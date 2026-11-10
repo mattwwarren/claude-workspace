@@ -77,7 +77,10 @@ class TestSessionPurpose:
         assert SessionPurpose.DEBT.value == "debt"
 
     def test_all_values(self) -> None:
-        assert len(SessionPurpose) == 5
+        assert len(SessionPurpose) == 8
+        assert SessionPurpose.PLAN.value == "plan"
+        assert SessionPurpose.REVIEW.value == "review"
+        assert SessionPurpose.FINALIZE.value == "finalize"
 
 
 class TestSessionStatus:
@@ -4449,3 +4452,41 @@ class TestReviewDebtAutoEnqueueConfig:
         )
         with pytest.raises(ConfigValidationError, match="debt_autoenqueue"):
             load_clients()
+
+
+class TestWorkerTmpFallbackRetentionConfig:
+    """#2682: fallback ~/.cw/tmp retention knobs on OrchestratorConfig."""
+
+    def test_defaults(self) -> None:
+        from cw.models import OrchestratorConfig
+
+        cfg = OrchestratorConfig()
+        assert cfg.worker_tmp_fallback_retention_enabled is True
+        assert cfg.worker_tmp_fallback_retention_days == 7
+        assert cfg.worker_tmp_fallback_retention_interval_minutes == 60
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "worker_tmp_fallback_retention_days",
+            "worker_tmp_fallback_retention_interval_minutes",
+        ],
+    )
+    def test_rejects_zero(self, field: str) -> None:
+        from cw.models import OrchestratorConfig
+
+        with pytest.raises(ValidationError):
+            OrchestratorConfig(**{field: 0})
+
+    def test_accepts_one_and_round_trips(self) -> None:
+        from cw.models import OrchestratorConfig
+
+        cfg = OrchestratorConfig(
+            worker_tmp_fallback_retention_days=1,
+            worker_tmp_fallback_retention_interval_minutes=1,
+            worker_tmp_fallback_retention_enabled=False,
+        )
+        again = OrchestratorConfig.model_validate_json(cfg.model_dump_json())
+        assert again.worker_tmp_fallback_retention_days == 1
+        assert again.worker_tmp_fallback_retention_interval_minutes == 1
+        assert again.worker_tmp_fallback_retention_enabled is False

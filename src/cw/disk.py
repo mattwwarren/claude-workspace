@@ -125,3 +125,17 @@ def check_disk_usage(path: Path) -> DiskUsage:
         total_gb=usage.total / _BYTES_PER_GB,
         free_gb=usage.free / _BYTES_PER_GB,
     )
+
+
+def same_filesystem(a: Path, b: Path) -> bool:
+    """True when *a* and *b* live on the same device (#2682).
+
+    Compares ``st_dev`` of each path's nearest existing ancestor, so a
+    not-yet-created path resolves to the mount it will land on. ``OSError``
+    propagates: the caller decides the posture (the disk-pressure gate probes
+    the second mount anyway).
+    """
+    return (
+        _nearest_existing_ancestor(a).stat().st_dev
+        == _nearest_existing_ancestor(b).stat().st_dev
+    )

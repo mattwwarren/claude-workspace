@@ -630,13 +630,18 @@ class TestThroughReconcile:
         assert [e.payload.get("ticket_id") for e in escalations] == ["T-1"]
         assert _by_ticket()["T-1"].status is QueueItemStatus.BLOCKED_ON_USER
 
-    def test_live_unrecorded_worker_is_stopped_the_same_tick(
+    def test_live_unrecorded_worker_past_grace_is_stopped_the_same_tick(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """#2670: an unrecorded worker past the grace, in the client's worktree
+        base, is stopped by the sweep that runs in the same reconcile tick."""
         daemon = _world(
             tmp_path, monkeypatch, state=_real_session(), tasks=[_running("T-1")]
         )
-        unrecorded = daemon.seed_live_worker(tmp_path / "worktrees" / "dev-T-1")
+        aged_ms = int((datetime.now(UTC) - timedelta(minutes=10)).timestamp() * 1000)
+        unrecorded = daemon.seed_live_worker(
+            tmp_path / "worktrees" / "dev-T-1", started_at_ms=aged_ms
+        )
 
         reconcile()
 
@@ -644,6 +649,25 @@ class TestThroughReconcile:
         assert [lock for lock, _statuses in daemon.probes] == ["free"]
         assert _by_ticket()["T-1"].disposition == _LOST
         assert_no_parked_row_is_sessionless(load_dev_queue())
+
+    def test_live_unrecorded_worker_within_grace_survives_the_tick(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2670: a young unrecorded worker (the spawn race) is spared this
+        tick. The row still parks, since that sweep is independent."""
+        daemon = _world(
+            tmp_path, monkeypatch, state=_real_session(), tasks=[_running("T-1")]
+        )
+        young_ms = int((datetime.now(UTC) - timedelta(seconds=5)).timestamp() * 1000)
+        young = daemon.seed_live_worker(
+            tmp_path / "worktrees" / "dev-T-1", started_at_ms=young_ms
+        )
+
+        reconcile()
+
+        assert daemon.stop_calls == []
+        assert young in daemon.list_live_session_short_ids()
+        assert _by_ticket()["T-1"].disposition == _LOST
 
     def test_daemon_outage_early_return_runs_neither_sweep(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -405,7 +405,10 @@ def test_daemon_stop_failure_leaves_session_completed(
     next_tick = FakeNativeDaemonClient()
     next_tick._live.add(_REF)
     next_tick._cwd_by_id[_REF] = tmp_path / f"wt-{_SID}"
-    assert sweep_leaked_daemon_workers(load_state(), daemon=next_tick) == [_REF]
+    # Terminal arm: unconditional, so no clients or age evidence is needed (#2670).
+    assert sweep_leaked_daemon_workers(
+        load_state(), daemon=next_tick, now=datetime.now(UTC), clients={}
+    ) == [_REF]
     assert next_tick.stop_calls == [_REF]
 
 

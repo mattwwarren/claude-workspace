@@ -166,10 +166,26 @@ supersedes their worktree clause.
   on the post-lock sink)
   and the leaked-worker sweep (`sweep_leaked_daemon_workers`, called from
   `_reconcile_locked` and queued on the post-lock sink); they act on workers
-  whose owning session is terminal or absent. The leaked-worker sweep can
-  also stop a just-spawned worker whose session is not yet recorded (a
-  pre-existing hazard, documented in `leaked_workers.py`). The mid-turn
-  usage-limit act's stop is chosen only under `reap_policy: auto`.
+  whose owning session is terminal, or absent and evidenced orphaned
+  (#2670): older than `LEAKED_WORKER_GRACE_SECONDS` (180 s, the spawn-to-record
+  window) and homed strictly inside a configured client's cw worktree base.
+  The grace is a debounce, never the trigger (ADR-0014 invariant 1): absence
+  is the evidence, and the clock only delays a stop that absence already
+  justifies. The #2670 narrowing closes the `spawn_bg` race, so this sweep
+  never stops a just-spawned worker that cw has not yet recorded, nor a
+  hand-launched non-cw `claude --bg` worker, nor `cw doctor --reap`. The
+  mid-turn usage-limit act's stop is chosen only under `reap_policy: auto`.
+  **Spared, and so left on the roster until stopped by hand
+  (`claude stop <short_id>`):** a young worker inside the grace; a worker with
+  no or an invalid `startedAt`; a non-cw cwd; a cwd outside every currently
+  configured client's base (a removed client, a changed `worktree_base`, a
+  symlinked base, an orphan homed at the main checkout); and every unrecorded
+  worker when `clients.yaml` is unreadable. An operator advisory for
+  spared-but-old workers is follow-up debt. **Occupancy trade-off:**
+  `live_home_reason` still does not count an unrecorded worker as occupying,
+  so a spared worker does not block re-dispatch. A young spawn-race worker is
+  invisible to occupancy for up to the grace, and a non-cw or out-of-base
+  worker for as long as it lives (bounded treatment is follow-up debt).
 - **Discriminated (#2662).** The reconcile dirty helper no longer reads its
   own errors as clean: a missing worktree directory still reads clean;
   transient or host-global causes (an unreadable `clients.yaml`, a missing or
@@ -205,7 +221,8 @@ these acts run on every lane.
   past `sessions_lock`. **This stops a roster-live worker**, which amends
   the "act on workers whose owning session is terminal or absent" wording
   of the #2630 amendment for this one sweep: its target session was live at
-  detect time.
+  detect time. (#2670 narrowed the absent arm to evidenced orphans; the
+  terminal-session arm is unchanged.)
 - **It departs from the literal Option B words.** It completes no queue row:
   the route already advanced the row, and the stalled and idle sweeps own the
   RUNNING-row case. The acceptance is the freed client-ceiling slot.
@@ -239,7 +256,8 @@ these acts run on every lane.
   invariant cannot hold for such a row (the record was never written); the
   park keeps the dangling id as evidence and deletes nothing. It can never
   produce a parked row with `session_id = None`, and the leaked-worker sweep
-  stops any live unrecorded worker. The disposition escalates after 45
+  stops a live unrecorded worker once it is evidenced orphaned (#2670). The
+  disposition escalates after 45
   minutes and is never auto-requeued; `cw dev-queue requeue` releases it.
 - **Mass-park guards.** When `sessions.json` holds no session at all and
   more than three bound rows would park, nothing parks (one WARNING). Otherwise

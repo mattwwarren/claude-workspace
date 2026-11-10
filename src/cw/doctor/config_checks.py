@@ -592,6 +592,9 @@ def _worker_tmp_result(client: ClientConfig, config: OrchestratorConfig) -> Chec
 def _check_worker_tmp_pressure(clients: dict[str, ClientConfig]) -> list[CheckResult]:
     """Check each client's worktree-base mount for free space and inodes (#2470).
 
+    The shared ``~/.cw/tmp`` fallback mount is checked by the sibling
+    ``worker-tmp-fallback`` check (#2682), not here.
+
     Every dispatched worker's TMPDIR is ``<worktree>/.cw/tmp``, so this mount
     is where worker scratch files land. Applies the same thresholds as the
     dispatch-time disk-pressure gate -- free GB below

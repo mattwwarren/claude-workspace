@@ -20,12 +20,19 @@ class SessionPurpose(StrEnum):
     # start`/`--purpose` choice (see WORKER_PURPOSES exclusion below), same
     # carve-out shape as ORCHESTRATE.
     FIX = "fix"
+    # #3054 -- stage-neutral codex sessions record their stage's purpose. Like
+    # FIX and ORCHESTRATE, never a `cw start --purpose` choice (WORKER_PURPOSES
+    # exclusion below). Declaration order is pinned by the schema golden.
+    PLAN = "plan"
+    REVIEW = "review"
+    FINALIZE = "finalize"
 
 
 # Purposes a worker session can be dispatched/created with. ORCHESTRATE is
 # excluded: an ORCHESTRATE session is created only via `cw orchestrate start`
 # (#595 / Phase 4b), never selected as a worker --purpose. FIX is excluded for
 # the same reason (#2017): it is dispatched only by the fix_agent recipe.
+# PLAN, REVIEW and FINALIZE (#3054) are excluded likewise: codex sessions only.
 WORKER_PURPOSES: tuple[SessionPurpose, ...] = (
     SessionPurpose.IMPL,
     SessionPurpose.IDEA,
@@ -727,7 +734,8 @@ class OrchestratorEventType(StrEnum):
     # GitHub #2480 -- audit record of the leaked-daemon-worker sweep
     # (cw.reconcile.leaked_workers, and the mirrored `cw doctor --reap`
     # wedge) stopping one roster worker whose surface_ref names a cw session
-    # already in a TERMINAL status, or no cw session at all. Without a
+    # already in a TERMINAL status, or no cw session at all and evidenced
+    # orphaned past the spawn grace (#2670). Without a
     # completion path that stops the daemon surface (#2480's items 1-2), such
     # a worker sits live in roster.json forever and
     # cw.worktree.live_home_reason reports its ticket's worktree occupied

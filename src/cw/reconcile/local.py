@@ -65,7 +65,7 @@ from functools import partial
 from time import monotonic
 from typing import TYPE_CHECKING
 
-from cw.codex_background import _resolve_codex_fix_loop_enabled
+from cw.codex_lane_config import _resolve_codex_fix_loop_enabled
 from cw.config import load_effective_config, save_state
 from cw.events import record_event
 from cw.local_runner import read_process_start_time_ns

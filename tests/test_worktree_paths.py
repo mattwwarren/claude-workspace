@@ -14,6 +14,7 @@ from cw.worktree import (
     _hashed_worktree_base,
     apply_worker_tmpdir,
     effective_worktree_bases,
+    resolve_fallback_worker_tmpdir,
     resolve_worker_tmpdir,
     resolve_worktree_base,
     slugify_branch,
@@ -238,3 +239,21 @@ class TestApplyWorkerTmpdir:
 
         assert result.is_dir()
         assert env["TMPDIR"] == str(result)
+
+
+class TestResolveFallbackWorkerTmpdir:
+    """#2682: the shared ~/.cw/tmp fallback, read at call time."""
+
+    def test_is_home_cw_tmp(self) -> None:
+        assert resolve_fallback_worker_tmpdir() == Path.home() / ".cw" / "tmp"
+
+    def test_reads_home_at_call_time(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path / "h"))
+        assert resolve_fallback_worker_tmpdir() == tmp_path / "h" / ".cw" / "tmp"
+
+    def test_matches_apply_worker_tmpdir_on_home(self) -> None:
+        env: dict[str, str] = {}
+        apply_worker_tmpdir(env, Path.home())
+        assert env["TMPDIR"] == str(resolve_fallback_worker_tmpdir())

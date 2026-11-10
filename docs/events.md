@@ -391,7 +391,9 @@ present only on the main claim-loop tick — the one tick that can carry
 `host_capacity_gated`. `disk_free_gb` / `disk_min_free_gb` (float) and
 `disk_free_inodes` / `disk_min_free_inodes` (int | null — null when the
 inode probe failed or the filesystem reports no fixed inode count, #2470)
-are present only on `disk_pressure_gate` ticks. `freshness_detail` carries the
+are present only on `disk_pressure_gate` ticks. `disk_gb_mount` /
+`disk_inode_mount` (str: `worktree` | `worker_tmp_fallback`, #2682) name the mount
+each dimension was probed on, and are present on the same ticks. `freshness_detail` carries the
 legacy freshness gate detail (`non_main_head | main_behind_origin |
 main_dirty_checkout | main_diverged_from_origin | main_detached_head`) on
 `freshness_gate` ticks, and `blocked_branch` is present only there. On a
@@ -463,13 +465,18 @@ SSH-key-gate bypass is attention-worthy.
   "disk_free_gb": 1.2,
   "disk_min_free_gb": 5.0,
   "disk_free_inodes": 10000,
-  "disk_min_free_inodes": 50000
+  "disk_min_free_inodes": 50000,
+  "disk_gb_mount": "worktree",
+  "disk_inode_mount": "worktree"
 }
 ```
 **Semantics:** GitHub #1887 (split from #1858). Emitted when
 `disk_pressure_gate_enabled` is `false` and the claim-time disk-pressure
 probe (`cw.disk.check_disk_usage` on
-`cw.worktree.resolve_worktree_base(client)`) reports free space below
+`cw.worktree.resolve_worktree_base(client)`, and, since #2682, the same probe
+on the `~/.cw/tmp` fallback dir when it sits on a different filesystem;
+`disk_gb_mount` / `disk_inode_mount` name which mount each dimension came from)
+reports free space below
 `disk_pressure_min_free_gb`, or (since #2470, via `cw.disk.check_inode_usage`)
 free inodes below `max(disk_pressure_min_free_inodes,
 disk_pressure_min_free_inode_fraction × total)` — the operator has explicitly
@@ -1033,8 +1040,9 @@ open enum; consumers MUST tolerate unknown values. Known values:
   this page. Exactly the canonical nine keys: `session_id` is the row's
   dangling id, `session_name` is `""`, `claude_session_id` is `null`, `lane`
   is the row's lane, `crashed` is `false`. `breadcrumbs` says nothing was
-  deleted, names the missing id, notes that the leaked-worker sweep stops any
-  live unrecorded worker, and names the release (verify the worktree holds
+  deleted, names the missing id, notes that the leaked-worker sweep stops a
+  live worker with no cw session once it is older than the grace window and
+  in a cw worktree base, and names the release (verify the worktree holds
   no unsaved work, then `cw dev-queue requeue`). Escalation-eligible (fires
   after 45 minutes) and never auto-requeued. No push notification (parity
   with `routed_result_session_stranded`). At most three rows park per tick;
@@ -1113,15 +1121,19 @@ open enum; consumers MUST tolerate unknown values. Known values:
   that "only": it also sets `session_name`, and leaves `claude_session_id`
   `null`; its breadcrumb reads `worker live (session <id>): <backend> pid
   <pid> ...`, with no surface. When the state write failed, the session id is absent from
-  `sessions.json`: the leaked-worker sweep stops the unrecorded worker on the
-  next reconcile tick, the row stays RUNNING bound to that id, and
+  `sessions.json`: the leaked-worker sweep stops the unrecorded worker once it
+  is past the 180 s grace (`LEAKED_WORKER_GRACE_SECONDS`, #2670) and homed in a
+  configured client's cw worktree base, about three minutes after launch, not
+  on the next tick; a worker that fails either test is spared and stays until
+  `claude stop <short_id>`. The row stays RUNNING bound to that id, and
   `cw dev-queue tasks` shows the `?session_mismatch` advisory. For a fix-loop
   handoff (#2590) the row is instead held: it records the launched worker's
   surface (`fix_dispatch_launched_worker`) and stays RUNNING, keeping its lane
   slot, with no new REVIEW round claimed, until a readable daemon roster no
   longer lists that surface. The next reconcile tick stops the worker through
-  the leaked-worker sweep and then confirms it gone, so the hold normally
-  clears within a tick; if the roster is unreadable or the stop fails the row
+  the leaked-worker sweep once the worker is older than the 180 s grace
+  (#2670) and then confirms it gone, so the hold clears within about three
+  minutes of launch, not on the next tick; if the roster is unreadable or the stop fails the row
   stays held and `fix_dispatch_worker_unconfirmed` pages. `cancel` followed by
   `requeue --from-cancelled` does not release a held fix-loop row (the hold
   follows `fix_dispatch_session_id`, not the row's status); only
@@ -1328,14 +1340,19 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `"blocked"` paused_status for this park only; `breadcrumbs` still carries
   the specific `blocker.reason` verbatim. The task is BLOCKED_ON_USER.
   See #1155.
-- `"host_tmp_exhausted"` — the claim-time disk-pressure gate found a
-  client's worktree-base mount (home of every worker's `.cw/tmp` TMPDIR)
-  below its free-inode floor (#2470). Sessionless and ticketless
-  (`session_id=""`, `ticket_id=None`) but per-client: `client` is the real
-  client name. Edge-triggered per client — fires on the first exhausted
-  probe and re-arms only after a healthy one — and fires even when
-  `disk_pressure_gate_enabled` is `false`. `breadcrumbs` carries
-  `free_inodes=<n> min_free_inodes=<n>`.
+- `"host_tmp_exhausted"` — the claim-time disk-pressure gate found a mount
+  that holds worker scratch space below its free-inode floor (#2470): either
+  the client's worktree-base mount (home of every worker's `.cw/tmp` TMPDIR)
+  or, since #2682, the shared `~/.cw/tmp` fallback mount (probed only when it
+  is on a different filesystem from the worktree base). Sessionless and
+  ticketless (`session_id=""`, `ticket_id=None`) but per-client: `client` is
+  the real client name. Edge-triggered per client — fires on the first
+  exhausted probe and re-arms only after a healthy one — and fires even when
+  `disk_pressure_gate_enabled` is `false`. Because the fallback mount is shared
+  by every client, one inode-exhausted fallback mount latches every client at
+  once, each with its own event. `breadcrumbs` carries
+  `free_inodes=<n> min_free_inodes=<n> inode_mount=<worktree|worker_tmp_fallback>`,
+  naming the mount that gated.
 - `"sentinel_stage_mismatch_dead_session"` — the local dead-process harvest
   (`cw.reconcile.local`, #2490) synthesized a result for a session whose
   PID is gone (an opencode or aider worker) and the shared staged-advance
@@ -1856,8 +1873,9 @@ on either side is never adopted; a row with no `claimed_at` skips this
 check). The bind writes exactly the fields dispatch's own spawn stamp writes,
 except `stage_base_ref`. It is not gated by `reap_policy`: it reverts, stops
 and parks nothing. A row that cannot be tied this way is left untouched. A
-live worker with no recorded session is still stopped by the leaked-worker
-sweep, never adopted.
+live worker with no recorded session is never adopted; the leaked-worker
+sweep stops it once it is older than the grace window and homed in a cw
+worktree base (#2670), and spares it otherwise.
 
 | key | type | source |
 |---|---|---|

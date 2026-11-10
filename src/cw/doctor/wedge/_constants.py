@@ -136,7 +136,8 @@ _WEDGE_ACTIVE_DAEMON_STALE_NO_SENTINEL = "wedge/active-daemon-stale-no-sentinel"
 _WEDGE_ACTIVE_NULL_LIVENESS_ORPHAN = "wedge/active-null-liveness-orphan"
 
 # Wedge class for daemon roster workers whose surface_ref names a cw session
-# already TERMINAL, or no cw session at all (#2480). Distinct from every
+# already TERMINAL, or no cw session at all and evidenced orphaned (#2480,
+# #2670). Distinct from every
 # class above: those key off a queue task or cw Session; this one keys off a
 # live *roster* entry that has outlived its (or never had a) owning session
 # -- the leak that makes cw.worktree.live_home_reason report a finished

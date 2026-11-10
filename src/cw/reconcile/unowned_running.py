@@ -38,7 +38,7 @@ signal for a row that cannot be tied. Such a row is never adopted. A bound
 row whose Session record is missing is parked by
 ``cw.reconcile.lost_session_rows`` (#2715), and a row still unbound past the
 spawn grace is paged there; a live unrecorded worker is stopped by the
-leaked-worker sweep.
+leaked-worker sweep once it is evidenced orphaned (#2670).
 
 Runs from ``cw.reconcile.locked_sweeps._run_terminal_backstops_and_sweeps``, under
 ``reconcile()``'s ``sessions_lock``, before the TIMED_OUT backstop. It reads

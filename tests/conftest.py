@@ -2178,6 +2178,20 @@ def _reset_stop_carryover() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _reset_worker_tmp_last_attempt() -> Iterator[None]:
+    """Reset the fallback-tmp retention sweep's in-process last-attempt stamp (#2682).
+
+    The stamp is module-level process state, so a sweep one test ran would make
+    the next test's real-clock ``auto_sweep_fallback_tmp`` call read as not due.
+    """
+    from cw.worker_tmp_retention import _LAST_ATTEMPT
+
+    _LAST_ATTEMPT.clear()
+    yield
+    _LAST_ATTEMPT.clear()
+
+
+@pytest.fixture(autouse=True)
 def _mock_gh_availability(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default the fleet-wide gh-availability probe to 'available' (RFC 0011 A5).
 
@@ -2275,6 +2289,13 @@ def _mock_disk_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(
         "cw.doctor.config_checks.check_inode_usage", lambda _path: roomy_inodes
+    )
+    # #2682: the fallback-mount doctor check probes ~/.cw/tmp's mount.
+    monkeypatch.setattr(
+        "cw.doctor.worker_tmp_fallback.check_disk_usage", lambda _path: roomy_disk
+    )
+    monkeypatch.setattr(
+        "cw.doctor.worker_tmp_fallback.check_inode_usage", lambda _path: roomy_inodes
     )
 
 

@@ -96,6 +96,11 @@ _SLUG_GUARDED_ACTS: tuple[Callable[..., object], ...] = (
 )
 
 
+def ms_of(dt: datetime) -> int:
+    """Return *dt* as epoch milliseconds, the unit of a roster ``startedAt`` (#2670)."""
+    return int(dt.timestamp() * 1000)
+
+
 def probe_sessions_lock_free() -> bool:
     """Return True iff this thread does NOT hold ``sessions_lock`` right now.
 

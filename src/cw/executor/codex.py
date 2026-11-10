@@ -6,20 +6,21 @@ import shutil
 from typing import TYPE_CHECKING, Any
 
 from cw.auto_dev_result import AutoDevResult
-from cw.codex_background import _stamp_session_id_on_running_task
 from cw.codex_review import make_codex_blocked
 from cw.codex_runner import (
     RealCodexJobRunner,
     build_codex_run_argv,
     build_codex_run_env,
 )
+from cw.codex_stage_completion import stamp_session_id_on_running_task
 from cw.executor.core import (
     CODEX_NOT_FOUND,
     FireAndForgetRunner,
     _PreflightOK,
     _spawn_fire_and_forget,
+    purpose_for_stage,
 )
-from cw.models import SessionOrigin, SessionPurpose, Stage
+from cw.models import SessionOrigin, Stage
 from cw.native_daemon import get_native_daemon_client
 from cw.spawn import _write_hook_context
 
@@ -38,6 +39,11 @@ if TYPE_CHECKING:
 # its sibling CODEX_NOT_FOUND lives in cw.executor.core, shared with the
 # capability probe.
 CODEX_REVIEW_ONLY = "codex_review_only"
+
+#: Stages a codex executor runs (#3054). Only REVIEW has an executor today; the
+#: PLAN, IMPL and FINALIZE executors are C1-C3 (#3060-#3062). A stage not listed
+#: here parks with CODEX_REVIEW_ONLY.
+CODEX_SUPPORTED_STAGES: frozenset[Stage] = frozenset({Stage.REVIEW})
 
 
 def _codex_preflight(
@@ -71,7 +77,7 @@ def _codex_preflight(
         session_id=sess.id,
         session_name=sess.name,
         client=client.name,
-        purpose=SessionPurpose.IMPL.value,
+        purpose=sess.purpose.value,
         ticket_id=task.ticket_id,
         origin=SessionOrigin.DAEMON,
         task=task,
@@ -85,7 +91,7 @@ def _codex_preflight(
         write_stop_hook=False,
         daemon=daemon,
     )
-    if stage != Stage.REVIEW:
+    if stage not in CODEX_SUPPORTED_STAGES:
         return make_codex_blocked(
             ticket_id=task.ticket_id, worktree=worktree, reason=CODEX_REVIEW_ONLY
         )
@@ -93,7 +99,7 @@ def _codex_preflight(
         return make_codex_blocked(
             ticket_id=task.ticket_id, worktree=worktree, reason=CODEX_NOT_FOUND
         )
-    _stamp_session_id_on_running_task(
+    stamp_session_id_on_running_task(
         client_name=client.name,
         ticket_id=task.ticket_id,
         session_id=sess.id,
@@ -104,6 +110,7 @@ def _codex_preflight(
             ticket_id=task.ticket_id,
             session_id=sess.id,
             wall_clock_budget_seconds=wall_clock_budget_seconds,
+            stage=stage.value,
         ),
         env=build_codex_run_env(worktree),
     )
@@ -188,6 +195,7 @@ class CodexExecutor:
             ),
             blocked_ctor=_blocked,
             runner=self._runner,
+            purpose=purpose_for_stage(stage),
         )
 
     def stage_sentinel_schema(self, _stage: Stage) -> dict[str, Any]:
