@@ -95,6 +95,12 @@ A premise can be uninteresting for a reason that has nothing to do with whether 
 
 **Impact is mandatory on every item too — never omit it, and a bare `NONE` does not exempt (#2432).** Consumer-side default: a missing or malformed `Impact` line (wrong token, anything other than a leading `NONE`/`CODE-AFFECTING` token), or an `Impact: NONE` line whose `Impact-Reason:` sub-bullet is missing or empty, is treated as `CODE-AFFECTING` downstream — a deliberate fail-closed default, mirroring `Verified`/`Recommendation`, and never a shortcut for writing `NONE`. This fallthrough is the same parse-failure class as a malformed `Verified` line and is tallied together with it in `malformed_verified_count` (see `auto-dev-plan.md`'s malformed-verified tally paragraph).
 
+### Premises closed by a binding resolution — `Resolution:` (#1411)
+
+A premise may already be answered by an operator decision on record: an item of a `## Binding Pre-flight Resolutions` list or a `<!-- auto-dev-preflight-resolutions -->` comment or body section, or an entry under `## Operator resolutions recorded on the dev-queue row (binding)`. That closure is an authority decision, not an evidence-bar question — the `Verified: YES` bar above (docs, `--help`, source, command output) neither admits nor needs it. When a premise's claim is directly answered by such a resolution, do not park it: emit it with a `Resolution:` sub-bullet in the form `<identifier> — "<verbatim quote>"`, where `<identifier>` is `R<n>` (the item's number in the marker-bearing list) or `row:<round>` (the row entry's `round`), and the quote is copied character-for-character from that resolution's text. Still write `Verified:` and `Impact:` honestly — `Resolution:` is evaluated independently of both, and a closure the orchestrator can verify proceeds without the human regardless of `Verified` (see `auto-dev-plan.md` Step 4a, Resolution gate).
+
+**Resolution is optional and fail-closed (#1411).** Use it only for resolutions actually present in your prompt — never inferred, recalled from another ticket, or paraphrased; a resolution that merely touches the topic, or answers a different premise, does not close this one. A missing, empty, or unparseable `Resolution:` — or one whose identifier or quote the orchestrator cannot find in the live binding text — is treated as absent: the premise follows the ordinary `Verified`/`Impact` routing and a `friction_highlights` line records the unmatched claim.
+
 ### Before surfacing: check the plan's own resolution record
 
 A candidate ambiguity or premise may already have been settled by the plan under review itself, not just by the ticket. This matters most on a re-scan: the plan you were handed may already carry a `## Adopted Assumptions`, `## Self-Verified Premises`, or `## Deferred Premises` section from an earlier Step 4b partition pass in this same ticket's history (see `auto-dev-plan.md` Step 4b) — each entry there is a question or claim the plan already closed, with a stated interpretation/evidence and rationale.
@@ -150,6 +156,7 @@ PREMISES TO VERIFY — N items
    - Verify before building by: <capture a payload / check Datadog / read the API stub / ask the integration owner>
    - Impact: NONE | CODE-AFFECTING
    - Impact-Reason: <NONE only, mandatory to exempt — why no code path in the plan depends on this premise's truth value, in either direction. Missing or empty on a NONE item, the item is instead treated as CODE-AFFECTING (#2432)>
+   - Resolution: <optional — only when a binding resolution present in this prompt directly answers the premise: `<identifier> — "<verbatim quote of the resolution text>"`, identifier `R<n>` (item number in a marker-bearing resolutions list) or `row:<round>` (a dev-queue row entry). Omit the sub-bullet otherwise; never infer or paraphrase (#1411)>
    - Verified: YES | NO | DEFER
    - Citation: <YES only — the authoritative citation that settles the claim: the quoted --help excerpt, doc URL, source excerpt, or the exact command + verbatim output. A citation whose line number drifted because sibling code moved is re-cited against its current location, not treated as a mismatch>
    - Reason: <NO only — why your own evidence is absent, ambiguous, self-contradictory, or turns on operator intent>
@@ -171,7 +178,7 @@ plan-revision loop. A validly-exempting `Impact: NONE` premise — one carrying 
 non-empty `Impact-Reason:` sub-bullet — also proceeds without the human,
 independent of its `Verified` value (#2432); a `NONE` without `Impact-Reason:`,
 or a malformed `Impact:` token, does not exempt and instead follows the ordinary
-`Verified`-based routing above — see "Impact-gated premises" above.
+`Verified`-based routing above — see "Impact-gated premises" above. A premise closed via a verifiable `Resolution:` also proceeds without the human (#1411) — see "Premises closed by a binding resolution" above; an absent or unverifiable `Resolution:` falls back to the ordinary routing.
 
 ## Mode 2: Spec Compliance Review
 
