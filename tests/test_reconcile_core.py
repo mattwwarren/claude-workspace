@@ -2607,11 +2607,18 @@ def test_reconcile_auto_reverts_mid_turn_usage_limited_ticket(
         tmp_path, monkeypatch, config=_auto_config(), with_phantom=with_phantom
     )
 
+    # Tick 1 closes the session and queues the stop; the row is confirmed
+    # gone on tick 2, once the surface has left the roster.
+    first = reconcile()
+    assert _MID_TURN_TICKET not in first.reverted_ticket_ids
+    if with_phantom:
+        # The phantom has no live surface, so tick 1 already reverts it.
+        assert _PHANTOM_TICKET in first.reverted_ticket_ids
+
+    _surface_leaves_roster(monkeypatch)
     report = reconcile()
 
     assert _MID_TURN_TICKET in report.reverted_ticket_ids
-    if with_phantom:
-        assert _PHANTOM_TICKET in report.reverted_ticket_ids
     task = next(t for t in load_dev_queue().tasks if t.ticket_id == _MID_TURN_TICKET)
     assert task.status is QueueItemStatus.PENDING
     assert task.next_eligible_at is not None
@@ -2633,6 +2640,21 @@ def test_reconcile_signal_only_parks_mid_turn_ticket_without_reverting(
     task = load_dev_queue().tasks[0]
     assert task.status is QueueItemStatus.BLOCKED_ON_USER
     assert task.disposition == "usage_limited_mid_turn"
+
+
+_UNRELATED_FULL_ID = "unrelated-0000-4000-8000-000000000000"
+
+
+def _surface_leaves_roster(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stopped worker has left the roster; an unrelated worker stays listed.
+
+    The roster must stay non-empty: an empty roster with an ACTIVE session
+    reads as a daemon outage and skips the sweep.
+    """
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": _UNRELATED_FULL_ID}],
+    )
 
 
 def _fail_mid_turn_dev_queue_save(monkeypatch: pytest.MonkeyPatch, *, nth: int) -> None:
@@ -2678,6 +2700,12 @@ def test_reconcile_contains_a_failed_mid_turn_decision_and_retries_it(
     assert task.status is QueueItemStatus.RUNNING
     assert task.usage_limit_act is None
 
+    # The retry decides and closes the session; the stop is queued, and the
+    # row is confirmed gone on the next tick once the roster no longer lists it.
+    assert _MID_TURN_TICKET not in reconcile().reverted_ticket_ids
+    assert load_state().sessions[0].status is SessionStatus.COMPLETED
+
+    _surface_leaves_roster(monkeypatch)
     report = reconcile()
 
     assert _MID_TURN_TICKET in report.reverted_ticket_ids
@@ -2729,8 +2757,14 @@ def test_reconcile_backstop_skips_row_whose_act_closed_the_session(
     before = load_dev_queue().tasks[0].unproductive_attempts
     _fail_mid_turn_dev_queue_save(monkeypatch, nth=3)
 
+    # Tick 1 closes the session and queues the stop; the surface is still listed.
     assert _MID_TURN_TICKET not in reconcile().reverted_ticket_ids
     assert load_state().sessions[0].status is SessionStatus.COMPLETED
+    _assert_act_still_in_flight(unproductive_attempts=before)
+
+    # Tick 2 confirms the surface is gone, then the final transition fails.
+    _surface_leaves_roster(monkeypatch)
+    assert _MID_TURN_TICKET not in reconcile().reverted_ticket_ids
     _assert_act_still_in_flight(unproductive_attempts=before)
 
     _assert_act_finished_uncharged(reconcile(), unproductive_attempts=before)
