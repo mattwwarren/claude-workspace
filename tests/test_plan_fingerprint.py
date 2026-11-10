@@ -41,6 +41,8 @@ _LAST_EVALUATED = (
 )
 _SETTLED_A = "<!-- plan-stage-settled: A1: ADOPTED -->\n"
 _SETTLED_P = "<!-- plan-stage-settled: P2: REFUTED -->\n"
+_SETTLED_A_R2 = "<!-- plan-stage-settled: R2.A1: ADOPTED -->\n"
+_SETTLED_P_R3 = "<!-- plan-stage-settled: R3.P2: CONFIRMED -->\n"
 _ATTEMPTED_STARTED = (
     "<!-- plan-stage-resolutions-attempted: source=comment:42; "
     "outcome=started; lease_until=2026-09-25T10:00:00Z -->\n"
@@ -120,6 +122,47 @@ class TestComputePlanDraftFingerprint:
         bookkeeping and must change the digest."""
         malformed = "<!-- plan-stage-settled: A1: ADOPTED (operator note) -->\n"
         assert compute_plan_draft_fingerprint(_ROUND + malformed + _BODY) != _BODY_SHA
+
+
+class TestRoundQualifiedSettledIds:
+    """#2626: ``R<k>.`` (k >= 2) round-qualifies a settled item id; bare ids are
+    round 1. Anything else is content and changes the digest."""
+
+    def test_bare_and_qualified_ids_in_one_draft_are_bookkeeping(self) -> None:
+        text = (
+            _ROUND
+            + _LAST_EVALUATED
+            + _SETTLED_A
+            + _SETTLED_A_R2
+            + _SETTLED_P_R3
+            + _BODY
+        )
+        assert compute_plan_draft_fingerprint(text) == _BODY_SHA
+
+    def test_multi_digit_round_and_item_ids_are_bookkeeping(self) -> None:
+        marker = "<!-- plan-stage-settled: R10.A12: ALT-b -->\n"
+        assert compute_plan_draft_fingerprint(_ROUND + marker + _BODY) == _BODY_SHA
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            pytest.param("R1.A1: ADOPTED", id="round-one-never-written"),
+            pytest.param("R0.A1: ADOPTED", id="round-zero"),
+            pytest.param("R02.A1: ADOPTED", id="leading-zero-round"),
+            pytest.param("R2.B1: ADOPTED", id="unknown-item-kind"),
+            pytest.param("R2.A1: ADOPTED (note)", id="trailing-text"),
+            pytest.param("R2A1: ADOPTED", id="missing-dot"),
+            pytest.param("R2.A1: CONFIRMED", id="wrong-vocabulary-for-a"),
+            pytest.param("R2.P1: ADOPTED", id="wrong-vocabulary-for-p"),
+        ],
+    )
+    def test_non_conforming_qualified_line_is_content(self, line: str) -> None:
+        marker = f"<!-- plan-stage-settled: {line} -->\n"
+        assert compute_plan_draft_fingerprint(_ROUND + marker + _BODY) != _BODY_SHA
+
+    def test_two_rounds_that_each_settled_item_one_strip_together(self) -> None:
+        text = _ROUND + _SETTLED_A + _SETTLED_A_R2 + _BODY
+        assert compute_plan_draft_fingerprint(text) == _BODY_SHA
 
 
 _APPLIED_ROW = "<!-- plan-stage-resolutions-applied: source=row:3 -->\n"
