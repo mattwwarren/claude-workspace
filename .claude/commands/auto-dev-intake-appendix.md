@@ -253,5 +253,5 @@ keeping the within-session fetch-once optimization.
 
 `.cw/context.json` is distinct from `.claude/cw-context.json` (written by
 `cw dispatch`; `session_id` and `ticket_id` only). Per-stage files read
-`.cw/context.json` for full ticket orientation; the `CW_SESSION`/`TICKET`
+`.cw/context.json` for full ticket orientation; the `TICKET`
 bootstrap reads `.claude/cw-context.json`.

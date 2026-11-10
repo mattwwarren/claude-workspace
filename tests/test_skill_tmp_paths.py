@@ -41,7 +41,7 @@ def test_no_bare_tmp_path_in_impl_appendix() -> None:
 def test_finalize_conflicted_files_live_in_session_worktree() -> None:
     """Writer and reader of the conflicted-file list agree on one path."""
     content = _cmd("auto-dev-finalize.md")
-    path = '"$(git rev-parse --show-toplevel)/.cw/conflicted-files-$CW_SESSION"'
+    path = '"$(git rev-parse --show-toplevel)/.cw/conflicted-files.txt"'
     assert f"> {path}" in content
     assert f"--conflicted-files {path}" in content
 

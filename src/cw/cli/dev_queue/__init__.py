@@ -25,6 +25,8 @@ below is what registers those commands. Submodules:
   (#2337).
 - ``crud`` — queue mutation commands (add, move, requeue, unblock, remove,
   cancel, clear, prune).
+- ``fix_handoff`` — ``record-fix-handoff``, run by the review stage's fix loop
+  to record the fix-agent handoff on the row from ``cw-context.json`` (#2651).
 - ``plan_decisions`` — ``record-plan-decisions``, run by the plan stage to
   record the approved plan's decided sections on the row (#2984).
 - ``recover`` — the ``recover-red-pr`` command: disarm a shipped red PR and
@@ -49,6 +51,7 @@ from cw.cli.dev_queue import (  # noqa: F401  (command registration side effects
     adopted_prs,
     approve,
     crud,
+    fix_handoff,
     plan_decisions,
     recover,
     resolve,
