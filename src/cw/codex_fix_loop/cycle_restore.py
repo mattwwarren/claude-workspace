@@ -20,13 +20,15 @@ requeued cycle then met the clean-start refusal (``codex_fix_dirty_start``,
    else is lost. Untracked and ignored paths (``.cw/``) are untouched. A
    tracked, modified review artifact is reverted in the worktree, but its
    content is part of the pinned commit, so it is recoverable from the ref.
-5. One ``codex_fix.cycle_preserved`` event durably records the reset outcome.
+5. One ``codex_fix.cycle_preserved`` event durably records the authorized reset
+   intent before the destructive reset is attempted.
 
-Nothing is reset unless the ref was written. Once the ref exists, every later
-failure (the reset, the rev-parse, the clean re-check, or event recording, as a
-``CalledProcessError`` or an ``OSError``) is handled without raising. Reset and
-clean-tree failures still emit the durable event with ``restored=False`` and
-the preserved ref, so the audit record reflects the actual outcome.
+Nothing is reset unless the ref and the audit event both succeed. If the audit
+event cannot be recorded, the ref is retained and the worktree stays dirty so
+the park names the missing audit event. Once the reset is authorized, every
+later failure (the reset, the rev-parse, or the clean re-check, as a
+``CalledProcessError`` or an ``OSError``) is handled without raising and keeps
+the preserved ref and dirty paths.
 
 Only :mod:`cw.codex_fix_loop.commit` calls this module; :mod:`fence` and
 :mod:`baseline` must not import it. The park text carries the ref name and the
@@ -71,6 +73,7 @@ _UNSAFE_REF_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
 _CLEAN_WHY = "the worktree was still not clean after the reset"
 _NO_STASH_WHY = "git stash create saved nothing for a non-empty diff"
 _RESET_PENDING_WHY = "reset pending after ref pin"
+_AUDIT_WHY = "could not record the refused-cycle audit event"
 
 
 @dataclass(frozen=True)
@@ -207,10 +210,9 @@ def _record_preserved(
         "reason": reason,
         "ref": result.ref,
         "paths": list(result.dirty_paths),
-        # The event is emitted after reset and clean-tree verification while
-        # the worktree lock is held, so it records the observed outcome.
+        # The event is emitted before reset while the worktree lock is held;
+        # it records the authorized reset intent, not an outcome known later.
         "reset_requested": True,
-        "restored": result.restored,
         "head": result.head_short,
     }
     try:
@@ -294,14 +296,28 @@ def preserve_and_reset(
             )
             ref = result.ref if result is not None else None
             if result is not None and ref is not None:
-                result = _reset_after_pin(worktree, ref=ref, paths=result.dirty_paths)
-                _record_preserved(
+                if not _record_preserved(
                     ticket=ticket,
                     client=client,
                     cycle=cycle,
                     reason=reason,
                     result=result,
-                )
+                ):
+                    result = dataclasses.replace(
+                        result,
+                        why_not=_AUDIT_WHY,
+                        failed_step="record audit event",
+                    )
+                    _log.warning(
+                        "codex fix cycle %d (%s): refused-cycle restore skipped: %s",
+                        cycle,
+                        reason,
+                        result.why_not,
+                    )
+                else:
+                    result = _reset_after_pin(
+                        worktree, ref=ref, paths=result.dirty_paths
+                    )
     except subprocess.CalledProcessError as exc:
         _log.warning(
             "codex fix cycle %d (%s): refused-cycle restore skipped: git exited %s: %s",

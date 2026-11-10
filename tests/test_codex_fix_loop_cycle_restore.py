@@ -104,7 +104,7 @@ class TestPreserveAndReset:
         assert event_type is OrchestratorEventType.CODEX_FIX_CYCLE_PRESERVED
         assert payload["ref"] == ref
         assert payload["reset_requested"] is True
-        assert payload["restored"] is True
+        assert "restored" not in payload
         assert payload["client"] == "C-1"
         assert payload["ticket_id"] == "T-1"
         assert payload["paths"] == ["gone.py", "new.py", "tracked.py"]
@@ -137,9 +137,10 @@ class TestPreserveAndReset:
         assert git_in(repo, "cat-file", "-t", result.ref) == "commit"
         assert "tracked.py" in git_in(repo, "status", "--porcelain")
         assert events[0][1]["ref"] == result.ref
-        # The outcome is recorded after reset is attempted, including failure.
+        # The audit is published before reset, so it records reset intent even
+        # when the subsequent reset fails.
         assert events[0][1]["reset_requested"] is True
-        assert events[0][1]["restored"] is False
+        assert "restored" not in events[0][1]
 
     def test_clean_recheck_failure_keeps_ref(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
@@ -268,10 +269,13 @@ class TestPreserveAndReset:
         result = _preserve(repo)
 
         assert isinstance(result, CycleRestore)
-        assert result.restored is True
+        assert result.restored is False
         assert result.ref is not None
         assert result.dirty_paths == ("tracked.py",)
-        assert git_in(repo, "status", "--porcelain") == ""
+        assert result.why_not == cycle_restore._AUDIT_WHY
+        assert result.failed_step == "record audit event"
+        assert "tracked.py" in git_in(repo, "status", "--porcelain")
+        assert git_in(repo, "cat-file", "-t", result.ref) == "commit"
 
 
 class TestHintRewrite:
