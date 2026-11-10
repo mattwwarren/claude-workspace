@@ -26,7 +26,10 @@ from cw.review_engine.constants import (
     engine_refusal_details,
 )
 from cw.review_engine.context import EngineContext
-from cw.review_engine.manifest_source import read_default_branch_manifest
+from cw.review_engine.manifest_source import (
+    ManifestStatus,
+    read_default_branch_manifest,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -50,9 +53,9 @@ def engine_round_spec(
         default_branch=client.default_branch,
     )
     read = read_default_branch_manifest(worktree, client.default_branch, engine.skill)
-    if read.status == "loaded":
+    if read.status == ManifestStatus.LOADED:
         return EngineRoundSpec(context=context)
-    if read.status == "unresolvable":
+    if read.status == ManifestStatus.UNRESOLVABLE:
         reason = EngineRoundFailure.ENGINE_UNRESOLVABLE
         return make_codex_blocked(
             ticket_id=task.ticket_id,

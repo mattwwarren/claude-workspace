@@ -378,13 +378,14 @@ class TestObservability:
 
 class TestRoleFailures:
     @pytest.mark.parametrize(
-        ("reply", "reason"),
+        ("reply", "reason", "retry"),
         [
-            (CodexRunResult(-1, "", "", timed_out=True), "codex_timeout"),
-            (CodexRunResult(1, "", "boom"), "codex_error"),
+            (CodexRunResult(-1, "", "", timed_out=True), "codex_timeout", True),
+            (CodexRunResult(1, "", "boom"), "codex_error", False),
             (
                 CodexRunResult(0, "", "", output_file_content="{not json"),
                 "codex_review_unparseable",
+                False,
             ),
             (
                 CodexRunResult(
@@ -394,18 +395,19 @@ class TestRoleFailures:
                     output_file_content=_doc_json(role="security", status="failed"),
                 ),
                 "failed_document",
+                False,
             ),
         ],
         ids=["timeout", "nonzero", "invalid-json", "failed-document"],
     )
     def test_a_failed_role_skips_the_aggregator_and_blocks_retryably(
-        self, repo: EngineRepo, reply: CodexRunResult, reason: str
+        self, repo: EngineRepo, reply: CodexRunResult, reason: str, retry: bool
     ) -> None:
         runner = _engine_runner(security=reply)
 
         outcome = _pass(repo, runner)
 
-        details = _blocked(outcome)
+        details = _blocked(outcome, retry=retry)
         assert details == FRICTION[EngineRoundFailure.ENGINE_ROLE_FAILED].format(
             role="security", reason=reason
         )
@@ -494,46 +496,58 @@ class TestShardedRoles:
             repo, runner, inputs=_inputs(repo, runner, max_prompt_chars=limit)
         )
 
-        assert "security (codex_error)" in _blocked(outcome)
+        assert "security (codex_error)" in _blocked(outcome, retry=False)
         assert _aggregator_stdins(runner) == []
 
 
 class TestAggregatorFailures:
     @pytest.mark.parametrize(
-        ("reply", "prefix"),
+        ("reply", "prefix", "retry"),
         [
             (
                 CodexRunResult(-1, "", "", timed_out=True),
                 "engine_aggregation_failed: codex_timeout",
+                True,
             ),
-            (CodexRunResult(2, "", "boom"), "engine_aggregation_failed: codex_error"),
+            (
+                CodexRunResult(2, "", "boom"),
+                "engine_aggregation_failed: codex_error",
+                False,
+            ),
             (
                 CodexRunResult(0, "", "", output_file_content=""),
                 "engine_aggregation_failed: empty_output",
+                False,
             ),
             (
                 CodexRunResult(0, "", "", output_file_content=None),
                 "engine_aggregation_failed: missing_output",
+                False,
             ),
             (
                 CodexRunResult(0, "", "", output_file_content="{nope"),
                 "engine_aggregation_failed: invalid_json",
+                False,
             ),
             (
                 _aggregation(counts={}),
                 "engine_aggregation_failed: schema_mismatch",
+                False,
             ),
             (
                 _aggregation(coverage="PARTIAL"),
                 "engine_coverage_incomplete: coverage=PARTIAL",
+                False,
             ),
             (
                 _aggregation(coverage="FAILED"),
                 "engine_coverage_incomplete: coverage=FAILED",
+                False,
             ),
             (
                 _aggregation([engine_finding("NIT")], verdict="FAIL"),
                 "engine_summary_invalid: fail_without_gating_finding",
+                False,
             ),
         ],
         ids=[
@@ -549,13 +563,13 @@ class TestAggregatorFailures:
         ],
     )
     def test_each_failure_blocks_retryably_with_its_friction(
-        self, repo: EngineRepo, reply: CodexRunResult, prefix: str
+        self, repo: EngineRepo, reply: CodexRunResult, prefix: str, retry: bool
     ) -> None:
         runner = _engine_runner(aggregation=reply)
 
         outcome = _pass(repo, runner)
 
-        assert _blocked(outcome).startswith(prefix)
+        assert _blocked(outcome, retry=retry).startswith(prefix)
         assert len(_aggregator_stdins(runner)) == 1
         assert outcome.prepared is not None
 
@@ -570,7 +584,9 @@ class TestAggregatorFailures:
 
         outcome = _pass(repo, runner)
 
-        assert _blocked(outcome).startswith("engine_head_mismatch: summary=-")
+        assert _blocked(outcome, retry=False).startswith(
+            "engine_head_mismatch: summary=-"
+        )
 
     def test_a_role_that_dirties_the_tree_is_a_worktree_mutation(
         self, repo: EngineRepo
@@ -583,7 +599,10 @@ class TestAggregatorFailures:
 
         outcome = _pass(repo, runner)
 
-        assert _blocked(outcome) == FRICTION[EngineRoundFailure.ENGINE_WORKTREE_MUTATED]
+        assert (
+            _blocked(outcome, retry=False)
+            == FRICTION[EngineRoundFailure.ENGINE_WORKTREE_MUTATED]
+        )
 
     def test_a_summary_write_failure_is_engine_no_summary(
         self, repo: EngineRepo

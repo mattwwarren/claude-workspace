@@ -28,6 +28,7 @@ from cw.auto_dev_result import (
     REVIEW_ENGINE_MODIFIED_BLOCKER_REASON,
     REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
 )
+from cw.codex_review._const import _TRANSIENT_FAILURE_REASONS
 from cw.codex_review._context import EngineRoster, _prepare_review_pass
 from cw.codex_review._diff import _capture_head_sha
 from cw.codex_review._engine_aggregate import run_codex_aggregator
@@ -138,7 +139,12 @@ class _Loaded(NamedTuple):
 
 
 def _agent_block(
-    inputs: EnginePassInputs, cycle: int, reason: EngineRoundFailure, detail: str
+    inputs: EnginePassInputs,
+    cycle: int,
+    reason: EngineRoundFailure,
+    detail: str,
+    *,
+    failure_reason: str | None = None,
 ) -> _Failure:
     _log.warning(
         "codex engine round failed: ticket=%s cycle=%d failure=%s",
@@ -152,7 +158,14 @@ def _agent_block(
             worktree=inputs.worktree,
             reason="agent_block",
             details=detail,
-            retry_eligible=True,
+            retry_eligible=(
+                reason
+                in {
+                    EngineRoundFailure.ENGINE_NO_SUMMARY,
+                    EngineRoundFailure.ENGINE_UNRESOLVABLE,
+                }
+                or failure_reason in _TRANSIENT_FAILURE_REASONS
+            ),
         )
     )
 
@@ -278,7 +291,7 @@ def _run_roles(
         return run
     reason = EngineRoundFailure.ENGINE_ROLE_FAILED
     detail = FRICTION[reason].format(role=failed[0], reason=failed[1])
-    return _agent_block(inputs, cycle, reason, detail)
+    return _agent_block(inputs, cycle, reason, detail, failure_reason=failed[1])
 
 
 def _run_aggregation(
@@ -303,15 +316,24 @@ def _run_aggregation(
         timeout_seconds=inputs.wall_clock_budget_seconds,
         max_prompt_chars=inputs.max_prompt_chars,
     )
-    outcome = (
-        failure
-        or engine_precheck(inputs.worktree, loaded.head)
-        or validate_engine_summary(
+    if failure is not None:
+        outcome: SummaryFailure | ValidatedSummary = failure
+    else:
+        precheck = engine_precheck(inputs.worktree, loaded.head)
+        outcome = precheck or validate_engine_summary(
             loaded.summary_path, expect_head=loaded.head, skill=spec.context.skill
         )
-    )
     if isinstance(outcome, SummaryFailure):
-        return _agent_block(inputs, cycle, outcome.reason, outcome.detail)
+        failure_reason = None
+        if outcome.reason is EngineRoundFailure.ENGINE_AGGREGATION_FAILED:
+            failure_reason = outcome.detail.rsplit(": ", 1)[-1]
+        return _agent_block(
+            inputs,
+            cycle,
+            outcome.reason,
+            outcome.detail,
+            failure_reason=failure_reason,
+        )
     return outcome
 
 

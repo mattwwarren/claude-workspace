@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
@@ -237,6 +238,24 @@ def _copy_engine_files(repo: Path, skill_dir: str, source: Path) -> list[str]:
         target.write_bytes(file.read_bytes())
         written.append(rel)
     return written
+
+
+def copy_engine_fixture(
+    tmp_path: Path,
+    source: Path,
+    *,
+    name: str = "engine",
+    **manifest_overrides: object,
+) -> Path:
+    """Copy an engine fixture and optionally override its manifest fields."""
+    copy = tmp_path / name
+    shutil.copytree(source, copy)
+    if manifest_overrides:
+        manifest = copy / "cw-engine.json"
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        payload.update(manifest_overrides)
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+    return copy
 
 
 def make_engine_repo(

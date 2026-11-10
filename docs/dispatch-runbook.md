@@ -3567,10 +3567,11 @@ lane on a client with `review.engine` runs the engine in process through the
 skill's `cw-engine.json` (`docs/headless-contract.md` section 12.14): the D-13
 preflight on every round, one `codex exec` per declared role, then a read-only
 aggregation turn whose summary cw writes and validates. Every round reviews the
-full diff at the tip. A role or aggregation failure is `agent_block`
-(`retry_eligible: true`) with `engine_role_failed: ...` or
-`engine_aggregation_failed: ...` in `blocker.details`; a touched engine path
-parks as `review_engine_modified` exactly as above. The default confirm backend
+full diff at the tip. A role or aggregation failure is `agent_block`, with
+`engine_role_failed: ...` or `engine_aggregation_failed: ...` in
+`blocker.details`; only transient timeout, budget, and capacity failures are
+`retry_eligible: true`, while deterministic failures require triage. A touched
+engine path parks as `review_engine_modified` exactly as above. The default confirm backend
 after a codex engine pass is Claude; set `review.confirm_backend: none` or
 `codex` for an all-codex lane.
 

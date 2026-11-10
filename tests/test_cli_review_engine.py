@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -27,6 +26,7 @@ from tests._cli_review_helpers import _enter_operator_machine, _write_session_co
 from tests._review_engine_helpers import (
     EngineRepo,
     StubEngine,
+    copy_engine_fixture,
     engine_context_payload,
     engine_finding,
     make_engine_repo,
@@ -598,13 +598,10 @@ _MANIFEST_OK = "review engine manifest valid: manifest_version=1 backends=codex 
 
 def _stub_copy(tmp_path: Path, **manifest_overrides: object) -> Path:
     """A copy of the stub engine directory; returns its manifest path."""
-    copy = tmp_path / "engine"
-    shutil.copytree(_STUB_ENGINE, copy)
-    manifest = copy / "cw-engine.json"
-    payload = json.loads(manifest.read_text(encoding="utf-8"))
-    payload.update(manifest_overrides)
-    manifest.write_text(json.dumps(payload), encoding="utf-8")
-    return manifest
+    return (
+        copy_engine_fixture(tmp_path, _STUB_ENGINE, **manifest_overrides)
+        / "cw-engine.json"
+    )
 
 
 def test_kind_summary_equals_the_default(tmp_path: Path) -> None:

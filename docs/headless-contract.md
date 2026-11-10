@@ -1339,9 +1339,12 @@ the strings echoes finding text.
 | `engine_role_failed` | codex lane only (#3216): a role turn failed, so the aggregation turn is skipped | `engine_role_failed: <role> (<reason>)`, reason one of `codex_timeout`, `codex_error`, `codex_review_unparseable`, `budget_exhausted`, `failed_document`, `unreviewed_shard` |
 | `engine_aggregation_failed` | codex lane only (#3216): the aggregation turn produced no valid output | `engine_aggregation_failed: <reason>`, reason one of `codex_timeout`, `codex_error`, `missing_output`, `empty_output`, `invalid_json`, `schema_mismatch` |
 
-On the codex lane every failure above is `blocker.reason: "agent_block"` with
-`retry_eligible: true`, and the friction string goes in `blocker.details` (the
-lane records no workspace failure).
+On the codex lane every failure above is `blocker.reason: "agent_block"` and
+the friction string goes in `blocker.details` (the lane records no workspace
+failure). `retry_eligible` is true for `engine_unresolvable`,
+`engine_no_summary`, and transient role or aggregation failures
+(`codex_timeout`, `budget_exhausted`, or `codex_model_capacity`); deterministic
+output, coverage, head, and worktree failures are false.
 
 The adjudication refusal codes are `engine_reject_forbidden`,
 `engine_non_deferrable` and `engine_must_fix_defer_requires_operator`.

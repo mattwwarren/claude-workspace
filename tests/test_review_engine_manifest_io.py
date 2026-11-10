@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -28,7 +27,7 @@ from cw.review_engine_manifest_io import (
     manifest_refusal_cause,
 )
 from cw.review_engine_summary_io import EngineSummaryIssue
-from tests._review_engine_helpers import pad_to
+from tests._review_engine_helpers import copy_engine_fixture, pad_to
 from tests.test_review_engine_manifest import manifest_payload
 
 STUB_DIR = Path(__file__).parent / "fixtures" / "review_engine_stub"
@@ -674,7 +673,6 @@ def test_loader_never_imports_codex_review() -> None:
 
 
 def test_stub_directory_copy_loads(tmp_path: Path) -> None:
-    copy = tmp_path / "copy"
-    shutil.copytree(STUB_DIR, copy)
+    copy = copy_engine_fixture(tmp_path, STUB_DIR, name="copy")
 
     assert load_engine_manifest(copy / "cw-engine.json").manifest.roles

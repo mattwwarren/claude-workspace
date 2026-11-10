@@ -9,8 +9,6 @@ absent or invalid manifest, codex cannot-verify, opencode/local unsupported).
 
 from __future__ import annotations
 
-import json
-import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -27,7 +25,7 @@ from cw.models import (
 )
 from cw.models.client import ReviewConfig, ReviewEngineConfig
 from cw.review_engine.manifest_source import ManifestRead, read_default_branch_manifest
-from tests._review_engine_helpers import make_engine_repo
+from tests._review_engine_helpers import copy_engine_fixture, make_engine_repo
 from tests.conftest import git_in
 
 if TYPE_CHECKING:
@@ -111,13 +109,7 @@ def read_counter(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Path, str, str]]
 
 def _stub_manifest_copy(tmp_path: Path, **overrides: object) -> Path:
     """A copy of the stub engine whose ``cw-engine.json`` has *overrides* applied."""
-    copy = tmp_path / "stub-copy"
-    shutil.copytree(STUB_DIR, copy)
-    path = copy / "cw-engine.json"
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    payload.update(overrides)
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    return copy
+    return copy_engine_fixture(tmp_path, STUB_DIR, name="stub-copy", **overrides)
 
 
 def _codex_client(workspace: Path, name: str = "acme") -> ClientConfig:

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import shutil
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -17,7 +15,11 @@ from cw.review_engine_manifest_io import (
     EngineManifestError,
     LoadedEngineManifest,
 )
-from tests._review_engine_helpers import EngineRepo, make_engine_repo
+from tests._review_engine_helpers import (
+    EngineRepo,
+    copy_engine_fixture,
+    make_engine_repo,
+)
 from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
@@ -36,13 +38,9 @@ def _read(
 
 def _stub_with(tmp_path: Path, **manifest_overrides: object) -> Path:
     """A copy of the stub engine whose manifest has *overrides* applied."""
-    copy = tmp_path / "stub-copy"
-    shutil.copytree(STUB_DIR, copy)
-    path = copy / "cw-engine.json"
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    payload.update(manifest_overrides)
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    return copy
+    return copy_engine_fixture(
+        tmp_path, STUB_DIR, name="stub-copy", **manifest_overrides
+    )
 
 
 def test_manifest_present_is_loaded(make_git_repo: Callable[..., Path]) -> None:

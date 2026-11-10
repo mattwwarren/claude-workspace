@@ -17,8 +17,9 @@ from __future__ import annotations
 import subprocess
 import tempfile
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, cast
 
 from cw._git import run_git
 from cw.exceptions import CwError
@@ -41,7 +42,14 @@ from cw.review_engine_manifest_io import (
 if TYPE_CHECKING:
     from cw.review_engine.skill import ResolvedSkill
 
-ManifestStatus = Literal["loaded", "absent", "invalid", "unresolvable"]
+
+class ManifestStatus(StrEnum):
+    """States returned by the default-branch manifest reader."""
+
+    LOADED = "loaded"
+    ABSENT = "absent"
+    INVALID = "invalid"
+    UNRESOLVABLE = "unresolvable"
 
 
 @dataclass(frozen=True)
@@ -62,11 +70,13 @@ class ManifestRead:
 
 
 def _unresolvable(cause: str, detail: str) -> ManifestRead:
-    return ManifestRead(status="unresolvable", cause=cause, detail=detail)
+    return ManifestRead(status=ManifestStatus.UNRESOLVABLE, cause=cause, detail=detail)
 
 
 def _absent(detail: str) -> ManifestRead:
-    return ManifestRead(status="absent", cause=CAUSE_NO_CODEX_MANIFEST, detail=detail)
+    return ManifestRead(
+        status=ManifestStatus.ABSENT, cause=CAUSE_NO_CODEX_MANIFEST, detail=detail
+    )
 
 
 def _archive(repo: Path, commit: str, skill: ResolvedSkill) -> bytes:
@@ -94,12 +104,14 @@ def _load_from_archive(data: bytes, skill_name: str) -> ManifestRead:
             loaded = load_engine_manifest(manifest_path)
         except EngineManifestError as exc:
             return ManifestRead(
-                status="invalid",
+                status=ManifestStatus.INVALID,
                 cause=manifest_refusal_cause(exc),
                 detail=f"{exc.reason}: {exc.field_path or '-'}",
                 error=exc,
             )
-    return ManifestRead(status="loaded", cause="", detail="", loaded=loaded)
+    return ManifestRead(
+        status=ManifestStatus.LOADED, cause="", detail="", loaded=loaded
+    )
 
 
 def read_default_branch_manifest(
