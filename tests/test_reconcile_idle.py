@@ -1211,7 +1211,10 @@ def test_detect_forwards_scope_probes_to_the_parse(
     result = _shipped_result()
 
     def _parse(
-        _session: object, *, scope_probes: object = None
+        _session: object,
+        *,
+        scope_probes: object = None,
+        warned_blocks: object = None,
     ) -> tuple[AutoDevResult, str]:
         seen.append(scope_probes)
         return result, "csid-routed"

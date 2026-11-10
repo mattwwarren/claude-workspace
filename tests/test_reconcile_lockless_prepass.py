@@ -315,7 +315,10 @@ def _patch_scope_parse(
     calls: list[tuple[str, object]] = []
 
     def _parse(
-        session: Session, *, scope_probes: object = None
+        session: Session,
+        *,
+        scope_probes: object = None,
+        warned_blocks: object = None,
     ) -> tuple[AutoDevResult | BlockedResult, str] | None:
         calls.append((session.id, scope_probes))
         result = by_session.get(session.id)

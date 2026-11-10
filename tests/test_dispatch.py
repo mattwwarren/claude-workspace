@@ -6243,6 +6243,7 @@ class TestRunDispatchLoopVerbose:
             usage_limited_until: Mapping[str, datetime] | None = None,
             auto_ff: bool = True,
             client_filter: str | None = None,
+            warned_blocks: set[str] | None = None,
         ) -> DispatchTickResult:
             nonlocal tick_count
             tick_count += 1
@@ -6260,6 +6261,7 @@ class TestRunDispatchLoopVerbose:
                 warned_unresolvable=warned_unresolvable,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
+                warned_blocks=warned_blocks,
                 client_filter=client_filter,
             )
 
@@ -6933,7 +6935,7 @@ class TestDispatchUsageLimitBackoff:
         # Reconcile returns usage_limited=True (phantom with usage-limit transcript).
         monkeypatch.setattr(
             "cw.dispatch.tick._reconcile_usage_limited",
-            lambda: True,
+            lambda **_kw: True,
         )
 
         result = dispatch_tick(simple_config, native_daemon=daemon)
@@ -6955,7 +6957,7 @@ class TestDispatchUsageLimitBackoff:
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr(
             "cw.dispatch.tick._reconcile_usage_limited",
-            lambda: True,
+            lambda **_kw: True,
         )
 
         dispatch_tick(simple_config, native_daemon=daemon)
@@ -6997,7 +6999,7 @@ class TestDispatchUsageLimitBackoff:
             return real_merge_and_save(windows)
 
         monkeypatch.setattr(
-            "cw.dispatch.loop.merge_and_save_usage_limited_until",
+            "cw.dispatch.usage_limit_windows.merge_and_save_usage_limited_until",
             capturing_merge_and_save,
         )
 
@@ -7552,7 +7554,9 @@ class TestUsageLimitResetThreading:
 
         daemon = FakeNativeDaemonClient()
         daemon.usage_limit_reset_at = datetime.now(UTC) + timedelta(hours=2)
-        monkeypatch.setattr("cw.dispatch.tick._reconcile_usage_limited", lambda: True)
+        monkeypatch.setattr(
+            "cw.dispatch.tick._reconcile_usage_limited", lambda **_kw: True
+        )
 
         result = dispatch_tick(simple_config, native_daemon=daemon)
 
@@ -7658,7 +7662,7 @@ class TestUsageLimitResetThreading:
             return real_merge_and_save(windows)
 
         monkeypatch.setattr(
-            "cw.dispatch.loop.merge_and_save_usage_limited_until",
+            "cw.dispatch.usage_limit_windows.merge_and_save_usage_limited_until",
             capturing_merge_and_save,
         )
         monkeypatch.setattr("cw.dispatch.loop.time.sleep", lambda _: None)
@@ -17415,6 +17419,7 @@ class TestWaveCollisionDetection:
             usage_limited_until: Mapping[str, datetime] | None = None,
             auto_ff: bool = True,
             client_filter: str | None = None,
+            warned_blocks: set[str] | None = None,
         ) -> DispatchTickResult:
             captured_collision_sets.append(warned_collision)
             return original(
@@ -17431,6 +17436,7 @@ class TestWaveCollisionDetection:
                 warned_unresolvable=warned_unresolvable,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
+                warned_blocks=warned_blocks,
                 client_filter=client_filter,
             )
 

@@ -5663,10 +5663,14 @@ def _record_phantom_parses(
     """Record the scope_probes each phantom transcript parse receives (#2641)."""
     seen: list[tuple[str, object]] = []
 
-    def _salvage(_session: object, *, scope_probes: object = None) -> None:
+    def _salvage(
+        _session: object, *, scope_probes: object = None, warned_blocks: object = None
+    ) -> None:
         seen.append(("salvage", scope_probes))
 
-    def _parse(_session: object, *, scope_probes: object = None) -> None:
+    def _parse(
+        _session: object, *, scope_probes: object = None, warned_blocks: object = None
+    ) -> None:
         seen.append(("advance", scope_probes))
 
     monkeypatch.setattr("cw.reconcile._shared.salvage_terminal_result", _salvage)

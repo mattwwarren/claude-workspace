@@ -808,7 +808,9 @@ class TestSalvageScopePrePass:
             lambda: [{"sessionId": "decoy000"}],
         )
         store = new_scope_probes()
-        monkeypatch.setattr(prepasses, "capture_salvage_scope_probes", lambda: store)
+        monkeypatch.setattr(
+            prepasses, "capture_salvage_scope_probes", lambda **_kw: store
+        )
         seen = self._record_consumers(monkeypatch)
 
         report = reconcile()
@@ -907,8 +909,8 @@ class TestSalvageScopePrePass:
         worktree = self._seed_phantom_scope(make_git_repo)
         real_capture = prepasses.capture_salvage_scope_probes
 
-        def _capture_then_reemit() -> ScopeProbes:
-            store = real_capture()
+        def _capture_then_reemit(**kw: object) -> ScopeProbes:
+            store = real_capture(**kw)
             _write_scope_transcript(worktree, files=40)
             return store
 
@@ -934,7 +936,11 @@ class TestSalvageScopePrePass:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         self._seed_phantom_scope(make_git_repo)
-        monkeypatch.setattr(prepasses, "capture_salvage_scope_probes", new_scope_probes)
+        monkeypatch.setattr(
+            prepasses,
+            "capture_salvage_scope_probes",
+            lambda **_kw: new_scope_probes(),
+        )
 
         with caplog.at_level(logging.WARNING):
             self._reconcile_now(monkeypatch)
@@ -1000,9 +1006,12 @@ class TestDirtyChecksPrePass:
         lock_free_at_capture: list[bool] = []
 
         def _fake_capture(
-            *, config: OrchestratorConfig, roster: roster_snapshot.RosterReader
+            *,
+            config: OrchestratorConfig,
+            roster: roster_snapshot.RosterReader,
+            warned_blocks: object = None,
         ) -> DirtyChecks:
-            del config, roster
+            del config, roster, warned_blocks
             lock_free_at_capture.append(probe_sessions_lock_free())
             return sentinel
 

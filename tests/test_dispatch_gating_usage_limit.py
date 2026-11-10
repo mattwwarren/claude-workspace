@@ -96,7 +96,7 @@ class TestDispatchTickReconcileErrors:
         )
 
         assert _reconcile_usage_limited() is usage_limited
-        assert seen == [{"dispatch_review_jobs": True}]
+        assert seen == [{"dispatch_review_jobs": True, "warned_blocks": None}]
 
 
 class TestDispatchTickSessionsLockTimeout:

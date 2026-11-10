@@ -187,7 +187,9 @@ class TestPerClientGate:
         """
         write_clients_yaml(*fleet.values())
         add_ticket(TicketTask(ticket_id="GEN-reconcile", client="client-a"))
-        monkeypatch.setattr("cw.dispatch.tick._reconcile_usage_limited", lambda: True)
+        monkeypatch.setattr(
+            "cw.dispatch.tick._reconcile_usage_limited", lambda **_kw: True
+        )
 
         result = dispatch_tick(fleet_config, native_daemon=FakeNativeDaemonClient())
 
@@ -325,7 +327,7 @@ class TestMergeAndArm:
         falls back to the flat window rather than parking that client for a
         month.
         """
-        from cw.dispatch.loop import _arm_usage_limit_windows
+        from cw.dispatch.usage_limit_windows import _arm_usage_limit_windows
 
         now = datetime.now(UTC)
         parsed = now + timedelta(hours=3)
@@ -352,7 +354,7 @@ class TestUsageLimitArmedEvent:
     """#1409 review round 1: the set side needs a durable audit record too."""
 
     def test_emits_one_event_per_armed_client(self, tmp_events_dir: Path) -> None:
-        from cw.dispatch.loop import _arm_usage_limit_windows
+        from cw.dispatch.usage_limit_windows import _arm_usage_limit_windows
 
         now = datetime.now(UTC)
         parsed = now + timedelta(hours=2)

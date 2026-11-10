@@ -1053,7 +1053,10 @@ class TestRecipeParkMarkerPoisonClear:
         seen: list[object] = []
 
         def _salvage(
-            _session: Session, *, scope_probes: object = None
+            _session: Session,
+            *,
+            scope_probes: object = None,
+            warned_blocks: object = None,
         ) -> tuple[AutoDevResult, str]:
             seen.append(scope_probes)
             return (
