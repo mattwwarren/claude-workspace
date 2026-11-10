@@ -18,12 +18,17 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from cw._git import run_git
 from cw.exceptions import CwError
 from cw.review_convergence import resolve_default_branch_ref
-from cw.review_engine.constants import ENGINE_MANIFEST_FILENAME
+from cw.review_engine.constants import (
+    CAUSE_DEFAULT_BRANCH_UNRESOLVED,
+    CAUSE_MATERIALIZE_FAILED,
+    CAUSE_NO_CODEX_MANIFEST,
+    ENGINE_MANIFEST_FILENAME,
+)
 from cw.review_engine.materialize import MaterializeError, _extract_archive
 from cw.review_engine.skill import SkillResolutionError, resolve_skill
 from cw.review_engine_manifest_io import (
@@ -37,10 +42,6 @@ if TYPE_CHECKING:
     from cw.review_engine.skill import ResolvedSkill
 
 ManifestStatus = Literal["loaded", "absent", "invalid", "unresolvable"]
-
-_CAUSE_ABSENT: Final = "no_codex_manifest"
-_CAUSE_DEFAULT_UNRESOLVED: Final = "default_branch_unresolved"
-_CAUSE_MATERIALIZE_FAILED: Final = "materialize_failed"
 
 
 @dataclass(frozen=True)
@@ -65,7 +66,7 @@ def _unresolvable(cause: str, detail: str) -> ManifestRead:
 
 
 def _absent(detail: str) -> ManifestRead:
-    return ManifestRead(status="absent", cause=_CAUSE_ABSENT, detail=detail)
+    return ManifestRead(status="absent", cause=CAUSE_NO_CODEX_MANIFEST, detail=detail)
 
 
 def _archive(repo: Path, commit: str, skill: ResolvedSkill) -> bytes:
@@ -113,7 +114,7 @@ def read_default_branch_manifest(
     except CwError:
         ref = None
     if ref is None:
-        return _unresolvable(_CAUSE_DEFAULT_UNRESOLVED, default_branch)
+        return _unresolvable(CAUSE_DEFAULT_BRANCH_UNRESOLVED, default_branch)
     try:
         resolved = resolve_skill(repo, ref.commit, skill)
     except SkillResolutionError as exc:
@@ -124,4 +125,4 @@ def read_default_branch_manifest(
         data = _archive(repo, ref.commit, resolved)
         return _load_from_archive(data, skill)
     except (MaterializeError, subprocess.CalledProcessError, OSError) as exc:
-        return _unresolvable(_CAUSE_MATERIALIZE_FAILED, " ".join(str(exc).split()))
+        return _unresolvable(CAUSE_MATERIALIZE_FAILED, " ".join(str(exc).split()))

@@ -40,7 +40,14 @@ from cw.review_engine.aggregate import (
     engine_aggregation_schema,
     render_aggregation_envelope,
 )
-from cw.review_engine.constants import FRICTION, EngineRoundFailure
+from cw.review_engine.constants import (
+    AGGREGATION_REASON_EMPTY_OUTPUT,
+    AGGREGATION_REASON_INVALID_JSON,
+    AGGREGATION_REASON_MISSING_OUTPUT,
+    AGGREGATION_REASON_SCHEMA_MISMATCH,
+    FRICTION,
+    EngineRoundFailure,
+)
 from cw.review_engine.validate import SummaryFailure
 
 if TYPE_CHECKING:
@@ -63,17 +70,17 @@ def _aggregation_failure(reason: str) -> SummaryFailure:
 def _output_failure_reason(content: str | None) -> str | None:
     """The exit-0 output failure kind, or ``None`` when *content* is valid."""
     if content is None:
-        return "missing_output"
+        return AGGREGATION_REASON_MISSING_OUTPUT
     if not content.strip():
-        return "empty_output"
+        return AGGREGATION_REASON_EMPTY_OUTPUT
     try:
         json.loads(content)
     except json.JSONDecodeError:
-        return "invalid_json"
+        return AGGREGATION_REASON_INVALID_JSON
     try:
         EngineAggregationOutput.model_validate_json(content)
     except ValidationError:
-        return "schema_mismatch"
+        return AGGREGATION_REASON_SCHEMA_MISMATCH
     return None
 
 
@@ -156,5 +163,5 @@ def run_codex_aggregator(
         return _aggregation_failure(reason)
     output_reason = _output_failure_reason(result.output_file_content)
     if output_reason is not None or result.output_file_content is None:
-        return _aggregation_failure(output_reason or "missing_output")
+        return _aggregation_failure(output_reason or AGGREGATION_REASON_MISSING_OUTPUT)
     return _write_summary(result.output_file_content, head_sha, summary_path)

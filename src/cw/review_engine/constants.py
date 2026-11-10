@@ -131,26 +131,38 @@ FRICTION: Final[dict[EngineRoundFailure, str]] = {
 
 #: ``{reason}`` values ``engine_role_failed`` carries: a ``ReviewerRunFailure``
 #: reason, or the two engine-round-only causes.
+ROLE_REASON_CODEX_TIMEOUT: Final = "codex_timeout"
+ROLE_REASON_CODEX_ERROR: Final = "codex_error"
+ROLE_REASON_CODEX_UNPARSEABLE: Final = "codex_review_unparseable"
+ROLE_REASON_BUDGET_EXHAUSTED: Final = "budget_exhausted"
+ROLE_REASON_FAILED_DOCUMENT: Final = "failed_document"
+ROLE_REASON_UNREVIEWED_SHARD: Final = "unreviewed_shard"
 ROLE_FAILED_REASONS: Final = frozenset(
     {
-        "codex_timeout",
-        "codex_error",
-        "codex_review_unparseable",
-        "budget_exhausted",
-        "failed_document",
-        "unreviewed_shard",
+        ROLE_REASON_CODEX_TIMEOUT,
+        ROLE_REASON_CODEX_ERROR,
+        ROLE_REASON_CODEX_UNPARSEABLE,
+        ROLE_REASON_BUDGET_EXHAUSTED,
+        ROLE_REASON_FAILED_DOCUMENT,
+        ROLE_REASON_UNREVIEWED_SHARD,
     }
 )
 
 #: ``{reason}`` values ``engine_aggregation_failed`` carries.
+AGGREGATION_REASON_CODEX_TIMEOUT: Final = "codex_timeout"
+AGGREGATION_REASON_CODEX_ERROR: Final = "codex_error"
+AGGREGATION_REASON_MISSING_OUTPUT: Final = "missing_output"
+AGGREGATION_REASON_EMPTY_OUTPUT: Final = "empty_output"
+AGGREGATION_REASON_INVALID_JSON: Final = "invalid_json"
+AGGREGATION_REASON_SCHEMA_MISMATCH: Final = "schema_mismatch"
 AGGREGATION_FAILED_REASONS: Final = frozenset(
     {
-        "codex_timeout",
-        "codex_error",
-        "missing_output",
-        "empty_output",
-        "invalid_json",
-        "schema_mismatch",
+        AGGREGATION_REASON_CODEX_TIMEOUT,
+        AGGREGATION_REASON_CODEX_ERROR,
+        AGGREGATION_REASON_MISSING_OUTPUT,
+        AGGREGATION_REASON_EMPTY_OUTPUT,
+        AGGREGATION_REASON_INVALID_JSON,
+        AGGREGATION_REASON_SCHEMA_MISMATCH,
     }
 )
 
@@ -160,37 +172,46 @@ def role_slug(role: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", role.lower()).strip("-")
 
 
+# Engine-resolution causes shared by the default-branch reader and codex pass.
+CAUSE_MATERIALIZE_FAILED: Final = "materialize_failed"
+CAUSE_DEFAULT_BRANCH_UNRESOLVED: Final = "default_branch_unresolved"
+
+
 #: Causes ``engine_unresolvable`` may carry.
 UNRESOLVABLE_CAUSES: Final = frozenset(
     {
         "skill_not_found",
         "skill_unreadable",
-        "materialize_failed",
-        "default_branch_unresolved",
+        CAUSE_MATERIALIZE_FAILED,
+        CAUSE_DEFAULT_BRANCH_UNRESOLVED,
     }
 )
 
 
 #: Causes the ``review_engine_unsupported_backend`` refusal carries (#3216).
+CAUSE_NO_CODEX_MANIFEST: Final = "no_codex_manifest"
+CAUSE_CODEX_NOT_DECLARED: Final = "codex_not_declared"
+CAUSE_MANIFEST_INVALID: Final = "manifest_invalid"
+CAUSE_BACKEND_UNSUPPORTED: Final = "backend_unsupported"
 ENGINE_REFUSAL_CAUSES: Final = frozenset(
     {
-        "no_codex_manifest",
-        "codex_not_declared",
-        "manifest_invalid",
-        "backend_unsupported",
+        CAUSE_NO_CODEX_MANIFEST,
+        CAUSE_CODEX_NOT_DECLARED,
+        CAUSE_MANIFEST_INVALID,
+        CAUSE_BACKEND_UNSUPPORTED,
     }
 )
 
 _REFUSAL_REMEDY: Final[dict[str, str]] = {
-    "no_codex_manifest": (
+    CAUSE_NO_CODEX_MANIFEST: (
         "add cw-engine.json beside SKILL.md on the default branch, or point "
         "review.engine at a skill that has one"
     ),
-    "codex_not_declared": 'list "codex" in the manifest\'s backends',
-    "manifest_invalid": (
+    CAUSE_CODEX_NOT_DECLARED: 'list "codex" in the manifest\'s backends',
+    CAUSE_MANIFEST_INVALID: (
         "repair cw-engine.json (see `cw review engine validate --kind manifest`)"
     ),
-    "backend_unsupported": (
+    CAUSE_BACKEND_UNSUPPORTED: (
         "run review on a claude-native or codex lane, or remove review.engine"
     ),
 }

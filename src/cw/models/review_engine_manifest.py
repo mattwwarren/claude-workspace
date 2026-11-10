@@ -34,10 +34,8 @@ MAX_ENGINE_MANIFEST_BYTES = 262_144
 MAX_ENGINE_ROLES = 8
 #: Byte cap on each agent-spec file and on the aggregation prompt file.
 MAX_ENGINE_SPEC_BYTES = 65_536
-MAX_ENGINE_REF_LENGTH = 512
 
 ENGINE_ROLE_ID_RE = r"^[a-z0-9][a-z0-9-]*$"
-MAX_ENGINE_ROLE_ID_LENGTH = 64
 
 # Mirrors ``cw.models.CODEX_BACKEND``; this module stays free of ``cw`` imports,
 # so a drift test pins the equality.
@@ -62,7 +60,6 @@ class EngineRole(BaseModel):
 
     id: str = Field(
         pattern=ENGINE_ROLE_ID_RE,
-        max_length=MAX_ENGINE_ROLE_ID_LENGTH,
         description=(
             "Lowercase role identifier (letters, digits, hyphens), unique after "
             "slug normalization."
@@ -70,7 +67,6 @@ class EngineRole(BaseModel):
     )
     agent_spec: str = Field(
         min_length=1,
-        max_length=MAX_ENGINE_REF_LENGTH,
         description=(
             "Path to the role's agent-spec file, relative to the manifest's "
             "directory; no absolute path, no `..`, no symlink escape."
@@ -98,7 +94,6 @@ class EngineManifest(BaseModel):
     )
     aggregation_prompt: str = Field(
         min_length=1,
-        max_length=MAX_ENGINE_REF_LENGTH,
         description=(
             "Path to the aggregation-turn prompt file, relative to the "
             "manifest's directory."

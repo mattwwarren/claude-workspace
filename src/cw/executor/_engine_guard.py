@@ -19,12 +19,13 @@ from typing import TYPE_CHECKING
 
 from cw.models import Stage
 from cw.review_convergence import engine_supported
-from cw.review_engine.constants import engine_refusal_details
+from cw.review_engine.constants import (
+    CAUSE_BACKEND_UNSUPPORTED,
+    engine_refusal_details,
+)
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig
-
-_BACKEND_UNSUPPORTED = "backend_unsupported"
 
 
 def engine_block_details(
@@ -41,5 +42,5 @@ def engine_block_details(
     if engine_supported(backend):
         return None
     return engine_refusal_details(
-        backend, _BACKEND_UNSUPPORTED, f"skill={client.review.engine.skill}"
+        backend, CAUSE_BACKEND_UNSUPPORTED, f"skill={client.review.engine.skill}"
     )

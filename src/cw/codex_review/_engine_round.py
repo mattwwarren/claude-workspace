@@ -41,9 +41,13 @@ from cw.models import CODEX_BACKEND
 from cw.models.enums import DEFAULT_REVIEWER_SANDBOX_MODE, SandboxMode
 from cw.review_convergence import resolve_loop_diff_base
 from cw.review_engine.constants import (
+    CAUSE_DEFAULT_BRANCH_UNRESOLVED,
+    CAUSE_MATERIALIZE_FAILED,
     ENGINE_MANIFEST_FILENAME,
     ENGINE_ROLE_PREAMBLE,
     FRICTION,
+    ROLE_REASON_FAILED_DOCUMENT,
+    ROLE_REASON_UNREVIEWED_SHARD,
     EngineRoundFailure,
     engine_refusal_details,
 )
@@ -190,7 +194,9 @@ def _preflight(
     except SkillResolutionError as exc:
         return _unresolvable(inputs, cycle, context.skill, exc.cause)
     except CwError:
-        return _unresolvable(inputs, cycle, context.skill, "default_branch_unresolved")
+        return _unresolvable(
+            inputs, cycle, context.skill, CAUSE_DEFAULT_BRANCH_UNRESOLVED
+        )
     if verdict.decision == "park":
         details = (
             "the branch changed the repo review engine's skill or a guarded "
@@ -214,7 +220,7 @@ def _materialize_roster(
     except MaterializeError as exc:
         return _unresolvable(inputs, cycle, context.skill, exc.cause)
     except EnginePreconditionError:
-        return _unresolvable(inputs, cycle, context.skill, "materialize_failed")
+        return _unresolvable(inputs, cycle, context.skill, CAUSE_MATERIALIZE_FAILED)
     try:
         manifest = load_engine_manifest(
             Path(materialized.skill_dir) / ENGINE_MANIFEST_FILENAME
@@ -246,9 +252,9 @@ def _role_failure(run: ShardedRun) -> tuple[str, str] | None:
         return failure.role, failure.reason
     for document in run.documents:
         if document.status == "failed":
-            return document.reviewer_role, "failed_document"
+            return document.reviewer_role, ROLE_REASON_FAILED_DOCUMENT
     if any(not shard.reviewed for shard in run.coverage):
-        return _UNREVIEWED_SHARD_ROLE, "unreviewed_shard"
+        return _UNREVIEWED_SHARD_ROLE, ROLE_REASON_UNREVIEWED_SHARD
     return None
 
 
@@ -310,10 +316,13 @@ def _run_aggregation(
 
 
 def _synthesize(
-    inputs: EnginePassInputs, prepared: _ReviewPassInputs, validated: ValidatedSummary
+    inputs: EnginePassInputs,
+    prepared: _ReviewPassInputs,
+    validated: ValidatedSummary,
+    run: ShardedRun,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """The verdict from the one engine document; nothing can reject it (R20)."""
-    return synthesize_codex_review_result(
+    result, verdict = synthesize_codex_review_result(
         task=inputs.task,
         worktree=inputs.worktree,
         documents=[validated.document],
@@ -323,6 +332,7 @@ def _synthesize(
         session_id=inputs.session_id,
         default_branch=inputs.default_branch,
         fix_loop_enabled=inputs.fix_loop_enabled,
+        metrics_by_role=run.metrics_by_role,
         capability=prepared.capability,
         agent_spec_status=prepared.agent_spec_status,
         review_config=prepared.review_config,
@@ -331,10 +341,14 @@ def _synthesize(
         voided_findings=[],
         finding_dispositions={},
         refused_dispositions=[],
+        pre_validation_rejected=run.pre_validation_rejected,
         claim_tier_enabled=inputs.claim_tier_enabled,
         disposition_drift_check_enabled=inputs.disposition_drift_check_enabled,
         settled_suppression=inputs.settled_suppression,
     )
+    if verdict is not None and run.coverage:
+        verdict = verdict.model_copy(update={"shards": run.coverage})
+    return result, verdict
 
 
 def _prepare(inputs: EnginePassInputs, loaded: _Loaded) -> _ReviewPassInputs:
@@ -380,12 +394,10 @@ def run_engine_pass(
     )
     prepared = _prepare(inputs, loaded)
     ran = _run_roles(inputs, cycle, prepared)
-    validated = (
-        ran
-        if isinstance(ran, _Failure)
-        else _run_aggregation(spec, inputs, cycle, loaded, ran)
-    )
+    if isinstance(ran, _Failure):
+        return EnginePassOutcome(ran.result, None, prepared)
+    validated = _run_aggregation(spec, inputs, cycle, loaded, ran)
     if isinstance(validated, _Failure):
         return EnginePassOutcome(validated.result, None, prepared)
-    result, verdict = _synthesize(inputs, prepared, validated)
+    result, verdict = _synthesize(inputs, prepared, validated, ran)
     return EnginePassOutcome(result, verdict, prepared)
