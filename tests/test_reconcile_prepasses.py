@@ -952,6 +952,205 @@ class TestSalvageScopePrePass:
         assert "reason=missing" in caplog.text
 
 
+_MALFORMED_WARNING = "did not parse as JSON"
+_MALFORMED_RECORD: dict[str, Any] = {
+    "type": "assistant",
+    "message": {
+        "role": "assistant",
+        "content": [
+            {
+                "type": "text",
+                "text": "<<<AUTO_DEV_RESULT\n{oops\nAUTO_DEV_RESULT>>>",
+            }
+        ],
+    },
+}
+
+
+class TestWarnedBlocksThreading:
+    """#1394: ``reconcile(warned_blocks=...)`` reaches every sentinel parse seam.
+
+    The bare ``reconcile()`` (``cw start``, ``cw doctor --reap``) delivers
+    ``None`` everywhere, so it stays un-deduplicated.
+    """
+
+    @staticmethod
+    def _record_consumers(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> dict[str, list[object]]:
+        seen: dict[str, list[object]] = {
+            "salvage_capture": [],
+            "dirty_capture": [],
+            "idle": [],
+            "phantom": [],
+            "concierge": [],
+        }
+        real_idle = locked_sweeps._detect_idle_candidates
+        real_phantom = reconcile_core._detect_phantom_candidates
+
+        def _salvage_capture(**kwargs: object) -> ScopeProbes:
+            seen["salvage_capture"].append(kwargs.get("warned_blocks", "unset"))
+            return new_scope_probes()
+
+        def _dirty_capture(**kwargs: object) -> DirtyChecks:
+            seen["dirty_capture"].append(kwargs.get("warned_blocks", "unset"))
+            return DirtyChecks()
+
+        def _idle(*args: Any, **kwargs: Any) -> Any:
+            seen["idle"].append(kwargs.get("warned_blocks", "unset"))
+            return real_idle(*args, **kwargs)
+
+        def _phantom(*args: Any, **kwargs: Any) -> Any:
+            seen["phantom"].append(kwargs.get("warned_blocks", "unset"))
+            return real_phantom(*args, **kwargs)
+
+        def _concierge(**kwargs: object) -> list[str]:
+            seen["concierge"].append(kwargs.get("warned_blocks", "unset"))
+            return []
+
+        monkeypatch.setattr(prepasses, "capture_salvage_scope_probes", _salvage_capture)
+        monkeypatch.setattr(reconcile_core, "_capture_dirty_checks", _dirty_capture)
+        monkeypatch.setattr(locked_sweeps, "_detect_idle_candidates", _idle)
+        monkeypatch.setattr(reconcile_core, "_detect_phantom_candidates", _phantom)
+        monkeypatch.setattr(locked_sweeps, "run_concierge_recoveries", _concierge)
+        return seen
+
+    @pytest.mark.parametrize("with_phantom", [True, False])
+    def test_set_is_threaded_by_identity_to_every_seam(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        with_phantom: bool,
+    ) -> None:
+        """Both terminal tails (phantom and no-phantom) forward the same set."""
+        sessions = [_mk_session("s1", "missing-ref")] if with_phantom else []
+        save_state(CwState(sessions=sessions))
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": "decoy000"}],
+        )
+        seen = self._record_consumers(monkeypatch)
+        warned: set[str] = set()
+
+        report = reconcile(warned_blocks=warned)
+
+        assert (report.phantom_session_ids == ["s1"]) is with_phantom
+        for name in ("salvage_capture", "dirty_capture", "idle", "concierge"):
+            assert len(seen[name]) == 1, name
+            assert seen[name][0] is warned, name
+        assert len(seen["phantom"]) == (1 if with_phantom else 0)
+        assert all(item is warned for item in seen["phantom"])
+
+    @pytest.mark.parametrize("with_phantom", [True, False])
+    def test_bare_reconcile_delivers_none_to_every_seam(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        with_phantom: bool,
+    ) -> None:
+        """``cw start`` / ``cw doctor --reap`` call ``reconcile()`` bare (#1394)."""
+        sessions = [_mk_session("s1", "missing-ref")] if with_phantom else []
+        save_state(CwState(sessions=sessions))
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": "decoy000"}],
+        )
+        seen = self._record_consumers(monkeypatch)
+
+        reconcile()
+
+        for name in ("salvage_capture", "dirty_capture", "idle", "concierge"):
+            assert seen[name] == [None], name
+        assert seen["phantom"] == ([None] if with_phantom else [])
+
+    @staticmethod
+    def _seed_malformed_phantom(
+        make_git_repo: Callable[..., Path],
+    ) -> Callable[[], None]:
+        """Seed a crashed phantom whose transcript has a malformed block.
+
+        Returns a ``reseed`` callable that restores the pre-reconcile state, so
+        a second tick sees the same phantom again.
+        """
+        worktree = TestSalvageScopePrePass._seed_phantom_scope(make_git_repo)
+        payload = _inflate_scope(_shipped_salvage_payload("salv-scope"))
+        _write_salvage_transcript(
+            Path.home(),
+            worktree,
+            "claude-uuid-scope",
+            payload,
+            surface_ref="gone-ref",
+            extra_records=[_MALFORMED_RECORD],
+        )
+        state0 = load_state()
+        queue0 = load_dev_queue()
+
+        def _reseed() -> None:
+            save_state(state0)
+            save_dev_queue(queue0)
+
+        return _reseed
+
+    @staticmethod
+    def _malformed_count(caplog: pytest.LogCaptureFixture) -> int:
+        return sum(
+            1
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+            and _MALFORMED_WARNING in record.message
+        )
+
+    def test_end_to_end_warns_once_across_ticks_and_parse_sites(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        make_git_repo: Callable[..., Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Real parse code: the lockless prepasses and the in-lock phantom
+        salvage all read the same malformed block, across two ticks."""
+        reseed = self._seed_malformed_phantom(make_git_repo)
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": "live-ref"}],
+        )
+        warned: set[str] = set()
+
+        with (
+            caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"),
+            freezegun.freeze_time(_SCOPE_STARTED_AT + timedelta(minutes=5)),
+        ):
+            reconcile(warned_blocks=warned)
+            reseed()
+            reconcile(warned_blocks=warned)
+
+        assert self._malformed_count(caplog) == 1
+        assert len(warned) == 1
+
+    def test_end_to_end_warns_repeatedly_without_the_set(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        make_git_repo: Callable[..., Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        reseed = self._seed_malformed_phantom(make_git_repo)
+        monkeypatch.setattr(
+            "cw.reconcile.core._claude_agents_json",
+            lambda: [{"sessionId": "live-ref"}],
+        )
+
+        with (
+            caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"),
+            freezegun.freeze_time(_SCOPE_STARTED_AT + timedelta(minutes=5)),
+        ):
+            reconcile()
+            reseed()
+            reconcile()
+
+        assert self._malformed_count(caplog) > 1
+
+
 _SCOPE_STARTED_AT = datetime(2026, 1, 1, tzinfo=UTC)
 
 
