@@ -67,6 +67,7 @@ from cw.codex_review_persist import (
     _persist_unparseable_artifact,
     _post_review_comment,
 )
+from cw.codex_review_signals import undelivered_operator_context
 from cw.codex_stage_completion import (
     clear_stage_blocked_marker,
     complete_session_through_door,
@@ -90,7 +91,7 @@ from cw.models.enums import (
 )
 from cw.operator_identity import resolve_operator_login
 from cw.review_finding_dispositions import merge_finding_dispositions
-from cw.tracker import resolve_tracker
+from cw.tracker import resolve_tracker, tracker_kind
 from cw.worktree import _checked_out_branch, _git_dir
 
 if TYPE_CHECKING:
@@ -656,6 +657,15 @@ def _run_codex_review_and_complete(
         save_stage_blocked_marker(
             client_name=client.name, ticket_id=task.ticket_id, session_id=sid
         )
+        # #3055 (RFC 0018 S3, Case B): a non-GitHub (or unset) tracker means
+        # the review below runs without the operator's tracker context. Once
+        # per session, before Step 3; best-effort, never raises OSError.
+        undelivered_operator_context(
+            task=task,
+            client=client.name,
+            tracker=tracker_kind(client.workspace_path),
+            session_id=sid,
+        )
 
         # Step 3: per-role review pass + bounded fix loop (#1392), then the
         # clean-mode confirm gate (#2791).
@@ -701,6 +711,10 @@ def _run_codex_review_and_complete(
             _post_review_comment(
                 task.ticket_id,
                 review_text,
+                client=client.name,
+                session_id=sid,
+                kind="verdict",
+                reviewed_sha=verdict.reviewed_sha,
                 cwd=_git_dir(client),
                 tracker=resolve_tracker(client.workspace_path),
                 artifact_path=artifact_path,
@@ -712,16 +726,21 @@ def _run_codex_review_and_complete(
             # (_format_failures_detail) plus a diagnostics-bundle pointer.
             # Reused verbatim as both the worktree artifact and the ticket
             # comment text, mirroring the verdict-present branch's shape.
+            head_sha = capture_head_sha(worktree, strict=False)
             artifact_path = _persist_unparseable_artifact(
                 worktree,
                 result.blocker,
                 ticket_id=task.ticket_id,
-                reviewed_sha=capture_head_sha(worktree, strict=False),
+                reviewed_sha=head_sha,
                 reviewer_label=reviewer_label,
             )
             _post_review_comment(
                 task.ticket_id,
                 result.blocker.details,
+                client=client.name,
+                session_id=sid,
+                kind="unparseable",
+                reviewed_sha=head_sha or None,
                 cwd=_git_dir(client),
                 tracker=resolve_tracker(client.workspace_path),
                 artifact_path=artifact_path,
