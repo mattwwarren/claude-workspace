@@ -49,6 +49,8 @@ re-exports. Submodules:
   global fallback / absent) drift detection.
 - ``codex_fix_loop`` — per-lane effective codex fix-loop state and its source
   (lane vs global default) for lanes with a codex review executor (#2542).
+- ``tracker_mcp`` — per-lane tracker-MCP reachability for opencode and codex
+  lanes on a non-GitHub tracker: FAIL when the gate would park the row (#3055).
 - ``review_convergence`` — per-lane effective ``review.convergence: clean``
   support for clean clients: FAIL for a lane whose REVIEW backend writes no
   convergence ledger (#2797).
@@ -115,6 +117,7 @@ from cw.doctor.review_convergence import _check_review_convergence
 from cw.doctor.session_outcomes import _check_session_outcomes
 from cw.doctor.sessions_auto_prune import _check_sessions_auto_prune
 from cw.doctor.skills_drift import _check_skills_commands_drift
+from cw.doctor.tracker_mcp import _check_tracker_mcp
 from cw.doctor.user_level_hooks import _check_user_level_stop_hook
 from cw.doctor.versions import (
     _CW_DEPS_CHECK_NAME,
@@ -182,6 +185,7 @@ __all__ = [
     "_check_skills_commands_drift",
     "_check_ssh_key_loaded",
     "_check_timed_out_merged",
+    "_check_tracker_mcp",
     "_check_user_level_stop_hook",
     "_check_wedge_repo_ahead",
     "_check_wedge_task_running_completed_session",

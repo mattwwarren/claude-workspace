@@ -1,0 +1,168 @@
+"""Per-lane tracker-MCP reachability check for non-Claude backends (#3055).
+
+RFC 0018 S3. One ``CheckResult`` named ``tracker-mcp/<client>/<lane>/<backend>``
+per lane whose pipeline runs a tracker-touching stage on a non-Claude backend
+(opencode PLAN/IMPL/FINALIZE; codex REVIEW) for a client whose tracker is not
+GitHub. A GitHub tracker needs no MCP and produces no result; ``local`` and
+``claude-native`` are not reported here.
+
+Severity:
+
+* codex: always a warning naming what its reviews lose on this tracker
+  (free-text operator comments, the voided-findings block, marker comments).
+* opencode, tracker unset: a warning -- the PLAN/IMPL prompt tells the agent
+  to block with ``tracker_tool_unavailable``.
+* opencode, no ``tracker_mcp_gate.servers.opencode`` named: a warning.
+* opencode, server named: the user-layer config is read in process with
+  :func:`cw.backend_mcp_config.read_backend_mcp`. ``ENABLED`` is ok (with the
+  "auth, env and headless load unverified" caveat); ``UNKNOWN`` warns;
+  ``ABSENT``/``DISABLED`` **fails** when the gate is on and the lane runs
+  PLAN or IMPL on opencode (the row would park), and warns otherwise.
+
+Root is ``client.repo_path or client.workspace_path``. Leaf module, no
+cross-``doctor`` dependencies; read-only.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, NamedTuple
+
+from cw.backend_mcp_config import McpConfigReading, McpState, read_backend_mcp
+from cw.doctor._shared import CheckResult
+from cw.executor import resolve_executor_config, resolve_pipeline_stages
+from cw.models import CODEX_BACKEND, OPENCODE_BACKEND, Stage, TicketTask
+from cw.tracker import TrackerClass, TrackerKind, tracker_kind
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from cw.models import ClientConfig
+
+_CHECK_NAME = "tracker-mcp"
+
+# The stages each non-Claude backend performs tracker operations in. opencode
+# REVIEW performs none (its prompt says so); codex reads at REVIEW only.
+_TRACKER_STAGES: dict[str, frozenset[Stage]] = {
+    OPENCODE_BACKEND: frozenset({Stage.PLAN, Stage.IMPL, Stage.FINALIZE}),
+    CODEX_BACKEND: frozenset({Stage.REVIEW}),
+}
+# The stages the dispatch gate parks on (``cw.dispatch.tracker_mcp_gate``).
+_GATED_STAGES = frozenset({Stage.PLAN, Stage.IMPL})
+
+_CAVEAT = "declared in {path}; auth, env and headless load unverified"
+_LOST_CONTEXT = (
+    "codex reviews on this tracker run without the operator's free-text ticket"
+    " comments, the voided-findings block (#1814) and marker comments, because"
+    " the daemon cannot read this tracker; the verdict comment is not posted"
+    " either (review.verdict_comment_skipped). Row-carried constraints and"
+    " finding dispositions still reach the review."
+)
+_UNSET_PROMPT = (
+    "the opencode PLAN/IMPL prompt tells the agent to block with"
+    " tracker_tool_unavailable; set tracking.primary.system in"
+    " .claude/project-config.yaml"
+)
+
+
+class _Lane(NamedTuple):
+    """One reportable (client, lane, backend) and its tracker-touching stages."""
+
+    client: ClientConfig
+    lane: str
+    backend: str
+    stages: tuple[Stage, ...]
+
+
+def _lane_backends(client: ClientConfig, lane: str) -> dict[str, tuple[Stage, ...]]:
+    """Map each non-Claude backend to the tracker-touching stages it runs."""
+    # ticket_id="" is the documented "no associated ticket" sentinel.
+    task = TicketTask(ticket_id="", client=client.name, lane=lane, stage=Stage.PLAN)
+    grouped: dict[str, list[Stage]] = {}
+    for stage in resolve_pipeline_stages(task, client):
+        backend = resolve_executor_config(stage, task, client).backend
+        if stage in _TRACKER_STAGES.get(backend, frozenset()):
+            grouped.setdefault(backend, []).append(stage)
+    return {backend: tuple(stages) for backend, stages in grouped.items()}
+
+
+def _server_for(client: ClientConfig, backend: str) -> str | None:
+    gate = client.tracker_mcp_gate
+    if gate is None or gate.servers is None:
+        return None
+    return gate.servers.get(backend)
+
+
+def _mcp_clause(server: str | None, reading: McpConfigReading | None) -> str:
+    """Describe what the backend config says about the server."""
+    if server is None or reading is None:
+        return "no tracker_mcp_gate.servers entry names this backend's MCP server"
+    if reading.state is McpState.ENABLED:
+        return _CAVEAT.format(path=reading.path)
+    if reading.state is McpState.UNKNOWN:
+        return f"MCP declaration unverified: {reading.reason}"
+    return f"server {server} is {reading.state.value} in {reading.path}"
+
+
+def _lost_context_clause(backend: str, kind: TrackerKind) -> str:
+    if backend == CODEX_BACKEND:
+        return _LOST_CONTEXT
+    if kind.tracker_class is TrackerClass.UNSET:
+        return _UNSET_PROMPT
+    return ""
+
+
+def _severity(
+    entry: _Lane, kind: TrackerKind, reading: McpConfigReading | None
+) -> tuple[bool, bool]:
+    """``(ok, warn)`` for one lane; see the module docstring."""
+    if entry.backend == CODEX_BACKEND or kind.tracker_class is TrackerClass.UNSET:
+        return True, True
+    if reading is None or reading.state is McpState.UNKNOWN:
+        return True, True
+    if reading.state is McpState.ENABLED:
+        return True, False
+    gate = entry.client.tracker_mcp_gate
+    gate_on = gate is not None and gate.enabled
+    if gate_on and _GATED_STAGES.intersection(entry.stages):
+        return False, False
+    return True, True
+
+
+def _lane_result(entry: _Lane, root: Path, kind: TrackerKind) -> CheckResult:
+    server = _server_for(entry.client, entry.backend)
+    reading = (
+        read_backend_mcp(entry.backend, server, root)
+        if server is not None and kind.tracker_class is TrackerClass.OTHER
+        else None
+    )
+    ok, warn = _severity(entry, kind, reading)
+    stages = ",".join(stage.value for stage in entry.stages)
+    clauses = [
+        f"lane {entry.lane}, stage {stages}, backend {entry.backend},"
+        f" tracker {kind.system or 'unset'}, server {server or 'none named'}",
+        _mcp_clause(server, reading),
+        _lost_context_clause(entry.backend, kind),
+    ]
+    return CheckResult(
+        f"{_CHECK_NAME}/{entry.client.name}/{entry.lane}/{entry.backend}",
+        ok=ok,
+        warn=warn,
+        detail="; ".join(clause for clause in clauses if clause),
+    )
+
+
+def _client_results(client: ClientConfig) -> list[CheckResult]:
+    root = client.repo_path or client.workspace_path
+    kind = tracker_kind(root)
+    if kind.tracker_class is TrackerClass.GITHUB:
+        return []
+    return [
+        _lane_result(_Lane(client, lane.name, backend, stages), root, kind)
+        for lane in client.effective_lanes
+        for backend, stages in _lane_backends(client, lane.name).items()
+    ]
+
+
+def _check_tracker_mcp(clients: dict[str, ClientConfig]) -> list[CheckResult]:
+    """Report tracker-MCP reachability for every non-Claude tracker lane."""
+    return [result for client in clients.values() for result in _client_results(client)]
