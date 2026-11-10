@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, cast, get_args
 
 from cw._git import run_git
 from cw.auto_dev_result import AutoDevResult, PlanSource
-from cw.codex_review import FIX_CYCLE_COMMIT_PREFIX
+from cw.codex_review._const import is_fix_cycle_commit_subject
 from cw.exceptions import CwError
 from cw.review_convergence import resolve_diff_base
 
@@ -105,7 +105,7 @@ def fix_loop_facts(
     commits = []
     for line in log.stdout.splitlines():
         sha, _, subject = line.partition(" ")
-        if sha and subject.startswith(FIX_CYCLE_COMMIT_PREFIX):
+        if sha and is_fix_cycle_commit_subject(subject):
             commits.append(sha)
     return fork, commits
 

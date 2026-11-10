@@ -14,16 +14,12 @@ import subprocess
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from cw.codex_stage_facts import (
-    fix_loop_facts,
-    resolve_plan_source,
-    stamp_stage_facts,
-)
 
 from cw import context_queue_metadata
 from cw._git import run_git
 from cw.auto_dev_result import AutoDevResult, parse_stdout
 from cw.codex_review import FIX_CYCLE_COMMIT_PREFIX, make_codex_blocked
+from cw.codex_stage_facts import fix_loop_facts, resolve_plan_source, stamp_stage_facts
 from cw.dispatch.routing import scope_tier
 from tests._codex_review_helpers import _task
 from tests.conftest import add_bare_origin, git_in

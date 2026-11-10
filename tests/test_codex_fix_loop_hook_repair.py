@@ -13,12 +13,12 @@ import subprocess
 from typing import TYPE_CHECKING
 
 import pytest
-from cw.codex_fix_loop.gates import GateFailure, GatePlan
 
 from cw._git import run_git as real_run_git
 from cw.codex_fix_loop import commit as commit_module
 from cw.codex_fix_loop.commit import _build_repair_prompt
 from cw.codex_fix_loop.fence import LEFT_STAGED_HINT
+from cw.codex_fix_loop.gates import GateFailure, GatePlan
 from cw.codex_fix_loop.growth import DEFAULT_GROWTH_BUDGET_LINES
 from cw.codex_fix_loop.hook_failure import (
     CommitHookFailedError,

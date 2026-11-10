@@ -233,6 +233,12 @@ CODEX_FIX_LOOP_CUMULATIVE_GROWTH_BUDGET_KEY = (
 # of a branch's log by the same literal the commit step writes.
 FIX_CYCLE_COMMIT_PREFIX = "fix(review): codex fix cycle"
 
+
+def is_fix_cycle_commit_subject(subject: str) -> bool:
+    """Whether *subject* is the subject of a codex fix-cycle commit."""
+    return subject.startswith(FIX_CYCLE_COMMIT_PREFIX)
+
+
 # Review-exit guard park (#2354): the fix loop converged clean, but local HEAD
 # is not on origin/<branch> and a self-heal push also failed. Reporting the
 # clean result anyway would hand a later stage work that exists only locally.

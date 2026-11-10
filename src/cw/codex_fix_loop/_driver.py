@@ -70,6 +70,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, NamedTuple
 
+from cw.auto_dev_result import AutoDevResult
 from cw.codex_fix_loop.commit import _run_fix_and_commit
 from cw.codex_fix_loop.constraints import (
     constraint_rules,
@@ -136,7 +137,6 @@ if TYPE_CHECKING:
     from typing import TypeGuard
 
     from cw.auto_dev_result import (
-        AutoDevResult,
         OperatorConstraintsSource,
         Review,
         ScopeTier,
@@ -520,6 +520,23 @@ def _should_seed(
     )
 
 
+def _merge_gate_tokens(
+    result: AutoDevResult, gate_tokens: list[str] | None
+) -> AutoDevResult:
+    """Keep gate friction on every terminal result, without duplicating it."""
+    if not gate_tokens:
+        return result
+    missing = [
+        token for token in gate_tokens if token not in result.friction_highlights
+    ]
+    if not missing:
+        return result
+    merged = result.model_copy(
+        update={"friction_highlights": [*result.friction_highlights, *missing]}
+    )
+    return AutoDevResult.model_validate(merged.model_dump(mode="json"))
+
+
 def run_review_with_fix_loop(
     *,
     runner: CodexRunner,
@@ -639,7 +656,7 @@ def run_review_with_fix_loop(
         or not fix_loop_enabled
         or has_contested_decision(verdict)  # #2984: the whole verdict parks
     ):
-        return result, verdict
+        return _merge_gate_tokens(result, gate_tokens), verdict
 
     cycle0_review = verdict.review
     # #2880: re-reviews cover only the delta, so what cycle 0 left unread is
@@ -682,7 +699,8 @@ def run_review_with_fix_loop(
         had_real_commit=False,
     )
     if cycle0_park is not None:
-        return cycle0_park
+        parked_result, parked_verdict = cycle0_park
+        return _merge_gate_tokens(parked_result, gate_tokens), parked_verdict
     baseline_lines = pre_loop_diff_lines(worktree, default_branch)
     divergence_state = initial_divergence_state(
         original_keys=frozenset(open_findings),
@@ -751,7 +769,11 @@ def run_review_with_fix_loop(
                 gate_tokens=gate_tokens,
             )
         if park is not None:
-            return park
+            cycle_parked_result, cycle_parked_verdict = park
+            return (
+                _merge_gate_tokens(cycle_parked_result, gate_tokens),
+                cycle_parked_verdict,
+            )
         had_real_commit = had_real_commit or commit_sha is not None
         previous_reviewed_sha = verdict.reviewed_sha
         result, verdict, prepared = _rereview(
@@ -777,16 +799,14 @@ def run_review_with_fix_loop(
             # never reached) and this park's details come from
             # `_format_failures_detail`, not from any persisted verdict — so
             # nothing is finalized here (#1763).
-            return (
-                result.model_copy(
-                    update={
-                        "friction_highlights": _with_snapshot_pointer(
-                            result.friction_highlights, snapshot.pointer
-                        )
-                    }
-                ),
-                None,
+            result = result.model_copy(
+                update={
+                    "friction_highlights": _with_snapshot_pointer(
+                        result.friction_highlights, snapshot.pointer
+                    )
+                }
             )
+            return _merge_gate_tokens(result, gate_tokens), None
         delta_gap = delta_gap.fold(verdict, cycle)
         pre_open_keys = frozenset(open_findings)
         open_findings = _track_open_findings(
@@ -832,9 +852,10 @@ def run_review_with_fix_loop(
             observer=cycle_observer,
         )
         if cycle_exit is not None:
-            return cycle_exit
+            exit_result, exit_verdict = cycle_exit
+            return _merge_gate_tokens(exit_result, gate_tokens), exit_verdict
 
-    return _park_survivors(
+    survivor_result, survivor_verdict = _park_survivors(
         task=task,
         worktree=worktree,
         session_id=session_id,
@@ -847,3 +868,4 @@ def run_review_with_fix_loop(
         snapshot=snapshot,
         had_real_commit=had_real_commit,
     )
+    return _merge_gate_tokens(survivor_result, gate_tokens), survivor_verdict

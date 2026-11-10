@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
-from cw._git import git_clean_env
+from cw._git import git_clean_env, git_output
 from cw.codex_fix_loop.baseline import staged_cycle_tree
 from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, FenceBreach
 from cw.codex_fix_loop.posted_text import redact_and_cap, withhold_secret_lines
@@ -77,7 +77,9 @@ REPO_SCRIPT_CANDIDATES = (
     "scripts/prep_pr_state.py",
 )
 _HOME_SCRIPT = Path(".claude") / "scripts" / "prep_pr_state.py"
-STALE_MARKER = "gate-timeout"
+DETECT_GATES_COMMAND = "detect-gates"
+GATE_TIMEOUT_COMMAND = "gate-timeout"
+STALE_MARKER = GATE_TIMEOUT_COMMAND
 _PROBED = ".claude/scripts/, scripts/, ~/.claude/scripts/"
 
 NONE_DETECTED_FRICTION = "codex_fix_gates_none_detected"
@@ -241,12 +243,15 @@ def _take_line(out: _Output, raw: bytes) -> None:
     line = raw.decode("utf-8", errors="replace").rstrip("\r")
     out.tail.append(line)
     if out.log:
+        safe_line = redact_and_cap(
+            withhold_secret_lines(line), max_total_chars=_TAIL_MAX_CHARS
+        )
         _log.warning(
             "codex_gate_output ticket=%s cycle=%s gate=%s | %s",
             out.scope.ticket_id,
             out.scope.cycle,
             out.gate,
-            line,
+            safe_line,
         )
 
 
@@ -376,7 +381,7 @@ def _gate_entry(entry: object) -> tuple[str, str]:
         command = entry.get("command")
         if isinstance(name, str) and name and isinstance(command, str) and command:
             return name, command
-    msg = "`prep_pr_state.py detect-gates` printed a malformed gate list"
+    msg = f"`prep_pr_state.py {DETECT_GATES_COMMAND}` printed a malformed gate list"
     raise GateUnavailableError(msg)
 
 
@@ -384,7 +389,7 @@ def _detected_gates(data: dict[str, Any]) -> list[tuple[str, str]]:
     """Return ``(name, command)`` per detected gate."""
     entries = data.get("gates")
     if not isinstance(entries, list):
-        msg = "`prep_pr_state.py detect-gates` printed a malformed gate list"
+        msg = f"`prep_pr_state.py {DETECT_GATES_COMMAND}` printed a malformed gate list"
         raise GateUnavailableError(msg)
     return [_gate_entry(entry) for entry in entries]
 
@@ -393,9 +398,11 @@ def _gate_ceiling(
     script: Path, name: str, *, worktree: Path, scope: GateScope
 ) -> float:
     """Read one gate's ``foreground_ceiling_s`` once, at cycle start."""
-    label = f"gate-timeout {name}"
+    label = f"{GATE_TIMEOUT_COMMAND} {name}"
     data = _json_object(
-        _helper_output(script, ("gate-timeout", name), worktree=worktree, scope=scope),
+        _helper_output(
+            script, (GATE_TIMEOUT_COMMAND, name), worktree=worktree, scope=scope
+        ),
         label,
     )
     ceiling = data.get("foreground_ceiling_s")
@@ -424,9 +431,9 @@ def plan_cycle_gates(worktree: Path, scope: GateScope) -> GatePlan:
         detected = _detected_gates(
             _json_object(
                 _helper_output(
-                    script, ("detect-gates",), worktree=worktree, scope=scope
+                    script, (DETECT_GATES_COMMAND,), worktree=worktree, scope=scope
                 ),
-                "detect-gates",
+                DETECT_GATES_COMMAND,
             )
         )
         planned = tuple(
@@ -468,6 +475,7 @@ def _run_one_gate(
     tree_before: str,
 ) -> GateFailure | None:
     """Run one pinned gate; return why it refused the cycle, if it did."""
+    snapshot = git_output(["stash", "create"], cwd=worktree).strip()
     try:
         watched = _run_watched(
             ["sh", "-c", gate.command],
@@ -490,6 +498,14 @@ def _run_one_gate(
         watched.seconds,
     )
     output = _postable(watched.tail)
+    dirtied = staged_cycle_tree(worktree, review_artifacts) != tree_before
+    if (watched.returncode != 0 or dirtied) and snapshot:
+        # Gate commands execute against the fix itself. If a failing or
+        # mutating command rewrites it, put the exact pre-gate state back
+        # before the normal refused-cycle preservation path snapshots it.
+        git_output(["reset", "--hard", "HEAD"], cwd=worktree)
+        git_output(["clean", "-fd"], cwd=worktree)
+        git_output(["stash", "apply", "--index", snapshot], cwd=worktree)
     if watched.returncode != 0:
         return GateFailure(
             "red",
@@ -500,7 +516,7 @@ def _run_one_gate(
             output,
             None,
         )
-    if staged_cycle_tree(worktree, review_artifacts) != tree_before:
+    if dirtied:
         return GateFailure(
             "dirtied", gate.name, gate.command, 0, watched.seconds, output, None
         )
