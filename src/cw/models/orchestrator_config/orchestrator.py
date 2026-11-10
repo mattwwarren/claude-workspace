@@ -391,6 +391,8 @@ class OrchestratorConfig(BaseModel):
     # sensitive-path guard, hook-failure park or divergence guard. A lane may
     # override in either direction (LaneConfig.codex_fix_loop_growth_guard_enabled),
     # resolved by cw.codex_background._resolve_codex_fix_loop_growth_guard_enabled.
+    # #2666: the switch also covers the divergence guard's relative threshold
+    # (anchor-scaled), not its absolute threshold or stall_cycles.
     codex_fix_loop_growth_guard_enabled: bool = True
     # #2210 — master opt-in for the codex review ledger's fuzzy claim-match
     # suppression tier. Default False, mirroring concierge_enabled's

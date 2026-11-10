@@ -37,7 +37,7 @@ from cw.review_convergence import resolve_loop_diff_base
 from cw.worktree import _parse_numstat_totals
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
     from pathlib import Path
 
     from cw.codex_fix_loop.convergence import _OpenFindingKey
@@ -58,6 +58,12 @@ _DIVERGENCE_MIN_LINES = 150
 # Fraction of the pre-loop branch diff the cumulative churn must also exceed,
 # so a large PR is not tripped by fix churn proportionate to its own size.
 _DIVERGENCE_PRE_LOOP_FRACTION = 0.5
+# #2666: the threshold may also scale with the original findings' anchor size,
+# so a six-line finding resolved by 59 churned lines (#2590) parks at 48 rather
+# than needing 150. Relative minimum matches DEFAULT_CUMULATIVE_GROWTH_BUDGET_LINES
+# by convention only (separate constant, no import).
+_DIVERGENCE_ANCHOR_RATIO = 8
+_DIVERGENCE_RELATIVE_MIN_LINES = 40
 
 
 class _DivergenceCycleRecord(NamedTuple):
@@ -77,6 +83,10 @@ class DivergenceState(NamedTuple):
     ``cumulative_net_lines_added`` never resets: only ``stall_streak`` resets on
     a cycle that resolves an original finding, so one token fix cannot launder
     a large accumulated diff.
+
+    ``original_anchor_lines`` (#2666) is the total line count of the original
+    findings' anchors, or ``None`` when the relative threshold does not apply
+    (switch off, or any original finding is file-level / unanchored).
     """
 
     original_keys: frozenset[_OpenFindingKey]
@@ -86,6 +96,7 @@ class DivergenceState(NamedTuple):
     cumulative_net_lines_added: int
     history: tuple[_DivergenceCycleRecord, ...]
     stall_cycles: int = _DIVERGENCE_STALL_CYCLES
+    original_anchor_lines: int | None = None
 
 
 def initial_divergence_state(
@@ -94,6 +105,7 @@ def initial_divergence_state(
     pre_loop_diff_lines: int,
     pre_loop_head_sha: str,
     stall_cycles: int = _DIVERGENCE_STALL_CYCLES,
+    original_anchor_lines: int | None = None,
 ) -> DivergenceState:
     """Return the pre-loop state seeded from cycle 0's open MUST_FIX keys."""
     return DivergenceState(
@@ -104,7 +116,52 @@ def initial_divergence_state(
         cumulative_net_lines_added=0,
         history=(),
         stall_cycles=stall_cycles,
+        original_anchor_lines=original_anchor_lines,
     )
+
+
+def total_anchor_lines(findings: Iterable[AcceptedFinding]) -> int | None:
+    """Return the summed anchor size of *findings*, or ``None`` if unusable.
+
+    Each finding's anchor is ``line_end - line_start + 1`` (``line_end`` falls
+    back to ``line_start``, floor 1). ``None`` when there are no findings, or
+    when any finding is file-level or ``"N/A"``: the relative threshold then
+    does not apply and the absolute one stays in force.
+    """
+    total = 0
+    seen = False
+    for af in findings:
+        finding = af.finding
+        if finding.file == _NO_FILE or finding.line_start is None:
+            return None
+        end = finding.line_end if finding.line_end is not None else finding.line_start
+        total += max(1, end - finding.line_start + 1)
+        seen = True
+    return total if seen else None
+
+
+def _absolute_threshold(state: DivergenceState) -> int:
+    return max(
+        _DIVERGENCE_MIN_LINES,
+        int(state.pre_loop_diff_lines * _DIVERGENCE_PRE_LOOP_FRACTION),
+    )
+
+
+def divergence_threshold(state: DivergenceState) -> int:
+    """Return the cumulative-churn bar the loop must exceed to be diverging.
+
+    Absolute ``max(150, 0.5 x pre-loop diff)`` when no anchor is known. With
+    anchors, ``min`` of that and ``max(40, 8 x anchor lines)``: the relative
+    term can only lower the bar, and the absolute value stays the upper bound.
+    """
+    absolute = _absolute_threshold(state)
+    if state.original_anchor_lines is None:
+        return absolute
+    relative = max(
+        _DIVERGENCE_RELATIVE_MIN_LINES,
+        _DIVERGENCE_ANCHOR_RATIO * state.original_anchor_lines,
+    )
+    return min(absolute, relative)
 
 
 def net_lines_for_commit(worktree: Path, commit_sha: str | None) -> int:
@@ -168,13 +225,9 @@ def record_divergence_cycle(
 
 def is_diverging(state: DivergenceState) -> bool:
     """Return True iff the loop is stalled on original findings AND growing."""
-    threshold = max(
-        _DIVERGENCE_MIN_LINES,
-        state.pre_loop_diff_lines * _DIVERGENCE_PRE_LOOP_FRACTION,
-    )
     return (
         state.stall_streak >= state.stall_cycles
-        and state.cumulative_net_lines_added > threshold
+        and state.cumulative_net_lines_added > divergence_threshold(state)
     )
 
 
@@ -239,6 +292,24 @@ def loop_generated_findings(
     ]
 
 
+def _threshold_line(state: DivergenceState) -> str:
+    """Name the threshold and how it was derived (#2666)."""
+    threshold = divergence_threshold(state)
+    if state.original_anchor_lines is None:
+        return (
+            f"Divergence threshold: {threshold} line(s) of cumulative churn "
+            "(absolute: max(150, 0.5 x pre-loop diff))."
+        )
+    anchor = state.original_anchor_lines
+    return (
+        f"Divergence threshold: {threshold} line(s) of cumulative churn "
+        f"(relative to {anchor} original anchor line(s): "
+        f"max({_DIVERGENCE_RELATIVE_MIN_LINES}, "
+        f"{_DIVERGENCE_ANCHOR_RATIO} x {anchor}); "
+        f"the absolute threshold of {_absolute_threshold(state)} still caps it)."
+    )
+
+
 def render_divergence_report(
     state: DivergenceState, loop_generated: Sequence[AcceptedFinding] = ()
 ) -> str:
@@ -249,6 +320,7 @@ def render_divergence_report(
         f"{state.cumulative_net_lines_added} line(s). Pre-loop head: "
         f"{state.pre_loop_head_sha} (pre-loop diff: "
         f"{state.pre_loop_diff_lines} line(s)).",
+        _threshold_line(state),
     ]
     lines.extend(
         f"- cycle {r.cycle}: MUST_FIX {r.must_fix_before}→{r.must_fix_after}, "
@@ -278,11 +350,12 @@ def emit_divergence_event(
     """Log and record the divergence trip that is about to park the loop."""
     _log.info(
         "auto-dev: codex fix loop diverging; parking early "
-        "(ticket=%s, stall_streak=%d, cumulative_net_lines_added=%d, since=%s, "
-        "loop_generated=%d)",
+        "(ticket=%s, stall_streak=%d, cumulative_net_lines_added=%d, threshold=%d, "
+        "since=%s, loop_generated=%d)",
         ticket_id,
         state.stall_streak,
         state.cumulative_net_lines_added,
+        divergence_threshold(state),
         state.pre_loop_head_sha,
         len(loop_generated),
     )
@@ -293,6 +366,8 @@ def emit_divergence_event(
             "cycles": [record._asdict() for record in state.history],
             "cumulative_net_lines_added": state.cumulative_net_lines_added,
             "stall_streak": state.stall_streak,
+            "threshold": divergence_threshold(state),
+            "anchor_lines": state.original_anchor_lines,
             "loop_generated_findings": [
                 {
                     "file": af.finding.file,
