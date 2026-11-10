@@ -161,17 +161,25 @@ def _server_state(
     data: dict[str, object], servers_key: str, server: str
 ) -> tuple[McpState, str]:
     """Classify *server* under *servers_key* in one parsed config object."""
-    container = data.get(servers_key)
-    if container is None:
+    if servers_key not in data:
         return McpState.ABSENT, f"no {servers_key} section"
+    container = data[servers_key]
     if not isinstance(container, dict):
-        return McpState.UNKNOWN, f"{servers_key} is not a table/object"
+        reason = (
+            f"{servers_key} is null"
+            if container is None
+            else f"{servers_key} is not a table/object"
+        )
+        return McpState.UNKNOWN, reason
     label = f"{servers_key}.{server}"
-    entry = container.get(server)
-    if entry is None:
+    if server not in container:
         return McpState.ABSENT, f"{label} is not declared"
+    entry = container[server]
     if not isinstance(entry, dict):
-        return McpState.UNKNOWN, f"{label} is not a table/object"
+        reason = (
+            f"{label} is null" if entry is None else f"{label} is not a table/object"
+        )
+        return McpState.UNKNOWN, reason
     return _entry_state(entry, label)
 
 

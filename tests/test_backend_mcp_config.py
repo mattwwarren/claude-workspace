@@ -129,6 +129,25 @@ class TestReadBackendMcp:
 
         assert reading == McpConfigReading(McpState.ABSENT, path, "no mcp section")
 
+    @pytest.mark.parametrize(
+        ("content", "reason"),
+        [
+            ('{"mcp": null}\n', "mcp is null"),
+            ('{"mcp": {"linear": null}}\n', "mcp.linear is null"),
+        ],
+    )
+    def test_null_servers_section_or_entry_is_unknown(
+        self, tmp_path: Path, content: str, reason: str
+    ) -> None:
+        path = opencode_user_path()
+        path.parent.mkdir(parents=True)
+        path.write_text(content, encoding="utf-8")
+
+        reading = read_backend_mcp(OPENCODE_BACKEND, "linear", _root(tmp_path))
+
+        assert reading.state is McpState.UNKNOWN
+        assert reason in reading.reason
+
     def test_server_entry_not_an_object_is_unknown(self, tmp_path: Path) -> None:
         path = opencode_user_path()
         path.parent.mkdir(parents=True)

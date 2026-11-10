@@ -24,6 +24,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cw.auto_dev_result.schema._vocab import (
+    PLAN_MISSING_CONTEXT_BLOCKER_REASON,
+    TRACKER_TOOL_UNAVAILABLE_BLOCKER_REASON,
+)
 from cw.tracker import TRACKER_GITHUB_ISSUES, TrackerClass
 
 if TYPE_CHECKING:
@@ -32,18 +36,18 @@ if TYPE_CHECKING:
 #: The one line both opencode REVIEW prompts carry.
 REVIEW_NO_TRACKER_LINE = "This stage performs no tracker operations."
 
-#: The blocker.reason for a tracker write with no tool, or a failed call.
-TRACKER_TOOL_UNAVAILABLE = "tracker_tool_unavailable"
-
 _FAILURE_PARAGRAPH = (
     "If no tool for this tracker is available in this session, or a call "
     "fails, do not improvise or skip: emit status blocked with blocker.reason "
-    f"`{TRACKER_TOOL_UNAVAILABLE}` (for a write) or `plan_missing_context` "
+    f"`{TRACKER_TOOL_UNAVAILABLE_BLOCKER_REASON}` (for a write) or "
+    f"`{PLAN_MISSING_CONTEXT_BLOCKER_REASON}` "
     "(for a read), with blocker.details naming the tracker, the operation and "
     "the error."
 )
 
-_UNSET_LINE = f"Tracker unknown: emit blocked `{TRACKER_TOOL_UNAVAILABLE}`."
+_UNSET_LINE = (
+    f"Tracker unknown: emit blocked `{TRACKER_TOOL_UNAVAILABLE_BLOCKER_REASON}`."
+)
 
 
 def _github_line(ticket_id: str) -> str:

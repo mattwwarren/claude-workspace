@@ -36,6 +36,7 @@ from cw.auto_dev_result import (
     StageReached,
     parse_last_block_in_chunks,
 )
+from cw.auto_dev_result.schema._vocab import PLAN_MISSING_CONTEXT_BLOCKER_REASON
 from cw.executor_diagnostics import (
     append_diagnostics_pointer,
     build_executor_failure,
@@ -461,7 +462,8 @@ def _plan_prompt(
         + "Produce the implementation plan for this ticket:\n"
         "1. Context: read .cw/context.json if present. Live-fetch the ticket "
         f"body and ALL comments. {tracker_ops} If the ticket cannot be "
-        'fetched, emit blocked with blocker.reason "plan_missing_context".\n'
+        f"fetched, emit blocked with blocker.reason "
+        f'"{PLAN_MISSING_CONTEXT_BLOCKER_REASON}".\n'
         "2. If the ticket already contains a sufficient plan (file paths plus "
         "a phased approach), extract it verbatim instead of regenerating "
         '(plan_source "github_issue_existing").\n'
