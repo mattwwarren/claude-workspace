@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import AbstractContextManager
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,9 @@ from click.testing import CliRunner, Result
 
 from cw.cli import main
 from cw.cli.dev_queue.fix_handoff import record_fix_handoff_command
+from cw.dev_queue.storage import _lock as _real_lock
 from cw.dev_queue.storage import load_dev_queue
+from cw.events import read_events
 from cw.models import QueueItemStatus
 from tests._cli_review_helpers import _write_session_context
 from tests._ticket_view_helpers import make_task, seed_queue
@@ -47,7 +50,9 @@ def ctx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return prompt
 
 
-def test_happy_path_records_handoff_on_running_row(ctx: Path) -> None:
+def test_happy_path_records_handoff_on_running_row(
+    ctx: Path, tmp_events_dir: Path
+) -> None:
     seed_queue([make_task(status=QueueItemStatus.RUNNING, session_id="sess-1")])
     result = _run(ctx.parent, ctx)
     assert result.exit_code == 0
@@ -62,6 +67,21 @@ def test_happy_path_records_handoff_on_running_row(ctx: Path) -> None:
     assert pending.label == "fix-ACM-1"
     assert pending.cycle == 2
     assert pending.prompt == "# fix\n"
+    assert pending.requested_at.tzinfo is not None
+    assert read_events() == []
+
+
+def test_subdirectory_cwd_finds_parent_context(
+    ctx: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_queue([make_task(status=QueueItemStatus.RUNNING, session_id="sess-1")])
+    nested = tmp_path / "a" / "b"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+    assert _run(nested, ctx).exit_code == 0
+    pending = load_dev_queue().tasks[0].pending_fix_dispatch
+    assert pending is not None
+    assert pending.requested_by_session_id == "sess-1"
 
 
 def test_stale_cw_session_env_is_ignored(
@@ -104,24 +124,41 @@ def test_pending_row_is_refused(ctx: Path) -> None:
 
 def test_no_matching_row_is_refused(ctx: Path) -> None:
     seed_queue([])
+    before = load_dev_queue().model_dump_json()
     assert _run(ctx.parent, ctx).exit_code == 1
+    assert load_dev_queue().model_dump_json() == before
 
 
-@pytest.mark.parametrize("missing", ["session_id", "ticket_id", "client"])
+@pytest.mark.parametrize(
+    ("key", "bad"),
+    [
+        ("session_id", ""),
+        ("ticket_id", ""),
+        ("client", ""),
+        ("session_id", 7),
+    ],
+)
 def test_context_missing_key_is_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, bad: object
 ) -> None:
-    values = {"session_id": "sess-1", "ticket_id": "ACM-1", "client": "acme"}
-    values[missing] = ""
+    values: dict[str, object] = {
+        "session_id": "sess-1",
+        "ticket_id": "ACM-1",
+        "client": "acme",
+    }
+    values[key] = bad
     ctx_path = tmp_path / ".claude" / "cw-context.json"
     ctx_path.parent.mkdir(parents=True)
     ctx_path.write_text(json.dumps({"headless": True, **values}), encoding="utf-8")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("x", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
+    seed_queue([make_task(status=QueueItemStatus.RUNNING, session_id="sess-1")])
+    before = load_dev_queue().model_dump_json()
     result = _run(tmp_path, prompt)
     assert result.exit_code == 1
-    assert f"has no non-empty '{missing}'" in result.output
+    assert f"has no non-empty '{key}'" in result.output
+    assert load_dev_queue().model_dump_json() == before
 
 
 def test_no_context_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -148,9 +185,11 @@ def test_bad_prompt_file_is_refused(ctx: Path, body: bytes) -> None:
 
 def test_missing_prompt_file_is_refused(ctx: Path) -> None:
     seed_queue([make_task(status=QueueItemStatus.RUNNING, session_id="sess-1")])
+    before = load_dev_queue().model_dump_json()
     result = _run(ctx.parent, ctx.parent / "absent.md")
     assert result.exit_code == 1
     assert "cannot read prompt file" in result.output
+    assert load_dev_queue().model_dump_json() == before
 
 
 @pytest.mark.parametrize("cycle", ["0", None])
@@ -172,6 +211,19 @@ def test_write_failure_is_reported(ctx: Path, monkeypatch: pytest.MonkeyPatch) -
     result = _run(ctx.parent, ctx)
     assert result.exit_code == 1
     assert "writing the dev-queue failed" in result.output
+
+
+def test_lock_is_bounded(ctx: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[bool] = []
+
+    def spy(*, bounded: bool = False) -> AbstractContextManager[None]:
+        seen.append(bounded)
+        return _real_lock(bounded=bounded)
+
+    monkeypatch.setattr("cw.dev_queue.fix_handoff._lock", spy)
+    seed_queue([make_task(status=QueueItemStatus.RUNNING, session_id="sess-1")])
+    assert _run(ctx.parent, ctx).exit_code == 0
+    assert seen == [True]
 
 
 def test_no_client_option() -> None:
