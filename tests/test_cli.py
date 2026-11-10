@@ -1736,13 +1736,8 @@ class TestSignalStop:
         worktree = _make_stale_base_repo(
             make_git_repo, "wt-hook-trunk", default_branch="trunk"
         )
-        config_dir = tmp_config_dir / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            "clients:\n"
-            "  test-client:\n"
-            "    workspace_path: /tmp/ws-test\n"
-            "    default_branch: trunk\n"
+        write_clients_yaml(
+            ClientSpec("test-client", "/tmp/ws-test", default_branch="trunk")
         )
 
         updated = self._run_scope_guard_signal_stop(
@@ -3863,10 +3858,7 @@ class TestSignalStop:
         )
         # The gate is fail-closed on an unknown client, so the row's client
         # must be registered even when the ticket-level map does the arming.
-        clients_file().parent.mkdir(parents=True, exist_ok=True)
-        clients_file().write_text(
-            "clients:\n  test-client:\n    workspace_path: /tmp/ws-2135\n"
-        )
+        write_clients_yaml(ClientSpec("test-client", "/tmp/ws-2135"))
         self._write_headless_context(
             worktree,
             session_id=session.id,
@@ -4767,7 +4759,7 @@ class TestSignalStop:
             _PARK_BENIGN_RECORDS,
             ticket_override=None,
         )
-        self._write_park_lane_yaml(tmp_config_dir, enabled=False)
+        self._write_park_lane_yaml(enabled=False)
 
         self._invoke_stop(worktree)
 
@@ -4790,7 +4782,7 @@ class TestSignalStop:
             _PARK_BENIGN_RECORDS,
             ticket_override=None,
         )
-        self._write_park_lane_yaml(tmp_config_dir, enabled=True)
+        self._write_park_lane_yaml(enabled=True)
 
         self._invoke_stop(worktree)
 
@@ -4818,14 +4810,17 @@ class TestSignalStop:
         _session, worktree, _daemon = self._seed_park_case(
             tmp_path, monkeypatch, "undeclared-lane", _PARK_BENIGN_RECORDS
         )
-        clients_file().write_text(
-            "clients:\n"
-            "  test-client:\n"
-            "    workspace_path: /tmp/ws-2135\n"
-            "    lanes:\n"
-            "      - name: fastlane\n"
-            "        park_on_abandoned_exit:\n"
-            f"          {PARK_ON_ABANDONED_EXIT_KEY}: true\n"
+        write_clients_yaml(
+            ClientSpec(
+                "test-client",
+                "/tmp/ws-2135",
+                lanes=[
+                    {
+                        "name": "fastlane",
+                        "park_on_abandoned_exit": {PARK_ON_ABANDONED_EXIT_KEY: True},
+                    }
+                ],
+            )
         )
 
         with caplog.at_level("WARNING", logger="cw.reconcile.abandoned_exit"):
@@ -5008,9 +5003,7 @@ class TestSignalStop:
             "unknown-client",
             _PARK_BENIGN_RECORDS,
         )
-        clients_file().write_text(
-            "clients:\n  someone-else:\n    workspace_path: /tmp/ws-2135\n"
-        )
+        write_clients_yaml(ClientSpec("someone-else", "/tmp/ws-2135"))
         lookups = self._count_transcript_lookups(monkeypatch)
 
         self._invoke_stop(worktree)
@@ -5020,18 +5013,19 @@ class TestSignalStop:
         assert lookups == []
 
     @staticmethod
-    def _write_park_lane_yaml(tmp_config_dir: Path, *, enabled: bool) -> None:
+    def _write_park_lane_yaml(*, enabled: bool) -> None:
         """clients.yaml giving test-client's default lane a park map."""
-        path = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            "clients:\n"
-            "  test-client:\n"
-            "    workspace_path: /tmp/ws-2135\n"
-            "    lanes:\n"
-            "      - name: default\n"
-            "        park_on_abandoned_exit:\n"
-            f"          {PARK_ON_ABANDONED_EXIT_KEY}: {str(enabled).lower()}\n"
+        write_clients_yaml(
+            ClientSpec(
+                "test-client",
+                "/tmp/ws-2135",
+                lanes=[
+                    {
+                        "name": "default",
+                        "park_on_abandoned_exit": {PARK_ON_ABANDONED_EXIT_KEY: enabled},
+                    }
+                ],
+            )
         )
 
     # ------------------------------------------------------------------
@@ -7360,15 +7354,10 @@ class TestCompleteCallbacks:
         self,
         tmp_config_dir: Path,
     ) -> None:
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            "clients:\n"
-            "  alpha:\n"
-            "    workspace_path: /tmp/a\n"
-            "  beta:\n"
-            "    workspace_path: /tmp/b\n"
-            "  apricot:\n"
-            "    workspace_path: /tmp/c\n"
+        write_clients_yaml(
+            ClientSpec("alpha", "/tmp/a"),
+            ClientSpec("beta", "/tmp/b"),
+            ClientSpec("apricot", "/tmp/c"),
         )
 
         # None ctx/param are fine - callbacks don't use them
@@ -7384,14 +7373,7 @@ class TestCompleteCallbacks:
         self,
         tmp_config_dir: Path,
     ) -> None:
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            "clients:\n"
-            "  alpha:\n"
-            "    workspace_path: /tmp/a\n"
-            "  beta:\n"
-            "    workspace_path: /tmp/b\n"
-        )
+        write_clients_yaml(ClientSpec("alpha", "/tmp/a"), ClientSpec("beta", "/tmp/b"))
 
         items = _complete_client(
             cast("click.Context", None), cast("click.Parameter", None), ""
@@ -7539,13 +7521,8 @@ class TestShowStatus:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
-            "clients:\n"
-            "  test-client:\n"
-            "    workspace_path: /tmp/ws\n"
-            "  other-client:\n"
-            "    workspace_path: /tmp/ws2\n"
+        write_clients_yaml(
+            ClientSpec("test-client", "/tmp/ws"), ClientSpec("other-client", "/tmp/ws2")
         )
 
         save_state(sample_state)
@@ -12388,12 +12365,7 @@ class TestDevQueueApproveCli:
         from cw.models import DevQueueStore, QueueItemStatus
 
         ws = tmp_path / "ws"
-        ws.mkdir(parents=True, exist_ok=True)
-        config_dir = tmp_config_dir / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            f"clients:\n  acme:\n    workspace_path: {ws}\n"
-        )
+        self._seed_client(tmp_config_dir, tmp_path)
 
         task = TicketTask(
             ticket_id="ACME-1",
@@ -12598,12 +12570,7 @@ class TestDevQueueApproveCli:
         from cw.models import DevQueueStore, QueueItemStatus
 
         ws = tmp_path / "ws"
-        ws.mkdir(parents=True, exist_ok=True)
-        config_dir = tmp_config_dir / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            f"clients:\n  acme:\n    workspace_path: {ws}\n"
-        )
+        self._seed_client(tmp_config_dir, tmp_path)
 
         task = TicketTask(
             ticket_id="ACME-1",
@@ -13272,13 +13239,7 @@ class TestDevQueueApproveCli:
         from cw.dev_queue import save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus
 
-        ws = tmp_path / "ws"
-        ws.mkdir(parents=True, exist_ok=True)
-        config_dir = tmp_config_dir / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            f"clients:\n  acme:\n    workspace_path: {ws}\n"
-        )
+        self._seed_client(tmp_config_dir, tmp_path)
         save_dev_queue(
             DevQueueStore(
                 tasks=[
@@ -13459,13 +13420,7 @@ class TestDevQueueApproveCli:
         from cw.models import DevQueueStore, QueueItemStatus
         from tests.conftest import _make_finding, write_review_verdict_envelope
 
-        ws = tmp_path / "ws"
-        ws.mkdir(parents=True, exist_ok=True)
-        config_dir = tmp_config_dir / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            f"clients:\n  acme:\n    workspace_path: {ws}\n"
-        )
+        self._seed_client(tmp_config_dir, tmp_path)
         worktree = tmp_path / "wt-acme-1"
         worktree.mkdir()
         write_review_verdict_envelope(
@@ -13691,13 +13646,7 @@ class TestDevQueueApproveCli:
         assert option.help == getattr(self, expected_attr)
 
     def _seed_client(self, tmp_config_dir: Path, tmp_path: Path) -> None:
-        ws = tmp_path / "ws"
-        ws.mkdir(parents=True, exist_ok=True)
-        config_dir = tmp_config_dir / ".config" / "cw"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "clients.yaml").write_text(
-            f"clients:\n  acme:\n    workspace_path: {ws}\n"
-        )
+        write_clients_yaml(ClientSpec("acme", tmp_path / "ws"), ensure_workspaces=True)
 
     def test_revoke_plan_approval_cli_clears_durable_approval(
         self, tmp_config_dir: Path, tmp_path: Path
