@@ -360,6 +360,7 @@ These are firm leans, decided to unblock the breakout. Each one can be reversed 
 - **Deferred:** the engine manifest's file name, format and version scheme → resolved at A4 hardening.
 - **Deferred:** whether a narrow daemon-side tracker client is needed → resolved by the A2 hardening and its probe, before C1 is dispatched.
 - **Deferred:** how Linear markdown treats hidden comment markers → resolved by A2's recorded probe.
+  - **Status (#3057):** A2 shipped the opt-in probe (`tests/test_tracker_io_live.py`); the result is UNVERIFIED until the operator runs it and commits `tests/fixtures/tracker_io/linear_marker_probe.json`. Until then verification is marker-insensitive and records `marker_survived`; the reversal conditions are in the dispatch runbook's "Tracker-IO turn" section.
 - **Exit choice:** Exit 1 because the change touches stage contracts, sentinel use and blocker reasons across several waves.
 
 ### Orchestrator brief

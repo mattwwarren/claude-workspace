@@ -2513,8 +2513,9 @@ companion "delivery succeeded" event to pair with (self-contained).
 ### `review.verdict_comment_skipped`
 
 **Emitter:** `emit_verdict_comment_skipped` in `cw.codex_review_signals`,
-called from `_post_review_comment`'s non-GitHub skip branch in
-`cw.codex_review_persist` (both Step 4b call sites in `cw.codex_background`)
+called from `_post_review_comment`'s non-GitHub branch in
+`cw.codex_review_persist` (both Step 4b call sites in `cw.codex_background`):
+its legacy skip, and (#3057) a tracker-IO turn whose outcome is `NONE`
 **Payload:**
 ```json
 {
@@ -2523,7 +2524,7 @@ called from `_post_review_comment`'s non-GitHub skip branch in
   "tracker": "<str>",
   "backend": "codex",
   "kind": "verdict | unparseable",
-  "reason": "non_github_tracker",
+  "reason": "non_github_tracker | tracker_mcp_not_enabled | mcp_server_unnamed | tracker_unsupported | plan_refused | scratch_unwritable | codex_unavailable | tool_unavailable | turn_reported_failure",
   "artifact_path": "<str | null>",
   "reviewed_sha": "<str | null>",
   "session_id": "<str>"
@@ -2542,8 +2543,109 @@ artifact; `null` when that capture failed. An unset tracker still posts
 (fail-open) and emits nothing. Emitted after Step 4 and best-effort: a failed
 event write logs one warning and never affects the review or the row.
 `correlation_id` is the `ticket_id`. In `_DEFAULT_OPERATOR_EVENT_TYPES`: the
-verdict otherwise exists only in the local artifact. A2 (#3057) replaces this
-skip with a real post.
+verdict otherwise exists only in the local artifact.
+
+Since #3057 (RFC 0018 A2) the non-GitHub branch posts through the tracker-IO
+agent turn (`cw.tracker_io.post_parts_via_turn`) whenever the caller passes
+its context, which both Step 4b call sites do. `reason` then says why nothing
+was posted:
+
+- `non_github_tracker`: the legacy skip, no tracker-IO context.
+- `tracker_mcp_not_enabled`: the codex user-layer config lacks the server
+  named by `tracker_mcp_gate.servers.codex`, or sets `enabled = false` on it.
+- `mcp_server_unnamed`: no `tracker_mcp_gate.servers.codex` entry, or a name
+  that is not `[A-Za-z0-9_-]+`.
+- `tracker_unsupported`: no comment-tool allowlist for this tracker (only
+  `linear` has one).
+- `plan_refused`: the ticket id is not `[A-Za-z0-9_-]+`, or the text is
+  blank or cannot be split into comment parts.
+- `scratch_unwritable`: the turn's scratch directory could not be created.
+- `codex_unavailable`: the `codex` binary could not be launched.
+- `tool_unavailable`, `turn_reported_failure`: the agent reported it could
+  not post (tools unavailable, or another failure) and returned no comment
+  ids.
+
+The first six are refusals before launch: nothing was posted. The last two
+are the agent's own word: also unconfirmed, not proof that nothing was posted,
+so check the ticket for a stray or duplicate comment before any re-run.
+
+### `review.verdict_comment_unverified`
+
+**Emitter:** `emit_verdict_comment_unverified` in `cw.codex_review_signals`,
+called from `_post_review_comment` in `cw.codex_review_persist` when the
+tracker-IO turn's outcome is `POSSIBLE` or `CONFIRMED` but not verified
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "tracker": "<str>",
+  "backend": "codex",
+  "kind": "verdict | unparseable",
+  "reason": "<TrackerIoReason>",
+  "artifact_path": "<str | null>",
+  "reviewed_sha": "<str | null>",
+  "session_id": "<str>",
+  "public_state": "possible | confirmed",
+  "posted": [{"index": 1, "comment_id": "<str>", "url": "<str>"}],
+  "marker_survived": "<bool | null>"
+}
+```
+**Semantics:** GitHub #3057 (RFC 0018 A2). The `review.verdict_comment_skipped`
+keys, plus what the tracker-IO turn may have made public. `public_state` is
+`possible` when the turn timed out (`turn_timeout`), exited nonzero
+(`turn_exit_nonzero`; a `-c mcp_servers.<name>` override naming a server no
+config layer defines makes codex abort at config load, which looks the same)
+or left an unparseable result (`result_unparseable`); `turn_exception` means
+the turn raised after launch; `posted` is then empty.
+It is `confirmed` when the agent returned comment ids but its report failed
+verification: `ticket_mismatch` (the echoed ticket id, or a returned URL, does
+not name the ticket), `ids_count_mismatch`, `ids_out_of_order`,
+`id_malformed`, `id_duplicate`, `url_mismatch` (a URL that does not contain
+its comment id), `readback_mismatch` or `readback_missing`; also
+`tool_unavailable` or `turn_reported_failure` when ids came back anyway.
+
+The verification is **self-attested**: the ids, URLs and read-back windows
+are model-echoed and are not proof of delivery; cw Python never reads the
+tracker (ADR-0013). The read-back covers only the first and last 200
+characters of each stored comment, so content appended or altered in the
+middle of a part cannot be detected, and a tracker-side markdown
+normalisation can produce `readback_mismatch` on a faithful post.
+`marker_survived` records whether every stored tail still ends with
+`<!-- cw-agent-authored -->` (`null` with no parts); it is never enforced.
+
+cw never retries a post. On this event the operator reads the ticket for a
+duplicate or stray comment before any re-run. Emitted after Step 4 and
+best-effort: it never holds the row or changes the persisted result (the
+durable worktree artifact is already written). A verified post emits nothing
+and logs its ids at info. `correlation_id` is the `ticket_id`. In
+`_DEFAULT_OPERATOR_EVENT_TYPES`.
+
+### `review.verdict_comment_posted`
+
+**Emitter:** `emit_verdict_comment_posted` in `cw.codex_review_signals`,
+called after a tracker-IO turn's self-attested verification succeeds
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "tracker": "<str>",
+  "backend": "codex",
+  "kind": "verdict | unparseable",
+  "posted": [{"index": 1, "comment_id": "<str>", "url": "<str>"}],
+  "reviewed_sha": "<str | null>",
+  "session_id": "<str>",
+  "posted_at": "<ISO-8601 str>",
+  "content_sha256": "<hex str>",
+  "artifact_path": "<str | null>"
+}
+```
+**Semantics:** GitHub #3057 (RFC 0018 A2). This append-only audit record
+contains the ticket, model-reported part/comment ids, client, session,
+reviewed SHA, posting timestamp and a hash of the rendered verdict text. The
+event records cw's verification result; it is not independent proof of
+delivery. It is not forwarded by default. `correlation_id` is the `ticket_id`.
 
 ### `review.operator_context_undelivered`
 

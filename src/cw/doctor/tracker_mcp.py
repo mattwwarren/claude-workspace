@@ -53,8 +53,10 @@ _CAVEAT = "declared in {path}; auth, env and headless load unverified"
 _LOST_CONTEXT = (
     "codex reviews on this tracker run without the operator's free-text ticket"
     " comments, the voided-findings block (#1814) and marker comments, because"
-    " the daemon cannot read this tracker; the verdict comment is not posted"
-    " either (review.verdict_comment_skipped). Row-carried constraints and"
+    " the daemon cannot read this tracker. The verdict comment posts through"
+    " the tracker-IO turn (#3057) only when tracker_mcp_gate.servers.codex"
+    " names the tracker's MCP server and it is enabled; otherwise it is"
+    " skipped (review.verdict_comment_skipped). Row-carried constraints and"
     " finding dispositions still reach the review."
 )
 _UNSET_PROMPT = (

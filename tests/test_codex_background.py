@@ -369,6 +369,13 @@ def _run(
     )
 
 
+def _assert_tracker_io_context(kwargs: dict[str, object], worktree: Path) -> None:
+    """#3057: both post sites pass the daemon helper runner, client and worktree."""
+    assert isinstance(kwargs["runner"], _UnusedRunner)
+    assert kwargs["client"] == _client(worktree)
+    assert kwargs["worktree"] == worktree
+
+
 def test_run_codex_review_and_complete_success_path(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
@@ -398,7 +405,7 @@ def test_run_codex_review_and_complete_success_path(
         # (see test_run_codex_review_and_complete_posts_one_line_comment_
         # when_verdict_is_none below) — patched here so this general
         # success-path test stays hermetic instead of shelling out to gh.
-        patch("cw.codex_background._post_review_comment") as post_mock,
+        patch("cw.codex_background._post_daemon_verdict_comment") as post_mock,
     ):
         _run(sid="bg-ok", task=task, worktree=worktree, client=_client(worktree))
 
@@ -443,7 +450,7 @@ def test_run_codex_review_and_complete_posts_verdict_comment(
             return_value=(result, verdict),
         ),
         patch("cw.codex_background.render_verdict_comment", return_value="rendered"),
-        patch("cw.codex_background._post_review_comment") as post_mock,
+        patch("cw.codex_background._post_daemon_verdict_comment") as post_mock,
     ):
         _run(sid="bg-verdict", task=task, worktree=worktree, client=_client(worktree))
 
@@ -453,7 +460,7 @@ def test_run_codex_review_and_complete_posts_verdict_comment(
     # #2095: the tracker is resolved from the client's workspace (None here --
     # no project-config.yaml -- so the GitHub post still fires, fail-open) and
     # the durable copy is written before the post is attempted.
-    assert post_mock.call_args.kwargs["tracker"] is None
+    _assert_tracker_io_context(post_mock.call_args.kwargs, worktree)
     artifact = post_mock.call_args.kwargs["artifact_path"]
     assert artifact == worktree / ".claude" / "review-verdict.md"
     written = artifact.read_text(encoding="utf-8")
@@ -507,7 +514,7 @@ def test_run_codex_review_and_complete_posts_one_line_comment_when_verdict_is_no
             "cw.codex_background.run_review_with_fix_loop",
             return_value=(result, None),
         ),
-        patch("cw.codex_background._post_review_comment") as post_mock,
+        patch("cw.codex_background._post_daemon_verdict_comment") as post_mock,
     ):
         _run(
             sid="bg-unparseable", task=task, worktree=worktree, client=_client(worktree)
@@ -519,7 +526,7 @@ def test_run_codex_review_and_complete_posts_one_line_comment_when_verdict_is_no
         post_mock.call_args.args[1]
         == "editor (codex_timeout); reviewer (codex_timeout)"
     )
-    assert post_mock.call_args.kwargs["tracker"] is None
+    _assert_tracker_io_context(post_mock.call_args.kwargs, worktree)
     artifact = post_mock.call_args.kwargs["artifact_path"]
     assert artifact == worktree / ".claude" / "review-verdict-unparseable.md"
     written = artifact.read_text(encoding="utf-8")
@@ -562,7 +569,7 @@ def test_run_codex_review_and_complete_skips_render_when_verdict_is_none(
             "cw.codex_review_persist._persist_review_verdict",
             wraps=_persist_review_verdict,
         ) as persist_mock,
-        patch("cw.codex_background._post_review_comment"),
+        patch("cw.codex_background._post_daemon_verdict_comment"),
     ):
         _run(
             sid="bg-unparseable-skip",
@@ -603,7 +610,7 @@ def test_run_codex_review_and_complete_skips_structured_verdict_when_verdict_is_
             "cw.codex_background.run_review_with_fix_loop",
             return_value=(result, None),
         ),
-        patch("cw.codex_background._post_review_comment"),
+        patch("cw.codex_background._post_daemon_verdict_comment"),
     ):
         _run(
             sid="bg-no-json",
@@ -644,7 +651,7 @@ def test_run_codex_review_and_complete_writes_structured_verdict_json_on_must_fi
             "cw.codex_background.run_review_with_fix_loop",
             return_value=(result, verdict),
         ),
-        patch("cw.codex_background._post_review_comment"),
+        patch("cw.codex_background._post_daemon_verdict_comment"),
     ):
         _run(
             sid="bg-must-fix-json",
@@ -887,7 +894,7 @@ def test_run_codex_review_and_complete_marker_cleared_after_verdict_posting(
             side_effect=_capture_marker,
         ),
         patch("cw.codex_background.render_verdict_comment", return_value="rendered"),
-        patch("cw.codex_background._post_review_comment") as post_mock,
+        patch("cw.codex_background._post_daemon_verdict_comment") as post_mock,
     ):
         _run(
             sid="bg-marker-verdict",
@@ -1651,7 +1658,7 @@ def _run_guarded(
             ),
         ),
         patch("cw.codex_background.run_review_with_fix_loop", return_value=returned),
-        patch("cw.codex_background._post_review_comment") as post_mock,
+        patch("cw.codex_background._post_daemon_verdict_comment") as post_mock,
     ):
         _run(
             sid=sid,
@@ -2125,7 +2132,7 @@ def test_pre_loop_resume_runs_only_the_confirm(
             "cw.codex_background.run_review_with_fix_loop",
             side_effect=AssertionError("the codex loop must not run"),
         ),
-        patch("cw.codex_background._post_review_comment") as post_mock,
+        patch("cw.codex_background._post_daemon_verdict_comment") as post_mock,
     ):
         _run(
             sid="bg-resume",
@@ -2214,7 +2221,7 @@ def test_resumed_confirm_on_an_unpushed_head_parks_and_stays_converged(
             "cw.codex_background.run_review_with_fix_loop",
             side_effect=AssertionError("the codex loop must not run"),
         ),
-        patch("cw.codex_background._post_review_comment"),
+        patch("cw.codex_background._post_daemon_verdict_comment"),
     ):
         _run(sid="bg-rpark-1", task=task, worktree=worktree, client=client)
     first = AutoDevResult.model_validate(load_state().sessions[0].last_result)
@@ -2369,7 +2376,7 @@ def test_an_outage_blocks_then_the_requeue_converges_without_the_codex_loop(
             "cw.codex_background.run_review_with_fix_loop",
             side_effect=AssertionError("the codex loop must not run again"),
         ),
-        patch("cw.codex_background._post_review_comment"),
+        patch("cw.codex_background._post_daemon_verdict_comment"),
     ):
         _run(sid="bg-seq-2", task=task, worktree=worktree, client=client)
     second = AutoDevResult.model_validate(load_state().sessions[0].last_result)
@@ -2471,7 +2478,7 @@ def _run_reentry(
         patch(
             "cw.codex_background.run_review_with_fix_loop", side_effect=loop
         ) as loop_mock,
-        patch("cw.codex_background._post_review_comment"),
+        patch("cw.codex_background._post_daemon_verdict_comment"),
     ):
         _run(
             sid=sid,
@@ -2672,7 +2679,7 @@ def test_the_iteration_backstop_bounds_the_loop_calls(
         patch(
             "cw.codex_background.run_review_with_fix_loop", return_value=returned
         ) as loop_mock,
-        patch("cw.codex_background._post_review_comment"),
+        patch("cw.codex_background._post_daemon_verdict_comment"),
     ):
         _seed_session("bg-bs")
         _run(
@@ -2909,7 +2916,7 @@ def test_a_seeded_loop_that_parks_does_not_reenter(
         patch(
             "cw.codex_background.run_review_with_fix_loop", return_value=returned
         ) as loop_mock,
-        patch("cw.codex_background._post_review_comment"),
+        patch("cw.codex_background._post_daemon_verdict_comment"),
     ):
         _seed_session("bg-rqp")
         _run(
@@ -3128,7 +3135,9 @@ def _verdict_run(
             patch("cw.codex_background.render_verdict_comment", return_value="r")
         )
         post_mock = (
-            stack.enter_context(patch("cw.codex_background._post_review_comment"))
+            stack.enter_context(
+                patch("cw.codex_background._post_daemon_verdict_comment")
+            )
             if patch_post
             else None
         )
@@ -3145,7 +3154,7 @@ def test_verdict_post_passes_the_signal_identity(
 
     assert post_mock is not None
     kwargs = post_mock.call_args.kwargs
-    assert kwargs["client"] == "test"
+    assert kwargs["client"].name == "test"
     assert kwargs["session_id"] == "bg-3055-v"
     assert kwargs["kind"] == "verdict"
     assert kwargs["reviewed_sha"] == "deadbeef"
@@ -3170,7 +3179,7 @@ def test_unparseable_post_passes_the_hoisted_head_sha(
             "cw.codex_background.run_review_with_fix_loop",
             return_value=(result, None),
         ),
-        patch("cw.codex_background._post_review_comment") as post_mock,
+        patch("cw.codex_background._post_daemon_verdict_comment") as post_mock,
     ):
         _run(sid="bg-3055-u", task=task, worktree=worktree, client=_client(worktree))
 
@@ -3178,7 +3187,7 @@ def test_unparseable_post_passes_the_hoisted_head_sha(
     assert kwargs["kind"] == "unparseable"
     assert kwargs["reviewed_sha"] == head
     assert kwargs["session_id"] == "bg-3055-u"
-    assert kwargs["client"] == "test"
+    assert kwargs["client"].name == "test"
     stamp = (worktree / REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH).read_text(
         encoding="utf-8"
     )
@@ -3270,6 +3279,75 @@ def test_signal_write_failure_never_changes_the_review(
     assert len(_completed_events()) == 2
 
 
+def test_tracker_io_turn_fault_never_reverts_a_persisted_review(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#3057 R2: a raising tracker-IO turn on a non-GitHub tracker is swallowed
+    inside the real _post_review_comment, so it never reaches the run's broad
+    ``except`` (which would revert the claimed row and overwrite the result)."""
+    worktree = make_git_repo("wt-bg-turn-fault")
+    _write_tracker_config(worktree, "linear")
+    _seed_session("bg-turn-fault")
+    add_ticket(
+        TicketTask(
+            ticket_id="GEN-5",
+            client="test",
+            stage=Stage.REVIEW,
+            status=QueueItemStatus.RUNNING,
+            session_id="bg-turn-fault",
+        )
+    )
+    task = TicketTask(ticket_id="GEN-5", client="test", stage=Stage.REVIEW)
+    result = make_blocked(
+        ticket_id="GEN-5",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+    verdict = consolidate_verdict(
+        [_make_reviewer_doc(_make_finding(severity="MUST_FIX"))],
+        _make_diff(),
+        reviewed_sha="deadbeef",
+    )
+    events: list[object] = []
+    with (
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            return_value=(result, verdict),
+        ),
+        patch("cw.codex_background.render_verdict_comment", return_value="rendered"),
+        patch(
+            "cw.codex_review_persist.post_parts_via_turn",
+            side_effect=RuntimeError("turn boom"),
+        ) as turn_mock,
+        patch(
+            "cw.codex_background._record_orchestrator_event",
+            side_effect=lambda *args, **_kw: events.append(args[0]),
+        ),
+        patch("cw.codex_background._complete_session_as_unexpected_error") as err_mock,
+        patch(
+            "cw.codex_background.revert_claimed_row_after_unexpected_error"
+        ) as revert_mock,
+    ):
+        _run(
+            sid="bg-turn-fault", task=task, worktree=worktree, client=_client(worktree)
+        )
+
+    turn_mock.assert_called_once()
+    err_mock.assert_not_called()
+    revert_mock.assert_not_called()
+    assert events == [OrchestratorEventType.SESSION_COMPLETED]
+    session = load_state().sessions[0]
+    assert session.status is SessionStatus.COMPLETED
+    persisted = AutoDevResult.model_validate(session.last_result)
+    assert persisted.blocker is not None
+    assert persisted.blocker.reason == CODEX_REVIEW_UNPARSEABLE
+    stored = load_dev_queue().tasks[0]
+    assert stored.status is QueueItemStatus.RUNNING
+    assert stored.spawn_error_count == 0
+
+
 # ---------------------------------------------------------------------------
 # #3056: stage facts are stamped once, between the review and the door
 # ---------------------------------------------------------------------------
@@ -3299,7 +3377,7 @@ def _persisted_after_run(
     with (
         patch("cw.codex_background.run_review_with_fix_loop", side_effect=loop),
         patch("cw.codex_background._record_orchestrator_event"),
-        patch("cw.codex_background._post_review_comment"),
+        patch("cw.codex_background._post_daemon_verdict_comment"),
         patch(
             "cw.codex_background.resume_pending_confirm",
             return_value=patches.get("resumed"),

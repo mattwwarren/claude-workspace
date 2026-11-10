@@ -21,7 +21,9 @@ not one class:
 ``codex``
     ``FakeFireAndForgetRunner`` (re-exported from ``cw.executor.core``), the
     :func:`fake_codex_job_runner` fixture and the autouse
-    :func:`_mock_codex_capability_probe`.
+    :func:`_mock_codex_capability_probe`. The tracker-IO turn (#3057) runs
+    through ``cw.codex_runner.FakeCodexRunner``; :func:`marked_parts` and
+    :func:`tracker_io_turn_result` build its emitted parts and result JSON.
 ``opencode``, ``uv``, ``pre-commit``
     :func:`fake_opencode_cli`, :func:`fake_uv_cli` and
     :func:`fake_pre_commit_cli`, recording shims built on
@@ -52,7 +54,7 @@ import sys
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -66,6 +68,7 @@ from cw.gh import (
     agent_marked_body,
 )
 from cw.native_daemon import FakeNativeDaemonClient
+from cw.tracker_io import READBACK_WINDOW
 from tests._host_probe_guard import blocked_binary
 
 if TYPE_CHECKING:
@@ -98,6 +101,7 @@ __all__ = [
     "fake_pre_commit_cli",
     "fake_uv_cli",
     "gh_calls",
+    "marked_parts",
     "path_with_stub",
     "prepend_to_path",
     "read_calls",
@@ -108,6 +112,7 @@ __all__ = [
     "stub_gh_issue_create",
     "stub_gh_issue_list",
     "stub_gh_recording",
+    "tracker_io_turn_result",
     "write_bin_stub",
 ]
 
@@ -1167,3 +1172,46 @@ def _mock_codex_capability_probe(monkeypatch: pytest.MonkeyPatch) -> None:
             args=[], returncode=0, stdout="codex-cli 0.144.5\n", stderr=""
         ),
     )
+
+
+def marked_parts(*bodies: str) -> tuple[str, ...]:
+    """The tracker-IO turn's emitted parts: each body plus the agent marker."""
+    return tuple(agent_marked_body(body) for body in bodies)
+
+
+def tracker_io_turn_result(
+    ticket_id: str,
+    parts: Sequence[str],
+    *,
+    status: str = "ok",
+    detail: str = "",
+    mutate: Callable[[dict[str, Any]], None] | None = None,
+) -> str:
+    """A strict-schema tracker-IO turn result that verifies against *parts*.
+
+    Part ``i`` gets comment id ``cmt-<i>``, a Linear-shaped URL naming
+    *ticket_id* and that id, and read-back windows taken verbatim from the
+    marked part (the first and last ``READBACK_WINDOW`` characters). *mutate*
+    edits the document before it is serialised, to build a failing case.
+    """
+    window = READBACK_WINDOW
+    doc: dict[str, Any] = {
+        "status": status,
+        "detail": detail,
+        "ticket_id": ticket_id,
+        "parts": [
+            {
+                "index": index,
+                "comment_id": f"cmt-{index}",
+                "url": (
+                    f"https://linear.app/acme/issue/{ticket_id}/x#comment-cmt-{index}"
+                ),
+                "readback_head": part[:window],
+                "readback_tail": part[-window:],
+            }
+            for index, part in enumerate(parts, start=1)
+        ],
+    }
+    if mutate is not None:
+        mutate(doc)
+    return json.dumps(doc)
