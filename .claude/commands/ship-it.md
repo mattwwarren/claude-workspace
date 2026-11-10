@@ -14,6 +14,7 @@ Quality gates (ruff/mypy/pytest) are handled by `/prep-pr` Step 7 — do not re-
 
 ---
 
+<!-- el-begin: ship-it.parse-arguments -->
 <!-- el: ship-it.parse-arguments -->
 ## Step 1: Parse arguments
 
@@ -26,6 +27,8 @@ if printf '%s' "$ARGUMENTS" | grep -qE '(^| )--title '; then
 fi
 ```
 
+<!-- el-end: ship-it.parse-arguments -->
+<!-- el-begin: ship-it.confirm-branch-is-pushed -->
 <!-- el: ship-it.confirm-branch-is-pushed -->
 ## Step 2: Confirm branch is pushed
 
@@ -36,6 +39,8 @@ git push -u origin "$BRANCH" 2>&1
 
 If push fails (e.g., diverged), BLOCK and park for the orchestrator — never force-push from here. A force-push of a cw-owned branch is the orchestrator's, after its evidence checks (ADR-0020).
 
+<!-- el-end: ship-it.confirm-branch-is-pushed -->
+<!-- el-begin: ship-it.create-pr -->
 <!-- el: ship-it.create-pr -->
 ## Step 3: Create the PR
 
@@ -114,6 +119,8 @@ echo "CLOSES_TRAILER: $CLOSES_TRAILER"
 echo "LAST_RESORT_TITLE: $LAST_RESORT_TITLE"
 ```
 
+<!-- el-end: ship-it.create-pr -->
+<!-- el-begin: ship-it.changelog-gate-compliance -->
 <!-- el: ship-it.changelog-gate-compliance -->
 ## Step 3a: Changelog Gate Compliance
 
@@ -207,6 +214,8 @@ gh pr create \
 
 If PR creation fails, BLOCK with the `gh` error verbatim.
 
+<!-- el-end: ship-it.changelog-gate-compliance -->
+<!-- el-begin: ship-it.enable-auto-merge -->
 <!-- el: ship-it.enable-auto-merge -->
 ## Step 4: Enable auto-merge
 
@@ -255,6 +264,8 @@ If `check-automerge-allowed` permits arming and `arm-automerge` exits 1 after it
 
 A refusal is not a gh failure: when the exit-1 JSON's `gh_stderr` begins with `changelog_merge_freeze:`, `attempts` is `0` and no `gh pr merge` call was made, because merging this PR into the latest `origin/<base>` would put its CHANGELOG entry inside a released `## [X.Y.Z]` section (a release was cut after the PR last went green). BLOCK with that `gh_stderr` verbatim; it names the repair, `cw worktree changelog-sync --base <base>`, which the caller runs once before pushing plainly and re-running this step. Never edit the released section by hand and never force-push.
 
+<!-- el-end: ship-it.enable-auto-merge -->
+<!-- el-begin: ship-it.register-pr-monitor -->
 <!-- el: ship-it.register-pr-monitor -->
 ## Step 5: Register PR monitor
 
@@ -275,6 +286,8 @@ On success `register` prints one JSON line (`{"registered": true, "key": "<owner
 
 If registration fails, report the error but do not block — monitor is advisory. If `/prep-pr` Step 9 requires it via `--require-monitor`, it will catch the gap and retry.
 
+<!-- el-end: ship-it.register-pr-monitor -->
+<!-- el-begin: ship-it.run-finalize-verification -->
 <!-- el: ship-it.run-finalize-verification -->
 ## Step 6: Run finalize verification
 
@@ -290,6 +303,7 @@ If the script exits non-zero, BLOCK with the JSON. Do not paper over failures.
 
 ---
 
+<!-- el-end: ship-it.run-finalize-verification -->
 <!-- el: ship-it.failure-modes -->
 ## Failure modes
 
