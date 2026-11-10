@@ -949,10 +949,12 @@ The skill emits stage transitions via `cw event record` from inside the headless
 
 ```bash
 cw event record stage.entered \
-  --payload '{"session_id":"$CW_SESSION_ID","ticket_id":"173","stage":"s2_impl_started","prev_stage":"s1_plan_reviewed","started_at":"2026-05-23T13:01:42Z"}'
+  --payload '{"ticket_id":"173","stage":"s2_impl_started","prev_stage":"s1_plan_reviewed","started_at":"2026-05-23T13:01:42Z"}'
 ```
 
 The §10.2 enum is enforced, not just documented (#2429): `cw event record` rejects a `stage.entered` / `stage.errored` payload whose `stage` is missing or outside §10.2, or whose `prev_stage` is present and outside §10.2, exiting non-zero with `Unknown stage '<value>'. Valid stages: …` (or `Unknown prev_stage '<value>'. …`) and recording nothing. `error_kind` stays open (§10.3) and is not checked.
+
+`cw event record` fills `session_id` on `stage.entered` and `stage.errored` from the nearest `.claude/cw-context.json`; a conflicting value in the payload is replaced and a warning goes to stderr. The producer omits `session_id` (#2651).
 
 Since #2443, this check runs inside `record_event` itself (`cw.events`), not only in the `cw event record` CLI command — every internal producer that calls `record_event` directly is validated at the same chokepoint and raises the same rejection, closing the bypass an in-process caller previously had.
 

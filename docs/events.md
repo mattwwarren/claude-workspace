@@ -298,7 +298,9 @@ captured in [ADR-0004](adr/0004-stage-events-on-orchestrator-bus.md).
 ```
 
 `stage` and `prev_stage` MUST match the closed enum in headless-contract
-§10.2 (`s0_intake` … `done`).
+§10.2 (`s0_intake` … `done`). `session_id` is derived from the nearest
+`.claude/cw-context.json` by `cw event record` (#2651); a producer's own value
+is replaced on disagreement.
 
 ### `stage.errored`
 
