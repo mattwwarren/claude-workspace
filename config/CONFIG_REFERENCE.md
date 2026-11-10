@@ -888,6 +888,28 @@ lanes:
   for secret scanners (gitleaks, detect-secrets, trufflehog and similar) only the
   name and exit code. The full output is in `.cw/codex_driver.log` in the cycle
   worktree, and the park text says so.
+- **Post-fix quality gates** (`codex_fix_gate_failed`, always on, #3056). Before a
+  fix cycle that changed files is committed, the repo's quality gates run on its
+  changes. The gate list comes from `prep_pr_state.py detect-gates`, resolved the
+  way `/prep-pr` Step 2 does (`.claude/scripts/`, then `scripts/` in the
+  worktree, then `~/.claude/scripts/`; the first file found wins and one without
+  the `gate-timeout` subcommand is STALE). `detect-gates` and each gate's
+  `gate-timeout` are read once per cycle, from the clean cycle-start worktree and
+  before the fix turn, so the fix cannot change which gates run (it can still
+  change what a gate command executes, such as the code under test). The gates
+  run in order and fail fast, before the commit. A gate that exits non-zero,
+  a gate that leaves the worktree changed, or a script that is missing, stale or
+  failing parks `codex_fix_gate_failed` with the gate name, exit code and a
+  redacted tail of its output; the edits are pinned under
+  `refs/cw/refused-cycles/` as for the other guards. When no gates are detected
+  the cycle proceeds, and the review result's `friction_highlights` carries
+  `codex_fix_gates_none_detected` (with a WARNING naming the ticket, session and
+  cycle). Gate output and per-gate summaries are logged at WARNING to
+  `.cw/codex_driver.log` while the gate runs, because the detached job's root
+  logger is WARNING. A gate (or detector) running past its ceiling only emits the
+  `codex_fix.gate_slow` event; it is never killed. There is no config switch: a
+  client whose resolver chain misses parks every committing cycle until
+  `prep_pr_state.py` is installed.
 - **Divergence report.** `fix_loop_diverging` now also lists findings the loop
   itself generated (a finding on lines added since the loop began, or a
   file-level finding on a file the loop created) so the operator can tell new
@@ -2213,6 +2235,12 @@ tracking:
   through MCP (`cw review debt emit`, then `cw review debt record --ids <file>`).
   Any other or unset `system` skips filing with friction
   `debt_filing: skipped_no_tracker`.
+- **When it files:** at deferral time for `cw review adjudicate`, and once at
+  finalize Step 4d (`cw review debt file`) for the codex and opencode lanes. The
+  codex loop and `record-round` only write defers to `.cw/deferred-findings.md`;
+  `cw review debt file` skips an unticketed defer that none of the last two
+  recorded review rounds raised (`last_seen_round` in the convergence ledger),
+  and files everything when the ledger is absent or unreadable.
 - **Where it is read:** from the client's `workspace_path`
   (`.claude/project-config.yaml` at its root), through
   `cw.project_config.load_project_config_dict`. A missing file or malformed YAML

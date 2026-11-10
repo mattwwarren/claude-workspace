@@ -22,6 +22,7 @@ the human lines and the ``friction:`` lines.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -42,7 +43,6 @@ from cw.cli.review._debt_session import (
 )
 from cw.cli.review._group import review
 from cw.cli.review._settle_store import client_tracker
-from cw.codex_review_debt import register_debt_filer
 from cw.config import get_client, load_effective_config
 from cw.dev_queue.review_debt_records import read_review_debt, record_review_debt
 from cw.exceptions import CwError
@@ -56,6 +56,12 @@ from cw.redact_post_text import (
     resolve_home,
 )
 from cw.review_adjudication._models import DEFERRED_OUTCOME
+from cw.review_convergence import (
+    DEBT_CURRENT_ROUND_WINDOW,
+    LEDGER_RELATIVE_PATH,
+    load_ledger,
+    stale_defer_keys,
+)
 from cw.review_debt_filing import (
     CAUSE_AUTO_CREATE_OFF,
     CAUSE_MCP,
@@ -96,6 +102,8 @@ if TYPE_CHECKING:
     from cw.models import ClientConfig
     from cw.models.review_debt_record import ReviewDebtRecord
     from cw.review_adjudication import Adjudication
+
+_log = logging.getLogger(__name__)
 
 _DEFAULT_OUT_DIR = Path(".cw/review-debt")
 _GIT_TIMEOUT_S = 10
@@ -551,9 +559,54 @@ _artifact_option = click.option(
 )
 
 
+def _stale_keys(ledger_path: Path) -> frozenset[str]:
+    """Debt keys of settled defers the final review rounds no longer raise.
+
+    Empty when the ledger is absent or unreadable: a read failure must never
+    drop debt, so it is reported and every entry stays fileable.
+    """
+    try:
+        ledger = load_ledger(ledger_path)
+    except (OSError, ValueError) as exc:
+        _log.warning(
+            "review-debt stale filter skipped: ledger unreadable path=%s",
+            ledger_path,
+            exc_info=True,
+        )
+        click.echo(
+            f"debt filing: convergence ledger unreadable ({exc.__class__.__name__}); "
+            "filing every unticketed deferral",
+            err=True,
+        )
+        return frozenset()
+    return stale_defer_keys(ledger) if ledger is not None else frozenset()
+
+
+def _current(entries: Sequence[DebtEntry], artifact: Path) -> list[DebtEntry]:
+    """*entries* minus unticketed defers the final review rounds no longer raise.
+
+    Review rounds record every SHOULD_FIX defer in the artifact, and a reviewer
+    rewords or a fix removes a finding from round to round, so filing the whole
+    artifact files findings that no longer apply. The ledger beside *artifact*
+    says which defers one of the last ``DEBT_CURRENT_ROUND_WINDOW`` recorded
+    rounds raised. A ticketed entry is never touched, and the artifact keeps
+    every entry.
+    """
+    stale = _stale_keys(artifact.parent / LEDGER_RELATIVE_PATH.name)
+    kept = [entry for entry in entries if entry.ticket or entry.key not in stale]
+    skipped = len(entries) - len(kept)
+    if skipped:
+        click.echo(
+            f"debt filing skipped {skipped} deferral(s) not raised in the last "
+            f"{DEBT_CURRENT_ROUND_WINDOW} review rounds",
+            err=True,
+        )
+    return kept
+
+
 def _file_artifact(identity: Identity, artifact: Path) -> _Outcome:
     plan = _plan(identity)
-    entries = _screened(artifact_debt_entries(artifact))
+    entries = _current(_screened(artifact_debt_entries(artifact)), artifact)
     existing = (
         tuple(_require_row(identity))
         if plan.mode is not TrackerMode.SKIP_NO_TRACKER and unticketed(entries)
@@ -829,8 +882,3 @@ def debt_link_pr(pr: int | None, client: str | None, ticket: str | None) -> None
             skipped=result.skipped,
         )
     )
-
-
-# The codex lane (#3137) files its defers through this filer; registering it here
-# keeps cw.codex_review_debt free of a module-level import back into cw.cli.
-register_debt_filer(run_debt_filing)

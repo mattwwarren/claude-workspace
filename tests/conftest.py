@@ -2514,6 +2514,27 @@ def _isolate_process_table(
 
 
 @pytest.fixture(autouse=True)
+def _codex_fix_gates_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default the codex fix loop's post-fix quality gates to an empty plan (#3056).
+
+    Without it every committing fix cycle in the existing suite would park
+    ``codex_fix_gate_failed``: the test HOME carries no ``prep_pr_state.py``,
+    and no unrelated test should spawn the detector. The plan is the zero-gate
+    one with no script, which runs nothing and surfaces no friction token.
+    ``tests/test_codex_fix_loop_gates.py`` restores the real functions.
+    """
+    from cw.codex_fix_loop.gates import GatePlan
+
+    monkeypatch.setattr(
+        "cw.codex_fix_loop.commit.plan_cycle_gates",
+        lambda *_, **__: GatePlan(script=None, gates=(), why_unavailable=None),
+    )
+    monkeypatch.setattr(
+        "cw.codex_fix_loop.commit.run_cycle_gates", lambda *_, **__: None
+    )
+
+
+@pytest.fixture(autouse=True)
 def _reset_opencode_flag_probe() -> Iterator[None]:
     """Clear the process-sticky ``opencode run --help`` probe cache (#2664).
 

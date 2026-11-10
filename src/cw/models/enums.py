@@ -299,6 +299,12 @@ class OrchestratorEventType(StrEnum):
     # cycle, reason, ref, paths, reset_requested, head. Audit record for the
     # destructive reset; fleet-level, not a page.
     CODEX_FIX_CYCLE_PRESERVED = "codex_fix.cycle_preserved"
+    # #3056 -- a codex fix-cycle gate subprocess (or the detect-gates /
+    # gate-timeout helper that plans it) ran past its ceiling. Signal only:
+    # nothing is killed, parked or reset, and the runner keeps waiting for the
+    # real exit code. Emitted once per subprocess. Payload: ticket_id, client,
+    # session_id, cycle, gate, elapsed_s, ceiling_s. Fleet-level, not a page.
+    CODEX_FIX_GATE_SLOW = "codex_fix.gate_slow"
     # #1343 -- fires when the dispatch loop's usage-limit back-off window
     # (usage_limited_until) transitions from armed to lapsed. See
     # docs/events.md for the payload shape and the --once / single-loop-

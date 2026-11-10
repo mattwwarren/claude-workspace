@@ -149,6 +149,7 @@ def route_engine_confirm(
     settled = settled_index(ledger)
     park: dict[FindingIdentity, RoundFinding] = {}
     defer: dict[FindingIdentity, RoundFinding] = {}
+    reseen: dict[FindingIdentity, None] = {}
     resurfaced = 0
     for finding in findings:
         identity = _identity_of(finding)
@@ -157,6 +158,7 @@ def route_engine_confirm(
             entry, finding.severity, finding.fingerprint, finding.rule_id
         ):
             resurfaced += 1
+            reseen[identity] = None
         elif _is_park_class(finding):
             park.setdefault(identity, finding)
         else:
@@ -171,6 +173,7 @@ def route_engine_confirm(
             rationale=CONFIRM_ENGINE_DEFER_RATIONALE,
             round=round_number,
             debt_key=settled_debt_key("defer", finding.file, finding.summary),
+            last_seen_round=round_number,
         )
         for identity, finding in deferred.items()
     ]
@@ -179,6 +182,7 @@ def route_engine_confirm(
         new_operator=list(park.values()),
         newly_settled=newly_settled,
         resurfaced=resurfaced,
+        reseen=list(reseen),
     )
     return ConfirmRoute(
         action=_action(bool(park), bool(deferred)),

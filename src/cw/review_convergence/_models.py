@@ -186,6 +186,12 @@ class SettledEntry(BaseModel):
     # from the verbatim summary (the ledger keeps no summary). Dropped when None,
     # so a pre-#3094 ledger dumps byte-identically.
     debt_key: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    # The latest recorded round that raised this identity: the settling round,
+    # moved forward each time a later round re-raises it. ``None`` is "unknown"
+    # (an entry written before this field existed, or settled by an operator)
+    # and counts as current, so a legacy defer is still filed. Dropped when None,
+    # so a legacy ledger dumps byte-identically.
+    last_seen_round: int | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class FixedEntry(BaseModel):

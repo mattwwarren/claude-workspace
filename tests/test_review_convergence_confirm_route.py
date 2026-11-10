@@ -412,6 +412,7 @@ class TestConfirmDeferDebtKey:
         (entry,) = route.classified.newly_settled
         assert entry.outcome == "defer"
         assert entry.debt_key == debt_key("src/a.py", "Trailing  ")
+        assert entry.last_seen_round == len(fresh_ledger().rounds) + 1
 
     def test_park_class_findings_settle_nothing(self) -> None:
         park = round_finding("MUST_FIX", "Blocker", file="src/a.py")

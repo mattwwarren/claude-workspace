@@ -209,6 +209,12 @@ CODEX_FIX_DIRTY_START = "codex_fix_dirty_start"
 # commit-msg) after the one re-stage retry. Before #2633 this read as a bare
 # ``codex_error`` with the hook output lost to the driver log.
 CODEX_FIX_HOOK_FAILED = "codex_fix_hook_failed"
+# A fix cycle's changes failed one of the repo's quality gates (#3056, the
+# gates ``prep_pr_state.py detect-gates`` reports, pinned at cycle start) before
+# the cycle was committed: a gate exited non-zero, dirtied the worktree, or the
+# detector could not be run (missing or stale script). An operator park, not
+# transient: a blind retry meets the same refusal. Not in _CATEGORY_TO_REASON.
+CODEX_FIX_GATE_FAILED = "codex_fix_gate_failed"
 # A fix cycle added code inside an allowed file beyond what the open findings
 # justify: a new lock, on-disk state file or path constant, too many new
 # top-level definitions, or more net source lines than the per-cycle or the
@@ -226,6 +232,12 @@ CODEX_FIX_LOOP_CUMULATIVE_GROWTH_BUDGET_KEY = (
 # Shared so the empty-diff recovery hint (#2492) can pick fix-cycle commits out
 # of a branch's log by the same literal the commit step writes.
 FIX_CYCLE_COMMIT_PREFIX = "fix(review): codex fix cycle"
+
+
+def is_fix_cycle_commit_subject(subject: str) -> bool:
+    """Whether *subject* is the subject of a codex fix-cycle commit."""
+    return subject.startswith(FIX_CYCLE_COMMIT_PREFIX)
+
 
 # Review-exit guard park (#2354): the fix loop converged clean, but local HEAD
 # is not on origin/<branch> and a self-heal push also failed. Reporting the
@@ -315,6 +327,11 @@ _TRANSIENT_FAILURE_REASONS = frozenset(
 # below this; a role that cannot get at least this much budget is skipped as
 # budget-exhausted instead.
 _MIN_ROLE_TIMEOUT_SECONDS = 30
+
+# Coarse per-fix-cycle wall-clock floor: a cycle needs at least one fix
+# invocation plus one re-review role turn, so it must be able to afford two
+# per-role floors. Shared by the fix-loop driver and confirm-feedback re-entry.
+FIX_CYCLE_FLOOR_SECONDS = 2 * _MIN_ROLE_TIMEOUT_SECONDS
 
 # Maps the fine-grained ExecutorFailureCategory (#1239 diagnostics taxonomy)
 # to the coarse ReviewerRunFailure.reason vocabulary above — the single source

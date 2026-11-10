@@ -32,30 +32,22 @@ def _invoke_run(stage: str) -> tuple[int, str]:
 class TestCliStageDispatch:
     def test_review_reaches_runner(self) -> None:
         runner = MagicMock()
-        with (
-            patch("cw.cli.codex.run_codex_review_stage", runner),
-            patch("cw.cli.codex.register_debt_filer") as register,
-        ):
+        with patch("cw.cli.codex.run_codex_review_stage", runner):
             exit_code, _ = _invoke_run("review")
         assert exit_code == 0
         runner.assert_called_once_with(
             ticket_id="T-stage", session_id="sid-x", wall_clock_budget_seconds=None
         )
-        register.assert_called_once()
 
     @pytest.mark.parametrize("stage", ["harden", "plan", "finalize"])
-    def test_unserved_stage_refuses_before_runner_and_filer(self, stage: str) -> None:
+    def test_unserved_stage_refuses_before_runner(self, stage: str) -> None:
         runner = MagicMock()
-        with (
-            patch("cw.cli.codex.run_codex_review_stage", runner),
-            patch("cw.cli.codex.register_debt_filer") as register,
-        ):
+        with patch("cw.cli.codex.run_codex_review_stage", runner):
             exit_code, output = _invoke_run(stage)
         assert exit_code != 0
         assert "no codex executor for stage" in output
         assert f"'{stage}'" in output
         runner.assert_not_called()
-        register.assert_not_called()
 
     def test_impl_still_names_ticket_1550(self) -> None:
         runner = MagicMock()
