@@ -332,6 +332,23 @@ cites one of these.
     subprocess runs under `sessions_lock` outside the ticket-tracked
     allowlist. — Source:
     `docs/adr/0019-lock-hierarchy-and-no-subprocess-under-sessions-lock.md`
+15. No unbounded serial external-call drain on the reconcile tick path: any
+    per-item external call (daemon stop, `gh`, `git`) made over a state- or
+    roster-sized collection in `reconcile()` has a per-tick cap or a
+    concurrency bound, and a drain that can run long must not delay the other
+    post-lock steps; surplus work is dropped only when the next tick re-finds
+    it, and is otherwise carried over. — Source:
+    `src/cw/reconcile/deferred.py` (`MAX_STOP_JOBS_PER_TICK`, #2551;
+    `run_post_lock_jobs`, `StopKind.RECOVERABLE`/`CARRIED`); GitHub #1232
+16. A lockless prefetch mirrors its candidate predicate and is bounded: it
+    hoists a per-candidate external read out of `sessions_lock`, so it
+    derives its candidates with the same predicate as the in-lock step that
+    consumes them and carries a per-tick cap and a wall-clock budget; a
+    candidate it did not capture defers to the next tick, never defaults.
+    — Source: `src/cw/reconcile/gate_plan_probes.py`
+    (`PLAN_PREFETCH_MAX_PER_TICK`, `PLAN_PREFETCH_BUDGET_SECONDS`, #2545),
+    `src/cw/reconcile/dirty_checks.py` (`DIRTY_CHECK_MAX_PER_TICK`, #2548),
+    `src/cw/reconcile/probe_store.py` (`BoundedProbeStore`); GitHub #1232
 
 ## §8 Anti-patterns
 
@@ -406,6 +423,19 @@ principle, grounded in the same source document.
     git/gh/`claude` subprocess under `sessions_lock` without a follow-up
     ticket and allowlist entry. — Source:
     `docs/adr/0019-lock-hierarchy-and-no-subprocess-under-sessions-lock.md`
+15. An unbounded serial external-call drain on the tick path — a new
+    per-item daemon stop, `gh` or `git` call looped over a state- or
+    roster-sized collection in `reconcile()` with no per-tick cap or
+    concurrency bound, or one whose slow tail delays the other post-lock
+    steps (a raised cap or removed `MAX_STOP_JOBS_PER_TICK` counts). —
+    Source: `src/cw/reconcile/deferred.py`; GitHub #1232
+16. A lockless prefetch that drifts from, or is unbounded relative to, its
+    in-lock step — a pre-lock capture that selects candidates with a
+    different predicate than the in-lock consumer (capturing candidates the
+    in-lock step never consumes, or omitting ones it does, so they defer
+    every tick), or one with no per-tick cap and wall-clock budget. —
+    Source: `src/cw/reconcile/gate_plan_probes.py`,
+    `src/cw/reconcile/dirty_checks.py`; GitHub #1232
 
 ## Reference Table
 
