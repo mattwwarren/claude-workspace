@@ -8,6 +8,7 @@ allowed-tools: ["Bash", "Glob", "Grep", "Read", "Write", "Agent", "AskUserQuesti
 
 **Orientation:** Read `.cw/context.json` for ticket context (body, title, prior decisions). If absent, prose-delegate to `auto-dev-intake.md` first to materialize it.
 
+<!-- el-begin: plan.comments-and-body-are-live -->
 <!-- el: plan.comments-and-body-are-live -->
 **Comments and body are live, not cached.** Stage 1 MUST **live-fetch the ticket comments AND the ticket body on every invocation** — including a standalone `/auto-dev-plan <ticket-id> --headless` re-dispatch — via the active tracker's fetch op (`get_issue` + `list_comments(<id>)` for `linear`; `gh issue view <n> --json body,comments` for `github-issues`). The cached `comments` array and the cached `body` field in `.cw/context.json` are a **Stage-0 provenance snapshot only** and MUST NOT be treated as current: intake does not re-run between stages, so either can be stale — an operator "Pre-flight Resolutions" comment posted after Stage 0 (#952), or a later edit folding those resolutions into the body instead (#980). Use the live fetch of both as the source of truth for every comment-derived or body-derived decision below.
 
@@ -23,14 +24,20 @@ This stage runs as a standalone headless entrypoint (`/auto-dev-plan <ticket-id>
 
 For each ticket in the queue:
 
+<!-- el-end: plan.comments-and-body-are-live -->
+<!-- el-begin: plan.check-for-existing-plan -->
 <!-- el: plan.check-for-existing-plan -->
 ### Step 1a: Check for Existing Plan
 
+<!-- el-end: plan.check-for-existing-plan -->
+<!-- el-begin: plan.resume-check -->
 <!-- el: plan.resume-check -->
 0. **Resume check (runs before the tracker scan):** if `.cw/plan-draft.md` exists in the worktree AND `.cw/plan.md` does NOT exist, treat it exactly like "Plan found (sufficient)" below — extract its content, skip Step 1b's generation entirely, log "Found persisted plan draft from prior blocked/parked attempt — resuming, not regenerating," append a `friction_highlights` entry noting the resume (e.g. `resumed plan from .cw/plan-draft.md — prior blocked/parked attempt`; `plan_source` stays `"generated"` and carries no resume signal of its own), and proceed to Step 1a.0b below, then to Step 1c (the ambiguity scan no longer runs unconditionally on a resumed dispatch — Step 1a.0b's fast path may skip it entirely). **Supersession/ordering guard:** if `.cw/plan.md` already exists, ignore `.cw/plan-draft.md` regardless of either file's timestamp — an approved `.cw/plan.md` always wins over a stale draft. **Checkpoint-origin note (#1778):** a draft may also originate from the Step 1b post-generation checkpoint or the Step 1f.4 post-revision checkpoint, not only from a blocked/parked EXIT. Such a draft is never treated as final or pre-approved: the resume check is presence-based (keyed only on whether `.cw/plan.md` exists) and routes ANY resumed draft through Step 1c's ambiguity scan and Step 1f's review stations unconditionally — so no separate checkpoint-specific guard is needed. **Round counter (#1683):** `.cw/plan-draft.md`'s literal first line carries the scan round counter `<!-- plan-stage-scan-round: N -->`. The resume check reads `plan-stage-scan-round` from that first line (default 0 when the line is absent) and hands the value to Step 1c.0's round-cap read; it never increments the counter itself — only a Step 4c park EXIT does, via the pre-branch cap check.
 
 0b. **Binding-resolutions delta + approved-fingerprint fast path (resumed rounds only):** Fires only when Step 1a.0's resume branch fired this dispatch; on a fresh (non-resumed) dispatch — the common path — skip straight to item 1 below. When it does fire, the full procedure (resolutions-delta detection against Step 1b setup's marker-discovery procedure, the delta/revision branch scoped inside Step 1f.4, and the fingerprint fast-path check reusing Checkpoint 1's row-path evidence) lives in `.claude/commands/auto-dev-plan-appendix.md`, section "Step 1a.0b: binding-resolutions delta + approved-fingerprint fast path (resumed rounds only)". Read it now if this dispatch resumed; do not skip Step 1c's ambiguity scan or Step 1c.0's round-cap/settlement-folding machinery based on this summary alone — only the appendix procedure's own fingerprint-match evidence check may do that.
 
+<!-- el-end: plan.resume-check -->
+<!-- el-begin: plan.tracked-tickets -->
 <!-- el: plan.tracked-tickets -->
 1. **Tracked tickets:** Read the issue description AND comments via the active tracker's fetch ops (`get_issue` + `list_comments` for `linear`; `gh issue view <n> --json title,body,comments` for `github-issues`). **Pipeline-authored comment exclusion (#1650):** content in a comment bearing a **pipeline fixed header** — that set is named once, in the *Comment provenance rule* in `.claude/commands/auto-dev.md`, so this clause and the Decision branch below cannot drift apart (#2097); the plan-of-record post is deliberately NOT in it, per that section's scope note — MUST NOT be treated as an existing plan — a consolidated park's `### Draft plan (unreviewed — context only)` sub-section is pipeline-authored and unreviewed; resume of pipeline drafts goes through `.cw/plan-draft.md` only (the Step 1a.0 check above). Otherwise look for content constituting an implementation plan: file paths with described changes, a phased approach (tests + implementation), estimated scope (files/lines), sections titled "Plan"/"Implementation Plan"/"Approach", or a clear actionable description of what to change and where.
 
@@ -44,12 +51,17 @@ For each ticket in the queue:
 
 ### Step 1b: Generate Plan (Agent)
 
+<!-- el-end: plan.tracked-tickets -->
+<!-- el-begin: plan.setup-pre-flight-resolution-pre-extraction -->
 <!-- el: plan.setup-pre-flight-resolution-pre-extraction -->
 **Step 1b setup — Pre-flight Resolution pre-extraction (orchestrator, before spawning the Plan agent).** Grep the **Stage-1 live-fetched ticket comments** for the marker `<!-- auto-dev-preflight-resolutions -->` (the `/harden-ticket` resolution comment), AND ALSO grep the live-fetched issue BODY's resolutions section for the same marker — the operator may fold resolutions into the body instead of, or in addition to, a comment, and both channels use the identical marker (see `harden-ticket/SKILL.md`). Grep that live fetch — **NEVER the `.cw/context.json` `comments` array or cached `body` field** (#952, #980). When tallying, exclude any comment bearing the pipeline's own blocker header `## Multi-Marker Gate Blocked` — those are self-authored gate diagnostics, never operator resolutions, so a stray marker inside one must never inflate the count and re-trip the gate (defense in depth, #967).
 
+<!-- el-end: plan.setup-pre-flight-resolution-pre-extraction -->
+<!-- el-begin: plan.row-delivered-resolutions-read-first -->
 <!-- el: plan.row-delivered-resolutions-read-first -->
 **Row-delivered resolutions (#2702) — read first.** Before the marker greps above, read `queue_metadata.operator_resolutions` from `.claude/cw-context.json` (for example `jq -c '.queue_metadata.operator_resolutions // []' .claude/cw-context.json`; cw writes this file from the dev-queue row, unlike the banned `.cw/context.json` comments or body cache). The entries are `{text, recorded_at, actor, round}` objects that `cw dev-queue resolve` recorded from an interactive operator session. When the list is non-empty it is the authoritative resolutions source: its entries carry the same binding authority as a `<!-- auto-dev-preflight-resolutions -->` comment, and the row outranks both the body and the comment channels. Inject every entry, in `round` order, into `## Binding Pre-flight Resolutions` on every round; a later round supersedes an earlier one on the same point. Number the items consecutively across rounds and name the round in each line. The marker comments and a marker-bearing body are then un-tallied mirrors: skip the tally, the newest-wins branch and its friction entry. If a marker comment lacking `<!-- cw-agent-authored -->` (a human-posted comment, per the *Comment provenance rule* in `.claude/commands/auto-dev.md`) is ignored as a mirror, append a `friction_highlights` entry in the form `resolutions-comment-ignored-as-mirror: comment <id> carries the preflight marker but the dev-queue row already holds operator_resolutions (round <N>); record it with cw dev-queue resolve` (`<id>` and `<N>` are literal placeholders — substitute the comment id and the highest `round` before emitting). When the list is empty or absent, the comment and body procedure below runs unchanged as the fallback. Never copy a resolution's text verbatim into `.cw/plan-draft.md`: the row carries it, and the draft carries only the plan the resolutions shaped.
 
+<!-- el-end: plan.row-delivered-resolutions-read-first -->
 <!-- el: plan.body-comment-precedence -->
 **Body/comment precedence (the #980 body-fold rule).** The >1-marker tally stays scoped to comments only — body markers are EXCLUDED from that tally, checked separately as at most a single authoritative source. The body is the preferred channel: if the body's resolutions section carries the marker, the body's copy is authoritative — use the body's list and do not separately inject the comment's copy, even when a marker-bearing comment with the same or older resolutions is also present. That pairing (#929) is the expected steady state and must NOT trip the gate; the >1-marker branch absorbs genuinely conflicting submissions via newest-wins (#1654), not this sanctioned echo. Treat `updatedAt` as at most a coarse re-read trigger — the failure asymmetry favors over-reading (a redundant fetch) over missing a response (a burned round).
 
@@ -89,6 +101,7 @@ Spawn a **Plan** agent (`subagent_type: "Plan", model: "sonnet"`) and wait for i
   ```
   If the plan touches no existing code, write `## Touch-point Contract\n\nN/A — no existing touch-points.` instead. A plan that attaches to existing code but omits `Touch-point Contract` is a friction-block (BLOCK level), not a warning.
 - Instruction to produce a test-first plan: Phase 1 = tests to write/update BEFORE implementation (for larger scope, integration tests run in isolation); Phase 2 = implementation, specific file changes with paths.
+<!-- el-begin: plan.file-enumeration-under-explicit-files-modified -->
 <!-- el: plan.file-enumeration-under-explicit-files-modified -->
 - **File enumeration under an explicit `## Files Modified` heading (required, #1779).** List every file the implementation will modify or create as **one bullet per file**, in the form `- <repo-relative path> (~<N> lines)` — one path per bullet, path first, nothing else before it. `.claude/scripts/check_plan_scope_conformance.py` parses this section (by heading prefix, paths from bullets or a table) at Step 2.5 gate 2 to measure the delivered diff against the plan; a plan that buries its file list in prose gives that gate no anchor and the run ships unmeasured. A table is tolerated as a fallback; bullets remain required. **This heading is the plan's complete file inventory, not a source-only subset (#1881):** it MUST include every Phase 1 test file the plan adds or modifies — do not rely on the Phase 1 test enumeration alone, the gate parses only this heading — and every mechanical companion a planned source change requires, most commonly a package `__init__.py` re-export needed to expose a new or renamed symbol (see CLAUDE.md's Module Size convention). A file named only in Phase 1/Phase 2 prose and omitted here is invisible to the gate and reads as unplanned scope drift.
 - **Pre-flight Resolution Conformance:** When the prompt contains a `## Binding Pre-flight Resolutions` section, the plan MUST include a `## Pre-flight Resolution Conformance` section placed immediately before `## Ambiguities`, one line per item in the format `- R<n>: <short restatement> — <how the plan honors it> [SATISFIED | NOT APPLICABLE]`. An item with no conformance line is MISSING (a plan-review MUST_FIX). **If no `## Binding Pre-flight Resolutions` was injected into this prompt, omit `## Pre-flight Resolution Conformance` entirely — do not emit an empty or `N/A` section.**
@@ -115,6 +128,8 @@ Spawn a **Plan** agent (`subagent_type: "Plan", model: "sonnet"`) and wait for i
      --payload "{\"ticket_id\":\"$TICKET\",\"stage\":\"s1_plan_generated\",\"prev_stage\":\"s0_intake\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
    ```
 
+<!-- el-end: plan.file-enumeration-under-explicit-files-modified -->
+<!-- el-begin: plan.ambiguity-verification -->
 <!-- el: plan.ambiguity-verification -->
 ### Step 1c: Ambiguity Verification
 
@@ -122,6 +137,8 @@ After a plan is in hand (extracted or generated), run an ambiguity scan against 
 
 **This step is non-negotiable.** Do NOT do an "inline scan" instead. If you catch yourself drafting prose that explains *why* the agent isn't needed this time, that IS the signal — spawn it. **Being tempted to skip the spawn** is rare — the four rationalizations and why each is wrong live in `.claude/commands/auto-dev-plan-appendix.md`, section "Why an inline ambiguity scan is never a substitute for the agent spawn". Read it now if you are weighing a skip; the rule above is binding either way.
 
+<!-- el-end: plan.ambiguity-verification -->
+<!-- el-begin: plan.settlement-marker-grammar -->
 <!-- el: plan.settlement-marker-grammar -->
 **Settlement marker grammar (`plan-stage-settled`, #1683).** A settled plan item is recorded as one HTML-comment line appended to `.cw/plan-draft.md`. **Bookkeeping-line order (#2154):** the round-counter line is always first; the `plan-stage-last-evaluated` fingerprint line, when one has been persisted, is always second; every `plan-stage-settled` marker line is appended after both — never before, and never onto the fingerprint's own line. (A draft that has never yet reached a cap check carries no fingerprint line yet, so its settlement markers begin at line 2 instead; once first persisted, the fingerprint line is never removed.) Settlement markers live only in `.cw/plan-draft.md`: no tracker comment this pipeline writes — `## Pending Verification Scan` included — may carry a settlement marker of any kind. The grammar below is closed and exhaustive for the payload after `plan-stage-settled:`; these six forms are the ENTIRE grammar, and nothing else is valid; the other leading bookkeeping lines are defined by the broader bookkeeping-line grammar immediately below.
 
@@ -147,6 +164,8 @@ A line whose content is anything other than the exact grammar above (trailing te
 
 **Round-qualified item ids (#2626).** The part of the payload before the colon is the item id. `<n>` is the item's number inside its park comment and restarts at 1 in every park comment, so the id also carries the park's ordinal: `<k>` is the 1-based position of that park comment among the live-fetched `## Pending Verification Scan` comments in chronological order (Step 1c.0 step 2 in the appendix defines it). The bare spelling (`A1`, `P2`) is the round-1 spelling and the only spelling ever written for round 1; the `R<k>.` spelling is written only for `<k>` ≥ 2, and `R1.` is never written (it is non-conforming). Every bare id persisted by an earlier version keeps parsing and means round 1. Ids compare as exact strings: `A1` and `R2.A1` are different items. `<k>` is not the round counter `N`: the cap check resets `N` to 0 when an operator reply arrives, which is the moment of settlement, so `N` cannot tell two parks apart.
 
+<!-- el-end: plan.settlement-marker-grammar -->
+<!-- el-begin: plan.leading-bookkeeping-line-grammar-and-order -->
 <!-- el: plan.leading-bookkeeping-line-grammar-and-order -->
 **Leading bookkeeping-line grammar and order (#2154, #2376).** These are the complete leading HTML-comment lines permitted in `.cw/plan-draft.md`; their relative order is fixed and every rewrite preserves them. After the three existing positions documented above, `plan-stage-resolutions-attempted` comes when present; then `plan-stage-approval-revoked` when present; and `plan-stage-resolutions-applied`, when present, is always last — the `plan-stage-resolutions-applied` line, when persisted, is always last. If a later line is absent, the remaining lines close up without changing order.
 
@@ -164,6 +183,7 @@ A line whose content is anything other than the exact grammar above (trailing te
 
 `<resolution-source>` is exactly one of `comment:<id>`, `body:<sha>` or `row:<N>:<sha>` (`N` = the highest `round` in `queue_metadata.operator_resolutions`, #2702, and `<sha>` = the SHA-256 digest over every entry text in round order, #2728; cw computes it and delivers it as `queue_metadata.operator_resolutions_source`, and the worker never recomputes it; the bare `row:<N>` is the legacy form persisted before #2728); that same source placeholder applies to both the `started` and terminal (`failed|succeeded`) attempted-marker forms.
 
+<!-- el-end: plan.leading-bookkeeping-line-grammar-and-order -->
 <!-- el: plan.round-counter -->
 **Round counter (`plan-stage-scan-round`, #1683).** `.cw/plan-draft.md`'s literal first line, in the form `<!-- plan-stage-scan-round: N -->`, cap 2, incremented once per park EXIT — only the three Step 4c EXIT-bullet outcomes ever increment it; AUTO-CONTINUE never does, since nothing is parked. The cap check additionally resets `N` to 0 on a detected tracker-state delta (#2154) — see the cap check's tracker-state-delta reset below and Step 1c.0's fingerprint-read step. Rounds that do not reach the cap check settle the fingerprint through the *Fingerprint settle* in the Pre-branch integrity checks, which resets `N` on a genuine delta but never increments it.
 
@@ -270,6 +290,7 @@ A line whose content is anything other than the exact grammar above (trailing te
 
    **Malformed-verified note (#2432).** Whenever `unverified` items are posted to the `## Pending Verification Scan` comment, if `malformed_verified_count` is non-zero, prepend a one-line note above the numbered list: `Note: <malformed_verified_count> premise item(s) this scan carried a missing/malformed Verified field, or a missing/malformed Impact field (including Impact: NONE with no supporting Impact-Reason) — not necessarily a genuine NO/park decision.` `<malformed_verified_count>` is a literal placeholder; because this count spans all buckets (`self_verified`/`deferred`/`unverified` alike, per the malformed-verified tally paragraph above), it is deliberately NOT worded as "`X` of these `Y` item(s)" — it is not guaranteed to be less-than-or-equal-to `unverified_count`. A count-only note — no per-item classification, no new partition bucket.
 
+<!-- el-begin: plan.plan-draft-fingerprint-rule -->
 <!-- el: plan.plan-draft-fingerprint-rule -->
 ### Plan-draft fingerprint rule
 
@@ -277,17 +298,24 @@ The single definition of the plan-draft content fingerprint (#2102). Every produ
 
 **Computation.** Take the current text of `.cw/plan-draft.md`, **strip** its leading bookkeeping lines — the `<!-- plan-stage-scan-round: N -->` round-counter line, the `<!-- plan-stage-last-evaluated: ... -->` fingerprint line, every `<!-- plan-stage-settled: ... -->` marker line, the `<!-- plan-stage-resolutions-attempted: ... -->` line, the `<!-- plan-stage-approval-revoked: ... -->` line, and the `<!-- plan-stage-resolutions-applied: ... -->` line — and hash what remains with **SHA-256**, rendered as full lowercase hex (all 64 characters, never truncated). The stripped lines are bookkeeping about the draft, not the draft: a round-counter increment or a newly-appended settlement marker must never read as a changed plan, or every resumed round would invalidate its own approval.
 
+<!-- el-end: plan.plan-draft-fingerprint-rule -->
+<!-- el-begin: plan.where-it-is-computed -->
 <!-- el: plan.where-it-is-computed -->
 **Where it is computed.** Fresh, on demand, every time a site needs it — never persisted as an additional bookkeeping line in `.cw/plan-draft.md` (the bookkeeping-line grammar above is closed, #2154).
 
+<!-- el-end: plan.where-it-is-computed -->
+<!-- el-begin: plan.how-it-travels -->
 <!-- el: plan.how-it-travels -->
 **How it travels.** One evidence channel, end to end: the sentinel's `plan_draft_fingerprint` field → `Session.last_result` → the dev-queue row's `TicketTask.plan_approved_fingerprint` (stamped by `cw dev-queue approve`) → `queue_metadata.plan_approved_fingerprint` in the next worker's `.claude/cw-context.json`, which is what Checkpoint 1 compares against. Nothing on the evidence path reads the fingerprint back out of any comment. `cw dev-queue approve --post-marker` also embeds it in an audit marker the operator posts (#2194), so the approved draft is identifiable on the ticket, but no stage reads that audit marker back: a fingerprint shown to the operator, in a park comment or in the audit marker, is display, never evidence.
 
 **When there is no draft.** No draft in hand means no fingerprint: emit `null` explicitly. `null` is absent evidence, never a wildcard that matches anything.
 
+<!-- el-end: plan.how-it-travels -->
+<!-- el-begin: plan.operator-resolutions-are-inputs-not -->
 <!-- el: plan.operator-resolutions-are-inputs-not -->
 **Operator resolutions are inputs, not plan body (#2702).** Row-delivered resolutions (`queue_metadata.operator_resolutions`) are never part of the draft, and the `plan-stage-resolutions-applied: source=row:<N>:<sha>` line is stripped, in every accepted form (including the legacy bare `row:<N>`), like the line's other `source=` forms. A resolution changes `draft_fp` only through the plan-text revision it triggers, and Step 1a.0b decides what that revision does to an existing approval: an equal fingerprint keeps it, a different one revokes it.
 
+<!-- el-end: plan.operator-resolutions-are-inputs-not -->
 <!-- el: plan.scope-classification -->
 ### Step 1d: Scope Classification
 
@@ -307,6 +335,7 @@ From the plan (existing or generated), classify scope:
 5. **Constraint enforcement** (if `--forbidden <areas>` is active): if the plan touches any forbidden area, **AskUserQuestion:** "Ticket <id> touches forbidden area (<area>). Skip this ticket, or abort pipeline?"
    `--forbidden` tokens resolve to detectors, applied for this run in addition to the v4 set: `migrations` → `migrations/**`; `auth` → auth/security-core paths; `ci` → `.github/workflows/**` hunks that touch a pipeline-behavior YAML key (`steps:`, `run:`, `uses:`, `permissions:`, `on:`/trigger blocks, matrix definitions, or `env:` consumed by a step — the former Step 1d.2b content gate, #1091; a hunk confined to a string or comment payload does not count); `shared-bases` → shared base classes with 3+ consumers. A `--forbidden` hit sets `forbidden_touched=true` for this run only; it does not widen the default set for other runs.
 
+<!-- el-begin: plan.checkpoint-1 -->
 <!-- el: plan.checkpoint-1 -->
 ### Checkpoint 1 (Plan Approval)
 
@@ -316,17 +345,23 @@ the Approve/Adjust/Skip semantics live in
 `.claude/commands/auto-dev-plan-appendix.md`, section "Checkpoint 1 — interactive
 plan-approval gate". Read it now if this is an interactive run.
 
+<!-- el-end: plan.checkpoint-1 -->
+<!-- el-begin: plan.headless-plan-approval -->
 <!-- el: plan.headless-plan-approval -->
 **Headless** (clauses evaluated in order; first match wins): If plan agent reported `pre-flight: already satisfied` → EXIT `no_op` (see Step 1e) — this preempts every clause below, including scope and forbidden-area rejections, since there is nothing to implement. Otherwise: if plan in Linear or resumed from `.cw/plan-draft.md` → AUTO-SKIP plan-approval question (Step 1c's ambiguity scan still runs and may exit `ambiguities_pending_resolution`). **Large-scope carve-out on the resumed-draft path (#1650, #2102):** when the plan was resumed from `.cw/plan-draft.md` AND Step 1d classifies it Large, the AUTO-SKIP additionally requires approval evidence. **Before evaluating the clauses below, compute the resumed draft's fingerprint per the *Plan-draft fingerprint rule* above** — call it `draft_fp`. Two independent sources can supply the evidence:
 
   - **Comment path:** an operator reply carrying the **comment-path approval token** (grammar and rules below), posted after the prior round's `## Pending Verification Scan` comment (the `### Approval requested` ask), where that reply must itself carry operator authority under the *Comment provenance rule* in `.claude/commands/auto-dev.md` (#2097) — an agent-authored comment is never approval evidence. Prose alone is never sufficient — "approved", "LGTM", "go ahead" are not evidence; fail closed on anything short of the exact token.
   - **Row path:** non-null `queue_metadata.plan_approved_at` **AND** non-null `queue_metadata.plan_approved_fingerprint` in `.claude/cw-context.json`, **AND** either (a) the fingerprint is **equal to `draft_fp`**, or (b) no operator-authority delta since `plan_approved_at`, per the *Operator-authority delta* rule in `.claude/commands/auto-dev.md` — the latter branch does not require fingerprint equality: it tolerates a non-equal fingerprint but still requires both durable approval fields. Both keys are stamped together by `src/cw/dev_queue/approval.py` when the operator runs `cw dev-queue approve`, and threaded in at spawn by `src/cw/spawn.py`. For the fingerprint-equality branch, a non-null timestamp is **not** sufficient by itself: it records that an approval happened, never which text the operator read, so on its own it lets a draft edited after approval resume straight past this gate — the exact vulnerability #2102 closes. The no-delta branch also needs condition 3 of *Fast-path composition requires a third condition* (`.claude/commands/auto-dev.md`): a persisted `body_sha` matching the live body; no marker fails closed (#2311). The row path is the only evidence a Linear-tracked ticket can ever produce, since `cw dev-queue approve --post-marker` posts through `gh` and cannot reach Linear. **Before accepting either row-path sub-condition, honor any durable `<!-- plan-stage-approval-revoked: at=<UTC>; fingerprint=<sha> -->` marker in the draft:** if its fingerprint equals `plan_approved_fingerprint` and `plan_approved_at` is at or before the marker's `at`, treat the entire row-path evidence pair and both sub-conditions as revoked and absent; a later `plan_approved_at` is a fresh approval and supersedes that marker. Step 1a.0b revokes the row durably with `cw dev-queue revoke-plan-approval <ticket> -c <client>`, which atomically clears **both** row fields under the queue lock; the draft marker is audit/recovery evidence only. The checker treats the row evidence as absent for that dispatch after the mutation, and a later spawn consumes the cleared `queue_metadata` values.
 
+<!-- el-end: plan.headless-plan-approval -->
+<!-- el-begin: plan.operator-authority-delta-alternate -->
 <!-- el: plan.operator-authority-delta-alternate -->
 **Operator-authority-delta alternate (#2433).** When the row has both durable approval fields — `plan_approved_at` and `plan_approved_fingerprint` — and the *Operator-authority delta* rule finds no newer operator-authority comment, the approval transfers through this alternate row-path condition independently of fingerprint equality. A newer operator-authority comment disqualifies the alternate and forces the full re-scan; Step 1a.0b's fast path applies the same test.
 
 Either source is sufficient **on its own terms** — the comment path is gated by the token, no-double-duty, and staleness rules below, and the row path by exact fingerprint equality or the Operator-authority delta alternate; neither is a mere presence check. Absent both, EXIT `plan_pending_approval` again (persist the draft, reference the existing park comment rather than re-posting the full draft — do not re-run the advisory stations just to re-ask). A resumed draft that was parked for approval must not slip through approval by being resumed.
 
+<!-- el-end: plan.operator-authority-delta-alternate -->
+<!-- el-begin: plan.comment-path-approval-token-grammar-closed -->
 <!-- el: plan.comment-path-approval-token-grammar-closed -->
 **Comment-path approval token grammar (#2074), closed and exhaustive:**
 
@@ -336,18 +371,27 @@ Either source is sufficient **on its own terms** — the comment path is gated b
 
 This token is distinct from, and never satisfied by, the CLI's write-only, audit-only post-marker comment that `cw dev-queue approve --post-marker` posts (#2194) — that marker records a row-path approval already granted through the CLI and stays audit-only; it is never comment-path evidence.
 
+<!-- el-end: plan.comment-path-approval-token-grammar-closed -->
+<!-- el-begin: plan.no-double-duty -->
 <!-- el: plan.no-double-duty -->
 **No double duty (#2074).** The token-bearing comment MUST NOT be the comment Step 1c.0 step 3 (`.claude/commands/auto-dev-plan-appendix.md`) located as this round's settlement-source comment, if that comment settled ≥1 item at step 5. Resolving a parked ambiguity or premise is not approving the plan's scope, and this pipeline never lets one comment do both jobs — however many tokens it carries. Approval must arrive in its own, separate comment.
 
+<!-- el-end: plan.no-double-duty -->
+<!-- el-begin: plan.staleness-guard -->
 <!-- el: plan.staleness-guard -->
 **Staleness guard (#2074).** The token-bearing comment must be the LAST comment, in live-fetched chronological order, that carries either operator authorship or any pipeline fixed header named by the *Comment provenance rule* in `.claude/commands/auto-dev.md` — `## Pending Verification Scan`, `## Multi-Marker Gate Blocked`, `## Blocking Review Findings`, or `## Operator-Actionable Review Findings`. If any such fixed-header comment appears later, the draft moved on since the operator approved it; treat the token as stale (absent evidence) and re-park.
 
+<!-- el-end: plan.staleness-guard -->
+<!-- el-begin: plan.fingerprint-mismatch-sub-case -->
 <!-- el: plan.fingerprint-mismatch-sub-case -->
 **Fingerprint mismatch sub-case (#2102).** A non-null `plan_approved_fingerprint` that does **not** equal `draft_fp` is a distinct outcome from absent evidence. First evaluate the *Operator-authority delta* alternate: if a durable `plan_approved_at` exists and no operator-authority comment postdates it, the approval transfers through that alternate despite the mismatch, and Step 1a.0b's fast path applies; the mismatch is tolerated as advisory-only drift with no operator dissent. That alternate is the same composed condition as the Row path's (b): it holds only when the *Fast-path composition requires a third condition* rule in `.claude/commands/auto-dev.md` is also met, so a `body_sha` mismatch — or no persisted `body_sha` marker at all — disqualifies the alternate exactly as a newer operator-authority comment does (#2311). If that no-delta condition does not hold, then the fingerprint mismatch fallback applies to a resumed draft classified **Large**: EXIT `plan_pending_approval`, and the re-park comment must say the approval was revoked by a **fingerprint mismatch** and must **quote both fingerprints** — the approved one (`plan_approved_fingerprint`) and the current one (`draft_fp`) — so the operator can see that what they approved is not what is about to be built. Do not silently re-ask as though no approval had ever been given. A resumed draft classified **Small** follows the ordinary AUTO-SKIP path; a plan generated in this dispatch follows the ordinary scope behavior: small → AUTO-APPROVE and proceed (Step 1c still gates on ambiguities), large → EXIT `plan_pending_approval` **through the Step 1c consolidated park** (post the single enriched `## Pending Verification Scan` comment — advisory station findings, `### Approval requested`, and the full draft — no branch; ambiguity scan results ride along in the same comment when present; persist the draft to `.cw/plan-draft.md` per the Step 1c draft-persistence rule before exiting). If `--scope-limit small` rejects → EXIT `scope_exceeded`. If `--forbidden` rejects → EXIT `forbidden_area`.
 
+<!-- el-end: plan.fingerprint-mismatch-sub-case -->
+<!-- el-begin: plan.row-delivered-revisions-never-use-operator-authority-delta -->
 <!-- el: plan.row-delivered-revisions-never-use-operator-authority-delta -->
 **Row-delivered revisions never use the Operator-authority-delta alternate (#2702).** In a dispatch where Step 1a.0b handled a `row:<N>:<sha>` resolutions delta, only exact equality of `draft_fp` and `plan_approved_fingerprint` is row-path evidence. Step 1a.0b has already compared them: equal means the approval stands; different means it was revoked there, and the durable-revocation rule treats the row evidence as absent. Neither branch (b) of the Row path nor the Fingerprint mismatch sub-case's alternate may carry an approval across a row-delivered revision: a mismatch is never tolerated as advisory-only drift for a row delivery, and a row resolution is not an operator-authority comment. Answering questions never revokes an approval by itself; only a change to the plan text does.
 
+<!-- el-end: plan.row-delivered-revisions-never-use-operator-authority-delta -->
 <!-- el: plan.pre-flight-already-satisfied-check -->
 ### Step 1e: Pre-flight Already-Satisfied Check
 
@@ -445,6 +489,7 @@ Re-spawn the **Plan** agent (`subagent_type: "Plan", model: "sonnet"`) (#2211) w
 
 **Format-only revision (defense-in-depth).** Fires only when Step 1f.3 routes here because every persisting Plan Reviewer MUST_FIX carries the `Format-Only` category (rare — a compliant reviewer raises such findings as SHOULD_FIX per plan-reviewer.md's severity floor). Spawns the same Plan agent, scoped to just the format-only findings, with instruction to re-emit the affected section(s) in the required schema and make no other content changes. Tracked on an **independent axis** from, and does **not** decrement, the standard 1-cycle budget — it may run even when that budget is spent. This format-only cycle is itself capped at **1 attempt**; if exhausted with MUST_FIX (still all `Format-Only`) persisting, fall through to the standard "persists after 1 revision cycle" exit branches.
 
+<!-- el-begin: plan.headless-only-checkpoint-revised-draft -->
 <!-- el: plan.headless-only-checkpoint-revised-draft -->
 **Headless only — checkpoint the revised draft (#1778).** Immediately after the plan-revision agent returns a new plan text — from either the standard MUST_FIX revision cycle or the format-only revision cycle — write the plan's current text to `.cw/plan-draft.md` — best-effort: if the write fails, log and continue; do not treat it as blocking. This checkpoint is not the fully-re-reviewed, authoritative version: Step 1f.2 still re-reviews the revised plan, and the Step 1f.3 blocked-exit writes remain the authoritative draft writes if the revision cycle is exhausted — this checkpoint only ensures a revised draft survives an unexpected interruption in between. This write follows the draft-rewrite rule (Step 1c's headless mode, above) — its leading bookkeeping lines are carried forward unchanged.
 
@@ -461,6 +506,7 @@ cw event record stage.errored \
 
 After plan is approved (or auto-skipped with existing plan) AND Plan Quality Review has passed (Step 1f):
 
+<!-- el-end: plan.headless-only-checkpoint-revised-draft -->
 <!-- el: plan.tier-re-verification-before-stamp -->
 **Step 1g.0 — Tier re-verification before stamp (#1897).** Immediately before writing the `**Scope tier:**` line below, re-run Step 1d's classification (files/lines/forbidden-area touches) against the plan text exactly as it stands at this moment — after any Step 1f.4 revision cycle (standard or format-only) and after every `## Adopted Assumptions` / `## Self-Verified Premises` / `## Deferred Premises` / `## Settled Plan Items` section folded in across every resumed round this ticket has been through. This is the one point downstream of Step 1d where a revision cycle or an accumulated resumed round could otherwise carry an earlier round's stale classification through to the persisted stamp — this pipeline auto-approves a resumed Small-tier draft (Checkpoint 1) and Large-tier is the only path requiring operator approval evidence, so a stale-Small stamp on a plan that has actually grown Large silently skips that gate.
 
@@ -475,14 +521,18 @@ cw event record stage.errored \
   --payload "{\"ticket_id\":\"$TICKET\",\"stage\":\"s1_plan_reviewed\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"error_kind\":\"scope_tier_stale\"}"
 ```
 
+<!-- el-begin: plan.independent-of-approval-fingerprint -->
 <!-- el: plan.independent-of-approval-fingerprint -->
 **Independent of the approval fingerprint (#2102, no rule change).** This gate and Checkpoint 1's fingerprint-equality check are two separate sensors on the same underlying risk, and neither subsumes the other: a Small→Large tier flip fires here even when the fingerprint matched, and a fingerprint mismatch re-parks at Checkpoint 1 even when the tier is unchanged. There is deliberately no additional "a tier change always re-asks for approval" rule — a tier change is very likely to correlate with a content change, which the fingerprint already detects, and a stale-tier stamp is caught here regardless.
 
+<!-- el-end: plan.independent-of-approval-fingerprint -->
+<!-- el-begin: plan.first-persist-plan-file -->
 <!-- el: plan.first-persist-plan-file -->
 **FIRST, persist the plan file (#943 — the stage's primary artifact, not optional):** Write the full reviewed plan text verbatim — including both signoff markers below — to `.cw/plan.md` in the worktree, BEFORE posting to the tracker and BEFORE emitting the sentinel. Stage 2 (`auto-dev-impl.md`) hard-requires this file; a plan that exists only as a tracker comment leaves the ticket unimplementable. Verify the write (`test -s .cw/plan.md`) as part of this step.
 
 **Then, best-effort clear the draft:** if `.cw/plan.md` was written successfully, delete `.cw/plan-draft.md` if present — a stale draft would otherwise resurface on the next Step 1a resume check even though the plan it drafted has been approved and superseded. Deletion is best-effort: if it fails, log and continue — a failed deletion must NOT fail Step 1g.
 
+<!-- el-end: plan.first-persist-plan-file -->
 <!-- el: plan.then-record-plan-s-decisions -->
 **Then record the plan's decisions (#2984, Step 1g.1):** run `cw dev-queue record-plan-decisions <ticket> -c <client> --plan .cw/plan.md` in the foreground under a sized `timeout`. It records the plan's `## Adopted Assumptions`, `## Non-Goals` and `## Decisions` on the ticket's row as decided constraints for the review lane. It is idempotent and refuses unless the row is in the plan stage; run it only here, never from another stage. A non-zero exit appends `plan_decisions_not_recorded: <reason>` to `friction_highlights` and does not fail the stage; exit 3 (cap) is recorded the same way.
 <!-- el: plan.then -->
@@ -491,6 +541,7 @@ cw event record stage.errored \
 <!-- el: plan.never-background-this-post -->
 **Never background this post (#2157).** Wrap the tracker-post call in a sized `timeout` and run it foreground — never `run_in_background`, never accept a background continuation. A timeout or failure here is `blocked`/`agent_block`, not a silent turn-end: see the *Worker Execution Discipline* section in `.claude/commands/auto-dev.md` for the no-backgrounding rule and why it applies to orchestrator-run calls like this one.
 
+<!-- el-begin: plan.marker-signoff-requirement -->
 <!-- el: plan.marker-signoff-requirement -->
 **Marker requirement:** The plan body posted to Linear MUST include both signoff markers, each on its own line near the top, exactly:
 
@@ -501,6 +552,8 @@ cw event record stage.errored \
 
 Use today's date and each station's current marker version. By the time Step 1g runs both markers are settled — a station that did not clear (and was not overridden) exits before this step. The markers are the contract that lets future `/auto-dev` runs skip Step 1f.2's expensive reviewer spawns.
 
+<!-- el-end: plan.marker-signoff-requirement -->
+<!-- el-begin: plan.marker-scope-tier -->
 <!-- el: plan.marker-scope-tier -->
 **Scope tier marker requirement:** the persisted `.cw/plan.md` MUST also include a single canonical scope-tier line, near the scope classification, in the exact form:
 
@@ -523,6 +576,8 @@ cw event record stage.entered \
 
 ---
 
+<!-- el-end: plan.marker-scope-tier -->
+<!-- el-begin: plan.stage-1-completion -->
 <!-- el: plan.stage-1-completion -->
 ## Stage 1 Completion (headless only)
 
@@ -530,9 +585,13 @@ After all Stage 1 steps complete successfully in headless mode, emit the `AUTO_D
 
 **Only emit this sentinel when invoked as a standalone `/auto-dev-plan <ticket-id> --headless` command. Do NOT emit when running as part of the interactive monolith chain (`auto-dev.md` owns the sentinel in that context).**
 
+<!-- el-end: plan.stage-1-completion -->
+<!-- el-begin: plan.emit-through-cw-then-frame -->
 <!-- el: plan.emit-through-cw-then-frame -->
 **Emit through cw, then frame (#2382).** Record the payload with `cw result emit -` per the *Sentinel emit rule* in `.claude/commands/auto-dev.md` — run it from the cw session worktree root, fix every `field.path: message` error it reports and re-run until it exits 0, and only then frame the recorded JSON. Recording is not framing (#1890): the literal `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` frame, wrapping the same JSON, MUST be the final characters of this same message. Never narrate emission as a separate act from performing it.
 
+<!-- el-end: plan.emit-through-cw-then-frame -->
+<!-- el-begin: plan.no-interactive-escalation-ever -->
 <!-- el: plan.no-interactive-escalation-ever -->
 **No interactive escalation, ever (#1890).** In headless mode there is no listener. Never escalate a detected blocker — including a `plan_unreviewable`/`plan_unsound`/`scope_tier_stale` finding — by asking a question and ending your turn. Escalate exclusively via this sentinel's `blocker` field with `status: "blocked"`, per the exit rules already specified above.
 
@@ -575,9 +634,12 @@ printf '%s' "$SENTINEL_JSON" | cw result emit -
 AUTO_DEV_RESULT>>>
 ```
 
+<!-- el-end: plan.no-interactive-escalation-ever -->
+<!-- el-begin: plan.plan-draft-fingerprint-emission-rule -->
 <!-- el: plan.plan-draft-fingerprint-emission-rule -->
 **`plan_draft_fingerprint` emission rule (#2102).** Unlike the two keys below, this one is **always present** on a plan-stage sentinel — at the completion sentinel above and at **every park exit** (`plan_pending_approval`, `ambiguities_pending_resolution`, `premises_pending_verification`, and the round-cap / stub / `blocked` hard-exits). Whenever a draft plan is in hand, compute the value per the *Plan-draft fingerprint rule* (Step 1c/1d boundary above) and place it here; when no draft exists, emit `null` explicitly rather than omitting the key. Do not restate the stripping or hashing steps here — the named rule is their only definition. This is what `cw dev-queue approve` reads to bind the approval it records to a specific draft (the dev-queue row's `plan_approved_fingerprint`); a round that omits the key on a park exit hands the next round an approval bound to nothing, which is the #2102 bug reproducing itself.
 
+<!-- el-end: plan.plan-draft-fingerprint-emission-rule -->
 <!-- el: plan.resolution-consumed-resolution-evidence-emission-rule -->
 **`resolution_consumed`/`resolution_evidence` emission rule (#1896).** These two keys must include both keys only if this round settled ≥1 item via Step 1c.0 step 5 (the round's `resolution_evidence` candidate — see that step) AND the round still exits paused through one of the three Step 4c EXIT bullets; must not include them otherwise. The Pre-branch integrity checks' cap-check (`ambiguity_scan_unconverged`) and stub-check (`deferred_stub_unresolved`) hard-exits are never eligible carriers for these two keys, whatever this round settled (#2154) — widening this to the cap/stub exits would let a round the dispatch productivity ceiling (`cw.dispatch.productivity.is_unproductive`, #1750) OR's in `resolution_consumed` as one of its "productive" signals read as productive for a plan-stage round that reset its own cap, defeating that ceiling for exactly the rounds it needs to bound. This is what makes the anti-gaming guarantee hold: only step 5's own current-round transcription can produce a candidate, so a round with nothing settled this pass — including a round that merely finds a prior round's marker already present — never emits `resolution_consumed: true`. **Scoped to Step 1c.0 settlement only (#2098).** A Step 1b `## Binding Pre-flight Resolutions` merge (Step 1b setup above) is NOT a settlement and never emits these keys, even on a round that merged one — that merge happens before the plan is even generated, has no step 5 transcription, and is not gated by a Step 4c EXIT. Its trace is the plan's own `## Pre-flight Resolution Conformance` section and `friction_highlights`; it does not additionally set `resolution_consumed`. Step 1a.0b's resolutions-delta revision (`.claude/commands/auto-dev-plan-appendix.md`) is excluded for the identical reason: it too runs before Step 1c.0's step 5 transcription and is not gated by a Step 4c EXIT bullet, so it never emits `resolution_consumed`/`resolution_evidence` either — its trace is the plan's own `## Pre-flight Resolution Conformance` section and `friction_highlights`, exactly like the Step 1b merge above.
 

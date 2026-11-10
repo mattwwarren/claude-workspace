@@ -6,9 +6,11 @@ allowed-tools: ["Bash", "Glob", "Grep", "Read", "Write", "Agent", "Skill"]
 
 # auto-dev Stage 2: Implement
 
+<!-- el-begin: impl.orientation -->
 <!-- el: impl.orientation -->
 **Orientation:** Read `.cw/plan.md` for the approved plan from Stage 1. Read `.cw/context.json` for ticket context (or prose-delegate to `auto-dev-intake.md` first if absent). **`.cw/plan.md` being absent** is rare — the tracker-aware plan-recovery fallback (#943/#1906), the per-tracker authorship checks it must satisfy before honoring a `<!-- plan-spec-reviewed` marker, and the `plan_missing` exit that fires only once every tracker branch is exhausted live in `.claude/commands/auto-dev-impl-appendix.md`, section "Orientation: tracker-aware plan recovery when `.cw/plan.md` is absent". Read it now if the plan file is missing; do not improvise a recovery path, and do not exit `plan_missing` from this summary alone. An adopted non-green PR that entered at impl with repair feedback has no plan by design: when the recovery finds none, follow "Repair entry: no plan (adopted non-green PR, #2944)" below instead of exiting.
 
+<!-- el-end: impl.orientation -->
 <!-- el: impl.comments-are-live-not-cached -->
 **Comments are live, not cached (#1794).** The cached `comments` array in `.cw/context.json` is a Stage-0 (or earlier Stage-2 re-materialization) snapshot only. Dispatch spawns `/auto-dev-{stage.value} <ticket> --headless` **directly per stage** (`src/cw/executor.py`, RFC 0005 A2) — Stage 0 does NOT re-run between pipeline stages, so on an IMPL-stage re-entry (queue re-dispatch, `--regress --stage impl`, or a resumed `s2_implementing` session) the cached array can be arbitrarily stale and an operator send-back comment would never reach this stage. Regardless of whether `.cw/context.json` already exists, this stage MUST live-fetch the ticket comments on every invocation via the active tracker's fetch op (`list_comments(<id>)` for `linear`; `gh issue view <n> --json comments` for `github-issues`), overwrite `.cw/context.json`'s `comments` array with the fresh result (each entry mapped to `{"author": "<login>", "created_at": "<createdAt>", "body": "<text>"}`), and bump `materialized_by_session` to the current session id. Mirrors `auto-dev-plan.md`'s "Comments and body are live, not cached" paragraph. Also write the fresh array verbatim to `$GUARD_ROOT/.cw/impl-comments.json` (creating the directory first if absent), resolving `$GUARD_ROOT` exactly as in "Guard-script path resolution and staleness marker (#2141)" below — the Pre-Stage Detector Guard below consumes it. Never write this cache to a fixed `/tmp/...` path or any `$CW_SESSION`-keyed path: `$CW_SESSION` is not guaranteed unique across two workers sharing a machine, so a fixed name there lets one worker's cache collide with another's. The Step 2.5 gate worktree and its `TMPDIR` follow the same rule: their `cw-gate-wt-`/`cw-gate-tmp-` names come from `gate_key.py` (clone identity plus branch), never from `$CW_SESSION` (#2436). **On comments-fetch failure, a regressed entry hard-blocks; a fresh one WARNs (#2415).** Before deciding how to handle a failed live fetch, read `queue_metadata.regressed_into_stage` from `.claude/cw-context.json` — the same source the Pre-Stage Detector Guard's `REGRESSED_INTO_STAGE` reads (`.claude/commands/auto-dev-impl-appendix.md`). **If it is non-empty** (this IMPL entry was reached via `_stage_regress`) **and** the live fetch exits non-zero or returns malformed JSON: EXIT `blocked` with `blocker.reason: "impl_comments_unreadable_after_regress"` and `blocker.details` naming the fetch failure. A regress exists specifically to act on newer comments, and continuing on the stale cached array would defeat it, and the worker cannot tell whether the comment that triggered the regress is the very one it can no longer read. **Otherwise** (a fresh, non-regressed entry), **WARN and continue** (mirrors `auto-dev-intake.md`'s Step 0d): emit an attention signal, log `"impl_comments_fetch_failed"` in `friction_highlights`, and leave the existing `comments` array untouched rather than overwriting it with an empty/failed result — a stale-but-real array is better evidence than none. Still write whatever was fetched (possibly `[]`) to `$GUARD_ROOT/.cw/impl-comments.json`; the staleness script degrades gracefully on a bad or empty comments file without masking an independently-sourced `regressed_into_stage` signal.
 
@@ -26,6 +28,7 @@ In standalone headless invocation: emit `AUTO_DEV_RESULT` after this stage compl
 
 ## Stage 2: Implement (Agent in Worktree)
 
+<!-- el-begin: impl.review-feedback-guard -->
 <!-- el: impl.review-feedback-guard -->
 ### Review-feedback guard
 
@@ -56,6 +59,8 @@ another worktree. Existing dispatch, auth, security, PHI, approval, and push
 gates remain binding; this guard does not add a push action or authorize a
 bypass.
 
+<!-- el-end: impl.review-feedback-guard -->
+<!-- el-begin: impl.repair-entry-no-plan -->
 <!-- el: impl.repair-entry-no-plan -->
 ### Repair entry: no plan (adopted non-green PR, #2944)
 
@@ -91,6 +96,8 @@ When it applies:
   `repair_entry_unsupported_backend`, before any agent runs; their parity is
   tracked in #2983.
 
+<!-- el-end: impl.repair-entry-no-plan -->
+<!-- el-begin: impl.repair-entry-with-plan -->
 <!-- el: impl.repair-entry-with-plan -->
 ### Repair entry with a plan (#2945)
 
@@ -116,6 +123,8 @@ When it applies:
   applies only when `.cw/plan.md` is absent and `queue_metadata.branch` is
   non-null.
 
+<!-- el-end: impl.repair-entry-with-plan -->
+<!-- el-begin: impl.dispatch-detection -->
 <!-- el: impl.dispatch-detection -->
 ### Dispatch Detection — #766 (skip redundant EnterWorktree when already in a cw worktree)
 
@@ -139,6 +148,7 @@ section "Dispatch detection: the alternative check and the #766 nested-worktree
 leak". Read it now if the presence check above is ambiguous; do not improvise
 the detection rule from memory.
 
+<!-- el-end: impl.dispatch-detection -->
 <!-- el: impl.resolve-impl-model-from-diff -->
 ### Resolve the impl model from diff size
 
@@ -211,6 +221,7 @@ safe, and why a busy-wait poll defeats the liveness sweep) lives in
 to busy-wait on the impl agent (verified 2026-08-19)". Read it now if you want
 that fuller framing.
 
+<!-- el-begin: impl.worktree-isolation-guard -->
 <!-- el: impl.worktree-isolation-guard -->
 ### Worktree Isolation Guard (headless) — #402
 
@@ -237,6 +248,8 @@ below are binding regardless:
 - Before any commit/push, confirm the cwd resolves under `worktree_path` (or
   `$TMPWT`); if it resolves to `workspace_path`, abort and exit `blocked`.
 
+<!-- el-end: impl.worktree-isolation-guard -->
+<!-- el-begin: impl.guard-script-path-resolution-and-staleness -->
 <!-- el: impl.guard-script-path-resolution-and-staleness -->
 ### Guard-script path resolution and staleness marker (#2141)
 
@@ -349,6 +362,7 @@ literally at each call site, because shell state does not persist between
 `Bash` tool calls (same convention as `prep-pr.md`'s `prep_pr_state.py`
 resolver).
 
+<!-- el-end: impl.guard-script-path-resolution-and-staleness -->
 <!-- el: impl.tool-scripts-outside-table -->
 **Tool scripts outside the table (#2436).** `gate_key.py` is invoked from the Step 2.5 fences but is deliberately not a row above: it has no stale-versus-current behaviour to gate (it computes a key, and `--claim` fails closed), so it follows the tool-script convention of `prep_pr_state.py`: probe the session worktree or `$GUARD_ROOT` copy, then `$HOME/.claude/scripts`, and hard-stop when it is absent with one line ending `run scripts/install-skills.sh`. A missing helper never falls back to a `$CW_SESSION`- or `$$`-keyed path. Commands reach a client-repo worker as soon as the checkout updates, but scripts are linked per file, so until the installer is re-run `~/.claude/scripts/gate_key.py` is absent there and Step 2.5 stops with that remedy. Each fence validates the printed key against `^[0-9a-f]{16}$` instead of trusting the script's presence.
 
@@ -490,6 +504,7 @@ Stage 2 agent spawn:
   - **Could work be incomplete?**: NO | MAYBE | YES (explain)
   - **Recommendation**: PROCEED | EXIT_FOR_HUMAN_REVIEW
   ```
+<!-- el-begin: impl.following-completion-artifacts-block-verbatim -->
 <!-- el: impl.following-completion-artifacts-block-verbatim -->
 - **The following Completion Artifacts block verbatim** (Subagent Reliability Mitigation 2 — orchestrator gates on these, NOT on the prose claim of "done"):
   ```
@@ -503,6 +518,7 @@ Stage 2 agent spawn:
   ```
   Hallucinating or paraphrasing these is a discipline failure — the orchestrator parses them. Pasted output contradicting the "done" claim (FAILED in test tail, blocking mypy errors per the type-check gate, empty diff) results in `impl_failed`, and a report missing a row for any gate named in the session's quality-gate sentence draws the same `impl_failed` disposition.
 
+<!-- el-end: impl.following-completion-artifacts-block-verbatim -->
 <!-- el: impl.gate-orchestrator-completion -->
 ### Step 2.5: Orchestrator Completion Gate
 
@@ -594,6 +610,7 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
 <!-- el: impl.gate-helper-missing -->
 **Gate helper missing (#2436).** A fence that cannot resolve `gate_key.py` prints one line ending `run scripts/install-skills.sh` and exits non-zero before touching any gate path; it never falls back to a `$CW_SESSION`- or `$$`-keyed path. In headless mode EXIT `blocked` with `blocker.reason: "impl_failed"` and `blocker.details: "Step 2.5 gate setup: gate_key.py not found — run scripts/install-skills.sh"`, so the orchestrator can self-resolve (ADR-0020) instead of reading a generic implementation failure.
 
+<!-- el-begin: impl.absent-owner-record -->
 <!-- el: impl.absent-owner-record -->
 **Absent owner record (#2676).** A gate path that exists while `cw-gate-owner-$GATE_KEY.json` does not is treated as unowned: `--claim` publishes a record and the self-heal then removes the path. This keeps operator resolution R3 on #2436 (a dead or absent owner allows the self-heal), which is the basis for the keep. A record-less path arises from external removal of the record (an operator, a `/var/tmp` age cleaner) and also whenever gates 2-4 use the paths after the setup claim is released, because those fences re-derive the paths and do not claim. Refusing instead would block ordinary re-runs and leave the operator no record to remove, and a recovery subcommand or an mtime/cwd heuristic is mechanism this gate does not carry. Residual risk, accepted: a live run with no record can lose its gate path to a concurrent claim for the same branch; claim coverage for gates 2-4 is filed as follow-up debt. `--claim` also prints a per-claim generation that the cleanup hands back to `--release`, so a cleanup from an older claim never removes a newer claim's record; the generation protects the record, not the gate paths.
 
@@ -610,6 +627,7 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
    > "Step 2.5 gate 1: why the empty-diff check is not the only line of defence (#1870)".
    > Nothing changes here; this gate stays the first and cheapest catch.
 
+<!-- el-end: impl.absent-owner-record -->
 <!-- el: impl.file-set-is-within-plan-s -->
 2. **File set is within the plan's enumeration** (mechanical, not prose — #1779):
    ```bash
@@ -795,6 +813,7 @@ This step replaces "trust the agent's `Could work be incomplete?: NO`" with "ver
 
 **Headless:** AUTO-CONTINUE always (never gate, regardless of scope). On BLOCK or 2x failure → EXIT `blocked` with `blocker.reason: "impl_failed"`.
 
+<!-- el-begin: impl.implementation-failure-escalation -->
 <!-- el: impl.implementation-failure-escalation -->
 ### Implementation Failure Escalation
 
@@ -805,6 +824,8 @@ escalation (interactive only)". Read it now if this is an interactive run and
 either condition applies. In headless mode neither branch applies: escalate
 exclusively through the sentinel's `blocker` field.
 
+<!-- el-end: impl.implementation-failure-escalation -->
+<!-- el-begin: impl.marker-s2-completion -->
 <!-- el: impl.marker-s2-completion -->
 ### S2 Completion Marker
 
@@ -822,6 +843,8 @@ The Stage 2 agent prompt MUST include this trailer requirement, added to the "In
 
 ---
 
+<!-- el-end: impl.marker-s2-completion -->
+<!-- el-begin: impl.stage-2-completion -->
 <!-- el: impl.stage-2-completion -->
 ## Stage 2 Completion (headless only)
 
@@ -829,9 +852,12 @@ After all Stage 2 steps complete in headless mode (branch pushed, gates passed, 
 
 **Only emit this sentinel when invoked as a standalone `/auto-dev-impl <ticket-id> --headless` command. Do NOT emit when running as part of the interactive monolith chain (`auto-dev.md` owns the sentinel in that context).**
 
+<!-- el-end: impl.stage-2-completion -->
+<!-- el-begin: impl.emit-through-cw-then-frame -->
 <!-- el: impl.emit-through-cw-then-frame -->
 **Emit through cw, then frame (#2382).** Record the payload with `cw result emit -` per the *Sentinel emit rule* in `.claude/commands/auto-dev.md` — run it from the cw session worktree root, fix every `field.path: message` error it reports and re-run until it exits 0, and only then frame the recorded JSON. Recording is not framing (#1890): the literal `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` frame, wrapping the same JSON, MUST be the final characters of this same message. Never narrate emission as a separate act from performing it.
 
+<!-- el-end: impl.emit-through-cw-then-frame -->
 <!-- el: impl.no-interactive-escalation-ever -->
 **No interactive escalation, ever (#1890).** In headless mode there is no listener. Never escalate an implementation blocker (BLOCK, `impl_not_pushed`, `impl_failed`, `plan_scope_drift`, `agent_block`) by asking a question and ending your turn. Escalate exclusively via this sentinel's `blocker` field with `status: "blocked"`.
 

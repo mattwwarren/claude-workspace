@@ -21,6 +21,7 @@ is no TTY: **every interactive gate that would call `AskUserQuestion` is
 forbidden.** Each gate below carries an explicit `**Headless:**` override — read
 it in place of the interactive prompt.
 
+<!-- el-begin: prep-pr.universal-rule -->
 <!-- el: prep-pr.universal-rule -->
 **The universal rule:** a gate collapses to one of
 
@@ -52,6 +53,7 @@ behavior — the orchestrator reads the block and resolves it (escalating to the
 
 ---
 
+<!-- el-end: prep-pr.universal-rule -->
 <!-- el: prep-pr.validate-preconditions -->
 ## Step 0: Validate Preconditions
 
@@ -87,6 +89,7 @@ Check that we're ready to prepare a PR:
    amend) and continue. Committing pending work is non-destructive and matches
    Step 8.1; do not abort on this.
 
+<!-- el-begin: prep-pr.sync-with-base-branch -->
 <!-- el: prep-pr.sync-with-base-branch -->
 ## Step 1: Sync with Base Branch
 
@@ -144,6 +147,8 @@ The fetch comes first, in the same fence: the probe never fetches, and a stale `
   file list). Do NOT attempt an autonomous conflict resolution — a mis-resolved
   merge is worse than a surfaced block.
 
+<!-- el-end: prep-pr.sync-with-base-branch -->
+<!-- el-begin: prep-pr.detect-quality-gates -->
 <!-- el: prep-pr.detect-quality-gates -->
 ## Step 2: Detect Quality Gates
 
@@ -192,6 +197,7 @@ This records the initial diff metrics (files, additions, deletions, directories)
 
 If `--skip-review` is in arguments → jump to **Step 7**.
 
+<!-- el-end: prep-pr.detect-quality-gates -->
 <!-- el: prep-pr.run-self-review -->
 ## Step 4: Run Self-Review
 
@@ -353,6 +359,7 @@ After all gates pass:
   `details:` the remaining-issues summary). Do NOT "ship anyway" past unresolved
   MUST_FIX issues and do NOT proceed to Step 8.
 
+<!-- el-begin: prep-pr.clean-mode-convergence -->
 <!-- el: prep-pr.clean-mode-convergence -->
 ### Clean-mode convergence (#2787)
 
@@ -363,6 +370,7 @@ Only when `cw review converge config` reports `clean`; when it reports `blocking
 - **Releasing a stop:** a `/prep-pr` stop is released by the user re-running `/prep-pr` after a change. `cw review converge operator-settle` is the dispatch orchestrator's ingress and is not part of the standalone path.
 - **Final SHA:** run `cw review converge verify-tip --ledger .cw/prep-pr-convergence.json` before Step 8 ship; a non-zero exit means another round, not a ship.
 
+<!-- el-end: prep-pr.clean-mode-convergence -->
 <!-- el: prep-pr.ship -->
 ## Step 8: Ship
 
@@ -459,6 +467,7 @@ Output is the canonical Ship Summary (markdown). For programmatic callers (e.g. 
 - Report the failed checks verbatim to the user
 - Do NOT claim success
 - Diagnose: most failures mean a /ship-it sub-step was skipped (no push, no PR, no auto-merge). Re-run the missing step rather than papering over it.
+<!-- el-begin: prep-pr.exception-automerge-enabled -->
 <!-- el: prep-pr.exception-automerge-enabled -->
 - **Exception — `automerge-enabled`:** if this check shows as optional (`○`) rather than required (`✗`) in the Ship Summary, `.claude/project-config.yaml` has declared `pr.auto_merge: false` and the script already downgraded it — this is the repo's deliberate, permanent state, not a skipped step. Do NOT run `gh pr merge --auto` in response to it: on a repo without branch protection this command merges immediately (unreviewed, without waiting for CI) rather than arming a pending merge (#2046). Only retry sub-steps behind checks still marked required (`✗`).
 - **Headless:** after attempting the missing sub-step once, if `verify` still
@@ -504,6 +513,7 @@ Print the Ship Summary from Step 9 as the final message. Add cycle-level context
 
 ---
 
+<!-- el-end: prep-pr.exception-automerge-enabled -->
 <!-- el: prep-pr.loop-termination-conditions -->
 ## Loop Termination Conditions
 
