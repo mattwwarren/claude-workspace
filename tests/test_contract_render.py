@@ -516,6 +516,13 @@ def test_missing_core_doc_raises(tmp_path: Path) -> None:
         render_stage_prompt("plan", CODEX_BACKEND, docs_root=root)
 
 
+def test_undecodable_core_doc_raises(tmp_path: Path) -> None:
+    root = _docs_copy(tmp_path)
+    (root / "auto-dev-impl.md").write_bytes(b"\xff\xfe not utf-8")
+    with pytest.raises(RenderError, match=r"auto-dev-impl\.md"):
+        render_stage_prompt("impl", CODEX_BACKEND, docs_root=root)
+
+
 def test_scan_violation_in_a_core_doc_raises(tmp_path: Path) -> None:
     lines = _raw("auto-dev-plan.md").split("\n")
     drop = next(i for i, line in enumerate(lines) if line.startswith("<!-- el-end:"))
