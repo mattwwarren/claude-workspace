@@ -35,8 +35,8 @@ the working tree, so a bare repository would report a union-merged file as a
 conflict.
 
 The module is a leaf: it imports only :mod:`cw._git`. :func:`resolve_base`,
-:func:`git_bounded` and :class:`GitFailedError` are public for
-``cw.changelog_sync``.
+:func:`already_merged`, :func:`failure_detail`, :func:`git_bounded` and
+:class:`GitFailedError` are public for ``cw.changelog_sync``.
 """
 
 from __future__ import annotations
@@ -118,7 +118,7 @@ def git_bounded(
         raise GitFailedError(msg) from exc
 
 
-def _failure_detail(argv0: str, result: subprocess.CompletedProcess[str]) -> str:
+def failure_detail(argv0: str, result: subprocess.CompletedProcess[str]) -> str:
     """``git <argv0> exited <rc>: <first stderr line>``, capped."""
     lines = (result.stderr or "").strip().splitlines()
     reason = lines[0] if lines else "no output"
@@ -148,7 +148,7 @@ def merge_tree(
     except GitFailedError as exc:
         return _unavailable_tree(str(exc))
     if result.returncode not in {_MERGE_TREE_CLEAN_RC, _MERGE_TREE_CONFLICT_RC}:
-        return _unavailable_tree(_failure_detail("merge-tree", result))
+        return _unavailable_tree(failure_detail("merge-tree", result))
     entries = result.stdout.split("\0")
     tree = entries[0].strip()
     if not FULL_COMMIT_ID_RE.fullmatch(tree) or entries[-1]:
@@ -170,7 +170,7 @@ def resolve_base(worktree: Path, base: str, timeout: float) -> str:
     return sha
 
 
-def _already_merged(worktree: Path, base_sha: str, timeout: float) -> bool:
+def already_merged(worktree: Path, base_sha: str, timeout: float) -> bool:
     """Whether *base_sha* is an ancestor of HEAD; raise on a git error."""
     result = git_bounded(
         worktree, ["merge-base", "--is-ancestor", base_sha, "HEAD"], timeout
@@ -179,7 +179,7 @@ def _already_merged(worktree: Path, base_sha: str, timeout: float) -> bool:
         return True
     if result.returncode == _NOT_ANCESTOR_RC:
         return False
-    raise GitFailedError(_failure_detail("merge-base", result))
+    raise GitFailedError(failure_detail("merge-base", result))
 
 
 def probe_default_merge(
@@ -199,7 +199,7 @@ def probe_default_merge(
     except GitFailedError as exc:
         return MergeProbe("unavailable", None, (), str(exc))
     try:
-        merged = _already_merged(worktree, base_sha, timeout)
+        merged = already_merged(worktree, base_sha, timeout)
     except GitFailedError as exc:
         return MergeProbe("unavailable", base_sha, (), str(exc))
     if merged:

@@ -542,7 +542,13 @@ def _evaluate_merge(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 0
-    merged_text = _read_blob(root, tree, rel_path) or ""
+    merged_text = _read_blob(root, tree, rel_path)
+    if merged_text is None:
+        print(
+            f"{_PREFIX}: note: merge result has no {rel_path}; nothing to compare.",
+            file=sys.stderr,
+        )
+        return 0
     violations = check_merge_preserves_released(
         main_text.splitlines(), merged_text.splitlines()
     )

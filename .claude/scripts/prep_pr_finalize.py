@@ -1016,8 +1016,9 @@ def _first_line(text: str, fallback: str) -> str:
 
 def _read_base_ref(pr_number: int, repo_path: Path) -> tuple[str, str]:
     """``(baseRefName, "")`` or ``("", reason)`` from ``gh pr view``."""
-    view = run(
-        ["gh", "pr", "view", str(pr_number), "--json", "baseRefName"], cwd=repo_path
+    view = _bounded(
+        ["gh", "pr", "view", str(pr_number), "--json", "baseRefName"],
+        cwd=repo_path,
     )
     if view.returncode != 0:
         reason = _first_line(view.stderr, f"exited {view.returncode}")
@@ -1130,7 +1131,18 @@ def check_merge_freeze(
     script = repo_path / MERGE_FREEZE_SCRIPT
     if not script.is_file() or not (repo_path / MERGE_FREEZE_CHANGELOG).is_file():
         return MergeFreezeCheck("skipped", "")
-    base, error = _read_base_ref(pr_number, repo_path)
+    try:
+        base, error = _read_base_ref(pr_number, repo_path)
+    except subprocess.TimeoutExpired:
+        return MergeFreezeCheck(
+            "skipped",
+            f"gh pr view --json baseRefName timed out after "
+            f"{MERGE_FREEZE_TIMEOUT_SECONDS:g}s",
+        )
+    except OSError as exc:
+        return MergeFreezeCheck(
+            "skipped", f"gh pr view --json baseRefName could not run: {exc}"
+        )
     if not base:
         return MergeFreezeCheck("skipped", error)
     return _run_freeze_script(script, repo_path, base, head_sha)

@@ -44,6 +44,8 @@ from cw.changelog_rebuild import (
 from cw.merge_probe import (
     PROBE_TIMEOUT_SECONDS,
     GitFailedError,
+    already_merged,
+    failure_detail,
     git_bounded,
     merge_tree,
     resolve_base,
@@ -83,8 +85,6 @@ _MISSING_BLOB_MARKERS: Final = (
     " does not exist in ",
     " exists on disk, but not in ",
 )
-_IS_ANCESTOR_RC: Final = 0
-_NOT_ANCESTOR_RC: Final = 1
 _DETAIL_LIMIT: Final = 300
 
 
@@ -139,19 +139,13 @@ def _answer(
     )
 
 
-def _failure_detail(argv0: str, result: subprocess.CompletedProcess[str]) -> str:
-    lines = (result.stderr or "").strip().splitlines()
-    reason = lines[0] if lines else "no output"
-    return f"git {argv0} exited {result.returncode}: {reason}"
-
-
 def _checked(
     worktree: Path, argv: list[str], timeout: float
 ) -> subprocess.CompletedProcess[str]:
     """:func:`git_bounded`, raising :class:`GitFailedError` on a non-zero exit."""
     result = git_bounded(worktree, argv, timeout)
     if result.returncode != 0:
-        raise GitFailedError(_failure_detail(argv[0], result))
+        raise GitFailedError(failure_detail(argv[0], result))
     return result
 
 
@@ -210,14 +204,6 @@ def _show_changelog(worktree: Path, rev: str, timeout: float) -> str | None:
         ) from exc
 
 
-def _is_ancestor(worktree: Path, base_sha: str, timeout: float) -> bool:
-    argv = ["merge-base", "--is-ancestor", base_sha, "HEAD"]
-    result = git_bounded(worktree, argv, timeout)
-    if result.returncode in {_IS_ANCESTOR_RC, _NOT_ANCESTOR_RC}:
-        return result.returncode == _IS_ANCESTOR_RC
-    raise GitFailedError(_failure_detail("merge-base", result))
-
-
 def _plan_move(
     worktree: Path, base: str, base_sha: str, head: str, tree: str, timeout: float
 ) -> ChangelogSync | _Move:
@@ -231,7 +217,7 @@ def _plan_move(
     )
     if main is None or not changed:
         return _answer("clean", base_sha, head)
-    if _is_ancestor(worktree, base_sha, timeout):
+    if already_merged(worktree, base_sha, timeout):
         return _answer(
             "refused",
             base_sha,
@@ -303,9 +289,9 @@ def _merge_in_progress(worktree: Path, timeout: float) -> bool:
     result = git_bounded(worktree, argv, timeout)
     if result.returncode == 0:
         return True
-    if result.returncode == _NOT_ANCESTOR_RC:
+    if result.returncode == 1:
         return False
-    raise GitFailedError(_failure_detail("rev-parse", result))
+    raise GitFailedError(failure_detail("rev-parse", result))
 
 
 def _abort(worktree: Path, move: _Move, detail: str, timeout: float) -> ChangelogSync:
