@@ -13,6 +13,7 @@ import subprocess
 from typing import TYPE_CHECKING
 
 import pytest
+from cw.codex_fix_loop.gates import GateFailure, GatePlan
 
 from cw._git import run_git as real_run_git
 from cw.codex_fix_loop import commit as commit_module
@@ -26,6 +27,7 @@ from cw.codex_fix_loop.hook_failure import (
     repair_excerpt,
 )
 from cw.codex_review import (
+    CODEX_FIX_GATE_FAILED,
     CODEX_FIX_GROWTH_BUDGET,
     CODEX_FIX_HOOK_FAILED,
     CODEX_FIX_SCOPE_DRIFT,
@@ -604,3 +606,56 @@ class TestHookRepairTurn:
 
         assert _blocker_reason(out) == CODEX_FIX_HOOK_FAILED
         assert runner.fix_calls == 2
+
+    def test_repaired_cycle_is_gated_again_with_the_same_pinned_plan(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3056: the recommit re-runs the pinned gates, never the detector."""
+        plan = GatePlan(script=None, gates=(), why_unavailable=None)
+        planned: list[GatePlan] = []
+        run_with: list[GatePlan] = []
+
+        def _plan(*_args: object, **_kwargs: object) -> GatePlan:
+            planned.append(plan)
+            return plan
+
+        def _run(gate_plan: GatePlan, **_kwargs: object) -> None:
+            run_with.append(gate_plan)
+
+        monkeypatch.setattr(commit_module, "plan_cycle_gates", _plan)
+        monkeypatch.setattr(commit_module, "run_cycle_gates", _run)
+
+        out, _worktree_path, runner = self._loop(
+            make_git_repo, "wt-repair-gates", _LINT_HOOK, [_MARKER_FIX, _CLEAN_REPAIR]
+        )
+
+        assert out.status != "blocked", out
+        assert runner.fix_calls == 2
+        assert len(planned) == 1
+        assert run_with == [plan, plan]
+
+    def test_failing_gate_after_the_repair_parks_and_commits_nothing(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = {"n": 0}
+
+        def _run(_plan: GatePlan, **_kwargs: object) -> GateFailure | None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return None
+            return GateFailure("red", "lint", "ruff", 1, 0.1, "still red", None)
+
+        monkeypatch.setattr(commit_module, "run_cycle_gates", _run)
+
+        out, worktree, runner = self._loop(
+            make_git_repo,
+            "wt-repair-gate-red",
+            _LINT_HOOK,
+            [_MARKER_FIX, _CLEAN_REPAIR],
+        )
+
+        assert _blocker_reason(out) == CODEX_FIX_GATE_FAILED
+        assert runner.fix_calls == 2
+        head, _count, origin_tip = _heads(worktree)
+        assert head == origin_tip
+        assert git_in(worktree, "status", "--porcelain") == ""

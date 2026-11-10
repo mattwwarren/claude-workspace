@@ -922,9 +922,11 @@ _SCOPE_STAGE = {
 }
 _CODEX_STAGE_TICKETS = {"plan": 3060, "impl": 3061, "finalize": 3062}
 # #3055 closed with RFC 0018 S3: its codex review cells moved to #3057 (A2).
-_CODEX_REVIEW_TICKETS = frozenset({3056, 2464, 3063, 3057})
+_CODEX_REVIEW_TICKETS = frozenset({3318, 2464, 3063, 3057})
 #: The S3 ticket; no cell may defer to it once it lands (#3055).
 _S3_TICKET = 3055
+#: The A1 ticket; no cell may defer to it once it lands (#3056).
+_A1_TICKET = 3056
 
 #: Seeded floor (R4, R5): (id, backend, disposition, ticket or None).
 _NAMED_GAP_DISPOSITIONS = (
@@ -1156,12 +1158,13 @@ def test_codex_cells_follow_the_stage_ticket_map() -> None:
 
 
 def test_no_cell_defers_to_the_closing_ticket() -> None:
-    """#3055 resolved every cell that cited it; none may cite it again."""
+    """#3055 and #3056 resolved every cell that cited them; none may again."""
     for element_id, element in _manifest().elements.items():
         for backend in _BACKENDS:
             cell = element.cells[backend]
             assert not isinstance(cell, str), (element_id, backend)
-            assert _ticket_of(cell) != _S3_TICKET, (element_id, backend)
+            for ticket in (_S3_TICKET, _A1_TICKET):
+                assert _ticket_of(cell) != ticket, (element_id, backend)
 
 
 def test_orch_governs_table_is_complete() -> None:

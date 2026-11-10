@@ -18,7 +18,7 @@ import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
@@ -3254,3 +3254,129 @@ def test_signal_write_failure_never_changes_the_review(
     revert_mock.assert_not_called()
     assert signal_mock.call_count == (1 if patch_post else 2)
     assert len(_completed_events()) == 2
+
+
+# ---------------------------------------------------------------------------
+# #3056: stage facts are stamped once, between the review and the door
+# ---------------------------------------------------------------------------
+
+_FIX_COMMIT_SUBJECT = "fix(review): codex fix cycle 1 — tidy"
+_GATES_NONE_FRICTION = "codex_fix_gates_none_detected"
+
+
+def _fix_commit(worktree: Path) -> str:
+    (worktree / "fix.py").write_text("x = 1\n", encoding="utf-8")
+    git_in(worktree, "add", "fix.py")
+    git_in(worktree, "commit", "-m", _FIX_COMMIT_SUBJECT)
+    return git_in(worktree, "rev-parse", "HEAD")
+
+
+def _persisted_after_run(
+    worktree: Path, sid: str, task: TicketTask, **patches: object
+) -> dict[str, object]:
+    _seed_session(sid)
+    result = make_blocked(
+        ticket_id=task.ticket_id,
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+    loop = patches.get("loop") or (lambda **_kw: (result, None))
+    with (
+        patch("cw.codex_background.run_review_with_fix_loop", side_effect=loop),
+        patch("cw.codex_background._record_orchestrator_event"),
+        patch("cw.codex_background._post_review_comment"),
+        patch(
+            "cw.codex_background.resume_pending_confirm",
+            return_value=patches.get("resumed"),
+        ),
+    ):
+        _run(sid=sid, task=task, worktree=worktree, client=_client(worktree))
+    persisted = load_state().sessions[0].last_result
+    assert persisted is not None
+    return persisted
+
+
+def test_review_result_carries_the_stamped_stage_facts(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-3056-stamp")
+    (worktree / ".cw").mkdir()
+    (worktree / ".cw" / "plan.md").write_text("# plan\n", encoding="utf-8")
+    fix = _fix_commit(worktree)
+    task = TicketTask(
+        ticket_id="T-3056", client="test", stage=Stage.REVIEW, plan_source="generated"
+    )
+
+    persisted = _persisted_after_run(worktree, "bg-3056-stamp", task)
+
+    assert persisted["plan_source"] == "generated"
+    assert persisted["commits"] == [fix]
+    assert persisted["fork_point_sha"] == git_in(worktree, "rev-parse", "origin/main")
+
+
+def test_review_result_without_a_plan_degrades_to_none_with_a_token(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-3056-noplan")
+    task = TicketTask(ticket_id="T-3056", client="test", stage=Stage.REVIEW)
+
+    persisted = _persisted_after_run(worktree, "bg-3056-noplan", task)
+
+    assert persisted["plan_source"] == "none"
+    assert persisted["commits"] == []
+    friction = persisted["friction_highlights"]
+    assert isinstance(friction, list)
+    assert any(str(t).startswith("codex_plan_source_none") for t in friction)
+
+
+def test_resumed_confirm_result_is_stamped_too(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-3056-resumed")
+    fix = _fix_commit(worktree)
+    task = TicketTask(ticket_id="T-3056", client="test", stage=Stage.REVIEW)
+    returned = make_blocked(
+        ticket_id="T-3056",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+    resumed = CleanConfirmOutcome(
+        result=returned, verdict=None, reviewer_label="Codex", fix_loop_footer=False
+    )
+
+    persisted = _persisted_after_run(worktree, "bg-3056-resumed", task, resumed=resumed)
+
+    assert persisted["commits"] == [fix]
+
+
+def test_gate_tokens_ride_the_final_result_exactly_once(
+    tmp_config_dir: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+) -> None:
+    worktree, _origin = make_git_repo_with_origin("wt-bg-3056-tokens")
+    task = TicketTask(ticket_id="T-3056", client="test", stage=Stage.REVIEW)
+    result = make_blocked(
+        ticket_id="T-3056",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+    seen: list[object] = []
+
+    def _loop(**kwargs: Any) -> tuple[AutoDevResult, None]:
+        tokens = kwargs["gate_tokens"]
+        seen.append(tokens)
+        tokens.append(_GATES_NONE_FRICTION)
+        return result, None
+
+    persisted = _persisted_after_run(worktree, "bg-3056-tokens", task, loop=_loop)
+
+    assert isinstance(seen[0], list)
+    friction = persisted["friction_highlights"]
+    assert isinstance(friction, list)
+    assert friction.count(_GATES_NONE_FRICTION) == 1
