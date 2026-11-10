@@ -48,6 +48,10 @@ ACTIVE/IDLE sessions with surface refs exist — a hiccup must not mass-reap.
 The roster is read lockless into a tick-scoped snapshot before
 ``sessions_lock`` (#2550); a stale or missing snapshot is treated like an
 outage too, unconditionally: the tick skips every roster-dependent sweep.
+A session spawned or resumed within 15 s of the capture, or after it, may have
+a ref the snapshot cannot list, so absence from it is never read as death: the
+phantom check, concierge recipes 1 and 2 and the mid-turn usage-limit act's
+stop all spare it (M1).
 
 See ADR-0005 (single state lock) and ADR-0006 (reaping is gated by an
 authority) for the invariants this module enforces.

@@ -674,6 +674,7 @@ class TestRunPostGuardSweeps:
         clients = {"client-a": ClientConfig(name="client-a", workspace_path=Path())}
         shipped_probes = MagicMock()
         scope_probes = new_scope_probes()
+        captured_at = datetime(2026, 1, 1, 0, 0, 3, tzinfo=UTC)
 
         reverted = locked_sweeps._run_post_guard_sweeps(
             CwState(sessions=[]),
@@ -687,6 +688,7 @@ class TestRunPostGuardSweeps:
             deferred=DeferredReconcileJobs(),
             scope_probes=scope_probes,
             shipped_probes=shipped_probes,
+            roster_captured_at=captured_at,
         )
 
         assert reverted == ["T-9"]
@@ -709,6 +711,10 @@ class TestRunPostGuardSweeps:
             "client-a"
         }
         assert kwargs["detect_and_park_mid_turn_usage_limits"]["clients"] is effective
+        assert (
+            kwargs["detect_and_park_mid_turn_usage_limits"]["roster_captured_at"]
+            == captured_at
+        )
 
 
 class TestWithoutActsInFlight:
