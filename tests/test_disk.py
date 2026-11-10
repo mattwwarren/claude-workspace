@@ -16,6 +16,7 @@ from cw.disk import (
     check_inode_usage,
     effective_min_free_inodes,
     inodes_exhausted,
+    same_filesystem,
 )
 
 
@@ -162,3 +163,49 @@ class TestInodeFloor:
             )
             is exhausted
         )
+
+
+class TestSameFilesystem:
+    """#2682: same-device probe for the fallback-mount gate."""
+
+    def test_same_path_is_same_filesystem(self, tmp_path: Path) -> None:
+        assert same_filesystem(tmp_path, tmp_path) is True
+
+    def test_missing_path_resolves_via_existing_ancestor(self, tmp_path: Path) -> None:
+        assert same_filesystem(tmp_path / "not" / "yet", tmp_path) is True
+
+    def test_differing_device_returns_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        real_stat = os.stat
+
+        def fake_stat(path: str | os.PathLike[str], **kwargs: bool) -> os.stat_result:
+            st = real_stat(path, **kwargs)
+            if Path(path) == b:
+                fields = list(st)
+                fields[2] = st.st_dev + 1
+                return os.stat_result(fields[:10])
+            return st
+
+        monkeypatch.setattr(os, "stat", fake_stat)
+        assert same_filesystem(a, b) is False
+
+    def test_oserror_propagates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_stat = os.stat
+
+        def failing_stat(
+            path: str | os.PathLike[str], **kwargs: bool
+        ) -> os.stat_result:
+            if Path(path) == tmp_path:
+                raise PermissionError(str(path))
+            return real_stat(path, **kwargs)
+
+        monkeypatch.setattr(os, "stat", failing_stat)
+        with pytest.raises(OSError, match="tmp"):
+            same_filesystem(tmp_path, tmp_path)

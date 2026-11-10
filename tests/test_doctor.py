@@ -9913,6 +9913,35 @@ class TestCheckWorkerTmpPressure:
         assert "worker-tmpdir-scope" in by_name
         assert by_name["worker-tmpdir-scope"].ok is True
 
+    def test_worker_tmp_fallback_registered_in_run_doctor(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """run_doctor() includes the #2682 worker-tmp-fallback check."""
+        from cw.disk import DiskUsage, InodeUsage
+
+        _stub_claude_version_ok(monkeypatch)
+        monkeypatch.setattr(
+            "cw.doctor.worker_tmpdir.get_native_daemon_client",
+            lambda: mock_native_daemon,
+        )
+        monkeypatch.setattr(
+            "cw.doctor.worker_tmp_fallback.check_disk_usage",
+            lambda _path: DiskUsage(total_gb=500.0, free_gb=250.0),
+        )
+        monkeypatch.setattr(
+            "cw.doctor.worker_tmp_fallback.check_inode_usage",
+            lambda _path: InodeUsage(total_inodes=1_000_000, free_inodes=900_000),
+        )
+
+        report = run_doctor()
+
+        by_name = {c.name: c for c in report.checks}
+        assert "worker-tmp-fallback" in by_name
+        assert by_name["worker-tmp-fallback"].ok is True
+
 
 class TestPendingWorktreeOccupiedWedge:
     """``wedge/pending-worktree-occupied`` wiring and reap exclusion (#2516)."""

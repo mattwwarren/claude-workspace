@@ -394,7 +394,10 @@ adds a claim-time preflight probe of each client's worktree-base mount:
 when free space drops below `disk_pressure_min_free_gb` (default `5.0`
 GB), that client is held PENDING for the tick with
 `skip_reason=disk_pressure_gate` instead of risking a session spawning
-onto an already-filling disk.
+onto an already-filling disk. The mount holding the shared `~/.cw/tmp`
+fallback dir is also probed when it differs from the client's worktree-base
+mount (#2682); pressure there holds every client PENDING, and
+`disk_pressure_gate_enabled: false` bypasses it too.
 
 To dispatch in a planned order rather than raw priority, produce a
 DispatchPlan first: `cw dev-queue plan -c <client>` spawns a one-shot
@@ -4002,6 +4005,34 @@ backlog drains over several runs. Set `sessions_auto_prune_enabled: false` in
   counts toward the `state_io_fraction` the decision rule above reads.
 - `cw session prune` remains the manual path (no `--max`, everything eligible
   in one run) and the decision rule's remediation when auto-prune is disabled.
+
+### Fallback tmp retention (#2682)
+
+Workers whose per-worktree env block is not honored fall back to the shared
+`~/.cw/tmp` (#2672). The dispatch loop sweeps that dir after each tick, gated by
+`worker_tmp_fallback_retention_interval_minutes` (default 60) through the
+`worker_tmp_retention.json` sidecar. Removal rules: a file or symlink goes when
+the newer of its mtime and ctime is older than `worker_tmp_fallback_retention_days`
+(default 7) and no live process holds it open or as cwd. A directory goes only
+if it was stale at scan time and is empty when its turn comes. Symlinks are
+unlinked, never followed. The root is never removed, and entries on another
+device are skipped. A run is capped at 5000 removals.
+
+- *Ownership:* on Linux, `/proc/<pid>/cwd` and `/proc/<pid>/fd/*` protect the
+  path and its ancestors up to the root. Without `/proc` the sweep is age-only,
+  and the sidecar records `proc_guard: false`. Residual risk: an unheld file
+  re-read by path after more than the retention window of idleness. A bound
+  unix-socket file is never removed: the `/proc` fd guard cannot see a socket as
+  a path, so the sweep keeps it regardless of age.
+- *Disk pressure:* the dispatch disk-pressure gate also probes this mount when it
+  is not the worktree-base mount. Pressure here holds every client PENDING. The
+  WARN line and the skip and bypass events name the mount (`disk_gb_mount`,
+  `disk_inode_mount`).
+- *Doctor:* `cw doctor` check `worker-tmp-fallback` reports the mount's free GB
+  and inodes, a bounded tree measurement, and the last run. It is `ok=false` on a
+  shortfall, and warns only when the last retention run failed.
+- Disable with `worker_tmp_fallback_retention_enabled: false`. Retention is not
+  gated by `reap_policy`.
 
 **Tie-in to the watchdog.** A `cw dev-queue serve` wedged on `.sessions.lock`
 stops emitting `dispatch.tick`. The mainstream watchdog's dead-man's switch

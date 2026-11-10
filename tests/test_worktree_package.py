@@ -140,6 +140,7 @@ _FROZEN_NAMES = [
     "probe_checked_out_branch",
     "reconcile_result_scope",
     "remove_worktree",
+    "resolve_fallback_worker_tmpdir",
     "resolve_scope_guard_default_branch",
     "resolve_task_worktree",
     "resolve_worker_tmpdir",

@@ -59,6 +59,7 @@ from cw.review_debt_filing import CloseOutcome, DebtCloseState, sweep_debt_close
 from cw.session_auto_prune import auto_prune_sessions
 from cw.shipped_pr_signal import scan_shipped_red_prs
 from cw.sprint import GhClient
+from cw.worker_tmp_retention import auto_sweep_fallback_tmp
 from cw.worktree import TickFetchGate, _git_dir
 
 if TYPE_CHECKING:
@@ -670,6 +671,22 @@ def _run_sessions_auto_prune_guarded(config: OrchestratorConfig) -> None:
         _log.exception("sessions auto-prune failed during tick; continuing")
 
 
+def _run_worker_tmp_retention_guarded(config: OrchestratorConfig) -> None:
+    """Run the ``~/.cw/tmp`` fallback retention sweep, self-gated (#2682).
+
+    Same contract as :func:`_run_sessions_auto_prune_guarded`: called with no
+    guarded lock held, lock-discipline errors are re-raised, and any operational
+    failure is logged so the loop keeps ticking. The sweep records its own
+    failure in the sidecar, so a missed run only delays the next one.
+    """
+    try:
+        auto_sweep_fallback_tmp(config)
+    except (CwLockReentrancyError, CwLockOrderError):
+        raise
+    except (CwError, OSError, ValueError):
+        _log.exception("fallback tmp retention failed during tick; continuing")
+
+
 def _run_post_tick_steps_guarded(
     config: OrchestratorConfig, stale_watchdog_next_scan_at: datetime | None
 ) -> datetime | None:
@@ -678,13 +695,14 @@ def _run_post_tick_steps_guarded(
     Folded into one helper so ``_run_dispatch_loop_body`` stays inside the
     PLR0915 statement budget (#2965). Order is the stale-client watchdog
     (#2076: it must scan after the tick records its events), then the sessions
-    auto-prune, which needs no particular position beyond running with no
-    guarded lock held.
+    auto-prune and the fallback tmp retention (#2682), which need no particular
+    position beyond running with no guarded lock held.
     """
     next_scan_at = _run_stale_client_watchdog_guarded(
         config, stale_watchdog_next_scan_at
     )
     _run_sessions_auto_prune_guarded(config)
+    _run_worker_tmp_retention_guarded(config)
     return next_scan_at
 
 
