@@ -92,8 +92,18 @@ _STAGE_DOCS: dict[str, tuple[str, ...]] = {
 }
 _SHIP_IT_DOC = "ship-it.md"
 
-#: The RFC 0017 ticket (D-7 switch): a codex cell deferred to it is not rendered.
+#: The RFC 0017 cells that remain deferred on codex (D-7 switch). The C3
+#: finalize cells use ticket 3062, but only these two IDs are RFC 0017
+#: deferrals; other 3062 cells are separate C3 work and remain renderable.
 RFC_0017_TICKET = 3216
+_CODEX_FINALIZE_TICKET = 3062
+_RFC_0017_DEFERRAL_IDS = frozenset(
+    {
+        "review.review-debt-filing",
+        "finalize.gate-review-debt-re-file",
+        "finalize.review-sign-off",
+    }
+)
 
 #: The ticket id a render carries when the caller names none.
 TICKET_PLACEHOLDER = "<ticket-id>"
@@ -215,7 +225,13 @@ def needed_element_ids(manifest: Manifest, stage: str, backend: str) -> tuple[st
 
 def _is_rfc_0017_deferral(manifest: Manifest, element_id: str, backend: str) -> bool:
     cell = manifest.elements[element_id].cells.get(backend)
-    return isinstance(cell, DeferredDisposition) and cell.ref.number == RFC_0017_TICKET
+    return isinstance(cell, DeferredDisposition) and (
+        cell.ref.number == RFC_0017_TICKET
+        or (
+            element_id in _RFC_0017_DEFERRAL_IDS
+            and cell.ref.number == _CODEX_FINALIZE_TICKET
+        )
+    )
 
 
 def _body(lines: list[str], begin_line: int, end_line: int) -> str:

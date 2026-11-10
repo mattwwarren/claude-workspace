@@ -4,7 +4,9 @@ Split out of :mod:`cw.codex_fix_loop._driver` (#2888). Owns the concern "run one
 review pass over the diff", including prompt-size handling: cycle 0's
 ``run_review`` under the lane's prompt limit (#2867), the delta re-review a fix
 cycle runs afterwards (#1837, #2877), and the named non-retryable
-``agent_block`` park for a prompt the shard planner cannot fit.
+``agent_block`` park for a prompt the shard planner cannot fit. With a repo
+review engine configured (#3216), both passes delegate to
+:func:`_run_engine_pass` instead, which runs a full-diff engine round.
 
 Nothing here imports :mod:`cw.codex_fix_loop._driver`; the driver imports
 :func:`_review_cycle_zero` and :func:`_rereview` from this module and calls them
@@ -23,6 +25,12 @@ from cw.codex_review import (
     run_prepared_roles,
     run_review,
     synthesize_codex_review_result,
+)
+from cw.codex_review._engine_round import (
+    EnginePassInputs,
+    EnginePassOutcome,
+    EngineRoundSpec,
+    run_engine_pass,
 )
 from cw.models.enums import DEFAULT_REVIEWER_SANDBOX_MODE, SandboxMode
 
@@ -62,7 +70,8 @@ def _rereview(
     settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None = None,
     max_prompt_chars: int | None = None,
     reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
-) -> tuple[AutoDevResult, ReviewVerdict | None, _ReviewPassInputs]:
+    engine: EngineRoundSpec | None = None,
+) -> tuple[AutoDevResult, ReviewVerdict | None, _ReviewPassInputs | None]:
     """Run a per-role review pass over the delta since the last cycle (#1837).
 
     Reviews ``previous_reviewed_sha..HEAD``, not the whole branch: a full
@@ -91,7 +100,32 @@ def _rereview(
     the clean-mode ledger's seam; ``None`` in blocking mode).
     ``reviewer_sandbox_mode`` (#1767) reaches this cycle's probe and roles,
     the same mode cycle 0 ran under.
+
+    ``engine`` (#3216) runs a full-diff engine pass instead (R2); the prepared
+    inputs are ``None`` only when that pass stopped before its prepare.
     """
+    if engine is not None:
+        return _run_engine_pass(
+            engine,
+            EnginePassInputs(
+                runner=runner,
+                task=task,
+                worktree=worktree,
+                default_branch=default_branch,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                wall_clock_budget_seconds=_budget_seconds(remaining),
+                session_id=session_id,
+                fix_loop_enabled=True,
+                prior_open_findings=prior_open_findings,
+                claim_tier_enabled=claim_tier_enabled,
+                disposition_drift_check_enabled=disposition_drift_check_enabled,
+                settled_suppression=settled_suppression,
+                max_prompt_chars=max_prompt_chars,
+                reviewer_sandbox_mode=reviewer_sandbox_mode,
+            ),
+            cycle=cycle,
+        )
     prepared = _prepare_review_pass(
         task,
         worktree,
@@ -161,6 +195,22 @@ def _rereview(
             update["shards"] = run.coverage
         verdict = verdict.model_copy(update=update)
     return result, verdict, prepared
+
+
+def _run_engine_pass(
+    spec: EngineRoundSpec, inputs: EnginePassInputs, *, cycle: int
+) -> EnginePassOutcome:
+    """One engine pass; a prompt that cannot fit becomes cycle *cycle*'s park.
+
+    The same non-retryable ``agent_block`` and log line as the built-in path
+    (S4), with no verdict.
+    """
+    try:
+        return run_engine_pass(spec, inputs, cycle=cycle)
+    except ReviewInputTooLargeError as exc:
+        _log_input_too_large(inputs.task, exc, cycle=cycle)
+        block = _input_too_large_block(inputs.task, inputs.worktree, exc, cycle=cycle)
+        return EnginePassOutcome(block, None, None)
 
 
 def _log_input_too_large(
@@ -233,14 +283,39 @@ def _review_cycle_zero(
     settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None,
     max_prompt_chars: int | None,
     reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
+    engine: EngineRoundSpec | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Cycle 0's ``run_review`` under the lane's prompt limit (#2867).
 
     A :class:`~cw.codex_review.ReviewInputTooLargeError` (a file that cannot
     fit alone, or prompt overhead over the limit) becomes the named
     ``agent_block`` park with no verdict, the shape the no-documents path
-    already returns. A sharded pass logs its shard coverage.
+    already returns. A sharded pass logs its shard coverage. ``engine``
+    (#3216) runs cycle 0 as a repo review engine pass instead.
     """
+    if engine is not None:
+        outcome = _run_engine_pass(
+            engine,
+            EnginePassInputs(
+                runner=runner,
+                task=task,
+                worktree=worktree,
+                default_branch=default_branch,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                wall_clock_budget_seconds=wall_clock_budget_seconds,
+                session_id=session_id,
+                fix_loop_enabled=fix_loop_enabled,
+                prior_open_findings=None,
+                claim_tier_enabled=claim_tier_enabled,
+                disposition_drift_check_enabled=disposition_drift_check_enabled,
+                settled_suppression=settled_suppression,
+                max_prompt_chars=max_prompt_chars,
+                reviewer_sandbox_mode=reviewer_sandbox_mode,
+            ),
+            cycle=0,
+        )
+        return outcome.result, outcome.verdict
     try:
         result, verdict = run_review(
             runner=runner,

@@ -1,0 +1,12 @@
+{
+  "pass": {
+    "codex_version": "codex-cli 0.167.0",
+    "recorded": "2026-11-10",
+    "scenario": "pass"
+  },
+  "fail": {
+    "codex_version": "codex-cli 0.167.0",
+    "recorded": "2026-11-10",
+    "scenario": "fail"
+  }
+}

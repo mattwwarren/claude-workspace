@@ -97,6 +97,7 @@ from cw.codex_review._context._repo_config import (
     _render_lint_grounding_block,
     _RuffLintConfig,
 )
+from cw.codex_review._context._roster import EngineRoster, resolve_roster
 from cw.codex_review._context._sensitive_files import (
     _SENSITIVE_HEADER,
     _hit_from_entry,
@@ -128,6 +129,7 @@ __all__ = [
     "_OUTPUT_INSTRUCTIONS_INLINED_ONLY",
     "_REVIEWER_ROLE_AGENT_FILES",
     "_SENSITIVE_HEADER",
+    "EngineRoster",
     "ReviewConfigSource",
     "_AgentSpecResolution",
     "_FileCategories",
@@ -161,4 +163,5 @@ __all__ = [
     "_select_reviewer_roles",
     "is_test_path",
     "resolve_review_config_source",
+    "resolve_roster",
 ]

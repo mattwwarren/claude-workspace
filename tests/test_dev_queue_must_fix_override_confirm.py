@@ -14,26 +14,35 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from cw.claude_review import ClaudeRunResult
+from cw.codex_clean_confirm import apply_clean_confirm
+from cw.codex_review import synthesize_codex_review_result
 from cw.dev_queue import approve_must_fix_override_ticket, requeue_ticket
 from cw.dev_queue.review_attestation import _overrides_from_row
 from cw.dev_queue.storage import load_dev_queue, save_dev_queue
 from cw.exceptions import ApproveGateError
 from cw.models import (
+    ClientConfig,
     DevQueueStore,
     OrchestratorEventType,
     QueueItemStatus,
     Stage,
     TicketTask,
 )
+from cw.models.client import ReviewConfig
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     evaluate_tip,
     load_ledger,
+    load_round_verdict,
     round_verdict_path,
 )
 from cw.review_debt import fingerprint_v1, normalize_summary
+from cw.review_engine.constants import ENGINE_ROLE
 from cw.review_findings import REVIEW_VERDICT_JSON_RELATIVE_PATH
+from tests._claude_review_helpers import RoleAwareClaudeRunner, review_envelope
 from tests._clients_yaml import write_clients_yaml
+from tests._codex_review_helpers import _doc_json, _finding_payload
 from tests._review_convergence_helpers import (
     engine_confirm_verdict,
     make_review_client,
@@ -42,12 +51,16 @@ from tests._review_convergence_helpers import (
 )
 from tests._review_debt_helpers import _events_of
 from tests.conftest import (
+    _make_diff,
     _make_finding,
+    _make_reviewer_doc,
     _make_ticket_task,
+    git_in,
     write_review_verdict_envelope,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from cw.review_convergence import ConvergenceLedger
@@ -320,3 +333,144 @@ class TestCodexParkUnchanged:
     ) -> None:
         self._codex_park(tmp_path, "N/A")
         _assert_refused(None, "has no diff anchor")
+
+
+class TestCodexLaneEngineConfirmPark:
+    """A codex-lane ``review_confirm_must_fix`` park (#3216, S6).
+
+    The park is produced by the real codex gate (``apply_clean_confirm`` over an
+    engine pass and a Claude confirm), never a hand-written ledger, so the
+    saved round verdict is exactly what the codex lane persists: the decided,
+    park-stamped verdict.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _claude_on_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cw.codex_clean_confirm._which_claude", lambda: "/x/claude")
+
+    @staticmethod
+    def _park(
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+        entries: Sequence[tuple[str, str, str | None]],
+    ) -> tuple[Path, ReviewVerdict]:
+        """Run the codex engine confirm over *entries*; return the repo and verdict.
+
+        *entries* are ``(severity, summary, rule_id)``. The row is parked
+        ``review_confirm_must_fix`` on that repo, as dispatch would leave it.
+        """
+        worktree, _origin = make_git_repo_with_origin("codex-engine-park")
+        client = ClientConfig(
+            name=_CLIENT,
+            workspace_path=worktree,
+            default_branch="main",
+            review=ReviewConfig.model_validate({"convergence": "clean"}),
+        )
+        write_clients_yaml(client)
+        task = _make_ticket_task(
+            ticket_id=_TICKET,
+            client=_CLIENT,
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            stage=Stage.REVIEW,
+            blocked_reason=_CONFIRM_PARK,
+            worktree_path=worktree,
+            scope_hint="small",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        head = git_in(worktree, "rev-parse", "HEAD")
+        result, verdict = synthesize_codex_review_result(
+            task=task,
+            worktree=worktree,
+            documents=[_make_reviewer_doc(reviewer_role=ENGINE_ROLE)],
+            failures=[],
+            diff=_make_diff("x = 1", files={"feature.py": [1]}),
+            reviewed_sha=head,
+            session_id="s-codex",
+            default_branch="main",
+            fix_loop_enabled=True,
+        )
+        assert verdict is not None
+
+        def _confirm(role: str) -> ClaudeRunResult:
+            findings = []
+            for severity, summary, rule_id in entries:
+                finding = _finding_payload(
+                    severity=severity,
+                    file="feature.py",
+                    line_start=1,
+                    line_end=1,
+                    summary=summary,
+                    evidence="x = 1",
+                )
+                if rule_id is not None:
+                    finding["rule_id"] = rule_id
+                findings.append(finding)
+            return ClaudeRunResult(
+                0, review_envelope(_doc_json(role=role, findings=findings)), ""
+            )
+
+        outcome = apply_clean_confirm(
+            task=task,
+            worktree=worktree,
+            client=client,
+            sid="sid-1",
+            runner=RoleAwareClaudeRunner(_confirm),
+            deadline=None,
+            result=result,
+            verdict=verdict,
+        )
+        assert outcome.result.blocker is not None
+        assert outcome.result.blocker.reason == _CONFIRM_PARK
+        saved = load_round_verdict(worktree / LEDGER_RELATIVE_PATH, 2)
+        assert saved is not None
+        return worktree, saved
+
+    def test_a_plain_must_fix_park_is_released_by_the_override(
+        self, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
+    ) -> None:
+        worktree, saved = self._park(
+            make_git_repo_with_origin, [("MUST_FIX", "Real bug", None)]
+        )
+        assert {af.disposition for af in saved.accepted} == {"fixed"}
+        assert _ledger(worktree).status == "stopped"
+
+        result = approve_must_fix_override_ticket(_TICKET, _CLIENT, "accepted risk")
+
+        head = git_in(worktree, "rev-parse", "HEAD")
+        assert result["reviewed_sha"] == head
+        assert result["ledger_overridden_round"] == 2
+        assert result["finding_ids"] == [("feature.py", normalize_summary("Real bug"))]
+        ledger = _ledger(worktree)
+        assert ledger.status == "converged"
+        assert ledger.last_clean_sha == head
+        (override,) = ledger.confirm_overrides
+        assert override.prior_stop_reason == "confirm_must_fix"
+        row = _row()
+        assert row.must_fix_override is not None
+        assert row.must_fix_override.reviewed_sha == head
+        assert not (worktree / REVIEW_VERDICT_JSON_RELATIVE_PATH).exists()
+
+    @pytest.mark.parametrize("rule", ["coverage.patch", "acceptance.criteria"])
+    def test_a_never_deferrable_should_fix_in_the_park_is_refused(
+        self,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+        rule: str,
+    ) -> None:
+        worktree, saved = self._park(
+            make_git_repo_with_origin,
+            [("MUST_FIX", "Real bug", None), ("SHOULD_FIX", "Untested", rule)],
+        )
+        assert "operator_actionable" in {af.disposition for af in saved.accepted}
+
+        _assert_refused(worktree, "never-deferrable", names_regress=True)
+
+    @pytest.mark.parametrize("rule", ["coverage.patch", "acceptance.criteria"])
+    def test_a_never_deferrable_only_park_has_nothing_to_override(
+        self,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+        rule: str,
+    ) -> None:
+        worktree, _saved = self._park(
+            make_git_repo_with_origin, [("SHOULD_FIX", "Untested", rule)]
+        )
+
+        _assert_refused(worktree, "nothing to override", names_regress=True)

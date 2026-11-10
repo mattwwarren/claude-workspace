@@ -31,6 +31,9 @@ each submodule only imports from those above it (no cycles):
   repo review engine writes (#3036). A pure-pydantic DAG root, not
   re-exported: import it by submodule path, as ``review_history`` and
   ``ticket_view`` are.
+- ``review_engine_manifest`` — the strict ``EngineManifest`` contract of a
+  repo review engine's ``cw-engine.json`` (#3216). Also a pure-pydantic DAG
+  root, not re-exported: import it by submodule path.
 - ``review_attestation`` — the lenient row-state ``ReviewAttestation``, the
   head-pinned review sign-off (#3040). A pure-pydantic DAG root that
   ``tasks.ticket_task`` imports; not re-exported, import it by submodule path.

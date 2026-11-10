@@ -77,7 +77,7 @@ from cw.codex_fix_loop.constraints import (
     select_constraint_comment,
     with_row_constraints,
 )
-from cw.codex_fix_loop.convergence import _track_open_findings
+from cw.codex_fix_loop.convergence import _stamp_debt, _track_open_findings
 from cw.codex_fix_loop.coverage import NO_DELTA_GAP
 from cw.codex_fix_loop.divergence import (
     _DIVERGENCE_STALL_CYCLES,
@@ -106,7 +106,7 @@ from cw.codex_fix_loop.park import (
 )
 from cw.codex_fix_loop.review_pass import _rereview, _review_cycle_zero
 from cw.codex_fix_loop.rounds import CycleRound
-from cw.codex_fix_loop.seed import seed_verdict
+from cw.codex_fix_loop.seed import _should_seed, seed_verdict
 from cw.codex_fix_loop.snapshot import _persist_cycle_snapshot, _with_snapshot_pointer
 from cw.codex_review import (
     _MIN_ROLE_TIMEOUT_SECONDS,
@@ -127,14 +127,12 @@ from cw.models.enums import (
 )
 from cw.models.operator_constraint import split_constraints
 from cw.review_convergence import unread_from_verdict
-from cw.review_debt import dedupe_debt
 from cw.review_findings import has_contested_decision
 from cw.tracker import tracker_kind
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
-    from typing import TypeGuard
 
     from cw.auto_dev_result import (
         AutoDevResult,
@@ -149,6 +147,7 @@ if TYPE_CHECKING:
     from cw.codex_fix_loop.growth import RunGrowth
     from cw.codex_fix_loop.rounds import CycleObserver
     from cw.codex_fix_loop.snapshot import _PersistedSnapshot
+    from cw.codex_review._engine_round import EngineRoundSpec
     from cw.codex_runner import CodexRunner
     from cw.models import TicketTask
     from cw.review_convergence import UnreadFindings
@@ -173,18 +172,6 @@ def _remaining_budget(deadline: float | None) -> float | None:
 def _fix_timeout(remaining: float | None) -> int | None:
     """Per-fix-invocation timeout, floored at the per-role minimum."""
     return None if remaining is None else max(int(remaining), _MIN_ROLE_TIMEOUT_SECONDS)
-
-
-def _stamp_debt(
-    verdict: ReviewVerdict, debt_ledger: dict[tuple[str, str], DebtRecord]
-) -> ReviewVerdict:
-    """Stamp the run's accumulated debt onto *verdict*.
-
-    Applied after every tracker update so whichever exit path returns this
-    verdict carries the ledger as of that moment — the loop has several exits
-    and threading a stamp onto each one separately is how one gets missed.
-    """
-    return verdict.model_copy(update={"debt": dedupe_debt(list(debt_ledger.values()))})
 
 
 def _cycle_exit(
@@ -495,26 +482,6 @@ def _load_comment_constraints(
     return constraints
 
 
-def _should_seed(
-    verdict: ReviewVerdict | None,
-    result: AutoDevResult,
-    seed_findings: Sequence[AcceptedFinding],
-    fix_loop_enabled: bool,
-) -> TypeGuard[ReviewVerdict]:
-    """Whether *seed_findings* are merged into cycle 0's *verdict* (#2807).
-
-    Seed only when cycle 0 produced fixable work or parked on nothing: the
-    verdict blocks, or the result carries no blocker. A cycle 0 parked on
-    something other than its own findings keeps its park.
-    """
-    return bool(
-        seed_findings
-        and fix_loop_enabled
-        and verdict is not None
-        and (verdict.blocking or result.blocker is None)
-    )
-
-
 def run_review_with_fix_loop(
     *,
     runner: CodexRunner,
@@ -540,6 +507,7 @@ def run_review_with_fix_loop(
     reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
     fix_sandbox_mode: SandboxMode = DEFAULT_FIX_SANDBOX_MODE,
     gate_tokens: list[str] | None = None,
+    engine: EngineRoundSpec | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the initial review pass plus a bounded MUST_FIX fix loop.
 
@@ -603,6 +571,8 @@ def run_review_with_fix_loop(
     ``gate_tokens`` (#3056) is the run-level friction list the post-fix quality
     gates append to (``codex_fix_gates_none_detected``); the caller merges it
     into the final result. ``None`` keeps it private to each cycle.
+    ``engine`` (#3216) makes cycle 0 and every re-review a full-diff repo
+    review engine pass.
     """
     deadline = (
         None
@@ -625,6 +595,7 @@ def run_review_with_fix_loop(
         settled_suppression=suppression,
         max_prompt_chars=max_prompt_chars,
         reviewer_sandbox_mode=reviewer_sandbox_mode,
+        engine=engine,
     )
     if _should_seed(verdict, result, seed_findings, fix_loop_enabled):
         verdict = seed_verdict(verdict, seed_findings)
@@ -768,8 +739,9 @@ def run_review_with_fix_loop(
             settled_suppression=suppression,
             max_prompt_chars=max_prompt_chars,
             reviewer_sandbox_mode=reviewer_sandbox_mode,
+            engine=engine,
         )
-        if verdict is None:
+        if verdict is None or prepared is None:
             # No cycle-N snapshot was persisted (the persist call below is
             # never reached) and this park's details come from
             # `_format_failures_detail`, not from any persisted verdict — so

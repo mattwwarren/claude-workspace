@@ -23,8 +23,8 @@ Submodules, each importing only the ones above it:
   summary)`` anchor (the voided matcher's fingerprint minus ``evidence``).
 - ``_models`` -- the ledger, its entries, the request/report envelopes and the
   vocabulary, plus :class:`ConvergenceError`.
-- ``_backend`` -- :func:`resolve_confirm_backend` and
-  :func:`clean_mode_supported`.
+- ``_backend`` -- :func:`resolve_confirm_backend`,
+  :func:`clean_mode_supported` and :func:`engine_supported`.
 - ``_policy`` -- ``max_cycles_exhausted``, ``release_cause``, the no-progress
   and oscillation detectors, ``consecutive_confirm_failures``.
 - ``_findings`` -- :func:`from_verdict`, :func:`unread_from_verdict`,
@@ -32,7 +32,8 @@ Submodules, each importing only the ones above it:
   :func:`suppress_settled` and the SHOULD_FIX deferral helpers
   :func:`decided_finding` / :func:`decide_verdict`.
 - ``_confirm_route`` -- :func:`route_engine_confirm`, :class:`ConfirmRoute`,
-  :class:`ConfirmAction` and :func:`engine_pass_precedes` (#3042): the pure
+  :class:`ConfirmAction`, :func:`engine_pass_precedes`,
+  :func:`decide_confirm_verdict` and :func:`verdict_ran_engine` (#3042, #3216): the pure
   router of the independent confirm round after a repo review engine pass
   (park a new MUST_FIX, defer every SHOULD_FIX, else clean), with its two
   rationale constants.
@@ -87,6 +88,7 @@ from __future__ import annotations
 from cw.review_convergence._backend import (
     ResolvedBackend,
     clean_mode_supported,
+    engine_supported,
     resolve_confirm_backend,
 )
 from cw.review_convergence._confirm_route import (
@@ -94,8 +96,10 @@ from cw.review_convergence._confirm_route import (
     CONFIRM_ENGINE_PARK_RATIONALE,
     ConfirmAction,
     ConfirmRoute,
+    decide_confirm_verdict,
     engine_pass_precedes,
     route_engine_confirm,
+    verdict_ran_engine,
 )
 from cw.review_convergence._diff_base import (
     DefaultBranchRef,
@@ -322,6 +326,7 @@ __all__ = [
     "confirm_override_applies",
     "consecutive_confirm_failures",
     "converged_across_tolerated_merge",
+    "decide_confirm_verdict",
     "decide_verdict",
     "decided_finding",
     "default_merge_only",
@@ -330,6 +335,7 @@ __all__ = [
     "detect_no_progress",
     "detect_oscillation",
     "engine_pass_precedes",
+    "engine_supported",
     "evaluate_tip",
     "finalize_ready",
     "finding_identity",
@@ -381,6 +387,7 @@ __all__ = [
     "tolerance_from_context",
     "tolerates_review_move",
     "unread_from_verdict",
+    "verdict_ran_engine",
     "verify_diff_base",
     "worktree_state",
 ]

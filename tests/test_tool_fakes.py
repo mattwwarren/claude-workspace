@@ -21,6 +21,7 @@ import pytest
 import cw.executor.codex
 import cw.executor.core
 import cw.native_daemon
+from cw.codex_runner import CodexRunResult
 from cw.gh import GhFailure
 from cw.sprint import GhClient, GhSurface
 from tests import _changelog_repair_helpers, _tool_fakes
@@ -36,6 +37,8 @@ from tests._tool_fakes import (
     GhReply,
     ReadyGh,
     RecordingShim,
+    ScriptedCodexRunner,
+    any_call,
     assert_gh_calls,
     fake_claude_cli,
     fake_opencode_cli,
@@ -46,6 +49,7 @@ from tests._tool_fakes import (
     prepend_to_path,
     restore_real_run,
     shim_env,
+    stdin_contains,
     stub_gh,
     stub_gh_arm,
     stub_gh_issue_create,
@@ -85,6 +89,8 @@ _SHARED_NAMES = frozenset(
         "_shim_env",
         "_gh_calls",
         "_assert_gh_calls",
+        "ScriptedCodexRunner",
+        "_ScriptedCodexRunner",
         "marked_parts",
         "tracker_io_turn_result",
     }
@@ -571,6 +577,7 @@ class TestNoPrivateDuplicate:
         assert {
             "FakeGh",
             "ReadyGh",
+            "ScriptedCodexRunner",
             "write_bin_stub",
             "stub_gh_arm",
             "path_with_stub",
@@ -780,3 +787,90 @@ class TestNoOpenCodedPathPrepend:
             assert _open_coded_path_prepends(source, "<probe>") == [1], source
         for source in negatives:
             assert _open_coded_path_prepends(source, "<probe>") == [], source
+
+
+class TestScriptedCodexRunner:
+    """The shared argv/stdin-aware ``CodexRunner`` double."""
+
+    _WORKTREE = Path("/unused")
+    _ARGV = ("codex", "exec", "--output-schema", "s.json", "-o", "o.json")
+
+    def _run(
+        self, runner: ScriptedCodexRunner, stdin: str | None = "prompt"
+    ) -> CodexRunResult:
+        return runner.run(self._WORKTREE, list(self._ARGV), 30, stdin=stdin)
+
+    def test_first_matching_rule_answers_and_the_call_is_recorded(self) -> None:
+        runner = ScriptedCodexRunner()
+        runner.add(stdin_contains("alpha"), CodexRunResult(1, "", "alpha-rule"))
+        runner.add(any_call, CodexRunResult(0, "", "", output_file_content="{}"))
+
+        assert self._run(runner, "alpha beta").stderr == "alpha-rule"
+        assert self._run(runner, "beta").output_file_content == "{}"
+        assert [call["stdin"] for call in runner.calls] == ["alpha beta", "beta"]
+        assert runner.calls[0]["argv"] == list(self._ARGV)
+        assert runner.calls[0]["timeout"] == 30
+        assert runner.calls[0]["cwd"] == self._WORKTREE
+
+    def test_stdin_contains_needs_every_fragment_and_a_stdin(self) -> None:
+        match = stdin_contains("a", "b")
+
+        assert match([], "a b")
+        assert not match([], "a")
+        assert not match([], None)
+
+    def test_times_spends_a_rule_then_falls_through(self) -> None:
+        runner = ScriptedCodexRunner()
+        runner.add(any_call, CodexRunResult(0, "once", ""), times=1)
+        runner.add(any_call, CodexRunResult(0, "after", ""))
+
+        assert [self._run(runner).stdout for _ in range(3)] == [
+            "once",
+            "after",
+            "after",
+        ]
+
+    def test_a_callable_reply_sees_the_call(self) -> None:
+        runner = ScriptedCodexRunner()
+        runner.add(
+            any_call,
+            lambda argv, stdin: CodexRunResult(0, f"{argv[-1]}|{stdin}", ""),
+        )
+
+        assert self._run(runner).stdout == "o.json|prompt"
+
+    def test_timed_out_nonzero_and_empty_output_replies_pass_through(self) -> None:
+        runner = ScriptedCodexRunner()
+        runner.add(stdin_contains("t"), CodexRunResult(-1, "", "", timed_out=True))
+        runner.add(stdin_contains("n"), CodexRunResult(2, "", "boom"))
+        runner.add(any_call, CodexRunResult(0, "", "", output_file_content=""))
+
+        assert self._run(runner, "t").timed_out is True
+        assert self._run(runner, "n").returncode == 2
+        assert self._run(runner, "e").output_file_content == ""
+
+    def test_an_unmatched_call_raises(self) -> None:
+        runner = ScriptedCodexRunner()
+
+        with pytest.raises(AssertionError, match="no rule answers"):
+            self._run(runner)
+
+    def test_the_capability_probe_is_answered_and_excluded_from_review_calls(
+        self,
+    ) -> None:
+        runner = ScriptedCodexRunner()
+        probe_argv = [
+            "codex",
+            "exec",
+            "--sandbox",
+            "read-only",
+            "--skip-git-repo-check",
+        ]
+
+        probe = runner.run(self._WORKTREE, probe_argv, 120, stdin="p")
+        runner.add(any_call, CodexRunResult(0, "", ""))
+        self._run(runner)
+
+        assert "CW_CODEX_FS_PROBE" in probe.stdout
+        assert [call["probe"] for call in runner.calls] == [True, False]
+        assert len(runner.review_calls) == 1

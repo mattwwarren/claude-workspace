@@ -59,6 +59,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from cw._lock_guard import HeldLock, held_locks
+from cw.codex_runner import CodexRunResult
 from cw.executor.core import FakeFireAndForgetRunner
 from cw.gh import (
     GhFailure,
@@ -94,6 +95,8 @@ __all__ = [
     "GhReply",
     "ReadyGh",
     "RecordingShim",
+    "ScriptedCodexRunner",
+    "any_call",
     "assert_gh_calls",
     "fake_claude_cli",
     "fake_codex_job_runner",
@@ -107,6 +110,7 @@ __all__ = [
     "read_calls",
     "restore_real_run",
     "shim_env",
+    "stdin_contains",
     "stub_gh",
     "stub_gh_arm",
     "stub_gh_issue_create",
@@ -1172,6 +1176,106 @@ def _mock_codex_capability_probe(monkeypatch: pytest.MonkeyPatch) -> None:
             args=[], returncode=0, stdout="codex-cli 0.144.5\n", stderr=""
         ),
     )
+
+
+# --- scripted codex runner -----------------------------------------------------
+
+#: What a :class:`ScriptedCodexRunner` rule matches on: ``(argv, stdin)``.
+CodexMatcher = Callable[[list[str], str | None], bool]
+#: A rule's reply: a fixed result, or one computed from ``(argv, stdin)``.
+CodexReply = Callable[[list[str], str | None], CodexRunResult] | CodexRunResult
+
+
+def stdin_contains(*fragments: str) -> CodexMatcher:
+    """A matcher true when every fragment occurs in the call's stdin."""
+
+    def _match(_argv: list[str], stdin: str | None) -> bool:
+        return stdin is not None and all(fragment in stdin for fragment in fragments)
+
+    return _match
+
+
+def any_call(_argv: list[str], _stdin: str | None) -> bool:
+    """A matcher true for every call."""
+    return True
+
+
+@dataclass
+class _CodexRule:
+    matcher: CodexMatcher
+    reply: CodexReply
+    remaining: int | None
+
+
+class ScriptedCodexRunner:
+    """A ``CodexRunner`` that answers each call from an ordered list of rules.
+
+    A rule is ``(matcher over (argv, stdin)) -> reply``; the first rule whose
+    matcher accepts a call answers it, and a rule added with ``times=N`` is
+    spent after N answers (``None``: unlimited). A call no rule answers raises
+    ``AssertionError`` naming it, so a test never passes on an unplanned call.
+
+    Records every call in ``calls`` (the ``FakeCodexRunner`` shape, plus
+    ``probe``) and writes nothing itself: a result's ``output_file_content`` is
+    handed back as-is, which is what the real runner reads from the ``-o`` file.
+    A reply may be a callable, which is how a test makes a call touch the
+    worktree.
+
+    The filesystem-capability probe call ``_prepare_review_pass`` makes with no
+    cached verdict is answered here (capable) without a rule, and flagged
+    ``probe=True``; ``review_calls`` lists every other call.
+    """
+
+    def __init__(self) -> None:
+        self._rules: list[_CodexRule] = []
+        self.calls: list[dict[str, object]] = []
+
+    def add(
+        self, matcher: CodexMatcher, reply: CodexReply, *, times: int | None = None
+    ) -> ScriptedCodexRunner:
+        """Append a rule; returns ``self`` so rules chain."""
+        self._rules.append(_CodexRule(matcher, reply, times))
+        return self
+
+    @property
+    def review_calls(self) -> list[dict[str, object]]:
+        """Every recorded call except the capability probe."""
+        return [call for call in self.calls if not call["probe"]]
+
+    def run(
+        self,
+        worktree: Path,
+        argv: list[str],
+        timeout_seconds: int | None,
+        *,
+        stdin: str | None = None,
+    ) -> CodexRunResult:
+        from cw.codex_review._capability import _PROBE_SENTINEL
+
+        probe = "--skip-git-repo-check" in argv and "--output-schema" not in argv
+        self.calls.append(
+            {
+                "argv": list(argv),
+                "cwd": worktree,
+                "timeout": timeout_seconds,
+                "stdin": stdin,
+                "probe": probe,
+            }
+        )
+        if probe:
+            return CodexRunResult(
+                returncode=0, stdout=f"{_PROBE_SENTINEL}\n", stderr=""
+            )
+        for rule in self._rules:
+            if rule.remaining == 0 or not rule.matcher(argv, stdin):
+                continue
+            if rule.remaining is not None:
+                rule.remaining -= 1
+            if isinstance(rule.reply, CodexRunResult):
+                return rule.reply
+            return rule.reply(argv, stdin)
+        msg = f"ScriptedCodexRunner: no rule answers argv={argv!r}"
+        raise AssertionError(msg)
 
 
 def marked_parts(*bodies: str) -> tuple[str, ...]:

@@ -26,11 +26,14 @@ from pathlib import Path
 
 from cw.auto_dev_result import KNOWN_BLOCKER_REASONS
 from cw.review_engine.constants import (
+    ENGINE_AGGREGATOR_PREAMBLE,
     ENGINE_PREAMBLE,
     ENGINE_ROLE,
+    ENGINE_ROLE_PREAMBLE,
     FRICTION,
     EngineRoundFailure,
 )
+from cw.review_engine_manifest_io import EngineManifestRejection
 from tests.conftest import _appendix, _cmd
 from tests.test_agent_comment_provenance import _blocker_reason_table, _table_reasons
 from tests.test_auto_dev_preflight_resolutions import _after
@@ -397,3 +400,112 @@ def test_changelog_carries_the_engine_bullet_with_operator_note() -> None:
         "review-engine/<client>/<lane>",
     ):
         assert needle in bullet, needle
+
+
+# --- RFC 0018 A4 (#3216): the codex engine lane ------------------------------
+
+_UNSUPPORTED = "review_engine_unsupported_backend"
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.replace('"', "").split())
+
+
+def _contract_section(heading: str, end: str) -> str:
+    contract = _read("docs/headless-contract.md")
+    start = contract.index(heading)
+    return contract[start : contract.index(end, start + 1)]
+
+
+def test_headless_contract_pins_the_codex_preambles_verbatim() -> None:
+    section = _flat(_contract_section("### 12.10 Engine-Skill Contract", "### 12.11"))
+    assert _flat(ENGINE_ROLE_PREAMBLE) in section
+    assert _flat(ENGINE_AGGREGATOR_PREAMBLE) in section
+    assert "ENGINE_ROLE_PREAMBLE" in section
+    assert "ENGINE_AGGREGATOR_PREAMBLE" in section
+    assert "reviewer_sandbox_mode" in section
+
+
+def test_headless_contract_documents_the_manifest() -> None:
+    section = _contract_section("### 12.14 Codex Engine Manifest", "\n## 13.")
+    for needle in (
+        "`cw-engine.json`",
+        "`manifest_version`",
+        "`backends`",
+        "`roles`",
+        "`aggregation_prompt`",
+        "cw schema show review-engine-manifest",
+        "`codex_not_declared`",
+        "`manifest_invalid`",
+        "`no_codex_manifest`",
+    ):
+        assert needle in section, needle
+    for reason in EngineManifestRejection:
+        assert f"`{reason}`" in section, reason
+
+
+def test_headless_contract_versions_the_manifest_separately() -> None:
+    section = _contract_section("### 12.9 Version History", "### 12.10")
+    assert "| `manifest_version` | Changes |" in section
+    assert "| 1 | Initial manifest. Tracked in #3216. |" in section
+
+
+def test_validate_section_documents_the_kind_option() -> None:
+    section = _contract_section("### 12.8 `cw review engine validate", "### 12.9")
+    assert "`--kind {summary,manifest}`" in section
+    assert (
+        "review engine manifest valid: manifest_version=1 backends=codex roles=<n>"
+        in section
+    )
+
+
+def test_headless_contract_has_the_unsupported_backend_row() -> None:
+    section = _contract_section("### 4.2 `blocker.reason`", "\n### 4.3")
+    row = next(
+        line
+        for line in section.splitlines()
+        if line.startswith(f"| `{_UNSUPPORTED}` |")
+    )
+    for cause in (
+        "backend_unsupported",
+        "no_codex_manifest",
+        "codex_not_declared",
+        "manifest_invalid",
+    ):
+        assert f"`{cause}`" in row, cause
+    assert "`retry_eligible: false`" in row
+
+
+def test_engine_docs_drop_the_claude_native_only_claim() -> None:
+    config = _read("config/CONFIG_REFERENCE.md")
+    assert "Claude-native review lanes only" not in config
+    assert "review.confirm_backend: none" in config
+    assert _UNSUPPORTED in config
+    runbook = _read("docs/dispatch-runbook.md")
+    assert f"**Park: `{_UNSUPPORTED}` (#3216).**" in runbook
+    assert "`review.confirm_backend: none`" in runbook
+
+
+def test_events_doc_names_the_codex_confirm_emitter() -> None:
+    events = _read("docs/events.md")
+    start = events.index("### `review.confirm_escalated`")
+    section = events[start : events.index("\n### ", start + 1)]
+    assert "cw.codex_engine_confirm.engine_confirm_park" in section
+    assert "codex_review_signal_failed" in section
+
+
+def test_changelog_carries_the_codex_engine_migration_line() -> None:
+    changelog = _read("CHANGELOG.md")
+    bullet = next(
+        line for line in changelog.splitlines() if "(RFC 0018 A4, #3216)" in line
+    )
+    assert "**Operator note:**" in bullet
+    assert "cause=no_codex_manifest" in bullet
+    assert _UNSUPPORTED in bullet
+
+
+def test_command_doc_carries_only_the_park_release_tag() -> None:
+    doc = _read(".claude/commands/auto-dev-review.md")
+    lines = doc.splitlines()
+    index = lines.index("<!-- el: review.engine-park-release -->")
+    assert lines[index + 1].startswith("**Releasing a `review_engine_modified` park.**")

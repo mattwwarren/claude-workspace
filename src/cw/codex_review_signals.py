@@ -20,6 +20,8 @@ stamps on its terminal review:
   this covers first entry.
 * :func:`constraints_source`: where the fix loop's operator constraints came
   from (``Review.operator_constraints_source``).
+* :func:`emit_confirm_escalated` (#3216): ``review.confirm_escalated`` when a
+  confirm round after a codex engine pass parks.
 
 **Best-effort (A15).** Case A (and A2) runs after the session completed and Case B
 before the review; an escaping exception would revert the row or abort the
@@ -324,4 +326,15 @@ def undelivered_operator_context(
         OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED,
         payload,
         task.ticket_id,
+    )
+
+
+def emit_confirm_escalated(payload: dict[str, object], *, ticket_id: str) -> None:
+    """``review.confirm_escalated`` for a codex engine-confirm park (#3216).
+
+    The codex peer of claude-native's ``announce_confirm_park``: same event and
+    payload, best-effort (an ``OSError`` logs ``codex_review_signal_failed``).
+    """
+    _record_best_effort(
+        OrchestratorEventType.REVIEW_CONFIRM_ESCALATED, payload, ticket_id
     )

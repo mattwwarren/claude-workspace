@@ -1130,3 +1130,136 @@ def test_local_clean_review_guard_lifts_when_engine_supports_local(
             worktree, _review_client(worktree, "clean"), Stage.REVIEW
         )
     assert isinstance(result, _PreflightOK)
+
+
+# ---------------------------------------------------------------------------
+# Entry guards: clean review, then engine, then repair (#3216)
+# ---------------------------------------------------------------------------
+
+
+def _engine_client(worktree: Path) -> ClientConfig:
+    review = ReviewConfig.model_validate(
+        {"convergence": "clean", "engine": {"skill": "repo-review"}}
+    )
+    return ClientConfig(name="test", workspace_path=worktree, review=review)
+
+
+def _repair_row(stage: Stage) -> TicketTask:
+    return TicketTask.model_validate(
+        {
+            "ticket_id": "T-1",
+            "client": "test",
+            "stage": stage,
+            "branch": "dev/2944",
+            "review_feedback": {
+                "repo": "acme/widgets",
+                "pr_number": 7,
+                "reviewed_sha": "a" * 40,
+                "captured_at": "2026-11-05T00:00:00+00:00",
+                "report": "CW PR REPAIR FEEDBACK (test fixture)",
+            },
+        }
+    )
+
+
+def test_local_engine_review_is_refused_with_its_own_reason(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Behind a lifted clean-review guard, the engine guard refuses before aider."""
+    worktree = make_git_repo("wt-local-engine-review")
+    fake_runner = FakeFireAndForgetRunner()
+    executor = LocalExecutor(config=_local_config(), runner=fake_runner)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
+
+    with patch(_CLEAN_SEAM, return_value=True):
+        executor.spawn(
+            stage=Stage.REVIEW,
+            task=task,
+            worktree=worktree,
+            client=_engine_client(worktree),
+        )
+
+    assert len(fake_runner.calls) == 0
+    session = find_completed_session(load_state())
+    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.status == "blocked"
+    assert result.stage_reached == "stage3_review"
+    assert result.blocker is not None
+    assert result.blocker.reason == "review_engine_unsupported_backend"
+    assert result.blocker.retry_eligible is False
+    assert result.blocker.stage == "stage3_review"
+    assert "cause=backend_unsupported" in result.blocker.details
+    assert "on local lane" in result.blocker.details
+
+
+def test_local_engine_review_is_refused_before_the_endpoint_and_aider_checks(
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """No endpoint, no aider, no plan: the engine guard still decides first."""
+    worktree = make_git_repo("wt-local-engine-first")
+    config = StageExecutorConfig(backend=LOCAL_BACKEND, model="m")
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
+
+    with (
+        patch(_CLEAN_SEAM, return_value=True),
+        patch("cw.executor.local.aider_available", return_value=False),
+    ):
+        result = _local_preflight(
+            config, task, worktree, _engine_client(worktree), Stage.REVIEW
+        )
+
+    assert isinstance(result, AutoDevResult)
+    assert result.blocker is not None
+    assert result.blocker.reason == "review_engine_unsupported_backend"
+
+
+def test_local_entry_guards_run_clean_review_then_engine(
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """With both guards firing, the clean-review reason wins (guard order)."""
+    worktree = make_git_repo("wt-local-guard-order")
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
+    client = _engine_client(worktree)
+
+    first = _local_preflight(_local_config(), task, worktree, client, Stage.REVIEW)
+    with patch(_CLEAN_SEAM, return_value=True):
+        second = _local_preflight(_local_config(), task, worktree, client, Stage.REVIEW)
+
+    assert isinstance(first, AutoDevResult)
+    assert first.blocker is not None
+    assert first.blocker.reason == CLEAN_REVIEW_UNSUPPORTED_BACKEND
+    assert isinstance(second, AutoDevResult)
+    assert second.blocker is not None
+    assert second.blocker.reason == "review_engine_unsupported_backend"
+
+
+def test_local_repair_guard_still_returns_its_own_reason_on_an_engine_client(
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """The engine guard is REVIEW-only; an IMPL repair row keeps its reason."""
+    worktree = make_git_repo("wt-local-repair-guard")
+    client = _engine_client(worktree)
+
+    with patch(_CLEAN_SEAM, return_value=True):
+        result = _local_preflight(
+            _local_config(), _repair_row(Stage.IMPL), worktree, client, Stage.IMPL
+        )
+
+    assert isinstance(result, AutoDevResult)
+    assert result.blocker is not None
+    assert result.blocker.reason == "repair_entry_unsupported_backend"
+    assert result.blocker.retry_eligible is False
+    assert result.stage_reached == "stage2_impl"
+
+
+def test_local_engine_guard_does_not_touch_a_client_without_an_engine(
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    worktree = make_git_repo("wt-local-no-engine")
+    with patch(_CLEAN_SEAM, return_value=True):
+        result = _preflight_with_plan(
+            worktree, _review_client(worktree, "clean"), Stage.REVIEW
+        )
+    assert isinstance(result, _PreflightOK)

@@ -48,6 +48,7 @@ from cw.review_convergence import (
     demote_for_rereview,
     detect_no_progress,
     detect_oscillation,
+    engine_supported,
     evaluate_tip,
     finalize_ready,
     finding_identity,
@@ -141,7 +142,7 @@ if TYPE_CHECKING:
         RoundKind,
         RoundReport,
     )
-    from cw.review_findings import Disposition, Severity
+    from cw.review_findings import AcceptedFinding, Disposition, Severity
 
 LATER = "2026-10-27T13:00:00+00:00"
 _CLEAN = "c" * 40
@@ -1629,6 +1630,53 @@ class TestDecidedFinding:
         (item,) = consolidated_verdict(accepted=[(severity, "x")]).accepted
         assert decided_finding(item, self.RATIONALE) == item
 
+    @staticmethod
+    def _engine(
+        severity: Severity,
+        rule_id: str,
+        *,
+        source: str = "engine",
+        disposition: Disposition = "dropped",
+    ) -> AcceptedFinding:
+        (base,) = consolidated_verdict(accepted=[(severity, f"{rule_id} gap")]).accepted
+        finding = base.finding.model_copy(
+            update={"source": source, "rule_id": rule_id, "fingerprint": "fp-x"}
+        )
+        return base.model_copy(update={"finding": finding, "disposition": disposition})
+
+    @pytest.mark.parametrize("rule_id", ["coverage.x", "acceptance.x"])
+    def test_engine_non_deferrable_should_fix_is_a_fix(self, rule_id: str) -> None:
+        """#3216 R20: never deferred, so the loop must fix it."""
+        item = self._engine("SHOULD_FIX", rule_id)
+        assert decided_finding(item, self.RATIONALE).disposition == "fixed"
+
+    def test_plain_engine_should_fix_still_defers(self) -> None:
+        item = self._engine("SHOULD_FIX", "style.naming")
+        decided = decided_finding(item, self.RATIONALE)
+        assert decided.disposition == "deferred"
+        assert decided.disposition_detail == self.RATIONALE
+
+    def test_builtin_look_alike_rule_is_unchanged(self) -> None:
+        item = self._engine("SHOULD_FIX", "coverage.x", source="builtin")
+        assert decided_finding(item, self.RATIONALE).disposition == "deferred"
+
+    def test_rejected_engine_finding_passes_through(self) -> None:
+        item = self._engine("SHOULD_FIX", "coverage.x", disposition="rejected")
+        assert decided_finding(item, self.RATIONALE) == item
+
+    @pytest.mark.parametrize("disposition", ["dropped", "unresolved"])
+    def test_engine_must_fix_still_becomes_fixed(
+        self, disposition: Disposition
+    ) -> None:
+        item = self._engine("MUST_FIX", "style.naming", disposition=disposition)
+        assert decided_finding(item, self.RATIONALE).disposition == "fixed"
+
+    def test_explicit_adjudicated_fix_is_unchanged(self) -> None:
+        item = self._engine("SHOULD_FIX", "style.naming").model_copy(
+            update={"adjudicated_fix": True}
+        )
+        assert decided_finding(item, self.RATIONALE) == item
+
     def test_decide_verdict_rewrites_only_accepted(self) -> None:
         verdict = consolidated_verdict(
             accepted=[("SHOULD_FIX", "s"), ("MUST_FIX", "m")],
@@ -1691,6 +1739,20 @@ class TestCleanModeSupported:
     )
     def test_supported_backends(self, backend: str, supported: bool) -> None:
         assert clean_mode_supported(backend) is supported
+
+    @pytest.mark.parametrize(
+        ("backend", "supported"),
+        [
+            ("claude-native", True),
+            ("codex", True),
+            ("opencode", False),
+            ("local", False),
+            ("unknown", False),
+        ],
+    )
+    def test_engine_supported(self, backend: str, supported: bool) -> None:
+        """#3216: the engine round runs on claude-native and codex only."""
+        assert engine_supported(backend) is supported
 
     def test_derived_from_the_loop_tables(self) -> None:
         """#2806: every family loop and every family-less loop is supported."""

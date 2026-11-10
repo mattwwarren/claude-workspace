@@ -5,11 +5,15 @@ from __future__ import annotations
 import contextlib
 from typing import TYPE_CHECKING, Any
 
-from cw.auto_dev_result import AutoDevResult
+from cw.auto_dev_result import (
+    REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
+    AutoDevResult,
+)
 from cw.executor._clean_review import (
     CLEAN_REVIEW_UNSUPPORTED_BACKEND,
     clean_review_block_details,
 )
+from cw.executor._engine_guard import engine_block_details
 from cw.executor._repair_entry import (
     REPAIR_ENTRY_UNSUPPORTED_BACKEND,
     repair_entry_block_details,
@@ -47,6 +51,43 @@ if TYPE_CHECKING:
     )
 
 
+def _entry_guard(
+    task: TicketTask, worktree: Path, client: ClientConfig, stage: Stage
+) -> AutoDevResult | None:
+    """The fail-closed entry guards, in order: clean review, engine, repair.
+
+    Each refuses before any agent runs, with ``retry_eligible: false`` and the
+    dispatched stage's entry marker; its own reason names which guard fired.
+    """
+    guards = (
+        (
+            CLEAN_REVIEW_UNSUPPORTED_BACKEND,
+            clean_review_block_details(client, stage, LOCAL_BACKEND),
+        ),
+        # #3216: an engine-configured REVIEW never runs the aider roster.
+        (
+            REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
+            engine_block_details(client, stage, LOCAL_BACKEND),
+        ),
+        # #2944: an adopted repair row must not run as ordinary aider impl.
+        (
+            REPAIR_ENTRY_UNSUPPORTED_BACKEND,
+            repair_entry_block_details(task, stage, LOCAL_BACKEND),
+        ),
+    )
+    for reason, details in guards:
+        if details is not None:
+            return make_blocked(
+                ticket_id=task.ticket_id,
+                worktree=worktree,
+                reason=reason,
+                details=details,
+                retry_eligible=False,
+                stage_reached=stage_entry_marker(stage.value),
+            )
+    return None
+
+
 def _local_preflight(
     config: StageExecutorConfig,
     task: TicketTask,
@@ -68,27 +109,9 @@ def _local_preflight(
     no convergence ledger), run before the endpoint/aider/plan checks so it
     is deterministic on a host without aider.
     """
-    details = clean_review_block_details(client, stage, LOCAL_BACKEND)
-    if details is not None:
-        return make_blocked(
-            ticket_id=task.ticket_id,
-            worktree=worktree,
-            reason=CLEAN_REVIEW_UNSUPPORTED_BACKEND,
-            details=details,
-            retry_eligible=False,
-            stage_reached=stage_entry_marker(stage.value),
-        )
-    # #2944: an adopted repair row must not run as ordinary aider impl.
-    repair_details = repair_entry_block_details(task, stage, LOCAL_BACKEND)
-    if repair_details is not None:
-        return make_blocked(
-            ticket_id=task.ticket_id,
-            worktree=worktree,
-            reason=REPAIR_ENTRY_UNSUPPORTED_BACKEND,
-            details=repair_details,
-            retry_eligible=False,
-            stage_reached=stage_entry_marker(stage.value),
-        )
+    blocked = _entry_guard(task, worktree, client, stage)
+    if blocked is not None:
+        return blocked
     if config.endpoint is None:
         return make_blocked(
             ticket_id=task.ticket_id,

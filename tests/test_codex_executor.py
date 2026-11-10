@@ -15,7 +15,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
@@ -955,3 +955,75 @@ class TestCodexCapabilityDiagnosis:
         ):
             codex_capability_diagnosis()
         assert mock_run.call_args.kwargs["timeout"] == 10
+
+
+# ---------------------------------------------------------------------------
+# Repo review engine (#3216): the dispatch tick adds no git read
+# ---------------------------------------------------------------------------
+
+
+def _git_argvs_of_a_codex_spawn(
+    worktree: Path,
+    client: ClientConfig,
+    runner: FakeFireAndForgetRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[list[str]]:
+    """Every git command one codex ``spawn`` launches, worktree path normalized."""
+    launched: list[list[str]] = []
+    real_popen = subprocess.Popen
+
+    def _spy(args: Any, *rest: Any, **kwargs: Any) -> subprocess.Popen[Any]:
+        argv = (
+            [str(a) for a in args] if isinstance(args, (list, tuple)) else [str(args)]
+        )
+        if Path(argv[0]).name == "git":
+            launched.append([a.replace(str(worktree), "<wt>") for a in argv])
+        return real_popen(args, *rest, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(subprocess, "Popen", _spy)
+        with patch(_WHICH, return_value=_CODEX_PATH):
+            _codex_executor(runner=runner).spawn(
+                stage=Stage.REVIEW,
+                task=_review_task("T-engine-nogit"),
+                worktree=worktree,
+                client=client,
+            )
+    assert len(runner.calls) == 1
+    return launched
+
+
+def test_codex_preflight_adds_no_git_call_for_an_engine_client(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_codex_preflight`` is unchanged by the engine (#3216, S3).
+
+    The manifest refusal happens at the start of the background run, so the
+    dispatch tick gains no git read. The one git call every spawn makes is
+    ``_write_hook_context``'s ``rev-parse origin/<default>``; an engine client
+    launches exactly the git commands a plain client does, and none reads the
+    skill or its manifest.
+    """
+    engine_review = ReviewConfig.model_validate(
+        {"convergence": "clean", "engine": {"skill": "repo-review"}}
+    )
+    runs: dict[str, list[list[str]]] = {}
+    for label, review in (("plain", ReviewConfig()), ("engine", engine_review)):
+        worktree = make_git_repo(f"wt-codex-{label}-git")
+        client = ClientConfig(
+            name="test", workspace_path=worktree, default_branch="main", review=review
+        )
+        runner = FakeFireAndForgetRunner()
+        try:
+            runs[label] = _git_argvs_of_a_codex_spawn(
+                worktree, client, runner, monkeypatch
+            )
+        finally:
+            _kill_procs(runner)
+
+    assert runs["plain"], "the spy saw no git call, so it proves nothing"
+    assert runs["engine"] == runs["plain"]
+    verbs = {argv[3] for argv in runs["engine"] if len(argv) > 3}
+    assert not verbs & {"archive", "ls-tree", "cat-file", "show"}

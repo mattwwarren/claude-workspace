@@ -7,6 +7,8 @@ backend agrees. :func:`resolve_confirm_backend` turns the configured choice
 ledger stores, and says whether that backend is NOT independent of the loop.
 :func:`clean_mode_supported` says whether a loop backend's REVIEW lane writes
 the convergence ledger at all (#2797; opencode since #2806).
+:func:`engine_supported` says whether a backend's REVIEW lane can run a repo
+review engine round (#3216, RFC 0018 A4).
 
 Import these names from :mod:`cw.review_convergence`, not from this private
 submodule.
@@ -16,7 +18,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple
 
-from cw.models import OPENCODE_BACKEND
+from cw.models import CLAUDE_NATIVE_BACKEND, CODEX_BACKEND, OPENCODE_BACKEND
 
 if TYPE_CHECKING:
     from cw.review_convergence._models import ConfirmBackend
@@ -75,3 +77,18 @@ def clean_mode_supported(loop_backend: str) -> bool:
     both read this one predicate (#2797).
     """
     return loop_backend in _LOOP_FAMILY or loop_backend in _FAMILYLESS_LOOPS
+
+
+#: Backends whose REVIEW lane runs a repo review engine round (#3216). opencode
+#: and local never do; their pre-flight refuses an engine-configured client.
+_ENGINE_BACKENDS: frozenset[str] = frozenset({CLAUDE_NATIVE_BACKEND, CODEX_BACKEND})
+
+
+def engine_supported(backend: str) -> bool:
+    """True when *backend*'s REVIEW lane can run a repo review engine round.
+
+    The one predicate ``converge config``, the review attestation scan, the
+    ``review-engine`` doctor check and the opencode/local pre-flight guard
+    (``cw.executor._engine_guard``) read (RFC 0018 A4, R25).
+    """
+    return backend in _ENGINE_BACKENDS

@@ -29,10 +29,12 @@ import logging
 import os
 import shutil
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import ValidationError
 
 from cw.codex_review import (
     _OUTPUT_INSTRUCTIONS,
@@ -725,3 +727,187 @@ class TestApprovalOverrideLive:
             target.exists(),
             result.returncode,
         )
+
+
+# --- RFC 0018 A4 (#3216) Gate 0: the D-8 aggregation probe -------------------
+
+_ENGINE_STUB_DIR = Path(__file__).parent / "fixtures" / "review_engine_stub"
+_FIXTURES_DIR = Path(__file__).parent / "fixtures"
+_AGGREGATION_RUNS = 5
+_AGGREGATION_TIMEOUT_SECONDS = 300
+_RECORD_FIXTURE = os.environ.get("CW_RECORD_ENGINE_FIXTURE", "").strip() == "1"
+
+
+def _role_doc(role: str, findings: list[dict[str, object]]) -> str:
+    return json.dumps(
+        {
+            "reviewer_role": role,
+            "status": "ok",
+            "detail": "reviewed the whole diff.",
+            "findings": findings,
+        }
+    )
+
+
+_MUST_FIX_ROLE_FINDING: dict[str, object] = {
+    "severity": "MUST_FIX",
+    "file": "app/run.py",
+    "line_start": 4,
+    "line_end": 4,
+    "summary": "User input reaches a shell command unescaped.",
+    "consequence": "Any caller can run arbitrary commands on the host.",
+    "suggested_fix": "Pass an argument list to subprocess.run without shell=True.",
+    "evidence": "subprocess.run(f'ls {path}', shell=True)",
+    "confidence": "high",
+}
+_COVERAGE_ROLE_FINDING: dict[str, object] = {
+    "severity": "SHOULD_FIX",
+    "file": "app/run.py",
+    "line_start": 1,
+    "line_end": 1,
+    "summary": "The new list_dir function has no test.",
+    "consequence": "A regression in list_dir would ship unnoticed.",
+    "suggested_fix": "Add a unit test for list_dir; use rule_id coverage.missing_test.",
+    "evidence": "def list_dir(path):",
+    "confidence": "high",
+}
+
+#: (name, role documents in manifest order, expected verdict)
+_AGGREGATION_SCENARIOS: tuple[tuple[str, list[tuple[str, str]], str], ...] = (
+    (
+        "pass",
+        [
+            ("security", _role_doc("security", [])),
+            ("quality", _role_doc("quality", [])),
+        ],
+        "PASS",
+    ),
+    (
+        "fail",
+        [
+            ("security", _role_doc("security", [_MUST_FIX_ROLE_FINDING])),
+            ("quality", _role_doc("quality", [_COVERAGE_ROLE_FINDING])),
+        ],
+        "FAIL",
+    ),
+)
+
+
+def _record_engine_fixture(scenario: str, content: str) -> None:
+    """Write one verbatim ``-o`` output and its meta (CW_RECORD_ENGINE_FIXTURE=1)."""
+    from cw.executor import codex_capability_diagnosis
+    from cw.review_engine.aggregate import engine_aggregation_schema
+
+    path = _FIXTURES_DIR / f"codex_engine_aggregation_real_{scenario}.json"
+    path.write_text(content, encoding="utf-8")
+    meta_path = _FIXTURES_DIR / "codex_engine_aggregation_real.meta.json"
+    meta: dict[str, object] = {}
+    if meta_path.is_file():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta[scenario] = {
+        "codex_version": codex_capability_diagnosis().detail,
+        "recorded": datetime.now(tz=UTC).date().isoformat(),
+        "scenario": scenario,
+    }
+    meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    schema_path = _FIXTURES_DIR / "review_engine_aggregation_schema.json"
+    schema_path.write_text(
+        json.dumps(engine_aggregation_schema(), indent=2) + "\n", encoding="utf-8"
+    )
+
+
+@pytest.mark.skipif(not _CODEX_LIVE, reason="INTEGRATION_CODEX_LIVE not set")
+class TestCodexEngineAggregation:
+    """#3216 Gate 0 (R14): a codex turn reliably emits a schema-valid aggregation.
+
+    Each scenario runs five times. Every run must exit 0 (the strict schema is
+    accepted), validate as ``EngineAggregationOutput``, pass the unchanged
+    ``load_review_engine_summary`` once cw fills its three fields, and reach
+    ``turn.completed`` in the audit stream. Runs nightly, never in default CI.
+    """
+
+    @pytest.mark.parametrize(
+        ("scenario", "role_documents", "expected_verdict"),
+        _AGGREGATION_SCENARIOS,
+        ids=[s[0] for s in _AGGREGATION_SCENARIOS],
+    )
+    def test_aggregation_is_schema_valid(
+        self,
+        scenario: str,
+        role_documents: list[tuple[str, str]],
+        expected_verdict: str,
+        make_git_repo: Callable[..., Path],
+        live_base: Callable[[], Path],
+    ) -> None:
+        from cw.models.enums import SandboxMode
+        from cw.review_engine.aggregate import (
+            EngineAggregationOutput,
+            assemble_summary,
+            engine_aggregation_schema,
+            render_aggregation_envelope,
+        )
+        from cw.review_engine_summary_io import (
+            EngineSummaryError,
+            load_review_engine_summary,
+        )
+
+        base = live_base()
+        repo = make_git_repo(f"engine-aggregation-{scenario}", base=base)
+        head = git_in(repo, "rev-parse", "HEAD")
+        aggregation_prompt = (_ENGINE_STUB_DIR / "prompts" / "aggregate.md").read_text(
+            encoding="utf-8"
+        )
+        envelope = render_aggregation_envelope(
+            head_sha=head,
+            aggregation_prompt=aggregation_prompt,
+            role_documents=role_documents,
+        )
+        assert envelope.startswith("This is a gate step.")
+        failures: list[str] = []
+        recorded = False
+        for attempt in range(_AGGREGATION_RUNS):
+            scratch = _scratch(base)
+            schema_path = scratch / "aggregation-schema.json"
+            schema_path.write_text(
+                json.dumps(engine_aggregation_schema()), encoding="utf-8"
+            )
+            argv = _build_generic_codex_argv(
+                model=None,
+                reasoning_effort=None,
+                schema_path=schema_path,
+                output_path=scratch / "aggregation-output.json",
+                sandbox_mode=SandboxMode.READ_ONLY,
+            )
+            runner = _RecordingCodexRunner()
+            result = runner.run(
+                repo, argv, _AGGREGATION_TIMEOUT_SECONDS, stdin=envelope
+            )
+            runner.assert_clean()
+            content = result.output_file_content or ""
+            label = f"{scenario}#{attempt}"
+            try:
+                assert not result.timed_out, f"{label}: timed out"
+                assert result.returncode == 0, (
+                    f"{label}: exit {result.returncode}: {result.stderr[-2000:]}"
+                )
+                assert "invalid_json_schema" not in result.stderr, label
+                output = EngineAggregationOutput.model_validate_json(content)
+                summary_path = scratch / "summary.json"
+                summary_path.write_text(
+                    json.dumps(assemble_summary(output, head)), encoding="utf-8"
+                )
+                summary = load_review_engine_summary(summary_path)
+                assert summary.verdict == expected_verdict, (
+                    f"{label}: verdict {summary.verdict}"
+                )
+                metrics = _parse_codex_audit_events(result.stdout, duration_seconds=0.0)
+                assert metrics.get("terminal_event") == "turn.completed", label
+            except (AssertionError, ValidationError, EngineSummaryError) as exc:
+                failures.append(f"{label}: {exc!r}\n-o content: {content[:4000]}")
+                _log.warning("engine aggregation probe failed %s: %r", label, exc)
+                continue
+            _log.info("engine aggregation probe ok %s", label)
+            if _RECORD_FIXTURE and not recorded:
+                _record_engine_fixture(scenario, content)
+                recorded = True
+        assert not failures, "\n\n".join(failures)

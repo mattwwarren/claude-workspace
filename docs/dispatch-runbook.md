@@ -3570,8 +3570,43 @@ the `touched` paths. Doctor and `show` list the park like any other
 - Files the engine reads or runs outside the skill directory and
   `guarded_paths` are not guarded; keep `guarded_paths` complete.
 
+**Codex review lane with an engine (RFC 0018 A4, #3216).** A codex REVIEW
+lane on a client with `review.engine` runs the engine in process through the
+skill's `cw-engine.json` (`docs/headless-contract.md` section 12.14): the D-13
+preflight on every round, one `codex exec` per declared role, then a read-only
+aggregation turn whose summary cw writes and validates. Every round reviews the
+full diff at the tip. A role or aggregation failure is `agent_block`, with
+`engine_role_failed: ...` or `engine_aggregation_failed: ...` in
+`blocker.details`; only transient timeout, budget, and capacity failures are
+`retry_eligible: true`, while deterministic failures require triage. A touched
+engine path parks as `review_engine_modified` exactly as above. The default confirm backend
+after a codex engine pass is Claude; set `review.confirm_backend: none` or
+`codex` for an all-codex lane.
+
+**Park: `review_engine_unsupported_backend` (#3216).** The client sets
+`review.engine`, but the REVIEW lane cannot run it. `blocker.details` names the
+backend and the cause:
+
+- `backend_unsupported`: an opencode or local REVIEW lane, refused in
+  pre-flight before any agent runs. Move the lane's REVIEW executor to
+  claude-native or codex, or remove `review.engine`.
+- `no_codex_manifest`: a codex lane whose default-branch skill has no
+  `cw-engine.json` (a single-file `.claude/commands/<n>.md` engine never has
+  one). Add the manifest beside `SKILL.md` on the default branch.
+- `codex_not_declared`: the manifest's `backends` does not list `codex`.
+- `manifest_invalid`: any other manifest rejection, named as
+  `<reason>: <field_path>`. Check it locally with
+  `cw review engine validate --kind manifest <path>/cw-engine.json`.
+
+Then `cw dev-queue requeue <T> -c <C>`; a bare requeue without the fix parks
+again. `cw doctor` reports the lane as `review-engine/<client>/<lane>`.
+Migration note: before #3216 a codex lane with `review.engine` and no manifest
+ran the built-in roster with only a doctor warning; it now parks (operator
+decision R9).
+
 **Park: `review_confirm_must_fix` (RFC 0017, #3042).** On a claude-native
-client with `review.engine` set and a `codex` confirm backend, the independent
+client with `review.engine` set and a `codex` confirm backend (and, since
+#3216, on a codex engine lane with a `claude` or `codex` confirm backend), the independent
 confirm round after a clean engine round is decided in code, never adjudicated
 (the engine's verdict is final, D-5/D-9). A new MUST_FIX, or a never-deferrable
 `coverage.*`/`acceptance.*` SHOULD_FIX, stops the ledger with

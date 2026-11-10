@@ -38,18 +38,17 @@ from cw.review_adjudication import Adjudication
 from cw.review_adjudication._models import DEFERRED_OUTCOME
 from cw.review_convergence import (
     CONFIRM_ENGINE_DEFER_RATIONALE,
-    CONFIRM_ENGINE_PARK_RATIONALE,
     DECISION_STOP_CONFIRM_MUST_FIX,
     ConvergenceError,
     confirm_escalated_event_payload,
-    decide_verdict,
+    decide_confirm_verdict,
     engine_pass_precedes,
     finding_identity,
     route_engine_confirm,
+    verdict_ran_engine,
 )
 from cw.review_debt_filing import artifact_debt_entries, debt_entry
 from cw.review_engine.constants import ENGINE_ROLE
-from cw.review_engine.route import is_non_deferrable_rule
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -61,7 +60,7 @@ if TYPE_CHECKING:
         RoundInput,
         RoundReport,
     )
-    from cw.review_findings import AcceptedFinding, Finding, ReviewVerdict
+    from cw.review_findings import Finding, ReviewVerdict
 
 #: Prefix of the stderr line a parked engine-confirm round prints. The line is
 #: ``friction: confirm_escalated: <reason> round=<n>``; the prose copies it into
@@ -112,29 +111,13 @@ def round_ran_engine(payload: RoundInput) -> bool:
     """
     if payload.kind != "loop":
         return False
-    roles = (
-        {record.reviewer_role for record in payload.verdict.agents_run}
-        if payload.verdict is not None
-        else set(payload.roster)
-    )
-    return roles == {ENGINE_ROLE}
+    if payload.verdict is not None:
+        return verdict_ran_engine(payload.verdict)
+    return set(payload.roster) == {ENGINE_ROLE}
 
 
 def _engine_confirm(payload: RoundInput, ledger: ConvergenceLedger) -> bool:
     return payload.kind == "confirm" and engine_pass_precedes(ledger)
-
-
-def _park_stamp(item: AcceptedFinding) -> AcceptedFinding:
-    """*item* restamped ``operator_actionable`` when it can never be deferred."""
-    finding = item.finding
-    if finding.severity in _GATING and is_non_deferrable_rule(finding.rule_id):
-        return item.model_copy(
-            update={
-                "disposition": "operator_actionable",
-                "disposition_detail": CONFIRM_ENGINE_PARK_RATIONALE,
-            }
-        )
-    return item
 
 
 def prepare_engine_confirm(
@@ -147,18 +130,18 @@ def prepare_engine_confirm(
     ``decide_verdict`` with :data:`CONFIRM_ENGINE_DEFER_RATIONALE` (no
     coordinator adjudication runs), and a gating finding with a never-deferrable
     ``coverage.*``/``acceptance.*`` rule is restamped ``operator_actionable``
-    with :data:`CONFIRM_ENGINE_PARK_RATIONALE`. Any other payload is returned
-    unchanged.
+    with :data:`CONFIRM_ENGINE_PARK_RATIONALE`, through the shared
+    :func:`cw.review_convergence.decide_confirm_verdict`. Any other payload is
+    returned unchanged.
     """
     if not _engine_confirm(payload, ledger):
         return payload
     if payload.verdict is None:
         raise ConvergenceError(ENGINE_CONFIRM_NEEDS_VERDICT)
-    decided = decide_verdict(payload.verdict, CONFIRM_ENGINE_DEFER_RATIONALE)
-    stamped = decided.model_copy(
-        update={"accepted": [_park_stamp(item) for item in decided.accepted]}
+    decided = decide_confirm_verdict(
+        payload.verdict, ledger, CONFIRM_ENGINE_DEFER_RATIONALE
     )
-    return payload.model_copy(update={"verdict": stamped})
+    return payload.model_copy(update={"verdict": decided})
 
 
 def _accepted_by_identity(
