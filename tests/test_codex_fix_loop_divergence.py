@@ -856,7 +856,7 @@ class TestLoopCitation:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         repo, state = citation_repo
-        exc = subprocess.CalledProcessError(128, ["git", "diff"])
+        exc = subprocess.CalledProcessError(128, ["diff"])
 
         def _boom(*_a: object, **_k: object) -> str:
             raise exc
