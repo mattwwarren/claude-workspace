@@ -3,14 +3,15 @@
 ``reconcile`` runs the lockless pre-passes (``cw.reconcile.prepasses``) -- gh
 merge state, the codex clean probes (#2563), the gate recipes'
 plan-of-record prefetch (#2545), the review recipes' repo slugs (#2564), the
-worktree dirty checks (#2548) and, last, the local harvest's git facts
-(#2565) -- then ``_reconcile_locked`` under ``sessions_lock`` (the
-detect/emit/act sweeps for stalled, idle, and phantom sessions, wired in
-``cw.reconcile.locked_sweeps``), then the post-lock gh/git passes. See the
-package ``__init__`` docstring and ADR-0005/ADR-0006/ADR-0019 for the
-invariants. This module keeps the single ``sessions_lock`` acquisition, the
-daemon roster query and outage guard, the phantom tail and the post-lock
-drain; the rest was split out (#2896).
+worktree dirty checks (#2548), the local harvest's git facts (#2565) and,
+last, the daemon-roster snapshot refresh (#2550,
+``cw.reconcile.roster_snapshot``) -- then ``_reconcile_locked`` under
+``sessions_lock`` (the detect/emit/act sweeps for stalled, idle, and phantom
+sessions, wired in ``cw.reconcile.locked_sweeps``), then the post-lock gh/git
+passes. See the package ``__init__`` docstring and ADR-0005/ADR-0006/ADR-0019
+for the invariants. This module keeps the single ``sessions_lock``
+acquisition, the roster snapshot and its in-lock lookup and outage guard, the
+phantom tail and the post-lock drain; the rest was split out (#2896).
 
 Anything whose side effect re-acquires ``sessions_lock`` (a ``spawn_create_impl``
 call, a dispatch tick that re-enters ``reconcile()``) must NOT run inside
@@ -30,8 +31,6 @@ audit comments, and the review recipes' reviewer request.
 
 from __future__ import annotations
 
-import json
-import subprocess
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -74,6 +73,11 @@ from cw.reconcile.review_recipes import (
     dispatch_deferred_review_jobs,
 )
 from cw.reconcile.review_recipes.core import capture_review_repo_slugs
+from cw.reconcile.roster_snapshot import (
+    RosterSnapshot,
+    RosterUnavailableError,
+    lookup_roster,
+)
 from cw.reconcile.tasks import complete_timed_out_merged_tasks
 
 if TYPE_CHECKING:
@@ -141,22 +145,34 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     merge state, the codex clean probes (#2563), the gate recipes'
     plan-of-record reads (#2545), the review recipes' repo slugs (#2564), the
     worktree dirty checks (#2548), the shipped-release PR lookups (#2715), the
-    main-drift checks and concierge recipe 3's git read (#2546) and the local
-    harvest's git facts (#2565).
+    main-drift checks and concierge recipe 3's git read (#2546), the local
+    harvest's git facts (#2565) and the daemon roster (#2550).
     The in-lock code only reads their results, and a candidate with no usable
-    result defers to the next tick. The harvest capture runs last: its facts
-    expire ``HARVEST_FACTS_MAX_AGE_SECONDS`` after capture, so no other
-    pre-pass may run between it and the lock. Stacked worst case before the
-    lock is requested, all lockless: codex probes 60 s, repo slugs 30 s, dirty
-    checks 30 s plus one in-flight check, and one 15 s roster call, shipped
-    PRs 20 s plus one in-flight 15 s lookup, main-drift and cancelled-row
-    probes 20 s each as a budget checked between items plus the in-flight git
-    (``_run_git`` passes no timeout, so not a hard cap), harvest
-    facts 60 s plus one in-flight candidate's four 10 s git calls; only the
-    harvest pass's own span (at most 100 s) counts against its 180 s age
-    limit. The dirty checks expire ``DIRTY_CHECK_MAX_AGE_SECONDS`` after
-    capture, the drift and cancelled-row probes 180 s after (so a slow harvest
-    pass cannot age them out); one aged out by a lock wait only defers.
+    result defers to the next tick. The harvest capture is the last git/gh
+    pre-pass: its facts expire ``HARVEST_FACTS_MAX_AGE_SECONDS`` after
+    capture, so only the roster refresh follows it. Stacked worst case before
+    the lock is requested, all lockless: codex probes 60 s, repo slugs 30 s,
+    dirty checks 30 s plus one in-flight check, and one 10 s roster call,
+    shipped PRs 20 s plus one in-flight 15 s lookup, main-drift and
+    cancelled-row probes 20 s each as a budget checked between items plus the
+    in-flight git (``_run_git`` passes no timeout, so not a hard cap), harvest
+    facts 60 s plus one in-flight candidate's four 10 s git calls, then a
+    second 10 s roster refresh when the first read is older than
+    ``ROSTER_REUSE_MAX_AGE_SECONDS``; the harvest pass's own span (at most
+    100 s) plus that final refresh (at most 10 s) counts against its 180 s
+    age limit. The dirty checks expire ``DIRTY_CHECK_MAX_AGE_SECONDS`` after
+    capture, and that 90 s budget can already be exceeded in this stacked
+    worst case (a stale dirty check only defers, never authorizes); the extra
+    roster refresh only widens a case that defers. The drift and
+    cancelled-row probes expire 180 s after capture (so a slow harvest pass
+    cannot age them out); one aged out by a lock wait only defers.
+
+    Roster snapshot (#2550): ``claude agents --json`` runs only before the
+    lock, into one :class:`~cw.reconcile.roster_snapshot.RosterSnapshot`
+    shared by the dirty-check pre-pass and the final refresh. The in-lock
+    lookup fails closed: a snapshot at least ``ROSTER_SNAPSHOT_MAX_AGE_SECONDS``
+    (20 s) old, or none, skips the roster-dependent sweeps for the tick, and a
+    failed read is treated as a daemon outage, as before.
     """
     # Pre-pass: check PR merge state for ACTIVE/IDLE DAEMON sessions before
     # acquiring sessions_lock. gh subprocess must NOT run under the lock
@@ -185,17 +201,24 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
         config=_orchestrator_config, dispatching=dispatch_review_jobs
     )
     # Fifth (#2548): the worktree dirty checks the phantom sweep and the
-    # TIMED_OUT/COMPLETED backstops read in-lock.
+    # TIMED_OUT/COMPLETED backstops read in-lock. Its roster read goes
+    # through the tick's roster snapshot (#2550), so the refresh below can
+    # reuse it.
+    roster = RosterSnapshot()
     dirty_checks = _capture_dirty_checks(
-        config=_orchestrator_config, roster=_claude_agents_json
+        config=_orchestrator_config, roster=roster.shared(_claude_agents_json)
     )
     # Sixth (#2715), the shipped-release `gh pr list`, then the main-drift and
     # recipe-3 git (#2546), then the salvaged-sentinel scope git (#2641), then
-    # LAST (#2565) the local harvest's git facts, whose max age is measured
-    # from capture.
+    # (#2565) the local harvest's git facts, whose max age is measured from
+    # capture.
     shipped_probes, drift_probes, cancelled_probes, scope_probes, harvest_facts = (
         _capture_closing_prepasses(config=_orchestrator_config, clients=_clients)
     )
+    # LAST (#2550): `claude agents --json`, lockless, so the roster is young
+    # when the lock is taken; re-reads only if the dirty-check read is not a
+    # success younger than ROSTER_REUSE_MAX_AGE_SECONDS.
+    roster.refresh(_claude_agents_json)
 
     jobs = DeferredReconcileJobs(
         review=DeferredReviewDispatch() if dispatch_review_jobs else None
@@ -223,6 +246,7 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
                 drift_probes=drift_probes,
                 cancelled_probes=cancelled_probes,
                 scope_probes=scope_probes,
+                roster_snapshot=roster,
             )
     except (KeyboardInterrupt, SystemExit):
         interrupted = True
@@ -339,6 +363,7 @@ def _reconcile_locked(
     drift_probes: MainDriftProbes | None = None,
     cancelled_probes: CancelledRowProbes | None = None,
     scope_probes: ScopeProbes | None = None,
+    roster_snapshot: RosterSnapshot | None = None,
 ) -> ReconcileReport:
     """Body of reconcile(), called while sessions_lock is held.
 
@@ -385,6 +410,15 @@ def _reconcile_locked(
     scope_probes comes from reconcile()'s lockless salvage-scope pre-pass
     (#2641): the idle, phantom and concierge sentinel parses correct a
     salvaged scope from it, never git; ``None`` leaves every scope as reported.
+    roster_snapshot comes from reconcile()'s lockless roster capture (#2550):
+    it is looked up first (``lookup_roster``, never a subprocess), so the
+    in-lock sweeps' run time does not age it. A failed read (error, timeout,
+    unparseable) is an empty roster with ``daemon_errored`` set, fed to the
+    unchanged outage guard. A stale or missing snapshot (``None`` is missing)
+    returns right after the roster-independent pre-guard sweeps, so no
+    roster-dependent sweep runs on a fabricated empty roster. Its capture
+    time is passed to ``compute_drift``, which spares a session spawned or
+    resumed too recently for the capture to list it.
 
     Since the process-kill-timeout removal, no sweep in here dispositions a
     session off elapsed time or transcript quietness: the foreign-result and
@@ -407,8 +441,19 @@ def _reconcile_locked(
     # filesystem reads within the same reconcile tick. See GitHub issue #326.
     shared_tasks = load_dev_queue().tasks
     shared_task_by_ticket = {t.ticket_id: t for t in shared_tasks}
+    # The roster lookup runs first (#2550, M3): it is pure, and doing it
+    # before the sweeps keeps their run time from aging the snapshot. Only the
+    # early-return decision waits for the pre-guard sweeps. `claude agents
+    # --json` returns sessionId as a full UUID; normalize_roster keys it by
+    # the 8-char short id cw stores as surface_ref.
+    unavailable: RosterUnavailableError | None = None
+    try:
+        native_live, surface_to_full = normalize_roster(lookup_roster(roster_snapshot))
+    except RosterUnavailableError as exc:
+        native_live, surface_to_full = set(), {}
+        unavailable = exc
     # The roster-independent sweeps (foreign-result, local harvest, main
-    # drift, leaked workers) run BEFORE the daemon query + outage guard below.
+    # drift, leaked workers) run BEFORE the outage guard below.
     local_harvested = _run_pre_guard_sweeps(
         state,
         now=now,
@@ -422,26 +467,11 @@ def _reconcile_locked(
         drift_probes=drift_probes,
     )
 
-    try:
-        # `claude agents --json` returns sessionId as a full UUID
-        # (e.g. "04bf1c48-6b3a-401b-bc3a-0d61b5b7a6ac"). cw's surface_ref
-        # is the 8-char short id (prefix of the UUID) — same shape
-        # `claude --bg` returns at spawn. Normalize to short id for
-        # comparison; otherwise reconcile sees every native session as a
-        # phantom because UUID != short-id.
-        _agents = _claude_agents_json()
-        native_live, surface_to_full = normalize_roster(_agents)
-        daemon_errored = False
-    except (
-        subprocess.CalledProcessError,
-        json.JSONDecodeError,
-        FileNotFoundError,
-        subprocess.TimeoutExpired,
+    # A stale or missing snapshot skips every roster-dependent sweep (M2); a
+    # failed read keeps the outage heuristic with daemon_errored=True.
+    if (unavailable is not None and unavailable.skips_tick) or (
+        _looks_like_daemon_outage(state, unavailable is not None, native_live)
     ):
-        native_live = set()
-        surface_to_full = {}
-        daemon_errored = True
-    if _looks_like_daemon_outage(state, daemon_errored, native_live):
         return ReconcileReport(
             completed_ticket_ids=list(dict.fromkeys(local_harvested)),
         )
@@ -459,7 +489,14 @@ def _reconcile_locked(
         shipped_probes=shipped_probes,
     )
 
-    drift = compute_drift(state, native_live, now=now)
+    drift = compute_drift(
+        state,
+        native_live,
+        now=now,
+        roster_captured_at=(
+            roster_snapshot.captured_at if roster_snapshot is not None else None
+        ),
+    )
     phantom_session_ids = _without_acts_in_flight(drift.phantom_session_ids)
     if not phantom_session_ids:
         # No phantom sessions to reap, but still run the TIMED_OUT,

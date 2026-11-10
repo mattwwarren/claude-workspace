@@ -8,14 +8,22 @@ patching the live helper's seams (``_deps.probe_checked_out_branch``,
 ``_worktree_evidence.unsaved_work_reason`` and friends). Mirrors
 ``detect_adopt_plan_prefetched`` / ``run_gate_recipes_prefetched`` in
 ``tests/_reconcile_helpers.py``, kept separate for that module's size.
+
+It also builds the daemon-roster snapshot (#2550) that ``reconcile()``
+captures lockless and hands ``_reconcile_locked``: a test that calls
+``_reconcile_locked`` directly passes :func:`fresh_roster_snapshot` (or
+:func:`aged_roster_snapshot`), because a missing snapshot skips every
+roster-dependent sweep.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
+
+from freezegun import freeze_time
 
 from cw.config import load_state
 from cw.dev_queue import load_dev_queue
@@ -28,6 +36,7 @@ from cw.reconcile.phantom import (
     _detect_phantom_candidates,
     capture_phantom_dirty_checks,
 )
+from cw.reconcile.roster_snapshot import RosterSnapshot
 from cw.reconcile.tasks import (
     capture_backstop_dirty_checks,
     revert_completed_silent_tasks,
@@ -36,7 +45,7 @@ from cw.reconcile.tasks import (
 from tests._reconcile_helpers import _attention_events, _state_queue_snapshot
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping
+    from collections.abc import Collection, Iterable, Mapping
     from pathlib import Path
 
     import pytest
@@ -77,6 +86,24 @@ def detect_phantom_prefetched(
         config=config,
         dirty_checks=checks,
     )
+
+
+def fresh_roster_snapshot(
+    agents: Iterable[Mapping[str, object]] = (),
+) -> RosterSnapshot:
+    """A roster snapshot that captured *agents* just now (#2550). No subprocess."""
+    rows = [dict(agent) for agent in agents]
+    snapshot = RosterSnapshot()
+    snapshot.capture(lambda: [dict(row) for row in rows])
+    return snapshot
+
+
+def aged_roster_snapshot(
+    agents: Iterable[Mapping[str, object]] = (), *, age_seconds: float
+) -> RosterSnapshot:
+    """A roster snapshot whose capture is *age_seconds* old by the real clock."""
+    with freeze_time(datetime.now(UTC) - timedelta(seconds=age_seconds)):
+        return fresh_roster_snapshot(agents)
 
 
 def capture_backstops_from_disk() -> DirtyChecks:

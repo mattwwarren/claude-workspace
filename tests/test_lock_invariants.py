@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import json
 import re
 import subprocess
 import sys
@@ -27,15 +28,20 @@ import pytest
 from cw import history
 from cw._git import run_git
 from cw._lock_guard import GuardEvent, LockRank
-from cw.config import sessions_lock
+from cw.config import save_state, sessions_lock
 from cw.dev_queue.storage import dev_queue_lock
 from cw.exceptions import CwError, CwLockOrderError
+from cw.models import CwState
+from cw.reconcile import reconcile
+from cw.reconcile._shared import _roster as _roster_module
 from tests import _git_sandbox
 from tests._lock_invariants import (
     SUBPROCESS_UNDER_SESSIONS_ALLOWLIST,
     LockTrace,
     install,
 )
+from tests._tool_fakes import fake_claude_cli, prepend_to_path, restore_real_run
+from tests.conftest import _make_daemon_session
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _HARNESS_SOURCE = _REPO_ROOT / "tests" / "_lock_invariants.py"
@@ -44,6 +50,7 @@ _INNER_PYTEST_TIMEOUT_S = 120
 _THREADS = 8
 _PAIRS_PER_THREAD = 50
 _TICKET_RE = re.compile(r"^#\d+$")
+_LIVE_REF = "abcd1234"
 
 # Follow-up tickets that track the in-lock subprocess exceptions documented in
 # ADR-0019 (invariant 3): the #1232 follow-ups plus the four the #1233 probe
@@ -59,7 +66,9 @@ _TICKET_RE = re.compile(r"^#\d+$")
 # the main-drift checks and concierge recipe 3's git read run lock-free.
 # #2641's ``cw.reconcile._shared._sentinels`` entry, the last one, is deleted:
 # the salvaged-sentinel scope check's git runs in a lockless pre-pass, so the
-# allowlist is empty. It never had an ADR row.
+# allowlist is empty. It never had an ADR row. #2550's ADR row is deleted; it
+# never had an allowlist entry (every test stubbed the roster read, so the
+# probe never saw it); the roster read runs in a lockless snapshot.
 _DOCUMENTED_TICKETS = frozenset(
     {
         "#2545",
@@ -422,6 +431,58 @@ def test_main_drift_is_not_allowlisted() -> None:
         )
         for module in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
     )
+
+
+def test_claude_agents_is_not_allowlisted() -> None:
+    """#2550: ``claude agents --json`` is read into a lockless tick-scoped
+    snapshot, so no in-lock subprocess under the roster reader's, core's or
+    the snapshot module's frame is forgiven."""
+    for module in (
+        "cw.reconcile._shared._roster",
+        "cw.reconcile.core",
+        "cw.reconcile.roster_snapshot",
+    ):
+        assert module not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+    assert "#2550" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST.values()
+    assert not any(
+        module.startswith(("cw.reconcile._shared", "cw.reconcile.roster_snapshot"))
+        for module in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+    )
+
+
+def test_roster_read_runs_outside_sessions_lock(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2550, real-subprocess proof: a ``reconcile()`` tick runs the real
+    ``_claude_agents_json`` against a recording ``claude`` shim, and the
+    harness records no subprocess under ``sessions_lock``."""
+    shim = fake_claude_cli(
+        tmp_path, agents_json=json.dumps([{"sessionId": f"{_LIVE_REF}-full-uuid"}])
+    )
+    restore_real_run(monkeypatch)
+    prepend_to_path(monkeypatch, shim.bin_dir)
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json", _roster_module._claude_agents_json
+    )
+    save_state(
+        CwState(
+            sessions=[
+                _make_daemon_session(
+                    id="s-live",
+                    name="client-a/s-live",
+                    surface_ref=_LIVE_REF,
+                    worktree_path=None,
+                )
+            ]
+        )
+    )
+    trace = install(monkeypatch, allowlist={})
+
+    report = reconcile()
+
+    assert trace.subprocess_calls() == ()
+    assert ["agents", "--json"] in shim.calls
+    assert report.phantom_session_ids == []
 
 
 def test_salvage_scope_is_not_allowlisted() -> None:

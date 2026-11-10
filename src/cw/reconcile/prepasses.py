@@ -7,9 +7,11 @@ review recipes' repo slugs (#2564, ``capture_review_repo_slugs``, called from
 core directly), the worktree dirty checks (#2548), then
 ``_capture_closing_prepasses``: the shipped-release PR lookups (#2715), the
 main-drift and concierge recipe 3 git reads (#2546), the salvaged-sentinel
-scope (#2641) and, last, the local harvest's git facts (#2565). Every ``gh``
-and ``git`` call the in-lock sweeps would otherwise need runs here; the
-in-lock code only reads the results (ADR-0019).
+scope (#2641) and, last, the local harvest's git facts (#2565). After the
+harvest pass core makes one more lockless step, the daemon-roster refresh
+(#2550, ``cw.reconcile.roster_snapshot``). Every ``gh`` and ``git`` call the
+in-lock sweeps would otherwise need runs here; the in-lock code only reads
+the results (ADR-0019).
 
 The codex clean probes, plan probes, dirty checks and harvest facts each own
 their own state and dev-queue read, contain a read error
@@ -75,8 +77,8 @@ if TYPE_CHECKING:
     from cw.models import ClientConfig, CwState, OrchestratorConfig, TicketTask
     from cw.reconcile._shared import ScopeProbes
     from cw.reconcile.cancelled_row_probes import CancelledRowProbes
-    from cw.reconcile.dirty_checks import RosterReader
     from cw.reconcile.main_drift import MainDriftProbes
+    from cw.reconcile.roster_snapshot import RosterReader
     from cw.reconcile.shipped_release import ShippedPrProbes
 
 _log = logging.getLogger(__name__)
@@ -244,9 +246,12 @@ def _capture_dirty_checks(
     when a live DAEMON session has a worktree. Bounded by
     ``DIRTY_CHECK_MAX_PER_TICK`` checks and ``DIRTY_CHECK_BUDGET_SECONDS``.
 
-    *roster* is that roster call: ``reconcile()`` passes
-    ``cw.reconcile.core._claude_agents_json`` (#2896), so a patch on core's
-    binding reaches this capture too.
+    *roster* is that roster call: ``reconcile()`` passes the snapshot-bound
+    reader ``RosterSnapshot.shared(cw.reconcile.core._claude_agents_json)``
+    (#2896, #2550), so a patch on core's binding reaches both this read and
+    the final pre-lock refresh, which reuses it when it is young enough.
+    An exception outside ``ROSTER_READ_ERRORS`` (a ``PermissionError``, say)
+    propagates out of ``reconcile()`` before the lock.
 
     Like ``_capture_codex_clean_probes`` it must never fail ``reconcile()``
     over a state or dev-queue read error: that is logged and yields an empty

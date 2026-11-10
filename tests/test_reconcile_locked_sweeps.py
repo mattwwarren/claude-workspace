@@ -49,6 +49,7 @@ from cw.reconcile.deferred import DeferredReconcileJobs
 from cw.reconcile.dirty_checks import DirtyChecks
 from cw.reconcile.harvest_synthesis import HarvestFacts
 from tests._clients_yaml import write_clients_yaml
+from tests._dirty_check_helpers import fresh_roster_snapshot
 from tests._reconcile_helpers import (
     _auto_config,
     _mk_session,
@@ -550,7 +551,10 @@ class TestSlotReleaseSweepWiring:
         monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
 
         with sessions_lock():
-            reconcile_core._reconcile_locked(deferred=DeferredReconcileJobs())
+            reconcile_core._reconcile_locked(
+                deferred=DeferredReconcileJobs(),
+                roster_snapshot=fresh_roster_snapshot(),
+            )
 
         assert seen == [None]
 

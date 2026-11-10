@@ -59,6 +59,7 @@ from cw.reconcile._shared import (
     ProposedAction,
     ReapCandidate,
 )
+from cw.reconcile._shared._roster import ROSTER_REGISTRATION_SLACK_SECONDS
 from cw.reconcile.deferred import DeferredReconcileJobs
 from cw.reconcile.review_recipes import (
     RECIPE_ADDRESS_REVIEW,
@@ -68,9 +69,11 @@ from cw.reconcile.review_recipes import (
     _shared,
 )
 from cw.reconcile.review_recipes._shared import RepoSlugs
+from cw.reconcile.roster_snapshot import RosterSnapshot
 from cw.review_strategy import ReviewStrategy
 from tests import _git_sandbox
 from tests._clients_yaml import ClientSpec, staged_client, write_clients_yaml
+from tests._dirty_check_helpers import aged_roster_snapshot, fresh_roster_snapshot
 from tests._reconcile_helpers import (
     LockProbeDaemon,
     _auto_config,
@@ -805,7 +808,9 @@ class TestCodexLiveWriterRepark:
 
         with sessions_lock():
             reconcile_core._reconcile_locked(
-                clients=scope, deferred=DeferredReconcileJobs()
+                clients=scope,
+                deferred=DeferredReconcileJobs(),
+                roster_snapshot=fresh_roster_snapshot(),
             )
 
         repark_mock.assert_called_once()
@@ -822,7 +827,8 @@ class TestHarvestCaptureOrder:
     def test_harvest_capture_runs_last_before_the_lock(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Its facts age from capture, so no other pre-pass may run after it."""
+        """Its facts age from capture: it is the last git/gh pre-pass, and only
+        the bounded roster refresh (#2550) follows it."""
         save_state(CwState(sessions=[]))
         order: list[str] = []
 
@@ -850,6 +856,294 @@ class TestHarvestCaptureOrder:
         reconcile()
 
         assert order == ["codex", "slugs", "dirty", "harvest", "locked"]
+
+
+_LIVE_REF = "abcd1234"
+_LIVE_UUID = f"{_LIVE_REF}-1111-2222-3333-444455556666"
+_DECOY_ROSTER: list[dict[str, object]] = [{"sessionId": "decoy000-0000"}]
+
+
+class _RosterCounter:
+    """A ``_claude_agents_json`` stand-in that records whether each call ran
+    with ``sessions_lock`` held, and raises if one did (#2550)."""
+
+    def __init__(self, result: list[dict[str, object]] | Exception) -> None:
+        self.result = result
+        self.held: list[bool] = []
+
+    def __call__(self) -> list[dict[str, object]]:
+        held = _sessions_lock_held()
+        self.held.append(held)
+        if held:
+            msg = "claude agents --json ran under sessions_lock"
+            raise AssertionError(msg)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return list(self.result)
+
+
+def _worktree_session(sid: str, ref: str = _LIVE_REF) -> Session:
+    """A live DAEMON session with a worktree, so the dirty-check pre-pass
+    reads the roster; its name carries no ticket, so no gh runs."""
+    return _make_daemon_session(
+        id=sid,
+        name=f"client-a/{sid}",
+        surface_ref=ref,
+        worktree_path=Path(f"/tmp/no-such-wt-{sid}"),
+    )
+
+
+def _run_locked(snapshot: RosterSnapshot | None) -> ReconcileReport:
+    with sessions_lock():
+        return reconcile_core._reconcile_locked(
+            deferred=DeferredReconcileJobs(), roster_snapshot=snapshot
+        )
+
+
+class TestRosterSnapshotTick:
+    """#2550: ``claude agents --json`` runs only in a lockless, tick-scoped
+    snapshot; ``_reconcile_locked`` only looks it up and fails closed."""
+
+    def test_fast_tick_with_a_worktree_session_reads_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_state(CwState(sessions=[_worktree_session("w1")]))
+        reader = _RosterCounter([{"sessionId": _LIVE_UUID}])
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", reader)
+
+        report = reconcile()
+
+        assert reader.held == [False]
+        assert report.phantom_session_ids == []
+
+    def test_idle_tick_reads_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        save_state(CwState(sessions=[]))
+        reader = _RosterCounter([])
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", reader)
+
+        reconcile()
+
+        assert reader.held == [False]
+
+    def test_slow_tick_rereads_before_the_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_state(CwState(sessions=[_worktree_session("w1")]))
+        reader = _RosterCounter([{"sessionId": _LIVE_UUID}])
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", reader)
+        monkeypatch.setattr(
+            "cw.reconcile.roster_snapshot.ROSTER_REUSE_MAX_AGE_SECONDS", 0.0
+        )
+
+        reconcile()
+
+        assert reader.held == [False, False]
+
+    def test_in_lock_consumer_never_calls_the_reader(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_state(CwState(sessions=[_mk_session("s1", _LIVE_REF)]))
+        reader = _RosterCounter([{"sessionId": _LIVE_UUID}])
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", reader)
+
+        reconcile()
+        with sessions_lock():
+            reconcile_core._reconcile_locked(
+                deferred=DeferredReconcileJobs(),
+                roster_snapshot=fresh_roster_snapshot([{"sessionId": _LIVE_UUID}]),
+            )
+
+        assert reader.held == [False]
+
+    def test_timeout_with_an_idle_fleet_proceeds_as_an_outage_input(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_state(
+            CwState(
+                sessions=[_mk_session("done", "r-done", status=SessionStatus.COMPLETED)]
+            )
+        )
+        reader = _RosterCounter(
+            subprocess.TimeoutExpired(cmd=["claude", "agents", "--json"], timeout=10)
+        )
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", reader)
+        outage = MagicMock(wraps=reconcile_core._looks_like_daemon_outage)
+        monkeypatch.setattr(reconcile_core, "_looks_like_daemon_outage", outage)
+        post_guard = MagicMock(wraps=reconcile_core._run_post_guard_sweeps)
+        monkeypatch.setattr(reconcile_core, "_run_post_guard_sweeps", post_guard)
+
+        report = reconcile()
+
+        assert report.phantom_session_ids == []
+        outage.assert_called_once()
+        _state, daemon_errored, native_live = outage.call_args.args
+        assert daemon_errored is True
+        assert native_live == set()
+        post_guard.assert_called_once()
+
+    @pytest.mark.parametrize("live", [True, False], ids=["live_fleet", "idle_fleet"])
+    def test_daemon_errored_is_redundant_with_an_empty_roster(self, live: bool) -> None:
+        status = SessionStatus.ACTIVE if live else SessionStatus.COMPLETED
+        state = CwState(sessions=[_mk_session("s1", "r1", status=status)])
+        errored = reconcile_core._looks_like_daemon_outage(state, True, set())
+        assert errored == reconcile_core._looks_like_daemon_outage(state, False, set())
+        assert errored is live
+
+    def test_stale_snapshot_skips_the_roster_dependent_sweeps(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+        save_state(CwState(sessions=[_mk_session("s1", "missing-ref")]))
+        pre_guard = MagicMock(wraps=reconcile_core._run_pre_guard_sweeps)
+        monkeypatch.setattr(reconcile_core, "_run_pre_guard_sweeps", pre_guard)
+        post_guard = MagicMock(wraps=reconcile_core._run_post_guard_sweeps)
+        monkeypatch.setattr(reconcile_core, "_run_post_guard_sweeps", post_guard)
+        stale = aged_roster_snapshot(_DECOY_ROSTER, age_seconds=21.0)
+
+        with caplog.at_level("WARNING", logger="cw.reconcile.roster_snapshot"):
+            report = _run_locked(stale)
+
+        assert report.phantom_session_ids == []
+        pre_guard.assert_called_once()
+        post_guard.assert_not_called()
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            m.startswith("roster_unavailable: cause=stale age=") for m in messages
+        )
+        stored = load_state().find_by_name_or_id("s1")
+        assert stored is not None
+        assert stored.status is SessionStatus.ACTIVE
+        assert stored.completed_reason is None
+
+    def test_missing_snapshot_skips_the_roster_dependent_sweeps(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+        save_state(CwState(sessions=[_mk_session("s1", "missing-ref")]))
+        post_guard = MagicMock(wraps=reconcile_core._run_post_guard_sweeps)
+        monkeypatch.setattr(reconcile_core, "_run_post_guard_sweeps", post_guard)
+
+        report = _run_locked(None)
+
+        assert report.phantom_session_ids == []
+        post_guard.assert_not_called()
+        stored = load_state().find_by_name_or_id("s1")
+        assert stored is not None
+        assert stored.status is SessionStatus.ACTIVE
+
+    def test_empty_snapshot_with_live_refs_is_an_outage(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+        save_state(CwState(sessions=[_mk_session("s1", "missing-ref")]))
+
+        report = _run_locked(fresh_roster_snapshot([]))
+
+        assert report.phantom_session_ids == []
+        stored = load_state().find_by_name_or_id("s1")
+        assert stored is not None
+        assert stored.status is SessionStatus.ACTIVE
+
+    def test_phantom_is_still_reaped_on_a_fresh_snapshot(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+        save_state(CwState(sessions=[_mk_session("s1", "missing-ref")]))
+
+        report = _run_locked(fresh_roster_snapshot(_DECOY_ROSTER))
+
+        assert report.phantom_session_ids == ["s1"]
+        stored = load_state().find_by_name_or_id("s1")
+        assert stored is not None
+        assert stored.status is SessionStatus.COMPLETED
+
+    def test_session_spawned_after_an_aged_capture_is_not_a_phantom(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+        aged = aged_roster_snapshot(_DECOY_ROSTER, age_seconds=19.0)
+        assert aged.captured_at is not None
+        started = aged.captured_at + timedelta(seconds=1)
+        save_state(
+            CwState(sessions=[_mk_session("s1", "missing-ref", started_at=started)])
+        )
+
+        report = _run_locked(aged)
+
+        assert report.phantom_session_ids == []
+
+    def test_session_resumed_after_the_capture_is_not_a_phantom(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """M1: a resume rewrites ``surface_ref`` without moving
+        ``started_at``; ``resumed_at`` after the capture protects it."""
+        monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+        snap = aged_roster_snapshot(_DECOY_ROSTER, age_seconds=2.0)
+        assert snap.captured_at is not None
+        resumed = _mk_session("s1", "new-ref").model_copy(
+            update={"resumed_at": snap.captured_at + timedelta(seconds=1)}
+        )
+        save_state(CwState(sessions=[resumed]))
+
+        report = _run_locked(snap)
+
+        assert report.phantom_session_ids == []
+        stored = load_state().find_by_name_or_id("s1")
+        assert stored is not None
+        assert stored.status is SessionStatus.ACTIVE
+
+    def test_session_resumed_well_before_the_capture_is_still_a_phantom(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+        snap = fresh_roster_snapshot(_DECOY_ROSTER)
+        assert snap.captured_at is not None
+        resumed = _mk_session("s1", "gone-ref").model_copy(
+            update={
+                "resumed_at": snap.captured_at
+                - timedelta(seconds=ROSTER_REGISTRATION_SLACK_SECONDS + 60)
+            }
+        )
+        save_state(CwState(sessions=[resumed]))
+
+        report = _run_locked(snap)
+
+        assert report.phantom_session_ids == ["s1"]
+
+    @pytest.mark.parametrize("fresh", [True, False], ids=["fresh", "stale"])
+    def test_concierge_does_not_act_on_an_unavailable_snapshot(
+        self, monkeypatch: pytest.MonkeyPatch, fresh: bool
+    ) -> None:
+        """M2: concierge's ``_is_session_dead`` reads an absent ref as dead
+        with no live-status gate, so a stale snapshot must not reach it even
+        on an idle fleet. The fresh case proves the setup reaches it."""
+        save_state(
+            CwState(
+                sessions=[_mk_session("done", "r1", status=SessionStatus.COMPLETED)]
+            )
+        )
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id="T-9",
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        session_id="done",
+                    )
+                ]
+            )
+        )
+        concierge = MagicMock(return_value=None)
+        monkeypatch.setattr(locked_sweeps, "run_concierge_recoveries", concierge)
+        snap = (
+            fresh_roster_snapshot(_DECOY_ROSTER)
+            if fresh
+            else aged_roster_snapshot(_DECOY_ROSTER, age_seconds=30.0)
+        )
+
+        _run_locked(snap)
+
+        assert concierge.called is fresh
 
 
 class TestFixDispatchRunsPostLock:

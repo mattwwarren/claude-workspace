@@ -5,7 +5,8 @@ straight-line from ``_reconcile_locked`` in a fixed order:
 
 - ``_run_pre_guard_sweeps`` — the roster-independent sweeps (foreign-result,
   local harvest, main drift, leaked daemon workers), before the
-  ``claude agents --json`` query and the daemon-outage guard.
+  daemon-outage guard (the roster is looked up first, from the lockless
+  snapshot ``reconcile()`` captured, #2550).
 - ``_run_post_guard_sweeps`` — after the outage guard: session-id backfill
   and supervisor check, the RUNNING-row advisories, the emitted-sentinel
   router, liveness, the shipped release and routed-result page, and the
@@ -104,9 +105,10 @@ def _run_pre_guard_sweeps(
 ) -> list[str]:
     """Run the sweeps that do not depend on the daemon roster.
 
-    Called from ``_reconcile_locked`` before the ``claude agents --json``
-    query and the daemon-outage guard, so each of these fires even when the
-    roster is unavailable. Returns the ticket ids the local harvest completed.
+    Called from ``_reconcile_locked`` after the roster snapshot lookup
+    (#2550) and before the daemon-outage guard, so each of these fires even
+    when the roster is unavailable. Returns the ticket ids the local harvest
+    completed.
     """
     # Foreign-result sweep: completes headless DAEMON sessions whose
     # last_result already carries a terminal sentinel recorded by another
