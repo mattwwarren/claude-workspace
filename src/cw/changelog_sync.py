@@ -314,6 +314,13 @@ def _abort(worktree: Path, move: _Move, detail: str, timeout: float) -> Changelo
         merge_in_progress = _merge_in_progress(worktree, timeout)
     except GitFailedError as exc:
         detail = f"{detail}; could not determine merge state ({exc})"
+        try:
+            _checked(worktree, ["merge", "--abort"], timeout)
+        except GitFailedError as abort_exc:
+            detail = (
+                f"{detail}; git merge --abort failed ({abort_exc}): the worktree is"
+                " mid-merge, run `git merge --abort` by hand"
+            )
     else:
         if merge_in_progress:
             try:
