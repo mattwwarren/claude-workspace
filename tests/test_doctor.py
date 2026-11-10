@@ -8700,6 +8700,19 @@ class TestWedgeLeakedDaemonWorker:
             "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
         )
 
+    def _stub_reconcile_pass(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Stub the doctor's unconditional reconcile pass (``_check_reconcile``).
+
+        ``run_doctor(reap=True)`` runs the wedge reap AND that pass against the
+        same fake daemon, and the pass stops the same evidenced orphans. Without
+        this stub a wrong ``clients``/``now`` in the wedge reap sweep stays
+        invisible, because the reconcile pass still issues the stops. With it,
+        only the wedge reap can stop a worker."""
+        monkeypatch.setattr(
+            "cw.doctor.core._check_reconcile",
+            lambda: CheckResult("reconciliation", ok=True, detail="stubbed"),
+        )
+
     def test_completed_session_worker_detected_and_reaped(
         self,
         tmp_config_dir: Path,
@@ -8761,6 +8774,7 @@ class TestWedgeLeakedDaemonWorker:
             tmp_path / "leaked-wt", started_at_ms=_aged_started_at_ms()
         )
         self._patch_daemon(monkeypatch, daemon)
+        self._stub_reconcile_pass(monkeypatch)
 
         report = run_doctor(reap=True)
 
@@ -8941,10 +8955,7 @@ class TestWedgeLeakedDaemonWorker:
         # paths and lets a raw yaml error escape (pre-existing, not #2670's
         # surface). Stub that whole check so the detector and the reap, the
         # surfaces under test, keep reading the real malformed file.
-        monkeypatch.setattr(
-            "cw.doctor.core._check_reconcile",
-            lambda: CheckResult("reconciliation", ok=True, detail="stubbed"),
-        )
+        self._stub_reconcile_pass(monkeypatch)
         daemon = FakeNativeDaemonClient()
         old_ms = ms_of(datetime.now(UTC) - timedelta(hours=1))
         unrecorded = daemon.seed_live_worker(
@@ -8993,6 +9004,7 @@ class TestWedgeLeakedDaemonWorker:
         )
         terminal = self._seed_terminal_session_worker(daemon, tmp_path / "done-wt")
         self._patch_daemon(monkeypatch, daemon)
+        self._stub_reconcile_pass(monkeypatch)
 
         report = run_doctor(reap=True)
 
