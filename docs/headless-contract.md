@@ -1290,7 +1290,7 @@ The round has these fixed limits:
 | Manifest size | `256 KiB` | Measure the manifest bytes before materialization. |
 | Per-role prompt | `64 KiB` | Measure each rendered role prompt before launch. |
 | Per-role result | `256 KiB` | Reject an oversized role result. |
-| Aggregation input | `CODEX_ENGINE_MAX_AGGREGATION_INPUT_BYTES = 1_048_576` bytes | Measure the serialized UTF-8 envelope before launching aggregation. |
+| Aggregation input | `CODEX_ENGINE_MAX_AGGREGATION_INPUT_BYTES = 3_145_728` bytes | Measure the serialized UTF-8 envelope before launching aggregation; this covers eight maximum role results plus up to 1 MiB of envelope overhead. |
 | Codex subprocesses | `CODEX_ENGINE_MAX_SUBPROCESS_CALLS = 9` | Count every attempted role, retry, and aggregation invocation. |
 | Role concurrency | `4` | At most four role invocations run at once. |
 | Round deadline | `15` minutes | Shared by all roles and aggregation. |
@@ -1339,8 +1339,9 @@ The reservation and settlement order is:
 Every reservation and settlement is checked against
 `CODEX_ENGINE_USAGE_BUDGET_TOKENS`; the subprocess count is checked against
 `CODEX_ENGINE_MAX_SUBPROCESS_CALLS`, and the byte/deadline limits are checked
-at their corresponding points above. Any exceeded cap, unavailable
-reservation, unusable required artifact, or expired deadline fails closed with
+at their corresponding points above. A missing or `FAILED` role artifact fails
+closed with `engine_coverage_incomplete`; any exceeded cap, unavailable
+reservation, or expired deadline fails closed with
 `review_engine_limits_exceeded`. The round is not recorded as complete and no
 fallback reviewer or retry may bypass the failure.
 

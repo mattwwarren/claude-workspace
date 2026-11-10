@@ -323,7 +323,7 @@ def test_headless_contract_documents_the_engine_skill_contract() -> None:
     assert "files outside the skill directory" in " ".join(section.split()).lower() or (
         "outside" in section and "`guarded_paths`" in section
     )
-    assert "### 12.13 Known Limitation: Unguarded Files" in section
+    assert "### 12.14 Known Limitation: Unguarded Files" in section
     assert "Files the engine reads or runs that sit outside" in " ".join(
         section.split()
     )
