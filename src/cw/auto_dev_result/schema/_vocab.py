@@ -13,6 +13,7 @@ issue #2193.
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Literal
 
 from cw.models import QueueItemStatus
@@ -44,6 +45,25 @@ RealCommitOutcome = Literal[
     # predates the field.
     "unknown",
 ]
+
+
+class OperatorConstraintsSource(StrEnum):
+    """Where a codex fix loop's operator constraints came from (#3055, RFC 0018 S3).
+
+    Stamped on ``Review.operator_constraints_source`` when the codex fix loop
+    engaged and the exit built a finalized review. ``TRACKER_UNREADABLE``
+    means the tracker is not GitHub (or unset), so operator comments could
+    not be read, and the row carried no constraint entries either. Additive,
+    no ``schema_version`` bump; ``None`` on the model means the producer did
+    not report it.
+    """
+
+    COMMENT = "comment"
+    ROW = "row"
+    COMMENT_AND_ROW = "comment_and_row"
+    NONE = "none"
+    TRACKER_UNREADABLE = "tracker_unreadable"
+
 
 Status = Literal[
     "shipped",
@@ -263,6 +283,10 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             "plan_missing_context",
             "prior_pipeline_pr_open",
             "repair_entry_unsupported_backend",
+            # #3055 (RFC 0018 S3): an opencode PLAN/IMPL tracker write that
+            # had no tool or failed (retry_eligible: false); a failed read
+            # stays plan_missing_context.
+            "tracker_tool_unavailable",
         }
     )
     # cw-side synthetic reasons. The literals are owned by

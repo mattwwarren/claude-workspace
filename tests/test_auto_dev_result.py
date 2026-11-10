@@ -40,6 +40,7 @@ from cw.auto_dev_result import (
     AutoDevResult,
     BlockedResult,
     Health,
+    OperatorConstraintsSource,
     RealCommitOutcome,
     Review,
     Status,
@@ -5150,6 +5151,64 @@ class TestReviewDowngradedDispositionCount:
         )
         restored = Review.model_validate_json(review.model_dump_json())
         assert restored.downgraded_disposition_count == 3
+
+
+class TestReviewOperatorConstraintsSource:
+    """#3055 (RFC 0018 S3) — Review.operator_constraints_source.
+
+    Additive and optional: ``None`` means "the producer did not report it" and
+    is omitted on dump, so every existing sentinel shape is byte-identical. No
+    ``schema_version`` bump.
+    """
+
+    def test_defaults_to_none_and_is_omitted_on_dump(self) -> None:
+        review = Review(must_fix_initial=0, should_fix=0, fix_cycles_used=0)
+
+        assert review.operator_constraints_source is None
+        assert "operator_constraints_source" not in review.model_dump()
+        assert "operator_constraints_source" not in review.model_dump(mode="json")
+
+    @pytest.mark.parametrize("source", list(OperatorConstraintsSource))
+    def test_round_trips_through_json(self, source: OperatorConstraintsSource) -> None:
+        review = Review(
+            must_fix_initial=1,
+            should_fix=0,
+            fix_cycles_used=1,
+            operator_constraints_source=source,
+        )
+
+        dumped = review.model_dump(mode="json")
+        restored = Review.model_validate_json(review.model_dump_json())
+
+        assert dumped["operator_constraints_source"] == source.value
+        assert restored.operator_constraints_source is source
+
+    def test_five_values(self) -> None:
+        assert {s.value for s in OperatorConstraintsSource} == {
+            "comment",
+            "row",
+            "comment_and_row",
+            "none",
+            "tracker_unreadable",
+        }
+
+    def test_rejects_unknown_value(self) -> None:
+        with pytest.raises(ValidationError):
+            Review.model_validate(
+                {
+                    "must_fix_initial": 0,
+                    "should_fix": 0,
+                    "fix_cycles_used": 0,
+                    "operator_constraints_source": "bogus",
+                }
+            )
+
+    def test_schema_version_is_unchanged(self) -> None:
+        assert AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION == 9
+
+    def test_tracker_tool_unavailable_is_a_known_reason(self) -> None:
+        assert "tracker_tool_unavailable" in KNOWN_BLOCKER_REASONS
+        assert is_known_blocker_reason("tracker_tool_unavailable")
 
 
 class TestReviewReviewedSha:
