@@ -275,6 +275,16 @@ class TestFailures:
         )
         assert not summary_path.exists()
 
+    def test_deeply_nested_json_is_invalid_json(self, tmp_path: Path) -> None:
+        content = "[" * 10_000 + "0" + "]" * 10_000
+
+        failure = _run(_runner(_ok(content)), tmp_path / "summary.json")
+
+        assert failure == (
+            EngineRoundFailure.ENGINE_AGGREGATION_FAILED,
+            _failure_text("invalid_json"),
+        )
+
     def test_a_summary_write_oserror_is_engine_no_summary(self, tmp_path: Path) -> None:
         blocker = tmp_path / "blocker"
         blocker.write_text("a file where the round directory must go")

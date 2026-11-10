@@ -21,14 +21,13 @@ import shutil
 import uuid
 from typing import TYPE_CHECKING
 
-from pydantic import ValidationError
-
 from cw.atomic import atomic_write_text
 from cw.codex_review._const import _CATEGORY_TO_REASON
 from cw.codex_review._roles import (
     _AUDIT_ARGV_FLAGS,
     _build_generic_codex_argv,
     _classify_codex_failure,
+    _classify_codex_output,
     _codex_scratch_dir,
     _is_audit_flag_rejection,
 )
@@ -41,10 +40,7 @@ from cw.review_engine.aggregate import (
     render_aggregation_envelope,
 )
 from cw.review_engine.constants import (
-    AGGREGATION_REASON_EMPTY_OUTPUT,
-    AGGREGATION_REASON_INVALID_JSON,
     AGGREGATION_REASON_MISSING_OUTPUT,
-    AGGREGATION_REASON_SCHEMA_MISMATCH,
     FRICTION,
     EngineRoundFailure,
 )
@@ -69,19 +65,9 @@ def _aggregation_failure(reason: str) -> SummaryFailure:
 
 def _output_failure_reason(content: str | None) -> str | None:
     """The exit-0 output failure kind, or ``None`` when *content* is valid."""
-    if content is None:
-        return AGGREGATION_REASON_MISSING_OUTPUT
-    if not content.strip():
-        return AGGREGATION_REASON_EMPTY_OUTPUT
-    try:
-        json.loads(content)
-    except json.JSONDecodeError:
-        return AGGREGATION_REASON_INVALID_JSON
-    try:
-        EngineAggregationOutput.model_validate_json(content)
-    except ValidationError:
-        return AGGREGATION_REASON_SCHEMA_MISMATCH
-    return None
+    return _classify_codex_output(
+        content, validator=EngineAggregationOutput.model_validate
+    )
 
 
 def _run_once(
