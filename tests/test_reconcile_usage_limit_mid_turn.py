@@ -1378,6 +1378,47 @@ def test_detect_and_park_is_idempotent_on_second_tick(
     assert len(_events(OrchestratorEventType.TASK_TRANSITION)) == 1
 
 
+def test_detect_and_park_auto_queues_a_single_stop_across_ticks(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+) -> None:
+    """Tick 2 over a closed session re-reads the roster; it never queues a stop.
+
+    Nothing drains the queue, so the surface stays listed across both ticks.
+    Each tick gets its own sink, as in production: a shared sink would dedupe
+    a repeat per surface and hide it. The act queues its one stop on tick 1
+    and only waits on tick 2 (the leaked-worker sweep owns any replay), and
+    its audit events fire once.
+    """
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    first = DeferredReconcileJobs()
+    second = DeferredReconcileJobs()
+
+    assert (
+        _tick(state, _auto_config(), daemon, at=_NOW, deferred=first, drain=False) == []
+    )
+    assert (
+        _tick(
+            load_state(),
+            _auto_config(),
+            daemon,
+            at=_LATER,
+            deferred=second,
+            drain=False,
+        )
+        == []
+    )
+
+    assert [job.label for job in first.post_lock] == [f"surface_stop:{_SURFACE}"]
+    assert second.post_lock == []
+    assert len(_events(OrchestratorEventType.USAGE_LIMIT_ARMED)) == 1
+    assert len(_events(OrchestratorEventType.SESSION_NEEDS_ATTENTION)) == 1
+    _assert_row_still_running()
+    assert _owned_row().usage_limit_act is not None
+
+
 # ---------------------------------------------------------------------------
 # Resumability -- an interruption after any step is finished by the next tick
 # ---------------------------------------------------------------------------
