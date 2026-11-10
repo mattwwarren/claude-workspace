@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 from cw.atomic import atomic_write_text
 from cw.codex_review import CODEX_REVIEWER_LABEL
+from cw.codex_review_signals import emit_verdict_comment_skipped
 from cw.gh import post_issue_comment
 from cw.review_findings import (
     REVIEW_VERDICT_JSON_RELATIVE_PATH,
@@ -26,6 +27,7 @@ from cw.tracker import TRACKER_GITHUB_ISSUES
 
 if TYPE_CHECKING:
     from cw.auto_dev_result import Blocker
+    from cw.codex_review_signals import VerdictCommentKind
     from cw.review_findings import ReviewVerdict
 
 _log = logging.getLogger(__name__)
@@ -199,6 +201,10 @@ def _post_review_comment(
     ticket_id: str,
     review_text: str,
     *,
+    client: str,
+    session_id: str,
+    kind: VerdictCommentKind,
+    reviewed_sha: str | None,
     cwd: Path | None = None,
     tracker: str | None = None,
     artifact_path: Path | None = None,
@@ -221,6 +227,10 @@ def _post_review_comment(
     carries the verdict instead, so the omission is visible rather than a
     swallowed subprocess failure. Fail-open on an unresolvable tracker, the
     same polarity as every other tracker gate in cw.
+
+    The skip also records ``review.verdict_comment_skipped`` (#3055, RFC 0018
+    S3) naming *client* (the client name), *session_id*, *kind* and
+    *reviewed_sha*; best-effort, it never raises.
     """
     if tracker is not None and tracker != TRACKER_GITHUB_ISSUES:
         _log.warning(
@@ -230,6 +240,15 @@ def _post_review_comment(
             ticket_id,
             tracker,
             artifact_path,
+        )
+        emit_verdict_comment_skipped(
+            ticket_id=ticket_id,
+            client=client,
+            tracker=tracker,
+            kind=kind,
+            artifact_path=artifact_path,
+            reviewed_sha=reviewed_sha,
+            session_id=session_id,
         )
         return
     result = post_issue_comment(ticket_id, review_text, cwd=cwd)

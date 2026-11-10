@@ -239,10 +239,12 @@ _PRE_DISPATCH_STALE_PR_REASON: Final = "pr_already_open_pre_dispatch"
 # ``Status``-derived set.
 #
 # Deliberately NOT a HOLD_DISPOSITIONS member, on the stale-PR gate's
-# precedent: it clears by fixing the branch's settings file (or disabling the
-# client's gate) and re-dispatching, not by an operator saying "proceed
-# anyway" -- and membership would make it eligible for concierge's false-park
-# auto-requeue recipe, re-dispatching into the same missing plugin.
+# precedent: it clears by fixing the branch's settings file or, for an
+# opencode row (#3055), the backend's MCP config (or disabling the client's
+# gate), then an explicit `cw dev-queue requeue` -- not by an operator saying
+# "proceed anyway" -- and membership would make it eligible for concierge's
+# false-park auto-requeue recipe, re-dispatching into the same missing plugin.
+# It is an operator-gated park (#3055): `cw doctor --reap` never reverts it.
 TRACKER_MCP_GATE_DISPOSITION: Final = "tracker_mcp_gate"
 
 # ``TicketTask.blocked_reason`` stamped alongside TRACKER_MCP_GATE_DISPOSITION

@@ -117,6 +117,7 @@ from cw.codex_review import (
     _fetch_ticket_comments,
     _load_ticket_context,
 )
+from cw.codex_review_signals import constraints_source
 from cw.local_runner import resolve_tier
 from cw.models.enums import (
     DEFAULT_FIX_SANDBOX_MODE,
@@ -127,13 +128,19 @@ from cw.models.operator_constraint import split_constraints
 from cw.review_convergence import unread_from_verdict
 from cw.review_debt import dedupe_debt
 from cw.review_findings import has_contested_decision
+from cw.tracker import tracker_kind
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
     from typing import TypeGuard
 
-    from cw.auto_dev_result import AutoDevResult, Review, ScopeTier
+    from cw.auto_dev_result import (
+        AutoDevResult,
+        OperatorConstraintsSource,
+        Review,
+        ScopeTier,
+    )
     from cw.codex_fix_loop.constraints import OperatorConstraints
     from cw.codex_fix_loop.convergence import _OpenFindingKey
     from cw.codex_fix_loop.coverage import DeltaGap
@@ -360,6 +367,8 @@ class _LoopInputs(NamedTuple):
     ticket_text: str | None
     constraints: OperatorConstraints | None
     allowed_files: frozenset[str] | None
+    # #3055: where `constraints` came from, stamped on the terminal Review.
+    constraints_source: OperatorConstraintsSource
 
 
 def _loop_inputs(
@@ -372,16 +381,25 @@ def _loop_inputs(
     _, _, cycle0_changed = _capture_diff(worktree, default_branch)
     cycle0_files = frozenset(cycle0_changed)
     plan_text, ticket_text = _load_ticket_context(worktree)
+    constraints = _load_constraints(worktree, task, operator_login, ticket_text)
     return _LoopInputs(
         cycle0_files=cycle0_files,
         # #2767 non-ship-path: hint-only tier kept; ship gates use the new resolver
         scope_tier=resolve_tier(task.scope_hint),
         plan_text=plan_text,
         ticket_text=ticket_text,
-        constraints=_load_constraints(worktree, task, operator_login, ticket_text),
+        constraints=constraints,
         # #2485: the file fence every fix cycle is held to — plan manifest plus
         # cycle-0 diff; None (no fence) when the plan has no manifest.
         allowed_files=fix_scope_allowlist(plan_text, cycle0_files),
+        # #3055 (A16): the fix loop's own worktree is the root the comment
+        # loader read. A row-only result has body == "", so body (not
+        # comment_id, which may be None) tells a selected comment apart.
+        constraints_source=constraints_source(
+            has_comment=constraints is not None and bool(constraints.body),
+            row_entries=len(task.operator_constraints),
+            tracker=tracker_kind(worktree),
+        ),
     )
 
 
@@ -625,6 +643,9 @@ def run_review_with_fix_loop(
     # #2877: and what a sharded re-review left unread of its own delta.
     delta_gap = NO_DELTA_GAP
     inputs = _loop_inputs(worktree, task, default_branch, operator_login)
+    cycle0_review = cycle0_review.model_copy(
+        update={"operator_constraints_source": inputs.constraints_source}
+    )
     # #1837: one ledger object threaded through every cycle, accumulating the
     # findings the loop records instead of acting on.
     debt_ledger: dict[tuple[str, str], DebtRecord] = {}

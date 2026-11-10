@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+from cw import tracker as _tracker
+
 #: The label every review-debt ticket carries; the marker lookup lists it.
 REVIEW_DEBT_LABEL = "review-debt"
 
@@ -68,5 +70,6 @@ DEBT_MARKER_PREFIX = "<!-- cw-review-debt: "
 PR_MARKER_PREFIX = "<!-- cw-review-debt-pr: "
 MARKER_SUFFIX = " -->"
 
-#: The non-GitHub tracker system debt filing distinguishes.
-TRACKER_LINEAR: Literal["linear"] = "linear"
+#: The non-GitHub tracker system debt filing distinguishes. Defined once in
+#: ``cw.tracker`` (#3055); bound here so existing importers keep working.
+TRACKER_LINEAR: Literal["linear"] = _tracker.TRACKER_LINEAR

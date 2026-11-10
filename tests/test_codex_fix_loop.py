@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from cw.auto_dev_result import OperatorConstraintsSource
 from cw.codex_fix_loop import (
     _MAX_FIX_CYCLES,
     FIX_CYCLE_FLOOR_SECONDS,
@@ -4323,3 +4324,142 @@ class TestDriverSurfaceAfterReviewPassSplit:
         assert _driver._rereview is review_pass._rereview
         assert _driver._review_cycle_zero is review_pass._review_cycle_zero
         assert review_pass._rereview.__module__ == "cw.codex_fix_loop.review_pass"
+
+
+# ---------------------------------------------------------------------------
+# #3055 (RFC 0018 S3): Review.operator_constraints_source on terminal reviews
+# ---------------------------------------------------------------------------
+
+_GITHUB_CONFIG = "tracking:\n  primary:\n    system: github-issues\n"
+_NEUTRAL_ROW = "Keep the public API stable."
+
+
+def _source_of(out: AutoDevResult) -> OperatorConstraintsSource | None:
+    return out.review.operator_constraints_source
+
+
+class TestOperatorConstraintsSourceStamp:
+    @pytest.mark.parametrize(
+        ("config", "comments", "rows", "expected"),
+        [
+            (_GITHUB_CONFIG, [], (), OperatorConstraintsSource.NONE),
+            (_GITHUB_CONFIG, "observed", (), OperatorConstraintsSource.COMMENT),
+            (
+                _GITHUB_CONFIG,
+                "observed",
+                (_NEUTRAL_ROW,),
+                OperatorConstraintsSource.COMMENT_AND_ROW,
+            ),
+            (_LINEAR_CONFIG, None, (_NEUTRAL_ROW,), OperatorConstraintsSource.ROW),
+            (_LINEAR_CONFIG, None, (), OperatorConstraintsSource.TRACKER_UNREADABLE),
+            (None, None, (), OperatorConstraintsSource.TRACKER_UNREADABLE),
+        ],
+    )
+    def test_clean_exit_carries_the_source(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        config: str | None,
+        comments: str | list[dict[str, object]] | None,
+        rows: tuple[str, ...],
+        expected: OperatorConstraintsSource,
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-src-clean")
+        if config is not None:
+            commit_tracked_file(worktree, ".claude/project-config.yaml", config)
+        _serve_comments(
+            monkeypatch, _observed_comments() if comments == "observed" else comments
+        )
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC])
+
+        out, verdict = _run_loop(
+            runner,
+            worktree,
+            session_id="s-src-clean",
+            task=_row_task(*rows) if rows else None,
+            operator_login=_LOGIN,
+        )
+
+        assert out.status == "stage_complete"
+        assert _source_of(out) is expected
+        assert verdict is not None
+        assert verdict.review.operator_constraints_source is expected
+
+    def test_cap_park_carries_the_source(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-src-cap")
+        out, _ = _run_loop(_FixLoopRunner([_MF_DOC]), worktree, session_id="s-src-cap")
+
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_MUST_FIX_FINDINGS
+        assert _source_of(out) is OperatorConstraintsSource.TRACKER_UNREADABLE
+
+    def test_fix_failure_park_carries_no_source(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """A3: _park_fix_failure never builds a finalized review."""
+        worktree = _worktree(make_git_repo, "wt-src-fixfail")
+        runner = _FixLoopRunner(
+            [_MF_DOC],
+            fix_behaviors=[CodexRunResult(returncode=1, stdout="", stderr="boom")],
+        )
+
+        out, _ = _run_loop(runner, worktree, session_id="s-src-fixfail")
+
+        assert out.blocker is not None
+        assert out.blocker.reason == "codex_error"
+        assert _source_of(out) is None
+
+    def test_absent_when_the_fix_loop_is_off(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-src-off")
+        out, _ = _run_loop(
+            _FixLoopRunner([_MF_DOC]),
+            worktree,
+            session_id="s-src-off",
+            fix_loop_enabled=False,
+        )
+
+        assert _source_of(out) is None
+        assert (
+            "operator_constraints_source" not in out.model_dump(mode="json")["review"]
+        )
+
+    def test_absent_when_cycle_zero_is_clean(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-src-c0clean")
+        out, _ = _run_loop(
+            _FixLoopRunner([_CLEAN_DOC]), worktree, session_id="s-src-c0clean"
+        )
+
+        assert out.status == "stage_complete"
+        assert _source_of(out) is None
+
+
+@pytest.mark.parametrize("source", [*OperatorConstraintsSource, None])
+def test_finalize_review_copies_the_cycle0_source(
+    source: OperatorConstraintsSource | None,
+) -> None:
+    """Every exit through _finalize_review (budget, ledger, divergence,
+    contested, fence-breach, cap and clean) carries cycle 0's stamp."""
+    from cw.codex_fix_loop.park import _finalize_review
+
+    verdict = consolidate_verdict(
+        [_make_reviewer_doc(_make_finding(severity="MUST_FIX"))],
+        _make_diff(),
+        reviewed_sha="abc",
+    )
+    cycle0 = verdict.review.model_copy(update={"operator_constraints_source": source})
+
+    review = _finalize_review(
+        cycle0_review=cycle0,
+        final_verdict=verdict,
+        open_findings={},
+        cycle_count=1,
+        had_real_commit=False,
+    )
+
+    assert review.operator_constraints_source is source

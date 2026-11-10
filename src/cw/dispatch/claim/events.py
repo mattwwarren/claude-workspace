@@ -19,7 +19,11 @@ from cw.dev_queue import (
 )
 from cw.dev_queue.next_commands import dev_queue_command
 from cw.events import record_event
-from cw.models import DispatchSkipReason, OrchestratorEventType
+from cw.models import (
+    CLAUDE_NATIVE_BACKEND,
+    DispatchSkipReason,
+    OrchestratorEventType,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -235,6 +239,38 @@ def _emit_tracker_mcp_gate_blocked_event(client_name: str, ticket_id: str) -> No
     )
 
 
+def _tracker_mcp_gate_attention_extra(
+    branch: str, file_inspected: str, expected: str, backend: str
+) -> dict[str, str]:
+    """The gate park's additive SESSION_NEEDS_ATTENTION keys, in payload order.
+
+    A claude-native hit keeps ``expected_plugin`` and its pre-#3055
+    ``details`` string byte for byte, plus ``backend``. A non-Claude hit
+    (RFC 0018 S3) names the MCP server as ``expected_server`` instead.
+    """
+    if backend == CLAUDE_NATIVE_BACKEND:
+        return {
+            "branch": branch,
+            "file_inspected": file_inspected,
+            "expected_plugin": expected,
+            "backend": backend,
+            "details": (
+                f"branch={branch}; file_inspected={file_inspected};"
+                f" expected_plugin={expected}"
+            ),
+        }
+    return {
+        "branch": branch,
+        "file_inspected": file_inspected,
+        "backend": backend,
+        "expected_server": expected,
+        "details": (
+            f"branch={branch}; file_inspected={file_inspected};"
+            f" backend={backend}; expected_server={expected}"
+        ),
+    }
+
+
 def _emit_tracker_mcp_gate_attention_event(
     task: TicketTask,
     client_name: str,
@@ -242,12 +278,14 @@ def _emit_tracker_mcp_gate_attention_event(
     *,
     branch: str,
     file_inspected: str,
-    expected_plugin: str,
+    expected: str,
+    backend: str,
 ) -> None:
     """Emit SESSION_NEEDS_ATTENTION for a pre-dispatch tracker-MCP gate park (#2442).
 
-    ``branch``, ``file_inspected``, and ``expected_plugin`` name exactly what
-    the orchestrator must fix, and ``details`` composes them into one
+    ``branch``, ``file_inspected``, the expected plugin (claude-native) or MCP
+    server (opencode, #3055) and ``backend`` name exactly what the
+    orchestrator must fix, and ``details`` composes them into one
     human-readable string. This detail is transient and event-only by design
     -- ``TicketTask.advisory_note`` is cleared by the very
     ``transition_task_status`` call that performs the park.
@@ -257,15 +295,9 @@ def _emit_tracker_mcp_gate_attention_event(
         client_name,
         lane,
         paused_status=TRACKER_MCP_GATE_DISPOSITION,
-        extra={
-            "branch": branch,
-            "file_inspected": file_inspected,
-            "expected_plugin": expected_plugin,
-            "details": (
-                f"branch={branch}; file_inspected={file_inspected};"
-                f" expected_plugin={expected_plugin}"
-            ),
-        },
+        extra=_tracker_mcp_gate_attention_extra(
+            branch, file_inspected, expected, backend
+        ),
     )
 
 

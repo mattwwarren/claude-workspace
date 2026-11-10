@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -20,18 +21,37 @@ from cw.codex_review_persist import (
     REVIEW_VERDICT_OWNER_STAMP_FORMAT,
     _post_review_comment,
 )
+from cw.codex_review_signals import VerdictCommentKind
+from cw.events import read_events
+from cw.models import OrchestratorEvent, OrchestratorEventType
 from cw.review_findings import ReviewVerdictEnvelope, consolidate_verdict
+from tests._tool_fakes import FakeGhComment
 from tests.conftest import _make_diff, _make_finding, _make_reviewer_doc
 
 # ---------------------------------------------------------------------------
 # _post_review_comment — Step 4b's best-effort GitHub write
 # ---------------------------------------------------------------------------
 
+# The identity keywords every caller passes (#3055); the skip event names them.
+_IDENTITY: dict[str, Any] = {
+    "client": "acme",
+    "session_id": "sess-1",
+    "kind": "verdict",
+    "reviewed_sha": "abc123",
+}
+
+
+def _skip_events() -> list[OrchestratorEvent]:
+    return read_events(
+        consumer="test-3055-skip",
+        event_types=[OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED],
+    )
+
 
 def test_post_review_comment_suppresses_oserror() -> None:
     """_post_review_comment swallows OSError from a missing gh binary."""
     with patch("cw.gh._sp.run", side_effect=FileNotFoundError("no gh")):
-        _post_review_comment("T-1", "findings")
+        _post_review_comment("T-1", "findings", **_IDENTITY)
 
 
 def test_post_review_comment_suppresses_timeout() -> None:
@@ -40,14 +60,14 @@ def test_post_review_comment_suppresses_timeout() -> None:
         "cw.gh._sp.run",
         side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=30),
     ):
-        _post_review_comment("T-1", "findings")
+        _post_review_comment("T-1", "findings", **_IDENTITY)
 
 
 def test_post_review_comment_forwards_cwd() -> None:
     """#1279: _post_review_comment scopes the gh call to the client's repo."""
     want_cwd = Path("/some/client-a/repo")
     with patch("cw.codex_review_persist.post_issue_comment") as post_mock:
-        _post_review_comment("T-1", "findings", cwd=want_cwd)
+        _post_review_comment("T-1", "findings", cwd=want_cwd, **_IDENTITY)
     post_mock.assert_called_once_with("T-1", "findings", cwd=want_cwd)
 
 
@@ -59,7 +79,7 @@ def test_post_review_comment_logs_on_none_result(
         patch("cw.codex_review_persist.post_issue_comment", return_value=None),
         caplog.at_level("WARNING"),
     ):
-        _post_review_comment("T-1", "findings", cwd=None)
+        _post_review_comment("T-1", "findings", cwd=None, **_IDENTITY)
     assert any(
         "T-1" in r.message and "gh call failed" in r.message for r in caplog.records
     )
@@ -77,7 +97,12 @@ def test_post_review_comment_skips_gh_on_non_github_tracker(
         caplog.at_level("WARNING"),
     ):
         _post_review_comment(
-            "GEN-1", "findings", cwd=None, tracker="linear", artifact_path=artifact
+            "GEN-1",
+            "findings",
+            cwd=None,
+            tracker="linear",
+            artifact_path=artifact,
+            **_IDENTITY,
         )
     post_mock.assert_not_called()
     assert any(
@@ -85,6 +110,96 @@ def test_post_review_comment_skips_gh_on_non_github_tracker(
         and "GEN-1" in r.message
         and "linear" in r.message
         and str(artifact) in r.message
+        for r in caplog.records
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "reviewed_sha", "expected_sha"),
+    [("verdict", "abc123", "abc123"), ("unparseable", "", None)],
+)
+def test_post_review_comment_skip_records_the_event(
+    tmp_path: Path,
+    kind: VerdictCommentKind,
+    reviewed_sha: str,
+    expected_sha: str | None,
+) -> None:
+    """#3055 (Case A): the non-GitHub skip emits review.verdict_comment_skipped
+    with the full payload; an empty captured sha (git failure) is null."""
+    artifact = tmp_path / ".claude" / "review-verdict.md"
+    with patch("cw.codex_review_persist.post_issue_comment") as post_mock:
+        _post_review_comment(
+            "GEN-1",
+            "findings",
+            client="acme",
+            session_id="sess-1",
+            kind=kind,
+            reviewed_sha=reviewed_sha,
+            tracker="linear",
+            artifact_path=artifact,
+        )
+    post_mock.assert_not_called()
+    (event,) = _skip_events()
+    assert event.correlation_id == "GEN-1"
+    assert list(event.payload.items()) == [
+        ("ticket_id", "GEN-1"),
+        ("client", "acme"),
+        ("tracker", "linear"),
+        ("backend", "codex"),
+        ("kind", kind),
+        ("reason", "non_github_tracker"),
+        ("artifact_path", str(artifact)),
+        ("reviewed_sha", expected_sha),
+        ("session_id", "sess-1"),
+    ]
+
+
+def test_post_review_comment_skip_without_artifact_records_null_path() -> None:
+    _post_review_comment(
+        "GEN-1", "findings", tracker="linear", artifact_path=None, **_IDENTITY
+    )
+    (event,) = _skip_events()
+    assert event.payload["artifact_path"] is None
+
+
+def test_post_review_comment_github_path_posts_and_emits_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3055: the GitHub path is unchanged -- gh records the call, no event."""
+    fake = FakeGhComment().install(monkeypatch)
+    _post_review_comment(
+        "7", "findings", tracker="github-issues", artifact_path=None, **_IDENTITY
+    )
+    assert len(fake.calls) == 1
+    assert fake.calls[0][:3] == ["gh", "issue", "comment"]
+    assert fake.bodies[0].startswith("findings")
+    assert _skip_events() == []
+
+
+def test_post_review_comment_unset_tracker_posts_and_emits_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail-open polarity kept: an unresolvable tracker still posts."""
+    fake = FakeGhComment().install(monkeypatch)
+    _post_review_comment("7", "findings", tracker=None, **_IDENTITY)
+    assert len(fake.calls) == 1
+    assert _skip_events() == []
+
+
+def test_post_review_comment_skip_event_failure_is_best_effort(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failing event write never escapes _post_review_comment (A15)."""
+    with (
+        patch(
+            "cw.codex_review_signals.record_event",
+            side_effect=OSError("inbox locked"),
+        ),
+        caplog.at_level("WARNING"),
+    ):
+        _post_review_comment("GEN-1", "findings", tracker="linear", **_IDENTITY)
+    assert any(
+        "codex_review_signal_failed" in r.message and "GEN-1" in r.message
         for r in caplog.records
     )
 
@@ -98,7 +213,7 @@ def test_post_review_comment_posts_on_github_or_unknown_tracker(
         post_mock.return_value = subprocess.CompletedProcess(
             args=["gh"], returncode=0, stdout=b"", stderr=b""
         )
-        _post_review_comment("T-1", "findings", cwd=None, tracker=tracker)
+        _post_review_comment("T-1", "findings", cwd=None, tracker=tracker, **_IDENTITY)
     post_mock.assert_called_once_with("T-1", "findings", cwd=None)
 
 
@@ -308,7 +423,7 @@ def test_post_review_comment_logs_on_nonzero_returncode(
         patch("cw.codex_review_persist.post_issue_comment", return_value=fake_result),
         caplog.at_level("WARNING"),
     ):
-        _post_review_comment("T-1", "findings", cwd=None)
+        _post_review_comment("T-1", "findings", cwd=None, **_IDENTITY)
     assert any(
         "T-1" in r.message and "1" in r.message and "invalid issue format" in r.message
         for r in caplog.records

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw.events import read_events
-from cw.models import OrchestratorEventType
+from cw.models import CLAUDE_NATIVE_BACKEND, OPENCODE_BACKEND, OrchestratorEventType
 from tests._adopt_pr_helpers import make_adopted_task
 
 if TYPE_CHECKING:
@@ -89,7 +89,8 @@ class TestTrackerMcpGateAttention:
             _LANE,
             branch="B",
             file_inspected="F",
-            expected_plugin="P",
+            expected="P",
+            backend=CLAUDE_NATIVE_BACKEND,
         )
 
         ev = _only_event()
@@ -100,7 +101,37 @@ class TestTrackerMcpGateAttention:
             ("branch", "B"),
             ("file_inspected", "F"),
             ("expected_plugin", "P"),
+            ("backend", "claude-native"),
             ("details", "branch=B; file_inspected=F; expected_plugin=P"),
+        ]
+
+    def test_opencode_payload_names_the_server(self) -> None:
+        """#3055: a non-Claude hit carries expected_server, not expected_plugin."""
+        from cw.dispatch.claim.events import _emit_tracker_mcp_gate_attention_event
+
+        task = make_adopted_task()
+        _emit_tracker_mcp_gate_attention_event(
+            task,
+            _CLIENT,
+            _LANE,
+            branch="B",
+            file_inspected="/h/.config/opencode/opencode.json",
+            expected="linear",
+            backend=OPENCODE_BACKEND,
+        )
+
+        ev = _only_event()
+        assert list(ev.payload.items()) == [
+            *_common(session_id="", paused_status="tracker_mcp_gate"),
+            ("branch", "B"),
+            ("file_inspected", "/h/.config/opencode/opencode.json"),
+            ("backend", "opencode"),
+            ("expected_server", "linear"),
+            (
+                "details",
+                "branch=B; file_inspected=/h/.config/opencode/opencode.json;"
+                " backend=opencode; expected_server=linear",
+            ),
         ]
 
 

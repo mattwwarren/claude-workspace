@@ -12,6 +12,7 @@ persist helpers moved to ``cw.codex_review_persist`` (#2807) and are tested in
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import threading
 import time
@@ -71,6 +72,7 @@ from cw.codex_review_persist import (
 from cw.config import load_state, save_state
 from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue
 from cw.dispatch_state import load_executor_blocked_markers
+from cw.events import read_events
 from cw.local_runner import UNEXPECTED_ERROR, make_blocked
 from cw.models import (
     ClientConfig,
@@ -79,6 +81,8 @@ from cw.models import (
     LaneConfig,
     LastResultSource,
     OrchestratorConfig,
+    OrchestratorEvent,
+    OrchestratorEventType,
     QueueItemStatus,
     SessionStatus,
     Stage,
@@ -106,6 +110,7 @@ from tests.conftest import (
     _make_diff,
     _make_finding,
     _make_reviewer_doc,
+    _write_tracker_config,
     commit_tracked_file,
     git_in,
 )
@@ -3059,3 +3064,193 @@ def test_a_recorder_stop_parks_review_not_converging_without_reentry(
     assert ledger is not None
     assert [r.kind for r in ledger.rounds] == ["loop", "loop"]
     assert ledger.stop_reason == "oscillation"
+
+
+# ---------------------------------------------------------------------------
+# RFC 0018 S3 (#3055): the two codex review signals at the run level
+# ---------------------------------------------------------------------------
+
+
+def _signal_events(event_type: OrchestratorEventType) -> list[OrchestratorEvent]:
+    return list(read_events(consumer="test-3055-bg", event_types=[event_type]))
+
+
+def _verdict_run(
+    worktree: Path, sid: str, *, patch_post: bool = True
+) -> tuple[MagicMock | None, list[int]]:
+    """Run one verdict-present review; return the post mock (``None`` when the
+    real ``_post_review_comment`` ran) and the Case B event count seen when
+    Step 3 started."""
+    _seed_session(sid)
+    task = TicketTask(ticket_id="T-3055", client="test", stage=Stage.REVIEW)
+    result = make_blocked(
+        ticket_id="T-3055",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+    verdict = consolidate_verdict(
+        [_make_reviewer_doc(_make_finding(severity="MUST_FIX"))],
+        _make_diff(),
+        reviewed_sha="deadbeef",
+    )
+    seen_at_step3: list[int] = []
+
+    def _step3(**_kwargs: object) -> tuple[object, object]:
+        seen_at_step3.append(
+            len(
+                _signal_events(
+                    OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED
+                )
+            )
+        )
+        return (result, verdict)
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(
+            patch("cw.codex_background.run_review_with_fix_loop", side_effect=_step3)
+        )
+        stack.enter_context(
+            patch("cw.codex_background.render_verdict_comment", return_value="r")
+        )
+        post_mock = (
+            stack.enter_context(patch("cw.codex_background._post_review_comment"))
+            if patch_post
+            else None
+        )
+        _run(sid=sid, task=task, worktree=worktree, client=_client(worktree))
+    return post_mock, seen_at_step3
+
+
+def test_verdict_post_passes_the_signal_identity(
+    tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+) -> None:
+    worktree = make_git_repo("wt-3055-verdict")
+
+    post_mock, _ = _verdict_run(worktree, "bg-3055-v")
+
+    assert post_mock is not None
+    kwargs = post_mock.call_args.kwargs
+    assert kwargs["client"] == "test"
+    assert kwargs["session_id"] == "bg-3055-v"
+    assert kwargs["kind"] == "verdict"
+    assert kwargs["reviewed_sha"] == "deadbeef"
+
+
+def test_unparseable_post_passes_the_hoisted_head_sha(
+    tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+) -> None:
+    worktree = make_git_repo("wt-3055-unparseable")
+    head = git_in(worktree, "rev-parse", "HEAD")
+    _seed_session("bg-3055-u")
+    task = TicketTask(ticket_id="T-3055u", client="test", stage=Stage.REVIEW)
+    result = make_blocked(
+        ticket_id="T-3055u",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+
+    with (
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            return_value=(result, None),
+        ),
+        patch("cw.codex_background._post_review_comment") as post_mock,
+    ):
+        _run(sid="bg-3055-u", task=task, worktree=worktree, client=_client(worktree))
+
+    kwargs = post_mock.call_args.kwargs
+    assert kwargs["kind"] == "unparseable"
+    assert kwargs["reviewed_sha"] == head
+    assert kwargs["session_id"] == "bg-3055-u"
+    assert kwargs["client"] == "test"
+    stamp = (worktree / REVIEW_UNPARSEABLE_ARTIFACT_RELATIVE_PATH).read_text(
+        encoding="utf-8"
+    )
+    assert f"reviewed_sha={head}" in stamp
+
+
+@pytest.mark.parametrize(("tracker", "expected"), [("linear", 1), (None, 1)])
+def test_case_b_fires_once_before_step3_on_non_github(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    tracker: str | None,
+    expected: int,
+) -> None:
+    worktree = make_git_repo("wt-3055-caseb")
+    if tracker is not None:
+        _write_tracker_config(worktree, tracker)
+
+    _, seen_at_step3 = _verdict_run(worktree, "bg-3055-b")
+
+    events = _signal_events(OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED)
+    assert len(events) == expected
+    assert seen_at_step3 == [expected]
+
+
+def test_case_b_does_not_fire_on_github(
+    tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+) -> None:
+    worktree = make_git_repo("wt-3055-gh")
+    _write_tracker_config(worktree, "github-issues")
+
+    _verdict_run(worktree, "bg-3055-gh")
+
+    assert (
+        _signal_events(OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED) == []
+    )
+
+
+def test_case_b_fires_once_per_session(
+    tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+) -> None:
+    """The emit sits at run level, outside the fix loop (which reruns the
+    per-cycle review pass): one event per session, naming that session."""
+    worktree = make_git_repo("wt-3055-cycles")
+    _write_tracker_config(worktree, "linear")
+
+    _verdict_run(worktree, "bg-3055-c1")
+    _verdict_run(worktree, "bg-3055-c2")
+
+    events = _signal_events(OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED)
+    assert [e.payload["session_id"] for e in events] == ["bg-3055-c1", "bg-3055-c2"]
+
+
+def _completed_events() -> list[OrchestratorEvent]:
+    return _signal_events(OrchestratorEventType.SESSION_COMPLETED)
+
+
+@pytest.mark.parametrize("patch_post", [True, False])
+def test_signal_write_failure_never_changes_the_review(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    patch_post: bool,
+) -> None:
+    """A15: a failing Case B (before Step 3) and Case A (after Step 4) emit
+    leaves the persisted result, the completion event and the row untouched."""
+    worktree = make_git_repo("wt-3055-signal-fail")
+    _write_tracker_config(worktree, "linear")
+    _verdict_run(worktree, "bg-3055-ok", patch_post=patch_post)
+    expected = load_state().sessions[0].last_result
+    assert expected is not None
+
+    with (
+        patch(
+            "cw.codex_review_signals.record_event",
+            side_effect=OSError("inbox locked"),
+        ) as signal_mock,
+        patch(
+            "cw.codex_background.revert_claimed_row_after_unexpected_error"
+        ) as revert_mock,
+    ):
+        _verdict_run(worktree, "bg-3055-fail", patch_post=patch_post)
+
+    persisted = load_state().sessions[0].last_result
+    assert persisted is not None
+    assert {k: v for k, v in persisted.items() if k != "session_id"} == {
+        k: v for k, v in expected.items() if k != "session_id"
+    }
+    revert_mock.assert_not_called()
+    assert signal_mock.call_count == (1 if patch_post else 2)
+    assert len(_completed_events()) == 2

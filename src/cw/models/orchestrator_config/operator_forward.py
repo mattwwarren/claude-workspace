@@ -73,6 +73,14 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         # (see #1730 Decisions item 4) -- this event is self-contained, not a
         # correction to another forwarded signal.
         OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
+        # GitHub #3055 (RFC 0018 S3): a codex verdict that never reached the
+        # non-GitHub tracker exists only in the local artifact -- the operator
+        # must be told, same rationale as REQUEUE_REVIEW_DELIVERY_DEGRADED.
+        OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED,
+        # GitHub #3055: the first-entry sibling of
+        # REQUEUE_REVIEW_DELIVERY_DEGRADED -- a codex review ran without the
+        # operator's tracker comments, voided findings and settle markers.
+        OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED,
     }
 )
 _DEFAULT_OPERATOR_TASK_TRANSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(

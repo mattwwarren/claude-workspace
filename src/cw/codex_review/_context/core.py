@@ -164,6 +164,12 @@ def _fetch_ticket_comments(
     a fetch op reachable from this process (``linear`` reads go through MCP
     tools only a Claude session holds). Returns ``None`` on an unresolvable
     tracker or a gh failure — never raises.
+
+    The loaders stay pure: the "comments were not read" signal for a
+    non-GitHub (or unset) tracker is emitted once per session at run level
+    (``review.operator_context_undelivered``, from
+    ``cw.codex_review_signals`` via ``cw.codex_background``, #3055). That event
+    covers first entry; ``requeue.review_delivery_degraded`` covers re-entry.
     """
     if resolve_tracker(worktree) != TRACKER_GITHUB_ISSUES:
         return None

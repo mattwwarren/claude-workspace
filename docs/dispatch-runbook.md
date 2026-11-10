@@ -1136,9 +1136,11 @@ common wedge conditions:
   case.
 - `wedge/operator-gated-park` (#2739) — advisory only. A `BLOCKED_ON_USER` row
   that holds a lane slot (`occupies_lane_slot`) while parked on a deliberate
-  operator gate: disposition `finalize_gate_held`, `stale_dispatch_gate` or
-  `attempt_cap_blocked`, or disposition `blocked` with a `codex_fix_*`
-  `blocked_reason`. These rows look dead but wait on an operator, so
+  operator gate: disposition `finalize_gate_held`, `stale_dispatch_gate`,
+  `attempt_cap_blocked`, the RFC 0016 adoption parks, `review_approval_gate`,
+  `review_engine_modified` or `tracker_mcp_gate` (#3055: fix the branch
+  settings file or the backend's MCP config, then `cw dev-queue requeue`), or
+  disposition `blocked` with a `codex_fix_*` `blocked_reason`. These rows look dead but wait on an operator, so
   `wedge/blocked-on-user-dead-session` skips them; this class is the visible
   counterpart, so a lane slot held by such a row is not left unexplained.
   A plain `cw doctor` reports it on every run; `cw doctor --reap` never
@@ -3612,6 +3614,19 @@ hard-fail guard here would invert that codified asymmetry (see
 `src/cw/dev_queue/requeue.py`'s `_apply_requeue_stage`). Watch for the event
 with `cw event tail` after any send-back requeue; if it fires, the reviewer
 ran without your comment and its verdict should be read accordingly.
+
+**Codex on a non-GitHub tracker (#3055, RFC 0018 S3).** Two more events,
+both forwarded by default, cover the cases the requeue event does not. Every
+codex review on a client whose tracker is not GitHub (or is unset) records
+`review.operator_context_undelivered` once at its start: the reviewer ran
+without your free-text comments, voided findings and settle markers (row
+constraints from `cw review constrain` and settled dispositions still reach
+it). That is the first-entry signal; `requeue.review_delivery_degraded` stays
+the re-entry signal, and a requeued review emits both. When the review ends,
+`review.verdict_comment_skipped` says the verdict was not posted to the
+ticket and names the worktree artifact that holds it. Read the artifact, and
+record anything the loop must obey with `cw review constrain`. `cw doctor`
+reports such lanes as `tracker-mcp/<client>/<lane>/codex`.
 
 **#1717 coordination.** `pending_operator_comment` is stamped at the shared
 `_stage_regress` chokepoint alongside #1794's `regressed_into_stage`. #1717's

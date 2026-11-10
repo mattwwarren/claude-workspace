@@ -21,7 +21,12 @@ from pydantic import (
 )
 
 from cw.models.enums import SessionPurpose
-from cw.models.orchestrator_config import LaneConfig, StagePipelineConfig
+from cw.models.orchestrator_config import (
+    CODEX_BACKEND,
+    OPENCODE_BACKEND,
+    LaneConfig,
+    StagePipelineConfig,
+)
 from cw.models.tasks import DEFAULT_LANE
 
 DEFAULT_AUTO_PURPOSES: list[SessionPurpose] = [
@@ -44,13 +49,43 @@ class TrackerMcpGateConfig(BaseModel):
     with no ``@``-suffix stripping and no case folding. Anything ambiguous --
     no branch yet, no settings file, malformed JSON, an unrecognized
     ``enabledPlugins`` shape -- fails open (the spawn proceeds).
+
+    ``plugin_id`` and ``settings_path`` apply to claude-native rows only.
+    ``servers`` (#3055, RFC 0018 S3) maps a non-Claude backend (``codex`` or
+    ``opencode``) to the MCP server name its own config declares for the
+    tracker; ``servers[backend]`` applies to that backend's rows only, and in
+    S3 only opencode PLAN/IMPL rows are gated on it. At least one of
+    ``plugin_id`` or a non-empty ``servers`` is required. The server check is
+    declaration-only: auth, env and headless load stay unverified.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
-    plugin_id: str
+    plugin_id: str | None = None
     settings_path: str = ".claude/settings.json"
+    servers: dict[str, str] | None = None
+
+    _SERVER_BACKENDS: ClassVar[frozenset[str]] = frozenset(
+        {CODEX_BACKEND, OPENCODE_BACKEND}
+    )
+
+    @model_validator(mode="after")
+    def _validate_gate_target(self) -> TrackerMcpGateConfig:
+        if self.plugin_id is None and not self.servers:
+            msg = "tracker_mcp_gate needs plugin_id or servers (a non-empty map)"
+            raise ValueError(msg)
+        for backend, server in (self.servers or {}).items():
+            if backend not in self._SERVER_BACKENDS:
+                msg = (
+                    f"tracker_mcp_gate.servers key {backend!r} is not one of "
+                    f"{sorted(self._SERVER_BACKENDS)}"
+                )
+                raise ValueError(msg)
+            if not server.strip():
+                msg = f"tracker_mcp_gate.servers[{backend!r}] is blank"
+                raise ValueError(msg)
+        return self
 
 
 # Bounds of the #2917 mechanical repair/verify command timeouts. The post-lock

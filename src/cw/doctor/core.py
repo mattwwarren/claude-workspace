@@ -69,6 +69,7 @@ from cw.doctor.routed_result_wedge import (
 from cw.doctor.session_outcomes import _check_session_outcomes
 from cw.doctor.sessions_auto_prune import _check_sessions_auto_prune
 from cw.doctor.skills_drift import _check_skills_commands_drift
+from cw.doctor.tracker_mcp import _check_tracker_mcp
 from cw.doctor.user_level_hooks import _check_user_level_stop_hook
 from cw.doctor.versions import (
     _check_bypass_disclaimer,
@@ -377,6 +378,7 @@ def _client_config_checks(clients: dict[str, ClientConfig]) -> list[CheckResult]
         *_check_review_strategy(clients),
         *_check_agent_spec_drift(clients),
         *_check_codex_fix_loop(clients),
+        *_check_tracker_mcp(clients),
         *_check_review_convergence(clients),
         *_check_review_engine(clients),
         *_check_merge_gate_disabled(clients),

@@ -31,6 +31,7 @@ from cw.auto_dev_result.schema._validators import (
 )
 from cw.auto_dev_result.schema._vocab import (
     _LOGGER_NAME,
+    OperatorConstraintsSource,
     RealCommitOutcome,
     ScopeTier,
     is_known_blocker_reason,
@@ -170,6 +171,13 @@ class Review(BaseModel):
     converged: bool | None = None
     final_round_clean_sha: str | None = None
     confirm_backend: Literal["codex", "claude", "none"] | None = None
+    # #3055 (RFC 0018 S3): where the codex fix loop's operator constraints
+    # came from (tracker comment, queue row, both, neither, or an unreadable
+    # non-GitHub tracker). Stamped only when the fix loop engaged and the exit
+    # built a finalized review. Additive, no `schema_version` bump; `None`
+    # means "the producer did not report this" and is omitted on dump, so
+    # every existing sentinel stays byte-identical.
+    operator_constraints_source: OperatorConstraintsSource | None = None
 
     # Why: read-side only (#1745). Pre-v9 sentinels and persisted
     # `.claude/review-verdict.json` envelopes (read by `must_fix_override`,
@@ -203,6 +211,8 @@ class Review(BaseModel):
                 "confirm_backend",
             ):
                 data.pop(field_name, None)
+        if self.operator_constraints_source is None:
+            data.pop("operator_constraints_source", None)
         return data
 
     @model_validator(mode="after")

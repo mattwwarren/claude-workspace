@@ -18,6 +18,7 @@ from cw.dev_queue.dispositions import (
     REVIEW_APPROVAL_GATE_DISPOSITION,
     REVIEW_ENGINE_MODIFIED_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
+    TRACKER_MCP_GATE_DISPOSITION,
 )
 from cw.models import DispatchSkipReason
 
@@ -79,8 +80,11 @@ _DIRTY_WORKTREE_DISPOSITION = "dirty_worktree"
 # reap revert would dispatch an adopted PR at an unreviewed head or while still
 # red. The claim-time review-approval park (#2773) waits on the operator's
 # `cw dev-queue requeue --stage review`; a reap revert would re-dispatch a
-# large-tier finalize that the gate refuses. Sourced from the owning constants so
-# the strings cannot drift.
+# large-tier finalize that the gate refuses. The pre-dispatch tracker-MCP gate
+# park (#2442, #3055) waits on the operator fixing the branch settings file or
+# the backend's MCP config and running `cw dev-queue requeue`; no session ever
+# ran, so a reap revert would only re-derive the same park. Sourced from the
+# owning constants so the strings cannot drift.
 _OPERATOR_GATED_PARK_DISPOSITIONS: frozenset[str] = frozenset(
     {
         FINALIZE_GATE_HELD_DISPOSITION,
@@ -91,6 +95,7 @@ _OPERATOR_GATED_PARK_DISPOSITIONS: frozenset[str] = frozenset(
         ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
         REVIEW_APPROVAL_GATE_DISPOSITION,
         REVIEW_ENGINE_MODIFIED_DISPOSITION,
+        TRACKER_MCP_GATE_DISPOSITION,
     }
 )
 

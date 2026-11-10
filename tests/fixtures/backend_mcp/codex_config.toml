@@ -1,0 +1,24 @@
+# Redacted capture of a real ~/.codex/config.toml (#3055). Shape preserved,
+# values redacted; the one MCP server table is renamed to "linear" (the name
+# tests stage). Do not tidy: the unrelated top-level tables are the point.
+model_reasoning_effort = "<redacted>"
+model = "<redacted>"
+approvals_reviewer = "<redacted>"
+
+[projects."/redacted/project/path"]
+trust_level = "<redacted>"
+
+[tui]
+screen_reader_detection_done = true
+
+[tui.model_availability_nux]
+"<redacted-model-a>" = 0
+"<redacted-model-b>" = 0
+
+[mcp_servers.linear]
+command = "<redacted>"
+args = ["<redacted>"]
+
+[hooks.state."<redacted-hook>"]
+enabled = true
+trusted_hash = "<redacted>"

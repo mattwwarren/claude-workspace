@@ -13,6 +13,7 @@ issue #2193.
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Literal
 
 from cw.models import QueueItemStatus
@@ -44,6 +45,25 @@ RealCommitOutcome = Literal[
     # predates the field.
     "unknown",
 ]
+
+
+class OperatorConstraintsSource(StrEnum):
+    """Where a codex fix loop's operator constraints came from (#3055, RFC 0018 S3).
+
+    Stamped on ``Review.operator_constraints_source`` when the codex fix loop
+    engaged and the exit built a finalized review. ``TRACKER_UNREADABLE``
+    means the tracker is not GitHub (or unset), so operator comments could
+    not be read, and the row carried no constraint entries either. Additive,
+    no ``schema_version`` bump; ``None`` on the model means the producer did
+    not report it.
+    """
+
+    COMMENT = "comment"
+    ROW = "row"
+    COMMENT_AND_ROW = "comment_and_row"
+    NONE = "none"
+    TRACKER_UNREADABLE = "tracker_unreadable"
+
 
 Status = Literal[
     "shipped",
@@ -139,6 +159,14 @@ CONFIRM_BACKEND_UNAVAILABLE_BLOCKER_REASON: Literal["confirm_backend_unavailable
 # cw.dev_queue.dispositions._PRE_DISPATCH_STALE_PR_REASON, which names the
 # *code-side* gate's park -- that one is never emitted by an agent. See #1862.
 STALE_DISPATCH_BLOCKER_REASON: Literal["pr_already_open"] = "pr_already_open"
+# Public blocker reasons used by the opencode tracker-operation prompt. Keep
+# these identifiers named so prompt text and diagnostics cannot drift apart.
+PLAN_MISSING_CONTEXT_BLOCKER_REASON: Literal["plan_missing_context"] = (
+    "plan_missing_context"
+)
+TRACKER_TOOL_UNAVAILABLE_BLOCKER_REASON: Literal["tracker_tool_unavailable"] = (
+    "tracker_tool_unavailable"
+)
 # Blocker reasons at Stage.FINALIZE eligible for automatic regress to IMPL.
 # "agent_block" covers prep-pr gate failures (diff-cover, etc.) that a fresh
 # impl session can fix by adding missing tests. Reasons absent here (e.g.
@@ -260,9 +288,13 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             "local_main_diverged_from_origin",
             "plan_ambiguous",
             "plan_missing",
-            "plan_missing_context",
+            PLAN_MISSING_CONTEXT_BLOCKER_REASON,
             "prior_pipeline_pr_open",
             "repair_entry_unsupported_backend",
+            # #3055 (RFC 0018 S3): an opencode PLAN/IMPL tracker write that
+            # had no tool or failed (retry_eligible: false); a failed read
+            # stays plan_missing_context.
+            TRACKER_TOOL_UNAVAILABLE_BLOCKER_REASON,
         }
     )
     # cw-side synthetic reasons. The literals are owned by

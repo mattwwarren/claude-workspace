@@ -25,11 +25,12 @@ from cw.auto_dev_result.schema import AutoDevResult, Blocker
 
 # The complete re-export surface: every top-level name the flat ``schema.py``
 # bound before the split, plus later deliberate additions (``RealCommitOutcome``,
-# #1745). 53 of these are re-exported one level out by
-# ``cw.auto_dev_result.__init__``; ``SchemaVersion`` is deliberately excluded
+# #1745; ``OperatorConstraintsSource``, #3055). All but one are re-exported one
+# level out by ``cw.auto_dev_result.__init__``; ``SchemaVersion`` is excluded
 # from that outer block (``parse.py`` imports it from here directly).
 EXPECTED_EXPORTS = {
     # Vocabulary — type aliases (schema/_vocab.py)
+    "OperatorConstraintsSource",  # #3055: StrEnum, not an alias
     "PlanSource",
     "RealCommitOutcome",
     "SchemaVersion",

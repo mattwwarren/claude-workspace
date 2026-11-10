@@ -21,12 +21,25 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.models import DevQueueStore, QueueItemStatus, Stage, TicketTask
+import cw.dispatch.tracker_mcp_gate as gate_module
+from cw.backend_mcp_config import McpConfigReading
+from cw.dispatch.tracker_mcp_gate import TrackerMcpGateHit
+from cw.models import (
+    CLAUDE_NATIVE_BACKEND,
+    CODEX_BACKEND,
+    OPENCODE_BACKEND,
+    DevQueueStore,
+    QueueItemStatus,
+    Stage,
+    TicketTask,
+)
 from cw.models.client import ClientConfig, TrackerMcpGateConfig
-from tests.conftest import commit_tracked_file, git_in
+from tests._backend_mcp_helpers import McpStage, stage_mcp_config
+from tests._doctor_helpers import make_stage_pipeline
+from tests.conftest import _write_tracker_config, commit_tracked_file, git_in
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
 _CLIENT = "acme"
 _TICKET = "T-2442"
@@ -41,12 +54,28 @@ def _reset_warn_dedupe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("cw.dispatch.tracker_mcp_gate._WARNED_FAIL_OPEN", {})
 
 
-def _client(repo: Path, gate: TrackerMcpGateConfig | None) -> ClientConfig:
-    return ClientConfig(name=_CLIENT, workspace_path=repo, tracker_mcp_gate=gate)
+def _client(
+    repo: Path,
+    gate: TrackerMcpGateConfig | None,
+    *,
+    executors: Mapping[Stage, str | None] | None = None,
+    tracker: str | None = None,
+) -> ClientConfig:
+    """A gate client; *executors* sets stage backends, *tracker* the tracker."""
+    if tracker is not None:
+        _write_tracker_config(repo, tracker)
+    return ClientConfig(
+        name=_CLIENT,
+        workspace_path=repo,
+        tracker_mcp_gate=gate,
+        pipeline=make_stage_pipeline(executors or {}),
+    )
 
 
-def _enabled_gate(plugin_id: str = _PLUGIN) -> TrackerMcpGateConfig:
-    return TrackerMcpGateConfig(enabled=True, plugin_id=plugin_id)
+def _enabled_gate(
+    plugin_id: str | None = _PLUGIN, *, servers: dict[str, str] | None = None
+) -> TrackerMcpGateConfig:
+    return TrackerMcpGateConfig(enabled=True, plugin_id=plugin_id, servers=servers)
 
 
 def _snapshot(*, stage: Stage = Stage.PLAN, ticket_id: str = _TICKET) -> DevQueueStore:
@@ -240,7 +269,7 @@ class TestGateHit:
 
         assert hits == {
             _TICKET: TrackerMcpGateHit(
-                branch=_BRANCH, file_inspected=_SETTINGS, expected_plugin=plugin_id
+                branch=_BRANCH, file_inspected=_SETTINGS, expected=plugin_id
             )
         }
 
@@ -313,7 +342,7 @@ class TestGateHit:
 
         assert _resolve(_client(repo, gate), _snapshot()) == {
             _TICKET: TrackerMcpGateHit(
-                branch=_BRANCH, file_inspected=custom, expected_plugin=_PLUGIN
+                branch=_BRANCH, file_inspected=custom, expected=_PLUGIN
             )
         }
 
@@ -393,3 +422,337 @@ class TestScoping:
 
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 2
+
+
+# --- RFC 0018 S3 (#3055): per-backend server gate ---------------------------
+
+_SERVER = "linear"
+_OPENCODE_SERVERS = {OPENCODE_BACKEND: _SERVER}
+_ALL_SERVERS = {OPENCODE_BACKEND: _SERVER, CODEX_BACKEND: _SERVER}
+
+
+def _on(backend: str) -> dict[Stage, str | None]:
+    return {Stage.PLAN: backend, Stage.IMPL: backend, Stage.REVIEW: backend}
+
+
+def _count_reads(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Wrap the gate's ``read_backend_mcp`` and record each call (per-tick test)."""
+    calls: list[tuple[str, str]] = []
+    real = gate_module.read_backend_mcp
+
+    def _counting(backend: str, server: str, root: Path) -> McpConfigReading:
+        calls.append((backend, server))
+        return real(backend, server, root)
+
+    monkeypatch.setattr(gate_module, "read_backend_mcp", _counting)
+    return calls
+
+
+def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+
+
+_TRACKERS = ("github-issues", "linear", None)
+_GATE_STATES: tuple[McpStage, ...] = ("enabled", "absent", "disabled", "malformed")
+
+
+def _expect_hit(
+    tracker: str | None, backend: str, state: McpStage, stage: Stage
+) -> bool:
+    return (
+        tracker == "linear"
+        and backend == OPENCODE_BACKEND
+        and state in ("absent", "disabled")
+        and stage in (Stage.PLAN, Stage.IMPL)
+    )
+
+
+@pytest.mark.usefixtures("isolated_backend_layers")
+class TestBackendServerGate:
+    @pytest.mark.parametrize("tracker", _TRACKERS)
+    @pytest.mark.parametrize("backend", [OPENCODE_BACKEND, CODEX_BACKEND])
+    @pytest.mark.parametrize("state", _GATE_STATES)
+    @pytest.mark.parametrize("stage", [Stage.PLAN, Stage.IMPL, Stage.REVIEW])
+    def test_table(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tracker: str | None,
+        backend: str,
+        state: McpStage,
+        stage: Stage,
+    ) -> None:
+        path = stage_mcp_config(monkeypatch, tmp_path, backend, state)
+        (tmp_path / "ws" / ".git").mkdir(parents=True)
+        client = _client(
+            tmp_path / "ws",
+            _enabled_gate(None, servers=_ALL_SERVERS),
+            executors=_on(backend),
+            tracker=tracker,
+        )
+        reads = _count_reads(monkeypatch)
+
+        hits = _resolve(client, _snapshot(stage=stage))
+
+        if _expect_hit(tracker, backend, state, stage):
+            assert hits == {
+                _TICKET: TrackerMcpGateHit(
+                    branch=_BRANCH,
+                    file_inspected=str(path),
+                    expected=_SERVER,
+                    backend=OPENCODE_BACKEND,
+                )
+            }
+        else:
+            assert hits == {}
+        if tracker != "linear" or backend == CODEX_BACKEND or stage is Stage.REVIEW:
+            assert reads == []
+
+    def test_unset_tracker_warns_once_and_never_reads(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        stage_mcp_config(monkeypatch, tmp_path, OPENCODE_BACKEND, "absent")
+        client = _client(
+            tmp_path,
+            _enabled_gate(None, servers=_OPENCODE_SERVERS),
+            executors=_on(OPENCODE_BACKEND),
+        )
+        reads = _count_reads(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
+            assert _resolve(client, _snapshot()) == {}
+            assert _resolve(client, _snapshot()) == {}
+
+        assert reads == []
+        warnings = _warnings(caplog)
+        assert len(warnings) == 1
+        assert "opencode:tracker" in warnings[0]
+        assert "tracker unset" in warnings[0]
+
+    def test_unknown_reading_warns_once_naming_the_path(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        path = stage_mcp_config(monkeypatch, tmp_path, OPENCODE_BACKEND, "missing")
+        client = _client(
+            tmp_path,
+            _enabled_gate(None, servers=_OPENCODE_SERVERS),
+            executors=_on(OPENCODE_BACKEND),
+            tracker="linear",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
+            assert _resolve(client, _snapshot()) == {}
+            assert _resolve(client, _snapshot()) == {}
+
+        warnings = _warnings(caplog)
+        assert len(warnings) == 1
+        assert f"opencode:{path}" in warnings[0]
+        assert "does not exist" in warnings[0]
+
+    def test_probe_found_layer_fails_open(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        stage_mcp_config(monkeypatch, tmp_path, OPENCODE_BACKEND, "absent")
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "opencode.json").write_text("{}", encoding="utf-8")
+        client = _client(
+            tmp_path,
+            _enabled_gate(None, servers=_OPENCODE_SERVERS),
+            executors=_on(OPENCODE_BACKEND),
+            tracker="linear",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
+            assert _resolve(client, _snapshot()) == {}
+
+        warnings = _warnings(caplog)
+        assert len(warnings) == 1
+        assert "not parsed" in warnings[0]
+
+    def test_enabled_reading_rearms_the_warning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        client = _client(
+            tmp_path,
+            _enabled_gate(None, servers=_OPENCODE_SERVERS),
+            executors=_on(OPENCODE_BACKEND),
+            tracker="linear",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
+            stage_mcp_config(monkeypatch, tmp_path, OPENCODE_BACKEND, "malformed")
+            _resolve(client, _snapshot())
+            stage_mcp_config(monkeypatch, tmp_path, OPENCODE_BACKEND, "enabled")
+            _resolve(client, _snapshot())
+            stage_mcp_config(monkeypatch, tmp_path, OPENCODE_BACKEND, "malformed")
+            _resolve(client, _snapshot())
+
+        assert len(_warnings(caplog)) == 2
+
+    def test_hit_rearms_the_warning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        client = _client(
+            tmp_path,
+            _enabled_gate(None, servers=_OPENCODE_SERVERS),
+            executors=_on(OPENCODE_BACKEND),
+            tracker="linear",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
+            stage_mcp_config(monkeypatch, tmp_path, OPENCODE_BACKEND, "malformed")
+            _resolve(client, _snapshot())
+            stage_mcp_config(monkeypatch, tmp_path, OPENCODE_BACKEND, "absent")
+            assert _resolve(client, _snapshot()) != {}
+            stage_mcp_config(monkeypatch, tmp_path, OPENCODE_BACKEND, "malformed")
+            _resolve(client, _snapshot())
+
+        assert len(_warnings(caplog)) == 2
+
+    def test_one_config_read_per_tick_per_backend(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        stage_mcp_config(monkeypatch, tmp_path, OPENCODE_BACKEND, "absent")
+        client = _client(
+            tmp_path,
+            _enabled_gate(None, servers=_OPENCODE_SERVERS),
+            executors=_on(OPENCODE_BACKEND),
+            tracker="linear",
+        )
+        snapshot = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=f"T-{n}",
+                    client=_CLIENT,
+                    status=QueueItemStatus.PENDING,
+                    stage=Stage.PLAN,
+                )
+                for n in range(3)
+            ]
+        )
+        reads = _count_reads(monkeypatch)
+
+        hits = _resolve(client, snapshot)
+
+        assert sorted(hits) == ["T-0", "T-1", "T-2"]
+        assert reads == [(OPENCODE_BACKEND, _SERVER)]
+
+    def test_opencode_row_under_plugin_only_gate_is_not_gated(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A12: the plugin path is claude-native only."""
+        stage_mcp_config(monkeypatch, tmp_path, OPENCODE_BACKEND, "absent")
+        client = _client(
+            tmp_path,
+            _enabled_gate(_PLUGIN),
+            executors=_on(OPENCODE_BACKEND),
+            tracker="linear",
+        )
+        reads = _count_reads(monkeypatch)
+
+        assert _resolve(client, _snapshot()) == {}
+        assert reads == []
+
+    def test_local_backend_row_is_not_gated(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        client = _client(
+            tmp_path,
+            _enabled_gate(_PLUGIN, servers=_ALL_SERVERS),
+            executors=_on("local"),
+            tracker="linear",
+        )
+        reads = _count_reads(monkeypatch)
+
+        assert _resolve(client, _snapshot()) == {}
+        assert reads == []
+
+    def test_claude_row_under_servers_only_gate_is_skipped(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = _branch_with_settings(make_git_repo, {"enabledPlugins": {}})
+        calls: list[str] = []
+
+        def _spy(client: ClientConfig, branch: str, relpath: str) -> None:
+            calls.append(branch)
+
+        monkeypatch.setattr("cw.dispatch.tracker_mcp_gate._read_branch_json", _spy)
+        client = _client(repo, _enabled_gate(None, servers=_OPENCODE_SERVERS))
+
+        assert _resolve(client, _snapshot()) == {}
+        assert calls == []
+
+    def test_mixed_gate_evaluates_each_row_by_its_backend(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A plugin_id+servers gate: claude row by plugin, opencode row by server."""
+        repo = _branch_with_settings(make_git_repo, {"enabledPlugins": {}})
+        git_in(repo, "checkout", "-b", "dev/T-OC")
+        git_in(repo, "checkout", "main")
+        config_path = stage_mcp_config(
+            monkeypatch, tmp_path, OPENCODE_BACKEND, "disabled"
+        )
+        client = ClientConfig(
+            name=_CLIENT,
+            workspace_path=repo,
+            tracker_mcp_gate=_enabled_gate(_PLUGIN, servers=_OPENCODE_SERVERS),
+            lanes=[
+                {
+                    "name": "oc",
+                    "pipeline": make_stage_pipeline(_on(OPENCODE_BACKEND)),
+                }
+            ],
+        )
+        _write_tracker_config(repo, "linear")
+        snapshot = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=_TICKET,
+                    client=_CLIENT,
+                    status=QueueItemStatus.PENDING,
+                    stage=Stage.PLAN,
+                ),
+                TicketTask(
+                    ticket_id="T-OC",
+                    client=_CLIENT,
+                    status=QueueItemStatus.PENDING,
+                    stage=Stage.IMPL,
+                    lane="oc",
+                ),
+            ]
+        )
+
+        hits = _resolve(client, snapshot)
+
+        assert hits == {
+            _TICKET: TrackerMcpGateHit(
+                branch=_BRANCH,
+                file_inspected=_SETTINGS,
+                expected=_PLUGIN,
+                backend=CLAUDE_NATIVE_BACKEND,
+            ),
+            "T-OC": TrackerMcpGateHit(
+                branch="dev/T-OC",
+                file_inspected=str(config_path),
+                expected=_SERVER,
+                backend=OPENCODE_BACKEND,
+            ),
+        }

@@ -261,6 +261,27 @@ def _render_delta_note(verdict: ReviewVerdict) -> list[str]:
     ]
 
 
+def _render_operator_constraints_note(review: Review) -> list[str]:
+    """Say what a non-GitHub tracker kept from the fix loop (#3055, RFC 0018 S3).
+
+    Renders only for ``tracker_unreadable``: the operator's free-text
+    comments, voided findings (#1814) and settle markers live on the tracker,
+    which cw cannot read here, and the row carried no constraints either.
+    Every other value stays in the JSON envelope only, so GitHub comment text
+    is byte-identical.
+    """
+    if review.operator_constraints_source != "tracker_unreadable":
+        return []
+    return [
+        "**Operator context not read:** this tracker is not GitHub, so the fix "
+        "loop ran without the operator's free-text ticket comments, voided "
+        "findings (#1814) and settle marker comments. No operator constraints "
+        "were on the queue row either; record them with `cw review constrain` "
+        "to reach the loop.",
+        "",
+    ]
+
+
 def _render_review_config_note(verdict: ReviewVerdict) -> list[str]:
     """Say where the repository's review configuration was read from (#3038).
 

@@ -139,7 +139,8 @@ def _park_tracker_mcp_gated_task(
 
     ``unproductive=False`` for the same reason as :func:`_park_stale_pr_task`:
     no session was ever spawned for this claim. *hit* names the branch, the
-    settings file inspected, and the expected plugin id, carried on the
+    file inspected, the expected plugin id or MCP server, and the backend
+    (#3055), carried on the
     SESSION_NEEDS_ATTENTION event only (transient, event-only detail).
     """
     transition_task_status(
@@ -157,7 +158,8 @@ def _park_tracker_mcp_gated_task(
         lane,
         branch=hit.branch,
         file_inspected=hit.file_inspected,
-        expected_plugin=hit.expected_plugin,
+        expected=hit.expected,
+        backend=hit.backend,
     )
 
 
