@@ -1,0 +1,279 @@
+{
+  "$defs": {
+    "AcceptanceRow": {
+      "additionalProperties": false,
+      "description": "One acceptance criterion and whether the change meets it.",
+      "properties": {
+        "id": {
+          "description": "The criterion's identifier, such as `ac1`.",
+          "maxLength": 64,
+          "title": "Id",
+          "type": "string"
+        },
+        "status": {
+          "description": "Whether the criterion is met.",
+          "enum": [
+            "PASS",
+            "FAIL",
+            "NOT_APPLICABLE"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "evidence": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Why the engine reached that status, or null.",
+          "title": "Evidence"
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "evidence"
+      ],
+      "title": "AcceptanceRow",
+      "type": "object"
+    },
+    "EngineFinding": {
+      "additionalProperties": false,
+      "description": "One finding the engine reports.",
+      "properties": {
+        "fingerprint": {
+          "description": "Opaque engine-owned identity, unique within the summary and stable across rounds by the engine's contract.",
+          "maxLength": 128,
+          "minLength": 8,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Fingerprint",
+          "type": "string"
+        },
+        "severity": {
+          "description": "The finding's severity.",
+          "enum": [
+            "MUST_FIX",
+            "SHOULD_FIX",
+            "DEBT",
+            "NIT",
+            "PRINCIPLE"
+          ],
+          "title": "Severity",
+          "type": "string"
+        },
+        "rule_id": {
+          "description": "Dotted lowercase rule identifier, such as `style.naming`.",
+          "maxLength": 128,
+          "pattern": "^[a-z0-9_]+(\\.[a-z0-9_-]+)*$",
+          "title": "Rule Id",
+          "type": "string"
+        },
+        "file": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Repo-relative file the finding is about, or null for none.",
+          "title": "File"
+        },
+        "line": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "1-based line in `file`, or null; requires a `file`.",
+          "title": "Line"
+        },
+        "summary": {
+          "description": "One-paragraph statement of the problem.",
+          "maxLength": 2000,
+          "title": "Summary",
+          "type": "string"
+        },
+        "evidence": {
+          "description": "What the engine saw that supports the finding.",
+          "maxLength": 8000,
+          "title": "Evidence",
+          "type": "string"
+        },
+        "consequence": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What goes wrong if the finding is left in place, if stated.",
+          "title": "Consequence"
+        },
+        "suggested_fix": {
+          "anyOf": [
+            {
+              "maxLength": 4000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How the engine suggests fixing it, if stated.",
+          "title": "Suggested Fix"
+        }
+      },
+      "required": [
+        "fingerprint",
+        "severity",
+        "rule_id",
+        "file",
+        "line",
+        "summary",
+        "evidence",
+        "consequence",
+        "suggested_fix"
+      ],
+      "title": "EngineFinding",
+      "type": "object"
+    },
+    "GateSignal": {
+      "additionalProperties": false,
+      "description": "One quality-gate signal the engine observed.",
+      "properties": {
+        "name": {
+          "description": "The gate's name, such as `ruff`.",
+          "maxLength": 64,
+          "title": "Name",
+          "type": "string"
+        },
+        "status": {
+          "description": "The gate's outcome.",
+          "enum": [
+            "PASS",
+            "FAIL",
+            "WARN"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Short detail on the outcome, or null.",
+          "title": "Detail"
+        }
+      },
+      "required": [
+        "name",
+        "status",
+        "detail"
+      ],
+      "title": "GateSignal",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "What the aggregation turn emits: the summary minus cw's three fields.",
+  "properties": {
+    "verdict": {
+      "description": "PASS, or FAIL; FAIL if and only if a MUST_FIX or SHOULD_FIX finding exists.",
+      "enum": [
+        "PASS",
+        "FAIL"
+      ],
+      "title": "Verdict",
+      "type": "string"
+    },
+    "coverage": {
+      "description": "COMPLETE only when every role document reviewed the change.",
+      "enum": [
+        "COMPLETE",
+        "PARTIAL",
+        "FAILED"
+      ],
+      "title": "Coverage",
+      "type": "string"
+    },
+    "risk": {
+      "description": "The overall risk rating.",
+      "enum": [
+        "LOW",
+        "MEDIUM",
+        "HIGH"
+      ],
+      "title": "Risk",
+      "type": "string"
+    },
+    "risk_notes": {
+      "description": "Short notes behind the risk rating; may be empty.",
+      "items": {
+        "maxLength": 1000,
+        "type": "string"
+      },
+      "maxItems": 32,
+      "title": "Risk Notes",
+      "type": "array"
+    },
+    "findings": {
+      "description": "Every finding; may be empty.",
+      "items": {
+        "$ref": "#/$defs/EngineFinding"
+      },
+      "maxItems": 500,
+      "title": "Findings",
+      "type": "array"
+    },
+    "acceptance": {
+      "description": "Acceptance-criterion rows; may be empty.",
+      "items": {
+        "$ref": "#/$defs/AcceptanceRow"
+      },
+      "maxItems": 200,
+      "title": "Acceptance",
+      "type": "array"
+    },
+    "gate_signals": {
+      "description": "Quality-gate signals; may be empty.",
+      "items": {
+        "$ref": "#/$defs/GateSignal"
+      },
+      "maxItems": 64,
+      "title": "Gate Signals",
+      "type": "array"
+    }
+  },
+  "required": [
+    "verdict",
+    "coverage",
+    "risk",
+    "risk_notes",
+    "findings",
+    "acceptance",
+    "gate_signals"
+  ],
+  "title": "EngineAggregationOutput",
+  "type": "object"
+}

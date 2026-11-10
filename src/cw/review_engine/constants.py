@@ -38,6 +38,34 @@ ENGINE_PREAMBLE: Final = (
     "coverage PARTIAL or FAILED."
 )
 
+#: Read-only preamble each codex engine role receives (RFC 0018 A4, #3216). It
+#: is the first text under the role prompt's ``## Agent Specification``
+#: heading. ``docs/headless-contract.md`` section 12.10 quotes it verbatim.
+ENGINE_ROLE_PREAMBLE: Final = (
+    "This is a gate step. The worktree is read-only: do not edit, stage, "
+    "commit, push or post anything, and do not write any file. Do not ask "
+    "questions. Emit only this role's findings JSON document, following the "
+    "output schema in this prompt. Report anything you could not verify as "
+    "status degraded, with the reason in detail."
+)
+
+#: Read-only preamble the codex aggregation turn receives first on stdin. cw
+#: writes the summary file itself and fills ``schema_version``, ``head_sha``
+#: and ``counts``. Section 12.10 quotes it verbatim.
+ENGINE_AGGREGATOR_PREAMBLE: Final = (
+    "This is a gate step. The worktree is read-only: do not edit, stage, "
+    "commit, push or post anything, and do not write any file; cw writes the "
+    "summary. Emit exactly one JSON object matching the output schema, with "
+    "only verdict, coverage, risk, risk_notes, findings, acceptance and "
+    "gate_signals; cw fills schema_version, head_sha and counts. The verdict "
+    "is FAIL if and only if at least one finding is MUST_FIX or SHOULD_FIX. "
+    "Never report coverage COMPLETE when a role document below is failed or "
+    "missing."
+)
+
+#: The manifest a codex-capable engine commits beside its ``SKILL.md``.
+ENGINE_MANIFEST_FILENAME: Final = "cw-engine.json"
+
 #: Round ids name a directory under ``.cw/review-engine``; the same shape as
 #: ``cw.review_workspace._ID_RE``.
 ROUND_ID_RE: Final = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"

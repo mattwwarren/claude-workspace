@@ -1,0 +1,9 @@
+{
+  "manifest_version": 1,
+  "backends": ["codex"],
+  "roles": [
+    {"id": "security", "agent_spec": "agents/security.md"},
+    {"id": "quality", "agent_spec": "agents/quality.md"}
+  ],
+  "aggregation_prompt": "prompts/aggregate.md"
+}
