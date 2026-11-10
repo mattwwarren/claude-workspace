@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "repo": "acme/widgets",
+  "pr_number": 42,
+  "event_type": "ci_failed",
+  "kind": "transition",
+  "payload": {
+    "workflow_conclusion": "failure"
+  },
+  "source_id": "src-ci-1",
+  "event_id": "29a68db8488e749784be878d552123198d01d633b90df3d654c7980278aef9ff",
+  "head_sha": "fa098ced97925fdea4c0a31ac75247b8cec08d22",
+  "event_time": null,
+  "received_at": "2026-11-09T12:00:00.000+00:00"
+}

@@ -1,0 +1,1 @@
+{"schema_version": 1, "repo": "acme/widgets", "pr_number": 42, "event_type": "merged", "kind": "transition", "payload": {}, "source_id": null, "event_id": null, "head_sha": null, "event_time": null, "received_at": "2026-11-09T12:00:00.000+00:00"}

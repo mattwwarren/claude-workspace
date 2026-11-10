@@ -1,0 +1,1 @@
+{"repo": "acme/widgets", "pr_number": 42, "event_type": "review_received", "payload": {"review_decision": "APPROVED"}, "source_id": null, "head_sha": null, "event_time": null}

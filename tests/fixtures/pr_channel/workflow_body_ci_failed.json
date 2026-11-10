@@ -1,0 +1,1 @@
+{"repo": "acme/widgets", "pr_number": 42, "event_type": "ci_failed", "payload": {"workflow_conclusion": "failure"}, "source_id": null, "head_sha": null, "event_time": null}

@@ -1,6 +1,6 @@
 """Guard tests for `.github/workflows/pr-events.yml`'s `review_requested` relay (#1169).
 
-#1154 landed the server-side half of RFC 0011 S2 (`_VALID_EVENT_TYPES` and
+#1154 landed the server-side half of RFC 0011 S2 (`PREventType` and
 `_handle_review_requested_sync` in `cw_pr_events_server.py`). This file covers the
 producer side: the workflow must declare the `review_requested` trigger and must not
 fall into the pre-existing `pull_request)` merged-gate (every `review_requested`
@@ -22,7 +22,10 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
+
+from tests._tool_fakes import shim_env, stub_gh
 
 ROOT = Path(__file__).parent.parent
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "pr-events.yml"
@@ -214,3 +217,170 @@ def test_closed_merged_and_closed_unmerged_still_work() -> None:
         }
     )
     assert unmerged.get("skip") == "true"
+
+
+# ---------------------------------------------------------------------------
+# PR channel v1 (#3173): ci_failed payload, Post-step body, triggers unchanged.
+# ---------------------------------------------------------------------------
+
+_V1_FIXTURES = Path(__file__).parent / "fixtures" / "pr_channel"
+
+
+def _v1_fixture(name: str) -> dict[str, Any]:
+    loaded: dict[str, Any] = json.loads((_V1_FIXTURES / name).read_text())
+    return loaded
+
+
+def _post_step_script() -> str:
+    raw = yaml.safe_load(WORKFLOW_PATH.read_text())
+    step = next(
+        s
+        for s in raw["jobs"]["push-pr-event"]["steps"]
+        if s.get("name") == "Post event to relay"
+    )
+    script: str = step["run"]
+    return script
+
+
+def _run_post_step(
+    env_overrides: dict[str, str], record: Path
+) -> subprocess.CompletedProcess[str]:
+    """Run the Post step's ``run:`` text with an explicit env; curl is a fake."""
+    base_env = {
+        "RELAY_URL": "http://relay.invalid/pr-event",
+        "HMAC_SECRET": "",
+        "REPO": "acme/widgets",
+        "PR_NUMBER": "42",
+        "EVENT_TYPE": "merged",
+        "PAYLOAD": "{}",
+        "CURL_RECORD": str(record),
+        "PATH": "/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/bin/bash", "-c", _post_step_script()],
+        env={**base_env, **env_overrides},
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return result
+
+
+def _curl_stub(tmp_path: Path) -> Path:
+    from tests._tool_fakes import write_bin_stub
+
+    body = '#!/bin/bash\nprintf "%s\\0" "$@" > "$CURL_RECORD"\n'
+    return write_bin_stub(tmp_path, "curl", body)
+
+
+def _recorded_args(record: Path) -> list[str]:
+    return record.read_bytes().decode().split("\0")[:-1]
+
+
+def _body_from_args(args: list[str]) -> dict[str, Any]:
+    idx = args.index("-d")
+    loaded: dict[str, Any] = json.loads(args[idx + 1])
+    return loaded
+
+
+class TestPRChannelWorkflowV1:
+    def test_triggers_unchanged(self) -> None:
+        raw = yaml.safe_load(WORKFLOW_PATH.read_text())
+        triggers = raw[True]
+        assert triggers == {
+            "pull_request": {"types": ["closed", "review_requested"]},
+            "pull_request_review": {"types": ["submitted"]},
+            "workflow_run": {"workflows": ["CI"], "types": ["completed"]},
+        }
+
+    def test_header_points_at_pr_channel_doc(self) -> None:
+        assert "docs/pr-channel.md" in WORKFLOW_PATH.read_text()
+
+    def test_ci_failed_payload_carries_conclusion(self, tmp_path: Path) -> None:
+        bin_dir = stub_gh(tmp_path, exit_code=0, stdout="42\n")
+        out = _run_resolve_step(
+            {
+                "EVENT_NAME": "workflow_run",
+                "WORKFLOW_CONCLUSION": "failure",
+                "WORKFLOW_HEAD_BRANCH": "dev/1",
+                "REPO": "acme/widgets",
+                **shim_env(bin_dir),
+            }
+        )
+        assert out["event_type"] == "ci_failed"
+        assert json.loads(out["payload"]) == {"workflow_conclusion": "failure"}
+
+    def test_ci_cancelled_reflected_honestly(self, tmp_path: Path) -> None:
+        bin_dir = stub_gh(tmp_path, exit_code=0, stdout="42\n")
+        out = _run_resolve_step(
+            {
+                "EVENT_NAME": "workflow_run",
+                "WORKFLOW_CONCLUSION": "cancelled",
+                "WORKFLOW_HEAD_BRANCH": "dev/1",
+                "REPO": "acme/widgets",
+                **shim_env(bin_dir),
+            }
+        )
+        assert json.loads(out["payload"]) == {"workflow_conclusion": "cancelled"}
+
+    def test_ci_success_skips(self, tmp_path: Path) -> None:
+        bin_dir = stub_gh(tmp_path, exit_code=0, stdout="42\n")
+        out = _run_resolve_step(
+            {
+                "EVENT_NAME": "workflow_run",
+                "WORKFLOW_CONCLUSION": "success",
+                "WORKFLOW_HEAD_BRANCH": "dev/1",
+                "REPO": "acme/widgets",
+                **shim_env(bin_dir),
+            }
+        )
+        assert out.get("skip") == "true"
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "workflow_body_merged.json",
+            "workflow_body_ci_failed.json",
+            "workflow_body_review_received.json",
+            "workflow_body_review_requested.json",
+        ],
+    )
+    def test_post_body_matches_golden(self, name: str, tmp_path: Path) -> None:
+        golden = _v1_fixture(name)
+        record = tmp_path / "curl-args.bin"
+        _run_post_step(
+            {
+                "EVENT_TYPE": golden["event_type"],
+                "PAYLOAD": json.dumps(golden["payload"]),
+                "PR_NUMBER": str(golden["pr_number"]),
+                "REPO": golden["repo"],
+                **shim_env(_curl_stub(tmp_path)),
+            },
+            record,
+        )
+        args = _recorded_args(record)
+        assert _body_from_args(args) == golden
+        assert "X-Cw-Signature: sha256=" not in " ".join(args)
+
+    def test_post_signs_body_when_secret_set(self, tmp_path: Path) -> None:
+        import hashlib
+        import hmac
+
+        golden = _v1_fixture("workflow_body_merged.json")
+        record = tmp_path / "curl-args.bin"
+        _run_post_step(
+            {
+                "HMAC_SECRET": "s3cret",
+                "EVENT_TYPE": "merged",
+                "PAYLOAD": "{}",
+                **shim_env(_curl_stub(tmp_path)),
+            },
+            record,
+        )
+        args = _recorded_args(record)
+        body = args[args.index("-d") + 1]
+        expected = hmac.new(b"s3cret", body.encode(), hashlib.sha256).hexdigest()
+        assert f"X-Cw-Signature: sha256={expected}" in args
+        assert _body_from_args(args) == golden
