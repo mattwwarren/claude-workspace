@@ -20,12 +20,19 @@ class SessionPurpose(StrEnum):
     # start`/`--purpose` choice (see WORKER_PURPOSES exclusion below), same
     # carve-out shape as ORCHESTRATE.
     FIX = "fix"
+    # #3054 -- stage-neutral codex sessions record their stage's purpose. Like
+    # FIX and ORCHESTRATE, never a `cw start --purpose` choice (WORKER_PURPOSES
+    # exclusion below). Declaration order is pinned by the schema golden.
+    PLAN = "plan"
+    REVIEW = "review"
+    FINALIZE = "finalize"
 
 
 # Purposes a worker session can be dispatched/created with. ORCHESTRATE is
 # excluded: an ORCHESTRATE session is created only via `cw orchestrate start`
 # (#595 / Phase 4b), never selected as a worker --purpose. FIX is excluded for
 # the same reason (#2017): it is dispatched only by the fix_agent recipe.
+# PLAN, REVIEW and FINALIZE (#3054) are excluded likewise: codex sessions only.
 WORKER_PURPOSES: tuple[SessionPurpose, ...] = (
     SessionPurpose.IMPL,
     SessionPurpose.IDEA,
