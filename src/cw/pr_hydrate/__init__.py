@@ -375,7 +375,7 @@ def observe_pushed_event(
     (``apply_pr_state_observation``) so push and poll producers share
     transition-dedup and both land in ``dev_queue.json`` (``pr_state``) and
     ``inbox.jsonl`` (``pr.*`` events). *wire_event_type* is the bare suffix
-    from ``cw_pr_events_server._VALID_EVENT_TYPES`` (``"ci_failed"``,
+    from ``cw.models.pr_channel_event.PREventType`` (``"ci_failed"``,
     ``"review_received"``, ``"mergeable"``, ``"merged"``); an unrecognized
     suffix is a silent no-op (defensive — the wire contract validates this
     upstream via ``PREventRequest``).
