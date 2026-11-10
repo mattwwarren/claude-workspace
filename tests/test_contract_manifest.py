@@ -1287,6 +1287,25 @@ def test_codex_cells_follow_the_stage_ticket_map() -> None:
     assert used == set(_CODEX_STAGE_TICKETS.values())
 
 
+#: The codex cells A2 (#3057) implements with the tracker-IO turn.
+_A2_TRACKER_IO_CELLS = (
+    "orch.tracker-post-seam",
+    "orch.comment-provenance-rule",
+    "orch.marker-cw-agent-authored",
+    "review.blocking-findings-comment-rule",
+    "review.blocking-findings-comment-rule-body-shape",
+)
+
+
+@pytest.mark.parametrize("element_id", _A2_TRACKER_IO_CELLS)
+def test_a2_cells_point_at_the_tracker_io_turn(element_id: str) -> None:
+    cell = _real_cell(element_id, CODEX_BACKEND)
+    assert isinstance(cell, ImplementedDisposition), element_id
+    assert cell.ref == CodeRef(
+        kind="code", path="src/cw/tracker_io/_turn.py", symbol="post_parts_via_turn"
+    )
+
+
 def test_no_cell_defers_to_the_closing_ticket() -> None:
     """#3055 and #3056 resolved every cell that cited them; none may again."""
     for element_id, element in _manifest().elements.items():

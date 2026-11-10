@@ -2739,6 +2739,7 @@ class TestOperatorChannelForward:
                 OrchestratorEventType.DISK_PRESSURE_GATE_BYPASSED,
                 OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
                 OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED,
+                OrchestratorEventType.REVIEW_VERDICT_COMMENT_UNVERIFIED,
                 OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED,
             }
         )

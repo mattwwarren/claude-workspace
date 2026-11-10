@@ -174,13 +174,14 @@ class TestAdmitsFilterEngine:
         "event_type",
         [
             OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED,
+            OrchestratorEventType.REVIEW_VERDICT_COMMENT_UNVERIFIED,
             OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED,
         ],
     )
     def test_rfc0018_s3_review_signals_admitted_by_default(
         self, event_type: OrchestratorEventType
     ) -> None:
-        """Both #3055 codex review signals forward unconditionally."""
+        """The #3055 and #3057 codex review signals forward unconditionally."""
         event = OrchestratorEvent(type=event_type, payload={})
         assert _admits(event, self._default_forward()) is True
 

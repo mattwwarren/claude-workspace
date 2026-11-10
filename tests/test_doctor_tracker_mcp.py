@@ -158,6 +158,10 @@ class TestCodex:
         assert "marker comments" in result.detail
         assert "settle" not in result.detail
         assert "constraints and finding dispositions still reach" in result.detail
+        # #3057: the verdict now posts through the tracker-IO turn.
+        assert "verdict comment is not posted" not in result.detail
+        assert "tracker-IO turn" in result.detail
+        assert "tracker_mcp_gate.servers.codex" in result.detail
         assert f"tracker {tracker or 'unset'}" in result.detail
 
     @pytest.mark.parametrize("state", ["absent", "disabled"])

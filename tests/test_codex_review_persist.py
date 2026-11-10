@@ -19,13 +19,18 @@ from cw.auto_dev_result import Blocker
 from cw.codex_review import CODEX_REVIEW_UNPARSEABLE
 from cw.codex_review_persist import (
     REVIEW_VERDICT_OWNER_STAMP_FORMAT,
+    _post_daemon_verdict_comment,
     _post_review_comment,
 )
 from cw.codex_review_signals import VerdictCommentKind
+from cw.codex_runner import FakeCodexRunner
 from cw.events import read_events
-from cw.models import OrchestratorEvent, OrchestratorEventType
+from cw.models import ClientConfig, OrchestratorEvent, OrchestratorEventType
+from cw.models.client import TrackerMcpGateConfig
 from cw.review_findings import ReviewVerdictEnvelope, consolidate_verdict
-from tests._tool_fakes import FakeGhComment
+from cw.tracker_io import TrackerIoContext, plan_turn_parts
+from tests._backend_mcp_helpers import McpStage, stage_mcp_config
+from tests._tool_fakes import FakeGhComment, tracker_io_turn_result
 from tests.conftest import _make_diff, _make_finding, _make_reviewer_doc
 
 # ---------------------------------------------------------------------------
@@ -45,6 +50,20 @@ def _skip_events() -> list[OrchestratorEvent]:
     return read_events(
         consumer="test-3055-skip",
         event_types=[OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED],
+    )
+
+
+def _unverified_events() -> list[OrchestratorEvent]:
+    return read_events(
+        consumer="test-3057-unverified",
+        event_types=[OrchestratorEventType.REVIEW_VERDICT_COMMENT_UNVERIFIED],
+    )
+
+
+def _posted_events() -> list[OrchestratorEvent]:
+    return read_events(
+        consumer="test-3057-posted",
+        event_types=[OrchestratorEventType.REVIEW_VERDICT_COMMENT_POSTED],
     )
 
 
@@ -428,3 +447,199 @@ def test_post_review_comment_logs_on_nonzero_returncode(
         "T-1" in r.message and "1" in r.message and "invalid issue format" in r.message
         for r in caplog.records
     )
+
+
+# ---------------------------------------------------------------------------
+# _post_review_comment — the tracker-IO turn on a non-GitHub tracker (#3057)
+# ---------------------------------------------------------------------------
+
+
+def _tracker_io(
+    tmp_path: Path,
+    runner: FakeCodexRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    state: McpStage = "enabled",
+) -> TrackerIoContext:
+    stage_mcp_config(monkeypatch, tmp_path, "codex", state)
+    workspace = tmp_path / "workspace"
+    # Its own .git stops the MCP reader's project-layer walk here (#3055).
+    (workspace / ".git").mkdir(parents=True, exist_ok=True)
+    client = ClientConfig(
+        name="acme",
+        workspace_path=workspace,
+        default_branch="main",
+        tracker_mcp_gate=TrackerMcpGateConfig(
+            enabled=True, servers={"codex": "linear"}
+        ),
+    )
+    return TrackerIoContext(runner=runner, client=client, worktree=tmp_path)
+
+
+def _post_linear(context: TrackerIoContext, artifact: Path | None = None) -> None:
+    _post_review_comment(
+        "GEN-1",
+        "findings",
+        tracker="linear",
+        artifact_path=artifact,
+        tracker_io=context,
+        **_IDENTITY,
+    )
+
+
+@pytest.mark.usefixtures("isolated_backend_layers")
+def test_tracker_io_verified_post_skips_gh_and_emits_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = FakeCodexRunner()
+    context = _tracker_io(tmp_path, runner, monkeypatch)
+    runner.output_file_content = tracker_io_turn_result(
+        "GEN-1", plan_turn_parts("findings", context)
+    )
+    with patch("cw.codex_review_persist.post_issue_comment") as post_mock:
+        _post_linear(context)
+    post_mock.assert_not_called()
+    assert len(runner.calls) == 1
+    assert _skip_events() == []
+    assert _unverified_events() == []
+    (event,) = _posted_events()
+    assert event.payload["ticket_id"] == "GEN-1"
+    assert event.payload["posted"] == [
+        {
+            "index": 1,
+            "comment_id": "cmt-1",
+            "url": "https://linear.app/acme/issue/GEN-1/x#comment-cmt-1",
+        }
+    ]
+    assert event.payload["client"] == "acme"
+    assert event.payload["session_id"] == "sess-1"
+    assert event.payload["reviewed_sha"] == "abc123"
+    assert event.payload["content_sha256"]
+    assert event.payload["posted_at"]
+
+
+@pytest.mark.usefixtures("isolated_backend_layers")
+def test_tracker_io_not_enabled_records_the_skip_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = FakeCodexRunner()
+    context = _tracker_io(tmp_path, runner, monkeypatch, "disabled")
+    artifact = tmp_path / ".claude" / "review-verdict.md"
+    _post_linear(context, artifact)
+    assert runner.calls == []
+    (event,) = _skip_events()
+    assert event.payload["reason"] == "tracker_mcp_not_enabled"
+    assert event.payload["artifact_path"] == str(artifact)
+    assert _unverified_events() == []
+
+
+@pytest.mark.usefixtures("isolated_backend_layers")
+def test_tracker_io_mismatch_records_the_unverified_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    runner = FakeCodexRunner()
+    context = _tracker_io(tmp_path, runner, monkeypatch)
+    runner.output_file_content = tracker_io_turn_result(
+        "GEN-2", plan_turn_parts("findings", context)
+    )
+    with caplog.at_level("WARNING"):
+        _post_linear(context)
+    assert _skip_events() == []
+    (event,) = _unverified_events()
+    assert event.correlation_id == "GEN-1"
+    assert event.payload["reason"] == "ticket_mismatch"
+    assert event.payload["public_state"] == "confirmed"
+    assert event.payload["posted"] == [
+        {
+            "index": 1,
+            "comment_id": "cmt-1",
+            "url": "https://linear.app/acme/issue/GEN-2/x#comment-cmt-1",
+        }
+    ]
+    assert event.payload["marker_survived"] is True
+    assert any("review_comment_unverified" in r.message for r in caplog.records)
+
+
+@pytest.mark.usefixtures("isolated_backend_layers")
+def test_tracker_io_timeout_records_possible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context = _tracker_io(tmp_path, FakeCodexRunner(simulate_timeout=True), monkeypatch)
+    _post_linear(context)
+    (event,) = _unverified_events()
+    assert event.payload["reason"] == "turn_timeout"
+    assert event.payload["public_state"] == "possible"
+    assert event.payload["posted"] == []
+    assert event.payload["marker_survived"] is None
+
+
+def test_github_tracker_with_context_keeps_the_gh_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GitHub path unchanged: gh posts, the turn never runs."""
+    fake = FakeGhComment().install(monkeypatch)
+    runner = FakeCodexRunner()
+    context = _tracker_io(tmp_path, runner, monkeypatch)
+    for tracker in ("github-issues", None):
+        _post_review_comment(
+            "7", "findings", tracker=tracker, tracker_io=context, **_IDENTITY
+        )
+    assert len(fake.calls) == 2
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize(
+    "fault", [RuntimeError("boom"), KeyError("k"), OSError("disk")]
+)
+def test_tracker_io_turn_fault_is_best_effort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    fault: Exception,
+) -> None:
+    """R2: no turn exception reaches the caller (it would revert the row)."""
+    context = _tracker_io(tmp_path, FakeCodexRunner(), monkeypatch)
+    with (
+        patch("cw.codex_review_persist.post_parts_via_turn", side_effect=fault),
+        caplog.at_level("WARNING", logger="cw.codex_review_persist"),
+    ):
+        _post_linear(context)
+    (record,) = [r for r in caplog.records if "tracker_io_turn_failed" in r.message]
+    assert record.exc_info is not None
+    assert record.exc_info[1] is fault
+    assert _skip_events() == []
+    (event,) = _unverified_events()
+    assert event.payload["reason"] == "turn_exception"
+    assert event.payload["public_state"] == "possible"
+    assert event.payload["posted"] == []
+
+
+def test_daemon_verdict_helper_carries_the_daemon_tracker_io_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(ticket_id: str, text: str, **kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr("cw.codex_review_persist._post_review_comment", fake_post)
+    client = ClientConfig(name="acme", workspace_path=tmp_path, default_branch="main")
+    runner = FakeCodexRunner()
+    _post_daemon_verdict_comment(
+        "GEN-9",
+        "findings",
+        client=client,
+        runner=runner,
+        worktree=tmp_path,
+        session_id="bg-9",
+        kind="verdict",
+        reviewed_sha="abc",
+        artifact_path=None,
+    )
+    context = captured["tracker_io"]
+    assert isinstance(context, TrackerIoContext)
+    assert context.runner is runner
+    assert context.client is client
+    assert context.worktree == tmp_path
+    assert captured["client"] == "acme"
+    assert captured["session_id"] == "bg-9"
+    assert {"cwd", "tracker", "artifact_path", "reviewed_sha"} <= captured.keys()

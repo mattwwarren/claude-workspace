@@ -12,22 +12,38 @@ raises; see :func:`_persist_worktree_artifact`.
 from __future__ import annotations
 
 import logging
+import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from cw.atomic import atomic_write_text
 from cw.codex_review import CODEX_REVIEWER_LABEL
-from cw.codex_review_signals import emit_verdict_comment_skipped
+from cw.codex_review_signals import (
+    emit_verdict_comment_posted,
+    emit_verdict_comment_skipped,
+    emit_verdict_comment_unverified,
+)
 from cw.gh import post_issue_comment
 from cw.review_findings import (
     REVIEW_VERDICT_JSON_RELATIVE_PATH,
     render_review_verdict_envelope,
 )
-from cw.tracker import TRACKER_GITHUB_ISSUES
+from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
+from cw.tracker_io import (
+    PublicState,
+    TrackerIoContext,
+    TrackerIoOutcome,
+    TrackerIoReason,
+    post_parts_via_turn,
+)
+from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
     from cw.auto_dev_result import Blocker
     from cw.codex_review_signals import VerdictCommentKind
+    from cw.codex_runner import CodexRunner
+    from cw.models import ClientConfig
     from cw.review_findings import ReviewVerdict
 
 _log = logging.getLogger(__name__)
@@ -197,6 +213,38 @@ def _persist_unparseable_artifact(
     )
 
 
+def _post_daemon_verdict_comment(
+    ticket_id: str,
+    review_text: str,
+    *,
+    client: ClientConfig,
+    runner: CodexRunner,
+    worktree: Path,
+    session_id: str,
+    kind: VerdictCommentKind,
+    reviewed_sha: str | None,
+    artifact_path: Path | None,
+) -> None:
+    """The daemon's verdict-comment post, carrying its tracker-IO context (#3057).
+
+    Builds the :class:`TrackerIoContext` the daemon owns and resolves the
+    client's repo scope and tracker itself, so the review driver passes only
+    its runner and worktree. Behaviour is that of :func:`_post_review_comment`.
+    """
+    _post_review_comment(
+        ticket_id,
+        review_text,
+        client=client.name,
+        session_id=session_id,
+        kind=kind,
+        reviewed_sha=reviewed_sha,
+        cwd=_git_dir(client),
+        tracker=resolve_tracker(client.workspace_path),
+        artifact_path=artifact_path,
+        tracker_io=TrackerIoContext(runner=runner, client=client, worktree=worktree),
+    )
+
+
 def _post_review_comment(
     ticket_id: str,
     review_text: str,
@@ -208,8 +256,9 @@ def _post_review_comment(
     cwd: Path | None = None,
     tracker: str | None = None,
     artifact_path: Path | None = None,
+    tracker_io: TrackerIoContext | None = None,
 ) -> None:
-    """Post codex review findings as a GitHub issue comment (best-effort, logged).
+    """Post codex review findings as a ticket comment (best-effort, logged).
 
     Delegates to the shared ``cw.gh.post_issue_comment`` primitive. A failed
     post is logged at warning (ticket_id, returncode, stderr) rather than
@@ -231,8 +280,31 @@ def _post_review_comment(
     The skip also records ``review.verdict_comment_skipped`` (#3055, RFC 0018
     S3) naming *client* (the client name), *session_id*, *kind* and
     *reviewed_sha*; best-effort, it never raises.
+
+    *tracker_io* (#3057, RFC 0018 A2): on a non-GitHub tracker, when the
+    caller supplies it, the comment is posted through the tracker-IO agent
+    turn (:func:`cw.tracker_io.post_parts_via_turn`) instead of skipped. A
+    verified post logs at info; a refusal records the skipped event with the
+    turn's reason; an unconfirmed post records
+    ``review.verdict_comment_unverified``. Without it the skip is unchanged.
+    The GitHub path never uses it.
     """
     if tracker is not None and tracker != TRACKER_GITHUB_ISSUES:
+        if tracker_io is not None:
+            _post_via_tracker_io(
+                ticket_id,
+                review_text,
+                tracker=tracker,
+                context=tracker_io,
+                identity=_VerdictIdentity(
+                    client=client,
+                    session_id=session_id,
+                    kind=kind,
+                    reviewed_sha=reviewed_sha,
+                    artifact_path=artifact_path,
+                ),
+            )
+            return
         _log.warning(
             "review_comment_skipped ticket=%s tracker=%s: the review verdict"
             " cannot be posted from the daemon (gh is GitHub-only); durable"
@@ -262,3 +334,145 @@ def _post_review_comment(
             result.returncode,
             result.stderr.decode(errors="replace").strip(),
         )
+
+
+# The fault classes the tracker-IO call is guarded against (#3057 R2). The
+# turn converts every operational failure into an outcome itself; this tuple
+# backstops the rest. ``ValueError`` covers ``pydantic.ValidationError``.
+_TURN_FAULTS: tuple[type[Exception], ...] = (
+    OSError,
+    ValueError,
+    RuntimeError,
+    LookupError,
+    TypeError,
+    AttributeError,
+    subprocess.SubprocessError,
+)
+
+
+@dataclass(frozen=True)
+class _VerdictIdentity:
+    """The identity fields every verdict-comment event carries (#3055)."""
+
+    client: str
+    session_id: str
+    kind: VerdictCommentKind
+    reviewed_sha: str | None
+    artifact_path: Path | None
+
+
+def _post_via_tracker_io(
+    ticket_id: str,
+    review_text: str,
+    *,
+    tracker: str,
+    context: TrackerIoContext,
+    identity: _VerdictIdentity,
+) -> None:
+    """Post through the tracker-IO turn and surface its outcome (best-effort).
+
+    Runs after Step 4 persisted the result, so nothing here may raise: an
+    escaping exception would reach ``_run_codex_review_and_complete``'s broad
+    ``except``, which reverts the claimed row and overwrites the persisted
+    result with ``UNEXPECTED_ERROR``. A mismatch is an operator alert, never
+    a row hold (RFC 0018 A2 D1).
+    """
+    try:
+        outcome = post_parts_via_turn(
+            ticket_id,
+            review_text,
+            tracker=tracker,
+            context=context,
+            session_id=identity.session_id,
+        )
+    except _TURN_FAULTS:
+        _log.warning(
+            "tracker_io_turn_failed ticket=%s tracker=%s: durable copy at %s",
+            ticket_id,
+            tracker,
+            identity.artifact_path,
+            exc_info=True,
+        )
+        _surface_turn_outcome(
+            ticket_id,
+            review_text,
+            tracker,
+            TrackerIoOutcome(
+                public_state=PublicState.POSSIBLE,
+                reason=TrackerIoReason.TURN_EXCEPTION,
+                parts_total=0,
+            ),
+            identity,
+        )
+        return
+    _surface_turn_outcome(ticket_id, review_text, tracker, outcome, identity)
+
+
+def _surface_turn_outcome(
+    ticket_id: str,
+    review_text: str,
+    tracker: str,
+    outcome: TrackerIoOutcome,
+    identity: _VerdictIdentity,
+) -> None:
+    """Log a verified post; record the skipped or unverified event otherwise."""
+    if outcome.reason is None:
+        emit_verdict_comment_posted(
+            ticket_id=ticket_id,
+            client=identity.client,
+            tracker=tracker,
+            kind=identity.kind,
+            artifact_path=identity.artifact_path,
+            reviewed_sha=identity.reviewed_sha,
+            session_id=identity.session_id,
+            posted=[
+                {"index": p.index, "comment_id": p.comment_id, "url": p.url}
+                for p in outcome.posted
+            ],
+            content=review_text,
+        )
+        return  # the turn logged the verified post's ids at info
+    if outcome.public_state is PublicState.NONE:
+        _log.warning(
+            "review_comment_skipped ticket=%s tracker=%s reason=%s: durable copy at %s",
+            ticket_id,
+            tracker,
+            outcome.reason.value,
+            identity.artifact_path,
+        )
+        emit_verdict_comment_skipped(
+            ticket_id=ticket_id,
+            client=identity.client,
+            tracker=tracker,
+            kind=identity.kind,
+            artifact_path=identity.artifact_path,
+            reviewed_sha=identity.reviewed_sha,
+            session_id=identity.session_id,
+            reason=outcome.reason.value,
+        )
+        return
+    _log.warning(
+        "review_comment_unverified ticket=%s tracker=%s reason=%s public_state=%s"
+        " ids=%s: check the ticket before any re-run",
+        ticket_id,
+        tracker,
+        outcome.reason.value,
+        outcome.public_state.value,
+        ",".join(p.comment_id for p in outcome.posted),
+    )
+    emit_verdict_comment_unverified(
+        ticket_id=ticket_id,
+        client=identity.client,
+        tracker=tracker,
+        kind=identity.kind,
+        reason=outcome.reason.value,
+        artifact_path=identity.artifact_path,
+        reviewed_sha=identity.reviewed_sha,
+        session_id=identity.session_id,
+        public_state=outcome.public_state.value,
+        posted=[
+            {"index": p.index, "comment_id": p.comment_id, "url": p.url}
+            for p in outcome.posted
+        ],
+        marker_survived=outcome.marker_survived,
+    )

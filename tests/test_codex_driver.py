@@ -203,7 +203,7 @@ def test_run_codex_review_stage_completes_session_via_door_with_fake_runner(
     _seed(tmp_config_dir=tmp_config_dir, worktree=worktree)
     runner = FakeCodexRunner(returncode=0, output_file_content=_reviewer_doc())
 
-    with patch("cw.codex_background._post_review_comment") as post_mock:
+    with patch("cw.codex_background._post_daemon_verdict_comment") as post_mock:
         _run_stage(runner)
 
     result = _persisted_result()
@@ -244,7 +244,7 @@ def test_run_codex_review_stage_must_fix_runs_fix_loop_to_cap_and_parks(
 
     with (
         patch("cw.codex_driver.get_client", return_value=client),
-        patch("cw.codex_background._post_review_comment") as post_mock,
+        patch("cw.codex_background._post_daemon_verdict_comment") as post_mock,
     ):
         _run_stage(runner)
 
@@ -283,7 +283,7 @@ def test_run_codex_review_stage_lane_false_over_global_true_never_builds_fix_arg
 
     with (
         patch("cw.codex_driver.get_client", return_value=client),
-        patch("cw.codex_background._post_review_comment") as post_mock,
+        patch("cw.codex_background._post_daemon_verdict_comment") as post_mock,
         patch(
             "cw.codex_fix_loop.commit._build_fix_codex_argv",
             wraps=_build_fix_codex_argv,
@@ -334,7 +334,7 @@ def test_run_codex_review_stage_fix_loop_resolution_matrix(
 
     with (
         patch("cw.codex_driver.get_client", return_value=client),
-        patch("cw.codex_background._post_review_comment"),
+        patch("cw.codex_background._post_daemon_verdict_comment"),
         patch(
             "cw.codex_fix_loop.commit._build_fix_codex_argv",
             wraps=_build_fix_codex_argv,
@@ -367,7 +367,7 @@ def test_run_codex_review_stage_clean_with_fix_loop_enabled_states_available(
 
     with (
         patch("cw.codex_driver.get_client", return_value=client),
-        patch("cw.codex_background._post_review_comment") as post_mock,
+        patch("cw.codex_background._post_daemon_verdict_comment") as post_mock,
     ):
         _run_stage(runner)
 
@@ -385,7 +385,7 @@ def test_run_codex_review_stage_all_roles_unparseable_parks_with_artifact(
     _seed(tmp_config_dir=tmp_config_dir, worktree=worktree)
     runner = FakeCodexRunner(returncode=0, output_file_content="not json{{")
 
-    with patch("cw.codex_background._post_review_comment") as post_mock:
+    with patch("cw.codex_background._post_daemon_verdict_comment") as post_mock:
         _run_stage(runner)
 
     result = _persisted_result()
@@ -417,7 +417,7 @@ def test_run_codex_review_stage_should_fix_only_stays_complete(
     )
     runner = FakeCodexRunner(returncode=0, output_file_content=doc)
 
-    with patch("cw.codex_background._post_review_comment"):
+    with patch("cw.codex_background._post_daemon_verdict_comment"):
         _run_stage(runner)
 
     result = _persisted_result()
@@ -470,7 +470,7 @@ def test_run_codex_review_stage_threads_reasoning_effort_from_resolved_executor_
     with (
         patch("cw.codex_driver.get_client", return_value=client),
         patch("cw.codex_background.run_review_with_fix_loop", _spy_run_review),
-        patch("cw.codex_background._post_review_comment"),
+        patch("cw.codex_background._post_daemon_verdict_comment"),
     ):
         _run_stage(FakeCodexRunner(returncode=0))
 
@@ -521,7 +521,7 @@ def test_run_codex_review_stage_threads_sandbox_modes_from_resolved_executor_con
     with (
         patch("cw.codex_driver.get_client", return_value=client),
         patch("cw.codex_background.run_review_with_fix_loop", _spy_run_review),
-        patch("cw.codex_background._post_review_comment"),
+        patch("cw.codex_background._post_daemon_verdict_comment"),
     ):
         _run_stage(FakeCodexRunner(returncode=0))
 

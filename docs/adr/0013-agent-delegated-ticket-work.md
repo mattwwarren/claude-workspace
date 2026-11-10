@@ -128,6 +128,14 @@ superseded by the rescope this ADR records.
   allowlist is now the package prefix `cw/gh/`, not the flat `cw/gh.py`. New
   submodules under `cw/gh/` are in-allowlist by design, so a new submodule
   needs no new ADR; a new direct-`gh` caller outside the package still does.
+- **Update (2026-11-10): #3057 (RFC 0018 A2, D-1) added the tracker-IO
+  turn.** A cw-launched agent turn (`codex exec`) whose only callable tools
+  are the tracker's comment create and list tools, by an explicit MCP
+  allowlist, is agent work under this ADR: the agent does the tracker I/O
+  through its own MCP tools. cw Python still never talks to a non-GitHub
+  tracker API; it builds the argv, hands over the parts and verifies the
+  agent's self-attested report (`src/cw/tracker_io/`). Not a new allowlist
+  entry and not a new ADR.
 
 ## Alternatives considered
 

@@ -11,6 +11,7 @@ import cw.backend_mcp_config as bmc
 from cw.backend_mcp_config import (
     McpConfigReading,
     McpState,
+    declared_server_names,
     read_backend_mcp,
     user_layer_path,
 )
@@ -349,3 +350,43 @@ class TestLayerProbe:
 
         assert reading.state is McpState.UNKNOWN
         assert str(layer) in reading.reason
+
+
+class TestDeclaredServerNames:
+    """#3057: the user-layer codex server names the tracker-IO turn disables."""
+
+    @pytest.mark.parametrize(
+        ("state", "expected"),
+        [
+            ("enabled", ("linear",)),
+            ("absent", ()),
+            ("disabled", ("linear",)),
+            ("missing", None),
+            ("malformed", None),
+            ("non_dict", None),
+        ],
+    )
+    def test_codex_states(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        state: McpStage,
+        expected: tuple[str, ...] | None,
+    ) -> None:
+        stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, state)
+        assert declared_server_names(CODEX_BACKEND) == expected
+
+    def test_keeps_declaration_order(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        path = stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, "enabled")
+        path.write_text(
+            path.read_text(encoding="utf-8")
+            + '\n[mcp_servers.github]\ncommand = "x"\n',
+            encoding="utf-8",
+        )
+        assert declared_server_names(CODEX_BACKEND) == ("linear", "github")
+
+    @pytest.mark.parametrize("backend", [OPENCODE_BACKEND, "aider"])
+    def test_other_backends_are_unknown(self, backend: str) -> None:
+        assert declared_server_names(backend) is None
