@@ -1230,6 +1230,20 @@ class TestGateTimeoutConfigOverride:
         assert out["source"] == "project-config"
         assert out["clamped"] is False
 
+    def test_live_repo_config_with_autofix_block_keeps_pre_commit_ceiling(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = _REPO_ROOT / ".claude" / "project-config.yaml"
+        assert "autofix:" in config.read_text(encoding="utf-8")
+
+        with_yaml = _mod.resolve_gate_timeout("pre-commit-run-2", config_path=config)
+        monkeypatch.setattr(_mod, "yaml", None)
+        scanned = _mod.resolve_gate_timeout("pre-commit-run-2", config_path=config)
+
+        assert with_yaml["foreground_ceiling_s"] == _BASH_CAP_S
+        assert scanned["foreground_ceiling_s"] == _BASH_CAP_S
+        assert scanned["source"] == "project-config"
+
     def test_config_reference_documents_timeouts_key(self) -> None:
         text = _CONFIG_REFERENCE.read_text(encoding="utf-8")
         assert "quality_gates.timeouts" in text
