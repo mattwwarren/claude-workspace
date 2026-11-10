@@ -298,41 +298,38 @@ def _analyse(
 
 
 def _merge_in_progress(worktree: Path, timeout: float) -> bool:
-    argv = ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]
-    try:
-        return git_bounded(worktree, argv, timeout).returncode == 0
-    except GitFailedError:
-        return True
-
-
-def _existing_merge(worktree: Path, timeout: float) -> bool:
-    """Check for a pre-existing merge without treating probe errors as absence."""
+    """Return whether a merge is in progress; raise if the probe failed."""
     argv = ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]
     result = git_bounded(worktree, argv, timeout)
     if result.returncode == 0:
         return True
-    if result.returncode in {_NOT_ANCESTOR_RC, _MISSING_BLOB_RC}:
+    if result.returncode == _NOT_ANCESTOR_RC:
         return False
     raise GitFailedError(_failure_detail("rev-parse", result))
 
 
 def _abort(worktree: Path, move: _Move, detail: str, timeout: float) -> ChangelogSync:
     """Abort any merge this call started; the answer is ``unavailable``."""
-    if _merge_in_progress(worktree, timeout):
-        try:
-            _checked(worktree, ["merge", "--abort"], timeout)
-        except GitFailedError as exc:
-            detail = (
-                f"{detail}; git merge --abort failed ({exc}): the worktree is"
-                " mid-merge, run `git merge --abort` by hand"
-            )
+    try:
+        merge_in_progress = _merge_in_progress(worktree, timeout)
+    except GitFailedError as exc:
+        detail = f"{detail}; could not determine merge state ({exc})"
+    else:
+        if merge_in_progress:
+            try:
+                _checked(worktree, ["merge", "--abort"], timeout)
+            except GitFailedError as exc:
+                detail = (
+                    f"{detail}; git merge --abort failed ({exc}): the worktree is"
+                    " mid-merge, run `git merge --abort` by hand"
+                )
     return _answer("unavailable", move.base_sha, move.head_sha, detail=detail)
 
 
 def _apply(worktree: Path, move: _Move, timeout: float) -> ChangelogSync:
     """Steps 6-7: dirty check, merge, write, commit; abort on any failure."""
     try:
-        existing_merge = _existing_merge(worktree, timeout)
+        existing_merge = _merge_in_progress(worktree, timeout)
     except GitFailedError as exc:
         return _answer("unavailable", move.base_sha, move.head_sha, detail=str(exc))
     if existing_merge:
