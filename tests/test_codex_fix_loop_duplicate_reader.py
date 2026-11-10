@@ -353,6 +353,15 @@ class TestCheckDuplicateReader:
         finding = _finding(summary="duplicates `read_roster_snapshot`")
         assert _check_duplicate_reader(repo, [finding]) is None
 
+    def test_finding_naming_freshly_added_non_reader_def_returns_none(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _duplicate_reader_repo(make_git_repo)
+        _write(repo / "src" / "hold.py", _helper_body("read_roster_snapshot"))
+        _write(repo / "src" / "builder.py", _helper_body("build_roster"))
+        finding = _finding(summary="duplicates `build_roster`")
+        assert _check_duplicate_reader(repo, [finding]) is None
+
     def test_async_existing_function_resolves(
         self, make_git_repo: Callable[..., Path]
     ) -> None:

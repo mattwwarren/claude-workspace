@@ -100,15 +100,15 @@ def is_reader_name(name: str) -> bool:
     return any(token.startswith(stem) for token in tokens for stem in _READER_STEMS)
 
 
-def added_defs(
+def new_top_level_defs(
     file_diffs: dict[str, str], added: dict[str, dict[int, str]]
 ) -> list[AddedDef]:
-    """The reader-like top-level defs the diff adds to non-test source.
+    """Every top-level def the diff adds to non-test source, reader-named or not.
 
     A name that also appears as a removed ``def`` anywhere in the diff is
-    dropped: an in-place edit or a cross-file move is not a new helper. Counting
-    by name, not by position, so an edit earlier in a file never shifts which
-    added def survives.
+    dropped: an in-place edit or a cross-file move is not a new function.
+    Counting by name, not by position, so an edit earlier in a file never shifts
+    which added def survives.
     """
     removed_names = {
         m.group(1)
@@ -123,11 +123,16 @@ def added_defs(
             continue
         for number, text in sorted(lines.items()):
             m = _DEF.match(text)
-            if m is None or m.group(1) in removed_names:
-                continue
-            if is_reader_name(m.group(1)):
+            if m is not None and m.group(1) not in removed_names:
                 found.append(AddedDef(m.group(1), path, number, text))
     return found
+
+
+def added_defs(
+    file_diffs: dict[str, str], added: dict[str, dict[int, str]]
+) -> list[AddedDef]:
+    """The reader-like top-level defs the diff adds to non-test source."""
+    return [d for d in new_top_level_defs(file_diffs, added) if is_reader_name(d.name)]
 
 
 def _identifier(token: str) -> str | None:
@@ -322,7 +327,9 @@ def check_duplicate_reader(
     pairs = _pairs(open_findings, helpers)
     if not pairs:
         return None
-    exclude = frozenset((h.path, h.line) for h in helpers)
+    # Every def this diff adds is excluded, not only the reader-named ones: a
+    # finding naming a freshly added `build_roster` names no *existing* function.
+    exclude = frozenset((d.path, d.line) for d in new_top_level_defs(file_diffs, added))
     names = list(dict.fromkeys(n for pair in pairs for n in pair.names))
     existing = resolve_existing(worktree, names, exclude)
     for pair in pairs:
