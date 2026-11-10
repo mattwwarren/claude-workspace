@@ -482,3 +482,86 @@ def test_moved_builders_are_imported_from_the_cut_helpers_only() -> None:
     for name in _MOVED:
         assert hasattr(_changelog_cut_helpers, name), name
     assert CL_BASE.startswith("# Changelog")
+
+
+def _git_bounded_failing(
+    monkeypatch: pytest.MonkeyPatch, fails: Callable[[list[str]], bool]
+) -> None:
+    """Make ``changelog_sync.git_bounded`` exit 128 for argv *fails* matches."""
+    real = changelog_sync.git_bounded
+
+    def _fake(
+        worktree: Path, argv: list[str], timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        if fails(argv):
+            return subprocess.CompletedProcess(argv, 128, "", "fatal: injected\n")
+        return real(worktree, argv, timeout)
+
+    monkeypatch.setattr(changelog_sync, "git_bounded", _fake)
+
+
+def test_an_unreadable_head_is_unavailable(
+    straddle: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _git_bounded_failing(
+        monkeypatch, lambda argv: argv == ["rev-parse", "--verify", "HEAD"]
+    )
+
+    result = sync_changelog(straddle.clone, "main")
+
+    assert (result.state, result.head_sha) == ("unavailable", None)
+    assert result.base_sha == straddle.main_sha
+    assert result.detail == "HEAD does not resolve"
+
+
+def test_a_failed_status_is_unavailable(
+    straddle: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _git_bounded_failing(monkeypatch, lambda argv: argv[0] == "status")
+    before = _state(straddle.clone)
+
+    result = sync_changelog(straddle.clone, "main")
+
+    assert result.state == "unavailable"
+    assert "git status exited 128" in result.detail
+    assert _state(straddle.clone) == before
+
+
+def test_a_blob_read_oserror_is_unavailable(
+    straddle: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _oserror(*_a: object, **_k: object) -> subprocess.CompletedProcess[bytes]:
+        msg = "no git"
+        raise OSError(msg)
+
+    monkeypatch.setattr(changelog_sync, "run_git", _oserror)
+
+    result = sync_changelog(straddle.clone, "main")
+
+    assert result.state == "unavailable"
+    assert "could not run: no git" in result.detail
+
+
+def test_an_unreadable_merge_state_still_aborts(
+    straddle: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = changelog_sync.git_bounded
+
+    def _fake(
+        worktree: Path, argv: list[str], timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        if argv[0] == "commit":
+            return subprocess.CompletedProcess(argv, 1, "", "hook said no\n")
+        if argv[-1] == "MERGE_HEAD":
+            msg = "git rev-parse timed out after 10s"
+            raise GitFailedError(msg)
+        return real(worktree, argv, timeout)
+
+    monkeypatch.setattr(changelog_sync, "git_bounded", _fake)
+    before = _state(straddle.clone)
+
+    result = sync_changelog(straddle.clone, "main")
+
+    assert result.state == "unavailable"
+    assert not _merge_head(straddle.clone)
+    assert _state(straddle.clone) == before
