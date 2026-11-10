@@ -1110,13 +1110,14 @@ class TestRosterSnapshotTick:
 
         assert report.phantom_session_ids == ["s1"]
 
-    @pytest.mark.parametrize("fresh", [True, False], ids=["fresh", "stale"])
+    @pytest.mark.parametrize("kind", ["fresh", "stale", "missing"])
     def test_concierge_does_not_act_on_an_unavailable_snapshot(
-        self, monkeypatch: pytest.MonkeyPatch, fresh: bool
+        self, monkeypatch: pytest.MonkeyPatch, kind: str
     ) -> None:
         """M2: concierge's ``_is_session_dead`` reads an absent ref as dead
-        with no live-status gate, so a stale snapshot must not reach it even
-        on an idle fleet. The fresh case proves the setup reaches it."""
+        with no live-status gate, so a stale or missing snapshot must not
+        reach it even on an idle fleet. The fresh case proves the setup
+        reaches it."""
         save_state(
             CwState(
                 sessions=[_mk_session("done", "r1", status=SessionStatus.COMPLETED)]
@@ -1135,15 +1136,80 @@ class TestRosterSnapshotTick:
         )
         concierge = MagicMock(return_value=None)
         monkeypatch.setattr(locked_sweeps, "run_concierge_recoveries", concierge)
-        snap = (
-            fresh_roster_snapshot(_DECOY_ROSTER)
-            if fresh
-            else aged_roster_snapshot(_DECOY_ROSTER, age_seconds=30.0)
+        snapshots: dict[str, RosterSnapshot | None] = {
+            "fresh": fresh_roster_snapshot(_DECOY_ROSTER),
+            "stale": aged_roster_snapshot(_DECOY_ROSTER, age_seconds=30.0),
+            "missing": None,
+        }
+
+        _run_locked(snapshots[kind])
+
+        assert concierge.called is (kind == "fresh")
+
+    @pytest.mark.parametrize(
+        ("resumed_after_capture", "requeued"),
+        [(True, False), (False, True)],
+        ids=["resumed-after-capture", "resumed-long-before-capture"],
+    )
+    def test_concierge_spares_a_session_resumed_after_the_capture(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        resumed_after_capture: bool,
+        requeued: bool,
+    ) -> None:
+        """M1 for the concierge: a resume rewrites ``surface_ref`` without
+        moving ``started_at``, so a ref absent from a fresh non-empty
+        snapshot is not proof of death when the resume postdates the capture.
+        Recipe 1 must not requeue the parked row; the long-before control
+        proves the setup reaches the requeue."""
+        for module in ("false_park", "park_marker_poison"):
+            monkeypatch.setattr(
+                f"cw.reconcile.concierge.{module}._transcript_age_seconds",
+                lambda *_a, **_k: None,
+            )
+        monkeypatch.setattr(
+            "cw.reconcile.core.load_orchestrator_config",
+            lambda: OrchestratorConfig(concierge_enabled=True),
+        )
+        snap = fresh_roster_snapshot(_DECOY_ROSTER)
+        assert snap.captured_at is not None
+        resumed_at = snap.captured_at + (
+            timedelta(seconds=1)
+            if resumed_after_capture
+            else -timedelta(seconds=ROSTER_REGISTRATION_SLACK_SECONDS + 600)
+        )
+        save_state(
+            CwState(
+                sessions=[
+                    _make_daemon_session(
+                        id="s1",
+                        name="client-a/auto-dev/GEN-1",
+                        client="client-a",
+                        surface_ref="missing-ref",
+                        worktree_path=None,
+                        resumed_at=resumed_at,
+                    )
+                ]
+            )
+        )
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id="GEN-1",
+                        client="client-a",
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        disposition="stalled_retry_cap_parked",
+                        attempts=1,
+                    )
+                ]
+            )
         )
 
         _run_locked(snap)
 
-        assert concierge.called is fresh
+        [task] = load_dev_queue().tasks
+        assert (task.status is QueueItemStatus.PENDING) is requeued
 
 
 class TestFixDispatchRunsPostLock:

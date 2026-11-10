@@ -417,8 +417,8 @@ def _reconcile_locked(
     unchanged outage guard. A stale or missing snapshot (``None`` is missing)
     returns right after the roster-independent pre-guard sweeps, so no
     roster-dependent sweep runs on a fabricated empty roster. Its capture
-    time is passed to ``compute_drift``, which spares a session spawned or
-    resumed too recently for the capture to list it.
+    time is passed to ``compute_drift`` and the concierge recipes, which spare
+    a session spawned or resumed too recently for the capture to list it.
 
     Since the process-kill-timeout removal, no sweep in here dispositions a
     session off elapsed time or transcript quietness: the foreign-result and
@@ -467,6 +467,10 @@ def _reconcile_locked(
         drift_probes=drift_probes,
     )
 
+    roster_captured_at = (
+        roster_snapshot.captured_at if roster_snapshot is not None else None
+    )
+
     # A stale or missing snapshot skips every roster-dependent sweep (M2); a
     # failed read keeps the outage heuristic with daemon_errored=True.
     if (unavailable is not None and unavailable.skips_tick) or (
@@ -490,12 +494,7 @@ def _reconcile_locked(
     )
 
     drift = compute_drift(
-        state,
-        native_live,
-        now=now,
-        roster_captured_at=(
-            roster_snapshot.captured_at if roster_snapshot is not None else None
-        ),
+        state, native_live, now=now, roster_captured_at=roster_captured_at
     )
     phantom_session_ids = _without_acts_in_flight(drift.phantom_session_ids)
     if not phantom_session_ids:
@@ -516,6 +515,7 @@ def _reconcile_locked(
                 dirty_checks=dirty_checks,
                 cancelled_probes=cancelled_probes,
                 scope_probes=scope_probes,
+                roster_captured_at=roster_captured_at,
             )
         )
         all_reverted = list(
@@ -578,6 +578,7 @@ def _reconcile_locked(
             dirty_checks=dirty_checks,
             cancelled_probes=cancelled_probes,
             scope_probes=scope_probes,
+            roster_captured_at=roster_captured_at,
         )
     )
     all_reverted = list(

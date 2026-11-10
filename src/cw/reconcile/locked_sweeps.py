@@ -273,6 +273,7 @@ def _run_terminal_backstops_and_sweeps(
     dirty_checks: DirtyChecks | None = None,
     cancelled_probes: CancelledRowProbes | None = None,
     scope_probes: ScopeProbes | None = None,
+    roster_captured_at: datetime | None = None,
 ) -> tuple[list[str], list[str]]:
     """Run the post-detect TicketTask backstops + RFC 0008 capstone sweeps.
 
@@ -296,7 +297,10 @@ def _run_terminal_backstops_and_sweeps(
     COMPLETED backstops read each worktree dirty check from *dirty_checks*,
     captured before the lock too (#2548); a session with no usable capture
     defers a tick. Concierge recipe 3 reads *cancelled_probes* (#2546), and
-    recipe 2's salvage *scope_probes* (#2641).
+    recipe 2's salvage *scope_probes* (#2641). Concierge recipes 1 and 2 also
+    take *roster_captured_at*, the capture time of the lockless roster
+    *native_live* came from (#2550): a session spawned or resumed too recently
+    for that capture to list it is not called dead.
     Extracted to one call site (instead of duplicating 4 lines in each
     branch) to keep ``_reconcile_locked``'s statement count under the
     PLR0915 limit.
@@ -329,6 +333,7 @@ def _run_terminal_backstops_and_sweeps(
         config=config,
         cancelled_probes=cancelled_probes,
         scope_probes=scope_probes,
+        roster_captured_at=roster_captured_at,
     )
     # #2307: re-evaluate codex-orphan parks the boot pass left with an ACTIVE
     # session (live or unprovable writer). Unconditional, like the boot pass,

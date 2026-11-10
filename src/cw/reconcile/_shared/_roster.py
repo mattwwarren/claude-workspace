@@ -78,6 +78,18 @@ def _claude_agents_json() -> list[dict[str, object]]:
     return data if isinstance(data, list) else []
 
 
+def roster_registration_cutoff(roster_captured_at: datetime | None) -> datetime | None:
+    """The birth time at or after which a ref may postdate the capture (M1).
+
+    ``None`` (no capture time known) means no session is spared. Shared by
+    :func:`compute_drift` and the concierge recipes' death test, so the two
+    cannot drift apart on the slack.
+    """
+    if roster_captured_at is None:
+        return None
+    return roster_captured_at - timedelta(seconds=ROSTER_REGISTRATION_SLACK_SECONDS)
+
+
 def _may_postdate_roster(session: Session, registration_cutoff: datetime) -> bool:
     """True when *session*'s ref may be newer than the roster capture (M1).
 
@@ -119,11 +131,7 @@ def compute_drift(
     that guard lives in :func:`reconcile`.
     """
     cutoff = (now or datetime.now(UTC)) - timedelta(seconds=SPAWN_GRACE_SECONDS)
-    registration_cutoff = (
-        None
-        if roster_captured_at is None
-        else roster_captured_at - timedelta(seconds=ROSTER_REGISTRATION_SLACK_SECONDS)
-    )
+    registration_cutoff = roster_registration_cutoff(roster_captured_at)
     phantoms: list[str] = []
     for session in state.sessions:
         if session.status not in _LIVE_STATUSES:
