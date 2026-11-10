@@ -38,6 +38,7 @@ from cw.watchdog import (
     systemd_timer_path,
     uninstall,
 )
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests.conftest import _make_daemon_session, _make_ticket_task
 
 if TYPE_CHECKING:
@@ -231,12 +232,7 @@ def dispatching_config(
     records exactly one (see ``test_a_proceeding_tick_records_one_dispatch_tick``).
     """
     workspace = make_git_repo("workspace/acme")
-    clients_path = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-    clients_path.parent.mkdir(parents=True, exist_ok=True)
-    clients_path.write_text(
-        f"clients:\n  acme:\n    workspace_path: {workspace}\n"
-        "    default_branch: main\n"
-    )
+    write_clients_yaml(ClientSpec("acme", workspace, default_branch="main"))
     return OrchestratorConfig(per_client_max_parallel={"acme": 1})
 
 
