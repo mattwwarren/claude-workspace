@@ -45,9 +45,14 @@ _LAST_EVALUATED_LINE = re.compile(
     r"<!-- plan-stage-last-evaluated: "
     r"operator_comment=[^|\n]+\|body_sha=(?P<body_sha>[0-9a-f]{64}) -->\n?"
 )
+# Round-qualified item ids (#2626): bare `A<n>`/`P<n>` is round 1; `R<k>.` is
+# written only for park ordinals k >= 2, so `R1.`, `R0.` and `R02.` are not
+# bookkeeping.
+_SETTLED_ROUND_PREFIX = r"(?:R(?:[2-9]|[1-9][0-9]+)\.)?"
 _SETTLED_LINE = re.compile(
     r"<!-- plan-stage-settled: "
-    r"(?:A[0-9]+: (?:ADOPTED|ALT-[a-z])|"
+    + _SETTLED_ROUND_PREFIX
+    + r"(?:A[0-9]+: (?:ADOPTED|ALT-[a-z])|"
     r"P[0-9]+: (?:CONFIRMED|REFUTED|DEFERRED)) -->\n?"
 )
 _RESOLUTIONS_ATTEMPTED_LINE = re.compile(
@@ -81,12 +86,12 @@ def compute_plan_draft_fingerprint(text: str) -> str:
     """Apply the named *Plan-draft fingerprint rule* to draft *text* (#2102).
 
     Strips the leading bookkeeping block -- the round-counter line, the
-    ``plan-stage-last-evaluated`` line, every ``plan-stage-settled`` marker,
-    and the ``resolutions-attempted`` / ``approval-revoked`` /
-    ``resolutions-applied`` lines -- and hashes what remains with SHA-256,
-    rendered as full lowercase hex. The bookkeeping grammar is a *leading*
-    block: without the round-counter line nothing is stripped, and any of
-    these markers appearing later in the body is content.
+    ``plan-stage-last-evaluated`` line, every ``plan-stage-settled`` marker
+    (bare or round-qualified, #2626), and the ``resolutions-attempted`` /
+    ``approval-revoked`` / ``resolutions-applied`` lines -- and hashes what
+    remains with SHA-256, rendered as full lowercase hex. The bookkeeping
+    grammar is a *leading* block: without the round-counter line nothing is
+    stripped, and any of these markers appearing later in the body is content.
     """
     round_match = _ROUND_LINE.match(text)
     if round_match is None:
