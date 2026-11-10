@@ -12,6 +12,7 @@ Hermetic: no ``gh``, no ``git``, no ``claude``; writes only to ``tmp_path``.
 from __future__ import annotations
 
 import copy
+import functools
 import importlib.resources
 import re
 from typing import TYPE_CHECKING, Any, get_args
@@ -963,6 +964,12 @@ _KNOWN_MID_PARAGRAPH_SITES = (
 )
 
 
+@functools.cache
+def _manifest() -> Manifest:
+    """The packaged manifest, parsed once per session (it is frozen)."""
+    return load_manifest()
+
+
 def _raw_docs() -> dict[str, str]:
     return {doc: _cmd(doc, raw=True) for doc in DOC_SCOPES}
 
@@ -979,7 +986,7 @@ def _prompt_for_stage(tmp_path: Path) -> Callable[[str], str]:
 
 
 def _real_cell(element_id: str, backend: str) -> BackendDisposition:
-    cell = load_manifest().elements[element_id].cells[backend]
+    cell = _manifest().elements[element_id].cells[backend]
     assert not isinstance(cell, str), f"{element_id}/{backend} is TODO"
     return cell
 
@@ -1034,7 +1041,7 @@ def test_contract_is_clean(tmp_path: Path) -> None:
 def test_manifest_has_no_todo_cells() -> None:
     todo = [
         f"{element_id}/{backend}"
-        for element_id, element in load_manifest().elements.items()
+        for element_id, element in _manifest().elements.items()
         for backend, cell in element.cells.items()
         if cell == TODO_CELL
     ]
@@ -1049,7 +1056,7 @@ def test_doc_set_is_the_thirteen_in_scope_docs() -> None:
 
 def test_backend_set_pinned_to_constants() -> None:
     expected = {CLAUDE_NATIVE_BACKEND, CODEX_BACKEND, OPENCODE_BACKEND, LOCAL_BACKEND}
-    manifest = load_manifest()
+    manifest = _manifest()
     assert set(manifest.backends) == expected
     assert len(manifest.backends) == len(expected)
     assert NATIVE_BACKEND == CLAUDE_NATIVE_BACKEND
@@ -1058,7 +1065,7 @@ def test_backend_set_pinned_to_constants() -> None:
 
 
 def test_every_status_and_blocker_reason_is_covered() -> None:
-    covered = {c for e in load_manifest().elements.values() for c in e.covers}
+    covered = {c for e in _manifest().elements.values() for c in e.covers}
     missing = (set(get_args(Status)) | set(KNOWN_BLOCKER_REASONS)) - covered
     assert not missing, (
         f"tag every new contract rule: add a tagged element and list it in "
@@ -1112,7 +1119,7 @@ def test_named_gap_dispositions(
 
 
 def test_local_ticket_citations_follow_the_stage_split() -> None:
-    for element_id, element in load_manifest().elements.items():
+    for element_id, element in _manifest().elements.items():
         cell = element.cells[LOCAL_BACKEND]
         assert not isinstance(cell, str)
         stage = _scope_stage(element_id, LOCAL_BACKEND)
@@ -1127,7 +1134,7 @@ def test_local_ticket_citations_follow_the_stage_split() -> None:
 
 def test_codex_cells_follow_the_stage_ticket_map() -> None:
     used: set[int] = set()
-    for element_id, element in load_manifest().elements.items():
+    for element_id, element in _manifest().elements.items():
         if element_id in _RFC_0017_MEMBERS:
             continue
         cell = element.cells[CODEX_BACKEND]
@@ -1146,7 +1153,7 @@ def test_codex_cells_follow_the_stage_ticket_map() -> None:
 
 
 def test_orch_governs_table_is_complete() -> None:
-    orch_ids = {i for i in load_manifest().elements if i.startswith("orch.")}
+    orch_ids = {i for i in _manifest().elements if i.startswith("orch.")}
     assert set(_ORCH_GOVERNS) <= orch_ids
     assert set(_ORCH_GOVERNS.values()) <= set(_STAGES)
 
@@ -1186,7 +1193,7 @@ def test_opencode_clean_review_cells_track_clean_review_body() -> None:
 @pytest.mark.parametrize(("gap", "element_id"), sorted(_GAP_SEED_FLOOR.items()))
 def test_gap_seed_floor_has_a_deliberate_cell(gap: str, element_id: str) -> None:
     for backend in (OPENCODE_BACKEND, CODEX_BACKEND):
-        cell = load_manifest().elements[element_id].cells[backend]
+        cell = _manifest().elements[element_id].cells[backend]
         assert cell != TODO_CELL, f"{gap}: {element_id}/{backend}"
 
 
