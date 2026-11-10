@@ -22,6 +22,7 @@ from cw.codex_review import _const as codex_const
 from cw.config import load_state, state_file
 from cw.dev_queue import load_dev_queue
 from cw.dev_queue.dispositions import (
+    _PRE_DISPATCH_TRACKER_MCP_REASON,
     ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
     ADOPTED_HEAD_DRIFT_DISPOSITION,
     FINALIZE_GATE_HELD_DISPOSITION,
@@ -29,6 +30,7 @@ from cw.dev_queue.dispositions import (
     REVIEW_APPROVAL_GATE_DISPOSITION,
     REVIEW_ENGINE_MODIFIED_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
+    TRACKER_MCP_GATE_DISPOSITION,
 )
 from cw.dev_queue.next_commands import (
     HUMAN_GATE_LABEL,
@@ -112,6 +114,9 @@ _GATED: list[tuple[str, str | None]] = [
     (REVIEW_APPROVAL_GATE_DISPOSITION, None),
     # RFC 0017 I1 (#3039): an engine-path edit waits on `cw review engine allow`.
     (REVIEW_ENGINE_MODIFIED_DISPOSITION, None),
+    # #3055: the pre-dispatch tracker-MCP gate park waits on a config fix
+    # and an explicit `cw dev-queue requeue`.
+    (TRACKER_MCP_GATE_DISPOSITION, None),
     ("blocked", codex_const.CODEX_FIX_SCOPE_DRIFT),
     ("blocked", codex_const.CODEX_FIX_GROWTH_BUDGET),
 ]
@@ -771,3 +776,29 @@ def test_review_engine_modified_is_an_operator_gated_park(
     assert REVIEW_ENGINE_MODIFIED_DISPOSITION not in _HUMAN_GATED_PARK_DISPOSITIONS
     assert _is_operator_gated_park(_row(REVIEW_ENGINE_MODIFIED_DISPOSITION, None))
     assert len(_detect([_row(REVIEW_ENGINE_MODIFIED_DISPOSITION, None)])) == 1
+
+
+def test_tracker_mcp_gate_is_an_operator_gated_park(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3055 (R4): the realistic gate park is reported, never reverted by --reap."""
+    assert TRACKER_MCP_GATE_DISPOSITION in _OPERATOR_GATED_PARK_DISPOSITIONS
+    assert TRACKER_MCP_GATE_DISPOSITION not in _HUMAN_GATED_PARK_DISPOSITIONS
+    task = _row(TRACKER_MCP_GATE_DISPOSITION, _PRE_DISPATCH_TRACKER_MCP_REASON)
+    assert _is_operator_gated_park(task)
+    assert len(_detect([task])) == 1
+    stub_daemon_roster(tmp_path, monkeypatch)
+    seed_queue([task])
+    before = _row_state()
+
+    report = run_doctor(reap=True)
+
+    assert _row_state() == before
+    assert len(_advisory(report.wedge_findings)) == 1
+
+
+def test_doctor_help_lists_the_tracker_mcp_gate_park() -> None:
+    result = CliRunner().invoke(main, ["doctor", "--help"])
+
+    assert result.exit_code == 0
+    assert "tracker_mcp_gate" in result.output
