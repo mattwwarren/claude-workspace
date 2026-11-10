@@ -1244,7 +1244,7 @@ def test_detect_forwards_warned_blocks_to_the_parse(
 ) -> None:
     """#1394: the caller's dedup set reaches the in-lock re-parse by identity.
 
-    Omitting it delivers ``None`` (un-deduplicated), the pre-#1394 behaviour.
+    ``None`` (the default) delivers ``None`` (un-deduplicated), the pre-#1394 behaviour.
     """
     seen: list[object] = []
     result = _shipped_result()
@@ -1260,7 +1260,6 @@ def test_detect_forwards_warned_blocks_to_the_parse(
 
     monkeypatch.setattr(idle_detect, "_parse_any_sentinel_from_transcript", _parse)
     warned: set[str] = set()
-    extra: dict[str, set[str]] = {"warned_blocks": warned} if pass_set else {}
 
     candidates = _detect_idle_candidates(
         _state(tmp_path),
@@ -1268,7 +1267,7 @@ def test_detect_forwards_warned_blocks_to_the_parse(
         native_live={"fake-short-id"},
         config=OrchestratorConfig(),
         task_by_ticket={},
-        **extra,
+        warned_blocks=warned if pass_set else None,
     )
 
     assert len(candidates) == 1

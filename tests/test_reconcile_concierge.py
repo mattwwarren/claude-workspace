@@ -1074,6 +1074,58 @@ class TestRecipeParkMarkerPoisonClear:
         assert len(seen) == 1
         assert seen[0] is store
 
+    @pytest.mark.parametrize("pass_set", [True, False])
+    def test_warned_blocks_reach_the_pre_close_salvage(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        pass_set: bool,
+    ) -> None:
+        """#1394: run_concierge_recoveries -> poison act -> close -> salvage.
+
+        The caller's dedup set arrives by identity; with ``None`` (the
+        default) the salvage sees ``None`` (un-deduplicated).
+        """
+        self._stale_45m(monkeypatch)
+        task = _make_task(disposition=None, attempts=1, session_id="sess-1")
+        session = _make_session(
+            last_result={"paused_status": "silently_idle"},
+            consecutive_salvage_skips=1,
+            surface_ref="surf-dead",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[session]))
+        seen: list[object] = []
+
+        def _salvage(
+            _session: Session,
+            *,
+            scope_probes: object = None,
+            warned_blocks: object = "unset",
+        ) -> tuple[AutoDevResult, str]:
+            seen.append(warned_blocks)
+            return (
+                AutoDevResult.model_validate(_shipped_salvage_payload("GEN-1")),
+                "fake-claude-id",
+            )
+
+        monkeypatch.setattr(f"{_PARK_MARKER_POISON}.salvage_terminal_result", _salvage)
+        warned: set[str] = set()
+
+        recovered = run_concierge_recoveries(
+            now=_NOW,
+            native_live=set(),
+            config=_config(),
+            warned_blocks=warned if pass_set else None,
+        )
+
+        assert recovered == ["GEN-1"]
+        assert len(seen) == 1
+        if pass_set:
+            assert seen[0] is warned
+        else:
+            assert seen[0] is None
+
     def test_clears_park_marker_when_dead_and_stale(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
