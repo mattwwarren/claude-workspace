@@ -238,7 +238,7 @@ def _materialize_roster(
     except EnginePreconditionError:
         return _unresolvable(inputs, cycle, context.skill, CAUSE_MATERIALIZE_FAILED)
     manifest_path = Path(materialized.skill_dir) / ENGINE_MANIFEST_FILENAME
-    if not manifest_path.is_file():
+    if not manifest_path.exists():
         details = engine_refusal_details(
             CODEX_BACKEND,
             CAUSE_NO_CODEX_MANIFEST,

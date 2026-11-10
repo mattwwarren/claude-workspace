@@ -788,6 +788,31 @@ class TestManifestAtRoundTime:
         assert runner.calls == []
         assert outcome.prepared is None
 
+    def test_a_manifest_directory_is_invalid_not_absent(
+        self, make_git_repo: Callable[..., Path], tmp_path: Path
+    ) -> None:
+        engine = tmp_path / "engine-files"
+        for source in _STUB.rglob("*"):
+            if source.is_file() and source.name != "cw-engine.json":
+                target = engine / source.relative_to(_STUB)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source.read_bytes())
+        marker = engine / "cw-engine.json" / "marker"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("not a manifest", encoding="utf-8")
+        repo = make_engine_repo(
+            make_git_repo, engine_files=engine, name="manifest-directory-repo"
+        )
+
+        outcome = _pass(repo, _engine_runner())
+
+        details = _blocked(
+            outcome,
+            reason=REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
+            retry=False,
+        )
+        assert "cause=manifest_invalid" in details
+
 
 class TestFullDiffReview:
     def test_a_re_review_reviews_the_whole_diff_not_the_delta(
