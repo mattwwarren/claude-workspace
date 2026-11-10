@@ -3,19 +3,26 @@
 from __future__ import annotations
 
 import subprocess
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from cw._git import run_git
+from cw.codex_fix_loop import commit as commit_module
 from cw.codex_fix_loop import duplicate_reader
 from cw.codex_fix_loop.baseline import cycle_touched_paths
+from cw.codex_fix_loop.commit import _GrowthGuards
 from cw.codex_fix_loop.duplicate_reader import (
     added_defs,
     duplicated_names,
     is_reader_name,
 )
-from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, SETTLE_FINDING_HINT
+from cw.codex_fix_loop.fence import (
+    LEFT_STAGED_HINT,
+    SETTLE_FINDING_HINT,
+    FenceBreach,
+)
 from cw.codex_fix_loop.growth import LoopGrowthBudget, effective_budget
 from cw.codex_fix_loop.posted_text import POSTED_TEXT_MAX_CHARS, TRUNCATION_MARKER
 from cw.codex_review import (
@@ -35,6 +42,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from cw.codex_fix_loop.commit import _CycleContext
     from cw.review_findings import Finding
 
 _DUP = "duplicates the native parser `_read_roster_workers`"
@@ -436,3 +444,102 @@ class TestCheckDuplicateReader:
         _write(repo / "src" / "hold.py", _helper_body("read_roster_snapshot"))
         head = _head_baseline(repo)
         assert "src/hold.py" in cycle_touched_paths(repo, head)
+
+
+_ROOMY_BUDGET_LINES = 40
+
+
+def _ctx(repo: Path, cycle: int = 2) -> _CycleContext:
+    """The two fields ``_growth_breach`` reads from a cycle context."""
+    return cast("_CycleContext", SimpleNamespace(worktree=repo, cycle=cycle))
+
+
+def _hook(
+    repo: Path,
+    *,
+    enabled: bool = True,
+    allowed_files: frozenset[str] | None = frozenset({"src/hold.py"}),
+    budget_lines: int = _ROOMY_BUDGET_LINES,
+    loop_budget: LoopGrowthBudget | None = None,
+    findings: list[Finding] | None = None,
+) -> object:
+    """Stage the cycle against HEAD, then run the real ``_growth_breach`` hook."""
+    baseline = _head_baseline(repo)
+    cycle_touched_paths(repo, baseline)
+    guards = _GrowthGuards(
+        enabled=enabled,
+        budget_lines=budget_lines,
+        constraints=None,
+        loop_budget=loop_budget,
+    )
+    return commit_module._growth_breach(
+        _ctx(repo),
+        baseline,
+        findings=[_finding()] if findings is None else findings,
+        allowed_files=allowed_files,
+        guards=guards,
+    )
+
+
+class TestDriverIntegration:
+    """The hook in ``commit._growth_breach`` runs, forwards and stays gated (#2667).
+
+    Called directly with a ``_GrowthGuards`` (the plan's stated fallback): the
+    real driver would need a delta-admitted re-review doc to carry the finding.
+    """
+
+    def test_enabled_manifest_parks_naming_existing_function(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _duplicate_reader_repo(make_git_repo)
+        _write(repo / "src" / "hold.py", "HOLD = 1\n" + _helper_body("read_snapshot"))
+
+        breach = _hook(repo)
+
+        assert isinstance(breach, FenceBreach)
+        assert breach.reason == CODEX_FIX_GROWTH_BUDGET
+        assert "`_read_roster_workers`" in breach.details
+        assert "src/native.py:1" in breach.details
+
+    def test_loop_budget_is_forwarded(self, make_git_repo: Callable[..., Path]) -> None:
+        repo = _duplicate_reader_repo(make_git_repo)
+        start = _head_baseline(repo).head_sha
+        _write(repo / "src" / "hold.py", _helper_body("read_roster_snapshot"))
+        git_in(repo, "add", "-A")
+        git_in(repo, "commit", "-m", "cycle 1 helper")
+        _write(repo / "src" / "other.py", "OTHER = 2\n")
+        budget = LoopGrowthBudget(start, 40, effective_budget(40, 1))
+
+        # Without the loop budget the earlier commit is invisible (no park).
+        assert _hook(repo) is None
+        breach = _hook(repo, loop_budget=budget)
+        assert isinstance(breach, FenceBreach)
+        assert "`_read_roster_workers`" in breach.details
+
+    def test_switched_off_never_parks(self, make_git_repo: Callable[..., Path]) -> None:
+        repo = _duplicate_reader_repo(make_git_repo)
+        _write(repo / "src" / "hold.py", _helper_body("read_roster_snapshot"))
+        assert _hook(repo, enabled=False) is None
+
+    def test_no_manifest_never_parks(self, make_git_repo: Callable[..., Path]) -> None:
+        repo = _duplicate_reader_repo(make_git_repo)
+        _write(repo / "src" / "hold.py", _helper_body("read_roster_snapshot"))
+        assert _hook(repo, allowed_files=None) is None
+
+    def test_growth_breach_short_circuits_duplicate_check(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = _duplicate_reader_repo(make_git_repo)
+        _write(repo / "src" / "hold.py", _helper_body("read_roster_snapshot"))
+        message = "duplicate-reader check must not run after a growth breach"
+
+        def _boom(*_a: object, **_k: object) -> None:
+            raise AssertionError(message)
+
+        monkeypatch.setattr(commit_module, "check_duplicate_reader", _boom)
+
+        breach = _hook(repo, budget_lines=0)
+
+        assert isinstance(breach, FenceBreach)
+        assert breach.reason == CODEX_FIX_GROWTH_BUDGET
+        assert "exceeds the budget" in breach.details
