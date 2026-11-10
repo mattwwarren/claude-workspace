@@ -69,6 +69,9 @@ _LIVE_REF = "abcd1234"
 # allowlist is empty. It never had an ADR row. #2550's ADR row is deleted; it
 # never had an allowlist entry (every test stubbed the roster read, so the
 # probe never saw it); the roster read runs in a lockless snapshot.
+# #2549's usage-limit stop is no longer an in-lock exception: it is queued on
+# the post-lock sink, so its ADR row and stop-guard entry are gone (the ticket
+# number stays here as a documented reference).
 _DOCUMENTED_TICKETS = frozenset(
     {
         "#2545",
