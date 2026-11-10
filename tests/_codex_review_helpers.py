@@ -389,11 +389,11 @@ def _install_pre_commit_hook(repo: Path, script: str) -> None:
 
 
 def exclude_cw_dir(repo: Path) -> None:
-    """Git-exclude ``.cw/`` in *repo*, as a real cw worktree does (#2967).
+    """Git-exclude ``.cw/`` in *repo*, as a real cw worktree does.
 
     Mirrors ``worktree/_lifecycle.py::_CW_EXCLUDE_PATTERNS``: a worktree made
-    by ``make_git_repo`` does not exclude ``.cw/``, so the refused-cycle patch
-    guard (``git check-ignore``) would correctly block every restore.
+    by ``make_git_repo`` does not exclude ``.cw/``, so cw's own state would be
+    staged by the cycle's ``git add -A`` (#2967).
     """
     exclude = repo / git_in(repo, "rev-parse", "--git-path", "info/exclude")
     exclude.parent.mkdir(parents=True, exist_ok=True)
@@ -401,25 +401,22 @@ def exclude_cw_dir(repo: Path) -> None:
         handle.write(".cw/\n")
 
 
-def refused_patches(worktree: Path) -> list[Path]:
-    """The patches a refused cycle saved under ``.cw/codex_fix_refused/``."""
-    return sorted((worktree / ".cw" / "codex_fix_refused").glob("*.patch"))
+def assert_clean_after_refusal(worktree: Path, start_sha: str) -> str:
+    """Assert a refused cycle left a clean tree plus a pinned edit ref.
 
-
-def assert_clean_after_refusal(worktree: Path, start_sha: str) -> Path:
-    """Assert a refused cycle left a clean, restored tree plus a usable patch.
-
-    Empty ``git status --porcelain``, ``HEAD`` still *start_sha*, a saved patch
-    that re-applies (``git apply --check --index``) onto the restored tree.
-    Returns the (newest) patch path. Git runs through ``tests/_git_sandbox``.
+    Empty ``git status --porcelain``, ``HEAD`` still *start_sha*, and a commit
+    pinned under ``refs/cw/refused-cycles/``. Returns that ref name. Git runs
+    through ``tests/_git_sandbox``.
     """
     assert git_in(worktree, "status", "--porcelain") == ""
     assert git_in(worktree, "rev-parse", "HEAD") == start_sha
-    patches = refused_patches(worktree)
-    assert patches, "no patch saved under .cw/codex_fix_refused/"
-    patch = patches[-1]
-    git_in(worktree, "apply", "--check", "--index", str(patch))
-    return patch
+    refs = git_in(
+        worktree, "for-each-ref", "--format=%(refname)", "refs/cw/refused-cycles/"
+    ).split()
+    assert refs, "no edit ref pinned under refs/cw/refused-cycles/"
+    ref = refs[-1]
+    assert git_in(worktree, "cat-file", "-t", ref) == "commit"
+    return ref
 
 
 def _stage_merge_from_other_branch(

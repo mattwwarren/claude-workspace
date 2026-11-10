@@ -720,7 +720,7 @@ lanes:
   itself generated (a finding on lines added since the loop began, or a
   file-level finding on a file the loop created) so the operator can tell new
   debt from unresolved findings. The same list is in the
-  `review.fix_loop_divergence_detected` event.
+  `review.fix_loop_divergence_detected` event. The refusal never drops anything: the dirty state predates the cycle, so cw leaves it for the operator.
 
 **What the switch covers.** `codex_fix_loop_growth_guard_enabled: false` turns off
 the growth guard (per-cycle and cumulative net lines, definition count, lock,
@@ -730,22 +730,7 @@ guard, the scope fence, the revert guard, the sensitive-path guard, the
 hook-failure park or the divergence guard. The divergence guard has its own knob,
 `codex_fix_loop_stall_cycles`.
 
-**Recovery text and the refused-cycle patch (#2967).** A cycle that parks without
-committing (a growth, constraint, hook, scope drift, scope violation or revert-guard
-breach, a failed fix invocation, or a git error after staging) first saves its
-edits as a binary patch at
-`.cw/codex_fix_refused/cycle-<N>-<reason>-<UTC timestamp>.patch` in the cycle
-worktree (git-excluded, and removed with the worktree), reads the file back, and
-restores the paths after the snapshot is verified. A plain
-`cw dev-queue requeue` starts a clean cycle. The park's `recovery_hint`
-names the patch: `git apply --stat <patch>` to inspect, or `git apply --index
-<patch>` from a clean tree at the cycle-start commit to keep the edits. The
-restore is path-scoped (never `git reset --hard` or `git clean`), so ignored files
-and cw's own review artifacts stay, and it is verified with the clean-start check
-afterwards. The refused edits are always recoverable from the patch. On a
-cumulative growth park (#2648) only the current cycle is restored; earlier cycles'
-commits stay on the branch. This supersedes the earlier "every guard parks
-uncommitted and reports; none auto-reverts" resolution for these exits.
+**Recovery text and the refused-cycle ref (#2967).** A cycle that parks without committing (a growth, constraint, hook, scope drift, scope violation or revert-guard breach, a failed fix invocation, or a git error after staging) first pins its edits under `refs/cw/refused-cycles/<ticket>/cycle-<N>-<reason>-<UTC timestamp>`, a `git stash create` commit that `git stash apply <ref>` restores. Only then does it drop the cycle's own paths back to HEAD, leaving ignored files and cw's review artifacts alone. The park's `recovery_hint` names the ref, and a plain `cw dev-queue requeue` starts a clean cycle. If the ref cannot be written, nothing is dropped; if the path drop fails after the ref is written, the park names the ref and the dirty paths. On a cumulative growth park (#2648) only the current cycle is dropped; earlier cycles' commits stay on the branch. This supersedes the earlier "every guard parks uncommitted and reports; none auto-reverts" resolution for these exits.
 
 If the patch cannot be saved or verified, nothing is restored and the park keeps the
 old advice (edits left staged, `git reset --hard HEAD` after inspecting) plus one

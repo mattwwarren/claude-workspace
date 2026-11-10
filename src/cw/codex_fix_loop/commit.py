@@ -12,8 +12,8 @@ switchable growth and constraint guards (:mod:`cw.codex_fix_loop.growth`,
 step parks through the builders in :mod:`cw.codex_fix_loop.park`.
 
 Every park that leaves cycle edits behind (a restorable guard breach, a failed
-invocation, a non-hook git error) first saves them as a patch and restores the
-cycle-start tree through :mod:`cw.codex_fix_loop.cycle_restore` (#2967), so a
+invocation, a non-hook git error) first pins them under a ref and drops the
+cycle's paths through :mod:`cw.codex_fix_loop.cycle_restore` (#2967), so a
 plain requeue starts clean. The dirty-start refusal and the staged-set
 mismatch never restore.
 """
@@ -40,7 +40,7 @@ from cw.codex_fix_loop.cycle_restore import (
     CycleRestore,
     apply_to_breach,
     failure_note,
-    snapshot_and_restore,
+    preserve_and_reset,
 )
 from cw.codex_fix_loop.fence import (
     StagedSetMismatchError,
@@ -402,11 +402,15 @@ class _CycleContext:
     baseline: CycleBaseline | None = None
 
     def _restore(self, reason: str) -> CycleRestore | None:
-        """Save the cycle's edits and restore its start tree (#2967)."""
+        """Pin the cycle's edits under a ref and drop them (#2967)."""
         if self.baseline is None:
             return None
-        return snapshot_and_restore(
-            self.worktree, self.baseline, cycle=self.cycle, reason=reason
+        return preserve_and_reset(
+            self.worktree,
+            review_artifacts=self.baseline.review_artifacts,
+            ticket=self.task.ticket_id,
+            cycle=self.cycle,
+            reason=reason,
         )
 
     def park_breach(self, breach: FenceBreach) -> _Park:

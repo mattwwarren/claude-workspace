@@ -335,7 +335,7 @@ class TestHookRepairTurn:
         assert out.blocker is not None
         assert "commit was rejected again" in out.blocker.details
         assert out.blocker.recovery_hint is not None
-        assert "git apply --index .cw/codex_fix_refused/" in out.blocker.recovery_hint
+        assert "git stash apply refs/cw/refused-cycles/" in out.blocker.recovery_hint
         assert runner.fix_calls == 2
         assert git_in(worktree, "status", "--porcelain") == ""
 

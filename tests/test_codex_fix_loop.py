@@ -2062,7 +2062,7 @@ class TestScopeViolationGate:
         assert out.blocker.retry_eligible is None
         # #2967: the refused edits are saved as a patch and the tree restored.
         assert out.blocker.recovery_hint is not None
-        assert "git apply --index .cw/codex_fix_refused/" in out.blocker.recovery_hint
+        assert "git stash apply refs/cw/refused-cycles/" in out.blocker.recovery_hint
         assert git_in(worktree, "status", "--porcelain") == ""
 
     def test_out_of_scope_sensitive_modification_parks_verdict_stamped(
@@ -2144,7 +2144,7 @@ class TestFixFence:
         assert out.blocker.reason == CODEX_FIX_REVERTED_BRANCH
         assert "new.py" in out.blocker.details
         assert out.blocker.recovery_hint is not None
-        assert "git apply --index .cw/codex_fix_refused/" in out.blocker.recovery_hint
+        assert "git stash apply refs/cw/refused-cycles/" in out.blocker.recovery_hint
         assert_clean_after_refusal(worktree, head_before)
         assert out.review.fix_cycles_used == 1
         assert out.review.had_real_commit == "no_op"

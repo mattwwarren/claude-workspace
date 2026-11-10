@@ -403,7 +403,7 @@ class TestScopeViolationUsesBaseline:
         assert _blocker_reason(out) == CODEX_FIX_SCOPE_VIOLATION
         assert out.blocker is not None
         assert out.blocker.recovery_hint is not None
-        assert "git apply --index .cw/codex_fix_refused/" in out.blocker.recovery_hint
+        assert "git stash apply refs/cw/refused-cycles/" in out.blocker.recovery_hint
         assert git_in(worktree, "status", "--porcelain") == ""
 
 
@@ -503,7 +503,7 @@ class TestInvocationFailure:
         assert out.blocker is not None
         assert out.blocker.retry_eligible is True
         assert "left uncommitted edits" not in out.blocker.details
-        assert ".cw/codex_fix_refused/" in out.blocker.details
+        assert "refs/cw/refused-cycles/" in out.blocker.details
         assert_clean_after_refusal(worktree, start)
 
     def test_timeout_with_partial_edits_and_failed_restore_is_not_retry_eligible(
@@ -511,7 +511,7 @@ class TestInvocationFailure:
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-timeout-norestore")
         monkeypatch.setattr(
-            "cw.codex_fix_loop.cycle_restore._restore_paths",
+            "cw.codex_fix_loop.cycle_restore._drop_paths",
             _raise_called_process_error,
         )
         runner = _FixLoopRunner([_MF_DOC], fix_behaviors=[self._timeout_after(True)])
@@ -644,7 +644,7 @@ class TestHookFailure:
         assert "LINT-ERROR-XYZ" in out.blocker.details
         assert "Repair turn: not attempted." in out.blocker.details
         assert out.blocker.recovery_hint is not None
-        assert "git apply --index .cw/codex_fix_refused/" in out.blocker.recovery_hint
+        assert "git stash apply refs/cw/refused-cycles/" in out.blocker.recovery_hint
         assert runner.fix_calls == 1
         assert_clean_after_refusal(worktree, head)
 
