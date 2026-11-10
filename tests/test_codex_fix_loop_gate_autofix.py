@@ -10,15 +10,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+
+from cw.codex_fix_loop import gate_autofix
+from cw.codex_fix_loop.baseline import staged_cycle_tree
 from cw.codex_fix_loop.gate_autofix import (
     changed_paths,
     declared_autofixes,
     revert_paths,
 )
-
-from cw.codex_fix_loop import gate_autofix
-from cw.codex_fix_loop.baseline import staged_cycle_tree
-from tests.conftest import commit_tracked_file
+from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -182,7 +182,9 @@ class TestRevertPaths:
         assert (repo / "tracked.py").read_text(encoding="utf-8") == "x   =   1\n"
 
     def test_path_beginning_with_a_colon_is_literal(self, repo: Path) -> None:
-        commit_tracked_file(repo, ":col.py", "c = 1\n")
+        (repo / ":col.py").write_text("c = 1\n", encoding="utf-8")
+        git_in(repo, "--literal-pathspecs", "add", "--", ":col.py")
+        git_in(repo, "commit", "-m", "add colon file")
         before = _tree(repo)
         (repo / ":col.py").write_text("c   =   1\n", encoding="utf-8")
         after = _tree(repo)
@@ -190,6 +192,20 @@ class TestRevertPaths:
         revert_paths(repo, before, changed_paths(repo, before, after))
 
         assert (repo / ":col.py").read_text(encoding="utf-8") == "c = 1\n"
+        assert _tree(repo) == before
+
+    def test_nested_paths_are_restored_and_removed(self, repo: Path) -> None:
+        (repo / "pkg").mkdir()
+        commit_tracked_file(repo, "pkg/mod.py", "m = 1\n")
+        before = _tree(repo)
+        (repo / "pkg" / "mod.py").write_text("m   =   1\n", encoding="utf-8")
+        (repo / "pkg" / "added.py").write_text("a = 1\n", encoding="utf-8")
+        after = _tree(repo)
+
+        revert_paths(repo, before, changed_paths(repo, before, after))
+
+        assert (repo / "pkg" / "mod.py").read_text(encoding="utf-8") == "m = 1\n"
+        assert not (repo / "pkg" / "added.py").exists()
         assert _tree(repo) == before
 
     def test_handles_non_ascii_filename(self, repo: Path) -> None:
