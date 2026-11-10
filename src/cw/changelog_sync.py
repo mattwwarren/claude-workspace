@@ -33,7 +33,8 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, Literal, cast
+from enum import StrEnum
+from typing import TYPE_CHECKING, Final, cast
 
 from cw._git import run_git
 from cw.changelog_rebuild import (
@@ -64,7 +65,16 @@ __all__ = [
     "sync_changelog",
 ]
 
-SyncState = Literal["clean", "moved", "conflict", "refused", "unavailable"]
+
+class SyncState(StrEnum):
+    """The states returned by :func:`sync_changelog`."""
+
+    CLEAN = "clean"
+    MOVED = "moved"
+    CONFLICT = "conflict"
+    REFUSED = "refused"
+    UNAVAILABLE = "unavailable"
+
 
 #: The command-local disposition for a move refused over uncommitted changes.
 DISPOSITION_DIRTY_WORKTREE: Final = "dirty_worktree"
@@ -80,11 +90,6 @@ COMMIT_MESSAGE: Final = (
 COMMIT_TIMEOUT_SECONDS: Final = 120.0
 
 _CHANGELOG: Final = "CHANGELOG.md"
-_MISSING_BLOB_RC: Final = 128
-_MISSING_BLOB_MARKERS: Final = (
-    " does not exist in ",
-    " exists on disk, but not in ",
-)
 _DETAIL_LIMIT: Final = 300
 
 
@@ -162,6 +167,15 @@ def _show_changelog(worktree: Path, rev: str, timeout: float) -> str | None:
     """``CHANGELOG.md`` at *rev*, byte-exact and UTF-8; ``None`` if absent."""
     what = f"git show {rev}:{_CHANGELOG}"
     try:
+        exists = run_git(
+            ["rev-parse", "--verify", "--quiet", f"{rev}:{_CHANGELOG}"],
+            cwd=worktree,
+            check=False,
+            capture_output=True,
+            timeout=timeout,
+        )
+        if exists.returncode != 0:
+            return None
         # ``run_git`` is annotated for the text default; ``text=False`` yields bytes.
         shown = cast(
             "subprocess.CompletedProcess[bytes]",
@@ -186,16 +200,10 @@ def _show_changelog(worktree: Path, rev: str, timeout: float) -> str | None:
             stderr_text = stderr.decode("utf-8", errors="replace")
         else:
             stderr_text = str(stderr)
-        if not (
-            shown.returncode == _MISSING_BLOB_RC
-            and stderr_text.startswith("fatal: path ")
-            and any(marker in stderr_text for marker in _MISSING_BLOB_MARKERS)
-        ):
-            reason = stderr_text.strip().splitlines()
-            detail = reason[0] if reason else "no output"
-            message = f"{what} exited {shown.returncode}: {detail}"
-            raise GitFailedError(message)
-        return None
+        reason = stderr_text.strip().splitlines()
+        detail = reason[0] if reason else "no output"
+        message = f"{what} exited {shown.returncode}: {detail}"
+        raise GitFailedError(message)
     try:
         return shown.stdout.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -216,10 +224,10 @@ def _plan_move(
         else ()
     )
     if main is None or not changed:
-        return _answer("clean", base_sha, head)
+        return _answer(SyncState.CLEAN, base_sha, head)
     if already_merged(worktree, base_sha, timeout):
         return _answer(
-            "refused",
+            SyncState.REFUSED,
             base_sha,
             head,
             disposition=RepairDisposition.CHANGELOG_RELEASED_SECTION_TOUCHED.value,
@@ -244,10 +252,10 @@ def _settle(
     """Steps 2-5 once ``origin/<base>`` and HEAD resolved."""
     found = merge_tree(worktree, "HEAD", base_sha, timeout=timeout)
     if found.status == "unavailable":
-        return _answer("unavailable", base_sha, head, detail=found.detail)
+        return _answer(SyncState.UNAVAILABLE, base_sha, head, detail=found.detail)
     if found.status == "conflict" or found.tree is None:
         return _answer(
-            "conflict",
+            SyncState.CONFLICT,
             base_sha,
             head,
             conflicted_files=found.conflicted_files,
@@ -259,10 +267,10 @@ def _settle(
     try:
         return _plan_move(worktree, base, base_sha, head, found.tree, timeout)
     except GitFailedError as exc:
-        return _answer("unavailable", base_sha, head, detail=str(exc))
+        return _answer(SyncState.UNAVAILABLE, base_sha, head, detail=str(exc))
     except ChangelogRebuildError as exc:
         return _answer(
-            "refused",
+            SyncState.REFUSED,
             base_sha,
             head,
             disposition=exc.disposition.value,
@@ -277,9 +285,11 @@ def _analyse(
     try:
         base_sha = resolve_base(worktree, base, timeout)
     except GitFailedError as exc:
-        return _answer("unavailable", None, head, detail=str(exc))
+        return _answer(SyncState.UNAVAILABLE, None, head, detail=str(exc))
     if head is None:
-        return _answer("unavailable", base_sha, None, detail="HEAD does not resolve")
+        return _answer(
+            SyncState.UNAVAILABLE, base_sha, None, detail="HEAD does not resolve"
+        )
     return _settle(worktree, base, base_sha, head, timeout)
 
 
@@ -316,7 +326,7 @@ def _abort(worktree: Path, move: _Move, detail: str, timeout: float) -> Changelo
                     f"{detail}; git merge --abort failed ({exc}): the worktree is"
                     " mid-merge, run `git merge --abort` by hand"
                 )
-    return _answer("unavailable", move.base_sha, move.head_sha, detail=detail)
+    return _answer(SyncState.UNAVAILABLE, move.base_sha, move.head_sha, detail=detail)
 
 
 def _apply(worktree: Path, move: _Move, timeout: float) -> ChangelogSync:
@@ -324,10 +334,12 @@ def _apply(worktree: Path, move: _Move, timeout: float) -> ChangelogSync:
     try:
         existing_merge = _merge_in_progress(worktree, timeout)
     except GitFailedError as exc:
-        return _answer("unavailable", move.base_sha, move.head_sha, detail=str(exc))
+        return _answer(
+            SyncState.UNAVAILABLE, move.base_sha, move.head_sha, detail=str(exc)
+        )
     if existing_merge:
         return _answer(
-            "refused",
+            SyncState.REFUSED,
             move.base_sha,
             move.head_sha,
             detail=(
@@ -339,10 +351,12 @@ def _apply(worktree: Path, move: _Move, timeout: float) -> ChangelogSync:
     try:
         dirty = _checked(worktree, argv, timeout).stdout.strip()
     except GitFailedError as exc:
-        return _answer("unavailable", move.base_sha, move.head_sha, detail=str(exc))
+        return _answer(
+            SyncState.UNAVAILABLE, move.base_sha, move.head_sha, detail=str(exc)
+        )
     if dirty:
         return _answer(
-            "refused",
+            SyncState.REFUSED,
             move.base_sha,
             move.head_sha,
             disposition=DISPOSITION_DIRTY_WORKTREE,
@@ -360,7 +374,7 @@ def _apply(worktree: Path, move: _Move, timeout: float) -> ChangelogSync:
     except (GitFailedError, OSError) as exc:
         return _abort(worktree, move, str(exc), timeout)
     return _answer(
-        "moved",
+        SyncState.MOVED,
         move.base_sha,
         _head_sha(worktree, timeout),
         inserted=move.inserted,

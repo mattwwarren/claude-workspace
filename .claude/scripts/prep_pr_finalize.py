@@ -1066,6 +1066,16 @@ def _run_freeze_script(
     script: Path, repo_path: Path, base: str, head_sha: str
 ) -> MergeFreezeCheck:
     """Fetch origin/<base>, then run the freeze script's merged-result mode."""
+    stage = _fetch_and_run_freeze_script(script, repo_path, base, head_sha)
+    if isinstance(stage, MergeFreezeCheck):
+        return stage
+    return _classify_freeze_result(stage, base)
+
+
+def _fetch_and_run_freeze_script(
+    script: Path, repo_path: Path, base: str, head_sha: str
+) -> subprocess.CompletedProcess[str] | MergeFreezeCheck:
+    """Fetch the base and run the freeze script, returning a skip on failure."""
     refspec = f"+refs/heads/{base}:refs/remotes/origin/{base}"
     fetch_cmd = ["git", "fetch", "--no-tags", "origin", refspec]
     freeze_cmd = [
@@ -1089,12 +1099,18 @@ def _run_freeze_script(
                 base,
             )
         stage = "the freeze script"
-        checked = _bounded(freeze_cmd, cwd=repo_path)
+        return _bounded(freeze_cmd, cwd=repo_path)
     except subprocess.TimeoutExpired:
         reason = f"{stage} timed out after {MERGE_FREEZE_TIMEOUT_SECONDS:g}s"
         return MergeFreezeCheck("skipped", reason, base)
     except OSError as e:
         return MergeFreezeCheck("skipped", f"{stage} could not run: {e}", base)
+
+
+def _classify_freeze_result(
+    checked: subprocess.CompletedProcess[str], base: str
+) -> MergeFreezeCheck:
+    """Classify the freeze script's completed process."""
     if checked.returncode == _FREEZE_VIOLATION_RC:
         refusal = _refusal_text(checked.stdout, base)
         if refusal is not None:

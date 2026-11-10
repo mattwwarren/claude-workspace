@@ -8,7 +8,7 @@ from pathlib import Path
 
 import click
 
-from cw.changelog_sync import sync_changelog
+from cw.changelog_sync import SyncState, sync_changelog
 from cw.cli._base import _complete_client, handle_errors, main
 from cw.config import load_clients
 from cw.exceptions import CwError
@@ -270,12 +270,12 @@ def worktree_merge_probe(worktree: Path, base: str) -> None:
 
 #: ``cw worktree changelog-sync`` exit codes (#3190): nothing to do or one merge
 #: made; a conflict or a refusal (read ``state``); git could not tell.
-_SYNC_EXIT: dict[str, int] = {
-    "clean": 0,
-    "moved": 0,
-    "conflict": 1,
-    "refused": 1,
-    "unavailable": 3,
+_SYNC_EXIT: dict[SyncState, int] = {
+    SyncState.CLEAN: 0,
+    SyncState.MOVED: 0,
+    SyncState.CONFLICT: 1,
+    SyncState.REFUSED: 1,
+    SyncState.UNAVAILABLE: 3,
 }
 
 
@@ -320,7 +320,7 @@ def worktree_changelog_sync(worktree: Path, base: str) -> None:
         "base": base,
         "base_sha": synced.base_sha,
         "head_sha": synced.head_sha,
-        "state": synced.state,
+        "state": synced.state.value,
         "disposition": synced.disposition,
         "conflicted_files": list(synced.conflicted_files),
         "inserted": list(synced.inserted),
