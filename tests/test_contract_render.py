@@ -492,7 +492,7 @@ def test_tagged_ship_it_with_unpaired_range_raises(tmp_path: Path) -> None:
 
 
 def test_ship_it_fallback_is_pinned_to_prep_pr() -> None:
-    doc = _normalized(_raw("prep-pr.md"))
+    doc = _normalized(_raw("prep-pr.md")).replace("*", "")
     glue = _normalized(render_module._SHIP_IT_FALLBACK)
     for path in _PROBE_PATHS:
         assert path in doc

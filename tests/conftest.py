@@ -170,8 +170,9 @@ def _cmd(name: str, *, raw: bool = False) -> str:
 
     The ``<!-- el: <id> -->`` contract tags (#3053) are removed through
     ``cw.contract_manifest.strip_doc_tags`` so prose-window assertions never
-    see them; ``raw=True`` returns the file exactly as read (the contract
-    manifest test scans the tags themselves).
+    see them. The ``<!-- el-begin: <id> -->`` / ``<!-- el-end: <id> -->``
+    range tags (#3058) go the same way; ``raw=True`` returns the file exactly
+    as read (the contract manifest test scans the tags themselves).
 
     Canonical reader for the doc-guard test files that assert against
     slash-command prose. Consolidates 20 byte-identical (modulo an explicit
