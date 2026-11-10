@@ -367,6 +367,15 @@
      ],
      "title": "ReasoningEffort",
      "type": "string"
+    },
+    "SandboxMode": {
+     "description": "Codex ``--sandbox`` modes a codex reviewer or fix role may run under.\n\nThe report/fix boundary: a reviewer reports what is wrong and a fix role\nrepairs it, so the reviewer defaults to ``read-only`` and the fix loop to\n``workspace-write`` (``StageExecutorConfig.reviewer_sandbox_mode`` /\n``fix_sandbox_mode``, #1767). ``danger-full-access`` is deliberately not a\nmember: no cw role needs writes outside the worktree, so a typo or an\nexperiment cannot reach it through config.",
+     "enum": [
+      "read-only",
+      "workspace-write"
+     ],
+     "title": "SandboxMode",
+     "type": "string"
     }
    },
    "additionalProperties": false,
@@ -411,6 +420,14 @@
       }
      ],
      "default": "high"
+    },
+    "reviewer_sandbox_mode": {
+     "$ref": "#/$defs/SandboxMode",
+     "default": "read-only"
+    },
+    "fix_sandbox_mode": {
+     "$ref": "#/$defs/SandboxMode",
+     "default": "workspace-write"
     }
    },
    "title": "StageExecutorConfig",
@@ -431,6 +448,15 @@
       "ultra"
      ],
      "title": "ReasoningEffort",
+     "type": "string"
+    },
+    "SandboxMode": {
+     "description": "Codex ``--sandbox`` modes a codex reviewer or fix role may run under.\n\nThe report/fix boundary: a reviewer reports what is wrong and a fix role\nrepairs it, so the reviewer defaults to ``read-only`` and the fix loop to\n``workspace-write`` (``StageExecutorConfig.reviewer_sandbox_mode`` /\n``fix_sandbox_mode``, #1767). ``danger-full-access`` is deliberately not a\nmember: no cw role needs writes outside the worktree, so a typo or an\nexperiment cannot reach it through config.",
+     "enum": [
+      "read-only",
+      "workspace-write"
+     ],
+     "title": "SandboxMode",
      "type": "string"
     },
     "Stage": {
@@ -488,6 +514,14 @@
         }
        ],
        "default": "high"
+      },
+      "reviewer_sandbox_mode": {
+       "$ref": "#/$defs/SandboxMode",
+       "default": "read-only"
+      },
+      "fix_sandbox_mode": {
+       "$ref": "#/$defs/SandboxMode",
+       "default": "workspace-write"
       }
      },
      "title": "StageExecutorConfig",
@@ -544,6 +578,15 @@
      "title": "ReasoningEffort",
      "type": "string"
     },
+    "SandboxMode": {
+     "description": "Codex ``--sandbox`` modes a codex reviewer or fix role may run under.\n\nThe report/fix boundary: a reviewer reports what is wrong and a fix role\nrepairs it, so the reviewer defaults to ``read-only`` and the fix loop to\n``workspace-write`` (``StageExecutorConfig.reviewer_sandbox_mode`` /\n``fix_sandbox_mode``, #1767). ``danger-full-access`` is deliberately not a\nmember: no cw role needs writes outside the worktree, so a typo or an\nexperiment cannot reach it through config.",
+     "enum": [
+      "read-only",
+      "workspace-write"
+     ],
+     "title": "SandboxMode",
+     "type": "string"
+    },
     "Stage": {
      "description": "RFC 0005 pipeline stage. Mutated live by dispatch via\n``_stage_advance_unchecked`` as a task moves through the pipeline.",
      "enum": [
@@ -599,6 +642,14 @@
         }
        ],
        "default": "high"
+      },
+      "reviewer_sandbox_mode": {
+       "$ref": "#/$defs/SandboxMode",
+       "default": "read-only"
+      },
+      "fix_sandbox_mode": {
+       "$ref": "#/$defs/SandboxMode",
+       "default": "workspace-write"
       }
      },
      "title": "StageExecutorConfig",
@@ -2255,6 +2306,15 @@
      "title": "ReviewEngineConfig",
      "type": "object"
     },
+    "SandboxMode": {
+     "description": "Codex ``--sandbox`` modes a codex reviewer or fix role may run under.\n\nThe report/fix boundary: a reviewer reports what is wrong and a fix role\nrepairs it, so the reviewer defaults to ``read-only`` and the fix loop to\n``workspace-write`` (``StageExecutorConfig.reviewer_sandbox_mode`` /\n``fix_sandbox_mode``, #1767). ``danger-full-access`` is deliberately not a\nmember: no cw role needs writes outside the worktree, so a typo or an\nexperiment cannot reach it through config.",
+     "enum": [
+      "read-only",
+      "workspace-write"
+     ],
+     "title": "SandboxMode",
+     "type": "string"
+    },
     "SessionPurpose": {
      "enum": [
       "impl",
@@ -2321,6 +2381,14 @@
         }
        ],
        "default": "high"
+      },
+      "reviewer_sandbox_mode": {
+       "$ref": "#/$defs/SandboxMode",
+       "default": "read-only"
+      },
+      "fix_sandbox_mode": {
+       "$ref": "#/$defs/SandboxMode",
+       "default": "workspace-write"
       }
      },
      "title": "StageExecutorConfig",
@@ -3236,6 +3304,15 @@
      "title": "ReasoningEffort",
      "type": "string"
     },
+    "SandboxMode": {
+     "description": "Codex ``--sandbox`` modes a codex reviewer or fix role may run under.\n\nThe report/fix boundary: a reviewer reports what is wrong and a fix role\nrepairs it, so the reviewer defaults to ``read-only`` and the fix loop to\n``workspace-write`` (``StageExecutorConfig.reviewer_sandbox_mode`` /\n``fix_sandbox_mode``, #1767). ``danger-full-access`` is deliberately not a\nmember: no cw role needs writes outside the worktree, so a typo or an\nexperiment cannot reach it through config.",
+     "enum": [
+      "read-only",
+      "workspace-write"
+     ],
+     "title": "SandboxMode",
+     "type": "string"
+    },
     "Stage": {
      "description": "RFC 0005 pipeline stage. Mutated live by dispatch via\n``_stage_advance_unchecked`` as a task moves through the pipeline.",
      "enum": [
@@ -3291,6 +3368,14 @@
         }
        ],
        "default": "high"
+      },
+      "reviewer_sandbox_mode": {
+       "$ref": "#/$defs/SandboxMode",
+       "default": "read-only"
+      },
+      "fix_sandbox_mode": {
+       "$ref": "#/$defs/SandboxMode",
+       "default": "workspace-write"
       }
      },
      "title": "StageExecutorConfig",

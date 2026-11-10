@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from cw._util import MCP_EXTRA_MSG
 from cw.atomic import atomic_write_text
 from cw.config import state_dir
-from cw.event_bus import EventBus
+from cw.event_bus import AckRequest, EventBus
 from cw.models import OrchestratorConfig, QueueItemStatus, SessionStatus
 
 if TYPE_CHECKING:
@@ -43,11 +43,6 @@ class QueueSnapshot(BaseModel):
     # Tracks the last-seen reap_reason per session so the poller can fire
     # queue.session_reaped exactly once when reconcile stamps a new reason.
     session_reap_reasons: dict[str, str] = Field(default_factory=dict)
-
-
-class AckRequest(BaseModel):
-    client_id: str
-    offset: int
 
 
 # The generic append/subscribe/broadcast/cursor machinery now lives in
@@ -402,18 +397,23 @@ def _start_poller() -> None:
 
 
 async def handle_post_ack(request: Request) -> Response:
-    """Handle POST /ack: advance per-subscriber cursor."""
+    """Handle POST /ack: record the subscriber's declared durable prefix.
+
+    Same cursor contract as the PR channel (#3172): 200 with the effective
+    cursor for valid, duplicate and stale acks; 400 for invalid input or an
+    offset beyond the next-offset frontier, state unchanged.
+    """
     from starlette.responses import JSONResponse
 
     try:
         body = await request.json()
         req = AckRequest.model_validate(body)
+        cursor = ack_offset(req.client_id, req.offset)
     except (ValueError, TypeError) as exc:
         msg = str(exc)
         logger.warning("ack rejected: %s", msg)
         return JSONResponse({"error": msg}, status_code=400)
-    ack_offset(req.client_id, req.offset)
-    return JSONResponse({"status": "ok"})
+    return JSONResponse({"status": "ok", "cursor": cursor})
 
 
 _cursors.update(_load_cursors())

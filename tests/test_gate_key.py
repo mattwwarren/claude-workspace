@@ -30,9 +30,10 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import pytest
 
-from tests._tool_fakes import write_bin_stub
+from tests._tool_fakes import path_with_stub, write_bin_stub
 from tests.conftest import (
     GATE_KEY_SCRIPT,
+    GATE_KEY_TEST_GENERATION,
     GATE_KEY_TEST_PIDNS,
     git_in,
     load_guard_script_module,
@@ -48,6 +49,8 @@ pytestmark = pytest.mark.usefixtures("clean_gate_env")
 _mod = load_guard_script_module(GATE_KEY_SCRIPT, "gate_key")
 
 KEY = "0123456789abcdef"
+GEN_A = "aaaaaaaaaaaaaaaa"
+GEN_B = "bbbbbbbbbbbbbbbb"
 BRANCH = "feature"
 _BOOT_ID = "0123abcd-4567-89ab-cdef-0123456789ab"
 _PS_TIME = "Sat Oct 11 12:34:56 2026"
@@ -206,9 +209,20 @@ def _claim_main(gate_root: Path, probe: Any, *extra: str) -> int:
     return code
 
 
-def _release_main(gate_root: Path, probe: Any) -> int:
+def _release_main(
+    gate_root: Path, probe: Any, generation: str = GATE_KEY_TEST_GENERATION
+) -> int:
     code: int = _mod.main(
-        ["--release", "--key", KEY, "--gate-root", str(gate_root)], probe=probe
+        [
+            "--release",
+            "--key",
+            KEY,
+            "--generation",
+            generation,
+            "--gate-root",
+            str(gate_root),
+        ],
+        probe=probe,
     )
     return code
 
@@ -302,8 +316,7 @@ def test_git_failure_exits_1(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    bin_dir = write_bin_stub(tmp_path, "git", "#!/bin/sh\necho boom >&2\nexit 128\n")
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    path_with_stub(monkeypatch, tmp_path, "git", "#!/bin/sh\necho boom >&2\nexit 128\n")
     _assert_key_failure(capsys, ["--branch", BRANCH], "exited 128: boom")
 
 
@@ -312,8 +325,7 @@ def test_empty_git_common_dir_exits_1(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    bin_dir = write_bin_stub(tmp_path, "git", "#!/bin/sh\nexit 0\n")
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    path_with_stub(monkeypatch, tmp_path, "git", "#!/bin/sh\nexit 0\n")
     _assert_key_failure(capsys, ["--branch", BRANCH], "printed no git common dir")
 
 
@@ -375,8 +387,7 @@ def test_git_timeout_exits_1(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    bin_dir = write_bin_stub(tmp_path, "git", "#!/bin/sh\nsleep 5\n")
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    path_with_stub(monkeypatch, tmp_path, "git", "#!/bin/sh\nsleep 5\n")
     monkeypatch.setattr(_mod, "GIT_TIMEOUT_S", 0.2)
     _assert_key_failure(capsys, ["--branch", BRANCH], "could not run")
 
@@ -443,6 +454,19 @@ def test_claim_without_gate_root_is_usage_error_even_with_cw_gate_root_set(
         ["--key", KEY],
         ["--branch", BRANCH, "--gate-root", "g"],
         ["--release", "--key", KEY],
+        ["--release", "--key", KEY, "--gate-root", "g"],
+        [
+            "--branch",
+            BRANCH,
+            "--claim",
+            "--key",
+            KEY,
+            "--gate-root",
+            "g",
+            "--generation",
+            "g",
+        ],
+        ["--branch", BRANCH, "--generation", "g"],
     ],
     ids=[
         "release_without_key",
@@ -453,6 +477,9 @@ def test_claim_without_gate_root_is_usage_error_even_with_cw_gate_root_set(
         "key_alone",
         "gate_root_in_key_mode",
         "release_without_gate_root",
+        "release_without_generation",
+        "generation_with_claim",
+        "generation_in_key_mode",
     ],
 )
 def test_usage_errors_exit_2(argv: list[str]) -> None:
@@ -462,7 +489,15 @@ def test_usage_errors_exit_2(argv: list[str]) -> None:
 def test_release_with_a_malformed_key_exits_1(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    argv = ["--release", "--key", "nothex", "--gate-root", str(tmp_path)]
+    argv = [
+        "--release",
+        "--key",
+        "nothex",
+        "--generation",
+        "x",
+        "--gate-root",
+        str(tmp_path),
+    ]
     assert _mod.main(argv) == 1
     assert "not a 16-hex gate key" in capsys.readouterr().err
 
@@ -495,6 +530,15 @@ def test_proc_start_token_parses_stat_with_parens_in_comm(tmp_path: Path) -> Non
     assert _mod.process_start_token(77, probe) == f"proc:{_BOOT_ID}:987654"
     assert _mod.parent_pid(77, probe) == 1
     assert _mod.process_state(77, probe) == "S"
+
+
+def test_non_utf8_comm_in_proc_stat_reads_cleanly(tmp_path: Path) -> None:
+    probe = fake_proc_tree(tmp_path, {77: FakeProc(987654, 1)})
+    rest = " ".join(["S", "1", *["0"] * 17, "987654", *["0"] * 10])
+    (probe.proc_root / "77" / "stat").write_bytes(b"77 (\xff\xfe) " + rest.encode())
+    assert _mod.process_start_token(77, probe) == f"proc:{_BOOT_ID}:987654"
+    assert _mod.process_state(77, probe) == "S"
+    assert _mod.parent_pid(77, probe) == 1
 
 
 def test_proc_start_token_none_for_missing_short_or_boot_id_less_proc(
@@ -705,13 +749,65 @@ def test_claimants_own_ps_token_is_recorded_verbatim(
     assert record["start"] == "ps:garbage"
     assert record["pid"] == WORKER
     assert "cannot record an owner" not in capsys.readouterr().err
-    assert _release_main(gate_root, probe) == 0
+    assert _release_main(gate_root, probe, record["generation"]) == 0
     assert not Path(_mod.owner_path(gate_root, KEY)).exists()
 
+    # Rule 5a precedes the token-shape check: the same shell takes over its own
+    # record even though the token it wrote does not match the expected layout.
     assert _claim_main(gate_root, probe) == 0
-    assert _claim_main(gate_root, probe) == 3
+    assert _claim_main(gate_root, probe) == 0
     err = capsys.readouterr().err
-    assert "(bad token in shell_start)" in err
+    owner = Path(_mod.owner_path(gate_root, KEY))
+    assert _mod.note_reentry(SHELL, owner) in err
+    assert "malformed" not in err
+    rewritten = _owner_json(gate_root)
+    assert rewritten["shell_start"] == "ps:garbage"
+    assert rewritten["start"] == "ps:garbage"
+
+
+def test_same_shell_reentry_with_a_non_conforming_ps_layout_takes_over(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    probe = _ps_probe(tmp_path, _stub_ps(tmp_path, _verbatim_ps_body()))
+    monkeypatch.setenv("CW_GATE_OWNER_PID", str(WORKER))
+    gate_root = tmp_path / "gate-root"
+    owner = Path(_mod.owner_path(gate_root, KEY))
+    assert _claim_main(gate_root, probe) == 0
+    capsys.readouterr()
+    assert _claim_main(gate_root, probe) == 0
+    assert _mod.note_reentry(SHELL, owner) in capsys.readouterr().err
+
+    # Only 5a escapes the shape check: the same garbage token written by some
+    # other shell pid is still an unprovable record.
+    other_gate_root = tmp_path / "other-gate-root"
+    other_owner = _write_owner(
+        other_gate_root,
+        _dead_record(
+            shell_pid=OTHER_SHELL,
+            shell_start="ps:garbage",
+            start="ps:garbage",
+            pidns=GATE_KEY_TEST_PIDNS,
+        ),
+    )
+    claimant = _claimant(probe, pidns=GATE_KEY_TEST_PIDNS)
+    code, text = _mod.claim(other_gate_root, KEY, BRANCH, claimant, probe)
+    assert code == 3
+    assert text == _mod.refuse_malformed(other_owner, "bad token in shell_start")
+
+
+def test_foreign_host_with_a_non_conforming_token_refuses_as_foreign_host(
+    tmp_path: Path,
+) -> None:
+    probe = _tree(tmp_path)
+    seed = _dead_record(host="elsewhere", shell_start="ps:garbage")
+    code, text, owner, before = _claim(tmp_path, probe, _claimant(probe), seed)
+    assert code == 3
+    host = socket.gethostname()
+    assert text == _mod.refuse_foreign_host("elsewhere", host, DEAD_WORKER, owner)
+    assert "malformed" not in text
+    assert owner.read_bytes() == before
 
 
 def test_claimants_empty_ps_shell_token_exits_1_with_m8(
@@ -825,6 +921,69 @@ def test_publish_rejects_a_symlinked_temp_record(
     assert target.read_text(encoding="utf-8") == "leave me"
 
 
+def test_claim_refuses_a_symlinked_lock_file(tmp_path: Path) -> None:
+    probe = _tree(tmp_path)
+    gate_root = tmp_path / "gate-root"
+    gate_root.mkdir()
+    lock = gate_root / f"cw-gate-owner-{KEY}.lock"
+    missing = tmp_path / "outside-missing"
+    lock.symlink_to(missing)
+
+    code, text = _mod.claim(gate_root, KEY, BRANCH, _claimant(probe), probe)
+
+    assert code == 1
+    assert "cannot use gate root" in text
+    assert not missing.exists()
+    assert not Path(_mod.owner_path(gate_root, KEY)).exists()
+
+    existing = tmp_path / "outside-existing"
+    existing.write_text("leave me", encoding="utf-8")
+    lock.unlink()
+    lock.symlink_to(existing)
+
+    code, text = _mod.claim(gate_root, KEY, BRANCH, _claimant(probe), probe)
+
+    assert code == 1
+    assert "cannot use gate root" in text
+    assert existing.read_text(encoding="utf-8") == "leave me"
+    assert not Path(_mod.owner_path(gate_root, KEY)).exists()
+
+
+def test_claim_closes_the_lock_descriptor_when_fdopen_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probe = _tree(tmp_path)
+    claimant = _claimant(probe)
+    gate_root = tmp_path / "gate-root"
+    opened: list[int] = []
+    closed: list[int] = []
+    real_open = os.open
+    real_close = os.close
+
+    def _open(*args: Any, **kwargs: Any) -> int:
+        descriptor: int = real_open(*args, **kwargs)
+        opened.append(descriptor)
+        return descriptor
+
+    def _close(descriptor: int) -> None:
+        closed.append(descriptor)
+        real_close(descriptor)
+
+    def _fdopen(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError(errno.EMFILE, "too many open files")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "open", _open)
+        patch.setattr(os, "close", _close)
+        patch.setattr(os, "fdopen", _fdopen)
+        code, text = _mod.claim(gate_root, KEY, BRANCH, claimant, probe)
+
+    assert code == 1
+    assert "cannot use gate root" in text
+    assert opened
+    assert closed == opened
+
+
 def test_zombie_state_reads_as_dead_on_proc(tmp_path: Path) -> None:
     procs = _base_procs()
     procs[DEAD_WORKER] = FakeProc(77, 1, state="Z")
@@ -936,7 +1095,8 @@ def test_script_passes_the_ruff_syntax_check_at_the_python_39_floor(
         [*command, str(control)], capture_output=True, text=True, check=False
     )
     assert bad.returncode != 0
-    assert "Cannot reuse outer quote character in f-strings" in bad.stdout
+    assert "nested_quote.py" in bad.stdout
+    assert "invalid-syntax" in bad.stdout or "f-string" in bad.stdout
 
 
 def test_claimed_at_is_a_utc_strftime_stamp(
@@ -1068,8 +1228,33 @@ def test_absent_file_claims(tmp_path: Path) -> None:
         "branch": BRANCH,
         "claimed_at": record["claimed_at"],
         "source": "CLAUDE_PID",
+        "generation": claimant.generation,
     }
     assert all(value is not None for value in record.values())
+
+
+def test_claim_over_an_existing_gate_path_with_no_record_takes_it_and_touches_nothing(
+    tmp_path: Path,
+) -> None:
+    gate_root = tmp_path / "gate-root"
+    wt_dir = gate_root / f"cw-gate-wt-{KEY}"
+    tmp_dir = gate_root / f"cw-gate-tmp-{KEY}"
+    sentinel = wt_dir / "sentinel"
+    wt_dir.mkdir(parents=True)
+    tmp_dir.mkdir()
+    sentinel.write_text("planted", encoding="utf-8")
+    owner = Path(_mod.owner_path(gate_root, KEY))
+    assert not owner.exists()
+    probe = _tree(tmp_path)
+    claimant = _claimant(probe)
+
+    result = _mod.claim(gate_root, KEY, BRANCH, claimant, probe)
+
+    assert result == (0, "")
+    assert _owner_json(gate_root)["generation"] == claimant.generation
+    assert sentinel.read_text(encoding="utf-8") == "planted"
+    assert wt_dir.is_dir()
+    assert tmp_dir.is_dir()
 
 
 def test_absent_file_claim_records_a_null_pidns_when_unreadable(tmp_path: Path) -> None:
@@ -1243,6 +1428,9 @@ def test_unsupported_record_version_refuses(tmp_path: Path) -> None:
         (_dead_record(shell_pid="7"), "missing or malformed field shell_pid"),
         (_dead_record(shell_start=7), "bad token in shell_start"),
         (_dead_record(start="ps:garbage"), "bad token in start"),
+        (_dead_record(shell_start="ps:garbage"), "bad token in shell_start"),
+        (_dead_record(shell_start=""), "bad token in shell_start"),
+        (_dead_record(start=""), "bad token in start"),
         (_dead_record(host=""), "missing or malformed field host"),
         (
             {k: v for k, v in _dead_record().items() if k != "pidns"},
@@ -1276,9 +1464,12 @@ def test_unreadable_owner_file_refuses_as_invalid_json(tmp_path: Path) -> None:
         ({"source": 7}, "claimed unknown via unknown"),
         (
             {"claimed_at": ["x"], "source": "CLAUDE_PID"},
-            "claimed unknown via CLAUDE_PID",
+            "claimed unknown via 'CLAUDE_PID'",
         ),
+        ({"source": ""}, "claimed unknown via unknown"),
+        ({"claimed_at": "", "source": ""}, "claimed unknown via unknown"),
     ],
+    ids=["source_int", "claimed_at_list", "source_empty", "both_empty"],
 )
 def test_claimed_at_and_source_are_display_only(
     tmp_path: Path, overrides: dict[str, object], rendered: str
@@ -1306,7 +1497,14 @@ _WORDING: list[tuple[str, Callable[[], str], str]] = [
             11, "2026-10-11T00:00:00Z", "CLAUDE_PID", _OWNER
         ),
         "gate_key: gate path in use by a live run, pid 11 (claimed"
-        f" 2026-10-11T00:00:00Z via CLAUDE_PID; owner file {_OWNER}); refusing"
+        f" '2026-10-11T00:00:00Z' via 'CLAUDE_PID'; owner file {_OWNER}); refusing"
+        f" destructive cleanup. {_EXIT_CLAUSE}",
+    ),
+    (
+        "M1-unknown",
+        lambda: _mod.refuse_live_worker(11, "unknown", "unknown", _OWNER),
+        "gate_key: gate path in use by a live run, pid 11 (claimed"
+        f" unknown via unknown; owner file {_OWNER}); refusing"
         f" destructive cleanup. {_EXIT_CLAUSE}",
     ),
     (
@@ -1325,7 +1523,7 @@ _WORDING: list[tuple[str, Callable[[], str], str]] = [
     (
         "M4",
         lambda: _mod.refuse_foreign_host("far", "near", 11, _OWNER),
-        "gate_key: gate path claimed on host far, not this host (near): pid 11;"
+        "gate_key: gate path claimed on host 'far', not this host (near): pid 11;"
         " liveness cannot be checked across hosts, refusing destructive cleanup."
         f" If that run is gone, remove {_OWNER} and re-run",
     ),
@@ -1354,6 +1552,13 @@ _WORDING: list[tuple[str, Callable[[], str], str]] = [
         "M7",
         lambda: _mod.refuse_foreign_pidns(_OWNER, None, 11, "pid:[2]"),
         f"gate_key: owner file {_OWNER} was written from pid namespace unreadable"
+        " (pid 11), this process runs in pid:[2]; liveness cannot be checked"
+        f" across pid namespaces, refusing destructive cleanup. {_EXIT_CLAUSE}",
+    ),
+    (
+        "M7-recorded-string",
+        lambda: _mod.refuse_foreign_pidns(_OWNER, "pid:[1]", 11, "pid:[2]"),
+        f"gate_key: owner file {_OWNER} was written from pid namespace 'pid:[1]'"
         " (pid 11), this process runs in pid:[2]; liveness cannot be checked"
         f" across pid namespaces, refusing destructive cleanup. {_EXIT_CLAUSE}",
     ),
@@ -1394,8 +1599,60 @@ def test_refusal_messages_match_the_quoted_wording(
     label: str, build: Callable[[], str], expected: str
 ) -> None:
     assert build() == expected
-    if label in {"M1", "M2", "M3", "M7"}:
+    if label in {"M1", "M1-unknown", "M2", "M3", "M7", "M7-recorded-string"}:
         assert expected.endswith(_EXIT_CLAUSE)
+
+
+def test_unbounded_record_fields_are_bounded_and_single_line(tmp_path: Path) -> None:
+    probe = _tree(tmp_path)
+    claimed_at = "a\n" * 500
+    source = "s\n" * 500
+    live = _record(
+        _claimant(probe, OTHER_WORKER, OTHER_SHELL),
+        claimed_at=claimed_at,
+        source=source,
+    )
+    code, text, _, _ = _claim(tmp_path / "m1", probe, _claimant(probe), live)
+    assert code == 3
+    assert f"claimed {claimed_at[:40]!r} via {source[:40]!r}" in text
+    assert claimed_at not in text
+    assert source not in text
+    assert "\n" not in text
+
+    host = "h\n" * 250
+    code, text, _, _ = _claim(
+        tmp_path / "m4", probe, _claimant(probe), _dead_record(host=host)
+    )
+    assert code == 3
+    assert f"claimed on host {host[:40]!r}, not this host" in text
+    assert host not in text
+    assert "\n" not in text
+
+    pidns = "p\n" * 250
+    code, text, _, _ = _claim(
+        tmp_path / "m7", probe, _claimant(probe), _dead_record(pidns=pidns)
+    )
+    assert code == 3
+    assert f"written from pid namespace {pidns[:40]!r} (pid" in text
+    assert pidns not in text
+    assert "\n" not in text
+
+
+def test_bounded_is_a_pure_repr_of_the_value_preview() -> None:
+    assert _mod._bounded("x" * 100) == repr("x" * 40)
+    assert len(_mod._bounded("x" * 100)) == 42
+    assert _mod._bounded("unknown") == "'unknown'"
+    assert _mod._bounded("a\nb") == "'a\\nb'"
+
+
+def test_owner_pid_preview_is_unchanged_by_the_shared_bound(tmp_path: Path) -> None:
+    probe = _tree(tmp_path)
+    for raw in ("unknown", "x" * 100):
+        worker, reason = _mod._verify_owner_pid("CW_GATE_OWNER_PID", raw, probe)
+        assert worker is None
+        assert reason == (
+            f"CW_GATE_OWNER_PID is not a positive integer (got {raw[:40]!r})"
+        )
 
 
 # --- Claim key (R28c) --------------------------------------------------------
@@ -1408,8 +1665,7 @@ def test_claim_records_the_supplied_key_without_consulting_git(
     plain.mkdir()
     monkeypatch.chdir(plain)
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
-    bin_dir = write_bin_stub(tmp_path, "git", "#!/bin/sh\nexit 128\n")
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    path_with_stub(monkeypatch, tmp_path, "git", "#!/bin/sh\nexit 128\n")
     supplied = "fedcba9876543210"
     gate_root = tmp_path / "gate-root"
     code = _mod.main(
@@ -1431,16 +1687,19 @@ def test_release_removes_only_a_record_naming_this_shell(tmp_path: Path) -> None
     probe = _tree(tmp_path)
     gate_root = tmp_path / "gate-root"
     owner = _write_owner(gate_root, _record(_claimant(probe)))
-    assert _mod.release(gate_root, KEY, probe) == 0
+    assert _mod.release(gate_root, KEY, GATE_KEY_TEST_GENERATION, probe) == 0
     assert not owner.exists()
     foreign = _write_owner(
         gate_root, _record(_claimant(probe, OTHER_WORKER, OTHER_SHELL))
     )
-    assert _mod.release(gate_root, KEY, probe) == 0
+    assert _mod.release(gate_root, KEY, GATE_KEY_TEST_GENERATION, probe) == 0
     assert foreign.exists()
     other_ns = _write_owner(gate_root, _record(_claimant(probe), pidns="pid:[1]"))
-    assert _mod.release(gate_root, KEY, probe) == 0
+    assert _mod.release(gate_root, KEY, GATE_KEY_TEST_GENERATION, probe) == 0
     assert other_ns.exists()
+    wrong_gen = _write_owner(gate_root, _record(_claimant(probe)))
+    assert _mod.release(gate_root, KEY, GEN_A, probe) == 0
+    assert wrong_gen.exists()
 
 
 @pytest.mark.parametrize("content", [None, "{not json", "[1]"])
@@ -1451,7 +1710,7 @@ def test_release_is_exit_0_when_absent_or_unreadable(
     gate_root = tmp_path / "gate-root"
     if content is not None:
         owner = _write_owner(gate_root, content)
-    assert _mod.release(gate_root, KEY, probe) == 0
+    assert _mod.release(gate_root, KEY, GATE_KEY_TEST_GENERATION, probe) == 0
     if content is not None:
         assert owner.exists()
 
@@ -1463,7 +1722,7 @@ def test_release_leaves_the_record_when_the_shell_token_is_unreadable(
     gate_root = tmp_path / "gate-root"
     owner = _write_owner(gate_root, _record(_claimant(probe)))
     (probe.proc_root / str(SHELL) / "stat").unlink()
-    assert _mod.release(gate_root, KEY, probe) == 0
+    assert _mod.release(gate_root, KEY, GATE_KEY_TEST_GENERATION, probe) == 0
     assert owner.exists()
 
 
@@ -1487,21 +1746,78 @@ def test_release_needs_no_git_and_works_from_a_deleted_cwd(
 # --- Stdout and claim() contract (R27) ---------------------------------------
 
 
-def test_claim_and_release_write_nothing_to_stdout(
+def test_claim_prints_its_generation_on_success_only(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     probe = _tree(tmp_path)
     gate_root = tmp_path / "gate-root"
     assert _claim_main(gate_root, probe) == 0
-    assert capsys.readouterr().out == ""
+    assert capsys.readouterr().out == f"{_owner_json(gate_root)['generation']}\n"
     _write_owner(gate_root, _dead_record())
     assert _claim_main(gate_root, probe) == 0
-    assert capsys.readouterr().out == ""
+    assert capsys.readouterr().out == f"{_owner_json(gate_root)['generation']}\n"
     _write_owner(gate_root, _record(_claimant(probe, OTHER_WORKER, OTHER_SHELL)))
     assert _claim_main(gate_root, probe) == 3
     assert capsys.readouterr().out == ""
     assert _release_main(gate_root, probe) == 0
     assert capsys.readouterr().out == ""
+    bad_key = [
+        "--branch",
+        BRANCH,
+        "--claim",
+        "--key",
+        "nothex",
+        "--gate-root",
+        str(gate_root),
+    ]
+    assert _mod.main(bad_key, probe=probe) == 1
+    assert capsys.readouterr().out == ""
+
+
+def test_older_release_after_a_same_shell_reclaim_leaves_the_newer_record(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    probe = _tree(tmp_path)
+    gate_root = tmp_path / "gate-root"
+    assert _claim_main(gate_root, probe) == 0
+    gen_1 = capsys.readouterr().out.strip()
+    assert _claim_main(gate_root, probe) == 0
+    gen_2 = capsys.readouterr().out.strip()
+    assert gen_1 != gen_2
+    assert _mod.KEY_RE.match(gen_1)
+    assert _mod.KEY_RE.match(gen_2)
+    owner = Path(_mod.owner_path(gate_root, KEY))
+    assert _release_main(gate_root, probe, gen_1) == 0
+    assert owner.exists()
+    assert _owner_json(gate_root)["generation"] == gen_2
+    assert _release_main(gate_root, probe, gen_2) == 0
+    assert not owner.exists()
+
+
+def test_release_never_matches_a_record_without_a_generation(tmp_path: Path) -> None:
+    probe = _tree(tmp_path)
+    gate_root = tmp_path / "gate-root"
+    legacy = _record(_claimant(probe))
+    legacy.pop("generation")
+    owner = _write_owner(gate_root, legacy)
+    assert _mod.release(gate_root, KEY, GATE_KEY_TEST_GENERATION, probe) == 0
+    assert owner.exists()
+    owner = _write_owner(gate_root, _record(_claimant(probe, generation="")))
+    assert _mod.release(gate_root, KEY, "", probe) == 0
+    assert owner.exists()
+
+
+def test_resolve_claimant_stamps_a_fresh_16_hex_generation_each_call(
+    tmp_path: Path,
+) -> None:
+    probe = _tree(tmp_path)
+    first = _mod.resolve_claimant({}, probe)
+    second = _mod.resolve_claimant({}, probe)
+    assert first is not None
+    assert second is not None
+    assert first.generation != second.generation
+    assert _mod.KEY_RE.match(first.generation)
+    assert _mod.KEY_RE.match(second.generation)
 
 
 def test_claim_returns_exit_code_and_stderr_text(
@@ -1668,8 +1984,7 @@ def test_release_via_main_uses_key_not_git(
     probe = _tree(tmp_path)
     gate_root = tmp_path / "gate-root"
     owner = _write_owner(gate_root, _record(_claimant(probe)))
-    bin_dir = write_bin_stub(tmp_path, "git", "#!/bin/sh\nexit 128\n")
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    path_with_stub(monkeypatch, tmp_path, "git", "#!/bin/sh\nexit 128\n")
     assert _release_main(gate_root, probe) == 0
     assert not owner.exists()
 
@@ -1700,16 +2015,23 @@ def test_main_as_script_exits_with_main_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     gate_root = tmp_path / "gate-root"
-    argv = ["gate_key.py", "--release", "--key", KEY, "--gate-root", str(gate_root)]
+    argv = [
+        "gate_key.py",
+        "--release",
+        "--key",
+        KEY,
+        "--generation",
+        "x",
+        "--gate-root",
+        str(gate_root),
+    ]
     monkeypatch.setattr(sys, "argv", argv)
     with pytest.raises(SystemExit) as exc_info:
         runpy.run_path(str(GATE_KEY_SCRIPT), run_name="__main__")
     assert exc_info.value.code == 0
 
 
-@pytest.mark.skipif(
-    not Path("/proc/self/ns/pid").exists(), reason="needs a Linux /proc"
-)
+@pytest.mark.skipif(sys.platform != "linux", reason="needs a Linux kernel")
 def test_default_probe_real_kernel_sanity(
     sleeper: Callable[[], subprocess.Popen[bytes]],
 ) -> None:

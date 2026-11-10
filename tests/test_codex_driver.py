@@ -39,6 +39,7 @@ from cw.models import (
     LastResultSource,
     QueueItemStatus,
     ReasoningEffort,
+    SandboxMode,
     SessionStatus,
     Stage,
     StageExecutorConfig,
@@ -476,6 +477,56 @@ def test_run_codex_review_stage_threads_reasoning_effort_from_resolved_executor_
     assert captured["session_id"] == "sess-1"
     assert captured["reasoning_effort"] == "max"
     assert captured["model"] == "gpt-test"
+
+
+def test_run_codex_review_stage_threads_sandbox_modes_from_resolved_executor_config(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """The REVIEW stage config's sandbox modes reach the review (#1767).
+
+    End-to-end wiring: driver -> ``_run_codex_review_and_complete`` ->
+    ``_review_and_confirm`` -> ``run_review_with_fix_loop``. Every hop is a
+    defaulted kwarg, so a dropped one would silently fall back to the default;
+    the reviewer value here is the non-default, so it cannot.
+    """
+    worktree = make_git_repo("wt-driver-sandbox")
+    client = ClientConfig(
+        name="test",
+        workspace_path=worktree,
+        default_branch="main",
+        pipeline=StagePipelineConfig(
+            executors={
+                Stage.REVIEW: StageExecutorConfig(
+                    backend=CODEX_BACKEND,
+                    reviewer_sandbox_mode=SandboxMode.READ_ONLY,
+                    fix_sandbox_mode=SandboxMode.WORKSPACE_WRITE,
+                )
+            }
+        ),
+    )
+    _seed_client(tmp_config_dir=tmp_config_dir, worktree=worktree, client=client)
+    captured: dict[str, object] = {}
+
+    def _spy_run_review(**kwargs: object) -> tuple[AutoDevResult, None]:
+        captured.update(kwargs)
+        blocked = make_blocked(
+            ticket_id="T-1",
+            worktree=worktree,
+            reason=CODEX_REVIEW_UNPARSEABLE,
+            stage_reached="stage3_review",
+        )
+        return blocked, None
+
+    with (
+        patch("cw.codex_driver.get_client", return_value=client),
+        patch("cw.codex_background.run_review_with_fix_loop", _spy_run_review),
+        patch("cw.codex_background._post_review_comment"),
+    ):
+        _run_stage(FakeCodexRunner(returncode=0))
+
+    assert captured["reviewer_sandbox_mode"] == "read-only"
+    assert captured["fix_sandbox_mode"] == "workspace-write"
 
 
 def test_run_codex_review_stage_no_running_task_raises(

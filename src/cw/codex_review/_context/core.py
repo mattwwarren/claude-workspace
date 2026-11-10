@@ -66,6 +66,7 @@ from cw.gh import (
 )
 from cw.local_runner import TICKET_BODY_KEY, TICKET_TITLE_KEY, resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH, HOOK_CONTEXT_RELATIVE_PATH
+from cw.models.enums import DEFAULT_REVIEWER_SANDBOX_MODE, SandboxMode
 from cw.models.operator_constraint import (
     render_constraint_entries,
     render_decided_entries,
@@ -597,6 +598,7 @@ def _prepare_review_pass(
     capability: _CodexFilesystemCapability | None = None,
     backend: ExecutorName = "codex",
     resolution: ResolutionSpec | None = None,
+    reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
 ) -> _ReviewPassInputs:
     """Assemble one review pass's inputs: capture diff, select roles, build prompts.
 
@@ -657,6 +659,10 @@ def _prepare_review_pass(
     separate from ``default_branch`` because the Claude confirm round hands
     ``default_branch`` a pinned diff-base sha, which is not a branch name.
     Required, so no call site can inherit a default that reads the wrong ref.
+
+    ``reviewer_sandbox_mode`` (#1767) is the mode the capability probe runs
+    under, the reviewer's resolved mode, so its verdict describes what the
+    reviewers of this pass can read. Unused when ``capability`` is given.
     """
     if resolution is not None and delta_from_sha is not None:
         msg = "resolution and delta_from_sha are mutually exclusive"
@@ -665,7 +671,9 @@ def _prepare_review_pass(
         if runner is None:
             msg = "_prepare_review_pass needs a runner or a capability"
             raise ValueError(msg)
-        capability = _probe_filesystem_capability(runner=runner, session_id=session_id)
+        capability = _probe_filesystem_capability(
+            runner=runner, session_id=session_id, sandbox_mode=reviewer_sandbox_mode
+        )
     delta_diff: CapturedDiff | None = None
     delta_changed_files: frozenset[str] | None = None
     branch_context = _NO_BRANCH_CONTEXT

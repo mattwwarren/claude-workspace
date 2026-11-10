@@ -28,7 +28,10 @@ not one class:
     :class:`RecordingShim`.
 
 A shim lives in ``tmp_path/bin``, inside the test root, so the launch guard
-lets it run by bare name once its directory leads ``PATH``.
+lets it run by bare name once its directory leads ``PATH``. Put it there with
+:func:`path_with_stub` (write the stub and lead ``PATH`` with its directory) or
+:func:`prepend_to_path` (a directory already in hand); do not open-code
+``monkeypatch.setenv("PATH", ...)`` -- ``tests/test_tool_fakes.py`` fails on it.
 
 This module never imports ``tests.conftest``: the conftest imports it.
 ``FakeGhHead`` is re-exported through a module ``__getattr__`` because its
@@ -95,6 +98,8 @@ __all__ = [
     "fake_pre_commit_cli",
     "fake_uv_cli",
     "gh_calls",
+    "path_with_stub",
+    "prepend_to_path",
     "read_calls",
     "restore_real_run",
     "shim_env",
@@ -177,6 +182,40 @@ def write_bin_stub(tmp_path: Path, name: str, body: str) -> Path:
     stub.write_text(body)
     stub.chmod(0o755)
     return fake_bin
+
+
+def prepend_to_path(
+    monkeypatch: pytest.MonkeyPatch, bin_dir: Path, *, keep_existing: bool = True
+) -> Path:
+    """Put *bin_dir* first on ``PATH``, ahead of the current ``PATH``.
+
+    The value is ``bin_dir`` + ``os.pathsep`` + current ``PATH``;
+    ``keep_existing=False`` replaces ``PATH`` with ``str(bin_dir)``. Returns
+    *bin_dir*. The change is undone with the rest of *monkeypatch*.
+    """
+    if keep_existing:
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    else:
+        monkeypatch.setenv("PATH", str(bin_dir))
+    return bin_dir
+
+
+def path_with_stub(
+    monkeypatch: pytest.MonkeyPatch,
+    base: Path,
+    name: str,
+    body: str,
+    *,
+    keep_existing: bool = True,
+) -> Path:
+    """:func:`write_bin_stub` ``(base, name, body)``, then lead ``PATH`` with its dir.
+
+    Pass a ``tempfile`` directory as *base* to put the stub outside the pytest
+    basetemp (emulating a host install under the launch guard). Returns the bin
+    dir (``base / "bin"``).
+    """
+    bin_dir = write_bin_stub(base, name, body)
+    return prepend_to_path(monkeypatch, bin_dir, keep_existing=keep_existing)
 
 
 def read_calls(fake_bin: Path, calls_file: str) -> list[list[str]]:

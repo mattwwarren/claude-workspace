@@ -35,6 +35,7 @@ from cw.codex_review._const import (
     CODEX_BUDGET_EXHAUSTED,
     CODEX_INPUT_TOO_LARGE,
     CODEX_MODEL_CAPACITY,
+    _exec_policy_argv,
     _is_spawn_error,
     format_input_sizes,
 )
@@ -45,6 +46,7 @@ from cw.executor_diagnostics import (
     diagnostics_bundle_dir,
     persist_diagnostics_bundle,
 )
+from cw.models.enums import DEFAULT_REVIEWER_SANDBOX_MODE, SandboxMode
 from cw.openai_strict_schema import to_openai_strict_schema
 from cw.review_findings import (
     ReviewerFindingsDocument,
@@ -138,14 +140,18 @@ def _build_generic_codex_argv(
     reasoning_effort: str | None,
     schema_path: Path,
     output_path: Path,
+    sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
 ) -> list[str]:
     """Return the generic ``codex exec`` argv (no ``review``/``--base``).
 
-    ``--sandbox read-only`` (ticket AC, MUST_FIX 4, #1236): every reviewer
-    input is inlined into the prompt over stdin — a reviewer role has no
-    legitimate reason to write to the worktree, so it never gets write
-    access, matching the pre-#1236 ``codex exec review`` path's implicit
-    read-only posture.
+    ``--sandbox read-only`` by default (ticket AC, MUST_FIX 4, #1236): every
+    reviewer input is inlined into the prompt over stdin — a reviewer role has
+    no legitimate reason to write to the worktree, so by default it gets no
+    write access, matching the pre-#1236 ``codex exec review`` path's implicit
+    read-only posture. *sandbox_mode* is the resolved
+    ``StageExecutorConfig.reviewer_sandbox_mode`` (#1767); the sandbox pair and
+    the headless ``-c approval_policy=never`` override come from the shared
+    seam :func:`~cw.codex_review._const._exec_policy_argv`.
 
     ``--json`` + ``--ephemeral`` (#1710): the former makes codex print its
     run as a JSONL event stream on stdout (parsed by ``_audit_events`` into
@@ -157,11 +163,11 @@ def _build_generic_codex_argv(
     reasoning-effort pin (:func:`_reasoning_effort_argv`) sits in the same
     pre-schema slot for the same reason.
     """
+    # Sandbox + approval override: one seam, see _const._exec_policy_argv.
     argv = [
         "codex",
         "exec",
-        "--sandbox",
-        "read-only",
+        *_exec_policy_argv(sandbox_mode),
         *_AUDIT_ARGV_FLAGS,
         *_reasoning_effort_argv(reasoning_effort),
         "--output-schema",
@@ -414,6 +420,7 @@ def _run_codex_role(
     timeout_seconds: int | None,
     scratch_dir: Path,
     session_id: str,
+    reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
 ) -> tuple[
     ReviewerFindingsDocument | None,
     ReviewerRunFailure | None,
@@ -464,6 +471,7 @@ def _run_codex_role(
         reasoning_effort=reasoning_effort,
         schema_path=schema_path,
         output_path=output_path,
+        sandbox_mode=reviewer_sandbox_mode,
     )
     start = time.monotonic()
     result = runner.run(worktree, argv, timeout_seconds, stdin=prompt)
@@ -586,6 +594,7 @@ def run_codex_roles(
     reasoning_effort: str | None,
     wall_clock_budget_seconds: int | None,
     session_id: str,
+    reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
 ) -> tuple[
     list[ReviewerFindingsDocument],
     list[ReviewerRunFailure],
@@ -615,7 +624,18 @@ def run_codex_roles(
     role order, for ``consolidate_verdict``'s ``pre_validation_rejected``. A
     role that failed outright contributes nothing to it — its losses are
     recorded on its own :class:`ReviewerRunFailure` tally instead.
+
+    *reviewer_sandbox_mode* (#1767) reaches every role's argv. A mode other
+    than read-only logs one WARNING per call: a writable reviewer can repair
+    what it should report.
     """
+    if reviewer_sandbox_mode != SandboxMode.READ_ONLY:
+        _log.warning(
+            "codex reviewer sandbox is %s (not read-only) for session %s; "
+            "report/fix boundary is weakened",
+            SandboxMode(reviewer_sandbox_mode).value,
+            session_id,
+        )
     scratch_dir = _codex_scratch_dir(uuid.uuid4().hex)
     try:
         documents: list[ReviewerFindingsDocument] = []
@@ -641,6 +661,7 @@ def run_codex_roles(
                 timeout_seconds=budget.timeout_seconds,
                 scratch_dir=scratch_dir,
                 session_id=session_id,
+                reviewer_sandbox_mode=reviewer_sandbox_mode,
             )
             metrics_by_role[role] = metrics
             pre_validation_rejected.extend(rejected)

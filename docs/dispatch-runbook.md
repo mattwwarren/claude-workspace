@@ -1406,6 +1406,42 @@ happened, and a `requeue --stage finalize` runs no new review round. Use the
 override to ship past this verdict. Use settle so the next round stops raising
 the finding. They can be combined.
 
+### Codex headless approval override
+
+Every `codex exec` cw launches (reviewer roles, fix cycles, the
+filesystem-capability probe) carries `-c approval_policy=never` (#1767). An
+escalation request, a write the sandbox blocked retried with a request for
+permission, is denied rather than answered by the host's approval setup. It
+exists because a host `~/.codex/config.toml` with
+`approvals_reviewer = "auto_review"` auto-approved an escalated write out of a
+`read-only` reviewer sandbox. It is not configurable. cw never edits
+`~/.codex/config.toml`, so an interactive `codex` is unaffected and keeps its
+own `approvals_reviewer`.
+
+Behavior change: a fix-loop or reviewer run that previously relied on an
+auto-approved escalation (for example a write outside the workspace) is now
+denied. This is intended. A denied fix exits 0 with an empty tree, so it shows
+up as the fix-cycle WARNING "produced no changes ... approval_policy=never
+denied it", and the cycle still counts toward the cap.
+
+Check the override still holds with the opt-in live probe (a real model call;
+needs an authenticated `codex`):
+
+```bash
+INTEGRATION_CODEX_LIVE=1 uv run pytest tests/test_codex_contract_live.py -k ApprovalOverride -m integration
+```
+
+- `nightly-codex.yml` runs this class too, but despite its name it is
+  `workflow_dispatch` only: nothing runs it on a schedule. Re-run the probe by
+  hand after every codex CLI upgrade.
+- A pass on a host without `approvals_reviewer = "auto_review"` (a CI runner,
+  most likely) is weak evidence: nothing there would have approved the write.
+  The pass that counts is one on an `auto_review` host.
+- A failure means the escalated write escaped the sandbox even with the
+  override: this codex version no longer honors `approval_policy=never` for
+  `codex exec`. Stop dispatching codex lanes until the argv is fixed. The
+  control case (override stripped) only logs whether the write escaped.
+
 ### Large ticket on a lane with no review stage (#2779)
 
 A large ticket reaches finalize Step 4.0 with no review approval when its lane
@@ -4785,6 +4821,45 @@ of it. The one caveat: a `COMMENTED` review's `pr.review_received` event
 has nothing to compare against) is push-only; if the relay is down when a
 `COMMENTED` review lands, that specific notification is missed, though the
 review itself remains visible via `gh pr view`.
+
+### 10.5 Replay cursor and /ack contract (#3172)
+
+A subscriber's replay cursor is the **next offset to read**: every record with
+an offset below the cursor has been handled by that subscriber, and
+`subscribe_with_cursor` replays records with `offset >= cursor`.
+
+`POST /ack` records the subscriber's *declared durable prefix*. The server
+cannot prove downstream processing and does not enforce per-subscription
+delivery. It only keeps the cursor between its current value and the
+next-offset frontier (the offset the next appended event will get). The same
+semantics apply to the queue channel's `/ack` and the operator channel's
+`/operator/ack`, which share the same bus.
+
+- **Request:** `{"client_id": <non-blank string>, "offset": <non-negative
+  integer>}`. Types are strict: a bool, string or float offset is rejected, as
+  is a blank or whitespace-only `client_id`. The id is stored verbatim.
+- **200** `{"status": "ok", "cursor": <effective cursor>}` for a valid advance,
+  a duplicate, or a stale (regressing) ACK. A duplicate or regressing ACK is a
+  silent no-op: nothing is written and the response carries the higher,
+  effective cursor. An ACK equal to the frontier ("caught up") is accepted.
+- **400** `{"error": "<message>"}` for invalid input or an ACK beyond the
+  frontier, with persisted and in-memory state unchanged. The future-ACK message
+  reads `ack offset <N> is beyond the next-offset frontier <F> for client
+  '<id>'`.
+- **Behavior change:** an ACK beyond the persisted next-offset frontier is now a
+  hard 400. There is no deprecation window; earlier builds accepted and stored
+  any integer.
+- **No rewind, no repair:** `/ack` cannot rewind or repair a persisted cursor
+  that is too high (poisoned or rewound). A regressing ACK is a silent no-op.
+  Today the recovery is to edit the channel's cursors file in the state
+  directory and restart the server. An operator rewind/repair command is
+  tracked in #3209.
+- **Frontier note:** besides the in-memory counter, the frontier consults the
+  events file with `_last_offset_from_reverse_scan`, which takes the max over
+  only the first non-empty read group. Under cross-process interleaving it can
+  undercount; a false "future" 400 would also need the in-memory counter to be
+  stale, so exposure is narrow.
+- Out of scope: the events-log retention floor (#1991).
 
 ---
 

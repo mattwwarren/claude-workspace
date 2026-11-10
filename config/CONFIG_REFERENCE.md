@@ -372,6 +372,73 @@ clients:
               reasoning_effort: max
 ```
 
+### Codex Sandbox Mode
+
+Two fields on the `review` stage config of a `backend: codex` stage pick the
+`codex exec --sandbox` mode of each codex role (#1767). The reviewer roles and
+the fix loop share the one `review` stage config but default to opposite modes,
+hence two fields.
+
+- `reviewer_sandbox_mode`: currently fixed to `read-only`. A configured
+  `workspace-write` reviewer is rejected until reviewer changes have an audit
+  and recovery path; the lower-level mode plumbing remains reserved for that
+  follow-up. The filesystem-capability probe follows the resolved reviewer
+  mode (one probe per mode; the cached verdict records the mode).
+- `fix_sandbox_mode`: default `workspace-write`, which is also its only accepted
+  value. `read-only` fails config load: the fix loop edits files, so a
+  read-only sandbox would silently no-op every fix.
+- `danger-full-access` is not accepted for either field. Neither field can be
+  `null`: an unpinned sandbox would leave the mode to `~/.codex/config.toml`.
+- Codex backend only: an explicit non-default value on any other backend is a
+  config error (the defaults are simply unused there).
+- Like `model` and `reasoning_effort`, a lane's stage config replaces the
+  client's stage config wholesale, so a lane must repeat both fields. A lane
+  that omits them gets the defaults, not the client's values.
+- `cw review confirm` and `cw review converge delta-confirm` have no resolved
+  executor config and always run their reviewers `read-only`.
+- Network access is not controlled by this knob.
+- The capability cache holds one verdict, so lanes that alternate modes pay
+  one extra probe per switch.
+
+**Safety boundary:** `workspace-write` reviewer mode is unavailable until the
+reviewer identity/session, pre/post tree changes, and recovery/approval path
+are recorded durably (see #1763 and #1738). The reviewer prompt and health
+handling therefore continue to assume a read-only reviewer.
+
+```yaml
+clients:
+  my-project:
+    workspace_path: /path/to/repo
+    lanes:
+      - name: default
+        pipeline:
+          executors:
+            review:
+              backend: codex
+              model: gpt-5.6-luna
+              reviewer_sandbox_mode: read-only      # the default
+              fix_sandbox_mode: workspace-write     # the default and only value
+```
+
+#### Headless approval policy
+
+Every `codex exec` cw launches (reviewer roles, fix cycles, the capability
+probe) also carries `-c approval_policy=never`. It is not configurable and
+needs no YAML. An escalation request (a write the sandbox blocked, retried with
+a request for permission) is denied instead of answered by the host's own
+approval setup. Without it, a host whose `~/.codex/config.toml` sets
+`approvals_reviewer = "auto_review"` auto-approved an escalated write out of a
+`read-only` sandbox (observed 2026-11-09, codex-cli 0.167.0). `codex exec` has
+no `-a/--ask-for-approval` flag, so the override uses the config form.
+
+It is a per-invocation flag on cw's headless launches only. cw never reads or
+edits `~/.codex/config.toml`, so an interactive `codex` keeps its own
+`approvals_reviewer`. A fix or reviewer run that relied on an auto-approved
+escalation is now denied: a denied fix exits 0 with no changes, and the fix
+loop logs "produced no changes ... approval_policy=never denied it". See
+[`docs/dispatch-runbook.md`](../docs/dispatch-runbook.md#codex-headless-approval-override)
+for the live probe.
+
 Each `backend` here corresponds to a harvest-authority mechanism documented in
 [`docs/headless-contract.md` §11](../docs/headless-contract.md#11-result-publishing-harvest-authority-rfc-0012)
 — `claude-native` harvests via the Stop hook (`stop_hook_harvest`), `codex`

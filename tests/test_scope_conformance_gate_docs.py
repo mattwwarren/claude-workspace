@@ -38,8 +38,6 @@ from cw.models import (
 from cw.models.review_feedback import REVIEW_FEEDBACK_KEY
 from tests import _git_sandbox
 from tests.conftest import (
-    _GATE2_END,
-    _GATE2_START,
     GUARD_FENCE_INVOKED,
     GUARD_MARKER_BAD_CASES,
     GUARD_MARKER_CURRENT,
@@ -51,6 +49,7 @@ from tests.conftest import (
     _placement,
     assert_gate_key_helper_missing,
     gate2_fence,
+    gate2_section,
     gate_key_for,
     git_in,
     guard_candidate_path,
@@ -114,14 +113,6 @@ def _table_minimums() -> dict[str, tuple[int, str]]:
     }
     assert len(rows) == 6, f"expected 6 table rows, parsed {sorted(rows)}"
     return rows
-
-
-def _gate2_section() -> str:
-    """Step 2.5 gate 2, from its numbered bullet to gate 3's (#2141)."""
-    content = _cmd("auto-dev-impl.md")
-    start = content.index(_GATE2_START)
-    end = content.index(_GATE2_END, start)
-    return content[start:end]
 
 
 def _resolver_table_section() -> str:
@@ -325,7 +316,7 @@ def test_gate2_resolves_repo_local_then_global_script_path() -> None:
     ``~/.claude/scripts/`` since #2096; a client repo without a local
     ``.claude/scripts/`` previously made the gate silently no-op.
     """
-    section = _gate2_section()
+    section = gate2_section()
     assert '"$SESSION_WT/.claude/scripts/check_plan_scope_conformance.py"' in section
     assert '"$HOME/.claude/scripts/check_plan_scope_conformance.py"' in section
 
@@ -337,7 +328,7 @@ def test_gate2_absent_from_both_locations_skips_non_blocking() -> None:
     generic "parse error" branch — non-blocking by accident, under the wrong
     label. This pins the honest label and the continue-to-gate-3 disposition.
     """
-    section = _gate2_section()
+    section = gate2_section()
     assert "check_plan_scope_conformance: script absent, skipped" in section
     assert "continue to gate 3" in section
 
@@ -345,7 +336,7 @@ def test_gate2_absent_from_both_locations_skips_non_blocking() -> None:
 def test_gate2_greps_cw_script_version_marker_and_headless_blocks_on_stale() -> None:
     """The marker-stale branch is a hard stop, textually distinct from the
     non-blocking absent-from-both-locations branch (#2141)."""
-    section = _gate2_section()
+    section = gate2_section()
     assert "cw-script-version" in section
     assert "HEADLESS BLOCK" in section
 
@@ -380,7 +371,7 @@ def test_gate2_anchors_the_repo_local_candidate_absolutely() -> None:
     anchor is the cw session worktree rather than ``$TMPWT`` — the gate around
     it does run inside ``$TMPWT``, so silence there reads as a contradiction.
     """
-    section = _gate2_section()
+    section = gate2_section()
     assert "for candidate in .claude/scripts/" not in section
     assert '"$SESSION_WT/.claude/scripts/' in section
     assert "not `$TMPWT`" in section or "NOT $TMPWT" in section
@@ -1506,7 +1497,7 @@ def test_gate2_fence_pins_the_repair_entry_skip() -> None:
     assert "queue_metadata.review_feedback != null" in fence
     assert "queue_metadata.branch != null" in fence
     assert _REPAIR_SKIP in fence
-    assert "impl_scope_conformance_skipped_repair_entry" in _gate2_section()
+    assert "impl_scope_conformance_skipped_repair_entry" in gate2_section()
 
 
 @pytest.mark.parametrize("location", _GATE2_LOCATIONS)
@@ -1657,7 +1648,7 @@ def test_gate2_reads_scope_drift_approval_and_checks_ancestry() -> None:
     assert "merge-base --is-ancestor" in fence
     assert "--approved-extra-files" in fence
     assert "scope_drift_approval_stale" in fence
-    section = _gate2_section()
+    section = gate2_section()
     assert "ancestry" in section
     assert "cw dev-queue approve" in section
 

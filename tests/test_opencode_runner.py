@@ -55,7 +55,7 @@ from tests._opencode_helpers import (
     text_event,
     write_opencode_log,
 )
-from tests._tool_fakes import write_bin_stub
+from tests._tool_fakes import path_with_stub
 
 if TYPE_CHECKING:
     from tests._opencode_helpers import LogLine
@@ -161,10 +161,9 @@ def test_build_argv_default_probe_ignores_a_host_opencode(
     under ``tmp_path`` is a test's own fake and would be allowed to run.
     """
     with tempfile.TemporaryDirectory(prefix="cw-host-bin-") as host:
-        bin_dir = write_bin_stub(
-            Path(host), "opencode", '#!/bin/sh\necho "--pure --dir"\n'
+        path_with_stub(
+            monkeypatch, Path(host), "opencode", '#!/bin/sh\necho "--pure --dir"\n'
         )
-        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
         _supports_v1_flags.cache_clear()
 
         assert "--pure" not in build_argv(None, tmp_path, "p")
