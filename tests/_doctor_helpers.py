@@ -23,11 +23,11 @@ from cw.models import (
     StageExecutorConfig,
     StagePipelineConfig,
 )
-from cw.models.client import ReviewConfig
+from cw.models.client import ReviewConfig, TrackerMcpGateConfig
 from cw.native_daemon import FakeNativeDaemonClient
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     import pytest
 
@@ -68,6 +68,25 @@ def write_orchestrator_yaml(body: str) -> None:
     path.write_text(body, encoding="utf-8")
 
 
+def make_stage_pipeline(
+    executors: Mapping[Stage, str | None], stages: Sequence[Stage] | None = None
+) -> StagePipelineConfig:
+    """A pipeline running each stage in *executors* on its backend (#3055).
+
+    A ``None`` backend means no override for that stage. *stages*, when given,
+    is set explicitly, so a lane carrying this pipeline overrides the client's
+    stage list.
+    """
+    configured = {
+        stage: StageExecutorConfig(backend=backend)
+        for stage, backend in executors.items()
+        if backend
+    }
+    if stages is None:
+        return StagePipelineConfig(executors=configured)
+    return StagePipelineConfig(executors=configured, stages=list(stages))
+
+
 def make_review_pipeline(
     backend: str | None, stages: Sequence[Stage] | None = None
 ) -> StagePipelineConfig:
@@ -76,10 +95,7 @@ def make_review_pipeline(
     *stages*, when given, is set explicitly, so a lane carrying this pipeline
     overrides the client's stage list.
     """
-    executors = {Stage.REVIEW: StageExecutorConfig(backend=backend)} if backend else {}
-    if stages is None:
-        return StagePipelineConfig(executors=executors)
-    return StagePipelineConfig(executors=executors, stages=list(stages))
+    return make_stage_pipeline({Stage.REVIEW: backend}, stages)
 
 
 def make_lane(
@@ -87,11 +103,19 @@ def make_lane(
     flag: bool | None = None,
     backend: str | None = None,
     stages: Sequence[Stage] | None = None,
+    *,
+    executors: Mapping[Stage, str] | None = None,
 ) -> LaneConfig:
-    """A lane with an optional codex fix-loop flag, REVIEW backend and stages."""
-    pipeline = (
-        make_review_pipeline(backend, stages) if backend or stages is not None else None
-    )
+    """A lane with an optional codex fix-loop flag, REVIEW backend and stages.
+
+    *executors* sets other stages' backends (PLAN/IMPL/FINALIZE, #3055);
+    *backend* stays the REVIEW backend.
+    """
+    pipeline = None
+    if backend or stages is not None or executors:
+        pipeline = make_stage_pipeline(
+            {**(executors or {}), Stage.REVIEW: backend}, stages
+        )
     return LaneConfig(name=name, codex_fix_loop_enabled=flag, pipeline=pipeline)
 
 
@@ -100,15 +124,22 @@ def make_client(
     backend: str = CODEX_BACKEND,
     review: ReviewConfig | None = None,
     name: str = "client-a",
+    executors: Mapping[Stage, str] | None = None,
+    tracker_mcp_gate: TrackerMcpGateConfig | None = None,
+    workspace_path: Path | None = None,
 ) -> ClientConfig:
     """A client whose client-level REVIEW stage runs on *backend*.
 
     *review* ``None`` keeps the default ``ReviewConfig`` (blocking mode).
+    *executors* sets other client-level stage backends; *workspace_path*
+    defaults to ``/tmp/x`` (doctor tests pass ``tmp_path`` so the tracker and
+    the layer probe are real).
     """
     return ClientConfig(
         name=name,
-        workspace_path=Path("/tmp/x"),
+        workspace_path=workspace_path if workspace_path is not None else Path("/tmp/x"),
         lanes=list(lanes),
-        pipeline=make_review_pipeline(backend),
+        pipeline=make_stage_pipeline({**(executors or {}), Stage.REVIEW: backend}),
         review=review if review is not None else ReviewConfig(),
+        tracker_mcp_gate=tracker_mcp_gate,
     )

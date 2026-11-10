@@ -170,6 +170,20 @@ class TestAdmitsFilterEngine:
         )
         assert _admits(event, self._default_forward()) is True
 
+    @pytest.mark.parametrize(
+        "event_type",
+        [
+            OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED,
+            OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED,
+        ],
+    )
+    def test_rfc0018_s3_review_signals_admitted_by_default(
+        self, event_type: OrchestratorEventType
+    ) -> None:
+        """Both #3055 codex review signals forward unconditionally."""
+        event = OrchestratorEvent(type=event_type, payload={})
+        assert _admits(event, self._default_forward()) is True
+
     def test_concierge_recovered_not_admitted_by_default(self) -> None:
         """CONCIERGE_RECOVERED is audit-trail only — NOT in the default
         forward set (#1015, Q3)."""

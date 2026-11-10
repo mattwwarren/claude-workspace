@@ -21988,7 +21988,7 @@ class TestClaimNextPendingTrackerMcpGate:
                 tid: TrackerMcpGateHit(
                     branch=f"dev/{tid}",
                     file_inspected=".claude/settings.json",
-                    expected_plugin=self._PLUGIN,
+                    expected=self._PLUGIN,
                 )
                 for tid in ticket_ids
             }
@@ -22059,10 +22059,67 @@ class TestClaimNextPendingTrackerMcpGate:
         assert payload["branch"] == "dev/GEN-2442"
         assert payload["file_inspected"] == ".claude/settings.json"
         assert payload["expected_plugin"] == self._PLUGIN
+        assert payload["backend"] == "claude-native"
         assert payload["details"] == (
             "branch=dev/GEN-2442; file_inspected=.claude/settings.json;"
             f" expected_plugin={self._PLUGIN}"
         )
+
+    @pytest.mark.usefixtures("isolated_backend_layers")
+    def test_tracker_mcp_gate_parks_opencode_row_missing_its_server(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """#3055: the real resolver parks an opencode PLAN row on a Linear
+        tracker whose opencode.json lacks the gate's server; no spawn."""
+        from cw.dev_queue import TRACKER_MCP_GATE_DISPOSITION
+        from cw.dev_queue.dispositions import _PRE_DISPATCH_TRACKER_MCP_REASON
+        from cw.models.client import TrackerMcpGateConfig
+        from tests._backend_mcp_helpers import stage_mcp_config
+        from tests._doctor_helpers import make_stage_pipeline
+        from tests.conftest import _write_tracker_config
+
+        config_path = stage_mcp_config(monkeypatch, tmp_path, "opencode", "absent")
+        _write_tracker_config(sample_client_config.workspace_path, "linear")
+        client = sample_client_config.model_copy(
+            update={
+                "tracker_mcp_gate": TrackerMcpGateConfig(
+                    enabled=True, servers={"opencode": "linear"}
+                ),
+                "pipeline": make_stage_pipeline(
+                    {Stage.PLAN: "opencode", Stage.IMPL: "opencode"}
+                ),
+            }
+        )
+        write_clients_yaml(client)
+        self._seed("GEN-3055")
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._config(), native_daemon=daemon)
+
+        parked = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-3055")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == TRACKER_MCP_GATE_DISPOSITION
+        assert parked.blocked_reason == _PRE_DISPATCH_TRACKER_MCP_REASON
+        assert parked.attempts == 0
+        assert daemon.spawn_calls == []
+        events = read_events(
+            consumer="test-3055-gate-events",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        attention = [
+            e
+            for e in events
+            if e.payload.get("paused_status") == TRACKER_MCP_GATE_DISPOSITION
+        ]
+        assert len(attention) == 1
+        payload = attention[0].payload
+        assert payload["backend"] == "opencode"
+        assert payload["expected_server"] == "linear"
+        assert payload["file_inspected"] == str(config_path)
+        assert "expected_plugin" not in payload
 
     def test_tracker_mcp_gate_allows_dispatch_when_plugin_enabled(
         self,

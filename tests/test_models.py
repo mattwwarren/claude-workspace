@@ -420,11 +420,50 @@ class TestClientConfig:
         assert gate.enabled is False
         assert gate.settings_path == ".claude/settings.json"
 
-    def test_tracker_mcp_gate_config_requires_plugin_id(self) -> None:
+    def test_tracker_mcp_gate_config_requires_plugin_id_or_servers(self) -> None:
         from cw.models.client import TrackerMcpGateConfig
 
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match="plugin_id or servers"):
             TrackerMcpGateConfig.model_validate({"enabled": True})
+
+    def test_tracker_mcp_gate_config_rejects_empty_servers_alone(self) -> None:
+        from cw.models.client import TrackerMcpGateConfig
+
+        with pytest.raises(ValidationError, match="plugin_id or servers"):
+            TrackerMcpGateConfig.model_validate({"enabled": True, "servers": {}})
+
+    def test_tracker_mcp_gate_config_servers_only_is_valid(self) -> None:
+        """#3055: a servers-only gate needs no plugin_id."""
+        from cw.models.client import TrackerMcpGateConfig
+
+        gate = TrackerMcpGateConfig.model_validate(
+            {"enabled": True, "servers": {"opencode": "linear", "codex": "linear"}}
+        )
+        assert gate.plugin_id is None
+        assert gate.servers == {"opencode": "linear", "codex": "linear"}
+
+    def test_tracker_mcp_gate_config_plugin_only_still_valid(self) -> None:
+        from cw.models.client import TrackerMcpGateConfig
+
+        gate = TrackerMcpGateConfig.model_validate({"plugin_id": "linear@acme"})
+        assert gate.plugin_id == "linear@acme"
+        assert gate.servers is None
+
+    @pytest.mark.parametrize("backend", ["claude-native", "local", "bogus"])
+    def test_tracker_mcp_gate_config_rejects_unknown_server_backend(
+        self, backend: str
+    ) -> None:
+        from cw.models.client import TrackerMcpGateConfig
+
+        with pytest.raises(ValidationError, match="servers key"):
+            TrackerMcpGateConfig.model_validate({"servers": {backend: "linear"}})
+
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_tracker_mcp_gate_config_rejects_blank_server(self, value: str) -> None:
+        from cw.models.client import TrackerMcpGateConfig
+
+        with pytest.raises(ValidationError, match="blank"):
+            TrackerMcpGateConfig.model_validate({"servers": {"opencode": value}})
 
     def test_tracker_mcp_gate_config_rejects_unknown_key(self) -> None:
         from cw.models.client import TrackerMcpGateConfig
@@ -2699,6 +2738,8 @@ class TestOperatorChannelForward:
                 OrchestratorEventType.SSH_KEY_GATE_BYPASSED,
                 OrchestratorEventType.DISK_PRESSURE_GATE_BYPASSED,
                 OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
+                OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED,
+                OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED,
             }
         )
 

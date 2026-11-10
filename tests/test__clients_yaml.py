@@ -284,6 +284,23 @@ _FIDELITY_CASES = {
         workspace_path=Path("/tmp/ws-gated"),
         tracker_mcp_gate=TrackerMcpGateConfig(enabled=True, plugin_id="tracker@mkt"),
     ),
+    # #3055: a servers-only gate (no plugin_id) and a plugin_id+servers gate.
+    "tracker_gate_servers_only": ClientConfig(
+        name="gated-servers",
+        workspace_path=Path("/tmp/ws-gated-servers"),
+        tracker_mcp_gate=TrackerMcpGateConfig(
+            enabled=True, servers={"opencode": "linear"}
+        ),
+    ),
+    "tracker_gate_plugin_and_servers": ClientConfig(
+        name="gated-both",
+        workspace_path=Path("/tmp/ws-gated-both"),
+        tracker_mcp_gate=TrackerMcpGateConfig(
+            enabled=True,
+            plugin_id="tracker@mkt",
+            servers={"opencode": "linear", "codex": "linear"},
+        ),
+    ),
     "occupancy_false": ClientConfig(
         name="occ", workspace_path=Path("/tmp/ws-occ"), occupancy_gate_enabled=False
     ),

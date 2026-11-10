@@ -1054,6 +1054,8 @@
       "review.confirm_escalated",
       "review.finding_disposition_reverted",
       "review.finding_disposition_stale",
+      "review.verdict_comment_skipped",
+      "review.operator_context_undelivered",
       "watched_pr.collision",
       "sentinel.race_miss",
       "worktree.fast_forwarded",
@@ -1240,6 +1242,8 @@
       "review.confirm_escalated",
       "review.finding_disposition_reverted",
       "review.finding_disposition_stale",
+      "review.verdict_comment_skipped",
+      "review.operator_context_undelivered",
       "watched_pr.collision",
       "sentinel.race_miss",
       "worktree.fast_forwarded",
@@ -2426,7 +2430,7 @@
     },
     "TrackerMcpGateConfig": {
      "additionalProperties": false,
-     "description": "Per-client opt-in for the #2442 pre-dispatch tracker-MCP gate.\n\nBefore a PLAN/IMPL-stage PENDING ticket is claimed, dispatch reads\n``settings_path`` from the ticket's own branch (``git show``, no checkout)\nand parks the ticket when that file's ``enabledPlugins`` verifiably lacks\n``plugin_id`` -- a worker spawned there could not reach the tracker MCP.\n\n``plugin_id`` is the exact ``enabledPlugins`` key the tracker's MCP plugin\nregisters under (e.g. ``\"linear@acme-marketplace\"``); matching is exact,\nwith no ``@``-suffix stripping and no case folding. Anything ambiguous --\nno branch yet, no settings file, malformed JSON, an unrecognized\n``enabledPlugins`` shape -- fails open (the spawn proceeds).",
+     "description": "Per-client opt-in for the #2442 pre-dispatch tracker-MCP gate.\n\nBefore a PLAN/IMPL-stage PENDING ticket is claimed, dispatch reads\n``settings_path`` from the ticket's own branch (``git show``, no checkout)\nand parks the ticket when that file's ``enabledPlugins`` verifiably lacks\n``plugin_id`` -- a worker spawned there could not reach the tracker MCP.\n\n``plugin_id`` is the exact ``enabledPlugins`` key the tracker's MCP plugin\nregisters under (e.g. ``\"linear@acme-marketplace\"``); matching is exact,\nwith no ``@``-suffix stripping and no case folding. Anything ambiguous --\nno branch yet, no settings file, malformed JSON, an unrecognized\n``enabledPlugins`` shape -- fails open (the spawn proceeds).\n\n``plugin_id`` and ``settings_path`` apply to claude-native rows only.\n``servers`` (#3055, RFC 0018 S3) maps a non-Claude backend (``codex`` or\n``opencode``) to the MCP server name its own config declares for the\ntracker; ``servers[backend]`` applies to that backend's rows only, and in\nS3 only opencode PLAN/IMPL rows are gated on it. At least one of\n``plugin_id`` or a non-empty ``servers`` is required. The server check is\ndeclaration-only: auth, env and headless load stay unverified.",
      "properties": {
       "enabled": {
        "default": false,
@@ -2434,18 +2438,38 @@
        "type": "boolean"
       },
       "plugin_id": {
-       "title": "Plugin Id",
-       "type": "string"
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Plugin Id"
       },
       "settings_path": {
        "default": ".claude/settings.json",
        "title": "Settings Path",
        "type": "string"
+      },
+      "servers": {
+       "anyOf": [
+        {
+         "additionalProperties": {
+          "type": "string"
+         },
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Servers"
       }
      },
-     "required": [
-      "plugin_id"
-     ],
      "title": "TrackerMcpGateConfig",
      "type": "object"
     }
@@ -2793,6 +2817,8 @@
       "review.confirm_escalated",
       "review.finding_disposition_reverted",
       "review.finding_disposition_stale",
+      "review.verdict_comment_skipped",
+      "review.operator_context_undelivered",
       "watched_pr.collision",
       "sentinel.race_miss",
       "worktree.fast_forwarded",
@@ -3763,6 +3789,8 @@
      "pr.registered",
      "pr.review_received",
      "requeue.review_delivery_degraded",
+     "review.operator_context_undelivered",
+     "review.verdict_comment_skipped",
      "session.liveness_changed",
      "session.needs_attention",
      "task.deleted",

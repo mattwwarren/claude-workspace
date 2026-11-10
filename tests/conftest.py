@@ -3504,6 +3504,32 @@ def _vouch_for_roster_worker(client: ClientConfig, short_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Env vars that point codex or opencode at a config layer outside the
+# per-test HOME (#3055). Cleared by ``isolated_backend_layers``.
+_BACKEND_CONFIG_ENV_VARS = (
+    "CODEX_HOME",
+    "OPENCODE_CONFIG",
+    "OPENCODE_CONFIG_DIR",
+    "OPENCODE_CONFIG_CONTENT",
+)
+
+
+@pytest.fixture
+def isolated_backend_layers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hide every backend MCP config layer the per-test HOME does not own.
+
+    Clears the codex/opencode config env vars and empties
+    ``cw.backend_mcp_config._SYSTEM_LAYERS`` so a developer's real
+    ``/etc/opencode`` or ``/etc/codex`` never reaches a test. HOME is already
+    isolated by the autouse ``_isolate_home`` fixture (#3055).
+    """
+    import cw.backend_mcp_config
+
+    for name in _BACKEND_CONFIG_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(cw.backend_mcp_config, "_SYSTEM_LAYERS", {})
+
+
 @pytest.fixture
 def tmp_dispatch_dirs(tmp_config_dir: Path) -> Path:
     """Return tmp_path; state isolation is handled by the autouse fixture."""
