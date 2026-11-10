@@ -1272,7 +1272,15 @@ the strings echoes finding text.
 The adjudication refusal codes are `engine_reject_forbidden`,
 `engine_non_deferrable` and `engine_must_fix_defer_requires_operator`.
 
-### 12.13 Codex Engine Round Limits and Usage Budget (RFC 0018)
+### 12.13 Known Limitation: Unguarded Files (#3039)
+
+`preflight` parks a branch that touches the engine skill directory or a path in
+the skill's `guarded_paths`. Files the engine reads or runs that sit outside
+both are not guarded: a branch can change them without the park, and the
+engine will then run against the changed file. List every file the engine
+invokes in `guarded_paths`. cw does not discover them.
+
+### 12.14 Codex Engine Round Limits and Usage Budget (RFC 0018)
 
 On a codex review lane, an engine round runs one `codex exec` invocation per
 declared role and one aggregation invocation. It materializes the engine from
@@ -1344,14 +1352,6 @@ closed with `engine_coverage_incomplete`; any exceeded cap, unavailable
 reservation, or expired deadline fails closed with
 `review_engine_limits_exceeded`. The round is not recorded as complete and no
 fallback reviewer or retry may bypass the failure.
-
-### 12.14 Known Limitation: Unguarded Files (#3039)
-
-`preflight` parks a branch that touches the engine skill directory or a path in
-the skill's `guarded_paths`. Files the engine reads or runs that sit outside
-both are not guarded: a branch can change them without the park, and the
-engine will then run against the changed file. List every file the engine
-invokes in `guarded_paths`. cw does not discover them.
 
 ## 13. Review Sign-off Attestation (RFC 0017)
 
