@@ -709,7 +709,8 @@ def _stamp_dispatch_failure(job: _DispatchJob, exc: CwError) -> None:
         save_dev_queue(store)
         # session_id degrades to the REVIEW session that recorded the handoff:
         # this tick owns no session of its own, and that is the closest thing to
-        # the $CW_SESSION the equivalent in-session emissions carry.
+        # the session id the equivalent in-session stage events carry
+        # (cw-context.json).
         _emit_fix_dispatch_operator_signal(
             session_id=job.pending.requested_by_session_id,
             ticket_id=job.ticket_id,
@@ -752,9 +753,10 @@ def _park_for_unresolved_ref(job: _DispatchJob, exc: RemoteRefUnresolvedError) -
     ``(ticket_id, client, RUNNING)`` just as well. Parking then would file a
     healthy, unrelated session as blocked on a ref failure that was never its
     own. ``job.pending.requested_by_session_id`` is that identity: the REVIEW
-    session that recorded the handoff is the session that claimed the row, and
-    ``claim.py`` stamps ``session_id`` with the same ``$CW_SESSION`` value the
-    handoff carries. A mismatch skips the park silently and the row is left to
+    session that recorded the handoff is the session that claimed the row:
+    dispatch stamps ``session_id`` with the spawned ``Session.id``, and
+    ``cw dev-queue record-fix-handoff`` records that same id from
+    ``cw-context.json``. A mismatch skips the park silently and the row is left to
     the ordinary stale-handoff drop, exactly as the not-RUNNING case is.
 
     ``unproductive=False`` for the same reason ``_stamp_dispatch_failure``
