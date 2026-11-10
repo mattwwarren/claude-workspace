@@ -136,10 +136,6 @@ def _preflight(
     ticket_id: str, tracker: str, client: ClientConfig
 ) -> tuple[str, tuple[str, str]] | TrackerIoReason:
     """The server name and tools, or why the turn must not launch."""
-    gate = client.tracker_mcp_gate
-    if gate is not None and not gate.enabled:
-        _log.warning("tracker_io_gate_disabled: tracker-IO turn is opt-in")
-        return TrackerIoReason.TRACKER_MCP_NOT_ENABLED
     try:
         tools = comment_tools_for(tracker)
         # A missing servers.codex entry is "" here: MCP_SERVER_UNNAMED too.

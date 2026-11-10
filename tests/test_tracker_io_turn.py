@@ -306,7 +306,7 @@ def test_mcp_not_enabled_never_launches(
     assert runner.calls == []
 
 
-def test_tracker_mcp_gate_must_be_enabled(
+def test_tracker_mcp_gate_enabled_flag_is_ignored(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _stage(monkeypatch, tmp_path)
@@ -321,9 +321,9 @@ def test_tracker_mcp_gate_must_be_enabled(
     )
     context = TrackerIoContext(runner=runner, client=client, worktree=tmp_path)
     outcome = _turn(context)
-    assert outcome.reason is TrackerIoReason.TRACKER_MCP_NOT_ENABLED
-    assert outcome.public_state is PublicState.NONE
-    assert runner.calls == []
+    assert outcome.reason is TrackerIoReason.RESULT_UNPARSEABLE
+    assert outcome.public_state is PublicState.POSSIBLE
+    assert len(runner.calls) == 1
 
 
 def test_unknown_mcp_state_proceeds(
