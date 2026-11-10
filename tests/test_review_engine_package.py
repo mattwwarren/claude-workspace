@@ -154,6 +154,7 @@ def test_codex_failure_reason_vocabularies_are_pinned() -> None:
     assert {
         "codex_timeout",
         "codex_error",
+        "codex_model_capacity",
         "missing_output",
         "empty_output",
         "invalid_json",

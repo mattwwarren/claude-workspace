@@ -161,6 +161,9 @@ def _agent_block(
             retry_eligible=(
                 reason
                 in {
+                    EngineRoundFailure.ENGINE_SUMMARY_INVALID,
+                    EngineRoundFailure.ENGINE_COVERAGE_INCOMPLETE,
+                    EngineRoundFailure.ENGINE_HEAD_MISMATCH,
                     EngineRoundFailure.ENGINE_NO_SUMMARY,
                     EngineRoundFailure.ENGINE_UNRESOLVABLE,
                 }

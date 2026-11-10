@@ -30,6 +30,7 @@ from cw.codex_review._roles import (
     _classify_codex_output,
     _codex_scratch_dir,
     _is_audit_flag_rejection,
+    _refined_nonzero_reason,
 )
 from cw.codex_review._shard import ReviewInputTooLargeError
 from cw.models.enums import SandboxMode
@@ -145,7 +146,11 @@ def run_codex_aggregator(
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     if result.timed_out or result.returncode != 0:
-        reason = _CATEGORY_TO_REASON[_classify_codex_failure(result)]
+        category = _classify_codex_failure(result)
+        reason = _CATEGORY_TO_REASON[category]
+        if category == "nonzero_exit":
+            refined, _ = _refined_nonzero_reason(result)
+            reason = refined or reason
         return _aggregation_failure(reason)
     output_reason = _output_failure_reason(result.output_file_content)
     if output_reason is not None or result.output_file_content is None:

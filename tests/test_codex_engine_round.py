@@ -537,17 +537,17 @@ class TestAggregatorFailures:
             (
                 _aggregation(coverage="PARTIAL"),
                 "engine_coverage_incomplete: coverage=PARTIAL",
-                False,
+                True,
             ),
             (
                 _aggregation(coverage="FAILED"),
                 "engine_coverage_incomplete: coverage=FAILED",
-                False,
+                True,
             ),
             (
                 _aggregation([engine_finding("NIT")], verdict="FAIL"),
                 "engine_summary_invalid: fail_without_gating_finding",
-                False,
+                True,
             ),
         ],
         ids=[
@@ -584,7 +584,7 @@ class TestAggregatorFailures:
 
         outcome = _pass(repo, runner)
 
-        assert _blocked(outcome, retry=False).startswith(
+        assert _blocked(outcome, retry=True).startswith(
             "engine_head_mismatch: summary=-"
         )
 

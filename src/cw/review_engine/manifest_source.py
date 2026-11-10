@@ -131,6 +131,8 @@ def read_default_branch_manifest(
         resolved = resolve_skill(repo, ref.commit, skill)
     except SkillResolutionError as exc:
         return _unresolvable(exc.cause, skill)
+    except (CwError, subprocess.SubprocessError, OSError, UnicodeError) as exc:
+        return _unresolvable("skill_unreadable", " ".join(str(exc).split()))
     if resolved.is_file:
         return _absent(f"{skill} is a single-file command; it has no manifest")
     try:
