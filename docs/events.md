@@ -504,15 +504,14 @@ orchestrator restarts it.
 ### `codex_fix.cycle_preserved`
 
 **Emitter:** `cw.codex_fix_loop.cycle_restore` (`preserve_and_reset`)
-**Payload:** `{"ticket_id": "<str>", "client": "<str>", "cycle": <int>, "reason": "<str>", "ref": "<str>", "paths": ["<str>", ...], "restored": <bool>, "head": "<short sha or empty>"}`
+**Payload:** `{"ticket_id": "<str>", "client": "<str>", "cycle": <int>, "reason": "<str>", "ref": "<str>", "paths": ["<str>", ...], "reset_requested": true, "head": "<short sha or empty>"}`
 **Semantics:** Emitted once for each refused codex fix cycle that pinned its
-edits under `refs/cw/refused-cycles/<ticket>/cycle-<N>-<reason>-<stamp>`. The
-pinned commit holds the cycle's edits; `paths` names what the cycle touched.
-`restored: true` means the worktree was then reset to HEAD
-(`git reset --hard HEAD`) and verified clean. `restored: false` means the reset
-or the clean re-check failed, and the ref and paths are still recorded.
-Recover the edits with `git stash apply <ref>`. Fleet-level audit record, not a
-page.
+edits under `refs/cw/refused-cycles/<ticket>/cycle-<N>-<reason>-<stamp>`, before
+the reset is attempted. The pinned commit holds the cycle's edits; `paths`
+names what the cycle touched. `reset_requested: true` records the authorized
+reset intent, not a completed reset; the final reset and clean-tree outcome is
+reported by the fix-cycle result. Recover the edits with `git stash apply
+<ref>`. Fleet-level audit record, not a page.
 
 ```json
 {
@@ -522,8 +521,8 @@ page.
   "reason": "codex_fix_growth_budget_exceeded",
   "ref": "refs/cw/refused-cycles/CW-42/cycle-1-codex_fix_growth_budget_exceeded-20261110T010738123456",
   "paths": ["src/app.py"],
-  "restored": true,
-  "head": "1a2b3c4d5e6f"
+  "reset_requested": true,
+  "head": ""
 }
 ```
 

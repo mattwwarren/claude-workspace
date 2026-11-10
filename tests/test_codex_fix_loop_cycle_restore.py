@@ -103,7 +103,8 @@ class TestPreserveAndReset:
         event_type, payload = events[0]
         assert event_type is OrchestratorEventType.CODEX_FIX_CYCLE_PRESERVED
         assert payload["ref"] == ref
-        assert payload["restored"] is True
+        assert payload["reset_requested"] is True
+        assert "restored" not in payload
         assert payload["client"] == "C-1"
         assert payload["ticket_id"] == "T-1"
         assert payload["paths"] == ["gone.py", "new.py", "tracked.py"]
@@ -136,9 +137,9 @@ class TestPreserveAndReset:
         assert git_in(repo, "cat-file", "-t", result.ref) == "commit"
         assert "tracked.py" in git_in(repo, "status", "--porcelain")
         assert events[0][1]["ref"] == result.ref
-        # The audit is acknowledged before the reset, so it records the
-        # intended preservation even when the subsequent reset fails.
-        assert events[0][1]["restored"] is True
+        # The audit is acknowledged before the reset, so it records reset
+        # intent even when the subsequent reset fails.
+        assert events[0][1]["reset_requested"] is True
 
     def test_clean_recheck_failure_keeps_ref(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch

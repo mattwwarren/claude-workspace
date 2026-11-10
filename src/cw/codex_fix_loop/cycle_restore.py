@@ -12,8 +12,9 @@ requeued cycle then met the clean-start refusal (``codex_fix_dirty_start``,
    neither the shared stash reflog nor the worktree.
 3. ``git update-ref refs/cw/refused-cycles/<ticket>/cycle-<N>-<reason>-<stamp>``
    pins that commit so the edits survive pruning and are named in the park.
-4. One ``codex_fix.cycle_preserved`` event names the ref and the paths.
-5. ``git reset --hard HEAD`` drops the cycle's uncommitted edits. It resets to
+4. One ``codex_fix.cycle_preserved`` event durably records the reset intent.
+5. While the worktree lock remains held, ``git reset --hard HEAD`` drops the
+   cycle's uncommitted edits. It resets to
    the HEAD at that moment, not a recorded cycle-start SHA, so an orchestrator
    merge that moved HEAD is not reverted. The cycle-start tree is clean by
    construction (``codex_fix_dirty_start`` refuses otherwise), so nothing
@@ -21,11 +22,14 @@ requeued cycle then met the clean-start refusal (``codex_fix_dirty_start``,
    tracked, modified review artifact is reverted in the worktree, but its
    content is part of the pinned commit, so it is recoverable from the ref.
 
-Nothing is reset unless step 3 succeeded. Once the ref is written, every
-later failure (the reset, the rev-parse, the clean re-check, as a
-``CalledProcessError`` or an ``OSError``) returns a :class:`CycleRestore`
-with ``restored=False`` that keeps the ref and the dirty paths, so the park
-still names the recovery command. The function never raises.
+Nothing is reset unless the ref and the audit event both succeeded. The audit
+event is intentionally a reset-intent record: the final reset outcome is
+returned by :class:`CycleRestore`, not claimed by the pre-reset event. Once
+the ref is written, every later failure (the reset, the rev-parse, the clean
+re-check, as a ``CalledProcessError`` or an ``OSError``) returns a
+:class:`CycleRestore` with ``restored=False`` that keeps the ref and the dirty
+paths, so the park still names the recovery command. The function never
+raises.
 
 Only :mod:`cw.codex_fix_loop.commit` calls this module; :mod:`fence` and
 :mod:`baseline` must not import it. The park text carries the ref name and the
@@ -54,6 +58,7 @@ from cw.codex_fix_loop.baseline import (
 )
 from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, FenceBreach
 from cw.events import record_event
+from cw.exceptions import CwError
 from cw.models.enums import OrchestratorEventType
 
 if TYPE_CHECKING:
@@ -68,6 +73,7 @@ _STAMP_FORMAT = "%Y%m%dT%H%M%S%f"
 _UNSAFE_REF_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
 _CLEAN_WHY = "the worktree was still not clean after the reset"
 _NO_STASH_WHY = "git stash create saved nothing for a non-empty diff"
+_RESET_PENDING_WHY = "reset pending after audit event"
 _AUDIT_WHY = "could not record the refused-cycle audit event"
 
 
@@ -91,7 +97,13 @@ class CycleRestore:
 
 @contextlib.contextmanager
 def _worktree_lock(worktree: Path) -> Iterator[None]:
-    """Serialize preserve/reset operations for one worktree."""
+    """Serialize the complete preserve/audit/reset transaction.
+
+    The OS flock stays held while the audit event is emitted. The guard is
+    scoped only around acquisition because recording the event takes another
+    leaf lock; the physical worktree reservation remains active until the
+    context exits.
+    """
     lock_path = Path(
         git_output(
             ["rev-parse", "--git-path", "codex-fix-restore.lock"], cwd=worktree
@@ -99,15 +111,14 @@ def _worktree_lock(worktree: Path) -> Iterator[None]:
     )
     if not lock_path.is_absolute():
         lock_path = worktree / lock_path
-    with (
-        lock_guard("codex_fix_restore", lock_path, LockRank.LEAF),
-        lock_path.open("a+") as handle,
-    ):
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+    handle = lock_path.open("a+")
+    try:
+        with lock_guard("codex_fix_restore", lock_path, LockRank.LEAF):
+            fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+        handle.close()
 
 
 def _cycle_paths(worktree: Path, review_artifacts: frozenset[str]) -> tuple[str, ...]:
@@ -128,14 +139,19 @@ def _best_effort_dirty_paths(worktree: Path) -> tuple[str, ...]:
     except (subprocess.CalledProcessError, OSError):
         return ()
     paths: list[str] = []
-    for entry in out.split("\0"):
-        if not entry:
-            continue
+    records = [entry for entry in out.split("\0") if entry]
+    index = 0
+    while index < len(records):
+        entry = records[index]
+        status = entry[:2]
         path = entry[3:]
-        if " -> " in path:
-            path = path.rsplit(" -> ", 1)[-1]
         if path:
             paths.append(path)
+        if status[0] in "RC" or status[1] in "RC":
+            index += 1
+            if index < len(records):
+                paths.append(records[index])
+        index += 1
     return tuple(sorted(set(paths)))
 
 
@@ -171,7 +187,7 @@ def _reset_after_pin(
 def _record_preserved(
     *, ticket: str, client: str, cycle: int, reason: str, result: CycleRestore
 ) -> bool:
-    """Record the one durable audit event for a pinned ref (#2967)."""
+    """Record durable reset intent for a pinned ref before discarding edits."""
     payload = {
         "ticket_id": ticket,
         "client": client,
@@ -179,12 +195,14 @@ def _record_preserved(
         "reason": reason,
         "ref": result.ref,
         "paths": list(result.dirty_paths),
-        "restored": result.restored,
+        # This event is emitted before reset while the worktree lock is held;
+        # it records the authorized reset intent, not an outcome known later.
+        "reset_requested": True,
         "head": result.head_short,
     }
     try:
         record_event(OrchestratorEventType.CODEX_FIX_CYCLE_PRESERVED, payload)
-    except Exception:  # noqa: BLE001 — audit failure must never escape the refusal path.
+    except (CwError, OSError, RuntimeError, TypeError, ValueError):
         _log.warning("failed to record codex_fix.cycle_preserved event", exc_info=True)
         return False
     return True
@@ -234,7 +252,7 @@ def _attempt(
             dirty_paths=paths,
             failed_step="git update-ref",
         )
-    return CycleRestore(True, ref, None, dirty_paths=paths)
+    return CycleRestore(False, ref, _RESET_PENDING_WHY, dirty_paths=paths)
 
 
 def preserve_and_reset(
@@ -261,6 +279,32 @@ def preserve_and_reset(
                 cycle=cycle,
                 reason=reason,
             )
+            ref = result.ref if result is not None else None
+            if result is not None and ref is not None:
+                if not _record_preserved(
+                    ticket=ticket,
+                    client=client,
+                    cycle=cycle,
+                    reason=reason,
+                    result=result,
+                ):
+                    result = CycleRestore(
+                        False,
+                        result.ref,
+                        _AUDIT_WHY,
+                        dirty_paths=result.dirty_paths,
+                        failed_step="record audit event",
+                    )
+                    _log.warning(
+                        "codex fix cycle %d (%s): refused-cycle restore skipped: %s",
+                        cycle,
+                        reason,
+                        result.why_not,
+                    )
+                else:
+                    result = _reset_after_pin(
+                        worktree, ref=ref, paths=result.dirty_paths
+                    )
     except subprocess.CalledProcessError as exc:
         _log.warning(
             "codex fix cycle %d (%s): refused-cycle restore skipped: git exited %s: %s",
@@ -292,45 +336,6 @@ def preserve_and_reset(
         )
     if result is None:
         return None
-    ref = result.ref
-    if ref is not None:
-        # Record the audit event before the destructive reset. This happens
-        # outside the worktree lock so the event bus can acquire its leaf lock;
-        # the lock is reacquired only after the event bus has released it.
-        if not _record_preserved(
-            ticket=ticket,
-            client=client,
-            cycle=cycle,
-            reason=reason,
-            result=result,
-        ):
-            result = CycleRestore(
-                False,
-                result.ref,
-                _AUDIT_WHY,
-                dirty_paths=result.dirty_paths,
-                failed_step="record audit event",
-            )
-            _log.warning(
-                "codex fix cycle %d (%s): refused-cycle restore skipped: %s",
-                cycle,
-                reason,
-                result.why_not,
-            )
-            return result
-        # Reacquire the worktree lock only after the event bus has released its
-        # leaf lock, then make the reset and clean-tree probe authoritative.
-        try:
-            with _worktree_lock(worktree):
-                result = _reset_after_pin(worktree, ref=ref, paths=result.dirty_paths)
-        except (subprocess.CalledProcessError, OSError) as exc:
-            result = CycleRestore(
-                False,
-                result.ref,
-                _failure_why(exc),
-                dirty_paths=result.dirty_paths,
-                failed_step="reset worktree",
-            )
     if result.restored:
         _log.info(
             "codex fix cycle %d (%s): saved rejected changes to %s and reset "
