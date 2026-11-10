@@ -157,13 +157,14 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     cancelled-row probes 20 s each as a budget checked between items plus the
     in-flight git (``_run_git`` passes no timeout, so not a hard cap), harvest
     facts 60 s plus one in-flight candidate's four 10 s git calls, then a
-    second 10 s roster refresh when the first read is older than
-    ``ROSTER_REUSE_MAX_AGE_SECONDS``; the harvest pass's own span (at most
-    100 s) plus that final refresh (at most 10 s) counts against its 180 s
-    age limit. The dirty checks expire ``DIRTY_CHECK_MAX_AGE_SECONDS`` after
-    capture, and that 90 s budget can already be exceeded in this stacked
-    worst case (a stale dirty check only defers, never authorizes); the extra
-    roster refresh only widens a case that defers. The drift and
+    second 10 s roster refresh unless a successful read younger than
+    ``ROSTER_REUSE_MAX_AGE_SECONDS`` is held (a failed read is always
+    re-read); the harvest pass's own span (at most 100 s) plus that final
+    refresh (at most 10 s) counts against its 180 s age limit. The dirty
+    checks expire ``DIRTY_CHECK_MAX_AGE_SECONDS`` after capture, and that 90 s
+    budget can already be exceeded in this stacked worst case (a stale dirty
+    check only defers, never authorizes); the extra roster refresh only widens
+    a case that defers. The drift and
     cancelled-row probes expire 180 s after capture (so a slow harvest pass
     cannot age them out); one aged out by a lock wait only defers.
 

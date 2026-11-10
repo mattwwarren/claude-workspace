@@ -144,8 +144,9 @@ which lives in `cw.reconcile._shared`:
 - `resolve_session_for_task(task, state)` — the first two hops.
 - `session_daemon_liveness(session, live_short_ids)` — the third. The roster set
   is passed in; `reconcile()` reads `claude agents --json` into one
-  tick-scoped snapshot (a second lockless refresh when the first is over 5 s
-  old) and every consumer shares that result.
+  tick-scoped snapshot (a second lockless refresh unless a successful read
+  younger than 5 s is held; a failed read is always re-read) and every
+  consumer shares that result.
 - `resolve_session_liveness_for_task(task, state, live_short_ids)` — both.
 
 Do not re-derive this chain. `cw dev-queue wait` originally carried the only

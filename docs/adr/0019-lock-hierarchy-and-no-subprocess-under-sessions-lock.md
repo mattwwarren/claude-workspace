@@ -62,8 +62,9 @@ keeps that order and extends it to every other state-file lock.
    #2563 to #2566 were found by the #1233 suite probe.
 
    The daemon roster (`claude agents --json`) is read into a tick-scoped
-   snapshot before the lock (#2550); the in-lock code only looks it up and
-   treats a stale or missing snapshot as an outage.
+   snapshot before the lock (#2550); the in-lock code only looks it up. A
+   failed read is treated as a daemon outage, and a stale or missing snapshot
+   skips every roster-dependent sweep for the tick.
 
    The post-lock stop drain (#2551) is serial and capped at
    `MAX_STOP_JOBS_PER_TICK` stop jobs per tick. A surplus recoverable stop is
