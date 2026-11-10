@@ -161,6 +161,23 @@ def capture_cycle_baseline(worktree: Path) -> CycleBaseline | DirtyStart:
     )
 
 
+def staged_cycle_tree(worktree: Path, review_artifacts: frozenset[str]) -> str:
+    """Stage the whole tree (review artifacts aside) and return its tree sha.
+
+    The one staging-and-``write-tree`` step :func:`cycle_touched_paths` and the
+    post-fix gate runner (#3056) both compare trees with. Ignored files never
+    enter it.
+    """
+    stage_cycle(worktree, review_artifacts)
+    return git_output(["write-tree"], cwd=worktree).strip()
+
+
+def stage_cycle(worktree: Path, review_artifacts: frozenset[str]) -> None:
+    """Stage the whole tree while leaving review artifacts unstaged."""
+    git_output(["add", "-A"], cwd=worktree)
+    unstage_review_artifacts(worktree, review_artifacts)
+
+
 def cycle_touched_paths(worktree: Path, baseline: CycleBaseline) -> set[str]:
     """Stage the cycle's changes and return every path differing from the baseline.
 
@@ -168,9 +185,7 @@ def cycle_touched_paths(worktree: Path, baseline: CycleBaseline) -> set[str]:
     before it. ``--no-renames``: a rename reports both sides, matching
     :func:`cw.codex_fix_loop.fence._name_only`.
     """
-    git_output(["add", "-A"], cwd=worktree)
-    unstage_review_artifacts(worktree, baseline.review_artifacts)
-    new_tree = git_output(["write-tree"], cwd=worktree).strip()
+    new_tree = staged_cycle_tree(worktree, baseline.review_artifacts)
     out = git_output(
         ["diff-tree", "-r", "--name-only", "--no-renames", baseline.tree_sha, new_tree],
         cwd=worktree,

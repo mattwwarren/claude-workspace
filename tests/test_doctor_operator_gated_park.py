@@ -99,6 +99,7 @@ _BREACH_REASONS = (
     codex_const.CODEX_FIX_REVERTED_BRANCH,
     codex_const.CODEX_FIX_DIRTY_START,
     codex_const.CODEX_FIX_HOOK_FAILED,
+    codex_const.CODEX_FIX_GATE_FAILED,
     codex_const.CODEX_FIX_GROWTH_BUDGET,
     codex_const.CODEX_FIX_CONSTRAINT_VIOLATION,
 )

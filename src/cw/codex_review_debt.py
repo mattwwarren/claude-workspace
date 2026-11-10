@@ -1,32 +1,25 @@
-"""File the codex lane's SHOULD_FIX deferrals as review debt at record time (#3137).
+"""Record the codex lane's SHOULD_FIX deferrals in the session artifact (#3137).
 
 The codex loop round and the Claude confirm round stamp SHOULD_FIX findings as
-``defer`` on the convergence ledger, where they are non-gating. Nothing filed
-them: only ``cw review adjudicate`` and the engine-confirm path reach the
-review-debt filer, so a codex defer stayed unticketed until a finalize retry,
-if one ever ran.
+``defer`` on the convergence ledger, where they are non-gating. Only ``cw review
+adjudicate`` and the engine-confirm path reach the review-debt filer, so a codex
+defer needs a durable record that finalize can find.
 
 :func:`file_codex_deferrals` writes the round's new defers to the session
-artifact and hands them to the filer. It runs in the detached ``cw codex run``
-process, whose cwd is not guaranteed to be the session worktree, so every path
-it touches is anchored on *worktree*.
-
-**Structural call (named, not hidden):** the filer lives in
-``cw.cli.review.debt``, and that package reaches back into the codex lane
-through ``cw.dev_queue`` and ``cw.dispatch``. A module-level import from here
-closes a cycle from every entry point, and a function-level import is barred by
-PLC0415. So the filer is *registered*: ``cw.cli.review.debt`` calls
-:func:`register_debt_filer` when it loads, and ``cw.cli.codex`` (the detached
-``cw codex run`` process, which never loads ``cw.cli.review.debt``) registers it
-explicitly before the driver starts. Hoisting ``run_debt_filing`` into a core
-package removes the registry; that is the follow-up.
+artifact (``.cw/deferred-findings.md``) and files nothing. Filing happens once
+per ticket, at finalize Step 4d item 2a (``cw review debt file``), from the
+artifact's final state: a reviewer rewords the same finding from round to
+round, so a per-round filer opened a ticket per wording (#2682 got 39 issues
+over six rounds). It runs in the detached ``cw codex run`` process, whose cwd
+is not guaranteed to be the session worktree, so every path it touches is
+anchored on *worktree*.
 
 Contract: *ledger* is the PRE-record ledger, the one ``record_round`` received.
 ``record_round`` settles every new defer into its returned ledger, so a
 post-record ledger would make the "not already settled" filter drop them all.
 
-Filing never raises: a failure is logged and the loop carries on, because the
-defer is already recorded and a finalize retry can still file it.
+Writing never raises: a failure is logged and the loop carries on, because the
+defer is already recorded on the ledger.
 """
 
 from __future__ import annotations
@@ -47,27 +40,13 @@ from cw.review_adjudication._models import DEFERRED_OUTCOME
 from cw.review_convergence import finding_identity
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Sequence
     from pathlib import Path
 
     from cw.models import ClientConfig, TicketTask
     from cw.review_convergence import ConvergenceLedger, RoundFinding
 
 _log = logging.getLogger(__name__)
-
-#: The filer's registry key; ``cw.cli.review.debt`` and ``cw.cli.codex`` fill it.
-_FILER_KEY = "run_debt_filing"
-_FILERS: dict[str, Callable[..., None]] = {}
-
-
-def register_debt_filer(run_filing: Callable[..., None]) -> None:
-    """Install the review-debt filer this lane hands its defers to.
-
-    Called by ``cw.cli.review.debt`` at import and by ``cw codex run`` before the
-    detached driver starts. Re-registering replaces the previous filer, which is
-    what a test that swaps the filer relies on.
-    """
-    _FILERS[_FILER_KEY] = run_filing
 
 
 def round_deferral(finding: RoundFinding, round_number: int, now: str) -> Adjudication:
@@ -113,8 +92,8 @@ def _new_defers(
 def _write_artifact(path: Path, applied: Sequence[Adjudication]) -> None:
     """Merge *applied* into the session artifact, then write it atomically.
 
-    The artifact is the rediscovery point a finalize Step 4d retry reads, so it
-    is written before the filer runs.
+    The artifact is what finalize Step 4d item 2a reads to file the ticket's
+    review debt once, so every round keeps it current.
     """
     prior = read_deferred_findings_md(path)
     merged = merge_deferred_adjudications(prior, list(applied))
@@ -135,35 +114,21 @@ def file_codex_deferrals(
     round_number: int,
     now: str,
 ) -> None:
-    """Write the round's new defers to the session artifact, then file them.
+    """Write the round's new defers to the session artifact; file nothing.
 
-    Returns before any IO when nothing is new. A missing filer (the registry
-    was never filled) is logged, not silently skipped: the artifact still holds
-    the defers for a later ``cw review debt file``.
+    Returns before any IO when nothing is new. The name is historical: the
+    review-debt filer runs at finalize, not here.
     """
     new_defers = _new_defers(findings, ledger)
     if not new_defers:
         return
     applied = [round_deferral(f, round_number, now) for f in new_defers]
-    artifact = worktree / DEFERRED_FINDINGS_RELATIVE_PATH
-    run_filing = _FILERS.get(_FILER_KEY)
     try:
-        _write_artifact(artifact, applied)
-        if run_filing is None:
-            # The artifact above still holds the defers for `cw review debt file`.
-            _log.warning(
-                "review-debt filer not registered, deferrals left in artifact "
-                "ticket=%s client=%s session=%s round=%s",
-                task.ticket_id,
-                client.name,
-                sid,
-                round_number,
-            )
-            return
-        run_filing(client.name, task.ticket_id, artifact, applied, cwd=worktree)
+        _write_artifact(worktree / DEFERRED_FINDINGS_RELATIVE_PATH, applied)
     except (OSError, ValueError, CwError):
         _log.warning(
-            "codex review-debt filing failed ticket=%s client=%s session=%s round=%s",
+            "codex review-debt artifact write failed ticket=%s client=%s "
+            "session=%s round=%s",
             task.ticket_id,
             client.name,
             sid,
@@ -172,7 +137,7 @@ def file_codex_deferrals(
         )
         return
     _log.info(
-        "codex review-debt deferrals handed to filing ticket=%s client=%s "
+        "codex review-debt deferrals recorded in artifact ticket=%s client=%s "
         "session=%s round=%s count=%d",
         task.ticket_id,
         client.name,

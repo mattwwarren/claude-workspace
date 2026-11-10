@@ -47,7 +47,11 @@ from cw.review_convergence._confirm_route import (
     engine_pass_precedes,
     route_engine_confirm,
 )
-from cw.review_convergence._findings import classify_findings, settled_debt_key
+from cw.review_convergence._findings import (
+    classify_findings,
+    mark_reseen,
+    settled_debt_key,
+)
 from cw.review_convergence._identity import FindingIdentity, finding_identity
 from cw.review_convergence._models import (
     DECISION_CLEAN,
@@ -434,7 +438,10 @@ def _apply_round(
     )
     update: dict[str, object] = {
         "rounds": rounds,
-        "settled": [*ledger.settled, *classified.newly_settled],
+        "settled": [
+            *mark_reseen(ledger.settled, classified.reseen, round_number),
+            *classified.newly_settled,
+        ],
         "awaiting_confirm_sha": None,
     }
     if ledger.frozen is None and frozen is not None:

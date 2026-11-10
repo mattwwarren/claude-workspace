@@ -537,6 +537,36 @@ reported by the fix-cycle result. Recover the edits with `git stash apply
 }
 ```
 
+### `codex_fix.gate_slow`
+
+**Emitter:** `cw.codex_fix_loop.gates` (`run_cycle_gates` / `plan_cycle_gates`)
+**Payload:** `{"ticket_id": "<str>", "client": "<str>", "session_id": "<str>", "cycle": <int>, "gate": "<str>", "elapsed_s": <float>, "ceiling_s": <float>}`
+**Semantics:** Emitted once per subprocess when a codex fix cycle's quality gate
+(or the `detect-gates` / `gate-timeout <name>` lookup that plans it, named by
+`gate`) outlives its ceiling. It is a signal only: the runner keeps waiting and
+honors the real exit code, and nothing is killed, parked or reset because of
+elapsed time. A gate that never exits holds the review until the operator acts;
+the recovery is to stop the codex job and its gate first (the detached
+`cw codex run` job is its own session leader, so `kill -- -<job pid>` stops the
+job and the gate child together, and `cw spawn close` alone does not stop a
+codex job), then run `cw spawn close <session> --requeue`. See it with `cw event
+tail --type codex_fix.gate_slow`. `ceiling_s` is the gate's `gate-timeout`
+`foreground_ceiling_s`, which `prep_pr_state.py` clamps to 600 s, so a gate
+configured above 600 s signals at 600 s (advisory only); a slow helper signals
+at 60 s. Fleet-level audit record, not a page.
+
+```json
+{
+  "ticket_id": "CW-42",
+  "client": "my-client",
+  "session_id": "3f9a1c",
+  "cycle": 1,
+  "gate": "pytest",
+  "elapsed_s": 601.25,
+  "ceiling_s": 600
+}
+```
+
 ### `sessions.auto_pruned`
 
 **Emitter:** `auto_prune_sessions` (`cw.session_auto_prune`), called by the
