@@ -369,6 +369,10 @@ def _apply_spawn_success_fields(stored_task: TicketTask, *, session_id: str) -> 
     stored_task.session_id = session_id
     stored_task.spawn_error_count = 0
     stored_task.next_eligible_at = None
+    # #2615: a bound row has no launch in flight, so the claim's launch marker
+    # is spent. Cleared here, not in the caller, so dispatch's own stamp and
+    # reconcile's ADOPT clear it alike.
+    stored_task.launch_marker = None
     # #1631: the single write site for the durable "a session was
     # genuinely spawned for this row" fact. Unconditional and
     # write-once-to-True -- reaching here IS the proof, and no

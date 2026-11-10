@@ -264,6 +264,12 @@ def transition_task_status(
     # next episode. _stamp_session_id_mismatch_advisories re-derives it on the
     # next reconcile tick if the condition still holds.
     task.advisory_note = None
+    # GitHub #2615: same unconditional-clear treatment for the claim's launch
+    # marker. It says "the claiming dispatcher may still be launching", which
+    # only holds while the row is RUNNING and unbound; every exit (revert,
+    # park, complete, cancel) ends that claim. The claim site re-stamps it
+    # after its own transition to RUNNING.
+    task.launch_marker = None
     # GitHub #2324: the mid-turn usage-limit act's intent. Its own final
     # transition clears it in the same row write; any other transition means
     # someone else dispositioned the row, which ends the act.
