@@ -11,9 +11,13 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING
 
-from cw.auto_dev_result import STALE_DISPATCH_BLOCKER_REASON
+from cw.auto_dev_result import (
+    GATE_TIMEOUT_BLOCKER_REASON,
+    STALE_DISPATCH_BLOCKER_REASON,
+)
 from cw.config import load_clients, load_orchestrator_config, load_state, save_state
 from cw.dev_queue import (
+    GATE_TIMEOUT_DISPOSITION,
     STALE_DISPATCH_DISPOSITION,
     _stamp_salvage_stage,
     dev_queue_lock,
@@ -787,7 +791,10 @@ _STALE_GATE_CONSUMER = "dev_queue_stale_gate"
 # verbatim (dispatch/routing.py); "blocked"/"automerge_not_armed" is Rule 5's
 # stamp for a failed auto-merge arm on an already-created PR (both parks
 # populate task.pr_url -- merge_pending directly, automerge_not_armed via the
-# pr_info fallback threaded in dispatch/routing.py).
+# pr_info fallback threaded in dispatch/routing.py). #3372 adds a third pair,
+# GATE_TIMEOUT_DISPOSITION/GATE_TIMEOUT_BLOCKER_REASON: a reuse-path gate the
+# foreground timeout cut off parks with auto-merge left as found and pr_url
+# stamped from pr_info, so a PR that merges on its own releases the row.
 #
 # The "automerge_not_armed" / "prior_pipeline_pr_open" reason literals
 # themselves are NOT re-declared here -- _is_variant_a_gate_task and
@@ -815,6 +822,11 @@ def _is_variant_a_gate_task(task: TicketTask) -> bool:
     if task.status != QueueItemStatus.BLOCKED_ON_USER:
         return False
     if task.disposition == _VARIANT_A_MERGE_PENDING_DISPOSITION:
+        return True
+    if (
+        task.disposition == GATE_TIMEOUT_DISPOSITION
+        and task.blocked_reason == GATE_TIMEOUT_BLOCKER_REASON
+    ):
         return True
     return (
         task.disposition == _VARIANT_A_BLOCKED_DISPOSITION
@@ -927,7 +939,7 @@ def _release_variant_a(task: TicketTask, policy: ReapPolicy) -> None:
     """Apply the SIGNAL_ONLY/AUTO release for a Variant A gate task."""
     if policy is ReapPolicy.AUTO:
         # Why: this row's PR is confirmed MERGED (own-PR event) or already
-        # created (automerge_not_armed) -- mirrors
+        # created (automerge_not_armed, gate_timeout #3372) -- mirrors
         # complete_timed_out_merged_tasks's identical disposition="shipped"
         # for the same "PR merged, no further gh call needed" shape.
         transition_task_status(task, QueueItemStatus.COMPLETED, disposition="shipped")
@@ -958,7 +970,8 @@ def release_stale_gated_tasks() -> list[str]:
     root-cause chain):
 
     * Variant A -- the row is blocked behind ITS OWN PR (disposition
-      "merge_pending", or "blocked"/blocked_reason="automerge_not_armed").
+      "merge_pending", "blocked"/blocked_reason="automerge_not_armed", or
+      "gate_timeout"/blocked_reason="gate_timeout", #3372).
       Detected by consuming ``PR_MERGED`` events off a dedicated consumer
       cursor (``_STALE_GATE_CONSUMER``) and matching each event's
       ``(client, ticket_id)`` against the current Variant A candidate set.

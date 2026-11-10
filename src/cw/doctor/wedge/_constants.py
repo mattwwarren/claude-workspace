@@ -14,6 +14,7 @@ from cw.dev_queue.dispositions import (
     ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
     ADOPTED_HEAD_DRIFT_DISPOSITION,
     FINALIZE_GATE_HELD_DISPOSITION,
+    GATE_TIMEOUT_DISPOSITION,
     LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
     REVIEW_APPROVAL_GATE_DISPOSITION,
     REVIEW_ENGINE_MODIFIED_DISPOSITION,
@@ -83,8 +84,12 @@ _DIRTY_WORKTREE_DISPOSITION = "dirty_worktree"
 # large-tier finalize that the gate refuses. The pre-dispatch tracker-MCP gate
 # park (#2442, #3055) waits on the operator fixing the branch settings file or
 # the backend's MCP config and running `cw dev-queue requeue`; no session ever
-# ran, so a reap revert would only re-derive the same park. Sourced from the
-# owning constants so the strings cannot drift.
+# ran, so a reap revert would only re-derive the same park. The reuse-path
+# gate-timeout park (#3372) waits on the orchestrator running the timed-out
+# gate by hand, `gate-pass record` and `cw dev-queue requeue`; a reap revert
+# would re-run finalize and time the same gate out again. It is not
+# human-gated and not escalation-eligible. Sourced from the owning constants
+# so the strings cannot drift.
 _OPERATOR_GATED_PARK_DISPOSITIONS: frozenset[str] = frozenset(
     {
         FINALIZE_GATE_HELD_DISPOSITION,
@@ -96,6 +101,7 @@ _OPERATOR_GATED_PARK_DISPOSITIONS: frozenset[str] = frozenset(
         REVIEW_APPROVAL_GATE_DISPOSITION,
         REVIEW_ENGINE_MODIFIED_DISPOSITION,
         TRACKER_MCP_GATE_DISPOSITION,
+        GATE_TIMEOUT_DISPOSITION,
     }
 )
 
