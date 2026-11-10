@@ -57,6 +57,9 @@ if TYPE_CHECKING:
 # left staged (never committed or pushed), so the operator can inspect them.
 # The hard-reset advice is only correct because a cycle starts from a clean
 # tree (#2633, `baseline.capture_cycle_baseline`), and the hint says so.
+# Since #2967 this is the FALLBACK text: `cycle_restore` replaces it with the
+# saved-patch text after a verified restore, and it stays only when the
+# snapshot or restore did not complete (or the breach is not restorable).
 LEFT_STAGED_HINT = (
     "The rejected fix-cycle changes are left staged and uncommitted in the "
     "worktree (inspect with `git diff --cached`). This cycle began from a clean "
@@ -99,12 +102,19 @@ _NO_MARKER_HINT = (
 
 @dataclass(frozen=True)
 class FenceBreach:
-    """A fix cycle a guard rejected: the park reason, paths, and operator text."""
+    """A fix cycle a guard rejected: the park reason, paths, and operator text.
+
+    ``restorable`` (#2967): whether the park may snapshot the cycle's edits and
+    restore the cycle-start tree. It rides on the breach, not the reason code,
+    because ``codex_fix_scope_drift`` is produced by both a restorable fence
+    breach and a non-restorable staged-set mismatch.
+    """
 
     reason: str
     paths: tuple[str, ...]
     details: str
     recovery_hint: str
+    restorable: bool = True
 
 
 class StagedSetMismatchError(Exception):
@@ -170,7 +180,7 @@ def _revert_breach(
     )
     hint = (
         "Compare the branch HEAD (the last good commit before this fix cycle) "
-        "with the staged changes to see what the fix tried to undo, then "
+        "with the rejected changes to see what the fix tried to undo, then "
         f"requeue REVIEW, or settle the finding ({SETTLE_FINDING_HINT}) if it "
         f"cannot be fixed without reverting the feature. {LEFT_STAGED_HINT}"
     )
@@ -257,7 +267,9 @@ def cycle_start_breach(start: DirtyStart, cycle: int) -> FenceBreach:
 
     The hint never advises ``git reset --hard``: the state predates the cycle,
     so cw cannot say what a hard reset would lose. It names the state to
-    inspect and each unfinished operation's own abort command.
+    inspect and each unfinished operation's own abort command. It is never
+    restorable (#2967): there is no cycle edit to save, and discarding what was
+    already there is exactly what the hint refuses to advise.
     """
     sections = [
         f"codex fix cycle {cycle} was not started: the worktree was not clean at "
@@ -291,7 +303,11 @@ def cycle_start_breach(start: DirtyStart, cycle: int) -> FenceBreach:
     )
     paths = {*start.unmerged, *(p for d in start.dirty for p in _porcelain_paths(d))}
     return FenceBreach(
-        CODEX_FIX_DIRTY_START, tuple(sorted(paths)), "\n\n".join(sections), hint
+        CODEX_FIX_DIRTY_START,
+        tuple(sorted(paths)),
+        "\n\n".join(sections),
+        hint,
+        restorable=False,
     )
 
 
@@ -334,7 +350,10 @@ def staged_set_breach(
     path the cycle was not measured to touch. Unreachable under the
     clean-start invariant except through a race or a fix invocation that
     committed on its own, so its hint does NOT append :data:`LEFT_STAGED_HINT`
-    — that hint's premise is exactly what failed here.
+    — that hint's premise is exactly what failed here. It is not restorable
+    (#2967): cw cannot tell what is the cycle's own work (a self-committed fix,
+    a race, a partial commit), so discarding anything could lose another
+    actor's work.
     """
     sections = [
         f"codex fix cycle {cycle} was not committed: the staged set does not "
@@ -352,6 +371,7 @@ def staged_set_breach(
         tuple(sorted(measured ^ staged)),
         "\n\n".join(sections),
         _staged_set_hint(measured, staged, start_head),
+        restorable=False,
     )
 
 

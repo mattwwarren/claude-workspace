@@ -402,6 +402,37 @@ def _install_pre_commit_hook(repo: Path, script: str) -> None:
     hook_path.chmod(0o755)
 
 
+def exclude_cw_dir(repo: Path) -> None:
+    """Git-exclude ``.cw/`` in *repo*, as a real cw worktree does.
+
+    Mirrors ``worktree/_lifecycle.py::_CW_EXCLUDE_PATTERNS``: a worktree made
+    by ``make_git_repo`` does not exclude ``.cw/``, so cw's own state would be
+    staged by the cycle's ``git add -A`` (#2967).
+    """
+    exclude = repo / git_in(repo, "rev-parse", "--git-path", "info/exclude")
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with exclude.open("a", encoding="utf-8") as handle:
+        handle.write(".cw/\n")
+
+
+def assert_clean_after_refusal(worktree: Path, start_sha: str) -> str:
+    """Assert a refused cycle left a clean tree plus a pinned edit ref.
+
+    Empty ``git status --porcelain``, ``HEAD`` still *start_sha*, and a commit
+    pinned under ``refs/cw/refused-cycles/``. Returns that ref name. Git runs
+    through ``tests/_git_sandbox``.
+    """
+    assert git_in(worktree, "status", "--porcelain") == ""
+    assert git_in(worktree, "rev-parse", "HEAD") == start_sha
+    refs = git_in(
+        worktree, "for-each-ref", "--format=%(refname)", "refs/cw/refused-cycles/"
+    ).split()
+    assert refs, "no edit ref pinned under refs/cw/refused-cycles/"
+    ref = refs[-1]
+    assert git_in(worktree, "cat-file", "-t", ref) == "commit"
+    return ref
+
+
 def _stage_merge_from_other_branch(
     repo: Path, files: dict[str, str], *, squash: bool = False
 ) -> None:
