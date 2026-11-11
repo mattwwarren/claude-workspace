@@ -98,7 +98,7 @@ elements:
   orch.impl-stage-consumption:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3529}, note: "deferred IMPL machinery (pre-stage detector guard, resume dispositions, staleness, freshness, merge-conclusion guard); #3529"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   orch.gate-destructive-directive:
@@ -202,13 +202,13 @@ elements:
   orch.post-impl-scope-conformance-threshold:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_impl/_gates.py, symbol: run_scope_conformance}, note: "cw runs the scope-conformance gate on the staged diff and parks plan_scope_drift"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   orch.absent-owner-record:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "cw does this outside the turn (RFC 0018 C2, #3061): the codex IMPL executor runs it in cw.codex_impl, so it is not part of the model prompt"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   orch.sentinel-structured-output:
@@ -717,266 +717,266 @@ elements:
   impl.orientation:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3530}, note: "tracker-aware plan recovery is #3530; a plan-absent non-repair row blocks plan_missing"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.comments-are-live-not-cached:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_impl/_run.py, symbol: _Run.prompt}, note: "cw prefetches the ticket body and comments live on every run"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.review-feedback-guard:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_impl/_feedback.py, symbol: verify_review_feedback}, note: "cw binds the feedback to the live PR before the turn and fails closed with review_feedback_stale"}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_repair_entry.py, symbol: repair_entry_block_details}, note: "opencode IMPL passes block_any_feedback=True, so any row carrying review_feedback is refused as repair_entry_unsupported_backend (B1)"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "review_feedback is never read; repair_entry_block_details fails closed only for adopted rows"}
   impl.repair-entry-no-plan:
     covers: [repair_entry_unsupported_backend]
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_impl/_gates.py, symbol: run_scope_conformance}, note: "a repair row with no plan skips gate 2 with friction and records plan_source none"}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_repair_entry.py, symbol: repair_entry_block_details}}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_repair_entry.py, symbol: repair_entry_block_details}}
   impl.repair-entry-with-plan:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_impl/_prompt.py, symbol: render_impl_prompt}, note: "the prompt carries the plan and the untrusted feedback; gate 2 still runs"}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_repair_entry.py, symbol: repair_entry_block_details}}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_repair_entry.py, symbol: repair_entry_block_details}}
   impl.dispatch-detection:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "cw does this outside the turn (RFC 0018 C2, #3061): the codex IMPL executor runs it in cw.codex_impl, so it is not part of the model prompt"}
       opencode: {disposition: not-applicable, reason: "names Claude Code-only machinery (Agent tool, Skill tool, hooks); opencode prompts are self-contained (see the shared-fragment note in src/cw/opencode_runner.py)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.resolve-impl-model-from-diff:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "the model comes from the lane StageExecutorConfig, not a diff-size heuristic"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "scope_hint is not read; the opencode model comes from client config"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "scope_hint is not read; the aider model comes from client config"}
   impl.never-set-name-on-agent:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "there is no spawned agent on codex"}
       opencode: {disposition: not-applicable, reason: "names Claude Code-only machinery (Agent tool, Skill tool, hooks); opencode prompts are self-contained (see the shared-fragment note in src/cw/opencode_runner.py)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.read-only-helper-spawns:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "there is no spawned agent on codex"}
       opencode: {disposition: not-applicable, reason: "names Claude Code-only machinery (Agent tool, Skill tool, hooks); opencode prompts are self-contained (see the shared-fragment note in src/cw/opencode_runner.py)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.worktree-isolation-guard:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "cw does this outside the turn (RFC 0018 C2, #3061): the codex IMPL executor runs it in cw.codex_impl, so it is not part of the model prompt"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.guard-script-path-resolution-and-staleness:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_impl/_gates.py, symbol: run_scope_conformance}, note: "cw resolves repo-local then ~/.claude/scripts and applies the strict cw-script-version marker rule to the one script it runs"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.tool-scripts-outside-table:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "cw runs the guard scripts itself; the model runs none"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.pre-stage-detector-guard:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3529}, note: "deferred IMPL machinery (pre-stage detector guard, resume dispositions, staleness, freshness, merge-conclusion guard); #3529"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.branch-freshness:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3529}, note: "deferred IMPL machinery (pre-stage detector guard, resume dispositions, staleness, freshness, merge-conclusion guard); #3529"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the IMPL prompt always merges the default branch and records the fork point; the merge-only-on-conflict probe is not carried"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.gate-type-check:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3531}, note: "gate 3 (claimed test command) and gate 4 (mypy baseline) are #3531"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.pre-mutation-guard:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "cw does this outside the turn (RFC 0018 C2, #3061): the codex IMPL executor runs it in cw.codex_impl, so it is not part of the model prompt"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.pre-completion-merge-guard:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3529}, note: "deferred IMPL machinery (pre-stage detector guard, resume dispositions, staleness, freshness, merge-conclusion guard); #3529"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.following-completion-artifacts-block-verbatim:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3531}, note: "the Completion Artifacts block and its claimed-test re-run are #3531"}
       opencode: {disposition: not-applicable, reason: "names Claude Code-only machinery (Agent tool, Skill tool, hooks); opencode prompts are self-contained (see the shared-fragment note in src/cw/opencode_runner.py)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.gate-orchestrator-completion:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_impl/_gates.py, symbol: run_quality_gates}, note: "cw runs the repo quality gates and parks impl_failed with the verbatim gate output"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.gate-helper-missing:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "cw runs the gates; a missing prep_pr_state.py parks impl_failed through run_quality_gates"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.absent-owner-record:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "cw does this outside the turn (RFC 0018 C2, #3061): the codex IMPL executor runs it in cw.codex_impl, so it is not part of the model prompt"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.file-set-is-within-plan-s:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_impl/_gates.py, symbol: run_scope_conformance}, note: "cw parks plan_scope_drift when the staged files leave the plan"}
       opencode: {disposition: implemented, ref: {kind: prompt, stage: impl, needle: "Stay within the plan's"}}
       local: {disposition: implemented, ref: {kind: code, path: src/cw/plan_files.py, symbol: parse_plan_files_modified}}
   impl.checkpoint-2:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "no interactive checkpoint on codex; escalation is the sentinel blocker"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.implementation-failure-escalation:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "no interactive run on codex; escalation is the sentinel blocker"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.marker-s2-completion:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_impl/_result.py, symbol: impl_commit_message}, note: "cw makes the one commit and adds the Auto-Dev-Stage: impl-complete trailer"}
       opencode: {disposition: implemented, ref: {kind: prompt, stage: impl, needle: "Auto-Dev-Stage: impl-complete"}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.stage-2-completion:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_impl/_result.py, symbol: stamp_impl_result}, note: "cw stamps the git facts over the model sentinel and completes through the door"}
       opencode: {disposition: implemented, ref: {kind: prompt, stage: impl, needle: stage2_impl}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.emit-through-cw-then-frame:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_impl/_result.py, symbol: parse_impl_turn}, note: "the turn returns a strict {sentinel} document; cw parses and stamps it"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.no-interactive-escalation-ever:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "no interactive run on codex"}
       opencode: {disposition: implemented, ref: {kind: prompt, stage: impl, needle: "emit an honest blocked sentinel"}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.dispatch-detection-alternative-check-and:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "cw does this outside the turn (RFC 0018 C2, #3061): the codex IMPL executor runs it in cw.codex_impl, so it is not part of the model prompt"}
       opencode: {disposition: not-applicable, reason: "names Claude Code-only machinery (Agent tool, Skill tool, hooks); opencode prompts are self-contained (see the shared-fragment note in src/cw/opencode_runner.py)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.pre-stage-detector-guard-resume-dispositions:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3529}, note: "deferred IMPL machinery (pre-stage detector guard, resume dispositions, staleness, freshness, merge-conclusion guard); #3529"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.staleness-regress-check-run-before-applying:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3529}, note: "deferred IMPL machinery (pre-stage detector guard, resume dispositions, staleness, freshness, merge-conclusion guard); #3529"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.regress-into-impl-carrying-unconcluded-merge:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3529}, note: "deferred IMPL machinery (pre-stage detector guard, resume dispositions, staleness, freshness, merge-conclusion guard); #3529"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.gate-2-scope-conformance-disposition-by:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_impl/_gates.py, symbol: run_scope_conformance}, note: "every gate-2 exit code has one disposition in run_scope_conformance"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.type-check-gate-mypy-baseline:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3531}, note: "gate 4 (mypy-baseline comparison) is #3531"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.orchestrator-record:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3531}, note: "the orchestrator-side record of the claimed gates is #3531"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "no DEFERRED-REVIEW-FINDINGS record is written by the IMPL prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.gate-1-why-empty-diff-check:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_impl/_gates.py, symbol: check_empty_diff}, note: "cw parks an empty staged diff as empty_diff_blocked"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.regress-into-impl-merge-conclusion-dispatch-backstop:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3529}, note: "deferred IMPL machinery (pre-stage detector guard, resume dispositions, staleness, freshness, merge-conclusion guard); #3529"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.worktree-isolation-breach-this-codifies:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "cw does this outside the turn (RFC 0018 C2, #3061): the codex IMPL executor runs it in cw.codex_impl, so it is not part of the model prompt"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.s2-completion-marker-why-trailer:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "rationale text for the trailer; cw adds the trailer"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.read-only-helper-spawns-capability-not:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "there is no spawned agent on codex"}
       opencode: {disposition: not-applicable, reason: "names Claude Code-only machinery (Agent tool, Skill tool, hooks); opencode prompts are self-contained (see the shared-fragment note in src/cw/opencode_runner.py)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.gate-config:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "cw runs the gates; gate configuration is read by cw"}
       opencode: {disposition: not-applicable, reason: "names Claude Code-only machinery (Agent tool, Skill tool, hooks); opencode prompts are self-contained (see the shared-fragment note in src/cw/opencode_runner.py)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.named-spawns-idle-teammates:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "there is no spawned agent on codex"}
       opencode: {disposition: not-applicable, reason: "names Claude Code-only machinery (Agent tool, Skill tool, hooks); opencode prompts are self-contained (see the shared-fragment note in src/cw/opencode_runner.py)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.capturing-teammate-entry:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "there is no spawned agent on codex"}
       opencode: {disposition: not-applicable, reason: "names Claude Code-only machinery (Agent tool, Skill tool, hooks); opencode prompts are self-contained (see the shared-fragment note in src/cw/opencode_runner.py)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.deferred-half:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3061}, note: "codex runs REVIEW only: CODEX_SUPPORTED_STAGES in src/cw/executor/codex.py parks IMPL with CODEX_REVIEW_ONLY until C2"}
+      codex: {disposition: not-applicable, reason: "rationale for a deferred half of an interactive-only path"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   review.no-plan:

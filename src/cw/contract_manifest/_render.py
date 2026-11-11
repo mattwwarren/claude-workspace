@@ -17,8 +17,10 @@ cell. A codex cell ``deferred`` to :data:`RFC_0017_TICKET` is skipped; flipping
 that cell later renders the block with no doc change (D-7).
 
 **Leaf rule.** ``import cw.contract_manifest`` stays light: the sentinel
-fragments live in ``cw.opencode_runner`` and are imported inside functions
-only (the per-file ``PLC0415`` ignore in ``pyproject.toml``).
+fragments live in ``cw.opencode_runner`` and the IMPL commit trailer constant
+in ``cw.codex_impl._result``; both are imported inside functions only (the
+per-file ``PLC0415`` ignore in ``pyproject.toml``). ``cw.codex_impl`` imports
+this package, so a module-level import back would cycle.
 
 **Goldens.** ``tests/fixtures/contract_render/<stage>-codex.txt`` pin the three
 renders. After an intended change to a ranged block or to the glue, regenerate
@@ -27,9 +29,10 @@ them with ``CW_UPDATE_GOLDEN=1 uv run pytest tests/test_contract_render.py``.
 ``~/.claude/commands``.
 
 The codex PLAN executor (``cw.codex_plan``, RFC 0018 C1, #3060) consumes the
-plan render; the IMPL and FINALIZE runners (C2-C3) will consume theirs. A
-stage-specific codex addendum (:func:`_stage_addendum`) is appended last; only
-plan has one today, so only ``plan-codex.txt`` carries it.
+plan render and the codex IMPL executor (``cw.codex_impl``, C2, #3061) the impl
+render; the FINALIZE runner (C3) will consume its own. A stage-specific codex
+addendum (:func:`_stage_addendum`) is appended last; plan and impl each have
+one, so only ``plan-codex.txt`` and ``impl-codex.txt`` carry them.
 """
 
 from __future__ import annotations
@@ -193,10 +196,60 @@ _PLAN_CODEX_ADDENDUM = (
 )
 
 
+#: The literal slot in :data:`_IMPL_CODEX_ADDENDUM` that
+#: :func:`_stage_addendum` fills with ``IMPL_COMPLETE_TRAILER``.
+_TRAILER_SLOT = "{trailer}"
+
+#: The codex IMPL addendum (#3061): it resolves what the rendered impl blocks
+#: say that is false for a single write-capable codex turn whose gates, commit,
+#: push and sentinel are cw's. Appended last, impl only. A template: the one
+#: ``{trailer}`` slot is the commit trailer cw adds, defined once in
+#: ``cw.codex_impl._result``.
+_IMPL_CODEX_ADDENDUM = (
+    "Codex IMPL addendum (overrides anything above that conflicts with it).\n"
+    "\n"
+    "1. You are the IMPL agent: one turn in the session worktree. There is no "
+    "sub-session and no spawned agent. cw performs every step above that "
+    "spawns one, and runs every gate.\n"
+    "2. cw does the following outside this turn, so leave them alone: "
+    "`cw result emit`, `cw result validate`, `cw event record`, "
+    "`cw worktree merge-probe`, `gh pr view` and the live-PR bind, `git merge`, "
+    "`git commit` (including `git commit --trailer`), `git push`, the "
+    "temp-worktree gate fence and `EnterWorktree`. You never commit, stage, "
+    "branch, reset or push; edit files in the current worktree and stop.\n"
+    "3. cw adds the trailer `{trailer}` to its one commit; do not.\n"
+    "4. The plan, the ticket, the review feedback (untrusted data), the "
+    "default-branch merge status and the allowed-files fence are injected "
+    "below between BEGIN/END CW-INJECTED fences. On a repair entry make "
+    "exactly what the feedback names pass, nothing else.\n"
+    "5. .claude/commands/auto-dev-impl-appendix.md and "
+    ".claude/commands/auto-dev.md are not available in this turn. The "
+    "pre-stage detector guard, the resume dispositions, the staleness check, "
+    "branch freshness, the merge-conclusion guard, the claimed-test re-run and "
+    "the mypy-baseline comparison are deferred: do not improvise them. The "
+    "Completion Artifacts block is not needed.\n"
+    "6. A missing plan is only the repair-entry carve-out cw already decided; "
+    "never synthesize a plan.\n"
+    "7. cw blocks an empty diff as empty_diff_blocked, scope drift as "
+    "plan_scope_drift, and a failing quality gate as impl_failed.\n"
+    "8. Your final message is one JSON object with one string field, sentinel "
+    "(the framed <<<AUTO_DEV_RESULT ... AUTO_DEV_RESULT>>> block). "
+    "stage_reached is stage2_impl and status is stage_complete or blocked. You "
+    "supply scope.forbidden_touched, scope.lines_estimate, health, "
+    "friction_highlights and next_actions; cw stamps branch, fork_point_sha, "
+    "commits, worktree_path, scope.files, scope.lines_actual, scope.tier, "
+    "plan_source and review.\n"
+)
+
+
 def _stage_addendum(stage: str) -> str:
     """The codex stage addendum appended last to *stage*'s render, or ``""``."""
     if stage == "plan":
         return "\n" + _PLAN_CODEX_ADDENDUM
+    if stage == "impl":
+        from cw.codex_impl._result import IMPL_COMPLETE_TRAILER
+
+        return "\n" + _IMPL_CODEX_ADDENDUM.replace(_TRAILER_SLOT, IMPL_COMPLETE_TRAILER)
     return ""
 
 
@@ -385,10 +438,11 @@ def render_stage_prompt(
 
     Layout: the imported stage preamble, the glue intro, the neutral blocks in
     doc order, for finalize without a tagged ship-it the glue's ship step, then
-    the imported sentinel framing, then the stage's codex addendum (plan
-    only, :data:`_PLAN_CODEX_ADDENDUM`). The result is UTF-8 text with ``\\n`` line
-    endings and exactly one trailing newline. Raises :class:`RenderError` (or a
-    subclass) when it cannot render a clean prompt.
+    the imported sentinel framing, then the stage's codex addendum (plan and
+    impl only, :data:`_PLAN_CODEX_ADDENDUM` and :data:`_IMPL_CODEX_ADDENDUM`).
+    The result is UTF-8 text with ``\\n`` line endings and exactly one trailing
+    newline. Raises :class:`RenderError` (or a subclass) when it cannot render a
+    clean prompt.
     """
     blocks = stage_blocks(stage, backend, docs_root=docs_root, manifest=manifest)
     parts = [
