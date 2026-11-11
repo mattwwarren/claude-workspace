@@ -35,7 +35,6 @@ from cw.gh import (
 )
 from cw.models import (
     DevQueueStore,
-    OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
     ReapPolicy,
@@ -59,13 +58,52 @@ from cw.reconcile._shared import (
     ticket_id_for_session,
 )
 from cw.reconcile.dirty_checks import DIRTY_CHECK_LOOKAHEAD_SECONDS, partition_dirty
-from cw.worktree import _git_dir
+from cw.reconcile.tasks._client_config import (
+    _client_cwd,
+    _is_dangling_client,
+    _resolve_task_policy,
+)
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from cw.models import ClientConfig, CwState, Session
     from cw.reconcile.dirty_checks import DirtyChecks
+
+__all__ = [
+    "_COMPLETION_ROUTING_GRACE_SECONDS",
+    "_PROPOSED_ACTION_VARIANT_A",
+    "_PROPOSED_ACTION_VARIANT_B",
+    "_STALE_GATE_CONSUMER",
+    "_TERMINAL_SIBLING_STATUSES",
+    "_VARIANT_A_BLOCKED_DISPOSITION",
+    "_VARIANT_A_MERGE_PENDING_DISPOSITION",
+    "_VARIANT_B_DISPOSITION",
+    "_client_cwd",
+    "_closed_pr_numbers_by_client",
+    "_collect_timed_out_merged_candidates",
+    "_emit_never_claimed_refusals",
+    "_filter_merged_candidates",
+    "_index_variant_a_candidates",
+    "_is_dangling_client",
+    "_is_never_claimed",
+    "_is_variant_a_gate_task",
+    "_is_variant_b_gate_task",
+    "_latest_terminal_at_index",
+    "_merged_pr_numbers_by_client",
+    "_pr_numbers_by_client_in_state",
+    "_release_variant_a",
+    "_release_variant_b",
+    "_resolve_task_policy",
+    "_revert_running_tasks_for_sessions",
+    "_revert_terminal_backstop",
+    "_sessions_past_completion_grace",
+    "backstop_targets",
+    "capture_backstop_dirty_checks",
+    "complete_timed_out_merged_tasks",
+    "park_terminal_sibling_tasks",
+    "release_stale_gated_tasks",
+    "revert_completed_silent_tasks",
+    "revert_timed_out_tasks",
+]
 
 # Grace window after Session.completed_at during which revert_timed_out_tasks/
 # revert_completed_silent_tasks leave a RUNNING task untouched, giving
@@ -319,33 +357,6 @@ def _emit_never_claimed_refusals(
             },
             correlation_id=ticket_id,
         )
-
-
-def _client_cwd(client_name: str, clients: dict[str, ClientConfig]) -> Path | None:
-    """Resolve the gh cwd for *client_name*, or None if no config is found.
-
-    None preserves today's ambient-CWD gh behavior for single-tenant
-    deployments with no clients.yaml at all (see #1269 plan Adopted
-    Assumptions and TestCompleteTimedOutMergedTasks's no-clients.yaml
-    coverage). Callers must check :func:`_is_dangling_client` first and
-    skip rather than call this when *clients* is populated but missing an
-    entry for *client_name* -- that is config drift, not single-tenant mode,
-    and an unscoped gh call there risks misattributing a same-numbered
-    ticket from a different repo as merged (GitHub #1269).
-    """
-    client_cfg = clients.get(client_name)
-    return _git_dir(client_cfg) if client_cfg is not None else None
-
-
-def _is_dangling_client(client_name: str, clients: dict[str, ClientConfig]) -> bool:
-    """True when *clients* is populated but has no entry for *client_name*.
-
-    Distinguishes "no clients.yaml at all" (single-tenant, safe ambient-cwd
-    fallback via :func:`_client_cwd`) from "client removed/renamed from an
-    otherwise-populated clients.yaml" (drift), which must not fall back to
-    an unscoped gh call (GitHub #1269).
-    """
-    return bool(clients) and client_name not in clients
 
 
 def _filter_merged_candidates(
@@ -638,21 +649,6 @@ def revert_completed_silent_tasks(
     list of ticket IDs reverted. See :func:`_revert_terminal_backstop`.
     """
     return _revert_terminal_backstop(SessionStatus.COMPLETED, dirty_checks)
-
-
-def _resolve_task_policy(
-    client: str,
-    lane: str,
-    clients: dict[str, ClientConfig],
-    config: OrchestratorConfig,
-) -> ReapPolicy:
-    """Resolve reap_policy for a task's client/lane without a ReapCandidate."""
-    client_cfg = clients.get(client)
-    if client_cfg is not None:
-        for lane_cfg in client_cfg.effective_lanes:
-            if lane_cfg.name == lane and lane_cfg.reap_policy is not None:
-                return lane_cfg.reap_policy
-    return config.reap_policy
 
 
 _TERMINAL_SIBLING_STATUSES = frozenset(

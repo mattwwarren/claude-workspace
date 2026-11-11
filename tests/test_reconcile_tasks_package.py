@@ -91,6 +91,12 @@ PUBLIC_EXPORTS = frozenset(
 # Owning module of each name. Starts as the flat module for every name; each
 # extraction commit repoints its names to the submodule that now defines them.
 _OWNER: dict[str, str] = dict.fromkeys(EXPECTED_EXPORTS, PACKAGE)
+_OWNER.update(
+    dict.fromkeys(
+        ("_client_cwd", "_is_dangling_client", "_resolve_task_policy"),
+        f"{PACKAGE}._client_config",
+    )
+)
 
 # Importers of this package and the names each binds at module scope. Each
 # binding must be the same object the package exposes.
@@ -123,7 +129,7 @@ CONSUMER_IMPORTS: dict[str, frozenset[str]] = {
 
 # Modules that must import cold, in a fresh interpreter, on their own. Each
 # extraction commit appends its submodule here.
-COLD_IMPORTS: tuple[str, ...] = (PACKAGE,)
+COLD_IMPORTS: tuple[str, ...] = (PACKAGE, f"{PACKAGE}._client_config")
 
 
 # Deliberate local copies: ``_parse`` and ``_top_level_names`` also live in
@@ -161,6 +167,23 @@ def test_name_set_matches_hardcoded_surface() -> None:
     assert defined == set(EXPECTED_EXPORTS)
     for name in EXPECTED_EXPORTS:
         assert hasattr(pkg, name), name
+
+
+# Deliberate local copy of the isort-style key that sorts ``__all__`` the way
+# ruff RUF022 does. The same key is copied in tests/test_doctor_wedge_reexports.py.
+def _isort_style_key(name: str) -> tuple[int, str]:
+    stripped = name.lstrip("_")
+    if stripped.isupper():
+        return 0, name
+    if stripped[:1].isupper():
+        return 1, name
+    return 2, name
+
+
+def test_package_all_is_complete_and_sorted() -> None:
+    """``__all__`` names the full surface, in isort style."""
+    assert set(pkg.__all__) == set(EXPECTED_EXPORTS)
+    assert list(pkg.__all__) == sorted(pkg.__all__, key=_isort_style_key)
 
 
 def test_flat_module_file_is_gone() -> None:
