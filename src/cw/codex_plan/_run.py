@@ -435,6 +435,24 @@ def _park(run: _Run, plan_text: str, check: ApprovalCheck) -> _Exit:
     return _Exit(result, comment, run.worktree / PLAN_DRAFT_RELATIVE_PATH)
 
 
+def _remove_own_invalid_plan(run: _Run, plan_path: Path, written: str) -> None:
+    """Remove ``.cw/plan.md`` only while it still holds exactly *written*.
+
+    *written* is the text this run read back and found invalid. A file whose
+    content has since changed is not this run's artifact and is left alone, so a
+    concurrent run's plan is never discarded. Best-effort: a fault is logged.
+    """
+    try:
+        if plan_path.read_text(encoding="utf-8") == written:
+            plan_path.unlink(missing_ok=True)
+    except (OSError, ValueError):
+        _log.warning(
+            "codex plan invalid artifact cleanup failed ticket=%s",
+            run.task.ticket_id,
+            exc_info=True,
+        )
+
+
 def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
     """A completing exit: binding stations, the stamped plan, the decisions."""
     plan_path = run.worktree / PLAN_MD_RELATIVE_PATH
@@ -497,17 +515,7 @@ def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
             plan_draft_fingerprint=_draft_fingerprint(plan_text, written=draft_written),
         )
     if not _plan_body_signoff_ok(written):
-        # An existing plan is refused before this point, so what is on disk is
-        # what this run just wrote: removing it never discards an authoritative
-        # plan, and leaves no invalid one behind.
-        try:
-            plan_path.unlink(missing_ok=True)
-        except OSError:
-            _log.warning(
-                "codex plan invalid artifact cleanup failed ticket=%s",
-                run.task.ticket_id,
-                exc_info=True,
-            )
+        _remove_own_invalid_plan(run, plan_path, written)
         return run.blocked(
             STAGE_PLAN_REVIEWED,
             CODEX_PLAN_ARTIFACT_MISSING,

@@ -533,6 +533,26 @@ def test_a_plan_failing_post_write_verification_is_not_left_on_disk(
     assert not (h.worktree / PLAN_MD_RELATIVE_PATH).exists()
 
 
+def test_a_plan_replaced_after_the_failed_verification_is_left_alone(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    add_stations(add_turn(h.runner))
+    plan_md_path = h.worktree / PLAN_MD_RELATIVE_PATH
+    calls = iter([True, False])
+
+    def _verify(_text: str) -> bool:
+        ok = next(calls)
+        if not ok:
+            plan_md_path.write_text("another run's plan", encoding="utf-8")
+        return ok
+
+    with patch("cw.codex_plan._run._plan_body_signoff_ok", side_effect=_verify):
+        result = h.run()
+    assert result.blocker is not None
+    assert plan_md_path.read_text(encoding="utf-8") == "another run's plan"
+
+
 def test_a_failed_invalid_plan_cleanup_is_logged_not_raised(
     harness: Callable[..., Harness], caplog: pytest.LogCaptureFixture
 ) -> None:
