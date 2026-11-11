@@ -97,6 +97,27 @@ _OWNER.update(
         f"{PACKAGE}._client_config",
     )
 )
+_OWNER.update(
+    dict.fromkeys(
+        (
+            "_COMPLETION_ROUTING_GRACE_SECONDS",
+            "_revert_running_tasks_for_sessions",
+            "_sessions_past_completion_grace",
+            "_revert_terminal_backstop",
+            "backstop_targets",
+            "capture_backstop_dirty_checks",
+            "revert_completed_silent_tasks",
+            "revert_timed_out_tasks",
+        ),
+        f"{PACKAGE}.backstops",
+    )
+)
+
+# (reader, module global it reads, owning module): the reader's globals must be
+# the owner's namespace, so a patch on the owner reaches the reader.
+PATCH_OWNERSHIP: tuple[tuple[str, str, str], ...] = (
+    ("_revert_terminal_backstop", "partition_dirty", f"{PACKAGE}.backstops"),
+)
 
 # Importers of this package and the names each binds at module scope. Each
 # binding must be the same object the package exposes.
@@ -129,7 +150,11 @@ CONSUMER_IMPORTS: dict[str, frozenset[str]] = {
 
 # Modules that must import cold, in a fresh interpreter, on their own. Each
 # extraction commit appends its submodule here.
-COLD_IMPORTS: tuple[str, ...] = (PACKAGE, f"{PACKAGE}._client_config")
+COLD_IMPORTS: tuple[str, ...] = (
+    PACKAGE,
+    f"{PACKAGE}._client_config",
+    f"{PACKAGE}.backstops",
+)
 
 
 # Deliberate local copies: ``_parse`` and ``_top_level_names`` also live in
@@ -205,6 +230,18 @@ def test_consumer_binds_same_objects(importer: str) -> None:
     namespace = vars(import_module(importer))
     for name in CONSUMER_IMPORTS[importer]:
         assert namespace[name] is getattr(pkg, name), f"{importer}.{name}"
+
+
+class TestPatchOwnership:
+    """A patch on a submodule global reaches the function that reads it."""
+
+    @pytest.mark.parametrize(("reader", "global_name", "owner"), PATCH_OWNERSHIP)
+    def test_reader_globals_are_owner_namespace(
+        self, reader: str, global_name: str, owner: str
+    ) -> None:
+        owner_ns = vars(import_module(owner))
+        assert getattr(pkg, reader).__globals__ is owner_ns
+        assert global_name in owner_ns
 
 
 def test_public_exports_in_cw_reconcile_all() -> None:
