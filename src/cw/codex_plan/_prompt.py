@@ -104,31 +104,43 @@ def _comment_text(comment: dict[str, Any]) -> str:
     return f"### Comment by {login or 'unknown'} at {created}\n\n{text.rstrip()}\n"
 
 
+_COMMENTS_HEADING: Final = "## Comments (oldest first)\n\n"
+_BODY_TRUNCATED_NOTE: Final = "\n[ticket body truncated by cw]\n"
+
+
+def _assemble_ticket_text(head: str, rendered: list[str], dropped: int) -> str:
+    """The final ticket text: body, comments heading, omission note, comments."""
+    note = f"[{dropped} oldest comment(s) omitted by cw]\n" if dropped else ""
+    return f"{head}\n{_COMMENTS_HEADING}{note}" + "\n".join(rendered)
+
+
 def render_ticket_text(
     body: str, comments: list[dict[str, Any]], *, cap: int = TICKET_TEXT_MAX_CHARS
 ) -> TicketText:
     """Render *body* and *comments* (oldest first), capped at *cap* characters.
 
+    The cap applies to the whole rendered text, framing and notes included.
     Comments are kept verbatim, agent-authored ones included (their
     ``cw-agent-authored`` marker is what the provenance rule reads). Oldest
     comments are dropped first until the text fits; a body that alone exceeds
-    the cap is truncated with a note.
+    the cap is truncated with a note. A *cap* smaller than the fixed framing
+    (about a hundred characters) cannot be honored and yields the framing.
     """
     head = f"## Ticket body\n\n{body.rstrip()}\n"
     rendered = [_comment_text(c) for c in comments]
     dropped = 0
-    while rendered and len(head) + sum(len(r) + 1 for r in rendered) > cap:
+    text = _assemble_ticket_text(head, rendered, dropped)
+    while rendered and len(text) > cap:
         rendered.pop(0)
         dropped += 1
-    if len(head) > cap:
-        head = head[:cap] + "\n[ticket body truncated by cw]\n"
-    note = f"[{dropped} oldest comment(s) omitted by cw]\n" if dropped else ""
-    comments_part = "## Comments (oldest first)\n\n" + note + "\n".join(rendered)
-    return TicketText(
-        text=f"{head}\n{comments_part}",
-        comments_total=len(comments),
-        comments_dropped=dropped,
-    )
+        text = _assemble_ticket_text(head, rendered, dropped)
+    if len(text) > cap:
+        # The body alone, with the fixed framing, exceeds the cap: keep as much
+        # of it as fits beside the framing and the truncation note.
+        framing = len(_assemble_ticket_text("", [], dropped))
+        room = max(cap - framing - len(_BODY_TRUNCATED_NOTE), 0)
+        text = _assemble_ticket_text(head[:room] + _BODY_TRUNCATED_NOTE, [], dropped)
+    return TicketText(text=text, comments_total=len(comments), comments_dropped=dropped)
 
 
 def prefetch_ticket(ticket_id: str, *, cwd: Path) -> TicketText | None:

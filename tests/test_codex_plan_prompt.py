@@ -200,16 +200,42 @@ class TestTicketText:
         assert "COMMENT-0" not in rendered.text
         assert "COMMENT-4" in rendered.text
         assert "oldest comment(s) omitted by cw" in rendered.text
+        assert len(rendered.text) <= 1200
 
-    def test_an_oversized_body_is_truncated(self) -> None:
-        rendered = render_ticket_text("y" * 500, [], cap=100)
+    @pytest.mark.parametrize("cap", [300, 700, 1000, 1500])
+    def test_the_cap_holds_for_the_whole_rendered_text(self, cap: int) -> None:
+        comments = [
+            {"author": {"login": "op"}, "body": f"C{i} " + "x" * 90} for i in range(12)
+        ]
+        rendered = render_ticket_text("b" * 50, comments, cap=cap)
+        assert len(rendered.text) <= cap
+        assert rendered.comments_total == 12
+
+    def test_an_oversized_body_is_truncated_within_the_cap(self) -> None:
+        rendered = render_ticket_text("y" * 500, [], cap=200)
         assert "[ticket body truncated by cw]" in rendered.text
+        assert len(rendered.text) <= 200
+
+    def test_a_body_truncated_after_dropping_every_comment_stays_in_the_cap(
+        self,
+    ) -> None:
+        comments = [{"author": "op", "body": "c" * 100}] * 3
+        rendered = render_ticket_text("y" * 500, comments, cap=200)
+        assert rendered.comments_dropped == 3
+        assert "[3 oldest comment(s) omitted by cw]" in rendered.text
+        assert "[ticket body truncated by cw]" in rendered.text
+        assert len(rendered.text) <= 200
+
+    def test_a_cap_below_the_framing_yields_the_framing_only(self) -> None:
+        rendered = render_ticket_text("y" * 500, [], cap=10)
+        assert "[ticket body truncated by cw]" in rendered.text
+        assert "yy" not in rendered.text
 
     def test_the_cap_constant_is_the_default(self) -> None:
         comments = [{"author": "op", "body": "z" * (TICKET_TEXT_MAX_CHARS // 2)}] * 3
         rendered = render_ticket_text("body", comments)
         assert rendered.comments_dropped >= 1
-        assert len(rendered.text) <= TICKET_TEXT_MAX_CHARS + 200
+        assert len(rendered.text) <= TICKET_TEXT_MAX_CHARS
 
 
 class TestPrefetch:
