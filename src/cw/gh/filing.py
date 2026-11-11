@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess as _sp
 import tempfile
@@ -14,6 +15,8 @@ from typing import TYPE_CHECKING, NamedTuple
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+
+_log = logging.getLogger(__name__)
 
 _CREATE_TIMEOUT = 30
 
@@ -27,8 +30,15 @@ _LIST_TIMEOUT = 30
 _CLOSE_TIMEOUT = 30
 
 #: ``--limit`` for the labelled-issue lookup. A full page means the listing may
-#: be truncated, which the caller must treat as inconclusive (#3041).
-_LABEL_LIST_LIMIT = 200
+#: be truncated, which the caller must treat as inconclusive (#3041). 1000
+#: leaves headroom over the 214 open ``review-debt`` issues seen in #3449, and
+#: the ``gh issue list --json number,body`` output for 1000 issues still fits
+#: ``_LIST_TIMEOUT``.
+_LABEL_LIST_LIMIT = 1000
+
+#: Percent of the limit at which the lookup logs a signal-only WARNING, so the
+#: next ceiling is visible before it blocks filing (#3449).
+_LABEL_LIST_WARN_PERCENT = 80
 
 #: Longest ``detail`` a typed failure carries.
 _DETAIL_MAX_CHARS = 200
@@ -544,6 +554,7 @@ def list_open_issues_by_label(
     No ``--search``: the caller filters bodies client-side for its marker, so
     the lookup does not depend on GitHub's search index. ``--state open`` makes
     a CLOSED match a miss by construction. A full page sets ``truncated``.
+    A listing at 80% of the limit logs a WARNING naming the count and the limit.
     """
     cmd = [
         "gh",
@@ -573,4 +584,13 @@ def list_open_issues_by_label(
         detail = "unparseable gh issue list output"
         return LabelledIssuesLookup((), GhFailure.OTHER, detail, False)
     issues, raw_count = parsed
+    if raw_count * 100 >= limit * _LABEL_LIST_WARN_PERCENT:
+        _log.warning(
+            "gh issue list --label %s returned %d issues against its limit of %d"
+            " (>= %d%%); at the limit the dedup lookup is inconclusive",
+            label,
+            raw_count,
+            limit,
+            _LABEL_LIST_WARN_PERCENT,
+        )
     return LabelledIssuesLookup(issues, None, "", raw_count >= limit)

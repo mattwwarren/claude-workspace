@@ -9,6 +9,7 @@ could not be captured without a write to a real repo (see that test).
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 
@@ -47,12 +48,21 @@ _LIST_PREFIX = ("gh", "issue", "list")
 _CREATE_PREFIX = ("gh", "issue", "create")
 _LABEL_PREFIX = ("gh", "label", "create")
 _REPO = Path("/tmp/client-repo")
-_LIMIT = 200
+_LIMIT = 1000
+_FILING_LOGGER = "cw.gh.filing"
 
 
 @pytest.fixture
 def cli(monkeypatch: pytest.MonkeyPatch) -> FakeGhCli:
     return FakeGhCli().install(monkeypatch)
+
+
+def _page(count: int) -> str:
+    return json.dumps([{"body": "x", "number": n} for n in range(count)])
+
+
+def _filing_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == _FILING_LOGGER]
 
 
 class TestEnsureLabel:
@@ -88,6 +98,101 @@ class TestEnsureLabel:
         cli.reply(*_LABEL_PREFIX)
         ensure_label("review-debt", "d4c5f9", "Debt", timeout=7)
         assert cli.records[0].timeout == 7
+
+
+class TestLabelListWarning:
+    def test_a_page_one_short_of_the_limit_is_conclusive(self, cli: FakeGhCli) -> None:
+        cli.reply(*_LIST_PREFIX, stdout=_page(_LIMIT - 1))
+        lookup = list_open_issues_by_label("review-debt")
+        assert lookup.failure is None
+        assert lookup.truncated is False
+        assert len(lookup.issues) == _LIMIT - 1
+
+    def test_the_observed_214_backlog_is_conclusive_and_logs_nothing(
+        self, cli: FakeGhCli, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        cli.reply(*_LIST_PREFIX, stdout=_page(214))
+        with caplog.at_level(logging.WARNING, logger=_FILING_LOGGER):
+            lookup = list_open_issues_by_label("review-debt")
+        assert lookup.failure is None
+        assert lookup.truncated is False
+        assert len(lookup.issues) == 214
+        assert _filing_records(caplog) == []
+
+    @pytest.mark.parametrize("count", [800, 999, 1000])
+    def test_listing_at_or_above_80_percent_warns_once(
+        self, cli: FakeGhCli, caplog: pytest.LogCaptureFixture, count: int
+    ) -> None:
+        cli.reply(*_LIST_PREFIX, stdout=_page(count))
+        with caplog.at_level(logging.WARNING, logger=_FILING_LOGGER):
+            lookup = list_open_issues_by_label("review-debt")
+        records = _filing_records(caplog)
+        assert len(records) == 1
+        assert records[0].levelno == logging.WARNING
+        message = records[0].getMessage()
+        assert str(count) in message
+        assert "1000" in message
+        assert "review-debt" in message
+        assert lookup.truncated is (count >= _LIMIT)
+        assert lookup.failure is None
+        assert len(lookup.issues) == count
+
+    @pytest.mark.parametrize("count", [0, 1, 214, 799])
+    def test_listing_below_80_percent_logs_nothing(
+        self, cli: FakeGhCli, caplog: pytest.LogCaptureFixture, count: int
+    ) -> None:
+        cli.reply(*_LIST_PREFIX, stdout=_page(count))
+        with caplog.at_level(logging.WARNING, logger=_FILING_LOGGER):
+            list_open_issues_by_label("review-debt")
+        assert _filing_records(caplog) == []
+
+    @pytest.mark.parametrize(
+        ("count", "warns"), [(8, True), (7, False)], ids=["at-80pct", "below-80pct"]
+    )
+    def test_the_warning_threshold_tracks_the_limit_argument(
+        self,
+        cli: FakeGhCli,
+        caplog: pytest.LogCaptureFixture,
+        count: int,
+        warns: bool,
+    ) -> None:
+        cli.reply(*_LIST_PREFIX, stdout=_page(count))
+        with caplog.at_level(logging.WARNING, logger=_FILING_LOGGER):
+            lookup = list_open_issues_by_label("review-debt", limit=10)
+        records = _filing_records(caplog)
+        assert lookup.truncated is False
+        assert len(records) == (1 if warns else 0)
+        if warns:
+            assert f"returned {count} issues against its limit of 10" in (
+                records[0].getMessage()
+            )
+
+    def test_a_gh_failure_logs_nothing(
+        self, cli: FakeGhCli, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        cli.reply(*_LIST_PREFIX, returncode=1, stderr=_AUTH_STDERR)
+        with caplog.at_level(logging.WARNING, logger=_FILING_LOGGER):
+            lookup = list_open_issues_by_label("review-debt")
+        assert lookup.failure is GhFailure.AUTH
+        assert _filing_records(caplog) == []
+
+    def test_a_timeout_logs_nothing(
+        self, cli: FakeGhCli, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        cli.reply(*_LIST_PREFIX, raises=subprocess.TimeoutExpired(["gh"], 1))
+        with caplog.at_level(logging.WARNING, logger=_FILING_LOGGER):
+            lookup = list_open_issues_by_label("review-debt")
+        assert lookup.failure is GhFailure.NETWORK
+        assert _filing_records(caplog) == []
+
+    def test_an_unparseable_listing_logs_nothing(
+        self, cli: FakeGhCli, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        cli.reply(*_LIST_PREFIX, stdout="not json")
+        with caplog.at_level(logging.WARNING, logger=_FILING_LOGGER):
+            lookup = list_open_issues_by_label("review-debt")
+        assert lookup.failure is GhFailure.OTHER
+        assert _filing_records(caplog) == []
 
 
 class TestCreateIssueDebt:
@@ -157,7 +262,7 @@ class TestListOpenIssuesByLabel:
             "--json",
             "number,body",
             "--limit",
-            "200",
+            "1000",
         ]
         assert "--search" not in argv
         assert cli.records[0].cwd == _REPO
