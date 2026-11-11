@@ -57,6 +57,10 @@ from cw.codex_plan._result import (
     DECISIONS_NOT_RECORDED_PREFIX,
     MODEL_TEXT_DISCARDED_FRICTION,
     PARK_STATUSES,
+    PLAN_BLOCKED,
+    PLAN_NO_OP,
+    PLAN_PENDING_APPROVAL,
+    PLAN_STAGE_COMPLETE,
     RESUME_FRICTION,
     PlanTurnFailure,
     ResumeDraft,
@@ -101,7 +105,7 @@ _log = logging.getLogger(__name__)
 
 PLAN_MISSING_CONTEXT: Final = "plan_missing_context"
 TRACKER_MCP_UNAVAILABLE: Final = "tracker_mcp_unavailable_pre_dispatch"
-NO_OP: Final = "no_op"
+NO_OP: Final = PLAN_NO_OP
 
 #: The stage identifiers the driver's stage events carry.
 STAGE_INTAKE: Final = StageIdentifier.S0_INTAKE.value
@@ -110,7 +114,7 @@ STAGE_PLAN_REVIEWED: Final = StageIdentifier.S1_PLAN_REVIEWED.value
 
 _SCHEMA_NAME: Final = "plan-schema.json"
 _OUTPUT_NAME: Final = "plan-output.json"
-_STATUSES_GATED_IN_FULL: Final = frozenset({"stage_complete", "plan_pending_approval"})
+_STATUSES_GATED_IN_FULL: Final = frozenset({PLAN_STAGE_COMPLETE, PLAN_PENDING_APPROVAL})
 
 
 @dataclass(frozen=True)
@@ -461,8 +465,8 @@ def _after_turn(
     """Steps 5-7 for a parsed turn."""
     if result.status == NO_OP:
         return _Exit(result)
-    if result.status == "blocked":
-        reason = result.blocker.reason if result.blocker is not None else "blocked"
+    if result.status == PLAN_BLOCKED:
+        reason = result.blocker.reason if result.blocker is not None else PLAN_BLOCKED
         run.emit(
             OrchestratorEventType.STAGE_ERRORED, STAGE_PLAN_GENERATED, error_kind=reason
         )

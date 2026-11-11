@@ -13,6 +13,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from cw.auto_dev_result import SCOPE_TIER_LARGE
+from cw.codex_plan._result import (
+    PLAN_APPROVAL_NEXT_ACTIONS,
+    PLAN_PENDING_APPROVAL,
+    PLAN_STAGE_COMPLETE,
+)
 from cw.plan_files import (
     _SCOPE_TIER_MARKER,
     _strip_fenced_lines,
@@ -30,7 +35,7 @@ CODEX_PLAN_ARTIFACT_MISSING: Final = "codex_plan_artifact_missing"
 CODEX_PLAN_GATE_FAILED: Final = "codex_plan_gate_failed"
 
 #: The ``next_actions`` a large plan parked for row approval carries.
-APPROVAL_NEXT_ACTIONS: Final = ("user_decide_plan_approval",)
+APPROVAL_NEXT_ACTIONS: Final = PLAN_APPROVAL_NEXT_ACTIONS
 
 
 @dataclass(frozen=True)
@@ -112,11 +117,11 @@ def check_large_tier_approval(
     quote both. Only exact equality is evidence in C1 (#3465 covers the
     operator-authority delta and the comment path).
     """
-    if result.status != "stage_complete" or result.scope.tier != SCOPE_TIER_LARGE:
+    if result.status != PLAN_STAGE_COMPLETE or result.scope.tier != SCOPE_TIER_LARGE:
         return ApprovalCheck(result)
     parked = result.model_copy(
         update={
-            "status": "plan_pending_approval",
+            "status": PLAN_PENDING_APPROVAL,
             "next_actions": list(APPROVAL_NEXT_ACTIONS),
         }
     )

@@ -16,8 +16,8 @@ durable copy. The events are the three existing verdict-comment events with
   part stops the post, so the parts that did post stay in order.
 * Any other tracker: one A2 tracker-IO turn (``post_parts_via_turn``).
 
-This wrapper mirrors the review-shaped ``_surface_turn_outcome`` rather than
-generalising it (named in the PR's structural call).
+Tracker-IO outcome classification is shared with the REVIEW post through the
+neutral signal helper; PLAN supplies its own comment identity and artifact.
 """
 
 from __future__ import annotations
@@ -29,17 +29,16 @@ from typing import TYPE_CHECKING, Any, Final
 from cw.auto_dev_result import SCOPE_TIER_LARGE
 from cw.codex_plan._result import PARK_STATUSES
 from cw.codex_review_signals import (
+    VerdictCommentIdentity,
     emit_verdict_comment_posted,
     emit_verdict_comment_skipped,
-    emit_verdict_comment_unverified,
+    surface_tracker_io_outcome,
 )
 from cw.codex_stage_completion import STAGE_FAULTS
 from cw.gh import post_issue_comment
 from cw.tracker import TRACKER_GITHUB_ISSUES, TrackerClass, tracker_kind
 from cw.tracker_io import (
-    PublicState,
     TrackerIoContext,
-    TrackerIoOutcome,
     TrackerIoReason,
     plan_turn_parts,
     post_parts_via_turn,
@@ -232,29 +231,14 @@ class _Post:
             content=content,
         )
 
-    def unverified(self, outcome: TrackerIoOutcome, reason: str) -> None:
-        _log.warning(
-            "plan_comment_unverified ticket=%s tracker=%s reason=%s public_state=%s",
-            self.ticket_id,
-            self.tracker,
-            reason,
-            outcome.public_state.value,
-        )
-        emit_verdict_comment_unverified(
-            ticket_id=self.ticket_id,
+    @property
+    def identity(self) -> VerdictCommentIdentity:
+        return VerdictCommentIdentity(
             client=self.client,
-            tracker=self.tracker,
-            kind="plan",
-            reason=reason,
-            artifact_path=self.artifact_path,
-            reviewed_sha=None,
             session_id=self.sid,
-            public_state=outcome.public_state.value,
-            posted=[
-                {"index": p.index, "comment_id": p.comment_id, "url": p.url}
-                for p in outcome.posted
-            ],
-            marker_survived=outcome.marker_survived,
+            kind="plan",
+            reviewed_sha=None,
+            artifact_path=self.artifact_path,
         )
 
 
@@ -285,19 +269,13 @@ def _post_other(post: _Post, text: str, context: TrackerIoContext) -> None:
     outcome = post_parts_via_turn(
         post.ticket_id, text, tracker=post.tracker, context=context, session_id=post.sid
     )
-    if outcome.reason is None:
-        post.posted(
-            [
-                {"index": p.index, "comment_id": p.comment_id, "url": p.url}
-                for p in outcome.posted
-            ],
-            text,
-        )
-        return
-    if outcome.public_state is PublicState.NONE:
-        post.skipped(outcome.reason.value)
-        return
-    post.unverified(outcome, outcome.reason.value)
+    surface_tracker_io_outcome(
+        post.ticket_id,
+        text,
+        tracker=post.tracker,
+        outcome=outcome,
+        identity=post.identity,
+    )
 
 
 def post_plan_comment(

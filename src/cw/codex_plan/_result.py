@@ -58,25 +58,27 @@ RESUME_FRICTION: Final = (
 MODEL_TEXT_DISCARDED_FRICTION: Final = "plan_resume_model_text_discarded"
 DECISIONS_NOT_RECORDED_PREFIX: Final = "plan_decisions_not_recorded: "
 
-#: The statuses a PLAN sentinel may carry; any other status is invalid here.
+# PLAN status vocabulary shared by the turn parser and gate transitions.
+PLAN_STAGE_COMPLETE: Final = "stage_complete"
+PLAN_PENDING_APPROVAL: Final = "plan_pending_approval"
+PLAN_AMBIGUITIES_PENDING: Final = "ambiguities_pending_resolution"
+PLAN_PREMISES_PENDING: Final = "premises_pending_verification"
+PLAN_NO_OP: Final = "no_op"
+PLAN_BLOCKED: Final = "blocked"
 PLAN_STATUSES: Final = frozenset(
     {
-        "stage_complete",
-        "plan_pending_approval",
-        "ambiguities_pending_resolution",
-        "premises_pending_verification",
-        "no_op",
-        "blocked",
+        PLAN_STAGE_COMPLETE,
+        PLAN_PENDING_APPROVAL,
+        PLAN_AMBIGUITIES_PENDING,
+        PLAN_PREMISES_PENDING,
+        PLAN_NO_OP,
+        PLAN_BLOCKED,
     }
 )
-#: The park statuses: cw writes the draft and posts the park comment.
 PARK_STATUSES: Final = frozenset(
-    {
-        "plan_pending_approval",
-        "ambiguities_pending_resolution",
-        "premises_pending_verification",
-    }
+    {PLAN_PENDING_APPROVAL, PLAN_AMBIGUITIES_PENDING, PLAN_PREMISES_PENDING}
 )
+PLAN_APPROVAL_NEXT_ACTIONS: Final = ("user_decide_plan_approval",)
 
 _SENTINEL_OPEN: Final = "<<<AUTO_DEV_RESULT"
 # Any 64-char lowercase hex digest: bind_claimed_fingerprint reads a non-null

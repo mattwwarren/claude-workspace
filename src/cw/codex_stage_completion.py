@@ -15,11 +15,11 @@ revert live in modules that import ``cw.executor`` at module level.
 from __future__ import annotations
 
 import logging
-import subprocess
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from cw.codex_review import STAGE3_REVIEW, make_codex_blocked
+from cw.codex_review_signals import COMMON_TURN_FAULTS
 from cw.config import sessions_lock
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.dispatch_state import (
@@ -59,16 +59,7 @@ _log = logging.getLogger(__name__)
 #: outside it escapes ``cw codex run``: the session stays ACTIVE and
 #: reconcile/local's codex branch is the crash-only fallback. Narrow on
 #: purpose, so the guarded wrapper needs no broad ``except Exception``.
-STAGE_FAULTS: tuple[type[Exception], ...] = (
-    OSError,
-    ValueError,
-    RuntimeError,
-    LookupError,
-    TypeError,
-    AttributeError,
-    subprocess.SubprocessError,
-    CwError,
-)
+STAGE_FAULTS: tuple[type[Exception], ...] = (*COMMON_TURN_FAULTS, CwError)
 
 
 def stamp_session_id_on_running_task(
