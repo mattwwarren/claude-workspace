@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.95.0] - 2026-11-11
+
 ### Added
 
 - **Codex runs the PLAN stage (#3060, RFC 0018 C1).** A lane whose PLAN stage resolves to `codex` now runs `cw codex run --stage plan` instead of parking `codex_review_only`: one read-only `codex exec` turn (`--sandbox read-only -c approval_policy=never`, fixed, no knob, no timeout) returns the plan text and a framed sentinel, and cw does the rest outside the sandbox: gate set B, the Plan Reviewer and Plan Soundness Reviewer as read-only per-role turns, both sign-off markers from clean verdicts only, `.cw/plan-draft.md` and `.cw/plan.md`, a strictly validated cw-stamped sentinel, the `stage.entered`/`stage.errored` events, in-process plan decisions and a best-effort plan or park comment (`review.verdict_comment_*` with `kind: plan`). Two new blocker reasons: `codex_plan_artifact_missing` and `codex_plan_gate_failed`. A resumed draft whose fingerprint the row approved is taken verbatim. The wheel now ships `auto-dev-plan.md` as package data (`cw/data/commands/`). Every codex pre-flight park now carries its own stage's `stage_reached` (IMPL and FINALIZE parks no longer say `stage3_review`). The tracker-MCP dispatch gate and `cw doctor` cover codex PLAN rows. Deferred to #3464 and #3465: resume-round parity, comment-path approval, the operator-authority delta and Stage-0 origin-sync checks.
