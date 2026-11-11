@@ -39,6 +39,7 @@ from cw.merge_probe import MergeProbe
 from cw.models import (
     ClientConfig,
     DevQueueStore,
+    LaneConfig,
     QueueItemStatus,
     SandboxMode,
     Stage,
@@ -867,16 +868,19 @@ def test_growth_guard_on_repair_row_parks_codex_fix_growth_budget_exceeded(
     assert_clean_after_refusal(h.worktree, start)
 
 
-def test_growth_guard_off_via_lane_key_codex_fix_loop_growth_guard_enabled_false_passes(
+def test_growth_guard_off_via_the_lane_key_passes(
     harness: Callable[..., Harness],
 ) -> None:
-    h = harness(repair=True)
+    lane = "no-growth-guard"
+    h = harness(repair=True, task_updates={"lane": lane})
+    h.client = ClientConfig(
+        name="test",
+        workspace_path=h.worktree,
+        default_branch="main",
+        lanes=[LaneConfig(name=lane, codex_fix_loop_growth_guard_enabled=False)],
+    )
     h.turn(files=_big_widget(60))
-    with patch(
-        "cw.codex_impl._run._resolve_codex_fix_loop_growth_guard_enabled",
-        return_value=False,
-    ):
-        result = h.run()
+    result = h.run()
     assert result.status == "stage_complete"
 
 
