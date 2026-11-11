@@ -24,6 +24,9 @@ STAGE3_REVIEW: StageReached = "stage3_review"
 #: The codex PLAN executor's wire stage (#3060); ``make_codex_blocked`` keys the
 #: plan ``next_actions`` label on it.
 STAGE1_PLAN: StageReached = "stage1_plan"
+#: The codex IMPL executor's wire stage (#3061); ``make_codex_blocked`` keys the
+#: impl ``next_actions`` label on it.
+STAGE2_IMPL: StageReached = "stage2_impl"
 
 #: Step 4b comment title and artifact-header label for a codex-built result.
 #: The Claude sibling is ``cw.claude_review.core.CLAUDE_REVIEWER_LABEL``.
@@ -313,6 +316,9 @@ _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS: list[str] = ["user_resolve_codex_review_fail
 # above would tell the operator to resolve a review failure for a run that
 # never reached review. ``make_codex_blocked`` selects it by ``stage_reached``.
 _CODEX_PLAN_BLOCKED_NEXT_ACTIONS: list[str] = ["user_resolve_codex_plan_failure"]
+
+# next_actions label for a codex IMPL blocked result (#3061), keyed the same way.
+_CODEX_IMPL_BLOCKED_NEXT_ACTIONS: list[str] = ["user_resolve_codex_impl_failure"]
 
 # Backend-side failure reasons: the codex/claude backend itself errored or was
 # at capacity, so nothing says it is up. A round whose every failed role is one
