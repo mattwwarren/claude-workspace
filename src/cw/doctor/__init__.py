@@ -62,7 +62,9 @@ re-exports. Submodules:
   ``INSTALL_PYTHON``; also the bounded probe ``cw dev-queue status`` prints
   (#2973). Also ``hook-install-python/<client>``: an advisory warning when any
   shared hook (``pre-push`` included) records an ``INSTALL_PYTHON`` inside one
-  of the client's dispatch-worktree bases (#3076).
+  of the client's dispatch-worktree bases (#3076) or a missing or
+  non-executable ``INSTALL_PYTHON`` (a ``pre-commit`` hook already reported as
+  stale by ``commit-hook`` is not repeated) (#3077).
 - ``repo_bare`` — per-client advisory warning when ``core.bare=true`` is set on a
   checkout that has a working tree (#2973).
 - ``user_level_hooks`` — detection of a ``cw signal-stop`` Stop hook installed

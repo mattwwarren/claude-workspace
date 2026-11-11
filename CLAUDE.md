@@ -143,14 +143,14 @@ for interactive contributors only: install it separately with
 `uv run pre-commit install --hook-type pre-push`. With no hook installed,
 `git commit` runs no checks at all and the first failure is in CI; a codex
 fix-cycle commit once shipped unformatted code that way.
-A dispatched worker must not run `pre-commit install` or `pre-commit uninstall`: `cw guard-hook-install` refuses it, and the operator repairs the shared hooks with `uv run pre-commit install --hook-type pre-commit` from the main checkout (`cw doctor` reports `commit-hook/<client>` and `hook-install-python/<client>`).
+A dispatched worker must not run `pre-commit install` or `pre-commit uninstall`, and never from inside a ticket worktree: hooks are installed only from the main checkout (the shared clone), by the operator, with `uv run pre-commit install --hook-type pre-commit`. `cw guard-hook-install` enforces this for Claude-hosted workers. Codex and opencode workers write no `settings.local.json`, so for them there is no preventive guard; enforcement is the post-hoc `hook-install-python/<client>` check in `cw doctor`, which reports a missing or worker-venv interpreter after the fact.
 Both commands rewrite the `.git/hooks` every worktree shares and pin
 `INSTALL_PYTHON` to the venv of the checkout that ran them. `pre-commit install`
 refuses while `core.hooksPath` is set, so unset it first
 (`git config --unset core.hooksPath`) and check `git rev-parse --git-path hooks`
 for an executable `pre-commit` file.
 `cw doctor` reports a missing, non-executable, `core.hooksPath`-bypassed or stale-`INSTALL_PYTHON`
-hook as the advisory `commit-hook/<client>` warning, any shared hook whose `INSTALL_PYTHON` lies inside a dispatch-worktree base as `hook-install-python/<client>`,
+hook as the advisory `commit-hook/<client>` warning, any shared hook whose `INSTALL_PYTHON` lies inside a dispatch-worktree base or is not an executable file as `hook-install-python/<client>` (a `pre-commit` hook that `commit-hook/<client>` already reports as stale is not repeated),
 and `core.bare=true` as `repo-bare/<client>`.
 
 Gate 7 compares each released `## [X.Y.Z]` section of `CHANGELOG.md` with the

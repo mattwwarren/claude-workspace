@@ -26,6 +26,14 @@ venv that is removed on worktree cleanup. The comparison is lexical, so a venv
 ``python`` symlinked to the system interpreter is still caught. It runs
 whether or not the repo declares commit-stage hooks, reports only when
 something is flagged (the ``repo-bare`` convention), and is advisory too.
+
+The same check has a second reason (#3077): the recorded ``INSTALL_PYTHON`` is
+missing or not an executable file, for a hook of any name. The one exception is
+a ``pre-commit`` hook that :func:`commit_hook_state` already reports as stale
+(executable file, readable config declaring commit-stage hooks): that finding
+is ``commit-hook/<client>``'s, so it is not repeated here. Every other hook with
+a missing interpreter, including an unreadable, absent, malformed or
+non-commit-stage config, is reported by this check.
 """
 
 from __future__ import annotations
@@ -289,12 +297,34 @@ def _check_commit_hook(clients: dict[str, ClientConfig]) -> list[CheckResult]:
     return results
 
 
-class _WorktreePythonFinding(NamedTuple):
-    """A shared hook whose ``INSTALL_PYTHON`` lies inside a worktree base."""
+class _InstallPythonFinding(NamedTuple):
+    """A shared hook whose ``INSTALL_PYTHON`` is in a worktree base, missing, or both.
+
+    ``base`` is ``None`` when the interpreter is outside every base; ``missing``
+    is set when it is not an executable file and the commit check does not own it.
+    """
 
     script: Path
     python: str
-    base: Path
+    base: Path | None
+    missing: bool
+
+
+def _commit_check_reports_stale(repo: Path, script: Path) -> bool:
+    """Whether :func:`commit_hook_state` already reports *script* as stale.
+
+    Mirrors that function's stale branch: a ``pre-commit`` file that is
+    executable (the ``X_OK`` test at its ``os.access`` gate) in a repo whose
+    readable config declares a commit-stage hook. Any other state (not
+    executable, unreadable, absent, malformed or non-commit config) returns
+    ``False``, so this check owns the missing interpreter instead. Keep the
+    preconditions in step with ``commit_hook_state``; the dedup tests fail if
+    they drift.
+    """
+    if script.name != _HOOK_NAME or not os.access(script, os.X_OK):
+        return False
+    config_text = _read_text(repo / _CONFIG_NAME)
+    return config_text is not None and declares_commit_stage_hook(config_text)
 
 
 def _shared_hook_scripts(hooks: Path) -> list[Path]:
@@ -321,10 +351,15 @@ def _containing_base(python: str, bases: frozenset[Path]) -> Path | None:
     return None
 
 
-def _worktree_python_findings(
+def _install_python_findings(
     repo: Path, client: ClientConfig, timeout: float
-) -> Iterator[_WorktreePythonFinding]:
-    """Each shared hook of *repo* whose interpreter is inside a worktree base."""
+) -> Iterator[_InstallPythonFinding]:
+    """Each shared hook of *repo* whose interpreter is in a base, missing, or both.
+
+    The missing-interpreter test runs only for a hook whose interpreter is
+    absent from every base's lexical match, and the stale-``pre-commit`` dedup
+    reads the config only when the interpreter is actually missing.
+    """
     try:
         hooks = git_hooks_dir(repo, timeout=timeout)
     except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired):
@@ -335,21 +370,34 @@ def _worktree_python_findings(
         if python is None:
             continue
         base = _containing_base(python, bases)
-        if base is not None:
-            yield _WorktreePythonFinding(script, python, base)
+        missing = not _is_executable_file(Path(python)) and not (
+            _commit_check_reports_stale(repo, script)
+        )
+        if base is not None or missing:
+            yield _InstallPythonFinding(script, python, base, missing)
 
 
-def _worktree_python_detail(findings: list[_WorktreePythonFinding]) -> str:
+def _install_python_reasons(finding: _InstallPythonFinding) -> list[str]:
+    reasons: list[str] = []
+    if finding.base is not None:
+        reasons.append(f"inside dispatch worktree base {finding.base}")
+    if finding.missing:
+        reasons.append("which is not an executable file")
+    return reasons
+
+
+def _install_python_detail(findings: list[_InstallPythonFinding]) -> str:
     hooks = "; ".join(
-        f"{f.script} records INSTALL_PYTHON={f.python}, inside dispatch worktree "
-        f"base {f.base}"
+        f"{f.script} records INSTALL_PYTHON={f.python}, "
+        + ", ".join(_install_python_reasons(f))
         for f in findings
     )
     removals = " ".join(f"`rm {f.script}`" for f in findings)
     return (
-        f"{hooks}. That interpreter is a dispatch worker's venv, removed when the "
-        "worktree is cleaned up, and every worktree's git runs this shared hook. "
-        f"Fix: remove the hook ({removals}) or reinstall it from the main "
+        f"{hooks}. A dispatch worker's venv is removed when its worktree is cleaned "
+        'up, and a missing interpreter makes the hook fail with "`pre-commit` not '
+        "found\" unless pre-commit is on PATH; every worktree's git runs this shared "
+        f"hook. Fix: remove the hook ({removals}) or reinstall it from the main "
         f"checkout (`{_INSTALL_CMD}`)"
     )
 
@@ -359,7 +407,7 @@ def _check_hook_install_python(clients: dict[str, ClientConfig]) -> list[CheckRe
     results: list[CheckResult] = []
     for name, client in clients.items():
         findings = list(
-            _worktree_python_findings(_git_dir(client), client, _DEFAULT_TIMEOUT)
+            _install_python_findings(_git_dir(client), client, _DEFAULT_TIMEOUT)
         )
         if not findings:
             continue
@@ -368,7 +416,7 @@ def _check_hook_install_python(clients: dict[str, ClientConfig]) -> list[CheckRe
                 f"hook-install-python/{name}",
                 ok=True,
                 warn=True,
-                detail=_worktree_python_detail(findings),
+                detail=_install_python_detail(findings),
             )
         )
     return results
