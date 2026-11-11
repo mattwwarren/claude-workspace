@@ -1,9 +1,10 @@
 """``cw codex`` — codex executor subprocess and migration commands.
 
 ``cw codex run``: RFC 0014 S1 / ADR-0018, thin CLI wiring over
-``cw.codex_driver``'s testable core. ``--stage review`` and ``--stage plan``
-(#3060) have runners; ``--stage impl`` is not implemented yet (#1550) and
-exits non-zero naming that ticket rather than silently no-op'ing.
+``cw.codex_driver``'s testable core. ``--stage review``, ``--stage plan``
+(#3060) and ``--stage impl`` (#3061) have runners; ``--stage finalize`` has
+none and exits non-zero naming the supported stages rather than silently
+no-op'ing.
 
 ``cw codex migrate-legacy``: RFC 0014 B1 (#2389), thin CLI wiring over
 ``cw.codex_legacy_recovery``.
@@ -18,6 +19,7 @@ import click
 
 from cw.cli._base import handle_errors, main
 from cw.codex_driver import (
+    run_codex_impl_stage,
     run_codex_plan_stage,
     run_codex_review_stage,
     unsupported_codex_stage_message,
@@ -39,11 +41,16 @@ def _stage_runners() -> dict[Stage, Callable[..., None]]:
     """Map each stage a codex executor serves to its runner (#3054).
 
     Built per call, not held in a module constant: the tests patch
-    ``run_codex_review_stage`` and ``run_codex_plan_stage`` on this module, and
+    ``run_codex_review_stage``, ``run_codex_plan_stage`` and
+    ``run_codex_impl_stage`` on this module, and
     a constant would capture the unpatched objects at import. A pin test
     asserts the keys equal ``cw.executor.codex.CODEX_SUPPORTED_STAGES``.
     """
-    return {Stage.REVIEW: run_codex_review_stage, Stage.PLAN: run_codex_plan_stage}
+    return {
+        Stage.REVIEW: run_codex_review_stage,
+        Stage.PLAN: run_codex_plan_stage,
+        Stage.IMPL: run_codex_impl_stage,
+    }
 
 
 @main.group(name="codex")

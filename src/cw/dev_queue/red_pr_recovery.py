@@ -7,7 +7,9 @@ layer in ``cw.shipped_pr_recovery`` (``cw.pr_feedback`` imports
 it). This module owns only the pure refusal rules and the locked row write:
 a COMPLETED shipped row regresses to IMPL through ``_stage_regress`` (which
 revokes the review approval, so the pipeline passes REVIEW again) with the
-head-pinned CI-failure feedback attached.
+head-pinned CI-failure feedback attached. The refusal accepts the claude-native
+and codex IMPL backends (the codex executor delivers the feedback, #3061);
+opencode and local still refuse (#2983).
 """
 
 from __future__ import annotations
@@ -23,13 +25,18 @@ from cw.dev_queue.shipped_red import SHIPPED_DISPOSITION
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.exceptions import RequeueStateError
 from cw.gh import parse_pr_url
-from cw.models import CLAUDE_NATIVE_BACKEND, QueueItemStatus, Stage
+from cw.models import CLAUDE_NATIVE_BACKEND, CODEX_BACKEND, QueueItemStatus, Stage
 from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from cw.models import ReviewFeedback, TicketTask
+
+
+#: The impl backends that deliver a row's ``review_feedback`` to the agent: the
+#: claude-native repair entry and the codex IMPL executor (#3061).
+_FEEDBACK_BACKENDS = frozenset({CLAUDE_NATIVE_BACKEND, CODEX_BACKEND})
 
 
 class RedPrRecovery(NamedTuple):
@@ -97,10 +104,10 @@ def red_pr_refusal(
             " reach finalize without a re-review",
         ),
         (
-            backend != CLAUDE_NATIVE_BACKEND,
-            f"the impl executor backend is {backend!r}; only claude-native"
-            " delivers the recovery feedback (opencode and local ignore it,"
-            " see #2983)",
+            backend not in _FEEDBACK_BACKENDS,
+            f"the impl executor backend is {backend!r}; only claude-native and"
+            " codex deliver the recovery feedback (opencode and local ignore"
+            " it, see #2983)",
         ),
     )
     return next((message for failed, message in checks if failed), None)
