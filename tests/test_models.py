@@ -57,7 +57,8 @@ from cw.models.operator_constraint import (
 )
 from cw.models.operator_resolution import OPERATOR_RESOLUTIONS_KEY, OperatorResolution
 from cw.review_finding_dispositions import FindingDisposition
-from tests.conftest import _make_constraint, _make_daemon_session
+from tests._shared.review_builders import _make_constraint
+from tests._shared.session_seeding import _make_daemon_session
 
 
 @pytest.fixture(autouse=True)

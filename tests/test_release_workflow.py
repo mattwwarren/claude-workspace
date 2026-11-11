@@ -19,7 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from tests.conftest import _load_workflow
+from tests._shared.workflow_text import _load_workflow
 
 ROOT = Path(__file__).parent.parent
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "release.yml"

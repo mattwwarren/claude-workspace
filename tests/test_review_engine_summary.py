@@ -49,7 +49,7 @@ from cw.models.review_engine_summary import (
 from cw.models.review_feedback import ReviewFeedback
 from cw.review_findings._models import Severity
 from tests._review_engine_helpers import SHA, make_finding, make_summary
-from tests.conftest import _norm, _section_between
+from tests._shared.workflow_text import _norm, _section_between
 
 if TYPE_CHECKING:
     from collections.abc import Callable

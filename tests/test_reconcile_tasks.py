@@ -72,7 +72,7 @@ from tests._reconcile_helpers import (
     gate_blocked_last_result,
     park_via_routing,
 )
-from tests.conftest import _make_daemon_session, _make_ticket_task
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 
 # ---------------------------------------------------------------------------
 # revert_completed_silent_tasks tests

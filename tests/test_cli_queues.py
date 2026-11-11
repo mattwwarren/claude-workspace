@@ -17,7 +17,7 @@ from click.testing import CliRunner, Result
 from cw.cli import main
 from cw.events import inbox_path, record_event
 from cw.models import OrchestratorEventType, SessionStatus
-from tests.conftest import _make_daemon_session, _seed_sessions
+from tests._shared.session_seeding import _make_daemon_session, _seed_sessions
 
 
 def _invoke(*args: str) -> Result:

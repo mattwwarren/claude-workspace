@@ -11,7 +11,7 @@ from cw.dev_queue.plan_promotion import promote_plan_draft
 from cw.exceptions import ApproveGateError
 from cw.models import QueueItemStatus, Stage
 from cw.plan_fingerprint import compute_plan_draft_fingerprint
-from tests.conftest import _make_ticket_task
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable

@@ -13,7 +13,7 @@ from cw.review_adjudication import read_deferred_findings_md
 from cw.review_convergence import SettledEntry, finding_identity
 from cw.review_debt_filing import DEFERRED_FINDINGS_RELATIVE_PATH
 from tests._review_convergence_helpers import fresh_ledger, round_finding
-from tests.conftest import _make_ticket_task
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from pathlib import Path

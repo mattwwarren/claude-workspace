@@ -40,8 +40,9 @@ from cw.worktree import (
     fetch_feature_branch,
 )
 from tests import _git_sandbox
+from tests._shared.git_repos import git_in, push_commit_to_origin
+from tests._shared.stop_hook_context import _symlink_loop
 from tests._worktree_helpers import patch_worktree
-from tests.conftest import _symlink_loop, git_in, push_commit_to_origin
 
 if TYPE_CHECKING:
     from collections.abc import Callable

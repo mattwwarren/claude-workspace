@@ -44,7 +44,7 @@ from cw.reconcile import (
 )
 from tests._clients_yaml import staged_client, write_clients_yaml
 from tests._opencode_helpers import invalid_merge_gate_frame, text_event
-from tests.conftest import _make_daemon_session
+from tests._shared.session_seeding import _make_daemon_session
 
 
 def _mk_opencode_session(

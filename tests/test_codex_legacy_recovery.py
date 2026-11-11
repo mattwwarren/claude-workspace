@@ -89,7 +89,8 @@ from tests._codex_recovery_helpers import (
     _use_auto_reap_policy,
 )
 from tests._reconcile_helpers import _mk_headless_daemon_session
-from tests.conftest import _make_daemon_session, commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.session_seeding import _make_daemon_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator

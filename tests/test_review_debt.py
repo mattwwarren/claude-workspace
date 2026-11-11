@@ -15,7 +15,7 @@ from cw.review_debt import (
     record_debt,
 )
 from cw.review_findings import AcceptedFinding, DebtRecord
-from tests.conftest import _make_debt_record, _make_finding
+from tests._shared.review_builders import _make_debt_record, _make_finding
 
 
 def _accepted(**overrides: object) -> AcceptedFinding:

@@ -20,7 +20,7 @@ from cw.reconcile.dispositions import (
     emit_routed_sentinel_completion,
 )
 from tests._reconcile_helpers import call_and_drain
-from tests.conftest import _make_daemon_session
+from tests._shared.session_seeding import _make_daemon_session
 
 
 def test_build_salvage_completion_payload_field_shape() -> None:

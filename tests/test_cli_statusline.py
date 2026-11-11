@@ -18,7 +18,7 @@ from cw.dev_queue import save_dev_queue
 from cw.focus import set_focus
 from cw.models import DevQueueStore, QueueItemStatus
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests.conftest import _make_ticket_task
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from pathlib import Path

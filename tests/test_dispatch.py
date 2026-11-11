@@ -131,18 +131,22 @@ from tests._dispatch_lane_helpers import (
     _save_lane_override,
     _seed_lane_override,
 )
-from tests.conftest import (
+from tests._shared.daemon_fakes import (
+    fire_and_forget_breadcrumb,
+    post_launch_attention_payload,
+)
+from tests._shared.git_repos import (
+    _vouch_for_roster_worker,
+    git_in,
+    occupy_worktree,
+    tree_fingerprint,
+)
+from tests._shared.session_seeding import (
     _make_daemon_session,
     _make_tick_summary,
     _make_ticket_task,
-    _symlink_loop,
-    _vouch_for_roster_worker,
-    fire_and_forget_breadcrumb,
-    git_in,
-    occupy_worktree,
-    post_launch_attention_payload,
-    tree_fingerprint,
 )
+from tests._shared.stop_hook_context import _symlink_loop
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -150,7 +154,7 @@ if TYPE_CHECKING:
     from cw.models import OrchestratorEvent
     from cw.native_daemon import NativeDaemonClient
     from cw.worktree import FetchWarningKey, UnresolvablePathWarningKey
-    from tests.conftest import CapturedEvent
+    from tests._shared.daemon_fakes import CapturedEvent
 
 
 def _captured_windows(kwargs: dict[str, object]) -> Mapping[str, datetime]:
@@ -1911,7 +1915,7 @@ def _seed_duplicate_running_rows(
     in the ticket's worktree so the plan-bypass predicate passes.
     """
     from cw.worktree import create_worktree
-    from tests.conftest import plan_body
+    from tests._shared.review_builders import plan_body
 
     branch = f"{sample_client_config.feature_branch_prefix}/GEN-DUP"
     worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
@@ -1961,7 +1965,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         check or re-emit a second TASK_STAGE_CHANGED event for this ticket.
         """
         from cw.worktree import create_worktree
-        from tests.conftest import plan_body
+        from tests._shared.review_builders import plan_body
 
         write_clients_yaml(sample_client_config)
         branch = f"{sample_client_config.feature_branch_prefix}/GEN-BYPASS"
@@ -2073,7 +2077,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         """A .cw/plan.md is present but missing the soundness signoff marker
         -> not a bypass; the worker still spawns at PLAN."""
         from cw.worktree import create_worktree
-        from tests.conftest import plan_body
+        from tests._shared.review_builders import plan_body
 
         write_clients_yaml(sample_client_config)
         branch = f"{sample_client_config.feature_branch_prefix}/GEN-UNSIGNED"
@@ -2102,7 +2106,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         """A TASK_STAGE_CHANGED(old=PLAN, new=IMPL, direction=advance) event
         is recorded on the stored row's auto-bypass advance."""
         from cw.worktree import create_worktree
-        from tests.conftest import plan_body
+        from tests._shared.review_builders import plan_body
 
         write_clients_yaml(sample_client_config)
         branch = f"{sample_client_config.feature_branch_prefix}/GEN-EVT"
@@ -2149,7 +2153,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         re-verify the plan.
         """
         from cw.worktree import create_worktree
-        from tests.conftest import plan_body
+        from tests._shared.review_builders import plan_body
 
         write_clients_yaml(sample_client_config)
         branch = f"{sample_client_config.feature_branch_prefix}/GEN-REGRESS"
@@ -2194,7 +2198,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         call -- the bypass must simply not attempt the advance.
         """
         from cw.worktree import create_worktree
-        from tests.conftest import plan_body
+        from tests._shared.review_builders import plan_body
 
         write_clients_yaml(
             ClientSpec(
@@ -2246,7 +2250,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         consulted, and that nothing raised.
         """
         from cw.worktree import create_worktree
-        from tests.conftest import plan_body
+        from tests._shared.review_builders import plan_body
 
         write_clients_yaml(
             ClientSpec(
@@ -2310,7 +2314,7 @@ class TestDispatchTickAutoBypassesApprovedPlan:
         import cw.dispatch.claim.screening as screening_mod
         import cw.dispatch.claim.spawn as spawn_mod
         from cw.worktree import create_worktree
-        from tests.conftest import plan_body
+        from tests._shared.review_builders import plan_body
 
         write_clients_yaml(sample_client_config)
         branch = f"{sample_client_config.feature_branch_prefix}/GEN-RACE"
@@ -14957,7 +14961,7 @@ class TestApplyStagedDecision:
         from cw.codex_review import synthesize_codex_review_result
         from cw.dispatch import apply_staged_decision
         from tests._codex_review_helpers import _task as _codex_task
-        from tests.conftest import _make_diff, _make_reviewer_doc
+        from tests._shared.review_builders import _make_diff, _make_reviewer_doc
 
         worktree = make_git_repo("wt-1702-health-gate")
         result, _verdict = synthesize_codex_review_result(
@@ -15015,7 +15019,7 @@ class TestApplyStagedDecision:
         from cw.codex_review import synthesize_codex_review_result
         from cw.dispatch import apply_staged_decision
         from tests._codex_review_helpers import _task as _codex_task
-        from tests.conftest import _make_diff, _make_reviewer_doc
+        from tests._shared.review_builders import _make_diff, _make_reviewer_doc
 
         worktree = make_git_repo("wt-1856-test-reviewer-only-degraded")
         result, _verdict = synthesize_codex_review_result(
@@ -22238,7 +22242,7 @@ class TestClaimNextPendingTrackerMcpGate:
         from cw.models.client import TrackerMcpGateConfig
         from tests._backend_mcp_helpers import stage_mcp_config
         from tests._doctor_helpers import make_stage_pipeline
-        from tests.conftest import _write_tracker_config
+        from tests._shared.cli_preflight import _write_tracker_config
 
         config_path = stage_mcp_config(monkeypatch, tmp_path, "opencode", "absent")
         _write_tracker_config(sample_client_config.workspace_path, "linear")

@@ -32,7 +32,8 @@ from cw.models import (
     Stage,
     TicketTask,
 )
-from tests.conftest import _appendix, _cmd, _make_ticket_task, _section_between
+from tests._shared.session_seeding import _make_ticket_task
+from tests._shared.workflow_text import _appendix, _cmd, _section_between
 from tests.test_stage import _guard_bullet
 
 ROOT = Path(__file__).parent.parent

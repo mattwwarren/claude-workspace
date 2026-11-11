@@ -46,7 +46,7 @@ from tests._codex_review_helpers import (
     _stem_content,
     _task,
 )
-from tests.conftest import commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

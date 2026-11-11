@@ -15,7 +15,7 @@ from cw.ssh import (
     push_remote_scheme,
     remote_needs_ssh_probe,
 )
-from tests.conftest import git_in
+from tests._shared.git_repos import git_in
 
 if TYPE_CHECKING:
     from pathlib import Path

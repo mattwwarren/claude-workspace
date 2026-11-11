@@ -23,7 +23,7 @@ import pytest
 from cw._git import capture_head_sha, run_git
 from tests import _git_ceiling, _git_sandbox
 from tests._git_ceiling import CEILING_ENV_VAR, confined_env
-from tests.conftest import git_in
+from tests._shared.git_repos import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

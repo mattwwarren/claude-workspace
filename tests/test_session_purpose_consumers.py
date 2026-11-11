@@ -15,7 +15,7 @@ from cw.config import _validate_purposes, load_state, save_state
 from cw.exceptions import CwError
 from cw.models import CwState, SessionPurpose
 from cw.prompts import get_purpose_prompt
-from tests.conftest import _make_daemon_session
+from tests._shared.session_seeding import _make_daemon_session
 
 if TYPE_CHECKING:
     from pathlib import Path

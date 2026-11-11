@@ -11,7 +11,7 @@ import pytest
 from cw.codex_review._context._agent_spec import _REVIEWER_ROLE_AGENT_FILES
 from cw.review_engine.constants import ENGINE_ROLE
 from tests._review_engine_helpers import invoke
-from tests.conftest import _doc_payload, _finding_kwargs
+from tests._shared.review_builders import _doc_payload, _finding_kwargs
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

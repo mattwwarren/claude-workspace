@@ -19,7 +19,7 @@ import subprocess
 from typing import TYPE_CHECKING
 
 from tests._git_sandbox import run as sandbox_run
-from tests.conftest import _clean_git_env, add_bare_origin, git_in
+from tests._shared.git_repos import _clean_git_env, add_bare_origin, git_in
 from tests.test_ci_workflow import DIFF_COVER_HOOK_ID, _hook
 
 if TYPE_CHECKING:

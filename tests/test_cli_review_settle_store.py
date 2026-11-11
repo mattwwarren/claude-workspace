@@ -40,7 +40,9 @@ from tests._cli_review_helpers import (
     _settle_payload,
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests.conftest import _hold_flock, _write_project_config_yaml, git_in
+from tests._shared.cli_preflight import _write_project_config_yaml
+from tests._shared.git_repos import git_in
+from tests._shared.lock_helpers import _hold_flock
 
 if TYPE_CHECKING:
     from collections.abc import Callable

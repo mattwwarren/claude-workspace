@@ -44,7 +44,7 @@ from tests._review_convergence_helpers import (
     resolution_merge_script,
     side_branch_commit,
 )
-from tests.conftest import commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

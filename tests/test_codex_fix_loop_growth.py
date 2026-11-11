@@ -29,7 +29,8 @@ from cw.codex_fix_loop.posted_text import (
 )
 from cw.codex_review import CODEX_FIX_GROWTH_BUDGET, _parse_unified_diff
 from tests._codex_review_helpers import _head_baseline, _write
-from tests.conftest import _make_finding, git_in
+from tests._shared.git_repos import git_in
+from tests._shared.review_builders import _make_finding
 
 if TYPE_CHECKING:
     from collections.abc import Callable

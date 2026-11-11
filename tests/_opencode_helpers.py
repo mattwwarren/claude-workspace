@@ -45,7 +45,7 @@ from cw.config import load_state
 from cw.models import LastResultSource
 from cw.opencode_runner import OPENCODE_LOG_RELATIVE_PATH, make_blocked
 from cw.tracker import TrackerClass, TrackerKind
-from tests.conftest import find_completed_session
+from tests._shared.session_seeding import find_completed_session
 
 if TYPE_CHECKING:
     from pathlib import Path

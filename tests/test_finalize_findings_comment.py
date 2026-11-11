@@ -32,7 +32,7 @@ from cw import redact_post_text
 from cw.auto_dev_result.schema import FINALIZE_REGRESS_BLOCKER_REASONS
 from cw.gh import AGENT_COMMENT_MARKER
 from cw.spawn import _PRIOR_ATTEMPT_DETAILS_MAX_LEN
-from tests.conftest import _appendix, _bash_fences, _cmd
+from tests._shared.workflow_text import _appendix, _bash_fences, _cmd
 from tests.test_agent_comment_provenance import PIPELINE_HEADERS
 from tests.test_auto_dev_finalize_automerge_verification import _ORDER_OF_EVALUATION
 from tests.test_auto_dev_preflight_resolutions import _after

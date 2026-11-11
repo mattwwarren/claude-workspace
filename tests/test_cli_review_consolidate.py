@@ -26,7 +26,8 @@ from tests._cli_review_helpers import (
     _branch_repo,
     _consolidate_payload,
 )
-from tests.conftest import (
+from tests._shared.git_repos import commit_tracked_file
+from tests._shared.review_builders import (
     _doc_payload,
     _finding_kwargs,
     _make_escalation,
@@ -34,7 +35,6 @@ from tests.conftest import (
     _make_reviewer_doc,
     _plan_text,
     _without_evidence,
-    commit_tracked_file,
 )
 
 if TYPE_CHECKING:

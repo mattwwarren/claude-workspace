@@ -26,7 +26,7 @@ would mismatch HEAD on every round that fixed anything) or drop the field from
 the sentinel template (which reads to the gate as "never stamped").
 """
 
-from tests.conftest import _cmd
+from tests._shared.workflow_text import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after, _nearby
 
 FREEZE_ANCHOR = "**Freeze** `.review.must_fix_initial`"

@@ -51,7 +51,7 @@ from cw.reconcile.leaked_workers import (
 from cw.spawn import _ROSTER_POLL_TIMEOUT_SECS
 from cw.worktree import effective_worktree_bases, resolve_worktree_base
 from tests._reconcile_helpers import ms_of
-from tests.conftest import _make_daemon_session
+from tests._shared.session_seeding import _make_daemon_session
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

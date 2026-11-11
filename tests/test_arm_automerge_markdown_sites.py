@@ -26,10 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import (
-    _bash_fences,
-    _cmd,
-)
+from tests._shared.workflow_text import _bash_fences, _cmd
 
 _SKILL_PATH = (
     Path(__file__).parent.parent

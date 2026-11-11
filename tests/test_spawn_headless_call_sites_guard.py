@@ -29,7 +29,7 @@ from __future__ import annotations
 import ast
 from typing import TYPE_CHECKING, Literal
 
-from tests.conftest import _SRC_ROOT, _iter_src_files
+from tests._shared.workflow_text import _SRC_ROOT, _iter_src_files
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -25,7 +25,7 @@ from cw.auto_dev_result import (
     KNOWN_BLOCKER_REASONS,
 )
 from cw.gh import AGENT_COMMENT_MARKER, is_agent_authored
-from tests.conftest import _appendix, _cmd
+from tests._shared.workflow_text import _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after, _nearby
 
 RULE_ANCHOR = "## Comment provenance rule (#2097)"

@@ -62,7 +62,10 @@ from cw.models.client import ReviewConfig
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.worktree import resolve_worker_tmpdir
 from tests._codex_review_helpers import _mk_codex_proc
-from tests.conftest import _seed_completed_session, find_completed_session
+from tests._shared.session_seeding import (
+    _seed_completed_session,
+    find_completed_session,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator

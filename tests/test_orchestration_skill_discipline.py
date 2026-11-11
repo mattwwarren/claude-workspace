@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import _cmd, _norm
+from tests._shared.workflow_text import _cmd, _norm
 from tests.test_bodyfile_write_tool_conformance import POINTER
 
 ROOT = Path(__file__).parent.parent

@@ -23,7 +23,7 @@ from cw.opencode_runner import (
 from cw.opencode_tracker_prompt import tracker_ops_fragment
 from cw.tracker import TrackerKind
 from tests._opencode_helpers import GH_TRACKER, LINEAR_TRACKER, UNSET_TRACKER
-from tests.conftest import _cmd
+from tests._shared.workflow_text import _cmd
 
 _TRACKERS = [GH_TRACKER, LINEAR_TRACKER, UNSET_TRACKER, None]
 _MARKER_LINE = "<!-- cw-opencode-plan: T-1 -->"

@@ -94,8 +94,8 @@ from tests._codex_recovery_helpers import (
 )
 from tests._host_probe_guard import scoped_process_iter
 from tests._reconcile_helpers import _mk_headless_daemon_session
+from tests._shared.git_repos import commit_tracked_file, git_in
 from tests._tool_fakes import path_with_stub
-from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

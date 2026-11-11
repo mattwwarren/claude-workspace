@@ -59,7 +59,7 @@ from tests._review_convergence_helpers import (
     round_finding,
     write_ledger,
 )
-from tests.conftest import commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

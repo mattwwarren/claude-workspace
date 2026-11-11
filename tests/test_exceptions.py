@@ -176,7 +176,7 @@ class TestAmbiguousSessionIdentifierError:
     def test_message_lists_each_candidate_and_ends_with_hint(self) -> None:
         from cw.exceptions import AmbiguousSessionIdentifierError
         from cw.models import SessionStatus
-        from tests.conftest import _make_daemon_session
+        from tests._shared.session_seeding import _make_daemon_session
 
         started_old = datetime(2026, 9, 1, 8, 0, tzinfo=UTC)
         started_new = datetime(2026, 9, 2, 9, 30, tzinfo=UTC)

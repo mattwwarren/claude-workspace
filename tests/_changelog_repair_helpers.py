@@ -67,7 +67,7 @@ from tests._changelog_cut_helpers import (
     ReleaseMovedRepo,
 )
 from tests._reconcile_helpers import capture_repo_slugs
-from tests.conftest import git_in
+from tests._shared.git_repos import git_in
 from tests.test_pr_hydrate import _pr_state
 from tests.test_reconcile_gate_recipes import _client_with_lanes, _make_task
 

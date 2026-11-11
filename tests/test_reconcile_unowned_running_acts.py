@@ -86,7 +86,7 @@ from tests._reconcile_helpers import (
     use_reconcile_daemon,
     write_unreadable_claim_context,
 )
-from tests.conftest import CapturedEvent
+from tests._shared.daemon_fakes import CapturedEvent
 
 _ACTS = "cw.reconcile.unowned_running_acts"
 _OLD = _CLAIM + timedelta(minutes=5)

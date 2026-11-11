@@ -31,7 +31,11 @@ from cw.session_auto_prune import (
     read_auto_prune_status,
 )
 from cw.session_retention import _SESSION_RETENTION_DAYS
-from tests.conftest import _make_daemon_session, _make_ticket_task, _seed_sessions
+from tests._shared.session_seeding import (
+    _make_daemon_session,
+    _make_ticket_task,
+    _seed_sessions,
+)
 
 _NOW = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 _EVENT_PAYLOAD_KEYS = {

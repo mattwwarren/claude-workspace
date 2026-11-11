@@ -23,7 +23,7 @@ from cw.reconcile.escalation import (
     ESCALATION_TRIGGER_TIMER,
     run_escalation_sweep,
 )
-from tests.conftest import _make_ticket_task
+from tests._shared.session_seeding import _make_ticket_task
 
 _NOW = datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
 

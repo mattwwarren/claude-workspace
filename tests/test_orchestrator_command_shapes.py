@@ -46,7 +46,8 @@ from pathlib import Path
 import pytest
 
 from cw.cli import main
-from tests.conftest import _bash_fences, walk_click_tree
+from tests._shared.cli_preflight import walk_click_tree
+from tests._shared.workflow_text import _bash_fences
 
 _REPO = Path(__file__).resolve().parent.parent
 

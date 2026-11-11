@@ -48,7 +48,8 @@ from tests._reconcile_helpers import (
     events_doc_bullet,
     use_reconcile_daemon,
 )
-from tests.conftest import _CANONICAL_ATTENTION_KEYS, _make_ticket_task
+from tests._shared.daemon_fakes import _CANONICAL_ATTENTION_KEYS
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -56,7 +57,7 @@ if TYPE_CHECKING:
 
     from cw.models import LaunchedFixWorker
     from cw.native_daemon import FakeNativeDaemonClient
-    from tests.conftest import CapturedEvent
+    from tests._shared.daemon_fakes import CapturedEvent
 
 _LOGGER = "cw.reconcile.fix_dispatch_hold"
 _MODULE = "cw.reconcile.fix_dispatch_hold"

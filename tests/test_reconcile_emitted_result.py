@@ -35,7 +35,7 @@ from cw.reconcile.emitted_result import (
 )
 from tests._clients_yaml import staged_client, write_clients_yaml
 from tests._reconcile_helpers import _stage_complete_payload
-from tests.conftest import _make_daemon_session
+from tests._shared.session_seeding import _make_daemon_session
 
 _TICKET = "t2699-unit"
 _SUBJECT = "dead opencode process"

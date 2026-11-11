@@ -43,7 +43,7 @@ from cw.models import (
     UnresolvedEntry,
 )
 from cw.reconcile.local import CODEX_HARVEST_ORPHANED_DISPOSITION
-from tests.conftest import _make_daemon_session
+from tests._shared.session_seeding import _make_daemon_session
 
 if TYPE_CHECKING:
     from pathlib import Path

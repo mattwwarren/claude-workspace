@@ -32,7 +32,8 @@ from cw.models.operator_constraint import (
     render_decided_entries,
 )
 from tests._codex_review_helpers import _head_baseline, _observed_comments, _write
-from tests.conftest import _make_constraint, git_in
+from tests._shared.git_repos import git_in
+from tests._shared.review_builders import _make_constraint
 
 if TYPE_CHECKING:
     from collections.abc import Callable

@@ -24,7 +24,7 @@ from cw.review_attestation_tolerance import (
 )
 from cw.review_convergence import MergeTolerance, _merge_tolerance
 from tests._review_approval_helpers import advance_main, head, sync_merge
-from tests.conftest import git_in
+from tests._shared.git_repos import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

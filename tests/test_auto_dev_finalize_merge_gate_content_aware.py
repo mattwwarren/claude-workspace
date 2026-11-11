@@ -33,20 +33,17 @@ import pytest
 
 from cw.dispatch.routing.pr_refs import _extract_blocked_on_pr
 from tests import _git_sandbox
-from tests.conftest import (
+from tests._shared.git_repos import _clean_git_env, commit_tracked_file, git_in
+from tests._shared.guard_fences import (
     GUARD_FENCE_INVOKED,
     GUARD_MARKER_BAD_CASES,
     GUARD_MARKER_GOOD_CASES,
-    _bash_fences,
-    _clean_git_env,
-    _cmd,
     _placement,
-    commit_tracked_file,
-    git_in,
     guard_candidate_path,
     run_guard_fence,
     substitute_fence_placeholders,
 )
+from tests._shared.workflow_text import _bash_fences, _cmd
 
 _SCRIPT = "check_merge_gate_overlap.py"
 _SCRIPT_SOURCE = Path(__file__).resolve().parents[1] / ".claude" / "scripts" / _SCRIPT

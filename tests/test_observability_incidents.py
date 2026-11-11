@@ -43,7 +43,9 @@ from cw.models import (
 )
 from cw.reconcile import reconcile
 from cw.worktree import OnBranch
-from tests.conftest import _make_daemon_session as _cw_make_daemon_session
+from tests._shared.session_seeding import (
+    _make_daemon_session as _cw_make_daemon_session,
+)
 
 
 def _make_daemon_session(

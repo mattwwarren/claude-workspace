@@ -20,12 +20,8 @@ import cw.preflight as pf
 from cw.cli import main
 from cw.config import clients_file
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests.conftest import (
-    _install_check_stubs,
-    _make_agent_repo,
-    git_in,
-    init_repo_with_remote,
-)
+from tests._shared.cli_preflight import _install_check_stubs, _make_agent_repo
+from tests._shared.git_repos import git_in, init_repo_with_remote
 
 if TYPE_CHECKING:
     from collections.abc import Callable

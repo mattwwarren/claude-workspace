@@ -34,7 +34,7 @@ from tests._codex_review_helpers import (
     _stage_merge_from_other_branch,
     _write,
 )
-from tests.conftest import git_in
+from tests._shared.git_repos import git_in
 from tests.test_branch_ahead import _seed_conflicting_merge
 
 if TYPE_CHECKING:

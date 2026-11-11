@@ -50,14 +50,14 @@ from tests._review_convergence_helpers import (
     write_ledger,
 )
 from tests._review_debt_helpers import _events_of
-from tests.conftest import (
+from tests._shared.git_repos import git_in
+from tests._shared.review_builders import (
     _make_diff,
     _make_finding,
     _make_reviewer_doc,
-    _make_ticket_task,
-    git_in,
     write_review_verdict_envelope,
 )
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence

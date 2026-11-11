@@ -23,7 +23,7 @@ from cw.codex_fix_loop.cycle_restore import (
 from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, FenceBreach
 from cw.models.enums import OrchestratorEventType
 from tests._codex_review_helpers import assert_clean_after_refusal, exclude_cw_dir
-from tests.conftest import git_in
+from tests._shared.git_repos import git_in
 
 _DISK_GONE = "disk gone"
 _INBOX_LOCKED = "inbox locked"

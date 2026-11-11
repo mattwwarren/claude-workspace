@@ -25,7 +25,7 @@ following the ``read_text()`` + literal-substring/window convention of
 private copy of any of these.
 """
 
-from tests.conftest import _REPO_ROOT, _appendix, _cmd
+from tests._shared.workflow_text import _REPO_ROOT, _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 from tests.test_plan_approval_fingerprint_binding import _fingerprint_rule_section
 from tests.test_plan_persistence import _step1a_section, _step1c_headless_section

@@ -35,7 +35,7 @@ from cw.codex_review import (
 )
 from cw.codex_runner import CodexRunResult
 from tests._codex_review_helpers import _install_pre_commit_hook
-from tests.conftest import commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
 from tests.test_codex_fix_loop import (
     _CLEAN_DOC,
     _CONSTRAINTS_HEADING,

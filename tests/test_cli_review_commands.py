@@ -57,14 +57,9 @@ from tests._cli_review_helpers import (
     _verdict_payload,
     _write_session_context,
 )
-from tests.conftest import (
-    _cmd,
-    _make_diff,
-    _make_finding,
-    _make_reviewer_doc,
-    commit_tracked_file,
-    git_in,
-)
+from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.review_builders import _make_diff, _make_finding, _make_reviewer_doc
+from tests._shared.workflow_text import _cmd
 
 if TYPE_CHECKING:
     from collections.abc import Callable

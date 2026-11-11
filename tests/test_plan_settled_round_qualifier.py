@@ -17,7 +17,7 @@ import hashlib
 import re
 
 from cw.plan_fingerprint import compute_plan_draft_fingerprint
-from tests.conftest import _appendix, _cmd
+from tests._shared.workflow_text import _appendix, _cmd
 from tests.test_plan_stage_settlement import (
     CAP_CHECK_ANCHOR,
     SETTLED_MARKER,

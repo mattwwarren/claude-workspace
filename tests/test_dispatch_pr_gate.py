@@ -40,6 +40,7 @@ from cw.gh import OpenPrLookup
 from cw.models import ClientConfig, DevQueueStore, QueueItemStatus, Stage
 from cw.queue_rows import _apply_spawn_success_fields
 from tests._adopt_pr_helpers import make_repair_feedback
+from tests._shared.session_seeding import _make_ticket_task
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -48,7 +49,6 @@ from tests._ticket_view_helpers import (
     queue_row,
     seed_queue,
 )
-from tests.conftest import _make_ticket_task
 
 if TYPE_CHECKING:
     from pathlib import Path

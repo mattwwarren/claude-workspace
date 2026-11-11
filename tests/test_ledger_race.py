@@ -13,7 +13,7 @@ from cw.dev_queue.ledger_race import (
 )
 from cw.exceptions import CwError
 from cw.models import DevQueueStore, QueueItemStatus
-from tests.conftest import _make_ticket_task
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from pathlib import Path

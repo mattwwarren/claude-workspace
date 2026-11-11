@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import ast
 
-from tests.conftest import _SRC_ROOT, _files_under
+from tests._shared.workflow_text import _SRC_ROOT, _files_under
 
 _FIELD = "had_real_commit"
 _RECEIVER = "review"

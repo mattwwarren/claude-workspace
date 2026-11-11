@@ -38,7 +38,7 @@ from cw.models import (
 )
 from tests._cli_review_helpers import _enter_operator_machine, _write_session_context
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests.conftest import _FakeClock, _hold_flock
+from tests._shared.lock_helpers import _FakeClock, _hold_flock
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 
     from click.testing import Result
 
-    from tests.conftest import CapturedEvent
+    from tests._shared.daemon_fakes import CapturedEvent
 
 _CLIENT = "acme"
 

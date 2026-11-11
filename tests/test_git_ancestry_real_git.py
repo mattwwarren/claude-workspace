@@ -13,7 +13,7 @@ import pytest
 
 from cw import _git
 from cw._git import commit_range_summary, is_ancestor
-from tests.conftest import commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

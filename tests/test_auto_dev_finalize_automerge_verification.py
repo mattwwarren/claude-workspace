@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.conftest import _appendix, _cmd
+from tests._shared.workflow_text import _appendix, _cmd
 
 ROOT = Path(__file__).parent.parent
 DOCS = ROOT / "docs"

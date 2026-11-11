@@ -22,7 +22,7 @@ import sys
 import types
 from pathlib import Path
 
-from tests.conftest import GUARD_MARKER_CURRENT
+from tests._shared.guard_fences import GUARD_MARKER_CURRENT
 
 # ---------------------------------------------------------------------------
 # Script loader

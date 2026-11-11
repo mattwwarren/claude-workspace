@@ -42,7 +42,7 @@ from tests._review_convergence_helpers import (
     codex_audit_fixture,
     warm_codex_capability,
 )
-from tests.conftest import commit_tracked_file
+from tests._shared.git_repos import commit_tracked_file
 
 if TYPE_CHECKING:
     from collections.abc import Callable

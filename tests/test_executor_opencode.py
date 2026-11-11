@@ -39,7 +39,8 @@ from cw.opencode_runner import (
 )
 from cw.tracker import TrackerClass, TrackerKind
 from cw.worktree import resolve_worker_tmpdir
-from tests.conftest import _write_tracker_config, find_completed_session
+from tests._shared.cli_preflight import _write_tracker_config
+from tests._shared.session_seeding import find_completed_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable

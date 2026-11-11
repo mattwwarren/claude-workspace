@@ -53,7 +53,7 @@ from cw.codex_runner import CodexRunResult, RealCodexRunner
 from cw.openai_strict_schema import to_openai_strict_schema
 from cw.review_findings import ReviewerFindingsDocument, consolidate_verdict
 from tests._codex_review_helpers import _task
-from tests.conftest import git_in
+from tests._shared.git_repos import git_in
 from tests.test_codex_contract_secrets import _assert_no_secrets_leaked
 
 if TYPE_CHECKING:

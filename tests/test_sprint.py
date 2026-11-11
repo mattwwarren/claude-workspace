@@ -22,8 +22,8 @@ from cw.sprint import (
     load_rfc_text,
     parse_rfc,
 )
+from tests._shared.cli_preflight import _write_project_config_yaml
 from tests._tool_fakes import FakeGh
-from tests.conftest import _write_project_config_yaml
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

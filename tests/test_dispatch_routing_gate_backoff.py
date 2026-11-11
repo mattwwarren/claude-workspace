@@ -32,7 +32,7 @@ from tests._reconcile_helpers import gate_blocked_last_result, park_via_routing
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from tests.conftest import CapturedEvent
+    from tests._shared.daemon_fakes import CapturedEvent
 
 _CLIENT = "test-client"
 _FROZEN = "2026-07-16 12:00:00"

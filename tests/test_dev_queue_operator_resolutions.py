@@ -26,6 +26,7 @@ from cw.events import read_events
 from cw.exceptions import ApproveGateError
 from cw.models import DEFAULT_LANE, OrchestratorEventType, QueueItemStatus, Stage
 from tests._clients_yaml import ClientSpec, write_clients_yaml
+from tests._shared.cli_preflight import _write_project_config_yaml
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -37,7 +38,6 @@ from tests._ticket_view_helpers import (
     patch_row_head,
     seed_queue,
 )
-from tests.conftest import _write_project_config_yaml
 
 if TYPE_CHECKING:
     from collections.abc import Callable

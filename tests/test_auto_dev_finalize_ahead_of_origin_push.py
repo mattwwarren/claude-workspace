@@ -15,7 +15,7 @@ resetting when that push fails.
 
 from __future__ import annotations
 
-from tests.conftest import _step4c2_section
+from tests._shared.workflow_text import _step4c2_section
 
 _RESET = "git checkout -B <branch-name> origin/<branch-name>"
 _AHEAD_COUNT = 'git rev-list --count "origin/<branch-name>..HEAD"'

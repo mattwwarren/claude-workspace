@@ -41,12 +41,9 @@ from cw.repair_disposition import RepairDisposition
 from cw.worktree import resolve_task_worktree, worktree_path_for
 from tests._changelog_repair_helpers import make_client, make_repair_job, repair_task
 from tests._clients_yaml import write_clients_yaml
-from tests.conftest import (
-    _make_daemon_session,
-    _make_ticket_task,
-    _write_hook_context_file,
-    occupy_worktree,
-)
+from tests._shared.git_repos import occupy_worktree
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
+from tests._shared.stop_hook_context import _write_hook_context_file
 
 if TYPE_CHECKING:
     from pathlib import Path

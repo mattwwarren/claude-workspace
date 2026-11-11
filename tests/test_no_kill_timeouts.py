@@ -42,7 +42,10 @@ from tests._reconcile_helpers import (
     _shipped_salvage_payload,
     _write_transcript_records,
 )
-from tests.conftest import _invoke_hook_command, _write_hook_context_file
+from tests._shared.stop_hook_context import (
+    _invoke_hook_command,
+    _write_hook_context_file,
+)
 from tests.test_cli_agent_spawn_stamp import _PRE_PAYLOAD, _payload
 
 _STARTED_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -125,7 +128,7 @@ def push_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
 
 
 def _stale_transcript(home: Path, worktree: Path, *, stale_minutes: float) -> None:
-    from tests.conftest import _write_idle_transcript
+    from tests._shared.stop_hook_context import _write_idle_transcript
 
     transcript = _write_idle_transcript(home, worktree)
     ts = (_NOW - timedelta(minutes=stale_minutes)).timestamp()

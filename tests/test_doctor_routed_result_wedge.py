@@ -61,7 +61,7 @@ from tests._reconcile_helpers import (
     _routed_last_result,
     _stamp_transcript_age,
 )
-from tests.conftest import _make_daemon_session
+from tests._shared.session_seeding import _make_daemon_session
 
 _SID = "2524"
 _REF = "fake-short-id"

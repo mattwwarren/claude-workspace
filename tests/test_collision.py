@@ -12,7 +12,7 @@ from cw.collision import _git_changed_files, detect_wave_collisions
 from cw.events import read_events
 from cw.models import OrchestratorEventType, QueueItemStatus, TicketTask
 from tests import _git_sandbox
-from tests.conftest import _make_ticket_task
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable

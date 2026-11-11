@@ -76,7 +76,7 @@ from tests._codex_recovery_helpers import (
     _seed_clean_codex_orphan,
 )
 from tests._reconcile_helpers import _mk_headless_daemon_session
-from tests.conftest import commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

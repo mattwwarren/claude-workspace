@@ -12,14 +12,14 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from tests._queue_peek_helpers import make_transcript
-from tests.conftest import (
-    _write_idle_transcript,
-    load_guard_script_module,
+from tests._shared.claude_home_files import (
     skill_listing_record,
     write_command,
     write_context_files,
     write_skill,
 )
+from tests._shared.guard_fences import load_guard_script_module
+from tests._shared.stop_hook_context import _write_idle_transcript
 
 if TYPE_CHECKING:
     from collections.abc import Iterable

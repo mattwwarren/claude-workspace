@@ -40,8 +40,8 @@ from tests._lock_invariants import (
     LockTrace,
     install,
 )
+from tests._shared.session_seeding import _make_daemon_session
 from tests._tool_fakes import fake_claude_cli, prepend_to_path, restore_real_run
-from tests.conftest import _make_daemon_session
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _HARNESS_SOURCE = _REPO_ROOT / "tests" / "_lock_invariants.py"

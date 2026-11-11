@@ -19,7 +19,7 @@ from cw.codex_fix_loop.push import (
     push_and_verify_head,
     remote_branch_tip,
 )
-from tests.conftest import commit_tracked_file, git_in, push_commit_to_origin
+from tests._shared.git_repos import commit_tracked_file, git_in, push_commit_to_origin
 
 if TYPE_CHECKING:
     from collections.abc import Callable

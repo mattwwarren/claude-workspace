@@ -60,7 +60,7 @@ from cw.review_findings import (
     validate_reviewer_document,
     write_review_verdict,
 )
-from tests.conftest import (
+from tests._shared.review_builders import (
     FindingKwargs,
     _doc_payload,
     _finding_kwargs,

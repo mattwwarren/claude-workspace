@@ -41,7 +41,7 @@ from tests._codex_review_helpers import (
     _task,
     _write,
 )
-from tests.conftest import git_in
+from tests._shared.git_repos import git_in
 from tests.test_codex_review_context import _disposition_ledger
 from tests.test_review_convergence_docs import CONFIRM_PROMPT_PAYLOAD
 

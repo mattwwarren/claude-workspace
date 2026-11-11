@@ -35,6 +35,8 @@ from tests._loop_identity_helpers import (
     patch_checkout_identity,
     write_loop_record,
 )
+from tests._shared.cli_preflight import _write_project_config_yaml
+from tests._shared.lock_helpers import _hold_flock
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -44,7 +46,6 @@ from tests._ticket_view_helpers import (
     queue_row,
     seed_queue,
 )
-from tests.conftest import _hold_flock, _write_project_config_yaml
 
 if TYPE_CHECKING:
     from pathlib import Path

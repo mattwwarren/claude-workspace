@@ -21,7 +21,7 @@ from cw.review_adjudication import (
 )
 from cw.review_findings import AcceptedFinding, ReviewVerdict
 from tests._cli_review_helpers import _accepted_payload, _verdict_payload
-from tests.conftest import _make_finding
+from tests._shared.review_builders import _make_finding
 
 _HEAD = (
     "# Deferred Review Findings\n"

@@ -25,13 +25,9 @@ from cw.codex_runner import CodexRunResult, FakeCodexRunner
 from cw.local_runner import make_blocked
 from cw.models import Stage, TicketTask
 from cw.review_findings import AcceptedFinding, CapturedDiff, ReviewVerdict
-from tests.conftest import (
-    _make_diff,
-    _make_ticket_task,
-    add_bare_origin,
-    commit_tracked_file,
-    git_in,
-)
+from tests._shared.git_repos import add_bare_origin, commit_tracked_file, git_in
+from tests._shared.review_builders import _make_diff
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable

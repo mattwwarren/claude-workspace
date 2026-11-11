@@ -45,7 +45,7 @@ from tests._changelog_repair_helpers import (
     origin_tip,
     payloads,
 )
-from tests.conftest import git_in, init_bare_origin
+from tests._shared.git_repos import git_in, init_bare_origin
 
 pytestmark = pytest.mark.platform_sensitive
 

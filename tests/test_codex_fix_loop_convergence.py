@@ -46,11 +46,8 @@ from tests._codex_review_helpers import (
     _producer_delta,
     _task,
 )
-from tests.conftest import (
-    _make_finding,
-    add_bare_origin,
-    commit_tracked_file,
-)
+from tests._shared.git_repos import add_bare_origin, commit_tracked_file
+from tests._shared.review_builders import _make_finding
 
 if TYPE_CHECKING:
     from collections.abc import Callable

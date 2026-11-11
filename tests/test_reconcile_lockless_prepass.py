@@ -46,7 +46,7 @@ from tests._reconcile_helpers import (
     _stage_complete_payload,
     _write_salvage_transcript,
 )
-from tests.conftest import _make_daemon_session, _make_ticket_task
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 
 _MODULE = "cw.reconcile.lockless_prepass"
 

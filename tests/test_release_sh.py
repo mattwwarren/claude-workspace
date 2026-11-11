@@ -32,7 +32,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from tests import _git_sandbox
-from tests.conftest import _clean_git_env, list_tags
+from tests._shared.git_repos import _clean_git_env, list_tags
 from tests.test_release_tag_workflow import GUARD_STEP_ID, _script
 
 ROOT = Path(__file__).parent.parent

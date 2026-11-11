@@ -39,8 +39,8 @@ from tests._adopt_pr_helpers import (
     stub_pr_view,
 )
 from tests._clients_yaml import write_clients_yaml
+from tests._shared.session_seeding import _make_ticket_task
 from tests._ticket_view_helpers import invoke_dev_queue, patch_roster
-from tests.conftest import _make_ticket_task
 
 if TYPE_CHECKING:
     from click.testing import Result

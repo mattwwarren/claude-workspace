@@ -91,6 +91,18 @@ from tests._reconcile_helpers import (
     gate_blocked_last_result,
     park_via_routing,
 )
+from tests._shared.cli_preflight import _write_project_config_yaml
+from tests._shared.daemon_fakes import (
+    _stop_leaves_worker_listed,
+    _stop_makes_roster_unreadable,
+)
+from tests._shared.lock_helpers import _seed_lock_holds
+from tests._shared.review_builders import plan_body, stub_fetch_plan
+from tests._shared.session_seeding import (
+    _make_daemon_session,
+    _make_ticket_task,
+    _patch_ticks,
+)
 from tests._ticket_view_helpers import (
     CASES,
     bound_session_for,
@@ -101,17 +113,6 @@ from tests._ticket_view_helpers import (
     write_lane_client,
 )
 from tests._worktree_helpers import patch_worktree
-from tests.conftest import (
-    _make_daemon_session,
-    _make_ticket_task,
-    _patch_ticks,
-    _seed_lock_holds,
-    _stop_leaves_worker_listed,
-    _stop_makes_roster_unreadable,
-    _write_project_config_yaml,
-    plan_body,
-    stub_fetch_plan,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -123,7 +124,7 @@ if TYPE_CHECKING:
     from cw.native_daemon import FakeNativeDaemonClient
     from cw.review_convergence import ConvergenceLedger
     from cw.review_findings import ReviewVerdict
-    from tests.conftest import CapturedEvent
+    from tests._shared.daemon_fakes import CapturedEvent
 
 
 # ---------------------------------------------------------------------------
@@ -8473,7 +8474,10 @@ class TestApproveMustFixOverride:
 
         *clean* configures the client with ``review.convergence: clean``.
         """
-        from tests.conftest import _make_finding, write_review_verdict_envelope
+        from tests._shared.review_builders import (
+            _make_finding,
+            write_review_verdict_envelope,
+        )
 
         _write_client_yaml(
             tmp_config_dir,
@@ -9340,7 +9344,10 @@ class TestApproveMustFixOverride:
 
     @classmethod
     def _non_deferrable(cls, worktree: Path, verdict: ReviewVerdict) -> None:
-        from tests.conftest import _make_finding, write_review_verdict_envelope
+        from tests._shared.review_builders import (
+            _make_finding,
+            write_review_verdict_envelope,
+        )
 
         cls._dirty_confirm(worktree, verdict)
         write_review_verdict_envelope(
@@ -9355,7 +9362,10 @@ class TestApproveMustFixOverride:
 
     @classmethod
     def _unrecorded_identity(cls, worktree: Path, verdict: ReviewVerdict) -> None:
-        from tests.conftest import _make_finding, write_review_verdict_envelope
+        from tests._shared.review_builders import (
+            _make_finding,
+            write_review_verdict_envelope,
+        )
 
         cls._dirty_confirm(worktree, verdict)
         write_review_verdict_envelope(
@@ -13889,7 +13899,7 @@ class TestUnblockTicket:
         from cw.dev_queue import unblock_ticket
         from cw.exceptions import LockTimeoutError
         from cw.models import CwState, ReapReason
-        from tests.conftest import _hold_flock
+        from tests._shared.lock_helpers import _hold_flock
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         task = _make_blocked_task(stage=Stage.IMPL, session_id="sess8004")
@@ -18378,7 +18388,7 @@ class TestPlanApprovedFingerprintStamp:
         from cw.dev_queue import approve_ticket
         from cw.models import CwState, LastResultSource
         from cw.result import emit_result_on
-        from tests.conftest import _plan_pending_payload
+        from tests._shared.session_seeding import _plan_pending_payload
 
         fingerprint = "f" * 64
         stub_fetch_plan(

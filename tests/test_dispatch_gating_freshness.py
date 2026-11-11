@@ -48,13 +48,13 @@ from cw.native_daemon import FakeNativeDaemonClient
 from cw.worktree import TickFetchGate
 from cw.worktree._tick_fetch import BACKOFF_SKIP_REASON
 from tests._clients_yaml import write_clients_yaml
-from tests._worktree_helpers import FakeClock, hanging_run
-from tests.conftest import (
+from tests._shared.git_repos import (
     add_bare_origin,
     commit_tracked_file,
     git_in,
     push_commit_to_origin,
 )
+from tests._worktree_helpers import FakeClock, hanging_run
 
 
 def test_dispatch_tick_freshness_detail_contract_is_documented() -> None:

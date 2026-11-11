@@ -18,7 +18,7 @@ from cw.review_adjudication._deferred_md import (
     _DEFERRED_SENTINEL,
     parse_deferred_findings_md,
 )
-from tests.conftest import _cmd
+from tests._shared.workflow_text import _cmd
 
 _SECTION = "Type check gate: mypy baseline detection and comparison"
 

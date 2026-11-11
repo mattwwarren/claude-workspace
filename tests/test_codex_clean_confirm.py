@@ -92,7 +92,8 @@ from tests._review_convergence_helpers import (
     structurally_invalid_doc_json,
     write_ledger,
 )
-from tests.conftest import _make_diff, _make_reviewer_doc, commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.review_builders import _make_diff, _make_reviewer_doc
 from tests.test_review_convergence import _sharded
 
 if TYPE_CHECKING:

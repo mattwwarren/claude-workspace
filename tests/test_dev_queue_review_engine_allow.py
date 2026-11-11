@@ -32,7 +32,7 @@ from cw.models import (
 )
 from tests._cli_review_helpers import _enter_operator_machine, _write_session_context
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests.conftest import _make_ticket_task
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from pathlib import Path

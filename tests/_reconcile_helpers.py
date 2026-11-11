@@ -85,14 +85,13 @@ from cw.reconcile.unowned_running import (
 from cw.worktree import OnBranch, worktree_path_for
 from tests import _git_sandbox
 from tests._clients_yaml import staged_client, write_clients_yaml
-from tests._ticket_view_helpers import ACME_TICKET
-from tests.conftest import (
-    _make_daemon_session,
-    _make_ticket_task,
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
+from tests._shared.stop_hook_context import (
     _write_hook_context_file,
     _write_idle_transcript,
     _write_stop_hook_transcript,
 )
+from tests._ticket_view_helpers import ACME_TICKET
 
 # Default daemon surface ref shared by the promoted doctor/reconcile helpers
 # below -- the same "fake-short-id" the transcript writers key their filename

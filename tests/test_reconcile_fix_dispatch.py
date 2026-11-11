@@ -60,12 +60,9 @@ from tests._reconcile_helpers import (
     make_fix_loop_client,
     use_reconcile_daemon,
 )
-from tests.conftest import (
-    _make_daemon_session,
-    _make_ticket_task,
-    git_in,
-    post_launch_attention_payload,
-)
+from tests._shared.daemon_fakes import post_launch_attention_payload
+from tests._shared.git_repos import git_in
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 from tests.test_reconcile_review_recipes import (
     _make_fix_client,
     _seed_origin,
@@ -76,7 +73,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from tests.conftest import CapturedEvent
+    from tests._shared.daemon_fakes import CapturedEvent
 
 _FIX_LOOP_PHASE = "fix_loop"
 

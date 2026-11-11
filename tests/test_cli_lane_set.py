@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 
     from click.testing import Result
 
-    from tests.conftest import CapturedEvent
+    from tests._shared.daemon_fakes import CapturedEvent
 
 # Short literal workspace paths (never created; nothing here checks them): a
 # tmp_path-length value pushes a line past ruamel's 80-column default width,

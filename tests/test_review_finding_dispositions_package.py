@@ -52,8 +52,8 @@ from cw.review_finding_dispositions import (
 )
 from cw.review_findings import AcceptedFinding, Finding, ReviewVerdict
 from cw.review_markers import DISPOSITION_SENTINEL, RefusedDisposition
-
-from .conftest import _make_finding, commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.review_builders import _make_finding
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator

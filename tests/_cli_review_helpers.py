@@ -36,12 +36,9 @@ from cw.dev_queue import add_ticket
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH, QueueItemStatus, Stage, TicketTask
 from cw.models.client import CLIENT_CONTEXT_KEY
 from tests import _git_sandbox
-from tests.conftest import (
-    _finding_kwargs,
-    _seed_sessions,
-    commit_tracked_file,
-    git_in,
-)
+from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.review_builders import _finding_kwargs
+from tests._shared.session_seeding import _seed_sessions
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence

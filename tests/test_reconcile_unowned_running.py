@@ -95,11 +95,9 @@ from tests._reconcile_helpers import (
     use_reconcile_daemon,
     write_unreadable_claim_context,
 )
-from tests.conftest import (
-    CapturedEvent,
-    _make_ticket_task,
-    _write_hook_context_file,
-)
+from tests._shared.daemon_fakes import CapturedEvent
+from tests._shared.session_seeding import _make_ticket_task
+from tests._shared.stop_hook_context import _write_hook_context_file
 
 _OTHER_TICKET = "GEN-2592"
 # A naive timestamp, as a legacy or hand-edited state file can carry.

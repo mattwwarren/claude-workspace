@@ -96,7 +96,7 @@ from tests._reconcile_helpers import (
     _write_salvage_transcript,
     probe_sessions_lock_free,
 )
-from tests.conftest import _make_daemon_session, _make_ticket_task
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 from tests.test_reconcile_codex_reparks import _seed_two_client_parks
 from tests.test_reconcile_gate_recipes import _make_session as _gate_session
 from tests.test_reconcile_gate_recipes import _make_task as _gate_task

@@ -16,7 +16,7 @@ that closes them.
 
 import pytest
 
-from tests.conftest import _COMMANDS_ROOT, _appendix, _cmd
+from tests._shared.workflow_text import _COMMANDS_ROOT, _appendix, _cmd
 
 FRAME_DISCIPLINE_ANCHOR = "Recording is not framing"
 FRAME_DISCIPLINE_DETAIL = "final characters of this same message"

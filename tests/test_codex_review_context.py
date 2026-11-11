@@ -86,14 +86,14 @@ from tests._codex_review_helpers import (
     _task,
     _write,
 )
-from tests.conftest import (
+from tests._shared.git_repos import git_in
+from tests._shared.review_builders import (
     _make_constraint,
     _make_diff,
     _make_finding,
     _make_reviewer_doc,
-    _make_ticket_task,
-    git_in,
 )
+from tests._shared.session_seeding import _make_ticket_task
 from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:

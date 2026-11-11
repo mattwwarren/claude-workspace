@@ -35,6 +35,7 @@ from tests._review_attestation_helpers import (
     red_pr_bundle,
     stamp_review_record,
 )
+from tests._shared.git_repos import git_in
 from tests._shipped_red_helpers import make_red_row
 from tests._ticket_view_helpers import (
     ACME,
@@ -46,7 +47,6 @@ from tests._ticket_view_helpers import (
     queue_row,
     seed_queue,
 )
-from tests.conftest import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

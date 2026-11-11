@@ -6,7 +6,7 @@ Pure-markdown assertions over the auto-dev pipeline instruction files. Mirrors t
 
 from pathlib import Path
 
-from tests.conftest import _appendix, _cmd
+from tests._shared.workflow_text import _appendix, _cmd
 
 ROOT = Path(__file__).parent.parent
 AGENTS = ROOT / ".claude" / "agents"

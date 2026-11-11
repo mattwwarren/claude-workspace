@@ -13,7 +13,7 @@ parks a gate. These tests pin that wording in every stage file so a regression
 to size-based tiering in one stage cannot ship while the others say v4.
 """
 
-from tests.conftest import _cmd
+from tests._shared.workflow_text import _cmd
 
 STAGE_FILES = (
     "auto-dev.md",

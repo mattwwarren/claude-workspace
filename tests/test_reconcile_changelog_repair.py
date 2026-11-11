@@ -92,7 +92,7 @@ from tests._changelog_repair_helpers import failed as _failed
 from tests._changelog_repair_helpers import taken as _taken
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._review_convergence_helpers import confirmed_ledger, write_ledger
-from tests.conftest import init_repo_with_remote
+from tests._shared.git_repos import init_repo_with_remote
 from tests.test_pr_hydrate import _pr_state
 from tests.test_reconcile_gate_recipes import _client_with_lanes
 

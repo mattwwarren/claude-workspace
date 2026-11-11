@@ -47,7 +47,9 @@ from cw.models import (
     TicketTask,
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests.conftest import _make_daemon_session, _write_global_toggle, git_in
+from tests._shared.git_repos import git_in
+from tests._shared.session_seeding import _make_daemon_session
+from tests._shared.stop_hook_context import _write_global_toggle
 
 if TYPE_CHECKING:
     from collections.abc import Callable

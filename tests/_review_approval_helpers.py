@@ -22,15 +22,10 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 from cw.context_queue_metadata import build_queue_metadata
 from cw.models import Stage
 from cw.spawn import CW_CONTEXT_SCHEMA_VERSION
-from tests.conftest import (
-    _bash_fences,
-    _clean_git_env,
-    _cmd,
-    _make_ticket_task,
-    git_in,
-    push_commit_to_origin,
-    substitute_fence_placeholders,
-)
+from tests._shared.git_repos import _clean_git_env, git_in, push_commit_to_origin
+from tests._shared.guard_fences import substitute_fence_placeholders
+from tests._shared.session_seeding import _make_ticket_task
+from tests._shared.workflow_text import _bash_fences, _cmd
 
 if TYPE_CHECKING:
     from collections.abc import Callable

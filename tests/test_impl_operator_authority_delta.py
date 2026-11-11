@@ -11,7 +11,7 @@ applies the *Operator-authority delta* rule (`auto-dev.md`, #2433) to the impl
 stage, anchored to `HEAD_COMMIT_AT` rather than `plan_approved_at`.
 """
 
-from tests.conftest import _cmd, _norm
+from tests._shared.workflow_text import _cmd, _norm
 from tests.test_agent_comment_provenance import _rule_section
 from tests.test_auto_dev_preflight_resolutions import _after
 from tests.test_impl_guard_staleness_docs import _guard_section

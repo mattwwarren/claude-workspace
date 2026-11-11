@@ -29,7 +29,7 @@ from cw.models import (
     SessionStatus,
 )
 from cw.session_resume_trigger import FakeResumeTriggerAdapter
-from tests.conftest import _make_daemon_session, _make_ticket_task
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, Session

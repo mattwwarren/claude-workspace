@@ -12,7 +12,7 @@ from cw.models import CODEX_BACKEND, OPENCODE_BACKEND, Stage
 from cw.models.client import ClientConfig, TrackerMcpGateConfig
 from tests._backend_mcp_helpers import McpStage, stage_mcp_config
 from tests._doctor_helpers import make_client, make_lane
-from tests.conftest import _write_tracker_config
+from tests._shared.cli_preflight import _write_tracker_config
 
 if TYPE_CHECKING:
     from pathlib import Path

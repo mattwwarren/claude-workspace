@@ -29,7 +29,7 @@ from cw.review_adjudication import (
 )
 from cw.review_findings import ReviewVerdict
 from tests._cli_review_helpers import _TICKET, _accepted_payload, _verdict_payload
-from tests.conftest import _cmd
+from tests._shared.workflow_text import _cmd
 
 if TYPE_CHECKING:
     from pathlib import Path

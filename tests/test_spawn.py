@@ -53,21 +53,21 @@ from cw.spawn import (
 )
 from tests._clients_yaml import ClientSpec, pipeline_stages_extra, write_clients_yaml
 from tests._reconcile_helpers import LockProbeDaemon
-from tests.conftest import (
-    _SRC_ROOT,
-    _FakeClock,
+from tests._shared.daemon_fakes import post_launch_attention_payload
+from tests._shared.lock_helpers import _FakeClock
+from tests._shared.session_seeding import (
     _make_daemon_session,
     _make_ticket_task,
     _seed_completed_session,
     _seed_daemon_session,
-    post_launch_attention_payload,
 )
+from tests._shared.workflow_text import _SRC_ROOT
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cw.native_daemon import NativeDaemonClient
-    from tests.conftest import CapturedEvent
+    from tests._shared.daemon_fakes import CapturedEvent
 
 # The post-launch page's breadcrumb keeps this many characters of the error
 # before appending "…" (#2502), the same cap as dispatch.tick's last_error.
@@ -2795,7 +2795,7 @@ class TestSpawnComplete:
         from cw.events import read_events
         from cw.exceptions import LockTimeoutError
         from cw.models import OrchestratorEventType
-        from tests.conftest import _hold_flock
+        from tests._shared.lock_helpers import _hold_flock
 
         sess = _seed_daemon_session(tmp_path, tmp_config_dir)
         _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
@@ -2837,7 +2837,7 @@ class TestSpawnComplete:
         from cw.cli.spawn import _spawn_complete_impl
         from cw.config import dev_queue_lock, sessions_lock_file
         from cw.exceptions import LockTimeoutError
-        from tests.conftest import _FakeClock, _hold_flock
+        from tests._shared.lock_helpers import _FakeClock, _hold_flock
 
         sess = _seed_daemon_session(tmp_path, tmp_config_dir)
         _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
@@ -2877,7 +2877,7 @@ class TestSpawnComplete:
         from cw.config import dev_queue_lock
         from cw.dev_queue import load_dev_queue
         from cw.models import QueueItemStatus
-        from tests.conftest import _hold_flock
+        from tests._shared.lock_helpers import _hold_flock
 
         sess = _seed_daemon_session(tmp_path, tmp_config_dir)
         _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)

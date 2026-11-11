@@ -11,7 +11,7 @@ import pytest
 import cw._state_backup
 from cw._state_backup import backup_legacy_state, on_disk_schema_version
 from cw.models import CW_STATE_SCHEMA_VERSION, CwState
-from tests.conftest import write_legacy_sessions_json
+from tests._shared.session_seeding import write_legacy_sessions_json
 
 _FULL_PARSE_MSG = "full json.loads must not run on this path"
 _DISK_FULL_MSG = "disk full"

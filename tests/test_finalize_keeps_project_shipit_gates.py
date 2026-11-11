@@ -18,7 +18,7 @@ assertions over the doc text, using the shared readers from
 
 from __future__ import annotations
 
-from tests.conftest import _cmd, _step4c2_section
+from tests._shared.workflow_text import _cmd, _step4c2_section
 
 
 def test_finalize_brief_keeps_project_shipit_gates() -> None:

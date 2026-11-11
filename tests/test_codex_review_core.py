@@ -43,7 +43,8 @@ from tests._codex_review_helpers import (
     _stem_content,
     _task,
 )
-from tests.conftest import _make_reviewer_doc, commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.review_builders import _make_reviewer_doc
 from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:

@@ -64,8 +64,9 @@ from tests._review_engine_helpers import (
     make_aggregation_output,
     make_engine_repo,
 )
+from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.session_seeding import _make_ticket_task
 from tests._tool_fakes import CodexReply, ScriptedCodexRunner, stdin_contains
-from tests.conftest import _make_ticket_task, commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

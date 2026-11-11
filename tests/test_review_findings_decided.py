@@ -21,8 +21,7 @@ from cw.review_findings import (
     has_contested_decision,
     stamp_decision_contests,
 )
-
-from .conftest import _finding_kwargs, _make_finding
+from tests._shared.review_builders import _finding_kwargs, _make_finding
 
 _QUOTE = "Non-Goal 2 'no retraction path' leaves a stale entry binding forever."
 _HELD = (

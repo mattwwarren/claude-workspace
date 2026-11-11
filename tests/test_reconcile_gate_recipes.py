@@ -53,14 +53,10 @@ from tests._reconcile_helpers import (
     forbidden_plan_fetch,
     run_gate_recipes_prefetched,
 )
+from tests._shared.review_builders import plan_body, stub_fetch_plan
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 from tests._tool_fakes import FakeGhComment
 from tests._worktree_helpers import patch_worktree
-from tests.conftest import (
-    _make_daemon_session,
-    _make_ticket_task,
-    plan_body,
-    stub_fetch_plan,
-)
 
 _NOW = datetime(2026, 7, 8, 12, 0, 0, tzinfo=UTC)
 
@@ -3063,7 +3059,7 @@ class TestGateRecipesValidator:
 def _linear_clients(ws: Path) -> dict[str, ClientConfig]:
     """`_seam1_clients` shape, but rooted at a real tmp workspace that carries
     a ``tracking.primary.system: linear`` project config."""
-    from tests.conftest import _write_project_config_yaml
+    from tests._shared.cli_preflight import _write_project_config_yaml
 
     ws.mkdir(parents=True, exist_ok=True)
     _write_project_config_yaml(ws, "tracking:\n  primary:\n    system: linear\n")

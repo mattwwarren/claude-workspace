@@ -30,8 +30,8 @@ from cw.models.client import TrackerMcpGateConfig
 from cw.review_findings import ReviewVerdictEnvelope, consolidate_verdict
 from cw.tracker_io import TrackerIoContext, plan_turn_parts
 from tests._backend_mcp_helpers import McpStage, stage_mcp_config
+from tests._shared.review_builders import _make_diff, _make_finding, _make_reviewer_doc
 from tests._tool_fakes import FakeGhComment, tracker_io_turn_result
-from tests.conftest import _make_diff, _make_finding, _make_reviewer_doc
 
 # ---------------------------------------------------------------------------
 # _post_review_comment — Step 4b's best-effort GitHub write
