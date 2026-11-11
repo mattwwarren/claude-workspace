@@ -286,14 +286,11 @@ def _fail_group(
     run.fail_all([item.entry for item in group.items], kind, detail)
 
 
-def _append_group(run: _Run, group: RollupGroup) -> None:
+def _append_group(run: _Run, group: RollupGroup, number: int) -> None:
     """Append *group*'s items to its existing roll-up, re-reading the body first.
 
     The re-read keeps a checkbox a person ticked since the listing.
     """
-    number = group.number
-    if number is None:
-        return
     timeout = run.timeout(FETCH_BODY_TIMEOUT_S)
     if timeout is None:
         _fail_group(run, group, FilingFailureKind.BUDGET_EXHAUSTED, _BUDGET_DETAIL)
@@ -342,7 +339,7 @@ def _file_rollup(
         if group.number is None:
             _create_group(run, group)
         else:
-            _append_group(run, group)
+            _append_group(run, group, group.number)
 
 
 def _file_pending(

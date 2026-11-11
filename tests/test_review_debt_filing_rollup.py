@@ -489,14 +489,19 @@ class TestFilingFailures:
         # label 0->30, list 30->60, fetch 60->90: nothing left for the update.
         assert [f.kind for f in result.failures] == [FilingFailureKind.BUDGET_EXHAUSTED]
 
-    def test_budget_spent_before_the_body_fetch(self) -> None:
+    def test_budget_spent_between_the_body_read_and_the_update(self) -> None:
         clock = FakeClock()
         gh, existing = self._seed()
-        gh.on_call = _clock_stepper(clock, 45.0)
+
+        def _spend_after_the_read(name: str) -> None:
+            if name == "fetch_issue_body":
+                clock.now += 100.0
+
+        gh.on_call = _spend_after_the_read
         ctx = _debt_ctx(existing=existing, clock=clock, budget_s=90.0)
         result = file_review_debt(_entries(2), ctx, gh)
         assert [f.kind for f in result.failures] == [FilingFailureKind.BUDGET_EXHAUSTED]
-        assert "fetch_issue_body:100" not in gh.calls
+        assert "update_issue_body:100" not in gh.calls
 
     def test_a_failed_create_names_the_gh_failure_kind(self) -> None:
         gh = FakeGh()
