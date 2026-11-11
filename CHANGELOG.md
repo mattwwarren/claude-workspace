@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The `.claude/scripts` coverage floor is raised from 50% to 84% (#2628).** `ci.yml`'s `Coverage floors` step and CLAUDE.md gate 10 now enforce floor(measured) − 2 after script coverage rose to 86%, per the #2249 ratchet. The `src/cw` floor (88%) is unchanged.
+
 ### Added
 
 - **Reconcile now recovers an unbound RUNNING row whose claiming dispatcher is gone, and pages once for one it cannot tie to a worker (#3328, Part B of #2615).** After the existing adoption, the unowned-running sweep parks a row BLOCKED_ON_USER as the new `ReapReason.UNOWNED_RUNNING_ROW` (`signal_only`, one `unowned_running_row` page), or reverts it PENDING under `auto`, when its launch marker proves the claiming process gone, the daemon roster is readable and homes no worker on its worktree, the client is claude-native only and `cw-context.json` ties the row to no session. It records `session.reap_proposed` (`session_id: ""`) first, re-reads every liveness source under `dev_queue_lock`, stops and deletes nothing, charges no unproductive attempt, and acts on at most three rows per tick. A row it cannot confirm (a duplicate row, a session bound elsewhere, recorded for another claim or predating the claim, a naive timestamp, an unreadable context, a non-native executor or an unproven empty roster) gets one `unowned_running_unconfirmed` page and an `?unowned_unconfirmed` advisory note, with no status change. Operator notes: under `auto` an empty roster never reverts, so a lone unowned row on a quiet fleet waits for you; `cw dev-queue wait` exits the park as BLOCKED, not ATTENTION; check the roster and `cw list` before `cw doctor --reap` class 2, which releases a sessionless RUNNING row even while a worker is live; a dispatcher or observer outside the host pid namespace stamps no launch marker and honours no "process gone" verdict.
