@@ -113,10 +113,22 @@ _OWNER.update(
     )
 )
 
+_OWNER.update(
+    dict.fromkeys(
+        (
+            "_TERMINAL_SIBLING_STATUSES",
+            "_latest_terminal_at_index",
+            "park_terminal_sibling_tasks",
+        ),
+        f"{PACKAGE}.terminal_siblings",
+    )
+)
+
 # (reader, module global it reads, owning module): the reader's globals must be
 # the owner's namespace, so a patch on the owner reaches the reader.
 PATCH_OWNERSHIP: tuple[tuple[str, str, str], ...] = (
     ("_revert_terminal_backstop", "partition_dirty", f"{PACKAGE}.backstops"),
+    ("park_terminal_sibling_tasks", "load_clients", f"{PACKAGE}.terminal_siblings"),
 )
 
 # Importers of this package and the names each binds at module scope. Each
@@ -154,6 +166,7 @@ COLD_IMPORTS: tuple[str, ...] = (
     PACKAGE,
     f"{PACKAGE}._client_config",
     f"{PACKAGE}.backstops",
+    f"{PACKAGE}.terminal_siblings",
 )
 
 
