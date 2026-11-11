@@ -2591,6 +2591,26 @@ def _isolate_process_table(
     monkeypatch.setattr("psutil.process_iter", _host_probe_guard.empty_process_table)
 
 
+def _in_initial_pid_namespace(*, proc_root: Path | None = None) -> bool:
+    del proc_root
+    return True
+
+
+@pytest.fixture(autouse=True)
+def _assume_initial_pid_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default ``cw.launch_marker.in_initial_pid_namespace`` to True (#3328).
+
+    A suite run inside a container or sandbox pid namespace would otherwise
+    stamp no launch marker (``current_launch_marker()`` is None) and demote
+    every dead marker to ``IN_FLIGHT``, so results would depend on where the
+    suite runs. Tests of the real function import it at module top, before
+    this patch, and a test that needs the demotion patches it back to False.
+    """
+    monkeypatch.setattr(
+        "cw.launch_marker.in_initial_pid_namespace", _in_initial_pid_namespace
+    )
+
+
 @pytest.fixture(autouse=True)
 def _codex_fix_gates_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default the codex fix loop's post-fix quality gates to an empty plan (#3056).

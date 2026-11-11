@@ -8,6 +8,7 @@ reads as alive.
 from __future__ import annotations
 
 import os
+from typing import TYPE_CHECKING
 
 import psutil
 import pytest
@@ -19,11 +20,16 @@ from cw.launch_marker import (
     ProbeState,
     ProcessProbe,
     current_launch_marker,
+    in_initial_pid_namespace,
     launch_owner_state,
+    observed_launch_owner_state,
     probe_process_start_time_ns,
 )
 from cw.local_runner import read_process_start_time_ns
 from cw.models import LaunchMarker
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # Above every default pid_max (Linux caps it at 2**22), so nothing runs there.
 _NONEXISTENT_PID = 2_000_000_000
@@ -192,3 +198,107 @@ class TestCurrentLaunchMarker:
         _patch_probe(monkeypatch, probe)
 
         assert current_launch_marker() is None
+
+
+def _patch_pidns(monkeypatch: pytest.MonkeyPatch, *, initial: bool) -> None:
+    def _fake(**_kwargs: object) -> bool:
+        return initial
+
+    monkeypatch.setattr(launch_marker_mod, "in_initial_pid_namespace", _fake)
+
+
+class TestInitialPidNamespace:
+    """The real function, imported before the conftest autouse patch."""
+
+    @pytest.fixture
+    def linux(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cw.launch_marker.sys.platform", "linux")
+
+    @staticmethod
+    def _link(proc_root: Path, target: str) -> None:
+        ns = proc_root / "self" / "ns"
+        ns.mkdir(parents=True)
+        (ns / "pid").symlink_to(target)
+
+    @pytest.mark.usefixtures("linux")
+    @pytest.mark.parametrize(
+        ("target", "expected"),
+        [
+            pytest.param("pid:[4026531836]", True, id="initial"),
+            pytest.param("pid:[4026532198]", False, id="container"),
+        ],
+    )
+    def test_link_decides(self, tmp_path: Path, target: str, expected: bool) -> None:
+        self._link(tmp_path, target)
+
+        assert in_initial_pid_namespace(proc_root=tmp_path) is expected
+
+    @pytest.mark.usefixtures("linux")
+    def test_missing_link_fails_closed(self, tmp_path: Path) -> None:
+        assert in_initial_pid_namespace(proc_root=tmp_path) is False
+
+    @pytest.mark.usefixtures("linux")
+    def test_unreadable_link_fails_closed(self, tmp_path: Path) -> None:
+        """A path that is not a symlink makes ``readlink`` raise (EINVAL)."""
+        ns = tmp_path / "self" / "ns"
+        ns.mkdir(parents=True)
+        (ns / "pid").write_text("pid:[4026531836]", encoding="utf-8")
+
+        assert in_initial_pid_namespace(proc_root=tmp_path) is False
+
+    def test_non_linux_counts_as_initial(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.launch_marker.sys.platform", "darwin")
+
+        assert in_initial_pid_namespace(proc_root=tmp_path) is True
+
+
+class TestCurrentLaunchMarkerNamespaceGate:
+    def test_no_marker_outside_the_initial_namespace(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_pidns(monkeypatch, initial=False)
+
+        assert current_launch_marker() is None
+
+
+class TestObservedLaunchOwnerState:
+    @pytest.mark.parametrize(
+        "probe",
+        [
+            pytest.param(ProcessProbe(ProbeState.ABSENT, None), id="absent"),
+            pytest.param(
+                ProcessProbe(
+                    ProbeState.PRESENT,
+                    _MARKER_START_NS + START_TIME_TOLERANCE_NS + 1,
+                ),
+                id="recycled",
+            ),
+        ],
+    )
+    def test_owner_gone_demoted_outside_the_initial_namespace(
+        self, monkeypatch: pytest.MonkeyPatch, probe: ProcessProbe
+    ) -> None:
+        _patch_probe(monkeypatch, probe)
+        _patch_pidns(monkeypatch, initial=False)
+
+        assert observed_launch_owner_state(_marker()) is LaunchOwnerState.IN_FLIGHT
+
+    def test_owner_gone_passes_in_the_initial_namespace(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_probe(monkeypatch, ProcessProbe(ProbeState.ABSENT, None))
+        _patch_pidns(monkeypatch, initial=True)
+
+        assert observed_launch_owner_state(_marker()) is LaunchOwnerState.OWNER_GONE
+
+    @pytest.mark.parametrize("initial", [True, False], ids=["initial", "foreign"])
+    def test_in_flight_and_unknown_are_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch, initial: bool
+    ) -> None:
+        _patch_probe(monkeypatch, ProcessProbe(ProbeState.UNREADABLE, None))
+        _patch_pidns(monkeypatch, initial=initial)
+
+        assert observed_launch_owner_state(_marker()) is LaunchOwnerState.IN_FLIGHT
+        assert observed_launch_owner_state(None) is LaunchOwnerState.UNKNOWN

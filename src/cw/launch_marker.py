@@ -15,6 +15,20 @@ reads as :attr:`LaunchOwnerState.OWNER_GONE`. Everything unreadable
 reader can run in another process context from the dispatcher (``cw doctor
 --reap`` from a sandboxed shell, a ``hidepid`` ``/proc`` mount, another user).
 
+Pid namespaces (#3328): an absent pid is evidence of absence only when the
+observer shares the writer's pid namespace, and :class:`~cw.models.LaunchMarker`
+records none. The proof is two-sided and fails closed, using the fixed link of
+Linux's initial pid namespace (``pid:[4026531836]``):
+
+- :func:`current_launch_marker` stamps a marker only from the initial pid
+  namespace, so every marker it writes was written there;
+- :func:`observed_launch_owner_state` demotes ``OWNER_GONE`` to ``IN_FLIGHT``
+  unless the observer is in the initial pid namespace too.
+
+A dispatcher or observer in a container or sandbox pid namespace therefore
+stamps no marker, or honours no ``OWNER_GONE`` verdict. A platform without pid
+namespaces (macOS) counts as the initial one.
+
 Why a module of its own: :func:`cw.local_runner.read_process_start_time_ns`
 collapses absent and unreadable into ``None``, so it cannot serve R9, and
 ``cw.local_runner`` is already past the module-size flag. This leaf imports
@@ -26,7 +40,9 @@ seam is the module-level binding :func:`probe_process_start_time_ns`.
 from __future__ import annotations
 
 import os
+import sys
 from enum import Enum
+from pathlib import Path
 from typing import NamedTuple
 
 import psutil
@@ -35,6 +51,25 @@ from cw.dispatch_loop_identity import START_TIME_TOLERANCE_NS
 from cw.models import LaunchMarker
 
 _NS_PER_SECOND = 1_000_000_000
+_PROC_ROOT = Path("/proc")
+# readlink of /proc/self/ns/pid in Linux's initial pid namespace: the inode is
+# the kernel constant PROC_PID_INIT_INO, the same on every host.
+_INIT_PIDNS_LINK = "pid:[4026531836]"
+
+
+def in_initial_pid_namespace(*, proc_root: Path = _PROC_ROOT) -> bool:
+    """True when this process runs in the initial pid namespace.
+
+    A platform other than Linux has no pid namespaces and counts as the
+    initial one. On Linux an unreadable link fails closed (False).
+    """
+    if not sys.platform.startswith("linux"):
+        return True
+    try:
+        link = (proc_root / "self" / "ns" / "pid").readlink()
+    except OSError:
+        return False
+    return str(link) == _INIT_PIDNS_LINK
 
 
 class ProbeState(Enum):
@@ -104,9 +139,24 @@ def launch_owner_state(marker: LaunchMarker | None) -> LaunchOwnerState:
     return LaunchOwnerState.IN_FLIGHT
 
 
+def observed_launch_owner_state(marker: LaunchMarker | None) -> LaunchOwnerState:
+    """:func:`launch_owner_state`, failing closed outside the initial pid namespace.
+
+    An observer that cannot prove it shares the writer's pid namespace sees
+    every host pid as absent, so its ``OWNER_GONE`` reads as ``IN_FLIGHT``.
+    """
+    state = launch_owner_state(marker)
+    if state is LaunchOwnerState.OWNER_GONE and not in_initial_pid_namespace():
+        return LaunchOwnerState.IN_FLIGHT
+    return state
+
+
 def current_launch_marker() -> LaunchMarker | None:
     """Return this process's launch marker, or ``None`` if its start time is
-    unreadable (the claim then stores no marker, which reads as ``UNKNOWN``)."""
+    unreadable or it runs outside the initial pid namespace (the claim then
+    stores no marker, which reads as ``UNKNOWN``)."""
+    if not in_initial_pid_namespace():
+        return None
     pid = os.getpid()
     probe = probe_process_start_time_ns(pid)
     if probe.state is not ProbeState.PRESENT or probe.start_time_ns is None:
