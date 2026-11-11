@@ -87,6 +87,8 @@ _RESET_DISPOSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
 # copies. See #968 for the original duplication and #1567 for the unification.
 _PLAN_SPEC_MARKER = "<!-- plan-spec-reviewed"
 _PLAN_SOUNDNESS_MARKER = "<!-- plan-soundness-reviewed"
+_PLAN_SPEC_MARKER_VERSION = "v2"
+_PLAN_SOUNDNESS_MARKER_VERSION = "v1"
 
 
 def _marker_version(body: str, *, marker: str) -> str | None:

@@ -21,10 +21,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
-from cw.codex_plan._result import (
-    PLAN_SOUNDNESS_MARKER_VERSION,
-    PLAN_SPEC_MARKER_VERSION,
-)
 from cw.codex_review import (
     CODEX_ERROR,
     CODEX_MODEL_CAPACITY,
@@ -35,7 +31,9 @@ from cw.codex_review import (
 )
 from cw.dev_queue.lifecycle import (
     _PLAN_SOUNDNESS_MARKER,
+    _PLAN_SOUNDNESS_MARKER_VERSION,
     _PLAN_SPEC_MARKER,
+    _PLAN_SPEC_MARKER_VERSION,
 )
 from cw.models.enums import SandboxMode
 
@@ -219,8 +217,8 @@ def stamp_markers(plan_text: str, *, today: date) -> str:
     """Prepend both sign-off markers, each on its own line, to *plan_text*."""
     stamp = today.isoformat()
     return (
-        f"{_PLAN_SPEC_MARKER}: {stamp} {PLAN_SPEC_MARKER_VERSION} -->\n"
+        f"{_PLAN_SPEC_MARKER}: {stamp} {_PLAN_SPEC_MARKER_VERSION} -->\n"
         f"{_PLAN_SOUNDNESS_MARKER}: {stamp} "
-        f"{PLAN_SOUNDNESS_MARKER_VERSION} -->\n\n"
+        f"{_PLAN_SOUNDNESS_MARKER_VERSION} -->\n\n"
         f"{plan_text.lstrip()}"
     )

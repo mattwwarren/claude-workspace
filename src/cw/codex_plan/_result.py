@@ -30,7 +30,12 @@ from cw.auto_dev_result.parse import (
     extract_block,
 )
 from cw.codex_review import STAGE1_PLAN, make_codex_blocked
-from cw.dev_queue.lifecycle import _PLAN_SOUNDNESS_MARKER, _PLAN_SPEC_MARKER
+from cw.dev_queue.lifecycle import (
+    _PLAN_SOUNDNESS_MARKER,
+    _PLAN_SOUNDNESS_MARKER_VERSION,
+    _PLAN_SPEC_MARKER,
+    _PLAN_SPEC_MARKER_VERSION,
+)
 from cw.plan_fingerprint import (
     PLAN_DRAFT_FINGERPRINT_KEY,
     PLAN_DRAFT_RELATIVE_PATH,
@@ -55,8 +60,8 @@ REVIEW_MARKER_PREFIXES: Final[tuple[str, str]] = (
     _PLAN_SPEC_MARKER,
     _PLAN_SOUNDNESS_MARKER,
 )
-PLAN_SPEC_MARKER_VERSION: Final = "v2"
-PLAN_SOUNDNESS_MARKER_VERSION: Final = "v1"
+PLAN_SPEC_MARKER_VERSION: Final = _PLAN_SPEC_MARKER_VERSION
+PLAN_SOUNDNESS_MARKER_VERSION: Final = _PLAN_SOUNDNESS_MARKER_VERSION
 
 #: cw-recorded friction tokens (appended to the model's ``friction_highlights``).
 RESUME_FRICTION: Final = (
