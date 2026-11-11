@@ -253,6 +253,18 @@ class TestGitHub:
             }
         ]
 
+    def test_a_first_part_unknown_post_is_skipped_without_public_parts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = codex_tracker_client(tmp_path)
+        worktree = _worktree(tmp_path)
+        unknown = PostResult(PostStatus.PARTIAL, PostReason.POST_OUTCOME_UNKNOWN, (), 1)
+        with patch("cw.codex_plan._post.post_parts", return_value=unknown):
+            _post(client, worktree, _PLAN)
+        (event,) = _events()
+        assert event["type"] == "review.verdict_comment_skipped"
+        assert event["reason"] == GITHUB_POST_FAILED
+
     def test_a_refused_first_part_is_skipped(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

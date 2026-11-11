@@ -42,7 +42,7 @@ from cw.tracker_io import (
     plan_turn_parts,
     post_parts_via_turn,
 )
-from cw.tracker_post import PostStatus, post_parts
+from cw.tracker_post import PostReason, PostStatus, post_parts
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -274,8 +274,12 @@ def _post_github(post: _Post, text: str, context: TrackerIoContext) -> None:
     if result.status is PostStatus.REFUSED:
         post.skipped(GITHUB_POST_FAILED)
     elif result.status is PostStatus.PARTIAL:
-        # Some parts are public: report them as unverified, never as skipped.
-        post.unverified(posted)
+        if result.reason is PostReason.POST_OUTCOME_UNKNOWN and not posted:
+            # Nothing is known to be public when the first part has no outcome.
+            post.skipped(GITHUB_POST_FAILED)
+        else:
+            # Some parts are public, or delivery is otherwise ambiguous.
+            post.unverified(posted)
     else:
         post.posted(posted, text)
 
