@@ -11,6 +11,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from unittest.mock import patch
 
 import pytest
 
@@ -305,6 +306,27 @@ class TestGate2:
         assert "HEADLESS BLOCK" in block.details
         assert str(MIN_SCOPE_SCRIPT_VERSION) in block.details
 
+    def test_an_unreadable_script_is_a_stale_marker(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        script = install_home_scope_script(0, "{}", "")
+        script.write_bytes(b"\xff\xfe\x00 not utf-8")
+        block, _ = _scope(repo, tmp_path)
+        assert block is not None
+        assert "HEADLESS BLOCK" in block.details
+
+    def test_a_script_that_cannot_launch_is_impl_failed(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        install_home_scope_script(0, "{}", "")
+        with patch(
+            "cw.codex_impl._gates.subprocess.run", side_effect=OSError("no exec")
+        ):
+            block, _ = _scope(repo, tmp_path)
+        assert block is not None
+        assert block.reason == IMPL_FAILED
+        assert "no exec" in block.details
+
     def test_marker_on_line_six_is_missing(self, repo: Path, tmp_path: Path) -> None:
         script = install_home_scope_script(0, "{}", "")
         text = "#!/usr/bin/env python3\n" + "#\n" * 5 + "# cw-script-version: 3\n"
@@ -552,6 +574,13 @@ class TestFenceBlock:
         assert "stray.txt" in block.details
         assert not any(word in block.details for word in _REVIEW_WORDING)
 
+    def test_a_long_dirty_listing_is_capped(self) -> None:
+        dirty = tuple(f"?? file{i}.txt" for i in range(25))
+        block = dirty_start_block(DirtyStart(markers=(), unmerged=(), dirty=dirty))
+        assert "file0.txt" in block.details
+        assert "file24.txt" not in block.details
+        assert "and 5 more" in block.details
+
     def test_dirty_start_text_names_markers_and_unmerged(self) -> None:
         block = dirty_start_block(
             DirtyStart(
@@ -594,7 +623,7 @@ class TestCommitFailure:
 
     def test_plain_git_failure_is_codex_error(self) -> None:
         exc = subprocess.CalledProcessError(
-            128, ["git", "commit"], output="", stderr="fatal: boom"
+            128, "commit", output="", stderr="fatal: boom"
         )
         block = commit_failure_block(exc)
         assert block.reason == CODEX_ERROR

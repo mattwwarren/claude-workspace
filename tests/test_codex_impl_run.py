@@ -25,6 +25,7 @@ from cw.auto_dev_result import AutoDevResult
 from cw.codex_driver import run_codex_impl_stage
 from cw.codex_fix_loop.push import SYNTHETIC_MISMATCH_PREFIX
 from cw.codex_impl._argv import ImplArgvPolicyError
+from cw.codex_impl._result import ImplBlock
 from cw.codex_plan._argv import PLAN_READ_ONLY_ARGV, build_plan_argv
 from cw.codex_review import _CODEX_IMPL_BLOCKED_NEXT_ACTIONS, _exec_policy_argv
 from cw.codex_review._roles import _build_generic_codex_argv
@@ -466,6 +467,17 @@ def test_a_render_error_is_plan_missing_context(
     assert h.runner.calls == []
 
 
+def test_an_undisableable_mcp_server_name_blocks_before_the_turn(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    h.turn()
+    with patch("cw.codex_impl._run.declared_server_names", return_value=("bad.name",)):
+        result = h.run()
+    _assert_block(result, "tracker_mcp_unavailable_pre_dispatch")
+    assert h.runner.calls == []
+
+
 def test_dirty_start_blocks_with_impl_text_and_no_turn(
     harness: Callable[..., Harness],
 ) -> None:
@@ -767,7 +779,7 @@ def test_tip_mismatch_after_push_parks_impl_not_pushed(
     h = harness()
     h.turn()
     mismatch = subprocess.CalledProcessError(
-        1, ["git"], output="", stderr=f"{SYNTHETIC_MISMATCH_PREFIX} origin/x=y"
+        1, "push", output="", stderr=f"{SYNTHETIC_MISMATCH_PREFIX} origin/x=y"
     )
     with patch("cw.codex_impl._run.push_and_verify_head", side_effect=mismatch):
         result = h.run()
@@ -914,6 +926,18 @@ def test_repair_conflict_merges_default_then_commit_concludes_the_merge(
     assert not [f for f in result.friction_highlights if "dirty_start" in f]
 
 
+def test_a_merge_that_cannot_start_blocks_before_the_turn(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    h = harness(repair=True)
+    _conflicting_repair(h, tmp_path)
+    refused = ImplBlock("impl_failed", "git merge origin/main failed: refused")
+    with patch("cw.codex_impl._run.merge_default_on_conflict", return_value=refused):
+        result = h.run()
+    _assert_block(result, "impl_failed")
+    assert h.runner.calls == []
+
+
 def test_repair_conflict_with_a_planned_file_edit_still_trips_gate2(
     harness: Callable[..., Harness], tmp_path: Path
 ) -> None:
@@ -976,6 +1000,19 @@ def test_events_in_order(harness: Callable[..., Harness]) -> None:
             TICKET,
         ),
     ]
+
+
+def test_a_refused_turn_still_restores_when_measuring_fails(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness(gates=(("lint", "exit 1", 5.0),))
+    start = h.head()
+    h.turn()
+    boom = subprocess.CalledProcessError(1, "git")
+    with patch("cw.codex_impl._run.staged_totals", side_effect=boom):
+        result = h.run()
+    _assert_block(result, "impl_failed")
+    assert_clean_after_refusal(h.worktree, start)
 
 
 def test_events_use_record_event_best_effort(harness: Callable[..., Harness]) -> None:
