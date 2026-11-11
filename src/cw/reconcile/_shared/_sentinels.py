@@ -305,9 +305,12 @@ def classify_sentinel_stage_position(
     The classifier is part of the dispatch routing engine
     (``routing/stage_walk.py``), not a pure queue-row helper, so #2613 left it
     out of ``cw.queue_rows``: the engine imports ``cw.executor``, which imports
-    ``cw.reconcile`` at module top (``executor/core.py``). The dependency
-    inversion that would let this import move to module scope is tracked in
-    #2619.
+    ``cw.reconcile`` at module top (``executor/core.py``). Keeping this import
+    function-level is a deliberate performance optimization: it keeps the routing
+    engine and its ``cw.executor`` chain off the Stop-hook and session hot paths.
+    The inversion that would move it to module scope needs a registration layer
+    plus a ~55 ms per-turn import, which adds complexity for a lint-only gain (see
+    the closed #2619).
     """
     from cw.dispatch import _classify_sentinel_stage_position
 

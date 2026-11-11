@@ -471,8 +471,13 @@ def _apply_sentinel_to_task(
             # (#2613). The engine imports cw.executor (routing/stage_walk.py),
             # cw.executor imports cw.reconcile at module top
             # (executor/core.py), and cw.dispatch's package __init__ imports
-            # cw.reconcile, so a module-level import here is circular. The
-            # dependency inversion is tracked in #2619.
+            # cw.reconcile, so a module-level import here is circular. Keeping
+            # it function-level is also a deliberate performance optimization:
+            # it keeps the routing engine and its cw.executor import chain off
+            # the Stop-hook and session hot paths. The inversion that would
+            # remove it needs a registration layer plus a ~55 ms per-turn
+            # import, which adds complexity for a lint-only gain (see the
+            # closed #2619).
             from cw.dispatch import _route_staged_decision, apply_staged_decision
 
             clients = _deps.load_effective_clients()
