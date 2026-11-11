@@ -283,6 +283,28 @@ class TestNonGitHub:
 
 
 class TestParkComment:
+    def test_ambiguity_park_for_small_plan_does_not_request_approval(
+        self, tmp_path: Path
+    ) -> None:
+        result = _result(
+            tmp_path,
+            tier="small",
+            status="ambiguities_pending_resolution",
+            ambiguities=[{"question": "Which store?"}],
+            next_actions=["user_resolve_ambiguities"],
+            plan_draft_fingerprint=None,
+        )
+        text = render_park_comment(
+            ticket_id=_TICKET,
+            client_name="acme",
+            result=result,
+            draft_body="DRAFT BODY",
+            approved_fingerprint=None,
+            advisory_findings=[],
+        )
+        assert "### How to answer" in text
+        assert "### Approval requested" not in text
+
     def test_ambiguities_park_comment(self, tmp_path: Path) -> None:
         result = _result(
             tmp_path,

@@ -27,7 +27,6 @@ import re
 from typing import TYPE_CHECKING, Any, Final
 
 from cw.auto_dev_result import SCOPE_TIER_LARGE
-from cw.codex_plan._result import PARK_STATUSES
 from cw.codex_review_signals import (
     VerdictCommentIdentity,
     emit_verdict_comment_posted,
@@ -57,6 +56,8 @@ _log = logging.getLogger(__name__)
 
 #: The skipped reason when a GitHub ``gh issue comment`` part fails.
 GITHUB_POST_FAILED: Final = "github_post_failed"
+#: The verdict-comment event kind used by the codex PLAN lane.
+PLAN_COMMENT_KIND: Final = "plan"
 
 PARK_HEADER: Final = "## Pending Verification Scan"
 _COMMENT_ID_RE: Final = re.compile(r"issuecomment-([0-9]+)")
@@ -152,7 +153,7 @@ def render_park_comment(
             "### Advisory plan-review findings (address in the same round)\n\n"
             + "\n".join(advisory_findings)
         )
-    if result.scope.tier == SCOPE_TIER_LARGE or result.status in PARK_STATUSES:
+    if result.scope.tier == SCOPE_TIER_LARGE:
         sections.append(
             _approval_requested(
                 ticket_id,
@@ -211,7 +212,7 @@ class _Post:
             ticket_id=self.ticket_id,
             client=self.client,
             tracker=self.tracker,
-            kind="plan",
+            kind=PLAN_COMMENT_KIND,
             artifact_path=self.artifact_path,
             reviewed_sha=None,
             session_id=self.sid,
@@ -223,7 +224,7 @@ class _Post:
             ticket_id=self.ticket_id,
             client=self.client,
             tracker=self.tracker,
-            kind="plan",
+            kind=PLAN_COMMENT_KIND,
             artifact_path=self.artifact_path,
             reviewed_sha=None,
             session_id=self.sid,
@@ -236,7 +237,7 @@ class _Post:
         return VerdictCommentIdentity(
             client=self.client,
             session_id=self.sid,
-            kind="plan",
+            kind=PLAN_COMMENT_KIND,
             reviewed_sha=None,
             artifact_path=self.artifact_path,
         )

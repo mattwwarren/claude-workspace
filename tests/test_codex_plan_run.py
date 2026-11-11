@@ -347,6 +347,42 @@ def test_ambiguities_park_passes_through_and_posts_the_park_comment(
     assert ("stage.errored", "s1_plan_generated") not in kinds
 
 
+def test_park_completes_with_null_fingerprint_when_draft_write_fails(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    add_turn(
+        h.runner,
+        plan=LARGE_PLAN,
+        tier="large",
+        status="plan_pending_approval",
+        next_actions=["user_decide_plan_approval"],
+    )
+    add_stations(h.runner)
+    with patch("cw.codex_plan._run.write_plan_draft", side_effect=OSError("read-only")):
+        result = h.run()
+    assert result.status == "plan_pending_approval"
+    assert result.plan_draft_fingerprint is None
+
+
+def test_existing_plan_is_preserved_and_replacement_is_audited(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    old_plan = "## Summary\n\nOld plan.\n\n**Scope tier:** small\n"
+    plan_md_path = h.worktree / PLAN_MD_RELATIVE_PATH
+    plan_md_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_md_path.write_text(old_plan, encoding="utf-8")
+    add_stations(add_turn(h.runner))
+    result = h.run()
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == "codex_plan_artifact_missing"
+    assert "old fingerprint:" in result.blocker.details
+    assert "proposed replacement fingerprint:" in result.blocker.details
+    assert plan_md_path.read_text(encoding="utf-8") == old_plan
+
+
 def test_no_op_passes_through_and_posts_nothing(
     harness: Callable[..., Harness],
 ) -> None:

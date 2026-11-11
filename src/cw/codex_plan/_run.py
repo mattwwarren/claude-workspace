@@ -58,6 +58,7 @@ from cw.codex_plan._result import (
     MODEL_TEXT_DISCARDED_FRICTION,
     PARK_STATUSES,
     PLAN_BLOCKED,
+    PLAN_MD_RELATIVE_PATH,
     PLAN_NO_OP,
     PLAN_PENDING_APPROVAL,
     PLAN_STAGE_COMPLETE,
@@ -351,21 +352,25 @@ def _with_friction(result: AutoDevResult, tokens: list[str]) -> AutoDevResult:
     )
 
 
-def _bound(run: _Run, result: AutoDevResult) -> AutoDevResult:
+def _bound(
+    run: _Run, result: AutoDevResult, *, bind_draft: bool = True
+) -> AutoDevResult:
     """*result* with its fingerprint bound to the on-disk draft."""
     return stamp_plan_result(
         result.model_dump(mode="json"),
         ticket_id=run.task.ticket_id,
         worktree=run.worktree,
-        bind_draft=True,
+        bind_draft=bind_draft,
     )
 
 
-def _write_draft_best_effort(run: _Run, plan_text: str) -> None:
+def _write_draft_best_effort(run: _Run, plan_text: str) -> bool:
     try:
         write_plan_draft(run.worktree, plan_text)
     except OSError:
         _log.warning("codex plan draft not written ticket=%s", run.task.ticket_id)
+        return False
+    return True
 
 
 def _record_decisions(run: _Run, plan_text: str) -> str | None:
@@ -389,8 +394,8 @@ def _record_decisions(run: _Run, plan_text: str) -> str | None:
 
 def _park(run: _Run, plan_text: str, check: ApprovalCheck) -> _Exit:
     """A park exit: write the draft, run advisory stations, render the comment."""
-    write_plan_draft(run.worktree, plan_text)
-    result = _bound(run, check.result)
+    draft_written = _write_draft_best_effort(run, plan_text)
+    result = _bound(run, check.result, bind_draft=draft_written)
     stations = run_plan_stations(
         runner=run.runner,
         worktree=run.worktree,
@@ -414,6 +419,23 @@ def _park(run: _Run, plan_text: str, check: ApprovalCheck) -> _Exit:
 
 def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
     """A completing exit: binding stations, the stamped plan, the decisions."""
+    plan_path = run.worktree / PLAN_MD_RELATIVE_PATH
+    if plan_path.exists():
+        try:
+            old_text = plan_path.read_text(encoding="utf-8")
+            old_fingerprint = compute_plan_draft_fingerprint(clean_plan_text(old_text))
+        except OSError as exc:
+            old_fingerprint = f"unreadable ({exc})"
+        new_fingerprint = compute_plan_draft_fingerprint(clean_plan_text(plan_text))
+        return run.blocked(
+            STAGE_PLAN_GENERATED,
+            CODEX_PLAN_ARTIFACT_MISSING,
+            "refusing to replace existing authoritative .cw/plan.md; "
+            f"old fingerprint: {old_fingerprint}; "
+            f"proposed replacement fingerprint: {new_fingerprint}; "
+            "an explicit re-plan/regress operation must clear or version the "
+            "existing artifact first",
+        )
     stations = run_plan_stations(
         runner=run.runner,
         worktree=run.worktree,
@@ -453,7 +475,14 @@ def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
         STAGE_PLAN_REVIEWED,
         prev_stage=STAGE_PLAN_GENERATED,
     )
-    (run.worktree / PLAN_DRAFT_RELATIVE_PATH).unlink(missing_ok=True)
+    try:
+        (run.worktree / PLAN_DRAFT_RELATIVE_PATH).unlink(missing_ok=True)
+    except OSError:
+        _log.warning(
+            "codex plan draft cleanup failed ticket=%s",
+            run.task.ticket_id,
+            exc_info=True,
+        )
     token = _record_decisions(run, written)
     result = _with_friction(result, [token] if token else [])
     return _Exit(result, marked, plan_path)
