@@ -1,4 +1,4 @@
-"""PR writes: reviewer requests and auto-merge disarm."""
+"""PR writes: reviewer requests, auto-merge disarm, PR create and body edit."""
 
 from __future__ import annotations
 
@@ -59,6 +59,72 @@ def disarm_pr_auto_merge(
         return _sp.run(
             ["gh", "pr", "merge", pr_ref, "--disable-auto"],
             capture_output=True,
+            timeout=timeout,
+            check=False,
+            cwd=cwd,
+        )
+    except (OSError, _sp.TimeoutExpired):
+        return None
+
+
+def create_pr(
+    *,
+    base: str,
+    head: str,
+    title: str,
+    body_file: Path,
+    timeout: int = _POST_COMMENT_TIMEOUT_SECONDS,
+    cwd: Path | None = None,
+) -> _sp.CompletedProcess[str] | None:
+    """Open a PR via ``gh pr create --base --head --title --body-file`` (#3062).
+
+    Never a draft. Policy-free, like :func:`add_pr_reviewer`: returns the
+    completed subprocess (``gh`` prints the new PR's URL on stdout) or None
+    if it could not run or timed out. The caller binds the printed URL to the
+    live PR before trusting it.
+    """
+    try:
+        return _sp.run(
+            [
+                "gh",
+                "pr",
+                "create",
+                "--base",
+                base,
+                "--head",
+                head,
+                "--title",
+                title,
+                "--body-file",
+                str(body_file),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            cwd=cwd,
+        )
+    except (OSError, _sp.TimeoutExpired):
+        return None
+
+
+def edit_pr_body(
+    pr_ref: str,
+    *,
+    body_file: Path,
+    timeout: int = _POST_COMMENT_TIMEOUT_SECONDS,
+    cwd: Path | None = None,
+) -> _sp.CompletedProcess[str] | None:
+    """Replace *pr_ref*'s body via ``gh pr edit --body-file`` (#3062).
+
+    Policy-free: returns the completed subprocess or None if it could not
+    run or timed out.
+    """
+    try:
+        return _sp.run(
+            ["gh", "pr", "edit", pr_ref, "--body-file", str(body_file)],
+            capture_output=True,
+            text=True,
             timeout=timeout,
             check=False,
             cwd=cwd,
