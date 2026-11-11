@@ -431,7 +431,7 @@ def _make_pending_fix_dispatch(**overrides: Any) -> PendingFixDispatch:
     Dict-merge + model-construct idiom matching ``_make_ticket_task``
     (``tests/conftest.py``); shared so ``tests/test_reconcile_fix_dispatch.py``,
     ``tests/test_dispatch.py``, and the backstop-exemption tests
-    (``tests/test_reconcile_tasks.py``, ``tests/test_reconcile_phantom.py``)
+    (``tests/test_reconcile_tasks_*.py``, ``tests/test_reconcile_phantom.py``)
     do not each hand-roll their own ``PendingFixDispatch(...)`` defaults.
     """
     kwargs: dict[str, Any] = {

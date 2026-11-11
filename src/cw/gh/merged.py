@@ -221,7 +221,7 @@ def resolve_merged_via_pr_state(
     GitHub #975: the single shared seam for "check task_by_ticket's fresh
     pr_state first, fall back to a gh subprocess call when stale/absent" --
     used identically by reconcile/prepasses.py's merge-state pre-pass,
-    reconcile/tasks.py's _filter_merged_candidates, and
+    reconcile/tasks/merged_completion.py's _filter_merged_candidates, and
     doctor/loop_health.py's _check_timed_out_merged.
 
     gh_fallback is a zero-arg callable -- each call site passes a

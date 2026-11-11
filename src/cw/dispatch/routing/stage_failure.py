@@ -471,7 +471,7 @@ def _route_stage_failure(
     #
     # #3372: a reuse-path gate_timeout park carries its PR the same way and
     # leaves auto-merge as found, so the stamp lets cw observe the PR merging
-    # on its own and release the row (Variant A, reconcile/tasks.py).
+    # on its own and release the row (Variant A, reconcile/tasks/stale_gate.py).
     gate_pr_url = (
         _extract_pr_url_or_info(last_result)
         if blocker_reason in (_AUTOMERGE_NOT_ARMED_REASON, GATE_TIMEOUT_BLOCKER_REASON)

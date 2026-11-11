@@ -13,7 +13,7 @@ arrival in the currently-buffered batch, not the oldest -- see
 
 Sibling to ``tests/test_cw_operator_events.py`` (RFC 0008 W3, #1002), split
 into its own file per R2/R3's corrected anchor -- the digest logic lives in
-``cw_operator_events.py``, not ``reconcile/tasks.py`` -- and to avoid growing
+``cw_operator_events.py``, not ``reconcile/tasks/`` -- and to avoid growing
 the existing ~586-line file past ~1000 lines.
 
 Sibling coverage lives in ``tests/test_dev_queue.py``:
