@@ -111,6 +111,22 @@ class TestConstraintsSource:
 
 
 class TestVerdictCommentSkipped:
+    def test_plan_kind_is_accepted(self, tmp_path: Path) -> None:
+        """#3060: the codex PLAN post reuses the event with kind=plan."""
+        payload = verdict_comment_skipped_payload(
+            ticket_id="GEN-9",
+            client="acme",
+            tracker="linear",
+            kind="plan",
+            artifact_path=tmp_path / ".cw" / "plan.md",
+            reviewed_sha=None,
+            session_id="s-1",
+            reason="github_post_failed",
+        )
+        assert payload["kind"] == "plan"
+        assert payload["reviewed_sha"] is None
+        assert payload["reason"] == "github_post_failed"
+
     def test_payload_fields(self, tmp_path: Path) -> None:
         payload = verdict_comment_skipped_payload(
             ticket_id="GEN-9",

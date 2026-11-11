@@ -2,14 +2,17 @@
 
 RFC 0018 S3. One ``CheckResult`` named ``tracker-mcp/<client>/<lane>/<backend>``
 per lane whose pipeline runs a tracker-touching stage on a non-Claude backend
-(opencode PLAN/IMPL/FINALIZE; codex REVIEW) for a client whose tracker is not
+(opencode PLAN/IMPL/FINALIZE; codex PLAN/REVIEW) for a client whose tracker is not
 GitHub. A GitHub tracker needs no MCP and produces no result; ``local`` and
 ``claude-native`` are not reported here.
 
 Severity:
 
-* codex: always a warning naming what its reviews lose on this tracker
-  (free-text operator comments, the voided-findings block, marker comments).
+* codex: a warning naming what its reviews lose on this tracker (free-text
+  operator comments, the voided-findings block, marker comments) and that a
+  codex PLAN turn reads the ticket only through ``servers.codex`` (#3060).
+  When the lane runs PLAN on codex, the gate is on and the server reads
+  ``ABSENT``/``DISABLED``, it **fails** like opencode (the row would park).
 * opencode, tracker unset: a warning -- the PLAN/IMPL prompt tells the agent
   to block with ``tracker_tool_unavailable``.
 * opencode, no ``tracker_mcp_gate.servers.opencode`` named: a warning.
@@ -41,10 +44,11 @@ if TYPE_CHECKING:
 _CHECK_NAME = "tracker-mcp"
 
 # The stages each non-Claude backend performs tracker operations in. opencode
-# REVIEW performs none (its prompt says so); codex reads at REVIEW only.
+# REVIEW performs none (its prompt says so); codex reads at PLAN (#3060) and
+# REVIEW.
 _TRACKER_STAGES: dict[str, frozenset[Stage]] = {
     OPENCODE_BACKEND: frozenset({Stage.PLAN, Stage.IMPL, Stage.FINALIZE}),
-    CODEX_BACKEND: frozenset({Stage.REVIEW}),
+    CODEX_BACKEND: frozenset({Stage.PLAN, Stage.REVIEW}),
 }
 # The stages the dispatch gate parks on (``cw.dispatch.tracker_mcp_gate``).
 _GATED_STAGES = frozenset({Stage.PLAN, Stage.IMPL})
@@ -57,7 +61,9 @@ _LOST_CONTEXT = (
     " the tracker-IO turn (#3057) only when tracker_mcp_gate.servers.codex"
     " names the tracker's MCP server and it is enabled; otherwise it is"
     " skipped (review.verdict_comment_skipped). Row-carried constraints and"
-    " finding dispositions still reach the review."
+    " finding dispositions still reach the review. A codex PLAN turn (#3060)"
+    " reads the ticket only through the MCP server tracker_mcp_gate.servers.codex"
+    " names, and blocks tracker_mcp_unavailable_pre_dispatch without it."
 )
 _UNSET_PROMPT = (
     "the opencode PLAN/IMPL prompt tells the agent to block with"
@@ -117,12 +123,14 @@ def _severity(
     entry: _Lane, kind: TrackerKind, reading: McpConfigReading | None
 ) -> tuple[bool, bool]:
     """``(ok, warn)`` for one lane; see the module docstring."""
-    if entry.backend == CODEX_BACKEND or kind.tracker_class is TrackerClass.UNSET:
+    if kind.tracker_class is TrackerClass.UNSET:
+        return True, True
+    if entry.backend == CODEX_BACKEND and Stage.PLAN not in entry.stages:
         return True, True
     if reading is None or reading.state is McpState.UNKNOWN:
         return True, True
     if reading.state is McpState.ENABLED:
-        return True, False
+        return True, entry.backend == CODEX_BACKEND
     gate = entry.client.tracker_mcp_gate
     gate_on = gate is not None and gate.enabled
     if gate_on and _GATED_STAGES.intersection(entry.stages):

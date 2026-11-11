@@ -456,14 +456,20 @@ _TRACKERS = ("github-issues", "linear", None)
 _GATE_STATES: tuple[McpStage, ...] = ("enabled", "absent", "disabled", "malformed")
 
 
+def _gated(backend: str, stage: Stage) -> bool:
+    """Whether a (backend, stage) row is checked: opencode PLAN/IMPL, codex PLAN."""
+    if backend == CODEX_BACKEND:
+        return stage is Stage.PLAN
+    return stage in (Stage.PLAN, Stage.IMPL)
+
+
 def _expect_hit(
     tracker: str | None, backend: str, state: McpStage, stage: Stage
 ) -> bool:
     return (
         tracker == "linear"
-        and backend == OPENCODE_BACKEND
         and state in ("absent", "disabled")
-        and stage in (Stage.PLAN, Stage.IMPL)
+        and _gated(backend, stage)
     )
 
 
@@ -500,13 +506,47 @@ class TestBackendServerGate:
                     branch=_BRANCH,
                     file_inspected=str(path),
                     expected=_SERVER,
-                    backend=OPENCODE_BACKEND,
+                    backend=backend,
                 )
             }
         else:
             assert hits == {}
-        if tracker != "linear" or backend == CODEX_BACKEND or stage is Stage.REVIEW:
+        if tracker != "linear" or not _gated(backend, stage):
             assert reads == []
+
+    @pytest.mark.parametrize("servers", [_OPENCODE_SERVERS, {CODEX_BACKEND: "a.b"}])
+    def test_codex_plan_with_unusable_server_is_a_hit(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, servers: dict[str, str]
+    ) -> None:
+        (tmp_path / "ws" / ".git").mkdir(parents=True)
+        client = _client(
+            tmp_path / "ws",
+            _enabled_gate(None, servers=servers),
+            executors=_on(CODEX_BACKEND),
+            tracker="linear",
+        )
+        reads = _count_reads(monkeypatch)
+        hits = _resolve(client, _snapshot(stage=Stage.PLAN))
+        (hit,) = hits.values()
+        assert hit.backend == CODEX_BACKEND
+        assert hit.file_inspected == "clients.yaml tracker_mcp_gate.servers"
+        assert hit.expected == servers.get(CODEX_BACKEND, "servers.codex (unset)")
+        assert reads == []
+
+    @pytest.mark.parametrize("tracker", ["github-issues", None])
+    def test_codex_plan_without_server_off_a_tracker_fails_open(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tracker: str | None
+    ) -> None:
+        (tmp_path / "ws" / ".git").mkdir(parents=True)
+        client = _client(
+            tmp_path / "ws",
+            _enabled_gate(None, servers=_OPENCODE_SERVERS),
+            executors=_on(CODEX_BACKEND),
+            tracker=tracker,
+        )
+        reads = _count_reads(monkeypatch)
+        assert _resolve(client, _snapshot(stage=Stage.PLAN)) == {}
+        assert reads == []
 
     def test_unset_tracker_warns_once_and_never_reads(
         self,

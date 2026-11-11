@@ -92,6 +92,7 @@ from tests._codex_recovery_helpers import (
     _task_without_base_ref,
     _use_auto_reap_policy,
 )
+from tests._codex_review_helpers import exclude_cw_dir
 from tests._host_probe_guard import scoped_process_iter
 from tests._reconcile_helpers import _mk_headless_daemon_session
 from tests._tool_fakes import path_with_stub
@@ -1022,6 +1023,18 @@ class TestWorktreePorcelainCleanExceptVerdict:
         git_in(repo, "mv", "notes.md", ".claude/review-verdict.md")
 
         assert _worktree_porcelain_clean_except_verdict(repo) is False
+
+    def test_codex_plan_artifacts_under_excluded_cw_are_clean(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#3060: a codex PLAN run leaves only .cw/ artifacts, never dirty."""
+        repo = make_git_repo("wt")
+        exclude_cw_dir(repo)
+        (repo / ".cw").mkdir()
+        (repo / ".cw" / "plan-draft.md").write_text("draft\n")
+        (repo / ".cw" / "plan.md").write_text("plan\n")
+
+        assert _worktree_porcelain_clean_except_verdict(repo) is True
 
     def test_not_a_repository_is_unknown(self, tmp_path: Path) -> None:
         assert _worktree_porcelain_clean_except_verdict(tmp_path) is None

@@ -17,6 +17,7 @@ import pytest
 import cw
 from cw.auto_dev_result import AgentHealthEntry, OperatorConstraintsSource, Review
 from cw.codex_review import (
+    _CODEX_PLAN_BLOCKED_NEXT_ACTIONS,
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     CODEX_BUDGET_EXHAUSTED,
     CODEX_ERROR,
@@ -585,6 +586,21 @@ class TestMakeCodexBlocked:
         assert result.stage_reached == "stage3_review"
         assert result.blocker is not None
         assert result.blocker.stage == "stage3_review"
+
+    def test_make_codex_blocked_plan_stage_carries_plan_next_actions(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """#3060: a stage1_plan block never tells the operator it was a review."""
+        worktree = make_git_repo("wt-make-codex-blocked-plan")
+        result = make_codex_blocked(
+            ticket_id="T-1",
+            worktree=worktree,
+            reason="whatever",
+            stage_reached="stage1_plan",
+        )
+        assert result.next_actions == _CODEX_PLAN_BLOCKED_NEXT_ACTIONS
+        assert result.next_actions == ["user_resolve_codex_plan_failure"]
+        assert result.next_actions is not _CODEX_PLAN_BLOCKED_NEXT_ACTIONS
 
     def test_make_codex_blocked_stage_reached_override_still_works(
         self, make_git_repo: Callable[[str], Path]

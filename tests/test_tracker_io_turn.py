@@ -77,6 +77,16 @@ def _verified_runner(context: TrackerIoContext, text: str) -> FakeCodexRunner:
     return FakeCodexRunner(output_file_content=tracker_io_turn_result(_TICKET, parts))
 
 
+def test_plan_turn_parts_unmarked_for_the_github_path(tmp_path: Path) -> None:
+    """#3060: marked=False leaves the marker to post_issue_comment."""
+    context = _context(tmp_path, FakeCodexRunner())
+    marked = plan_turn_parts("plan text", context)
+    unmarked = plan_turn_parts("plan text", context, marked=False)
+    assert all(AGENT_COMMENT_MARKER in part for part in marked)
+    assert not any(AGENT_COMMENT_MARKER in part for part in unmarked)
+    assert len(marked) == len(unmarked)
+
+
 class _RecordingRunner:
     """Reads the real ``-o`` file, as ``RealCodexRunner`` does; can raise."""
 

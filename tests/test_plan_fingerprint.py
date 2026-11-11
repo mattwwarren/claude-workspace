@@ -22,6 +22,7 @@ from cw.plan_fingerprint import (
     compute_plan_draft_fingerprint,
     extract_persisted_body_sha,
     is_plan_draft_fingerprint,
+    leading_bookkeeping_end,
     sanitize_persisted_fingerprint,
 )
 
@@ -122,6 +123,35 @@ class TestComputePlanDraftFingerprint:
         bookkeeping and must change the digest."""
         malformed = "<!-- plan-stage-settled: A1: ADOPTED (operator note) -->\n"
         assert compute_plan_draft_fingerprint(_ROUND + malformed + _BODY) != _BODY_SHA
+
+
+class TestLeadingBookkeepingEnd:
+    """#3060: the block boundary the fingerprint and draft rewrites share."""
+
+    def test_no_round_line_is_zero(self) -> None:
+        assert leading_bookkeeping_end(_BODY) == 0
+        assert leading_bookkeeping_end(_LAST_EVALUATED + _BODY) == 0
+
+    def test_end_is_the_body_start(self) -> None:
+        leading = _ROUND + _LAST_EVALUATED + _SETTLED_A
+        assert leading_bookkeeping_end(leading + _BODY) == len(leading)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            _BODY,
+            _ROUND + _BODY,
+            _ROUND + _LAST_EVALUATED + _BODY,
+            _ROUND + _SETTLED_A + _SETTLED_A_R2 + _BODY,
+            _BODY + _ROUND,
+        ],
+    )
+    def test_fingerprint_is_the_digest_of_the_text_after_the_block(
+        self, text: str
+    ) -> None:
+        body = text[leading_bookkeeping_end(text) :]
+        expected = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        assert compute_plan_draft_fingerprint(text) == expected
 
 
 class TestRoundQualifiedSettledIds:

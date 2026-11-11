@@ -46,9 +46,12 @@ Contracts:
   a non-GitHub tracker, ``cw.backend_mcp_config.read_backend_mcp`` reads the
   user-layer ``opencode.json`` in process, and the row parks when the server
   is verifiably absent or disabled. A GitHub tracker needs no MCP and is
-  never read; an unset tracker fails open with one warning. Codex is not
-  gated in S3 (``cw doctor`` reports it). One tracker resolution and one
-  config read per backend per tick.
+  never read; an unset tracker fails open with one warning. A **codex PLAN**
+  row (#3060, RFC 0018 C1) is checked the same way against
+  ``servers["codex"]``, and on a non-GitHub tracker an unset or unusable
+  ``servers.codex`` is itself a hit; codex REVIEW/IMPL rows are not gated
+  here (``cw doctor`` reports them). One tracker resolution and one config
+  read per backend per tick.
 
 Non-goal: probing whether the tracker's credential (e.g. an API-key env var)
 is present. That is a runtime property of the spawned session's environment,
@@ -66,12 +69,14 @@ from cw.backend_mcp_config import McpConfigReading, McpState, read_backend_mcp
 from cw.executor import resolve_executor_config
 from cw.models import (
     CLAUDE_NATIVE_BACKEND,
+    CODEX_BACKEND,
     OPENCODE_BACKEND,
     QueueItemStatus,
     Stage,
     resolve_feature_branch,
 )
 from cw.tracker import TrackerClass, TrackerKind, tracker_kind
+from cw.tracker_io._argv import is_valid_name
 from cw.worktree import _git_dir, _ref_exists, _run_git
 
 if TYPE_CHECKING:
@@ -285,6 +290,33 @@ def _evaluate_backend_server(
     )
 
 
+#: What a codex PLAN hit names when ``servers.codex`` itself is unusable.
+_CODEX_SERVERS_FILE = "clients.yaml tracker_mcp_gate.servers"
+_CODEX_SERVER_UNSET = "servers.codex (unset)"
+
+
+def _evaluate_codex_plan(
+    client: ClientConfig, gate: TrackerMcpGateConfig, branch: str, tick: _GateTick
+) -> TrackerMcpGateHit | None:
+    """A codex PLAN row's check (#3060): ``servers.codex`` must be usable.
+
+    GitHub needs no MCP and an unset tracker fails open (both through
+    :func:`_evaluate_backend_server`). On any other tracker a missing or
+    non-identifier ``servers.codex`` is a hit before any config read.
+    """
+    server = (gate.servers or {}).get(CODEX_BACKEND)
+    if server is not None and is_valid_name(server):
+        return _evaluate_backend_server(client, CODEX_BACKEND, server, branch, tick)
+    if tick.tracker().tracker_class is not TrackerClass.OTHER:
+        return _evaluate_backend_server(client, CODEX_BACKEND, "", branch, tick)
+    return TrackerMcpGateHit(
+        branch=branch,
+        file_inspected=_CODEX_SERVERS_FILE,
+        expected=_CODEX_SERVER_UNSET if server is None else server,
+        backend=CODEX_BACKEND,
+    )
+
+
 def _evaluate_task(
     client: ClientConfig, gate: TrackerMcpGateConfig, task: TicketTask, tick: _GateTick
 ) -> TrackerMcpGateHit | None:
@@ -292,7 +324,8 @@ def _evaluate_task(
 
     claude-native: the branch/plugin path, only when ``plugin_id`` is set.
     opencode: the server path, only when ``servers["opencode"]`` is set.
-    Codex, ``local`` and anything else are not gated here.
+    codex: PLAN rows only (#3060), through :func:`_evaluate_codex_plan`.
+    Other codex stages, ``local`` and anything else are not gated here.
     """
     backend = resolve_executor_config(task.stage, task, client).backend
     branch = resolve_feature_branch(task.ticket_id, client, task)
@@ -300,6 +333,8 @@ def _evaluate_task(
         if gate.plugin_id is None:
             return None
         return _evaluate_branch(client, gate, branch)
+    if backend == CODEX_BACKEND and task.stage == Stage.PLAN:
+        return _evaluate_codex_plan(client, gate, branch, tick)
     server = (gate.servers or {}).get(backend)
     if backend != OPENCODE_BACKEND or server is None:
         _log.debug(

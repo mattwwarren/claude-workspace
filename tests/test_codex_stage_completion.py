@@ -20,17 +20,21 @@ if TYPE_CHECKING:
 
 from cw import codex_background, codex_stage_completion
 from cw.auto_dev_result import AutoDevResult
+from cw.codex_review import _CODEX_PLAN_BLOCKED_NEXT_ACTIONS
 from cw.codex_stage_completion import (
+    STAGE_FAULTS,
     clear_stage_blocked_marker,
     complete_session_as_unexpected_error,
     complete_session_through_door,
     revert_claimed_row_after_unexpected_error,
+    run_guarded_stage,
     save_stage_blocked_marker,
     stamp_session_id_on_running_task,
 )
 from cw.config import load_state
 from cw.dev_queue import add_ticket, load_dev_queue
 from cw.dispatch_state import load_executor_blocked_markers
+from cw.exceptions import CwError
 from cw.local_runner import UNEXPECTED_ERROR
 from cw.models import QueueItemStatus, SessionStatus, Stage, TicketTask
 from tests.test_codex_background import _client, _run, _seed_session
@@ -179,6 +183,75 @@ class TestDoorAndUnexpectedError:
         persisted = AutoDevResult.model_validate(session.last_result)
         assert persisted.blocker is not None
         assert persisted.blocker.reason == UNEXPECTED_ERROR
+
+    def test_unexpected_error_carries_the_given_stage(
+        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-stage-plan")
+        _seed_session("sid-plan")
+        task = TicketTask(ticket_id="T-plan", client="test", stage=Stage.PLAN)
+
+        complete_session_as_unexpected_error(
+            "sid-plan", task, worktree, stage_reached="stage1_plan"
+        )
+
+        persisted = AutoDevResult.model_validate(load_state().sessions[0].last_result)
+        assert persisted.stage_reached == "stage1_plan"
+        assert persisted.next_actions == _CODEX_PLAN_BLOCKED_NEXT_ACTIONS
+
+
+class TestRunGuardedStage:
+    def _guard(self, worktree: Path, body: Callable[[], None]) -> None:
+        run_guarded_stage(
+            client_name="test",
+            task=_running_task("sid-g"),
+            worktree=worktree,
+            sid="sid-g",
+            stage_reached="stage1_plan",
+            body=body,
+        )
+
+    def test_runs_the_body_with_the_marker_held(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        seen: list[int] = []
+        self._guard(tmp_path, lambda: seen.append(len(load_executor_blocked_markers())))
+        assert seen == [1]
+        assert not load_executor_blocked_markers()
+
+    @pytest.mark.parametrize("fault", [OSError("io"), CwError("cw"), ValueError("v")])
+    def test_a_stage_fault_completes_and_reverts(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
+        fault: Exception,
+    ) -> None:
+        assert isinstance(fault, STAGE_FAULTS)
+        worktree = make_git_repo("wt-guard")
+        _seed_session("sid-g")
+
+        def _boom() -> None:
+            raise fault
+
+        self._guard(worktree, _boom)
+
+        persisted = AutoDevResult.model_validate(load_state().sessions[0].last_result)
+        assert persisted.blocker is not None
+        assert persisted.blocker.reason == UNEXPECTED_ERROR
+        assert persisted.stage_reached == "stage1_plan"
+        assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
+        assert not load_executor_blocked_markers()
+
+    def test_other_exceptions_propagate_and_still_clear_the_marker(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        def _interrupt() -> None:
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            self._guard(tmp_path, _interrupt)
+        assert not load_executor_blocked_markers()
+        assert load_dev_queue().tasks[0].status is QueueItemStatus.RUNNING
 
 
 class TestRowHelpers:
