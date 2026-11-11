@@ -4374,10 +4374,15 @@ an operator who closes a debt ticket by hand, fixed or won't-fix, while its
 deferral is still in `.cw/deferred-findings.md` sees a fresh ticket filed on
 the next `cw review debt file` or finalize re-file gate. If no row matches, cw lists OPEN `review-debt`
 issues (`gh issue list --label review-debt --state open --json number,body
---limit 200`) and looks for the body marker `<!-- cw-review-debt: <key> -->`,
+--limit 1000`) and looks for the body marker `<!-- cw-review-debt: <key> -->`,
 scoped to the same queue ticket. A CLOSED match is a miss: a closed debt ticket
-does not stop a fresh deferral from filing a new one. A full 200-item page with
-no match fails closed (`lookup_failed`) rather than risk a duplicate.
+does not stop a fresh deferral from filing a new one. A full 1000-item page with
+no match fails closed (`lookup_failed`) rather than risk a duplicate. The
+listing is capped at 1000 open issues, so a page of exactly 1000 is treated as
+possibly truncated; a listing of 800 or more (80% of the limit) logs a
+`cw.gh.filing` WARNING naming the count and the limit. cw never closes
+`review-debt` issues because the backlog is large; pruning it is an operator
+decision.
 
 **Budget and concurrency.** One run has a 90 second total budget
 (`DEBT_FILING_BUDGET_S`); entries still unfiled when it runs out stay
@@ -4471,10 +4476,10 @@ merging describes a finding that never reached the default branch.
   next sweep. The sweep writes nothing to the dev-queue store and holds no
   lock while it runs. GitHub issue state is its ledger: a closed ticket is
   never listed again.
-- **Known limitation.** A client with 200 or more open `review-debt` issues
-  fills the listing's 200-item page. The sweep cannot tell which issues it
+- **Known limitation.** A client with 1000 or more open `review-debt` issues
+  fills the listing's 1000-item page. The sweep cannot tell which issues it
   missed, so it skips that client and logs a WARNING naming it. Nothing is
-  paginated; the client is swept again once the open count drops below 200.
+  paginated; the client is swept again once the open count drops below 1000.
 
 ## Review debt auto-enqueue (#3045)
 
