@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import subprocess
 import sys
 import tomllib
@@ -168,7 +169,7 @@ _ROUTING_ENGINE_KEYS = (
     "src/cw/reconcile/_shared/_sentinels.py",
 )
 _ROUTING_RATIONALE = "deliberate performance optimization"
-_STALE_FOLLOW_UP = "tracked in #2619"
+_STALE_FOLLOW_UP = re.compile(r"tracked\s+in\s+#2619")
 
 
 def _pyproject_comment_above(key: str) -> str:
@@ -295,7 +296,7 @@ def test_routing_engine_ignore_states_performance_rationale(key: str) -> None:
         for line in _pyproject_comment_above(key).splitlines()
     )
     assert _ROUTING_RATIONALE in " ".join(comment.split())
-    assert _STALE_FOLLOW_UP not in comment
+    assert not _STALE_FOLLOW_UP.search(comment)
 
 
 @pytest.mark.parametrize("module", _COLD_IMPORT_FIRST)
