@@ -112,7 +112,7 @@ class TestVerifyReviewFeedback:
                 "view",
                 _URL,
                 "--json",
-                "number,headRefOid,headRefName,url,headRepository",
+                "number,headRefOid,headRefName,url",
             ],
         ]
         assert all(r.cwd == repo for r in gh.records)

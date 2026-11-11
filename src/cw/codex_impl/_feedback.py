@@ -37,7 +37,7 @@ STALE_PREFIX: Final = "review_feedback_stale"
 CONFLICT_PREFIX: Final = "merge_conflict_with_default_branch"
 PROBE_UNAVAILABLE: Final = "merge_probe_unavailable"
 
-_PR_FIELDS: Final = "number,headRefOid,headRefName,url,headRepository"
+_PR_FIELDS: Final = "number,headRefOid,headRefName,url"
 _GH_TIMEOUT_SECONDS: Final = 30
 _MERGE_CONFLICT_RC: Final = 1
 _MERGE_CLEAN_RC: Final = 0
@@ -67,9 +67,6 @@ def _pr_mismatch(
 ) -> str | None:
     """Why the live PR view and the local worktree do not match *feedback*."""
     head, branch = local
-    head_repository = view.get("headRepository")
-    if isinstance(head_repository, dict):
-        head_repository = head_repository.get("nameWithOwner")
     checks = (
         (
             view.get("number") == feedback.pr_number,
@@ -78,11 +75,6 @@ def _pr_mismatch(
         (
             view.get("url") == github_pr_url(feedback.repo, feedback.pr_number),
             f"live PR url {view.get('url')!r} does not identify the PR",
-        ),
-        (
-            isinstance(head_repository, str) and head_repository == feedback.repo,
-            f"live PR head repository {head_repository!r} != feedback repo "
-            f"{feedback.repo}",
         ),
         (
             view.get("headRefOid") == feedback.reviewed_sha,

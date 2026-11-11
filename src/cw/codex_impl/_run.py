@@ -104,7 +104,7 @@ from cw.codex_review import (
     _codex_scratch_dir,
     _is_model_capacity_error,
 )
-from cw.codex_review_signals import record_event_best_effort
+from cw.codex_review_signals import COMMON_TURN_FAULTS, record_event_best_effort
 from cw.codex_stage_completion import complete_session_through_door, run_guarded_stage
 from cw.codex_stage_facts import resolve_plan_source
 from cw.config import load_effective_config
@@ -672,7 +672,26 @@ def _after_turn(
     pushed = _push(run)
     if pushed is not None:
         return run.blocked(pushed)
-    return _stamp_final(run, flow, payload)
+    try:
+        return _stamp_final(run, flow, payload)
+    except COMMON_TURN_FAULTS as exc:
+        # The commit is already pushed. Convert a post-push stamping failure
+        # into a durable terminal result so the guarded-stage crash handler
+        # cannot incorrectly return the row to PENDING and dispatch it again.
+        try:
+            sha = git_output(["rev-parse", "HEAD"], cwd=run.worktree).strip()
+        except (subprocess.CalledProcessError, OSError):
+            sha = "unknown"
+        detail = redact_and_cap(str(exc))
+        return run.blocked(
+            ImplBlock(
+                IMPL_FAILED,
+                f"the IMPL commit {sha[:12]} was pushed, but cw could not "
+                "complete the post-push result: "
+                f"{detail or 'the completion facts were unavailable'}; "
+                "the pushed commit remains for operator reconciliation",
+            )
+        )
 
 
 def _early_stamp(
@@ -697,6 +716,30 @@ def _early_stamp(
         )
 
 
+def _turn_head_block(run: _Run, flow: _Flow) -> ImplBlock | None:
+    """Refuse a turn that moved HEAD before cw could stage its changes."""
+    try:
+        head = git_output(["rev-parse", "HEAD"], cwd=run.worktree).strip()
+    except (subprocess.CalledProcessError, OSError) as exc:
+        return ImplBlock(
+            IMPL_FAILED,
+            "cw could not verify HEAD after the IMPL turn; no commit or push "
+            f"was attempted: {redact_and_cap(str(exc))}",
+        )
+    if head == flow.baseline.head_sha:
+        return None
+    # A model-created commit (or any other HEAD movement) cannot be safely
+    # restored by the cycle ref; preserve the non-restorable staged-set breach
+    # wording and leave the branch for operator inspection.
+    breach = staged_set_breach(
+        frozenset({"HEAD"}),
+        frozenset(),
+        _CYCLE,
+        start_head=flow.baseline.head_sha,
+    )
+    return fence_block(breach)
+
+
 def _run_turn(run: _Run, flow: _Flow, scratch: Path) -> AutoDevResult:
     """Step 3: launch the turn, parse it, and hand a completing turn on."""
     run.emit(
@@ -707,6 +750,9 @@ def _run_turn(run: _Run, flow: _Flow, scratch: Path) -> AutoDevResult:
     turn = run.turn(flow.pre.prompt, scratch)
     if isinstance(turn, ImplBlock):
         return run.blocked(turn)
+    head_block = _turn_head_block(run, flow)
+    if head_block is not None:
+        return run.blocked(head_block)
     failed = run.turn_failure(turn)
     if failed is not None:
         return run.refused(failed, flow)
@@ -717,9 +763,11 @@ def _run_turn(run: _Run, flow: _Flow, scratch: Path) -> AutoDevResult:
     early = _early_stamp(run, flow, parsed)
     if isinstance(early, ImplBlock):
         return run.refused(early, flow)
-    if early.status == IMPL_BLOCKED:
-        return run.pass_through(early, flow)
-    return _after_turn(run, flow, parsed, scratch)
+    return (
+        run.pass_through(early, flow)
+        if early.status == IMPL_BLOCKED
+        else _after_turn(run, flow, parsed, scratch)
+    )
 
 
 def _impl(run: _Run, scratch: Path) -> AutoDevResult:
@@ -740,7 +788,21 @@ def _execute(run: _Run) -> None:
         result = _impl(run, scratch)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
-    complete_session_through_door(run.sid, result.model_dump(mode="json"))
+    payload = result.model_dump(mode="json")
+    try:
+        complete_session_through_door(run.sid, payload)
+    except COMMON_TURN_FAULTS:
+        # A pushed IMPL commit must not be stranded by a transient completion
+        # failure. The door is idempotent: a retry either writes the result or
+        # observes the first write and still completes the session.
+        _log.warning(
+            "codex impl: retrying completion after post-push failure "
+            "session=%s ticket=%s",
+            run.sid,
+            run.task.ticket_id,
+            exc_info=True,
+        )
+        complete_session_through_door(run.sid, payload)
     record_event_best_effort(
         OrchestratorEventType.SESSION_COMPLETED,
         {
