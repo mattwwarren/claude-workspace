@@ -518,6 +518,40 @@ def test_an_unmarked_written_plan_is_artifact_missing(
     assert "sign-off markers" in result.blocker.details
 
 
+def test_a_plan_failing_post_write_verification_is_not_left_on_disk(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    add_stations(add_turn(h.runner))
+    checks = iter([True, False])
+    with patch(
+        "cw.codex_plan._run._plan_body_signoff_ok", side_effect=lambda _t: next(checks)
+    ):
+        result = h.run()
+    assert result.blocker is not None
+    assert "does not carry both sign-off markers" in result.blocker.details
+    assert not (h.worktree / PLAN_MD_RELATIVE_PATH).exists()
+
+
+def test_a_failed_invalid_plan_cleanup_is_logged_not_raised(
+    harness: Callable[..., Harness], caplog: pytest.LogCaptureFixture
+) -> None:
+    h = harness()
+    add_stations(add_turn(h.runner))
+    checks = iter([True, False])
+    with (
+        patch(
+            "cw.codex_plan._run._plan_body_signoff_ok",
+            side_effect=lambda _t: next(checks),
+        ),
+        patch("pathlib.Path.unlink", side_effect=OSError("busy")),
+        caplog.at_level("WARNING"),
+    ):
+        result = h.run()
+    assert result.blocker is not None
+    assert "invalid artifact cleanup failed" in caplog.text
+
+
 def test_an_unexpected_error_completes_and_reverts_the_row(
     harness: Callable[..., Harness],
 ) -> None:

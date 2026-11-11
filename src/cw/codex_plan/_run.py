@@ -495,6 +495,17 @@ def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
             plan_draft_fingerprint=_draft_fingerprint(plan_text, written=draft_written),
         )
     if not _plan_body_signoff_ok(written):
+        # An existing plan is refused before this point, so what is on disk is
+        # what this run just wrote: removing it never discards an authoritative
+        # plan, and leaves no invalid one behind.
+        try:
+            plan_path.unlink(missing_ok=True)
+        except OSError:
+            _log.warning(
+                "codex plan invalid artifact cleanup failed ticket=%s",
+                run.task.ticket_id,
+                exc_info=True,
+            )
         return run.blocked(
             STAGE_PLAN_REVIEWED,
             CODEX_PLAN_ARTIFACT_MISSING,
