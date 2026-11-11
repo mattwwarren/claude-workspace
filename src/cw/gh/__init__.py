@@ -92,6 +92,7 @@ from cw.gh.pr_writes import (
 from cw.gh.probes import (
     check_gh_availability,
     current_gh_login,
+    fetch_repo_name_with_owner,
     fetch_repo_visibility,
 )
 from cw.gh.runner import (
@@ -162,6 +163,7 @@ __all__ = [
     "fetch_issue_state",
     "fetch_pr_head",
     "fetch_pr_view",
+    "fetch_repo_name_with_owner",
     "fetch_repo_visibility",
     "fetch_required_failing_checks",
     "find_milestone",

@@ -6,7 +6,8 @@ single-line HTML comment tag, and ``src/cw/data/contract_manifest.yaml``
 gives every id one disposition per backend. ``tests/test_contract_manifest.py``
 fails on any gap. This package's cw imports are :mod:`cw.markdown_fence`,
 ``cw.models.orchestrator_config.constants`` and, inside ``_render`` functions
-only, the sentinel fragments of ``cw.opencode_runner``.
+only, the sentinel fragments of ``cw.opencode_runner`` and the IMPL commit
+trailer constant of ``cw.codex_impl._result``.
 
 **Authoring rule: tag every new contract rule.** A new rule in a command doc
 gets a tag and a manifest element with all four cells, and every ``Status``

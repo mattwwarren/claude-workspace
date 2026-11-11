@@ -100,12 +100,15 @@ __all__ = [
     "any_call",
     "argv_has",
     "assert_gh_calls",
+    "editing_reply",
     "fake_claude_cli",
     "fake_codex_job_runner",
     "fake_opencode_cli",
     "fake_pre_commit_cli",
     "fake_uv_cli",
     "gh_calls",
+    "impl_sentinel",
+    "impl_turn_result",
     "marked_parts",
     "path_with_stub",
     "plan_sentinel",
@@ -1385,6 +1388,84 @@ def plan_turn_result(
             {"plan_markdown": plan_markdown, "sentinel": sentinel}
         ),
     )
+
+
+# --- codex IMPL executor fakes (#3061) ------------------------------------------
+
+
+def impl_sentinel(**overrides: object) -> str:
+    """A framed ``stage2_impl`` ``AUTO_DEV_RESULT`` block for the codex IMPL turn.
+
+    The defaults are a valid small ``stage_complete``; *overrides* replace
+    top-level keys. The model-claimed git facts are deliberately wrong: cw
+    stamps its own over them.
+    """
+    payload: dict[str, object] = {
+        "schema_version": 4,
+        "ticket_id": "T-1",
+        "status": "stage_complete",
+        "stage_reached": "stage2_impl",
+        "scope": {
+            "tier": "small",
+            "files": 1,
+            "lines_estimate": 20,
+            "lines_actual": 7,
+            "forbidden_touched": False,
+        },
+        "plan_source": "generated",
+        "branch": "model/claimed-branch",
+        "worktree_path": "/model/claimed/path",
+        "fork_point_sha": "f" * 40,
+        "commits": ["e" * 40],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "ambiguities": [],
+        "blocker": None,
+        "prior_pr_warnings": [],
+        "next_actions": [],
+    }
+    payload.update(overrides)
+    return f"<<<AUTO_DEV_RESULT\n{json.dumps(payload, indent=2)}\nAUTO_DEV_RESULT>>>"
+
+
+def impl_turn_result(
+    sentinel: str, returncode: int = 0, stderr: str = ""
+) -> CodexRunResult:
+    """An IMPL turn's result: the ``{sentinel}`` ``-o`` document."""
+    return CodexRunResult(
+        returncode=returncode,
+        stdout="",
+        stderr=stderr,
+        output_file_content=json.dumps({"sentinel": sentinel}),
+    )
+
+
+def editing_reply(
+    worktree: Path, files: dict[str, str], result: CodexRunResult
+) -> Callable[[list[str], str | None], CodexRunResult]:
+    """A ``ScriptedCodexRunner`` reply that writes *files* under *worktree*.
+
+    The worktree is bound here because a reply receives only ``(argv, stdin)``.
+    Parent directories are created; the reply then returns *result*.
+    """
+
+    def _reply(_argv: list[str], _stdin: str | None) -> CodexRunResult:
+        for relative, text in files.items():
+            target = worktree / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        return result
+
+    return _reply
 
 
 def station_findings_doc(

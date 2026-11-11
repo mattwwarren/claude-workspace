@@ -39,6 +39,7 @@ from cw.contract_manifest import (
     strip_doc_tags,
 )
 from cw.contract_manifest import _render as render_module
+from cw.contract_manifest._render import _stage_addendum
 from cw.models.orchestrator_config.constants import CODEX_BACKEND
 from cw.opencode_runner import (
     _IMPL_SENTINEL_TEMPLATE,
@@ -266,6 +267,7 @@ def test_glue_and_imported_fragments_are_denylist_clean() -> None:
         render_module._SHIP_IT_FALLBACK,
         render_module._FINALIZE_SENTINEL_NOTE,
         render_module._PLAN_CODEX_ADDENDUM,
+        render_module._IMPL_CODEX_ADDENDUM,
         _stage_preamble("plan", "T-1"),
         _sentinel_rules(None),
         _sentinel_rules("abc"),
@@ -277,14 +279,54 @@ def test_glue_and_imported_fragments_are_denylist_clean() -> None:
             assert token not in text, token
 
 
-def test_only_plan_carries_the_codex_addendum() -> None:
-    """#3060: the addendum is the plan render's last block; impl/finalize lack it."""
-    addendum = render_module._PLAN_CODEX_ADDENDUM
+def test_plan_and_impl_each_carry_their_own_codex_addendum() -> None:
+    """#3060/#3061: each addendum is its stage's last block; finalize has none."""
+    plan_addendum = render_module._PLAN_CODEX_ADDENDUM
+    impl_addendum = _stage_addendum("impl").strip("\n")
     plan = render_stage_prompt("plan", CODEX_BACKEND, docs_root=_COMMANDS_ROOT)
-    assert plan.rstrip("\n").endswith(addendum.rstrip("\n"))
-    for stage in ("impl", "finalize"):
-        text = render_stage_prompt(stage, CODEX_BACKEND, docs_root=_COMMANDS_ROOT)
-        assert addendum not in text
+    impl = render_stage_prompt("impl", CODEX_BACKEND, docs_root=_COMMANDS_ROOT)
+    finalize = render_stage_prompt("finalize", CODEX_BACKEND, docs_root=_COMMANDS_ROOT)
+    assert plan.rstrip("\n").endswith(plan_addendum.rstrip("\n"))
+    assert impl.rstrip("\n").endswith(impl_addendum)
+    assert impl_addendum not in plan
+    assert plan_addendum not in impl
+    assert plan_addendum not in finalize
+    assert impl_addendum not in finalize
+    assert "Codex IMPL addendum" not in finalize
+
+
+def test_impl_addendum_overrides_the_remaining_claude_machinery() -> None:
+    addendum = _stage_addendum("impl")
+    for needle in (
+        "cw result emit",
+        "cw result validate",
+        "cw event record",
+        "cw worktree merge-probe",
+        "gh pr view",
+        "git merge",
+        "git commit --trailer",
+        "git push",
+        "temp-worktree gate fence",
+        "EnterWorktree",
+    ):
+        assert needle in addendum, needle
+    assert "leave them alone" in addendum
+    assert "Auto-Dev-Stage: impl-complete" in addendum
+    assert "{trailer}" not in addendum
+    assert "is deferred" in addendum or "are deferred" in addendum
+
+
+def test_impl_golden_drops_the_cw_run_blocks() -> None:
+    text = _render("impl")
+    for dropped in (
+        "### Dispatch Detection",
+        "### Worktree Isolation Guard",
+        "**Absent owner record (#2676).**",
+        "### Implementation Failure Escalation",
+    ):
+        assert dropped not in text, dropped
+    assert "### Review-feedback guard" in text
+    assert "### S2 Completion Marker" in text
 
 
 def test_every_range_body_is_denylist_clean() -> None:
@@ -642,6 +684,28 @@ def test_render_module_imports_opencode_runner_lazily() -> None:
         if isinstance(fn, ast.FunctionDef)
         for child in ast.walk(fn)
         if imports_runner(child)
+    ]
+    assert nested
+
+
+def test_render_module_imports_codex_impl_lazily() -> None:
+    """The trailer constant lives in ``cw.codex_impl``, which imports this package."""
+    tree = ast.parse(Path(render_module.__file__).read_text(encoding="utf-8"))
+
+    def imports_impl(node: ast.AST) -> bool:
+        if isinstance(node, ast.ImportFrom):
+            return (node.module or "").startswith("cw.codex_impl")
+        if isinstance(node, ast.Import):
+            return any(a.name.startswith("cw.codex_impl") for a in node.names)
+        return False
+
+    assert not [n for n in tree.body if imports_impl(n)]
+    nested = [
+        child
+        for fn in ast.walk(tree)
+        if isinstance(fn, ast.FunctionDef)
+        for child in ast.walk(fn)
+        if imports_impl(child)
     ]
     assert nested
 

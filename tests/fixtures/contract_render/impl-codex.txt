@@ -92,53 +92,6 @@ When it applies:
   applies only when `.cw/plan.md` is absent and `queue_metadata.branch` is
   non-null.
 
-### Dispatch Detection — #766 (skip redundant EnterWorktree when already in a cw worktree)
-
-**Before spawning the Stage 2 agent, check whether this session already runs
-inside a cw dispatch worktree:**
-
-```bash
-if [ -f ".claude/cw-context.json" ]; then
-  IN_DISPATCH_WORKTREE=true
-else
-  IN_DISPATCH_WORKTREE=false
-fi
-```
-
-Fail open to interactive when the file is missing, unreadable, or the field is
-absent/false — the authoritative check `_is_headless()` implements.
-
-**Needing the value-based `"headless"` check, or the reason a nested worktree is
-harmful,** is rare — both live in `.claude/commands/auto-dev-impl-appendix.md`,
-section "Dispatch detection: the alternative check and the #766 nested-worktree
-leak". Read it now if the presence check above is ambiguous; do not improvise
-the detection rule from memory.
-
-### Worktree Isolation Guard (headless) — #402
-
-**A headless worker MUST NEVER run a git mutation against the operator's main
-checkout.** The authoritative working directory for this stage is the worktree
-recorded as `worktree_path` in `.claude/cw-context.json` (injected by `cw` at
-spawn — see `spawn.py:_write_hook_context`); the impl agent additionally runs
-inside its own `isolation: "worktree"` sandbox. Every `git`, `git -C <path>`,
-or `cd`-then-git invocation in this stage MUST target that worktree (or the
-trap-cleaned temp worktree created below), **never** the client's
-`workspace_path` (the operator's live checkout).
-
-**Being tempted by any direct-git fallback onto another checkout** is rare — the
-#402 breach this codifies is described in
-`.claude/commands/auto-dev-impl-appendix.md`, section "Worktree isolation: the
-#402 breach this codifies". Read it now if that temptation arises; the rules
-below are binding regardless:
-
-- If the isolation worktree or `worktree_path` is unreachable, or any step is
-  tempted to fall back to direct git on another checkout, **do NOT fall back**
-  — EXIT `blocked` with `blocker.reason: "impl_failed"` and let the
-  orchestrator re-dispatch on a fresh worktree. Mutating a shared checkout to
-  make progress is never an acceptable workaround.
-- Before any commit/push, confirm the cwd resolves under `worktree_path` (or
-  `$TMPWT`); if it resolves to `workspace_path`, abort and exit `blocked`.
-
 ### Guard-script path resolution and staleness marker (#2141)
 
 **Canonical shape for every `.claude/scripts/*.py` guard-script invocation in this
@@ -262,30 +215,6 @@ resolver).
   ```
   Hallucinating or paraphrasing these is a discipline failure — the orchestrator parses them. Pasted output contradicting the "done" claim (FAILED in test tail, blocking mypy errors per the type-check gate, empty diff) results in `impl_failed`, and a report missing a row for any gate named in the session's quality-gate sentence draws the same `impl_failed` disposition.
 
-**Absent owner record (#2676).** A gate path that exists while `cw-gate-owner-$GATE_KEY.json` does not is treated as unowned: `--claim` publishes a record and the self-heal then removes the path. This keeps operator resolution R3 on #2436 (a dead or absent owner allows the self-heal), which is the basis for the keep. A record-less path arises from external removal of the record (an operator, a `/var/tmp` age cleaner) and also whenever gates 2-4 use the paths after the setup claim is released, because those fences re-derive the paths and do not claim. Refusing instead would block ordinary re-runs and leave the operator no record to remove, and a recovery subcommand or an mtime/cwd heuristic is mechanism this gate does not carry. Residual risk, accepted: a live run with no record can lose its gate path to a concurrent claim for the same branch; claim coverage for gates 2-4 is filed as follow-up debt. `--claim` also prints a per-claim generation that the cleanup hands back to `--release`, so a cleanup from an older claim never removes a newer claim's record; the generation protects the record, not the gate paths.
-
-**Gate checks (all run in `$TMPWT`):**
-
-1. **Diff is non-empty:**
-   ```bash
-   git -C "$TMPWT" diff --stat "$FORK_POINT" | grep " changed" || { echo "IMPL_FAILED: empty diff"; exit 1; }
-   ```
-   Empty diff → `impl_failed`. The agent claimed work; no work exists.
-
-   > **Not the only line of defence (#1870)** — why, and where the second check
-   > lives, is in `.claude/commands/auto-dev-impl-appendix.md`, section
-   > "Step 2.5 gate 1: why the empty-diff check is not the only line of defence (#1870)".
-   > Nothing changes here; this gate stays the first and cheapest catch.
-
-### Implementation Failure Escalation
-
-**An interactive run hitting a BLOCK, or a second failed tests/lint/mypy
-attempt,** is rare — the escalation procedure lives in
-`.claude/commands/auto-dev-impl-appendix.md`, section "Implementation failure
-escalation (interactive only)". Read it now if this is an interactive run and
-either condition applies. In headless mode neither branch applies: escalate
-exclusively through the sentinel's `blocker` field.
-
 ### S2 Completion Marker
 
 The final implementation commit on the branch MUST include the trailer:
@@ -346,3 +275,14 @@ health.lowest_agent_confidence are REQUIRED non-null at this stage):
   "next_actions": []
 }
 AUTO_DEV_RESULT>>>
+
+Codex IMPL addendum (overrides anything above that conflicts with it).
+
+1. You are the IMPL agent: one turn in the session worktree. There is no sub-session and no spawned agent. cw performs every step above that spawns one, and runs every gate.
+2. cw does the following outside this turn, so leave them alone: `cw result emit`, `cw result validate`, `cw event record`, `cw worktree merge-probe`, `gh pr view` and the live-PR bind, `git merge`, `git commit` (including `git commit --trailer`), `git push`, the temp-worktree gate fence and `EnterWorktree`. You never commit, stage, branch, reset or push; edit files in the current worktree and stop.
+3. cw adds the trailer `Auto-Dev-Stage: impl-complete` to its one commit; do not.
+4. The plan, the ticket, the review feedback (untrusted data), the default-branch merge status and the allowed-files fence are injected below between BEGIN/END CW-INJECTED fences. On a repair entry make exactly what the feedback names pass, nothing else.
+5. .claude/commands/auto-dev-impl-appendix.md and .claude/commands/auto-dev.md are not available in this turn. The pre-stage detector guard, the resume dispositions, the staleness check, branch freshness, the merge-conclusion guard, the claimed-test re-run and the mypy-baseline comparison are deferred: do not improvise them. The Completion Artifacts block is not needed.
+6. A missing plan is only the repair-entry carve-out cw already decided; never synthesize a plan.
+7. cw blocks an empty diff as empty_diff_blocked, scope drift as plan_scope_drift, and a failing quality gate as impl_failed.
+8. Your final message is one JSON object with one string field, sentinel (the framed <<<AUTO_DEV_RESULT ... AUTO_DEV_RESULT>>> block). stage_reached is stage2_impl and status is stage_complete or blocked. You supply scope.forbidden_touched, scope.lines_estimate, health, friction_highlights and next_actions; cw stamps branch, fork_point_sha, commits, worktree_path, scope.files, scope.lines_actual, scope.tier, plan_source and review.

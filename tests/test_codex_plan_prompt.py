@@ -60,23 +60,65 @@ class TestCommandDocsRoot:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         packaged = tmp_path / "packaged"
-        monkeypatch.setattr(prompt_module, "_packaged_commands_dir", lambda: packaged)
         monkeypatch.setattr(
-            prompt_module, "_checkout_commands_dir", lambda: tmp_path / "checkout"
+            prompt_module, "_packaged_commands_dir", lambda *_a, **_k: packaged
+        )
+        monkeypatch.setattr(
+            prompt_module,
+            "_checkout_commands_dir",
+            lambda *_a, **_k: tmp_path / "checkout",
         )
         assert command_docs_root() == packaged
 
     def test_checkout_is_the_fallback(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(prompt_module, "_packaged_commands_dir", lambda: None)
-        monkeypatch.setattr(prompt_module, "_checkout_commands_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            prompt_module, "_packaged_commands_dir", lambda *_a, **_k: None
+        )
+        monkeypatch.setattr(
+            prompt_module, "_checkout_commands_dir", lambda *_a, **_k: tmp_path
+        )
         assert command_docs_root() == tmp_path
 
     def test_both_absent_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(prompt_module, "_packaged_commands_dir", lambda: None)
-        monkeypatch.setattr(prompt_module, "_checkout_commands_dir", lambda: None)
+        monkeypatch.setattr(
+            prompt_module, "_packaged_commands_dir", lambda *_a, **_k: None
+        )
+        monkeypatch.setattr(
+            prompt_module, "_checkout_commands_dir", lambda *_a, **_k: None
+        )
         assert command_docs_root() is None
+
+    def test_docs_param_requires_every_named_doc_present(self, tmp_path: Path) -> None:
+        (tmp_path / "a.md").write_text("a", encoding="utf-8")
+        assert prompt_module._has_plan_docs(tmp_path, ("a.md",))
+        assert not prompt_module._has_plan_docs(tmp_path, ("a.md", "b.md"))
+        assert not prompt_module._has_plan_docs(tmp_path)
+
+    def test_default_docs_are_the_plan_docs(self) -> None:
+        assert command_docs_root() == command_docs_root(prompt_module.PLAN_DOCS)
+
+    def test_docs_are_threaded_positionally_to_both_seams(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        seen: list[tuple[str, tuple[str, ...]]] = []
+
+        def _record(name: str, result: Path | None) -> object:
+            def _seam(docs: tuple[str, ...]) -> Path | None:
+                seen.append((name, docs))
+                return result
+
+            return _seam
+
+        monkeypatch.setattr(
+            prompt_module, "_packaged_commands_dir", _record("packaged", None)
+        )
+        monkeypatch.setattr(
+            prompt_module, "_checkout_commands_dir", _record("checkout", tmp_path)
+        )
+        assert command_docs_root(("x.md",)) == tmp_path
+        assert seen == [("packaged", ("x.md",)), ("checkout", ("x.md",))]
 
     def test_a_package_dir_without_the_docs_is_skipped(self) -> None:
         # A source checkout ships no cw/data/commands.
@@ -89,6 +131,13 @@ class TestCommandDocsRoot:
         fake_pkg.mkdir(parents=True)
         monkeypatch.setattr(prompt_module.cw, "__file__", str(fake_pkg / "x.py"))
         assert prompt_module._checkout_commands_dir() is None
+
+
+def test_wheel_force_includes_every_impl_doc() -> None:
+    data = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    force = data["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+    for name in _STAGE_DOCS["impl"]:
+        assert force[f".claude/commands/{name}"] == f"cw/data/commands/{name}"
 
 
 def test_wheel_force_includes_every_plan_doc() -> None:

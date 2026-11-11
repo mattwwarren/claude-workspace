@@ -626,8 +626,12 @@ def test_prefetch_failure_is_plan_missing_context(
 def test_no_docs_root_is_plan_missing_context(
     harness: Callable[..., Harness], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("cw.codex_plan._prompt._packaged_commands_dir", lambda: None)
-    monkeypatch.setattr("cw.codex_plan._prompt._checkout_commands_dir", lambda: None)
+    monkeypatch.setattr(
+        "cw.codex_plan._prompt._packaged_commands_dir", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        "cw.codex_plan._prompt._checkout_commands_dir", lambda *_a, **_k: None
+    )
     h = harness()
     result = h.run()
     assert result.blocker is not None

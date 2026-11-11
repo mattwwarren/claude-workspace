@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cw.codex_background import _run_codex_review_and_complete
+from cw.codex_impl import run_impl_stage_and_complete
 from cw.codex_plan import run_plan_stage_and_complete
 from cw.codex_runner import RealCodexRunner
 from cw.config import get_client, load_state
@@ -32,10 +33,6 @@ if TYPE_CHECKING:
 STAGE_REVIEW = "review"
 STAGE_PLAN = "plan"
 STAGE_IMPL = "impl"
-
-_IMPL_STAGE_NOT_IMPLEMENTED = (
-    "cw codex run --stage impl is not implemented yet — see GitHub #1550."
-)
 
 
 def _load_session(session_id: str) -> Session:
@@ -60,14 +57,11 @@ def _load_running_task(*, ticket_id: str, session_id: str) -> TicketTask:
 def unsupported_codex_stage_message(stage: Stage) -> str:
     """Return the refusal for a ``cw codex run --stage`` no codex executor serves.
 
-    Impl keeps its #1550 text, which the CLI tests pin; every other stage names
-    the stages that do have an executor (#3054).
+    Names the stages that do have an executor (#3054, #3061).
     """
-    if stage == Stage.IMPL:
-        return _IMPL_STAGE_NOT_IMPLEMENTED
     return (
         f"no codex executor for stage {stage.value!r} "
-        f"(supported: {STAGE_PLAN}, {STAGE_REVIEW})"
+        f"(supported: {STAGE_PLAN}, {STAGE_IMPL}, {STAGE_REVIEW})"
     )
 
 
@@ -152,4 +146,38 @@ def run_codex_plan_stage(
         sess_name=session.name,
         model=executor_config.model,
         reasoning_effort=executor_config.reasoning_effort,
+    )
+
+
+def run_codex_impl_stage(
+    *,
+    ticket_id: str,
+    session_id: str,
+    wall_clock_budget_seconds: int | None,
+    runner: CodexRunner | None = None,
+) -> None:
+    """Run the codex IMPL stage for *ticket_id*/*session_id* and complete it (#3061).
+
+    Re-derives the run from the persisted RUNNING row and session, as
+    :func:`run_codex_plan_stage` does. *wall_clock_budget_seconds* is accepted
+    for the shared CLI signature and ignored: no cw timer bounds the IMPL turn
+    (ADR-0014). The IMPL stage's model, reasoning effort and
+    ``fix_sandbox_mode`` are read from its executor config: the turn edits
+    files, so it runs under the lane's write-capable sandbox, while PLAN, the
+    review stations and tracker IO stay read-only.
+    """
+    del wall_clock_budget_seconds
+    session, client, task, worktree, executor_config = _load_stage_run(
+        ticket_id=ticket_id, session_id=session_id, stage=Stage.IMPL
+    )
+    run_impl_stage_and_complete(
+        runner=runner or RealCodexRunner(),
+        task=task,
+        worktree=worktree,
+        client=client,
+        sid=session.id,
+        sess_name=session.name,
+        model=executor_config.model,
+        reasoning_effort=executor_config.reasoning_effort,
+        sandbox_mode=executor_config.fix_sandbox_mode,
     )

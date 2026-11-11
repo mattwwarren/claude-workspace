@@ -26,6 +26,7 @@ from cw.exceptions import RequeueLiveSessionError, RequeueStateError
 from cw.executor._repair_entry import is_adopted_repair_entry
 from cw.models import (
     CLAUDE_NATIVE_BACKEND,
+    CODEX_BACKEND,
     QueueItemStatus,
     ReviewFeedback,
     Stage,
@@ -311,6 +312,16 @@ class TestRefusalRules:
 
     def test_eligible_row_has_no_refusal(self) -> None:
         assert red_pr_refusal(make_red_row(), STAGES, CLAUDE_NATIVE_BACKEND) is None
+
+    def test_codex_backend_is_eligible(self) -> None:
+        assert red_pr_refusal(make_red_row(), STAGES, CODEX_BACKEND) is None
+
+    @pytest.mark.parametrize("backend", ["opencode", "local"])
+    def test_opencode_and_local_still_refuse_naming_2983(self, backend: str) -> None:
+        msg = red_pr_refusal(make_red_row(), STAGES, backend)
+        assert msg is not None
+        assert "#2983" in msg
+        assert "claude-native and codex" in msg
 
 
 @pytest.fixture(params=["operator", "adopted", "recovered"])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess as _sp
 from typing import TYPE_CHECKING
 
@@ -101,3 +102,38 @@ def fetch_repo_visibility(*, timeout: int, cwd: Path | None) -> str | None:
     if not isinstance(value, str) or not value:
         return None
     return value.upper()
+
+
+_REPO_SLUG = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+
+
+def fetch_repo_name_with_owner(*, timeout: int, cwd: Path | None) -> str | None:
+    """Return the repo's ``owner/name`` slug, or None.
+
+    Shaped exactly like :func:`fetch_repo_visibility`: runs ``gh repo view
+    --json nameWithOwner`` in *cwd* and returns None on every failure (gh
+    absent, a non-zero exit, a timeout, unparsable JSON, a missing, non-string
+    or empty value, or a value that is not an ``owner/name`` slug). The IMPL
+    executor binds repair feedback to the live repository with it.
+    """
+    try:
+        result = _sp.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            cwd=cwd,
+        )
+    except (OSError, _sp.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except ValueError:
+        return None
+    value = data.get("nameWithOwner") if isinstance(data, dict) else None
+    if not isinstance(value, str) or not _REPO_SLUG.fullmatch(value):
+        return None
+    return value
