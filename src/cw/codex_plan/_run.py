@@ -472,6 +472,14 @@ def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
             plan_draft_fingerprint=_draft_fingerprint(plan_text, written=draft_written),
         )
     marked = stamp_markers(clean_plan_text(plan_text), today=datetime.now(UTC).date())
+    if not _plan_body_signoff_ok(marked):
+        draft_written = _write_draft_best_effort(run, plan_text)
+        return run.blocked(
+            STAGE_PLAN_REVIEWED,
+            CODEX_PLAN_ARTIFACT_MISSING,
+            "stamped plan does not carry both sign-off markers",
+            plan_draft_fingerprint=_draft_fingerprint(plan_text, written=draft_written),
+        )
     draft_written = False
     try:
         write_plan_draft(run.worktree, plan_text)

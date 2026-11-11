@@ -219,8 +219,9 @@ def parse_plan_turn(
     payload = _sentinel_payload(document.sentinel)
     if isinstance(payload, str):
         return PlanTurnFailure(BLOCKER_REASON_VALIDATION_FAILED, payload)
-    if payload.get("status") not in PLAN_STATUSES:
-        details = f"status {payload.get('status')!r} is not a plan-stage status"
+    status = payload.get("status")
+    if not isinstance(status, str) or status not in PLAN_STATUSES:
+        details = f"status {status!r} is not a plan-stage status"
         return PlanTurnFailure(BLOCKER_REASON_VALIDATION_FAILED, details)
     try:
         result = stamp_plan_result(payload, ticket_id=ticket_id, worktree=worktree)
