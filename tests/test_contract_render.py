@@ -265,6 +265,7 @@ def test_glue_and_imported_fragments_are_denylist_clean() -> None:
         render_module._CONTRACT_INTRO,
         render_module._SHIP_IT_FALLBACK,
         render_module._FINALIZE_SENTINEL_NOTE,
+        render_module._PLAN_CODEX_ADDENDUM,
         _stage_preamble("plan", "T-1"),
         _sentinel_rules(None),
         _sentinel_rules("abc"),
@@ -274,6 +275,16 @@ def test_glue_and_imported_fragments_are_denylist_clean() -> None:
     for text in glue:
         for token in CLAUDE_ONLY_DENYLIST:
             assert token not in text, token
+
+
+def test_only_plan_carries_the_codex_addendum() -> None:
+    """#3060: the addendum is the plan render's last block; impl/finalize lack it."""
+    addendum = render_module._PLAN_CODEX_ADDENDUM
+    plan = render_stage_prompt("plan", CODEX_BACKEND, docs_root=_COMMANDS_ROOT)
+    assert plan.rstrip("\n").endswith(addendum.rstrip("\n"))
+    for stage in ("impl", "finalize"):
+        text = render_stage_prompt(stage, CODEX_BACKEND, docs_root=_COMMANDS_ROOT)
+        assert addendum not in text
 
 
 def test_every_range_body_is_denylist_clean() -> None:

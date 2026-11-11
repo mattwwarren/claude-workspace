@@ -1059,7 +1059,12 @@ _CLEAN_BODY_REF = CodeRef(
     kind="code", path="src/cw/opencode_clean_review.py", symbol="clean_review_body"
 )
 
-_CODEX_STAGE_TICKETS = {"plan": 3060, "impl": 3061, "finalize": 3062}
+_CODEX_STAGE_TICKETS = {"impl": 3061, "finalize": 3062}
+#: The C1 ticket (#3060, codex PLAN executor); no cell may defer to it once it
+#: lands. Its plan-stage cells are implemented, fails-closed, not-applicable,
+#: or deferred to one of its two follow-ups.
+_C1_TICKET = 3060
+_CODEX_PLAN_FOLLOW_UPS = frozenset({3464, 3465})
 # #3055 closed with RFC 0018 S3: its codex review cells moved to #3057 (A2).
 _CODEX_REVIEW_TICKETS = frozenset({3318, 2464, 3063, 3057})
 #: The S3 ticket; no cell may defer to it once it lands (#3055).
@@ -1319,15 +1324,34 @@ def test_local_ticket_citations_follow_the_stage_split() -> None:
             assert cell.reason == _AIDER_REASON, element_id
 
 
+def _assert_codex_plan_cell(element_id: str, cell: object) -> int | None:
+    """A codex PLAN cell (#3060): a code ref, a reason, or a C1 follow-up."""
+    if isinstance(cell, (ImplementedDisposition, FailsClosedDisposition)):
+        assert isinstance(cell.ref, CodeRef), element_id
+        assert cell.ref.path.startswith("src/cw/"), element_id
+        return None
+    if isinstance(cell, NotApplicableDisposition):
+        assert cell.reason.strip(), element_id
+        return None
+    assert isinstance(cell, DeferredDisposition), element_id
+    assert cell.ref.number in _CODEX_PLAN_FOLLOW_UPS, element_id
+    return cell.ref.number
+
+
 def test_codex_cells_follow_the_stage_ticket_map() -> None:
     used: set[int] = set()
+    plan_follow_ups: set[int] = set()
     for element_id, element in _manifest().elements.items():
         if element_id == "review.review-debt-filing":
             continue
         cell = element.cells[CODEX_BACKEND]
         assert not isinstance(cell, str)
         stage = scope_stage(element_id, CODEX_BACKEND)
-        if stage in _CODEX_STAGE_TICKETS:
+        if stage == "plan":
+            follow_up = _assert_codex_plan_cell(element_id, cell)
+            if follow_up is not None:
+                plan_follow_ups.add(follow_up)
+        elif stage in _CODEX_STAGE_TICKETS:
             assert isinstance(cell, DeferredDisposition), element_id
             assert cell.ref.number == _CODEX_STAGE_TICKETS[stage], element_id
             used.add(cell.ref.number)
@@ -1337,6 +1361,14 @@ def test_codex_cells_follow_the_stage_ticket_map() -> None:
             assert isinstance(cell, DeferredDisposition), element_id
             assert cell.ref.number in _CODEX_REVIEW_TICKETS, element_id
     assert used == set(_CODEX_STAGE_TICKETS.values())
+    assert plan_follow_ups == _CODEX_PLAN_FOLLOW_UPS
+
+
+def test_no_cell_defers_to_the_landed_c1_ticket() -> None:
+    for element_id, element in _manifest().elements.items():
+        for backend, cell in element.cells.items():
+            if isinstance(cell, DeferredDisposition):
+                assert cell.ref.number != _C1_TICKET, (element_id, backend)
 
 
 #: The codex cells A2 (#3057) implements with the tracker-IO turn.
