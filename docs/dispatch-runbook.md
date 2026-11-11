@@ -3807,6 +3807,72 @@ server headless (the read-only probe fails), if `approval_policy=never`
 denies MCP tool calls with no `default_tools_approval_mode` workaround, or if
 the extra turn per post proves too costly (the probe records its seconds).
 
+**Codex PLAN (#3060, RFC 0018 C1).** A lane whose PLAN stage resolves to
+`codex` runs `cw codex run --stage plan`: one `codex exec` turn with the
+fixed `--sandbox read-only -c approval_policy=never` policy (no knob; the
+REVIEW `reviewer_sandbox_mode` / `fix_sandbox_mode` settings are never
+read) and no cw timer (ADR-0014). The turn writes nothing. It returns
+`{plan_markdown, sentinel}` in its `-o` document; cw, outside the sandbox,
+does everything else:
+
+- **Inputs.** The prompt is A3's plan render plus the codex addendum, then
+  the prefetched ticket (GitHub, via `gh`, capped with the oldest comments
+  dropped first) and, on a resume, the persisted `.cw/plan-draft.md` with an
+  `approval: matches|none` line. `queue_metadata` is read by the model from
+  `.claude/cw-context.json`. On any other tracker the turn reads the ticket
+  through the MCP server `tracker_mcp_gate.servers.codex` names, with only
+  `get_issue` and `list_comments` enabled; with no usable server, a missing
+  read allowlist for the tracker, or an `ABSENT`/`DISABLED` reading, the run
+  blocks `tracker_mcp_unavailable_pre_dispatch` before launching
+  (`UNKNOWN` fails open). The dispatch gate parks the same rows before spawn
+  when the client opts in.
+- **Command docs.** The render reads cw's own copy of
+  `auto-dev-plan.md`: the wheel ships it as package data
+  (`cw/data/commands/`, a hatch `force-include`; CI's package-smoke job pins
+  it), and a source checkout reads `.claude/commands/`. Never the client
+  worktree and never `~/.claude/commands`. Neither present, or a render
+  error, blocks `plan_missing_context` with no turn launched.
+- **Gates and stations.** cw parses the sentinel strictly and stamps its own
+  fields (`stage1_plan`, null branch/fork point/PR, `lines_actual` null, the
+  fingerprint it computes). Gate set B checks a non-empty plan
+  (`codex_plan_artifact_missing`), a `## Files Modified` section and exactly
+  one `**Scope tier:**` line matching the sentinel's tier
+  (`codex_plan_gate_failed`, the gate named in `details`). A large
+  `stage_complete` without a row approval bound to this plan's fingerprint
+  parks `plan_pending_approval`. Then cw runs the Plan Reviewer and the Plan
+  Soundness Reviewer as read-only per-role turns: a `MUST_FIX`, a `degraded`
+  or `failed` document, or a rejected finding parks `plan_unreviewable` /
+  `plan_unsound` with the findings in `blocker.details`; only a model
+  capacity failure is retry-eligible. cw stamps both sign-off markers into
+  `.cw/plan.md` from clean verdicts only. On a park the stations are advisory
+  and their findings ride in the park comment.
+- **Artifacts and resume.** `.cw/plan-draft.md` starts with the explicit
+  `<!-- plan-stage-scan-round: 0 -->` line, and any on-disk leading
+  bookkeeping block is carried verbatim; cw never increments the counter.
+  When the row's `plan_approved_fingerprint` (from `cw dev-queue approve`)
+  equals the resumed draft's fingerprint, cw takes that draft verbatim as
+  the plan and discards the model's text (`plan_resume_model_text_discarded`
+  in `friction_highlights`). `.cw/` is git-excluded, so the artifacts never
+  make the worktree dirty for crash recovery. A crash before dispatch
+  stamps `stage_base_ref` has no `origin/<branch>` to fall back to on a
+  first PLAN, so it parks as a git error rather than requeueing.
+- **Posting.** After the result persists, cw posts the stamped
+  `.cw/plan.md` (or, on a park, the consolidated `## Pending Verification
+  Scan` comment) through `gh` or the tracker-IO turn above, best-effort and
+  never retried. A refusal is a `review.verdict_comment_skipped` /
+  `_unverified` event with `kind: plan`, never a row hold. On a non-GitHub
+  tracker `.cw/plan.md` in the reused worktree is the only durable copy; a
+  rebuilt worktree loses it (codex IMPL retrieval is C2).
+- **Deferred.** Comment-path approval, the operator-authority delta, the
+  resolutions fast path, settlement folding, the round cap, the revision
+  cycle and the #1815 blocking-findings comment are not on the codex PLAN
+  lane yet (#3464, #3465): only `cw dev-queue approve` approves a large plan.
+
+Two UNVERIFIED items: whether MCP tool calls run under
+`approval_policy=never` (the tracker-IO probe above is the evidence path),
+and whether the pre-flight resolutions marker survives on Linear. The tests
+cover the row-delivered and the comment channel and never assert survival.
+
 **#1717 coordination.** `pending_operator_comment` is stamped at the shared
 `_stage_regress` chokepoint alongside #1794's `regressed_into_stage`. #1717's
 `finalize_regress_branch_head` is designed to stamp at the same point; per
@@ -4548,8 +4614,8 @@ from the artifact's final state. A per-round filer opened one issue per
 wording, because a reviewer rewords a finding from round to round and the dedup
 key is the finding's text (one ticket produced 39 issues over six rounds,
 another 24). The engine-confirm path (`file_confirm_deferrals`) still files at
-record time. A codex review lane runs REVIEW only; its finalize runs on the
-claude-native executor, so item 2a is the normal-completion path, not only a
+record time. A codex lane runs PLAN and REVIEW only (#3060); its finalize runs
+on the claude-native executor, so item 2a is the normal-completion path, not only a
 retry. The review-debt filer registry (`register_debt_filer`) is gone: nothing
 files from the codex process.
 
