@@ -22,6 +22,7 @@ import pytest
 import cw.reconcile
 import cw.reconcile.tasks as pkg
 from tests._package_split_helpers import (
+    SRC_ROOT,
     _module_name,
     _package_files,
     _run_cold,
@@ -160,6 +161,11 @@ def test_name_set_matches_hardcoded_surface() -> None:
     assert defined == set(EXPECTED_EXPORTS)
     for name in EXPECTED_EXPORTS:
         assert hasattr(pkg, name), name
+
+
+def test_flat_module_file_is_gone() -> None:
+    """The flat module is now the package ``__init__``; no ``tasks.py`` remains."""
+    assert not (SRC_ROOT / "reconcile" / "tasks.py").exists()
 
 
 def test_owner_table_covers_surface() -> None:
