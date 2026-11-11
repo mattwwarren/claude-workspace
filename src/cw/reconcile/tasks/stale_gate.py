@@ -47,6 +47,7 @@ from cw.reconcile.tasks._client_config import (
 # ---------------------------------------------------------------------------
 # release_stale_gated_tasks (GitHub #1713)
 # ---------------------------------------------------------------------------
+
 # Consumer cursor name for the Variant A (own-PR-merged) event stream.
 # Independent of orchestrate.py's _RETIREMENT_CONSUMER ("orchestrate_retire")
 # -- that consumer retires Session/PRDispatchRecord state for the manual
