@@ -64,10 +64,28 @@ EVIDENCE_PLACEHOLDER = "(evidence not recorded)"
 #: Shortest evidence fence; a longer backtick run inside evidence lengthens it.
 MIN_FENCE_TICKS = 3
 
+#: Roll-up sizing. GitHub rejects an issue body over 65536 characters, so a
+#: roll-up body stays at or under :data:`ROLLUP_BODY_MAX_CHARS` (leaving room for
+#: the header, the PR link markers and edits by hand) and the findings that do
+#: not fit continue in a numbered continuation issue. One item is capped so a
+#: single finding can never exceed the budget on its own: its evidence at
+#: :data:`ROLLUP_EVIDENCE_MAX_CHARS`, its summary and rationale at
+#: :data:`ROLLUP_FIELD_MAX_CHARS` each.
+ROLLUP_BODY_MAX_CHARS = 60000
+ROLLUP_EVIDENCE_MAX_CHARS = 6000
+ROLLUP_FIELD_MAX_CHARS = 2000
+
+#: The severity the roll-up title counts separately.
+MUST_FIX_SEVERITY = "MUST_FIX"
+
 #: Body markers. ``<!-- cw-review-debt: <key> -->`` is the dedup recovery path;
 #: ``<!-- cw-review-debt-pr: <url> -->`` links the PR; III2 (#3044) parses it.
 DEBT_MARKER_PREFIX = "<!-- cw-review-debt: "
 PR_MARKER_PREFIX = "<!-- cw-review-debt-pr: "
+#: ``<!-- cw-review-debt-rollup: part=<n> -->`` names a roll-up issue and its
+#: part number (1 for the first issue, 2 and up for continuations).
+ROLLUP_MARKER_PREFIX = "<!-- cw-review-debt-rollup: "
+ROLLUP_PART_KEY = "part="
 MARKER_SUFFIX = " -->"
 
 #: The non-GitHub tracker system debt filing distinguishes. Defined once in

@@ -266,6 +266,56 @@ def test_duplicate_debt_ids_in_one_event_enqueue_once() -> None:
     assert len(_debt_rows()) == 1
 
 
+def test_a_shared_rollup_id_is_not_hidden_by_a_record_of_an_earlier_pr() -> None:
+    """One roll-up, findings linked to two PRs: the merged PR's record decides."""
+    _write_config()
+    _seed(
+        _parent_row(
+            debt=[
+                _debt_record(ticket_id="101", key="k1", pr_url=_OTHER_PR_URL),
+                _debt_record(ticket_id="101", key="k2", pr_url=_PR_URL),
+            ]
+        )
+    )
+    _prime()
+    _merge()
+    assert enqueue_review_debt_for_merged_prs() == ["101"]
+    [enqueued] = _payloads(OrchestratorEventType.REVIEW_DEBT_ENQUEUED)
+    assert (enqueued["debt_ticket_id"], enqueued["key"]) == ("101", "k2")
+
+
+def test_a_shared_rollup_id_with_only_other_pr_records_is_one_mismatch() -> None:
+    _write_config()
+    _seed(
+        _parent_row(
+            debt=[
+                _debt_record(ticket_id="101", key="k1", pr_url=_OTHER_PR_URL),
+                _debt_record(ticket_id="101", key="k2", pr_url=_OTHER_PR_URL),
+            ]
+        )
+    )
+    _prime()
+    _merge()
+    assert enqueue_review_debt_for_merged_prs() == []
+    skips = _payloads(OrchestratorEventType.REVIEW_DEBT_ENQUEUE_SKIPPED)
+    assert [(s["reason"], s["key"]) for s in skips] == [("pr_mismatch", "k1")]
+
+
+def test_a_shared_rollup_id_prefers_an_unlinked_record_over_an_earlier_pr() -> None:
+    _write_config()
+    _seed(
+        _parent_row(
+            debt=[
+                _debt_record(ticket_id="101", key="k1", pr_url=_OTHER_PR_URL),
+                _debt_record(ticket_id="101", key="k2", pr_url=None),
+            ]
+        )
+    )
+    _prime()
+    _merge()
+    assert enqueue_review_debt_for_merged_prs() == ["101"]
+
+
 def test_record_with_other_pr_url_is_pr_mismatch() -> None:
     _write_config()
     _seed(_parent_row(debt=[_debt_record(ticket_id="101", pr_url=_OTHER_PR_URL)]))

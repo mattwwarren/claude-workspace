@@ -21,11 +21,16 @@ from cw.review_debt_filing import (
     sweep_debt_closes,
 )
 from cw.review_debt_filing._events import emit_closed
+from cw.review_debt_filing._marker import pr_marker
+from cw.review_debt_filing._rollup import render_body as render_rollup_body
+from cw.review_debt_filing._rollup import render_item
 from tests._review_debt_helpers import (
     DEBT_TICKET,
     FakeClock,
     _clock_stepper,
     _debt_body,
+    _debt_ctx,
+    _debt_entry,
     _events_of,
     _sweep_state,
     _write_debt_config,
@@ -135,6 +140,35 @@ class TestClosing:
         assert "cw review-debt key" not in comment
         (event,) = _events_of(OrchestratorEventType.REVIEW_DEBT_CLOSED)
         assert (event["key"], event["ticket_id"]) == (None, None)
+
+    def test_a_rollup_closes_with_a_plural_comment_and_no_single_key(
+        self, tmp_path: Path
+    ) -> None:
+        gh = FakeGh()
+        ctx = _debt_ctx()
+        items = [render_item(_debt_entry(summary=f"f{n}"), ctx) for n in range(3)]
+        body = render_rollup_body(items, ctx, 1)
+        gh.open_issues[_ISSUE] = body + f"{pr_marker(_PR1)}\n"
+        gh.pr_states[_PR1] = "CLOSED"
+        results = _sweep(gh, _client(tmp_path))
+        ((_number, comment, reason),) = gh.closed
+        assert reason == "not planned"
+        assert "findings never reached the default branch" in comment
+        assert "cw review-debt key" not in comment
+        assert results == [CloseResult("acme", _ISSUE, (_PR1,), CloseOutcome.CLOSED)]
+        (event,) = _events_of(OrchestratorEventType.REVIEW_DEBT_CLOSED)
+        assert (event["key"], event["ticket_id"]) == (None, DEBT_TICKET)
+
+    def test_a_rollup_with_one_merged_pr_stays_open(self, tmp_path: Path) -> None:
+        gh = FakeGh()
+        ctx = _debt_ctx()
+        body = render_rollup_body([render_item(_debt_entry(), ctx)], ctx, 1)
+        gh.open_issues[_ISSUE] = body + f"{pr_marker(_PR1)}\n{pr_marker(_PR2)}\n"
+        gh.pr_states[_PR1] = "CLOSED"
+        gh.pr_states[_PR2] = "MERGED"
+        results = _sweep(gh, _client(tmp_path))
+        assert gh.closed == []
+        assert [r.outcome for r in results] == [CloseOutcome.SKIPPED_PR_MERGED]
 
     def test_sweeping_twice_closes_once(self, tmp_path: Path) -> None:
         gh = FakeGh()

@@ -66,6 +66,7 @@ from cw.review_debt_filing._models import (
     CloseResult,
     TrackerMode,
 )
+from cw.review_debt_filing._rollup import is_rollup
 from cw.review_debt_filing._tracker import tracker_mode
 from cw.tracker import resolve_tracker
 from cw.worktree import _git_dir
@@ -98,6 +99,14 @@ _CLOSE_SENTENCE = (
     "{pr_url}, was closed without merging, so the deferred finding never "
     "reached the default branch. Reopen this issue if the work moves to "
     "another PR."
+)
+
+#: The close comment for a roll-up issue (one issue, many findings).
+_ROLLUP_CLOSE_SENTENCE = (
+    "Closing as not planned: every pull request that carried this review "
+    "debt, last {pr_url}, was closed without merging, so the deferred "
+    "findings never reached the default branch. Reopen this issue if the "
+    "work moves to another PR."
 )
 
 
@@ -155,9 +164,13 @@ class _ClientRun:
         return self._ctx
 
 
-def _comment(pr_url: str, key: str | None) -> str:
-    """The R11 close comment; the key line only when the key parsed."""
-    text = _CLOSE_SENTENCE.format(pr_url=pr_url)
+def _comment(pr_url: str, key: str | None, *, rollup: bool = False) -> str:
+    """The R11 close comment; the key line only when the key parsed.
+
+    A roll-up names no single key and speaks of its findings in the plural.
+    """
+    sentence = _ROLLUP_CLOSE_SENTENCE if rollup else _CLOSE_SENTENCE
+    text = sentence.format(pr_url=pr_url)
     if key is None:
         return text
     return f"{text}\n\ncw review-debt key `{key[:KEY_DISPLAY_CHARS]}`"
@@ -205,11 +218,13 @@ def _close_one(
     if timeout is None:
         return
     pr_url = urls[-1]
-    key = parse_debt_key(issue.body)
+    rollup = is_rollup(issue.body)
+    # A roll-up holds many keys; naming the first one would be a guess.
+    key = None if rollup else parse_debt_key(issue.body)
     queue_ticket = queue_ticket_ref(issue.body)
     ctx = client.context()
     text = redact_post_text(
-        _comment(pr_url, key), home=ctx.home, worktrees=ctx.worktrees
+        _comment(pr_url, key, rollup=rollup), home=ctx.home, worktrees=ctx.worktrees
     )
     sweep.closes += 1
     failure = client.tracker.close_issue(

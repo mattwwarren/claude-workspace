@@ -1,7 +1,10 @@
 """File review-debt tickets at deferral time (GitHub #3041, RFC 0017 D-7).
 
 ``cw review adjudicate`` (and ``cw review debt file``, finalize's re-file)
-turns every ticketless ``defer`` entry into one debt ticket. On a GitHub
+lists every ticketless ``defer`` entry in the queue ticket's one ``review-debt``
+roll-up issue (a checklist, one item per finding; a numbered continuation issue
+opens past the body size cap). Payloads emitted for Linear, or with
+``auto_create_issues: false``, stay one per finding. On a GitHub
 client with ``tracking.primary.auto_create_issues: true`` cw files it through
 ``gh``; otherwise (``false``, or a Linear client) cw emits a redacted payload
 and, for Linear, verifies the IDs the worker reports back. Finalize links the
@@ -17,7 +20,8 @@ Submodules, one concern each:
 - ``_constants``: labels, budget, timeouts, caps, marker text.
 - ``_models``: :class:`DebtEntry`, :class:`FilingContext`, the results.
 - ``_marker``: the key and PR body markers and the dedup match.
-- ``_render``: title, body and payload, all redacted.
+- ``_render``: title, body and payload of one finding, all redacted (the emit
+  payloads); ``_rollup``: the roll-up issue's title, body, items and packing.
 - ``_tracker``: :class:`DebtTracker` and the tracker-mode decision.
 - ``_file``: :func:`file_review_debt`.
 - ``_emit``: :func:`emit_review_debt`.

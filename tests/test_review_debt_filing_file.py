@@ -28,21 +28,29 @@ def _create_calls(gh: FakeGh) -> list[str]:
     return [call for call in gh.calls if call.startswith("create_issue")]
 
 
-def test_files_each_entry_after_ensuring_the_label_once() -> None:
+def test_files_all_entries_in_one_rollup_after_ensuring_the_label_once() -> None:
     gh = FakeGh()
     result = file_review_debt([_A, _B], _debt_ctx(), gh)
     assert gh.calls[0] == "ensure_label:review-debt"
     assert gh.calls.count("ensure_label:review-debt") == 1
     assert gh.calls[1] == "list_open_issues_by_label:review-debt"
-    assert len(_create_calls(gh)) == 2
-    assert gh.issue_labels[f"review-debt: SHOULD_FIX {_A.summary}"] == ["review-debt"]
+    assert _create_calls(gh) == [
+        "create_issue:review-debt: #3041 \u2014 2 deferred findings"
+    ]
+    assert gh.issue_labels["review-debt: #3041 \u2014 2 deferred findings"] == [
+        "review-debt"
+    ]
     assert [(r.key, r.mode, r.ticket_id) for r in result.records] == [
         (_A.key, "filed", "100"),
-        (_B.key, "filed", "101"),
+        (_B.key, "filed", "100"),
     ]
     assert result.records[0].ticket_url == f"{FAKE_ISSUE_URL_BASE}100"
     assert result.records[0].filed_at == DEBT_FILED_AT
     assert result.failures == []
+    body = gh.bodies[100]
+    assert body.splitlines()[0] == f"{scope_prefix('#3041')} `dev/3041`."
+    assert debt_marker(_A.key) in body
+    assert debt_marker(_B.key) in body
     filed = _events_of(OrchestratorEventType.REVIEW_DEBT_FILED)
     assert [e["key"] for e in filed] == [_A.key, _B.key]
     assert filed[0] == {
@@ -55,6 +63,7 @@ def test_files_each_entry_after_ensuring_the_label_once() -> None:
         "url": f"{FAKE_ISSUE_URL_BASE}100",
         "mode": "filed",
     }
+    assert filed[1]["tracker_id"] == "100"
 
 
 def test_a_failed_event_write_after_create_still_returns_and_keeps_the_record(
@@ -231,15 +240,15 @@ def test_a_missing_row_creates_nothing() -> None:
     assert [f.kind for f in result.failures] == [FilingFailureKind.OTHER] * 2
 
 
-def test_budget_exhaustion_leaves_the_rest_unticketed() -> None:
+def test_budget_spent_before_the_create_leaves_every_entry_unticketed() -> None:
     clock = FakeClock()
     gh = FakeGh()
-    gh.on_call = _clock_stepper(clock, 40.0)
+    gh.on_call = _clock_stepper(clock, 45.0)
     ctx = _debt_ctx(clock=clock, budget_s=90.0)
-    entries = [_A, _B, _debt_entry(summary="third")]
-    result = file_review_debt(entries, ctx, gh)
-    # label (t=0->40), list (40->80), create A at 80 (10s left), then spent.
-    assert [r.key for r in result.records] == [_A.key]
+    result = file_review_debt([_A, _B], ctx, gh)
+    # label (t=0->45), list (45->90): nothing left for the create.
+    assert result.records == []
+    assert _create_calls(gh) == []
     assert [f.kind for f in result.failures] == [
         FilingFailureKind.BUDGET_EXHAUSTED,
         FilingFailureKind.BUDGET_EXHAUSTED,
@@ -287,13 +296,14 @@ def test_duplicate_keys_file_once() -> None:
 
 def test_a_retry_after_a_failure_files_only_the_failed_entries() -> None:
     gh = FakeGh()
-    gh.fail_create_issue = {f"review-debt: SHOULD_FIX {_B.summary}"}
+    gh.fail_create_kind = GhFailure.NETWORK
     first = file_review_debt([_A, _B], _debt_ctx(), gh)
-    assert [r.key for r in first.records] == [_A.key]
-    gh.fail_create_issue = set()
-    second = file_review_debt([_A, _B], _debt_ctx(existing=tuple(first.records)), gh)
-    assert [r.key for r in second.records] == [_B.key]
-    assert second.deduped_keys == (_A.key,)
+    assert first.records == []
+    gh.fail_create_kind = None
+    second = file_review_debt([_A, _B], _debt_ctx(), gh)
+    assert [r.key for r in second.records] == [_A.key, _B.key]
+    assert len(_create_calls(gh)) == 2  # the failed attempt, then the one that landed
+    assert len(gh.open_issues) == 1
 
 
 def test_a_failure_detail_is_redacted_and_capped() -> None:

@@ -79,3 +79,36 @@ def test_emitted_and_linear_records_are_skipped() -> None:
     result = link_pr(records, _PR, gh)
     assert gh.calls == []
     assert result.skipped == len(records)
+
+
+def test_records_sharing_one_rollup_link_it_once() -> None:
+    gh = _gh_with(101)
+    records = [_debt_record(key=f"{n}" * 64) for n in range(3)]
+    result = link_pr(records, _PR, gh)
+    assert gh.bodies[101] == f"debt body\n{pr_marker(_PR)}\n"
+    assert gh.calls.count("fetch_issue_body:101") == 1
+    assert gh.calls.count("update_issue_body:101") == 1
+    assert len(gh.comments["101"]) == 1
+    assert "roll-up" in gh.comments["101"][0]
+    assert "key `" not in gh.comments["101"][0]
+    assert [r.pr_url for r in result.records] == [_PR] * 3
+    assert (result.linked, result.already_linked, result.failed) == (3, 0, 0)
+
+
+def test_a_failed_rollup_link_fails_every_record_for_it() -> None:
+    gh = _gh_with(101)
+    gh.fail_fetch_body = {"101"}
+    records = [_debt_record(key=f"{n}" * 64) for n in range(2)]
+    result = link_pr(records, _PR, gh)
+    assert (result.failed, result.records) == (2, [])
+    assert gh.calls.count("fetch_issue_body:101") == 1
+
+
+def test_a_second_pr_adds_its_own_marker_to_the_same_rollup() -> None:
+    gh = _gh_with(101)
+    first = link_pr([_debt_record()], _PR, gh)
+    later = _debt_record(key="b" * 64)
+    other = "https://github.com/owner/repo/pull/10"
+    link_pr([*first.records, later], other, gh)
+    assert pr_marker(_PR) in gh.bodies[101]
+    assert pr_marker(other) in gh.bodies[101]
