@@ -36,6 +36,7 @@ from cw.codex_review_signals import (
 from cw.codex_stage_completion import STAGE_FAULTS
 from cw.tracker import TRACKER_GITHUB_ISSUES, TrackerClass, tracker_kind
 from cw.tracker_io import (
+    PublicState,
     TrackerIoContext,
     TrackerIoReason,
     plan_turn_parts,
@@ -236,7 +237,7 @@ class _Post:
             artifact_path=self.artifact_path,
             reviewed_sha=None,
             session_id=self.sid,
-            public_state="possible",
+            public_state=PublicState.POSSIBLE.value,
             posted=posted,
             marker_survived=None,
         )

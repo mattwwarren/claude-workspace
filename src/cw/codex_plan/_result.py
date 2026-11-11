@@ -30,6 +30,7 @@ from cw.auto_dev_result.parse import (
     extract_block,
 )
 from cw.codex_review import STAGE1_PLAN, make_codex_blocked
+from cw.dev_queue.lifecycle import _PLAN_SOUNDNESS_MARKER, _PLAN_SPEC_MARKER
 from cw.plan_fingerprint import (
     PLAN_DRAFT_FINGERPRINT_KEY,
     PLAN_DRAFT_RELATIVE_PATH,
@@ -51,8 +52,8 @@ ROUND_ZERO_LINE: Final = "<!-- plan-stage-scan-round: 0 -->\n"
 
 #: The two review sign-off marker prefixes; only cw's stations stamp them.
 REVIEW_MARKER_PREFIXES: Final[tuple[str, str]] = (
-    "<!-- plan-spec-reviewed",
-    "<!-- plan-soundness-reviewed",
+    _PLAN_SPEC_MARKER,
+    _PLAN_SOUNDNESS_MARKER,
 )
 
 #: cw-recorded friction tokens (appended to the model's ``friction_highlights``).

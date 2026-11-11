@@ -433,25 +433,49 @@ def _park(run: _Run, plan_text: str, check: ApprovalCheck) -> _Exit:
     return _Exit(result, comment, run.worktree / PLAN_DRAFT_RELATIVE_PATH)
 
 
+def _existing_plan_exit(run: _Run, plan_path: Path, plan_text: str) -> _Exit | None:
+    """Keep a signed plan authoritative, or remove an invalid stale artifact."""
+    try:
+        old_text = plan_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return run.blocked(
+            STAGE_PLAN_GENERATED,
+            CODEX_PLAN_ARTIFACT_MISSING,
+            "refusing to replace unreadable existing .cw/plan.md; "
+            f"old fingerprint: unreadable ({exc}); "
+            "an explicit re-plan/regress operation must clear or version "
+            "the existing artifact first",
+        )
+    if not _plan_body_signoff_ok(old_text):
+        try:
+            plan_path.unlink()
+        except OSError as exc:
+            return run.blocked(
+                STAGE_PLAN_GENERATED,
+                CODEX_PLAN_ARTIFACT_MISSING,
+                f"invalid existing .cw/plan.md could not be removed: {exc}",
+            )
+        return None
+    old_fingerprint = compute_plan_draft_fingerprint(clean_plan_text(old_text))
+    new_fingerprint = compute_plan_draft_fingerprint(clean_plan_text(plan_text))
+    return run.blocked(
+        STAGE_PLAN_GENERATED,
+        CODEX_PLAN_ARTIFACT_MISSING,
+        "refusing to replace existing authoritative .cw/plan.md; "
+        f"old fingerprint: {old_fingerprint}; "
+        f"proposed replacement fingerprint: {new_fingerprint}; "
+        "an explicit re-plan/regress operation must clear or version the "
+        "existing artifact first",
+    )
+
+
 def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
     """A completing exit: binding stations, the stamped plan, the decisions."""
     plan_path = run.worktree / PLAN_MD_RELATIVE_PATH
     if plan_path.exists():
-        try:
-            old_text = plan_path.read_text(encoding="utf-8")
-            old_fingerprint = compute_plan_draft_fingerprint(clean_plan_text(old_text))
-        except OSError as exc:
-            old_fingerprint = f"unreadable ({exc})"
-        new_fingerprint = compute_plan_draft_fingerprint(clean_plan_text(plan_text))
-        return run.blocked(
-            STAGE_PLAN_GENERATED,
-            CODEX_PLAN_ARTIFACT_MISSING,
-            "refusing to replace existing authoritative .cw/plan.md; "
-            f"old fingerprint: {old_fingerprint}; "
-            f"proposed replacement fingerprint: {new_fingerprint}; "
-            "an explicit re-plan/regress operation must clear or version the "
-            "existing artifact first",
-        )
+        existing = _existing_plan_exit(run, plan_path, plan_text)
+        if existing is not None:
+            return existing
     stations = run_plan_stations(
         runner=run.runner,
         worktree=run.worktree,

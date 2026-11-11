@@ -365,7 +365,7 @@ def test_park_completes_with_null_fingerprint_when_draft_write_fails(
     assert result.plan_draft_fingerprint is None
 
 
-def test_existing_plan_is_preserved_and_replacement_is_audited(
+def test_invalid_existing_plan_is_replaced(
     harness: Callable[..., Harness],
 ) -> None:
     h = harness()
@@ -375,12 +375,9 @@ def test_existing_plan_is_preserved_and_replacement_is_audited(
     plan_md_path.write_text(old_plan, encoding="utf-8")
     add_stations(add_turn(h.runner))
     result = h.run()
-    assert result.status == "blocked"
-    assert result.blocker is not None
-    assert result.blocker.reason == "codex_plan_artifact_missing"
-    assert "old fingerprint:" in result.blocker.details
-    assert "proposed replacement fingerprint:" in result.blocker.details
-    assert plan_md_path.read_text(encoding="utf-8") == old_plan
+    assert result.status == "stage_complete"
+    assert _plan_body_signoff_ok(plan_md_path.read_text(encoding="utf-8"))
+    assert "Old plan." not in plan_md_path.read_text(encoding="utf-8")
 
 
 def test_no_op_passes_through_and_posts_nothing(
