@@ -177,7 +177,7 @@ def test_release_stale_gated_tasks_gate_timeout_auto_policy_completes(
     save_dev_queue(DevQueueStore(tasks=[task]))
     save_state(CwState(sessions=[]))
     monkeypatch.setattr(
-        "cw.reconcile.tasks.load_orchestrator_config",
+        "cw.reconcile.tasks.stale_gate.load_orchestrator_config",
         lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
     )
     _emit_pr_merged(client="client-a", ticket_id="SG-GT2", repo="foo/bar", pr_number=62)
@@ -250,7 +250,7 @@ def test_release_stale_gated_tasks_auto_policy_completes_variant_a(
     save_dev_queue(DevQueueStore(tasks=[task]))
     save_state(CwState(sessions=[]))
     monkeypatch.setattr(
-        "cw.reconcile.tasks.load_orchestrator_config",
+        "cw.reconcile.tasks.stale_gate.load_orchestrator_config",
         lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
     )
     _emit_pr_merged(client="client-a", ticket_id="SG-A3", repo="foo/bar", pr_number=44)
@@ -300,7 +300,7 @@ def test_release_stale_gated_tasks_auto_policy_requeues_variant_b(
     save_dev_queue(DevQueueStore(tasks=[blocking, blocked]))
     save_state(CwState(sessions=[]))
     monkeypatch.setattr(
-        "cw.reconcile.tasks.load_orchestrator_config",
+        "cw.reconcile.tasks.stale_gate.load_orchestrator_config",
         lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
     )
 
@@ -350,7 +350,7 @@ def test_release_stale_gated_tasks_auto_policy_requeues_variant_b_closed_unmerge
     save_dev_queue(DevQueueStore(tasks=[blocking, blocked]))
     save_state(CwState(sessions=[]))
     monkeypatch.setattr(
-        "cw.reconcile.tasks.load_orchestrator_config",
+        "cw.reconcile.tasks.stale_gate.load_orchestrator_config",
         lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
     )
 
@@ -455,7 +455,7 @@ def test_release_stale_gated_tasks_auto_policy_requeues_stale_dispatch_variant_b
     save_state(CwState(sessions=[]))
     _register_and_hydrate_merged_watch(monkeypatch)
     monkeypatch.setattr(
-        "cw.reconcile.tasks.load_orchestrator_config",
+        "cw.reconcile.tasks.stale_gate.load_orchestrator_config",
         lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
     )
 
@@ -495,7 +495,7 @@ def test_release_stale_gated_tasks_auto_policy_requeues_stale_dispatch_variant_b
     save_state(CwState(sessions=[]))
     _register_and_hydrate_merged_watch(monkeypatch, state="CLOSED")
     monkeypatch.setattr(
-        "cw.reconcile.tasks.load_orchestrator_config",
+        "cw.reconcile.tasks.stale_gate.load_orchestrator_config",
         lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
     )
 
@@ -539,7 +539,7 @@ def test_release_stale_gated_tasks_stale_dispatch_open_pr_not_released_end_to_en
     save_state(CwState(sessions=[]))
     _register_and_hydrate_merged_watch(monkeypatch, state="OPEN")
     monkeypatch.setattr(
-        "cw.reconcile.tasks.load_orchestrator_config",
+        "cw.reconcile.tasks.stale_gate.load_orchestrator_config",
         lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
     )
 
@@ -658,7 +658,7 @@ def _append_gate_blocking_row(state: str) -> None:
 
 def _set_auto_reap(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "cw.reconcile.tasks.load_orchestrator_config",
+        "cw.reconcile.tasks.stale_gate.load_orchestrator_config",
         lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
     )
 
@@ -1127,7 +1127,8 @@ def test_release_stale_gated_tasks_lane_reap_policy_override(
         "client-a", "special", reap_policy=ReapPolicy.AUTO
     )
     monkeypatch.setattr(
-        "cw.reconcile.tasks.load_clients", lambda: {"client-a": auto_lane_client}
+        "cw.reconcile.tasks.stale_gate.load_clients",
+        lambda: {"client-a": auto_lane_client},
     )
     _emit_pr_merged(client="client-a", ticket_id="SG-A6", repo="foo/bar", pr_number=47)
 
@@ -1212,7 +1213,7 @@ def test_release_stale_gated_tasks_event_not_lost_when_save_dev_queue_raises(
         msg = "simulated save_dev_queue failure"
         raise OSError(msg)
 
-    monkeypatch.setattr("cw.reconcile.tasks.save_dev_queue", _raise_once)
+    monkeypatch.setattr("cw.reconcile.tasks.stale_gate.save_dev_queue", _raise_once)
 
     with pytest.raises(OSError, match="simulated save_dev_queue failure"):
         release_stale_gated_tasks()
@@ -1226,7 +1227,9 @@ def test_release_stale_gated_tasks_event_not_lost_when_save_dev_queue_raises(
     # the failing call, this second pass would silently drop the event and
     # return []. It must instead release the task, proving the event was
     # not lost.
-    monkeypatch.setattr("cw.reconcile.tasks.save_dev_queue", real_save_dev_queue)
+    monkeypatch.setattr(
+        "cw.reconcile.tasks.stale_gate.save_dev_queue", real_save_dev_queue
+    )
     released = release_stale_gated_tasks()
 
     assert released == ["SG-A7"]

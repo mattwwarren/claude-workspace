@@ -137,11 +137,43 @@ _OWNER.update(
     )
 )
 
+_STALE_GATE_NAMES = (
+    "_STALE_GATE_CONSUMER",
+    "_VARIANT_A_MERGE_PENDING_DISPOSITION",
+    "_VARIANT_A_BLOCKED_DISPOSITION",
+    "_VARIANT_B_DISPOSITION",
+    "_PROPOSED_ACTION_VARIANT_A",
+    "_PROPOSED_ACTION_VARIANT_B",
+    "_is_variant_a_gate_task",
+    "_is_variant_b_gate_task",
+    "_index_variant_a_candidates",
+    "_pr_numbers_by_client_in_state",
+    "_merged_pr_numbers_by_client",
+    "_closed_pr_numbers_by_client",
+    "_release_variant_a",
+    "_release_variant_b",
+    "release_stale_gated_tasks",
+)
+_OWNER.update(dict.fromkeys(_STALE_GATE_NAMES, f"{PACKAGE}.stale_gate"))
+
+# Line ceiling for every package module (CLAUDE.md "Module Size").
+_MODULE_LINE_LIMIT = 800
+
+# Flat-module globals that the split moved out of the package namespace.
+PATCHED_GLOBALS = frozenset(
+    {"load_clients", "load_orchestrator_config", "save_dev_queue", "partition_dirty"}
+)
+
+# (reader, module global it reads, owning module): the reader's globals must be
+# the owner's namespace, so a patch on the owner reaches the reader.
 # (reader, module global it reads, owning module): the reader's globals must be
 # the owner's namespace, so a patch on the owner reaches the reader.
 PATCH_OWNERSHIP: tuple[tuple[str, str, str], ...] = (
     ("_revert_terminal_backstop", "partition_dirty", f"{PACKAGE}.backstops"),
     ("park_terminal_sibling_tasks", "load_clients", f"{PACKAGE}.terminal_siblings"),
+    ("release_stale_gated_tasks", "load_orchestrator_config", f"{PACKAGE}.stale_gate"),
+    ("release_stale_gated_tasks", "load_clients", f"{PACKAGE}.stale_gate"),
+    ("release_stale_gated_tasks", "save_dev_queue", f"{PACKAGE}.stale_gate"),
 )
 
 # Importers of this package and the names each binds at module scope. Each
@@ -181,6 +213,7 @@ COLD_IMPORTS: tuple[str, ...] = (
     f"{PACKAGE}.backstops",
     f"{PACKAGE}.terminal_siblings",
     f"{PACKAGE}.merged_completion",
+    f"{PACKAGE}.stale_gate",
 )
 
 
@@ -236,6 +269,41 @@ def test_package_all_is_complete_and_sorted() -> None:
     """``__all__`` names the full surface, in isort style."""
     assert set(pkg.__all__) == set(EXPECTED_EXPORTS)
     assert list(pkg.__all__) == sorted(pkg.__all__, key=_isort_style_key)
+
+
+def test_every_module_is_under_the_line_limit() -> None:
+    """Each package module stays under the ~800-line yellow flag."""
+    for path in _package_files(PACKAGE):
+        count = len(path.read_text(encoding="utf-8").splitlines())
+        assert count < _MODULE_LINE_LIMIT, f"{path.name}: {count} lines"
+
+
+def test_package_init_is_a_pure_reexport() -> None:
+    """``__init__`` defines nothing: it binds ``__all__`` names and submodules only."""
+    init = _parse(SRC_ROOT / "reconcile" / "tasks" / "__init__.py")
+    assert not any(
+        isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+        for node in init.body
+    )
+    submodules = {module.rsplit(".", 1)[1] for module in _sibling_modules(PACKAGE)}
+    bound = {name for name in vars(pkg) if not name.startswith("__")}
+    assert bound == set(pkg.__all__) | submodules
+
+
+def test_package_binds_no_patched_global() -> None:
+    """A stale ``cw.reconcile.tasks.<global>`` patch must fail, not pass silently."""
+    init = _parse(SRC_ROOT / "reconcile" / "tasks" / "__init__.py")
+    # Globals __init__'s own code reads are exempt: patching them still reaches
+    # a reader defined there. Derived from the AST, not hardcoded.
+    read_by_init = {
+        node.id
+        for node in ast.walk(init)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    }
+    moved = PATCHED_GLOBALS - read_by_init
+    assert moved, "no moved global to check: the guard would be vacuous"
+    for name in moved:
+        assert name not in vars(pkg), name
 
 
 def test_flat_module_file_is_gone() -> None:
