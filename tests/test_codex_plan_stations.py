@@ -7,6 +7,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from cw.codex_plan._result import (
+    PLAN_SOUNDNESS_MARKER_VERSION,
+    PLAN_SPEC_MARKER_VERSION,
+)
 from cw.codex_plan._stations import (
     PLAN_REVIEWER,
     PLAN_SOUNDNESS_REVIEWER,
@@ -17,7 +21,11 @@ from cw.codex_plan._stations import (
 )
 from cw.codex_review import CODEX_MODEL_CAPACITY, PLAN_STATION_AGENT_FILES
 from cw.codex_runner import CodexRunResult
-from cw.dev_queue.lifecycle import _plan_body_signoff_ok
+from cw.dev_queue.lifecycle import (
+    _PLAN_SOUNDNESS_MARKER,
+    _PLAN_SPEC_MARKER,
+    _plan_body_signoff_ok,
+)
 from tests._codex_review_helpers import _populate_global_agents_dir
 from tests._tool_fakes import (
     ScriptedCodexRunner,
@@ -69,8 +77,12 @@ class TestVerdicts:
         stamped = stamp_markers(_PLAN, today=_TODAY)
         assert _plan_body_signoff_ok(stamped)
         lines = stamped.splitlines()
-        assert lines[0] == "<!-- plan-spec-reviewed: 2026-11-10 v2 -->"
-        assert lines[1] == "<!-- plan-soundness-reviewed: 2026-11-10 v1 -->"
+        assert lines[0] == (
+            f"{_PLAN_SPEC_MARKER}: 2026-11-10 {PLAN_SPEC_MARKER_VERSION} -->"
+        )
+        assert lines[1] == (
+            f"{_PLAN_SOUNDNESS_MARKER}: 2026-11-10 {PLAN_SOUNDNESS_MARKER_VERSION} -->"
+        )
 
     def test_blocking_reviewer_parks_and_skips_soundness(self, tmp_path: Path) -> None:
         runner = _runner(

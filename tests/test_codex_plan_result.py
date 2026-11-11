@@ -279,12 +279,25 @@ class TestWriteDraft:
         text = write_plan_draft(tmp_path, "no newline").read_text(encoding="utf-8")
         assert text == ROUND_ZERO_LINE + "no newline\n"
 
-    def test_unreadable_on_disk_draft_starts_fresh(self, tmp_path: Path) -> None:
+    def test_unreadable_on_disk_draft_is_preserved_and_refused(
+        self, tmp_path: Path
+    ) -> None:
         path = tmp_path / PLAN_DRAFT_RELATIVE_PATH
         path.parent.mkdir(parents=True)
-        path.write_bytes(b"\xff\xfe")
-        text = write_plan_draft(tmp_path, _PLAN).read_text(encoding="utf-8")
-        assert text == ROUND_ZERO_LINE + _PLAN
+        original = b"\xff\xfe"
+        path.write_bytes(original)
+        with pytest.raises(OSError, match="existing plan draft is unreadable"):
+            write_plan_draft(tmp_path, _PLAN)
+        assert path.read_bytes() == original
+
+    def test_empty_on_disk_draft_is_preserved_and_refused(self, tmp_path: Path) -> None:
+        path = tmp_path / PLAN_DRAFT_RELATIVE_PATH
+        path.parent.mkdir(parents=True)
+        original = b"  \n"
+        path.write_bytes(original)
+        with pytest.raises(OSError, match="existing plan draft is empty"):
+            write_plan_draft(tmp_path, _PLAN)
+        assert path.read_bytes() == original
 
 
 def test_plan_md_is_written_with_both_markers(tmp_path: Path) -> None:

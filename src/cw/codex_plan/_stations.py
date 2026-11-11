@@ -21,6 +21,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
+from cw.codex_plan._result import (
+    PLAN_SOUNDNESS_MARKER_VERSION,
+    PLAN_SPEC_MARKER_VERSION,
+)
 from cw.codex_review import (
     CODEX_ERROR,
     CODEX_MODEL_CAPACITY,
@@ -28,6 +32,10 @@ from cw.codex_review import (
     _load_agent_spec_fallback_gate,
     _resolve_agent_spec,
     run_codex_roles,
+)
+from cw.dev_queue.lifecycle import (
+    _PLAN_SOUNDNESS_MARKER,
+    _PLAN_SPEC_MARKER,
 )
 from cw.models.enums import SandboxMode
 
@@ -55,13 +63,6 @@ STATION_BLOCK_REASONS: Final[dict[str, str]] = {
     PLAN_REVIEWER: "plan_unreviewable",
     PLAN_SOUNDNESS_REVIEWER: "plan_unsound",
 }
-
-#: Each station's sign-off marker and its current version, matching the
-#: ``auto-dev-plan.md`` Step 1g template that ``_plan_body_signoff_ok`` reads.
-PLAN_SPEC_MARKER: Final = "plan-spec-reviewed"
-PLAN_SPEC_MARKER_VERSION: Final = "v2"
-PLAN_SOUNDNESS_MARKER: Final = "plan-soundness-reviewed"
-PLAN_SOUNDNESS_MARKER_VERSION: Final = "v1"
 
 #: The only retry-eligible station failure: a provider capacity blip.
 _RETRYABLE_FAILURES: Final = frozenset({CODEX_MODEL_CAPACITY})
@@ -218,8 +219,8 @@ def stamp_markers(plan_text: str, *, today: date) -> str:
     """Prepend both sign-off markers, each on its own line, to *plan_text*."""
     stamp = today.isoformat()
     return (
-        f"<!-- {PLAN_SPEC_MARKER}: {stamp} {PLAN_SPEC_MARKER_VERSION} -->\n"
-        f"<!-- {PLAN_SOUNDNESS_MARKER}: {stamp} "
+        f"{_PLAN_SPEC_MARKER}: {stamp} {PLAN_SPEC_MARKER_VERSION} -->\n"
+        f"{_PLAN_SOUNDNESS_MARKER}: {stamp} "
         f"{PLAN_SOUNDNESS_MARKER_VERSION} -->\n\n"
         f"{plan_text.lstrip()}"
     )

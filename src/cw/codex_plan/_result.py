@@ -55,6 +55,8 @@ REVIEW_MARKER_PREFIXES: Final[tuple[str, str]] = (
     _PLAN_SPEC_MARKER,
     _PLAN_SOUNDNESS_MARKER,
 )
+PLAN_SPEC_MARKER_VERSION: Final = "v2"
+PLAN_SOUNDNESS_MARKER_VERSION: Final = "v1"
 
 #: cw-recorded friction tokens (appended to the model's ``friction_highlights``).
 RESUME_FRICTION: Final = (
@@ -124,6 +126,17 @@ class ResumeDraft:
     leading: str
     body: str
     fingerprint: str
+
+
+class PlanDraftError(OSError):
+    """An existing draft cannot safely be read before a rewrite."""
+
+    def __init__(self, path: Path, *, empty: bool) -> None:
+        state = "empty" if empty else "unreadable"
+        super().__init__(
+            f"existing plan draft is {state}: {path}; repair or remove it "
+            "before re-planning"
+        )
 
 
 def _cw_fields(ticket_id: str, worktree: Path) -> dict[str, Any]:
@@ -273,10 +286,19 @@ def clean_plan_text(text: str) -> str:
 
 
 def _on_disk_leading(worktree: Path) -> str:
+    path = worktree / PLAN_DRAFT_RELATIVE_PATH
     try:
-        text = (worktree / PLAN_DRAFT_RELATIVE_PATH).read_bytes().decode("utf-8")
-    except (OSError, UnicodeDecodeError):
+        path.lstat()
+    except FileNotFoundError:
         return ""
+    except OSError as exc:
+        raise PlanDraftError(path, empty=False) from exc
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise PlanDraftError(path, empty=False) from exc
+    if not text.strip():
+        raise PlanDraftError(path, empty=True)
     return text[: leading_bookkeeping_end(text)]
 
 

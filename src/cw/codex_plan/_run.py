@@ -61,9 +61,8 @@ from cw.codex_plan._result import (
     PLAN_BLOCKED,
     PLAN_MD_RELATIVE_PATH,
     PLAN_NO_OP,
-    PLAN_PENDING_APPROVAL,
-    PLAN_STAGE_COMPLETE,
     RESUME_FRICTION,
+    PlanDraftError,
     PlanTurnFailure,
     ResumeDraft,
     clean_plan_text,
@@ -115,7 +114,6 @@ STAGE_PLAN_REVIEWED: Final = StageIdentifier.S1_PLAN_REVIEWED.value
 
 _SCHEMA_NAME: Final = "plan-schema.json"
 _OUTPUT_NAME: Final = "plan-output.json"
-_STATUSES_GATED_IN_FULL: Final = frozenset({PLAN_STAGE_COMPLETE, PLAN_PENDING_APPROVAL})
 
 
 @dataclass(frozen=True)
@@ -344,8 +342,10 @@ def _choose_text(
 
 
 def _gate(result: AutoDevResult, plan_text: str) -> GateFailure | None:
+    if result.status in {NO_OP, PLAN_BLOCKED}:
+        return None
     failure = check_artifact(plan_text)
-    if failure is not None or result.status not in _STATUSES_GATED_IN_FULL:
+    if failure is not None:
         return failure
     return check_plan_files(plan_text) or check_scope_tier(plan_text, result.scope.tier)
 
@@ -373,6 +373,8 @@ def _bound(
 def _write_draft_best_effort(run: _Run, plan_text: str) -> bool:
     try:
         write_plan_draft(run.worktree, plan_text)
+    except PlanDraftError:
+        raise
     except OSError:
         _log.warning("codex plan draft not written ticket=%s", run.task.ticket_id)
         return False
