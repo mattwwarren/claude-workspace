@@ -17,7 +17,6 @@ from cw.codex_review._const import _is_spawn_error
 from cw.codex_runner import CodexRunResult, FakeCodexRunner
 from cw.config import state_dir
 from cw.gh import AGENT_COMMENT_MARKER
-from cw.models import ClientConfig
 from cw.models.client import TrackerMcpGateConfig
 from cw.tracker import TRACKER_LINEAR
 from cw.tracker_io import (
@@ -29,7 +28,11 @@ from cw.tracker_io import (
     plan_turn_parts,
     post_parts_via_turn,
 )
-from tests._backend_mcp_helpers import McpStage, stage_mcp_config
+from tests._backend_mcp_helpers import (
+    McpStage,
+    codex_tracker_client,
+    stage_mcp_config,
+)
 from tests._tool_fakes import tracker_io_turn_result
 
 if TYPE_CHECKING:
@@ -39,21 +42,6 @@ pytestmark = pytest.mark.usefixtures("isolated_backend_layers")
 
 _TICKET = "GEN-7"
 _SECRET = "sk-proj-" + "a1B2c3D4" * 4
-
-
-def _client(tmp_path: Path, servers: dict[str, str] | None = None) -> ClientConfig:
-    workspace = tmp_path / "workspace"
-    # Its own .git stops the MCP reader's project-layer walk here (#3055).
-    (workspace / ".git").mkdir(parents=True, exist_ok=True)
-    gate = (
-        None if servers is None else TrackerMcpGateConfig(enabled=True, servers=servers)
-    )
-    return ClientConfig(
-        name="acme",
-        workspace_path=workspace,
-        default_branch="main",
-        tracker_mcp_gate=gate,
-    )
 
 
 def _context(
@@ -66,7 +54,7 @@ def _context(
     worktree = tmp_path / "wt"
     worktree.mkdir(exist_ok=True)
     return TrackerIoContext(
-        runner=runner, client=_client(tmp_path, servers), worktree=worktree
+        runner=runner, client=codex_tracker_client(tmp_path, servers), worktree=worktree
     )
 
 
@@ -87,6 +75,16 @@ def _stage(
 def _verified_runner(context: TrackerIoContext, text: str) -> FakeCodexRunner:
     parts = plan_turn_parts(text, context)
     return FakeCodexRunner(output_file_content=tracker_io_turn_result(_TICKET, parts))
+
+
+def test_plan_turn_parts_unmarked_for_the_github_path(tmp_path: Path) -> None:
+    """#3060: marked=False leaves the marker to post_issue_comment."""
+    context = _context(tmp_path, FakeCodexRunner())
+    marked = plan_turn_parts("plan text", context)
+    unmarked = plan_turn_parts("plan text", context, marked=False)
+    assert all(AGENT_COMMENT_MARKER in part for part in marked)
+    assert not any(AGENT_COMMENT_MARKER in part for part in unmarked)
+    assert len(marked) == len(unmarked)
 
 
 class _RecordingRunner:
@@ -311,7 +309,7 @@ def test_tracker_mcp_gate_enabled_flag_is_ignored(
 ) -> None:
     _stage(monkeypatch, tmp_path)
     runner = FakeCodexRunner()
-    client = _client(tmp_path)
+    client = codex_tracker_client(tmp_path)
     client = client.model_copy(
         update={
             "tracker_mcp_gate": TrackerMcpGateConfig(
@@ -349,7 +347,7 @@ def test_unnamed_server_is_refused(
     runner = FakeCodexRunner()
     context = TrackerIoContext(
         runner=runner,
-        client=_client(tmp_path, servers),
+        client=codex_tracker_client(tmp_path, servers),
         worktree=tmp_path,
     )
     outcome = _turn(context)

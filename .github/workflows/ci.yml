@@ -169,6 +169,11 @@ jobs:
       - name: Build wheel
         run: uv build --wheel --out-dir dist
 
+      # The codex PLAN executor (#3060) reads the plan command doc as package
+      # data; pin that the hatch force-include put it in the wheel.
+      - name: Smoke test - plan command doc packaged
+        run: unzip -l dist/*.whl | grep -q 'cw/data/commands/auto-dev-plan.md'
+
       - name: Install wheel into clean env
         run: uv tool install --no-cache dist/*.whl
 

@@ -1,4 +1,4 @@
-"""CodexExecutor — detached ``cw codex run`` REVIEW backend (#1236, RFC 0014 A2)."""
+"""CodexExecutor — detached ``cw codex run`` PLAN/REVIEW backend (#1236, #3060)."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from cw.executor.core import (
 )
 from cw.models import SessionOrigin, Stage
 from cw.native_daemon import get_native_daemon_client
+from cw.opencode_runner import stage_entry_marker
 from cw.spawn import _write_hook_context
 
 if TYPE_CHECKING:
@@ -40,10 +41,11 @@ if TYPE_CHECKING:
 # capability probe.
 CODEX_REVIEW_ONLY = "codex_review_only"
 
-#: Stages a codex executor runs (#3054). Only REVIEW has an executor today; the
-#: PLAN, IMPL and FINALIZE executors are C1-C3 (#3060-#3062). A stage not listed
-#: here parks with CODEX_REVIEW_ONLY.
-CODEX_SUPPORTED_STAGES: frozenset[Stage] = frozenset({Stage.REVIEW})
+#: Stages a codex executor runs (#3054). REVIEW and PLAN (#3060) have
+#: executors; the IMPL and FINALIZE executors are C2-C3 (#3061-#3062). A stage
+#: not listed here parks with CODEX_REVIEW_ONLY (the reason keeps its name
+#: until C2 and C3 land).
+CODEX_SUPPORTED_STAGES: frozenset[Stage] = frozenset({Stage.REVIEW, Stage.PLAN})
 
 
 def _codex_preflight(
@@ -63,7 +65,13 @@ def _codex_preflight(
     a codex-review attempt never gets a cw-context.json -- and with it, never
     gets a ``prior_attempts_summary`` on retry. ``write_stop_hook=False``:
     there is no Claude turn loop here to signal-stop. Called first so even a
-    CODEX_REVIEW_ONLY/CODEX_NOT_FOUND park is covered.
+    CODEX_REVIEW_ONLY/CODEX_NOT_FOUND park is covered; the codex PLAN turn
+    also reads its ``queue_metadata`` from that file (#3060).
+
+    Every park carries the entry marker of *stage* (``stage_entry_marker``),
+    never the REVIEW default: dispatch walks ``task.stage`` forward on a
+    later-stage sentinel, so a ``stage3_review`` label on a PLAN or IMPL park
+    would advance the row (#3060 R8).
 
     On success, stamps the session id onto the still-RUNNING dev-queue row
     *before* the launch (#1727 R1): ``cw codex run`` re-finds its task by
@@ -91,13 +99,20 @@ def _codex_preflight(
         write_stop_hook=False,
         daemon=daemon,
     )
+    stage_reached = stage_entry_marker(stage.value)
     if stage not in CODEX_SUPPORTED_STAGES:
         return make_codex_blocked(
-            ticket_id=task.ticket_id, worktree=worktree, reason=CODEX_REVIEW_ONLY
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=CODEX_REVIEW_ONLY,
+            stage_reached=stage_reached,
         )
     if shutil.which("codex") is None:
         return make_codex_blocked(
-            ticket_id=task.ticket_id, worktree=worktree, reason=CODEX_NOT_FOUND
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=CODEX_NOT_FOUND,
+            stage_reached=stage_reached,
         )
     stamp_session_id_on_running_task(
         client_name=client.name,
@@ -119,8 +134,9 @@ def _codex_preflight(
 class CodexExecutor:
     """StageExecutor backed by a detached ``cw codex run`` subprocess (#2388).
 
-    REVIEW-only: pre-flight blocks with ``CODEX_REVIEW_ONLY`` on any other
-    stage, and with ``CODEX_NOT_FOUND`` when the codex binary is absent.
+    Serves the stages in ``CODEX_SUPPORTED_STAGES`` (PLAN and REVIEW):
+    pre-flight blocks with ``CODEX_REVIEW_ONLY`` on any other stage, and with
+    ``CODEX_NOT_FOUND`` when the codex binary is absent.
 
     spawn() is non-blocking on the launch path: after synchronous pre-flight
     checks, it launches ``cw codex run`` via ``RealCodexJobRunner.launch``
@@ -176,6 +192,7 @@ class CodexExecutor:
                 worktree=worktree,
                 reason=reason,
                 details=details,
+                stage_reached=stage_entry_marker(stage.value),
             )
 
         return _spawn_fire_and_forget(

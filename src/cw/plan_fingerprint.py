@@ -82,20 +82,20 @@ def is_plan_draft_fingerprint(value: str) -> bool:
     return PLAN_DRAFT_FINGERPRINT_RE.fullmatch(value) is not None
 
 
-def compute_plan_draft_fingerprint(text: str) -> str:
-    """Apply the named *Plan-draft fingerprint rule* to draft *text* (#2102).
+def leading_bookkeeping_end(text: str) -> int:
+    """Return the offset where *text*'s leading bookkeeping block ends (#3060).
 
-    Strips the leading bookkeeping block -- the round-counter line, the
-    ``plan-stage-last-evaluated`` line, every ``plan-stage-settled`` marker
-    (bare or round-qualified, #2626), and the ``resolutions-attempted`` /
-    ``approval-revoked`` / ``resolutions-applied`` lines -- and hashes what
-    remains with SHA-256, rendered as full lowercase hex. The bookkeeping
-    grammar is a *leading* block: without the round-counter line nothing is
-    stripped, and any of these markers appearing later in the body is content.
+    Walks the closed grammar the *Plan-draft fingerprint rule* strips: the
+    round-counter line, then the ``plan-stage-last-evaluated`` line, every
+    ``plan-stage-settled`` marker, and the ``resolutions-attempted`` /
+    ``approval-revoked`` / ``resolutions-applied`` lines, each anchored at the
+    running offset. Without the round-counter line there is no block and the
+    result is 0. ``text[:end]`` is the block a draft rewrite must carry
+    forward; ``text[end:]`` is the hash material.
     """
     round_match = _ROUND_LINE.match(text)
     if round_match is None:
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+        return 0
     offset = round_match.end()
     last_evaluated_match = _LAST_EVALUATED_LINE.match(text, offset)
     if last_evaluated_match is not None:
@@ -106,7 +106,22 @@ def compute_plan_draft_fingerprint(text: str) -> str:
         trailing_match = pattern.match(text, offset)
         if trailing_match is not None:
             offset = trailing_match.end()
-    stripped = text[offset:]
+    return offset
+
+
+def compute_plan_draft_fingerprint(text: str) -> str:
+    """Apply the named *Plan-draft fingerprint rule* to draft *text* (#2102).
+
+    Strips the leading bookkeeping block -- the round-counter line, the
+    ``plan-stage-last-evaluated`` line, every ``plan-stage-settled`` marker
+    (bare or round-qualified, #2626), and the ``resolutions-attempted`` /
+    ``approval-revoked`` / ``resolutions-applied`` lines -- and hashes what
+    remains with SHA-256, rendered as full lowercase hex. The bookkeeping
+    grammar is a *leading* block: without the round-counter line nothing is
+    stripped, and any of these markers appearing later in the body is content.
+    The block boundary is :func:`leading_bookkeeping_end`.
+    """
+    stripped = text[leading_bookkeeping_end(text) :]
     return hashlib.sha256(stripped.encode("utf-8")).hexdigest()
 
 

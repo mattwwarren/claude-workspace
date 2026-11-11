@@ -26,7 +26,10 @@ them with ``CW_UPDATE_GOLDEN=1 uv run pytest tests/test_contract_render.py``.
 ``docs_root`` must be the repo-tracked ``.claude/commands`` copy, never
 ``~/.claude/commands``.
 
-Nothing consumes this yet; the codex stage runners (RFC 0018 C1-C3) do.
+The codex PLAN executor (``cw.codex_plan``, RFC 0018 C1, #3060) consumes the
+plan render; the IMPL and FINALIZE runners (C2-C3) will consume theirs. A
+stage-specific codex addendum (:func:`_stage_addendum`) is appended last; only
+plan has one today, so only ``plan-codex.txt`` carries it.
 """
 
 from __future__ import annotations
@@ -140,6 +143,61 @@ _FINALIZE_SENTINEL_NOTE = (
     "shape. Set stage_reached to stage4a_merge_gate, stage4b_pr_create or "
     "stage5_post_create, whichever stage you reached.\n"
 )
+
+
+#: The codex PLAN addendum (#3060): it resolves what the rendered plan blocks
+#: say that is false for a single read-only codex turn whose sentinel, artifacts
+#: and review stations are cw's. Appended last, plan only.
+_PLAN_CODEX_ADDENDUM = (
+    "Codex PLAN addendum (overrides anything above that conflicts with it).\n"
+    "\n"
+    "1. You are the Plan agent. There is no sub-session and no spawned agent. "
+    "cw performs every step above that spawns one, including the two plan "
+    "review stations (Plan Reviewer and Plan Soundness Reviewer), which cw "
+    "runs itself after this turn; do not perform or simulate them.\n"
+    "2. The state-writing cw commands named above (event recording, result "
+    "emission, plan-approval revocation) are done by cw outside the sandbox; "
+    "leave them alone. You write no files: the sandbox is read-only, and cw "
+    "writes .cw/plan-draft.md and .cw/plan.md from your answer.\n"
+    "3. Read .claude/cw-context.json for queue_metadata (operator_resolutions, "
+    "plan_approved_at, plan_approved_fingerprint, plan_source): use jq, or "
+    "cat the file if jq is absent.\n"
+    "4. The ticket body and comments are injected below on GitHub; on any "
+    "other tracker read them with the MCP get_issue and list_comments tools.\n"
+    '5. If a "Resumed plan draft" section is injected below, it is the '
+    "persisted draft from a prior park (the resume check): do not regenerate "
+    "it from scratch; re-run the scan; return it as plan_markdown, changed "
+    "only to apply resolved operator items. When that section says "
+    '"approval: matches", return it unchanged.\n'
+    "6. .claude/commands/auto-dev-plan-appendix.md and "
+    ".claude/commands/auto-dev.md are not available in this turn. Their "
+    "machinery (the resume delta and fast path, settlement folding and the "
+    "round cap, the revision cycle, the operator-authority delta and "
+    "comment-path approval) is deferred: on a resumed draft always re-scan, "
+    "treat only exact fingerprint equality on the row as approval evidence, "
+    "and treat the comment approval path as unavailable.\n"
+    "7. The one sentinel template that applies is the plan template: "
+    "stage_reached stage1_plan, scope.lines_actual null, status one of "
+    "stage_complete | plan_pending_approval | ambiguities_pending_resolution "
+    "| premises_pending_verification | no_op | blocked.\n"
+    "8. Classify the scope tier yourself (small unless the plan touches "
+    "migrations or an auth or security core, at any file or line count), "
+    "write exactly one **Scope tier:** line and a ## Files Modified section "
+    "in the plan, and put the same tier in the sentinel; cw only "
+    "cross-checks it.\n"
+    "9. Your final message is one JSON object with two string fields, "
+    "plan_markdown (the whole plan) and sentinel (the framed "
+    "<<<AUTO_DEV_RESULT ... AUTO_DEV_RESULT>>> block). Do not write any "
+    "sign-off marker or bookkeeping comment line into plan_markdown; cw owns "
+    "them.\n"
+)
+
+
+def _stage_addendum(stage: str) -> str:
+    """The codex stage addendum appended last to *stage*'s render, or ``""``."""
+    if stage == "plan":
+        return "\n" + _PLAN_CODEX_ADDENDUM
+    return ""
 
 
 class RenderError(ValueError):
@@ -327,7 +385,8 @@ def render_stage_prompt(
 
     Layout: the imported stage preamble, the glue intro, the neutral blocks in
     doc order, for finalize without a tagged ship-it the glue's ship step, then
-    the imported sentinel framing. The result is UTF-8 text with ``\\n`` line
+    the imported sentinel framing, then the stage's codex addendum (plan
+    only, :data:`_PLAN_CODEX_ADDENDUM`). The result is UTF-8 text with ``\\n`` line
     endings and exactly one trailing newline. Raises :class:`RenderError` (or a
     subclass) when it cannot render a clean prompt.
     """
@@ -340,6 +399,7 @@ def render_stage_prompt(
     if stage == "finalize" and _ship_it_text(docs_root) is None:
         parts.append("\n" + _SHIP_IT_FALLBACK + "\n")
     parts.append(_sentinel_section(stage, session_id))
+    parts.append(_stage_addendum(stage))
     output = "".join(parts)
     _check_denylist(output)
     return output.rstrip("\n") + "\n"

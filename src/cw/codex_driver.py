@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cw.codex_background import _run_codex_review_and_complete
+from cw.codex_plan import run_plan_stage_and_complete
 from cw.codex_runner import RealCodexRunner
 from cw.config import get_client, load_state
 from cw.exceptions import CwError
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
     from cw.models import ClientConfig, Session, StageExecutorConfig, TicketTask
 
 STAGE_REVIEW = "review"
+STAGE_PLAN = "plan"
 STAGE_IMPL = "impl"
 
 _IMPL_STAGE_NOT_IMPLEMENTED = (
@@ -63,7 +65,10 @@ def unsupported_codex_stage_message(stage: Stage) -> str:
     """
     if stage == Stage.IMPL:
         return _IMPL_STAGE_NOT_IMPLEMENTED
-    return f"no codex executor for stage {stage.value!r} (supported: {STAGE_REVIEW})"
+    return (
+        f"no codex executor for stage {stage.value!r} "
+        f"(supported: {STAGE_PLAN}, {STAGE_REVIEW})"
+    )
 
 
 def _load_stage_run(
@@ -115,4 +120,36 @@ def run_codex_review_stage(
         config_reasoning_effort=executor_config.reasoning_effort,
         config_reviewer_sandbox_mode=executor_config.reviewer_sandbox_mode,
         config_fix_sandbox_mode=executor_config.fix_sandbox_mode,
+    )
+
+
+def run_codex_plan_stage(
+    *,
+    ticket_id: str,
+    session_id: str,
+    wall_clock_budget_seconds: int | None,
+    runner: CodexRunner | None = None,
+) -> None:
+    """Run the codex PLAN stage for *ticket_id*/*session_id* and complete it (#3060).
+
+    Re-derives the run from the persisted RUNNING row and session, as
+    :func:`run_codex_review_stage` does. *wall_clock_budget_seconds* is
+    accepted for the shared CLI signature and ignored: no cw timer bounds the
+    PLAN turn or its review stations (ADR-0014). Only the PLAN stage's model
+    and reasoning effort are read from its executor config; the turn's
+    read-only sandbox is fixed, not configured.
+    """
+    del wall_clock_budget_seconds
+    session, client, task, worktree, executor_config = _load_stage_run(
+        ticket_id=ticket_id, session_id=session_id, stage=Stage.PLAN
+    )
+    run_plan_stage_and_complete(
+        runner=runner or RealCodexRunner(),
+        task=task,
+        worktree=worktree,
+        client=client,
+        sid=session.id,
+        sess_name=session.name,
+        model=executor_config.model,
+        reasoning_effort=executor_config.reasoning_effort,
     )

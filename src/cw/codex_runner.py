@@ -44,8 +44,8 @@ def build_codex_run_argv(
 ) -> list[str]:
     """Return the argv that runs the codex stage as ``cw codex run``.
 
-    *stage* defaults to review, the only stage with a codex executor today
-    (#3054); the executor passes the stage it was spawned for.
+    *stage* defaults to review (#3054); the executor passes the stage it was
+    spawned for (review or plan, #3060).
 
     ``sys.executable -m cw`` rather than resolving a ``cw`` binary on PATH
     (contrast ``cw.watchdog._resolve_cw_executable_path``, which serves a

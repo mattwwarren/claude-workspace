@@ -156,21 +156,6 @@ This token is distinct from, and never satisfied by, the CLI's write-only, audit
 
 **Row-delivered revisions never use the Operator-authority-delta alternate (#2702).** In a dispatch where Step 1a.0b handled a `row:<N>:<sha>` resolutions delta, only exact equality of `draft_fp` and `plan_approved_fingerprint` is row-path evidence. Step 1a.0b has already compared them: equal means the approval stands; different means it was revoked there, and the durable-revocation rule treats the row evidence as absent. Neither branch (b) of the Row path nor the Fingerprint mismatch sub-case's alternate may carry an approval across a row-delivered revision: a mismatch is never tolerated as advisory-only drift for a row delivery, and a row resolution is not an operator-authority comment. Answering questions never revokes an approval by itself; only a change to the plan text does.
 
-**Headless only — checkpoint the revised draft (#1778).** Immediately after the plan-revision agent returns a new plan text — from either the standard MUST_FIX revision cycle or the format-only revision cycle — write the plan's current text to `.cw/plan-draft.md` — best-effort: if the write fails, log and continue; do not treat it as blocking. This checkpoint is not the fully-re-reviewed, authoritative version: Step 1f.2 still re-reviews the revised plan, and the Step 1f.3 blocked-exit writes remain the authoritative draft writes if the revision cycle is exhausted — this checkpoint only ensures a revised draft survives an unexpected interruption in between. This write follows the draft-rewrite rule (Step 1c's headless mode, above) — its leading bookkeeping lines are carried forward unchanged.
-
-**Headless only — if the 1 revision cycle is exhausted and MUST_FIX persists, emit `stage.errored` before exiting:**
-```bash
-cw event record stage.errored \
-  --correlation-id "$TICKET" \
-  --payload "{\"ticket_id\":\"$TICKET\",\"stage\":\"s1_plan_reviewed\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"error_kind\":\"plan_revision_failed\"}"
-```
-
-**Friction & health check note:** if either reviewer's friction is **BLOCK** (couldn't access the repo, plan malformed), treat as `agent_block` per the existing escalation path — do NOT treat agent failure as a clean review.
-
-### Step 1g: Persist Plan + Post to Linear
-
-After plan is approved (or auto-skipped with existing plan) AND Plan Quality Review has passed (Step 1f):
-
 **Independent of the approval fingerprint (#2102, no rule change).** This gate and Checkpoint 1's fingerprint-equality check are two separate sensors on the same underlying risk, and neither subsumes the other: a Small→Large tier flip fires here even when the fingerprint matched, and a fingerprint mismatch re-parks at Checkpoint 1 even when the tier is unchanged. There is deliberately no additional "a tier change always re-asks for approval" rule — a tier change is very likely to correlate with a content change, which the fingerprint already detects, and a stale-tier stamp is caught here regardless.
 
 **FIRST, persist the plan file (#943 — the stage's primary artifact, not optional):** Write the full reviewed plan text verbatim — including both signoff markers below — to `.cw/plan.md` in the worktree, BEFORE posting to the tracker and BEFORE emitting the sentinel. Stage 2 (`auto-dev-impl.md`) hard-requires this file; a plan that exists only as a tracker comment leaves the ticket unimplementable. Verify the write (`test -s .cw/plan.md`) as part of this step.
@@ -212,8 +197,6 @@ cw event record stage.entered \
 After all Stage 1 steps complete successfully in headless mode, emit the `AUTO_DEV_RESULT` sentinel.
 
 **Only emit this sentinel when invoked as a standalone `/auto-dev-plan <ticket-id> --headless` command. Do NOT emit when running as part of the interactive monolith chain (`auto-dev.md` owns the sentinel in that context).**
-
-**Emit through cw, then frame (#2382).** Record the payload with `cw result emit -` per the *Sentinel emit rule* in `.claude/commands/auto-dev.md` — run it from the cw session worktree root, fix every `field.path: message` error it reports and re-run until it exits 0, and only then frame the recorded JSON. Recording is not framing (#1890): the literal `<<<AUTO_DEV_RESULT` / `AUTO_DEV_RESULT>>>` frame, wrapping the same JSON, MUST be the final characters of this same message. Never narrate emission as a separate act from performing it.
 
 **No interactive escalation, ever (#1890).** In headless mode there is no listener. Never escalate a detected blocker — including a `plan_unreviewable`/`plan_unsound`/`scope_tier_stale` finding — by asking a question and ending your turn. Escalate exclusively via this sentinel's `blocker` field with `status: "blocked"`, per the exit rules already specified above.
 
@@ -292,3 +275,15 @@ pr null, and scope.lines_actual MUST be null at this stage):
   "next_actions": []
 }
 AUTO_DEV_RESULT>>>
+
+Codex PLAN addendum (overrides anything above that conflicts with it).
+
+1. You are the Plan agent. There is no sub-session and no spawned agent. cw performs every step above that spawns one, including the two plan review stations (Plan Reviewer and Plan Soundness Reviewer), which cw runs itself after this turn; do not perform or simulate them.
+2. The state-writing cw commands named above (event recording, result emission, plan-approval revocation) are done by cw outside the sandbox; leave them alone. You write no files: the sandbox is read-only, and cw writes .cw/plan-draft.md and .cw/plan.md from your answer.
+3. Read .claude/cw-context.json for queue_metadata (operator_resolutions, plan_approved_at, plan_approved_fingerprint, plan_source): use jq, or cat the file if jq is absent.
+4. The ticket body and comments are injected below on GitHub; on any other tracker read them with the MCP get_issue and list_comments tools.
+5. If a "Resumed plan draft" section is injected below, it is the persisted draft from a prior park (the resume check): do not regenerate it from scratch; re-run the scan; return it as plan_markdown, changed only to apply resolved operator items. When that section says "approval: matches", return it unchanged.
+6. .claude/commands/auto-dev-plan-appendix.md and .claude/commands/auto-dev.md are not available in this turn. Their machinery (the resume delta and fast path, settlement folding and the round cap, the revision cycle, the operator-authority delta and comment-path approval) is deferred: on a resumed draft always re-scan, treat only exact fingerprint equality on the row as approval evidence, and treat the comment approval path as unavailable.
+7. The one sentinel template that applies is the plan template: stage_reached stage1_plan, scope.lines_actual null, status one of stage_complete | plan_pending_approval | ambiguities_pending_resolution | premises_pending_verification | no_op | blocked.
+8. Classify the scope tier yourself (small unless the plan touches migrations or an auth or security core, at any file or line count), write exactly one **Scope tier:** line and a ## Files Modified section in the plan, and put the same tier in the sentinel; cw only cross-checks it.
+9. Your final message is one JSON object with two string fields, plan_markdown (the whole plan) and sentinel (the framed <<<AUTO_DEV_RESULT ... AUTO_DEV_RESULT>>> block). Do not write any sign-off marker or bookkeeping comment line into plan_markdown; cw owns them.

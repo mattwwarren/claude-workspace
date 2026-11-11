@@ -965,6 +965,15 @@ class TestKnownBlockerReasons:
         assert FINALIZE_REGRESS_BLOCKER_REASONS <= KNOWN_BLOCKER_REASONS
         assert OPERATOR_UNAVAILABLE_BLOCKER_REASONS <= KNOWN_BLOCKER_REASONS
 
+    def test_codex_plan_reasons_registered(self) -> None:
+        """#3060: gate set B's two reasons are known, with the owner's literals."""
+        from cw.codex_plan import CODEX_PLAN_ARTIFACT_MISSING, CODEX_PLAN_GATE_FAILED
+
+        assert CODEX_PLAN_ARTIFACT_MISSING == "codex_plan_artifact_missing"
+        assert CODEX_PLAN_GATE_FAILED == "codex_plan_gate_failed"
+        assert CODEX_PLAN_ARTIFACT_MISSING in KNOWN_BLOCKER_REASONS
+        assert CODEX_PLAN_GATE_FAILED in KNOWN_BLOCKER_REASONS
+
     def test_external_state_block_reason_registered(self) -> None:
         """external_state_block (#2320) is a known reason with the exact
         literal value producer skills must emit."""

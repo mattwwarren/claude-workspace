@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import cw.backend_mcp_config
+from cw.models import ClientConfig
+from cw.models.client import TrackerMcpGateConfig
 from cw.models.orchestrator_config import CODEX_BACKEND, OPENCODE_BACKEND
 
 if TYPE_CHECKING:
@@ -139,3 +141,25 @@ def write_system_layer(
     path.write_text("{}\n", encoding="utf-8")
     monkeypatch.setattr(cw.backend_mcp_config, "_SYSTEM_LAYERS", {backend: (path,)})
     return path
+
+
+def codex_tracker_client(
+    tmp_path: Path, servers: dict[str, str] | None = None
+) -> ClientConfig:
+    """A client whose workspace stops the MCP project-layer walk (#3057, #3060).
+
+    *servers* becomes an enabled ``tracker_mcp_gate.servers`` map; ``None``
+    leaves the gate unset. Shared by the tracker-IO turn and codex PLAN tests.
+    """
+    workspace = tmp_path / "workspace"
+    # Its own .git stops the MCP reader's project-layer walk here (#3055).
+    (workspace / ".git").mkdir(parents=True, exist_ok=True)
+    gate = (
+        None if servers is None else TrackerMcpGateConfig(enabled=True, servers=servers)
+    )
+    return ClientConfig(
+        name="acme",
+        workspace_path=workspace,
+        default_branch="main",
+        tracker_mcp_gate=gate,
+    )
