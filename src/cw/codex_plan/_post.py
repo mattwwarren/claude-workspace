@@ -26,6 +26,8 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any, Final
 
+from cw.auto_dev_result import SCOPE_TIER_LARGE
+from cw.codex_plan._result import PARK_STATUSES
 from cw.codex_review_signals import (
     emit_verdict_comment_posted,
     emit_verdict_comment_skipped,
@@ -151,7 +153,7 @@ def render_park_comment(
             "### Advisory plan-review findings (address in the same round)\n\n"
             + "\n".join(advisory_findings)
         )
-    if result.scope.tier == "large" or result.status == "plan_pending_approval":
+    if result.scope.tier == SCOPE_TIER_LARGE or result.status in PARK_STATUSES:
         sections.append(
             _approval_requested(
                 ticket_id,

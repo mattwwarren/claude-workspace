@@ -43,10 +43,12 @@ if TYPE_CHECKING:
         ReviewerRunFailure,
     )
 
-PLAN_REVIEWER: Final = "Plan Reviewer"
-PLAN_SOUNDNESS_REVIEWER: Final = "Plan Soundness Reviewer"
-#: Station order: the soundness station runs only after a clean Plan Reviewer.
-PLAN_STATIONS: Final[tuple[str, str]] = (PLAN_REVIEWER, PLAN_SOUNDNESS_REVIEWER)
+# The role names and their agent specs have one source in the shared mapping.
+# Station order follows mapping insertion order: soundness runs only after a
+# clean Plan Reviewer.
+PLAN_STATIONS: Final[tuple[str, ...]] = tuple(PLAN_STATION_AGENT_FILES)
+PLAN_REVIEWER: Final = PLAN_STATIONS[0]
+PLAN_SOUNDNESS_REVIEWER: Final = PLAN_STATIONS[1]
 
 #: The blocked reason a non-clean station verdict parks with.
 STATION_BLOCK_REASONS: Final[dict[str, str]] = {
@@ -141,12 +143,17 @@ def _classify(
     """One station's verdict: a block (or ``None`` when clean) and its findings."""
     if failures or len(documents) != 1:
         if failures:
-            return _failure_block(failures[0]), []
-        details = f"{role} station returned {len(documents)} documents"
-        return StationBlock(CODEX_ERROR, details, retry_eligible=False), []
+            block = _failure_block(failures[0])
+        else:
+            details = f"{role} station returned {len(documents)} documents"
+            block = StationBlock(CODEX_ERROR, details, retry_eligible=False)
+        return block, []
     document = documents[0]
-    lines = [_format_finding(role, finding) for finding in document.findings]
     reason = STATION_BLOCK_REASONS[role]
+    if document.reviewer_role != role:
+        details = f"{role} station returned reviewer_role {document.reviewer_role!r}"
+        return StationBlock(reason, details, retry_eligible=False), []
+    lines = [_format_finding(role, finding) for finding in document.findings]
     if document.status != "ok":
         details = f"{role} returned status {document.status}: {document.detail}"
         return StationBlock(reason, details, retry_eligible=False), lines

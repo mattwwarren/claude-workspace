@@ -83,6 +83,7 @@ from cw.dev_queue.operator_constraints import record_plan_constraints
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import CODEX_BACKEND, OrchestratorEventType, Stage
+from cw.models.enums import StageIdentifier
 from cw.plan_decisions import parse_plan_decisions
 from cw.plan_fingerprint import PLAN_DRAFT_RELATIVE_PATH, compute_plan_draft_fingerprint
 from cw.tracker import TrackerClass, tracker_kind
@@ -103,9 +104,9 @@ TRACKER_MCP_UNAVAILABLE: Final = "tracker_mcp_unavailable_pre_dispatch"
 NO_OP: Final = "no_op"
 
 #: The stage identifiers the driver's stage events carry.
-STAGE_INTAKE: Final = "s0_intake"
-STAGE_PLAN_GENERATED: Final = "s1_plan_generated"
-STAGE_PLAN_REVIEWED: Final = "s1_plan_reviewed"
+STAGE_INTAKE: Final = StageIdentifier.S0_INTAKE.value
+STAGE_PLAN_GENERATED: Final = StageIdentifier.S1_PLAN_GENERATED.value
+STAGE_PLAN_REVIEWED: Final = StageIdentifier.S1_PLAN_REVIEWED.value
 
 _SCHEMA_NAME: Final = "plan-schema.json"
 _OUTPUT_NAME: Final = "plan-output.json"
