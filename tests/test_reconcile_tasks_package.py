@@ -124,6 +124,19 @@ _OWNER.update(
     )
 )
 
+_OWNER.update(
+    dict.fromkeys(
+        (
+            "_collect_timed_out_merged_candidates",
+            "_emit_never_claimed_refusals",
+            "_filter_merged_candidates",
+            "_is_never_claimed",
+            "complete_timed_out_merged_tasks",
+        ),
+        f"{PACKAGE}.merged_completion",
+    )
+)
+
 # (reader, module global it reads, owning module): the reader's globals must be
 # the owner's namespace, so a patch on the owner reaches the reader.
 PATCH_OWNERSHIP: tuple[tuple[str, str, str], ...] = (
@@ -167,6 +180,7 @@ COLD_IMPORTS: tuple[str, ...] = (
     f"{PACKAGE}._client_config",
     f"{PACKAGE}.backstops",
     f"{PACKAGE}.terminal_siblings",
+    f"{PACKAGE}.merged_completion",
 )
 
 
