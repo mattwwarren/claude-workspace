@@ -3,8 +3,9 @@
 ``cw review adjudicate`` tests whose cwd was the repo root once wrote their
 fixture deferrals into the dispatch worktree's real
 ``.cw/deferred-findings.md``, and finalize then filed them as review-debt
-tickets. ``tests/conftest.py``'s autouse ``_real_cw_guard`` arms this module
-for every unit test, so such a write fails the test that made it.
+tickets. ``tests/_shared/autouse_isolation.py``'s autouse ``_real_cw_guard``
+arms this module for every unit test, so such a write fails the test that made
+it.
 
 Mechanism: one process-wide audit hook (:func:`sys.addaudithook`, installed
 once by :func:`install_hook`) judges the write-shaped events in

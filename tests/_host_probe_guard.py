@@ -13,8 +13,8 @@ tests pass or fail according to the machine they ran on:
   readable cwd therefore parked every scan on the host, whatever the test
   meant to prove.
 
-This module holds the logic; ``tests/conftest.py`` wires it into autouse
-fixtures, the same split as ``tests/_git_ceiling.py``.
+This module holds the logic; ``tests/_shared/autouse_isolation.py`` wires it
+into autouse fixtures, the same split as ``tests/_git_ceiling.py``.
 
 Tool launch guard
 -----------------

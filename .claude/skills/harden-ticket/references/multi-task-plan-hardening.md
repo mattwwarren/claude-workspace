@@ -41,7 +41,7 @@ These are what the sweep must check for. They recurred across every task:
   other coverage to average against. Whole helper classes (e.g. a default
   client used only when `client=None`) are easy to leave 0%-covered.
 - **Fabricated test helpers.** A plan that imports `_write_config` when the real
-  helper is `_write_project_config_yaml` (in `conftest.py`) produces an
+  helper is `_write_project_config_yaml` (in `tests/_shared/cli_preflight.py`) produces an
   `ImportError` at collection — failing *every* test in the file, not just the
   new ones.
 - **Dropped registration entries.** A `cli/__init__.py` registration tuple
