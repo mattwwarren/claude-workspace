@@ -84,7 +84,14 @@ re-exports. Submodules:
 - ``tasks`` — dev-queue revert backstops and timed-out-merged completion.
 - ``unowned_running`` — adopts a RUNNING row whose launched session was never
   stamped on it, from the worktree's ``cw-context.json`` (#2591;
-  constructive, not ``reap_policy``-gated).
+  constructive, not ``reap_policy``-gated); otherwise parks or reverts an
+  unbound row whose claiming process is gone and that no worker owns
+  (NO_OWNER, ``reap_policy``-gated), or pages once one whose ownership cannot
+  be confirmed (#3328).
+- ``unowned_running_acts`` — that sweep's candidates, claim-context reader and
+  NO_OWNER / UNCONFIRMABLE acts (#3328).
+- ``unowned_running_text`` — that sweep's operator texts, stored note and
+  event payloads, pure (#3328).
 - ``deferred`` — the post-lock job sink (``DeferredReconcileJobs``,
   ``PostLockJob``, ``defer_surface_stop``, ``run_post_lock_jobs``) that
   carries the act phases' daemon stops and the recipes' gh calls out of

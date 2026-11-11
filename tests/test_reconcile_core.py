@@ -87,9 +87,12 @@ from tests._reconcile_helpers import (
     _ul_record,
     _write_idle_transcript_with_text,
     _write_transcript_records,
+    dead_launch_marker,
     interrupting_spawn,
+    mk_unowned_running_row,
     probe_sessions_lock_free,
     stub_worktree_probe,
+    use_reconcile_daemon,
 )
 from tests.conftest import _make_daemon_session, _make_ticket_task
 from tests.test_pr_hydrate import _pr_state
@@ -3509,3 +3512,99 @@ def test_reconcile_recipe_gh_calls_run_with_sessions_lock_free(
     assert rows["GEN-1"].stage == Stage.FINALIZE
     assert rows["GEN-2"].request_reviewer_fired_at is not None
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
+class TestUnownedRunningThroughReconcile:
+    """#3328: a dead-launcher unbound row, end to end through ``reconcile()``."""
+
+    @staticmethod
+    def _world(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, populated: bool
+    ) -> FakeNativeDaemonClient:
+        client = ClientConfig(
+            name="client-a",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "worktrees",
+        )
+        write_clients_yaml(client)
+        daemon = FakeNativeDaemonClient()
+        if populated:
+            # An unrelated worker: the roster is readable and non-empty (R13).
+            elsewhere = tmp_path / "elsewhere"
+            elsewhere.mkdir()
+            daemon.seed_live_worker(elsewhere)
+        use_reconcile_daemon(monkeypatch, daemon)
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+        mk_unowned_running_row(
+            client="client-a",
+            ticket_id="TKT-1",
+            attempts=1,
+            claimed_at=datetime.now(UTC) - timedelta(minutes=5),
+            launch_marker=dead_launch_marker(),
+        )
+        return daemon
+
+    def test_signal_only_parks(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        daemon = self._world(tmp_path, monkeypatch, populated=True)
+
+        reconcile()
+
+        row = load_dev_queue().tasks[0]
+        assert row.status is QueueItemStatus.BLOCKED_ON_USER
+        assert row.disposition == ReapReason.UNOWNED_RUNNING_ROW.value
+        assert daemon.stop_calls == []
+
+    def test_auto_reverts(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+        daemon = self._world(tmp_path, monkeypatch, populated=True)
+
+        reconcile()
+
+        assert load_dev_queue().tasks[0].status is QueueItemStatus.PENDING
+        assert daemon.stop_calls == []
+
+    def test_auto_with_an_empty_roster_does_not_revert(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+        self._world(tmp_path, monkeypatch, populated=False)
+
+        reconcile()
+
+        assert load_dev_queue().tasks[0].status is QueueItemStatus.RUNNING
+        assert (
+            read_events(event_types=[OrchestratorEventType.SESSION_REAP_PROPOSED]) == []
+        )
+
+    def test_outage_guard_short_circuits_first(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A live recorded session plus an empty roster returns before the sweep."""
+        save_state(
+            CwState(
+                sessions=[
+                    _make_daemon_session(
+                        id="live-1",
+                        name="client-a/auto-dev/OTHER",
+                        surface_ref="abcd1234",
+                    )
+                ]
+            )
+        )
+        self._world(tmp_path, monkeypatch, populated=False)
+        before = load_dev_queue().model_dump_json()
+
+        reconcile()
+
+        assert load_dev_queue().model_dump_json() == before
+        assert (
+            read_events(event_types=[OrchestratorEventType.SESSION_REAP_PROPOSED]) == []
+        )
+        assert (
+            read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+            == []
+        )

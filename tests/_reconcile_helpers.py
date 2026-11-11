@@ -22,9 +22,11 @@ from cw._config_migrate import migrate_cw_state
 from cw._lock_guard import LockRank, is_rank_held
 from cw.config import load_effective_clients, load_state, save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue, transition_task_status
+from cw.dispatch_loop_identity import START_TIME_TOLERANCE_NS
 from cw.events import read_events
 from cw.exceptions import RemoteRefUnresolvedError
 from cw.gh import BranchPr
+from cw.launch_marker import current_launch_marker
 from cw.local_runner import AIDER_LOG_RELATIVE_PATH
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
@@ -33,6 +35,7 @@ from cw.models import (
     DevQueueStore,
     LastResultSource,
     LaunchedFixWorker,
+    LaunchMarker,
     LocalLivenessHandle,
     OrchestratorConfig,
     OrchestratorEventType,
@@ -46,7 +49,7 @@ from cw.models import (
     Stage,
     TicketTask,
 )
-from cw.native_daemon import FakeNativeDaemonClient
+from cw.native_daemon import FakeNativeDaemonClient, NativeDaemonClient, WorkerHome
 from cw.reconcile import fix_dispatch
 from cw.reconcile._shared import _SENTINEL_PARTIAL_ROUTE_CONSUMED_KEY, ReapCandidate
 from cw.reconcile.codex_boot import CleanProbes
@@ -74,13 +77,19 @@ from cw.reconcile.review_recipes.auto_fix_ci import (
     _act_auto_fix_ci,
     _auto_fix_ci_guard_target,
 )
-from cw.worktree import OnBranch
+from cw.reconcile.unowned_running import (
+    UnownedFindings,
+    detect_unowned_running,
+    run_unowned_running_recovery,
+)
+from cw.worktree import OnBranch, worktree_path_for
 from tests import _git_sandbox
 from tests._clients_yaml import staged_client, write_clients_yaml
 from tests._ticket_view_helpers import ACME_TICKET
 from tests.conftest import (
     _make_daemon_session,
     _make_ticket_task,
+    _write_hook_context_file,
     _write_idle_transcript,
     _write_stop_hook_transcript,
 )
@@ -1310,6 +1319,183 @@ def write_unreadable_claim_context(worktree: Path, text: str) -> None:
     context_path = worktree / HOOK_CONTEXT_RELATIVE_PATH
     context_path.parent.mkdir(parents=True, exist_ok=True)
     context_path.write_text(text, encoding="utf-8")
+
+
+# --- unowned-running sweep scaffolding (#2591, #3328) ------------------------
+# Shared by tests/test_reconcile_unowned_running.py and
+# tests/test_reconcile_unowned_running_acts.py.
+
+_CLIENT = "client-a"
+_TICKET = "GEN-2591"
+_SID = "sess-2591"
+_CLAIM = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
+# Above every default pid_max, so nothing runs there (#2615).
+_DEAD_PID = 2_000_000_000
+
+
+def live_launch_marker() -> LaunchMarker:
+    """This process's launch marker: its owner is provably alive."""
+    marker = current_launch_marker()
+    assert marker is not None
+    return marker
+
+
+def dead_launch_marker(*, recycled: bool = False) -> LaunchMarker:
+    """A marker whose owner is provably gone.
+
+    The default names a pid nothing runs as; *recycled* names this live
+    process with a start time past the tolerance (the recycled-pid branch).
+    """
+    if not recycled:
+        return LaunchMarker(pid=_DEAD_PID, start_time_ns=1)
+    live = live_launch_marker()
+    return LaunchMarker(
+        pid=live.pid, start_time_ns=live.start_time_ns + START_TIME_TOLERANCE_NS + 1
+    )
+
+
+class RosterReadProbeDaemon(FakeNativeDaemonClient):
+    """Fake daemon recording whether ``dev_queue_lock`` is held at each roster read.
+
+    Each ``list_live_worker_homes()`` call appends ``is_rank_held(STATE)`` to
+    :attr:`reads`, then answers as the base fake does. *on_read*, when set,
+    runs before the answer, so a test can change the roster mid-sweep.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads: list[bool] = []
+        self.on_read: Callable[[RosterReadProbeDaemon, int], None] | None = None
+
+    def list_live_worker_homes(self) -> frozenset[WorkerHome] | None:
+        self.reads.append(is_rank_held(LockRank.STATE))
+        if self.on_read is not None:
+            self.on_read(self, len(self.reads))
+        return super().list_live_worker_homes()
+
+
+def make_client_cfg(tmp_path: Path) -> ClientConfig:
+    """The unowned-running tests' client, rooted under *tmp_path*."""
+    return ClientConfig(
+        name=_CLIENT,
+        workspace_path=tmp_path / "ws",
+        worktree_base=tmp_path / "worktrees",
+    )
+
+
+def _worktree(client: ClientConfig, ticket_id: str = _TICKET) -> Path:
+    wt = worktree_path_for(client, f"{client.feature_branch_prefix}/{ticket_id}")
+    wt.mkdir(parents=True, exist_ok=True)
+    return wt
+
+
+def _claim_context(
+    wt: Path,
+    *,
+    attempts: int,
+    session_id: str = _SID,
+    ticket_id: str = _TICKET,
+    client: str = _CLIENT,
+) -> None:
+    """The context a dispatch spawn writes for a claim, through the real writer."""
+    _write_hook_context_file(
+        wt,
+        session_id=session_id,
+        ticket_id=ticket_id,
+        client=client,
+        task=_make_ticket_task(ticket_id=ticket_id, client=client, attempts=attempts),
+    )
+
+
+def _session(**overrides: object) -> Session:
+    """The claim's recorded session: a task-spawned name, started after the claim."""
+    fields: dict[str, object] = {
+        "id": _SID,
+        "name": f"{_CLIENT}/auto-dev/{_TICKET}",
+        "client": _CLIENT,
+        "status": SessionStatus.COMPLETED,
+        "surface_ref": None,
+        "started_at": _CLAIM + timedelta(seconds=5),
+    }
+    fields.update(overrides)
+    return _make_daemon_session(**fields)
+
+
+def _seed(*sessions: Session) -> None:
+    state = load_state()
+    state.sessions.extend(sessions)
+    save_state(state)
+
+
+def _arrange(
+    client: ClientConfig,
+    *,
+    attempts: int = 1,
+    claimed_at: datetime | None = _CLAIM,
+    session: Session | None = None,
+    **row_overrides: object,
+) -> TicketTask:
+    """A claim whose stamp failed: context written, session recorded, row unbound."""
+    _claim_context(_worktree(client), attempts=attempts)
+    _seed(session if session is not None else _session())
+    return mk_unowned_running_row(
+        client=_CLIENT,
+        ticket_id=_TICKET,
+        attempts=attempts,
+        claimed_at=claimed_at,
+        **row_overrides,
+    )
+
+
+def _sweep(
+    client: ClientConfig,
+    *,
+    now: datetime = _CLAIM + timedelta(seconds=5),
+    native_live: set[str] | None = None,
+    config: OrchestratorConfig | None = None,
+) -> list[str]:
+    """Run the sweep for *client* alone; the default *now* is a young claim.
+
+    The daemon is whatever the test injected with :func:`use_reconcile_daemon`.
+    """
+    return run_unowned_running_recovery(
+        now=now,
+        clients={_CLIENT: client},
+        config=config or OrchestratorConfig(),
+        native_live=native_live or set(),
+    )
+
+
+def _row(ticket_id: str = _TICKET) -> TicketTask:
+    return next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+
+
+def _wrap_detect(monkeypatch: pytest.MonkeyPatch, between: Callable[[], None]) -> None:
+    """Run *between* after the real detect returned and before the acts."""
+    real = detect_unowned_running
+
+    def _detect(
+        store: DevQueueStore,
+        state: CwState,
+        clients: dict[str, ClientConfig],
+        *,
+        now: datetime,
+        daemon: NativeDaemonClient,
+        native_live: set[str],
+    ) -> UnownedFindings:
+        found = real(
+            store, state, clients, now=now, daemon=daemon, native_live=native_live
+        )
+        between()
+        return found
+
+    monkeypatch.setattr("cw.reconcile.unowned_running.detect_unowned_running", _detect)
+
+
+def _edit_queue(mutate: Callable[[DevQueueStore], None]) -> None:
+    store = load_dev_queue()
+    mutate(store)
+    save_dev_queue(store)
 
 
 def detect_adopt_plan_prefetched(
