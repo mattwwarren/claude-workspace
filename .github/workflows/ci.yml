@@ -92,7 +92,7 @@ jobs:
       - name: Coverage floors (per source tree)
         run: |
           uv run coverage report --include='src/cw/*' --fail-under=88
-          uv run coverage report --include='.claude/scripts/*' --fail-under=50
+          uv run coverage report --include='.claude/scripts/*' --fail-under=84
 
       - name: Test (integration)
         run: uv run pytest tests/ -v --tb=short -m integration
