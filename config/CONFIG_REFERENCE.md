@@ -2229,8 +2229,10 @@ requesting a bogus reviewer. For `claude-workspace` itself the key is set to
 
 ## Review Debt Filing (`tracking.primary.auto_create_issues`, #3041)
 
-`cw review adjudicate` files one review-debt ticket per deferred finding at
-deferral time (RFC 0017 (pending merge) D-7). Whether cw may publish those
+`cw review adjudicate` files deferred findings at deferral time (RFC 0017
+(pending merge) D-7), as one `review-debt` roll-up issue per queue ticket: a
+checklist with one item per finding, continued in a numbered issue past 60000
+characters (`docs/dispatch-runbook.md` "Review debt filing"). Whether cw may publish those
 tickets itself is a per-repo opt-in in `.claude/project-config.yaml`
 (repo-committed), under the same `tracking.primary` block that
 `cw.tracker.resolve_tracker` reads:
@@ -2246,11 +2248,13 @@ tracking:
 - **Type and default:** a YAML bool. Absent, `null`, a string such as `"true"`
   and any other non-bool value all mean `false`: only a literal YAML `true`
   files.
-- **`true` on a `github-issues` client:** cw files each deferral through `gh`
-  with the `review-debt` label (created once per run with `gh label create
-  --force`), deduplicating against the dev-queue row's `review_debt` records and
-  then the `<!-- cw-review-debt: <key> -->` body marker among open
-  `review-debt` issues.
+- **`true` on a `github-issues` client:** cw lists each deferral in the queue
+  ticket's roll-up issue through `gh` with the `review-debt` label (created once
+  per run with `gh label create --force`), deduplicating against the dev-queue
+  row's `review_debt` records and then the `<!-- cw-review-debt: <key> -->` body
+  marker among open `review-debt` issues. The marker is found in a roll-up item
+  and in a legacy per-finding issue alike, so a finding a legacy issue already
+  tickets is not listed again; legacy issues are never edited.
 - **`false` or absent on a `github-issues` client:** emit-only. cw writes
   redacted payloads to `.cw/review-debt/` and records `mode: emitted` rows;
   nothing is published. Step H3 or the operator files them.
@@ -2310,7 +2314,8 @@ clients:
   the debt was filed.
 - **Which records.** Any review-debt record with a ticket ID qualifies, on any tracker and in
   any mode. A record whose `pr_url` names a different PR is skipped (`pr_mismatch`); a record
-  with no `pr_url` falls back to the merged PR. Dedupe is by debt ticket ID within one merge.
+  with no `pr_url` falls back to the merged PR. Dedupe is by debt ticket ID within one merge,
+  so a roll-up issue (one ID, many records) is one queued row.
 - **Linear caveat.** cw checks only the shape of a Linear ID, not that the ticket exists, and
   there is no ticket-state check at merge time. A debt ticket closed between filing and merge
   is still enqueued.

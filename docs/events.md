@@ -3647,7 +3647,11 @@ default-event rules above apply unchanged.
 ```
 **Semantics:** #3041 (RFC 0017 (pending merge) D-7). cw created the review-debt
 ticket for one deferred finding on the tracker, and it fires right after the
-create succeeds, once per entry the library creates. `mode` is always
+create or append succeeds, once per finding the library lists. Since the
+roll-up change several findings of one queue ticket share one issue, so several
+`review.debt_filed` events carry the same `tracker_id` and `url` (an append to an
+existing roll-up fires the event for the appended findings only; `url` is then a
+sibling record's URL, or `#<n>` when the row holds none). `mode` is always
 `"filed"`. A ticket that already existed is not this event: a marker-recovered
 match is `review.debt_deduped` below.
 
@@ -3678,11 +3682,12 @@ record read after the fact, not an interrupt.
 ```
 **Semantics:** #3041. One entry was not filed because a ticket for its key
 already exists; fires once per such entry. `tracker_id` is the existing ticket.
-`via` is `"row"` when the `review_debt` record on the dev-queue row matched and
+`tracker_id` may be a roll-up issue shared by many keys. `via` is `"row"` when the `review_debt` record on the dev-queue row matched and
 that ticket is still OPEN (one `gh issue view --json state` read; since #3044 a
 CLOSED recorded ticket is a miss and files a new one, while an unknown state
 still dedupes), or `"marker"` when the `<!-- cw-review-debt: <key> -->` marker matched
-an OPEN `review-debt` issue for the same queue ticket, in which case a recovered
+an OPEN `review-debt` issue for the same queue ticket (a legacy per-finding issue
+or an item of a roll-up), in which case a recovered
 `filed` record is also written. A CLOSED match is a miss and files a new ticket.
 
 Not added to `_DEFAULT_OPERATOR_EVENT_TYPES`.
@@ -3783,7 +3788,7 @@ Not added to `_DEFAULT_OPERATOR_EVENT_TYPES`.
 {
   "ticket_id": "<queue ticket id parsed from the issue body, or null>",
   "client": "<client>",
-  "key": "<debt key from the body's key marker, or null>",
+  "key": "<debt key from the body's key marker, or null (also null for a roll-up, which holds many keys)>",
   "tracker": "github-issues",
   "tracker_id": "<issue number, as a string>",
   "url": "https://github.com/<owner>/<repo>/issues/<n>",
@@ -3852,7 +3857,7 @@ from the `cw dev-queue serve` dispatch loop (#3045, RFC 0017 D-8).
   "ticket_id": "<parent queue ticket id>",
   "debt_ticket_id": "<debt ticket id, as enqueued>",
   "lane": "<the configured debt lane>",
-  "key": "<debt record key>",
+  "key": "<debt record key; for a roll-up issue, the key of the record kept for its ID>",
   "pr_number": 123
 }
 ```

@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Review-debt filing opens one roll-up issue per queue ticket instead of one issue per deferred finding.** `cw review adjudicate` and `cw review debt file` list a queue ticket's deferred findings as checklist items (`- [ ] **<severity>** <file> - <summary>`, with why-deferred, rule and fenced evidence) in a single `review-debt` issue titled `review-debt: #<ticket> — <N> deferred findings (<M> MUST_FIX)`; ticket #3060 filed 52 issues in two minutes and now files one. Each item carries its own `<!-- cw-review-debt: <key> -->` marker, so re-filing is idempotent, a later pass appends only findings not already listed (a ticked box is kept and never re-added), and a body that would pass `ROLLUP_BODY_MAX_CHARS` (60000) continues in a numbered `part <n>` issue instead of truncating a finding. The title count is set at creation and is not rewritten by an append. Legacy per-finding issues are neither migrated nor edited, and a finding they already ticket (open or closed-and-recorded) is still recognised and not listed again. Downstream: the row keeps one record per finding, so records share a `ticket_id`; `cw review debt link-pr` links each issue once, the close sweep closes a roll-up (key-less comment, `key: null` events) once every linked PR closed unmerged, and the debt auto-enqueue picks one record per issue ID, preferring the merged PR's, so a roll-up queues as one row. Emitted payloads (Linear, `auto_create_issues: false`) stay one per finding. No event type, `--json` field or headless-contract field changed. See `docs/dispatch-runbook.md` "Review debt filing".
+
 ## [1.95.0] - 2026-11-11
 
 ### Added
