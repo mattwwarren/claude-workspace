@@ -51,6 +51,13 @@ _FEEDBACK_NOTE: Final = (
 )
 
 
+def _escape_injected_fences(text: str) -> str:
+    """Keep untrusted section bodies from manufacturing a CW delimiter."""
+    return text.replace("=== BEGIN CW-INJECTED:", "=== BEGIN CW-INJECTED\\:").replace(
+        "=== END CW-INJECTED:", "=== END CW-INJECTED\\:"
+    )
+
+
 def _feedback_body(feedback: ReviewFeedback) -> str:
     return (
         f"{_FEEDBACK_NOTE}\n\n"
@@ -98,6 +105,8 @@ def render_impl_prompt(
     ]
     parts = [contract]
     parts.extend(
-        "\n" + _section(name, body) for name, body in sections if body is not None
+        "\n" + _section(name, _escape_injected_fences(body))
+        for name, body in sections
+        if body is not None
     )
     return "".join(parts)

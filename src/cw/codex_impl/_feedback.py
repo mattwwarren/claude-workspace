@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from cw._git import LOCAL_GIT_TIMEOUT_SECONDS, git_output, run_git
+from cw.codex_fix_loop.posted_text import redact_and_cap
 from cw.codex_impl._result import IMPL_FAILED, ImplBlock
 from cw.gh import fetch_pr_view, fetch_repo_name_with_owner, github_pr_url
 from cw.merge_probe import merge_tree, probe_default_merge
@@ -36,7 +37,7 @@ STALE_PREFIX: Final = "review_feedback_stale"
 CONFLICT_PREFIX: Final = "merge_conflict_with_default_branch"
 PROBE_UNAVAILABLE: Final = "merge_probe_unavailable"
 
-_PR_FIELDS: Final = "number,headRefOid,headRefName,url"
+_PR_FIELDS: Final = "number,headRefOid,headRefName,url,headRepository"
 _GH_TIMEOUT_SECONDS: Final = 30
 _MERGE_CONFLICT_RC: Final = 1
 _MERGE_CLEAN_RC: Final = 0
@@ -66,6 +67,9 @@ def _pr_mismatch(
 ) -> str | None:
     """Why the live PR view and the local worktree do not match *feedback*."""
     head, branch = local
+    head_repository = view.get("headRepository")
+    if isinstance(head_repository, dict):
+        head_repository = head_repository.get("nameWithOwner")
     checks = (
         (
             view.get("number") == feedback.pr_number,
@@ -74,6 +78,11 @@ def _pr_mismatch(
         (
             view.get("url") == github_pr_url(feedback.repo, feedback.pr_number),
             f"live PR url {view.get('url')!r} does not identify the PR",
+        ),
+        (
+            isinstance(head_repository, str) and head_repository == feedback.repo,
+            f"live PR head repository {head_repository!r} != feedback repo "
+            f"{feedback.repo}",
         ),
         (
             view.get("headRefOid") == feedback.reviewed_sha,
@@ -159,9 +168,11 @@ def _fetch_default(worktree: Path, default_branch: str) -> str | None:
             timeout=LOCAL_GIT_TIMEOUT_SECONDS,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
-        return f"git fetch origin {default_branch} did not run: {exc}"
+        return (
+            f"git fetch origin {default_branch} did not run: {redact_and_cap(str(exc))}"
+        )
     if fetched.returncode != 0:
-        tail = (fetched.stderr or "").strip()[-_ERROR_TAIL_CHARS:]
+        tail = redact_and_cap((fetched.stderr or "").strip()[-_ERROR_TAIL_CHARS:])
         return f"git fetch origin {default_branch} failed: {tail}"
     return None
 
@@ -181,12 +192,14 @@ def probe_default_branch(
         return ProbeOutcome(friction=(f"{PROBE_UNAVAILABLE}: {failed}",))
     probe = probe_default_merge(worktree, default_branch)
     if probe.state == "unavailable":
-        return ProbeOutcome(friction=(f"{PROBE_UNAVAILABLE}: {probe.detail}",))
+        return ProbeOutcome(
+            friction=(f"{PROBE_UNAVAILABLE}: {redact_and_cap(probe.detail)}",)
+        )
     if probe.state != "conflict":
         return ProbeOutcome()
     if repair:
         return ProbeOutcome(needs_merge=True, conflicted_files=probe.conflicted_files)
-    files = ", ".join(probe.conflicted_files)
+    files = redact_and_cap(", ".join(probe.conflicted_files))
     return ProbeOutcome(
         block=ImplBlock(
             IMPL_FAILED,
@@ -213,13 +226,16 @@ def merge_default_on_conflict(
     if tree.tree is None:
         return ImplBlock(
             IMPL_FAILED,
-            f"cannot measure the default-branch merge: {tree.detail or tree.status}",
+            "cannot measure the default-branch merge: "
+            + redact_and_cap(tree.detail or tree.status),
         )
     merged = run_git(
         ["merge", "--no-commit", "--no-ff", ref], cwd=worktree, capture_output=True
     )
     if merged.returncode not in {_MERGE_CLEAN_RC, _MERGE_CONFLICT_RC}:
-        tail = (merged.stderr or merged.stdout or "").strip()[-_ERROR_TAIL_CHARS:]
+        tail = redact_and_cap(
+            (merged.stderr or merged.stdout or "").strip()[-_ERROR_TAIL_CHARS:]
+        )
         return ImplBlock(IMPL_FAILED, f"git merge {ref} failed: {tail}")
     names = git_output(
         ["diff", "--name-only", "--no-renames", f"HEAD...{ref}"], cwd=worktree

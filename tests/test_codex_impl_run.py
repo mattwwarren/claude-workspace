@@ -219,6 +219,7 @@ def harness(
                     {
                         "headRefName": branch,
                         "headRefOid": head,
+                        "headRepository": {"nameWithOwner": REPO},
                         "number": PR_NUMBER,
                         "url": PR_URL,
                     }
@@ -654,6 +655,7 @@ def _repin(h: Harness) -> None:
             {
                 "headRefName": BRANCH,
                 "headRefOid": sha,
+                "headRepository": {"nameWithOwner": REPO},
                 "number": PR_NUMBER,
                 "url": PR_URL,
             }

@@ -28,8 +28,11 @@ from cw.auto_dev_result.schema._vocab import (
     EMPTY_DIFF_BLOCKER_REASON,
     PLAN_SCOPE_DRIFT_BLOCKER_REASON,
 )
+from cw.codex_fix_loop.commit import _scope_violations
+from cw.codex_fix_loop.fence import scope_violation_breach
 from cw.codex_fix_loop.gates import run_cycle_gates
 from cw.codex_fix_loop.hook_failure import CommitHookFailedError, hook_failure_breach
+from cw.codex_fix_loop.posted_text import redact_and_cap
 from cw.codex_impl._result import (
     IMPL_FAILED,
     PLAN_MISSING,
@@ -49,6 +52,7 @@ from cw.worktree import _parse_numstat_totals
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
+    from cw.auto_dev_result.schema._vocab import ScopeTier
     from cw.codex_fix_loop.baseline import CycleBaseline, DirtyStart
     from cw.codex_fix_loop.fence import FenceBreach
     from cw.codex_fix_loop.gates import GatePlan, GateScope
@@ -133,13 +137,21 @@ def check_existing_branch_work(facts: GitFacts, task: TicketTask) -> ImplBlock |
     return None
 
 
-def check_on_branch(worktree: Path, expected: str) -> ImplBlock | None:
-    """Block on a detached HEAD or a branch other than *expected*."""
+def check_on_branch(
+    worktree: Path, expected: str, *, default_branch: str | None = None
+) -> ImplBlock | None:
+    """Block on a detached, mismatched, or configured default branch."""
     current = git_output(["branch", "--show-current"], cwd=worktree).strip()
     if not current:
         return ImplBlock(
             IMPL_FAILED,
             f"HEAD is detached; the IMPL turn must run on branch {expected!r}",
+        )
+    if default_branch is not None and default_branch in {current, expected}:
+        return ImplBlock(
+            IMPL_FAILED,
+            "the IMPL turn cannot run on the configured default branch "
+            f"{default_branch!r}",
         )
     if current != expected:
         return ImplBlock(
@@ -239,6 +251,45 @@ def approved_extra(worktree: Path, task: TicketTask) -> tuple[list[str], list[st
     return sorted(approved), []
 
 
+def repair_allowed_files(
+    worktree: Path, *, fork_point: str, approved: Iterable[str]
+) -> frozenset[str] | None:
+    """Derive the bounded file fence for an adopted repair with no plan."""
+    if not fork_point:
+        return None
+    try:
+        names = git_output(
+            ["diff", "--name-only", "--no-renames", f"{fork_point}...HEAD"],
+            cwd=worktree,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    files = {line for line in names.splitlines() if line}
+    files.update(approved)
+    return frozenset(files) or None
+
+
+def no_plan_sensitive_block(
+    worktree: Path,
+    *,
+    touched: Iterable[str],
+    allowed_files: frozenset[str],
+    scope_tier: ScopeTier,
+    default_branch: str,
+) -> ImplBlock | None:
+    """Run the shared sensitive-path check for a no-plan repair fence."""
+    violations = _scope_violations(
+        worktree,
+        touched,
+        allowed_files,
+        scope_tier,
+        default_branch,
+    )
+    if not violations:
+        return None
+    return fence_block(scope_violation_breach(violations, 0))
+
+
 def _verdict(stdout: str) -> dict[str, Any] | None:
     try:
         data = json.loads(stdout)
@@ -250,17 +301,18 @@ def _verdict(stdout: str) -> dict[str, Any] | None:
 def _drift_block(verdict: dict[str, Any] | None, stderr: str) -> ImplBlock:
     """The exit-1 disposition: a valid verdict is drift, else a tooling failure."""
     if verdict is None or "triggered" not in verdict:
-        tail = stderr.strip()[-_STDERR_TAIL_CHARS:]
+        tail = redact_and_cap(stderr.strip()[-_STDERR_TAIL_CHARS:])
         return ImplBlock(
             IMPL_FAILED,
             "the scope-conformance script exited 1 without a valid JSON verdict "
             f"(a tooling failure, not drift): {tail}",
         )
-    extras = [str(path) for path in verdict.get("extra_files") or []]
+    extras = [redact_and_cap(str(path)) for path in verdict.get("extra_files") or []]
+    allowed_extra = redact_and_cap(str(verdict.get("allowed_extra")))
     return ImplBlock(
         PLAN_SCOPE_DRIFT_BLOCKER_REASON,
         f"the delivered diff touches {len(extras)} file(s) beyond the plan's "
-        f"Files Modified allowance (allowed extra: {verdict.get('allowed_extra')}). "
+        f"Files Modified allowance (allowed extra: {allowed_extra}). "
         "extra_files:\n" + "\n".join(f"- {path}" for path in extras),
     )
 
@@ -319,7 +371,8 @@ def run_scope_conformance(
         )
     except OSError as exc:
         return ImplBlock(
-            IMPL_FAILED, f"the scope-conformance script did not run: {exc}"
+            IMPL_FAILED,
+            "the scope-conformance script did not run: " + redact_and_cap(str(exc)),
         ), friction
     return _scope_outcome(done, friction)
 
@@ -329,16 +382,18 @@ def _scope_outcome(
 ) -> tuple[ImplBlock | None, list[str]]:
     verdict = _verdict(done.stdout)
     if done.returncode == _GIT_OK:
-        extras = [str(p) for p in (verdict or {}).get("extra_files") or []]
+        extras = [
+            redact_and_cap(str(p)) for p in (verdict or {}).get("extra_files") or []
+        ]
         if extras:
             friction = [*friction, GROWTH_FRICTION_PREFIX + ", ".join(extras)]
         return None, friction
     if done.returncode == _EXIT_DRIFT:
         return _drift_block(verdict, done.stderr), friction
     if done.returncode == _EXIT_USAGE:
-        note = UNPARSED_FRICTION_PREFIX + done.stderr.strip()
+        note = UNPARSED_FRICTION_PREFIX + redact_and_cap(done.stderr.strip())
         return None, [*friction, note]
-    tail = done.stderr.strip()[-_STDERR_TAIL_CHARS:]
+    tail = redact_and_cap(done.stderr.strip()[-_STDERR_TAIL_CHARS:])
     block = ImplBlock(
         IMPL_FAILED,
         f"the scope-conformance script exited {done.returncode}: {tail}",
@@ -375,7 +430,9 @@ def run_quality_gates(
     if failure is None:
         return None
     if failure.kind == "unavailable":
-        what = f"the repo's quality gates could not be run: {failure.why}"
+        what = "the repo's quality gates could not be run: " + redact_and_cap(
+            failure.why or "no reason recorded"
+        )
     elif failure.kind == "red":
         what = (
             f"the repo's quality gate `{failure.gate}` failed with exit code "
@@ -391,7 +448,7 @@ def run_quality_gates(
         "Nothing was committed or pushed."
     )
     if failure.output:
-        details += f"\n\nLast lines of gate output:\n{failure.output}"
+        details += "\n\nLast lines of gate output:\n" + redact_and_cap(failure.output)
     return ImplBlock(IMPL_FAILED, details)
 
 
@@ -487,5 +544,7 @@ def commit_failure_block(exc: subprocess.CalledProcessError) -> ImplBlock:
             f"turn for it. {breach.details}"
         )
         return ImplBlock(CODEX_FIX_HOOK_FAILED, details)
-    tail = (exc.stderr or exc.stdout or "").strip()[-_STDERR_TAIL_CHARS:]
+    tail = redact_and_cap(
+        (exc.stderr or exc.stdout or "").strip()[-_STDERR_TAIL_CHARS:]
+    )
     return ImplBlock(CODEX_ERROR, f"git commit failed (exit {exc.returncode}): {tail}")

@@ -58,6 +58,7 @@ from cw.codex_fix_loop.fence import (
 from cw.codex_fix_loop.gates import GateScope, plan_cycle_gates
 from cw.codex_fix_loop.growth import check_growth_budget
 from cw.codex_fix_loop.hook_failure import as_hook_failure
+from cw.codex_fix_loop.posted_text import redact_and_cap
 from cw.codex_fix_loop.push import push_and_verify_head
 from cw.codex_impl._argv import build_impl_argv, require_impl_sandbox_argv
 from cw.codex_impl._feedback import (
@@ -75,6 +76,8 @@ from cw.codex_impl._gates import (
     commit_failure_block,
     dirty_start_block,
     fence_block,
+    no_plan_sensitive_block,
+    repair_allowed_files,
     run_quality_gates,
     run_scope_conformance,
     staged_totals,
@@ -149,6 +152,7 @@ class _Pre:
     facts: GitFacts
     prompt: str
     needs_merge: bool
+    allowed: frozenset[str]
     approved: frozenset[str]
     friction: list[str]
 
@@ -365,7 +369,7 @@ class _Run:
                 "the IMPL turn hit a model capacity limit",
                 retry_eligible=True,
             )
-        tail = run.stderr.strip()[-_STDERR_TAIL_CHARS:]
+        tail = redact_and_cap(run.stderr.strip()[-_STDERR_TAIL_CHARS:])
         return ImplBlock(CODEX_ERROR, f"the IMPL turn exited {run.returncode}: {tail}")
 
 
@@ -399,10 +403,12 @@ def _guards(run: _Run) -> tuple[str | None, GitFacts] | ImplBlock:
     plan_text = _read_plan(run.worktree)
     block = check_plan_present(plan_text, run.task)
     if block is None:
-        block = verify_review_feedback(run.task, run.worktree)
-    if block is None:
         expected = resolve_feature_branch(run.task.ticket_id, run.client, run.task)
-        block = check_on_branch(run.worktree, expected)
+        block = check_on_branch(
+            run.worktree, expected, default_branch=run.client.default_branch
+        )
+    if block is None:
+        block = verify_review_feedback(run.task, run.worktree)
     if block is not None:
         return block
     facts = git_facts(run.worktree, run.client.default_branch)
@@ -422,13 +428,33 @@ def _prepare(run: _Run) -> _Pre | ImplBlock:
     if probe.block is not None:
         return probe.block
     approved, approval_friction = approved_extra(run.worktree, run.task)
-    allowed = fix_scope_allowlist(plan_text, approved)
+    if plan_text is None:
+        allowed = repair_allowed_files(
+            run.worktree,
+            fork_point=facts["fork_point"],
+            approved=approved,
+        )
+        if allowed is None:
+            return ImplBlock(
+                IMPL_FAILED,
+                "no-plan repair entry has no validated files from the reviewed "
+                "branch or an approved scope-drift allowance; cw will not launch "
+                "an unbounded repair turn",
+            )
+    else:
+        allowed = fix_scope_allowlist(plan_text, approved)
     prompt = run.prompt(plan_text, allowed, _merge_note(probe.conflicted_files))
     if isinstance(prompt, ImplBlock):
         return prompt
     friction = [*probe.friction, *approval_friction]
     return _Pre(
-        plan_text, facts, prompt, probe.needs_merge, frozenset(approved), friction
+        plan_text,
+        facts,
+        prompt,
+        probe.needs_merge,
+        allowed or frozenset(),
+        frozenset(approved),
+        friction,
     )
 
 
@@ -501,9 +527,29 @@ def _fence_blocks(run: _Run, flow: _Flow, touched: set[str]) -> ImplBlock | None
     block = check_empty_diff(run.worktree, flow.base)
     if block is not None:
         return block
+    if flow.pre.plan_text is None:
+        files, lines = staged_totals(run.worktree, flow.base)
+        tier = resolve_review_scope_tier(None, run.task.scope_hint, (files, lines))
+        if tier is None:
+            return ImplBlock(
+                IMPL_FAILED,
+                "no-plan repair entry has no resolvable scope tier for its "
+                "sensitive-path check",
+            )
+        block = no_plan_sensitive_block(
+            run.worktree,
+            touched=touched,
+            allowed_files=flow.pre.allowed | _merge_files(flow),
+            scope_tier=tier,
+            default_branch=run.client.default_branch,
+        )
+        if block is not None:
+            return block
     allowed = fix_scope_allowlist(
         flow.pre.plan_text, flow.pre.approved | _merge_files(flow)
     )
+    if flow.pre.plan_text is None:
+        allowed = flow.pre.allowed | _merge_files(flow)
     breach = check_fix_fence(
         run.worktree,
         default_branch=run.client.default_branch,
@@ -578,7 +624,9 @@ def _push(run: _Run) -> ImplBlock | None:
     try:
         push_and_verify_head(run.worktree, sha)
     except subprocess.CalledProcessError as exc:
-        tail = (exc.stderr or exc.stdout or "").strip()[-_STDERR_TAIL_CHARS:]
+        tail = redact_and_cap(
+            (exc.stderr or exc.stdout or "").strip()[-_STDERR_TAIL_CHARS:]
+        )
         return ImplBlock(
             IMPL_NOT_PUSHED,
             f"the IMPL commit {sha[:12]} was made locally but not pushed "

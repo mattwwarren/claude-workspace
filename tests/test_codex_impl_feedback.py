@@ -72,6 +72,7 @@ def _script(repo: Path, gh: FakeGhCli, **pr: Any) -> None:
     view = {
         "headRefName": _BRANCH,
         "headRefOid": sha,
+        "headRepository": {"nameWithOwner": _REPO},
         "number": _PR,
         "url": _URL,
         **pr,
@@ -111,7 +112,7 @@ class TestVerifyReviewFeedback:
                 "view",
                 _URL,
                 "--json",
-                "number,headRefOid,headRefName,url",
+                "number,headRefOid,headRefName,url,headRepository",
             ],
         ]
         assert all(r.cwd == repo for r in gh.records)
