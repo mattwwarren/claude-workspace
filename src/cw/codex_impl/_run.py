@@ -104,8 +104,12 @@ from cw.codex_review import (
     _codex_scratch_dir,
     _is_model_capacity_error,
 )
-from cw.codex_review_signals import COMMON_TURN_FAULTS, record_event_best_effort
-from cw.codex_stage_completion import complete_session_through_door, run_guarded_stage
+from cw.codex_review_signals import record_event_best_effort
+from cw.codex_stage_completion import (
+    STAGE_FAULTS,
+    complete_session_through_door,
+    run_guarded_stage,
+)
 from cw.codex_stage_facts import resolve_plan_source
 from cw.config import load_effective_config
 from cw.contract_manifest import RenderError
@@ -674,7 +678,7 @@ def _after_turn(
         return run.blocked(pushed)
     try:
         return _stamp_final(run, flow, payload)
-    except COMMON_TURN_FAULTS as exc:
+    except STAGE_FAULTS as exc:
         # The commit is already pushed. Convert a post-push stamping failure
         # into a durable terminal result so the guarded-stage crash handler
         # cannot incorrectly return the row to PENDING and dispatch it again.
@@ -791,7 +795,7 @@ def _execute(run: _Run) -> None:
     payload = result.model_dump(mode="json")
     try:
         complete_session_through_door(run.sid, payload)
-    except COMMON_TURN_FAULTS:
+    except STAGE_FAULTS:
         # A pushed IMPL commit must not be stranded by a transient completion
         # failure. The door is idempotent: a retry either writes the result or
         # observes the first write and still completes the session.
