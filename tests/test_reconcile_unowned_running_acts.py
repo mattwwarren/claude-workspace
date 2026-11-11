@@ -16,7 +16,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
+from cw.cli import main
 from cw.dev_queue import load_dev_queue
 from cw.events import read_events
 from cw.models import (
@@ -48,6 +50,8 @@ from cw.reconcile.unowned_running_text import (
     CONTEXT_NO_ATTEMPT,
     CONTEXT_OTHER_CLAIM,
     CONTEXT_SESSION_ABSENT,
+    NO_OWNER_PAGE_REASON,
+    UNCONFIRMED_PAGE_REASON,
     backend_names_text,
     claim_age_seconds,
     context_clause,
@@ -63,6 +67,7 @@ from tests._reconcile_helpers import (
     _CLIENT,
     _DEAD_PID,
     _TICKET,
+    EVENTS_DOC,
     RosterReadProbeDaemon,
     _attention_events,
     _claim_context,
@@ -75,6 +80,7 @@ from tests._reconcile_helpers import (
     _worktree,
     _wrap_detect,
     dead_launch_marker,
+    events_doc_bullet,
     make_client_cfg,
     mk_unowned_running_row,
     use_reconcile_daemon,
@@ -971,3 +977,101 @@ class TestTexts:
         now = datetime(2026, 10, 7, 9, 1, 30, tzinfo=UTC)
 
         assert claim_age_seconds(claimed_at, now) == expected
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _reap_proposed_section() -> str:
+    text = EVENTS_DOC.read_text(encoding="utf-8")
+    start = text.index("### `session.reap_proposed`")
+    end = text.find("\n### ", start + 1)
+    return text[start : end if end != -1 else len(text)]
+
+
+class TestEventDocumented:
+    @pytest.mark.parametrize(
+        ("status", "session_id"),
+        [
+            (NO_OWNER_PAGE_REASON, "no-owner:<client>/<ticket>#<attempts>"),
+            (
+                UNCONFIRMED_PAGE_REASON,
+                "unconfirmed:<client>/<ticket>#<attempts>:<cause>",
+            ),
+        ],
+    )
+    def test_paused_status_bullets(self, status: str, session_id: str) -> None:
+        bullet = _flat(events_doc_bullet(f'- `"{status}"`'))
+
+        assert f"`{session_id}`" in bullet
+        assert "canonical nine keys" in bullet.lower()
+        assert "No push notification" in bullet
+
+    def test_unconfirmed_bullet_names_every_cause(self) -> None:
+        bullet = _flat(events_doc_bullet(f'- `"{UNCONFIRMED_PAGE_REASON}"`'))
+
+        for cause in ALL_CAUSES:
+            assert f"`{cause}`" in bullet
+
+    def test_reap_proposed_documents_the_no_owner_evidence(self) -> None:
+        section = _flat(_reap_proposed_section())
+
+        assert '`reason` is `"unowned_running_row"`' in section
+        assert '`session_id` is `""`' in section
+        for key in (
+            "roster_readable",
+            "worktree_path",
+            "context_state",
+            "launch_owner_pid",
+            "launch_owner_alive",
+            "claim_age_seconds",
+        ):
+            assert f"`evidence.{key}`" in section
+        for state in (
+            CONTEXT_MISSING,
+            CONTEXT_NO_ATTEMPT,
+            CONTEXT_ATTEMPT_MISMATCH,
+            CONTEXT_OTHER_CLAIM,
+            CONTEXT_SESSION_ABSENT,
+        ):
+            assert f"`{state}`" in section
+        assert "acts on nothing" in section
+
+
+class TestDocsNameValidCommands:
+    """The new bullets name real commands, in the order that makes them valid."""
+
+    def test_unconfirmed_bullet_names_cancel_then_requeue_from_cancelled(
+        self,
+    ) -> None:
+        bullet = _flat(events_doc_bullet(f'- `"{UNCONFIRMED_PAGE_REASON}"`'))
+
+        cancel = bullet.index("`cw dev-queue cancel <ticket> -c <client>`")
+        requeue = bullet.index(
+            "`cw dev-queue requeue <ticket> -c <client> --from-cancelled`"
+        )
+        assert cancel < requeue
+        assert "cw doctor --reap" not in bullet
+
+    def test_no_owner_bullet_names_requeue_and_doctor_reap(self) -> None:
+        bullet = _flat(events_doc_bullet(f'- `"{NO_OWNER_PAGE_REASON}"`'))
+
+        assert "`cw dev-queue requeue <ticket> -c <client>`" in bullet
+        assert "`cw doctor --reap` (class 5)" in bullet
+
+    @pytest.mark.parametrize(
+        ("args", "flag"),
+        [
+            (["dev-queue", "cancel"], None),
+            (["dev-queue", "requeue"], "--from-cancelled"),
+            (["doctor"], "--reap"),
+        ],
+        ids=["cancel", "requeue", "doctor_reap"],
+    )
+    def test_named_commands_exist(self, args: list[str], flag: str | None) -> None:
+        result = CliRunner().invoke(main, [*args, "--help"])
+
+        assert result.exit_code == 0, result.output
+        if flag is not None:
+            assert flag in result.output

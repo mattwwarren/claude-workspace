@@ -1067,7 +1067,14 @@ common wedge conditions:
   (`task.session_adopted`, #2591) once the worktree's `cw-context.json` ties
   the session to the claim, after which it is an ordinary bound row and no
   longer a wedge. A row reconcile cannot tie, for example because the
-  `sessions.json` write also failed, is still reported here.
+  `sessions.json` write also failed, is still reported here. **Check the
+  roster and `cw list` first** (#3328): class 2 reverts a RUNNING row with no
+  session, or an absent one, even while a worker is live, and it does not read
+  the launch marker or skip a row carrying the `?unowned_unconfirmed` note.
+  Reconcile itself parks a row whose claiming process is provably gone
+  (`unowned_running_row`, described with the other dispositions under
+  "Circuit-breaker pause and held slots") and pages one it cannot tie
+  (`unowned_running_unconfirmed`).
 - `wedge/task-running-completed-session` — reverts task to PENDING.
 - `wedge/terminal-sibling-park` — a `BLOCKED_ON_USER` row with
   `disposition=terminal_sibling` (see below) that was never claimed
@@ -4065,7 +4072,53 @@ reason. Wait for the annotation to clear; only a tick line still reading
   when no worker is live for the ticket, release it with `cw doctor --reap`
   (class 2) or `cw dev-queue cancel` followed by
   `cw dev-queue requeue --from-cancelled`. The row's `advisory_note` reads
-  `?no_session` until it is bound or claimed again.
+  `?no_session` until it is bound or claimed again. That "adopts once the
+  evidence ties" holds only when the evidence can tie: a stale context (an
+  earlier claim's session) never ties, and a row whose claiming process may
+  still be alive waits. Those rows get the `unowned_running_*` outcomes below,
+  or stay on this page.
+- `disposition: unowned_running_row` (#3328) means the row was RUNNING with
+  **no session bound**, its launch marker proved the claiming dispatcher gone,
+  the daemon roster was readable and listed no worker homed on the worktree,
+  and the worktree's `cw-context.json` tied the row to no session. Under
+  `signal_only` reconcile parked it BLOCKED_ON_USER (one
+  `session.needs_attention` with this `paused_status`), stopping, reverting
+  and deleting nothing, and charged no unproductive attempt. The release
+  authority is `cw dev-queue requeue <ticket> -c <client>` or
+  `cw doctor --reap` (class 5, `wedge/blocked-on-user-dead-session`);
+  `cw orchestrate run` does **not** authorize this park, because its
+  `session.reap_proposed` names no session. `cw dev-queue wait` exits this
+  park as BLOCKED, not ATTENTION: the ATTENTION mapping needs a Session with
+  `reap_proposed_at`, and there is none (the same gap as
+  `running_row_session_lost`; a separate ticket covers both). Under `auto` the
+  row is reverted PENDING instead, with no page, but only when the in-lock
+  re-read of `roster.json` is readable, non-empty and homes no worker on the
+  worktree: `claude agents --json` cannot be re-read under the lock, so an
+  empty roster proves nothing, and a lone unowned row on a quiet fleet waits
+  for the page or for you. Not escalated and not auto-requeued. At most three
+  rows act per tick, oldest claim first.
+- A `session.needs_attention` with `paused_status=unowned_running_unconfirmed`
+  (#3328) is page-only: reconcile cannot confirm who owns an unbound RUNNING
+  row, and the breadcrumbs name the cause (`duplicate`, `bound_elsewhere`,
+  `conflicting_session`, `stale_session`, `naive_datetime`,
+  `unreadable_context`, `non_native` or `roster_unproven`). cw changed
+  nothing: the row **stays RUNNING, keeps its lane slot**, and
+  `cw dev-queue wait` keeps polling. The row's `advisory_note` reads
+  `?unowned_unconfirmed: <cause>: ...` until a transition or an adoption
+  clears it, and the page does not repeat for the same claim and cause. Check
+  the roster and `cw list` for a worker on the ticket's worktree; only once
+  you confirm none runs, release it with `cw dev-queue cancel <ticket> -c
+  <client>` then `cw dev-queue requeue <ticket> -c <client> --from-cancelled`.
+  Do not use `cw doctor --reap` class 2 for it: class 2 releases the row even
+  with a live worker.
+- **Launch-marker limits (#3328).** A failed post-launch stamp leaves the
+  launch marker set, so while the dispatcher that claimed the row lives, the
+  row reads as in flight and only an adoption or the generic `?no_session`
+  page recovers it: no claim age ever triggers a park. That weakens the
+  "release a stale claim" goal in practice, but it fails safe. A dispatcher
+  or observer outside the host's initial pid namespace (a container or a
+  sandboxed shell) stamps no marker and honours no "process gone" verdict,
+  so such a row only ever waits or pages.
 
 ### Dispatch-loop staleness page (`dispatch_loop_stale`)
 
