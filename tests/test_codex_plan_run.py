@@ -593,7 +593,7 @@ def test_an_event_write_failure_is_swallowed(
 ) -> None:
     h = harness()
     add_stations(add_turn(h.runner))
-    with patch("cw.codex_plan._run.record_event", side_effect=OSError("disk")):
+    with patch("cw.codex_review_signals.record_event", side_effect=OSError("disk")):
         result = h.run()
     assert result.status == "stage_complete"
 

@@ -81,12 +81,12 @@ from cw.codex_review import (
     _codex_scratch_dir,
     _is_model_capacity_error,
 )
+from cw.codex_review_signals import record_event_best_effort
 from cw.codex_stage_completion import complete_session_through_door, run_guarded_stage
 from cw.contract_manifest import RenderError
 from cw.dev_queue import _PRE_DISPATCH_TRACKER_MCP_REASON
 from cw.dev_queue.lifecycle import _plan_body_signoff_ok
 from cw.dev_queue.operator_constraints import record_plan_constraints
-from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import CODEX_BACKEND, OrchestratorEventType, Stage
 from cw.models.enums import StageIdentifier
@@ -171,7 +171,7 @@ class _Run:
         if error_kind is not None:
             payload["error_kind"] = error_kind
         payload["started_at"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        _record_best_effort(event_type, payload, self.task.ticket_id)
+        record_event_best_effort(event_type, payload, self.task.ticket_id)
 
     def blocked(
         self,
@@ -303,20 +303,6 @@ class _Run:
             STAGE_PLAN_GENERATED,
             CODEX_ERROR,
             f"the PLAN turn exited {run.returncode}: {tail}",
-        )
-
-
-def _record_best_effort(
-    event_type: OrchestratorEventType, payload: dict[str, object], ticket_id: str
-) -> None:
-    try:
-        record_event(event_type, payload, correlation_id=ticket_id)
-    except (OSError, CwError):
-        _log.warning(
-            "codex plan event %s not recorded ticket=%s",
-            event_type.value,
-            ticket_id,
-            exc_info=True,
         )
 
 
@@ -608,7 +594,7 @@ def _execute(run: _Run) -> None:
             text=exit_.post_text,
             artifact_path=exit_.artifact_path,
         )
-    _record_best_effort(
+    record_event_best_effort(
         OrchestratorEventType.SESSION_COMPLETED,
         {
             "session_id": run.sid,

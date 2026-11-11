@@ -124,7 +124,7 @@ def constraints_source(
     return OperatorConstraintsSource.TRACKER_UNREADABLE
 
 
-def _record_best_effort(
+def record_event_best_effort(
     event_type: OrchestratorEventType, payload: dict[str, object], ticket_id: str
 ) -> None:
     """``record_event``, swallowing ``OSError`` with one warning (A15)."""
@@ -186,7 +186,7 @@ def emit_verdict_comment_skipped(
         session_id=session_id,
         reason=reason,
     )
-    _record_best_effort(
+    record_event_best_effort(
         OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED, payload, ticket_id
     )
 
@@ -255,7 +255,7 @@ def emit_verdict_comment_unverified(
         posted=posted,
         marker_survived=marker_survived,
     )
-    _record_best_effort(
+    record_event_best_effort(
         OrchestratorEventType.REVIEW_VERDICT_COMMENT_UNVERIFIED, payload, ticket_id
     )
 
@@ -312,7 +312,7 @@ def emit_verdict_comment_posted(
         posted=posted,
         content=content,
     )
-    _record_best_effort(
+    record_event_best_effort(
         OrchestratorEventType.REVIEW_VERDICT_COMMENT_POSTED, payload, ticket_id
     )
 
@@ -427,7 +427,7 @@ def undelivered_operator_context(
     payload = operator_context_undelivered_payload(
         task=task, client=client, tracker=tracker, session_id=session_id
     )
-    _record_best_effort(
+    record_event_best_effort(
         OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED,
         payload,
         task.ticket_id,
@@ -440,6 +440,6 @@ def emit_confirm_escalated(payload: dict[str, object], *, ticket_id: str) -> Non
     The codex peer of claude-native's ``announce_confirm_park``: same event and
     payload, best-effort (an ``OSError`` logs ``codex_review_signal_failed``).
     """
-    _record_best_effort(
+    record_event_best_effort(
         OrchestratorEventType.REVIEW_CONFIRM_ESCALATED, payload, ticket_id
     )
