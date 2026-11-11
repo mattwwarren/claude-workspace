@@ -24,7 +24,11 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from cw.atomic import atomic_write_text
 from cw.auto_dev_result import AutoDevResult
-from cw.auto_dev_result.parse import extract_block
+from cw.auto_dev_result.parse import (
+    BLOCKER_REASON_NO_RESULT_EMITTED,
+    BLOCKER_REASON_VALIDATION_FAILED,
+    extract_block,
+)
 from cw.codex_review import STAGE1_PLAN, make_codex_blocked
 from cw.plan_fingerprint import (
     PLAN_DRAFT_FINGERPRINT_KEY,
@@ -84,9 +88,6 @@ _SENTINEL_OPEN: Final = "<<<AUTO_DEV_RESULT"
 # Any 64-char lowercase hex digest: bind_claimed_fingerprint reads a non-null
 # claim only as "a draft is in hand" and replaces it with its own digest.
 _FINGERPRINT_CLAIM: Final = "0" * 64
-
-NO_RESULT_EMITTED: Final = "no_result_emitted"
-VALIDATION_FAILED: Final = "validation_failed"
 
 
 class PlanTurnDocument(BaseModel):
@@ -206,22 +207,26 @@ def parse_plan_turn(
     carries a non-plan status is ``validation_failed``.
     """
     if content is None or not content.strip():
-        return PlanTurnFailure(NO_RESULT_EMITTED, "the turn wrote no -o document")
+        return PlanTurnFailure(
+            BLOCKER_REASON_NO_RESULT_EMITTED, "the turn wrote no -o document"
+        )
     try:
         document = PlanTurnDocument.model_validate_json(content)
     except ValidationError as exc:
         details = f"the -o document is not a {{plan_markdown, sentinel}} object: {exc}"
-        return PlanTurnFailure(NO_RESULT_EMITTED, details)
+        return PlanTurnFailure(BLOCKER_REASON_NO_RESULT_EMITTED, details)
     payload = _sentinel_payload(document.sentinel)
     if isinstance(payload, str):
-        return PlanTurnFailure(VALIDATION_FAILED, payload)
+        return PlanTurnFailure(BLOCKER_REASON_VALIDATION_FAILED, payload)
     if payload.get("status") not in PLAN_STATUSES:
         details = f"status {payload.get('status')!r} is not a plan-stage status"
-        return PlanTurnFailure(VALIDATION_FAILED, details)
+        return PlanTurnFailure(BLOCKER_REASON_VALIDATION_FAILED, details)
     try:
         result = stamp_plan_result(payload, ticket_id=ticket_id, worktree=worktree)
     except ValidationError as exc:
-        return PlanTurnFailure(VALIDATION_FAILED, f"sentinel failed validation: {exc}")
+        return PlanTurnFailure(
+            BLOCKER_REASON_VALIDATION_FAILED, f"sentinel failed validation: {exc}"
+        )
     return PlanTurn(plan_markdown=document.plan_markdown, result=result)
 
 

@@ -83,6 +83,7 @@ from cw.codex_review import (
 )
 from cw.codex_stage_completion import complete_session_through_door, run_guarded_stage
 from cw.contract_manifest import RenderError
+from cw.dev_queue import _PRE_DISPATCH_TRACKER_MCP_REASON
 from cw.dev_queue.lifecycle import _plan_body_signoff_ok
 from cw.dev_queue.operator_constraints import record_plan_constraints
 from cw.events import record_event
@@ -105,7 +106,6 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 PLAN_MISSING_CONTEXT: Final = "plan_missing_context"
-TRACKER_MCP_UNAVAILABLE: Final = "tracker_mcp_unavailable_pre_dispatch"
 NO_OP: Final = PLAN_NO_OP
 
 #: The stage identifiers the driver's stage events carry.
@@ -222,7 +222,9 @@ class _Run:
         return _McpTarget(server=server, tracker=kind.system)
 
     def _mcp_blocked(self, details: str) -> _Exit:
-        return self.blocked(STAGE_PLAN_GENERATED, TRACKER_MCP_UNAVAILABLE, details)
+        return self.blocked(
+            STAGE_PLAN_GENERATED, _PRE_DISPATCH_TRACKER_MCP_REASON, details
+        )
 
     def prompt(
         self, target: _McpTarget, resume: ResumeDraft | None, approval: bool
