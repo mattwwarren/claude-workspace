@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Literal
 
 from cw.auto_dev_result import OperatorConstraintsSource
 from cw.events import record_event
+from cw.exceptions import CwError
 from cw.models import CODEX_BACKEND, OrchestratorEventType
 from cw.tracker import TrackerClass, TrackerKind
 
@@ -127,10 +128,10 @@ def constraints_source(
 def record_event_best_effort(
     event_type: OrchestratorEventType, payload: dict[str, object], ticket_id: str
 ) -> None:
-    """``record_event``, swallowing ``OSError`` with one warning (A15)."""
+    """``record_event``, swallowing event-write faults with one warning (A15)."""
     try:
         record_event(event_type, payload, correlation_id=ticket_id)
-    except OSError as exc:
+    except (OSError, CwError) as exc:
         _log.warning(
             "codex_review_signal_failed ticket=%s event=%s: %s",
             ticket_id,
