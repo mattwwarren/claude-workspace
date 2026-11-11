@@ -14,10 +14,12 @@ revert live in modules that import ``cw.executor`` at module level.
 
 from __future__ import annotations
 
+import logging
+import subprocess
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from cw.codex_review import make_codex_blocked
+from cw.codex_review import STAGE3_REVIEW, make_codex_blocked
 from cw.config import sessions_lock
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.dispatch_state import (
@@ -25,23 +27,48 @@ from cw.dispatch_state import (
     clear_executor_blocked_marker,
     save_executor_blocked_marker,
 )
+from cw.exceptions import CwError
 from cw.local_runner import UNEXPECTED_ERROR
 from cw.queue_rows import _find_running_row
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
     from typing import Any
 
+    from cw.auto_dev_result import StageReached
     from cw.models import TicketTask
 
 __all__ = [
+    "STAGE_FAULTS",
     "clear_stage_blocked_marker",
     "complete_session_as_unexpected_error",
     "complete_session_through_door",
     "revert_claimed_row_after_unexpected_error",
+    "run_guarded_stage",
     "save_stage_blocked_marker",
     "stamp_session_id_on_running_task",
 ]
+
+_log = logging.getLogger(__name__)
+
+#: The fault classes a guarded stage run converts into an unexpected-error
+#: completion (#3060). The same set as the tracker-IO turn's ``_TURN_FAULTS``
+#: (``cw.codex_review_persist``; not imported, because ``cw.executor`` imports
+#: this module at its top) plus ``CwError``, cw's own failure base. A fault
+#: outside it escapes ``cw codex run``: the session stays ACTIVE and
+#: reconcile/local's codex branch is the crash-only fallback. Narrow on
+#: purpose, so the guarded wrapper needs no broad ``except Exception``.
+STAGE_FAULTS: tuple[type[Exception], ...] = (
+    OSError,
+    ValueError,
+    RuntimeError,
+    LookupError,
+    TypeError,
+    AttributeError,
+    subprocess.SubprocessError,
+    CwError,
+)
 
 
 def stamp_session_id_on_running_task(
@@ -134,12 +161,18 @@ def complete_session_through_door(
 
 
 def complete_session_as_unexpected_error(
-    sid: str, task: TicketTask, worktree: Path
+    sid: str,
+    task: TicketTask,
+    worktree: Path,
+    *,
+    stage_reached: StageReached = STAGE3_REVIEW,
 ) -> None:
     """Complete a session with a blocked/unexpected-error payload via the door.
 
     Used by the stage thread's own except branch, which may be racing the
     completion door's success path, hence ``guard_already_completed=True``.
+    *stage_reached* names the stage that failed (#3060); the REVIEW default
+    keeps the review thread's payload byte-identical.
     """
     complete_session_through_door(
         sid,
@@ -147,6 +180,7 @@ def complete_session_as_unexpected_error(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=UNEXPECTED_ERROR,
+            stage_reached=stage_reached,
         ).model_dump(mode="json"),
         guard_already_completed=True,
     )
@@ -166,3 +200,44 @@ def revert_claimed_row_after_unexpected_error(
     _revert_claimed_task_to_pending(
         client_name, ticket_id, stamp_backoff=True, expected_session_id=session_id
     )
+
+
+def run_guarded_stage(
+    *,
+    client_name: str,
+    task: TicketTask,
+    worktree: Path,
+    sid: str,
+    stage_reached: StageReached,
+    body: Callable[[], None],
+) -> None:
+    """Run a codex stage *body* under the shared top-frame guard (#3060).
+
+    The stage-neutral shape of the REVIEW thread's sanctioned handler, with a
+    narrow :data:`STAGE_FAULTS` tuple in place of a broad catch: the blocked
+    marker is saved inside the ``try`` (so a save failure is handled like any
+    other fault), a fault completes the session as ``unexpected_error`` with
+    *stage_reached* and returns the claimed row to PENDING, and the marker is
+    cleared in ``finally`` on every exit path, including an exception outside
+    the tuple, which propagates.
+    """
+    try:
+        save_stage_blocked_marker(
+            client_name=client_name, ticket_id=task.ticket_id, session_id=sid
+        )
+        body()
+    except STAGE_FAULTS:
+        _log.exception(
+            "codex stage run failed session=%s ticket=%s stage=%s",
+            sid,
+            task.ticket_id,
+            stage_reached,
+        )
+        complete_session_as_unexpected_error(
+            sid, task, worktree, stage_reached=stage_reached
+        )
+        revert_claimed_row_after_unexpected_error(
+            client_name=client_name, ticket_id=task.ticket_id, session_id=sid
+        )
+    finally:
+        clear_stage_blocked_marker(client_name, task.ticket_id)

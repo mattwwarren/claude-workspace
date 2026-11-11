@@ -22,6 +22,7 @@ import pytest
 
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_review import (
+    _CODEX_PLAN_BLOCKED_NEXT_ACTIONS,
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     CODEX_REVIEW_UNPARSEABLE,
 )
@@ -139,26 +140,59 @@ def _seed_running_row(task: TicketTask) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("stage", "expected_stage_reached"),
+    [(Stage.IMPL, "stage2_impl"), (Stage.FINALIZE, "stage4a_merge_gate")],
+)
 def test_codex_executor_wrong_stage_blocked(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
     fake_runner: FakeFireAndForgetRunner,
+    stage: Stage,
+    expected_stage_reached: str,
 ) -> None:
-    """spawn() on a non-REVIEW stage → blocked/codex_review_only, no launch."""
+    """spawn() on an unsupported stage → blocked/codex_review_only, no launch.
+
+    The park carries that stage's entry marker, never the REVIEW default
+    (#3060 R8): dispatch walks the row forward on a later-stage sentinel.
+    """
     worktree = make_git_repo("wt-codex-wrong-stage")
     executor = _codex_executor(runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=worktree)
-    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.PLAN)
+    task = TicketTask(ticket_id="T-1", client="test", stage=stage)
 
-    executor.spawn(stage=Stage.PLAN, task=task, worktree=worktree, client=client)
+    executor.spawn(stage=stage, task=task, worktree=worktree, client=client)
 
     assert fake_runner.calls == []
     result = _persisted_result()
     assert result.status == "blocked"
-    assert result.stage_reached == "stage3_review"
+    assert result.stage_reached == expected_stage_reached
     assert result.blocker is not None
     assert result.blocker.reason == CODEX_REVIEW_ONLY
     assert result.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
+
+
+def test_codex_executor_plan_codex_not_found_carries_plan_labels(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    fake_runner: FakeFireAndForgetRunner,
+) -> None:
+    """PLAN is supported (#3060); a missing binary parks at stage1_plan."""
+    worktree = make_git_repo("wt-codex-plan-missing")
+    executor = _codex_executor(runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.PLAN)
+
+    with patch(_WHICH, return_value=None):
+        executor.spawn(stage=Stage.PLAN, task=task, worktree=worktree, client=client)
+
+    assert fake_runner.calls == []
+    result = _persisted_result()
+    assert result.status == "blocked"
+    assert result.stage_reached == "stage1_plan"
+    assert result.blocker is not None
+    assert result.blocker.reason == CODEX_NOT_FOUND
+    assert result.next_actions == _CODEX_PLAN_BLOCKED_NEXT_ACTIONS
 
 
 def test_codex_executor_codex_not_found(
@@ -572,7 +606,7 @@ def test_preflight_failure_persist_error_completes_session_and_reraises(
     """
     worktree = make_git_repo("wt-codex-preflight-boom")
     executor = _codex_executor()
-    task = TicketTask(ticket_id="T-pf", client="test", stage=Stage.PLAN)
+    task = TicketTask(ticket_id="T-pf", client="test", stage=Stage.IMPL)
 
     calls: list[dict[str, object]] = []
 
@@ -586,9 +620,9 @@ def test_preflight_failure_persist_error_completes_session_and_reraises(
         patch("cw.executor.core._complete_session_via_door", _door),
         pytest.raises(OSError, match="door boom"),
     ):
-        # Stage.PLAN trips the CODEX_REVIEW_ONLY pre-flight guard.
+        # Stage.IMPL trips the CODEX_REVIEW_ONLY pre-flight guard.
         executor.spawn(
-            stage=Stage.PLAN, task=task, worktree=worktree, client=_client(worktree)
+            stage=Stage.IMPL, task=task, worktree=worktree, client=_client(worktree)
         )
 
     # Second call is the guarded blocked-result write from the except branch.

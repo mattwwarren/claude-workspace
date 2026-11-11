@@ -108,8 +108,14 @@ def _refused(reason: TrackerIoReason, parts_total: int = 0) -> TrackerIoOutcome:
     )
 
 
-def plan_turn_parts(text: str, context: TrackerIoContext) -> tuple[str, ...]:
+def plan_turn_parts(
+    text: str, context: TrackerIoContext, *, marked: bool = True
+) -> tuple[str, ...]:
     """Redact, wrap and split *text*; each part carries the agent marker.
+
+    *marked* ``False`` returns the parts without the marker (#3060): the codex
+    PLAN executor's GitHub path posts each part through ``post_issue_comment``,
+    which appends the marker itself, so a marked part would carry it twice.
 
     Raises ``ValueError`` when the text cannot be planned.
     """
@@ -122,6 +128,8 @@ def plan_turn_parts(text: str, context: TrackerIoContext) -> tuple[str, ...]:
         ),
         single=False,
     )
+    if not marked:
+        return tuple(plan.bodies)
     return tuple(agent_marked_body(body) for body in plan.bodies)
 
 

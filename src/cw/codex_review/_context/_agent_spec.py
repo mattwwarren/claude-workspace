@@ -15,12 +15,15 @@ from __future__ import annotations
 import logging
 import tomllib
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.codex_review._context._util import _load_optional_text
 from cw.review_findings import AgentSpecStatus
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from cw.review_findings import AgentSpecSource
 
 _log = logging.getLogger(__name__)
@@ -38,6 +41,17 @@ _REVIEWER_ROLE_AGENT_FILES: dict[str, str] = {
     "API Contract Validator": "api-contract-validator.md",
     "Deployment Reviewer": "deployment-reviewer.md",
 }
+
+# Plan review station name -> agent-spec file (#3060). Kept OUT of
+# ``_REVIEWER_ROLE_AGENT_FILES``: the review roster, the repo-config loader and
+# the agent-spec drift check all iterate that table, and a plan station is not a
+# code reviewer. The codex PLAN executor passes this as ``agent_files``.
+PLAN_STATION_AGENT_FILES: Mapping[str, str] = MappingProxyType(
+    {
+        "Plan Reviewer": "plan-reviewer.md",
+        "Plan Soundness Reviewer": "plan-soundness-reviewer.md",
+    }
+)
 
 # The operator's own agent-spec directory, used as the fallback source when a
 # worktree carries no usable ``.claude/agents/<role>.md`` (#1773). Bound at
@@ -77,7 +91,11 @@ class _AgentSpecResolution(NamedTuple):
 
 
 def _resolve_agent_spec(
-    worktree: Path, role: str, *, global_fallback_enabled: bool
+    worktree: Path,
+    role: str,
+    *,
+    global_fallback_enabled: bool,
+    agent_files: Mapping[str, str] = _REVIEWER_ROLE_AGENT_FILES,
 ) -> _AgentSpecResolution:
     """Resolve *role*'s agent spec repo-local-first, then global (#1773).
 
@@ -93,8 +111,12 @@ def _resolve_agent_spec(
     was found but blank is carried on the returned status for the verdict
     comment instead, because "present but empty" and "not there at all" are
     different facts about the repo.
+
+    *agent_files* maps role names to spec filenames; it defaults to the review
+    roster's table, and the codex PLAN stations pass
+    :data:`PLAN_STATION_AGENT_FILES` (#3060).
     """
-    filename = _REVIEWER_ROLE_AGENT_FILES[role]
+    filename = agent_files[role]
     repo_path = worktree / ".claude" / "agents" / filename
     repo_text = _load_optional_text(repo_path)
     empty_repo_file = repo_text is not None and not repo_text.strip()

@@ -53,8 +53,9 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
-#: Which verdict comment a skip dropped: a parsed verdict or an unparseable one.
-VerdictCommentKind = Literal["verdict", "unparseable"]
+#: Which comment a skip dropped: a parsed verdict, an unparseable one, or the
+#: codex PLAN executor's plan or park comment (``plan``, #3060).
+VerdictCommentKind = Literal["verdict", "unparseable", "plan"]
 
 #: Case A's default ``reason``: a non-GitHub tracker with no tracker-IO turn.
 #: The turn's refusals carry its own closed ``cw.tracker_io.TrackerIoReason``

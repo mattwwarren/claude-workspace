@@ -21,6 +21,9 @@ if TYPE_CHECKING:
     from cw.executor_diagnostics import ExecutorFailureCategory
 
 STAGE3_REVIEW: StageReached = "stage3_review"
+#: The codex PLAN executor's wire stage (#3060); ``make_codex_blocked`` keys the
+#: plan ``next_actions`` label on it.
+STAGE1_PLAN: StageReached = "stage1_plan"
 
 #: Step 4b comment title and artifact-header label for a codex-built result.
 #: The Claude sibling is ``cw.claude_review.core.CLAUDE_REVIEWER_LABEL``.
@@ -305,6 +308,11 @@ CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS = "codex_reviewer_failure_discarded_fi
 # blocked+terminal-reject next_actions invariant (see schema.py
 # _check_next_actions_invariants).
 _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS: list[str] = ["user_resolve_codex_review_failure"]
+
+# next_actions label for a codex PLAN blocked result (#3060): the REVIEW label
+# above would tell the operator to resolve a review failure for a run that
+# never reached review. ``make_codex_blocked`` selects it by ``stage_reached``.
+_CODEX_PLAN_BLOCKED_NEXT_ACTIONS: list[str] = ["user_resolve_codex_plan_failure"]
 
 # Backend-side failure reasons: the codex/claude backend itself errored or was
 # at capacity, so nothing says it is up. A round whose every failed role is one
