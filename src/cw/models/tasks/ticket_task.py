@@ -121,14 +121,14 @@ class TicketTask(BaseModel):
     # Deliberately NOT read by the #756 per-stage validation_failed cap in
     # reconcile/_shared/_routing.py, which stays on raw `attempts`. See GitHub #1750.
     unproductive_attempts: int = 0
-    # Durable proof that a session was genuinely spawned for this row at least
-    # once — the state reconcile/tasks.py's _is_never_claimed needs and cannot
-    # derive from the counters above. `attempts` increments at claim time, but
-    # the UsageLimitError revert path calls _revert_claimed_task_to_pending
-    # with stamp_backoff=False, so spawn_error_count does NOT move in lockstep
-    # (deliberate: #868's fleet-wide backoff must not charge a usage limit as
-    # a spawn error). A row whose every attempt died that way therefore looks
-    # exactly like one that ran, shipped and timed out inside its first stage.
+    # Durable proof that a session was genuinely spawned for this row at least once —
+    # the state reconcile/tasks/merged_completion.py's _is_never_claimed needs and
+    # cannot derive from the counters above. `attempts` increments at claim time, but
+    # the UsageLimitError revert path calls _revert_claimed_task_to_pending with
+    # stamp_backoff=False, so spawn_error_count does NOT move in lockstep (deliberate:
+    # #868's fleet-wide backoff must not charge a usage limit as a spawn error). A row
+    # whose every attempt died that way therefore looks exactly like one that ran,
+    # shipped and timed out inside its first stage.
     #
     # Written True at exactly one seam: dispatch/claim.py's spawn-success
     # block, alongside the session_id stamp. Seeded False at exactly one seam:

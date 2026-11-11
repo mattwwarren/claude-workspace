@@ -41,13 +41,12 @@ Q1) and are individually toggleable via
 :func:`resolve_concierge_recipe_enabled` (Q7).
 
 Each recipe follows the repo's detect/act split (see
-``reconcile/tasks.py``'s ``park_terminal_sibling_tasks`` for the closest
-sibling template): a pure ``_detect_*_candidates`` classification phase, then
-an ``_act_on_*_candidates`` phase that re-validates under lock and mutates.
-Emit-before-act is a hard requirement per recipe:
-:class:`OrchestratorEventType.CONCIERGE_RECOVERED` is recorded (durably, to
-the append-only events inbox) before the corresponding task/session
-mutation, so evidence of what the concierge *decided* survives even if the
+``reconcile/tasks/terminal_siblings.py``'s ``park_terminal_sibling_tasks`` for the
+closest sibling template): a pure ``_detect_*_candidates`` classification phase, then an
+``_act_on_*_candidates`` phase that re-validates under lock and mutates. Emit-before-act
+is a hard requirement per recipe: :class:`OrchestratorEventType.CONCIERGE_RECOVERED` is
+recorded (durably, to the append-only events inbox) before the corresponding
+task/session mutation, so evidence of what the concierge *decided* survives even if the
 subsequent write fails. See GitHub #1015.
 
 Package layout (#2895), one submodule per concern; ``_common`` is the leaf,

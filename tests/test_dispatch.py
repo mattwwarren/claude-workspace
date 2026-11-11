@@ -3230,7 +3230,7 @@ class TestDispatchTickSpawnErrors:
         dies before emitting any sentinel loses the regressed_into_stage
         signal for good -- claim.py's spawn-time clear (#1794) already ran
         before the death was ever detected, so reconcile's reap path (which
-        never touches this field, see test_reconcile_tasks.py's sibling
+        never touches this field, see test_reconcile_tasks_*.py's sibling
         no-op test) has nothing left to preserve. This is the deliberate,
         documented inversion of the ticket's literal AC3 wording: the plan's
         decision is accept-and-document, not survive-the-death, so this test

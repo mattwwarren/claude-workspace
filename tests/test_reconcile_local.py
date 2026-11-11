@@ -1087,7 +1087,8 @@ def test_park_terminal_sibling_tasks_auto_policy_cancels_pending(
         lanes=[LaneConfig(name="default", max_parallel=1, reap_policy=ReapPolicy.AUTO)],
     )
     monkeypatch.setattr(
-        "cw.reconcile.tasks.load_clients", lambda: {"client-a": auto_client}
+        "cw.reconcile.tasks.terminal_siblings.load_clients",
+        lambda: {"client-a": auto_client},
     )
 
     parked = park_terminal_sibling_tasks()

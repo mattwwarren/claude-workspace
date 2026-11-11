@@ -1497,7 +1497,9 @@ class TestMissSources:
             save_dev_queue(DevQueueStore(tasks=[_row("m7b")]))
             return real_partition(checks, sessions)
 
-        monkeypatch.setattr("cw.reconcile.tasks.partition_dirty", _partition_then_claim)
+        monkeypatch.setattr(
+            "cw.reconcile.tasks.backstops.partition_dirty", _partition_then_claim
+        )
 
         assert revert_timed_out_tasks(DirtyChecks()) == []
 

@@ -5,7 +5,7 @@ reasons name another PR that this ticket's fate depends on, and neither is
 carried in a structured sentinel field -- the producer only ever writes them
 into ``blocker.details`` prose. This module owns the regex that reads them
 back out. The two reason literals themselves moved to the ``cw.queue_rows``
-leaf (#2613) so ``reconcile/tasks.py`` can import them at module scope; the
+leaf (#2613) so ``reconcile/tasks/`` can import them at module scope; the
 routing package ``__init__`` imports them from there.
 
 Imports ``re`` and nothing else: no back-dependency on ``routing/__init__.py``,

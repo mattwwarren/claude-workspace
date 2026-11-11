@@ -415,6 +415,10 @@ def test_phantom_detect_and_tasks_are_not_allowlisted() -> None:
     frame is forgiven any more."""
     assert "cw.reconcile.phantom._detect" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
     assert "cw.reconcile.tasks" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+    assert not any(
+        module.startswith("cw.reconcile.tasks")
+        for module in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+    )
     assert "#2548" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST.values()
 
 
