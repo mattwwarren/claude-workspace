@@ -27,7 +27,13 @@ from cw.gh import AGENT_COMMENT_MARKER
 from cw.models import OrchestratorEventType
 from cw.tracker import TRACKER_GITHUB_ISSUES, TRACKER_LINEAR
 from cw.tracker_io import TrackerIoContext, plan_turn_parts
-from cw.tracker_post import PART_TEXT_CHARS
+from cw.tracker_post import (
+    PART_TEXT_CHARS,
+    PostedPart,
+    PostReason,
+    PostResult,
+    PostStatus,
+)
 from tests._backend_mcp_helpers import codex_tracker_client, stage_mcp_config
 from tests._tool_fakes import (
     FakeGhComment,
@@ -215,6 +221,50 @@ class TestGitHub:
         with patch("cw.codex_plan._post.post_parts", side_effect=OSError("disk")):
             _post(client, worktree, _PLAN)
         assert _events() == []
+
+    def test_a_partially_public_post_is_unverified_not_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Part 1 is public, part 2 failed: the operator must check the ticket."""
+        client = codex_tracker_client(tmp_path)
+        worktree = _worktree(tmp_path)
+        partial = PostResult(
+            PostStatus.PARTIAL,
+            PostReason.POST_FAILED,
+            (
+                PostedPart(
+                    index=1, url="https://github.com/o/r/issues/7#issuecomment-41"
+                ),
+            ),
+            2,
+        )
+        with patch("cw.codex_plan._post.post_parts", return_value=partial):
+            _post(client, worktree, _PLAN)
+        (event,) = _events()
+        assert event["type"] == "review.verdict_comment_unverified"
+        assert event["kind"] == "plan"
+        assert event["reason"] == GITHUB_POST_FAILED
+        assert event["public_state"] == "possible"
+        assert event["posted"] == [
+            {
+                "index": 1,
+                "comment_id": "41",
+                "url": "https://github.com/o/r/issues/7#issuecomment-41",
+            }
+        ]
+
+    def test_a_refused_first_part_is_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing is public when the first part is refused: the post is skipped."""
+        client = codex_tracker_client(tmp_path)
+        worktree = _worktree(tmp_path)
+        refused = PostResult(PostStatus.REFUSED, PostReason.POST_FAILED, (), 1)
+        with patch("cw.codex_plan._post.post_parts", return_value=refused):
+            _post(client, worktree, _PLAN)
+        (event,) = _events()
+        assert event["type"] == "review.verdict_comment_skipped"
+        assert event["reason"] == GITHUB_POST_FAILED
 
 
 def _linear(

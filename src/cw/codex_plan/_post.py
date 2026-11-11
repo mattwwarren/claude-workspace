@@ -30,6 +30,7 @@ from cw.codex_review_signals import (
     VerdictCommentIdentity,
     emit_verdict_comment_posted,
     emit_verdict_comment_skipped,
+    emit_verdict_comment_unverified,
     surface_tracker_io_outcome,
 )
 from cw.codex_stage_completion import STAGE_FAULTS
@@ -224,6 +225,22 @@ class _Post:
             content=content,
         )
 
+    def unverified(self, posted: list[dict[str, object]]) -> None:
+        """Record a partially public GitHub post without losing its parts."""
+        emit_verdict_comment_unverified(
+            ticket_id=self.ticket_id,
+            client=self.client,
+            tracker=self.tracker,
+            kind=PLAN_COMMENT_KIND,
+            reason=GITHUB_POST_FAILED,
+            artifact_path=self.artifact_path,
+            reviewed_sha=None,
+            session_id=self.sid,
+            public_state="possible",
+            posted=posted,
+            marker_survived=None,
+        )
+
     @property
     def identity(self) -> VerdictCommentIdentity:
         return VerdictCommentIdentity(
@@ -245,9 +262,6 @@ def _post_github(post: _Post, text: str, context: TrackerIoContext) -> None:
         post.skipped(TrackerIoReason.PLAN_REFUSED.value)
         return
     result = post_parts(post.ticket_id, parts, cwd=context.client.workspace_path)
-    if result.status is not PostStatus.POSTED:
-        post.skipped(GITHUB_POST_FAILED)
-        return
     posted = [
         {
             "index": part.index,
@@ -256,7 +270,13 @@ def _post_github(post: _Post, text: str, context: TrackerIoContext) -> None:
         }
         for part in result.posted
     ]
-    post.posted(posted, text)
+    if result.status is PostStatus.REFUSED:
+        post.skipped(GITHUB_POST_FAILED)
+    elif result.status is PostStatus.PARTIAL:
+        # Some parts are public: report them as unverified, never as skipped.
+        post.unverified(posted)
+    else:
+        post.posted(posted, text)
 
 
 def _post_other(post: _Post, text: str, context: TrackerIoContext) -> None:
