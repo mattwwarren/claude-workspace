@@ -21,7 +21,9 @@ import pytest
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_driver import (
     STAGE_IMPL,
+    STAGE_PLAN,
     STAGE_REVIEW,
+    run_codex_plan_stage,
     run_codex_review_stage,
 )
 from cw.codex_fix_loop.commit import _build_fix_codex_argv
@@ -47,6 +49,7 @@ from cw.models import (
     TicketTask,
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
+from tests._codex_review_helpers import seed_codex_stage_run
 from tests.conftest import _make_daemon_session, _write_global_toggle, git_in
 
 if TYPE_CHECKING:
@@ -111,50 +114,14 @@ def _seed_client(
     beyond ``cw.codex_driver.get_client`` resolves; the lane/pipeline shape
     the review path needs comes from *client* via the patch.
     """
-    _seed(
-        tmp_config_dir=tmp_config_dir,
+    del tmp_config_dir
+    seed_codex_stage_run(
         worktree=worktree,
         client_name=client.name,
         ticket_id=ticket_id,
         session_id=session_id,
         lane=client.lanes[0].name if client.lanes else None,
     )
-
-
-def _seed(
-    *,
-    tmp_config_dir: Path,
-    worktree: Path,
-    client_name: str = "test",
-    ticket_id: str = "T-1",
-    session_id: str = "sess-1",
-    lane: str | None = None,
-) -> None:
-    """Seed a Session + a matching RUNNING dev-queue row, plus clients.yaml."""
-    write_clients_yaml(ClientSpec(client_name, str(worktree)))
-    save_state(
-        CwState(
-            sessions=[
-                _make_daemon_session(
-                    id=session_id,
-                    client=client_name,
-                    worktree_path=worktree,
-                )
-            ]
-        )
-    )
-    from cw.dev_queue import save_dev_queue
-
-    task = TicketTask(
-        ticket_id=ticket_id,
-        client=client_name,
-        stage=Stage.REVIEW,
-        status=QueueItemStatus.RUNNING,
-        session_id=session_id,
-    )
-    if lane is not None:
-        task = task.model_copy(update={"lane": lane})
-    save_dev_queue(DevQueueStore(tasks=[task]))
 
 
 def _fix_loop_client(worktree: Path, *, lane_flag: bool | None = True) -> ClientConfig:
@@ -200,7 +167,7 @@ def test_run_codex_review_stage_completes_session_via_door_with_fake_runner(
     the review in-process (#2388).
     """
     worktree = _worktree_with_change(make_worktree_with_change, "wt-driver-clean")
-    _seed(tmp_config_dir=tmp_config_dir, worktree=worktree)
+    seed_codex_stage_run(worktree=worktree)
     runner = FakeCodexRunner(returncode=0, output_file_content=_reviewer_doc())
 
     with patch("cw.codex_background._post_daemon_verdict_comment") as post_mock:
@@ -382,7 +349,7 @@ def test_run_codex_review_stage_all_roles_unparseable_parks_with_artifact(
 ) -> None:
     """Unparseable output from every role → blocked; per-role summary posted (#2280)."""
     worktree = _worktree_with_change(make_worktree_with_change, "wt-driver-fail")
-    _seed(tmp_config_dir=tmp_config_dir, worktree=worktree)
+    seed_codex_stage_run(worktree=worktree)
     runner = FakeCodexRunner(returncode=0, output_file_content="not json{{")
 
     with patch("cw.codex_background._post_daemon_verdict_comment") as post_mock:
@@ -407,7 +374,7 @@ def test_run_codex_review_stage_should_fix_only_stays_complete(
     worktree = _worktree_with_change(
         make_worktree_with_change, "wt-driver-should-fix-only"
     )
-    _seed(tmp_config_dir=tmp_config_dir, worktree=worktree)
+    seed_codex_stage_run(worktree=worktree)
     doc = _reviewer_doc(
         [
             _finding(
@@ -617,4 +584,39 @@ def test_codex_driver_module_not_imported_by_executor() -> None:
 
 def test_stage_constants_are_stage_agnostic_strings() -> None:
     assert STAGE_REVIEW == "review"
+    assert STAGE_PLAN == "plan"
     assert STAGE_IMPL == "impl"
+
+
+def test_run_codex_plan_stage_loads_the_plan_row_and_ignores_the_budget(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """#3060: the PLAN driver re-derives its run from the PLAN row and session."""
+    worktree = tmp_path / "wt-plan"
+    worktree.mkdir()
+    seed_codex_stage_run(worktree=worktree, stage=Stage.PLAN)
+    runner = FakeCodexRunner()
+    with patch("cw.codex_driver.run_plan_stage_and_complete") as run_plan:
+        run_codex_plan_stage(
+            ticket_id="T-1",
+            session_id="sess-1",
+            wall_clock_budget_seconds=900,
+            runner=runner,
+        )
+    kwargs = run_plan.call_args.kwargs
+    assert kwargs["runner"] is runner
+    assert kwargs["task"].stage is Stage.PLAN
+    assert kwargs["worktree"] == worktree
+    assert kwargs["sid"] == "sess-1"
+    assert kwargs["client"].name == "test"
+    assert "wall_clock_budget_seconds" not in kwargs
+    assert set(kwargs) == {
+        "runner",
+        "task",
+        "worktree",
+        "client",
+        "sid",
+        "sess_name",
+        "model",
+        "reasoning_effort",
+    }
