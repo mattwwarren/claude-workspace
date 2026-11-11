@@ -1373,6 +1373,14 @@ class TestReapReasonRoutedResultStranded:
         assert ReapReason.ROUTED_RESULT_STRANDED.value not in {r.value for r in others}
 
 
+class TestReapReasonUnownedRunningRow:
+    def test_value_is_distinct(self) -> None:
+        """#3328: the unowned-running park owns its own disposition value."""
+        assert ReapReason.UNOWNED_RUNNING_ROW.value == "unowned_running_row"
+        others = [r for r in ReapReason if r is not ReapReason.UNOWNED_RUNNING_ROW]
+        assert ReapReason.UNOWNED_RUNNING_ROW.value not in {r.value for r in others}
+
+
 def _legacy_ceiling_predicate(s: Session, name: str) -> bool:
     """The inline ceiling expression dispatch used before #2524, verbatim."""
     return (

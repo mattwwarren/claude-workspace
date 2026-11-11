@@ -594,13 +594,17 @@ class TicketTask(BaseModel):
     # carry a signal about an ordinary RUNNING row; this field is the non-
     # terminal counterpart, rendered in the same `cw dev-queue tasks` REASON
     # column when `blocked_reason` is unset (blocked_reason always wins).
-    # Two writers. cw.reconcile._shared._stamp_session_id_mismatch_advisories
+    # Three writers. cw.reconcile._shared._stamp_session_id_mismatch_advisories
     # visits only RUNNING rows WITH a session_id; it overwrites the note every
     # tick and clears it the moment the condition lifts — a live
     # re-derivation, not a latch. cw.reconcile.lost_session_rows (#2715) writes
     # "?no_session" on a RUNNING row with NO session_id after paging it once —
     # a page-once latch the mismatch stamper never visits, which it clears once
-    # the row is bound. Cleared unconditionally by transition_task_status
+    # the row is bound. cw.reconcile.unowned_running (#3328) writes
+    # "?unowned_unconfirmed: {cause}: {clause}" on a RUNNING row with NO
+    # session_id after paging once that its ownership cannot be confirmed — a
+    # per-(claim, cause) latch; lost_session_rows skips such a row, and an
+    # adoption clears it. Cleared unconditionally by transition_task_status
     # alongside the durable-escalation latches, so a fresh claim pages again.
     # Readers (cw dev-queue tasks, ticket_view, queue_peek) show it as an
     # advisory. None on every pre-v37 row (migrate.py backfills it).

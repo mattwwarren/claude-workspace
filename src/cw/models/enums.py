@@ -169,6 +169,12 @@ class ReapReason(StrEnum):
     # completed_reason=NORMAL (doctor: USER) and its session.completed event
     # carrying pr_url.
     ROUTED_RESULT_STRANDED = "routed_result_stranded"
+    # GitHub #3328 (Part B of #2615) — an unbound RUNNING row whose claiming
+    # process is gone, with no worker homed on its worktree and no context
+    # tying it to a session. A queue disposition and the session.reap_proposed
+    # reason only: there is no Session, so it is never stamped as a session's
+    # reap_reason.
+    UNOWNED_RUNNING_ROW = "unowned_running_row"
 
 
 class LastResultSource(StrEnum):

@@ -327,11 +327,16 @@ def _run_terminal_backstops_and_sweeps(
     in-lock either way, and ``reconcile()`` always builds and drains the sink.
 
     First, it adopts any RUNNING row whose launched session was never
-    stamped on it (#2591), so the backstops below see that row bound.
+    stamped on it (#2591), so the backstops below see that row bound, and
+    parks or reverts (by ``reap_policy``) an unbound row whose claiming
+    process is gone and that no worker owns, or pages one whose ownership
+    cannot be confirmed (#3328).
 
     Returns (timed_out_ticket_ids, completed_silent_ticket_ids).
     """
-    run_unowned_running_recovery(clients=clients)
+    run_unowned_running_recovery(
+        now=now, clients=clients, config=config, native_live=native_live
+    )
     timed_out_ticket_ids = revert_timed_out_tasks(dirty_checks)
     completed_silent_ticket_ids = revert_completed_silent_tasks(dirty_checks)
     park_terminal_sibling_tasks()

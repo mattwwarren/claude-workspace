@@ -149,6 +149,8 @@ _COLD_IMPORT_FIRST = (
     "cw.reconcile.stalled._mutations",
     "cw.reconcile.tasks",
     "cw.reconcile.unowned_running",
+    "cw.reconcile.unowned_running_acts",
+    "cw.reconcile.unowned_running_text",
     "cw.reconcile.usage_limit_mid_turn",
 )
 

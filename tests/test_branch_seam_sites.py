@@ -580,7 +580,10 @@ def test_unowned_running_reads_the_row_branch_worktree_context(
         DevQueueStore(tasks=[row]),
         CwState(sessions=[_claim_session()]),
         {_CLIENT: sample_client_config},
-    )
+        now=datetime.now(UTC),
+        daemon=FakeNativeDaemonClient(),
+        native_live=set(),
+    ).adopts
 
     assert [candidate.session_id for candidate in found] == [_SESSION_ID]
 
@@ -598,7 +601,10 @@ def test_unowned_running_ignores_a_prefix_path_context_for_an_adopted_row(
         DevQueueStore(tasks=[row]),
         CwState(sessions=[_claim_session()]),
         {_CLIENT: sample_client_config},
-    )
+        now=datetime.now(UTC),
+        daemon=FakeNativeDaemonClient(),
+        native_live=set(),
+    ).adopts
 
     assert found == []
 
