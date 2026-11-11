@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from cw.auto_dev_result import AutoDevResult, parse_stdout
-from tests.conftest import _cmd
+from tests._shared.workflow_text import _cmd
 from tests.test_ambiguity_scan_adopted_assumptions import (
     _step1c_prompt_must_include_window,
 )
