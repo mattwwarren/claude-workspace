@@ -47,6 +47,7 @@ from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import CODEX_BACKEND, OrchestratorEventType
 from cw.tracker import TrackerClass, TrackerKind
+from cw.tracker_io._verify import PublicState
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -349,7 +350,7 @@ def surface_tracker_io_outcome(
         )
         return
     label = "plan" if identity.kind == "plan" else "review"
-    if outcome.public_state.value == "none":
+    if outcome.public_state is PublicState.NONE:
         _log.warning(
             "%s_comment_skipped ticket=%s tracker=%s reason=%s: durable copy at %s",
             label,

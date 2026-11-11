@@ -210,6 +210,12 @@ def run_plan_stations(
         findings.extend(lines)
         if block is not None and binding:
             return StationsOutcome(block=block, findings=tuple(findings))
+        if (
+            block is not None
+            and not binding
+            and (not lines or not block.details.endswith("\n".join(lines)))
+        ):
+            findings.append(f"- {block.details}")
     return StationsOutcome(block=None, findings=tuple(findings))
 
 

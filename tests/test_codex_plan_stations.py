@@ -168,6 +168,30 @@ class TestVerdicts:
         assert len(runner.calls) == 2
         assert len(outcome.findings) == 2
 
+    def test_advisory_failure_detail_is_preserved(self, tmp_path: Path) -> None:
+        runner = _runner(
+            station_findings_doc(
+                PLAN_REVIEWER, status="failed", detail="station unavailable"
+            ),
+            _clean(PLAN_SOUNDNESS_REVIEWER),
+        )
+        outcome = _stations(runner, tmp_path, binding=False)
+        assert outcome.block is None
+        assert any("station unavailable" in finding for finding in outcome.findings)
+        assert len(runner.calls) == 2
+
+    def test_advisory_missing_document_detail_is_preserved(
+        self, tmp_path: Path
+    ) -> None:
+        missing = CodexRunResult(returncode=0, stdout="", stderr="")
+        runner = _runner(missing, _clean(PLAN_SOUNDNESS_REVIEWER))
+        outcome = _stations(runner, tmp_path, binding=False)
+        assert outcome.block is None
+        assert any(
+            "Plan Reviewer station failed" in finding for finding in outcome.findings
+        )
+        assert len(runner.calls) == 2
+
 
 class TestLaunch:
     def test_station_argv_is_read_only_with_no_timeout(self, tmp_path: Path) -> None:
