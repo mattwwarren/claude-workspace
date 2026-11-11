@@ -22,12 +22,9 @@ import pytest
 
 from cw.merge_probe import PROBE_TIMEOUT_SECONDS
 from cw.review_convergence._merge_tolerance import TIP_CHECK_BUDGET_SECONDS
-from tests.conftest import (
-    _appendix,
-    _clean_git_env,
-    _cmd,
-    substitute_fence_placeholders,
-)
+from tests._shared.git_repos import _clean_git_env
+from tests._shared.guard_fences import substitute_fence_placeholders
+from tests._shared.workflow_text import _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
 _ROOT = Path(__file__).resolve().parent.parent

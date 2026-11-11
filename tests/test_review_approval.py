@@ -39,7 +39,7 @@ from tests._review_approval_helpers import (
     head,
     make_approval_repo,
 )
-from tests.conftest import commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
 from tests.test_reconcile_gate_recipes import _make_task
 
 if TYPE_CHECKING:

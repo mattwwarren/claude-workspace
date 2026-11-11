@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from cw.models import ClientConfig, Stage, TicketTask
 from cw.models.enums import QueueItemStatus
 from cw.reconcile.codex_boot import _head_matches_pre_review_ref
-from tests.conftest import commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

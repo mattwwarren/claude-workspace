@@ -95,7 +95,7 @@ from tests._codex_recovery_helpers import (
 )
 from tests._dirty_check_helpers import revert_completed_silent_prefetched
 from tests._reconcile_helpers import _local_git_worktree, _save_dead_local_session
-from tests.conftest import commit_tracked_file
+from tests._shared.git_repos import commit_tracked_file
 
 if TYPE_CHECKING:
     from collections.abc import Callable

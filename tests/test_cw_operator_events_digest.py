@@ -54,7 +54,7 @@ from cw.models import (
     TicketTask,
 )
 from tests._event_bus_helpers import drain
-from tests.conftest import _make_ticket_task
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from pathlib import Path

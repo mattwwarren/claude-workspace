@@ -51,7 +51,7 @@ from cw.models import (
     SessionStatus,
     TicketTask,
 )
-from tests.conftest import _make_daemon_session, _make_ticket_task
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 
 # Captured at module-load time, BEFORE the _no_real_poller_thread autouse
 # fixture (below) monkeypatches _server_mod._run_poller to a no-op for every

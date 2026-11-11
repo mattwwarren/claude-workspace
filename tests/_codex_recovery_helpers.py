@@ -41,7 +41,7 @@ from tests._reconcile_helpers import (
     _mk_headless_daemon_session,
     probe_sessions_lock_free,
 )
-from tests.conftest import commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     import subprocess

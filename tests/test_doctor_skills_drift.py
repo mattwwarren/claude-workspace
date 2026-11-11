@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from cw.doctor.skills_drift import _CHECK_NAME, _check_skills_commands_drift
-from tests.conftest import _patch_cw_dist_not_found
+from tests._shared.cli_preflight import _patch_cw_dist_not_found
 
 
 def _mk_proc(stdout: str = "", returncode: int = 0) -> subprocess.CompletedProcess[str]:

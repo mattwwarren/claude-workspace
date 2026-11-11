@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import ast
 
-from tests.conftest import _SRC_ROOT, _iter_src_files
+from tests._shared.workflow_text import _SRC_ROOT, _iter_src_files
 
 _PREFIX_ATTR = "feature_branch_prefix"
 _DELETED_HELPER = "feature_branch_key"

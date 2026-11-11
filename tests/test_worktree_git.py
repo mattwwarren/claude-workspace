@@ -27,7 +27,7 @@ from cw.worktree import (
     probe_checked_out_branch,
 )
 from cw.worktree._git import _PER_ROW_REPO_FAULTS, READ_ONLY_NETWORK_VERBS
-from tests.conftest import git_in
+from tests._shared.git_repos import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

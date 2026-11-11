@@ -13,7 +13,7 @@ The prompt now counts and renders them (informational only, never bucketed,
 never gating).
 """
 
-from tests.conftest import _appendix, _cmd
+from tests._shared.workflow_text import _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after, _nearby
 
 OLD_DISCARD_TEXT = "entirely — log them, do not present them to the bucket sort"

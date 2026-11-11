@@ -58,7 +58,8 @@ from cw.pr_hydrate import (
 )
 from tests._review_monitor_helpers import checkrun as _checkrun
 from tests._review_monitor_helpers import status_context
-from tests.conftest import _REPO_ROOT, init_repo_with_remote
+from tests._shared.git_repos import init_repo_with_remote
+from tests._shared.workflow_text import _REPO_ROOT
 
 _URL = "https://github.com/acme/widgets/pull/42"
 

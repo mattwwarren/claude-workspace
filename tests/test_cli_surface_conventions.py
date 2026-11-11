@@ -33,7 +33,7 @@ import pytest
 
 import cw
 from cw.cli import main
-from tests.conftest import walk_click_tree
+from tests._shared.cli_preflight import walk_click_tree
 
 # Commands where ``-c`` is bound to a non-client option, so ``--client`` cannot
 # also take it. Keyed by command path, valued by the reason. Empty today: no

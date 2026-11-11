@@ -24,7 +24,7 @@ from cw.dev_queue.gate_backoff import (
 )
 from cw.models import Stage, TicketTask
 from cw.models.gate_block import GateBlockBackoff
-from tests.conftest import _make_ticket_task
+from tests._shared.session_seeding import _make_ticket_task
 
 _NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
 _MGB = "merge_gate_blocked"

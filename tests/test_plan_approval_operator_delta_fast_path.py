@@ -7,7 +7,13 @@ helpers rather than duplicated here.
 
 import re
 
-from tests.conftest import _REPO_ROOT, _appendix, _checkpoint1_section, _cmd, _norm
+from tests._shared.workflow_text import (
+    _REPO_ROOT,
+    _appendix,
+    _checkpoint1_section,
+    _cmd,
+    _norm,
+)
 from tests.test_agent_comment_provenance import RULE_ANCHOR, _rule_section
 from tests.test_auto_dev_preflight_resolutions import _after
 from tests.test_plan_stage_settlement import (

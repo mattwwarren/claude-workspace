@@ -49,7 +49,11 @@ from cw.models import (
 from cw.models.operator_resolution import OperatorResolution
 from cw.native_daemon import FakeNativeDaemonClient
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests.conftest import _make_daemon_session, _make_ticket_task, _seed_sessions
+from tests._shared.session_seeding import (
+    _make_daemon_session,
+    _make_ticket_task,
+    _seed_sessions,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence

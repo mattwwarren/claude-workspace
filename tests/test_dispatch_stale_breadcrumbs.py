@@ -14,7 +14,11 @@ from cw.dispatch.stale_breadcrumbs import build_stale_breadcrumbs
 from cw.exceptions import CwError
 from cw.models import CwState, DevQueueStore, QueueItemStatus
 from tests._reconcile_helpers import events_doc_bullet
-from tests.conftest import _make_daemon_session, _make_tick_summary, _make_ticket_task
+from tests._shared.session_seeding import (
+    _make_daemon_session,
+    _make_tick_summary,
+    _make_ticket_task,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path

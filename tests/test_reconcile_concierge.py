@@ -58,7 +58,7 @@ from tests._reconcile_helpers import (
     _shipped_salvage_payload,
     _write_salvage_transcript,
 )
-from tests.conftest import _make_daemon_session, _make_ticket_task
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1750,7 +1750,7 @@ def test_park_marker_poison_clear_survives_widened_transcript_lookup(
 
     from cw.reconcile._shared import _transcript_age_seconds as _real_age
     from cw.reconcile.concierge import _park_marker_transcript_stale_45m
-    from tests.conftest import _write_idle_transcript
+    from tests._shared.stop_hook_context import _write_idle_transcript
 
     # The autouse _flat_transcript fixture stubs age to None; restore the real
     # (widened) implementation so this test exercises the glob across all files.

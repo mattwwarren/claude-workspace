@@ -31,7 +31,7 @@ from cw.opencode_runner import (
     OPENCODE_LOG_RELATIVE_PATH,
     extract_text_from_jsonl,
 )
-from tests.conftest import git_in
+from tests._shared.git_repos import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

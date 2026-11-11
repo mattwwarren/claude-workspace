@@ -26,7 +26,7 @@ from tests._review_engine_helpers import (
     seed_row,
     write_engine_context,
 )
-from tests.conftest import commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

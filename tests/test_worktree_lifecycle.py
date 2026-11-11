@@ -28,8 +28,8 @@ from cw.worktree import (
     create_worktree,
     remove_worktree,
 )
+from tests._shared.git_repos import commit_tracked_file, git_in
 from tests._worktree_helpers import patch_worktree
-from tests.conftest import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

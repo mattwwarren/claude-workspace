@@ -21,6 +21,7 @@ from cw.worktree import (
     create_worktree,
     unsaved_work_reason,
 )
+from tests._shared.git_repos import git_in, push_commit_to_origin
 from tests._worktree_helpers import patch_worktree
 from tests._worktree_refresh_helpers import (
     _FULL_SHA_CHARS,
@@ -38,7 +39,6 @@ from tests._worktree_refresh_helpers import (
     _seed_session,
     _spy_git,
 )
-from tests.conftest import git_in, push_commit_to_origin
 
 if TYPE_CHECKING:
     from collections.abc import Callable

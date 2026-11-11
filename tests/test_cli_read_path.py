@@ -53,7 +53,8 @@ from tests._reconcile_helpers import (
     _make_pending_fix_dispatch,
     _seed_task,
 )
-from tests.conftest import _FakeClock, _make_daemon_session, _seed_sessions
+from tests._shared.lock_helpers import _FakeClock
+from tests._shared.session_seeding import _make_daemon_session, _seed_sessions
 
 _READ_COMMANDS = ("list", "status")
 _PHANTOM_ID = "phantom1"
@@ -404,7 +405,7 @@ def test_read_command_on_legacy_state_leaves_tree_identical(
     command: str, tmp_config_dir: Path
 ) -> None:
     """A pure read over a legacy sessions.json writes nothing (#2951)."""
-    from tests.conftest import write_legacy_sessions_json
+    from tests._shared.session_seeding import write_legacy_sessions_json
 
     state_dir = tmp_config_dir / ".local" / "share" / "cw"
     write_legacy_sessions_json(state_dir, mtime_ns=1_000_000_000_000_000_000)

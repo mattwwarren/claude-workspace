@@ -31,7 +31,7 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from tests._clients_yaml import write_clients_yaml
-from tests.conftest import _hold_sessions_lock
+from tests._shared.lock_helpers import _hold_sessions_lock
 
 
 class TestDispatchTickReconcileErrors:

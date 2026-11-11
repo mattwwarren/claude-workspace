@@ -94,7 +94,7 @@ from tests._reconcile_helpers import (
     stub_worktree_probe,
     use_reconcile_daemon,
 )
-from tests.conftest import _make_daemon_session, _make_ticket_task
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 from tests.test_pr_hydrate import _pr_state
 from tests.test_reconcile_gate_recipes import _GATE_LANES, _clean_result
 from tests.test_reconcile_gate_recipes import _make_session as _gate_session

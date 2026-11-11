@@ -16,7 +16,12 @@ guards below pin that it is never an evidence source.
 
 import pytest
 
-from tests.conftest import _REPO_ROOT, _appendix, _checkpoint1_section, _cmd
+from tests._shared.workflow_text import (
+    _REPO_ROOT,
+    _appendix,
+    _checkpoint1_section,
+    _cmd,
+)
 from tests.test_auto_dev_preflight_resolutions import _after, _nearby
 
 _FINGERPRINT_RULE_NAME = "Plan-draft fingerprint rule"

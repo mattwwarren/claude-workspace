@@ -37,7 +37,7 @@ from cw.result import reconstruct_staged_sentinel
 from tests._adopt_pr_helpers import ADOPT_PIN, make_adopted_task
 from tests._clients_yaml import write_clients_yaml
 from tests._reconcile_helpers import _stage_complete_payload
-from tests.conftest import _seed_daemon_session
+from tests._shared.session_seeding import _seed_daemon_session
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -22,7 +22,7 @@ from cw.codex_review import FIX_CYCLE_COMMIT_PREFIX, make_codex_blocked
 from cw.codex_stage_facts import fix_loop_facts, resolve_plan_source, stamp_stage_facts
 from cw.dispatch.routing import scope_tier
 from tests._codex_review_helpers import _task
-from tests.conftest import add_bare_origin, git_in
+from tests._shared.git_repos import add_bare_origin, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence

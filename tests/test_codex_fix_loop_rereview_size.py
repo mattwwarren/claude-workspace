@@ -46,8 +46,8 @@ from tests._codex_review_helpers import (
     _task,
 )
 from tests._review_engine_helpers import EngineRepo, make_engine_repo
+from tests._shared.git_repos import add_bare_origin, commit_tracked_file, git_in
 from tests._tool_fakes import ScriptedCodexRunner
-from tests.conftest import add_bare_origin, commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence

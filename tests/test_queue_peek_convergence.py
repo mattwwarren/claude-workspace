@@ -31,7 +31,7 @@ from tests._review_convergence_helpers import (
     stopped_ledger,
     write_ledger,
 )
-from tests.conftest import _make_ticket_task
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from pathlib import Path

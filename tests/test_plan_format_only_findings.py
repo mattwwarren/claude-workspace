@@ -20,7 +20,7 @@ where every persisting MUST_FIX finding is category ``Format-Only``.
 
 from pathlib import Path
 
-from tests.conftest import _cmd
+from tests._shared.workflow_text import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
 ROOT = Path(__file__).parent.parent

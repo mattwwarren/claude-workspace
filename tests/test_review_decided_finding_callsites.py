@@ -53,7 +53,7 @@ from tests._review_convergence_helpers import (
     engine_pass_ledger,
     record,
 )
-from tests.conftest import _make_finding
+from tests._shared.review_builders import _make_finding
 
 if TYPE_CHECKING:
     from collections.abc import Callable

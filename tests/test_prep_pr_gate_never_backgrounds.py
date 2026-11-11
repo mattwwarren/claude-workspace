@@ -11,7 +11,7 @@ override (fail on foreground timeout, cross-referencing auto-dev.md's Worker
 Execution Discipline) and that interactive mode keeps its background/poll path.
 """
 
-from tests.conftest import _cmd
+from tests._shared.workflow_text import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
 _FOREGROUND_TIMEOUT_ANCHOR = "**If the foreground call itself times out"

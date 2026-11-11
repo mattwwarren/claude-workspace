@@ -23,7 +23,7 @@ from cw.session_resume_trigger import (
     ResumeTriggerResult,
 )
 from tests._clients_yaml import write_clients_yaml
-from tests.conftest import _make_daemon_session
+from tests._shared.session_seeding import _make_daemon_session
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple
 
-from tests.conftest import git_in, init_bare_origin
+from tests._shared.git_repos import git_in, init_bare_origin
 
 if TYPE_CHECKING:
     from collections.abc import Callable

@@ -30,12 +30,8 @@ from typing import TYPE_CHECKING, NamedTuple
 from cw.events import read_events
 from cw.models import ClientConfig, OrchestratorEventType, Stage, TicketTask
 from cw.models.review_feedback import ReviewFeedback
-from tests.conftest import (
-    _make_ticket_task,
-    commit_tracked_file,
-    git_in,
-    push_commit_to_origin,
-)
+from tests._shared.git_repos import commit_tracked_file, git_in, push_commit_to_origin
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable

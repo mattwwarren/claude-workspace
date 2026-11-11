@@ -14,7 +14,7 @@ Covers the Step 2.5 / Mitigation 1 gate-worktree block in both
 - gate-failure prose covers a gate-setup failure, not just checks 1/3/4
 """
 
-from tests.conftest import _cmd
+from tests._shared.workflow_text import _cmd
 
 
 def test_impl_gate_worktree_path_keyed_on_gate_key_not_session() -> None:

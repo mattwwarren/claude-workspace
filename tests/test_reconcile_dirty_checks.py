@@ -102,7 +102,8 @@ from tests._reconcile_helpers import (
     stub_worktree_probe,
     use_reconcile_daemon,
 )
-from tests.conftest import _make_daemon_session, _make_ticket_task, git_in
+from tests._shared.git_repos import git_in
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping

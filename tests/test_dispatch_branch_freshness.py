@@ -32,7 +32,8 @@ from cw.models import (
     QueueItemStatus,
     Stage,
 )
-from tests.conftest import _make_ticket_task, git_in
+from tests._shared.git_repos import git_in
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable

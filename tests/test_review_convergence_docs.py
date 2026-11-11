@@ -36,7 +36,7 @@ from cw.dev_queue.gates import (
     STALE_TIP_FRICTION_PREFIX,
 )
 from cw.review_convergence import CONFIRM_FAILURE_CAUSES
-from tests.conftest import _cmd
+from tests._shared.workflow_text import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
 if TYPE_CHECKING:

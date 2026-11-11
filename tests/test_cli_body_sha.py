@@ -18,7 +18,7 @@ from click.testing import CliRunner, Result
 from cw.cli import main
 from cw.plan_fingerprint import compute_body_sha
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests.conftest import _make_agent_repo
+from tests._shared.cli_preflight import _make_agent_repo
 
 if TYPE_CHECKING:
     from pathlib import Path

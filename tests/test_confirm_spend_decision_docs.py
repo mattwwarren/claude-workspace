@@ -14,7 +14,7 @@ from pathlib import Path
 
 from cw.claude_review import build_claude_review_argv
 from cw.models.client import ReviewConfig
-from tests.conftest import _norm
+from tests._shared.workflow_text import _norm
 from tests.test_auto_dev_preflight_resolutions import _after
 
 ROOT = Path(__file__).resolve().parent.parent

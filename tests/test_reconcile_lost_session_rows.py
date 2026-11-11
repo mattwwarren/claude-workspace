@@ -52,7 +52,8 @@ from tests._reconcile_helpers import (
     use_reconcile_daemon,
     write_unreadable_claim_context,
 )
-from tests.conftest import _CANONICAL_ATTENTION_KEYS, _make_daemon_session
+from tests._shared.daemon_fakes import _CANONICAL_ATTENTION_KEYS
+from tests._shared.session_seeding import _make_daemon_session
 
 _CLIENT = "client-a"
 _LOST = "running_row_session_lost"
@@ -820,7 +821,7 @@ class TestThroughReconcile:
         """The unowned-running sweep runs before this one in the tail: a row
         its evidence ties to a recorded session is bound, never paged."""
         from cw.worktree import worktree_path_for
-        from tests.conftest import _write_hook_context_file
+        from tests._shared.stop_hook_context import _write_hook_context_file
 
         client = ClientConfig(
             name=_CLIENT,

@@ -20,7 +20,7 @@ from tests._changelog_cut_helpers import (
     pyproject,
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests.conftest import commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

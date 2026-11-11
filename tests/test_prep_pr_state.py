@@ -28,12 +28,9 @@ from typing import Any, Protocol, cast
 import pytest
 
 from cw.codex_review._context import _load_claude_md_quality_gates
-from tests.conftest import (
-    _bash_fences,
-    _write_project_config_yaml,
-    commit_tracked_file,
-    git_in,
-)
+from tests._shared.cli_preflight import _write_project_config_yaml
+from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.workflow_text import _bash_fences
 from tests.test_prep_pr_finalize import _python
 
 # ---------------------------------------------------------------------------

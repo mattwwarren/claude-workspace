@@ -23,6 +23,7 @@ from cw.worktree import (
     create_worktree,
     fetch_feature_branch,
 )
+from tests._shared.git_repos import git_in
 from tests._worktree_helpers import FakeClock, patch_worktree
 from tests._worktree_refresh_helpers import (
     _REUSE_BRANCH,
@@ -41,7 +42,6 @@ from tests._worktree_refresh_helpers import (
     _spy_fetch,
     _vouch_for_roster_worker,
 )
-from tests.conftest import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

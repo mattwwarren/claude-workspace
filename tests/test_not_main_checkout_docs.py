@@ -16,7 +16,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from tests.conftest import GUARD_MARKER_CURRENT, _cmd
+from tests._shared.guard_fences import GUARD_MARKER_CURRENT
+from tests._shared.workflow_text import _cmd
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = _REPO_ROOT / ".claude" / "scripts" / "check_not_main_checkout.py"

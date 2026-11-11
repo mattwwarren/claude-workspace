@@ -40,7 +40,7 @@ from tests._adopt_pr_helpers import (
     make_adopted_task,
     make_pinned_origin,
 )
-from tests.conftest import git_in
+from tests._shared.git_repos import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

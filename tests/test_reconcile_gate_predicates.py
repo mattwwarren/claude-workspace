@@ -19,7 +19,7 @@ from cw.reconcile.gate_predicates import (
     _predicate_holds,
     _row_eligible,
 )
-from tests.conftest import _make_ticket_task
+from tests._shared.session_seeding import _make_ticket_task
 
 _FP = "c" * 64
 _NOW = datetime(2026, 10, 2, 12, 0, 0, tzinfo=UTC)

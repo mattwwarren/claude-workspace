@@ -45,7 +45,7 @@ from cw.local_runner import (
 )
 from cw.worktree import resolve_worker_tmpdir
 from tests import _git_sandbox
-from tests.conftest import commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

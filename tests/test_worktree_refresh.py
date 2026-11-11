@@ -29,6 +29,7 @@ from cw.worktree import (
     fetch_feature_branch,
     is_main_behind_origin,
 )
+from tests._shared.git_repos import git_in, push_commit_to_origin
 from tests._worktree_helpers import FakeClock, patch_worktree
 from tests._worktree_refresh_helpers import (
     _REUSE_BRANCH,
@@ -42,7 +43,6 @@ from tests._worktree_refresh_helpers import (
     _seed_session,
     _spy_fetch,
 )
-from tests.conftest import git_in, push_commit_to_origin
 
 if TYPE_CHECKING:
     from collections.abc import Callable

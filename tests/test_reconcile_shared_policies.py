@@ -77,7 +77,7 @@ from tests._reconcile_helpers import (
     _write_transcript_records,
     call_and_drain,
 )
-from tests.conftest import _make_daemon_session, _make_ticket_task
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 
 
 class TestEmitReapProposed:

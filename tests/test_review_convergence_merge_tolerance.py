@@ -54,7 +54,7 @@ from tests._review_convergence_helpers import (
     tolerated_merge_script,
     write_ledger,
 )
-from tests.conftest import (
+from tests._shared.git_repos import (
     add_bare_origin,
     commit_tracked_file,
     git_in,

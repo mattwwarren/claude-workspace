@@ -25,7 +25,8 @@ from cw.models import QueueItemStatus, Stage
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._codex_review_helpers import _SequencedRunner
 from tests._review_convergence_helpers import warm_codex_capability
-from tests.conftest import _make_ticket_task, git_in
+from tests._shared.git_repos import git_in
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence

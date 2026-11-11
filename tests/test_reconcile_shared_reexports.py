@@ -40,11 +40,8 @@ from cw.models import (
 from cw.reconcile import _shared
 from tests._clients_yaml import staged_client, write_clients_yaml
 from tests._reconcile_helpers import _mk_session, _stage_complete_payload
-from tests.conftest import (
-    _make_daemon_session,
-    _make_ticket_task,
-    _write_idle_transcript,
-)
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
+from tests._shared.stop_hook_context import _write_idle_transcript
 
 # The complete importable surface: every top-level name the flat
 # ``reconcile/_shared.py`` bound before the split (134 definitions, the six

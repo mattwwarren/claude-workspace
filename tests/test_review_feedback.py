@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from cw.dev_queue import migrate_dev_queue
 from cw.models import DEV_QUEUE_SCHEMA_VERSION, DevQueueStore, TicketTask
 from cw.models.review_feedback import MAX_REVIEW_REPORT_BYTES, ReviewFeedback
-from tests.conftest import _COMMANDS_ROOT, _REPO_ROOT, _iter_src_files
+from tests._shared.workflow_text import _COMMANDS_ROOT, _REPO_ROOT, _iter_src_files
 
 # Built from two literals so a repo-wide `git grep -i` of tests/ is also clean.
 _TERM = "pi" + "ta"

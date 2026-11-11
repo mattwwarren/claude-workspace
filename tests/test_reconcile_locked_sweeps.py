@@ -54,7 +54,8 @@ from tests._reconcile_helpers import (
     _auto_config,
     _mk_session,
 )
-from tests.conftest import CapturedEvent, _make_daemon_session, _make_ticket_task
+from tests._shared.daemon_fakes import CapturedEvent
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 
 
 class TestVerifySupervisorSessionId:
@@ -396,7 +397,7 @@ class TestUnownedRunningSweepWiring:
         """A row whose claim session is a phantom is the phantom sweep's (keyed
         by ticket id); adoption then finds no RUNNING row and does nothing."""
         from cw.worktree import worktree_path_for
-        from tests.conftest import _write_hook_context_file
+        from tests._shared.stop_hook_context import _write_hook_context_file
 
         monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
         client = ClientConfig(

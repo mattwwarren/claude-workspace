@@ -33,8 +33,7 @@ from cw.review_finding_dispositions import (
 )
 from cw.review_findings import AcceptedFinding, Finding, ReviewVerdict
 from cw.review_markers import RefusedDisposition
-
-from .conftest import _make_finding
+from tests._shared.review_builders import _make_finding
 
 _LOGGER = "cw.review_finding_dispositions"
 _TICKET = "T-1838"

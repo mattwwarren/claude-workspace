@@ -33,10 +33,10 @@ from cw.models import (
     SessionOrigin,
     Stage,
 )
-from tests.conftest import (
+from tests._shared.session_seeding import _make_ticket_task
+from tests._shared.stop_hook_context import (
     _hold_context_lock,
     _invoke_hook_command,
-    _make_ticket_task,
     _write_hook_context_file,
 )
 

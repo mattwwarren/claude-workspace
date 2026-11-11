@@ -46,7 +46,7 @@ from cw.opencode_runner import (
     _sentinel_rules,
     _stage_preamble,
 )
-from tests.conftest import _COMMANDS_ROOT, _cmd
+from tests._shared.workflow_text import _COMMANDS_ROOT, _cmd
 
 TICKET_PLACEHOLDER = render_module.TICKET_PLACEHOLDER
 

@@ -15,7 +15,7 @@ from cw.dev_queue import add_ticket
 from cw.models import CwState, QueueItemStatus, Stage, TicketTask
 from tests._clients_yaml import review_backend_clients, write_clients_yaml
 from tests._codex_recovery_helpers import _STARTED_AT
-from tests.conftest import _make_daemon_session
+from tests._shared.session_seeding import _make_daemon_session
 
 _FIRST_RUN_AT = "2026-02-01 12:00:00"
 _FIRST_RUN_ISO = "2026-02-01T12:00:00+00:00"

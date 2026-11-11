@@ -19,7 +19,7 @@ import pytest
 
 from cw.models.enums import OrchestratorEventType
 from cw.models.events import OrchestratorEvent
-from tests.conftest import _REPO_ROOT
+from tests._shared.workflow_text import _REPO_ROOT
 
 _SKILL = _REPO_ROOT / ".claude" / "skills" / "cw-smoke-test" / "SKILL.md"
 _WORKER_ID = "probe-session"

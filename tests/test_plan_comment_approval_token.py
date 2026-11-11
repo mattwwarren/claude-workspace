@@ -15,7 +15,7 @@ checks.
 other command-prose readers.
 """
 
-from tests.conftest import _appendix, _checkpoint1_section
+from tests._shared.workflow_text import _appendix, _checkpoint1_section
 from tests.test_auto_dev_preflight_resolutions import _after
 
 _APPROVAL_MARKER = "<!-- auto-dev-comment-approval -->"

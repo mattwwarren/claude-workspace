@@ -75,6 +75,8 @@ from cw.models.ticket_view import NextCommand
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile._shared import resolve_session_for_task
 from cw.review_convergence._models import TipReason
+from tests._shared.review_builders import plan_body, stub_fetch_plan
+from tests._shared.session_seeding import _make_ticket_task
 from tests._shipped_red_helpers import make_episode, make_red_row
 from tests._ticket_view_helpers import (
     ACME,
@@ -92,7 +94,6 @@ from tests._ticket_view_helpers import (
     seed_queue,
     write_lane_client,
 )
-from tests.conftest import _make_ticket_task, plan_body, stub_fetch_plan
 
 if TYPE_CHECKING:
     from pathlib import Path

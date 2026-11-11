@@ -52,12 +52,8 @@ from cw.exceptions import CwError, LockTimeoutError
 from cw.models import CwState, DevQueueStore, QueueItemStatus
 from tests._cli_review_helpers import _enter_operator_machine
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests.conftest import (
-    _FakeClock,
-    _hold_flock,
-    _make_daemon_session,
-    _make_ticket_task,
-)
+from tests._shared.lock_helpers import _FakeClock, _hold_flock
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator

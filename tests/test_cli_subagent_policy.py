@@ -30,7 +30,7 @@ import pytest
 
 from cw.cli._subagent_policy import classify_spawn
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests.conftest import (
+from tests._shared.stop_hook_context import (
     _headless_worktree,
     _write_global_toggle,
     _write_hook_context_file,

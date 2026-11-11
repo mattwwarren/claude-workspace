@@ -26,7 +26,7 @@ the reasons that are still mechanically rejected, and reviewers are told to
 quote the inlined diff rather than the on-disk file.
 """
 
-from tests.conftest import _cmd
+from tests._shared.workflow_text import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after, _nearby
 
 DEGRADED_BULLET_ANCHOR = (

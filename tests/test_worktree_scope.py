@@ -18,8 +18,8 @@ from cw.worktree import (
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._reconcile_helpers import _no_op_salvage_payload
+from tests._shared.git_repos import git_in
 from tests._worktree_helpers import patch_worktree
-from tests.conftest import git_in
 from tests.test_result import _valid_payload
 
 if TYPE_CHECKING:

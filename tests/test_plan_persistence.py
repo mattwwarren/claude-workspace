@@ -25,7 +25,7 @@ draft-persistence rule in Step 1c's headless branch that each exit clause
 references.
 """
 
-from tests.conftest import _checkpoint1_section, _cmd
+from tests._shared.workflow_text import _checkpoint1_section, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after, _nearby
 
 DRAFT_FILE = ".cw/plan-draft.md"

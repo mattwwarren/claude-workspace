@@ -36,7 +36,7 @@ from cw._lock_guard import held_locks
 from cw.config import clients_lock, concurrency_override_lock
 from cw.dev_queue import dev_queue_lock
 from cw.exceptions import CwError, LockTimeoutError, SessionsLockTimeoutError
-from tests.conftest import (
+from tests._shared.lock_helpers import (
     _assert_lock_held,
     _fake_fcntl,
     _FakeClock,
@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from typing import IO
 
-    from tests.conftest import _RecordingLockPath
+    from tests._shared.lock_helpers import _RecordingLockPath
 
 pytestmark = pytest.mark.platform_sensitive
 

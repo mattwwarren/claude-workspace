@@ -19,7 +19,7 @@ send-back cross-check — that routes an out-of-scope finding to DEFER instead
 of FIX NOW.
 """
 
-from tests.conftest import _cmd
+from tests._shared.workflow_text import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
 CONSOLIDATE_INVOCATION_ANCHOR = (

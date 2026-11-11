@@ -10,7 +10,7 @@ closures (Mitigation 1's gate test-command, Step 1g's tracker-comment post),
 and the disambiguation sentence added to every existing Async-dispatch note.
 """
 
-from tests.conftest import _appendix, _cmd
+from tests._shared.workflow_text import _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
 

@@ -8,8 +8,8 @@ import pytest
 
 from cw.review_debt_filing import TrackerMode, auto_create_issues, tracker_mode
 from cw.sprint import GhClient
+from tests._shared.cli_preflight import _write_project_config_yaml
 from tests._tool_fakes import FakeGh
-from tests.conftest import _write_project_config_yaml
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -20,7 +20,7 @@ from cw.config import load_state, mutate_state, save_state, sessions_lock, state
 from cw.exceptions import CwLockReentrancyError, SessionsLockTimeoutError
 from cw.models import CwState, LastResultSource, Session, SessionPurpose, SessionStatus
 from cw.result import emit_result
-from tests.conftest import _FakeClock
+from tests._shared.lock_helpers import _FakeClock
 from tests.test_result import _valid_payload
 
 if TYPE_CHECKING:

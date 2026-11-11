@@ -51,7 +51,7 @@ from tests._codex_review_helpers import (
     _ok_result,
     _SequencedRunner,
 )
-from tests.conftest import _without_evidence
+from tests._shared.review_builders import _without_evidence
 
 _AUDIT_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "codex_audit_events"
 

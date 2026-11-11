@@ -17,7 +17,7 @@ failures in ``malformed_verified_count``.
 
 from pathlib import Path
 
-from tests.conftest import _cmd
+from tests._shared.workflow_text import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 from tests.test_plan_stage_settlement import _step4b_bullet
 

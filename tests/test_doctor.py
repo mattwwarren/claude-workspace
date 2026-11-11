@@ -34,11 +34,11 @@ from tests._reconcile_helpers import (
     _write_transcript_records,
     ms_of,
 )
-from tests.conftest import (
+from tests._shared.lock_helpers import _seed_lock_holds
+from tests._shared.session_seeding import (
     _make_daemon_session,
     _make_tick_summary,
     _make_ticket_task,
-    _seed_lock_holds,
     _seed_sessions,
 )
 

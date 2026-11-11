@@ -26,7 +26,7 @@ from cw.models import (
 from cw.models.client import ReviewConfig, ReviewEngineConfig
 from cw.review_engine.manifest_source import ManifestRead, read_default_branch_manifest
 from tests._review_engine_helpers import copy_engine_fixture, make_engine_repo
-from tests.conftest import git_in
+from tests._shared.git_repos import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

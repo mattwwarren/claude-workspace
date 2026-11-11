@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 
-from tests.conftest import _COMMANDS_ROOT
+from tests._shared.workflow_text import _COMMANDS_ROOT
 
 _COMMAND_PREFIX = "cw event record stage."
 _SWALLOW = "|| true"

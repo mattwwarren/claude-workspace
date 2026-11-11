@@ -39,7 +39,8 @@ from tests._review_engine_helpers import (
     write_summary,
 )
 from tests._review_engine_helpers import invoke as invoke_cw
-from tests.conftest import _norm, commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.workflow_text import _norm
 
 if TYPE_CHECKING:
     from collections.abc import Callable

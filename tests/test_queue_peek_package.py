@@ -32,7 +32,7 @@ import pytest
 
 import cw.queue_peek
 from cw.models import QueueItemStatus
-from tests.conftest import _make_ticket_task
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from types import ModuleType

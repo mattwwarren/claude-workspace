@@ -28,7 +28,8 @@ from cw.models import (
     Stage,
 )
 from cw.session_retention import prune_sessions
-from tests.conftest import _make_daemon_session, _make_diff, _seed_sessions
+from tests._shared.review_builders import _make_diff
+from tests._shared.session_seeding import _make_daemon_session, _seed_sessions
 
 
 def _make_session(

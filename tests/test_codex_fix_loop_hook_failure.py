@@ -20,7 +20,7 @@ from cw.codex_fix_loop.hook_failure import (
 from cw.codex_fix_loop.posted_text import TRUNCATION_MARKER
 from cw.codex_review import CODEX_FIX_HOOK_FAILED
 from tests._codex_review_helpers import _install_pre_commit_hook, _write
-from tests.conftest import git_in
+from tests._shared.git_repos import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

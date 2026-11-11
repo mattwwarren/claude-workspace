@@ -85,16 +85,14 @@ from tests._codex_review_helpers import (
     assert_clean_after_refusal,
     exclude_cw_dir,
 )
-from tests.conftest import (
+from tests._shared.git_repos import add_bare_origin, commit_tracked_file, git_in
+from tests._shared.review_builders import (
     _make_constraint,
     _make_diff,
     _make_finding,
     _make_reviewer_doc,
-    _make_ticket_task,
-    add_bare_origin,
-    commit_tracked_file,
-    git_in,
 )
+from tests._shared.session_seeding import _make_ticket_task
 from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:

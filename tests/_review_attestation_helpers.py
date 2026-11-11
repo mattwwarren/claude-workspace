@@ -46,7 +46,8 @@ from tests._review_convergence_helpers import (
 )
 from tests._review_engine_helpers import SHA, make_summary, write_summary
 from tests._review_history_helpers import sentinel_review
-from tests.conftest import _make_ticket_task, git_in
+from tests._shared.git_repos import git_in
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence

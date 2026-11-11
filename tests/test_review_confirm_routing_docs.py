@@ -30,7 +30,7 @@ from tests._review_convergence_helpers import (
     record,
     round_finding,
 )
-from tests.conftest import _appendix, _cmd
+from tests._shared.workflow_text import _appendix, _cmd
 from tests.test_agent_comment_provenance import _blocker_reason_table, _table_reasons
 
 ROOT = Path(__file__).resolve().parent.parent

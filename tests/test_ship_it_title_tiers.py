@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import _clean_git_env, git_in
+from tests._shared.git_repos import _clean_git_env, git_in
 
 ROOT = Path(__file__).parent.parent
 SHIP_IT_PATH = ROOT / ".claude" / "commands" / "ship-it.md"

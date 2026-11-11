@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import _REPO_ROOT, _cmd
+from tests._shared.workflow_text import _REPO_ROOT, _cmd
 
 _RULE_HEADING = "## Sentinel emit rule (#2382)"
 _EMIT_LINE = "printf '%s' \"$SENTINEL_JSON\" | cw result emit -"

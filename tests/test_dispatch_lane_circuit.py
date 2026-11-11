@@ -63,7 +63,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import ClientConfig, OrchestratorConfig
-    from tests.conftest import CapturedEvent
+    from tests._shared.daemon_fakes import CapturedEvent
 
 _CLIENT = "test-client"
 _LANE = LaneConfig(name="default")

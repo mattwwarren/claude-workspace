@@ -31,7 +31,7 @@ from click.testing import CliRunner, Result
 
 from cw.cli import main
 from cw.config import orchestrator_config_file
-from tests.conftest import _write_idle_transcript
+from tests._shared.stop_hook_context import _write_idle_transcript
 
 _MAIN_CSID = "aaaa1111-0000-0000-0000-000000000000"
 # Far enough in the past that any file written during the test run has an

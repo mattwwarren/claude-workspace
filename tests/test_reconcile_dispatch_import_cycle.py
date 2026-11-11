@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from tests.conftest import _REPO_ROOT, _SRC_ROOT
+from tests._shared.workflow_text import _REPO_ROOT, _SRC_ROOT
 
 if TYPE_CHECKING:
     from pathlib import Path

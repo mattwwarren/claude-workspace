@@ -35,7 +35,8 @@ lets it run by bare name once its directory leads ``PATH``. Put it there with
 :func:`prepend_to_path` (a directory already in hand); do not open-code
 ``monkeypatch.setenv("PATH", ...)`` -- ``tests/test_tool_fakes.py`` fails on it.
 
-This module never imports ``tests.conftest``: the conftest imports it.
+This module never imports ``tests.conftest``: ``tests/_shared/autouse_isolation.py``
+imports it.
 ``FakeGhHead`` is re-exported through a module ``__getattr__`` because its
 home module imports ``tests.conftest`` at its top.
 """
@@ -1165,7 +1166,7 @@ def _mock_codex_capability_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     ``tests/test_codex_capability.py`` re-patches the same two names directly
     for its binary-absent/timeout/non-zero-exit/unparseable cases; pytest's
     patch stack lets the test-level patch win. Registered suite-wide by its
-    binding in ``tests/conftest.py``.
+    binding in ``tests/_shared/autouse_isolation.py``.
     """
     monkeypatch.setattr(
         "cw.codex_review._capability._which_codex", lambda: "/usr/bin/codex"

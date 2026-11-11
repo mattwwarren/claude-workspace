@@ -44,7 +44,7 @@ from cw.worktree_gc import (
     run_worktree_gc,
 )
 from tests._reconcile_helpers import fake_branch_pr
-from tests.conftest import add_bare_origin, git_in
+from tests._shared.git_repos import add_bare_origin, git_in
 from tests.test_gh import _GH_PRS_MERGED, _GH_PRS_MIXED, _GH_PRS_OPEN
 
 # ---------------------------------------------------------------------------

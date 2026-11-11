@@ -25,7 +25,7 @@ from __future__ import annotations
 import ast
 from collections import Counter
 
-from tests.conftest import _SRC_ROOT, _files_under
+from tests._shared.workflow_text import _SRC_ROOT, _files_under
 
 _STOP_ATTR = "stop"
 _RECONCILE_PREFIX = "cw/reconcile/"

@@ -34,7 +34,7 @@ from cw.review_engine.constants import (
     EngineRoundFailure,
 )
 from cw.review_engine_manifest_io import EngineManifestRejection
-from tests.conftest import _appendix, _cmd
+from tests._shared.workflow_text import _appendix, _cmd
 from tests.test_agent_comment_provenance import _blocker_reason_table, _table_reasons
 from tests.test_auto_dev_preflight_resolutions import _after
 

@@ -36,6 +36,7 @@ from typing import Any
 
 import yaml
 
+from tests._shared.git_repos import _clean_git_env, git_in
 from tests._tool_fakes import (
     assert_gh_calls,
     gh_calls,
@@ -43,7 +44,6 @@ from tests._tool_fakes import (
     stub_gh_issue_list,
     stub_gh_recording,
 )
-from tests.conftest import _clean_git_env, git_in
 
 ROOT = Path(__file__).parent.parent
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "release-tag.yml"

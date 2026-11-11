@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from cw.events import record_event
 from cw.events_tail import ANCHOR_BYTES, locate_after_event
 from cw.models import OrchestratorEventType
-from tests.conftest import _seed_inbox_with_cursor
+from tests._shared.dispatch_fixtures import _seed_inbox_with_cursor
 
 if TYPE_CHECKING:
     from pathlib import Path

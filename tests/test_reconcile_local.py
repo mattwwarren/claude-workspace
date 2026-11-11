@@ -83,7 +83,7 @@ from tests._reconcile_helpers import (
     act_on_local_harvest,
     probe_sessions_lock_free,
 )
-from tests.conftest import (
+from tests._shared.session_seeding import (
     _audit_failure_logged,
     _fail_audit_append,
     _make_daemon_session,

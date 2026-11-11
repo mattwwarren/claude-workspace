@@ -78,6 +78,7 @@ from cw.models import (
 from tests._dispatch_tick_helpers import skip_tick_events
 from tests._doctor_helpers import stub_daemon_roster
 from tests._reconcile_helpers import _stamp_transcript_age
+from tests._shared.session_seeding import _make_daemon_session
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -85,7 +86,6 @@ from tests._ticket_view_helpers import (
     make_task,
     seed_queue,
 )
-from tests.conftest import _make_daemon_session
 
 if TYPE_CHECKING:
     from cw.models import Session, TicketTask

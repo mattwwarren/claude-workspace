@@ -23,7 +23,7 @@ import pytest
 
 from tests import _git_sandbox, _host_probe_guard
 from tests import _review_monitor_helpers as review_monitor
-from tests.conftest import load_guard_script_module
+from tests._shared.guard_fences import load_guard_script_module
 
 _SCRIPTS = Path(__file__).resolve().parents[1] / ".claude" / "scripts"
 

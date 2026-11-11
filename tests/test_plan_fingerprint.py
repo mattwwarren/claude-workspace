@@ -235,7 +235,7 @@ class TestRowResolutionsSource:
     def test_cw_computed_identity_is_stripped_as_bookkeeping(self) -> None:
         """Ties the cw helper's output to the regex: the string cw delivers as
         ``queue_metadata.operator_resolutions_source`` is a valid applied source."""
-        from tests.conftest import _make_ticket_task
+        from tests._shared.session_seeding import _make_ticket_task
 
         recorded_at = datetime(2026, 10, 18, 9, 0, tzinfo=UTC)
         task = _make_ticket_task(
@@ -267,7 +267,7 @@ class TestRowResolutionsSource:
     ) -> None:
         from cw.dev_queue.plan_promotion import promote_plan_draft
         from cw.models import QueueItemStatus, Stage
-        from tests.conftest import _make_ticket_task
+        from tests._shared.session_seeding import _make_ticket_task
 
         cw_dir = tmp_path / "wt" / ".cw"
         cw_dir.mkdir(parents=True)

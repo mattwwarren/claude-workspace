@@ -14,7 +14,7 @@ from cw._transcript import (
     locate_transcript,
     subagent_transcript_paths,
 )
-from tests.conftest import _write_idle_transcript
+from tests._shared.stop_hook_context import _write_idle_transcript
 
 _EPOCH = dt.datetime.fromtimestamp(0, tz=dt.UTC)
 _NOW = dt.datetime(2026, 6, 20, 12, 0, 0, tzinfo=dt.UTC)

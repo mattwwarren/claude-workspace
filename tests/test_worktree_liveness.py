@@ -23,6 +23,8 @@ from cw.worktree import (
     live_session_worktree_paths,
 )
 from cw.worktree_gc import _live_worktree_paths
+from tests._shared.git_repos import git_in, push_commit_to_origin
+from tests._shared.stop_hook_context import _symlink_loop
 from tests._worktree_refresh_helpers import (
     _REUSE_BRANCH,
     _cw_worktree_records,
@@ -42,7 +44,6 @@ from tests._worktree_refresh_helpers import (
     _vouch_for_roster_worker,
     _write_corrupt_state,
 )
-from tests.conftest import _symlink_loop, git_in, push_commit_to_origin
 
 if TYPE_CHECKING:
     from collections.abc import Callable

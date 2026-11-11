@@ -46,7 +46,7 @@ class TestIsMainBehindOrigin:
     # Option A: real bare-repo tests
     # ------------------------------------------------------------------
 
-    # Not tests.conftest.git_in: optional cwd and no -C, so bare
+    # Not tests._shared.git_repos.git_in: optional cwd and no -C, so bare
     # "git init"/"git clone" callers pass no repo at all.
     @staticmethod
     def _run_bare_git(*args: str, cwd: Path | None = None) -> str:
@@ -1300,7 +1300,7 @@ class TestFetchDefaultBranchWrapper:
     collection.
     """
 
-    # Not tests.conftest.git_in: optional cwd and no -C, so bare
+    # Not tests._shared.git_repos.git_in: optional cwd and no -C, so bare
     # "git init"/"git clone" callers pass no repo at all.
     @staticmethod
     def _run_bare_git(*args: str, cwd: Path | None = None) -> str:
@@ -1381,7 +1381,7 @@ class TestFetchFeatureBranch:
     an empty diff, causing reviewers to return a false BLOCK.
     """
 
-    # Not tests.conftest.git_in: optional cwd and no -C, so bare
+    # Not tests._shared.git_repos.git_in: optional cwd and no -C, so bare
     # "git init"/"git clone" callers pass no repo at all.
     @staticmethod
     def _run_bare_git(*args: str, cwd: Path | None = None) -> str:

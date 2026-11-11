@@ -49,14 +49,8 @@ from cw.review_findings import (
     consolidate_verdict,
 )
 from tests._codex_review_helpers import _finding_payload
-from tests.conftest import (
-    _make_diff,
-    _make_finding,
-    _make_reviewer_doc,
-    commit_tracked_file,
-    git_in,
-    push_commit_to_origin,
-)
+from tests._shared.git_repos import commit_tracked_file, git_in, push_commit_to_origin
+from tests._shared.review_builders import _make_diff, _make_finding, _make_reviewer_doc
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence

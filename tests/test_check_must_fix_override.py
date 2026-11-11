@@ -17,12 +17,8 @@ import pytest
 
 from cw import review_debt
 from cw.models import MustFixOverride
-from tests.conftest import (
-    _make_finding,
-    load_guard_script_module,
-    run_guard_script_cli,
-    write_review_verdict_envelope,
-)
+from tests._shared.guard_fences import load_guard_script_module, run_guard_script_cli
+from tests._shared.review_builders import _make_finding, write_review_verdict_envelope
 
 if TYPE_CHECKING:
     import subprocess

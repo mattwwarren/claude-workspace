@@ -62,7 +62,8 @@ from tests._reconcile_helpers import (
     _ul_record,
     _write_transcript_records,
 )
-from tests.conftest import _make_ticket_task, _stop_leaves_worker_listed
+from tests._shared.daemon_fakes import _stop_leaves_worker_listed
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable

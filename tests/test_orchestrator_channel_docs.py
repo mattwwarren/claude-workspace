@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.conftest import _norm
+from tests._shared.workflow_text import _norm
 
 ROOT = Path(__file__).parent.parent
 SKILLS = ROOT / ".claude" / "skills"

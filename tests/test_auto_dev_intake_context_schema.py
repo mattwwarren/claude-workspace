@@ -21,7 +21,8 @@ from cw.codex_review._context import _prepare_review_pass
 from cw.codex_runner import FakeCodexRunner
 from cw.local_runner import TASK_CONTEXT_RELATIVE_PATH, build_task_message
 from tests._codex_review_helpers import _task
-from tests.conftest import _cmd, git_in
+from tests._shared.git_repos import git_in
+from tests._shared.workflow_text import _cmd
 from tests.test_check_impl_guard_staleness import _run
 
 if TYPE_CHECKING:

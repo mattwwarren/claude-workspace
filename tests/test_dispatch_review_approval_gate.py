@@ -54,7 +54,8 @@ from tests._review_approval_helpers import (
     run_step40_fence,
     write_context,
 )
-from tests.conftest import _make_ticket_task, commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable

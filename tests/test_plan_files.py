@@ -17,7 +17,7 @@ from cw.plan_files import (
     parse_plan_scope_tier,
     resolve_review_scope_tier,
 )
-from tests.conftest import _plan_text
+from tests._shared.review_builders import _plan_text
 
 
 def test_parses_bullet_paths_from_files_modified_section() -> None:

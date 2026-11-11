@@ -50,7 +50,8 @@ from tests._review_convergence_helpers import (
     write_ledger,
 )
 from tests._review_engine_helpers import engine_loop_verdict
-from tests.conftest import _make_finding, commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.review_builders import _make_finding
 from tests.test_codex_background import _clean_result
 from tests.test_codex_fix_loop import (
     _MF_DOC,

@@ -11,12 +11,9 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from tests.conftest import (
-    _plan_text,
-    load_guard_script_module,
-    run_guard_script_cli,
-    write_pyproject_override,
-)
+from tests._shared.git_repos import write_pyproject_override
+from tests._shared.guard_fences import load_guard_script_module, run_guard_script_cli
+from tests._shared.review_builders import _plan_text
 
 if TYPE_CHECKING:
     import subprocess

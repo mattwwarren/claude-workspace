@@ -57,12 +57,8 @@ from tests._reconcile_helpers import (
     forbidden_plan_fetch,
     probe_sessions_lock_free,
 )
-from tests.conftest import (
-    _make_daemon_session,
-    _make_ticket_task,
-    plan_body,
-    stub_fetch_plan,
-)
+from tests._shared.review_builders import plan_body, stub_fetch_plan
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 from tests.test_reconcile_gate_recipes import (
     _GATE_LANES,
     _clean_result,

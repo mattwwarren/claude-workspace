@@ -17,13 +17,13 @@ its ``_load_scope_thresholds`` re-implements rather than imports
 ``cw.codex_review._context``'s fallback-gate loader for the same reason.
 **The two copies must be kept in lockstep by hand**; ``tests/test_plan_files.py``
 and ``tests/test_check_plan_scope_conformance.py`` assert against a shared
-fixture builder (``tests/conftest.py::_plan_text``) so drift shows up as a
-failing test in one suite but not the other. As of #1917, both copies are
-code-fence-aware (``` and ~~~, including indented fence markers) — keep them
-in lockstep by hand going forward. Nested-bullet resolution (#2909) is the same
-two-copy contract: ``_indent_width`` and ``_resolve_nested_path`` are mirrored,
-and ``tests/test_plan_files_nested_bullets.py`` feeds one plan text to both
-parsers and asserts equal output.
+fixture builder (``tests/_shared/review_builders.py::_plan_text``) so drift
+shows up as a failing test in one suite but not the other. As of #1917, both
+copies are code-fence-aware (``` and ~~~, including indented fence markers) —
+keep them in lockstep by hand going forward. Nested-bullet resolution (#2909)
+is the same two-copy contract: ``_indent_width`` and ``_resolve_nested_path``
+are mirrored, and ``tests/test_plan_files_nested_bullets.py`` feeds one plan
+text to both parsers and asserts equal output.
 
 SCOPE TIER (#2767). The module also parses the plan's ``**Scope tier:**``
 marker (:func:`parse_plan_scope_tier`) and resolves the tier a review sentinel

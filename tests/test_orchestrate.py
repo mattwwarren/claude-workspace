@@ -66,12 +66,8 @@ from cw.reconcile import ProposedAction
 from tests import _git_sandbox
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._reconcile_helpers import probe_sessions_lock_free
-from tests.conftest import (
-    _make_daemon_session,
-    _make_ticket_task,
-    _seed_inbox_with_cursor,
-    _spy_parse_lines,
-)
+from tests._shared.dispatch_fixtures import _seed_inbox_with_cursor, _spy_parse_lines
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 
 _RunnerFn = Callable[[list[str]], subprocess.CompletedProcess[str]]
 

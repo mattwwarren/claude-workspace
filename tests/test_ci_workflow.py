@@ -34,7 +34,8 @@ import pytest
 import yaml
 
 from cw.codex_review._context import _load_claude_md_quality_gates
-from tests.conftest import _bash_fences, _clean_git_env, _load_workflow
+from tests._shared.git_repos import _clean_git_env
+from tests._shared.workflow_text import _bash_fences, _load_workflow
 
 if TYPE_CHECKING:
     from collections.abc import Callable

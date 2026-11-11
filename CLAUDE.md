@@ -228,8 +228,11 @@ Keep source modules under **~1000 lines**. This is a review-enforced convention
   modules.
 
 Test files map 1:1 onto source modules (see Testing), so this ceiling targets
-`src/` modules; an oversized test file mirrors an oversized source module and is
-resolved by splitting the source.
+`src/` modules. The exception is the shared test-infrastructure layer:
+`tests/conftest.py` (bootstrap and `pytest_plugins` registration only) and the
+concern modules under `tests/_shared/` are held to the same ~1000-line ceiling,
+pinned by `tests/test_shared_layer.py`. New shared fixtures and helpers go in
+the concern module under `tests/_shared/`, never into `tests/conftest.py`.
 
 ## Testing
 
@@ -238,12 +241,14 @@ onto source modules (`test_cli.py` ↔ `cli.py`, `test_native_daemon.py` ↔
 `native_daemon.py`, etc.).
 
 **Patterns:**
-- Isolation: the autouse `tmp_config_dir` fixture in `conftest.py` patches
+- Isolation: the autouse `tmp_config_dir` fixture in
+  `tests/_shared/autouse_isolation.py` patches
   every `cw.config.*` path at module load; consumers read paths through
   accessor functions so no per-test module-local patching is needed
-- HOME is redirected by construction (#1756): `tests/_session_home.py` (imported
-  by `conftest.py` before any `cw` import) points `HOME` at a throwaway dir and
-  drops `XDG_*`, and the autouse `_isolate_home` fixture sets `HOME` to
+- HOME is redirected by construction (#1756): `tests/_session_home.py` (the
+  first entry of `conftest.py`'s `pytest_plugins`, imported before any `cw`
+  import) points `HOME` at a throwaway dir and drops `XDG_*`, and the autouse
+  `_isolate_home` fixture (`tests/_shared/autouse_isolation.py`) sets `HOME` to
   `tmp_path / "_home"` per test. Use `Path.home()`, never
   `monkeypatch.setenv("HOME", ...)`, unless the HOME needs specific content.
   Git identity comes from `$HOME/.gitconfig` (`_clean_git_env()` strips
@@ -519,8 +524,8 @@ When writing or resolving a test that runs code under a "bare" or *different* in
 
 A test whose outcome depends on an optional external CLI (`codex`, `opencode`, ...) being installed on the host is invisible to all twelve local gates by construction — it's green on any dev machine that happens to have the binary, and only fails where it's genuinely absent (CI). `codex --version` shelling out for real, or a `shutil.which("codex")` pre-flight quietly taking its "found" branch, are the same shape of bug as the interpreter-isolation pitfall above: the test never actually exercised the absent-binary path it claims to cover.
 
-- **Mechanism:** `tests/conftest.py`'s autouse `_hide_optional_binaries` fixture patches `shutil.which` process-wide so every name in `_OPTIONAL_BINARY_DENYLIST` resolves to `None` by default, reproducing CI's binary-absent condition on every local run.
-- **Adding a binary to the denylist:** edit `_OPTIONAL_BINARY_DENYLIST` in `tests/conftest.py` and justify the addition in the PR description — it changes default behavior for every test in the suite, not just the one that motivated it.
+- **Mechanism:** `tests/_shared/autouse_isolation.py`'s autouse `_hide_optional_binaries` fixture patches `shutil.which` process-wide so every name in `_OPTIONAL_BINARY_DENYLIST` resolves to `None` by default, reproducing CI's binary-absent condition on every local run.
+- **Adding a binary to the denylist:** edit `_OPTIONAL_BINARY_DENYLIST` in `tests/_shared/autouse_isolation.py` and justify the addition in the PR description — it changes default behavior for every test in the suite, not just the one that motivated it.
 - **Declaring a test needs a binary present:** mark it `@pytest.mark.binary_on_path("codex")` (registered in `pyproject.toml`) — the guard then returns a deterministic `/usr/bin/<name>` for that call instead of `None`, so the test doesn't silently depend on a real binary being installed either. It forces `shutil.which` only: a forced-present tool must still be mocked at its seam, and launching it unmocked is refused.
 - **Launches are blocked for a wider set (#2664, #3078):** `_GUARDED_TOOLS` (`gh`, `claude`, `codex`, `opencode`, `uv`, `pre-commit`) is the launch guard's set; `_OPTIONAL_BINARY_DENYLIST` stays `{codex, opencode}` as the `which`-masking set: gh and uv are present on CI, so masking them would flip the "available" branch of cw's own probes (`shutil.which("gh") is not None`) for every test and make local runs differ from CI. The same autouse fixture refuses any launch of a guarded tool whose binary lies outside the pytest basetemp — bare name (resolved with the real `which` against the child's `PATH`), absolute path, bytes or `PathLike` argv, `shell=True` strings (first word), the `executable=` kwarg, and `os.exec*`/`os.spawn*`/`os.posix_spawn*`/`os.system` — with `ToolLaunchBlockedError`, a `FileNotFoundError(ENOENT)` naming the fake to use. A stub from `tests/_tool_fakes.py` under `tmp_path` runs. Logic: `tests/_host_probe_guard.py`.
 - **Use the shared fakes:** every gh/claude/codex/opencode/uv/pre-commit fake lives in `tests/_tool_fakes.py` (seam-specific: `FakeGhCli`, `stub_gh*`, `ReadyGh`, `FakeNativeDaemonClient`, `fake_codex_job_runner`, `RecordingShim`, ...). Do not grow a private copy; `tests/test_tool_fakes.py` fails on one. Two suite defaults answer unmocked one-shot calls the way CI does: `subprocess.run` of `gh` gets an unauthenticated exit 4, and of `claude`/`codex`/`opencode` gets `ENOENT`. A guard self-test that needs a launch to reach `Popen` calls `restore_real_run(monkeypatch)`.

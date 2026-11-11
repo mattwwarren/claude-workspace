@@ -16,7 +16,7 @@ longer discards every already-completed sibling's findings — plus the sibling
 truncate guidance.
 """
 
-from tests.conftest import _appendix, _cmd
+from tests._shared.workflow_text import _appendix, _cmd
 
 
 def _step3a_dispatch_section() -> str:

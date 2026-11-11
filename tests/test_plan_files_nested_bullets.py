@@ -22,7 +22,8 @@ import pytest
 
 from cw import plan_files
 from cw.plan_files import parse_plan_files_modified
-from tests.conftest import _plan_text, load_guard_script_module
+from tests._shared.guard_fences import load_guard_script_module
+from tests._shared.review_builders import _plan_text
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = _REPO_ROOT / ".claude" / "scripts" / "check_plan_scope_conformance.py"

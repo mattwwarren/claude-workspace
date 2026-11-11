@@ -30,8 +30,7 @@ from cw.review_finding_dispositions import (
 from cw.review_finding_dispositions.suppress import _render_suppression_signal
 from cw.review_findings import AcceptedFinding, Finding, ReviewVerdict
 from tests._cli_review_helpers import CLAIM_ROW1_CANDIDATE, CLAIM_ROW1_RECORDED
-
-from .conftest import _make_finding
+from tests._shared.review_builders import _make_finding
 
 _LOGGER = "cw.review_finding_dispositions"
 _TICKET = "T-1838"

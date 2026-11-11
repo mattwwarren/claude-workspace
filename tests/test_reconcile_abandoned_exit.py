@@ -35,7 +35,7 @@ from cw.reconcile.abandoned_exit import (
     park_on_abandoned_exit_open,
     resolve_park_on_abandoned_exit_enabled,
 )
-from tests.conftest import _make_ticket_task
+from tests._shared.session_seeding import _make_ticket_task
 
 KEY = PARK_ON_ABANDONED_EXIT_KEY
 

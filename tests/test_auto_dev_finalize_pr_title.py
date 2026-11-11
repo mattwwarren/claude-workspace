@@ -20,7 +20,7 @@ readers from ``tests/conftest.py`` (#1787/#2354).
 
 from __future__ import annotations
 
-from tests.conftest import _cmd, _step4c2_section
+from tests._shared.workflow_text import _cmd, _step4c2_section
 
 
 def test_title_composition_instructions_present() -> None:

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from tests.conftest import _COMMANDS_ROOT
+from tests._shared.workflow_text import _COMMANDS_ROOT
 
 if TYPE_CHECKING:
     from pathlib import Path
