@@ -2362,6 +2362,11 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     # row-lag settle before approve/requeue (#2692): read-only precheck, no
     # side effect before the lock; LockTimeoutError caught, verb proceeds
     ("cw/cli/dev_queue/_settle.py", "_consume_pending_bounded"): 1,
+    # codex PLAN plan-decision recording (#3060): runs in the `cw codex run`
+    # subprocess (never dispatch_tick) BEFORE the result is emitted through the
+    # door; the read-only codex turn wrote no state, and a LockTimeoutError
+    # (a CwError) becomes a plan_decisions_not_recorded friction token.
+    ("cw/codex_plan/_run.py", "_record_decisions"): 1,
     # `cw config concurrency ...` / `cw lane ...`: clients, concurrency_override
     # and (lane rm) dev_queue locks (#2501)
     ("cw/cli/config_cmds.py", "config_concurrency_set"): 1,
