@@ -301,7 +301,9 @@ captured in [ADR-0004](adr/0004-stage-events-on-orchestrator-bus.md).
 `stage` and `prev_stage` MUST match the closed enum in headless-contract
 §10.2 (`s0_intake` … `done`). `session_id` is derived from the nearest
 `.claude/cw-context.json` by `cw event record` (#2651); a producer's own value
-is replaced on disagreement.
+is replaced on disagreement. The codex PLAN executor (#3060) records
+`s1_plan_generated` (`prev_stage: s0_intake`) and `s1_plan_reviewed` (`prev_stage:
+s1_plan_generated`) itself from the driver, with `correlation_id` the ticket.
 
 ### `stage.errored`
 
@@ -319,7 +321,10 @@ worker may recover and continue. Visible in `cw event tail` and
 }
 ```
 
-`error_kind` is an open enum — consumers MUST tolerate unknown values.
+`error_kind` is an open enum — consumers MUST tolerate unknown values. The
+codex PLAN executor (#3060) records one per blocked result it builds, with
+`error_kind` the `blocker.reason` and `stage` `s1_plan_generated` or
+`s1_plan_reviewed`; its unexpected-error path records none.
 
 ### `dispatch.tick`
 
@@ -2606,8 +2611,8 @@ its legacy skip, and (#3057) a tracker-IO turn whose outcome is `NONE`
   "client": "<str>",
   "tracker": "<str>",
   "backend": "codex",
-  "kind": "verdict | unparseable",
-  "reason": "non_github_tracker | tracker_mcp_not_enabled | mcp_server_unnamed | tracker_unsupported | plan_refused | scratch_unwritable | codex_unavailable | tool_unavailable | turn_reported_failure",
+  "kind": "verdict | unparseable | plan",
+  "reason": "non_github_tracker | tracker_mcp_not_enabled | mcp_server_unnamed | tracker_unsupported | plan_refused | scratch_unwritable | codex_unavailable | tool_unavailable | turn_reported_failure | github_post_failed",
   "artifact_path": "<str | null>",
   "reviewed_sha": "<str | null>",
   "session_id": "<str>"
@@ -2625,6 +2630,13 @@ now carries the verdict (`.claude/review-verdict.md` or
 artifact; `null` when that capture failed. An unset tracker still posts
 (fail-open) and emits nothing. Emitted after Step 4 and best-effort: a failed
 event write logs one warning and never affects the review or the row.
+`kind: plan` (#3060, RFC 0018 C1) is the codex PLAN executor's plan or park
+comment (`cw.codex_plan._post.post_plan_comment`, on GitHub as well as other
+trackers): `reviewed_sha` is always `null`, `artifact_path` is `.cw/plan.md`
+(a completing exit) or `.cw/plan-draft.md` (a park), and `reason:
+github_post_failed` means a `gh issue comment` part failed, so later parts were
+not posted. The same `kind` value appears on `review.verdict_comment_unverified`
+and `review.verdict_comment_posted`.
 `correlation_id` is the `ticket_id`. In `_DEFAULT_OPERATOR_EVENT_TYPES`: the
 verdict otherwise exists only in the local artifact.
 
@@ -2664,7 +2676,7 @@ tracker-IO turn's outcome is `POSSIBLE` or `CONFIRMED` but not verified
   "client": "<str>",
   "tracker": "<str>",
   "backend": "codex",
-  "kind": "verdict | unparseable",
+  "kind": "verdict | unparseable | plan",
   "reason": "<TrackerIoReason>",
   "artifact_path": "<str | null>",
   "reviewed_sha": "<str | null>",
@@ -2715,7 +2727,7 @@ called after a tracker-IO turn's self-attested verification succeeds
   "client": "<str>",
   "tracker": "<str>",
   "backend": "codex",
-  "kind": "verdict | unparseable",
+  "kind": "verdict | unparseable | plan",
   "posted": [{"index": 1, "comment_id": "<str>", "url": "<str>"}],
   "reviewed_sha": "<str | null>",
   "session_id": "<str>",

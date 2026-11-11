@@ -22,15 +22,18 @@ from cw.codex_fix_loop.duplicate_reader import check_duplicate_reader
 from cw.codex_review import _prepare_review_pass, run_review
 from cw.codex_review._shard import plan_prompt_shards, split_diff_by_file
 from cw.codex_runner import CodexRunResult, FakeCodexRunner
+from cw.config import save_state
+from cw.dev_queue import save_dev_queue
 from cw.local_runner import make_blocked
-from cw.models import Stage, TicketTask
+from cw.models import CwState, DevQueueStore, QueueItemStatus, Stage, TicketTask
 from cw.review_findings import AcceptedFinding, CapturedDiff, ReviewVerdict
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._shared.git_repos import add_bare_origin, commit_tracked_file, git_in
 from tests._shared.review_builders import _make_diff
-from tests._shared.session_seeding import _make_ticket_task
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from cw.auto_dev_result import AutoDevResult
     from cw.codex_fix_loop.fence import FenceBreach
@@ -711,3 +714,47 @@ def _check_duplicate_reader(
     return check_duplicate_reader(
         repo, baseline, findings, cycle=cycle, loop_budget=loop_budget
     )
+
+
+def seed_codex_stage_run(
+    *,
+    worktree: Path,
+    stage: Stage = Stage.REVIEW,
+    client_name: str = "test",
+    ticket_id: str = "T-1",
+    session_id: str = "sess-1",
+    lane: str | None = None,
+    task_updates: Mapping[str, object] | None = None,
+) -> None:
+    """Seed a Session + a matching RUNNING dev-queue row at *stage*, plus clients.yaml.
+
+    The ``cw codex run`` driver re-derives its run from exactly these. Callers
+    still request ``tmp_config_dir`` (the isolation the writes land in).
+    *task_updates* are applied to the row with ``model_copy`` (e.g. a PLAN
+    flow stamping ``plan_approved_at`` / ``plan_approved_fingerprint``).
+    """
+    write_clients_yaml(ClientSpec(client_name, str(worktree)))
+    save_state(
+        CwState(
+            sessions=[
+                _make_daemon_session(
+                    id=session_id,
+                    client=client_name,
+                    worktree_path=worktree,
+                )
+            ]
+        )
+    )
+    task = TicketTask(
+        ticket_id=ticket_id,
+        client=client_name,
+        stage=stage,
+        status=QueueItemStatus.RUNNING,
+        session_id=session_id,
+    )
+    updates: dict[str, object] = dict(task_updates or {})
+    if lane is not None:
+        updates["lane"] = lane
+    if updates:
+        task = task.model_copy(update=updates)
+    save_dev_queue(DevQueueStore(tasks=[task]))

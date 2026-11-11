@@ -1,6 +1,6 @@
 [project]
 name = "claude-workspace"
-version = "1.94.0"
+version = "1.95.0"
 description = "Multi-session workspace orchestrator for Claude Code"
 readme = "README.md"
 authors = [
@@ -70,6 +70,13 @@ build-backend = "hatchling.build"
 # src/cw/data — hatchling would add the same file twice and the wheel build
 # fails with "A second file is being added ... at the same path".
 packages = ["src/cw"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# The codex PLAN executor (#3060) renders its prompt from cw's own copy of the
+# plan command doc, read at run time as package data (cw/data/commands). The
+# source is outside src/cw, so it is not the second-file clash warned about
+# above: nothing under packages already lands at this wheel path.
+".claude/commands/auto-dev-plan.md" = "cw/data/commands/auto-dev-plan.md"
 
 [tool.cw.changelog_freeze]
 # Released CHANGELOG sections are frozen for this tag and every later one;

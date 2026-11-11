@@ -337,6 +337,10 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             "codex_fix_scope_violation",
             "codex_must_fix_findings",
             "codex_must_fix_mechanically_rejected",
+            # #3060 (RFC 0018 C1): the codex PLAN executor's own gate set B;
+            # owned by cw.codex_plan._gates.
+            "codex_plan_artifact_missing",
+            "codex_plan_gate_failed",
             "codex_review_partial",
             "codex_review_unparseable",
             "codex_review_worktree_mutated",

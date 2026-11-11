@@ -153,6 +153,29 @@ class TestCategorizeChangedFiles:
         assert "_fetch_ticket_comments" in cw.codex_review.__all__
         assert "_fetch_ticket_comments" in cw.codex_review._context.__all__
 
+    def test_plan_names_are_reexported_through_both_facades(self) -> None:
+        """#3060: the codex PLAN executor imports both names via cw.codex_review."""
+        import cw.codex_review
+        import cw.codex_review._context
+        from cw.codex_review import _const
+        from cw.codex_review._context import _agent_spec
+
+        assert (
+            cw.codex_review.PLAN_STATION_AGENT_FILES
+            is _agent_spec.PLAN_STATION_AGENT_FILES
+        )
+        assert (
+            cw.codex_review._context.PLAN_STATION_AGENT_FILES
+            is _agent_spec.PLAN_STATION_AGENT_FILES
+        )
+        assert (
+            cw.codex_review._CODEX_PLAN_BLOCKED_NEXT_ACTIONS
+            is _const._CODEX_PLAN_BLOCKED_NEXT_ACTIONS
+        )
+        assert "PLAN_STATION_AGENT_FILES" in cw.codex_review.__all__
+        assert "PLAN_STATION_AGENT_FILES" in cw.codex_review._context.__all__
+        assert "_CODEX_PLAN_BLOCKED_NEXT_ACTIONS" in cw.codex_review.__all__
+
     def test_python_and_tests(self) -> None:
         cats = _categorize_changed_files(["src/cw/foo.py", "tests/test_foo.py"])
         assert cats.python
@@ -1721,6 +1744,26 @@ class TestResolveAgentSpec:
     global-absent cases; the fallback-succeeds cases re-patch the same name
     with a populated directory.
     """
+
+    def test_plan_station_files_resolve_through_agent_files(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3060: plan station names resolve only via the plan mapping."""
+        from cw.codex_review import PLAN_STATION_AGENT_FILES
+
+        worktree = tmp_path / "wt"
+        _write(worktree / ".claude" / "agents" / "plan-reviewer.md", "PLAN SPEC\n")
+        resolved = _resolve_agent_spec(
+            worktree,
+            "Plan Reviewer",
+            global_fallback_enabled=True,
+            agent_files=PLAN_STATION_AGENT_FILES,
+        )
+        assert resolved.text == "PLAN SPEC\n"
+        assert resolved.status.source == "repo"
+        with pytest.raises(KeyError):
+            _resolve_agent_spec(worktree, "Plan Reviewer", global_fallback_enabled=True)
+        assert "Plan Reviewer" not in _REVIEWER_ROLE_AGENT_FILES
 
     def test_repo_local_present_wins_and_never_reads_global(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -23,6 +23,7 @@ from cw.codex_review_signals import (
     verdict_comment_unverified_payload,
 )
 from cw.events import read_events
+from cw.exceptions import CwError
 from cw.models import (
     OrchestratorEvent,
     OrchestratorEventType,
@@ -111,6 +112,22 @@ class TestConstraintsSource:
 
 
 class TestVerdictCommentSkipped:
+    def test_plan_kind_is_accepted(self, tmp_path: Path) -> None:
+        """#3060: the codex PLAN post reuses the event with kind=plan."""
+        payload = verdict_comment_skipped_payload(
+            ticket_id="GEN-9",
+            client="acme",
+            tracker="linear",
+            kind="plan",
+            artifact_path=tmp_path / ".cw" / "plan.md",
+            reviewed_sha=None,
+            session_id="s-1",
+            reason="github_post_failed",
+        )
+        assert payload["kind"] == "plan"
+        assert payload["reviewed_sha"] is None
+        assert payload["reason"] == "github_post_failed"
+
     def test_payload_fields(self, tmp_path: Path) -> None:
         payload = verdict_comment_skipped_payload(
             ticket_id="GEN-9",
@@ -154,6 +171,25 @@ class TestVerdictCommentSkipped:
     def test_emit_swallows_oserror(self, caplog: pytest.LogCaptureFixture) -> None:
         with (
             patch("cw.codex_review_signals.record_event", side_effect=OSError("x")),
+            caplog.at_level(logging.WARNING, logger="cw.codex_review_signals"),
+        ):
+            emit_verdict_comment_skipped(
+                ticket_id="GEN-9",
+                client="acme",
+                tracker="linear",
+                kind="verdict",
+                artifact_path=None,
+                reviewed_sha=None,
+                session_id="s-1",
+            )
+
+        (record,) = caplog.records
+        assert "GEN-9" in record.getMessage()
+        assert "review.verdict_comment_skipped" in record.getMessage()
+
+    def test_emit_swallows_cwerror(self, caplog: pytest.LogCaptureFixture) -> None:
+        with (
+            patch("cw.codex_review_signals.record_event", side_effect=CwError("x")),
             caplog.at_level(logging.WARNING, logger="cw.codex_review_signals"),
         ):
             emit_verdict_comment_skipped(

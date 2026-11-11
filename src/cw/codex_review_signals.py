@@ -37,24 +37,55 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import subprocess
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
 from cw.auto_dev_result import OperatorConstraintsSource
 from cw.events import record_event
+from cw.exceptions import CwError
 from cw.models import CODEX_BACKEND, OrchestratorEventType
 from cw.tracker import TrackerClass, TrackerKind
+from cw.tracker_io._verify import PublicState
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     from cw.models import TicketTask
+    from cw.tracker_io import TrackerIoOutcome
 
 _log = logging.getLogger(__name__)
 
-#: Which verdict comment a skip dropped: a parsed verdict or an unparseable one.
-VerdictCommentKind = Literal["verdict", "unparseable"]
+# Shared by tracker-IO outcome handling and codex stage guards. This module is
+# intentionally below both callers in the dependency graph: it contains no
+# tracker-IO or stage-executor imports at runtime.
+COMMON_TURN_FAULTS: tuple[type[Exception], ...] = (
+    OSError,
+    ValueError,
+    RuntimeError,
+    LookupError,
+    TypeError,
+    AttributeError,
+    subprocess.SubprocessError,
+)
+
+#: Which comment a skip dropped: a parsed verdict, an unparseable one, or the
+#: codex PLAN executor's plan or park comment (``plan``, #3060).
+VerdictCommentKind = Literal["verdict", "unparseable", "plan"]
+
+
+@dataclass(frozen=True)
+class VerdictCommentIdentity:
+    """Identity fields shared by tracker-IO verdict and PLAN comments."""
+
+    client: str
+    session_id: str
+    kind: VerdictCommentKind
+    reviewed_sha: str | None
+    artifact_path: Path | None
+
 
 #: Case A's default ``reason``: a non-GitHub tracker with no tracker-IO turn.
 #: The turn's refusals carry its own closed ``cw.tracker_io.TrackerIoReason``
@@ -95,13 +126,13 @@ def constraints_source(
     return OperatorConstraintsSource.TRACKER_UNREADABLE
 
 
-def _record_best_effort(
+def record_event_best_effort(
     event_type: OrchestratorEventType, payload: dict[str, object], ticket_id: str
 ) -> None:
-    """``record_event``, swallowing ``OSError`` with one warning (A15)."""
+    """``record_event``, swallowing event-write faults with one warning (A15)."""
     try:
         record_event(event_type, payload, correlation_id=ticket_id)
-    except OSError as exc:
+    except (OSError, CwError) as exc:
         _log.warning(
             "codex_review_signal_failed ticket=%s event=%s: %s",
             ticket_id,
@@ -157,7 +188,7 @@ def emit_verdict_comment_skipped(
         session_id=session_id,
         reason=reason,
     )
-    _record_best_effort(
+    record_event_best_effort(
         OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED, payload, ticket_id
     )
 
@@ -226,7 +257,7 @@ def emit_verdict_comment_unverified(
         posted=posted,
         marker_survived=marker_survived,
     )
-    _record_best_effort(
+    record_event_best_effort(
         OrchestratorEventType.REVIEW_VERDICT_COMMENT_UNVERIFIED, payload, ticket_id
     )
 
@@ -283,8 +314,84 @@ def emit_verdict_comment_posted(
         posted=posted,
         content=content,
     )
-    _record_best_effort(
+    record_event_best_effort(
         OrchestratorEventType.REVIEW_VERDICT_COMMENT_POSTED, payload, ticket_id
+    )
+
+
+def surface_tracker_io_outcome(
+    ticket_id: str,
+    content: str,
+    *,
+    tracker: str,
+    outcome: TrackerIoOutcome,
+    identity: VerdictCommentIdentity,
+) -> None:
+    """Classify one tracker-IO outcome and emit its verdict-comment event.
+
+    Review verdicts and PLAN comments use the same A2 outcome contract; the
+    identity carries the only stage-specific part, including ``kind``.
+    """
+    posted = [
+        {"index": part.index, "comment_id": part.comment_id, "url": part.url}
+        for part in outcome.posted
+    ]
+    if outcome.reason is None:
+        emit_verdict_comment_posted(
+            ticket_id=ticket_id,
+            client=identity.client,
+            tracker=tracker,
+            kind=identity.kind,
+            artifact_path=identity.artifact_path,
+            reviewed_sha=identity.reviewed_sha,
+            session_id=identity.session_id,
+            posted=posted,
+            content=content,
+        )
+        return
+    label = "plan" if identity.kind == "plan" else "review"
+    if outcome.public_state is PublicState.NONE:
+        _log.warning(
+            "%s_comment_skipped ticket=%s tracker=%s reason=%s: durable copy at %s",
+            label,
+            ticket_id,
+            tracker,
+            outcome.reason.value,
+            identity.artifact_path,
+        )
+        emit_verdict_comment_skipped(
+            ticket_id=ticket_id,
+            client=identity.client,
+            tracker=tracker,
+            kind=identity.kind,
+            artifact_path=identity.artifact_path,
+            reviewed_sha=identity.reviewed_sha,
+            session_id=identity.session_id,
+            reason=outcome.reason.value,
+        )
+        return
+    _log.warning(
+        "%s_comment_unverified ticket=%s tracker=%s reason=%s public_state=%s"
+        " ids=%s: check the ticket before any re-run",
+        label,
+        ticket_id,
+        tracker,
+        outcome.reason.value,
+        outcome.public_state.value,
+        ",".join(p.comment_id for p in outcome.posted),
+    )
+    emit_verdict_comment_unverified(
+        ticket_id=ticket_id,
+        client=identity.client,
+        tracker=tracker,
+        kind=identity.kind,
+        reason=outcome.reason.value,
+        artifact_path=identity.artifact_path,
+        reviewed_sha=identity.reviewed_sha,
+        session_id=identity.session_id,
+        public_state=outcome.public_state.value,
+        posted=posted,
+        marker_survived=outcome.marker_survived,
     )
 
 
@@ -322,7 +429,7 @@ def undelivered_operator_context(
     payload = operator_context_undelivered_payload(
         task=task, client=client, tracker=tracker, session_id=session_id
     )
-    _record_best_effort(
+    record_event_best_effort(
         OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED,
         payload,
         task.ticket_id,
@@ -335,6 +442,6 @@ def emit_confirm_escalated(payload: dict[str, object], *, ticket_id: str) -> Non
     The codex peer of claude-native's ``announce_confirm_park``: same event and
     payload, best-effort (an ``OSError`` logs ``codex_review_signal_failed``).
     """
-    _record_best_effort(
+    record_event_best_effort(
         OrchestratorEventType.REVIEW_CONFIRM_ESCALATED, payload, ticket_id
     )

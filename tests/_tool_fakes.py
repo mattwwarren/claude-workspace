@@ -98,6 +98,7 @@ __all__ = [
     "RecordingShim",
     "ScriptedCodexRunner",
     "any_call",
+    "argv_has",
     "assert_gh_calls",
     "fake_claude_cli",
     "fake_codex_job_runner",
@@ -107,10 +108,13 @@ __all__ = [
     "gh_calls",
     "marked_parts",
     "path_with_stub",
+    "plan_sentinel",
+    "plan_turn_result",
     "prepend_to_path",
     "read_calls",
     "restore_real_run",
     "shim_env",
+    "station_findings_doc",
     "stdin_contains",
     "stub_gh",
     "stub_gh_arm",
@@ -1320,3 +1324,118 @@ def tracker_io_turn_result(
     if mutate is not None:
         mutate(doc)
     return json.dumps(doc)
+
+
+# --- codex PLAN executor fakes (#3060) ------------------------------------------
+
+
+def plan_sentinel(*, tier: str = "small", **overrides: object) -> str:
+    """A framed plan-stage ``AUTO_DEV_RESULT`` block for the codex PLAN turn.
+
+    The defaults are a valid small ``stage_complete``; *tier* sets
+    ``scope.tier`` and *overrides* replace top-level keys.
+    """
+    payload: dict[str, object] = {
+        "schema_version": 4,
+        "ticket_id": "T-1",
+        "status": "stage_complete",
+        "stage_reached": "stage1_plan",
+        "scope": {
+            "tier": tier,
+            "files": 3,
+            "lines_estimate": 120,
+            "lines_actual": None,
+            "forbidden_touched": False,
+        },
+        "plan_source": "generated",
+        "branch": None,
+        "worktree_path": "/model/claimed/path",
+        "fork_point_sha": None,
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "PROCEED",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "ambiguities": [],
+        "blocker": None,
+        "prior_pr_warnings": [],
+        "next_actions": [],
+        "plan_draft_fingerprint": None,
+    }
+    payload.update(overrides)
+    return f"<<<AUTO_DEV_RESULT\n{json.dumps(payload, indent=2)}\nAUTO_DEV_RESULT>>>"
+
+
+def plan_turn_result(
+    plan_markdown: str, sentinel: str, *, returncode: int = 0, stderr: str = ""
+) -> CodexRunResult:
+    """A PLAN turn's result: the ``{plan_markdown, sentinel}`` ``-o`` document."""
+    return CodexRunResult(
+        returncode=returncode,
+        stdout="",
+        stderr=stderr,
+        output_file_content=json.dumps(
+            {"plan_markdown": plan_markdown, "sentinel": sentinel}
+        ),
+    )
+
+
+def station_findings_doc(
+    role: str,
+    *,
+    severity: str | None = None,
+    status: str = "ok",
+    detail: str = "checked the plan against the ticket",
+) -> CodexRunResult:
+    """A plan review station's reply: a ``ReviewerFindingsDocument`` ``-o`` file.
+
+    No *severity*: a clean document with a justified ``detail``. A *severity*
+    adds one finding of it; *status* ``degraded``/``failed`` keeps *detail* as
+    the reason.
+    """
+    findings = (
+        []
+        if severity is None
+        else [
+            {
+                "severity": severity,
+                "file": ".cw/plan.md",
+                "line_start": None,
+                "line_end": None,
+                "summary": f"{severity} finding from {role}",
+                "consequence": "the plan would mislead the implementer",
+                "suggested_fix": "revise the plan section",
+                "evidence": "the plan text",
+                "confidence": "HIGH",
+            }
+        ]
+    )
+    return CodexRunResult(
+        returncode=0,
+        stdout="",
+        stderr="",
+        output_file_content=json.dumps(
+            {
+                "reviewer_role": role,
+                "status": status,
+                "detail": detail,
+                "findings": findings,
+            }
+        ),
+    )
+
+
+def argv_has(*tokens: str) -> CodexMatcher:
+    """A matcher true when every token occurs in the call's argv."""
+
+    def _match(argv: list[str], _stdin: str | None) -> bool:
+        return all(token in argv for token in tokens)
+
+    return _match

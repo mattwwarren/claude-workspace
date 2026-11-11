@@ -12,17 +12,16 @@ raises; see :func:`_persist_worktree_artifact`.
 from __future__ import annotations
 
 import logging
-import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from cw.atomic import atomic_write_text
 from cw.codex_review import CODEX_REVIEWER_LABEL
 from cw.codex_review_signals import (
-    emit_verdict_comment_posted,
+    COMMON_TURN_FAULTS,
+    VerdictCommentIdentity,
     emit_verdict_comment_skipped,
-    emit_verdict_comment_unverified,
+    surface_tracker_io_outcome,
 )
 from cw.gh import post_issue_comment
 from cw.review_findings import (
@@ -296,7 +295,7 @@ def _post_review_comment(
                 review_text,
                 tracker=tracker,
                 context=tracker_io,
-                identity=_VerdictIdentity(
+                identity=VerdictCommentIdentity(
                     client=client,
                     session_id=session_id,
                     kind=kind,
@@ -339,26 +338,7 @@ def _post_review_comment(
 # The fault classes the tracker-IO call is guarded against (#3057 R2). The
 # turn converts every operational failure into an outcome itself; this tuple
 # backstops the rest. ``ValueError`` covers ``pydantic.ValidationError``.
-_TURN_FAULTS: tuple[type[Exception], ...] = (
-    OSError,
-    ValueError,
-    RuntimeError,
-    LookupError,
-    TypeError,
-    AttributeError,
-    subprocess.SubprocessError,
-)
-
-
-@dataclass(frozen=True)
-class _VerdictIdentity:
-    """The identity fields every verdict-comment event carries (#3055)."""
-
-    client: str
-    session_id: str
-    kind: VerdictCommentKind
-    reviewed_sha: str | None
-    artifact_path: Path | None
+_TURN_FAULTS = COMMON_TURN_FAULTS
 
 
 def _post_via_tracker_io(
@@ -367,7 +347,7 @@ def _post_via_tracker_io(
     *,
     tracker: str,
     context: TrackerIoContext,
-    identity: _VerdictIdentity,
+    identity: VerdictCommentIdentity,
 ) -> None:
     """Post through the tracker-IO turn and surface its outcome (best-effort).
 
@@ -393,86 +373,22 @@ def _post_via_tracker_io(
             identity.artifact_path,
             exc_info=True,
         )
-        _surface_turn_outcome(
+        surface_tracker_io_outcome(
             ticket_id,
             review_text,
-            tracker,
-            TrackerIoOutcome(
+            tracker=tracker,
+            outcome=TrackerIoOutcome(
                 public_state=PublicState.POSSIBLE,
                 reason=TrackerIoReason.TURN_EXCEPTION,
                 parts_total=0,
             ),
-            identity,
+            identity=identity,
         )
         return
-    _surface_turn_outcome(ticket_id, review_text, tracker, outcome, identity)
-
-
-def _surface_turn_outcome(
-    ticket_id: str,
-    review_text: str,
-    tracker: str,
-    outcome: TrackerIoOutcome,
-    identity: _VerdictIdentity,
-) -> None:
-    """Log a verified post; record the skipped or unverified event otherwise."""
-    if outcome.reason is None:
-        emit_verdict_comment_posted(
-            ticket_id=ticket_id,
-            client=identity.client,
-            tracker=tracker,
-            kind=identity.kind,
-            artifact_path=identity.artifact_path,
-            reviewed_sha=identity.reviewed_sha,
-            session_id=identity.session_id,
-            posted=[
-                {"index": p.index, "comment_id": p.comment_id, "url": p.url}
-                for p in outcome.posted
-            ],
-            content=review_text,
-        )
-        return  # the turn logged the verified post's ids at info
-    if outcome.public_state is PublicState.NONE:
-        _log.warning(
-            "review_comment_skipped ticket=%s tracker=%s reason=%s: durable copy at %s",
-            ticket_id,
-            tracker,
-            outcome.reason.value,
-            identity.artifact_path,
-        )
-        emit_verdict_comment_skipped(
-            ticket_id=ticket_id,
-            client=identity.client,
-            tracker=tracker,
-            kind=identity.kind,
-            artifact_path=identity.artifact_path,
-            reviewed_sha=identity.reviewed_sha,
-            session_id=identity.session_id,
-            reason=outcome.reason.value,
-        )
-        return
-    _log.warning(
-        "review_comment_unverified ticket=%s tracker=%s reason=%s public_state=%s"
-        " ids=%s: check the ticket before any re-run",
+    surface_tracker_io_outcome(
         ticket_id,
-        tracker,
-        outcome.reason.value,
-        outcome.public_state.value,
-        ",".join(p.comment_id for p in outcome.posted),
-    )
-    emit_verdict_comment_unverified(
-        ticket_id=ticket_id,
-        client=identity.client,
+        review_text,
         tracker=tracker,
-        kind=identity.kind,
-        reason=outcome.reason.value,
-        artifact_path=identity.artifact_path,
-        reviewed_sha=identity.reviewed_sha,
-        session_id=identity.session_id,
-        public_state=outcome.public_state.value,
-        posted=[
-            {"index": p.index, "comment_id": p.comment_id, "url": p.url}
-            for p in outcome.posted
-        ],
-        marker_survived=outcome.marker_survived,
+        outcome=outcome,
+        identity=identity,
     )

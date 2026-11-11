@@ -21,12 +21,13 @@ already excludes *self-verified-this-session* premises and validly-exempting
 producer-skill level. This coercion is defense-in-depth for items that reach
 the wire anyway -- most notably a premise resolved by a PRE-EXISTING binding
 resolution the producer maps onto (the #1325 evidence: `resolves: comment 1
-Resolution 11/12/13`), which the producer partition does not cover.
+Resolution 11/12/13`), which the producer partition covered only from #1411
+on (its Step 4a Resolution gate); this coercion stays as the safety net.
 
 Scope (R1, pre-flight resolution on issue #1325): parser-side fix only. The
 producer-prompt companion change (.claude/commands/auto-dev-plan.md Step
-4a/4c partition language to recognize premises closed by a pre-existing
-binding resolution) is deferred to #1411.
+4a Resolution gate, recognizing premises closed by a pre-existing binding
+resolution) landed in #1411.
 """
 
 from __future__ import annotations

@@ -26,6 +26,7 @@ import pytest
 
 import cw
 from cw.codex_fix_loop.commit import _build_fix_codex_argv
+from cw.codex_plan._argv import build_plan_argv
 from cw.codex_review._capability import (
     _PROBE_ARGV,
     _PROBE_SENTINEL,
@@ -50,10 +51,11 @@ _LAUNCH_SITES = frozenset(
         "codex_review/_capability.py",
         "codex_fix_loop/commit.py",
         "tracker_io/_argv.py",
+        "codex_plan/_argv.py",
     }
 )
 _MODE_LITERALS = frozenset({"read-only", "workspace-write", "danger-full-access"})
-_MODE_SCOPED_PACKAGES = ("codex_review", "codex_fix_loop", "tracker_io")
+_MODE_SCOPED_PACKAGES = ("codex_review", "codex_fix_loop", "tracker_io", "codex_plan")
 _OVERRIDE = ["-c", "approval_policy=never"]
 _LEGAL_MODES = (SandboxMode.READ_ONLY, SandboxMode.WORKSPACE_WRITE)
 
@@ -125,6 +127,24 @@ _FIX_LITERAL = [
     "-m",
     "m",
 ]
+_PLAN_LITERAL = [
+    "codex",
+    "exec",
+    "--sandbox",
+    "read-only",
+    "-c",
+    "approval_policy=never",
+    "--json",
+    "--ephemeral",
+    "-c",
+    "model_reasoning_effort=high",
+    "--output-schema",
+    str(_S),
+    "-o",
+    str(_O),
+    "-m",
+    "m",
+]
 _PROBE_LITERAL = [
     "codex",
     "exec",
@@ -172,6 +192,18 @@ class TestDefaultArgvLiterals:
 
     def test_probe_default_argv(self) -> None:
         assert list(_PROBE_ARGV) == _PROBE_LITERAL
+
+    def test_plan_default_argv(self) -> None:
+        argv = build_plan_argv(
+            schema_path=_S,
+            output_path=_O,
+            model="m",
+            reasoning_effort="high",
+            mcp_server=None,
+            tracker=None,
+            other_servers=(),
+        )
+        assert argv == _PLAN_LITERAL
 
     def test_config_default_modes_build_the_same_literals(self) -> None:
         cfg = StageExecutorConfig()
@@ -236,6 +268,19 @@ class TestEveryLaunchSiteCarriesTheOverride:
         )
         (argv,) = _argvs(runner)
         _assert_override_after_sandbox(argv, mode.value)
+
+    def test_plan_launch(self) -> None:
+        # The PLAN turn has no sandbox knob: read-only is the only mode.
+        argv = build_plan_argv(
+            schema_path=_S,
+            output_path=_O,
+            model=None,
+            reasoning_effort=None,
+            mcp_server=None,
+            tracker=None,
+            other_servers=(),
+        )
+        _assert_override_after_sandbox(argv, "read-only")
 
     def test_fix_launch(self, make_git_repo: Callable[..., Path]) -> None:
         # fix_sandbox_mode has one legal config value, so only it is driven.
