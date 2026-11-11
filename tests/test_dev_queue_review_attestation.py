@@ -361,6 +361,31 @@ class TestEngineSummary:
         )
         assert att is None
 
+    def test_a_codex_lane_summary_backs_the_engine_label(self, tmp_path: Path) -> None:
+        """#3216: a codex round writes a summary, so the label needs one too."""
+        client = with_review_backend(_engine_client(tmp_path), "codex")
+        att = _build(
+            review_row(None),
+            client=client,
+            ledger=_ledger(),
+            engine_summary=_summary(),
+        )
+        assert att is not None
+        assert att.engine == "code-review"
+        assert att.reviewer_backend == "codex"
+        assert att.risk == "LOW"
+
+    @pytest.mark.parametrize("backend", ["codex", "opencode"])
+    def test_a_non_claude_native_row_with_no_summary_has_no_engine_label(
+        self, tmp_path: Path, backend: str
+    ) -> None:
+        """The label is no longer inherited from the configured skill (#3216)."""
+        client = with_review_backend(_engine_client(tmp_path), backend)
+        att = _build(review_row(None), client=client, ledger=_ledger())
+        assert att is not None
+        assert att.engine is None
+        assert att.reviewer_backend == backend
+
 
 class TestModes:
     def test_blocking_mode_reports_nothing_even_with_a_sentinel_deferral(

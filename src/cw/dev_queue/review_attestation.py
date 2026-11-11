@@ -64,6 +64,7 @@ from cw.models.review_attestation import (
 )
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
+    engine_supported,
     finalize_ready,
     load_ledger,
 )
@@ -104,7 +105,6 @@ SKIP_WEAKER_THAN_STORED: Final = "weaker_than_stored"
 _REVIEW_PENDING_APPROVAL: Final = "review_pending_approval"
 _ENGINE_CLEAN_VERDICT: Final = "PASS"
 _ENGINE_COMPLETE: Final = "COMPLETE"
-_CLAUDE_NATIVE: Final = "claude-native"
 _HEAD_RE: Final = re.compile(HEAD_SHA_PATTERN)
 #: The executor backends an attestation may name, keyed by the config value.
 _REVIEWER_BACKENDS: Final[dict[str, ReviewerBackend]] = {
@@ -172,16 +172,17 @@ def _engine_scan_head(
     """The clean head to scan engine rounds for, or None when no scan applies.
 
     Every check that could skip the write for another reason runs first, so
-    the scan never changes which skip token a call reports. The engine lane is
-    claude-native only: a codex or opencode round never writes the summary
-    file this scan reads.
+    the scan never changes which skip token a call reports. Only an
+    engine-capable lane (claude-native or codex, #3216) writes the summary
+    file this scan reads; an opencode or local round never does.
     """
     if client is None or client.review.engine is None or ledger is None:
         return None
     head = _clean_head(last_result)
     if isinstance(head, _Skip):
         return None
-    if _backend(task, client) != _CLAUDE_NATIVE:
+    backend = _backend(task, client)
+    if backend is None or not engine_supported(backend):
         return None
     return head if _ledger_agrees(ledger, task, head) else None
 
@@ -216,18 +217,15 @@ def _engine_summary_for_exit(
 
 
 def _engine_label(
-    review: ReviewConfig,
-    backend: ReviewerBackend,
-    summary: ReviewEngineSummary | None,
+    review: ReviewConfig, summary: ReviewEngineSummary | None
 ) -> str | None:
     """The attestation's ``engine`` label: the skill, only with evidence behind it.
 
-    A claude-native attestation names the engine only when a summary backed it.
-    A codex or opencode attestation keeps the configured skill as its label.
+    Every backend names the engine only when a summary backed it (#3216): a
+    codex round now writes one too, and an opencode or local row never runs
+    the engine, so neither may claim it.
     """
-    if review.engine is None:
-        return None
-    if summary is None and backend == _CLAUDE_NATIVE:
+    if review.engine is None or summary is None:
         return None
     return review.engine.skill
 
@@ -264,7 +262,7 @@ def record_review_attestation(
         backend=backend,
         last_result=last_result,
         engine_summary=engine_summary,
-        engine=_engine_label(review, backend, engine_summary),
+        engine=_engine_label(review, engine_summary),
         ledger=ledger if review.is_clean else None,
         now=now or datetime.now(UTC),
     )

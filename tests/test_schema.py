@@ -23,6 +23,7 @@ class TestSchemaList:
         assert "ticket-view" in result.output
         assert "review-history" in result.output
         assert "review-engine-summary" in result.output
+        assert "review-engine-manifest" in result.output
 
     def test_list_json_is_valid_array(self) -> None:
         runner = CliRunner()
@@ -37,8 +38,9 @@ class TestSchemaList:
         assert "ticket-view" in parsed
         assert "review-history" in parsed
         assert "review-engine-summary" in parsed
+        assert "review-engine-manifest" in parsed
         assert "pr-channel-event" in parsed
-        assert len(parsed) == 8
+        assert len(parsed) == 9
 
 
 class TestSchemaShow:
@@ -235,6 +237,31 @@ class TestSchemaShowReviewEngineSummary:
         )
         assert result.exit_code == 0, result.output
         assert "schema_version" in result.output
+
+
+class TestSchemaShowReviewEngineManifest:
+    """``cw schema show review-engine-manifest`` (#3216)."""
+
+    def test_json_format(self) -> None:
+        result = CliRunner().invoke(
+            main, ["schema", "show", "review-engine-manifest", "--format=json"]
+        )
+        assert result.exit_code == 0, result.output
+        parsed = json.loads(result.output)
+        for key in ("manifest_version", "backends", "roles", "aggregation_prompt"):
+            assert key in parsed["properties"]
+        assert "EngineRole" in parsed["$defs"]
+        assert parsed["additionalProperties"] is False
+        assert parsed["properties"]["backends"]["items"]["enum"] == ["codex"]
+
+    def test_tldr_format(self) -> None:
+        result = CliRunner().invoke(
+            main, ["schema", "show", "review-engine-manifest", "--format=tldr"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "EngineManifest" in result.output
+        assert "manifest_version" in result.output
+        assert "aggregation_prompt" in result.output
 
 
 class TestSchemaShowDocstringTracksRegistry:

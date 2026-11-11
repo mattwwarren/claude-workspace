@@ -612,11 +612,19 @@ def _config(*extra: str) -> dict[str, Any]:
     return body
 
 
-@pytest.mark.parametrize("backend", ["codex", "opencode"])
+@pytest.mark.parametrize("backend", ["opencode", "local"])
 def test_other_lanes_print_no_engine(repo: EngineRepo, backend: str) -> None:
     body = _config("--loop-backend", backend)
 
     assert body["engine"] is None
+    assert body["engine_error"] is None
+
+
+def test_codex_lane_reports_the_engine(repo: EngineRepo) -> None:
+    """#3216: a codex lane runs the engine, so converge config reports it."""
+    body = _config("--loop-backend", "codex")
+
+    assert body["engine"] == "repo-review"
     assert body["engine_error"] is None
 
 

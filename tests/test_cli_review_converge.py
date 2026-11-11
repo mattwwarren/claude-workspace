@@ -4848,7 +4848,20 @@ class TestConfigEngine:
         assert report["engine_error"] is None
         assert "scripts" not in json.dumps(report)
 
-    @pytest.mark.parametrize("backend", ["codex", "opencode", "some-future-backend"])
+    def test_codex_loop_backend_reports_the_engine(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """#3216: a codex lane runs the engine, so it sees the skill name."""
+        report = self._config(
+            runner, self._engine_ctx(tmp_path), "--loop-backend", "codex"
+        )
+
+        assert report["engine"] == "repo-review"
+        assert report["engine_error"] is None
+        assert report["convergence"] == "clean"
+        assert "scripts" not in json.dumps(report)
+
+    @pytest.mark.parametrize("backend", ["opencode", "local", "some-future-backend"])
     def test_other_loop_backends_report_null(
         self, runner: CliRunner, tmp_path: Path, backend: str
     ) -> None:
@@ -4904,12 +4917,22 @@ class TestConfigEngine:
         assert report["engine"] is None
         assert reason in report["engine_error"]
 
-    def test_engine_error_is_hidden_from_a_codex_lane(
+    def test_engine_error_is_reported_to_a_codex_lane(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
         ctx = self._engine_ctx(tmp_path, engine="oops")
 
         report = self._config(runner, ctx, "--loop-backend", "codex")
+
+        assert report["engine"] is None
+        assert "not an object" in report["engine_error"]
+
+    def test_engine_error_is_hidden_from_an_opencode_lane(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        ctx = self._engine_ctx(tmp_path, engine="oops")
+
+        report = self._config(runner, ctx, "--loop-backend", "opencode")
 
         assert report["engine"] is None
         assert report["engine_error"] is None

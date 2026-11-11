@@ -58,6 +58,7 @@ from cw.claude_review import (
     _which_claude,
     run_claude_review,
 )
+from cw.codex_engine_confirm import engine_confirm_park, pending_lines
 from cw.codex_review import (
     CODEX_CONVERGENCE_LEDGER_ERROR,
     CODEX_MUST_FIX_FINDINGS,
@@ -82,7 +83,8 @@ from cw.review_convergence import (
     LEDGER_STATUS_STOPPED,
     STOP_DECISIONS,
     confirm_blocker_fragment,
-    decide_verdict,
+    decide_confirm_verdict,
+    engine_pass_precedes,
     friction_lines,
     from_verdict,
     frozen_counts_from_verdict,
@@ -100,6 +102,7 @@ from cw.review_convergence import (
     stop_summary,
     suppress_settled,
     unread_from_verdict,
+    verdict_ran_engine,
     verify_diff_base,
 )
 
@@ -305,6 +308,7 @@ def _record_loop_round(
         frozen=frozen_counts_from_verdict(verdict),
         shard_count=shard_count,
         shards_reviewed=shards_reviewed,
+        engine=verdict_ran_engine(verdict),
     )
     save_ledger(gate.ledger_path, ledger)
     gate.ledger = ledger
@@ -509,20 +513,6 @@ def _unavailable_outcome(
     return _parked(gate, base, Blocker.model_validate(fragment))
 
 
-def _pending_lines(verdict: ReviewVerdict) -> list[str]:
-    """``SEVERITY file:line summary`` for each accepted MUST_FIX/SHOULD_FIX."""
-    lines: list[str] = []
-    for item in verdict.accepted:
-        finding = item.finding
-        if finding.severity not in ("MUST_FIX", "SHOULD_FIX"):
-            continue
-        where = finding.file
-        if finding.line_start is not None:
-            where = f"{where}:{finding.line_start}"
-        lines.append(f"{finding.severity} {where} {one_line(finding.summary)}")
-    return lines
-
-
 def _record_confirm_round(
     gate: _Gate,
     ledger: ConvergenceLedger,
@@ -538,10 +528,10 @@ def _record_confirm_round(
     Claude ``codex_must_fix_findings`` result; a ``stop_*`` decision appends
     the ledger's release hint to its details.
     """
-    decided = decide_verdict(claude_verdict, CONFIRM_DEFER_RATIONALE)
+    decided = decide_confirm_verdict(claude_verdict, ledger, CONFIRM_DEFER_RATIONALE)
     # The paid round has returned: keep its findings reachable if bookkeeping
     # fails before they reach the ledger (see _ledger_error_outcome).
-    gate.pending_findings = _pending_lines(claude_verdict)
+    gate.pending_findings = pending_lines(claude_verdict)
     for line in gate.pending_findings:
         _log.info(
             "claude confirm finding ticket=%s client=%s session=%s %s",
@@ -574,7 +564,8 @@ def _record_confirm_round(
         round_number=report.round,
         now=_now(),
     )
-    save_round_verdict(gate.ledger_path, report.round, claude_verdict)
+    persisted = decided if engine_pass_precedes(prior) else claude_verdict
+    save_round_verdict(gate.ledger_path, report.round, persisted)
     save_ledger(gate.ledger_path, ledger)
     gate.pending_findings = []
     gate.ledger = ledger
@@ -616,6 +607,7 @@ def _record_confirm_round(
             }
         )
         result = result.model_copy(update={"blocker": hinted})
+    result = engine_confirm_park(result, report, ledger, gate.task, gate.client)
     return CleanConfirmOutcome(
         result=_finish(gate, result, park=True),
         verdict=claude_verdict,

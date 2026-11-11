@@ -151,8 +151,20 @@ def decided_finding(item: AcceptedFinding, rationale: str) -> AcceptedFinding:
     ``outcome: fix``. That rationale names the round's origin (the wording is
     lane-specific, so there is no default). Existing rejected/deferred
     dispositions and non-gating NIT, PRINCIPLE, and DEBT findings pass through.
+
+    An engine-sourced gating finding whose rule is never deferrable
+    (``coverage.*`` / ``acceptance.*``, RFC 0017 D-6) and that is not rejected
+    is a ``fix`` whatever its severity (#3216, R20). The source gate leaves a
+    built-in finding with a look-alike rule on the SHOULD_FIX default.
     """
     severity = item.finding.severity
+    if (
+        item.finding.source == "engine"
+        and severity in ("MUST_FIX", "SHOULD_FIX")
+        and is_non_deferrable_rule(item.finding.rule_id)
+        and item.disposition != "rejected"
+    ):
+        return item.model_copy(update={"disposition": "fixed"})
     if (
         severity == "SHOULD_FIX"
         and item.disposition not in ("rejected", "deferred")

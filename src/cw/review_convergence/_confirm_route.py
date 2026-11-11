@@ -20,6 +20,11 @@ The router is pure and deterministic: the engine (``_apply_round``) calls it
 to decide the round, and the CLI calls it on the same pre-record ledger to
 learn which SHOULD_FIX findings to file.
 
+:func:`decide_confirm_verdict` is the verdict-side half both lanes share
+(#3216): the claude-native ``record-round`` CLI and the codex confirm round
+decide the confirm verdict through it, and :func:`verdict_ran_engine` says
+whether a loop verdict came from the engine alone.
+
 Import these names from :mod:`cw.review_convergence`, not from this private
 submodule.
 """
@@ -31,6 +36,7 @@ from typing import TYPE_CHECKING, Final, NamedTuple
 
 from cw.review_convergence._findings import (
     Classified,
+    decide_verdict,
     settled_applies,
     settled_debt_key,
     settled_index,
@@ -41,12 +47,14 @@ from cw.review_convergence._models import (
     RoundFinding,
     SettledEntry,
 )
+from cw.review_engine.constants import ENGINE_ROLE
 from cw.review_engine.route import is_non_deferrable_rule
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from cw.review_convergence._models import ConvergenceLedger
+    from cw.review_findings import AcceptedFinding, ReviewVerdict
 
 #: Rationale of every SHOULD_FIX the confirm round after an engine pass defers.
 #: It is the settled entry's rationale and the filed debt ticket's rationale.
@@ -189,4 +197,45 @@ def route_engine_confirm(
         classified=classified,
         park_identities=tuple(park),
         deferred=tuple(deferred.values()),
+    )
+
+
+_GATING: Final = frozenset({"MUST_FIX", "SHOULD_FIX"})
+
+
+def verdict_ran_engine(verdict: ReviewVerdict) -> bool:
+    """Whether *verdict*'s reviewer set is the repo review engine alone."""
+    return {record.reviewer_role for record in verdict.agents_run} == {ENGINE_ROLE}
+
+
+def _park_stamp(item: AcceptedFinding) -> AcceptedFinding:
+    """*item* restamped ``operator_actionable`` when it can never be deferred."""
+    finding = item.finding
+    if finding.severity in _GATING and is_non_deferrable_rule(finding.rule_id):
+        return item.model_copy(
+            update={
+                "disposition": "operator_actionable",
+                "disposition_detail": CONFIRM_ENGINE_PARK_RATIONALE,
+            }
+        )
+    return item
+
+
+def decide_confirm_verdict(
+    verdict: ReviewVerdict, ledger: ConvergenceLedger, default_rationale: str
+) -> ReviewVerdict:
+    """The confirm round *verdict* decided in code, for either lane.
+
+    After an engine pass (:func:`engine_pass_precedes` on the pre-record
+    *ledger*) every accepted finding goes through ``decide_verdict`` with
+    :data:`CONFIRM_ENGINE_DEFER_RATIONALE` and a gating never-deferrable
+    ``coverage.*``/``acceptance.*`` finding is restamped
+    ``operator_actionable`` with :data:`CONFIRM_ENGINE_PARK_RATIONALE`.
+    Otherwise it is ``decide_verdict(verdict, default_rationale)``.
+    """
+    if not engine_pass_precedes(ledger):
+        return decide_verdict(verdict, default_rationale)
+    decided = decide_verdict(verdict, CONFIRM_ENGINE_DEFER_RATIONALE)
+    return decided.model_copy(
+        update={"accepted": [_park_stamp(item) for item in decided.accepted]}
     )

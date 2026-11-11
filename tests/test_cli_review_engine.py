@@ -26,6 +26,7 @@ from tests._cli_review_helpers import _enter_operator_machine, _write_session_co
 from tests._review_engine_helpers import (
     EngineRepo,
     StubEngine,
+    copy_engine_fixture,
     engine_context_payload,
     engine_finding,
     make_engine_repo,
@@ -585,3 +586,171 @@ def test_every_client_option_also_accepts_short_c() -> None:
         for param in command.params:
             if isinstance(param, click.Option) and "--client" in param.opts:
                 assert "-c" in param.opts, command.name
+
+
+# ---------------------------------------------------------------------------
+# validate --kind (#3216): the summary default and the manifest kind
+# ---------------------------------------------------------------------------
+
+_STUB_ENGINE = Path(__file__).parent / "fixtures" / "review_engine_stub"
+_MANIFEST_OK = "review engine manifest valid: manifest_version=1 backends=codex roles=2"
+
+
+def _stub_copy(tmp_path: Path, **manifest_overrides: object) -> Path:
+    """A copy of the stub engine directory; returns its manifest path."""
+    return (
+        copy_engine_fixture(tmp_path, _STUB_ENGINE, **manifest_overrides)
+        / "cw-engine.json"
+    )
+
+
+def test_kind_summary_equals_the_default(tmp_path: Path) -> None:
+    good = write_summary(tmp_path, make_summary([make_finding()]))
+    bad = write_summary(tmp_path, _bad_findings(3), name="bad.json")
+
+    for path in (good, bad):
+        default = _invoke(str(path))
+        explicit = _invoke("--kind", "summary", str(path))
+
+        assert explicit.exit_code == default.exit_code
+        assert explicit.stdout == default.stdout
+        assert explicit.stderr == default.stderr
+
+
+def test_kind_manifest_success_line(tmp_path: Path) -> None:
+    result = _invoke("--kind", "manifest", str(_stub_copy(tmp_path)))
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.splitlines() == [_MANIFEST_OK]
+    assert result.stderr == ""
+
+
+def test_kind_manifest_resolves_refs_relative_to_the_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _stub_copy(tmp_path)
+    elsewhere = tmp_path / "cwd"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    result = _invoke("--kind", "manifest", str(manifest))
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.splitlines() == [_MANIFEST_OK]
+
+
+def test_kind_manifest_ref_failure_names_the_field(tmp_path: Path) -> None:
+    manifest = _stub_copy(tmp_path)
+    (manifest.parent / "agents" / "quality.md").unlink()
+
+    result = _invoke("--kind", "manifest", str(manifest))
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    lines = _stderr_lines(result)
+    assert len(lines) == 1
+    assert lines[0].startswith("path_invalid: roles.1.agent_spec: ")
+
+
+@pytest.mark.parametrize(
+    ("build", "line_prefix"),
+    [
+        (lambda tmp: tmp / "absent.json", "unreadable: -: "),
+        (
+            lambda tmp: _stub_copy(tmp, manifest_version=2),
+            "unsupported_manifest_version: manifest_version: ",
+        ),
+        (
+            lambda tmp: _stub_copy(tmp, backends=["opencode"]),
+            "schema_invalid: backends.0: ",
+        ),
+        (
+            lambda tmp: _stub_copy(tmp, schema_version=1),
+            "schema_invalid: schema_version: ",
+        ),
+    ],
+    ids=["unreadable", "version", "backends", "unknown-key"],
+)
+def test_kind_manifest_rejection_lines(
+    tmp_path: Path, build: object, line_prefix: str
+) -> None:
+    assert callable(build)
+    path = build(tmp_path)
+
+    result = _invoke("--kind", "manifest", str(path))
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    lines = _stderr_lines(result)
+    assert len(lines) == 1
+    assert lines[0].startswith(line_prefix)
+
+
+@pytest.mark.parametrize(
+    ("count", "trailer"),
+    [
+        (25, "... 5 more line(s) omitted"),
+        (21, "... 1 more line(s) omitted"),
+        (20, None),
+    ],
+)
+def test_kind_manifest_error_lines_truncated(
+    tmp_path: Path, count: int, trailer: str | None
+) -> None:
+    # Eight invalid role ids is the roles cap; the rest are invalid backends.
+    roles = [{"id": f"BAD{i}", "agent_spec": "a.md"} for i in range(8)]
+    manifest = _stub_copy(tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["roles"] = roles
+    payload["backends"] = ["x"] * (count - 8)
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _invoke("--kind", "manifest", str(manifest))
+
+    assert result.exit_code == 1
+    lines = _stderr_lines(result)
+    issue_lines = [line for line in lines if line.startswith("schema_invalid: ")]
+    assert len(issue_lines) == MAX_VALIDATE_ERROR_LINES
+    if trailer is None:
+        assert len(lines) == MAX_VALIDATE_ERROR_LINES
+    else:
+        assert lines[-1] == trailer
+        assert len(lines) == MAX_VALIDATE_ERROR_LINES + 1
+
+
+def test_kind_manifest_never_echoes_input_values(tmp_path: Path) -> None:
+    manifest = _stub_copy(tmp_path, backends=["SENTINEL-BACKEND-31cc"])
+
+    result = _invoke("--kind", "manifest", str(manifest))
+
+    assert result.exit_code == 1
+    assert "SENTINEL-BACKEND-31cc" not in result.stderr
+
+
+def test_unknown_kind_exits_two(tmp_path: Path) -> None:
+    result = _invoke("--kind", "bogus", str(tmp_path / "x.json"))
+
+    assert result.exit_code == 2
+
+
+def test_kind_manifest_emits_no_event_and_writes_nothing(tmp_path: Path) -> None:
+    manifest = _stub_copy(tmp_path)
+    before = sorted(manifest.parent.rglob("*"))
+    content = manifest.read_bytes()
+
+    result = _invoke("--kind", "manifest", str(manifest))
+
+    assert result.exit_code == 0
+    assert sorted(manifest.parent.rglob("*")) == before
+    assert manifest.read_bytes() == content
+    assert not inbox_path().exists()
+
+
+def test_validate_help_documents_kind() -> None:
+    result = CliRunner().invoke(main, ["review", "engine", "validate", "--help"])
+
+    assert result.exit_code == 0
+    text = _norm(result.output)
+    assert "--kind" in text
+    assert "summary" in text
+    assert "manifest" in text

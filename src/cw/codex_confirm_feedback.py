@@ -59,7 +59,8 @@ _log = logging.getLogger(__name__)
 #: Dispositions of an accepted MUST_FIX that still need a fix: ``fixed`` is
 #: the optimistic default, and ``dropped``/``unresolved`` mean nobody fixed
 #: it. Mirrors ``cw.review_convergence.decided_finding``, which records exactly
-#: these as ``fix`` on the confirm round.
+#: these as ``fix`` on the confirm round. Its engine-sourced SHOULD_FIX branch
+#: (#3216) is outside this mirror: it is read only where severity is MUST_FIX.
 _OPEN_DISPOSITIONS = frozenset({"fixed", "dropped", "unresolved"})
 
 _MUST_FIX = "MUST_FIX"

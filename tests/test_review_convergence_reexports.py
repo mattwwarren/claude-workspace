@@ -31,6 +31,7 @@ EXPECTED_EXPORTS = {
     "ConfirmRoute",
     "confirm_escalated_event_payload",
     "engine_pass_precedes",
+    "engine_supported",
     "route_engine_confirm",
     "DEFAULT_MERGE_TOLERATED_KEY",
     "DELTA_CONFIRM_ELIGIBLE_KEY",
@@ -95,6 +96,7 @@ EXPECTED_EXPORTS = {
     "confirm_blocker_fragment",
     "consecutive_confirm_failures",
     "converged_across_tolerated_merge",
+    "decide_confirm_verdict",
     "decide_verdict",
     "decided_finding",
     "default_merge_only",
@@ -155,6 +157,7 @@ EXPECTED_EXPORTS = {
     "classify_default_merge",
     "shard_tally_from_verdict",
     "unread_from_verdict",
+    "verdict_ran_engine",
     "verify_diff_base",
     "worktree_state",
 }

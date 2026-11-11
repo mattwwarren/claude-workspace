@@ -48,6 +48,7 @@ from cw.executor_diagnostics import (
 )
 from cw.models.enums import DEFAULT_REVIEWER_SANDBOX_MODE, SandboxMode
 from cw.openai_strict_schema import to_openai_strict_schema
+from cw.review_engine.constants import role_slug
 from cw.review_findings import (
     ReviewerFindingsDocument,
     ReviewerRunFailure,
@@ -56,6 +57,7 @@ from cw.review_findings import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from cw.codex_runner import CodexRunner, CodexRunResult
@@ -63,6 +65,10 @@ if TYPE_CHECKING:
     from cw.review_findings import RejectedFinding
 
 _log = logging.getLogger(__name__)
+
+#: Filesystem-safe slug for a reviewer role name. One definition, shared with
+#: the engine manifest loader through the light constants module (#3216).
+_slug = role_slug
 
 # The two audit flags #1710 adds to every generic reviewer invocation. Kept as
 # one tuple so the argv builder and the degrade-and-retry strip cannot drift.
@@ -180,9 +186,30 @@ def _build_generic_codex_argv(
     return argv
 
 
-def _slug(role: str) -> str:
-    """Filesystem-safe slug for a reviewer role name."""
-    return re.sub(r"[^a-z0-9]+", "-", role.lower()).strip("-")
+def _classify_codex_output(
+    content: str | None, *, validator: Callable[[object], object]
+) -> ExecutorFailureCategory | None:
+    """Classify codex output, using *validator* for its target document.
+
+    ``None`` means the content is valid for the target document. Keeping the
+    JSON parsing and validation here lets each codex output consumer use the
+    same failure taxonomy without hard-coding the document model.
+    """
+    if content is None:
+        return "missing_output"
+    if not content.strip():
+        return "empty_output"
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, RecursionError):
+        return "invalid_json"
+    try:
+        validator(data)
+    except RecursionError:
+        return "invalid_json"
+    except ValueError:
+        return "schema_mismatch"
+    return None
 
 
 def _classify_codex_output_failure(content: str | None) -> ExecutorFailureCategory:
@@ -194,19 +221,12 @@ def _classify_codex_output_failure(content: str | None) -> ExecutorFailureCatego
     ``invalid_json`` / ``schema_mismatch``. A genuinely valid document never
     reaches here (the caller returned it), so the final return is unreachable.
     """
-    if content is None:
-        return "missing_output"
-    if not content.strip():
-        return "empty_output"
-    try:
-        data = json.loads(content)
-    except json.JSONDecodeError:
-        return "invalid_json"
-    try:
-        ReviewerFindingsDocument.model_validate(data)
-    except ValueError:
-        return "schema_mismatch"
-    return "schema_mismatch"  # pragma: no cover — unreachable on the failure path
+    return (
+        _classify_codex_output(
+            content, validator=ReviewerFindingsDocument.model_validate
+        )
+        or "schema_mismatch"
+    )  # pragma: no cover — valid output is handled first
 
 
 def _classify_codex_failure(result: CodexRunResult) -> ExecutorFailureCategory:

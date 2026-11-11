@@ -8,7 +8,7 @@ reviews, real fix commits) with the real recorder as its cycle observer.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -49,6 +49,7 @@ from tests._review_convergence_helpers import (
     round_finding,
     write_ledger,
 )
+from tests._review_engine_helpers import engine_loop_verdict
 from tests.conftest import _make_finding, commit_tracked_file, git_in
 from tests.test_codex_background import _clean_result
 from tests.test_codex_fix_loop import (
@@ -362,6 +363,102 @@ class TestRecording:
         assert stop.reason == REVIEW_NOT_CONVERGING_BLOCKER_REASON
         assert "operator_action" in stop.details
         assert _ledger(wt).stop_reason == "operator_action"
+
+
+# ---------------------------------------------------------------------------
+# The engine flag of a recorded loop round (#3216)
+# ---------------------------------------------------------------------------
+
+
+def _engine_cycle(sha: str, *accepted: AcceptedFinding) -> CycleRound:
+    """A dirty cycle-0 pass whose verdict ran the repo review engine alone."""
+    open_findings = {
+        _open_finding_key(af.finding): af
+        for af in accepted
+        if af.finding.severity == "MUST_FIX" and af.disposition == "fixed"
+    }
+    verdict = _loop_verdict(
+        *accepted,
+        reviewed_sha=sha,
+        agents_run=engine_loop_verdict(sha).agents_run,
+    )
+    return CycleRound(0, verdict, open_findings)
+
+
+class TestEngineFlag:
+    def test_an_engine_verdict_records_an_engine_round(self, wt: Path) -> None:
+        stop = _recorder(wt).record(_engine_cycle(_head(wt), _af("Bug A")))
+
+        assert stop is None
+        (round_,) = _ledger(wt).rounds
+        assert round_.engine is True
+        assert (round_.kind, round_.backend) == ("loop", "codex")
+
+    def test_a_built_in_verdict_records_a_non_engine_round(self, wt: Path) -> None:
+        stop = _recorder(wt).record(_cycle(0, _head(wt), _af("Bug A")))
+
+        assert stop is None
+        (round_,) = _ledger(wt).rounds
+        assert round_.engine is False
+
+    def test_an_engine_never_deferrable_should_fix_is_a_fix_and_is_not_filed(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3216 (R20): ``coverage.*`` gates the loop; a plain SHOULD_FIX defers."""
+        filed: list[list[tuple[str, str]]] = []
+
+        def _spy(**kwargs: Any) -> None:
+            filed.append([(f.summary, f.outcome) for f in kwargs["findings"]])
+
+        monkeypatch.setattr("cw.codex_loop_rounds.file_codex_deferrals", _spy)
+
+        def _engine_should_fix(
+            summary: str, rule: str, fingerprint: str
+        ) -> AcceptedFinding:
+            return AcceptedFinding(
+                finding=_make_finding(
+                    severity="SHOULD_FIX",
+                    file=_PRODUCER,
+                    summary=summary,
+                    rule_id=rule,
+                    source="engine",
+                    fingerprint=fingerprint,
+                ),
+                reviewers=["Code Quality Reviewer"],
+            )
+
+        cycle = _engine_cycle(
+            _head(wt),
+            _engine_should_fix("coverage gap", "coverage.untested", "fp-coverage"),
+            _engine_should_fix("plain nit", "style.naming", "fp-plain"),
+        )
+
+        assert _recorder(wt).record(cycle) is None
+
+        assert filed == [[("coverage gap", "fix"), ("plain nit", "defer")]]
+        ledger = _ledger(wt)
+        (round_,) = ledger.rounds
+        assert round_.new_fix == 1
+        assert [e.outcome for e in ledger.settled] == ["defer"]
+        assert ledger.settled[0].rationale == LOOP_DEFER_RATIONALE
+
+    def test_an_engine_flag_is_not_set_by_a_mixed_roster(self, wt: Path) -> None:
+        sha = _head(wt)
+        accepted = (_af("Bug A"),)
+        mixed = _loop_verdict(
+            *accepted,
+            reviewed_sha=sha,
+            agents_run=engine_loop_verdict(
+                sha, also=("Code Quality Reviewer",)
+            ).agents_run,
+        )
+        cycle = CycleRound(
+            0, mixed, {_open_finding_key(accepted[0].finding): accepted[0]}
+        )
+
+        assert _recorder(wt).record(cycle) is None
+        (round_,) = _ledger(wt).rounds
+        assert round_.engine is False
 
 
 # ---------------------------------------------------------------------------

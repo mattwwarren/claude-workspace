@@ -146,7 +146,7 @@ def test_runbook_documents_the_close_sweep() -> None:
 def test_runbook_states_the_close_sweep_listing_limitation() -> None:
     section = _close_section()
     assert "**Known limitation.**" in section
-    assert "200 or more open `review-debt` issues" in section
+    assert "1000 or more open `review-debt` issues" in section
     assert "Nothing is paginated" in section
 
 
@@ -156,6 +156,8 @@ def test_runbook_dedup_counts_only_open_row_tickets() -> None:
     assert "(schema v55)" not in section
     assert "counts only while it is still OPEN" in section
     assert "closes a debt ticket by hand" in section
+    assert "--limit 1000" in section
+    assert "A full 1000-item page" in section
 
 
 def test_config_reference_documents_the_close_switch() -> None:

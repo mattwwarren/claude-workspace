@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from cw.auto_dev_result import AutoDevResult
 from cw.models import Session, TicketTask
 from cw.models.pr_channel_event import PREventMessage
+from cw.models.review_engine_manifest import EngineManifest
 from cw.models.review_engine_summary import ReviewEngineSummary
 from cw.models.review_history import ReviewHistory
 from cw.models.ticket_view import TicketView
@@ -38,6 +39,9 @@ REGISTRY: dict[str, type[BaseModel]] = {
     # The summary a repo review engine writes, checked by
     # `cw review engine validate` (#3036).
     "review-engine-summary": ReviewEngineSummary,
+    # The cw-engine.json manifest of a codex-capable review engine (#3216),
+    # checked by `cw review engine validate --kind manifest`.
+    "review-engine-manifest": EngineManifest,
     # The v1 `message` JSON of a PR channel event (#3173); see docs/pr-channel.md.
     "pr-channel-event": PREventMessage,
 }

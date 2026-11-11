@@ -576,3 +576,95 @@ def test_opencode_clean_review_without_binary_blocks_opencode_not_found(
     assert result.blocker is not None
     assert result.blocker.reason == OPENCODE_NOT_FOUND
     assert result.blocker.retry_eligible is True
+
+
+# ---------------------------------------------------------------------------
+# Repo review engine guard (#3216)
+# ---------------------------------------------------------------------------
+
+
+def _engine_client(worktree: Path) -> ClientConfig:
+    review = ReviewConfig.model_validate(
+        {"convergence": "clean", "engine": {"skill": "repo-review"}}
+    )
+    return ClientConfig(name="test", workspace_path=worktree, review=review)
+
+
+@pytest.mark.parametrize("binary_available", [True, False])
+def test_opencode_engine_review_is_refused_before_the_binary_probe(
+    binary_available: bool,
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """An engine-configured REVIEW fails closed whether or not opencode exists."""
+    worktree = make_git_repo("wt-opencode-engine-refused")
+    fake_runner = FakeFireAndForgetRunner()
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
+    executor = OpencodeExecutor(config=config, runner=fake_runner)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
+
+    with patch(
+        "cw.executor.opencode.opencode_available", return_value=binary_available
+    ) as probe:
+        executor.spawn(
+            stage=Stage.REVIEW,
+            task=task,
+            worktree=worktree,
+            client=_engine_client(worktree),
+        )
+
+    probe.assert_not_called()
+    assert len(fake_runner.calls) == 0
+    session = find_completed_session(load_state())
+    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.status == "blocked"
+    assert result.stage_reached == "stage3_review"
+    assert result.blocker is not None
+    assert result.blocker.reason == "review_engine_unsupported_backend"
+    assert result.blocker.retry_eligible is False
+    assert result.blocker.stage == "stage3_review"
+    assert "cause=backend_unsupported" in result.blocker.details
+    assert "opencode" in result.blocker.details
+    assert "skill=repo-review" in result.blocker.details
+
+
+def test_opencode_engine_guard_is_review_only(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """The engine runs only in REVIEW: an IMPL spawn on the same client proceeds."""
+    worktree = make_git_repo("wt-opencode-engine-impl")
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+    client = _engine_client(worktree)
+    sess = _sess()
+
+    with patch("cw.executor.opencode.opencode_available", return_value=True):
+        result = _opencode_preflight(config, task, worktree, client, Stage.IMPL, sess)
+
+    assert isinstance(result, _PreflightOK)
+
+
+def test_opencode_review_without_an_engine_is_not_refused_by_the_engine_guard(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A clean client with no ``review.engine`` still reaches the binary probe."""
+    worktree = make_git_repo("wt-opencode-no-engine")
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
+
+    with patch("cw.executor.opencode.opencode_available", return_value=False):
+        result = _opencode_preflight(
+            config,
+            task,
+            worktree,
+            _review_client(worktree, "clean"),
+            Stage.REVIEW,
+            _sess(),
+        )
+
+    assert isinstance(result, AutoDevResult)
+    assert result.blocker is not None
+    assert result.blocker.reason == OPENCODE_NOT_FOUND

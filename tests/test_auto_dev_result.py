@@ -29,6 +29,7 @@ from cw.auto_dev_result import (
     KNOWN_BLOCKER_REASONS,
     OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
     PAUSED_FOR_USER_INPUT_STATUSES,
+    REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
     SALVAGE_HOLD_STATUSES,
     SALVAGE_TERMINAL_STATUSES,
     SCOPE_GATED_APPROVAL_STATUSES,
@@ -970,6 +971,14 @@ class TestKnownBlockerReasons:
         assert EXTERNAL_STATE_BLOCKER_REASON == "external_state_block"
         assert EXTERNAL_STATE_BLOCKER_REASON in KNOWN_BLOCKER_REASONS
         assert is_known_blocker_reason(EXTERNAL_STATE_BLOCKER_REASON)
+
+    def test_review_engine_unsupported_backend_reason_registered(self) -> None:
+        """#3216: the engine-refusal reason is pinned and known."""
+        assert (
+            REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON
+            == "review_engine_unsupported_backend"
+        )
+        assert REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON in KNOWN_BLOCKER_REASONS
 
     def test_registry_covers_the_parse_side_synthetic_reasons(self) -> None:
         """Lockstep guard: parse.py owns these literals, the registry restates

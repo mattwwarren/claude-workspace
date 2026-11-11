@@ -17,7 +17,11 @@ if TYPE_CHECKING:
 
 from cw._git import run_git
 from cw.exceptions import CwError
-from cw.review_engine.constants import MAX_SYMLINK_HOPS
+from cw.review_engine.constants import (
+    CAUSE_SKILL_NOT_FOUND,
+    CAUSE_SKILL_UNREADABLE,
+    MAX_SYMLINK_HOPS,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -31,8 +35,6 @@ SKILL_LAYOUTS: Final = (
 
 _SYMLINK_MODE: Final = "120000"
 _COMMAND_LAYOUT: Final = ".claude/commands/{n}.md"
-_CAUSE_NOT_FOUND: Final = "skill_not_found"
-_CAUSE_UNREADABLE: Final = "skill_unreadable"
 
 
 class SkillResolutionError(CwError):
@@ -48,7 +50,7 @@ class SkillResolutionError(CwError):
 
 
 def _unreadable(detail: str) -> SkillResolutionError:
-    return SkillResolutionError(_CAUSE_UNREADABLE, detail)
+    return SkillResolutionError(CAUSE_SKILL_UNREADABLE, detail)
 
 
 @dataclass(frozen=True)
@@ -181,7 +183,7 @@ def resolve_skill(worktree: Path, commit: str, name: str) -> ResolvedSkill:
             real_path=real_text,
             is_file=is_file,
         )
-    raise SkillResolutionError(_CAUSE_NOT_FOUND, name)
+    raise SkillResolutionError(CAUSE_SKILL_NOT_FOUND, name)
 
 
 def guard_patterns(

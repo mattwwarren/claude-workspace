@@ -22,6 +22,7 @@ from cw.auto_dev_result import (
     OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
     PAUSED_FOR_USER_INPUT_STATUSES,
     REVIEW_ENGINE_MODIFIED_BLOCKER_REASON,
+    REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
     STAGE_FAILURE_STATUSES,
     STAGE_SUCCESS_STATUSES,
     AutoDevResult,
@@ -55,6 +56,13 @@ AWAITING_OPERATOR_DISPOSITION = "awaiting_operator"
 # the repo review engine skill. Not a HOLD_DISPOSITIONS member: it waits on an
 # operator `cw review engine allow`, not on operator availability.
 REVIEW_ENGINE_MODIFIED_DISPOSITION: Final = "review_engine_modified"
+# #3216: a REVIEW row refused because its lane cannot run the configured repo
+# review engine (opencode/local, or a codex lane whose default-branch skill has
+# no usable cw-engine.json). Not a hold either: it waits on a config or
+# manifest fix, then a requeue.
+REVIEW_ENGINE_UNSUPPORTED_DISPOSITION: Final = (
+    REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON
+)
 # #3372: a FINALIZE row parked because the executor's foreground timeout cut a
 # reuse-path quality gate off. An operator-gated park: not a HOLD, not a
 # DRAIN, not escalation-eligible and not reap-eligible. The orchestrator
@@ -390,6 +398,8 @@ def _hold_aware_disposition(
         return AWAITING_OPERATOR_DISPOSITION
     if blocker_reason == REVIEW_ENGINE_MODIFIED_BLOCKER_REASON:
         return REVIEW_ENGINE_MODIFIED_DISPOSITION
+    if blocker_reason == REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON:
+        return REVIEW_ENGINE_UNSUPPORTED_DISPOSITION
     if blocker_reason == GATE_TIMEOUT_BLOCKER_REASON:
         return GATE_TIMEOUT_DISPOSITION
     return _derive_disposition(status)

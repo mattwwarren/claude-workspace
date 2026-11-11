@@ -21,7 +21,9 @@ from cw.codex_fix_loop.convergence import _open_finding_key
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from typing import TypeGuard
 
+    from cw.auto_dev_result import AutoDevResult
     from cw.codex_fix_loop.convergence import _OpenFindingKey
     from cw.review_findings import AcceptedFinding, ReviewVerdict
 
@@ -72,4 +74,24 @@ def seed_verdict(
             "blocking": True,
             "review": review,
         }
+    )
+
+
+def _should_seed(
+    verdict: ReviewVerdict | None,
+    result: AutoDevResult,
+    seed_findings: Sequence[AcceptedFinding],
+    fix_loop_enabled: bool,
+) -> TypeGuard[ReviewVerdict]:
+    """Whether *seed_findings* are merged into cycle 0's *verdict* (#2807).
+
+    Seed only when cycle 0 produced fixable work or parked on nothing: the
+    verdict blocks, or the result carries no blocker. A cycle 0 parked on
+    something other than its own findings keeps its park.
+    """
+    return bool(
+        seed_findings
+        and fix_loop_enabled
+        and verdict is not None
+        and (verdict.blocking or result.blocker is None)
     )

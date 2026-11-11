@@ -61,6 +61,7 @@ from cw.review_convergence import (
     consecutive_confirm_failures,
     converged_across_tolerated_merge,
     decide_verdict,
+    engine_supported,
     frozen_counts_from_verdict,
     load_ledger,
     one_line,
@@ -345,11 +346,11 @@ def _config_report(config: ConvergenceConfig, loop_backend: str) -> dict[str, ob
         "source": config.source,
         "ticket_id": config.ticket_id,
         "dispatch_refusal": config.dispatch_refusal,
-        # #3039: the engine is reported only to the Claude-native review stage.
-        # A codex or opencode lane keeps the built-in roster and sees null.
-        "engine": config.engine if loop_backend == CLAUDE_NATIVE_BACKEND else None,
+        # #3039, #3216: the engine is reported only to an engine-capable review
+        # lane (claude-native, codex). opencode and local see null.
+        "engine": config.engine if engine_supported(loop_backend) else None,
         "engine_error": (
-            config.engine_error if loop_backend == CLAUDE_NATIVE_BACKEND else None
+            config.engine_error if engine_supported(loop_backend) else None
         ),
     }
 

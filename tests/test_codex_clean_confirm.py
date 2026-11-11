@@ -12,11 +12,16 @@ from __future__ import annotations
 import time
 from functools import partial
 from typing import TYPE_CHECKING, Any
+from unittest.mock import patch
 
 import pytest
 
 from cw import codex_clean_confirm
-from cw.auto_dev_result import KNOWN_BLOCKER_REASONS, AutoDevResult
+from cw.auto_dev_result import (
+    KNOWN_BLOCKER_REASONS,
+    REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON,
+    AutoDevResult,
+)
 from cw.claude_review import (
     CLAUDE_BACKEND_DETAILS_PREFIX,
     ClaudeReviewRound,
@@ -30,6 +35,7 @@ from cw.codex_clean_confirm import (
     resume_pending_confirm,
     stop_details,
 )
+from cw.codex_confirm_feedback import reenter_feedback
 from cw.codex_review import (
     CODEX_CONVERGENCE_LEDGER_ERROR,
     CODEX_MUST_FIX_FINDINGS,
@@ -42,9 +48,12 @@ from cw.codex_review import (
     synthesize_codex_review_result,
 )
 from cw.dispatch_state import load_executor_blocked_markers
-from cw.models import ClientConfig
+from cw.events import read_events
+from cw.models import ClientConfig, OrchestratorEventType
 from cw.models.client import ReviewConfig
 from cw.review_convergence import (
+    CONFIRM_ENGINE_DEFER_RATIONALE,
+    CONFIRM_ENGINE_PARK_RATIONALE,
     LEDGER_RELATIVE_PATH,
     ConvergenceLedger,
     SettleTarget,
@@ -59,6 +68,7 @@ from cw.review_convergence import (
     stop_summary,
     tolerance_for_client,
 )
+from cw.review_engine.constants import ENGINE_ROLE
 from cw.review_findings import has_contested_decision
 from tests._claude_review_helpers import (
     RoleAwareClaudeRunner,
@@ -91,6 +101,7 @@ if TYPE_CHECKING:
 
     from cw.auto_dev_result import Blocker
     from cw.codex_clean_confirm import _Gate
+    from cw.models import OrchestratorEvent
     from cw.review_convergence import ConfirmBackend, RoundFinding
     from cw.review_findings import ReviewVerdict
 
@@ -1787,3 +1798,305 @@ def test_a_codex_lane_confirm_must_fix_continues_on_its_non_engine_ledger() -> N
     )
     assert report.decision == "continue"
     assert updated.fix_cycles_used == ledger.fix_cycles_used + 1
+
+
+# ---------------------------------------------------------------------------
+# A confirm round after a repo review engine pass (#3216, RFC 0018 A4)
+# ---------------------------------------------------------------------------
+
+_COVERAGE_RULE = "coverage.untested-branch"
+_ACCEPTANCE_RULE = "acceptance.ac-1"
+_CONFIRM_EVENT = OrchestratorEventType.REVIEW_CONFIRM_ESCALATED
+
+
+def _engine_codex(wt: Path) -> tuple[AutoDevResult, ReviewVerdict]:
+    """A clean codex result whose verdict ran the repo review engine alone."""
+    result, verdict = synthesize_codex_review_result(
+        task=_task(),
+        worktree=wt,
+        documents=[_make_reviewer_doc(reviewer_role=ENGINE_ROLE)],
+        failures=[],
+        diff=_make_diff("x = 1", files={"feature.py": [1]}),
+        reviewed_sha=_head(wt),
+        session_id="s-codex",
+        default_branch="main",
+        fix_loop_enabled=True,
+    )
+    assert result.blocker is None
+    assert verdict is not None
+    assert {r.reviewer_role for r in verdict.agents_run} == {ENGINE_ROLE}
+    return result, verdict
+
+
+def _rule_role(
+    severity: str, summary: str, rule_id: str | None
+) -> Callable[[str], ClaudeRunResult]:
+    """A confirm reviewer whose only finding is *severity* on *rule_id*."""
+
+    def _respond(role: str) -> ClaudeRunResult:
+        finding = _finding(severity, summary)
+        if rule_id is not None:
+            finding["rule_id"] = rule_id
+        return ClaudeRunResult(
+            0, review_envelope(_doc_json(role=role, findings=[finding])), ""
+        )
+
+    return _respond
+
+
+def _confirm_events() -> list[OrchestratorEvent]:
+    return list(read_events(consumer="test-3216-clean", event_types=[_CONFIRM_EVENT]))
+
+
+def _decided_round_verdict(wt: Path, round_number: int) -> ReviewVerdict:
+    verdict = load_round_verdict(wt / LEDGER_RELATIVE_PATH, round_number)
+    assert verdict is not None
+    return verdict
+
+
+class TestEngineConfirmBackends:
+    """The confirm backends after an engine pass: claude, codex and none."""
+
+    def test_the_loop_round_is_recorded_as_an_engine_round(self, wt: Path) -> None:
+        runner = RoleAwareClaudeRunner(_clean_role)
+
+        outcome = _apply(wt, _client(wt), runner, codex=_engine_codex(wt))
+
+        assert outcome.result.review.converged is True
+        loop, confirm = _ledger(wt).rounds
+        assert (loop.kind, loop.engine) == ("loop", True)
+        assert (confirm.kind, confirm.engine) == ("confirm", False)
+
+    def test_the_claude_confirm_runs_by_default_and_converges_when_clean(
+        self, wt: Path
+    ) -> None:
+        runner = RoleAwareClaudeRunner(_clean_role)
+
+        outcome = _apply(wt, _client(wt), runner, codex=_engine_codex(wt))
+
+        assert runner.roles
+        assert outcome.result.blocker is None
+        assert outcome.result.review.confirm_backend == "claude"
+        ledger = _ledger(wt)
+        assert ledger.status == "converged"
+        assert _confirm_events() == []
+
+    @pytest.mark.parametrize("confirm", ["none", "codex"])
+    def test_no_independent_confirm_converges_on_the_engine_round(
+        self, wt: Path, confirm: ConfirmBackend
+    ) -> None:
+        runner = RoleAwareClaudeRunner(_clean_role)
+
+        outcome = _apply(
+            wt, _client(wt, confirm=confirm), runner, codex=_engine_codex(wt)
+        )
+
+        assert runner.roles == []
+        assert outcome.result.blocker is None
+        assert outcome.result.review.converged is True
+        (loop,) = _ledger(wt).rounds
+        assert loop.engine is True
+        assert _confirm_events() == []
+
+
+class TestEngineConfirmOutcomes:
+    def test_a_plain_should_fix_is_deferred_and_filed(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        filed: list[list[tuple[str, str, str]]] = []
+
+        def _spy(**kwargs: Any) -> None:
+            filed.append(
+                [(f.summary, f.outcome, f.rationale) for f in kwargs["findings"]]
+            )
+
+        monkeypatch.setattr("cw.codex_clean_confirm.file_codex_deferrals", _spy)
+        runner = RoleAwareClaudeRunner(_only_role("SHOULD_FIX", _SHOULD_FIX_SUMMARY))
+
+        outcome = _apply(wt, _client(wt), runner, codex=_engine_codex(wt))
+
+        assert outcome.result.blocker is None
+        assert outcome.result.review.converged is True
+        assert filed == [
+            [(_SHOULD_FIX_SUMMARY, "defer", CONFIRM_ENGINE_DEFER_RATIONALE)]
+        ]
+        ledger = _ledger(wt)
+        assert ledger.status == "converged"
+        assert [e.outcome for e in ledger.settled] == ["defer"]
+        assert ledger.settled[0].rationale == CONFIRM_ENGINE_DEFER_RATIONALE
+        assert _confirm_events() == []
+
+    def test_a_new_must_fix_parks_as_review_confirm_must_fix(self, wt: Path) -> None:
+        outcome = _apply(
+            wt,
+            _client(wt),
+            RoleAwareClaudeRunner(_only_role("MUST_FIX", _MUST_FIX_SUMMARY)),
+            codex=_engine_codex(wt),
+        )
+
+        blocker = outcome.result.blocker
+        assert blocker is not None
+        assert blocker.reason == REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON
+        assert blocker.reason != CODEX_MUST_FIX_FINDINGS
+        assert blocker.retry_eligible is False
+        assert blocker.details.startswith(
+            CLAUDE_BACKEND_DETAILS_PREFIX + "## Claude Review Verdict"
+        )
+        assert "convergence ledger stopped (confirm_must_fix); release:" in (
+            blocker.details
+        )
+        assert outcome.result.review.converged is False
+        assert outcome.reviewer_label == "Claude"
+        ledger = _ledger(wt)
+        assert ledger.status == "stopped"
+        assert ledger.stop_reason == "confirm_must_fix"
+        (event,) = _confirm_events()
+        assert event.correlation_id == "T-1"
+        assert event.payload["ticket_id"] == "T-1"
+        assert event.payload["client"] == "test"
+
+    @pytest.mark.parametrize("rule", [_COVERAGE_RULE, _ACCEPTANCE_RULE])
+    def test_a_never_deferrable_should_fix_parks_the_same_way(
+        self, wt: Path, rule: str
+    ) -> None:
+        outcome = _apply(
+            wt,
+            _client(wt),
+            RoleAwareClaudeRunner(_rule_role("SHOULD_FIX", _SHOULD_FIX_SUMMARY, rule)),
+            codex=_engine_codex(wt),
+        )
+
+        blocker = outcome.result.blocker
+        assert blocker is not None
+        assert blocker.reason == REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON
+        assert blocker.retry_eligible is False
+        assert _ledger(wt).stop_reason == "confirm_must_fix"
+        (persisted,) = _decided_round_verdict(wt, 2).accepted
+        assert persisted.disposition == "operator_actionable"
+        assert len(_confirm_events()) == 1
+
+    def test_the_park_does_not_re_enter_the_fix_loop(self, wt: Path) -> None:
+        outcome = _apply(
+            wt,
+            _client(wt),
+            RoleAwareClaudeRunner(_only_role("MUST_FIX", _MUST_FIX_SUMMARY)),
+            codex=_engine_codex(wt),
+        )
+        assert outcome.reviewer_label == "Claude"
+
+        with patch("cw.codex_confirm_feedback.load_ledger") as load_mock:
+            feedback = reenter_feedback(
+                outcome,
+                task=_task(),
+                worktree=wt,
+                client=_client(wt),
+                fix_loop_enabled=True,
+                after_round=0,
+                deadline=None,
+            )
+
+        assert feedback is None
+        load_mock.assert_not_called()
+
+    def test_a_resumed_engine_confirm_parks_the_same_way(self, wt: Path) -> None:
+        """The resume path records through the same round writer."""
+        _apply(
+            wt,
+            _client(wt, confirm="claude"),
+            RoleAwareClaudeRunner(_error_role),
+            codex=_engine_codex(wt),
+        )
+        assert _ledger(wt).status == "awaiting_confirm"
+
+        outcome = _resume(
+            wt,
+            _client(wt),
+            RoleAwareClaudeRunner(_only_role("MUST_FIX", _MUST_FIX_SUMMARY)),
+        )
+
+        assert outcome is not None
+        assert outcome.result.blocker is not None
+        assert outcome.result.blocker.reason == REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON
+        assert len(_confirm_events()) == 1
+
+
+class TestPersistedConfirmVerdict:
+    """S6: after an engine pass the round verdict file is the decided verdict."""
+
+    @staticmethod
+    def _claude_verdict(monkeypatch: pytest.MonkeyPatch) -> list[ReviewVerdict]:
+        """Capture the raw Claude verdict handed to ``decide_confirm_verdict``."""
+        seen: list[ReviewVerdict] = []
+        real = codex_clean_confirm.decide_confirm_verdict
+
+        def _spy(
+            verdict: ReviewVerdict, ledger: ConvergenceLedger, rationale: str
+        ) -> ReviewVerdict:
+            seen.append(verdict)
+            return real(verdict, ledger, rationale)
+
+        monkeypatch.setattr("cw.codex_clean_confirm.decide_confirm_verdict", _spy)
+        return seen
+
+    def test_the_engine_confirm_persists_the_decided_verdict(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen = self._claude_verdict(monkeypatch)
+
+        _apply(
+            wt,
+            _client(wt),
+            RoleAwareClaudeRunner(_only_role("SHOULD_FIX", _SHOULD_FIX_SUMMARY)),
+            codex=_engine_codex(wt),
+        )
+
+        (claude,) = seen
+        persisted = _decided_round_verdict(wt, 2)
+        (item,) = persisted.accepted
+        assert item.disposition == "deferred"
+        assert item.disposition_detail == CONFIRM_ENGINE_DEFER_RATIONALE
+        assert persisted != claude
+        assert claude.accepted[0].disposition_detail != CONFIRM_ENGINE_DEFER_RATIONALE
+
+    def test_the_parked_engine_confirm_persists_the_park_stamped_verdict(
+        self, wt: Path
+    ) -> None:
+        _apply(
+            wt,
+            _client(wt),
+            RoleAwareClaudeRunner(
+                _rule_role("SHOULD_FIX", _SHOULD_FIX_SUMMARY, _COVERAGE_RULE)
+            ),
+            codex=_engine_codex(wt),
+        )
+
+        (item,) = _decided_round_verdict(wt, 2).accepted
+        assert item.disposition == "operator_actionable"
+        assert item.disposition_detail == CONFIRM_ENGINE_PARK_RATIONALE
+
+    def test_a_non_engine_confirm_still_persists_the_claude_verdict(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen = self._claude_verdict(monkeypatch)
+
+        _apply(
+            wt,
+            _client(wt),
+            RoleAwareClaudeRunner(_only_role("SHOULD_FIX", _SHOULD_FIX_SUMMARY)),
+        )
+
+        (claude,) = seen
+        assert _decided_round_verdict(wt, 2) == claude
+        assert _ledger(wt).rounds[0].engine is False
+
+
+class TestNonEngineConfirmUnchanged:
+    def test_a_must_fix_still_parks_as_codex_must_fix_findings(self, wt: Path) -> None:
+        outcome = _apply(wt, _client(wt), RoleAwareClaudeRunner(_must_fix_role))
+
+        blocker = outcome.result.blocker
+        assert blocker is not None
+        assert blocker.reason == CODEX_MUST_FIX_FINDINGS
+        assert blocker.retry_eligible is not False
+        assert _ledger(wt).status == "in_progress"
+        assert _confirm_events() == []

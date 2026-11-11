@@ -50,6 +50,7 @@ from cw.codex_review import (
 )
 from cw.codex_review import core as codex_review_core
 from cw.codex_review._capability import _PROBE_ARGV
+from cw.codex_review._engine_round import EngineRoundSpec
 from cw.codex_runner import CodexRunResult
 from cw.events import read_events
 from cw.executor_diagnostics import diagnostics_bundle_dir
@@ -58,6 +59,7 @@ from cw.local_runner import make_blocked
 from cw.models import SandboxMode, Stage, TicketTask
 from cw.models.enums import OrchestratorEventType
 from cw.models.operator_constraint import OperatorConstraint
+from cw.review_engine.context import EngineContext
 from cw.review_finding_dispositions import (
     FindingDisposition,
     _disposition_key,
@@ -4272,6 +4274,63 @@ class TestRunWideGrowthBudget:
         assert parked.blocker is not None
         assert parked.blocker.reason == CODEX_FIX_GROWTH_BUDGET
         assert "cumulative net non-test source lines +42" in parked.blocker.details
+
+
+class TestEngineThreadedThroughTheLoop:
+    """#3216: the driver's ``engine`` reaches cycle 0 and every re-review."""
+
+    _SPEC = EngineRoundSpec(
+        context=EngineContext(
+            skill="repo-review",
+            guarded_paths=(),
+            ticket_id="T-1",
+            client="test",
+            default_branch="main",
+        )
+    )
+
+    def _loop_with_spies(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        name: str,
+        **loop_kwargs: object,
+    ) -> dict[str, object]:
+        worktree = _worktree(make_git_repo, name)
+        result0, verdict = _blocking_stub(worktree)
+        seen: dict[str, object] = {}
+
+        def _cycle_zero(**kwargs: object) -> tuple[AutoDevResult, ReviewVerdict]:
+            seen["cycle_zero"] = kwargs["engine"]
+            return result0, verdict
+
+        clean_result, clean_verdict = _stage_complete(worktree)
+
+        def _rereview(**kwargs: object) -> tuple[object, object, object]:
+            seen["rereview"] = kwargs["engine"]
+            return clean_result, clean_verdict, _stub_prepared()
+
+        monkeypatch.setattr("cw.codex_fix_loop._driver._review_cycle_zero", _cycle_zero)
+        monkeypatch.setattr("cw.codex_fix_loop._driver._rereview", _rereview)
+        runner = _SequencedRunner([CodexRunResult(returncode=0, stdout="", stderr="")])
+        _run_loop(runner, worktree, session_id=f"s-{name}", **loop_kwargs)
+        return seen
+
+    def test_the_engine_reaches_cycle_zero_and_the_rereview(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen = self._loop_with_spies(
+            make_git_repo, monkeypatch, "wt-engine-thread", engine=self._SPEC
+        )
+
+        assert seen == {"cycle_zero": self._SPEC, "rereview": self._SPEC}
+
+    def test_without_an_engine_both_passes_get_none(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen = self._loop_with_spies(make_git_repo, monkeypatch, "wt-engine-none")
+
+        assert seen == {"cycle_zero": None, "rereview": None}
 
 
 class TestDriverSurfaceAfterReviewPassSplit:
