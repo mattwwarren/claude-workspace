@@ -23,7 +23,6 @@ neutral signal helper; PLAN supplies its own comment identity and artifact.
 from __future__ import annotations
 
 import logging
-import re
 from typing import TYPE_CHECKING, Any, Final
 
 from cw.auto_dev_result import SCOPE_TIER_LARGE
@@ -34,7 +33,6 @@ from cw.codex_review_signals import (
     surface_tracker_io_outcome,
 )
 from cw.codex_stage_completion import STAGE_FAULTS
-from cw.gh import post_issue_comment
 from cw.tracker import TRACKER_GITHUB_ISSUES, TrackerClass, tracker_kind
 from cw.tracker_io import (
     TrackerIoContext,
@@ -42,7 +40,7 @@ from cw.tracker_io import (
     plan_turn_parts,
     post_parts_via_turn,
 )
-from cw.tracker_post import parse_comment_url
+from cw.tracker_post import PostStatus, post_parts
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -60,7 +58,6 @@ GITHUB_POST_FAILED: Final = "github_post_failed"
 PLAN_COMMENT_KIND: Final = "plan"
 
 PARK_HEADER: Final = "## Pending Verification Scan"
-_COMMENT_ID_RE: Final = re.compile(r"issuecomment-([0-9]+)")
 
 
 def _item_lines(number: int, item: dict[str, Any], lead_keys: Sequence[str]) -> str:
@@ -177,11 +174,6 @@ def _tracker_label(client: ClientConfig) -> tuple[str, bool]:
     return kind.system or TRACKER_GITHUB_ISSUES, True
 
 
-def _posted_entry(index: int, url: str) -> dict[str, object]:
-    match = _COMMENT_ID_RE.search(url)
-    return {"index": index, "comment_id": match.group(1) if match else "", "url": url}
-
-
 class _Post:
     """One plan post's identity, shared by its events."""
 
@@ -252,17 +244,18 @@ def _post_github(post: _Post, text: str, context: TrackerIoContext) -> None:
     if not parts:
         post.skipped(TrackerIoReason.PLAN_REFUSED.value)
         return
-    posted: list[dict[str, object]] = []
-    for index, part in enumerate(parts, 1):
-        proc = post_issue_comment(
-            post.ticket_id, part, cwd=context.client.workspace_path
-        )
-        if proc is None or proc.returncode != 0:
-            post.skipped(GITHUB_POST_FAILED)
-            return
-        url = parse_comment_url(proc.stdout)
-        if url is not None:
-            posted.append(_posted_entry(index, url))
+    result = post_parts(post.ticket_id, parts, cwd=context.client.workspace_path)
+    if result.status is not PostStatus.POSTED:
+        post.skipped(GITHUB_POST_FAILED)
+        return
+    posted = [
+        {
+            "index": part.index,
+            "comment_id": part.url.rsplit("-", 1)[-1],
+            "url": part.url,
+        }
+        for part in result.posted
+    ]
     post.posted(posted, text)
 
 

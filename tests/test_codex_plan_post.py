@@ -101,6 +101,15 @@ def _gh_ok(url_id: int) -> subprocess.CompletedProcess[bytes]:
     return subprocess.CompletedProcess(["gh"], 0, stdout, b"")
 
 
+def _skip_readback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the shared poster's ``gh`` read-back (it has its own tests).
+
+    These tests pin what the plan post hands the poster; the read-back is a
+    separate verification that needs ``gh`` answers and real retry sleeps.
+    """
+    monkeypatch.setattr("cw.tracker_post._read_back", lambda *_a, **_k: None)
+
+
 class TestGitHub:
     def test_stamped_plan_posts_with_one_marker(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -108,12 +117,22 @@ class TestGitHub:
         client = codex_tracker_client(tmp_path)
         _write_tracker_config(client.workspace_path, TRACKER_GITHUB_ISSUES)
         worktree = _worktree(tmp_path)
-        fake = FakeGhComment().install(monkeypatch)
+        _skip_readback(monkeypatch)
+        bodies: list[str] = []
+
+        def _run(
+            argv: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[bytes]:
+            if argv[0] != "gh":
+                return subprocess.CompletedProcess(argv, 128, b"", b"")
+            stdin = kwargs.get("input")
+            bodies.append(stdin.decode() if isinstance(stdin, bytes) else "")
+            return _gh_ok(len(bodies))
+
+        monkeypatch.setattr("cw.gh._sp.run", _run)
         stamped = stamp_markers(_PLAN, today=_DAY)
         _post(client, worktree, stamped)
-        (body,) = [
-            b for c, b in zip(fake.calls, fake.bodies, strict=True) if c[0] == "gh"
-        ]
+        (body,) = bodies
         assert body.count(AGENT_COMMENT_MARKER) == 1
         assert _plan_body_signoff_ok(body)
         (event,) = _events()
@@ -127,6 +146,7 @@ class TestGitHub:
     ) -> None:
         client = codex_tracker_client(tmp_path)
         worktree = _worktree(tmp_path)
+        _skip_readback(monkeypatch)
         calls: list[str] = []
 
         def _run(
@@ -192,9 +212,7 @@ class TestGitHub:
     ) -> None:
         client = codex_tracker_client(tmp_path)
         worktree = _worktree(tmp_path)
-        with patch(
-            "cw.codex_plan._post.post_issue_comment", side_effect=OSError("disk")
-        ):
+        with patch("cw.codex_plan._post.post_parts", side_effect=OSError("disk")):
             _post(client, worktree, _PLAN)
         assert _events() == []
 

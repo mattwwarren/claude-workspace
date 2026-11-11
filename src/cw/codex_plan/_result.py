@@ -310,9 +310,10 @@ def plan_blocked(
     reason: str,
     details: str,
     retry_eligible: bool = False,
+    plan_draft_fingerprint: str | None = None,
 ) -> AutoDevResult:
     """A blocked PLAN result: ``stage1_plan`` and the plan ``next_actions``."""
-    return make_codex_blocked(
+    result = make_codex_blocked(
         ticket_id=ticket_id,
         worktree=worktree,
         reason=reason,
@@ -320,3 +321,8 @@ def plan_blocked(
         retry_eligible=retry_eligible,
         stage_reached=STAGE1_PLAN,
     )
+    if plan_draft_fingerprint is not None:
+        result = result.model_copy(
+            update={PLAN_DRAFT_FINGERPRINT_KEY: plan_draft_fingerprint}
+        )
+    return result

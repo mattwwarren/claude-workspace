@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
+from cw.auto_dev_result.schema._vocab import PLAN_MISSING_CONTEXT_BLOCKER_REASON
 from cw.backend_mcp_config import McpState, declared_server_names, read_backend_mcp
 from cw.codex_plan._argv import build_plan_argv, read_tools_for, require_read_only_argv
 from cw.codex_plan._gates import (
@@ -105,7 +106,6 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
-PLAN_MISSING_CONTEXT: Final = "plan_missing_context"
 NO_OP: Final = PLAN_NO_OP
 
 #: The stage identifiers the driver's stage events carry.
@@ -182,6 +182,7 @@ class _Run:
         details: str,
         *,
         retry_eligible: bool = False,
+        plan_draft_fingerprint: str | None = None,
     ) -> _Exit:
         """A cw-built blocked exit; emits its one ``stage.errored``."""
         result = plan_blocked(
@@ -190,6 +191,7 @@ class _Run:
             reason=reason,
             details=details,
             retry_eligible=retry_eligible,
+            plan_draft_fingerprint=plan_draft_fingerprint,
         )
         self.emit(OrchestratorEventType.STAGE_ERRORED, stage, error_kind=reason)
         return _Exit(result)
@@ -234,7 +236,7 @@ class _Run:
         if docs_root is None:
             return self.blocked(
                 STAGE_PLAN_GENERATED,
-                PLAN_MISSING_CONTEXT,
+                PLAN_MISSING_CONTEXT_BLOCKER_REASON,
                 "cw's command-doc tree (packaged cw/data/commands or the cw "
                 "source checkout's .claude/commands) is not available",
             )
@@ -246,7 +248,7 @@ class _Run:
             if ticket is None:
                 return self.blocked(
                     STAGE_PLAN_GENERATED,
-                    PLAN_MISSING_CONTEXT,
+                    PLAN_MISSING_CONTEXT_BLOCKER_REASON,
                     f"gh could not fetch ticket {self.task.ticket_id} body/comments",
                 )
         try:
@@ -259,7 +261,9 @@ class _Run:
             )
         except RenderError as exc:
             return self.blocked(
-                STAGE_PLAN_GENERATED, PLAN_MISSING_CONTEXT, f"render failed: {exc}"
+                STAGE_PLAN_GENERATED,
+                PLAN_MISSING_CONTEXT_BLOCKER_REASON,
+                f"render failed: {exc}",
             )
 
     def turn(self, prompt: str, target: _McpTarget) -> CodexRunResult | _Exit:
@@ -375,6 +379,16 @@ def _write_draft_best_effort(run: _Run, plan_text: str) -> bool:
     return True
 
 
+def _draft_fingerprint(plan_text: str, *, written: bool) -> str | None:
+    """Return the fingerprint only when this run wrote the draft."""
+    if not written:
+        return None
+    body = clean_plan_text(plan_text)
+    if not body.endswith("\n"):
+        body += "\n"
+    return compute_plan_draft_fingerprint(body)
+
+
 def _record_decisions(run: _Run, plan_text: str) -> str | None:
     """Record the plan's decisions on the row; a friction token on any shortfall."""
     if run.task.stage != Stage.PLAN:
@@ -448,29 +462,36 @@ def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
         binding=True,
     )
     if stations.block is not None:
-        _write_draft_best_effort(run, plan_text)
+        draft_written = _write_draft_best_effort(run, plan_text)
         block = stations.block
         return run.blocked(
             STAGE_PLAN_REVIEWED,
             block.reason,
             block.details,
             retry_eligible=block.retry_eligible,
+            plan_draft_fingerprint=_draft_fingerprint(plan_text, written=draft_written),
         )
     marked = stamp_markers(clean_plan_text(plan_text), today=datetime.now(UTC).date())
+    draft_written = False
     try:
         write_plan_draft(run.worktree, plan_text)
+        draft_written = True
         result = _bound(run, result)
         plan_path = write_plan_md(run.worktree, marked)
         written = plan_path.read_text(encoding="utf-8")
     except OSError as exc:
         return run.blocked(
-            STAGE_PLAN_REVIEWED, CODEX_PLAN_ARTIFACT_MISSING, f".cw/plan.md: {exc}"
+            STAGE_PLAN_REVIEWED,
+            CODEX_PLAN_ARTIFACT_MISSING,
+            f".cw/plan.md: {exc}",
+            plan_draft_fingerprint=_draft_fingerprint(plan_text, written=draft_written),
         )
     if not _plan_body_signoff_ok(written):
         return run.blocked(
             STAGE_PLAN_REVIEWED,
             CODEX_PLAN_ARTIFACT_MISSING,
             ".cw/plan.md does not carry both sign-off markers",
+            plan_draft_fingerprint=_draft_fingerprint(plan_text, written=draft_written),
         )
     run.emit(
         OrchestratorEventType.STAGE_ENTERED,
