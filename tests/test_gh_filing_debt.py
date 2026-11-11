@@ -49,6 +49,7 @@ _CREATE_PREFIX = ("gh", "issue", "create")
 _LABEL_PREFIX = ("gh", "label", "create")
 _REPO = Path("/tmp/client-repo")
 _LIMIT = 1000
+_FILING_LOGGER = "cw.gh.filing"
 
 
 @pytest.fixture
@@ -61,7 +62,7 @@ def _page(count: int) -> str:
 
 
 def _filing_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
-    return [r for r in caplog.records if r.name == "cw.gh.filing"]
+    return [r for r in caplog.records if r.name == _FILING_LOGGER]
 
 
 class TestEnsureLabel:
@@ -111,7 +112,7 @@ class TestLabelListWarning:
         self, cli: FakeGhCli, caplog: pytest.LogCaptureFixture
     ) -> None:
         cli.reply(*_LIST_PREFIX, stdout=_page(214))
-        with caplog.at_level(logging.WARNING, logger="cw.gh.filing"):
+        with caplog.at_level(logging.WARNING, logger=_FILING_LOGGER):
             lookup = list_open_issues_by_label("review-debt")
         assert lookup.failure is None
         assert lookup.truncated is False
@@ -123,7 +124,7 @@ class TestLabelListWarning:
         self, cli: FakeGhCli, caplog: pytest.LogCaptureFixture, count: int
     ) -> None:
         cli.reply(*_LIST_PREFIX, stdout=_page(count))
-        with caplog.at_level(logging.WARNING, logger="cw.gh.filing"):
+        with caplog.at_level(logging.WARNING, logger=_FILING_LOGGER):
             lookup = list_open_issues_by_label("review-debt")
         records = _filing_records(caplog)
         assert len(records) == 1
@@ -141,7 +142,7 @@ class TestLabelListWarning:
         self, cli: FakeGhCli, caplog: pytest.LogCaptureFixture, count: int
     ) -> None:
         cli.reply(*_LIST_PREFIX, stdout=_page(count))
-        with caplog.at_level(logging.WARNING, logger="cw.gh.filing"):
+        with caplog.at_level(logging.WARNING, logger=_FILING_LOGGER):
             list_open_issues_by_label("review-debt")
         assert _filing_records(caplog) == []
 
@@ -156,7 +157,7 @@ class TestLabelListWarning:
         warns: bool,
     ) -> None:
         cli.reply(*_LIST_PREFIX, stdout=_page(count))
-        with caplog.at_level(logging.WARNING, logger="cw.gh.filing"):
+        with caplog.at_level(logging.WARNING, logger=_FILING_LOGGER):
             lookup = list_open_issues_by_label("review-debt", limit=10)
         records = _filing_records(caplog)
         assert lookup.truncated is False
@@ -170,7 +171,7 @@ class TestLabelListWarning:
         self, cli: FakeGhCli, caplog: pytest.LogCaptureFixture
     ) -> None:
         cli.reply(*_LIST_PREFIX, returncode=1, stderr=_AUTH_STDERR)
-        with caplog.at_level(logging.WARNING, logger="cw.gh.filing"):
+        with caplog.at_level(logging.WARNING, logger=_FILING_LOGGER):
             lookup = list_open_issues_by_label("review-debt")
         assert lookup.failure is GhFailure.AUTH
         assert _filing_records(caplog) == []
@@ -179,7 +180,7 @@ class TestLabelListWarning:
         self, cli: FakeGhCli, caplog: pytest.LogCaptureFixture
     ) -> None:
         cli.reply(*_LIST_PREFIX, raises=subprocess.TimeoutExpired(["gh"], 1))
-        with caplog.at_level(logging.WARNING, logger="cw.gh.filing"):
+        with caplog.at_level(logging.WARNING, logger=_FILING_LOGGER):
             lookup = list_open_issues_by_label("review-debt")
         assert lookup.failure is GhFailure.NETWORK
         assert _filing_records(caplog) == []
@@ -188,7 +189,7 @@ class TestLabelListWarning:
         self, cli: FakeGhCli, caplog: pytest.LogCaptureFixture
     ) -> None:
         cli.reply(*_LIST_PREFIX, stdout="not json")
-        with caplog.at_level(logging.WARNING, logger="cw.gh.filing"):
+        with caplog.at_level(logging.WARNING, logger=_FILING_LOGGER):
             lookup = list_open_issues_by_label("review-debt")
         assert lookup.failure is GhFailure.OTHER
         assert _filing_records(caplog) == []
