@@ -235,7 +235,10 @@ def _capture_plan_probes(
 
 
 def _capture_dirty_checks(
-    *, config: OrchestratorConfig, roster: RosterReader
+    *,
+    config: OrchestratorConfig,
+    roster: RosterReader,
+    warned_blocks: set[str] | None = None,
 ) -> DirtyChecks:
     """Lockless pre-pass: capture the worktree dirty checks (#2548).
 
@@ -290,6 +293,7 @@ def _capture_dirty_checks(
         now=now,
         config=config,
         checks=checks,
+        warned_blocks=warned_blocks,
     )
     checks.settle_outages()
     return checks
@@ -325,7 +329,10 @@ def _capture_harvest_facts() -> HarvestFacts:
 
 
 def _capture_closing_prepasses(
-    *, config: OrchestratorConfig, clients: dict[str, ClientConfig]
+    *,
+    config: OrchestratorConfig,
+    clients: dict[str, ClientConfig],
+    warned_blocks: set[str] | None = None,
 ) -> tuple[
     ShippedPrProbes, MainDriftProbes, CancelledRowProbes, ScopeProbes, HarvestFacts
 ]:
@@ -335,5 +342,5 @@ def _capture_closing_prepasses(
     drift, cancelled = capture_drift_and_cancelled_probes(
         config=config, clients=clients
     )
-    scope = capture_salvage_scope_probes()
+    scope = capture_salvage_scope_probes(warned_blocks=warned_blocks)
     return shipped, drift, cancelled, scope, _capture_harvest_facts()

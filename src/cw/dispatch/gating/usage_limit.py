@@ -83,7 +83,27 @@ def _emit_usage_limit_skip_events(
         )
 
 
-def _reconcile_usage_limited() -> bool:
+# Cap on the loop-owned sentinel parse-warning dedup set (#1394). A key is a
+# 65-char digest prefix plus the rendered message, ~0.3 KB typically and a few
+# KB when a pydantic ValidationError is embedded, so the ceiling is ~2 MB. 512
+# holds 100+ distinct live malformed blocks against tens of live sessions.
+# Past the cap the set is cleared in place: every still-live malformed block
+# re-warns once, at most one repeat burst per 512 new distinct keys.
+WARNED_BLOCKS_MAX_KEYS = 512
+
+
+def _bound_warned_blocks(warned_blocks: set[str] | None) -> None:
+    """Clear *warned_blocks* in place once it exceeds :data:`WARNED_BLOCKS_MAX_KEYS`.
+
+    Runs once per tick, before the tick's parses. ``None`` is a no-op. The
+    object's identity is preserved, so the loop-owned set keeps being the one
+    every parse site writes into.
+    """
+    if warned_blocks is not None and len(warned_blocks) > WARNED_BLOCKS_MAX_KEYS:
+        warned_blocks.clear()
+
+
+def _reconcile_usage_limited(warned_blocks: set[str] | None = None) -> bool:
     """Run the best-effort reconcile preamble, returning its usage-limit flag.
 
     Returns True if reconcile reported a usage limit; False on success without
@@ -100,9 +120,12 @@ def _reconcile_usage_limited() -> bool:
     exception NOT swallowed: it propagates so ``dispatch_tick`` skips the tick
     (see ``dispatch/tick.py`` for the watchdog semantics of a skipped tick).
     """
+    _bound_warned_blocks(warned_blocks)
     reconcile_report = None
     try:
-        reconcile_report = reconcile(dispatch_review_jobs=True)
+        reconcile_report = reconcile(
+            dispatch_review_jobs=True, warned_blocks=warned_blocks
+        )
     except SessionsLockTimeoutError:
         raise
     except Exception:  # noqa: BLE001

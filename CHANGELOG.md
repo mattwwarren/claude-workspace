@@ -10,6 +10,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **The review-debt dedup listing cap is raised from 200 to 1000, so filing no longer parks `review_debt_unfiled` on a backlog of 200 or more open `review-debt` issues (#3449).** `cw.gh.filing._LABEL_LIST_LIMIT` is now 1000. A page of exactly the limit is still inconclusive and fails closed as `lookup_failed`, so filing without a conclusive dedup is still refused (#3041). The close sweep shares the default and now also lists up to 1000 issues per client. A listing at or above 80% of the limit logs one `cw.gh.filing` WARNING naming the count and the limit; it changes no behavior and emits no event. **Operator note:** cw never closes `review-debt` issues because the backlog is large; pruning a backlog is an operator decision, and the existing close sweep (#3044) still closes only issues whose linked PRs all closed unmerged. A client with 200 to 999 open `review-debt` issues is now swept by the close sweep instead of skipped.
 
+- **The malformed-sentinel parse warning dedups across dispatch ticks (#1394).** A malformed `AUTO_DEV_RESULT` block logged an identical "did not parse as JSON" WARNING on every dispatch tick through the reconcile scan. The dispatch loop now owns one `warned_blocks` set for the whole run, threaded through the lockless and in-lock sentinel parse sites; it is bounded at 512 keys and cleared in place past that cap, so a still-live block can re-warn once per 512 new distinct keys. `cw start` and `cw doctor --reap` pass nothing and keep the un-deduplicated behaviour. The usage-limit mid-turn parse and the "block discarded: claims ticket_id" warning are not deduplicated yet (follow-up debt).
+
 ## [1.94.0] - 2026-11-10
 
 ### Changed

@@ -488,6 +488,52 @@ def test_watchdog_usage_limited_true_when_timestamp_missing(
     assert "watchdog-ul-nots" in report.reverted_ticket_ids
 
 
+@pytest.mark.parametrize("pass_set", [True, False])
+def test_reconcile_forwards_warned_blocks_to_locked_body_and_prepasses(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pass_set: bool,
+) -> None:
+    """#1394: reconcile() hands the dedup set to the dirty-check and closing
+    pre-passes and to ``_reconcile_locked``; bare, all three get ``None``."""
+    save_state(CwState(sessions=[_mk_session("alive", "abcd1234")]))
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": "abcd1234-1111-2222-3333-444455556666"}],
+    )
+    seen: dict[str, object] = {}
+    real_dirty = reconcile_core._capture_dirty_checks
+    real_closing = reconcile_core._capture_closing_prepasses
+    real_locked = reconcile_core._reconcile_locked
+
+    def _dirty(**kwargs: Any) -> Any:
+        seen["dirty"] = kwargs.get("warned_blocks", "unset")
+        return real_dirty(**kwargs)
+
+    def _closing(**kwargs: Any) -> Any:
+        seen["closing"] = kwargs.get("warned_blocks", "unset")
+        return real_closing(**kwargs)
+
+    def _locked(**kwargs: Any) -> Any:
+        seen["locked"] = kwargs.get("warned_blocks", "unset")
+        return real_locked(**kwargs)
+
+    monkeypatch.setattr(reconcile_core, "_capture_dirty_checks", _dirty)
+    monkeypatch.setattr(reconcile_core, "_capture_closing_prepasses", _closing)
+    monkeypatch.setattr(reconcile_core, "_reconcile_locked", _locked)
+    warned: set[str] = set()
+
+    if pass_set:
+        reconcile(warned_blocks=warned)
+    else:
+        reconcile()
+
+    assert set(seen) == {"dirty", "closing", "locked"}
+    expected = warned if pass_set else None
+    for name, value in seen.items():
+        assert value is expected, name
+
+
 def test_reconcile_noop_when_no_phantoms(
     tmp_config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,

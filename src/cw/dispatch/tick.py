@@ -495,6 +495,7 @@ def dispatch_tick(
     usage_limited_until: Mapping[str, datetime] | None = None,
     auto_ff: bool = True,
     client_filter: str | None = None,
+    warned_blocks: set[str] | None = None,
 ) -> DispatchTickResult:
     """Run one dispatch tick.
 
@@ -563,6 +564,13 @@ def dispatch_tick(
             client name. The caller is responsible for validating that the
             name exists before calling; an unknown name silently produces
             an empty tick.
+        warned_blocks: Mutable set of sentinel parse-warning dedup keys
+            (#1394) forwarded to the reconcile preamble so a malformed
+            ``AUTO_DEV_RESULT`` block warns once, not once per tick. Caller
+            owns the set and mutates it in place; it is bounded once per tick
+            by ``_reconcile_usage_limited`` (``WARNED_BLOCKS_MAX_KEYS``) and
+            is intended to live for the whole dispatcher process. When None,
+            warnings are not deduplicated.
 
     Returns:
         :class:`DispatchTickResult` with ``spawned`` count and
@@ -570,7 +578,7 @@ def dispatch_tick(
     """
     resolved_native_daemon = native_daemon or get_native_daemon_client()
     try:
-        any_usage_limit_detected = _reconcile_usage_limited()
+        any_usage_limit_detected = _reconcile_usage_limited(warned_blocks=warned_blocks)
     except SessionsLockTimeoutError as exc:
         # Another process holds .sessions.lock (#2491). Claiming and spawning
         # would each wait on the same lock, so skip the whole tick and let the

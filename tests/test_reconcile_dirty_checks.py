@@ -1556,6 +1556,39 @@ class TestPhantomCapture:
 
         assert calls == ["crash"]
 
+    def test_capture_forwards_warned_blocks_to_every_classification(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1394: the lockless capture hands one dedup set to each classifier call."""
+        from cw.reconcile.phantom import _detect as phantom_detect
+
+        state, phantoms, _ = self._mixed_state(tmp_path)
+        _live(monkeypatch)
+        real = phantom_detect._classify_before_dirty_check
+        seen: list[object] = []
+
+        def _spy(
+            session: Session, task_by_ticket: dict[str, TicketTask], **kwargs: object
+        ) -> object:
+            seen.append(kwargs.get("warned_blocks", "unset"))
+            return real(session, task_by_ticket, **kwargs)
+
+        monkeypatch.setattr(phantom_detect, "_classify_before_dirty_check", _spy)
+        warned: set[str] = set()
+
+        capture_phantom_dirty_checks(
+            state,
+            phantoms,
+            {},
+            now=_STARTED,
+            config=OrchestratorConfig(),
+            checks=DirtyChecks(),
+            warned_blocks=warned,
+        )
+
+        assert seen
+        assert all(item is warned for item in seen)
+
     def test_detect_never_defers_a_session_the_capture_selected(
         self,
         tmp_path: Path,

@@ -111,6 +111,7 @@ def _detect_idle_candidate_for_session(
     task: TicketTask | None,
     ticket_id: str | None,
     scope_probes: ScopeProbes | None = None,
+    warned_blocks: set[str] | None = None,
 ) -> ReapCandidate | None:
     """Return a ROUTE_EMITTED_SENTINEL candidate for an unrouted sentinel, or None.
 
@@ -140,7 +141,9 @@ def _detect_idle_candidate_for_session(
         )
     if session.last_result is not None:
         return None
-    routed = _parse_any_sentinel_from_transcript(session, scope_probes=scope_probes)
+    routed = _parse_any_sentinel_from_transcript(
+        session, scope_probes=scope_probes, warned_blocks=warned_blocks
+    )
     if routed is None:
         return None
     _routed_result, _csid = routed
@@ -164,6 +167,7 @@ def _detect_idle_candidates(
     config: OrchestratorConfig,
     task_by_ticket: dict[str, TicketTask],
     scope_probes: ScopeProbes | None = None,
+    warned_blocks: set[str] | None = None,
 ) -> list[ReapCandidate]:
     """Pure classification phase for live DAEMON sessions with unrouted sentinels.
 
@@ -193,6 +197,7 @@ def _detect_idle_candidates(
             task=task,
             ticket_id=ticket_id,
             scope_probes=scope_probes,
+            warned_blocks=warned_blocks,
         )
         if candidate is not None:
             candidates.append(candidate)

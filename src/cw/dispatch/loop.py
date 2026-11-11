@@ -34,8 +34,6 @@ from cw.dispatch_state import (
     clear_all_executor_blocked_markers,
     load_usage_limit_armed_at,
     load_usage_limited_until,
-    merge_and_save_usage_limited_until,
-    save_usage_limit_armed_at,
 )
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import (
@@ -85,7 +83,7 @@ from cw.dispatch.lanes import _notify_stale_clients_with_pending
 from cw.dispatch.session_completions import _apply_events_to_store
 from cw.dispatch.tick import dispatch_tick
 from cw.dispatch.usage_limit_windows import (
-    _arm_usage_limit_windows,
+    _arm_and_persist_usage_limit_window,
     _merge_persisted_usage_limited_until,
     _usage_limit_window_is_active,
 )
@@ -820,6 +818,9 @@ def _run_dispatch_loop_body(
     # break of the same path warn independently -- see
     # cw.worktree.UnresolvablePathWarningKey.
     warned_unresolvable: set[UnresolvablePathWarningKey] = set()
+    # Sentinel parse-warning dedup across ticks (#1394): process-lifetime and
+    # bounded in place by _reconcile_usage_limited (WARNED_BLOCKS_MAX_KEYS).
+    warned_blocks: set[str] = set()
     # Scan-frequency gate for the cross-client staleness watchdog (#1875);
     # process-lifetime local like the warn-dedup sets above. See
     # _run_stale_client_watchdog_guarded for why the gate is a call-frequency
@@ -882,6 +883,7 @@ def _run_dispatch_loop_body(
                     usage_limited_until=usage_limited_until,
                     auto_ff=auto_ff,
                     client_filter=client,
+                    warned_blocks=warned_blocks,
                 )
 
             # AFTER dispatch_tick, not before it (#2076): the scan reads the
@@ -896,33 +898,13 @@ def _run_dispatch_loop_body(
             )
 
             if result.usage_limit_clients and not once:
-                usage_limited_until = _arm_usage_limit_windows(
-                    usage_limited_until,
-                    result.usage_limit_clients,
-                    backoff_seconds=config.usage_limit_backoff_seconds,
+                usage_limited_until, usage_limit_window_armed_at = (
+                    _arm_and_persist_usage_limit_window(
+                        usage_limited_until,
+                        result.usage_limit_clients,
+                        backoff_seconds=config.usage_limit_backoff_seconds,
+                    )
                 )
-                # Read-merge-write under ONE lock (#1409 review round 4): a
-                # second writer (--force, #1362) arming a DIFFERENT client
-                # between the tick-start merge and this save used to be
-                # silently erased by the whole-mapping write -- round 3
-                # narrowed that to an unlocked re-merge immediately before a
-                # separately-locked save, which still left a gap between the
-                # two. merge_and_save_usage_limited_until folds the read, the
-                # merge, and the write into a single dispatch_state_lock()
-                # acquisition, so no writer can land in between: the window
-                # is closed, not shortened.
-                usage_limited_until = merge_and_save_usage_limited_until(
-                    usage_limited_until
-                )
-                # #1343 R2: stamp the arm timestamp on every fresh detection
-                # (this block already only fires when the detecting client's
-                # window was NOT already active this tick -- see tick.py,
-                # which skips a client whose window is still live) so the
-                # eventual cleared-event's detected_at is exact, not derived
-                # from backoff_seconds. Fleet-level like the cleared event it
-                # feeds, not per client.
-                usage_limit_window_armed_at = datetime.now(UTC)
-                save_usage_limit_armed_at(usage_limit_window_armed_at)
 
             if once:
                 return

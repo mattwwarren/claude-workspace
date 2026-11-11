@@ -93,7 +93,11 @@ if TYPE_CHECKING:
     from cw.reconcile.shipped_release import ShippedPrProbes
 
 
-def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
+def reconcile(
+    *,
+    dispatch_review_jobs: bool = False,
+    warned_blocks: set[str] | None = None,
+) -> ReconcileReport:
     """Apply drift reconciliation against the persisted state.
 
     Flips phantom ACTIVE/IDLE sessions to COMPLETED with
@@ -117,6 +121,13 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     (no latch stamp, no ``PR_ACTION_TAKEN``); ``request_reviewer`` and
     ``escalate_merge_block`` run regardless. ``cw status`` and ``cw list`` do
     not call ``reconcile()`` at all (#2938): they are pure reads.
+
+    *warned_blocks* (#1394) is the caller-owned sentinel parse-warning dedup
+    set, threaded to every transcript sentinel parse in the lockless
+    pre-passes and the in-lock sweeps so one malformed block warns once across
+    sites and ticks. Only the dispatch loop passes it (via
+    ``_reconcile_usage_limited``); ``cw start``, ``cw doctor --reap`` and
+    ``doctor/linkage.py`` call ``reconcile()`` bare and stay un-deduplicated.
 
     Post-lock job sink (#1232): every call builds one
     :class:`~cw.reconcile.deferred.DeferredReconcileJobs`, fills it inside the
@@ -207,14 +218,20 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
     # reuse it.
     roster = RosterSnapshot()
     dirty_checks = _capture_dirty_checks(
-        config=_orchestrator_config, roster=roster.shared(_claude_agents_json)
+        config=_orchestrator_config,
+        roster=roster.shared(_claude_agents_json),
+        warned_blocks=warned_blocks,
     )
     # Sixth (#2715), the shipped-release `gh pr list`, then the main-drift and
     # recipe-3 git (#2546), then the salvaged-sentinel scope git (#2641), then
     # (#2565) the local harvest's git facts, whose max age is measured from
     # capture.
     shipped_probes, drift_probes, cancelled_probes, scope_probes, harvest_facts = (
-        _capture_closing_prepasses(config=_orchestrator_config, clients=_clients)
+        _capture_closing_prepasses(
+            config=_orchestrator_config,
+            clients=_clients,
+            warned_blocks=warned_blocks,
+        )
     )
     # LAST (#2550): `claude agents --json`, lockless, so the roster is young
     # when the lock is taken; re-reads only if the dirty-check read is not a
@@ -248,6 +265,7 @@ def reconcile(*, dispatch_review_jobs: bool = False) -> ReconcileReport:
                 cancelled_probes=cancelled_probes,
                 scope_probes=scope_probes,
                 roster_snapshot=roster,
+                warned_blocks=warned_blocks,
             )
     except (KeyboardInterrupt, SystemExit):
         interrupted = True
@@ -365,6 +383,7 @@ def _reconcile_locked(
     cancelled_probes: CancelledRowProbes | None = None,
     scope_probes: ScopeProbes | None = None,
     roster_snapshot: RosterSnapshot | None = None,
+    warned_blocks: set[str] | None = None,
 ) -> ReconcileReport:
     """Body of reconcile(), called while sessions_lock is held.
 
@@ -493,6 +512,7 @@ def _reconcile_locked(
         scope_probes=scope_probes,
         shipped_probes=shipped_probes,
         roster_captured_at=roster_captured_at,
+        warned_blocks=warned_blocks,
     )
 
     drift = compute_drift(
@@ -518,6 +538,7 @@ def _reconcile_locked(
                 cancelled_probes=cancelled_probes,
                 scope_probes=scope_probes,
                 roster_captured_at=roster_captured_at,
+                warned_blocks=warned_blocks,
             )
         )
         all_reverted = list(
@@ -541,6 +562,7 @@ def _reconcile_locked(
         config=orchestrator_config,
         dirty_checks=dirty_checks,
         scope_probes=scope_probes,
+        warned_blocks=warned_blocks,
     )
     _emit_reap_proposed(state, phantom_candidates, native_live=native_live, now=now)
     (
@@ -581,6 +603,7 @@ def _reconcile_locked(
             cancelled_probes=cancelled_probes,
             scope_probes=scope_probes,
             roster_captured_at=roster_captured_at,
+            warned_blocks=warned_blocks,
         )
     )
     all_reverted = list(

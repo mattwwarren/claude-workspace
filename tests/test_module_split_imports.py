@@ -141,7 +141,6 @@ _OLD_PATH_NAMES: dict[str, tuple[str, ...]] = {
         "_apply_pending_completion_events",
         "apply_pending_completion",
         "_merge_persisted_usage_limited_until",
-        "_arm_usage_limit_windows",
         "_usage_limit_window_is_active",
         "_emit_usage_limit_cleared",
         "_handle_usage_limit_window_transition",
@@ -178,7 +177,6 @@ _PATCH_TARGETS: dict[str, tuple[str, ...]] = {
         "register_stale_dispatch_watched_prs",
         "_notify_stale_clients_with_pending",
         "latest_tick_summary_by_client",
-        "merge_and_save_usage_limited_until",
         "dispatch_loop_lock",
         "loop_record_fields",
         "_LOADED_VERSION",
@@ -309,7 +307,6 @@ _LOOP_MOVED_TO = (
     ("_reconcile_owns_completion", "cw.dispatch.session_completions"),
     ("_apply_events_to_store", "cw.dispatch.session_completions"),
     ("_merge_persisted_usage_limited_until", "cw.dispatch.usage_limit_windows"),
-    ("_arm_usage_limit_windows", "cw.dispatch.usage_limit_windows"),
     ("_usage_limit_window_is_active", "cw.dispatch.usage_limit_windows"),
 )
 
@@ -364,7 +361,7 @@ class TestOldPathNames:
     """``from <old path> import X`` keeps working for every X."""
 
     def test_loop_tuple_is_complete(self) -> None:
-        assert len(_OLD_PATH_NAMES[_LOOP]) == len(set(_OLD_PATH_NAMES[_LOOP])) == 29
+        assert len(_OLD_PATH_NAMES[_LOOP]) == len(set(_OLD_PATH_NAMES[_LOOP])) == 28
 
     @pytest.mark.parametrize(("module", "name"), _pairs(_OLD_PATH_NAMES))
     def test_name_resolves_on_old_path(self, module: str, name: str) -> None:

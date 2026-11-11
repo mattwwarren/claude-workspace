@@ -51,6 +51,7 @@ def run_concierge_recoveries(
     cancelled_probes: CancelledRowProbes | None = None,
     scope_probes: ScopeProbes | None = None,
     roster_captured_at: datetime | None = None,
+    warned_blocks: set[str] | None = None,
 ) -> list[str]:
     """Run all enabled concierge recipes for one reconcile tick.
 
@@ -104,7 +105,10 @@ def run_concierge_recoveries(
         )
         recovered.extend(
             _act_on_park_marker_poison_candidates(
-                park_marker_candidates, now=now, scope_probes=scope_probes
+                park_marker_candidates,
+                now=now,
+                scope_probes=scope_probes,
+                warned_blocks=warned_blocks,
             )
         )
 

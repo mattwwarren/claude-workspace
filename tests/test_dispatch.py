@@ -6243,6 +6243,7 @@ class TestRunDispatchLoopVerbose:
             usage_limited_until: Mapping[str, datetime] | None = None,
             auto_ff: bool = True,
             client_filter: str | None = None,
+            warned_blocks: set[str] | None = None,
         ) -> DispatchTickResult:
             nonlocal tick_count
             tick_count += 1
@@ -6260,6 +6261,7 @@ class TestRunDispatchLoopVerbose:
                 warned_unresolvable=warned_unresolvable,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
+                warned_blocks=warned_blocks,
                 client_filter=client_filter,
             )
 
@@ -6933,7 +6935,7 @@ class TestDispatchUsageLimitBackoff:
         # Reconcile returns usage_limited=True (phantom with usage-limit transcript).
         monkeypatch.setattr(
             "cw.dispatch.tick._reconcile_usage_limited",
-            lambda: True,
+            lambda **_kw: True,
         )
 
         result = dispatch_tick(simple_config, native_daemon=daemon)
@@ -6955,7 +6957,7 @@ class TestDispatchUsageLimitBackoff:
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr(
             "cw.dispatch.tick._reconcile_usage_limited",
-            lambda: True,
+            lambda **_kw: True,
         )
 
         dispatch_tick(simple_config, native_daemon=daemon)
@@ -6997,7 +6999,7 @@ class TestDispatchUsageLimitBackoff:
             return real_merge_and_save(windows)
 
         monkeypatch.setattr(
-            "cw.dispatch.loop.merge_and_save_usage_limited_until",
+            "cw.dispatch.usage_limit_windows.merge_and_save_usage_limited_until",
             capturing_merge_and_save,
         )
 
@@ -7552,7 +7554,9 @@ class TestUsageLimitResetThreading:
 
         daemon = FakeNativeDaemonClient()
         daemon.usage_limit_reset_at = datetime.now(UTC) + timedelta(hours=2)
-        monkeypatch.setattr("cw.dispatch.tick._reconcile_usage_limited", lambda: True)
+        monkeypatch.setattr(
+            "cw.dispatch.tick._reconcile_usage_limited", lambda **_kw: True
+        )
 
         result = dispatch_tick(simple_config, native_daemon=daemon)
 
@@ -7658,7 +7662,7 @@ class TestUsageLimitResetThreading:
             return real_merge_and_save(windows)
 
         monkeypatch.setattr(
-            "cw.dispatch.loop.merge_and_save_usage_limited_until",
+            "cw.dispatch.usage_limit_windows.merge_and_save_usage_limited_until",
             capturing_merge_and_save,
         )
         monkeypatch.setattr("cw.dispatch.loop.time.sleep", lambda _: None)
@@ -17415,6 +17419,7 @@ class TestWaveCollisionDetection:
             usage_limited_until: Mapping[str, datetime] | None = None,
             auto_ff: bool = True,
             client_filter: str | None = None,
+            warned_blocks: set[str] | None = None,
         ) -> DispatchTickResult:
             captured_collision_sets.append(warned_collision)
             return original(
@@ -17431,6 +17436,7 @@ class TestWaveCollisionDetection:
                 warned_unresolvable=warned_unresolvable,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
+                warned_blocks=warned_blocks,
                 client_filter=client_filter,
             )
 
@@ -17447,6 +17453,35 @@ class TestWaveCollisionDetection:
 
         assert len(captured_collision_sets) == 1
         assert isinstance(captured_collision_sets[0], set)
+
+    def test_run_dispatch_loop_shares_one_warned_blocks_set_across_ticks(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1394: the loop owns ONE process-lifetime ``set`` and hands the
+        identical object to every ``dispatch_tick`` (a per-tick set could not
+        dedup sentinel parse warnings across ticks)."""
+        write_clients_yaml(sample_client_config)
+        monkeypatch.setattr("cw.dispatch.loop.time.sleep", lambda _: None)
+        captured: list[object] = []
+
+        def _counting_tick(*_args: object, **kwargs: object) -> DispatchTickResult:
+            captured.append(kwargs.get("warned_blocks", "unset"))
+            if len(captured) > 2:
+                raise KeyboardInterrupt
+            return DispatchTickResult(spawned=0)
+
+        monkeypatch.setattr("cw.dispatch.loop.dispatch_tick", _counting_tick)
+
+        with contextlib.suppress(KeyboardInterrupt):
+            run_dispatch_loop(emit=None)
+
+        assert len(captured) >= 2
+        first, second = captured[0], captured[1]
+        assert first is not None
+        assert type(first) is set
+        assert first is second
 
     def test_collision_detection_fires_for_running_tasks_sharing_files(
         self,

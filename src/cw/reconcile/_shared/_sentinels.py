@@ -133,7 +133,10 @@ _SALVAGE_TERMINAL_STATUSES: frozenset[str] = SALVAGE_TERMINAL_STATUSES
 
 
 def _parse_sentinel_from_blocks(
-    path: Path, *, ticket_id: str | None = None
+    path: Path,
+    *,
+    ticket_id: str | None = None,
+    warned_blocks: set[str] | None = None,
 ) -> AutoDevResult | BlockedResult | None:
     """Parse the LAST real sentinel block in the transcript.
 
@@ -156,9 +159,14 @@ def _parse_sentinel_from_blocks(
     text, landing the frame in a tool_result block; scanning only assistant
     text misses it and the stage stalls (GitHub #731). Returns ``None`` when no
     chunk carries a complete real frame; a truncated frame reads as none.
+
+    ``warned_blocks`` is the caller-owned parse-warning dedup set (#1394); ``None``
+    keeps the un-deduplicated warning behaviour.
     """
     return parse_last_block_per_chunk(
-        _iter_sentinel_text_blocks(path), ticket_id=ticket_id
+        _iter_sentinel_text_blocks(path),
+        ticket_id=ticket_id,
+        warned_blocks=warned_blocks,
     )
 
 
@@ -166,6 +174,7 @@ def _salvage_terminal_result(
     session: Session,
     *,
     scope_probes: ScopeProbes | None = None,
+    warned_blocks: set[str] | None = None,
 ) -> tuple[AutoDevResult, str] | None:
     """Recover a terminal-success AUTO_DEV_RESULT from the session's transcript.
 
@@ -184,7 +193,9 @@ def _salvage_terminal_result(
     Returns ``None`` otherwise. *scope_probes* is forwarded to the parse; see
     :func:`_parse_any_sentinel_from_transcript`.
     """
-    parsed = _parse_any_sentinel_from_transcript(session, scope_probes=scope_probes)
+    parsed = _parse_any_sentinel_from_transcript(
+        session, scope_probes=scope_probes, warned_blocks=warned_blocks
+    )
     if parsed is None:
         return None
     result, csid = parsed
@@ -200,6 +211,7 @@ def _parse_any_sentinel_from_transcript(
     session: Session,
     *,
     scope_probes: ScopeProbes | None = None,
+    warned_blocks: set[str] | None = None,
 ) -> tuple[AutoDevResult | BlockedResult, str] | None:
     """Parse any sentinel from the transcript, regardless of status.
 
@@ -236,7 +248,9 @@ def _parse_any_sentinel_from_transcript(
 
     def _try(path: Path) -> tuple[AutoDevResult | BlockedResult, str] | None:
         result = _parse_sentinel_from_blocks(
-            path, ticket_id=ticket_id_for_session(session.name)
+            path,
+            ticket_id=ticket_id_for_session(session.name),
+            warned_blocks=warned_blocks,
         )
         if result is None or (
             isinstance(result, BlockedResult)

@@ -45,6 +45,7 @@ def _phantom_advance_sentinel_candidate(
     lane: str,
     *,
     scope_probes: ScopeProbes | None = None,
+    warned_blocks: set[str] | None = None,
 ) -> ReapCandidate | None:
     """Return a ROUTE_EMITTED_SENTINEL candidate for an exited stage-advance worker.
 
@@ -59,7 +60,9 @@ def _phantom_advance_sentinel_candidate(
     sentinel or the status is not a non-terminal advance. *scope_probes* feeds
     the parse's prefetched scope check (#2641).
     """
-    parsed = _parse_any_sentinel_from_transcript(session, scope_probes=scope_probes)
+    parsed = _parse_any_sentinel_from_transcript(
+        session, scope_probes=scope_probes, warned_blocks=warned_blocks
+    )
     if parsed is None:
         return None
     result, csid = parsed
@@ -195,6 +198,7 @@ def _classify_before_dirty_check(
     now: datetime,
     config: OrchestratorConfig,
     scope_probes: ScopeProbes | None = None,
+    warned_blocks: set[str] | None = None,
 ) -> _PreDirtyOutcome:
     """Classify one phantom up to (not including) its worktree dirty check.
 
@@ -258,7 +262,9 @@ def _classify_before_dirty_check(
             )
     # Try sentinel salvage before declaring crashed (DAEMON only).
     salvage = (
-        _shared.salvage_terminal_result(session, scope_probes=scope_probes)
+        _shared.salvage_terminal_result(
+            session, scope_probes=scope_probes, warned_blocks=warned_blocks
+        )
         if session.origin is SessionOrigin.DAEMON
         else None
     )
@@ -283,7 +289,11 @@ def _classify_before_dirty_check(
     # as a crash (DAEMON only; USER sessions have no staged task). See #716.
     if session.origin is SessionOrigin.DAEMON and not already_refused:
         advance = _phantom_advance_sentinel_candidate(
-            session, ticket_id, lane, scope_probes=scope_probes
+            session,
+            ticket_id,
+            lane,
+            scope_probes=scope_probes,
+            warned_blocks=warned_blocks,
         )
         return _PreDirtyOutcome(advance, ticket_id, lane)
     if session.origin is SessionOrigin.DAEMON and already_refused:
@@ -406,6 +416,7 @@ def _detect_phantom_candidates(
     config: OrchestratorConfig | None = None,
     dirty_checks: DirtyChecks | None = None,
     scope_probes: ScopeProbes | None = None,
+    warned_blocks: set[str] | None = None,
 ) -> list[ReapCandidate]:
     """Pure classification phase for phantom sessions.
 
@@ -443,6 +454,7 @@ def _detect_phantom_candidates(
             now=now,
             config=effective_config,
             scope_probes=scope_probes,
+            warned_blocks=warned_blocks,
         )
         if outcome.candidate is not None:
             candidates.append(outcome.candidate)
@@ -475,6 +487,7 @@ def capture_phantom_dirty_checks(
     now: datetime,
     config: OrchestratorConfig,
     checks: DirtyChecks,
+    warned_blocks: set[str] | None = None,
 ) -> None:
     """Lockless pre-pass: capture the dirty checks the phantom detect will read.
 
@@ -492,7 +505,11 @@ def capture_phantom_dirty_checks(
         and _needs_dirty_check(
             session,
             _classify_before_dirty_check(
-                session, task_by_ticket, now=now, config=config
+                session,
+                task_by_ticket,
+                now=now,
+                config=config,
+                warned_blocks=warned_blocks,
             ),
         )
     ]

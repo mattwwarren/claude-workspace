@@ -675,6 +675,7 @@ class TestRunPostGuardSweeps:
         shipped_probes = MagicMock()
         scope_probes = new_scope_probes()
         captured_at = datetime(2026, 1, 1, 0, 0, 3, tzinfo=UTC)
+        warned: set[str] = set()
 
         deferred = DeferredReconcileJobs()
         reverted = locked_sweeps._run_post_guard_sweeps(
@@ -690,6 +691,7 @@ class TestRunPostGuardSweeps:
             scope_probes=scope_probes,
             shipped_probes=shipped_probes,
             roster_captured_at=captured_at,
+            warned_blocks=warned,
         )
 
         assert reverted == ["T-9"]
@@ -706,6 +708,7 @@ class TestRunPostGuardSweeps:
         ]
         kwargs = dict(calls)
         assert kwargs["_detect_idle_candidates"]["scope_probes"] is scope_probes
+        assert kwargs["_detect_idle_candidates"]["warned_blocks"] is warned
         assert kwargs["run_shipped_release"]["probes"] is shipped_probes
         assert kwargs["run_shipped_release"]["clients"] is clients
         assert set(kwargs["sweep_routed_result_sessions"]["enabled_clients"]) == {
@@ -717,6 +720,49 @@ class TestRunPostGuardSweeps:
             kwargs["detect_and_park_mid_turn_usage_limits"]["roster_captured_at"]
             == captured_at
         )
+
+
+class TestRunTerminalBackstopsAndSweeps:
+    @pytest.mark.parametrize("pass_set", [True, False])
+    def test_forwards_warned_blocks_to_the_concierge_recipes(
+        self, monkeypatch: pytest.MonkeyPatch, pass_set: bool
+    ) -> None:
+        """#1394: the dedup set reaches ``run_concierge_recoveries`` by identity."""
+        calls = _record_calls(
+            monkeypatch,
+            {
+                "run_unowned_running_recovery": None,
+                "revert_timed_out_tasks": [],
+                "revert_completed_silent_tasks": [],
+                "park_terminal_sibling_tasks": None,
+                "run_lost_session_recovery": None,
+                "run_concierge_recoveries": [],
+                "run_codex_live_writer_reparks": None,
+                "run_gate_recipes": None,
+                "run_review_recipes": None,
+                "run_escalation_sweep": None,
+            },
+        )
+        warned: set[str] = set()
+
+        locked_sweeps._run_terminal_backstops_and_sweeps(
+            now=datetime(2026, 1, 1, tzinfo=UTC),
+            native_live=set(),
+            config=OrchestratorConfig(),
+            clients={},
+            deferred=DeferredReconcileJobs(),
+            codex_probes=None,
+            plan_probes=None,
+            repo_slugs=None,
+            warned_blocks=warned if pass_set else None,
+        )
+
+        concierge = [kw for name, kw in calls if name == "run_concierge_recoveries"]
+        assert len(concierge) == 1
+        if pass_set:
+            assert concierge[0]["warned_blocks"] is warned
+        else:
+            assert concierge[0]["warned_blocks"] is None
 
 
 class TestWithoutActsInFlight:
