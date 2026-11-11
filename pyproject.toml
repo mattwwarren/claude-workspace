@@ -338,10 +338,13 @@ ignore = [
 # This is a real cycle, not a pure queue-row helper: the dispatch routing engine
 # imports cw.executor (routing/stage_walk.py), cw.executor imports cw.reconcile at
 # module top (executor/core.py), and cw.dispatch's package __init__ imports
-# cw.reconcile (claim/screening.py). Hoisting needs a registration seam or a move
-# of the ~1,800-line routing engine, neither of which is a pure move; the
-# dependency inversion is tracked in #2619. Inline import at function level is the
-# sanctioned mechanism, not a workaround (#698).
+# cw.reconcile (claim/screening.py). It is also a deliberate performance
+# optimization: the function-level import keeps the routing engine and its
+# cw.executor import chain off the Stop-hook and session hot paths. The inversion
+# that would remove it needs a registration layer plus a ~55 ms per-turn import
+# (measured 52-57 ms on every Stop-hook invocation, which fires on every worker
+# turn), which adds complexity for a lint-only gain (see the closed #2619). Inline
+# import at function level is the sanctioned mechanism, not a workaround (#698).
 "src/cw/reconcile/_shared/_routing.py" = ["PLC0415"]
 "src/cw/reconcile/_shared/_sentinels.py" = ["PLC0415"]
 # codex_background defers cw.dispatch.claim's _find_running_row inside
