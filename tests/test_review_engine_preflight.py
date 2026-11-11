@@ -29,7 +29,8 @@ from tests._review_engine_helpers import (
     seed_row,
     write_engine_context,
 )
-from tests.conftest import _make_ticket_task, commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable

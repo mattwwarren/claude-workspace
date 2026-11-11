@@ -51,7 +51,7 @@ from tests._dispatch_tick_helpers import (
     seed_dispatch_events,
     skip_tick_events,
 )
-from tests.conftest import _patch_ticks
+from tests._shared.session_seeding import _patch_ticks
 
 if TYPE_CHECKING:
     from collections.abc import Callable

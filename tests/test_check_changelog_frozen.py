@@ -46,7 +46,7 @@ from tests._changelog_cut_helpers import (
     release_cut_pr_repo,
     squash_onto_origin_main,
 )
-from tests.conftest import git_in, list_tags, write_pyproject_override
+from tests._shared.git_repos import git_in, list_tags, write_pyproject_override
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = _REPO_ROOT / ".claude" / "scripts" / "check_changelog_frozen.py"

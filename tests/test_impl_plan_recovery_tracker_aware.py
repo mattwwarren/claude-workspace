@@ -19,7 +19,7 @@ complete (GEN-5485). This adds a `linear` sub-branch to the Orientation
 paragraph, additive only -- the GitHub sub-branch is untouched.
 """
 
-from tests.conftest import _appendix, _cmd
+from tests._shared.workflow_text import _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after, _nearby
 
 ORIENTATION_START = "## Orientation: tracker-aware plan recovery"

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from tests.conftest import _cmd, _norm, _section_between
+from tests._shared.workflow_text import _cmd, _norm, _section_between
 
 ROOT = Path(__file__).resolve().parents[1]
 

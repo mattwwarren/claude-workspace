@@ -26,9 +26,9 @@ from cw.auto_dev_result import AutoDevResult
 from cw.cli import stop_hook
 from cw.models import AGENT_SPAWN_STAMP_KEY, AGENT_SPAWN_UNRESOLVED_COUNT_KEY
 from tests._reconcile_helpers import _stage_complete_payload
-from tests.conftest import (
+from tests._shared.session_seeding import _make_daemon_session
+from tests._shared.stop_hook_context import (
     _invoke_hook_command,
-    _make_daemon_session,
     _write_hook_context_file,
 )
 

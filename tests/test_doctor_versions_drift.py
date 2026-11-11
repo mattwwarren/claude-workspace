@@ -47,7 +47,7 @@ from cw.doctor.versions import (
     _check_cw_deps_drift,
     _dep_distribution_name,
 )
-from tests.conftest import _patch_cw_dist_not_found
+from tests._shared.cli_preflight import _patch_cw_dist_not_found
 
 if TYPE_CHECKING:
     from pathlib import Path

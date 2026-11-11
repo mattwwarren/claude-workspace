@@ -34,8 +34,8 @@ from cw.models.review_attestation import (
     ReviewAttestation,
 )
 from cw.models.review_feedback import REVIEW_FEEDBACK_KEY, ReviewFeedback
+from tests._shared.session_seeding import _make_ticket_task
 from tests._ticket_view_helpers import make_resolutions
-from tests.conftest import _make_ticket_task
 
 _APPROVED_AT = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
 _RECORDED_AT = datetime(2026, 10, 2, 9, 30, tzinfo=UTC)

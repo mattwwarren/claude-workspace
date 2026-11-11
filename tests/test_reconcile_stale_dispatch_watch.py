@@ -31,7 +31,7 @@ from cw.reconcile.stale_dispatch_watch import (
     _WATCHED_PR_SOURCE_STALE_DISPATCH_PARK,
     register_stale_dispatch_watched_prs,
 )
-from tests.conftest import _make_ticket_task
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from pathlib import Path

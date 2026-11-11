@@ -1,6 +1,6 @@
 """Suite-wide lock-invariant harness (#1233, ADR-0019).
 
-The autouse ``_lock_invariants`` fixture in ``tests/conftest.py`` calls
+The autouse ``_lock_invariants`` fixture in ``tests/_shared/autouse_isolation.py`` calls
 :func:`install` before every test and :func:`finish` after it. While a test
 runs, a :class:`LockTrace` records:
 

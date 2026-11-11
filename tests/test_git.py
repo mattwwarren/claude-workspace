@@ -16,7 +16,7 @@ from cw._git import (
     git_output,
     run_git,
 )
-from tests.conftest import commit_tracked_file, git_in, hostile_git_env
+from tests._shared.git_repos import commit_tracked_file, git_in, hostile_git_env
 
 if TYPE_CHECKING:
     from collections.abc import Callable

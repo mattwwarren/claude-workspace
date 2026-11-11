@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from tests.conftest import _REPO_ROOT, _SRC_ROOT
+from tests._shared.workflow_text import _REPO_ROOT, _SRC_ROOT
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -148,7 +148,14 @@ _COLD_IMPORT_FIRST = (
     "cw.reconcile.phantom._mutations",
     "cw.reconcile.stalled._mutations",
     "cw.reconcile.tasks",
+    "cw.reconcile.tasks._client_config",
+    "cw.reconcile.tasks.backstops",
+    "cw.reconcile.tasks.merged_completion",
+    "cw.reconcile.tasks.stale_gate",
+    "cw.reconcile.tasks.terminal_siblings",
     "cw.reconcile.unowned_running",
+    "cw.reconcile.unowned_running_acts",
+    "cw.reconcile.unowned_running_text",
     "cw.reconcile.usage_limit_mid_turn",
 )
 

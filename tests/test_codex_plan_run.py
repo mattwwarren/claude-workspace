@@ -39,6 +39,7 @@ from tests._backend_mcp_helpers import (
     stage_mcp_config,
 )
 from tests._codex_review_helpers import exclude_cw_dir, seed_codex_stage_run
+from tests._shared.cli_preflight import _write_tracker_config
 from tests._tool_fakes import (
     FakeGhCli,
     ScriptedCodexRunner,
@@ -47,7 +48,6 @@ from tests._tool_fakes import (
     station_findings_doc,
     stdin_contains,
 )
-from tests.conftest import _write_tracker_config
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping

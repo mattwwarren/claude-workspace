@@ -24,6 +24,7 @@ from cw.models import (
     ClientConfig,
     CwState,
     DevQueueStore,
+    OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
     SessionStatus,
@@ -37,14 +38,22 @@ from cw.reconcile.lost_session_rows import (
     find_lost_session_rows,
     run_lost_session_recovery,
 )
+from cw.reconcile.unowned_running import run_unowned_running_recovery
+from cw.reconcile.unowned_running_text import (
+    CAUSE_UNREADABLE_CONTEXT,
+    unconfirmed_note,
+)
+from cw.worktree import worktree_path_for
 from tests._clients_yaml import write_clients_yaml
 from tests._reconcile_helpers import (
     LockProbeDaemon,
     _failing_record_event,
     assert_no_parked_row_is_sessionless,
     use_reconcile_daemon,
+    write_unreadable_claim_context,
 )
-from tests.conftest import _CANONICAL_ATTENTION_KEYS, _make_daemon_session
+from tests._shared.daemon_fakes import _CANONICAL_ATTENTION_KEYS
+from tests._shared.session_seeding import _make_daemon_session
 
 _CLIENT = "client-a"
 _LOST = "running_row_session_lost"
@@ -434,6 +443,61 @@ class TestSessionlessPage:
         assert _pages(SESSIONLESS_PAGE_REASON) == []
         assert "naive claimed_at" in caplog.text
 
+    def test_unconfirmed_note_skips_the_page_and_latch(
+        self, clients: dict[str, ClientConfig]
+    ) -> None:
+        """#3328: a row the unowned-running sweep paged is not paged again here."""
+        note = unconfirmed_note(CAUSE_UNREADABLE_CONTEXT)
+        save_dev_queue(
+            DevQueueStore(tasks=[_running("T-1", session_id=None, advisory_note=note)])
+        )
+
+        _run(clients)
+
+        assert _pages(SESSIONLESS_PAGE_REASON) == []
+        assert _by_ticket()["T-1"].advisory_note == note
+
+    @pytest.mark.parametrize(
+        ("note", "paged"),
+        [(None, True), (NO_SESSION_ADVISORY_NOTE, False), ("?other", True)],
+        ids=["no_note", "no_session_latch", "other_note"],
+    )
+    def test_other_notes_behave_as_before(
+        self, clients: dict[str, ClientConfig], note: str | None, paged: bool
+    ) -> None:
+        save_dev_queue(
+            DevQueueStore(tasks=[_running("T-1", session_id=None, advisory_note=note)])
+        )
+
+        _run(clients)
+
+        assert bool(_pages(SESSIONLESS_PAGE_REASON)) is paged
+
+    def test_the_two_sweeps_never_alternate(
+        self,
+        clients: dict[str, ClientConfig],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Run in tail order over one unreadable-context row, three ticks."""
+        client = clients[_CLIENT]
+        worktree = worktree_path_for(client, f"{client.feature_branch_prefix}/T-1")
+        write_unreadable_claim_context(worktree, "{not json")
+        save_dev_queue(DevQueueStore(tasks=[_running("T-1", session_id=None)]))
+        use_reconcile_daemon(monkeypatch, LockProbeDaemon())
+        now = datetime.now(UTC)
+
+        for _ in range(3):
+            run_unowned_running_recovery(
+                now=now, clients=clients, config=OrchestratorConfig(), native_live=set()
+            )
+            _run(clients, now=now)
+
+        assert _pages(SESSIONLESS_PAGE_REASON) == []
+        assert len(_pages("unowned_running_unconfirmed")) == 1
+        assert _by_ticket()["T-1"].advisory_note == unconfirmed_note(
+            CAUSE_UNREADABLE_CONTEXT
+        )
+
     def test_payload_latch_and_no_repeat(
         self, clients: dict[str, ClientConfig]
     ) -> None:
@@ -757,7 +821,7 @@ class TestThroughReconcile:
         """The unowned-running sweep runs before this one in the tail: a row
         its evidence ties to a recorded session is bound, never paged."""
         from cw.worktree import worktree_path_for
-        from tests.conftest import _write_hook_context_file
+        from tests._shared.stop_hook_context import _write_hook_context_file
 
         client = ClientConfig(
             name=_CLIENT,

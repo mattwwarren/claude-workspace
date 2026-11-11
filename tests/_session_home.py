@@ -1,8 +1,8 @@
 """Redirect ``HOME`` for the whole test session, at import time (#1756).
 
-Imported by ``tests/conftest.py`` ahead of every ``cw`` import. ``src/cw`` binds
-many ``Path.home()``-derived constants at import time (``cw.config``'s
-``_REAL_STATE_DIR``/``_REAL_CONFIG_DIR``,
+Imported first by ``tests/conftest.py``'s ``pytest_plugins``, ahead of every
+``cw`` import. ``src/cw`` binds many ``Path.home()``-derived constants at
+import time (``cw.config``'s ``_REAL_STATE_DIR``/``_REAL_CONFIG_DIR``,
 ``queue_peek.locate.CLAUDE_PROJECTS``, ``native_daemon._JOBS_PATH``, the
 ``doctor`` seams, ...), and ``cw.config`` also reads ``XDG_*`` at import
 time. A fixture or ``pytest_configure`` hook
@@ -10,9 +10,9 @@ runs too late to reach them, so this module mutates ``os.environ`` as a side
 effect of being imported: ``HOME`` points at a throwaway directory holding a
 minimal ``.gitconfig``, and the ``XDG_*`` base-directory overrides are dropped.
 
-The autouse ``_isolate_home`` fixture in ``conftest.py`` then narrows ``HOME``
-to a per-test directory, so tests that seed ``~/.claude/...`` cannot see each
-other's files.
+The autouse ``_isolate_home`` fixture in ``tests/_shared/autouse_isolation.py``
+then narrows ``HOME`` to a per-test directory, so tests that seed
+``~/.claude/...`` cannot see each other's files.
 
 Opt-out is whole-process: live and integration runs that need the operator's
 real credentials (``claude``/``codex`` auth, ``~/.codex/sessions``) set

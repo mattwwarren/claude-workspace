@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.conftest import _norm, _section_between
+from tests._shared.workflow_text import _norm, _section_between
 
 ROOT = Path(__file__).resolve().parents[1]
 

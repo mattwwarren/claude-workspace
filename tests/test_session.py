@@ -28,7 +28,7 @@ from cw.session import (
     start_session,
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests.conftest import _make_daemon_session
+from tests._shared.session_seeding import _make_daemon_session
 from tests.test_spawn import _write_orchestrator_disallow
 
 if TYPE_CHECKING:

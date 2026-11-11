@@ -38,7 +38,8 @@ from tests._codex_review_helpers import (
     _head_baseline,
     _write,
 )
-from tests.conftest import _make_finding, git_in
+from tests._shared.git_repos import git_in
+from tests._shared.review_builders import _make_finding
 from tests.test_codex_fix_loop_growth import _diff, _loop_budget
 
 if TYPE_CHECKING:

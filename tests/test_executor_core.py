@@ -60,12 +60,14 @@ from cw.models import (
     TicketTask,
 )
 from cw.reconcile import AUTO_DEV_LABEL_PREFIX
-from tests.conftest import (
+from tests._shared.daemon_fakes import (
+    fire_and_forget_breadcrumb,
+    post_launch_attention_payload,
+)
+from tests._shared.session_seeding import (
     _audit_failure_logged,
     _fail_audit_append,
     find_completed_session,
-    fire_and_forget_breadcrumb,
-    post_launch_attention_payload,
 )
 
 if TYPE_CHECKING:
@@ -76,7 +78,7 @@ if TYPE_CHECKING:
     from cw.executor_diagnostics import ExecutorName
     from cw.models import LocalLivenessBackend, LocalLivenessHandle
     from cw.native_daemon import FakeNativeDaemonClient
-    from tests.conftest import CapturedEvent
+    from tests._shared.daemon_fakes import CapturedEvent
 
 
 def _make_client(tmp_path: Path, *, worker_model: str | None = None) -> ClientConfig:

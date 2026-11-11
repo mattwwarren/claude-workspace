@@ -15,7 +15,7 @@ from cw.config import load_state, save_state
 from cw.dev_queue import save_dev_queue
 from cw.models import CwState, DevQueueStore, QueueItemStatus, Session, SessionStatus
 from tests._reconcile_helpers import _mk_routed_session
-from tests.conftest import _make_daemon_session, _make_ticket_task
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 
 if TYPE_CHECKING:
     import logging

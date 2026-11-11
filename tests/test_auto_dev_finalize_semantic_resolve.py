@@ -29,17 +29,15 @@ from pathlib import Path
 import pytest
 
 from cw.auto_dev_result.schema import FINALIZE_REGRESS_BLOCKER_REASONS
-from tests.conftest import (
+from tests._shared.guard_fences import (
     GUARD_FENCE_INVOKED,
     GUARD_MARKER_BAD_CASES,
     GUARD_MARKER_CURRENT,
-    _appendix,
-    _bash_fences,
-    _cmd,
     _placement,
     guard_candidate_path,
     run_guard_fence,
 )
+from tests._shared.workflow_text import _appendix, _bash_fences, _cmd
 
 _SECTION_HEADING = "Semantic auto-resolve attempt (operator direction, #1850)"
 _TEMPLATE_HEADING = "**Sentinel template — `merge_conflict_post_push` blocker:**"

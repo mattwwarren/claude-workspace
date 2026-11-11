@@ -32,7 +32,7 @@ from cw.review_engine.constants import (
 )
 from cw.review_engine.context import EngineContext
 from tests._review_engine_helpers import EngineRepo, make_engine_repo
-from tests.conftest import _make_ticket_task
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable

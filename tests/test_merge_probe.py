@@ -13,7 +13,7 @@ from cw.merge_probe import (
     merge_tree,
     probe_default_merge,
 )
-from tests.conftest import git_in
+from tests._shared.git_repos import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping

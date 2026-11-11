@@ -19,7 +19,7 @@ import pytest
 
 from cw.codex_review._context._agent_spec import _REVIEWER_ROLE_AGENT_FILES
 from cw.review_findings import ReviewerFindingsDocument
-from tests.conftest import _cmd, _norm, _section_between
+from tests._shared.workflow_text import _cmd, _norm, _section_between
 
 _AGENTS_DIR = Path(__file__).resolve().parents[1] / ".claude" / "agents"
 _CLEAN_SECTION_START = "**Every reviewer prompt must include:**"

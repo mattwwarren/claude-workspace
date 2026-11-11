@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 
 from cw.gh import AGENT_COMMENT_MARKER
-from tests.conftest import _norm, _section_between
+from tests._shared.workflow_text import _norm, _section_between
 
 SKILLS = Path(__file__).resolve().parent.parent / ".claude" / "skills"
 REFERENCE = "*Posting tracker comments* in `/cw-orchestration`"

@@ -24,13 +24,8 @@ from cw._hook_context import (
     _write_cw_context_locked,
 )
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH
-from tests.conftest import (
-    _fake_fcntl,
-    _FakeClock,
-    _hold_context_lock,
-    _raise_eio,
-    _write_hook_context_file,
-)
+from tests._shared.lock_helpers import _fake_fcntl, _FakeClock, _raise_eio
+from tests._shared.stop_hook_context import _hold_context_lock, _write_hook_context_file
 
 
 def _seeded_worktree(tmp_path: Path, name: str = "wt") -> Path:

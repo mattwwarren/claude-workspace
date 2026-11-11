@@ -37,28 +37,28 @@ from cw.models import (
 )
 from cw.models.review_feedback import REVIEW_FEEDBACK_KEY
 from tests import _git_sandbox
-from tests.conftest import (
+from tests._shared.git_repos import git_in
+from tests._shared.guard_fences import (
     GUARD_FENCE_INVOKED,
     GUARD_MARKER_BAD_CASES,
     GUARD_MARKER_CURRENT,
     GUARD_MARKER_GOOD_CASES,
     GUARD_MARKER_STALE,
-    _appendix,
-    _bash_fences,
-    _cmd,
     _placement,
-    assert_gate_key_helper_missing,
-    gate2_fence,
-    gate2_section,
-    gate_key_for,
-    git_in,
     guard_candidate_path,
-    install_gate_key,
-    link_real_python3,
     run_guard_fence,
     substitute_fence_placeholders,
     write_guard_stub_bin,
 )
+from tests._shared.step25_gates import (
+    assert_gate_key_helper_missing,
+    gate2_fence,
+    gate2_section,
+    gate_key_for,
+    install_gate_key,
+    link_real_python3,
+)
+from tests._shared.workflow_text import _appendix, _bash_fences, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
 # Sentinel replacing the real guard-script invocation, so the executable fence

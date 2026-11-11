@@ -15,7 +15,8 @@ import pytest
 
 import cw.models
 from cw.models import ClientConfig, resolve_feature_branch
-from tests.conftest import _SRC_ROOT, _make_ticket_task
+from tests._shared.session_seeding import _make_ticket_task
+from tests._shared.workflow_text import _SRC_ROOT
 
 _BRANCH_MODULE = _SRC_ROOT / "cw" / "models" / "branch.py"
 _SIBLING_MODULES = frozenset({"cw.models.client", "cw.models.tasks"})

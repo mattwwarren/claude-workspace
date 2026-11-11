@@ -39,7 +39,7 @@ from tests._claude_review_helpers import (
 )
 from tests._codex_review_helpers import _Clock, _doc_json, _finding_payload
 from tests._review_convergence_helpers import structurally_invalid_doc_json
-from tests.conftest import commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

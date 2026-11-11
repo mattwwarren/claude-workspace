@@ -34,7 +34,7 @@ from cw.models import OrchestratorConfig, OrchestratorEvent, OrchestratorEventTy
 from cw.models.enums import STAGE_IDENTIFIERS, StageIdentifier
 from tests._cli_review_helpers import _write_session_context
 from tests._reconcile_helpers import _auto_config
-from tests.conftest import (
+from tests._shared.dispatch_fixtures import (
     _seed_inbox_with_cursor,
     _spy_inbox_reads,
     _spy_parse_lines,

@@ -25,7 +25,7 @@ the reviewer always receives the complete live-fetched stream.
 import re
 from pathlib import Path
 
-from tests.conftest import _appendix, _cmd
+from tests._shared.workflow_text import _appendix, _cmd
 from tests.test_ambiguity_scan_adopted_assumptions import (
     _step1c_prompt_must_include_window,
 )

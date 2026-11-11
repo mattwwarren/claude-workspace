@@ -16,6 +16,7 @@ from cw.config import dev_queue_file
 from cw.models import Stage
 from cw.models.operator_constraint import DECIDED_SCOPE_INSTRUCTIONS
 from tests._cli_review_helpers import _enter_operator_machine, _write_session_context
+from tests._shared.review_builders import _make_constraint
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -23,7 +24,6 @@ from tests._ticket_view_helpers import (
     make_task,
     seed_queue,
 )
-from tests.conftest import _make_constraint
 
 if TYPE_CHECKING:
     from pathlib import Path

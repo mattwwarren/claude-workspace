@@ -45,7 +45,7 @@ from tests._codex_review_helpers import (
     _FakeRunner,
     assert_clean_after_refusal,
 )
-from tests.conftest import add_bare_origin, commit_tracked_file, git_in
+from tests._shared.git_repos import add_bare_origin, commit_tracked_file, git_in
 from tests.test_codex_fix_loop_convergence import _accepted
 from tests.test_prep_pr_script_resolution import (
     PREP_PR_PATH,

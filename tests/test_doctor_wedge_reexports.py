@@ -28,7 +28,7 @@ import cw.doctor
 import cw.doctor.core
 from cw.doctor import wedge
 from cw.models import DevQueueStore, QueueItemStatus
-from tests.conftest import _make_ticket_task
+from tests._shared.session_seeding import _make_ticket_task
 
 _PKG = "cw.doctor.wedge"
 _CONSTANTS_MOD = f"{_PKG}._constants"

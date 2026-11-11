@@ -31,7 +31,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.conftest import _appendix, _cmd
+from tests._shared.workflow_text import _appendix, _cmd
 
 _AGENTS_ROOT = Path(__file__).resolve().parents[1] / ".claude" / "agents"
 _COMMANDS_ROOT = Path(__file__).resolve().parents[1] / ".claude" / "commands"

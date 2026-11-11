@@ -52,9 +52,9 @@ from cw.worktree import _git_dir
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._lock_invariants import install
 from tests._reconcile_helpers import forbidden_plan_fetch, recording_plan_fetch
+from tests._shared.review_builders import plan_body, stub_fetch_plan
 from tests._tool_fakes import restore_real_run
 from tests._worktree_helpers import patch_worktree
-from tests.conftest import plan_body, stub_fetch_plan
 from tests.test_reconcile_gate_recipes import (
     _GATE_LANES,
     _NOW,

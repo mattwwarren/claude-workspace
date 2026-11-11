@@ -33,7 +33,7 @@ from cw.models import (
 )
 from cw.opencode_runner import STAGE4A_MERGE_GATE
 from tests._opencode_helpers import blocked_result
-from tests.conftest import find_completed_session
+from tests._shared.session_seeding import find_completed_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable

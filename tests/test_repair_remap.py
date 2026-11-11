@@ -31,7 +31,7 @@ from cw.review_convergence import (
     load_ledger,
 )
 from tests._review_convergence_helpers import TICKET_ID, confirmed_ledger, write_ledger
-from tests.conftest import commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
 
 OLD = "old-head-sha"
 NEW = "new-head-sha"

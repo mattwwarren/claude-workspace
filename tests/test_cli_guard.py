@@ -17,7 +17,10 @@ from click.testing import CliRunner
 
 from cw.cli import main
 from cw.cli.guard import _read_hook_cwd
-from tests.conftest import _invoke_hook_command, _write_hook_context_file
+from tests._shared.stop_hook_context import (
+    _invoke_hook_command,
+    _write_hook_context_file,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path

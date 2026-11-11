@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from cw.models import DEFAULT_STAGE, QueueItemStatus, Stage, TicketTask
 from cw.queue_peek import locate
-from tests.conftest import _make_ticket_task as _cw_make_ticket_task
+from tests._shared.session_seeding import _make_ticket_task as _cw_make_ticket_task
 
 if TYPE_CHECKING:
     import pytest

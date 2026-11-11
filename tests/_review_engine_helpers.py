@@ -31,14 +31,9 @@ from cw.review_engine.constants import ENGINE_ROLE
 from cw.review_engine.materialize import engine_paths
 from cw.review_findings import consolidate_verdict
 from tests._cli_review_helpers import _seed_review_row
-from tests.conftest import (
-    _make_diff,
-    _make_reviewer_doc,
-    _make_ticket_task,
-    add_bare_origin,
-    commit_tracked_file,
-    git_in,
-)
+from tests._shared.git_repos import add_bare_origin, commit_tracked_file, git_in
+from tests._shared.review_builders import _make_diff, _make_reviewer_doc
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable

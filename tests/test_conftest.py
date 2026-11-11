@@ -45,17 +45,19 @@ from tests import _git_sandbox
 from tests import _real_cw_guard as real_cw_guard
 from tests._host_probe_guard import REAL_WHICH, LaunchRecorder, ToolLaunchBlockedError
 from tests._session_home import REAL_HOME, SESSION_HOME, wants_real_home
-from tests._tool_fakes import path_with_stub, write_bin_stub
-from tests.conftest import (
+from tests._shared.autouse_isolation import (
     _GUARDED_TOOLS,
     _OPTIONAL_BINARY_DENYLIST,
-    _REPO_ROOT,
-    _guard_no_real_claude_projects_writes,
+    _reset_opencode_flag_probe,
+)
+from tests._shared.session_guards import _guard_no_real_claude_projects_writes
+from tests._shared.session_seeding import (
     _make_daemon_session,
     _make_ticket_task,
-    _reset_opencode_flag_probe,
     _seed_daemon_session,
 )
+from tests._shared.workflow_text import _REPO_ROOT
+from tests._tool_fakes import path_with_stub, write_bin_stub
 
 if TYPE_CHECKING:
     from collections.abc import Callable

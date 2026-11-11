@@ -36,8 +36,7 @@ from cw.review_adjudication import (
     verify_fixed_dispositions,
 )
 from cw.review_findings import AcceptedFinding, CapturedDiff, Finding, ReviewVerdict
-
-from .conftest import _make_diff, _make_finding
+from tests._shared.review_builders import _make_diff, _make_finding
 
 _LOGGER = "cw.review_adjudication"
 _TICKET = "T-1814"

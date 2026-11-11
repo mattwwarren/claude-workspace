@@ -40,8 +40,8 @@ from tests._lock_invariants import (
     LockTrace,
     install,
 )
+from tests._shared.session_seeding import _make_daemon_session
 from tests._tool_fakes import fake_claude_cli, prepend_to_path, restore_real_run
-from tests.conftest import _make_daemon_session
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _HARNESS_SOURCE = _REPO_ROOT / "tests" / "_lock_invariants.py"
@@ -415,6 +415,10 @@ def test_phantom_detect_and_tasks_are_not_allowlisted() -> None:
     frame is forgiven any more."""
     assert "cw.reconcile.phantom._detect" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
     assert "cw.reconcile.tasks" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+    assert not any(
+        module.startswith("cw.reconcile.tasks")
+        for module in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST
+    )
     assert "#2548" not in SUBPROCESS_UNDER_SESSIONS_ALLOWLIST.values()
 
 

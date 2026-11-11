@@ -51,7 +51,8 @@ from cw.models import (
 from cw.models.client import ReviewConfig
 from cw.result import EmitOutcome
 from cw.worktree import resolve_worker_tmpdir
-from tests.conftest import commit_tracked_file, find_completed_session
+from tests._shared.git_repos import commit_tracked_file
+from tests._shared.session_seeding import find_completed_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable

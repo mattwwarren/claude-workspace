@@ -49,7 +49,7 @@ from cw.exceptions import (
 )
 from cw.focus import focus_lock
 from tests._lock_invariants import observing
-from tests.conftest import _SRC_ROOT, _iter_src_files
+from tests._shared.workflow_text import _SRC_ROOT, _iter_src_files
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator

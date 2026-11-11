@@ -36,7 +36,7 @@ from tests._review_attestation_helpers import (
 from tests._review_attestation_helpers import (
     write_attested as _write_attested,
 )
-from tests.conftest import git_in
+from tests._shared.git_repos import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

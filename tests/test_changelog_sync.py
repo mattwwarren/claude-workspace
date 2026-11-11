@@ -33,7 +33,7 @@ from tests._changelog_cut_helpers import (
     cut_straddle_repo,
     pyproject,
 )
-from tests.conftest import git_in, init_bare_origin
+from tests._shared.git_repos import git_in, init_bare_origin
 
 if TYPE_CHECKING:
     from collections.abc import Callable

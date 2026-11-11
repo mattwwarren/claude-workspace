@@ -55,7 +55,7 @@ from tests._changelog_repair_helpers import (
     scratch_path,
 )
 from tests._review_convergence_helpers import confirmed_ledger, write_ledger
-from tests.conftest import git_in, push_commit_to_origin
+from tests._shared.git_repos import git_in, push_commit_to_origin
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _REAL_GATE = _REPO_ROOT / ".claude" / "scripts" / "check_changelog_frozen.py"

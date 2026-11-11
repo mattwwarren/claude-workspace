@@ -48,7 +48,8 @@ from tests._review_convergence_helpers import (
     tolerated_merge_script,
     write_ledger,
 )
-from tests.conftest import _make_ticket_task, git_in
+from tests._shared.git_repos import git_in
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     import subprocess

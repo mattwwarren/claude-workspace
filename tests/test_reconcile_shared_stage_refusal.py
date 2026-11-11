@@ -31,7 +31,7 @@ from tests._reconcile_helpers import (
     _failing_record_event,
     _stage_complete_payload,
 )
-from tests.conftest import _make_daemon_session
+from tests._shared.session_seeding import _make_daemon_session
 
 _FAILING_TARGET = "cw.reconcile._shared._stage_refusal.record_event"
 _PINNED_LOGGER_NAME = "cw.reconcile._shared"

@@ -45,7 +45,7 @@ from cw.config import orchestrator_config_file
 from cw.events import read_events
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH, OrchestratorEventType
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests.conftest import (
+from tests._shared.stop_hook_context import (
     _hold_context_lock,
     _invoke_hook_command,
     _write_hook_context_file,

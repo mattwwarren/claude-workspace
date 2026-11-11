@@ -14,7 +14,7 @@ import pytest
 import yaml
 
 from cw.auto_dev_result.schema._vocab import KNOWN_BLOCKER_REASONS
-from tests.conftest import _norm, _section_between
+from tests._shared.workflow_text import _norm, _section_between
 
 ROOT = Path(__file__).resolve().parents[1]
 

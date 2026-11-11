@@ -53,7 +53,8 @@ from tests._reconcile_helpers import (
     _ul_record,
     _write_transcript_records,
 )
-from tests.conftest import _make_daemon_session, _write_idle_transcript
+from tests._shared.session_seeding import _make_daemon_session
+from tests._shared.stop_hook_context import _write_idle_transcript
 
 _STARTED_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 _NOW = datetime(2026, 1, 2, 0, 0, 0, tzinfo=UTC)

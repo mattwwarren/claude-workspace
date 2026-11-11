@@ -18,7 +18,7 @@ under the fixed header ``## Operator-Actionable Review Findings``.
 
 from pathlib import Path
 
-from tests.conftest import _appendix, _cmd
+from tests._shared.workflow_text import _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 
 ROOT = Path(__file__).parent.parent

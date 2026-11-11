@@ -8,7 +8,7 @@ from click.testing import CliRunner
 
 from cw.cli import main
 from cw.schema import REGISTRY
-from tests.conftest import _norm
+from tests._shared.workflow_text import _norm
 
 
 class TestSchemaList:

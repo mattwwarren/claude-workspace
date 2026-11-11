@@ -16,16 +16,15 @@ import pytest
 
 from cw.auto_dev_result.schema import FINALIZE_REGRESS_BLOCKER_REASONS
 from cw.codex_review import CODEX_MUST_FIX_FINDINGS
-from tests.conftest import (
+from tests._shared.guard_fences import (
     GUARD_FENCE_INVOKED,
     GUARD_MARKER_BAD_CASES,
     GUARD_MARKER_CURRENT,
-    _bash_fences,
-    _cmd,
     _placement,
     guard_candidate_path,
     run_guard_fence,
 )
+from tests._shared.workflow_text import _bash_fences, _cmd
 
 if TYPE_CHECKING:
     import subprocess

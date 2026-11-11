@@ -33,7 +33,7 @@ from tests._commit_hook_helpers import (
     make_hook_client,
     write_commit_hook_config,
 )
-from tests.conftest import git_in
+from tests._shared.git_repos import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence

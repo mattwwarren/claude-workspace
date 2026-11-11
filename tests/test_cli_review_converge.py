@@ -91,14 +91,9 @@ from tests._review_convergence_helpers import (
     stopped_ledger,
     write_ledger,
 )
-from tests.conftest import (
-    _make_finding,
-    _make_reviewer_doc,
-    _make_ticket_task,
-    commit_tracked_file,
-    git_in,
-    push_commit_to_origin,
-)
+from tests._shared.git_repos import commit_tracked_file, git_in, push_commit_to_origin
+from tests._shared.review_builders import _make_finding, _make_reviewer_doc
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence

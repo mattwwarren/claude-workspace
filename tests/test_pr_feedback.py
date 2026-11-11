@@ -37,7 +37,7 @@ from tests._adopt_pr_helpers import (
     FIXTURE_GREEN_UNKNOWN,
     load_adopt_fixture,
 )
-from tests.conftest import add_bare_origin, commit_tracked_file, git_in
+from tests._shared.git_repos import add_bare_origin, commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

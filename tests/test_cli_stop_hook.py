@@ -50,10 +50,10 @@ from cw.models import (
 )
 from cw.reconcile._shared import SentinelRouteOutcome
 from tests._reconcile_helpers import LockProbeDaemon, _stage_complete_payload
-from tests.conftest import (
+from tests._shared.session_seeding import _make_daemon_session
+from tests._shared.stop_hook_context import (
     _STAMP_ABSENT,
     _invoke_hook_command,
-    _make_daemon_session,
     _read_stamp,
     _seed_session,
     _stop_payload,

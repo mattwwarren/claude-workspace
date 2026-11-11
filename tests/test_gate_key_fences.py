@@ -30,12 +30,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from tests._tool_fakes import write_bin_stub
-from tests.conftest import (
+from tests._shared.git_repos import _clean_git_env
+from tests._shared.guard_fences import (
+    load_guard_script_module,
+    substitute_fence_placeholders,
+)
+from tests._shared.step25_gates import (
     GATE_KEY_SCRIPT,
-    _bash_fences,
-    _clean_git_env,
-    _cmd,
     assert_gate_key_helper_missing,
     gate2_fence,
     gate_key_for,
@@ -43,11 +44,11 @@ from tests.conftest import (
     impl_gate_setup_fence,
     install_gate_key,
     link_real_python3,
-    load_guard_script_module,
     make_claimant,
     monolith_gate_fence,
-    substitute_fence_placeholders,
 )
+from tests._shared.workflow_text import _bash_fences, _cmd
+from tests._tool_fakes import write_bin_stub
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping

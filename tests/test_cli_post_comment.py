@@ -25,8 +25,9 @@ from cw.gh import AGENT_COMMENT_MARKER
 from cw.tracker_post import PostReason, PostStatus
 from tests import _git_sandbox
 from tests._clients_yaml import ClientSpec, write_clients_yaml
+from tests._shared.cli_preflight import _make_agent_repo
+from tests._shared.git_repos import hostile_git_env
 from tests._tool_fakes import FakePostCommentGh
-from tests.conftest import _make_agent_repo, hostile_git_env
 
 if TYPE_CHECKING:
     from collections.abc import Callable

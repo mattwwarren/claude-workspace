@@ -39,7 +39,7 @@ import typing
 from pathlib import Path
 
 from cw.auto_dev_result import _STAGE_REACHED_CANONICAL, StageReached
-from tests.conftest import _appendix, _cmd, _step4c2_section
+from tests._shared.workflow_text import _appendix, _cmd, _step4c2_section
 
 ROOT = Path(__file__).parent.parent
 DOCS = ROOT / "docs"

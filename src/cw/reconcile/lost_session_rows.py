@@ -17,7 +17,10 @@ Two RUNNING-row shapes no other sweep owns:
   ``SPAWN_GRACE_SECONDS`` since its claim (a claim of unknown age counts).
   It is paged once, latched in ``TicketTask.advisory_note``, and never parked:
   the claim-to-bind window can exceed the grace, and the unowned-running
-  sweep adopts the row once the evidence ties (#2591).
+  sweep adopts the row once the evidence ties (#2591). A row that sweep
+  already paged as ``unowned_running_unconfirmed`` (its ``advisory_note``
+  starts with ``?unowned_unconfirmed``) is not paged here, so the two pages
+  never alternate (#3328).
 
 Mass-park guards: when ``sessions.json`` holds no session at all (missing or
 wiped) and more than ``SESSION_LOST_PARKS_MAX_PER_TICK`` bound rows would
@@ -52,6 +55,7 @@ from cw.models import OrchestratorEventType, QueueItemStatus
 from cw.queue_rows import _find_running_row, _is_backstop_exempt
 from cw.reconcile._shared import (
     _SESSION_LOST_REASON,
+    _UNOWNED_UNCONFIRMED_NOTE_PREFIX,
     SPAWN_GRACE_SECONDS,
     find_live_sessions_for_ticket,
     resolve_session_for_task,
@@ -166,8 +170,12 @@ def find_lost_session_rows(
             # durable ``ever_spawned`` marker was reached.
             if resolve_session_for_task(task, state) is None:
                 parks.append(_lost_row(task))
-        elif task.advisory_note != NO_SESSION_ADVISORY_NOTE and _past_spawn_grace(
-            task, now
+        elif (
+            task.advisory_note != NO_SESSION_ADVISORY_NOTE
+            and not (task.advisory_note or "").startswith(
+                _UNOWNED_UNCONFIRMED_NOTE_PREFIX
+            )
+            and _past_spawn_grace(task, now)
         ):
             sessionless.append(_lost_row(task))
     wiped = not state.sessions and len(parks) > SESSION_LOST_PARKS_MAX_PER_TICK

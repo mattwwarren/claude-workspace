@@ -42,7 +42,8 @@ from cw.events import read_events
 from cw.models.enums import OrchestratorEventType
 from cw.review_findings import AcceptedFinding
 from tests._codex_review_helpers import _write
-from tests.conftest import _make_finding, git_in
+from tests._shared.git_repos import git_in
+from tests._shared.review_builders import _make_finding
 
 if TYPE_CHECKING:
     from collections.abc import Callable

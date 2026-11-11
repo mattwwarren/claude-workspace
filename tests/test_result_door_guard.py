@@ -17,7 +17,7 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
-from tests.conftest import _REPO_ROOT
+from tests._shared.workflow_text import _REPO_ROOT
 
 # Narrower than conftest's `_SRC_ROOT` (`src/`) — this guard's scan target is
 # `src/cw/` only (R4), so a distinctly-named local pair is defined here

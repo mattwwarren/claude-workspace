@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from tests import _review_monitor_helpers as helpers
-from tests.conftest import git_in
+from tests._shared.git_repos import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

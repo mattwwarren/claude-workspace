@@ -29,7 +29,7 @@ from cw.cli.guard_hook_install import (
     classify_hook_install,
 )
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH
-from tests.conftest import (
+from tests._shared.stop_hook_context import (
     _headless_worktree,
     _invoke_hook_command,
     _write_hook_context_file,

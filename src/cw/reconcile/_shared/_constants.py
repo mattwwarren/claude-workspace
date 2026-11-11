@@ -103,6 +103,15 @@ _SALVAGE_SKIP_REASON = "park_marker_blocks_salvage"
 # survives the REASON column's 20-char truncation. _reason_cell renders the
 # value verbatim and does not add the marker itself.
 _SESSION_ID_MISMATCH_ADVISORY_NOTE = "?session_mismatch"
+# Prefix of the TicketTask.advisory_note latch the unowned-running sweep writes
+# when it pages that an unbound RUNNING row's ownership cannot be confirmed
+# (#3328). The full note is "?unowned_unconfirmed: {cause}: {clause}". The
+# leading "?" follows the convention above, and the prefix is exactly 20
+# characters, so `cw dev-queue tasks`'s REASON cell shows it whole. Shared by
+# cw.reconcile.unowned_running_text (the writer) and
+# cw.reconcile.lost_session_rows, whose sessionless page skips a latched row so
+# the two pages never alternate.
+_UNOWNED_UNCONFIRMED_NOTE_PREFIX = "?unowned_unconfirmed"
 # Paused-status written to SESSION_NEEDS_ATTENTION events when an
 # `external`-counterparty session (reviewing a teammate's PR) reaches the
 # confirmed-idle threshold. Escalated rather than reaped/parked. RFC 0011 B1

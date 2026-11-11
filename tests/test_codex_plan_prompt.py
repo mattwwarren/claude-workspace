@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import tomllib
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
@@ -26,10 +26,9 @@ from cw.contract_manifest._render import _PLAN_CODEX_ADDENDUM, _STAGE_DOCS
 from cw.gh import AGENT_COMMENT_MARKER
 from cw.models import CODEX_BACKEND
 from tests._tool_fakes import FakeGhCli
-from tests.conftest import _COMMANDS_ROOT, _REPO_ROOT
 
-if TYPE_CHECKING:
-    from pathlib import Path
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_COMMANDS_ROOT = _REPO_ROOT / ".claude" / "commands"
 
 _TICKET = "4242"
 

@@ -55,7 +55,7 @@ from cw.exceptions import (
     CwLockReentrancyError,
     LockTimeoutError,
 )
-from tests.conftest import _FakeClock, _hold_flock, _seed_lock_holds
+from tests._shared.lock_helpers import _FakeClock, _hold_flock, _seed_lock_holds
 
 if TYPE_CHECKING:
     from collections.abc import Callable

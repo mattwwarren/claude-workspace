@@ -102,15 +102,14 @@ from tests._reconcile_helpers import (
     _make_stale_base_repo,
     _scope_guard_git,
 )
-from tests.conftest import (
+from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.review_builders import (
     _doc_payload,
     _finding_kwargs,
     _make_debt_record,
     _make_diff,
     _make_finding,
     _make_reviewer_doc,
-    commit_tracked_file,
-    git_in,
 )
 from tests.test_review_adjudication import _make_voided_finding
 

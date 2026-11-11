@@ -20,13 +20,12 @@ from click.testing import CliRunner
 import cw.preflight as pf
 from cw.cli import main
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests.conftest import (
+from tests._shared.cli_preflight import (
     _install_check_stubs,
     _make_agent_repo,
     _write_tracker_config,
-    git_in,
-    init_repo_with_remote,
 )
+from tests._shared.git_repos import git_in, init_repo_with_remote
 
 if TYPE_CHECKING:
     from collections.abc import Callable

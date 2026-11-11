@@ -72,7 +72,10 @@ from tests._routed_result_helpers import (
     _status_of,
     _wipe_roster_on_stop,
 )
-from tests.conftest import _stop_leaves_worker_listed, _stop_makes_roster_unreadable
+from tests._shared.daemon_fakes import (
+    _stop_leaves_worker_listed,
+    _stop_makes_roster_unreadable,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

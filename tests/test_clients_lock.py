@@ -24,7 +24,7 @@ from cw.config import (
     load_clients,
 )
 from cw.exceptions import LockTimeoutError
-from tests.conftest import _hold_flock
+from tests._shared.lock_helpers import _hold_flock
 
 if TYPE_CHECKING:
     from collections.abc import Callable

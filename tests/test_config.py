@@ -64,16 +64,16 @@ from cw.models import (
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._invalid_utf8 import INVALID_UTF8
-from tests.conftest import (
+from tests._shared.lock_helpers import (
     _assert_lock_held,
     _fake_fcntl,
     _FakeClock,
     _hold_flock,
     _hold_sessions_lock,
-    _make_daemon_session,
     _raise_eio,
     _RecordingLockPath,
 )
+from tests._shared.session_seeding import _make_daemon_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1861,7 +1861,7 @@ class TestMigrateCwState:
         """load_state() is a pure read: legacy file is migrated in memory only,
         no backup is written, and no byte or mtime under state_dir changes (#2951)."""
         from cw.models import CW_STATE_SCHEMA_VERSION
-        from tests.conftest import write_legacy_sessions_json
+        from tests._shared.session_seeding import write_legacy_sessions_json
 
         state_dir = tmp_config_dir / ".local" / "share" / "cw"
         sf = write_legacy_sessions_json(state_dir, mtime_ns=1_000_000_000_000_000_000)
@@ -1890,7 +1890,7 @@ class TestMigrateCwState:
         import json
 
         from cw.models import CW_STATE_SCHEMA_VERSION
-        from tests.conftest import write_legacy_sessions_json
+        from tests._shared.session_seeding import write_legacy_sessions_json
 
         state_dir = tmp_config_dir / ".local" / "share" / "cw"
         sf = write_legacy_sessions_json(state_dir)
@@ -1910,7 +1910,7 @@ class TestMigrateCwState:
 
     def test_mutate_state_backs_up_legacy_file_once(self, tmp_config_dir: Path) -> None:
         """mutate_state() over a legacy file backs it up on its save (#2951)."""
-        from tests.conftest import write_legacy_sessions_json
+        from tests._shared.session_seeding import write_legacy_sessions_json
 
         state_dir = tmp_config_dir / ".local" / "share" / "cw"
         sf = write_legacy_sessions_json(state_dir)
@@ -1928,7 +1928,7 @@ class TestMigrateCwState:
     ) -> None:
         """Backup decision reads disk: a save with no prior load backs up (#2951)."""
         from cw.models import CwState
-        from tests.conftest import write_legacy_sessions_json
+        from tests._shared.session_seeding import write_legacy_sessions_json
 
         state_dir = tmp_config_dir / ".local" / "share" / "cw"
         sf = write_legacy_sessions_json(state_dir)
@@ -1954,7 +1954,7 @@ class TestMigrateCwState:
         """Guard runs before the backup: a refused save creates nothing and leaves
         the legacy bytes untouched (#2951)."""
         from cw.models import CwState
-        from tests.conftest import write_legacy_sessions_json
+        from tests._shared.session_seeding import write_legacy_sessions_json
 
         state_dir = tmp_config_dir / ".local" / "share" / "cw"
         sf = write_legacy_sessions_json(state_dir)

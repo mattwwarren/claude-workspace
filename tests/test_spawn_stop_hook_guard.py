@@ -60,8 +60,9 @@ def _place_context(worktree: Path) -> Path:
     """Create a bare ``.claude/cw-context.json`` under *worktree*.
 
     The guard only tests file existence, so a literal ``{}`` is enough; going
-    through the real writer (``tests/conftest.py::_write_hook_context_file``)
-    would also write ``settings.local.json`` and blur what this file isolates.
+    through the real writer
+    (``tests/_shared/stop_hook_context.py::_write_hook_context_file``) would
+    also write ``settings.local.json`` and blur what this file isolates.
     """
     context_path = worktree / HOOK_CONTEXT_RELATIVE_PATH
     context_path.parent.mkdir(parents=True, exist_ok=True)

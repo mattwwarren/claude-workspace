@@ -101,11 +101,9 @@ from tests._reconcile_helpers import (
     _write_transcript_records,
     stub_worktree_probe,
 )
-from tests.conftest import (
-    _make_daemon_session,
-    _write_idle_transcript,
-    git_in,
-)
+from tests._shared.git_repos import git_in
+from tests._shared.session_seeding import _make_daemon_session
+from tests._shared.stop_hook_context import _write_idle_transcript
 
 if TYPE_CHECKING:
     from collections.abc import Callable

@@ -35,6 +35,8 @@ from cw.tracker_post import (
     PostStatus,
 )
 from tests._backend_mcp_helpers import codex_tracker_client, stage_mcp_config
+from tests._shared.cli_preflight import _write_tracker_config
+from tests._shared.session_seeding import _make_ticket_task
 from tests._tool_fakes import (
     FakeGhComment,
     ScriptedCodexRunner,
@@ -42,7 +44,6 @@ from tests._tool_fakes import (
     plan_sentinel,
     tracker_io_turn_result,
 )
-from tests.conftest import _make_ticket_task, _write_tracker_config
 
 if TYPE_CHECKING:
     from pathlib import Path

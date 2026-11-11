@@ -23,18 +23,22 @@ from click.testing import CliRunner
 
 from cw.cli import main
 from cw.config import load_state, save_state
-from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.dev_queue import load_dev_queue
 from cw.models import (
+    HOOK_CONTEXT_RELATIVE_PATH,
     ClientConfig,
     CwState,
     DevQueueStore,
+    LaneConfig,
+    OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
     Session,
     SessionOrigin,
     SessionStatus,
     Stage,
-    TicketTask,
+    StageExecutorConfig,
+    StagePipelineConfig,
     UsageLimitAct,
 )
 from cw.native_daemon import FakeNativeDaemonClient
@@ -42,46 +46,78 @@ from cw.reconcile import _deps, reconcile
 from cw.reconcile.dirty_checks import DirtyChecks
 from cw.reconcile.unowned_running import (
     UnownedCandidate,
+    UnownedFindings,
     detect_unowned_running,
     run_unowned_running_recovery,
 )
-from cw.worktree import worktree_path_for
+from cw.reconcile.unowned_running_text import (
+    CAUSE_BOUND_ELSEWHERE,
+    CAUSE_CONFLICTING_SESSION,
+    CAUSE_DUPLICATE,
+    CAUSE_NAIVE_DATETIME,
+    CAUSE_NON_NATIVE,
+    CAUSE_ROSTER_UNPROVEN,
+    CAUSE_STALE_SESSION,
+    CAUSE_UNREADABLE_CONTEXT,
+    CONTEXT_ATTEMPT_MISMATCH,
+    CONTEXT_MISSING,
+    CONTEXT_NO_ATTEMPT,
+    CONTEXT_OTHER_CLAIM,
+    CONTEXT_SESSION_ABSENT,
+    unconfirmed_note,
+)
 from tests._clients_yaml import write_clients_yaml
 from tests._dirty_check_helpers import DIRTY_CHECKS_LOGGER, unavailable_records
 from tests._reconcile_helpers import (
+    _CLAIM,
+    _CLIENT,
+    _SID,
+    _TICKET,
     EVENTS_DOC,
+    _arrange,
     _attention_events,
+    _claim_context,
+    _edit_queue,
     _failing_record_event,
+    _row,
+    _seed,
+    _session,
     _state_queue_snapshot,
+    _sweep,
+    _worktree,
+    _wrap_detect,
     _write_agent_spawn_stamp,
+    dead_launch_marker,
     events_doc_bullet,
+    live_launch_marker,
+    make_client_cfg,
     mk_unowned_running_row,
+    use_reconcile_daemon,
     write_unreadable_claim_context,
 )
-from tests.conftest import (
-    CapturedEvent,
-    _make_daemon_session,
-    _make_ticket_task,
-    _write_hook_context_file,
-)
+from tests._shared.daemon_fakes import CapturedEvent
+from tests._shared.session_seeding import _make_ticket_task
+from tests._shared.stop_hook_context import _write_hook_context_file
 
-_CLIENT = "client-a"
-_TICKET = "GEN-2591"
 _OTHER_TICKET = "GEN-2592"
-_SID = "sess-2591"
-_CLAIM = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
 # A naive timestamp, as a legacy or hand-edited state file can carry.
 _NAIVE_START = (_CLAIM + timedelta(hours=1)).replace(tzinfo=None)
 _MODULE = "cw.reconcile.unowned_running"
+# Past the spawn grace: an UNKNOWN-verdict evidence cause signals at this age.
+_OLD = _CLAIM + timedelta(minutes=5)
 
 
 @pytest.fixture
 def client_cfg(tmp_path: Path) -> ClientConfig:
-    return ClientConfig(
-        name=_CLIENT,
-        workspace_path=tmp_path / "ws",
-        worktree_base=tmp_path / "worktrees",
-    )
+    return make_client_cfg(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def daemon(monkeypatch: pytest.MonkeyPatch) -> FakeNativeDaemonClient:
+    """The sweep's daemon: an in-memory roster, empty unless a test seeds it."""
+    fake = FakeNativeDaemonClient()
+    use_reconcile_daemon(monkeypatch, fake)
+    return fake
 
 
 @pytest.fixture
@@ -89,100 +125,6 @@ def adopted(
     capture_events: Callable[..., list[CapturedEvent]],
 ) -> list[CapturedEvent]:
     return capture_events(_MODULE, OrchestratorEventType.TASK_SESSION_ADOPTED)
-
-
-def _worktree(client: ClientConfig, ticket_id: str = _TICKET) -> Path:
-    wt = worktree_path_for(client, f"{client.feature_branch_prefix}/{ticket_id}")
-    wt.mkdir(parents=True, exist_ok=True)
-    return wt
-
-
-def _claim_context(
-    wt: Path,
-    *,
-    attempts: int,
-    session_id: str = _SID,
-    ticket_id: str = _TICKET,
-    client: str = _CLIENT,
-) -> None:
-    """The context a dispatch spawn writes for a claim, through the real writer."""
-    _write_hook_context_file(
-        wt,
-        session_id=session_id,
-        ticket_id=ticket_id,
-        client=client,
-        task=_make_ticket_task(ticket_id=ticket_id, client=client, attempts=attempts),
-    )
-
-
-def _session(**overrides: object) -> Session:
-    """The claim's recorded session: a task-spawned name, started after the claim."""
-    fields: dict[str, object] = {
-        "id": _SID,
-        "name": f"{_CLIENT}/auto-dev/{_TICKET}",
-        "client": _CLIENT,
-        "status": SessionStatus.COMPLETED,
-        "surface_ref": None,
-        "started_at": _CLAIM + timedelta(seconds=5),
-    }
-    fields.update(overrides)
-    return _make_daemon_session(**fields)
-
-
-def _seed(*sessions: Session) -> None:
-    state = load_state()
-    state.sessions.extend(sessions)
-    save_state(state)
-
-
-def _arrange(
-    client: ClientConfig,
-    *,
-    attempts: int = 1,
-    claimed_at: datetime | None = _CLAIM,
-    session: Session | None = None,
-    **row_overrides: object,
-) -> TicketTask:
-    """A claim whose stamp failed: context written, session recorded, row unbound."""
-    _claim_context(_worktree(client), attempts=attempts)
-    _seed(session if session is not None else _session())
-    return mk_unowned_running_row(
-        client=_CLIENT,
-        ticket_id=_TICKET,
-        attempts=attempts,
-        claimed_at=claimed_at,
-        **row_overrides,
-    )
-
-
-def _sweep(client: ClientConfig) -> list[str]:
-    return run_unowned_running_recovery(clients={_CLIENT: client})
-
-
-def _row(ticket_id: str = _TICKET) -> TicketTask:
-    return next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
-
-
-def _wrap_detect(monkeypatch: pytest.MonkeyPatch, between: Callable[[], None]) -> None:
-    """Run *between* after the real detect returned and before the act."""
-    import cw.reconcile.unowned_running as mod
-
-    real = mod.detect_unowned_running
-
-    def _detect(
-        store: DevQueueStore, state: CwState, clients: dict[str, ClientConfig]
-    ) -> list[UnownedCandidate]:
-        found = real(store, state, clients)
-        between()
-        return found
-
-    monkeypatch.setattr(mod, "detect_unowned_running", _detect)
-
-
-def _edit_queue(mutate: Callable[[DevQueueStore], None]) -> None:
-    store = load_dev_queue()
-    mutate(store)
-    save_dev_queue(store)
 
 
 class TestAdopt:
@@ -669,7 +611,12 @@ class TestAdoptNotApplicable:
         }
         before = _state_queue_snapshot()
 
-        assert run_unowned_running_recovery(clients=scoped) == []
+        assert (
+            run_unowned_running_recovery(
+                now=_OLD, clients=scoped, config=OrchestratorConfig(), native_live=set()
+            )
+            == []
+        )
 
         assert _state_queue_snapshot() == before
         assert adopted == []
@@ -729,11 +676,18 @@ class TestNoOpAndInvariants:
         before = _state_queue_snapshot()
 
         found = detect_unowned_running(
-            load_dev_queue(), load_state(), {_CLIENT: client_cfg}
+            load_dev_queue(),
+            load_state(),
+            {_CLIENT: client_cfg},
+            now=_OLD,
+            daemon=FakeNativeDaemonClient(),
+            native_live=set(),
         )
 
         assert _state_queue_snapshot() == before
-        assert found == [
+        assert found.no_owner == []
+        assert found.signals == []
+        assert found.adopts == [
             UnownedCandidate(
                 ticket_id=_TICKET,
                 client=_CLIENT,
@@ -884,6 +838,460 @@ class TestNoOpAndInvariants:
 
         assert _row().status is QueueItemStatus.PENDING
         assert len(checked) == 1
+
+
+class TestAdoptClearsPartBState:
+    def test_adopt_clears_launch_marker(self, client_cfg: ClientConfig) -> None:
+        _arrange(client_cfg, launch_marker=live_launch_marker())
+
+        assert _sweep(client_cfg) == [_TICKET]
+
+        assert _row().launch_marker is None
+
+    def test_adopt_clears_unconfirmed_note(self, client_cfg: ClientConfig) -> None:
+        _arrange(client_cfg, advisory_note=unconfirmed_note(CAUSE_ROSTER_UNPROVEN))
+
+        assert _sweep(client_cfg) == [_TICKET]
+
+        assert _row().advisory_note is None
+
+    def test_adopt_keeps_another_note(self, client_cfg: ClientConfig) -> None:
+        _arrange(client_cfg, advisory_note="?no_session")
+
+        assert _sweep(client_cfg) == [_TICKET]
+
+        assert _row().advisory_note == "?no_session"
+
+    def test_non_utf8_context_does_not_abort_the_sweep(
+        self, client_cfg: ClientConfig, adopted: list[CapturedEvent]
+    ) -> None:
+        """A non-UTF-8 context once raised UnicodeDecodeError out of the tick."""
+        context = _worktree(client_cfg, _OTHER_TICKET) / HOOK_CONTEXT_RELATIVE_PATH
+        context.parent.mkdir(parents=True)
+        context.write_bytes(b"\xff\xfe\x00")
+        mk_unowned_running_row(
+            client=_CLIENT, ticket_id=_OTHER_TICKET, attempts=1, claimed_at=_CLAIM
+        )
+        _arrange(client_cfg)
+
+        assert _sweep(client_cfg, now=_OLD) == [_TICKET]
+
+        assert _row(_OTHER_TICKET).session_id is None
+        assert len(adopted) == 1
+
+
+_Builder = Callable[..., None]
+
+
+def _build_duplicate(client: ClientConfig, **row: object) -> None:
+    _arrange(client, **row)
+    mk_unowned_running_row(
+        client=_CLIENT,
+        ticket_id=_TICKET,
+        attempts=1,
+        claimed_at=row.get("claimed_at", _CLAIM),
+        launch_marker=row.get("launch_marker"),
+    )
+
+
+def _build_bound_elsewhere(client: ClientConfig, **row: object) -> None:
+    _arrange(client, **row)
+    _edit_queue(
+        lambda store: store.tasks.append(
+            _make_ticket_task(
+                ticket_id=_OTHER_TICKET,
+                client=_CLIENT,
+                status=QueueItemStatus.BLOCKED_ON_USER,
+                session_id=_SID,
+            )
+        )
+    )
+
+
+def _build_conflicting(client: ClientConfig, **row: object) -> None:
+    _arrange(
+        client, session=_session(name=f"{_CLIENT}/auto-dev/{_OTHER_TICKET}"), **row
+    )
+
+
+def _build_stale(client: ClientConfig, **row: object) -> None:
+    _arrange(client, session=_session(started_at=_CLAIM - timedelta(hours=1)), **row)
+
+
+def _build_naive(client: ClientConfig, **row: object) -> None:
+    _arrange(client, session=_session(started_at=_NAIVE_START), **row)
+
+
+def _unbound(**row: object) -> None:
+    fields: dict[str, object] = {"attempts": 1, "claimed_at": _CLAIM, **row}
+    mk_unowned_running_row(client=_CLIENT, ticket_id=_TICKET, **fields)
+
+
+def _build_unreadable(client: ClientConfig, **row: object) -> None:
+    write_unreadable_claim_context(_worktree(client), "{not json")
+    _unbound(**row)
+
+
+def _build_missing(client: ClientConfig, **row: object) -> None:
+    _worktree(client)
+    _unbound(**row)
+
+
+def _build_no_attempt(client: ClientConfig, **row: object) -> None:
+    _write_hook_context_file(
+        _worktree(client), session_id=_SID, ticket_id=_TICKET, client=_CLIENT
+    )
+    _unbound(**row)
+
+
+def _build_attempt_mismatch(client: ClientConfig, **row: object) -> None:
+    _claim_context(_worktree(client), attempts=1)
+    _seed(_session())
+    _unbound(**{**row, "attempts": 2})
+
+
+def _build_other_claim(client: ClientConfig, **row: object) -> None:
+    _claim_context(_worktree(client), attempts=1, ticket_id=_OTHER_TICKET)
+    _unbound(**row)
+
+
+def _build_session_absent(client: ClientConfig, **row: object) -> None:
+    _claim_context(_worktree(client), attempts=1)
+    _unbound(**row)
+
+
+_EVIDENCE_BUILDERS: dict[str, _Builder] = {
+    CAUSE_DUPLICATE: _build_duplicate,
+    CAUSE_BOUND_ELSEWHERE: _build_bound_elsewhere,
+    CAUSE_CONFLICTING_SESSION: _build_conflicting,
+    CAUSE_STALE_SESSION: _build_stale,
+    CAUSE_NAIVE_DATETIME: _build_naive,
+    CAUSE_UNREADABLE_CONTEXT: _build_unreadable,
+}
+_NO_TIE_BUILDERS: dict[str, _Builder] = {
+    CONTEXT_MISSING: _build_missing,
+    CONTEXT_NO_ATTEMPT: _build_no_attempt,
+    CONTEXT_ATTEMPT_MISMATCH: _build_attempt_mismatch,
+    CONTEXT_OTHER_CLAIM: _build_other_claim,
+    CONTEXT_SESSION_ABSENT: _build_session_absent,
+}
+_ALL_BUILDERS = {**_EVIDENCE_BUILDERS, **_NO_TIE_BUILDERS}
+
+
+def _detect(
+    client: ClientConfig,
+    *,
+    now: datetime = _OLD,
+    daemon: FakeNativeDaemonClient | None = None,
+    native_live: set[str] | None = None,
+) -> UnownedFindings:
+    return detect_unowned_running(
+        load_dev_queue(),
+        load_state(),
+        {_CLIENT: client},
+        now=now,
+        daemon=daemon if daemon is not None else FakeNativeDaemonClient(),
+        native_live=native_live or set(),
+    )
+
+
+def _causes(found: UnownedFindings) -> set[str]:
+    return {s.cause for s in found.signals}
+
+
+def _assert_silent(found: UnownedFindings) -> None:
+    assert found.adopts == []
+    assert found.no_owner == []
+    assert found.signals == []
+
+
+def _non_native_client(tmp_path: Path, *, lane_level: bool) -> ClientConfig:
+    codex = StagePipelineConfig(
+        executors={Stage.REVIEW: StageExecutorConfig(backend="codex")}
+    )
+    if lane_level:
+        return ClientConfig(
+            name=_CLIENT,
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "worktrees",
+            lanes=[
+                LaneConfig(name="default"),
+                LaneConfig(name="fast", pipeline=codex),
+            ],
+        )
+    return ClientConfig(
+        name=_CLIENT,
+        workspace_path=tmp_path / "ws",
+        worktree_base=tmp_path / "worktrees",
+        pipeline=codex,
+    )
+
+
+class TestDecisionTable:
+    """Detect-level and pure: which outcome each verdict and evidence shape gets."""
+
+    @pytest.mark.parametrize("shape", sorted(_ALL_BUILDERS))
+    def test_in_flight_waits_for_every_cause(
+        self, client_cfg: ClientConfig, shape: str
+    ) -> None:
+        _ALL_BUILDERS[shape](client_cfg, launch_marker=live_launch_marker())
+
+        _assert_silent(_detect(client_cfg))
+
+    @pytest.mark.parametrize("shape", sorted(_NO_TIE_BUILDERS))
+    def test_unknown_never_releases(self, client_cfg: ClientConfig, shape: str) -> None:
+        _NO_TIE_BUILDERS[shape](client_cfg)
+
+        _assert_silent(_detect(client_cfg))
+
+    @pytest.mark.parametrize("cause", sorted(_EVIDENCE_BUILDERS))
+    def test_unknown_old_claim_signals_the_evidence_cause(
+        self, client_cfg: ClientConfig, cause: str
+    ) -> None:
+        _EVIDENCE_BUILDERS[cause](client_cfg)
+
+        found = _detect(client_cfg)
+
+        assert found.no_owner == []
+        assert found.adopts == []
+        assert _causes(found) == {cause}
+
+    @pytest.mark.parametrize("cause", sorted(_EVIDENCE_BUILDERS))
+    def test_unknown_young_claim_is_silent(
+        self, client_cfg: ClientConfig, cause: str
+    ) -> None:
+        _EVIDENCE_BUILDERS[cause](client_cfg)
+
+        _assert_silent(_detect(client_cfg, now=_CLAIM + timedelta(seconds=5)))
+
+    def test_unknown_naive_claim_is_silent(self, client_cfg: ClientConfig) -> None:
+        _build_duplicate(client_cfg, claimed_at=_CLAIM.replace(tzinfo=None))
+
+        _assert_silent(_detect(client_cfg))
+
+    def test_unknown_claim_of_unknown_age_counts_as_old(
+        self, client_cfg: ClientConfig
+    ) -> None:
+        _build_duplicate(client_cfg, claimed_at=None)
+
+        found = _detect(client_cfg, now=_CLAIM)
+
+        assert _causes(found) == {CAUSE_DUPLICATE}
+
+    @pytest.mark.parametrize("cause", sorted(_EVIDENCE_BUILDERS))
+    def test_owner_gone_signals_without_debounce(
+        self, client_cfg: ClientConfig, cause: str
+    ) -> None:
+        _EVIDENCE_BUILDERS[cause](client_cfg, launch_marker=dead_launch_marker())
+
+        found = _detect(client_cfg, now=_CLAIM + timedelta(seconds=1))
+
+        assert found.no_owner == []
+        assert _causes(found) == {cause}
+
+    @pytest.mark.parametrize("state", sorted(_NO_TIE_BUILDERS))
+    def test_owner_gone_no_tie_is_a_no_owner_candidate(
+        self, client_cfg: ClientConfig, state: str
+    ) -> None:
+        _NO_TIE_BUILDERS[state](client_cfg, launch_marker=dead_launch_marker())
+
+        found = _detect(client_cfg, now=_CLAIM + timedelta(seconds=1))
+
+        assert found.signals == []
+        assert [c.context_state for c in found.no_owner] == [state]
+        candidate = found.no_owner[0]
+        assert candidate.launch_marker == dead_launch_marker()
+        assert candidate.homes_snapshot == frozenset()
+        assert candidate.worktree == _worktree(client_cfg)
+
+    def test_recycled_pid_counts_as_gone(self, client_cfg: ClientConfig) -> None:
+        _build_missing(client_cfg, launch_marker=dead_launch_marker(recycled=True))
+
+        assert len(_detect(client_cfg).no_owner) == 1
+
+    def test_roster_unreadable_waits(self, client_cfg: ClientConfig) -> None:
+        _build_missing(client_cfg, launch_marker=dead_launch_marker())
+        daemon = FakeNativeDaemonClient()
+        daemon.roster_unreadable = True
+
+        _assert_silent(_detect(client_cfg, daemon=daemon))
+
+    def test_recorded_live_session_homed_waits(self, client_cfg: ClientConfig) -> None:
+        _build_missing(client_cfg, launch_marker=dead_launch_marker())
+        _seed(
+            _session(
+                id="sess-live",
+                status=SessionStatus.ACTIVE,
+                worktree_path=_worktree(client_cfg),
+            )
+        )
+
+        _assert_silent(_detect(client_cfg))
+
+    def test_unrecorded_roster_worker_homed_waits(
+        self, client_cfg: ClientConfig
+    ) -> None:
+        _build_missing(client_cfg, launch_marker=dead_launch_marker())
+        daemon = FakeNativeDaemonClient()
+        daemon.seed_live_worker(_worktree(client_cfg))
+
+        _assert_silent(_detect(client_cfg, daemon=daemon))
+
+    def test_unnormalizable_path_waits(
+        self, client_cfg: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _build_missing(client_cfg, launch_marker=dead_launch_marker())
+
+        def _loop(_path: Path) -> Path:
+            msg = "symlink loop"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.reconcile.unowned_running_acts._normalize_path", _loop)
+
+        _assert_silent(_detect(client_cfg))
+
+    @pytest.mark.parametrize("lane_level", [False, True], ids=["client", "lane"])
+    def test_non_native_client_signals(self, tmp_path: Path, lane_level: bool) -> None:
+        client = _non_native_client(tmp_path, lane_level=lane_level)
+        _build_missing(client, launch_marker=dead_launch_marker())
+
+        found = _detect(client)
+
+        assert found.no_owner == []
+        assert _causes(found) == {CAUSE_NON_NATIVE}
+        assert "(codex)" in found.signals[0].evidence
+
+    def test_roster_unproven_by_agents_listing(self, client_cfg: ClientConfig) -> None:
+        _build_missing(client_cfg, launch_marker=dead_launch_marker())
+
+        found = _detect(client_cfg, native_live={"0000abcd"})
+
+        assert found.no_owner == []
+        assert _causes(found) == {CAUSE_ROSTER_UNPROVEN}
+
+    def test_roster_unproven_by_a_bound_live_row(
+        self, client_cfg: ClientConfig
+    ) -> None:
+        _build_missing(client_cfg, launch_marker=dead_launch_marker())
+        _seed(
+            _session(
+                id="sess-bound",
+                name=f"{_CLIENT}/auto-dev/{_OTHER_TICKET}",
+                status=SessionStatus.ACTIVE,
+                surface_ref="0000abcd",
+            )
+        )
+        mk_unowned_running_row(
+            client=_CLIENT,
+            ticket_id=_OTHER_TICKET,
+            attempts=1,
+            claimed_at=_CLAIM,
+            session_id="sess-bound",
+            ever_spawned=True,
+        )
+
+        found = _detect(client_cfg)
+
+        assert found.no_owner == []
+        assert _causes(found) == {CAUSE_ROSTER_UNPROVEN}
+
+    def test_unreadable_context_directory(self, client_cfg: ClientConfig) -> None:
+        (_worktree(client_cfg) / HOOK_CONTEXT_RELATIVE_PATH).mkdir(parents=True)
+        _unbound(launch_marker=dead_launch_marker())
+
+        found = _detect(client_cfg)
+
+        assert found.no_owner == []
+        assert _causes(found) == {CAUSE_UNREADABLE_CONTEXT}
+
+    def test_unreadable_context_permission_error(
+        self, client_cfg: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Monkeypatched, because ``chmod`` is a no-op when the suite runs as root."""
+        _build_session_absent(client_cfg, launch_marker=dead_launch_marker())
+        real_read_text = Path.read_text
+
+        def _read_text(
+            self: Path,
+            encoding: str | None = None,
+            errors: str | None = None,
+            newline: str | None = None,
+        ) -> str:
+            if self.name == HOOK_CONTEXT_RELATIVE_PATH.name:
+                raise PermissionError(self)
+            return real_read_text(
+                self, encoding=encoding, errors=errors, newline=newline
+            )
+
+        monkeypatch.setattr(Path, "read_text", _read_text)
+
+        found = _detect(client_cfg)
+
+        assert found.no_owner == []
+        assert _causes(found) == {CAUSE_UNREADABLE_CONTEXT}
+
+    def test_unreadable_context_non_utf8(self, client_cfg: ClientConfig) -> None:
+        context = _worktree(client_cfg) / HOOK_CONTEXT_RELATIVE_PATH
+        context.parent.mkdir(parents=True)
+        context.write_bytes(b"\xff\xfe\x00")
+        _unbound(launch_marker=dead_launch_marker())
+
+        assert _causes(_detect(client_cfg)) == {CAUSE_UNREADABLE_CONTEXT}
+
+    @pytest.mark.parametrize("shape", [CONTEXT_MISSING, CAUSE_DUPLICATE])
+    def test_foreign_pid_namespace_honours_no_verdict(
+        self, client_cfg: ClientConfig, monkeypatch: pytest.MonkeyPatch, shape: str
+    ) -> None:
+        _ALL_BUILDERS[shape](client_cfg, launch_marker=dead_launch_marker())
+        monkeypatch.setattr(
+            "cw.launch_marker.in_initial_pid_namespace", lambda **_kw: False
+        )
+
+        _assert_silent(_detect(client_cfg))
+
+    def test_latched_cause_is_skipped(self, client_cfg: ClientConfig) -> None:
+        _build_duplicate(
+            client_cfg,
+            launch_marker=dead_launch_marker(),
+            advisory_note=unconfirmed_note(CAUSE_DUPLICATE),
+        )
+
+        found = _detect(client_cfg)
+
+        # Only the second (unlatched) duplicate row is signalled.
+        assert len(found.signals) == 1
+        assert found.signals[0].created_at == load_dev_queue().tasks[1].created_at
+
+    def test_other_cause_latch_does_not_skip(self, client_cfg: ClientConfig) -> None:
+        _build_missing(
+            client_cfg,
+            launch_marker=dead_launch_marker(),
+            advisory_note=unconfirmed_note(CAUSE_DUPLICATE),
+        )
+
+        found = _detect(client_cfg, native_live={"0000abcd"})
+
+        assert _causes(found) == {CAUSE_ROSTER_UNPROVEN}
+
+    def test_same_cause_latch_skips_a_changed_count(
+        self, client_cfg: ClientConfig
+    ) -> None:
+        """R10: the latch keys on the cause, so a new live count stays silent."""
+        _build_missing(
+            client_cfg,
+            launch_marker=dead_launch_marker(),
+            advisory_note=unconfirmed_note(CAUSE_ROSTER_UNPROVEN),
+        )
+
+        _assert_silent(_detect(client_cfg, native_live={"0000abcd", "0000abce"}))
+
+    def test_detect_writes_nothing(self, client_cfg: ClientConfig) -> None:
+        _build_duplicate(client_cfg, launch_marker=dead_launch_marker())
+        before = _state_queue_snapshot()
+
+        _detect(client_cfg)
+
+        assert _state_queue_snapshot() == before
 
 
 def _events_section(heading: str) -> str:

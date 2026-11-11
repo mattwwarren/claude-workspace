@@ -23,7 +23,7 @@ positionals, and ``file://`` URLs. A repo-location variable passed through
 ``extra_env`` is refused too.
 
 The root is the pytest basetemp, bound once per session by the
-``_git_sandbox_root`` fixture in ``tests/conftest.py`` (the same root
+``_git_sandbox_root`` fixture in ``tests/_shared/session_guards.py`` (the same root
 ``tests/_git_ceiling.py`` confines discovery to). ``integration`` tests run
 the runner with containment off: the live codex suite builds repos under a
 home-tree base.
@@ -37,10 +37,11 @@ narrows what a test can reach; it is not a security boundary.
 :func:`scrub_process_env` removes the six repo-location variables from this
 process's environment so bash scripts a test runs (whose git no ``Popen``
 guard can see) also start clean. It runs as a side effect of importing this
-module, which ``tests/conftest.py`` does next to ``tests._session_home``,
-ahead of every ``cw`` import. It honours the same live-run opt-out as the
-``HOME`` redirect, and unlike the runner leaves ``GIT_SSH_COMMAND``,
-``GIT_ASKPASS`` and ``GIT_EXEC_PATH`` alone for code that relies on them.
+module, which ``tests/conftest.py``'s ``pytest_plugins`` does next to
+``tests._session_home``, ahead of every ``cw`` import. It honours the same
+live-run opt-out as the ``HOME`` redirect, and unlike the runner leaves
+``GIT_SSH_COMMAND``, ``GIT_ASKPASS`` and ``GIT_EXEC_PATH`` alone for code that
+relies on them.
 """
 
 from __future__ import annotations
@@ -256,7 +257,7 @@ def validate(argv: Sequence[str], *, cwd: Path, root: Path) -> None:
 def _require_root() -> Path:
     root = _STATE.root
     if root is None:
-        msg = "git sandbox: no sandbox root bound (tests/conftest.py binds basetemp)"
+        msg = "git sandbox: no sandbox root bound (session_guards binds basetemp)"
         raise GitSandboxViolationError(msg)
     return root
 

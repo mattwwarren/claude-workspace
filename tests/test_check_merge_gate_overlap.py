@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import GUARD_MARKER_CURRENT, load_guard_script_module
+from tests._shared.guard_fences import GUARD_MARKER_CURRENT, load_guard_script_module
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = _REPO_ROOT / ".claude" / "scripts" / "check_merge_gate_overlap.py"

@@ -66,12 +66,8 @@ from cw.reconcile import ProposedAction
 from tests import _git_sandbox
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._reconcile_helpers import probe_sessions_lock_free
-from tests.conftest import (
-    _make_daemon_session,
-    _make_ticket_task,
-    _seed_inbox_with_cursor,
-    _spy_parse_lines,
-)
+from tests._shared.dispatch_fixtures import _seed_inbox_with_cursor, _spy_parse_lines
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 
 _RunnerFn = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
@@ -3264,6 +3260,48 @@ def test_orchestrate_run_drain_authorizes_revert_task(
 
     assert count == 1
     assert reap_calls == ["s1"]
+
+
+@pytest.mark.parametrize(
+    "proposed_action",
+    [ProposedAction.REVERT_TASK, ProposedAction.PARK_BLOCKED_ON_USER],
+    ids=["revert_task", "park_blocked_on_user"],
+)
+def test_orchestrate_run_drain_skips_a_no_owner_proposal(
+    run_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    proposed_action: ProposedAction,
+) -> None:
+    """#3328: a NO_OWNER proposal names no session, so the drain acts on nothing."""
+    from cw.cli.orchestrate import _drain_reap_proposals
+    from cw.reconcile.unowned_running_text import reap_proposed_payload
+
+    reap_calls: list[str] = []
+
+    def fake_reap(selector: str, **kwargs: object) -> bool:
+        reap_calls.append(selector)
+        return True
+
+    monkeypatch.setattr("cw.cli.orchestrate._reap_session_by_selector", fake_reap)
+    record_event(
+        OrchestratorEventType.SESSION_REAP_PROPOSED,
+        reap_proposed_payload(
+            client="client-a",
+            ticket_id="GEN-1",
+            lane="default",
+            proposed_action=proposed_action.value,
+            worktree_path="/w/GEN-1",
+            context_state="missing",
+            launch_owner_pid=2_000_000_000,
+            claim_age_seconds=None,
+        ),
+        correlation_id="GEN-1",
+    )
+
+    assert _drain_reap_proposals("client-a", "default") == 1
+    assert reap_calls == []
+    # "Already resolved, skipping" still advanced the cursor.
+    assert _drain_reap_proposals("client-a", "default") == 0
 
 
 def test_orchestrate_run_drain_reap_stays_unbounded(

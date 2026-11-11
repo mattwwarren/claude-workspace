@@ -102,7 +102,8 @@ from tests._reconcile_helpers import (
     stub_worktree_probe,
     use_reconcile_daemon,
 )
-from tests.conftest import _make_daemon_session, _make_ticket_task, git_in
+from tests._shared.git_repos import git_in
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -1496,7 +1497,9 @@ class TestMissSources:
             save_dev_queue(DevQueueStore(tasks=[_row("m7b")]))
             return real_partition(checks, sessions)
 
-        monkeypatch.setattr("cw.reconcile.tasks.partition_dirty", _partition_then_claim)
+        monkeypatch.setattr(
+            "cw.reconcile.tasks.backstops.partition_dirty", _partition_then_claim
+        )
 
         assert revert_timed_out_tasks(DirtyChecks()) == []
 

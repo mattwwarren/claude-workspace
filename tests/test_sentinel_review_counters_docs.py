@@ -23,7 +23,7 @@ read as a settlement, since ``cw.dispatch.productivity`` uses this field as
 one of three OR'd anti-gaming productivity signals.
 """
 
-from tests.conftest import _cmd
+from tests._shared.workflow_text import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after, _nearby
 
 FREEZE_ANCHOR = "**Freeze** `.review.must_fix_initial`"

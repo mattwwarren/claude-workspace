@@ -83,7 +83,7 @@ from tests._reconcile_helpers import (
     act_on_local_harvest,
     probe_sessions_lock_free,
 )
-from tests.conftest import (
+from tests._shared.session_seeding import (
     _audit_failure_logged,
     _fail_audit_append,
     _make_daemon_session,
@@ -1087,7 +1087,8 @@ def test_park_terminal_sibling_tasks_auto_policy_cancels_pending(
         lanes=[LaneConfig(name="default", max_parallel=1, reap_policy=ReapPolicy.AUTO)],
     )
     monkeypatch.setattr(
-        "cw.reconcile.tasks.load_clients", lambda: {"client-a": auto_client}
+        "cw.reconcile.tasks.terminal_siblings.load_clients",
+        lambda: {"client-a": auto_client},
     )
 
     parked = park_terminal_sibling_tasks()

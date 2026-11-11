@@ -22,7 +22,7 @@ from cw.events_follow import (
     save_cursor_record,
 )
 from cw.models import OrchestratorEvent, OrchestratorEventType
-from tests.conftest import (
+from tests._shared.dispatch_fixtures import (
     _seed_inbox_with_cursor,
     _spy_inbox_reads,
     _spy_parse_lines,

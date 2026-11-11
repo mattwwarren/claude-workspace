@@ -24,7 +24,7 @@ tracked separately as follow-up issue #1951, per the plan's Adopted
 Assumptions.
 """
 
-from tests.conftest import _cmd
+from tests._shared.workflow_text import _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
 from tests.test_plan_persistence import _step1g_section
 

@@ -347,26 +347,41 @@ class TestScrubProcessEnv:
     def test_conftest_scrubs_before_any_cw_import(self) -> None:
         """Pin the ordering, as ``TestHomeRedirectByConstruction`` does for HOME.
 
-        ``tests._git_sandbox`` scrubs on import, so its import must sit next to
-        the ``tests._session_home`` import and ahead of every ``cw`` import.
+        ``tests._git_sandbox`` scrubs on import, so it and ``tests._session_home``
+        must be the first two ``pytest_plugins`` entries in conftest: pytest
+        imports that list in order after the conftest body runs, so both load
+        ahead of every ``tests._shared`` module (the only ones that import
+        ``cw``). The conftest body itself must import neither ``cw`` nor
+        ``tests._shared``, so nothing there can import ``cw`` first.
         """
         tree = ast.parse(_CONFTEST.read_text(encoding="utf-8"))
         modules: list[str] = []
+        plugin_lists: list[ast.expr] = []
         for node in tree.body:
             if isinstance(node, ast.Import):
                 modules.extend(alias.name for alias in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module:
                 modules.append(node.module)
+            elif isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "pytest_plugins"
+                for t in node.targets
+            ):
+                plugin_lists.append(node.value)
 
-        sandbox = modules.index("tests._git_sandbox")
-        session_home = modules.index("tests._session_home")
-        first_cw = next(
-            i
-            for i, name in enumerate(modules)
-            if name == "cw" or name.startswith("cw.")
-        )
-        assert abs(sandbox - session_home) == 1
-        assert max(sandbox, session_home) < first_cw
+        assert len(plugin_lists) == 1
+        plugin_list = plugin_lists[0]
+        assert isinstance(plugin_list, ast.List)
+        plugins: list[str] = []
+        for elt in plugin_list.elts:
+            assert isinstance(elt, ast.Constant)
+            assert isinstance(elt.value, str)
+            plugins.append(elt.value)
+        assert set(plugins[:2]) == {"tests._session_home", "tests._git_sandbox"}
+        assert not [
+            name
+            for name in modules
+            if name == "cw" or name.startswith(("cw.", "tests._shared"))
+        ]
 
 
 # --- Raw-git guard (C4) ---------------------------------------------------------

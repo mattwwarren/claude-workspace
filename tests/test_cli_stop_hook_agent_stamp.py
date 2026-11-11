@@ -40,7 +40,7 @@ from cw.models import (
     AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
     HOOK_CONTEXT_RELATIVE_PATH,
 )
-from tests.conftest import (
+from tests._shared.stop_hook_context import (
     _invoke_hook_command,
     _read_stamp,
     _seed_session,

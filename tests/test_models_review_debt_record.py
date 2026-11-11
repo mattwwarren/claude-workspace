@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from cw.models import DEV_QUEUE_SCHEMA_VERSION, TicketTask
 from cw.models.review_debt_record import ReviewDebtRecord
 from tests._review_debt_helpers import _debt_record
-from tests.conftest import _make_ticket_task
+from tests._shared.session_seeding import _make_ticket_task
 
 _SCHEMA_V58 = 58
 

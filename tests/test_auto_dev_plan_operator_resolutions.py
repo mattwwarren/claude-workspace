@@ -10,7 +10,7 @@ sentence in ``auto-dev.md``.
 
 from __future__ import annotations
 
-from tests.conftest import _appendix, _checkpoint1_section, _cmd, _norm
+from tests._shared.workflow_text import _appendix, _checkpoint1_section, _cmd, _norm
 from tests.test_auto_dev_preflight_resolutions import _after
 
 _ROW_FIRST = "**Row-delivered resolutions (#2702) — read first.**"

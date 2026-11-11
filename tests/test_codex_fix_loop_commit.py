@@ -38,7 +38,8 @@ from tests._codex_review_helpers import (
     _write,
     assert_clean_after_refusal,
 )
-from tests.conftest import _make_finding, git_in
+from tests._shared.git_repos import git_in
+from tests._shared.review_builders import _make_finding
 from tests.test_codex_fix_loop import (
     _CLEAN_DOC,
     _CONTENT,

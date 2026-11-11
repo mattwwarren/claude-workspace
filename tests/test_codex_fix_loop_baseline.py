@@ -30,7 +30,7 @@ from tests._codex_review_helpers import (
     _stage_merge_from_other_branch,
     _write,
 )
-from tests.conftest import commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

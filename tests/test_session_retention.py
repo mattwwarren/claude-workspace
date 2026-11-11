@@ -22,7 +22,11 @@ from cw.session_retention import (
     find_session_by_id,
     prune_sessions,
 )
-from tests.conftest import _make_daemon_session, _make_ticket_task, _seed_sessions
+from tests._shared.session_seeding import (
+    _make_daemon_session,
+    _make_ticket_task,
+    _seed_sessions,
+)
 
 _NOW = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 _OLD = _NOW - timedelta(days=_SESSION_RETENTION_DAYS + 10)

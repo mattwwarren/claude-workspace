@@ -54,7 +54,8 @@ from tests._reconcile_helpers import (
     _auto_config,
     _mk_session,
 )
-from tests.conftest import CapturedEvent, _make_daemon_session, _make_ticket_task
+from tests._shared.daemon_fakes import CapturedEvent
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 
 
 class TestVerifySupervisorSessionId:
@@ -328,9 +329,17 @@ class TestUnownedRunningSweepWiring:
         real_adopt = locked_sweeps.run_unowned_running_recovery
         real_revert = locked_sweeps.revert_timed_out_tasks
 
-        def _adopt(*, clients: dict[str, ClientConfig]) -> list[str]:
+        def _adopt(
+            *,
+            now: datetime,
+            clients: dict[str, ClientConfig],
+            config: OrchestratorConfig,
+            native_live: set[str],
+        ) -> list[str]:
             order.append("unowned_running")
-            return real_adopt(clients=clients)
+            return real_adopt(
+                now=now, clients=clients, config=config, native_live=native_live
+            )
 
         def _revert(dirty_checks: DirtyChecks | None = None) -> list[str]:
             order.append("revert_timed_out")
@@ -388,7 +397,7 @@ class TestUnownedRunningSweepWiring:
         """A row whose claim session is a phantom is the phantom sweep's (keyed
         by ticket id); adoption then finds no RUNNING row and does nothing."""
         from cw.worktree import worktree_path_for
-        from tests.conftest import _write_hook_context_file
+        from tests._shared.stop_hook_context import _write_hook_context_file
 
         monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
         client = ClientConfig(
@@ -723,6 +732,51 @@ class TestRunPostGuardSweeps:
 
 
 class TestRunTerminalBackstopsAndSweeps:
+    def test_forwards_the_tick_to_the_unowned_running_sweep(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3328: the sweep gets the tick's now, scope, config and roster."""
+        calls = _record_calls(
+            monkeypatch,
+            {
+                "run_unowned_running_recovery": [],
+                "revert_timed_out_tasks": [],
+                "revert_completed_silent_tasks": [],
+                "park_terminal_sibling_tasks": None,
+                "run_lost_session_recovery": None,
+                "run_concierge_recoveries": [],
+                "run_codex_live_writer_reparks": None,
+                "run_gate_recipes": None,
+                "run_review_recipes": None,
+                "run_escalation_sweep": None,
+            },
+        )
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        native_live = {"0000abcd"}
+        config = OrchestratorConfig()
+        clients = {"client-a": ClientConfig(name="client-a", workspace_path=Path("/w"))}
+
+        locked_sweeps._run_terminal_backstops_and_sweeps(
+            now=now,
+            native_live=native_live,
+            config=config,
+            clients=clients,
+            deferred=DeferredReconcileJobs(),
+            codex_probes=None,
+            plan_probes=None,
+            repo_slugs=None,
+        )
+
+        assert calls[0] == (
+            "run_unowned_running_recovery",
+            {
+                "now": now,
+                "clients": clients,
+                "config": config,
+                "native_live": native_live,
+            },
+        )
+
     @pytest.mark.parametrize("pass_set", [True, False])
     def test_forwards_warned_blocks_to_the_concierge_recipes(
         self, monkeypatch: pytest.MonkeyPatch, pass_set: bool

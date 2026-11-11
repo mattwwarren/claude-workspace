@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from tests.conftest import load_guard_script_module, run_guard_script_cli
+from tests._shared.guard_fences import load_guard_script_module, run_guard_script_cli
 
 if TYPE_CHECKING:
     import types

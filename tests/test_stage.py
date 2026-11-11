@@ -90,20 +90,17 @@ from tests._review_approval_helpers import step40_fence as _step40_fence
 from tests._review_approval_helpers import step40_section as _step40_section
 from tests._review_approval_helpers import sync_merge as _sync_merge
 from tests._review_approval_helpers import write_context as _write_context
-from tests._ticket_view_helpers import without_review_stage
-from tests.conftest import (
-    _clean_git_env,
-    _cmd,
-    _make_daemon_session,
+from tests._shared.git_repos import _clean_git_env, commit_tracked_file, git_in
+from tests._shared.guard_fences import substitute_fence_placeholders
+from tests._shared.review_builders import (
     _make_diff,
     _make_finding,
     _make_reviewer_doc,
-    _make_ticket_task,
-    commit_tracked_file,
-    git_in,
-    substitute_fence_placeholders,
     write_review_verdict_envelope,
 )
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
+from tests._shared.workflow_text import _cmd
+from tests._ticket_view_helpers import without_review_stage
 
 if TYPE_CHECKING:
     from collections.abc import Callable

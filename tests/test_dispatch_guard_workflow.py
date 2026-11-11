@@ -7,8 +7,9 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from tests._shared.git_repos import _clean_git_env
+from tests._shared.workflow_text import _load_workflow
 from tests._tool_fakes import stub_gh_issue_create, stub_gh_issue_list
-from tests.conftest import _clean_git_env, _load_workflow
 
 ROOT = Path(__file__).parent.parent
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "dispatch-guard.yml"

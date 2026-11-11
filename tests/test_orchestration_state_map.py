@@ -37,9 +37,10 @@ from cw.dev_queue.next_commands import LANE_PAUSED_SKIP_CODE, next_commands
 from cw.dev_queue.park_guidance import RESOLVE_COMMAND
 from cw.models import DispatchSkipReason, QueueItemStatus
 from cw.pr_hydrate import PrAttentionState
+from tests._shared.cli_preflight import walk_click_tree
+from tests._shared.workflow_text import _norm
 from tests._shipped_red_helpers import make_red_row
 from tests._ticket_view_helpers import ACME, ACME_TICKET, CASES
-from tests.conftest import _norm, walk_click_tree
 
 ROOT = Path(__file__).parent.parent
 SKILLS = ROOT / ".claude" / "skills"

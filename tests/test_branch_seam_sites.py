@@ -41,12 +41,9 @@ from cw.repair_disposition import RepairDisposition
 from cw.worktree import resolve_task_worktree, worktree_path_for
 from tests._changelog_repair_helpers import make_client, make_repair_job, repair_task
 from tests._clients_yaml import write_clients_yaml
-from tests.conftest import (
-    _make_daemon_session,
-    _make_ticket_task,
-    _write_hook_context_file,
-    occupy_worktree,
-)
+from tests._shared.git_repos import occupy_worktree
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
+from tests._shared.stop_hook_context import _write_hook_context_file
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -580,7 +577,10 @@ def test_unowned_running_reads_the_row_branch_worktree_context(
         DevQueueStore(tasks=[row]),
         CwState(sessions=[_claim_session()]),
         {_CLIENT: sample_client_config},
-    )
+        now=datetime.now(UTC),
+        daemon=FakeNativeDaemonClient(),
+        native_live=set(),
+    ).adopts
 
     assert [candidate.session_id for candidate in found] == [_SESSION_ID]
 
@@ -598,7 +598,10 @@ def test_unowned_running_ignores_a_prefix_path_context_for_an_adopted_row(
         DevQueueStore(tasks=[row]),
         CwState(sessions=[_claim_session()]),
         {_CLIENT: sample_client_config},
-    )
+        now=datetime.now(UTC),
+        daemon=FakeNativeDaemonClient(),
+        native_live=set(),
+    ).adopts
 
     assert found == []
 

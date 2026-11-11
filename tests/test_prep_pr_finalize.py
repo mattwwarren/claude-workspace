@@ -19,6 +19,7 @@ import pytest
 
 from cw.changelog_sync import sync_changelog
 from tests._changelog_cut_helpers import ReleaseMovedRepo, cut_straddle_repo
+from tests._shared.cli_preflight import _write_project_config_yaml
 from tests._tool_fakes import (
     ARM_VIEW_ARMED,
     ARM_VIEW_OPEN,
@@ -28,7 +29,6 @@ from tests._tool_fakes import (
     shim_env,
     stub_gh_arm,
 )
-from tests.conftest import _write_project_config_yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = _REPO_ROOT / ".claude" / "scripts" / "prep_pr_finalize.py"

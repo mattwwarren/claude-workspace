@@ -21,7 +21,12 @@ import tomllib
 from collections.abc import Callable
 from pathlib import Path
 
-from tests.conftest import _REPO_ROOT, _SRC_ROOT, _files_under, _iter_src_files
+from tests._shared.workflow_text import (
+    _REPO_ROOT,
+    _SRC_ROOT,
+    _files_under,
+    _iter_src_files,
+)
 
 # Modules allowed to directly construct a `gh`-led argv list/tuple: a `"gh"`
 # literal, a name bound from `which("gh")` (or the conventional name `gh`), or

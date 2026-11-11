@@ -44,7 +44,7 @@ from tests._reconcile_helpers import (
     _shipped_salvage_payload,
     _stage_complete_payload,
 )
-from tests.conftest import _make_daemon_session
+from tests._shared.session_seeding import _make_daemon_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable

@@ -13,7 +13,7 @@ from cw.review_debt_filing import DebtCloseState, DebtEntry, FilingContext
 from cw.review_debt_filing._marker import debt_marker, pr_marker, scope_prefix
 from tests._cli_review_helpers import _seed_review_row
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests.conftest import _write_project_config_yaml
+from tests._shared.cli_preflight import _write_project_config_yaml
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence

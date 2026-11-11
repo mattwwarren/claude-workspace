@@ -30,16 +30,15 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import pytest
 
-from tests._tool_fakes import path_with_stub, write_bin_stub
-from tests.conftest import (
+from tests._shared.git_repos import git_in
+from tests._shared.guard_fences import load_guard_script_module, run_guard_script_cli
+from tests._shared.step25_gates import (
     GATE_KEY_SCRIPT,
     GATE_KEY_TEST_GENERATION,
     GATE_KEY_TEST_PIDNS,
-    git_in,
-    load_guard_script_module,
     make_claimant,
-    run_guard_script_cli,
 )
+from tests._tool_fakes import path_with_stub, write_bin_stub
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping

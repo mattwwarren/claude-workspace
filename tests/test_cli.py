@@ -79,16 +79,16 @@ from tests._reconcile_helpers import (
     _ul_record,
     _write_transcript_records,
 )
-from tests.conftest import (
+from tests._shared.cli_preflight import _write_project_config_yaml
+from tests._shared.review_builders import stub_fetch_plan
+from tests._shared.session_seeding import (
     _audit_failure_logged,
     _fail_audit_append,
     _make_daemon_session,
     _patch_ticks,
     _seed_daemon_session,
-    _write_project_config_yaml,
-    _write_stop_hook_transcript,
-    stub_fetch_plan,
 )
+from tests._shared.stop_hook_context import _write_stop_hook_transcript
 from tests.test_result import _valid_payload
 from tests.test_sprint import CONFIG_YAML, MINIMAL_RFC, _plan
 
@@ -8647,7 +8647,7 @@ def _seed_lock_wait_world(tmp_path: Path, fake: FakeNativeDaemonClient) -> None:
     """A RUNNING ``WAIT-1`` row bound to a live DAEMON session."""
     from cw.dev_queue import save_dev_queue
     from cw.models import DevQueueStore, QueueItemStatus
-    from tests.conftest import _make_ticket_task
+    from tests._shared.session_seeding import _make_ticket_task
 
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
@@ -8691,7 +8691,7 @@ class TestOperatorCommandLockWait:
         mock_native_daemon: FakeNativeDaemonClient,
     ) -> None:
         from cw import _flock
-        from tests.conftest import _FakeClock
+        from tests._shared.lock_helpers import _FakeClock
 
         for target in (
             "cw.cli.spawn.get_native_daemon_client",
@@ -11161,7 +11161,7 @@ class TestDevQueueTasksPrState:
             QueueItemStatus,
             TicketTask,
         )
-        from tests.conftest import _make_daemon_session, _seed_sessions
+        from tests._shared.session_seeding import _make_daemon_session, _seed_sessions
 
         session_kwargs: dict[str, object] = {
             "id": "dead-1",
@@ -13417,7 +13417,10 @@ class TestDevQueueApproveCli:
         """Park ACME-1 at REVIEW for *blocked_reason* with a blocking verdict."""
         from cw.dev_queue import save_dev_queue
         from cw.models import DevQueueStore, QueueItemStatus
-        from tests.conftest import _make_finding, write_review_verdict_envelope
+        from tests._shared.review_builders import (
+            _make_finding,
+            write_review_verdict_envelope,
+        )
 
         self._seed_client(tmp_config_dir, tmp_path)
         worktree = tmp_path / "wt-acme-1"

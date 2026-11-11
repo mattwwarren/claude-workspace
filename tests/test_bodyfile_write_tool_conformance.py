@@ -18,7 +18,7 @@ convention of ``test_harden_ticket_positioning.py`` and
 import re
 from pathlib import Path
 
-from tests.conftest import _cmd
+from tests._shared.workflow_text import _cmd
 
 ROOT = Path(__file__).parent.parent
 CLAUDE_MD = ROOT / "CLAUDE.md"

@@ -123,14 +123,8 @@ from tests._review_convergence_helpers import (
     warm_codex_capability,
     write_ledger,
 )
-from tests.conftest import (
-    _make_diff,
-    _make_finding,
-    _make_reviewer_doc,
-    commit_tracked_file,
-    git_in,
-    push_commit_to_origin,
-)
+from tests._shared.git_repos import commit_tracked_file, git_in, push_commit_to_origin
+from tests._shared.review_builders import _make_diff, _make_finding, _make_reviewer_doc
 
 if TYPE_CHECKING:
     from collections.abc import Callable

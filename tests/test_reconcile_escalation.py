@@ -23,7 +23,7 @@ from cw.reconcile.escalation import (
     ESCALATION_TRIGGER_TIMER,
     run_escalation_sweep,
 )
-from tests.conftest import _make_ticket_task
+from tests._shared.session_seeding import _make_ticket_task
 
 _NOW = datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
 
@@ -215,6 +215,25 @@ class TestEligibilityFormula:
         assert _SESSION_LOST_REASON not in _REAP_ELIGIBLE_DISPOSITIONS_BASE
         assert _SESSION_LOST_REASON not in HOLD_DISPOSITIONS
         assert _SESSION_LOST_REASON not in DRAIN_DISPOSITIONS
+
+    def test_unowned_running_park_joins_no_disposition_set(self) -> None:
+        """#3328: the NO_OWNER park is released by an operator only.
+
+        Neither escalated nor auto-requeued, held or drained: ``cw doctor
+        --reap`` class 5 or ``cw dev-queue requeue`` releases it.
+        """
+        from cw.dev_queue import DRAIN_DISPOSITIONS, HOLD_DISPOSITIONS
+        from cw.models import ReapReason
+        from cw.reconcile._shared import _REAP_ELIGIBLE_DISPOSITIONS_BASE
+        from cw.reconcile.concierge import _FALSE_PARK_ELIGIBLE_DISPOSITIONS
+        from cw.reconcile.escalation import _ELIGIBLE_DISPOSITIONS
+
+        value = ReapReason.UNOWNED_RUNNING_ROW.value
+        assert value not in _ELIGIBLE_DISPOSITIONS
+        assert value not in _FALSE_PARK_ELIGIBLE_DISPOSITIONS
+        assert value not in _REAP_ELIGIBLE_DISPOSITIONS_BASE
+        assert value not in HOLD_DISPOSITIONS
+        assert value not in DRAIN_DISPOSITIONS
 
     def test_unresolved_subagent_spawn_not_false_park_requeueable(self) -> None:
         """#1646: concierge must NOT auto-requeue this class.

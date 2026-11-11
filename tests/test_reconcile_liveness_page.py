@@ -32,7 +32,7 @@ from tests._reconcile_helpers import (
     _ul_record,
     _write_transcript_records,
 )
-from tests.conftest import _make_daemon_session
+from tests._shared.session_seeding import _make_daemon_session
 
 _STARTED_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 _ERROR_TS = datetime(2026, 1, 1, 23, 10, 0, tzinfo=UTC)

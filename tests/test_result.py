@@ -40,13 +40,13 @@ from cw.result import (
     validate_payload,
 )
 from tests._clients_yaml import staged_client, write_clients_yaml
-from tests.conftest import (
-    _REPO_ROOT,
+from tests._shared.session_seeding import (
     _audit_failure_logged,
     _fail_audit_append,
     _plan_pending_payload,
     _seed_daemon_session,
 )
+from tests._shared.workflow_text import _REPO_ROOT
 
 _PAYLOAD_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 

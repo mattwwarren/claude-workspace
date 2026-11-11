@@ -23,7 +23,8 @@ from cw.dev_queue import (
 from cw.exceptions import CwError, LockTimeoutError
 from cw.models import DevQueueStore, QueueItemStatus, TicketTask
 from cw.review_finding_dispositions import FindingDisposition, _disposition_key
-from tests.conftest import _hold_flock, _make_ticket_task
+from tests._shared.lock_helpers import _hold_flock
+from tests._shared.session_seeding import _make_ticket_task
 
 _CLIENT = "acme"
 _TICKET = "T-2701"

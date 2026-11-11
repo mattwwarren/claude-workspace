@@ -127,6 +127,13 @@ from tests._reconcile_helpers import (
     capture_repo_slugs,
     interrupting_spawn,
 )
+from tests._shared.git_repos import (
+    git_in,
+    init_bare_origin,
+    occupy_worktree,
+    push_commit_to_origin,
+    tree_fingerprint,
+)
 
 # Reuse the sibling test helpers rather than re-deriving TicketTask / PrState
 # construction: _make_task accepts **kwargs (pr_url / pr_state / session_id /
@@ -134,13 +141,6 @@ from tests._reconcile_helpers import (
 # _client_with_lanes builds a ClientConfig with the given lanes (reused by the
 # resolve-precedence tests below).
 from tests._worktree_helpers import FakeClock, hanging_run, patch_worktree
-from tests.conftest import (
-    git_in,
-    init_bare_origin,
-    occupy_worktree,
-    push_commit_to_origin,
-    tree_fingerprint,
-)
 from tests.test_pr_hydrate import _pr_state, _watched
 from tests.test_reconcile_gate_recipes import _client_with_lanes, _make_task
 

@@ -57,7 +57,8 @@ from cw.models.operator_constraint import (
 )
 from cw.models.operator_resolution import OPERATOR_RESOLUTIONS_KEY, OperatorResolution
 from cw.review_finding_dispositions import FindingDisposition
-from tests.conftest import _make_constraint, _make_daemon_session
+from tests._shared.review_builders import _make_constraint
+from tests._shared.session_seeding import _make_daemon_session
 
 
 @pytest.fixture(autouse=True)
@@ -1371,6 +1372,14 @@ class TestReapReasonRoutedResultStranded:
         assert ReapReason.ROUTED_RESULT_STRANDED.value == "routed_result_stranded"
         others = [r for r in ReapReason if r is not ReapReason.ROUTED_RESULT_STRANDED]
         assert ReapReason.ROUTED_RESULT_STRANDED.value not in {r.value for r in others}
+
+
+class TestReapReasonUnownedRunningRow:
+    def test_value_is_distinct(self) -> None:
+        """#3328: the unowned-running park owns its own disposition value."""
+        assert ReapReason.UNOWNED_RUNNING_ROW.value == "unowned_running_row"
+        others = [r for r in ReapReason if r is not ReapReason.UNOWNED_RUNNING_ROW]
+        assert ReapReason.UNOWNED_RUNNING_ROW.value not in {r.value for r in others}
 
 
 def _legacy_ceiling_predicate(s: Session, name: str) -> bool:

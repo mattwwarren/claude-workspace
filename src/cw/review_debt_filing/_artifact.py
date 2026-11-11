@@ -30,8 +30,9 @@ if TYPE_CHECKING:
 
 
 #: Paths only the test suite's fixture findings name
-#: (``tests/conftest.py::_finding_kwargs``). No real file lives there, so an
-#: unticketed entry naming one leaked from a test into an artifact (#3113).
+#: (``tests/_shared/review_builders.py::_finding_kwargs``). No real file lives
+#: there, so an unticketed entry naming one leaked from a test into an artifact
+#: (#3113).
 FIXTURE_ENTRY_PATHS = frozenset({"src/cw/foo.py"})
 
 

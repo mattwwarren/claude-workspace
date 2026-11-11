@@ -40,11 +40,8 @@ from cw.models import (
 from cw.reconcile import _shared
 from tests._clients_yaml import staged_client, write_clients_yaml
 from tests._reconcile_helpers import _mk_session, _stage_complete_payload
-from tests.conftest import (
-    _make_daemon_session,
-    _make_ticket_task,
-    _write_idle_transcript,
-)
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
+from tests._shared.stop_hook_context import _write_idle_transcript
 
 # The complete importable surface: every top-level name the flat
 # ``reconcile/_shared.py`` bound before the split (134 definitions, the six
@@ -98,6 +95,7 @@ EXPECTED_EXPORTS = {
     "_STOPPED_WITHOUT_SENTINEL_REASON",
     "_TIMED_OUT_MERGED_REASON",
     "_UNCONSUMED_QUEUE_NOTIFICATION_REASON",
+    "_UNOWNED_UNCONFIRMED_NOTE_PREFIX",
     "_UNRESOLVED_SUBAGENT_SPAWN_REASON",
     "_USAGE_LIMITED_MID_TURN_REASON",
     # Report / candidate / action types (_types)
@@ -226,7 +224,7 @@ class TestPackageExportCompleteness:
     """Guards that ``cw.reconcile._shared`` keeps its full pre-split surface."""
 
     def test_expected_surface_size(self) -> None:
-        assert len(EXPECTED_EXPORTS) == 153
+        assert len(EXPECTED_EXPORTS) == 154
 
     def test_all_matches_full_surface(self) -> None:
         assert set(_shared.__all__) == EXPECTED_EXPORTS

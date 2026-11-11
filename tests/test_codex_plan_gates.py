@@ -18,8 +18,8 @@ from cw.codex_plan._gates import (
     has_approval_evidence,
 )
 from cw.codex_plan._result import parse_plan_turn, stamp_plan_result
+from tests._shared.session_seeding import _make_ticket_task
 from tests._tool_fakes import plan_sentinel
-from tests.conftest import _make_ticket_task
 
 if TYPE_CHECKING:
     from pathlib import Path

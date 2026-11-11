@@ -15,7 +15,7 @@ per-gate reporting contract across the three `.claude/commands/*.md` sites so
 the two-field collapse cannot silently creep back in.
 """
 
-from tests.conftest import _cmd
+from tests._shared.workflow_text import _cmd
 
 
 def test_impl_completion_artifacts_reports_one_row_per_gate() -> None:

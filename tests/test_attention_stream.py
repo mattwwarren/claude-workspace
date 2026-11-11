@@ -39,6 +39,7 @@ from cw.models import (
 )
 from cw.models.enums import PipelinePosition
 from cw.models.ticket_view import NextCommand
+from tests._shared.lock_helpers import _FakeClock
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -52,7 +53,6 @@ from tests._ticket_view_helpers import (
     write_lane_client,
     write_lane_override,
 )
-from tests.conftest import _FakeClock
 
 if TYPE_CHECKING:
     from collections.abc import Callable

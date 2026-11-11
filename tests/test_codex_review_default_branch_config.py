@@ -31,7 +31,7 @@ from cw.codex_review._context._default_branch_config import (
 )
 from cw.codex_runner import FakeCodexRunner
 from tests._codex_review_helpers import _seed_default_branch_config, _task
-from tests.conftest import git_in
+from tests._shared.git_repos import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence

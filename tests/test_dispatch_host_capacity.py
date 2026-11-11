@@ -33,7 +33,7 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from tests._clients_yaml import write_clients_yaml
-from tests.conftest import _make_daemon_session, _make_ticket_task
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable

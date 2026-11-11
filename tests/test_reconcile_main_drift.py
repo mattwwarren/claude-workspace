@@ -54,7 +54,7 @@ from tests._reconcile_helpers import (
     _mk_daemon_session_with_worktree,
     probe_sessions_lock_free,
 )
-from tests.conftest import commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
 
 
 def _mk_live_drift_session(sid: str, wt_path: Path) -> Session:

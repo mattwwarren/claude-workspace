@@ -69,7 +69,7 @@ from cw.codex_review import (
 from cw.executor._clean_review import CLEAN_REVIEW_UNSUPPORTED_BACKEND
 from cw.executor._finalize_guard import FINALIZE_UNSUPPORTED_BACKEND
 from cw.models import QueueItemStatus
-from tests.conftest import _plan_pending_payload
+from tests._shared.session_seeding import _plan_pending_payload
 
 # ---------------------------------------------------------------------------
 # Package-split import guard (#1321)
@@ -3995,7 +3995,7 @@ class TestPlanDraftFingerprintField:
         """The v8 bump left §3.3's current-version statement behind at `5`,
         contradicting §8. Pin both statements to the parser so the next bump
         cannot silently strand one of them."""
-        from tests.conftest import _REPO_ROOT
+        from tests._shared.workflow_text import _REPO_ROOT
 
         doc = (_REPO_ROOT / "docs" / "headless-contract.md").read_text(encoding="utf-8")
         current = AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
@@ -4009,7 +4009,7 @@ class TestPlanDraftFingerprintField:
         """`auto-dev.md`'s bump-history heading is the producer-side twin of the
         §3.3 row above; left at an older version it tells the producer to stamp
         a version the parser has already moved past."""
-        from tests.conftest import _cmd
+        from tests._shared.workflow_text import _cmd
 
         current = AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
         assert f"**`schema_version: {current}`**" in _cmd("auto-dev.md")
@@ -4022,7 +4022,7 @@ class TestPlanDraftFingerprintField:
         enforced by test_agent_comment_provenance.py's
         test_every_documented_reason_is_registered. The doc previously claimed
         a bidirectional lockstep that does not exist."""
-        from tests.conftest import _REPO_ROOT
+        from tests._shared.workflow_text import _REPO_ROOT
 
         doc = (_REPO_ROOT / "docs" / "headless-contract.md").read_text(encoding="utf-8")
         assert "test_every_documented_reason_is_registered" in doc
@@ -5328,7 +5328,7 @@ class TestSchemaVersionV9:
     def test_contract_doc_records_v9_retype_and_restart_caveat(self) -> None:
         """Version-history row 9, Note A18 and the §8 rollout exception all
         name the retype, and A18 carries the serve-loop restart caveat."""
-        from tests.conftest import _REPO_ROOT
+        from tests._shared.workflow_text import _REPO_ROOT
 
         doc = (_REPO_ROOT / "docs" / "headless-contract.md").read_text(encoding="utf-8")
         row_start = doc.index("\n| 9 |")

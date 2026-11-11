@@ -31,7 +31,7 @@ from cw.cli._background_tool_policy import (
 from cw.events import read_events
 from cw.models import OrchestratorEventType
 from cw.spawn import _BACKGROUND_TOOL_GUARD_COMMAND, _build_hook_settings
-from tests.conftest import (
+from tests._shared.stop_hook_context import (
     _headless_worktree,
     _invoke_hook_command,
     _write_global_toggle,

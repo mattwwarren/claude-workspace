@@ -65,7 +65,7 @@ from cw.models.orchestrator_config.constants import (
 )
 from cw.opencode_clean_review import clean_review_body
 from cw.opencode_runner import build_stage_prompt
-from tests.conftest import _REPO_ROOT, _appendix, _cmd, _section_between
+from tests._shared.workflow_text import _REPO_ROOT, _appendix, _cmd, _section_between
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping

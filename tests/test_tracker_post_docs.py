@@ -34,7 +34,7 @@ import pytest
 
 from cw.cli.post_comment import EMITTED_STATUS, exit_code_for
 from cw.tracker_post import PostReason, PostStatus
-from tests.conftest import _appendix, _cmd
+from tests._shared.workflow_text import _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after, _nearby
 
 if TYPE_CHECKING:

@@ -12,7 +12,7 @@ import re
 
 import pytest
 
-from tests.conftest import _appendix, _cmd
+from tests._shared.workflow_text import _appendix, _cmd
 
 # A literal ``/tmp/`` path. The lookbehind excludes ``/var/tmp/`` (a word char
 # before the slash), a ``$VAR/tmp/`` expansion, and a backtick-quoted prose

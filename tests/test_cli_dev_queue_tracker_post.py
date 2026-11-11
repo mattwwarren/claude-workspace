@@ -19,7 +19,7 @@ from cw.cli.dev_queue._tracker_post import (
     tracker_is_github_or_unknown,
 )
 from cw.models import ClientConfig
-from tests.conftest import _write_project_config_yaml
+from tests._shared.cli_preflight import _write_project_config_yaml
 
 if TYPE_CHECKING:
     from pathlib import Path

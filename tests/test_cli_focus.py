@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from tests.conftest import CapturedEvent
+    from tests._shared.daemon_fakes import CapturedEvent
 
 _SESSION = "sess-focus-1"
 

@@ -14,7 +14,11 @@ from cw.orchestrator_session import (
     orchestrator_mcp_config_path,
     write_orchestrator_mcp_config,
 )
-from tests.conftest import _make_daemon_session, _seed_daemon_session, _seed_sessions
+from tests._shared.session_seeding import (
+    _make_daemon_session,
+    _seed_daemon_session,
+    _seed_sessions,
+)
 
 
 def test_close_removes_orchestrator_mcp_config(

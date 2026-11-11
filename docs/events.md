@@ -1115,6 +1115,55 @@ open enum; consumers MUST tolerate unknown values. Known values:
   same-ticket session is live. A slow worktree phase or an unstamped worker
   can look like this (reconcile adopts the row once the evidence ties,
   #2591), so a rare false page is possible. No push notification.
+- `"unowned_running_row"` — reconcile's unowned-running sweep (#3328,
+  `cw.reconcile.unowned_running`) parked an unbound RUNNING row (no
+  `session_id`) that no worker owns: the row's launch marker proves the
+  claiming process gone, the daemon roster is readable and lists no worker
+  homed on the worktree, the client configures only claude-native executors,
+  and the worktree's `cw-context.json` ties the row to no session (it is
+  missing, records no attempt or another attempt, names another ticket or
+  client, or names a session absent from `sessions.json`). Under
+  `signal_only` (or a lane with no resolvable `reap_policy`) the row is now
+  BLOCKED_ON_USER with this disposition, keeps its `pr_url`, keeps
+  `session_id` unset, and is not charged an unproductive attempt; a
+  `session.reap_proposed` (`park_blocked_on_user`) and then a
+  `task.transition` precede this page. Nothing is stopped, reverted or
+  deleted. Under `auto` the row is reverted PENDING instead and no page is
+  written (the proposal and the transition are the audit); `auto` never
+  reverts on an empty roster, since `claude agents --json` cannot be re-read
+  under the lock. Exactly the canonical nine keys: `session_id` is the
+  synthetic `no-owner:<client>/<ticket>#<attempts>`, `session_name` is `""`,
+  `claude_session_id` is `null`, `crashed` is `false`, `lane` is the row's
+  lane. `breadcrumbs` names the claiming pid, the worktree and the context
+  state, and the release: `cw dev-queue requeue <ticket> -c <client>` (it
+  refuses while a recorded live session exists or the daemon roster is
+  unreadable) or `cw doctor --reap` (class 5). Never escalated or
+  auto-requeued; `cw orchestrate run` does not authorize it. At most three
+  rows act per tick, oldest claim first. No push notification.
+- `"unowned_running_unconfirmed"` — the same sweep cannot confirm who owns an
+  unbound RUNNING row, for one cause: `duplicate` (another RUNNING row for
+  the ticket), `bound_elsewhere`, `conflicting_session`, `stale_session`
+  (the context's session started before this claim), `naive_datetime` or
+  `unreadable_context` (the context exists but cannot be read as a JSON
+  object), each paged when the marker proves the claiming process gone, or
+  when the row has no marker and its claim is at least `SPAWN_GRACE_SECONDS`
+  old; or `non_native` or `roster_unproven`, paged only when the claiming
+  process is gone and no context ties. Page only, under both policies: the
+  status, `session_id` and lane slot are unchanged, and `cw dev-queue wait`
+  keeps polling. After the page lands the row is latched in `advisory_note`
+  as `?unowned_unconfirmed: <cause>: <clause>`, a static clause with no
+  count; the 20-character prefix fills the `cw dev-queue tasks` REASON cell.
+  One page per claim and cause: a changed live count never pages again, a
+  different cause does, and an adoption or any transition clears the note.
+  The `running_row_no_session` page skips a latched row, so the two never
+  alternate. Canonical nine keys; `session_id` is the synthetic
+  `unconfirmed:<client>/<ticket>#<attempts>:<cause>`, `session_name` is `""`,
+  `claude_session_id` is `null`, `crashed` is `false`. `breadcrumbs` states
+  the evidence and, once you confirm no worker runs for the row, the release
+  `cw dev-queue cancel <ticket> -c <client>` then
+  `cw dev-queue requeue <ticket> -c <client> --from-cancelled`. It
+  deliberately names no doctor reap, whose class 2 releases a sessionless
+  RUNNING row even while a worker is live. No push notification.
 - `"silently_idle"` — *historical (ADR-0014)*: the idle watchdog's park.
   No longer produced; may exist on old rows/logs.
 - `"needs_salvage"` — *historical (ADR-0014)*: the git-state salvage LOW
@@ -1200,7 +1249,11 @@ open enum; consumers MUST tolerate unknown values. Known values:
   it does the orchestrator inspects the worker and, if none is running, releases
   the row with `cw dev-queue cancel <ticket> -c <client>` followed by
   `cw dev-queue requeue <ticket> -c <client> --from-cancelled` (plain
-  `cw dev-queue requeue` refuses a RUNNING row). When the `sessions.json`
+  `cw dev-queue requeue` refuses a RUNNING row). When reconcile cannot tie
+  such a row it pages `unowned_running_unconfirmed`, and when the claiming
+  process is gone and no worker is homed on the worktree it parks the row
+  (`signal_only`) or reverts it (`auto`) as `unowned_running_row` (#3328; see
+  those two entries). When the `sessions.json`
   write failed on a dispatch claim, the next reconcile tick parks the row
   BLOCKED_ON_USER as `running_row_session_lost` (#2715), keeping its
   `session_id`, and a plain requeue then releases it. No push
@@ -1801,6 +1854,33 @@ preventing duplicate events across ticks for the same session.
 `lane` is the owning task's lane name, or `"default"` for candidates not
 associated with a task (phantom sessions without a matching queue entry).
 
+**NO_OWNER proposal (#3328).** The unowned-running sweep
+(`cw.reconcile.unowned_running_acts`) also emits this event, inside
+`dev_queue_lock` after its in-lock re-reads and immediately before it parks
+or reverts an unbound RUNNING row that no worker owns (the
+`unowned_running_row` page). There is no Session, so `session_id` is `""` and
+`session_name` is `null` (as for `terminal_sibling`); `client`, `ticket_id`
+and `lane` are the stored row's; `reason` is `"unowned_running_row"`;
+`proposed_action` is `park_blocked_on_user` (`signal_only`, or a lane with no
+resolvable policy) or `revert_task` (`auto`). Its `evidence` replaces the
+shape above:
+
+- `evidence.roster_readable`: `true`.
+- `evidence.worktree_path`: the row's worktree path.
+- `evidence.context_state`: `missing`, `no_attempt`, `attempt_mismatch`,
+  `other_claim` or `session_absent`.
+- `evidence.launch_owner_pid`: the launch marker's pid.
+- `evidence.launch_owner_alive`: `false`.
+- `evidence.claim_age_seconds`: a float, or `null` when `claimed_at` is
+  missing or naive. Informational only, never a trigger.
+
+`correlation_id` is the `ticket_id`. `reap_proposed_at` is not stamped (there
+is no Session); the row's transition out of RUNNING is the dedup. A failed
+write skips the act, which is retried next tick (ADR-0006 invariant 3).
+`cw orchestrate run`'s reap drain finds no session for `""` and skips the
+proposal as already resolved, so it acts on nothing: a `signal_only` park is
+released only by `cw dev-queue requeue` or `cw doctor --reap` (class 5).
+
 **Consumer note:** This event is written to the orchestrator event inbox
 (`events/inbox.jsonl`) as a state-snapshot delta. It does NOT appear in the
 channel-server queue-events channel; the queue-events channel only carries
@@ -1927,8 +2007,11 @@ that no other row owns, of the same client and named for the same ticket, and
 that session did not start before the row's `claimed_at` (a naive timestamp
 on either side is never adopted; a row with no `claimed_at` skips this
 check). The bind writes exactly the fields dispatch's own spawn stamp writes,
-except `stage_base_ref`. It is not gated by `reap_policy`: it reverts, stops
-and parks nothing. A row that cannot be tied this way is left untouched. A
+except `stage_base_ref` (those fields clear the launch marker), and it also
+clears an `?unowned_unconfirmed` note (#3328). It is not gated by
+`reap_policy`: it reverts, stops and parks nothing. A row that cannot be tied
+this way is never adopted; the same sweep may instead park or revert it
+(`unowned_running_row`) or page it (`unowned_running_unconfirmed`). A
 live worker with no recorded session is never adopted; the leaked-worker
 sweep stops it once it is older than the grace window and homed in a cw
 worktree base (#2670), and spares it otherwise.

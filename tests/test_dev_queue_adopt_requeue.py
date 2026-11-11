@@ -65,8 +65,8 @@ from tests._review_convergence_helpers import (
     fresh_ledger,
     stopped_ledger,
 )
+from tests._shared.git_repos import git_in
 from tests._ticket_view_helpers import patch_roster
-from tests.conftest import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable

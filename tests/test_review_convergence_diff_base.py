@@ -37,7 +37,7 @@ from tests._review_convergence_helpers import (
     rewind_origin_main,
     side_branch_commit,
 )
-from tests.conftest import git_in
+from tests._shared.git_repos import git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence

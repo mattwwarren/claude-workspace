@@ -105,15 +105,10 @@ from tests._review_convergence_helpers import (
     record,
     write_ledger,
 )
-from tests.conftest import (
-    _make_daemon_session,
-    _make_diff,
-    _make_finding,
-    _make_reviewer_doc,
-    _write_tracker_config,
-    commit_tracked_file,
-    git_in,
-)
+from tests._shared.cli_preflight import _write_tracker_config
+from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.review_builders import _make_diff, _make_finding, _make_reviewer_doc
+from tests._shared.session_seeding import _make_daemon_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
