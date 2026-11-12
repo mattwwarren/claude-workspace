@@ -103,10 +103,7 @@ from cw.reconcile._shared import (
     resolve_reap_policy,
     ticket_id_for_session,
 )
-from cw.reconcile._shared._roster import (
-    _may_postdate_roster,
-    roster_registration_cutoff,
-)
+from cw.reconcile._shared._roster import session_may_postdate_roster
 from cw.reconcile.deferred import defer_surface_stop
 
 if TYPE_CHECKING:
@@ -517,12 +514,6 @@ def _clear_intent(target: TicketTask) -> None:
     target.usage_limit_act = None
 
 
-def _may_postdate_roster_capture(act: _Act) -> bool:
-    """True when the act's session ref may be newer than its roster capture (M1)."""
-    cutoff = roster_registration_cutoff(act.roster_captured_at)
-    return cutoff is not None and _may_postdate_roster(act.session, cutoff)
-
-
 def _live_surface_ref(act: _Act) -> str | None:
     """The session's ``surface_ref`` iff the roster snapshot still lists it."""
     ref = act.session.surface_ref
@@ -550,7 +541,8 @@ def _close_and_queue_stop(act: _Act) -> _Stop:
 
     The surface's liveness is read from the captured roster. A live surface
     whose tail has changed abandons the act. A surface that may postdate the
-    roster capture (M1) is not treated as absent: the act waits for a newer
+    roster capture (born within the registration slack of it) is not treated
+    as absent: the act waits for a newer
     capture. Otherwise the session is persisted COMPLETED first, so the
     outage guard never sees a live-status session with an empty roster; the
     stop itself runs post-lock and is confirmed on a later tick.
@@ -560,7 +552,7 @@ def _close_and_queue_stop(act: _Act) -> _Stop:
     if (
         live_ref is None
         and session.surface_ref is not None
-        and _may_postdate_roster_capture(act)
+        and session_may_postdate_roster(session, act.roster_captured_at)
     ):
         _log.info(
             "usage_limit_mid_turn: surface %s for ticket %s session %s may "
@@ -847,7 +839,7 @@ def detect_and_park_mid_turn_usage_limits(
     here. *deferred* receives the ``auto`` act's stop, which runs post-lock
     (#2549). *roster_captured_at* is the capture time of the lockless roster
     *native_live* came from (#2550): an ``auto`` act does not treat a session
-    spawned or resumed within ``ROSTER_REGISTRATION_SLACK_SECONDS`` of it, or
+    spawned, resumed or bound within ``ROSTER_REGISTRATION_SLACK_SECONDS`` of it, or
     after it, as stopped just because its surface is absent from
     *native_live* (the ref may postdate the capture); the act retries next
     tick. ``None`` spares no session. Returns the ticket ids requeued to

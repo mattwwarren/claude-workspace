@@ -78,26 +78,30 @@ def _claude_agents_json() -> list[dict[str, object]]:
     return data if isinstance(data, list) else []
 
 
-def roster_registration_cutoff(roster_captured_at: datetime | None) -> datetime | None:
-    """The birth time at or after which a ref may postdate the capture (M1).
+def session_may_postdate_roster(
+    session: Session, roster_captured_at: datetime | None
+) -> bool:
+    """True when *session*'s ref may be newer than the roster capture.
 
-    ``None`` (no capture time known) means no session is spared. Shared by
-    :func:`compute_drift` and the concierge recipes' death test, so the two
-    cannot drift apart on the slack.
+    ``None`` (no capture time known) spares nothing. Otherwise the ref's
+    birth is the latest of ``started_at``, ``resumed_at`` (a resume rewrites
+    ``surface_ref`` without moving ``started_at``) and ``surface_bound_at``
+    (a fresh spawn appends its row only after ``spawn_bg`` returns, #3339);
+    a birth at or after ``roster_captured_at -
+    ROSTER_REGISTRATION_SLACK_SECONDS`` may postdate the capture. The one
+    predicate :func:`compute_drift`, the concierge recipes' death test, the
+    mid-turn usage-limit act and :func:`find_live_sessions_for_ticket` share,
+    so they cannot drift apart on the slack (#3340).
     """
     if roster_captured_at is None:
-        return None
-    return roster_captured_at - timedelta(seconds=ROSTER_REGISTRATION_SLACK_SECONDS)
-
-
-def _may_postdate_roster(session: Session, registration_cutoff: datetime) -> bool:
-    """True when *session*'s ref may be newer than the roster capture (M1).
-
-    A resume rewrites ``surface_ref`` and stamps ``resumed_at`` without moving
-    ``started_at``, so the later of the two is the ref's birth.
-    """
-    born = max(session.started_at, session.resumed_at or session.started_at)
-    return born >= registration_cutoff
+        return False
+    cutoff = roster_captured_at - timedelta(seconds=ROSTER_REGISTRATION_SLACK_SECONDS)
+    born = max(
+        session.started_at,
+        session.resumed_at or session.started_at,
+        session.surface_bound_at or session.started_at,
+    )
+    return born >= cutoff
 
 
 def compute_drift(
@@ -115,10 +119,8 @@ def compute_drift(
     - its ``started_at`` is older than :data:`SPAWN_GRACE_SECONDS` ago
       (newly-spawned sessions are still registering with the daemon), AND
     - when *roster_captured_at* is given (the capture time of the roster
-      *native_live* came from, #2550), the later of its ``started_at`` and
-      ``resumed_at`` is before ``roster_captured_at -
-      ROSTER_REGISTRATION_SLACK_SECONDS``: a ref born after that may postdate
-      the capture.
+      *native_live* came from, #2550), the ref may not postdate that capture
+      (:func:`session_may_postdate_roster`).
 
     *native_live* is the set of short session IDs reported by
     ``claude agents --json``; callers obtain it via :func:`_claude_agents_json`.
@@ -131,7 +133,6 @@ def compute_drift(
     that guard lives in :func:`reconcile`.
     """
     cutoff = (now or datetime.now(UTC)) - timedelta(seconds=SPAWN_GRACE_SECONDS)
-    registration_cutoff = roster_registration_cutoff(roster_captured_at)
     phantoms: list[str] = []
     for session in state.sessions:
         if session.status not in _LIVE_STATUSES:
@@ -142,9 +143,7 @@ def compute_drift(
             continue
         if session.started_at > cutoff:
             continue
-        if registration_cutoff is not None and _may_postdate_roster(
-            session, registration_cutoff
-        ):
+        if session_may_postdate_roster(session, roster_captured_at):
             continue
         if session.purpose is SessionPurpose.ORCHESTRATE:
             continue

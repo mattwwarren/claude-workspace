@@ -68,6 +68,7 @@ from cw.reconcile._shared import _roster as _roster_module
 from cw.reconcile._shared._roster import (
     CLAUDE_AGENTS_TIMEOUT_SECONDS,
     ROSTER_REGISTRATION_SLACK_SECONDS,
+    session_may_postdate_roster,
 )
 from cw.worktree import (
     BranchLookupError,
@@ -215,9 +216,9 @@ def test_claude_agents_timeout_is_a_named_module_constant() -> None:
 
 
 def test_compute_drift_registration_slack_protects_a_resumed_session() -> None:
-    """M1 (#2550): a resume rewrites ``surface_ref`` and stamps ``resumed_at``
-    without moving ``started_at``; a ref the roster snapshot may predate is
-    not a phantom."""
+    """#2550 registration slack: a resume rewrites ``surface_ref`` and stamps
+    ``resumed_at`` without moving ``started_at``; a ref the roster snapshot
+    may predate is not a phantom."""
     captured = datetime(2026, 5, 26, 12, 0, 0, tzinfo=UTC)
     now = captured + timedelta(seconds=15)
     old_start = captured - timedelta(hours=2)
@@ -271,6 +272,83 @@ def test_compute_drift_registration_slack_uses_started_at_when_never_resumed() -
     )
 
     assert report.phantom_session_ids == []
+
+
+_CAPTURED_AT = datetime(2026, 5, 26, 12, 0, 0, tzinfo=UTC)
+_SLACK = timedelta(seconds=ROSTER_REGISTRATION_SLACK_SECONDS)
+_OLD_START = _CAPTURED_AT - timedelta(hours=2)
+
+
+@pytest.mark.parametrize(
+    ("captured_at", "update", "expected"),
+    [
+        pytest.param(None, {"started_at": _CAPTURED_AT}, False, id="no-capture"),
+        pytest.param(
+            _CAPTURED_AT,
+            {"started_at": _CAPTURED_AT - _SLACK + timedelta(seconds=1)},
+            True,
+            id="started-within-slack",
+        ),
+        pytest.param(
+            _CAPTURED_AT,
+            {"started_at": _OLD_START, "resumed_at": _CAPTURED_AT - _SLACK},
+            True,
+            id="resumed-at-slack-edge",
+        ),
+        pytest.param(
+            _CAPTURED_AT,
+            {"started_at": _OLD_START, "surface_bound_at": _CAPTURED_AT},
+            True,
+            id="bound-at-capture",
+        ),
+        pytest.param(
+            _CAPTURED_AT,
+            {"started_at": _CAPTURED_AT + timedelta(seconds=3)},
+            True,
+            id="started-after-capture",
+        ),
+        pytest.param(
+            _CAPTURED_AT,
+            {
+                "started_at": _OLD_START,
+                "resumed_at": _CAPTURED_AT - _SLACK - timedelta(seconds=1),
+                "surface_bound_at": _CAPTURED_AT - _SLACK - timedelta(seconds=1),
+            },
+            False,
+            id="before-slack",
+        ),
+    ],
+)
+def test_session_may_postdate_roster_matrix(
+    captured_at: datetime | None, update: dict[str, object], expected: bool
+) -> None:
+    """#3340: one public predicate owns the ``None`` rule, the slack cutoff
+    and the ``max()`` fold over the session's birth stamps."""
+    session = _mk_session("s", "ref").model_copy(update=update)
+    assert session_may_postdate_roster(session, captured_at) is expected
+
+
+def test_compute_drift_spares_a_session_bound_after_capture_despite_old_start() -> None:
+    """#3339: a fresh spawn stamps ``started_at`` before its unbounded
+    ``spawn_bg`` and appends the row only afterwards, so ``surface_bound_at``
+    (the append time) is the ref's birth; a control bound before the slack
+    is still a phantom."""
+    bound_after = _mk_session("bound", "new-ref", started_at=_OLD_START).model_copy(
+        update={"surface_bound_at": _CAPTURED_AT + timedelta(seconds=1)}
+    )
+    bound_before = _mk_session("control", "gone-ref", started_at=_OLD_START).model_copy(
+        update={"surface_bound_at": _CAPTURED_AT - _SLACK - timedelta(seconds=1)}
+    )
+    state = CwState(sessions=[bound_after, bound_before])
+
+    report = compute_drift(
+        state,
+        set(),
+        now=_CAPTURED_AT + timedelta(seconds=5),
+        roster_captured_at=_CAPTURED_AT,
+    )
+
+    assert report.phantom_session_ids == ["control"]
 
 
 def test_compute_drift_empty_state_returns_empty_report() -> None:
