@@ -16,6 +16,7 @@ from cw.codex_fix_loop.baseline import (
     _CW_REVIEW_ARTIFACTS,
     CycleBaseline,
     DirtyStart,
+    best_effort_dirty_paths,
     capture_cycle_baseline,
     cycle_diff,
     cycle_touched_paths,
@@ -467,3 +468,50 @@ class TestStagedCycleTree:
         _write(repo / _ARTIFACTS[0], "verdict\n")
 
         assert staged_cycle_tree(repo, frozenset({_ARTIFACTS[0]})) == clean
+
+
+class TestBestEffortDirtyPaths:
+    def test_untracked_modified_and_deleted_paths_are_sorted_and_unique(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo, "bdp-basic")
+        (repo / "keep.py").write_text("k = 1\n", encoding="utf-8")
+        (repo / "gone.py").write_text("g = 1\n", encoding="utf-8")
+        git_in(repo, "add", "keep.py", "gone.py")
+        git_in(repo, "commit", "-m", "add keep and gone")
+        (repo / "keep.py").write_text("k = 2\n", encoding="utf-8")
+        (repo / "gone.py").unlink()
+        (repo / "new.py").write_text("n = 1\n", encoding="utf-8")
+
+        assert best_effort_dirty_paths(repo) == ("gone.py", "keep.py", "new.py")
+
+    def test_staged_rename_yields_both_paths(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo, "bdp-rename")
+        git_in(repo, "mv", "a.py", "b.py")
+
+        assert best_effort_dirty_paths(repo) == ("a.py", "b.py")
+
+    def test_clean_tree_returns_empty(self, make_git_repo: Callable[..., Path]) -> None:
+        repo = _repo(make_git_repo, "bdp-clean")
+        assert best_effort_dirty_paths(repo) == ()
+
+    @pytest.mark.parametrize(
+        "error", [subprocess.CalledProcessError(1, "git status"), OSError("gone")]
+    )
+    def test_failing_status_returns_empty(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        error: BaseException,
+    ) -> None:
+        from cw.codex_fix_loop import baseline
+
+        repo = _repo(make_git_repo, "bdp-fail")
+
+        def _raise(*_args: object, **_kwargs: object) -> str:
+            raise error
+
+        monkeypatch.setattr(baseline, "git_output", _raise)
+        assert best_effort_dirty_paths(repo) == ()

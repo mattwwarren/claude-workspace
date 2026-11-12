@@ -3370,9 +3370,7 @@ run, immediately before the loop parks with `blocker.reason =
   ]
 }
 ```
-**Semantics:** GitHub #2394. `threshold` and `anchor_lines` are additive keys (#2666);
-`loop_attributed` per cycle is additive (#2665).
-The event's semantics: GitHub #2394. The fix loop made no net progress on the originally-found
+**Semantics:** GitHub #2394. The fix loop made no net progress on the originally-found
 (cycle-0) MUST_FIX findings for the configured number of consecutive cycles
 (`codex_fix_loop_stall_cycles`, default 1 since #2633; a lane can override it)
 while its cumulative fix
@@ -3382,8 +3380,9 @@ branch diff), max(40, 8 × anchor_lines))` when `anchor_lines` is set, else
 `max(150, 0.5 × the pre-loop branch diff)` (#2666). `threshold` is the bar
 applied; `anchor_lines` is the summed line count of the original findings'
 anchors (`null` when the relative term did not apply: a file-level or
-unanchored original finding, or the growth-guard switch off). Both
-conditions are required. The loop parks before reaching its cycle cap instead
+unanchored original finding, or the growth-guard switch off). `threshold` and
+`anchor_lines` are additive keys (#2666); `loop_attributed` per cycle is additive (#2665).
+Both conditions are required. The loop parks before reaching its cycle cap instead
 of spending the remaining cycles growing the diff further.
 
 `pre_loop_head_sha` is the cycle-0 reviewed head, so an operator can reset to
