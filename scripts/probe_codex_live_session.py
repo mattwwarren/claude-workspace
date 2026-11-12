@@ -125,7 +125,7 @@ class _StreamState:
         kind = event["type"]
         if kind == "thread.started":
             return self._thread_started(event)
-        if isinstance(kind, str) and kind.startswith("turn."):
+        if isinstance(kind, str) and kind in TERMINAL_EVENTS:
             return self._terminal(kind)
         return None
 
@@ -141,8 +141,7 @@ class _StreamState:
         return None
 
     def _terminal(self, kind: str) -> ParseFault | None:
-        # A turn.* event that is not a known terminal is an invalid terminal.
-        if kind not in TERMINAL_EVENTS or self.terminal is not None:
+        if self.terminal is not None:
             return ParseFault.INVALID_TERMINAL
         self.terminal = kind
         return None

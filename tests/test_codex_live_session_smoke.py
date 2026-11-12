@@ -165,6 +165,10 @@ _PARSE_CASES: list[tuple[str, tuple[str | None, str | None, str | None]]] = [
         "\n" + _stream(_started("thr-1"), {"type": "item.completed"}, _done()) + "\n",
         ("thr-1", "turn.completed", None),
     ),
+    (
+        _stream(_started("thr-1"), {"type": "turn.started"}, _done()),
+        ("thr-1", "turn.completed", None),
+    ),
     ("not json\n", (None, None, "malformed_jsonl")),
     ("[1,2]\n", (None, None, "malformed_jsonl")),
     ('{"type": 5}\n', (None, None, "malformed_jsonl")),
