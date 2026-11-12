@@ -686,9 +686,27 @@ class TestArmPersistsBeforeAnnouncing:
             {}, {"client-a": now + timedelta(hours=1)}, backoff_seconds=3600
         )
 
-        assert armed["client-a"] < existing
+        assert armed["client-a"] == existing
         assert load_usage_limited_until()["client-a"] == existing
         assert read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED]) == []
+
+    def test_restart_reconciles_persisted_window_without_armed_event(
+        self,
+        tmp_events_dir: Path,
+    ) -> None:
+        from cw.dispatch.usage_limit_windows import (
+            _reconcile_unannounced_usage_limit_windows,
+        )
+
+        until = datetime.now(UTC) + timedelta(hours=1)
+        merge_and_save_usage_limited_until({"client-a": until})
+
+        _reconcile_unannounced_usage_limit_windows(load_usage_limited_until())
+
+        events = read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED])
+        assert [(e.payload["client"], e.payload["until"]) for e in events] == [
+            ("client-a", until.isoformat())
+        ]
 
     def test_arm_and_persist_failed_save_still_returns_window_and_armed_at(
         self,

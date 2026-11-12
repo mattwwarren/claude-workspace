@@ -4591,7 +4591,8 @@ answers, the wall is gone. During a genuine wall, STOP the dispatch loop
 - A failed persist of a window logs a warning and emits no
   `dispatch.usage_limit_armed` event. The loop still backs off in memory for
   that process. Check the log for `did not persist` when an expected armed
-  event is missing.
+  event is missing. If the event write fails after the window is persisted,
+  the next restart recovers the missing audit event before dispatch resumes.
 - A per-client arm time is a separate ticket if it is wanted.
 
 ---

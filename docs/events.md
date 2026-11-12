@@ -644,6 +644,10 @@ known client with no open window with `source: "flat_backoff"` for it. A
 client whose window is still open is left alone: re-arming it would overwrite
 a live parsed deadline with the flat one (#2276).
 
+Startup recovery of a persisted window whose armed event is missing also uses
+`source: "flat_backoff"`: the sidecar stores the deadline, but not the parser
+provenance.
+
 **Order decision (#2276, recorded once here; the docstrings point at this
 section).** The two arming paths deliberately differ. On the dispatch-loop
 path (`_arm_usage_limit_windows`) the window is PERSISTED first, read back to
@@ -656,11 +660,14 @@ the reverse, audit FIRST then persist, by design: its resume path skips
 re-arming once the window lands (`_lockout_covers`), so the audit must
 precede the write to stay idempotent. The residual cost of the dispatch-loop
 order: an event-write failure after a successful persist leaves a durable
-window with no audit line. The loop errors out, the supervisor restarts it,
-and the restarted loop honours the sidecar. Because the failing event write
-raises before `save_usage_limit_armed_at` runs, the next
-`dispatch.usage_limit_cleared` carries a stale or null `detected_at`. This is
-the accepted cost of persist-before-announce; there is no retry or suppression. The mid-turn sweep (#2324)
+window with no audit line. The loop errors out rather than continuing. On
+restart, before the first normal tick, the loop compares active sidecar
+windows with the retained armed events and records a recovery event for each
+missing audit line; if recovery cannot be recorded, normal dispatch does not
+resume. Because the original failing event write raises before
+`save_usage_limit_armed_at` runs, the fleet-level marker may remain stale or
+null; recovery repairs the audit line without changing that marker. The
+mid-turn sweep (#2324)
 is different: it detects a roster-present worker whose transcript tail is the
 limit message, arms only that session's client, and parses the message's reset
 time, so it can report either `source` — see `"usage_limited_mid_turn"` under

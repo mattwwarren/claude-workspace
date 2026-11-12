@@ -85,6 +85,7 @@ from cw.dispatch.tick import dispatch_tick
 from cw.dispatch.usage_limit_windows import (
     _arm_and_persist_usage_limit_window,
     _merge_persisted_usage_limited_until,
+    _reconcile_unannounced_usage_limit_windows,
     _usage_limit_window_is_active,
 )
 
@@ -832,6 +833,9 @@ def _run_dispatch_loop_body(
     # Keyed by client name since #1409 -- one client's parsed reset must not
     # park the rest of the fleet.
     usage_limited_until: dict[str, datetime] = load_usage_limited_until()
+    # Recover an armed event that was lost after its sidecar write, before the
+    # first normal dispatch tick can run (#2276).
+    _reconcile_unannounced_usage_limit_windows(usage_limited_until)
     # #1343: in-process-local usage-limit-window transition detector state --
     # see _handle_usage_limit_window_transition's docstring for the R4
     # single-loop-invariant caveat.

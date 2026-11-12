@@ -22,6 +22,7 @@ from cw.dispatch_state import (
     resolve_usage_limited_until,
     save_usage_limit_armed_at,
 )
+from cw.events import read_events
 from cw.models import OrchestratorEventType
 
 if TYPE_CHECKING:
@@ -89,7 +90,7 @@ def _arm_usage_limit_windows(
     previously_known = merge_usage_limited_until(
         usage_limited_until, load_usage_limited_until()
     )
-    armed = dict(usage_limited_until)
+    armed = previously_known
     resolved: dict[str, tuple[datetime, datetime | None]] = {}
     for client, reset_at in detections.items():
         until = resolve_usage_limited_until(now, reset_at, backoff_seconds)
@@ -104,11 +105,7 @@ def _arm_usage_limit_windows(
         ) is not None and previous_until >= until
         if was_already_covered:
             continue
-        if (
-            effective_until is None
-            or effective_until < until
-            or persisted.get(client) != effective_until
-        ):
+        if effective_until is None or (p := persisted.get(client)) is None or p < until:
             _log.warning(
                 "dispatch: usage limit window for %s (until %s) did not persist; "
                 "backing off in memory only, no %s event recorded",
@@ -127,6 +124,37 @@ def _arm_usage_limit_windows(
             source,
         )
     return merged
+
+
+def _reconcile_unannounced_usage_limit_windows(
+    usage_limited_until: Mapping[str, datetime],
+) -> None:
+    """Recover arm events lost after a persisted window landed (#2276).
+
+    A dispatch-loop event write can fail after the sidecar write succeeds. On
+    restart, compare the active sidecar windows with the retained arm events
+    and record a recovery event before the first normal dispatch tick. The
+    sidecar stores only deadlines, so a recovered event uses the flat-backoff
+    provenance label; its audit purpose is to establish that the window exists.
+    Event-write failures are allowed to raise so the loop does not resume
+    normal dispatch without completing this reconciliation.
+    """
+    if not usage_limited_until:
+        return
+    announced = {
+        (event.payload.get("client"), event.payload.get("until"))
+        for event in read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED])
+    }
+    for client, until in usage_limited_until.items():
+        if (client, until.isoformat()) in announced:
+            continue
+        record_usage_limit_armed(client, until=until, reset_at=None)
+        _log.warning(
+            "dispatch: recovered missing usage limit armed event for %s; "
+            "window remains armed until %s",
+            client,
+            until,
+        )
 
 
 def _usage_limit_window_is_active(usage_limited_until: Mapping[str, datetime]) -> bool:
