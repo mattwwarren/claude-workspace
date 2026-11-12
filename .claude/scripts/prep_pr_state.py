@@ -11,6 +11,7 @@ Subcommands:
   gate-timeout  — Foreground/poll timeout ceilings for a named gate
   gate-elapsed  — Elapsed time since a timestamp vs a ceiling
   gate-pass     — Record a gate pass at HEAD, or check whether one still applies
+  gate-ci-evidence — Whether green CI at a PR's live head proves a gate (opt-in)
 """
 
 from __future__ import annotations
@@ -1004,6 +1005,171 @@ def gate_pass_record(name: str, base: str) -> dict[str, Any]:
     return {"gate": name, "recorded": True, "sha": head}
 
 
+# --- CI Evidence (open-PR reuse path) ---
+
+# project-config.yaml, opt-in per repo: quality_gates.ci_evidence maps a gate
+# name (exactly as detect-gates prints it) to the CI check name(s) whose
+# success at the PR's live head already proves that gate. A repo with no map,
+# or a gate with no entry, never skips anything.
+GATE_CI_EVIDENCE_CONFIG_KEY = "ci_evidence"
+GH_CALL_TIMEOUT_SECONDS = 60
+CI_CHECK_SUCCESS = "SUCCESS"
+CI_CHECK_COMPLETED = "COMPLETED"
+
+
+def _ci_evidence_entry(key: object, value: object) -> list[str] | None:
+    """One map entry as a non-empty list of check names, else None (invalid)."""
+    if not isinstance(key, str):
+        return None
+    names = [value] if isinstance(value, str) else value
+    if (
+        not isinstance(names, list)
+        or not names
+        or not all(isinstance(n, str) and n.strip() for n in names)
+    ):
+        return None
+    return [str(n).strip() for n in names]
+
+
+def _parse_ci_evidence(text: str) -> Mapping[object, object]:
+    """The raw ``quality_gates.ci_evidence`` mapping from config *text*.
+
+    Needs PyYAML (``load_ci_evidence_map`` checks); absent or null is empty.
+    """
+    if yaml is None:
+        return {}
+    doc = yaml.safe_load(text)
+    if doc is None:
+        return {}
+    if not isinstance(doc, dict):
+        msg = "root is not a mapping"
+        raise TypeError(msg)
+    section = _nested_mapping(doc, GATE_TIMEOUT_CONFIG_SECTION)
+    return _nested_mapping(section, GATE_CI_EVIDENCE_CONFIG_KEY)
+
+
+def load_ci_evidence_map(
+    config_path: Path = PROJECT_CONFIG_PATH,
+) -> dict[str, list[str]]:
+    """Valid ``quality_gates.ci_evidence`` entries from *config_path*.
+
+    Fail closed: a missing file, no PyYAML, or a malformed file yields ``{}``,
+    which makes every gate run locally. An invalid entry is logged and skipped
+    without affecting its siblings.
+    """
+    if yaml is None or not config_path.exists():
+        return {}
+    try:
+        raw = _parse_ci_evidence(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, yaml.YAMLError) as exc:
+        logger.warning("Ignoring gate CI evidence in %s: %s", config_path, exc)
+        return {}
+    evidence: dict[str, list[str]] = {}
+    for key, value in raw.items():
+        checks = _ci_evidence_entry(key, value)
+        if checks is None:
+            logger.warning(
+                "Ignoring %s.%s.%s = %r in %s: want a check name or a list of them",
+                GATE_TIMEOUT_CONFIG_SECTION,
+                GATE_CI_EVIDENCE_CONFIG_KEY,
+                key,
+                value,
+                config_path,
+            )
+            continue
+        evidence[str(key)] = checks
+    return evidence
+
+
+def _pr_ci_snapshot(pr: int, repo: str | None) -> dict[str, Any] | None:
+    """Live ``headRefOid`` and check rollup of PR *pr*, or None on any failure."""
+    cmd = ["gh", "pr", "view", str(pr), "--json", "headRefOid,statusCheckRollup"]
+    if repo:
+        cmd += ["--repo", repo]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=GH_CALL_TIMEOUT_SECONDS,
+        )
+        parsed = json.loads(result.stdout)
+    except (
+        FileNotFoundError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        ValueError,
+    ) as exc:
+        logger.warning("Could not read CI state for PR %s: %s", pr, exc)
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _rollup_entry_name(entry: Mapping[str, Any]) -> object:
+    """A rollup entry's check name: ``name`` (CheckRun) or ``context`` (status)."""
+    return entry.get("name") or entry.get("context")
+
+
+def _rollup_entry_succeeded(entry: Mapping[str, Any]) -> bool:
+    """Whether a rollup entry is a finished success (skipped/neutral is not)."""
+    if "state" in entry and "conclusion" not in entry:
+        return entry.get("state") == CI_CHECK_SUCCESS
+    return (
+        entry.get("status") == CI_CHECK_COMPLETED
+        and entry.get("conclusion") == CI_CHECK_SUCCESS
+    )
+
+
+def gate_ci_evidence(
+    name: str,
+    pr: int,
+    repo: str | None = None,
+    config_path: Path = PROJECT_CONFIG_PATH,
+) -> dict[str, Any]:
+    """Whether green CI at the PR's live head already proves gate *name*.
+
+    ``skip`` is true only when the gate has a ``ci_evidence`` entry, local HEAD
+    equals the PR head read live from GitHub, and every mapped check has at
+    least one rollup entry and all of them are finished successes. Every other
+    outcome (no entry, no signal, head moved, red/pending/skipped/missing
+    check, GitHub unreachable) is ``skip: false`` with the reason, so the
+    caller runs the gate locally as before.
+    """
+    checks = load_ci_evidence_map(config_path).get(name, [])
+    head = _run_git(["rev-parse", "HEAD"])
+    verdict: dict[str, Any] = {
+        "gate": name,
+        "skip": False,
+        "reason": "",
+        "sha": head or None,
+        "checks": checks,
+    }
+    if not checks:
+        return {**verdict, "reason": "no-map-entry"}
+    if not head:
+        return {**verdict, "reason": "head-unresolved"}
+    snapshot = _pr_ci_snapshot(pr, repo)
+    if snapshot is None:
+        return {**verdict, "reason": "ci-signal-unavailable"}
+    live_head = snapshot.get("headRefOid")
+    if live_head != head:
+        return {**verdict, "reason": "head-mismatch", "live_sha": live_head}
+    rollup = snapshot.get("statusCheckRollup")
+    entries = (
+        [e for e in rollup if isinstance(e, dict)] if isinstance(rollup, list) else []
+    )
+    if not entries:
+        return {**verdict, "reason": "no-ci-signal"}
+    for check in checks:
+        matching = [e for e in entries if _rollup_entry_name(e) == check]
+        if not matching:
+            return {**verdict, "reason": "check-missing", "failed_check": check}
+        if not all(_rollup_entry_succeeded(e) for e in matching):
+            return {**verdict, "reason": "check-not-success", "failed_check": check}
+    return {**verdict, "skip": True, "reason": "matched"}
+
+
 # --- Scope Tracking ---
 
 
@@ -1224,6 +1390,11 @@ def cmd_gate_pass(args: argparse.Namespace) -> None:
     print(json.dumps(result, indent=2))
 
 
+def cmd_gate_ci_evidence(args: argparse.Namespace) -> None:
+    """Handle gate-ci-evidence subcommand."""
+    print(json.dumps(gate_ci_evidence(args.name, args.pr, args.repo), indent=2))
+
+
 def cmd_gate_elapsed(args: argparse.Namespace) -> None:
     """Handle gate-elapsed subcommand."""
     try:
@@ -1329,9 +1500,28 @@ def main() -> None:
         ),
     )
 
+    # gate-ci-evidence
+    gate_ci_parser = subparsers.add_parser(
+        "gate-ci-evidence",
+        help=(
+            "Report whether green CI at the PR's live head already proves a"
+            " gate (open-PR reuse path; opt-in via quality_gates.ci_evidence)"
+        ),
+    )
+    gate_ci_parser.add_argument(
+        "name", help="Gate name exactly as detect-gates printed it"
+    )
+    gate_ci_parser.add_argument(
+        "--pr", type=int, required=True, help="Pull request number"
+    )
+    gate_ci_parser.add_argument(
+        "--repo", default=None, help="owner/name (default: gh's current repo)"
+    )
+
     args = parser.parse_args()
 
     dispatch = {
+        "gate-ci-evidence": cmd_gate_ci_evidence,
         "detect-gates": cmd_detect_gates,
         "snapshot": cmd_snapshot,
         "check-scope": cmd_check_scope,

@@ -434,9 +434,12 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
 
 - the start-time step (record each gate's start before running it);
 - the foreground-timeout step (one foreground Bash call per gate, with `timeout` set from `gate-timeout`);
+- `"$PREP_PR_STATE" gate-ci-evidence <name> --pr <pr_number>` (skip a gate the repo has opted in to proving by green CI at the PR's live head; see CI-evidence skip below);
 - `"$PREP_PR_STATE" gate-pass check <name>` (skip a gate that already passed at this HEAD);
 - `"$PREP_PR_STATE" gate-timeout <name>` (the ceiling);
 - the `gate_timeout` token, which on a timeout is the top-level `blocker.reason` (see Headless ceiling).
+
+**CI-evidence skip (opt-in, per repo).** Runs before `gate-pass check`, once per gate. A repo opts in by mapping gate names (exactly as `detect-gates` prints them) to the CI check name(s) that already prove them, under `quality_gates.ci_evidence` in `.claude/project-config.yaml`; with no map, or no entry for a gate, nothing is skipped and this step behaves as before. `gate-ci-evidence` prints JSON and always exits 0. `skip: true` means local HEAD equals the PR head read live from GitHub and every mapped check finished green on it. In that case do not run the gate; append `reuse_path_gate_ci_covered: <name> via <checks>` to `friction_highlights` and move to the next gate. Any other result (`skip: false`, whatever the `reason`: no entry, no CI signal, head moved, check pending, red, skipped or missing, GitHub unreachable) falls through to the normal procedure and runs the gate locally. A skipped gate leaves the worktree untouched, so the dirty-worktree comparison below is unaffected, and Step 4d still pins `--match-head-commit`, so a head that moves after the check cannot be armed ungated. Never treat `skip: false` as a failure, and never retry the call in a loop waiting for CI.
 
 Nothing else is inherited: no autofix, no fix loop, no commit, no push, no backgrounding, and no `gate-pass record`. Fail fast on the first failing gate. At the start of Step 4c.6, capture `START_STATUS=$(git status --porcelain -- . ':(exclude).claude/prep-pr-state.json')`; after each gate and at the end of the step, capture `END_STATUS=$(git status --porcelain -- . ':(exclude).claude/prep-pr-state.json')` and compare the filtered output with `START_STATUS`. A gate that dirties the worktree is a failed gate, is never committed, and reports the changed paths in `details`.
 

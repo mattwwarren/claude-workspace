@@ -2583,6 +2583,52 @@ This key is unrelated to the `quality_gates:` key removed by #1616 (that one was
 never read). `claude-workspace` sets `pre-commit: 600`: its full hook suite runs
 the test suite and outgrew the 480 s default.
 
+## Quality Gate CI Evidence (`quality_gates.ci_evidence`)
+
+Opt-in. On the open-PR reuse path, finalize Step 4c.6 re-runs the repo's quality
+gates locally before arming auto-merge. A repo whose CI already runs those same
+gates (often sharded across runners, so faster than a local single-process run)
+can declare that, and finalize then trusts green CI at the PR's current head
+instead of re-running the gate:
+
+```yaml
+# .claude/project-config.yaml
+quality_gates:
+  ci_evidence:
+    lint: ci-status            # gate name (as detect-gates prints it) -> CI check name
+    tests: [ci-status, e2e]    # a list means every listed check must be green
+```
+
+`prep_pr_state.py gate-ci-evidence <gate-name> --pr <N> [--repo owner/name]`
+prints JSON (`gate`, `skip`, `reason`, `sha`, `checks`, plus `live_sha` /
+`failed_check` when relevant) and always exits 0. `skip` is `true` only when
+all of these hold:
+
+- the gate has an exact entry in the map (no prefix matching);
+- local `HEAD` equals the PR head read live from GitHub (`gh pr view`), never a
+  value cached on a row;
+- every mapped check has at least one entry in the PR's check rollup, and every
+  entry of that name is a finished success (a check run `COMPLETED` with
+  conclusion `SUCCESS`, or a commit status in state `SUCCESS`).
+
+Everything else is `skip: false` and the gate runs locally exactly as it did
+before: `no-map-entry`, `head-unresolved`, `ci-signal-unavailable` (`gh`
+failed, timed out or returned junk), `head-mismatch`, `no-ci-signal`,
+`check-missing`, `check-not-success` (pending, red, cancelled, skipped, neutral).
+
+- **Choosing check names.** Map a gate only to a check that really runs that
+  gate on the same scope. An aggregate check that the repo requires for merge
+  is usually the safest value. A check that is skipped for some changes (draft
+  PRs, path filters) simply yields `check-not-success` and the gate runs
+  locally.
+- **Invalid entries.** Each value must be a non-empty check name or a non-empty
+  list of them. A bad entry is skipped with a warning on stderr and does not
+  affect its siblings.
+- **Requires PyYAML.** Without it the map reads as empty and every gate runs
+  locally (fail closed). The `quality_gates.timeouts` bare-`python3` scanner
+  ignores this sibling key.
+- **Path.** Read relative to the current directory, like `quality_gates.timeouts`.
+
 ## Quality Gate Autofix (`quality_gates.autofix`, #3412)
 
 The codex fix loop runs the repo's quality gates before each fix commit. A gate
