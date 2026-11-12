@@ -32,6 +32,7 @@ from cw.review_engine.constants import (
     FRICTION,
     EngineRoundFailure,
 )
+from cw.review_engine.validate import SummaryFailure
 from cw.review_engine_summary_io import load_review_engine_summary
 from tests._codex_review_helpers import _doc_json
 from tests._review_engine_helpers import (
@@ -301,6 +302,50 @@ class TestFailures:
                 path=str(summary_path)
             ),
         )
+
+
+class TestScratchFailures:
+    """#3436: a scratch-dir or schema-write OSError is a typed failure."""
+
+    def _no_summary(self, summary_path: Path) -> SummaryFailure:
+        reason = EngineRoundFailure.ENGINE_NO_SUMMARY
+        return SummaryFailure(reason, FRICTION[reason].format(path=str(summary_path)))
+
+    def test_a_scratch_dir_oserror_is_engine_no_summary_and_runs_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _unwritable(_session_id: str) -> Path:
+            msg = "read-only state dir"
+            raise OSError(msg)
+
+        monkeypatch.setattr(
+            "cw.codex_review._engine_aggregate._codex_scratch_dir", _unwritable
+        )
+        summary_path = tmp_path / "summary.json"
+        runner = _runner(_ok(_REAL_PASS))
+
+        failure = _run(runner, summary_path)
+
+        assert failure == self._no_summary(summary_path)
+        assert runner.calls == []
+        assert not summary_path.exists()
+
+    def test_a_schema_write_oserror_is_engine_no_summary_and_runs_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        missing = tmp_path / "gone" / "scratch"
+        monkeypatch.setattr(
+            "cw.codex_review._engine_aggregate._codex_scratch_dir",
+            lambda _session_id: missing,
+        )
+        summary_path = tmp_path / "summary.json"
+        runner = _runner(_ok(_REAL_PASS))
+
+        failure = _run(runner, summary_path)
+
+        assert failure == self._no_summary(summary_path)
+        assert runner.calls == []
+        assert not missing.exists()
 
 
 class TestAuditFlagDegrade:

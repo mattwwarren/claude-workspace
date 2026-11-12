@@ -626,6 +626,25 @@ class TestAggregatorFailures:
 
         assert _blocked(outcome, retry=False).startswith("engine_no_summary:")
 
+    def test_an_unwritable_aggregation_scratch_is_engine_no_summary(
+        self, repo: EngineRepo, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3436: the scratch OSError reaches the pass as a typed block."""
+
+        def _unwritable(_session_id: str) -> Path:
+            msg = "read-only state dir"
+            raise OSError(msg)
+
+        monkeypatch.setattr(
+            "cw.codex_review._engine_aggregate._codex_scratch_dir", _unwritable
+        )
+        runner = _engine_runner()
+
+        outcome = _pass(repo, runner)
+
+        assert _blocked(outcome, retry=False).startswith("engine_no_summary:")
+        assert _aggregator_stdins(runner) == []
+
 
 class TestPreflight:
     def test_a_branch_touching_the_engine_parks_before_any_codex_call(

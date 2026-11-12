@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-    from cw.codex_runner import CodexRunner
+    from cw.codex_runner import CodexRunner, CodexRunResult
 
 _log = logging.getLogger(__name__)
 
@@ -78,6 +78,53 @@ def _write_summary(
     except OSError:
         return _no_summary(summary_path)
     return None
+
+
+def _run_turn(
+    runner: CodexRunner,
+    worktree: Path,
+    envelope: str,
+    *,
+    summary_path: Path,
+    model: str | None,
+    reasoning_effort: str | None,
+    timeout_seconds: int | None,
+) -> CodexRunResult | SummaryFailure:
+    """Write the schema to a fresh scratch dir and run the aggregation turn.
+
+    A scratch-dir or schema-write ``OSError`` is ``engine_no_summary`` before
+    any codex call (#3436): cw cannot produce the summary, and a plain requeue
+    would hit the same unwritable state dir.
+    """
+    try:
+        scratch = _codex_scratch_dir(uuid.uuid4().hex)
+    except OSError:
+        _log.warning("codex aggregation scratch dir is unwritable", exc_info=True)
+        return _no_summary(summary_path)
+    try:
+        schema_path = scratch / _SCHEMA_FILENAME
+        try:
+            schema_path.write_text(
+                json.dumps(engine_aggregation_schema()), encoding="utf-8"
+            )
+        except OSError:
+            _log.warning(
+                "codex aggregation schema write failed: %s", schema_path, exc_info=True
+            )
+            return _no_summary(summary_path)
+        argv = _build_generic_codex_argv(
+            model=model,
+            reasoning_effort=reasoning_effort,
+            schema_path=schema_path,
+            output_path=scratch / _OUTPUT_FILENAME,
+            sandbox_mode=SandboxMode.READ_ONLY,
+        )
+        result, _argv = _run_codex_with_audit_degrade(
+            runner, worktree, argv, timeout_seconds, envelope
+        )
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    return result
 
 
 def run_codex_aggregator(
@@ -110,24 +157,17 @@ def run_codex_aggregator(
         raise ReviewInputTooLargeError(
             actual_chars=len(envelope), max_chars=max_prompt_chars
         )
-    scratch = _codex_scratch_dir(uuid.uuid4().hex)
-    try:
-        schema_path = scratch / _SCHEMA_FILENAME
-        schema_path.write_text(
-            json.dumps(engine_aggregation_schema()), encoding="utf-8"
-        )
-        argv = _build_generic_codex_argv(
-            model=model,
-            reasoning_effort=reasoning_effort,
-            schema_path=schema_path,
-            output_path=scratch / _OUTPUT_FILENAME,
-            sandbox_mode=SandboxMode.READ_ONLY,
-        )
-        result, _argv = _run_codex_with_audit_degrade(
-            runner, worktree, argv, timeout_seconds, envelope
-        )
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+    result = _run_turn(
+        runner,
+        worktree,
+        envelope,
+        summary_path=summary_path,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        timeout_seconds=timeout_seconds,
+    )
+    if isinstance(result, SummaryFailure):
+        return result
     if result.timed_out or result.returncode != 0:
         category = _classify_codex_failure(result)
         reason = _CATEGORY_TO_REASON[category]

@@ -1393,7 +1393,9 @@ failure). `retry_eligible` is true for `engine_unresolvable`,
 `engine_summary_invalid`, `engine_coverage_incomplete`, `engine_head_mismatch`,
 and transient role or aggregation failures (`codex_timeout`,
 `budget_exhausted`, or `codex_model_capacity`). It is false for
-`engine_no_summary` (cw could not write the summary file, an environment
+`engine_no_summary` (cw could not write the summary file, or on the codex lane
+could not create the aggregation scratch dir or write its schema file (#3436);
+the friction string names the summary path either way. It is an environment
 failure outside the transient policy, so a plain requeue would hit the same
 path), for `engine_worktree_mutated`, and for non-transient role or aggregation
 failures.
