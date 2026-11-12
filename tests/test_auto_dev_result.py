@@ -56,6 +56,11 @@ from cw.auto_dev_result import (
     parse_stdout,
     queue_status_for_terminal_sentinel,
 )
+from cw.codex_finalize._result import (
+    MERGE_CONFLICT_POST_PUSH,
+    PR_ALREADY_TERMINAL,
+    SCOPE_TIER_UNRESOLVABLE,
+)
 from cw.codex_review import (
     CODEX_FIX_CONSTRAINT_VIOLATION,
     CODEX_FIX_DIRTY_START,
@@ -66,6 +71,7 @@ from cw.codex_review import (
     CODEX_MUST_FIX_MECHANICALLY_REJECTED,
     FIX_LOOP_DIVERGING,
 )
+from cw.codex_review._verdict._synthesis import _SCOPE_TIER_UNRESOLVABLE
 from cw.executor._clean_review import CLEAN_REVIEW_UNSUPPORTED_BACKEND
 from cw.executor._finalize_guard import FINALIZE_UNSUPPORTED_BACKEND
 from cw.models import QueueItemStatus
@@ -1023,6 +1029,37 @@ class TestKnownBlockerReasons:
     def test_registry_covers_the_finalize_guard_reason(self) -> None:
         """RFC 0018 B1 (#3059): the opencode FINALIZE pre-flight reason is known."""
         assert FINALIZE_UNSUPPORTED_BACKEND in KNOWN_BLOCKER_REASONS
+
+
+class TestCodexFinalizeReasonLockstep:
+    """#3062: ``_vocab`` restates the codex FINALIZE executor's owner constants.
+
+    ``schema`` cannot import ``cw.codex_finalize`` (it imports the schema), so
+    the three new literals are spelled in ``KNOWN_BLOCKER_REASONS`` and pinned
+    here to the constants ``codex_finalize/_result.py`` owns.
+    """
+
+    def test_literals_equal_the_owner_constants(self) -> None:
+        assert PR_ALREADY_TERMINAL == "pr_already_terminal"
+        assert MERGE_CONFLICT_POST_PUSH == "merge_conflict_post_push"
+        assert SCOPE_TIER_UNRESOLVABLE == "scope_tier_unresolvable"
+
+    def test_every_owner_constant_is_registered(self) -> None:
+        assert {
+            PR_ALREADY_TERMINAL,
+            MERGE_CONFLICT_POST_PUSH,
+            SCOPE_TIER_UNRESOLVABLE,
+        } <= KNOWN_BLOCKER_REASONS
+        for reason in (
+            PR_ALREADY_TERMINAL,
+            MERGE_CONFLICT_POST_PUSH,
+            SCOPE_TIER_UNRESOLVABLE,
+        ):
+            assert is_known_blocker_reason(reason)
+
+    def test_scope_tier_unresolvable_matches_the_synthesis_constant(self) -> None:
+        """The codex review synthesis path already emits this literal."""
+        assert SCOPE_TIER_UNRESOLVABLE == _SCOPE_TIER_UNRESOLVABLE
 
 
 # ---------------------------------------------------------------------------

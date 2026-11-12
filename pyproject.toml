@@ -72,12 +72,14 @@ build-backend = "hatchling.build"
 packages = ["src/cw"]
 
 [tool.hatch.build.targets.wheel.force-include]
-# The codex PLAN (#3060) and IMPL (#3061) executors render their prompts from
-# cw's own copy of the plan and impl command docs, read at run time as package data (cw/data/commands). The
+# The codex PLAN (#3060), IMPL (#3061) and FINALIZE (#3062) executors render their prompts from
+# cw's own copy of the plan, impl, finalize and prep-pr command docs, read at run time as package data (cw/data/commands). The
 # source is outside src/cw, so it is not the second-file clash warned about
 # above: nothing under packages already lands at this wheel path.
 ".claude/commands/auto-dev-plan.md" = "cw/data/commands/auto-dev-plan.md"
 ".claude/commands/auto-dev-impl.md" = "cw/data/commands/auto-dev-impl.md"
+".claude/commands/auto-dev-finalize.md" = "cw/data/commands/auto-dev-finalize.md"
+".claude/commands/prep-pr.md" = "cw/data/commands/prep-pr.md"
 
 [tool.cw.changelog_freeze]
 # Released CHANGELOG sections are frozen for this tag and every later one;

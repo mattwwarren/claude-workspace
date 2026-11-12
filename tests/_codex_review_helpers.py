@@ -901,3 +901,48 @@ def seed_codex_impl_run(
         task_updates=task_updates,
     )
     exclude_cw_dir(worktree)
+
+
+def fresh_finalize_repo(
+    make_git_repo: Callable[..., Path],
+    name: str,
+    branch: str,
+    *,
+    unpushed_commits: int = 0,
+) -> tuple[Path, Path]:
+    """A FINALIZE worktree on *branch*: one implementation commit, pushed.
+
+    ``main`` and *branch* sit on a bare origin, so the branch is a real
+    non-empty one (the review-complete state a FINALIZE row starts from).
+    *unpushed_commits* adds that many commits after the push, leaving the
+    branch ahead of ``origin/<branch>`` for the ahead-push path. Returns
+    ``(worktree, origin)``.
+    """
+    repo = make_git_repo(name)
+    git_in(repo, "checkout", "-b", branch)
+    commit_tracked_file(repo, "feature.py")
+    origin = add_bare_origin(repo)
+    for index in range(unpushed_commits):
+        commit_tracked_file(repo, f"ahead_{index}.py")
+    return repo, origin
+
+
+def seed_codex_finalize_run(
+    *,
+    worktree: Path,
+    ticket_id: str,
+    session_id: str,
+    task_updates: Mapping[str, object] | None = None,
+) -> None:
+    """Seed a FINALIZE session and RUNNING row, and git-exclude ``.cw/``.
+
+    Builds no repo: pair it with :func:`fresh_finalize_repo`.
+    """
+    seed_codex_stage_run(
+        worktree=worktree,
+        stage=Stage.FINALIZE,
+        ticket_id=ticket_id,
+        session_id=session_id,
+        task_updates=task_updates,
+    )
+    exclude_cw_dir(worktree)

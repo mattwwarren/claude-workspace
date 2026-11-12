@@ -348,6 +348,12 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             "multiple_result_blocks",
             "no_result_emitted",
             "pr_already_open_pre_dispatch",
+            # #3062 (RFC 0018 C3): the codex FINALIZE executor's own reasons;
+            # owned by cw.codex_finalize._result (lockstep-pinned in
+            # tests/test_auto_dev_result.py).
+            "pr_already_terminal",
+            "merge_conflict_post_push",
+            "scope_tier_unresolvable",
             "schema_version_unsupported",
             "status_unknown",
             "tracker_mcp_unavailable_pre_dispatch",

@@ -507,6 +507,9 @@ hence two fields.
   knob: they always run `--sandbox read-only -c approval_policy=never` (cw
   writes the plan artifacts outside the sandbox). Neither field above is
   read for PLAN, and setting one on a `plan` stage config changes nothing.
+- The codex FINALIZE turn (#3062) has no sandbox knob either: it always runs
+  `--sandbox read-only -c approval_policy=never` and returns judgement text
+  only (cw does the push, PR and arm outside the sandbox).
 - Codex backend only: an explicit non-default value on any other backend is a
   config error (the defaults are simply unused there).
 - Like `model` and `reasoning_effort`, a lane's stage config replaces the

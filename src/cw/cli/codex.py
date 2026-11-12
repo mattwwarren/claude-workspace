@@ -19,6 +19,7 @@ import click
 
 from cw.cli._base import handle_errors, main
 from cw.codex_driver import (
+    run_codex_finalize_stage,
     run_codex_impl_stage,
     run_codex_plan_stage,
     run_codex_review_stage,
@@ -41,8 +42,9 @@ def _stage_runners() -> dict[Stage, Callable[..., None]]:
     """Map each stage a codex executor serves to its runner (#3054).
 
     Built per call, not held in a module constant: the tests patch
-    ``run_codex_review_stage``, ``run_codex_plan_stage`` and
-    ``run_codex_impl_stage`` on this module, and
+    ``run_codex_review_stage``, ``run_codex_plan_stage``,
+    ``run_codex_impl_stage`` and ``run_codex_finalize_stage`` (#3062) on this
+    module, and
     a constant would capture the unpatched objects at import. A pin test
     asserts the keys equal ``cw.executor.codex.CODEX_SUPPORTED_STAGES``.
     """
@@ -50,6 +52,7 @@ def _stage_runners() -> dict[Stage, Callable[..., None]]:
         Stage.REVIEW: run_codex_review_stage,
         Stage.PLAN: run_codex_plan_stage,
         Stage.IMPL: run_codex_impl_stage,
+        Stage.FINALIZE: run_codex_finalize_stage,
     }
 
 

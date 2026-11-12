@@ -41,11 +41,11 @@ if TYPE_CHECKING:
 # capability probe.
 CODEX_REVIEW_ONLY = "codex_review_only"
 
-#: Stages a codex executor runs (#3054). REVIEW, PLAN (#3060) and IMPL (#3061)
-#: have executors; the FINALIZE executor is C3 (#3062). A stage not listed here
-#: parks with CODEX_REVIEW_ONLY (the reason keeps its name until C3 lands).
+#: Stages a codex executor runs (#3054). REVIEW, PLAN (#3060), IMPL (#3061) and
+#: FINALIZE (#3062) have executors. A stage not listed here (HARDEN) parks with
+#: CODEX_REVIEW_ONLY, which keeps its historical name.
 CODEX_SUPPORTED_STAGES: frozenset[Stage] = frozenset(
-    {Stage.REVIEW, Stage.PLAN, Stage.IMPL}
+    {Stage.REVIEW, Stage.PLAN, Stage.IMPL, Stage.FINALIZE}
 )
 
 

@@ -34,8 +34,8 @@ _DETAILS = (
 def finalize_block_details(stage: Stage, backend: str) -> str | None:
     """Details text when this spawn must fail closed; ``None`` otherwise.
 
-    Only the opencode pre-flight calls it. Codex handles FINALIZE through
-    ``CODEX_REVIEW_ONLY``, and local is IMPL-only.
+    Only the opencode pre-flight calls it. Codex runs FINALIZE through its
+    own executor (``cw.codex_finalize``, #3062), and local is IMPL-only.
     """
     if stage != Stage.FINALIZE:
         return None

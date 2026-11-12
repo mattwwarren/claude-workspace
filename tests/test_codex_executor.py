@@ -22,6 +22,7 @@ import pytest
 
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_review import (
+    _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS,
     _CODEX_IMPL_BLOCKED_NEXT_ACTIONS,
     _CODEX_PLAN_BLOCKED_NEXT_ACTIONS,
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
@@ -147,7 +148,7 @@ def _seed_running_row(task: TicketTask) -> None:
 
 @pytest.mark.parametrize(
     ("stage", "expected_stage_reached"),
-    [(Stage.FINALIZE, "stage4a_merge_gate")],
+    [(Stage.HARDEN, "stage4a_merge_gate")],
 )
 def test_codex_executor_wrong_stage_blocked(
     tmp_config_dir: Path,
@@ -160,6 +161,8 @@ def test_codex_executor_wrong_stage_blocked(
 
     The park carries that stage's entry marker, never the REVIEW default
     (#3060 R8): dispatch walks the row forward on a later-stage sentinel.
+    HARDEN's entry marker is ``stage4a_merge_gate``, which ``make_codex_blocked``
+    keys to the codex FINALIZE label since #3062.
     """
     worktree = make_git_repo("wt-codex-wrong-stage")
     executor = _codex_executor(runner=fake_runner)
@@ -174,7 +177,7 @@ def test_codex_executor_wrong_stage_blocked(
     assert result.stage_reached == expected_stage_reached
     assert result.blocker is not None
     assert result.blocker.reason == CODEX_REVIEW_ONLY
-    assert result.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
+    assert result.next_actions == _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS
 
 
 def test_codex_executor_impl_preflight_ok_launches_cw_codex_run_stage_impl(
@@ -225,25 +228,31 @@ def test_codex_executor_impl_codex_not_found_carries_impl_labels(
     assert result.next_actions == _CODEX_IMPL_BLOCKED_NEXT_ACTIONS
 
 
-def test_codex_review_only_park_for_finalize_keeps_the_finalize_marker(
+def test_codex_executor_finalize_is_supported_and_launches(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
     fake_runner: FakeFireAndForgetRunner,
 ) -> None:
-    """FINALIZE still parks CODEX_REVIEW_ONLY at stage4a_merge_gate; IMPL never."""
-    worktree = make_git_repo("wt-codex-finalize-review-only")
+    """FINALIZE is supported (#3062): no CODEX_REVIEW_ONLY park, one launch."""
+    worktree = make_git_repo("wt-codex-finalize-launch")
     executor = _codex_executor(runner=fake_runner)
     task = TicketTask(ticket_id="T-1", client="test", stage=Stage.FINALIZE)
 
-    executor.spawn(
-        stage=Stage.FINALIZE, task=task, worktree=worktree, client=_client(worktree)
-    )
+    with patch(_WHICH, return_value=_CODEX_PATH):
+        sid = executor.spawn(
+            stage=Stage.FINALIZE,
+            task=task,
+            worktree=worktree,
+            client=_client(worktree),
+        )
 
-    result = _persisted_result()
-    assert result.stage_reached == "stage4a_merge_gate"
-    assert result.blocker is not None
-    assert result.blocker.reason == CODEX_REVIEW_ONLY
-    assert Stage.IMPL in CODEX_SUPPORTED_STAGES
+    assert Stage.FINALIZE in CODEX_SUPPORTED_STAGES
+    session = next(s for s in load_state().sessions if s.id == sid)
+    assert session.last_result is None
+    (call,) = fake_runner.calls
+    argv = call["argv"]
+    assert isinstance(argv, list)
+    assert argv[argv.index("--stage") + 1] == "finalize"
 
 
 def test_codex_executor_plan_codex_not_found_carries_plan_labels(
@@ -680,7 +689,7 @@ def test_preflight_failure_persist_error_completes_session_and_reraises(
     """
     worktree = make_git_repo("wt-codex-preflight-boom")
     executor = _codex_executor()
-    task = TicketTask(ticket_id="T-pf", client="test", stage=Stage.FINALIZE)
+    task = TicketTask(ticket_id="T-pf", client="test", stage=Stage.HARDEN)
 
     calls: list[dict[str, object]] = []
 
@@ -694,9 +703,9 @@ def test_preflight_failure_persist_error_completes_session_and_reraises(
         patch("cw.executor.core._complete_session_via_door", _door),
         pytest.raises(OSError, match="door boom"),
     ):
-        # Stage.FINALIZE trips the CODEX_REVIEW_ONLY pre-flight guard.
+        # Stage.HARDEN trips the CODEX_REVIEW_ONLY pre-flight guard.
         executor.spawn(
-            stage=Stage.FINALIZE, task=task, worktree=worktree, client=_client(worktree)
+            stage=Stage.HARDEN, task=task, worktree=worktree, client=_client(worktree)
         )
 
     # Second call is the guarded blocked-result write from the except branch.

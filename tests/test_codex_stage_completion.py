@@ -20,7 +20,10 @@ if TYPE_CHECKING:
 
 from cw import codex_background, codex_stage_completion
 from cw.auto_dev_result import AutoDevResult
-from cw.codex_review import _CODEX_PLAN_BLOCKED_NEXT_ACTIONS
+from cw.codex_review import (
+    _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS,
+    _CODEX_PLAN_BLOCKED_NEXT_ACTIONS,
+)
 from cw.codex_stage_completion import (
     STAGE_FAULTS,
     clear_stage_blocked_marker,
@@ -198,6 +201,24 @@ class TestDoorAndUnexpectedError:
         persisted = AutoDevResult.model_validate(load_state().sessions[0].last_result)
         assert persisted.stage_reached == "stage1_plan"
         assert persisted.next_actions == _CODEX_PLAN_BLOCKED_NEXT_ACTIONS
+
+    def test_unexpected_error_at_the_merge_gate_carries_finalize_next_actions(
+        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """#3062: the finalize wire stage keys the finalize label, not review's."""
+        worktree = make_git_repo("wt-stage-finalize")
+        _seed_session("sid-fin")
+        task = TicketTask(ticket_id="T-fin", client="test", stage=Stage.FINALIZE)
+
+        complete_session_as_unexpected_error(
+            "sid-fin", task, worktree, stage_reached="stage4a_merge_gate"
+        )
+
+        persisted = AutoDevResult.model_validate(load_state().sessions[0].last_result)
+        assert persisted.stage_reached == "stage4a_merge_gate"
+        assert persisted.blocker is not None
+        assert persisted.blocker.reason == UNEXPECTED_ERROR
+        assert persisted.next_actions == _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS
 
 
 class TestRunGuardedStage:

@@ -5,7 +5,8 @@ stage it is: stamping the running row with the session id, the executor-blocked
 marker lifecycle, completing a session through the door under ``sessions_lock``,
 and the unexpected-error completion plus claimed-row revert that the background
 thread's except branch performs. ``cw.codex_background`` (the REVIEW stage) and
-any future stage executor import these; none of it names a stage.
+the PLAN, IMPL and FINALIZE executors (``cw.codex_plan``, ``cw.codex_impl``,
+``cw.codex_finalize``, #3062) import these; none of it names a stage.
 
 Deferred imports below break the ``cw.executor`` <-> this module cycle:
 ``cw.executor`` imports the stamp from here at its top, and the door and the

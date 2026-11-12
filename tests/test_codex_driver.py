@@ -20,9 +20,11 @@ import pytest
 
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_driver import (
+    STAGE_FINALIZE,
     STAGE_IMPL,
     STAGE_PLAN,
     STAGE_REVIEW,
+    run_codex_finalize_stage,
     run_codex_impl_stage,
     run_codex_plan_stage,
     run_codex_review_stage,
@@ -589,6 +591,58 @@ def test_stage_constants_are_stage_agnostic_strings() -> None:
     assert STAGE_REVIEW == "review"
     assert STAGE_PLAN == "plan"
     assert STAGE_IMPL == "impl"
+    assert STAGE_FINALIZE == "finalize"
+
+
+def test_run_codex_finalize_stage_loads_finalize_row_no_sandbox_no_budget(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """#3062: the FINALIZE driver reads only model and reasoning effort."""
+    worktree = tmp_path / "wt-finalize"
+    worktree.mkdir()
+    seed_codex_stage_run(worktree=worktree, stage=Stage.FINALIZE)
+    runner = FakeCodexRunner()
+    with patch("cw.codex_driver.run_finalize_stage_and_complete") as run_finalize:
+        run_codex_finalize_stage(
+            ticket_id="T-1",
+            session_id="sess-1",
+            wall_clock_budget_seconds=900,
+            runner=runner,
+        )
+    kwargs = run_finalize.call_args.kwargs
+    assert kwargs["runner"] is runner
+    assert kwargs["task"].stage is Stage.FINALIZE
+    assert kwargs["worktree"] == worktree
+    assert kwargs["sid"] == "sess-1"
+    assert kwargs["client"].name == "test"
+    assert "wall_clock_budget_seconds" not in kwargs
+    assert "sandbox_mode" not in kwargs
+    assert set(kwargs) == {
+        "runner",
+        "task",
+        "worktree",
+        "client",
+        "sid",
+        "sess_name",
+        "model",
+        "reasoning_effort",
+    }
+
+
+def test_run_codex_finalize_stage_defaults_to_the_real_runner(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    worktree = tmp_path / "wt-finalize-real"
+    worktree.mkdir()
+    seed_codex_stage_run(worktree=worktree, stage=Stage.FINALIZE)
+    with (
+        patch("cw.codex_driver.run_finalize_stage_and_complete") as run_finalize,
+        patch("cw.codex_driver.RealCodexRunner") as real_runner,
+    ):
+        run_codex_finalize_stage(
+            ticket_id="T-1", session_id="sess-1", wall_clock_budget_seconds=None
+        )
+    assert run_finalize.call_args.kwargs["runner"] is real_runner.return_value
 
 
 def test_run_codex_plan_stage_loads_the_plan_row_and_ignores_the_budget(

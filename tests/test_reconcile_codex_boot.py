@@ -372,6 +372,75 @@ def test_clean_impl_orphan_on_a_descendant_of_the_baseline_is_requeued(
     assert payload["from_stage"] == payload["to_stage"] == Stage.IMPL
 
 
+def _seed_finalize_orphan(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+) -> tuple[Path, str]:
+    """A clean codex orphan whose RUNNING row sits at FINALIZE (#3062)."""
+    repo, base = _seed_clean_codex_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    write_clients_yaml(
+        ClientSpec(
+            "client-a",
+            tmp_path / "ws",
+            default_branch="main",
+            extra=executor_backend_extra("finalize", "codex"),
+        )
+    )
+    store = load_dev_queue()
+    store.tasks[0].stage = Stage.FINALIZE
+    save_dev_queue(store)
+    return repo, base
+
+
+def test_finalize_committing_stage_set_is_unchanged() -> None:
+    """cw never commits in FINALIZE (#3062): only IMPL may advance past the base."""
+    assert frozenset({Stage.IMPL}) == codex_boot._COMMITTING_STAGES
+
+
+def test_clean_finalize_orphan_at_the_baseline_is_requeued(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finalize-shaped crash leaves HEAD at the baseline, so it is requeued."""
+    repo, base = _seed_finalize_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    assert git_in(repo, "rev-parse", "HEAD") == base
+    _no_codex_process(monkeypatch)
+    _use_auto_reap_policy(monkeypatch)
+
+    assert reap_orphaned_codex_sessions_at_boot() == 1
+
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.PENDING
+    assert task.stage is Stage.FINALIZE
+    assert task.session_id is None
+    _assert_session_closed()
+    assert _attention_events("test-codex-boot-requeue-attention") == []
+    (payload,) = _requeued_events("test-codex-boot-requeued")
+    assert payload["from_stage"] == payload["to_stage"] == Stage.FINALIZE
+    assert payload["reason"] == CODEX_ORPHAN_CLEAN_REQUEUE_REASON
+
+
+def test_finalize_orphan_with_a_moved_head_is_parked(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FINALIZE is not a committing stage: a descendant HEAD is not provably clean."""
+    repo, _ = _seed_finalize_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    commit_tracked_file(repo, "extra.txt")
+    _no_codex_process(monkeypatch)
+    _use_auto_reap_policy(monkeypatch)
+
+    assert reap_orphaned_codex_sessions_at_boot() == 1
+
+    _assert_parked("test-codex-boot-head-moved", _PARK_REASON_HEAD_MOVED)
+    _assert_session_closed()
+
+
 def _expected_close_audit(
     session: Session, *, disposition: str, detail: str
 ) -> dict[str, object]:

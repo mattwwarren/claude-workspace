@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import get_args
 from unittest.mock import patch
 
 import pytest
@@ -13,11 +15,14 @@ import pytest
 from cw.auto_dev_result import OperatorConstraintsSource
 from cw.codex_review_signals import (
     UNDELIVERED_OPERATOR_CONTEXT,
+    VerdictCommentIdentity,
+    VerdictCommentKind,
     constraints_source,
     emit_confirm_escalated,
     emit_verdict_comment_skipped,
     emit_verdict_comment_unverified,
     operator_context_undelivered_payload,
+    surface_tracker_io_outcome,
     undelivered_operator_context,
     verdict_comment_skipped_payload,
     verdict_comment_unverified_payload,
@@ -34,6 +39,12 @@ from cw.models import (
 from cw.models.operator_constraint import PLAN_ACTOR, OperatorConstraint
 from cw.review_finding_dispositions import FindingDisposition
 from cw.tracker import TrackerClass, TrackerKind
+from cw.tracker_io import (
+    PostedComment,
+    PublicState,
+    TrackerIoOutcome,
+    TrackerIoReason,
+)
 
 _GITHUB = TrackerKind(TrackerClass.GITHUB, "github-issues")
 _LINEAR = TrackerKind(TrackerClass.OTHER, "linear")
@@ -440,3 +451,113 @@ class TestEmitConfirmEscalated:
         assert message.startswith("codex_review_signal_failed")
         assert "GEN-9" in message
         assert "review.confirm_escalated" in message
+
+
+def _identity(kind: VerdictCommentKind) -> VerdictCommentIdentity:
+    return VerdictCommentIdentity(
+        client="acme",
+        session_id="s-1",
+        kind=kind,
+        reviewed_sha=None,
+        artifact_path=None,
+    )
+
+
+class TestPrLinkKind:
+    """#3062: the codex FINALIZE PR-link comment reuses the three events."""
+
+    def test_payload_carries_the_pr_link_kind(self) -> None:
+        payload = verdict_comment_skipped_payload(
+            ticket_id="GEN-9",
+            client="acme",
+            tracker="github-issues",
+            kind="pr_link",
+            artifact_path=None,
+            reviewed_sha=None,
+            session_id="s-1",
+            reason="github_post_failed",
+        )
+        assert payload["kind"] == "pr_link"
+        assert payload["reviewed_sha"] is None
+
+    @pytest.mark.parametrize(
+        ("kind", "label"),
+        [("pr_link", "pr_link"), ("plan", "plan"), ("verdict", "review")],
+    )
+    def test_skipped_log_label_per_kind(
+        self, kind: VerdictCommentKind, label: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        outcome = TrackerIoOutcome(
+            PublicState.NONE, TrackerIoReason.TOOL_UNAVAILABLE, parts_total=1
+        )
+        with caplog.at_level(logging.WARNING, logger="cw.codex_review_signals"):
+            surface_tracker_io_outcome(
+                "GEN-9",
+                "body",
+                tracker="linear",
+                outcome=outcome,
+                identity=_identity(kind),
+            )
+        (record,) = caplog.records
+        assert record.getMessage().startswith(f"{label}_comment_skipped ")
+        (event,) = _events(OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED)
+        assert event.payload["kind"] == kind
+
+    def test_unverified_log_label_and_event_carry_pr_link(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        outcome = TrackerIoOutcome(
+            PublicState.POSSIBLE,
+            TrackerIoReason.TURN_TIMEOUT,
+            parts_total=1,
+            posted=(PostedComment(index=1, comment_id="c1", url="u"),),
+        )
+        with caplog.at_level(logging.WARNING, logger="cw.codex_review_signals"):
+            surface_tracker_io_outcome(
+                "GEN-9",
+                "body",
+                tracker="linear",
+                outcome=outcome,
+                identity=_identity("pr_link"),
+            )
+        (record,) = caplog.records
+        assert record.getMessage().startswith("pr_link_comment_unverified ")
+        (event,) = _events(OrchestratorEventType.REVIEW_VERDICT_COMMENT_UNVERIFIED)
+        assert event.payload["kind"] == "pr_link"
+
+    def test_verified_post_emits_a_posted_event_with_pr_link_kind(self) -> None:
+        outcome = TrackerIoOutcome(
+            PublicState.CONFIRMED,
+            None,
+            parts_total=1,
+            posted=(PostedComment(index=1, comment_id="c1", url="u"),),
+        )
+        surface_tracker_io_outcome(
+            "GEN-9",
+            "body",
+            tracker="linear",
+            outcome=outcome,
+            identity=_identity("pr_link"),
+        )
+        (event,) = _events(OrchestratorEventType.REVIEW_VERDICT_COMMENT_POSTED)
+        assert event.payload["kind"] == "pr_link"
+
+
+_EVENTS_DOC = Path(__file__).resolve().parent.parent / "docs" / "events.md"
+_KIND_ENUMERATION = re.compile(r'"kind": "([a-z_| ]+)"')
+
+
+class TestEventsDocEnumeratesEveryKind:
+    """The three verdict-comment events list every ``VerdictCommentKind``."""
+
+    def test_each_kind_enumeration_names_every_member(self) -> None:
+        text = _EVENTS_DOC.read_text(encoding="utf-8")
+        enumerations = [
+            {part.strip() for part in match.split("|")}
+            for match in _KIND_ENUMERATION.findall(text)
+            if "|" in match and "verdict" in match
+        ]
+        assert len(enumerations) == 3
+        members = set(get_args(VerdictCommentKind))
+        for enumeration in enumerations:
+            assert members <= enumeration, members - enumeration

@@ -24,6 +24,7 @@ pytestmark = pytest.mark.usefixtures("isolated_backend_layers")
 _OPENCODE_PLAN_IMPL = {Stage.PLAN: OPENCODE_BACKEND, Stage.IMPL: OPENCODE_BACKEND}
 _CAVEAT_TAIL = "auth, env and headless load unverified"
 _CODEX_PLAN = {Stage.PLAN: CODEX_BACKEND}
+_CODEX_FINALIZE = {Stage.FINALIZE: CODEX_BACKEND}
 
 
 def _gate(
@@ -210,6 +211,55 @@ class TestCodex:
 
         assert (result.ok, result.warn) == (True, True)
         assert _CAVEAT_TAIL in result.detail
+
+    @pytest.mark.parametrize("state", ["absent", "disabled"])
+    def test_finalize_lane_gate_on_and_missing_fails(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: McpStage
+    ) -> None:
+        """RFC 0018 C3: a codex FINALIZE row would park, so this lane fails."""
+        stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, state)
+        client = _client(tmp_path, executors=_CODEX_FINALIZE, gate=_gate())
+
+        result = _only(client)
+
+        assert result.ok is False
+        assert "stage finalize" in result.detail
+        assert f"server linear is {state}" in result.detail
+        assert "codex PLAN turn (#3060)" in result.detail
+        assert "codex FINALIZE turn posts the PR link" in result.detail
+
+    @pytest.mark.parametrize("state", ["absent", "disabled"])
+    def test_finalize_lane_gate_off_and_missing_warns(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: McpStage
+    ) -> None:
+        stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, state)
+        client = _client(tmp_path, executors=_CODEX_FINALIZE, gate=_gate(enabled=False))
+
+        assert (_only(client).ok, _only(client).warn) == (True, True)
+
+    def test_finalize_lane_enabled_still_warns(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, "enabled")
+        client = _client(tmp_path, executors=_CODEX_FINALIZE, gate=_gate())
+
+        result = _only(client)
+
+        assert (result.ok, result.warn) == (True, True)
+        assert _CAVEAT_TAIL in result.detail
+
+    @pytest.mark.parametrize("state", ["absent", "disabled"])
+    def test_review_only_lane_gate_on_and_missing_still_warns(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: McpStage
+    ) -> None:
+        """REVIEW and IMPL are not in the codex gated set: warn only."""
+        stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, state)
+        client = _client(tmp_path, review_backend=CODEX_BACKEND, gate=_gate())
+
+        result = _only(client)
+
+        assert "stage review" in result.detail
+        assert (result.ok, result.warn) == (True, True)
 
 
 class TestOpencode:

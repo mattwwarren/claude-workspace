@@ -307,6 +307,11 @@ s1_plan_generated`) itself from the driver, with `correlation_id` the ticket. Th
 codex IMPL executor (#3061) records `s2_impl_started` (`prev_stage:
 s1_plan_reviewed`) immediately before its turn and `s2_impl_complete`
 (`prev_stage: s2_impl_started`) only after cw's commit and verified push.
+The codex FINALIZE executor (#3062) records `s4_pr_created` (`prev_stage:
+s3_review_complete`) as a `stage.entered` event when the stage starts, and
+`s5_ci_waiting` (`prev_stage: s4_pr_created`) then `done` (`prev_stage:
+s5_ci_waiting`) only on a shipped result. A block records `stage.errored` at
+`s4_pr_created` with `error_kind` set to the blocker reason.
 
 ### `stage.errored`
 
@@ -2618,7 +2623,7 @@ its legacy skip, and (#3057) a tracker-IO turn whose outcome is `NONE`
   "client": "<str>",
   "tracker": "<str>",
   "backend": "codex",
-  "kind": "verdict | unparseable | plan",
+  "kind": "verdict | unparseable | plan | pr_link",
   "reason": "non_github_tracker | tracker_mcp_not_enabled | mcp_server_unnamed | tracker_unsupported | plan_refused | scratch_unwritable | codex_unavailable | tool_unavailable | turn_reported_failure | github_post_failed",
   "artifact_path": "<str | null>",
   "reviewed_sha": "<str | null>",
@@ -2630,6 +2635,7 @@ verdict (`kind: verdict`) or a zero-documents result (`kind: unparseable`)
 whose ticket comment was not posted, because the client's
 `tracking.primary.system` is set and is not `github-issues`: the daemon's only
 tracker client is GitHub-only (ADR-0013). Before this the skip was a log line.
+`kind: pr_link` (#3062) is the codex FINALIZE executor's PR-link comment.
 `client` is the client name. `artifact_path` is the durable worktree copy that
 now carries the verdict (`.claude/review-verdict.md` or
 `.claude/review-verdict-unparseable.md`), `null` if that write failed.
@@ -2683,7 +2689,7 @@ tracker-IO turn's outcome is `POSSIBLE` or `CONFIRMED` but not verified
   "client": "<str>",
   "tracker": "<str>",
   "backend": "codex",
-  "kind": "verdict | unparseable | plan",
+  "kind": "verdict | unparseable | plan | pr_link",
   "reason": "<TrackerIoReason>",
   "artifact_path": "<str | null>",
   "reviewed_sha": "<str | null>",
@@ -2734,7 +2740,7 @@ called after a tracker-IO turn's self-attested verification succeeds
   "client": "<str>",
   "tracker": "<str>",
   "backend": "codex",
-  "kind": "verdict | unparseable | plan",
+  "kind": "verdict | unparseable | plan | pr_link",
   "posted": [{"index": 1, "comment_id": "<str>", "url": "<str>"}],
   "reviewed_sha": "<str | null>",
   "session_id": "<str>",
