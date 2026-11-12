@@ -47,6 +47,7 @@ from cw.reconcile.dirty_checks import DirtyChecks
 from cw.reconcile.unowned_running import (
     UnownedCandidate,
     UnownedFindings,
+    _claim_facts,
     detect_unowned_running,
     run_unowned_running_recovery,
 )
@@ -1299,6 +1300,17 @@ def _events_section(heading: str) -> str:
     start = text.index(f"### `{heading}`")
     end = text.find("\n### ", start + 1)
     return text[start : end if end != -1 else len(text)]
+
+
+def test_claim_facts_keys(tmp_path: Path) -> None:
+    """#3460: the hoisted fact seed shared by evidence and signal texts."""
+    row = _make_ticket_task(ticket_id="GEN-7", client="client-a")
+
+    assert _claim_facts(row, tmp_path / "wt") == {
+        "client": "client-a",
+        "ticket": "GEN-7",
+        "wt": str(tmp_path / "wt"),
+    }
 
 
 class TestEventDocumented:
