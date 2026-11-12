@@ -356,7 +356,7 @@ def _commit_fix_cycle(
     return sha
 
 
-def _scope_violations(
+def scope_violations(
     worktree: Path,
     paths: Iterable[str],
     cycle0_files: frozenset[str] | set[str],
@@ -667,7 +667,7 @@ def _cycle_breach(
     guard, as before #2633; the switchable growth and constraint guards last.
     """
     touched = cycle_touched_paths(ctx.worktree, baseline)
-    violations = _scope_violations(
+    violations = scope_violations(
         ctx.worktree, touched, cycle0_files, scope_tier, default_branch
     )
     if violations:

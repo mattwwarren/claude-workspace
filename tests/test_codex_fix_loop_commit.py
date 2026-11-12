@@ -749,14 +749,14 @@ class TestFixPromptConstraints:
 
 
 class TestScopeViolationsConfigSource:
-    """``_scope_violations`` reads the registry from the default branch (#3038)."""
+    """``scope_violations`` reads the registry from the default branch (#3038)."""
 
     def test_a_resolved_ref_with_no_manifest_is_empty(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-scope-no-manifest")
 
-        hits = commit._scope_violations(
+        hits = commit.scope_violations(
             worktree, ["pyproject.toml"], frozenset(), "small", "main"
         )
 
@@ -768,7 +768,7 @@ class TestScopeViolationsConfigSource:
         worktree = _worktree(make_git_repo, "wt-scope-manifest", manifest=_SENSITIVE)
         _write(worktree / ".claude" / "sensitive-files.yml", "sensitive_files: []\n")
 
-        hits = commit._scope_violations(
+        hits = commit.scope_violations(
             worktree, ["pyproject.toml"], frozenset(), "small", "main"
         )
 
@@ -779,7 +779,7 @@ class TestScopeViolationsConfigSource:
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-scope-unresolved", manifest=_SENSITIVE)
 
-        hits = commit._scope_violations(
+        hits = commit.scope_violations(
             worktree,
             ["a.py", "pyproject.toml", "kept.py"],
             frozenset({"kept.py"}),
@@ -802,7 +802,7 @@ class TestScopeViolationsConfigSource:
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-scope-unresolved-clean")
 
-        hits = commit._scope_violations(
+        hits = commit.scope_violations(
             worktree, ["kept.py"], frozenset({"kept.py"}), "small", "no-such-branch"
         )
 
@@ -812,7 +812,7 @@ class TestScopeViolationsConfigSource:
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-scope-unresolved-park")
-        hits = commit._scope_violations(
+        hits = commit.scope_violations(
             worktree, ["a.py"], frozenset(), "small", "no-such-branch"
         )
 

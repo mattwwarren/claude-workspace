@@ -27,7 +27,7 @@ from cw.auto_dev_result.schema._vocab import (
     EMPTY_DIFF_BLOCKER_REASON,
     PLAN_SCOPE_DRIFT_BLOCKER_REASON,
 )
-from cw.codex_fix_loop.commit import _scope_violations
+from cw.codex_fix_loop.commit import scope_violations
 from cw.codex_fix_loop.fence import scope_violation_breach
 from cw.codex_fix_loop.gates import run_cycle_gates
 from cw.codex_fix_loop.guard_script import find_guard_script, script_marker_ok
@@ -262,7 +262,7 @@ def no_plan_sensitive_block(
     default_branch: str,
 ) -> ImplBlock | None:
     """Run the shared sensitive-path check for a no-plan repair fence."""
-    violations = _scope_violations(
+    violations = scope_violations(
         worktree,
         touched,
         allowed_files,
