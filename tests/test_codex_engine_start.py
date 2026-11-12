@@ -22,6 +22,7 @@ from cw.auto_dev_result import (
 from cw.codex_review._engine_round import (
     EngineRoundSpec,
     engine_unresolvable_blocked,
+    manifest_refusal_blocked,
 )
 from cw.codex_review._engine_start import engine_round_spec
 from cw.models import ClientConfig, Stage
@@ -34,7 +35,12 @@ from cw.review_engine.constants import (
     engine_refusal_details,
 )
 from cw.review_engine.context import EngineContext
-from tests._review_engine_helpers import EngineRepo, make_engine_repo
+from cw.review_engine.manifest_source import read_manifest_file
+from tests._review_engine_helpers import (
+    EngineRepo,
+    make_engine_repo,
+    manifest_directory_engine,
+)
 from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
@@ -156,6 +162,38 @@ class TestEngineRoundSpec:
 
         assert "cause=manifest_invalid" in details
         assert "cw review engine validate --kind manifest" in details
+
+    def test_a_manifest_directory_is_refused_with_manifest_invalid(
+        self, make_git_repo: Callable[..., Path], tmp_path: Path
+    ) -> None:
+        """#3445: lane start reads a directory manifest as INVALID, like round time."""
+        engine = manifest_directory_engine(tmp_path, _STUB)
+        repo = make_engine_repo(make_git_repo, engine_files=engine, name="dir")
+
+        details = _refusal(_spec_or_block(repo, _client(repo)))
+
+        assert details == engine_refusal_details(
+            "codex", "manifest_invalid", "unreadable: -"
+        )
+        assert "cause=no_codex_manifest" not in details
+
+    def test_start_and_round_time_share_the_refusal_builder(
+        self, make_git_repo: Callable[..., Path], tmp_path: Path
+    ) -> None:
+        """#3445: the same manifest condition gives byte-identical details."""
+        engine = _stub_with_manifest(tmp_path, {})
+        repo = make_engine_repo(make_git_repo, engine_files=engine, name="parity")
+
+        outcome = _spec_or_block(repo, _client(repo))
+
+        round_time = manifest_refusal_blocked(
+            ticket_id=repo.ticket,
+            worktree=repo.worktree,
+            read=read_manifest_file(engine / "cw-engine.json", _SKILL),
+        )
+        assert round_time.blocker is not None
+        assert _refusal(outcome) == round_time.blocker.details
+        assert round_time.blocker.retry_eligible is False
 
     def test_a_backends_failure_is_refused_with_codex_not_declared(
         self, make_git_repo: Callable[..., Path], tmp_path: Path

@@ -47,7 +47,6 @@ from cw.review_convergence import resolve_loop_diff_base
 from cw.review_engine.constants import (
     CAUSE_DEFAULT_BRANCH_UNRESOLVED,
     CAUSE_MATERIALIZE_FAILED,
-    CAUSE_NO_CODEX_MANIFEST,
     ENGINE_MANIFEST_FILENAME,
     ENGINE_ROLE_PREAMBLE,
     FRICTION,
@@ -56,6 +55,7 @@ from cw.review_engine.constants import (
     EngineRoundFailure,
     engine_refusal_details,
 )
+from cw.review_engine.manifest_source import ManifestRead, read_manifest_file
 from cw.review_engine.materialize import (
     EnginePreconditionError,
     MaterializeError,
@@ -69,12 +69,6 @@ from cw.review_engine.validate import (
     engine_precheck,
     validate_engine_summary,
 )
-from cw.review_engine_manifest_io import (
-    EngineManifestError,
-    LoadedEngineManifest,
-    load_engine_manifest,
-    manifest_refusal_cause,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -85,6 +79,7 @@ if TYPE_CHECKING:
     from cw.codex_runner import CodexRunner
     from cw.models import TicketTask
     from cw.review_engine.context import EngineContext
+    from cw.review_engine_manifest_io import LoadedEngineManifest
     from cw.review_findings import Finding, ReviewVerdict
 
 _log = logging.getLogger(__name__)
@@ -157,6 +152,23 @@ def engine_unresolvable_blocked(
         reason=AGENT_BLOCK_BLOCKER_REASON,
         details=FRICTION[reason].format(skill=skill, cause=cause),
         retry_eligible=True,
+    )
+
+
+def manifest_refusal_blocked(
+    *, ticket_id: str, worktree: Path, read: ManifestRead
+) -> AutoDevResult:
+    """The non-retryable refusal for a manifest *read* that did not load.
+
+    The one builder behind lane start and round time, so an absent or invalid
+    ``cw-engine.json`` gives byte-identical details at both (#3445).
+    """
+    return make_codex_blocked(
+        ticket_id=ticket_id,
+        worktree=worktree,
+        reason=REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
+        details=engine_refusal_details(CODEX_BACKEND, read.cause, read.detail),
+        retry_eligible=False,
     )
 
 
@@ -261,26 +273,17 @@ def _materialize_roster(
         return _unresolvable(inputs, cycle, context.skill, exc.cause)
     except EnginePreconditionError:
         return _unresolvable(inputs, cycle, context.skill, CAUSE_MATERIALIZE_FAILED)
-    manifest_path = Path(materialized.skill_dir) / ENGINE_MANIFEST_FILENAME
-    if not manifest_path.exists():
-        details = engine_refusal_details(
-            CODEX_BACKEND,
-            CAUSE_NO_CODEX_MANIFEST,
-            f"{context.skill} has no {ENGINE_MANIFEST_FILENAME}",
+    read = read_manifest_file(
+        Path(materialized.skill_dir) / ENGINE_MANIFEST_FILENAME, context.skill
+    )
+    if read.loaded is None:
+        result = manifest_refusal_blocked(
+            ticket_id=inputs.task.ticket_id, worktree=inputs.worktree, read=read
         )
-        return _park(
-            inputs, cycle, REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON, details
+        return _blocked(
+            inputs, cycle, result, REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON
         )
-    try:
-        manifest = load_engine_manifest(manifest_path)
-    except EngineManifestError as exc:
-        cause = manifest_refusal_cause(exc)
-        detail = f"{exc.reason}: {exc.field_path or '-'}"
-        details = engine_refusal_details(CODEX_BACKEND, cause, detail)
-        return _park(
-            inputs, cycle, REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON, details
-        )
-    return _Loaded(head, round_id, materialized.summary_path, manifest)
+    return _Loaded(head, round_id, materialized.summary_path, read.loaded)
 
 
 def _engine_roster(loaded: LoadedEngineManifest) -> EngineRoster:

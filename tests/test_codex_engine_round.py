@@ -48,9 +48,14 @@ from cw.review_engine.constants import (
     ENGINE_ROLE_PREAMBLE,
     FRICTION,
     EngineRoundFailure,
+    engine_refusal_details,
 )
 from cw.review_engine.context import EngineContext
-from cw.review_engine.materialize import MaterializeError
+from cw.review_engine.materialize import (
+    MaterializedSkill,
+    MaterializeError,
+    materialize_skill,
+)
 from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from cw.review_findings import ShardRecord
 from tests._codex_review_helpers import (
@@ -64,6 +69,7 @@ from tests._review_engine_helpers import (
     engine_finding,
     make_aggregation_output,
     make_engine_repo,
+    manifest_directory_engine,
 )
 from tests._shared.git_repos import commit_tracked_file, git_in
 from tests._shared.session_seeding import _make_ticket_task
@@ -849,15 +855,7 @@ class TestManifestAtRoundTime:
     def test_a_manifest_directory_is_invalid_not_absent(
         self, make_git_repo: Callable[..., Path], tmp_path: Path
     ) -> None:
-        engine = tmp_path / "engine-files"
-        for source in _STUB.rglob("*"):
-            if source.is_file() and source.name != "cw-engine.json":
-                target = engine / source.relative_to(_STUB)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(source.read_bytes())
-        marker = engine / "cw-engine.json" / "marker"
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text("not a manifest", encoding="utf-8")
+        engine = manifest_directory_engine(tmp_path, _STUB)
         repo = make_engine_repo(
             make_git_repo, engine_files=engine, name="manifest-directory-repo"
         )
@@ -870,6 +868,41 @@ class TestManifestAtRoundTime:
             retry=False,
         )
         assert "cause=manifest_invalid" in details
+        assert details == engine_refusal_details(
+            "codex", "manifest_invalid", "unreadable: -"
+        )
+
+    def test_a_manifest_deleted_after_the_start_check_is_absent(
+        self, repo: EngineRepo, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3445: the round-time absent case shares the start-time text."""
+        real = materialize_skill
+
+        def _drop_manifest(
+            worktree: Path, *, round_id: str, expect_head: str, context: EngineContext
+        ) -> MaterializedSkill:
+            materialized = real(
+                worktree, round_id=round_id, expect_head=expect_head, context=context
+            )
+            (Path(materialized.skill_dir) / "cw-engine.json").unlink()
+            return materialized
+
+        monkeypatch.setattr(
+            "cw.codex_review._engine_round.materialize_skill", _drop_manifest
+        )
+        runner = _engine_runner()
+
+        outcome = _pass(repo, runner)
+
+        details = _blocked(
+            outcome,
+            reason=REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
+            retry=False,
+        )
+        assert details == engine_refusal_details(
+            "codex", "no_codex_manifest", f"{_SKILL} has no cw-engine.json"
+        )
+        assert runner.calls == []
 
 
 class TestFullDiffReview:
