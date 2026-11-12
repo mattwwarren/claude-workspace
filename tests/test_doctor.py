@@ -5400,6 +5400,58 @@ class TestCheckProjectConfigs:
         assert check.ok is True
         assert "confirm backend claude" in check.detail
 
+    def test_run_doctor_includes_all_codex_lane_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """A clean all-codex client WARNs about the confirm default (#3064), the
+        report stays ok and not clean, and a claude-native client adds nothing.
+        """
+        from cw.models import (
+            CLAUDE_NATIVE_BACKEND,
+            CODEX_BACKEND,
+            ClientConfig,
+            Stage,
+            StageExecutorConfig,
+            StagePipelineConfig,
+        )
+        from cw.models.client import ReviewConfig
+
+        _stub_claude_version_ok(monkeypatch)
+        codex = {
+            stage: StageExecutorConfig(backend=CODEX_BACKEND)
+            for stage in (Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE)
+        }
+        all_codex = ClientConfig(
+            name="client-a",
+            workspace_path=tmp_path,
+            pipeline=StagePipelineConfig(executors=codex),
+            review=ReviewConfig.model_validate({"convergence": "clean"}),
+        )
+        claude = ClientConfig(
+            name="client-b",
+            workspace_path=tmp_path,
+            pipeline=StagePipelineConfig(
+                executors={
+                    Stage.REVIEW: StageExecutorConfig(backend=CLAUDE_NATIVE_BACKEND)
+                }
+            ),
+            review=ReviewConfig.model_validate({"convergence": "clean"}),
+        )
+        monkeypatch.setattr(
+            "cw.doctor._deps.load_clients",
+            lambda: {"client-a": all_codex, "client-b": claude},
+        )
+
+        report = run_doctor()
+
+        checks = [c for c in report.checks if c.name.startswith("all-codex-lane")]
+        assert [c.name for c in checks] == ["all-codex-lane/client-a/default"]
+        (check,) = checks
+        assert check.ok is True
+        assert check.warn is True
+        assert report.ok is True
+        assert report.clean is False
+
     def _write_clean_review_lane(self, tmp_path: Path, backend: str) -> None:
         from tests._clients_yaml import ClientSpec, executor_backend_extra
 
