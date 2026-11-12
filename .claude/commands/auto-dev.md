@@ -885,7 +885,7 @@ The pipeline records deferred review findings in the PR body (Stage 4 Step 4d) b
 3. **Resolve the tracker** for the merged PR's repo from its `.claude/project-config.yaml` (per **Tracker Resolution**). Deferred tickets land in the **code's own repo** — `linear` or `github-issues` as that repo configures, not a central backlog.
 
 <!-- el: orch.for-each-finding-dedup-then -->
-4. **For each finding — dedup, then file:** skip any entry that carries a `ticket:` line; `cw review adjudicate` already filed (or recorded) its debt ticket at deferral time (#3041, RFC 0017 (pending merge)).
+4. **For each finding — dedup, then file:** skip any entry that carries a `ticket:` line; `cw review adjudicate` already filed (or recorded) its debt ticket at deferral time (#3041, RFC 0017 (pending merge)). Several entries can name the same `ticket:` (cw lists a queue ticket's findings in one `review-debt` roll-up issue); that is one filed issue, not a duplicate.
    - **Dedup:** search the tracker's open issues for the same summary/file before filing (prior-art culture — do not create duplicates). `gh issue list --search "<summary> in:title"` for `github-issues`; the `search_issues` op for `linear`. A plausible match → skip filing, log `deferred finding already tracked: <summary>`.
    - **File** the ticket against that repo with a `review-debt` label: title = the finding summary, body = file + rationale + a backlink to the source PR.
 

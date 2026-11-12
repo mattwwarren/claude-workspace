@@ -231,7 +231,7 @@ def _process_event(
     outcomes: list[_Outcome] = []
     enqueued: list[str] = []
     try:
-        for debt_id, record in _qualifying_records(parent):
+        for debt_id, record in _qualifying_records(parent, merged):
             skip = _skip_outcome(debt_id, record, merged, parent, lane)
             if skip is not None:
                 outcomes.append(skip)
@@ -306,22 +306,34 @@ def _select_parent(store: DevQueueStore, merged: _MergedPr) -> TicketTask | None
     return _newest_by_created_at(matches)
 
 
-def _qualifying_records(parent: TicketTask) -> list[tuple[str, ReviewDebtRecord]]:
+def _qualifying_records(
+    parent: TicketTask, merged: _MergedPr
+) -> list[tuple[str, ReviewDebtRecord]]:
     """``(debt_ticket_id, record)`` pairs for records carrying an ID, deduped by ID.
 
     An ID is any non-blank ``ticket_id``, on any tracker and in any mode. The
     shape of a Linear ID is checked, not that the ticket exists; there is no
-    ticket-state check at merge time. The first record for an ID is kept.
+    ticket-state check at merge time. Several records can share one ID (a
+    roll-up issue lists many findings); the pair kept for an ID is the first
+    record linked to the merged PR (or to no PR yet), else the first record, so
+    one finding linked to an earlier PR cannot hide a roll-up this PR carried.
     """
-    seen: set[str] = set()
-    kept: list[tuple[str, ReviewDebtRecord]] = []
+    chosen: dict[str, ReviewDebtRecord] = {}
     for record in parent.review_debt:
         debt_id = record.ticket_id
-        if debt_id is None or not debt_id.strip() or debt_id in seen:
+        if debt_id is None or not debt_id.strip():
             continue
-        seen.add(debt_id)
-        kept.append((debt_id, record))
-    return kept
+        prior = chosen.get(debt_id)
+        if prior is None or (
+            _links_other_pr(prior, merged) and not _links_other_pr(record, merged)
+        ):
+            chosen[debt_id] = record
+    return list(chosen.items())
+
+
+def _links_other_pr(record: ReviewDebtRecord, merged: _MergedPr) -> bool:
+    """True when *record* is linked to a PR other than the merged one."""
+    return record.pr_url is not None and not _is_merged_pr(record.pr_url, merged)
 
 
 def _skip_outcome(
@@ -337,7 +349,7 @@ def _skip_outcome(
     order affects the reported reason, never the outcome. The parent's lane is
     read now, at merge time, not when the debt was filed.
     """
-    if record.pr_url is not None and not _is_merged_pr(record.pr_url, merged):
+    if _links_other_pr(record, merged):
         reason = DebtEnqueueSkipReason.PR_MISMATCH
     elif parent.lane == lane:
         reason = DebtEnqueueSkipReason.ONE_LEVEL

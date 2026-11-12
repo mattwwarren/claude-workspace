@@ -2,8 +2,10 @@
 
 For each ``filed`` GitHub record with no ``pr_url``: append the
 ``<!-- cw-review-debt-pr: <url> -->`` line to the ticket body (III2, #3044,
-parses it), post one comment linking the PR, then set ``pr_url``. Idempotent:
-a body that already carries the marker gets no edit and no comment, and only
+parses it), post one comment linking the PR, then set ``pr_url``. Records that
+share one ticket (a roll-up lists many findings in one issue) are linked once:
+the first record's outcome is reused for the rest, and counts stay per record.
+Idempotent: a body that already carries the marker gets no edit and no comment, and only
 its ``pr_url`` is set. If the body edit lands but the comment fails, the next
 run sees the marker and sets ``pr_url`` without commenting. Failures degrade:
 they are counted, never raised, and never block finalize (plan Adopted
@@ -12,6 +14,7 @@ Assumption 12), because the ticket already exists.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.models.review_debt_record import FILED_MODE
@@ -52,7 +55,9 @@ def linkable(record: ReviewDebtRecord) -> bool:
     )
 
 
-def _comment(record: ReviewDebtRecord, pr_url: str) -> str:
+def _comment(record: ReviewDebtRecord, pr_url: str, *, shared: bool) -> str:
+    if shared:
+        return f"Review debt linked to {pr_url} (cw review-debt roll-up)."
     return (
         f"Review debt linked to {pr_url} "
         f"(cw review-debt key `{record.key[:KEY_DISPLAY_CHARS]}`)."
@@ -60,7 +65,7 @@ def _comment(record: ReviewDebtRecord, pr_url: str) -> str:
 
 
 def _link_one(
-    record: ReviewDebtRecord, pr_url: str, tracker: DebtTracker
+    record: ReviewDebtRecord, pr_url: str, tracker: DebtTracker, *, shared: bool
 ) -> LinkOutcome:
     """Return the typed outcome for one linkable record."""
     ticket_id = str(record.ticket_id)
@@ -75,7 +80,9 @@ def _link_one(
     if not updated:
         return LinkOutcome.FAILED
     posted = tracker.post_issue_comment(
-        ticket_id, _comment(record, pr_url), timeout=POST_COMMENT_TIMEOUT_S
+        ticket_id,
+        _comment(record, pr_url, shared=shared),
+        timeout=POST_COMMENT_TIMEOUT_S,
     )
     return LinkOutcome.LINKED if posted else LinkOutcome.FAILED
 
@@ -86,6 +93,8 @@ def link_pr(
     """Link every linkable record in *records* without a ``pr_url`` to *pr_url*."""
     updated: list[ReviewDebtRecord] = []
     counts = dict.fromkeys(LinkOutcome, 0)
+    per_ticket = Counter(r.ticket_id for r in records if linkable(r))
+    outcomes: dict[str, LinkOutcome] = {}
     for record in records:
         if not linkable(record):
             counts[LinkOutcome.SKIPPED] += 1
@@ -93,7 +102,12 @@ def link_pr(
         if record.pr_url is not None:
             counts[LinkOutcome.ALREADY] += 1
             continue
-        outcome = _link_one(record, pr_url, tracker)
+        ticket_id = str(record.ticket_id)
+        if ticket_id not in outcomes:
+            outcomes[ticket_id] = _link_one(
+                record, pr_url, tracker, shared=per_ticket[record.ticket_id] > 1
+            )
+        outcome = outcomes[ticket_id]
         counts[outcome] += 1
         if outcome is not LinkOutcome.FAILED:
             updated.append(record.model_copy(update={"pr_url": pr_url}))

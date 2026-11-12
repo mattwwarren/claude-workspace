@@ -3640,9 +3640,11 @@ with the rationale "SHOULD_FIX from the independent confirm round after a repo r
 - Known limitation: a confirm deferral that duplicates an engine deferral files
   its own debt ticket, because confirm deferrals carry built-in keys, not
   `engine:` keys.
-- Known limitation: filing is one external tracker write per deferred SHOULD_FIX
-  in the round, with no per-round cap, and the dedupe against open tickets is
-  inconclusive when the open-issue listing hits its limit.
+- Known limitation: a round's deferred SHOULD_FIX findings are listed in the
+  queue ticket's one roll-up issue (see "Review debt filing"), so the round no
+  longer opens an issue per finding, but there is still no per-round cap on how
+  many findings it lists, and the dedupe against open tickets is inconclusive
+  when the open-issue listing hits its limit.
 
 **Park: `gate_timeout` (#3372).** On the finalize open-PR reuse path (Step
 4c.6), the executor cut a quality gate call off at its foreground ceiling (600 s
@@ -4485,9 +4487,13 @@ answers, the wall is gone. During a genuine wall, STOP the dispatch loop
 
 ## Review debt filing
 
-#3041, RFC 0017 (pending merge) D-7. cw files one review-debt ticket per
-deferred review finding at the moment the deferral is recorded, instead of
-leaving the filing to the merge-time Step H3 sweep.
+#3041, RFC 0017 (pending merge) D-7. cw files the deferred review findings of a
+queue ticket at the moment each deferral is recorded, instead of leaving the
+filing to the merge-time Step H3 sweep. Since the roll-up change the filing is
+**one `review-debt` issue per queue ticket**, not one per finding: the issue is
+a checklist with one item per deferred finding (see "The roll-up issue" below).
+Ticket #3060 filed 52 separate issues in two minutes before this; it now files
+one.
 
 **Where it happens.**
 
@@ -4501,18 +4507,21 @@ leaving the filing to the merge-time Step H3 sweep.
   `blocker.reason: "review_debt_unfiled"` before auto-merge is armed.
 - Finalize Step 4d step 2b runs `cw review debt link-pr --pr <n>`, which adds
   the `<!-- cw-review-debt-pr: <url> -->` marker and one comment to each filed
-  ticket. It never blocks.
+  ticket (once per issue, however many findings it lists). It never blocks.
 
 **Tracker modes.**
 
 - `tracking.primary.system: github-issues` with
   `tracking.primary.auto_create_issues: true` in `.claude/project-config.yaml`
   (read from the client's `workspace_path`): cw files through `gh` with the
-  `review-debt` label, ensured once per run with `gh label create --force`.
+  `review-debt` label, ensured once per run with `gh label create --force`,
+  into the queue ticket's roll-up issue.
 - `github-issues` with `auto_create_issues` false, absent or not a YAML bool:
   cw emits redacted payloads to `.cw/review-debt/` and records `mode: emitted`
-  rows. Nothing is filed; Step H3 or the operator files them.
-- `linear`: always the MCP path below.
+  rows. Nothing is filed; Step H3 or the operator files them. Payloads stay one
+  per finding: the roll-up is what cw itself files through `gh`.
+- `linear`: always the MCP path below, one payload and one ticket per finding
+  (a roll-up is a GitHub-only format).
 - Any other or unset tracker: skipped, friction `debt_filing: skipped_no_tracker`.
 - No client or ticket identity: skipped loudly, friction
   `debt_filing: skipped_no_context`.
@@ -4536,16 +4545,83 @@ still exits 0. Known limitation: the refused entry stays in the artifact, so
 finalize step 2 would still copy it into the PR body; finalize step 2a deletes
 it from the artifact first.
 
+**The roll-up issue.** All of a queue ticket's deferred findings share one
+`review-debt` issue, titled `review-debt: #<ticket> — <N> deferred findings
+(<M> MUST_FIX)` (the MUST_FIX part is omitted when `M` is 0, and `finding`
+is singular for 1). The first line is the legacy scope line, `Deferred during
+review of #<ticket> on branch `<branch>`.`, followed by a
+`<!-- cw-review-debt-rollup: part=<n> -->` marker. Each finding is one checklist
+item with its own key marker:
+
+````markdown
+Deferred during review of #3060 on branch `dev/3060`.
+
+<!-- cw-review-debt-rollup: part=1 -->
+
+Deferred review findings for #3060 (part 1). Each item is one finding; check it
+off when it is fixed or dismissed. cw never re-adds an item, checked or not, and
+appends later findings for #3060 below.
+
+- [ ] **MUST_FIX** `src/cw/foo.py`:12 - Helper swallows the error
+  - **Why deferred:** Out of scope for this ticket
+  - **Rule:** py.bare-except
+  <!-- cw-review-debt: 4f0c...e1 -->
+  ```text
+  except Exception:
+      pass
+  ```
+- [ ] **SHOULD_FIX** `src/cw/bar.py` - Missing test for the empty case
+  - **Why deferred:** Follow-up
+  <!-- cw-review-debt: 9ab2...07 -->
+  ```text
+  (evidence not recorded)
+  ```
+
+<!-- cw-agent-authored -->
+````
+
+- **Append, not a second issue.** A later pass for the same queue ticket finds
+  the newest open roll-up for it (first line names the ticket and the body has
+  the roll-up marker), re-reads its body, and inserts only the findings not
+  already listed before its trailing marker block (PR link markers and the
+  agent marker stay last). A re-read before the edit keeps a box a person ticked
+  since the listing. A checked-off item is not re-added: its key marker is still
+  in the body.
+- **Size cap and continuation.** A roll-up body stays at or under
+  `ROLLUP_BODY_MAX_CHARS` (60000, below GitHub's 65536 limit). A finding that
+  would pass it opens a continuation issue, `part 2`, `part 3`, and so on, for
+  the same queue ticket; later passes append to the newest part. No finding is
+  split or dropped. A single item is itself bounded (evidence 6000 characters,
+  summary and rationale 2000 each, each cut with an explicit marker) so one
+  finding can never exceed the budget alone.
+- **Title.** The title is set when an issue is created and counts the findings
+  it was created with. An append does not rewrite it, because that would be a
+  second write that can fail halfway; the body is the live list. A continuation
+  title reads `review-debt: #<ticket> — part 2, <N> deferred findings`.
+- **Legacy issues.** The roughly 250 per-finding issues filed before the
+  roll-up are never edited or migrated. Their first line and key marker are the
+  same ones a roll-up item uses, so a finding already ticketed in a legacy
+  issue, open or closed-and-recorded, is found by the same marker match and is
+  not listed again. A legacy issue is never an append target: only a body with
+  the roll-up marker is.
+- **Several records, one issue.** Each finding keeps its own `review_debt` row
+  record (`key`), so every record of a roll-up carries the same `ticket_id` and
+  `ticket_url`, and every artifact entry's `ticket:` line names that one
+  issue. `cw review debt link-pr` links each issue once and counts per record;
+  the enqueue consumer (below) and the close sweep work per issue.
+
 **Dedup.** The authoritative record is the `review_debt` row list on the
 dev-queue row (schema v57). A row-recorded ticket counts only while it is still
-OPEN: each row hit costs one `gh issue view <n> --json state` read, inside the
+OPEN: each distinct ticket costs one `gh issue view <n> --json state` read (a
+roll-up's records share it), inside the
 90 second budget. A CLOSED ticket is a miss and the entry is filed again, with a
 fresh row record that does not inherit the old ticket's PR link. An unknown
 state (a `gh` failure), a non-numeric ticket id or a spent budget still count
 as a hit, so a `gh` failure never files a duplicate (#3044). One consequence:
 an operator who closes a debt ticket by hand, fixed or won't-fix, while its
 deferral is still in `.cw/deferred-findings.md` sees a fresh ticket filed on
-the next `cw review debt file` or finalize re-file gate. If no row matches, cw lists OPEN `review-debt`
+the next `cw review debt file` or finalize re-file gate (a roll-up closed by
+hand likewise re-lists its still-deferred findings in a new roll-up). If no row matches, cw lists OPEN `review-debt`
 issues (`gh issue list --label review-debt --state open --json number,body
 --limit 1000`) and looks for the body marker `<!-- cw-review-debt: <key> -->`,
 scoped to the same queue ticket. A CLOSED match is a miss: a closed debt ticket
@@ -4555,11 +4631,16 @@ listing is capped at 1000 open issues, so a page of exactly 1000 is treated as
 possibly truncated; a listing of 800 or more (80% of the limit) logs a
 `cw.gh.filing` WARNING naming the count and the limit. cw never closes
 `review-debt` issues because the backlog is large; pruning it is an operator
-decision.
+decision. Roll-ups cut the open count by roughly the number of findings per
+ticket, so the cap is reached far later.
 
 **Budget and concurrency.** One run has a 90 second total budget
 (`DEBT_FILING_BUDGET_S`); entries still unfiled when it runs out stay
-unticketed, with failure kind `budget_exhausted`, for the next run. Filing is
+unticketed, with failure kind `budget_exhausted`, for the next run. A run makes
+one create (or one read plus one edit) per roll-up part it touches, not one
+call per finding. A failed append or continuation fails exactly the findings
+bound for that issue (`network` for a failed read, `other` for a failed edit or
+create); the rest still file, and a retry lists only the unlisted ones. Filing is
 single-writer per queue ticket: do not run two `cw review debt file` for the
 same ticket at once.
 
@@ -4637,7 +4718,10 @@ merging describes a finding that never reached the default branch.
 - **The close.** One `gh issue close <n> --comment <body> --reason "not planned"`
   call, so the comment never lands without the close. The comment names the
   newest PR and the first 12 characters of the debt key, is redacted, and
-  carries the agent-authored marker. Events: `review.debt_closed`, and
+  carries the agent-authored marker. A roll-up names no single key: its comment
+  says the deferred findings never reached the default branch and has no key
+  line, and its events carry `key: null`. A roll-up that links several PRs
+  closes only when every one is CLOSED unmerged. Events: `review.debt_closed`, and
   `review.debt_close_failed` (rate-limited) when the close fails; see
   `docs/events.md`.
 - **Failures.** A failed close gets one `gh issue view --json state` re-read.
@@ -4708,6 +4792,12 @@ clients:
   check at merge time. Close the row by hand if that is wrong.
 - **One level deep.** A debt ticket filed from a row already in the debt lane is filed but
   never auto-queued. The lane is read at merge time.
+- **A roll-up is one candidate.** The records of one roll-up share a ticket ID, so the
+  existing dedupe by ID enqueues it once, as one row for the whole issue; the
+  `review.debt_enqueued` `key` is one record's key. For that ID the consumer uses the first
+  record linked to the merged PR (or to no PR), so a finding linked to an earlier PR does not
+  hide a roll-up the merged PR also carried. The row's worker is handed the whole checklist,
+  which can be large; split or trim the issue by hand if one worker should not take it all.
 
 ---
 

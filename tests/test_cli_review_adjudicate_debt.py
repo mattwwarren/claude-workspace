@@ -221,10 +221,11 @@ def test_baseline_hand_written_entries_are_filed_from_the_merged_artifact(
         "-c", _CLIENT, "--ticket", _TICKET, "--deferred-findings-out", str(out)
     )
     assert result.exit_code == 0, result.output
-    assert len(_creates(cli)) == 2
+    # Both deferrals share one roll-up issue; each entry still gets a ticket line.
+    assert len(_creates(cli)) == 1
     assert out.read_text(encoding="utf-8").count("  ticket: ") == 2
-    baseline_body = cli.records[2].body_file or ""
-    assert "(evidence not recorded)" in baseline_body
+    rollup_body = cli.records[2].body_file or ""
+    assert "(evidence not recorded)" in rollup_body
 
 
 def test_a_gh_failure_still_writes_the_artifact_and_the_verdict(
