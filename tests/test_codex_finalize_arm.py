@@ -16,6 +16,7 @@ from unittest.mock import patch
 import pytest
 
 from cw.codex_finalize._arm import (
+    _VERIFIED_STATES,
     FAILING_CHECKS_PREFIX,
     FREEZE_PREFIX,
     ArmResult,
@@ -23,6 +24,7 @@ from cw.codex_finalize._arm import (
     check_automerge_allowed,
     verify_pr_state,
 )
+from cw.codex_finalize._pr import PR_MERGED, PR_OPEN
 from cw.codex_finalize._result import FinalizeBlock
 from cw.reconcile.review_recipes.repair_git import ArmOutcome
 from tests._tool_fakes import FakeGhCli, ScriptStub, stub_prep_pr_finalize
@@ -275,6 +277,10 @@ def _verify(
 
 
 class TestVerifyPrState:
+    def test_the_verified_states_are_the_shared_pr_constants(self) -> None:
+        """#3550: the PR states come from ``codex_finalize._pr``."""
+        assert {PR_OPEN, PR_MERGED} == _VERIFIED_STATES
+
     def test_an_armed_open_pr_with_green_checks_verifies(
         self, repo: Path, gh: FakeGhCli
     ) -> None:

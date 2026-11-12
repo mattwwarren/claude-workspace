@@ -109,7 +109,11 @@ from cw.contract_manifest import RenderError
 from cw.dev_queue import _PRE_DISPATCH_TRACKER_MCP_REASON
 from cw.gh import edit_pr_body, fetch_pr_view
 from cw.local_runner import git_facts
-from cw.models import CODEX_BACKEND, OrchestratorEventType
+from cw.models import (
+    CODEX_BACKEND,
+    HOOK_CONTEXT_RELATIVE_PATH,
+    OrchestratorEventType,
+)
 from cw.models.branch import resolve_feature_branch
 from cw.models.enums import StageIdentifier
 from cw.tracker import TrackerClass, tracker_kind
@@ -134,7 +138,6 @@ STAGE_DONE: Final = StageIdentifier.DONE.value
 _SCHEMA_NAME: Final = "finalize-schema.json"
 _OUTPUT_NAME: Final = "finalize-output.json"
 _BODY_NAME: Final = "pr-body.md"
-_CONTEXT_RELATIVE: Final = ".claude/cw-context.json"
 _STDERR_TAIL_CHARS: Final = 500
 _GH_TIMEOUT: Final = 30
 
@@ -270,7 +273,9 @@ def _turn_failure(run: CodexRunResult) -> FinalizeBlock | None:
 
 def _context(worktree: Path) -> dict[str, Any]:
     try:
-        data = json.loads((worktree / _CONTEXT_RELATIVE).read_text(encoding="utf-8"))
+        data = json.loads(
+            (worktree / HOOK_CONTEXT_RELATIVE_PATH).read_text(encoding="utf-8")
+        )
     except (OSError, ValueError, UnicodeDecodeError, RecursionError):
         return {}
     return data if isinstance(data, dict) else {}
