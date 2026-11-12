@@ -19,7 +19,10 @@ from cw.auto_dev_result import (
     REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
     AutoDevResult,
 )
-from cw.codex_review._engine_round import EngineRoundSpec
+from cw.codex_review._engine_round import (
+    EngineRoundSpec,
+    engine_unresolvable_blocked,
+)
 from cw.codex_review._engine_start import engine_round_spec
 from cw.models import ClientConfig, Stage
 from cw.models.client import ReviewConfig, ReviewEngineConfig
@@ -201,6 +204,28 @@ class TestEngineRoundSpec:
         assert outcome.blocker.details == FRICTION[
             EngineRoundFailure.ENGINE_UNRESOLVABLE
         ].format(skill=skill, cause=cause)
+
+    def test_the_unresolvable_block_is_the_shared_round_time_builder(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#3438: lane start and round time build the same block."""
+        repo = make_engine_repo(make_git_repo, engine_files=_STUB)
+        client = _client(repo, default_branch="nonexistent")
+
+        outcome = _spec_or_block(repo, client)
+
+        shared = engine_unresolvable_blocked(
+            ticket_id=repo.ticket,
+            worktree=repo.worktree,
+            skill=_SKILL,
+            cause="default_branch_unresolved",
+        )
+        assert isinstance(outcome, AutoDevResult)
+        assert outcome.blocker is not None
+        assert shared.blocker is not None
+        assert outcome.blocker.reason == shared.blocker.reason == "agent_block"
+        assert outcome.blocker.details == shared.blocker.details
+        assert outcome.blocker.retry_eligible is shared.blocker.retry_eligible is True
 
 
 class TestEngineRefusalDetails:

@@ -33,6 +33,7 @@ from cw.codex_review._engine_round import (
     EnginePassOutcome,
     EngineRoundSpec,
     _role_failure,
+    engine_unresolvable_blocked,
     run_engine_pass,
 )
 from cw.codex_review._shard import ReviewInputTooLargeError, plan_prompt_shards
@@ -714,6 +715,24 @@ class TestPreflight:
             EngineRoundFailure.ENGINE_UNRESOLVABLE
         ].format(skill=_SKILL, cause="default_branch_unresolved")
         assert runner.calls == []
+
+    def test_the_unresolvable_block_is_the_shared_lane_start_builder(
+        self, repo: EngineRepo
+    ) -> None:
+        """#3438: round time and lane start build the same block."""
+        outcome = _pass(
+            repo, _engine_runner(), spec=_spec(repo, default_branch="nonexistent")
+        )
+
+        shared = engine_unresolvable_blocked(
+            ticket_id=repo.ticket,
+            worktree=repo.worktree,
+            skill=_SKILL,
+            cause="default_branch_unresolved",
+        )
+        assert shared.blocker is not None
+        details = _blocked(outcome, reason=shared.blocker.reason, retry=True)
+        assert details == shared.blocker.details
 
     def test_a_skill_that_is_not_on_the_default_branch_is_unresolvable(
         self, repo: EngineRepo

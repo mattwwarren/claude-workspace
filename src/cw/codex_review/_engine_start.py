@@ -17,14 +17,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON
-from cw.codex_review._engine_round import EngineRoundSpec
+from cw.codex_review._engine_round import (
+    EngineRoundSpec,
+    engine_unresolvable_blocked,
+)
 from cw.codex_review._verdict import make_codex_blocked
 from cw.models import CODEX_BACKEND
-from cw.review_engine.constants import (
-    FRICTION,
-    EngineRoundFailure,
-    engine_refusal_details,
-)
+from cw.review_engine.constants import engine_refusal_details
 from cw.review_engine.context import EngineContext
 from cw.review_engine.manifest_source import (
     ManifestStatus,
@@ -56,13 +55,11 @@ def engine_round_spec(
     if read.status == ManifestStatus.LOADED:
         return EngineRoundSpec(context=context)
     if read.status == ManifestStatus.UNRESOLVABLE:
-        reason = EngineRoundFailure.ENGINE_UNRESOLVABLE
-        return make_codex_blocked(
+        return engine_unresolvable_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
-            reason="agent_block",
-            details=FRICTION[reason].format(skill=engine.skill, cause=read.cause),
-            retry_eligible=True,
+            skill=engine.skill,
+            cause=read.cause,
         )
     return make_codex_blocked(
         ticket_id=task.ticket_id,

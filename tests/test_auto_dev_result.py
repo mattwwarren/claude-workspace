@@ -1030,6 +1030,16 @@ class TestKnownBlockerReasons:
         """RFC 0018 B1 (#3059): the opencode FINALIZE pre-flight reason is known."""
         assert FINALIZE_UNSUPPORTED_BACKEND in KNOWN_BLOCKER_REASONS
 
+    def test_agent_block_reason_is_named_and_registered(self) -> None:
+        """#3438: one named constant behind every codex ``agent_block``."""
+        from cw.auto_dev_result.schema._vocab import AGENT_BLOCK_BLOCKER_REASON
+        from cw.codex_finalize._result import AGENT_BLOCK
+
+        assert AGENT_BLOCK_BLOCKER_REASON == "agent_block"
+        assert AGENT_BLOCK == AGENT_BLOCK_BLOCKER_REASON
+        assert AGENT_BLOCK_BLOCKER_REASON in KNOWN_BLOCKER_REASONS
+        assert AGENT_BLOCK_BLOCKER_REASON in FINALIZE_REGRESS_BLOCKER_REASONS
+
 
 class TestCodexFinalizeReasonLockstep:
     """#3062: ``_vocab`` restates the codex FINALIZE executor's owner constants.

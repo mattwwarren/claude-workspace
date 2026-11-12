@@ -28,6 +28,7 @@ from cw.auto_dev_result import (
     REVIEW_ENGINE_MODIFIED_BLOCKER_REASON,
     REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
 )
+from cw.auto_dev_result.schema._vocab import AGENT_BLOCK_BLOCKER_REASON
 from cw.codex_review._const import _TRANSIENT_FAILURE_REASONS
 from cw.codex_review._context import EngineRoster, _prepare_review_pass
 from cw.codex_review._diff import _capture_head_sha
@@ -141,6 +142,37 @@ class _Loaded(NamedTuple):
     manifest: LoadedEngineManifest
 
 
+def engine_unresolvable_blocked(
+    *, ticket_id: str, worktree: Path, skill: str, cause: str
+) -> AutoDevResult:
+    """The retryable ``agent_block`` for an engine skill cw cannot resolve.
+
+    The one builder behind lane start (``engine_round_spec``) and round time,
+    so the two cannot drift (#3438).
+    """
+    reason = EngineRoundFailure.ENGINE_UNRESOLVABLE
+    return make_codex_blocked(
+        ticket_id=ticket_id,
+        worktree=worktree,
+        reason=AGENT_BLOCK_BLOCKER_REASON,
+        details=FRICTION[reason].format(skill=skill, cause=cause),
+        retry_eligible=True,
+    )
+
+
+def _blocked(
+    inputs: EnginePassInputs, cycle: int, result: AutoDevResult, failure: str
+) -> _Failure:
+    """Log the pass's one failure warning and wrap its blocked *result*."""
+    _log.warning(
+        "codex engine round failed: ticket=%s cycle=%d failure=%s",
+        inputs.task.ticket_id,
+        cycle,
+        failure,
+    )
+    return _Failure(result)
+
+
 def _agent_block(
     inputs: EnginePassInputs,
     cycle: int,
@@ -149,56 +181,46 @@ def _agent_block(
     *,
     failure_reason: str | None = None,
 ) -> _Failure:
-    _log.warning(
-        "codex engine round failed: ticket=%s cycle=%d failure=%s",
-        inputs.task.ticket_id,
-        cycle,
-        reason.value,
+    result = make_codex_blocked(
+        ticket_id=inputs.task.ticket_id,
+        worktree=inputs.worktree,
+        reason=AGENT_BLOCK_BLOCKER_REASON,
+        details=detail,
+        retry_eligible=(
+            reason
+            in {
+                EngineRoundFailure.ENGINE_SUMMARY_INVALID,
+                EngineRoundFailure.ENGINE_COVERAGE_INCOMPLETE,
+                EngineRoundFailure.ENGINE_HEAD_MISMATCH,
+                EngineRoundFailure.ENGINE_UNRESOLVABLE,
+            }
+            or failure_reason in _TRANSIENT_FAILURE_REASONS
+        ),
     )
-    return _Failure(
-        make_codex_blocked(
-            ticket_id=inputs.task.ticket_id,
-            worktree=inputs.worktree,
-            reason="agent_block",
-            details=detail,
-            retry_eligible=(
-                reason
-                in {
-                    EngineRoundFailure.ENGINE_SUMMARY_INVALID,
-                    EngineRoundFailure.ENGINE_COVERAGE_INCOMPLETE,
-                    EngineRoundFailure.ENGINE_HEAD_MISMATCH,
-                    EngineRoundFailure.ENGINE_UNRESOLVABLE,
-                }
-                or failure_reason in _TRANSIENT_FAILURE_REASONS
-            ),
-        )
-    )
+    return _blocked(inputs, cycle, result, reason.value)
 
 
 def _unresolvable(
     inputs: EnginePassInputs, cycle: int, skill: str, cause: str
 ) -> _Failure:
-    reason = EngineRoundFailure.ENGINE_UNRESOLVABLE
-    detail = FRICTION[reason].format(skill=skill, cause=cause)
-    return _agent_block(inputs, cycle, reason, detail)
+    result = engine_unresolvable_blocked(
+        ticket_id=inputs.task.ticket_id,
+        worktree=inputs.worktree,
+        skill=skill,
+        cause=cause,
+    )
+    return _blocked(inputs, cycle, result, EngineRoundFailure.ENGINE_UNRESOLVABLE.value)
 
 
 def _park(inputs: EnginePassInputs, cycle: int, reason: str, details: str) -> _Failure:
-    _log.warning(
-        "codex engine round failed: ticket=%s cycle=%d failure=%s",
-        inputs.task.ticket_id,
-        cycle,
-        reason,
+    result = make_codex_blocked(
+        ticket_id=inputs.task.ticket_id,
+        worktree=inputs.worktree,
+        reason=reason,
+        details=details,
+        retry_eligible=False,
     )
-    return _Failure(
-        make_codex_blocked(
-            ticket_id=inputs.task.ticket_id,
-            worktree=inputs.worktree,
-            reason=reason,
-            details=details,
-            retry_eligible=False,
-        )
-    )
+    return _blocked(inputs, cycle, result, reason)
 
 
 def _preflight(

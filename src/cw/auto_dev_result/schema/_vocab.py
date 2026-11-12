@@ -167,12 +167,18 @@ PLAN_MISSING_CONTEXT_BLOCKER_REASON: Literal["plan_missing_context"] = (
 TRACKER_TOOL_UNAVAILABLE_BLOCKER_REASON: Literal["tracker_tool_unavailable"] = (
     "tracker_tool_unavailable"
 )
+# The generic agent-side block: producer skills emit it, and the codex lanes
+# emit it for engine-round, unresolvable-engine and finalize failures. Named so
+# those producers share one spelling (#3438).
+AGENT_BLOCK_BLOCKER_REASON: Literal["agent_block"] = "agent_block"
 # Blocker reasons at Stage.FINALIZE eligible for automatic regress to IMPL.
 # "agent_block" covers prep-pr gate failures (diff-cover, etc.) that a fresh
 # impl session can fix by adding missing tests. Reasons absent here (e.g.
 # "no_result_emitted") stay BLOCKED_ON_USER. Open enum per §4.2 — add reasons
 # as the producer skill evolves. See GitHub #770.
-FINALIZE_REGRESS_BLOCKER_REASONS: frozenset[str] = frozenset({"agent_block"})
+FINALIZE_REGRESS_BLOCKER_REASONS: frozenset[str] = frozenset(
+    {AGENT_BLOCK_BLOCKER_REASON}
+)
 # Blocker reasons that mean "we can't reach the operator/a dependency right
 # now", not "this leg is broken" (RFC 0011 A1). Distinct axis from
 # FINALIZE_REGRESS_BLOCKER_REASONS above -- self-heals nothing, just tags the
@@ -290,7 +296,7 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             "deferred_stub_unresolved",
             "scope_tier_stale",
             "fix_loop_pending_dispatch",
-            "agent_block",
+            AGENT_BLOCK_BLOCKER_REASON,
             "tool_denied",
             DESTRUCTIVE_DIRECTIVE_BLOCKER_REASON,
             EXTERNAL_STATE_BLOCKER_REASON,
