@@ -7,6 +7,7 @@ import logging
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 import yaml
@@ -56,6 +57,7 @@ from cw.models.operator_constraint import (
     split_constraints,
 )
 from cw.models.operator_resolution import OPERATOR_RESOLUTIONS_KEY, OperatorResolution
+from cw.models.orchestrator_config.stage import ModelPrice
 from cw.review_finding_dispositions import FindingDisposition
 from tests._shared.review_builders import _make_constraint
 from tests._shared.session_seeding import _make_daemon_session
@@ -1764,6 +1766,49 @@ class TestBusyWaitGuardConfigBounds:
             LaneConfig(name="x", busy_wait_guard_window_seconds=0)
 
 
+class TestModelPrices:
+    """``ModelPrice`` and ``StageExecutorConfig.model_prices`` (#3063, R3)."""
+
+    _PRICE: ClassVar[dict[str, float]] = {
+        "input_usd_per_mtok": 1.25,
+        "cached_input_usd_per_mtok": 0.125,
+        "output_usd_per_mtok": 10.0,
+    }
+
+    def test_defaults_to_an_empty_map(self) -> None:
+        assert StageExecutorConfig().model_prices == {}
+
+    def test_valid_price_map_validates(self) -> None:
+        cfg = StageExecutorConfig(
+            backend="codex", model="gpt-x", model_prices={"gpt-x": self._PRICE}
+        )
+
+        assert cfg.model_prices["gpt-x"] == ModelPrice(**self._PRICE)
+
+    @pytest.mark.parametrize(
+        "field",
+        ["input_usd_per_mtok", "cached_input_usd_per_mtok", "output_usd_per_mtok"],
+    )
+    def test_negative_price_is_rejected(self, field: str) -> None:
+        with pytest.raises(ValidationError):
+            ModelPrice(**{**self._PRICE, field: -0.01})
+
+    def test_unknown_price_key_is_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ModelPrice(**self._PRICE, bogus=1)
+
+    @pytest.mark.parametrize("key", ["", "  "])
+    def test_empty_model_key_is_rejected(self, key: str) -> None:
+        with pytest.raises(ValidationError):
+            StageExecutorConfig(model_prices={key: self._PRICE})
+
+    def test_price_map_is_honoured_on_a_non_codex_backend(self) -> None:
+        # opencode prices by model too, so the map is not codex-only.
+        cfg = StageExecutorConfig(backend="opencode", model_prices={"m": self._PRICE})
+
+        assert "m" in cfg.model_prices
+
+
 class TestStageExecutorConfigExtraForbid:
     """RFC 0005 A1 (dormant); extra='forbid' coverage added by #1200."""
 
@@ -2028,7 +2073,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 58
+        assert DEV_QUEUE_SCHEMA_VERSION == 59
 
     def test_ticket_task_branch_defaults_none_on_a_pre_v49_blob(self) -> None:
         """#2948 (v49): a row persisted before the field existed loads unset,

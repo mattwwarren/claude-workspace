@@ -1,6 +1,7 @@
 """Session models: LocalLivenessHandle, Session.
 
-Depends only on ``cw.models.enums``. See ``cw.models.__init__`` for DAG order.
+Depends only on ``cw.models.enums`` and ``cw.models.usage``. See
+``cw.models.__init__`` for DAG order.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from cw.models.enums import (
     SessionStatus,
     Stage,
 )
+from cw.models.usage import SessionUsage
 
 # The fire-and-forget backends that record a LocalLivenessHandle. A narrow
 # subset of cw.executor_diagnostics.ExecutorName, defined here because that
@@ -187,6 +189,11 @@ class Session(BaseModel):
     # door on every successful write; None = pre-migration (no writer has
     # stamped a source yet). See GitHub #1456.
     last_result_source: LastResultSource | None = None
+    # RFC 0018 C4 (#3063) — per-stage and per-model token totals plus an
+    # availability state, recorded for non-claude stage turns. None for a
+    # session that never recorded usage (every claude-native session, and any
+    # session older than schema v20). Never a stand-in for cost_usd.
+    usage: SessionUsage | None = None
 
 
 def counts_toward_client_ceiling(session: Session, client_name: str) -> bool:

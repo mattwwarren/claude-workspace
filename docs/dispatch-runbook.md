@@ -2080,7 +2080,9 @@ lane is blocked (both below).
   (`effective_max_cycles + 1` loop runs). The cost is the CLI's self-reported
   `total_cost_usd`, visible only in the INFO log line `claude review role ...
   finished in ... (total_cost_usd=...)`; it is not recorded in the ledger or in
-  `cw review history`. To bound cost today, set `review.confirm_backend: none`
+  `cw review history`. Since #3063 the role's token counts and model are
+  recorded on the reviewer run record, but the cost still is not. To bound cost
+  today, set `review.confirm_backend: none`
   or `review.convergence: blocking`. `cw review confirm --backend claude` is
   covered by the same decision.
 - **Ledgers written before #2800.** A ledger with no `diff_base` needs no
@@ -3359,6 +3361,38 @@ for the CHANGELOG recipe.
   `push_rejected`, `push_outcome_unknown`, `pr_head_mismatch`,
   `arm_script_missing`, `disarm_failed`, `rearm_failed`, `post_push_failed`
   — as for the CHANGELOG recipe above.
+
+### Usage accounting for non-claude stage turns (#3063)
+
+RFC 0018 C4. Every codex stage turn records its token usage into the session:
+
+- `Session.usage` holds per-stage and per-model token totals and a state
+  (`recorded`, `partial` or `unavailable`). `cw session show <id>` prints one
+  `usage:` line; `cw session show <id> --json` and `cw session list --json` carry
+  the full record, enum values as strings.
+- `Session.cost_breakdown` holds the dollar estimate per configured model, only
+  when the stage config carries a `model_prices` entry for that model (see
+  `config/CONFIG_REFERENCE.md`, "Model Prices and Usage Accounting").
+  `Session.cost_usd` is never written by cw: it stays the producer's figure.
+- `TicketTask.total_tokens` (dev-queue schema 59) sums input plus output tokens
+  across the ticket's attempts; `total_cost_usd` adds a session's
+  `cost_breakdown` only when that session reported no `cost_usd`.
+- A completed turn that reports no token usage is not silently zero: the
+  session records `usage: unavailable (reason=..., turns=N)`, one
+  `usage_unavailable:` WARNING is logged, and a `usage_unavailable:` token joins
+  the stage result's `friction_highlights`. That token reflects only the turns
+  before the completion door; a tracker-IO turn that runs after it reaches
+  `Session.usage` and the warning only.
+- opencode and local (aider) sessions record the `unavailable` state with reason
+  `backend_output_unpinned` at harvest completion (`no pinned output shape for
+  this backend; see #3552`); the friction token is added only to a result the
+  harvest itself synthesizes, never to a worker-emitted one. Other `COMPLETED`
+  writers (`cw spawn close`, the stop hook, stalled and idle reconcile) leave a
+  session at `usage: none`.
+- The codex fix and tracker-IO turns now run with `--json` so their usage is
+  readable; the fix turn still runs without `--ephemeral`.
+
+There is no per-model, per-stage spend report yet (#3551).
 
 ### Legacy codex session recovery (`cw codex migrate-legacy`, RFC 0014 B1)
 

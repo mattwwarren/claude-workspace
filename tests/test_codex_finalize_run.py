@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
@@ -30,7 +30,14 @@ from cw.dev_queue import load_dev_queue
 from cw.events import read_events
 from cw.local_runner import UNEXPECTED_ERROR
 from cw.merge_probe import MergeProbe
-from cw.models import ClientConfig, OrchestratorEventType, QueueItemStatus
+from cw.models import (
+    ClientConfig,
+    OrchestratorEventType,
+    QueueItemStatus,
+    StageExecutorConfig,
+)
+from cw.models.orchestrator_config.stage import ModelPrice
+from cw.models.usage import UsageStage, UsageState, UsageUnavailableReason
 from cw.tracker import TRACKER_LINEAR
 from cw.tracker_io import TrackerIoContext, plan_turn_parts
 from tests._backend_mcp_helpers import codex_tracker_client, stage_mcp_config
@@ -48,6 +55,7 @@ from tests._tool_fakes import (
     ScriptedCodexRunner,
     ScriptStub,
     any_call,
+    codex_usage_stdout,
     finalize_document,
     finalize_turn_result,
     stdin_contains,
@@ -948,8 +956,10 @@ def test_the_re_fence_parks_after_the_pr_exists_and_never_arms(
     )
     result = h.run()
     assert result.status == "review_pending_approval"
-    assert result.friction_highlights[-1] == (
-        "review_tip_check: stale (commits_after_clean_round)"
+    # The harness turn reports no usage, so the unavailable token follows it;
+    # assert on the specific token, not its position (#3063).
+    assert "review_tip_check: stale (commits_after_clean_round)" in (
+        result.friction_highlights
     )
     assert len(h.created()) == 1
     assert h.arm.calls() == []
@@ -1299,9 +1309,9 @@ def test_an_arm_refusal_blocks_automerge_not_armed_with_pr_info(
     )
     handed: list[dict[str, Any]] = []
 
-    def _spy(sid: str, payload: dict[str, Any]) -> None:
+    def _spy(sid: str, payload: dict[str, Any], **kwargs: Any) -> None:
         handed.append(payload)
-        real(sid, payload)
+        real(sid, payload, **kwargs)
 
     with patch("cw.codex_finalize._run.complete_session_through_door", _spy):
         result = h.run()
@@ -1585,11 +1595,11 @@ def test_a_transient_door_failure_is_retried_so_an_armed_pr_is_not_stranded(
     h.turn()
     attempts: list[int] = []
 
-    def _flaky(sid: str, payload: dict[str, Any]) -> None:
+    def _flaky(sid: str, payload: dict[str, Any], **kwargs: Any) -> None:
         attempts.append(1)
         if len(attempts) == 1:
             raise OSError(_TRANSIENT)
-        real(sid, payload)
+        real(sid, payload, **kwargs)
 
     with patch("cw.codex_finalize._run.complete_session_through_door", _flaky):
         result = h.run()
@@ -1658,3 +1668,52 @@ class TestContext:
         path.parent.mkdir()
         path.write_bytes(b"\xff\xfe")
         assert _context(tmp_path) == {}
+
+
+_PRICE = ModelPrice(
+    input_usd_per_mtok=1.0, cached_input_usd_per_mtok=0.5, output_usd_per_mtok=2.0
+)
+
+
+def test_recorded_usage_is_persisted_for_the_finalize_turn(
+    harness: Callable[..., Harness],
+) -> None:
+    """#3063: the FINALIZE turn records under the configured model and prices it."""
+    h = harness()
+    reply = replace(
+        finalize_turn_result(finalize_document(pr_title=TITLE, pr_body=BODY)),
+        stdout=codex_usage_stdout(input_tokens=1000, output_tokens=100),
+    )
+    h.turn(result=reply)
+    config = StageExecutorConfig(
+        backend="codex", model="gpt-x", model_prices={"gpt-x": _PRICE}
+    )
+    with patch("cw.codex_driver.resolve_executor_config", return_value=config):
+        result = h.run()
+
+    assert result.status == "shipped"
+    session = load_state().sessions[0]
+    assert session.usage is not None
+    assert session.usage.state is UsageState.RECORDED
+    assert list(session.usage.by_stage) == [UsageStage.FINALIZE]
+    assert list(session.usage.by_model) == ["gpt-x"]
+    assert session.cost_breakdown == pytest.approx({"gpt-x": 0.0012})
+    assert not any(
+        f.startswith("usage_unavailable") for f in result.friction_highlights
+    )
+
+
+def test_a_finalize_turn_without_usage_is_unavailable_with_a_friction_token(
+    harness: Callable[..., Harness], caplog: pytest.LogCaptureFixture
+) -> None:
+    h = harness()
+    h.turn(finalize_document(pr_title=TITLE, pr_body=BODY))
+    with caplog.at_level("WARNING", logger="cw.codex_usage"):
+        result = h.run()
+
+    session = load_state().sessions[0]
+    assert session.usage is not None
+    assert session.usage.state is UsageState.UNAVAILABLE
+    assert session.usage.unavailable_reason is UsageUnavailableReason.NO_OUTPUT
+    assert [m for m in caplog.messages if "role=finalize " in m]
+    assert any(f.startswith("usage_unavailable: ") for f in result.friction_highlights)

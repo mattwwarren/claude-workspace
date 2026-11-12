@@ -20,10 +20,13 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from cw.executor_launch import _launch_logged_subprocess
 from cw.worktree import apply_worker_tmpdir
+
+if TYPE_CHECKING:
+    from cw.models.usage import UsageStage
 
 # Per-run output of the detached ``cw codex run`` job. Private: harvest never
 # parses it — reconcile/local's codex branch (A1) decides from git and audit
@@ -165,6 +168,38 @@ class CodexRunner(Protocol):
         the process gets ``/dev/null`` on stdin (the pre-#1236 behavior).
         """
         ...
+
+
+@runtime_checkable
+class RelabelableRunner(Protocol):
+    """A runner that attributes its turns to a usage stage and role (#3063).
+
+    Implemented by ``cw.codex_usage.RecordingRunner``. Every other runner
+    (:class:`RealCodexRunner`, the fakes) is not relabelable, so
+    :func:`relabeled` returns it unchanged.
+    """
+
+    def relabel(self, kind: UsageStage | None, role: str | None) -> CodexRunner:
+        """Return a runner recording under *kind* and *role* (``None`` keeps)."""
+        ...
+
+
+def relabeled(
+    runner: CodexRunner,
+    kind: UsageStage | None = None,
+    *,
+    role: str | None = None,
+) -> CodexRunner:
+    """Return *runner* re-labelled for usage attribution, or *runner* unchanged.
+
+    The accumulator rides inside the one ``runner`` already threaded to every
+    launch site, so each site re-labels it with one expression instead of
+    growing a parameter. A runner that is not a recording runner is a no-op,
+    which is why ``FakeCodexRunner`` and ``ScriptedCodexRunner`` need no change.
+    """
+    if isinstance(runner, RelabelableRunner):
+        return runner.relabel(kind, role)
+    return runner
 
 
 class RealCodexRunner:

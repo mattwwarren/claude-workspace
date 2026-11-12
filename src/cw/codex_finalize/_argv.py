@@ -21,7 +21,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
-from cw.codex_review import _exec_policy_argv, _reasoning_effort_argv
+from cw.codex_review import (
+    _AUDIT_ARGV_FLAGS,
+    _exec_policy_argv,
+    _reasoning_effort_argv,
+)
 from cw.models.enums import SandboxMode
 from cw.tracker_io._argv import _disable_others
 
@@ -35,8 +39,6 @@ if TYPE_CHECKING:
 FINALIZE_READ_ONLY_ARGV: Final[tuple[str, ...]] = tuple(
     _exec_policy_argv(SandboxMode.READ_ONLY)
 )
-
-_AUDIT_FLAGS: Final[tuple[str, str]] = ("--json", "--ephemeral")
 
 
 class FinalizeArgvPolicyError(ValueError):
@@ -56,7 +58,7 @@ def build_finalize_argv(
         "codex",
         "exec",
         *FINALIZE_READ_ONLY_ARGV,
-        *_AUDIT_FLAGS,
+        *_AUDIT_ARGV_FLAGS,
         *_reasoning_effort_argv(reasoning_effort),
         *_disable_others("", other_servers),
         "--output-schema",

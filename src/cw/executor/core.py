@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 
     from cw.executor_diagnostics import ExecutorName
     from cw.models import LocalLivenessBackend
+    from cw.models.usage import UsageSnapshot
     from cw.native_daemon import NativeDaemonClient
 
 _log = logging.getLogger(__name__)
@@ -246,6 +247,7 @@ def _complete_session_via_door(
     payload: dict[str, Any],
     *,
     guard_already_completed: bool = False,
+    usage: UsageSnapshot | None = None,
 ) -> None:
     """Route SID's terminal write through the door (RFC 0012 D-A1/D-S3,
     source=EXECUTOR_DIRECT), then transition status to COMPLETED.
@@ -277,6 +279,11 @@ def _complete_session_via_door(
     Every ``guard_already_completed=True`` call site is an ``except
     Exception:`` branch, so that flag doubles as the crashed/normal signal:
     True -> CRASHED, False -> NORMAL.
+
+    *usage* (#3063, R10) is an already-parsed, already-priced snapshot built by
+    the caller before taking the lock. The only thing done with it here is two
+    field assignments on the session this function already loads: no parse,
+    price lookup or file read runs under ``sessions_lock``.
     """
     if guard_already_completed:
         state = load_state()
@@ -298,6 +305,9 @@ def _complete_session_via_door(
             if guard_already_completed
             else CompletionReason.NORMAL
         )
+        if usage is not None:
+            target.usage = usage.usage
+            target.cost_breakdown = usage.cost_breakdown
         save_state(state)
 
 

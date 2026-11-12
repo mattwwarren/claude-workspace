@@ -10,6 +10,13 @@ import click
 from cw.cli._base import _relative_time, handle_errors
 from cw.config import load_state
 from cw.models import TERMINAL_SESSION_STATUSES, Session, SessionStatus
+from cw.models.usage import (
+    BACKEND_OUTPUT_UNPINNED_DETAIL,
+    SessionUsage,
+    TokenTotals,
+    UsageState,
+    UsageUnavailableReason,
+)
 from cw.reconcile import ticket_id_for_session
 from cw.session_retention import archive_file_count, find_session_by_id
 
@@ -51,6 +58,34 @@ def _session_to_dict(session: Session) -> dict[str, object]:
     return session.model_dump(mode="json")
 
 
+def _usage_line(usage: SessionUsage | None) -> str:
+    """The stable ``usage:`` string for ``cw session show`` (#3063)."""
+    if usage is None:
+        return "usage: none"
+    if usage.state is UsageState.UNAVAILABLE:
+        reason = usage.unavailable_reason
+        line = (
+            f"usage: unavailable (reason={reason.value if reason else 'unknown'}, "
+            f"turns={usage.unavailable_turns})"
+        )
+        if reason is UsageUnavailableReason.BACKEND_OUTPUT_UNPINNED:
+            line += f": {BACKEND_OUTPUT_UNPINNED_DETAIL}"
+        return line
+    totals = TokenTotals()
+    for model_totals in usage.by_model.values():
+        totals.input_tokens += model_totals.input_tokens
+        totals.cached_input_tokens += model_totals.cached_input_tokens
+        totals.output_tokens += model_totals.output_tokens
+        totals.reasoning_tokens += model_totals.reasoning_tokens
+        totals.turns += model_totals.turns
+    return (
+        f"usage: {usage.state.value} input={totals.input_tokens} "
+        f"cached={totals.cached_input_tokens} output={totals.output_tokens} "
+        f"reasoning={totals.reasoning_tokens} total={usage.total_tokens} "
+        f"turns={totals.turns}"
+    )
+
+
 def _print_session_human(session: Session) -> None:
     click.echo(f"id: {session.id}")
     click.echo(f"name: {session.name}")
@@ -70,6 +105,7 @@ def _print_session_human(session: Session) -> None:
     click.echo(f"lane: {session.lane}")
     click.echo(f"last_result: {session.last_result}")
     click.echo(f"cost_usd: {session.cost_usd}")
+    click.echo(_usage_line(session.usage))
     stage = session.stage.value if session.stage else None
     click.echo(f"stage: {stage}")
     last_result_source = (

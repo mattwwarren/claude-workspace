@@ -120,6 +120,7 @@ from cw.reconcile.harvest_synthesis import (
     harvest_uses_git,
     prove_harvest_backend,
 )
+from cw.reconcile.harvest_usage import usage_unavailable_friction
 from cw.reconcile.tasks import _resolve_task_policy
 
 if TYPE_CHECKING:
@@ -927,6 +928,8 @@ def _act_on_local_harvest_candidates(
         )
         if sentinel is None:
             continue
+        # #3063: the harvest authors this result, so it carries the marker.
+        sentinel.friction_highlights.append(usage_unavailable_friction(session))
         # Task first (before the session status change) so the task is in its
         # terminal/advanced state when revert_completed_silent_tasks runs.
         routed = True

@@ -246,6 +246,18 @@ def review_envelope(
     return json.dumps(envelope)
 
 
+def usage_envelope(mutate: Callable[[dict[str, object]], None]) -> str:
+    """The captured review envelope with *mutate* applied to it (#3063).
+
+    Built on :func:`_captured`, so every untouched field is the real one. The
+    callback edits the decoded envelope in place (drop ``usage``, null a field,
+    add a second ``modelUsage`` key) and the result is dumped back to text.
+    """
+    envelope = _captured()
+    mutate(envelope)
+    return json.dumps(envelope)
+
+
 def error_envelope(message: str = "API Error: 500 Internal server error") -> str:
     """SYNTHESISED from the real envelope's key set: ``is_error: true``.
 

@@ -57,6 +57,8 @@ def test_adr_0021_records_the_uncapped_decision() -> None:
         "self-reported",
         "not recorded",
         "real cost data",
+        "#3063",
+        "does not reopen this decision",
     ):
         assert needle in text, needle
 

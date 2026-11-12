@@ -138,6 +138,21 @@ class TestRunClaudeReview:
         assert round_.verdict.reviewed_sha == git_in(wt, "rev-parse", "HEAD")
         assert runner.roles
 
+    def test_every_run_record_carries_the_envelope_tokens_and_model(
+        self, wt: Path
+    ) -> None:
+        """#3063: the metrics reach the persisted ``ReviewerRunRecord``s."""
+        round_ = _review(wt, _RoleAwareRunner(_clean))
+
+        assert round_.verdict is not None
+        records = round_.verdict.agents_run
+        assert records
+        for record in records:
+            assert record.input_tokens == 16184
+            assert record.cached_input_tokens == 8040
+            assert record.output_tokens == 331
+            assert record.effective_model == "claude-sonnet-5-5"
+
     def test_must_fix_is_labeled_claude(self, wt: Path) -> None:
         round_ = _review(wt, _RoleAwareRunner(_must_fix))
         blocker = round_.result.blocker

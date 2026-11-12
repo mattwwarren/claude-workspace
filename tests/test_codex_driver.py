@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
+import cw.codex_driver as driver
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_driver import (
     STAGE_FINALIZE,
@@ -32,6 +33,7 @@ from cw.codex_driver import (
 from cw.codex_fix_loop.commit import _build_fix_codex_argv
 from cw.codex_review import CODEX_MUST_FIX_FINDINGS, CODEX_REVIEW_UNPARSEABLE
 from cw.codex_runner import FakeCodexRunner
+from cw.codex_usage import RecordingRunner
 from cw.config import load_state, save_state
 from cw.exceptions import CwError
 from cw.local_runner import make_blocked
@@ -51,11 +53,14 @@ from cw.models import (
     StagePipelineConfig,
     TicketTask,
 )
+from cw.models.orchestrator_config.stage import ModelPrice
+from cw.models.usage import UsageStage, UsageState
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._codex_review_helpers import seed_codex_stage_run
 from tests._shared.git_repos import git_in
 from tests._shared.session_seeding import _make_daemon_session
 from tests._shared.stop_hook_context import _write_global_toggle
+from tests._tool_fakes import codex_usage_stdout
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -194,6 +199,51 @@ def test_run_codex_review_stage_completes_session_via_door_with_fake_runner(
     body = post_mock.call_args.args[1]
     assert "Non-blocking" in body
     assert "disabled" in body.lower()
+
+
+def test_review_stage_records_each_role_turn_and_skips_the_capability_probe(
+    tmp_config_dir: Path,
+    make_worktree_with_change: Callable[..., Path],
+) -> None:
+    """#3063: role turns record as REVIEW_ROLE; the ``--json``-less probe is skipped."""
+    worktree = _worktree_with_change(make_worktree_with_change, "wt-driver-usage")
+    seed_codex_stage_run(worktree=worktree)
+    runner = FakeCodexRunner(
+        returncode=0,
+        output_file_content=_reviewer_doc(),
+        stdout=codex_usage_stdout(input_tokens=1000, output_tokens=100),
+    )
+
+    with patch("cw.codex_background._post_daemon_verdict_comment"):
+        _run_stage(runner)
+
+    session = load_state().sessions[0]
+    assert session.usage is not None
+    assert session.usage.state is UsageState.RECORDED
+    assert list(session.usage.by_stage) == [UsageStage.REVIEW_ROLE]
+    roles_run = _persisted_result().review.agents_run
+    assert session.usage.by_stage[UsageStage.REVIEW_ROLE].turns == roles_run
+    assert len(runner.calls) == roles_run + 1
+
+
+def test_review_stage_without_usage_stdout_carries_the_friction_token(
+    tmp_config_dir: Path,
+    make_worktree_with_change: Callable[..., Path],
+) -> None:
+    worktree = _worktree_with_change(make_worktree_with_change, "wt-driver-nousage")
+    seed_codex_stage_run(worktree=worktree)
+    runner = FakeCodexRunner(returncode=0, output_file_content=_reviewer_doc())
+
+    with patch("cw.codex_background._post_daemon_verdict_comment"):
+        _run_stage(runner)
+
+    session = load_state().sessions[0]
+    assert session.usage is not None
+    assert session.usage.state is UsageState.UNAVAILABLE
+    assert any(
+        f.startswith("usage_unavailable: ")
+        for f in _persisted_result().friction_highlights
+    )
 
 
 def test_run_codex_review_stage_must_fix_runs_fix_loop_to_cap_and_parks(
@@ -610,7 +660,10 @@ def test_run_codex_finalize_stage_loads_finalize_row_no_sandbox_no_budget(
             runner=runner,
         )
     kwargs = run_finalize.call_args.kwargs
-    assert kwargs["runner"] is runner
+    assert isinstance(kwargs["runner"], RecordingRunner)
+    assert kwargs["runner"].inner is runner
+    assert kwargs["runner"].kind is UsageStage.FINALIZE
+    assert kwargs["runner"].accumulator is kwargs["usage"]
     assert kwargs["task"].stage is Stage.FINALIZE
     assert kwargs["worktree"] == worktree
     assert kwargs["sid"] == "sess-1"
@@ -626,6 +679,7 @@ def test_run_codex_finalize_stage_loads_finalize_row_no_sandbox_no_budget(
         "sess_name",
         "model",
         "reasoning_effort",
+        "usage",
     }
 
 
@@ -642,7 +696,7 @@ def test_run_codex_finalize_stage_defaults_to_the_real_runner(
         run_codex_finalize_stage(
             ticket_id="T-1", session_id="sess-1", wall_clock_budget_seconds=None
         )
-    assert run_finalize.call_args.kwargs["runner"] is real_runner.return_value
+    assert run_finalize.call_args.kwargs["runner"].inner is real_runner.return_value
 
 
 def test_run_codex_plan_stage_loads_the_plan_row_and_ignores_the_budget(
@@ -661,7 +715,10 @@ def test_run_codex_plan_stage_loads_the_plan_row_and_ignores_the_budget(
             runner=runner,
         )
     kwargs = run_plan.call_args.kwargs
-    assert kwargs["runner"] is runner
+    assert isinstance(kwargs["runner"], RecordingRunner)
+    assert kwargs["runner"].inner is runner
+    assert kwargs["runner"].kind is UsageStage.PLAN
+    assert kwargs["runner"].accumulator is kwargs["usage"]
     assert kwargs["task"].stage is Stage.PLAN
     assert kwargs["worktree"] == worktree
     assert kwargs["sid"] == "sess-1"
@@ -676,6 +733,7 @@ def test_run_codex_plan_stage_loads_the_plan_row_and_ignores_the_budget(
         "sess_name",
         "model",
         "reasoning_effort",
+        "usage",
     }
 
 
@@ -695,7 +753,10 @@ def test_run_codex_impl_stage_loads_impl_row_with_fix_sandbox_no_budget(
             runner=runner,
         )
     kwargs = run_impl.call_args.kwargs
-    assert kwargs["runner"] is runner
+    assert isinstance(kwargs["runner"], RecordingRunner)
+    assert kwargs["runner"].inner is runner
+    assert kwargs["runner"].kind is UsageStage.IMPL
+    assert kwargs["runner"].accumulator is kwargs["usage"]
     assert kwargs["task"].stage is Stage.IMPL
     assert kwargs["worktree"] == worktree
     assert kwargs["sid"] == "sess-1"
@@ -712,4 +773,76 @@ def test_run_codex_impl_stage_loads_impl_row_with_fix_sandbox_no_budget(
         "model",
         "reasoning_effort",
         "sandbox_mode",
+        "usage",
     }
+
+
+_PRICE = ModelPrice(
+    input_usd_per_mtok=1.0, cached_input_usd_per_mtok=0.5, output_usd_per_mtok=2.0
+)
+
+
+@pytest.mark.parametrize(
+    ("stage", "driver_name", "runner_attr", "kind"),
+    [
+        (
+            Stage.PLAN,
+            "run_codex_plan_stage",
+            "run_plan_stage_and_complete",
+            UsageStage.PLAN,
+        ),
+        (
+            Stage.IMPL,
+            "run_codex_impl_stage",
+            "run_impl_stage_and_complete",
+            UsageStage.IMPL,
+        ),
+        (
+            Stage.FINALIZE,
+            "run_codex_finalize_stage",
+            "run_finalize_stage_and_complete",
+            UsageStage.FINALIZE,
+        ),
+        (
+            Stage.REVIEW,
+            "run_codex_review_stage",
+            "_run_codex_review_and_complete",
+            UsageStage.REVIEW_ROLE,
+        ),
+    ],
+)
+def test_each_stage_builds_its_accumulator_from_the_model_price_map(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    stage: Stage,
+    driver_name: str,
+    runner_attr: str,
+    kind: UsageStage,
+) -> None:
+    """#3063: the driver is the one place the accumulator is created."""
+    worktree = tmp_path / "wt-prices"
+    worktree.mkdir()
+    seed_codex_stage_run(worktree=worktree, stage=stage)
+    config = StageExecutorConfig(
+        backend="codex", model="gpt-x", model_prices={"gpt-x": _PRICE}
+    )
+    with (
+        patch(f"cw.codex_driver.{runner_attr}") as stage_run,
+        patch("cw.codex_driver.resolve_executor_config", return_value=config),
+    ):
+        getattr(driver, driver_name)(
+            ticket_id="T-1",
+            session_id="sess-1",
+            wall_clock_budget_seconds=None,
+            runner=FakeCodexRunner(
+                stdout=codex_usage_stdout(input_tokens=1000, output_tokens=100)
+            ),
+        )
+
+    kwargs = stage_run.call_args.kwargs
+    runner = kwargs["runner"]
+    assert runner.kind is kind
+    runner.run(worktree, ["codex", "exec", "--json", "-m", "gpt-x"], None)
+    snapshot = kwargs["usage"].snapshot()
+    assert snapshot is not None
+    assert snapshot.cost_breakdown == pytest.approx({"gpt-x": 0.0012})

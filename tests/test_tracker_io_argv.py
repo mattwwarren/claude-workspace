@@ -45,6 +45,7 @@ def test_exact_argv() -> None:
         "-c",
         "approval_policy=never",
         "--skip-git-repo-check",
+        "--json",
         "--ephemeral",
         "-c",
         "model_reasoning_effort=low",

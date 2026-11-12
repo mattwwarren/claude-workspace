@@ -102,6 +102,7 @@ __all__ = [
     "any_call",
     "argv_has",
     "assert_gh_calls",
+    "codex_usage_stdout",
     "editing_reply",
     "fake_claude_cli",
     "fake_codex_job_runner",
@@ -1686,3 +1687,39 @@ def stub_cw_cli(
     for target in _CW_CLI_TARGETS:
         monkeypatch.setattr(target, fake)
     return fake
+
+
+def codex_usage_stdout(
+    *,
+    input_tokens: int,
+    cached_input_tokens: int = 0,
+    output_tokens: int,
+    reasoning_output_tokens: int = 0,
+    cache_write_input_tokens: int = 0,
+    completed: bool = True,
+) -> str:
+    """A ``codex exec --json`` stdout shaped like the codex-cli 0.167.0 capture (#3063).
+
+    The one place usage JSONL is built for tests. *completed* False swaps the
+    terminal ``turn.completed`` for a ``turn.failed`` (no usage block).
+    """
+    lines: list[dict[str, Any]] = [
+        {"type": "thread.started", "thread_id": "<THREAD_ID>"},
+        {"type": "turn.started"},
+    ]
+    if completed:
+        lines.append(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "cached_input_tokens": cached_input_tokens,
+                    "cache_write_input_tokens": cache_write_input_tokens,
+                    "output_tokens": output_tokens,
+                    "reasoning_output_tokens": reasoning_output_tokens,
+                },
+            }
+        )
+    else:
+        lines.append({"type": "turn.failed", "error": {"message": "turn failed"}})
+    return "".join(json.dumps(line) + "\n" for line in lines)

@@ -220,10 +220,11 @@ and `fix`. A purpose is a static spawn-time label; it is not the pipeline
 
 ### Downgrading to a pre-#3054 build
 
-The `CwState` schema remains version `19`, but a pre-#3054 build cannot parse
-the new `plan`, `review` or `finalize` enum values. Before downgrading, stop
+The `CwState` schema was version `19` at #3054 and is `20` from #3063 (RFC 0018
+C4, `Session.usage`); a pre-#3054 build cannot parse the new `plan`, `review` or
+`finalize` enum values. Before downgrading, stop
 the dispatch loop and run this gate from the #3054 (or newer) checkout. It is
-versioned and fail-closed: it requires `schema_version == 19`, refuses the
+versioned and fail-closed: it requires `schema_version == 20`, refuses the
 downgrade if any new-purpose session is non-terminal or still bound to a
 dev-queue row, writes a timestamped JSONL archive, and preserves a complete
 copy of the original `sessions.json` before rewriting it.
@@ -238,7 +239,7 @@ from cw.config import load_state, save_state, sessions_lock, state_dir, state_fi
 from cw.dev_queue import load_dev_queue
 from cw.reconcile import ticket_id_for_session
 
-EXPECTED_STATE_SCHEMA = 19
+EXPECTED_STATE_SCHEMA = 20
 NEW_PURPOSES = {"plan", "review", "finalize"}
 TERMINAL_STATUSES = {"completed", "timed_out"}
 
@@ -482,6 +483,62 @@ clients:
               model: gpt-5.6-luna
               reasoning_effort: max
 ```
+
+### Model Prices and Usage Accounting
+
+Every codex stage turn (PLAN, the plan review stations, IMPL, FINALIZE, the
+review roles, the fix loop and the tracker-IO post) records its token usage into
+`Session.usage` (#3063, RFC 0018 C4); `cw session show` prints a `usage:` line
+and `--json` carries the whole record. `TicketTask.total_tokens` sums input plus
+output tokens across the ticket's sessions. A turn that exits 0 but reports no
+usage is not silently zero: the session records state `unavailable`, logs one
+`usage_unavailable:` warning and appends a `usage_unavailable:` token to the
+stage result's `friction_highlights`.
+
+`model_prices` is an optional, operator-supplied map on a stage config, keyed by
+the exact `model` string, that turns those tokens into a dollar estimate. No
+price table ships with cw, so the map is empty by default and a model with no
+entry records tokens only (that is not the unavailable marker). Prices are USD
+per million tokens:
+
+- `input_usd_per_mtok`, `cached_input_usd_per_mtok` and `output_usd_per_mtok`
+  are required and non-negative; keys must be non-empty and match `model`
+  exactly (`gpt-x` does not match `gpt-x-mini`).
+- `cached_input_tokens` is a subset of `input_tokens`: the estimate is
+  `(max(input - cached, 0) x input_price + cached x cached_price + output x
+  output_price) / 1e6`. Reasoning tokens are a subset of output and add
+  nothing; `cache_write_input_tokens` is recorded but never priced.
+- The estimate lands in `Session.cost_breakdown`, keyed by the configured model
+  string, never in `Session.cost_usd` (which stays the producer's own figure).
+  `TicketTask.total_cost_usd` adds the breakdown only for a session whose
+  `cost_usd` is absent, so a session is never double-counted.
+- A model gets a dollar figure only when every recorded turn for it reported
+  input, cached input and output; otherwise it has tokens only.
+- Like `model`, a lane's stage config replaces the client's wholesale, so repeat
+  `model_prices` on the lane.
+
+```yaml
+clients:
+  my-project:
+    workspace_path: /path/to/repo
+    lanes:
+      - name: default
+        pipeline:
+          executors:
+            review:
+              backend: codex
+              model: gpt-5.6-luna
+              model_prices:
+                gpt-5.6-luna:
+                  input_usd_per_mtok: 1.25
+                  cached_input_usd_per_mtok: 0.125
+                  output_usd_per_mtok: 10.0
+```
+
+The prices above are illustrative, not cw's claim about any model's price.
+opencode and local (aider) sessions record the `unavailable` state with reason
+`backend_output_unpinned` (no pinned output shape for the backend; see #3552),
+so a price map has nothing to price there.
 
 ### Codex Sandbox Mode
 

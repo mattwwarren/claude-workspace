@@ -112,8 +112,8 @@ def test_peek_decides_legacy_without_full_parse(
 
 def test_float_schema_version_falls_back_to_parse(state_dir: Path) -> None:
     sf = state_dir / "sessions.json"
-    sf.write_text('{\n  "schema_version": 19.5,\n  "sessions": []\n}')
-    assert on_disk_schema_version(sf) == 19
+    sf.write_text('{\n  "schema_version": 20.5,\n  "sessions": []\n}')
+    assert on_disk_schema_version(sf) == 20
     backup_legacy_state(sf)
     assert not _backup(state_dir).exists()
 

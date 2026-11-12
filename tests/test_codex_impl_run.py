@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import subprocess
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -43,8 +43,11 @@ from cw.models import (
     QueueItemStatus,
     SandboxMode,
     Stage,
+    StageExecutorConfig,
 )
+from cw.models.orchestrator_config.stage import ModelPrice
 from cw.models.review_feedback import ReviewFeedback
+from cw.models.usage import UsageStage, UsageState, UsageUnavailableReason
 from cw.tracker import TRACKER_LINEAR
 from cw.tracker_io._argv import build_tracker_io_argv
 from tests._backend_mcp_helpers import codex_tracker_client
@@ -61,6 +64,7 @@ from tests._shared.git_repos import commit_tracked_file, git_in, push_commit_to_
 from tests._tool_fakes import (
     FakeGhCli,
     ScriptedCodexRunner,
+    codex_usage_stdout,
     editing_reply,
     impl_sentinel,
     impl_turn_result,
@@ -1069,3 +1073,54 @@ def test_unexpected_error_completes_as_unexpected_error_at_stage2_impl(
     assert result.blocker.reason == UNEXPECTED_ERROR
     (task,) = load_dev_queue().tasks
     assert task.status is QueueItemStatus.PENDING
+
+
+_PRICE = ModelPrice(
+    input_usd_per_mtok=1.0, cached_input_usd_per_mtok=0.5, output_usd_per_mtok=2.0
+)
+
+
+@freeze_time(NOW)
+def test_recorded_usage_is_persisted_for_the_impl_turn(
+    harness: Callable[..., Harness],
+) -> None:
+    """#3063: the IMPL turn records under the configured model and prices it."""
+    h = harness()
+    reply = replace(
+        impl_turn_result(impl_sentinel(ticket_id=TICKET)),
+        stdout=codex_usage_stdout(input_tokens=1000, output_tokens=100),
+    )
+    h.turn(result=reply)
+    config = StageExecutorConfig(
+        backend="codex", model="gpt-x", model_prices={"gpt-x": _PRICE}
+    )
+    with patch("cw.codex_driver.resolve_executor_config", return_value=config):
+        result = h.run()
+
+    session = load_state().sessions[0]
+    assert session.usage is not None
+    assert session.usage.state is UsageState.RECORDED
+    assert list(session.usage.by_stage) == [UsageStage.IMPL]
+    assert list(session.usage.by_model) == ["gpt-x"]
+    assert session.cost_breakdown == pytest.approx({"gpt-x": 0.0012})
+    assert not any(
+        f.startswith("usage_unavailable") for f in result.friction_highlights
+    )
+
+
+@freeze_time(NOW)
+def test_an_impl_turn_without_usage_is_unavailable_with_a_friction_token(
+    harness: Callable[..., Harness], caplog: pytest.LogCaptureFixture
+) -> None:
+    h = harness()
+    h.turn()
+    with caplog.at_level("WARNING", logger="cw.codex_usage"):
+        result = h.run()
+
+    session = load_state().sessions[0]
+    assert session.usage is not None
+    assert session.usage.state is UsageState.UNAVAILABLE
+    assert session.usage.unavailable_reason is UsageUnavailableReason.NO_OUTPUT
+    assert session.cost_breakdown is None
+    assert [m for m in caplog.messages if "role=impl " in m]
+    assert any(f.startswith("usage_unavailable: ") for f in result.friction_highlights)

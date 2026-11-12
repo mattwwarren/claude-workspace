@@ -133,6 +133,7 @@ _FIX_LITERAL = [
     "workspace-write",
     "-c",
     "approval_policy=never",
+    "--json",
     "-c",
     "model_reasoning_effort=high",
     "-m",

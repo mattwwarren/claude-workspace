@@ -13,7 +13,7 @@ import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import DEFAULT, MagicMock
+from unittest.mock import DEFAULT, MagicMock, patch
 
 import freezegun
 import pytest
@@ -765,6 +765,121 @@ def test_local_harvest_stage_mismatch_does_not_orphan_task_or_complete_session(
         event_types=[OrchestratorEventType.SESSION_COMPLETED],
     )
     assert not any(e.payload.get("session_id") == "harv-mismatch" for e in events)
+
+
+# ---------------------------------------------------------------------------
+# #3063 -- the unavailable-usage marker on the harvest completion tail
+# ---------------------------------------------------------------------------
+
+_USAGE_FRICTION_PREFIX = "usage_unavailable: "
+
+
+def _usage_tokens(session: Session) -> list[str]:
+    assert session.last_result is not None
+    return [
+        str(f)
+        for f in session.last_result["friction_highlights"]
+        if str(f).startswith(_USAGE_FRICTION_PREFIX)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("backend", "with_commit"), [("opencode", False), ("aider", False), ("aider", True)]
+)
+def test_synthesized_harvest_stamps_usage_and_the_friction_token_once(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[..., Path],
+    backend: str,
+    *,
+    with_commit: bool,
+) -> None:
+    worktree = _local_git_worktree(
+        make_git_repo, f"wt-usage-{backend}-{with_commit}", with_commit=with_commit
+    )
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
+
+    session = _harvest_single(f"ses-usage-{backend}", "T-USAGE", worktree, backend)
+
+    assert session.status == SessionStatus.COMPLETED
+    assert session.usage is not None
+    assert session.usage.state.value == "unavailable"
+    assert session.usage.unavailable_reason is not None
+    assert session.usage.unavailable_reason.value == "backend_output_unpinned"
+    assert session.cost_breakdown is None
+    (token,) = _usage_tokens(session)
+    assert token == (
+        f"usage_unavailable: {backend} sessions record no token usage "
+        "(reason=backend_output_unpinned: no pinned output shape for this "
+        "backend; see #3552)"
+    )
+
+
+def test_a_deferred_harvest_is_not_stamped(
+    tmp_config_dir: Path, make_git_repo: Callable[..., Path]
+) -> None:
+    worktree = _local_git_worktree(make_git_repo, "wt-usage-defer", with_commit=True)
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
+
+    with patch("cw.reconcile.local._harvest_sentinel_or_defer", return_value=None):
+        session = _harvest_single("ses-usage-defer", "T-DEFER", worktree, "aider")
+
+    assert session.status != SessionStatus.COMPLETED
+    assert session.usage is None
+
+
+def test_a_stage_mismatch_refusal_is_not_stamped(
+    tmp_config_dir: Path, make_git_repo: Callable[..., Path]
+) -> None:
+    worktree = _local_git_worktree(make_git_repo, "wt-usage-mismatch", with_commit=True)
+    write_clients_yaml(staged_client("client-a", sentinel_mismatch_veto=True))
+    sess = _mk_local_session(
+        "ses-usage-mismatch",
+        worktree,
+        LocalLivenessHandle(pid=2_000_000_000, start_time_ns=123),
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="ses-usage-mismatch",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="ses-usage-mismatch",
+                    stage=Stage.REVIEW,
+                )
+            ]
+        )
+    )
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+    state = load_state()
+    candidates = _detect_local_harvest_candidates(state, list(task_by_ticket.values()))
+
+    act_on_local_harvest(
+        state,
+        candidates,
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+        task_by_ticket=task_by_ticket,
+    )
+
+    reloaded = next(s for s in load_state().sessions if s.id == "ses-usage-mismatch")
+    assert reloaded.usage is None
+
+
+def test_emitted_result_harvest_stamps_usage_without_editing_last_result(
+    tmp_config_dir: Path, make_git_repo: Callable[..., Path]
+) -> None:
+    worktree = _local_git_worktree(make_git_repo, "wt-usage-emit", with_commit=True)
+    sess = _emit_cli_dead_session(worktree, "t3063-emit")
+    emitted = dict(sess.last_result or {})
+
+    _run_emit_cli_harvest(sess, QueueItemStatus.RUNNING, Stage.IMPL)
+
+    reloaded = next(s for s in load_state().sessions if s.id == "t3063-emit")
+    assert reloaded.status == SessionStatus.COMPLETED
+    assert reloaded.usage is not None
+    assert reloaded.last_result == emitted
+    assert _usage_tokens(reloaded) == []
 
 
 def test_local_harvest_live_process_not_harvested(
