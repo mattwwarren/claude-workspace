@@ -126,7 +126,7 @@ review:
   claude-native lane, or a codex lane whose manifest loads, gets no warning.
   `cw review converge config` emits the `engine` and `engine_error` keys for
   `--loop-backend claude-native` and `codex`, and null for the others.
-- **An all-codex engine lane needs `review.confirm_backend: none` or `codex`.**
+- **An all-codex engine lane needs `review.confirm_backend: none` or `codex`.** See "All-codex lane (RFC 0018 D1, #3064)" below for the full lane setup.
   The confirm-backend default is unchanged: after a codex engine pass the
   default independent confirm round is Claude. Set `confirm_backend: none` (no
   confirm; the ledger converges on the engine round) or `codex` to keep every
@@ -713,6 +713,58 @@ tickets in that lane, even when the client's own default pipeline includes
 it. `approve` and `requeue` refuse with a `CwError` naming the lane and its
 resolved stages when a target stage isn't in that resolved list — they never
 silently fall back to the client default.
+
+### All-codex lane (RFC 0018 D1, #3064)
+
+A lane whose stages all run on the `codex` backend (plan, impl, review and
+finalize, each in `CODEX_SUPPORTED_STAGES`) is an all-codex lane. Every stage
+runs in codex, so no Claude executor runs the ticket. Set it on the lane:
+
+```yaml
+lanes:
+  - name: all-codex
+    pipeline:
+      executors:
+        plan:     { backend: codex }
+        impl:     { backend: codex }
+        review:   { backend: codex }
+        finalize: { backend: codex }
+```
+
+**The confirm default still reaches Claude.** In clean mode
+(`review.convergence: clean`) with `review.confirm_backend` unset, the
+independent confirm round defaults to `claude -p`. The lane therefore needs the
+`claude` binary on `PATH` and a Claude login. A missing binary parks the ticket
+`confirm_backend_unavailable` (uncharged), not skipped. In blocking mode there is
+no confirm round, so the lane needs no Claude executor at all.
+
+**Claude-free opt-outs** for a clean all-codex lane:
+
+- `review.confirm_backend: none`: no confirm round runs. The lane is Claude-free
+  and forfeits the independent round. The ledger converges on the codex loop
+  alone, and the sentinel records `none`.
+- `review.confirm_backend: codex`: the confirm round stays on codex. The lane is
+  Claude-free but not independent of the loop, and the sentinel records it as
+  not independent.
+
+**Doctor.** `cw doctor` reports each all-codex lane as
+`all-codex-lane/<client>/<lane>`. `[OK]` in blocking mode. In clean mode with
+REVIEW present and `confirm_backend` unset it is `[WARN]`, naming the `claude`
+binary dependency and the two opt-outs above. An explicit `confirm_backend` gives
+`[OK]` with the resolved confirm note. A clean lane without a REVIEW stage gives
+`[OK]`, since the confirm round does not apply. Every result carries the tracker
+pointer below.
+
+**Tracker MCP.** GitHub is reached through `gh` and needs nothing more. A
+non-GitHub tracker (Linear or another MCP-backed tracker) needs the codex-side
+MCP server installed, enabled, configured and authenticated for the codex
+backend. Declare its server name under `tracker_mcp_gate.servers.codex`. The
+report for it is `tracker-mcp/<client>/<lane>/codex`. Daemon-only tracker writes
+go through the narrow tracker-IO agent turn, described in
+`docs/dispatch-runbook.md` under "Tracker-IO turn (#3057, RFC 0018 A2)".
+
+**Smoke probe.** An opt-in operator probe runs one codex create and resume, and
+the MCP load check, outside default CI. See `docs/codex-live-session-smoke.md`.
 
 ### Recommended Per-Stage Defaults
 

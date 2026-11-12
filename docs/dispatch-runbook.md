@@ -4028,6 +4028,36 @@ reasoning). Whether `pending_operator_comment` and
 `finalize_regress_branch_head` share the same exposure is an open,
 out-of-scope question if this is ever revisited.
 
+**All-codex lane (RFC 0018 D1, #3064).** A lane whose stages all resolve to
+the `codex` backend runs the whole ticket on codex. Setup, in order:
+
+1. Set the lane's `pipeline.executors` for plan, impl, review and finalize to
+   `codex` (`config/CONFIG_REFERENCE.md`, "All-codex lane (RFC 0018 D1, #3064)").
+2. Pick the confirm backend for a clean client. Unset means the independent
+   confirm round is `claude -p`, so the lane needs the `claude` binary on `PATH`
+   and a Claude login. For a Claude-free lane set `review.confirm_backend: none`
+   (forfeits the independent round) or `review.confirm_backend: codex` (stays on
+   codex, not independent). Blocking clients run no confirm round.
+3. For a non-GitHub tracker, install, enable, configure and authenticate the
+   tracker's MCP server for the codex backend, and declare its name under
+   `tracker_mcp_gate.servers.codex`. GitHub uses `gh` and needs nothing more.
+   The daemon-only tracker writes go through the narrow turn in "Tracker-IO
+   turn (#3057, RFC 0018 A2)" above.
+4. Run `cw doctor`. Read the `all-codex-lane/<client>/<lane>` line: `[OK]` in
+   blocking mode; `[WARN]` in clean mode with REVIEW present and
+   `confirm_backend` unset, naming the Claude dependency and the two opt-outs;
+   `[OK]` with a resolved confirm note otherwise. The `tracker-mcp/<client>/<lane>/codex`
+   line reports step 3.
+
+A clean all-codex lane with `confirm_backend` unset and no `claude` binary on
+`PATH` parks the ticket `confirm_backend_unavailable` at the confirm round. The
+park is uncharged and no confirm round runs. Fix the binary or set one of the
+opt-outs above, then requeue. The park does not fail the codex loop itself.
+
+Smoke probe: an opt-in operator run of one codex create and resume lives in
+`docs/codex-live-session-smoke.md`. It never runs in default CI, and it does
+not validate queue or executor integration.
+
 ### Attempt-cap reset (environmental burn)
 
 See also: CANCELLED row recovery (above) — a different terminal condition

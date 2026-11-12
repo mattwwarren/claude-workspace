@@ -51,6 +51,9 @@ re-exports. Submodules:
   (lane vs global default) for lanes with a codex review executor (#2542).
 - ``tracker_mcp`` — per-lane tracker-MCP reachability for opencode and codex
   lanes on a non-GitHub tracker: FAIL when the gate would park the row (#3055).
+- ``all_codex_lane`` — per-lane advisory for lanes whose stages all run on
+  codex: the clean-mode confirm default's ``claude`` dependency, the Claude-free
+  opt-outs and the tracker MCP pointer (RFC 0018 D1, #3064).
 - ``review_convergence`` — per-lane effective ``review.convergence: clean``
   support for clean clients: FAIL for a lane whose REVIEW backend writes no
   convergence ledger (#2797).
@@ -81,6 +84,7 @@ from __future__ import annotations
 
 from cw.doctor._shared import CheckResult, DoctorReport, ReapScope, WedgeFinding
 from cw.doctor.agent_spec_drift import _check_agent_spec_drift
+from cw.doctor.all_codex_lane import _check_all_codex_lane
 from cw.doctor.codex_fix_loop import _check_codex_fix_loop
 from cw.doctor.commit_hook import _check_commit_hook, _check_hook_install_python
 from cw.doctor.config_checks import (
@@ -155,6 +159,7 @@ __all__ = [
     "ReapScope",
     "WedgeFinding",
     "_check_agent_spec_drift",
+    "_check_all_codex_lane",
     "_check_attention_state_census",
     "_check_claude_version",
     "_check_codex_capability",

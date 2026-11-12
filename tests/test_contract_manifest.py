@@ -1061,17 +1061,17 @@ _CLEAN_BODY_REF = CodeRef(
 
 _CODEX_STAGE_TICKETS: dict[str, int] = {}
 #: The C3 ticket (#3062, codex FINALIZE executor); no cell may defer to it once
-#: it lands. Its finalize-stage cells are implemented, fails-closed,
+#: it lands. Its finalize-stage cells are implemented,
 #: not-applicable, or deferred to one of its three follow-ups.
 _C3_TICKET = 3062
 _CODEX_FINALIZE_FOLLOW_UPS = frozenset({3542, 3543, 3544})
 #: The C1 ticket (#3060, codex PLAN executor); no cell may defer to it once it
-#: lands. Its plan-stage cells are implemented, fails-closed, not-applicable,
+#: lands. Its plan-stage cells are implemented, not-applicable,
 #: or deferred to one of its two follow-ups.
 _C1_TICKET = 3060
 _CODEX_PLAN_FOLLOW_UPS = frozenset({3464, 3465})
 #: The C2 ticket (#3061, codex IMPL executor); no cell may defer to it once it
-#: lands. Its impl-stage cells are implemented, fails-closed, not-applicable,
+#: lands. Its impl-stage cells are implemented, not-applicable,
 #: or deferred to one of its three follow-ups.
 _C2_TICKET = 3061
 _CODEX_IMPL_FOLLOW_UPS = frozenset({3529, 3530, 3531})
@@ -1246,7 +1246,7 @@ def test_gate_timeout_sentinel_element() -> None:
     codex = element.cells[CODEX_BACKEND]
     assert isinstance(codex, NotApplicableDisposition)
     assert "ADR-0014" in codex.reason
-    assert isinstance(sibling.cells[CODEX_BACKEND], FailsClosedDisposition)
+    assert isinstance(sibling.cells[CODEX_BACKEND], ImplementedDisposition)
 
 
 def test_element_count_floor() -> None:
@@ -1346,7 +1346,7 @@ def test_local_ticket_citations_follow_the_stage_split() -> None:
 
 def _assert_codex_plan_cell(element_id: str, cell: object) -> int | None:
     """A codex PLAN cell (#3060): a code ref, a reason, or a C1 follow-up."""
-    if isinstance(cell, (ImplementedDisposition, FailsClosedDisposition)):
+    if isinstance(cell, ImplementedDisposition):
         assert isinstance(cell.ref, CodeRef), element_id
         assert cell.ref.path.startswith("src/cw/"), element_id
         return None
@@ -1360,7 +1360,7 @@ def _assert_codex_plan_cell(element_id: str, cell: object) -> int | None:
 
 def _assert_codex_impl_cell(element_id: str, cell: object) -> int | None:
     """A codex IMPL cell (#3061): a code ref, a reason, or a C2 follow-up."""
-    if isinstance(cell, (ImplementedDisposition, FailsClosedDisposition)):
+    if isinstance(cell, ImplementedDisposition):
         assert isinstance(cell.ref, CodeRef), element_id
         assert cell.ref.path.startswith("src/cw/"), element_id
         return None
@@ -1374,7 +1374,7 @@ def _assert_codex_impl_cell(element_id: str, cell: object) -> int | None:
 
 def _assert_codex_finalize_cell(element_id: str, cell: object) -> int | None:
     """A codex FINALIZE cell (#3062): a code ref, a reason, or a C3 follow-up."""
-    if isinstance(cell, (ImplementedDisposition, FailsClosedDisposition)):
+    if isinstance(cell, ImplementedDisposition):
         assert isinstance(cell.ref, CodeRef), element_id
         assert cell.ref.path.startswith("src/cw/codex_finalize/"), element_id
         return None
@@ -1449,7 +1449,7 @@ _C2_CODE_CELLS = {
 @pytest.mark.parametrize("element_id", sorted(_C2_CODE_CELLS))
 def test_codex_impl_code_cells_resolve_to_the_package(element_id: str) -> None:
     cell = _real_cell(element_id, CODEX_BACKEND)
-    assert isinstance(cell, (ImplementedDisposition, FailsClosedDisposition))
+    assert isinstance(cell, ImplementedDisposition)
     filename, symbol = _C2_CODE_CELLS[element_id]
     assert cell.ref == CodeRef(
         kind="code", path=f"src/cw/codex_impl/{filename}", symbol=symbol
@@ -1499,7 +1499,7 @@ def test_codex_usage_accounting_cell_is_implemented_with_a_code_ref() -> None:
     )
 
 
-#: The codex FINALIZE implemented and fails-closed cells that point at a
+#: The codex FINALIZE implemented cells that point at a
 #: ``cw.codex_finalize`` symbol (#3062): element id -> (file, symbol).
 _C3_CODE_CELLS = {
     "finalize.claude-review-verdict-md-if-present-is-this": (
@@ -1551,20 +1551,20 @@ _C3_CODE_CELLS = {
 
 
 def test_codex_finalize_code_cell_table_is_exactly_the_code_cells() -> None:
-    """The 18 implemented and 12 fails-closed codex finalize cells, no others."""
+    """The 30 implemented codex finalize code cells, no others."""
     code_cells = {
         element_id
         for element_id, element in _manifest().elements.items()
         if scope_stage(element_id, CODEX_BACKEND) == "finalize"
         and isinstance(
             element.cells[CODEX_BACKEND],
-            (ImplementedDisposition, FailsClosedDisposition),
+            ImplementedDisposition,
         )
     }
     assert code_cells == set(_C3_CODE_CELLS)
     assert len(_C3_CODE_CELLS) == 30
     implemented = set(elements_with(CODEX_BACKEND, "implemented"))
-    assert len(implemented & set(_C3_CODE_CELLS)) == 18
+    assert len(implemented & set(_C3_CODE_CELLS)) == 30
 
 
 @pytest.mark.parametrize("element_id", sorted(_C3_CODE_CELLS))
@@ -1572,7 +1572,7 @@ def test_codex_finalize_code_cells_resolve_to_the_package(
     element_id: str, tmp_path: Path
 ) -> None:
     cell = _real_cell(element_id, CODEX_BACKEND)
-    assert isinstance(cell, (ImplementedDisposition, FailsClosedDisposition))
+    assert isinstance(cell, ImplementedDisposition)
     filename, symbol = _C3_CODE_CELLS[element_id]
     assert cell.ref == CodeRef(
         kind="code", path=f"src/cw/codex_finalize/{filename}", symbol=symbol
@@ -1610,6 +1610,13 @@ def test_codex_prep_pr_and_ship_it_cells_are_not_applicable() -> None:
     assert "codex_finalize/_gates.py::run_finalize_quality_gates" in gates.reason
 
 
+def test_no_codex_cell_is_fails_closed() -> None:
+    """RFC 0018 D1 (#3064): codex has no stage-level refusal left, so no codex
+    cell is fails-closed. Every former fails-closed codex cell is implemented
+    with the cw-run gate that carries it."""
+    assert elements_with(CODEX_BACKEND, "fails-closed") == ()
+
+
 def test_codex_finalize_cell_counts() -> None:
     counts: dict[str, int] = {}
     for element_id, element in _manifest().elements.items():
@@ -1617,8 +1624,7 @@ def test_codex_finalize_cell_counts() -> None:
             cell = element.cells[CODEX_BACKEND]
             counts[cell.disposition] = counts.get(cell.disposition, 0) + 1
     assert counts == {
-        "implemented": 18,
-        "fails-closed": 12,
+        "implemented": 30,
         "not-applicable": 32,
         "deferred": 24,
     }
