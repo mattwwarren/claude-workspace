@@ -1059,12 +1059,17 @@ _CLEAN_BODY_REF = CodeRef(
     kind="code", path="src/cw/opencode_clean_review.py", symbol="clean_review_body"
 )
 
-_CODEX_STAGE_TICKETS = {"impl": 3061, "finalize": 3062}
+_CODEX_STAGE_TICKETS = {"finalize": 3062}
 #: The C1 ticket (#3060, codex PLAN executor); no cell may defer to it once it
 #: lands. Its plan-stage cells are implemented, fails-closed, not-applicable,
 #: or deferred to one of its two follow-ups.
 _C1_TICKET = 3060
 _CODEX_PLAN_FOLLOW_UPS = frozenset({3464, 3465})
+#: The C2 ticket (#3061, codex IMPL executor); no cell may defer to it once it
+#: lands. Its impl-stage cells are implemented, fails-closed, not-applicable,
+#: or deferred to one of its three follow-ups.
+_C2_TICKET = 3061
+_CODEX_IMPL_FOLLOW_UPS = frozenset({3529, 3530, 3531})
 # #3055 closed with RFC 0018 S3: its codex review cells moved to #3057 (A2).
 _CODEX_REVIEW_TICKETS = frozenset({3318, 2464, 3063, 3057})
 #: The S3 ticket; no cell may defer to it once it lands (#3055).
@@ -1338,9 +1343,24 @@ def _assert_codex_plan_cell(element_id: str, cell: object) -> int | None:
     return cell.ref.number
 
 
+def _assert_codex_impl_cell(element_id: str, cell: object) -> int | None:
+    """A codex IMPL cell (#3061): a code ref, a reason, or a C2 follow-up."""
+    if isinstance(cell, (ImplementedDisposition, FailsClosedDisposition)):
+        assert isinstance(cell.ref, CodeRef), element_id
+        assert cell.ref.path.startswith("src/cw/"), element_id
+        return None
+    if isinstance(cell, NotApplicableDisposition):
+        assert cell.reason.strip(), element_id
+        return None
+    assert isinstance(cell, DeferredDisposition), element_id
+    assert cell.ref.number in _CODEX_IMPL_FOLLOW_UPS, element_id
+    return cell.ref.number
+
+
 def test_codex_cells_follow_the_stage_ticket_map() -> None:
     used: set[int] = set()
     plan_follow_ups: set[int] = set()
+    impl_follow_ups: set[int] = set()
     for element_id, element in _manifest().elements.items():
         if element_id == "review.review-debt-filing":
             continue
@@ -1351,6 +1371,10 @@ def test_codex_cells_follow_the_stage_ticket_map() -> None:
             follow_up = _assert_codex_plan_cell(element_id, cell)
             if follow_up is not None:
                 plan_follow_ups.add(follow_up)
+        elif stage == "impl":
+            follow_up = _assert_codex_impl_cell(element_id, cell)
+            if follow_up is not None:
+                impl_follow_ups.add(follow_up)
         elif stage in _CODEX_STAGE_TICKETS:
             assert isinstance(cell, DeferredDisposition), element_id
             assert cell.ref.number == _CODEX_STAGE_TICKETS[stage], element_id
@@ -1362,6 +1386,59 @@ def test_codex_cells_follow_the_stage_ticket_map() -> None:
             assert cell.ref.number in _CODEX_REVIEW_TICKETS, element_id
     assert used == set(_CODEX_STAGE_TICKETS.values())
     assert plan_follow_ups == _CODEX_PLAN_FOLLOW_UPS
+    assert impl_follow_ups == _CODEX_IMPL_FOLLOW_UPS
+
+
+#: The codex IMPL cells that point at a ``cw.codex_impl`` symbol (#3061).
+_C2_CODE_CELLS = {
+    "impl.review-feedback-guard": ("_feedback.py", "verify_review_feedback"),
+    "impl.repair-entry-no-plan": ("_gates.py", "run_scope_conformance"),
+    "impl.repair-entry-with-plan": ("_prompt.py", "render_impl_prompt"),
+    "impl.stage-2-completion": ("_result.py", "stamp_impl_result"),
+    "impl.marker-s2-completion": ("_result.py", "impl_commit_message"),
+    "impl.emit-through-cw-then-frame": ("_result.py", "parse_impl_turn"),
+    "impl.guard-script-path-resolution-and-staleness": (
+        "_gates.py",
+        "run_scope_conformance",
+    ),
+    "impl.gate-orchestrator-completion": ("_gates.py", "run_quality_gates"),
+    "impl.file-set-is-within-plan-s": ("_gates.py", "run_scope_conformance"),
+    "impl.gate-1-why-empty-diff-check": ("_gates.py", "check_empty_diff"),
+    "orch.post-impl-scope-conformance-threshold": (
+        "_gates.py",
+        "run_scope_conformance",
+    ),
+}
+
+
+@pytest.mark.parametrize("element_id", sorted(_C2_CODE_CELLS))
+def test_codex_impl_code_cells_resolve_to_the_package(element_id: str) -> None:
+    cell = _real_cell(element_id, CODEX_BACKEND)
+    assert isinstance(cell, (ImplementedDisposition, FailsClosedDisposition))
+    filename, symbol = _C2_CODE_CELLS[element_id]
+    assert cell.ref == CodeRef(
+        kind="code", path=f"src/cw/codex_impl/{filename}", symbol=symbol
+    )
+
+
+_C2_CW_RUN_GATES = (
+    "impl.dispatch-detection",
+    "impl.worktree-isolation-guard",
+    "impl.absent-owner-record",
+    "impl.implementation-failure-escalation",
+)
+
+
+@pytest.mark.parametrize("element_id", _C2_CW_RUN_GATES)
+def test_codex_impl_cw_run_ranged_blocks_are_not_applicable(element_id: str) -> None:
+    assert isinstance(_real_cell(element_id, CODEX_BACKEND), NotApplicableDisposition)
+
+
+def test_no_cell_defers_to_the_landed_c2_ticket() -> None:
+    for element_id, element in _manifest().elements.items():
+        for backend, cell in element.cells.items():
+            if isinstance(cell, DeferredDisposition):
+                assert cell.ref.number != _C2_TICKET, (element_id, backend)
 
 
 def test_no_cell_defers_to_the_landed_c1_ticket() -> None:

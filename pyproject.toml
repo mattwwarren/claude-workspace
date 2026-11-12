@@ -72,11 +72,12 @@ build-backend = "hatchling.build"
 packages = ["src/cw"]
 
 [tool.hatch.build.targets.wheel.force-include]
-# The codex PLAN executor (#3060) renders its prompt from cw's own copy of the
-# plan command doc, read at run time as package data (cw/data/commands). The
+# The codex PLAN (#3060) and IMPL (#3061) executors render their prompts from
+# cw's own copy of the plan and impl command docs, read at run time as package data (cw/data/commands). The
 # source is outside src/cw, so it is not the second-file clash warned about
 # above: nothing under packages already lands at this wheel path.
 ".claude/commands/auto-dev-plan.md" = "cw/data/commands/auto-dev-plan.md"
+".claude/commands/auto-dev-impl.md" = "cw/data/commands/auto-dev-impl.md"
 
 [tool.cw.changelog_freeze]
 # Released CHANGELOG sections are frozen for this tag and every later one;
@@ -337,10 +338,13 @@ ignore = [
 # This is a real cycle, not a pure queue-row helper: the dispatch routing engine
 # imports cw.executor (routing/stage_walk.py), cw.executor imports cw.reconcile at
 # module top (executor/core.py), and cw.dispatch's package __init__ imports
-# cw.reconcile (claim/screening.py). Hoisting needs a registration seam or a move
-# of the ~1,800-line routing engine, neither of which is a pure move; the
-# dependency inversion is tracked in #2619. Inline import at function level is the
-# sanctioned mechanism, not a workaround (#698).
+# cw.reconcile (claim/screening.py). It is also a deliberate performance
+# optimization: the function-level import keeps the routing engine and its
+# cw.executor import chain off the Stop-hook and session hot paths. The inversion
+# that would remove it needs a registration layer plus a ~55 ms per-turn import
+# (measured 52-57 ms on every Stop-hook invocation, which fires on every worker
+# turn), which adds complexity for a lint-only gain (see the closed #2619). Inline
+# import at function level is the sanctioned mechanism, not a workaround (#698).
 "src/cw/reconcile/_shared/_routing.py" = ["PLC0415"]
 "src/cw/reconcile/_shared/_sentinels.py" = ["PLC0415"]
 # codex_background defers cw.dispatch.claim's _find_running_row inside

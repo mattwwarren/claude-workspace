@@ -303,7 +303,10 @@ captured in [ADR-0004](adr/0004-stage-events-on-orchestrator-bus.md).
 `.claude/cw-context.json` by `cw event record` (#2651); a producer's own value
 is replaced on disagreement. The codex PLAN executor (#3060) records
 `s1_plan_generated` (`prev_stage: s0_intake`) and `s1_plan_reviewed` (`prev_stage:
-s1_plan_generated`) itself from the driver, with `correlation_id` the ticket.
+s1_plan_generated`) itself from the driver, with `correlation_id` the ticket. The
+codex IMPL executor (#3061) records `s2_impl_started` (`prev_stage:
+s1_plan_reviewed`) immediately before its turn and `s2_impl_complete`
+(`prev_stage: s2_impl_started`) only after cw's commit and verified push.
 
 ### `stage.errored`
 
@@ -324,7 +327,11 @@ worker may recover and continue. Visible in `cw event tail` and
 `error_kind` is an open enum — consumers MUST tolerate unknown values. The
 codex PLAN executor (#3060) records one per blocked result it builds, with
 `error_kind` the `blocker.reason` and `stage` `s1_plan_generated` or
-`s1_plan_reviewed`; its unexpected-error path records none.
+`s1_plan_reviewed`; its unexpected-error path records none. The codex IMPL executor
+(#3061) records one per blocked or empty-diff result it builds or passes through,
+with `error_kind` the `blocker.reason` (an existing reason, for example
+`impl_failed`, `plan_missing`, `plan_scope_drift`, `empty_diff_no_commits`,
+`impl_not_pushed`, `codex_fix_hook_failed`) and `stage` always `s2_impl_started`.
 
 ### `dispatch.tick`
 

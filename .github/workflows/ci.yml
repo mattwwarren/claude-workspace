@@ -174,6 +174,10 @@ jobs:
       - name: Smoke test - plan command doc packaged
         run: unzip -l dist/*.whl | grep -q 'cw/data/commands/auto-dev-plan.md'
 
+      # The codex IMPL executor (#3061) reads the impl command doc the same way.
+      - name: Smoke test - impl command doc packaged
+        run: unzip -l dist/*.whl | grep -q 'cw/data/commands/auto-dev-impl.md'
+
       - name: Install wheel into clean env
         run: uv tool install --no-cache dist/*.whl
 

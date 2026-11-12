@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import subprocess
 import sys
 import tomllib
@@ -161,12 +162,14 @@ _COLD_IMPORT_FIRST = (
 
 
 # The two retained routing-engine deferrals. Their shared pyproject comment
-# must cite the dependency-inversion follow-up that would let them go.
+# must state why they stay: a deliberate performance optimization, not a
+# pending follow-up.
 _ROUTING_ENGINE_KEYS = (
     "src/cw/reconcile/_shared/_routing.py",
     "src/cw/reconcile/_shared/_sentinels.py",
 )
-_ROUTING_FOLLOW_UP = "#2619"
+_ROUTING_RATIONALE = "deliberate performance optimization"
+_STALE_FOLLOW_UP = re.compile(r"tracked\s+in\s+#2619")
 
 
 def _pyproject_comment_above(key: str) -> str:
@@ -286,9 +289,14 @@ def test_only_routing_engine_dispatch_deferrals_remain() -> None:
 
 
 @pytest.mark.parametrize("key", _ROUTING_ENGINE_KEYS)
-def test_routing_engine_ignore_cites_follow_up(key: str) -> None:
-    """The routing-engine PLC0415 comment cites the #2619 follow-up."""
-    assert _ROUTING_FOLLOW_UP in _pyproject_comment_above(key)
+def test_routing_engine_ignore_states_performance_rationale(key: str) -> None:
+    """The routing-engine PLC0415 comment says the deferral is intentional."""
+    comment = " ".join(
+        line.removeprefix("#").strip()
+        for line in _pyproject_comment_above(key).splitlines()
+    )
+    assert _ROUTING_RATIONALE in " ".join(comment.split())
+    assert not _STALE_FOLLOW_UP.search(comment)
 
 
 @pytest.mark.parametrize("module", _COLD_IMPORT_FIRST)

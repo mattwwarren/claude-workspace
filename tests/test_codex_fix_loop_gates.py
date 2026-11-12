@@ -41,6 +41,7 @@ from cw.codex_review import CODEX_FIX_GATE_FAILED
 from cw.codex_runner import CodexRunResult
 from cw.models.enums import OrchestratorEventType
 from tests._codex_review_helpers import (
+    PrepPrStateStub,
     _drive_loop,
     _FakeRunner,
     assert_clean_after_refusal,
@@ -70,31 +71,6 @@ _AUTOFIXED_FRICTION = "codex_fix_gate_autofixed"
 _FMT_CHECK = "grep -q '^x = 1$' tracked.py"
 _FMT_FIX = "printf 'x = 1\\n' > tracked.py"
 _TRACKED_TOUCHED = frozenset({"tracked.py"})
-_STUB_TEMPLATE = '''\
-"""prep_pr_state stub: understands gate-timeout."""
-import json
-import sys
-import time
-
-SIDE = __SIDE__
-CALLS = __CALLS__
-cfg = json.load(open(SIDE))
-with open(CALLS, "a") as handle:
-    handle.write(" ".join(sys.argv[1:]) + "\\n")
-if sys.argv[1] == "detect-gates":
-    time.sleep(cfg["detect_delay"])
-    raw = cfg["detect_raw"]
-    print(raw if raw is not None else json.dumps(
-        {"gates": cfg["gates"], "detected_from": []}))
-    sys.exit(cfg["detect_exit"])
-if sys.argv[1] == "gate-timeout":
-    time.sleep(cfg["ceiling_delay"])
-    raw = cfg["ceiling_raw"]
-    print(raw if raw is not None else json.dumps(
-        {"gate": sys.argv[2], "foreground_ceiling_s": cfg["ceilings"][sys.argv[2]]}))
-    sys.exit(cfg["ceiling_exit"])
-sys.exit(2)
-'''
 
 
 @pytest.fixture(autouse=True)
@@ -124,49 +100,9 @@ def repo(make_git_repo: Callable[..., Path]) -> Path:
     return path
 
 
-class _Stub:
-    """A fake ``prep_pr_state.py`` plus the call log it appends to."""
-
-    def __init__(self, scripts_dir: Path, state: Path) -> None:
-        self.script = scripts_dir / "prep_pr_state.py"
-        self.calls_path = state / "calls.log"
-        self.side = state / "stub.json"
-        self.config: dict[str, object] = {
-            "gates": [],
-            "ceilings": {},
-            "detect_delay": 0,
-            "ceiling_delay": 0,
-            "detect_raw": None,
-            "detect_exit": 0,
-            "ceiling_raw": None,
-            "ceiling_exit": 0,
-        }
-        scripts_dir.mkdir(parents=True, exist_ok=True)
-        text = _STUB_TEMPLATE.replace("__SIDE__", repr(str(self.side))).replace(
-            "__CALLS__", repr(str(self.calls_path))
-        )
-        self.script.write_text(text, encoding="utf-8")
-        self.set()
-
-    def set(self, **overrides: object) -> None:
-        self.config.update(overrides)
-        self.side.write_text(json.dumps(self.config), encoding="utf-8")
-
-    def gates(self, *entries: tuple[str, str, float]) -> None:
-        self.set(
-            gates=[{"name": n, "command": c} for n, c, _ in entries],
-            ceilings={n: ceiling for n, _, ceiling in entries},
-        )
-
-    def calls(self) -> list[str]:
-        if not self.calls_path.exists():
-            return []
-        return self.calls_path.read_text(encoding="utf-8").splitlines()
-
-
 @pytest.fixture
-def home_stub(state: Path) -> _Stub:
-    return _Stub(Path.home() / ".claude" / "scripts", state)
+def home_stub(state: Path) -> PrepPrStateStub:
+    return PrepPrStateStub(Path.home() / ".claude" / "scripts", state)
 
 
 def _log_cmd(log: Path, name: str, body: str = "") -> str:
@@ -218,9 +154,9 @@ def _fmt_plan(*later: PlannedGate) -> GatePlan:
 
 class TestResolver:
     def test_probe_order_first_hit_wins(self, repo: Path, state: Path) -> None:
-        home = _Stub(Path.home() / ".claude" / "scripts", state)
-        scripts = _Stub(repo / "scripts", state)
-        claude = _Stub(repo / ".claude" / "scripts", state)
+        home = PrepPrStateStub(Path.home() / ".claude" / "scripts", state)
+        scripts = PrepPrStateStub(repo / "scripts", state)
+        claude = PrepPrStateStub(repo / ".claude" / "scripts", state)
 
         assert resolve_prep_pr_state(repo) == claude.script
         claude.script.unlink()
@@ -232,7 +168,7 @@ class TestResolver:
         stale = repo / ".claude" / "scripts" / "prep_pr_state.py"
         stale.parent.mkdir(parents=True)
         stale.write_text("print('no timeout subcommand')\n", encoding="utf-8")
-        _Stub(Path.home() / ".claude" / "scripts", state)
+        PrepPrStateStub(Path.home() / ".claude" / "scripts", state)
 
         with pytest.raises(GateUnavailableError, match="STALE"):
             resolve_prep_pr_state(repo)
@@ -269,7 +205,7 @@ class TestResolver:
 
 class TestPlanner:
     def test_happy_path_pins_gates_and_ceilings(
-        self, repo: Path, home_stub: _Stub
+        self, repo: Path, home_stub: PrepPrStateStub
     ) -> None:
         home_stub.gates(("lint", "ruff check .", 30), ("test", "pytest", 120.5))
 
@@ -291,7 +227,11 @@ class TestPlanner:
             frozen.script = None
 
     def test_detector_and_ceiling_launches_run_without_the_worker_scratch_vars(
-        self, repo: Path, state: Path, home_stub: _Stub, monkeypatch: pytest.MonkeyPatch
+        self,
+        repo: Path,
+        state: Path,
+        home_stub: PrepPrStateStub,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         scratch = state / "scratch"
         scratch.mkdir()
@@ -315,7 +255,7 @@ class TestPlanner:
             assert not [n for n in gates._WORKER_SCRATCH_VARS if n in env]
 
     def test_zero_gates_is_a_plan_not_unavailable(
-        self, repo: Path, home_stub: _Stub
+        self, repo: Path, home_stub: PrepPrStateStub
     ) -> None:
         plan = plan_cycle_gates(repo, _SCOPE)
 
@@ -338,7 +278,7 @@ class TestPlanner:
     def test_detector_failures_are_unavailable(
         self,
         repo: Path,
-        home_stub: _Stub,
+        home_stub: PrepPrStateStub,
         caplog: pytest.LogCaptureFixture,
         overrides: dict[str, object],
         needle: str,
@@ -368,7 +308,7 @@ class TestPlanner:
         ],
     )
     def test_bad_ceiling_is_unavailable(
-        self, repo: Path, home_stub: _Stub, raw: str
+        self, repo: Path, home_stub: PrepPrStateStub, raw: str
     ) -> None:
         home_stub.gates(("lint", "true", 1))
         home_stub.set(ceiling_raw=raw)
@@ -376,7 +316,7 @@ class TestPlanner:
         assert plan_cycle_gates(repo, _SCOPE).why_unavailable is not None
 
     def test_ceiling_lookup_failure_is_unavailable(
-        self, repo: Path, home_stub: _Stub
+        self, repo: Path, home_stub: PrepPrStateStub
     ) -> None:
         home_stub.gates(("lint", "true", 1))
         home_stub.set(ceiling_exit=1)
@@ -384,7 +324,7 @@ class TestPlanner:
         assert plan_cycle_gates(repo, _SCOPE).why_unavailable is not None
 
     def test_popen_oserror_is_unavailable(
-        self, repo: Path, home_stub: _Stub, monkeypatch: pytest.MonkeyPatch
+        self, repo: Path, home_stub: PrepPrStateStub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         def _boom(*_a: object, **_k: object) -> None:
             msg = "no exec"
@@ -398,7 +338,7 @@ class TestPlanner:
         assert "no exec" in plan.why_unavailable
 
     def test_detect_gates_autofix_is_carried_on_the_planned_gate(
-        self, repo: Path, home_stub: _Stub
+        self, repo: Path, home_stub: PrepPrStateStub
     ) -> None:
         home_stub.set(
             gates=[
@@ -424,7 +364,7 @@ class TestPlanner:
 
     @pytest.mark.parametrize("bad", [7, "", "   ", ["a"], {"a": 1}, True])
     def test_malformed_detect_gates_autofix_is_none_not_unavailable(
-        self, repo: Path, home_stub: _Stub, bad: object
+        self, repo: Path, home_stub: PrepPrStateStub, bad: object
     ) -> None:
         home_stub.set(
             gates=[{"name": "fmt", "command": "true", "autofix": bad}],
@@ -437,7 +377,7 @@ class TestPlanner:
         assert plan.gates == (PlannedGate("fmt", "true", 5),)
 
     def test_config_declared_autofix_fills_a_gate_that_has_none(
-        self, repo: Path, home_stub: _Stub
+        self, repo: Path, home_stub: PrepPrStateStub
     ) -> None:
         _write_project_config(repo, "quality_gates:\n  autofix:\n    fmt: fix-it\n")
         home_stub.gates(("fmt", "true", 5), ("lint", "true", 5))
@@ -447,7 +387,7 @@ class TestPlanner:
         assert [g.autofix for g in plan.gates] == ["fix-it", None]
 
     def test_detect_gates_autofix_wins_over_the_config(
-        self, repo: Path, home_stub: _Stub
+        self, repo: Path, home_stub: PrepPrStateStub
     ) -> None:
         _write_project_config(
             repo, "quality_gates:\n  autofix:\n    fmt: from-config\n"
@@ -462,7 +402,7 @@ class TestPlanner:
         assert plan.gates[0].autofix == "from-detect"
 
     def test_config_key_naming_no_detected_gate_is_ignored(
-        self, repo: Path, home_stub: _Stub
+        self, repo: Path, home_stub: PrepPrStateStub
     ) -> None:
         _write_project_config(repo, "quality_gates:\n  autofix:\n    ghost: boo\n")
         home_stub.gates(("fmt", "true", 5))
@@ -472,7 +412,7 @@ class TestPlanner:
         assert plan.gates == (PlannedGate("fmt", "true", 5),)
 
     def test_non_utf8_project_config_gives_no_autofix_not_unavailable(
-        self, repo: Path, home_stub: _Stub, caplog: pytest.LogCaptureFixture
+        self, repo: Path, home_stub: PrepPrStateStub, caplog: pytest.LogCaptureFixture
     ) -> None:
         config = repo / ".claude" / "project-config.yaml"
         config.parent.mkdir(parents=True, exist_ok=True)
@@ -803,7 +743,7 @@ class TestSlowGate:
     def test_slow_detector_and_ceiling_lookup_signal(
         self,
         repo: Path,
-        home_stub: _Stub,
+        home_stub: PrepPrStateStub,
         slow_events: list[tuple],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1276,7 +1216,7 @@ class TestWiring:
         self,
         monkeypatch: pytest.MonkeyPatch,
         loop_repo: Path,
-        home_stub: _Stub,
+        home_stub: PrepPrStateStub,
         state: Path,
         real_gates: None,
     ) -> None:
@@ -1304,7 +1244,7 @@ class TestWiring:
         self,
         monkeypatch: pytest.MonkeyPatch,
         loop_repo: Path,
-        home_stub: _Stub,
+        home_stub: PrepPrStateStub,
         real_gates: None,
     ) -> None:
         start = git_in(loop_repo, "rev-parse", "HEAD")
@@ -1328,7 +1268,7 @@ class TestWiring:
         self,
         monkeypatch: pytest.MonkeyPatch,
         loop_repo: Path,
-        home_stub: _Stub,
+        home_stub: PrepPrStateStub,
         real_gates: None,
     ) -> None:
         start = git_in(loop_repo, "rev-parse", "HEAD")
@@ -1395,7 +1335,7 @@ class TestWiring:
         self,
         monkeypatch: pytest.MonkeyPatch,
         loop_repo: Path,
-        home_stub: _Stub,
+        home_stub: PrepPrStateStub,
         real_gates: None,
     ) -> None:
         tokens: list[str] = []
@@ -1408,7 +1348,7 @@ class TestWiring:
         self,
         monkeypatch: pytest.MonkeyPatch,
         loop_repo: Path,
-        home_stub: _Stub,
+        home_stub: PrepPrStateStub,
         real_gates: None,
     ) -> None:
         start = git_in(loop_repo, "rev-parse", "HEAD")
@@ -1437,7 +1377,7 @@ class TestWiring:
         self,
         monkeypatch: pytest.MonkeyPatch,
         loop_repo: Path,
-        home_stub: _Stub,
+        home_stub: PrepPrStateStub,
         real_gates: None,
     ) -> None:
         start = git_in(loop_repo, "rev-parse", "HEAD")
@@ -1466,7 +1406,7 @@ class TestWiring:
         self,
         monkeypatch: pytest.MonkeyPatch,
         loop_repo: Path,
-        home_stub: _Stub,
+        home_stub: PrepPrStateStub,
         real_gates: None,
     ) -> None:
         start = git_in(loop_repo, "rev-parse", "HEAD")
@@ -1531,7 +1471,7 @@ class TestCycleStartPin:
         real_gates: None,
     ) -> None:
         sentinel = state / "sentinel"
-        stub = _Stub(loop_repo / ".claude" / "scripts", state)
+        stub = PrepPrStateStub(loop_repo / ".claude" / "scripts", state)
         (loop_repo / "CLAUDE.md").write_text("# gates\n- pytest\n", encoding="utf-8")
         git_in(loop_repo, "add", "-A")
         git_in(loop_repo, "commit", "-m", "add detector and CLAUDE.md")

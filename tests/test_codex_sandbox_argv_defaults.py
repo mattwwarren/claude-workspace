@@ -26,6 +26,7 @@ import pytest
 
 import cw
 from cw.codex_fix_loop.commit import _build_fix_codex_argv
+from cw.codex_impl._argv import build_impl_argv
 from cw.codex_plan._argv import build_plan_argv
 from cw.codex_review._capability import (
     _PROBE_ARGV,
@@ -52,10 +53,17 @@ _LAUNCH_SITES = frozenset(
         "codex_fix_loop/commit.py",
         "tracker_io/_argv.py",
         "codex_plan/_argv.py",
+        "codex_impl/_argv.py",
     }
 )
 _MODE_LITERALS = frozenset({"read-only", "workspace-write", "danger-full-access"})
-_MODE_SCOPED_PACKAGES = ("codex_review", "codex_fix_loop", "tracker_io", "codex_plan")
+_MODE_SCOPED_PACKAGES = (
+    "codex_review",
+    "codex_fix_loop",
+    "tracker_io",
+    "codex_plan",
+    "codex_impl",
+)
 _OVERRIDE = ["-c", "approval_policy=never"]
 _LEGAL_MODES = (SandboxMode.READ_ONLY, SandboxMode.WORKSPACE_WRITE)
 
@@ -145,6 +153,24 @@ _PLAN_LITERAL = [
     "-m",
     "m",
 ]
+_IMPL_LITERAL = [
+    "codex",
+    "exec",
+    "--sandbox",
+    "workspace-write",
+    "-c",
+    "approval_policy=never",
+    "--json",
+    "--ephemeral",
+    "-c",
+    "model_reasoning_effort=high",
+    "--output-schema",
+    str(_S),
+    "-o",
+    str(_O),
+    "-m",
+    "m",
+]
 _PROBE_LITERAL = [
     "codex",
     "exec",
@@ -154,6 +180,17 @@ _PROBE_LITERAL = [
     "approval_policy=never",
     "--skip-git-repo-check",
 ]
+
+
+def _impl_argv(mode: SandboxMode) -> list[str]:
+    return build_impl_argv(
+        schema_path=_S,
+        output_path=_O,
+        model="m",
+        reasoning_effort="high",
+        sandbox_mode=mode,
+        other_servers=(),
+    )
 
 
 def _assert_override_after_sandbox(argv: list[str], mode: str) -> None:
@@ -205,8 +242,12 @@ class TestDefaultArgvLiterals:
         )
         assert argv == _PLAN_LITERAL
 
+    def test_impl_default_argv(self) -> None:
+        assert _impl_argv(StageExecutorConfig().fix_sandbox_mode) == _IMPL_LITERAL
+
     def test_config_default_modes_build_the_same_literals(self) -> None:
         cfg = StageExecutorConfig()
+        assert _impl_argv(cfg.fix_sandbox_mode) == _IMPL_LITERAL
         assert _reviewer_argv(cfg.reviewer_sandbox_mode) == _REVIEWER_LITERAL
         assert _fix_argv(cfg.fix_sandbox_mode) == _FIX_LITERAL
         assert _build_probe_argv(cfg.reviewer_sandbox_mode) == _PROBE_LITERAL
@@ -281,6 +322,11 @@ class TestEveryLaunchSiteCarriesTheOverride:
             other_servers=(),
         )
         _assert_override_after_sandbox(argv, "read-only")
+
+    @pytest.mark.parametrize("mode", _LEGAL_MODES, ids=str)
+    def test_impl_launch(self, mode: SandboxMode) -> None:
+        # The IMPL turn takes the lane's resolved fix_sandbox_mode from the seam.
+        _assert_override_after_sandbox(_impl_argv(mode), mode.value)
 
     def test_fix_launch(self, make_git_repo: Callable[..., Path]) -> None:
         # fix_sandbox_mode has one legal config value, so only it is driven.

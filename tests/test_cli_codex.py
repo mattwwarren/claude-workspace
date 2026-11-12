@@ -28,21 +28,26 @@ def test_codex_run_help_documents_both_stages(tmp_config_dir: Path) -> None:
     assert "impl" in result.output
 
 
-def test_codex_run_stage_impl_exits_nonzero_naming_1550(tmp_config_dir: Path) -> None:
-    result = CliRunner().invoke(
-        main,
-        [
-            "codex",
-            "run",
-            "--stage",
-            "impl",
-            "--session-id",
-            "sess-1",
-            "T-1",
-        ],
+def test_codex_run_stage_impl_invokes_driver(tmp_config_dir: Path) -> None:
+    with patch("cw.cli.codex.run_codex_impl_stage") as driver_mock:
+        result = CliRunner().invoke(
+            main,
+            ["codex", "run", "--stage", "impl", "--session-id", "sess-1", "T-1"],
+        )
+
+    assert result.exit_code == 0, result.output
+    driver_mock.assert_called_once_with(
+        ticket_id="T-1",
+        session_id="sess-1",
+        wall_clock_budget_seconds=None,
     )
-    assert result.exit_code != 0
-    assert "#1550" in result.output
+
+
+def test_codex_run_help_no_longer_says_not_implemented(tmp_config_dir: Path) -> None:
+    result = CliRunner().invoke(main, ["codex", "run", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "not implemented" not in result.output.lower()
+    assert "1550" not in result.output
 
 
 def test_codex_run_stage_review_invokes_driver(tmp_config_dir: Path) -> None:

@@ -758,3 +758,146 @@ def seed_codex_stage_run(
     if updates:
         task = task.model_copy(update=updates)
     save_dev_queue(DevQueueStore(tasks=[task]))
+
+
+# --- prep_pr_state stub (hoisted from test_codex_fix_loop_gates, #3061) ---------
+
+_PREP_PR_STATE_STUB_TEMPLATE = '''\
+"""prep_pr_state stub: understands gate-timeout."""
+import json
+import sys
+import time
+
+SIDE = __SIDE__
+CALLS = __CALLS__
+cfg = json.load(open(SIDE))
+with open(CALLS, "a") as handle:
+    handle.write(" ".join(sys.argv[1:]) + "\\n")
+if sys.argv[1] == "detect-gates":
+    time.sleep(cfg["detect_delay"])
+    raw = cfg["detect_raw"]
+    print(raw if raw is not None else json.dumps(
+        {"gates": cfg["gates"], "detected_from": []}))
+    sys.exit(cfg["detect_exit"])
+if sys.argv[1] == "gate-timeout":
+    time.sleep(cfg["ceiling_delay"])
+    raw = cfg["ceiling_raw"]
+    print(raw if raw is not None else json.dumps(
+        {"gate": sys.argv[2], "foreground_ceiling_s": cfg["ceilings"][sys.argv[2]]}))
+    sys.exit(cfg["ceiling_exit"])
+sys.exit(2)
+'''
+
+
+class PrepPrStateStub:
+    """A fake ``prep_pr_state.py`` plus the call log it appends to."""
+
+    def __init__(self, scripts_dir: Path, state: Path) -> None:
+        self.script = scripts_dir / "prep_pr_state.py"
+        self.calls_path = state / "calls.log"
+        self.side = state / "stub.json"
+        self.config: dict[str, object] = {
+            "gates": [],
+            "ceilings": {},
+            "detect_delay": 0,
+            "ceiling_delay": 0,
+            "detect_raw": None,
+            "detect_exit": 0,
+            "ceiling_raw": None,
+            "ceiling_exit": 0,
+        }
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        text = _PREP_PR_STATE_STUB_TEMPLATE.replace(
+            "__SIDE__", repr(str(self.side))
+        ).replace("__CALLS__", repr(str(self.calls_path)))
+        self.script.write_text(text, encoding="utf-8")
+        self.set()
+
+    def set(self, **overrides: object) -> None:
+        self.config.update(overrides)
+        self.side.write_text(json.dumps(self.config), encoding="utf-8")
+
+    def gates(self, *entries: tuple[str, str, float]) -> None:
+        self.set(
+            gates=[{"name": n, "command": c} for n, c, _ in entries],
+            ceilings={n: ceiling for n, _, ceiling in entries},
+        )
+
+    def calls(self) -> list[str]:
+        if not self.calls_path.exists():
+            return []
+        return self.calls_path.read_text(encoding="utf-8").splitlines()
+
+
+def install_home_prep_pr_state(
+    state_dir: Path, *gates: tuple[str, str, float]
+) -> PrepPrStateStub:
+    """Install a ``prep_pr_state.py`` stub under the per-test HOME with *gates*.
+
+    The IMPL executor's quality gates resolve the script repo-local first, then
+    ``~/.claude/scripts``; a worktree-local stub would be an untracked file.
+    """
+    state_dir.mkdir(parents=True, exist_ok=True)
+    stub = PrepPrStateStub(Path.home() / ".claude" / "scripts", state_dir)
+    stub.gates(*gates)
+    return stub
+
+
+def install_home_scope_script(
+    exit_code: int, stdout: str, stderr: str, version: int = 3
+) -> Path:
+    """Write a stub ``check_plan_scope_conformance.py`` under the per-test HOME.
+
+    It ignores its arguments and prints *stdout* / *stderr* then exits with
+    *exit_code*. The ``# cw-script-version: N`` marker is the second line, as in
+    the real script (the first five lines are read).
+    """
+    path = Path.home() / ".claude" / "scripts" / "check_plan_scope_conformance.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "#!/usr/bin/env python3\n"
+        f"# cw-script-version: {version}\n"
+        "import sys\n"
+        f"sys.stdout.write({stdout!r})\n"
+        f"sys.stderr.write({stderr!r})\n"
+        f"sys.exit({exit_code})\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def fresh_impl_repo(
+    make_git_repo: Callable[..., Path], name: str, branch: str
+) -> tuple[Path, Path]:
+    """A fresh-row IMPL worktree on *branch*, pushed to a bare origin.
+
+    Adds no commit beyond ``main``, so ``check_existing_branch_work`` does not
+    fire (``make_git_repo_with_origin`` commits ``feature.py``, which a fresh
+    row would read as prior work). Returns ``(worktree, origin)``.
+    """
+    repo = make_git_repo(name)
+    git_in(repo, "checkout", "-b", branch)
+    origin = add_bare_origin(repo)
+    return repo, origin
+
+
+def seed_codex_impl_run(
+    *,
+    worktree: Path,
+    ticket_id: str,
+    session_id: str,
+    task_updates: Mapping[str, object] | None = None,
+) -> None:
+    """Seed an IMPL session and RUNNING row, and git-exclude ``.cw/``.
+
+    Builds no repo: a fresh row gets its worktree from :func:`fresh_impl_repo`
+    and a repair row from the ``make_git_repo_with_origin`` fixture.
+    """
+    seed_codex_stage_run(
+        worktree=worktree,
+        stage=Stage.IMPL,
+        ticket_id=ticket_id,
+        session_id=session_id,
+        task_updates=task_updates,
+    )
+    exclude_cw_dir(worktree)

@@ -73,7 +73,12 @@ from cw.reconcile.codex_boot import (
     reap_orphaned_codex_sessions_at_boot,
 )
 from cw.spawn import _write_hook_context
-from tests._clients_yaml import review_backend_clients, write_clients_yaml
+from tests._clients_yaml import (
+    ClientSpec,
+    executor_backend_extra,
+    review_backend_clients,
+    write_clients_yaml,
+)
 from tests._codex_recovery_helpers import (
     _STARTED_AT,
     _assert_session_closed,
@@ -326,6 +331,45 @@ def test_clean_orphan_with_fix_loop_off_is_requeued(
     assert payloads[0]["ticket_id"] == "T-orphan"
     assert payloads[0]["client"] == "client-a"
     assert "regressed" not in payloads[0]
+
+
+def test_clean_impl_orphan_on_a_descendant_of_the_baseline_is_requeued(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dead codex IMPL job whose tree is clean and descends from the baseline.
+
+    IMPL is a committing stage (``_COMMITTING_STAGES``): cw's own IMPL commit
+    (#3061) moves HEAD past ``stage_base_ref``, which is not a moved head the way
+    it is for REVIEW, so the clean orphan is requeued at IMPL, not parked.
+    """
+    repo, base = _seed_clean_codex_orphan(tmp_config_dir, tmp_path, make_git_repo)
+    write_clients_yaml(
+        ClientSpec(
+            "client-a",
+            tmp_path / "ws",
+            default_branch="main",
+            extra=executor_backend_extra("impl", "codex"),
+        )
+    )
+    commit_tracked_file(repo, "impl_work.py")
+    assert git_in(repo, "rev-parse", "HEAD") != base
+    store = load_dev_queue()
+    store.tasks[0].stage = Stage.IMPL
+    save_dev_queue(store)
+    _no_codex_process(monkeypatch)
+    _use_auto_reap_policy(monkeypatch)
+
+    assert reap_orphaned_codex_sessions_at_boot() == 1
+
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.PENDING
+    assert task.stage is Stage.IMPL
+    _assert_session_closed()
+    (payload,) = _requeued_events("test-codex-boot-requeued")
+    assert payload["from_stage"] == payload["to_stage"] == Stage.IMPL
 
 
 def _expected_close_audit(

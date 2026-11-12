@@ -63,27 +63,35 @@ class TestCliStageDispatch:
         assert f"'{stage}'" in output
         runner.assert_not_called()
 
-    def test_impl_still_names_ticket_1550(self) -> None:
-        runner = MagicMock()
-        with patch("cw.cli.codex.run_codex_review_stage", runner):
-            exit_code, output = _invoke_run("impl")
-        assert exit_code != 0
-        assert "#1550" in output
-        runner.assert_not_called()
+    def test_impl_reaches_impl_runner(self) -> None:
+        review_runner = MagicMock()
+        impl_runner = MagicMock()
+        with (
+            patch("cw.cli.codex.run_codex_review_stage", review_runner),
+            patch("cw.cli.codex.run_codex_impl_stage", impl_runner),
+        ):
+            exit_code, _ = _invoke_run("impl")
+        assert exit_code == 0
+        impl_runner.assert_called_once_with(
+            ticket_id="T-stage", session_id="sid-x", wall_clock_budget_seconds=None
+        )
+        review_runner.assert_not_called()
 
     def test_runner_map_keys_equal_supported_stages(self) -> None:
         assert set(_stage_runners()) == CODEX_SUPPORTED_STAGES
 
 
 class TestDriverMessages:
-    def test_impl_message_keeps_ticket_reference(self) -> None:
-        assert "#1550" in unsupported_codex_stage_message(Stage.IMPL)
+    def test_impl_is_served_and_names_no_ticket(self) -> None:
+        message = unsupported_codex_stage_message(Stage.IMPL)
+        assert "#1550" not in message
+        assert "supported: plan, impl, review" in message
 
     @pytest.mark.parametrize("stage", [Stage.HARDEN, Stage.FINALIZE])
     def test_other_stages_name_the_supported_ones(self, stage: Stage) -> None:
         message = unsupported_codex_stage_message(stage)
         assert f"'{stage.value}'" in message
-        assert "supported: plan, review" in message
+        assert "supported: plan, impl, review" in message
 
 
 class TestRunnerArgv:

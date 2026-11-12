@@ -23,6 +23,7 @@ from cw.codex_driver import (
     STAGE_IMPL,
     STAGE_PLAN,
     STAGE_REVIEW,
+    run_codex_impl_stage,
     run_codex_plan_stage,
     run_codex_review_stage,
 )
@@ -621,4 +622,40 @@ def test_run_codex_plan_stage_loads_the_plan_row_and_ignores_the_budget(
         "sess_name",
         "model",
         "reasoning_effort",
+    }
+
+
+def test_run_codex_impl_stage_loads_impl_row_with_fix_sandbox_no_budget(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """#3061: the IMPL driver re-derives its run from the IMPL row and session."""
+    worktree = tmp_path / "wt-impl"
+    worktree.mkdir()
+    seed_codex_stage_run(worktree=worktree, stage=Stage.IMPL)
+    runner = FakeCodexRunner()
+    with patch("cw.codex_driver.run_impl_stage_and_complete") as run_impl:
+        run_codex_impl_stage(
+            ticket_id="T-1",
+            session_id="sess-1",
+            wall_clock_budget_seconds=900,
+            runner=runner,
+        )
+    kwargs = run_impl.call_args.kwargs
+    assert kwargs["runner"] is runner
+    assert kwargs["task"].stage is Stage.IMPL
+    assert kwargs["worktree"] == worktree
+    assert kwargs["sid"] == "sess-1"
+    assert kwargs["client"].name == "test"
+    assert kwargs["sandbox_mode"] is StageExecutorConfig().fix_sandbox_mode
+    assert "wall_clock_budget_seconds" not in kwargs
+    assert set(kwargs) == {
+        "runner",
+        "task",
+        "worktree",
+        "client",
+        "sid",
+        "sess_name",
+        "model",
+        "reasoning_effort",
+        "sandbox_mode",
     }
