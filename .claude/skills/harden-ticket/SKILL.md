@@ -125,7 +125,14 @@ magic strings that should be enums/consts; raw dicts that should be typed
 models; network-call error handling + offline/timeout behavior; test
 determinism (freezegun for time windows, the exact monkeypatch/mock seam);
 function signatures + the run-site wiring; None/empty handling for every new
-field; public --json schema shape; idempotency / lock-ordering.
+field; public --json schema shape; idempotency / lock-ordering;
+shared-vs-owner placement per file (owner-specific logic in a shared module);
+sensitive values carried by except/output paths (`str(exc)`, `exc_info`, `%r`
+of external values, exception text into operator-visible output);
+three-state lookups and guards that fail open on "could not determine";
+base-signature changes without the override/caller sweep; full-overwrite write
+endpoints and the fields that must be carried forward; runtime-only
+configuration companions and their publish sequencing.
 
 Confirm the file set and flag any temptation to touch code outside it.
 
@@ -133,6 +140,35 @@ If the ticket names specific call sites, symbols, or touch points, GREP FOR
 THE FULL SET and report any the ticket missed. Report the grep you ran and
 its complete output. A ticket that names 2 of 7 call sites is the single most
 common cause of a plan bouncing on plan_unreviewable.
+
+Mandatory checks. For each, report the command and its output; "not run" is itself a finding.
+- **M1** `wc -l` every module the ticket will grow, plus a rough growth estimate. Flag a projected
+  breach of the repo's module-size ceiling (this repo: ~1000 lines) as a split decision to resolve
+  now (#1392, #1470, #1307).
+- **M2** Before mandating any new helper or fixture, `grep -rn` `tests/` for an existing one by
+  capability keyword (#1389).
+- **M3** Path check: grep every file or symbol path named in the ticket against the current tree,
+  and flag renames and moves from recent refactors (#1462).
+- **M4** Every mechanism or repo-state claim the resolutions assume must cite file:line or grep
+  output; for an absence or presence claim, run a control. An uncited claim is a finding, not a
+  premise (#1444; sibling of the "Theorizing Before Grepping the Mechanism" rule).
+- **Q1** Numeric claims: compare them explicitly and show the comparison; a proposed threshold is
+  checked against every observed value the document cites.
+- **Q2** Causal claims: what other mechanism would produce the same observation, and how was it
+  excluded? "I didn't check" means it is an observation, not a mechanism; write it as one.
+- **Q3** Mutation-proof vacuity: for each mutation bullet in the acceptance criteria, does the seam
+  it probes still exist after the fix? If not, it is vacuous; replace it. An unexpected green on a
+  mutation is investigated and never recorded as a pass (#1618).
+- **Q4** Self-created verification evidence: a step claiming CI execution must cite the run URL
+  and the conclusion from `gh run view`, and the sweep checks the cited step is not `skipped`. An
+  acceptance criterion satisfied by an artifact the worker created outside the specified mechanism
+  is a finding (#1859).
+
+Q1/Q2 apply to the ticket's own prose and to prior resolution and operator-reply text. The
+plan-stage settled marker (`plan-stage-settled`, #1683) closes the asked item by identity only and
+never verifies an asserted claim; `auto-dev-plan-appendix.md` ("No redaction, anywhere (R3)") keeps
+every claim re-scrutinizable. Historical cases, the fixture set of what each check would have
+caught: [`references/sweep-checklist-cases.md`](references/sweep-checklist-cases.md)
 
 Order findings by how likely they are to actually block/mislead the worker.
 If a category is genuinely clean, say so. Only REAL implementation-determining
@@ -204,14 +240,72 @@ A useful tell: if the answer follows directly from the ticket's stated intent
 or an established pattern, resolve it. If choosing wrong would still be a
 *defensible* product/scope choice, ask.
 
+**Mechanical results are triaged, not asked.** The M1-M4 and Q1-Q2 results never go to the
+operator as questions:
+- M1: a projected ceiling breach is a split decision, resolved now with the repo's package-split
+  convention unless it is a real scope fork.
+- M2/M3: write the existing helper and the corrected path directly into the resolution.
+- M4/Q2: an uncited or unexcluded mechanism is a finding, not a premise; rewrite it as an
+  observation, or re-grep, before it enters a resolution.
+- Q1: a failed comparison is a resolution to correct, not a question.
+
+### 2b. Probe runtime-only facts (optional)
+
+**Trigger:** the acceptance criteria depend on the runtime behavior of an external binary or
+service, so no amount of reading code settles them. Run the cheapest live probe in a scratch dir
+(session `$TMPDIR` or `.cw/tmp`, not a bare `/tmp/`) and record the observed facts as ground truth
+for the worker.
+- **Scope guard:** read-only, scratch-only, seconds-to-minutes, only facts the resolutions depend
+  on. This is not a pre-implementation.
+- **Redaction (the comment is permanent):** Probed facts record exit codes and the error class or
+  shape, never raw bodies or headers; redact credentials and identifiers (tokens, account and host
+  names, ids) before posting. Follow the global "Scope-Check Anything Leaving This Machine" rule.
+- **Probe impossible:** say so, and pre-authorize the worker's first-run discovery for exactly
+  those named facts.
+- **Examples (#1238):** R11 malformed-schema enforcement, R12 snap-sandbox `/tmp` blocking, R13
+  exit-code variance in `codex exec`; details in the case reference above.
+
 ### 3. Compose + post the resolution comment
 
 Write one comment titled `## Pre-flight Resolutions (operator)` containing
 **every** resolution — the ones you decided and the ones the operator decided —
 phrased as direct instructions to the implementer. Prefer named constants and
 typed models over magic numbers and raw dicts (say so explicitly; reviewers
-flag these). Restate any scope exclusion verbatim. End with `Proceed.` and the
-marker `<!-- auto-dev-preflight-resolutions -->`.
+flag these). Restate any scope exclusion verbatim. Run the self-critique pass
+below first; only then end with `Proceed.` and the marker
+`<!-- auto-dev-preflight-resolutions -->`. Shape:
+
+```
+## Pre-flight Resolutions (operator)
+1. <resolution, phrased as an instruction to the implementer>
+2. <resolution>
+
+### Probed facts (optional; only when step 2b ran)
+- <fact> — observed: <command, secrets redacted> → <exit code / error class or shape>
+- NOT PROBED (<why>): <fact> — worker first-run discovery pre-authorized for exactly this fact
+
+Proceed.
+<!-- auto-dev-preflight-resolutions -->
+```
+
+**Self-critique pass (before `Proceed.`).** Re-read the drafted resolutions
+once as a reviewer would:
+- **S1 Mechanical.** Literal code the resolutions mandate gets a real
+  `ruff check` (and `mypy` where cheap) on a scratch reconstruction under the
+  target repo's config. This extends the reconstruction discipline in
+  [`references/multi-task-plan-hardening.md`](references/multi-task-plan-hardening.md)
+  from plan code blocks to the resolutions. Example: #1303's mandated
+  `_bus._lock` aliasing violated `SLF001`, which the repo ignores only under
+  `tests/**`.
+- **S2 Doc-conformance.** Check each resolution against ARCHITECTURE.md and the
+  ADRs. A resolution contradicting a codified principle is a defect in the
+  resolution, not a question for the operator. Example: #1457's fallback clause
+  was a second write path outside the single result-publishing door, against
+  ARCHITECTURE.md §7 principle 2 / §8 anti-pattern 2 (the one-door principle).
+- **S3 Critic framing.** One adversarial pass: given these resolutions as
+  written, what NEW blocker do they create downstream?
+
+The pass also runs on a re-harden round's consolidated list.
 
 Author the comment body via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule.
 
