@@ -260,7 +260,11 @@ from cw.models.enums import Stage
 #      RUNNING claim and cleared at spawn success and on every status
 #      transition. ``| None`` with a ``None`` default, so a pre-v58 row loads
 #      with no marker and needs no migration filler.
-DEV_QUEUE_SCHEMA_VERSION = 58
+# v59: added TicketTask.total_tokens (GitHub #3063, RFC 0018 C4) — cumulative
+#      input plus output tokens across the ticket's sessions that recorded
+#      usage. ``| None`` with a ``None`` default, so a pre-v59 row loads with
+#      ``total_tokens`` unset and needs no migration filler.
+DEV_QUEUE_SCHEMA_VERSION = 59
 # Provenance of a v48 review approval: the human `approve` or the gate recipe.
 ReviewApproverKind = Literal["operator", "recipe"]
 DEFAULT_LANE: str = "default"

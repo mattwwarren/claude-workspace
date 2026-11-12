@@ -53,6 +53,7 @@ from cw.codex_review._capability import (
     _reset_filesystem_capability_cache,
 )
 from cw.codex_review._const import (
+    _AUDIT_ARGV_FLAGS,
     _CATEGORY_TO_REASON,
     _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS,
     _CODEX_IMPL_BLOCKED_NEXT_ACTIONS,
@@ -146,7 +147,6 @@ from cw.codex_review._diff import (
     _parse_unified_diff,
 )
 from cw.codex_review._roles import (
-    _AUDIT_ARGV_FLAGS,
     _FLAG_REJECTION_MARKERS,
     _TERMINAL_EVENTS,
     _build_generic_codex_argv,

@@ -78,6 +78,7 @@ from cw.codex_review import (
     _SensitiveHit,
     resolve_review_config_source,
 )
+from cw.codex_review._const import _JSON_FLAG
 from cw.models.enums import DEFAULT_FIX_SANDBOX_MODE, SandboxMode
 
 if TYPE_CHECKING:
@@ -129,6 +130,9 @@ def _build_fix_codex_argv(
         "codex",
         "exec",
         *_exec_policy_argv(sandbox_mode),
+        # JSONL stdout so the turn's token usage can be read (#3063). No
+        # ``--ephemeral``: a fix cycle keeps its rollout under ~/.codex.
+        _JSON_FLAG,
         *_reasoning_effort_argv(reasoning_effort),
     ]
     if model:

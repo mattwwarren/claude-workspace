@@ -99,9 +99,12 @@ from cw.codex_review_signals import record_event_best_effort
 from cw.codex_stage_completion import (
     STAGE_FAULTS,
     complete_session_through_door,
+    flush_late_usage,
     run_guarded_stage,
+    with_usage_friction,
 )
 from cw.codex_stage_facts import resolve_plan_source
+from cw.codex_usage import NO_USAGE, UsageAccumulator
 from cw.contract_manifest import RenderError
 from cw.dev_queue import _PRE_DISPATCH_TRACKER_MCP_REASON
 from cw.gh import edit_pr_body, fetch_pr_view
@@ -165,6 +168,7 @@ class _Run:
     sess_name: str
     model: str | None
     reasoning_effort: str | None
+    usage: UsageAccumulator = NO_USAGE
 
     def emit(
         self,
@@ -618,8 +622,9 @@ def _execute(run: _Run) -> None:
         payload = _finalize(run, scratch)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+    payload = with_usage_friction(payload, run.usage)
     try:
-        complete_session_through_door(run.sid, payload)
+        complete_session_through_door(run.sid, payload, usage=run.usage)
     except STAGE_FAULTS:
         # An armed PR must not be stranded by a transient completion failure;
         # the door is idempotent, so one retry either writes or observes it.
@@ -629,7 +634,7 @@ def _execute(run: _Run) -> None:
             run.task.ticket_id,
             exc_info=True,
         )
-        complete_session_through_door(run.sid, payload)
+        complete_session_through_door(run.sid, payload, usage=run.usage)
     pr = payload.get("pr")
     if payload.get("status") == "shipped" and isinstance(pr, dict):
         post_pr_link_comment(
@@ -641,6 +646,7 @@ def _execute(run: _Run) -> None:
             pr_url=str(pr.get("url")),
             plan_source=str(payload.get("plan_source")),
         )
+    flush_late_usage(run.sid, run.usage)
     record_event_best_effort(
         OrchestratorEventType.SESSION_COMPLETED,
         {
@@ -662,6 +668,7 @@ def run_finalize_stage_and_complete(
     sess_name: str,
     model: str | None,
     reasoning_effort: str | None,
+    usage: UsageAccumulator = NO_USAGE,
 ) -> None:
     """Run the codex FINALIZE stage for *task* and complete session *sid*.
 
@@ -678,6 +685,7 @@ def run_finalize_stage_and_complete(
         sess_name=sess_name,
         model=model,
         reasoning_effort=reasoning_effort,
+        usage=usage,
     )
     run_guarded_stage(
         client_name=client.name,
@@ -686,6 +694,7 @@ def run_finalize_stage_and_complete(
         sid=sid,
         stage_reached=STAGE4A_MERGE_GATE,
         body=lambda: _execute(run),
+        usage=usage,
     )
 
 

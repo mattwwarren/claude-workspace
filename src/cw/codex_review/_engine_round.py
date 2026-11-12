@@ -37,9 +37,11 @@ from cw.codex_review._verdict import (
     synthesize_codex_review_result,
 )
 from cw.codex_review.core import run_prepared_roles
+from cw.codex_runner import relabeled
 from cw.exceptions import CwError
 from cw.models import CODEX_BACKEND
 from cw.models.enums import DEFAULT_REVIEWER_SANDBOX_MODE, SandboxMode
+from cw.models.usage import UsageStage
 from cw.review_convergence import resolve_loop_diff_base
 from cw.review_engine.constants import (
     CAUSE_DEFAULT_BRANCH_UNRESOLVED,
@@ -314,7 +316,7 @@ def _run_aggregation(
 ) -> ValidatedSummary | _Failure:
     """The aggregation turn, then the shared precheck and summary checks."""
     failure: SummaryFailure | None = run_codex_aggregator(
-        runner=inputs.runner,
+        runner=relabeled(inputs.runner, UsageStage.ENGINE_AGGREGATE),
         worktree=inputs.worktree,
         head_sha=loaded.head,
         aggregation_prompt=loaded.manifest.aggregation_prompt,

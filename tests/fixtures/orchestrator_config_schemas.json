@@ -353,6 +353,34 @@
   },
   "StageExecutorConfig": {
    "$defs": {
+    "ModelPrice": {
+     "additionalProperties": false,
+     "description": "Operator-supplied USD-per-million-token prices for one model (#3063, R3).\n\nNo price table ships with cw: prices change and cw cannot know the\noperator's contract. ``cached_input_usd_per_mtok`` prices the cached part\nof the input (a subset of it, not an addition), and reasoning tokens are a\nsubset of output so they have no price of their own.",
+     "properties": {
+      "input_usd_per_mtok": {
+       "minimum": 0,
+       "title": "Input Usd Per Mtok",
+       "type": "number"
+      },
+      "cached_input_usd_per_mtok": {
+       "minimum": 0,
+       "title": "Cached Input Usd Per Mtok",
+       "type": "number"
+      },
+      "output_usd_per_mtok": {
+       "minimum": 0,
+       "title": "Output Usd Per Mtok",
+       "type": "number"
+      }
+     },
+     "required": [
+      "input_usd_per_mtok",
+      "cached_input_usd_per_mtok",
+      "output_usd_per_mtok"
+     ],
+     "title": "ModelPrice",
+     "type": "object"
+    },
     "ReasoningEffort": {
      "description": "Codex ``model_reasoning_effort`` levels a codex stage may pin.\n\nEmitted as ``-c model_reasoning_effort=<value>`` on every codex reviewer\nand fix invocation (see ``StageExecutorConfig.reasoning_effort``). A closed\nset so a typo fails at config load instead of surfacing mid-run as a\ndegraded review role. Not every model supports every level; an\nunsupported one is a codex runtime error, not a config error.",
      "enum": [
@@ -398,6 +426,13 @@
      "default": null,
      "title": "Model"
     },
+    "model_prices": {
+     "additionalProperties": {
+      "$ref": "#/$defs/ModelPrice"
+     },
+     "title": "Model Prices",
+     "type": "object"
+    },
     "endpoint": {
      "anyOf": [
       {
@@ -435,6 +470,34 @@
   },
   "StagePipelineConfig": {
    "$defs": {
+    "ModelPrice": {
+     "additionalProperties": false,
+     "description": "Operator-supplied USD-per-million-token prices for one model (#3063, R3).\n\nNo price table ships with cw: prices change and cw cannot know the\noperator's contract. ``cached_input_usd_per_mtok`` prices the cached part\nof the input (a subset of it, not an addition), and reasoning tokens are a\nsubset of output so they have no price of their own.",
+     "properties": {
+      "input_usd_per_mtok": {
+       "minimum": 0,
+       "title": "Input Usd Per Mtok",
+       "type": "number"
+      },
+      "cached_input_usd_per_mtok": {
+       "minimum": 0,
+       "title": "Cached Input Usd Per Mtok",
+       "type": "number"
+      },
+      "output_usd_per_mtok": {
+       "minimum": 0,
+       "title": "Output Usd Per Mtok",
+       "type": "number"
+      }
+     },
+     "required": [
+      "input_usd_per_mtok",
+      "cached_input_usd_per_mtok",
+      "output_usd_per_mtok"
+     ],
+     "title": "ModelPrice",
+     "type": "object"
+    },
     "ReasoningEffort": {
      "description": "Codex ``model_reasoning_effort`` levels a codex stage may pin.\n\nEmitted as ``-c model_reasoning_effort=<value>`` on every codex reviewer\nand fix invocation (see ``StageExecutorConfig.reasoning_effort``). A closed\nset so a typo fails at config load instead of surfacing mid-run as a\ndegraded review role. Not every model supports every level; an\nunsupported one is a codex runtime error, not a config error.",
      "enum": [
@@ -491,6 +554,13 @@
        ],
        "default": null,
        "title": "Model"
+      },
+      "model_prices": {
+       "additionalProperties": {
+        "$ref": "#/$defs/ModelPrice"
+       },
+       "title": "Model Prices",
+       "type": "object"
       },
       "endpoint": {
        "anyOf": [
@@ -554,6 +624,34 @@
   },
   "LaneConfig": {
    "$defs": {
+    "ModelPrice": {
+     "additionalProperties": false,
+     "description": "Operator-supplied USD-per-million-token prices for one model (#3063, R3).\n\nNo price table ships with cw: prices change and cw cannot know the\noperator's contract. ``cached_input_usd_per_mtok`` prices the cached part\nof the input (a subset of it, not an addition), and reasoning tokens are a\nsubset of output so they have no price of their own.",
+     "properties": {
+      "input_usd_per_mtok": {
+       "minimum": 0,
+       "title": "Input Usd Per Mtok",
+       "type": "number"
+      },
+      "cached_input_usd_per_mtok": {
+       "minimum": 0,
+       "title": "Cached Input Usd Per Mtok",
+       "type": "number"
+      },
+      "output_usd_per_mtok": {
+       "minimum": 0,
+       "title": "Output Usd Per Mtok",
+       "type": "number"
+      }
+     },
+     "required": [
+      "input_usd_per_mtok",
+      "cached_input_usd_per_mtok",
+      "output_usd_per_mtok"
+     ],
+     "title": "ModelPrice",
+     "type": "object"
+    },
     "ReapPolicy": {
      "description": "Policy controlling whether the reconciler destroys a stalled session.\n\nUnder ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,\nleave session/worktree/daemon surface intact.  Cleared by an explicit\noperator command (the orchestrator session counts, ADR-0020).\nUnder ``AUTO``: self-healing \u2014 stop daemon, revert task to PENDING for retry.\nNo reconcile act removes the worktree (ADR-0014).",
      "enum": [
@@ -619,6 +717,13 @@
        ],
        "default": null,
        "title": "Model"
+      },
+      "model_prices": {
+       "additionalProperties": {
+        "$ref": "#/$defs/ModelPrice"
+       },
+       "title": "Model Prices",
+       "type": "object"
       },
       "endpoint": {
        "anyOf": [
@@ -2126,6 +2231,34 @@
      "title": "MechanicalConflictRepairConfig",
      "type": "object"
     },
+    "ModelPrice": {
+     "additionalProperties": false,
+     "description": "Operator-supplied USD-per-million-token prices for one model (#3063, R3).\n\nNo price table ships with cw: prices change and cw cannot know the\noperator's contract. ``cached_input_usd_per_mtok`` prices the cached part\nof the input (a subset of it, not an addition), and reasoning tokens are a\nsubset of output so they have no price of their own.",
+     "properties": {
+      "input_usd_per_mtok": {
+       "minimum": 0,
+       "title": "Input Usd Per Mtok",
+       "type": "number"
+      },
+      "cached_input_usd_per_mtok": {
+       "minimum": 0,
+       "title": "Cached Input Usd Per Mtok",
+       "type": "number"
+      },
+      "output_usd_per_mtok": {
+       "minimum": 0,
+       "title": "Output Usd Per Mtok",
+       "type": "number"
+      }
+     },
+     "required": [
+      "input_usd_per_mtok",
+      "cached_input_usd_per_mtok",
+      "output_usd_per_mtok"
+     ],
+     "title": "ModelPrice",
+     "type": "object"
+    },
     "ReapPolicy": {
      "description": "Policy controlling whether the reconciler destroys a stalled session.\n\nUnder ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,\nleave session/worktree/daemon surface intact.  Cleared by an explicit\noperator command (the orchestrator session counts, ADR-0020).\nUnder ``AUTO``: self-healing \u2014 stop daemon, revert task to PENDING for retry.\nNo reconcile act removes the worktree (ADR-0014).",
      "enum": [
@@ -2373,6 +2506,13 @@
        ],
        "default": null,
        "title": "Model"
+      },
+      "model_prices": {
+       "additionalProperties": {
+        "$ref": "#/$defs/ModelPrice"
+       },
+       "title": "Model Prices",
+       "type": "object"
       },
       "endpoint": {
        "anyOf": [
@@ -3321,6 +3461,34 @@
   },
   "LaneConfig": {
    "$defs": {
+    "ModelPrice": {
+     "additionalProperties": false,
+     "description": "Operator-supplied USD-per-million-token prices for one model (#3063, R3).\n\nNo price table ships with cw: prices change and cw cannot know the\noperator's contract. ``cached_input_usd_per_mtok`` prices the cached part\nof the input (a subset of it, not an addition), and reasoning tokens are a\nsubset of output so they have no price of their own.",
+     "properties": {
+      "input_usd_per_mtok": {
+       "minimum": 0,
+       "title": "Input Usd Per Mtok",
+       "type": "number"
+      },
+      "cached_input_usd_per_mtok": {
+       "minimum": 0,
+       "title": "Cached Input Usd Per Mtok",
+       "type": "number"
+      },
+      "output_usd_per_mtok": {
+       "minimum": 0,
+       "title": "Output Usd Per Mtok",
+       "type": "number"
+      }
+     },
+     "required": [
+      "input_usd_per_mtok",
+      "cached_input_usd_per_mtok",
+      "output_usd_per_mtok"
+     ],
+     "title": "ModelPrice",
+     "type": "object"
+    },
     "ReapPolicy": {
      "description": "Policy controlling whether the reconciler destroys a stalled session.\n\nUnder ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,\nleave session/worktree/daemon surface intact.  Cleared by an explicit\noperator command (the orchestrator session counts, ADR-0020).\nUnder ``AUTO``: self-healing \u2014 stop daemon, revert task to PENDING for retry.\nNo reconcile act removes the worktree (ADR-0014).",
      "enum": [
@@ -3386,6 +3554,13 @@
        ],
        "default": null,
        "title": "Model"
+      },
+      "model_prices": {
+       "additionalProperties": {
+        "$ref": "#/$defs/ModelPrice"
+       },
+       "title": "Model Prices",
+       "type": "object"
       },
       "endpoint": {
        "anyOf": [

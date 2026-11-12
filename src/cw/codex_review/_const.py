@@ -98,6 +98,16 @@ def _exec_policy_argv(mode: str) -> list[str]:
     return [_SANDBOX_FLAG, SandboxMode(mode).value, *_APPROVAL_POLICY_ARGV]
 
 
+# The JSONL event stream and the no-rollout flags, emitted together by every
+# argv that wants its usage read (#3063). One definition for the reviewer,
+# PLAN, IMPL, FINALIZE and tracker-IO builders; the flag-rejection retries
+# strip exactly this pair. The fix argv takes ``_JSON_FLAG`` alone: it keeps
+# its rollouts, so no ``--ephemeral``.
+_JSON_FLAG = "--json"
+_EPHEMERAL_FLAG = "--ephemeral"
+_AUDIT_ARGV_FLAGS = (_JSON_FLAG, _EPHEMERAL_FLAG)
+
+
 class _SpawnProbeResult(Protocol):
     """The two fields of a runner result that identify a spawn failure.
 

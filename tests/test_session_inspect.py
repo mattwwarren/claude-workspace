@@ -27,6 +27,13 @@ from cw.models import (
     SessionStatus,
     Stage,
 )
+from cw.models.usage import (
+    SessionUsage,
+    TokenTotals,
+    UsageStage,
+    UsageState,
+    UsageUnavailableReason,
+)
 from cw.session_retention import prune_sessions
 from tests._shared.review_builders import _make_diff
 from tests._shared.session_seeding import _make_daemon_session, _seed_sessions
@@ -245,6 +252,105 @@ class TestSessionShow:
         assert "stage: impl" in result.output
         assert "last_result_source: git_synthesis" in result.output
         assert "reap_reason: wall_clock_budget" in result.output
+
+
+class TestSessionShowUsage:
+    """The ``usage:`` line and ``--json`` field (#3063)."""
+
+    @staticmethod
+    def _show(tmp_path: Path, usage: SessionUsage | None) -> str:
+        _seed_sessions(_make_session(tmp_path, usage=usage))
+        result = CliRunner().invoke(main, ["session", "show", "abcd1234"])
+        assert result.exit_code == 0
+        return next(
+            line for line in result.output.splitlines() if line.startswith("usage:")
+        )
+
+    def test_none(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+        assert self._show(tmp_path, None) == "usage: none"
+
+    def test_recorded(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+        usage = SessionUsage(
+            state=UsageState.RECORDED,
+            by_model={
+                "a": TokenTotals(
+                    input_tokens=100,
+                    cached_input_tokens=40,
+                    output_tokens=10,
+                    reasoning_tokens=5,
+                    turns=2,
+                ),
+                "b": TokenTotals(input_tokens=1, output_tokens=2, turns=1),
+            },
+        )
+
+        assert self._show(tmp_path, usage) == (
+            "usage: recorded input=101 cached=40 output=12 reasoning=5 "
+            "total=113 turns=3"
+        )
+
+    def test_partial(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+        usage = SessionUsage(
+            state=UsageState.PARTIAL,
+            by_model={"a": TokenTotals(input_tokens=7, output_tokens=3, turns=1)},
+            unavailable_turns=1,
+            unavailable_reason=UsageUnavailableReason.NO_OUTPUT,
+        )
+
+        assert self._show(tmp_path, usage).startswith(
+            "usage: partial input=7 cached=0 output=3 reasoning=0 total=10 turns=1"
+        )
+
+    def test_unavailable_codex_turns(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        usage = SessionUsage(
+            state=UsageState.UNAVAILABLE,
+            unavailable_turns=2,
+            unavailable_reason=UsageUnavailableReason.NO_USAGE_BLOCK,
+        )
+
+        assert self._show(tmp_path, usage) == (
+            "usage: unavailable (reason=no_usage_block, turns=2)"
+        )
+
+    def test_unavailable_backend_marker_names_the_follow_up(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        usage = SessionUsage(
+            state=UsageState.UNAVAILABLE,
+            unavailable_reason=UsageUnavailableReason.BACKEND_OUTPUT_UNPINNED,
+        )
+
+        assert self._show(tmp_path, usage) == (
+            "usage: unavailable (reason=backend_output_unpinned, turns=0): "
+            "no pinned output shape for this backend; see #3552"
+        )
+
+    def test_unavailable_without_a_reason(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        usage = SessionUsage(state=UsageState.UNAVAILABLE)
+
+        assert self._show(tmp_path, usage) == (
+            "usage: unavailable (reason=unknown, turns=0)"
+        )
+
+    def test_json_carries_usage_with_enum_values_as_strings(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        usage = SessionUsage(
+            state=UsageState.RECORDED,
+            by_stage={UsageStage.FIX: TokenTotals(input_tokens=1, turns=1)},
+            by_model={"m": TokenTotals(input_tokens=1, turns=1)},
+        )
+        _seed_sessions(_make_session(tmp_path, usage=usage))
+
+        result = CliRunner().invoke(main, ["session", "show", "abcd1234", "--json"])
+
+        data = json.loads(result.output)
+        assert data["usage"]["state"] == "recorded"
+        assert list(data["usage"]["by_stage"]) == ["fix"]
 
 
 class TestSessionList:

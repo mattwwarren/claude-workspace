@@ -1076,7 +1076,9 @@ _CODEX_PLAN_FOLLOW_UPS = frozenset({3464, 3465})
 _C2_TICKET = 3061
 _CODEX_IMPL_FOLLOW_UPS = frozenset({3529, 3530, 3531})
 # #3055 closed with RFC 0018 S3: its codex review cells moved to #3057 (A2).
-_CODEX_REVIEW_TICKETS = frozenset({3318, 2464, 3063, 3057})
+_CODEX_REVIEW_TICKETS = frozenset({3318, 2464, 3057})
+#: The C4 ticket (#3063, usage accounting); no cell may defer to it once it lands.
+_C4_TICKET = 3063
 #: The S3 ticket; no cell may defer to it once it lands (#3055).
 _S3_TICKET = 3055
 #: The A1 ticket; no cell may defer to it once it lands (#3056).
@@ -1479,6 +1481,22 @@ def test_no_cell_defers_to_the_landed_c3_ticket() -> None:
         for backend, cell in element.cells.items():
             if isinstance(cell, DeferredDisposition):
                 assert cell.ref.number != _C3_TICKET, (element_id, backend)
+
+
+def test_no_cell_defers_to_the_landed_c4_ticket() -> None:
+    for element_id, element in _manifest().elements.items():
+        for backend, cell in element.cells.items():
+            if isinstance(cell, DeferredDisposition):
+                assert cell.ref.number != _C4_TICKET, (element_id, backend)
+
+
+def test_codex_usage_accounting_cell_is_implemented_with_a_code_ref() -> None:
+    cell = _manifest().elements["orch.sentinel-structured-output"].cells["codex"]
+
+    assert isinstance(cell, ImplementedDisposition)
+    assert cell.ref == CodeRef(
+        kind="code", path="src/cw/codex_usage.py", symbol="UsageAccumulator"
+    )
 
 
 #: The codex FINALIZE implemented and fails-closed cells that point at a

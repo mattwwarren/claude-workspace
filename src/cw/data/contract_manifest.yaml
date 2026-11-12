@@ -214,7 +214,7 @@ elements:
   orch.sentinel-structured-output:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3063}, note: "usage accounting: codex stage turns record no token usage (C4); the result itself is synthesized by cw"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_usage.py, symbol: UsageAccumulator}, note: "usage accounting (RFC 0018 C4, #3063): codex stage turns record token usage into Session.usage; the result itself is synthesized by cw"}
       opencode: {disposition: implemented, ref: {kind: prompt, stage: plan, needle: "<<<AUTO_DEV_RESULT"}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   orch.emit-through-cw-then-frame:

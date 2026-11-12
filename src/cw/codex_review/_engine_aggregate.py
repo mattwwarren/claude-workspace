@@ -22,9 +22,8 @@ import uuid
 from typing import TYPE_CHECKING
 
 from cw.atomic import atomic_write_text
-from cw.codex_review._const import _CATEGORY_TO_REASON
+from cw.codex_review._const import _AUDIT_ARGV_FLAGS, _CATEGORY_TO_REASON
 from cw.codex_review._roles import (
-    _AUDIT_ARGV_FLAGS,
     _build_generic_codex_argv,
     _classify_codex_failure,
     _classify_codex_output,

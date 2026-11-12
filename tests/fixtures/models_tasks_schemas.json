@@ -1598,6 +1598,18 @@
      "default": null,
      "title": "Total Cost Usd"
     },
+    "total_tokens": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Total Tokens"
+    },
     "plan_source": {
      "anyOf": [
       {
@@ -3658,6 +3670,18 @@
        ],
        "default": null,
        "title": "Total Cost Usd"
+      },
+      "total_tokens": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Total Tokens"
       },
       "plan_source": {
        "anyOf": [
@@ -5802,6 +5826,18 @@
        "default": null,
        "title": "Total Cost Usd"
       },
+      "total_tokens": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Total Tokens"
+      },
       "plan_source": {
        "anyOf": [
         {
@@ -6474,7 +6510,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 58,
+     "default": 59,
      "title": "Schema Version",
      "type": "integer"
     },
@@ -8272,6 +8308,18 @@
      ],
      "default": null,
      "title": "Total Cost Usd"
+    },
+    "total_tokens": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Total Tokens"
     },
     "plan_source": {
      "anyOf": [
@@ -10334,6 +10382,18 @@
        "default": null,
        "title": "Total Cost Usd"
       },
+      "total_tokens": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Total Tokens"
+      },
       "plan_source": {
        "anyOf": [
         {
@@ -11006,7 +11066,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 58,
+     "default": 59,
      "title": "Schema Version",
      "type": "integer"
     },

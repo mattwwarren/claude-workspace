@@ -82,7 +82,13 @@ from cw.codex_review import (
     _is_model_capacity_error,
 )
 from cw.codex_review_signals import record_event_best_effort
-from cw.codex_stage_completion import complete_session_through_door, run_guarded_stage
+from cw.codex_stage_completion import (
+    complete_session_through_door,
+    flush_late_usage,
+    run_guarded_stage,
+    with_usage_friction,
+)
+from cw.codex_usage import NO_USAGE, UsageAccumulator
 from cw.contract_manifest import RenderError
 from cw.dev_queue import _PRE_DISPATCH_TRACKER_MCP_REASON
 from cw.dev_queue.lifecycle import _plan_body_signoff_ok
@@ -149,6 +155,7 @@ class _Run:
     sess_name: str
     model: str | None
     reasoning_effort: str | None
+    usage: UsageAccumulator = NO_USAGE
 
     # -- events -------------------------------------------------------------
 
@@ -564,7 +571,8 @@ def _plan(run: _Run) -> _Exit:
 def _execute(run: _Run) -> None:
     """Plan, complete through the door, post, then emit ``session.completed``."""
     exit_ = _plan(run)
-    complete_session_through_door(run.sid, exit_.result.model_dump(mode="json"))
+    payload = with_usage_friction(exit_.result.model_dump(mode="json"), run.usage)
+    complete_session_through_door(run.sid, payload, usage=run.usage)
     if exit_.post_text is not None:
         post_plan_comment(
             task=run.task,
@@ -575,6 +583,7 @@ def _execute(run: _Run) -> None:
             text=exit_.post_text,
             artifact_path=exit_.artifact_path,
         )
+    flush_late_usage(run.sid, run.usage)
     record_event_best_effort(
         OrchestratorEventType.SESSION_COMPLETED,
         {
@@ -596,11 +605,14 @@ def run_plan_stage_and_complete(
     sess_name: str,
     model: str | None,
     reasoning_effort: str | None,
+    usage: UsageAccumulator = NO_USAGE,
 ) -> None:
     """Run the codex PLAN stage for *task* and complete session *sid*.
 
     *model* and *reasoning_effort* are the PLAN stage's resolved
     ``StageExecutorConfig`` values; no sandbox or timeout setting is read.
+    *usage* (#3063) is the run's accumulator; its recording runner is already
+    inside *runner*.
     """
     run = _Run(
         runner=runner,
@@ -611,6 +623,7 @@ def run_plan_stage_and_complete(
         sess_name=sess_name,
         model=model,
         reasoning_effort=reasoning_effort,
+        usage=usage,
     )
     run_guarded_stage(
         client_name=client.name,
@@ -619,6 +632,7 @@ def run_plan_stage_and_complete(
         sid=sid,
         stage_reached=STAGE1_PLAN,
         body=lambda: _execute(run),
+        usage=usage,
     )
 
 

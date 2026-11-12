@@ -48,7 +48,9 @@ documented decision over a cap knob.
 - No spend visibility in the ticket's own history: the figure lives only in the
   INFO log line. The confirm round's cost is not on any result object that
   reaches the history renderer, so showing it needs new plumbing that this
-  decision does not add.
+  decision does not add. Since #3063 (RFC 0018 C4) the role's token counts and
+  model are recorded on the reviewer run records (still not cost), which does not
+  reopen this decision: no spend cap, budget flag or spend-park blocker exists.
 - A spend ceiling can be revisited once cost is persisted and real cost data
   exists. Persisting it is out of scope here.
 

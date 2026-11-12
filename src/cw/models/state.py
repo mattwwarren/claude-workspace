@@ -34,7 +34,9 @@ from cw.models.session import Session
 # v17: added Session.consecutive_sentinel_mismatch_vetoes (#1449).
 # v18: added Session.liveness_attention_next_eligible_at (#1858).
 # v19: added LocalLivenessHandle.backend (#2369).
-CW_STATE_SCHEMA_VERSION = 19
+# v20: added Session.usage (#3063, RFC 0018 C4) — per-stage and per-model token
+#      totals plus an availability state; None for sessions that recorded none.
+CW_STATE_SCHEMA_VERSION = 20
 
 
 class CwState(BaseModel):

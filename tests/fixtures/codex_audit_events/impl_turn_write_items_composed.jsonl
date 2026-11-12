@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"<THREAD_ID>"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"ls","exit_code":0}}
+{"type":"item.completed","item":{"id":"item_1","type":"file_change","changes":[{"path":"src/x.py","kind":"update"}]}}
+{"type":"item.completed","item":{"id":"item_2","type":"mcp_tool_call","server":"tracker","tool":"comment"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"done"}}
+{"type":"turn.completed","usage":{"input_tokens":52000,"cached_input_tokens":40000,"cache_write_input_tokens":0,"output_tokens":900,"reasoning_output_tokens":300}}

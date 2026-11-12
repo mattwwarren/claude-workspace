@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -36,6 +36,7 @@ from tests._claude_review_helpers import (
     non_document_envelope,
     review_envelope,
     truncated_envelope,
+    usage_envelope,
 )
 from tests._codex_review_helpers import _Clock, _doc_json, _finding_payload
 from tests._review_convergence_helpers import structurally_invalid_doc_json
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.claude_review import ClaudeRolesOutcome
+    from cw.review_findings import ReviewerRunMetrics
 
 _ROLE = "Code Quality Reviewer"
 _SECOND = "SysAdmin Reviewer"
@@ -283,7 +285,7 @@ class TestBudgetAndMetrics:
         _run(wt, runner, budget=600)
         assert runner.calls[0]["timeout"] == 500
 
-    def test_metrics_carry_only_duration(
+    def test_metrics_carry_duration_and_envelope_usage(
         self, wt: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
@@ -292,8 +294,13 @@ class TestBudgetAndMetrics:
         outcome = _run(wt, FakeClaudeRunner(stdout=review_envelope()))
         metrics = outcome.metrics_by_role["Code Quality Reviewer"]
         assert metrics["duration_seconds"] == pytest.approx(7.5)
-        assert metrics["input_tokens"] is None
-        assert metrics["output_tokens"] is None
+        # input = 4 base + 8140 cache creation + 8040 cache read.
+        assert metrics["input_tokens"] == 16184
+        assert metrics["cached_input_tokens"] == 8040
+        assert metrics["output_tokens"] == 331
+        assert metrics["reasoning_tokens"] == 0
+        assert metrics["effective_model"] == "claude-sonnet-5-5"
+        assert metrics["thread_id"] is None
         assert metrics["terminal_event"] is None
         assert metrics["tool_call_counts"] == {}
 
@@ -371,3 +378,143 @@ class TestWorktreeMutation:
             ("h", "".join(f"?? f{i}.txt\n" for i in range(8))),
         )
         assert mutation.describe().count("??") == 5
+
+
+_USAGE_LOGGER = "cw.claude_review._roles"
+
+
+def _metrics(wt: Path, stdout: str) -> ReviewerRunMetrics:
+    outcome = _run(wt, FakeClaudeRunner(stdout=stdout))
+    return outcome.metrics_by_role[_ROLE]
+
+
+def _usage(envelope: dict[str, object]) -> dict[str, Any]:
+    usage = envelope["usage"]
+    assert isinstance(usage, dict)
+    return usage
+
+
+class TestEnvelopeUsage:
+    """#3063: the confirm lane records tokens and model on the run metrics."""
+
+    def test_a_complete_usage_block_does_not_warn(
+        self, wt: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING, logger=_USAGE_LOGGER):
+            _metrics(wt, review_envelope())
+
+        assert not [m for m in caplog.messages if "usage absent" in m]
+
+    def test_a_missing_usage_block_warns_with_role_and_session(
+        self, wt: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        stdout = usage_envelope(lambda e: e.pop("usage"))
+
+        with caplog.at_level(logging.WARNING, logger=_USAGE_LOGGER):
+            metrics = _metrics(wt, stdout)
+
+        assert metrics["input_tokens"] is None
+        assert metrics["output_tokens"] is None
+        (message,) = [m for m in caplog.messages if "usage absent" in m]
+        assert f"role={_ROLE!r}" in message
+        assert f"session={_SESSION!r}" in message
+
+    def test_a_non_dict_usage_is_absent(
+        self, wt: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        stdout = usage_envelope(lambda e: e.update(usage=7))
+
+        with caplog.at_level(logging.WARNING, logger=_USAGE_LOGGER):
+            metrics = _metrics(wt, stdout)
+
+        assert metrics["input_tokens"] is None
+        assert [m for m in caplog.messages if "usage absent" in m]
+
+    def test_bool_and_str_token_values_are_none(self, wt: Path) -> None:
+        def mutate(envelope: dict[str, object]) -> None:
+            usage = _usage(envelope)
+            usage["input_tokens"] = True
+            usage["output_tokens"] = "331"
+            usage["cache_read_input_tokens"] = False
+
+        metrics = _metrics(wt, usage_envelope(mutate))
+
+        assert metrics["input_tokens"] is None
+        assert metrics["output_tokens"] is None
+        assert metrics["cached_input_tokens"] is None
+
+    def test_missing_cache_fields_count_as_zero(self, wt: Path) -> None:
+        def mutate(envelope: dict[str, object]) -> None:
+            usage = _usage(envelope)
+            del usage["cache_read_input_tokens"]
+            del usage["cache_creation_input_tokens"]
+
+        metrics = _metrics(wt, usage_envelope(mutate))
+
+        assert metrics["input_tokens"] == 4
+        assert metrics["cached_input_tokens"] is None
+        assert metrics["output_tokens"] == 331
+
+    def test_missing_output_tokens_details_leaves_reasoning_none(
+        self, wt: Path
+    ) -> None:
+        stdout = usage_envelope(lambda e: _usage(e).pop("output_tokens_details"))
+
+        assert _metrics(wt, stdout)["reasoning_tokens"] is None
+
+    def test_thinking_tokens_are_reasoning(self, wt: Path) -> None:
+        def mutate(envelope: dict[str, object]) -> None:
+            _usage(envelope)["output_tokens_details"] = {"thinking_tokens": 12}
+
+        assert _metrics(wt, usage_envelope(mutate))["reasoning_tokens"] == 12
+
+    def test_two_model_usage_keys_leave_the_model_none(self, wt: Path) -> None:
+        def mutate(envelope: dict[str, object]) -> None:
+            model_usage = envelope["modelUsage"]
+            assert isinstance(model_usage, dict)
+            model_usage["claude-haiku-5-5"] = {}
+
+        assert _metrics(wt, usage_envelope(mutate))["effective_model"] is None
+
+    @pytest.mark.parametrize("model_usage", [None, [], {}, "x"])
+    def test_absent_or_non_dict_model_usage_leaves_the_model_none(
+        self, wt: Path, model_usage: object
+    ) -> None:
+        stdout = usage_envelope(lambda e: e.update(modelUsage=model_usage))
+
+        assert _metrics(wt, stdout)["effective_model"] is None
+
+    def test_an_error_envelope_keeps_its_tokens(self, wt: Path) -> None:
+        stdout = usage_envelope(lambda e: e.update(is_error=True))
+        outcome = _run(wt, FakeClaudeRunner(stdout=stdout))
+
+        assert outcome.failures[0].reason == CODEX_ERROR
+        assert outcome.metrics_by_role[_ROLE]["input_tokens"] == 16184
+
+    def test_a_mutated_worktree_role_keeps_its_tokens(self, wt: Path) -> None:
+        runner = FakeClaudeRunner(stdout=review_envelope(), side_effect=_write_file)
+
+        outcome = _run(wt, runner)
+
+        assert outcome.mutation is not None
+        assert outcome.metrics_by_role[_ROLE]["output_tokens"] == 331
+
+    def test_a_process_failure_has_none_tokens_and_no_usage_warning(
+        self, wt: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        runner = FakeClaudeRunner(returncode=1, stdout="", stderr="boom")
+
+        with caplog.at_level(logging.WARNING, logger=_USAGE_LOGGER):
+            outcome = _run(wt, runner)
+
+        assert outcome.metrics_by_role[_ROLE]["input_tokens"] is None
+        assert not [m for m in caplog.messages if "usage absent" in m]
+
+    def test_cost_is_still_logged_and_never_persisted(
+        self, wt: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.INFO, logger=_USAGE_LOGGER):
+            metrics = _metrics(wt, review_envelope())
+
+        assert "total_cost_usd=0.036682" in caplog.text
+        assert "cost_usd" not in metrics

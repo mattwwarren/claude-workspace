@@ -75,8 +75,10 @@ from cw.codex_review_signals import undelivered_operator_context
 from cw.codex_stage_completion import (
     clear_stage_blocked_marker,
     complete_session_through_door,
+    flush_late_usage,
     revert_claimed_row_after_unexpected_error,
     save_stage_blocked_marker,
+    with_usage_friction,
 )
 from cw.codex_stage_completion import (
     complete_session_as_unexpected_error as _complete_session_as_unexpected_error,
@@ -85,6 +87,7 @@ from cw.codex_stage_completion import (
     stamp_session_id_on_running_task as _stamp_session_id_on_running_task,
 )
 from cw.codex_stage_facts import stamp_stage_facts
+from cw.codex_usage import NO_USAGE, UsageAccumulator
 from cw.config import load_effective_config
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event as _record_orchestrator_event
@@ -615,6 +618,7 @@ def _run_codex_review_and_complete(
     config_reasoning_effort: str | None,
     config_reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
     config_fix_sandbox_mode: SandboxMode = DEFAULT_FIX_SANDBOX_MODE,
+    usage: UsageAccumulator = NO_USAGE,
 ) -> None:
     """Run the review, persist its result, post the verdict, emit completion.
 
@@ -682,7 +686,10 @@ def _run_codex_review_and_complete(
         )
 
         # Step 4: persist result under sessions_lock.
-        complete_session_through_door(sid, result.model_dump(mode="json"))
+        # #3063: usage is snapshotted before the door's lock; the unavailable
+        # token rides the persisted payload like the other stages'.
+        payload = with_usage_friction(result.model_dump(mode="json"), usage)
+        complete_session_through_door(sid, payload, usage=usage)
 
         # Step 4b: post the consolidated verdict (best-effort). After Step 4 so
         # a retry on a persist failure cannot post a duplicate comment. verdict
@@ -744,6 +751,10 @@ def _run_codex_review_and_complete(
                 artifact_path=artifact_path,
             )
 
+        # #3063: the tracker-IO post above ran after the door, so its turn is
+        # not in the door's snapshot; one late rewrite lands it before Step 5.
+        flush_late_usage(sid, usage)
+
         # Step 5: emit SESSION_COMPLETED — no result payload; dispatch reads
         # the last_result written through the door in Step 4.
         _record_orchestrator_event(
@@ -769,7 +780,7 @@ def _run_codex_review_and_complete(
         _log.exception(
             "codex review thread failed session=%s ticket=%s", sid, task.ticket_id
         )
-        _complete_session_as_unexpected_error(sid, task, worktree)
+        _complete_session_as_unexpected_error(sid, task, worktree, usage=usage)
         revert_claimed_row_after_unexpected_error(
             client_name=client.name, ticket_id=task.ticket_id, session_id=sid
         )

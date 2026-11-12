@@ -16,15 +16,22 @@ from cw.codex_stage_post import (
     post_stage_comment,
     tracker_label,
 )
+from cw.codex_usage import UsageAccumulator
 from cw.events import read_events
 from cw.models import OrchestratorEventType
+from cw.models.usage import UsageStage
 from cw.tracker import TRACKER_GITHUB_ISSUES, TRACKER_LINEAR
 from cw.tracker_io import TrackerIoContext, plan_turn_parts
 from cw.tracker_post import PostedPart, PostReason, PostResult, PostStatus
 from tests._backend_mcp_helpers import codex_tracker_client, stage_mcp_config
 from tests._shared.cli_preflight import _write_tracker_config
 from tests._shared.session_seeding import _make_ticket_task
-from tests._tool_fakes import ScriptedCodexRunner, any_call, tracker_io_turn_result
+from tests._tool_fakes import (
+    ScriptedCodexRunner,
+    any_call,
+    codex_usage_stdout,
+    tracker_io_turn_result,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -205,6 +212,37 @@ class TestOtherTracker:
         assert event["type"] == "review.verdict_comment_posted"
         assert event["kind"] == kind
         assert event["tracker"] == TRACKER_LINEAR
+
+    def test_the_post_relabels_the_runner_so_the_turn_records_as_tracker_io(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        kind: VerdictCommentKind,
+    ) -> None:
+        """#3063: the caller's recording runner is relabelled for the post."""
+        client = _linear(tmp_path, monkeypatch)
+        worktree = _worktree(tmp_path)
+        scripted = ScriptedCodexRunner()
+        parts = plan_turn_parts(
+            _TEXT, TrackerIoContext(runner=scripted, client=client, worktree=worktree)
+        )
+        scripted.add(
+            any_call,
+            CodexRunResult(
+                returncode=0,
+                stdout=codex_usage_stdout(input_tokens=200, output_tokens=20),
+                stderr="",
+                output_file_content=tracker_io_turn_result(_TICKET, parts),
+            ),
+        )
+        acc = UsageAccumulator("s-post", _TICKET, {})
+        runner = acc.recording_runner(UsageStage.PLAN, scripted)
+
+        _post(client, worktree, kind, runner=runner)
+
+        snapshot = acc.snapshot()
+        assert snapshot is not None
+        assert list(snapshot.usage.by_stage) == [UsageStage.TRACKER_IO]
 
     def test_refused_turn_is_skipped_with_kind_label(
         self,

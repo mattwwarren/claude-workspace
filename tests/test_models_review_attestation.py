@@ -297,7 +297,7 @@ class TestRowField:
             "tasks": [{"ticket_id": "ACM-1", "client": "acme"}],
         }
         migrated = migrate_dev_queue(raw)
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 58
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 59
         tasks = migrated["tasks"]
         assert isinstance(tasks, list)
         task = TicketTask.model_validate(tasks[0])

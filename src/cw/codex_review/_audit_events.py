@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 
+from cw.models.usage import TurnUsage, UsageUnavailable, UsageUnavailableReason
 from cw.review_findings import ReviewerRunMetrics
 
 # Item types a read-only reviewer role legitimately produces. Grounded in live
@@ -209,3 +210,95 @@ def _parse_codex_audit_events(
         elif event_type == _TURN_COMPLETED:
             _apply_usage(event, metrics)
     return metrics
+
+
+# ``usage`` keys on a ``turn.completed`` event, in ``TurnUsage`` field order.
+_USAGE_WIRE_KEYS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+)
+
+
+def _sum_optional(left: int | None, right: int | None) -> int | None:
+    """Add two optional counts; ``None`` only when both are ``None``."""
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return left + right
+
+
+def _completed_usage_blocks(
+    events: list[dict[str, object]],
+) -> tuple[bool, list[dict[str, object]]]:
+    """Return (any ``turn.completed`` seen, the dict ``usage`` blocks among them)."""
+    seen_completed = False
+    blocks: list[dict[str, object]] = []
+    for event in events:
+        if event.get("type") != _TURN_COMPLETED:
+            continue
+        seen_completed = True
+        usage = event.get("usage")
+        if isinstance(usage, dict):
+            blocks.append(usage)
+    return seen_completed, blocks
+
+
+def _no_token_usage(metrics: ReviewerRunMetrics) -> bool:
+    """True when *metrics* carries none of the four reported token fields (#3063).
+
+    The one "usage absent" predicate, shared by the codex accumulator's notion
+    (:attr:`~cw.models.usage.TurnUsage.absent`) and the Claude confirm lane.
+    """
+    return TurnUsage(
+        input_tokens=metrics["input_tokens"],
+        cached_input_tokens=metrics["cached_input_tokens"],
+        cache_write_input_tokens=None,
+        output_tokens=metrics["output_tokens"],
+        reasoning_tokens=metrics["reasoning_tokens"],
+    ).absent
+
+
+def parse_turn_usage(stdout: str) -> TurnUsage | UsageUnavailable:
+    """Parse the token usage of one codex turn from its ``--json`` stdout (#3063).
+
+    A thin sibling of :func:`_parse_codex_audit_events` that reads only the
+    ``turn.completed`` usage blocks. It deliberately does not reuse that
+    parser: its item allowlist is reviewer-flavoured and would flag the
+    ``file_change`` and ``mcp_tool_call`` items an IMPL or tracker-IO turn
+    legitimately produces.
+
+    Fields are summed across every ``turn.completed`` event, per field and
+    ``None``-aware (``None`` only if every event's field is ``None``). That
+    assumes ``usage`` is a per-turn total rather than a running total; the
+    pinned codex-cli 0.167.0 capture has one event, so it does not discriminate.
+
+    Returns :class:`UsageUnavailable` for an empty or non-JSONL stream, a
+    stream with no dict ``usage``, a ``turn.failed``-only stream, or usage
+    blocks whose four reported fields are all ``None``. Like its sibling it
+    never raises and never logs: the caller owns the warning, because only it
+    has the role and session to attribute one to.
+    """
+    events = _iter_events(stdout)
+    seen_completed, blocks = _completed_usage_blocks(events)
+    if blocks:
+        totals: list[int | None] = [None] * len(_USAGE_WIRE_KEYS)
+        for block in blocks:
+            totals = [
+                _sum_optional(total, _as_int(block.get(key)))
+                for total, key in zip(totals, _USAGE_WIRE_KEYS, strict=True)
+            ]
+        usage = TurnUsage(*totals)
+        if usage.absent:
+            return UsageUnavailable(UsageUnavailableReason.USAGE_FIELDS_NULL)
+        return usage
+    if seen_completed:
+        return UsageUnavailable(UsageUnavailableReason.NO_USAGE_BLOCK)
+    if any(event.get("type") == _TURN_FAILED for event in events):
+        return UsageUnavailable(UsageUnavailableReason.TURN_FAILED)
+    if not events:
+        return UsageUnavailable(UsageUnavailableReason.NO_OUTPUT)
+    return UsageUnavailable(UsageUnavailableReason.NO_USAGE_BLOCK)

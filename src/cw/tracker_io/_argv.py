@@ -25,7 +25,11 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
-from cw.codex_review import _exec_policy_argv, _reasoning_effort_argv
+from cw.codex_review import (
+    _AUDIT_ARGV_FLAGS,
+    _exec_policy_argv,
+    _reasoning_effort_argv,
+)
 from cw.models.enums import SandboxMode
 from cw.tracker import TRACKER_LINEAR
 from cw.tracker_io._verify import TrackerIoReason
@@ -123,7 +127,7 @@ def build_tracker_io_argv(
         "exec",
         *_exec_policy_argv(SandboxMode.READ_ONLY),
         "--skip-git-repo-check",
-        "--ephemeral",
+        *_AUDIT_ARGV_FLAGS,
         *_reasoning_effort_argv(TURN_REASONING_EFFORT),
         "-c",
         f"mcp_servers.{server}.enabled_tools={allowlist}",
