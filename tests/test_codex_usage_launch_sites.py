@@ -38,15 +38,13 @@ _SITES: Final[dict[tuple[str, str], tuple[str, str]]] = {
     # Reviewer roles (and PLAN stations through the same loop): the role loop
     # relabels with the real role name. The first attempt carries --json.
     ("codex_review/_roles.py", "_build_generic_codex_argv"): (RECORDED, "role argv"),
-    ("codex_review/_roles.py", "_run_codex_role"): (
+    # The one launch shared by the role runner and the aggregator (#3432): the
+    # role loop relabels with the role name, the engine round relabels
+    # ENGINE_AGGREGATE. First run recorded; the flag-rejection retry is not.
+    ("codex_review/_roles.py", "_run_codex_with_audit_degrade"): (
         RECORDED,
         "first run records; the degrade-and-retry rerun strips --json and is "
         "skipped by the recorder, and a failed first attempt is silent",
-    ),
-    # Aggregator: first run recorded, the flag-rejection retry is not.
-    ("codex_review/_engine_aggregate.py", "_run_once"): (
-        RECORDED,
-        "first run records as ENGINE_AGGREGATE; the retry has no --json",
     ),
     # Fix cycle and repair turn share the one runner the driver relabels FIX.
     ("codex_fix_loop/commit.py", "_build_fix_codex_argv"): (RECORDED, "fix argv"),
