@@ -22,14 +22,14 @@ import uuid
 from typing import TYPE_CHECKING
 
 from cw.atomic import atomic_write_text
-from cw.codex_review._const import _AUDIT_ARGV_FLAGS, _CATEGORY_TO_REASON
+from cw.codex_review._const import _CATEGORY_TO_REASON
 from cw.codex_review._roles import (
     _build_generic_codex_argv,
     _classify_codex_failure,
-    _classify_codex_output,
     _codex_scratch_dir,
-    _is_audit_flag_rejection,
+    _parse_codex_output,
     _refined_nonzero_reason,
+    _run_codex_with_audit_degrade,
 )
 from cw.codex_review._shard import ReviewInputTooLargeError
 from cw.models.enums import SandboxMode
@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-    from cw.codex_runner import CodexRunner, CodexRunResult
+    from cw.codex_runner import CodexRunner
 
 _log = logging.getLogger(__name__)
 
@@ -63,38 +63,20 @@ def _aggregation_failure(reason: str) -> SummaryFailure:
     return SummaryFailure(failure, FRICTION[failure].format(reason=reason))
 
 
-def _output_failure_reason(content: str | None) -> str | None:
-    """The exit-0 output failure kind, or ``None`` when *content* is valid."""
-    return _classify_codex_output(
-        content, validator=EngineAggregationOutput.model_validate
-    )
-
-
-def _run_once(
-    runner: CodexRunner,
-    worktree: Path,
-    argv: list[str],
-    timeout_seconds: int | None,
-    stdin: str,
-) -> CodexRunResult:
-    """One run, retried once without the audit flags on an older codex-cli."""
-    result = runner.run(worktree, argv, timeout_seconds, stdin=stdin)
-    if _is_audit_flag_rejection(result):
-        stripped = [flag for flag in argv if flag not in _AUDIT_ARGV_FLAGS]
-        result = runner.run(worktree, stripped, timeout_seconds, stdin=stdin)
-    return result
+def _no_summary(summary_path: Path) -> SummaryFailure:
+    """The ``engine_no_summary`` failure naming *summary_path*."""
+    reason = EngineRoundFailure.ENGINE_NO_SUMMARY
+    return SummaryFailure(reason, FRICTION[reason].format(path=str(summary_path)))
 
 
 def _write_summary(
-    content: str, head_sha: str, summary_path: Path
+    output: EngineAggregationOutput, head_sha: str, summary_path: Path
 ) -> SummaryFailure | None:
-    output = EngineAggregationOutput.model_validate_json(content)
     try:
         summary_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(summary_path, json.dumps(assemble_summary(output, head_sha)))
     except OSError:
-        reason = EngineRoundFailure.ENGINE_NO_SUMMARY
-        return SummaryFailure(reason, FRICTION[reason].format(path=str(summary_path)))
+        return _no_summary(summary_path)
     return None
 
 
@@ -141,7 +123,9 @@ def run_codex_aggregator(
             output_path=scratch / _OUTPUT_FILENAME,
             sandbox_mode=SandboxMode.READ_ONLY,
         )
-        result = _run_once(runner, worktree, argv, timeout_seconds, envelope)
+        result, _argv = _run_codex_with_audit_degrade(
+            runner, worktree, argv, timeout_seconds, envelope
+        )
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     if result.timed_out or result.returncode != 0:
@@ -151,7 +135,9 @@ def run_codex_aggregator(
             refined, _ = _refined_nonzero_reason(result)
             reason = refined or reason
         return _aggregation_failure(reason)
-    output_reason = _output_failure_reason(result.output_file_content)
-    if output_reason is not None or result.output_file_content is None:
+    output, output_reason = _parse_codex_output(
+        result.output_file_content, validator=EngineAggregationOutput.model_validate
+    )
+    if output is None:
         return _aggregation_failure(output_reason or AGGREGATION_REASON_MISSING_OUTPUT)
-    return _write_summary(result.output_file_content, head_sha, summary_path)
+    return _write_summary(output, head_sha, summary_path)

@@ -345,6 +345,44 @@ class TestAuditFlagDegrade:
 
         assert len(runner.calls) == 1
 
+    def test_a_spawn_error_naming_an_audit_flag_is_not_retried(
+        self, tmp_path: Path
+    ) -> None:
+        """#3432: the aggregator inherits the role runner's stricter guard."""
+        runner = _runner(
+            CodexRunResult(127, "", "codex: command not found; " + _AUDIT_REJECTION)
+        )
+
+        failure = _run(runner, tmp_path / "summary.json")
+
+        assert len(runner.calls) == 1
+        assert failure == (
+            EngineRoundFailure.ENGINE_AGGREGATION_FAILED,
+            _failure_text("codex_error"),
+        )
+
+
+class TestParseOnce:
+    def test_a_valid_output_is_not_parsed_a_second_time(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3432: the parsed model is reused for the summary write."""
+        calls: list[str] = []
+
+        def _counting(content: str) -> EngineAggregationOutput:
+            calls.append(content)
+            msg = "re-parsed"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(EngineAggregationOutput, "model_validate_json", _counting)
+        summary_path = tmp_path / "summary.json"
+
+        failure = _run(_runner(_ok(_REAL_PASS)), summary_path)
+
+        assert failure is None
+        assert calls == []
+        assert summary_path.is_file()
+
 
 class TestPromptLimit:
     def test_an_envelope_over_the_limit_raises_before_any_codex_call(
