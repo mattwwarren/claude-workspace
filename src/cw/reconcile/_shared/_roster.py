@@ -362,7 +362,12 @@ def resolve_session_liveness_for_task(
 
 
 def find_live_sessions_for_ticket(
-    state: CwState, ticket_id: str, client: str, live_short_ids: set[str]
+    state: CwState,
+    ticket_id: str,
+    client: str,
+    live_short_ids: set[str],
+    *,
+    roster_captured_at: datetime | None = None,
 ) -> list[Session]:
     """Every session in *state* for (*ticket_id*, *client*) still live in the
     daemon roster (GitHub #2275).
@@ -371,6 +376,13 @@ def find_live_sessions_for_ticket(
     ``TicketTask.session_id`` -- derives the ticket id from each
     ``Session.name`` via :func:`ticket_id_for_session`, so a stray session no
     dev-queue row points at any more is still found.
+
+    *roster_captured_at* is the capture time of the roster *live_short_ids*
+    came from (#3334). When given, a native-surface session absent from it is
+    still returned if its ref may postdate the capture
+    (:func:`session_may_postdate_roster`); the caller can tell the two apart
+    by ``surface_ref in live_short_ids``. ``None`` (the default) keeps the
+    roster-only answer.
     """
     live: list[Session] = []
     for session in state.sessions:
@@ -379,7 +391,10 @@ def find_live_sessions_for_ticket(
         if ticket_id_for_session(session.name) != ticket_id:
             continue
         liveness = session_daemon_liveness(session, live_short_ids)
-        if liveness.native_surface and liveness.in_roster:
+        if liveness.native_surface and (
+            liveness.in_roster
+            or session_may_postdate_roster(session, roster_captured_at)
+        ):
             live.append(session)
     return live
 

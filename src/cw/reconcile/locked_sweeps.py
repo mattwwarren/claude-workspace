@@ -309,8 +309,10 @@ def _run_terminal_backstops_and_sweeps(
     defers a tick. Concierge recipe 3 reads *cancelled_probes* (#2546), and
     recipe 2's salvage *scope_probes* (#2641). Concierge recipes 1 and 2 also
     take *roster_captured_at*, the capture time of the lockless roster
-    *native_live* came from (#2550): a session spawned or resumed too recently
-    for that capture to list it is not called dead.
+    *native_live* came from (#2550): a session spawned, resumed or bound too
+    recently for that capture to list it is not called dead. The lost-row
+    sweep takes it too (#3334), so its sessionless page names such a session
+    instead of suggesting ``cw doctor --reap``.
     Extracted to one call site (instead of duplicating 4 lines in each
     branch) to keep ``_reconcile_locked``'s statement count under the
     PLR0915 limit.
@@ -341,7 +343,12 @@ def _run_terminal_backstops_and_sweeps(
     completed_silent_ticket_ids = revert_completed_silent_tasks(dirty_checks)
     park_terminal_sibling_tasks()
     # #2715: park record-missing RUNNING rows; page sessionless ones.
-    run_lost_session_recovery(now=now, clients=clients, native_live=native_live)
+    run_lost_session_recovery(
+        now=now,
+        clients=clients,
+        native_live=native_live,
+        roster_captured_at=roster_captured_at,
+    )
     run_concierge_recoveries(
         now=now,
         native_live=native_live,

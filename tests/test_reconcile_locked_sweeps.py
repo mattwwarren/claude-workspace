@@ -777,6 +777,43 @@ class TestRunTerminalBackstopsAndSweeps:
             },
         )
 
+    def test_forwards_the_roster_capture_time_to_the_lost_row_sweep(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3334: the sessionless page spares a session whose ref may postdate
+        the capture only if the sweep is handed the capture time."""
+        calls = _record_calls(
+            monkeypatch,
+            {
+                "run_unowned_running_recovery": None,
+                "revert_timed_out_tasks": [],
+                "revert_completed_silent_tasks": [],
+                "park_terminal_sibling_tasks": None,
+                "run_lost_session_recovery": None,
+                "run_concierge_recoveries": [],
+                "run_codex_live_writer_reparks": None,
+                "run_gate_recipes": None,
+                "run_review_recipes": None,
+                "run_escalation_sweep": None,
+            },
+        )
+        captured_at = datetime(2026, 1, 1, tzinfo=UTC)
+
+        locked_sweeps._run_terminal_backstops_and_sweeps(
+            now=captured_at,
+            native_live=set(),
+            config=OrchestratorConfig(),
+            clients={},
+            deferred=DeferredReconcileJobs(),
+            codex_probes=None,
+            plan_probes=None,
+            repo_slugs=None,
+            roster_captured_at=captured_at,
+        )
+
+        [lost] = [kw for name, kw in calls if name == "run_lost_session_recovery"]
+        assert lost["roster_captured_at"] == captured_at
+
     @pytest.mark.parametrize("pass_set", [True, False])
     def test_forwards_warned_blocks_to_the_concierge_recipes(
         self, monkeypatch: pytest.MonkeyPatch, pass_set: bool

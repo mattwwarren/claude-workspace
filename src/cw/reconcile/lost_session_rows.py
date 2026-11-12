@@ -66,7 +66,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from datetime import datetime
 
-    from cw.models import ClientConfig, CwState, TicketTask
+    from cw.models import ClientConfig, CwState, Session, TicketTask
 
 _log = logging.getLogger(__name__)
 
@@ -347,22 +347,44 @@ def _sessionless_breadcrumbs(
     )
 
 
+def _live_name(session: Session, native_live: set[str]) -> str:
+    """A live same-ticket session's page label; annotated when it is spared
+    only because its ref may postdate the roster capture (#3334)."""
+    name = f"{session.id} ({session.name})"
+    if session.surface_ref in native_live:
+        return name
+    return f"{name} (may postdate the roster capture)"
+
+
 def _page_sessionless(
-    row: LostRow, *, state: CwState, native_live: set[str], now: datetime
+    row: LostRow,
+    *,
+    state: CwState,
+    native_live: set[str],
+    now: datetime,
+    roster_captured_at: datetime | None = None,
 ) -> bool:
     """Page one sessionless row, then latch it; True when latched.
 
     Page first, latch second (at-least-once, the #2524 rule): a failed page
     leaves the row unlatched so the next tick retries, and a row whose claim
-    changed since detect is not latched.
+    changed since detect is not latched. A same-ticket session whose ref may
+    postdate *roster_captured_at* is named too (annotated), so the page does
+    not suggest ``cw doctor --reap`` for a worker the capture could not list.
     """
-    live = find_live_sessions_for_ticket(state, row.ticket_id, row.client, native_live)
+    live = find_live_sessions_for_ticket(
+        state,
+        row.ticket_id,
+        row.client,
+        native_live,
+        roster_captured_at=roster_captured_at,
+    )
     payload = _page_payload(
         row,
         session_id=f"no-session:{row.client}/{row.ticket_id}#{row.attempts}",
         paused_status=SESSIONLESS_PAGE_REASON,
         breadcrumbs=_sessionless_breadcrumbs(
-            row, now=now, live_names=[f"{s.id} ({s.name})" for s in live]
+            row, now=now, live_names=[_live_name(s, native_live) for s in live]
         ),
     )
     if not _emit_page(payload, ticket_id=row.ticket_id):
@@ -385,13 +407,18 @@ def _page_sessionless(
 
 
 def run_lost_session_recovery(
-    *, now: datetime, clients: dict[str, ClientConfig], native_live: set[str]
+    *,
+    now: datetime,
+    clients: dict[str, ClientConfig],
+    native_live: set[str],
+    roster_captured_at: datetime | None = None,
 ) -> list[str]:
     """Park record-missing rows and page sessionless ones. Returns parked tickets.
 
     *clients* is the tick's client scope (empty: a no-op); *native_live* is
-    the tick's roster, used only to name live same-ticket sessions on a page.
-    Reads state and the queue fresh.
+    the tick's roster, used only to name live same-ticket sessions on a page,
+    and *roster_captured_at* its capture time (#3334): a session whose ref may
+    postdate it is named too. Reads state and the queue fresh.
     """
     if not clients:
         return []
@@ -399,5 +426,11 @@ def run_lost_session_recovery(
     found = find_lost_session_rows(state, load_dev_queue().tasks, clients, now=now)
     parked = _act_on_parks(found)
     for row in found.sessionless:
-        _page_sessionless(row, state=state, native_live=native_live, now=now)
+        _page_sessionless(
+            row,
+            state=state,
+            native_live=native_live,
+            now=now,
+            roster_captured_at=roster_captured_at,
+        )
     return [row.ticket_id for row in parked]
