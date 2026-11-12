@@ -180,7 +180,7 @@ def parse_stream(stdout: str) -> Parsed:
             continue
         event = _decode_line(line)
         if event is None:
-            return Parsed(None, None, ParseFault.MALFORMED)
+            return Parsed(state.thread_id, state.terminal, ParseFault.MALFORMED)
         fault = state.feed(event)
         if fault is not None:
             return Parsed(state.thread_id, state.terminal, fault)
