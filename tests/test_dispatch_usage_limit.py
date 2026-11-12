@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
 _CLIENTS = ("client-a", "client-b", "client-c")
+_DISK_FULL_MSG = "disk full"
 
 
 @pytest.fixture
@@ -382,6 +383,23 @@ class TestMergeAndArm:
         # Untouched clients keep their existing window.
         assert armed["client-z"] == now + timedelta(minutes=5)
 
+    def test_once_does_not_reconcile_unannounced_window(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_events_dir: Path,
+        fleet: dict[str, ClientConfig],
+    ) -> None:
+        """``--once`` must not emit startup recovery events."""
+        write_clients_yaml(*fleet.values())
+        add_ticket(TicketTask(ticket_id="GEN-once-recovery", client="client-a"))
+        merge_and_save_usage_limited_until(
+            {"client-a": datetime.now(UTC) + timedelta(hours=1)}
+        )
+
+        run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
+
+        assert read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED]) == []
+
 
 class TestUsageLimitArmedEvent:
     """#1409 review round 1: the set side needs a durable audit record too."""
@@ -544,3 +562,294 @@ class TestConcurrentWriterSurvivesTheSave:
             "client-a": now + timedelta(hours=1),
             "client-b": now + timedelta(hours=2),
         }
+
+
+class TestArmOrderIsDocumented:
+    """#2276: the persist-before-announce decision must not drift silently."""
+
+    def test_event_order_decision_is_documented(self) -> None:
+        events_doc = (Path(__file__).parent.parent / "docs" / "events.md").read_text(
+            encoding="utf-8"
+        )
+
+        assert "**Order decision (#2276" in events_doc
+        assert "the window is PERSISTED first" in events_doc
+
+
+class TestArmPersistsBeforeAnnouncing:
+    """#2276 R1: the armed event is recorded only after the window is on disk."""
+
+    def test_event_recorded_only_after_window_is_on_disk(
+        self,
+        tmp_events_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import cw.dispatch.usage_limit_windows as windows_mod
+        from cw.dispatch.usage_limit_windows import _arm_usage_limit_windows
+
+        real_record = windows_mod.record_usage_limit_armed
+        on_disk_at_emit: dict[str, datetime | None] = {}
+
+        def spy(client: str, *, until: datetime, reset_at: datetime | None) -> str:
+            on_disk_at_emit[client] = load_usage_limited_until().get(client)
+            return real_record(client, until=until, reset_at=reset_at)
+
+        monkeypatch.setattr(windows_mod, "record_usage_limit_armed", spy)
+        now = datetime.now(UTC)
+        parsed = now + timedelta(hours=2)
+
+        armed = _arm_usage_limit_windows(
+            {},
+            {"client-a": parsed, "client-b": None},
+            backoff_seconds=3600,
+        )
+
+        assert on_disk_at_emit["client-a"] == parsed
+        assert on_disk_at_emit["client-b"] == armed["client-b"]
+        events = read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED])
+        assert {e.payload["client"]: e.payload["source"] for e in events} == {
+            "client-a": "parsed_reset",
+            "client-b": "flat_backoff",
+        }
+
+    def test_failed_save_emits_no_event_and_keeps_in_memory_window(
+        self,
+        tmp_events_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+
+        from cw.dispatch.usage_limit_windows import _arm_usage_limit_windows
+
+        def disk_full(path: Path, text: str) -> None:
+            raise OSError(_DISK_FULL_MSG)
+
+        monkeypatch.setattr("cw.dispatch_state.atomic_write_text", disk_full)
+        caplog.set_level(logging.WARNING, logger="cw.dispatch")
+        now = datetime.now(UTC)
+        z_until = now + timedelta(minutes=5)
+
+        armed = _arm_usage_limit_windows(
+            {"client-z": z_until},
+            {"client-a": now + timedelta(hours=1)},
+            backoff_seconds=3600,
+        )
+
+        assert read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED]) == []
+        assert armed["client-a"] > now
+        assert armed["client-z"] == z_until
+        assert load_usage_limited_until() == {}
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("client-a" in m and "did not persist" in m for m in messages), (
+            messages
+        )
+        assert not any("usage limit detected" in m for m in messages), messages
+
+    def test_swallowed_noop_save_is_also_not_announced(
+        self,
+        tmp_events_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.dispatch.usage_limit_windows import _arm_usage_limit_windows
+
+        monkeypatch.setattr(
+            "cw.dispatch.usage_limit_windows.merge_and_save_usage_limited_until",
+            dict,
+        )
+        now = datetime.now(UTC)
+
+        armed = _arm_usage_limit_windows(
+            {}, {"client-a": now + timedelta(hours=1)}, backoff_seconds=3600
+        )
+
+        assert "client-a" in armed
+        assert read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED]) == []
+
+    def test_existing_later_window_is_not_reannounced(
+        self,
+        tmp_events_dir: Path,
+    ) -> None:
+        from cw.dispatch.usage_limit_windows import _arm_usage_limit_windows
+
+        now = datetime.now(UTC)
+        existing = now + timedelta(hours=2)
+        merge_and_save_usage_limited_until({"client-a": existing})
+
+        armed = _arm_usage_limit_windows(
+            {}, {"client-a": now + timedelta(hours=1)}, backoff_seconds=3600
+        )
+
+        assert armed["client-a"] == existing
+        assert read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED]) == []
+
+    def test_failed_save_with_existing_later_window_is_not_announced(
+        self,
+        tmp_events_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.dispatch.usage_limit_windows import _arm_usage_limit_windows
+
+        now = datetime.now(UTC)
+        existing = now + timedelta(hours=2)
+        merge_and_save_usage_limited_until({"client-a": existing})
+
+        def disk_full(path: Path, text: str) -> None:
+            raise OSError(_DISK_FULL_MSG)
+
+        monkeypatch.setattr("cw.dispatch_state.atomic_write_text", disk_full)
+
+        armed = _arm_usage_limit_windows(
+            {}, {"client-a": now + timedelta(hours=1)}, backoff_seconds=3600
+        )
+
+        assert armed["client-a"] == existing
+        assert load_usage_limited_until()["client-a"] == existing
+        assert read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED]) == []
+
+    def test_restart_reconciles_persisted_window_without_armed_event(
+        self,
+        tmp_events_dir: Path,
+    ) -> None:
+        from cw.dispatch.usage_limit_windows import (
+            _reconcile_unannounced_usage_limit_windows,
+        )
+
+        until = datetime.now(UTC) + timedelta(hours=1)
+        merge_and_save_usage_limited_until({"client-a": until})
+
+        _reconcile_unannounced_usage_limit_windows(load_usage_limited_until())
+
+        events = read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED])
+        assert [(e.payload["client"], e.payload["until"]) for e in events] == [
+            ("client-a", until.isoformat())
+        ]
+
+    def test_arm_and_persist_failed_save_still_returns_window_and_armed_at(
+        self,
+        tmp_events_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.dispatch.usage_limit_windows import _arm_and_persist_usage_limit_window
+
+        def disk_full(path: Path, text: str) -> None:
+            raise OSError(_DISK_FULL_MSG)
+
+        monkeypatch.setattr("cw.dispatch_state.atomic_write_text", disk_full)
+        now = datetime.now(UTC)
+
+        merged, armed_at = _arm_and_persist_usage_limit_window(
+            {},
+            {"client-a": now + timedelta(hours=1)},
+            backoff_seconds=3600,
+        )
+
+        assert "client-a" in merged
+        assert isinstance(armed_at, datetime)
+        assert read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED]) == []
+
+    def test_arm_and_persist_success_persists_window_and_armed_at(
+        self,
+        tmp_events_dir: Path,
+    ) -> None:
+        from cw.dispatch.usage_limit_windows import _arm_and_persist_usage_limit_window
+        from cw.dispatch_state import load_usage_limit_armed_at
+
+        now = datetime.now(UTC)
+        until = now + timedelta(hours=1)
+
+        merged, armed_at = _arm_and_persist_usage_limit_window(
+            {}, {"client-a": until}, backoff_seconds=3600
+        )
+
+        assert merged["client-a"] == until
+        assert load_usage_limited_until()["client-a"] == until
+        assert load_usage_limit_armed_at() == armed_at
+        events = read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED])
+        assert [e.payload["client"] for e in events] == ["client-a"]
+
+
+class TestReconcileFallbackSkipsActiveWindows:
+    """#2276 R2: the reconcile fallback never re-arms a client with an open window."""
+
+    def test_reconcile_detection_skips_clients_with_an_active_window(
+        self,
+        tmp_dispatch_dirs: Path,
+        fleet: dict[str, ClientConfig],
+        fleet_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        write_clients_yaml(*fleet.values())
+        monkeypatch.setattr(
+            "cw.dispatch.tick._reconcile_usage_limited", lambda **_kw: True
+        )
+        active = datetime.now(UTC) + timedelta(minutes=10)
+
+        result = dispatch_tick(
+            fleet_config,
+            native_daemon=FakeNativeDaemonClient(),
+            usage_limited_until={"client-a": active},
+        )
+
+        assert result.usage_limit_detected is True
+        assert result.usage_limit_clients == {"client-b": None, "client-c": None}
+
+    def test_reconcile_fallback_does_not_overwrite_an_active_parsed_window(
+        self,
+        tmp_dispatch_dirs: Path,
+        fleet: dict[str, ClientConfig],
+        fleet_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.dispatch.usage_limit_windows import _arm_and_persist_usage_limit_window
+
+        write_clients_yaml(*fleet.values())
+        monkeypatch.setattr(
+            "cw.dispatch.tick._reconcile_usage_limited", lambda **_kw: True
+        )
+        now = datetime.now(UTC)
+        parsed = now + timedelta(minutes=10)  # shorter than the 3600s flat window
+        merge_and_save_usage_limited_until({"client-a": parsed})
+        current = load_usage_limited_until()
+
+        result = dispatch_tick(
+            fleet_config,
+            native_daemon=FakeNativeDaemonClient(),
+            usage_limited_until=current,
+        )
+        merged, _armed_at = _arm_and_persist_usage_limit_window(
+            current,
+            result.usage_limit_clients,
+            backoff_seconds=3600,
+        )
+
+        assert load_usage_limited_until()["client-a"] == parsed
+        assert merged["client-a"] == parsed
+        assert merged["client-b"] > now
+        armed_clients = {
+            e.payload["client"]
+            for e in read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED])
+        }
+        assert armed_clients == {"client-b", "client-c"}
+
+    def test_reconcile_detection_with_client_filter_arms_only_unlimited_known_clients(
+        self,
+        tmp_dispatch_dirs: Path,
+        fleet: dict[str, ClientConfig],
+        fleet_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        write_clients_yaml(*fleet.values())
+        monkeypatch.setattr(
+            "cw.dispatch.tick._reconcile_usage_limited", lambda **_kw: True
+        )
+        active = datetime.now(UTC) + timedelta(minutes=10)
+
+        result = dispatch_tick(
+            fleet_config,
+            native_daemon=FakeNativeDaemonClient(),
+            client_filter="client-b",
+            usage_limited_until={"client-a": active},
+        )
+
+        assert result.usage_limit_clients == {"client-b": None, "client-c": None}

@@ -640,7 +640,34 @@ time that parsed (and survived the 7-day clamp), `flat_backoff` when it did
 not and the window fell back to `usage_limit_backoff_seconds`. The phantom
 sweep's transcript-derived detection (`ReconcileReport.usage_limited`, a
 roster-absent session) names no client at all, so the dispatch loop arms every
-known client with `source: "flat_backoff"` for it. The mid-turn sweep (#2324)
+known client with no open window with `source: "flat_backoff"` for it. A
+client whose window is still open is left alone: re-arming it would overwrite
+a live parsed deadline with the flat one (#2276).
+
+Startup recovery of a persisted window whose armed event is missing also uses
+`source: "flat_backoff"`: the sidecar stores the deadline, but not the parser
+provenance.
+
+**Order decision (#2276, recorded once here; the docstrings point at this
+section).** The two arming paths deliberately differ. On the dispatch-loop
+path (`_arm_usage_limit_windows`) the window is PERSISTED first, read back to
+verify, and only then is this event recorded: an armed event must never claim
+a window the write lost. The save swallows `OSError`, so the read-back is the
+only check. A failed save records no event and logs a warning, but the window
+stays in the returned map and the loop still backs off in memory for this
+process. Reconcile's mid-turn path (`cw.reconcile.usage_limit_mid_turn`) is
+the reverse, audit FIRST then persist, by design: its resume path skips
+re-arming once the window lands (`_lockout_covers`), so the audit must
+precede the write to stay idempotent. The residual cost of the dispatch-loop
+order: an event-write failure after a successful persist leaves a durable
+window with no audit line. The loop errors out rather than continuing. On
+restart, before the first normal tick, the loop compares active sidecar
+windows with the retained armed events and records a recovery event for each
+missing audit line; if recovery cannot be recorded, normal dispatch does not
+resume. Because the original failing event write raises before
+`save_usage_limit_armed_at` runs, the fleet-level marker may remain stale or
+null; recovery repairs the audit line without changing that marker. The
+mid-turn sweep (#2324)
 is different: it detects a roster-present worker whose transcript tail is the
 limit message, arms only that session's client, and parses the message's reset
 time, so it can report either `source` — see `"usage_limited_mid_turn"` under
@@ -672,8 +699,10 @@ usage-limit back-off window (`usage_limited_until`) transition from active
 to lapsed — never per-client; `clients_affected` carries the full cohort in
 a single event. `clients_affected` and `sessions_affected` are computed by
 scanning `session.timed_out` events with `cause: "usage_limit_cutoff"`
-recorded since `detected_at`. `detected_at` is the persisted arm timestamp
-(the moment the window was opened, not derived from
+recorded since `detected_at`. `detected_at` is the persisted arm timestamp,
+which is fleet-level: the LATEST arm time across clients, not a per-client
+time (#2276; no per-client arm time is recorded). It is the moment the window
+was opened, not derived from
 `usage_limit_backoff_seconds`); it is `null` when that timestamp failed to
 persist or predates this window's arming — the event still fires rather
 than being dropped, but the cohort scan degrades to unbounded history in
