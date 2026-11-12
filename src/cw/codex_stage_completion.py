@@ -21,7 +21,8 @@ from typing import TYPE_CHECKING
 
 from cw.codex_review import STAGE3_REVIEW, make_codex_blocked
 from cw.codex_review_signals import COMMON_TURN_FAULTS
-from cw.config import sessions_lock
+from cw.codex_usage import NO_USAGE
+from cw.config import mutate_state, sessions_lock
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.dispatch_state import (
     ExecutorBlockedMarker,
@@ -38,13 +39,15 @@ if TYPE_CHECKING:
     from typing import Any
 
     from cw.auto_dev_result import StageReached
-    from cw.models import TicketTask
+    from cw.codex_usage import UsageAccumulator
+    from cw.models import CwState, TicketTask
 
 __all__ = [
     "STAGE_FAULTS",
     "clear_stage_blocked_marker",
     "complete_session_as_unexpected_error",
     "complete_session_through_door",
+    "flush_late_usage",
     "revert_claimed_row_after_unexpected_error",
     "run_guarded_stage",
     "save_stage_blocked_marker",
@@ -135,21 +138,58 @@ def clear_stage_blocked_marker(client_name: str, ticket_id: str) -> None:
 
 
 def complete_session_through_door(
-    sid: str, payload: dict[str, Any], *, guard_already_completed: bool = False
+    sid: str,
+    payload: dict[str, Any],
+    *,
+    guard_already_completed: bool = False,
+    usage: UsageAccumulator = NO_USAGE,
 ) -> None:
     """Persist *payload* as the session's result through the completion door.
 
     Takes ``sessions_lock()`` here, so callers must not already hold it: the
     lock is not re-entrant (ADR-0019).
+
+    *usage* (#3063) is snapshotted, parsed and priced, BEFORE the lock is
+    taken; the in-lock door receives only the ready ``UsageSnapshot``, which it
+    assigns. The default :data:`~cw.codex_usage.NO_USAGE` records nothing.
     """
     # Deferred: cw.executor imports this module at its top (executor/codex.py
     # takes the stamp from here), so a module-level import would be circular.
     from cw.executor import _complete_session_via_door
 
+    snapshot = usage.snapshot()
     with sessions_lock():
         _complete_session_via_door(
-            sid=sid, payload=payload, guard_already_completed=guard_already_completed
+            sid=sid,
+            payload=payload,
+            guard_already_completed=guard_already_completed,
+            usage=snapshot,
         )
+
+
+def flush_late_usage(sid: str, usage: UsageAccumulator) -> None:
+    """Rewrite the session's usage when turns were recorded after the door (#3063).
+
+    The tracker-IO post runs after the completion door, so its turn is not in
+    the door's snapshot. This is the second and last write: it re-snapshots
+    (a superset of the door's) outside any lock and assigns it through
+    :func:`~cw.config.mutate_state`. A no-op when nothing was recorded since
+    the last snapshot, and when *sid* is no longer in state. Call it only after
+    the door returned and outside any ``sessions_lock`` block.
+    """
+    if not usage.dirty:
+        return
+    snapshot = usage.snapshot()
+    if snapshot is None:
+        return
+
+    def _assign(state: CwState) -> None:
+        target = next((s for s in state.sessions if s.id == sid), None)
+        if target is not None:
+            target.usage = snapshot.usage
+            target.cost_breakdown = snapshot.cost_breakdown
+
+    mutate_state(_assign)
 
 
 def complete_session_as_unexpected_error(
@@ -158,13 +198,15 @@ def complete_session_as_unexpected_error(
     worktree: Path,
     *,
     stage_reached: StageReached = STAGE3_REVIEW,
+    usage: UsageAccumulator = NO_USAGE,
 ) -> None:
     """Complete a session with a blocked/unexpected-error payload via the door.
 
     Used by the stage thread's own except branch, which may be racing the
     completion door's success path, hence ``guard_already_completed=True``.
     *stage_reached* names the stage that failed (#3060); the REVIEW default
-    keeps the review thread's payload byte-identical.
+    keeps the review thread's payload byte-identical. *usage* (#3063) persists
+    the tokens a crashed run spent before it failed.
     """
     complete_session_through_door(
         sid,
@@ -175,6 +217,7 @@ def complete_session_as_unexpected_error(
             stage_reached=stage_reached,
         ).model_dump(mode="json"),
         guard_already_completed=True,
+        usage=usage,
     )
 
 
@@ -202,6 +245,7 @@ def run_guarded_stage(
     sid: str,
     stage_reached: StageReached,
     body: Callable[[], None],
+    usage: UsageAccumulator = NO_USAGE,
 ) -> None:
     """Run a codex stage *body* under the shared top-frame guard (#3060).
 
@@ -226,7 +270,7 @@ def run_guarded_stage(
             stage_reached,
         )
         complete_session_as_unexpected_error(
-            sid, task, worktree, stage_reached=stage_reached
+            sid, task, worktree, stage_reached=stage_reached, usage=usage
         )
         revert_claimed_row_after_unexpected_error(
             client_name=client_name, ticket_id=task.ticket_id, session_id=sid
