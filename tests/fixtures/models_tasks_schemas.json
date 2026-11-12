@@ -1153,6 +1153,19 @@
        ],
        "default": null,
        "title": "Audited At"
+      },
+      "escalated_at": {
+       "anyOf": [
+        {
+         "format": "date-time",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Escalated At"
       }
      },
      "required": [
@@ -4256,6 +4269,19 @@
        ],
        "default": null,
        "title": "Audited At"
+      },
+      "escalated_at": {
+       "anyOf": [
+        {
+         "format": "date-time",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Escalated At"
       }
      },
      "required": [
@@ -6411,6 +6437,19 @@
        ],
        "default": null,
        "title": "Audited At"
+      },
+      "escalated_at": {
+       "anyOf": [
+        {
+         "format": "date-time",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Escalated At"
       }
      },
      "required": [
@@ -6649,6 +6688,19 @@
      ],
      "default": null,
      "title": "Audited At"
+    },
+    "escalated_at": {
+     "anyOf": [
+      {
+       "format": "date-time",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Escalated At"
     }
    },
    "required": [
@@ -7864,6 +7916,19 @@
        ],
        "default": null,
        "title": "Audited At"
+      },
+      "escalated_at": {
+       "anyOf": [
+        {
+         "format": "date-time",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Escalated At"
       }
      },
      "required": [
@@ -10967,6 +11032,19 @@
        ],
        "default": null,
        "title": "Audited At"
+      },
+      "escalated_at": {
+       "anyOf": [
+        {
+         "format": "date-time",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Escalated At"
       }
      },
      "required": [
