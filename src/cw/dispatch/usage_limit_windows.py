@@ -86,6 +86,9 @@ def _arm_usage_limit_windows(
     ``docs/events.md`` for the decision.
     """
     now = datetime.now(UTC)
+    previously_known = merge_usage_limited_until(
+        usage_limited_until, load_usage_limited_until()
+    )
     armed = dict(usage_limited_until)
     resolved: dict[str, tuple[datetime, datetime | None]] = {}
     for client, reset_at in detections.items():
@@ -95,8 +98,17 @@ def _arm_usage_limit_windows(
     merged = merge_and_save_usage_limited_until(armed)
     persisted = load_usage_limited_until()
     for client, (until, reset_at) in resolved.items():
-        landed = (p := persisted.get(client)) is not None and p >= until
-        if not landed:
+        effective_until = merged.get(client)
+        was_already_covered = (
+            previous_until := previously_known.get(client)
+        ) is not None and previous_until >= until
+        if was_already_covered:
+            continue
+        if (
+            effective_until is None
+            or effective_until < until
+            or persisted.get(client) != effective_until
+        ):
             _log.warning(
                 "dispatch: usage limit window for %s (until %s) did not persist; "
                 "backing off in memory only, no %s event recorded",
@@ -105,11 +117,13 @@ def _arm_usage_limit_windows(
                 OrchestratorEventType.USAGE_LIMIT_ARMED.value,
             )
             continue
-        source = record_usage_limit_armed(client, until=until, reset_at=reset_at)
+        source = record_usage_limit_armed(
+            client, until=effective_until, reset_at=reset_at
+        )
         _log.warning(
             "dispatch: usage limit detected for %s; backing off until %s (%s)",
             client,
-            until,
+            effective_until,
             source,
         )
     return merged

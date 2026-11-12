@@ -649,6 +649,47 @@ class TestArmPersistsBeforeAnnouncing:
         assert "client-a" in armed
         assert read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED]) == []
 
+    def test_existing_later_window_is_not_reannounced(
+        self,
+        tmp_events_dir: Path,
+    ) -> None:
+        from cw.dispatch.usage_limit_windows import _arm_usage_limit_windows
+
+        now = datetime.now(UTC)
+        existing = now + timedelta(hours=2)
+        merge_and_save_usage_limited_until({"client-a": existing})
+
+        armed = _arm_usage_limit_windows(
+            {}, {"client-a": now + timedelta(hours=1)}, backoff_seconds=3600
+        )
+
+        assert armed["client-a"] == existing
+        assert read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED]) == []
+
+    def test_failed_save_with_existing_later_window_is_not_announced(
+        self,
+        tmp_events_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.dispatch.usage_limit_windows import _arm_usage_limit_windows
+
+        now = datetime.now(UTC)
+        existing = now + timedelta(hours=2)
+        merge_and_save_usage_limited_until({"client-a": existing})
+
+        def disk_full(path: Path, text: str) -> None:
+            raise OSError(_DISK_FULL_MSG)
+
+        monkeypatch.setattr("cw.dispatch_state.atomic_write_text", disk_full)
+
+        armed = _arm_usage_limit_windows(
+            {}, {"client-a": now + timedelta(hours=1)}, backoff_seconds=3600
+        )
+
+        assert armed["client-a"] < existing
+        assert load_usage_limited_until()["client-a"] == existing
+        assert read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED]) == []
+
     def test_arm_and_persist_failed_save_still_returns_window_and_armed_at(
         self,
         tmp_events_dir: Path,
