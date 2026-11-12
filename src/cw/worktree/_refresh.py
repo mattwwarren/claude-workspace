@@ -1,7 +1,8 @@
 """Reuse refresh orchestration for reused worktrees (#2213).
 
-When :func:`~cw.worktree.create_worktree` reuses an existing worktree with
-``refresh_on_reuse`` set, this module runs the refresh: the occupancy gate
+When :func:`~cw.worktree.create_worktree` reuses an existing worktree with a
+``refresh`` options object (:class:`~cw.worktree.ReuseRefreshOptions`, #2238),
+this module runs the refresh: the occupancy gate
 (:mod:`cw.worktree._occupancy`), the fetch of ``origin/<branch>``, the
 branch-absent handling (#2328), and the classification of HEAD against the
 fetched ref that hands a behind tree to the fast-forward
@@ -260,8 +261,8 @@ def _refresh_reused_worktree(
 ) -> RefreshResult:
     """Best-effort fetch, then fast-forward a *behind, unoccupied* reused worktree.
 
-    Called from :func:`create_worktree` only when ``refresh_on_reuse`` is set
-    (#2213), after its branch-identity and unsaved-work guards. Closes the
+    Called from :func:`create_worktree` only when its ``refresh`` options are
+    passed (#2213, #2238), after its branch-identity and unsaved-work guards. Closes the
     asymmetry between the first-time path (which fetches) and the reuse path
     (which used to return the worktree untouched): a per-ticket worktree reused
     across pipeline stages could sit on a stale HEAD while ``origin/<branch>``

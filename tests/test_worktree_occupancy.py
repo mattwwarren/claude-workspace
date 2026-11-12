@@ -16,6 +16,7 @@ from cw.models import ClientConfig, SessionStatus
 from cw.worktree import (
     FetchResult,
     RefreshOutcome,
+    ReuseRefreshOptions,
     TickFetchGate,
     _occupancy_verdict,
     _reuse_occupancy,
@@ -48,9 +49,10 @@ if TYPE_CHECKING:
 
 
 class TestCreateWorktreeReuseRefresh:
-    """#2213: with ``refresh_on_reuse=True`` the reuse path best-effort fetches
-    and fast-forwards a *behind, unoccupied, clean* worktree. It never resets,
-    never raises, and leaves an occupied or diverged worktree exactly as it is."""
+    """#2213: with a ``refresh`` options object (#2238) the reuse path
+    best-effort fetches and fast-forwards a *behind, unoccupied, clean*
+    worktree. It never resets, never raises, and leaves an occupied or
+    diverged worktree exactly as it is."""
 
     @pytest.mark.parametrize("source", ["state", "roster"])
     def test_live_occupant_raises_and_nothing_is_fetched(
@@ -171,7 +173,10 @@ class TestCreateWorktreeReuseRefresh:
 
         with pytest.raises(WorktreeError) as excinfo:
             create_worktree(
-                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+                client,
+                _REUSE_BRANCH,
+                allow_dirty_reuse=True,
+                refresh=ReuseRefreshOptions(),
             )
 
         assert isinstance(excinfo.value, WorktreeOccupiedError)
@@ -183,7 +188,7 @@ class TestCreateWorktreeReuseRefresh:
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
     ) -> None:
-        """``refresh_on_reuse=False`` is unchanged: path resolution only, so it
+        """``refresh=None`` (the default) is unchanged: path resolution only, so it
         neither consults occupancy nor raises (``cw start`` does not opt in)."""
         client, wt, workspace, old_sha, _new = _seed_behind(tmp_path, make_git_repo)
         _occupy("roster", workspace, wt)

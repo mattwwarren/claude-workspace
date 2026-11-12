@@ -19,6 +19,7 @@ from cw.worktree import (
     FetchResult,
     RefreshOutcome,
     RefreshResult,
+    ReuseRefreshOptions,
     ReuseRefreshReport,
     TickFetchGate,
     _Occupancy,
@@ -49,9 +50,10 @@ if TYPE_CHECKING:
 
 
 class TestCreateWorktreeReuseRefresh:
-    """#2213: with ``refresh_on_reuse=True`` the reuse path best-effort fetches
-    and fast-forwards a *behind, unoccupied, clean* worktree. It never resets,
-    never raises, and leaves an occupied or diverged worktree exactly as it is."""
+    """#2213: with a ``refresh`` options object (#2238) the reuse path
+    best-effort fetches and fast-forwards a *behind, unoccupied, clean*
+    worktree. It never resets, never raises, and leaves an occupied or
+    diverged worktree exactly as it is."""
 
     def test_default_reuse_does_not_fetch_or_move(
         self,
@@ -102,7 +104,7 @@ class TestCreateWorktreeReuseRefresh:
                 client,
                 _REUSE_BRANCH,
                 allow_dirty_reuse=allow_dirty_reuse,
-                refresh_on_reuse=True,
+                refresh=ReuseRefreshOptions(),
             )
 
         assert result == wt
@@ -166,7 +168,10 @@ class TestCreateWorktreeReuseRefresh:
         caplog.clear()  # drop seed-phase records
         with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
             result = create_worktree(
-                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+                client,
+                _REUSE_BRANCH,
+                allow_dirty_reuse=True,
+                refresh=ReuseRefreshOptions(),
             )
 
         # The occupancy check is pre-network: no fetch, HEAD and edit untouched.
@@ -206,7 +211,10 @@ class TestCreateWorktreeReuseRefresh:
         caplog.clear()  # drop seed-phase records
         with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
             result = create_worktree(
-                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+                client,
+                _REUSE_BRANCH,
+                allow_dirty_reuse=True,
+                refresh=ReuseRefreshOptions(),
             )
 
         assert result == wt
@@ -253,7 +261,7 @@ class TestCreateWorktreeReuseRefresh:
                     client,
                     _REUSE_BRANCH,
                     allow_dirty_reuse=True,
-                    refresh_on_reuse=True,
+                    refresh=ReuseRefreshOptions(),
                 )
             assert result == wt
             assert git_in(wt, "rev-parse", "HEAD") == new_sha
@@ -263,7 +271,10 @@ class TestCreateWorktreeReuseRefresh:
             pytest.raises(WorktreeOccupiedError) as excinfo,
         ):
             create_worktree(
-                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+                client,
+                _REUSE_BRANCH,
+                allow_dirty_reuse=True,
+                refresh=ReuseRefreshOptions(),
             )
 
         assert excinfo.value.path == wt
@@ -302,7 +313,10 @@ class TestCreateWorktreeReuseRefresh:
             pytest.raises(WorktreeOccupiedError) as excinfo,
         ):
             create_worktree(
-                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+                client,
+                _REUSE_BRANCH,
+                allow_dirty_reuse=True,
+                refresh=ReuseRefreshOptions(),
             )
 
         assert excinfo.value.path == wt
@@ -331,7 +345,10 @@ class TestCreateWorktreeReuseRefresh:
         caplog.clear()  # drop seed-phase records
         with caplog.at_level(logging.INFO, logger="cw.worktree"):
             result = create_worktree(
-                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+                client,
+                _REUSE_BRANCH,
+                allow_dirty_reuse=True,
+                refresh=ReuseRefreshOptions(),
             )
 
         assert result == wt
@@ -355,7 +372,10 @@ class TestCreateWorktreeReuseRefresh:
 
         with pytest.raises(StaleWorktreeError):
             create_worktree(
-                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+                client,
+                _REUSE_BRANCH,
+                allow_dirty_reuse=True,
+                refresh=ReuseRefreshOptions(),
             )
 
         assert fetched == []
@@ -368,7 +388,7 @@ class TestCreateWorktreeReuseRefresh:
     ) -> None:
         client, _wt, _origin, workspace = _seed_reuse(tmp_path, make_git_repo)
 
-        created = create_worktree(client, "dev/fresh", refresh_on_reuse=True)
+        created = create_worktree(client, "dev/fresh", refresh=ReuseRefreshOptions())
 
         assert created.exists()
         assert git_in(created, "branch", "--show-current") == "dev/fresh"
@@ -393,7 +413,10 @@ class TestCreateWorktreeReuseRefresh:
         caplog.clear()  # drop seed-phase records
         with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
             result = create_worktree(
-                client, never_pushed, allow_dirty_reuse=True, refresh_on_reuse=True
+                client,
+                never_pushed,
+                allow_dirty_reuse=True,
+                refresh=ReuseRefreshOptions(),
             )
 
         assert result == wt
@@ -418,7 +441,10 @@ class TestCreateWorktreeReuseRefresh:
         caplog.clear()  # drop seed-phase records
         with caplog.at_level(logging.INFO, logger="cw.worktree"):
             result = create_worktree(
-                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+                client,
+                _REUSE_BRANCH,
+                allow_dirty_reuse=True,
+                refresh=ReuseRefreshOptions(),
             )
 
         assert result == wt
@@ -660,8 +686,7 @@ class TestCreateWorktreeReuseRefresh:
             client,
             never_pushed,
             allow_dirty_reuse=True,
-            refresh_on_reuse=True,
-            refresh_report=report,
+            refresh=ReuseRefreshOptions(report=report),
         )
 
         fetched = fetch_feature_branch(client, never_pushed)
@@ -837,8 +862,7 @@ class TestCreateWorktreeReuseRefresh:
                 client,
                 "feat/oserror",
                 allow_dirty_reuse=True,
-                refresh_on_reuse=True,
-                refresh_report=report,
+                refresh=ReuseRefreshOptions(report=report),
             )
 
         assert result == wt_path
@@ -912,8 +936,7 @@ class TestCreateWorktreeReuseRefresh:
             client,
             never_pushed,
             allow_dirty_reuse=True,
-            refresh_on_reuse=True,
-            refresh_report=report,
+            refresh=ReuseRefreshOptions(report=report),
         )
 
         assert path == wt
@@ -945,8 +968,7 @@ class TestCreateWorktreeReuseRefresh:
             client,
             never_pushed,
             allow_dirty_reuse=True,
-            refresh_on_reuse=True,
-            refresh_report=report,
+            refresh=ReuseRefreshOptions(report=report),
         )
 
         assert path == wt2
@@ -1039,8 +1061,7 @@ class TestCreateWorktreeReuseRefresh:
             client,
             never_pushed,
             allow_dirty_reuse=True,
-            refresh_on_reuse=True,
-            refresh_report=report,
+            refresh=ReuseRefreshOptions(report=report),
         )
 
         assert path == wt2
@@ -1100,7 +1121,10 @@ class TestCreateWorktreeReuseRefresh:
 
         with pytest.raises(AssertionError):
             create_worktree(
-                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+                client,
+                _REUSE_BRANCH,
+                allow_dirty_reuse=True,
+                refresh=ReuseRefreshOptions(),
             )
 
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
@@ -1122,7 +1146,10 @@ class TestCreateWorktreeReuseRefresh:
 
         with pytest.raises(AssertionError):
             create_worktree(
-                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+                client,
+                _REUSE_BRANCH,
+                allow_dirty_reuse=True,
+                refresh=ReuseRefreshOptions(),
             )
 
     def test_is_main_behind_origin_rejects_an_unknown_fetch_outcome(
@@ -1140,11 +1167,13 @@ class TestCreateWorktreeReuseRefresh:
     def test_refresh_report_is_optional(
         self, tmp_path: Path, make_git_repo: Callable[..., Path]
     ) -> None:
-        """A caller with no surface (the dispatch claim) passes none."""
+        """The options object's ``report`` is optional (#2238): a caller with no
+        friction surface (the dispatch claim) leaves it ``None`` and the
+        refresh still runs, into a throwaway report."""
         client, wt, _workspace, _old, new_sha = _seed_behind(tmp_path, make_git_repo)
 
         create_worktree(
-            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh=ReuseRefreshOptions()
         )
 
         assert git_in(wt, "rev-parse", "HEAD") == new_sha

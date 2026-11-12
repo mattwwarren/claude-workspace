@@ -1,16 +1,20 @@
-"""Result and report types for the reuse refresh (#2213).
+"""Option, result and report types for the reuse refresh (#2213, #2238).
 
-:class:`RefreshOutcome`, :class:`RefreshResult` and :class:`ReuseRefreshReport`
-are shared by the occupancy check, the fast-forward, the refresh orchestration
-and ``create_worktree``, so they live in this dependency-free leaf. It also
-holds :data:`_LOGGER_NAME`, the one logger name the reuse-refresh submodules
-share.
+:class:`RefreshOutcome`, :class:`RefreshResult`, :class:`ReuseRefreshReport`
+and :class:`ReuseRefreshOptions` are shared by the occupancy check, the
+fast-forward, the refresh orchestration and ``create_worktree``, so they live
+in this runtime dependency-free leaf. It also holds :data:`_LOGGER_NAME`, the
+one logger name the reuse-refresh submodules share.
 """
 
 from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from cw.native_daemon import NativeDaemonClient
 
 # Every reuse-refresh submodule logs under the pre-split ``_refresh`` module
 # name, so operator log filters survive the #2569 split.
@@ -59,8 +63,9 @@ class RefreshResult:
 class ReuseRefreshReport:
     """What the reuse refresh learned, for callers that must act on it (#2213).
 
-    ``create_worktree`` returns only a path. A caller that opts into
-    ``refresh_on_reuse`` and needs more than that passes one of these in:
+    ``create_worktree`` returns only a path. A caller that opts into the
+    refresh and needs more than that passes one of these in, as
+    ``refresh=ReuseRefreshOptions(report=...)``:
 
     - ``notes``: one single-line entry per refresh FAILURE the caller cannot
       otherwise see, each naming the worktree and the reason -- the fetch
@@ -86,3 +91,32 @@ class ReuseRefreshReport:
     notes: list[str] = field(default_factory=list)
     outcome: RefreshOutcome | None = None
     reason: str | None = None
+
+
+@dataclass(frozen=True)
+class ReuseRefreshOptions:
+    """A caller's opt-in to ``create_worktree``'s reuse refresh (#2238).
+
+    Passing one of these as ``refresh=`` IS the opt-in; ``refresh=None`` (the
+    default) is path resolution only. The fields used to be four loose
+    ``create_worktree`` kwargs, three of which were silently ignored unless a
+    fourth flag was set. Grouping them makes "a report, ticket or daemon
+    without the refresh" unrepresentable, so there is nothing to validate.
+
+    - ``report``: the optional :class:`ReuseRefreshReport` out-parameter.
+      ``None`` is for a caller with no friction surface (the dispatch claim);
+      ``create_worktree`` then refreshes into a throwaway report. The options
+      object is frozen but the report it holds is not: it is the caller's own
+      object, filled in before ``create_worktree`` returns or raises.
+    - ``ticket_id``: the ticket the caller is working, for the
+      ``worktree.fast_forwarded`` audit event only (payload ``ticket_id`` and
+      ``correlation_id``). It has no other effect.
+    - ``native_daemon``: the caller's own
+      :class:`~cw.native_daemon.NativeDaemonClient` for the occupancy check's
+      roster read, so an injected fake is consulted instead of the host's real
+      roster. ``None`` uses :func:`~cw.native_daemon.get_native_daemon_client`.
+    """
+
+    report: ReuseRefreshReport | None = None
+    ticket_id: str | None = None
+    native_daemon: NativeDaemonClient | None = None

@@ -52,6 +52,7 @@ from cw.queue_rows import (
 )
 from cw.spawn import emit_spawn_post_launch_attention
 from cw.worktree import (
+    ReuseRefreshOptions,
     check_not_main_checkout,
     create_worktree,
     live_home_reason,
@@ -247,7 +248,7 @@ def _defer_occupied_claim(
 ) -> _SpawnOutcome:
     """Release a claim whose reused worktree is occupied; spawn nothing (#2213).
 
-    ``create_worktree(refresh_on_reuse=True)`` raised
+    ``create_worktree(refresh=ReuseRefreshOptions(...))`` raised
     :exc:`~cw.exceptions.WorktreeOccupiedError`: a live cw session, a live
     daemon-roster worker, or an indeterminate read of either (fail closed) may be
     operating in the ticket's per-ticket worktree. Spawning a second worker into
@@ -606,7 +607,7 @@ def _spawn_claimed_task(
         try:
             # allow_dirty_reuse: staged stages reuse one per-ticket
             # worktree and legitimately leave cross-stage churn (#712).
-            # refresh_on_reuse (#2213): a reused per-ticket worktree can sit
+            # refresh (#2213, #2238): a reused per-ticket worktree can sit
             # behind origin/<branch>, so ask for a best-effort refresh. NOTE
             # this does a network `git fetch` (can be slow) and fast-forwards
             # only an unoccupied (no live cw session or daemon-roster worker),
@@ -629,15 +630,18 @@ def _spawn_claimed_task(
             #     tree: an occupied one is never removed). A stale
             #     (wrong-branch) tree gets its own occupancy check inside
             #     that branch and reaches the same deferral.
-            # ticket_id: names the ticket on the worktree.fast_forwarded audit
-            # event a refresh that moves HEAD records; no other effect.
+            # No report: there is no friction surface here. ticket_id names
+            # the ticket on the worktree.fast_forwarded audit event a refresh
+            # that moves HEAD records; no other effect. native_daemon is the
+            # tick's own client, so an injected fake is the one consulted.
             worktree_path = create_worktree(
                 client,
                 branch,
                 allow_dirty_reuse=True,
-                refresh_on_reuse=True,
-                ticket_id=task.ticket_id,
-                native_daemon=resolved_native_daemon,
+                refresh=ReuseRefreshOptions(
+                    ticket_id=task.ticket_id,
+                    native_daemon=resolved_native_daemon,
+                ),
             )
         except StaleWorktreeError:
             # A stale worktree (wrong branch / not a worktree) refused
