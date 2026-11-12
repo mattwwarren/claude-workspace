@@ -245,6 +245,38 @@ def test_resolve_effective_automerge_required_false_base_stays_false(
     assert _mod.resolve_effective_automerge_required(base_required=False) is False
 
 
+def test_resolve_effective_monitor_required_downgrades_when_config_false(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_project_config_yaml(tmp_path, "pr:\n  auto_merge: false\n")
+    assert _mod.resolve_effective_monitor_required(base_required=True) is False
+
+
+@pytest.mark.parametrize(
+    "config_content",
+    [
+        pytest.param("pr:\n  auto_merge: true\n", id="explicit-true"),
+        pytest.param(None, id="absent"),
+    ],
+)
+def test_resolve_effective_monitor_required_stays_true_otherwise(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, config_content: str | None
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    if config_content is not None:
+        _write_project_config_yaml(tmp_path, config_content)
+    assert _mod.resolve_effective_monitor_required(base_required=True) is True
+
+
+def test_resolve_effective_monitor_required_false_base_stays_false(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_project_config_yaml(tmp_path, "pr:\n  auto_merge: false\n")
+    assert _mod.resolve_effective_monitor_required(base_required=False) is False
+
+
 def _run_verify_with_pr(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -253,8 +285,13 @@ def _run_verify_with_pr(
     state: str,
     auto_merge_request: dict[str, str] | None,
     config_yaml: str | None = None,
+    extra_args: tuple[str, ...] = (),
+    pr_view_fails: bool = False,
 ) -> tuple[int, dict[str, object]]:
     """Run `verify --require-automerge --json` against a faked `gh pr view`.
+
+    ``extra_args`` are appended to the verify command line; ``pr_view_fails``
+    makes `gh pr view` exit non-zero (no PR for the branch).
 
     Returns (exit_code, parsed JSON payload).
     """
@@ -276,6 +313,10 @@ def _run_verify_with_pr(
         cmd: list[str], check: bool = False, capture: bool = True
     ) -> subprocess.CompletedProcess[str]:
         if cmd[:3] == ["gh", "pr", "view"]:
+            if pr_view_fails:
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=1, stdout="", stderr="no pull requests found"
+                )
             payload = {
                 "number": 42,
                 "url": "https://github.com/example/repo/pull/42",
@@ -294,7 +335,14 @@ def _run_verify_with_pr(
     monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
 
     args = _mod.build_parser().parse_args(
-        ["verify", "--branch", "feature-branch", "--require-automerge", "--json"]
+        [
+            "verify",
+            "--branch",
+            "feature-branch",
+            "--require-automerge",
+            *extra_args,
+            "--json",
+        ]
     )
     exit_code = _mod.cmd_verify(args)
 
@@ -332,6 +380,140 @@ def test_cmd_verify_downgrades_automerge_when_config_disabled(
     warnings = payload["warnings"]
     assert isinstance(warnings, list)
     assert any("pr.auto_merge: false" in w for w in warnings)
+
+
+# --- monitor-registered downgrade when pr.auto_merge: false (#3548) ---
+
+_MONITOR_WARNING = "monitor-registered check treated as optional"
+
+
+def _warnings(payload: dict[str, object]) -> list[str]:
+    warnings = payload["warnings"]
+    assert isinstance(warnings, list)
+    return [str(w) for w in warnings]
+
+
+def test_cmd_verify_downgrades_monitor_when_config_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """pr.auto_merge: false means no monitor is ever registered; the check is
+    reported optional and verify stays ok instead of failing finalize Step 4c.
+    """
+    exit_code, payload = _run_verify_with_pr(
+        monkeypatch,
+        tmp_path,
+        capsys,
+        state="OPEN",
+        auto_merge_request=None,
+        config_yaml="pr:\n  auto_merge: false\n",
+        extra_args=("--require-monitor",),
+    )
+
+    assert exit_code == 0
+    assert payload["status"] == "ok"
+    monitor_check = _find_check(payload, "monitor-registered")
+    assert monitor_check["required"] is False
+    assert monitor_check["passed"] is False
+    assert any(_MONITOR_WARNING in w for w in _warnings(payload))
+
+
+def test_cmd_verify_keeps_monitor_required_when_config_true(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code, payload = _run_verify_with_pr(
+        monkeypatch,
+        tmp_path,
+        capsys,
+        state="MERGED",
+        auto_merge_request=None,
+        config_yaml="pr:\n  auto_merge: true\n",
+        extra_args=("--require-monitor",),
+    )
+
+    assert exit_code == 1
+    assert _find_check(payload, "monitor-registered")["required"] is True
+    assert not any(_MONITOR_WARNING in w for w in _warnings(payload))
+
+
+def test_cmd_verify_keeps_monitor_required_when_config_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code, payload = _run_verify_with_pr(
+        monkeypatch,
+        tmp_path,
+        capsys,
+        state="MERGED",
+        auto_merge_request=None,
+        extra_args=("--require-monitor",),
+    )
+
+    assert exit_code == 1
+    assert _find_check(payload, "monitor-registered")["required"] is True
+    assert not any(_MONITOR_WARNING in w for w in _warnings(payload))
+
+
+def test_cmd_verify_keeps_monitor_required_on_unparseable_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code, payload = _run_verify_with_pr(
+        monkeypatch,
+        tmp_path,
+        capsys,
+        state="MERGED",
+        auto_merge_request=None,
+        config_yaml=_UNTERMINATED_YAML,
+        extra_args=("--require-monitor",),
+    )
+
+    assert exit_code == 1
+    assert _find_check(payload, "monitor-registered")["required"] is True
+    assert not any(_MONITOR_WARNING in w for w in _warnings(payload))
+
+
+def test_cmd_verify_no_downgrade_warning_without_require_monitor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, payload = _run_verify_with_pr(
+        monkeypatch,
+        tmp_path,
+        capsys,
+        state="OPEN",
+        auto_merge_request=None,
+        config_yaml="pr:\n  auto_merge: false\n",
+    )
+
+    assert _find_check(payload, "monitor-registered")["required"] is False
+    assert not any(_MONITOR_WARNING in w for w in _warnings(payload))
+
+
+@pytest.mark.parametrize(
+    ("config_yaml", "expected_required"),
+    [
+        pytest.param("pr:\n  auto_merge: false\n", False, id="config-false"),
+        pytest.param("pr:\n  auto_merge: true\n", True, id="config-true"),
+    ],
+)
+def test_cmd_verify_no_pr_skipped_monitor_check_uses_effective_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    config_yaml: str,
+    expected_required: bool,
+) -> None:
+    _, payload = _run_verify_with_pr(
+        monkeypatch,
+        tmp_path,
+        capsys,
+        state="OPEN",
+        auto_merge_request=None,
+        config_yaml=config_yaml,
+        extra_args=("--require-monitor",),
+        pr_view_fails=True,
+    )
+
+    monitor_check = _find_check(payload, "monitor-registered")
+    assert monitor_check["detail"] == "skipped — no PR"
+    assert monitor_check["required"] is expected_required
 
 
 # --- fail-closed pr.auto_merge gate (#2581) ---
@@ -537,6 +719,28 @@ def test_resolve_effective_automerge_required_ignores_fail_closed_gate(
 
     assert _mod.automerge_allowed() is False
     assert _mod.resolve_effective_automerge_required(base_required=True) is True
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(_UNTERMINATED_YAML, id="invalid-yaml"),
+        pytest.param('pr:\n  auto_merge: "false"\n', id="string-false"),
+        pytest.param(None, id="directory"),
+    ],
+)
+def test_resolve_effective_monitor_required_ignores_fail_closed_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, content: str | None
+) -> None:
+    """verify must never downgrade --require-monitor on an unreadable config."""
+    monkeypatch.chdir(tmp_path)
+    if content is None:
+        _config_path(tmp_path).mkdir(parents=True)
+    else:
+        _write_project_config_yaml(tmp_path, content)
+
+    assert _mod.automerge_allowed() is False
+    assert _mod.resolve_effective_monitor_required(base_required=True) is True
 
 
 def test_cmd_verify_keeps_automerge_required_on_unparseable_config(
