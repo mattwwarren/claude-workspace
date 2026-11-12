@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -159,6 +161,35 @@ def commit_tracked_file(worktree: Path, relpath: str, content: str = "x = 1\n") 
     path.write_text(content, encoding="utf-8")
     _git_sandbox.run("add", relpath, cwd=worktree)
     _git_sandbox.run("commit", "-m", f"add {relpath}", cwd=worktree)
+
+
+#: The non-UTF-8 byte string the #3419 tests name a file with.
+NON_UTF8_NAME_BYTES = b"bad-\xff.txt"
+
+#: Shell twin of :func:`replace_dir_with_file` for a gate-level autofix command.
+DIR_TO_FILE_SH = "rm -r pkg && printf x > pkg"
+
+
+def write_non_utf8_named_file(repo: Path, content: str = "x\n") -> str:
+    """Create a file whose name is not valid UTF-8 and return its ``fsdecode`` name.
+
+    Skips off Linux: macOS (APFS) rejects non-UTF-8 filenames. The returned
+    name carries a lone surrogate; ``os.fsencode`` gives the original bytes back.
+    """
+    if sys.platform != "linux":
+        pytest.skip("non-UTF-8 filenames need a Linux filesystem")
+    name = os.fsdecode(NON_UTF8_NAME_BYTES)
+    (repo / name).write_text(content, encoding="utf-8")
+    return name
+
+
+def replace_dir_with_file(repo: Path, name: str = "pkg") -> None:
+    """Turn the directory *name* into a regular file of the same name.
+
+    The type change ``git restore`` cannot undo path by path (#3423).
+    """
+    shutil.rmtree(repo / name)
+    (repo / name).write_text("x", encoding="utf-8")
 
 
 def hostile_git_env(

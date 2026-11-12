@@ -938,7 +938,10 @@ lanes:
   see [Quality Gate Autofix](#quality-gate-autofix-quality_gatesautofix-3412))
   has the autofix run and the same gate re-checked (#3412); the cycle parks
   `codex_fix_gate_failed` only if the re-check still fails, with the original
-  output.
+  output. Ecosystem-default lint autofixes (`ruff check --fix`,
+  `npm run lint -- --fix`) are adopted (#3421); an autofix may not delete or
+  rename a path (#3427), and a revert that cannot restore the tree parks
+  `codex_error` (#3423).
 - **Divergence report.** `fix_loop_diverging` now also lists findings the loop
   itself generated (a finding on lines added since the loop began, or a
   file-level finding on a file the loop created) so the operator can tell new
@@ -2542,10 +2545,27 @@ quality_gates:
 - **Matching.** Exact gate name, as `detect-gates` prints it; there is no prefix
   match (unlike `timeouts`). A key naming no detected gate is ignored.
 - **Precedence.** A `detect-gates` `autofix` wins over this map.
+- **Ecosystem defaults are adopted (#3421).** The `detect-gates` ecosystem
+  defaults carry an autofix too: `uv run ruff check --fix .` for the `ruff` gate
+  and `npm run lint -- --fix` for the `lint` gate. A red lint gate with such a
+  default is autofixed and committed in-cycle instead of parking. The safety
+  fence below is the only confinement. A repo that wants no autofix declares its
+  gates in a `CLAUDE.md` bash block, which carries no autofix (the ecosystem
+  defaults then do not apply). There is no per-gate opt-out key; one is a
+  possible follow-up.
 - **Safety.** The autofix runs only for a `red` failure that left the tree
   alone, must exit 0, must change at least one path, and may change only paths
-  the cycle already changed; the re-check must exit 0 and not dirty the tree.
-  Anything else reverts the autofix and parks with the original output.
+  the cycle already changed, and may not delete or rename one (#3427); the
+  re-check must exit 0 and not dirty the tree. Anything else reverts the
+  autofix and parks with the original output.
+- **Revert.** A revert never deletes a file that was git-ignored on disk before
+  the autofix ran, even when the autofix rewrote the ignore rules (#3420). It
+  restores the changed paths first; if that fails or leaves the tree different,
+  it logs `codex_fix_gate_autofix_revert_incomplete` and falls back to
+  `git read-tree --reset -u`, which keeps review artifacts and those ignored
+  files, and logs `codex_fix_gate_autofix_revert_fallback outcome=<restored|failed>`
+  (#3423). If neither restores the tree the cycle parks `codex_error` with the
+  live tree pinned, instead of `codex_fix_gate_failed` over a half-reverted tree.
 - **Fail-closed.** A missing, malformed, wrongly-typed or non-UTF-8 file, a
   non-mapping `quality_gates` / `autofix`, and a non-string or blank command all
   mean no config-declared autofix; the gate parks as it does without one. It

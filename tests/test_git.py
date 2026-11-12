@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -16,7 +18,13 @@ from cw._git import (
     git_output,
     run_git,
 )
-from tests._shared.git_repos import commit_tracked_file, git_in, hostile_git_env
+from tests._shared.git_repos import (
+    NON_UTF8_NAME_BYTES,
+    commit_tracked_file,
+    git_in,
+    hostile_git_env,
+    write_non_utf8_named_file,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -329,6 +337,61 @@ class TestGitOutput:
         assert not [k for k in env if k.startswith("GIT_")]
         assert defaults["cwd"] is None
         assert defaults["timeout"] is None
+
+    def test_a_non_utf8_name_fails_the_default_strict_decode(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("git-output-strict")
+        write_non_utf8_named_file(repo)
+
+        with pytest.raises(UnicodeDecodeError):
+            git_output(["ls-files", "-z", "--others"], cwd=repo)
+
+    def test_surrogateescape_round_trips_a_non_utf8_name(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """The decode inverts ``os.fsencode``, the argv re-encoding (#3419)."""
+        repo = make_git_repo("git-output-surrogate")
+        name = write_non_utf8_named_file(repo)
+
+        out = git_output(
+            ["ls-files", "-z", "--others"], cwd=repo, errors="surrogateescape"
+        )
+
+        names = [line for line in out.split("\0") if line]
+        assert names == [name]
+        assert names[0] == os.fsdecode(NON_UTF8_NAME_BYTES)
+        assert os.fsencode(names[0]) == NON_UTF8_NAME_BYTES
+
+    def test_an_explicit_strict_matches_the_default(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("git-output-explicit-strict")
+
+        default = git_output(["rev-parse", "HEAD"], cwd=repo)
+
+        assert git_output(["rev-parse", "HEAD"], cwd=repo, errors="strict") == default
+        assert default.strip() == git_in(repo, "rev-parse", "HEAD")
+
+    def test_the_default_call_forwards_no_explicit_encoding(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[dict[str, object]] = []
+
+        def _record(_args: object, **kwargs: object) -> str:
+            seen.append(kwargs)
+            return ""
+
+        monkeypatch.setattr("cw._git.subprocess.check_output", _record)
+
+        git_output(["status"], cwd=tmp_path)
+        git_output(["status"], cwd=tmp_path, errors="surrogateescape")
+
+        default, escaped = seen
+        assert default["encoding"] is None
+        assert default["errors"] == "strict"
+        assert escaped["encoding"] == sys.getfilesystemencoding()
+        assert escaped["errors"] == "surrogateescape"
 
 
 class TestGitHooksDir:

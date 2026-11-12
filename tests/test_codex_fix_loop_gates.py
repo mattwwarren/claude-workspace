@@ -23,8 +23,13 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from cw.codex_fix_loop import commit, gates
-from cw.codex_fix_loop.baseline import staged_cycle_tree
+from cw.codex_fix_loop import commit, gate_autofix, gates
+from cw.codex_fix_loop.baseline import (
+    CycleBaseline,
+    capture_cycle_baseline,
+    cycle_touched_paths,
+    staged_cycle_tree,
+)
 from cw.codex_fix_loop.fence import LEFT_STAGED_HINT
 from cw.codex_fix_loop.gates import (
     GateFailure,
@@ -37,16 +42,23 @@ from cw.codex_fix_loop.gates import (
     resolve_prep_pr_state,
     run_cycle_gates,
 )
-from cw.codex_review import CODEX_FIX_GATE_FAILED
+from cw.codex_review import CODEX_ERROR, CODEX_FIX_GATE_FAILED
 from cw.codex_runner import CodexRunResult
 from cw.models.enums import OrchestratorEventType
 from tests._codex_review_helpers import (
+    FAKE_REREVIEW_REASON,
     PrepPrStateStub,
     _drive_loop,
     _FakeRunner,
     assert_clean_after_refusal,
 )
-from tests._shared.git_repos import add_bare_origin, commit_tracked_file, git_in
+from tests._shared.git_repos import (
+    DIR_TO_FILE_SH,
+    add_bare_origin,
+    commit_tracked_file,
+    git_in,
+    write_non_utf8_named_file,
+)
 from tests.test_codex_fix_loop_convergence import _accepted
 from tests.test_prep_pr_script_resolution import (
     PREP_PR_PATH,
@@ -55,7 +67,7 @@ from tests.test_prep_pr_script_resolution import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from cw.auto_dev_result import AutoDevResult
 
@@ -71,6 +83,11 @@ _AUTOFIXED_FRICTION = "codex_fix_gate_autofixed"
 _FMT_CHECK = "grep -q '^x = 1$' tracked.py"
 _FMT_FIX = "printf 'x = 1\\n' > tracked.py"
 _TRACKED_TOUCHED = frozenset({"tracked.py"})
+_CAFE = "café.py"
+# git's C-quoted spelling of _CAFE, as cycle_touched_paths reports it (#3425).
+_CAFE_QUOTED = '"caf\\303\\251.py"'
+_CAFE_CHECK = f"grep -q '^z = 1$' {_CAFE}"
+_CAFE_FIX = f"printf 'z = 1\\n' > {_CAFE}"
 
 
 @pytest.fixture(autouse=True)
@@ -401,6 +418,33 @@ class TestPlanner:
 
         assert plan.gates[0].autofix == "from-detect"
 
+    def test_ecosystem_default_lint_autofix_is_adopted_on_the_planned_gate(
+        self, repo: Path, home_stub: PrepPrStateStub
+    ) -> None:
+        """#3421 decision: an ecosystem-default ``--fix`` is adopted, not dropped.
+
+        ``prep_pr_state.py detect-gates`` emits ``uv run ruff check --fix .`` for
+        its ecosystem-default ``ruff`` gate. The fix loop accepts it, fenced by
+        the touched set, the no-delete rule and a green re-check.
+        """
+        home_stub.set(
+            gates=[
+                {
+                    "name": "ruff",
+                    "command": "uv run ruff check .",
+                    "autofix": "uv run ruff check --fix .",
+                }
+            ],
+            ceilings={"ruff": 30},
+        )
+
+        plan = plan_cycle_gates(repo, _SCOPE)
+
+        assert plan.why_unavailable is None
+        assert plan.gates == (
+            PlannedGate("ruff", "uv run ruff check .", 30, "uv run ruff check --fix ."),
+        )
+
     def test_config_key_naming_no_detected_gate_is_ignored(
         self, repo: Path, home_stub: PrepPrStateStub
     ) -> None:
@@ -631,8 +675,24 @@ class TestRunner:
 
 
 class TestBreachText:
+    def test_positional_construction_is_a_type_error(self) -> None:
+        """#3377: seven same-typed-ish fields are keyword-only."""
+        args: tuple[object, ...] = ("red", "lint", "ruff", 4, 1.0, "tail", None)
+        build: Callable[..., object] = GateFailure
+
+        with pytest.raises(TypeError):
+            build(*args)
+
     def test_red(self) -> None:
-        failure = GateFailure("red", "lint", "ruff", 4, 1.0, "tail text", None)
+        failure = GateFailure(
+            kind="red",
+            gate="lint",
+            command="ruff",
+            exit_code=4,
+            seconds=1.0,
+            output="tail text",
+            why=None,
+        )
 
         breach = gate_failure_breach(failure, 2)
 
@@ -645,7 +705,15 @@ class TestBreachText:
         assert LEFT_STAGED_HINT in breach.recovery_hint
 
     def test_dirtied(self) -> None:
-        failure = GateFailure("dirtied", "fmt", "ruff format", 0, 1.0, "", None)
+        failure = GateFailure(
+            kind="dirtied",
+            gate="fmt",
+            command="ruff format",
+            exit_code=0,
+            seconds=1.0,
+            output="",
+            why=None,
+        )
 
         breach = gate_failure_breach(failure, 1)
 
@@ -654,7 +722,15 @@ class TestBreachText:
         assert LEFT_STAGED_HINT in breach.recovery_hint
 
     def test_unavailable(self) -> None:
-        failure = GateFailure("unavailable", "", "", None, 0.0, "", "script STALE")
+        failure = GateFailure(
+            kind="unavailable",
+            gate="",
+            command="",
+            exit_code=None,
+            seconds=0.0,
+            output="",
+            why="script STALE",
+        )
 
         breach = gate_failure_breach(failure, 1)
 
@@ -1168,6 +1244,185 @@ class TestAutofix:
         assert _run(plan, repo, touched=_TRACKED_TOUCHED) is None
         assert seen.read_text(encoding="utf-8") == "UNSET"
 
+    def _cafe_cycle(self, repo: Path) -> frozenset[str]:
+        """Commit ``café.py``, edit it as a cycle would; return the measured set."""
+        commit_tracked_file(repo, _CAFE, "z = 1\n")
+        baseline = capture_cycle_baseline(repo)
+        assert isinstance(baseline, CycleBaseline)
+        (repo / _CAFE).write_text("z   =   1\n", encoding="utf-8")
+        return frozenset(cycle_touched_paths(repo, baseline))
+
+    def test_non_ascii_touched_path_is_matched_in_its_c_quoted_spelling(
+        self, repo: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """#3425: ``touched`` and the subset check share git's C-quoted spelling."""
+        touched = self._cafe_cycle(repo)
+        assert _CAFE_QUOTED in touched
+        plan = _plan_of(PlannedGate("fmt", _CAFE_CHECK, _CEILING, _CAFE_FIX))
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(plan, repo, touched=touched)
+
+        assert failure is None
+        assert (repo / _CAFE).read_text(encoding="utf-8") == "z = 1\n"
+        assert _autofix_outcomes(caplog) == ["applied"]
+
+    def test_non_ascii_touched_path_in_its_real_spelling_does_not_match(
+        self, repo: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self._cafe_cycle(repo)
+        plan = _plan_of(PlannedGate("fmt", _CAFE_CHECK, _CEILING, _CAFE_FIX))
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(plan, repo, touched=frozenset({_CAFE}))
+
+        assert failure is not None
+        assert (repo / _CAFE).read_text(encoding="utf-8") == "z   =   1\n"
+        assert _autofix_outcomes(caplog) == ["reverted_scope"]
+
+    def test_autofix_that_deletes_a_touched_path_is_reverted(
+        self, repo: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """#3427: a touched path the autofix deletes is out of scope."""
+        _cycle_edit(repo)
+        before = staged_cycle_tree(repo, frozenset())
+        check = "! grep -q '^x   =   1$' tracked.py 2>/dev/null"
+        plan = _plan_of(PlannedGate("fmt", check, _CEILING, "rm tracked.py"))
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(plan, repo, touched=_TRACKED_TOUCHED)
+
+        assert failure is not None
+        assert (failure.kind, failure.exit_code) == ("red", 1)
+        assert _tracked(repo) == "x   =   1\n"
+        assert staged_cycle_tree(repo, frozenset()) == before
+        assert _autofix_outcomes(caplog) == ["reverted_scope"]
+
+    def test_autofix_that_deletes_a_non_ascii_touched_path_is_reverted(
+        self, repo: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        touched = self._cafe_cycle(repo)
+        before = staged_cycle_tree(repo, frozenset())
+        check = f"! grep -q '^z   =   1$' {_CAFE} 2>/dev/null"
+        plan = _plan_of(PlannedGate("fmt", check, _CEILING, f"rm {_CAFE}"))
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(plan, repo, touched=touched)
+
+        assert failure is not None
+        assert (repo / _CAFE).read_text(encoding="utf-8") == "z   =   1\n"
+        assert staged_cycle_tree(repo, frozenset()) == before
+        assert _autofix_outcomes(caplog) == ["reverted_scope"]
+
+    def test_autofix_that_renames_a_touched_path_is_reverted(
+        self, repo: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _cycle_edit(repo)
+        before = staged_cycle_tree(repo, frozenset())
+        check = "! grep -q '^x   =   1$' tracked.py 2>/dev/null"
+        plan = _plan_of(PlannedGate("fmt", check, _CEILING, "mv tracked.py renamed.py"))
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(plan, repo, touched=frozenset({"tracked.py", "renamed.py"}))
+
+        assert failure is not None
+        assert _tracked(repo) == "x   =   1\n"
+        assert not (repo / "renamed.py").exists()
+        assert staged_cycle_tree(repo, frozenset()) == before
+        assert _autofix_outcomes(caplog) == ["reverted_scope"]
+
+    def test_scope_revert_keeps_an_ignored_file_after_an_ignore_rewrite(
+        self, repo: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """#3420: emptying ``.gitignore`` must not get ``.coverage`` deleted."""
+        (repo / ".coverage").write_text("cov-data", encoding="utf-8")
+        _cycle_edit(repo)
+        before = staged_cycle_tree(repo, frozenset())
+        fix = f"printf '' > .gitignore; {_FMT_FIX}"
+        plan = _plan_of(PlannedGate("fmt", _FMT_CHECK, _CEILING, fix))
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(plan, repo, touched=_TRACKED_TOUCHED)
+
+        assert failure is not None
+        assert (repo / ".coverage").read_text(encoding="utf-8") == "cov-data"
+        assert (repo / ".gitignore").read_text(encoding="utf-8") == ".coverage\n"
+        assert staged_cycle_tree(repo, frozenset()) == before
+        assert _autofix_outcomes(caplog) == ["reverted_scope"]
+
+    def test_scope_revert_of_a_non_utf8_named_path_does_not_raise(
+        self, repo: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """#3419: the revert's ``-z`` reads survive a non-UTF-8 name."""
+        source = tmp_path / "non-utf8-src"
+        source.mkdir()
+        name = write_non_utf8_named_file(source)
+        _cycle_edit(repo)
+        before = staged_cycle_tree(repo, frozenset())
+        fix = f"{_FMT_FIX}; cp {shlex.quote(str(source))}/* ."
+        plan = _plan_of(PlannedGate("fmt", _FMT_CHECK, _CEILING, fix))
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(plan, repo, touched=_TRACKED_TOUCHED)
+
+        assert failure is not None
+        assert not (repo / name).exists()
+        assert staged_cycle_tree(repo, frozenset()) == before
+        assert _autofix_outcomes(caplog) == ["reverted_scope"]
+
+    def test_a_raising_scope_revert_falls_back_and_returns_the_original_failure(
+        self, repo: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """#3423: a dir-to-file autofix makes the targeted revert raise."""
+        commit_tracked_file(repo, "pkg/mod.py", "m = 1\n")
+        _cycle_edit(repo)
+        before = staged_cycle_tree(repo, frozenset())
+        plan = _plan_of(
+            PlannedGate("fmt", _FMT_CHECK, _CEILING, f"{_FMT_FIX}; {DIR_TO_FILE_SH}")
+        )
+
+        with caplog.at_level(logging.WARNING):
+            failure = _run(plan, repo, touched=_TRACKED_TOUCHED)
+
+        assert failure is not None
+        assert (failure.kind, failure.exit_code) == ("red", 1)
+        assert (repo / "pkg" / "mod.py").read_text(encoding="utf-8") == "m = 1\n"
+        assert _tracked(repo) == "x   =   1\n"
+        assert staged_cycle_tree(repo, frozenset()) == before
+        assert _autofix_outcomes(caplog) == ["reverted_scope"]
+        assert any(
+            "codex_fix_gate_autofix_revert_fallback" in r.getMessage()
+            and "gate=fmt" in r.getMessage()
+            and "outcome=restored" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_a_failing_read_tree_makes_the_gate_run_raise(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        commit_tracked_file(repo, "pkg/mod.py", "m = 1\n")
+        _cycle_edit(repo)
+        real = gate_autofix.git_output
+
+        def _no_read_tree(
+            argv: Sequence[str],
+            *,
+            cwd: Path | str | None = None,
+            timeout: float | None = None,
+            errors: str = "strict",
+        ) -> str:
+            if argv[0] == "read-tree":
+                raise subprocess.CalledProcessError(128, list(argv), "", "boom")
+            return real(argv, cwd=cwd, timeout=timeout, errors=errors)
+
+        monkeypatch.setattr(gate_autofix, "git_output", _no_read_tree)
+        plan = _plan_of(
+            PlannedGate("fmt", _FMT_CHECK, _CEILING, f"{_FMT_FIX}; {DIR_TO_FILE_SH}")
+        )
+
+        with pytest.raises(subprocess.CalledProcessError):
+            _run(plan, repo, touched=_TRACKED_TOUCHED)
+
 
 # ---------------------------------------------------------------------------
 # Wiring through the real loop
@@ -1425,6 +1680,87 @@ class TestWiring:
         assert "lint-went-wrong" in result.blocker.details
         assert_clean_after_refusal(loop_repo, start)
         assert not (loop_repo / "autofix-ran").exists()
+
+    def test_autofix_returning_a_touched_path_to_baseline_still_commits(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        loop_repo: Path,
+        home_stub: PrepPrStateStub,
+        real_gates: None,
+    ) -> None:
+        """#3424/#3426: the commit's measured set is re-measured after the gates."""
+        start = git_in(loop_repo, "rev-parse", "HEAD")
+        origin = _origin_tip(loop_repo)
+        home_stub.set(
+            gates=[{"name": "fmt", "command": _FMT_CHECK, "autofix": _FMT_FIX}],
+            ceilings={"fmt": 5},
+        )
+        tokens: list[str] = []
+        runner = _FakeRunner(edit=True, extra_writes={"tracked.py": "x   =   1\n"})
+
+        result, _fake = _drive(
+            monkeypatch, loop_repo, runner=runner, gate_tokens=tokens
+        )
+
+        assert result.blocker is None or result.blocker.reason == FAKE_REREVIEW_REASON
+        assert git_in(loop_repo, "rev-parse", "HEAD") != start
+        assert _origin_tip(loop_repo) != origin
+        names = git_in(loop_repo, "show", "--name-only", "--format=", "HEAD")
+        assert names.split() == ["fix_cycle_1.py"]
+        assert git_in(loop_repo, "show", "HEAD:tracked.py") == "x = 1"
+        assert tokens == [_AUTOFIXED_FRICTION]
+
+    def test_autofix_that_empties_the_cycle_is_a_tolerated_no_op(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        loop_repo: Path,
+        home_stub: PrepPrStateStub,
+        real_gates: None,
+    ) -> None:
+        start = git_in(loop_repo, "rev-parse", "HEAD")
+        home_stub.set(
+            gates=[{"name": "fmt", "command": _FMT_CHECK, "autofix": _FMT_FIX}],
+            ceilings={"fmt": 5},
+        )
+        tokens: list[str] = []
+        runner = _FakeRunner(extra_writes={"tracked.py": "x   =   1\n"})
+
+        result, _fake = _drive(
+            monkeypatch, loop_repo, runner=runner, gate_tokens=tokens
+        )
+
+        # The cycle was not parked: the loop went on to its (faked) re-review.
+        assert result.blocker is None or result.blocker.reason == FAKE_REREVIEW_REASON
+        assert git_in(loop_repo, "rev-parse", "HEAD") == start
+        assert git_in(loop_repo, "status", "--porcelain") == ""
+        assert tokens == [_AUTOFIXED_FRICTION]
+
+    def test_git_error_in_the_post_gate_remeasure_parks_as_a_codex_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        loop_repo: Path,
+        home_stub: PrepPrStateStub,
+        real_gates: None,
+    ) -> None:
+        """#3424: the re-measure sits inside ``park_gates``' git-error ``try``."""
+        assert home_stub.script.exists()
+        start = git_in(loop_repo, "rev-parse", "HEAD")
+        real = commit.cycle_touched_paths
+        calls: list[int] = []
+
+        def _second_call_fails(worktree: Path, baseline: CycleBaseline) -> set[str]:
+            calls.append(1)
+            if len(calls) > 1:
+                raise subprocess.CalledProcessError(2, ["add"], "", "git broke")
+            return real(worktree, baseline)
+
+        monkeypatch.setattr(commit, "cycle_touched_paths", _second_call_fails)
+
+        result, _fake = _drive(monkeypatch, loop_repo)
+
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_ERROR
+        assert_clean_after_refusal(loop_repo, start)
 
 
 class _PinRunner:

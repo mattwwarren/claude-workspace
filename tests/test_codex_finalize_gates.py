@@ -735,7 +735,15 @@ class TestQualityGates:
         self, gated: Path, path: str
     ) -> None:
         plan = GatePlan(script=None, gates=(), why_unavailable="detector missing")
-        failure = GateFailure("unavailable", "", "", None, 0.0, "", None)
+        failure = GateFailure(
+            kind="unavailable",
+            gate="",
+            command="",
+            exit_code=None,
+            seconds=0.0,
+            output="",
+            why=None,
+        )
         with (
             patch("cw.codex_finalize._gates.plan_cycle_gates", return_value=plan),
             patch("cw.codex_finalize._gates.run_cycle_gates", return_value=failure),

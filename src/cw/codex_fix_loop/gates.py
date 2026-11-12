@@ -34,8 +34,9 @@ Only a green re-check lets the cycle go on; anything else reverts the autofix's
 changes and returns the ORIGINAL failure, so the park text and the pinned edits
 are exactly as without an autofix. The autofix runs only when the failure is
 ``red`` and the failing check left the tree alone, it must exit 0, change at
-least one path, and change only paths already in the cycle's measured ``touched``
-set (which passed the scope, fence and growth checks). Format-only is therefore
+least one path, change only paths already in the cycle's measured ``touched``
+set (which passed the scope, fence and growth checks), and delete none (a
+rename counts as a deletion, #3427). Format-only is therefore
 a property proved by a declaration plus a green re-check, never guessed from a
 gate's name or output. Feeding a failing gate's output to a later fix turn was
 considered and rejected here: a park ends the loop, so no such turn exists
@@ -70,7 +71,8 @@ from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, FenceBreach
 from cw.codex_fix_loop.gate_autofix import (
     changed_paths,
     declared_autofixes,
-    revert_paths,
+    ignored_on_disk,
+    revert_to_tree,
 )
 from cw.codex_fix_loop.posted_text import redact_and_cap, withhold_secret_lines
 from cw.codex_review import CODEX_FIX_GATE_FAILED
@@ -164,9 +166,13 @@ class GatePlan:
         return cls(script=None, gates=(), why_unavailable=why)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class GateFailure:
-    """Why a cycle's gates refused it; ``kind`` picks the park text."""
+    """Why a cycle's gates refused it; ``kind`` picks the park text.
+
+    Keyword-only (#3377): seven fields, several of the same type, so a
+    positional call that swaps two of them must be a ``TypeError``.
+    """
 
     kind: GateKind
     gate: str
@@ -556,7 +562,15 @@ def _run_one_gate(
         )
     except OSError as exc:
         why = f"gate {gate.name} could not be started: {exc}"
-        return GateFailure("unavailable", gate.name, gate.command, None, 0.0, "", why)
+        return GateFailure(
+            kind="unavailable",
+            gate=gate.name,
+            command=gate.command,
+            exit_code=None,
+            seconds=0.0,
+            output="",
+            why=why,
+        )
     _log.warning(
         "codex_fix_gate ticket=%s session=%s cycle=%s gate=%s exit=%s seconds=%.1f",
         scope.ticket_id,
@@ -570,17 +584,23 @@ def _run_one_gate(
     dirtied = staged_cycle_tree(worktree, review_artifacts) != tree_before
     if watched.returncode != 0:
         return GateFailure(
-            "red",
-            gate.name,
-            gate.command,
-            watched.returncode,
-            watched.seconds,
-            output,
-            None,
+            kind="red",
+            gate=gate.name,
+            command=gate.command,
+            exit_code=watched.returncode,
+            seconds=watched.seconds,
+            output=output,
+            why=None,
         )
     if dirtied:
         return GateFailure(
-            "dirtied", gate.name, gate.command, 0, watched.seconds, output, None
+            kind="dirtied",
+            gate=gate.name,
+            command=gate.command,
+            exit_code=0,
+            seconds=watched.seconds,
+            output=output,
+            why=None,
         )
     return None
 
@@ -606,14 +626,12 @@ def _log_autofix(scope: GateScope, gate: PlannedGate, outcome: str, paths: int) 
     )
 
 
-def _revert_autofix(
-    worktree: Path, review_artifacts: frozenset[str], tree_before: str
-) -> None:
-    """Undo everything that changed since *tree_before*; log, never raise, on a miss."""
-    current = staged_cycle_tree(worktree, review_artifacts)
-    revert_paths(worktree, tree_before, changed_paths(worktree, tree_before, current))
-    if staged_cycle_tree(worktree, review_artifacts) != tree_before:
-        _log.warning("codex_fix_gate_autofix_revert_incomplete worktree=%s", worktree)
+def _revert_context(scope: GateScope, gate: PlannedGate) -> str:
+    """The identity a revert's log lines carry, as ``_log_autofix`` logs it."""
+    return (
+        f"ticket={scope.ticket_id} session={scope.session_id} "
+        f"cycle={scope.cycle} gate={gate.name}"
+    )
 
 
 def _apply_autofix(
@@ -625,14 +643,19 @@ def _apply_autofix(
     scope: GateScope,
     tree_before: str,
     touched: frozenset[str],
+    preserve: frozenset[str],
 ) -> _Autofix:
     """Run *command* (the gate's declared autofix) and vet what it changed.
 
     ``tree_after`` is set only for outcome ``applied``; every other outcome has
     already restored the tree to *tree_before* (or never changed it). The
     autofix runs exactly as a gate does: signal-only ceiling, the gate env, no
-    lock, no kill (ADR-0014, ADR-0019).
+    lock, no kill (ADR-0014, ADR-0019). An autofix that deletes (or renames) a
+    path is ``reverted_scope`` like one that leaves *touched* (#3427). A revert
+    keeps *preserve*, the ignored files on disk before the autofix ran, and
+    raises ``CalledProcessError`` only when it cannot restore the tree.
     """
+    context = _revert_context(scope, gate)
     if staged_cycle_tree(worktree, review_artifacts) != tree_before:
         return _Autofix("skipped_tree_changed", None)
     try:
@@ -648,15 +671,20 @@ def _apply_autofix(
         _log.warning("codex_fix_gate_autofix could not be started", exc_info=True)
         return _Autofix("reverted_failed", None)
     if watched.returncode != 0:
-        _revert_autofix(worktree, review_artifacts, tree_before)
+        revert_to_tree(
+            worktree, review_artifacts, tree_before, preserve=preserve, context=context
+        )
         return _Autofix("reverted_failed", None)
     tree_after = staged_cycle_tree(worktree, review_artifacts)
     changed = changed_paths(worktree, tree_before, tree_after)
     if not changed:
         return _Autofix("unchanged", None)
     spelled = changed_paths(worktree, tree_before, tree_after, c_quoted=True)
-    if not spelled <= touched:
-        _revert_autofix(worktree, review_artifacts, tree_before)
+    deleted = changed_paths(worktree, tree_before, tree_after, diff_filter="D")
+    if deleted or not spelled <= touched:
+        revert_to_tree(
+            worktree, review_artifacts, tree_before, preserve=preserve, context=context
+        )
         return _Autofix("reverted_scope", None, len(changed))
     return _Autofix("applied", tree_after, len(changed))
 
@@ -688,6 +716,7 @@ def _run_gate_with_autofix(
     )
     if failure is None or failure.kind != "red" or gate.autofix is None:
         return failure, tree_before
+    preserve = ignored_on_disk(worktree)
     fixed = _apply_autofix(
         gate,
         gate.autofix,
@@ -696,6 +725,7 @@ def _run_gate_with_autofix(
         scope=scope,
         tree_before=tree_before,
         touched=touched,
+        preserve=preserve,
     )
     if fixed.tree_after is None:
         _log_autofix(scope, gate, fixed.outcome, fixed.paths)
@@ -708,7 +738,13 @@ def _run_gate_with_autofix(
         tree_before=fixed.tree_after,
     )
     if recheck is not None:
-        _revert_autofix(worktree, review_artifacts, tree_before)
+        revert_to_tree(
+            worktree,
+            review_artifacts,
+            tree_before,
+            preserve=preserve,
+            context=_revert_context(scope, gate),
+        )
         _log_autofix(scope, gate, "reverted_red", fixed.paths)
         return failure, tree_before
     _log_autofix(scope, gate, fixed.outcome, fixed.paths)
@@ -738,7 +774,15 @@ def run_cycle_gates(
     (``CalledProcessError``).
     """
     if plan.why_unavailable is not None:
-        return GateFailure("unavailable", "", "", None, 0.0, "", plan.why_unavailable)
+        return GateFailure(
+            kind="unavailable",
+            gate="",
+            command="",
+            exit_code=None,
+            seconds=0.0,
+            output="",
+            why=plan.why_unavailable,
+        )
     if not plan.gates:
         _log.warning(
             "%s ticket=%s session=%s cycle=%s",
