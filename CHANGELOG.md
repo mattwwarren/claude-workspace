@@ -10,11 +10,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`cw dev-queue status --json` gains live per-client counts and `tick_ts` (#1586).** Each client entry carries `pending`, `running`, `blocked`, `completed`, `cancelled` and `failed`, the same numbers as the text table (one shared counter), read from the queue at call time rather than from the last tick, plus `tick_ts` (the `Z`-suffixed time of the tick that `skip_reason`, `freshness_detail` and `blocked_branch` come from, `null` without a tick). `blocked` counts `blocked_on_user` only, and `awaiting_operator_signoff` rows appear in none of the six keys. A client with queued tickets but no tick, paused lane or held row now appears in the output.
 
-### Changed
-
-- **`create_worktree` takes its reuse refresh as one options object (#2238).** The four keyword arguments `refresh_on_reuse`, `refresh_report`, `ticket_id` and `native_daemon` are replaced by one keyword-only `refresh: ReuseRefreshOptions | None = None`. `ReuseRefreshOptions` is a frozen dataclass exported from `cw.worktree` with the fields `report`, `ticket_id` and `native_daemon`. Passing it turns the refresh on; `None` (the default) is path resolution only, as before. The old form let a caller pass a report, ticket or daemon without turning the refresh on, and those values were then ignored; the new form cannot express that. The old keywords are removed with no alias, and the dispatch claim and fix-agent callers are migrated. Refresh behavior is unchanged.
-### Added
-
 - **Operator signal for a run of roster-skipped reconcile ticks (#3335).** When the tick's lockless roster snapshot is stale or missing on 3 consecutive ticks (`ROSTER_SKIP_ATTENTION_THRESHOLD`), reconcile emits one fleet-wide `session.needs_attention` with `paused_status` `roster_skip_streak` (`client` `""`, no push), stays silent while the streak lasts and re-arms after a tick that used the roster. A failed roster read keeps the daemon-outage path and does not count. The count is per process. `cw event tail` and the operator channel show the event; `cw orchestrate watch` filters it (no client), like `gh_availability_outage`.
 
 ### Changed
