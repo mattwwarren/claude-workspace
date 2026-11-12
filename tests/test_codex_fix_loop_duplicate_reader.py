@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -26,7 +27,11 @@ from cw.codex_fix_loop.fence import (
     SETTLE_FINDING_HINT,
     FenceBreach,
 )
-from cw.codex_fix_loop.posted_text import POSTED_TEXT_MAX_CHARS, TRUNCATION_MARKER
+from cw.codex_fix_loop.posted_text import (
+    POSTED_TEXT_MAX_CHARS,
+    TRUNCATION_MARKER,
+    WITHHELD,
+)
 from cw.codex_review import (
     CODEX_FIX_GROWTH_BUDGET,
     CODEX_FIX_LOOP_GROWTH_GUARD_KEY,
@@ -260,6 +265,21 @@ class TestNewDefsSourceOnly:
         assert [d.name for d in new_defs(file_diffs, added, _DEF)] == ["read_t"]
         assert new_defs(file_diffs, added, _DEF, source_only=False) == []
 
+    @pytest.mark.parametrize("source_only", [True, False])
+    def test_non_python_removed_def_does_not_cancel_added_name(
+        self, source_only: bool
+    ) -> None:
+        diff = "\n".join(
+            [
+                _diff("scripts/legacy.sh", [], removed=("def read_t(x):",)),
+                _diff("src/a.py", ["def read_t(x):"]),
+            ]
+        )
+        file_diffs, added, _window, _changed = _parse_unified_diff(diff)
+
+        found = new_defs(file_diffs, added, _DEF, source_only=source_only)
+        assert [d.name for d in found] == ["read_t"]
+
 
 class TestCheckDuplicateReader:
     def test_acceptance_new_helper_duplicating_existing_parks(
@@ -283,6 +303,8 @@ class TestCheckDuplicateReader:
         assert SETTLE_FINDING_HINT in breach.recovery_hint
         assert CODEX_FIX_LOOP_GROWTH_GUARD_KEY in breach.recovery_hint
         assert breach.paths == ("src/hold.py", "src/native.py")
+        assert "only this cycle's changes are staged" not in breach.recovery_hint
+        assert "the check is loop-wide" in breach.recovery_hint
 
     def test_no_duplication_finding_returns_none_without_git(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
@@ -482,7 +504,10 @@ class TestCheckDuplicateReader:
         assert _check_duplicate_reader(repo, [_finding()]) is None
 
     def test_git_timeout_returns_none(
-        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         repo = _duplicate_reader_repo(make_git_repo)
         _write(repo / "src" / "hold.py", _helper_body("read_roster_snapshot"))
@@ -491,7 +516,78 @@ class TestCheckDuplicateReader:
             raise subprocess.TimeoutExpired(cmd="git", timeout=1)
 
         monkeypatch.setattr(duplicate_reader, "run_git", _timeout)
-        assert _check_duplicate_reader(repo, [_finding()]) is None
+        with caplog.at_level(logging.WARNING, logger=duplicate_reader.__name__):
+            assert _check_duplicate_reader(repo, [_finding()]) is None
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "timed out" in warnings[0].getMessage()
+
+    @pytest.mark.parametrize("returncode", [2, 128])
+    def test_git_error_exit_logs_one_warning_and_returns_none(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        returncode: int,
+    ) -> None:
+        repo = _duplicate_reader_repo(make_git_repo)
+        _write(repo / "src" / "hold.py", _helper_body("read_roster_snapshot"))
+
+        def _fail(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess([], returncode, stdout="", stderr="boom")
+
+        monkeypatch.setattr(duplicate_reader, "run_git", _fail)
+        with caplog.at_level(logging.WARNING, logger=duplicate_reader.__name__):
+            assert _check_duplicate_reader(repo, [_finding()]) is None
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "boom" in warnings[0].getMessage()
+
+    def test_git_no_match_exit_is_silent(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        repo = _duplicate_reader_repo(make_git_repo)
+        _write(repo / "src" / "hold.py", _helper_body("read_roster_snapshot"))
+
+        def _no_match(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess([], 1, stdout="", stderr="")
+
+        monkeypatch.setattr(duplicate_reader, "run_git", _no_match)
+        with caplog.at_level(logging.WARNING, logger=duplicate_reader.__name__):
+            assert _check_duplicate_reader(repo, [_finding()]) is None
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+    @pytest.mark.parametrize("use_budget", [False, True])
+    def test_diff_failure_returns_none_and_warns(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        use_budget: bool,
+    ) -> None:
+        repo = _duplicate_reader_repo(make_git_repo)
+        _write(repo / "src" / "hold.py", _helper_body("read_roster_snapshot"))
+
+        def _unresolvable(*_a: object, **_k: object) -> str:
+            raise subprocess.CalledProcessError(128, "git diff", stderr="bad rev")
+
+        monkeypatch.setattr(duplicate_reader, "diff_since", _unresolvable)
+        monkeypatch.setattr(duplicate_reader, "cycle_diff", _unresolvable)
+        budget: Any = SimpleNamespace(start_sha="deadbeef") if use_budget else None
+        with caplog.at_level(logging.WARNING, logger=duplicate_reader.__name__):
+            result = duplicate_reader.check_duplicate_reader(
+                repo,
+                _head_baseline(repo),
+                [_finding()],
+                cycle=1,
+                loop_budget=budget,
+            )
+        assert result is None
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
 
     def test_untrusted_text_is_redacted_and_capped(
         self, make_git_repo: Callable[..., Path]
@@ -507,6 +603,8 @@ class TestCheckDuplicateReader:
         assert "hunter2" not in breach.recovery_hint
         assert len(breach.details) <= POSTED_TEXT_MAX_CHARS
         assert TRUNCATION_MARKER in breach.details
+        assert "`_read_roster_workers`" in breach.details
+        assert f"{WITHHELD} second line injected" in breach.details
 
     def test_not_mutated(self, make_git_repo: Callable[..., Path]) -> None:
         repo = _duplicate_reader_repo(make_git_repo)

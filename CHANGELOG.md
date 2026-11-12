@@ -10,6 +10,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`prep_pr_state.py detect-gates` now reads the quality gates from the default branch's committed `CLAUDE.md`.** With no explicit `--claude-md`, gates come from `./CLAUDE.md` as committed on `origin/HEAD` (a subdirectory still reads its own `CLAUDE.md`), so a branch cut before a gate change, or one that edits its own gate list, is held to the default branch's gates, and a branch's own gate edits count once they merge. When there is no git repo, no `origin/HEAD`, or no such file there, it falls back to the worktree copy exactly as before, quietly (no warning). The result gains a `claude_md_source` key (`default-branch` or `worktree`); `detected_from` is unchanged. `gate-pass record` and `gate-pass check` follow automatically because they resolve gates through `detect-gates`. This applies to every repo that uses `/prep-pr`. `_run_git` gains a `quiet` option for callers where failing is the normal fallback.
 
+### Fixed
+
+- **Codex fix-loop cleanup (#3224, #3255, #3264, #3266, #3267, #3268, #3272, #3274, #3276, #3277, #3296, #3297, #3302, #3303, #3304).** The duplicate-reader signal now logs a WARNING and still fails open when `git grep` times out or exits with an error, and when its loop-wide diff read exits non-zero (for example an unresolvable loop start commit, which previously raised out of the guard; other git failures such as a missing `git` binary are unchanged). Its removed-name scan reads only `.py` paths. The post-restore hint drops a stale "only this cycle's changes are staged" sentence. Refused-cycle recovery docs now state which git failures pin a ref and the non-restorable staged-set exception, and the stale patch-file paragraph is gone. The divergence report's absolute threshold text is built from its constants (output unchanged). `cycle_restore.py` was split into `restore_report.py` with its public imports unchanged. The `FIX_LOOP_DIVERGING` and `FIX_LOOP_DIVERGENCE_DETECTED` comments now describe net progress (no values changed). Only the Unreleased section is edited, so gate 7 is unaffected.
+
 ## [1.96.0] - 2026-11-12
 
 ### Added

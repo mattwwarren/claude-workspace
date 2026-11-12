@@ -49,7 +49,8 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
-# Default consecutive cycles resolving zero originally-found MUST_FIX findings
+# Default consecutive cycles making no net progress on the originally-found
+# MUST_FIX findings
 # before the loop may be declared diverging (#2633: one cycle; configurable via
 # codex_fix_loop_stall_cycles, globally or per lane).
 _DIVERGENCE_STALL_CYCLES = 1
@@ -368,7 +369,8 @@ def _threshold_line(state: DivergenceState) -> str:
     if state.original_anchor_lines is None:
         return (
             f"Divergence threshold: {threshold} line(s) of cumulative churn "
-            "(absolute: max(150, 0.5 x pre-loop diff))."
+            f"(absolute: max({_DIVERGENCE_MIN_LINES}, "
+            f"{_DIVERGENCE_PRE_LOOP_FRACTION} x pre-loop diff))."
         )
     anchor = state.original_anchor_lines
     return (
