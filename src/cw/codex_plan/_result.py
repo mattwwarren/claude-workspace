@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from cw.atomic import atomic_write_text
+from cw.atomic import atomic_write_text, rotate_backup
 from cw.auto_dev_result import AutoDevResult
 from cw.auto_dev_result.parse import (
     BLOCKER_REASON_NO_RESULT_EMITTED,
@@ -290,12 +290,17 @@ def clean_plan_text(text: str) -> str:
     return "".join(kept)
 
 
-def _on_disk_leading(worktree: Path) -> str:
+def _read_on_disk_draft(worktree: Path) -> str | None:
+    """The on-disk draft's text, ``None`` when absent.
+
+    Raises :class:`PlanDraftError` when it exists but is unreadable or empty,
+    so a rewrite never replaces a draft cw could not read first.
+    """
     path = worktree / PLAN_DRAFT_RELATIVE_PATH
     try:
         path.lstat()
     except FileNotFoundError:
-        return ""
+        return None
     except OSError as exc:
         raise PlanDraftError(path, empty=False) from exc
     try:
@@ -304,7 +309,7 @@ def _on_disk_leading(worktree: Path) -> str:
         raise PlanDraftError(path, empty=False) from exc
     if not text.strip():
         raise PlanDraftError(path, empty=True)
-    return text[: leading_bookkeeping_end(text)]
+    return text
 
 
 def write_plan_draft(worktree: Path, plan_text: str) -> Path:
@@ -312,15 +317,23 @@ def write_plan_draft(worktree: Path, plan_text: str) -> Path:
 
     The on-disk leading block (any lane's round line, last-evaluated,
     settled or revocation lines) is carried verbatim; with none, the explicit
-    round-0 line is written. *plan_text* is cleaned first.
+    round-0 line is written. *plan_text* is cleaned first. A prior draft that
+    differs from the new text is snapshotted first (``plan-draft.md.bak-<ns>``,
+    best-effort, newest 5 kept), so a re-park never silently discards an
+    operator's edit (#3490).
     """
-    leading = _on_disk_leading(worktree) or ROUND_ZERO_LINE
+    prior = _read_on_disk_draft(worktree)
+    carried = prior[: leading_bookkeeping_end(prior)] if prior is not None else ""
+    leading = carried or ROUND_ZERO_LINE
     body = clean_plan_text(plan_text)
     if not body.endswith("\n"):
         body += "\n"
+    text = leading + body
     path = worktree / PLAN_DRAFT_RELATIVE_PATH
+    if prior is not None and prior != text:
+        rotate_backup(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, leading + body)
+    atomic_write_text(path, text)
     return path
 
 

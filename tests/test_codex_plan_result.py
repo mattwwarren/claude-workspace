@@ -298,6 +298,67 @@ class TestWriteDraft:
         with pytest.raises(OSError, match="existing plan draft is empty"):
             write_plan_draft(tmp_path, _PLAN)
         assert path.read_bytes() == original
+        assert _draft_backups(tmp_path) == []
+
+    def test_a_differing_rewrite_backs_up_the_prior_draft(self, tmp_path: Path) -> None:
+        """#3490: a re-park keeps the operator's prior text in a backup."""
+        prior = ROUND_ZERO_LINE + "operator-edited body\n"
+        _draft(tmp_path, prior)
+
+        write_plan_draft(tmp_path, _PLAN)
+
+        (backup,) = _draft_backups(tmp_path)
+        assert backup.read_text(encoding="utf-8") == prior
+
+    def test_a_first_write_makes_no_backup(self, tmp_path: Path) -> None:
+        write_plan_draft(tmp_path, _PLAN)
+
+        assert _draft_backups(tmp_path) == []
+
+    def test_an_identical_rewrite_makes_no_backup(self, tmp_path: Path) -> None:
+        """Repeated identical re-parks do not evict distinct operator edits."""
+        write_plan_draft(tmp_path, _PLAN)
+
+        write_plan_draft(tmp_path, _PLAN)
+
+        assert _draft_backups(tmp_path) == []
+
+    def test_an_unreadable_draft_is_refused_before_any_backup(
+        self, tmp_path: Path
+    ) -> None:
+        _draft_bytes(tmp_path, b"\xff\xfe")
+
+        with pytest.raises(OSError, match="existing plan draft is unreadable"):
+            write_plan_draft(tmp_path, _PLAN)
+
+        assert _draft_backups(tmp_path) == []
+
+    def test_a_backup_failure_does_not_block_the_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _draft(tmp_path, ROUND_ZERO_LINE + "prior body\n")
+
+        def _fail(*_args: object, **_kwargs: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.atomic.shutil.copy2", _fail)
+
+        path = write_plan_draft(tmp_path, _PLAN)
+
+        assert path.read_text(encoding="utf-8") == ROUND_ZERO_LINE + _PLAN
+        assert _draft_backups(tmp_path) == []
+
+
+def _draft_bytes(worktree: Path, data: bytes) -> None:
+    path = worktree / PLAN_DRAFT_RELATIVE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
+def _draft_backups(worktree: Path) -> list[Path]:
+    draft = worktree / PLAN_DRAFT_RELATIVE_PATH
+    return sorted(draft.parent.glob(f"{draft.name}.bak-*"))
 
 
 def test_plan_md_is_written_with_both_markers(tmp_path: Path) -> None:
