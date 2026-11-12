@@ -17,12 +17,14 @@ from cw.models import (
     DEFAULT_LANE,
     DevQueueStore,
     LastResultSource,
+    LocalLivenessHandle,
     QueueItemStatus,
     Session,
     SessionStatus,
     Stage,
     TicketTask,
 )
+from cw.models.usage import UsageState, UsageUnavailableReason
 from cw.reconcile import ProposedAction, ReapCandidate
 from cw.reconcile._shared import _stamp_sentinel_partial_route_consumed
 from cw.reconcile.emitted_result import (
@@ -545,3 +547,79 @@ def test_route_stage_mismatch_without_page_context_falls_through(
     assert result is None
     row = _row()
     assert (row.status, row.stage) == (QueueItemStatus.RUNNING, Stage.REVIEW)
+
+
+# --- #3063: the opencode/local unavailable-usage marker -----------------------
+
+
+def test_emitted_result_completion_stamps_usage_and_leaves_last_result_alone(
+    tmp_config_dir: object,
+) -> None:
+    """The worker's first-writer-wins record is never edited; only usage is set."""
+    _seed_row(QueueItemStatus.RUNNING, Stage.IMPL)
+    payload = {**_stage_complete_payload(), "ticket_id": _TICKET}
+    session = _session(dict(payload))
+    session.local_liveness = LocalLivenessHandle.model_validate(
+        {"pid": 1, "start_time_ns": 1, "backend": "opencode"}
+    )
+    before = dict(session.last_result or {})
+    harvested: list[str] = []
+    events: list[dict[str, object]] = []
+
+    handled = handle_emitted_result(
+        session,
+        _candidate(),
+        subject=_SUBJECT,
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+        harvested_ticket_ids=harvested,
+        pending_events=events,
+        refusal_pages=[],
+    )
+
+    assert handled is True
+    assert session.status == SessionStatus.COMPLETED
+    assert session.usage is not None
+    assert session.usage.state is UsageState.UNAVAILABLE
+    assert (
+        session.usage.unavailable_reason
+        is UsageUnavailableReason.BACKEND_OUTPUT_UNPINNED
+    )
+    assert session.last_result == before
+    assert "usage_unavailable" not in str(session.last_result)
+
+
+def test_a_refused_emitted_result_does_not_stamp_usage(
+    tmp_config_dir: object,
+) -> None:
+    _seed_row(QueueItemStatus.RUNNING, Stage.REVIEW)
+    session = _session({**_stage_complete_payload(), "ticket_id": _TICKET})
+    session.local_liveness = LocalLivenessHandle.model_validate(
+        {"pid": 1, "start_time_ns": 1, "backend": "opencode"}
+    )
+
+    handle_emitted_result(
+        session,
+        _candidate(),
+        subject=_SUBJECT,
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+        harvested_ticket_ids=[],
+        pending_events=[],
+        refusal_pages=[],
+    )
+
+    assert session.usage is None
+
+
+def test_a_session_with_no_liveness_handle_completes_with_usage_none() -> None:
+    session = _session(None)
+
+    stamp_harvest_completed(
+        session,
+        _candidate(),
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+        harvested_ticket_ids=[],
+        pending_events=[],
+    )
+
+    assert session.status == SessionStatus.COMPLETED
+    assert session.usage is None

@@ -43,6 +43,7 @@ from cw.reconcile._shared import (
     _sentinel_partial_route_consumed,
     stage_refusal_page,
 )
+from cw.reconcile.harvest_usage import stamp_backend_usage_unavailable
 from cw.result import has_terminal_result, reconstruct_staged_sentinel
 
 if TYPE_CHECKING:
@@ -157,7 +158,13 @@ def stamp_harvest_completed(
     harvested_ticket_ids: list[str],
     pending_events: list[dict[str, object]],
 ) -> None:
-    """Mark a dead LOCAL session COMPLETED and queue its SESSION_COMPLETED payload."""
+    """Mark a dead LOCAL session COMPLETED and queue its SESSION_COMPLETED payload.
+
+    Also stamps the opencode/local unavailable-usage marker (#3063): this is
+    where the session's usage is first assigned at completion, for both
+    completion paths. A pure in-memory assignment from data already in hand.
+    """
+    stamp_backend_usage_unavailable(session, candidate.ticket_id)
     if candidate.ticket_id:
         harvested_ticket_ids.append(candidate.ticket_id)
     session.status = SessionStatus.COMPLETED
