@@ -69,6 +69,10 @@ RESUME_FRICTION: Final = (
 )
 MODEL_TEXT_DISCARDED_FRICTION: Final = "plan_resume_model_text_discarded"
 DECISIONS_NOT_RECORDED_PREFIX: Final = "plan_decisions_not_recorded: "
+#: A completing run replaced an existing ``.cw/plan.md`` (#3498):
+#: ``plan_md_replaced: old=<fp|unreadable> new=<fp> backup=<ok|failed>``.
+PLAN_MD_REPLACED_PREFIX: Final = "plan_md_replaced: "
+UNREADABLE_PLAN_MD: Final = "unreadable"
 
 # PLAN status vocabulary shared by the turn parser and gate transitions.
 PLAN_STAGE_COMPLETE: Final = "stage_complete"
@@ -343,6 +347,33 @@ def write_plan_md(worktree: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, text)
     return path
+
+
+def existing_plan_md_fingerprint(worktree: Path) -> str | None:
+    """The existing ``.cw/plan.md``'s raw-text fingerprint (#3498).
+
+    ``None`` when there is none, :data:`UNREADABLE_PLAN_MD` when it cannot be
+    read as UTF-8 text.
+    """
+    path = worktree / PLAN_MD_RELATIVE_PATH
+    if not path.exists():
+        return None
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return UNREADABLE_PLAN_MD
+    return compute_plan_draft_fingerprint(text)
+
+
+def backup_plan_md(worktree: Path) -> bool:
+    """Snapshot the existing ``.cw/plan.md``; ``False`` when that failed."""
+    return rotate_backup(worktree / PLAN_MD_RELATIVE_PATH) is not None
+
+
+def plan_md_replaced_token(old: str, new: str, *, backup_ok: bool) -> str:
+    """The friction token auditing a replaced ``.cw/plan.md`` (#3498)."""
+    backup = "ok" if backup_ok else "failed"
+    return f"{PLAN_MD_REPLACED_PREFIX}old={old} new={new} backup={backup}"
 
 
 def plan_blocked(

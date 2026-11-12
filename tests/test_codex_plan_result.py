@@ -12,12 +12,16 @@ from cw.auto_dev_result.parse import extract_block
 from cw.codex_plan._result import (
     MODEL_TEXT_DISCARDED_FRICTION,
     PLAN_MD_RELATIVE_PATH,
+    PLAN_MD_REPLACED_PREFIX,
     ROUND_ZERO_LINE,
     PlanTurn,
     PlanTurnFailure,
+    backup_plan_md,
     clean_plan_text,
+    existing_plan_md_fingerprint,
     parse_plan_turn,
     plan_blocked,
+    plan_md_replaced_token,
     read_resume_draft,
     stamp_plan_result,
     write_plan_draft,
@@ -348,6 +352,76 @@ class TestWriteDraft:
 
         assert path.read_text(encoding="utf-8") == ROUND_ZERO_LINE + _PLAN
         assert _draft_backups(tmp_path) == []
+
+
+def _plan_md(worktree: Path, data: bytes) -> Path:
+    path = worktree / PLAN_MD_RELATIVE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+def _plan_md_backups(worktree: Path) -> list[Path]:
+    path = worktree / PLAN_MD_RELATIVE_PATH
+    return sorted(path.parent.glob(f"{path.name}.bak-*"))
+
+
+class TestPlanMdReplacement:
+    """#3498: the helpers behind replacing an existing ``.cw/plan.md``."""
+
+    def test_write_plan_md_is_a_pure_atomic_write(self, tmp_path: Path) -> None:
+        write_plan_md(tmp_path, "first\n")
+        write_plan_md(tmp_path, "second\n")
+
+        assert (tmp_path / PLAN_MD_RELATIVE_PATH).read_text() == "second\n"
+        assert _plan_md_backups(tmp_path) == []
+
+    def test_backup_plan_md_snapshots_the_existing_plan(self, tmp_path: Path) -> None:
+        _plan_md(tmp_path, b"old plan\n")
+
+        assert backup_plan_md(tmp_path) is True
+
+        (backup,) = _plan_md_backups(tmp_path)
+        assert backup.read_bytes() == b"old plan\n"
+
+    def test_backup_plan_md_reports_a_failed_snapshot(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _plan_md(tmp_path, b"old plan\n")
+
+        def _fail(*_args: object, **_kwargs: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.atomic.shutil.copy2", _fail)
+
+        assert backup_plan_md(tmp_path) is False
+
+    def test_the_fingerprint_is_none_when_absent(self, tmp_path: Path) -> None:
+        assert existing_plan_md_fingerprint(tmp_path) is None
+
+    def test_the_fingerprint_is_unreadable_for_non_utf8(self, tmp_path: Path) -> None:
+        _plan_md(tmp_path, b"\xff\xfe")
+
+        assert existing_plan_md_fingerprint(tmp_path) == "unreadable"
+
+    def test_the_fingerprint_is_the_raw_text_digest(self, tmp_path: Path) -> None:
+        _plan_md(tmp_path, b"old plan\n")
+
+        assert existing_plan_md_fingerprint(tmp_path) == compute_plan_draft_fingerprint(
+            "old plan\n"
+        )
+
+    @pytest.mark.parametrize(
+        ("backup_ok", "suffix"), [(True, "backup=ok"), (False, "backup=failed")]
+    )
+    def test_the_token_names_both_fingerprints_and_the_backup(
+        self, backup_ok: bool, suffix: str
+    ) -> None:
+        token = plan_md_replaced_token("aaa", "bbb", backup_ok=backup_ok)
+
+        assert token == f"{PLAN_MD_REPLACED_PREFIX}old=aaa new=bbb {suffix}"
+        assert token.startswith("plan_md_replaced: ")
 
 
 def _draft_bytes(worktree: Path, data: bytes) -> None:

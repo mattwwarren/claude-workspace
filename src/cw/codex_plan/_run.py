@@ -59,15 +59,17 @@ from cw.codex_plan._result import (
     MODEL_TEXT_DISCARDED_FRICTION,
     PARK_STATUSES,
     PLAN_BLOCKED,
-    PLAN_MD_RELATIVE_PATH,
     PLAN_NO_OP,
     RESUME_FRICTION,
     PlanDraftError,
     PlanTurnFailure,
     ResumeDraft,
+    backup_plan_md,
     clean_plan_text,
+    existing_plan_md_fingerprint,
     parse_plan_turn,
     plan_blocked,
+    plan_md_replaced_token,
     read_resume_draft,
     stamp_plan_result,
     write_plan_draft,
@@ -429,24 +431,13 @@ def _park(run: _Run, plan_text: str, check: ApprovalCheck) -> _Exit:
 
 
 def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
-    """A completing exit: binding stations, the stamped plan, the decisions."""
-    plan_path = run.worktree / PLAN_MD_RELATIVE_PATH
-    if plan_path.exists():
-        try:
-            old_text = plan_path.read_text(encoding="utf-8")
-            old_fingerprint = compute_plan_draft_fingerprint(clean_plan_text(old_text))
-        except OSError as exc:
-            old_fingerprint = f"unreadable ({exc})"
-        new_fingerprint = compute_plan_draft_fingerprint(clean_plan_text(plan_text))
-        return run.blocked(
-            STAGE_PLAN_GENERATED,
-            CODEX_PLAN_ARTIFACT_MISSING,
-            "refusing to replace existing authoritative .cw/plan.md; "
-            f"old fingerprint: {old_fingerprint}; "
-            f"proposed replacement fingerprint: {new_fingerprint}; "
-            "an explicit re-plan/regress operation must clear or version the "
-            "existing artifact first",
-        )
+    """A completing exit: binding stations, the stamped plan, the decisions.
+
+    An existing ``.cw/plan.md`` (the normal state after a regress into PLAN)
+    is replaced only once both stations are clean and both markers verify; it
+    is snapshotted first and the replacement is audited as a friction token
+    (#3498).
+    """
     stations = run_plan_stations(
         runner=run.runner,
         worktree=run.worktree,
@@ -475,11 +466,15 @@ def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
             "stamped plan does not carry both sign-off markers",
             plan_draft_fingerprint=_draft_fingerprint(plan_text, written=draft_written),
         )
+    old_fingerprint = existing_plan_md_fingerprint(run.worktree)
+    backup_ok = False
     draft_written = False
     try:
         write_plan_draft(run.worktree, plan_text)
         draft_written = True
         result = _bound(run, result)
+        if old_fingerprint is not None:
+            backup_ok = backup_plan_md(run.worktree)
         plan_path = write_plan_md(run.worktree, marked)
         written = plan_path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -509,9 +504,22 @@ def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
             run.task.ticket_id,
             exc_info=True,
         )
+    tokens = _replacement_friction(old_fingerprint, marked, backup_ok=backup_ok)
     token = _record_decisions(run, written)
-    result = _with_friction(result, [token] if token else [])
+    result = _with_friction(result, [*tokens, *([token] if token else [])])
     return _Exit(result, marked, plan_path)
+
+
+def _replacement_friction(
+    old_fingerprint: str | None, marked: str, *, backup_ok: bool
+) -> list[str]:
+    """The ``plan_md_replaced`` token when a prior ``.cw/plan.md`` was replaced."""
+    if old_fingerprint is None:
+        return []
+    new_fingerprint = compute_plan_draft_fingerprint(marked)
+    return [
+        plan_md_replaced_token(old_fingerprint, new_fingerprint, backup_ok=backup_ok)
+    ]
 
 
 def _after_turn(
