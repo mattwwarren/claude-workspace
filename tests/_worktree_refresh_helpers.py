@@ -34,6 +34,7 @@ from cw.models import (
 )
 from cw.worktree import (
     FetchResult,
+    ReuseRefreshOptions,
     ReuseRefreshReport,
     _run_git,
     create_worktree,
@@ -463,7 +464,10 @@ def _refresh_with_debug(client: ClientConfig, caplog: pytest.LogCaptureFixture) 
     caplog.clear()  # drop seed-phase records
     with caplog.at_level(logging.DEBUG, logger="cw.worktree"):
         return create_worktree(
-            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+            client,
+            _REUSE_BRANCH,
+            allow_dirty_reuse=True,
+            refresh=ReuseRefreshOptions(),
         )
 
 
@@ -474,8 +478,7 @@ def _refresh_reporting(client: ClientConfig) -> tuple[Path, ReuseRefreshReport]:
         client,
         _REUSE_BRANCH,
         allow_dirty_reuse=True,
-        refresh_on_reuse=True,
-        refresh_report=report,
+        refresh=ReuseRefreshOptions(report=report),
     )
     return path, report
 
@@ -494,8 +497,7 @@ def _refresh_occupied(
             client,
             _REUSE_BRANCH,
             allow_dirty_reuse=True,
-            refresh_on_reuse=True,
-            refresh_report=report,
+            refresh=ReuseRefreshOptions(report=report),
         )
     return excinfo.value, report
 
@@ -522,7 +524,10 @@ def _refresh_stale_with_debug(
         pytest.raises(StaleWorktreeError) as excinfo,
     ):
         create_worktree(
-            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+            client,
+            _REUSE_BRANCH,
+            allow_dirty_reuse=True,
+            refresh=ReuseRefreshOptions(),
         )
     return excinfo.value
 
@@ -548,6 +553,5 @@ def _refresh_with_ticket(client: ClientConfig, ticket_id: str | None = "2213") -
         client,
         _REUSE_BRANCH,
         allow_dirty_reuse=True,
-        refresh_on_reuse=True,
-        ticket_id=ticket_id,
+        refresh=ReuseRefreshOptions(ticket_id=ticket_id),
     )

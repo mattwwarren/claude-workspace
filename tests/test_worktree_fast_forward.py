@@ -16,6 +16,7 @@ from cw.worktree import (
     FetchOutcome,
     FetchResult,
     RefreshOutcome,
+    ReuseRefreshOptions,
     ReuseRefreshReport,
     _run_git,
     create_worktree,
@@ -45,9 +46,10 @@ if TYPE_CHECKING:
 
 
 class TestCreateWorktreeReuseRefresh:
-    """#2213: with ``refresh_on_reuse=True`` the reuse path best-effort fetches
-    and fast-forwards a *behind, unoccupied, clean* worktree. It never resets,
-    never raises, and leaves an occupied or diverged worktree exactly as it is."""
+    """#2213: with a ``refresh`` options object (#2238) the reuse path
+    best-effort fetches and fast-forwards a *behind, unoccupied, clean*
+    worktree. It never resets, never raises, and leaves an occupied or
+    diverged worktree exactly as it is."""
 
     def test_merge_refusal_is_logged_and_leaves_worktree_alone(
         self,
@@ -76,7 +78,10 @@ class TestCreateWorktreeReuseRefresh:
         caplog.clear()  # drop seed-phase records
         with caplog.at_level(logging.INFO, logger="cw.worktree"):
             result = create_worktree(
-                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+                client,
+                _REUSE_BRANCH,
+                allow_dirty_reuse=True,
+                refresh=ReuseRefreshOptions(),
             )
 
         assert result == wt
@@ -99,7 +104,10 @@ class TestCreateWorktreeReuseRefresh:
 
         with pytest.raises(AssertionError):
             create_worktree(
-                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+                client,
+                _REUSE_BRANCH,
+                allow_dirty_reuse=True,
+                refresh=ReuseRefreshOptions(),
             )
 
         assert git_in(wt, "rev-parse", "HEAD") == old_sha
@@ -121,7 +129,7 @@ class TestReuseSubmoduleSync:
         assert old_sha != new_sha
 
         result = create_worktree(
-            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh=ReuseRefreshOptions()
         )
 
         assert result == wt
@@ -139,7 +147,7 @@ class TestReuseSubmoduleSync:
         calls = _spy_git(monkeypatch)
 
         result = create_worktree(
-            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+            client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh=ReuseRefreshOptions()
         )
 
         assert result == wt
@@ -177,7 +185,10 @@ class TestReuseSubmoduleSync:
             pytest.raises(WorktreeOccupiedError),
         ):
             create_worktree(
-                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+                client,
+                _REUSE_BRANCH,
+                allow_dirty_reuse=True,
+                refresh=ReuseRefreshOptions(),
             )
 
         assert git_in(wt, "rev-parse", "HEAD") == new_sha  # ff not undone
@@ -202,8 +213,7 @@ class TestReuseSubmoduleSync:
                 client,
                 _REUSE_BRANCH,
                 allow_dirty_reuse=True,
-                refresh_on_reuse=True,
-                refresh_report=report,
+                refresh=ReuseRefreshOptions(report=report),
             )
 
         assert result == wt
@@ -246,8 +256,7 @@ class TestReuseSubmoduleSync:
             client,
             _REUSE_BRANCH,
             allow_dirty_reuse=True,
-            refresh_on_reuse=True,
-            refresh_report=report,
+            refresh=ReuseRefreshOptions(report=report),
         )
 
         assert result == wt
@@ -437,9 +446,7 @@ class TestFastForwardAuditEvent:
             client,
             _REUSE_BRANCH,
             allow_dirty_reuse=True,
-            refresh_on_reuse=True,
-            refresh_report=report,
-            ticket_id="2213",
+            refresh=ReuseRefreshOptions(report=report, ticket_id="2213"),
         )
 
         assert report.outcome is RefreshOutcome.REFRESHED
@@ -470,9 +477,7 @@ class TestFastForwardAuditEvent:
                 client,
                 _REUSE_BRANCH,
                 allow_dirty_reuse=True,
-                refresh_on_reuse=True,
-                refresh_report=report,
-                ticket_id="2213",
+                refresh=ReuseRefreshOptions(report=report, ticket_id="2213"),
             )
 
         assert result == wt

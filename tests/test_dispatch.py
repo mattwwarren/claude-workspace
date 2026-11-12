@@ -113,7 +113,12 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
-from cw.worktree import TickFetchGate, active_tick_fetch, run_network_git
+from cw.worktree import (
+    ReuseRefreshOptions,
+    TickFetchGate,
+    active_tick_fetch,
+    run_network_git,
+)
 from tests import _git_sandbox
 from tests._clients_yaml import (
     ClientSpec,
@@ -2728,9 +2733,9 @@ class TestDispatchTickSpawnErrors:
         assert seen == [
             {
                 "allow_dirty_reuse": True,
-                "refresh_on_reuse": True,
-                "ticket_id": "GEN-2213",
-                "native_daemon": daemon,
+                "refresh": ReuseRefreshOptions(
+                    ticket_id="GEN-2213", native_daemon=daemon
+                ),
             }
         ]
 
@@ -3451,11 +3456,12 @@ def _seed_occupied_ticket_worktree(
 class TestClaimRefusesOccupiedWorktree:
     """A claim whose reused per-ticket worktree is occupied must NOT spawn.
 
-    ``create_worktree(refresh_on_reuse=True)`` raises ``WorktreeOccupiedError``
-    for a live cw session, a live daemon-roster worker, or an indeterminate read
-    of either. Before round 5 the claim path passed no report and so discarded
-    the refusal, then spawned a SECOND worker into the occupied tree: the exact
-    hazard the ticket exists to prevent. The refusal is now a type the claim
+    ``create_worktree(refresh=ReuseRefreshOptions(...))`` raises
+    ``WorktreeOccupiedError`` for a live cw session, a live daemon-roster
+    worker, or an indeterminate read of either. Before round 5 the claim path
+    passed no report and so discarded the refusal, then spawned a SECOND
+    worker into the occupied tree: the exact hazard the ticket exists to
+    prevent. The refusal is now a type the claim
     handles: the row goes back to PENDING for a later tick, nothing is spawned,
     nothing is removed, and the transient skip is not charged as an attempt or a
     spawn error (which would trip the lane circuit breaker over a per-ticket

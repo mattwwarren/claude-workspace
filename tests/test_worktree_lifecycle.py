@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import subprocess
 from pathlib import Path
@@ -310,13 +311,13 @@ class TestCreateWorktree:
         # _checked_out_branch: branch matches.
         patch_worktree(monkeypatch, "_checked_out_branch", lambda _p: "feat/search")
         patch_worktree(monkeypatch, "fetch_feature_branch", mock_fetch)
-        result = create_worktree(client, "feat/search")
+        result = create_worktree(client, "feat/search", refresh=None)
         assert result == wt_path
         # The behavior under test: an on-branch worktree is reused without a
         # `worktree add`. Assert that, not the exact verification command.
         assert not any("add" in call for call in calls)
-        # Default reuse (refresh_on_reuse=False) is path resolution only: no
-        # network fetch and no fast-forward (#2213).
+        # Default reuse (refresh=None) is path resolution only: no network
+        # fetch and no fast-forward (#2213, #2238).
         assert fetch_calls == []
         assert not any("merge" in call for call in calls)
 
@@ -1266,6 +1267,53 @@ class TestCreateWorktreeBranchHeldElsewhere:
         from cw.exceptions import BranchHeldByWorktreeError
 
         assert not isinstance(exc_info.value, BranchHeldByWorktreeError)
+
+
+# The four loose reuse-refresh controls #2238 folded into ReuseRefreshOptions.
+_REMOVED_REFRESH_KWARGS = (
+    "refresh_on_reuse",
+    "refresh_report",
+    "ticket_id",
+    "native_daemon",
+)
+
+
+class TestCreateWorktreeRefreshSignature:
+    """The reuse refresh is one keyword-only options value, not loose flags (#2238).
+
+    The old ``refresh_on_reuse`` / ``refresh_report`` / ``ticket_id`` /
+    ``native_daemon`` kwargs let a caller pass a report, ticket or daemon
+    without opting in, which was silently ignored. One optional options
+    object makes that combination unrepresentable.
+    """
+
+    def test_parameters_are_exact(self) -> None:
+        params = inspect.signature(create_worktree).parameters
+
+        assert list(params) == [
+            "client",
+            "branch",
+            "force",
+            "allow_dirty_reuse",
+            "refresh",
+        ]
+        refresh = params["refresh"]
+        assert refresh.kind is inspect.Parameter.KEYWORD_ONLY
+        assert refresh.default is None
+        assert not set(_REMOVED_REFRESH_KWARGS) & set(params)
+
+    @pytest.mark.parametrize("name", _REMOVED_REFRESH_KWARGS)
+    def test_removed_kwargs_are_rejected(self, tmp_path: Path, name: str) -> None:
+        client = ClientConfig(
+            name="test",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "wt",
+        )
+        # Untyped alias: the call is deliberately one the signature rejects.
+        call: Callable[..., object] = create_worktree
+
+        with pytest.raises(TypeError, match=name):
+            call(client, "feat/x", **{name: None})
 
 
 class TestRemoveWorktree:

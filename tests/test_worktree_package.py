@@ -62,6 +62,7 @@ _FROZEN_NAMES = [
     "ProbeUnavailable",
     "RefreshOutcome",
     "RefreshResult",
+    "ReuseRefreshOptions",
     "ReuseRefreshReport",
     "TickFetchGate",
     "UnresolvablePathWarningKey",
