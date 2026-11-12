@@ -575,6 +575,25 @@ class TestAggregatorFailures:
         assert len(_aggregator_stdins(runner)) == 1
         assert outcome.prepared is not None
 
+    def test_an_input_too_large_rejection_is_known_and_not_retryable(
+        self, repo: EngineRepo
+    ) -> None:
+        """#3441: the emitted string is unchanged and stays non-transient."""
+        stdout = (
+            Path(__file__).parent
+            / "fixtures"
+            / "codex_audit_events"
+            / "input_too_large_turn_failed.jsonl"
+        ).read_text(encoding="utf-8")
+        runner = _engine_runner(aggregation=CodexRunResult(1, stdout, ""))
+
+        outcome = _pass(repo, runner)
+
+        assert (
+            _blocked(outcome, retry=False)
+            == "engine_aggregation_failed: codex_input_too_large"
+        )
+
     def test_a_head_that_moved_during_the_round_is_a_head_mismatch(
         self, repo: EngineRepo
     ) -> None:

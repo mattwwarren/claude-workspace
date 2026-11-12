@@ -40,6 +40,7 @@ from cw.review_engine.aggregate import (
     render_aggregation_envelope,
 )
 from cw.review_engine.constants import (
+    AGGREGATION_FAILED_REASONS,
     AGGREGATION_REASON_MISSING_OUTPUT,
     FRICTION,
     EngineRoundFailure,
@@ -59,6 +60,14 @@ _OUTPUT_FILENAME = "aggregation-output.json"
 
 
 def _aggregation_failure(reason: str) -> SummaryFailure:
+    """The ``engine_aggregation_failed`` failure for a vocabulary *reason*.
+
+    An unknown *reason* is an internal-contract violation (#3441): every
+    producer in this module maps onto ``AGGREGATION_FAILED_REASONS``.
+    """
+    if reason not in AGGREGATION_FAILED_REASONS:
+        msg = f"unknown aggregation failure reason: {reason!r}"
+        raise ValueError(msg)
     failure = EngineRoundFailure.ENGINE_AGGREGATION_FAILED
     return SummaryFailure(failure, FRICTION[failure].format(reason=reason))
 

@@ -16,7 +16,11 @@ from pathlib import Path
 
 import pytest
 
-from cw.codex_review._engine_aggregate import run_codex_aggregator
+from cw.codex_review._const import CODEX_INPUT_TOO_LARGE
+from cw.codex_review._engine_aggregate import (
+    _aggregation_failure,
+    run_codex_aggregator,
+)
 from cw.codex_review._roles import _AUDIT_ARGV_FLAGS
 from cw.codex_review._shard import ReviewInputTooLargeError
 from cw.codex_runner import CodexRunResult, relabeled
@@ -28,6 +32,8 @@ from cw.review_engine.aggregate import (
     render_aggregation_envelope,
 )
 from cw.review_engine.constants import (
+    AGGREGATION_FAILED_REASONS,
+    AGGREGATION_REASON_CODEX_INPUT_TOO_LARGE,
     ENGINE_AGGREGATOR_PREAMBLE,
     FRICTION,
     EngineRoundFailure,
@@ -302,6 +308,61 @@ class TestFailures:
                 path=str(summary_path)
             ),
         )
+
+
+_CAPACITY_STDOUT = (
+    _FIXTURES / "codex_audit_events" / "capacity_turn_failed.jsonl"
+).read_text(encoding="utf-8")
+_TOO_LARGE_STDOUT = (
+    _FIXTURES / "codex_audit_events" / "input_too_large_turn_failed.jsonl"
+).read_text(encoding="utf-8")
+
+
+class TestReasonVocabulary:
+    """#3441: every emitted aggregation reason is in the closed vocabulary."""
+
+    def test_an_unknown_reason_is_refused_at_construction(self) -> None:
+        with pytest.raises(ValueError, match="bogus"):
+            _aggregation_failure("bogus")
+
+    def test_the_leaf_constant_matches_the_codex_reason(self) -> None:
+        assert AGGREGATION_REASON_CODEX_INPUT_TOO_LARGE == CODEX_INPUT_TOO_LARGE
+        assert AGGREGATION_REASON_CODEX_INPUT_TOO_LARGE in AGGREGATION_FAILED_REASONS
+
+    @pytest.mark.parametrize(
+        ("reply", "reason"),
+        [
+            (CodexRunResult(-1, "", "", timed_out=True), "codex_timeout"),
+            (CodexRunResult(127, "", "codex: command not found"), "codex_error"),
+            (CodexRunResult(1, "", "boom"), "codex_error"),
+            (CodexRunResult(1, _CAPACITY_STDOUT, ""), "codex_model_capacity"),
+            (CodexRunResult(1, _TOO_LARGE_STDOUT, ""), "codex_input_too_large"),
+            (_ok(None), "missing_output"),
+            (_ok(""), "empty_output"),
+            (_ok("{nope"), "invalid_json"),
+            (_ok('{"verdict": "PASS"}'), "schema_mismatch"),
+        ],
+        ids=[
+            "timeout",
+            "spawn-error",
+            "nonzero",
+            "capacity",
+            "input-too-large",
+            "missing",
+            "empty",
+            "invalid-json",
+            "schema",
+        ],
+    )
+    def test_every_reachable_producer_emits_a_known_reason(
+        self, tmp_path: Path, reply: CodexRunResult, reason: str
+    ) -> None:
+        failure = _run(_runner(reply), tmp_path / "summary.json")
+
+        assert isinstance(failure, SummaryFailure)
+        assert failure.reason is EngineRoundFailure.ENGINE_AGGREGATION_FAILED
+        assert failure.detail == _failure_text(reason)
+        assert reason in AGGREGATION_FAILED_REASONS
 
 
 class TestScratchFailures:
