@@ -48,10 +48,10 @@ def _accumulate_task_cost(task: TicketTask, session_id: str | None) -> None:
       2. session.last_result.get('cost_usd') (populated by the RFC 0012 door —
          the harvest-authority write path used when signal_stop did not run)
 
-    ``session.cost_breakdown`` is an operator-priced estimate and is retained
-    on the session, but is not folded into ``total_cost_usd`` here: doing so
-    without a persisted contribution record would make the durable aggregate
-    unauditable. An estimate is never written into ``cost_usd`` itself.
+    When both reported cost sources are absent, the operator-priced
+    ``session.cost_breakdown`` estimate is folded into ``total_cost_usd``.
+    Reported cost takes precedence, and an estimate is never written into
+    ``cost_usd`` itself.
 
     Tokens (``session.usage.total_tokens``) accumulate into
     ``task.total_tokens`` independently of the cost branch: a priced and an
@@ -69,5 +69,9 @@ def _accumulate_task_cost(task: TicketTask, session_id: str | None) -> None:
     cost = _reported_cost(session)
     if cost is not None:
         task.total_cost_usd = (task.total_cost_usd or 0.0) + cost
+    elif session.cost_breakdown:
+        task.total_cost_usd = (task.total_cost_usd or 0.0) + sum(
+            session.cost_breakdown.values()
+        )
     if session.usage is not None:
         task.total_tokens = _add_optional(task.total_tokens, session.usage.total_tokens)

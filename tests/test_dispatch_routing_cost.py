@@ -42,7 +42,7 @@ def _save(**session_overrides: object) -> None:
     save_state(CwState(sessions=[_make_daemon_session(id=_SID, **session_overrides)]))
 
 
-class TestEstimateNeverDoubleCounts:
+class TestEstimateFoldsOnlyWhenUnreported:
     def test_cost_usd_wins_over_a_breakdown(self) -> None:
         _save(cost_usd=1.5, cost_breakdown={"m": 9.0})
         task = _task()
@@ -59,21 +59,21 @@ class TestEstimateNeverDoubleCounts:
 
         assert task.total_cost_usd == pytest.approx(2.0)
 
-    def test_breakdown_estimate_is_not_folded_into_total(self) -> None:
+    def test_breakdown_estimate_is_folded_into_a_fresh_total(self) -> None:
         _save(cost_breakdown={"a": 0.25, "b": 0.5})
         task = _task()
 
         _accumulate_task_cost(task, _SID)
 
-        assert task.total_cost_usd is None
+        assert task.total_cost_usd == pytest.approx(0.75)
 
-    def test_breakdown_estimate_does_not_change_existing_total(self) -> None:
+    def test_breakdown_estimate_adds_to_an_existing_total(self) -> None:
         _save(cost_breakdown={"a": 0.25})
         task = _task(total_cost_usd=1.0)
 
         _accumulate_task_cost(task, _SID)
 
-        assert task.total_cost_usd == pytest.approx(1.0)
+        assert task.total_cost_usd == pytest.approx(1.25)
 
     def test_cost_usd_is_never_written_by_accumulation(self) -> None:
         _save(cost_breakdown={"a": 0.25})
@@ -81,7 +81,12 @@ class TestEstimateNeverDoubleCounts:
 
         _accumulate_task_cost(task, _SID)
 
-        assert task.total_cost_usd is None
+        assert task.total_cost_usd == pytest.approx(0.25)
+        # The estimate lands in the total only; Session.cost_usd stays unset.
+        from cw.config import load_state
+
+        session = next(s for s in load_state().sessions if s.id == _SID)
+        assert session.cost_usd is None
 
 
 class TestTokenAccumulation:
@@ -119,7 +124,8 @@ class TestTokenAccumulation:
         _accumulate_task_cost(task, _SID)
 
         assert task.total_tokens == 33
-        assert task.total_cost_usd is None
+        # Only the priced session (no reported cost) folds into the total.
+        assert task.total_cost_usd == pytest.approx(0.5)
 
     def test_old_row_without_total_tokens_loads_none(self) -> None:
         raw = _task().model_dump(mode="json")
