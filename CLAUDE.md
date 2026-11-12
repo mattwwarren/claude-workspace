@@ -83,7 +83,7 @@ uv run python .claude/scripts/check_changelog_frozen.py          # 7. Freeze rel
 uv run pre-commit run actionlint --all-files                     # 8. Lint workflows (actionlint)
 uv run pre-commit run --all-files                                # 9. Hooks
 uv run --extra mcp pytest tests/ -n auto -m 'not integration' \
-  --cov=cw --cov=.claude/scripts --cov-report=xml && uv run coverage report --include='src/cw/*' --fail-under=88 && uv run coverage report --include='.claude/scripts/*' --fail-under=50  # 10. Unit + per-tree cov (src/cw ≥88%, .claude/scripts ≥50%)
+  --cov=cw --cov=.claude/scripts --cov-report=xml && uv run coverage report --include='src/cw/*' --fail-under=88 && uv run coverage report --include='.claude/scripts/*' --fail-under=84  # 10. Unit + per-tree cov (src/cw ≥88%, .claude/scripts ≥84%)
 uv run pytest tests/ -m integration                              # 11. Integration
 uv run diff-cover coverage.xml --compare-branch=origin/main \
   --fail-under=90                                                # 12. Patch coverage ≥90%
@@ -204,7 +204,7 @@ CI's "Coverage floors" step together; never lower a floor to land a change.
 - `ruff format --check` - **ZERO reformats** (run `ruff format` to fix; `ruff check` does NOT enforce formatting)
 - `mypy --strict` - **ZERO type errors allowed**
 - Test suite - **100% pass rate required**
-- `src/cw` coverage **≥88%** and `.claude/scripts` coverage **≥50%** (separate floors, never blended); new/changed lines (patch coverage) **≥90%** — cover every new branch, including `except`/error paths
+- `src/cw` coverage **≥88%** and `.claude/scripts` coverage **≥84%** (separate floors, never blended); new/changed lines (patch coverage) **≥90%** — cover every new branch, including `except`/error paths
 - No suppressions (`# noqa`, `# type: ignore`) without explicit approval (escalate: worker → orchestrator → user)
 
 Report format: Only actionable problems. Zero praise, zero summaries.
