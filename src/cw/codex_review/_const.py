@@ -272,10 +272,13 @@ CODEX_REVIEW_WORKTREE_MUTATED = "codex_review_worktree_mutated"
 
 # Fix-loop divergence guard (#2394): the fix loop grew the diff for a
 # configured number of consecutive cycles (default 1 since #2633,
-# ``codex_fix_loop_stall_cycles``) while resolving none of the originally-found
-# MUST_FIX findings — distinct from CODEX_MUST_FIX_FINDINGS (the cap was reached
-# but findings may still be shrinking) and from REVIEW_TREADMILL_DETECTED (a
-# single refused self-inflicted finding, not a loop-wide progress signal).
+# ``codex_fix_loop_stall_cycles``) while making no net progress on the
+# originally-found MUST_FIX findings: resolved originals minus new findings
+# attributed to the loop's own code (#2665), so it also fires when resolved
+# originals are offset by loop-attributed findings. Distinct from
+# CODEX_MUST_FIX_FINDINGS (the cap was reached but findings may still be
+# shrinking) and from REVIEW_TREADMILL_DETECTED (a single refused self-inflicted
+# finding, not a loop-wide progress signal).
 # Stops the loop BEFORE the cycle cap, unlike every other reason above.
 FIX_LOOP_DIVERGING = "fix_loop_diverging"
 
