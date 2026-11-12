@@ -35,6 +35,10 @@ _SRC_ROOT = _REPO_ROOT / "src"
 _COMMANDS_ROOT = _REPO_ROOT / ".claude" / "commands"
 
 
+# Root of the repo-tracked skill prose, backing the shared ``_skill`` reader.
+_SKILLS_ROOT = _REPO_ROOT / ".claude" / "skills"
+
+
 def _iter_src_files() -> list[Path]:
     """Return every ``*.py`` file under ``src/``, sorted for determinism."""
     return sorted(_SRC_ROOT.rglob("*.py"))
@@ -149,6 +153,18 @@ def _appendix(stage: str, *, raw: bool = False) -> str:
     as in ``_cmd`` unless ``raw=True``.
     """
     return _cmd(f"auto-dev-{stage}-appendix.md", raw=raw)
+
+
+def _skill(name: str) -> str:
+    """Return the text of ``.claude/skills/<name>``, *name* relative to it.
+
+    For example ``"harden-ticket/SKILL.md"`` or
+    ``"harden-ticket/references/sweep-checklist-cases.md"``. New skill-prose
+    guard tests import this rather than adding another local copy. Skill files
+    carry no ``<!-- el: -->`` contract tags, so there is no ``strip_doc_tags``
+    step (unlike ``_cmd``).
+    """
+    return (_SKILLS_ROOT / name).read_text(encoding="utf-8")
 
 
 def _section_between(content: str, start: str, end: str | None = None) -> str:
