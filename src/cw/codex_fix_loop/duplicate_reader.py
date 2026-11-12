@@ -21,6 +21,7 @@ diff it measures over).
 
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 from typing import TYPE_CHECKING, NamedTuple
@@ -68,6 +69,8 @@ _GREP_HIT = re.compile(r"^(.+?):(\d+):")
 _MIN_NAME_CHARS = 4
 _MAX_CANDIDATES = 5
 _GREP_TIMEOUT_SECONDS = 30.0
+_GREP_ERROR_RETURNCODE = 2  # git grep: 1 is no match, 2 or more is an error
+_log = logging.getLogger(__name__)
 
 
 class AddedDef(NamedTuple):
@@ -113,14 +116,15 @@ def new_defs(
     A name that also appears as a removed ``def`` (same *pattern*) anywhere in
     the diff is dropped: an in-place edit or a cross-file move is not a new
     function. Counting by name, not by position, so an edit earlier in a file
-    never shifts which added def survives. With *source_only* (the default)
-    test and prose paths are skipped on both scans; ``False`` keeps them, for
-    callers that attribute code the loop wrote anywhere (#2665).
+    never shifts which added def survives. Both scans read only ``.py`` paths
+    (#3304). With *source_only* (the default) test and prose paths are skipped
+    too; ``False`` keeps them, for callers that attribute code the loop wrote
+    anywhere (#2665).
     """
     removed_names = {
         m.group(1)
         for path, diff in file_diffs.items()
-        if not source_only or is_source_path(path)
+        if path.endswith(".py") and (not source_only or is_source_path(path))
         for line in removed_lines(diff)
         if (m := pattern.match(line)) is not None
     }
@@ -230,8 +234,9 @@ def _grep_hits(
 ) -> list[ExistingFunction]:
     """Every staged source ``def`` of *names*, sorted, minus *exclude*.
 
-    A git failure or a timeout returns no hits: the signal is advisory and must
-    never wedge the loop, so an unreadable repo simply does not park.
+    A timeout or a git error logs one WARNING; both, and a plain no-match, return
+    no hits. The signal is advisory and must never wedge the loop, so an
+    unreadable repo simply does not park.
     """
     alternation = "|".join(names)
     pattern = (
@@ -246,6 +251,19 @@ def _grep_hits(
             timeout=_GREP_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
+        _log.warning(
+            "codex fix loop: duplicate-reader git grep timed out after %ss; "
+            "failing open",
+            _GREP_TIMEOUT_SECONDS,
+        )
+        return []
+    if proc.returncode >= _GREP_ERROR_RETURNCODE:
+        _log.warning(
+            "codex fix loop: duplicate-reader git grep failed (exit %s): %s; "
+            "failing open",
+            proc.returncode,
+            (proc.stderr or "").strip(),
+        )
         return []
     if proc.returncode != 0:
         return []
@@ -310,7 +328,7 @@ def _hint(helper: AddedDef, existing: ExistingFunction) -> str:
         "If the new helper is genuinely needed, settle the finding with "
         f"{SETTLE_FINDING_HINT} and requeue REVIEW. "
         "The helper may already be committed by an earlier cycle (the check is "
-        "loop-wide); only this cycle's changes are staged. "
+        "loop-wide). "
         "To switch this signal off along with the growth guard, set "
         f"`{CODEX_FIX_LOOP_GROWTH_GUARD_KEY}: false` for the lane. "
         f"{LEFT_STAGED_HINT}"
@@ -346,13 +364,22 @@ def check_duplicate_reader(
     """Return the duplicate-reader park, or ``None``.
 
     Cheap text checks run first: with no finding carrying duplication language
-    and a named identifier, this returns before any git call.
+    and a named identifier, this returns before any git call. A git exit failure
+    on the diff (for example an unresolvable loop start commit) logs a WARNING
+    and fails open; other errors still propagate.
     """
     if not any(duplicated_names(f) for f in open_findings):
         return None
-    file_diffs, added, _window, _changed = _parse_unified_diff(
-        _base_diff(worktree, baseline, loop_budget)
-    )
+    try:
+        diff = _base_diff(worktree, baseline, loop_budget)
+    except subprocess.CalledProcessError as exc:
+        _log.warning(
+            "codex fix cycle %d: duplicate-reader diff failed (%s); failing open",
+            cycle,
+            exc,
+        )
+        return None
+    file_diffs, added, _window, _changed = _parse_unified_diff(diff)
     helpers = added_defs(file_diffs, added)
     pairs = _pairs(open_findings, helpers)
     if not pairs:

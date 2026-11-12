@@ -13,13 +13,8 @@ requeued cycle then met the clean-start refusal (``codex_fix_dirty_start``,
 3. ``git update-ref refs/cw/refused-cycles/<ticket>/cycle-<N>-<reason>-<stamp>``
    pins that commit so the edits survive pruning and are named in the park.
 4. While the worktree lock remains held, ``git reset --hard HEAD`` drops the
-   cycle's uncommitted edits. It resets to
-   the HEAD at that moment, not a recorded cycle-start SHA, so an orchestrator
-   merge that moved HEAD is not reverted. The cycle-start tree is clean by
-   construction (``codex_fix_dirty_start`` refuses otherwise), so nothing
-   else is lost. Untracked and ignored paths (``.cw/``) are untouched. A
-   tracked, modified review artifact is reverted in the worktree, but its
-   content is part of the pinned commit, so it is recoverable from the ref.
+   cycle's uncommitted edits, resetting to the HEAD at that moment (not a
+   recorded cycle-start SHA). Untracked and ignored paths (``.cw/``) are untouched.
 5. One ``codex_fix.cycle_preserved`` event durably records the authorized reset
    intent before the destructive reset is attempted.
 
@@ -30,9 +25,10 @@ later failure (the reset, the rev-parse, or the clean re-check, as a
 ``CalledProcessError`` or an ``OSError``) is handled without raising and keeps
 the preserved ref and dirty paths.
 
-Only :mod:`cw.codex_fix_loop.commit` calls this module; :mod:`fence` and
-:mod:`baseline` must not import it. The park text carries the ref name and the
-dirty path names, never diff text or hook output.
+Only :mod:`cw.codex_fix_loop.commit` and :mod:`cw.codex_impl._run` call this
+module; :mod:`fence` and :mod:`baseline` must not import it. The outcome record
+and park text live in :mod:`restore_report`, re-exported here. The park text
+carries the ref name and the dirty path names, never diff text or hook output.
 """
 
 from __future__ import annotations
@@ -43,7 +39,6 @@ import fcntl
 import logging
 import re
 import subprocess
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -52,10 +47,11 @@ from cw._git import git_output
 from cw._lock_guard import LockRank, lock_guard
 from cw.codex_fix_loop.baseline import (
     CycleBaseline,
+    best_effort_dirty_paths,
     capture_cycle_baseline,
     unstage_review_artifacts,
 )
-from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, FenceBreach
+from cw.codex_fix_loop.restore_report import CycleRestore, apply_to_breach, failure_note
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models.enums import OrchestratorEventType
@@ -63,10 +59,17 @@ from cw.models.enums import OrchestratorEventType
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+__all__ = [
+    "REF_ROOT",
+    "CycleRestore",
+    "apply_to_breach",
+    "failure_note",
+    "preserve_and_reset",
+]
+
 _log = logging.getLogger(__name__)
 
 REF_ROOT = "refs/cw/refused-cycles"
-MAX_NAMED_PATHS = 20
 _SHORT_SHA_LENGTH = 12
 _STAMP_FORMAT = "%Y%m%dT%H%M%S%f"
 _UNSAFE_REF_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
@@ -74,24 +77,11 @@ _CLEAN_WHY = "the worktree was still not clean after the reset"
 _NO_STASH_WHY = "git stash create saved nothing for a non-empty diff"
 _RESET_PENDING_WHY = "reset pending after ref pin"
 _AUDIT_WHY = "could not record the refused-cycle audit event"
-
-
-@dataclass(frozen=True)
-class CycleRestore:
-    """What :func:`preserve_and_reset` did for one refused cycle.
-
-    ``restored`` means the edits are pinned under ``ref`` AND the worktree was
-    reset AND it verifiably reads clean. ``why_not`` names why it did not
-    complete. ``dirty_paths`` names the cycle's paths when the cycle touched
-    anything.
-    """
-
-    restored: bool
-    ref: str | None
-    why_not: str | None
-    head_short: str = ""
-    dirty_paths: tuple[str, ...] = ()
-    failed_step: str | None = None
+_STEP_COLLECT = "collect cycle paths"
+_STEP_STASH = "git stash create"
+_STEP_UPDATE_REF = "git update-ref"
+_STEP_AUDIT = "record audit event"
+_STEP_LOCK = "acquire restore lock"
 
 
 @contextlib.contextmanager
@@ -128,32 +118,6 @@ def _cycle_paths(worktree: Path, review_artifacts: frozenset[str]) -> tuple[str,
     return tuple(sorted(line for line in out.splitlines() if line))
 
 
-def _best_effort_dirty_paths(worktree: Path) -> tuple[str, ...]:
-    """Collect paths when staging failed before ``_cycle_paths`` returned."""
-    try:
-        out = git_output(
-            ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-            cwd=worktree,
-        )
-    except (subprocess.CalledProcessError, OSError):
-        return ()
-    paths: list[str] = []
-    records = [entry for entry in out.split("\0") if entry]
-    index = 0
-    while index < len(records):
-        entry = records[index]
-        status = entry[:2]
-        path = entry[3:]
-        if path:
-            paths.append(path)
-        if status[0] in "RC" or status[1] in "RC":
-            index += 1
-            if index < len(records):
-                paths.append(records[index])
-        index += 1
-    return tuple(sorted(set(paths)))
-
-
 def _ref_name(ticket: str, cycle: int, reason: str) -> str:
     stamp = datetime.now(UTC).strftime(_STAMP_FORMAT)
     safe_ticket = _UNSAFE_REF_CHARS.sub("-", ticket) or "ticket"
@@ -165,6 +129,13 @@ def _failure_why(exc: Exception) -> str:
     if isinstance(exc, subprocess.CalledProcessError):
         return f"git exited {exc.returncode}"
     return type(exc).__name__
+
+
+def _step_failed(exc: Exception, step: str, paths: tuple[str, ...]) -> CycleRestore:
+    """A git failure before the ref exists: nothing pinned, nothing reset."""
+    return CycleRestore(
+        False, None, _failure_why(exc), dirty_paths=paths, failed_step=step
+    )
 
 
 def _reset_after_pin(
@@ -208,7 +179,7 @@ def _record_preserved(
     reason: str,
     result: CycleRestore,
 ) -> bool:
-    """Record the durable outcome for a pinned ref after reset verification."""
+    """Record the ``codex_fix.cycle_preserved`` audit event before the reset runs."""
     try:
         head = git_output(["rev-parse", "HEAD"], cwd=worktree).strip()
         payload = {
@@ -248,25 +219,13 @@ def _attempt(
     try:
         paths = _cycle_paths(worktree, review_artifacts)
     except (subprocess.CalledProcessError, OSError) as exc:
-        return CycleRestore(
-            False,
-            None,
-            _failure_why(exc),
-            dirty_paths=_best_effort_dirty_paths(worktree),
-            failed_step="collect cycle paths",
-        )
+        return _step_failed(exc, _STEP_COLLECT, best_effort_dirty_paths(worktree))
     if not paths:
         return None
     try:
         sha = git_output(["stash", "create"], cwd=worktree).strip()
     except (subprocess.CalledProcessError, OSError) as exc:
-        return CycleRestore(
-            False,
-            None,
-            _failure_why(exc),
-            dirty_paths=paths,
-            failed_step="git stash create",
-        )
+        return _step_failed(exc, _STEP_STASH, paths)
     if not sha:
         return CycleRestore(False, None, _NO_STASH_WHY, dirty_paths=paths)
     ref = _ref_name(ticket, cycle, reason)
@@ -274,14 +233,64 @@ def _attempt(
         git_output(["update-ref", ref, sha], cwd=worktree)
     except (subprocess.CalledProcessError, OSError) as exc:
         # Nothing was pinned, so nothing is reset.
-        return CycleRestore(
-            False,
-            None,
-            _failure_why(exc),
-            dirty_paths=paths,
-            failed_step="git update-ref",
-        )
+        return _step_failed(exc, _STEP_UPDATE_REF, paths)
     return CycleRestore(False, ref, _RESET_PENDING_WHY, dirty_paths=paths)
+
+
+def _preserve_locked(
+    worktree: Path,
+    *,
+    review_artifacts: frozenset[str],
+    ticket: str,
+    client: str,
+    cycle: int,
+    reason: str,
+) -> CycleRestore | None:
+    """Run the pin, audit and reset steps; the caller holds the worktree lock."""
+    result = _attempt(
+        worktree,
+        review_artifacts=review_artifacts,
+        ticket=ticket,
+        cycle=cycle,
+        reason=reason,
+    )
+    if result is None or result.ref is None:
+        return result
+    if not _record_preserved(
+        worktree,
+        ticket=ticket,
+        client=client,
+        cycle=cycle,
+        reason=reason,
+        result=result,
+    ):
+        _log.warning(
+            "codex fix cycle %d (%s): refused-cycle restore skipped: %s",
+            cycle,
+            reason,
+            _AUDIT_WHY,
+        )
+        return dataclasses.replace(result, why_not=_AUDIT_WHY, failed_step=_STEP_AUDIT)
+    return _reset_after_pin(worktree, ref=result.ref, paths=result.dirty_paths)
+
+
+def _log_outcome(cycle: int, reason: str, result: CycleRestore) -> None:
+    if result.restored:
+        _log.info(
+            "codex fix cycle %d (%s): saved rejected changes to %s and reset "
+            "worktree to %s",
+            cycle,
+            reason,
+            result.ref,
+            result.head_short,
+        )
+    else:
+        _log.warning(
+            "codex fix cycle %d (%s): refused-cycle restore incomplete: %s",
+            cycle,
+            reason,
+            result.why_not,
+        )
 
 
 def preserve_and_reset(
@@ -301,145 +310,26 @@ def preserve_and_reset(
     """
     try:
         with _worktree_lock(worktree):
-            result = _attempt(
+            result = _preserve_locked(
                 worktree,
                 review_artifacts=review_artifacts,
                 ticket=ticket,
+                client=client,
                 cycle=cycle,
                 reason=reason,
             )
-            ref = result.ref if result is not None else None
-            if result is not None and ref is not None:
-                if not _record_preserved(
-                    worktree,
-                    ticket=ticket,
-                    client=client,
-                    cycle=cycle,
-                    reason=reason,
-                    result=result,
-                ):
-                    result = dataclasses.replace(
-                        result,
-                        why_not=_AUDIT_WHY,
-                        failed_step="record audit event",
-                    )
-                    _log.warning(
-                        "codex fix cycle %d (%s): refused-cycle restore skipped: %s",
-                        cycle,
-                        reason,
-                        result.why_not,
-                    )
-                else:
-                    result = _reset_after_pin(
-                        worktree, ref=ref, paths=result.dirty_paths
-                    )
-    except subprocess.CalledProcessError as exc:
-        _log.warning(
-            "codex fix cycle %d (%s): refused-cycle restore skipped: git exited %s: %s",
-            cycle,
-            reason,
-            exc.returncode,
-            (exc.stderr or "").strip() or type(exc).__name__,
-        )
-        return CycleRestore(
-            False,
-            None,
-            f"git exited {exc.returncode}",
-            dirty_paths=_best_effort_dirty_paths(worktree),
-            failed_step="acquire restore lock",
-        )
-    except OSError as exc:
+    except (subprocess.CalledProcessError, OSError) as exc:
+        stderr = ""
+        if isinstance(exc, subprocess.CalledProcessError):
+            stderr = (exc.stderr or "").strip()
+        detail = f"{_failure_why(exc)}: {stderr}" if stderr else _failure_why(exc)
         _log.warning(
             "codex fix cycle %d (%s): refused-cycle restore skipped: %s",
             cycle,
             reason,
-            type(exc).__name__,
+            detail,
         )
-        return CycleRestore(
-            False,
-            None,
-            type(exc).__name__,
-            dirty_paths=_best_effort_dirty_paths(worktree),
-            failed_step="acquire restore lock",
-        )
-    if result is None:
-        return None
-    if result.restored:
-        _log.info(
-            "codex fix cycle %d (%s): saved rejected changes to %s and reset "
-            "worktree to %s",
-            cycle,
-            reason,
-            result.ref,
-            result.head_short,
-        )
-    else:
-        _log.warning(
-            "codex fix cycle %d (%s): refused-cycle restore incomplete: %s",
-            cycle,
-            reason,
-            result.why_not,
-        )
+        return _step_failed(exc, _STEP_LOCK, best_effort_dirty_paths(worktree))
+    if result is not None:
+        _log_outcome(cycle, reason, result)
     return result
-
-
-def _restored_text(restore: CycleRestore) -> str:
-    return (
-        f"Saved the rejected changes to ref `{restore.ref}` and reset the "
-        f"worktree to `{restore.head_short}`; a plain requeue starts clean. To "
-        f"inspect or keep them: `git stash apply {restore.ref}`."
-    )
-
-
-def _dirty_clause(paths: tuple[str, ...]) -> str:
-    if not paths:
-        return ""
-    shown = paths[:MAX_NAMED_PATHS]
-    more = len(paths) - len(shown)
-    names = ", ".join(f"`{rel}`" for rel in shown)
-    suffix = f" (+{more} more)" if more else ""
-    return f" Dirty paths: {names}{suffix}."
-
-
-def _not_restored_text(restore: CycleRestore) -> str:
-    clause = _dirty_clause(restore.dirty_paths)
-    step = f" Failed step: {restore.failed_step}." if restore.failed_step else ""
-    if restore.ref is not None:
-        return (
-            f"Saved the rejected changes to ref `{restore.ref}` but could not "
-            f"reset the worktree: {restore.why_not}.{step}{clause} To inspect or keep "
-            f"them: `git stash apply {restore.ref}`."
-        )
-    return (
-        "cw neither saved nor discarded the rejected changes (no reset was "
-        f"performed): {restore.why_not}.{step}{clause}"
-    )
-
-
-def failure_note(restore: CycleRestore | None) -> str | None:
-    """Return the sentence a failure park appends to its headline, or ``None``."""
-    if restore is None:
-        return None
-    return _restored_text(restore) if restore.restored else _not_restored_text(restore)
-
-
-def apply_to_breach(breach: FenceBreach, restore: CycleRestore | None) -> FenceBreach:
-    """Return *breach* with its recovery hint rewritten for what the restore did.
-
-    A non-restorable breach and an empty cycle (``None``) come back untouched.
-    After a verified restore :data:`LEFT_STAGED_HINT` (which may sit mid-string)
-    is replaced; otherwise the old hint stays and one sentence names the reason.
-    """
-    if not breach.restorable or restore is None:
-        return breach
-    hint = breach.recovery_hint
-    if restore.restored:
-        text = _restored_text(restore)
-        hint = (
-            hint.replace(LEFT_STAGED_HINT, text)
-            if LEFT_STAGED_HINT in hint
-            else f"{hint} {text}"
-        )
-    else:
-        hint = f"{hint} {_not_restored_text(restore)}"
-    return dataclasses.replace(breach, recovery_hint=hint)

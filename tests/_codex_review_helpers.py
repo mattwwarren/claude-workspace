@@ -18,6 +18,7 @@ import pytest
 
 from cw.auto_dev_result import Review
 from cw.codex_fix_loop.baseline import CycleBaseline, cycle_touched_paths
+from cw.codex_fix_loop.cycle_restore import REF_ROOT
 from cw.codex_fix_loop.duplicate_reader import check_duplicate_reader
 from cw.codex_review import _prepare_review_pass, run_review
 from cw.codex_review._shard import plan_prompt_shards, split_diff_by_file
@@ -422,15 +423,15 @@ def assert_clean_after_refusal(worktree: Path, start_sha: str) -> str:
     """Assert a refused cycle left a clean tree plus a pinned edit ref.
 
     Empty ``git status --porcelain``, ``HEAD`` still *start_sha*, and a commit
-    pinned under ``refs/cw/refused-cycles/``. Returns that ref name. Git runs
+    pinned under ``REF_ROOT``. Returns that ref name. Git runs
     through ``tests/_git_sandbox``.
     """
     assert git_in(worktree, "status", "--porcelain") == ""
     assert git_in(worktree, "rev-parse", "HEAD") == start_sha
     refs = git_in(
-        worktree, "for-each-ref", "--format=%(refname)", "refs/cw/refused-cycles/"
+        worktree, "for-each-ref", "--format=%(refname)", f"{REF_ROOT}/"
     ).split()
-    assert refs, "no edit ref pinned under refs/cw/refused-cycles/"
+    assert refs, f"no edit ref pinned under {REF_ROOT}/"
     ref = refs[-1]
     assert git_in(worktree, "cat-file", "-t", ref) == "commit"
     return ref
