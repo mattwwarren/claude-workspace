@@ -7,7 +7,7 @@ name) and ``cw.models.enums``.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from cw.models.enums import (
     DEFAULT_FIX_SANDBOX_MODE,
@@ -19,6 +19,22 @@ from cw.models.enums import (
 from cw.models.orchestrator_config.constants import CLAUDE_NATIVE_BACKEND, CODEX_BACKEND
 
 
+class ModelPrice(BaseModel):
+    """Operator-supplied USD-per-million-token prices for one model (#3063, R3).
+
+    No price table ships with cw: prices change and cw cannot know the
+    operator's contract. ``cached_input_usd_per_mtok`` prices the cached part
+    of the input (a subset of it, not an addition), and reasoning tokens are a
+    subset of output so they have no price of their own.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    input_usd_per_mtok: float = Field(ge=0)
+    cached_input_usd_per_mtok: float = Field(ge=0)
+    output_usd_per_mtok: float = Field(ge=0)
+
+
 class StageExecutorConfig(BaseModel):
     """Executor configuration for a single pipeline stage (RFC 0005 A1, dormant)."""
 
@@ -26,6 +42,12 @@ class StageExecutorConfig(BaseModel):
 
     backend: str = CLAUDE_NATIVE_BACKEND
     model: str | None = None
+    # Operator price map (#3063, RFC 0018 C4), keyed by the exact configured
+    # model string. Empty by default: no price table ships, and a model with no
+    # entry records tokens only (that is not the unavailable marker). Used to
+    # fill Session.cost_breakdown, never Session.cost_usd. Resolved like
+    # `model`: a lane's stage config replaces the client's wholesale.
+    model_prices: dict[str, ModelPrice] = Field(default_factory=dict)
     endpoint: str | None = None  # OpenAI-compatible base URL for local backend
     # Codex-only: pinned as `-c model_reasoning_effort=<value>` on every codex
     # reviewer and fix invocation, which beats ~/.codex/config.toml. Defaults
@@ -46,6 +68,16 @@ class StageExecutorConfig(BaseModel):
     # gets these defaults, not the client's values.
     reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE
     fix_sandbox_mode: SandboxMode = DEFAULT_FIX_SANDBOX_MODE
+
+    @field_validator("model_prices")
+    @classmethod
+    def _model_price_keys_non_empty(
+        cls, prices: dict[str, ModelPrice]
+    ) -> dict[str, ModelPrice]:
+        if any(not key.strip() for key in prices):
+            msg = "model_prices keys must be non-empty model names"
+            raise ValueError(msg)
+        return prices
 
     @model_validator(mode="after")
     def _reasoning_effort_codex_only(self) -> StageExecutorConfig:

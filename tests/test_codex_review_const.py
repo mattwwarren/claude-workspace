@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import get_args
 
 import pytest
@@ -27,6 +28,7 @@ from cw.codex_review import (
     STAGE5_POST_CREATE,
     format_input_sizes,
 )
+from cw.codex_review._const import _AUDIT_ARGV_FLAGS, _EPHEMERAL_FLAG, _JSON_FLAG
 from cw.executor_diagnostics import ExecutorFailureCategory
 
 
@@ -126,3 +128,22 @@ def test_input_sizes_format_round_trips_through_the_shared_pattern() -> None:
     match = INPUT_SIZES_PATTERN.search(f"role (codex_input_too_large): {text}")
     assert match is not None
     assert match.groups() == ("1379349", "1048576")
+
+
+def test_audit_argv_flags_are_the_json_and_ephemeral_pair() -> None:
+    assert _AUDIT_ARGV_FLAGS == (_JSON_FLAG, _EPHEMERAL_FLAG)
+    assert _AUDIT_ARGV_FLAGS == ("--json", "--ephemeral")
+
+
+@pytest.mark.parametrize(
+    "module", ["codex_plan", "codex_impl", "codex_finalize", "tracker_io"]
+)
+def test_stage_argv_modules_keep_no_private_audit_flag_copy(module: str) -> None:
+    """One definition of the pair (#3063): the stage builders import it."""
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "cw" / module / "_argv.py"
+    ).read_text(encoding="utf-8")
+
+    assert "_AUDIT_FLAGS" not in source
+    assert '("--json", "--ephemeral")' not in source
+    assert "_AUDIT_ARGV_FLAGS" in source

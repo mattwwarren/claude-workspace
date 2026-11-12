@@ -1639,6 +1639,30 @@ class TestMigrateCwState:
             "local_liveness.backend missing" in rec.message for rec in caplog.records
         )
 
+    def test_v19_to_v20_fills_session_usage_none(self) -> None:
+        """migrate_cw_state fills Session.usage=None on a v19 session (#3063)."""
+        raw = {
+            "schema_version": 19,
+            "sessions": [self._v18_session("s1", None)],
+        }
+
+        migrated = migrate_cw_state(raw)
+
+        assert migrated["sessions"][0]["usage"] is None
+        assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION == 20
+
+    def test_v19_session_usage_preserved_idempotently(self) -> None:
+        """An existing usage value survives a migration pass (#3063)."""
+        usage = {"state": "recorded", "by_stage": {}, "by_model": {}}
+        session = self._v18_session("s1", None)
+        session["usage"] = usage
+        raw = {"schema_version": 19, "sessions": [session]}
+
+        migrated = migrate_cw_state(raw)
+
+        assert migrated["sessions"][0]["usage"] == usage
+        assert migrate_cw_state(migrated) == migrated
+
     def test_v18_local_liveness_backend_preserved_idempotently(self) -> None:
         """An existing local_liveness.backend value survives a migration pass
         unchanged (#2369)."""

@@ -23,7 +23,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
-from cw.codex_review import _exec_policy_argv, _reasoning_effort_argv
+from cw.codex_review import (
+    _AUDIT_ARGV_FLAGS,
+    _exec_policy_argv,
+    _reasoning_effort_argv,
+)
 from cw.tracker_io._argv import _disable_others
 
 if TYPE_CHECKING:
@@ -32,7 +36,6 @@ if TYPE_CHECKING:
 
     from cw.models.enums import SandboxMode
 
-_AUDIT_FLAGS: Final[tuple[str, str]] = ("--json", "--ephemeral")
 _EXEC_PREFIX_WIDTH: Final = 2
 
 
@@ -58,7 +61,7 @@ def build_impl_argv(
         "codex",
         "exec",
         *_exec_policy_argv(sandbox_mode),
-        *_AUDIT_FLAGS,
+        *_AUDIT_ARGV_FLAGS,
         *_reasoning_effort_argv(reasoning_effort),
         *_disable_others("", other_servers),
         "--output-schema",

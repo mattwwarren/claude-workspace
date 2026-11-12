@@ -30,6 +30,7 @@ from cw.codex_review._audit_events import (
     _parse_codex_audit_events,
 )
 from cw.codex_review._const import (
+    _AUDIT_ARGV_FLAGS,
     _CATEGORY_TO_REASON,
     _MIN_ROLE_TIMEOUT_SECONDS,
     CODEX_BUDGET_EXHAUSTED,
@@ -69,10 +70,6 @@ _log = logging.getLogger(__name__)
 #: Filesystem-safe slug for a reviewer role name. One definition, shared with
 #: the engine manifest loader through the light constants module (#3216).
 _slug = role_slug
-
-# The two audit flags #1710 adds to every generic reviewer invocation. Kept as
-# one tuple so the argv builder and the degrade-and-retry strip cannot drift.
-_AUDIT_ARGV_FLAGS = ("--json", "--ephemeral")
 
 # clap-style "you passed a flag I don't know" phrasings. An older codex-cli
 # that predates --json/--ephemeral rejects the whole invocation with one of

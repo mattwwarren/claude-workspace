@@ -2522,7 +2522,15 @@ class TestFixPromptAndArgv:
             "read-only",
             "-c",
             "approval_policy=never",
+            "--json",
         ]
+
+    def test_fix_argv_streams_json_and_is_not_ephemeral(self) -> None:
+        # #3063: --json so the turn's usage is readable; no --ephemeral, so the
+        # fix rollout stays under ~/.codex as before.
+        argv = _build_fix_codex_argv(model="m", reasoning_effort="high")
+        assert "--json" in argv
+        assert "--ephemeral" not in argv
 
 
 # ---------------------------------------------------------------------------
