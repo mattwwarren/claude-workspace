@@ -48,10 +48,10 @@ def _accumulate_task_cost(task: TicketTask, session_id: str | None) -> None:
       2. session.last_result.get('cost_usd') (populated by the RFC 0012 door —
          the harvest-authority write path used when signal_stop did not run)
 
-    Only when both are absent does the sum of ``session.cost_breakdown`` (the
-    operator-priced estimate, #3063) count toward ``total_cost_usd``, so a
-    session that reports its own cost is never double-counted. An estimate is
-    never written into ``cost_usd`` itself.
+    ``session.cost_breakdown`` is an operator-priced estimate and is retained
+    on the session, but is not folded into ``total_cost_usd`` here: doing so
+    without a persisted contribution record would make the durable aggregate
+    unauditable. An estimate is never written into ``cost_usd`` itself.
 
     Tokens (``session.usage.total_tokens``) accumulate into
     ``task.total_tokens`` independently of the cost branch: a priced and an
@@ -67,8 +67,6 @@ def _accumulate_task_cost(task: TicketTask, session_id: str | None) -> None:
     if session is None:
         return
     cost = _reported_cost(session)
-    if cost is None and session.cost_breakdown:
-        cost = sum(session.cost_breakdown.values())
     if cost is not None:
         task.total_cost_usd = (task.total_cost_usd or 0.0) + cost
     if session.usage is not None:
