@@ -364,11 +364,12 @@ class UnknownClientError(CwError):
 class WorktreeOccupiedError(WorktreeError):
     """``create_worktree`` refused to hand back a worktree another worker may be using.
 
-    Raised only by ``create_worktree``'s reuse refresh (``refresh_on_reuse=True``,
-    #2213) when a live cw session in persisted state, a live daemon-roster
-    worker, or an INDETERMINATE read of either (fail closed) is homed on the
-    worktree. It carries the two facts a handler needs: ``path`` (the worktree)
-    and ``reason`` (which occupant, or that occupancy could not be ruled out).
+    Raised only by ``create_worktree``'s reuse refresh (a non-``None``
+    ``refresh`` options object, #2213, #2238) when a live cw session in
+    persisted state, a live daemon-roster worker, or an INDETERMINATE read of
+    either (fail closed) is homed on the worktree. It carries the two facts a
+    handler needs: ``path`` (the worktree) and ``reason`` (which occupant, or
+    that occupancy could not be ruled out).
 
     It is an exception rather than a return value so a caller cannot get it
     wrong by forgetting to look: an ignored boolean or report field lets a spawn

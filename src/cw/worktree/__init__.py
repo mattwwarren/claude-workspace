@@ -14,7 +14,8 @@ re-exports. Submodules:
 - ``_freshness`` — fetch and freshness vs. origin, for feature and default
   branches.
 - ``_unsaved`` — unsaved-work / dirty-tree detection.
-- ``_refresh_types`` — reuse refresh result and report types (#2213).
+- ``_refresh_types`` — reuse refresh option, result and report types (#2213,
+  #2238).
 - ``_liveness`` — live-session and daemon-worker liveness for a worktree.
 - ``_occupancy`` — occupancy verdict for a reused worktree.
 - ``_fast_forward`` — reused-worktree fast-forward, audit event and
@@ -116,7 +117,12 @@ from cw.worktree._refresh import (
     _refresh_reused_worktree,
     _refresh_reused_worktree_steps,
 )
-from cw.worktree._refresh_types import RefreshOutcome, RefreshResult, ReuseRefreshReport
+from cw.worktree._refresh_types import (
+    RefreshOutcome,
+    RefreshResult,
+    ReuseRefreshOptions,
+    ReuseRefreshReport,
+)
 from cw.worktree._scope import (
     _NUMSTAT_MIN_COLS,
     _SCOPE_MISMATCH_RATIO_THRESHOLD,
@@ -169,6 +175,7 @@ __all__ = [
     "ProbeUnavailable",
     "RefreshOutcome",
     "RefreshResult",
+    "ReuseRefreshOptions",
     "ReuseRefreshReport",
     "TickFetchGate",
     "UnresolvablePathWarningKey",
