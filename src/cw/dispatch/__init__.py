@@ -55,8 +55,10 @@ target ``cw.dispatch.lane_circuit``.
 
 #2999 moved two seams out of ``loop`` into flat siblings, re-exported the same
 way: ``session_completions`` (``_apply_events_to_store`` and
-``_reconcile_owns_completion``) and ``usage_limit_windows`` (the three
-usage-limit back-off window helpers). ``loop`` imports them back, so every
+``_reconcile_owns_completion``) and ``usage_limit_windows`` (the four
+usage-limit back-off window helpers, three of which ``loop`` calls; the fourth,
+``_arm_usage_limit_windows``, is called only from inside the module). ``loop``
+imports back the names it calls, so every
 ``cw.dispatch.loop`` path still resolves. Only functions that read no name the
 suite patches on ``cw.dispatch.loop`` moved: ``consume_completed_sessions``
 (``dev_queue_lock``, ``apply_pending_completions``),
