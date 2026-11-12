@@ -20,6 +20,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - All-codex lane support (RFC 0018 D1, #3064, folds in #2463): `cw doctor` reports each lane whose stages all run on codex as `all-codex-lane/<client>/<lane>`, warning when clean mode leaves `review.confirm_backend` unset (the confirm default needs the `claude` binary); an opt-in operator probe `scripts/probe_codex_live_session.py` exercises codex create and resume (`docs/codex-live-session-smoke.md`); the contract manifest flips the 27 codex `fails-closed` cells to `implemented`, so no codex cell is `fails-closed`. The superseded branch `origin/codex/2463-headless-session-smoke` is left untouched.
 
+### Fixed
+
+- **Codex fix-loop cleanup (#3224, #3255, #3264, #3266, #3267, #3268, #3272, #3274, #3276, #3277, #3296, #3297, #3302, #3303, #3304).** The duplicate-reader signal now logs a WARNING and still fails open when `git grep` times out or exits with an error, and when its loop-wide diff read exits non-zero (for example an unresolvable loop start commit, which previously raised out of the guard; other git failures such as a missing `git` binary are unchanged). Its removed-name scan reads only `.py` paths. The post-restore hint drops a stale "only this cycle's changes are staged" sentence. Refused-cycle recovery docs now state which git failures pin a ref and the non-restorable staged-set exception, and the stale patch-file paragraph is gone. The divergence report's absolute threshold text is built from its constants (output unchanged). `cycle_restore.py` was split into `restore_report.py` with its public imports unchanged. The `FIX_LOOP_DIVERGING` and `FIX_LOOP_DIVERGENCE_DETECTED` comments now describe net progress (no values changed). Only the Unreleased section is edited, so gate 7 is unaffected.
+
 ## [1.96.0] - 2026-11-12
 
 ### Added
