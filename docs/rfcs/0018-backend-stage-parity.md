@@ -23,7 +23,7 @@ The contract lives only as prose in `.claude/commands/auto-dev-*.md` (6,730 line
 - **The opencode prompts disagree with each other.** The IMPL prompt recovers the plan from a `<!-- plan-spec-reviewed` comment (`src/cw/opencode_runner.py:501`); the PLAN prompt never writes that marker.
 - **Codex review re-implements the review contract in Python** and diverges: no adjudication or deferred-findings file, no quality gates after a fix cycle, delta-only re-reviews, and a thin sentinel (`plan_source: none`, empty `commits` after fix commits).
 - **Non-GitHub trackers lose content silently.** The codex verdict comment is skipped with a log line (`src/cw/codex_review_persist.py:225-234`), and the ticket's operator comments are never fetched (`src/cw/codex_review/_context/core.py:155-156`). The opencode plan prompt says "use the configured tracker's CLI otherwise" and "when the tracker is writable" with no command (`src/cw/opencode_runner.py:455-457,485-486`).
-- **Usage is invisible off claude-native.** Cost comes from the sentinel's self-reported `cost_usd`. Opencode, local and the codex fix invocations record nothing; codex review token fields are null on codex-cli 0.164.0 (#2837).
+- **Usage is invisible off claude-native.** Cost comes from the sentinel's self-reported `cost_usd`. Opencode, local and the codex fix invocations record nothing; Claude confirm-round run records carried no usage until #2837, and the codex token fields are populated on codex-cli 0.167.0 (verified).
 - **Parity is decided one ticket at a time.** #2983 chose to fail closed on repair rows instead of implementing the contract, and nothing records which other elements were skipped on purpose.
 
 ## Design
@@ -272,7 +272,7 @@ These are firm leans, decided to unblock the breakout. Each one can be reversed 
 - **Wave:** 3
 - **Sprint:** 4
 - **Depends on:** C2
-- **Context:** Folds in #2837 and #2842. Claude cost comes from the sentinel's self-reported `cost_usd`; codex review token fields are null on codex-cli 0.164.0, fix invocations run without `--json`, and opencode and local record nothing. This ticket records usage for every codex stage turn and fix invocation and adds a visible marker when usage is unavailable.
+- **Context:** Folds in #2837 and #2842. Claude cost comes from the sentinel's self-reported `cost_usd`; Claude confirm-round run records carried no usage until #2837, codex token fields are populated on codex-cli 0.167.0 (verified), fix invocations run without `--json`, and opencode and local record nothing. This ticket records usage for every codex stage turn and fix invocation and adds a visible marker when usage is unavailable.
 - **Scope:** D-2, D-4
 - **Acceptance:**
   - Codex stage turns and fix invocations run with machine-readable output and their token usage is recorded on the session.
