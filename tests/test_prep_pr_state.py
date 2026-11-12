@@ -845,7 +845,7 @@ EXPECTED_REPO_GATES: list[tuple[str, str]] = [
         "uv run --extra mcp pytest tests/ -n auto -m 'not integration' "
         "--cov=cw --cov=.claude/scripts --cov-report=xml "
         "&& uv run coverage report --include='src/cw/*' --fail-under=88 "
-        "&& uv run coverage report --include='.claude/scripts/*' --fail-under=50",
+        "&& uv run coverage report --include='.claude/scripts/*' --fail-under=84",
     ),
     ("pytest-integration", "uv run pytest tests/ -m integration"),
     (

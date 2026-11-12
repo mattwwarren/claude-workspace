@@ -80,7 +80,7 @@ CLAUDE_MD = ROOT / "CLAUDE.md"
 # `--cov=` targets every coverage-measuring pytest run must carry (#2249).
 COV_TARGETS = {"cw", ".claude/scripts"}
 # Per-tree `coverage report --include=<tree> --fail-under=<floor>` floors.
-EXPECTED_FLOORS = {"src/cw/*": 88, ".claude/scripts/*": 50}
+EXPECTED_FLOORS = {"src/cw/*": 88, ".claude/scripts/*": 84}
 DIFF_COVER_COMMAND = (
     "uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=90"
 )

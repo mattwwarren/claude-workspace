@@ -12,6 +12,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **The plan stage's premise partition now closes premises answered by a pre-existing binding resolution at the source (#1411, follow-up to #1325).** `auto-dev-plan.md` Step 4a gains a Resolution gate beside the Impact gate: a premise carrying a `Resolution: <identifier> — "<quote>"` sub-bullet whose identifier exists in the live binding set (`R<n>` or `row:<round>`) and whose quote is verbatim from it is routed to `self_verified` instead of parked, and the Product Manager Reviewer's Mode 1 contract gains the matching optional sub-bullet; a failed check falls through to the ordinary routing with an `unmatched premise resolution` friction line. The #1325 parser coercion is unchanged and remains the safety net. **Operator note:** no schema change and no `schema_version` bump; a ticket with a recorded resolution that answers a premise no longer parks for it.
+- **The `.claude/scripts` coverage floor is raised from 50% to 84% (#2628).** `ci.yml`'s `Coverage floors` step and CLAUDE.md gate 10 now enforce floor(measured) − 2 after script coverage rose to 86%, per the #2249 ratchet. The `src/cw` floor (88%) is unchanged.
 
 ## [1.95.0] - 2026-11-11
 
