@@ -82,12 +82,15 @@ from tests._dirty_check_helpers import (
     revert_timed_out_prefetched,
 )
 from tests._reconcile_helpers import (
+    _MALFORMED_SENTINEL_BLOCK,
+    _MALFORMED_SENTINEL_RECORD,
     PROVIDER_OVERLOAD_TEXT,
     SCOPE_GUARD_FILES,
     SCOPE_GUARD_LINES,
     _inflate_scope,
     _make_stale_base_repo,
     _make_terminal_payload,
+    _malformed_parse_warning_count,
     _mk_daemon_session_with_worktree,
     _mk_headless_daemon_session,
     _mk_session,
@@ -4310,7 +4313,6 @@ def test_1258_shape_placeholder_then_delayed_real_sentinel(tmp_path: Path) -> No
 # _parse_sentinel_from_blocks — last real block wins WITHIN one text (#2515)
 # ---------------------------------------------------------------------------
 
-_MALFORMED_SENTINEL_BLOCK = "<<<AUTO_DEV_RESULT\n{oops\nAUTO_DEV_RESULT>>>"
 _TRUNCATED_SENTINEL_FRAME = '<<<AUTO_DEV_RESULT\n{"schema_version": 4, "tick'
 
 
@@ -4630,18 +4632,6 @@ class TestParseAnySentinelFromTranscript:
         assert csid_stem == f"{_TWO_LAYER_SURFACE_REF}-original"
 
 
-_MALFORMED_PARSE_WARNING = "did not parse as JSON"
-
-
-def _malformed_parse_warning_count(caplog: pytest.LogCaptureFixture) -> int:
-    return sum(
-        1
-        for record in caplog.records
-        if record.levelno == logging.WARNING
-        and _MALFORMED_PARSE_WARNING in record.message
-    )
-
-
 def _write_malformed_then_real_transcript(path: Path, ticket_id: str) -> None:
     """Transcript with a malformed block before the real terminal sentinel."""
     _write_raw_sentinel_transcript(
@@ -4651,6 +4641,57 @@ def _write_malformed_then_real_transcript(path: Path, ticket_id: str) -> None:
             _sentinel_frame(_make_terminal_payload("merge_gate_blocked", ticket_id)),
         ],
     )
+
+
+class TestParseSentinelFromBlocksWarnedBlocks:
+    """#1394: ``warned_blocks`` dedups the parse warning at the block-parse seam.
+
+    Moved from ``tests/test_warned_blocks_dedup.py`` (#3454).
+    """
+
+    @staticmethod
+    def _malformed_transcript(tmp_path: Path) -> Path:
+        return _write_salvage_transcript(
+            Path.home(),
+            tmp_path / "wt-1394",
+            "claude-1394",
+            _shipped_salvage_payload(),
+            extra_records=[_MALFORMED_SENTINEL_RECORD],
+        )
+
+    def test_parse_warning_is_deduped_across_calls_with_shared_set(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+        path = self._malformed_transcript(tmp_path)
+        warned: set[str] = set()
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            first = _parse_sentinel_from_blocks(path, warned_blocks=warned)
+            second = _parse_sentinel_from_blocks(path, warned_blocks=warned)
+
+        assert first is not None
+        assert second is not None
+        assert _malformed_parse_warning_count(caplog) == 1
+        assert len(warned) == 1
+
+    def test_parse_warning_repeats_without_shared_set(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+        path = self._malformed_transcript(tmp_path)
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            _parse_sentinel_from_blocks(path)
+            _parse_sentinel_from_blocks(path)
+
+        assert _malformed_parse_warning_count(caplog) == 2
 
 
 class TestParseAnySentinelWarnedBlocks:

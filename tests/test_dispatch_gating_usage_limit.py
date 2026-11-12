@@ -19,7 +19,10 @@ from cw.dev_queue import (
 )
 from cw.dispatch import dispatch_tick
 from cw.dispatch.gating import _reconcile_usage_limited
-from cw.dispatch.gating.usage_limit import _bound_warned_blocks
+from cw.dispatch.gating.usage_limit import (
+    WARNED_BLOCKS_MAX_KEYS,
+    _bound_warned_blocks,
+)
 from cw.events import read_events
 from cw.exceptions import SessionsLockTimeoutError
 from cw.models import (
@@ -100,9 +103,8 @@ class TestDispatchTickReconcileErrors:
         assert seen == [{"dispatch_review_jobs": True, "warned_blocks": None}]
 
 
-class TestWarnedBlocksBoundEdges:
-    """#1394: the cap-and-clear bound's untouched edge (cap cases live in
-    ``tests/test_warned_blocks_dedup.py``)."""
+class TestWarnedBlocksBound:
+    """#1394: the loop-owned ``warned_blocks`` cap-and-clear bound."""
 
     def test_empty_set_is_untouched_and_keeps_identity(self) -> None:
         warned: set[str] = set()
@@ -112,6 +114,49 @@ class TestWarnedBlocksBoundEdges:
 
         assert warned is original
         assert len(warned) == 0
+
+    def test_bound_keeps_set_at_exact_cap(self) -> None:
+        warned = {f"k{i}" for i in range(WARNED_BLOCKS_MAX_KEYS)}
+
+        _bound_warned_blocks(warned)
+
+        assert len(warned) == WARNED_BLOCKS_MAX_KEYS
+
+    def test_bound_clears_in_place_past_cap(self) -> None:
+        warned = {f"k{i}" for i in range(WARNED_BLOCKS_MAX_KEYS + 1)}
+        original = warned
+
+        _bound_warned_blocks(warned)
+
+        assert len(warned) == 0
+        assert warned is original
+
+    def test_bound_is_noop_for_none_and_small_sets(self) -> None:
+        _bound_warned_blocks(None)
+        small: set[str] = {"a", "b"}
+
+        _bound_warned_blocks(small)
+
+        assert small == {"a", "b"}
+
+    def test_reconcile_usage_limited_bounds_before_reconcile_and_passes_set(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.reconcile import ReconcileReport
+
+        warned = {f"k{i}" for i in range(WARNED_BLOCKS_MAX_KEYS + 1)}
+        seen: list[tuple[int, object]] = []
+
+        def _spy_reconcile(**kwargs: object) -> ReconcileReport:
+            seen.append((len(warned), kwargs.get("warned_blocks")))
+            return ReconcileReport(usage_limited=False)
+
+        monkeypatch.setattr("cw.dispatch.gating.usage_limit.reconcile", _spy_reconcile)
+
+        assert _reconcile_usage_limited(warned_blocks=warned) is False
+        assert seen == [(0, warned)]
+        assert seen[0][1] is warned
 
 
 class TestDispatchTickSessionsLockTimeout:
