@@ -98,6 +98,15 @@ def _failure_text(reason: str) -> str:
     return FRICTION[EngineRoundFailure.ENGINE_AGGREGATION_FAILED].format(reason=reason)
 
 
+def _aggregation_failed(reason: str) -> SummaryFailure:
+    """The failure, carrying *reason* structurally as well as in the text."""
+    return SummaryFailure(
+        EngineRoundFailure.ENGINE_AGGREGATION_FAILED,
+        _failure_text(reason),
+        failure_reason=reason,
+    )
+
+
 class TestArgvAndEnvelope:
     def test_argv_is_read_only_with_schema_output_and_audit_flags(
         self, tmp_path: Path
@@ -227,10 +236,7 @@ class TestFailures:
 
         failure = _run(runner, summary_path)
 
-        assert failure == (
-            EngineRoundFailure.ENGINE_AGGREGATION_FAILED,
-            _failure_text("codex_timeout"),
-        )
+        assert failure == _aggregation_failed("codex_timeout")
         assert not summary_path.exists()
 
     def test_a_nonzero_exit_is_codex_error(self, tmp_path: Path) -> None:
@@ -238,20 +244,14 @@ class TestFailures:
 
         failure = _run(runner, tmp_path / "summary.json")
 
-        assert failure == (
-            EngineRoundFailure.ENGINE_AGGREGATION_FAILED,
-            _failure_text("codex_error"),
-        )
+        assert failure == _aggregation_failed("codex_error")
 
     def test_a_missing_runner_binary_is_codex_error(self, tmp_path: Path) -> None:
         runner = _runner(CodexRunResult(127, "", "codex: command not found"))
 
         failure = _run(runner, tmp_path / "summary.json")
 
-        assert failure == (
-            EngineRoundFailure.ENGINE_AGGREGATION_FAILED,
-            _failure_text("codex_error"),
-        )
+        assert failure == _aggregation_failed("codex_error")
 
     @pytest.mark.parametrize(
         ("content", "reason"),
@@ -279,10 +279,7 @@ class TestFailures:
 
         failure = _run(_runner(_ok(content)), summary_path)
 
-        assert failure == (
-            EngineRoundFailure.ENGINE_AGGREGATION_FAILED,
-            _failure_text(reason),
-        )
+        assert failure == _aggregation_failed(reason)
         assert not summary_path.exists()
 
     def test_deeply_nested_json_is_invalid_json(self, tmp_path: Path) -> None:
@@ -290,10 +287,7 @@ class TestFailures:
 
         failure = _run(_runner(_ok(content)), tmp_path / "summary.json")
 
-        assert failure == (
-            EngineRoundFailure.ENGINE_AGGREGATION_FAILED,
-            _failure_text("invalid_json"),
-        )
+        assert failure == _aggregation_failed("invalid_json")
 
     def test_a_summary_write_oserror_is_engine_no_summary(self, tmp_path: Path) -> None:
         blocker = tmp_path / "blocker"
@@ -302,12 +296,14 @@ class TestFailures:
 
         failure = _run(_runner(_ok(_REAL_PASS)), summary_path)
 
-        assert failure == (
+        assert failure == SummaryFailure(
             EngineRoundFailure.ENGINE_NO_SUMMARY,
             FRICTION[EngineRoundFailure.ENGINE_NO_SUMMARY].format(
                 path=str(summary_path)
             ),
         )
+        assert isinstance(failure, SummaryFailure)
+        assert failure.failure_reason is None
 
 
 _CAPACITY_STDOUT = (
@@ -361,7 +357,7 @@ class TestReasonVocabulary:
 
         assert isinstance(failure, SummaryFailure)
         assert failure.reason is EngineRoundFailure.ENGINE_AGGREGATION_FAILED
-        assert failure.detail == _failure_text(reason)
+        assert failure == _aggregation_failed(reason)
         assert reason in AGGREGATION_FAILED_REASONS
 
 
@@ -439,10 +435,7 @@ class TestAuditFlagDegrade:
         failure = _run(runner, tmp_path / "summary.json")
 
         assert len(runner.calls) == 2
-        assert failure == (
-            EngineRoundFailure.ENGINE_AGGREGATION_FAILED,
-            _failure_text("codex_error"),
-        )
+        assert failure == _aggregation_failed("codex_error")
 
     def test_an_ordinary_nonzero_exit_is_not_retried(self, tmp_path: Path) -> None:
         runner = _runner(CodexRunResult(2, "", "error: model unavailable"))
@@ -462,10 +455,7 @@ class TestAuditFlagDegrade:
         failure = _run(runner, tmp_path / "summary.json")
 
         assert len(runner.calls) == 1
-        assert failure == (
-            EngineRoundFailure.ENGINE_AGGREGATION_FAILED,
-            _failure_text("codex_error"),
-        )
+        assert failure == _aggregation_failed("codex_error")
 
 
 class TestParseOnce:

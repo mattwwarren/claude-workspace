@@ -56,6 +56,7 @@ from cw.review_engine.materialize import (
     MaterializeError,
     materialize_skill,
 )
+from cw.review_engine.validate import SummaryFailure
 from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from cw.review_findings import ShardRecord
 from tests._codex_review_helpers import (
@@ -580,6 +581,33 @@ class TestAggregatorFailures:
         assert _blocked(outcome, retry=retry).startswith(prefix)
         assert len(_aggregator_stdins(runner)) == 1
         assert outcome.prepared is not None
+
+    @pytest.mark.parametrize(
+        ("failure_reason", "retry"),
+        [("codex_timeout", True), (None, False)],
+        ids=["structured-transient", "no-structured-reason"],
+    )
+    def test_retry_eligibility_reads_the_structured_reason_not_the_text(
+        self,
+        repo: EngineRepo,
+        monkeypatch: pytest.MonkeyPatch,
+        failure_reason: str | None,
+        retry: bool,
+    ) -> None:
+        """#3446: a detail ending in a transient reason no longer decides retry."""
+        failure = SummaryFailure(
+            EngineRoundFailure.ENGINE_AGGREGATION_FAILED,
+            "x: y: codex_timeout" if failure_reason is None else "x: y: z",
+            failure_reason=failure_reason,
+        )
+        monkeypatch.setattr(
+            "cw.codex_review._engine_round.run_codex_aggregator",
+            lambda **_kwargs: failure,
+        )
+
+        outcome = _pass(repo, _engine_runner())
+
+        assert _blocked(outcome, retry=retry) == failure.detail
 
     def test_an_input_too_large_rejection_is_known_and_not_retryable(
         self, repo: EngineRepo

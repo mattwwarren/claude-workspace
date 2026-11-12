@@ -69,7 +69,9 @@ def _aggregation_failure(reason: str) -> SummaryFailure:
         msg = f"unknown aggregation failure reason: {reason!r}"
         raise ValueError(msg)
     failure = EngineRoundFailure.ENGINE_AGGREGATION_FAILED
-    return SummaryFailure(failure, FRICTION[failure].format(reason=reason))
+    return SummaryFailure(
+        failure, FRICTION[failure].format(reason=reason), failure_reason=reason
+    )
 
 
 def _no_summary(summary_path: Path) -> SummaryFailure:

@@ -362,15 +362,12 @@ def _run_aggregation(
             loaded.summary_path, expect_head=loaded.head, skill=spec.context.skill
         )
     if isinstance(outcome, SummaryFailure):
-        failure_reason = None
-        if outcome.reason is EngineRoundFailure.ENGINE_AGGREGATION_FAILED:
-            failure_reason = outcome.detail.rsplit(": ", 1)[-1]
         return _agent_block(
             inputs,
             cycle,
             outcome.reason,
             outcome.detail,
-            failure_reason=failure_reason,
+            failure_reason=outcome.failure_reason,
         )
     return outcome
 
