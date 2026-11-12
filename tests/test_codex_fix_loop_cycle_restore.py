@@ -286,6 +286,7 @@ class TestPreserveAndReset:
         assert result.restored is False
         assert result.ref is None
         assert result.why_not == "OSError"
+        assert result.failed_step == cycle_restore._STEP_COLLECT
         assert "tracked.py" in git_in(repo, "status", "--porcelain")
 
     def test_empty_stash_create_resets_nothing(
