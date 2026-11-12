@@ -563,11 +563,15 @@ class _FakeRunner:
 
     By default a fix invocation changes nothing (a tolerated no-op cycle).
     With *edit*, each fix invocation writes a new file, so the cycle commits
-    and moves ``HEAD``.
+    and moves ``HEAD``. *extra_writes* (``relpath -> content``) is written on
+    every fix invocation too, after the *edit* file.
     """
 
-    def __init__(self, *, edit: bool = False) -> None:
+    def __init__(
+        self, *, edit: bool = False, extra_writes: Mapping[str, str] | None = None
+    ) -> None:
         self._edit = edit
+        self._extra_writes = dict(extra_writes or {})
         self.fix_calls = 0
 
     def run(
@@ -583,6 +587,8 @@ class _FakeRunner:
             if self._edit:
                 path = worktree / f"fix_cycle_{self.fix_calls}.py"
                 path.write_text(f"cycle = {self.fix_calls}\n", encoding="utf-8")
+            for relpath, content in self._extra_writes.items():
+                (worktree / relpath).write_text(content, encoding="utf-8")
         return CodexRunResult(returncode=0, stdout="", stderr="")
 
 
