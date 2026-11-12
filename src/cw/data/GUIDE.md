@@ -223,6 +223,11 @@ a sentinel carries one — and they never share values, so always say which.
 - `cw status`, `cw list`, `cw session show` — sessions.
 - `cw dev-queue status`, `cw dev-queue tasks` — the queue (task status).
   `BLOCKED` in the status summary counts `blocked_on_user` only.
+  `dev-queue status --json` carries per-client live `pending`, `running`,
+  `blocked`, `completed`, `cancelled` and `failed` counts (the same
+  `blocked_on_user`-only `blocked`; `awaiting_operator_signoff` rows appear in
+  none of the six) plus `tick_ts`, the time of the tick that its `skip_reason`,
+  `freshness_detail` and `blocked_branch` come from.
 - `cw dev-queue show <ticket>` — one task in full plus the legal `next:`
   commands; `add`/`move`/`requeue`/`approve`/`cancel` print the same block.
 - `cw board` — lanes × stages. `cw queue peek` — a liveness verdict per

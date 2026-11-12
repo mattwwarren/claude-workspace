@@ -95,7 +95,12 @@ _PURE_READS: tuple[_PureRead, ...] = (
         ("session", "wait", _DONE_ID),
         f"session {_DONE_ID}: completed",
     ),
-    _PureRead("dev-queue status --json", ("dev-queue", "status", "--json"), "{}"),
+    _PureRead(
+        "dev-queue status --json",
+        ("dev-queue", "status", "--json"),
+        _FIX_LOOP_CLIENT,
+        loads_orchestrator_config=True,
+    ),
     _PureRead(
         "dev-queue tasks",
         ("dev-queue", "tasks"),

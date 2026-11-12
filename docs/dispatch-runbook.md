@@ -4177,6 +4177,16 @@ reason. Wait for the annotation to clear; only a tick line still reading
   PENDING row in the "Pending tickets held by dispatch" block, `Z`-suffixed
   timestamps, `[]` when none. A client with a held row but no tick and no
   paused lane still gets an entry, with null tick fields.
+  Each entry also carries live per-client queue-row counts (#1586) -- `pending`,
+  `running`, `blocked`, `completed`, `cancelled`, `failed`, the same numbers as
+  the text table's columns -- and `tick_ts`, the `Z`-suffixed time of the client
+  tick that `skip_reason`, `freshness_detail`, `blocked_branch` and
+  `effective.last_tick_cap` were read from (`null` when the client has no
+  tick). The counts are read from the queue at call time, not from the tick.
+  `blocked` counts `blocked_on_user` rows only, and `awaiting_operator_signoff`
+  rows appear in none of the six keys, so `pending + running + blocked` is not
+  lane occupancy. A client with queued tickets but no tick, pause or held row
+  now gets an entry too.
 - **Auto-resume.** A circuit-breaker pause lifts on its own after
   `lane_circuit_auto_resume_minutes` (default `15`; set to `0` to disable), doubling
   per consecutive trip with no spawn success in between up to

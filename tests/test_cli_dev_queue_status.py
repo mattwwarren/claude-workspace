@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -35,10 +36,11 @@ from cw.config import (
     clients_file,
     orchestrator_config_file,
 )
-from cw.dev_queue import add_ticket
+from cw.dev_queue import add_ticket, list_tickets, save_dev_queue
 from cw.models import (
     ClientConcurrencyOverride,
     ConcurrencyOverrides,
+    DevQueueStore,
     LaneConcurrencyOverride,
     LaneConfig,
     QueueItemStatus,
@@ -51,7 +53,7 @@ from tests._dispatch_tick_helpers import (
     seed_dispatch_events,
     skip_tick_events,
 )
-from tests._shared.session_seeding import _patch_ticks
+from tests._shared.session_seeding import _make_ticket_task, _patch_ticks
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -370,6 +372,13 @@ class TestJson:
                 "freshness_detail": None,
                 "blocked_branch": None,
                 "needs_attn": 0,
+                "tick_ts": "2026-10-18T12:05:00Z",
+                "pending": 0,
+                "running": 0,
+                "blocked": 0,
+                "completed": 0,
+                "cancelled": 0,
+                "failed": 0,
                 "paused_lanes": [
                     {
                         "client": "acme",
@@ -409,6 +418,8 @@ class TestJson:
         assert entry["freshness_detail"] is None
         assert entry["blocked_branch"] is None
         assert entry["needs_attn"] == 0
+        assert entry["tick_ts"] is None
+        assert entry["pending"] == entry["running"] == entry["blocked"] == 0
         paused = entry["paused_lanes"]
         assert isinstance(paused, list)
         assert [p["source"] for p in paused] == ["legacy"]
@@ -440,6 +451,155 @@ class TestJson:
         assert effective["lane_caps"] == {"default": 3}
         assert effective["ceiling_source"] == "default"
         assert effective["last_tick_cap"] == 3
+
+
+_COUNT_KEYS = ("pending", "running", "blocked", "completed", "cancelled", "failed")
+
+
+def _seed_rows(client: str, **per_status: int) -> None:
+    """Append one row per requested count, e.g. ``pending=2`` (status name keys)."""
+    status_by_key = {
+        "pending": QueueItemStatus.PENDING,
+        "running": QueueItemStatus.RUNNING,
+        "blocked": QueueItemStatus.BLOCKED_ON_USER,
+        "completed": QueueItemStatus.COMPLETED,
+        "cancelled": QueueItemStatus.CANCELLED,
+        "failed": QueueItemStatus.FAILED,
+        "signoff": QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+    }
+    tasks = list_tickets()
+    for key, count in per_status.items():
+        tasks.extend(
+            _make_ticket_task(
+                ticket_id=f"{client}-{key}-{i}",
+                client=client,
+                status=status_by_key[key],
+            )
+            for i in range(count)
+        )
+    save_dev_queue(DevQueueStore(tasks=tasks))
+
+
+def _counts(entry: dict[str, object]) -> dict[str, object]:
+    return {key: entry[key] for key in _COUNT_KEYS}
+
+
+class TestJsonLiveCounts:
+    """Live per-client counts and ``tick_ts`` in ``--json`` (#1586)."""
+
+    def test_counts_per_status(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_ticks(monkeypatch, {"acme": {"tick_at": _NOW}})
+        _seed_rows(
+            "acme",
+            pending=2,
+            running=1,
+            blocked=1,
+            completed=3,
+            cancelled=1,
+            failed=1,
+            signoff=1,
+        )
+
+        assert _counts(_json()["acme"]) == {
+            "pending": 2,
+            "running": 1,
+            "blocked": 1,
+            "completed": 3,
+            "cancelled": 1,
+            "failed": 1,
+        }
+
+    def test_pending_ticket_without_tick_is_listed(self) -> None:
+        _seed_rows("acme", pending=1)
+
+        entry = _json()["acme"]
+
+        assert entry["pending"] == 1
+        assert entry["running"] == 0
+        assert entry["skip_reason"] is None
+        assert entry["tick_ts"] is None
+
+    def test_empty_queue_tick_client_is_distinguishable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_ticks(monkeypatch, {"acme": {"tick_at": _NOW}})
+        _seed_rows("beta", pending=1)
+
+        data = _json()
+
+        assert _counts(data["acme"]) == dict.fromkeys(_COUNT_KEYS, 0)
+        assert data["acme"]["tick_ts"] == "2026-10-18T12:05:00Z"
+        assert data["beta"]["tick_ts"] is None
+        assert data["beta"]["pending"] == 1
+
+    def test_tick_ts_is_iso_z_of_tick_at(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_ticks(monkeypatch, {"acme": {"tick_at": _T0 + timedelta(seconds=7)}})
+        _seed_rows("beta", pending=1)
+
+        data = _json()
+
+        assert data["acme"]["tick_ts"] == "2026-10-18T12:00:07Z"
+        assert data["beta"]["tick_ts"] is None
+
+    def test_counts_match_text_table_columns(self) -> None:
+        _seed_rows("acme", pending=2, running=1, blocked=1, completed=3, failed=1)
+        _seed_rows("beta", pending=1, cancelled=2, failed=3, running=2)
+
+        data = _json()
+        lines = _status().output.splitlines()
+
+        for name in ("acme", "beta"):
+            row = next(line for line in lines if line.startswith(f"{name} "))
+            fields = re.split(r" {2,}", row.strip())
+            assert [int(f) for f in fields[1:7]] == [
+                data[name][key] for key in _COUNT_KEYS
+            ]
+
+    def test_client_filter_applies_to_counts(self) -> None:
+        _seed_rows("acme", pending=2, running=1)
+        _seed_rows("beta", failed=4)
+
+        data = _json("--client", "acme")
+
+        assert list(data) == ["acme"]
+        assert _counts(data["acme"]) == {
+            "pending": 2,
+            "running": 1,
+            "blocked": 0,
+            "completed": 0,
+            "cancelled": 0,
+            "failed": 0,
+        }
+
+    def test_ticket_client_not_duplicated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _overrides({"acme/default": LaneConcurrencyOverride(paused=True)})
+        _patch_ticks(monkeypatch, {"beta": {"tick_at": _NOW}})
+        _held_row("49", client="acme")
+        _seed_skips("49", 3, client="acme")
+        _seed_rows("acme", running=1)
+        _seed_rows("beta", pending=1)
+        _seed_rows("gamma", pending=1)
+
+        data = _json()
+
+        assert list(data) == ["beta", "acme", "gamma"]
+        assert data["acme"]["pending"] == 1
+        assert data["acme"]["running"] == 1
+
+    def test_live_counts_not_taken_from_tick(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_ticks(
+            monkeypatch, {"acme": {"tick_at": _NOW, "pending": 5, "running": 2}}
+        )
+        _seed_rows("acme", pending=1)
+
+        entry = _json()["acme"]
+
+        assert entry["pending"] == 1
+        assert entry["running"] == 0
 
 
 _HELD_HEADER = (
