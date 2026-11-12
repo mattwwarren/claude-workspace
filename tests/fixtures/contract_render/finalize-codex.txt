@@ -703,7 +703,7 @@ Only when `cw review converge config` reports `clean`; when it reports `blocking
   `details:` the verbatim failed checks). Never emit a Ship Summary that claims
   success when `verify` failed.
 
-**If monitor registration is missing**, run it now:
+**If monitor registration is missing** (skip this step when `monitor-registered` shows as optional `○`: `pr.auto_merge: false` is the repo's deliberate state, as with the `automerge-enabled` exception above), run it now:
 ```bash
 PR_NUMBER=$(gh pr view --json number --jq .number)
 REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
@@ -719,7 +719,7 @@ HEAD_SHA=$(gh pr view --json headRefOid --jq .headRefOid)
 
 `register` reports its own outcome: one JSON line on success (`{"registered": true, "key": "<owner/repo>#<n>", "sha": "<sha>", "updated": <bool>}`), or an `Error:` line on stderr and a non-zero exit on failure — no separate command is needed to learn whether it worked.
 
-Then re-run finalize with `--require-monitor` as the final contract check.
+Then re-run finalize with `--require-monitor` as the final contract check (the script downgrades it to optional on a repo with `pr.auto_merge: false`, where no monitor is registered; skip registration there if the check shows `○`).
 
 ## Step 10: Clean Up
 
