@@ -835,7 +835,8 @@ def _run_dispatch_loop_body(
     usage_limited_until: dict[str, datetime] = load_usage_limited_until()
     # Recover an armed event that was lost after its sidecar write, before the
     # first normal dispatch tick can run (#2276).
-    _reconcile_unannounced_usage_limit_windows(usage_limited_until)
+    if not once:
+        _reconcile_unannounced_usage_limit_windows(usage_limited_until)
     # #1343: in-process-local usage-limit-window transition detector state --
     # see _handle_usage_limit_window_transition's docstring for the R4
     # single-loop-invariant caveat.

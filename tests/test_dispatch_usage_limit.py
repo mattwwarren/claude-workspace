@@ -383,6 +383,23 @@ class TestMergeAndArm:
         # Untouched clients keep their existing window.
         assert armed["client-z"] == now + timedelta(minutes=5)
 
+    def test_once_does_not_reconcile_unannounced_window(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_events_dir: Path,
+        fleet: dict[str, ClientConfig],
+    ) -> None:
+        """``--once`` must not emit startup recovery events."""
+        write_clients_yaml(*fleet.values())
+        add_ticket(TicketTask(ticket_id="GEN-once-recovery", client="client-a"))
+        merge_and_save_usage_limited_until(
+            {"client-a": datetime.now(UTC) + timedelta(hours=1)}
+        )
+
+        run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
+
+        assert read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED]) == []
+
 
 class TestUsageLimitArmedEvent:
     """#1409 review round 1: the set side needs a durable audit record too."""
