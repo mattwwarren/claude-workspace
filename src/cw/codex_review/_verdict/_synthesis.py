@@ -23,6 +23,7 @@ from cw.auto_dev_result import (
     Scope,
 )
 from cw.codex_review._const import (
+    _CODEX_IMPL_BLOCKED_NEXT_ACTIONS,
     _CODEX_PLAN_BLOCKED_NEXT_ACTIONS,
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     CODEX_MUST_FIX_FINDINGS,
@@ -32,6 +33,7 @@ from cw.codex_review._const import (
     CODEX_REVIEWER_FAILURE_DISCARDED_FINDINGS,
     CODEX_REVIEWER_LABEL,
     STAGE1_PLAN,
+    STAGE2_IMPL,
     STAGE3_REVIEW,
     is_fix_cycle_commit_subject,
 )
@@ -145,6 +147,12 @@ def _with_review_config(
     return verdict.model_copy(update={"review_config": review_config})
 
 
+_BLOCKED_NEXT_ACTIONS_BY_STAGE: dict[StageReached, list[str]] = {
+    STAGE1_PLAN: _CODEX_PLAN_BLOCKED_NEXT_ACTIONS,
+    STAGE2_IMPL: _CODEX_IMPL_BLOCKED_NEXT_ACTIONS,
+}
+
+
 def make_codex_blocked(
     *,
     ticket_id: str,
@@ -163,13 +171,13 @@ def make_codex_blocked(
     so a new Codex-subsystem call site inherits the correct label by
     construction. Deliberately no ``next_actions`` parameter here: the label
     is derived from *stage_reached* instead (#3060), so a codex PLAN failure
-    (``stage1_plan``) carries ``_CODEX_PLAN_BLOCKED_NEXT_ACTIONS`` and every
-    other stage keeps the review label, with no call site able to mislabel it.
+    (``stage1_plan``) carries ``_CODEX_PLAN_BLOCKED_NEXT_ACTIONS``, a codex
+    IMPL failure (``stage2_impl``, #3061) ``_CODEX_IMPL_BLOCKED_NEXT_ACTIONS``,
+    and every other stage keeps the review label, with no call site able to
+    mislabel it.
     """
-    next_actions = (
-        _CODEX_PLAN_BLOCKED_NEXT_ACTIONS
-        if stage_reached == STAGE1_PLAN
-        else _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
+    next_actions = _BLOCKED_NEXT_ACTIONS_BY_STAGE.get(
+        stage_reached, _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
     )
     return make_blocked(
         ticket_id=ticket_id,

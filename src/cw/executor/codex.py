@@ -41,11 +41,12 @@ if TYPE_CHECKING:
 # capability probe.
 CODEX_REVIEW_ONLY = "codex_review_only"
 
-#: Stages a codex executor runs (#3054). REVIEW and PLAN (#3060) have
-#: executors; the IMPL and FINALIZE executors are C2-C3 (#3061-#3062). A stage
-#: not listed here parks with CODEX_REVIEW_ONLY (the reason keeps its name
-#: until C2 and C3 land).
-CODEX_SUPPORTED_STAGES: frozenset[Stage] = frozenset({Stage.REVIEW, Stage.PLAN})
+#: Stages a codex executor runs (#3054). REVIEW, PLAN (#3060) and IMPL (#3061)
+#: have executors; the FINALIZE executor is C3 (#3062). A stage not listed here
+#: parks with CODEX_REVIEW_ONLY (the reason keeps its name until C3 lands).
+CODEX_SUPPORTED_STAGES: frozenset[Stage] = frozenset(
+    {Stage.REVIEW, Stage.PLAN, Stage.IMPL}
+)
 
 
 def _codex_preflight(
@@ -134,7 +135,7 @@ def _codex_preflight(
 class CodexExecutor:
     """StageExecutor backed by a detached ``cw codex run`` subprocess (#2388).
 
-    Serves the stages in ``CODEX_SUPPORTED_STAGES`` (PLAN and REVIEW):
+    Serves the stages in ``CODEX_SUPPORTED_STAGES`` (PLAN, IMPL and REVIEW):
     pre-flight blocks with ``CODEX_REVIEW_ONLY`` on any other stage, and with
     ``CODEX_NOT_FOUND`` when the codex binary is absent.
 

@@ -500,6 +500,9 @@ hence two fields.
   read-only sandbox would silently no-op every fix.
 - `danger-full-access` is not accepted for either field. Neither field can be
   `null`: an unpinned sandbox would leave the mode to `~/.codex/config.toml`.
+- The codex IMPL turn (#3061) reads `fix_sandbox_mode` (default and only
+  accepted value `workspace-write`: the turn edits files), while PLAN, the review
+  stations and tracker IO stay `read-only`.
 - The codex PLAN turn and its two review stations (#3060) have no sandbox
   knob: they always run `--sandbox read-only -c approval_policy=never` (cw
   writes the plan artifacts outside the sandbox). Neither field above is

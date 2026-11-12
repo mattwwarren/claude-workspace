@@ -62,29 +62,34 @@ class TicketText:
     comments_dropped: int
 
 
-def _has_plan_docs(root: Path) -> bool:
-    return all((root / name).is_file() for name in PLAN_DOCS)
+def _has_plan_docs(root: Path, docs: tuple[str, ...] = PLAN_DOCS) -> bool:
+    """Whether *root* holds every doc in *docs* (the plan docs by default)."""
+    return all((root / name).is_file() for name in docs)
 
 
-def _packaged_commands_dir() -> Path | None:
-    """The wheel's ``cw/data/commands`` when it holds the plan docs."""
+def _packaged_commands_dir(docs: tuple[str, ...] = PLAN_DOCS) -> Path | None:
+    """The wheel's ``cw/data/commands`` when it holds every doc in *docs*."""
     root = Path(str(importlib.resources.files("cw").joinpath(*_PACKAGED_SUBDIR)))
-    return root if _has_plan_docs(root) else None
+    return root if _has_plan_docs(root, docs) else None
 
 
-def _checkout_commands_dir() -> Path | None:
-    """The cw source checkout's ``.claude/commands`` when it holds the plan docs."""
+def _checkout_commands_dir(docs: tuple[str, ...] = PLAN_DOCS) -> Path | None:
+    """The cw source checkout's ``.claude/commands`` when it holds every doc."""
     package_dir = Path(cw.__file__).resolve().parent
     root = package_dir.parent.parent
     if package_dir != root / "src" / "cw" or not (root / "pyproject.toml").is_file():
         return None
     commands = root / ".claude" / "commands"
-    return commands if _has_plan_docs(commands) else None
+    return commands if _has_plan_docs(commands, docs) else None
 
 
-def command_docs_root() -> Path | None:
-    """cw's own command-doc tree: packaged first, then the source checkout."""
-    return _packaged_commands_dir() or _checkout_commands_dir()
+def command_docs_root(docs: tuple[str, ...] = PLAN_DOCS) -> Path | None:
+    """cw's own command-doc tree: packaged first, then the source checkout.
+
+    *docs* names the stage's docs, each of which must be present in the root
+    (the plan docs by default; the IMPL executor passes its own).
+    """
+    return _packaged_commands_dir(docs) or _checkout_commands_dir(docs)
 
 
 def _section(name: str, body: str) -> str:

@@ -2594,8 +2594,8 @@ cw dev-queue recover-red-pr <T> -c <CLIENT>
 
 It refuses unless the row is `COMPLETED` with `disposition: shipped`, the PR is
 OPEN with a live failing required check, the lane pipeline has impl and
-review, the impl executor is claude-native (opencode and local ignore the
-feedback; #2983) and no daemon session is live for the ticket. Then it:
+review, the impl executor is claude-native or codex (opencode and local ignore
+the feedback; #2983) and no daemon session is live for the ticket. Then it:
 
 1. synthesizes head-pinned CI-failure feedback with the shared synthesizer
    (`cw.pr_feedback`), reading the failing checks live;
@@ -3877,6 +3877,60 @@ does everything else:
   cycle and the #1815 blocking-findings comment are not on the codex PLAN
   lane yet (#3464, #3465): only `cw dev-queue approve` approves a large plan.
 
+**Codex IMPL (#3061, RFC 0018 C2).** A lane whose IMPL stage resolves to
+`codex` runs `cw codex run --stage impl`: one `codex exec` turn under the
+lane's `fix_sandbox_mode` (`workspace-write`; the PLAN turn, the review
+stations and tracker IO stay `read-only`) with no cw timer (ADR-0014). The turn
+edits the worktree and returns `{sentinel}`; it never stages, commits or
+pushes. cw does everything else:
+
+- **Inputs.** The prompt is A3's impl render plus the IMPL codex addendum, then
+  the prefetched GitHub ticket, the approved plan (`.cw/plan.md`), on a repair
+  row the review report as an untrusted-data section, a default-branch merge
+  note when one applies, and the plan's "Files You May Change" fence. A
+  non-GitHub tracker blocks `tracker_mcp_unavailable_pre_dispatch` (#3530). A
+  missing plan blocks `plan_missing` unless the row is an adopted repair entry
+  (`review_feedback` and `branch` both set); a `recover-red-pr` row has no
+  `branch`, so it needs its `.cw/plan.md`.
+- **Pre-turn guards.** The worktree must be on the row's branch
+  (`queue_metadata.branch`, else `<prefix>/<ticket>`), and a fresh row's branch
+  must carry no commits ahead of its fork point (`impl_failed`,
+  `existing_branch_work`). A failed push leaves a local commit, so a retried
+  fresh row blocks there until you push or reset it. A dirty start parks
+  `codex_fix_dirty_start` with no turn.
+- **Gates, in order.** Gate 1 parks `empty_diff_blocked`
+  (`empty_diff_no_commits`) on an empty net diff against the fork point; the
+  plan fence parks `codex_fix_scope_drift`; on repair rows the growth guard
+  (`codex_fix_loop_growth_guard_enabled`, 40 net lines) parks
+  `codex_fix_growth_budget_exceeded`; gate 2 runs
+  `check_plan_scope_conformance.py` and parks `plan_scope_drift` (a stale or
+  unmarked script, below `cw-script-version` 3, parks `impl_failed`); then the
+  repo's quality gates park `impl_failed` with the gate output. Gate 2 is
+  skipped with friction on a repair row with no plan. Gates 3 and 4 (the
+  claimed test command and the mypy baseline) are #3531.
+- **One commit.** cw stages the measured paths, checks the staged set,
+  makes one commit (`feat: implement #<T>`, or `fix: address review feedback
+  for #<T>` on a repair row) with the `Auto-Dev-Stage: impl-complete` trailer,
+  pushes it with an explicit refspec and verifies origin's tip
+  (`impl_not_pushed`). A commit hook rejection parks `codex_fix_hook_failed`;
+  cw runs no hook-repair turn. A refused turn's edits are pinned under
+  `refs/cw/refused-cycles/<T>/cycle-0-<reason>-<stamp>` and the tree is reset.
+- **Repair rows.** `review_feedback` is bound to the live PR before any turn
+  (`gh repo view`, `gh pr view`; every mismatch or lookup failure is
+  `impl_failed`, `review_feedback_stale`). When `origin/<default>` would
+  conflict, cw merges it (`--no-commit`, conflicts left in the tree) and the
+  turn resolves them; the merge-side files are allowed through the fence and
+  skipped by gate 2. A repair turn that changes nothing parks
+  `impl_failed` (`repair_turn_made_no_change`).
+- **Result.** cw stamps `branch`, `fork_point_sha`, `commits` (every
+  `fork..HEAD` commit, newest first), `scope.files`, `scope.lines_actual`,
+  `scope.tier`, `plan_source` and `review` over the model's sentinel, emits
+  `s2_impl_started` / `s2_impl_complete`, completes through the door and
+  posts nothing to the tracker.
+- **Deferred.** Tracker-aware plan recovery (#3530); the pre-stage detector
+  guard, resume dispositions, branch freshness and merge-conclusion backstops
+  (#3529); the claimed-test and mypy-baseline gates (#3531).
+
 Two UNVERIFIED items: whether MCP tool calls run under
 `approval_policy=never` (the tracker-IO probe above is the evidence path),
 and whether the pre-flight resolutions marker survives on Linear. The tests
@@ -4757,8 +4811,8 @@ from the artifact's final state. A per-round filer opened one issue per
 wording, because a reviewer rewords a finding from round to round and the dedup
 key is the finding's text (one ticket produced 39 issues over six rounds,
 another 24). The engine-confirm path (`file_confirm_deferrals`) still files at
-record time. A codex lane runs PLAN and REVIEW only (#3060); its finalize runs
-on the claude-native executor, so item 2a is the normal-completion path, not only a
+record time. A codex lane runs PLAN, IMPL and REVIEW only (#3060, #3061); its
+finalize runs on the claude-native executor, so item 2a is the normal-completion path, not only a
 retry. The review-debt filer registry (`register_debt_filer`) is gone: nothing
 files from the codex process.
 

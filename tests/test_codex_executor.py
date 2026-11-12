@@ -22,6 +22,7 @@ import pytest
 
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_review import (
+    _CODEX_IMPL_BLOCKED_NEXT_ACTIONS,
     _CODEX_PLAN_BLOCKED_NEXT_ACTIONS,
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     CODEX_REVIEW_UNPARSEABLE,
@@ -39,6 +40,7 @@ from cw.executor import (
     codex_capability_diagnosis,
     resolve_executor,
 )
+from cw.executor.codex import CODEX_SUPPORTED_STAGES
 from cw.executor.core import FakeFireAndForgetRunner
 from cw.executor_diagnostics import (
     ExecutorFailure,
@@ -145,7 +147,7 @@ def _seed_running_row(task: TicketTask) -> None:
 
 @pytest.mark.parametrize(
     ("stage", "expected_stage_reached"),
-    [(Stage.IMPL, "stage2_impl"), (Stage.FINALIZE, "stage4a_merge_gate")],
+    [(Stage.FINALIZE, "stage4a_merge_gate")],
 )
 def test_codex_executor_wrong_stage_blocked(
     tmp_config_dir: Path,
@@ -173,6 +175,75 @@ def test_codex_executor_wrong_stage_blocked(
     assert result.blocker is not None
     assert result.blocker.reason == CODEX_REVIEW_ONLY
     assert result.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
+
+
+def test_codex_executor_impl_preflight_ok_launches_cw_codex_run_stage_impl(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    fake_runner: FakeFireAndForgetRunner,
+) -> None:
+    """IMPL is supported (#3061): no CODEX_REVIEW_ONLY park, one impl launch."""
+    worktree = make_git_repo("wt-codex-impl-launch")
+    executor = _codex_executor(runner=fake_runner)
+    task = TicketTask(ticket_id="T-impl", client="test", stage=Stage.IMPL)
+
+    with patch(_WHICH, return_value=_CODEX_PATH):
+        sid = executor.spawn(
+            stage=Stage.IMPL, task=task, worktree=worktree, client=_client(worktree)
+        )
+
+    session = next(s for s in load_state().sessions if s.id == sid)
+    assert session.status == SessionStatus.ACTIVE
+    assert session.last_result is None
+    (call,) = fake_runner.calls
+    argv = call["argv"]
+    assert isinstance(argv, list)
+    assert argv[argv.index("--stage") + 1] == "impl"
+    assert argv[argv.index("--session-id") + 1] == sid
+
+
+def test_codex_executor_impl_codex_not_found_carries_impl_labels(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    fake_runner: FakeFireAndForgetRunner,
+) -> None:
+    """A missing binary on an IMPL spawn parks at stage2_impl, not stage3_review."""
+    worktree = make_git_repo("wt-codex-impl-missing")
+    executor = _codex_executor(runner=fake_runner)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+
+    with patch(_WHICH, return_value=None):
+        executor.spawn(
+            stage=Stage.IMPL, task=task, worktree=worktree, client=_client(worktree)
+        )
+
+    assert fake_runner.calls == []
+    result = _persisted_result()
+    assert result.stage_reached == "stage2_impl"
+    assert result.blocker is not None
+    assert result.blocker.reason == CODEX_NOT_FOUND
+    assert result.next_actions == _CODEX_IMPL_BLOCKED_NEXT_ACTIONS
+
+
+def test_codex_review_only_park_for_finalize_keeps_the_finalize_marker(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    fake_runner: FakeFireAndForgetRunner,
+) -> None:
+    """FINALIZE still parks CODEX_REVIEW_ONLY at stage4a_merge_gate; IMPL never."""
+    worktree = make_git_repo("wt-codex-finalize-review-only")
+    executor = _codex_executor(runner=fake_runner)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.FINALIZE)
+
+    executor.spawn(
+        stage=Stage.FINALIZE, task=task, worktree=worktree, client=_client(worktree)
+    )
+
+    result = _persisted_result()
+    assert result.stage_reached == "stage4a_merge_gate"
+    assert result.blocker is not None
+    assert result.blocker.reason == CODEX_REVIEW_ONLY
+    assert Stage.IMPL in CODEX_SUPPORTED_STAGES
 
 
 def test_codex_executor_plan_codex_not_found_carries_plan_labels(
@@ -609,7 +680,7 @@ def test_preflight_failure_persist_error_completes_session_and_reraises(
     """
     worktree = make_git_repo("wt-codex-preflight-boom")
     executor = _codex_executor()
-    task = TicketTask(ticket_id="T-pf", client="test", stage=Stage.IMPL)
+    task = TicketTask(ticket_id="T-pf", client="test", stage=Stage.FINALIZE)
 
     calls: list[dict[str, object]] = []
 
@@ -623,9 +694,9 @@ def test_preflight_failure_persist_error_completes_session_and_reraises(
         patch("cw.executor.core._complete_session_via_door", _door),
         pytest.raises(OSError, match="door boom"),
     ):
-        # Stage.IMPL trips the CODEX_REVIEW_ONLY pre-flight guard.
+        # Stage.FINALIZE trips the CODEX_REVIEW_ONLY pre-flight guard.
         executor.spawn(
-            stage=Stage.IMPL, task=task, worktree=worktree, client=_client(worktree)
+            stage=Stage.FINALIZE, task=task, worktree=worktree, client=_client(worktree)
         )
 
     # Second call is the guarded blocked-result write from the except branch.

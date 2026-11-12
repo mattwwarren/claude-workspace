@@ -2423,6 +2423,67 @@ class TestFetchRepoVisibility:
         assert gh.fetch_repo_visibility(timeout=5, cwd=None) is None
 
 
+class TestFetchRepoNameWithOwner:
+    """fetch_repo_name_with_owner (#3061), shaped after fetch_repo_visibility."""
+
+    def test_returns_the_slug(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[object] = []
+
+        def _fake_run(argv: list[str], **kwargs: Any) -> Any:
+            calls.append((argv, kwargs["cwd"], kwargs["timeout"]))
+            return _make_run_result(0, '{"nameWithOwner":"acme/widgets"}')
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        slug = gh.fetch_repo_name_with_owner(timeout=5, cwd=Path("/repo"))
+        assert slug == "acme/widgets"
+        assert calls == [
+            (["gh", "repo", "view", "--json", "nameWithOwner"], Path("/repo"), 5)
+        ]
+
+    def test_none_on_non_zero_exit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(1, ""))
+        assert gh.fetch_repo_name_with_owner(timeout=5, cwd=None) is None
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            "not json{{",
+            "[]",
+            "{}",
+            '{"nameWithOwner": null}',
+            '{"nameWithOwner": 7}',
+            '{"nameWithOwner": ""}',
+            '{"nameWithOwner": "no-slash"}',
+            '{"nameWithOwner": "a/b/c"}',
+            '{"nameWithOwner": "a b/c"}',
+        ],
+    )
+    def test_none_on_bad_output(
+        self, monkeypatch: pytest.MonkeyPatch, stdout: str
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(0, stdout)
+        )
+        assert gh.fetch_repo_name_with_owner(timeout=5, cwd=None) is None
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            FileNotFoundError("gh"),
+            OSError("boom"),
+            subprocess.TimeoutExpired(cmd="gh", timeout=5),
+        ],
+    )
+    def test_none_when_gh_cannot_run(
+        self, monkeypatch: pytest.MonkeyPatch, exc: BaseException
+    ) -> None:
+        def _raise(*_a: object, **_kw: object) -> Any:
+            raise exc
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+        assert gh.fetch_repo_name_with_owner(timeout=5, cwd=None) is None
+
+
 class TestIsAgentAuthored:
     """is_agent_authored: the read side of the #2097 provenance marker."""
 
