@@ -26,7 +26,7 @@ import time
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.claude_review._runner import build_claude_review_argv
-from cw.codex_review._audit_events import _empty_metrics
+from cw.codex_review._audit_events import _as_int, _empty_metrics, _no_token_usage
 from cw.codex_review._const import (
     _CATEGORY_TO_REASON,
     CODEX_BUDGET_EXHAUSTED,
@@ -97,6 +97,7 @@ class _Envelope(NamedTuple):
     category: ExecutorFailureCategory | None
     document_text: str | None
     cost_usd: float | None
+    metrics: ReviewerRunMetrics
 
 
 def _json_object(text: str) -> dict[str, object] | None:
@@ -114,7 +115,37 @@ def _cost(envelope: dict[str, object]) -> float | None:
     return None
 
 
-def _read_envelope(stdout: str) -> _Envelope:
+def _usage_metrics(envelope: dict[str, object], duration: float) -> ReviewerRunMetrics:
+    """Map the envelope's ``usage`` and ``modelUsage`` onto the run metrics (#3063).
+
+    ``input_tokens`` is the base count plus the cache read and creation parts
+    (the Anthropic ``input_tokens`` field excludes both); ``cached_input_tokens``
+    is the cache read, so it stays a subset of ``input_tokens``. A missing cache
+    part counts as zero; a non-int base count leaves ``input_tokens`` ``None``.
+    ``effective_model`` is the sole ``modelUsage`` key, or ``None`` when there are
+    several or none. ``cost_usd`` stays logged, never stored (ADR-0021).
+    """
+    metrics = _empty_metrics(duration)
+    usage = envelope.get("usage")
+    if isinstance(usage, dict):
+        base = _as_int(usage.get("input_tokens"))
+        cache_read = _as_int(usage.get("cache_read_input_tokens"))
+        cache_created = _as_int(usage.get("cache_creation_input_tokens"))
+        if base is not None:
+            metrics["input_tokens"] = base + (cache_read or 0) + (cache_created or 0)
+        metrics["cached_input_tokens"] = cache_read
+        metrics["output_tokens"] = _as_int(usage.get("output_tokens"))
+        details = usage.get("output_tokens_details")
+        if isinstance(details, dict):
+            metrics["reasoning_tokens"] = _as_int(details.get("thinking_tokens"))
+    model_usage = envelope.get("modelUsage")
+    if isinstance(model_usage, dict) and len(model_usage) == 1:
+        (model,) = model_usage
+        metrics["effective_model"] = model if isinstance(model, str) else None
+    return metrics
+
+
+def _read_envelope(stdout: str, duration: float) -> _Envelope:
     """Unwrap the envelope into the reviewer document text, or a failure category.
 
     The captured envelope (``tests/_claude_review_helpers.py``) carries the
@@ -123,23 +154,23 @@ def _read_envelope(stdout: str) -> _Envelope:
     ``is_error: true`` envelope is a backend-side failure (``runtime_error``,
     which maps to ``CODEX_ERROR``), never a content failure.
     """
+    empty = _empty_metrics(duration)
     if not stdout.strip():
-        return _Envelope(category="empty_output", document_text=None, cost_usd=None)
+        return _Envelope("empty_output", None, None, empty)
     envelope = _json_object(stdout)
     if envelope is None:
-        return _Envelope(category="invalid_json", document_text=None, cost_usd=None)
+        return _Envelope("invalid_json", None, None, empty)
     cost = _cost(envelope)
+    metrics = _usage_metrics(envelope, duration)
     if envelope.get("is_error") is True:
-        return _Envelope(category="runtime_error", document_text=None, cost_usd=cost)
+        return _Envelope("runtime_error", None, cost, metrics)
     structured = envelope.get("structured_output")
     if isinstance(structured, dict):
-        return _Envelope(
-            category=None, document_text=json.dumps(structured), cost_usd=cost
-        )
+        return _Envelope(None, json.dumps(structured), cost, metrics)
     result = envelope.get("result")
     if isinstance(result, str):
-        return _Envelope(category=None, document_text=result, cost_usd=cost)
-    return _Envelope(category="missing_output", document_text=None, cost_usd=cost)
+        return _Envelope(None, result, cost, metrics)
+    return _Envelope("missing_output", None, cost, metrics)
 
 
 def _process_category(result: ClaudeRunResult) -> ExecutorFailureCategory | None:
@@ -242,7 +273,14 @@ def _run_claude_role(
     result = runner.run(worktree, argv, timeout_seconds, stdin=prompt)
     duration = time.monotonic() - start
     after = worktree_state(worktree)
-    metrics = _empty_metrics(duration)
+    # Read before the mutation check, so a mutated role keeps the tokens it spent.
+    process_category = _process_category(result)
+    envelope = (
+        _read_envelope(result.stdout, duration)
+        if process_category is None
+        else _Envelope(process_category, None, None, _empty_metrics(duration))
+    )
+    metrics = envelope.metrics
     if after != before:
         mutation = WorktreeMutation(role, before, after)
         _log.warning(
@@ -253,12 +291,6 @@ def _run_claude_role(
         )
         failure = ReviewerRunFailure(role=role, reason=CODEX_REVIEW_WORKTREE_MUTATED)
         return None, failure, metrics, [], mutation
-    process_category = _process_category(result)
-    envelope = (
-        _read_envelope(result.stdout)
-        if process_category is None
-        else _Envelope(category=process_category, document_text=None, cost_usd=None)
-    )
     _log.info(
         "claude review role %r finished in %.1fs (total_cost_usd=%s)",
         role,
@@ -266,6 +298,13 @@ def _run_claude_role(
         envelope.cost_usd,
     )
     category = envelope.category
+    if category is None and _no_token_usage(metrics):
+        _log.warning(
+            "claude review role usage absent: role=%r session=%r "
+            "(claude -p envelope carries no token usage; output format drift?)",
+            role,
+            session_id,
+        )
     if category is None:
         parsed = _parse_reviewer_document(envelope.document_text)
         if parsed is not None:
@@ -306,9 +345,9 @@ def run_claude_roles(
     ``ReviewerFindingsDocument`` JSON schema (the OpenAI-strict transform is
     codex-only), passed inline, so no scratch files exist to clean up.
 
-    Metrics carry duration only: the envelope's token and cost fields are
-    logged, not persisted. A G4 mutation stops the loop; the roles after it
-    are not run and contribute nothing.
+    Metrics carry duration, the envelope's token counts and its model (#3063);
+    the cost field is logged, never persisted (ADR-0021). A G4 mutation stops
+    the loop; the roles after it are not run and contribute nothing.
     """
     argv = build_claude_review_argv(
         model=model, schema=json.dumps(ReviewerFindingsDocument.model_json_schema())

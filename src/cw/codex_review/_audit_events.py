@@ -247,6 +247,21 @@ def _completed_usage_blocks(
     return seen_completed, blocks
 
 
+def _no_token_usage(metrics: ReviewerRunMetrics) -> bool:
+    """True when *metrics* carries none of the four reported token fields (#3063).
+
+    The one "usage absent" predicate, shared by the codex accumulator's notion
+    (:attr:`~cw.models.usage.TurnUsage.absent`) and the Claude confirm lane.
+    """
+    return TurnUsage(
+        input_tokens=metrics["input_tokens"],
+        cached_input_tokens=metrics["cached_input_tokens"],
+        cache_write_input_tokens=None,
+        output_tokens=metrics["output_tokens"],
+        reasoning_tokens=metrics["reasoning_tokens"],
+    ).absent
+
+
 def parse_turn_usage(stdout: str) -> TurnUsage | UsageUnavailable:
     """Parse the token usage of one codex turn from its ``--json`` stdout (#3063).
 

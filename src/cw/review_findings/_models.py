@@ -558,9 +558,10 @@ class ReviewerRunRecord(BaseModel):
 
     Everything below ``finding_count`` is executor audit telemetry (#1710),
     populated from the codex ``--json`` event stream where one is available and
-    left at its default everywhere else (the Claude-native review path, a role
-    whose stream was malformed, a run that never emitted one). It is purely
-    observational: no health, blocking, or gate decision reads any of it.
+    from the ``claude -p`` envelope's usage block on the Claude confirm lane
+    (#3063); left at its default everywhere else (a role whose stream was
+    malformed, a run that never emitted one). It is purely observational: no
+    health, blocking, or gate decision reads any of it.
     """
 
     reviewer_role: str
@@ -569,7 +570,8 @@ class ReviewerRunRecord(BaseModel):
     finding_count: int
     # Executor-native run identifier (codex ``thread.started.thread_id``).
     thread_id: str | None = None
-    # Always None today: no codex-cli 0.147.0 event carries a model field.
+    # Always None for codex (no codex-cli event carries a model field); the
+    # Claude confirm lane fills it from the envelope's sole modelUsage key.
     effective_model: str | None = None
     duration_seconds: float | None = None
     input_tokens: int | None = None
