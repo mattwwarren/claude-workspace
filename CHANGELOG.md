@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.97.0] - 2026-11-12
+
 ### Added
 
 - **Opt-in CI evidence for the finalize reuse-path quality gates (`quality_gates.ci_evidence`).** A repo whose CI already runs its quality gates can map gate names to CI check names in `.claude/project-config.yaml`; `prep_pr_state.py gate-ci-evidence <gate> --pr <N> [--repo o/r] [--base main]` then reports `skip: true` only when the map (read from the committed file on `origin/<base>`, so a PR cannot opt itself in) has an entry for the gate, the PR is open against that base, local `HEAD` equals the PR head read live from GitHub, and every mapped check finished green on that commit, and `auto-dev-finalize.md` Step 4c.6 skips that gate instead of re-running it locally. Check runs and statuses are looked up by name through `gh api`, not the 100-entry-capped `statusCheckRollup`. Every other outcome (no map, no entry, PR closed or retargeted, head moved, check pending/red/skipped/missing, `gh` unreachable, no PyYAML) is `skip: false` and the gate runs locally exactly as before, so a repo that does not opt in sees no change. No new `blocker.reason` and no schema change. See `config/CONFIG_REFERENCE.md` "Quality Gate CI Evidence".
