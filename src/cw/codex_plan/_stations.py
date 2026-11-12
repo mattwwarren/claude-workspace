@@ -94,11 +94,17 @@ STATION_OUTPUT_INSTRUCTIONS: Final = (
 
 @dataclass(frozen=True)
 class StationBlock:
-    """Why a binding station refused the plan."""
+    """Why a binding station refused the plan.
+
+    ``restates_findings`` marks *details* that only restate finding lines the
+    station's findings already carry (the MUST_FIX block), so an advisory run
+    does not list them twice (#3527).
+    """
 
     reason: str
     details: str
     retry_eligible: bool
+    restates_findings: bool = False
 
 
 @dataclass(frozen=True)
@@ -174,7 +180,10 @@ def _classify(
     ]
     if blocking:
         details = f"{role} MUST_FIX findings:\n" + "\n".join(blocking)
-        return StationBlock(reason, details, retry_eligible=False), lines
+        block = StationBlock(
+            reason, details, retry_eligible=False, restates_findings=True
+        )
+        return block, lines
     return None, lines
 
 
@@ -218,11 +227,7 @@ def run_plan_stations(
         findings.extend(lines)
         if block is not None and binding:
             return StationsOutcome(block=block, findings=tuple(findings))
-        if (
-            block is not None
-            and not binding
-            and (not lines or not block.details.endswith("\n".join(lines)))
-        ):
+        if block is not None and not binding and not block.restates_findings:
             findings.append(f"- {block.details}")
     return StationsOutcome(block=None, findings=tuple(findings))
 

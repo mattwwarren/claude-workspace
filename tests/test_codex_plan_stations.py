@@ -181,6 +181,46 @@ class TestVerdicts:
         assert len(runner.calls) == 2
         assert len(outcome.findings) == 2
 
+    def test_advisory_mixed_severities_list_each_finding_once(
+        self, tmp_path: Path
+    ) -> None:
+        """#3527: a MUST_FIX restatement is never re-appended beside SHOULD_FIX."""
+        runner = _runner(
+            station_findings_doc(
+                PLAN_REVIEWER, severity="MUST_FIX", severities=("SHOULD_FIX",)
+            ),
+            _clean(PLAN_SOUNDNESS_REVIEWER),
+        )
+
+        outcome = _stations(runner, tmp_path, binding=False)
+
+        assert outcome.block is None
+        assert len(outcome.findings) == 2
+        must_fix = [f for f in outcome.findings if "MUST_FIX finding from" in f]
+        assert len(must_fix) == 1
+        assert not any("MUST_FIX findings:" in f for f in outcome.findings)
+
+    def test_advisory_degraded_status_with_findings_keeps_its_detail(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _runner(
+            station_findings_doc(
+                PLAN_REVIEWER,
+                severity="SHOULD_FIX",
+                status="degraded",
+                detail="ticket unreadable",
+            ),
+            _clean(PLAN_SOUNDNESS_REVIEWER),
+        )
+
+        outcome = _stations(runner, tmp_path, binding=False)
+
+        assert outcome.block is None
+        assert any(
+            "returned status degraded: ticket unreadable" in f for f in outcome.findings
+        )
+        assert any("SHOULD_FIX finding from" in f for f in outcome.findings)
+
     def test_advisory_failure_detail_is_preserved(self, tmp_path: Path) -> None:
         runner = _runner(
             station_findings_doc(
