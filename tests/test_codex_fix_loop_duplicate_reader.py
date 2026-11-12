@@ -572,7 +572,7 @@ class TestCheckDuplicateReader:
         _write(repo / "src" / "hold.py", _helper_body("read_roster_snapshot"))
 
         def _unresolvable(*_a: object, **_k: object) -> str:
-            raise subprocess.CalledProcessError(128, ["git", "diff"], stderr="bad rev")
+            raise subprocess.CalledProcessError(128, "git diff", stderr="bad rev")
 
         monkeypatch.setattr(duplicate_reader, "diff_since", _unresolvable)
         monkeypatch.setattr(duplicate_reader, "cycle_diff", _unresolvable)

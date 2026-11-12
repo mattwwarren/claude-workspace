@@ -498,7 +498,7 @@ class TestBestEffortDirtyPaths:
         assert best_effort_dirty_paths(repo) == ()
 
     @pytest.mark.parametrize(
-        "error", [subprocess.CalledProcessError(1, ["git"]), OSError("gone")]
+        "error", [subprocess.CalledProcessError(1, "git status"), OSError("gone")]
     )
     def test_failing_status_returns_empty(
         self,
