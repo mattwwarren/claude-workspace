@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING, Final
 from cw.codex_review import (
     CODEX_ERROR,
     CODEX_MODEL_CAPACITY,
+    PLAN_REVIEWER_ROLE,
+    PLAN_SOUNDNESS_REVIEWER_ROLE,
     PLAN_STATION_AGENT_FILES,
     _load_agent_spec_fallback_gate,
     _resolve_agent_spec,
@@ -51,12 +53,12 @@ if TYPE_CHECKING:
         ReviewerRunFailure,
     )
 
-# The role names and their agent specs have one source in the shared mapping.
-# Station order follows mapping insertion order: soundness runs only after a
+# The role names and their agent specs have one source in the shared mapping
+# module. Station order is declared here (#3484): soundness runs only after a
 # clean Plan Reviewer.
-PLAN_STATIONS: Final[tuple[str, ...]] = tuple(PLAN_STATION_AGENT_FILES)
-PLAN_REVIEWER: Final = PLAN_STATIONS[0]
-PLAN_SOUNDNESS_REVIEWER: Final = PLAN_STATIONS[1]
+PLAN_REVIEWER: Final = PLAN_REVIEWER_ROLE
+PLAN_SOUNDNESS_REVIEWER: Final = PLAN_SOUNDNESS_REVIEWER_ROLE
+PLAN_STATIONS: Final[tuple[str, ...]] = (PLAN_REVIEWER, PLAN_SOUNDNESS_REVIEWER)
 
 #: The blocked reason a non-clean station verdict parks with.
 STATION_BLOCK_REASONS: Final[dict[str, str]] = {

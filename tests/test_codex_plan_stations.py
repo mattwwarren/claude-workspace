@@ -14,12 +14,18 @@ from cw.codex_plan._result import (
 from cw.codex_plan._stations import (
     PLAN_REVIEWER,
     PLAN_SOUNDNESS_REVIEWER,
+    PLAN_STATIONS,
     STATION_OUTPUT_INSTRUCTIONS,
     build_station_prompt,
     run_plan_stations,
     stamp_markers,
 )
-from cw.codex_review import CODEX_MODEL_CAPACITY, PLAN_STATION_AGENT_FILES
+from cw.codex_review import (
+    CODEX_MODEL_CAPACITY,
+    PLAN_REVIEWER_ROLE,
+    PLAN_SOUNDNESS_REVIEWER_ROLE,
+    PLAN_STATION_AGENT_FILES,
+)
 from cw.codex_runner import CodexRunResult
 from cw.codex_usage import UsageAccumulator
 from cw.dev_queue.lifecycle import (
@@ -193,6 +199,16 @@ class TestVerdicts:
             "Plan Reviewer station failed" in finding for finding in outcome.findings
         )
         assert len(runner.calls) == 2
+
+
+class TestStationNames:
+    def test_the_station_order_is_an_explicit_declaration(self) -> None:
+        """#3484: order and names no longer derive from mapping insertion order."""
+        assert PLAN_STATIONS == ("Plan Reviewer", "Plan Soundness Reviewer")
+        assert PLAN_STATIONS == (PLAN_REVIEWER, PLAN_SOUNDNESS_REVIEWER)
+        assert PLAN_REVIEWER is PLAN_REVIEWER_ROLE
+        assert PLAN_SOUNDNESS_REVIEWER is PLAN_SOUNDNESS_REVIEWER_ROLE
+        assert set(PLAN_STATION_AGENT_FILES) == set(PLAN_STATIONS)
 
 
 class TestLaunch:
