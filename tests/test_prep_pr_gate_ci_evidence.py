@@ -377,7 +377,9 @@ class TestBaseConfigIsAuthoritative:
         done = subprocess.CompletedProcess([], 0, stdout=_CONFIG, stderr="")
         text, seen = self._git_show(monkeypatch, done)
         assert text == _CONFIG
-        assert seen == [["git", "show", "origin/main:.claude/project-config.yaml"]]
+        assert len(seen) == 1
+        assert seen[0][0] == "git"
+        assert seen[0][1:] == ["show", "origin/main:.claude/project-config.yaml"]
 
     @pytest.mark.parametrize(
         "outcome",
