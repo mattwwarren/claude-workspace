@@ -54,6 +54,7 @@ _MODEL_ARGC: Final = 2  # exactly "--model" and its VALUE
 TURN_COMPLETED: Final = "turn.completed"
 TURN_FAILED: Final = "turn.failed"
 TERMINAL_EVENTS: Final = frozenset({TURN_COMPLETED, TURN_FAILED})
+NONTERMINAL_TURN_EVENTS: Final = frozenset({"turn.started"})
 CREATE_PROMPT: Final = (
     "Reply exactly cw-session-smoke-ok. Do not use tools or modify files."
 )
@@ -125,7 +126,11 @@ class _StreamState:
         kind = event["type"]
         if kind == "thread.started":
             return self._thread_started(event)
+        if isinstance(kind, str) and kind in NONTERMINAL_TURN_EVENTS:
+            return None
         if isinstance(kind, str) and kind in TERMINAL_EVENTS:
+            return self._terminal(kind)
+        if isinstance(kind, str) and kind.startswith("turn."):
             return self._terminal(kind)
         return None
 
@@ -141,6 +146,8 @@ class _StreamState:
         return None
 
     def _terminal(self, kind: str) -> ParseFault | None:
+        if kind not in TERMINAL_EVENTS:
+            return ParseFault.INVALID_TERMINAL
         if self.terminal is not None:
             return ParseFault.INVALID_TERMINAL
         self.terminal = kind
