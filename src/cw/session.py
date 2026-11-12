@@ -449,6 +449,13 @@ def resume_session(
                        get_native_daemon_client(). Inject FakeNativeDaemonClient
                        for tests.
 
+    Deliberately ungated on the owning task's park disposition. This is an
+    explicit operator action with no inbox message whose delivery could be
+    wasted, and the operator may resume a mechanically parked session (dirty
+    worktree, merge gate) to fix it by hand. The disposition gate lives in
+    ``cw session send``'s resume trigger
+    (``cw.session_resume_trigger``; ADR-0017).
+
     The underscore-prefixed poll parameters are injectable for testing only.
     """
     daemon = native_daemon or get_native_daemon_client()
