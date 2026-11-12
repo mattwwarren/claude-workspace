@@ -430,13 +430,16 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
 - Zero gates detected → log `reuse_path_gates: none_detected` in `friction_highlights` and continue to Step 4d.
 - Script absent, stale, or `detect-gates` fails → headless EXIT `blocked` with `blocker.reason: "agent_block"` and `details: "Step 4c.6: HEADLESS BLOCK — prep_pr_state.py <cause>"`. Fail closed, mirroring `/prep-pr` Step 2's script-resolution block.
 
-**Per-gate procedure.** This step inherits exactly these pieces of `/prep-pr` Step 7, and nothing else:
+**Per-gate procedure.** This step inherits exactly these pieces of `/prep-pr` Step 7, adds one opt-in call of its own (`gate-ci-evidence`, first in the list), and nothing else:
 
 - the start-time step (record each gate's start before running it);
 - the foreground-timeout step (one foreground Bash call per gate, with `timeout` set from `gate-timeout`);
+- `"$PREP_PR_STATE" gate-ci-evidence <name> --pr <pr_number> --repo <owner>/<repo> --base <base>` (not a `/prep-pr` Step 7 piece: skip a gate the repo has opted in to proving by green CI at the PR's live head; see CI-evidence skip below);
 - `"$PREP_PR_STATE" gate-pass check <name>` (skip a gate that already passed at this HEAD);
 - `"$PREP_PR_STATE" gate-timeout <name>` (the ceiling);
 - the `gate_timeout` token, which on a timeout is the top-level `blocker.reason` (see Headless ceiling).
+
+**CI-evidence skip (opt-in, per repo).** Runs before `gate-pass check`, once per gate. A repo opts in by mapping gate names (exactly as `detect-gates` prints them) to the CI check name(s) that already prove them, under `quality_gates.ci_evidence` in `.claude/project-config.yaml`. The map is read from the committed file on `origin/<base>`, never from the working tree, so the PR under finalize cannot opt itself in. With no map, or no entry for a gate, nothing is skipped and this step behaves as before. `gate-ci-evidence` prints one JSON object. `skip: true` means the PR is open against `<base>`, local HEAD equals the PR head read live from GitHub, and every mapped check finished green on that commit. In that case do not run the gate; append `reuse_path_gate_ci_covered: <name> via <checks>` to `friction_highlights` and move to the next gate. Anything other than `skip: true` falls through to the normal procedure and runs the gate locally: a `skip: false` result whatever its `reason` (no entry, PyYAML unavailable, PR closed or retargeted, head moved, check pending, red, skipped or missing, GitHub unreachable), and equally a non-zero exit, a traceback, or output that is not that JSON (for example a script copy that predates the subcommand). A skipped gate leaves the worktree untouched, so the dirty-worktree comparison below is unaffected, and Step 4d still pins `--match-head-commit`, so a head that moves after the check cannot be armed ungated. Never treat `skip: false` as a failure, and never retry the call in a loop waiting for CI.
 
 Nothing else is inherited: no autofix, no fix loop, no commit, no push, no backgrounding, and no `gate-pass record`. Fail fast on the first failing gate. At the start of Step 4c.6, capture `START_STATUS=$(git status --porcelain -- . ':(exclude).claude/prep-pr-state.json')`; after each gate and at the end of the step, capture `END_STATUS=$(git status --porcelain -- . ':(exclude).claude/prep-pr-state.json')` and compare the filtered output with `START_STATUS`. A gate that dirties the worktree is a failed gate, is never committed, and reports the changed paths in `details`.
 

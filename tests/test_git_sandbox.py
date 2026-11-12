@@ -1052,6 +1052,9 @@ _GIT_ARGV_DATA_ALLOWLIST: dict[tuple[str, str, str], int] = {
         "TestProbeCheckedOutBranch.test_runs_git_with_c_locale_utf8_replace_and_without_git_env",
         "comparison",
     ): 1,
+    # Fake git-argv router for the codex probe tests (#3064): it matches the
+    # recorded argv to pick a canned result; it launches nothing.
+    ("tests/test_codex_live_session_smoke.py", "FakeRun.__call__", "comparison"): 1,
 }
 
 

@@ -23,6 +23,7 @@ from cw.contract_manifest import (
     STAGES,
     STRICT_RANGE_TAG,
     TAG_SHAPED,
+    CodeRef,
     DeferredDisposition,
     Manifest,
     NeutralBlock,
@@ -450,7 +451,9 @@ def test_every_needed_id_is_rendered_or_deferred(stage: str) -> None:
     for element_id in needed - rendered:
         cell = manifest.elements[element_id].cells[CODEX_BACKEND]
         assert not isinstance(cell, str)
-        assert cell.disposition in {"fails-closed", "deferred"}, element_id
+        assert cell.disposition in {"implemented", "deferred"}, element_id
+        if cell.disposition == "implemented":
+            assert isinstance(cell.ref, CodeRef), element_id
 
 
 def test_rfc_0017_members_are_skipped_and_pinned() -> None:

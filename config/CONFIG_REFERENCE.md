@@ -126,7 +126,7 @@ review:
   claude-native lane, or a codex lane whose manifest loads, gets no warning.
   `cw review converge config` emits the `engine` and `engine_error` keys for
   `--loop-backend claude-native` and `codex`, and null for the others.
-- **An all-codex engine lane needs `review.confirm_backend: none` or `codex`.**
+- **An all-codex engine lane needs `review.confirm_backend: none` or `codex`.** See "All-codex lane (RFC 0018 D1, #3064)" below for the full lane setup.
   The confirm-backend default is unchanged: after a codex engine pass the
   default independent confirm round is Claude. Set `confirm_backend: none` (no
   confirm; the ledger converges on the engine round) or `codex` to keep every
@@ -713,6 +713,58 @@ tickets in that lane, even when the client's own default pipeline includes
 it. `approve` and `requeue` refuse with a `CwError` naming the lane and its
 resolved stages when a target stage isn't in that resolved list — they never
 silently fall back to the client default.
+
+### All-codex lane (RFC 0018 D1, #3064)
+
+A lane whose stages all run on the `codex` backend (plan, impl, review and
+finalize, each in `CODEX_SUPPORTED_STAGES`) is an all-codex lane. Every stage
+runs in codex, so no Claude executor runs the ticket. Set it on the lane:
+
+```yaml
+lanes:
+  - name: all-codex
+    pipeline:
+      executors:
+        plan:     { backend: codex }
+        impl:     { backend: codex }
+        review:   { backend: codex }
+        finalize: { backend: codex }
+```
+
+**The confirm default still reaches Claude.** In clean mode
+(`review.convergence: clean`) with `review.confirm_backend` unset, the
+independent confirm round defaults to `claude -p`. The lane therefore needs the
+`claude` binary on `PATH` and a Claude login. A missing binary parks the ticket
+`confirm_backend_unavailable` (uncharged), not skipped. In blocking mode there is
+no confirm round, so the lane needs no Claude executor at all.
+
+**Claude-free opt-outs** for a clean all-codex lane:
+
+- `review.confirm_backend: none`: no confirm round runs. The lane is Claude-free
+  and forfeits the independent round. The ledger converges on the codex loop
+  alone, and the sentinel records `none`.
+- `review.confirm_backend: codex`: the confirm round stays on codex. The lane is
+  Claude-free but not independent of the loop, and the sentinel records it as
+  not independent.
+
+**Doctor.** `cw doctor` reports each all-codex lane as
+`all-codex-lane/<client>/<lane>`. `[OK]` in blocking mode. In clean mode with
+REVIEW present and `confirm_backend` unset it is `[WARN]`, naming the `claude`
+binary dependency and the two opt-outs above. An explicit `confirm_backend` gives
+`[OK]` with the resolved confirm note. A clean lane without a REVIEW stage gives
+`[OK]`, since the confirm round does not apply. Every result carries the tracker
+pointer below.
+
+**Tracker MCP.** GitHub is reached through `gh` and needs nothing more. A
+non-GitHub tracker (Linear or another MCP-backed tracker) needs the codex-side
+MCP server installed, enabled, configured and authenticated for the codex
+backend. Declare its server name under `tracker_mcp_gate.servers.codex`. The
+report for it is `tracker-mcp/<client>/<lane>/codex`. Daemon-only tracker writes
+go through the narrow tracker-IO agent turn, described in
+`docs/dispatch-runbook.md` under "Tracker-IO turn (#3057, RFC 0018 A2)".
+
+**Smoke probe.** An opt-in operator probe runs one codex create and resume, and
+the MCP load check, outside default CI. See `docs/codex-live-session-smoke.md`.
 
 ### Recommended Per-Stage Defaults
 
@@ -2573,6 +2625,69 @@ quality_gates:
 This key is unrelated to the `quality_gates:` key removed by #1616 (that one was
 never read). `claude-workspace` sets `pre-commit: 600`: its full hook suite runs
 the test suite and outgrew the 480 s default.
+
+## Quality Gate CI Evidence (`quality_gates.ci_evidence`)
+
+Opt-in. On the open-PR reuse path, finalize Step 4c.6 re-runs the repo's quality
+gates locally before arming auto-merge. A repo whose CI already runs those same
+gates (often sharded across runners, so faster than a local single-process run)
+can declare that, and finalize then trusts green CI at the PR's current head
+instead of re-running the gate:
+
+```yaml
+# .claude/project-config.yaml
+quality_gates:
+  ci_evidence:
+    lint: ci-status            # gate name (as detect-gates prints it) -> CI check name
+    tests: [ci-status, e2e]    # a list means every listed check must be green
+```
+
+`prep_pr_state.py gate-ci-evidence <gate-name> --pr <N> [--repo owner/name]
+[--base main]` prints JSON (`gate`, `skip`, `reason`, `sha`, `checks`, plus
+`live_sha` / `live_base` / `pr_state` / `failed_check` when relevant). It exits 0
+for every decision it makes; finalize also treats a non-zero exit or unparseable
+output as "run the gate". `skip` is `true` only when all of these hold:
+
+- the gate has an exact entry in the map (no prefix matching), read from the
+  **committed** `.claude/project-config.yaml` on `origin/<base>`, not the working
+  tree, so the PR being finalized cannot opt itself in;
+- the PR is open and targets `<base>`;
+- local `HEAD` equals the PR head read live from GitHub (`gh pr view`), never a
+  value cached on a row;
+- every mapped check has at least one entry on that exact commit, and every
+  entry of that name is a finished success (a check run `completed` with
+  conclusion `success`, or a commit status in state `success`).
+
+Everything else is `skip: false` and the gate runs locally exactly as it did
+before: `pyyaml-unavailable`, `no-map-entry`, `head-unresolved`,
+`ci-signal-unavailable` (`gh` failed, timed out, returned junk, or reported an
+incomplete page), `pr-not-open`, `pr-base-mismatch`, `head-mismatch`,
+`check-missing`, `check-not-success` (pending, red, cancelled, skipped, neutral).
+
+- **Choosing check names.** Map a gate only to a check that really runs that
+  gate on the same scope. An aggregate check that the repo requires for merge
+  is usually the safest value. A check that is skipped for some changes (draft
+  PRs, path filters) simply yields `check-not-success` and the gate runs
+  locally.
+- **Names are trusted, not authenticated.** A match is by check name on that
+  commit; it does not bind the producer. Any workflow job in the PR's own
+  workflow files, or anything that can post a commit status, could report a
+  check with the mapped name. Pick a name your required-checks protection
+  already treats as authoritative, and do not rely on this feature to defend
+  against a PR that rewrites CI.
+- **Lookup.** Check runs and commit statuses are queried by name for the PR's
+  head commit through `gh api`, not read from the PR's `statusCheckRollup`,
+  which `gh pr view` caps at 100 entries.
+- **Invalid entries.** Each value must be a non-empty check name or a non-empty
+  list of them. A bad entry is skipped with a warning on stderr and does not
+  affect its siblings.
+- **Requires PyYAML.** Unlike `quality_gates.timeouts`, this map has no
+  bare-`python3` fallback. Under an interpreter without PyYAML every gate
+  reports `reason: pyyaml-unavailable` and runs locally (fail closed), so a repo
+  that opts in should make sure the interpreter that runs `prep_pr_state.py` has
+  PyYAML. The `quality_gates.timeouts` scanner ignores this sibling key.
+- **Rollout.** Because the map comes from `origin/<base>`, a PR that adds or
+  changes it benefits only after it merges.
 
 ## Quality Gate Autofix (`quality_gates.autofix`, #3412)
 
