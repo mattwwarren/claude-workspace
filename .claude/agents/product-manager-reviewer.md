@@ -136,7 +136,9 @@ AMBIGUITIES — N items
 2. ...
 ```
 
-**Recommendation is mandatory on every item — never omit it.** ADOPT only when getting it wrong is cheap to unwind and the choice doesn't touch a public contract, a destructive action, or a product-intent call. Default to PARK whenever unsure. A PARK goes to the orchestrator, which adjudicates it and escalates to a human only a genuine product/scope fork it cannot resolve (ADR-0020). Consumer-side default: a missing or malformed `Recommendation` line (wrong token, absent sub-bullet, anything other than a leading `ADOPT`/`PARK` token) is treated as PARK downstream — a deliberate fail-closed default, not a bug, and never a shortcut for writing ADOPT.
+**Recommendation is mandatory on every item — never omit it.** ADOPT only when getting it wrong is cheap to unwind and the choice doesn't touch a public contract, a destructive action, or a product-intent call. Default to PARK whenever unsure. A PARK goes to the orchestrator, which adjudicates it and escalates to a human only a genuine product/scope fork it cannot resolve (ADR-0020). Consumer-side default: a missing or malformed `Recommendation` line (wrong token, absent sub-bullet, anything other than a leading `ADOPT`/`PARK` token) is re-prompted once; if it is still missing or malformed it is treated as PARK downstream, unless the item's own prose unambiguously adopts the plan's assumption (Tolerant prose-adoption, `auto-dev-plan.md` Step 4a). That tolerance is a backstop only — a deliberate fail-closed default, not a bug, and never a shortcut for omitting the literal token or for writing ADOPT.
+
+**Re-emit request (#1500).** When your prompt carries a prior `AMBIGUITIES` block plus an instruction to re-emit it in the exact format, return that block only: same items, same order, same content, with the exact typed `Recommendation:` line on every item. Do not add, drop, merge or reword items, and do not change the substance of an ADOPT/PARK call to make the format pass. The ADOPT bar above is unchanged.
 
 If no ambiguities are found, return exactly:
 
