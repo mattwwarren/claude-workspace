@@ -128,13 +128,17 @@ PAUSED_FOR_USER_INPUT_STATUSES: frozenset[str] = (
     _V4_STATUSES | SCOPE_GATED_APPROVAL_STATUSES
 )
 STAGE_SUCCESS_STATUSES: frozenset[str] = frozenset({"shipped", "stage_complete"})
+# The empty-diff park status. Named because cw's codex producers (the IMPL
+# gate and result, the REVIEW synthesis, the stage-facts stamper) share it
+# (#3537); the Status Literal keeps its own spelling (a type position).
+EMPTY_DIFF_STATUS: Literal["empty_diff_blocked"] = "empty_diff_blocked"
 STAGE_FAILURE_STATUSES: frozenset[str] = frozenset(
     {
         "blocked",
         "merge_gate_blocked",
         "scope_exceeded",
         "forbidden_area",
-        "empty_diff_blocked",
+        EMPTY_DIFF_STATUS,
         "stale_dispatch",
     }
 )
@@ -167,12 +171,22 @@ PLAN_MISSING_CONTEXT_BLOCKER_REASON: Literal["plan_missing_context"] = (
 TRACKER_TOOL_UNAVAILABLE_BLOCKER_REASON: Literal["tracker_tool_unavailable"] = (
     "tracker_tool_unavailable"
 )
+# The two plan review stations' block reasons: auto-dev-plan emits them, and
+# the codex PLAN executor's binding stations park with them (#3499).
+PLAN_UNREVIEWABLE_BLOCKER_REASON: Literal["plan_unreviewable"] = "plan_unreviewable"
+PLAN_UNSOUND_BLOCKER_REASON: Literal["plan_unsound"] = "plan_unsound"
+# The generic agent-side block: producer skills emit it, and the codex lanes
+# emit it for engine-round, unresolvable-engine and finalize failures. Named so
+# those producers share one spelling (#3438).
+AGENT_BLOCK_BLOCKER_REASON: Literal["agent_block"] = "agent_block"
 # Blocker reasons at Stage.FINALIZE eligible for automatic regress to IMPL.
 # "agent_block" covers prep-pr gate failures (diff-cover, etc.) that a fresh
 # impl session can fix by adding missing tests. Reasons absent here (e.g.
 # "no_result_emitted") stay BLOCKED_ON_USER. Open enum per §4.2 — add reasons
 # as the producer skill evolves. See GitHub #770.
-FINALIZE_REGRESS_BLOCKER_REASONS: frozenset[str] = frozenset({"agent_block"})
+FINALIZE_REGRESS_BLOCKER_REASONS: frozenset[str] = frozenset(
+    {AGENT_BLOCK_BLOCKER_REASON}
+)
 # Blocker reasons that mean "we can't reach the operator/a dependency right
 # now", not "this leg is broken" (RFC 0011 A1). Distinct axis from
 # FINALIZE_REGRESS_BLOCKER_REASONS above -- self-heals nothing, just tags the
@@ -284,13 +298,13 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             REVIEW_ENGINE_MODIFIED_BLOCKER_REASON,
             REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON,
             GATE_TIMEOUT_BLOCKER_REASON,
-            "plan_unreviewable",
-            "plan_unsound",
+            PLAN_UNREVIEWABLE_BLOCKER_REASON,
+            PLAN_UNSOUND_BLOCKER_REASON,
             "ambiguity_scan_unconverged",
             "deferred_stub_unresolved",
             "scope_tier_stale",
             "fix_loop_pending_dispatch",
-            "agent_block",
+            AGENT_BLOCK_BLOCKER_REASON,
             "tool_denied",
             DESTRUCTIVE_DIRECTIVE_BLOCKER_REASON,
             EXTERNAL_STATE_BLOCKER_REASON,

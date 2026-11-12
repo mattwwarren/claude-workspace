@@ -31,10 +31,16 @@ if TYPE_CHECKING:
 
 
 class SummaryFailure(NamedTuple):
-    """Why an engine round failed, and its friction line."""
+    """Why an engine round failed, and its friction line.
+
+    ``failure_reason`` is the structured cause behind an
+    ``engine_aggregation_failed`` failure (``codex_timeout``, ...), so retry
+    eligibility never re-parses the friction text (#3446). ``None`` elsewhere.
+    """
 
     reason: EngineRoundFailure
     detail: str
+    failure_reason: str | None = None
 
 
 class ValidatedSummary(NamedTuple):

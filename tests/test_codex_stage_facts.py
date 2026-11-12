@@ -18,6 +18,7 @@ import pytest
 from cw import context_queue_metadata
 from cw._git import run_git
 from cw.auto_dev_result import AutoDevResult, parse_stdout
+from cw.auto_dev_result.schema._vocab import EMPTY_DIFF_STATUS
 from cw.codex_review import FIX_CYCLE_COMMIT_PREFIX, make_codex_blocked
 from cw.codex_stage_facts import fix_loop_facts, resolve_plan_source, stamp_stage_facts
 from cw.dispatch.routing import scope_tier
@@ -174,7 +175,7 @@ class TestStamp:
         ]
 
     def test_empty_diff_blocked_comes_back_unchanged(self, repo: Path) -> None:
-        result = _result(repo).model_copy(update={"status": "empty_diff_blocked"})
+        result = _result(repo).model_copy(update={"status": EMPTY_DIFF_STATUS})
 
         stamped = stamp_stage_facts(
             result, task=_task(), worktree=repo, default_branch="main"

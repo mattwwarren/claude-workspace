@@ -27,6 +27,7 @@ from cw.codex_plan._prompt import (
     command_docs_root,
     render_ticket_text,
 )
+from cw.codex_plan._result import PLAN_MD_RELATIVE_PATH
 from cw.contract_manifest import CLAUDE_ONLY_DENYLIST, RenderError, render_stage_prompt
 from cw.contract_manifest._render import (
     _FINALIZE_CODEX_ADDENDUM,
@@ -34,6 +35,7 @@ from cw.contract_manifest._render import (
     _stage_addendum,
 )
 from cw.models import CODEX_BACKEND
+from cw.review_adjudication import DEFERRED_FINDINGS_RELATIVE_PATH
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _COMMANDS_ROOT = _REPO_ROOT / ".claude" / "commands"
@@ -228,6 +230,13 @@ class TestOptionalSections:
 
     def test_read_artifact_returns_the_text(self, tmp_path: Path) -> None:
         assert read_artifact(_worktree(tmp_path), PLAN_RELATIVE) == _PLAN
+
+
+class TestArtifactPaths:
+    def test_the_artifact_paths_are_the_owners_constants(self) -> None:
+        """#3550: no second spelling of the plan or deferred-findings path."""
+        assert PLAN_RELATIVE == PLAN_MD_RELATIVE_PATH
+        assert DEFERRED_RELATIVE == DEFERRED_FINDINGS_RELATIVE_PATH
 
 
 class TestDocsRootAndShipIt:

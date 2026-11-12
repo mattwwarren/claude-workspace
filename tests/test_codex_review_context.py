@@ -176,6 +176,25 @@ class TestCategorizeChangedFiles:
         assert "PLAN_STATION_AGENT_FILES" in cw.codex_review._context.__all__
         assert "_CODEX_PLAN_BLOCKED_NEXT_ACTIONS" in cw.codex_review.__all__
 
+    def test_plan_station_role_names_are_named_constants(self) -> None:
+        """#3484: the role names feed the mapping and both facades."""
+        import cw.codex_review
+        import cw.codex_review._context
+        from cw.codex_review._context import _agent_spec
+
+        reviewer = _agent_spec.PLAN_REVIEWER_ROLE
+        soundness = _agent_spec.PLAN_SOUNDNESS_REVIEWER_ROLE
+        assert (reviewer, soundness) == ("Plan Reviewer", "Plan Soundness Reviewer")
+        assert dict(_agent_spec.PLAN_STATION_AGENT_FILES) == {
+            reviewer: "plan-reviewer.md",
+            soundness: "plan-soundness-reviewer.md",
+        }
+        for facade in (cw.codex_review, cw.codex_review._context):
+            assert facade.PLAN_REVIEWER_ROLE is reviewer
+            assert facade.PLAN_SOUNDNESS_REVIEWER_ROLE is soundness
+            assert "PLAN_REVIEWER_ROLE" in facade.__all__
+            assert "PLAN_SOUNDNESS_REVIEWER_ROLE" in facade.__all__
+
     def test_python_and_tests(self) -> None:
         cats = _categorize_changed_files(["src/cw/foo.py", "tests/test_foo.py"])
         assert cats.python

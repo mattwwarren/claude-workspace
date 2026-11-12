@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Final
 
 from cw._git import git_clean_env
 from cw.auto_dev_result.schema._vocab import EXTERNAL_STATE_BLOCKER_REASON
+from cw.codex_finalize._pr import PR_MERGED, PR_OPEN
 from cw.codex_finalize._result import (
     AUTOMERGE_NOT_ARMED,
     OPERATOR_UNAVAILABLE,
@@ -42,7 +43,7 @@ FREEZE_PREFIX: Final = "changelog_merge_freeze:"
 FAILING_CHECKS_PREFIX: Final = "required_checks_failing_at_emission: "
 
 _CHECK_TIMEOUT: Final = 60
-_VERIFIED_STATES: Final = frozenset({"OPEN", "MERGED"})
+_VERIFIED_STATES: Final = frozenset({PR_OPEN, PR_MERGED})
 _TAIL: Final = 500
 
 
@@ -163,7 +164,7 @@ def _head_block(
     if head.state not in _VERIFIED_STATES:
         return FinalizeBlock(
             EXTERNAL_STATE_BLOCKER_REASON,
-            f"{pr_url} is {head.state} after the arm, not OPEN or MERGED",
+            f"{pr_url} is {head.state} after the arm, not {PR_OPEN} or {PR_MERGED}",
             retry_eligible=True,
         )
     if head.oid != head_sha:
@@ -172,7 +173,7 @@ def _head_block(
             f"{pr_url}'s head {head.oid} is not the local HEAD {head_sha}",
             retry_eligible=True,
         )
-    if head.state == "OPEN" and head.auto_merge_armed is not armed_claim:
+    if head.state == PR_OPEN and head.auto_merge_armed is not armed_claim:
         return FinalizeBlock(
             AUTOMERGE_NOT_ARMED,
             f"{pr_url} reads back auto_merge_armed={head.auto_merge_armed}, but "

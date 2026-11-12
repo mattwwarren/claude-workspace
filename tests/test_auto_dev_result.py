@@ -1030,6 +1030,28 @@ class TestKnownBlockerReasons:
         """RFC 0018 B1 (#3059): the opencode FINALIZE pre-flight reason is known."""
         assert FINALIZE_UNSUPPORTED_BACKEND in KNOWN_BLOCKER_REASONS
 
+    def test_agent_block_reason_is_named_and_registered(self) -> None:
+        """#3438: one named constant behind every codex ``agent_block``."""
+        from cw.auto_dev_result.schema._vocab import AGENT_BLOCK_BLOCKER_REASON
+        from cw.codex_finalize._result import AGENT_BLOCK
+
+        assert AGENT_BLOCK_BLOCKER_REASON == "agent_block"
+        assert AGENT_BLOCK == AGENT_BLOCK_BLOCKER_REASON
+        assert AGENT_BLOCK_BLOCKER_REASON in KNOWN_BLOCKER_REASONS
+        assert AGENT_BLOCK_BLOCKER_REASON in FINALIZE_REGRESS_BLOCKER_REASONS
+
+    def test_plan_station_reasons_are_named_and_registered(self) -> None:
+        """#3499: the two plan-station block reasons are named constants."""
+        from cw.auto_dev_result.schema._vocab import (
+            PLAN_UNREVIEWABLE_BLOCKER_REASON,
+            PLAN_UNSOUND_BLOCKER_REASON,
+        )
+
+        assert PLAN_UNREVIEWABLE_BLOCKER_REASON == "plan_unreviewable"
+        assert PLAN_UNSOUND_BLOCKER_REASON == "plan_unsound"
+        assert PLAN_UNREVIEWABLE_BLOCKER_REASON in KNOWN_BLOCKER_REASONS
+        assert PLAN_UNSOUND_BLOCKER_REASON in KNOWN_BLOCKER_REASONS
+
 
 class TestCodexFinalizeReasonLockstep:
     """#3062: ``_vocab`` restates the codex FINALIZE executor's owner constants.
@@ -3814,6 +3836,14 @@ class TestEmptyDiffBlockedStatus:
 
     def test_blocker_reason_constant_value(self) -> None:
         assert EMPTY_DIFF_BLOCKER_REASON == "empty_diff_no_commits"
+
+    def test_status_constant_value(self) -> None:
+        """#3537: one public constant behind the codex empty-diff producers."""
+        from cw.auto_dev_result.schema._vocab import EMPTY_DIFF_STATUS
+
+        assert EMPTY_DIFF_STATUS == "empty_diff_blocked"
+        assert EMPTY_DIFF_STATUS in STAGE_FAILURE_STATUSES
+        assert EMPTY_DIFF_STATUS in SALVAGE_TERMINAL_STATUSES
 
 
 # ---------------------------------------------------------------------------

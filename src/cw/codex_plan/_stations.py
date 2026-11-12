@@ -21,9 +21,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
+from cw.auto_dev_result.schema._vocab import (
+    PLAN_UNREVIEWABLE_BLOCKER_REASON,
+    PLAN_UNSOUND_BLOCKER_REASON,
+)
 from cw.codex_review import (
     CODEX_ERROR,
     CODEX_MODEL_CAPACITY,
+    PLAN_REVIEWER_ROLE,
+    PLAN_SOUNDNESS_REVIEWER_ROLE,
     PLAN_STATION_AGENT_FILES,
     _load_agent_spec_fallback_gate,
     _resolve_agent_spec,
@@ -51,17 +57,17 @@ if TYPE_CHECKING:
         ReviewerRunFailure,
     )
 
-# The role names and their agent specs have one source in the shared mapping.
-# Station order follows mapping insertion order: soundness runs only after a
+# The role names and their agent specs have one source in the shared mapping
+# module. Station order is declared here (#3484): soundness runs only after a
 # clean Plan Reviewer.
-PLAN_STATIONS: Final[tuple[str, ...]] = tuple(PLAN_STATION_AGENT_FILES)
-PLAN_REVIEWER: Final = PLAN_STATIONS[0]
-PLAN_SOUNDNESS_REVIEWER: Final = PLAN_STATIONS[1]
+PLAN_REVIEWER: Final = PLAN_REVIEWER_ROLE
+PLAN_SOUNDNESS_REVIEWER: Final = PLAN_SOUNDNESS_REVIEWER_ROLE
+PLAN_STATIONS: Final[tuple[str, ...]] = (PLAN_REVIEWER, PLAN_SOUNDNESS_REVIEWER)
 
 #: The blocked reason a non-clean station verdict parks with.
 STATION_BLOCK_REASONS: Final[dict[str, str]] = {
-    PLAN_REVIEWER: "plan_unreviewable",
-    PLAN_SOUNDNESS_REVIEWER: "plan_unsound",
+    PLAN_REVIEWER: PLAN_UNREVIEWABLE_BLOCKER_REASON,
+    PLAN_SOUNDNESS_REVIEWER: PLAN_UNSOUND_BLOCKER_REASON,
 }
 
 #: The only retry-eligible station failure: a provider capacity blip.
@@ -88,11 +94,17 @@ STATION_OUTPUT_INSTRUCTIONS: Final = (
 
 @dataclass(frozen=True)
 class StationBlock:
-    """Why a binding station refused the plan."""
+    """Why a binding station refused the plan.
+
+    ``restates_findings`` marks *details* that only restate finding lines the
+    station's findings already carry (the MUST_FIX block), so an advisory run
+    does not list them twice (#3527).
+    """
 
     reason: str
     details: str
     retry_eligible: bool
+    restates_findings: bool = False
 
 
 @dataclass(frozen=True)
@@ -168,7 +180,10 @@ def _classify(
     ]
     if blocking:
         details = f"{role} MUST_FIX findings:\n" + "\n".join(blocking)
-        return StationBlock(reason, details, retry_eligible=False), lines
+        block = StationBlock(
+            reason, details, retry_eligible=False, restates_findings=True
+        )
+        return block, lines
     return None, lines
 
 
@@ -212,11 +227,7 @@ def run_plan_stations(
         findings.extend(lines)
         if block is not None and binding:
             return StationsOutcome(block=block, findings=tuple(findings))
-        if (
-            block is not None
-            and not binding
-            and (not lines or not block.details.endswith("\n".join(lines)))
-        ):
+        if block is not None and not binding and not block.restates_findings:
             findings.append(f"- {block.details}")
     return StationsOutcome(block=None, findings=tuple(findings))
 

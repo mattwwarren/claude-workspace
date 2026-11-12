@@ -155,6 +155,7 @@ def test_codex_failure_reason_vocabularies_are_pinned() -> None:
         "codex_timeout",
         "codex_error",
         "codex_model_capacity",
+        "codex_input_too_large",
         "missing_output",
         "empty_output",
         "invalid_json",

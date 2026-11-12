@@ -16,7 +16,11 @@ from pathlib import Path
 
 import pytest
 
-from cw.codex_review._engine_aggregate import run_codex_aggregator
+from cw.codex_review._const import CODEX_INPUT_TOO_LARGE
+from cw.codex_review._engine_aggregate import (
+    _aggregation_failure,
+    run_codex_aggregator,
+)
 from cw.codex_review._roles import _AUDIT_ARGV_FLAGS
 from cw.codex_review._shard import ReviewInputTooLargeError
 from cw.codex_runner import CodexRunResult, relabeled
@@ -28,10 +32,13 @@ from cw.review_engine.aggregate import (
     render_aggregation_envelope,
 )
 from cw.review_engine.constants import (
+    AGGREGATION_FAILED_REASONS,
+    AGGREGATION_REASON_CODEX_INPUT_TOO_LARGE,
     ENGINE_AGGREGATOR_PREAMBLE,
     FRICTION,
     EngineRoundFailure,
 )
+from cw.review_engine.validate import SummaryFailure
 from cw.review_engine_summary_io import load_review_engine_summary
 from tests._codex_review_helpers import _doc_json
 from tests._review_engine_helpers import (
@@ -89,6 +96,15 @@ def _run(
 
 def _failure_text(reason: str) -> str:
     return FRICTION[EngineRoundFailure.ENGINE_AGGREGATION_FAILED].format(reason=reason)
+
+
+def _aggregation_failed(reason: str) -> SummaryFailure:
+    """The failure, carrying *reason* structurally as well as in the text."""
+    return SummaryFailure(
+        EngineRoundFailure.ENGINE_AGGREGATION_FAILED,
+        _failure_text(reason),
+        failure_reason=reason,
+    )
 
 
 class TestArgvAndEnvelope:
@@ -220,10 +236,7 @@ class TestFailures:
 
         failure = _run(runner, summary_path)
 
-        assert failure == (
-            EngineRoundFailure.ENGINE_AGGREGATION_FAILED,
-            _failure_text("codex_timeout"),
-        )
+        assert failure == _aggregation_failed("codex_timeout")
         assert not summary_path.exists()
 
     def test_a_nonzero_exit_is_codex_error(self, tmp_path: Path) -> None:
@@ -231,20 +244,14 @@ class TestFailures:
 
         failure = _run(runner, tmp_path / "summary.json")
 
-        assert failure == (
-            EngineRoundFailure.ENGINE_AGGREGATION_FAILED,
-            _failure_text("codex_error"),
-        )
+        assert failure == _aggregation_failed("codex_error")
 
     def test_a_missing_runner_binary_is_codex_error(self, tmp_path: Path) -> None:
         runner = _runner(CodexRunResult(127, "", "codex: command not found"))
 
         failure = _run(runner, tmp_path / "summary.json")
 
-        assert failure == (
-            EngineRoundFailure.ENGINE_AGGREGATION_FAILED,
-            _failure_text("codex_error"),
-        )
+        assert failure == _aggregation_failed("codex_error")
 
     @pytest.mark.parametrize(
         ("content", "reason"),
@@ -272,10 +279,7 @@ class TestFailures:
 
         failure = _run(_runner(_ok(content)), summary_path)
 
-        assert failure == (
-            EngineRoundFailure.ENGINE_AGGREGATION_FAILED,
-            _failure_text(reason),
-        )
+        assert failure == _aggregation_failed(reason)
         assert not summary_path.exists()
 
     def test_deeply_nested_json_is_invalid_json(self, tmp_path: Path) -> None:
@@ -283,10 +287,7 @@ class TestFailures:
 
         failure = _run(_runner(_ok(content)), tmp_path / "summary.json")
 
-        assert failure == (
-            EngineRoundFailure.ENGINE_AGGREGATION_FAILED,
-            _failure_text("invalid_json"),
-        )
+        assert failure == _aggregation_failed("invalid_json")
 
     def test_a_summary_write_oserror_is_engine_no_summary(self, tmp_path: Path) -> None:
         blocker = tmp_path / "blocker"
@@ -295,12 +296,113 @@ class TestFailures:
 
         failure = _run(_runner(_ok(_REAL_PASS)), summary_path)
 
-        assert failure == (
+        assert failure == SummaryFailure(
             EngineRoundFailure.ENGINE_NO_SUMMARY,
             FRICTION[EngineRoundFailure.ENGINE_NO_SUMMARY].format(
                 path=str(summary_path)
             ),
         )
+        assert isinstance(failure, SummaryFailure)
+        assert failure.failure_reason is None
+
+
+_CAPACITY_STDOUT = (
+    _FIXTURES / "codex_audit_events" / "capacity_turn_failed.jsonl"
+).read_text(encoding="utf-8")
+_TOO_LARGE_STDOUT = (
+    _FIXTURES / "codex_audit_events" / "input_too_large_turn_failed.jsonl"
+).read_text(encoding="utf-8")
+
+
+class TestReasonVocabulary:
+    """#3441: every emitted aggregation reason is in the closed vocabulary."""
+
+    def test_an_unknown_reason_is_refused_at_construction(self) -> None:
+        with pytest.raises(ValueError, match="bogus"):
+            _aggregation_failure("bogus")
+
+    def test_the_leaf_constant_matches_the_codex_reason(self) -> None:
+        assert AGGREGATION_REASON_CODEX_INPUT_TOO_LARGE == CODEX_INPUT_TOO_LARGE
+        assert AGGREGATION_REASON_CODEX_INPUT_TOO_LARGE in AGGREGATION_FAILED_REASONS
+
+    @pytest.mark.parametrize(
+        ("reply", "reason"),
+        [
+            (CodexRunResult(-1, "", "", timed_out=True), "codex_timeout"),
+            (CodexRunResult(127, "", "codex: command not found"), "codex_error"),
+            (CodexRunResult(1, "", "boom"), "codex_error"),
+            (CodexRunResult(1, _CAPACITY_STDOUT, ""), "codex_model_capacity"),
+            (CodexRunResult(1, _TOO_LARGE_STDOUT, ""), "codex_input_too_large"),
+            (_ok(None), "missing_output"),
+            (_ok(""), "empty_output"),
+            (_ok("{nope"), "invalid_json"),
+            (_ok('{"verdict": "PASS"}'), "schema_mismatch"),
+        ],
+        ids=[
+            "timeout",
+            "spawn-error",
+            "nonzero",
+            "capacity",
+            "input-too-large",
+            "missing",
+            "empty",
+            "invalid-json",
+            "schema",
+        ],
+    )
+    def test_every_reachable_producer_emits_a_known_reason(
+        self, tmp_path: Path, reply: CodexRunResult, reason: str
+    ) -> None:
+        failure = _run(_runner(reply), tmp_path / "summary.json")
+
+        assert isinstance(failure, SummaryFailure)
+        assert failure.reason is EngineRoundFailure.ENGINE_AGGREGATION_FAILED
+        assert failure == _aggregation_failed(reason)
+        assert reason in AGGREGATION_FAILED_REASONS
+
+
+class TestScratchFailures:
+    """#3436: a scratch-dir or schema-write OSError is a typed failure."""
+
+    def _no_summary(self, summary_path: Path) -> SummaryFailure:
+        reason = EngineRoundFailure.ENGINE_NO_SUMMARY
+        return SummaryFailure(reason, FRICTION[reason].format(path=str(summary_path)))
+
+    def test_a_scratch_dir_oserror_is_engine_no_summary_and_runs_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _unwritable(_session_id: str) -> Path:
+            msg = "read-only state dir"
+            raise OSError(msg)
+
+        monkeypatch.setattr(
+            "cw.codex_review._engine_aggregate._codex_scratch_dir", _unwritable
+        )
+        summary_path = tmp_path / "summary.json"
+        runner = _runner(_ok(_REAL_PASS))
+
+        failure = _run(runner, summary_path)
+
+        assert failure == self._no_summary(summary_path)
+        assert runner.calls == []
+        assert not summary_path.exists()
+
+    def test_a_schema_write_oserror_is_engine_no_summary_and_runs_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        missing = tmp_path / "gone" / "scratch"
+        monkeypatch.setattr(
+            "cw.codex_review._engine_aggregate._codex_scratch_dir",
+            lambda _session_id: missing,
+        )
+        summary_path = tmp_path / "summary.json"
+        runner = _runner(_ok(_REAL_PASS))
+
+        failure = _run(runner, summary_path)
+
+        assert failure == self._no_summary(summary_path)
+        assert runner.calls == []
+        assert not missing.exists()
 
 
 class TestAuditFlagDegrade:
@@ -333,10 +435,7 @@ class TestAuditFlagDegrade:
         failure = _run(runner, tmp_path / "summary.json")
 
         assert len(runner.calls) == 2
-        assert failure == (
-            EngineRoundFailure.ENGINE_AGGREGATION_FAILED,
-            _failure_text("codex_error"),
-        )
+        assert failure == _aggregation_failed("codex_error")
 
     def test_an_ordinary_nonzero_exit_is_not_retried(self, tmp_path: Path) -> None:
         runner = _runner(CodexRunResult(2, "", "error: model unavailable"))
@@ -344,6 +443,41 @@ class TestAuditFlagDegrade:
         _run(runner, tmp_path / "summary.json")
 
         assert len(runner.calls) == 1
+
+    def test_a_spawn_error_naming_an_audit_flag_is_not_retried(
+        self, tmp_path: Path
+    ) -> None:
+        """#3432: the aggregator inherits the role runner's stricter guard."""
+        runner = _runner(
+            CodexRunResult(127, "", "codex: command not found; " + _AUDIT_REJECTION)
+        )
+
+        failure = _run(runner, tmp_path / "summary.json")
+
+        assert len(runner.calls) == 1
+        assert failure == _aggregation_failed("codex_error")
+
+
+class TestParseOnce:
+    def test_a_valid_output_is_not_parsed_a_second_time(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3432: the parsed model is reused for the summary write."""
+        calls: list[str] = []
+
+        def _counting(content: str) -> EngineAggregationOutput:
+            calls.append(content)
+            msg = "re-parsed"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(EngineAggregationOutput, "model_validate_json", _counting)
+        summary_path = tmp_path / "summary.json"
+
+        failure = _run(_runner(_ok(_REAL_PASS)), summary_path)
+
+        assert failure is None
+        assert calls == []
+        assert summary_path.is_file()
 
 
 class TestPromptLimit:

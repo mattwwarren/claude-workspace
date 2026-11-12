@@ -39,7 +39,7 @@ from cw.models import (
 )
 from cw.models.orchestrator_config.stage import ModelPrice
 from cw.models.usage import UsageStage, UsageState, UsageUnavailableReason
-from cw.plan_fingerprint import PLAN_DRAFT_RELATIVE_PATH
+from cw.plan_fingerprint import PLAN_DRAFT_RELATIVE_PATH, compute_plan_draft_fingerprint
 from cw.tracker import TRACKER_GITHUB_ISSUES, TRACKER_LINEAR
 from tests._backend_mcp_helpers import (
     McpStage,
@@ -374,22 +374,142 @@ def test_park_completes_with_null_fingerprint_when_draft_write_fails(
     assert result.plan_draft_fingerprint is None
 
 
-def test_existing_plan_is_preserved_and_replacement_is_audited(
+_OLD_PLAN = "## Summary\n\nOld plan.\n\n**Scope tier:** small\n"
+
+
+def _seed_plan_md(h: Harness, data: bytes) -> Path:
+    path = h.worktree / PLAN_MD_RELATIVE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+def _plan_md_backups(h: Harness) -> list[Path]:
+    path = h.worktree / PLAN_MD_RELATIVE_PATH
+    return sorted(path.parent.glob(f"{path.name}.bak-*"))
+
+
+def _replaced_tokens(result: AutoDevResult) -> list[str]:
+    return [f for f in result.friction_highlights if f.startswith("plan_md_replaced: ")]
+
+
+def test_an_existing_plan_is_replaced_backed_up_and_audited(
+    harness: Callable[..., Harness],
+) -> None:
+    """#3498: a completing run after a regress replaces the stale plan."""
+    h = harness()
+    plan_md_path = _seed_plan_md(h, _OLD_PLAN.encode())
+    add_stations(add_turn(h.runner))
+
+    result = h.run()
+
+    assert result.status == "stage_complete"
+    new_text = plan_md_path.read_text(encoding="utf-8")
+    assert _plan_body_signoff_ok(new_text)
+    (backup,) = _plan_md_backups(h)
+    assert backup.read_text(encoding="utf-8") == _OLD_PLAN
+    old_fp = compute_plan_draft_fingerprint(_OLD_PLAN)
+    new_fp = compute_plan_draft_fingerprint(new_text)
+    assert _replaced_tokens(result) == [
+        f"plan_md_replaced: old={old_fp} new={new_fp} backup=ok"
+    ]
+
+
+def test_an_unreadable_existing_plan_is_still_replaced(
     harness: Callable[..., Harness],
 ) -> None:
     h = harness()
-    old_plan = "## Summary\n\nOld plan.\n\n**Scope tier:** small\n"
-    plan_md_path = h.worktree / PLAN_MD_RELATIVE_PATH
-    plan_md_path.parent.mkdir(parents=True, exist_ok=True)
-    plan_md_path.write_text(old_plan, encoding="utf-8")
+    plan_md_path = _seed_plan_md(h, b"\xff\xfe")
     add_stations(add_turn(h.runner))
+
     result = h.run()
-    assert result.status == "blocked"
+
+    assert result.status == "stage_complete"
+    assert _plan_body_signoff_ok(plan_md_path.read_text(encoding="utf-8"))
+    (token,) = _replaced_tokens(result)
+    assert token.startswith("plan_md_replaced: old=unreadable new=")
+    assert token.endswith(" backup=ok")
+
+
+def test_a_station_block_leaves_an_existing_plan_untouched(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    plan_md_path = _seed_plan_md(h, _OLD_PLAN.encode())
+    add_stations(
+        add_turn(h.runner),
+        reviewer=station_findings_doc(PLAN_REVIEWER, severity="MUST_FIX"),
+    )
+
+    result = h.run()
+
     assert result.blocker is not None
-    assert result.blocker.reason == "codex_plan_artifact_missing"
-    assert "old fingerprint:" in result.blocker.details
-    assert "proposed replacement fingerprint:" in result.blocker.details
-    assert plan_md_path.read_text(encoding="utf-8") == old_plan
+    assert result.blocker.reason == "plan_unreviewable"
+    assert plan_md_path.read_bytes() == _OLD_PLAN.encode()
+    assert _plan_md_backups(h) == []
+
+
+def test_a_park_leaves_an_existing_plan_untouched(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    plan_md_path = _seed_plan_md(h, _OLD_PLAN.encode())
+    add_stations(
+        add_turn(
+            h.runner,
+            status="ambiguities_pending_resolution",
+            ambiguities=[{"question": "Blue or red?"}],
+            next_actions=["user_resolve_ambiguities"],
+        )
+    )
+
+    result = h.run()
+
+    assert result.status == "ambiguities_pending_resolution"
+    assert plan_md_path.read_bytes() == _OLD_PLAN.encode()
+    assert _plan_md_backups(h) == []
+    assert _replaced_tokens(result) == []
+
+
+def test_backup_failure_is_reported_and_does_not_block_replacement(
+    harness: Callable[..., Harness], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = harness()
+    plan_md_path = _seed_plan_md(h, _OLD_PLAN.encode())
+    add_stations(add_turn(h.runner))
+
+    def _fail(*_args: object, **_kwargs: object) -> None:
+        msg = "disk full"
+        raise OSError(msg)
+
+    monkeypatch.setattr("cw.atomic.shutil.copy2", _fail)
+
+    result = h.run()
+
+    assert result.status == "stage_complete"
+    assert _plan_body_signoff_ok(plan_md_path.read_text(encoding="utf-8"))
+    assert _plan_md_backups(h) == []
+    (token,) = _replaced_tokens(result)
+    assert token.endswith(" backup=failed")
+
+
+def test_a_failed_readback_after_replacement_keeps_the_backup(
+    harness: Callable[..., Harness],
+) -> None:
+    """The post-write readback fails after replacement; the backup recovers it."""
+    h = harness()
+    _seed_plan_md(h, _OLD_PLAN.encode())
+    add_stations(add_turn(h.runner))
+    checks = iter([True, False])
+
+    with patch(
+        "cw.codex_plan._run._plan_body_signoff_ok", side_effect=lambda _t: next(checks)
+    ):
+        result = h.run()
+
+    assert result.blocker is not None
+    (backup,) = _plan_md_backups(h)
+    assert backup.read_text(encoding="utf-8") == _OLD_PLAN
 
 
 def test_no_op_passes_through_and_posts_nothing(
@@ -484,6 +604,70 @@ def test_a_blocking_station_parks_and_keeps_the_draft(
     ]
 
 
+def _on_disk_fingerprint(h: Harness) -> str:
+    return compute_plan_draft_fingerprint(h.draft_path().read_text(encoding="utf-8"))
+
+
+def test_a_station_block_fingerprint_is_the_on_disk_draft(
+    harness: Callable[..., Harness],
+) -> None:
+    """#3526: the blocked fingerprint is read from disk, never re-derived."""
+    h = harness()
+    leading = (
+        "<!-- plan-stage-scan-round: 2 -->\n<!-- plan-stage-settled: A1: ADOPTED -->\n"
+    )
+    h.draft_path().parent.mkdir(parents=True, exist_ok=True)
+    h.draft_path().write_text(leading + "old body\n", encoding="utf-8")
+    add_stations(
+        add_turn(h.runner),
+        reviewer=station_findings_doc(PLAN_REVIEWER, severity="MUST_FIX"),
+    )
+
+    result = h.run()
+
+    assert result.blocker is not None
+    assert h.draft_path().read_text(encoding="utf-8").startswith(leading)
+    assert result.plan_draft_fingerprint == _on_disk_fingerprint(h)
+
+
+def test_a_stamped_marker_failure_fingerprint_is_the_on_disk_draft(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    add_stations(add_turn(h.runner))
+    with patch("cw.codex_plan._run._plan_body_signoff_ok", return_value=False):
+        result = h.run()
+    assert result.blocker is not None
+    assert "stamped plan does not carry" in result.blocker.details
+    assert result.plan_draft_fingerprint == _on_disk_fingerprint(h)
+
+
+def test_a_post_write_marker_failure_fingerprint_is_the_on_disk_draft(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    add_stations(add_turn(h.runner))
+    checks = iter([True, False])
+    with patch(
+        "cw.codex_plan._run._plan_body_signoff_ok", side_effect=lambda _t: next(checks)
+    ):
+        result = h.run()
+    assert result.blocker is not None
+    assert result.plan_draft_fingerprint == _on_disk_fingerprint(h)
+
+
+def test_a_completing_draft_write_failure_has_no_fingerprint(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    add_stations(add_turn(h.runner))
+    with patch("cw.codex_plan._run.write_plan_draft", side_effect=OSError("ro")):
+        result = h.run()
+    assert result.blocker is not None
+    assert result.blocker.reason == "codex_plan_artifact_missing"
+    assert result.plan_draft_fingerprint is None
+
+
 def test_a_gate_failure_blocks_at_generated(harness: Callable[..., Harness]) -> None:
     h = harness()
     add_turn(h.runner, plan="## Summary\n\nNo tier, no files.\n")
@@ -512,6 +696,7 @@ def test_a_plan_write_failure_is_artifact_missing(
         result = h.run()
     assert result.blocker is not None
     assert result.blocker.reason == "codex_plan_artifact_missing"
+    assert result.plan_draft_fingerprint == _on_disk_fingerprint(h)
     errored = [p for t, p, _ in stage_events() if t == "stage.errored"]
     assert errored[0]["stage"] == "s1_plan_reviewed"
 

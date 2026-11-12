@@ -9,7 +9,12 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw.review_engine import manifest_source
-from cw.review_engine.manifest_source import ManifestRead, read_default_branch_manifest
+from cw.review_engine.manifest_source import (
+    ManifestRead,
+    ManifestStatus,
+    read_default_branch_manifest,
+    read_manifest_file,
+)
 from cw.review_engine.materialize import MaterializeError
 from cw.review_engine_manifest_io import (
     EngineManifestError,
@@ -19,6 +24,7 @@ from tests._review_engine_helpers import (
     EngineRepo,
     copy_engine_fixture,
     make_engine_repo,
+    manifest_directory_engine,
 )
 from tests._shared.git_repos import commit_tracked_file, git_in
 
@@ -288,6 +294,65 @@ def test_os_error_is_materialize_failed(
     monkeypatch.setattr(manifest_source, "_archive", full)
 
     assert _read(repo).cause == "materialize_failed"
+
+
+def test_manifest_that_is_a_directory_is_invalid(
+    make_git_repo: Callable[..., Path], tmp_path: Path
+) -> None:
+    """#3445: the default-branch read now agrees with round time (was ABSENT)."""
+    engine = manifest_directory_engine(tmp_path, STUB_DIR)
+    repo = make_engine_repo(make_git_repo, engine_files=engine)
+
+    result = _read(repo)
+
+    assert result.status == "invalid"
+    assert result.cause == "manifest_invalid"
+    assert result.detail == "unreadable: -"
+    assert result.loaded is None
+    assert isinstance(result.error, EngineManifestError)
+
+
+class TestReadManifestFile:
+    """#3445: the one absent/invalid/loaded reader behind both read sites."""
+
+    def test_a_missing_path_is_absent(self, tmp_path: Path) -> None:
+        result = read_manifest_file(tmp_path / "cw-engine.json", _SKILL)
+
+        assert result == ManifestRead(
+            status=ManifestStatus.ABSENT,
+            cause="no_codex_manifest",
+            detail=f"{_SKILL} has no cw-engine.json",
+        )
+
+    def test_an_invalid_manifest_carries_reason_and_field_path(
+        self, tmp_path: Path
+    ) -> None:
+        stub = _stub_with(tmp_path, roles=[])
+
+        result = read_manifest_file(stub / "cw-engine.json", _SKILL)
+
+        assert result.status is ManifestStatus.INVALID
+        assert result.cause == "manifest_invalid"
+        assert result.detail == "schema_invalid: roles"
+        assert isinstance(result.error, EngineManifestError)
+        assert result.loaded is None
+
+    def test_a_manifest_without_codex_is_codex_not_declared(
+        self, tmp_path: Path
+    ) -> None:
+        stub = _stub_with(tmp_path, backends=["opencode"])
+
+        result = read_manifest_file(stub / "cw-engine.json", _SKILL)
+
+        assert result.status is ManifestStatus.INVALID
+        assert result.cause == "codex_not_declared"
+
+    def test_a_valid_manifest_is_loaded(self) -> None:
+        result = read_manifest_file(STUB_DIR / "cw-engine.json", _SKILL)
+
+        assert result.status is ManifestStatus.LOADED
+        assert (result.cause, result.detail, result.error) == ("", "", None)
+        assert isinstance(result.loaded, LoadedEngineManifest)
 
 
 def test_manifest_read_defaults() -> None:

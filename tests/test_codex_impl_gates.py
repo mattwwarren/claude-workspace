@@ -6,6 +6,7 @@ HOME: no real ``gh``, ``codex`` or repo gate runs.
 
 from __future__ import annotations
 
+import ast
 import json
 import subprocess
 from datetime import UTC, datetime
@@ -17,6 +18,7 @@ import pytest
 
 from cw.auto_dev_result.schema._vocab import (
     EMPTY_DIFF_BLOCKER_REASON,
+    EMPTY_DIFF_STATUS,
     PLAN_SCOPE_DRIFT_BLOCKER_REASON,
 )
 from cw.codex_fix_loop.baseline import (
@@ -29,6 +31,7 @@ from cw.codex_fix_loop.fence import FenceBreach, staged_set_breach
 from cw.codex_fix_loop.gates import GateScope, plan_cycle_gates
 from cw.codex_fix_loop.hook_failure import as_hook_failure
 from cw.codex_fix_loop.push import push_and_verify_head
+from cw.codex_impl import _gates as _gates_module
 from cw.codex_impl._gates import (
     MIN_SCOPE_SCRIPT_VERSION,
     check_empty_diff,
@@ -38,6 +41,7 @@ from cw.codex_impl._gates import (
     commit_failure_block,
     dirty_start_block,
     fence_block,
+    no_plan_sensitive_block,
     run_quality_gates,
     run_scope_conformance,
     staged_totals,
@@ -50,6 +54,7 @@ from cw.codex_review import (
     CODEX_FIX_HOOK_FAILED,
     CODEX_FIX_REVERTED_BRANCH,
     CODEX_FIX_SCOPE_DRIFT,
+    CODEX_FIX_SCOPE_VIOLATION,
 )
 from cw.local_runner import git_facts
 from cw.models import TicketTask
@@ -122,6 +127,49 @@ def _scope(
         touched=touched,
         scratch=tmp_path / "scratch",
     )
+
+
+class TestNoPlanSensitiveBlock:
+    """#3536: the repair fence calls the public ``commit.scope_violations``."""
+
+    def test_an_out_of_scope_path_with_no_registry_fails_closed(
+        self, repo: Path
+    ) -> None:
+        block = no_plan_sensitive_block(
+            repo,
+            touched=["src/a.py"],
+            allowed_files=frozenset(),
+            scope_tier="small",
+            default_branch="no-such-branch",
+        )
+
+        assert block is not None
+        assert block.reason == CODEX_FIX_SCOPE_VIOLATION
+        assert "src/a.py" in block.details
+
+    def test_an_allowed_path_is_not_blocked(self, repo: Path) -> None:
+        block = no_plan_sensitive_block(
+            repo,
+            touched=["src/a.py"],
+            allowed_files=frozenset({"src/a.py"}),
+            scope_tier="small",
+            default_branch="no-such-branch",
+        )
+
+        assert block is None
+
+    def test_no_private_commit_symbol_is_imported(self) -> None:
+        source = Path(_gates_module.__file__).read_text(encoding="utf-8")
+        private = [
+            alias.name
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.ImportFrom)
+            and node.module == "cw.codex_fix_loop.commit"
+            for alias in node.names
+            if alias.name.startswith("_")
+        ]
+
+        assert private == []
 
 
 class TestPlanPresent:
@@ -200,7 +248,7 @@ class TestGate1:
         base = git_facts(repo, "main")["fork_point"]
         block = check_empty_diff(repo, base)
         assert block is not None
-        assert block.status == "empty_diff_blocked"
+        assert block.status == EMPTY_DIFF_STATUS
         assert block.reason == EMPTY_DIFF_BLOCKER_REASON
 
     def test_passes_on_nonempty_staged_diff_vs_fork(self, repo: Path) -> None:

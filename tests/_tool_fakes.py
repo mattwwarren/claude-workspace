@@ -1479,32 +1479,31 @@ def station_findings_doc(
     role: str,
     *,
     severity: str | None = None,
+    severities: Sequence[str] = (),
     status: str = "ok",
     detail: str = "checked the plan against the ticket",
 ) -> CodexRunResult:
     """A plan review station's reply: a ``ReviewerFindingsDocument`` ``-o`` file.
 
     No *severity*: a clean document with a justified ``detail``. A *severity*
-    adds one finding of it; *status* ``degraded``/``failed`` keeps *detail* as
-    the reason.
+    adds one finding of it, and each of *severities* one more (a mixed-severity
+    document, #3527); *status* ``degraded``/``failed`` keeps *detail* as the
+    reason.
     """
-    findings = (
-        []
-        if severity is None
-        else [
-            {
-                "severity": severity,
-                "file": ".cw/plan.md",
-                "line_start": None,
-                "line_end": None,
-                "summary": f"{severity} finding from {role}",
-                "consequence": "the plan would mislead the implementer",
-                "suggested_fix": "revise the plan section",
-                "evidence": "the plan text",
-                "confidence": "HIGH",
-            }
-        ]
-    )
+    findings = [
+        {
+            "severity": each,
+            "file": ".cw/plan.md",
+            "line_start": None,
+            "line_end": None,
+            "summary": f"{each} finding from {role}",
+            "consequence": "the plan would mislead the implementer",
+            "suggested_fix": "revise the plan section",
+            "evidence": "the plan text",
+            "confidence": "HIGH",
+        }
+        for each in ([] if severity is None else [severity]) + list(severities)
+    ]
     return CodexRunResult(
         returncode=0,
         stdout="",

@@ -25,9 +25,10 @@ from typing import TYPE_CHECKING, Any, Final
 from cw._git import git_clean_env, git_output, run_git
 from cw.auto_dev_result.schema._vocab import (
     EMPTY_DIFF_BLOCKER_REASON,
+    EMPTY_DIFF_STATUS,
     PLAN_SCOPE_DRIFT_BLOCKER_REASON,
 )
-from cw.codex_fix_loop.commit import _scope_violations
+from cw.codex_fix_loop.commit import scope_violations
 from cw.codex_fix_loop.fence import scope_violation_breach
 from cw.codex_fix_loop.gates import run_cycle_gates
 from cw.codex_fix_loop.guard_script import find_guard_script, script_marker_ok
@@ -186,7 +187,7 @@ def check_empty_diff(worktree: Path, base: str) -> ImplBlock | None:
         "the IMPL turn left no net change against the fork point "
         f"{base[:_SHA_PREFIX_CHARS]}: the staged diff is empty, so there is "
         "nothing to commit",
-        status="empty_diff_blocked",
+        status=EMPTY_DIFF_STATUS,
     )
 
 
@@ -262,7 +263,7 @@ def no_plan_sensitive_block(
     default_branch: str,
 ) -> ImplBlock | None:
     """Run the shared sensitive-path check for a no-plan repair fence."""
-    violations = _scope_violations(
+    violations = scope_violations(
         worktree,
         touched,
         allowed_files,

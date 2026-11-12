@@ -21,6 +21,7 @@ from cw.auto_dev_result import (
     Review,
     StageReached,
 )
+from cw.auto_dev_result.schema._vocab import EMPTY_DIFF_STATUS
 from cw.codex_review import (
     _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS,
     _CODEX_IMPL_BLOCKED_NEXT_ACTIONS,
@@ -3841,7 +3842,7 @@ class TestEmptyDiffCleanReview:
             fix_loop_enabled=False,
         )
 
-        assert result.status == "empty_diff_blocked"
+        assert result.status == EMPTY_DIFF_STATUS
         assert result.stage_reached == "stage3_review"
         assert result.scope.files == 0
         assert result.scope.lines_actual == 0

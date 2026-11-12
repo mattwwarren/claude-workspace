@@ -152,6 +152,9 @@ ROLE_FAILED_REASONS: Final = frozenset(
 AGGREGATION_REASON_CODEX_TIMEOUT: Final = "codex_timeout"
 AGGREGATION_REASON_CODEX_ERROR: Final = "codex_error"
 AGGREGATION_REASON_CODEX_MODEL_CAPACITY: Final = "codex_model_capacity"
+#: Restates ``cw.codex_review._const.CODEX_INPUT_TOO_LARGE``: this leaf module
+#: cannot import ``codex_review``, so a test pins the two copies (#3441).
+AGGREGATION_REASON_CODEX_INPUT_TOO_LARGE: Final = "codex_input_too_large"
 AGGREGATION_REASON_MISSING_OUTPUT: Final = "missing_output"
 AGGREGATION_REASON_EMPTY_OUTPUT: Final = "empty_output"
 AGGREGATION_REASON_INVALID_JSON: Final = "invalid_json"
@@ -161,6 +164,7 @@ AGGREGATION_FAILED_REASONS: Final = frozenset(
         AGGREGATION_REASON_CODEX_TIMEOUT,
         AGGREGATION_REASON_CODEX_ERROR,
         AGGREGATION_REASON_CODEX_MODEL_CAPACITY,
+        AGGREGATION_REASON_CODEX_INPUT_TOO_LARGE,
         AGGREGATION_REASON_MISSING_OUTPUT,
         AGGREGATION_REASON_EMPTY_OUTPUT,
         AGGREGATION_REASON_INVALID_JSON,

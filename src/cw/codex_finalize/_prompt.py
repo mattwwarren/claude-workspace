@@ -27,10 +27,12 @@ from typing import TYPE_CHECKING, Any, Final
 from cw.codex_finalize._result import FinalizeTurnDocument
 from cw.codex_impl._prompt import _escape_injected_fences
 from cw.codex_plan._prompt import TICKET_SECTION, _section
+from cw.codex_plan._result import PLAN_MD_RELATIVE_PATH
 from cw.contract_manifest import render_stage_prompt
 from cw.contract_manifest._render import _STAGE_DOCS
 from cw.models import CODEX_BACKEND
 from cw.openai_strict_schema import to_openai_strict_schema
+from cw.review_adjudication import DEFERRED_FINDINGS_RELATIVE_PATH
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -50,11 +52,12 @@ BRANCH_SECTION: Final = "Branch facts"
 OVERRIDE_SECTION: Final = "Operator override (JSON)"
 DEFERRED_SECTION: Final = "Deferred review findings"
 
-PLAN_RELATIVE: Final = ".cw/plan.md"
-DEFERRED_RELATIVE: Final = ".cw/deferred-findings.md"
+#: The artifacts' owners define their paths (#3550).
+PLAN_RELATIVE: Final = PLAN_MD_RELATIVE_PATH
+DEFERRED_RELATIVE: Final = DEFERRED_FINDINGS_RELATIVE_PATH
 
 
-def read_artifact(worktree: Path, relative: str) -> str | None:
+def read_artifact(worktree: Path, relative: Path) -> str | None:
     """The artifact's text, or ``None`` when absent, unreadable or blank."""
     try:
         text = (worktree / relative).read_text(encoding="utf-8")

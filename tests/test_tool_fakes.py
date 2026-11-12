@@ -56,6 +56,7 @@ from tests._tool_fakes import (
     prepend_to_path,
     restore_real_run,
     shim_env,
+    station_findings_doc,
     stdin_contains,
     stub_cw_cli,
     stub_gh,
@@ -1026,3 +1027,23 @@ class TestFinalizeFakes:
 
         with pytest.raises(AssertionError, match="no scripted cw CLI reply"):
             gates_module.run_cw_cli(tmp_path, ["unknown"])
+
+
+class TestStationFindingsDoc:
+    """#3527: the station fake builds mixed-severity documents too."""
+
+    def _severities(self, reply: object) -> list[str]:
+        assert isinstance(reply, CodexRunResult)
+        assert reply.output_file_content is not None
+        doc = json.loads(reply.output_file_content)
+        return [finding["severity"] for finding in doc["findings"]]
+
+    def test_no_severity_is_a_clean_document(self) -> None:
+        assert self._severities(station_findings_doc("Plan Reviewer")) == []
+
+    def test_severity_and_severities_combine_in_order(self) -> None:
+        reply = station_findings_doc(
+            "Plan Reviewer", severity="MUST_FIX", severities=("SHOULD_FIX", "NIT")
+        )
+
+        assert self._severities(reply) == ["MUST_FIX", "SHOULD_FIX", "NIT"]

@@ -60,6 +60,8 @@ from __future__ import annotations
 from cw.codex_review._context._agent_spec import (
     _GLOBAL_AGENTS_DIR,
     _REVIEWER_ROLE_AGENT_FILES,
+    PLAN_REVIEWER_ROLE,
+    PLAN_SOUNDNESS_REVIEWER_ROLE,
     PLAN_STATION_AGENT_FILES,
     _AgentSpecResolution,
     _load_agent_spec_fallback_gate,
@@ -120,6 +122,8 @@ from cw.codex_review._context.core import (
 )
 
 __all__ = [
+    "PLAN_REVIEWER_ROLE",
+    "PLAN_SOUNDNESS_REVIEWER_ROLE",
     "PLAN_STATION_AGENT_FILES",
     "REVIEW_CONFIG_UNAVAILABLE_CATEGORY",
     "_CAPABLE_ONLY_MARKER",

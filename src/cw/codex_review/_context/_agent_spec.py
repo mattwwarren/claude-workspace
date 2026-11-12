@@ -16,7 +16,7 @@ import logging
 import tomllib
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Final, NamedTuple
 
 from cw.codex_review._context._util import _load_optional_text
 from cw.review_findings import AgentSpecStatus
@@ -45,11 +45,15 @@ _REVIEWER_ROLE_AGENT_FILES: dict[str, str] = {
 # Plan review station name -> agent-spec file (#3060). Kept OUT of
 # ``_REVIEWER_ROLE_AGENT_FILES``: the review roster, the repo-config loader and
 # the agent-spec drift check all iterate that table, and a plan station is not a
-# code reviewer. The codex PLAN executor passes this as ``agent_files``.
+# code reviewer. The codex PLAN executor passes this as ``agent_files``. The
+# role names are named constants so the station order is declared explicitly
+# in ``cw.codex_plan._stations`` rather than read off insertion order (#3484).
+PLAN_REVIEWER_ROLE: Final = "Plan Reviewer"
+PLAN_SOUNDNESS_REVIEWER_ROLE: Final = "Plan Soundness Reviewer"
 PLAN_STATION_AGENT_FILES: Mapping[str, str] = MappingProxyType(
     {
-        "Plan Reviewer": "plan-reviewer.md",
-        "Plan Soundness Reviewer": "plan-soundness-reviewer.md",
+        PLAN_REVIEWER_ROLE: "plan-reviewer.md",
+        PLAN_SOUNDNESS_REVIEWER_ROLE: "plan-soundness-reviewer.md",
     }
 )
 

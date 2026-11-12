@@ -28,6 +28,7 @@ from cw.auto_dev_result.parse import (
     BLOCKER_REASON_NO_RESULT_EMITTED,
     BLOCKER_REASON_VALIDATION_FAILED,
 )
+from cw.auto_dev_result.schema._vocab import AGENT_BLOCK_BLOCKER_REASON
 from cw.codex_review import (
     STAGE4A_MERGE_GATE,
     STAGE5_POST_CREATE,
@@ -48,7 +49,7 @@ MERGE_CONFLICT_POST_PUSH: Final = "merge_conflict_post_push"
 SCOPE_TIER_UNRESOLVABLE: Final = "scope_tier_unresolvable"
 
 #: Existing reasons the FINALIZE stage reuses.
-AGENT_BLOCK: Final = "agent_block"
+AGENT_BLOCK: Final = AGENT_BLOCK_BLOCKER_REASON
 AUTOMERGE_NOT_ARMED: Final = "automerge_not_armed"
 OPERATOR_UNAVAILABLE: Final = "operator_unavailable"
 PRIOR_PIPELINE_PR_OPEN: Final = "prior_pipeline_pr_open"

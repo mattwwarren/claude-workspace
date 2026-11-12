@@ -12,6 +12,7 @@ from cw.auto_dev_result import AutoDevResult
 from cw.auto_dev_result.parse import extract_block
 from cw.auto_dev_result.schema._vocab import (
     EMPTY_DIFF_BLOCKER_REASON,
+    EMPTY_DIFF_STATUS,
     KNOWN_BLOCKER_REASONS,
 )
 from cw.codex_impl._result import (
@@ -253,7 +254,7 @@ class TestBlocked:
         result = impl_empty_diff_result(
             ticket_id="T-9", worktree=tmp_path, details="nothing changed", measured=None
         )
-        assert result.status == "empty_diff_blocked"
+        assert result.status == EMPTY_DIFF_STATUS
         assert result.stage_reached == "stage2_impl"
         assert result.blocker is not None
         assert result.blocker.reason == EMPTY_DIFF_BLOCKER_REASON
