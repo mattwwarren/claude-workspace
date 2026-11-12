@@ -19,6 +19,12 @@ commit-stage hooks that ``git commit`` would not run, from the same probe as
 ``cw doctor``'s ``commit-hook/<client>`` check (machine form in
 ``cw doctor --json``). ``--json`` is unchanged. The probe is bounded -- a short
 per-call timeout and a total budget -- so an advisory line cannot stall status.
+
+#1586 adds live per-client ``pending``, ``running``, ``blocked``, ``completed``,
+``cancelled`` and ``failed`` counts to ``--json`` (the table's columns, from
+``_status_counts``) and lists every client with queue rows. ``skip_reason``,
+``freshness_detail``, ``blocked_branch`` and ``effective.last_tick_cap`` stay
+tick-snapshot values; the new ``tick_ts`` dates them (``null`` without a tick).
 """
 
 from __future__ import annotations
@@ -79,6 +85,7 @@ from cw.reconcile.routed_result_sessions import (
 from cw.worktree import _git_dir
 
 from ._group import _DEFAULT_DISPLAY_STATUSES, _PAUSED_LANE_MARKER, dev_queue
+from ._status_counts import StatusCounts, status_counts_by_client
 from .tasks import _count_needs_attn, _needs_attn_by_client
 
 if TYPE_CHECKING:
@@ -299,19 +306,8 @@ def _echo_client_rows(
     running_row_counts: dict[str, int] = {}
     for client_name in clients_seen:
         client_tasks = by_client[client_name]
-        pending_tasks = [t for t in client_tasks if t.status == QueueItemStatus.PENDING]
-        running_tasks = [t for t in client_tasks if t.status == QueueItemStatus.RUNNING]
-        blocked_tasks = [
-            t for t in client_tasks if t.status == QueueItemStatus.BLOCKED_ON_USER
-        ]
-        completed_tasks = [
-            t for t in client_tasks if t.status == QueueItemStatus.COMPLETED
-        ]
-        cancelled_tasks = [
-            t for t in client_tasks if t.status == QueueItemStatus.CANCELLED
-        ]
-        failed_tasks = [t for t in client_tasks if t.status == QueueItemStatus.FAILED]
-        running_row_counts[client_name] = len(running_tasks)
+        counts = StatusCounts.from_tasks(client_tasks)
+        running_row_counts[client_name] = counts.running
         needs_attn = _count_needs_attn(client_tasks)
         display_tasks = (
             client_tasks
@@ -320,9 +316,9 @@ def _echo_client_rows(
         )
         ticket_ids = ", ".join(t.ticket_id for t in display_tasks) or "—"
         click.echo(
-            f"{client_name:<20} {len(pending_tasks):>7}  {len(running_tasks):>7}"
-            f"  {len(blocked_tasks):>7}  {len(completed_tasks):>9}"
-            f"  {len(cancelled_tasks):>9}  {len(failed_tasks):>6}"
+            f"{client_name:<20} {counts.pending:>7}  {counts.running:>7}"
+            f"  {counts.blocked:>7}  {counts.completed:>9}"
+            f"  {counts.cancelled:>9}  {counts.failed:>6}"
             f"  {needs_attn:>10}  {ticket_ids}"
         )
     return running_row_counts
@@ -586,16 +582,18 @@ def _pending_skips_json(streaks: list[SkipStreak]) -> list[dict[str, object]]:
 
 
 def _status_json(client: str | None) -> dict[str, dict[str, object]]:
-    """The ``status --json`` payload: tick, paused-lane and held-row clients.
+    """The ``status --json`` payload: every client with a tick, pause or queue row.
 
-    A client with a paused lane or a held PENDING row but no client-wide tick
-    appears with null tick fields. The effective config is loaded once, and
-    only when an entry is emitted.
+    A client with a paused lane, a held PENDING row or any queue row but no
+    client-wide tick appears with null tick fields and ``tick_ts``. The count
+    keys are live queue-row counts (#1586). The effective config is loaded
+    once, and only when an entry is emitted.
     """
     events = _read_tick_events()
     tick_data = client_tick_snapshots(events)
     tasks = list_tickets(client)
     attn_by_client = _needs_attn_by_client(tasks)
+    counts_by_client = status_counts_by_client(tasks)
     held = _held_by_client(tasks, events, now=datetime.now(UTC))
     overrides = _load_concurrency_overrides()
     config = functools.cache(load_effective_config)
@@ -603,7 +601,7 @@ def _status_json(client: str | None) -> dict[str, dict[str, object]]:
     views = _status_paused_views(client, overrides, config, declared)
     names = [c for c in tick_data if client is None or c == client]
     names += sorted({v.client for v in views} - set(names))
-    names += sorted(held.keys() - set(names))
+    names += sorted({t.client for t in tasks} - set(names))
     payload: dict[str, dict[str, object]] = {}
     for name in names:
         tick = tick_data.get(name)
@@ -612,6 +610,8 @@ def _status_json(client: str | None) -> dict[str, dict[str, object]]:
             "freshness_detail": tick.freshness_detail if tick is not None else None,
             "blocked_branch": tick.blocked_branch if tick is not None else None,
             "needs_attn": attn_by_client.get(name, 0),
+            "tick_ts": iso_z(tick.tick_at) if tick is not None else None,
+            **asdict(counts_by_client.get(name, StatusCounts())),
             "paused_lanes": [
                 v.model_dump(mode="json") for v in views if v.client == name
             ],
