@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`prep_pr_state.py detect-gates` now reads the quality gates from the default branch's committed `CLAUDE.md`.** With no explicit `--claude-md`, gates come from `./CLAUDE.md` as committed on `origin/HEAD` (a subdirectory still reads its own `CLAUDE.md`), so a branch cut before a gate change, or one that edits its own gate list, is held to the default branch's gates, and a branch's own gate edits count once they merge. When there is no git repo, no `origin/HEAD`, or no such file there, it falls back to the worktree copy exactly as before, quietly (no warning). The result gains a `claude_md_source` key (`default-branch` or `worktree`); `detected_from` is unchanged. `gate-pass record` and `gate-pass check` follow automatically because they resolve gates through `detect-gates`. This applies to every repo that uses `/prep-pr`. `_run_git` gains a `quiet` option for callers where failing is the normal fallback.
+
 ## [1.96.0] - 2026-11-12
 
 ### Added

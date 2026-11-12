@@ -249,10 +249,12 @@ def _git_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
 
-def _run_git(args: list[str], *, default: str = "") -> str:
+def _run_git(args: list[str], *, default: str = "", quiet: bool = False) -> str:
     """Run a git command and return stdout.
 
     Returns *default* (empty string unless given) on failure instead of raising.
+    A failure is logged unless *quiet*, for callers where failing is the normal
+    fallback path rather than a problem worth a warning.
     """
     cmd = ["git", *args]
     try:
@@ -264,10 +266,14 @@ def _run_git(args: list[str], *, default: str = "") -> str:
             env=_git_env(),
         )
     except FileNotFoundError:
-        logger.exception("git not found")
+        if not quiet:
+            logger.exception("git not found")
         return default
     except subprocess.CalledProcessError as e:
-        logger.warning("git command failed: %s\n%s", " ".join(cmd), e.stderr.strip())
+        if not quiet:
+            logger.warning(
+                "git command failed: %s\n%s", " ".join(cmd), e.stderr.strip()
+            )
         return default
     return result.stdout.strip()
 
@@ -783,7 +789,15 @@ def _parse_claude_md_gates(claude_md_path: Path) -> ClaudeMdGates:
         content = claude_md_path.read_text()
     except OSError:
         return ClaudeMdGates(gates=[], authoritative=False)
+    return _parse_claude_md_gates_text(content)
 
+
+def _parse_claude_md_gates_text(content: str) -> ClaudeMdGates:
+    """``_parse_claude_md_gates`` over CLAUDE.md text already read.
+
+    See ``_parse_claude_md_gates`` for the formats. Split out so the text can
+    come from git (the default branch's committed copy) rather than a file.
+    """
     in_gates_section = False
     in_bash_fence = False
     fence_lines: list[str] = []
@@ -829,10 +843,21 @@ def _parse_claude_md_gates(claude_md_path: Path) -> ClaudeMdGates:
     return ClaudeMdGates(gates=merged, authoritative=bool(block_gates))
 
 
+# Where detect_gates read CLAUDE.md from (the ``claude_md_source`` result key).
+CLAUDE_MD_SOURCE_DEFAULT_BRANCH = "default-branch"
+CLAUDE_MD_SOURCE_WORKTREE = "worktree"
+
+# Sentinel default for quiet git reads: distinguishes failure from empty output.
+_GIT_QUIET_FAILED = "git-quiet-failed"
+
+
 def detect_gates(claude_md_path: Path | None = None) -> dict[str, Any]:
     """Auto-detect quality gates from project files and CLAUDE.md overrides.
 
-    Returns dict with 'gates' list and 'detected_from' list.
+    Returns dict with 'gates' list, 'detected_from' list, and
+    'claude_md_source' (``default-branch`` when CLAUDE.md came from the remote
+    default branch's committed copy, ``worktree`` otherwise; an explicit
+    ``claude_md_path`` is always ``worktree``).
 
     A CLAUDE.md bash block that yields at least one gate is authoritative:
     ecosystem defaults are dropped and ``detected_from`` lists only
@@ -849,11 +874,20 @@ def detect_gates(claude_md_path: Path | None = None) -> dict[str, Any]:
             detected_from.append(marker)
             gates.extend(default_gates)
 
-    # Check for CLAUDE.md overrides
-    if claude_md_path is None:
-        claude_md_path = cwd / "CLAUDE.md"
-
-    parsed = _parse_claude_md_gates(claude_md_path)
+    # Check for CLAUDE.md overrides. Gates are repo policy, so with no explicit
+    # path they come from the default branch's committed CLAUDE.md: a branch cut
+    # before a gate change, or one that edits its own gates, is still held to the
+    # default branch's gates. Not a git repo, no origin/HEAD, or no such file
+    # there -> the worktree's CLAUDE.md, as before. An explicit path always wins.
+    source = CLAUDE_MD_SOURCE_WORKTREE
+    default_branch_text = (
+        _default_branch_claude_md() if claude_md_path is None else None
+    )
+    if default_branch_text is not None:
+        parsed = _parse_claude_md_gates_text(default_branch_text)
+        source = CLAUDE_MD_SOURCE_DEFAULT_BRANCH
+    else:
+        parsed = _parse_claude_md_gates(claude_md_path or cwd / "CLAUDE.md")
     if parsed.authoritative:
         # The bash block is the complete gate set: drop every ecosystem default.
         gates = []
@@ -868,7 +902,30 @@ def detect_gates(claude_md_path: Path | None = None) -> dict[str, Any]:
     return {
         "gates": [g.to_dict() for g in gates],
         "detected_from": detected_from,
+        "claude_md_source": source,
     }
+
+
+def _default_branch_claude_md() -> str | None:
+    """``./CLAUDE.md`` as committed on the remote default branch, or None.
+
+    The default branch is whatever ``origin/HEAD`` points at. ``./`` keeps the
+    path relative to the current directory, so a subdirectory with its own
+    CLAUDE.md reads that one. Quiet on purpose: outside a git repo, with no
+    ``origin/HEAD``, or with no such file there, None is the normal fallback
+    (the worktree copy), not a failure worth a warning.
+    """
+    ref = _run_git(
+        ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+        default=_GIT_QUIET_FAILED,
+        quiet=True,
+    )
+    if not ref or ref == _GIT_QUIET_FAILED:
+        return None
+    text = _run_git(
+        ["show", f"{ref}:./CLAUDE.md"], default=_GIT_QUIET_FAILED, quiet=True
+    )
+    return None if text == _GIT_QUIET_FAILED else text
 
 
 # --- Gate-Pass Stamps (#2758) ---
