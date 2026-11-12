@@ -189,7 +189,7 @@ def _run_post_guard_sweeps(
     lockless snapshot, which can be seconds old. *roster_captured_at* is that
     snapshot's capture time (#2550); it goes to the mid-turn usage-limit sweep
     so an in-flight act does not read a session spawned or resumed after the
-    capture as stopped (its ref may postdate the roster, M1). ``None`` (the
+    capture as stopped (its ref may postdate the roster). ``None`` (the
     default) spares no session. Returns the tickets the mid-turn usage-limit
     sweep reverted to PENDING.
     """

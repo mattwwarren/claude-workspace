@@ -44,17 +44,26 @@ _log = logging.getLogger(_LOGGER_NAME)
 # only, into the tick's ``cw.reconcile.roster_snapshot.RosterSnapshot``, whose
 # consumption bound has to leave room for a successful read:
 # ``CLAUDE_AGENTS_TIMEOUT_SECONDS < ROSTER_SNAPSHOT_MAX_AGE_SECONDS <
-# SPAWN_GRACE_SECONDS``. A spurious timeout is benign: the tick reads it as a
-# daemon outage and retries next tick.
+# SPAWN_GRACE_SECONDS``. A failed or timed-out read is treated as a daemon
+# outage (the tick stops before the roster-dependent sweeps) only while some
+# ACTIVE/IDLE session carries a ref (``_looks_like_daemon_outage``). On an idle
+# fleet the tick proceeds on an empty roster by documented design (#2550
+# Non-Goals, ADR-0019), and the concierge recipes' death test, which has no
+# live-status gate, then reads every absent ref as dead. So a spurious timeout
+# is benign only on a non-idle fleet; on an idle one the concierge acts as if
+# the roster were empty, bounded only by its own gates (opt-in
+# ``concierge_enabled``, the attempt ceiling), not by ``reap_policy`` (#3341).
 CLAUDE_AGENTS_TIMEOUT_SECONDS: float = 10.0
 
-# How long after its ``started_at`` / ``resumed_at`` a session's surface_ref
-# may still be absent from a roster capture (#2550, M1). The spawn and resume
-# paths record the session before their roster-registration poll
-# (``cw.spawn._ROSTER_POLL_TIMEOUT_SECS``, 10 s) completes, so a capture taken
-# up to that long after the stamp can predate the ref; plus 5 s for daemon
-# registration lag and clock skew. Not imported from ``cw.spawn`` (a heavy
-# import); ``tests/test_reconcile_roster_snapshot.py`` pins the relation.
+# How long before a roster capture a session's ref may be born and still be
+# absent from it (#2550). The resume paths stamp ``resumed_at`` and fresh
+# spawns stamp ``surface_bound_at`` (#3339) at the committing append, so the
+# slack no longer has to cover the spawn path's pre-append work. It keeps
+# headroom for the roster-registration poll
+# (``cw.spawn._ROSTER_POLL_TIMEOUT_SECS``, 10 s) that precedes a row's commit,
+# plus 5 s for daemon registration lag and clock skew. Not imported from
+# ``cw.spawn`` (a heavy import); ``tests/test_reconcile_roster_snapshot.py``
+# pins the relation.
 ROSTER_REGISTRATION_SLACK_SECONDS: float = 15.0
 
 
