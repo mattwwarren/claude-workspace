@@ -195,7 +195,7 @@ Two consequences worth knowing:
 - **The worktree is never removed between review and fix.** Step 3b.1's old
   `git worktree remove --force` + `git branch -D` is gone. `create_worktree`
   now hits its idempotent-reuse branch, which checks the worktree; the
-  dispatch and fix-dispatch callers pass `refresh_on_reuse=True`, which
+  dispatch and fix-dispatch callers pass `refresh=ReuseRefreshOptions(...)`, which
   best-effort fetches and fast-forwards an unoccupied (no live cw session or
   daemon-roster worker homed on it), clean, strictly-behind branch only (never
   a reset). "The refresh did not move the worktree" means two different things,

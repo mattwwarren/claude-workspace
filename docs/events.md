@@ -4288,7 +4288,7 @@ follow-up if this proves to fire in practice.
 ### `worktree.fast_forwarded`
 
 **Emitter:** `_ff_reused_worktree` (`cw.worktree`), reached from
-`create_worktree(..., refresh_on_reuse=True)` — the dispatch claim path and
+`create_worktree(..., refresh=ReuseRefreshOptions(...))` — the dispatch claim path and
 `dispatch_fix_agent`.
 **Payload:**
 ```json
