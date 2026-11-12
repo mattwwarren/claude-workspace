@@ -2574,6 +2574,69 @@ This key is unrelated to the `quality_gates:` key removed by #1616 (that one was
 never read). `claude-workspace` sets `pre-commit: 600`: its full hook suite runs
 the test suite and outgrew the 480 s default.
 
+## Quality Gate CI Evidence (`quality_gates.ci_evidence`)
+
+Opt-in. On the open-PR reuse path, finalize Step 4c.6 re-runs the repo's quality
+gates locally before arming auto-merge. A repo whose CI already runs those same
+gates (often sharded across runners, so faster than a local single-process run)
+can declare that, and finalize then trusts green CI at the PR's current head
+instead of re-running the gate:
+
+```yaml
+# .claude/project-config.yaml
+quality_gates:
+  ci_evidence:
+    lint: ci-status            # gate name (as detect-gates prints it) -> CI check name
+    tests: [ci-status, e2e]    # a list means every listed check must be green
+```
+
+`prep_pr_state.py gate-ci-evidence <gate-name> --pr <N> [--repo owner/name]
+[--base main]` prints JSON (`gate`, `skip`, `reason`, `sha`, `checks`, plus
+`live_sha` / `live_base` / `pr_state` / `failed_check` when relevant). It exits 0
+for every decision it makes; finalize also treats a non-zero exit or unparseable
+output as "run the gate". `skip` is `true` only when all of these hold:
+
+- the gate has an exact entry in the map (no prefix matching), read from the
+  **committed** `.claude/project-config.yaml` on `origin/<base>`, not the working
+  tree, so the PR being finalized cannot opt itself in;
+- the PR is open and targets `<base>`;
+- local `HEAD` equals the PR head read live from GitHub (`gh pr view`), never a
+  value cached on a row;
+- every mapped check has at least one entry on that exact commit, and every
+  entry of that name is a finished success (a check run `completed` with
+  conclusion `success`, or a commit status in state `success`).
+
+Everything else is `skip: false` and the gate runs locally exactly as it did
+before: `pyyaml-unavailable`, `no-map-entry`, `head-unresolved`,
+`ci-signal-unavailable` (`gh` failed, timed out, returned junk, or reported an
+incomplete page), `pr-not-open`, `pr-base-mismatch`, `head-mismatch`,
+`check-missing`, `check-not-success` (pending, red, cancelled, skipped, neutral).
+
+- **Choosing check names.** Map a gate only to a check that really runs that
+  gate on the same scope. An aggregate check that the repo requires for merge
+  is usually the safest value. A check that is skipped for some changes (draft
+  PRs, path filters) simply yields `check-not-success` and the gate runs
+  locally.
+- **Names are trusted, not authenticated.** A match is by check name on that
+  commit; it does not bind the producer. Any workflow job in the PR's own
+  workflow files, or anything that can post a commit status, could report a
+  check with the mapped name. Pick a name your required-checks protection
+  already treats as authoritative, and do not rely on this feature to defend
+  against a PR that rewrites CI.
+- **Lookup.** Check runs and commit statuses are queried by name for the PR's
+  head commit through `gh api`, not read from the PR's `statusCheckRollup`,
+  which `gh pr view` caps at 100 entries.
+- **Invalid entries.** Each value must be a non-empty check name or a non-empty
+  list of them. A bad entry is skipped with a warning on stderr and does not
+  affect its siblings.
+- **Requires PyYAML.** Unlike `quality_gates.timeouts`, this map has no
+  bare-`python3` fallback. Under an interpreter without PyYAML every gate
+  reports `reason: pyyaml-unavailable` and runs locally (fail closed), so a repo
+  that opts in should make sure the interpreter that runs `prep_pr_state.py` has
+  PyYAML. The `quality_gates.timeouts` scanner ignores this sibling key.
+- **Rollout.** Because the map comes from `origin/<base>`, a PR that adds or
+  changes it benefits only after it merges.
+
 ## Quality Gate Autofix (`quality_gates.autofix`, #3412)
 
 The codex fix loop runs the repo's quality gates before each fix commit. A gate
