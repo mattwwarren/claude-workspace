@@ -87,6 +87,7 @@ __all__ = [
     "GH_UNAUTHENTICATED",
     "AbsentToolCli",
     "ArmStep",
+    "FakeCwCli",
     "FakeFireAndForgetRunner",
     "FakeGh",
     "FakeGhCli",
@@ -96,6 +97,7 @@ __all__ = [
     "GhReply",
     "ReadyGh",
     "RecordingShim",
+    "ScriptStub",
     "ScriptedCodexRunner",
     "any_call",
     "argv_has",
@@ -106,6 +108,8 @@ __all__ = [
     "fake_opencode_cli",
     "fake_pre_commit_cli",
     "fake_uv_cli",
+    "finalize_document",
+    "finalize_turn_result",
     "gh_calls",
     "impl_sentinel",
     "impl_turn_result",
@@ -119,11 +123,13 @@ __all__ = [
     "shim_env",
     "station_findings_doc",
     "stdin_contains",
+    "stub_cw_cli",
     "stub_gh",
     "stub_gh_arm",
     "stub_gh_issue_create",
     "stub_gh_issue_list",
     "stub_gh_recording",
+    "stub_prep_pr_finalize",
     "tracker_io_turn_result",
     "write_bin_stub",
 ]
@@ -1520,3 +1526,163 @@ def argv_has(*tokens: str) -> CodexMatcher:
         return all(token in argv for token in tokens)
 
     return _match
+
+
+# --- codex FINALIZE executor fakes (#3062) --------------------------------------
+
+
+def finalize_document(**overrides: object) -> str:
+    """The FINALIZE turn's strict four-field ``-o`` document, as JSON text.
+
+    The defaults are a valid document; *overrides* replace fields (an extra
+    key builds the strict-schema violation).
+    """
+    document: dict[str, object] = {
+        "pr_title": "Add the widget",
+        "pr_body": "## Summary\n\nAdds the widget.\n",
+        "adjudication_section": "",
+        "override_section": "",
+    }
+    document.update(overrides)
+    return json.dumps(document)
+
+
+def finalize_turn_result(
+    document: str | None = None, returncode: int = 0, stderr: str = ""
+) -> CodexRunResult:
+    """A FINALIZE turn's result: *document* (default :func:`finalize_document`)."""
+    return CodexRunResult(
+        returncode=returncode,
+        stdout="",
+        stderr=stderr,
+        output_file_content=finalize_document() if document is None else document,
+    )
+
+
+@dataclass(frozen=True)
+class ScriptStub:
+    """A stub script on disk plus the call log it appends to."""
+
+    script: Path
+    calls_path: Path
+
+    def calls(self) -> list[list[str]]:
+        """Each invocation's arguments (the script path excluded), in order."""
+        if not self.calls_path.exists():
+            return []
+        return [
+            line.split(GH_ARG_SEPARATOR)[:-1]
+            for line in self.calls_path.read_text(encoding="utf-8").splitlines()
+        ]
+
+
+_PREP_PR_FINALIZE_STUB = """\
+import sys
+
+CALLS = {calls!r}
+with open(CALLS, "a", encoding="utf-8") as handle:
+    handle.write("\\x1f".join(sys.argv[1:]) + "\\x1f\\n")
+if sys.argv[1] == "check-automerge-allowed":
+    sys.stderr.write({check_stderr!r})
+    sys.exit({check_exit})
+if sys.argv[1] == "arm-automerge":
+    sys.stdout.write({arm_stdout!r})
+    sys.stderr.write({arm_stderr!r})
+    sys.exit({arm_exit})
+sys.exit(2)
+"""
+
+
+def stub_prep_pr_finalize(
+    root: Path,
+    *,
+    check_exit: int = 0,
+    check_stderr: str = "",
+    arm_exit: int = 0,
+    arm_stdout: str = "",
+    arm_gh_stderr: str = "",
+    arm_stderr: str = "",
+) -> ScriptStub:
+    """A fake ``prep_pr_finalize.py`` at ``<root>/.claude/scripts/``.
+
+    *root* is the worktree (repo-local copy) or ``Path.home()`` (the per-test
+    HOME), the two places the arm resolves the script. ``check-automerge-allowed``
+    exits *check_exit*; ``arm-automerge`` exits *arm_exit* and prints
+    *arm_stdout* (default: a ``{"gh_stderr": ...}`` object when *arm_gh_stderr*
+    is set). Every call is logged; read it with :meth:`ScriptStub.calls`.
+    """
+    scripts = root / ".claude" / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    script = scripts / "prep_pr_finalize.py"
+    calls = scripts / "prep_pr_finalize.calls"
+    if not arm_stdout and arm_gh_stderr:
+        arm_stdout = json.dumps({"status": "failed", "gh_stderr": arm_gh_stderr})
+    script.write_text(
+        _PREP_PR_FINALIZE_STUB.format(
+            calls=str(calls),
+            check_stderr=check_stderr,
+            check_exit=check_exit,
+            arm_stdout=arm_stdout,
+            arm_stderr=arm_stderr,
+            arm_exit=arm_exit,
+        ),
+        encoding="utf-8",
+    )
+    return ScriptStub(script, calls)
+
+
+class FakeCwCli:
+    """In-process ``run_cw_cli`` double: scripted replies keyed by argv prefix.
+
+    *replies* maps the space-joined leading args (``"review check-approval"``)
+    to a :class:`GhReply`, ``None`` (the CLI could not finish) or a list of
+    those, consumed in order with the last one repeating. The longest matching
+    prefix wins; an unmatched call raises so a test never runs the real CLI.
+    """
+
+    def __init__(self, replies: Mapping[str, GhReply | None | list[GhReply | None]]):
+        self._replies = {
+            key: list(value) if isinstance(value, list) else [value]
+            for key, value in replies.items()
+        }
+        self.calls: list[list[str]] = []
+        self.cwds: list[Path] = []
+
+    def __call__(
+        self, worktree: Path, args: list[str], *, timeout: float = 0
+    ) -> subprocess.CompletedProcess[str] | None:
+        del timeout
+        self.calls.append(list(args))
+        self.cwds.append(worktree)
+        line = " ".join(args)
+        keys = [key for key in self._replies if line.startswith(key)]
+        if not keys:
+            msg = f"no scripted cw CLI reply for {line!r}"
+            raise AssertionError(msg)
+        queue = self._replies[max(keys, key=len)]
+        reply = queue.pop(0) if len(queue) > 1 else queue[0]
+        if reply is None:
+            return None
+        return subprocess.CompletedProcess(
+            [sys.executable, "-m", "cw", *args],
+            reply.returncode,
+            reply.stdout,
+            reply.stderr,
+        )
+
+
+_CW_CLI_TARGETS = (
+    "cw.codex_finalize._gates.run_cw_cli",
+    "cw.codex_finalize._merge_gate.run_cw_cli",
+)
+
+
+def stub_cw_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    replies: Mapping[str, GhReply | None | list[GhReply | None]],
+) -> FakeCwCli:
+    """Replace ``run_cw_cli`` (every importing module) with a :class:`FakeCwCli`."""
+    fake = FakeCwCli(replies)
+    for target in _CW_CLI_TARGETS:
+        monkeypatch.setattr(target, fake)
+    return fake

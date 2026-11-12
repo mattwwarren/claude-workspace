@@ -279,20 +279,65 @@ def test_glue_and_imported_fragments_are_denylist_clean() -> None:
             assert token not in text, token
 
 
-def test_plan_and_impl_each_carry_their_own_codex_addendum() -> None:
-    """#3060/#3061: each addendum is its stage's last block; finalize has none."""
+def test_plan_impl_and_finalize_each_carry_their_own_codex_addendum() -> None:
+    """#3060/#3061/#3062: each addendum is its stage's last block, in it alone."""
     plan_addendum = render_module._PLAN_CODEX_ADDENDUM
     impl_addendum = _stage_addendum("impl").strip("\n")
+    finalize_addendum = _stage_addendum("finalize").strip("\n")
+    assert finalize_addendum == render_module._FINALIZE_CODEX_ADDENDUM.strip("\n")
     plan = render_stage_prompt("plan", CODEX_BACKEND, docs_root=_COMMANDS_ROOT)
     impl = render_stage_prompt("impl", CODEX_BACKEND, docs_root=_COMMANDS_ROOT)
     finalize = render_stage_prompt("finalize", CODEX_BACKEND, docs_root=_COMMANDS_ROOT)
     assert plan.rstrip("\n").endswith(plan_addendum.rstrip("\n"))
     assert impl.rstrip("\n").endswith(impl_addendum)
+    assert finalize.rstrip("\n").endswith(finalize_addendum)
     assert impl_addendum not in plan
     assert plan_addendum not in impl
     assert plan_addendum not in finalize
     assert impl_addendum not in finalize
-    assert "Codex IMPL addendum" not in finalize
+    assert finalize_addendum not in plan
+    assert finalize_addendum not in impl
+    assert "Codex FINALIZE addendum" not in plan
+    assert "Codex FINALIZE addendum" not in impl
+
+
+def test_finalize_addendum_overrides_the_remaining_claude_machinery() -> None:
+    addendum = _normalized(_stage_addendum("finalize"))
+    for needle in (
+        "cw result emit",
+        "cw event record",
+        "git push",
+        "git merge",
+        "gh pr create",
+        "gh pr edit",
+        "prep_pr_finalize.py",
+        "Step 4.0 and 4.0b fences",
+        "merge gate",
+        "quality gates",
+        "both the create path and the reuse path",
+        "the sentinel and every stage event",
+        "leave them alone",
+        "overrides anything above that conflicts with it",
+        ".claude/commands/auto-dev-finalize-appendix.md",
+        ".claude/commands/auto-dev.md",
+        "are not available in this turn",
+        "is deferred",
+        "pr_title, pr_body, adjudication_section and override_section",
+    ):
+        assert needle in addendum, needle
+    # The PR-title rules finalize.compose-pr-title-in-parent would have rendered.
+    for needle in ("<type>(<scope>): <summary>", "72 characters", "GitHub-numeric"):
+        assert needle in addendum, needle
+    for token in CLAUDE_ONLY_DENYLIST:
+        assert token not in addendum, token
+
+
+def test_finalize_golden_carries_the_addendum_and_the_ship_fallback() -> None:
+    text = _render("finalize")
+    assert render_module._FINALIZE_CODEX_ADDENDUM.rstrip("\n") in text
+    assert render_module._SHIP_IT_FALLBACK in text
+    assert _SHIP_IT_STEP not in text
+    assert "finalize.compose-pr-title-in-parent" not in text
 
 
 def test_impl_addendum_overrides_the_remaining_claude_machinery() -> None:
@@ -420,8 +465,14 @@ def test_rfc_0017_members_are_skipped_and_pinned() -> None:
             deferred.add(element_id)
     assert render_module.RFC_0017_TICKET == 3216
     # #3216 implemented five members on codex and retargeted the two finalize
-    # members to C3 (#3062); all three RFC 0017 deferrals stay out of prompts.
+    # members to the finalize review-debt follow-up (#3543); all three RFC 0017
+    # deferrals stay out of prompts.
     assert deferred == {"review.review-debt-filing"}
+    assert render_module._CODEX_FINALIZE_TICKET == 3543
+    for element_id in ("finalize.review-sign-off", "finalize.gate-review-debt-re-file"):
+        cell = manifest.elements[element_id].cells[CODEX_BACKEND]
+        assert isinstance(cell, DeferredDisposition)
+        assert cell.ref.number == render_module._CODEX_FINALIZE_TICKET
     rendered = {
         block.element_id
         for stage in _STAGES
@@ -458,6 +509,28 @@ def test_a_3216_deferral_skips_the_block() -> None:
         for b in stage_blocks("finalize", CODEX_BACKEND, docs_root=_COMMANDS_ROOT)
     ]
     assert "finalize.review-sign-off" not in default
+
+
+def test_only_the_rfc_0017_members_skip_on_the_finalize_follow_up_ticket() -> None:
+    """A #3543 deferral skips the block only for the two RFC 0017 members."""
+    ticket = render_module._CODEX_FINALIZE_TICKET
+    cell = {"disposition": "deferred", "ref": {"kind": "ticket", "number": ticket}}
+    manifest = _manifest_variant(
+        **{
+            "finalize.review-sign-off": cell,
+            "finalize.gate-review-debt-re-file": cell,
+            "finalize.link-debt-tickets-to-pr": cell,
+        }
+    )
+    ids = {
+        b.element_id
+        for b in stage_blocks(
+            "finalize", CODEX_BACKEND, docs_root=_COMMANDS_ROOT, manifest=manifest
+        )
+    }
+    assert "finalize.review-sign-off" not in ids
+    assert "finalize.gate-review-debt-re-file" not in ids
+    assert "finalize.link-debt-tickets-to-pr" in ids
 
 
 def test_not_applicable_cell_drops_the_block() -> None:
@@ -503,15 +576,69 @@ def test_blocks_are_verbatim_doc_text_in_doc_order() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_tagged_ship_it_follows_prep_pr_blocks() -> None:
+def _ship_it_implemented_manifest() -> Manifest:
+    """The packaged manifest with every ``prep-pr.*``/``ship-it.*`` codex cell
+    implemented, so those ranges render (they are ``not-applicable`` as shipped:
+    cw does that work in Python on the codex FINALIZE lane)."""
+    cell = {
+        "disposition": "implemented",
+        "ref": {
+            "kind": "code",
+            "path": "src/cw/codex_finalize/_pr.py",
+            "symbol": "create_pr_for",
+        },
+    }
+    ids = [
+        element_id
+        for element_id in load_manifest().elements
+        if element_id.startswith(("prep-pr.", "ship-it."))
+    ]
+    return _manifest_variant(**dict.fromkeys(ids, cell))
+
+
+def test_prep_pr_and_ship_it_cells_drop_their_blocks_as_shipped() -> None:
     blocks = stage_blocks("finalize", CODEX_BACKEND, docs_root=_COMMANDS_ROOT)
+    docs = {b.doc for b in blocks}
+    assert "prep-pr.md" not in docs
+    assert "ship-it.md" not in docs
+
+
+def test_tagged_ship_it_follows_prep_pr_blocks() -> None:
+    manifest = _ship_it_implemented_manifest()
+    blocks = stage_blocks(
+        "finalize", CODEX_BACKEND, docs_root=_COMMANDS_ROOT, manifest=manifest
+    )
     docs = [b.doc for b in blocks]
     assert docs.index("ship-it.md") > max(
         i for i, doc in enumerate(docs) if doc == "prep-pr.md"
     )
-    text = _render("finalize")
+    text = render_stage_prompt(
+        "finalize", CODEX_BACKEND, docs_root=_COMMANDS_ROOT, manifest=manifest
+    )
     assert _SHIP_IT_STEP in text
     assert render_module._SHIP_IT_FALLBACK not in text
+
+
+def test_ship_it_fallback_is_appended_iff_no_ship_it_block_rendered(
+    tmp_path: Path,
+) -> None:
+    """Rendered from the checkout and from a copy, the fallback follows the
+    blocks, not the presence of a tagged ``ship-it.md`` in the docs root."""
+    manifest = _ship_it_implemented_manifest()
+    root = _docs_copy(tmp_path)
+    for docs_root, mfst, expect_fallback in (
+        (_COMMANDS_ROOT, None, True),
+        (root, None, True),
+        (_COMMANDS_ROOT, manifest, False),
+        (root, manifest, False),
+    ):
+        text = render_stage_prompt(
+            "finalize", CODEX_BACKEND, docs_root=docs_root, manifest=mfst
+        )
+        assert (render_module._SHIP_IT_FALLBACK in text) is expect_fallback
+    assert render_stage_prompt(
+        "finalize", CODEX_BACKEND, docs_root=root
+    ) == render_stage_prompt("finalize", CODEX_BACKEND, docs_root=_COMMANDS_ROOT)
 
 
 @pytest.mark.parametrize("variant", ["untagged", "absent"])

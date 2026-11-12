@@ -23,6 +23,7 @@ from cw.auto_dev_result import (
     Scope,
 )
 from cw.codex_review._const import (
+    _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS,
     _CODEX_IMPL_BLOCKED_NEXT_ACTIONS,
     _CODEX_PLAN_BLOCKED_NEXT_ACTIONS,
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
@@ -35,6 +36,9 @@ from cw.codex_review._const import (
     STAGE1_PLAN,
     STAGE2_IMPL,
     STAGE3_REVIEW,
+    STAGE4A_MERGE_GATE,
+    STAGE4B_PR_CREATE,
+    STAGE5_POST_CREATE,
     is_fix_cycle_commit_subject,
 )
 from cw.codex_review._context import _load_ticket_context
@@ -150,6 +154,9 @@ def _with_review_config(
 _BLOCKED_NEXT_ACTIONS_BY_STAGE: dict[StageReached, list[str]] = {
     STAGE1_PLAN: _CODEX_PLAN_BLOCKED_NEXT_ACTIONS,
     STAGE2_IMPL: _CODEX_IMPL_BLOCKED_NEXT_ACTIONS,
+    STAGE4A_MERGE_GATE: _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS,
+    STAGE4B_PR_CREATE: _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS,
+    STAGE5_POST_CREATE: _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS,
 }
 
 
@@ -173,6 +180,8 @@ def make_codex_blocked(
     is derived from *stage_reached* instead (#3060), so a codex PLAN failure
     (``stage1_plan``) carries ``_CODEX_PLAN_BLOCKED_NEXT_ACTIONS``, a codex
     IMPL failure (``stage2_impl``, #3061) ``_CODEX_IMPL_BLOCKED_NEXT_ACTIONS``,
+    a codex FINALIZE failure (``stage4a_merge_gate``, ``stage4b_pr_create``,
+    ``stage5_post_create``, #3062) ``_CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS``,
     and every other stage keeps the review label, with no call site able to
     mislabel it.
     """

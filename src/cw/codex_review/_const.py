@@ -27,6 +27,13 @@ STAGE1_PLAN: StageReached = "stage1_plan"
 #: The codex IMPL executor's wire stage (#3061); ``make_codex_blocked`` keys the
 #: impl ``next_actions`` label on it.
 STAGE2_IMPL: StageReached = "stage2_impl"
+#: The codex FINALIZE executor's wire stages (#3062); ``make_codex_blocked``
+#: keys the finalize ``next_actions`` label on all three. ``stage4a_merge_gate``
+#: labels the gate parks and pre-PR faults, ``stage4b_pr_create`` a pre-PR
+#: failure and ``stage5_post_create`` a failure once a PR exists.
+STAGE4A_MERGE_GATE: StageReached = "stage4a_merge_gate"
+STAGE4B_PR_CREATE: StageReached = "stage4b_pr_create"
+STAGE5_POST_CREATE: StageReached = "stage5_post_create"
 
 #: Step 4b comment title and artifact-header label for a codex-built result.
 #: The Claude sibling is ``cw.claude_review.core.CLAUDE_REVIEWER_LABEL``.
@@ -319,6 +326,12 @@ _CODEX_PLAN_BLOCKED_NEXT_ACTIONS: list[str] = ["user_resolve_codex_plan_failure"
 
 # next_actions label for a codex IMPL blocked result (#3061), keyed the same way.
 _CODEX_IMPL_BLOCKED_NEXT_ACTIONS: list[str] = ["user_resolve_codex_impl_failure"]
+
+# next_actions label for a codex FINALIZE blocked result (#3062), keyed the
+# same way on the three finalize stages.
+_CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS: list[str] = [
+    "user_resolve_codex_finalize_failure"
+]
 
 # Backend-side failure reasons: the codex/claude backend itself errored or was
 # at capacity, so nothing says it is up. A round whose every failed role is one

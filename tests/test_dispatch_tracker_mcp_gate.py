@@ -433,7 +433,12 @@ _ALL_SERVERS = {OPENCODE_BACKEND: _SERVER, CODEX_BACKEND: _SERVER}
 
 
 def _on(backend: str) -> dict[Stage, str | None]:
-    return {Stage.PLAN: backend, Stage.IMPL: backend, Stage.REVIEW: backend}
+    return {
+        Stage.PLAN: backend,
+        Stage.IMPL: backend,
+        Stage.REVIEW: backend,
+        Stage.FINALIZE: backend,
+    }
 
 
 def _count_reads(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
@@ -458,9 +463,9 @@ _GATE_STATES: tuple[McpStage, ...] = ("enabled", "absent", "disabled", "malforme
 
 
 def _gated(backend: str, stage: Stage) -> bool:
-    """Whether a (backend, stage) row is checked: opencode PLAN/IMPL, codex PLAN."""
+    """Whether a row is checked: opencode PLAN/IMPL, codex PLAN/FINALIZE."""
     if backend == CODEX_BACKEND:
-        return stage is Stage.PLAN
+        return stage in (Stage.PLAN, Stage.FINALIZE)
     return stage in (Stage.PLAN, Stage.IMPL)
 
 
@@ -479,7 +484,9 @@ class TestBackendServerGate:
     @pytest.mark.parametrize("tracker", _TRACKERS)
     @pytest.mark.parametrize("backend", [OPENCODE_BACKEND, CODEX_BACKEND])
     @pytest.mark.parametrize("state", _GATE_STATES)
-    @pytest.mark.parametrize("stage", [Stage.PLAN, Stage.IMPL, Stage.REVIEW])
+    @pytest.mark.parametrize(
+        "stage", [Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
+    )
     def test_table(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -515,9 +522,14 @@ class TestBackendServerGate:
         if tracker != "linear" or not _gated(backend, stage):
             assert reads == []
 
+    @pytest.mark.parametrize("stage", [Stage.PLAN, Stage.FINALIZE])
     @pytest.mark.parametrize("servers", [_OPENCODE_SERVERS, {CODEX_BACKEND: "a.b"}])
-    def test_codex_plan_with_unusable_server_is_a_hit(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, servers: dict[str, str]
+    def test_codex_plan_and_finalize_with_unusable_server_is_a_hit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        servers: dict[str, str],
+        stage: Stage,
     ) -> None:
         (tmp_path / "ws" / ".git").mkdir(parents=True)
         client = _client(
@@ -527,16 +539,21 @@ class TestBackendServerGate:
             tracker="linear",
         )
         reads = _count_reads(monkeypatch)
-        hits = _resolve(client, _snapshot(stage=Stage.PLAN))
+        hits = _resolve(client, _snapshot(stage=stage))
         (hit,) = hits.values()
         assert hit.backend == CODEX_BACKEND
         assert hit.file_inspected == "clients.yaml tracker_mcp_gate.servers"
         assert hit.expected == servers.get(CODEX_BACKEND, "servers.codex (unset)")
         assert reads == []
 
+    @pytest.mark.parametrize("stage", [Stage.PLAN, Stage.FINALIZE])
     @pytest.mark.parametrize("tracker", ["github-issues", None])
-    def test_codex_plan_without_server_off_a_tracker_fails_open(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tracker: str | None
+    def test_codex_plan_and_finalize_without_server_off_a_tracker_fails_open(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tracker: str | None,
+        stage: Stage,
     ) -> None:
         (tmp_path / "ws" / ".git").mkdir(parents=True)
         client = _client(
@@ -546,7 +563,55 @@ class TestBackendServerGate:
             tracker=tracker,
         )
         reads = _count_reads(monkeypatch)
-        assert _resolve(client, _snapshot(stage=Stage.PLAN)) == {}
+        assert _resolve(client, _snapshot(stage=stage)) == {}
+        assert reads == []
+
+    @pytest.mark.parametrize("state", ["absent", "disabled"])
+    def test_opencode_finalize_row_is_never_gated(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: McpStage
+    ) -> None:
+        """FINALIZE rows enter the candidate scan, but only codex is gated."""
+        stage_mcp_config(monkeypatch, tmp_path, OPENCODE_BACKEND, state)
+        client = _client(
+            tmp_path,
+            _enabled_gate(None, servers=_OPENCODE_SERVERS),
+            executors=_on(OPENCODE_BACKEND),
+            tracker="linear",
+        )
+        reads = _count_reads(monkeypatch)
+
+        assert _resolve(client, _snapshot(stage=Stage.FINALIZE)) == {}
+        assert reads == []
+
+    def test_claude_native_finalize_row_with_plugin_missing_is_never_gated(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = _branch_with_settings(make_git_repo, {"enabledPlugins": {}})
+        calls: list[str] = []
+
+        def _spy(client: ClientConfig, branch: str, relpath: str) -> None:
+            calls.append(branch)
+
+        monkeypatch.setattr("cw.dispatch.tracker_mcp_gate._read_branch_json", _spy)
+        client = _client(repo, _enabled_gate(_PLUGIN), tracker="linear")
+
+        assert _resolve(client, _snapshot(stage=Stage.FINALIZE)) == {}
+        assert calls == []
+
+    @pytest.mark.parametrize("stage", [Stage.REVIEW, Stage.IMPL])
+    def test_codex_review_and_impl_rows_stay_ungated_with_unusable_server(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stage: Stage
+    ) -> None:
+        (tmp_path / "ws" / ".git").mkdir(parents=True)
+        client = _client(
+            tmp_path / "ws",
+            _enabled_gate(None, servers=_OPENCODE_SERVERS),
+            executors=_on(CODEX_BACKEND),
+            tracker="linear",
+        )
+        reads = _count_reads(monkeypatch)
+
+        assert _resolve(client, _snapshot(stage=stage)) == {}
         assert reads == []
 
     def test_unset_tracker_warns_once_and_never_reads(

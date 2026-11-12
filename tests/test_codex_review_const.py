@@ -8,6 +8,7 @@ import pytest
 
 from cw.codex_review import (
     _CATEGORY_TO_REASON,
+    _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS,
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     _TRANSIENT_FAILURE_REASONS,
     BACKEND_DOWN_REASONS,
@@ -21,6 +22,9 @@ from cw.codex_review import (
     CODEX_MAX_PROMPT_CHARS,
     CODEX_MODEL_CAPACITY,
     INPUT_SIZES_PATTERN,
+    STAGE4A_MERGE_GATE,
+    STAGE4B_PR_CREATE,
+    STAGE5_POST_CREATE,
     format_input_sizes,
 )
 from cw.executor_diagnostics import ExecutorFailureCategory
@@ -43,6 +47,23 @@ def test_codex_review_blocked_next_actions_is_user_directed() -> None:
     assert _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS[0].startswith(
         ("user_resolve_", "user_decide_", "user_verify_")
     )
+
+
+def test_codex_finalize_blocked_next_actions_is_user_directed() -> None:
+    """#3062: the FINALIZE label must satisfy USER_DIRECTED_PREFIXES too."""
+    assert _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS == [
+        "user_resolve_codex_finalize_failure"
+    ]
+    assert _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS[0].startswith(
+        ("user_resolve_", "user_decide_", "user_verify_")
+    )
+
+
+def test_finalize_stage_constants_are_the_wire_values() -> None:
+    """#3062: the three StageReached constants codex FINALIZE owns."""
+    assert STAGE4A_MERGE_GATE == "stage4a_merge_gate"
+    assert STAGE4B_PR_CREATE == "stage4b_pr_create"
+    assert STAGE5_POST_CREATE == "stage5_post_create"
 
 
 def test_codex_model_capacity_is_transient() -> None:

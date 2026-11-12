@@ -22396,6 +22396,42 @@ class TestClaimNextPendingTrackerMcpGate:
         assert claimed.status == QueueItemStatus.RUNNING
         assert claimed.disposition is None
 
+    def test_tracker_mcp_gate_parks_a_finalize_stage_task_with_a_hit(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RFC 0018 C3: the claim-time re-check covers a FINALIZE row with a hit."""
+        from cw.dev_queue import TRACKER_MCP_GATE_DISPOSITION
+
+        write_clients_yaml(self._gated_client(sample_client_config))
+        self._stub_resolver(monkeypatch, "GEN-fin")
+        self._seed("GEN-fin", stage=Stage.FINALIZE)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._config(), native_daemon=daemon)
+
+        parked = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-fin")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == TRACKER_MCP_GATE_DISPOSITION
+        assert daemon.spawn_calls == []
+
+    def test_tracker_mcp_gate_never_holds_a_finalize_row_without_a_hit(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Hits exist only for codex FINALIZE rows; any other FINALIZE row claims."""
+        write_clients_yaml(self._gated_client(sample_client_config))
+        self._stub_resolver(monkeypatch)
+        self._seed("GEN-fin2", stage=Stage.FINALIZE)
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        claimed = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-fin2")
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.disposition is None
+
 
 # ---------------------------------------------------------------------------
 # TestStaleDispatchSentinelRouting (#1862)

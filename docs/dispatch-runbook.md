@@ -3936,6 +3936,37 @@ Two UNVERIFIED items: whether MCP tool calls run under
 and whether the pre-flight resolutions marker survives on Linear. The tests
 cover the row-delivered and the comment channel and never assert survival.
 
+**Codex FINALIZE (#3062, RFC 0018 C3).** A lane whose FINALIZE stage resolves
+to `codex` runs `cw codex run --stage finalize`: one `read-only` `codex exec`
+turn (a fixed argv, no knob, no cw timer, ADR-0014) that returns only the
+judgement text (PR title, PR body, the adjudication section and the operator
+override section). The turn never edits, stages, commits, pushes or runs `gh`.
+cw does every mechanical or ordering-critical step in Python:
+
+- **Guards, in order.** The MUST_FIX override check, the tier resolution
+  (`scope_tier_unresolvable` when it cannot be resolved), the checked-out
+  branch against the feature branch (`external_state_block`), then the
+  Detector Guard: an OPEN PR takes the reuse path, a CLOSED PR blocks
+  `pr_already_terminal` (`retry_eligible: false`), no PR takes the create path.
+- **Approval fence.** Steps 4.0 and 4.0b park `review_pending_approval` (a
+  Large tier, or an unconverged clean-mode review) and are re-run immediately
+  before the arm.
+- **Create path.** Step 4a merge gate (`merge_gate_blocked`,
+  `prior_pipeline_pr_open`), the repo quality gates (`agent_block` on a red
+  gate; nothing is pushed), the default-branch merge probe
+  (`merge_conflict_post_push`; cw never resolves a conflict), the push with
+  origin verification (`push_auth_failed` or `impl_not_pushed`), `gh pr
+  create`, the mergeability check, then the arm through `prep_pr_finalize.py`
+  with a read-back (`automerge_not_armed`). The reuse path runs the quality
+  gates, then the same live bind, probe, arm and verification.
+- **Result.** cw stamps the sentinel (`stage_reached`, `branch`, `commits`,
+  `pr`, `review`, `scope.tier`, `plan_source`), takes `pr.auto_merge` from the
+  verified PR head, never from the model, emits the stage events and posts the
+  PR-link comment (`kind: pr_link`). A failure of either post is friction,
+  not a block.
+- **Deferred.** The review-debt re-file (Step 4d, #3543) and the
+  `classify_merge_conflict.py` resolution round (#3542).
+
 **#1717 coordination.** `pending_operator_comment` is stamped at the shared
 `_stage_regress` chokepoint alongside #1794's `regressed_into_stage`. #1717's
 `finalize_regress_branch_head` is designed to stamp at the same point; per
@@ -4811,9 +4842,10 @@ from the artifact's final state. A per-round filer opened one issue per
 wording, because a reviewer rewords a finding from round to round and the dedup
 key is the finding's text (one ticket produced 39 issues over six rounds,
 another 24). The engine-confirm path (`file_confirm_deferrals`) still files at
-record time. A codex lane runs PLAN, IMPL and REVIEW only (#3060, #3061); its
-finalize runs on the claude-native executor, so item 2a is the normal-completion path, not only a
-retry. The review-debt filer registry (`register_debt_filer`) is gone: nothing
+record time. A codex lane runs PLAN, IMPL, REVIEW and FINALIZE (#3060, #3061, #3062);
+the codex FINALIZE executor does not run item 2a (the debt re-file is deferred
+to #3543), so item 2a is the normal-completion path only on a claude-native
+finalize, not only a retry. The review-debt filer registry (`register_debt_filer`) is gone: nothing
 files from the codex process.
 
 **Stale-defer filter.** The ledger's `settled` entries carry an additive

@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cw.codex_background import _run_codex_review_and_complete
+from cw.codex_finalize import run_finalize_stage_and_complete
 from cw.codex_impl import run_impl_stage_and_complete
 from cw.codex_plan import run_plan_stage_and_complete
 from cw.codex_runner import RealCodexRunner
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
 STAGE_REVIEW = "review"
 STAGE_PLAN = "plan"
 STAGE_IMPL = "impl"
+STAGE_FINALIZE = "finalize"
 
 
 def _load_session(session_id: str) -> Session:
@@ -57,11 +59,11 @@ def _load_running_task(*, ticket_id: str, session_id: str) -> TicketTask:
 def unsupported_codex_stage_message(stage: Stage) -> str:
     """Return the refusal for a ``cw codex run --stage`` no codex executor serves.
 
-    Names the stages that do have an executor (#3054, #3061).
+    Names the stages that do have an executor (#3054, #3061, #3062).
     """
     return (
         f"no codex executor for stage {stage.value!r} "
-        f"(supported: {STAGE_PLAN}, {STAGE_IMPL}, {STAGE_REVIEW})"
+        f"(supported: {STAGE_PLAN}, {STAGE_IMPL}, {STAGE_REVIEW}, {STAGE_FINALIZE})"
     )
 
 
@@ -180,4 +182,35 @@ def run_codex_impl_stage(
         model=executor_config.model,
         reasoning_effort=executor_config.reasoning_effort,
         sandbox_mode=executor_config.fix_sandbox_mode,
+    )
+
+
+def run_codex_finalize_stage(
+    *,
+    ticket_id: str,
+    session_id: str,
+    wall_clock_budget_seconds: int | None,
+    runner: CodexRunner | None = None,
+) -> None:
+    """Run the codex FINALIZE stage for *ticket_id*/*session_id* and complete it.
+
+    #3062 (RFC 0018 C3). Re-derives the run from the persisted RUNNING row and
+    session, as :func:`run_codex_impl_stage` does. *wall_clock_budget_seconds*
+    is accepted for the shared CLI signature and ignored (ADR-0014). Only the
+    FINALIZE stage's model and reasoning effort are read: the turn is
+    read-only, so ``fix_sandbox_mode`` does not apply.
+    """
+    del wall_clock_budget_seconds
+    session, client, task, worktree, executor_config = _load_stage_run(
+        ticket_id=ticket_id, session_id=session_id, stage=Stage.FINALIZE
+    )
+    run_finalize_stage_and_complete(
+        runner=runner or RealCodexRunner(),
+        task=task,
+        worktree=worktree,
+        client=client,
+        sid=session.id,
+        sess_name=session.name,
+        model=executor_config.model,
+        reasoning_effort=executor_config.reasoning_effort,
     )
