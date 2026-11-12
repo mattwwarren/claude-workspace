@@ -1519,8 +1519,12 @@ def _inject(
 ) -> None:
     """Make the act fail once at *point*, the way a crash there would leave it.
 
-    The module's dev-queue writes are, in order: the decision (1), the audit
-    mark (2) and the final transition (3).
+    The module's dev-queue writes are the decision, the audit mark and the
+    final transition. Under ``park`` all three land on the first tick, in that
+    order. Under ``auto`` the first tick stops at the audit mark (the row stays
+    RUNNING until the stop is confirmed), so the final transition is a later
+    tick's write: ``transition`` therefore matches on state (the save that
+    clears the intent) rather than on a cumulative call count (#3395).
     """
     from cw import dispatch_state
     from cw.config import save_state as real_save_state
@@ -1571,10 +1575,45 @@ def _inject(
     elif point == "close":
         _fail_once(monkeypatch, f"{mod}.save_state", real_save_state)
     elif point == "transition":
-        _fail_once(monkeypatch, f"{mod}.save_dev_queue", save_dev_queue, nth=3)
+        _fail_once(
+            monkeypatch,
+            f"{mod}.save_dev_queue",
+            save_dev_queue,
+            match=lambda store, *_a, **_k: any(
+                t.ticket_id == _SID and t.usage_limit_act is None for t in store.tasks
+            ),
+        )
     else:  # pragma: no cover - a typo in the parametrize list
         msg = f"unknown injection point {point!r}"
         raise AssertionError(msg)
+
+
+# The tick (1-based, counting the interrupted first tick) on which an ``auto``
+# act requeues its row after a failure at each point (#3395). Confirmed by
+# running: a smaller number fails the final ``requeued == [_SID]`` assertion,
+# a larger one fails an intermediate ``== []`` assertion.
+#
+# Under ``auto`` tick N closes the session and queues the stop, and the NEXT
+# tick sees the surface gone and requeues, so the requeue never lands on the
+# closing tick. A point that fails before the close persists makes tick 2 the
+# closing tick and tick 3 the requeue. ``stop``: tick 1 closes and queues, the
+# drained stop fails, the test applies it by hand, and tick 2 confirms and
+# requeues. ``transition``: tick 1 closes and queues; tick 2 confirms the
+# surface gone but its transition save fails; tick 3 requeues.
+_AUTO_FINISH_TICK = {
+    "decision": 3,
+    "lockout": 3,
+    "needs-attention": 3,
+    "reap-proposed": 3,
+    "audit-mark": 3,
+    "completed": 3,
+    "close": 3,
+    "stop": 2,
+    "transition": 3,
+}
+# Under ``park`` ``_resume`` goes straight to ``_finish``, so tick 2 resumes
+# from the intent and parks, whatever the point.
+_PARK_FINISH_TICK = 2
 
 
 def _finish_after_failure(
@@ -1583,16 +1622,21 @@ def _finish_after_failure(
     config: OrchestratorConfig,
     daemon: FakeNativeDaemonClient,
 ) -> list[str]:
-    """Run the ticks that finish an act whose first tick was interrupted at *point*."""
+    """Run the ticks that finish an act whose first tick was interrupted at *point*.
+
+    Each tick between the first and the pinned finishing tick must leave the
+    row RUNNING under its act; the finishing tick's result is returned.
+    """
     if point == "stop":
         # The failed stop is replayed by the leaked-worker sweep, which this
         # test does not run; apply the stop that sweep would have re-queued.
         FakeNativeDaemonClient.stop(daemon, _SURFACE)
-    requeued = _tick(load_state(), config, daemon, at=_LATER)
-    if branch == "auto" and requeued == []:
-        # Closing and queuing the stop is one tick; confirming the roster is the next.
-        requeued = _tick(load_state(), config, daemon, at=_LATER)
-    return requeued
+    final = _AUTO_FINISH_TICK[point] if branch == "auto" else _PARK_FINISH_TICK
+    for _ in range(2, final):
+        assert _tick(load_state(), config, daemon, at=_LATER) == []
+        _assert_row_still_running()
+        assert _owned_row().usage_limit_act is not None
+    return _tick(load_state(), config, daemon, at=_LATER)
 
 
 _COMMON_POINTS = [
@@ -1634,6 +1678,9 @@ def test_interrupted_act_is_finished_next_tick_without_charge(
     before = _owned_row().unproductive_attempts
     _inject(point, monkeypatch, daemon)
 
+    # Under ``auto`` the ``transition`` failure fires on tick 2, not here, so
+    # for it this check is trivially true; the intermediate-tick assertions in
+    # ``_finish_after_failure`` carry the non-trivial check.
     assert _tick(state, config, daemon, at=_NOW) == []
     _assert_row_still_running()
 
