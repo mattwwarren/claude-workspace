@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any
 
+import freezegun
 import pytest
 
 from cw.config import load_state, save_state
@@ -70,6 +72,35 @@ class TestStartSession:
         assert s.purpose == SessionPurpose.IMPL
         assert s.status == SessionStatus.ACTIVE
         assert s.origin == SessionOrigin.USER
+
+    def test_start_stamps_surface_bound_at_at_append(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#3339: ``cw start`` stamps the ref's bind at the committing append,
+        after ``spawn_bg`` returned."""
+        write_clients_yaml(sample_client)
+        monkeypatch.setattr("cw.session._write_hook_context", _noop)
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+        t0 = datetime(2026, 11, 12, 9, 0, tzinfo=UTC)
+        bound = t0 + timedelta(seconds=20)
+        real_spawn = mock_native_daemon.spawn_bg
+
+        with freezegun.freeze_time(t0) as frozen:
+
+            def _slow_spawn(**kwargs: Any) -> str:
+                frozen.move_to(bound)
+                return real_spawn(**kwargs)
+
+            monkeypatch.setattr(mock_native_daemon, "spawn_bg", _slow_spawn)
+            start_session("test-client", "impl", native_daemon=mock_native_daemon)
+
+        (s,) = load_state().sessions
+        assert s.started_at == t0
+        assert s.surface_bound_at == bound
 
     def test_new_session_spawns_via_daemon(
         self,

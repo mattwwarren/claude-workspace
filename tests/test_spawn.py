@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, get_args
 
@@ -5570,6 +5570,53 @@ class TestRosterRegistrationVerification:
         state = load_state()
         assert len(state.sessions) == 1
         assert state.sessions[0].id == session_id
+
+    def test_row_is_stamped_after_spawn_bg_and_poll(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """#3339: ``started_at`` stays at ``Session()`` creation (the
+        transcript floor) while ``surface_bound_at`` is stamped at the
+        append, after an arbitrarily slow ``spawn_bg``."""
+        from freezegun import freeze_time
+
+        from cw.spawn import spawn_create_impl
+
+        t0 = datetime(2026, 11, 12, 9, 0, tzinfo=UTC)
+        bound = t0 + timedelta(seconds=20)
+
+        with freeze_time(t0) as frozen:
+
+            class _SlowSpawnDaemon(FakeNativeDaemonClient):
+                def spawn_bg(
+                    self,
+                    *,
+                    cwd: Path,
+                    prompt: str,
+                    extra_args: list[str] | None = None,
+                    permission_mode: str | None = None,
+                ) -> str:
+                    frozen.move_to(bound)
+                    return super().spawn_bg(
+                        cwd=cwd,
+                        prompt=prompt,
+                        extra_args=extra_args,
+                        permission_mode=permission_mode,
+                    )
+
+            spawn_create_impl(
+                client=_make_client(tmp_path),
+                worktree=make_git_repo("wt-3339-bound"),
+                prompt="/auto-dev 3339 --headless",
+                label="auto-dev-3339",
+                native_daemon=_SlowSpawnDaemon(),
+            )
+
+        (sess,) = load_state().sessions
+        assert sess.started_at == t0
+        assert sess.surface_bound_at == bound
 
     def test_unregistered_worker_raises_spawn_unregistered_error(
         self,
