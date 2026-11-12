@@ -1,7 +1,7 @@
 # A session's inbound channel is a durable mailbox plus a paused-only resume trigger
 
 **Status:** Accepted
-**Driven by:** #2212 (and #1889, whose spike finding forces the shape)
+**Driven by:** #2212 (and #1889, whose spike finding forces the shape), #2287
 
 ## Decision
 
@@ -12,10 +12,31 @@ respawning it with `--resume`. The two halves are independent: queuing succeeds
 or fails on its own, and delivery is best-effort on top of it.
 
 The resume trigger is restricted, deliberately and as an architecture decision,
-to sessions that are **already paused** — the owning `TicketTask` is
-`BLOCKED_ON_USER`, or the `Session` is `SessionStatus.IDLE`. Delivering to a
-genuinely live, mid-task session is **not implemented** and is deferred to
-**#2255**.
+to sessions that are **already paused AND whose park an operator message can
+resolve** (#2287). The owning `TicketTask` row decides:
+
+- Row `BLOCKED_ON_USER` with a `disposition` in `PAUSED_FOR_USER_INPUT_STATUSES`
+  (`ambiguities_pending_resolution`, `premises_pending_verification`,
+  `plan_pending_approval`, `review_pending_approval`), or
+  `stopped_without_sentinel` (the abandoned-exit park, the awaiting-operator
+  signal this ADR already names under Alternatives), or `blocked` with
+  `blocked_reason == "plan_ambiguous"` (the one reason that means the agent has
+  an open question): **eligible**.
+- Row `BLOCKED_ON_USER` with any other disposition, or none (`merge_gate_blocked`,
+  `dirty_worktree`, `attempt_cap_blocked`, `blocked` with any other reason,
+  `awaiting_operator`, ...): **refused** with `delivered=False` and a reason
+  naming the disposition. A message cannot clear these; respawning only wastes
+  a run. The message stays queued. The check is an allowlist, so an unknown
+  disposition fails closed.
+- No `BLOCKED_ON_USER` row owns the session (an ad hoc USER-origin session, or a
+  row in another status): a `Session` that is `SessionStatus.IDLE` is eligible.
+  `IDLE` does **not** override a `BLOCKED_ON_USER` row's park; the row is the
+  only authoritative park-reason signal, because `Session.status` says nothing
+  about why a session stopped.
+
+A row links to its session through `session_id`, or `codex_orphan_session_id`
+for the codex boot-orphan park. Delivering to a genuinely live, mid-task
+session is **not implemented** and is deferred to **#2255**.
 
 ## Invariant
 
@@ -30,8 +51,9 @@ genuinely live, mid-task session is **not implemented** and is deferred to
    report a queued-but-undelivered message as a failure, and must not treat a
    delivery success as evidence the message was queued.
 4. **The resume trigger touches no harness client until the gate passes.** A
-   session that is neither `BLOCKED_ON_USER` nor `IDLE` must produce zero
-   calls into `NativeDaemonClient` — no `spawn_bg`, no `stop`, not even
+   session that is neither `IDLE` nor `BLOCKED_ON_USER` for a park a message
+   can resolve, or that is `BLOCKED_ON_USER` for a mechanical park, must
+   produce zero calls into `NativeDaemonClient` — no `spawn_bg`, no `stop`, not even
    `list_live_session_short_ids`.
 5. **The resume trigger never calls `daemon.stop()`.** See Consequences.
 6. **The mailbox is not session state.** It has its own lock and its own
@@ -40,7 +62,8 @@ genuinely live, mid-task session is **not implemented** and is deferred to
 7. **The per-session resume-trigger lock re-checks the full eligibility
    gate, not just daemon liveness.** A second concurrent call that reaches
    the lock after the first one's outer check must be refused if the task
-   has moved out of `BLOCKED_ON_USER` in the meantime, exactly as if it had
+   has moved out of `BLOCKED_ON_USER`, or onto a disposition a message cannot
+   resolve, in the meantime, exactly as if it had
    never passed the outer gate at all -- not just refused because the
    surface is already live.
 8. **A failure after the daemon commits state is not compensated by
@@ -84,6 +107,21 @@ genuinely live, mid-task session is **not implemented** and is deferred to
   by definition not concurrently mid-task. A gate-eligible session that
   nevertheless still holds a live roster entry respawns without a preceding
   stop, which is pre-existing accepted behavior on that branch, not a new risk.
+- **Manual `cw resume` stays ungated (#2287).** `resume_session` does not read
+  the owning row's disposition. It is an explicit operator action on a
+  `BACKGROUNDED` or `IDLE` session, there is no message whose delivery could be
+  wasted, and the operator may deliberately resume a mechanically parked
+  session to fix it by hand (a dirty worktree, a merge gate). Gating it would
+  block that path and need a `--force`. The disposition gate lives only in the
+  `cw session send` trigger.
+- **Known gap: parks that clear `session_id` are invisible to the gate
+  (#2287).** The row lookup matches `session_id` or `codex_orphan_session_id`.
+  Several mechanical parks (`dirty_worktree` from the reconcile backstop,
+  `terminal_sibling`, `fix_dispatch_ref_unresolved`) clear `session_id`, and
+  claim-time parks (`stale_dispatch_gate`, `attempt_cap_blocked`) never had one.
+  A session with no matching row keeps the pre-#2287 behavior (IDLE-only). A
+  ticket-id fallback was rejected for now: it risks attributing a newer
+  episode's park to an older, stale session.
 - **The live case stays broken until #2255.** Pre-#2255, a `RUNNING`/`ACTIVE`
   session's message queues and is reported as not yet delivered. This is the
   common outcome, which is exactly why it is a warning and exit 0 rather than
@@ -134,9 +172,12 @@ genuinely live, mid-task session is **not implemented** and is deferred to
   describes the session resuming, not dev-queue disposition automation, and
   transitioning a row's status on an unrelated trigger would invite a fresh
   ambiguity of the same flavor #2212 exists to remove.
+- **Resume on any `BLOCKED_ON_USER` row (the pre-#2287 gate).** Rejected: a
+  message cannot clear a mechanical park (merge gate, dirty worktree, attempt
+  cap), so the respawn is a wasted run that ends parked again.
 - **Fail the command when the message cannot be delivered.** Rejected: see
   Invariant 3. Pre-#2255 that would make the common case look like an error.
 
 ## Referenced by
 
-- #2212, #2255, #1889, ADR-0005, ADR-0011
+- #2212, #2255, #2287, #1889, ADR-0005, ADR-0011

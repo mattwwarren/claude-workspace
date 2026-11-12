@@ -1242,7 +1242,10 @@ This is unrelated to `cw event prune`, which trims the event log itself.
 ## 6a. Answer a paused session (`cw session send`)
 
 A worker that pauses to ask you something parks its row `BLOCKED_ON_USER` and
-then sits there. Before #2212 the only way to answer was lossy: close the
+then sits there. (Not every `BLOCKED_ON_USER` park is a question: a mechanical
+park such as a merge gate or a dirty worktree is also `BLOCKED_ON_USER`, and a
+message cannot clear it. See "Which parks does a message resume?" below.)
+Before #2212 the only way to answer was lossy: close the
 session, requeue the ticket, and let a fresh worker rediscover the context you
 were about to hand it. `cw session send` collapses that into one command that
 preserves the transcript, the worktree, the dev-queue row, and the row's
@@ -1290,11 +1293,44 @@ is the point: a queued message survives whether or not the session could be
 woken right now. Exit 1 means nothing was queued at all — unknown session,
 terminal session, or bad flags.
 
+**Which parks does a message resume?** The owning row's `disposition`
+decides (#2287). `cw session send` respawns the session only when an operator
+message can clear the park:
+
+- Resumes: `ambiguities_pending_resolution`, `premises_pending_verification`,
+  `plan_pending_approval`, `review_pending_approval`, `stopped_without_sentinel`
+  (the worker posted a park comment and exited), and `blocked` with blocker
+  reason `plan_ambiguous` (the agent has an open question).
+- Does not resume: every other park, including `merge_gate_blocked`,
+  `dirty_worktree`, `stale_dispatch_gate`, `attempt_cap_blocked`,
+  `terminal_sibling`, `fix_dispatch_ref_unresolved`,
+  `codex_review_orphaned_at_boot`, `awaiting_operator`, `finalize_gate_held`,
+  `blocked` with any other reason, and a row with no recorded disposition. An
+  allowlist, so an unknown disposition is refused. An `IDLE` session does not
+  bypass this: the row's park wins.
+
+A refused session is not respawned and the message stays queued (exit 0):
+
+```
+Message <id> queued for session <id>.
+Warning: not delivered yet — session's task is parked for disposition
+'merge_gate_blocked', which an operator message cannot clear; the session was
+not respawned and the message stays queued (inspect with
+`cw dev-queue show <ticket> -c <client>`)
+```
+
+Fix the park the usual way (`cw dev-queue requeue`, resolve the gate, etc.).
+Manual `cw resume <session>` is not gated on the disposition: use it when you
+deliberately want to attach to a mechanically parked session and fix it by
+hand. The gate only matches a row that still links to the session
+(`session_id`, or `codex_orphan_session_id`); a park that clears `session_id`
+is not seen, and an `IDLE` session with no matching row behaves as before.
+
 **What it does not do.** It does not transition the dev-queue row. The row
 stays `BLOCKED_ON_USER`; releasing it is still the separate, explicit action
 it always was (`cw dev-queue requeue`, `cw plan approve`, etc.).
 
-**The one case it cannot handle yet.** A session that is genuinely live and
+**The live case it cannot handle yet.** A session that is genuinely live and
 mid-task (`RUNNING` row, `ACTIVE` session) cannot be woken — there is no way
 to deliver into a running `claude --bg` turn, per #1889's spike. You will see:
 
