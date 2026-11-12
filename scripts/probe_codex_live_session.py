@@ -127,6 +127,8 @@ class _StreamState:
         if kind == "thread.started":
             return self._thread_started(event)
         if isinstance(kind, str) and kind in NONTERMINAL_TURN_EVENTS:
+            if self.terminal is not None:
+                return ParseFault.INVALID_TERMINAL
             return None
         if isinstance(kind, str) and kind in TERMINAL_EVENTS:
             return self._terminal(kind)
