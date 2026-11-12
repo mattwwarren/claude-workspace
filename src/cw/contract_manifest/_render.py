@@ -12,8 +12,9 @@ runtime on the whole output, glue included.
 
 **Needed set.** :func:`needed_element_ids` lists every manifest id whose stage
 is the requested one and whose codex cell is not ``not-applicable``. An id the
-renderer does not emit is covered by its ``deferred`` (or ``fails-closed``)
-cell. A codex cell ``deferred`` to :data:`RFC_0017_TICKET` is skipped; flipping
+renderer does not emit is covered by its ``deferred`` cell, or by an
+``implemented`` cell citing the cw-run code that carries it. A codex cell
+``deferred`` to :data:`RFC_0017_TICKET` is skipped; flipping
 that cell later renders the block with no doc change (D-7).
 
 **Leaf rule.** ``import cw.contract_manifest`` stays light: the sentinel

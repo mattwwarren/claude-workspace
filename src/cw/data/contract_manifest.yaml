@@ -178,7 +178,7 @@ elements:
   orch.marker-plan-signoff:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_plan/_stations.py, symbol: run_plan_stations}, note: "never marked reviewed without both clean station verdicts"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_stations.py, symbol: run_plan_stations}, note: "never marked reviewed without both clean station verdicts"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   orch.marker-scope-tier:
@@ -202,7 +202,7 @@ elements:
   orch.post-impl-scope-conformance-threshold:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_impl/_gates.py, symbol: run_scope_conformance}, note: "cw runs the scope-conformance gate on the staged diff and parks plan_scope_drift"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_impl/_gates.py, symbol: run_scope_conformance}, note: "cw runs the scope-conformance gate on the staged diff and parks plan_scope_drift"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   orch.absent-owner-record:
@@ -296,19 +296,19 @@ elements:
   orch.sentinel-ambiguities:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_plan/_result.py, symbol: parse_plan_turn}, note: "strict AutoDevResult validation of the cw-stamped sentinel"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_result.py, symbol: parse_plan_turn}, note: "strict AutoDevResult validation of the cw-stamped sentinel"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   orch.sentinel-premises:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_plan/_result.py, symbol: parse_plan_turn}, note: "strict AutoDevResult validation of the cw-stamped sentinel"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_result.py, symbol: parse_plan_turn}, note: "strict AutoDevResult validation of the cw-stamped sentinel"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   orch.plan-draft-fingerprint:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_plan/_result.py, symbol: stamp_plan_result}, note: "cw computes and binds the fingerprint itself"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_result.py, symbol: stamp_plan_result}, note: "cw computes and binds the fingerprint itself"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   orch.sentinel-schema-version:
@@ -518,7 +518,7 @@ elements:
   plan.scope-classification:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_plan/_gates.py, symbol: check_scope_tier}, note: "the model classifies; cw only cross-checks the sentinel tier against the plan's tier line"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_gates.py, symbol: check_scope_tier}, note: "the model classifies; cw only cross-checks the sentinel tier against the plan's tier line"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   plan.checkpoint-1:
@@ -578,7 +578,7 @@ elements:
   plan.signoff-marker-check:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_plan/_stations.py, symbol: run_plan_stations}, note: "never marked reviewed without both clean station verdicts"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_stations.py, symbol: run_plan_stations}, note: "never marked reviewed without both clean station verdicts"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the PLAN prompt runs no review stations and writes no signoff marker (it would assert a review that did not run); its audit copy ends with the cw-opencode-plan marker the IMPL prompt reads alongside plan-spec-reviewed (B1, pinned by tests/test_opencode_prompt_consistency.py)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   plan.blocking-findings-comment-rule:
@@ -596,14 +596,14 @@ elements:
   plan.tier-re-verification-before-stamp:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_plan/_gates.py, symbol: check_scope_tier}, note: "the model classifies; cw only cross-checks the sentinel tier against the plan's tier line"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_gates.py, symbol: check_scope_tier}, note: "the model classifies; cw only cross-checks the sentinel tier against the plan's tier line"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   plan.headless-stale-tier-stamp:
     covers: [scope_tier_stale]
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_plan/_gates.py, symbol: check_scope_tier}, note: "the model classifies; cw only cross-checks the sentinel tier against the plan's tier line"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_gates.py, symbol: check_scope_tier}, note: "the model classifies; cw only cross-checks the sentinel tier against the plan's tier line"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   plan.independent-of-approval-fingerprint:
@@ -675,7 +675,7 @@ elements:
   plan.resolution-consumed-resolution-evidence-emission-rule:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_plan/_result.py, symbol: stamp_plan_result}, note: "the model's evidence is discarded; cw stamps resolution_consumed false and resolution_evidence null"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_result.py, symbol: stamp_plan_result}, note: "the model's evidence is discarded; cw stamps resolution_consumed false and resolution_evidence null"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   plan.binding-resolutions-delta-fast-path:
@@ -723,7 +723,7 @@ elements:
   impl.comments-are-live-not-cached:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_impl/_run.py, symbol: _Run.prompt}, note: "cw prefetches the ticket body and comments live on every run"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_impl/_run.py, symbol: _Run.prompt}, note: "cw prefetches the ticket body and comments live on every run"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.review-feedback-guard:
@@ -826,7 +826,7 @@ elements:
   impl.gate-orchestrator-completion:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_impl/_gates.py, symbol: run_quality_gates}, note: "cw runs the repo quality gates and parks impl_failed with the verbatim gate output"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_impl/_gates.py, symbol: run_quality_gates}, note: "cw runs the repo quality gates and parks impl_failed with the verbatim gate output"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.gate-helper-missing:
@@ -844,7 +844,7 @@ elements:
   impl.file-set-is-within-plan-s:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_impl/_gates.py, symbol: run_scope_conformance}, note: "cw parks plan_scope_drift when the staged files leave the plan"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_impl/_gates.py, symbol: run_scope_conformance}, note: "cw parks plan_scope_drift when the staged files leave the plan"}
       opencode: {disposition: implemented, ref: {kind: prompt, stage: impl, needle: "Stay within the plan's"}}
       local: {disposition: implemented, ref: {kind: code, path: src/cw/plan_files.py, symbol: parse_plan_files_modified}}
   impl.checkpoint-2:
@@ -910,7 +910,7 @@ elements:
   impl.gate-2-scope-conformance-disposition-by:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_impl/_gates.py, symbol: run_scope_conformance}, note: "every gate-2 exit code has one disposition in run_scope_conformance"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_impl/_gates.py, symbol: run_scope_conformance}, note: "every gate-2 exit code has one disposition in run_scope_conformance"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.type-check-gate-mypy-baseline:
@@ -928,7 +928,7 @@ elements:
   impl.gate-1-why-empty-diff-check:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_impl/_gates.py, symbol: check_empty_diff}, note: "cw parks an empty staged diff as empty_diff_blocked"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_impl/_gates.py, symbol: check_empty_diff}, note: "cw parks an empty staged diff as empty_diff_blocked"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.regress-into-impl-merge-conclusion-dispatch-backstop:
@@ -1534,7 +1534,7 @@ elements:
   finalize.merge-gate-check:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_finalize/_merge_gate.py, symbol: run_merge_gate}}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_finalize/_merge_gate.py, symbol: run_merge_gate}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.fix-prior-pr:
@@ -1546,13 +1546,13 @@ elements:
   finalize.adopted-pr-inventory-fails:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_finalize/_merge_gate.py, symbol: run_merge_gate}}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_finalize/_merge_gate.py, symbol: run_merge_gate}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.absent-from-both-locations:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_finalize/_merge_gate.py, symbol: run_merge_gate}}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_finalize/_merge_gate.py, symbol: run_merge_gate}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.merge-gate-disabled-merge-gate-disabled-by-client-config:
@@ -1588,7 +1588,7 @@ elements:
   finalize.compose-pr-title-in-parent:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_finalize/_result.py, symbol: compose_pr_title}}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_finalize/_result.py, symbol: compose_pr_title}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.base-branch-state-classifier:
@@ -1612,7 +1612,7 @@ elements:
   finalize.main-session-re-verification:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_finalize/_arm.py, symbol: verify_pr_state}}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_finalize/_arm.py, symbol: verify_pr_state}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.classifier-denied-arm-checked-first:
@@ -1720,7 +1720,7 @@ elements:
   finalize.enable-auto-merge:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_finalize/_arm.py, symbol: arm}}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_finalize/_arm.py, symbol: arm}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.post-to-linear:
@@ -1769,7 +1769,7 @@ elements:
     covers: [merge_conflict_post_push]
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_finalize/_pr.py, symbol: probe_default}}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_finalize/_pr.py, symbol: probe_default}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.finalize-review-findings-comment-trigger-body:
@@ -1824,26 +1824,26 @@ elements:
     covers: [push_auth_failed]
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_finalize/_result.py, symbol: classify_unavailability}}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_finalize/_result.py, symbol: classify_unavailability}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.cw-side-classification:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_finalize/_result.py, symbol: classify_unavailability}}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_finalize/_result.py, symbol: classify_unavailability}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.push-sites-covered:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_finalize/_pr.py, symbol: push_ahead}}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_finalize/_pr.py, symbol: push_ahead}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.sentinel-automerge-not-armed:
     covers: [automerge_not_armed]
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_finalize/_arm.py, symbol: arm}}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_finalize/_arm.py, symbol: arm}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.sentinel-gate-timeout:
@@ -1856,7 +1856,7 @@ elements:
   finalize.reuse-path-gate-failure-agent-block-sentinel:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_finalize/_gates.py, symbol: run_finalize_quality_gates}}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_finalize/_gates.py, symbol: run_finalize_quality_gates}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.adopted-row-limitation-agent-block-sentinel:
