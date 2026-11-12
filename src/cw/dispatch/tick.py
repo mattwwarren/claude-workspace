@@ -124,6 +124,16 @@ def _combine_usage_limit_reset_at(
     return max(current, new)
 
 
+def _window_is_open(windows: Mapping[str, datetime], name: str, now: datetime) -> bool:
+    """Is *name*'s back-off window still open at *now*? (#2276)
+
+    The one definition of "this client is limited": the spawn gate and the
+    reconcile fallback both consult it, so the two cannot disagree about which
+    windows are live.
+    """
+    return (until := windows.get(name)) is not None and now < until
+
+
 def _apply_usage_limit_gate(
     clients: dict[str, ClientConfig],
     usage_limited_until: Mapping[str, datetime],
@@ -148,7 +158,7 @@ def _apply_usage_limit_gate(
     limited = {
         name: client
         for name, client in clients.items()
-        if (until := usage_limited_until.get(name)) is not None and now < until
+        if _window_is_open(usage_limited_until, name, now)
     }
     if not limited:
         return clients, False
@@ -643,13 +653,20 @@ def dispatch_tick(
     # usage_limited_until before the next tick fires (#804).
     if any_usage_limit_detected:
         _emit_usage_limit_skip_events(clients, config, state)
-        # Transcript-derived, so it names no client: arm the whole known fleet
-        # on the flat back-off (None == "no parsed reset"), which is what the
-        # pre-#1409 fleet-wide scalar amounted to on this path.
+        # Transcript-derived, so it names no client: arm every known client on
+        # the flat back-off (None == "no parsed reset"), EXCEPT a client whose
+        # window is still open. Re-arming that client would overwrite a live
+        # parsed deadline with the flat one (#2276). An empty result is falsy,
+        # so the loop skips arming when every known client is already limited.
+        now = datetime.now(UTC)
         return DispatchTickResult(
             spawned=0,
             usage_limit_detected=True,
-            usage_limit_clients=dict.fromkeys(known_client_names, None),
+            usage_limit_clients={
+                name: None
+                for name in known_client_names
+                if not _window_is_open(windows, name, now)
+            },
         )
 
     # Tier-1: optionally cap how many clients are eligible per tick.

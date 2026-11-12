@@ -22,6 +22,7 @@ from cw.dispatch_state import (
     resolve_usage_limited_until,
     save_usage_limit_armed_at,
 )
+from cw.models import OrchestratorEventType
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -67,20 +68,43 @@ def _arm_usage_limit_windows(
     fleet-wide lockout this ticket exists to remove.
 
     Clients absent from *detections* keep the window they already had. A client
-    present in both is overwritten rather than extended: a detection can only
-    fire when that client's gate was open (``dispatch_tick`` skips a client
-    whose window is still live), so the prior value is by definition lapsed.
+    present in both takes the LATER of its prior and its new deadline
+    (:func:`~cw.dispatch_state.merge_usage_limited_until`), so an open window is
+    never shortened. Callers (``dispatch_tick``) never pass a client whose window
+    is still open: the reconcile fallback filters them out (#2276).
 
-    Emits one :attr:`~cw.models.OrchestratorEventType.USAGE_LIMIT_ARMED` per
-    client — the set-side counterpart to ``dispatch.usage_limit_cleared``,
-    which only ever fired on the way out. Without it the only durable record of
-    a multi-hour lockout was a log line.
+    Order, and why: resolve the window, PERSIST it with
+    :func:`merge_and_save_usage_limited_until`, verify the write by read-back,
+    and only THEN emit one
+    :attr:`~cw.models.OrchestratorEventType.USAGE_LIMIT_ARMED` per client that
+    landed. The primitive swallows ``OSError`` and returns its input, so the
+    read-back is the only way to know the window reached disk. An armed event
+    must never claim a window the write lost. A client whose save did not land
+    gets a warning and no event, but its window stays in the returned map, so
+    this process still backs off. The reconcile mid-turn arm is the opposite
+    order (audit first, then persist) for resume-idempotence; see
+    ``docs/events.md`` for the decision.
     """
     now = datetime.now(UTC)
     armed = dict(usage_limited_until)
+    resolved: dict[str, tuple[datetime, datetime | None]] = {}
     for client, reset_at in detections.items():
         until = resolve_usage_limited_until(now, reset_at, backoff_seconds)
-        armed[client] = until
+        armed = merge_usage_limited_until(armed, {client: until})
+        resolved[client] = (until, reset_at)
+    merged = merge_and_save_usage_limited_until(armed)
+    persisted = load_usage_limited_until()
+    for client, (until, reset_at) in resolved.items():
+        landed = (p := persisted.get(client)) is not None and p >= until
+        if not landed:
+            _log.warning(
+                "dispatch: usage limit window for %s (until %s) did not persist; "
+                "backing off in memory only, no %s event recorded",
+                client,
+                until,
+                OrchestratorEventType.USAGE_LIMIT_ARMED.value,
+            )
+            continue
         source = record_usage_limit_armed(client, until=until, reset_at=reset_at)
         _log.warning(
             "dispatch: usage limit detected for %s; backing off until %s (%s)",
@@ -88,7 +112,7 @@ def _arm_usage_limit_windows(
             until,
             source,
         )
-    return armed
+    return merged
 
 
 def _usage_limit_window_is_active(usage_limited_until: Mapping[str, datetime]) -> bool:
@@ -123,21 +147,19 @@ def _arm_and_persist_usage_limit_window(
     mapping and the fleet-level arm timestamp (#1343 R2) so the caller can
     carry both forward.
     """
-    armed = _arm_usage_limit_windows(
+    # Persist, verify and audit happen inside _arm_usage_limit_windows (#2276).
+    # Its save is a read-merge-write under ONE lock (#1409 review round 4), so
+    # a second writer (--force, #1362) arming a DIFFERENT client is never erased.
+    merged = _arm_usage_limit_windows(
         usage_limited_until,
         usage_limit_clients,
         backoff_seconds=backoff_seconds,
     )
-    # Read-merge-write under ONE lock (#1409 review round 4): a second writer
-    # (--force, #1362) arming a DIFFERENT client between the tick-start merge
-    # and this save used to be silently erased by the whole-mapping write.
-    # merge_and_save_usage_limited_until folds the read, the merge, and the
-    # write into a single dispatch_state_lock() acquisition, so no writer can
-    # land in between: the window is closed, not shortened.
-    merged = merge_and_save_usage_limited_until(armed)
     # #1343 R2: stamp the arm timestamp on every fresh detection so the
     # eventual cleared-event's detected_at is exact, not derived from
-    # backoff_seconds. Fleet-level like the cleared event it feeds.
+    # backoff_seconds. R3 (#2276): usage_limit_armed_at is FLEET-LEVEL, the
+    # LATEST arm time across clients armed this tick and across ticks; no
+    # per-client arm time is recorded. The cleared event feeds on it.
     armed_at = datetime.now(UTC)
     save_usage_limit_armed_at(armed_at)
     return merged, armed_at

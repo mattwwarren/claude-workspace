@@ -836,6 +836,8 @@ def _run_dispatch_loop_body(
     # see _handle_usage_limit_window_transition's docstring for the R4
     # single-loop-invariant caveat.
     usage_limit_window_active: bool = _usage_limit_window_is_active(usage_limited_until)
+    # Fleet-level, not per client (#2276): the LATEST arm time across clients.
+    # It feeds the single dispatch.usage_limit_cleared detected_at.
     usage_limit_window_armed_at: datetime | None = load_usage_limit_armed_at()
 
     try:
