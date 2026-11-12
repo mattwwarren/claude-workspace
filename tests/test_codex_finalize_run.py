@@ -584,11 +584,27 @@ def test_open_pr_is_reused_with_the_reuse_gates_and_no_turn(
     assert h.order == [
         "run_approval_fence",
         "run_finalize_quality_gates",
+        "probe_default",
         "run_approval_fence",
         "check_automerge_allowed",
         "arm",
     ]
     assert not any(a[0:2] == ["gh", "pr"] and a[2] == "merge" for a in h.gh.argvs())
+
+
+def test_a_reused_conflicting_pr_is_not_armed(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    h.gh.reply("pr", "list", "--head", BRANCH, stdout=_pr_list("OPEN"))
+    conflict = MergeProbe("conflict", "a" * 40, ("clash.py",), "")
+    with patch("cw.codex_impl._feedback.probe_default_merge", return_value=conflict):
+        result = h.run()
+    _assert_block(result, "merge_conflict_post_push", stage="stage5_post_create")
+    assert result.blocker is not None
+    assert result.blocker.retry_eligible is True
+    assert "clash.py" in result.blocker.details
+    assert h.arm.calls() == []
 
 
 def test_the_reuse_path_skips_the_merge_gate_and_the_ahead_push(

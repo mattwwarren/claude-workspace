@@ -533,8 +533,13 @@ def _edit_override(
 
 
 def _reuse(run: _Run, state: _State, bound: BoundPr, scratch: Path) -> Payload:
-    """The OPEN-PR path: quality gates, the override edit, then the arm."""
+    """The OPEN-PR path: gates, probe, override edit, then the arm."""
     block = _gates(run, state, "reuse")
+    if block is None:
+        block, friction = probe_default(
+            run.worktree, default_branch=run.client.default_branch, pr_exists=True
+        )
+        state.friction.extend(friction)
     if block is None and state.override_json is not None:
         block = _edit_override(run, state, bound, scratch)
     if block is not None:
