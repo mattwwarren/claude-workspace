@@ -9,6 +9,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **`cw dev-queue status --json` gains live per-client counts and `tick_ts` (#1586).** Each client entry carries `pending`, `running`, `blocked`, `completed`, `cancelled` and `failed`, the same numbers as the text table (one shared counter), read from the queue at call time rather than from the last tick, plus `tick_ts` (the `Z`-suffixed time of the tick that `skip_reason`, `freshness_detail` and `blocked_branch` come from, `null` without a tick). `blocked` counts `blocked_on_user` only, and `awaiting_operator_signoff` rows appear in none of the six keys. A client with queued tickets but no tick, paused lane or held row now appears in the output.
+- **The Stage 2 impl prompt asks for an override-set mypy sweep, per-guard kill-checks and a sensitive-carrier grep (#2084).** The scoped `uv run mypy <touched_files>` gate cannot see a subclass override in another file, so a base-class signature change passed locally and failed `[override]` in CI. The impl agent now also runs mypy on the package holding the overrides, never baselining that error. Each new conditional, guard, default or list argument gets a revert-and-confirm-red kill-check, recorded as a `kill_checks` friction key with a `Kill-checks run:` line in the next commit body (the friction report is authoritative when no later commit exists). A sensitive-carrier grep over changed files requires a justification or sanitizer routing for each hit. Docs-only: no schema change, no new `blocker.reason`.
 
 ### Changed
 
