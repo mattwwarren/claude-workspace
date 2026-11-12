@@ -40,6 +40,7 @@ from cw.codex_review import (
     CODEX_FIX_REVERTED_BRANCH,
     CODEX_FIX_SCOPE_DRIFT,
     CODEX_FIX_SCOPE_VIOLATION,
+    CODEX_MODEL_CAPACITY,
     CODEX_MUST_FIX_FINDINGS,
     CODEX_MUST_FIX_MECHANICALLY_REJECTED,
     CODEX_REVIEW_UNPARSEABLE,
@@ -52,6 +53,7 @@ from cw.codex_review import core as codex_review_core
 from cw.codex_review._capability import _PROBE_ARGV
 from cw.codex_review._engine_round import EngineRoundSpec
 from cw.codex_runner import CodexRunResult
+from cw.codex_usage import UsageAccumulator
 from cw.events import read_events
 from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.gh import AGENT_COMMENT_MARKER
@@ -59,6 +61,7 @@ from cw.local_runner import make_blocked
 from cw.models import SandboxMode, Stage, TicketTask
 from cw.models.enums import OrchestratorEventType
 from cw.models.operator_constraint import OperatorConstraint
+from cw.models.usage import UsageStage
 from cw.review_engine.context import EngineContext
 from cw.review_finding_dispositions import (
     FindingDisposition,
@@ -85,6 +88,7 @@ from tests._codex_review_helpers import (
     assert_clean_after_refusal,
     exclude_cw_dir,
 )
+from tests._review_convergence_helpers import codex_audit_fixture
 from tests._shared.git_repos import add_bare_origin, commit_tracked_file, git_in
 from tests._shared.review_builders import (
     _make_constraint,
@@ -93,6 +97,7 @@ from tests._shared.review_builders import (
     _make_reviewer_doc,
 )
 from tests._shared.session_seeding import _make_ticket_task
+from tests._tool_fakes import codex_usage_stdout
 from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:
@@ -608,6 +613,59 @@ class TestFixInvocation:
         assert out.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
         bundle = diagnostics_bundle_dir("s-fix-error")
         assert list(bundle.glob("fix-cycle-1-nonzero_exit-*.json"))
+
+    def test_fix_capacity_failure_keeps_todays_classification_with_jsonl_stdout(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#3063 (R5): ``--json`` makes the fix stdout JSONL; classification holds.
+
+        ``_park_invocation_failure`` calls only ``_classify_codex_failure``, which
+        reads the exit code, timeout and ``-o`` file: the capacity and
+        input-too-large refinements (``_is_model_capacity_error`` and friends)
+        run on the reviewer roles and the PLAN, IMPL and FINALIZE turns, never
+        here. So a capacity ``turn.failed`` on a fix turn is still a plain
+        ``nonzero_exit`` / ``codex_error`` park, with the JSONL in the
+        diagnostics ``stdout_excerpt``. Wiring the refinement into the fix park
+        would be a behaviour change and is filed as debt, not done here.
+        """
+        worktree = _worktree(make_git_repo, "wt-fix-capacity")
+        capacity = codex_audit_fixture("capacity_turn_failed.jsonl")
+        runner = _FixLoopRunner(
+            [_MF_DOC],
+            fix_behaviors=[CodexRunResult(returncode=1, stdout=capacity, stderr="")],
+        )
+        out, _ = _run_loop(runner, worktree, session_id="s-fix-capacity")
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == "codex_error"
+        assert out.blocker.reason != CODEX_MODEL_CAPACITY
+        bundle = diagnostics_bundle_dir("s-fix-capacity")
+        (path,) = bundle.glob("fix-cycle-1-nonzero_exit-*.json")
+        assert "turn.failed" in path.read_text()
+
+    def test_fix_turns_record_usage_under_the_fix_stage(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#3063: the driver relabels the shared runner, so fix turns are FIX."""
+        worktree = _worktree(make_git_repo, "wt-fix-usage")
+        acc = UsageAccumulator("s-fix-usage", "T-fix", {})
+        fix_stdout = codex_usage_stdout(input_tokens=1000, output_tokens=100)
+        runner = acc.recording_runner(
+            UsageStage.REVIEW_ROLE,
+            _FixLoopRunner(
+                [_MF_DOC],
+                fix_behaviors=[
+                    CodexRunResult(returncode=1, stdout=fix_stdout, stderr="")
+                ],
+            ),
+        )
+        _run_loop(runner, worktree, session_id="s-fix-usage")
+
+        snapshot = acc.snapshot()
+        assert snapshot is not None
+        fix = snapshot.usage.by_stage[UsageStage.FIX]
+        assert (fix.input_tokens, fix.output_tokens, fix.turns) == (1000, 100, 1)
 
     def test_fix_failure_diagnostics_argv_carries_real_effort_pin(
         self, make_git_repo: Callable[..., Path]

@@ -29,7 +29,9 @@ from cw.codex_review_signals import (
     emit_verdict_comment_unverified,
     surface_tracker_io_outcome,
 )
+from cw.codex_runner import relabeled
 from cw.codex_stage_completion import STAGE_FAULTS
+from cw.models.usage import UsageStage
 from cw.tracker import TRACKER_GITHUB_ISSUES, TrackerClass, tracker_kind
 from cw.tracker_io import (
     PublicState,
@@ -216,7 +218,11 @@ def post_stage_comment(
             sid=sid,
             kind=kind,
         )
-        context = TrackerIoContext(runner=runner, client=client, worktree=worktree)
+        context = TrackerIoContext(
+            runner=relabeled(runner, UsageStage.TRACKER_IO),
+            client=client,
+            worktree=worktree,
+        )
         if github:
             post_github(post, text, context)
         else:

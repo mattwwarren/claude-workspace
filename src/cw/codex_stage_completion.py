@@ -52,6 +52,7 @@ __all__ = [
     "run_guarded_stage",
     "save_stage_blocked_marker",
     "stamp_session_id_on_running_task",
+    "with_usage_friction",
 ]
 
 _log = logging.getLogger(__name__)
@@ -165,6 +166,22 @@ def complete_session_through_door(
             guard_already_completed=guard_already_completed,
             usage=snapshot,
         )
+
+
+def with_usage_friction(
+    payload: dict[str, Any], usage: UsageAccumulator
+) -> dict[str, Any]:
+    """Return *payload* with the unavailable-usage friction token appended (#3063).
+
+    Unchanged when no completed turn lacked usage. The token reflects only the
+    turns recorded before the completion door: a tracker-IO turn that runs
+    after it reaches ``Session.usage`` and the warning, not the payload.
+    """
+    token = usage.friction_token()
+    if token is None:
+        return payload
+    friction = payload.get("friction_highlights") or []
+    return {**payload, "friction_highlights": [*friction, token]}
 
 
 def flush_late_usage(sid: str, usage: UsageAccumulator) -> None:

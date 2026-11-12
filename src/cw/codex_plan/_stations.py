@@ -29,6 +29,7 @@ from cw.codex_review import (
     _resolve_agent_spec,
     run_codex_roles,
 )
+from cw.codex_runner import relabeled
 from cw.dev_queue.lifecycle import (
     _PLAN_SOUNDNESS_MARKER,
     _PLAN_SOUNDNESS_MARKER_VERSION,
@@ -36,6 +37,7 @@ from cw.dev_queue.lifecycle import (
     _PLAN_SPEC_MARKER_VERSION,
 )
 from cw.models.enums import SandboxMode
+from cw.models.usage import UsageStage
 
 if TYPE_CHECKING:
     from datetime import date
@@ -196,7 +198,7 @@ def run_plan_stations(
             agent_files=PLAN_STATION_AGENT_FILES,
         ).text
         documents, failures, _metrics, rejected = run_codex_roles(
-            runner=runner,
+            runner=relabeled(runner, UsageStage.PLAN_STATION),
             worktree=worktree,
             roles=[role],
             prompts_by_role={role: build_station_prompt(role, spec, plan_text)},

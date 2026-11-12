@@ -265,6 +265,21 @@ class RecordingRunner:
         self._kind = kind
         self._role = role
 
+    @property
+    def inner(self) -> CodexRunner:
+        """The runner that actually launches the turn."""
+        return self._inner
+
+    @property
+    def accumulator(self) -> UsageAccumulator:
+        """The accumulator this runner records into."""
+        return self._accumulator
+
+    @property
+    def kind(self) -> UsageStage:
+        """The usage stage this runner records under."""
+        return self._kind
+
     def relabel(self, kind: UsageStage | None, role: str | None) -> RecordingRunner:
         """Return a runner over the same inner runner under a new label.
 

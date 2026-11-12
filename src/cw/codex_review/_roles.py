@@ -41,6 +41,7 @@ from cw.codex_review._const import (
     format_input_sizes,
 )
 from cw.codex_review._context import _parse_reviewer_document
+from cw.codex_runner import relabeled
 from cw.config import state_dir
 from cw.executor_diagnostics import (
     build_executor_failure,
@@ -669,7 +670,7 @@ def run_codex_roles(
                 )
                 continue
             doc, failure, metrics, rejected = _run_codex_role(
-                runner=runner,
+                runner=relabeled(runner, role=role),
                 worktree=worktree,
                 role=role,
                 prompt=prompts_by_role[role],

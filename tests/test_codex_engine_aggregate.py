@@ -9,6 +9,7 @@ summary loader are exercised against what codex actually produced.
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import json
 from pathlib import Path
@@ -18,7 +19,9 @@ import pytest
 from cw.codex_review._engine_aggregate import run_codex_aggregator
 from cw.codex_review._roles import _AUDIT_ARGV_FLAGS
 from cw.codex_review._shard import ReviewInputTooLargeError
-from cw.codex_runner import CodexRunResult
+from cw.codex_runner import CodexRunResult, relabeled
+from cw.codex_usage import UsageAccumulator
+from cw.models.usage import UsageStage
 from cw.review_engine.aggregate import (
     EngineAggregationOutput,
     assemble_summary,
@@ -35,7 +38,7 @@ from tests._review_engine_helpers import (
     engine_finding,
     make_aggregation_output,
 )
-from tests._tool_fakes import ScriptedCodexRunner, any_call
+from tests._tool_fakes import ScriptedCodexRunner, any_call, codex_usage_stdout
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 _REAL_PASS = (_FIXTURES / "codex_engine_aggregation_real_pass.json").read_text(
@@ -372,3 +375,48 @@ class TestPromptLimit:
 
         assert failure is None
         assert len(runner.calls) == 1
+
+
+class TestUsageRecording:
+    """#3063: the aggregation turn records as ENGINE_AGGREGATE; a retry does not."""
+
+    def test_the_aggregation_turn_is_recorded_under_engine_aggregate(
+        self, tmp_path: Path
+    ) -> None:
+        acc = UsageAccumulator("s-agg", "T-agg", {})
+        reply = dataclasses.replace(
+            _ok(_REAL_PASS),
+            stdout=codex_usage_stdout(input_tokens=500, output_tokens=50),
+        )
+        runner = relabeled(
+            acc.recording_runner(UsageStage.REVIEW_ROLE, _runner(reply)),
+            UsageStage.ENGINE_AGGREGATE,
+        )
+
+        assert _run(runner, tmp_path / "summary.json") is None
+
+        snapshot = acc.snapshot()
+        assert snapshot is not None
+        assert list(snapshot.usage.by_stage) == [UsageStage.ENGINE_AGGREGATE]
+        assert snapshot.usage.by_stage[UsageStage.ENGINE_AGGREGATE].input_tokens == 500
+
+    def test_the_flag_rejection_retry_records_nothing(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        acc = UsageAccumulator("s-agg", "T-agg", {})
+        scripted = ScriptedCodexRunner()
+        scripted.add(
+            lambda argv, _stdin: "--json" in argv,
+            CodexRunResult(2, "", _AUDIT_REJECTION),
+        )
+        scripted.add(any_call, _ok(_REAL_PASS))
+        runner = relabeled(
+            acc.recording_runner(UsageStage.REVIEW_ROLE, scripted),
+            UsageStage.ENGINE_AGGREGATE,
+        )
+
+        with caplog.at_level("WARNING", logger="cw.codex_usage"):
+            assert _run(runner, tmp_path / "summary.json") is None
+
+        assert acc.snapshot() is None
+        assert not caplog.records

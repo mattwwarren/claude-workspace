@@ -21,11 +21,13 @@ from cw.codex_plan._stations import (
 )
 from cw.codex_review import CODEX_MODEL_CAPACITY, PLAN_STATION_AGENT_FILES
 from cw.codex_runner import CodexRunResult
+from cw.codex_usage import UsageAccumulator
 from cw.dev_queue.lifecycle import (
     _PLAN_SOUNDNESS_MARKER,
     _PLAN_SPEC_MARKER,
     _plan_body_signoff_ok,
 )
+from cw.models.usage import UsageStage
 from tests._codex_review_helpers import _populate_global_agents_dir
 from tests._tool_fakes import (
     ScriptedCodexRunner,
@@ -251,3 +253,38 @@ class TestSpecResolution:
         assert "GLOBAL REVIEWER" in str(runner.calls[0]["stdin"])
         assert "GLOBAL SOUNDNESS" in str(runner.calls[1]["stdin"])
         assert set(PLAN_STATION_AGENT_FILES) == {PLAN_REVIEWER, PLAN_SOUNDNESS_REVIEWER}
+
+
+class TestUsageRecording:
+    """#3063: station turns record as PLAN_STATION under their real role names."""
+
+    def test_each_station_records_under_its_role_name(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        acc = UsageAccumulator("sess-st", "T-st", {})
+        scripted = _runner(_clean(PLAN_REVIEWER), _clean(PLAN_SOUNDNESS_REVIEWER))
+        recorder = acc.recording_runner(UsageStage.PLAN, scripted)
+
+        with caplog.at_level("WARNING", logger="cw.codex_usage"):
+            run_plan_stations(
+                runner=recorder,
+                worktree=tmp_path,
+                plan_text=_PLAN,
+                model="gpt-plan",
+                reasoning_effort="high",
+                session_id="sess-st",
+                binding=True,
+            )
+
+        # The scripted stations return no usage, so each completed turn warns
+        # with its real role name and the PLAN_STATION stage.
+        usage_messages = [
+            r.getMessage() for r in caplog.records if r.name == "cw.codex_usage"
+        ]
+        assert len(usage_messages) == 2
+        for role in (PLAN_REVIEWER, PLAN_SOUNDNESS_REVIEWER):
+            assert any(f"role={role} " in m for m in usage_messages)
+        assert all("stage=plan_station" in m for m in usage_messages)
+        snapshot = acc.snapshot()
+        assert snapshot is not None
+        assert snapshot.usage.unavailable_turns == 2

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -30,7 +30,15 @@ from cw.dev_queue.lifecycle import _plan_body_signoff_ok
 from cw.events import read_events
 from cw.exceptions import CwError
 from cw.local_runner import UNEXPECTED_ERROR
-from cw.models import ClientConfig, OrchestratorEventType, QueueItemStatus, Stage
+from cw.models import (
+    ClientConfig,
+    OrchestratorEventType,
+    QueueItemStatus,
+    Stage,
+    StageExecutorConfig,
+)
+from cw.models.orchestrator_config.stage import ModelPrice
+from cw.models.usage import UsageStage, UsageState, UsageUnavailableReason
 from cw.plan_fingerprint import PLAN_DRAFT_RELATIVE_PATH
 from cw.tracker import TRACKER_GITHUB_ISSUES, TRACKER_LINEAR
 from tests._backend_mcp_helpers import (
@@ -43,6 +51,7 @@ from tests._shared.cli_preflight import _write_tracker_config
 from tests._tool_fakes import (
     FakeGhCli,
     ScriptedCodexRunner,
+    codex_usage_stdout,
     plan_sentinel,
     plan_turn_result,
     station_findings_doc,
@@ -813,3 +822,94 @@ def test_comment_channel_resolutions_reach_the_prompt(
     assert result.status == "stage_complete"
     (call,) = h.plan_calls
     assert OPERATOR_MARKER in str(call["stdin"])
+
+
+_PRICE = ModelPrice(
+    input_usd_per_mtok=1.0, cached_input_usd_per_mtok=0.5, output_usd_per_mtok=2.0
+)
+_USAGE_STDOUT = codex_usage_stdout(input_tokens=1000, output_tokens=100)
+
+
+def _priced_config() -> StageExecutorConfig:
+    return StageExecutorConfig(
+        backend="codex", model="gpt-x", model_prices={"gpt-x": _PRICE}
+    )
+
+
+def _with_usage(reply: CodexRunResult) -> CodexRunResult:
+    return replace(reply, stdout=_USAGE_STDOUT)
+
+
+@freeze_time(NOW)
+def test_recorded_usage_is_persisted_by_stage_and_model(
+    harness: Callable[..., Harness],
+) -> None:
+    """#3063: the PLAN turn and both stations record under the configured model."""
+    h = harness()
+    h.runner.add(
+        stdin_contains(PLAN_TURN),
+        _with_usage(
+            plan_turn_result(SMALL_PLAN, plan_sentinel(tier="small", ticket_id=TICKET))
+        ),
+    )
+    add_stations(
+        h.runner,
+        reviewer=_with_usage(station_findings_doc(PLAN_REVIEWER)),
+        soundness=_with_usage(station_findings_doc(PLAN_SOUNDNESS_REVIEWER)),
+    )
+    with patch(
+        "cw.codex_driver.resolve_executor_config", return_value=_priced_config()
+    ):
+        result = h.run()
+
+    session = load_state().sessions[0]
+    assert session.usage is not None
+    assert session.usage.state is UsageState.RECORDED
+    assert set(session.usage.by_stage) == {UsageStage.PLAN, UsageStage.PLAN_STATION}
+    assert session.usage.by_stage[UsageStage.PLAN_STATION].turns == 2
+    assert list(session.usage.by_model) == ["gpt-x"]
+    assert session.cost_breakdown == pytest.approx({"gpt-x": 3 * 0.0012})
+    assert not [
+        f for f in result.friction_highlights if f.startswith("usage_unavailable")
+    ]
+
+
+@freeze_time(NOW)
+def test_no_price_map_records_tokens_without_a_cost_breakdown(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    h.runner.add(
+        stdin_contains(PLAN_TURN),
+        _with_usage(
+            plan_turn_result(SMALL_PLAN, plan_sentinel(tier="small", ticket_id=TICKET))
+        ),
+    )
+    add_stations(
+        h.runner,
+        reviewer=_with_usage(station_findings_doc(PLAN_REVIEWER)),
+        soundness=_with_usage(station_findings_doc(PLAN_SOUNDNESS_REVIEWER)),
+    )
+    h.run()
+
+    session = load_state().sessions[0]
+    assert session.usage is not None
+    assert session.usage.state is UsageState.RECORDED
+    assert session.cost_breakdown is None
+
+
+@freeze_time(NOW)
+def test_a_turn_without_usage_is_unavailable_with_a_friction_token(
+    harness: Callable[..., Harness], caplog: pytest.LogCaptureFixture
+) -> None:
+    h = harness()
+    add_stations(add_turn(h.runner))
+    with caplog.at_level("WARNING", logger="cw.codex_usage"):
+        result = h.run()
+
+    session = load_state().sessions[0]
+    assert session.usage is not None
+    assert session.usage.state is UsageState.UNAVAILABLE
+    assert session.usage.unavailable_reason is UsageUnavailableReason.NO_OUTPUT
+    assert [m for m in caplog.messages if "role=plan " in m]
+    assert any(f.startswith("usage_unavailable: ") for f in result.friction_highlights)
