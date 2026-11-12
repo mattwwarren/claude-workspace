@@ -22,6 +22,7 @@ from cw.auto_dev_result import (
     Health,
     Scope,
 )
+from cw.auto_dev_result.schema._vocab import EMPTY_DIFF_STATUS
 from cw.codex_review._const import (
     _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS,
     _CODEX_IMPL_BLOCKED_NEXT_ACTIONS,
@@ -290,7 +291,7 @@ def _empty_diff_result(
     return AutoDevResult(
         schema_version=_SCHEMA_VERSION,
         ticket_id=task.ticket_id,
-        status="empty_diff_blocked",
+        status=EMPTY_DIFF_STATUS,
         stage_reached=STAGE3_REVIEW,
         scope=Scope(
             tier=resolve_tier(task.scope_hint),

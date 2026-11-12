@@ -18,6 +18,7 @@ import pytest
 
 from cw.auto_dev_result.schema._vocab import (
     EMPTY_DIFF_BLOCKER_REASON,
+    EMPTY_DIFF_STATUS,
     PLAN_SCOPE_DRIFT_BLOCKER_REASON,
 )
 from cw.codex_fix_loop.baseline import (
@@ -247,7 +248,7 @@ class TestGate1:
         base = git_facts(repo, "main")["fork_point"]
         block = check_empty_diff(repo, base)
         assert block is not None
-        assert block.status == "empty_diff_blocked"
+        assert block.status == EMPTY_DIFF_STATUS
         assert block.reason == EMPTY_DIFF_BLOCKER_REASON
 
     def test_passes_on_nonempty_staged_diff_vs_fork(self, repo: Path) -> None:

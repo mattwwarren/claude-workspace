@@ -3837,6 +3837,14 @@ class TestEmptyDiffBlockedStatus:
     def test_blocker_reason_constant_value(self) -> None:
         assert EMPTY_DIFF_BLOCKER_REASON == "empty_diff_no_commits"
 
+    def test_status_constant_value(self) -> None:
+        """#3537: one public constant behind the codex empty-diff producers."""
+        from cw.auto_dev_result.schema._vocab import EMPTY_DIFF_STATUS
+
+        assert EMPTY_DIFF_STATUS == "empty_diff_blocked"
+        assert EMPTY_DIFF_STATUS in STAGE_FAILURE_STATUSES
+        assert EMPTY_DIFF_STATUS in SALVAGE_TERMINAL_STATUSES
+
 
 # ---------------------------------------------------------------------------
 # Issue #1862 — stale_dispatch: this ticket already has an open, unmerged PR

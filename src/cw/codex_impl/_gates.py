@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Final
 from cw._git import git_clean_env, git_output, run_git
 from cw.auto_dev_result.schema._vocab import (
     EMPTY_DIFF_BLOCKER_REASON,
+    EMPTY_DIFF_STATUS,
     PLAN_SCOPE_DRIFT_BLOCKER_REASON,
 )
 from cw.codex_fix_loop.commit import scope_violations
@@ -186,7 +187,7 @@ def check_empty_diff(worktree: Path, base: str) -> ImplBlock | None:
         "the IMPL turn left no net change against the fork point "
         f"{base[:_SHA_PREFIX_CHARS]}: the staged diff is empty, so there is "
         "nothing to commit",
-        status="empty_diff_blocked",
+        status=EMPTY_DIFF_STATUS,
     )
 
 

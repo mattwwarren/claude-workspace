@@ -128,13 +128,17 @@ PAUSED_FOR_USER_INPUT_STATUSES: frozenset[str] = (
     _V4_STATUSES | SCOPE_GATED_APPROVAL_STATUSES
 )
 STAGE_SUCCESS_STATUSES: frozenset[str] = frozenset({"shipped", "stage_complete"})
+# The empty-diff park status. Named because cw's codex producers (the IMPL
+# gate and result, the REVIEW synthesis, the stage-facts stamper) share it
+# (#3537); the Status Literal keeps its own spelling (a type position).
+EMPTY_DIFF_STATUS: Literal["empty_diff_blocked"] = "empty_diff_blocked"
 STAGE_FAILURE_STATUSES: frozenset[str] = frozenset(
     {
         "blocked",
         "merge_gate_blocked",
         "scope_exceeded",
         "forbidden_area",
-        "empty_diff_blocked",
+        EMPTY_DIFF_STATUS,
         "stale_dispatch",
     }
 )
