@@ -4578,6 +4578,22 @@ a PAST window, not the current one. Before pausing a wave:
 answers, the wall is gone. During a genuine wall, STOP the dispatch loop
 (each tick burns an attempt per pending ticket into the wall).
 
+### Usage-limit back-off windows
+
+- Windows are per client. `usage_limited_until` in `dispatch_state.json` maps
+  client name to deadline; one client's limit does not park the fleet.
+- `usage_limit_armed_at` is FLEET-LEVEL (#2276): the LATEST arm time across
+  clients, not a per-client time. Do not read it as "when client X was
+  limited". It feeds only the single fleet-level `dispatch.usage_limit_cleared`
+  `detected_at`. It is a historical marker, not expiry-checked.
+- A transcript-derived (reconcile) detection does not touch a client whose
+  window is still open. It arms only the known clients with no open window.
+- A failed persist of a window logs a warning and emits no
+  `dispatch.usage_limit_armed` event. The loop still backs off in memory for
+  that process. Check the log for `did not persist` when an expected armed
+  event is missing.
+- A per-client arm time is a separate ticket if it is wanted.
+
 ---
 
 ## Review debt filing
