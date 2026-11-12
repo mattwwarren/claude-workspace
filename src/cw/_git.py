@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -104,18 +105,29 @@ def git_output(
     *,
     cwd: Path | str | None = None,
     timeout: float | None = None,
+    errors: str = "strict",
 ) -> str:
     """``subprocess.check_output(["git", *argv])`` with ``GIT_*`` stripped.
 
     Always decodes as text — hardcoded rather than a parameter, since no
     caller wants bytes. ``check_output`` raises ``CalledProcessError`` on a
     non-zero exit by contract, so there is no ``check`` to expose.
+
+    *errors* is the decode error handler. The default ``"strict"`` decodes
+    with the locale encoding, exactly as before (#3419). Any other handler
+    (``"surrogateescape"`` for a ``-z`` path read) also pins the encoding to
+    :func:`sys.getfilesystemencoding`, the one ``os.fsencode`` uses to
+    re-encode argv and filesystem paths, so a returned path round-trips to
+    its original bytes. Such a string may contain lone surrogates.
     """
+    encoding = None if errors == "strict" else sys.getfilesystemencoding()
     return subprocess.check_output(
         ["git", *argv],
         cwd=cwd,
         timeout=timeout,
         text=True,
+        encoding=encoding,
+        errors=errors,
         env=git_clean_env(),
     )
 
