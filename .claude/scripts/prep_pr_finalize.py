@@ -20,7 +20,9 @@ Checks (all required unless flagged optional):
     --require-automerge; downgraded to optional regardless when
     .claude/project-config.yaml sets pr.auto_merge: false — see
     check-automerge-allowed below)
-  - Monitor is registered (optional, --require-monitor)
+  - Monitor is registered (optional, --require-monitor; downgraded to
+    optional regardless when .claude/project-config.yaml sets
+    pr.auto_merge: false, since such a repo never registers a monitor, #3548)
 
 Subcommands:
   verify                   Run all checks above, exit non-zero if any
@@ -397,6 +399,10 @@ UNDETERMINABLE_TEMPLATE = (
     "cannot determine pr.auto_merge ({reason}); "
     "refusing to arm auto-merge (fail closed, #2046/#2581)"
 )
+MONITOR_DOWNGRADE_WARNING = (
+    "pr.auto_merge: false in .claude/project-config.yaml — "
+    "monitor-registered check treated as optional, not required (#3548)"
+)
 
 
 @dataclass(frozen=True)
@@ -518,6 +524,25 @@ def resolve_effective_automerge_required(base_required: bool) -> bool:
     must never downgrade --require-automerge on a config it cannot read
     (#2581).
     """
+    return _required_unless_automerge_disabled(base_required)
+
+
+def resolve_effective_monitor_required(base_required: bool) -> bool:
+    """Downgrade a caller's --require-monitor when pr.auto_merge is false.
+
+    A repo with pr.auto_merge: false never hands PRs to /review-monitor, so no
+    monitor is ever registered. Requiring one regressed finalize Step 4c rows
+    to IMPL, which cannot register a monitor (#3548). Any config state other
+    than an explicit false (absent file/key, auto_merge: true, unparseable
+    YAML, no PyYAML) keeps the caller's own flag, and the fail-closed
+    read_automerge_gate is deliberately not used, as for
+    resolve_effective_automerge_required.
+    """
+    return _required_unless_automerge_disabled(base_required)
+
+
+def _required_unless_automerge_disabled(base_required: bool) -> bool:
+    """False when not required or when pr.auto_merge is explicitly false."""
     if not base_required:
         return False
     return resolve_project_config_auto_merge() is not False
@@ -863,6 +888,10 @@ def cmd_verify(args: argparse.Namespace) -> int:
             "treating auto-merge as required"
         )
 
+    effective_require_monitor = resolve_effective_monitor_required(args.require_monitor)
+    if effective_require_monitor != args.require_monitor:
+        summary.warnings.append(MONITOR_DOWNGRADE_WARNING)
+
     summary.checks.append(check_not_protected(summary.branch, summary))
     summary.checks.append(check_branch_pushed(summary.branch, summary))
 
@@ -874,14 +903,14 @@ def cmd_verify(args: argparse.Namespace) -> int:
             check_automerge(summary, required=effective_require_automerge)
         )
         summary.checks.append(
-            check_monitor_registered(summary, required=args.require_monitor)
+            check_monitor_registered(summary, required=effective_require_monitor)
         )
     else:
         # No PR means downstream checks are all skipped/failed.
         for name, required in [
             ("pr-sha-matches", True),
             ("automerge-enabled", effective_require_automerge),
-            ("monitor-registered", args.require_monitor),
+            ("monitor-registered", effective_require_monitor),
         ]:
             summary.checks.append(
                 CheckResult(
@@ -1373,7 +1402,11 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument(
         "--require-monitor",
         action="store_true",
-        help="Treat monitor-not-registered as a required failure",
+        help=(
+            "Treat monitor-not-registered as a required failure "
+            "(downgraded to optional when .claude/project-config.yaml "
+            "sets pr.auto_merge: false)"
+        ),
     )
     verify.add_argument(
         "--json", action="store_true", help="Emit JSON instead of markdown"
