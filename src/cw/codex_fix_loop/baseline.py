@@ -131,6 +131,36 @@ def unstage_review_artifacts(worktree: Path, artifacts: frozenset[str]) -> None:
         git_output(["restore", "--staged", "--", *staged_artifacts], cwd=worktree)
 
 
+def best_effort_dirty_paths(worktree: Path) -> tuple[str, ...]:
+    """Collect dirty paths when staging failed before the cycle's paths were known.
+
+    Reads ``git status`` rather than the index, so it works after a failed
+    ``git add``. A failed status read returns ``()``.
+    """
+    try:
+        out = git_output(
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            cwd=worktree,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return ()
+    paths: list[str] = []
+    records = [entry for entry in out.split("\0") if entry]
+    index = 0
+    while index < len(records):
+        entry = records[index]
+        status = entry[:2]
+        path = entry[3:]
+        if path:
+            paths.append(path)
+        if status[0] in "RC" or status[1] in "RC":
+            index += 1
+            if index < len(records):
+                paths.append(records[index])
+        index += 1
+    return tuple(sorted(set(paths)))
+
+
 def capture_cycle_baseline(worktree: Path) -> CycleBaseline | DirtyStart:
     """Return the cycle's clean-start baseline, or what makes the tree dirty.
 
