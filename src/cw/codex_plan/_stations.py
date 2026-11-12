@@ -21,6 +21,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
+from cw.auto_dev_result.schema._vocab import (
+    PLAN_UNREVIEWABLE_BLOCKER_REASON,
+    PLAN_UNSOUND_BLOCKER_REASON,
+)
 from cw.codex_review import (
     CODEX_ERROR,
     CODEX_MODEL_CAPACITY,
@@ -62,8 +66,8 @@ PLAN_STATIONS: Final[tuple[str, ...]] = (PLAN_REVIEWER, PLAN_SOUNDNESS_REVIEWER)
 
 #: The blocked reason a non-clean station verdict parks with.
 STATION_BLOCK_REASONS: Final[dict[str, str]] = {
-    PLAN_REVIEWER: "plan_unreviewable",
-    PLAN_SOUNDNESS_REVIEWER: "plan_unsound",
+    PLAN_REVIEWER: PLAN_UNREVIEWABLE_BLOCKER_REASON,
+    PLAN_SOUNDNESS_REVIEWER: PLAN_UNSOUND_BLOCKER_REASON,
 }
 
 #: The only retry-eligible station failure: a provider capacity blip.

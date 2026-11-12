@@ -1040,6 +1040,18 @@ class TestKnownBlockerReasons:
         assert AGENT_BLOCK_BLOCKER_REASON in KNOWN_BLOCKER_REASONS
         assert AGENT_BLOCK_BLOCKER_REASON in FINALIZE_REGRESS_BLOCKER_REASONS
 
+    def test_plan_station_reasons_are_named_and_registered(self) -> None:
+        """#3499: the two plan-station block reasons are named constants."""
+        from cw.auto_dev_result.schema._vocab import (
+            PLAN_UNREVIEWABLE_BLOCKER_REASON,
+            PLAN_UNSOUND_BLOCKER_REASON,
+        )
+
+        assert PLAN_UNREVIEWABLE_BLOCKER_REASON == "plan_unreviewable"
+        assert PLAN_UNSOUND_BLOCKER_REASON == "plan_unsound"
+        assert PLAN_UNREVIEWABLE_BLOCKER_REASON in KNOWN_BLOCKER_REASONS
+        assert PLAN_UNSOUND_BLOCKER_REASON in KNOWN_BLOCKER_REASONS
+
 
 class TestCodexFinalizeReasonLockstep:
     """#3062: ``_vocab`` restates the codex FINALIZE executor's owner constants.

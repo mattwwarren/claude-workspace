@@ -167,6 +167,10 @@ PLAN_MISSING_CONTEXT_BLOCKER_REASON: Literal["plan_missing_context"] = (
 TRACKER_TOOL_UNAVAILABLE_BLOCKER_REASON: Literal["tracker_tool_unavailable"] = (
     "tracker_tool_unavailable"
 )
+# The two plan review stations' block reasons: auto-dev-plan emits them, and
+# the codex PLAN executor's binding stations park with them (#3499).
+PLAN_UNREVIEWABLE_BLOCKER_REASON: Literal["plan_unreviewable"] = "plan_unreviewable"
+PLAN_UNSOUND_BLOCKER_REASON: Literal["plan_unsound"] = "plan_unsound"
 # The generic agent-side block: producer skills emit it, and the codex lanes
 # emit it for engine-round, unresolvable-engine and finalize failures. Named so
 # those producers share one spelling (#3438).
@@ -290,8 +294,8 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             REVIEW_ENGINE_MODIFIED_BLOCKER_REASON,
             REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON,
             GATE_TIMEOUT_BLOCKER_REASON,
-            "plan_unreviewable",
-            "plan_unsound",
+            PLAN_UNREVIEWABLE_BLOCKER_REASON,
+            PLAN_UNSOUND_BLOCKER_REASON,
             "ambiguity_scan_unconverged",
             "deferred_stub_unresolved",
             "scope_tier_stale",

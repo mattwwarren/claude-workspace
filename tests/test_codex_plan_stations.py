@@ -7,6 +7,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from cw.auto_dev_result.schema._vocab import (
+    PLAN_UNREVIEWABLE_BLOCKER_REASON,
+    PLAN_UNSOUND_BLOCKER_REASON,
+)
 from cw.codex_plan._result import (
     PLAN_SOUNDNESS_MARKER_VERSION,
     PLAN_SPEC_MARKER_VERSION,
@@ -15,6 +19,7 @@ from cw.codex_plan._stations import (
     PLAN_REVIEWER,
     PLAN_SOUNDNESS_REVIEWER,
     PLAN_STATIONS,
+    STATION_BLOCK_REASONS,
     STATION_OUTPUT_INSTRUCTIONS,
     build_station_prompt,
     run_plan_stations,
@@ -209,6 +214,13 @@ class TestStationNames:
         assert PLAN_REVIEWER is PLAN_REVIEWER_ROLE
         assert PLAN_SOUNDNESS_REVIEWER is PLAN_SOUNDNESS_REVIEWER_ROLE
         assert set(PLAN_STATION_AGENT_FILES) == set(PLAN_STATIONS)
+
+    def test_the_block_reasons_are_the_vocab_constants(self) -> None:
+        """#3499: no inline reason literals."""
+        assert {
+            PLAN_REVIEWER: PLAN_UNREVIEWABLE_BLOCKER_REASON,
+            PLAN_SOUNDNESS_REVIEWER: PLAN_UNSOUND_BLOCKER_REASON,
+        } == STATION_BLOCK_REASONS
 
 
 class TestLaunch:
