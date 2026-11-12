@@ -18,6 +18,7 @@ from cw.codex_plan._result import (
     PlanTurnFailure,
     backup_plan_md,
     clean_plan_text,
+    draft_fingerprint_on_disk,
     existing_plan_md_fingerprint,
     parse_plan_turn,
     plan_blocked,
@@ -364,6 +365,25 @@ def _plan_md(worktree: Path, data: bytes) -> Path:
 def _plan_md_backups(worktree: Path) -> list[Path]:
     path = worktree / PLAN_MD_RELATIVE_PATH
     return sorted(path.parent.glob(f"{path.name}.bak-*"))
+
+
+class TestDraftFingerprintOnDisk:
+    """#3526: the blocked exits read the draft's digest from disk."""
+
+    def test_the_digest_of_the_written_draft(self, tmp_path: Path) -> None:
+        path = write_plan_draft(tmp_path, _PLAN)
+
+        assert draft_fingerprint_on_disk(tmp_path) == compute_plan_draft_fingerprint(
+            path.read_text(encoding="utf-8")
+        )
+
+    def test_none_when_absent(self, tmp_path: Path) -> None:
+        assert draft_fingerprint_on_disk(tmp_path) is None
+
+    def test_none_when_not_utf8(self, tmp_path: Path) -> None:
+        _draft_bytes(tmp_path, b"\xff\xfe")
+
+        assert draft_fingerprint_on_disk(tmp_path) is None
 
 
 class TestPlanMdReplacement:

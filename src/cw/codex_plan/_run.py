@@ -66,6 +66,7 @@ from cw.codex_plan._result import (
     ResumeDraft,
     backup_plan_md,
     clean_plan_text,
+    draft_fingerprint_on_disk,
     existing_plan_md_fingerprint,
     parse_plan_turn,
     plan_blocked,
@@ -365,25 +366,34 @@ def _bound(
     )
 
 
-def _write_draft_best_effort(run: _Run, plan_text: str) -> bool:
+def _write_draft_best_effort(run: _Run, plan_text: str) -> str | None:
+    """Write the draft; its on-disk fingerprint, or ``None`` when not written."""
     try:
         write_plan_draft(run.worktree, plan_text)
     except PlanDraftError:
         raise
     except OSError:
         _log.warning("codex plan draft not written ticket=%s", run.task.ticket_id)
-        return False
-    return True
-
-
-def _draft_fingerprint(plan_text: str, *, written: bool) -> str | None:
-    """Return the fingerprint only when this run wrote the draft."""
-    if not written:
         return None
-    body = clean_plan_text(plan_text)
-    if not body.endswith("\n"):
-        body += "\n"
-    return compute_plan_draft_fingerprint(body)
+    return draft_fingerprint_on_disk(run.worktree)
+
+
+def _blocked_with_draft(
+    run: _Run,
+    reason: str,
+    details: str,
+    *,
+    fingerprint: str | None,
+    retry_eligible: bool = False,
+) -> _Exit:
+    """A blocked exit after the stations ran, carrying the draft's fingerprint."""
+    return run.blocked(
+        STAGE_PLAN_REVIEWED,
+        reason,
+        details,
+        retry_eligible=retry_eligible,
+        plan_draft_fingerprint=fingerprint,
+    )
 
 
 def _record_decisions(run: _Run, plan_text: str) -> str | None:
@@ -407,8 +417,8 @@ def _record_decisions(run: _Run, plan_text: str) -> str | None:
 
 def _park(run: _Run, plan_text: str, check: ApprovalCheck) -> _Exit:
     """A park exit: write the draft, run advisory stations, render the comment."""
-    draft_written = _write_draft_best_effort(run, plan_text)
-    result = _bound(run, check.result, bind_draft=draft_written)
+    draft_fingerprint = _write_draft_best_effort(run, plan_text)
+    result = _bound(run, check.result, bind_draft=draft_fingerprint is not None)
     stations = run_plan_stations(
         runner=run.runner,
         worktree=run.worktree,
@@ -448,48 +458,46 @@ def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
         binding=True,
     )
     if stations.block is not None:
-        draft_written = _write_draft_best_effort(run, plan_text)
         block = stations.block
-        return run.blocked(
-            STAGE_PLAN_REVIEWED,
+        return _blocked_with_draft(
+            run,
             block.reason,
             block.details,
+            fingerprint=_write_draft_best_effort(run, plan_text),
             retry_eligible=block.retry_eligible,
-            plan_draft_fingerprint=_draft_fingerprint(plan_text, written=draft_written),
         )
     marked = stamp_markers(clean_plan_text(plan_text), today=datetime.now(UTC).date())
     if not _plan_body_signoff_ok(marked):
-        draft_written = _write_draft_best_effort(run, plan_text)
-        return run.blocked(
-            STAGE_PLAN_REVIEWED,
+        return _blocked_with_draft(
+            run,
             CODEX_PLAN_ARTIFACT_MISSING,
             "stamped plan does not carry both sign-off markers",
-            plan_draft_fingerprint=_draft_fingerprint(plan_text, written=draft_written),
+            fingerprint=_write_draft_best_effort(run, plan_text),
         )
     old_fingerprint = existing_plan_md_fingerprint(run.worktree)
     backup_ok = False
-    draft_written = False
+    fingerprint: str | None = None
     try:
         write_plan_draft(run.worktree, plan_text)
-        draft_written = True
+        fingerprint = draft_fingerprint_on_disk(run.worktree)
         result = _bound(run, result)
         if old_fingerprint is not None:
             backup_ok = backup_plan_md(run.worktree)
         plan_path = write_plan_md(run.worktree, marked)
         written = plan_path.read_text(encoding="utf-8")
     except OSError as exc:
-        return run.blocked(
-            STAGE_PLAN_REVIEWED,
+        return _blocked_with_draft(
+            run,
             CODEX_PLAN_ARTIFACT_MISSING,
             f".cw/plan.md: {exc}",
-            plan_draft_fingerprint=_draft_fingerprint(plan_text, written=draft_written),
+            fingerprint=fingerprint,
         )
     if not _plan_body_signoff_ok(written):
-        return run.blocked(
-            STAGE_PLAN_REVIEWED,
+        return _blocked_with_draft(
+            run,
             CODEX_PLAN_ARTIFACT_MISSING,
             ".cw/plan.md does not carry both sign-off markers",
-            plan_draft_fingerprint=_draft_fingerprint(plan_text, written=draft_written),
+            fingerprint=fingerprint,
         )
     run.emit(
         OrchestratorEventType.STAGE_ENTERED,

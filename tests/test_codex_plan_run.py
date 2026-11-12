@@ -604,6 +604,70 @@ def test_a_blocking_station_parks_and_keeps_the_draft(
     ]
 
 
+def _on_disk_fingerprint(h: Harness) -> str:
+    return compute_plan_draft_fingerprint(h.draft_path().read_text(encoding="utf-8"))
+
+
+def test_a_station_block_fingerprint_is_the_on_disk_draft(
+    harness: Callable[..., Harness],
+) -> None:
+    """#3526: the blocked fingerprint is read from disk, never re-derived."""
+    h = harness()
+    leading = (
+        "<!-- plan-stage-scan-round: 2 -->\n<!-- plan-stage-settled: A1: ADOPTED -->\n"
+    )
+    h.draft_path().parent.mkdir(parents=True, exist_ok=True)
+    h.draft_path().write_text(leading + "old body\n", encoding="utf-8")
+    add_stations(
+        add_turn(h.runner),
+        reviewer=station_findings_doc(PLAN_REVIEWER, severity="MUST_FIX"),
+    )
+
+    result = h.run()
+
+    assert result.blocker is not None
+    assert h.draft_path().read_text(encoding="utf-8").startswith(leading)
+    assert result.plan_draft_fingerprint == _on_disk_fingerprint(h)
+
+
+def test_a_stamped_marker_failure_fingerprint_is_the_on_disk_draft(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    add_stations(add_turn(h.runner))
+    with patch("cw.codex_plan._run._plan_body_signoff_ok", return_value=False):
+        result = h.run()
+    assert result.blocker is not None
+    assert "stamped plan does not carry" in result.blocker.details
+    assert result.plan_draft_fingerprint == _on_disk_fingerprint(h)
+
+
+def test_a_post_write_marker_failure_fingerprint_is_the_on_disk_draft(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    add_stations(add_turn(h.runner))
+    checks = iter([True, False])
+    with patch(
+        "cw.codex_plan._run._plan_body_signoff_ok", side_effect=lambda _t: next(checks)
+    ):
+        result = h.run()
+    assert result.blocker is not None
+    assert result.plan_draft_fingerprint == _on_disk_fingerprint(h)
+
+
+def test_a_completing_draft_write_failure_has_no_fingerprint(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    add_stations(add_turn(h.runner))
+    with patch("cw.codex_plan._run.write_plan_draft", side_effect=OSError("ro")):
+        result = h.run()
+    assert result.blocker is not None
+    assert result.blocker.reason == "codex_plan_artifact_missing"
+    assert result.plan_draft_fingerprint is None
+
+
 def test_a_gate_failure_blocks_at_generated(harness: Callable[..., Harness]) -> None:
     h = harness()
     add_turn(h.runner, plan="## Summary\n\nNo tier, no files.\n")
@@ -632,6 +696,7 @@ def test_a_plan_write_failure_is_artifact_missing(
         result = h.run()
     assert result.blocker is not None
     assert result.blocker.reason == "codex_plan_artifact_missing"
+    assert result.plan_draft_fingerprint == _on_disk_fingerprint(h)
     errored = [p for t, p, _ in stage_events() if t == "stage.errored"]
     assert errored[0]["stage"] == "s1_plan_reviewed"
 

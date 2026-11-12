@@ -341,6 +341,19 @@ def write_plan_draft(worktree: Path, plan_text: str) -> Path:
     return path
 
 
+def draft_fingerprint_on_disk(worktree: Path) -> str | None:
+    """The fingerprint of the on-disk ``.cw/plan-draft.md``, ``None`` if unreadable.
+
+    The disk is the truth (#3526): the same rule ``bind_claimed_fingerprint``
+    applies, so a blocked exit never re-derives the draft's normalization.
+    """
+    try:
+        text = (worktree / PLAN_DRAFT_RELATIVE_PATH).read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return compute_plan_draft_fingerprint(text)
+
+
 def write_plan_md(worktree: Path, text: str) -> Path:
     """Write ``.cw/plan.md`` atomically."""
     path = worktree / PLAN_MD_RELATIVE_PATH
