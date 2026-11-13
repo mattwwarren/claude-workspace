@@ -16,12 +16,14 @@ against a captured payload.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
 
+import cw.cli.stop_hook.continuation as continuation_module
 from cw.cli.stop_hook._constants import (
     MAX_STOP_CONTINUATIONS,
     STOP_CONTINUATION_NUDGE,
@@ -108,8 +110,6 @@ def _row_counter() -> int | None:
 
 @pytest.fixture
 def worktree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setenv("CW_STOP_CONTINUATION_MODE", "enabled")
-    monkeypatch.setenv("CW_STOP_CONTINUATION_SCOPES", "client-a")
     session = _seed_session(tmp_path)
     assert session.worktree_path is not None
     _write_hook_context_file(session.worktree_path, headless=True)
@@ -175,58 +175,34 @@ class TestContinuationHappyPath:
         assert "lane" in payload
 
 
+class TestContinuationNoRollout:
+    def test_ordinary_client_and_lane_continue_without_configuration(
+        self,
+        worktree: Path,
+        recorded: list[tuple[object, dict[str, object]]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Tripwire: no env var, client name or lane may gate continuation.
+        for name in list(os.environ):
+            if name.startswith("CW_STOP_CONTINUATION"):
+                monkeypatch.delenv(name)
+        _seed_row()
+        _write_transcript(worktree, [_assistant(PLAIN_TEXT)])
+
+        result = _stop(worktree, last_assistant_message=PLAIN_TEXT)
+
+        assert result.stdout.strip() == NUDGE_JSON
+        assert _row_counter() == 1
+        [payload] = _continued_events(recorded)
+        assert payload["client"] == "client-a"
+
+    def test_continuation_source_reads_no_environment(self) -> None:
+        source = Path(continuation_module.__file__).read_text(encoding="utf-8")
+        assert "os.environ" not in source
+        assert "getenv" not in source
+
+
 class TestContinuationCap:
-    def test_off_mode_does_not_continue(
-        self,
-        worktree: Path,
-        recorded: list[tuple[object, dict[str, object]]],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setenv("CW_STOP_CONTINUATION_MODE", "off")
-        _seed_row()
-        _write_transcript(worktree, [_assistant(PLAIN_TEXT)])
-
-        result = _stop(worktree, last_assistant_message=PLAIN_TEXT)
-
-        assert result.stdout.strip() == ""
-        assert _row_counter() is None
-        assert recorded == []
-
-    def test_non_targeted_scope_does_not_continue(
-        self,
-        worktree: Path,
-        recorded: list[tuple[object, dict[str, object]]],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setenv("CW_STOP_CONTINUATION_SCOPES", "other-client")
-        _seed_row()
-        _write_transcript(worktree, [_assistant(PLAIN_TEXT)])
-
-        result = _stop(worktree, last_assistant_message=PLAIN_TEXT)
-
-        assert result.stdout.strip() == ""
-        assert _row_counter() is None
-        assert recorded == []
-
-    def test_shadow_mode_does_not_mutate_enrolled_scope(
-        self,
-        worktree: Path,
-        recorded: list[tuple[object, dict[str, object]]],
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        monkeypatch.setenv("CW_STOP_CONTINUATION_MODE", "shadow")
-        caplog.set_level("INFO", logger="cw.cli.stop_hook")
-        _seed_row()
-        _write_transcript(worktree, [_assistant(PLAIN_TEXT)])
-
-        result = _stop(worktree, last_assistant_message=PLAIN_TEXT)
-
-        assert result.stdout.strip() == ""
-        assert _row_counter() is None
-        assert recorded == []
-        assert "stop continuation shadowed" in caplog.text
-
     def test_cap_two_then_falls_through(
         self, worktree: Path, recorded: list[tuple[object, dict[str, object]]]
     ) -> None:
