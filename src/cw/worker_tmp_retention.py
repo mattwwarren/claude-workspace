@@ -32,9 +32,8 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from pydantic import BaseModel
 
-from cw.atomic import atomic_write_text
-from cw.config import state_dir
 from cw.exceptions import CwError, CwLockOrderError, CwLockReentrancyError
+from cw.sidecar_status import is_due, read_sidecar, write_sidecar
 from cw.worktree import resolve_fallback_worker_tmpdir
 
 if TYPE_CHECKING:
@@ -57,7 +56,7 @@ MEASURE_LIMIT = 50_000
 _NOT_EMPTY_ERRNOS = frozenset({errno.ENOTEMPTY, errno.EEXIST})
 
 # Process-local record of the last due run, keyed ``_ATTEMPT_KEY``. The sidecar
-# is the cross-process cadence record, but ``_write_status`` swallows a write
+# is the cross-process cadence record, but ``write_sidecar`` swallows a write
 # failure (a full or read-only state mount, the pressure this sweep targets),
 # and without this stamp every ~30 s dispatch tick would then find no record and
 # repeat the full sweep. Cleared between tests by the autouse conftest fixture.
@@ -107,25 +106,9 @@ def _lstat(path: str | os.PathLike[str]) -> os.stat_result:
     return os.lstat(path)
 
 
-def _status_path() -> Path:
-    return state_dir() / _STATUS_FILENAME
-
-
 def read_retention_status() -> RetentionStatus | None:
     """Return the last run's record, or None when absent or unreadable (fail-open)."""
-    try:
-        return RetentionStatus.model_validate_json(_status_path().read_text())
-    except (OSError, ValueError):
-        return None
-
-
-def _write_status(status: RetentionStatus) -> None:
-    """Persist *status* atomically; a write failure is logged, never raised."""
-    try:
-        state_dir().mkdir(parents=True, exist_ok=True)
-        atomic_write_text(_status_path(), status.model_dump_json(indent=2))
-    except OSError:
-        _log.warning("could not write %s; continuing", _STATUS_FILENAME, exc_info=True)
+    return read_sidecar(_STATUS_FILENAME, RetentionStatus)
 
 
 def _is_due(config: OrchestratorConfig, now: datetime) -> bool:
@@ -140,9 +123,7 @@ def _is_due(config: OrchestratorConfig, now: datetime) -> bool:
     if attempted is not None and timedelta(0) <= now - attempted < interval:
         return False
     last = read_retention_status()
-    if last is None:
-        return True
-    return not timedelta(0) <= now - last.last_run_at < interval
+    return is_due(last.last_run_at if last else None, interval, now)
 
 
 def _is_stale(st: os.stat_result, cutoff_ts: float) -> bool:
@@ -401,17 +382,20 @@ def auto_sweep_fallback_tmp(
         raise
     except (CwError, OSError, ValueError) as exc:
         _log.exception("fallback tmp retention failed; will retry next interval")
-        _write_status(
+        write_sidecar(
+            _STATUS_FILENAME,
             RetentionStatus(
                 last_run_at=run_at,
                 status="failed",
                 retention_days=days,
                 error=f"{type(exc).__name__}: {exc}",
-            )
+            ),
+            _log,
         )
         return None
 
-    _write_status(
+    write_sidecar(
+        _STATUS_FILENAME,
         RetentionStatus(
             last_run_at=run_at,
             status="ok",
@@ -423,7 +407,8 @@ def auto_sweep_fallback_tmp(
             retention_days=days,
             capped=result.capped,
             proc_guard=result.proc_guard,
-        )
+        ),
+        _log,
     )
     if result.removed_files + result.removed_dirs > 0:
         _log.info(

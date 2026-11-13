@@ -31,16 +31,13 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
 
-from cw.atomic import atomic_write_text
-from cw.config import state_dir
 from cw.events import record_event
 from cw.exceptions import CwError, CwLockOrderError, CwLockReentrancyError
 from cw.models import OrchestratorEventType
 from cw.session_retention import SessionPruneResult, prune_sessions
+from cw.sidecar_status import is_due, read_sidecar, write_sidecar
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from cw.models import OrchestratorConfig
 
 _log = logging.getLogger("cw.session_auto_prune")
@@ -65,38 +62,9 @@ class AutoPruneStatus(BaseModel):
     error: str | None = None
 
 
-def _status_path() -> Path:
-    return state_dir() / _STATUS_FILENAME
-
-
 def read_auto_prune_status() -> AutoPruneStatus | None:
     """Return the last run's record, or None when absent or unreadable (fail-open)."""
-    try:
-        return AutoPruneStatus.model_validate_json(_status_path().read_text())
-    except (OSError, ValueError):
-        return None
-
-
-def _write_status(status: AutoPruneStatus) -> None:
-    """Persist *status* atomically; a write failure is logged, never raised."""
-    try:
-        state_dir().mkdir(parents=True, exist_ok=True)
-        atomic_write_text(_status_path(), status.model_dump_json(indent=2))
-    except OSError:
-        _log.warning("could not write %s; continuing", _STATUS_FILENAME, exc_info=True)
-
-
-def _is_due(config: OrchestratorConfig, now: datetime) -> bool:
-    """True when no run is recorded or the interval has elapsed since the last.
-
-    A ``last_run_at`` in the future (clock skew, a restored sidecar) counts as
-    due, so a bad timestamp cannot stall the schedule.
-    """
-    last = read_auto_prune_status()
-    if last is None:
-        return True
-    interval = timedelta(minutes=config.sessions_auto_prune_interval_minutes)
-    return not timedelta(0) <= now - last.last_run_at < interval
+    return read_sidecar(_STATUS_FILENAME, AutoPruneStatus)
 
 
 def _emit_event(config: OrchestratorConfig, result: SessionPruneResult) -> None:
@@ -131,7 +99,9 @@ def auto_prune_sessions(
     if not config.sessions_auto_prune_enabled:
         return None
     run_at = now or datetime.now(UTC)
-    if not _is_due(config, run_at):
+    last = read_auto_prune_status()
+    interval = timedelta(minutes=config.sessions_auto_prune_interval_minutes)
+    if not is_due(last.last_run_at if last else None, interval, run_at):
         return None
 
     age_days = config.sessions_auto_prune_age_days
@@ -146,18 +116,21 @@ def auto_prune_sessions(
         raise
     except (CwError, OSError, ValueError) as exc:
         _log.exception("automatic sessions prune failed; will retry next interval")
-        _write_status(
+        write_sidecar(
+            _STATUS_FILENAME,
             AutoPruneStatus(
                 last_run_at=run_at,
                 status="failed",
                 age_days=age_days,
                 max_per_run=max_per_run,
                 error=f"{type(exc).__name__}: {exc}",
-            )
+            ),
+            _log,
         )
         return None
 
-    _write_status(
+    write_sidecar(
+        _STATUS_FILENAME,
         AutoPruneStatus(
             last_run_at=run_at,
             status="ok",
@@ -170,7 +143,8 @@ def auto_prune_sessions(
             capped=result.capped,
             bytes_before=result.bytes_before,
             bytes_after=result.bytes_after,
-        )
+        ),
+        _log,
     )
     if result.archived_count + result.deleted_count > 0:
         _emit_event(config, result)
