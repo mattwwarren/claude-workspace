@@ -8,6 +8,7 @@ the best-effort tracker comment (``_post_review_comment``).
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -513,8 +514,38 @@ def test_tracker_io_verified_post_skips_gh_and_emits_nothing(
     assert event.payload["client"] == "acme"
     assert event.payload["session_id"] == "sess-1"
     assert event.payload["reviewed_sha"] == "abc123"
-    assert event.payload["content_sha256"]
+    expected = hashlib.sha256(
+        plan_turn_parts("findings", context)[0].encode("utf-8")
+    ).hexdigest()
+    assert event.payload["content_sha256"] == expected
+    assert event.payload["content_sha256"] != hashlib.sha256(b"findings").hexdigest()
     assert event.payload["posted_at"]
+
+
+@pytest.mark.usefixtures("isolated_backend_layers")
+def test_audit_hash_covers_the_redacted_marked_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3353: the hash is of the redacted body the turn was given, not the raw text."""
+    runner = FakeCodexRunner()
+    context = _tracker_io(tmp_path, runner, monkeypatch)
+    raw = f"findings: see {tmp_path}/secret-note"
+    runner.output_file_content = tracker_io_turn_result(
+        "GEN-1", plan_turn_parts(raw, context)
+    )
+    _post_review_comment(
+        "GEN-1",
+        raw,
+        tracker="linear",
+        artifact_path=None,
+        tracker_io=context,
+        **_IDENTITY,
+    )
+    (event,) = _posted_events()
+    body = plan_turn_parts(raw, context)[0]
+    assert str(tmp_path) not in body
+    assert event.payload["content_sha256"] == hashlib.sha256(body.encode()).hexdigest()
+    assert event.payload["content_sha256"] != hashlib.sha256(raw.encode()).hexdigest()
 
 
 @pytest.mark.usefixtures("isolated_backend_layers")
@@ -585,6 +616,67 @@ def test_github_tracker_with_context_keeps_the_gh_path(
         )
     assert len(fake.calls) == 2
     assert runner.calls == []
+
+
+_SURFACE_FAULTS: list[Exception] = [
+    OSError("disk"),
+    ValueError("v"),
+    RuntimeError("boom"),
+    LookupError("k"),
+    TypeError("t"),
+    AttributeError("a"),
+    subprocess.SubprocessError("s"),
+]
+
+
+@pytest.mark.usefixtures("isolated_backend_layers")
+@pytest.mark.parametrize("fault", _SURFACE_FAULTS, ids=lambda f: type(f).__name__)
+def test_tracker_io_surface_fault_is_best_effort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    fault: Exception,
+) -> None:
+    """#3366: a fault surfacing the verified outcome cannot escape or re-queue."""
+    runner = FakeCodexRunner()
+    context = _tracker_io(tmp_path, runner, monkeypatch)
+    runner.output_file_content = tracker_io_turn_result(
+        "GEN-1", plan_turn_parts("findings", context)
+    )
+    with (
+        patch("cw.codex_review_persist.surface_tracker_io_outcome", side_effect=fault),
+        caplog.at_level("WARNING", logger="cw.codex_review_persist"),
+    ):
+        _post_linear(context)
+    (record,) = [r for r in caplog.records if "tracker_io_surface_failed" in r.message]
+    assert record.exc_info is not None
+    assert record.exc_info[1] is fault
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.usefixtures("isolated_backend_layers")
+def test_turn_and_surface_both_fault_nothing_escapes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#3366: the turn fault falls through to the surface; both are logged."""
+    context = _tracker_io(tmp_path, FakeCodexRunner(), monkeypatch)
+    with (
+        patch(
+            "cw.codex_review_persist.post_parts_via_turn",
+            side_effect=RuntimeError("turn"),
+        ),
+        patch(
+            "cw.codex_review_persist.surface_tracker_io_outcome",
+            side_effect=OSError("surface"),
+        ),
+        caplog.at_level("WARNING", logger="cw.codex_review_persist"),
+    ):
+        _post_linear(context)
+    messages = [r.message for r in caplog.records]
+    assert any("tracker_io_turn_failed" in m for m in messages)
+    assert any("tracker_io_surface_failed" in m for m in messages)
 
 
 @pytest.mark.parametrize(

@@ -70,6 +70,8 @@ re-exports. Submodules:
   stale by ``commit-hook`` is not repeated) (#3077).
 - ``repo_bare`` — per-client advisory warning when ``core.bare=true`` is set on a
   checkout that has a working tree (#2973).
+- ``spared_workers`` — the global advisory listing unrecorded daemon roster
+  workers older than the leaked-worker grace that the sweep spares (#3257).
 - ``user_level_hooks`` — detection of a ``cw signal-stop`` Stop hook installed
   in ``~/.claude/settings{,.local}.json``, where it applies to every Claude
   session instead of just cw's worktrees (#2226).
@@ -123,6 +125,7 @@ from cw.doctor.review_convergence import _check_review_convergence
 from cw.doctor.session_outcomes import _check_session_outcomes
 from cw.doctor.sessions_auto_prune import _check_sessions_auto_prune
 from cw.doctor.skills_drift import _check_skills_commands_drift
+from cw.doctor.spared_workers import _check_spared_unrecorded_workers
 from cw.doctor.tracker_mcp import _check_tracker_mcp
 from cw.doctor.user_level_hooks import _check_user_level_stop_hook
 from cw.doctor.versions import (
@@ -190,6 +193,7 @@ __all__ = [
     "_check_sessions_auto_prune",
     "_check_sessions_size",
     "_check_skills_commands_drift",
+    "_check_spared_unrecorded_workers",
     "_check_ssh_key_loaded",
     "_check_timed_out_merged",
     "_check_tracker_mcp",

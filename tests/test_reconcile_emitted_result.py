@@ -8,6 +8,7 @@ stage mismatch, and fall through to git synthesis for everything else.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -415,6 +416,48 @@ def test_route_parked_row_rescued_by_staged_result_under_both_policies(
 
     assert result == EmittedResultDisposition(complete=True)
     assert _row().stage == Stage.REVIEW
+
+
+@pytest.mark.parametrize(("complete_unrouted", "page"), _BOTH_POLICIES)
+def test_route_signoff_row_stays_held_under_both_policies(
+    tmp_config_dir: object,
+    monkeypatch: pytest.MonkeyPatch,
+    complete_unrouted: bool,
+    page: RefusalPageContext | None,
+) -> None:
+    """#3151: a signoff-parked REVIEW row re-parks at the gate under both policies."""
+    _seed_row(QueueItemStatus.AWAITING_OPERATOR_SIGNOFF, Stage.REVIEW)
+    store = load_dev_queue()
+    store.tasks[0].signoff = "operator"
+    save_dev_queue(store)
+    monkeypatch.setattr(
+        "cw.dispatch.review_gates.resolve_task_worktree",
+        lambda _t, _c: Path("/stub-worktree"),
+    )
+    monkeypatch.setattr(
+        "cw.dispatch.review_gates.current_head_sha", lambda _p: "signoff-head"
+    )
+    payload = _stage_complete_payload()
+    payload["stage_reached"] = "stage3_review"
+    payload["review"] = {
+        **payload["review"],
+        "agents_run": 2,
+        "reviewed_sha": "signoff-head",
+    }
+    session = _session({**payload, "ticket_id": _TICKET})
+
+    result = route_emitted_result(
+        session,
+        ticket_id=_TICKET,
+        complete_unrouted=complete_unrouted,
+        page=page,
+    )
+
+    assert result == EmittedResultDisposition(complete=True)
+    row = _row()
+    assert row.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+    assert row.stage == Stage.REVIEW
+    assert row.disposition == "signoff_gate"
 
 
 @pytest.mark.parametrize(("complete_unrouted", "page"), _BOTH_POLICIES)

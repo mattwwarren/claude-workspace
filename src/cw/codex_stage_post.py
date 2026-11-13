@@ -31,6 +31,7 @@ from cw.codex_review_signals import (
 )
 from cw.codex_runner import relabeled
 from cw.codex_stage_completion import STAGE_FAULTS
+from cw.gh import agent_marked_body
 from cw.models.usage import UsageStage
 from cw.tracker import TRACKER_GITHUB_ISSUES, TrackerClass, tracker_kind
 from cw.tracker_io import (
@@ -43,6 +44,7 @@ from cw.tracker_io import (
 from cw.tracker_post import PostStatus, post_parts
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from cw.codex_runner import CodexRunner
@@ -103,8 +105,8 @@ class StagePost:
             reason=reason,
         )
 
-    def posted(self, posted: list[dict[str, object]], content: str) -> None:
-        """Record a confirmed post."""
+    def posted(self, posted: list[dict[str, object]], bodies: Sequence[str]) -> None:
+        """Record a confirmed post; *bodies* are the marked, redacted parts as sent."""
         emit_verdict_comment_posted(
             ticket_id=self.ticket_id,
             client=self.client,
@@ -114,7 +116,7 @@ class StagePost:
             reviewed_sha=None,
             session_id=self.sid,
             posted=posted,
-            content=content,
+            bodies=bodies,
         )
 
     def unverified(self, posted: list[dict[str, object]]) -> None:
@@ -172,7 +174,7 @@ def post_github(post: StagePost, text: str, context: TrackerIoContext) -> None:
         # returned, because the comment may have landed.
         post.unverified(posted)
     else:
-        post.posted(posted, text)
+        post.posted(posted, tuple(agent_marked_body(part) for part in parts))
 
 
 def post_other(post: StagePost, text: str, context: TrackerIoContext) -> None:
@@ -182,7 +184,6 @@ def post_other(post: StagePost, text: str, context: TrackerIoContext) -> None:
     )
     surface_tracker_io_outcome(
         post.ticket_id,
-        text,
         tracker=post.tracker,
         outcome=outcome,
         identity=post.identity,

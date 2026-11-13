@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import subprocess
 from typing import TYPE_CHECKING, Any
@@ -18,6 +19,7 @@ from cw.codex_stage_post import (
 )
 from cw.codex_usage import UsageAccumulator
 from cw.events import read_events
+from cw.gh import agent_marked_body
 from cw.models import OrchestratorEventType
 from cw.models.usage import UsageStage
 from cw.tracker import TRACKER_GITHUB_ISSUES, TRACKER_LINEAR
@@ -104,6 +106,35 @@ class TestGitHub:
         assert event["reviewed_sha"] is None
         assert event["artifact_path"] is None
         assert event["posted"] == [{"index": 1, "comment_id": "41", "url": _URL}]
+
+    def test_success_hashes_the_marked_redacted_body(
+        self, tmp_path: Path, kind: VerdictCommentKind
+    ) -> None:
+        """#3353: the GitHub path hashes what post_issue_comment posts, not raw text."""
+        client = codex_tracker_client(tmp_path)
+        worktree = _worktree(tmp_path)
+        raw = f"verdict: see {worktree}/private-note"
+        ok = PostResult(PostStatus.POSTED, None, (PostedPart(index=1, url=_URL),), 1)
+        with patch("cw.codex_stage_post.post_parts", return_value=ok):
+            post_stage_comment(
+                task=_make_ticket_task(ticket_id=_TICKET, client=client.name),
+                client=client,
+                worktree=worktree,
+                sid="sess-s",
+                runner=ScriptedCodexRunner(),
+                text=raw,
+                artifact_path=None,
+                kind=kind,
+            )
+        (event,) = _events()
+        ctx = TrackerIoContext(
+            runner=ScriptedCodexRunner(), client=client, worktree=worktree
+        )
+        posted_body = agent_marked_body(plan_turn_parts(raw, ctx, marked=False)[0])
+        assert str(worktree) not in posted_body
+        expected = hashlib.sha256(posted_body.encode("utf-8")).hexdigest()
+        assert event["content_sha256"] == expected
+        assert event["content_sha256"] != hashlib.sha256(raw.encode()).hexdigest()
 
     def test_refused_is_skipped(self, tmp_path: Path, kind: VerdictCommentKind) -> None:
         client = codex_tracker_client(tmp_path)

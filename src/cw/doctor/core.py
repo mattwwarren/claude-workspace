@@ -70,6 +70,7 @@ from cw.doctor.routed_result_wedge import (
 from cw.doctor.session_outcomes import _check_session_outcomes
 from cw.doctor.sessions_auto_prune import _check_sessions_auto_prune
 from cw.doctor.skills_drift import _check_skills_commands_drift
+from cw.doctor.spared_workers import _check_spared_unrecorded_workers
 from cw.doctor.tracker_mcp import _check_tracker_mcp
 from cw.doctor.user_level_hooks import _check_user_level_stop_hook
 from cw.doctor.versions import (
@@ -462,7 +463,12 @@ def run_doctor(
     report.checks.extend(_check_worktree_paths_sessions(link_state))
 
     if link_state is not None:
-        report.checks.extend(_check_timed_out_merged(link_state, _clients))
+        report.checks.extend(
+            [
+                *_check_timed_out_merged(link_state, _clients),
+                _check_spared_unrecorded_workers(link_state, _clients),
+            ]
+        )
         # Wedge checks: load queue once, run every check off it.
         queue = _deps.load_dev_queue()
         report.wedge_findings.extend(_collect_wedge_findings(link_state, queue))

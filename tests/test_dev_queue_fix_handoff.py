@@ -102,3 +102,34 @@ def test_lock_bounded_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
         bounded=True,
     )
     assert seen == [False, True]
+
+
+def test_writer_stamps_the_row_the_fix_dispatch_reader_resolves() -> None:
+    """#3313: with duplicate rows, writer and reader agree on the row."""
+    from datetime import UTC, datetime
+
+    from cw.reconcile import fix_dispatch
+
+    seed_queue(
+        [
+            make_task(
+                status=QueueItemStatus.COMPLETED,
+                created_at=datetime(2026, 8, 1, tzinfo=UTC),
+            ),
+            make_task(
+                status=QueueItemStatus.RUNNING,
+                session_id="sess-2",
+                created_at=datetime(2026, 8, 2, tzinfo=UTC),
+            ),
+        ]
+    )
+
+    fix_handoff.record_pending_fix_dispatch(
+        "ACM-1", "acme", prompt="p", cycle=1, requested_by_session_id="sess-2"
+    )
+
+    store = load_dev_queue()
+    resolved = fix_dispatch._find_task(store, "ACM-1", "acme")
+    assert resolved is store.tasks[1]
+    assert resolved.pending_fix_dispatch is not None
+    assert store.tasks[0].pending_fix_dispatch is None

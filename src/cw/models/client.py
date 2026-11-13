@@ -587,6 +587,13 @@ class ClientConfig(BaseModel):
         """Names of this client's effective lanes, for membership checks."""
         return {lane.name for lane in self.effective_lanes}
 
+    def tracker_mcp_server(self, backend: str) -> str | None:
+        """The MCP server name tracker_mcp_gate.servers names for *backend*, or None."""
+        gate = self.tracker_mcp_gate
+        if gate is None or gate.servers is None:
+            return None
+        return gate.servers.get(backend)
+
     @model_validator(mode="after")
     def _validate_path_config(self) -> ClientConfig:
         has_workspace = self.workspace_path is not None

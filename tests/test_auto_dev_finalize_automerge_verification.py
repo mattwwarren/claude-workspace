@@ -618,3 +618,43 @@ def test_step4d_merge_freeze_refusal_paragraph() -> None:
     )
     assert "Never run `changelog-sync` a second time" in paragraph
     assert "never edit a released `## [X.Y.Z]` section by hand" in paragraph
+
+
+# --- #3548: monitor-registered downgrade is owned by the script ---
+
+_STEP4C_VERIFY_COMMAND = (
+    "~/.claude/scripts/prep_pr_finalize.py verify --require-automerge "
+    "--require-monitor --json"
+)
+
+
+def test_step4c_verify_command_keeps_require_monitor_byte_identical() -> None:
+    """Step 4c's static command cannot branch on project config, so it keeps
+    ``--require-monitor`` verbatim; ``prep_pr_finalize.py verify`` downgrades
+    the check to optional itself when ``pr.auto_merge`` is false (#3548).
+    """
+    assert _STEP4C_VERIFY_COMMAND in _step4c_section()
+
+
+def test_prep_pr_step9_documents_monitor_downgrade() -> None:
+    content = _cmd("prep-pr.md")
+    monitor_bullet = next(
+        line for line in content.splitlines() if line.startswith("- Monitor registered")
+    )
+    rerun_line = next(
+        line
+        for line in content.splitlines()
+        if line.startswith("Then re-run finalize with `--require-monitor`")
+    )
+    lead_in = next(
+        line
+        for line in content.splitlines()
+        if line.startswith("**If monitor registration is missing**")
+    )
+    assert "pr.auto_merge: false" in monitor_bullet
+    assert "pr.auto_merge: false" in rerun_line
+    # The first Step 9 verify runs without --require-monitor, so an unregistered
+    # monitor shows ``○`` on every repo: the skip must key on the config, not
+    # the optional marker.
+    assert "pr.auto_merge: false" in lead_in
+    assert "shows as optional" not in lead_in

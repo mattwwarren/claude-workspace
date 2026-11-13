@@ -319,7 +319,13 @@ class TestNonGitHub:
         assert event["session_id"] == "sess-p"
         assert event["reviewed_sha"] is None
         assert event["artifact_path"] == str(worktree / ".cw" / "plan.md")
-        expected = hashlib.sha256(_PLAN.encode("utf-8")).hexdigest()
+        # #3353: the hash is of the marked, redacted body the turn was given.
+        ctx = TrackerIoContext(
+            runner=ScriptedCodexRunner(), client=client, worktree=worktree
+        )
+        expected = hashlib.sha256(
+            plan_turn_parts(_PLAN, ctx)[0].encode("utf-8")
+        ).hexdigest()
         assert event["content_sha256"] == expected
 
     def test_refusal_emits_skipped(

@@ -48,6 +48,7 @@ from cw.models import (
     WatchedPr,
     counts_toward_client_ceiling,
 )
+from cw.models.client import TrackerMcpGateConfig
 from cw.models.gate_block import GateBlockBackoff
 from cw.models.operator_constraint import (
     PLAN_ACTOR,
@@ -415,6 +416,24 @@ class TestClientConfig:
         """#2442: omitted from clients.yaml -> the gate never runs."""
         c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
         assert c.tracker_mcp_gate is None
+
+    @pytest.mark.parametrize(
+        ("gate", "backend", "expected"),
+        [
+            (None, "codex", None),
+            (TrackerMcpGateConfig(plugin_id="linear@acme"), "codex", None),
+            (TrackerMcpGateConfig(servers={"codex": "linear"}), "codex", "linear"),
+            (TrackerMcpGateConfig(servers={"codex": "linear"}), "opencode", None),
+        ],
+    )
+    def test_tracker_mcp_server_lookup(
+        self, gate: TrackerMcpGateConfig | None, backend: str, expected: str | None
+    ) -> None:
+        """#3309: one lookup for every site that reads a backend's MCP server."""
+        c = ClientConfig(
+            name="test", workspace_path=Path("/dev/null"), tracker_mcp_gate=gate
+        )
+        assert c.tracker_mcp_server(backend) == expected
 
     def test_tracker_mcp_gate_config_defaults(self) -> None:
         from cw.models.client import TrackerMcpGateConfig
@@ -4267,6 +4286,42 @@ class TestLaunchMarker:
         from cw.models.tasks import records
 
         assert models.LaunchMarker is tasks.LaunchMarker is records.LaunchMarker
+
+    def test_pre_3319_blob_loads_with_since_boot_pair_none(self) -> None:
+        """#3319: additive optional fields, no DEV_QUEUE_SCHEMA_VERSION bump."""
+        from cw.models import LaunchMarker
+
+        marker = LaunchMarker.model_validate(
+            {"pid": self._PID, "start_time_ns": self._START_NS}
+        )
+
+        assert marker.start_since_boot_ns is None
+        assert marker.boot_id is None
+        assert DEV_QUEUE_SCHEMA_VERSION == 60
+
+    def test_new_shape_round_trips_through_json_on_a_row(self) -> None:
+        from cw.models import LaunchMarker
+
+        marker = LaunchMarker(
+            pid=self._PID,
+            start_time_ns=self._START_NS,
+            start_since_boot_ns=98_760_000_000,
+            boot_id="6f1c2a9e-0000-4000-8000-00000000000a",
+        )
+        task = TicketTask(ticket_id="GEN-1", client="acme", launch_marker=marker)
+
+        restored = TicketTask.model_validate_json(task.model_dump_json())
+
+        assert restored.launch_marker == marker
+
+    def test_unknown_extra_keys_are_ignored(self) -> None:
+        from cw.models import LaunchMarker
+
+        marker = LaunchMarker.model_validate(
+            {"pid": self._PID, "start_time_ns": self._START_NS, "future_key": 1}
+        )
+
+        assert marker == LaunchMarker(pid=self._PID, start_time_ns=self._START_NS)
 
 
 class TestScopeDriftApprovalFields:

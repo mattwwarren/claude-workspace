@@ -37,14 +37,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple
 
-from cw.models import CompletionReason, LastResultSource, SessionStatus
+from cw.models import CompletionReason, SessionStatus
 from cw.reconcile._shared import (
     _apply_sentinel_to_task,
     _sentinel_partial_route_consumed,
+    holds_staged_emit_result,
     stage_refusal_page,
 )
 from cw.reconcile.harvest_usage import stamp_backend_usage_unavailable
-from cw.result import has_terminal_result, reconstruct_staged_sentinel
+from cw.result import reconstruct_staged_sentinel
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -73,13 +74,6 @@ class RefusalPageContext(NamedTuple):
     subject: str
 
 
-def _holds_emitted_result(session: Session) -> bool:
-    """True when *session*'s own ``cw result emit`` result is terminal-shaped."""
-    return session.last_result_source is LastResultSource.EMIT_CLI and (
-        has_terminal_result(session.last_result)
-    )
-
-
 def route_emitted_result(
     session: Session,
     *,
@@ -102,7 +96,7 @@ def route_emitted_result(
     Takes no lock. ``_apply_sentinel_to_task`` takes ``dev_queue_lock`` itself,
     inside the caller's ``sessions_lock`` (ADR-0019).
     """
-    if not _holds_emitted_result(session):
+    if not holds_staged_emit_result(session, include_consumed=True):
         return None
     unrouted = EmittedResultDisposition(complete=True) if complete_unrouted else None
     if _sentinel_partial_route_consumed(session):

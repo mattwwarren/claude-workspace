@@ -11,7 +11,7 @@ it. Every other choice is fixed too:
 * ``-c mcp_servers.<server>.enabled_tools=[...]``: the tracker's comment
   create and list tools only (:data:`TRACKER_COMMENT_TOOLS`).
 * ``-c mcp_servers.<other>.enabled=false`` for every other server the
-  user-layer config declares.
+  user and system layers declare.
 
 ``--ignore-user-config`` is deliberately absent: the MCP server definition
 (command, url, auth) lives in ``~/.codex/config.toml`` and cw must not learn

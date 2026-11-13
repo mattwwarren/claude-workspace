@@ -21,7 +21,10 @@ Severity:
   :func:`cw.backend_mcp_config.read_backend_mcp`. ``ENABLED`` is ok (with the
   "auth, env and headless load unverified" caveat); ``UNKNOWN`` warns;
   ``ABSENT``/``DISABLED`` **fails** when the gate is on and the lane runs
-  PLAN or IMPL on opencode (the row would park), and warns otherwise.
+  PLAN or IMPL on opencode (the row would park), and warns otherwise. The
+  non-ENABLED readings carry a "declaration-only check" caveat. A named server
+  whose read was skipped (tracker unset) reports "MCP declaration not read"
+  with no caveat, because nothing was read.
 
 Root is ``client.repo_path or client.workspace_path``. Leaf module, no
 cross-``doctor`` dependencies; read-only.
@@ -57,7 +60,11 @@ _GATED_STAGES = frozenset({Stage.PLAN, Stage.IMPL})
 # ticket and a codex FINALIZE turn posts the PR link, both through the MCP.
 _CODEX_GATED_STAGES = frozenset({Stage.PLAN, Stage.FINALIZE})
 
-_CAVEAT = "declared in {path}; auth, env and headless load unverified"
+_UNVERIFIED = "auth, env and headless load unverified"
+_CAVEAT = "declared in {path}; " + _UNVERIFIED
+# Non-ENABLED readings only prove what the file says, not what loads.
+_DECLARED_ONLY = "declaration-only check; " + _UNVERIFIED
+_NOT_READ = "MCP declaration not read: tracker is unset"
 _LOST_CONTEXT = (
     "codex reviews on this tracker run without the operator's free-text ticket"
     " comments, the voided-findings block (#1814) and marker comments, because"
@@ -99,22 +106,20 @@ def _lane_backends(client: ClientConfig, lane: str) -> dict[str, tuple[Stage, ..
     return {backend: tuple(stages) for backend, stages in grouped.items()}
 
 
-def _server_for(client: ClientConfig, backend: str) -> str | None:
-    gate = client.tracker_mcp_gate
-    if gate is None or gate.servers is None:
-        return None
-    return gate.servers.get(backend)
-
-
 def _mcp_clause(server: str | None, reading: McpConfigReading | None) -> str:
     """Describe what the backend config says about the server."""
-    if server is None or reading is None:
+    if server is None:
         return "no tracker_mcp_gate.servers entry names this backend's MCP server"
+    if reading is None:
+        # The read is skipped only when the tracker is unset (see _lane_result).
+        return _NOT_READ
     if reading.state is McpState.ENABLED:
         return _CAVEAT.format(path=reading.path)
     if reading.state is McpState.UNKNOWN:
-        return f"MCP declaration unverified: {reading.reason}"
-    return f"server {server} is {reading.state.value} in {reading.path}"
+        return f"MCP declaration unverified: {reading.reason}; {_DECLARED_ONLY}"
+    return (
+        f"server {server} is {reading.state.value} in {reading.path}; {_DECLARED_ONLY}"
+    )
 
 
 def _lost_context_clause(backend: str, kind: TrackerKind) -> str:
@@ -146,7 +151,7 @@ def _severity(
 
 
 def _lane_result(entry: _Lane, root: Path, kind: TrackerKind) -> CheckResult:
-    server = _server_for(entry.client, entry.backend)
+    server = entry.client.tracker_mcp_server(entry.backend)
     reading = (
         read_backend_mcp(entry.backend, server, root)
         if server is not None and kind.tracker_class is TrackerClass.OTHER

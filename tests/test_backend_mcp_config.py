@@ -353,7 +353,7 @@ class TestLayerProbe:
 
 
 class TestDeclaredServerNames:
-    """#3057: the user-layer codex server names the tracker-IO turn disables."""
+    """#3057, #3368: the codex user and system layer server names turns disable."""
 
     @pytest.mark.parametrize(
         ("state", "expected"),
@@ -390,3 +390,39 @@ class TestDeclaredServerNames:
     @pytest.mark.parametrize("backend", [OPENCODE_BACKEND, "aider"])
     def test_other_backends_are_unknown(self, backend: str) -> None:
         assert declared_server_names(backend) is None
+
+    _SYSTEM_NOTION = '[mcp_servers.notion]\ncommand = "x"\n'
+
+    def test_user_then_system_names_deduplicated(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, "enabled")
+        write_system_layer(
+            monkeypatch,
+            tmp_path,
+            CODEX_BACKEND,
+            text=self._SYSTEM_NOTION + '\n[mcp_servers.linear]\ncommand = "y"\n',
+        )
+        assert declared_server_names(CODEX_BACKEND) == ("linear", "notion")
+
+    def test_missing_user_layer_still_answers_from_system(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, "missing")
+        write_system_layer(
+            monkeypatch, tmp_path, CODEX_BACKEND, text=self._SYSTEM_NOTION
+        )
+        assert declared_server_names(CODEX_BACKEND) == ("notion",)
+
+    def test_malformed_system_layer_is_ignored(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, "enabled")
+        write_system_layer(monkeypatch, tmp_path, CODEX_BACKEND, text="not = [toml")
+        assert declared_server_names(CODEX_BACKEND) == ("linear",)
+
+    def test_all_layers_unknown_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, "missing")
+        assert declared_server_names(CODEX_BACKEND) is None

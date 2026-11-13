@@ -379,22 +379,20 @@ def _post_via_tracker_io(
             identity.artifact_path,
             exc_info=True,
         )
-        surface_tracker_io_outcome(
-            ticket_id,
-            review_text,
-            tracker=tracker,
-            outcome=TrackerIoOutcome(
-                public_state=PublicState.POSSIBLE,
-                reason=TrackerIoReason.TURN_EXCEPTION,
-                parts_total=0,
-            ),
-            identity=identity,
+        outcome = TrackerIoOutcome(
+            public_state=PublicState.POSSIBLE,
+            reason=TrackerIoReason.TURN_EXCEPTION,
+            parts_total=0,
         )
-        return
-    surface_tracker_io_outcome(
-        ticket_id,
-        review_text,
-        tracker=tracker,
-        outcome=outcome,
-        identity=identity,
-    )
+    try:
+        surface_tracker_io_outcome(
+            ticket_id, tracker=tracker, outcome=outcome, identity=identity
+        )
+    except _TURN_FAULTS:
+        _log.warning(
+            "tracker_io_surface_failed ticket=%s tracker=%s: durable copy at %s",
+            ticket_id,
+            tracker,
+            identity.artifact_path,
+            exc_info=True,
+        )

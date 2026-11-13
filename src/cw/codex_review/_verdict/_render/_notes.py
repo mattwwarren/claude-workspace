@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cw.auto_dev_result import OperatorConstraintsSource
 from cw.codex_review._context._default_branch_config import (
     REVIEW_EXTRAS_PATH,
     REVIEW_POLICY_PATH,
@@ -270,7 +271,10 @@ def _render_operator_constraints_note(review: Review) -> list[str]:
     Every other value stays in the JSON envelope only, so GitHub comment text
     is byte-identical.
     """
-    if review.operator_constraints_source != "tracker_unreadable":
+    if (
+        review.operator_constraints_source
+        is not OperatorConstraintsSource.TRACKER_UNREADABLE
+    ):
         return []
     return [
         "**Operator context not read:** this tracker is not GitHub, so the fix "

@@ -355,7 +355,9 @@ def _apply_salvaged_completion(
     return outcome
 
 
-def holds_staged_emit_result(session: Session) -> bool:
+def holds_staged_emit_result(
+    session: Session, *, include_consumed: bool = False
+) -> bool:
     """True when *session* carries a staged, still-routable ``cw result emit`` result.
 
     The shared base predicate for "an emit_cli result is staged and not yet
@@ -366,15 +368,21 @@ def holds_staged_emit_result(session: Session) -> bool:
     ``cw.reconcile.idle._detect``'s ``_holds_staged_emit_result``): this
     predicate is the load-bearing gate for the exact defect class #2458 exists
     to fix, so a future change to what counts as "staged and routable" has one
-    site to update. ``cw spawn close`` (#2704) reaches the same gate through
-    ``route_emitted_result`` (``_holds_emitted_result`` plus the consumed check).
-    Each caller ANDs its own extra context-specific condition (DAEMON origin, no
-    route refusal yet, etc.) on top of this base pair.
+    site to update. Each caller ANDs its own extra context-specific condition
+    (DAEMON origin, no route refusal yet, etc.) on top of this base pair.
+
+    By default a result a #2458 partial route already consumed does not count.
+    *include_consumed* (#3152) drops that check, so the predicate answers only
+    "EMIT_CLI and terminal-shaped": ``route_emitted_result`` (reached by
+    ``cw spawn close`` and the dead-process harvest) passes True because it
+    must still see a consumed result to apply its own ``complete_unrouted``
+    policy (the harvest completes it, ``cw spawn close`` cancels it). The
+    Stop-hook and idle callers use the default.
     """
     return (
         session.last_result_source is LastResultSource.EMIT_CLI
         and _has_terminal_sentinel(session)
-        and not _sentinel_partial_route_consumed(session)
+        and (include_consumed or not _sentinel_partial_route_consumed(session))
     )
 
 

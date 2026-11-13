@@ -217,7 +217,7 @@ class _Run:
         gate = self.client.tracker_mcp_gate
         if gate is None:
             return self._mcp_blocked(f"tracker {kind.system!r}: tracker_mcp_gate unset")
-        server = (gate.servers or {}).get(CODEX_BACKEND, "")
+        server = self.client.tracker_mcp_server(CODEX_BACKEND) or ""
         try:
             validate_server_name(server)
             read_tools_for(kind.system)

@@ -1160,6 +1160,24 @@ common wedge conditions:
   gate's command is labelled operator-only and is for the operator, not for an
   agent to run. A terminal_sibling row holds no slot and is the section
   below's case.
+- `wedge/leaked-daemon-worker` (#2480, #2670) and the advisory
+  `spared-unrecorded-workers` (#3257). The reconcile leaked-worker sweep stops
+  a daemon roster worker on its own only when its cw session is terminal, or
+  when no cw session names it and it is evidenced orphaned: its `startedAt` is
+  at least 180 s old and its cwd is inside a configured client's cw worktree
+  base. The wedge lists those, and `cw doctor --reap` stops them. Every other
+  unrecorded worker is **spared** and stays on the roster: one younger than
+  the grace, one with no `startedAt`, one whose cwd is not a cw worktree or is
+  outside every configured base (a removed client, a changed
+  `worktree_base`), and every unrecorded worker while `clients.yaml` is
+  unreadable. `spared-unrecorded-workers` lists the spared ones older than the
+  grace, each with its short id and cwd; a worker with no `startedAt` cannot
+  be aged and is not listed. The remedy is by hand: `claude stop <short_id>`,
+  after checking the cwd for unsaved work. A hand-launched non-cw
+  `claude --bg` worker also appears there; leave it if it is intentional. A
+  spared worker does not block re-dispatch: worktree occupancy does not count
+  an unrecorded worker (the ADR-0006 occupancy trade-off). The advisory is
+  read-only, is not a wedge finding, and no `--reap` selector acts on it.
 
 Run `cw doctor --reap --json` for machine-readable output.
 
@@ -2362,7 +2380,8 @@ is the safer failure. A silently dropped finding is not.
 **Visibility limit.** `reviewer_reprompted:` in the sentinel `friction_highlights`
 is the interim record. The marker copy is garbage-collected with the worktree,
 and nothing aggregates these entries across tickets until the follow-up
-`cw doctor` per-role counter ships.
+`cw doctor` per-role `frame_missing` / `reviewer_failed` counter ships; #3331
+tracks it.
 
 ### Review configuration is read from the default branch (#3038)
 
@@ -3808,7 +3827,7 @@ for Linear), passes it the redacted, marked parts `cw post-comment
 --emit-only` would write, and verifies the JSON the agent returns. The turn
 runs `--sandbox read-only` with `-c approval_policy=never`, `--ephemeral`,
 low reasoning effort, in a scratch directory that is removed afterwards, with
-every other user-layer MCP server disabled. It is best-effort and runs after
+every other MCP server the user and system layers declare disabled. It is best-effort and runs after
 the review result is persisted: no outcome holds the row.
 
 Setup, per client:
@@ -4315,7 +4334,10 @@ reason. Wait for the annotation to clear; only a tick line still reading
   `session_id` as evidence, and charged no unproductive attempt. The
   leaked-worker sweep stops a live worker with no cw session once it is older
   than the grace window (180 s) and in a cw worktree base (#2670), so by the
-  time you look the worker is normally gone. **Check before requeueing:** the
+  time you look the worker is normally gone. A worker the sweep spares (for
+  example, its client was removed or its `worktree_base` changed) stays on the
+  roster: `cw doctor` lists it as `spared-unrecorded-workers`, and you stop it
+  with `claude stop <short_id>`. **Check before requeueing:** the
   ticket's worktree for unsaved work (commit and push it, or confirm it is
   junk), then run `cw dev-queue requeue <ticket> -c <client>`. Doctor class 5
   also lists this park as `wedge/blocked-on-user-dead-session` (a session
@@ -4609,7 +4631,10 @@ inspect those sessions' transcripts before deciding a cause.
 
 **Doctor.** The `session-outcomes` check shows the 7-day rate, the largest cause
 and the command to run. It is informational on the rate and never warns on it.
-It warns only when the inbox or history cannot be read.
+It warns only when the inbox or history cannot be read. That warning names the
+exception type and its message (for a file error, the `OSError` text with the
+failing path) and points at `cw event session-outcomes --days 7`, which reads
+the same files and reproduces the error (#3123).
 
 **Follow-up procedure.** Run the command on the real host, attach the output to
 the tracking ticket, and file one fix ticket per non-empty cause, largest first.
