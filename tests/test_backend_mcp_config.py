@@ -353,7 +353,7 @@ class TestLayerProbe:
 
 
 class TestDeclaredServerNames:
-    """#3057: the user-layer codex server names the tracker-IO turn disables."""
+    """#3057, #3368: the codex user and system layer server names turns disable."""
 
     @pytest.mark.parametrize(
         ("state", "expected"),
@@ -391,10 +391,6 @@ class TestDeclaredServerNames:
     def test_other_backends_are_unknown(self, backend: str) -> None:
         assert declared_server_names(backend) is None
 
-
-class TestTrackerIoOtherServerNames:
-    """#3368: the tracker-IO turn disables the user and system layers' names."""
-
     _SYSTEM_NOTION = '[mcp_servers.notion]\ncommand = "x"\n'
 
     def test_user_then_system_names_deduplicated(
@@ -407,7 +403,7 @@ class TestTrackerIoOtherServerNames:
             CODEX_BACKEND,
             text=self._SYSTEM_NOTION + '\n[mcp_servers.linear]\ncommand = "y"\n',
         )
-        assert bmc.tracker_io_other_server_names() == ("linear", "notion")
+        assert declared_server_names(CODEX_BACKEND) == ("linear", "notion")
 
     def test_missing_user_layer_still_answers_from_system(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -416,27 +412,17 @@ class TestTrackerIoOtherServerNames:
         write_system_layer(
             monkeypatch, tmp_path, CODEX_BACKEND, text=self._SYSTEM_NOTION
         )
-        assert bmc.tracker_io_other_server_names() == ("notion",)
+        assert declared_server_names(CODEX_BACKEND) == ("notion",)
 
     def test_malformed_system_layer_is_ignored(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, "enabled")
         write_system_layer(monkeypatch, tmp_path, CODEX_BACKEND, text="not = [toml")
-        assert bmc.tracker_io_other_server_names() == ("linear",)
+        assert declared_server_names(CODEX_BACKEND) == ("linear",)
 
     def test_all_layers_unknown_returns_none(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, "missing")
-        assert bmc.tracker_io_other_server_names() is None
-
-    def test_declared_server_names_stays_user_layer_only(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        """Other codex turns keep the user-layer answer; only tracker-IO widens."""
-        stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, "enabled")
-        write_system_layer(
-            monkeypatch, tmp_path, CODEX_BACKEND, text=self._SYSTEM_NOTION
-        )
-        assert declared_server_names(CODEX_BACKEND) == ("linear",)
+        assert declared_server_names(CODEX_BACKEND) is None
