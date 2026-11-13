@@ -158,8 +158,9 @@ a sentinel carries one — and they never share values, so always say which.
   nothing recorded and the row is not requeued. A comment-based resolution is
   ignored as a mirror while the list is non-empty. To consolidate: merge the
   decisions into one file, then `cw dev-queue remove <T> -c <C>`,
-  `cw dev-queue add <T> -c <C>` (re-pass lane, priority and scope), wait for the
-  plan stage to re-park, and `cw dev-queue resolve <T> -c <C> --file <merged.md>`.
+  `cw dev-queue add <T> -c <C>` (re-pass lane, priority and scope; remove then
+  add also resets the row's attempt count, cost totals and session binding, not
+  only the ledger), wait for the plan stage to re-park, and `cw dev-queue resolve <T> -c <C> --file <merged.md>`.
   `cancel` does not work: re-adding a cancelled row at the same stage is a no-op.
   Restart `cw dev-queue serve` before using it: a dispatch loop older than the
   release that ships `resolve` rewrites the queue without the ledger and erases

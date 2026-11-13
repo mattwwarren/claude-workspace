@@ -310,6 +310,25 @@ class TestTotalCap:
         _assert_nothing_recorded(queue_bytes)
         assert len(_row().operator_resolutions) == 4
 
+    def test_over_cap_consolidation_warning_names_what_remove_and_add_lose(
+        self,
+    ) -> None:
+        _seed(
+            last_result=_AMBIGUITIES, operator_resolutions=make_resolutions([MAX] * 4)
+        )
+        with pytest.raises(ApproveGateError) as exc:
+            _record("z")
+        message = " ".join(str(exc.value).split())
+        discards = message.split("this discards", 1)[1].split(")", 1)[0]
+        assert "ledger" in discards
+        assert "attempt" in discards
+        assert "cost" in discards
+        assert "session binding" in discards
+        reset = message.split("re-pass", 1)[1].split("let the plan stage", 1)[0]
+        assert "attempts" in reset
+        assert "cost total" in reset
+        assert "session binding" in reset
+
     def test_multibyte_text_is_counted_in_bytes_not_chars(self) -> None:
         entries = make_resolutions([MAX] * 3 + [MAX - 2])
         entries[3] = entries[3].model_copy(update={"text": "é" * (MAX // 2 - 1)})
