@@ -116,15 +116,6 @@ def worktree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return session.worktree_path
 
 
-@pytest.fixture(autouse=True)
-def continuation_rollout_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Enable the explicitly opted-in test tenant for continuation coverage."""
-    monkeypatch.setattr(
-        "cw.cli.stop_hook.continuation.STOP_CONTINUATION_ENABLED_CLIENTS",
-        frozenset({"client-a"}),
-    )
-
-
 @pytest.fixture
 def recorded(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, dict[str, object]]]:
     events: list[tuple[object, dict[str, object]]] = []
@@ -396,6 +387,15 @@ class TestContinuationEventRegistration:
             OrchestratorEventType.SESSION_STOP_CONTINUED
             not in _DEFAULT_OPERATOR_EVENT_TYPES
         )
+
+
+class TestApiErrorPrefixSingleSource:
+    def test_prefix_is_not_redefined_in_stop_hook_constants(self) -> None:
+        from cw.cli.stop_hook import _constants, continuation
+        from cw.reconcile import liveness_page
+
+        assert not hasattr(_constants, "_API_ERROR_PREFIX")
+        assert continuation._API_ERROR_PREFIX is liveness_page._API_ERROR_PREFIX
 
 
 class TestContinuationHelpersDirect:

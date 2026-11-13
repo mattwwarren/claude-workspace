@@ -30,10 +30,8 @@ import click
 
 from cw._util import claude_project_dir
 from cw.cli.stop_hook._constants import (
-    _API_ERROR_PREFIX,
     _LOGGER_NAME,
     MAX_STOP_CONTINUATIONS,
-    STOP_CONTINUATION_ENABLED_CLIENTS,
     STOP_CONTINUATION_NUDGE,
 )
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
@@ -42,6 +40,7 @@ from cw.exceptions import USAGE_LIMIT_RE
 from cw.models import OrchestratorEventType, QueueItemStatus
 from cw.reconcile import find_running_task_for_session
 from cw.reconcile._shared import _DEV_QUEUE_LOAD_ERRORS, _lookup_matching_task
+from cw.reconcile.liveness_page import _API_ERROR_PREFIX
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -84,14 +83,6 @@ def maybe_continue_headless_turn(
         return
     transcript = _find_transcript(session, cwd_value, claude_session_id)
     if transcript is None or _turn_ended_in_tool_error(transcript):
-        return
-    if session.client not in STOP_CONTINUATION_ENABLED_CLIENTS:
-        logger.info(
-            "stop continuation shadow candidate: client=%s lane=%s ticket=%s",
-            session.client,
-            task.lane,
-            ticket_id,
-        )
         return
     claim = _claim_stop_continuation(ticket_id, session)
     if claim is None:

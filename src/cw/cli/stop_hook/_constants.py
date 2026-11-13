@@ -15,11 +15,6 @@ from __future__ import annotations
 # name must keep seeing it after the package split (#2496).
 _LOGGER_NAME = "cw.cli.stop_hook"
 
-# Shared marker used by the liveness evidence and Stop-hook continuation paths
-# to recognize provider API-error text. Keep the wording in one place so a
-# provider error can never be treated as a continuation candidate by drift.
-_API_ERROR_PREFIX = "API Error"
-
 # ``paused_status`` of the signal-only ``session.needs_attention`` page fired
 # when a staged emit_cli result reaches the resolution step and neither its
 # reconstruction nor the transcript fallback yields a routable sentinel
@@ -68,8 +63,3 @@ STOP_CONTINUATION_NUDGE = (
     "AUTO_DEV_RESULT sentinel, or, if something is blocking you, emit a "
     "blocked sentinel stating the reason."
 )
-
-# Roll out auto-continuation per client after reviewing shadow logs. Empty is
-# the fail-safe default: eligible Stops are observed but never continued until
-# an operator explicitly enables the client's rollout.
-STOP_CONTINUATION_ENABLED_CLIENTS: frozenset[str] = frozenset()
