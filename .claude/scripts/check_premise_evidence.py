@@ -395,9 +395,10 @@ def _parse_form_b(text: str) -> _Entry | None:
     idx = text.find(_SEP_EVIDENCE)
     if idx < 0:
         return None
-    has_legacy_key_pair = _SEP_DEPENDS in text
+    suffix = text[idx:]
+    has_legacy_key_pair = _SEP_DEPENDS in suffix
     has_new_form_metadata = any(
-        marker in text
+        marker in suffix
         for marker in (
             f"{_SEP}Route: ",
             f"{_SEP}Observed-at: ",
@@ -411,7 +412,7 @@ def _parse_form_b(text: str) -> _Entry | None:
     claim = text[:idx].strip()
     if not claim:
         return None
-    parts = _KEY_SPLIT_RE.split(text[idx:])
+    parts = _KEY_SPLIT_RE.split(suffix)
     pairs: dict[str, str] = {}
     duplicate_keys: set[str] = set()
     for key, value in zip(parts[1::2], parts[2::2], strict=True):

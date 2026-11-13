@@ -649,6 +649,14 @@ def test_parse_form_c_prose() -> None:
     assert entry.depends_on == "seen in --help output"
 
 
+def test_parse_form_c_marker_before_evidence_is_not_form_b() -> None:
+    entry = _mod._parse_entry(
+        ["- the flag exists — Depends on: prose marker — Evidence: cited output"]
+    )
+    assert entry.form == "c"
+    assert entry.claim == "the flag exists"
+
+
 def test_parse_evidence_prefixed_form_c_without_depends_on() -> None:
     entry = _mod._parse_entry(
         ["- Evidence: prior observation — Evidence: cited output"]
