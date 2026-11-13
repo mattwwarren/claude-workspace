@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.98.0] - 2026-11-13
+
 ### Fixed
 
 - **Plan-stage Self-Verified premises are bound to the check that produced them (#2343).** The Product Manager Reviewer stamps each `Verified: YES` premise with `Observed-at`, `Kind` and `Tool-call`, a new stdlib script (`.claude/scripts/check_premise_evidence.py`) validates their shape and the dispatch time window, and a stale or unbound premise is downgraded to `unverified` instead of surviving as "verified". A failed re-verification is `Verified: NO`, never carried forward. The script proves freshness shape only, not that the quoted call ran. Prose and script only: no schema, `blocker.reason` or status change.
