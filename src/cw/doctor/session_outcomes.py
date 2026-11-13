@@ -21,18 +21,18 @@ if TYPE_CHECKING:
 _CHECK_NAME = "session-outcomes"
 _WINDOW_DAYS = 7
 _SAMPLES = 0
+_COMMAND = f"cw event session-outcomes --days {_WINDOW_DAYS}"
 
 
 def _summary(report: OutcomeReport) -> str:
-    command = f"cw event session-outcomes --days {_WINDOW_DAYS}"
     if report.spawned == 0:
-        return f"{_WINDOW_DAYS}d window: no worker sessions spawned; run `{command}`"
+        return f"{_WINDOW_DAYS}d window: no worker sessions spawned; run `{_COMMAND}`"
     largest = report.largest_cause
     largest_text = largest.value if largest is not None else "none"
     return (
         f"{_WINDOW_DAYS}d window: {report.without_result} of {report.spawned}"
         f" spawned without a result ({report.no_result_rate:.1%});"
-        f" largest cause {largest_text}; run `{command}`"
+        f" largest cause {largest_text}; run `{_COMMAND}`"
     )
 
 
@@ -50,8 +50,8 @@ def _check_session_outcomes(state: CwState | None) -> CheckResult:
         )
     except (OSError, ValueError) as exc:
         detail = (
-            f"could not read the event inbox or history ({type(exc).__name__});"
-            " breakdown unavailable"
+            f"could not read the event inbox or history ({type(exc).__name__}: {exc});"
+            f" breakdown unavailable; run `{_COMMAND}` to reproduce the error"
         )
         return CheckResult(_CHECK_NAME, ok=True, warn=True, detail=detail)
     return CheckResult(_CHECK_NAME, ok=True, detail=_summary(report))

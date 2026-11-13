@@ -12,6 +12,11 @@ its siblings: the root of the package's layering. Split out of the flat
 from __future__ import annotations
 
 from cw.models import ReapReason, SessionStatus
+from cw.session_event_vocabulary import (
+    CAUSE_USAGE_LIMIT_CUTOFF,
+    PHANTOM_REAP_MERGED_REASON,
+    USAGE_LIMITED_MID_TURN,
+)
 
 # Pinned logger name for every record this package emits. Deliberately a
 # literal, not ``__name__``: the pre-split ``reconcile/_shared.py`` logged under
@@ -196,7 +201,9 @@ _NEVER_CLAIMED_COMPLETION_REASON = "never_claimed_completion_refused"
 # Reason tag written to SESSION_COMPLETED events when a phantom/stalled/idle
 # session's PR was found MERGED before its task was reverted to PENDING.
 # Prevents re-dispatch of already-shipped tickets (GitHub issue #637).
-_PHANTOM_REAP_MERGED_REASON = "phantom_reap_merged"
+# The wire value lives in cw.session_event_vocabulary, which the audit-only
+# cw.session_outcomes reader shares (#3124).
+_PHANTOM_REAP_MERGED_REASON = PHANTOM_REAP_MERGED_REASON
 # Paused-status written to SESSION_NEEDS_ATTENTION events when the gh
 # availability or PR-merged check returns an inconclusive result and the
 # task is routed to BLOCKED_ON_USER rather than being reverted to PENDING
@@ -227,7 +234,8 @@ _STOPPED_WITHOUT_SENTINEL_REASON = "stopped_without_sentinel"
 # event) when a still-roster-present worker's transcript tail is a usage-limit
 # message with no sentinel (GitHub #2324). Stamped on the BLOCKED_ON_USER park
 # a non-auto reap_policy routes to; the auto branch reverts to PENDING instead.
-_USAGE_LIMITED_MID_TURN_REASON = "usage_limited_mid_turn"
+# Wire value shared through cw.session_event_vocabulary (#3124).
+_USAGE_LIMITED_MID_TURN_REASON = USAGE_LIMITED_MID_TURN
 # The 6-member reap-eligible disposition base shared verbatim by
 # concierge/false_park.py's _FALSE_PARK_ELIGIBLE_DISPOSITIONS (recipe 1: false-park
 # requeue) and escalation.py's _ELIGIBLE_DISPOSITIONS (BLOCKED_ON_USER
@@ -323,8 +331,10 @@ _RESCUE_PR_CLOSES_TRAILER_TEMPLATE = "\n\nCloses #{ticket_id}"
 # idle_stall_recovered — watchdog fired but no usage-limit message found.
 # usage_limit_cutoff   — transcript contains a Claude session/usage-limit message.
 # USAGE_LIMIT_RE is imported from cw.exceptions (centralized there for reuse).
+# The usage_limit_cutoff wire value is shared through
+# cw.session_event_vocabulary (#3124).
 _CAUSE_IDLE_STALL = "idle_stall_recovered"
-_CAUSE_USAGE_LIMIT = "usage_limit_cutoff"
+_CAUSE_USAGE_LIMIT = CAUSE_USAGE_LIMIT_CUTOFF
 
 # Grace window for a newly-spawned session to register with the daemon
 # (`claude agents --json`). `claude --bg` spawn → daemon roster registration

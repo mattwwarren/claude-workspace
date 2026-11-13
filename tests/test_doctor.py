@@ -7882,6 +7882,35 @@ class TestWedgeActiveDaemonStaleNoSentinel:
         updated = next(s for s in state.sessions if s.id == "orch-sess-1")
         assert updated.status == SessionStatus.ACTIVE
 
+    @pytest.mark.parametrize("purpose_value", ["review", "plan", "finalize"])
+    def test_non_orchestrate_purposes_are_flagged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        purpose_value: str,
+    ) -> None:
+        """#3253: only ORCHESTRATE is skipped; codex stage purposes are flagged."""
+        from cw.config import save_state
+        from cw.models import CwState, SessionPurpose
+
+        home, _daemon = self._setup_common(tmp_path, monkeypatch)
+        worktree = tmp_path / "wt"
+        self._stamp_transcript(home, worktree, stale_minutes=50)
+
+        sess = self._make_session(
+            tmp_path,
+            worktree,
+            sid=f"{purpose_value}-sess-1",
+            purpose=SessionPurpose(purpose_value),
+        )
+        save_state(CwState(sessions=[sess]))
+
+        report = run_doctor(reap=False)
+
+        classes = [f.wedge_class for f in report.wedge_findings]
+        assert "wedge/active-daemon-stale-no-sentinel" in classes
+
     def test_signal_only_without_reap(
         self,
         tmp_config_dir: Path,

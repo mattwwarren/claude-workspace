@@ -2380,7 +2380,8 @@ is the safer failure. A silently dropped finding is not.
 **Visibility limit.** `reviewer_reprompted:` in the sentinel `friction_highlights`
 is the interim record. The marker copy is garbage-collected with the worktree,
 and nothing aggregates these entries across tickets until the follow-up
-`cw doctor` per-role counter ships.
+`cw doctor` per-role `frame_missing` / `reviewer_failed` counter ships; #3331
+tracks it.
 
 ### Review configuration is read from the default branch (#3038)
 
@@ -4630,7 +4631,10 @@ inspect those sessions' transcripts before deciding a cause.
 
 **Doctor.** The `session-outcomes` check shows the 7-day rate, the largest cause
 and the command to run. It is informational on the rate and never warns on it.
-It warns only when the inbox or history cannot be read.
+It warns only when the inbox or history cannot be read. That warning names the
+exception type and its message (for a file error, the `OSError` text with the
+failing path) and points at `cw event session-outcomes --days 7`, which reads
+the same files and reproduces the error (#3123).
 
 **Follow-up procedure.** Run the command on the real host, attach the output to
 the tracking ticket, and file one fix ticket per non-empty cause, largest first.

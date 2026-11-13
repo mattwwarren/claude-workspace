@@ -2387,6 +2387,40 @@ class TestResolveResumeCwd:
         )
         assert _resolve_resume_cwd(session, client) == wt
 
+    @pytest.mark.parametrize(
+        "purpose",
+        [SessionPurpose.REVIEW, SessionPurpose.PLAN, SessionPurpose.FINALIZE],
+    )
+    def test_user_stage_purpose_main_cwd_unguarded(
+        self, tmp_path: Path, purpose: SessionPurpose
+    ) -> None:
+        """#3253: codex stage purposes are not in WORKTREE_PURPOSES → no guard.
+
+        The IMPL control with the same inputs is
+        ``test_user_worktree_purpose_cwd_is_main_raises``.
+        """
+        client = self._client(tmp_path)
+        session = self._session(
+            origin=SessionOrigin.USER,
+            purpose=purpose,
+            workspace_path=client.workspace_path,
+            worktree_path=client.workspace_path,
+        )
+        assert _resolve_resume_cwd(session, client) == client.workspace_path
+
+    def test_daemon_review_worktree_set_proceeds(self, tmp_path: Path) -> None:
+        """#3253: DAEMON-origin REVIEW with a worktree returns that worktree."""
+        client = self._client(tmp_path)
+        wt = tmp_path / "wt-review"
+        wt.mkdir()
+        session = self._session(
+            origin=SessionOrigin.DAEMON,
+            purpose=SessionPurpose.REVIEW,
+            workspace_path=client.workspace_path,
+            worktree_path=wt,
+        )
+        assert _resolve_resume_cwd(session, client) == wt
+
     def test_daemon_worktree_none_blocks_spawn_via_resume_session(
         self,
         tmp_config_dir: Path,

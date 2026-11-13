@@ -53,6 +53,7 @@ from cw.models import (
     SandboxMode,
     Session,
     SessionOrigin,
+    SessionPurpose,
     SessionStatus,
     Stage,
     StageExecutorConfig,
@@ -159,6 +160,21 @@ def test_spawn_stage_model_wins(
     # Exactly one --model flag
     assert args.count("--model") == 1
     assert args[args.index("--model") + 1] == "haiku"
+
+
+@pytest.mark.parametrize("stage", [Stage.REVIEW, Stage.IMPL])
+def test_claude_native_spawn_pins_impl_purpose(tmp_path: Path, stage: Stage) -> None:
+    """#3253: claude-native sessions stay IMPL whatever the stage."""
+    executor = ClaudeNativeExecutor(config=StageExecutorConfig())
+    task = TicketTask(ticket_id="T-1", client="test", stage=stage)
+    with patch(
+        "cw.executor.core.spawn_create_impl", return_value="sid-1"
+    ) as spawn_mock:
+        sid = executor.spawn(
+            stage=stage, task=task, worktree=tmp_path, client=_make_client(tmp_path)
+        )
+    assert sid == "sid-1"
+    assert spawn_mock.call_args.kwargs["purpose"] is SessionPurpose.IMPL
 
 
 def test_stage_sentinel_schema(
@@ -790,6 +806,7 @@ def _faf_spawn(
     runner: FireAndForgetRunner,
     preflight: AutoDevResult | _PreflightOK,
     executor_name: LocalLivenessBackend = "aider",
+    purpose: SessionPurpose | None = None,
 ) -> str:
     return _spawn_fire_and_forget(
         task=TicketTask(ticket_id=_FAF_TICKET, client="test", stage=Stage.IMPL),
@@ -800,6 +817,7 @@ def _faf_spawn(
         preflight_fn=lambda _sess: preflight,
         blocked_ctor=_faf_blocked_ctor(worktree),
         runner=runner,
+        purpose=SessionPurpose.IMPL if purpose is None else purpose,
     )
 
 
@@ -904,6 +922,52 @@ def test_spawn_fire_and_forget_happy_path_stores_backend(
         assert session.local_liveness is not None
         assert session.local_liveness.pid == runner.procs[0].pid
         assert session.local_liveness.backend == executor_name
+    finally:
+        _kill_procs(runner)
+
+
+def test_spawn_fire_and_forget_forwards_purpose(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#3253: an explicit purpose (codex stage sessions) reaches the session."""
+    worktree = make_git_repo("wt-faf-purpose-review")
+    runner = FakeFireAndForgetRunner()
+    try:
+        sid = _faf_spawn(
+            worktree,
+            runner=runner,
+            preflight=_PreflightOK(argv=_FAF_ARGV, env=_FAF_ENV),
+            purpose=SessionPurpose.REVIEW,
+        )
+        session = next(s for s in load_state().sessions if s.id == sid)
+        assert session.purpose is SessionPurpose.REVIEW
+    finally:
+        _kill_procs(runner)
+
+
+@pytest.mark.parametrize("executor_name", ["aider", "opencode"])
+def test_spawn_fire_and_forget_local_backends_default_to_impl(
+    executor_name: LocalLivenessBackend,
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#3253: the local and opencode backends keep the IMPL purpose default."""
+    worktree = make_git_repo(f"wt-faf-purpose-{executor_name}")
+    runner = FakeFireAndForgetRunner()
+    try:
+        sid = _spawn_fire_and_forget(
+            task=TicketTask(ticket_id=_FAF_TICKET, client="test", stage=Stage.IMPL),
+            worktree=worktree,
+            client=ClientConfig(name="test", workspace_path=worktree),
+            stage=Stage.IMPL,
+            executor_name=executor_name,
+            preflight_fn=lambda _sess: _PreflightOK(argv=_FAF_ARGV, env=_FAF_ENV),
+            blocked_ctor=_faf_blocked_ctor(worktree),
+            runner=runner,
+        )
+        session = next(s for s in load_state().sessions if s.id == sid)
+        assert session.purpose is SessionPurpose.IMPL
     finally:
         _kill_procs(runner)
 
