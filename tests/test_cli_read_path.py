@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ast
 import fcntl
+import json
 import os
 import re
 import subprocess
@@ -449,3 +450,51 @@ def test_sessions_module_no_longer_reconciles() -> None:
     assert "reconcile" not in imported
     assert "operator_read_lock_wait_seconds" not in imported
     assert "_check_and_mark_dead_sessions" not in functions
+
+
+def test_dev_queue_status_json_payload_is_the_seeded_world(
+    armed_world: _ArmedWorld, no_subprocess: list[object]
+) -> None:
+    """Exact ``dev-queue status --json`` payload for the armed world (#3114).
+
+    The ``_PURE_READS`` matrix entry only substring-matches the client name.
+    This pins the seeded world's counts and flags exactly. ``lane_caps`` and the
+    breaker thresholds are config defaults, so they are deliberately not pinned.
+    """
+    armed_world.seed_orchestrator_config()
+    result = CliRunner().invoke(main, ["dev-queue", "status", "--json"])
+    assert result.exit_code == 0, result.output
+    assert no_subprocess == []
+
+    payload = json.loads(result.output)
+    assert set(payload) == {_FIX_LOOP_CLIENT}
+    entry = payload[_FIX_LOOP_CLIENT]
+    assert {k: v for k, v in entry.items() if k != "effective"} == {
+        "skip_reason": None,
+        "freshness_detail": None,
+        "blocked_branch": None,
+        "needs_attn": 0,
+        "tick_ts": None,
+        "pending": 0,
+        "running": 1,
+        "blocked": 0,
+        "completed": 0,
+        "cancelled": 0,
+        "failed": 0,
+        "paused_lanes": [],
+        "pending_skips": [],
+    }
+    effective = entry["effective"]
+    assert set(effective) == {
+        "ceiling",
+        "ceiling_source",
+        "lane_caps",
+        "circuit_breaker_threshold",
+        "worktree_breaker_threshold",
+        "auto_resume_minutes",
+        "auto_resume_max_minutes",
+        "last_tick_cap",
+    }
+    assert effective["ceiling"] == 3
+    assert effective["ceiling_source"] == "default"
+    assert effective["last_tick_cap"] is None
