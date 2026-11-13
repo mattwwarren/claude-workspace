@@ -36,6 +36,7 @@ from cw.dev_queue import (
     transition_task_status,
 )
 from cw.dev_queue.adoption import AdoptedPrSnapshot
+from cw.dev_queue.stage_entry import enter_stage
 from cw.exceptions import AdoptionRefusedError
 from cw.gh import PR_ADOPT_FIELDS, fetch_issue_body, fetch_pr_view
 from cw.gh_check_vocabulary import (
@@ -418,12 +419,12 @@ def build_adopted_task(
     """
     snapshot = intake.snapshot
     feedback = intake.review_feedback
+    entry_stage = Stage.REVIEW if feedback is None else Stage.IMPL
     try:
         task = TicketTask(
             ticket_id=ticket_id,
             client=client.name,
             lane=lane,
-            stage=Stage.REVIEW if feedback is None else Stage.IMPL,
             branch=snapshot.branch,
             adopted_pr_url=snapshot.pr_url,
             adopted_head_sha=snapshot.head_sha,
@@ -434,6 +435,8 @@ def build_adopted_task(
     except ValidationError as exc:
         msg = f"Refusing to adopt {snapshot.pr_url} as ticket {ticket_id!r}: {exc}"
         raise _refuse(msg) from exc
+    # #2155: the entry stage and its stamp are set together, through the seam.
+    enter_stage(task, entry_stage)
     if intake.disposition is not None:
         transition_task_status(
             task,

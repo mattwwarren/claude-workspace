@@ -25,6 +25,7 @@ from cw.dev_queue import (
     save_dev_queue,
 )
 from cw.dev_queue.lifecycle import _advance_stage
+from cw.dev_queue.stage_entry import enter_stage
 from cw.dispatch.claim.claimed_row import _stamp_spawn_success
 from cw.dispatch.claim.codex_capability import _codex_capability_gate, _SpawnOutcome
 from cw.dispatch.claim.events import _emit_worktree_occupied_skip_event
@@ -215,7 +216,7 @@ def _apply_plan_bypass_if_available(
         # Mirror onto the in-memory task so this tick's
         # executor.spawn(stage=task.stage, ...) below builds the IMPL
         # prompt, not PLAN.
-        task.stage = stored_task.stage
+        enter_stage(task, stored_task.stage, entered_at=stored_task.stage_entered_at)
         _log.info(
             "dispatch: %r has an approved, signed-off plan already"
             " on disk (%s) -- bypassing Stage 1 and spawning at"

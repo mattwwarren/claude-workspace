@@ -367,6 +367,10 @@ class TicketTask(BaseModel):
     lane: str = DEFAULT_LANE
     # RFC 0005 A1 — dormant; no dispatch wiring yet (GitHub #612).
     stage: Stage = DEFAULT_STAGE
+    # ISO-8601 UTC stamp of the last ``stage`` change (GitHub #2155), written
+    # only by ``cw.dev_queue.stage_entry.enter_stage``. ``None`` for pre-v60
+    # rows; no validator or default_factory stamps on load.
+    stage_entered_at: str | None = None
     stage_base_ref: str | None = None
     # Terminal disposition for this ticket — the AutoDevResult status (or a
     # reconcile reason string) that caused the task to reach COMPLETED,

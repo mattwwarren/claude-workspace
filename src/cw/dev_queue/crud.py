@@ -26,6 +26,7 @@ from cw.config import get_client
 from cw.dev_queue.adoption import refuse_if_adoption_conflicts
 from cw.dev_queue.lifecycle import _raise_stage_high_water, transition_task_status
 from cw.dev_queue.refusal import refusal_hint
+from cw.dev_queue.stage_entry import enter_stage
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import CwError, LaneMoveError, LaneNotFoundError, RequeueStageError
@@ -274,7 +275,7 @@ def build_queued_task(
 
     A pydantic ``ValidationError`` for a bad ``ticket_id`` propagates to the caller.
     """
-    return TicketTask(
+    task = TicketTask(
         ticket_id=ticket_id,
         client=client,
         priority=priority,
@@ -282,7 +283,6 @@ def build_queued_task(
         lane=lane,
         signoff=signoff,
         hold_finalize=hold_finalize,
-        stage=stage,
         review_feedback=review_feedback,
         # #1631: the model default is True (fail-open, for rows whose
         # spawn history cannot be reconstructed). A ticket being enqueued right
@@ -290,6 +290,9 @@ def build_queued_task(
         # downstream only ever raises this to True; nothing lowers it.
         ever_spawned=False,
     )
+    # #2155: the stage and its entry stamp are set together, through the seam.
+    enter_stage(task, stage)
+    return task
 
 
 def register_watched_pr(watched: WatchedPr) -> bool:
