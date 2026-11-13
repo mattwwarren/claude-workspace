@@ -175,6 +175,54 @@ def test_config_path_that_is_a_directory_blocks(
     assert "RAN" not in result.stdout
 
 
+def test_non_directory_claude_path_blocks(
+    tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
+) -> None:
+    # An executable regular file at .claude must not look like an absent config
+    # to the filesystem probe.
+    bed = GateBed(tmp_path)
+    repo, _ = make_git_repo_with_origin("clone")
+    tmpwt, _, _ = bed.paths(repo)
+    tmpwt.mkdir()
+    claude = tmpwt / ".claude"
+    claude.write_text("not a directory\n", encoding="utf-8")
+    claude.chmod(0o755)
+    result = bed.run(fill_gate_fence(impl_gate3_fence(), "printf RAN"), repo)
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "could not be read" in result.stdout
+    assert "RAN" not in result.stdout
+
+
+def test_dangling_claude_path_blocks(
+    tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
+) -> None:
+    bed = GateBed(tmp_path)
+    repo, _ = make_git_repo_with_origin("clone")
+    tmpwt, _, _ = bed.paths(repo)
+    tmpwt.mkdir()
+    (tmpwt / ".claude").symlink_to(tmpwt / "missing-claude")
+    result = bed.run(fill_gate_fence(impl_gate3_fence(), "printf RAN"), repo)
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "could not be read" in result.stdout
+    assert "RAN" not in result.stdout
+
+
+def test_dangling_config_symlink_blocks(
+    tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
+) -> None:
+    bed = GateBed(tmp_path)
+    repo, _ = make_git_repo_with_origin("clone")
+    tmpwt, _, _ = bed.paths(repo)
+    tmpwt.mkdir()
+    claude = tmpwt / ".claude"
+    claude.mkdir()
+    (claude / "project-config.yaml").symlink_to(tmpwt / "missing-config.yaml")
+    result = bed.run(fill_gate_fence(impl_gate3_fence(), "printf RAN"), repo)
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "could not be read" in result.stdout
+    assert "RAN" not in result.stdout
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads mode-000 files")
 def test_unreadable_config_blocks(
     tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]

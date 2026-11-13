@@ -789,7 +789,8 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
    # tests.prepare (#2179): the project-declared post-checkout step, read from the pushed head in $TMPWT through cw's one typed reader (cw tests-prepare). The filesystem probe only decides whether the config path is absent or needs the reader; it never inspects YAML text. A missing config path stays compatible with older cw installs, while an existing or inaccessible path, or a missing gate worktree, goes to cw and fails closed on an unreadable or malformed value.
    PREPARE_CMD=""
    CFG="$TMPWT/.claude/project-config.yaml"
-   if [ ! -d "$TMPWT" ] || [ -e "$CFG" ] || [ -L "$CFG" ] || { [ -e "$TMPWT/.claude" ] && { [ ! -r "$TMPWT/.claude" ] || [ ! -x "$TMPWT/.claude" ]; }; }; then
+   CLAUDE_DIR="$TMPWT/.claude"
+   if [ ! -d "$TMPWT" ] || [ -e "$CFG" ] || [ -L "$CFG" ] || ( { [ -e "$CLAUDE_DIR" ] || [ -L "$CLAUDE_DIR" ]; } && [ ! -d "$CLAUDE_DIR" ] ); then
      PREPARE_CMD=$(cw tests-prepare "$TMPWT"); PREPARE_RC=$?
      [ "$PREPARE_RC" -eq 0 ] || { echo "IMPL_FAILED: Step 2.5 gate 3: tests.prepare could not be read (tests-prepare exited $PREPARE_RC): the key in $TMPWT/.claude/project-config.yaml is malformed or unreadable, the gate worktree $TMPWT is missing, or the installed cw lacks the tests-prepare command (reinstall cw, e.g. scripts/install.sh)"; exit 3; }
    fi

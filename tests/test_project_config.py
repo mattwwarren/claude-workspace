@@ -114,3 +114,11 @@ def test_unreadable_config_raises_not_absent(tmp_path: Path) -> None:
     (tmp_path / ".claude" / "project-config.yaml").mkdir(parents=True)
     with pytest.raises(PrepareConfigError, match=r"could not be read or parsed"):
         read_tests_prepare(tmp_path)
+
+
+def test_dangling_config_symlink_raises_not_absent(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".claude"
+    config_dir.mkdir()
+    (config_dir / "project-config.yaml").symlink_to(tmp_path / "missing.yaml")
+    with pytest.raises(PrepareConfigError, match=r"could not be read or parsed"):
+        read_tests_prepare(tmp_path)

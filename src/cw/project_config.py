@@ -38,6 +38,11 @@ def load_project_config_dict(
     try:
         raw = parser.safe_load(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
+        if strict and (
+            path.is_symlink() or (path.parent.is_symlink() and not path.parent.exists())
+        ):
+            msg = f"{PROJECT_CONFIG_RELPATH} could not be read or parsed"
+            raise ProjectConfigError(msg) from None
         return None
     except OSError as exc:
         if strict:
