@@ -306,28 +306,27 @@ def _merge_in_progress(worktree: Path, timeout: float) -> bool:
     raise GitFailedError(failure_detail("rev-parse", result))
 
 
+def _abort_merge(worktree: Path, detail: str, timeout: float) -> str:
+    """Run ``git merge --abort``; *detail* grows a note when the abort fails."""
+    try:
+        _checked(worktree, ["merge", "--abort"], timeout)
+    except GitFailedError as exc:
+        return (
+            f"{detail}; git merge --abort failed ({exc}): the worktree is"
+            " mid-merge, run `git merge --abort` by hand"
+        )
+    return detail
+
+
 def _abort(worktree: Path, move: _Move, detail: str, timeout: float) -> ChangelogSync:
     """Abort any merge this call started; the answer is ``unavailable``."""
     try:
-        merge_in_progress = _merge_in_progress(worktree, timeout)
+        in_progress = _merge_in_progress(worktree, timeout)
     except GitFailedError as exc:
         detail = f"{detail}; could not determine merge state ({exc})"
-        try:
-            _checked(worktree, ["merge", "--abort"], timeout)
-        except GitFailedError as abort_exc:
-            detail = (
-                f"{detail}; git merge --abort failed ({abort_exc}): the worktree is"
-                " mid-merge, run `git merge --abort` by hand"
-            )
-    else:
-        if merge_in_progress:
-            try:
-                _checked(worktree, ["merge", "--abort"], timeout)
-            except GitFailedError as exc:
-                detail = (
-                    f"{detail}; git merge --abort failed ({exc}): the worktree is"
-                    " mid-merge, run `git merge --abort` by hand"
-                )
+        in_progress = True  # abort anyway: an unreadable state may be mid-merge
+    if in_progress:
+        detail = _abort_merge(worktree, detail, timeout)
     return _answer(SyncState.UNAVAILABLE, move.base_sha, move.head_sha, detail=detail)
 
 

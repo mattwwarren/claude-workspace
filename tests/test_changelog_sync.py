@@ -384,6 +384,66 @@ def test_a_failed_abort_is_named_in_the_detail(
     git_in(straddle.clone, "merge", "--abort")
 
 
+def test_unreadable_merge_state_and_failed_abort_names_both(
+    straddle: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = changelog_sync.git_bounded
+    probes: list[list[str]] = []
+
+    def _fake(
+        worktree: Path, argv: list[str], timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        if argv[-1] == "MERGE_HEAD":
+            probes.append(argv)
+            if len(probes) > 1:
+                msg = "git rev-parse timed out after 10s"
+                raise GitFailedError(msg)
+            return real(worktree, argv, timeout)
+        if argv[0] == "commit":
+            return subprocess.CompletedProcess(argv, 1, "", "hook said no\n")
+        if argv[:2] == ["merge", "--abort"]:
+            return subprocess.CompletedProcess(argv, 128, "", "fatal: no merge\n")
+        return real(worktree, argv, timeout)
+
+    monkeypatch.setattr(changelog_sync, "git_bounded", _fake)
+
+    result = sync_changelog(straddle.clone, "main")
+
+    assert len(probes) == 2
+    assert result.state == "unavailable"
+    assert "could not determine merge state" in result.detail
+    assert "git merge --abort failed" in result.detail
+    assert "run `git merge --abort` by hand" in result.detail
+    monkeypatch.setattr(changelog_sync, "git_bounded", real)
+    git_in(straddle.clone, "merge", "--abort")
+
+
+def test_a_merge_failure_that_leaves_no_merge_head_skips_the_abort(
+    straddle: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = changelog_sync.git_bounded
+    calls: list[list[str]] = []
+
+    def _fake(
+        worktree: Path, argv: list[str], timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if argv[0] == "merge":
+            return subprocess.CompletedProcess(argv, 1, "", "merge refused\n")
+        return real(worktree, argv, timeout)
+
+    monkeypatch.setattr(changelog_sync, "git_bounded", _fake)
+    before = _state(straddle.clone)
+
+    result = sync_changelog(straddle.clone, "main")
+
+    assert result.state == "unavailable"
+    assert "git merge exited 1: merge refused" in result.detail
+    assert ["merge", "--abort"] not in calls
+    assert "abort" not in result.detail
+    assert _state(straddle.clone) == before
+
+
 def test_a_merge_tree_error_is_unavailable(
     straddle: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
