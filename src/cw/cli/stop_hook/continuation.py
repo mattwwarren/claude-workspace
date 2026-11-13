@@ -30,8 +30,10 @@ import click
 
 from cw._util import claude_project_dir
 from cw.cli.stop_hook._constants import (
+    _API_ERROR_PREFIX,
     _LOGGER_NAME,
     MAX_STOP_CONTINUATIONS,
+    STOP_CONTINUATION_ENABLED_CLIENTS,
     STOP_CONTINUATION_NUDGE,
 )
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
@@ -47,11 +49,6 @@ if TYPE_CHECKING:
     from cw.models import Session
 
 logger = logging.getLogger(_LOGGER_NAME)
-
-# Mirrors ``cw.reconcile.liveness_page._API_ERROR_PREFIX``, which is private to
-# that module. Kept as a literal here so the Stop hook does not import the
-# liveness page; a change there must change this too.
-_API_ERROR_PREFIX = "API Error"
 
 
 class _ContinuationClaim(NamedTuple):
@@ -87,6 +84,14 @@ def maybe_continue_headless_turn(
         return
     transcript = _find_transcript(session, cwd_value, claude_session_id)
     if transcript is None or _turn_ended_in_tool_error(transcript):
+        return
+    if session.client not in STOP_CONTINUATION_ENABLED_CLIENTS:
+        logger.info(
+            "stop continuation shadow candidate: client=%s lane=%s ticket=%s",
+            session.client,
+            task.lane,
+            ticket_id,
+        )
         return
     claim = _claim_stop_continuation(ticket_id, session)
     if claim is None:

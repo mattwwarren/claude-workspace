@@ -116,6 +116,15 @@ def worktree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return session.worktree_path
 
 
+@pytest.fixture(autouse=True)
+def continuation_rollout_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Enable the explicitly opted-in test tenant for continuation coverage."""
+    monkeypatch.setattr(
+        "cw.cli.stop_hook.continuation.STOP_CONTINUATION_ENABLED_CLIENTS",
+        frozenset({"client-a"}),
+    )
+
+
 @pytest.fixture
 def recorded(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, dict[str, object]]]:
     events: list[tuple[object, dict[str, object]]] = []
