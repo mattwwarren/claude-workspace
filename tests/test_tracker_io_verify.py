@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
@@ -17,6 +17,8 @@ from cw.tracker_io import (
     public_state_for,
     verify_turn_result,
 )
+from cw.tracker_io._prompt import TurnStatus
+from cw.tracker_io._verify import _STATUS_REASON
 from tests._tool_fakes import marked_parts, tracker_io_turn_result
 
 _TICKET = "GEN-7"
@@ -266,3 +268,16 @@ def test_every_reason_has_a_mapping_row() -> None:
     """A new reason must be classified deliberately (the table above)."""
     for reason in TrackerIoReason:
         assert isinstance(public_state_for(reason, parts_returned=0), PublicState)
+
+
+def test_status_reason_covers_every_non_ok_turn_status() -> None:
+    """#3383 drift guard: the reason map and the TurnStatus literal stay in step.
+
+    ``"ok"`` is the success status and maps to no reason. The real enforcement
+    is the ``dict[TurnStatus, TrackerIoReason]`` annotation under mypy --strict.
+    """
+    statuses = set(get_args(TurnStatus))
+    assert set(_STATUS_REASON) | {"ok"} == statuses
+    assert all(
+        isinstance(reason, TrackerIoReason) for reason in _STATUS_REASON.values()
+    )
