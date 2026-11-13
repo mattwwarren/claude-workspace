@@ -16,6 +16,7 @@ GROUPS: list[tuple[str, list[str]]] = [
             "check_merge_gate_overlap",
             "check_must_fix_override",
             "check_plan_scope_conformance",
+            "check_premise_evidence",
             "classify_merge_conflict",
             "gate_key",
             "post_review",
