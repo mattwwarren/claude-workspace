@@ -35,11 +35,7 @@ import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from cw.backend_mcp_config import (
-    McpState,
-    read_backend_mcp,
-    tracker_io_other_server_names,
-)
+from cw.backend_mcp_config import McpState, declared_server_names, read_backend_mcp
 from cw.codex_review import _codex_scratch_dir
 from cw.codex_review._const import _is_spawn_error
 from cw.gh import agent_marked_body
@@ -164,7 +160,7 @@ def _preflight(
 
 
 def _other_servers() -> tuple[str, ...]:
-    names = tracker_io_other_server_names()
+    names = declared_server_names(CODEX_BACKEND)
     if names is None:
         _log.info("tracker_io_other_servers_unknown: none disabled")
         return ()

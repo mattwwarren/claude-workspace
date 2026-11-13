@@ -236,34 +236,24 @@ def _layer_server_names(path: Path) -> tuple[str, ...] | None:
 
 
 def declared_server_names(backend: str) -> tuple[str, ...] | None:
-    """The MCP server names *backend*'s user-layer config declares (#3057).
+    """The MCP server names *backend*'s user and system layers declare (#3057, #3368).
 
-    Codex only, in declaration order; ``()`` when the file parses and has no
-    ``mcp_servers`` section. ``None`` when the answer is unknown: another
-    backend, a missing or unreadable file, a parse error or a non-table
-    section. Project and system layers are not read here.
+    Codex only: the user layer then the system layer (``/etc/codex/config.toml``),
+    user names first, de-duplicated, in declaration order. A system-layer server
+    is enabled for every codex turn unless disabled, so a caller that disables
+    every name it gets must see those too. A project layer is not read: the
+    tracker-IO turn's cwd is a cw-owned scratch directory, so none reaches it.
+
+    ``()`` when a layer parses and has no ``mcp_servers`` section. ``None`` when
+    no layer's answer is known (another backend, or every layer missing,
+    unreadable, unparseable or holding a non-table section); callers disable
+    nothing on ``None``.
     """
-    path = user_layer_path(backend) if backend == _CODEX else None
-    if path is None:
+    if backend != _CODEX:
         return None
-    return _layer_server_names(path)
-
-
-def _optional(path: Path | None) -> tuple[Path, ...]:
-    return () if path is None else (path,)
-
-
-def tracker_io_other_server_names() -> tuple[str, ...] | None:
-    """The codex MCP server names the tracker-IO turn must disable (#3368).
-
-    The user layer plus the system layer (``/etc/codex/config.toml``), user
-    names first and de-duplicated. A system-layer server is enabled for every
-    codex turn unless disabled, so the turn must name it. The turn's cwd is a
-    cw-owned scratch directory, so no project layer can reach it. ``None``
-    when no layer's answer is known, which disables nothing.
-    """
-    layers = [*_optional(user_layer_path(_CODEX)), *_SYSTEM_LAYERS.get(_CODEX, ())]
-    answers = [names for names in map(_layer_server_names, layers) if names is not None]
+    user_path = user_layer_path(backend)
+    paths = (*((user_path,) if user_path else ()), *_SYSTEM_LAYERS.get(backend, ()))
+    answers = [names for names in map(_layer_server_names, paths) if names is not None]
     if not answers:
         return None
     return tuple(dict.fromkeys(name for names in answers for name in names))
