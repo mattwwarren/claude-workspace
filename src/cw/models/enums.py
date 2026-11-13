@@ -312,9 +312,10 @@ class OrchestratorEventType(StrEnum):
     # session_id, cycle, gate, elapsed_s, ceiling_s. Fleet-level, not a page.
     CODEX_FIX_GATE_SLOW = "codex_fix.gate_slow"
     # #1343 -- fires when the dispatch loop's usage-limit back-off window
-    # (usage_limited_until) transitions from armed to lapsed. See
-    # docs/events.md for the payload shape and the --once / single-loop-
-    # invariant caveats.
+    # (usage_limited_until) transitions from armed to lapsed (no ``trigger``
+    # key), and #3547 -- when ``cw dev-queue usage-limit clear`` lifts one
+    # client's window (``trigger: "operator"``). See docs/events.md for the
+    # payload shapes and the --once / single-loop-invariant caveats.
     USAGE_LIMIT_CLEARED = "dispatch.usage_limit_cleared"
     # #1409 -- the set-side counterpart to USAGE_LIMIT_CLEARED: fires once per
     # client whose usage-limit back-off window is opened, carrying the deadline

@@ -4647,7 +4647,10 @@ Worker transcripts ending in "You've hit your session limit" are evidence of
 a PAST window, not the current one. Before pausing a wave:
 `claude -p "Reply with exactly: WORKER-OK" --model <worker-model>` — if it
 answers, the wall is gone. During a genuine wall, STOP the dispatch loop
-(each tick burns an attempt per pending ticket into the wall).
+(each tick burns an attempt per pending ticket into the wall). Once the wall
+is gone but a back-off window is still armed, lift it with
+`cw dev-queue usage-limit clear` (see "Clearing a window early" below), which
+runs this same probe first.
 
 ### Usage-limit back-off windows
 
@@ -4665,6 +4668,74 @@ answers, the wall is gone. During a genuine wall, STOP the dispatch loop
   event is missing. If the event write fails after the window is persisted,
   the next restart recovers the missing audit event before dispatch resumes.
 - A per-client arm time is a separate ticket if it is wanted.
+
+#### Inspecting windows
+
+- `cw dev-queue status` prints a `Usage-limit windows:` block, one line per
+  active window:
+  `  <client>: until <iso> (armed-at <iso|none>, fleet-level; source <parsed_reset|flat_backoff|none>)`.
+  `armed-at` is the fleet-level `usage_limit_armed_at` described above, not a
+  per-client time. `source` is from the latest matching
+  `dispatch.usage_limit_armed` event, `none` when there is none.
+- `cw dev-queue status --json` carries the same data as a per-client
+  `usage_limit` object (`client`, `until`, `armed_at`, `source`), or `null`.
+- `cw doctor` reports one advisory `usage-limit/<client>` line per active
+  window: `usage-limit window for <client> is active until <iso>; lift it
+  early with: cw dev-queue usage-limit clear -c <client>`.
+
+#### Clearing a window early (#3547)
+
+`cw dev-queue usage-limit clear -c <client> [--dry-run] [--force]` lifts a
+client's window after the account limit was reset by hand.
+
+- It reads first. With no active window and no waiting rows it prints
+  `nothing to clear for <client>: no active usage-limit window and no waiting
+  rows` and exits 0. `--dry-run` prints `dry run: would clear ...` /
+  `dry run: would release <ticket>: next_eligible_at <iso> -> <iso|none>` /
+  `dry run: no changes made`, changes nothing and runs no probe.
+- Otherwise it runs the probe above (`claude -p "Reply with exactly:
+  WORKER-OK"`, `--model <worker_model>` when the client pins one) once, with
+  no lock held:
+  - limited: `refusing to clear <client>: the account probe reports the usage
+    limit is still in effect (...). Re-run with --force to clear anyway.`
+  - probe error (timeout, `claude` missing, unrecognised reply) fails closed:
+    `refusing to clear <client>: the account probe could not determine the
+    account state (...). Re-run with --force to clear without probing.`
+  - `--force` skips the probe entirely, for example when the `claude` binary
+    is unavailable on the host.
+- What it removes: the client's `usage_limited_until` entry, and every future
+  `next_eligible_at` on the client's PENDING rows. That stamp is shared by
+  usage-limit, spawn-error and worktree-occupied waits and a row does not
+  record which one wrote it, so all of them are released (the dry run says
+  so). What it keeps: gate-block waits (`gate_block.until ==
+  next_eligible_at`; a gate wait layered under a later wait is restored),
+  `spawn_error_count`, and RUNNING, BLOCKED_ON_USER and terminal rows.
+- A running dispatch loop needs no restart. The clear records a per-client
+  clear mark (`usage_limit_cleared` in `dispatch_state.json`) in the same lock
+  hold as the window pop. The loop drops its in-memory copy of the window on
+  its next tick, and its post-tick arm never re-persists the stale copy.
+- It records one `dispatch.usage_limit_cleared` with `trigger: "operator"`
+  (see `docs/events.md`); the loop does not emit its own lapse event for it.
+- If the event write fails, the window and rows are already cleared: the
+  command prints the summary, then `usage-limit window for <client> was
+  cleared (...) but the dispatch.usage_limit_cleared audit event could not be
+  recorded: <error>`, and exits non-zero. There is nothing to re-run. If the
+  row release fails, the event is still recorded and a re-run releases the
+  remaining rows.
+
+A clear can be overridden by a detection that really happened. Each of these
+re-arms the window after a clear; the remedy is to re-run the clear:
+
+- a spawn-time usage-limit detection in the same tick as the clear;
+- a reconcile "phantom" sweep that re-arms the known fleet on the first tick
+  after the clear;
+- a mid-turn act whose session hit the wall before the clear, but which
+  reconcile first notices after it;
+- a clear that lands between a mid-turn act's arm and its finish, which leaves
+  the requeued row stamped.
+
+A mid-turn act decided BEFORE the clear is treated as moot instead: it does
+not re-arm the window and requeues its row with no stamp.
 
 ---
 
