@@ -477,6 +477,16 @@ class TestSinceBootVerdict:
 
         assert launch_owner_state(_new_marker()) is LaunchOwnerState.IN_FLIGHT
 
+    def test_unreadable_probe_stays_in_flight_even_across_boots(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R9: an unreadable probe is never evidence of absence, so the
+        boot-id comparison is not even reached for it."""
+        _patch_probe(monkeypatch, ProcessProbe(ProbeState.UNREADABLE, None))
+        _patch_boot_id(monkeypatch, _BOOT_B)
+
+        assert launch_owner_state(_new_marker()) is LaunchOwnerState.IN_FLIGHT
+
     def test_absent_probe_is_still_owner_gone(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
