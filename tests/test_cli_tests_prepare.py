@@ -12,14 +12,9 @@ from pathlib import Path
 from click.testing import CliRunner, Result
 
 from cw.cli import main
+from tests._shared.cli_preflight import _write_project_config_yaml as _write_config
 
 _GODOT = "godot --headless --path game --import"
-
-
-def _write_config(root: Path, body: bytes | str) -> None:
-    cfg = root / ".claude" / "project-config.yaml"
-    cfg.parent.mkdir(parents=True, exist_ok=True)
-    cfg.write_bytes(body if isinstance(body, bytes) else body.encode("utf-8"))
 
 
 def _invoke(root: Path) -> Result:
@@ -66,6 +61,15 @@ def test_invalid_utf8_exits_1(tmp_path: Path) -> None:
     result = _invoke(tmp_path)
     assert result.exit_code == 1
     assert result.stdout == ""
+
+
+def test_unreadable_config_exits_1_not_silent(tmp_path: Path) -> None:
+    # A directory at the config path exists but cannot be read as a file.
+    (tmp_path / ".claude" / "project-config.yaml").mkdir(parents=True)
+    result = _invoke(tmp_path)
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "project-config.yaml" in result.stderr
 
 
 def test_nonexistent_root_exits_2(tmp_path: Path) -> None:

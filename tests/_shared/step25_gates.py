@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -221,7 +222,8 @@ def link_cw_shim(bin_dir: Path) -> Path:
     bin_dir.mkdir(parents=True, exist_ok=True)
     shim = bin_dir / "cw"
     shim.unlink(missing_ok=True)
-    shim.write_text(f'#!/bin/sh\nexec {sys.executable} -m cw "$@"\n', encoding="utf-8")
+    interpreter = shlex.quote(sys.executable)
+    shim.write_text(f'#!/bin/sh\nexec {interpreter} -m cw "$@"\n', encoding="utf-8")
     shim.chmod(0o755)
     return bin_dir
 

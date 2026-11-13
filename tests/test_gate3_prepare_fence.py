@@ -11,6 +11,7 @@ command failed. Both are ``impl_failed`` setup failures, never a
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -160,6 +161,42 @@ def test_malformed_value_blocks_before_anything_runs(
         "IMPL_FAILED: Step 2.5 gate 3: tests.prepare could not be read" in result.stdout
     )
     assert not (tmpwt / _TEST_MARKER).exists()
+
+
+def test_config_path_that_is_a_directory_blocks(
+    tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
+) -> None:
+    # A directory at the config path has no "prepare" text for the grep probe to
+    # find; the probe must still send it to cw, which fails closed (#2179).
+    bed = GateBed(tmp_path)
+    repo, _ = make_git_repo_with_origin("clone")
+    tmpwt, _, _ = bed.paths(repo)
+    (tmpwt / ".claude" / "project-config.yaml").mkdir(parents=True)
+    result = bed.run(fill_gate_fence(impl_gate3_fence(), "printf RAN"), repo)
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "could not be read" in result.stdout
+    assert "RAN" not in result.stdout
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads mode-000 files")
+def test_unreadable_config_without_prepare_text_blocks(
+    tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
+) -> None:
+    # Unreadable and no "prepare" text: the grep probe alone would skip it.
+    bed = GateBed(tmp_path)
+    repo, _ = make_git_repo_with_origin("clone")
+    tmpwt, _, _ = bed.paths(repo)
+    tmpwt.mkdir()
+    _config(tmpwt, "quality_gates: {}\n")
+    cfg = tmpwt / ".claude" / "project-config.yaml"
+    cfg.chmod(0o000)
+    try:
+        result = bed.run(fill_gate_fence(impl_gate3_fence(), "printf RAN"), repo)
+    finally:
+        cfg.chmod(0o600)
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "could not be read" in result.stdout
+    assert "RAN" not in result.stdout
 
 
 def test_blank_prepare_is_absent(
