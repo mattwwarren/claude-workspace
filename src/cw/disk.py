@@ -86,7 +86,8 @@ def effective_min_free_inodes(
     The absolute floor protects a small mount (a 1M-inode tmpfs refuses below
     50K free at the defaults); the fraction scales to a large one (a
     50M-inode mount refuses below 2.5M free). Shared by the dispatch-time
-    gate and the ``cw doctor`` worker-tmp check so the two never disagree.
+    gate and both ``cw doctor`` worker-tmp checks (through :func:`assess_mount`)
+    so they never disagree.
     """
     return ceil(max(min_free_inodes, min_free_inode_fraction * total_inodes))
 
@@ -109,6 +110,60 @@ def inodes_exhausted(
         min_free_inode_fraction=min_free_inode_fraction,
     )
     return usage.free_inodes < floor
+
+
+def space_exhausted(usage: DiskUsage, *, min_free_gb: float) -> bool:
+    """True when *usage* has fewer free GB than *min_free_gb* (#3179).
+
+    The byte-dimension sibling of :func:`inodes_exhausted`, so the dispatch gate
+    and the doctor checks compare against the floor one way.
+    """
+    return usage.free_gb < min_free_gb
+
+
+class MountAssessment(NamedTuple):
+    """Whether a mount is below the disk-pressure floors (#3179).
+
+    ``inode_floor`` is None when the mount reports no fixed inode budget
+    (``total_inodes == 0``), in which case ``inode_short`` is always False.
+    """
+
+    space_short: bool
+    inode_short: bool
+    inode_floor: int | None
+
+
+def assess_mount(
+    disk: DiskUsage,
+    inodes: InodeUsage,
+    *,
+    min_free_gb: float,
+    min_free_inodes: float,
+    min_free_inode_fraction: float,
+) -> MountAssessment:
+    """Assess one mount against the disk-pressure floors, both dimensions at once.
+
+    The single place the ``cw doctor`` worker-tmp checks apply the thresholds the
+    dispatch gate uses. Wording stays in each check.
+    """
+    inode_floor = (
+        None
+        if inodes.total_inodes == 0
+        else effective_min_free_inodes(
+            inodes.total_inodes,
+            min_free_inodes=min_free_inodes,
+            min_free_inode_fraction=min_free_inode_fraction,
+        )
+    )
+    return MountAssessment(
+        space_short=space_exhausted(disk, min_free_gb=min_free_gb),
+        inode_short=inodes_exhausted(
+            inodes,
+            min_free_inodes=min_free_inodes,
+            min_free_inode_fraction=min_free_inode_fraction,
+        ),
+        inode_floor=inode_floor,
+    )
 
 
 def check_disk_usage(path: Path) -> DiskUsage:

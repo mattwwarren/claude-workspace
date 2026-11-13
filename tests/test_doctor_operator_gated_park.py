@@ -25,6 +25,7 @@ from cw.dev_queue.dispositions import (
     _PRE_DISPATCH_TRACKER_MCP_REASON,
     ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
     ADOPTED_HEAD_DRIFT_DISPOSITION,
+    AWAITING_CI_EVIDENCE_DISPOSITION,
     FINALIZE_GATE_HELD_DISPOSITION,
     GATE_TIMEOUT_DISPOSITION,
     HOLD_DISPOSITIONS,
@@ -128,6 +129,9 @@ _GATED: list[tuple[str, str | None]] = [
     # #3372: a reuse-path gate cut off by the foreground timeout waits on the
     # orchestrator's hand-run gate, `gate-pass record` and requeue.
     (GATE_TIMEOUT_DISPOSITION, None),
+    # #3618: a finalize run parked waiting on mapped CI checks waits on the
+    # orchestrator's requeue; a reap revert would re-run finalize.
+    (AWAITING_CI_EVIDENCE_DISPOSITION, None),
     ("blocked", codex_const.CODEX_FIX_SCOPE_DRIFT),
     ("blocked", codex_const.CODEX_FIX_GROWTH_BUDGET),
 ]
@@ -815,6 +819,24 @@ def test_gate_timeout_is_an_operator_gated_park(tmp_config_dir: Path) -> None:
             QueueItemStatus.BLOCKED_ON_USER, GATE_TIMEOUT_DISPOSITION
         )
         is False
+    )
+
+
+def test_awaiting_ci_evidence_is_an_operator_gated_park(
+    tmp_config_dir: Path,
+) -> None:
+    """#3618: the CI-evidence park is reported, never reaped, never paged."""
+    disposition = AWAITING_CI_EVIDENCE_DISPOSITION
+    assert disposition == "awaiting_ci_evidence"
+    assert disposition in _OPERATOR_GATED_PARK_DISPOSITIONS
+    assert disposition not in _HUMAN_GATED_PARK_DISPOSITIONS
+    assert _is_operator_gated_park(_row(disposition, None))
+    assert len(_detect([_row(disposition, None)])) == 1
+    assert disposition not in HOLD_DISPOSITIONS
+    assert disposition not in DRAIN_DISPOSITIONS
+    assert disposition not in _REAP_ELIGIBLE_DISPOSITIONS_BASE
+    assert (
+        _is_escalation_eligible(QueueItemStatus.BLOCKED_ON_USER, disposition) is False
     )
 
 

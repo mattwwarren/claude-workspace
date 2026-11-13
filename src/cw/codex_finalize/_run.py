@@ -43,6 +43,13 @@ from cw.codex_finalize._argv import (
     require_read_only_finalize_argv,
 )
 from cw.codex_finalize._arm import arm, check_automerge_allowed, verify_pr_state
+from cw.codex_finalize._ci_evidence import (
+    CiContext,
+    DeferredGate,
+    awaiting_ci_evidence_block,
+    ci_pr_info,
+    release_ci_hold,
+)
 from cw.codex_finalize._gates import (
     check_branch,
     gate_scope,
@@ -153,6 +160,7 @@ class _State:
     branch: str
     override_json: str | None
     friction: list[str] = field(default_factory=list)
+    deferred: tuple[DeferredGate, ...] = ()
 
     def stamped(self) -> FinalizeFacts:
         """The facts with the accumulated friction."""
@@ -427,14 +435,28 @@ def _bind(
     )
 
 
-def _gates(run: _Run, state: _State, path: str) -> FinalizeBlock | None:
-    block, friction = run_finalize_quality_gates(
+def _ci_context(run: _Run, state: _State, pr: BoundPr | None = None) -> CiContext:
+    """What the CI-evidence consult needs: the base, the head and any bound PR."""
+    return CiContext(
+        base=run.client.default_branch,
+        pr_number=pr.number if pr is not None else None,
+        pr_url=pr.url if pr is not None else None,
+        head=state.head,
+    )
+
+
+def _gates(
+    run: _Run, state: _State, path: str, *, pr: BoundPr | None = None
+) -> FinalizeBlock | None:
+    gated = run_finalize_quality_gates(
         run.worktree,
         scope=gate_scope(run.task.ticket_id, run.client.name, run.sid),
         path=path,
+        ci=_ci_context(run, state, pr),
     )
-    state.friction.extend(friction)
-    return block
+    state.friction.extend(gated.friction)
+    state.deferred = gated.deferred
+    return gated.block
 
 
 def _client_branch_prefix(run: _Run) -> str:
@@ -507,6 +529,12 @@ def _create(run: _Run, state: _State, scratch: Path) -> Payload:
     bound = _bind(run, state, created[0], created[1], require_head=True)
     if isinstance(bound, FinalizeBlock):
         return run.blocked(bound, state, STAGE5_POST_CREATE)
+    if state.deferred:
+        # Mapped gates belong to CI: the PR exists but is never armed here.
+        parked = awaiting_ci_evidence_block(
+            "deferred", _ci_context(run, state, bound), deferred=state.deferred
+        )
+        return run.blocked(parked, state, STAGE5_POST_CREATE)
     return _arm_and_ship(run, state, bound)
 
 
@@ -542,7 +570,7 @@ def _edit_override(
 
 def _reuse(run: _Run, state: _State, bound: BoundPr, scratch: Path) -> Payload:
     """The OPEN-PR path: gates, probe, override edit, then the arm."""
-    block = _gates(run, state, "reuse")
+    block = _gates(run, state, "reuse", pr=bound)
     if block is None:
         block, friction = probe_default(
             run.worktree, default_branch=run.client.default_branch, pr_exists=True
@@ -550,6 +578,11 @@ def _reuse(run: _Run, state: _State, bound: BoundPr, scratch: Path) -> Payload:
         state.friction.extend(friction)
     if block is None and state.override_json is not None:
         block = _edit_override(run, state, bound, scratch)
+    if block is None:
+        # A hold left by a headless create must not strand this pass's arm.
+        block = release_ci_hold(
+            run.worktree, ci_pr_info(_ci_context(run, state, bound)), head=state.head
+        )
     if block is not None:
         return run.blocked(block, state, STAGE5_POST_CREATE)
     return _arm_and_ship(run, state, bound)

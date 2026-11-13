@@ -12,6 +12,8 @@ Subcommands:
   gate-elapsed  — Elapsed time since a timestamp vs a ceiling
   gate-pass     — Record a gate pass at HEAD, or check whether one still applies
   gate-ci-evidence — Whether green CI at a PR's live head proves a gate (opt-in)
+  ci-deferral   — Which detected gates the base branch maps to CI checks (create path)
+  ci-reuse-plan — Per detected gate: skip (CI green), park (CI pending/red) or run
 """
 
 from __future__ import annotations
@@ -1076,6 +1078,25 @@ GH_API_PAGE_SIZE = 100
 CI_CHECK_SUCCESS = "success"
 CI_CHECK_COMPLETED = "completed"
 CI_PR_OPEN = "open"
+CI_CHECK_MISSING = "missing"
+CI_STATUS_PENDING = "pending"
+CI_FAILED_CONCLUSIONS = frozenset({"failure", "timed_out", "startup_failure"})
+CI_FAILED_STATES = frozenset({"failure", "error"})
+
+# What a mapped check's state means to the caller. ``local`` is every state
+# that is neither a proof nor a CI-owned wait (cancelled, skipped, neutral,
+# stale, action_required, signal unavailable, ...): the gate runs locally.
+CI_OUTCOME_GREEN = "green"
+CI_OUTCOME_LOCAL = "local"
+CI_OUTCOME_PENDING = "pending"
+CI_OUTCOME_RED = "red"
+# Worst wins when several entries or checks disagree: red > pending > local > green.
+_CI_OUTCOME_RANK = {
+    CI_OUTCOME_GREEN: 0,
+    CI_OUTCOME_LOCAL: 1,
+    CI_OUTCOME_PENDING: 2,
+    CI_OUTCOME_RED: 3,
+}
 
 
 def _ci_evidence_entry(key: object, value: object) -> list[str] | None:
@@ -1243,14 +1264,95 @@ def _lower(value: object) -> str:
     return value.lower() if isinstance(value, str) else ""
 
 
-def _entry_succeeded(entry: Mapping[str, Any]) -> bool:
-    """Whether a check run or commit status is a finished success."""
+@dataclass(frozen=True)
+class _CheckVerdict:
+    """What one check run, commit status or whole check says (see ``CI_OUTCOME_*``)."""
+
+    outcome: str
+    state: str | None = None
+    url: str | None = None
+
+
+def _entry_url(entry: Mapping[str, Any], key: str) -> str | None:
+    value = entry.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _classify_entry(entry: Mapping[str, Any]) -> _CheckVerdict:
+    """Classify a check run or commit status.
+
+    A commit status has ``state`` and no ``conclusion``; anything else is a
+    check run. ``state`` on a pending or red verdict is the lower-cased
+    ``status``/``conclusion``/``state`` that decided it.
+    """
     if "state" in entry and "conclusion" not in entry:
-        return _lower(entry.get("state")) == CI_CHECK_SUCCESS
-    return (
-        _lower(entry.get("status")) == CI_CHECK_COMPLETED
-        and _lower(entry.get("conclusion")) == CI_CHECK_SUCCESS
-    )
+        state = _lower(entry.get("state"))
+        url = _entry_url(entry, "target_url")
+        if state == CI_CHECK_SUCCESS:
+            return _CheckVerdict(CI_OUTCOME_GREEN)
+        if state in CI_FAILED_STATES:
+            return _CheckVerdict(CI_OUTCOME_RED, state, url)
+        if state == CI_STATUS_PENDING:
+            return _CheckVerdict(CI_OUTCOME_PENDING, state, url)
+        return _CheckVerdict(CI_OUTCOME_LOCAL)
+    status = _lower(entry.get("status"))
+    conclusion = _lower(entry.get("conclusion"))
+    url = _entry_url(entry, "html_url")
+    if status and status != CI_CHECK_COMPLETED:
+        return _CheckVerdict(CI_OUTCOME_PENDING, status, url)
+    if status != CI_CHECK_COMPLETED:
+        return _CheckVerdict(CI_OUTCOME_LOCAL)
+    if conclusion == CI_CHECK_SUCCESS:
+        return _CheckVerdict(CI_OUTCOME_GREEN)
+    if conclusion in CI_FAILED_CONCLUSIONS:
+        return _CheckVerdict(CI_OUTCOME_RED, conclusion, url)
+    return _CheckVerdict(CI_OUTCOME_LOCAL)
+
+
+def _worst(verdicts: list[_CheckVerdict]) -> _CheckVerdict:
+    """The worst verdict; the first one wins a tie. Empty is a missing check."""
+    if not verdicts:
+        return _CheckVerdict(CI_OUTCOME_PENDING, CI_CHECK_MISSING)
+    worst = verdicts[0]
+    for verdict in verdicts[1:]:
+        if _CI_OUTCOME_RANK[verdict.outcome] > _CI_OUTCOME_RANK[worst.outcome]:
+            worst = verdict
+    return worst
+
+
+def _decide_checks(repo: str | None, head: str, checks: list[str]) -> dict[str, Any]:
+    """Verdict fields for every mapped *check* at *head*.
+
+    Every check is queried; the worst one decides (red > pending, including a
+    check with no entry yet > local > green). GitHub being unable to say about
+    any check fails closed at once with ``ci-signal-unavailable``.
+    """
+    decided: _CheckVerdict | None = None
+    decided_check = ""
+    for check in checks:
+        entries = _check_entries(repo, head, check)
+        if entries is None:
+            return {"reason": "ci-signal-unavailable", "failed_check": check}
+        verdict = _worst([_classify_entry(e) for e in entries])
+        if decided is None or (
+            _CI_OUTCOME_RANK[verdict.outcome] > _CI_OUTCOME_RANK[decided.outcome]
+        ):
+            decided, decided_check = verdict, check
+    if decided is None or decided.outcome == CI_OUTCOME_GREEN:
+        return {"skip": True, "reason": "matched", "outcome": CI_OUTCOME_GREEN}
+    fields: dict[str, Any] = {
+        "reason": (
+            "check-missing"
+            if decided.state == CI_CHECK_MISSING
+            else "check-not-success"
+        ),
+        "failed_check": decided_check,
+        "outcome": decided.outcome,
+    }
+    # A ``local`` verdict carries no state or url, so these are None for it.
+    fields["check_state"] = decided.state
+    fields["failed_url"] = decided.url
+    return fields
 
 
 def gate_ci_evidence(
@@ -1268,6 +1370,12 @@ def gate_ci_evidence(
     (no PyYAML, no entry, GitHub unreachable, PR closed or retargeted, head
     moved, check missing, pending, red, cancelled, skipped or neutral) is
     ``skip: false`` with the reason, so the caller runs the gate locally.
+
+    ``outcome`` is the aggregate decision for the caller: ``green`` (skip),
+    ``pending`` (a mapped check is missing or unfinished), ``red`` (a mapped
+    check failed) or ``local`` (everything else: run the gate yourself).
+    ``check_state`` and ``failed_url`` describe the check that decided a
+    ``pending`` or ``red`` outcome and are ``None`` otherwise.
     """
     verdict: dict[str, Any] = {
         "gate": name,
@@ -1275,6 +1383,9 @@ def gate_ci_evidence(
         "reason": "",
         "sha": None,
         "checks": [],
+        "outcome": CI_OUTCOME_LOCAL,
+        "check_state": None,
+        "failed_url": None,
     }
     if yaml is None:
         # Distinct from "no-map-entry": the map cannot be read at all, so a
@@ -1303,19 +1414,82 @@ def gate_ci_evidence(
     live_head = state.get("headRefOid")
     if live_head != head:
         return {**verdict, "reason": "head-mismatch", "live_sha": live_head}
-    for check in checks:
-        entries = _check_entries(repo, head, check)
-        if entries is None:
-            return {
-                **verdict,
-                "reason": "ci-signal-unavailable",
-                "failed_check": check,
-            }
-        if not entries:
-            return {**verdict, "reason": "check-missing", "failed_check": check}
-        if not all(_entry_succeeded(e) for e in entries):
-            return {**verdict, "reason": "check-not-success", "failed_check": check}
-    return {**verdict, "skip": True, "reason": "matched"}
+    return {**verdict, **_decide_checks(repo, head, checks)}
+
+
+def _gate_names() -> list[str]:
+    """Detected gate names, in ``detect-gates`` order (process cwd)."""
+    return [str(g["name"]) for g in detect_gates()["gates"]]
+
+
+def ci_deferral(base: str) -> dict[str, Any]:
+    """Which detected gates ``origin/<base>`` maps to CI checks (create path).
+
+    A gate is deferred only on an exact-name ``quality_gates.ci_evidence``
+    entry; everything else, including an unreadable or malformed map, stays
+    local. ``deferred`` and ``local`` follow detect order and are disjoint.
+    No PR is needed and GitHub is never consulted.
+    """
+    names = _gate_names()
+    mapping = (
+        parse_ci_evidence_map(_base_config_text(base), f"origin/{base}")
+        if yaml is not None
+        else {}
+    )
+    deferred = [{"gate": n, "checks": list(mapping[n])} for n in names if n in mapping]
+    if deferred:
+        reason = "mapped"
+    elif yaml is None:
+        reason = "pyyaml-unavailable"
+    elif not names:
+        reason = "no-gates"
+    else:
+        reason = "no-map-entry"
+    return {
+        "deferred": deferred,
+        "local": [n for n in names if n not in mapping],
+        "reason": reason,
+    }
+
+
+def _reuse_park(verdicts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The gate verdict to park on: the first red one, else the first pending one."""
+    for flavor in (CI_OUTCOME_RED, CI_OUTCOME_PENDING):
+        for verdict in verdicts:
+            if verdict["outcome"] == flavor:
+                return {
+                    "flavor": flavor,
+                    "gate": verdict["gate"],
+                    "checks": verdict["checks"],
+                    "failed_check": verdict["failed_check"],
+                    "check_state": verdict["check_state"],
+                    "failed_url": verdict["failed_url"],
+                    "sha": verdict["sha"],
+                }
+    return None
+
+
+def ci_reuse_plan(pr: int, repo: str | None, base: str) -> dict[str, Any]:
+    """Per detected gate: skip (mapped checks green at the live head), park or run.
+
+    A mapped check that is pending, missing or red parks the whole run, so
+    ``skip`` and ``run`` are then empty. Otherwise every gate whose checks are
+    all green is in ``skip`` and every other gate is in ``run``: a consumer
+    runs any gate not named in ``skip`` locally.
+    """
+    verdicts = [gate_ci_evidence(n, pr, repo, base) for n in _gate_names()]
+    park = _reuse_park(verdicts)
+    if park is not None:
+        return {"park": park, "skip": [], "run": []}
+    return {
+        "park": None,
+        "skip": [
+            {"gate": v["gate"], "checks": v["checks"]}
+            for v in verdicts
+            if v["outcome"] == CI_OUTCOME_GREEN
+        ],
+        "run": [v["gate"] for v in verdicts if v["outcome"] != CI_OUTCOME_GREEN],
+    }
 
 
 # --- Scope Tracking ---
@@ -1544,6 +1718,16 @@ def cmd_gate_ci_evidence(args: argparse.Namespace) -> None:
     print(json.dumps(result, indent=2))
 
 
+def cmd_ci_deferral(args: argparse.Namespace) -> None:
+    """Handle ci-deferral subcommand."""
+    print(json.dumps(ci_deferral(args.base), indent=2))
+
+
+def cmd_ci_reuse_plan(args: argparse.Namespace) -> None:
+    """Handle ci-reuse-plan subcommand."""
+    print(json.dumps(ci_reuse_plan(args.pr, args.repo, args.base), indent=2))
+
+
 def cmd_gate_elapsed(args: argparse.Namespace) -> None:
     """Handle gate-elapsed subcommand."""
     try:
@@ -1555,6 +1739,79 @@ def cmd_gate_elapsed(args: argparse.Namespace) -> None:
 
 
 # --- CLI Entry Point ---
+
+
+def _add_ci_evidence_parsers(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    """Register ``gate-ci-evidence``, ``ci-deferral`` and ``ci-reuse-plan``."""
+    # gate-ci-evidence
+    gate_ci_parser = subparsers.add_parser(
+        "gate-ci-evidence",
+        help=(
+            "Report whether green CI at the PR's live head already proves a"
+            " gate (open-PR reuse path; opt-in via quality_gates.ci_evidence)"
+        ),
+    )
+    gate_ci_parser.add_argument(
+        "name", help="Gate name exactly as detect-gates printed it"
+    )
+    gate_ci_parser.add_argument(
+        "--pr", type=int, required=True, help="Pull request number"
+    )
+    gate_ci_parser.add_argument(
+        "--repo", default=None, help="owner/name (default: gh's current repo)"
+    )
+    gate_ci_parser.add_argument(
+        "--base",
+        default="main",
+        help=(
+            "Base branch the PR targets; the ci_evidence map is read from the"
+            " committed config on origin/<base> (default: main)"
+        ),
+    )
+
+    # ci-deferral
+    deferral_parser = subparsers.add_parser(
+        "ci-deferral",
+        help=(
+            "Report which detected gates the base branch's"
+            " quality_gates.ci_evidence maps to CI checks (create path: those"
+            " gates are deferred to CI instead of run locally); exit 0 always"
+        ),
+    )
+    deferral_parser.add_argument(
+        "--base",
+        default="main",
+        help=(
+            "Base branch the PR will target; the ci_evidence map is read from"
+            " the committed config on origin/<base> (default: main)"
+        ),
+    )
+
+    # ci-reuse-plan
+    reuse_parser = subparsers.add_parser(
+        "ci-reuse-plan",
+        help=(
+            "For every detected gate decide skip (mapped checks green at the"
+            " PR's live head), park (a mapped check is pending, missing or"
+            " red) or run locally; one JSON object, exit 0"
+        ),
+    )
+    reuse_parser.add_argument(
+        "--pr", type=int, required=True, help="Pull request number"
+    )
+    reuse_parser.add_argument(
+        "--repo", default=None, help="owner/name (default: gh's current repo)"
+    )
+    reuse_parser.add_argument(
+        "--base",
+        default="main",
+        help=(
+            "Base branch the PR targets; the ci_evidence map is read from the"
+            " committed config on origin/<base> (default: main)"
+        ),
+    )
 
 
 def main() -> None:
@@ -1649,36 +1906,14 @@ def main() -> None:
         ),
     )
 
-    # gate-ci-evidence
-    gate_ci_parser = subparsers.add_parser(
-        "gate-ci-evidence",
-        help=(
-            "Report whether green CI at the PR's live head already proves a"
-            " gate (open-PR reuse path; opt-in via quality_gates.ci_evidence)"
-        ),
-    )
-    gate_ci_parser.add_argument(
-        "name", help="Gate name exactly as detect-gates printed it"
-    )
-    gate_ci_parser.add_argument(
-        "--pr", type=int, required=True, help="Pull request number"
-    )
-    gate_ci_parser.add_argument(
-        "--repo", default=None, help="owner/name (default: gh's current repo)"
-    )
-    gate_ci_parser.add_argument(
-        "--base",
-        default="main",
-        help=(
-            "Base branch the PR targets; the ci_evidence map is read from the"
-            " committed config on origin/<base> (default: main)"
-        ),
-    )
+    _add_ci_evidence_parsers(subparsers)
 
     args = parser.parse_args()
 
     dispatch = {
         "gate-ci-evidence": cmd_gate_ci_evidence,
+        "ci-deferral": cmd_ci_deferral,
+        "ci-reuse-plan": cmd_ci_reuse_plan,
         "detect-gates": cmd_detect_gates,
         "snapshot": cmd_snapshot,
         "check-scope": cmd_check_scope,

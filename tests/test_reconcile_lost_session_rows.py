@@ -540,6 +540,61 @@ class TestSessionlessPage:
         assert "live-1" in breadcrumbs
         assert "cw doctor --reap" not in breadcrumbs
 
+    def _seed_unlisted_session(self, *, bound_at: datetime) -> None:
+        """A same-ticket ACTIVE session whose ref the roster does not list,
+        started long ago and bound at *bound_at* (#3334)."""
+        session = _make_daemon_session(
+            id="young-1",
+            name=f"{_CLIENT}/auto-dev/T-1",
+            surface_ref="abcd1234",
+            started_at=bound_at - timedelta(hours=2),
+        ).model_copy(update={"surface_bound_at": bound_at})
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(DevQueueStore(tasks=[_running("T-1", session_id=None)]))
+
+    def test_session_that_may_postdate_the_capture_is_named_and_reap_omitted(
+        self, clients: dict[str, ClientConfig]
+    ) -> None:
+        now = datetime.now(UTC)
+        self._seed_unlisted_session(bound_at=now - timedelta(seconds=3))
+
+        run_lost_session_recovery(
+            now=now, clients=clients, native_live=set(), roster_captured_at=now
+        )
+
+        breadcrumbs = str(_pages(SESSIONLESS_PAGE_REASON)[0]["breadcrumbs"])
+        assert (
+            f"young-1 ({_CLIENT}/auto-dev/T-1) (may postdate the roster capture)"
+            in breadcrumbs
+        )
+        assert "cw doctor --reap" not in breadcrumbs
+
+    def test_old_unlisted_session_is_not_named_even_with_a_capture_time(
+        self, clients: dict[str, ClientConfig]
+    ) -> None:
+        now = datetime.now(UTC)
+        self._seed_unlisted_session(bound_at=now - timedelta(hours=1))
+
+        run_lost_session_recovery(
+            now=now, clients=clients, native_live=set(), roster_captured_at=now
+        )
+
+        breadcrumbs = str(_pages(SESSIONLESS_PAGE_REASON)[0]["breadcrumbs"])
+        assert "Live sessions for this ticket: none." in breadcrumbs
+        assert "cw doctor --reap" in breadcrumbs
+
+    def test_default_capture_time_none_keeps_roster_only_behaviour(
+        self, clients: dict[str, ClientConfig]
+    ) -> None:
+        now = datetime.now(UTC)
+        self._seed_unlisted_session(bound_at=now - timedelta(seconds=3))
+
+        run_lost_session_recovery(now=now, clients=clients, native_live=set())
+
+        breadcrumbs = str(_pages(SESSIONLESS_PAGE_REASON)[0]["breadcrumbs"])
+        assert "young-1" not in breadcrumbs
+        assert "cw doctor --reap" in breadcrumbs
+
     @pytest.mark.parametrize("later", [timedelta(hours=1), timedelta(days=3)])
     def test_never_parked(
         self, clients: dict[str, ClientConfig], later: timedelta

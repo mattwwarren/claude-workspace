@@ -264,6 +264,18 @@ REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON: Literal[
 # merely unreachable). The create path's nested `/prep-pr` Step 7
 # `gate_timeout` marker still collapses to `agent_block`.
 GATE_TIMEOUT_BLOCKER_REASON: Literal["gate_timeout"] = "gate_timeout"
+# blocker.reason headless finalize emits when the base branch's
+# `quality_gates.ci_evidence` maps a gate to CI checks that have not all
+# finished green at the PR head (#3618): the create path deferred the gate to
+# CI, or the reuse pass found a mapped check pending, missing or red. The PR
+# exists (carried in `pr_info`) and cw did not arm auto-merge; the row parks
+# BLOCKED_ON_USER at FINALIZE and `cw dev-queue requeue` releases it. Absent
+# from FINALIZE_REGRESS_BLOCKER_REASONS (waiting on CI is not an impl defect;
+# a red mapped check takes the operator's parked-row `--regress` route) and
+# from OPERATOR_UNAVAILABLE_BLOCKER_REASONS.
+AWAITING_CI_EVIDENCE_BLOCKER_REASON: Literal["awaiting_ci_evidence"] = (
+    "awaiting_ci_evidence"
+)
 # blocker.reason the Claude-native review stage emits when the independent
 # confirm round after a repo review engine pass raises a new MUST_FIX or a
 # never-deferrable SHOULD_FIX (#3042, RFC 0017 I3). The ledger stops with
@@ -298,6 +310,7 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             REVIEW_ENGINE_MODIFIED_BLOCKER_REASON,
             REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON,
             GATE_TIMEOUT_BLOCKER_REASON,
+            AWAITING_CI_EVIDENCE_BLOCKER_REASON,
             PLAN_UNREVIEWABLE_BLOCKER_REASON,
             PLAN_UNSOUND_BLOCKER_REASON,
             "ambiguity_scan_unconverged",

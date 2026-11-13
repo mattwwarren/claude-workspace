@@ -18,6 +18,7 @@ from cw.disk import (
     effective_min_free_inodes,
     inodes_exhausted,
     same_filesystem,
+    space_exhausted,
 )
 from cw.dispatch.gating.context_json import _LOGGER_NAME
 from cw.dispatch_state import (
@@ -148,7 +149,8 @@ def _probe_mount(
         )
         gated_gb, free_gb = False, 0.0
     else:
-        gated_gb, free_gb = usage.free_gb < min_free_gb, usage.free_gb
+        gated_gb = space_exhausted(usage, min_free_gb=min_free_gb)
+        free_gb = usage.free_gb
     gated_inodes, free_inodes, floor = _resolve_inode_pressure(
         client,
         path,

@@ -319,9 +319,10 @@ class TestConstants:
         assert ROSTER_REUSE_MAX_AGE_SECONDS < ROSTER_SNAPSHOT_MAX_AGE_SECONDS
 
     def test_registration_slack_covers_the_spawn_roster_poll(self) -> None:
-        """M1: a session's ref may land on the roster up to the spawn/resume
-        roster poll (``spawn._ROSTER_POLL_TIMEOUT_SECS``) after its
-        ``started_at``/``resumed_at``; the slack is that plus 5 s of skew."""
+        """The registration slack keeps headroom for the spawn/resume roster
+        poll (``spawn._ROSTER_POLL_TIMEOUT_SECS``) that precedes a row's
+        committing stamp (``resumed_at``/``surface_bound_at``, #3339), plus
+        5 s of registration lag and skew."""
         assert spawn._ROSTER_POLL_TIMEOUT_SECS == 10.0
         assert ROSTER_REGISTRATION_SLACK_SECONDS == (
             spawn._ROSTER_POLL_TIMEOUT_SECS + 5.0

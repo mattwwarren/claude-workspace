@@ -5,11 +5,14 @@ them: those probe the worktree-base mount and say so in their messages, while
 this one probes the mount that holds the shared fallback dir. It reports the
 mount's free GB and free inodes against the same ``disk_pressure_*`` thresholds
 the dispatch gate uses, a bounded tree measurement, and the last retention run
-from its ``worker_tmp_retention.json`` sidecar. ``ok=False`` on a shortfall;
-``warn=True`` only when the last retention run failed.
+from its ``worker_tmp_retention.json`` sidecar, including whether the ``/proc``
+open-file guard was on and how many processes it could not read. ``ok=False`` on
+a shortfall; ``warn=True`` only when retention is enabled and its last run
+failed (a stale failed record of a disabled sweep is not actionable). The guard
+state is informational and never sets ``warn``.
 
-Leaf module apart from ``config_checks._orchestrator_config_or_default``, which
-it reuses rather than copying a third time.
+Leaf module apart from ``_shared.orchestrator_config_or_default``, the one
+degrade-to-defaults config loader every doctor check shares.
 """
 
 from __future__ import annotations
@@ -18,14 +21,8 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from cw._util import format_compact_age
-from cw.disk import (
-    check_disk_usage,
-    check_inode_usage,
-    effective_min_free_inodes,
-    inodes_exhausted,
-)
-from cw.doctor._shared import CheckResult
-from cw.doctor.config_checks import _orchestrator_config_or_default
+from cw.disk import assess_mount, check_disk_usage, check_inode_usage
+from cw.doctor._shared import CheckResult, orchestrator_config_or_default
 from cw.worker_tmp_retention import (
     MEASURE_LIMIT,
     RetentionStatus,
@@ -61,30 +58,38 @@ def _mount_findings(
         f"mount free {disk.free_gb:.1f} GB"
         f" (floor {config.disk_pressure_min_free_gb:.1f} GB)"
     )
-    if disk.free_gb < config.disk_pressure_min_free_gb:
+    inode = check_inode_usage(root)
+    assessment = assess_mount(
+        disk,
+        inode,
+        min_free_gb=config.disk_pressure_min_free_gb,
+        min_free_inodes=config.disk_pressure_min_free_inodes,
+        min_free_inode_fraction=config.disk_pressure_min_free_inode_fraction,
+    )
+    if assessment.space_short:
         shortfalls.append(
             f"mount free {disk.free_gb:.1f} GB below"
             f" {config.disk_pressure_min_free_gb:.1f} GB"
         )
-    inode = check_inode_usage(root)
-    if inode.total_inodes == 0:
+    floor = assessment.inode_floor
+    if floor is None:
         notes.append("mount reports no fixed inode budget")
         return headroom, shortfalls, notes
-    floor = effective_min_free_inodes(
-        inode.total_inodes,
-        min_free_inodes=config.disk_pressure_min_free_inodes,
-        min_free_inode_fraction=config.disk_pressure_min_free_inode_fraction,
-    )
     headroom += f", {inode.free_inodes:,} free inodes (floor {floor:,})"
-    if inodes_exhausted(
-        inode,
-        min_free_inodes=config.disk_pressure_min_free_inodes,
-        min_free_inode_fraction=config.disk_pressure_min_free_inode_fraction,
-    ):
+    if assessment.inode_short:
         shortfalls.append(
             f"mount free inodes {inode.free_inodes:,} below floor {floor:,}"
         )
     return headroom, shortfalls, notes
+
+
+def _guard_note(status: RetentionStatus) -> str:
+    """Describe the open-file guard of an ok run (informational, never a warn)."""
+    if not status.proc_guard:
+        return "age-only (no /proc guard)"
+    if status.unreadable_procs:
+        return f"/proc guard on, {status.unreadable_procs} processes unreadable"
+    return "/proc guard on"
 
 
 def _retention_detail(
@@ -104,13 +109,14 @@ def _retention_detail(
     return (
         f"last retention run {age} ago: removed {status.removed_files} files,"
         f" {status.removed_dirs} dirs ({status.freed_bytes}B freed),"
-        f" kept {status.kept_in_use} in use, {status.errors} errors"
+        f" kept {status.kept_in_use} in use, {status.errors} errors;"
+        f" {_guard_note(status)}"
     )
 
 
 def _check_worker_tmp_fallback() -> CheckResult:
     """Report the ``~/.cw/tmp`` mount, its tree size and the last retention run."""
-    config = _orchestrator_config_or_default()
+    config = orchestrator_config_or_default()
     root = resolve_fallback_worker_tmpdir()
     try:
         headroom, shortfalls, notes = _mount_findings(root, config)
@@ -134,6 +140,8 @@ def _check_worker_tmp_fallback() -> CheckResult:
     return CheckResult(
         _CHECK_NAME,
         ok=not shortfalls,
-        warn=status is not None and status.status == "failed",
+        warn=config.worker_tmp_fallback_retention_enabled
+        and status is not None
+        and status.status == "failed",
         detail="; ".join(parts),
     )

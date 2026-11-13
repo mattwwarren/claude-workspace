@@ -770,7 +770,7 @@ def seed_codex_stage_run(
 # --- prep_pr_state stub (hoisted from test_codex_fix_loop_gates, #3061) ---------
 
 _PREP_PR_STATE_STUB_TEMPLATE = '''\
-"""prep_pr_state stub: understands gate-timeout."""
+"""prep_pr_state stub: understands gate-timeout, ci-deferral, ci-reuse-plan."""
 import json
 import sys
 import time
@@ -792,6 +792,18 @@ if sys.argv[1] == "gate-timeout":
     print(raw if raw is not None else json.dumps(
         {"gate": sys.argv[2], "foreground_ceiling_s": cfg["ceilings"][sys.argv[2]]}))
     sys.exit(cfg["ceiling_exit"])
+if sys.argv[1] == "ci-deferral":
+    raw = cfg["deferral_raw"]
+    names = [g["name"] for g in cfg["gates"]]
+    print(raw if raw is not None else json.dumps(
+        {"deferred": [], "local": names, "reason": "no-map-entry"}))
+    sys.exit(cfg["deferral_exit"])
+if sys.argv[1] == "ci-reuse-plan":
+    raw = cfg["reuse_plan_raw"]
+    names = [g["name"] for g in cfg["gates"]]
+    print(raw if raw is not None else json.dumps(
+        {"park": None, "skip": [], "run": names}))
+    sys.exit(cfg["reuse_plan_exit"])
 sys.exit(2)
 '''
 
@@ -812,6 +824,10 @@ class PrepPrStateStub:
             "detect_exit": 0,
             "ceiling_raw": None,
             "ceiling_exit": 0,
+            "deferral_raw": None,
+            "deferral_exit": 0,
+            "reuse_plan_raw": None,
+            "reuse_plan_exit": 0,
         }
         scripts_dir.mkdir(parents=True, exist_ok=True)
         text = _PREP_PR_STATE_STUB_TEMPLATE.replace(
@@ -829,6 +845,42 @@ class PrepPrStateStub:
             gates=[{"name": n, "command": c} for n, c, _ in entries],
             ceilings={n: ceiling for n, _, ceiling in entries},
         )
+
+    def defer(self, *entries: tuple[str, tuple[str, ...]]) -> None:
+        """Make ``ci-deferral`` defer *entries* (gate, checks); the rest run locally."""
+        names = [str(g["name"]) for g in self.gates_config()]
+        deferred = [{"gate": gate, "checks": list(checks)} for gate, checks in entries]
+        mapped = {gate for gate, _ in entries}
+        self.set(
+            deferral_raw=json.dumps(
+                {
+                    "deferred": deferred,
+                    "local": [n for n in names if n not in mapped],
+                    "reason": "mapped",
+                }
+            )
+        )
+
+    def reuse_plan(
+        self,
+        *,
+        park: dict[str, object] | None = None,
+        skip: tuple[tuple[str, tuple[str, ...]], ...] = (),
+    ) -> None:
+        """Make ``ci-reuse-plan`` answer *park* / *skip*; every other gate runs."""
+        names = [str(g["name"]) for g in self.gates_config()]
+        skipped = {gate for gate, _ in skip}
+        body: dict[str, object] = {
+            "park": park,
+            "skip": [] if park else [{"gate": g, "checks": list(c)} for g, c in skip],
+            "run": [] if park else [n for n in names if n not in skipped],
+        }
+        self.set(reuse_plan_raw=json.dumps(body))
+
+    def gates_config(self) -> list[dict[str, object]]:
+        gates = self.config["gates"]
+        assert isinstance(gates, list)
+        return gates
 
     def calls(self) -> list[str]:
         if not self.calls_path.exists():

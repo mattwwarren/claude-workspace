@@ -48,6 +48,7 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
+    SPAWN_GRACE_SECONDS,
     ReconcileReport,
     locked_sweeps,
     prepasses,
@@ -69,6 +70,7 @@ from cw.reconcile.review_recipes import (
     _shared,
 )
 from cw.reconcile.review_recipes._shared import RepoSlugs
+from cw.reconcile.roster_skip_streak import ROSTER_SKIP_STREAK_STATUS
 from cw.reconcile.roster_snapshot import RosterSnapshot
 from cw.review_strategy import ReviewStrategy
 from tests import _git_sandbox
@@ -94,6 +96,7 @@ from tests._reconcile_helpers import (
     stub_worktree_probe,
     use_reconcile_daemon,
 )
+from tests._shared.daemon_fakes import CapturedEvent
 from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 from tests.test_pr_hydrate import _pr_state
 from tests.test_reconcile_gate_recipes import _GATE_LANES, _clean_result
@@ -959,7 +962,7 @@ def _seed_parked_concierge_row(
 ) -> None:
     """Arm the concierge and seed one BLOCKED_ON_USER row GEN-1 whose session
     ``s1`` carries a ref (``missing-ref``) absent from *snap*, resumed either
-    just after the capture or long before it (M1, #2550). The transcript is
+    just after the capture or long before it (#2550). The transcript is
     unlocatable, so the recipes read it as stale."""
     for module in ("false_park", "park_marker_poison"):
         monkeypatch.setattr(
@@ -1195,11 +1198,110 @@ class TestRosterSnapshotTick:
 
         assert report.phantom_session_ids == []
 
+    @pytest.mark.parametrize(
+        ("slack_offset", "phantoms"),
+        [(-1.0, []), (1.0, ["s1"])],
+        ids=["inside-the-slack", "just-outside-the-slack"],
+    )
+    def test_registration_slack_of_an_aged_capture(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        slack_offset: float,
+        phantoms: list[str],
+    ) -> None:
+        """#3337: a session born just inside the slack before an aged capture
+        is spared by the slack alone (it is older than the spawn grace, so
+        SPAWN_GRACE cannot mask a reverted slack check); one born just outside
+        the slack is still a phantom."""
+        monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+        aged = aged_roster_snapshot(_DECOY_ROSTER, age_seconds=19.0)
+        assert aged.captured_at is not None
+        started = aged.captured_at - timedelta(
+            seconds=ROSTER_REGISTRATION_SLACK_SECONDS + slack_offset
+        )
+        assert datetime.now(UTC) - started > timedelta(seconds=SPAWN_GRACE_SECONDS)
+        save_state(
+            CwState(sessions=[_mk_session("s1", "missing-ref", started_at=started)])
+        )
+
+        report = _run_locked(aged)
+
+        assert report.phantom_session_ids == phantoms
+
+    def test_session_bound_after_the_capture_is_not_a_phantom(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3339: a fresh spawn's row is appended (``surface_bound_at``) after
+        ``spawn_bg`` and its poll, long after ``started_at``; a bind after the
+        capture spares it even though ``started_at`` is far outside both the
+        spawn grace and the slack."""
+        monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+        snap = aged_roster_snapshot(_DECOY_ROSTER, age_seconds=2.0)
+        assert snap.captured_at is not None
+        bound = _mk_session("s1", "new-ref").model_copy(
+            update={"surface_bound_at": snap.captured_at + timedelta(seconds=1)}
+        )
+        save_state(CwState(sessions=[bound]))
+
+        report = _run_locked(snap)
+
+        assert report.phantom_session_ids == []
+        stored = load_state().find_by_name_or_id("s1")
+        assert stored is not None
+        assert stored.status is SessionStatus.ACTIVE
+
+    def test_failed_read_on_an_idle_fleet_still_reaches_the_concierge(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3341 characterization: a failed (timed-out) read on an idle fleet
+        is not an outage, so the tick proceeds on the empty roster and the
+        concierge runs. This pins the documented #2550 decision; gating the
+        concierge on an available roster must revisit it first."""
+        save_state(
+            CwState(
+                sessions=[_mk_session("done", "r1", status=SessionStatus.COMPLETED)]
+            )
+        )
+        concierge = MagicMock(return_value=None)
+        monkeypatch.setattr(locked_sweeps, "run_concierge_recoveries", concierge)
+        snap = RosterSnapshot()
+
+        def _timeout() -> list[dict[str, object]]:
+            raise subprocess.TimeoutExpired(cmd=["claude", "agents"], timeout=10)
+
+        snap.capture(_timeout)
+
+        _run_locked(snap)
+
+        assert concierge.called is True
+
+    def test_stale_tick_streak_emits_one_operator_event_and_a_fresh_tick_resets(
+        self,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """#3335 wiring: ``_reconcile_locked`` settles the skip streak each
+        tick. Three stale ticks page once; a fresh tick re-arms, so the next
+        streak needs three more."""
+        events = capture_events(
+            "cw.reconcile.roster_skip_streak",
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        )
+        save_state(CwState(sessions=[]))
+
+        for _ in range(3):
+            _run_locked(aged_roster_snapshot(_DECOY_ROSTER, age_seconds=30.0))
+        assert [e[1]["paused_status"] for e in events] == [ROSTER_SKIP_STREAK_STATUS]
+
+        _run_locked(fresh_roster_snapshot(_DECOY_ROSTER))
+        for _ in range(2):
+            _run_locked(aged_roster_snapshot(_DECOY_ROSTER, age_seconds=30.0))
+        assert len(events) == 1
+
     def test_session_resumed_after_the_capture_is_not_a_phantom(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """M1: a resume rewrites ``surface_ref`` without moving
-        ``started_at``; ``resumed_at`` after the capture protects it."""
+        """A resume rewrites ``surface_ref`` without moving ``started_at``;
+        ``resumed_at`` after the capture protects it (#2550)."""
         monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
         snap = aged_roster_snapshot(_DECOY_ROSTER, age_seconds=2.0)
         assert snap.captured_at is not None
@@ -1237,7 +1339,8 @@ class TestRosterSnapshotTick:
     def test_concierge_does_not_act_on_an_unavailable_snapshot(
         self, monkeypatch: pytest.MonkeyPatch, kind: str
     ) -> None:
-        """M2: concierge's ``_is_session_dead`` reads an absent ref as dead
+        """A stale or missing snapshot skips the tick: concierge's
+        ``_is_session_dead`` reads an absent ref as dead
         with no live-status gate, so a stale or missing snapshot must not
         reach it even on an idle fleet. The fresh case proves the setup
         reaches it."""
@@ -1280,53 +1383,18 @@ class TestRosterSnapshotTick:
         resumed_after_capture: bool,
         requeued: bool,
     ) -> None:
-        """M1 for the concierge: a resume rewrites ``surface_ref`` without
-        moving ``started_at``, so a ref absent from a fresh non-empty
-        snapshot is not proof of death when the resume postdates the capture.
-        Recipe 1 must not requeue the parked row; the long-before control
-        proves the setup reaches the requeue."""
-        for module in ("false_park", "park_marker_poison"):
-            monkeypatch.setattr(
-                f"cw.reconcile.concierge.{module}._transcript_age_seconds",
-                lambda *_a, **_k: None,
-            )
-        monkeypatch.setattr(
-            "cw.reconcile.core.load_orchestrator_config",
-            lambda: OrchestratorConfig(concierge_enabled=True),
-        )
+        """The registration slack for the concierge: a resume rewrites
+        ``surface_ref`` without moving ``started_at``, so a ref absent from a
+        fresh non-empty snapshot is not proof of death when the resume
+        postdates the capture. Recipe 1 must not requeue the parked row; the
+        long-before control proves the setup reaches the requeue."""
         snap = fresh_roster_snapshot(_DECOY_ROSTER)
-        assert snap.captured_at is not None
-        resumed_at = snap.captured_at + (
-            timedelta(seconds=1)
-            if resumed_after_capture
-            else -timedelta(seconds=ROSTER_REGISTRATION_SLACK_SECONDS + 600)
-        )
-        save_state(
-            CwState(
-                sessions=[
-                    _make_daemon_session(
-                        id="s1",
-                        name="client-a/auto-dev/GEN-1",
-                        client="client-a",
-                        surface_ref="missing-ref",
-                        worktree_path=None,
-                        resumed_at=resumed_at,
-                    )
-                ]
-            )
-        )
-        save_dev_queue(
-            DevQueueStore(
-                tasks=[
-                    _make_ticket_task(
-                        ticket_id="GEN-1",
-                        client="client-a",
-                        status=QueueItemStatus.BLOCKED_ON_USER,
-                        disposition="stalled_retry_cap_parked",
-                        attempts=1,
-                    )
-                ]
-            )
+        _seed_parked_concierge_row(
+            monkeypatch,
+            snap,
+            resumed_after_capture=resumed_after_capture,
+            session_overrides={},
+            disposition="stalled_retry_cap_parked",
         )
 
         _run_locked(snap)
@@ -1345,9 +1413,10 @@ class TestRosterSnapshotTick:
         resumed_after_capture: bool,
         cleared: bool,
     ) -> None:
-        """M1 for recipe 2: a park-marked session whose ref is absent from a
-        fresh non-empty snapshot is not dead when its resume postdates the
-        capture, so the poison clear neither closes it nor requeues the row.
+        """The registration slack for recipe 2: a park-marked session whose
+        ref is absent from a fresh non-empty snapshot is not dead when its
+        resume postdates the capture, so the poison clear neither closes it
+        nor requeues the row.
         The long-before control (same absent ref) reaches the clear."""
         snap = fresh_roster_snapshot(_DECOY_ROSTER)
         _seed_parked_concierge_row(

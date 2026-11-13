@@ -13,6 +13,7 @@ from cw.auto_dev_result import (
     _AMBIGUITY_GLITCH_PLACEHOLDER_QUESTION,
     _PREMISE_GLITCH_PLACEHOLDER_CLAIM,
     AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION,
+    AWAITING_CI_EVIDENCE_BLOCKER_REASON,
     BLOCKER_REASON_MULTIPLE_RESULT_BLOCKS,
     BLOCKER_REASON_NO_RESULT_EMITTED,
     BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN,
@@ -6374,3 +6375,50 @@ class TestReviewDebtUnfiledReason:
 
     def test_is_not_an_operator_unavailable_hold(self) -> None:
         assert "review_debt_unfiled" not in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
+
+
+class TestAwaitingCiEvidenceBlockerReason:
+    """#3618: `awaiting_ci_evidence` parks a finalize run waiting on CI.
+
+    A new open-enum reason (no schema_version bump), outside the regress and
+    operator-unavailable sets, kept in lockstep with the codex literal.
+    """
+
+    def test_constant_value_and_registration(self) -> None:
+        assert AWAITING_CI_EVIDENCE_BLOCKER_REASON == "awaiting_ci_evidence"
+        assert AWAITING_CI_EVIDENCE_BLOCKER_REASON in KNOWN_BLOCKER_REASONS
+
+    def test_excluded_from_regress_and_operator_unavailable(self) -> None:
+        assert frozenset({"agent_block"}) == FINALIZE_REGRESS_BLOCKER_REASONS
+        assert (
+            AWAITING_CI_EVIDENCE_BLOCKER_REASON
+            not in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
+        )
+
+    def test_codex_literal_is_in_lockstep(self) -> None:
+        from cw.codex_finalize._result import AWAITING_CI_EVIDENCE
+
+        assert AWAITING_CI_EVIDENCE == AWAITING_CI_EVIDENCE_BLOCKER_REASON
+
+    def test_blocked_sentinel_round_trips_with_pr_info(self) -> None:
+        p = _blocked_payload()
+        p["stage_reached"] = "stage5_post_create"
+        p["pr"] = None
+        p["pr_info"] = {
+            "number": 42,
+            "url": "https://github.com/example/example/pull/42",
+            "auto_merge": False,
+            "base": "main",
+        }
+        p["blocker"]["stage"] = "stage5_post_create"
+        p["blocker"]["reason"] = AWAITING_CI_EVIDENCE_BLOCKER_REASON
+        p["blocker"]["details"] = (
+            "ci_evidence_pending: PR #42 (https://github.com/example/example/"
+            "pull/42) at head " + "a" * 40 + ": gate mypy mapped to check ci is"
+            " in_progress; cw did not arm auto-merge and did not run the gate"
+            " locally."
+        )
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.blocker is not None
+        assert result.blocker.reason == AWAITING_CI_EVIDENCE_BLOCKER_REASON

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import graphlib
+import inspect
 from importlib import import_module
 from typing import TYPE_CHECKING
 
@@ -88,55 +89,33 @@ PUBLIC_EXPORTS = frozenset(
     }
 )
 
-# Owning module of each name. Starts as the flat module for every name; each
-# extraction commit repoints its names to the submodule that now defines them.
-_OWNER: dict[str, str] = dict.fromkeys(EXPECTED_EXPORTS, PACKAGE)
-_OWNER.update(
-    dict.fromkeys(
-        ("_client_cwd", "_is_dangling_client", "_resolve_task_policy"),
-        f"{PACKAGE}._client_config",
-    )
+# Names each submodule defines, one explicit group per owner (#3470). No
+# name is seeded with the package itself: every name is listed exactly once,
+# under the submodule that defines it, which
+# ``test_owner_groups_are_disjoint_and_cover_the_surface`` pins.
+_CLIENT_CONFIG_NAMES = ("_client_cwd", "_is_dangling_client", "_resolve_task_policy")
+_BACKSTOP_NAMES = (
+    "_COMPLETION_ROUTING_GRACE_SECONDS",
+    "_revert_running_tasks_for_sessions",
+    "_sessions_past_completion_grace",
+    "_revert_terminal_backstop",
+    "backstop_targets",
+    "capture_backstop_dirty_checks",
+    "revert_completed_silent_tasks",
+    "revert_timed_out_tasks",
 )
-_OWNER.update(
-    dict.fromkeys(
-        (
-            "_COMPLETION_ROUTING_GRACE_SECONDS",
-            "_revert_running_tasks_for_sessions",
-            "_sessions_past_completion_grace",
-            "_revert_terminal_backstop",
-            "backstop_targets",
-            "capture_backstop_dirty_checks",
-            "revert_completed_silent_tasks",
-            "revert_timed_out_tasks",
-        ),
-        f"{PACKAGE}.backstops",
-    )
+_TERMINAL_SIBLING_NAMES = (
+    "_TERMINAL_SIBLING_STATUSES",
+    "_latest_terminal_at_index",
+    "park_terminal_sibling_tasks",
 )
-
-_OWNER.update(
-    dict.fromkeys(
-        (
-            "_TERMINAL_SIBLING_STATUSES",
-            "_latest_terminal_at_index",
-            "park_terminal_sibling_tasks",
-        ),
-        f"{PACKAGE}.terminal_siblings",
-    )
+_MERGED_COMPLETION_NAMES = (
+    "_collect_timed_out_merged_candidates",
+    "_emit_never_claimed_refusals",
+    "_filter_merged_candidates",
+    "_is_never_claimed",
+    "complete_timed_out_merged_tasks",
 )
-
-_OWNER.update(
-    dict.fromkeys(
-        (
-            "_collect_timed_out_merged_candidates",
-            "_emit_never_claimed_refusals",
-            "_filter_merged_candidates",
-            "_is_never_claimed",
-            "complete_timed_out_merged_tasks",
-        ),
-        f"{PACKAGE}.merged_completion",
-    )
-)
-
 _STALE_GATE_NAMES = (
     "_STALE_GATE_CONSUMER",
     "_VARIANT_A_MERGE_PENDING_DISPOSITION",
@@ -154,7 +133,21 @@ _STALE_GATE_NAMES = (
     "_release_variant_b",
     "release_stale_gated_tasks",
 )
-_OWNER.update(dict.fromkeys(_STALE_GATE_NAMES, f"{PACKAGE}.stale_gate"))
+_OWNED_NAMES: dict[str, tuple[str, ...]] = {
+    f"{PACKAGE}._client_config": _CLIENT_CONFIG_NAMES,
+    f"{PACKAGE}.backstops": _BACKSTOP_NAMES,
+    f"{PACKAGE}.terminal_siblings": _TERMINAL_SIBLING_NAMES,
+    f"{PACKAGE}.merged_completion": _MERGED_COMPLETION_NAMES,
+    f"{PACKAGE}.stale_gate": _STALE_GATE_NAMES,
+}
+
+# Owning module of each name.
+_OWNER: dict[str, str] = {
+    name: owner for owner, names in _OWNED_NAMES.items() for name in names
+}
+
+# The constants of the surface, by the same rule ``_isort_style_key`` uses.
+_CONSTANTS = frozenset(n for n in EXPECTED_EXPORTS if n.lstrip("_").isupper())
 
 # Line ceiling for every package module (CLAUDE.md "Module Size").
 _MODULE_LINE_LIMIT = 800
@@ -309,6 +302,103 @@ def test_package_binds_no_patched_global() -> None:
 def test_flat_module_file_is_gone() -> None:
     """The flat module is now the package ``__init__``; no ``tasks.py`` remains."""
     assert not (SRC_ROOT / "reconcile" / "tasks.py").exists()
+
+
+def test_owner_groups_are_disjoint_and_cover_the_surface() -> None:
+    """#3470: each name is listed once, under a submodule, never the package."""
+    listed = sum(len(names) for names in _OWNED_NAMES.values())
+    assert listed == len(_OWNER) == len(EXPECTED_EXPORTS)
+    assert set(_OWNER) == set(EXPECTED_EXPORTS)
+    assert PACKAGE not in set(_OWNER.values())
+
+
+def test_every_name_is_defined_where_the_owner_table_says() -> None:
+    """#3471: each package file defines exactly the names ``_OWNER`` assigns
+    to it. A list, not a set, so a name defined in two files fails."""
+    defined = [
+        (name, _module_name(path, PACKAGE))
+        for path in _package_files(PACKAGE)
+        for name in _top_level_names(_parse(path))
+    ]
+    assert sorted(defined) == sorted(_OWNER.items())
+
+
+def test_constant_set_is_the_eight_flat_module_constants() -> None:
+    assert len(_CONSTANTS) == 8
+
+
+@pytest.mark.parametrize("name", sorted(_OWNER.keys() - _CONSTANTS))
+def test_callable_is_defined_in_its_owner(name: str) -> None:
+    """#3471: functions report their owning module as ``__module__``, so a
+    re-import alias in the owner cannot stand in for a definition."""
+    obj = vars(import_module(_OWNER[name]))[name]
+    assert inspect.isfunction(obj) or inspect.isclass(obj)
+    assert obj.__module__ == _OWNER[name]
+
+
+def _resolve_import_from(node: ast.ImportFrom, module: str) -> str:
+    """The absolute module an ``ImportFrom`` in submodule *module* reads from."""
+    if not node.level:
+        return node.module or ""
+    base = module.rsplit(".", node.level)[0]
+    return f"{base}.{node.module}" if node.module else base
+
+
+def _bare_package_imports(source: str, module: str) -> list[int]:
+    """Lines of *source* (submodule *module*) that import the bare package.
+
+    Resolves ``import cw.reconcile.tasks``, ``from cw.reconcile.tasks import
+    x``, ``from cw.reconcile import tasks`` and the relative ``from . import
+    x``, anywhere in the AST (function-local imports included). A direct
+    submodule path is not the bare package.
+    """
+    lines: list[int] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            hit = any(alias.name == PACKAGE for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = _resolve_import_from(node, module)
+            hit = base == PACKAGE or any(
+                f"{base}.{alias.name}" == PACKAGE for alias in node.names
+            )
+        else:
+            continue
+        if hit:
+            lines.append(node.lineno)
+    return sorted(lines)
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("from cw.reconcile.tasks import x\n", [1]),
+        ("import cw.reconcile.tasks\n", [1]),
+        ("from cw.reconcile import tasks\n", [1]),
+        ("from . import backstops\n", [1]),
+        ("from .. import tasks\n", [1]),
+        ("def f() -> None:\n    from cw.reconcile.tasks import x\n", [2]),
+        ("from cw.reconcile.tasks._client_config import x\n", []),
+        ("from ._client_config import x\n", []),
+        ("import cw.reconcile.tasks.backstops\n", []),
+    ],
+)
+def test_bare_package_import_detector_catches_each_form(
+    source: str, expected: list[int]
+) -> None:
+    """#3472: the detector is demonstrably RED-capable for every form."""
+    assert _bare_package_imports(source, f"{PACKAGE}.backstops") == expected
+
+
+@pytest.mark.parametrize(
+    "path",
+    [p for p in _package_files(PACKAGE) if p.name != "__init__.py"],
+    ids=lambda path: path.name,
+)
+def test_no_submodule_imports_the_bare_package(path: Path) -> None:
+    """#3472: siblings reach each other by direct path, never through the
+    package, which would make the import order load-bearing."""
+    source = path.read_text(encoding="utf-8")
+    assert _bare_package_imports(source, _module_name(path, PACKAGE)) == []
 
 
 def test_owner_table_covers_surface() -> None:

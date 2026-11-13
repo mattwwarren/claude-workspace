@@ -48,10 +48,10 @@ ACTIVE/IDLE sessions with surface refs exist — a hiccup must not mass-reap.
 The roster is read lockless into a tick-scoped snapshot before
 ``sessions_lock`` (#2550); a stale or missing snapshot is treated like an
 outage too, unconditionally: the tick skips every roster-dependent sweep.
-A session spawned or resumed within 15 s of the capture, or after it, may have
-a ref the snapshot cannot list, so absence from it is never read as death: the
-phantom check, concierge recipes 1 and 2 and the mid-turn usage-limit act's
-stop all spare it (M1).
+A session spawned, resumed or bound within 15 s of the capture, or after it,
+may have a ref the snapshot cannot list, so absence from it is never read as
+death: the phantom check, concierge recipes 1 and 2 and the mid-turn
+usage-limit act's stop all spare it (``session_may_postdate_roster``).
 
 See ADR-0005 (single state lock) and ADR-0006 (reaping is gated by an
 authority) for the invariants this module enforces.
@@ -104,6 +104,9 @@ re-exports. Submodules:
   capture (``RosterSnapshot``), shared by the dirty-check pre-pass and the
   final pre-lock refresh, and its fail-closed in-lock lookup
   (``lookup_roster``; #2550).
+- ``roster_skip_streak`` — counts consecutive ticks a stale or missing
+  snapshot skipped and pages the operator once per streak
+  (``roster_skip_streak`` attention event; in-process edge latch, #3335).
 - ``locked_sweeps`` — the in-lock sweep wiring ``_reconcile_locked`` calls
   straight-line: the pre-guard and post-guard sweep groups and the terminal
   backstops (#2896).

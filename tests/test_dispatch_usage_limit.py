@@ -24,6 +24,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import freezegun
 import pytest
 
 import cw.dispatch.loop
@@ -31,9 +32,11 @@ from cw.dev_queue import add_ticket
 from cw.dispatch import DispatchTickResult, dispatch_tick
 from cw.dispatch.loop import run_dispatch_loop
 from cw.dispatch_state import (
+    load_usage_limit_armed_at,
     load_usage_limited_until,
     merge_and_save_usage_limited_until,
     record_usage_limit_armed,
+    save_usage_limit_armed_at,
 )
 from cw.events import read_events
 from cw.models import (
@@ -398,6 +401,74 @@ class TestMergeAndArm:
 
         run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
 
+        assert read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED]) == []
+
+
+_ARM_NOW = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
+
+
+class TestArmAndPersistWindow:
+    """#3452: ``_arm_and_persist_usage_limit_window`` called directly.
+
+    Arms one window per detecting client, merges with what another writer
+    persisted, saves the merge, and stamps a fresh fleet-level arm time.
+    """
+
+    def test_persists_merged_windows_and_returns_fresh_arm_timestamp(
+        self, tmp_dispatch_dirs: Path, tmp_events_dir: Path
+    ) -> None:
+        from cw.dispatch.usage_limit_windows import (
+            _arm_and_persist_usage_limit_window,
+        )
+
+        parsed = _ARM_NOW + timedelta(hours=3)
+        with freezegun.freeze_time(_ARM_NOW):
+            merge_and_save_usage_limited_until(
+                {"client-c": _ARM_NOW + timedelta(hours=2)}
+            )
+            save_usage_limit_armed_at(_ARM_NOW - timedelta(days=1))
+
+            merged, armed_at = _arm_and_persist_usage_limit_window(
+                {"client-z": _ARM_NOW + timedelta(minutes=5)},
+                {"client-a": parsed, "client-b": None},
+                backoff_seconds=3600,
+            )
+            persisted = load_usage_limited_until()
+            persisted_armed_at = load_usage_limit_armed_at()
+
+        assert merged == persisted
+        assert merged == {
+            "client-a": parsed,
+            "client-b": _ARM_NOW + timedelta(seconds=3600),
+            "client-c": _ARM_NOW + timedelta(hours=2),
+            "client-z": _ARM_NOW + timedelta(minutes=5),
+        }
+        assert armed_at == _ARM_NOW
+        assert persisted_armed_at == _ARM_NOW
+        events = read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED])
+        assert sorted(event.payload["client"] for event in events) == [
+            "client-a",
+            "client-b",
+        ]
+
+    def test_empty_detections_still_stamp_fresh_armed_at(
+        self, tmp_dispatch_dirs: Path, tmp_events_dir: Path
+    ) -> None:
+        from cw.dispatch.usage_limit_windows import (
+            _arm_and_persist_usage_limit_window,
+        )
+
+        with freezegun.freeze_time(_ARM_NOW):
+            save_usage_limit_armed_at(_ARM_NOW - timedelta(days=1))
+
+            merged, armed_at = _arm_and_persist_usage_limit_window(
+                {}, {}, backoff_seconds=3600
+            )
+            persisted_armed_at = load_usage_limit_armed_at()
+
+        assert merged == {}
+        assert armed_at == _ARM_NOW
+        assert persisted_armed_at == _ARM_NOW
         assert read_events(event_types=[OrchestratorEventType.USAGE_LIMIT_ARMED]) == []
 
 

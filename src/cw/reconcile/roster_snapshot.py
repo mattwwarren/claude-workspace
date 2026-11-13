@@ -24,9 +24,11 @@ TOCTOU and the spawn grace: the in-lock read used to run milliseconds before
 the phantom sweep; a snapshot is now up to ``ROSTER_SNAPSHOT_MAX_AGE_SECONDS``
 old. A session spawned or resumed after the capture is absent from it, so
 ``compute_drift`` is passed the capture time and spares any session whose
-``started_at``/``resumed_at`` falls within ``ROSTER_REGISTRATION_SLACK_SECONDS``
-before it or later; the age bound keeps the snapshot inside the 30 s spawn
-grace as well.
+``started_at``/``resumed_at``/``surface_bound_at`` falls within
+``ROSTER_REGISTRATION_SLACK_SECONDS`` before it or later; the age bound keeps
+the snapshot inside the 30 s spawn grace as well. A run of stale or missing
+snapshots pages the operator once (``cw.reconcile.roster_skip_streak``,
+#3335).
 
 A leaf module: it imports ``cw.reconcile.probe_store`` and the standard
 library only.
@@ -93,11 +95,12 @@ class RosterUnavailableError(Exception):
 
     @property
     def skips_tick(self) -> bool:
-        """True for a stale or missing snapshot (#2550, M2).
+        """True for a stale or missing snapshot (#2550).
 
         A failed read is a daemon fact and keeps flowing through the outage
-        heuristic; a stale or missing snapshot is a lock-wait artifact, so
-        no roster-dependent sweep may run on its fabricated empty roster.
+        heuristic; a stale or missing snapshot is a lock-wait artifact, so it
+        skips the tick: no roster-dependent sweep may run on its fabricated
+        empty roster.
         """
         return self.reason != "failed"
 

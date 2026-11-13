@@ -9,6 +9,7 @@ without an entry fall through to the rule commands alone.
 from __future__ import annotations
 
 from cw.dev_queue.dispositions import (
+    AWAITING_CI_EVIDENCE_DISPOSITION,
     AWAITING_OPERATOR_DISPOSITION,
     BRANCH_STALENESS_GATE_DISPOSITION,
     GATE_TIMEOUT_DISPOSITION,
@@ -64,6 +65,25 @@ PARK_GUIDANCE: dict[str, str] = {
         " timed-out gate by hand with no time limit. If it passes on a clean"
         " tree, run `prep_pr_state.py gate-pass record <gate>` there, then"
         " requeue the row with `cw dev-queue requeue`."
+    ),
+    AWAITING_CI_EVIDENCE_DISPOSITION: (
+        "The finalize stage is waiting on CI, not failed. The PR exists and cw"
+        " did not arm auto-merge: the repo's `quality_gates.ci_evidence` maps one"
+        " or more gates to CI checks that have not all finished green at the PR"
+        " head, and those gates were not run locally. Waiting or deferred: once"
+        " the mapped checks have finished, release the row with"
+        " `cw dev-queue requeue`. Red: the mapped check failed, which is a CI"
+        " failure, not a gate failure; regress with"
+        " `cw dev-queue requeue --stage impl --regress` (add"
+        " `--review-feedback-file <file>` with head-pinned evidence of the"
+        " failure). A mapped check that never reports (renamed or path-filtered)"
+        " parks every requeue, because there is no timer fallback (ADR-0014):"
+        " correct or remove its `quality_gates.ci_evidence` entry on the base"
+        " branch (the map is read from the worktree's `origin/<base>` ref, so it"
+        " must have fetched the change), or run the gate by hand and merge the"
+        " PR yourself, then `cw dev-queue remove` the row. The worktree's"
+        " arm-seam hold is released by the green requeue; to drop it by hand,"
+        ' run `"$FINALIZE" ci-hold release --repo-path <worktree>` there.'
     ),
     REVIEW_HEALTH_GATE_DISPOSITION: (
         "Review health is degraded. This clears by re-running review, not by approving."

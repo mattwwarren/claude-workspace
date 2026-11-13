@@ -13,6 +13,7 @@ from cw.auto_dev_result import PAUSED_FOR_USER_INPUT_STATUSES
 from cw.dev_queue.dispositions import (
     ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
     ADOPTED_HEAD_DRIFT_DISPOSITION,
+    AWAITING_CI_EVIDENCE_DISPOSITION,
     FINALIZE_GATE_HELD_DISPOSITION,
     GATE_TIMEOUT_DISPOSITION,
     LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
@@ -88,7 +89,9 @@ _DIRTY_WORKTREE_DISPOSITION = "dirty_worktree"
 # ran, so a reap revert would only re-derive the same park. The reuse-path
 # gate-timeout park (#3372) waits on the orchestrator running the timed-out
 # gate by hand, `gate-pass record` and `cw dev-queue requeue`; a reap revert
-# would re-run finalize and time the same gate out again. It is not
+# would re-run finalize and time the same gate out again. The CI-evidence park
+# (#3618) waits on mapped CI checks and `cw dev-queue requeue`; a reap revert
+# would re-run finalize against the same unfinished checks. It is not
 # human-gated and not escalation-eligible. Sourced from the owning constants
 # so the strings cannot drift.
 _OPERATOR_GATED_PARK_DISPOSITIONS: frozenset[str] = frozenset(
@@ -104,6 +107,7 @@ _OPERATOR_GATED_PARK_DISPOSITIONS: frozenset[str] = frozenset(
         REVIEW_ENGINE_UNSUPPORTED_DISPOSITION,
         TRACKER_MCP_GATE_DISPOSITION,
         GATE_TIMEOUT_DISPOSITION,
+        AWAITING_CI_EVIDENCE_DISPOSITION,
     }
 )
 

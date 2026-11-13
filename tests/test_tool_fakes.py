@@ -61,6 +61,7 @@ from tests._tool_fakes import (
     stub_cw_cli,
     stub_gh,
     stub_gh_arm,
+    stub_gh_ci,
     stub_gh_issue_create,
     stub_gh_issue_list,
     stub_gh_recording,
@@ -87,12 +88,14 @@ _SHARED_NAMES = frozenset(
         "stub_gh",
         "stub_gh_recording",
         "stub_gh_arm",
+        "stub_gh_ci",
         "gh_calls",
         "shim_env",
         "assert_gh_calls",
         "_stub_gh",
         "_stub_gh_recording",
         "_stub_gh_arm",
+        "_stub_gh_ci",
         "_stub_gh_create",
         "_stub_gh_issue_list",
         "_write_bin_stub",
@@ -168,6 +171,36 @@ class TestShellShims:
         assert _run(["gh", "pr", "merge"], env).returncode == 0
         assert _run(["gh", "pr", "view"], env).stdout == ARM_VIEW_ARMED
         assert len(gh_calls(bin_dir)) == 4
+
+    def test_stub_gh_ci_serves_the_ci_reads_from_canned_data(
+        self, tmp_path: Path
+    ) -> None:
+        run = {"name": "ci", "status": "completed", "conclusion": "success"}
+        status = {"context": "legacy", "state": "pending"}
+        pr = {"headRefOid": "a" * 40, "baseRefName": "main", "state": "OPEN"}
+        bin_dir = stub_gh_ci(tmp_path, pr=pr, check_runs=[run], statuses=[status])
+        env = shim_env(bin_dir)
+        runs_path = f"repos/o/r/commits/{'a' * 40}/check-runs"
+        status_path = f"repos/o/r/commits/{'a' * 40}/status"
+
+        view = _run(["gh", "pr", "view", "7", "--json", "headRefOid"], env)
+        runs = _run(["gh", "api", "-X", "GET", runs_path, "-f", "per_page=100"], env)
+        statuses = _run(["gh", "api", "-X", "GET", status_path], env)
+
+        assert json.loads(view.stdout) == pr
+        assert json.loads(runs.stdout) == {"total_count": 1, "check_runs": [run]}
+        assert json.loads(statuses.stdout) == {"total_count": 1, "statuses": [status]}
+        assert _run(["gh", "pr", "merge", "7"], env).returncode == 2
+        assert len(gh_calls(bin_dir)) == 4
+
+    def test_stub_gh_ci_none_makes_that_read_fail(self, tmp_path: Path) -> None:
+        bin_dir = stub_gh_ci(tmp_path, pr=None, check_runs=None, statuses=[])
+        env = shim_env(bin_dir)
+
+        assert _run(["gh", "pr", "view", "7"], env).returncode == 1
+        assert _run(["gh", "api", "-X", "GET", "x/check-runs"], env).returncode == 1
+        ok = _run(["gh", "api", "-X", "GET", "x/status"], env)
+        assert json.loads(ok.stdout) == {"total_count": 0, "statuses": []}
 
     def test_stub_gh_issue_create_captures_the_body(self, tmp_path: Path) -> None:
         bin_dir = stub_gh_issue_create(tmp_path)
@@ -271,6 +304,7 @@ class TestShellShims:
             "stub_gh",
             "stub_gh_recording",
             "stub_gh_arm",
+            "stub_gh_ci",
             "stub_gh_issue_create",
             "stub_gh_issue_list",
             "__init__",
@@ -599,6 +633,7 @@ class TestNoPrivateDuplicate:
             "ScriptedCodexRunner",
             "write_bin_stub",
             "stub_gh_arm",
+            "stub_gh_ci",
             "path_with_stub",
             "prepend_to_path",
             "marked_parts",
@@ -963,6 +998,50 @@ class TestFinalizeFakes:
             ["arm-automerge", "7", "a b"],
             ["bogus"],
         ]
+
+    def test_stub_prep_pr_finalize_answers_ci_hold_and_carries_the_literal(
+        self, tmp_path: Path
+    ) -> None:
+        stub = stub_prep_pr_finalize(tmp_path)
+        # The codex release probe skips a script whose text lacks this word.
+        assert "ci-hold" in stub.script.read_text(encoding="utf-8")
+        script = [sys.executable, str(stub.script)]
+
+        status = _run([*script, "ci-hold", "status", "--json"], {})
+        release = _run([*script, "ci-hold", "release", "--repo-path", "/w"], {})
+        hold = _run([*script, "ci-hold", "set", "--base", "main"], {})
+
+        assert [r.returncode for r in (status, release, hold)] == [0, 0, 0]
+        assert json.loads(status.stdout)["state"] == "none"
+        assert json.loads(release.stdout) == {"hold": "released", "was": "none"}
+        assert json.loads(hold.stdout)["hold"] == "set"
+        assert stub.calls() == [
+            ["ci-hold", "status", "--json"],
+            ["ci-hold", "release", "--repo-path", "/w"],
+            ["ci-hold", "set", "--base", "main"],
+        ]
+
+    def test_stub_prep_pr_finalize_honours_hold_exit_and_stderr(
+        self, tmp_path: Path
+    ) -> None:
+        stub = stub_prep_pr_finalize(tmp_path, hold_exit=1, hold_stderr="cannot")
+        script = [sys.executable, str(stub.script)]
+
+        for action in ("set", "status", "release"):
+            done = _run([*script, "ci-hold", action], {})
+            assert (done.returncode, done.stdout, done.stderr) == (1, "", "cannot")
+
+        assert len(stub.calls()) == 3
+
+    def test_stub_prep_pr_finalize_unknown_ci_hold_action_exits_2(
+        self, tmp_path: Path
+    ) -> None:
+        stub = stub_prep_pr_finalize(tmp_path)
+        script = [sys.executable, str(stub.script)]
+
+        assert _run([*script, "ci-hold", "bogus"], {}).returncode == 2
+        assert _run([*script, "ci-hold"], {}).returncode == 2
+        assert stub.calls() == [["ci-hold", "bogus"], ["ci-hold"]]
 
     def test_stub_prep_pr_finalize_builds_the_gh_stderr_object(
         self, tmp_path: Path

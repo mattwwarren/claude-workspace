@@ -10,6 +10,7 @@ import pytest
 from cw.config import state_dir
 from cw.disk import DiskUsage, InodeUsage
 from cw.doctor.worker_tmp_fallback import _check_worker_tmp_fallback
+from cw.models import OrchestratorConfig
 from cw.worker_tmp_retention import RetentionStatus, TmpUsage
 from cw.worktree import resolve_fallback_worker_tmpdir
 
@@ -44,6 +45,23 @@ def _patch_mount(
 
     monkeypatch.setattr("cw.doctor.worker_tmp_fallback.check_disk_usage", fake_disk)
     monkeypatch.setattr("cw.doctor.worker_tmp_fallback.check_inode_usage", fake_inodes)
+
+
+def _patch_config(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> None:
+    config = OrchestratorConfig.model_validate(overrides)
+    monkeypatch.setattr(
+        "cw.doctor.worker_tmp_fallback.orchestrator_config_or_default", lambda: config
+    )
+
+
+def _status(**overrides: object) -> RetentionStatus:
+    fields: dict[str, object] = {
+        "last_run_at": datetime.now(UTC) - timedelta(minutes=5),
+        "status": "ok",
+        "retention_days": 7,
+    }
+    fields.update(overrides)
+    return RetentionStatus.model_validate(fields)
 
 
 def _write_sidecar(status: RetentionStatus) -> None:
@@ -163,16 +181,82 @@ class TestWorkerTmpFallbackCheck:
     def test_retention_disabled_is_noted(
         self, monkeypatch: pytest.MonkeyPatch, root: Path
     ) -> None:
-        from cw.models import OrchestratorConfig
-
         _patch_mount(monkeypatch)
-        monkeypatch.setattr(
-            "cw.doctor.config_checks._orchestrator_config_or_default",
-            lambda: OrchestratorConfig(worker_tmp_fallback_retention_enabled=False),
-        )
-        monkeypatch.setattr(
-            "cw.doctor.worker_tmp_fallback._orchestrator_config_or_default",
-            lambda: OrchestratorConfig(worker_tmp_fallback_retention_enabled=False),
-        )
+        _patch_config(monkeypatch, worker_tmp_fallback_retention_enabled=False)
         result = _check_worker_tmp_fallback()
         assert "retention disabled" in result.detail
+
+    def test_disabled_retention_with_stale_failed_sidecar_does_not_warn(
+        self, monkeypatch: pytest.MonkeyPatch, root: Path
+    ) -> None:
+        _patch_mount(monkeypatch)
+        _patch_config(monkeypatch, worker_tmp_fallback_retention_enabled=False)
+        _write_sidecar(_status(status="failed", error="OSError: boom"))
+        result = _check_worker_tmp_fallback()
+        assert result.warn is False
+        assert "retention disabled" in result.detail
+
+    def test_enabled_retention_with_failed_sidecar_still_warns(
+        self, monkeypatch: pytest.MonkeyPatch, root: Path
+    ) -> None:
+        _patch_mount(monkeypatch)
+        _patch_config(monkeypatch, worker_tmp_fallback_retention_enabled=True)
+        _write_sidecar(_status(status="failed", error="OSError: boom"))
+        assert _check_worker_tmp_fallback().warn is True
+
+    def test_gb_and_inodes_both_short_reports_both(
+        self, monkeypatch: pytest.MonkeyPatch, root: Path
+    ) -> None:
+        _patch_mount(
+            monkeypatch,
+            disk=DiskUsage(total_gb=500.0, free_gb=1.0),
+            inodes=InodeUsage(total_inodes=1_000_000, free_inodes=10_000),
+        )
+        result = _check_worker_tmp_fallback()
+        assert result.ok is False
+        assert "mount free 1.0 GB below 5.0 GB" in result.detail
+        assert "mount free inodes 10,000 below floor 50,000" in result.detail
+        assert "10,000 free inodes (floor 50,000)" in result.detail
+
+
+class TestProcGuardDetail:
+    """The ok-run detail reports the ``/proc`` guard state (#3163), never warns."""
+
+    def test_guard_on(self, monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+        _patch_mount(monkeypatch)
+        _write_sidecar(_status(proc_guard=True))
+        result = _check_worker_tmp_fallback()
+        assert "/proc guard on" in result.detail
+        assert "unreadable" not in result.detail
+        assert "age-only" not in result.detail
+        assert result.warn is False
+
+    def test_guard_off_is_age_only(
+        self, monkeypatch: pytest.MonkeyPatch, root: Path
+    ) -> None:
+        _patch_mount(monkeypatch)
+        _write_sidecar(_status(proc_guard=False))
+        result = _check_worker_tmp_fallback()
+        assert "age-only" in result.detail
+        assert "no /proc guard" in result.detail
+        assert result.ok is True
+        assert result.warn is False
+
+    def test_unreadable_processes_are_counted_without_warning(
+        self, monkeypatch: pytest.MonkeyPatch, root: Path
+    ) -> None:
+        _patch_mount(monkeypatch)
+        _write_sidecar(_status(proc_guard=True, unreadable_procs=12))
+        result = _check_worker_tmp_fallback()
+        assert "12 processes unreadable" in result.detail
+        assert result.ok is True
+        assert result.warn is False
+
+    def test_failed_run_does_not_mention_the_guard(
+        self, monkeypatch: pytest.MonkeyPatch, root: Path
+    ) -> None:
+        _patch_mount(monkeypatch)
+        _write_sidecar(_status(status="failed", error="OSError: boom"))
+        result = _check_worker_tmp_fallback()
+        assert "/proc" not in result.detail
+        assert "age-only" not in result.detail
