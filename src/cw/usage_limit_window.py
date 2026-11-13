@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from cw.dev_queue import dev_queue_lock, list_tickets, load_dev_queue, save_dev_queue
+from cw.dev_queue.gate_backoff import gate_wait_released
 from cw.dispatch_state import load_usage_limit_armed_at, load_usage_limited_until
 from cw.dispatch_state_marks import clear_usage_limited_until
 from cw.events import read_events, record_event
@@ -157,11 +158,6 @@ class ClearResult:
     rows_released: tuple[str, ...]
 
 
-def _gate_owned(task: TicketTask) -> bool:
-    record = task.gate_block
-    return record is not None and task.next_eligible_at == record.until
-
-
 def _releasable(task: TicketTask, client: str, now: datetime) -> bool:
     """A PENDING row of *client* holding a future, non-gate wait."""
     stamp = task.next_eligible_at
@@ -170,14 +166,18 @@ def _releasable(task: TicketTask, client: str, now: datetime) -> bool:
         and task.status is QueueItemStatus.PENDING
         and stamp is not None
         and stamp > now
-        and not _gate_owned(task)
+        and not gate_wait_released(task, backoff_enabled=False)
     )
 
 
 def _restore_target(task: TicketTask, now: datetime) -> datetime | None:
     """A gate wait layered under the released one is put back; else None."""
     record = task.gate_block
-    if record is not None and record.until > now:
+    if (
+        record is not None
+        and not gate_wait_released(task, backoff_enabled=False)
+        and record.until > now
+    ):
         return record.until
     return None
 
@@ -234,7 +234,7 @@ def _release_rows(plan: ClearPlan, now: datetime) -> tuple[list[str], Exception 
                     released.append(task.ticket_id)
             if released:
                 save_dev_queue(store)
-    except (OSError, TypeError, ValueError, KeyError) as exc:
+    except Exception as exc:  # noqa: BLE001 - every ordinary row failure is audited
         return [], exc
     return released, None
 

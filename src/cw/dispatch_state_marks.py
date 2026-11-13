@@ -81,9 +81,11 @@ def clear_usage_limited_until(
                 "to refresh the plan and account probe"
             )
             raise CwError(msg)
-        payload["usage_limited_until"] = {
-            name: until.isoformat() for name, until in windows.items()
-        }
+        raw_windows = payload.get("usage_limited_until")
+        if isinstance(raw_windows, dict):
+            preserved_windows = dict(raw_windows)
+            preserved_windows.pop(client, None)
+            payload["usage_limited_until"] = preserved_windows
         horizon = cleared_at - CLEAR_MARK_RETENTION
         marks = {
             name: mark
