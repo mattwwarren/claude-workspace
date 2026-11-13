@@ -84,7 +84,9 @@ an explicit operator command (`cw doctor --reap`, `cw reconcile --apply`; per
 ADR-0020 the orchestrator session counts as the operator) — authorizes it. Automatic reaping (`reap_policy: auto`) is opt-in per lane, not
 the default. The daemon stops that are not gated (including the merged-PR,
 routed-sentinel and foreign-result completions and the leaked-worker sweep) act
-on workers whose owning session is terminal or absent. The one exception is the
+on workers whose owning session is terminal, or absent and evidenced orphaned
+(#2670: older than the 180 s grace and homed inside a configured client's cw
+worktree base; an unevidenced worker is spared). The one exception is the
 shipped release (#2715, ADR-0006 amendment): its target session was live at
 detect time, it acts only on a recorded `shipped` result whose own PR is OPEN
 or MERGED, and it fails closed on an absent, unreadable or foreign drain stamp. Callers must count `BLOCKED_ON_USER`/`REAP_PROPOSED` sessions as
@@ -111,7 +113,9 @@ and remains subject to ADR-0006's `reap_policy` gate. New health heuristics land
 advisories) first; promoting one to an automatic disposition requires a new
 ADR superseding this one. This is the constraint a plan reaches for when
 asked to fix a hang — "if it has been quiet for N minutes, do X to the
-session" — and it is forbidden as written.
+session" — and it is forbidden as written. ADR-0014's `Clarification (#3256)`
+records the one roster stop an age gates (the leaked-worker sweep's 180 s
+grace) as a narrow, evidence-triggered exception.
 
 See `docs/adr/0006-reaping-is-gated-by-an-authority.md`,
 `docs/adr/0009-branch-absence-is-diagnostic-not-completion.md`, and
@@ -332,7 +336,8 @@ cites one of these.
     may mutate session status, dev-queue state, the daemon roster, or a
     worktree; time-based heuristics land as signals only, and a destructive
     act needs evidence or an operator command (the orchestrator session
-    counts, per ADR-0020). — Source:
+    counts, per ADR-0020). The leaked-worker sweep's age gate is the one
+    recorded exception (ADR-0014 `Clarification (#3256)`). — Source:
     `docs/adr/0014-timers-never-destroy-work.md`
 14. Lock discipline: state-file locks are acquired in non-decreasing rank
     (`sessions_lock`, then STATE locks, then a leaf inbox/history lock, with

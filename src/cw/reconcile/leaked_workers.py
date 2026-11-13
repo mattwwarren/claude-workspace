@@ -27,9 +27,10 @@ A roster worker is stopped only on one of two arms:
   leak. A hand-launched non-cw ``claude --bg`` worker is not in a cw base, so
   it is also spared.
 
-The grace is a debounce, never the trigger (ADR-0014 invariant 1): the trigger
-is absence evidence, and the clock only delays a stop that absence already
-justifies.
+The trigger is absence evidence, and the age is part of that evidence:
+absence from cw state only counts once the spawn-to-record window has passed.
+Read literally, the age gate is an exception to ADR-0014 invariant 1; ADR-0014's
+``Clarification (#3256)`` records it.
 
 Consulted from two call sites that must never disagree about what counts as
 leaked:

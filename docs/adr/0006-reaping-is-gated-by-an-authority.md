@@ -169,9 +169,10 @@ supersedes their worktree clause.
   whose owning session is terminal, or absent and evidenced orphaned
   (#2670): older than `LEAKED_WORKER_GRACE_SECONDS` (180 s, the spawn-to-record
   window) and homed strictly inside a configured client's cw worktree base.
-  The grace is a debounce, never the trigger (ADR-0014 invariant 1): absence
-  is the evidence, and the clock only delays a stop that absence already
-  justifies. The #2670 narrowing closes the `spawn_bg` race, so this sweep
+  Absence is the trigger, and the age is part of that evidence: absence from
+  cw state only counts once the spawn-to-record window has passed. Read
+  literally, that age gate is an exception to ADR-0014 invariant 1; ADR-0014's
+  `Clarification (#3256)` records it. The #2670 narrowing closes the `spawn_bg` race, so this sweep
   never stops a just-spawned worker that cw has not yet recorded, nor a
   hand-launched non-cw `claude --bg` worker, nor `cw doctor --reap`. The
   mid-turn usage-limit act's stop is chosen only under `reap_policy: auto`.
