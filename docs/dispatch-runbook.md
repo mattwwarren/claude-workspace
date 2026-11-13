@@ -2319,7 +2319,7 @@ agent's own loop round.
 
 #### Opencode fail-closed guards (#3059)
 
-Three opencode pre-flight refusals, each before any agent runs (RFC 0018 B1):
+Two opencode pre-flight refusals fire before any agent runs (RFC 0018 B1), and one prompt convention keeps the opencode PLAN and IMPL stages consistent:
 
 - **Repair feedback.** An IMPL row carrying `review_feedback` is refused with
   `repair_entry_unsupported_backend`, because the opencode IMPL prompt does not
@@ -2331,7 +2331,7 @@ Three opencode pre-flight refusals, each before any agent runs (RFC 0018 B1):
   `executors.finalize` is opencode parks every ticket at FINALIZE; no `cw doctor`
   check warns beforehand. Fix: set `executors.finalize` to `claude-native`, then
   `cw dev-queue requeue`.
-- **Plan marker.** The opencode PLAN writes a cw-owned `<!-- cw-opencode-plan:
+- **Plan marker (a convention, not a refusal).** The opencode PLAN writes a cw-owned `<!-- cw-opencode-plan:
   <ticket> -->` marker as the last line of its audit-copy comment; the opencode
   IMPL prompt reads it alongside the claude-native `<!-- plan-spec-reviewed`
   marker. PLAN never writes a review sign-off marker.
@@ -3874,8 +3874,8 @@ middle of a part cannot be detected, and a tracker-side markdown
 normalisation can cause `readback_mismatch` on a faithful post: on
 `readback_mismatch`, read the ticket. On `POSSIBLE` or `CONFIRMED`, check the
 ticket for a duplicate or stray comment before re-running anything; cw never
-retries a post. A verified post emits no event and logs its comment ids at
-info.
+retries a post. A verified post emits `review.verdict_comment_posted` (not an
+unverified or skipped event) and logs its comment ids at info.
 
 Hidden-marker record. Linear marker survival: **UNVERIFIED**. Whether
 Linear's markdown keeps the `<!-- cw-agent-authored -->` marker has not been
@@ -4959,10 +4959,15 @@ clients:
   so only a crash or failed event write in the narrow gap between the save and the event
   leaves a row without them. That stays at-most-once: the replay hits `row_exists` and
   does not re-emit.
-- **Known limitation (R10).** If a debt row is pruned and the cursor file is also lost, a
-  replay could re-enqueue that debt. Pruning keeps the newest contiguous suffix of the inbox,
-  so a pruned cursor event alone does not replay consumed merges; only a deleted cursor file
-  or a restored old inbox can, and a missing cursor is forward-only.
+- **Known limitation (R10).** A replay can re-enqueue a pruned debt row only when the cursor
+  file survives but the inbox is replaced by an older copy (a restored backup or a rotated
+  inbox) that lacks the cursor's event: `read_events` logs `cursor <id> not found in inbox;
+  replaying from start` and re-reads every retained `pr.merged`, and `row_exists` no longer
+  protects a pruned row. Pruning alone does not do this: it keeps the newest contiguous suffix
+  of the inbox, so a pruned cursor event leaves only merges newer than the cursor, none already
+  consumed. A deleted cursor file does not replay either: it is forward-only, because
+  `init_cursor_at_end` re-seeds the cursor at the inbox end, so merges recorded between the
+  loss and the next tick are skipped, not replayed.
 - **Skip reasons.** `one_level`, `row_exists`, `no_parent_row`, `lane_undeclared`,
   `pr_mismatch` and `unknown_client`, all carried by `review.debt_enqueue_skipped`; see
   [events](events.md).

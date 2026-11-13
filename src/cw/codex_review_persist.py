@@ -289,8 +289,9 @@ def _post_review_comment(
     *tracker_io* (#3057, RFC 0018 A2): on a non-GitHub tracker, when the
     caller supplies it, the comment is posted through the tracker-IO agent
     turn (:func:`cw.tracker_io.post_parts_via_turn`) instead of skipped. A
-    verified post logs at info; a refusal records the skipped event with the
-    turn's reason; an unconfirmed post records
+    verified post records ``review.verdict_comment_posted`` and logs at info;
+    a refusal records the skipped event with the turn's reason; an unconfirmed
+    post records
     ``review.verdict_comment_unverified``. Without it the skip is unchanged.
     The GitHub path never uses it.
     """

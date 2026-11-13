@@ -346,13 +346,16 @@ cites one of these.
     allowlist. — Source:
     `docs/adr/0019-lock-hierarchy-and-no-subprocess-under-sessions-lock.md`
 15. No unbounded serial external-call drain on the reconcile tick path: any
-    per-item external call (daemon stop, `gh`, `git`) made over a state- or
-    roster-sized collection in `reconcile()` has a per-tick cap or a
+    new per-item external call (daemon stop, `gh`, `git`) made over a state- or
+    roster-sized collection in `reconcile()` needs a per-tick cap or a
     concurrency bound, and a drain that can run long must not delay the other
     post-lock steps; surplus work is dropped only when the next tick re-finds
-    it, and is otherwise carried over. — Source:
+    it, and is otherwise carried over. Today the post-lock drain caps only
+    daemon stops (`MAX_STOP_JOBS_PER_TICK`); every other post-lock job
+    (`StopKind.NOT_A_STOP`: the `gh` gate-recipe audit comments, reviewer
+    requests and conflict repairs) is uncapped by design. — Source:
     `src/cw/reconcile/deferred.py` (`MAX_STOP_JOBS_PER_TICK`, #2551;
-    `run_post_lock_jobs`, `StopKind.RECOVERABLE`/`CARRIED`); GitHub #1232
+    `run_post_lock_jobs`, `StopKind.RECOVERABLE`/`CARRIED`/`NOT_A_STOP`); GitHub #1232
 16. A lockless prefetch mirrors its candidate predicate and is bounded: it
     hoists a per-candidate external read out of `sessions_lock`, so it
     derives its candidates with the same predicate as the in-lock step that
@@ -446,7 +449,7 @@ principle, grounded in the same source document.
     in-lock step — a pre-lock capture that selects candidates with a
     different predicate than the in-lock consumer (capturing candidates the
     in-lock step never consumes, or omitting ones it does, so they defer
-    every tick), or one with no per-tick cap and wall-clock budget. —
+    every tick), or one with no per-tick cap or no wall-clock budget. —
     Source: `src/cw/reconcile/gate_plan_probes.py`,
     `src/cw/reconcile/dirty_checks.py`; GitHub #1232
 

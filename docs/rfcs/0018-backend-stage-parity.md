@@ -11,7 +11,9 @@ Adjudication, the built-in reviewer roster and egress policy for codex review st
 A repo review engine, meaning a custom review skill named by `review.engine`, now runs on a codex review lane:
 - codex runs each role the engine declares;
 - one codex aggregation turn writes the cw-owned engine summary;
-- no Claude call is made.
+- the engine round makes no Claude call.
+
+The confirm round is a separate step and is unchanged (D-3): with `review.confirm_backend` unset, a codex lane still runs a Claude confirm round after a clean engine verdict. A Claude-free lane needs `confirm_backend: none` or `codex` (D1).
 
 Opencode keeps the engine fail-closed.
 
@@ -65,7 +67,8 @@ These are firm leans, decided to unblock the breakout. Each one can be reversed 
 - **D-5 — Codex REVIEW parity covers stage-completeness and the repo review engine.** In scope: the sentinel fields, post-fix quality gates and `review_feedback` (A1), plus the RFC 0017 engine round on a codex review lane (A4, D-8). Adjudication of built-in findings and the built-in roster and egress policy stay with #2464. Deferred-finding filing on codex already landed in #3137. (Amended 2026-11-09: D-5's reversal point, RFC 0017 landing, has been reached.)
 - **D-6 — The contract has one source: a manifest first, then rendering.** Stable element ids in the command docs, a per-backend disposition manifest and a drift test land first. New codex prompts are rendered from tagged neutral blocks from day one. A shared contract module that generates the docs is rejected as too large.
 - **D-7 — RFC 0017 is respected; its codex deferral is lifted and its opencode deferral stays.** The elements RFC 0017 adds have these manifest dispositions:
-  - review attestation, engine summary and engine round: `implemented` for codex once A4 lands, and `deferred` for codex until then;
+  - the engine round (manifest ids `review.engine-round`, `review.engine-branch`, `review.engine-round-adjudication`, `review.fourth-trigger-review-engine-modified-park`, `review.fifth-trigger-review-confirm-must-fix-park` and `review.engine-park-release`): `implemented` for codex. A4 landed in #3216 (commit 60d76687) and the cells cite the codex engine-round modules (`src/cw/codex_review/_engine_round.py`, `src/cw/codex_engine_confirm.py`, `src/cw/review_engine/constants.py`). The engine summary has no manifest element of its own; it is part of the engine round;
+  - review sign-off attestation on codex FINALIZE: still `deferred` (#3543, `finalize.review-sign-off`);
   - opencode: `fails-closed`, per D-4.
 
   #2999 has merged, so `models/tasks/` is already a package. (Amended 2026-11-09.)
