@@ -52,6 +52,12 @@ Both are thin callers around :func:`find_leaked_daemon_workers` and
 :func:`stop_leaked_daemon_worker` so the detection predicate and the audit
 payload shape can never drift between them. Both pass the same ``now`` and
 ``clients``.
+
+:func:`find_spared_unrecorded_workers` is the read-only complement (#3257):
+the unrecorded workers older than the grace that the absent arm spares, which
+``cw doctor``'s ``spared-unrecorded-workers`` advisory lists so an operator can
+stop them by hand. It reuses ``_is_evidenced_orphan`` and the same grace, so
+the sweep and the advisory can never disagree about which worker is spared.
 """
 
 from __future__ import annotations
@@ -180,6 +186,45 @@ def find_leaked_daemon_workers(
             continue
         leaked.append(LeakedWorker(home.short_id, home.cwd, session))
     return leaked
+
+
+def find_spared_unrecorded_workers(
+    state: CwState,
+    *,
+    daemon: NativeDaemonClient,
+    now: datetime,
+    clients: Mapping[str, ClientConfig],
+) -> list[WorkerHome] | None:
+    """Return the old unrecorded roster workers the absent arm spares, or None.
+
+    Read-only (#3257): it never stops a worker. A worker is listed when no cw
+    session's ``surface_ref`` names it, its ``started_at_ms`` is set and at
+    least :data:`LEAKED_WORKER_GRACE_SECONDS` old at *now*, and it is NOT
+    evidenced orphaned (its ``cwd`` is outside every base of *clients*, or
+    *clients* is empty). A worker with no ``startedAt`` cannot be called old
+    and is not listed; an evidenced orphan is the sweep's, so it is never
+    listed here either. ``None`` means the roster could not be read.
+
+    *now* must be timezone-aware (``ValueError`` otherwise).
+    """
+    if now.tzinfo is None:
+        msg = "find_spared_unrecorded_workers: now must be timezone-aware"
+        raise ValueError(msg)
+    homes = daemon.list_live_worker_homes()
+    if homes is None:
+        return None
+    now_ms = int(now.timestamp() * 1000)
+    bases = _cw_worktree_bases(clients)
+    recorded = {s.surface_ref for s in state.sessions if s.surface_ref is not None}
+    grace_ms = LEAKED_WORKER_GRACE_SECONDS * 1000
+    return [
+        home
+        for home in homes
+        if home.short_id not in recorded
+        and home.started_at_ms is not None
+        and now_ms - home.started_at_ms >= grace_ms
+        and not _is_evidenced_orphan(home, now_ms=now_ms, bases=bases)
+    ]
 
 
 def stop_leaked_daemon_worker(

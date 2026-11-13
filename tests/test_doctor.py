@@ -10148,6 +10148,29 @@ class TestCheckWorkerTmpPressure:
         assert "worker-tmpdir-scope" in by_name
         assert by_name["worker-tmpdir-scope"].ok is True
 
+    def test_spared_unrecorded_workers_registered_in_run_doctor(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """run_doctor() includes the #3257 spared-unrecorded-workers advisory."""
+        _stub_claude_version_ok(monkeypatch)
+        monkeypatch.setattr(
+            "cw.doctor.worker_tmpdir.get_native_daemon_client",
+            lambda: mock_native_daemon,
+        )
+        monkeypatch.setattr(
+            "cw.doctor.spared_workers.get_native_daemon_client",
+            lambda: mock_native_daemon,
+        )
+
+        report = run_doctor()
+
+        by_name = {c.name: c for c in report.checks}
+        assert "spared-unrecorded-workers" in by_name
+        assert by_name["spared-unrecorded-workers"].ok is True
+
     def test_worker_tmp_fallback_registered_in_run_doctor(
         self,
         tmp_config_dir: Path,

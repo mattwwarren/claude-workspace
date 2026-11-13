@@ -181,8 +181,9 @@ supersedes their worktree clause.
   no or an invalid `startedAt`; a non-cw cwd; a cwd outside every currently
   configured client's base (a removed client, a changed `worktree_base`, a
   symlinked base, an orphan homed at the main checkout); and every unrecorded
-  worker when `clients.yaml` is unreadable. An operator advisory for
-  spared-but-old workers is follow-up debt. **Occupancy trade-off:**
+  worker when `clients.yaml` is unreadable. `cw doctor` reports a
+  spared-but-old unrecorded worker as the advisory `spared-unrecorded-workers`
+  check (#3257); stop it by hand with `claude stop <short_id>`. **Occupancy trade-off:**
   `live_home_reason` still does not count an unrecorded worker as occupying,
   so a spared worker does not block re-dispatch. A young spawn-race worker is
   invisible to occupancy for up to the grace, and a non-cw or out-of-base
