@@ -367,6 +367,12 @@ def test_round_is_defined_as_the_dispatch_not_a_counter() -> None:
     assert "is not `plan-stage-scan-round` or `<k>`" in para
 
 
+def test_binding_check_names_the_real_context_file_path() -> None:
+    para = _binding()
+    assert "`stage_started_at` in `.claude/cw-context.json`" in para
+    assert ".cw/cw-context.json" not in para
+
+
 # ---------------------------------------------------------------------------
 # auto-dev-plan.md: Step 4b
 # ---------------------------------------------------------------------------
