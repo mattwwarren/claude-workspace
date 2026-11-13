@@ -5,6 +5,8 @@ The reuse path (an OPEN PR found by the Pre-Stage Detector Guard) skips
 runs them before Step 4d arms auto-merge. Pure-markdown assertions over the
 finalize command, its appendix, the runbook and the headless contract, plus a
 routing check that a failing gate never ships, adopted rows included.
+The #3618 CI-evidence deferral and park pins live in
+``test_auto_dev_finalize_ci_deferral.py``.
 """
 
 from __future__ import annotations
@@ -172,6 +174,14 @@ class TestStep4c6Runner:
         section = _step_4c6()
         assert "start-time" in section
         assert "foreground-timeout" in section
+        # #3618: the CI-evidence consult is no longer an inherited-list bullet;
+        # it is its own paragraph, one `ci-reuse-plan` call headless and the
+        # per-gate `gate-ci-evidence` call interactive.
+        intro = _paragraph(section, "**Per-gate procedure.**")
+        assert "adds the opt-in CI-evidence consult of its own" in intro
+        listed = section[section.index(intro) : section.index("**CI evidence")]
+        assert "gate-ci-evidence" not in listed
+        assert "ci-reuse-plan" not in listed
 
     def test_headless_keeps_foreground_ceiling_rules(self) -> None:
         section = _step_4c6()
