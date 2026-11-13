@@ -23,12 +23,7 @@ from cw.config import (
     orchestrator_config_file,
     state_file,
 )
-from cw.disk import (
-    check_disk_usage,
-    check_inode_usage,
-    effective_min_free_inodes,
-    inodes_exhausted,
-)
+from cw.disk import assess_mount, check_disk_usage, check_inode_usage
 from cw.doctor import _deps
 from cw.doctor._shared import CheckResult, orchestrator_config_or_default
 from cw.events import inbox_path
@@ -47,7 +42,7 @@ from cw.worktree import resolve_worktree_base
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.disk import DiskUsage, InodeUsage
+    from cw.disk import DiskUsage, InodeUsage, MountAssessment
     from cw.models import ClientConfig, CwState, TicketTask
 
 
@@ -491,20 +486,15 @@ def _check_sessions_size() -> CheckResult:
 
 
 def _inode_shortfall(
-    client: ClientConfig, inodes: InodeUsage, config: OrchestratorConfig
+    client: ClientConfig,
+    inodes: InodeUsage,
+    config: OrchestratorConfig,
+    assessment: MountAssessment,
 ) -> str | None:
     """Return the failing-detail fragment for a low-inode mount, else None."""
-    if not inodes_exhausted(
-        inodes,
-        min_free_inodes=config.disk_pressure_min_free_inodes,
-        min_free_inode_fraction=config.disk_pressure_min_free_inode_fraction,
-    ):
+    floor = assessment.inode_floor
+    if not assessment.inode_short or floor is None:
         return None
-    floor = effective_min_free_inodes(
-        inodes.total_inodes,
-        min_free_inodes=config.disk_pressure_min_free_inodes,
-        min_free_inode_fraction=config.disk_pressure_min_free_inode_fraction,
-    )
     return (
         f"worktree-base mount for '{client.name}' has"
         f" {inodes.free_inodes:,} free inodes, below the {floor:,} floor"
@@ -515,10 +505,13 @@ def _inode_shortfall(
 
 
 def _space_shortfall(
-    client: ClientConfig, disk: DiskUsage, config: OrchestratorConfig
+    client: ClientConfig,
+    disk: DiskUsage,
+    config: OrchestratorConfig,
+    assessment: MountAssessment,
 ) -> str | None:
     """Return the failing-detail fragment for a low-space mount, else None."""
-    if disk.free_gb >= config.disk_pressure_min_free_gb:
+    if not assessment.space_short:
         return None
     return (
         f"worktree-base mount for '{client.name}' has {disk.free_gb:.1f} GB free,"
@@ -527,22 +520,21 @@ def _space_shortfall(
 
 
 def _healthy_worker_tmp_detail(
-    disk: DiskUsage, inodes: InodeUsage, config: OrchestratorConfig
+    disk: DiskUsage,
+    inodes: InodeUsage,
+    config: OrchestratorConfig,
+    assessment: MountAssessment,
 ) -> str:
     """Summarize a healthy mount: free inodes (when reported) and free space."""
     space = (
         f"{disk.free_gb:.1f} GB free (min {config.disk_pressure_min_free_gb:.1f} GB)"
     )
-    if inodes.total_inodes == 0:
+    floor = assessment.inode_floor
+    if floor is None:
         return (
             f"worktree-base mount has {space};"
             " inode count not reported (dynamic inode allocation)"
         )
-    floor = effective_min_free_inodes(
-        inodes.total_inodes,
-        min_free_inodes=config.disk_pressure_min_free_inodes,
-        min_free_inode_fraction=config.disk_pressure_min_free_inode_fraction,
-    )
     return (
         f"worktree-base mount has {inodes.free_inodes:,} free inodes"
         f" (min {floor:,}), {space}"
@@ -560,18 +552,27 @@ def _worker_tmp_result(client: ClientConfig, config: OrchestratorConfig) -> Chec
         return CheckResult(
             name, ok=False, detail=f"could not probe worktree-base mount {base}: {exc}"
         )
+    assessment = assess_mount(
+        disk,
+        inodes,
+        min_free_gb=config.disk_pressure_min_free_gb,
+        min_free_inodes=config.disk_pressure_min_free_inodes,
+        min_free_inode_fraction=config.disk_pressure_min_free_inode_fraction,
+    )
     problems = [
         p
         for p in (
-            _space_shortfall(client, disk, config),
-            _inode_shortfall(client, inodes, config),
+            _space_shortfall(client, disk, config, assessment),
+            _inode_shortfall(client, inodes, config, assessment),
         )
         if p is not None
     ]
     if problems:
         return CheckResult(name, ok=False, detail="; ".join(problems))
     return CheckResult(
-        name, ok=True, detail=_healthy_worker_tmp_detail(disk, inodes, config)
+        name,
+        ok=True,
+        detail=_healthy_worker_tmp_detail(disk, inodes, config, assessment),
     )
 
 

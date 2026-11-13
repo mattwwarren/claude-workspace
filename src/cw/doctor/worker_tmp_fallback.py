@@ -18,12 +18,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from cw._util import format_compact_age
-from cw.disk import (
-    check_disk_usage,
-    check_inode_usage,
-    effective_min_free_inodes,
-    inodes_exhausted,
-)
+from cw.disk import assess_mount, check_disk_usage, check_inode_usage
 from cw.doctor._shared import CheckResult, orchestrator_config_or_default
 from cw.worker_tmp_retention import (
     MEASURE_LIMIT,
@@ -60,26 +55,25 @@ def _mount_findings(
         f"mount free {disk.free_gb:.1f} GB"
         f" (floor {config.disk_pressure_min_free_gb:.1f} GB)"
     )
-    if disk.free_gb < config.disk_pressure_min_free_gb:
+    inode = check_inode_usage(root)
+    assessment = assess_mount(
+        disk,
+        inode,
+        min_free_gb=config.disk_pressure_min_free_gb,
+        min_free_inodes=config.disk_pressure_min_free_inodes,
+        min_free_inode_fraction=config.disk_pressure_min_free_inode_fraction,
+    )
+    if assessment.space_short:
         shortfalls.append(
             f"mount free {disk.free_gb:.1f} GB below"
             f" {config.disk_pressure_min_free_gb:.1f} GB"
         )
-    inode = check_inode_usage(root)
-    if inode.total_inodes == 0:
+    floor = assessment.inode_floor
+    if floor is None:
         notes.append("mount reports no fixed inode budget")
         return headroom, shortfalls, notes
-    floor = effective_min_free_inodes(
-        inode.total_inodes,
-        min_free_inodes=config.disk_pressure_min_free_inodes,
-        min_free_inode_fraction=config.disk_pressure_min_free_inode_fraction,
-    )
     headroom += f", {inode.free_inodes:,} free inodes (floor {floor:,})"
-    if inodes_exhausted(
-        inode,
-        min_free_inodes=config.disk_pressure_min_free_inodes,
-        min_free_inode_fraction=config.disk_pressure_min_free_inode_fraction,
-    ):
+    if assessment.inode_short:
         shortfalls.append(
             f"mount free inodes {inode.free_inodes:,} below floor {floor:,}"
         )
