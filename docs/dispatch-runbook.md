@@ -1147,7 +1147,8 @@ common wedge conditions:
   `attempt_cap_blocked`, the RFC 0016 adoption parks, `review_approval_gate`,
   `review_engine_modified`, `tracker_mcp_gate` (#3055: fix the branch
   settings file or the backend's MCP config, then `cw dev-queue requeue`) or
-  `gate_timeout` (#3372: see **Park: `gate_timeout`** below), or
+  `gate_timeout` (#3372: see **Park: `gate_timeout`** below),
+  `awaiting_ci_evidence` (#3618: see **Park: `awaiting_ci_evidence`** below), or
   disposition `blocked` with a `codex_fix_*` `blocked_reason`. These rows look dead but wait on an operator, so
   `wedge/blocked-on-user-dead-session` skips them; this class is the visible
   counterpart, so a lane slot held by such a row is not left unexplained.
@@ -2319,7 +2320,7 @@ agent's own loop round.
 
 #### Opencode fail-closed guards (#3059)
 
-Three opencode pre-flight refusals, each before any agent runs (RFC 0018 B1):
+Two opencode pre-flight refusals fire before any agent runs (RFC 0018 B1), and one prompt convention keeps the opencode PLAN and IMPL stages consistent:
 
 - **Repair feedback.** An IMPL row carrying `review_feedback` is refused with
   `repair_entry_unsupported_backend`, because the opencode IMPL prompt does not
@@ -2331,7 +2332,7 @@ Three opencode pre-flight refusals, each before any agent runs (RFC 0018 B1):
   `executors.finalize` is opencode parks every ticket at FINALIZE; no `cw doctor`
   check warns beforehand. Fix: set `executors.finalize` to `claude-native`, then
   `cw dev-queue requeue`.
-- **Plan marker.** The opencode PLAN writes a cw-owned `<!-- cw-opencode-plan:
+- **Plan marker (a convention, not a refusal).** The opencode PLAN writes a cw-owned `<!-- cw-opencode-plan:
   <ticket> -->` marker as the last line of its audit-copy comment; the opencode
   IMPL prompt reads it alongside the claude-native `<!-- plan-spec-reviewed`
   marker. PLAN never writes a review sign-off marker.
@@ -3758,6 +3759,46 @@ merges on its own cw releases the row. Release it (Who: orchestrator):
    the head moved or the worktree was removed, finalize re-runs the gate and
    may park again; re-record the pass.
 
+**Park: `awaiting_ci_evidence` (#3618).** The repo opted in with
+`quality_gates.ci_evidence` (a gate name mapped to the CI check(s) that prove
+it, committed on the base branch), and the finalize stage is waiting on CI, not
+failed. On the create path, a headless `/prep-pr` Step 7 deferred a mapped gate
+instead of running it, opened the PR unarmed (a per-worktree `ci-hold`), and
+finalize parked. On the reuse pass (Step 4c.6), `ci-reuse-plan` found a mapped
+check pending, missing or red at the PR head. Either way the PR exists, cw did
+not arm auto-merge, and the gate was not run locally. The row parks
+`BLOCKED_ON_USER` at finalize with `blocker.reason: "awaiting_ci_evidence"` and
+disposition `awaiting_ci_evidence`; it is never regressed to impl and charges no
+attempt. `pr_url` is stamped. The flavor is the `blocker.details` prefix (Who:
+orchestrator):
+
+1. `ci_evidence_deferred:` or `ci_evidence_pending:` (a mapped check is
+   `missing`, `queued`, `in_progress` or `pending`): once the mapped checks have
+   finished, run `cw dev-queue requeue <T> -c <C>`. The requeue re-enters Step
+   4c.6, which arms only if every mapped check is green at the PR head.
+2. `ci_evidence_red:` (a mapped check concluded `failure`, `timed_out` or
+   similar; the details carry its url): this is a CI failure, not a gate
+   failure. Follow the `ci_failing` parked-row route: `cw dev-queue requeue <T>
+   -c <C> --stage impl --regress`, adding `--review-feedback-file <file>` when
+   you hold head-pinned evidence of the failure.
+3. `ci_evidence_hold_error:` (`ci-hold status` or `ci-hold release` failed):
+   fix the cause in `details`, usually a stale `prep_pr_finalize.py` copy, then
+   `cw dev-queue requeue <T> -c <C>`.
+4. A mapped check that never reports (renamed or path-filtered) parks every
+   requeue, because there is no timer fallback (ADR-0014). Correct or remove its
+   `quality_gates.ci_evidence` entry on the base branch (the map is read from
+   the worktree's `origin/<base>` ref, so it must have fetched the change), or
+   run the gate by hand and merge the PR yourself, then `cw dev-queue remove
+   <T> -c <C>`: a hand merge does not release the row automatically.
+   `pr.auto_merge: false` is not an escape, because the arm seam reads the
+   worktree's own config and setting it would change the head. To undo the hold
+   by hand, run `"$FINALIZE" ci-hold release --repo-path <worktree>`.
+
+The hold stays in force across any later commit on the branch (Step 7 autofix,
+fix loops, Step 8 remaining changes, the changelog gate) and is released only
+by the green reuse pass, `ci-hold release`, or an empty-array `ci-hold set` from
+the next headless Step 7.
+
 **Deferring an engine MUST_FIX (RFC 0017, #3039).** A repo review engine
 finding is never rejected, and an adjudication that tries to `reject` one is
 refused (`engine_route: engine_reject_forbidden: <file>: <fingerprint>`). A
@@ -3874,8 +3915,8 @@ middle of a part cannot be detected, and a tracker-side markdown
 normalisation can cause `readback_mismatch` on a faithful post: on
 `readback_mismatch`, read the ticket. On `POSSIBLE` or `CONFIRMED`, check the
 ticket for a duplicate or stray comment before re-running anything; cw never
-retries a post. A verified post emits no event and logs its comment ids at
-info.
+retries a post. A verified post emits `review.verdict_comment_posted` (not an
+unverified or skipped event) and logs its comment ids at info.
 
 Hidden-marker record. Linear marker survival: **UNVERIFIED**. Whether
 Linear's markdown keeps the `<!-- cw-agent-authored -->` marker has not been
@@ -4559,7 +4600,12 @@ device are skipped. A run is capped at 5000 removals.
 
 - *Ownership:* on Linux, `/proc/<pid>/cwd` and `/proc/<pid>/fd/*` protect the
   path and its ancestors up to the root. Without `/proc` the sweep is age-only,
-  and the sidecar records `proc_guard: false`. Residual risk: an unheld file
+  and the sidecar records `proc_guard: false`. A `/proc/<pid>` entry that cannot
+  be read (any error other than the process vanishing) protects nothing and is
+  counted, once per pid, as `unreadable_procs` in the sidecar; same-uid cw
+  workers are readable, so foreign-uid entries are the expected count. An empty
+  or missing root skips the scan but still records whether `/proc` is readable.
+  Residual risk: an unheld file
   re-read by path after more than the retention window of idleness. A bound
   unix-socket file is never removed: the `/proc` fd guard cannot see a socket as
   a path, so the sweep keeps it regardless of age.
@@ -4568,8 +4614,11 @@ device are skipped. A run is capped at 5000 removals.
   WARN line and the skip and bypass events name the mount (`disk_gb_mount`,
   `disk_inode_mount`).
 - *Doctor:* `cw doctor` check `worker-tmp-fallback` reports the mount's free GB
-  and inodes, a bounded tree measurement, and the last run. It is `ok=false` on a
-  shortfall, and warns only when the last retention run failed.
+  and inodes, a bounded tree measurement, and the last run, including the guard
+  state (`/proc guard on`, `/proc guard on, N processes unreadable` or `age-only
+  (no /proc guard)`). It is `ok=false` on a shortfall, and warns only when
+  retention is enabled and the last retention run failed. The guard state never
+  warns.
 - Disable with `worker_tmp_fallback_retention_enabled: false`. Retention is not
   gated by `reap_policy`.
 
@@ -5041,10 +5090,15 @@ clients:
   so only a crash or failed event write in the narrow gap between the save and the event
   leaves a row without them. That stays at-most-once: the replay hits `row_exists` and
   does not re-emit.
-- **Known limitation (R10).** If a debt row is pruned and the cursor file is also lost, a
-  replay could re-enqueue that debt. Pruning keeps the newest contiguous suffix of the inbox,
-  so a pruned cursor event alone does not replay consumed merges; only a deleted cursor file
-  or a restored old inbox can, and a missing cursor is forward-only.
+- **Known limitation (R10).** A replay can re-enqueue a pruned debt row only when the cursor
+  file survives but the inbox is replaced by an older copy (a restored backup or a rotated
+  inbox) that lacks the cursor's event: `read_events` logs `cursor <id> not found in inbox;
+  replaying from start` and re-reads every retained `pr.merged`, and `row_exists` no longer
+  protects a pruned row. Pruning alone does not do this: it keeps the newest contiguous suffix
+  of the inbox, so a pruned cursor event leaves only merges newer than the cursor, none already
+  consumed. A deleted cursor file does not replay either: it is forward-only, because
+  `init_cursor_at_end` re-seeds the cursor at the inbox end, so merges recorded between the
+  loss and the next tick are skipped, not replayed.
 - **Skip reasons.** `one_level`, `row_exists`, `no_parent_row`, `lane_undeclared`,
   `pr_mismatch` and `unknown_client`, all carried by `review.debt_enqueue_skipped`; see
   [events](events.md).

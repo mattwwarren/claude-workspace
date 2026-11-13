@@ -51,6 +51,7 @@ from cw.reconcile._shared._roster import ROSTER_REGISTRATION_SLACK_SECONDS
 from cw.reconcile.deferred import DeferredReconcileJobs, StopKind, run_post_lock_jobs
 from cw.reconcile.leaked_workers import sweep_leaked_daemon_workers
 from cw.reconcile.usage_limit_mid_turn import (
+    ACT_STALLED_AFTER_SECONDS,
     ACT_STARTED_AT_KEY,
     _act_on_mid_turn_usage_limit_candidates,
     _detect_mid_turn_usage_limit_candidates,
@@ -61,8 +62,12 @@ from tests._reconcile_helpers import (
     _shipped_salvage_payload,
     _ul_record,
     _write_transcript_records,
+    events_doc_bullet,
 )
-from tests._shared.daemon_fakes import _stop_leaves_worker_listed
+from tests._shared.daemon_fakes import (
+    _stop_leaves_worker_listed,
+    _stop_makes_roster_unreadable,
+)
 from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
@@ -1056,7 +1061,7 @@ def test_act_auto_skips_stop_when_surface_ref_already_cleared(
 
 
 # ---------------------------------------------------------------------------
-# Act -- M1: a session born after the roster capture is not "gone" (#2550)
+# Act -- registration slack: a session born after the capture is not "gone" (#2550)
 # ---------------------------------------------------------------------------
 
 
@@ -1165,7 +1170,8 @@ def test_act_finishes_when_the_session_is_not_young_enough_to_postdate_the_roste
     daemon: FakeNativeDaemonClient,
     captured: str,
 ) -> None:
-    """Revert check: without the M1 spare an absent ref still means stopped."""
+    """Revert check: without the registration-slack spare an absent ref
+    still means stopped."""
     state, _ = _seed(home, tmp_path, _limit_tail())
     _in_flight_auto_act(state)
     roster_captured_at = None
@@ -1519,8 +1525,12 @@ def _inject(
 ) -> None:
     """Make the act fail once at *point*, the way a crash there would leave it.
 
-    The module's dev-queue writes are, in order: the decision (1), the audit
-    mark (2) and the final transition (3).
+    The module's dev-queue writes are the decision, the audit mark and the
+    final transition. Under ``park`` all three land on the first tick, in that
+    order. Under ``auto`` the first tick stops at the audit mark (the row stays
+    RUNNING until the stop is confirmed), so the final transition is a later
+    tick's write: ``transition`` therefore matches on state (the save that
+    clears the intent) rather than on a cumulative call count (#3395).
     """
     from cw import dispatch_state
     from cw.config import save_state as real_save_state
@@ -1571,10 +1581,45 @@ def _inject(
     elif point == "close":
         _fail_once(monkeypatch, f"{mod}.save_state", real_save_state)
     elif point == "transition":
-        _fail_once(monkeypatch, f"{mod}.save_dev_queue", save_dev_queue, nth=3)
+        _fail_once(
+            monkeypatch,
+            f"{mod}.save_dev_queue",
+            save_dev_queue,
+            match=lambda store, *_a, **_k: any(
+                t.ticket_id == _SID and t.usage_limit_act is None for t in store.tasks
+            ),
+        )
     else:  # pragma: no cover - a typo in the parametrize list
         msg = f"unknown injection point {point!r}"
         raise AssertionError(msg)
+
+
+# The tick (1-based, counting the interrupted first tick) on which an ``auto``
+# act requeues its row after a failure at each point (#3395). Confirmed by
+# running: a smaller number fails the final ``requeued == [_SID]`` assertion,
+# a larger one fails an intermediate ``== []`` assertion.
+#
+# Under ``auto`` tick N closes the session and queues the stop, and the NEXT
+# tick sees the surface gone and requeues, so the requeue never lands on the
+# closing tick. A point that fails before the close persists makes tick 2 the
+# closing tick and tick 3 the requeue. ``stop``: tick 1 closes and queues, the
+# drained stop fails, the test applies it by hand, and tick 2 confirms and
+# requeues. ``transition``: tick 1 closes and queues; tick 2 confirms the
+# surface gone but its transition save fails; tick 3 requeues.
+_AUTO_FINISH_TICK = {
+    "decision": 3,
+    "lockout": 3,
+    "needs-attention": 3,
+    "reap-proposed": 3,
+    "audit-mark": 3,
+    "completed": 3,
+    "close": 3,
+    "stop": 2,
+    "transition": 3,
+}
+# Under ``park`` ``_resume`` goes straight to ``_finish``, so tick 2 resumes
+# from the intent and parks, whatever the point.
+_PARK_FINISH_TICK = 2
 
 
 def _finish_after_failure(
@@ -1583,16 +1628,21 @@ def _finish_after_failure(
     config: OrchestratorConfig,
     daemon: FakeNativeDaemonClient,
 ) -> list[str]:
-    """Run the ticks that finish an act whose first tick was interrupted at *point*."""
+    """Run the ticks that finish an act whose first tick was interrupted at *point*.
+
+    Each tick between the first and the pinned finishing tick must leave the
+    row RUNNING under its act; the finishing tick's result is returned.
+    """
     if point == "stop":
         # The failed stop is replayed by the leaked-worker sweep, which this
         # test does not run; apply the stop that sweep would have re-queued.
         FakeNativeDaemonClient.stop(daemon, _SURFACE)
-    requeued = _tick(load_state(), config, daemon, at=_LATER)
-    if branch == "auto" and requeued == []:
-        # Closing and queuing the stop is one tick; confirming the roster is the next.
-        requeued = _tick(load_state(), config, daemon, at=_LATER)
-    return requeued
+    final = _AUTO_FINISH_TICK[point] if branch == "auto" else _PARK_FINISH_TICK
+    for _ in range(2, final):
+        assert _tick(load_state(), config, daemon, at=_LATER) == []
+        _assert_row_still_running()
+        assert _owned_row().usage_limit_act is not None
+    return _tick(load_state(), config, daemon, at=_LATER)
 
 
 _COMMON_POINTS = [
@@ -1634,6 +1684,9 @@ def test_interrupted_act_is_finished_next_tick_without_charge(
     before = _owned_row().unproductive_attempts
     _inject(point, monkeypatch, daemon)
 
+    # Under ``auto`` the ``transition`` failure fires on tick 2, not here, so
+    # for it this check is trivially true; the intermediate-tick assertions in
+    # ``_finish_after_failure`` carry the non-trivial check.
     assert _tick(state, config, daemon, at=_NOW) == []
     _assert_row_still_running()
 
@@ -1790,6 +1843,237 @@ def test_act_resumed_after_its_window_lapsed_skips_the_lockout(
     assert task.status is QueueItemStatus.PENDING
     assert task.next_eligible_at == _LATER
     assert load_state().sessions[0].status is SessionStatus.COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# Stalled act -- a pending stop that outlives the bound pages once (#3397)
+# ---------------------------------------------------------------------------
+
+_BOUND = timedelta(seconds=ACT_STALLED_AFTER_SECONDS)
+_STALLED = "usage_limit_act_stalled"
+
+
+def _stalled_pages() -> list[dict[str, Any]]:
+    return [
+        p
+        for p in _events(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+        if p["paused_status"] == _STALLED
+    ]
+
+
+def _assert_act_still_open() -> None:
+    """Signal only (ADR-0014): the row, its act and the session are untouched."""
+    _assert_row_still_running()
+    assert _owned_row().usage_limit_act is not None
+    session = load_state().sessions[0]
+    assert session.status is SessionStatus.COMPLETED
+    assert session.completed_at == _NOW
+
+
+def _is_stalled_page(event_type: object, payload: object = None, **_k: object) -> bool:
+    return (
+        event_type is OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        and isinstance(payload, dict)
+        and payload.get("paused_status") == _STALLED
+    )
+
+
+def _saves_escalation_stamp(store: DevQueueStore, *_a: object, **_k: object) -> bool:
+    return any(
+        t.ticket_id == _SID
+        and t.usage_limit_act is not None
+        and t.usage_limit_act.escalated_at is not None
+        for t in store.tasks
+    )
+
+
+def test_pending_stop_escalates_once_when_the_act_outlives_the_bound(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    _stop_leaves_worker_listed(monkeypatch, daemon)
+    config = _auto_config()
+
+    assert _tick(state, config, daemon, at=_NOW) == []
+    attention = _events(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+    assert [p["paused_status"] for p in attention] == ["usage_limited_mid_turn"]
+
+    just_under = _NOW + _BOUND - timedelta(seconds=1)
+    assert _tick(load_state(), config, daemon, at=just_under) == []
+    assert _stalled_pages() == []
+    pending = _owned_row().usage_limit_act
+    assert pending is not None
+    assert pending.escalated_at is None
+
+    assert _tick(load_state(), config, daemon, at=_NOW + _BOUND) == []
+    pages = _stalled_pages()
+    assert len(pages) == 1
+    page = pages[0]
+    assert page[ACT_STARTED_AT_KEY] == _NOW.isoformat()
+    assert page["ticket_id"] == _SID
+    assert page["crashed"] is False
+    assert page["lane"] == _owned_row().lane
+    assert page["breadcrumbs"] == (
+        f"act started {int(ACT_STALLED_AFTER_SECONDS)}s ago; stop still pending, "
+        f"surface {_SURFACE} still listed or roster unreadable; "
+        "row stays RUNNING under its act"
+    )
+    _assert_act_still_open()
+    act = _owned_row().usage_limit_act
+    assert act is not None
+    assert act.escalated_at == _NOW + _BOUND
+    assert daemon.stop_calls == [_SURFACE]
+
+    assert _tick(load_state(), config, daemon, at=_NOW + 2 * _BOUND) == []
+    assert len(_stalled_pages()) == 1
+    _assert_act_still_open()
+
+
+def test_unreadable_roster_escalates_too(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop that can never be confirmed is the same stall: it pages once."""
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    _stop_makes_roster_unreadable(monkeypatch, daemon)
+    config = _auto_config()
+
+    assert _tick(state, config, daemon, at=_NOW) == []
+    assert _tick(load_state(), config, daemon, at=_NOW + _BOUND) == []
+
+    pages = _stalled_pages()
+    assert len(pages) == 1
+    assert _SURFACE in pages[0]["breadcrumbs"]
+    _assert_act_still_open()
+
+
+def test_escalation_not_emitted_when_act_finishes_even_if_old(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A confirmed stop finishes the act; its age alone never pages."""
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    real_stop = daemon.stop
+    _stop_leaves_worker_listed(monkeypatch, daemon)
+    config = _auto_config()
+
+    assert _tick(state, config, daemon, at=_NOW) == []
+    monkeypatch.setattr(daemon, "stop", real_stop)
+    real_stop(_SURFACE)
+
+    assert _tick(load_state(), config, daemon, at=_NOW + 2 * _BOUND) == [_SID]
+    assert _stalled_pages() == []
+    assert _owned_row().status is QueueItemStatus.PENDING
+
+
+def test_escalation_emit_failure_retries_next_tick(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failed page write leaves the act unstamped; the next tick pages."""
+    from cw.events import record_event as real_record_event
+
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    _stop_leaves_worker_listed(monkeypatch, daemon)
+    config = _auto_config()
+    assert _tick(state, config, daemon, at=_NOW) == []
+    _fail_once(
+        monkeypatch,
+        "cw.reconcile.usage_limit_mid_turn.record_event",
+        real_record_event,
+        match=_is_stalled_page,
+    )
+
+    with caplog.at_level("WARNING", logger="cw.reconcile.usage_limit_mid_turn"):
+        assert _tick(load_state(), config, daemon, at=_NOW + _BOUND) == []
+
+    assert any(_SID in m and "resumes next tick" in m for m in _log_messages(caplog))
+    assert _stalled_pages() == []
+    failed = _owned_row().usage_limit_act
+    assert failed is not None
+    assert failed.escalated_at is None
+
+    later = _NOW + _BOUND + timedelta(minutes=1)
+    assert _tick(load_state(), config, daemon, at=later) == []
+    assert len(_stalled_pages()) == 1
+    stamped = _owned_row().usage_limit_act
+    assert stamped is not None
+    assert stamped.escalated_at == later
+    _assert_act_still_open()
+
+
+def test_escalation_stamp_failure_repeats_the_page_once(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A page whose stamp did not land is re-sent once, then never again."""
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    _stop_leaves_worker_listed(monkeypatch, daemon)
+    config = _auto_config()
+    assert _tick(state, config, daemon, at=_NOW) == []
+    _fail_once(
+        monkeypatch,
+        "cw.reconcile.usage_limit_mid_turn.save_dev_queue",
+        save_dev_queue,
+        match=_saves_escalation_stamp,
+    )
+
+    assert _tick(load_state(), config, daemon, at=_NOW + _BOUND) == []
+    assert len(_stalled_pages()) == 1
+    unstamped = _owned_row().usage_limit_act
+    assert unstamped is not None
+    assert unstamped.escalated_at is None
+
+    later = _NOW + _BOUND + timedelta(minutes=1)
+    assert _tick(load_state(), config, daemon, at=later) == []
+    assert len(_stalled_pages()) == 2
+    assert _tick(load_state(), config, daemon, at=later + _BOUND) == []
+    assert len(_stalled_pages()) == 2
+    stamped = _owned_row().usage_limit_act
+    assert stamped is not None
+    assert stamped.escalated_at == later
+    _assert_act_still_open()
+
+
+def test_park_act_never_emits_the_stalled_page(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+) -> None:
+    """``park`` has no stop to wait on: it finishes the act on its first tick."""
+    state, _ = _seed(home, tmp_path, _limit_tail())
+
+    assert _tick(state, OrchestratorConfig(), daemon, at=_NOW) == []
+    assert _tick(load_state(), OrchestratorConfig(), daemon, at=_NOW + _BOUND) == []
+
+    assert _owned_row().status is QueueItemStatus.BLOCKED_ON_USER
+    assert _stalled_pages() == []
+
+
+def test_stalled_status_is_documented() -> None:
+    bullet = events_doc_bullet('- `"usage_limit_act_stalled"`')
+
+    assert "escalated_at" in bullet
+    assert "ADR-0014" in bullet
+    assert "act started {age_seconds}s ago; stop still pending" in bullet
 
 
 # ---------------------------------------------------------------------------

@@ -2050,6 +2050,18 @@ def test_session_lane_defaults_to_none() -> None:
     assert sess.lane is None
 
 
+def test_session_surface_bound_at_defaults_none() -> None:
+    """Session.surface_bound_at defaults to None (#3339): older rows and
+    resumes carry no bind stamp, so no schema bump is needed."""
+    sess = Session(
+        name="test/impl",
+        client="test",
+        purpose=SessionPurpose.IMPL,
+        workspace_path=Path("/tmp"),
+    )
+    assert sess.surface_bound_at is None
+
+
 def test_session_lane_round_trips() -> None:
     """Session(lane='x') stores and returns the lane value."""
     sess = Session(

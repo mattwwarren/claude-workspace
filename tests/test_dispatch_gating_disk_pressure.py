@@ -861,3 +861,39 @@ class TestFallbackMountPressure:
         assert merged.free_gb == 2.0
         assert merged.inode_mount == "worker_tmp_fallback"
         assert merged.free_inodes == 10_000
+
+    def test_merge_primary_wins_when_both_mounts_gate_same_dimension(self) -> None:
+        primary = _DiskPressure(True, True, 1.0, 5_000, 50_000)
+        fallback = _DiskPressure(
+            True,
+            True,
+            2.0,
+            10_000,
+            60_000,
+            gb_mount="worker_tmp_fallback",
+            inode_mount="worker_tmp_fallback",
+        )
+        merged = _merge_pressure(primary, fallback)
+        assert merged.gb_mount == "worktree"
+        assert merged.free_gb == 1.0
+        assert merged.inode_mount == "worktree"
+        assert merged.free_inodes == 5_000
+        assert merged.min_free_inodes == 50_000
+
+    def test_merge_picks_each_dimension_independently(self) -> None:
+        primary = _DiskPressure(True, False, 1.0, 900_000, 50_000)
+        fallback = _DiskPressure(
+            True,
+            True,
+            2.0,
+            10_000,
+            60_000,
+            gb_mount="worker_tmp_fallback",
+            inode_mount="worker_tmp_fallback",
+        )
+        merged = _merge_pressure(primary, fallback)
+        assert merged.gb_mount == "worktree"
+        assert merged.free_gb == 1.0
+        assert merged.inode_mount == "worker_tmp_fallback"
+        assert merged.free_inodes == 10_000
+        assert merged.min_free_inodes == 60_000

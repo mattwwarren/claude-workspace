@@ -42,7 +42,12 @@ intent, resumable from any point, rather than an ordering of steps:
      row stays RUNNING under its intent until the surface is gone from the
      captured roster and the fail-closed ``roster.json`` read (an unreadable
      roster confirms nothing). A surface still listed is replayed by the
-     leaked-worker sweep for any terminal session;
+     leaked-worker sweep for any terminal session. The wait has no
+     disposition deadline, so it is not silent instead: once the stop has
+     been pending ``ACT_STALLED_AFTER_SECONDS`` past the decision, one
+     ``session.needs_attention`` / ``usage_limit_act_stalled`` page is
+     recorded and latched by the intent's ``escalated_at`` (#3397). Signal
+     only (ADR-0014): the row stays RUNNING under its act;
    - transition the row -- ``auto``: RUNNING -> PENDING with
      ``next_eligible_at`` at the window's end, so the existing claim gate
      releases it; ``park``: RUNNING -> BLOCKED_ON_USER /
@@ -104,10 +109,7 @@ from cw.reconcile._shared import (
     resolve_reap_policy,
     ticket_id_for_session,
 )
-from cw.reconcile._shared._roster import (
-    _may_postdate_roster,
-    roster_registration_cutoff,
-)
+from cw.reconcile._shared._roster import session_may_postdate_roster
 from cw.reconcile.deferred import defer_surface_stop
 
 if TYPE_CHECKING:
@@ -136,6 +138,12 @@ _PARK: Literal["park"] = "park"
 # Payload key carrying the intent's started_at on the act's audit events, so a
 # re-emit after a crash is recognisably the same act as the first emit.
 ACT_STARTED_AT_KEY = "act_started_at"
+
+# An ``auto`` act whose stop is still unconfirmed this long after its decision
+# pages once (#3397). Signal only (ADR-0014): the age gates the page, never a
+# disposition, so the row stays RUNNING under its act.
+ACT_STALLED_AFTER_SECONDS = 900.0
+_ACT_STALLED_REASON = "usage_limit_act_stalled"
 
 
 class _Stop(Enum):
@@ -537,12 +545,6 @@ def _clear_intent(target: TicketTask) -> None:
     target.usage_limit_act = None
 
 
-def _may_postdate_roster_capture(act: _Act) -> bool:
-    """True when the act's session ref may be newer than its roster capture (M1)."""
-    cutoff = roster_registration_cutoff(act.roster_captured_at)
-    return cutoff is not None and _may_postdate_roster(act.session, cutoff)
-
-
 def _live_surface_ref(act: _Act) -> str | None:
     """The session's ``surface_ref`` iff the roster snapshot still lists it."""
     ref = act.session.surface_ref
@@ -570,7 +572,8 @@ def _close_and_queue_stop(act: _Act) -> _Stop:
 
     The surface's liveness is read from the captured roster. A live surface
     whose tail has changed abandons the act. A surface that may postdate the
-    roster capture (M1) is not treated as absent: the act waits for a newer
+    roster capture (born within the registration slack of it) is not treated
+    as absent: the act waits for a newer
     capture. Otherwise the session is persisted COMPLETED first, so the
     outage guard never sees a live-status session with an empty roster; the
     stop itself runs post-lock and is confirmed on a later tick.
@@ -580,7 +583,7 @@ def _close_and_queue_stop(act: _Act) -> _Stop:
     if (
         live_ref is None
         and session.surface_ref is not None
-        and _may_postdate_roster_capture(act)
+        and session_may_postdate_roster(session, act.roster_captured_at)
     ):
         _log.info(
             "usage_limit_mid_turn: surface %s for ticket %s session %s may "
@@ -621,6 +624,8 @@ def _close_and_request_stop(act: _Act) -> _Stop:
     outcome leaves the row RUNNING under its intent for the next tick. A
     terminal session (closed on an earlier tick) is only re-checked for the
     roster; the leaked-worker sweep re-queues a stop that is still listed.
+    A ``PENDING`` outcome past the bound pages once via
+    :func:`_escalate_if_stalled` (#3397).
     """
     if act.session.status not in TERMINAL_SESSION_STATUSES:
         return _close_and_queue_stop(act)
@@ -703,12 +708,58 @@ def _finish(row: _ActRow, *, moot: bool = False) -> bool:
     return False
 
 
+def _mark_escalated(target: TicketTask, *, at: datetime) -> None:
+    intent = target.usage_limit_act
+    if intent is not None:
+        target.usage_limit_act = intent.model_copy(update={"escalated_at": at})
+
+
+def _escalate_if_stalled(act: _Act) -> None:
+    """Page once when an ``auto`` act's stop is still pending past the bound.
+
+    Signal only (ADR-0014): the page and its ``escalated_at`` dedup stamp
+    change no session, row, roster or worktree state. The page is recorded
+    before the stamp, so a failed stamp repeats it once (at-least-once, like
+    the audit); a failed page leaves the act unstamped for the next tick.
+    """
+    intent = act.row.intent
+    age_seconds = (act.now - intent.started_at).total_seconds()
+    if intent.escalated_at is not None or age_seconds < ACT_STALLED_AFTER_SECONDS:
+        return
+    _log.warning(
+        "usage_limit_mid_turn: the act on ticket %s session %s started %ds ago "
+        "and its stop is still pending; paging the orchestrator",
+        act.row.ticket_id,
+        act.session.id,
+        age_seconds,
+    )
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            **_audit_payload(act),
+            "paused_status": _ACT_STALLED_REASON,
+            "breadcrumbs": (
+                f"act started {int(age_seconds)}s ago; stop still pending, "
+                f"surface {act.session.surface_ref} still listed or roster "
+                "unreadable; row stays RUNNING under its act"
+            ),
+            "lane": act.row.lane,
+        },
+        correlation_id=act.row.ticket_id,
+    )
+    _mutate_act_row(act.row, partial(_mark_escalated, at=act.now))
+
+
 def _resume(act: _Act, *, moot: bool = False) -> bool:
     """Perform every step the act has not done yet; True iff it requeued."""
     if not _arm_lockout(act, moot=moot) or not _audit(act):
         return False
-    if act.row.auto and _close_and_request_stop(act) is not _Stop.DONE:
-        return False
+    if act.row.auto:
+        stop = _close_and_request_stop(act)
+        if stop is _Stop.PENDING:
+            _escalate_if_stalled(act)
+        if stop is not _Stop.DONE:
+            return False
     return _finish(act.row, moot=moot)
 
 
@@ -872,7 +923,7 @@ def detect_and_park_mid_turn_usage_limits(
     here. *deferred* receives the ``auto`` act's stop, which runs post-lock
     (#2549). *roster_captured_at* is the capture time of the lockless roster
     *native_live* came from (#2550): an ``auto`` act does not treat a session
-    spawned or resumed within ``ROSTER_REGISTRATION_SLACK_SECONDS`` of it, or
+    spawned, resumed or bound within ``ROSTER_REGISTRATION_SLACK_SECONDS`` of it, or
     after it, as stopped just because its surface is absent from
     *native_live* (the ref may postdate the capture); the act retries next
     tick. ``None`` spares no session. Returns the ticket ids requeued to

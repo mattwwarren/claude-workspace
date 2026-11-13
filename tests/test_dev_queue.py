@@ -16520,6 +16520,33 @@ class TestHoldAwareDisposition:
         assert GATE_TIMEOUT_DISPOSITION not in DRAIN_DISPOSITIONS
         assert GATE_TIMEOUT_BLOCKER_REASON not in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
 
+    def test_awaiting_ci_evidence_reason_returns_its_own_disposition(self) -> None:
+        """#3618: the CI-evidence park maps to its own disposition.
+
+        Not a hold, not a drain, not an operator-unavailable reason.
+        """
+        from cw.auto_dev_result import (
+            AWAITING_CI_EVIDENCE_BLOCKER_REASON,
+            OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
+        )
+        from cw.dev_queue import (
+            AWAITING_CI_EVIDENCE_DISPOSITION,
+            DRAIN_DISPOSITIONS,
+            HOLD_DISPOSITIONS,
+        )
+
+        assert (
+            self._derive("blocked", AWAITING_CI_EVIDENCE_BLOCKER_REASON)
+            == AWAITING_CI_EVIDENCE_DISPOSITION
+            == "awaiting_ci_evidence"
+        )
+        assert AWAITING_CI_EVIDENCE_DISPOSITION not in HOLD_DISPOSITIONS
+        assert AWAITING_CI_EVIDENCE_DISPOSITION not in DRAIN_DISPOSITIONS
+        assert (
+            AWAITING_CI_EVIDENCE_BLOCKER_REASON
+            not in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestMustFixMechanicallyRejectedDisposition (#1714)
@@ -17873,6 +17900,56 @@ class TestUsageLimitActMigration:
         assert loaded == intent
         assert loaded is not None
         assert loaded.audited_at is None
+        assert loaded.escalated_at is None
+
+    def test_usage_limit_act_escalated_at_round_trips_through_the_store(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """#3397: the stalled-act page's dedup latch persists with the intent."""
+        escalated_at = datetime(2026, 9, 24, 1, 15, tzinfo=UTC)
+        intent = UsageLimitAct.model_validate(
+            {**self._INTENT, "escalated_at": escalated_at.isoformat()}
+        )
+        task = TicketTask(
+            ticket_id="GEN-39",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-1",
+            usage_limit_act=intent,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        loaded = load_dev_queue().tasks[0].usage_limit_act
+
+        assert loaded == intent
+        assert loaded is not None
+        assert loaded.escalated_at == escalated_at
+
+    def test_usage_limit_act_without_escalated_at_key_loads_as_none(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """An act persisted before #3397 has no key and loads unescalated."""
+        from cw.config import dev_queue_file
+
+        raw = {
+            "schema_version": DEV_QUEUE_SCHEMA_VERSION,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-39",
+                    "client": "test-client",
+                    "status": "running",
+                    "session_id": "sess-1",
+                    "usage_limit_act": dict(self._INTENT),
+                }
+            ],
+        }
+        dev_queue_file().parent.mkdir(parents=True, exist_ok=True)
+        dev_queue_file().write_text(json.dumps(raw))
+
+        loaded = load_dev_queue().tasks[0].usage_limit_act
+
+        assert loaded is not None
+        assert loaded.escalated_at is None
 
 
 class TestCodexOrphanLinkMigration:

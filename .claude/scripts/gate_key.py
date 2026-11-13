@@ -52,7 +52,7 @@ fallback cannot provide. Residual risk, accepted: a live run whose record is
 absent can have its gate path deleted by a concurrent claim for the same
 branch, and the destructive step's blast radius is the one deterministic
 cw-gate-wt-<key> and cw-gate-tmp-<key> pair. Follow-up: claim coverage for
-gates 2-4, or positive evidence before the self-heal, is filed as debt. The
+gates 2-4, or positive evidence before the self-heal, is filed as debt in #3210. The
 generation binds `--release` to the record only; it does not protect the gate
 paths, which the cleanup removes before it releases.
 

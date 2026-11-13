@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from cw._util import NO_CLIENTS_MSG
 from cw.models import (
     CwState,
     QueueItemStatus,
@@ -1870,7 +1871,7 @@ class TestWorktreeGcCli:
             result = runner.invoke(cli_main, ["worktree", "gc"])
 
         assert result.exit_code == 0
-        assert "No clients configured" in result.output
+        assert result.output.strip() == NO_CLIENTS_MSG
 
     def test_unknown_client_errors(self, tmp_path: Path) -> None:
         from click.testing import CliRunner

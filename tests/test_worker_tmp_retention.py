@@ -8,6 +8,7 @@ pushed into the future to model a fresh entry.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 from datetime import UTC, datetime, timedelta
@@ -17,8 +18,10 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw import worker_tmp_retention as wtr
+from cw.config import state_dir
 from cw.exceptions import CwLockOrderError, CwLockReentrancyError
 from cw.models import OrchestratorConfig
+from cw.sidecar_status import write_sidecar
 from cw.worker_tmp_retention import (
     RetentionStatus,
     auto_sweep_fallback_tmp,
@@ -33,6 +36,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
 _FUTURE_MTIME = 4_000_000_000  # year 2096: "fresh" against any near cutoff
+_SIDECAR = "worker_tmp_retention.json"
+_log = logging.getLogger("tests.worker_tmp_retention")
 
 
 def _future_cutoff() -> datetime:
@@ -67,6 +72,11 @@ def _lstat_raises(
     monkeypatch.setattr(wtr, "_lstat", fake_lstat)
 
 
+def _write_status(status: RetentionStatus) -> None:
+    """Seed the sidecar the way the sweep does, through the shared writer."""
+    write_sidecar(_SIDECAR, status, _log)
+
+
 @pytest.fixture
 def root() -> Path:
     """The real fallback root under the per-test redirected HOME."""
@@ -93,6 +103,36 @@ class TestSweepRemovals:
         assert not link.is_symlink()
         assert target.read_text() == "keep me"
         assert result.removed_files == 1
+
+    def test_stale_symlink_to_directory_unlinked_target_tree_untouched(
+        self, root: Path, tmp_path: Path
+    ) -> None:
+        outside = tmp_path / "outside"
+        inner = _make_file(outside / "inner.txt", "keep me")
+        link = root / "dirlink"
+        link.symlink_to(outside, target_is_directory=True)
+        result = sweep_fallback_tmp(root, cutoff=_future_cutoff(), protected=None)
+        assert not link.is_symlink()
+        assert outside.is_dir()
+        assert inner.read_text() == "keep me"
+        assert result.removed_files == 1
+        assert result.removed_dirs == 0
+
+    def test_fresh_symlink_to_directory_kept_target_tree_untouched(
+        self, root: Path, tmp_path: Path
+    ) -> None:
+        if os.utime not in os.supports_follow_symlinks:
+            pytest.skip("platform cannot set a symlink's own timestamps")
+        outside = tmp_path / "outside"
+        inner = _make_file(outside / "inner.txt", "keep me")
+        link = root / "dirlink"
+        link.symlink_to(outside, target_is_directory=True)
+        os.utime(link, (_FUTURE_MTIME, _FUTURE_MTIME), follow_symlinks=False)
+        result = sweep_fallback_tmp(root, cutoff=_future_cutoff(), protected=None)
+        assert link.is_symlink()
+        assert inner.read_text() == "keep me"
+        assert result.removed_files == 0
+        assert result.removed_dirs == 0
 
     def test_fresh_file_kept(self, root: Path) -> None:
         f = _make_file(root / "fresh.txt")
@@ -435,6 +475,34 @@ def _proc_entry(proc: Path, pid: str, *, cwd: Path | None, fds: list[Path]) -> N
         (pdir / "fd" / str(i)).symlink_to(target)
 
 
+def _deny_proc_access(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cwd_pids: tuple[str, ...] = (),
+    fd_pids: tuple[str, ...] = (),
+) -> None:
+    """Make ``/proc/<pid>/cwd`` and ``/proc/<pid>/fd`` raise ``PermissionError``.
+
+    Keyed on the pid directory name so every other path behaves normally. No
+    chmod: the test run may be root, for whom a mode bit denies nothing.
+    """
+    real_readlink = Path.readlink
+    real_iterdir = Path.iterdir
+
+    def readlink(self: Path) -> Path:
+        if self.name == "cwd" and self.parent.name in cwd_pids:
+            raise PermissionError(str(self))
+        return real_readlink(self)
+
+    def iterdir(self: Path) -> Iterator[Path]:
+        if self.name == "fd" and self.parent.name in fd_pids:
+            raise PermissionError(str(self))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "readlink", readlink)
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+
+
 class TestHeldPaths:
     @pytest.fixture
     def proc(self, tmp_path: Path) -> Iterator[Path]:
@@ -447,10 +515,10 @@ class TestHeldPaths:
         _proc_entry(proc, "123", cwd=None, fds=[f])
         held = held_paths(root, proc_root=proc)
         assert held is not None
-        assert f in held
-        assert root / "a" / "b" in held
-        assert root / "a" in held
-        assert root not in held
+        assert f in held.paths
+        assert root / "a" / "b" in held.paths
+        assert root / "a" in held.paths
+        assert root not in held.paths
 
     def test_cwd_under_dir_protects_dir(self, root: Path, proc: Path) -> None:
         d = root / "work"
@@ -458,7 +526,7 @@ class TestHeldPaths:
         _proc_entry(proc, "456", cwd=d, fds=[])
         held = held_paths(root, proc_root=proc)
         assert held is not None
-        assert d in held
+        assert d in held.paths
 
     def test_entries_outside_root_not_protected(
         self, root: Path, proc: Path, tmp_path: Path
@@ -466,27 +534,91 @@ class TestHeldPaths:
         outside = _make_file(tmp_path / "elsewhere.txt")
         _proc_entry(proc, "789", cwd=tmp_path, fds=[outside])
         held = held_paths(root, proc_root=proc)
-        assert held == frozenset()
+        assert held is not None
+        assert held.paths == frozenset()
+        assert held.unreadable_procs == 0
 
     def test_non_numeric_proc_entries_ignored(self, root: Path, proc: Path) -> None:
         f = _make_file(root / "x.txt")
         _proc_entry(proc, "self", cwd=None, fds=[f])
         held = held_paths(root, proc_root=proc)
-        assert held == frozenset()
+        assert held is not None
+        assert held.paths == frozenset()
 
     def test_vanished_pid_ignored(self, root: Path, proc: Path) -> None:
         (proc / "999").mkdir()
         held = held_paths(root, proc_root=proc)
-        assert held == frozenset()
+        assert held is not None
+        assert held.paths == frozenset()
+        assert held.unreadable_procs == 0  # vanished, not unreadable
 
     def test_missing_proc_returns_none(self, root: Path, tmp_path: Path) -> None:
         assert held_paths(root, proc_root=tmp_path / "no-proc") is None
+
+    def test_unreadable_cwd_counts_one_process(
+        self, root: Path, proc: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _proc_entry(proc, "111", cwd=root, fds=[])
+        _deny_proc_access(monkeypatch, cwd_pids=("111",))
+        held = held_paths(root, proc_root=proc)
+        assert held is not None
+        assert held.unreadable_procs == 1
+
+    def test_unreadable_fd_dir_counts_one_process(
+        self, root: Path, proc: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _proc_entry(proc, "222", cwd=root / "w", fds=[])
+        _deny_proc_access(monkeypatch, fd_pids=("222",))
+        held = held_paths(root, proc_root=proc)
+        assert held is not None
+        assert held.unreadable_procs == 1
+
+    def test_cwd_and_fd_both_unreadable_counts_the_process_once(
+        self, root: Path, proc: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _proc_entry(proc, "333", cwd=root, fds=[])
+        _deny_proc_access(monkeypatch, cwd_pids=("333",), fd_pids=("333",))
+        held = held_paths(root, proc_root=proc)
+        assert held is not None
+        assert held.unreadable_procs == 1
+
+    def test_readable_pids_still_protected_beside_an_unreadable_one(
+        self, root: Path, proc: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        a = _make_file(root / "a.txt")
+        b = _make_file(root / "b.txt")
+        _proc_entry(proc, "10", cwd=None, fds=[a])
+        _proc_entry(proc, "11", cwd=None, fds=[b])
+        _proc_entry(proc, "12", cwd=root, fds=[])
+        _deny_proc_access(monkeypatch, cwd_pids=("12",), fd_pids=("12",))
+        held = held_paths(root, proc_root=proc)
+        assert held is not None
+        assert {a, b} <= held.paths
+        assert held.unreadable_procs == 1
+
+    def test_closed_fd_between_listing_and_readlink_is_not_unreadable(
+        self, root: Path, proc: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        f = _make_file(root / "f.txt")
+        _proc_entry(proc, "20", cwd=None, fds=[f])
+        real_readlink = Path.readlink
+
+        def readlink(self: Path) -> Path:
+            if self.parent.name == "fd":
+                raise FileNotFoundError(str(self))
+            return real_readlink(self)
+
+        monkeypatch.setattr(Path, "readlink", readlink)
+        held = held_paths(root, proc_root=proc)
+        assert held is not None
+        assert held.unreadable_procs == 0
 
     def test_held_file_survives_sweep(self, root: Path, proc: Path) -> None:
         f = _make_file(root / "live" / "scratch.txt")
         _proc_entry(proc, "42", cwd=None, fds=[f])
         held = held_paths(root, proc_root=proc)
-        result = sweep_fallback_tmp(root, cutoff=_future_cutoff(), protected=held)
+        assert held is not None
+        result = sweep_fallback_tmp(root, cutoff=_future_cutoff(), protected=held.paths)
         assert f.exists()
         assert (root / "live").is_dir()
         assert result.kept_in_use >= 1
@@ -524,9 +656,9 @@ class TestSymlinkedAncestorRoot:
         _proc_entry(proc, "42", cwd=None, fds=[held_file])
         held = held_paths(root, proc_root=proc)
         assert held is not None
-        assert held_file in held
-        assert canonical / "live" in held
-        assert canonical not in held
+        assert held_file in held.paths
+        assert canonical / "live" in held.paths
+        assert canonical not in held.paths
 
     def test_held_file_survives_sweep_and_unheld_sibling_removed(
         self, linked_root: tuple[Path, Path], proc: Path
@@ -536,7 +668,8 @@ class TestSymlinkedAncestorRoot:
         stale = _make_file(canonical / "stale" / "old.txt")
         _proc_entry(proc, "42", cwd=None, fds=[held_file])
         held = held_paths(root, proc_root=proc)
-        result = sweep_fallback_tmp(root, cutoff=_future_cutoff(), protected=held)
+        assert held is not None
+        result = sweep_fallback_tmp(root, cutoff=_future_cutoff(), protected=held.paths)
         assert held_file.exists()
         assert (canonical / "live").is_dir()
         assert result.kept_in_use >= 1
@@ -571,7 +704,7 @@ class TestRealProc:
         finally:
             os.close(fd)
         assert held is not None
-        assert Path(os.path.realpath(f)) in held
+        assert Path(os.path.realpath(f)) in held.paths
 
     def test_open_fd_is_held_via_symlinked_ancestor(
         self, linked_root: tuple[Path, Path]
@@ -584,8 +717,8 @@ class TestRealProc:
         finally:
             os.close(fd)
         assert held is not None
-        assert canonical / "d" / "open.txt" in held
-        assert canonical / "d" in held
+        assert canonical / "d" / "open.txt" in held.paths
+        assert canonical / "d" in held.paths
         assert f.exists()
 
 
@@ -628,18 +761,27 @@ class TestAutoSweep:
     def _config(self, **overrides: object) -> OrchestratorConfig:
         return OrchestratorConfig.model_validate(overrides)
 
+    @pytest.fixture
+    def fake_proc(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """An empty, readable stand-in for ``/proc``, bound as ``_PROC_ROOT``."""
+        proc = tmp_path / "proc"
+        proc.mkdir()
+        monkeypatch.setattr(wtr, "_PROC_ROOT", proc)
+        return proc
+
     def test_disabled_returns_none_and_writes_no_sidecar(self, root: Path) -> None:
         cfg = self._config(worker_tmp_fallback_retention_enabled=False)
         assert auto_sweep_fallback_tmp(cfg) is None
         assert read_retention_status() is None
 
-    def test_missing_root_records_ok_zero_run(self) -> None:
+    def test_missing_root_records_ok_zero_run(self, fake_proc: Path) -> None:
         result = auto_sweep_fallback_tmp(self._config())
         assert result is not None
         assert result.removed_files == 0
         status = read_retention_status()
         assert status is not None
         assert status.status == "ok"
+        assert status.proc_guard is True
 
     def test_not_due_returns_none(self, root: Path) -> None:
         now = datetime.now(UTC)
@@ -650,11 +792,13 @@ class TestAutoSweep:
             capped=False,
             proc_guard=False,
         )
-        wtr._write_status(status)
+        _write_status(status)
         cfg = self._config(worker_tmp_fallback_retention_interval_minutes=60)
         assert auto_sweep_fallback_tmp(cfg, now=now) is None
 
-    def test_due_run_removes_and_writes_sidecar(self, root: Path) -> None:
+    def test_due_run_removes_and_writes_sidecar(
+        self, root: Path, fake_proc: Path
+    ) -> None:
         _make_file(root / "old.txt", "abc")
         now = datetime.now(UTC) + timedelta(days=30)
         result = auto_sweep_fallback_tmp(self._config(), now=now)
@@ -668,10 +812,72 @@ class TestAutoSweep:
         assert status.freed_bytes == 3
         assert status.retention_days == 7
         assert status.proc_guard is True
+        assert status.unreadable_procs == 0
+
+    def test_unreadable_proc_falls_back_to_age_only_end_to_end(
+        self, root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(wtr, "_PROC_ROOT", tmp_path / "no-proc")
+        stale = _make_file(root / "old.txt")
+        now = datetime.now(UTC) + timedelta(days=30)
+        result = auto_sweep_fallback_tmp(self._config(), now=now)
+        assert result is not None
+        assert not stale.exists()
+        assert result.proc_guard is False
+        status = read_retention_status()
+        assert status is not None
+        assert status.proc_guard is False
+        assert status.unreadable_procs == 0
+
+    def test_unreadable_processes_recorded_in_sidecar(
+        self, root: Path, fake_proc: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        held = _make_file(root / "held.txt")
+        stale = _make_file(root / "stale.txt")
+        _proc_entry(fake_proc, "10", cwd=None, fds=[held])
+        _proc_entry(fake_proc, "11", cwd=None, fds=[])
+        _deny_proc_access(monkeypatch, cwd_pids=("11",), fd_pids=("11",))
+        now = datetime.now(UTC) + timedelta(days=30)
+        result = auto_sweep_fallback_tmp(self._config(), now=now)
+        assert result is not None
+        assert held.exists()
+        assert not stale.exists()
+        assert result.kept_in_use == 1
+        assert result.unreadable_procs == 1
+        status = read_retention_status()
+        assert status is not None
+        assert status.kept_in_use == 1
+        assert status.proc_guard is True
+        assert status.unreadable_procs == 1
+
+    @pytest.mark.parametrize("root_state", ["empty", "missing"])
+    @pytest.mark.parametrize("proc_state", ["readable", "missing", "not-a-dir"])
+    def test_empty_root_records_proc_guard_from_proc_readability(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        root_state: str,
+        proc_state: str,
+    ) -> None:
+        proc = tmp_path / "proc"
+        if proc_state == "readable":
+            proc.mkdir()
+        elif proc_state == "not-a-dir":
+            proc.write_text("")
+        monkeypatch.setattr(wtr, "_PROC_ROOT", proc)
+        if root_state == "empty":
+            resolve_fallback_worker_tmpdir().mkdir(parents=True)
+        result = auto_sweep_fallback_tmp(self._config())
+        assert result is not None
+        assert result.proc_guard is (proc_state == "readable")
+        assert result.unreadable_procs == 0
+        status = read_retention_status()
+        assert status is not None
+        assert status.proc_guard is (proc_state == "readable")
 
     def test_future_last_run_counts_as_due(self, root: Path) -> None:
         now = datetime.now(UTC)
-        wtr._write_status(
+        _write_status(
             RetentionStatus(
                 last_run_at=now + timedelta(hours=2),
                 status="ok",
@@ -723,7 +929,7 @@ class TestAutoSweep:
             msg = "disk full"
             raise OSError(msg)
 
-        monkeypatch.setattr(wtr, "atomic_write_text", fail)
+        monkeypatch.setattr("cw.sidecar_status.atomic_write_text", fail)
         assert auto_sweep_fallback_tmp(self._config()) is not None
 
     def test_sidecar_write_failure_does_not_rerun_every_tick(
@@ -733,7 +939,7 @@ class TestAutoSweep:
             msg = "disk full"
             raise OSError(msg)
 
-        monkeypatch.setattr(wtr, "atomic_write_text", fail)
+        monkeypatch.setattr("cw.sidecar_status.atomic_write_text", fail)
         cfg = self._config(worker_tmp_fallback_retention_interval_minutes=60)
         t = datetime.now(UTC)
         assert auto_sweep_fallback_tmp(cfg, now=t) is not None
@@ -799,7 +1005,7 @@ class TestAutoSweep:
 
     def test_status_json_round_trip(self, root: Path) -> None:
         auto_sweep_fallback_tmp(self._config())
-        raw = json.loads((wtr.state_dir() / "worker_tmp_retention.json").read_text())
+        raw = json.loads((state_dir() / _SIDECAR).read_text())
         assert raw["status"] == "ok"
 
 
@@ -808,11 +1014,26 @@ class TestReadStatus:
         assert read_retention_status() is None
 
     def test_corrupt_returns_none(self) -> None:
-        wtr.state_dir().mkdir(parents=True, exist_ok=True)
-        (wtr.state_dir() / "worker_tmp_retention.json").write_text("{not json")
+        state_dir().mkdir(parents=True, exist_ok=True)
+        (state_dir() / _SIDECAR).write_text("{not json")
         assert read_retention_status() is None
 
     def test_unreadable_returns_none(self) -> None:
         # A directory where the sidecar should be raises IsADirectoryError (OSError).
-        (wtr.state_dir() / "worker_tmp_retention.json").mkdir(parents=True)
+        (state_dir() / _SIDECAR).mkdir(parents=True)
         assert read_retention_status() is None
+
+    def test_old_sidecar_without_unreadable_procs_still_parses(self) -> None:
+        legacy = {
+            "last_run_at": "2026-11-01T00:00:00Z",
+            "status": "ok",
+            "removed_files": 2,
+            "retention_days": 7,
+            "proc_guard": True,
+        }
+        state_dir().mkdir(parents=True, exist_ok=True)
+        (state_dir() / _SIDECAR).write_text(json.dumps(legacy))
+        status = read_retention_status()
+        assert status is not None
+        assert status.removed_files == 2
+        assert status.unreadable_procs == 0

@@ -45,9 +45,7 @@ def _write_status(**overrides: object) -> AutoPruneStatus:
 
 
 def _patch_config(monkeypatch: pytest.MonkeyPatch, config: OrchestratorConfig) -> None:
-    monkeypatch.setattr(
-        "cw.doctor.sessions_auto_prune.load_orchestrator_config", lambda: config
-    )
+    monkeypatch.setattr("cw.doctor._shared.load_orchestrator_config", lambda: config)
 
 
 class TestCheckSessionsAutoPrune:
@@ -140,9 +138,7 @@ class TestCheckSessionsAutoPrune:
             msg = "simulated bad orchestrator.yaml"
             raise ConfigValidationError(msg)
 
-        monkeypatch.setattr(
-            "cw.doctor.sessions_auto_prune.load_orchestrator_config", _raise
-        )
+        monkeypatch.setattr("cw.doctor._shared.load_orchestrator_config", _raise)
 
         result = _check_sessions_auto_prune()
 

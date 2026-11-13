@@ -2086,8 +2086,9 @@ def test_close_confirmed_dead_session_scope_miss_keeps_sentinel(
 
 
 class TestIsSessionDeadRosterCapture:
-    """#2550 M1: absence from a lockless roster capture is not proof of death
-    for a session spawned or resumed too recently for the capture to list it."""
+    """#2550: absence from a lockless roster capture is not proof of death
+    for a session spawned, resumed or bound too recently for the capture to
+    list it."""
 
     _CAPTURED = datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
     _OLD = _CAPTURED - timedelta(seconds=ROSTER_REGISTRATION_SLACK_SECONDS + 600)
@@ -2099,6 +2100,17 @@ class TestIsSessionDeadRosterCapture:
 
     def test_resumed_after_the_capture_is_not_dead(self) -> None:
         session = self._session(resumed_at=self._CAPTURED + timedelta(seconds=1))
+
+        assert not _is_session_dead(
+            session, {"other"}, roster_captured_at=self._CAPTURED
+        )
+
+    def test_bound_after_the_capture_is_not_dead(self) -> None:
+        """#3339: a fresh spawn's ``surface_bound_at`` after the capture spares
+        it even though ``started_at`` predates the slack."""
+        session = self._session(resumed_at=None).model_copy(
+            update={"surface_bound_at": self._CAPTURED + timedelta(seconds=1)}
+        )
 
         assert not _is_session_dead(
             session, {"other"}, roster_captured_at=self._CAPTURED

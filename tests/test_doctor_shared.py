@@ -15,9 +15,18 @@ import dataclasses
 from typing import TYPE_CHECKING
 
 import pytest
+import yaml
+from pydantic import ValidationError
 
 from cw.doctor import ReapScope as ReexportedReapScope
-from cw.doctor._shared import ReapScope, SettingsReadFailure, _read_settings
+from cw.doctor._shared import (
+    ReapScope,
+    SettingsReadFailure,
+    _read_settings,
+    orchestrator_config_or_default,
+)
+from cw.exceptions import ConfigValidationError, CwError
+from cw.models import OrchestratorConfig
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -128,3 +137,34 @@ class TestReapScope:
 
     def test_is_reexported_from_the_package(self) -> None:
         assert ReexportedReapScope is ReapScope
+
+
+class TestOrchestratorConfigOrDefault:
+    """The one degrade-to-defaults loader every doctor check shares (#3162)."""
+
+    def test_returns_the_loaded_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        cfg = OrchestratorConfig(inbox_line_count_warn=7)
+        monkeypatch.setattr("cw.doctor._shared.load_orchestrator_config", lambda: cfg)
+
+        assert orchestrator_config_or_default() is cfg
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            OSError("unreadable"),
+            yaml.YAMLError("bad yaml"),
+            CwError("cw failure"),
+            ConfigValidationError("bad config"),
+            ValidationError.from_exception_data("OrchestratorConfig", []),
+        ],
+        ids=["oserror", "yaml", "cwerror", "config-validation", "pydantic"],
+    )
+    def test_degrades_to_defaults_on_load_failure(
+        self, monkeypatch: pytest.MonkeyPatch, error: Exception
+    ) -> None:
+        def _raise() -> OrchestratorConfig:
+            raise error
+
+        monkeypatch.setattr("cw.doctor._shared.load_orchestrator_config", _raise)
+
+        assert orchestrator_config_or_default() == OrchestratorConfig()

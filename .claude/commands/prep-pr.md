@@ -284,7 +284,18 @@ Spawn parallel subagents via the Task tool (`subagent_type: "general-purpose"`),
 <!-- el: prep-pr.run-quality-gates -->
 ## Step 7: Run Quality Gates
 
-Run each gate detected in Step 2, in order.
+**Headless only: CI-evidence deferral (#3618).** Interactive Step 7 skips this paragraph and runs every gate. In a headless run, first ask which detected gates the base branch's committed `quality_gates.ci_evidence` maps to CI checks; those gates are not run here, because the PR does not exist yet and CI will run them on it. Resolve the finalize script in the same Bash call as every use of it (shell state does not persist between Bash calls; the probe order mirrors Step 2 and finalize's self-heal fence):
+
+```bash
+FINALIZE=""
+for candidate in .claude/scripts/prep_pr_finalize.py scripts/prep_pr_finalize.py "$HOME/.claude/scripts/prep_pr_finalize.py"; do
+  if [ -f "$candidate" ]; then FINALIZE="$candidate"; break; fi
+done
+```
+
+Then run `"$PREP_PR_STATE" ci-deferral --base <base>`. If it exits non-zero, is not JSON, or lacks `deferred`, run every gate locally and record friction `ci_evidence_unavailable: ci-deferral <cause>`. If `deferred` is non-empty, require `$FINALIZE` set and `grep -q 'ci-hold' "$FINALIZE"` (a stale copy lacking it is not usable), then run `"$FINALIZE" ci-hold set --base <base> --gates-json '<the deferred array verbatim>'` FIRST. If that fails, or `$FINALIZE` cannot be used, run every gate locally and record `ci_evidence_unavailable: ci-hold set <cause>`. On success, skip each deferred gate, log `create_path_gate_ci_deferred: <gate> via <checks>` (checks joined with `, `), and run the `local` gates through the loop below. Every "run every gate locally" fallback above first makes one best-effort `"$FINALIZE" ci-hold release --repo-path "$(git rev-parse --show-toplevel)"` (only when `$FINALIZE` supports `ci-hold`; ignore its failure, but record `ci_evidence_unavailable: ci-hold release <cause>`), so a hold left by an earlier attempt cannot park a PR whose gates all ran locally. Commits made later in the same run (Step 7 autofix, a fix-loop commit, Step 8 "remaining changes", ship-it's changelog commit) leave the hold `active` by ancestry, so this paragraph adds no second `ci-hold set` before Step 8; a loop back to Step 7 re-runs `ci-deferral` and `ci-hold set` at the new HEAD. If `deferred` is empty and `$FINALIZE` supports `ci-hold`, run `"$FINALIZE" ci-hold set --base <base> --gates-json '[]'` to clear any stale hold for this head. A deferred gate leaves the PR unarmed: ship-it Step 4 sees the hold through `check-automerge-allowed` and leaves the PR open, and finalize parks `awaiting_ci_evidence`.
+
+Run each gate detected in Step 2, in order, except the gates deferred above.
 
 For each gate, first check whether it already passed at this exact commit:
 ```bash
@@ -470,7 +481,7 @@ Output is the canonical Ship Summary (markdown). For programmatic callers (e.g. 
 - Diagnose: most failures mean a /ship-it sub-step was skipped (no push, no PR, no auto-merge). Re-run the missing step rather than papering over it.
 <!-- el-begin: prep-pr.exception-automerge-enabled -->
 <!-- el: prep-pr.exception-automerge-enabled -->
-- **Exception — `automerge-enabled`:** if this check shows as optional (`○`) rather than required (`✗`) in the Ship Summary, `.claude/project-config.yaml` has declared `pr.auto_merge: false` and the script already downgraded it — this is the repo's deliberate, permanent state, not a skipped step. Do NOT run `gh pr merge --auto` in response to it: on a repo without branch protection this command merges immediately (unreviewed, without waiting for CI) rather than arming a pending merge (#2046). Only retry sub-steps behind checks still marked required (`✗`).
+- **Exception — `automerge-enabled`:** if this check shows as optional (`○`) rather than required (`✗`) in the Ship Summary, `.claude/project-config.yaml` has declared `pr.auto_merge: false` and the script already downgraded it — this is the repo's deliberate, permanent state, not a skipped step. Do NOT run `gh pr merge --auto` in response to it: on a repo without branch protection this command merges immediately (unreviewed, without waiting for CI) rather than arming a pending merge (#2046). Only retry sub-steps behind checks still marked required (`✗`). A `○` there can also mean an active CI-evidence hold (a headless Step 7 deferred a mapped gate to CI, #3618; the PR is deliberately left unarmed): do NOT run `gh pr merge --auto` then either.
 - **Headless:** after attempting the missing sub-step once, if `verify` still
   exits non-zero, emit a `HEADLESS BLOCK` (`gate: "Step 9 finalize verify"`,
   `details:` the verbatim failed checks). Never emit a Ship Summary that claims

@@ -63,7 +63,6 @@ its audit events and pages after that lock releases, except NO_OWNER's
 from __future__ import annotations
 
 import logging
-from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -95,6 +94,7 @@ from cw.reconcile.unowned_running_acts import (
     non_native_backend_names,
     read_context_tie,
     run_no_owner_acts,
+    running_siblings,
     worker_homed,
 )
 from cw.reconcile.unowned_running_text import (
@@ -184,7 +184,6 @@ class _TickView:
     homes: frozenset[WorkerHome] | None
     sessions_by_id: dict[str, Session]
     bound_session_ids: set[str]
-    running: Counter[tuple[str, str]]
 
 
 def _is_aware(value: datetime) -> bool:
@@ -287,25 +286,23 @@ def _duplicate_evidence(
         row.ticket_id,
     )
     other = min(
-        (
-            t.created_at
-            for t in view.store.tasks
-            if t is not row
-            and t.status is QueueItemStatus.RUNNING
-            and t.client == row.client
-            and t.ticket_id == row.ticket_id
-        ),
+        (t.created_at for t in running_siblings(view.store, row)),
         default=row.created_at,
     )
     return _Evidence(CAUSE_DUPLICATE, {**facts, "other_created": other.isoformat()})
+
+
+def _claim_facts(row: TicketTask, worktree: Path) -> dict[str, str]:
+    """The fact seed every evidence and signal text starts from."""
+    return {"client": row.client, "ticket": row.ticket_id, "wt": str(worktree)}
 
 
 def _classify_unbound(
     row: TicketTask, *, worktree: Path, view: _TickView
 ) -> UnownedCandidate | _Evidence | ContextTie:
     """Adoption, a specific blocking reason, or the no-tie context state."""
-    facts = {"client": row.client, "ticket": row.ticket_id, "wt": str(worktree)}
-    if view.running[(row.client, row.ticket_id)] > 1:
+    facts = _claim_facts(row, worktree)
+    if running_siblings(view.store, row):
         return _duplicate_evidence(row, view=view, facts=facts)
     tie = read_context_tie(worktree, row)
     if tie.state == CONTEXT_UNREADABLE:
@@ -363,7 +360,7 @@ def _no_tie_outcome(
     homes = view.homes
     if homes is None:
         return None
-    facts = {"client": row.client, "ticket": row.ticket_id, "wt": str(worktree)}
+    facts = _claim_facts(row, worktree)
     names = non_native_backend_names(client)
     if names:
         return _signal(
@@ -466,11 +463,6 @@ def detect_unowned_running(
         bound_session_ids={
             t.session_id for t in store.tasks if t.session_id is not None
         },
-        running=Counter(
-            (t.client, t.ticket_id)
-            for t in store.tasks
-            if t.status is QueueItemStatus.RUNNING
-        ),
     )
     for row, client in rows:
         _route_row(row, client=client, view=view, found=found)
@@ -493,17 +485,9 @@ def _still_adoptable(
     ):
         return False
     return not any(
-        other is not row
-        and (
-            other.session_id == candidate.session_id
-            or (
-                other.status is QueueItemStatus.RUNNING
-                and other.client == row.client
-                and other.ticket_id == row.ticket_id
-            )
-        )
+        other is not row and other.session_id == candidate.session_id
         for other in store.tasks
-    )
+    ) and not running_siblings(store, row)
 
 
 def _emit_adopted(candidate: UnownedCandidate) -> None:

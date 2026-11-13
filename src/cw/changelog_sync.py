@@ -15,8 +15,8 @@ not a plain commit on the old merge-base: the merge makes main an ancestor,
 so the squash diff is just the bullets under ``[Unreleased]``.
 
 It never fetches, never rebases and never pushes. Anything it cannot do
-safely (a rebuild refusal, a conflict, a dirty tree, a git failure) writes
-nothing; a merge it started and could not finish is aborted.
+safely (a rebuild refusal, a conflict, a dirty tree, an in-progress merge, a git
+failure) writes nothing; a merge it started and could not finish is aborted.
 
 CHANGELOG blobs are read byte-exact (``text=False``, decoded as UTF-8), the
 ``repair_git._show_blob`` discipline: text mode would translate CRLF and bare
@@ -306,28 +306,27 @@ def _merge_in_progress(worktree: Path, timeout: float) -> bool:
     raise GitFailedError(failure_detail("rev-parse", result))
 
 
+def _abort_merge(worktree: Path, detail: str, timeout: float) -> str:
+    """Run ``git merge --abort``; *detail* grows a note when the abort fails."""
+    try:
+        _checked(worktree, ["merge", "--abort"], timeout)
+    except GitFailedError as exc:
+        return (
+            f"{detail}; git merge --abort failed ({exc}): the worktree is"
+            " mid-merge, run `git merge --abort` by hand"
+        )
+    return detail
+
+
 def _abort(worktree: Path, move: _Move, detail: str, timeout: float) -> ChangelogSync:
     """Abort any merge this call started; the answer is ``unavailable``."""
     try:
-        merge_in_progress = _merge_in_progress(worktree, timeout)
+        in_progress = _merge_in_progress(worktree, timeout)
     except GitFailedError as exc:
         detail = f"{detail}; could not determine merge state ({exc})"
-        try:
-            _checked(worktree, ["merge", "--abort"], timeout)
-        except GitFailedError as abort_exc:
-            detail = (
-                f"{detail}; git merge --abort failed ({abort_exc}): the worktree is"
-                " mid-merge, run `git merge --abort` by hand"
-            )
-    else:
-        if merge_in_progress:
-            try:
-                _checked(worktree, ["merge", "--abort"], timeout)
-            except GitFailedError as exc:
-                detail = (
-                    f"{detail}; git merge --abort failed ({exc}): the worktree is"
-                    " mid-merge, run `git merge --abort` by hand"
-                )
+        in_progress = True  # abort anyway: an unreadable state may be mid-merge
+    if in_progress:
+        detail = _abort_merge(worktree, detail, timeout)
     return _answer(SyncState.UNAVAILABLE, move.base_sha, move.head_sha, detail=detail)
 
 
@@ -395,7 +394,9 @@ def sync_changelog(
     ``origin/<base>`` has it (or either side lacks a ``CHANGELOG.md``);
     ``moved`` after one merge commit; ``conflict`` when ``origin/<base>``
     does not merge cleanly; ``refused`` for a rebuild refusal, a branch that
-    already contains ``origin/<base>``, or uncommitted tracked changes;
+    already contains ``origin/<base>``, an in-progress merge, or uncommitted
+    tracked changes (the ancestor refusal carries disposition
+    ``changelog_released_section_touched``; the in-progress one carries none);
     ``unavailable`` for a git failure. Never raises and never fetches; every
     git call is bounded by *timeout* (the merge and commit by
     :data:`COMMIT_TIMEOUT_SECONDS`).

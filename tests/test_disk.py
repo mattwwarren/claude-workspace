@@ -11,12 +11,15 @@ import pytest
 from cw.disk import (
     DiskUsage,
     InodeUsage,
+    MountAssessment,
     _nearest_existing_ancestor,
+    assess_mount,
     check_disk_usage,
     check_inode_usage,
     effective_min_free_inodes,
     inodes_exhausted,
     same_filesystem,
+    space_exhausted,
 )
 
 
@@ -163,6 +166,79 @@ class TestInodeFloor:
             )
             is exhausted
         )
+
+
+class TestSpaceExhausted:
+    """``space_exhausted`` is the GB sibling of ``inodes_exhausted`` (#3179)."""
+
+    @pytest.mark.parametrize(
+        ("free_gb", "exhausted"),
+        [(4.99, True), (5.0, False), (5.01, False)],
+    )
+    def test_at_below_and_above_the_floor(
+        self, free_gb: float, exhausted: bool
+    ) -> None:
+        usage = DiskUsage(total_gb=500.0, free_gb=free_gb)
+        assert space_exhausted(usage, min_free_gb=5.0) is exhausted
+
+
+class TestAssessMount:
+    """``assess_mount`` is the doctor-side combined space + inode predicate (#3179)."""
+
+    @pytest.mark.parametrize(
+        ("disk", "inodes", "expected"),
+        [
+            pytest.param(
+                DiskUsage(total_gb=500.0, free_gb=250.0),
+                InodeUsage(total_inodes=1_000_000, free_inodes=900_000),
+                MountAssessment(
+                    space_short=False, inode_short=False, inode_floor=50_000
+                ),
+                id="roomy",
+            ),
+            pytest.param(
+                DiskUsage(total_gb=500.0, free_gb=1.0),
+                InodeUsage(total_inodes=1_000_000, free_inodes=900_000),
+                MountAssessment(
+                    space_short=True, inode_short=False, inode_floor=50_000
+                ),
+                id="space-short-only",
+            ),
+            pytest.param(
+                DiskUsage(total_gb=500.0, free_gb=250.0),
+                InodeUsage(total_inodes=1_000_000, free_inodes=10_000),
+                MountAssessment(
+                    space_short=False, inode_short=True, inode_floor=50_000
+                ),
+                id="inodes-short-only",
+            ),
+            pytest.param(
+                DiskUsage(total_gb=500.0, free_gb=1.0),
+                InodeUsage(total_inodes=50_000_000, free_inodes=2_000_000),
+                MountAssessment(
+                    space_short=True, inode_short=True, inode_floor=2_500_000
+                ),
+                id="both-short-fraction-floor",
+            ),
+            pytest.param(
+                DiskUsage(total_gb=500.0, free_gb=250.0),
+                InodeUsage(total_inodes=0, free_inodes=0),
+                MountAssessment(space_short=False, inode_short=False, inode_floor=None),
+                id="no-fixed-inode-budget",
+            ),
+        ],
+    )
+    def test_assessment(
+        self, disk: DiskUsage, inodes: InodeUsage, expected: MountAssessment
+    ) -> None:
+        got = assess_mount(
+            disk,
+            inodes,
+            min_free_gb=5.0,
+            min_free_inodes=50_000,
+            min_free_inode_fraction=0.05,
+        )
+        assert got == expected
 
 
 class TestSameFilesystem:

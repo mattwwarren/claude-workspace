@@ -1,7 +1,11 @@
 """The dispatch loop's per-client usage-limit back-off windows (#2999).
 
-Extracted from ``cw.dispatch.loop``, which re-imports all three helpers.
-They consult no name the suite patches on ``cw.dispatch.loop``; the
+Extracted from ``cw.dispatch.loop``. The module holds four helpers; ``loop``
+imports back the three it calls (``_arm_and_persist_usage_limit_window``,
+``_merge_persisted_usage_limited_until`` and ``_usage_limit_window_is_active``),
+and ``_arm_usage_limit_windows`` is called only by
+``_arm_and_persist_usage_limit_window``. They consult no name the suite
+patches on ``cw.dispatch.loop``; the
 ``dispatch.usage_limit_cleared`` emit and its transition handler read the
 patched ``record_event`` and stay in ``loop``. Not to be confused with
 ``cw.dispatch.gating.usage_limit``, the spawn-time gate. Logs as

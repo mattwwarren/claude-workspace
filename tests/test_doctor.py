@@ -9099,7 +9099,7 @@ class TestCheckInboxSize:
 
         (tmp_events_dir / "inbox.jsonl").write_text('{"a": 1}\n')
         monkeypatch.setattr(
-            "cw.doctor.config_checks.load_orchestrator_config",
+            "cw.doctor._shared.load_orchestrator_config",
             lambda: OrchestratorConfig(
                 inbox_size_warn_bytes=1_000_000, inbox_line_count_warn=1_000
             ),
@@ -9116,7 +9116,7 @@ class TestCheckInboxSize:
 
         (tmp_events_dir / "inbox.jsonl").write_text('{"a": 1}\n' * 5)
         monkeypatch.setattr(
-            "cw.doctor.config_checks.load_orchestrator_config",
+            "cw.doctor._shared.load_orchestrator_config",
             lambda: OrchestratorConfig(
                 inbox_size_warn_bytes=1, inbox_line_count_warn=1_000
             ),
@@ -9134,7 +9134,7 @@ class TestCheckInboxSize:
 
         (tmp_events_dir / "inbox.jsonl").write_text('{"a": 1}\n' * 5)
         monkeypatch.setattr(
-            "cw.doctor.config_checks.load_orchestrator_config",
+            "cw.doctor._shared.load_orchestrator_config",
             lambda: OrchestratorConfig(
                 inbox_size_warn_bytes=1_000_000, inbox_line_count_warn=2
             ),
@@ -9214,7 +9214,7 @@ class TestCheckInboxSize:
             raise ConfigValidationError(error_msg)
 
         monkeypatch.setattr(
-            "cw.doctor.config_checks.load_orchestrator_config",
+            "cw.doctor._shared.load_orchestrator_config",
             fake_load_orchestrator_config,
         )
         result = _check_inbox_size()
@@ -9228,11 +9228,11 @@ class TestCheckInboxSize:
 
 
 def _patch_sessions_threshold(monkeypatch: pytest.MonkeyPatch, warn_bytes: int) -> None:
-    """Point config_checks.load_orchestrator_config at a given sessions threshold."""
+    """Point _shared.load_orchestrator_config at a given sessions threshold."""
     from cw.models import OrchestratorConfig
 
     cfg = OrchestratorConfig(sessions_size_warn_bytes=warn_bytes)
-    monkeypatch.setattr("cw.doctor.config_checks.load_orchestrator_config", lambda: cfg)
+    monkeypatch.setattr("cw.doctor._shared.load_orchestrator_config", lambda: cfg)
 
 
 class _UnstatablePath:
@@ -9347,7 +9347,7 @@ class TestCheckSessionsSize:
             raise ConfigValidationError(error_msg)
 
         monkeypatch.setattr(
-            "cw.doctor.config_checks.load_orchestrator_config",
+            "cw.doctor._shared.load_orchestrator_config",
             fake_load_orchestrator_config,
         )
         result = _check_sessions_size()
@@ -10137,7 +10137,7 @@ class TestCheckWorkerTmpPressure:
         def _raise() -> object:
             raise ConfigValidationError(config_error)
 
-        monkeypatch.setattr("cw.doctor.config_checks.load_orchestrator_config", _raise)
+        monkeypatch.setattr("cw.doctor._shared.load_orchestrator_config", _raise)
 
         (result,) = _check_worker_tmp_pressure(self._clients(tmp_path))
 

@@ -3833,6 +3833,32 @@ class TestFindLiveSessionsForTicket:
 
         assert find_live_sessions_for_ticket(state, "T-1", "client-a", set()) == []
 
+    @pytest.mark.parametrize(
+        ("captured_offset", "found"),
+        [(timedelta(seconds=1), True), (None, False)],
+        ids=["may-postdate-the-capture", "no-capture-time"],
+    )
+    def test_session_absent_from_roster_but_may_postdate_the_capture(
+        self, captured_offset: timedelta | None, found: bool
+    ) -> None:
+        """#3334: with a capture time, a ref born after it is admitted even
+        though the roster does not list it; ``None`` stays roster-only."""
+        from cw.reconcile import find_live_sessions_for_ticket
+
+        sess = _make_daemon_session(
+            surface_ref=self.LIVE_REF, started_at=self.STARTED
+        ).model_copy(update={"surface_bound_at": self.STARTED})
+        state = CwState(sessions=[sess])
+        captured_at = (
+            None if captured_offset is None else self.STARTED - captured_offset
+        )
+
+        live = find_live_sessions_for_ticket(
+            state, "T-1", "client-a", set(), roster_captured_at=captured_at
+        )
+
+        assert live == ([sess] if found else [])
+
     def test_stray_live_session_found_without_any_task_binding(
         self, tmp_path: Path
     ) -> None:

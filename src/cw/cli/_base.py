@@ -25,7 +25,7 @@ import click
 from click.shell_completion import CompletionItem
 
 from cw import __version__
-from cw._util import format_compact_age
+from cw._util import NO_CLIENTS_MSG, format_compact_age
 from cw.cli._lazy import LAZY_COMMANDS, LazyGroup
 from cw.exceptions import CwError
 
@@ -192,8 +192,7 @@ def _resolve_client(client_name: str | None) -> ClientConfig:
     if client_name:
         return get_client(client_name)
     if not clients:
-        msg = "No clients configured. Add one to ~/.config/cw/clients.yaml."
-        raise CwError(msg)
+        raise CwError(NO_CLIENTS_MSG)
     first = next(iter(clients.values()))
     click.echo(f"warning: no --client given; defaulting to {first.name}", err=True)
     return first

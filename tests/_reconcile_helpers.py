@@ -10,6 +10,7 @@ each helper.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -787,6 +788,30 @@ def _write_salvage_transcript(
     }
     path.write_text(prefix + json.dumps(record) + "\n")
     return path
+
+
+# A sentinel frame whose body does not parse as JSON, the WARNING the parser
+# logs for it, and the assistant record carrying it (for ``extra_records``).
+# Shared by every reconcile test of the #1394 ``warned_blocks`` dedup (#3453).
+_MALFORMED_SENTINEL_BLOCK = "<<<AUTO_DEV_RESULT\n{oops\nAUTO_DEV_RESULT>>>"
+_MALFORMED_PARSE_WARNING = "did not parse as JSON"
+_MALFORMED_SENTINEL_RECORD: dict[str, Any] = {
+    "type": "assistant",
+    "message": {
+        "role": "assistant",
+        "content": [{"type": "text", "text": _MALFORMED_SENTINEL_BLOCK}],
+    },
+}
+
+
+def _malformed_parse_warning_count(caplog: pytest.LogCaptureFixture) -> int:
+    """Count the WARNING records the malformed-block parse logged."""
+    return sum(
+        1
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and _MALFORMED_PARSE_WARNING in record.message
+    )
 
 
 def _write_idle_transcript_with_text(

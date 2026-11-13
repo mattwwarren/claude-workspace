@@ -594,6 +594,140 @@ bare retry would time the same gate out again.
 
 ---
 
+<!-- el: finalize.sentinel-awaiting-ci-evidence -->
+## Step 4c / 4c.6 CI-evidence park: the `awaiting_ci_evidence` sentinel (#3618)
+
+Reached from two places in the core doc, both headless: the Step 4c
+create-path check (a deferred gate left a CI-evidence hold on the worktree) and
+Step 4c.6 (the reuse pass found a mapped check pending, missing or red, or
+could not read or release the hold). The PR exists, cw did not arm auto-merge,
+and no mapped gate was run locally. The decision is `prep_pr_state.py`'s
+(`ci-deferral`, `ci-reuse-plan`); the hold is `prep_pr_finalize.py`'s
+(`ci-hold`); this section only builds the sentinel.
+
+**Sentinel template, `awaiting_ci_evidence` blocker (flavor `deferred` shown):**
+
+```json
+{
+  "schema_version": 4,
+  "ticket_id": "<ticket-id>",
+  "status": "blocked",
+  "stage_reached": "stage5_post_create",
+  "scope": {
+    "tier": "<resolved scope.tier — see 'Resolve carried-through context' above>",
+    "files": <count>,
+    "lines_estimate": <count>,
+    "lines_actual": <count>,
+    "forbidden_touched": <resolved forbidden_touched — see 'Resolve carried-through context' above>
+  },
+  "plan_source": "<resolved plan_source — see 'Resolve carried-through context' above>",
+  "branch": "<branch-name>",
+  "worktree_path": "<session worktree path>",
+  "pr": null,
+  "pr_info": {
+    "number": <pr_number>,
+    "url": "<pr_url>",
+    "auto_merge": false,
+    "base": "<base_ref>"
+  },
+  "review": {"must_fix_initial": <count>, "should_fix": <count>, "fix_cycles_used": <count>, "deferred": <count>},
+  "health": {
+    "lowest_agent_confidence": "HIGH",
+    "any_incomplete_risk": false,
+    "shortcuts": [],
+    "recommendation": "PROCEED",
+    "downgrade_applied": false,
+    "fix_loop_escalated": false
+  },
+  "blocker": {
+    "stage": "stage5_post_create",
+    "reason": "awaiting_ci_evidence",
+    "details": "ci_evidence_deferred: PR #<pr_number> (<pr_url>) at head <sha>: gate <g> mapped to check(s) <checks> deferred to CI and not run locally. cw did not arm auto-merge.",
+    "exception_type": null,
+    "message": "mapped CI checks have not all finished green at the PR head; cw did not arm auto-merge",
+    "recovery_hint": "Orchestrator: once the mapped CI checks have finished, run cw dev-queue requeue <ticket> -c <client>; finalize arms only if every mapped check is green at the PR head.",
+    "retry_eligible": true,
+    "retry_delay_seconds": null
+  },
+  "next_actions": []
+}
+```
+
+**Flavors.** `<sha>` is the 40-hex PR head, `<checks>` are joined with `, `,
+`<n>` and `<url>` are the PR number and URL. Only `blocker.details`,
+`blocker.message`, `blocker.recovery_hint` and `blocker.retry_eligible` differ.
+Every `details` string is copied verbatim:
+
+- `deferred` (Step 4c create-path check; several deferred gates are joined with
+  `; gate <g2> mapped to check(s) <checks2>`, and `unknown` stands for a
+  `corrupt` marker). `details`: `ci_evidence_deferred: PR #<n> (<url>) at head
+  <sha>: gate <g> mapped to check(s) <checks> deferred to CI and not run
+  locally[; gate <g2> mapped to check(s) <checks2> ...]. cw did not arm
+  auto-merge.` `retry_eligible: true`. `message` and `recovery_hint` as in the
+  template.
+- `pending` (Step 4c.6, `park.flavor`; `<check_state>` is `missing`, `queued`,
+  `in_progress` or `pending`). `details`: `ci_evidence_pending: PR #<n> (<url>)
+  at head <sha>: gate <g> mapped to check <c> is <check_state>; cw did not arm
+  auto-merge and did not run the gate locally.` `retry_eligible: true`.
+  `message` and `recovery_hint` as for `deferred`.
+- `red` (Step 4c.6; `<check_state>` is the lower-cased `conclusion` or commit
+  status `state`, and the url is `park.failed_url`). `details`:
+  `ci_evidence_red: PR #<n> (<url>) at head <sha>: gate <g> mapped to check <c>
+  concluded <check_state> (<failed_url or "no url">). This is a failing CI
+  check, not a gate failure; cw did not arm auto-merge and did not run the gate
+  locally.` `message`: `a mapped CI check is red at the PR head (a CI failure,
+  not a gate failure); cw did not arm auto-merge`. `recovery_hint`:
+  `Orchestrator: a mapped CI check failed (not a gate failure). Follow the
+  cw-orchestration ci_failing parked-row route: cw dev-queue requeue <ticket>
+  -c <client> --stage impl --regress, adding --review-feedback-file <file> when
+  you hold head-pinned evidence of the failure.` `retry_eligible` is `false`
+  for `red` (a hint only; routing never reads it).
+- `hold_error` (either place: `ci-hold status` or `ci-hold release` failed).
+  `details`: `ci_evidence_hold_error: PR #<n> (<url>) at head <sha>: ci-hold
+  <status|release> failed (<cause>). cw did not arm auto-merge.`
+  `retry_eligible: true`. `message`: `the CI-evidence hold could not be read or
+  released; cw did not arm auto-merge`. `recovery_hint`: `Orchestrator: fix the
+  cause in details (usually a stale prep_pr_finalize.py copy), then cw dev-queue
+  requeue <ticket> -c <client>.`
+
+The wording is "cw did not arm" because a project ship-it that bypasses the
+arm seam, or a human, could have armed the PR: the claim is about cw's own
+action and needs no read-back.
+
+**Field sources:** the same as the `gate_timeout` section above (`pr_info` from
+the Pre-Stage Detector Guard or the verify JSON and the read-only `baseRefName`
+call, the rest from "Resolve carried-through context"). Emit with
+`printf '%s' "$JSON" | cw result emit -` and frame it per the Stage 4+5
+Completion section, as above.
+
+**Escapes for a stuck park.** A mapped check that never reports (renamed or
+path-filtered) parks every requeue, because there is no timer fallback
+(ADR-0014). Either correct or remove its `quality_gates.ci_evidence` entry on
+the base branch (the map is read from the worktree's `origin/<base>` ref, so it
+must have fetched the change), or run the gate by hand and merge the PR
+yourself, then `cw dev-queue remove` the row. `pr.auto_merge: false` is not
+offered: the arm seam reads the worktree's own `.claude/project-config.yaml`,
+so it would need a branch commit and change the head. To undo the hold by hand
+without a requeue, run `"$FINALIZE" ci-hold release --repo-path <worktree>`.
+
+**Why not `agent_block`.** Nothing failed: the gates were deferred to CI and
+the PR is waiting on it, and a fresh IMPL session cannot make a CI check finish.
+`awaiting_ci_evidence` routes to the generic park: the row parks
+`BLOCKED_ON_USER` at FINALIZE, is never regressed to IMPL, charges no attempt,
+and gets `pr_url` stamped from `pr_info`. Red is a CI failure, not a gate
+failure; the orchestrator regresses it by hand through the documented
+parked-row route.
+
+**Do not add `awaiting_ci_evidence` to `FINALIZE_REGRESS_BLOCKER_REASONS`**
+(`src/cw/auto_dev_result/schema/_vocab.py`, which stays `{"agent_block"}`) or
+to `OPERATOR_UNAVAILABLE_BLOCKER_REASONS`.
+
+**Producer note:** `awaiting_ci_evidence` is an open-enum addition to
+`blocker.reason` (headless-contract.md §4.2): no `schema_version` bump and no
+parser change.
+
+---
+
 ## Step 4c.2: the `auto` permission-mode limitation, and the no-`/ship-it` block
 
 <!-- el: finalize.permission-mode -->

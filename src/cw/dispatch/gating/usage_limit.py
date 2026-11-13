@@ -119,6 +119,17 @@ def _reconcile_usage_limited(warned_blocks: set[str] | None = None) -> bool:
     :class:`~cw.exceptions.SessionsLockTimeoutError` (#2491) is the one
     exception NOT swallowed: it propagates so ``dispatch_tick`` skips the tick
     (see ``dispatch/tick.py`` for the watchdog semantics of a skipped tick).
+
+    *warned_blocks* is the dispatch loop's process-lifetime sentinel
+    parse-warning dedup set (#1394), so a malformed sentinel block warns once
+    per run rather than once per tick. It is forwarded by identity to
+    ``reconcile(warned_blocks=...)``, so every sentinel parse seam in the tick
+    writes into the same set. ``None`` means ``dispatch_tick`` (the only
+    caller) ran without a loop-owned set, as one-shot and test ticks do;
+    ``reconcile()`` then does no dedup. Before reconciling, the set is passed
+    through :func:`_bound_warned_blocks`, which clears it in place once it
+    exceeds :data:`WARNED_BLOCKS_MAX_KEYS`, so each still-live malformed block
+    re-warns once after a clear.
     """
     _bound_warned_blocks(warned_blocks)
     reconcile_report = None

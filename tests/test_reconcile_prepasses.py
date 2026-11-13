@@ -84,12 +84,14 @@ from tests._dirty_check_helpers import (
     unavailable_records,
 )
 from tests._reconcile_helpers import (
+    _MALFORMED_SENTINEL_RECORD,
     SCOPE_GUARD_FILES,
     SCOPE_GUARD_LINES,
     _attention_events,
     _auto_config,
     _inflate_scope,
     _make_stale_base_repo,
+    _malformed_parse_warning_count,
     _mk_headless_daemon_session,
     _mk_session,
     _shipped_salvage_payload,
@@ -952,21 +954,6 @@ class TestSalvageScopePrePass:
         assert "reason=missing" in caplog.text
 
 
-_MALFORMED_WARNING = "did not parse as JSON"
-_MALFORMED_RECORD: dict[str, Any] = {
-    "type": "assistant",
-    "message": {
-        "role": "assistant",
-        "content": [
-            {
-                "type": "text",
-                "text": "<<<AUTO_DEV_RESULT\n{oops\nAUTO_DEV_RESULT>>>",
-            }
-        ],
-    },
-}
-
-
 class TestWarnedBlocksThreading:
     """#1394: ``reconcile(warned_blocks=...)`` reaches every sentinel parse seam.
 
@@ -1080,7 +1067,7 @@ class TestWarnedBlocksThreading:
             "claude-uuid-scope",
             payload,
             surface_ref="gone-ref",
-            extra_records=[_MALFORMED_RECORD],
+            extra_records=[_MALFORMED_SENTINEL_RECORD],
         )
         state0 = load_state()
         queue0 = load_dev_queue()
@@ -1090,15 +1077,6 @@ class TestWarnedBlocksThreading:
             save_dev_queue(queue0)
 
         return _reseed
-
-    @staticmethod
-    def _malformed_count(caplog: pytest.LogCaptureFixture) -> int:
-        return sum(
-            1
-            for record in caplog.records
-            if record.levelno == logging.WARNING
-            and _MALFORMED_WARNING in record.message
-        )
 
     def test_end_to_end_warns_once_across_ticks_and_parse_sites(
         self,
@@ -1124,7 +1102,7 @@ class TestWarnedBlocksThreading:
             reseed()
             reconcile(warned_blocks=warned)
 
-        assert self._malformed_count(caplog) == 1
+        assert _malformed_parse_warning_count(caplog) == 1
         assert len(warned) == 1
 
     def test_end_to_end_warns_repeatedly_without_the_set(
@@ -1148,7 +1126,7 @@ class TestWarnedBlocksThreading:
             reseed()
             reconcile()
 
-        assert self._malformed_count(caplog) > 1
+        assert _malformed_parse_warning_count(caplog) > 1
 
 
 _SCOPE_STARTED_AT = datetime(2026, 1, 1, tzinfo=UTC)

@@ -44,17 +44,26 @@ _log = logging.getLogger(_LOGGER_NAME)
 # only, into the tick's ``cw.reconcile.roster_snapshot.RosterSnapshot``, whose
 # consumption bound has to leave room for a successful read:
 # ``CLAUDE_AGENTS_TIMEOUT_SECONDS < ROSTER_SNAPSHOT_MAX_AGE_SECONDS <
-# SPAWN_GRACE_SECONDS``. A spurious timeout is benign: the tick reads it as a
-# daemon outage and retries next tick.
+# SPAWN_GRACE_SECONDS``. A failed or timed-out read is treated as a daemon
+# outage (the tick stops before the roster-dependent sweeps) only while some
+# ACTIVE/IDLE session carries a ref (``_looks_like_daemon_outage``). On an idle
+# fleet the tick proceeds on an empty roster by documented design (#2550
+# Non-Goals, ADR-0019), and the concierge recipes' death test, which has no
+# live-status gate, then reads every absent ref as dead. So a spurious timeout
+# is benign only on a non-idle fleet; on an idle one the concierge acts as if
+# the roster were empty, bounded only by its own gates (opt-in
+# ``concierge_enabled``, the attempt ceiling), not by ``reap_policy`` (#3341).
 CLAUDE_AGENTS_TIMEOUT_SECONDS: float = 10.0
 
-# How long after its ``started_at`` / ``resumed_at`` a session's surface_ref
-# may still be absent from a roster capture (#2550, M1). The spawn and resume
-# paths record the session before their roster-registration poll
-# (``cw.spawn._ROSTER_POLL_TIMEOUT_SECS``, 10 s) completes, so a capture taken
-# up to that long after the stamp can predate the ref; plus 5 s for daemon
-# registration lag and clock skew. Not imported from ``cw.spawn`` (a heavy
-# import); ``tests/test_reconcile_roster_snapshot.py`` pins the relation.
+# How long before a roster capture a session's ref may be born and still be
+# absent from it (#2550). The resume paths stamp ``resumed_at`` and fresh
+# spawns stamp ``surface_bound_at`` (#3339) at the committing append, so the
+# slack no longer has to cover the spawn path's pre-append work. It keeps
+# headroom for the roster-registration poll
+# (``cw.spawn._ROSTER_POLL_TIMEOUT_SECS``, 10 s) that precedes a row's commit,
+# plus 5 s for daemon registration lag and clock skew. Not imported from
+# ``cw.spawn`` (a heavy import); ``tests/test_reconcile_roster_snapshot.py``
+# pins the relation.
 ROSTER_REGISTRATION_SLACK_SECONDS: float = 15.0
 
 
@@ -78,26 +87,30 @@ def _claude_agents_json() -> list[dict[str, object]]:
     return data if isinstance(data, list) else []
 
 
-def roster_registration_cutoff(roster_captured_at: datetime | None) -> datetime | None:
-    """The birth time at or after which a ref may postdate the capture (M1).
+def session_may_postdate_roster(
+    session: Session, roster_captured_at: datetime | None
+) -> bool:
+    """True when *session*'s ref may be newer than the roster capture.
 
-    ``None`` (no capture time known) means no session is spared. Shared by
-    :func:`compute_drift` and the concierge recipes' death test, so the two
-    cannot drift apart on the slack.
+    ``None`` (no capture time known) spares nothing. Otherwise the ref's
+    birth is the latest of ``started_at``, ``resumed_at`` (a resume rewrites
+    ``surface_ref`` without moving ``started_at``) and ``surface_bound_at``
+    (a fresh spawn appends its row only after ``spawn_bg`` returns, #3339);
+    a birth at or after ``roster_captured_at -
+    ROSTER_REGISTRATION_SLACK_SECONDS`` may postdate the capture. The one
+    predicate :func:`compute_drift`, the concierge recipes' death test, the
+    mid-turn usage-limit act and :func:`find_live_sessions_for_ticket` share,
+    so they cannot drift apart on the slack (#3340).
     """
     if roster_captured_at is None:
-        return None
-    return roster_captured_at - timedelta(seconds=ROSTER_REGISTRATION_SLACK_SECONDS)
-
-
-def _may_postdate_roster(session: Session, registration_cutoff: datetime) -> bool:
-    """True when *session*'s ref may be newer than the roster capture (M1).
-
-    A resume rewrites ``surface_ref`` and stamps ``resumed_at`` without moving
-    ``started_at``, so the later of the two is the ref's birth.
-    """
-    born = max(session.started_at, session.resumed_at or session.started_at)
-    return born >= registration_cutoff
+        return False
+    cutoff = roster_captured_at - timedelta(seconds=ROSTER_REGISTRATION_SLACK_SECONDS)
+    born = max(
+        session.started_at,
+        session.resumed_at or session.started_at,
+        session.surface_bound_at or session.started_at,
+    )
+    return born >= cutoff
 
 
 def compute_drift(
@@ -115,10 +128,8 @@ def compute_drift(
     - its ``started_at`` is older than :data:`SPAWN_GRACE_SECONDS` ago
       (newly-spawned sessions are still registering with the daemon), AND
     - when *roster_captured_at* is given (the capture time of the roster
-      *native_live* came from, #2550), the later of its ``started_at`` and
-      ``resumed_at`` is before ``roster_captured_at -
-      ROSTER_REGISTRATION_SLACK_SECONDS``: a ref born after that may postdate
-      the capture.
+      *native_live* came from, #2550), the ref may not postdate that capture
+      (:func:`session_may_postdate_roster`).
 
     *native_live* is the set of short session IDs reported by
     ``claude agents --json``; callers obtain it via :func:`_claude_agents_json`.
@@ -131,7 +142,6 @@ def compute_drift(
     that guard lives in :func:`reconcile`.
     """
     cutoff = (now or datetime.now(UTC)) - timedelta(seconds=SPAWN_GRACE_SECONDS)
-    registration_cutoff = roster_registration_cutoff(roster_captured_at)
     phantoms: list[str] = []
     for session in state.sessions:
         if session.status not in _LIVE_STATUSES:
@@ -142,9 +152,7 @@ def compute_drift(
             continue
         if session.started_at > cutoff:
             continue
-        if registration_cutoff is not None and _may_postdate_roster(
-            session, registration_cutoff
-        ):
+        if session_may_postdate_roster(session, roster_captured_at):
             continue
         if session.purpose is SessionPurpose.ORCHESTRATE:
             continue
@@ -354,7 +362,12 @@ def resolve_session_liveness_for_task(
 
 
 def find_live_sessions_for_ticket(
-    state: CwState, ticket_id: str, client: str, live_short_ids: set[str]
+    state: CwState,
+    ticket_id: str,
+    client: str,
+    live_short_ids: set[str],
+    *,
+    roster_captured_at: datetime | None = None,
 ) -> list[Session]:
     """Every session in *state* for (*ticket_id*, *client*) still live in the
     daemon roster (GitHub #2275).
@@ -363,6 +376,13 @@ def find_live_sessions_for_ticket(
     ``TicketTask.session_id`` -- derives the ticket id from each
     ``Session.name`` via :func:`ticket_id_for_session`, so a stray session no
     dev-queue row points at any more is still found.
+
+    *roster_captured_at* is the capture time of the roster *live_short_ids*
+    came from (#3334). When given, a native-surface session absent from it is
+    still returned if its ref may postdate the capture
+    (:func:`session_may_postdate_roster`); the caller can tell the two apart
+    by ``surface_ref in live_short_ids``. ``None`` (the default) keeps the
+    roster-only answer.
     """
     live: list[Session] = []
     for session in state.sessions:
@@ -371,7 +391,10 @@ def find_live_sessions_for_ticket(
         if ticket_id_for_session(session.name) != ticket_id:
             continue
         liveness = session_daemon_liveness(session, live_short_ids)
-        if liveness.native_surface and liveness.in_roster:
+        if liveness.native_surface and (
+            liveness.in_roster
+            or session_may_postdate_roster(session, roster_captured_at)
+        ):
             live.append(session)
     return live
 

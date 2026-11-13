@@ -20,6 +20,7 @@ import pytest
 from cw.changelog_sync import sync_changelog
 from tests._changelog_cut_helpers import ReleaseMovedRepo, cut_straddle_repo
 from tests._shared.cli_preflight import _write_project_config_yaml
+from tests._shared.git_repos import git_in
 from tests._tool_fakes import (
     ARM_VIEW_ARMED,
     ARM_VIEW_OPEN,
@@ -2496,23 +2497,124 @@ def _arm_args(repo: Path) -> object:
     )
 
 
+def _armed_after_merge_gh() -> Callable[[list[str]], subprocess.CompletedProcess[str]]:
+    """``gh`` answers: an OPEN un-armed view until a ``pr merge``, armed after."""
+    merged: list[bool] = []
+
+    def _handler(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            merged.append(True)
+            return _cp()
+        return _cp(stdout=ARM_VIEW_ARMED if merged else ARM_VIEW_OPEN)
+
+    return _handler
+
+
+def _refusal_result() -> object:
+    return _mod.ArmResult(
+        pr_number=42,
+        max_attempts=4,
+        status="failed",
+        attempts=0,
+        gh_stderr="changelog_merge_freeze: v1.1.0",
+        detail="changelog_merge_freeze: refused",
+    )
+
+
+@pytest.mark.parametrize(
+    "view", [ARM_VIEW_ARMED, _ARM_VIEW_MERGED], ids=["armed", "merged"]
+)
+def test_arm_automerge_before_arm_skipped_when_already_done(
+    monkeypatch: pytest.MonkeyPatch, view: str
+) -> None:
+    _patch_run(monkeypatch, lambda _cmd: _cp(stdout=view))
+    hook_calls: list[str] = []
+
+    def _hook() -> None:
+        hook_calls.append("hook")
+
+    result = _mod.arm_automerge(42, head_sha=_SHA, before_arm=_hook)
+
+    assert hook_calls == []
+    assert result.attempts == 0
+    assert result.status in {"armed", "merged"}
+
+
+def test_arm_automerge_before_arm_runs_once_before_the_first_merge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    def _handler(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            events.append("merge")
+            return _cp(returncode=1, stderr="nope")
+        events.append("view")
+        return _cp(stdout=ARM_VIEW_OPEN)
+
+    _patch_run(monkeypatch, _handler)
+
+    def _hook() -> None:
+        events.append("hook")
+
+    result = _mod.arm_automerge(
+        42,
+        head_sha=_SHA,
+        attempts=3,
+        backoff_seconds=0.0,
+        sleep=lambda _s: None,
+        before_arm=_hook,
+    )
+
+    assert result.attempts == 3
+    assert events.count("hook") == 1
+    assert events[:4] == ["view", "hook", "merge", "view"]
+    assert events.index("hook") < events.index("merge")
+
+
+def test_arm_automerge_before_arm_refusal_is_returned_with_no_merge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _patch_run(monkeypatch, lambda _cmd: _cp(stdout=ARM_VIEW_OPEN))
+    refusal = _refusal_result()
+
+    result = _mod.arm_automerge(42, head_sha=_SHA, before_arm=lambda: refusal)
+
+    assert result is refusal
+    assert [c for c in calls if c[:3] == ["gh", "pr", "merge"]] == []
+
+
+def test_cmd_arm_automerge_already_armed_never_runs_the_freeze_guard(
+    arm_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
+
+    def _must_not_run(*_a: object, **_k: object) -> object:
+        msg = "the freeze guard must not run for an already armed PR"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(_mod, "check_merge_freeze", _must_not_run)
+    _patch_run(monkeypatch, lambda _cmd: _cp(stdout=ARM_VIEW_ARMED))
+
+    code = _mod.cmd_arm_automerge(_arm_args(arm_repo))
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "armed"
+
+
 def test_cmd_arm_automerge_refusal_never_arms(
     arm_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     refusal = _mod.MergeFreezeCheck("refused", "changelog_merge_freeze: v1.1.0", "main")
     monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
     monkeypatch.setattr(_mod, "check_merge_freeze", lambda *_a, **_k: refusal)
-
-    def _never(*_a: object, **_k: object) -> object:
-        msg = "arm_automerge must not run after a refusal"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(_mod, "arm_automerge", _never)
+    calls = _patch_run(monkeypatch, lambda _cmd: _cp(stdout=ARM_VIEW_OPEN))
 
     code = _mod.cmd_arm_automerge(_arm_args(arm_repo))
     captured = capsys.readouterr()
 
     assert code == 1
+    assert [c for c in calls if c[:3] == ["gh", "pr", "merge"]] == []
     out = json.loads(captured.out)
     assert (out["status"], out["attempts"]) == ("failed", 0)
     assert out["gh_stderr"] == "changelog_merge_freeze: v1.1.0"
@@ -2520,7 +2622,7 @@ def test_cmd_arm_automerge_refusal_never_arms(
         "changelog_merge_freeze: arm refused before any gh pr merge call; merging"
         " this PR into origin/main would change a released CHANGELOG section"
     )
-    assert captured.err.startswith("ERROR: ")
+    assert captured.err == "ERROR: changelog_merge_freeze: v1.1.0\n"
 
 
 def test_cmd_arm_automerge_skip_with_a_reason_warns_and_arms(
@@ -2529,13 +2631,13 @@ def test_cmd_arm_automerge_skip_with_a_reason_warns_and_arms(
     skip = _mod.MergeFreezeCheck("skipped", "git fetch origin main exited 128", "main")
     monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
     monkeypatch.setattr(_mod, "check_merge_freeze", lambda *_a, **_k: skip)
-    armed = _mod.ArmResult(pr_number=42, max_attempts=4, status="armed", attempts=1)
-    monkeypatch.setattr(_mod, "arm_automerge", lambda *_a, **_k: armed)
+    calls = _patch_run(monkeypatch, _armed_after_merge_gh())
 
     code = _mod.cmd_arm_automerge(_arm_args(arm_repo))
     err = capsys.readouterr().err
 
     assert code == 0
+    assert len([c for c in calls if c[:3] == ["gh", "pr", "merge"]]) == 1
     assert err == (
         "WARNING: changelog_merge_freeze not evaluated (git fetch origin main"
         " exited 128); arming without the merge-time check\n"
@@ -2593,7 +2695,26 @@ def test_arm_automerge_refuses_a_merge_into_a_released_section(
     assert "cw worktree changelog-sync --base main" in out["gh_stderr"]
     assert out["detail"].startswith("changelog_merge_freeze:")
     assert "ERROR:" in result.stderr
-    assert_gh_calls(fake_bin, [_BASE_VIEW])
+    assert_gh_calls(fake_bin, [_VIEW, _BASE_VIEW])
+
+
+def test_arm_automerge_already_armed_pr_is_not_refused_by_a_release_cut(
+    tmp_path: Path, cut_clone: ReleaseMovedRepo
+) -> None:
+    armed_with_base = (
+        '{"state":"OPEN","autoMergeRequest":{"mergeMethod":"SQUASH"},'
+        '"baseRefName":"main"}'
+    )
+    fake_bin = stub_gh_arm(
+        tmp_path, [(0, "", ARM_VIEW_ARMED)], initial_view=armed_with_base
+    )
+
+    result = _run_arm(cut_clone.clone, fake_bin, head_sha=cut_clone.branch_sha)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["status"] == "armed"
+    assert_gh_calls(fake_bin, [_VIEW])
+    assert _merge_count(fake_bin) == 0
 
 
 def test_arm_automerge_ignores_an_inherited_git_dir(
@@ -2629,7 +2750,7 @@ def test_arm_automerge_arms_once_the_changelog_is_synced(
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["status"] == "armed"
     merge = [*_MERGE[:-1], synced.head_sha]
-    assert_gh_calls(fake_bin, [_BASE_VIEW, _VIEW, merge, _VIEW])
+    assert_gh_calls(fake_bin, [_VIEW, _BASE_VIEW, merge, _VIEW])
     assert "WARNING" not in result.stderr
 
 
@@ -2646,4 +2767,1016 @@ def test_arm_automerge_fetch_failure_warns_and_arms(
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["status"] == "armed"
     assert "WARNING: changelog_merge_freeze not evaluated" in result.stderr
-    assert_gh_calls(fake_bin, [_BASE_VIEW, _VIEW, _MERGE, _VIEW])
+    assert_gh_calls(fake_bin, [_VIEW, _BASE_VIEW, _MERGE, _VIEW])
+
+
+# --- ci-hold: per-worktree CI-evidence hold on arming (#3618) ---
+
+_HOLD_FILE = "cw-ci-evidence-hold.json"
+_HOLD_GATES = [{"gate": "lint", "checks": ["ci / lint"]}]
+_ABSENT_SHA = "f" * 40
+_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+_HOLD_STDERR_HEAD = "ci-evidence hold active for head "
+_HOLD_STDERR_TAIL = (
+    ": mapped CI checks are not yet proven green, so arming is withheld. "
+    "This is a deliberate wait released by cw dev-queue requeue, "
+    "not a pr.auto_merge opt-out."
+)
+_HOLD_DETAIL_TAIL = (
+    " -- no gh call made; released by cw dev-queue requeue, not a pr.auto_merge opt-out"
+)
+_UNDO = "ci-hold release"
+
+
+@pytest.fixture
+def hold_wt(arm_repo: Path, tmp_path: Path) -> Path:
+    """A real linked worktree on branch ``feat``, one commit past ``main``."""
+    wt = tmp_path / "wt"
+    git_in(arm_repo, "worktree", "add", "-b", "feat", str(wt))
+    _commit(wt, "feature work")
+    return wt
+
+
+@pytest.fixture(params=["main-checkout", "linked-worktree"])
+def hold_repo(request: pytest.FixtureRequest, arm_repo: Path, tmp_path: Path) -> Path:
+    """Both marker-path shapes: relative ``.git/...`` and absolute worktree git dir."""
+    if request.param == "main-checkout":
+        return arm_repo
+    wt = tmp_path / "wt"
+    git_in(arm_repo, "worktree", "add", "-b", "feat", str(wt))
+    return wt
+
+
+def _hold(
+    repo: Path, sub: str, *extra: str, cwd: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(_SCRIPT),
+            "ci-hold",
+            sub,
+            *extra,
+            "--repo-path",
+            str(repo),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=cwd,
+    )
+
+
+def _hold_set(repo: Path, gates: object = None) -> dict[str, object]:
+    raw = json.dumps(_HOLD_GATES if gates is None else gates)
+    result = _hold(repo, "set", "--base", "main", "--gates-json", raw)
+    assert result.returncode == 0, result.stderr
+    payload: dict[str, object] = json.loads(result.stdout)
+    return payload
+
+
+def _hold_status(repo: Path) -> dict[str, object]:
+    result = _hold(repo, "status", "--json")
+    assert result.returncode == 0, result.stderr
+    payload: dict[str, object] = json.loads(result.stdout)
+    return payload
+
+
+def _hold_marker(repo: Path) -> Path:
+    path = Path(git_in(repo, "rev-parse", "--git-path", _HOLD_FILE))
+    return path if path.is_absolute() else repo / path
+
+
+def _head(repo: Path) -> str:
+    return git_in(repo, "rev-parse", "HEAD")
+
+
+def _commit(repo: Path, message: str = "work") -> str:
+    git_in(repo, "commit", "--allow-empty", "-m", message)
+    return _head(repo)
+
+
+def _fake_gh(tmp_path: Path, label: str) -> Path:
+    root = tmp_path / label
+    root.mkdir()
+    return stub_gh_arm(root, [(0, "", ARM_VIEW_ARMED)])
+
+
+def _assert_withheld(repo: Path, tmp_path: Path, head: str) -> None:
+    """check-automerge-allowed and arm-automerge both refuse, reusing exits 1 / 3."""
+    allowed = _run_check_allowed(repo)
+    assert (allowed.stdout.strip(), allowed.returncode) == ("false", 1)
+    assert f"{_HOLD_STDERR_HEAD}{head[:8]}{_HOLD_STDERR_TAIL}" in allowed.stderr
+    assert _UNDO in allowed.stderr
+    fake_bin = _fake_gh(tmp_path, "gh_withheld")
+    armed = _run_arm(repo, fake_bin, head_sha=head)
+    assert armed.returncode == 3, armed.stderr
+    out = json.loads(armed.stdout)
+    assert out["status"] == "skipped"
+    assert out["attempts"] == 0
+    expected = f"{_HOLD_STDERR_HEAD}{head[:8]}{_HOLD_DETAIL_TAIL}"
+    assert expected in out["detail"]
+    assert _UNDO in out["detail"]
+    assert expected in armed.stderr
+    assert gh_calls(fake_bin) == []
+
+
+def _assert_arms(repo: Path, tmp_path: Path, head: str) -> None:
+    """With no enforced hold the seam behaves exactly as it did without one."""
+    allowed = _run_check_allowed(repo)
+    assert (allowed.stdout.strip(), allowed.returncode) == ("true", 0)
+    assert _HOLD_STDERR_HEAD not in allowed.stderr
+    fake_bin = _fake_gh(tmp_path, "gh_arms")
+    armed = _run_arm(repo, fake_bin, head_sha=head)
+    assert armed.returncode == 0, armed.stderr
+    assert json.loads(armed.stdout)["status"] == "armed"
+    assert _merge_count(fake_bin) == 1
+
+
+def test_ci_hold_round_trip_set_status_release(hold_repo: Path) -> None:
+    head = _head(hold_repo)
+
+    out = _hold_set(hold_repo)
+
+    marker = _hold_marker(hold_repo)
+    assert out["hold"] == "set"
+    assert out["head"] == head
+    assert out["gates"] == _HOLD_GATES
+    assert Path(str(out["path"])) == marker
+    assert marker.is_file()
+    assert git_in(hold_repo, "status", "--porcelain") == ""
+    record = json.loads(marker.read_text(encoding="utf-8"))
+    assert set(record) == {"head", "branch", "base", "gates", "recorded"}
+    assert record["branch"] == git_in(hold_repo, "branch", "--show-current")
+    assert record["base"] == "main"
+    status = _hold_status(hold_repo)
+    assert status == {
+        "state": "active",
+        "evaluated": True,
+        "head": head,
+        "recorded_head": head,
+        "gates": _HOLD_GATES,
+        "base": "main",
+        "recorded": record["recorded"],
+    }
+    released = _hold(hold_repo, "release")
+    assert released.returncode == 0, released.stderr
+    assert json.loads(released.stdout) == {"hold": "released", "was": "active"}
+    assert not marker.exists()
+    assert _hold_status(hold_repo)["state"] == "none"
+    again = _hold(hold_repo, "release")
+    assert again.returncode == 0
+    assert json.loads(again.stdout) == {"hold": "released", "was": "none"}
+
+
+def test_ci_hold_status_none_shape(hold_wt: Path) -> None:
+    assert _hold_status(hold_wt) == {
+        "state": "none",
+        "evaluated": True,
+        "head": _head(hold_wt),
+        "recorded_head": None,
+        "gates": [],
+        "base": None,
+        "recorded": None,
+    }
+
+
+def test_ci_hold_set_empty_array_clears_marker(hold_wt: Path, tmp_path: Path) -> None:
+    _hold_set(hold_wt)
+    head = _head(hold_wt)
+    _assert_withheld(hold_wt, tmp_path, head)
+
+    cleared = _hold(hold_wt, "set", "--base", "main", "--gates-json", "[]")
+
+    assert cleared.returncode == 0, cleared.stderr
+    assert json.loads(cleared.stdout) == {"hold": "cleared"}
+    assert not _hold_marker(hold_wt).exists()
+    _assert_arms(hold_wt, tmp_path, head)
+    idempotent = _hold(hold_wt, "set", "--base", "main", "--gates-json", "[]")
+    assert json.loads(idempotent.stdout) == {"hold": "cleared"}
+
+
+@pytest.mark.parametrize(
+    "gates_json",
+    [
+        pytest.param("not json", id="bad-json"),
+        pytest.param('{"gate": "lint"}', id="not-an-array"),
+        pytest.param('["lint"]', id="element-not-an-object"),
+        pytest.param('[{"gate": "lint"}]', id="missing-checks"),
+        pytest.param('[{"gate": "lint", "checks": "ci"}]', id="checks-not-a-list"),
+        pytest.param('[{"gate": 1, "checks": ["ci"]}]', id="gate-not-a-string"),
+    ],
+)
+def test_ci_hold_set_rejects_bad_gates_json(hold_wt: Path, gates_json: str) -> None:
+    result = _hold(hold_wt, "set", "--base", "main", "--gates-json", gates_json)
+
+    assert result.returncode == 2
+    assert result.stderr.startswith("ERROR: ")
+    assert not _hold_marker(hold_wt).exists()
+
+
+def test_ci_hold_set_exits_2_on_detached_head(hold_wt: Path) -> None:
+    git_in(hold_wt, "checkout", "--detach")
+
+    result = _hold(
+        hold_wt,
+        "set",
+        "--base",
+        "main",
+        "--gates-json",
+        '[{"gate":"g","checks":["c"]}]',
+    )
+
+    assert result.returncode == 2
+    assert "detached" in result.stderr
+    assert not _hold_marker(hold_wt).exists()
+
+
+def test_ci_hold_set_exits_2_on_unwritable_marker(hold_wt: Path) -> None:
+    marker = _hold_marker(hold_wt)
+    marker.mkdir()
+    (marker / "keep").write_text("x", encoding="utf-8")
+
+    result = _hold(
+        hold_wt, "set", "--base", "main", "--gates-json", json.dumps(_HOLD_GATES)
+    )
+
+    assert result.returncode == 2
+    assert result.stderr.startswith("ERROR: ")
+
+
+def test_ci_hold_release_exits_1_when_marker_cannot_be_removed(hold_wt: Path) -> None:
+    marker = _hold_marker(hold_wt)
+    marker.mkdir()
+    (marker / "keep").write_text("x", encoding="utf-8")
+
+    result = _hold(hold_wt, "release")
+
+    assert result.returncode == 1
+    assert result.stderr.startswith("ERROR: ")
+    assert marker.is_dir()
+
+
+@pytest.mark.parametrize("sub", ["set", "status", "release"])
+def test_ci_hold_rejects_a_non_directory_repo_path(tmp_path: Path, sub: str) -> None:
+    extra = ["--base", "main", "--gates-json", "[]"] if sub == "set" else []
+
+    result = _hold(tmp_path / "missing", sub, *extra)
+
+    assert result.returncode == 2
+    assert "--repo-path is not a directory" in result.stderr
+
+
+def test_ci_hold_help_strings() -> None:
+    def help_of(*argv: str) -> str:
+        done = subprocess.run(
+            [sys.executable, str(_SCRIPT), *argv, "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={**os.environ, "COLUMNS": "400"},
+        )
+        assert done.returncode == 0, done.stderr
+        return " ".join(done.stdout.split())
+
+    assert (
+        "Per-worktree hold that stops arm-automerge and check-automerge-allowed "
+        "from arming a PR whose mapped CI checks are not yet proven green "
+        "(set | status | release)"
+    ) in help_of()
+    sub_help = help_of("ci-hold")
+    assert (
+        "Record a hold for the current HEAD and the given deferred gates; an "
+        "empty --gates-json array clears any hold"
+    ) in sub_help
+    assert "Print the hold state as JSON: none | active | stale | corrupt" in sub_help
+    assert "Remove the hold (idempotent)" in sub_help
+
+
+def test_check_automerge_allowed_refuses_under_hold_from_cwd(hold_wt: Path) -> None:
+    """Without --repo-path the hold is read from the cwd's git toplevel."""
+    _hold_set(hold_wt)
+
+    result = subprocess.run(
+        [sys.executable, str(_SCRIPT), "check-automerge-allowed"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=hold_wt,
+    )
+
+    assert (result.stdout.strip(), result.returncode) == ("false", 1)
+    assert _HOLD_STDERR_HEAD in result.stderr
+
+
+def test_pr_auto_merge_false_wins_over_the_hold(hold_wt: Path) -> None:
+    _hold_set(hold_wt)
+    _write_project_config_yaml(hold_wt, "pr:\n  auto_merge: false\n")
+
+    allowed = _run_check_allowed(hold_wt)
+
+    assert (allowed.stdout.strip(), allowed.returncode) == ("false", 1)
+    assert _HOLD_STDERR_HEAD not in allowed.stderr
+
+
+def test_arm_pr_auto_merge_false_detail_wins_over_the_hold(
+    hold_wt: Path, tmp_path: Path
+) -> None:
+    _hold_set(hold_wt)
+    _write_project_config_yaml(hold_wt, "pr:\n  auto_merge: false\n")
+    fake_bin = _fake_gh(tmp_path, "gh_cfg")
+
+    armed = _run_arm(hold_wt, fake_bin, head_sha=_head(hold_wt))
+
+    assert armed.returncode == 3
+    assert json.loads(armed.stdout)["detail"] == _SEAM_DISALLOWED_DETAIL
+    assert gh_calls(fake_bin) == []
+
+
+def test_hold_enforced_at_set_head(hold_repo: Path, tmp_path: Path) -> None:
+    _hold_set(hold_repo)
+
+    _assert_withheld(hold_repo, tmp_path, _head(hold_repo))
+
+
+def _merge_base_commit(repo: Path) -> None:
+    """Merge a new commit from a side branch into the current branch."""
+    current = git_in(repo, "branch", "--show-current")
+    git_in(repo, "checkout", "-b", "side", "HEAD~1")
+    _commit(repo, "side")
+    git_in(repo, "checkout", current)
+    git_in(repo, "merge", "--no-ff", "-m", "merge side", "side")
+
+
+@pytest.mark.parametrize("shape", ["one-commit", "chain-of-three", "merge-commit"])
+def test_descendant_head_stays_held(hold_wt: Path, tmp_path: Path, shape: str) -> None:
+    """Case 1: any later commit on the branch leaves the hold in force."""
+    recorded = _head(hold_wt)
+    _hold_set(hold_wt)
+    if shape == "one-commit":
+        _commit(hold_wt, "autofix")
+    elif shape == "chain-of-three":
+        for n in range(3):
+            _commit(hold_wt, f"step {n}")
+    else:
+        _merge_base_commit(hold_wt)
+    head = _head(hold_wt)
+    assert head != recorded
+
+    status = _hold_status(hold_wt)
+
+    assert status["state"] == "active"
+    assert status["evaluated"] is True
+    assert status["head"] == head
+    assert status["recorded_head"] == recorded
+    _assert_withheld(hold_wt, tmp_path, head)
+
+
+def _orphan_commit(repo: Path) -> str:
+    return git_in(repo, "commit-tree", _EMPTY_TREE, "-m", "unrelated root")
+
+
+def _sibling_commit(repo: Path) -> str:
+    return git_in(repo, "commit-tree", "HEAD~1^{tree}", "-p", "HEAD~1", "-m", "sib")
+
+
+@pytest.mark.parametrize(
+    "move", ["unrelated-root", "sibling", "back-to-ancestor", "other-branch"]
+)
+def test_non_descendant_hold_reads_stale(
+    hold_wt: Path, tmp_path: Path, move: str
+) -> None:
+    """Case 2: a hold whose head is no ancestor of HEAD, or another branch, is stale."""
+    _hold_set(hold_wt)
+    recorded = _head(hold_wt)
+    if move == "unrelated-root":
+        git_in(hold_wt, "reset", "--hard", _orphan_commit(hold_wt))
+    elif move == "sibling":
+        git_in(hold_wt, "reset", "--hard", _sibling_commit(hold_wt))
+    elif move == "back-to-ancestor":
+        git_in(hold_wt, "reset", "--hard", "HEAD~1")
+    else:
+        git_in(hold_wt, "switch", "-c", "other")
+    head = _head(hold_wt)
+
+    status = _hold_status(hold_wt)
+
+    assert status["state"] == "stale"
+    assert status["evaluated"] is True
+    assert status["recorded_head"] == recorded
+    assert (head == recorded) is (move == "other-branch")
+    _assert_arms(hold_wt, tmp_path, head)
+
+
+def _write_marker(repo: Path, **overrides: object) -> None:
+    record: dict[str, object] = {
+        "head": _head(repo),
+        "branch": git_in(repo, "branch", "--show-current"),
+        "base": "main",
+        "gates": _HOLD_GATES,
+        "recorded": "2026-11-13T00:00:00+00:00",
+    }
+    record.update(overrides)
+    marker = _hold_marker(repo)
+    marker.write_text(json.dumps(record), encoding="utf-8")
+
+
+def test_ancestry_error_reads_active_and_enforces(
+    hold_wt: Path, tmp_path: Path
+) -> None:
+    """Case 3a: merge-base exits 128 for an absent well-formed object."""
+    _write_marker(hold_wt, head=_ABSENT_SHA)
+
+    status = _hold_status(hold_wt)
+
+    assert status["state"] == "active"
+    assert status["evaluated"] is False
+    _assert_withheld(hold_wt, tmp_path, _head(hold_wt))
+
+
+@pytest.mark.parametrize(
+    "boom",
+    [
+        pytest.param(OSError("no git"), id="oserror"),
+        pytest.param(subprocess.TimeoutExpired(cmd="git", timeout=30.0), id="timeout"),
+    ],
+)
+def test_ancestry_launch_failure_reads_active(
+    monkeypatch: pytest.MonkeyPatch, hold_wt: Path, boom: BaseException
+) -> None:
+    """Case 3b: a launch failure or timeout cannot prove staleness."""
+    _hold_set(hold_wt)
+    head = _head(hold_wt)
+
+    real_bounded = _mod._bounded
+
+    def _raise(cmd: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        if "merge-base" in cmd:
+            raise boom
+        done: subprocess.CompletedProcess[str] = real_bounded(cmd, cwd=cwd)
+        return done
+
+    monkeypatch.setattr(_mod, "_bounded", _raise)
+
+    assert _mod._recorded_is_ancestor(hold_wt, head, head) is None
+    state = _mod._hold_state(hold_wt, head)
+    assert (state.state, state.evaluated) == ("active", False)
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected"), [(0, True), (1, False), (128, None), (2, None)]
+)
+def test_recorded_is_ancestor_maps_exit_codes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    returncode: int,
+    expected: bool | None,
+) -> None:
+    calls: list[list[str]] = []
+
+    def _fake(cmd: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, returncode, "", "")
+
+    monkeypatch.setattr(_mod, "_bounded", _fake)
+
+    assert _mod._recorded_is_ancestor(tmp_path, "a" * 40, "b" * 40) is expected
+    assert len(calls) == 1
+    assert calls[0][0] == "git"
+    assert calls[0][1:] == [
+        "-C",
+        str(tmp_path),
+        "merge-base",
+        "--is-ancestor",
+        "a" * 40,
+        "b" * 40,
+    ]
+
+
+def test_detached_head_at_descendant_stays_held(hold_wt: Path, tmp_path: Path) -> None:
+    """Case 3c: an undeterminable branch does not by itself make a hold stale."""
+    _hold_set(hold_wt)
+    _commit(hold_wt, "autofix")
+    git_in(hold_wt, "checkout", "--detach")
+    head = _head(hold_wt)
+
+    status = _hold_status(hold_wt)
+
+    assert status["state"] == "active"
+    assert status["evaluated"] is False
+    _assert_withheld(hold_wt, tmp_path, head)
+
+
+def test_detached_head_at_non_descendant_is_stale_by_ancestry(
+    hold_wt: Path, tmp_path: Path
+) -> None:
+    _hold_set(hold_wt)
+    git_in(hold_wt, "checkout", "--detach", _sibling_commit(hold_wt))
+
+    status = _hold_status(hold_wt)
+
+    assert status["state"] == "stale"
+    assert status["evaluated"] is True
+    _assert_arms(hold_wt, tmp_path, _head(hold_wt))
+
+
+def test_arm_head_sha_absent_from_repo_stays_enforced(
+    hold_wt: Path, tmp_path: Path
+) -> None:
+    """Case 3d: a --head-sha that is no local object cannot be evaluated."""
+    _hold_set(hold_wt)
+    fake_bin = _fake_gh(tmp_path, "gh_absent")
+
+    armed = _run_arm(hold_wt, fake_bin, head_sha=_ABSENT_SHA)
+
+    assert armed.returncode == 3, armed.stderr
+    assert json.loads(armed.stdout)["status"] == "skipped"
+    assert f"{_HOLD_STDERR_HEAD}{_ABSENT_SHA[:8]}" in armed.stderr
+    assert gh_calls(fake_bin) == []
+
+
+@pytest.mark.parametrize(
+    "marker_text",
+    [
+        pytest.param("not json {", id="unparseable"),
+        pytest.param("[]", id="not-an-object"),
+        pytest.param('{"head": "%s"}' % ("a" * 40), id="missing-keys"),
+        pytest.param(None, id="non-hex-head"),
+        pytest.param("", id="empty-file"),
+    ],
+)
+def test_corrupt_marker_is_enforced(
+    hold_wt: Path, tmp_path: Path, marker_text: str | None
+) -> None:
+    """Case 3e: an unreadable marker fails closed."""
+    if marker_text is None:
+        _write_marker(hold_wt, head="zz" * 20)
+    else:
+        _hold_marker(hold_wt).write_text(marker_text, encoding="utf-8")
+
+    status = _hold_status(hold_wt)
+
+    assert status["state"] == "corrupt"
+    assert status["evaluated"] is False
+    _assert_withheld(hold_wt, tmp_path, _head(hold_wt))
+    released = _hold(hold_wt, "release")
+    assert json.loads(released.stdout) == {"hold": "released", "was": "corrupt"}
+    assert not _hold_marker(hold_wt).exists()
+
+
+def test_unresolvable_marker_path_in_a_work_tree_reads_corrupt(
+    monkeypatch: pytest.MonkeyPatch, hold_wt: Path
+) -> None:
+    real_git = _mod._hold_git
+
+    def _hold_git(repo: Path, *args: str) -> str:
+        if "--git-path" in args:
+            return ""
+        out: str = real_git(repo, *args)
+        return out
+
+    monkeypatch.setattr(_mod, "_hold_git", _hold_git)
+
+    state = _mod._hold_state(hold_wt, _head(hold_wt))
+
+    assert (state.state, state.evaluated) == ("corrupt", False)
+
+
+def test_unresolvable_marker_path_outside_a_work_tree_reads_none(
+    tmp_path: Path,
+) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    state = _mod._hold_state(plain, None)
+
+    assert (state.state, state.evaluated) == ("none", True)
+
+
+@pytest.mark.parametrize("how", ["release", "empty-array-set"])
+def test_release_after_green_checks_lets_arming_proceed(
+    hold_wt: Path, tmp_path: Path, how: str
+) -> None:
+    """Case 4: the explicit release is the only way a held head loosens."""
+    _hold_set(hold_wt)
+    head = _commit(hold_wt, "autofix")
+    _assert_withheld(hold_wt, tmp_path, head)
+
+    if how == "release":
+        released = _hold(hold_wt, "release")
+        assert json.loads(released.stdout) == {"hold": "released", "was": "active"}
+    else:
+        _hold(hold_wt, "set", "--base", "main", "--gates-json", "[]")
+
+    _assert_arms(hold_wt, tmp_path, head)
+    again = _hold(hold_wt, "release")
+    assert again.returncode == 0
+    assert json.loads(again.stdout)["was"] == "none"
+
+
+def test_required_unless_automerge_disabled_downgrades_under_hold(
+    monkeypatch: pytest.MonkeyPatch, hold_wt: Path
+) -> None:
+    _hold_set(hold_wt)
+    _commit(hold_wt, "autofix")
+    monkeypatch.chdir(hold_wt)
+
+    assert _mod.resolve_effective_automerge_required(base_required=True) is False
+    assert _mod.resolve_effective_monitor_required(base_required=True) is False
+    assert _mod.resolve_effective_automerge_required(base_required=False) is False
+    git_in(hold_wt, "reset", "--hard", "HEAD~2")
+    assert _mod.resolve_effective_automerge_required(base_required=True) is True
+    assert _mod.resolve_effective_monitor_required(base_required=True) is True
+
+
+def test_required_stays_true_without_a_marker(
+    monkeypatch: pytest.MonkeyPatch, hold_wt: Path
+) -> None:
+    monkeypatch.chdir(hold_wt)
+
+    assert _mod.resolve_effective_automerge_required(base_required=True) is True
+
+
+def _downgrade_warnings(payload: dict[str, object]) -> list[str]:
+    """The verify warnings about a requirement downgrade (not diff-stat noise)."""
+    return [w for w in _warnings(payload) if "merge-base" not in w]
+
+
+def _verify_without_pr(
+    monkeypatch: pytest.MonkeyPatch,
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    *flags: str,
+) -> dict[str, object]:
+    """`verify --json` in *repo* with only the gh calls faked (no PR for the branch)."""
+    monkeypatch.chdir(repo)
+    real_run = _mod.run
+
+    def _fake_run(
+        cmd: list[str], check: bool = False, capture: bool = True, **kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        if cmd[:1] == ["gh"]:
+            return subprocess.CompletedProcess(cmd, 1, "", "no pull requests found")
+        done: subprocess.CompletedProcess[str] = real_run(cmd, check, capture, **kw)
+        return done
+
+    monkeypatch.setattr(_mod, "run", _fake_run)
+    monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
+    args = _mod.build_parser().parse_args(["verify", *flags, "--json"])
+    _mod.cmd_verify(args)
+    payload: dict[str, object] = json.loads(capsys.readouterr().out)
+    return payload
+
+
+def test_verify_downgrades_under_hold_with_its_own_warning(
+    monkeypatch: pytest.MonkeyPatch, hold_wt: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _hold_set(hold_wt)
+    head = _commit(hold_wt, "autofix")
+
+    payload = _verify_without_pr(
+        monkeypatch, hold_wt, capsys, "--require-automerge", "--require-monitor"
+    )
+
+    assert _find_check(payload, "automerge-enabled")["required"] is False
+    assert _find_check(payload, "monitor-registered")["required"] is False
+    warnings = _downgrade_warnings(payload)
+    assert warnings == [
+        f"ci-evidence hold active for head {head[:8]} — automerge-enabled and "
+        "monitor-registered treated as optional while mapped CI checks are pending"
+    ]
+    assert not any("pr.auto_merge" in w for w in warnings)
+
+
+def test_verify_downgrades_under_hold_for_monitor_only(
+    monkeypatch: pytest.MonkeyPatch, hold_wt: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _hold_set(hold_wt)
+
+    payload = _verify_without_pr(monkeypatch, hold_wt, capsys, "--require-monitor")
+
+    assert _find_check(payload, "monitor-registered")["required"] is False
+    warnings = _downgrade_warnings(payload)
+    assert len(warnings) == 1
+    assert warnings[0].startswith("ci-evidence hold active for head ")
+
+
+def test_verify_keeps_requirements_when_hold_is_stale(
+    monkeypatch: pytest.MonkeyPatch, hold_wt: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _hold_set(hold_wt)
+    git_in(hold_wt, "reset", "--hard", "HEAD~1")
+
+    payload = _verify_without_pr(
+        monkeypatch, hold_wt, capsys, "--require-automerge", "--require-monitor"
+    )
+
+    assert _find_check(payload, "automerge-enabled")["required"] is True
+    assert _find_check(payload, "monitor-registered")["required"] is True
+    assert _downgrade_warnings(payload) == []
+
+
+def test_verify_config_false_warning_keeps_precedence_over_hold(
+    monkeypatch: pytest.MonkeyPatch, hold_wt: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _hold_set(hold_wt)
+    _write_project_config_yaml(hold_wt, "pr:\n  auto_merge: false\n")
+
+    payload = _verify_without_pr(monkeypatch, hold_wt, capsys, "--require-automerge")
+
+    warnings = _downgrade_warnings(payload)
+    assert len(warnings) == 1
+    assert "pr.auto_merge: false" in warnings[0]
+    assert _HOLD_STDERR_HEAD not in warnings[0]
+
+
+# --- ci-hold in-process twins (the subprocess cases above leave coverage blind) ---
+
+
+def _hold_main(
+    capsys: pytest.CaptureFixture[str], repo: Path, sub: str, *extra: str
+) -> tuple[int, str, str]:
+    code = _mod.main(["ci-hold", sub, *extra, "--repo-path", str(repo)])
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def test_ci_hold_commands_in_process_round_trip(
+    hold_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gates = json.dumps(_HOLD_GATES)
+    code, out, _ = _hold_main(
+        capsys, hold_repo, "set", "--base", "main", "--gates-json", gates
+    )
+    assert code == 0
+    assert json.loads(out)["hold"] == "set"
+    code, out, _ = _hold_main(capsys, hold_repo, "status", "--json")
+    assert (code, json.loads(out)["state"]) == (0, "active")
+    code, out, _ = _hold_main(capsys, hold_repo, "release")
+    assert (code, json.loads(out)) == (0, {"hold": "released", "was": "active"})
+    code, out, _ = _hold_main(
+        capsys, hold_repo, "set", "--base", "main", "--gates-json", "[]"
+    )
+    assert (code, json.loads(out)) == (0, {"hold": "cleared"})
+
+
+def test_ci_hold_set_in_process_error_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    hold_wt: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    gates = json.dumps(_HOLD_GATES)
+    code, _, err = _hold_main(
+        capsys, hold_wt, "set", "--base", "main", "--gates-json", "nope"
+    )
+    assert (code, err) == (2, "ERROR: --gates-json is not valid JSON\n")
+    code, _, err = _hold_main(
+        capsys, hold_wt, "set", "--base", "main", "--gates-json", "{}"
+    )
+    assert code == 2
+    assert "must be a JSON array" in err
+    with monkeypatch.context() as patch:
+        patch.setattr(_mod, "_local_head", lambda _repo: None)
+        code, _, err = _hold_main(
+            capsys, hold_wt, "set", "--base", "main", "--gates-json", gates
+        )
+    assert (code, err) == (2, "ERROR: cannot resolve HEAD to record the hold\n")
+    git_in(hold_wt, "checkout", "--detach")
+    code, _, err = _hold_main(
+        capsys, hold_wt, "set", "--base", "main", "--gates-json", gates
+    )
+    assert code == 2
+    assert "detached HEAD" in err
+    git_in(hold_wt, "switch", "feat")
+    marker = _hold_marker(hold_wt)
+    marker.mkdir()
+    (marker / "keep").write_text("x", encoding="utf-8")
+    for raw in (gates, "[]"):
+        code, _, err = _hold_main(
+            capsys, hold_wt, "set", "--base", "main", "--gates-json", raw
+        )
+        assert code == 2
+        assert err.startswith("ERROR: could not ")
+    assert not (marker.parent / f"{marker.name}.tmp").exists()
+
+
+def test_ci_hold_commands_in_process_unresolvable_git_path(
+    monkeypatch: pytest.MonkeyPatch,
+    hold_wt: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    real_git = _mod._hold_git
+
+    def _hold_git(repo: Path, *args: str) -> str:
+        if "--git-path" in args:
+            return ""
+        out: str = real_git(repo, *args)
+        return out
+
+    monkeypatch.setattr(_mod, "_hold_git", _hold_git)
+
+    code, _, err = _hold_main(
+        capsys, hold_wt, "set", "--base", "main", "--gates-json", "[]"
+    )
+    assert code == 2
+    assert "cannot resolve the cw-ci-evidence-hold.json git path" in err
+    code, out, _ = _hold_main(capsys, hold_wt, "status")
+    assert (code, json.loads(out)["state"]) == (0, "corrupt")
+    code, _, err = _hold_main(capsys, hold_wt, "release")
+    assert code == 1
+    assert "cannot resolve the cw-ci-evidence-hold.json git path" in err
+
+
+def test_ci_hold_release_in_process_unremovable_marker(
+    hold_wt: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    marker = _hold_marker(hold_wt)
+    marker.mkdir()
+    (marker / "keep").write_text("x", encoding="utf-8")
+
+    code, out, err = _hold_main(capsys, hold_wt, "release")
+
+    assert (code, out) == (1, "")
+    assert err.startswith("ERROR: could not remove ")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"branch": 5}, id="branch-not-a-string"),
+        pytest.param({"gates": "lint"}, id="gates-not-a-list"),
+        pytest.param({"head": 7}, id="head-not-a-string"),
+        pytest.param({"head": "a" * 39}, id="short-head"),
+    ],
+)
+def test_hold_state_corrupt_marker_shapes(
+    hold_wt: Path, overrides: dict[str, object]
+) -> None:
+    _write_marker(hold_wt, **overrides)
+
+    state = _mod._hold_state(hold_wt, _head(hold_wt))
+
+    assert (state.state, state.evaluated, state.record) == ("corrupt", False, None)
+
+
+def test_hold_state_unreadable_marker_is_corrupt(hold_wt: Path) -> None:
+    _hold_marker(hold_wt).mkdir()
+
+    assert _mod._hold_state(hold_wt, _head(hold_wt)).state == "corrupt"
+
+
+def test_hold_state_without_a_target_head_stays_active(hold_wt: Path) -> None:
+    _hold_set(hold_wt)
+
+    state = _mod._hold_state(hold_wt, None)
+
+    assert (state.state, state.evaluated) == ("active", False)
+    assert state.enforced is True
+
+
+def test_hold_state_stale_is_not_enforced(hold_wt: Path) -> None:
+    _hold_set(hold_wt)
+    git_in(hold_wt, "reset", "--hard", "HEAD~1")
+
+    state = _mod._hold_state(hold_wt, _head(hold_wt))
+
+    assert (state.state, state.evaluated, state.enforced) == ("stale", True, False)
+    assert _mod._enforced_hold(hold_wt, _head(hold_wt)) is None
+    assert _mod._enforced_hold(None, None) is None
+
+
+def test_hold_downgrade_warning_needs_a_downgrade_and_a_repo(
+    monkeypatch: pytest.MonkeyPatch, hold_wt: Path, tmp_path: Path
+) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    monkeypatch.chdir(plain)
+    assert _mod._hold_downgrade_warning(downgraded=True) is None
+    monkeypatch.chdir(hold_wt)
+    assert _mod._hold_downgrade_warning(downgraded=False) is None
+    assert _mod._hold_downgrade_warning(downgraded=True) is None
+    _hold_set(hold_wt)
+    warning = _mod._hold_downgrade_warning(downgraded=True)
+    assert warning is not None
+    assert warning.startswith(f"{_HOLD_STDERR_HEAD}{_head(hold_wt)[:8]} ")
+
+
+def test_check_automerge_allowed_in_process_under_hold(
+    monkeypatch: pytest.MonkeyPatch,
+    hold_wt: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _hold_set(hold_wt)
+    args = _mod.build_parser().parse_args(
+        ["check-automerge-allowed", "--repo-path", str(hold_wt)]
+    )
+
+    assert _mod.cmd_check_automerge_allowed(args) == 1
+    captured = capsys.readouterr()
+    assert captured.out == "false\n"
+    assert captured.err.startswith(f"{_HOLD_STDERR_HEAD}{_head(hold_wt)[:8]}")
+    assert _UNDO in captured.err
+    # No --repo-path: the cwd's toplevel decides; outside a repo there is no hold.
+    monkeypatch.chdir(hold_wt)
+    cwd_args = _mod.build_parser().parse_args(["check-automerge-allowed"])
+    assert _mod.cmd_check_automerge_allowed(cwd_args) == 1
+    capsys.readouterr()
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    monkeypatch.chdir(plain)
+    assert _mod.cmd_check_automerge_allowed(cwd_args) == 0
+    assert capsys.readouterr().out == "true\n"
+
+
+def test_arm_automerge_in_process_under_hold_makes_no_gh_call(
+    monkeypatch: pytest.MonkeyPatch,
+    hold_wt: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _hold_set(hold_wt)
+    head = _head(hold_wt)
+    monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
+
+    def _no_gh(*_a: object, **_k: object) -> None:
+        message = "a gh call was made under an enforced hold"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(_mod, "arm_automerge", _no_gh)
+    args = _mod.build_parser().parse_args(
+        ["arm-automerge", _ARM_PR, "--repo-path", str(hold_wt), "--head-sha", head]
+    )
+
+    assert _mod.cmd_arm_automerge(args) == _mod.EXIT_ARM_DISALLOWED
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    assert out["status"] == "skipped"
+    assert out["detail"].startswith(f"{_HOLD_STDERR_HEAD}{head[:8]}{_HOLD_DETAIL_TAIL}")
+    assert _UNDO in out["detail"]
+    assert captured.err == out["detail"] + "\n"
+
+
+@pytest.mark.parametrize("sub", ["set", "status", "release"])
+def test_ci_hold_in_process_rejects_a_non_directory_repo_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], sub: str
+) -> None:
+    extra = ["--base", "main", "--gates-json", "[]"] if sub == "set" else []
+
+    code, out, err = _hold_main(capsys, tmp_path / "missing", sub, *extra)
+
+    assert (code, out) == (2, "")
+    assert "--repo-path is not a directory" in err
+
+
+def test_ci_hold_set_in_process_rejects_malformed_gate_entries(
+    hold_wt: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _, err = _hold_main(
+        capsys, hold_wt, "set", "--base", "main", "--gates-json", '[{"gate": "g"}]'
+    )
+
+    assert (code, err) == (
+        2,
+        "ERROR: --gates-json entries must be {gate: str, checks: [str]}\n",
+    )
+
+
+def test_hold_git_reads_a_timeout_as_cannot_say(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def _slow(cmd: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd, 30.0)
+
+    monkeypatch.setattr(_mod, "_bounded", _slow)
+
+    assert _mod._hold_git(tmp_path, "rev-parse", "HEAD") == ""
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("not json {", id="unparseable"),
+        pytest.param("[]", id="not-an-object"),
+        pytest.param('{"head": "%s"}' % ("a" * 40), id="missing-keys"),
+        pytest.param("", id="empty-file"),
+    ],
+)
+def test_hold_state_unparseable_or_incomplete_marker_is_corrupt(
+    hold_wt: Path, text: str
+) -> None:
+    _hold_marker(hold_wt).write_text(text, encoding="utf-8")
+
+    state = _mod._hold_state(hold_wt, _head(hold_wt))
+
+    assert (state.state, state.evaluated, state.record) == ("corrupt", False, None)
+
+
+def test_hold_state_other_branch_is_stale_even_when_ancestry_holds(
+    hold_wt: Path,
+) -> None:
+    _hold_set(hold_wt)
+    git_in(hold_wt, "switch", "-c", "other")
+
+    state = _mod._hold_state(hold_wt, _head(hold_wt))
+
+    assert (state.state, state.evaluated) == ("stale", True)

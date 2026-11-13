@@ -115,6 +115,14 @@ class Session(BaseModel):
     consecutive_sentinel_mismatch_vetoes: int = 0
     backgrounded_at: datetime | None = None
     resumed_at: datetime | None = None
+    # #3339 — stamped under sessions_lock at the moment a fresh-spawn row that
+    # carries a surface_ref is appended to state (after spawn_bg and its
+    # roster-registration poll returned). started_at is stamped earlier, at
+    # Session() creation, and must not move: it floors transcript location and
+    # event reads. None for older sessions and for resumes (resumed_at covers
+    # those). Read only by session_may_postdate_roster. No schema bump: the
+    # field is defaulted (precedent #2437).
+    surface_bound_at: datetime | None = None
     completed_reason: CompletionReason | None = None
     completed_at: datetime | None = None
     # Durable task disposition for a recovery path that may crash after this

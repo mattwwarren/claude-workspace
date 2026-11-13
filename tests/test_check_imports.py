@@ -56,6 +56,10 @@ def test_check_hook_pins_in_groups() -> None:
     assert "check_hook_pins" in _scripts_group()
 
 
+def test_check_premise_evidence_in_groups() -> None:
+    assert "check_premise_evidence" in _scripts_group()
+
+
 def test_gate_key_in_groups() -> None:
     assert "gate_key" in _scripts_group()
 

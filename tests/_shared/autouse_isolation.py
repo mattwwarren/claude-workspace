@@ -271,6 +271,20 @@ def _reset_dirty_check_outage_state() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _reset_roster_skip_streak() -> Iterator[None]:
+    """Reset the roster skip-streak counter and its edge latch (#3335).
+
+    Module-level process state: one test's skipped ticks would otherwise
+    count toward, or silence, another test's ``roster_skip_streak`` event.
+    """
+    from cw.reconcile import roster_skip_streak
+
+    roster_skip_streak._STREAK.reset()
+    yield
+    roster_skip_streak._STREAK.reset()
+
+
+@pytest.fixture(autouse=True)
 def _reset_stop_carryover() -> Iterator[None]:
     """Reset the post-lock stop carry-over (#2551).
 

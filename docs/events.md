@@ -996,7 +996,10 @@ in `cw.dispatch`; and `spawn_create_impl` in `cw.spawn` plus the dispatch
 claim path's `_handle_post_launch_failure` in `cw.dispatch.claim.spawn`, both
 through `cw.spawn.emit_spawn_post_launch_attention` (#2502).
 `_spawn_fire_and_forget` in `cw.executor.core` also emits it, through
-`cw.spawn.emit_spawn_post_launch_attention` (#2592). (The former
+`cw.spawn.emit_spawn_post_launch_attention` (#2592). The reconcile mid-turn
+usage-limit sweep emits it from `_record_needs_attention` (#2324) and, for an
+act whose stop stays pending past its bound, from `_escalate_if_stalled`
+(#3397), both in `cw.reconcile.usage_limit_mid_turn`. (The former
 idle-watchdog / salvage / salvage-skip emitters were removed with the
 process-kill timeouts, ADR-0014.) The liveness sweep's
 distress check is skipped entirely for a row parked with
@@ -1480,7 +1483,36 @@ open enum; consumers MUST tolerate unknown values. Known values:
   `session_unresponsive` page all leave the row and its session alone, so an
   interrupted act is never charged. Neither branch charges
   `unproductive_attempts` — a whole turn ran.
+- `"usage_limit_act_stalled"` — an `auto` mid-turn usage-limit act (see
+  `"usage_limited_mid_turn"` above; `cw.reconcile.usage_limit_mid_turn`,
+  #3397) is still waiting for its stop to be confirmed: this tick's
+  close-and-stop step returned pending (the surface is still listed in the
+  daemon roster, or the roster is unreadable) and at least
+  `ACT_STALLED_AFTER_SECONDS` (900 s) have passed since the act's decision
+  (`UsageLimitAct.started_at`). It never fires for an act that finished, was
+  abandoned or is `park`, nor on a tick that failed earlier at the lockout or
+  audit step. The payload is the canonical nine fields (`crashed: false`,
+  `lane` set, `correlation_id` the `ticket_id`) plus `act_started_at`, and
+  `breadcrumbs` is exactly
+  `"act started {age_seconds}s ago; stop still pending, surface {surface_ref} still listed or roster unreadable; row stays RUNNING under its act"`,
+  with the age measured from the decision, not from the stop request. It fires **once per act**: the event is recorded first and
+  then latched by stamping `UsageLimitAct.escalated_at` on the row's intent,
+  which every transition clears along with the intent. A crash or failed
+  write between the two repeats the page once (at-least-once, like the act's
+  audit events); a failed event write leaves the act unstamped and the next
+  tick retries. **Signal only (ADR-0014):** the age gates the page, never a
+  disposition — `escalated_at` is a signal-dedup latch, and the row stays
+  `RUNNING` and bound under its act, the session and roster are untouched,
+  and no push notification is sent. Resolve it by stopping the worker (the
+  next tick then confirms the stop and finishes the act) or by
+  re-dispositioning the row. `cw orchestrate watch` keys its dedupe latch on
+  `(session.needs_attention, client, ticket_id, paused_status)`, so this page
+  is distinct from the act's own `"usage_limited_mid_turn"` page; it does not
+  render `reason=<breadcrumbs>` for this status (it is not in
+  `BREADCRUMB_PAUSED_STATUSES`), so the breadcrumb is visible in
+  `cw event tail` only.
 - `"worktree_probe_unavailable"` — the reconcile dirty-check pre-pass (`cw.reconcile.dirty_checks.DirtyChecks.settle_outages`, #2662) could not run a session's worktree dirty check for a host-global or transient reason, so it deferred that session's row to the next tick instead of reading it clean or parking it. **Client-scoped, not session-scoped:** `session_name` is empty, `ticket_id`, `claude_session_id` and `lane` are `null`, `crashed` is `false`, and `session_id` is the synthetic `worktree-probe:<kind>@<iso8601>` (the firing instant is folded in for the same `--dedup-terminal` reason as `dispatch_loop_stale`). `client` is the client of the first session that hit this kind on the tick, deliberately: the cause is host-wide, so one event per kind is emitted and it is attributed to that one client. `breadcrumbs` is exactly `"<kind>: <detail>"`, where `<kind>` is `client` (`clients.yaml` unreadable, unparseable, invalid, or no clients configured) or `git` (a missing or non-running `git`, any `OSError`, an unrecognized non-zero exit of `git branch --show-current` such as a dubious-ownership or bad-config failure, or a stray `CwError` or undecodable git output (`UnicodeDecodeError`) from the unsaved-work probe), and `<detail>` is the original exception type, a colon, then the first line of its message (at most 200 characters; for an unrecognized `git` exit the message is `git branch --show-current exited <rc>: <first stderr line, at most 120 characters>`), for example `git: BranchLookupError: git branch --show-current exited 128: fatal: detected dubious ownership in repository at '/x'`. The number of affected sessions is deliberately not reported. **Edge-triggered, per process:** one event when a kind first appears after a tick without it, silence while it persists, and one more after a tick in which no session hit it. A persistent per-row cause of the `git` kind (for example undecodable git output in one worktree) defers that row every tick while the event fires once per process. A tick whose dirty-check pass stopped at the per-tick cap or budget never ends an episode: it announces a newly seen kind but drops none. A tick whose pre-pass returned early because the state could not be read settles nothing, so it neither ends nor starts an episode. Known residual: when the phantom pre-pass (`prepass_phantom_ids`) yields an empty set because of a roster error or a daemon outage, that pass observes nothing but is not treated as unobserved, so a latched kind can be dropped and the same persistent outage re-announced once the roster recovers; this is event noise only, since nothing is parked or reverted and no push is sent. A short-lived `cw start`/`cw doctor --reap` process emits its own. The event mutates nothing: the deferred row stays RUNNING and bound, and no push notification is sent. `cw orchestrate watch` renders `reason=<breadcrumbs>` for this status, but its dedupe latch keys the page on `(session.needs_attention, client, "*", worktree_probe_unavailable)` and this event carries no `renotify_marker` and nothing clears that key, so the first outage per client pages and every later episode for the same client (including a different `<kind>`) is dropped by the latch; all episodes remain visible in `cw event tail`. `cw board` renders this event as the client-header ATTENTION badge of the attributed client for its 24-hour event-feed window (`_EVENT_FEED_WINDOW` in `cw.board`), because it is a `session.needs_attention` event with `ticket_id: null`. The cause is host-wide and the attributed client is only the first one affected, so do not read the badge as client-specific; `cw event tail` shows the cause in `breadcrumbs`.
+- `"roster_skip_streak"` — `_reconcile_locked` found the tick's lockless roster snapshot stale or missing (`RosterUnavailableError.skips_tick`, #2550) on `ROSTER_SKIP_ATTENTION_THRESHOLD` (3) consecutive ticks, so every roster-dependent sweep (phantom, concierge, terminal backstops) was skipped each time (`cw.reconcile.roster_skip_streak`, #3335). **Fleet-wide, not client- or session-scoped:** `client` and `session_name` are empty, `ticket_id`, `claude_session_id` and `lane` are `null`, `crashed` is `false`, and `session_id` is the synthetic `roster-skip:<count>@<iso8601>`. `breadcrumbs` is `"<count> consecutive ticks skipped the roster-dependent sweeps (last cause: <cause>)"`, where `<cause>` is `missing` or `stale age=<seconds>s`. **Edge-triggered, per process:** fires once on reaching the threshold, stays silent while the streak persists, and re-arms after a tick that used the roster. A failed roster read (`reason="failed"`) is not a skip: it keeps the daemon-outage path and ends the streak. The count is in-process only (not persisted), so a short-lived `cw start`/`cw doctor --reap` holds its own and in practice only the long-lived dispatch loop reaches it. A failed emit (`CwError`/`OSError`) is logged and retried on the next skipped tick. The event mutates nothing and sends no push notification. `cw orchestrate watch` filters it out (its `client` is `""`); `cw event tail` and the operator channel show it.
 - `"freshness_gate_blocked"` — A client's consecutive freshness-gate-block
   latch (`ClientConcurrencyOverride.consecutive_freshness_blocks`, RFC 0007
   §W2) reached `freshness_block_attention_threshold`. Client-scoped, not
@@ -1683,8 +1715,8 @@ open enum; consumers MUST tolerate unknown values. Known values:
 A push notification is fired for most emissions (via `fire_push_notification`)
 — **except** `"freshness_gate_blocked"`, `"salvage_skip_escalated"`,
 `"dispatch_loop_stale"`, `"stopped_without_sentinel"`,
-`"spawn_post_launch_failed"`, `"fix_dispatch_worker_unconfirmed"`, and
-`"worktree_probe_unavailable"`, which deliberately do not push. (`stopped_without_sentinel` is emitted from the short-lived
+`"spawn_post_launch_failed"`, `"fix_dispatch_worker_unconfirmed"`,
+`"worktree_probe_unavailable"`, and `"roster_skip_streak"`, which deliberately do not push. (`stopped_without_sentinel` is emitted from the short-lived
 `cw signal-stop` hook process, whose backgrounded push thread would be
 dropped when it exits.) The liveness sweep's distress fire — and therefore
 its push — is skipped entirely for a row parked with
@@ -2803,8 +2835,8 @@ normalisation can produce `readback_mismatch` on a faithful post.
 cw never retries a post. On this event the operator reads the ticket for a
 duplicate or stray comment before any re-run. Emitted after Step 4 and
 best-effort: it never holds the row or changes the persisted result (the
-durable worktree artifact is already written). A verified post emits nothing
-and logs its ids at info. `correlation_id` is the `ticket_id`. In
+durable worktree artifact is already written). A verified post emits `review.verdict_comment_posted` (below) instead of this event and
+logs its ids at info. `correlation_id` is the `ticket_id`. In
 `_DEFAULT_OPERATOR_EVENT_TYPES`.
 
 ### `review.verdict_comment_posted`

@@ -1633,6 +1633,12 @@ elements:
       codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_finalize/_arm.py, symbol: arm}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
+  finalize.ci-deferred-create-path:
+    cells:
+      claude-native: {disposition: implemented}
+      codex: {disposition: not-applicable, reason: "cw does this in Python: codex_finalize/_run.py::_create parks awaiting_ci_evidence after the PR is created when run_finalize_quality_gates deferred a mapped gate"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
+      local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   finalize.post-push-mergeability-verification:
     cells:
       claude-native: {disposition: implemented}
@@ -1859,6 +1865,13 @@ elements:
       codex: {disposition: not-applicable, reason: "no cw timer bounds a FINALIZE gate (ADR-0014), so gate_timeout is never produced"}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
+  finalize.sentinel-awaiting-ci-evidence:
+    covers: [awaiting_ci_evidence]
+    cells:
+      claude-native: {disposition: implemented}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_finalize/_ci_evidence.py, symbol: awaiting_ci_evidence_block}}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
+      local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.reuse-path-gate-failure-agent-block-sentinel:
     cells:
       claude-native: {disposition: implemented}
@@ -1904,7 +1917,7 @@ elements:
   prep-pr.detect-quality-gates:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: not-applicable, reason: "cw does this in Python: codex_finalize/_gates.py::run_finalize_quality_gates runs the repo's gates on the create path before the push"}
+      codex: {disposition: not-applicable, reason: "cw does this in Python: codex_finalize/_gates.py::run_finalize_quality_gates runs the repo's gates on the create path before the push, except gates the base branch's quality_gates.ci_evidence maps to CI checks, which codex_finalize/_ci_evidence.py defers and _run.py::_create parks as awaiting_ci_evidence once the PR exists"}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   prep-pr.run-self-review:
@@ -1916,7 +1929,7 @@ elements:
   prep-pr.run-quality-gates:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: not-applicable, reason: "cw does this in Python: codex_finalize/_gates.py::run_finalize_quality_gates runs the repo's gates on the create path before the push"}
+      codex: {disposition: not-applicable, reason: "cw does this in Python: codex_finalize/_gates.py::run_finalize_quality_gates runs the repo's gates on the create path before the push, except gates the base branch's quality_gates.ci_evidence maps to CI checks, which codex_finalize/_ci_evidence.py defers and _run.py::_create parks as awaiting_ci_evidence once the PR exists"}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/executor/_finalize_guard.py, symbol: finalize_block_details}}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   prep-pr.clean-mode-convergence:
