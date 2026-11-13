@@ -1963,3 +1963,152 @@ def test_park_is_noop_when_row_reclaimed_by_a_newer_session(
     assert task.session_id == "newer-review-sess"
     assert task.pending_fix_dispatch is not None
     assert read_events() == []
+
+
+# --- #3313: reader resolves duplicate rows the way the writer does ----------
+
+_T0 = datetime(2026, 8, 1, tzinfo=UTC)
+
+
+def _dup(status: QueueItemStatus, age_days: int, **overrides: Any) -> Any:
+    """A ``_TICKET`` row created *age_days* after ``_T0`` (bigger = newer)."""
+    return _make_ticket_task(
+        ticket_id=_TICKET,
+        client=_CLIENT,
+        status=status,
+        created_at=_T0 + timedelta(days=age_days),
+        **overrides,
+    )
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected"),
+    [
+        pytest.param(
+            [(QueueItemStatus.COMPLETED, 1), (QueueItemStatus.RUNNING, 2)],
+            1,
+            id="terminal-first-live-second",
+        ),
+        pytest.param(
+            [(QueueItemStatus.RUNNING, 1), (QueueItemStatus.COMPLETED, 2)],
+            0,
+            id="live-first-terminal-second",
+        ),
+        pytest.param(
+            [
+                (QueueItemStatus.BLOCKED_ON_USER, 1),
+                (QueueItemStatus.BLOCKED_ON_USER, 3),
+                (QueueItemStatus.COMPLETED, 5),
+            ],
+            1,
+            id="blocked-only-newest",
+        ),
+    ],
+)
+def test_find_task_matches_the_writer_selection(
+    rows: list[tuple[QueueItemStatus, int]], expected: int
+) -> None:
+    from cw.dev_queue import _find_ticket
+
+    store = DevQueueStore(tasks=[_dup(status, age) for status, age in rows])
+
+    found = fix_dispatch._find_task(store, _TICKET, _CLIENT)
+
+    assert found is store.tasks[expected]
+    assert found is _find_ticket(store, _TICKET, _CLIENT, warn=False)
+
+
+def test_find_task_returns_none_without_a_match() -> None:
+    store = DevQueueStore(tasks=[_dup(QueueItemStatus.RUNNING, 1)])
+
+    assert fix_dispatch._find_task(store, _TICKET, "other-client") is None
+
+
+def _healthy_other_row() -> Any:
+    return _make_ticket_task(
+        ticket_id="2099",
+        client=_CLIENT,
+        status=QueueItemStatus.RUNNING,
+        pending_fix_dispatch=_pending(label="fix-2099"),
+    )
+
+
+@pytest.mark.parametrize(
+    "latch",
+    [
+        pytest.param({"pending_fix_dispatch": "pending"}, id="pending"),
+        pytest.param({"fix_dispatch_session_id": "old-fix"}, id="completion"),
+    ],
+)
+def test_latch_on_non_selected_duplicate_is_never_a_candidate(
+    latch: dict[str, str],
+) -> None:
+    """A stale latch on an older terminal row the act phase never reaches must
+    not hold a cap slot, tick after tick; a healthy row still gets one."""
+    overrides: dict[str, Any] = dict(latch)
+    if "pending_fix_dispatch" in overrides:
+        overrides["pending_fix_dispatch"] = _pending()
+    tasks = [
+        _dup(QueueItemStatus.COMPLETED, 1, **overrides),
+        _dup(QueueItemStatus.RUNNING, 2),
+        _healthy_other_row(),
+    ]
+
+    for _tick in range(3):
+        pending = fix_dispatch._detect_pending_fix_dispatches(tasks)
+        completions = fix_dispatch._detect_fix_dispatch_completions(tasks)
+        assert [c.ticket_id for c in pending] == ["2099"]
+        assert completions == []
+
+
+def test_latch_on_selected_duplicate_is_dispatched_and_cleared(
+    tmp_config_dir: Path,
+    acme_client: ClientConfig,
+    stub_dispatch: _DispatchRecorder,
+) -> None:
+    """The converse: the newer live row carries the latch, so it is the
+    candidate, and the dispatch stamps and clears that row, not the older one."""
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                _dup(QueueItemStatus.COMPLETED, 1),
+                _dup(QueueItemStatus.RUNNING, 2, pending_fix_dispatch=_pending()),
+            ]
+        )
+    )
+
+    candidates = fix_dispatch._detect_pending_fix_dispatches(load_dev_queue().tasks)
+    acted = fix_dispatch._act_on_pending_fix_dispatches(
+        candidates, clients={_CLIENT: acme_client}
+    )
+
+    assert [c.ticket_id for c in candidates] == [_TICKET]
+    assert acted == [_TICKET]
+    assert len(stub_dispatch.calls) == 1
+    old, live = load_dev_queue().tasks
+    assert live.pending_fix_dispatch is None
+    assert live.fix_dispatch_session_id == "fix-sess"
+    assert old.fix_dispatch_session_id is None
+    assert old.status == QueueItemStatus.COMPLETED
+
+
+def test_completion_on_selected_duplicate_unparks_the_live_row(
+    tmp_config_dir: Path,
+) -> None:
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                _dup(QueueItemStatus.COMPLETED, 1),
+                _dup(QueueItemStatus.RUNNING, 2, fix_dispatch_session_id="fix-sess"),
+            ]
+        )
+    )
+    _save_fix_session(SessionStatus.COMPLETED)
+
+    candidates = fix_dispatch._detect_fix_dispatch_completions(load_dev_queue().tasks)
+    unparked = fix_dispatch._act_on_fix_dispatch_completions(candidates)
+
+    assert unparked == [_TICKET]
+    _old, live = load_dev_queue().tasks
+    assert live.fix_dispatch_session_id is None
+    assert live.status == QueueItemStatus.PENDING

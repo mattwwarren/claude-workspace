@@ -143,6 +143,32 @@ ARCHITECTURE §8 #13, already permits the kill. The conditions are:
   `git ls-remote` is a short-timeout read-only probe. Both predate #2910.
   This clarification neither widens nor authorizes them.
 
+## Clarification (#3256): the leaked-worker sweep's age gate
+
+The leaked-worker sweep's absent arm (#2670,
+`cw.reconcile.leaked_workers`) stops a daemon roster worker only when its
+roster `startedAt` is at least `LEAKED_WORKER_GRACE_SECONDS` (180 s) old.
+Read literally, that is an elapsed-time comparison gating a roster mutation,
+so it is an exception to invariant 1. This section records it; it does not
+claim invariant 1 already permits it, and it is not a general license.
+
+- **The trigger is evidence (invariant 2).** No cw session names the worker,
+  and its `cwd` is strictly inside a configured client's cw worktree base.
+- **The age is part of that evidence, not a debounce.** A `spawn_bg` worker
+  is on the roster before cw records its session, so absence from cw state
+  only means "orphaned" once the spawn-to-record window has passed. The
+  clock alone never stops a worker: a worker that fails either evidence test
+  is spared at any age.
+- **Fail closed on every unevidenced case.** A worker with no or an invalid
+  `startedAt`, a non-cw or out-of-base `cwd`, or any worker while
+  `clients.yaml` is unreadable, is spared. `cw doctor` reports spared workers
+  older than the grace as the advisory `spared-unrecorded-workers` (#3257);
+  stopping them stays an operator act (`claude stop <short_id>`).
+- **What stays forbidden.** The sweep never touches session status, the dev
+  queue, or a worktree, and no other code path may gate a roster stop (or
+  any other mutation) on age under this section. Any other age-gated
+  destructive act still needs a new ADR (invariant 3).
+
 ## Alternatives considered
 
 - **Keep timers but route everything through `signal_only`.** Rejected: the

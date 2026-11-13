@@ -2537,6 +2537,102 @@ class TestSpawnClose:
         assert closed.status == SessionStatus.COMPLETED
         assert closed.completed_reason == CompletionReason.USER
 
+    def _seed_signoff_close(
+        self,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        stage_reached: str,
+    ) -> Session:
+        """Seed the production signoff park (#3151): an AWAITING_OPERATOR_SIGNOFF
+        row at REVIEW with ``signoff="operator"`` and a staged EMIT_CLI result."""
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import LastResultSource, QueueItemStatus
+        from tests._reconcile_helpers import _stage_complete_payload
+
+        sess = _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="signoff1",
+            name="test-client/auto-dev/GEN-1234",
+            surface_ref="abc12345",
+        )
+        payload = _stage_complete_payload()
+        payload["stage_reached"] = stage_reached
+        payload["review"] = {
+            **payload["review"],
+            "agents_run": 2,
+            "reviewed_sha": "signoff-head",
+        }
+        state = load_state()
+        stored = state.find_by_name_or_id(sess.id)
+        assert stored is not None
+        stored.last_result = payload
+        stored.last_result_source = LastResultSource.EMIT_CLI
+        save_state(state)
+        self._write_staged_client()
+        self._seed_close_row(
+            sess.id, Stage.REVIEW, status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        )
+        store = load_dev_queue()
+        store.tasks[0].signoff = "operator"
+        save_dev_queue(store)
+        monkeypatch.setattr(
+            "cw.dispatch.review_gates.resolve_task_worktree",
+            lambda _t, _c: Path("/stub-worktree"),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.review_gates.current_head_sha", lambda _p: "signoff-head"
+        )
+        return sess
+
+    def test_spawn_close_keeps_signoff_row_held_when_rerouting_staged_result(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3151: closing a session whose row is parked at the operator signoff
+        gate re-routes the staged result through the gate, which re-parks the
+        row; it is never cancelled or advanced to FINALIZE."""
+        from cw.cli.spawn import _spawn_close_impl
+        from cw.models import QueueItemStatus
+
+        sess = self._seed_signoff_close(
+            tmp_path, tmp_config_dir, monkeypatch, stage_reached="stage3_review"
+        )
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=FakeNativeDaemonClient())
+
+        row = self._reload_close_row()
+        assert row.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        assert row.stage == Stage.REVIEW
+        assert row.disposition == "signoff_gate"
+        closed = load_state().find_by_name_or_id(sess.id)
+        assert closed is not None
+        assert closed.status == SessionStatus.COMPLETED
+        assert closed.completed_reason == CompletionReason.USER
+
+    def test_spawn_close_leaves_signoff_row_held_on_refused_staged_result(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3151: a stage-mismatched (refused) staged result on a signoff-parked
+        row leaves it AWAITING_OPERATOR_SIGNOFF; the close cancel only targets
+        RUNNING rows."""
+        from cw.cli.spawn import _spawn_close_impl
+        from cw.models import QueueItemStatus
+
+        sess = self._seed_signoff_close(
+            tmp_path, tmp_config_dir, monkeypatch, stage_reached="stage2_impl"
+        )
+
+        _spawn_close_impl(session_id=sess.id, native_daemon=FakeNativeDaemonClient())
+
+        row = self._reload_close_row()
+        assert row.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        assert row.stage == Stage.REVIEW
+        closed = load_state().find_by_name_or_id(sess.id)
+        assert closed is not None
+        assert closed.status == SessionStatus.COMPLETED
+
     def test_spawn_close_requeue_after_parked_row_rescue_is_a_noop(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

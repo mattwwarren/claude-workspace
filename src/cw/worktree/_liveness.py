@@ -281,12 +281,17 @@ def live_home_reason(
 
       A roster worker whose ``surface_ref`` maps to a session already in a
       TERMINAL status (COMPLETED/TIMED_OUT), or to no cw session at all
-      (never tracked, or the record is gone), is NOT counted as occupying --
-      it is a leaked daemon worker the session-completion stop should have
-      cleaned up (#2480; see :mod:`cw.reconcile.leaked_workers` for the sweep
-      that clears it). Without this filter a finished worker's idle roster
-      entry reports its ticket's worktree occupied forever, and the ticket
-      can never be re-dispatched.
+      (never tracked, or the record is gone), is NOT counted as occupying
+      (#2480). Without this filter a finished worker's idle roster entry
+      reports its ticket's worktree occupied forever, and the ticket can never
+      be re-dispatched. :mod:`cw.reconcile.leaked_workers` stops the
+      TERMINAL-session worker, and an unrecorded worker only when it is
+      evidenced orphaned (at least 180 s old and homed inside a configured cw
+      worktree base, #2670). An unrecorded worker that sweep spares (young,
+      no ``startedAt``, a non-cw or out-of-base cwd, no configured base) is
+      NOT cleared and stays on the roster, yet is still not counted here: the
+      ADR-0006 occupancy trade-off. ``cw doctor``'s
+      ``spared-unrecorded-workers`` advisory lists the old ones (#3257).
 
     Fails closed on the TARGET path exactly as before: any ``OSError``
     other than the deliberate ``FileNotFoundError`` carve-out (see

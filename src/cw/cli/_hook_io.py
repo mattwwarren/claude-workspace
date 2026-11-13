@@ -39,7 +39,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 import click
 
@@ -139,12 +139,29 @@ def find_cw_context_failopen(start: Path) -> dict[str, object] | None:
         return None
 
 
-def context_session_id(start: Path) -> str | None:
-    """The nearest cw-context's non-empty string ``session_id``, or None (#2651)."""
+class ContextIdentity(NamedTuple):
+    """The nearest cw-context's non-empty string identity keys (None when absent)."""
+
+    session_id: str | None
+    ticket_id: str | None
+
+
+_NO_CONTEXT_IDENTITY = ContextIdentity(session_id=None, ticket_id=None)
+
+
+def context_identity(start: Path) -> ContextIdentity:
+    """The nearest cw-context's ``session_id`` and ``ticket_id`` (#2651, #3312).
+
+    One fail-open walk (:func:`find_cw_context_failopen`) reads both keys, each
+    a non-empty string or None. No context reads as both None.
+    """
     context = find_cw_context_failopen(start)
     if context is None:
-        return None
-    return _context_str(context, "session_id")
+        return _NO_CONTEXT_IDENTITY
+    return ContextIdentity(
+        session_id=_context_str(context, "session_id"),
+        ticket_id=_context_str(context, "ticket_id"),
+    )
 
 
 def active_headless_context(payload: dict[str, object]) -> dict[str, object] | None:

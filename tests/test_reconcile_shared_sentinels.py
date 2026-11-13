@@ -45,6 +45,7 @@ from cw.models import (
     CompletionReason,
     CwState,
     DevQueueStore,
+    LastResultSource,
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
@@ -63,7 +64,11 @@ from cw.reconcile import (
     compute_drift,
     reconcile,
 )
-from cw.reconcile._shared import WorktreeProbeError
+from cw.reconcile._shared import (
+    WorktreeProbeError,
+    _stamp_sentinel_partial_route_consumed,
+    holds_staged_emit_result,
+)
 from cw.reconcile._shared import _roster as _roster_module
 from cw.reconcile._shared._roster import (
     CLAUDE_AGENTS_TIMEOUT_SECONDS,
@@ -437,6 +442,65 @@ def test_has_terminal_sentinel_unit(
 
     base.last_result = "not-a-dict"  # type: ignore[assignment]
     assert _has_terminal_sentinel(base) is False
+
+
+def _staged_session(
+    last_result: dict[str, object] | None,
+    source: LastResultSource | None = LastResultSource.EMIT_CLI,
+) -> Session:
+    sess = Session(
+        id="staged-pred",
+        name="client-a/staged-pred",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    sess.last_result = last_result
+    sess.last_result_source = source
+    return sess
+
+
+class TestHoldsStagedEmitResultIncludeConsumed:
+    """#3152: ``include_consumed`` widens only the consumed check."""
+
+    def test_unconsumed_staged_result_holds_under_both_shapes(self) -> None:
+        sess = _staged_session({"status": "shipped"})
+        assert holds_staged_emit_result(sess) is True
+        assert holds_staged_emit_result(sess, include_consumed=True) is True
+
+    def test_consumed_result_holds_only_with_include_consumed(self) -> None:
+        sess = _staged_session({"status": "shipped"})
+        _stamp_sentinel_partial_route_consumed(sess)
+        assert holds_staged_emit_result(sess) is False
+        assert holds_staged_emit_result(sess, include_consumed=True) is True
+
+    @pytest.mark.parametrize(
+        ("last_result", "source"),
+        [
+            pytest.param(
+                {"status": "shipped"},
+                LastResultSource.STOP_HOOK_HARVEST,
+                id="non-emit-cli",
+            ),
+            pytest.param(
+                {"paused_status": "silently_idle"},
+                LastResultSource.EMIT_CLI,
+                id="parked-marker",
+            ),
+            pytest.param(None, LastResultSource.EMIT_CLI, id="no-result"),
+        ],
+    )
+    def test_never_holds_without_staged_terminal_emit(
+        self,
+        last_result: dict[str, object] | None,
+        source: LastResultSource,
+    ) -> None:
+        sess = _staged_session(last_result, source)
+        assert holds_staged_emit_result(sess) is False
+        assert holds_staged_emit_result(sess, include_consumed=True) is False
 
 
 def test_awaiting_subagent_and_window_constant_removed_from_reconcile() -> None:

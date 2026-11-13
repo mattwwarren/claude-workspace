@@ -45,6 +45,7 @@ from cw.reconcile.leaked_workers import (
     LEAKED_WORKER_GRACE_SECONDS,
     LeakedWorker,
     find_leaked_daemon_workers,
+    find_spared_unrecorded_workers,
     stop_leaked_daemon_worker,
     sweep_leaked_daemon_workers,
 )
@@ -444,6 +445,126 @@ class TestUnrecordedWorkerEvidence:
         # to confirm it gone; that must land before the unconfirmed-worker page.
         tick = OrchestratorConfig().tick_interval_seconds
         assert _GRACE + 2 * tick < _ATTENTION_GRACE.total_seconds()
+
+
+def _spared(
+    state: CwState,
+    daemon: FakeNativeDaemonClient,
+    clients: Mapping[str, ClientConfig],
+    now: datetime = _NOW,
+) -> list[str] | None:
+    homes = find_spared_unrecorded_workers(
+        state, daemon=daemon, now=now, clients=clients
+    )
+    return None if homes is None else sorted(h.short_id for h in homes)
+
+
+class TestFindSparedUnrecordedWorkers:
+    """#3257: the read-only complement of the absent arm."""
+
+    def test_old_non_cw_cwd_is_spared(
+        self, tmp_path: Path, client: ClientConfig
+    ) -> None:
+        daemon = FakeNativeDaemonClient()
+        sid = daemon.seed_live_worker(tmp_path / "elsewhere", started_at_ms=_OLD_MS)
+
+        assert _spared(CwState(), daemon, _clients(client)) == [sid]
+
+    def test_old_worker_with_no_clients_is_spared(self, base: Path) -> None:
+        daemon = FakeNativeDaemonClient()
+        sid = _orphan(daemon, base)
+
+        assert _spared(CwState(), daemon, {}) == [sid]
+
+    def test_old_worker_in_removed_or_changed_base_is_spared(
+        self, tmp_path: Path, base: Path
+    ) -> None:
+        daemon = FakeNativeDaemonClient()
+        sid = _orphan(daemon, base)
+        moved = ClientConfig(
+            name="client-a",
+            workspace_path=tmp_path / "ws",
+            worktree_base=tmp_path / "moved",
+        )
+
+        assert _spared(CwState(), daemon, _clients(moved)) == [sid]
+
+    def test_young_worker_is_not_listed(
+        self, tmp_path: Path, client: ClientConfig
+    ) -> None:
+        daemon = FakeNativeDaemonClient()
+        daemon.seed_live_worker(
+            tmp_path / "elsewhere", started_at_ms=ms_of(_NOW) - 1000
+        )
+
+        assert _spared(CwState(), daemon, _clients(client)) == []
+
+    def test_grace_boundary_is_inclusive(
+        self, tmp_path: Path, client: ClientConfig
+    ) -> None:
+        daemon = FakeNativeDaemonClient()
+        sid = daemon.seed_live_worker(
+            tmp_path / "elsewhere", started_at_ms=ms_of(_NOW) - _GRACE * 1000
+        )
+
+        assert _spared(CwState(), daemon, _clients(client)) == [sid]
+
+    def test_worker_without_started_at_is_not_listed(
+        self, tmp_path: Path, client: ClientConfig
+    ) -> None:
+        daemon = FakeNativeDaemonClient()
+        daemon.seed_live_worker(tmp_path / "elsewhere")
+
+        assert _spared(CwState(), daemon, _clients(client)) == []
+
+    def test_evidenced_orphan_is_not_listed(
+        self, base: Path, client: ClientConfig
+    ) -> None:
+        daemon = FakeNativeDaemonClient()
+        _orphan(daemon, base)
+
+        assert _spared(CwState(), daemon, _clients(client)) == []
+
+    @pytest.mark.parametrize("status", [SessionStatus.ACTIVE, SessionStatus.COMPLETED])
+    def test_worker_named_by_a_session_is_not_listed(
+        self, tmp_path: Path, client: ClientConfig, status: SessionStatus
+    ) -> None:
+        daemon = FakeNativeDaemonClient()
+        sid = daemon.seed_live_worker(tmp_path / "elsewhere", started_at_ms=_OLD_MS)
+        state = CwState(
+            sessions=[_make_daemon_session(id="s1", status=status, surface_ref=sid)]
+        )
+
+        assert _spared(state, daemon, _clients(client)) == []
+
+    def test_roster_unreadable_returns_none(self, client: ClientConfig) -> None:
+        daemon = FakeNativeDaemonClient()
+        daemon.roster_unreadable = True
+
+        assert _spared(CwState(), daemon, _clients(client)) is None
+
+    def test_naive_now_is_rejected(self, client: ClientConfig) -> None:
+        daemon = FakeNativeDaemonClient()
+        with pytest.raises(ValueError, match="timezone-aware"):
+            _spared(CwState(), daemon, _clients(client), now=_NOW.replace(tzinfo=None))
+
+    def test_spared_and_leaked_never_overlap(
+        self, tmp_path: Path, base: Path, client: ClientConfig
+    ) -> None:
+        daemon = FakeNativeDaemonClient()
+        orphan = _orphan(daemon, base)
+        outside = daemon.seed_live_worker(tmp_path / "out", started_at_ms=_OLD_MS)
+        daemon.seed_live_worker(tmp_path / "young", started_at_ms=ms_of(_NOW))
+        daemon.seed_live_worker(tmp_path / "ageless")
+        clients = _clients(client)
+
+        leaked = _find(CwState(), daemon, clients)
+        spared = _spared(CwState(), daemon, clients)
+
+        assert leaked is not None
+        assert [w.short_id for w in leaked] == [orphan]
+        assert spared == [outside]
+        assert not {w.short_id for w in leaked} & set(spared)
 
 
 class TestStopLeakedDaemonWorker:
