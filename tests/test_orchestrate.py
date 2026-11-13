@@ -67,7 +67,11 @@ from tests import _git_sandbox
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._reconcile_helpers import probe_sessions_lock_free
 from tests._shared.dispatch_fixtures import _seed_inbox_with_cursor, _spy_parse_lines
-from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
+from tests._shared.session_seeding import (
+    _make_daemon_session,
+    _make_ticket_task,
+    _seed_sessions,
+)
 
 _RunnerFn = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
@@ -3048,6 +3052,34 @@ class TestOrchestrateStart:
         assert "cw spawn close orch-live-01" in result.output
         assert "--status completed" not in result.output
 
+    def test_start_ignores_live_review_session_on_lane(
+        self,
+        tmp_config_dir: Path,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#3253: only a live ORCHESTRATE session blocks a lane rebind."""
+        workspace = _write_client_with_lane(tmp_config_dir, "impl")
+        monkeypatch.setattr(
+            "cw.cli.orchestrate.get_native_daemon_client", lambda: mock_native_daemon
+        )
+        review = Session(
+            id="review-live-01",
+            name="test-client/review",
+            client="test-client",
+            purpose=SessionPurpose.REVIEW,
+            status=SessionStatus.ACTIVE,
+            workspace_path=workspace,
+            lane="impl",
+        )
+        save_state(CwState(sessions=[review]))
+
+        result = CliRunner().invoke(main, ["orchestrate", "start", "--lane", "impl"])
+
+        assert result.exit_code == 0, result.output
+        purposes = {s.purpose for s in load_state().sessions}
+        assert purposes == {SessionPurpose.REVIEW, SessionPurpose.ORCHESTRATE}
+
     def test_start_allows_rebind_on_terminal(
         self,
         tmp_config_dir: Path,
@@ -3548,6 +3580,25 @@ def test_orchestrate_run_binding_gate_raises_without_binding(
     assert result.exit_code != 0
     combined = result.output + str(result.exception or "")
     assert "No ORCHESTRATE binding" in combined
+
+
+def test_orchestrate_run_review_session_is_not_a_binding(run_env: Path) -> None:
+    """#3253: a REVIEW session on the lane does not satisfy the binding gate."""
+    _seed_sessions(
+        _make_daemon_session(
+            id="review-1",
+            name="client-a/review/lane-x",
+            client="client-a",
+            purpose=SessionPurpose.REVIEW,
+            status=SessionStatus.ACTIVE,
+            lane="lane-x",
+        )
+    )
+    result = CliRunner().invoke(
+        main, ["orchestrate", "run", "--lane", "lane-x", "--once"]
+    )
+    assert result.exit_code != 0
+    assert "No ORCHESTRATE binding" in result.output + str(result.exception or "")
 
 
 def test_orchestrate_run_defaults_to_first_client_with_warning(

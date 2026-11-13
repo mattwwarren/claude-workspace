@@ -445,6 +445,37 @@ class TestSessionList:
         assert "sess0001" in ids
         assert "sess0002" not in ids
 
+    def test_list_filter_by_review_purpose(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#3253: a codex REVIEW session filters, lists and shows as ``review``."""
+        review = _make_session(
+            tmp_path,
+            session_id="sess0001",
+            purpose=SessionPurpose.REVIEW,
+            # Name avoids "review" so the list assertion sees the purpose column.
+            name="c/stage-1",
+        )
+        impl = _make_session(
+            tmp_path, session_id="sess0002", purpose=SessionPurpose.IMPL, name="c/impl"
+        )
+        _seed_sessions(review, impl)
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["session", "list", "--purpose", "review", "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        assert [s["id"] for s in json.loads(result.output)] == ["sess0001"]
+
+        human = runner.invoke(main, ["session", "list", "--purpose", "review"])
+        assert human.exit_code == 0, human.output
+        assert "review" in human.output
+        assert "sess0002" not in human.output
+
+        shown = runner.invoke(main, ["session", "show", "sess0001"])
+        assert shown.exit_code == 0, shown.output
+        assert "purpose: review" in shown.output
+
     def test_list_filter_by_ticket(self, tmp_config_dir: Path, tmp_path: Path) -> None:
         # ticket_id_for_session parses "client/auto-dev/238" -> "238"
         auto_dev = _make_session(
