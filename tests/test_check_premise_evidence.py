@@ -31,6 +31,7 @@ _SCRIPT = _REPO_ROOT / ".claude" / "scripts" / "check_premise_evidence.py"
 _FIXTURES = Path(__file__).parent / "fixtures" / "premise_evidence"
 
 _mod = load_guard_script_module(_SCRIPT, "check_premise_evidence")
+_REAL_UTCNOW = _mod._utcnow
 
 _NOW = datetime(2026, 11, 13, 5, 0, 0, tzinfo=UTC)
 _STAGE_STARTED = "2026-11-13T04:52:06.649980+00:00"
@@ -195,6 +196,14 @@ def test_script_does_not_touch_transcripts() -> None:
     assert ".jsonl" not in source
     assert "projects" not in source
     assert "Path.home" not in source
+
+
+def test_real_clock_is_timezone_aware_utc() -> None:
+    before = datetime.now(UTC)
+    observed = _REAL_UTCNOW()
+    assert observed.tzinfo is not None
+    assert observed.utcoffset() == timedelta(0)
+    assert before <= observed <= datetime.now(UTC)
 
 
 # ---------------------------------------------------------------------------

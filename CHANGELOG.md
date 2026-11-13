@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Plan-stage Self-Verified premises are bound to the check that produced them (#2343).** The Product Manager Reviewer stamps each `Verified: YES` premise with `Observed-at`, `Kind` and `Tool-call`, a new stdlib script (`.claude/scripts/check_premise_evidence.py`) validates their shape and the dispatch time window, and a stale or unbound premise is downgraded to `unverified` instead of surviving as "verified". A failed re-verification is `Verified: NO`, never carried forward. The script proves freshness shape only, not that the quoted call ran. Prose and script only: no schema, `blocker.reason` or status change.
 - **Plan-stage resumed rounds fold operator answers into the plan before review (#2258, #2176, #2181).** A new Step 1c.0a folds the operator's answers to parked ambiguities and to advisory plan-review findings into the draft before the stations re-review it, and the Working-plan rule makes the validated text the only plan the rest of the round reads. Station prompts carry the decisions, and a finding a decision fully answers is labelled `Decided:` with a verified verbatim quote. The label never changes severity or gating. Prose only: no schema, `blocker.reason` or status change, and codex parity is deferred (#3464).
 
 ### Added
