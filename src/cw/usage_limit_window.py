@@ -158,6 +158,28 @@ class ClearResult:
     rows_released: tuple[str, ...]
 
 
+def clear_summary_lines(result: ClearResult) -> list[str]:
+    """Render the operator-facing summary of a completed clear."""
+    if result.old_until is None:
+        lines = [
+            f"no active usage-limit window for {result.client}; clear mark recorded"
+        ]
+    else:
+        lines = [
+            f"cleared usage-limit window for {result.client}"
+            f" (was until {display_instant(result.old_until)})"
+        ]
+    if result.rows_released:
+        lines.append(
+            f"released {len(result.rows_released)} row(s):"
+            f" {', '.join(result.rows_released)}"
+        )
+    lines.append(
+        "a running dispatch loop drops the window on its next tick; no restart needed"
+    )
+    return lines
+
+
 def _releasable(task: TicketTask, client: str, now: datetime) -> bool:
     """A PENDING row of *client* holding a future, non-gate wait."""
     stamp = task.next_eligible_at
@@ -270,23 +292,7 @@ def _event_payload(
 
 def _event_failure_message(result: ClearResult, error: Exception) -> str:
     """Describe the state that was cleared when the audit write failed."""
-    if result.old_until is None:
-        summary = (
-            f"no active usage-limit window for {result.client}; clear mark recorded"
-        )
-    else:
-        summary = (
-            f"cleared usage-limit window for {result.client} (was until"
-            f" {display_instant(result.old_until)})"
-        )
-    if result.rows_released:
-        summary += (
-            f"\nreleased {len(result.rows_released)} row(s):"
-            f" {', '.join(result.rows_released)}"
-        )
-    summary += (
-        "\na running dispatch loop drops the window on its next tick; no restart needed"
-    )
+    summary = "\n".join(clear_summary_lines(result))
     return (
         f"{summary}\nusage-limit window for {result.client} was cleared (was until"
         f" {display_instant(result.old_until)}; released {len(result.rows_released)}"

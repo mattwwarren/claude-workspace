@@ -24,6 +24,7 @@ from cw.operator_identity import resolve_actor_or_empty
 from cw.usage_limit_probe import ProbeVerdict, probe_account_usage_limit
 from cw.usage_limit_window import (
     apply_usage_limit_clear,
+    clear_summary_lines,
     display_instant,
     plan_usage_limit_clear,
 )
@@ -32,7 +33,7 @@ from ._group import dev_queue
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig
-    from cw.usage_limit_window import ClearPlan, ClearResult
+    from cw.usage_limit_window import ClearPlan
 
 _PROBE_SKIPPED = "skipped"
 
@@ -58,28 +59,6 @@ def _dry_run_lines(plan: ClearPlan) -> list[str]:
             " is released"
         )
     lines.append("dry run: no changes made")
-    return lines
-
-
-def _summary_lines(result: ClearResult) -> list[str]:
-    """What the clear changed."""
-    if result.old_until is None:
-        lines = [
-            f"no active usage-limit window for {result.client}; clear mark recorded"
-        ]
-    else:
-        lines = [
-            f"cleared usage-limit window for {result.client}"
-            f" (was until {display_instant(result.old_until)})"
-        ]
-    if result.rows_released:
-        lines.append(
-            f"released {len(result.rows_released)} row(s):"
-            f" {', '.join(result.rows_released)}"
-        )
-    lines.append(
-        "a running dispatch loop drops the window on its next tick; no restart needed"
-    )
     return lines
 
 
@@ -162,4 +141,4 @@ def usage_limit_clear(client: str, dry_run: bool, force: bool) -> None:
     result = apply_usage_limit_clear(
         plan, actor=actor, forced=force, probe_verdict=verdict
     )
-    _echo(_summary_lines(result))
+    _echo(clear_summary_lines(result))
