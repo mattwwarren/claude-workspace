@@ -80,6 +80,15 @@ def _mount_findings(
     return headroom, shortfalls, notes
 
 
+def _guard_note(status: RetentionStatus) -> str:
+    """Describe the open-file guard of an ok run (informational, never a warn)."""
+    if not status.proc_guard:
+        return "age-only (no /proc guard)"
+    if status.unreadable_procs:
+        return f"/proc guard on, {status.unreadable_procs} processes unreadable"
+    return "/proc guard on"
+
+
 def _retention_detail(
     status: RetentionStatus | None, config: OrchestratorConfig, now: datetime
 ) -> str:
@@ -97,7 +106,8 @@ def _retention_detail(
     return (
         f"last retention run {age} ago: removed {status.removed_files} files,"
         f" {status.removed_dirs} dirs ({status.freed_bytes}B freed),"
-        f" kept {status.kept_in_use} in use, {status.errors} errors"
+        f" kept {status.kept_in_use} in use, {status.errors} errors;"
+        f" {_guard_note(status)}"
     )
 
 

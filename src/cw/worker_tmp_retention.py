@@ -6,7 +6,11 @@ dir is one flat shared tree, so ownership by a live worker cannot be read from
 its layout. The sweep therefore protects, on Linux, every path a live process
 holds open or as its ``cwd`` (plus that path's ancestors up to the root), and
 ages out everything else by ``max(mtime, ctime)``. Where ``/proc`` is unreadable
-it falls back to age alone, and the status record says so.
+it falls back to age alone, and the status record says so. The guard is partial
+where a single ``/proc/<pid>`` entry is unreadable (another uid's process, say):
+that process can still hold a file open unseen, so each such pid is counted into
+``unreadable_procs``. The count is accounting only; it protects nothing and
+never blocks a removal.
 
 The caller is the dispatch loop's guarded post-tick step
 (``cw.dispatch.loop._run_worker_tmp_retention_guarded``), which holds no guarded
@@ -54,6 +58,9 @@ MAX_SCAN_ENTRIES = 200_000
 MEASURE_LIMIT = 50_000
 
 _NOT_EMPTY_ERRNOS = frozenset({errno.ENOTEMPTY, errno.EEXIST})
+# A process (or one of its fds) that went away mid-scan, as opposed to one whose
+# ``/proc`` entry exists but cannot be read.
+_VANISHED = (FileNotFoundError, ProcessLookupError)
 
 # Process-local record of the last due run, keyed ``_ATTEMPT_KEY``. The sidecar
 # is the cross-process cadence record, but ``write_sidecar`` swallows a write
@@ -77,12 +84,17 @@ class RetentionStatus(BaseModel):
     retention_days: int
     capped: bool = False
     proc_guard: bool = False
+    unreadable_procs: int = 0
     error: str | None = None
 
 
 @dataclass
 class SweepResult:
-    """What one sweep did. ``proc_guard`` is False when ``/proc`` was unreadable."""
+    """What one sweep did.
+
+    ``proc_guard`` is False when ``/proc`` was unreadable; ``unreadable_procs``
+    counts processes whose entry could not be read while it was on.
+    """
 
     removed_files: int = 0
     removed_dirs: int = 0
@@ -91,6 +103,21 @@ class SweepResult:
     errors: int = 0
     capped: bool = False
     proc_guard: bool = False
+    unreadable_procs: int = 0
+
+
+class HeldPaths(NamedTuple):
+    """Paths live processes hold under the root, and how many pids went unread."""
+
+    paths: frozenset[Path]
+    unreadable_procs: int
+
+
+class _ProcTargets(NamedTuple):
+    """One process's readable link targets, and whether any link was unreadable."""
+
+    targets: list[Path]
+    unreadable: bool
 
 
 class TmpUsage(NamedTuple):
@@ -273,40 +300,68 @@ def sweep_fallback_tmp(
     return result
 
 
-def held_paths(root: Path, proc_root: Path = _PROC_ROOT) -> frozenset[Path] | None:
+def _numeric_pids(proc_root: Path) -> list[str] | None:
+    """Return the numeric entry names of *proc_root*, or None when unreadable."""
+    try:
+        return [entry.name for entry in proc_root.iterdir() if entry.name.isdigit()]
+    except OSError:
+        return None
+
+
+def _proc_readable(proc_root: Path) -> bool:
+    """True when *proc_root* can be listed, so the open-file guard could run."""
+    return _numeric_pids(proc_root) is not None
+
+
+def held_paths(root: Path, proc_root: Path = _PROC_ROOT) -> HeldPaths | None:
     """Return every path under *root* a live process holds, plus its ancestors.
 
     Reads each numeric entry's ``cwd`` and ``fd/*`` symlinks. Returns None when
     *proc_root* is unreadable (macOS, or no ``/proc``), so the caller falls back
-    to age alone. Vanished processes and permission errors are skipped. Returned
-    paths carry the canonical root prefix (ancestor symlinks resolved), matching
-    the kernel's ``/proc`` link targets.
+    to age alone. A vanished process is skipped. A process with an entry that
+    fails for any other reason (a permission error) is skipped too, but counted
+    once into ``unreadable_procs``. Returned paths carry the canonical root
+    prefix (ancestor symlinks resolved), matching the kernel's ``/proc`` link
+    targets.
     """
     root = _canonical_root(root)
-    try:
-        pids = [entry.name for entry in proc_root.iterdir() if entry.name.isdigit()]
-    except OSError:
+    pids = _numeric_pids(proc_root)
+    if pids is None:
         return None
     held: set[Path] = set()
+    unreadable = 0
     for pid in pids:
-        for target in _process_targets(proc_root / pid):
+        scan = _process_targets(proc_root / pid)
+        unreadable += scan.unreadable
+        for target in scan.targets:
             held.update(_protected_chain(target, root))
-    return frozenset(held)
+    return HeldPaths(frozenset(held), unreadable)
 
 
-def _process_targets(pdir: Path) -> list[Path]:
-    """Return the readable ``cwd`` and ``fd`` link targets of one process."""
+def _process_targets(pdir: Path) -> _ProcTargets:
+    """Return the readable ``cwd`` and ``fd`` link targets of one process.
+
+    ``FileNotFoundError`` and ``ProcessLookupError`` mean the process or fd went
+    away mid-scan. Any other ``OSError`` (EACCES on another uid's process) marks
+    the process unreadable.
+    """
+    unreadable = False
     try:
         fds = list((pdir / "fd").iterdir())
+    except _VANISHED:
+        fds = []
     except OSError:
         fds = []
+        unreadable = True
     targets: list[Path] = []
     for link in [pdir / "cwd", *fds]:
         try:
             targets.append(Path(link.readlink()))
-        except OSError:
+        except _VANISHED:
             continue
-    return targets
+        except OSError:
+            unreadable = True
+    return _ProcTargets(targets, unreadable)
 
 
 def _protected_chain(target: Path, root: Path) -> list[Path]:
@@ -353,10 +408,21 @@ def _is_empty(root: Path) -> bool:
 
 
 def _run_sweep(root: Path, cutoff: datetime) -> SweepResult:
-    """Sweep *root*; a missing or empty root skips the ``/proc`` scan entirely."""
+    """Sweep *root*; a missing or empty root skips the ``/proc`` scan.
+
+    The skipped scan still records whether ``/proc`` is readable, so the doctor
+    check reports the real guard state rather than a hard-coded off. ``_PROC_ROOT``
+    is passed explicitly, not left to ``held_paths``'s def-time default, so a test
+    can redirect it.
+    """
     if not os.path.lexists(root) or _is_empty(root):
-        return SweepResult(proc_guard=False)
-    return sweep_fallback_tmp(root, cutoff=cutoff, protected=held_paths(root))
+        return SweepResult(proc_guard=_proc_readable(_PROC_ROOT))
+    scan = held_paths(root, proc_root=_PROC_ROOT)
+    result = sweep_fallback_tmp(
+        root, cutoff=cutoff, protected=scan.paths if scan else None
+    )
+    result.unreadable_procs = scan.unreadable_procs if scan else 0
+    return result
 
 
 def auto_sweep_fallback_tmp(
@@ -407,6 +473,7 @@ def auto_sweep_fallback_tmp(
             retention_days=days,
             capped=result.capped,
             proc_guard=result.proc_guard,
+            unreadable_procs=result.unreadable_procs,
         ),
         _log,
     )
