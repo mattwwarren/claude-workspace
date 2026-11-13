@@ -804,13 +804,13 @@ def test_draft_static_pre_window_is_carried() -> None:
     assert item["reasons"] == []
 
 
-def test_draft_repository_source_static_pre_window_is_stale() -> None:
+def test_draft_repository_source_static_pre_window_is_carried() -> None:
     entry = _new_entry(kind="STATIC", observed_at=_BEFORE).replace(
         "`tool --help` shows --json", "src/api.py:12", 1
     )
     item = _one(_draft_eval(_draft(entry)))
-    assert item["verdict"] == "STALE"
-    assert item["reasons"] == ["observed-before-window"]
+    assert item["verdict"] == "CARRIED"
+    assert item["reasons"] == []
 
 
 def test_draft_live_pre_window_is_stale() -> None:

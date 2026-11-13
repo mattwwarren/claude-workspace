@@ -61,6 +61,9 @@ Exit codes:
 A missing or malformed ``--context`` file, or an absent ``stage_started_at``, is
 a *verdict*, not exit 2: every evaluated item gets ``context-unavailable``.
 
+Structural entry errors use the named reason codes ``route-missing-or-invalid``
+and ``duplicate-key`` in addition to the freshness reason codes above.
+
 The JSON verdict is written to stdout on exits 0 and 1:
     {"items":[{"claim":str,"verdict":"BOUND|UNBOUND|FRESH|CARRIED|STALE",
                "reasons":[<code>...]}]}
@@ -110,6 +113,8 @@ _RELABEL_SCOPE_RE = re.compile(r"\b(?:this round|dispatch|session)\b", re.IGNORE
 
 _CARRIED_ROUTES = ("IMPACT", "RESOLUTION")
 _ROUTES = ("VERIFIED", "IMPACT", "RESOLUTION")
+_REASON_ROUTE_INVALID = "route-missing-or-invalid"
+_REASON_DUPLICATE_KEY = "duplicate-key"
 
 VERDICT_BOUND = "BOUND"
 VERDICT_UNBOUND = "UNBOUND"
@@ -120,13 +125,6 @@ _VERDICTS = frozenset(
     {VERDICT_BOUND, VERDICT_UNBOUND, VERDICT_FRESH, VERDICT_CARRIED, VERDICT_STALE}
 )
 _FAILED_VERDICTS = _VERDICTS.intersection({VERDICT_UNBOUND, VERDICT_STALE})
-
-_REPOSITORY_SOURCE_RE = re.compile(
-    r"(?<![A-Za-z0-9_.-])(?:\.?/?(?:src|tests|\.claude|scripts|lib|app|packages)/"
-    r"[A-Za-z0-9_.~/-]+(?::[0-9]+(?::[0-9]+)?)?|"
-    r"[A-Za-z0-9_.-]+\.(?:c|cc|cpp|go|java|js|jsx|md|py|rb|rs|sh|ts|tsx|yaml|yml)"
-    r":[0-9]+(?::[0-9]+)?)(?![A-Za-z0-9_.-])"
-)
 
 
 @dataclass
@@ -388,7 +386,7 @@ def _parse_form_b(text: str) -> _Entry | None:
         tool_call=pairs.get("Tool-call"),
         observed_attempt=pairs.get("Observed-attempt"),
         text=text,
-        structural_reasons=("duplicate-key",) if duplicate_keys else (),
+        structural_reasons=(_REASON_DUPLICATE_KEY,) if duplicate_keys else (),
     )
 
 
@@ -442,11 +440,6 @@ def _entry_route(entry: _Entry) -> str:
     return _infer_legacy_route(entry.evidence)
 
 
-def _is_repository_source_evidence(evidence: str) -> bool:
-    evidence_without_urls = re.sub(r"https?://\S+", "", evidence)
-    return _REPOSITORY_SOURCE_RE.search(evidence_without_urls) is not None
-
-
 def _is_relabeled(text: str) -> bool:
     for sentence in _SENTENCE_SPLIT_RE.split(text):
         if _RELABEL_ACTION_RE.search(sentence) and _RELABEL_SCOPE_RE.search(sentence):
@@ -462,15 +455,12 @@ def _verified_entry_verdict(
         if window_start is None:
             reasons.append("context-unavailable")
         return VERDICT_STALE, reasons
-    effective_kind = entry.kind
-    if entry.kind == "STATIC" and _is_repository_source_evidence(entry.evidence):
-        effective_kind = "LIVE"
-    stamp = (entry.observed_at, effective_kind, entry.tool_call, entry.observed_attempt)
-    reasons = [] if entry.route in _ROUTES else ["route-missing-or-invalid"]
+    stamp = (entry.observed_at, entry.kind, entry.tool_call, entry.observed_attempt)
+    reasons = [] if entry.route in _ROUTES else [_REASON_ROUTE_INVALID]
     reasons.extend(_freshness_reasons(stamp, window_start, now))
     if not reasons:
         return VERDICT_FRESH, []
-    if reasons == ["observed-before-window"] and effective_kind == "STATIC":
+    if reasons == ["observed-before-window"] and entry.kind == "STATIC":
         return VERDICT_CARRIED, []
     return VERDICT_STALE, reasons
 

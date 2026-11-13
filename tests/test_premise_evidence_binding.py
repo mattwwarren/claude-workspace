@@ -261,6 +261,9 @@ def test_pre_pass_lists_stale_entries_for_reverification() -> None:
     assert RE_VERIFY_HEADING in para
     assert "removed from the plan copy handed to the reviewer" in para
     assert "`context-unavailable`" in para
+    assert "also fails open" in para
+    assert "preserve the authoritative entries" in para
+    assert "skip stale-premise reconciliation" in para
 
 
 def test_pre_pass_states_working_plan_rule_is_not_violated() -> None:
