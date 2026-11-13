@@ -77,6 +77,7 @@ from cw.dispatch_state import (
     record_usage_limit_armed,
     resolve_usage_limited_until,
 )
+from cw.dispatch_state_marks import load_usage_limit_clear_marks
 from cw.events import record_event
 from cw.exceptions import parse_usage_limit_reset
 from cw.models import (
@@ -394,15 +395,34 @@ def _lockout_covers(client: str, until: datetime, *, now: datetime) -> bool:
     return armed is not None and armed >= until
 
 
-def _arm_lockout(act: _Act) -> bool:
+def _act_is_moot(row: _ActRow) -> bool:
+    """Did an operator clear the client's window after this act was decided?
+
+    Read once per resume attempt by :func:`_resume_contained` (#3547).
+    """
+    mark = load_usage_limit_clear_marks().get(row.client)
+    return mark is not None and mark >= row.intent.started_at
+
+
+def _arm_lockout(act: _Act, *, moot: bool = False) -> bool:
     """Arm the client's spawn lockout unless the sidecar already covers it.
 
     The shared helper audits before it persists, so a failed audit write
     raises with no window saved. The sidecar write swallows its own errors,
     so the window is read back: one that did not land is retried next tick.
+    A *moot* act (decided before an operator clear, #3547) arms nothing.
     """
     row = act.row
     until = row.intent.until
+    if moot:
+        _log.info(
+            "usage_limit_mid_turn: the act on ticket %s was decided before the "
+            "operator cleared the %s window; not re-arming and not stamping "
+            "next_eligible_at",
+            row.ticket_id,
+            row.client,
+        )
+        return True
     if _lockout_covers(row.client, until, now=act.now):
         return True
     record_usage_limit_armed(row.client, until=until, reset_at=row.intent.reset_at)
@@ -647,7 +667,7 @@ def _persist_completed(act: _Act) -> bool:
     return True
 
 
-def _requeue(target: TicketTask, *, until: datetime) -> None:
+def _requeue(target: TicketTask, *, until: datetime | None) -> None:
     transition_task_status(target, QueueItemStatus.PENDING, unproductive=False)
     target.session_id = None
     target.next_eligible_at = until
@@ -664,12 +684,14 @@ def _park(target: TicketTask) -> None:
     )
 
 
-def _finish(row: _ActRow) -> bool:
+def _finish(row: _ActRow, *, moot: bool = False) -> bool:
     """Transition the row, clearing the intent in the same write.
 
-    Returns True iff an ``auto`` act requeued the row to PENDING.
+    Returns True iff an ``auto`` act requeued the row to PENDING. A *moot*
+    act requeues with no ``next_eligible_at`` stamp (#3547).
     """
-    mutate = partial(_requeue, until=row.intent.until) if row.auto else _park
+    until = None if moot else row.intent.until
+    mutate = partial(_requeue, until=until) if row.auto else _park
     if _mutate_act_row(row, mutate):
         return row.auto
     _log.info(
@@ -681,13 +703,13 @@ def _finish(row: _ActRow) -> bool:
     return False
 
 
-def _resume(act: _Act) -> bool:
+def _resume(act: _Act, *, moot: bool = False) -> bool:
     """Perform every step the act has not done yet; True iff it requeued."""
-    if not _arm_lockout(act) or not _audit(act):
+    if not _arm_lockout(act, moot=moot) or not _audit(act):
         return False
     if act.row.auto and _close_and_request_stop(act) is not _Stop.DONE:
         return False
-    return _finish(act.row)
+    return _finish(act.row, moot=moot)
 
 
 def _resume_contained(
@@ -703,9 +725,12 @@ def _resume_contained(
 
     The intent makes every step resumable, so a write that fails is logged
     and retried next tick rather than aborting the other reconcile sweeps.
+    Whether an operator clear made the act moot is read ONCE here and passed
+    down, so nothing in the chain recomputes it against a newer mark (#3547).
     """
     session = next((s for s in state.sessions if s.id == row.intent.session_id), None)
     try:
+        moot = _act_is_moot(row)
         if session is None:
             # No session left to audit, stop or close: only the row remains.
             _log.warning(
@@ -714,7 +739,7 @@ def _resume_contained(
                 row.intent.session_id,
                 row.ticket_id,
             )
-            return _finish(row)
+            return _finish(row, moot=moot)
         act = _Act(
             row=row,
             state=state,
@@ -724,7 +749,7 @@ def _resume_contained(
             deferred=deferred,
             roster_captured_at=roster_captured_at,
         )
-        return _resume(act)
+        return _resume(act, moot=moot)
     except OSError:
         _log.warning(
             "usage_limit_mid_turn: a step of the act on ticket %s session %s "
