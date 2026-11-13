@@ -28,7 +28,7 @@ def _patch_cw_dist_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(importlib.metadata, "distribution", _raise)
 
 
-def _write_project_config_yaml(root: Path, content: str) -> None:
+def _write_project_config_yaml(root: Path, content: str | bytes) -> None:
     """Write .claude/project-config.yaml under *root*.
 
     Shared by test_tracker.py's and test_review_strategy.py's own private
@@ -36,11 +36,16 @@ def _write_project_config_yaml(root: Path, content: str) -> None:
     root); this is the canonical version new tests should import instead of
     adding a fourth copy. The two existing private copies in test_tracker.py
     and test_review_strategy.py are left as-is — pre-existing duplication,
-    out of scope for this ticket.
+    out of scope for this ticket. *content* may be bytes for tests that need a
+    non-UTF-8 file (#2179).
     """
     config_dir = root / ".claude"
     config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "project-config.yaml").write_text(content, encoding="utf-8")
+    path = config_dir / "project-config.yaml"
+    if isinstance(content, bytes):
+        path.write_bytes(content)
+    else:
+        path.write_text(content, encoding="utf-8")
 
 
 def _write_tracker_config(root: Path, system: str) -> None:
