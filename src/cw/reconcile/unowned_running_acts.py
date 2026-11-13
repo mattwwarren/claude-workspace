@@ -15,7 +15,9 @@ unbound RUNNING row that cannot be adopted:
   removal, no ``ever_spawned`` write; ``unproductive=False``, because a dead
   dispatcher is an infrastructure fault. ``auto`` additionally needs a
   non-empty in-lock roster (binding R13): ``claude agents --json`` cannot be
-  re-read under the lock, so an empty roster proves nothing.
+  re-read under the lock, so an empty roster proves nothing. At most
+  ``UNOWNED_ACTS_MAX_PER_TICK`` acts per tick (rows that wait do not count),
+  and a failure on one row is logged and retried next tick.
 - **UNCONFIRMABLE** (signal only). One ``session.needs_attention`` page, then
   the ``advisory_note`` latch (page first, latch second, the #2524 rule). No
   status, ``session_id`` or lane-slot change.
@@ -88,9 +90,10 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 # Most NO_OWNER acts per tick, oldest claim first; the rest wait for a later
-# tick. The same figure as ``SESSION_LOST_PARKS_MAX_PER_TICK``, kept separate
-# by design. Every candidate carries its own dead-launcher proof, so no
-# mass-trip guard is needed.
+# tick. It counts acts, not attempts: a candidate that waits or fails does not
+# use a slot (#3462). The same figure as ``SESSION_LOST_PARKS_MAX_PER_TICK``,
+# kept separate by design. Every candidate carries its own dead-launcher proof,
+# so no mass-trip guard is needed.
 UNOWNED_ACTS_MAX_PER_TICK = 3
 
 # ``ContextTie.state`` for a context that ties the row to a session id.
@@ -252,14 +255,19 @@ def _same_identity(
     )
 
 
-def _has_running_sibling(store: DevQueueStore, row: TicketTask) -> bool:
-    return any(
-        other is not row
+def running_siblings(store: DevQueueStore, row: TicketTask) -> list[TicketTask]:
+    """Every other RUNNING row of *store* for *row*'s (client, ticket_id).
+
+    The one sibling predicate detect and the acts share (#3460).
+    """
+    return [
+        other
+        for other in store.tasks
+        if other is not row
         and other.status is QueueItemStatus.RUNNING
         and other.client == row.client
         and other.ticket_id == row.ticket_id
-        for other in store.tasks
-    )
+    ]
 
 
 def _context_unchanged(candidate: NoOwnerCandidate, row: TicketTask) -> bool:
@@ -305,7 +313,7 @@ def _in_lock_wait_reason(
             row, attempts=candidate.attempts, claimed_at=candidate.claimed_at
         )
         or row.launch_marker != candidate.launch_marker
-        or _has_running_sibling(store, row)
+        or running_siblings(store, row)
     ):
         return "the row changed since detect"
     if (
@@ -407,17 +415,18 @@ def _page_no_owner(candidate: NoOwnerCandidate) -> None:
     )
 
 
-def act_no_owner(
+def _park_or_revert(
     candidate: NoOwnerCandidate,
     *,
     now: datetime,
     daemon: NativeDaemonClient,
     clients: dict[str, ClientConfig],
     config: OrchestratorConfig,
-) -> bool:
-    """Park or revert the candidate's row; True iff the row was mutated and saved.
+) -> bool | None:
+    """The in-lock half of :func:`act_no_owner`.
 
-    *now* only feeds the informational ``evidence.claim_age_seconds``.
+    Returns ``None`` when the row was not acted on, else whether it was
+    reverted (``auto``, True) or parked (False) and saved.
     """
     with dev_queue_lock():
         store = load_dev_queue()
@@ -441,7 +450,7 @@ def act_no_owner(
                 candidate.ticket_id,
                 reason,
             )
-            return False
+            return None
         policy = _resolve_task_policy(row.client, row.lane, clients, config)
         auto = policy is ReapPolicy.AUTO
         # The in-lock roster equals the snapshot here, so an empty snapshot is
@@ -453,11 +462,45 @@ def act_no_owner(
                 candidate.client,
                 candidate.ticket_id,
             )
-            return False
+            return None
         if not _record_proposal(candidate, auto=auto, now=now):
-            return False
+            return None
         _mutate(row, candidate, auto=auto)
         save_dev_queue(store)
+    return auto
+
+
+def act_no_owner(
+    candidate: NoOwnerCandidate,
+    *,
+    now: datetime,
+    daemon: NativeDaemonClient,
+    clients: dict[str, ClientConfig],
+    config: OrchestratorConfig,
+) -> bool:
+    """Park or revert the candidate's row; True iff the row was mutated and saved.
+
+    *now* only feeds the informational ``evidence.claim_age_seconds``. A
+    failure while parking or reverting one row (#3461) -- ``CwError`` from the
+    transition, ``OSError`` from the queue write, ``ValueError`` (pydantic or
+    JSON decode) from the queue read -- is logged and leaves the row RUNNING
+    for the next tick, so it never aborts the sweep for the other candidates.
+    """
+    try:
+        auto = _park_or_revert(
+            candidate, now=now, daemon=daemon, clients=clients, config=config
+        )
+    except (CwError, OSError, ValueError) as exc:
+        _log.warning(
+            "unowned_running: %s/%s not acted on: %s; retrying next tick",
+            candidate.client,
+            candidate.ticket_id,
+            exc,
+            exc_info=True,
+        )
+        return False
+    if auto is None:
+        return False
     _log.info(
         "unowned_running: %s %s/%s (%s): the claiming process %d is gone",
         "reverted" if auto else "parked",
@@ -487,19 +530,25 @@ def run_no_owner_acts(
     clients: dict[str, ClientConfig],
     config: OrchestratorConfig,
 ) -> int:
-    """Act on at most ``UNOWNED_ACTS_MAX_PER_TICK`` candidates; return acts done."""
+    """Act on candidates oldest claim first, stopping after
+    ``UNOWNED_ACTS_MAX_PER_TICK`` acts; return the acts done.
+
+    The cap counts acts, not attempts (#3462): a candidate that waits, or
+    whose act fails, does not take a slot, so it cannot starve a newer one.
+    """
     ordered = sorted(candidates, key=_claim_sort_key)
-    batch = ordered[:UNOWNED_ACTS_MAX_PER_TICK]
-    waiting = len(ordered) - len(batch)
-    if waiting:
-        _log.info(
-            "unowned_running: per-tick act cap reached; %d row(s) wait a tick",
-            waiting,
+    acted = 0
+    for index, candidate in enumerate(ordered):
+        if acted == UNOWNED_ACTS_MAX_PER_TICK:
+            _log.info(
+                "unowned_running: per-tick act cap reached; %d row(s) wait a tick",
+                len(ordered) - index,
+            )
+            break
+        acted += act_no_owner(
+            candidate, now=now, daemon=daemon, clients=clients, config=config
         )
-    return sum(
-        act_no_owner(c, now=now, daemon=daemon, clients=clients, config=config)
-        for c in batch
-    )
+    return acted
 
 
 def act_signal(candidate: SignalCandidate) -> bool:

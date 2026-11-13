@@ -386,7 +386,7 @@ def test_reconcile_locked_places_the_extracted_sweep_groups_around_the_guard() -
 
     The post-guard group is roster-dependent, so running it before the outage
     guard would act on an empty roster after a daemon hiccup. The lookup is
-    pure and runs first (#2550, M3), so in-lock sweep time never ages the
+    pure and runs first (#2550), so in-lock sweep time never ages the
     snapshot; only the early-return decision follows the pre-guard group.
     """
     fn = _function_def(core, "_reconcile_locked")

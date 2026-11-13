@@ -340,6 +340,10 @@ def _record_launched_session(
             # silently no-op it (#2149).
             if any(s.id == parent_session.id for s in state.sessions):
                 parent_session.worker_session_ids.append(sess.id)
+        # #3339: the ref's birth for the roster-capture slack is the append,
+        # not Session() creation (started_at precedes the unbounded spawn_bg
+        # and the poll above, and must stay put as the transcript floor).
+        sess.surface_bound_at = datetime.now(UTC)
         state.sessions.append(sess)
         save_state(state)
 

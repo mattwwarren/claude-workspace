@@ -73,6 +73,7 @@ from cw.reconcile.review_recipes import (
     dispatch_deferred_review_jobs,
 )
 from cw.reconcile.review_recipes.core import capture_review_repo_slugs
+from cw.reconcile.roster_skip_streak import settle_roster_skip_streak
 from cw.reconcile.roster_snapshot import (
     RosterSnapshot,
     RosterUnavailableError,
@@ -434,11 +435,16 @@ def _reconcile_locked(
     it is looked up first (``lookup_roster``, never a subprocess), so the
     in-lock sweeps' run time does not age it. A failed read (error, timeout,
     unparseable) is an empty roster with ``daemon_errored`` set, fed to the
-    unchanged outage guard. A stale or missing snapshot (``None`` is missing)
-    returns right after the roster-independent pre-guard sweeps, so no
-    roster-dependent sweep runs on a fabricated empty roster. Its capture
-    time is passed to ``compute_drift`` and the concierge recipes, which spare
-    a session spawned or resumed too recently for the capture to list it.
+    unchanged outage guard, which returns early only while some ACTIVE/IDLE
+    session carries a ref: on an idle fleet the tick proceeds on the empty
+    roster, and the concierge recipes read every absent ref as dead (#3341).
+    A stale or missing snapshot (``None`` is missing) returns right after the
+    roster-independent pre-guard sweeps, so no roster-dependent sweep runs on
+    a fabricated empty roster; ``settle_roster_skip_streak`` pages the
+    operator once a run of such ticks reaches its threshold (#3335). The
+    capture time is passed to ``compute_drift`` and the concierge recipes,
+    which spare a session spawned, resumed or bound too recently for the
+    capture to list it.
 
     Since the process-kill-timeout removal, no sweep in here dispositions a
     session off elapsed time or transcript quietness: the foreign-result and
@@ -461,8 +467,8 @@ def _reconcile_locked(
     # filesystem reads within the same reconcile tick. See GitHub issue #326.
     shared_tasks = load_dev_queue().tasks
     shared_task_by_ticket = {t.ticket_id: t for t in shared_tasks}
-    # The roster lookup runs first (#2550, M3): it is pure, and doing it
-    # before the sweeps keeps their run time from aging the snapshot. Only the
+    # The roster lookup runs first (#2550): it is pure, and doing it before
+    # the sweeps keeps their run time from aging the snapshot. Only the
     # early-return decision waits for the pre-guard sweeps. `claude agents
     # --json` returns sessionId as a full UUID; normalize_roster keys it by
     # the 8-char short id cw stores as surface_ref.
@@ -491,10 +497,15 @@ def _reconcile_locked(
         roster_snapshot.captured_at if roster_snapshot is not None else None
     )
 
-    # A stale or missing snapshot skips every roster-dependent sweep (M2); a
-    # failed read keeps the outage heuristic with daemon_errored=True.
-    if (unavailable is not None and unavailable.skips_tick) or (
-        _looks_like_daemon_outage(state, unavailable is not None, native_live)
+    # A stale or missing snapshot skips every roster-dependent sweep, and a
+    # run of such ticks pages the operator once (#3335). A failed read keeps
+    # the outage heuristic with daemon_errored=True, which stops the tick only
+    # while some ACTIVE/IDLE session carries a ref; on an idle fleet the tick
+    # proceeds on the empty roster by design (#2550, #3341).
+    skipped = unavailable is not None and unavailable.skips_tick
+    settle_roster_skip_streak(unavailable)
+    if skipped or _looks_like_daemon_outage(
+        state, unavailable is not None, native_live
     ):
         return ReconcileReport(
             completed_ticket_ids=list(dict.fromkeys(local_harvested)),

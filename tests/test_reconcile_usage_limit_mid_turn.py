@@ -1061,7 +1061,7 @@ def test_act_auto_skips_stop_when_surface_ref_already_cleared(
 
 
 # ---------------------------------------------------------------------------
-# Act -- M1: a session born after the roster capture is not "gone" (#2550)
+# Act -- registration slack: a session born after the capture is not "gone" (#2550)
 # ---------------------------------------------------------------------------
 
 
@@ -1170,7 +1170,8 @@ def test_act_finishes_when_the_session_is_not_young_enough_to_postdate_the_roste
     daemon: FakeNativeDaemonClient,
     captured: str,
 ) -> None:
-    """Revert check: without the M1 spare an absent ref still means stopped."""
+    """Revert check: without the registration-slack spare an absent ref
+    still means stopped."""
     state, _ = _seed(home, tmp_path, _limit_tail())
     _in_flight_auto_act(state)
     roster_captured_at = None

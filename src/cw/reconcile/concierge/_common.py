@@ -20,10 +20,7 @@ from cw.reconcile._shared import (
     resolve_attempt_ceiling,
     ticket_id_for_session,
 )
-from cw.reconcile._shared._roster import (
-    _may_postdate_roster,
-    roster_registration_cutoff,
-)
+from cw.reconcile._shared._roster import session_may_postdate_roster
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -142,15 +139,15 @@ def _is_session_dead(
     alive.
 
     *roster_captured_at* is the capture time of the lockless roster
-    *native_live* came from (#2550, M1). When given, a session spawned or
-    resumed within ``ROSTER_REGISTRATION_SLACK_SECONDS`` of it (or after it)
-    is not dead: its ref may postdate the capture, so absence proves nothing.
+    *native_live* came from (#2550). When given, a session born (spawned,
+    resumed or bound) within ``ROSTER_REGISTRATION_SLACK_SECONDS`` of it (or
+    after it) is not dead: its ref may postdate the capture, so absence proves
+    nothing.
     ``None`` keeps the roster-only test.
     """
     if session is None:
         return True
-    cutoff = roster_registration_cutoff(roster_captured_at)
-    if cutoff is not None and _may_postdate_roster(session, cutoff):
+    if session_may_postdate_roster(session, roster_captured_at):
         return False
     if session.surface_ref is None:
         return True

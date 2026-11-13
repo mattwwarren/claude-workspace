@@ -262,6 +262,8 @@ def start_session(
             if live_parent is not None:
                 session.parent_session_id = live_parent.id
                 live_parent.worker_session_ids.append(session.id)
+        # #3339: stamp the ref's bind at the committing append.
+        session.surface_bound_at = datetime.now(UTC)
         state.sessions.append(session)
 
     mutate_state(_append)

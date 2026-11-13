@@ -9,6 +9,7 @@ change. The text builders are tested here too (``TestTexts``).
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Callable
@@ -21,6 +22,7 @@ from click.testing import CliRunner
 from cw.cli import main
 from cw.dev_queue import load_dev_queue
 from cw.events import read_events
+from cw.exceptions import CwError
 from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     ClientConfig,
@@ -35,10 +37,12 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
+from cw.reconcile import unowned_running_acts as acts_module
 from cw.reconcile._shared import _UNOWNED_UNCONFIRMED_NOTE_PREFIX
 from cw.reconcile.unowned_running_acts import (
     UNOWNED_ACTS_MAX_PER_TICK,
     classify_claim_context,
+    running_siblings,
 )
 from cw.reconcile.unowned_running_text import (
     ALL_CAUSES,
@@ -319,6 +323,173 @@ class TestNoOwner:
         assert parked == {"GEN-2", "GEN-4", "GEN-3"}
         assert any("cap" in r.getMessage() for r in caplog.records)
 
+    def test_cap_logs_the_rows_left_waiting(
+        self, client_cfg: ClientConfig, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        for minute in range(5):
+            _no_owner_row(
+                client_cfg,
+                f"GEN-{minute + 1}",
+                claimed_at=_CLAIM + timedelta(minutes=minute),
+            )
+        caplog.set_level(logging.INFO, logger=_ACTS)
+
+        _sweep(client_cfg, now=_OLD + timedelta(minutes=5))
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert (
+            "unowned_running: per-tick act cap reached; 2 row(s) wait a tick"
+            in messages
+        )
+
+    def test_waiting_rows_do_not_consume_the_act_cap(
+        self,
+        client_cfg: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """#3462: the cap counts acts, not attempts. Three older rows that
+        wait (their claim changed since detect) leave the newest one a slot."""
+        for minute in range(4):
+            _no_owner_row(
+                client_cfg,
+                f"GEN-{minute + 1}",
+                claimed_at=_CLAIM + timedelta(minutes=minute),
+            )
+
+        def _reattempt_oldest_three(store: DevQueueStore) -> None:
+            for task in store.tasks[:3]:
+                task.attempts += 1
+
+        _wrap_detect(monkeypatch, lambda: _edit_queue(_reattempt_oldest_three))
+        caplog.set_level(logging.INFO, logger=_ACTS)
+
+        _sweep(client_cfg, now=_OLD + timedelta(minutes=4))
+
+        statuses = {t.ticket_id: t.status for t in load_dev_queue().tasks}
+        assert statuses == {
+            "GEN-1": QueueItemStatus.RUNNING,
+            "GEN-2": QueueItemStatus.RUNNING,
+            "GEN-3": QueueItemStatus.RUNNING,
+            "GEN-4": QueueItemStatus.BLOCKED_ON_USER,
+        }
+        waits = [
+            r.getMessage()
+            for r in caplog.records
+            if "the row changed since detect" in r.getMessage()
+        ]
+        assert len(waits) == 3
+
+    @pytest.mark.parametrize(
+        ("target", "error"),
+        [
+            ("_mutate", CwError("transition refused")),
+            ("save_dev_queue", OSError("disk full")),
+            ("load_dev_queue", json.JSONDecodeError("Expecting value", "", 0)),
+        ],
+        ids=["mutate-cwerror", "save-oserror", "load-jsondecodeerror"],
+    )
+    def test_failed_mutation_does_not_abort_the_sweep(
+        self,
+        client_cfg: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        target: str,
+        error: Exception,
+    ) -> None:
+        """#3461: a failure parking one row is logged and retried next tick;
+        the sweep still acts on the next candidate."""
+        _no_owner_row(client_cfg, "GEN-1", claimed_at=_CLAIM)
+        _no_owner_row(client_cfg, "GEN-2", claimed_at=_CLAIM + timedelta(minutes=1))
+        real = getattr(acts_module, target)
+        calls: list[int] = []
+
+        def _fail_first(*args: object, **kwargs: object) -> object:
+            calls.append(1)
+            if len(calls) == 1:
+                raise error
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(acts_module, target, _fail_first)
+        caplog.set_level(logging.INFO, logger=_ACTS)
+
+        _sweep(client_cfg, now=_OLD + timedelta(minutes=1))
+
+        assert _row("GEN-1").status is QueueItemStatus.RUNNING
+        assert _row("GEN-2").status is QueueItemStatus.BLOCKED_ON_USER
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any(
+            m.startswith(f"unowned_running: {_CLIENT}/GEN-1 not acted on:")
+            and m.endswith("retrying next tick")
+            for m in warnings
+        )
+
+    def test_running_sibling_appearing_before_the_act_waits(
+        self,
+        client_cfg: ClientConfig,
+        events: list[CapturedEvent],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """#3463: a second RUNNING row for the same ticket that lands between
+        detect and the act makes the act wait."""
+        _no_owner_row(client_cfg)
+        _wrap_detect(
+            monkeypatch,
+            lambda: mk_unowned_running_row(
+                client=_CLIENT,
+                ticket_id=_TICKET,
+                attempts=1,
+                claimed_at=_CLAIM,
+                session_id="sess-sibling",
+            ),
+        )
+        caplog.set_level(logging.INFO, logger=_ACTS)
+
+        _sweep(client_cfg, now=_OLD)
+
+        assert _row().status is QueueItemStatus.RUNNING
+        assert _proposals(events) == []
+        assert any(
+            r.getMessage().endswith("not acted on: the row changed since detect")
+            for r in caplog.records
+        )
+
+    @staticmethod
+    def _remove(store: DevQueueStore) -> None:
+        store.tasks.clear()
+
+    @staticmethod
+    def _move_status(store: DevQueueStore) -> None:
+        store.tasks[0].status = QueueItemStatus.PENDING
+
+    @pytest.mark.parametrize(
+        "vanish", ["_remove", "_move_status"], ids=["removed", "status_moved"]
+    )
+    def test_row_no_longer_running_waits(
+        self,
+        client_cfg: ClientConfig,
+        events: list[CapturedEvent],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        vanish: str,
+    ) -> None:
+        """#3463: a row removed or moved out of RUNNING since detect is left
+        alone."""
+        _no_owner_row(client_cfg)
+        _wrap_detect(monkeypatch, lambda: _edit_queue(getattr(self, vanish)))
+        caplog.set_level(logging.INFO, logger=_ACTS)
+
+        _sweep(client_cfg, now=_OLD)
+
+        assert events == []
+        assert any(
+            r.getMessage().endswith("not acted on: the row is no longer RUNNING")
+            for r in caplog.records
+        )
+
     def test_roster_is_re_read_under_dev_queue_lock(
         self, client_cfg: ClientConfig, daemon: RosterReadProbeDaemon
     ) -> None:
@@ -591,6 +762,49 @@ class TestNoOwner:
         assert failures == [1]
         assert _row().status is QueueItemStatus.BLOCKED_ON_USER
         assert any("page" in r.getMessage() for r in caplog.records)
+
+
+class TestRunningSiblings:
+    """#3460: the one sibling predicate detect and the acts share."""
+
+    @staticmethod
+    def _task(
+        ticket_id: str = _TICKET,
+        client: str = _CLIENT,
+        status: QueueItemStatus = QueueItemStatus.RUNNING,
+    ) -> TicketTask:
+        return TicketTask(ticket_id=ticket_id, client=client, status=status)
+
+    def test_returns_other_running_rows_for_same_client_and_ticket(self) -> None:
+        row, first, second = self._task(), self._task(), self._task()
+        store = DevQueueStore(tasks=[row, first, second])
+
+        siblings = running_siblings(store, row)
+
+        assert len(siblings) == 2
+        assert siblings[0] is first
+        assert siblings[1] is second
+
+    def test_excludes_self_other_ticket_other_client_and_non_running_rows(
+        self,
+    ) -> None:
+        row = self._task()
+        store = DevQueueStore(
+            tasks=[
+                row,
+                self._task(ticket_id="GEN-OTHER"),
+                self._task(client="client-other"),
+                self._task(status=QueueItemStatus.PENDING),
+                self._task(status=QueueItemStatus.BLOCKED_ON_USER),
+            ]
+        )
+
+        assert running_siblings(store, row) == []
+
+    def test_empty_when_alone(self) -> None:
+        row = self._task()
+
+        assert running_siblings(DevQueueStore(tasks=[row]), row) == []
 
 
 class TestClassifyClaimContext:
