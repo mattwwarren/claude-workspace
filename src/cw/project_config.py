@@ -33,10 +33,12 @@ def load_project_config_dict(
     """
     path = root / PROJECT_CONFIG_RELPATH
     parser = yaml if yaml_module is None else yaml_module
-    if parser is None or not path.exists():
+    if parser is None:
         return None
     try:
         raw = parser.safe_load(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
     except OSError as exc:
         if strict:
             msg = f"{PROJECT_CONFIG_RELPATH} could not be read or parsed: {exc}"
