@@ -523,14 +523,11 @@ class TestEveryImplExitRoute:
     def test_stage_writers_are_exactly_the_known_set(self) -> None:
         """A new ``.stage =`` writer must be handled (or allow-listed) here."""
         src = Path(lc.__file__).parents[1]
+        # #2155: every stage write routes through the single seam
+        # ``enter_stage``, which also stamps ``stage_entered_at``. That is now
+        # the only direct ``.stage =`` writer in the tree.
         expected = {
-            "dev_queue/lifecycle.py": {
-                "_advance_stage",
-                "_stamp_salvage_stage",
-                "_advance_task_pointer",
-                "_stage_regress",
-            },
-            "dispatch/claim/spawn.py": {"_apply_plan_bypass_if_available"},
+            "dev_queue/stage_entry.py": {"enter_stage"},
         }
         found: dict[str, set[str]] = {}
         for path in src.rglob("*.py"):
