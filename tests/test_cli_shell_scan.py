@@ -66,8 +66,8 @@ class TestBasename:
     @pytest.mark.parametrize(
         ("token", "expected"),
         [
-            ("git", "git"),
-            ("/usr/bin/git", "git"),
+            ("tool", "tool"),
+            ("/usr/bin/tool", "tool"),
             (".venv/bin/pre-commit", "pre-commit"),
             ("a/", ""),
             ("", ""),
@@ -107,7 +107,7 @@ class TestDashCScript:
 
 class TestNestedScripts:
     def test_eval_joins_its_arguments(self) -> None:
-        assert nested_scripts(["eval", "git", "status"]) == ["git status"]
+        assert nested_scripts(["eval", "tool", "status"]) == ["tool status"]
 
     @pytest.mark.parametrize("shell", ["bash", "sh", "zsh", "dash", "/bin/bash"])
     def test_shell_dash_c(self, shell: str) -> None:
@@ -118,7 +118,7 @@ class TestNestedScripts:
         assert nested_scripts(["bash", "script.sh"]) == []
 
     def test_other_commands_have_no_scripts(self) -> None:
-        assert nested_scripts(["git", "status"]) == []
+        assert nested_scripts(["tool", "status"]) == []
 
     def test_wrapper_prefix_is_scanned(self) -> None:
         assert nested_scripts(["env", "FOO=1", "bash", "-c", "x"]) == ["x"]
