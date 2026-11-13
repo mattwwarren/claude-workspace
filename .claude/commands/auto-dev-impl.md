@@ -442,6 +442,7 @@ Stage 2 agent spawn:
 - **Sensitive-carrier grep.** Run `grep -nE 'str\(exc|repr\(exc|exc_info=True|logger\.exception|%r|!r\}' <changed files>` (changed files from `git diff --name-only $FORK_POINT`). Every hit gets either a one-line justification (in the friction report, and in the body of the NEXT commit you make, when one follows, so it reaches the PR body) or is routed through the module's existing sanitizer; find that sanitizer in the module, do not invent one.
 - Instruction to read model/schema definitions before writing code
 - Instruction to use Read/Write tools for file operations, not Bash cp/mv/cat
+- Instruction never to run a bare `git stash`, `git stash pop` or `git stash clear` (the stash stack is shared by every worktree and session): set work aside with a temporary WIP commit; if a stash is unavoidable, use `git stash push -u -m "<unique-tag>"`, record the SHA from `git stash list --format='%H %gs'`, restore with `git stash apply <sha>`, never `pop`
 <!-- el: impl.pre-mutation-guard -->
 - **Pre-mutation guard (hard, not prose) — #766:** Before any `git add`, `git commit`,
   or `git push`, resolve the script per "Guard-script path resolution and staleness

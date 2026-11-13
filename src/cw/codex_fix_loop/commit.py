@@ -153,7 +153,10 @@ _FIX_SCOPE_RULES = (
     "- Do not revert, re-add, or rewrite work from earlier commits on this "
     "branch beyond what a finding explicitly requires.\n"
     "- Do not add new configuration flags, environment variables, or opt-in "
-    "toggles unless a finding explicitly requires one."
+    "toggles unless a finding explicitly requires one.\n"
+    "- Never run `git stash`, `git stash pop` or `git stash clear`: the stash "
+    "stack is shared by every worktree of the repository. Set work aside with "
+    "a temporary WIP commit instead."
 )
 
 

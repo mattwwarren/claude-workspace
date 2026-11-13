@@ -45,6 +45,7 @@ from cw.models.orchestrator_config.constants import CODEX_BACKEND
 from cw.opencode_runner import (
     _IMPL_SENTINEL_TEMPLATE,
     _PLAN_SENTINEL_TEMPLATE,
+    GIT_STASH_RULE,
     _sentinel_rules,
     _stage_preamble,
 )
@@ -734,6 +735,13 @@ def test_plan_and_impl_carry_the_imported_sentinel_fragments() -> None:
     impl = _render("impl")
     assert _sentinel_rules(None) + _IMPL_SENTINEL_TEMPLATE in impl
     assert _stage_preamble("impl", TICKET_PLACEHOLDER) in impl
+
+
+@pytest.mark.parametrize("stage", _STAGES)
+def test_every_codex_render_carries_the_git_stash_rule(stage: str) -> None:
+    """#1418: the shared preamble carries the stash rule into every render."""
+    assert GIT_STASH_RULE in _stage_preamble("impl", TICKET_PLACEHOLDER)
+    assert GIT_STASH_RULE in _render(stage)
 
 
 def test_finalize_names_the_schema_command() -> None:

@@ -1506,6 +1506,61 @@ substitution is not reliably caught.
 worker on those backends is not guarded. `cw doctor`'s
 `hook-install-python/<client>` check reports a hook such a worker installed.
 
+#### Shared-Stash Guard (#1418)
+
+`cw guard-git-stash` — a PreToolUse hook wired as the fifth command on the
+`"Bash"` matcher (after `cw guard-cwd`, `cw guard-busy-wait`,
+`cw background-tool-guard-pre` and `cw guard-hook-install`). Its help line:
+
+Refuse bare git stash, stash pop and other shared-stack stash use from a headless worker's Bash call.
+
+The git stash stack is one reflog shared by every worktree of the repository
+and by every concurrent session. A `git stash pop` applies and drops the newest
+entry, which may be another session's work, and a stash a worker never recovers
+silently loses its own. In a **headless** worker the guard refuses the forms
+that act on the default (newest) entry or push an untagged one:
+
+- bare `git stash`, and `git stash -u`, `-k`, `-a` or `-- <paths>` with no message
+- `git stash push` and `git stash store` with no non-empty message
+- `git stash save` (deprecated), every `git stash pop`, and `git stash clear`
+- `git stash apply` and `git stash drop` with no stash argument
+- `git stash branch` with fewer than two positionals
+
+These stay allowed because they name their target or tag their entry:
+`git stash push -m <tag>` (also `-um`, `--message=`), `git stash apply <sha>`
+(with `--index` or `-q`), `git stash drop <ref>`, `git stash store -m <tag> <sha>`,
+`git stash branch <name> <ref>`, and the read-only `list`, `show` and `create`.
+Detection sees through global options (`-C`, `-c`, `--git-dir`), `/usr/bin/git`,
+`command git`, `env`, an env assignment, redirections, any line of a multi-line
+command, and `bash -c` / `eval` (followed two levels deep). The words inside a
+quoted argument (a commit message, an `echo`) are allowed. The refusal text
+begins `BLOCKED (#1418): ` and ends with the safe form:
+
+If you must stash, run `git stash push -u -m "<unique-tag>"`, capture the new entry's SHA with `git stash list --format='%H %gs'`, restore with `git stash apply <sha>` (never pop), then re-find the entry by tag and drop it.
+
+Prefer a temporary WIP commit to a stash. The guard cannot verify that a tag is
+unique or that a `drop <ref>` was re-found by tag; it only requires that the
+stash names its target.
+
+Interactive and operator sessions are never refused, and any cwd with no
+ancestor `.claude/cw-context.json` is exempt. There is no config toggle and no
+event. Worktrees pick the guard up on their next spawn (the settings file is
+rewritten then); a session already running keeps the hooks it started with.
+
+The guard is best-effort and fails open: unreadable stdin, an unexpected
+payload shape, an unparseable command (an unterminated quote) and a fault
+reading the worker's context file are all allowed. The handler catches only
+`OSError`, `ValueError` and `TypeError`. Not caught: a git alias that expands to
+`stash` (`-c alias.x=stash`), backtick substitution, and scripts that call git
+internally. An unquoted `echo git stash pop` is a deliberate false positive; a
+command that only mentions these words should put the text in a file
+(`git commit -F <file>`).
+
+**Coverage gap:** the guard lives in the Claude worker's
+`settings.local.json`, which codex and opencode runners do not write, so a
+worker on those backends is covered by prompt text only (the shared stage
+preamble and the codex fix-prompt scope rules), not by a hard check.
+
 ## Orchestrator Configuration (`~/.claude-workspace/orchestrator.yaml`)
 
 Controls the autonomous dispatch loop. Created with defaults on first run.
