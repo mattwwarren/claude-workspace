@@ -25,6 +25,10 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from cw._lock_guard import LockRank, lock_guard
 from cw.atomic import atomic_write_text
 from cw.config import STATE_DIR, refuse_real_state_write, state_dir
+from cw.dispatch_state_marks_parse import (
+    drop_unseen_cleared,
+    usage_limit_clear_marks_from_payload,
+)
 from cw.events import record_event
 from cw.models import OrchestratorEventType
 
@@ -281,9 +285,8 @@ def _usage_limited_until_from_payload(
 # Hard ceiling on a window derived from a PARSED reset instant (#1409). The
 # parser is already structurally bounded below 7 days, so this only guards a
 # reset_at set by some other producer (a future raiser, the test fake). It
-# matters because nothing clears the persisted window early:
-# _merge_persisted_usage_limited_until never shortens, and no operator command
-# nulls the sidecar.
+# matters because only an explicit operator clear lifts a window early
+# (cw.dispatch_state_marks); _merge_persisted_usage_limited_until never shortens.
 _MAX_PARSED_USAGE_LIMIT_WINDOW = timedelta(days=7)
 
 
@@ -371,6 +374,9 @@ def merge_usage_limited_until(
 
 def merge_and_save_usage_limited_until(
     windows: Mapping[str, datetime],
+    *,
+    fresh: Mapping[str, datetime] | None = None,
+    clears_seen: Mapping[str, datetime] | None = None,
 ) -> dict[str, datetime]:
     """Read-merge-write ``usage_limited_until`` atomically, one lock (#1409 round 4).
 
@@ -390,22 +396,37 @@ def merge_and_save_usage_limited_until(
     errors — a failed persist just means the next loop start won't honour the
     backoff (acceptable degradation). The swallow is by design: a caller that
     must know whether the window landed reads it back (``_arm_usage_limit_windows``,
-    ``_arm_lockout``).
+    ``_arm_lockout``). With *clears_seen* (#3547), a *windows* entry of a client
+    whose on-disk clear mark is unseen is a stale carry and is dropped; *fresh*
+    holds this tick's real detections and is never filtered.
     """
+    extra = fresh or {}
     try:
         refuse_real_state_write(DISPATCH_STATE_FILE)
         DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with dispatch_state_lock():
             payload = _load_dispatch_state_raw()
             persisted = _usage_limited_until_from_payload(payload)
-            merged = merge_usage_limited_until(windows, persisted)
+            kept: Mapping[str, datetime] = windows
+            if clears_seen is not None:
+                marks = usage_limit_clear_marks_from_payload(payload)
+                kept, dropped = drop_unseen_cleared(windows, marks, clears_seen)
+                for client in sorted(dropped):
+                    logger.info(
+                        "dispatch_state: dropped carried usage_limited_until for %s;"
+                        " an operator clear mark has not been observed yet",
+                        client,
+                    )
+            merged = merge_usage_limited_until(
+                merge_usage_limited_until(kept, extra), persisted
+            )
             payload["usage_limited_until"] = {
                 name: dt.isoformat() for name, dt in merged.items()
             }
             atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
     except OSError:
         logger.warning("dispatch_state: failed to persist usage_limited_until")
-        return dict(windows)
+        return merge_usage_limited_until(windows, extra)
     return merged
 
 
