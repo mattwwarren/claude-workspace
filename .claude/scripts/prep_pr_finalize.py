@@ -22,7 +22,9 @@ Checks (all required unless flagged optional):
     check-automerge-allowed below)
   - Monitor is registered (optional, --require-monitor; downgraded to
     optional regardless when .claude/project-config.yaml sets
-    pr.auto_merge: false, since such a repo never registers a monitor, #3548)
+    pr.auto_merge: false, since such a repo never registers a monitor, #3548;
+    both also downgraded, with a distinct warning, while a CI-evidence hold
+    is enforced for the cwd's HEAD, #3618)
 
 Subcommands:
   verify                   Run all checks above, exit non-zero if any
@@ -44,16 +46,32 @@ Subcommands:
                             review-monitor.md and cw-session-watch/SKILL.md
                             call arm-automerge directly, which consults
                             the same seam.
+  ci-hold                  set | status | release the per-worktree CI-evidence
+                            hold (#3618): a marker in the worktree's git dir
+                            that makes check-automerge-allowed and
+                            arm-automerge withhold arming while the PR's
+                            mapped CI checks are not yet proven green. The
+                            hold is `stale` (ignored) only when the branch
+                            differs or the recorded head is provably not an
+                            ancestor of the target head; every unevaluable
+                            case stays enforced (fail closed). Only
+                            `ci-hold release` (or an empty-array `ci-hold
+                            set`) loosens it.
 
 Exit codes:
   0  all checks passed (arm-automerge: armed, or the PR is already MERGED)
   1  a required check failed (arm-automerge: arming failed after all retries, or
-     refused with `changelog_merge_freeze` before any gh pr merge call)
+     refused with `changelog_merge_freeze` before any gh pr merge call);
+     check-automerge-allowed: also a CI-evidence hold is enforced (prints
+     "false", stderr names the hold; no new exit code); ci-hold release: the
+     marker exists but cannot be removed
   2  invocation error (not in a git repo, gh missing, etc.); also, for
      check-automerge-allowed and arm-automerge, an existing
      .claude/project-config.yaml whose pr.auto_merge cannot be determined
      (fail closed, #2581)
-  3  arm-automerge only: refused because pr.auto_merge is false (no gh call)
+  3  arm-automerge only: refused because pr.auto_merge is false, or because a
+     CI-evidence hold is enforced for --head-sha (no gh call; `status:
+     skipped`, the `detail` tells the two apart)
 """
 
 from __future__ import annotations
@@ -69,6 +87,7 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple, cast
@@ -549,10 +568,17 @@ def resolve_effective_monitor_required(base_required: bool) -> bool:
 
 
 def _required_unless_automerge_disabled(base_required: bool) -> bool:
-    """False when not required or when pr.auto_merge is explicitly false."""
+    """False when not required, pr.auto_merge is explicitly false, or a CI hold holds.
+
+    A CI-evidence hold enforced for the cwd's HEAD (#3618) means the PR was
+    deliberately left unarmed, so requiring auto-merge or a monitor would
+    fail the very state the hold creates.
+    """
     if not base_required:
         return False
-    return resolve_project_config_auto_merge() is not False
+    if resolve_project_config_auto_merge() is False:
+        return False
+    return _cwd_enforced_hold() is None
 
 
 def check_automerge(summary: ShipSummary, required: bool) -> CheckResult:
@@ -897,9 +923,15 @@ def cmd_verify(args: argparse.Namespace) -> int:
     effective_require_automerge = resolve_effective_automerge_required(
         args.require_automerge
     )
+    effective_require_monitor = resolve_effective_monitor_required(args.require_monitor)
+    hold_warning = _hold_downgrade_warning(
+        downgraded=effective_require_automerge != args.require_automerge
+        or effective_require_monitor != args.require_monitor
+    )
     if effective_require_automerge != args.require_automerge:
         summary.warnings.append(
-            "pr.auto_merge: false in .claude/project-config.yaml — "
+            hold_warning
+            or "pr.auto_merge: false in .claude/project-config.yaml — "
             "automerge-enabled check treated as optional, not required (#2046)"
         )
     elif yaml is None and PROJECT_CONFIG_PATH.exists():
@@ -908,9 +940,10 @@ def cmd_verify(args: argparse.Namespace) -> int:
             "treating auto-merge as required"
         )
 
-    effective_require_monitor = resolve_effective_monitor_required(args.require_monitor)
     if effective_require_monitor != args.require_monitor:
-        summary.warnings.append(MONITOR_DOWNGRADE_WARNING)
+        warning = hold_warning or MONITOR_DOWNGRADE_WARNING
+        if warning not in summary.warnings:
+            summary.warnings.append(warning)
 
     summary.checks.append(check_not_protected(summary.branch, summary))
     summary.checks.append(check_branch_pushed(summary.branch, summary))
@@ -951,6 +984,23 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 1 if failed_required else 0
 
 
+def _hold_downgrade_warning(*, downgraded: bool) -> str | None:
+    """The hold's own verify warning when it, not pr.auto_merge, caused a downgrade.
+
+    ``None`` when nothing was downgraded or ``pr.auto_merge: false`` explains
+    it (that config warning keeps precedence and never mentions the hold).
+    """
+    if not downgraded or resolve_project_config_auto_merge() is False:
+        return None
+    repo = _cwd_toplevel()
+    if repo is None:
+        return None
+    head = _local_head(repo)
+    if _enforced_hold(repo, head) is None:
+        return None
+    return HOLD_VERIFY_WARNING_TEMPLATE.format(sha8=_sha8(head))
+
+
 def _invocation_error(message: str) -> int:
     """Write ``ERROR: <message>`` to stderr and return exit 2 (invocation error)."""
     sys.stderr.write(f"ERROR: {message}\n")
@@ -981,6 +1031,213 @@ def _normalize_repo_path(repo_path: Path) -> tuple[Path | None, str]:
     return toplevel, ""
 
 
+# --- CI-evidence hold (#3618) ---
+
+CI_HOLD_FILENAME = "cw-ci-evidence-hold.json"
+HOLD_NONE = "none"
+HOLD_ACTIVE = "active"
+HOLD_STALE = "stale"
+HOLD_CORRUPT = "corrupt"
+_HOLD_KEYS = ("head", "branch", "base", "gates", "recorded")
+# `git merge-base --is-ancestor` exits 0 for an ancestor and exactly 1 for a
+# non-ancestor; anything else (128 for an unknown object, ...) cannot say.
+_ANCESTOR_RC = 0
+_NOT_ANCESTOR_RC = 1
+HOLD_WITHHELD_TEMPLATE = (
+    "ci-evidence hold active for head {sha8}: mapped CI checks are not yet proven "
+    "green, so arming is withheld. This is a deliberate wait released by cw "
+    "dev-queue requeue, not a pr.auto_merge opt-out."
+)
+HOLD_ARM_DETAIL_TEMPLATE = (
+    "ci-evidence hold active for head {sha8} -- no gh call made; released by cw "
+    "dev-queue requeue, not a pr.auto_merge opt-out."
+)
+HOLD_UNDO_TEMPLATE = ' Manual undo: "$FINALIZE" ci-hold release --repo-path {repo}'
+HOLD_VERIFY_WARNING_TEMPLATE = (
+    "ci-evidence hold active for head {sha8} — automerge-enabled and "
+    "monitor-registered treated as optional while mapped CI checks are pending"
+)
+HOLD_UNKNOWN_SHA8 = "unknown"
+
+
+class HoldState(NamedTuple):
+    """The hold's verdict for one repo and target head.
+
+    ``evaluated`` is False exactly when the state was reached fail-closed:
+    ``corrupt``, or ``active`` because the ancestry, the target head or the
+    current branch could not be evaluated. ``record`` is the parsed marker
+    (``None`` for ``none`` and ``corrupt``).
+    """
+
+    state: str
+    evaluated: bool
+    record: dict[str, object] | None = None
+
+    @property
+    def enforced(self) -> bool:
+        return self.state in (HOLD_ACTIVE, HOLD_CORRUPT)
+
+
+def _hold_git(repo: Path, *args: str) -> str:
+    """Stripped stdout of ``git -C <repo> <args>``, or "" on failure or timeout.
+
+    Bounded through :func:`_bounded` (30 s), so a hung git reads as "cannot say"
+    and the hold stays in force. ``run()`` and ``git()`` are left unchanged.
+    """
+    try:
+        proc = _bounded(["git", "-C", str(repo), *args], cwd=repo)
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _hold_marker_path(repo: Path) -> Path | None:
+    """The per-worktree marker path, anchored at *repo* when git prints it relative.
+
+    Same resolution as ``cw.codex_fix_loop.cycle_restore`` uses for its lock;
+    ``None`` when git cannot resolve it.
+    """
+    out = _hold_git(repo, "rev-parse", "--git-path", CI_HOLD_FILENAME)
+    if not out:
+        return None
+    path = Path(out)
+    return path if path.is_absolute() else repo / path
+
+
+def _unresolvable_marker_state(repo: Path) -> HoldState:
+    """An unresolvable marker path: ``corrupt`` in a work tree, else ``none``."""
+    if _hold_git(repo, "rev-parse", "--is-inside-work-tree") == "true":
+        return HoldState(HOLD_CORRUPT, False)
+    return HoldState(HOLD_NONE, True)
+
+
+def _parse_hold_marker(text: str) -> dict[str, object] | None:
+    """The marker object, or None when it is unparseable or malformed."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or any(key not in data for key in _HOLD_KEYS):
+        return None
+    head = data["head"]
+    if not isinstance(head, str) or _FULL_SHA_RE.fullmatch(head) is None:
+        return None
+    if not isinstance(data["branch"], str) or not isinstance(data["gates"], list):
+        return None
+    return cast("dict[str, object]", data)
+
+
+def _recorded_is_ancestor(repo: Path, recorded: str, target: str) -> bool | None:
+    """Tri-state ancestry: True (ancestor or equal), False (provably not), None.
+
+    A local copy of ``cw._git.is_ancestor`` with the third state, because this
+    script must not import ``cw``. Runs through :func:`_bounded`, so a hung git
+    is a timeout, which (like a launch failure or any exit other than 0/1) is
+    ``None``: the caller then keeps the hold in force.
+    """
+    cmd = ["git", "-C", str(repo), "merge-base", "--is-ancestor", recorded, target]
+    try:
+        proc = _bounded(cmd, cwd=repo)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode == _ANCESTOR_RC:
+        return True
+    if proc.returncode == _NOT_ANCESTOR_RC:
+        return False
+    return None
+
+
+def _classify_hold(
+    repo: Path, record: dict[str, object], target: str | None
+) -> HoldState:
+    """Stale iff the branch provably differs or the ancestry check says exactly 1."""
+    branch = _hold_git(repo, "branch", "--show-current") or None
+    if branch is not None and branch != record["branch"]:
+        return HoldState(HOLD_STALE, True, record)
+    if target is None:
+        return HoldState(HOLD_ACTIVE, False, record)
+    ancestor = _recorded_is_ancestor(repo, str(record["head"]).lower(), target)
+    if ancestor is False:
+        return HoldState(HOLD_STALE, True, record)
+    return HoldState(HOLD_ACTIVE, ancestor is True and branch is not None, record)
+
+
+def _hold_state(repo: Path, target: str | None) -> HoldState:
+    """Evaluate the hold on *repo* against the head *target* (None: unresolvable).
+
+    ``none`` without a marker; ``corrupt`` for an unreadable or malformed
+    marker or, inside a work tree, an unresolvable marker path; otherwise
+    ``stale`` or ``active`` per :func:`_classify_hold`. Takes no lock: a torn
+    read parses as corrupt, which is enforced.
+    """
+    path = _hold_marker_path(repo)
+    if path is None:
+        return _unresolvable_marker_state(repo)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return HoldState(HOLD_NONE, True)
+    except OSError:
+        return HoldState(HOLD_CORRUPT, False)
+    record = _parse_hold_marker(text)
+    if record is None:
+        return HoldState(HOLD_CORRUPT, False)
+    return _classify_hold(repo, record, target)
+
+
+def _local_head(repo: Path) -> str | None:
+    head = git("-C", str(repo), "rev-parse", "HEAD")
+    return head or None
+
+
+def _cwd_toplevel() -> Path | None:
+    toplevel = git("rev-parse", "--show-toplevel")
+    return Path(toplevel) if toplevel else None
+
+
+def _enforced_hold(repo: Path | None, target: str | None) -> HoldState | None:
+    """The hold's state when it is enforced for *target*, else None (also no repo)."""
+    if repo is None:
+        return None
+    state = _hold_state(repo, target)
+    return state if state.enforced else None
+
+
+def _cwd_enforced_hold() -> HoldState | None:
+    """The hold enforced for the cwd's repo and HEAD, for the verify downgrade."""
+    repo = _cwd_toplevel()
+    if repo is None:
+        return None
+    return _enforced_hold(repo, _local_head(repo))
+
+
+def _sha8(sha: str | None) -> str:
+    return sha[:8] if sha else HOLD_UNKNOWN_SHA8
+
+
+def _hold_undo(repo: Path) -> str:
+    return HOLD_UNDO_TEMPLATE.format(repo=repo)
+
+
+def _hold_refusal(repo_path: Path | None) -> str | None:
+    """The stderr text refusing to arm under an enforced hold, else None.
+
+    *repo_path* is ``--repo-path`` (normalised to its toplevel), else the cwd's
+    git toplevel; no repo at all means no hold. The target head is the repo's
+    local HEAD.
+    """
+    if repo_path is not None:
+        repo, _ = _normalize_repo_path(repo_path)
+    else:
+        repo = _cwd_toplevel()
+    if repo is None:
+        return None
+    head = _local_head(repo)
+    if _enforced_hold(repo, head) is None:
+        return None
+    return HOLD_WITHHELD_TEMPLATE.format(sha8=_sha8(head)) + _hold_undo(repo)
+
+
 def cmd_check_automerge_allowed(args: argparse.Namespace) -> int:
     """Print "true"/"false" for whether pr.auto_merge permits `gh pr merge --auto`.
 
@@ -994,7 +1251,9 @@ def cmd_check_automerge_allowed(args: argparse.Namespace) -> int:
     leave the PR open. Exit 2 means an existing config's pr.auto_merge cannot
     be determined (prints "false", reason on stderr; fail closed, #2581) or
     --repo-path is not a directory or not inside a git work tree (prints
-    nothing). A missing config file is still "true".
+    nothing). A missing config file is still "true". A CI-evidence hold
+    enforced for the repo's HEAD (#3618) also prints "false" and exits 1, with
+    its own stderr text; the pr.auto_merge refusals keep precedence.
     """
     config_path = PROJECT_CONFIG_PATH
     if args.repo_path is not None:
@@ -1003,6 +1262,10 @@ def cmd_check_automerge_allowed(args: argparse.Namespace) -> int:
             return _invocation_error(error)
         config_path = root / PROJECT_CONFIG_PATH
     gate = read_automerge_gate(config_path)
+    if gate.allowed and (refusal := _hold_refusal(args.repo_path)) is not None:
+        print("false")
+        sys.stderr.write(refusal + "\n")
+        return 1
     print("true" if gate.allowed else "false")
     if gate.reason is not None:
         return _refuse_undeterminable(gate.reason)
@@ -1239,6 +1502,147 @@ def _merge_freeze_refusal(
     )
 
 
+def _hold_repo(args: argparse.Namespace) -> tuple[Path | None, int]:
+    """The repo a ``ci-hold`` command acts on, or ``(None, exit_code)`` on error."""
+    repo, error = _resolve_arm_repo_path(args.repo_path)
+    if repo is None:
+        return None, _invocation_error(error)
+    return repo, 0
+
+
+def _parse_hold_gates(raw: str) -> tuple[list[dict[str, object]] | None, str]:
+    """``(gates, "")`` for a JSON array of ``{gate, checks}``, else ``(None, err)``."""
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None, "--gates-json is not valid JSON"
+    if not isinstance(data, list):
+        return None, "--gates-json must be a JSON array of {gate, checks} objects"
+    for item in data:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("gate"), str)
+            or not isinstance(item.get("checks"), list)
+            or not all(isinstance(check, str) for check in item["checks"])
+        ):
+            return None, "--gates-json entries must be {gate: str, checks: [str]}"
+    return cast("list[dict[str, object]]", data), ""
+
+
+def _write_hold_marker(path: Path, record: dict[str, object]) -> str:
+    """Atomically write the marker; ``""`` on success, else the failure cause."""
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        return f"could not write {path}: {exc.strerror or type(exc).__name__}"
+    return ""
+
+
+def _remove_hold_marker(path: Path) -> str:
+    """Remove the marker if present; ``""`` on success, else the failure cause."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        return f"could not remove {path}: {exc.strerror or type(exc).__name__}"
+    return ""
+
+
+def cmd_ci_hold_set(args: argparse.Namespace) -> int:
+    """Record the hold at the current HEAD; an empty gate array clears it.
+
+    Prints ``{"hold": "set", ...}`` or ``{"hold": "cleared"}`` and exits 0; exit
+    2 on bad JSON, an unresolvable git path or HEAD, a detached HEAD (no branch
+    to record) or a write failure (#3618).
+    """
+    repo, code = _hold_repo(args)
+    if repo is None:
+        return code
+    gates, error = _parse_hold_gates(args.gates_json)
+    if gates is None:
+        return _invocation_error(error)
+    path = _hold_marker_path(repo)
+    if path is None:
+        return _invocation_error(f"cannot resolve the {CI_HOLD_FILENAME} git path")
+    if not gates:
+        error = _remove_hold_marker(path)
+        if error:
+            return _invocation_error(error)
+        print(json.dumps({"hold": "cleared"}, indent=2))
+        return 0
+    head = _local_head(repo)
+    branch = _hold_git(repo, "branch", "--show-current")
+    if head is None or _FULL_SHA_RE.fullmatch(head) is None:
+        return _invocation_error("cannot resolve HEAD to record the hold")
+    if not branch:
+        return _invocation_error("detached HEAD: no branch to record the hold against")
+    record: dict[str, object] = {
+        "head": head,
+        "branch": branch,
+        "base": args.base,
+        "gates": gates,
+        "recorded": datetime.now(UTC).isoformat(),
+    }
+    error = _write_hold_marker(path, record)
+    if error:
+        return _invocation_error(error)
+    print(
+        json.dumps(
+            {"hold": "set", "head": head, "gates": gates, "path": str(path)}, indent=2
+        )
+    )
+    return 0
+
+
+def cmd_ci_hold_status(args: argparse.Namespace) -> int:
+    """Print the hold state as JSON (always JSON; ``--json`` is accepted).
+
+    ``evaluated`` is False when the state was reached fail-closed. Exit 0;
+    exit 2 only on an invocation error (#3618).
+    """
+    repo, code = _hold_repo(args)
+    if repo is None:
+        return code
+    head = _local_head(repo)
+    verdict = _hold_state(repo, head)
+    record = verdict.record or {}
+    payload = {
+        "state": verdict.state,
+        "evaluated": verdict.evaluated,
+        "head": head,
+        "recorded_head": record.get("head"),
+        "gates": record.get("gates", []),
+        "base": record.get("base"),
+        "recorded": record.get("recorded"),
+    }
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_ci_hold_release(args: argparse.Namespace) -> int:
+    """Remove the hold (idempotent), reporting the state it was in.
+
+    Exit 0; 1 when the marker exists but cannot be removed; 2 on an invocation
+    error (#3618). The manual undo for a deliberate create-path wait.
+    """
+    repo, code = _hold_repo(args)
+    if repo is None:
+        return code
+    was = _hold_state(repo, _local_head(repo)).state
+    path = _hold_marker_path(repo)
+    if path is None:
+        sys.stderr.write(f"ERROR: cannot resolve the {CI_HOLD_FILENAME} git path\n")
+        return 1
+    error = _remove_hold_marker(path)
+    if error:
+        sys.stderr.write(f"ERROR: {error}\n")
+        return 1
+    print(json.dumps({"hold": "released", "was": was}, indent=2))
+    return 0
+
+
 def _report_arm_failure(result: ArmResult) -> None:
     """Write the stderr line for a failed arm: a freeze refusal or gh's failure."""
     if result.gh_stderr.startswith(f"{MERGE_FREEZE_PREFIX}:"):
@@ -1248,6 +1652,19 @@ def _report_arm_failure(result: ArmResult) -> None:
         f"ERROR: gh pr merge --auto failed after {result.attempts}/"
         f"{result.max_attempts} attempts (exit {result.gh_exit_code}): "
         f"{result.gh_stderr}\n"
+    )
+
+
+def _hold_skipped_result(args: argparse.Namespace, repo_path: Path) -> ArmResult | None:
+    """A ``skipped`` ArmResult when a CI-evidence hold is enforced for --head-sha."""
+    if _enforced_hold(repo_path, args.head_sha) is None:
+        return None
+    detail = HOLD_ARM_DETAIL_TEMPLATE.format(sha8=_sha8(args.head_sha))
+    return ArmResult(
+        pr_number=args.pr_number,
+        max_attempts=args.attempts,
+        status=ARM_STATUS_SKIPPED,
+        detail=detail + _hold_undo(repo_path),
     )
 
 
@@ -1265,7 +1682,9 @@ def cmd_arm_automerge(args: argparse.Namespace) -> int:
     `changelog_merge_freeze:`; a guard that cannot evaluate warns on stderr
     and arms.
     An existing config whose pr.auto_merge cannot be determined also makes
-    zero gh calls and exits 2 with no JSON (fail closed, #2581).
+    zero gh calls and exits 2 with no JSON (fail closed, #2581). A CI-evidence
+    hold enforced for --head-sha (#3618) likewise makes zero gh calls and
+    exits 3 with ``status: skipped`` and its own ``detail``.
     """
     if not shutil.which("gh"):
         return _invocation_error("`gh` CLI not found on PATH")
@@ -1291,6 +1710,12 @@ def cmd_arm_automerge(args: argparse.Namespace) -> int:
             ),
         )
         print(json.dumps(skipped.to_dict(), indent=2))
+        return EXIT_ARM_DISALLOWED
+
+    held = _hold_skipped_result(args, repo_path)
+    if held is not None:
+        print(json.dumps(held.to_dict(), indent=2))
+        sys.stderr.write(held.detail + "\n")
         return EXIT_ARM_DISALLOWED
 
     result = arm_automerge(
@@ -1521,7 +1946,58 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ready.set_defaults(func=cmd_ready)
 
+    _add_ci_hold_parser(sub)
+
     return parser
+
+
+def _add_ci_hold_parser(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    """Register ``ci-hold set|status|release`` (#3618)."""
+    hold = sub.add_parser(
+        "ci-hold",
+        help=(
+            "Per-worktree hold that stops arm-automerge and "
+            "check-automerge-allowed from arming a PR whose mapped CI checks "
+            "are not yet proven green (set | status | release)"
+        ),
+    )
+    hold_sub = hold.add_subparsers(dest="hold_cmd", required=True)
+    repo_help = (
+        "Path inside the repository (normalized to its git toplevel) whose hold "
+        "applies (default: the git toplevel of the current directory)"
+    )
+
+    hold_set = hold_sub.add_parser(
+        "set",
+        help=(
+            "Record a hold for the current HEAD and the given deferred gates; "
+            "an empty --gates-json array clears any hold"
+        ),
+    )
+    hold_set.add_argument("--base", required=True, help="Base branch the PR targets")
+    hold_set.add_argument(
+        "--gates-json",
+        required=True,
+        help='JSON array of {"gate": <name>, "checks": [<check>, ...]} deferred to CI',
+    )
+    hold_set.add_argument("--repo-path", type=Path, help=repo_help)
+    hold_set.set_defaults(func=cmd_ci_hold_set)
+
+    hold_status = hold_sub.add_parser(
+        "status",
+        help="Print the hold state as JSON: none | active | stale | corrupt",
+    )
+    hold_status.add_argument(
+        "--json", action="store_true", help="Accepted for symmetry; output is JSON"
+    )
+    hold_status.add_argument("--repo-path", type=Path, help=repo_help)
+    hold_status.set_defaults(func=cmd_ci_hold_status)
+
+    hold_release = hold_sub.add_parser("release", help="Remove the hold (idempotent)")
+    hold_release.add_argument("--repo-path", type=Path, help=repo_help)
+    hold_release.set_defaults(func=cmd_ci_hold_release)
 
 
 def main(argv: list[str] | None = None) -> int:
