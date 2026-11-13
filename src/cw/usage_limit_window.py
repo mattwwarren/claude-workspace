@@ -23,6 +23,7 @@ the gate's own. ``spawn_error_count`` and ``gate_block`` are never touched.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -30,10 +31,10 @@ from typing import TYPE_CHECKING
 from cw.dev_queue import dev_queue_lock, list_tickets, load_dev_queue, save_dev_queue
 from cw.dispatch_state import load_usage_limit_armed_at, load_usage_limited_until
 from cw.dispatch_state_marks import clear_usage_limited_until
-from cw.events import read_events, record_event
+from cw.events import _inbox_lock, inbox_path, read_events, record_event
 from cw.exceptions import CwError
 from cw.lane_pause import iso_z
-from cw.models import OrchestratorEventType, QueueItemStatus
+from cw.models import OrchestratorEvent, OrchestratorEventType, QueueItemStatus
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -215,15 +216,19 @@ def plan_usage_limit_clear(client: str, *, now: datetime | None = None) -> Clear
     )
 
 
-def _clear_window(client: str, cleared_at: datetime) -> datetime | None:
+def _clear_window(
+    client: str, cleared_at: datetime, *, expected_until: datetime | None
+) -> datetime | None:
     try:
-        return clear_usage_limited_until(client, cleared_at=cleared_at)
+        return clear_usage_limited_until(
+            client, cleared_at=cleared_at, expected_until=expected_until
+        )
     except OSError as exc:
         msg = f"could not clear the usage-limit window for {client}: {exc}"
         raise CwError(msg) from exc
 
 
-def _release_rows(plan: ClearPlan, now: datetime) -> tuple[list[str], OSError | None]:
+def _release_rows(plan: ClearPlan, now: datetime) -> tuple[list[str], Exception | None]:
     """Release the planned rows that still qualify, under ``dev_queue_lock``.
 
     Re-checked under the lock, so a row that changed since the plan is left
@@ -243,7 +248,7 @@ def _release_rows(plan: ClearPlan, now: datetime) -> tuple[list[str], OSError | 
                     released.append(task.ticket_id)
             if released:
                 save_dev_queue(store)
-    except OSError as exc:
+    except Exception as exc:  # noqa: BLE001 — queue load/validation must not lose the audit event.
         return [], exc
     return released, None
 
@@ -271,12 +276,37 @@ def _event_payload(
     }
 
 
+def _append_audit_fallback(payload: dict[str, object]) -> None:
+    """Append the audit event directly if the normal writer fails.
+
+    The clear has already committed its state changes by this point. The
+    fallback uses the same append-only inbox, its own lock, and an fsync so a
+    transient failure in the normal call cannot leave an un-audited clear.
+    """
+    event = OrchestratorEvent(
+        type=OrchestratorEventType.USAGE_LIMIT_CLEARED,
+        payload=payload,
+    )
+    path = inbox_path()
+    with _inbox_lock():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as stream:
+            stream.write(event.model_dump_json() + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+
 def _record_cleared(result: ClearResult, payload: dict[str, object]) -> None:
     """Record the audit event; on failure log it and raise the audit error."""
     try:
         record_event(OrchestratorEventType.USAGE_LIMIT_CLEARED, payload)
-    except OSError as exc:
+    except Exception as exc:  # noqa: BLE001 — every event-writer failure gets a durable fallback.
         error = exc
+        fallback_error: Exception | None = None
+        try:
+            _append_audit_fallback(payload)
+        except Exception as fallback_exc:  # noqa: BLE001 — surface fallback failure too.
+            fallback_error = fallback_exc
     else:
         return
     event_name = OrchestratorEventType.USAGE_LIMIT_CLEARED.value
@@ -287,7 +317,7 @@ def _record_cleared(result: ClearResult, payload: dict[str, object]) -> None:
         payload["old_until"],
         list(result.rows_released),
         event_name,
-        error,
+        error if fallback_error is None else f"{error}; fallback: {fallback_error}",
     )
     msg = (
         f"usage-limit window for {result.client} was cleared (was until"
@@ -295,6 +325,8 @@ def _record_cleared(result: ClearResult, payload: dict[str, object]) -> None:
         f" {len(result.rows_released)} row(s)) but the {event_name} audit event"
         f" could not be recorded: {error}"
     )
+    if fallback_error is not None:
+        msg += f"; durable fallback audit also failed: {fallback_error}"
     raise UsageLimitClearAuditError(msg, result=result) from error
 
 
@@ -317,7 +349,7 @@ def apply_usage_limit_clear(
     ``usage_limit_armed_at``.
     """
     cleared_at = now or datetime.now(UTC)
-    old_until = _clear_window(plan.client, cleared_at)
+    old_until = _clear_window(plan.client, cleared_at, expected_until=plan.window_until)
     released, row_error = _release_rows(plan, cleared_at)
     result = ClearResult(plan.client, old_until, tuple(released))
     payload = _event_payload(

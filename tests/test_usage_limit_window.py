@@ -393,7 +393,7 @@ class TestApply:
         seed_usage_limit_window(_ACME, _UNTIL)
         seed_stamped_row(_ACME, "A-1", next_eligible_at=_STAMP)
 
-        def _boom(_client: str, *, cleared_at: datetime) -> None:
+        def _boom(_client: str, *, cleared_at: datetime, **_kwargs: object) -> None:
             msg = "state disk full"
             raise OSError(msg)
 

@@ -16,7 +16,7 @@ because the suite isolates state by patching that module attribute.
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from cw import dispatch_state
 from cw.atomic import atomic_write_text
@@ -31,9 +31,29 @@ from cw.dispatch_state_marks_parse import (
     CLEAR_MARKS_KEY,
     usage_limit_clear_marks_from_payload,
 )
+from cw.exceptions import CwError
 
 if TYPE_CHECKING:
     from datetime import datetime
+
+
+_EXPECTED_UNSET = object()
+
+
+def _load_dispatch_state_for_clear() -> dict[str, object]:
+    """Read the state strictly; a clear must not turn a read failure into data loss."""
+    path = dispatch_state.DISPATCH_STATE_FILE
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
+        msg = f"could not read dispatch state: {exc}"
+        raise OSError(msg) from exc
+    if not isinstance(raw, dict):
+        msg = "dispatch state must contain a JSON object"
+        raise OSError(msg)
+    return raw
 
 
 def load_usage_limit_clear_marks() -> dict[str, datetime]:
@@ -44,7 +64,12 @@ def load_usage_limit_clear_marks() -> dict[str, datetime]:
     return usage_limit_clear_marks_from_payload(_load_dispatch_state_raw())
 
 
-def clear_usage_limited_until(client: str, *, cleared_at: datetime) -> datetime | None:
+def clear_usage_limited_until(
+    client: str,
+    *,
+    cleared_at: datetime,
+    expected_until: datetime | None | object = _EXPECTED_UNSET,
+) -> datetime | None:
     """Remove *client*'s usage-limit window and record its clear mark.
 
     One :func:`~cw.dispatch_state.dispatch_state_lock` acquisition covers the
@@ -59,9 +84,19 @@ def clear_usage_limited_until(client: str, *, cleared_at: datetime) -> datetime 
     refuse_real_state_write(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with dispatch_state_lock():
-        payload = _load_dispatch_state_raw()
+        payload = _load_dispatch_state_for_clear()
         windows = _usage_limited_until_from_payload(payload)
         old_until = windows.pop(client, None)
+        if expected_until is not _EXPECTED_UNSET and old_until != expected_until:
+            expected_dt = cast("datetime | None", expected_until)
+            expected = "none" if expected_dt is None else expected_dt.isoformat()
+            actual = "none" if old_until is None else old_until.isoformat()
+            msg = (
+                f"usage-limit window for {client} changed after planning "
+                f"(expected {expected}, found {actual}); re-run the clear "
+                "to refresh the plan and account probe"
+            )
+            raise CwError(msg)
         payload["usage_limited_until"] = {
             name: until.isoformat() for name, until in windows.items()
         }
