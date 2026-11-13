@@ -119,6 +119,10 @@ class UsageLimitAct(BaseModel):
     # re-emit them. An emit that lands just before a crash is re-emitted: the
     # audit is at-least-once, keyed by (session_id, started_at).
     audited_at: datetime | None = None
+    # Set once the stalled-act page is recorded (#3397), so a pending stop
+    # pages once per act, not per tick; cleared with the intent. A signal
+    # dedup latch only (ADR-0014): it never changes the act's disposition.
+    escalated_at: datetime | None = None
 
 
 class MustFixOverride(BaseModel):
