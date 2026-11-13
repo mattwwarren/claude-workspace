@@ -741,10 +741,11 @@ def test_partly_stamped_form_b_is_new_form_not_legacy() -> None:
 
 
 def test_route_only_form_b_is_new_form() -> None:
-    text = _draft("- bare — Evidence: docs — Depends on: x — Route: VERIFIED")
+    text = _draft("- bare — Evidence: docs — Depends on: x — Route: MYSTERY")
     item = _one(_draft_eval(text))
     assert item["verdict"] == "STALE"
     assert item["reasons"] == [
+        "route-missing-or-invalid",
         "observed-at-missing",
         "kind-missing-or-invalid",
         "tool-call-missing",
