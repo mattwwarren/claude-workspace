@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import click
@@ -49,10 +48,6 @@ if TYPE_CHECKING:
     from cw.models import Session
 
 logger = logging.getLogger(_LOGGER_NAME)
-
-_STOP_CONTINUATION_MODE_ENV = "CW_STOP_CONTINUATION_MODE"
-_STOP_CONTINUATION_SCOPES_ENV = "CW_STOP_CONTINUATION_SCOPES"
-_STOP_CONTINUATION_MODES = frozenset({"off", "shadow", "enabled"})
 
 
 class _ContinuationClaim(NamedTuple):
@@ -89,43 +84,11 @@ def maybe_continue_headless_turn(
     transcripts = _find_transcripts(session, cwd_value, claude_session_id)
     if not transcripts or any(_turn_ended_in_tool_error(path) for path in transcripts):
         return
-    if not _continuation_rollout_allows(task, ticket_id, session.id):
-        return
     claim = _claim_stop_continuation(ticket_id, session)
     if claim is None:
         return
     _record_continuation_event(session, claude_session_id, ticket_id, claim)
     _emit_block_decision()
-
-
-def _continuation_rollout_mode() -> str:
-    """Return the operator-controlled continuation mode, fail-safe."""
-    mode = os.environ.get(_STOP_CONTINUATION_MODE_ENV, "shadow").strip().lower()
-    return mode if mode in _STOP_CONTINUATION_MODES else "shadow"
-
-
-def _continuation_scope_enabled(client: str, lane: str) -> bool:
-    """Return whether *client* or its exact ``client/lane`` is enrolled."""
-    configured = os.environ.get(_STOP_CONTINUATION_SCOPES_ENV, "")
-    scopes = {scope.strip() for scope in configured.split(",") if scope.strip()}
-    return client in scopes or f"{client}/{lane}" in scopes
-
-
-def _continuation_rollout_allows(task: Any, ticket_id: str, session_id: str) -> bool:
-    """Apply the mode and client/lane enrollment gate before claiming."""
-    mode = _continuation_rollout_mode()
-    if mode == "off" or not _continuation_scope_enabled(task.client, task.lane):
-        return False
-    if mode == "shadow":
-        logger.info(
-            "stop continuation shadowed: client=%s lane=%s ticket=%s session=%s",
-            task.client,
-            task.lane,
-            ticket_id,
-            session_id,
-        )
-        return False
-    return True
 
 
 def _continuation_payload_qualifies(
@@ -277,28 +240,21 @@ def _record_continuation_event(
     ``claude_session_id``), not ``session.claude_session_id``, which is only
     conditionally populated for an ACTIVE session.
     """
-    try:
-        record_event(
-            OrchestratorEventType.SESSION_STOP_CONTINUED,
-            {
-                "session_id": session.id,
-                "session_name": session.name,
-                "client": session.client,
-                "ticket_id": ticket_id,
-                "claude_session_id": claude_session_id,
-                "stage": claim.stage,
-                "lane": claim.lane,
-                "continuation": claim.number,
-                "cap": MAX_STOP_CONTINUATIONS,
-            },
-            correlation_id=ticket_id,
-        )
-    except Exception:  # noqa: BLE001 — audit failure must not block a persisted continuation
-        logger.warning(
-            "stop continuation event write failed after queue claim: ticket=%s",
-            ticket_id,
-            exc_info=True,
-        )
+    record_event(
+        OrchestratorEventType.SESSION_STOP_CONTINUED,
+        {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": ticket_id,
+            "claude_session_id": claude_session_id,
+            "stage": claim.stage,
+            "lane": claim.lane,
+            "continuation": claim.number,
+            "cap": MAX_STOP_CONTINUATIONS,
+        },
+        correlation_id=ticket_id,
+    )
 
 
 def _emit_block_decision() -> None:

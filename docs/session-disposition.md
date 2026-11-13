@@ -819,12 +819,10 @@ nor `API Error` text; the session is Claude-hosted; the row is RUNNING; and the
 transcript does not end on a `tool_result` with `is_error`. The check is
 fail-closed on a missing or unreadable transcript.
 
-The action has an explicit operator rollout boundary. `CW_STOP_CONTINUATION_MODE`
-is `off`, `shadow`, or `enabled` (invalid or absent values fail safe to
-`shadow`), and `CW_STOP_CONTINUATION_SCOPES` is a comma-separated allowlist of
-client names or exact `client/lane` scopes. Only an enrolled scope in
-`enabled` mode can increment the row and print the block decision; `shadow`
-records the qualifying candidate in the hook log without changing queue state.
+The action is on for every client and lane with no configuration: there is no
+rollout mode, scope allowlist or environment switch. The operator decided this
+(#2348 review feedback); a reviewer asking for a shadow or kill-switch mode is
+asking to reopen that decision.
 
 The counter is `TicketTask.stop_continuations` on the row. The cap is 2 per
 stage: `enter_stage` resets it on a real stage change, and it survives a
