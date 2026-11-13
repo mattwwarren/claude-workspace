@@ -724,14 +724,15 @@ the one cleared client and `sessions_affected` is always `0` (no
 never writes that marker. `old_until` is the removed deadline, `null` when
 only a clear mark was recorded. `rows_released` lists the PENDING rows whose
 `next_eligible_at` wait was released. `forced` is `--force`; `probe` is
-`skipped` when forced. The event is recorded first, before any lock is taken
-and before anything is cleared (audit first). A failed event write refuses the
-clear: the command exits non-zero, says nothing was cleared, and changes no
-state. `rows_released` is the set of PENDING rows the plan selected; a row that
-no longer qualifies under the lock is left alone, so the field records the
-operator's intent, not a post-clear fact. If the window clear fails after the
-event was written, the event stays on record, the command exits non-zero, and
-nothing was cleared.
+`skipped` when forced. State changes happen first: the window and clear mark
+are written, then qualifying rows are released, and only then is the event
+recorded outside both locks. `rows_released` records only the rows actually
+released; a row that no longer qualifies under the lock is left alone. If the
+audit write fails, the cleared window and rows remain cleared, the command
+prints that result and exits non-zero, and a re-run is safe and idempotent. A
+row-release failure is likewise reported after the audit event is recorded,
+with `rows_released` containing only rows released before the failure; a
+re-run can release the remainder.
 
 **One audit line per lift.** The running loop suppresses its own lapse
 emission on the tick where it newly observes an operator clear mark, so an
