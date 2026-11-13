@@ -51,6 +51,7 @@ CI_HOLD_RELEASE_ACTION: Final = "release"
 CONSULT_TIMEOUT: Final = 300
 _HOLD_MARKER: Final = CI_HOLD_COMMAND
 _PARK_FLAVORS: Final = ("pending", "red")
+_HOLD_STATES: Final = ("none", "active", "stale", "corrupt")
 _TAIL: Final = 500
 _NOT_ARMED: Final = "cw did not arm auto-merge"
 _NOT_RUN: Final = "did not run the gate locally"
@@ -388,7 +389,11 @@ def _hold_release(script: Path, worktree: Path) -> str | None:
         response = json.loads(done.stdout)
     except (ValueError, RecursionError):
         return "release output is not JSON"
-    if not isinstance(response, dict) or response.get("hold") != "released":
+    if (
+        not isinstance(response, dict)
+        or response.get("hold") != "released"
+        or response.get("was") not in _HOLD_STATES
+    ):
         return "release output does not confirm hold: released"
     return None
 
