@@ -20,10 +20,15 @@ from unittest.mock import patch
 import pytest
 
 from cw.codex_finalize._ci_evidence import (
+    CI_DEFERRAL_COMMAND,
+    CI_HOLD_COMMAND,
+    CI_HOLD_RELEASE_ACTION,
+    CI_REUSE_PLAN_COMMAND,
     CiContext,
     DeferredGate,
     ReusePark,
     ReusePlan,
+    _HoldReleaseError,
     awaiting_ci_evidence_block,
     ci_pr_info,
     consult_create,
@@ -173,17 +178,13 @@ class TestUnavailableBestEffortRelease:
             ["ci-hold", "release", "--repo-path", str(tmp_path)]
         ]
 
-    def test_a_failing_release_is_friction_never_a_block(
+    def test_a_failing_release_stops_create_instead_of_becoming_friction(
         self, stub: PrepPrStateStub, tmp_path: Path
     ) -> None:
         stub.set(deferral_exit=1)
         stub_prep_pr_finalize(Path.home(), hold_exit=1, hold_stderr="boom")
-        deferred, friction = consult_create(stub.script, tmp_path, "main")
-        assert deferred == ()
-        assert friction == [
-            "ci_evidence_unavailable: ci-deferral exit 1",
-            "ci_evidence_unavailable: ci-hold release exit 1: boom",
-        ]
+        with pytest.raises(_HoldReleaseError, match="exit 1: boom"):
+            consult_create(stub.script, tmp_path, "main")
 
     def test_a_missing_arm_script_has_nothing_to_release(
         self, stub: PrepPrStateStub, tmp_path: Path
@@ -437,6 +438,17 @@ class TestReleaseCiHold:
             ["ci-hold", "release", "--repo-path", str(tmp_path)]
         ]
 
+    def test_zero_exit_without_a_release_confirmation_is_a_hold_error(
+        self, tmp_path: Path, tmp_config_dir: Path
+    ) -> None:
+        del tmp_config_dir
+        stub_prep_pr_finalize(tmp_path)
+        done = subprocess.CompletedProcess([], 0, '{"hold": "active"}', "")
+        with patch("cw.codex_finalize._ci_evidence._launch", return_value=done):
+            block = release_ci_hold(tmp_path, self._info(), head=_HEAD)
+        assert block is not None
+        assert "release output does not confirm hold: released" in block.details
+
     def test_a_script_lacking_ci_hold_is_skipped(
         self, tmp_path: Path, tmp_config_dir: Path
     ) -> None:
@@ -528,6 +540,20 @@ class TestReleaseCiHold:
         block = release_ci_hold(tmp_path, self._info())
         assert block is not None
         assert "at head unknown:" in block.details
+
+
+def test_ci_evidence_adapter_tokens_match_script_parser_vocabulary() -> None:
+    repo = Path(__file__).parents[1]
+    state_source = (repo / ".claude/scripts/prep_pr_state.py").read_text(
+        encoding="utf-8"
+    )
+    finalize_source = (repo / ".claude/scripts/prep_pr_finalize.py").read_text(
+        encoding="utf-8"
+    )
+    assert f'"{CI_DEFERRAL_COMMAND}"' in state_source
+    assert f'"{CI_REUSE_PLAN_COMMAND}"' in state_source
+    assert f'"{CI_HOLD_COMMAND}"' in finalize_source
+    assert f'"{CI_HOLD_RELEASE_ACTION}"' in finalize_source
 
 
 # --- parity: the wrapper against the real prep_pr_state.py ----------------------

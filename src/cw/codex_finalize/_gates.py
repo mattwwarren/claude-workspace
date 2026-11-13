@@ -26,6 +26,7 @@ from cw.auto_dev_result.schema._vocab import EXTERNAL_STATE_BLOCKER_REASON
 from cw.codex_finalize._ci_evidence import (
     CiContext,
     DeferredGate,
+    _HoldReleaseError,
     awaiting_ci_evidence_block,
     consult_create,
     consult_reuse,
@@ -438,7 +439,13 @@ def _consult(plan: GatePlan, worktree: Path, path: str, ci: CiContext) -> _CiPla
     if plan.script is None or plan.why_unavailable is not None or not plan.gates:
         return _CiPlan(plan)
     if path == "create":
-        deferred, friction = consult_create(plan.script, worktree, ci.base)
+        try:
+            deferred, friction = consult_create(plan.script, worktree, ci.base)
+        except _HoldReleaseError as exc:
+            return _CiPlan(
+                plan,
+                block=awaiting_ci_evidence_block("hold_error", ci, cause=exc.cause),
+            )
         gone = frozenset(d.gate for d in deferred)
         return _CiPlan(_without(plan, gone), friction, deferred)
     reuse = consult_reuse(plan.script, worktree, ci)

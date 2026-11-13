@@ -41,11 +41,15 @@ BlockFlavor = Literal["deferred", "pending", "red", "hold_error"]
 UNAVAILABLE_PREFIX: Final = "ci_evidence_unavailable: "
 CREATE_DEFERRED_PREFIX: Final = "create_path_gate_ci_deferred: "
 REUSE_COVERED_PREFIX: Final = "reuse_path_gate_ci_covered: "
+CI_DEFERRAL_COMMAND: Final = "ci-deferral"
+CI_REUSE_PLAN_COMMAND: Final = "ci-reuse-plan"
+CI_HOLD_COMMAND: Final = "ci-hold"
+CI_HOLD_RELEASE_ACTION: Final = "release"
 
 #: Bounded helper timeout (seconds): a helper clock, never a stage timer
 #: (ADR-0014). An expired consult is "unavailable", never a park.
 CONSULT_TIMEOUT: Final = 300
-_HOLD_MARKER: Final = "ci-hold"
+_HOLD_MARKER: Final = CI_HOLD_COMMAND
 _PARK_FLAVORS: Final = ("pending", "red")
 _TAIL: Final = 500
 _NOT_ARMED: Final = "cw did not arm auto-merge"
@@ -102,6 +106,10 @@ class _UnavailableError(Exception):
     def __init__(self, cause: str) -> None:
         super().__init__(cause)
         self.cause = cause
+
+
+class _HoldReleaseError(_UnavailableError):
+    """A hold could not be released safely before the create path continued."""
 
 
 def _unavailable(subcommand: str, cause: str) -> str:
@@ -182,21 +190,17 @@ def _covered(entries: tuple[DeferredGate, ...], prefix: str) -> tuple[str, ...]:
     return tuple(f"{prefix}{e.gate} via {', '.join(e.checks)}" for e in entries)
 
 
-def _release_stale_hold(worktree: Path) -> list[str]:
-    """Best-effort ``ci-hold release`` after an abandoned deferral (17(b)).
-
-    A marker left by an earlier attempt must not park a PR whose gates all ran
-    locally. A missing or older script has nothing to release; a failed release
-    is friction, never a block.
-    """
+def _release_stale_hold(worktree: Path) -> None:
+    """Release a stale hold before local gates can lead to an unarmed PR."""
     try:
         script = _probe_arm_script(worktree)
     except RepairStopError:
-        return []
+        return
     if not _supports_hold(script):
-        return []
+        return
     cause = _hold_release(script, worktree)
-    return [] if cause is None else [_unavailable("ci-hold release", cause)]
+    if cause is not None:
+        raise _HoldReleaseError(cause)
 
 
 def consult_create(
@@ -208,13 +212,11 @@ def consult_create(
     gate runs locally) and the friction names the cause.
     """
     try:
-        data = _call(script, worktree, ["ci-deferral", "--base", base])
+        data = _call(script, worktree, [CI_DEFERRAL_COMMAND, "--base", base])
         deferred = _gate_entries(data.get("deferred"), "deferred")
     except _UnavailableError as exc:
-        return (), [
-            _unavailable("ci-deferral", exc.cause),
-            *_release_stale_hold(worktree),
-        ]
+        _release_stale_hold(worktree)
+        return (), [_unavailable(CI_DEFERRAL_COMMAND, exc.cause)]
     return deferred, list(_covered(deferred, CREATE_DEFERRED_PREFIX))
 
 
@@ -257,7 +259,7 @@ def _reuse_plan(script: Path, worktree: Path, ctx: CiContext) -> ReusePlan:
     data = _call(
         script,
         worktree,
-        ["ci-reuse-plan", "--pr", str(ctx.pr_number), "--base", ctx.base],
+        [CI_REUSE_PLAN_COMMAND, "--pr", str(ctx.pr_number), "--base", ctx.base],
     )
     if "park" not in data:
         msg = "output has no park key"
@@ -281,7 +283,7 @@ def consult_reuse(script: Path, worktree: Path, ctx: CiContext) -> ReusePlan:
     try:
         return _reuse_plan(script, worktree, ctx)
     except _UnavailableError as exc:
-        return ReusePlan(friction=(_unavailable("ci-reuse-plan", exc.cause),))
+        return ReusePlan(friction=(_unavailable(CI_REUSE_PLAN_COMMAND, exc.cause),))
 
 
 # -- the park ------------------------------------------------------------------
@@ -317,8 +319,8 @@ def _details(
         return f"ci_evidence_deferred: {lead}: {gates}. {_NOT_ARMED}."
     if flavor == "hold_error":
         return (
-            f"ci_evidence_hold_error: {lead}: ci-hold release failed ({cause}). "
-            f"{_NOT_ARMED}."
+            f"ci_evidence_hold_error: {lead}: {CI_HOLD_COMMAND} "
+            f"{CI_HOLD_RELEASE_ACTION} failed ({cause}). {_NOT_ARMED}."
         )
     if park is None:
         msg = f"a {flavor} park needs its ReusePark"
@@ -372,13 +374,23 @@ def _supports_hold(script: Path) -> bool:
 
 
 def _hold_release(script: Path, worktree: Path) -> str | None:
-    """Run ``ci-hold release``; ``None`` on success, else the failure cause."""
+    """Run ``ci-hold release`` and validate its JSON response."""
     done = _launch(
-        script, worktree, ["ci-hold", "release", "--repo-path", str(worktree)]
+        script,
+        worktree,
+        [CI_HOLD_COMMAND, CI_HOLD_RELEASE_ACTION, "--repo-path", str(worktree)],
     )
     if isinstance(done, str):
         return done
-    return None if done.returncode == 0 else _exit_cause(done)
+    if done.returncode != 0:
+        return _exit_cause(done)
+    try:
+        response = json.loads(done.stdout)
+    except (ValueError, RecursionError):
+        return "release output is not JSON"
+    if not isinstance(response, dict) or response.get("hold") != "released":
+        return "release output does not confirm hold: released"
+    return None
 
 
 def release_ci_hold(
