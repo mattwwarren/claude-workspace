@@ -444,6 +444,21 @@ def test_a_merge_failure_that_leaves_no_merge_head_skips_the_abort(
     assert _state(straddle.clone) == before
 
 
+def test_an_in_progress_merge_is_refused(straddle: ReleaseMovedRepo) -> None:
+    clone = straddle.clone
+    git_in(clone, "merge", "--no-ff", "--no-commit", "origin/main")
+    assert _merge_head(clone)
+    before = _state(clone)
+
+    result = sync_changelog(clone, "main")
+
+    assert result.state == "refused"
+    assert result.disposition is None
+    assert "in-progress merge" in result.detail
+    assert _state(clone) == before
+    git_in(clone, "merge", "--abort")
+
+
 def test_a_merge_tree_error_is_unavailable(
     straddle: ReleaseMovedRepo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

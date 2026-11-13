@@ -380,6 +380,8 @@ class TestWorktreeChangelogSync:
         assert "Never fetches: run `git fetch origin <base>` first" in text
         assert "only `state` tells them apart" in text
         assert "Exit 3: unavailable" in text
+        assert "a merge already in progress in the worktree" in text
+        assert "already an ancestor of HEAD" in text
 
     def test_base_is_required(self) -> None:
         result = CliRunner().invoke(main, ["worktree", "changelog-sync"])

@@ -15,8 +15,8 @@ not a plain commit on the old merge-base: the merge makes main an ancestor,
 so the squash diff is just the bullets under ``[Unreleased]``.
 
 It never fetches, never rebases and never pushes. Anything it cannot do
-safely (a rebuild refusal, a conflict, a dirty tree, a git failure) writes
-nothing; a merge it started and could not finish is aborted.
+safely (a rebuild refusal, a conflict, a dirty tree, an in-progress merge, a git
+failure) writes nothing; a merge it started and could not finish is aborted.
 
 CHANGELOG blobs are read byte-exact (``text=False``, decoded as UTF-8), the
 ``repair_git._show_blob`` discipline: text mode would translate CRLF and bare
@@ -394,7 +394,9 @@ def sync_changelog(
     ``origin/<base>`` has it (or either side lacks a ``CHANGELOG.md``);
     ``moved`` after one merge commit; ``conflict`` when ``origin/<base>``
     does not merge cleanly; ``refused`` for a rebuild refusal, a branch that
-    already contains ``origin/<base>``, or uncommitted tracked changes;
+    already contains ``origin/<base>``, an in-progress merge, or uncommitted
+    tracked changes (the ancestor refusal carries disposition
+    ``changelog_released_section_touched``; the in-progress one carries none);
     ``unavailable`` for a git failure. Never raises and never fetches; every
     git call is bounded by *timeout* (the merge and commit by
     :data:`COMMIT_TIMEOUT_SECONDS`).
