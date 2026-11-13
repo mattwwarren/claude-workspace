@@ -548,9 +548,14 @@ class TestOperatorDocs:
         ):
             assert token in park, token
 
-    def test_changelog_unreleased_added_entry(self) -> None:
-        unreleased = _section_between(_CHANGELOG, "## [Unreleased]", "\n## [")
-        added = _section_between(unreleased, "### Added", "\n### ")
-        entry = next(line for line in added.splitlines() if "#3618" in line)
+    def test_changelog_added_entry(self) -> None:
+        # The entry sits under [Unreleased] until a release cut moves it into
+        # its version section, so find it wherever it lives and check that its
+        # nearest heading is "### Added".
+        entry_start = _CHANGELOG.index("- **Headless finalize defers")
+        heading_start = _CHANGELOG.rindex("\n### ", 0, entry_start) + 1
+        assert _CHANGELOG[heading_start:].startswith("### Added")
+        entry = _CHANGELOG[entry_start:].split("\n", 1)[0]
+        assert "#3618" in entry
         for token in (_REASON, "quality_gates.ci_evidence", "cw dev-queue requeue"):
             assert token in entry, token
