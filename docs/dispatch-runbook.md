@@ -5424,8 +5424,11 @@ Two options, either works — this repo does not prescribe or automate either:
 Either way, the relay's job is just to forward POST bodies unmodified from
 the public internet to the local `/pr-event` endpoint — it does not need to
 understand the payload shape. It does need to leave the body unmodified: the
-HMAC signature and `event_id` stability both depend on the exact bytes (see
-[`pr-channel.md`](pr-channel.md)).
+HMAC signature is computed over the exact request bytes, so a relay that
+re-serializes the body breaks verification. `event_id` does not depend on the
+bytes: it is derived from the identity fields only (`schema_version`, `repo`
+case-folded, `pr_number`, `event_type`, `source_id`), with no body hash (see
+[`pr-channel.md`](pr-channel.md), "Event identity").
 
 ### 10.2 Secret wiring
 

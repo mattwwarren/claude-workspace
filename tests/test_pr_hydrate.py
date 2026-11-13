@@ -245,6 +245,77 @@ class TestCheckStatusVocabularyClassification:
         assert result["pending_count"] == 0
         assert result["ok"] is True
 
+    def test_lowercase_checkrun_failure_normalised(self) -> None:
+        result = summarize_status_checks(
+            [_checkrun("completed", "failure", name="lint")]
+        )
+        assert result["ok"] is False
+        assert result["failing"][0]["conclusion"] == "FAILURE"
+
+    def test_mixed_case_checkrun_failure_normalised(self) -> None:
+        result = summarize_status_checks([_checkrun("Completed", "Timed_Out")])
+        assert result["ok"] is False
+        assert result["failing"][0]["conclusion"] == "TIMED_OUT"
+
+    def test_lowercase_pending_status_counts_as_pending(self) -> None:
+        result = summarize_status_checks([_checkrun("in_progress")])
+        assert result["pending_count"] == 1
+        assert result["ok"] is True
+
+    @pytest.mark.parametrize(
+        ("state", "normalised"),
+        [("failure", "FAILURE"), ("error", "ERROR")],
+    )
+    def test_lowercase_status_context_normalised(
+        self, state: str, normalised: str
+    ) -> None:
+        result = summarize_status_checks([status_context(state)])
+        assert result["ok"] is False
+        assert result["failing"][0]["conclusion"] == normalised
+
+    def test_lowercase_pending_status_context_counts_as_pending(self) -> None:
+        result = summarize_status_checks([status_context("pending")])
+        assert result["pending_count"] == 1
+        assert result["ok"] is True
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            *sorted(set(CheckRunStatus) - {CheckRunStatus.COMPLETED}),
+            "SOMETHING_NEW",
+        ],
+    )
+    def test_non_completed_status_with_failed_conclusion_is_not_failing(
+        self, status: str
+    ) -> None:
+        # The failing gate requires status == COMPLETED; any other status with a
+        # failed conclusion must not land in ``failing``.
+        result = summarize_status_checks([_checkrun(status, "FAILURE")])
+        assert result["failing"] == []
+        assert result["ok"] is True
+        expected_pending = 1 if status in PENDING_CHECKRUN_STATUSES else 0
+        assert result["pending_count"] == expected_pending
+
+    def test_empty_status_with_failed_conclusion_is_not_failing(self) -> None:
+        result = summarize_status_checks([_checkrun("", "FAILURE")])
+        assert result["failing"] == []
+        assert result["ok"] is True
+
+    def test_none_status_and_conclusion_are_neutral(self) -> None:
+        # Covers the ``or ""`` fallbacks: None is neither failing nor pending.
+        result = summarize_status_checks(
+            [
+                {
+                    "__typename": "CheckRun",
+                    "status": None,
+                    "conclusion": None,
+                    "name": "build",
+                },
+                {"__typename": "StatusContext", "state": None, "context": "ci"},
+            ]
+        )
+        assert result == {"failing": [], "pending_count": 0, "ok": True}
+
 
 class TestAttentionState:
     def test_row0_draft_returns_none(self) -> None:

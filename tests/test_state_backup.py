@@ -156,3 +156,58 @@ def test_copy_failure_propagates(
     monkeypatch.setattr(cw._state_backup.shutil, "copy2", _boom)
     with pytest.raises(OSError, match="disk full"):
         backup_legacy_state(sf)
+
+
+def _partial_copy_then_fail(src: Path, dst: Path) -> None:
+    """Stand-in for ``shutil.copy2`` that leaves a truncated destination behind."""
+    dst.write_bytes(b"{trunc")
+    raise OSError(_DISK_FULL_MSG)
+
+
+def test_partial_copy_failure_leaves_no_final_backup_and_no_temp(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sf = write_legacy_sessions_json(state_dir)
+    monkeypatch.setattr(cw._state_backup.shutil, "copy2", _partial_copy_then_fail)
+    with pytest.raises(OSError, match="disk full"):
+        backup_legacy_state(sf)
+    assert not _backup(state_dir).exists()
+    assert sorted(p.name for p in state_dir.iterdir()) == ["sessions.json"]
+
+
+def test_retry_after_failed_copy_produces_complete_backup(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sf = write_legacy_sessions_json(state_dir)
+    original = sf.read_bytes()
+    with monkeypatch.context() as patched:
+        patched.setattr(cw._state_backup.shutil, "copy2", _partial_copy_then_fail)
+        with pytest.raises(OSError, match="disk full"):
+            backup_legacy_state(sf)
+    backup_legacy_state(sf)
+    assert _backup(state_dir).read_bytes() == original
+
+
+def test_replace_failure_cleans_temp(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sf = write_legacy_sessions_json(state_dir)
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError(_DISK_FULL_MSG)
+
+    monkeypatch.setattr(Path, "replace", _boom)
+    with pytest.raises(OSError, match="disk full"):
+        backup_legacy_state(sf)
+    assert not _backup(state_dir).exists()
+    assert sorted(p.name for p in state_dir.iterdir()) == ["sessions.json"]
+
+
+def test_stale_temp_from_a_killed_run_is_overwritten(state_dir: Path) -> None:
+    sf = write_legacy_sessions_json(state_dir)
+    original = sf.read_bytes()
+    stale = state_dir / ".sessions.json.0.x-backup.tmp"
+    stale.write_bytes(b"junk from a killed run")
+    backup_legacy_state(sf)
+    assert _backup(state_dir).read_bytes() == original
+    assert not stale.exists()

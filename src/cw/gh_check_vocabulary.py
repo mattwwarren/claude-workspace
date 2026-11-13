@@ -11,9 +11,9 @@ Two consumers read the same GitHub values with different contracts:
   pending, and hydration never raises on it.
 
 A new GitHub value is added in this one file. The review-monitor script
-(``.claude/scripts/review_monitor_lib/attention.py``) keeps a hand copy of two
-subsets because it cannot import ``cw``; ``tests/test_gh_check_vocabulary.py``
-pins that copy to these sets.
+(``.claude/scripts/review_monitor_lib/attention.py``) keeps hand copies of two
+subsets and a (FAILURE, ERROR) state tuple because it cannot import ``cw``;
+``tests/test_gh_check_vocabulary.py`` pins those copies to these sets.
 
 This is a leaf module: it imports nothing from ``cw``.
 """

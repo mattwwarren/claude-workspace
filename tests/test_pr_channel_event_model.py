@@ -18,11 +18,13 @@ from pydantic import ValidationError
 from cw.cw_pr_events_server import PREventRequest, _build_notification
 from cw.models import OrchestratorEventType
 from cw.models.pr_channel_event import (
+    _MESSAGE_KEYS,
     EVENT_KIND_BY_TYPE,
     PR_CHANNEL_SCHEMA_VERSION,
     PREventKind,
     PREventMessage,
     PREventType,
+    build_pr_event_message,
     derive_event_id,
     kind_for,
     normalize_event_time,
@@ -161,15 +163,54 @@ class TestEventId:
             is None
         )
 
-    def test_independent_of_received_head_and_offset(self) -> None:
-        kwargs = {
-            "schema_version": 1,
+    def test_event_id_independent_of_head_event_time_received_and_payload(self) -> None:
+        # Offset is a bus-envelope field, not a builder input; its half of
+        # identity-independence is pinned in test_cw_pr_events_server.py
+        # (test_identical_body_twice_distinct_offsets_same_event_id) (#3285).
+        identity: dict[str, Any] = {
             "repo": "acme/widgets",
             "pr_number": 42,
-            "event_type": "merged",
-            "source_id": "s",
+            "event_type": PREventType.CI_FAILED,
+            "source_id": "same",
         }
-        assert derive_event_id(**kwargs) == derive_event_id(**kwargs)
+        variants = [
+            build_pr_event_message(
+                **identity,
+                payload={},
+                head_sha=SHA_40,
+                event_time=None,
+                received_at="2026-11-09T12:00:00.000+00:00",
+            ),
+            build_pr_event_message(
+                **identity,
+                payload={"workflow_conclusion": "failure"},
+                head_sha="b" * 40,
+                event_time="2026-11-09T12:00:01.000+00:00",
+                received_at="2026-11-09T12:00:02.000+00:00",
+            ),
+            build_pr_event_message(
+                **identity,
+                payload={"x": 1},
+                head_sha=None,
+                event_time="2026-11-09T12:00:03.000+00:00",
+                received_at="2026-11-09T12:00:04.000+00:00",
+            ),
+        ]
+        ids = {m.event_id for m in variants}
+        assert len(ids) == 1
+        (event_id,) = ids
+        assert event_id is not None
+        assert event_id == derive_event_id(
+            schema_version=1,
+            repo="acme/widgets",
+            pr_number=42,
+            event_type="ci_failed",
+            source_id="same",
+        )
+        # The varied fields really differ, so the equality above is not vacuous.
+        assert len({m.received_at for m in variants}) == 3
+        assert len({m.head_sha for m in variants}) == 3
+        assert "offset" not in variants[0].model_dump()
 
 
 class TestNormalizers:
@@ -279,6 +320,35 @@ class TestPREventMessageStrictness:
                 json.dumps(self._valid(head_sha=SHA_40 + "\n"))
             )
 
+    @pytest.mark.parametrize("key", ["source_id", "event_id", "head_sha", "event_time"])
+    def test_missing_nullable_key_rejected_for_v1(self, key: str) -> None:
+        # The four nullable wire keys are always present for v1, with explicit
+        # null when unknown (#3284). Absent is invalid; null is valid.
+        body = self._valid()
+        del body[key]
+        with pytest.raises(ValidationError):
+            PREventMessage.model_validate_json(json.dumps(body))
+
+    def test_explicit_null_nullable_keys_accepted_for_v1(self) -> None:
+        body = self._valid(
+            source_id=None, event_id=None, head_sha=None, event_time=None
+        )
+        assert {"source_id", "event_id", "head_sha", "event_time"} <= set(body)
+        message = PREventMessage.model_validate_json(json.dumps(body))
+        assert message.source_id is None
+        assert message.event_time is None
+
+    def test_missing_nullable_keys_allowed_for_v0(self) -> None:
+        legacy = {
+            "schema_version": 0,
+            "repo": "acme/widgets",
+            "pr_number": 1,
+            "event_type": "merged",
+        }
+        message = PREventMessage.model_validate_json(json.dumps(legacy))
+        assert message.head_sha is None
+        assert message.event_time is None
+
 
 class TestFromWire:
     def test_v1_round_trip(self) -> None:
@@ -314,6 +384,23 @@ class TestFromWire:
     def test_unknown_event_type_returns_none(self) -> None:
         raw = json.dumps({"repo": "a/b", "pr_number": 1, "event_type": "nope"})
         assert PREventMessage.from_wire(raw) is None
+
+    def test_v1_message_missing_nullable_key_returns_none(self) -> None:
+        body = _message(_load("workflow_body_merged.json"))
+        del body["head_sha"]
+        assert PREventMessage.from_wire(json.dumps(body)) is None
+
+    def test_message_keys_equal_model_fields(self) -> None:
+        assert frozenset(PREventMessage.model_fields) == _MESSAGE_KEYS
+
+    def test_from_wire_keeps_every_model_field(self) -> None:
+        # Behavioral guard for the key filter: a model field missing from
+        # _MESSAGE_KEYS would be silently dropped here (#3286).
+        msg = PREventMessage.from_wire(
+            json.dumps(_load("message_v1_ci_failed_with_source.json"))
+        )
+        assert msg is not None
+        assert msg.model_fields_set == set(PREventMessage.model_fields)
 
 
 class TestKindTable:
@@ -432,3 +519,16 @@ class TestDocGuards:
         from cw.gh import pr_reads
 
         assert "headRefOid" not in pr_reads._PR_VIEW_FIELDS
+
+    def test_runbook_relay_note_does_not_tie_event_id_to_body_bytes(self) -> None:
+        # Only the HMAC depends on exact body bytes; event_id is derived from
+        # identity fields alone (#3283).
+        runbook = (
+            Path(__file__).parent.parent / "docs" / "dispatch-runbook.md"
+        ).read_text()
+        assert "`event_id` stability" not in runbook
+        start = runbook.index("leave the body unmodified")
+        paragraph = runbook[start : runbook.index("\n\n", start)]
+        assert "HMAC" in paragraph
+        assert "`event_id`" in paragraph
+        assert "identity fields" in paragraph

@@ -77,6 +77,10 @@ with `_build_notification`.
 - `received_at`: server wall clock at acceptance, UTC ISO-8601 with milliseconds.
   Never an event time, never used for identity or cross-server ordering.
 
+For `schema_version >= 1`, `source_id`, `event_id`, `head_sha` and `event_time` are
+always present, with explicit null when unknown; a v1 message missing one of them is
+invalid. Legacy v0 messages may omit them and read as null.
+
 ### Versioning rules
 
 - Additive keys do not bump `schema_version`.
