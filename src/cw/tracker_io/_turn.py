@@ -133,13 +133,6 @@ def plan_turn_parts(
     return tuple(agent_marked_body(body) for body in plan.bodies)
 
 
-def _server_name(client: ClientConfig) -> str | None:
-    gate = client.tracker_mcp_gate
-    if gate is None or gate.servers is None:
-        return None
-    return gate.servers.get(CODEX_BACKEND)
-
-
 def _preflight(
     ticket_id: str, tracker: str, client: ClientConfig
 ) -> tuple[str, tuple[str, str]] | TrackerIoReason:
@@ -147,7 +140,7 @@ def _preflight(
     try:
         tools = comment_tools_for(tracker)
         # A missing servers.codex entry is "" here: MCP_SERVER_UNNAMED too.
-        server = validate_server_name(_server_name(client) or "")
+        server = validate_server_name(client.tracker_mcp_server(CODEX_BACKEND) or "")
         validate_ticket_id(ticket_id)
     except TrackerIoConfigError as exc:
         return exc.reason

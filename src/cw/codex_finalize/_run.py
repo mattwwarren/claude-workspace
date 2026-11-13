@@ -221,8 +221,7 @@ class _Run:
         kind = tracker_kind(self.client.workspace_path)
         if kind.tracker_class is not TrackerClass.OTHER or kind.system is None:
             return None
-        gate = self.client.tracker_mcp_gate
-        server = (gate.servers or {}).get(CODEX_BACKEND, "") if gate else ""
+        server = self.client.tracker_mcp_server(CODEX_BACKEND) or ""
         why = None
         try:
             validate_server_name(server)

@@ -305,7 +305,7 @@ _CODEX_SERVER_UNSET = "servers.codex (unset)"
 
 
 def _evaluate_codex_plan(
-    client: ClientConfig, gate: TrackerMcpGateConfig, branch: str, tick: _GateTick
+    client: ClientConfig, branch: str, tick: _GateTick
 ) -> TrackerMcpGateHit | None:
     """A codex PLAN or FINALIZE row's check (#3060): ``servers.codex`` must be usable.
 
@@ -313,7 +313,7 @@ def _evaluate_codex_plan(
     :func:`_evaluate_backend_server`). On any other tracker a missing or
     non-identifier ``servers.codex`` is a hit before any config read.
     """
-    server = (gate.servers or {}).get(CODEX_BACKEND)
+    server = client.tracker_mcp_server(CODEX_BACKEND)
     if server is not None and is_valid_name(server):
         return _evaluate_backend_server(client, CODEX_BACKEND, server, branch, tick)
     if tick.tracker().tracker_class is not TrackerClass.OTHER:
@@ -347,8 +347,8 @@ def _evaluate_task(
             return None
         return _evaluate_branch(client, gate, branch)
     if backend == CODEX_BACKEND and task.stage in (Stage.PLAN, Stage.FINALIZE):
-        return _evaluate_codex_plan(client, gate, branch, tick)
-    server = (gate.servers or {}).get(backend)
+        return _evaluate_codex_plan(client, branch, tick)
+    server = client.tracker_mcp_server(backend)
     if backend != OPENCODE_BACKEND or server is None:
         _log.debug(
             "dispatch: tracker-MCP gate not applied to %s %s (backend %s)",
