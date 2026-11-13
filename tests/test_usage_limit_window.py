@@ -16,7 +16,7 @@ from cw.dispatch_state import (
     save_usage_limit_armed_at,
 )
 from cw.dispatch_state_marks import load_usage_limit_clear_marks
-from cw.events import read_events
+from cw.events import read_events, record_event
 from cw.exceptions import DEV_QUEUE_LOCK_NAME, CwError
 from cw.models import OrchestratorEventType, QueueItemStatus, TicketTask
 from cw.models.gate_block import GateBlockBackoff
@@ -323,7 +323,33 @@ class TestApply:
         )
         assert snapshots == [()]
 
-    def test_event_write_failure_keeps_state_and_raises(
+    def test_audit_event_is_written_before_any_state_changes(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seed_usage_limit_window(_ACME, _UNTIL)
+        seed_stamped_row(_ACME, "A-1", next_eligible_at=_STAMP)
+        seen_at_write: list[dict[str, object]] = []
+
+        def _spy(event_type: OrchestratorEventType, payload: dict[str, object]) -> None:
+            seen_at_write.append(
+                {
+                    "window": load_usage_limited_until(),
+                    "row": _row("A-1").next_eligible_at,
+                    "marks": load_usage_limit_clear_marks(),
+                }
+            )
+            record_event(event_type, payload)
+
+        monkeypatch.setattr("cw.usage_limit_window.record_event", _spy)
+
+        _apply()
+
+        assert seen_at_write == [
+            {"window": {_ACME: _UNTIL}, "row": _STAMP, "marks": {}}
+        ]
+        assert len(_cleared_events()) == 1
+
+    def test_event_write_failure_refuses_and_changes_nothing(
         self,
         tmp_config_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -345,19 +371,19 @@ class TestApply:
             _apply()
 
         message = str(excinfo.value)
-        assert f"usage-limit window for {_ACME} was cleared (was until" in message
-        assert "released 1 row(s)" in message
+        assert f"refusing to clear {_ACME}" in message
         assert (
-            "but the dispatch.usage_limit_cleared audit event could not be recorded"
+            "the dispatch.usage_limit_cleared audit event could not be recorded"
             in message
         )
         assert "events disk full" in message
-        assert load_usage_limited_until() == {}
-        assert _ACME in load_usage_limit_clear_marks()
-        assert _row("A-1").next_eligible_at is None
+        assert message.endswith("nothing was cleared")
+        assert load_usage_limited_until() == {_ACME: _UNTIL}
+        assert load_usage_limit_clear_marks() == {}
+        assert _row("A-1").next_eligible_at == _STAMP
         errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
-        assert any(_ACME in m and _UNTIL.isoformat() in m for m in errors)
-        assert plan_usage_limit_clear(_ACME).is_empty
+        assert any(_ACME in m and "nothing cleared" in m for m in errors)
+        assert not plan_usage_limit_clear(_ACME).is_empty
 
     def test_row_save_failure_still_records_the_event(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
@@ -377,7 +403,7 @@ class TestApply:
 
         events = _cleared_events()
         assert len(events) == 1
-        assert events[0]["rows_released"] == []
+        assert events[0]["rows_released"] == ["A-1", "A-2"]
         assert events[0]["old_until"] == _UNTIL.isoformat()
         assert load_usage_limited_until() == {}
         monkeypatch.setattr("cw.usage_limit_window.save_dev_queue", save_dev_queue)
@@ -387,7 +413,7 @@ class TestApply:
         assert [r.ticket_id for r in plan.rows] == ["A-1", "A-2"]
         assert _apply(plan).rows_released == ("A-1", "A-2")
 
-    def test_window_clear_failure_raises_and_records_nothing(
+    def test_window_clear_failure_after_event_raises_with_event_on_record(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         seed_usage_limit_window(_ACME, _UNTIL)
@@ -400,10 +426,14 @@ class TestApply:
         monkeypatch.setattr("cw.usage_limit_window.clear_usage_limited_until", _boom)
 
         with pytest.raises(
-            CwError, match=f"could not clear the usage-limit window for {_ACME}"
+            CwError,
+            match=(
+                f"could not clear the usage-limit window for {_ACME}.*"
+                "audit event was already recorded and nothing was cleared"
+            ),
         ):
             _apply()
 
         assert load_usage_limited_until() == {_ACME: _UNTIL}
         assert _row("A-1").next_eligible_at == _STAMP
-        assert _cleared_events() == []
+        assert len(_cleared_events()) == 1

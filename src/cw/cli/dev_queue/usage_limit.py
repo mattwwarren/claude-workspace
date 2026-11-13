@@ -4,7 +4,8 @@ Order (ADR-0019): unlocked reads build the plan; nothing to clear or
 ``--dry-run`` stops there. Then the operator login is resolved and, unless
 ``--force``, the account is probed, both with no lock held. Only then does
 :func:`cw.usage_limit_window.apply_usage_limit_clear` take its two STATE
-locks in sequence and record the audit event. A probe ERROR fails closed: the
+locks in sequence, after recording the audit event first (a failed event write
+refuses the clear and changes nothing). A probe ERROR fails closed: the
 clear refuses and names ``--force``; the probe runs once, with no retry.
 """
 
@@ -20,7 +21,6 @@ from cw.exceptions import CwError
 from cw.operator_identity import resolve_actor_or_empty
 from cw.usage_limit_probe import ProbeVerdict, probe_account_usage_limit
 from cw.usage_limit_window import (
-    UsageLimitClearAuditError,
     apply_usage_limit_clear,
     display_instant,
     plan_usage_limit_clear,
@@ -60,7 +60,7 @@ def _dry_run_lines(plan: ClearPlan) -> list[str]:
 
 
 def _summary_lines(result: ClearResult) -> list[str]:
-    """What the clear changed, printed before any audit-failure error."""
+    """What the clear changed."""
     if result.old_until is None:
         lines = [
             f"no active usage-limit window for {result.client}; clear mark recorded"
@@ -157,11 +157,7 @@ def usage_limit_clear(client: str, dry_run: bool, force: bool) -> None:
         return
     actor = resolve_actor_or_empty(client_cfg, context=f"usage-limit clear {client}")
     verdict = _probe_verdict(client_cfg, force=force)
-    try:
-        result = apply_usage_limit_clear(
-            plan, actor=actor, forced=force, probe_verdict=verdict
-        )
-    except UsageLimitClearAuditError as exc:
-        _echo(_summary_lines(exc.result))
-        raise
+    result = apply_usage_limit_clear(
+        plan, actor=actor, forced=force, probe_verdict=verdict
+    )
     _echo(_summary_lines(result))

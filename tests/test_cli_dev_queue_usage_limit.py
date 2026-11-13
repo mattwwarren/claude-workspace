@@ -299,7 +299,7 @@ class TestClear:
         assert probe == [()]
         assert _cleared_events()[0]["cleared_by"] == "spy-actor"
 
-    def test_event_write_failure_prints_summary_then_fails(
+    def test_event_write_failure_refuses_and_changes_nothing(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _seed_window_and_rows()
@@ -315,14 +315,10 @@ class TestClear:
 
         assert result.exit_code != 0
         out = result.output
-        summary = out.index(f"cleared usage-limit window for {_CLIENT}")
-        failure = out.index(f"usage-limit window for {_CLIENT} was cleared (was until")
-        assert summary < failure
-        assert (
-            "but the dispatch.usage_limit_cleared audit event could not be recorded"
-            in out
-        )
-        assert load_usage_limited_until() == {}
+        assert f"refusing to clear {_CLIENT}" in out
+        assert "nothing was cleared" in out
+        assert f"cleared usage-limit window for {_CLIENT}" not in out
+        assert load_usage_limited_until() == {_CLIENT: _UNTIL}
 
     def test_unknown_client_fails_and_writes_nothing(
         self, monkeypatch: pytest.MonkeyPatch

@@ -10,8 +10,9 @@ caller resolves the actor and runs the account probe. The apply
 (:func:`apply_usage_limit_clear`) then takes ``dispatch_state_lock`` (window pop
 and clear mark, in ``clear_usage_limited_until``) and, as a separate later
 acquisition, ``dev_queue_lock`` (row stamps). Both are rank STATE and are never
-nested. The ``dispatch.usage_limit_cleared`` audit event is recorded after both
-are released: state first, then the event.
+nested. The ``dispatch.usage_limit_cleared`` audit event is recorded first,
+before either lock is taken: audit first, then state. If the event cannot be
+written the clear is refused and nothing changes.
 
 ``next_eligible_at`` is shared by the usage-limit requeue, the spawn-error
 backoff and the worktree-occupied deferral, and a row does not record which
@@ -156,20 +157,6 @@ class ClearResult:
     rows_released: tuple[str, ...]
 
 
-class UsageLimitClearAuditError(CwError):
-    """The clear landed but its audit event could not be recorded.
-
-    Carries the :class:`ClearResult`, so the CLI can print what was already
-    cleared before it exits non-zero.
-    """
-
-    __slots__ = ("result",)
-
-    def __init__(self, message: str, *, result: ClearResult) -> None:
-        super().__init__(message)
-        self.result = result
-
-
 def _gate_owned(task: TicketTask) -> bool:
     record = task.gate_block
     return record is not None and task.next_eligible_at == record.until
@@ -253,53 +240,52 @@ def _release_rows(plan: ClearPlan, now: datetime) -> tuple[list[str], Exception 
 
 
 def _event_payload(
-    result: ClearResult,
+    plan: ClearPlan,
     *,
     actor: str,
     forced: bool,
     probe_verdict: str,
     cleared_at: datetime,
 ) -> dict[str, object]:
+    """The audit payload, built from the plan before anything is mutated.
+
+    ``rows_released`` is the set the plan selected; a row that no longer
+    qualifies under the lock is left alone, so this is the intent, not a
+    post-clear fact. ``old_until`` is the window the plan saw.
+    """
     armed_at = load_usage_limit_armed_at()
+    old_until = plan.window_until
     return {
-        "clients_affected": [result.client],
+        "clients_affected": [plan.client],
         "sessions_affected": 0,
         "detected_at": None if armed_at is None else armed_at.isoformat(),
         "cleared_at": cleared_at.isoformat(),
         "trigger": OPERATOR_TRIGGER,
         "cleared_by": actor,
-        "old_until": None if result.old_until is None else result.old_until.isoformat(),
-        "rows_released": list(result.rows_released),
+        "old_until": None if old_until is None else old_until.isoformat(),
+        "rows_released": [row.ticket_id for row in plan.rows],
         "forced": forced,
         "probe": probe_verdict,
     }
 
 
-def _record_cleared(result: ClearResult, payload: dict[str, object]) -> None:
-    """Record the audit event; on failure log it and raise the audit error."""
+def _record_audit_first(plan: ClearPlan, payload: dict[str, object]) -> None:
+    """Write the audit event before any state changes; refuse on failure."""
+    event_name = OrchestratorEventType.USAGE_LIMIT_CLEARED.value
     try:
         record_event(OrchestratorEventType.USAGE_LIMIT_CLEARED, payload)
     except (OSError, TypeError, ValueError) as exc:
-        error = exc
-    else:
-        return
-    event_name = OrchestratorEventType.USAGE_LIMIT_CLEARED.value
-    logger.error(
-        "usage-limit clear for %s landed (was until %s; released %s) but the "
-        "%s audit event could not be recorded: %s",
-        result.client,
-        payload["old_until"],
-        list(result.rows_released),
-        event_name,
-        error,
-    )
-    msg = (
-        f"usage-limit window for {result.client} was cleared (was until"
-        f" {display_instant(result.old_until)}; released"
-        f" {len(result.rows_released)} row(s)) but the {event_name} audit event"
-        f" could not be recorded: {error}"
-    )
-    raise UsageLimitClearAuditError(msg, result=result) from error
+        logger.exception(
+            "usage-limit clear for %s refused: the %s audit event could not be"
+            " recorded, nothing cleared",
+            plan.client,
+            event_name,
+        )
+        msg = (
+            f"refusing to clear {plan.client}: the {event_name} audit event could"
+            f" not be recorded ({exc}); nothing was cleared"
+        )
+        raise CwError(msg) from exc
 
 
 def apply_usage_limit_clear(
@@ -310,28 +296,41 @@ def apply_usage_limit_clear(
     probe_verdict: str,
     now: datetime | None = None,
 ) -> ClearResult:
-    """Clear *plan*'s window and rows, then record one audit event.
+    """Record the audit event, then clear *plan*'s window and rows.
 
-    Order: the window pop and clear mark (``dispatch_state_lock``), then the
-    row release (``dev_queue_lock``), then the event, outside both locks. If
-    the row save fails after the window was cleared, the event is still
-    recorded (with the rows actually released, none) before the ``CwError``,
-    so ``old_until`` and the actor are never lost. If the event write fails,
-    :class:`UsageLimitClearAuditError` is raised. Never touches
-    ``usage_limit_armed_at``.
+    Order (audit first): the ``dispatch.usage_limit_cleared`` event is written
+    before any lock is taken. If it cannot be written, the clear is refused
+    with a ``CwError`` and nothing changes. Then the window pop and clear mark
+    (``dispatch_state_lock``), then the row release (``dev_queue_lock``), each
+    a separate acquisition outside the other. If the window clear fails after
+    the event landed, the ``CwError`` says so: the event stays on record and
+    nothing was cleared. If the row save fails after the window was cleared,
+    the ``CwError`` says the window cleared and the rows did not; re-running
+    the clear releases them. Never touches ``usage_limit_armed_at``.
     """
     cleared_at = now or datetime.now(UTC)
-    old_until = _clear_window(plan.client, cleared_at, expected_until=plan.window_until)
+    _record_audit_first(
+        plan,
+        _event_payload(
+            plan,
+            actor=actor,
+            forced=forced,
+            probe_verdict=probe_verdict,
+            cleared_at=cleared_at,
+        ),
+    )
+    try:
+        old_until = _clear_window(
+            plan.client, cleared_at, expected_until=plan.window_until
+        )
+    except CwError as exc:
+        msg = (
+            f"{exc}; the {OrchestratorEventType.USAGE_LIMIT_CLEARED.value} audit"
+            " event was already recorded and nothing was cleared"
+        )
+        raise CwError(msg) from exc
     released, row_error = _release_rows(plan, cleared_at)
     result = ClearResult(plan.client, old_until, tuple(released))
-    payload = _event_payload(
-        result,
-        actor=actor,
-        forced=forced,
-        probe_verdict=probe_verdict,
-        cleared_at=cleared_at,
-    )
-    _record_cleared(result, payload)
     if row_error is not None:
         msg = (
             f"usage-limit window for {plan.client} was cleared (was until"

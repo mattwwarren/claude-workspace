@@ -4716,12 +4716,16 @@ client's window after the account limit was reset by hand.
   its next tick, and its post-tick arm never re-persists the stale copy.
 - It records one `dispatch.usage_limit_cleared` with `trigger: "operator"`
   (see `docs/events.md`); the loop does not emit its own lapse event for it.
-- If the event write fails, the window and rows are already cleared: the
-  command prints the summary, then `usage-limit window for <client> was
-  cleared (...) but the dispatch.usage_limit_cleared audit event could not be
-  recorded: <error>`, and exits non-zero. There is nothing to re-run. If the
-  row release fails, the event is still recorded and a re-run releases the
-  remaining rows.
+- The audit event is written first. If it cannot be written, the command
+  refuses with `refusing to clear <client>: the dispatch.usage_limit_cleared
+  audit event could not be recorded (<error>); nothing was cleared`, exits
+  non-zero, and changes no state. Fix the event log and re-run the clear.
+- If the window clear fails after the event was written, the command exits
+  non-zero with `could not clear the usage-limit window for <client>: ...;
+  the dispatch.usage_limit_cleared audit event was already recorded and
+  nothing was cleared`. The event stays on record; re-run the clear.
+- If the row release fails after the window was cleared, the event is already
+  recorded and a re-run releases the remaining rows.
 
 A clear can be overridden by a detection that really happened. Each of these
 re-arms the window after a clear; the remedy is to re-run the clear:
