@@ -1742,7 +1742,10 @@ coordination stream, and the body lives in the session's own
 `inboxes/<session_id>/inbox.jsonl`. No `correlation_id` is set.
 
 Until #2255 lands, the common outcome for a session that is genuinely live
-and mid-task is queued-but-not-delivered; see ADR-0017.
+and mid-task is queued-but-not-delivered. A session whose owning task is
+`BLOCKED_ON_USER` for a park a message cannot clear (a mechanical disposition
+such as `merge_gate_blocked`, or no recorded disposition) is likewise queued
+but not respawned, with a reason naming the disposition (#2287); see ADR-0017.
 
 ### `session.result_emitted`
 
