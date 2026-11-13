@@ -460,7 +460,7 @@ The script verifies:
 - A PR exists for the current branch (`gh pr view` succeeds)
 - PR head SHA matches local HEAD (push and PR are in sync)
 - Auto-merge is enabled (required — auto-dev relies on this) — downgraded to informational when `.claude/project-config.yaml`'s `pr.auto_merge` is explicitly `false` (e.g. no branch protection on a free plan); `prep_pr_finalize.py` itself makes this determination (#2046). An already-MERGED PR also satisfies it (a synchronous-merge ship-it, #2163); a CLOSED-unmerged PR still fails.
-- Monitor registered (reported as optional unless `--require-monitor` is passed)
+- Monitor registered (reported as optional unless `--require-monitor` is passed; downgraded to optional when `.claude/project-config.yaml` sets `pr.auto_merge: false`, which `prep_pr_finalize.py` determines itself (#3548))
 
 Output is the canonical Ship Summary (markdown). For programmatic callers (e.g. /auto-dev's subagent), pass `--json`.
 
@@ -476,7 +476,7 @@ Output is the canonical Ship Summary (markdown). For programmatic callers (e.g. 
   `details:` the verbatim failed checks). Never emit a Ship Summary that claims
   success when `verify` failed.
 
-**If monitor registration is missing**, run it now:
+**If monitor registration is missing** (skip this step only when `.claude/project-config.yaml` sets `pr.auto_merge: false`, the repo's deliberate state, as with the `automerge-enabled` exception above; a `○` on this first run, which does not pass `--require-monitor`, does not mean the monitor was downgraded), run it now:
 ```bash
 PR_NUMBER=$(gh pr view --json number --jq .number)
 REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
@@ -492,7 +492,7 @@ HEAD_SHA=$(gh pr view --json headRefOid --jq .headRefOid)
 
 `register` reports its own outcome: one JSON line on success (`{"registered": true, "key": "<owner/repo>#<n>", "sha": "<sha>", "updated": <bool>}`), or an `Error:` line on stderr and a non-zero exit on failure — no separate command is needed to learn whether it worked.
 
-Then re-run finalize with `--require-monitor` as the final contract check.
+Then re-run finalize with `--require-monitor` as the final contract check (the script downgrades it to optional on a repo with `pr.auto_merge: false`, where no monitor is registered; skip registration there if the check shows `○`).
 
 ## Step 10: Clean Up
 
