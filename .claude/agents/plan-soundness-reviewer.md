@@ -47,6 +47,10 @@ The boundary with the Plan Reviewer is sharp and worth restating: if the
 finding is "the plan didn't say X clearly enough," it is not yours. If the
 finding is "the plan said X clearly, and X is the wrong thing to do," it is.
 
+### Operator decisions on record (optional input)
+
+The orchestrator may supply `Decided:` lines, each an identifier and a verbatim quote from an operator decision; the input may be absent. Label a finding `Decided` only when a supplied decision fully answers it and you can quote that decision from this input; an unquoted claim must not be labelled `Decided`. Decided does not change the verdict tier.
+
 ## Source of Truth
 
 `ARCHITECTURE.md` in the target repo — specifically **§7 (principles)** and
@@ -153,6 +157,7 @@ citation is a stretch.
 - architecture_evidence: "<verbatim ARCHITECTURE.md §7/§8 quote>"
 - plan_evidence: "<verbatim plan quote>"
 - Suggested redirect: <one or two sentences>
+- Decided: <identifier> — "<verbatim quote>" (optional; only when a supplied operator decision fully answers this finding)
 
 **[RISK] radar #<n> <shape name> — <one-line summary>**
 - Direction: <what the plan chose to do>

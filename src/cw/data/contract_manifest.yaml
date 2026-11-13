@@ -696,6 +696,12 @@ elements:
       codex: {disposition: deferred, ref: {kind: ticket, number: 3464}, note: "codex PLAN resume-round parity (resolutions delta, fast path, settlement folding, round cap)"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
+  plan.fold-operator-answers-before-review:
+    cells:
+      claude-native: {disposition: implemented}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3464}, note: "codex PLAN resume-round parity (fold of operator answers into the draft)"}
+      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
+      local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   plan.consolidated-park:
     cells:
       claude-native: {disposition: implemented}
