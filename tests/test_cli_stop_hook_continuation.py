@@ -108,6 +108,8 @@ def _row_counter() -> int | None:
 
 @pytest.fixture
 def worktree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("CW_STOP_CONTINUATION_MODE", "enabled")
+    monkeypatch.setenv("CW_STOP_CONTINUATION_SCOPES", "client-a")
     session = _seed_session(tmp_path)
     assert session.worktree_path is not None
     _write_hook_context_file(session.worktree_path, headless=True)
@@ -174,6 +176,57 @@ class TestContinuationHappyPath:
 
 
 class TestContinuationCap:
+    def test_off_mode_does_not_continue(
+        self,
+        worktree: Path,
+        recorded: list[tuple[object, dict[str, object]]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("CW_STOP_CONTINUATION_MODE", "off")
+        _seed_row()
+        _write_transcript(worktree, [_assistant(PLAIN_TEXT)])
+
+        result = _stop(worktree, last_assistant_message=PLAIN_TEXT)
+
+        assert result.stdout.strip() == ""
+        assert _row_counter() is None
+        assert recorded == []
+
+    def test_non_targeted_scope_does_not_continue(
+        self,
+        worktree: Path,
+        recorded: list[tuple[object, dict[str, object]]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("CW_STOP_CONTINUATION_SCOPES", "other-client")
+        _seed_row()
+        _write_transcript(worktree, [_assistant(PLAIN_TEXT)])
+
+        result = _stop(worktree, last_assistant_message=PLAIN_TEXT)
+
+        assert result.stdout.strip() == ""
+        assert _row_counter() is None
+        assert recorded == []
+
+    def test_shadow_mode_does_not_mutate_enrolled_scope(
+        self,
+        worktree: Path,
+        recorded: list[tuple[object, dict[str, object]]],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setenv("CW_STOP_CONTINUATION_MODE", "shadow")
+        caplog.set_level("INFO", logger="cw.cli.stop_hook")
+        _seed_row()
+        _write_transcript(worktree, [_assistant(PLAIN_TEXT)])
+
+        result = _stop(worktree, last_assistant_message=PLAIN_TEXT)
+
+        assert result.stdout.strip() == ""
+        assert _row_counter() is None
+        assert recorded == []
+        assert "stop continuation shadowed" in caplog.text
+
     def test_cap_two_then_falls_through(
         self, worktree: Path, recorded: list[tuple[object, dict[str, object]]]
     ) -> None:
