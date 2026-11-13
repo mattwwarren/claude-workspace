@@ -7,7 +7,19 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+
+from cw.dev_queue import list_tickets, save_dev_queue
+from cw.dispatch_state import (
+    load_usage_limit_armed_at,
+    load_usage_limited_until,
+    record_usage_limit_armed,
+    save_usage_limit_armed_at,
+)
 from cw.dispatch_state_marks import load_usage_limit_clear_marks
+from cw.events import read_events
+from cw.exceptions import DEV_QUEUE_LOCK_NAME, CwError
+from cw.models import OrchestratorEventType, QueueItemStatus, TicketTask
+from cw.models.gate_block import GateBlockBackoff
 from cw.usage_limit_window import (
     ClearPlan,
     ClearResult,
@@ -18,18 +30,6 @@ from cw.usage_limit_window import (
     render_usage_limit_lines,
     usage_limit_window_views,
 )
-
-from cw.dev_queue import list_tickets, save_dev_queue
-from cw.dispatch_state import (
-    load_usage_limit_armed_at,
-    load_usage_limited_until,
-    record_usage_limit_armed,
-    save_usage_limit_armed_at,
-)
-from cw.events import read_events
-from cw.exceptions import DEV_QUEUE_LOCK_NAME, CwError
-from cw.models import OrchestratorEventType, QueueItemStatus, TicketTask
-from cw.models.gate_block import GateBlockBackoff
 from tests._shared.dispatch_fixtures import seed_stamped_row, seed_usage_limit_window
 from tests._shared.lock_helpers import (
     DISPATCH_STATE_LOCK_NAME,
@@ -70,6 +70,19 @@ class TestViews:
         seed_usage_limit_window("lapsed", _NOW - timedelta(minutes=1))
 
         assert [v.client for v in usage_limit_window_views()] == [_ACME, "zeta"]
+
+    def test_no_window_reads_no_events(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With nothing active, neither the arm marker nor the event log is read."""
+        reads: list[object] = []
+        monkeypatch.setattr(
+            "cw.usage_limit_window.read_events",
+            lambda **kwargs: reads.append(kwargs) or [],
+        )
+
+        assert usage_limit_window_views() == []
+        assert reads == []
 
     def test_client_filter(self, tmp_config_dir: Path) -> None:
         seed_usage_limit_window("zeta", _UNTIL)
