@@ -29,9 +29,12 @@ def enter_stage(
     """Set ``task.stage`` and ``task.stage_entered_at`` together.
 
     ``entered_at`` is used verbatim when given; otherwise the stamp is the
-    current UTC time, whole seconds, ``Z`` suffix.
+    current UTC time, whole seconds, ``Z`` suffix. Also clears
+    ``task.stop_continuations`` (GitHub #2348): the Stop-hook continuation
+    cap is per stage, so a real stage entry starts it over.
     """
     task.stage = stage
     task.stage_entered_at = (
         entered_at if entered_at is not None else iso_z(utc_now_seconds())
     )
+    task.stop_continuations = None

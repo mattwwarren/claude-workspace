@@ -799,6 +799,12 @@ class OrchestratorEventType(StrEnum):
     # else is an audit trail, not an operator page -- same convention as
     # WORKTREE_FAST_FORWARDED above.
     DAEMON_LEAKED_WORKER_STOPPED = "daemon.leaked_worker_stopped"
+    # Stop-hook auto-continuation (GitHub #2348): a headless worker that ended
+    # its turn with text and no sentinel was sent the fixed nudge. Recorded
+    # after the continuation is persisted, so it means "decided and counted",
+    # not "delivered". A non-paging audit record, deliberately NOT added to
+    # _DEFAULT_OPERATOR_EVENT_TYPES (orchestrator_config/operator_forward.py).
+    SESSION_STOP_CONTINUED = "session.stop_continued"
 
 
 class StageIdentifier(StrEnum):
