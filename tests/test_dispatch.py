@@ -22711,3 +22711,82 @@ class TestRunDispatchLoopReviewDebtEnqueueHook:
         )
         _run_pr_merge_consumers_guarded()
         assert calls == ["release", "enqueue"]
+
+
+class TestAwaitingCiEvidenceRouting:
+    """#3618: an `awaiting_ci_evidence` park stays at FINALIZE.
+
+    It stamps the PR url from `pr_info`, never regresses and never charges
+    the unproductive ceiling, at any regress count.
+    """
+
+    _PR_URL = "https://github.com/acme/widgets/pull/42"
+
+    def _last(self) -> dict[str, object]:
+        return {
+            "schema_version": 4,
+            "ticket_id": "T-1",
+            "status": "blocked",
+            "stage_reached": "stage5_post_create",
+            "branch": "dev/T-1",
+            "pr": None,
+            "pr_info": {
+                "number": 42,
+                "url": self._PR_URL,
+                "auto_merge": False,
+                "base": "main",
+            },
+            "blocker": {
+                "stage": "stage5_post_create",
+                "reason": "awaiting_ci_evidence",
+                "details": (
+                    f"ci_evidence_deferred: PR #42 ({self._PR_URL}) at head "
+                    + "a" * 40
+                    + ": gate mypy mapped to check(s) ci deferred to CI and not"
+                    " run locally. cw did not arm auto-merge."
+                ),
+                "exception_type": None,
+                "message": (
+                    "mapped CI checks have not all finished green at the PR"
+                    " head; cw did not arm auto-merge"
+                ),
+                "retry_eligible": True,
+                "retry_delay_seconds": None,
+            },
+            "next_actions": [],
+        }
+
+    @pytest.mark.parametrize("attempts", [0, 1, 3])
+    def test_parks_at_finalize_with_pr_url_and_no_charge(self, attempts: int) -> None:
+        from cw.auto_dev_result import (
+            AWAITING_CI_EVIDENCE_BLOCKER_REASON,
+            FINALIZE_REGRESS_CAP,
+        )
+        from cw.dev_queue import AWAITING_CI_EVIDENCE_DISPOSITION, save_dev_queue
+        from cw.dispatch import apply_staged_decision
+        from cw.models import ClientConfig, DevQueueStore, QueueItemStatus, Stage
+        from tests._shared.session_seeding import _make_ticket_task
+
+        attempts = min(attempts, FINALIZE_REGRESS_CAP)
+        task = _make_ticket_task(
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.FINALIZE,
+            regress_attempts=attempts,
+        )
+        unproductive_before = task.unproductive_attempts
+        clients = {
+            "test-client": ClientConfig(
+                name="test-client", workspace_path=Path("/nonexistent/repo")
+            )
+        }
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        apply_staged_decision(task, "blocked", self._last(), clients)
+
+        assert task.stage == Stage.FINALIZE
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == AWAITING_CI_EVIDENCE_DISPOSITION
+        assert task.blocked_reason == AWAITING_CI_EVIDENCE_BLOCKER_REASON
+        assert task.pr_url == self._PR_URL
+        assert task.regress_attempts == attempts
+        assert task.unproductive_attempts == unproductive_before

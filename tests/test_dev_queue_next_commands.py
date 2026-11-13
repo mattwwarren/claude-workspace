@@ -28,6 +28,7 @@ from cw.cli import main
 from cw.codex_review import CODEX_MUST_FIX_FINDINGS
 from cw.config import get_client, load_state, save_state
 from cw.dev_queue import (
+    AWAITING_CI_EVIDENCE_DISPOSITION,
     BRANCH_STALENESS_GATE_DISPOSITION,
     DRAIN_DISPOSITIONS,
     FINALIZE_GATE_HELD_DISPOSITION,
@@ -372,6 +373,9 @@ _GUIDED = {
     ),
     GATE_TIMEOUT_DISPOSITION: (
         "The reuse-path quality gate was cut off by the foreground timeout"
+    ),
+    AWAITING_CI_EVIDENCE_DISPOSITION: (
+        "The finalize stage is waiting on CI, not failed."
     ),
 }
 
@@ -2401,3 +2405,28 @@ class TestConfirmMustFixRule:
             cmds = next_commands(case.task, session=None)
             assert [c.command for c in cmds] == case.expected
             assert not any("--regress" in c.command for c in cmds)
+
+
+def test_awaiting_ci_evidence_park_guidance_is_pinned() -> None:
+    """#3618: the CI-evidence park names its two releases and both escapes."""
+    from cw.dev_queue.park_guidance import PARK_GUIDANCE
+
+    assert PARK_GUIDANCE[AWAITING_CI_EVIDENCE_DISPOSITION] == (
+        "The finalize stage is waiting on CI, not failed. The PR exists and cw"
+        " did not arm auto-merge: the repo's `quality_gates.ci_evidence` maps one"
+        " or more gates to CI checks that have not all finished green at the PR"
+        " head, and those gates were not run locally. Waiting or deferred: once"
+        " the mapped checks have finished, release the row with"
+        " `cw dev-queue requeue`. Red: the mapped check failed, which is a CI"
+        " failure, not a gate failure; regress with"
+        " `cw dev-queue requeue --stage impl --regress` (add"
+        " `--review-feedback-file <file>` with head-pinned evidence of the"
+        " failure). A mapped check that never reports (renamed or path-filtered)"
+        " parks every requeue, because there is no timer fallback (ADR-0014):"
+        " correct or remove its `quality_gates.ci_evidence` entry on the base"
+        " branch (the map is read from the worktree's `origin/<base>` ref, so it"
+        " must have fetched the change), or run the gate by hand and merge the"
+        " PR yourself, then `cw dev-queue remove` the row. The worktree's"
+        " arm-seam hold is released by the green requeue; to drop it by hand,"
+        ' run `"$FINALIZE" ci-hold release --repo-path <worktree>` there.'
+    )
