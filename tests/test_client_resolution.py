@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from cw._util import NO_CLIENTS_MSG
 from cw.client_resolution import (
     ClientInferenceError,
     client_roots,
@@ -222,8 +223,9 @@ def test_infer_client_multiple_candidate_paths_pooled_and_deduped(
 
 
 def test_infer_client_no_clients_configured_raises(tmp_path: Path) -> None:
-    with pytest.raises(ClientInferenceError, match="No clients configured"):
+    with pytest.raises(ClientInferenceError, match="No clients configured") as exc:
         infer_client([tmp_path], {})
+    assert str(exc.value) == NO_CLIENTS_MSG
 
 
 def test_infer_client_three_way_tie_names_all(tmp_path: Path) -> None:

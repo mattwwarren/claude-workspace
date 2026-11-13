@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from cw._util import NO_CLIENTS_MSG
 from cw.config import load_clients
 from cw.exceptions import CwError
 from cw.worktree import effective_worktree_bases
@@ -31,7 +32,6 @@ if TYPE_CHECKING:
 
     from cw.models import ClientConfig
 
-_NO_CLIENTS_MSG = "No clients configured. Add one to ~/.config/cw/clients.yaml."
 # A two-client tie reads "both claim"; three or more read "all claim".
 _PAIR = 2
 
@@ -153,7 +153,7 @@ def infer_client(
     (nested workspaces) is accepted with a warning naming both.
     """
     if not clients:
-        raise ClientInferenceError(_NO_CLIENTS_MSG)
+        raise ClientInferenceError(NO_CLIENTS_MSG)
     where = Path(paths[0]) if paths else Path.cwd()
     match = match_client_roots(paths, clients)
     if match.root is None:

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from cw._util import NO_CLIENTS_MSG
 from cw.cli._base import _resolve_client, _resolve_client_or_infer
 from cw.client_resolution import ClientInferenceError
 from cw.exceptions import CwError, UnknownClientError
@@ -55,8 +56,9 @@ def test_resolve_client_default_warns_on_stderr(
 
 
 def test_resolve_client_no_clients_raises() -> None:
-    with pytest.raises(CwError, match="No clients configured"):
+    with pytest.raises(CwError, match="No clients configured") as exc:
         _resolve_client(None)
+    assert str(exc.value) == NO_CLIENTS_MSG
 
 
 # ---------------------------------------------------------------------------

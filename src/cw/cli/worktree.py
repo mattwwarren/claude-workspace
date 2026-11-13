@@ -8,6 +8,7 @@ from pathlib import Path
 
 import click
 
+from cw._util import NO_CLIENTS_MSG
 from cw.changelog_sync import SyncState, sync_changelog
 from cw.cli._base import _complete_client, handle_errors, main
 from cw.config import load_clients
@@ -166,7 +167,7 @@ def worktree_gc(
     clients = load_clients()
 
     if not clients:
-        click.echo("No clients configured. Add one to ~/.config/cw/clients.yaml.")
+        click.echo(NO_CLIENTS_MSG)
         return
 
     if client_name is not None:
