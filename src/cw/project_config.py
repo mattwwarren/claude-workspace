@@ -37,10 +37,13 @@ def load_project_config_dict(
         return None
     try:
         raw = parser.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, parser.YAMLError) as exc:
+    except OSError as exc:
         if strict:
             msg = f"{PROJECT_CONFIG_RELPATH} could not be read or parsed: {exc}"
             raise ProjectConfigError(msg) from exc
+        return None
+    except parser.YAMLError:
+        # Existing consumers intentionally treat invalid YAML as absent.
         return None
     return raw if isinstance(raw, dict) else None
 

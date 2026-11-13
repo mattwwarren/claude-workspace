@@ -166,8 +166,8 @@ def test_malformed_value_blocks_before_anything_runs(
 def test_config_path_that_is_a_directory_blocks(
     tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
 ) -> None:
-    # A directory at the config path has no "prepare" text for the grep probe to
-    # find; the probe must still send it to cw, which fails closed (#2179).
+    # A directory at the config path is an unreadable config: the fence must send
+    # it to the typed reader, which fails closed (#2179).
     bed = GateBed(tmp_path)
     repo, _ = make_git_repo_with_origin("clone")
     tmpwt, _, _ = bed.paths(repo)
@@ -179,10 +179,11 @@ def test_config_path_that_is_a_directory_blocks(
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads mode-000 files")
-def test_unreadable_config_without_prepare_text_blocks(
+def test_unreadable_config_blocks(
     tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
 ) -> None:
-    # Unreadable and no "prepare" text: the grep probe alone would skip it.
+    # An unreadable config is a declared-or-unknown key: it must block, never
+    # read as "no prepare step" (#2179 operator resolution 8).
     bed = GateBed(tmp_path)
     repo, _ = make_git_repo_with_origin("clone")
     tmpwt, _, _ = bed.paths(repo)
@@ -240,17 +241,33 @@ def test_cw_without_the_command_fails_closed(
     assert "RAN" not in result.stdout
 
 
-def test_cw_without_the_command_is_harmless_without_the_key(
+def test_cw_without_the_command_is_harmless_without_a_config_file(
     tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
 ) -> None:
-    # A repo that never declares tests.prepare must run no new code, even on a
-    # host whose installed cw predates the command (R1).
+    # A repo with no project config runs no new code, even on a host whose
+    # installed cw predates the command (R1). The fence skips the reader only
+    # when the config file is absent.
     bed = GateBed(tmp_path)
     repo, _ = make_git_repo_with_origin("clone")
     tmpwt, _, _ = bed.paths(repo)
     tmpwt.mkdir()
-    _config(tmpwt, "quality_gates: {}\n")
     write_bin_stub(bed.bin_dir.parent, "cw", "#!/bin/sh\nexit 2\n")
     result = bed.run(fill_gate_fence(impl_gate3_fence(), "printf RAN"), repo)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "RAN" in result.stdout
+
+
+def test_text_mentions_of_prepare_are_not_a_key(
+    tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
+) -> None:
+    # Detection goes through the typed reader, so a comment or an unrelated
+    # value that spells "prepare" declares nothing (#2179 operator resolution 9).
+    bed = GateBed(tmp_path)
+    repo, _ = make_git_repo_with_origin("clone")
+    tmpwt, _, _ = bed.paths(repo)
+    tmpwt.mkdir()
+    _config(tmpwt, 'tests:\n  other: "prepare"\n# prepare: nothing here\n')
+    result = bed.run(fill_gate_fence(impl_gate3_fence(), "printf RAN"), repo)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "RAN" in result.stdout
+    assert "tests.prepare" not in result.stdout

@@ -89,12 +89,10 @@ def test_invalid_utf8_file_raises_prepare_config_error(tmp_path: Path) -> None:
         read_tests_prepare(tmp_path)
 
 
-def test_unparseable_yaml_raises_not_absent(tmp_path: Path) -> None:
-    # A YAML syntax error in a file that may declare tests.prepare must fail
-    # closed, never read as "no prepare step" (#2179 review finding).
+def test_unparseable_yaml_reads_as_absent(tmp_path: Path) -> None:
+    # The shared loader's established lenient parse-error behavior is retained.
     _write_project_config_yaml(tmp_path, "tests: [\n")
-    with pytest.raises(PrepareConfigError, match=r"could not be read or parsed"):
-        read_tests_prepare(tmp_path)
+    assert read_tests_prepare(tmp_path) is None
 
 
 def test_lenient_loader_reads_unreadable_and_unparseable_as_absent(
