@@ -43,6 +43,8 @@ below is what registers those commands. Submodules:
   helpers shared with ``status``.
 - ``show`` — the one-ticket view (``show``) and the best-effort row echo the
   mutating verbs print after their confirmation (#2691).
+- ``usage_limit`` — the ``usage-limit`` group: ``clear`` lifts a client's
+  usage-limit back-off window early, after a probe (#3547).
 """
 
 from __future__ import annotations
@@ -59,6 +61,7 @@ from cw.cli.dev_queue import (  # noqa: F401  (command registration side effects
     show,
     status,
     tasks,
+    usage_limit,
     wait,
 )
 from cw.cli.dev_queue._group import (
