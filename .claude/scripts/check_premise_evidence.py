@@ -90,7 +90,7 @@ _TOOL_CALL_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*:\s*\S.*")
 _ATTEMPT_RE = re.compile(r"[0-9]+")
 _KINDS = ("STATIC", "LIVE")
 
-_BLOCK_ITEM_RE = re.compile(r"^\s*[0-9]+\.\s+(\S.*?)\s*$")
+_BLOCK_ITEM_RE = re.compile(r"^[0-9]+\.\s+(\S.*?)\s*$")
 _BLOCK_SUB_RE = re.compile(r"^\s+-\s+([A-Za-z][A-Za-z -]*):\s*(.*?)\s*$")
 _TRACKED_KEYS = frozenset(
     {"verified", "citation", "observed-at", "kind", "tool-call", "observed-attempt"}
@@ -109,6 +109,7 @@ _RELABEL_ACTION_RE = re.compile(
 _RELABEL_SCOPE_RE = re.compile(r"\b(?:this round|dispatch|session)\b", re.IGNORECASE)
 
 _CARRIED_ROUTES = ("IMPACT", "RESOLUTION")
+_ROUTES = ("VERIFIED", "IMPACT", "RESOLUTION")
 
 
 @dataclass
@@ -347,13 +348,16 @@ def _parse_form_b(text: str) -> _Entry | None:
     idx = text.find(_SEP_EVIDENCE)
     if idx < 0:
         return None
+    claim = text[:idx].strip()
+    if not claim:
+        return None
     parts = _KEY_SPLIT_RE.split(text[idx:])
     pairs: dict[str, str] = {}
     for key, value in zip(parts[1::2], parts[2::2], strict=True):
         pairs.setdefault(key, value.strip())
     return _Entry(
         form="b",
-        claim=text[:idx].strip(),
+        claim=claim,
         evidence=pairs.get("Evidence", ""),
         depends_on=pairs.get("Depends on", ""),
         route=pairs.get("Route"),
@@ -367,7 +371,7 @@ def _parse_form_b(text: str) -> _Entry | None:
 
 def _parse_form_c(text: str) -> _Entry | None:
     claim, sep, rest = text.partition(_SEP)
-    if not sep:
+    if not sep or not claim.strip():
         return None
     remainder = rest.strip()
     return _Entry(
@@ -383,10 +387,14 @@ def _parse_entry(lines: list[str]) -> _Entry:
     """Parse one entry by the first matching form (a, b, c), else unparseable."""
     first = lines[0][2:].strip()
     text = " ".join([first, *(line.strip() for line in lines[1:])]).strip()
+    if first.startswith(_EM):
+        return _Entry(form="unparseable", claim=first, text=text)
     if _CLAIM_LABEL_RE.match(lines[0]):
         parsed = _parse_form_a(lines)
     else:
-        parsed = _parse_form_b(text) or _parse_form_c(text)
+        parsed = _parse_form_b(text)
+        if parsed is None and _SEP_EVIDENCE not in text:
+            parsed = _parse_form_c(text)
     if parsed is not None:
         return parsed
     return _Entry(form="unparseable", claim=first, text=text)
@@ -407,8 +415,7 @@ def _infer_legacy_route(evidence: str) -> str:
 
 def _entry_route(entry: _Entry) -> str:
     if entry.form == "b" and entry.has_new_form_keys():
-        route = (entry.route or "VERIFIED").split(maxsplit=1)[0]
-        return route if route in _CARRIED_ROUTES else "VERIFIED"
+        return entry.route if entry.route in _ROUTES else "INVALID"
     return _infer_legacy_route(entry.evidence)
 
 
@@ -428,7 +435,8 @@ def _verified_entry_verdict(
             reasons.append("context-unavailable")
         return "STALE", reasons
     stamp = (entry.observed_at, entry.kind, entry.tool_call, entry.observed_attempt)
-    reasons = _freshness_reasons(stamp, window_start, now)
+    reasons = [] if entry.route in _ROUTES else ["route-missing-or-invalid"]
+    reasons.extend(_freshness_reasons(stamp, window_start, now))
     if not reasons:
         return "FRESH", []
     if reasons == ["observed-before-window"] and entry.kind == "STATIC":

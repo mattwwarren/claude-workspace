@@ -46,6 +46,7 @@ _REASON_CODES = {
     "observed-at-malformed",
     "observed-before-window",
     "observed-in-future",
+    "route-missing-or-invalid",
     "kind-missing-or-invalid",
     "tool-call-missing",
     "tool-call-malformed",
@@ -291,6 +292,18 @@ def test_block_parser_items_subbullets_and_continuations() -> None:
     assert first["observed-at"] == "2026-11-13T04:55:00Z"
     assert "mystery-key" not in first
     assert items[1].fields == {"verified": "NO"}
+
+
+def test_block_parser_indented_numbered_citation_is_continuation() -> None:
+    text = (
+        "1. first claim\n"
+        "   - Verified: YES\n"
+        "   - Citation: line one\n"
+        "     2. numbered citation output\n"
+    )
+    items = _mod._parse_block_items(text)
+    assert len(items) == 1
+    assert items[0].fields["citation"] == "line one 2. numbered citation output"
 
 
 def test_block_parser_ignores_text_before_first_item() -> None:
@@ -592,6 +605,12 @@ def test_parse_form_b_em_dash_inside_claim_and_citation_is_harmless() -> None:
     assert entry.route == "IMPACT"
 
 
+def test_parse_fully_stamped_empty_claim_is_unparseable() -> None:
+    entry = _mod._parse_entry([_new_entry("")])
+    assert entry.form == "unparseable"
+    assert entry.claim != ""
+
+
 def test_parse_form_b_joins_continuation_lines() -> None:
     entry = _mod._parse_entry(
         ["- claim — Evidence: line one", "  line two — Depends on: dep"]
@@ -714,7 +733,11 @@ def test_partly_stamped_form_b_is_new_form_not_legacy() -> None:
     item = _one(_draft_eval(text))
     assert item["verdict"] == "STALE"
     assert "legacy-no-metadata" not in _reasons(item)
-    assert item["reasons"] == ["kind-missing-or-invalid", "tool-call-missing"]
+    assert item["reasons"] == [
+        "route-missing-or-invalid",
+        "kind-missing-or-invalid",
+        "tool-call-missing",
+    ]
 
 
 def test_route_only_form_b_is_new_form() -> None:
@@ -746,8 +769,11 @@ def test_draft_fresh_with_observed_attempt() -> None:
     assert _one(_draft_eval(_draft(_new_entry(attempt="2"))))["verdict"] == "FRESH"
 
 
-def test_draft_route_absent_new_form_with_stamp_is_verified() -> None:
-    assert _one(_draft_eval(_draft(_new_entry(route=None))))["verdict"] == "FRESH"
+@pytest.mark.parametrize("route", [None, "MYSTERY", "VERIFIED extra"])
+def test_draft_missing_or_invalid_route_is_stale(route: str | None) -> None:
+    item = _one(_draft_eval(_draft(_new_entry(route=route))))
+    assert item["verdict"] == "STALE"
+    assert item["reasons"] == ["route-missing-or-invalid"]
 
 
 def test_draft_static_pre_window_is_carried() -> None:
@@ -789,10 +815,13 @@ def test_draft_route_carried_ignores_freshness_fields() -> None:
     assert _one(_draft_eval(_draft(entry)))["verdict"] == "CARRIED"
 
 
-def test_draft_unknown_route_token_is_treated_as_verified() -> None:
+def test_draft_unknown_route_token_is_invalid() -> None:
     item = _one(_draft_eval(_draft(_new_entry(route="MYSTERY", observed_at=None))))
     assert item["verdict"] == "STALE"
-    assert "observed-at-missing" in _reasons(item)
+    assert item["reasons"] == [
+        "route-missing-or-invalid",
+        "observed-at-missing",
+    ]
 
 
 def test_draft_reason_observed_at_missing_and_malformed() -> None:
