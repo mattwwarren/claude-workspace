@@ -99,6 +99,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from cw.config import load_effective_clients, load_state
 from cw.dev_queue import (
+    _find_ticket,
     dev_queue_lock,
     load_dev_queue,
     save_dev_queue,
@@ -113,6 +114,7 @@ from cw.exceptions import (
 )
 from cw.models import (
     TERMINAL_SESSION_STATUSES,
+    DevQueueStore,
     LaunchedFixWorker,
     OrchestratorEventType,
     QueueItemStatus,
@@ -134,7 +136,6 @@ if TYPE_CHECKING:
     from cw.models import (
         ClientConfig,
         CwState,
-        DevQueueStore,
         OrchestratorConfig,
         PendingFixDispatch,
         Stage,
@@ -206,15 +207,29 @@ class _FixDispatchCandidate(NamedTuple):
 
 
 def _find_task(store: DevQueueStore, ticket_id: str, client: str) -> TicketTask | None:
-    """Resolve the (ticket_id, client) row — no status filter.
+    """Resolve the (ticket_id, client) row the handoff writer stamps, or None.
 
-    Keyed on both fields because ticket_id is a per-repo issue number, not
-    globally unique across this multi-tenant system's clients.
+    Delegates to ``_find_ticket`` (newest live, then newest blocked, then newest
+    terminal), the selection ``record_pending_fix_dispatch`` writes through, so
+    reader and writer agree on duplicate rows (#3313). Keyed on both fields
+    because ticket_id is a per-repo issue number, not globally unique.
     """
-    return next(
-        (t for t in store.tasks if t.ticket_id == ticket_id and t.client == client),
-        None,
-    )
+    try:
+        return _find_ticket(store, ticket_id, client, warn=False)
+    except CwError:
+        return None
+
+
+def _selected_rows(tasks: list[TicketTask]) -> list[TicketTask]:
+    """The row :func:`_find_task` resolves for each (ticket_id, client), once each.
+
+    The detectors enumerate these, not every row (#3313): a latch on a
+    non-selected duplicate is one the act phase never reaches, so as a candidate
+    it would hold a ``_MAX_FIX_DISPATCHES_PER_TICK`` slot on every tick.
+    """
+    store = DevQueueStore.model_construct(tasks=tasks)
+    keys = dict.fromkeys((t.ticket_id, t.client) for t in tasks)
+    return [row for key in keys if (row := _find_task(store, *key)) is not None]
 
 
 def _detect_pending_fix_dispatches(
@@ -231,7 +246,7 @@ def _detect_pending_fix_dispatches(
     """
     return [
         _FixDispatchCandidate(ticket_id=t.ticket_id, client=t.client)
-        for t in tasks
+        for t in _selected_rows(tasks)
         if t.pending_fix_dispatch is not None and not _is_parked_for_unresolved_ref(t)
     ]
 
@@ -290,7 +305,7 @@ def _detect_fix_dispatch_completions(
                 else None
             ),
         )
-        for t in tasks
+        for t in _selected_rows(tasks)
         if t.fix_dispatch_session_id is not None
     ]
 
