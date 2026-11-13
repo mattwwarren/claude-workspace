@@ -111,6 +111,23 @@ _RELABEL_SCOPE_RE = re.compile(r"\b(?:this round|dispatch|session)\b", re.IGNORE
 _CARRIED_ROUTES = ("IMPACT", "RESOLUTION")
 _ROUTES = ("VERIFIED", "IMPACT", "RESOLUTION")
 
+VERDICT_BOUND = "BOUND"
+VERDICT_UNBOUND = "UNBOUND"
+VERDICT_FRESH = "FRESH"
+VERDICT_CARRIED = "CARRIED"
+VERDICT_STALE = "STALE"
+_VERDICTS = frozenset(
+    {VERDICT_BOUND, VERDICT_UNBOUND, VERDICT_FRESH, VERDICT_CARRIED, VERDICT_STALE}
+)
+_FAILED_VERDICTS = _VERDICTS.intersection({VERDICT_UNBOUND, VERDICT_STALE})
+
+_REPOSITORY_SOURCE_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])(?:\.?/?(?:src|tests|\.claude|scripts|lib|app|packages)/"
+    r"[A-Za-z0-9_.~/-]+(?::[0-9]+(?::[0-9]+)?)?|"
+    r"[A-Za-z0-9_.-]+\.(?:c|cc|cpp|go|java|js|jsx|md|py|rb|rs|sh|ts|tsx|yaml|yml)"
+    r":[0-9]+(?::[0-9]+)?)(?![A-Za-z0-9_.-])"
+)
+
 
 @dataclass
 class _BlockItem:
@@ -130,6 +147,7 @@ class _Entry:
     tool_call: str | None = None
     observed_attempt: str | None = None
     text: str = ""
+    structural_reasons: tuple[str, ...] = ()
 
     def has_new_form_keys(self) -> bool:
         return any(
@@ -285,7 +303,7 @@ def evaluate_scan_block(
         results.append(
             {
                 "claim": item.claim,
-                "verdict": "UNBOUND" if reasons else "BOUND",
+                "verdict": VERDICT_UNBOUND if reasons else VERDICT_BOUND,
                 "reasons": reasons,
             }
         )
@@ -353,8 +371,12 @@ def _parse_form_b(text: str) -> _Entry | None:
         return None
     parts = _KEY_SPLIT_RE.split(text[idx:])
     pairs: dict[str, str] = {}
+    duplicate_keys: set[str] = set()
     for key, value in zip(parts[1::2], parts[2::2], strict=True):
-        pairs.setdefault(key, value.strip())
+        if key in pairs:
+            duplicate_keys.add(key)
+        else:
+            pairs[key] = value.strip()
     return _Entry(
         form="b",
         claim=claim,
@@ -366,6 +388,7 @@ def _parse_form_b(text: str) -> _Entry | None:
         tool_call=pairs.get("Tool-call"),
         observed_attempt=pairs.get("Observed-attempt"),
         text=text,
+        structural_reasons=("duplicate-key",) if duplicate_keys else (),
     )
 
 
@@ -419,6 +442,11 @@ def _entry_route(entry: _Entry) -> str:
     return _infer_legacy_route(entry.evidence)
 
 
+def _is_repository_source_evidence(evidence: str) -> bool:
+    evidence_without_urls = re.sub(r"https?://\S+", "", evidence)
+    return _REPOSITORY_SOURCE_RE.search(evidence_without_urls) is not None
+
+
 def _is_relabeled(text: str) -> bool:
     for sentence in _SENTENCE_SPLIT_RE.split(text):
         if _RELABEL_ACTION_RE.search(sentence) and _RELABEL_SCOPE_RE.search(sentence):
@@ -433,27 +461,32 @@ def _verified_entry_verdict(
         reasons = ["legacy-no-metadata"]
         if window_start is None:
             reasons.append("context-unavailable")
-        return "STALE", reasons
-    stamp = (entry.observed_at, entry.kind, entry.tool_call, entry.observed_attempt)
+        return VERDICT_STALE, reasons
+    effective_kind = entry.kind
+    if entry.kind == "STATIC" and _is_repository_source_evidence(entry.evidence):
+        effective_kind = "LIVE"
+    stamp = (entry.observed_at, effective_kind, entry.tool_call, entry.observed_attempt)
     reasons = [] if entry.route in _ROUTES else ["route-missing-or-invalid"]
     reasons.extend(_freshness_reasons(stamp, window_start, now))
     if not reasons:
-        return "FRESH", []
-    if reasons == ["observed-before-window"] and entry.kind == "STATIC":
-        return "CARRIED", []
-    return "STALE", reasons
+        return VERDICT_FRESH, []
+    if reasons == ["observed-before-window"] and effective_kind == "STATIC":
+        return VERDICT_CARRIED, []
+    return VERDICT_STALE, reasons
 
 
 def _entry_verdict(
     entry: _Entry, window_start: datetime | None, now: datetime
 ) -> tuple[str, list[str]]:
     if entry.form == "unparseable":
-        return "CARRIED", ["unparseable-legacy"]
+        return VERDICT_CARRIED, ["unparseable-legacy"]
+    if entry.structural_reasons:
+        return VERDICT_STALE, list(entry.structural_reasons)
     if _entry_route(entry) in _CARRIED_ROUTES:
-        return "CARRIED", []
+        return VERDICT_CARRIED, []
     verdict, reasons = _verified_entry_verdict(entry, window_start, now)
-    if verdict != "FRESH" and _is_relabeled(entry.text):
-        return "STALE", [*reasons, "relabeled-without-fresh-check"]
+    if verdict != VERDICT_FRESH and _is_relabeled(entry.text):
+        return VERDICT_STALE, [*reasons, "relabeled-without-fresh-check"]
     return verdict, reasons
 
 
@@ -500,7 +533,7 @@ def main(argv: list[str] | None = None) -> int:
     evaluate = evaluate_scan_block if args.command == "scan-block" else evaluate_draft
     items = evaluate(text, window_start)
     print(json.dumps({"items": items}, separators=(",", ":")))
-    failed = any(item["verdict"] in ("UNBOUND", "STALE") for item in items)
+    failed = any(item["verdict"] in _FAILED_VERDICTS for item in items)
     return 1 if failed else 0
 
 

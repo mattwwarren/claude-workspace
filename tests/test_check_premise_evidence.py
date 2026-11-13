@@ -51,6 +51,7 @@ _REASON_CODES = {
     "tool-call-missing",
     "tool-call-malformed",
     "observed-attempt-invalid",
+    "duplicate-key",
     "context-unavailable",
     "legacy-no-metadata",
     "relabeled-without-fresh-check",
@@ -605,6 +606,26 @@ def test_parse_form_b_em_dash_inside_claim_and_citation_is_harmless() -> None:
     assert entry.route == "IMPACT"
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("Route", "IMPACT"),
+        ("Observed-at", _BEFORE),
+        ("Kind", "STATIC"),
+        ("Tool-call", "Bash: other-command"),
+    ],
+)
+def test_parse_form_b_duplicate_keys_are_structural_defects(
+    key: str, value: str
+) -> None:
+    entry_text = f"{_new_entry()} — {key}: {value}"
+    entry = _mod._parse_entry([entry_text])
+    assert entry.structural_reasons == ("duplicate-key",)
+    item = _one(_draft_eval(_draft(entry_text)))
+    assert item["verdict"] == "STALE"
+    assert item["reasons"] == ["duplicate-key"]
+
+
 def test_parse_fully_stamped_empty_claim_is_unparseable() -> None:
     entry = _mod._parse_entry([_new_entry("")])
     assert entry.form == "unparseable"
@@ -781,6 +802,15 @@ def test_draft_static_pre_window_is_carried() -> None:
     item = _one(_draft_eval(_draft(_new_entry(kind="STATIC", observed_at=_BEFORE))))
     assert item["verdict"] == "CARRIED"
     assert item["reasons"] == []
+
+
+def test_draft_repository_source_static_pre_window_is_stale() -> None:
+    entry = _new_entry(kind="STATIC", observed_at=_BEFORE).replace(
+        "`tool --help` shows --json", "src/api.py:12", 1
+    )
+    item = _one(_draft_eval(_draft(entry)))
+    assert item["verdict"] == "STALE"
+    assert item["reasons"] == ["observed-before-window"]
 
 
 def test_draft_live_pre_window_is_stale() -> None:
