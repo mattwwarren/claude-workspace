@@ -63,8 +63,3 @@ STOP_CONTINUATION_NUDGE = (
     "AUTO_DEV_RESULT sentinel, or, if something is blocking you, emit a "
     "blocked sentinel stating the reason."
 )
-
-# Roll out auto-continuation per client after reviewing shadow logs. Empty is
-# the fail-safe default: eligible Stops are observed but never continued until
-# an operator explicitly enables the client's rollout.
-STOP_CONTINUATION_ENABLED_CLIENTS: frozenset[str] = frozenset()

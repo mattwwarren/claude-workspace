@@ -32,7 +32,6 @@ from cw._util import claude_project_dir
 from cw.cli.stop_hook._constants import (
     _LOGGER_NAME,
     MAX_STOP_CONTINUATIONS,
-    STOP_CONTINUATION_ENABLED_CLIENTS,
     STOP_CONTINUATION_NUDGE,
 )
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
@@ -84,14 +83,6 @@ def maybe_continue_headless_turn(
         return
     transcripts = _find_transcripts(session, cwd_value, claude_session_id)
     if not transcripts or any(_turn_ended_in_tool_error(path) for path in transcripts):
-        return
-    if session.client not in STOP_CONTINUATION_ENABLED_CLIENTS:
-        logger.info(
-            "stop continuation shadow candidate: client=%s lane=%s ticket=%s",
-            session.client,
-            task.lane,
-            ticket_id,
-        )
         return
     claim = _claim_stop_continuation(ticket_id, session)
     if claim is None:
@@ -157,18 +148,6 @@ def _find_transcripts(
         )
     except OSError:
         return ()
-
-
-def _find_transcript(
-    session: Session, cwd_value: str, claude_session_id: object
-) -> Path | None:
-    """Return the first transcript for legacy direct callers.
-
-    The continuation path uses :func:`_find_transcripts` so it never makes a
-    decision from only the first existing candidate.
-    """
-    transcripts = _find_transcripts(session, cwd_value, claude_session_id)
-    return transcripts[0] if transcripts else None
 
 
 def _turn_ended_in_tool_error(transcript: Path) -> bool:

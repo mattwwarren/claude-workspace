@@ -128,15 +128,6 @@ def recorded(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, dict[str, ob
     return events
 
 
-@pytest.fixture(autouse=True)
-def continuation_rollout_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Enable the explicitly opted-in test tenant for continuation coverage."""
-    monkeypatch.setattr(
-        "cw.cli.stop_hook.continuation.STOP_CONTINUATION_ENABLED_CLIENTS",
-        frozenset({"client-a"}),
-    )
-
-
 def _stop(worktree: Path, **extra: object) -> Result:
     payload = _stop_payload(worktree, **extra)
     payload["session_id"] = CLAUDE_SESSION_ID
@@ -183,6 +174,18 @@ class TestContinuationHappyPath:
 
 
 class TestContinuationCap:
+    def test_ordinary_client_continues_without_configuration(
+        self, worktree: Path, recorded: list[tuple[object, dict[str, object]]]
+    ) -> None:
+        """No allowlist or rollout config exists: an ordinary client continues."""
+        _seed_row()
+        _write_transcript(worktree, [_assistant(PLAIN_TEXT)])
+
+        result = _stop(worktree, last_assistant_message=PLAIN_TEXT)
+
+        assert result.stdout.strip() == NUDGE_JSON
+        assert _row_counter() == 1
+
     def test_cap_two_then_falls_through(
         self, worktree: Path, recorded: list[tuple[object, dict[str, object]]]
     ) -> None:
@@ -216,28 +219,6 @@ class TestContinuationExclusions:
         assert result.stdout.strip() == ""
         assert _row_counter() is None
         assert _continued_events(recorded) == []
-
-    def test_disabled_client_records_shadow_candidate_only(
-        self,
-        worktree: Path,
-        recorded: list[tuple[object, dict[str, object]]],
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        _seed_row()
-        _write_transcript(worktree, [_assistant(PLAIN_TEXT)])
-        monkeypatch.setattr(
-            "cw.cli.stop_hook.continuation.STOP_CONTINUATION_ENABLED_CLIENTS",
-            frozenset(),
-        )
-        caplog.set_level(20, logger="cw.cli.stop_hook")
-
-        result = _stop(worktree, last_assistant_message=PLAIN_TEXT)
-
-        assert result.stdout.strip() == ""
-        assert _row_counter() is None
-        assert _continued_events(recorded) == []
-        assert "shadow candidate" in caplog.text
 
     def test_divergent_transcripts_fail_closed(
         self,
@@ -474,12 +455,12 @@ class TestApiErrorPrefixSingleSource:
 class TestContinuationHelpersDirect:
     """Fail-closed and race branches reached without a full Stop-hook run."""
 
-    def test_find_transcript_rejects_unusable_session_id(self, worktree: Path) -> None:
-        from cw.cli.stop_hook.continuation import _find_transcript
+    def test_find_transcripts_rejects_unusable_session_id(self, worktree: Path) -> None:
+        from cw.cli.stop_hook.continuation import _find_transcripts
 
         session = _seed_session(worktree.parent, sess_id=SESSION_ID)
-        assert _find_transcript(session, str(worktree), None) is None
-        assert _find_transcript(session, str(worktree), "") is None
+        assert _find_transcripts(session, str(worktree), None) == ()
+        assert _find_transcripts(session, str(worktree), "") == ()
 
     def test_malformed_transcript_line_fails_closed(self, tmp_path: Path) -> None:
         from cw.cli.stop_hook.continuation import _turn_ended_in_tool_error
