@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Final
 
 from cw.auto_dev_result import (
+    AWAITING_CI_EVIDENCE_BLOCKER_REASON,
     GATE_TIMEOUT_BLOCKER_REASON,
     OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
     PAUSED_FOR_USER_INPUT_STATUSES,
@@ -69,6 +70,12 @@ REVIEW_ENGINE_UNSUPPORTED_DISPOSITION: Final = (
 # releases it by running the gate by hand, `prep_pr_state.py gate-pass record`
 # and `cw dev-queue requeue`.
 GATE_TIMEOUT_DISPOSITION: Final = "gate_timeout"
+# #3618: a FINALIZE row parked because mapped CI checks
+# (`quality_gates.ci_evidence`) have not all finished green at the PR head; cw
+# did not arm auto-merge. An operator-gated park like GATE_TIMEOUT_DISPOSITION:
+# not a HOLD, not a DRAIN, not escalation-eligible and not reap-eligible (a
+# reap revert would re-run finalize). Released by `cw dev-queue requeue`.
+AWAITING_CI_EVIDENCE_DISPOSITION: Final = "awaiting_ci_evidence"
 
 # Disposition stamped when a park is a *proactive* hold -- "an operator asked
 # this ticket to stop before an unattended finalize", not "we could not reach
@@ -402,6 +409,8 @@ def _hold_aware_disposition(
         return REVIEW_ENGINE_UNSUPPORTED_DISPOSITION
     if blocker_reason == GATE_TIMEOUT_BLOCKER_REASON:
         return GATE_TIMEOUT_DISPOSITION
+    if blocker_reason == AWAITING_CI_EVIDENCE_BLOCKER_REASON:
+        return AWAITING_CI_EVIDENCE_DISPOSITION
     return _derive_disposition(status)
 
 

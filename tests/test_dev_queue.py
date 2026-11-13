@@ -16520,6 +16520,33 @@ class TestHoldAwareDisposition:
         assert GATE_TIMEOUT_DISPOSITION not in DRAIN_DISPOSITIONS
         assert GATE_TIMEOUT_BLOCKER_REASON not in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
 
+    def test_awaiting_ci_evidence_reason_returns_its_own_disposition(self) -> None:
+        """#3618: the CI-evidence park maps to its own disposition.
+
+        Not a hold, not a drain, not an operator-unavailable reason.
+        """
+        from cw.auto_dev_result import (
+            AWAITING_CI_EVIDENCE_BLOCKER_REASON,
+            OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
+        )
+        from cw.dev_queue import (
+            AWAITING_CI_EVIDENCE_DISPOSITION,
+            DRAIN_DISPOSITIONS,
+            HOLD_DISPOSITIONS,
+        )
+
+        assert (
+            self._derive("blocked", AWAITING_CI_EVIDENCE_BLOCKER_REASON)
+            == AWAITING_CI_EVIDENCE_DISPOSITION
+            == "awaiting_ci_evidence"
+        )
+        assert AWAITING_CI_EVIDENCE_DISPOSITION not in HOLD_DISPOSITIONS
+        assert AWAITING_CI_EVIDENCE_DISPOSITION not in DRAIN_DISPOSITIONS
+        assert (
+            AWAITING_CI_EVIDENCE_BLOCKER_REASON
+            not in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestMustFixMechanicallyRejectedDisposition (#1714)

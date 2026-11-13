@@ -1249,6 +1249,52 @@ def test_gate_timeout_sentinel_element() -> None:
     assert isinstance(sibling.cells[CODEX_BACKEND], ImplementedDisposition)
 
 
+def test_awaiting_ci_evidence_sentinel_element() -> None:
+    """#3618: the CI-evidence park sentinel carries the claude-native, opencode
+    and local cells of its finalize sibling
+    ``finalize.sentinel-automerge-not-armed``, and so does its codex cell: cw
+    builds the block in Python (``codex_finalize/_ci_evidence.py``)."""
+    elements = _manifest().elements
+    element = elements["finalize.sentinel-awaiting-ci-evidence"]
+    sibling = elements["finalize.sentinel-automerge-not-armed"]
+    assert list(element.covers) == ["awaiting_ci_evidence"]
+    for backend in set(element.cells) - {CODEX_BACKEND}:
+        assert element.cells[backend] == sibling.cells[backend], backend
+    codex = element.cells[CODEX_BACKEND]
+    assert isinstance(codex, ImplementedDisposition)
+    assert codex.ref == CodeRef(
+        kind="code",
+        path="src/cw/codex_finalize/_ci_evidence.py",
+        symbol="awaiting_ci_evidence_block",
+    )
+
+
+def test_ci_deferred_create_path_element() -> None:
+    """#3618: the create-path check is claude-native only. Codex parks the same
+    way from Python after the PR exists, so its cell is not-applicable and names
+    the parking site; opencode fails closed and local defers like its
+    ``finalize.self-heal-arm-only-when-automerge-enabled`` neighbour."""
+    elements = _manifest().elements
+    element = elements["finalize.ci-deferred-create-path"]
+    neighbour = elements["finalize.self-heal-arm-only-when-automerge-enabled"]
+    assert list(element.covers) == []
+    for backend in set(element.cells) - {CODEX_BACKEND}:
+        assert element.cells[backend] == neighbour.cells[backend], backend
+    codex = element.cells[CODEX_BACKEND]
+    assert isinstance(codex, NotApplicableDisposition)
+    assert "codex_finalize/_run.py::_create" in codex.reason
+    assert "awaiting_ci_evidence" in codex.reason
+
+
+def test_codex_gate_reasons_name_the_ci_evidence_deferral() -> None:
+    for element_id in ("prep-pr.detect-quality-gates", "prep-pr.run-quality-gates"):
+        cell = _real_cell(element_id, CODEX_BACKEND)
+        assert isinstance(cell, NotApplicableDisposition)
+        assert "codex_finalize/_ci_evidence.py" in cell.reason, element_id
+        assert "quality_gates.ci_evidence" in cell.reason, element_id
+        assert "awaiting_ci_evidence" in cell.reason, element_id
+
+
 def test_element_count_floor() -> None:
     assert len(_real_scan().tags) >= 200
 
@@ -1543,6 +1589,10 @@ _C3_CODE_CELLS = {
     "finalize.cw-side-classification": ("_result.py", "classify_unavailability"),
     "finalize.push-sites-covered": ("_pr.py", "push_ahead"),
     "finalize.sentinel-automerge-not-armed": ("_arm.py", "arm"),
+    "finalize.sentinel-awaiting-ci-evidence": (
+        "_ci_evidence.py",
+        "awaiting_ci_evidence_block",
+    ),
     "finalize.reuse-path-gate-failure-agent-block-sentinel": (
         "_gates.py",
         "run_finalize_quality_gates",
@@ -1551,7 +1601,7 @@ _C3_CODE_CELLS = {
 
 
 def test_codex_finalize_code_cell_table_is_exactly_the_code_cells() -> None:
-    """The 30 implemented codex finalize code cells, no others."""
+    """The 31 implemented codex finalize code cells, no others."""
     code_cells = {
         element_id
         for element_id, element in _manifest().elements.items()
@@ -1562,9 +1612,9 @@ def test_codex_finalize_code_cell_table_is_exactly_the_code_cells() -> None:
         )
     }
     assert code_cells == set(_C3_CODE_CELLS)
-    assert len(_C3_CODE_CELLS) == 30
+    assert len(_C3_CODE_CELLS) == 31
     implemented = set(elements_with(CODEX_BACKEND, "implemented"))
-    assert len(implemented & set(_C3_CODE_CELLS)) == 30
+    assert len(implemented & set(_C3_CODE_CELLS)) == 31
 
 
 @pytest.mark.parametrize("element_id", sorted(_C3_CODE_CELLS))
@@ -1624,8 +1674,8 @@ def test_codex_finalize_cell_counts() -> None:
             cell = element.cells[CODEX_BACKEND]
             counts[cell.disposition] = counts.get(cell.disposition, 0) + 1
     assert counts == {
-        "implemented": 30,
-        "not-applicable": 32,
+        "implemented": 31,
+        "not-applicable": 33,
         "deferred": 24,
     }
 

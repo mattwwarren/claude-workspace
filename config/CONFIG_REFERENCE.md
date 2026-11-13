@@ -2683,11 +2683,13 @@ the test suite and outgrew the 480 s default.
 
 ## Quality Gate CI Evidence (`quality_gates.ci_evidence`)
 
-Opt-in. On the open-PR reuse path, finalize Step 4c.6 re-runs the repo's quality
-gates locally before arming auto-merge. A repo whose CI already runs those same
-gates (often sharded across runners, so faster than a local single-process run)
-can declare that, and finalize then trusts green CI at the PR's current head
-instead of re-running the gate:
+Opt-in. Finalize runs the repo's quality gates locally: `/prep-pr` Step 7 on the
+create path, and Step 4c.6 on the open-PR reuse path, before arming auto-merge.
+A repo whose CI already runs those same gates (often sharded across runners, so
+faster than a local single-process run) can declare that. Headless finalize then
+trusts CI at the PR's head instead of running the gate locally: on the create
+path it opens the PR unarmed and parks (`awaiting_ci_evidence`), and on the
+requeued reuse pass it skips the gate once its mapped checks are green:
 
 ```yaml
 # .claude/project-config.yaml
@@ -2699,9 +2701,13 @@ quality_gates:
 
 `prep_pr_state.py gate-ci-evidence <gate-name> --pr <N> [--repo owner/name]
 [--base main]` prints JSON (`gate`, `skip`, `reason`, `sha`, `checks`, plus
-`live_sha` / `live_base` / `pr_state` / `failed_check` when relevant). It exits 0
-for every decision it makes; finalize also treats a non-zero exit or unparseable
-output as "run the gate". `skip` is `true` only when all of these hold:
+`live_sha` / `live_base` / `pr_state` / `failed_check` when relevant). It also
+carries `outcome` (`green`, `pending`, `red` or `local`), `check_state` and
+`failed_url`: the aggregate decision over every mapped check, worst first (red,
+then pending including a check with no entry yet, then anything else, which is
+`local`). It exits 0 for every decision it makes; finalize also treats a non-zero
+exit or unparseable output as "run the gate". `skip` is `true` only when all of
+these hold:
 
 - the gate has an exact entry in the map (no prefix matching), read from the
   **committed** `.claude/project-config.yaml` on `origin/<base>`, not the working
@@ -2713,17 +2719,64 @@ output as "run the gate". `skip` is `true` only when all of these hold:
   entry of that name is a finished success (a check run `completed` with
   conclusion `success`, or a commit status in state `success`).
 
-Everything else is `skip: false` and the gate runs locally exactly as it did
-before: `pyyaml-unavailable`, `no-map-entry`, `head-unresolved`,
-`ci-signal-unavailable` (`gh` failed, timed out, returned junk, or reported an
-incomplete page), `pr-not-open`, `pr-base-mismatch`, `head-mismatch`,
-`check-missing`, `check-not-success` (pending, red, cancelled, skipped, neutral).
+Everything else is `skip: false`, with `outcome` saying what finalize does next:
+
+- `outcome: local`: the gate runs locally, as it did before this feature.
+  Reasons: `pyyaml-unavailable`, `no-map-entry`, `head-unresolved`,
+  `ci-signal-unavailable` (`gh` failed, timed out, returned junk, or reported an
+  incomplete page), `pr-not-open`, `pr-base-mismatch`, `head-mismatch`, and a
+  worst mapped check that is cancelled, skipped, neutral, stale or
+  action_required (`check-not-success`).
+- `outcome: pending` (`check-missing`, or `check-not-success` with a check that
+  is `queued`, `in_progress` or a pending commit status) and `outcome: red` (a
+  check that concluded `failure`, `timed_out` or `startup_failure`, or a commit
+  status `failure` or `error`): headless finalize parks these as
+  `awaiting_ci_evidence`: the gate is never run locally and never arms
+  auto-merge.
+
+**Create path.** `prep_pr_state.py ci-deferral --base <b>` (no PR needed) prints
+`{"deferred": [{"gate", "checks"}], "local": [...], "reason": ...}` from the
+base branch's committed map and the detected gates. In a headless run,
+`/prep-pr` Step 7 sets a per-worktree hold with `prep_pr_finalize.py ci-hold set`,
+skips each deferred gate (friction `create_path_gate_ci_deferred: <gate> via
+<checks>`), runs the rest, and opens the PR unarmed: the arm seam
+(`check-automerge-allowed`, `arm-automerge`) refuses while the hold is in force.
+Finalize Step 4c then parks `awaiting_ci_evidence` (flavor `deferred`). With no
+map, no entry, an unreadable or malformed config, a stale script or any helper
+failure, every gate runs locally and the hold is cleared.
+
+**Reuse pass.** After the park, `cw dev-queue requeue <T> -c <C>` re-enters Step
+4c.6, which makes one call, `prep_pr_state.py ci-reuse-plan --pr <N> --base
+<b>`, and decides for all gates at once: `park` (a pending, missing or red
+mapped check: park `awaiting_ci_evidence` again, run nothing locally, arm
+nothing), `skip` (every mapped check green at the PR's live head: the gate is
+skipped, friction `reuse_path_gate_ci_covered: <gate> via <checks>`) and `run`
+(everything else runs locally). A non-zero exit or unparseable output runs
+every gate locally (friction `ci_evidence_unavailable: ci-reuse-plan <cause>`).
+Interactive finalize keeps the per-gate `gate-ci-evidence` call and never parks;
+it only releases a hold on the passing path.
+
+**The hold.** It lives in the worktree's git dir (never in `git status`), is
+evaluated by ancestry so it survives later commits on the branch (Step 7
+autofix, fix loops, Step 8 remaining changes, the changelog gate), fails closed
+when it cannot be evaluated, and is loosened only by the green reuse pass (which
+releases it before Step 4d), an empty-array `ci-hold set` from the next headless
+Step 7, or by hand: `"$FINALIZE" ci-hold release --repo-path <worktree>`.
+
+**A mapped check that never reports** (renamed, or skipped by a path filter)
+parks every requeue, because there is no timer fallback (ADR-0014). Correct or
+remove its `quality_gates.ci_evidence` entry on the base branch (the map is read
+from the worktree's `origin/<base>` ref, so it must have fetched the change), or
+run the gate by hand and merge the PR yourself, then `cw dev-queue remove`
+the row. `pr.auto_merge: false` is not an escape: it is read from the
+worktree's own config, so setting it would change the head.
 
 - **Choosing check names.** Map a gate only to a check that really runs that
   gate on the same scope. An aggregate check that the repo requires for merge
   is usually the safest value. A check that is skipped for some changes (draft
-  PRs, path filters) simply yields `check-not-success` and the gate runs
-  locally.
+  PRs, path filters) never reports or reports skipped; a skipped or neutral
+  check runs the gate locally, but one that never reports parks the row (see
+  above), so prefer a check that always reports.
 - **Names are trusted, not authenticated.** A match is by check name on that
   commit; it does not bind the producer. Any workflow job in the PR's own
   workflow files, or anything that can post a commit status, could report a

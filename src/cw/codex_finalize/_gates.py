@@ -23,6 +23,14 @@ from typing import TYPE_CHECKING, Final
 
 from cw._git import git_clean_env, git_output
 from cw.auto_dev_result.schema._vocab import EXTERNAL_STATE_BLOCKER_REASON
+from cw.codex_finalize._ci_evidence import (
+    CiContext,
+    DeferredGate,
+    _HoldReleaseError,
+    awaiting_ci_evidence_block,
+    consult_create,
+    consult_reuse,
+)
 from cw.codex_finalize._result import (
     AGENT_BLOCK,
     CODEX_MUST_FIX_FINDINGS,
@@ -37,6 +45,7 @@ from cw.codex_finalize._result import (
 )
 from cw.codex_fix_loop.baseline import DirtyStart, capture_cycle_baseline
 from cw.codex_fix_loop.gates import (
+    GateFailure,
     GatePlan,
     GateScope,
     plan_cycle_gates,
@@ -392,43 +401,80 @@ def _no_autofix(plan: GatePlan) -> GatePlan:
     )
 
 
-def run_finalize_quality_gates(
-    worktree: Path, *, scope: GateScope, path: str
-) -> tuple[FinalizeBlock | None, list[str]]:
-    """Run the repo's quality gates on the branch tip; never fix, never commit.
+@dataclass(frozen=True)
+class FinalizeGateRun:
+    """The quality-gate step: a block, the friction it logs, the gates CI owns.
 
-    *path* is ``"reuse"`` or ``"create"`` and names the friction literal
-    (``reuse_path_gates: passed|none_detected`` is the doc's). A red gate or a
-    dirtied tree is ``agent_block``; an unavailable detector
-    ``external_state_block``; a dirty start ``codex_fix_dirty_start``.
+    *deferred* is non-empty only on the create path, when the base branch maps
+    detected gates to CI checks; the caller parks once the PR exists.
     """
-    label = f"{path}_path_gates: "
-    baseline = capture_cycle_baseline(worktree)
-    if isinstance(baseline, DirtyStart):
-        return FinalizeBlock(
-            CODEX_FIX_DIRTY_START,
-            "the worktree was not clean before the FINALIZE quality gates "
-            "(uncommitted or unfinished work); nothing was pushed or created",
-        ), []
-    plan = _no_autofix(plan_cycle_gates(worktree, scope))
-    if plan.why_unavailable is None and not plan.gates:
-        return None, [f"{label}none_detected"]
-    failure = run_cycle_gates(
-        plan,
-        worktree=worktree,
-        review_artifacts=baseline.review_artifacts,
-        scope=scope,
-        tokens=[],
-        touched=frozenset(),
+
+    block: FinalizeBlock | None = None
+    friction: list[str] = field(default_factory=list)
+    deferred: tuple[DeferredGate, ...] = ()
+
+
+@dataclass(frozen=True)
+class _CiPlan:
+    """The gate plan after the CI-evidence consult, or the park it ended in."""
+
+    plan: GatePlan
+    friction: list[str] = field(default_factory=list)
+    deferred: tuple[DeferredGate, ...] = ()
+    block: FinalizeBlock | None = None
+
+
+def _without(plan: GatePlan, names: frozenset[str]) -> GatePlan:
+    return replace(
+        plan, gates=tuple(gate for gate in plan.gates if gate.name not in names)
     )
-    if failure is None:
-        return None, [f"{label}passed"]
+
+
+def _consult(plan: GatePlan, worktree: Path, path: str, ci: CiContext) -> _CiPlan:
+    """Drop the gates CI owns: deferred (create) or green-covered (reuse).
+
+    Nothing to consult for an unavailable plan or one with no gates. A reuse
+    park is returned as the block; no gate runs.
+    """
+    if plan.script is None or plan.why_unavailable is not None or not plan.gates:
+        return _CiPlan(plan)
+    if path == "create":
+        try:
+            deferred, friction = consult_create(plan.script, worktree, ci.base)
+        except _HoldReleaseError as exc:
+            return _CiPlan(
+                plan,
+                block=awaiting_ci_evidence_block("hold_error", ci, cause=exc.cause),
+            )
+        gone = frozenset(d.gate for d in deferred)
+        return _CiPlan(_without(plan, gone), friction, deferred)
+    reuse = consult_reuse(plan.script, worktree, ci)
+    if reuse.park is not None:
+        block = awaiting_ci_evidence_block(reuse.park.flavor, ci, park=reuse.park)
+        return _CiPlan(plan, block=block)
+    return _CiPlan(_without(plan, reuse.skip_names), list(reuse.friction))
+
+
+def _nothing_to_run(
+    label: str, detected: GatePlan, ci_plan: _CiPlan
+) -> FinalizeGateRun:
+    """No gate is left to run: none detected, all deferred, or all CI-covered."""
+    if not detected.gates:
+        tail = [f"{label}none_detected"]
+    elif ci_plan.deferred:
+        tail = []
+    else:
+        tail = [f"{label}passed"]
+    return FinalizeGateRun(None, [*ci_plan.friction, *tail], ci_plan.deferred)
+
+
+def _failure_block(path: str, failure: GateFailure) -> FinalizeBlock:
     if failure.kind == "unavailable":
         return FinalizeBlock(
             EXTERNAL_STATE_BLOCKER_REASON,
             "the repo's quality gates could not be run: "
             + redact_and_cap(failure.why or "no reason recorded"),
-        ), []
+        )
     what = (
         f"failed with exit code {failure.exit_code}"
         if failure.kind == "red"
@@ -440,7 +486,54 @@ def run_finalize_quality_gates(
     )
     if failure.output:
         details += "\n\nLast lines of gate output:\n" + redact_and_cap(failure.output)
-    return FinalizeBlock(AGENT_BLOCK, details), []
+    return FinalizeBlock(AGENT_BLOCK, details)
+
+
+def run_finalize_quality_gates(
+    worktree: Path, *, scope: GateScope, path: str, ci: CiContext
+) -> FinalizeGateRun:
+    """Run the repo's quality gates on the branch tip; never fix, never commit.
+
+    *path* is ``"reuse"`` or ``"create"`` and names the friction literal
+    (``reuse_path_gates: passed|none_detected`` is the doc's). A red gate or a
+    dirtied tree is ``agent_block``; an unavailable detector
+    ``external_state_block``; a dirty start ``codex_fix_dirty_start``.
+
+    Gates the base branch maps to CI (*ci*) do not run here: the create path
+    defers them (returned in ``deferred``), the reuse path skips the ones
+    already green at the PR head and parks, as the returned block, on a
+    pending, missing or red mapped check. A consult that cannot answer runs
+    every gate locally.
+    """
+    label = f"{path}_path_gates: "
+    baseline = capture_cycle_baseline(worktree)
+    if isinstance(baseline, DirtyStart):
+        return FinalizeGateRun(
+            FinalizeBlock(
+                CODEX_FIX_DIRTY_START,
+                "the worktree was not clean before the FINALIZE quality gates "
+                "(uncommitted or unfinished work); nothing was pushed or created",
+            )
+        )
+    detected = _no_autofix(plan_cycle_gates(worktree, scope))
+    ci_plan = _consult(detected, worktree, path, ci)
+    if ci_plan.block is not None:
+        return FinalizeGateRun(ci_plan.block, ci_plan.friction)
+    if detected.why_unavailable is None and not ci_plan.plan.gates:
+        return _nothing_to_run(label, detected, ci_plan)
+    failure = run_cycle_gates(
+        ci_plan.plan,
+        worktree=worktree,
+        review_artifacts=baseline.review_artifacts,
+        scope=scope,
+        tokens=[],
+        touched=frozenset(),
+    )
+    if failure is None:
+        return FinalizeGateRun(
+            None, [*ci_plan.friction, f"{label}passed"], ci_plan.deferred
+        )
+    return FinalizeGateRun(_failure_block(path, failure), ci_plan.friction)
 
 
 def gate_scope(ticket_id: str, client: str, session_id: str) -> GateScope:

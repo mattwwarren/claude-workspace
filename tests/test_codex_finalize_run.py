@@ -16,12 +16,14 @@ import subprocess
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_driver import run_codex_finalize_stage
+from cw.codex_finalize import _run
+from cw.codex_finalize._ci_evidence import CiContext
 from cw.codex_finalize._run import _context
 from cw.codex_review import _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS
 from cw.codex_runner import CodexRunResult
@@ -1717,3 +1719,264 @@ def test_a_finalize_turn_without_usage_is_unavailable_with_a_friction_token(
     assert session.usage.unavailable_reason is UsageUnavailableReason.NO_OUTPUT
     assert [m for m in caplog.messages if "role=finalize " in m]
     assert any(f.startswith("usage_unavailable: ") for f in result.friction_highlights)
+
+
+# --- #3618: CI evidence defers mapped gates to CI -----------------------------
+
+
+_CI_LOG = "ran.log"
+
+
+def _logged_gate(tmp_path: Path, *names: str) -> tuple[tuple[str, str, float], ...]:
+    log = tmp_path / _CI_LOG
+    return tuple((name, f"echo {name} >> {log}", 5.0) for name in names)
+
+
+def _gates_ran(tmp_path: Path) -> list[str]:
+    log = tmp_path / _CI_LOG
+    return log.read_text(encoding="utf-8").split() if log.exists() else []
+
+
+def _run_handing(h: Harness) -> tuple[AutoDevResult, dict[str, Any]]:
+    """Run, also returning the payload handed to the door (it carries ``pr_info``)."""
+    from cw.codex_stage_completion import complete_session_through_door as real
+
+    handed: list[dict[str, Any]] = []
+
+    def _spy(sid: str, payload: dict[str, Any], **kwargs: Any) -> None:
+        handed.append(payload)
+        real(sid, payload, **kwargs)
+
+    with patch("cw.codex_finalize._run.complete_session_through_door", _spy):
+        result = h.run()
+    (payload,) = handed
+    return result, payload
+
+
+def _arm_names(h: Harness) -> list[str]:
+    return [c[0] for c in h.arm.calls()]
+
+
+def _reuse_harness(
+    harness: Callable[..., Harness], tmp_path: Path, *names: str
+) -> Harness:
+    h = harness(gates=_logged_gate(tmp_path, *names))
+    h.gh.reply("pr", "list", "--head", BRANCH, stdout=_pr_list("OPEN"))
+    return h
+
+
+def _park_plan(flavor: str, state: str, url: str | None = None) -> dict[str, object]:
+    return {
+        "flavor": flavor,
+        "gate": "lint",
+        "checks": ["ci-lint"],
+        "failed_check": "ci-lint",
+        "check_state": state,
+        "failed_url": url,
+        "sha": "d" * 40,
+    }
+
+
+def test_a_deferred_gate_creates_the_pr_unarmed_and_parks(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    h = harness(gates=_logged_gate(tmp_path, "lint")).trace()
+    h.gates.defer(("lint", ("ci-lint",)))
+    h.turn(finalize_document(pr_title=TITLE, pr_body=BODY))
+    result, payload = _run_handing(h)
+    _assert_block(
+        result,
+        "awaiting_ci_evidence",
+        stage="stage5_post_create",
+    )
+    assert result.blocker is not None
+    assert result.blocker.retry_eligible is True
+    assert result.blocker.details == (
+        f"ci_evidence_deferred: PR #{PR_NUMBER} ({PR_URL}) at head {h.head}: gate "
+        "lint mapped to check(s) ci-lint deferred to CI and not run locally. "
+        "cw did not arm auto-merge."
+    )
+    assert payload["pr_info"] == {
+        "number": PR_NUMBER,
+        "url": PR_URL,
+        "auto_merge": False,
+        "base": "main",
+    }
+    assert len(h.created()) == 1
+    assert h.arm.calls() == []
+    assert (
+        "create_path_gate_ci_deferred: lint via ci-lint" in result.friction_highlights
+    )
+    assert _gates_ran(tmp_path) == []
+    assert h.order == [
+        "run_approval_fence",
+        "run_finalize_quality_gates",
+        "probe_default",
+        "push_ahead",
+        "turn",
+        "create_pr_for",
+    ]
+    mergeability = h.gh_argvs(
+        "pr", "view", PR_URL, "--json", "mergeable,mergeStateStatus"
+    )
+    assert mergeability == []
+
+
+def test_a_partial_deferral_runs_the_unmapped_gate_before_the_park(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    h = harness(gates=_logged_gate(tmp_path, "lint", "fmt"))
+    h.gates.defer(("lint", ("ci-lint",)))
+    h.turn()
+    result = h.run()
+    _assert_block(result, "awaiting_ci_evidence", stage="stage5_post_create")
+    assert _gates_ran(tmp_path) == ["fmt"]
+    assert "create_path_gates: passed" in result.friction_highlights
+
+
+def test_a_red_unmapped_gate_still_blocks_before_any_pr_exists(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness(gates=(("lint", "true", 5.0), ("fmt", "exit 3", 5.0)))
+    h.gates.defer(("lint", ("ci-lint",)))
+    result = h.run()
+    _assert_block(
+        result,
+        "agent_block",
+        blocker_stage="stage4b_pr_create",
+        stage="stage4b_pr_create",
+    )
+    _assert_nothing_created(h)
+
+
+def test_a_create_without_a_map_behaves_exactly_as_before(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    h = harness(gates=_logged_gate(tmp_path, "lint"))
+    h.turn(finalize_document(pr_title=TITLE, pr_body=BODY))
+    result = h.run()
+    assert result.status == "shipped"
+    assert result.pr is not None
+    assert result.pr.auto_merge is True
+    assert _arm_names(h) == ["check-automerge-allowed", "arm-automerge"]
+    assert _gates_ran(tmp_path) == ["lint"]
+    assert "ci-deferral --base main" in h.gates.calls()
+    assert "create_path_gates: passed" in result.friction_highlights
+
+
+def test_the_traced_gate_step_keeps_its_slot_and_receives_the_ci_context(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness().trace()
+    h.turn()
+    spy = Mock(wraps=_run.run_finalize_quality_gates)
+    h.monkeypatch.setattr("cw.codex_finalize._run.run_finalize_quality_gates", spy)
+    result = h.run()
+    assert result.status == "shipped"
+    (call,) = spy.call_args_list
+    assert call.kwargs["path"] == "create"
+    assert call.kwargs["ci"] == CiContext(base="main", head=h.head)
+    assert h.order[:3] == [
+        "run_approval_fence",
+        "run_finalize_quality_gates",
+        "probe_default",
+    ]
+
+
+def test_a_reuse_pass_hands_the_bound_pr_to_the_consult(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    h.gh.reply("pr", "list", "--head", BRANCH, stdout=_pr_list("OPEN"))
+    spy = Mock(wraps=_run.run_finalize_quality_gates)
+    h.monkeypatch.setattr("cw.codex_finalize._run.run_finalize_quality_gates", spy)
+    assert h.run().status == "shipped"
+    (call,) = spy.call_args_list
+    assert call.kwargs["path"] == "reuse"
+    assert call.kwargs["ci"] == CiContext(
+        base="main", pr_number=PR_NUMBER, pr_url=PR_URL, head=h.head
+    )
+    assert "ci-reuse-plan --pr 7 --base main" in h.gates.calls()
+
+
+@pytest.mark.parametrize(
+    ("flavor", "state", "url", "prefix", "retry"),
+    [
+        ("pending", "missing", None, "ci_evidence_pending:", True),
+        ("pending", "in_progress", None, "ci_evidence_pending:", True),
+        ("red", "failure", "https://ci.example/run/1", "ci_evidence_red:", False),
+    ],
+)
+def test_a_reuse_pass_parks_on_pending_missing_and_red_without_arming(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    flavor: str,
+    state: str,
+    url: str | None,
+    prefix: str,
+    retry: bool,
+) -> None:
+    h = _reuse_harness(harness, tmp_path, "lint")
+    h.gates.reuse_plan(park=_park_plan(flavor, state, url))
+    result, payload = _run_handing(h)
+    _assert_block(result, "awaiting_ci_evidence", stage="stage5_post_create")
+    assert result.blocker is not None
+    assert result.blocker.retry_eligible is retry
+    assert result.blocker.details.startswith(
+        f"{prefix} PR #{PR_NUMBER} ({PR_URL}) at head {'d' * 40}: gate lint"
+    )
+    assert payload["pr_info"] == {
+        "number": PR_NUMBER,
+        "url": PR_URL,
+        "auto_merge": False,
+        "base": "main",
+    }
+    assert h.arm.calls() == []
+    assert _gates_ran(tmp_path) == []
+    assert h.created() == []
+
+
+def test_a_green_reuse_releases_the_hold_then_arms_with_the_head_pin(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    h = _reuse_harness(harness, tmp_path, "lint", "fmt")
+    h.gates.reuse_plan(skip=(("lint", ("ci-lint",)),))
+    result = h.run()
+    assert result.status == "shipped"
+    assert result.pr is not None
+    assert result.pr.auto_merge is True
+    assert _gates_ran(tmp_path) == ["fmt"]
+    assert "reuse_path_gate_ci_covered: lint via ci-lint" in result.friction_highlights
+    assert _arm_names(h) == [
+        "ci-hold",
+        "check-automerge-allowed",
+        "arm-automerge",
+    ]
+    release = h.arm.calls()[0]
+    assert release == ["ci-hold", "release", "--repo-path", str(h.worktree)]
+    assert h.arm.calls()[2][-2:] == ["--head-sha", h.head]
+
+
+def test_a_failing_release_parks_hold_error_and_never_arms(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    h = _reuse_harness(harness, tmp_path, "lint")
+    h.arm = stub_prep_pr_finalize(Path.home(), hold_exit=1, hold_stderr="boom")
+    result = h.run()
+    _assert_block(result, "awaiting_ci_evidence", stage="stage5_post_create")
+    assert result.blocker is not None
+    assert result.blocker.details == (
+        f"ci_evidence_hold_error: PR #{PR_NUMBER} ({PR_URL}) at head {h.head}: "
+        "ci-hold release failed (exit 1: boom). cw did not arm auto-merge."
+    )
+    assert _arm_names(h) == ["ci-hold"]
+    assert h.gh_argvs("pr", "merge") == []
+
+
+def test_a_pending_park_never_calls_the_hold_release(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    h = _reuse_harness(harness, tmp_path, "lint")
+    h.gates.reuse_plan(park=_park_plan("pending", "queued"))
+    h.run()
+    assert "ci-hold" not in _arm_names(h)

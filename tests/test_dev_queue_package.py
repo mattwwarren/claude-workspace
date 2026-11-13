@@ -137,7 +137,8 @@ _OLD_PATHS = sorted(_OWNER.keys() - _NOT_REEXPORTED)
 # functions of review_engine_allow (94).
 # #3216 adds REVIEW_ENGINE_UNSUPPORTED_DISPOSITION (95).
 # #3372 adds GATE_TIMEOUT_DISPOSITION (95).
-_DEV_QUEUE_ALL_SIZE = 96
+# #3618 adds AWAITING_CI_EVIDENCE_DISPOSITION (97).
+_DEV_QUEUE_ALL_SIZE = 97
 
 
 def _owner(name: str) -> ModuleType:

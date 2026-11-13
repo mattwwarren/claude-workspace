@@ -593,3 +593,27 @@ def test_gate_timeout_entry_runs_gate_records_pass_then_requeues() -> None:
     assert f"`{REQUEUE_COMMAND}`" in entry.text
     assert entry.text.index("gate-pass record") < entry.text.index(REQUEUE_COMMAND)
     assert all(_ALTERNATION not in command for command in entry.commands)
+
+
+def test_awaiting_ci_evidence_entry_routes_each_flavor_and_both_escapes() -> None:
+    # #3618: requeue once checks finish; red follows ci_failing; hold_error is
+    # a script fix; a never-reporting check has two escapes and a manual undo.
+    entry = _entry_for("awaiting_ci_evidence")
+    text = _norm(entry.text)
+    assert _WHO_RE.findall(entry.text) == [WHO_ORCHESTRATOR], entry.text
+    for flavor in (
+        "ci_evidence_deferred:",
+        "ci_evidence_pending:",
+        "ci_evidence_red:",
+        "ci_evidence_hold_error:",
+    ):
+        assert f"`{flavor}`" in text, flavor
+    assert f"`{REQUEUE_COMMAND}`" in text
+    for command in (REGRESS_COMMAND, REGRESS_FEEDBACK_COMMAND):
+        assert command in entry.commands, command
+    assert "`ci_failing` parked-row route" in text
+    assert "no timer fallback, ADR-0014" in text
+    assert "quality_gates.ci_evidence" in text
+    assert "cw dev-queue remove <T> -c <C>" in entry.commands
+    assert '"$FINALIZE" ci-hold release --repo-path <worktree>' in text
+    assert not re.search(r"\bgh pr merge\b", text), entry.text

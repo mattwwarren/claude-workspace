@@ -57,6 +57,11 @@ PUSH_AUTH_FAILED: Final = "push_auth_failed"
 IMPL_NOT_PUSHED: Final = "impl_not_pushed"
 CODEX_MUST_FIX_FINDINGS: Final = "codex_must_fix_findings"
 
+#: The park reason for a PR left unarmed while mapped CI checks are not green
+#: (#3618); restated as a literal in ``cw.auto_dev_result.schema._vocab`` and
+#: pinned by a lockstep test in ``tests/test_auto_dev_result.py``.
+AWAITING_CI_EVIDENCE: Final = "awaiting_ci_evidence"
+
 #: The ``blocker.stage`` of a must-fix override refusal (the doc's label).
 STAGE4_MUST_FIX_OVERRIDE: Final = "stage4_must_fix_override"
 

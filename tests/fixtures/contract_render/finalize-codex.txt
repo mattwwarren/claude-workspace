@@ -92,7 +92,7 @@ Before invoking Step 4a, check for an existing PR on **this ticket's branch** (d
 gh pr view <branch-name> --json number,state,url 2>/dev/null
 ```
 
-- **PR exists and is OPEN** → **Headless:** first run Step 4.0, then Step 4.0b. Only after both pass: reuse the PR, skip the `/prep-pr` create-step (Step 4c) and Step 4c.5, run Step 4c.6 (the quality gates `/prep-pr` Step 7 would have run, against the branch tip), and only then proceed to Step 4d (auto-merge enablement + Linear comment if not already posted) and then Stage 5. **Interactive:** Step 4.0 does not run; reuse the PR, skip Step 4c, run Step 4c.6, and proceed to Step 4d and then Stage 5.
+- **PR exists and is OPEN** → **Headless:** first run Step 4.0, then Step 4.0b. Only after both pass: reuse the PR, skip the `/prep-pr` create-step (Step 4c) and Step 4c.5, run Step 4c.6 (the quality gates `/prep-pr` Step 7 would have run or deferred to CI, against the branch tip), and only then proceed to Step 4d (auto-merge enablement + Linear comment if not already posted) and then Stage 5. **Interactive:** Step 4.0 does not run; reuse the PR, skip Step 4c, run Step 4c.6, and proceed to Step 4d and then Stage 5.
 - **PR exists and is MERGED** → detector should have returned `merged`; surface as already-done and exit successfully with `status: shipped`. Step 4.0 does not run: nothing ships.
 - **PR exists and is CLOSED (not merged)** → EXIT `blocked` with `blocker.reason: "pr_already_terminal"`. Do not create a duplicate — the closed PR is a human decision the pipeline must not work around. Step 4.0 does not run: nothing ships.
 - **No PR exists** → **Headless:** run Step 4.0, then proceed with normal Step 4a (Merge Gate Check) → Step 4b → Step 4c flow. **Interactive:** skip Step 4.0 and proceed with Step 4a → 4b → 4c.
@@ -419,7 +419,7 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
 
 ### Step 4c.6: Reuse-Path Quality Gates (open-PR reuse path only)
 
-**Scope.** Runs only when the Pre-Stage Detector Guard reused an OPEN PR (`PR exists and is OPEN`). A run that created its PR through Step 4c skips this step, because `/prep-pr` Step 7 already ran the gates. Why it exists (#2974): the reuse path skips `/prep-pr`, and an adopted PR (RFC 0016) always takes the reuse path. Headless also skips Stage 5, so nothing else watches the branch's gates before auto-merge is armed.
+**Scope.** Runs only when the Pre-Stage Detector Guard reused an OPEN PR (`PR exists and is OPEN`). A run that created its PR through Step 4c skips this step, because `/prep-pr` Step 7 already ran every gate it did not defer to CI; a deferred gate parks the run at Step 4c as `awaiting_ci_evidence` and is decided by this step on the requeue. Why it exists (#2974): the reuse path skips `/prep-pr`, and an adopted PR (RFC 0016) always takes the reuse path. Headless also skips Stage 5, so nothing else watches the branch's gates before auto-merge is armed.
 
 **Mandatory enforcement.** These quality gates are mandatory for every OPEN-PR reuse path. A failing gate is never reduced to a shadow or log-only result.
 
@@ -427,19 +427,37 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
 
 **Shared runner and gate set.** Use the shared quality-gate runner contract in Step 4c.5 item 5: resolve `PREP_PR_STATE` with its exact resolver fence (repo copy first, STOP on a stale copy), then use its `/prep-pr` Step 2 `detect-gates` output in `/prep-pr` order and its foreground, no-autofix, no-fix-loop, no-backgrounding execution. Do not copy the fence here. **Shell state does not persist between Bash tool calls:** substitute the resolved path literally into every later `detect-gates`, `gate-timeout` and `gate-pass check` call, or re-run the resolver at the top of the same Bash call. Never rely on a `$PREP_PR_STATE` set in an earlier call; an empty value exits 127 and becomes a spurious `agent_block`.
 
-- Zero gates detected → log `reuse_path_gates: none_detected` in `friction_highlights` and continue to Step 4d.
+- Zero gates detected → log `reuse_path_gates: none_detected` in `friction_highlights`, skip the CI-evidence consult below, and go to the **Passing run** release, then Step 4d.
 - Script absent, stale, or `detect-gates` fails → headless EXIT `blocked` with `blocker.reason: "agent_block"` and `details: "Step 4c.6: HEADLESS BLOCK — prep_pr_state.py <cause>"`. Fail closed, mirroring `/prep-pr` Step 2's script-resolution block.
 
-**Per-gate procedure.** This step inherits exactly these pieces of `/prep-pr` Step 7, adds one opt-in call of its own (`gate-ci-evidence`, first in the list), and nothing else:
+**Per-gate procedure.** This step inherits exactly these pieces of `/prep-pr` Step 7, adds the opt-in CI-evidence consult of its own (see CI evidence below), and nothing else:
 
 - the start-time step (record each gate's start before running it);
 - the foreground-timeout step (one foreground Bash call per gate, with `timeout` set from `gate-timeout`);
-- `"$PREP_PR_STATE" gate-ci-evidence <name> --pr <pr_number> --repo <owner>/<repo> --base <base>` (not a `/prep-pr` Step 7 piece: skip a gate the repo has opted in to proving by green CI at the PR's live head; see CI-evidence skip below);
 - `"$PREP_PR_STATE" gate-pass check <name>` (skip a gate that already passed at this HEAD);
 - `"$PREP_PR_STATE" gate-timeout <name>` (the ceiling);
 - the `gate_timeout` token, which on a timeout is the top-level `blocker.reason` (see Headless ceiling).
 
-**CI-evidence skip (opt-in, per repo).** Runs before `gate-pass check`, once per gate. A repo opts in by mapping gate names (exactly as `detect-gates` prints them) to the CI check name(s) that already prove them, under `quality_gates.ci_evidence` in `.claude/project-config.yaml`. The map is read from the committed file on `origin/<base>`, never from the working tree, so the PR under finalize cannot opt itself in. With no map, or no entry for a gate, nothing is skipped and this step behaves as before. `gate-ci-evidence` prints one JSON object. `skip: true` means the PR is open against `<base>`, local HEAD equals the PR head read live from GitHub, and every mapped check finished green on that commit. In that case do not run the gate; append `reuse_path_gate_ci_covered: <name> via <checks>` to `friction_highlights` and move to the next gate. Anything other than `skip: true` falls through to the normal procedure and runs the gate locally: a `skip: false` result whatever its `reason` (no entry, PyYAML unavailable, PR closed or retargeted, head moved, check pending, red, skipped or missing, GitHub unreachable), and equally a non-zero exit, a traceback, or output that is not that JSON (for example a script copy that predates the subcommand). A skipped gate leaves the worktree untouched, so the dirty-worktree comparison below is unaffected, and Step 4d still pins `--match-head-commit`, so a head that moves after the check cannot be armed ungated. Never treat `skip: false` as a failure, and never retry the call in a loop waiting for CI.
+**CI evidence (opt-in, per repo).** A repo opts in by mapping gate names (exactly as `detect-gates` prints them) to the CI check name(s) that already prove them, under `quality_gates.ci_evidence` in `.claude/project-config.yaml`. The map is read from the committed file on `origin/<base>`, never from the working tree, so the PR under finalize cannot opt itself in. With no map, or no entry for a gate, nothing is skipped or parked and the gate runs locally. The decision lives in `prep_pr_state.py` only; this step consumes its JSON and never re-derives it.
+
+**Headless.** After `detect-gates` returns at least one gate, run one call before any gate:
+
+```bash
+"$PREP_PR_STATE" ci-reuse-plan --pr <pr_number> --repo <owner>/<repo> --base <base>
+```
+
+Exit 0 and one JSON object with the keys `park`, `skip` and `run` is the plan. A non-zero exit, a traceback, output that is not that JSON, or JSON missing `park` or `skip` (for example a script copy that predates the subcommand) means run every gate locally and append `ci_evidence_unavailable: ci-reuse-plan <cause>` to `friction_highlights`. Never retry the call in a loop waiting for CI.
+
+- `park` non-null: a mapped check is pending, missing or red at the PR's live head. Emit the `awaiting_ci_evidence` sentinel with flavor `park.flavor` (`pending` or `red`) and STOP. Run no gate, make no `ci-hold release` and arm nothing: Step 4d is not reached. Pending, missing and red mapped checks never run the gate locally and never arm.
+- `park` null: for each `skip` entry append `reuse_path_gate_ci_covered: <gate> via <checks>` (checks joined with `, `) to `friction_highlights` and do not run that gate. Run every other detected gate (the `run` list, and any gate named in neither list) through the per-gate procedure above, without any per-gate CI call. A skipped gate leaves the worktree untouched, so the dirty-worktree comparison below is unaffected, and Step 4d still pins `--match-head-commit`, so a head that moves after the plan cannot be armed ungated.
+
+**Interactive.** Never parks: it keeps the per-gate `gate-ci-evidence` call, once per gate before `gate-pass check`, exactly as it did before the park existed.
+
+```bash
+"$PREP_PR_STATE" gate-ci-evidence <name> --pr <pr_number> --repo <owner>/<repo> --base <base>
+```
+
+Here only `skip: true` skips the gate (the PR is open against `<base>`, local HEAD equals the PR head read live from GitHub, and every mapped check finished green on that commit); append `reuse_path_gate_ci_covered: <name> via <checks>` and move on. Anything else runs the gate locally: any `skip: false` whatever its `reason` (including a pending, missing or red check), a non-zero exit, a traceback, or output that is not that JSON. Never treat `skip: false` as a failure, and never retry the call in a loop waiting for CI.
 
 Nothing else is inherited: no autofix, no fix loop, no commit, no push, no backgrounding, and no `gate-pass record`. Fail fast on the first failing gate. At the start of Step 4c.6, capture `START_STATUS=$(git status --porcelain -- . ':(exclude).claude/prep-pr-state.json')`; after each gate and at the end of the step, capture `END_STATUS=$(git status --porcelain -- . ':(exclude).claude/prep-pr-state.json')` and compare the filtered output with `START_STATUS`. A gate that dirties the worktree is a failed gate, is never committed, and reports the changed paths in `details`.
 
@@ -449,7 +467,7 @@ Nothing else is inherited: no autofix, no fix loop, no commit, no push, no backg
 
 **Failure, interactive.** Read it now if a gate fails in an interactive run: the appendix section "Step 4c.6 reuse-path gate failure"; it holds the interactive prompt (Fix / Leave open without arming / Abort). There is no ship-anyway option. A foreground timeout is treated as a failed gate and shows the same prompt with the ceiling in its text.
 
-**Passing run.** All gates pass → log `reuse_path_gates: passed` in `friction_highlights` and continue to Step 4d. This step is non-mutating, so the Step 4d item 3 Step 4.0 / 4.0b re-check remains the pre-arm tip fence.
+**Passing run.** All gates pass (a `skip` entry counts as passed) → release any CI-evidence hold before Step 4d, in both modes. Resolve `FINALIZE` with the repo-first probe from the self-heal fence above, in the same Bash call. If `grep -q 'ci-hold' "$FINALIZE"` succeeds, run `"$FINALIZE" ci-hold release --repo-path <worktree>`. A non-zero exit emits the `awaiting_ci_evidence` sentinel with flavor `hold_error` (`ci-hold release`) and STOPS: it never falls through to Step 4d, which would otherwise take the `pr.auto_merge: false` leave-open exit silently. A script that lacks `ci-hold` is skipped. Then log `reuse_path_gates: passed` in `friction_highlights` and continue to Step 4d. A hold loosens only here, after `ci-reuse-plan` returned no `park` (every mapped gate green at the PR's live head, or run locally and passed): a head move never releases it, and the commits made after `/prep-pr` Step 7 set it do not either. Interactive 4c.6 releases the same way, because a PR created headless-deferred and then finalized interactively must not stay held. This step is non-mutating, so the Step 4d item 3 Step 4.0 / 4.0b re-check remains the pre-arm tip fence.
 
 ### Step 4d: Post-Ship Pipeline Bookkeeping
 

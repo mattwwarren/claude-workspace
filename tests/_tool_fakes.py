@@ -347,6 +347,64 @@ def stub_gh_arm(
     return write_bin_stub(tmp_path, "gh", "\n".join(lines) + "\n")
 
 
+def stub_gh_ci(
+    tmp_path: Path,
+    *,
+    pr: Mapping[str, Any] | None,
+    check_runs: Sequence[Mapping[str, Any]] | None,
+    statuses: Sequence[Mapping[str, Any]] | None,
+) -> Path:
+    """Write a read-only ``gh`` stub answering the CI-evidence reads (#3618).
+
+    Serves what ``prep_pr_state.py`` asks of GitHub, from canned data:
+    ``pr view`` prints *pr* (``headRefOid``/``baseRefName``/``state``),
+    ``api repos/.../commits/<sha>/check-runs`` prints a ``check_runs`` page of
+    *check_runs* and ``api repos/.../commits/<sha>/status`` a ``statuses``
+    page of *statuses*. The stub does no ``check_name`` filtering (the script
+    refilters by name itself). A ``None`` argument makes that read exit 1, the
+    way an unreachable GitHub does. Every call is logged (:func:`gh_calls`);
+    any other subcommand exits 2.
+    """
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    pages = {
+        "pr.json": pr,
+        "runs.json": (
+            None
+            if check_runs is None
+            else {"total_count": len(check_runs), "check_runs": list(check_runs)}
+        ),
+        "status.json": (
+            None
+            if statuses is None
+            else {"total_count": len(statuses), "statuses": list(statuses)}
+        ),
+    }
+    for name, payload in pages.items():
+        if payload is not None:
+            (fake_bin / name).write_text(json.dumps(payload), encoding="utf-8")
+    lines = [
+        "#!/bin/sh",
+        'DIR=$(dirname "$0")',
+        *(line.format(calls=GH_CALLS_FILE) for line in _RECORD_ARGV_LINES),
+        "serve() {",
+        '  if [ -f "$DIR/$1" ]; then cat "$DIR/$1"; exit 0; fi',
+        "  exit 1",
+        "}",
+        'case "$1 $2" in',
+        '  "pr view") serve pr.json;;',
+        '  "api -X")',
+        '    case "$4" in',
+        "      */check-runs) serve runs.json;;",
+        "      */status) serve status.json;;",
+        "    esac;;",
+        "esac",
+        'echo "unexpected gh invocation: $@" >&2',
+        "exit 2",
+    ]
+    return write_bin_stub(tmp_path, "gh", "\n".join(lines) + "\n")
+
+
 def stub_gh_issue_create(tmp_path: Path) -> Path:
     """``gh`` stub accepting only ``issue create``; writes ``--body`` to a file.
 
@@ -1589,8 +1647,19 @@ if sys.argv[1] == "arm-automerge":
     sys.stdout.write({arm_stdout!r})
     sys.stderr.write({arm_stderr!r})
     sys.exit({arm_exit})
+if sys.argv[1] == "ci-hold" and sys.argv[2:3] in (["set"], ["status"], ["release"]):
+    sys.stdout.write({hold_stdout!r}[sys.argv[2]])
+    sys.stderr.write({hold_stderr!r})
+    sys.exit({hold_exit})
 sys.exit(2)
 """
+
+# What the stub's ``ci-hold`` answers on stdout when it exits 0, per action.
+_HOLD_STUB_STDOUT = {
+    "set": json.dumps({"hold": "set"}),
+    "status": json.dumps({"state": "none", "evaluated": True, "gates": []}),
+    "release": json.dumps({"hold": "released", "was": "none"}),
+}
 
 
 def stub_prep_pr_finalize(
@@ -1602,6 +1671,8 @@ def stub_prep_pr_finalize(
     arm_stdout: str = "",
     arm_gh_stderr: str = "",
     arm_stderr: str = "",
+    hold_exit: int = 0,
+    hold_stderr: str = "",
 ) -> ScriptStub:
     """A fake ``prep_pr_finalize.py`` at ``<root>/.claude/scripts/``.
 
@@ -1609,7 +1680,11 @@ def stub_prep_pr_finalize(
     HOME), the two places the arm resolves the script. ``check-automerge-allowed``
     exits *check_exit*; ``arm-automerge`` exits *arm_exit* and prints
     *arm_stdout* (default: a ``{"gh_stderr": ...}`` object when *arm_gh_stderr*
-    is set). Every call is logged; read it with :meth:`ScriptStub.calls`.
+    is set). ``ci-hold set|status|release`` exit *hold_exit* and write
+    *hold_stderr*; on exit 0 they print a ``none``-state JSON reply (the script
+    text carries the literal ``ci-hold``, which the codex release probe looks
+    for). Any other subcommand exits 2. Every call is logged; read it with
+    :meth:`ScriptStub.calls`.
     """
     scripts = root / ".claude" / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
@@ -1625,6 +1700,11 @@ def stub_prep_pr_finalize(
             arm_stdout=arm_stdout,
             arm_stderr=arm_stderr,
             arm_exit=arm_exit,
+            hold_stdout=_HOLD_STUB_STDOUT
+            if hold_exit == 0
+            else dict.fromkeys(_HOLD_STUB_STDOUT, ""),
+            hold_stderr=hold_stderr,
+            hold_exit=hold_exit,
         ),
         encoding="utf-8",
     )
