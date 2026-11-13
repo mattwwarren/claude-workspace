@@ -180,10 +180,10 @@ def test_retry_after_failed_copy_produces_complete_backup(
 ) -> None:
     sf = write_legacy_sessions_json(state_dir)
     original = sf.read_bytes()
-    monkeypatch.setattr(cw._state_backup.shutil, "copy2", _partial_copy_then_fail)
-    with pytest.raises(OSError, match="disk full"):
-        backup_legacy_state(sf)
-    monkeypatch.undo()
+    with monkeypatch.context() as patched:
+        patched.setattr(cw._state_backup.shutil, "copy2", _partial_copy_then_fail)
+        with pytest.raises(OSError, match="disk full"):
+            backup_legacy_state(sf)
     backup_legacy_state(sf)
     assert _backup(state_dir).read_bytes() == original
 
