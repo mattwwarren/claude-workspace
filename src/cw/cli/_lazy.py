@@ -298,6 +298,14 @@ LAZY_COMMANDS: Final[dict[str, LazyCommand]] = {
         "statusline_group",
         "Render Claude Code statusline segments.",
     ),
+    "tests-prepare": LazyCommand(
+        "cw.cli.tests_prepare",
+        "tests_prepare",
+        (
+            "Print the tests.prepare command from ROOT's .claude/project-config.yaml,"
+            " or nothing when it is unset."
+        ),
+    ),
     "upgrade-workers": LazyCommand(
         "cw.cli.maintenance",
         "upgrade_workers",

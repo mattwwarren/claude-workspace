@@ -30,3 +30,40 @@ def load_project_config_dict(
     except (OSError, parser.YAMLError):
         return None
     return raw if isinstance(raw, dict) else None
+
+
+class PrepareConfigError(ValueError):
+    """``tests.prepare`` is present but is not a usable shell command string."""
+
+
+def read_tests_prepare(root: Path) -> str | None:
+    """Return the stripped ``tests.prepare`` command of *root*, or None when unset.
+
+    None covers an absent file, an absent or null ``tests`` block, an absent or
+    null ``prepare``, and a blank value. A non-mapping ``tests`` block, a
+    non-string ``prepare``, or a file that is not valid UTF-8 raises
+    :class:`PrepareConfigError`, so a caller can tell "absent" from "malformed".
+    """
+    try:
+        config = load_project_config_dict(root)
+    except ValueError as exc:
+        msg = f"{PROJECT_CONFIG_RELPATH} is not valid UTF-8: {exc}"
+        raise PrepareConfigError(msg) from exc
+    if config is None:
+        return None
+    tests = config.get("tests")
+    if tests is None:
+        return None
+    if not isinstance(tests, dict):
+        msg = "`tests` in .claude/project-config.yaml must be a mapping"
+        raise PrepareConfigError(msg)
+    prepare = tests.get("prepare")
+    if prepare is None:
+        return None
+    if not isinstance(prepare, str):
+        msg = (
+            "`tests.prepare` must be a single shell command string, got"
+            f" {type(prepare).__name__}"
+        )
+        raise PrepareConfigError(msg)
+    return prepare.strip() or None
