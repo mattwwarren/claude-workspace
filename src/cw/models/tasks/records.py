@@ -69,12 +69,23 @@ class LaunchMarker(BaseModel):
     may still be in flight: ``cw.launch_marker.launch_owner_state`` reads it as
     owner-gone only on positive evidence that this exact process no longer
     exists (the start time pins the pid against reuse).
+
+    ``start_since_boot_ns`` and ``boot_id`` (#3319) are a clock-independent
+    identity, set together or not at all: a wall-clock step moves
+    ``start_time_ns`` but not the since-boot start. A marker without them (an
+    older cw, or a host without ``/proc``) keeps the wall-clock comparison. Both
+    are optional with no ``DEV_QUEUE_SCHEMA_VERSION`` bump, and an older cw
+    ignores them (the model is not ``extra=forbid``).
     """
 
     # NOT extra=forbid — persisted/runtime state, see #1200
     pid: int
     # psutil create_time() in epoch nanoseconds, the LocalLivenessHandle unit.
     start_time_ns: int
+    # /proc/<pid>/stat field 22 (start in clock ticks since boot), in ns.
+    start_since_boot_ns: int | None = None
+    # /proc/sys/kernel/random/boot_id of the boot the marker was written in.
+    boot_id: str | None = None
 
 
 class UsageLimitAct(BaseModel):

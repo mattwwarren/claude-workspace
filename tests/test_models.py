@@ -4268,6 +4268,42 @@ class TestLaunchMarker:
 
         assert models.LaunchMarker is tasks.LaunchMarker is records.LaunchMarker
 
+    def test_pre_3319_blob_loads_with_since_boot_pair_none(self) -> None:
+        """#3319: additive optional fields, no DEV_QUEUE_SCHEMA_VERSION bump."""
+        from cw.models import LaunchMarker
+
+        marker = LaunchMarker.model_validate(
+            {"pid": self._PID, "start_time_ns": self._START_NS}
+        )
+
+        assert marker.start_since_boot_ns is None
+        assert marker.boot_id is None
+        assert DEV_QUEUE_SCHEMA_VERSION == 60
+
+    def test_new_shape_round_trips_through_json_on_a_row(self) -> None:
+        from cw.models import LaunchMarker
+
+        marker = LaunchMarker(
+            pid=self._PID,
+            start_time_ns=self._START_NS,
+            start_since_boot_ns=98_760_000_000,
+            boot_id="6f1c2a9e-0000-4000-8000-00000000000a",
+        )
+        task = TicketTask(ticket_id="GEN-1", client="acme", launch_marker=marker)
+
+        restored = TicketTask.model_validate_json(task.model_dump_json())
+
+        assert restored.launch_marker == marker
+
+    def test_unknown_extra_keys_are_ignored(self) -> None:
+        from cw.models import LaunchMarker
+
+        marker = LaunchMarker.model_validate(
+            {"pid": self._PID, "start_time_ns": self._START_NS, "future_key": 1}
+        )
+
+        assert marker == LaunchMarker(pid=self._PID, start_time_ns=self._START_NS)
+
 
 class TestScopeDriftApprovalFields:
     """v40 (#2337): the operator's plan_scope_drift approval on the row."""
