@@ -5,8 +5,11 @@ them: those probe the worktree-base mount and say so in their messages, while
 this one probes the mount that holds the shared fallback dir. It reports the
 mount's free GB and free inodes against the same ``disk_pressure_*`` thresholds
 the dispatch gate uses, a bounded tree measurement, and the last retention run
-from its ``worker_tmp_retention.json`` sidecar. ``ok=False`` on a shortfall;
-``warn=True`` only when the last retention run failed.
+from its ``worker_tmp_retention.json`` sidecar, including whether the ``/proc``
+open-file guard was on and how many processes it could not read. ``ok=False`` on
+a shortfall; ``warn=True`` only when retention is enabled and its last run
+failed (a stale failed record of a disabled sweep is not actionable). The guard
+state is informational and never sets ``warn``.
 
 Leaf module apart from ``_shared.orchestrator_config_or_default``, the one
 degrade-to-defaults config loader every doctor check shares.
@@ -137,6 +140,8 @@ def _check_worker_tmp_fallback() -> CheckResult:
     return CheckResult(
         _CHECK_NAME,
         ok=not shortfalls,
-        warn=status is not None and status.status == "failed",
+        warn=config.worker_tmp_fallback_retention_enabled
+        and status is not None
+        and status.status == "failed",
         detail="; ".join(parts),
     )
