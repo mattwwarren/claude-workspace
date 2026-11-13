@@ -2795,6 +2795,31 @@ This key is unrelated to the `quality_gates:` key removed by #1616 (that one was
 never read). `claude-workspace` declares `ruff-format` so a formatting-only
 cycle is fixed and committed instead of parked.
 
+## Test Prepare Step (`tests.prepare`, #2179)
+
+Some projects need one command after a fresh checkout before their tests can
+run. Godot, for example, needs its import pass first. Declare it as a single
+shell command string under `tests:` in `.claude/project-config.yaml`:
+
+```yaml
+tests:
+  prepare: godot --headless --path game --import
+```
+
+- **Absent by default.** With no `tests.prepare` key, Step 2.5 gate 3 behaves
+  exactly as before, and no new code runs.
+- **Read from the pushed head.** Gate 3 reads the key from the clean gate
+  worktree the branch was pushed to, so the prepare step a branch ships is the
+  one that runs at that head.
+- **Runs before the claimed test command**, in that worktree, under the same
+  shell, `TMPDIR` and tool-call timeout. Its failure is an `impl_failed` setup
+  failure that names the command and exit code, never a "claim did not
+  reproduce" finding.
+- **Fails closed.** A non-string value, a non-mapping `tests:` block or an
+  unreadable file blocks gate 3. A blank or null `prepare` means unset.
+- **Scope.** Only Step 2.5 gate 3 reads it. `/prep-pr`, `detect-gates` and the
+  codex executor do not.
+
 ## Worktree Context File (`.claude/cw-context.json`)
 
 Written by `cw` into each DAEMON worktree at spawn time. The Stop hook reads it

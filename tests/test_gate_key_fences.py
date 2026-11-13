@@ -31,19 +31,18 @@ from typing import TYPE_CHECKING
 import pytest
 
 from tests._shared.git_repos import _clean_git_env
-from tests._shared.guard_fences import (
-    load_guard_script_module,
-    substitute_fence_placeholders,
-)
+from tests._shared.guard_fences import load_guard_script_module
 from tests._shared.step25_gates import (
+    GATE_BRANCH,
     GATE_KEY_SCRIPT,
+    GATE_STALE_SESSION,
+    GateBed,
     assert_gate_key_helper_missing,
+    fill_gate_fence,
     gate2_fence,
     gate_key_for,
     impl_gate3_fence,
     impl_gate_setup_fence,
-    install_gate_key,
-    link_real_python3,
     make_claimant,
     monolith_gate_fence,
 )
@@ -51,7 +50,7 @@ from tests._shared.workflow_text import _bash_fences, _cmd
 from tests._tool_fakes import write_bin_stub
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
 pytestmark = [
     pytest.mark.usefixtures("clean_gate_env"),
@@ -61,8 +60,6 @@ pytestmark = [
 _mod = load_guard_script_module(GATE_KEY_SCRIPT, "gate_key")
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_BRANCH = "feature"
-_STALE_SESSION = "9141a90d"
 
 _FENCES: dict[str, Callable[[], str]] = {
     "setup": impl_gate_setup_fence,
@@ -312,82 +309,8 @@ def test_exactly_the_four_fences_name_gate_paths() -> None:
 # --- Executed ------------------------------------------------------------------
 
 
-def _run_fence_body(
-    body: str,
-    *,
-    cwd: Path,
-    home: Path,
-    gate_root: Path,
-    bin_dir: Path,
-    extra_env: Mapping[str, str] | None = None,
-    timeout: float = 120.0,
-) -> subprocess.CompletedProcess[str]:
-    """Run a filled fence body (or several) in one ``bash -c``."""
-    env = _clean_git_env()
-    env.update(
-        {
-            "HOME": str(home),
-            "PATH": f"{bin_dir}:{env.get('PATH', '')}",
-            "CW_GATE_ROOT": str(gate_root),
-            "CW_SESSION": _STALE_SESSION,
-        }
-    )
-    env.update(extra_env or {})
-    return subprocess.run(
-        ["bash", "-c", body],
-        cwd=cwd,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=timeout,
-    )
-
-
-class _Bed:
-    """One executed-fence test bed: home with the script, python3, gate root."""
-
-    def __init__(self, tmp_path: Path, *, install: bool = True) -> None:
-        self.tmp_path = tmp_path
-        self.home = tmp_path / "home"
-        self.home.mkdir(parents=True, exist_ok=True)
-        self.script = install_gate_key(self.home) if install else None
-        self.gate_root = tmp_path / "gate-root"
-        self.gate_root.mkdir(parents=True, exist_ok=True)
-        self.bin_dir = link_real_python3(tmp_path / "bin")
-
-    def run(
-        self,
-        body: str,
-        cwd: Path,
-        extra_env: Mapping[str, str] | None = None,
-    ) -> subprocess.CompletedProcess[str]:
-        return _run_fence_body(
-            body,
-            cwd=cwd,
-            home=self.home,
-            gate_root=self.gate_root,
-            bin_dir=self.bin_dir,
-            extra_env=extra_env,
-        )
-
-    def paths(self, repo: Path) -> tuple[Path, Path, Path]:
-        key = gate_key_for(repo, _BRANCH)
-        return (
-            self.gate_root / f"cw-gate-wt-{key}",
-            self.gate_root / f"cw-gate-tmp-{key}",
-            self.gate_root / f"cw-gate-owner-{key}.json",
-        )
-
-
-def _fill(fence: str, test_command: str = "true") -> str:
-    return substitute_fence_placeholders(
-        fence, {"branch-name": _BRANCH, "test_command": test_command}
-    )
-
-
 def _setup_body(echo_paths: bool = True) -> str:
-    body = _fill(impl_gate_setup_fence())
+    body = fill_gate_fence(impl_gate_setup_fence())
     return body + ('\necho "PATHS=$TMPWT|$TMPDIR"\n' if echo_paths else "\n")
 
 
@@ -448,7 +371,7 @@ def _stub_git(root: Path) -> Path:
 
 
 def _publish_owner(
-    bed: _Bed, repo: Path, pid_owner: subprocess.Popen[bytes], *, alive: bool
+    bed: GateBed, repo: Path, pid_owner: subprocess.Popen[bytes], *, alive: bool
 ) -> Path:
     """Publish an owner record for *repo* naming *pid_owner* as worker and shell."""
     probe = _mod.Probe()
@@ -458,8 +381,8 @@ def _publish_owner(
     if not alive:
         pid_owner.terminate()
         pid_owner.wait(timeout=10)
-    key = gate_key_for(repo, _BRANCH)
-    code, _ = _mod.claim(bed.gate_root, key, _BRANCH, claimant, probe)
+    key = gate_key_for(repo, GATE_BRANCH)
+    code, _ = _mod.claim(bed.gate_root, key, GATE_BRANCH, claimant, probe)
     assert code == 0
     return Path(_mod.owner_path(bed.gate_root, key))
 
@@ -474,7 +397,7 @@ def _plant(directory: Path, name: str = "sentinel", text: str = "keep\n") -> Pat
 def test_two_clones_same_cw_session_get_distinct_gate_paths(
     tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
 ) -> None:
-    bed = _Bed(tmp_path)
+    bed = GateBed(tmp_path)
     clone_a, _ = make_git_repo_with_origin("clone-a")
     clone_b, _ = make_git_repo_with_origin("clone-b")
     result_a = bed.run(_setup_body(), clone_a)
@@ -483,14 +406,14 @@ def test_two_clones_same_cw_session_get_distinct_gate_paths(
     assert result_b.returncode == 0, result_b.stdout + result_b.stderr
     paths_a, paths_b = _echoed_paths(result_a), _echoed_paths(result_b)
     assert paths_a != paths_b
-    assert _STALE_SESSION not in paths_a
-    assert _STALE_SESSION not in paths_b
+    assert GATE_STALE_SESSION not in paths_a
+    assert GATE_STALE_SESSION not in paths_b
 
 
 def test_other_clones_gate_worktree_survives_self_heal(
     tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
 ) -> None:
-    bed = _Bed(tmp_path)
+    bed = GateBed(tmp_path)
     clone_a, _ = make_git_repo_with_origin("clone-a")
     clone_b, _ = make_git_repo_with_origin("clone-b")
     sentinel = _plant(bed.paths(clone_a)[0])
@@ -504,7 +427,7 @@ def test_live_foreign_owner_refuses_and_leaves_the_path(
     make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
     sleeper: Callable[[], subprocess.Popen[bytes]],
 ) -> None:
-    bed = _Bed(tmp_path)
+    bed = GateBed(tmp_path)
     repo, _ = make_git_repo_with_origin("clone")
     child = sleeper()
     owner = _publish_owner(bed, repo, child, alive=True)
@@ -526,7 +449,7 @@ def test_dead_owner_allows_and_self_heal_runs(
     make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
     sleeper: Callable[[], subprocess.Popen[bytes]],
 ) -> None:
-    bed = _Bed(tmp_path)
+    bed = GateBed(tmp_path)
     repo, _ = make_git_repo_with_origin("clone")
     _publish_owner(bed, repo, sleeper(), alive=False)
     tmpwt, _, owner = bed.paths(repo)
@@ -541,7 +464,7 @@ def test_dead_owner_allows_and_self_heal_runs(
 def test_absent_owner_file_allows_and_a_normal_exit_releases(
     tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
 ) -> None:
-    bed = _Bed(tmp_path)
+    bed = GateBed(tmp_path)
     repo, _ = make_git_repo_with_origin("clone")
     tmpwt, tmpdir, owner = bed.paths(repo)
     result = bed.run(_setup_body() + f'cat "{owner}"\n', repo)
@@ -555,7 +478,7 @@ def test_absent_owner_file_allows_and_a_normal_exit_releases(
 def test_sigkilled_run_leaves_the_record_and_the_next_run_takes_over(
     tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
 ) -> None:
-    bed = _Bed(tmp_path)
+    bed = GateBed(tmp_path)
     repo, _ = make_git_repo_with_origin("clone")
     owner = bed.paths(repo)[2]
     stub_dir = _stub_git(tmp_path / "stub")
@@ -592,7 +515,7 @@ def _driver(repo: Path, owner: Path, tmpwt: Path) -> str:
 def test_same_worker_retry_after_a_killed_gate_shell_takes_over(
     tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
 ) -> None:
-    bed = _Bed(tmp_path)
+    bed = GateBed(tmp_path)
     repo, _ = make_git_repo_with_origin("clone")
     tmpwt, _, owner = bed.paths(repo)
     stub_dir = _stub_git(tmp_path / "stub")
@@ -608,7 +531,7 @@ def test_same_worker_retry_after_a_killed_gate_shell_takes_over(
 def test_same_worker_overlap_with_a_live_gate_shell_refuses(
     tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
 ) -> None:
-    bed = _Bed(tmp_path)
+    bed = GateBed(tmp_path)
     repo, _ = make_git_repo_with_origin("clone")
     tmpwt, _, owner = bed.paths(repo)
     stub_dir = _stub_git(tmp_path / "stub")
@@ -644,7 +567,7 @@ def test_same_worker_overlap_with_a_live_gate_shell_refuses(
 def test_setup_fence_twice_in_one_shell_is_a_takeover_not_a_refusal(
     tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
 ) -> None:
-    bed = _Bed(tmp_path)
+    bed = GateBed(tmp_path)
     repo, _ = make_git_repo_with_origin("clone")
     owner = bed.paths(repo)[2]
     show = 'cat "$CW_GATE_ROOT/cw-gate-owner-$GATE_KEY.json"; echo\n'
@@ -684,7 +607,7 @@ def test_claim_generation_is_captured_and_handed_to_release(name: str) -> None:
 def test_stale_generation_release_after_a_same_shell_reentry_keeps_the_newer_record(
     tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
 ) -> None:
-    bed = _Bed(tmp_path)
+    bed = GateBed(tmp_path)
     repo, _ = make_git_repo_with_origin("clone")
     owner = bed.paths(repo)[2]
     body = _setup_body(echo_paths=False) + 'OLD="$GATE_GEN"\n'
@@ -720,15 +643,15 @@ def test_absent_owner_record_decision_is_recorded_in_all_three_places() -> None:
 def test_setup_fence_runs_without_cw_session_env(
     tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
 ) -> None:
-    bed = _Bed(tmp_path)
+    bed = GateBed(tmp_path)
     repo, _ = make_git_repo_with_origin("clone")
     result = bed.run("unset CW_SESSION\n" + _setup_body(), repo)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
 _EARLIER_FENCES: dict[str, Callable[[], str]] = {
-    "setup": lambda: _fill(impl_gate_setup_fence()),
-    "monolith_preamble": lambda: _fill(_monolith_preamble()),
+    "setup": lambda: fill_gate_fence(impl_gate_setup_fence()),
+    "monolith_preamble": lambda: fill_gate_fence(_monolith_preamble()),
 }
 
 
@@ -748,7 +671,7 @@ def test_refused_or_failed_claim_in_a_shell_that_ran_an_earlier_fence_deletes_no
     fence_name: str,
     claim_outcome: str,
 ) -> None:
-    bed = _Bed(tmp_path)
+    bed = GateBed(tmp_path)
     clone_a, _ = make_git_repo_with_origin("clone-a")
     clone_b, _ = make_git_repo_with_origin("clone-b")
     wt_a, _, owner_a = bed.paths(clone_a)
@@ -761,7 +684,7 @@ def test_refused_or_failed_claim_in_a_shell_that_ran_an_earlier_fence_deletes_no
     else:
         assert bed.script is not None
         _shorten_lock_timeout(bed.script)
-        key_b = gate_key_for(clone_b, _BRANCH)
+        key_b = gate_key_for(clone_b, GATE_BRANCH)
         held = (bed.gate_root / f"cw-gate-owner-{key_b}.lock").open("a")
         fcntl.flock(held.fileno(), fcntl.LOCK_EX)
     fence = _EARLIER_FENCES[fence_name]()
@@ -797,7 +720,7 @@ def test_refused_or_failed_claim_in_a_shell_that_ran_an_earlier_fence_deletes_no
 def test_term_during_the_gate_runs_the_removal_once(
     tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
 ) -> None:
-    bed = _Bed(tmp_path)
+    bed = GateBed(tmp_path)
     repo, _ = make_git_repo_with_origin("clone")
     tmpwt, tmpdir, owner = bed.paths(repo)
     stub_dir = _stub_git(tmp_path / "stub")
@@ -824,7 +747,7 @@ def _claiming_body(name: str) -> str:
     """A runnable body for a claiming fence (setup, or the monolith preamble)."""
     if name == "setup":
         return _setup_body(echo_paths=False)
-    return _fill(_monolith_preamble()) + "\n"
+    return fill_gate_fence(_monolith_preamble()) + "\n"
 
 
 @pytest.mark.parametrize("name", _CLAIMING)
@@ -833,7 +756,7 @@ def test_ambient_exported_cleaned_flag_does_not_silence_cleanup(
     make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
     name: str,
 ) -> None:
-    bed = _Bed(tmp_path)
+    bed = GateBed(tmp_path)
     repo, _ = make_git_repo_with_origin("clone")
     tmpwt, tmpdir, owner = bed.paths(repo)
     result = bed.run(_claiming_body(name), repo, {"GATE_WT_CLEANED": "1"})
@@ -849,7 +772,7 @@ def test_second_term_during_cleanup_does_not_abandon_the_removal(
     make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
     name: str,
 ) -> None:
-    bed = _Bed(tmp_path)
+    bed = GateBed(tmp_path)
     repo, _ = make_git_repo_with_origin("clone")
     tmpwt, tmpdir, owner = bed.paths(repo)
     stub_dir = _stub_git(tmp_path / "stub")
@@ -876,7 +799,7 @@ def test_second_term_during_cleanup_does_not_abandon_the_removal(
 def test_fences_agree_on_gate_paths(
     tmp_path: Path, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
 ) -> None:
-    bed = _Bed(tmp_path)
+    bed = GateBed(tmp_path)
     repo, _ = make_git_repo_with_origin("clone")
     tmpwt, tmpdir, _ = bed.paths(repo)
     expected = f"{tmpwt}|{tmpdir}"
@@ -884,13 +807,13 @@ def test_fences_agree_on_gate_paths(
     assert setup.returncode == 0, setup.stdout + setup.stderr
     assert _echoed_paths(setup) == expected
     monolith = bed.run(
-        _fill(_monolith_preamble()) + '\necho "PATHS=$TMPWT|$TMPDIR"\n', repo
+        fill_gate_fence(_monolith_preamble()) + '\necho "PATHS=$TMPWT|$TMPDIR"\n', repo
     )
     assert monolith.returncode == 0, monolith.stdout + monolith.stderr
     assert _echoed_paths(monolith) == expected
     tmpwt.mkdir()
     gate3 = bed.run(
-        _fill(
+        fill_gate_fence(
             impl_gate3_fence(),
             test_command='printf \'PATHS=%s|%s\\n\' "$PWD" "$TMPDIR"',
         ),
@@ -909,9 +832,9 @@ def test_missing_helper_stops_without_creating_any_gate_path(
     name: str,
     code: int,
 ) -> None:
-    bed = _Bed(tmp_path, install=False)
+    bed = GateBed(tmp_path, install=False)
     repo, _ = make_git_repo_with_origin("clone")
-    result = bed.run(_fill(_FENCES[name]()), repo)
+    result = bed.run(fill_gate_fence(_FENCES[name]()), repo)
     assert result.returncode == code, result.stdout + result.stderr
     assert_gate_key_helper_missing(result.stdout)
     assert not [path for path in bed.gate_root.iterdir() if "cw-gate-" in path.name]
@@ -923,18 +846,18 @@ def test_a_non_hex_key_is_rejected_with_the_interpreter_version(
     make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
     name: str,
 ) -> None:
-    bed = _Bed(tmp_path)
+    bed = GateBed(tmp_path)
     assert bed.script is not None
     bed.script.write_text('print("nothex")\n', encoding="utf-8")
     repo, _ = make_git_repo_with_origin("clone")
-    result = bed.run(_fill(_FENCES[name]()), repo)
+    result = bed.run(fill_gate_fence(_FENCES[name]()), repo)
     assert result.returncode != 0
     assert _COULD_NOT_COMPUTE.search(result.stdout), result.stdout
     assert not [path for path in bed.gate_root.iterdir() if "cw-gate-" in path.name]
 
 
 def test_setup_fence_from_a_non_git_cwd_exits_non_zero(tmp_path: Path) -> None:
-    bed = _Bed(tmp_path)
+    bed = GateBed(tmp_path)
     plain = tmp_path / "plain"
     plain.mkdir()
     result = bed.run(_setup_body(), plain, {"GIT_CEILING_DIRECTORIES": str(tmp_path)})

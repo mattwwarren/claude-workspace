@@ -89,6 +89,13 @@ except ImportError:  # pragma: no cover - downstream repo without PyYAML
 
 def _load_project_config_module() -> ModuleType | None:
     """Load the shared config reader from source or an installed package."""
+    # An already-imported cw.project_config is the shared reader: re-executing
+    # the same source file under another module name makes a second module
+    # object, which under pytest-xdist drops coverage of the reader's bodies
+    # (#2179). A fresh interpreter has no entry and takes the path load below.
+    already = sys.modules.get("cw.project_config")
+    if already is not None:
+        return already
     source = Path(__file__).resolve().parents[2] / "src" / "cw" / "project_config.py"
     if source.exists():
         spec = importlib.util.spec_from_file_location("cw_project_config", source)

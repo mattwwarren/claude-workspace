@@ -786,9 +786,21 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
    GATE_KEY=$(python3 "$KEY_SCRIPT" --branch '<branch-name>') && [[ "$GATE_KEY" =~ ^[0-9a-f]{16}$ ]] || { echo "IMPL_FAILED: Step 2.5 gate 3: gate_key.py could not compute the gate key ($KEY_SCRIPT; $(python3 --version 2>&1))"; exit 3; }
    TMPWT="${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$GATE_KEY"
    export TMPDIR="${CW_GATE_ROOT:-/var/tmp}/cw-gate-tmp-$GATE_KEY"
+   # tests.prepare (#2179): the project-declared post-checkout step, read from the pushed head in $TMPWT through cw's one typed reader (cw tests-prepare). The filesystem probe only decides whether the config path is absent or needs the reader; it never inspects YAML text. A missing config path stays compatible with older cw installs, while an existing or inaccessible path, or a missing gate worktree, goes to cw and fails closed on an unreadable or malformed value.
+   PREPARE_CMD=""
+   CFG="$TMPWT/.claude/project-config.yaml"
+   CLAUDE_DIR="$TMPWT/.claude"
+   if [ ! -d "$TMPWT" ] || [ -e "$CFG" ] || [ -L "$CFG" ] || ( { [ -e "$CLAUDE_DIR" ] || [ -L "$CLAUDE_DIR" ]; } && [ ! -d "$CLAUDE_DIR" ] ); then
+     PREPARE_CMD=$(cw tests-prepare "$TMPWT"); PREPARE_RC=$?
+     [ "$PREPARE_RC" -eq 0 ] || { echo "IMPL_FAILED: Step 2.5 gate 3: tests.prepare could not be read (tests-prepare exited $PREPARE_RC): the key in $TMPWT/.claude/project-config.yaml is malformed or unreadable, the gate worktree $TMPWT is missing, or the installed cw lacks the tests-prepare command (reinstall cw, e.g. scripts/install.sh)"; exit 3; }
+   fi
+   if [ -n "$PREPARE_CMD" ]; then
+     (cd "$TMPWT" && bash -c "$PREPARE_CMD"); PREPARE_RC=$?
+     [ "$PREPARE_RC" -eq 0 ] || { echo "IMPL_FAILED: Step 2.5 gate 3: tests.prepare \`$PREPARE_CMD\` exited $PREPARE_RC in $TMPWT before the test command ran"; exit 4; }
+   fi
    cd "$TMPWT" && <test_command>
    ```
-   Non-zero exit → `impl_failed`. The agent's pasted tail was either fabricated or stale.
+   `tests.prepare` is optional and absent by default; with no key the gate runs exactly as before. A repo with no `.claude/project-config.yaml` runs no new code at all. A YAML syntax error reads as absent, the shared loader's established behaviour for every consumer; an unreadable file (not merely missing) and a non-string `tests.prepare` are blockers. Exit 3 (value unreadable or malformed, a config file that exists but cannot be read or is not a regular file, gate worktree missing, or installed `cw` lacks `tests-prepare`) and exit 4 (prepare command failed) are both `impl_failed`, with `blocker.details: "Step 2.5 gate 3 failed: <verbatim fence line>"`. Exit 3 on a repo that declares the key with an older `cw` is environment skew, not an implementation defect: set `blocker.retry_eligible: null`, as for the `gate_key.py`-missing case. Never report a prepare failure as "claim did not reproduce". Prepare runs in the foreground under the same shell, exported `TMPDIR` and tool-call timeout as the test command; the gate declares no further sandbox. A non-zero exit of the test command itself → `impl_failed`. The agent's pasted tail was either fabricated or stale.
 
 4. **Mypy/ruff clean on touched files** (if Python): Re-derive `GATE_KEY`, `TMPWT` and `TMPDIR` ahead of both re-runs below exactly as gate 3's fence does (same `gate_key.py` call; shell state does not persist between fenced Bash calls), so ruff/mypy/uv caches also stay off tmpfs. Re-run ruff in `$TMPWT`; non-zero exit → `impl_failed`. Re-run mypy under the Stage 2 type-check gate rule, re-verifying (never trusting) the agent's baseline claim: no baseline, or a strict override applies → plain mypy on touched files, non-zero → `impl_failed`; a baseline applies → independently re-run the appendix's Detection steps against `$FORK_POINT` to derive your own `MYPY_BASELINE_FILE` / `MYPY_BASELINE_CMD` (never copy them from the friction report; a mismatch with the agent's reported values → `impl_failed`), then run that command and the no-growth check per `.claude/commands/auto-dev-impl-appendix.md`, section "Type check gate: mypy baseline detection and comparison" — any blocking error, or a baseline file that gained entries since `$FORK_POINT`, → `impl_failed`. Record baselined pre-existing errors in touched files to `.cw/deferred-findings.md` as that section specifies; they do not fail this gate.
 
