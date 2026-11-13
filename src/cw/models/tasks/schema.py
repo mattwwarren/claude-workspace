@@ -269,7 +269,12 @@ from cw.models.enums import Stage
 #      regress, unchanged by a same-stage requeue). ``| None`` with a ``None``
 #      default, so a pre-v60 row loads with it unset and needs no migration
 #      filler.
-DEV_QUEUE_SCHEMA_VERSION = 60
+# v61: added TicketTask.stop_continuations (GitHub #2348) — the number of
+#      automatic Stop-hook continuations sent for the row's current stage,
+#      reset by ``enter_stage`` and kept across a same-stage requeue. ``| None``
+#      with a ``None`` default, so a pre-v61 row loads with it unset and needs
+#      no migration filler.
+DEV_QUEUE_SCHEMA_VERSION = 61
 # Provenance of a v48 review approval: the human `approve` or the gate recipe.
 ReviewApproverKind = Literal["operator", "recipe"]
 DEFAULT_LANE: str = "default"

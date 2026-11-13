@@ -55,6 +55,8 @@ def print_table(rows: Iterable[dict[str, Any]]) -> None:
         click.echo("  ".join(cells))
         if r.get("recommend") != "WAIT":
             click.echo(f"    └─ {r.get('reason')}")
+        if r.get("stop_continuations") is not None:
+            click.echo(f"    └─ auto-continued: {r['stop_continuations']}")
     # AWAITING_OPERATOR rows are excluded by construction: a parked row is an
     # answer candidate (`cw session send`), not a stop candidate (#2212).
     actionable = [r for r in rows if r["recommend"].startswith("STOP")]

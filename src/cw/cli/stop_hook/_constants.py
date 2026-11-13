@@ -47,3 +47,19 @@ _STAGED_ROUTE_TASK_ALREADY_TERMINAL_KEY = "sentinel_partial_route_task_already_t
 # still-unroutable bail; it is local to this package and read only by
 # _sentinel_unroutable, never by holds_staged_emit_result.
 _SENTINEL_UNROUTABLE_PAGED_KEY = "sentinel_unroutable_paged"
+
+# Stop-hook auto-continuation (GitHub #2348, R1): the most times one stage's
+# row is sent the nudge below for a turn that ended in text with no sentinel.
+# The counter lives on the dev-queue row (``TicketTask.stop_continuations``) so
+# it spans sessions and resets only on a real stage change. After the cap the
+# hook falls through to today's behaviour unchanged.
+MAX_STOP_CONTINUATIONS = 2
+
+# The fixed continuation message, sent as the Stop hook's ``reason``. Named
+# and fixed on purpose (R1: no injected system prompt, no open-item listing),
+# so the hook reads no tracker and no network.
+STOP_CONTINUATION_NUDGE = (
+    "Your stage is not finished. Either finish the stage and emit the "
+    "AUTO_DEV_RESULT sentinel, or, if something is blocking you, emit a "
+    "blocked sentinel stating the reason."
+)

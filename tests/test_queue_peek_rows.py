@@ -28,6 +28,7 @@ from tests._queue_peek_helpers import (
     sentinel_text,
     write_sessions,
 )
+from tests._shared.session_seeding import _make_ticket_task
 from tests._shipped_red_helpers import make_episode, make_red_row
 from tests._ticket_view_helpers import seed_queue
 
@@ -1708,3 +1709,17 @@ class TestRedShippedPrRows:
 
         assert [r["recommend"] == "RED_SHIPPED_PR" for r in rows] == [False, True]
         assert len(reads) == 1
+
+
+class TestStopContinuationPeekFields:
+    """The #2348 ``stop_continuations`` key is shown only once a continuation ran."""
+
+    def test_unset_counter_omits_key(self) -> None:
+        task = _make_ticket_task(status=QueueItemStatus.BLOCKED_ON_USER)
+        assert "stop_continuations" not in queue_peek.format_row(task, {}, NOW)
+
+    def test_set_counter_carries_key(self) -> None:
+        task = _make_ticket_task(
+            status=QueueItemStatus.BLOCKED_ON_USER, stop_continuations=1
+        )
+        assert queue_peek.format_row(task, {}, NOW)["stop_continuations"] == 1
