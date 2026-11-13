@@ -22,6 +22,7 @@ from pathlib import Path
 from cw.plan_fingerprint import compute_plan_draft_fingerprint, leading_bookkeeping_end
 from tests._shared.workflow_text import _appendix, _cmd
 from tests.test_auto_dev_preflight_resolutions import _after
+from tests.test_consolidated_park import _park_block
 from tests.test_plan_stage_settlement import _step1c0_block, _step1c_headless_section
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -31,7 +32,6 @@ FOLD_HEADING = "## Step 1c.0a: fold operator answers into the plan before review
 FOLD_TAG = "<!-- el: plan.fold-operator-answers-before-review -->"
 WORKING_PLAN_RULE = "**Working-plan rule (#2176, #2258).**"
 DECISIONS_PARAGRAPH = "**Decisions on record.**"
-PARK_HEADER = "**Consolidated park (single-exit rule, #1650).**"
 
 
 def _fold_section() -> str:
@@ -59,10 +59,6 @@ def _step1f2_line() -> str:
     core = _cmd("auto-dev-plan.md")
     start = core.index("**Each prompt must include:** the working plan")
     return core[start : core.index("\n", start)]
-
-
-def _park_block() -> str:
-    return _after(_appendix("plan"), PARK_HEADER, span=8000)
 
 
 def _agent_text(name: str) -> str:
@@ -199,6 +195,19 @@ def test_decided_label_is_wired_into_the_station_prompt() -> None:
     for identifier in ("`comment:<id>`", "`R<n>`", "`row:<round>`"):
         assert identifier in line
     assert "#### Decided, pending edit" not in line
+
+
+def test_decided_comment_identifier_is_defined_by_the_resolution_gate() -> None:
+    """Test 9 (contract): comment IDs use the live provenance-filtered stream."""
+    core = _cmd("auto-dev-plan.md")
+    gate = "**Resolution gate (checked second, after the Impact gate"
+    window = _after(core, gate, span=5000)
+    assert "For a station `Decided:` sub-bullet" in window
+    assert "`comment:<id>` looks up the exact id in the live comment stream" in window
+    assert "Comment provenance rule" in window
+    assert "supplied binding set" in window
+    assert "collapsing whitespace runs to one space on both sides" in window
+    assert "fails closed and leaves the finding open" in window
 
 
 def test_decided_label_is_defined_in_both_station_agents() -> None:
