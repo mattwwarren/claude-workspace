@@ -6,11 +6,11 @@ import subprocess
 from typing import TYPE_CHECKING
 
 import pytest
+
 from cw.usage_limit_probe import (
     ProbeVerdict,
     probe_account_usage_limit,
 )
-
 from tests._tool_fakes import GhReply, fake_claude_cli, prepend_to_path
 
 if TYPE_CHECKING:
