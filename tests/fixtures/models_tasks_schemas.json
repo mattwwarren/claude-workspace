@@ -401,7 +401,7 @@
      "type": "object"
     },
     "LaunchMarker": {
-     "description": "The dispatcher process that claimed a RUNNING row (GitHub #2615).\n\nWritten at the single RUNNING entry (``cw.dispatch.claim.screening``) from\nthe claiming process's own pid and process start time, and cleared once the\nspawn binds a session or the row leaves RUNNING. While it is set, a launch\nmay still be in flight: ``cw.launch_marker.launch_owner_state`` reads it as\nowner-gone only on positive evidence that this exact process no longer\nexists (the start time pins the pid against reuse).",
+     "description": "The dispatcher process that claimed a RUNNING row (GitHub #2615).\n\nWritten at the single RUNNING entry (``cw.dispatch.claim.screening``) from\nthe claiming process's own pid and process start time, and cleared once the\nspawn binds a session or the row leaves RUNNING. While it is set, a launch\nmay still be in flight: ``cw.launch_marker.launch_owner_state`` reads it as\nowner-gone only on positive evidence that this exact process no longer\nexists (the start time pins the pid against reuse).\n\n``start_since_boot_ns`` and ``boot_id`` (#3319) are a clock-independent\nidentity, set together or not at all: a wall-clock step moves\n``start_time_ns`` but not the since-boot start. A marker without them (an\nolder cw, or a host without ``/proc``) keeps the wall-clock comparison. Both\nare optional with no ``DEV_QUEUE_SCHEMA_VERSION`` bump, and an older cw\nignores them (the model is not ``extra=forbid``).",
      "properties": {
       "pid": {
        "title": "Pid",
@@ -410,6 +410,30 @@
       "start_time_ns": {
        "title": "Start Time Ns",
        "type": "integer"
+      },
+      "start_since_boot_ns": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Start Since Boot Ns"
+      },
+      "boot_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Boot Id"
       }
      },
      "required": [
@@ -2547,7 +2571,7 @@
      "type": "object"
     },
     "LaunchMarker": {
-     "description": "The dispatcher process that claimed a RUNNING row (GitHub #2615).\n\nWritten at the single RUNNING entry (``cw.dispatch.claim.screening``) from\nthe claiming process's own pid and process start time, and cleared once the\nspawn binds a session or the row leaves RUNNING. While it is set, a launch\nmay still be in flight: ``cw.launch_marker.launch_owner_state`` reads it as\nowner-gone only on positive evidence that this exact process no longer\nexists (the start time pins the pid against reuse).",
+     "description": "The dispatcher process that claimed a RUNNING row (GitHub #2615).\n\nWritten at the single RUNNING entry (``cw.dispatch.claim.screening``) from\nthe claiming process's own pid and process start time, and cleared once the\nspawn binds a session or the row leaves RUNNING. While it is set, a launch\nmay still be in flight: ``cw.launch_marker.launch_owner_state`` reads it as\nowner-gone only on positive evidence that this exact process no longer\nexists (the start time pins the pid against reuse).\n\n``start_since_boot_ns`` and ``boot_id`` (#3319) are a clock-independent\nidentity, set together or not at all: a wall-clock step moves\n``start_time_ns`` but not the since-boot start. A marker without them (an\nolder cw, or a host without ``/proc``) keeps the wall-clock comparison. Both\nare optional with no ``DEV_QUEUE_SCHEMA_VERSION`` bump, and an older cw\nignores them (the model is not ``extra=forbid``).",
      "properties": {
       "pid": {
        "title": "Pid",
@@ -2556,6 +2580,30 @@
       "start_time_ns": {
        "title": "Start Time Ns",
        "type": "integer"
+      },
+      "start_since_boot_ns": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Start Since Boot Ns"
+      },
+      "boot_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Boot Id"
       }
      },
      "required": [
@@ -4714,7 +4762,7 @@
      "type": "object"
     },
     "LaunchMarker": {
-     "description": "The dispatcher process that claimed a RUNNING row (GitHub #2615).\n\nWritten at the single RUNNING entry (``cw.dispatch.claim.screening``) from\nthe claiming process's own pid and process start time, and cleared once the\nspawn binds a session or the row leaves RUNNING. While it is set, a launch\nmay still be in flight: ``cw.launch_marker.launch_owner_state`` reads it as\nowner-gone only on positive evidence that this exact process no longer\nexists (the start time pins the pid against reuse).",
+     "description": "The dispatcher process that claimed a RUNNING row (GitHub #2615).\n\nWritten at the single RUNNING entry (``cw.dispatch.claim.screening``) from\nthe claiming process's own pid and process start time, and cleared once the\nspawn binds a session or the row leaves RUNNING. While it is set, a launch\nmay still be in flight: ``cw.launch_marker.launch_owner_state`` reads it as\nowner-gone only on positive evidence that this exact process no longer\nexists (the start time pins the pid against reuse).\n\n``start_since_boot_ns`` and ``boot_id`` (#3319) are a clock-independent\nidentity, set together or not at all: a wall-clock step moves\n``start_time_ns`` but not the since-boot start. A marker without them (an\nolder cw, or a host without ``/proc``) keeps the wall-clock comparison. Both\nare optional with no ``DEV_QUEUE_SCHEMA_VERSION`` bump, and an older cw\nignores them (the model is not ``extra=forbid``).",
      "properties": {
       "pid": {
        "title": "Pid",
@@ -4723,6 +4771,30 @@
       "start_time_ns": {
        "title": "Start Time Ns",
        "type": "integer"
+      },
+      "start_since_boot_ns": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Start Since Boot Ns"
+      },
+      "boot_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Boot Id"
       }
      },
      "required": [
@@ -7148,7 +7220,7 @@
      "type": "object"
     },
     "LaunchMarker": {
-     "description": "The dispatcher process that claimed a RUNNING row (GitHub #2615).\n\nWritten at the single RUNNING entry (``cw.dispatch.claim.screening``) from\nthe claiming process's own pid and process start time, and cleared once the\nspawn binds a session or the row leaves RUNNING. While it is set, a launch\nmay still be in flight: ``cw.launch_marker.launch_owner_state`` reads it as\nowner-gone only on positive evidence that this exact process no longer\nexists (the start time pins the pid against reuse).",
+     "description": "The dispatcher process that claimed a RUNNING row (GitHub #2615).\n\nWritten at the single RUNNING entry (``cw.dispatch.claim.screening``) from\nthe claiming process's own pid and process start time, and cleared once the\nspawn binds a session or the row leaves RUNNING. While it is set, a launch\nmay still be in flight: ``cw.launch_marker.launch_owner_state`` reads it as\nowner-gone only on positive evidence that this exact process no longer\nexists (the start time pins the pid against reuse).\n\n``start_since_boot_ns`` and ``boot_id`` (#3319) are a clock-independent\nidentity, set together or not at all: a wall-clock step moves\n``start_time_ns`` but not the since-boot start. A marker without them (an\nolder cw, or a host without ``/proc``) keeps the wall-clock comparison. Both\nare optional with no ``DEV_QUEUE_SCHEMA_VERSION`` bump, and an older cw\nignores them (the model is not ``extra=forbid``).",
      "properties": {
       "pid": {
        "title": "Pid",
@@ -7157,6 +7229,30 @@
       "start_time_ns": {
        "title": "Start Time Ns",
        "type": "integer"
+      },
+      "start_since_boot_ns": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Start Since Boot Ns"
+      },
+      "boot_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Boot Id"
       }
      },
      "required": [
@@ -9294,7 +9390,7 @@
      "type": "object"
     },
     "LaunchMarker": {
-     "description": "The dispatcher process that claimed a RUNNING row (GitHub #2615).\n\nWritten at the single RUNNING entry (``cw.dispatch.claim.screening``) from\nthe claiming process's own pid and process start time, and cleared once the\nspawn binds a session or the row leaves RUNNING. While it is set, a launch\nmay still be in flight: ``cw.launch_marker.launch_owner_state`` reads it as\nowner-gone only on positive evidence that this exact process no longer\nexists (the start time pins the pid against reuse).",
+     "description": "The dispatcher process that claimed a RUNNING row (GitHub #2615).\n\nWritten at the single RUNNING entry (``cw.dispatch.claim.screening``) from\nthe claiming process's own pid and process start time, and cleared once the\nspawn binds a session or the row leaves RUNNING. While it is set, a launch\nmay still be in flight: ``cw.launch_marker.launch_owner_state`` reads it as\nowner-gone only on positive evidence that this exact process no longer\nexists (the start time pins the pid against reuse).\n\n``start_since_boot_ns`` and ``boot_id`` (#3319) are a clock-independent\nidentity, set together or not at all: a wall-clock step moves\n``start_time_ns`` but not the since-boot start. A marker without them (an\nolder cw, or a host without ``/proc``) keeps the wall-clock comparison. Both\nare optional with no ``DEV_QUEUE_SCHEMA_VERSION`` bump, and an older cw\nignores them (the model is not ``extra=forbid``).",
      "properties": {
       "pid": {
        "title": "Pid",
@@ -9303,6 +9399,30 @@
       "start_time_ns": {
        "title": "Start Time Ns",
        "type": "integer"
+      },
+      "start_since_boot_ns": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Start Since Boot Ns"
+      },
+      "boot_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Boot Id"
       }
      },
      "required": [
