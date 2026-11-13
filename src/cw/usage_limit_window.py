@@ -235,9 +235,9 @@ def _release_rows(plan: ClearPlan, now: datetime) -> tuple[list[str], Exception 
             if released:
                 try:
                     save_dev_queue(store)
-                except Exception as exc:  # noqa: BLE001 — no rows persisted on save failure
+                except (CwError, OSError, TypeError, ValueError) as exc:
                     return [], exc
-    except Exception as exc:  # noqa: BLE001 — preserve the audit path for row failures
+    except (CwError, OSError, TypeError, ValueError) as exc:
         return released, exc
     return released, None
 
