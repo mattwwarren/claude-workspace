@@ -19,6 +19,7 @@ Anything the peek cannot decide falls back to the full-parse semantics that
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import shutil
@@ -68,8 +69,12 @@ def backup_legacy_state(path: Path) -> None:
     """Copy the pre-migration ``sessions.json`` to its backup, at most once.
 
     No-op when the backup already exists, the file is absent, or the on-disk
-    schema is current or newer. A copy ``OSError`` propagates so the caller
-    never overwrites the legacy bytes without a backup.
+    schema is current or newer. The copy goes to a temp sibling first and is
+    moved into place with ``os.replace``, so the final name only ever holds a
+    complete copy. Any failure removes the temp and propagates the ``OSError``,
+    so the caller never overwrites the legacy bytes without a backup. A stale
+    temp from a killed run is overwritten by the next ``copy2``; callers hold
+    ``sessions_lock``, which keeps the fixed temp name single-writer.
     """
     backup = path.parent / f".{path.name}.0.x-backup"
     if backup.exists():
@@ -77,4 +82,11 @@ def backup_legacy_state(path: Path) -> None:
     version = on_disk_schema_version(path)
     if version is None or version >= CW_STATE_SCHEMA_VERSION:
         return
-    shutil.copy2(path, backup)
+    tmp = backup.with_name(backup.name + ".tmp")
+    try:
+        shutil.copy2(path, tmp)
+        tmp.replace(backup)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
+        raise
