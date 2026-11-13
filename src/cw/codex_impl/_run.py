@@ -109,8 +109,10 @@ from cw.codex_stage_completion import (
     STAGE_FAULTS,
     complete_session_through_door,
     run_guarded_stage,
+    with_usage_friction,
 )
 from cw.codex_stage_facts import resolve_plan_source
+from cw.codex_usage import NO_USAGE, UsageAccumulator
 from cw.config import load_effective_config
 from cw.contract_manifest import RenderError
 from cw.dev_queue import _PRE_DISPATCH_TRACKER_MCP_REASON
@@ -187,6 +189,7 @@ class _Run:
     model: str | None
     reasoning_effort: str | None
     sandbox_mode: SandboxMode
+    usage: UsageAccumulator = NO_USAGE
 
     @property
     def repair(self) -> bool:
@@ -792,9 +795,9 @@ def _execute(run: _Run) -> None:
         result = _impl(run, scratch)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
-    payload = result.model_dump(mode="json")
+    payload = with_usage_friction(result.model_dump(mode="json"), run.usage)
     try:
-        complete_session_through_door(run.sid, payload)
+        complete_session_through_door(run.sid, payload, usage=run.usage)
     except STAGE_FAULTS:
         # A pushed IMPL commit must not be stranded by a transient completion
         # failure. The door is idempotent: a retry either writes the result or
@@ -806,7 +809,7 @@ def _execute(run: _Run) -> None:
             run.task.ticket_id,
             exc_info=True,
         )
-        complete_session_through_door(run.sid, payload)
+        complete_session_through_door(run.sid, payload, usage=run.usage)
     record_event_best_effort(
         OrchestratorEventType.SESSION_COMPLETED,
         {
@@ -829,6 +832,7 @@ def run_impl_stage_and_complete(
     model: str | None,
     reasoning_effort: str | None,
     sandbox_mode: SandboxMode,
+    usage: UsageAccumulator = NO_USAGE,
 ) -> None:
     """Run the codex IMPL stage for *task* and complete session *sid*.
 
@@ -846,6 +850,7 @@ def run_impl_stage_and_complete(
         model=model,
         reasoning_effort=reasoning_effort,
         sandbox_mode=sandbox_mode,
+        usage=usage,
     )
     run_guarded_stage(
         client_name=client.name,
@@ -854,6 +859,7 @@ def run_impl_stage_and_complete(
         sid=sid,
         stage_reached=STAGE2_IMPL,
         body=lambda: _execute(run),
+        usage=usage,
     )
 
 

@@ -38,6 +38,7 @@ from cw.models import (
 from cw.native_daemon import get_native_daemon_client
 from cw.session_retention import find_session_by_id
 from cw.worktree import (
+    ReuseRefreshOptions,
     ReuseRefreshReport,
     _git_dir,
     _ref_exists,
@@ -158,15 +159,16 @@ def dispatch_fix_agent(
 
     Order is load-bearing (R22): the live-session pre-check is a pure read that
     runs before anything touches the worktree. ``create_worktree`` is then
-    called with ``refresh_on_reuse=True`` (#2213): a network ``git fetch`` of
-    ``origin/<branch>`` (can be slow; a failed fetch skips the fast-forward and
-    uses the worktree as-is), then a fast-forward of the reused worktree to it
-    -- only when the worktree is unoccupied (no unsaved work, no live session
-    in cw state or worker in the daemon roster homed on it, occupancy
-    re-checked immediately before the merge), clean, on the expected branch
-    and strictly behind; otherwise it is left exactly as it is. Never a
-    reset. A fast-forward that moves HEAD records one ``worktree.fast_forwarded``
-    audit event carrying *ticket_id* (see ``docs/events.md``).
+    called with ``refresh=ReuseRefreshOptions(...)`` (#2213, #2238): a network
+    ``git fetch`` of ``origin/<branch>`` (can be slow; a failed fetch skips
+    the fast-forward and uses the worktree as-is), then a fast-forward of the
+    reused worktree to it -- only when the worktree is unoccupied (no unsaved
+    work, no live session in cw state or worker in the daemon roster homed on
+    it, occupancy re-checked immediately before the merge), clean, on the
+    expected branch and strictly behind; otherwise it is left exactly as it
+    is. Never a reset. A fast-forward that moves HEAD records one
+    ``worktree.fast_forwarded`` audit event carrying *ticket_id* (see
+    ``docs/events.md``).
 
     **"The refresh did not move the worktree" means two different things, and
     only one of them stops this dispatch.**
@@ -275,16 +277,15 @@ def dispatch_fix_agent(
 
     daemon = native_daemon or get_native_daemon_client()
     _refuse_if_worktree_references_live_session(client, branch)
-    refresh = ReuseRefreshReport()
+    report = ReuseRefreshReport()
     try:
         worktree = create_worktree(
             client,
             branch,
             allow_dirty_reuse=True,
-            refresh_on_reuse=True,
-            refresh_report=refresh,
-            ticket_id=ticket_id,
-            native_daemon=daemon,
+            refresh=ReuseRefreshOptions(
+                report=report, ticket_id=ticket_id, native_daemon=daemon
+            ),
         )
     except WorktreeOccupiedError as exc:
         # A live session or worker may be homed on this worktree. The steps
@@ -305,7 +306,7 @@ def dispatch_fix_agent(
         )
         raise HookContextConflictError(msg) from exc
     effective_prompt = (
-        "".join(f"_Friction note: {note}_\n\n" for note in refresh.notes)
+        "".join(f"_Friction note: {note}_\n\n" for note in report.notes)
         + effective_prompt
     )
 

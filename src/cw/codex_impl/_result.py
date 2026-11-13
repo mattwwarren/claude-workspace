@@ -26,7 +26,10 @@ from cw.auto_dev_result.parse import (
     BLOCKER_REASON_VALIDATION_FAILED,
     extract_block,
 )
-from cw.auto_dev_result.schema._vocab import EMPTY_DIFF_BLOCKER_REASON
+from cw.auto_dev_result.schema._vocab import (
+    EMPTY_DIFF_BLOCKER_REASON,
+    EMPTY_DIFF_STATUS,
+)
 from cw.codex_review import (
     _CODEX_IMPL_BLOCKED_NEXT_ACTIONS,
     STAGE2_IMPL,
@@ -253,7 +256,7 @@ def impl_empty_diff_result(
         stage=STAGE2_IMPL, reason=EMPTY_DIFF_BLOCKER_REASON, details=details
     )
     swapped = base.model_copy(
-        update={"status": "empty_diff_blocked", "blocker": blocker, "next_actions": []}
+        update={"status": EMPTY_DIFF_STATUS, "blocker": blocker, "next_actions": []}
     )
     return AutoDevResult.model_validate(swapped.model_dump(mode="json"))
 

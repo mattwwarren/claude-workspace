@@ -105,11 +105,17 @@ class RepairStopError(CwError):
 
 
 class ArmOutcome(NamedTuple):
-    """The arm script's exit code (None: could not run / timed out) and output."""
+    """The arm script's exit code (None: could not run / timed out) and output.
+
+    ``gh_stderr`` is the script's JSON ``gh_stderr`` field verbatim (the
+    refusing ``gh pr merge``'s stderr), ``""`` when absent; the codex
+    FINALIZE executor surfaces it in ``automerge_not_armed`` details (#3062).
+    """
 
     returncode: int | None
     status: str
     stderr_tail: str
+    gh_stderr: str = ""
 
 
 def _tail(text: str) -> str:
@@ -888,8 +894,10 @@ def _run_arm(script: Path, pr_number: int, scratch: Path, new_sha: str) -> ArmOu
     except ValueError:
         parsed = None
     status = parsed.get("status") if isinstance(parsed, dict) else None
+    gh_stderr = parsed.get("gh_stderr") if isinstance(parsed, dict) else None
     return ArmOutcome(
         returncode=armed.returncode,
         status=status if isinstance(status, str) else "",
         stderr_tail=_tail(armed.stderr),
+        gh_stderr=gh_stderr if isinstance(gh_stderr, str) else "",
     )

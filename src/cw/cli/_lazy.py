@@ -36,6 +36,8 @@ _HELP_COLUMN_ALLOWANCE = 6
 
 GUARD_HOOK_INSTALL_NAME: Final = "guard-hook-install"
 GUARD_HOOK_INSTALL_COMMAND: Final = f"cw {GUARD_HOOK_INSTALL_NAME}"
+GUARD_GIT_STASH_NAME: Final = "guard-git-stash"
+GUARD_GIT_STASH_COMMAND: Final = f"cw {GUARD_GIT_STASH_NAME}"
 
 
 def truncate_short_help(text: str, limit: int) -> str:
@@ -151,6 +153,12 @@ LAZY_COMMANDS: Final[dict[str, LazyCommand]] = {
         "cw.cli.guard",
         "guard_cwd",
         "Block a Bash tool call when the worker cwd is the operator main checkout.",
+    ),
+    GUARD_GIT_STASH_NAME: LazyCommand(
+        "cw.cli.guard_git_stash",
+        "guard_git_stash",
+        "Refuse bare git stash, stash pop and other shared-stack stash use from a "
+        "headless worker's Bash call.",
     ),
     GUARD_HOOK_INSTALL_NAME: LazyCommand(
         "cw.cli.guard_hook_install",

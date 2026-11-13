@@ -55,7 +55,7 @@ def _backup_files(path: Path) -> list[Path]:
 
 def test_rotate_backup_noop_when_path_missing(tmp_path: Path) -> None:
     target = tmp_path / "dev_queue.json"
-    rotate_backup(target)
+    assert rotate_backup(target) is None
     assert not target.exists()
     assert _backup_files(target) == []
 
@@ -64,11 +64,13 @@ def test_rotate_backup_creates_backup_before_overwrite(tmp_path: Path) -> None:
     target = tmp_path / "dev_queue.json"
     target.write_text("A", encoding="utf-8")
 
-    rotate_backup(target)
+    snapshot = rotate_backup(target)
 
     backups = _backup_files(target)
     assert len(backups) == 1
     assert backups[0].read_text(encoding="utf-8") == "A"
+    assert snapshot == backups[0]
+    assert snapshot.name.startswith(f"dev_queue.json{_BACKUP_SUFFIX}")
 
 
 def test_rotate_backup_prunes_to_keep_n(tmp_path: Path) -> None:
@@ -112,7 +114,7 @@ def test_rotate_backup_swallows_oserror_on_copy_failure(
     monkeypatch.setattr("cw.atomic.shutil.copy2", failing_copy2)
 
     with caplog.at_level(logging.WARNING, logger="cw.atomic"):
-        rotate_backup(target)
+        assert rotate_backup(target) is None
 
     assert _backup_files(target) == []
     assert any(record.levelno == logging.WARNING for record in caplog.records), (
@@ -151,8 +153,11 @@ def test_rotate_backup_swallows_oserror_on_prune_listing_failure(
     broken.symlink_to(tmp_path / "does-not-exist")
 
     with caplog.at_level(logging.WARNING, logger="cw.atomic"):
-        rotate_backup(target)  # glob now includes the broken symlink
+        snapshot = rotate_backup(target)  # glob now includes the broken symlink
 
+    # The snapshot itself succeeded before the prune failed (#3498).
+    assert snapshot is not None
+    assert snapshot.read_text(encoding="utf-8") == "A"
     assert any(record.levelno == logging.WARNING for record in caplog.records), (
         "expected a warning to be logged on prune-listing failure"
     )

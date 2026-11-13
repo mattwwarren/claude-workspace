@@ -1573,7 +1573,9 @@ class TestGatePass:
         name = _gate_names()[0]
         _gate_pass(capsys, "record", name)
 
-        def _git_fails(_args: list[str], *, default: str = "") -> str:
+        def _git_fails(
+            _args: list[str], *, default: str = "", **_kwargs: object
+        ) -> str:
             return default
 
         monkeypatch.setattr(_mod, "_run_git", _git_fails)
@@ -1594,7 +1596,9 @@ class TestGatePass:
         _gate_pass(capsys, "record", name)
         head = git_in(gate_repo, "rev-parse", "HEAD")
 
-        def _status_fails(args: list[str], *, default: str = "") -> str:
+        def _status_fails(
+            args: list[str], *, default: str = "", **_kwargs: object
+        ) -> str:
             return head if args[0] == "rev-parse" else default
 
         monkeypatch.setattr(_mod, "_run_git", _status_fails)

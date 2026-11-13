@@ -12,11 +12,17 @@ this kind of recovery: ``_resolve_resume_cwd`` -> ``_resume_spawn_args`` ->
 ``spawn_bg(extra_args=["--resume", ...])`` -> ``_verify_roster_registration``
 -> ``mutate_state`` -> ``record_event``.
 
-**Scope is deliberately restricted to sessions that are already paused** --
-the owning ``TicketTask`` is ``BLOCKED_ON_USER``, or the ``Session`` is
-``SessionStatus.IDLE``. Delivering to a genuinely live session is deferred to
-**#2255**, and :func:`ResumeTriggerAdapter.trigger` returns before touching
-the daemon at all in that case. The restriction is not polish deferred for
+**Scope is deliberately restricted to sessions that are already paused AND
+whose park an operator message can clear** (#2287). When a dev-queue row owns
+the session and is ``BLOCKED_ON_USER``, its ``disposition`` decides: a park
+waiting on an operator answer resumes; a mechanical park (dirty worktree,
+merge gate, attempt cap, ...) is refused with a reason naming the
+disposition, because respawning it only wastes a run -- the message stays
+queued. ``SessionStatus.IDLE`` does not override a row's park; it gates
+only a session no ``BLOCKED_ON_USER`` row owns. Delivering to a genuinely
+live session is deferred to **#2255**, and
+:func:`ResumeTriggerAdapter.trigger` returns before touching the daemon at
+all in either refusal case. The restriction is not polish deferred for
 later: ``SessionStatus`` carries no signal finer than ACTIVE/IDLE, so nothing
 today distinguishes "mid-tool-call" from "paused, safe to interrupt," and
 this module does not invent one. See ``docs/adr/0017-session-inbox-and-
@@ -36,6 +42,7 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple, Protocol, runtime_checkable
 
+from cw.auto_dev_result import PAUSED_FOR_USER_INPUT_STATUSES
 from cw.config import get_client, load_state, mutate_state
 from cw.dev_queue import list_tickets
 from cw.exceptions import CwError
@@ -59,7 +66,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
-    from cw.models import Session, SessionInboxMessage
+    from cw.models import Session, SessionInboxMessage, TicketTask
     from cw.native_daemon import NativeDaemonClient
 
 logger = logging.getLogger(__name__)
@@ -77,6 +84,29 @@ _ALREADY_RESUMED_REASON = (
     " queued for its next pause"
 )
 _VANISHED_REASON = "session no longer exists; message stays queued"
+_PARK_NOT_RESOLVABLE_REASON = (
+    "session's task is parked for {park}, which an operator message cannot"
+    " clear; the session was not respawned and the message stays queued"
+    " (inspect with `cw dev-queue show {ticket_id} -c {client}`)"
+)
+
+# Dispositions an operator message can resolve (#2287): the four parks that
+# wait on an operator answer, plus the abandoned-exit park -- the worker posted
+# a park comment for the operator and exited without a sentinel, which
+# docs/adr/0017-session-inbox-and-resume-trigger.md names as the canonical
+# "awaiting an operator" signal. The literal mirrors
+# cw.reconcile._shared._constants._STOPPED_WITHOUT_SENTINEL_REASON (private to
+# reconcile, so not imported here); a drift test pins the two together.
+_MESSAGE_RESOLVABLE_DISPOSITIONS: frozenset[str] = PAUSED_FOR_USER_INPUT_STATUSES | {
+    "stopped_without_sentinel"
+}
+# The "agent asked a question" arm: a ``blocked`` sentinel whose blocker reason
+# is ``plan_ambiguous`` (KNOWN_BLOCKER_REASONS in auto_dev_result/schema/_vocab.py;
+# the open question rides in blocker.details, see opencode_runner.py). Every
+# other ``blocked`` reason (agent_block, impl_failed, tool_denied, ...) is
+# fixed by a fresh session or an operator verb, not by a message.
+_AGENT_QUESTION_DISPOSITION = "blocked"
+_AGENT_QUESTION_BLOCKER_REASONS: frozenset[str] = frozenset({"plan_ambiguous"})
 
 
 class ResumeTriggerResult(NamedTuple):
@@ -108,22 +138,75 @@ class ResumeTriggerAdapter(Protocol):
         ...
 
 
-def _is_eligible(session: Session) -> bool:
-    """Whether *session* is paused enough to be safely respawned.
+def _owning_task(session: Session) -> TicketTask | None:
+    """Return the dev-queue row that owns *session*, or ``None``.
 
-    Two independent OR'd signals, not one derived from the other:
-    ``_route_stopped_without_sentinel``'s docstring states that
-    ``session.status`` is never touched on a BLOCKED_ON_USER transition, so a
-    parked row's owning Session can still read ACTIVE. A session with no
-    dev-queue row at all (an ad hoc USER-origin session) gates purely on
-    ``SessionStatus.IDLE``.
+    A row links to its session through ``session_id``, or through
+    ``codex_orphan_session_id`` for the codex boot-orphan park, which clears
+    ``session_id``. First match wins, as before.
     """
-    if session.status is SessionStatus.IDLE:
-        return True
-    task = next(
-        (t for t in list_tickets(session.client) if t.session_id == session.id), None
+    return next(
+        (
+            t
+            for t in list_tickets(session.client)
+            if session.id in (t.session_id, t.codex_orphan_session_id)
+        ),
+        None,
     )
-    return task is not None and task.status is QueueItemStatus.BLOCKED_ON_USER
+
+
+def _park_is_message_resolvable(task: TicketTask) -> bool:
+    """Whether an operator message can clear *task*'s ``BLOCKED_ON_USER`` park.
+
+    An allowlist, so an unknown or missing disposition fails closed.
+    """
+    if task.disposition in _MESSAGE_RESOLVABLE_DISPOSITIONS:
+        return True
+    return (
+        task.disposition == _AGENT_QUESTION_DISPOSITION
+        and task.blocked_reason in _AGENT_QUESTION_BLOCKER_REASONS
+    )
+
+
+def _describe_park(task: TicketTask) -> str:
+    """Name *task*'s park for a refusal reason."""
+    if task.disposition is None:
+        return "no recorded disposition (disposition unknown)"
+    park = f"disposition '{task.disposition}'"
+    if task.disposition != _AGENT_QUESTION_DISPOSITION:
+        return park
+    if task.blocked_reason is None:
+        return f"{park} (no blocker reason recorded)"
+    return f"{park} (blocker reason '{task.blocked_reason}')"
+
+
+def _gate_refusal(session: Session) -> str | None:
+    """Return why *session* must not be respawned, or ``None`` when eligible.
+
+    The owning row is the only authoritative park-reason signal:
+    ``Session.status`` carries only ACTIVE/IDLE and says nothing about why a
+    session stopped, and ``_route_stopped_without_sentinel``'s docstring states
+    it is never touched on a BLOCKED_ON_USER transition. So the row is read
+    first, and an IDLE session whose row is parked for a mechanical reason is
+    refused like an ACTIVE one (#2287).
+
+    - Owning row ``BLOCKED_ON_USER``: eligible only when
+      :func:`_park_is_message_resolvable`; otherwise the refusal names the
+      disposition.
+    - No row, or a row in another status: IDLE is eligible (an ad hoc
+      USER-origin session has no row at all); anything else is live and
+      deferred to #2255.
+    """
+    task = _owning_task(session)
+    if task is not None and task.status is QueueItemStatus.BLOCKED_ON_USER:
+        if _park_is_message_resolvable(task):
+            return None
+        return _PARK_NOT_RESOLVABLE_REASON.format(
+            park=_describe_park(task), ticket_id=task.ticket_id, client=task.client
+        )
+    if session.status is SessionStatus.IDLE:
+        return None
+    return DEFERRED_LIVE_DELIVERY_REASON
 
 
 def _build_resume_prompt(messages: list[SessionInboxMessage]) -> str:
@@ -215,10 +298,9 @@ class NativeDaemonResumeTriggerAdapter:
         self, session: Session, message: SessionInboxMessage
     ) -> ResumeTriggerResult:
         """Respawn *session* with ``--resume`` so it wakes on *message*."""
-        if not _is_eligible(session):
-            return ResumeTriggerResult(
-                delivered=False, reason=DEFERRED_LIVE_DELIVERY_REASON
-            )
+        refusal = _gate_refusal(session)
+        if refusal is not None:
+            return ResumeTriggerResult(delivered=False, reason=refusal)
         if not session.claude_session_id:
             return ResumeTriggerResult(delivered=False, reason=_NO_TRANSCRIPT_REASON)
         try:
@@ -244,7 +326,8 @@ class NativeDaemonResumeTriggerAdapter:
         both the task-status half and daemon liveness -- before spawning
         anything, so a second concurrent call for the same session, whether
         racing this one or arriving after it already committed, either finds
-        the task no longer ``BLOCKED_ON_USER`` and declines, or finds the
+        the task no longer ``BLOCKED_ON_USER`` (or parked on a disposition a
+        message cannot clear, #2287) and declines, or finds the
         session already live and declines, rather than double-spawning
         (#2212 review round 2, finding 1/2: a liveness-only recheck let a
         task that moved out of BLOCKED_ON_USER between the outer gate and
@@ -296,18 +379,18 @@ class NativeDaemonResumeTriggerAdapter:
             return ResumeTriggerResult(delivered=False, reason=_VANISHED_REASON)
         if not fresh.claude_session_id:
             return ResumeTriggerResult(delivered=False, reason=_NO_TRANSCRIPT_REASON)
-        if not _is_eligible(fresh):
+        refusal = _gate_refusal(fresh)
+        if refusal is not None:
             # The outer gate in trigger() checked eligibility against
             # whatever Session the caller happened to pass in; a second
             # racing call that reaches the lock later must recheck the
-            # task-status half too, not just daemon liveness below --
-            # otherwise a task that moved out of BLOCKED_ON_USER between
-            # the outer check and this lock still gets respawned (#2212
-            # review round 2, finding 1/2). Mechanical reuse of the same
-            # gate, just against freshly reloaded state.
-            return ResumeTriggerResult(
-                delivered=False, reason=DEFERRED_LIVE_DELIVERY_REASON
-            )
+            # task half too, not just daemon liveness below -- otherwise a
+            # task that moved out of BLOCKED_ON_USER, or onto a park a
+            # message cannot clear, between the outer check and this lock
+            # still gets respawned (#2212 review round 2, finding 1/2;
+            # #2287). Mechanical reuse of the same gate, just against
+            # freshly reloaded state.
+            return ResumeTriggerResult(delivered=False, reason=refusal)
         if (
             fresh.surface_ref
             and fresh.surface_ref in daemon.list_live_session_short_ids()

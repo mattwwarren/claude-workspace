@@ -113,7 +113,12 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
-from cw.worktree import TickFetchGate, active_tick_fetch, run_network_git
+from cw.worktree import (
+    ReuseRefreshOptions,
+    TickFetchGate,
+    active_tick_fetch,
+    run_network_git,
+)
 from tests import _git_sandbox
 from tests._clients_yaml import (
     ClientSpec,
@@ -2728,9 +2733,9 @@ class TestDispatchTickSpawnErrors:
         assert seen == [
             {
                 "allow_dirty_reuse": True,
-                "refresh_on_reuse": True,
-                "ticket_id": "GEN-2213",
-                "native_daemon": daemon,
+                "refresh": ReuseRefreshOptions(
+                    ticket_id="GEN-2213", native_daemon=daemon
+                ),
             }
         ]
 
@@ -3451,11 +3456,12 @@ def _seed_occupied_ticket_worktree(
 class TestClaimRefusesOccupiedWorktree:
     """A claim whose reused per-ticket worktree is occupied must NOT spawn.
 
-    ``create_worktree(refresh_on_reuse=True)`` raises ``WorktreeOccupiedError``
-    for a live cw session, a live daemon-roster worker, or an indeterminate read
-    of either. Before round 5 the claim path passed no report and so discarded
-    the refusal, then spawned a SECOND worker into the occupied tree: the exact
-    hazard the ticket exists to prevent. The refusal is now a type the claim
+    ``create_worktree(refresh=ReuseRefreshOptions(...))`` raises
+    ``WorktreeOccupiedError`` for a live cw session, a live daemon-roster
+    worker, or an indeterminate read of either. Before round 5 the claim path
+    passed no report and so discarded the refusal, then spawned a SECOND
+    worker into the occupied tree: the exact hazard the ticket exists to
+    prevent. The refusal is now a type the claim
     handles: the row goes back to PENDING for a later tick, nothing is spawned,
     nothing is removed, and the transient skip is not charged as an attempt or a
     spawn error (which would trip the lane circuit breaker over a per-ticket
@@ -22393,6 +22399,42 @@ class TestClaimNextPendingTrackerMcpGate:
         dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
 
         claimed = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-rev")
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.disposition is None
+
+    def test_tracker_mcp_gate_parks_a_finalize_stage_task_with_a_hit(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RFC 0018 C3: the claim-time re-check covers a FINALIZE row with a hit."""
+        from cw.dev_queue import TRACKER_MCP_GATE_DISPOSITION
+
+        write_clients_yaml(self._gated_client(sample_client_config))
+        self._stub_resolver(monkeypatch, "GEN-fin")
+        self._seed("GEN-fin", stage=Stage.FINALIZE)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._config(), native_daemon=daemon)
+
+        parked = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-fin")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == TRACKER_MCP_GATE_DISPOSITION
+        assert daemon.spawn_calls == []
+
+    def test_tracker_mcp_gate_never_holds_a_finalize_row_without_a_hit(
+        self,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Hits exist only for codex FINALIZE rows; any other FINALIZE row claims."""
+        write_clients_yaml(self._gated_client(sample_client_config))
+        self._stub_resolver(monkeypatch)
+        self._seed("GEN-fin2", stage=Stage.FINALIZE)
+
+        dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
+
+        claimed = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-fin2")
         assert claimed.status == QueueItemStatus.RUNNING
         assert claimed.disposition is None
 

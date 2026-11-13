@@ -25,7 +25,11 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Final
 
-from cw.codex_review import _exec_policy_argv, _reasoning_effort_argv
+from cw.codex_review import (
+    _AUDIT_ARGV_FLAGS,
+    _exec_policy_argv,
+    _reasoning_effort_argv,
+)
 from cw.models.enums import SandboxMode
 from cw.tracker import TRACKER_LINEAR
 from cw.tracker_io import TrackerIoConfigError, TrackerIoReason
@@ -46,8 +50,6 @@ PLAN_READ_ONLY_ARGV: Final[tuple[str, ...]] = tuple(
 PLAN_TRACKER_READ_TOOLS: Mapping[str, tuple[str, str]] = {
     TRACKER_LINEAR: ("get_issue", "list_comments"),
 }
-
-_AUDIT_FLAGS: Final[tuple[str, str]] = ("--json", "--ephemeral")
 
 
 class PlanArgvPolicyError(ValueError):
@@ -100,7 +102,7 @@ def build_plan_argv(
         "codex",
         "exec",
         *PLAN_READ_ONLY_ARGV,
-        *_AUDIT_FLAGS,
+        *_AUDIT_ARGV_FLAGS,
         *_reasoning_effort_argv(reasoning_effort),
         *_mcp_argv(mcp_server, tracker, other_servers),
         "--output-schema",

@@ -33,6 +33,7 @@ from cw.codex_review._engine_round import (
     EnginePassOutcome,
     EngineRoundSpec,
     _role_failure,
+    engine_unresolvable_blocked,
     run_engine_pass,
 )
 from cw.codex_review._shard import ReviewInputTooLargeError, plan_prompt_shards
@@ -47,9 +48,15 @@ from cw.review_engine.constants import (
     ENGINE_ROLE_PREAMBLE,
     FRICTION,
     EngineRoundFailure,
+    engine_refusal_details,
 )
 from cw.review_engine.context import EngineContext
-from cw.review_engine.materialize import MaterializeError
+from cw.review_engine.materialize import (
+    MaterializedSkill,
+    MaterializeError,
+    materialize_skill,
+)
+from cw.review_engine.validate import SummaryFailure
 from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from cw.review_findings import ShardRecord
 from tests._codex_review_helpers import (
@@ -63,6 +70,7 @@ from tests._review_engine_helpers import (
     engine_finding,
     make_aggregation_output,
     make_engine_repo,
+    manifest_directory_engine,
 )
 from tests._shared.git_repos import commit_tracked_file, git_in
 from tests._shared.session_seeding import _make_ticket_task
@@ -574,6 +582,52 @@ class TestAggregatorFailures:
         assert len(_aggregator_stdins(runner)) == 1
         assert outcome.prepared is not None
 
+    @pytest.mark.parametrize(
+        ("failure_reason", "retry"),
+        [("codex_timeout", True), (None, False)],
+        ids=["structured-transient", "no-structured-reason"],
+    )
+    def test_retry_eligibility_reads_the_structured_reason_not_the_text(
+        self,
+        repo: EngineRepo,
+        monkeypatch: pytest.MonkeyPatch,
+        failure_reason: str | None,
+        retry: bool,
+    ) -> None:
+        """#3446: a detail ending in a transient reason no longer decides retry."""
+        failure = SummaryFailure(
+            EngineRoundFailure.ENGINE_AGGREGATION_FAILED,
+            "x: y: codex_timeout" if failure_reason is None else "x: y: z",
+            failure_reason=failure_reason,
+        )
+        monkeypatch.setattr(
+            "cw.codex_review._engine_round.run_codex_aggregator",
+            lambda **_kwargs: failure,
+        )
+
+        outcome = _pass(repo, _engine_runner())
+
+        assert _blocked(outcome, retry=retry) == failure.detail
+
+    def test_an_input_too_large_rejection_is_known_and_not_retryable(
+        self, repo: EngineRepo
+    ) -> None:
+        """#3441: the emitted string is unchanged and stays non-transient."""
+        stdout = (
+            Path(__file__).parent
+            / "fixtures"
+            / "codex_audit_events"
+            / "input_too_large_turn_failed.jsonl"
+        ).read_text(encoding="utf-8")
+        runner = _engine_runner(aggregation=CodexRunResult(1, stdout, ""))
+
+        outcome = _pass(repo, runner)
+
+        assert (
+            _blocked(outcome, retry=False)
+            == "engine_aggregation_failed: codex_input_too_large"
+        )
+
     def test_a_head_that_moved_during_the_round_is_a_head_mismatch(
         self, repo: EngineRepo
     ) -> None:
@@ -625,6 +679,25 @@ class TestAggregatorFailures:
         outcome = _pass(repo, runner)
 
         assert _blocked(outcome, retry=False).startswith("engine_no_summary:")
+
+    def test_an_unwritable_aggregation_scratch_is_engine_no_summary(
+        self, repo: EngineRepo, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3436: the scratch OSError reaches the pass as a typed block."""
+
+        def _unwritable(_session_id: str) -> Path:
+            msg = "read-only state dir"
+            raise OSError(msg)
+
+        monkeypatch.setattr(
+            "cw.codex_review._engine_aggregate._codex_scratch_dir", _unwritable
+        )
+        runner = _engine_runner()
+
+        outcome = _pass(repo, runner)
+
+        assert _blocked(outcome, retry=False).startswith("engine_no_summary:")
+        assert _aggregator_stdins(runner) == []
 
 
 class TestPreflight:
@@ -695,6 +768,24 @@ class TestPreflight:
             EngineRoundFailure.ENGINE_UNRESOLVABLE
         ].format(skill=_SKILL, cause="default_branch_unresolved")
         assert runner.calls == []
+
+    def test_the_unresolvable_block_is_the_shared_lane_start_builder(
+        self, repo: EngineRepo
+    ) -> None:
+        """#3438: round time and lane start build the same block."""
+        outcome = _pass(
+            repo, _engine_runner(), spec=_spec(repo, default_branch="nonexistent")
+        )
+
+        shared = engine_unresolvable_blocked(
+            ticket_id=repo.ticket,
+            worktree=repo.worktree,
+            skill=_SKILL,
+            cause="default_branch_unresolved",
+        )
+        assert shared.blocker is not None
+        details = _blocked(outcome, reason=shared.blocker.reason, retry=True)
+        assert details == shared.blocker.details
 
     def test_a_skill_that_is_not_on_the_default_branch_is_unresolvable(
         self, repo: EngineRepo
@@ -792,15 +883,7 @@ class TestManifestAtRoundTime:
     def test_a_manifest_directory_is_invalid_not_absent(
         self, make_git_repo: Callable[..., Path], tmp_path: Path
     ) -> None:
-        engine = tmp_path / "engine-files"
-        for source in _STUB.rglob("*"):
-            if source.is_file() and source.name != "cw-engine.json":
-                target = engine / source.relative_to(_STUB)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(source.read_bytes())
-        marker = engine / "cw-engine.json" / "marker"
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text("not a manifest", encoding="utf-8")
+        engine = manifest_directory_engine(tmp_path, _STUB)
         repo = make_engine_repo(
             make_git_repo, engine_files=engine, name="manifest-directory-repo"
         )
@@ -813,6 +896,41 @@ class TestManifestAtRoundTime:
             retry=False,
         )
         assert "cause=manifest_invalid" in details
+        assert details == engine_refusal_details(
+            "codex", "manifest_invalid", "unreadable: -"
+        )
+
+    def test_a_manifest_deleted_after_the_start_check_is_absent(
+        self, repo: EngineRepo, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3445: the round-time absent case shares the start-time text."""
+        real = materialize_skill
+
+        def _drop_manifest(
+            worktree: Path, *, round_id: str, expect_head: str, context: EngineContext
+        ) -> MaterializedSkill:
+            materialized = real(
+                worktree, round_id=round_id, expect_head=expect_head, context=context
+            )
+            (Path(materialized.skill_dir) / "cw-engine.json").unlink()
+            return materialized
+
+        monkeypatch.setattr(
+            "cw.codex_review._engine_round.materialize_skill", _drop_manifest
+        )
+        runner = _engine_runner()
+
+        outcome = _pass(repo, runner)
+
+        details = _blocked(
+            outcome,
+            reason=REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
+            retry=False,
+        )
+        assert details == engine_refusal_details(
+            "codex", "no_codex_manifest", f"{_SKILL} has no cw-engine.json"
+        )
+        assert runner.calls == []
 
 
 class TestFullDiffReview:

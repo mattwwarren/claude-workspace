@@ -94,25 +94,34 @@ def _archive(repo: Path, commit: str, skill: ResolvedSkill) -> bytes:
     return result.stdout
 
 
+def read_manifest_file(manifest_path: Path, skill_name: str) -> ManifestRead:
+    """Read the ``cw-engine.json`` at *manifest_path*: absent, invalid or loaded.
+
+    The one absent/invalid decision shared by the default-branch read and the
+    codex round's read of the materialized skill (#3445). A path that exists
+    but is not a readable file (a directory) is INVALID, never ABSENT.
+    """
+    if not manifest_path.exists():
+        return _absent(f"{skill_name} has no {ENGINE_MANIFEST_FILENAME}")
+    try:
+        loaded = load_engine_manifest(manifest_path)
+    except EngineManifestError as exc:
+        return ManifestRead(
+            status=ManifestStatus.INVALID,
+            cause=manifest_refusal_cause(exc),
+            detail=f"{exc.reason}: {exc.field_path or '-'}",
+            error=exc,
+        )
+    return ManifestRead(
+        status=ManifestStatus.LOADED, cause="", detail="", loaded=loaded
+    )
+
+
 def _load_from_archive(data: bytes, skill_name: str) -> ManifestRead:
     with tempfile.TemporaryDirectory(prefix="cw-engine-manifest-") as tmp:
         directory = Path(tmp)
         _extract_archive(data, directory)
-        manifest_path = directory / ENGINE_MANIFEST_FILENAME
-        if not manifest_path.is_file():
-            return _absent(f"{skill_name} has no {ENGINE_MANIFEST_FILENAME}")
-        try:
-            loaded = load_engine_manifest(manifest_path)
-        except EngineManifestError as exc:
-            return ManifestRead(
-                status=ManifestStatus.INVALID,
-                cause=manifest_refusal_cause(exc),
-                detail=f"{exc.reason}: {exc.field_path or '-'}",
-                error=exc,
-            )
-    return ManifestRead(
-        status=ManifestStatus.LOADED, cause="", detail="", loaded=loaded
-    )
+        return read_manifest_file(directory / ENGINE_MANIFEST_FILENAME, skill_name)
 
 
 def read_default_branch_manifest(

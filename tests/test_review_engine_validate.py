@@ -91,6 +91,17 @@ class TestLoadSummary:
 class TestSummaryFailure:
     HEAD = "c" * 40
 
+    def test_the_failure_reason_defaults_to_none(self) -> None:
+        """#3446: the 2-arg form is unchanged; the 3-arg form carries a reason."""
+        reason = EngineRoundFailure.ENGINE_AGGREGATION_FAILED
+        plain = SummaryFailure(reason, "d")
+        typed = SummaryFailure(reason, "d", failure_reason="codex_timeout")
+
+        assert plain.failure_reason is None
+        assert plain == SummaryFailure(reason, "d", failure_reason=None)
+        assert typed.failure_reason == "codex_timeout"
+        assert typed != plain
+
     def _loaded(self, tmp_path: Path, **overrides: object) -> object:
         return load_review_engine_summary(_summary(tmp_path, self.HEAD, **overrides))
 

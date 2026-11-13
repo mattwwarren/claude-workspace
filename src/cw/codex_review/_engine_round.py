@@ -28,6 +28,7 @@ from cw.auto_dev_result import (
     REVIEW_ENGINE_MODIFIED_BLOCKER_REASON,
     REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
 )
+from cw.auto_dev_result.schema._vocab import AGENT_BLOCK_BLOCKER_REASON
 from cw.codex_review._const import _TRANSIENT_FAILURE_REASONS
 from cw.codex_review._context import EngineRoster, _prepare_review_pass
 from cw.codex_review._diff import _capture_head_sha
@@ -37,14 +38,15 @@ from cw.codex_review._verdict import (
     synthesize_codex_review_result,
 )
 from cw.codex_review.core import run_prepared_roles
+from cw.codex_runner import relabeled
 from cw.exceptions import CwError
 from cw.models import CODEX_BACKEND
 from cw.models.enums import DEFAULT_REVIEWER_SANDBOX_MODE, SandboxMode
+from cw.models.usage import UsageStage
 from cw.review_convergence import resolve_loop_diff_base
 from cw.review_engine.constants import (
     CAUSE_DEFAULT_BRANCH_UNRESOLVED,
     CAUSE_MATERIALIZE_FAILED,
-    CAUSE_NO_CODEX_MANIFEST,
     ENGINE_MANIFEST_FILENAME,
     ENGINE_ROLE_PREAMBLE,
     FRICTION,
@@ -53,6 +55,7 @@ from cw.review_engine.constants import (
     EngineRoundFailure,
     engine_refusal_details,
 )
+from cw.review_engine.manifest_source import ManifestRead, read_manifest_file
 from cw.review_engine.materialize import (
     EnginePreconditionError,
     MaterializeError,
@@ -66,12 +69,6 @@ from cw.review_engine.validate import (
     engine_precheck,
     validate_engine_summary,
 )
-from cw.review_engine_manifest_io import (
-    EngineManifestError,
-    LoadedEngineManifest,
-    load_engine_manifest,
-    manifest_refusal_cause,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -82,6 +79,7 @@ if TYPE_CHECKING:
     from cw.codex_runner import CodexRunner
     from cw.models import TicketTask
     from cw.review_engine.context import EngineContext
+    from cw.review_engine_manifest_io import LoadedEngineManifest
     from cw.review_findings import Finding, ReviewVerdict
 
 _log = logging.getLogger(__name__)
@@ -139,6 +137,54 @@ class _Loaded(NamedTuple):
     manifest: LoadedEngineManifest
 
 
+def engine_unresolvable_blocked(
+    *, ticket_id: str, worktree: Path, skill: str, cause: str
+) -> AutoDevResult:
+    """The retryable ``agent_block`` for an engine skill cw cannot resolve.
+
+    The one builder behind lane start (``engine_round_spec``) and round time,
+    so the two cannot drift (#3438).
+    """
+    reason = EngineRoundFailure.ENGINE_UNRESOLVABLE
+    return make_codex_blocked(
+        ticket_id=ticket_id,
+        worktree=worktree,
+        reason=AGENT_BLOCK_BLOCKER_REASON,
+        details=FRICTION[reason].format(skill=skill, cause=cause),
+        retry_eligible=True,
+    )
+
+
+def manifest_refusal_blocked(
+    *, ticket_id: str, worktree: Path, read: ManifestRead
+) -> AutoDevResult:
+    """The non-retryable refusal for a manifest *read* that did not load.
+
+    The one builder behind lane start and round time, so an absent or invalid
+    ``cw-engine.json`` gives byte-identical details at both (#3445).
+    """
+    return make_codex_blocked(
+        ticket_id=ticket_id,
+        worktree=worktree,
+        reason=REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
+        details=engine_refusal_details(CODEX_BACKEND, read.cause, read.detail),
+        retry_eligible=False,
+    )
+
+
+def _blocked(
+    inputs: EnginePassInputs, cycle: int, result: AutoDevResult, failure: str
+) -> _Failure:
+    """Log the pass's one failure warning and wrap its blocked *result*."""
+    _log.warning(
+        "codex engine round failed: ticket=%s cycle=%d failure=%s",
+        inputs.task.ticket_id,
+        cycle,
+        failure,
+    )
+    return _Failure(result)
+
+
 def _agent_block(
     inputs: EnginePassInputs,
     cycle: int,
@@ -147,56 +193,46 @@ def _agent_block(
     *,
     failure_reason: str | None = None,
 ) -> _Failure:
-    _log.warning(
-        "codex engine round failed: ticket=%s cycle=%d failure=%s",
-        inputs.task.ticket_id,
-        cycle,
-        reason.value,
+    result = make_codex_blocked(
+        ticket_id=inputs.task.ticket_id,
+        worktree=inputs.worktree,
+        reason=AGENT_BLOCK_BLOCKER_REASON,
+        details=detail,
+        retry_eligible=(
+            reason
+            in {
+                EngineRoundFailure.ENGINE_SUMMARY_INVALID,
+                EngineRoundFailure.ENGINE_COVERAGE_INCOMPLETE,
+                EngineRoundFailure.ENGINE_HEAD_MISMATCH,
+                EngineRoundFailure.ENGINE_UNRESOLVABLE,
+            }
+            or failure_reason in _TRANSIENT_FAILURE_REASONS
+        ),
     )
-    return _Failure(
-        make_codex_blocked(
-            ticket_id=inputs.task.ticket_id,
-            worktree=inputs.worktree,
-            reason="agent_block",
-            details=detail,
-            retry_eligible=(
-                reason
-                in {
-                    EngineRoundFailure.ENGINE_SUMMARY_INVALID,
-                    EngineRoundFailure.ENGINE_COVERAGE_INCOMPLETE,
-                    EngineRoundFailure.ENGINE_HEAD_MISMATCH,
-                    EngineRoundFailure.ENGINE_UNRESOLVABLE,
-                }
-                or failure_reason in _TRANSIENT_FAILURE_REASONS
-            ),
-        )
-    )
+    return _blocked(inputs, cycle, result, reason.value)
 
 
 def _unresolvable(
     inputs: EnginePassInputs, cycle: int, skill: str, cause: str
 ) -> _Failure:
-    reason = EngineRoundFailure.ENGINE_UNRESOLVABLE
-    detail = FRICTION[reason].format(skill=skill, cause=cause)
-    return _agent_block(inputs, cycle, reason, detail)
+    result = engine_unresolvable_blocked(
+        ticket_id=inputs.task.ticket_id,
+        worktree=inputs.worktree,
+        skill=skill,
+        cause=cause,
+    )
+    return _blocked(inputs, cycle, result, EngineRoundFailure.ENGINE_UNRESOLVABLE.value)
 
 
 def _park(inputs: EnginePassInputs, cycle: int, reason: str, details: str) -> _Failure:
-    _log.warning(
-        "codex engine round failed: ticket=%s cycle=%d failure=%s",
-        inputs.task.ticket_id,
-        cycle,
-        reason,
+    result = make_codex_blocked(
+        ticket_id=inputs.task.ticket_id,
+        worktree=inputs.worktree,
+        reason=reason,
+        details=details,
+        retry_eligible=False,
     )
-    return _Failure(
-        make_codex_blocked(
-            ticket_id=inputs.task.ticket_id,
-            worktree=inputs.worktree,
-            reason=reason,
-            details=details,
-            retry_eligible=False,
-        )
-    )
+    return _blocked(inputs, cycle, result, reason)
 
 
 def _preflight(
@@ -237,26 +273,17 @@ def _materialize_roster(
         return _unresolvable(inputs, cycle, context.skill, exc.cause)
     except EnginePreconditionError:
         return _unresolvable(inputs, cycle, context.skill, CAUSE_MATERIALIZE_FAILED)
-    manifest_path = Path(materialized.skill_dir) / ENGINE_MANIFEST_FILENAME
-    if not manifest_path.exists():
-        details = engine_refusal_details(
-            CODEX_BACKEND,
-            CAUSE_NO_CODEX_MANIFEST,
-            f"{context.skill} has no {ENGINE_MANIFEST_FILENAME}",
+    read = read_manifest_file(
+        Path(materialized.skill_dir) / ENGINE_MANIFEST_FILENAME, context.skill
+    )
+    if read.loaded is None:
+        result = manifest_refusal_blocked(
+            ticket_id=inputs.task.ticket_id, worktree=inputs.worktree, read=read
         )
-        return _park(
-            inputs, cycle, REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON, details
+        return _blocked(
+            inputs, cycle, result, REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON
         )
-    try:
-        manifest = load_engine_manifest(manifest_path)
-    except EngineManifestError as exc:
-        cause = manifest_refusal_cause(exc)
-        detail = f"{exc.reason}: {exc.field_path or '-'}"
-        details = engine_refusal_details(CODEX_BACKEND, cause, detail)
-        return _park(
-            inputs, cycle, REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON, details
-        )
-    return _Loaded(head, round_id, materialized.summary_path, manifest)
+    return _Loaded(head, round_id, materialized.summary_path, read.loaded)
 
 
 def _engine_roster(loaded: LoadedEngineManifest) -> EngineRoster:
@@ -314,7 +341,7 @@ def _run_aggregation(
 ) -> ValidatedSummary | _Failure:
     """The aggregation turn, then the shared precheck and summary checks."""
     failure: SummaryFailure | None = run_codex_aggregator(
-        runner=inputs.runner,
+        runner=relabeled(inputs.runner, UsageStage.ENGINE_AGGREGATE),
         worktree=inputs.worktree,
         head_sha=loaded.head,
         aggregation_prompt=loaded.manifest.aggregation_prompt,
@@ -335,15 +362,12 @@ def _run_aggregation(
             loaded.summary_path, expect_head=loaded.head, skill=spec.context.skill
         )
     if isinstance(outcome, SummaryFailure):
-        failure_reason = None
-        if outcome.reason is EngineRoundFailure.ENGINE_AGGREGATION_FAILED:
-            failure_reason = outcome.detail.rsplit(": ", 1)[-1]
         return _agent_block(
             inputs,
             cycle,
             outcome.reason,
             outcome.detail,
-            failure_reason=failure_reason,
+            failure_reason=outcome.failure_reason,
         )
     return outcome
 

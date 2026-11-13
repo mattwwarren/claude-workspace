@@ -18,9 +18,12 @@ from pathlib import Path
 
 import pytest
 
+import cw.codex_finalize._gates as gates_module
+import cw.codex_finalize._merge_gate as merge_gate_module
 import cw.executor.codex
 import cw.executor.core
 import cw.native_daemon
+from cw.codex_finalize._result import FinalizeTurnDocument
 from cw.codex_runner import CodexRunResult
 from cw.gh import GhFailure
 from cw.sprint import GhClient, GhSurface
@@ -30,6 +33,7 @@ from tests._tool_fakes import (
     ARM_VIEW_OPEN,
     GH_UNAUTHENTICATED,
     AbsentToolCli,
+    FakeCwCli,
     FakeGh,
     FakeGhCli,
     FakeGhComment,
@@ -38,23 +42,29 @@ from tests._tool_fakes import (
     ReadyGh,
     RecordingShim,
     ScriptedCodexRunner,
+    ScriptStub,
     any_call,
     assert_gh_calls,
     fake_claude_cli,
     fake_opencode_cli,
     fake_pre_commit_cli,
     fake_uv_cli,
+    finalize_document,
+    finalize_turn_result,
     gh_calls,
     path_with_stub,
     prepend_to_path,
     restore_real_run,
     shim_env,
+    station_findings_doc,
     stdin_contains,
+    stub_cw_cli,
     stub_gh,
     stub_gh_arm,
     stub_gh_issue_create,
     stub_gh_issue_list,
     stub_gh_recording,
+    stub_prep_pr_finalize,
     write_bin_stub,
 )
 
@@ -93,6 +103,15 @@ _SHARED_NAMES = frozenset(
         "_ScriptedCodexRunner",
         "marked_parts",
         "tracker_io_turn_result",
+        "codex_usage_stdout",
+        "finalize_document",
+        "finalize_turn_result",
+        "stub_prep_pr_finalize",
+        "stub_cw_cli",
+        "_finalize_document",
+        "_finalize_turn_result",
+        "_stub_prep_pr_finalize",
+        "_stub_cw_cli",
     }
 )
 
@@ -584,6 +603,11 @@ class TestNoPrivateDuplicate:
             "prepend_to_path",
             "marked_parts",
             "tracker_io_turn_result",
+            "codex_usage_stdout",
+            "finalize_document",
+            "finalize_turn_result",
+            "stub_prep_pr_finalize",
+            "stub_cw_cli",
         } <= defined
 
     def test_test_classes_are_skipped(self, tmp_path: Path) -> None:
@@ -874,3 +898,152 @@ class TestScriptedCodexRunner:
         assert "CW_CODEX_FS_PROBE" in probe.stdout
         assert [call["probe"] for call in runner.calls] == [True, False]
         assert len(runner.review_calls) == 1
+
+
+class TestFinalizeFakes:
+    """The codex FINALIZE executor's shared fakes (#3062)."""
+
+    _FIELDS = ("pr_title", "pr_body", "adjudication_section", "override_section")
+
+    def test_finalize_document_is_the_strict_four_field_object(self) -> None:
+        doc = json.loads(finalize_document())
+
+        assert tuple(doc) == self._FIELDS
+        assert doc["pr_title"]
+        assert FinalizeTurnDocument.model_validate_json(finalize_document())
+
+    def test_finalize_document_overrides_replace_and_extend(self) -> None:
+        doc = json.loads(finalize_document(pr_title="t", extra="x"))
+
+        assert doc["pr_title"] == "t"
+        assert doc["extra"] == "x"
+
+    def test_finalize_turn_result_defaults_to_the_default_document(self) -> None:
+        result = finalize_turn_result()
+
+        assert result.returncode == 0
+        assert result.output_file_content == finalize_document()
+
+    def test_finalize_turn_result_carries_an_explicit_document_and_failure(
+        self,
+    ) -> None:
+        result = finalize_turn_result("{}", returncode=2, stderr="boom")
+
+        assert (result.returncode, result.stderr) == (2, "boom")
+        assert result.output_file_content == "{}"
+
+    def test_stub_prep_pr_finalize_exits_scripted_codes_and_logs_calls(
+        self, tmp_path: Path
+    ) -> None:
+        stub = stub_prep_pr_finalize(
+            tmp_path,
+            check_exit=1,
+            check_stderr="no",
+            arm_exit=3,
+            arm_stdout='{"status": "x"}',
+            arm_stderr="warn",
+        )
+        assert isinstance(stub, ScriptStub)
+        assert stub.script == tmp_path / ".claude" / "scripts" / "prep_pr_finalize.py"
+        assert stub.calls() == []
+
+        check = _run([sys.executable, str(stub.script), "check-automerge-allowed"], {})
+        arm = _run([sys.executable, str(stub.script), "arm-automerge", "7", "a b"], {})
+        other = _run([sys.executable, str(stub.script), "bogus"], {})
+
+        assert (check.returncode, check.stderr) == (1, "no")
+        assert (arm.returncode, arm.stdout, arm.stderr) == (
+            3,
+            '{"status": "x"}',
+            "warn",
+        )
+        assert other.returncode == 2
+        assert stub.calls() == [
+            ["check-automerge-allowed"],
+            ["arm-automerge", "7", "a b"],
+            ["bogus"],
+        ]
+
+    def test_stub_prep_pr_finalize_builds_the_gh_stderr_object(
+        self, tmp_path: Path
+    ) -> None:
+        stub = stub_prep_pr_finalize(tmp_path, arm_exit=1, arm_gh_stderr="refused")
+
+        done = _run([sys.executable, str(stub.script), "arm-automerge"], {})
+
+        assert done.returncode == 1
+        assert json.loads(done.stdout)["gh_stderr"] == "refused"
+
+    def test_stub_cw_cli_answers_by_longest_prefix_and_records_calls(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = stub_cw_cli(
+            monkeypatch,
+            {
+                "review": GhReply(0, "generic"),
+                "review check-approval": GhReply(1, "out", "err"),
+            },
+        )
+        done = gates_module.run_cw_cli(
+            tmp_path, ["review", "check-approval", "--tier", "large"]
+        )
+        generic = merge_gate_module.run_cw_cli(tmp_path, ["review", "other"])
+
+        assert isinstance(fake, FakeCwCli)
+        assert done is not None
+        assert (done.returncode, done.stdout, done.stderr) == (1, "out", "err")
+        assert generic is not None
+        assert generic.stdout == "generic"
+        assert fake.calls == [
+            ["review", "check-approval", "--tier", "large"],
+            ["review", "other"],
+        ]
+        assert fake.cwds == [tmp_path, tmp_path]
+
+    def test_stub_cw_cli_none_is_a_cli_that_could_not_finish(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub_cw_cli(monkeypatch, {"dev-queue": None})
+
+        assert gates_module.run_cw_cli(tmp_path, ["dev-queue", "adopted-prs"]) is None
+
+    def test_stub_cw_cli_list_replies_are_consumed_then_the_last_repeats(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub_cw_cli(monkeypatch, {"x": [GhReply(0, "one"), GhReply(0, "two")]})
+
+        outs = [
+            r.stdout
+            for r in (gates_module.run_cw_cli(tmp_path, ["x"]) for _ in range(3))
+            if r is not None
+        ]
+
+        assert outs == ["one", "two", "two"]
+
+    def test_stub_cw_cli_refuses_an_unscripted_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub_cw_cli(monkeypatch, {"known": GhReply()})
+
+        with pytest.raises(AssertionError, match="no scripted cw CLI reply"):
+            gates_module.run_cw_cli(tmp_path, ["unknown"])
+
+
+class TestStationFindingsDoc:
+    """#3527: the station fake builds mixed-severity documents too."""
+
+    def _severities(self, reply: object) -> list[str]:
+        assert isinstance(reply, CodexRunResult)
+        assert reply.output_file_content is not None
+        doc = json.loads(reply.output_file_content)
+        return [finding["severity"] for finding in doc["findings"]]
+
+    def test_no_severity_is_a_clean_document(self) -> None:
+        assert self._severities(station_findings_doc("Plan Reviewer")) == []
+
+    def test_severity_and_severities_combine_in_order(self) -> None:
+        reply = station_findings_doc(
+            "Plan Reviewer", severity="MUST_FIX", severities=("SHOULD_FIX", "NIT")
+        )
+
+        assert self._severities(reply) == ["MUST_FIX", "SHOULD_FIX", "NIT"]

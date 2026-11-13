@@ -7,9 +7,10 @@ inspection, and ``send`` is a mutation.
 
 Exit-code contract: **exit 0 whenever the message was durably queued**, even
 when the resume trigger declines or fails. Queuing, not delivery, is this
-command's reliability bar -- and until #2255 lands a gate refusal is the
-common case for a live session, so treating it as an error would make the
-command look broken on every such attempt. Exit 1 is reserved for failures
+command's reliability bar -- and a gate refusal is routine (a live session
+until #2255 lands, or a session parked for a reason a message cannot clear,
+#2287), so treating it as an error would make the command look broken on
+every such attempt. Exit 1 is reserved for failures
 where nothing was queued at all: unknown session, terminal session, bad
 flags, inbox write failure.
 """
@@ -135,8 +136,12 @@ def session_send(
 
     The message is appended to the session's durable inbox first, then a
     resume is attempted. A session that is genuinely live and mid-task cannot
-    be woken yet (deferred to #2255): the message still queues, and the
-    command still exits 0, with the reason printed as a warning.
+    be woken yet (deferred to #2255). A session whose task is parked for a
+    reason a message cannot clear (dirty worktree, merge gate, attempt cap,
+    ...) is not respawned either: only a park waiting on an operator answer
+    resumes (#2287). In both cases the message still queues, and the command
+    still exits 0, with the reason (naming the park's disposition) printed as
+    a warning.
     """
     body = _resolve_body(message, message_file, message_arg)
 

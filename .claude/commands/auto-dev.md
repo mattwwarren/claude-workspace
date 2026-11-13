@@ -317,6 +317,17 @@ Bash call. Both are covered by rule 3 below.
    notification" on one never resumes. If a call can't finish inside its
    sized timeout, treat it as that stage's existing failure disposition
    (gate failure / `agent_block`), not as something to wait on.
+4. Never run a bare `git stash`, `git stash pop` or `git stash clear`
+   (including `git stash push` with no message, `git stash save`, and a bare
+   `git stash apply` or `git stash drop`). The stash stack is shared by every
+   worktree of the repository and by every concurrent session, so a pop
+   applies another session's work and an unrecovered stash silently loses
+   yours. Set work aside with a temporary WIP commit instead. If a stash is
+   unavoidable, use `git stash push -u -m "<unique-tag>"`, capture your
+   entry's SHA with `git stash list --format='%H %gs'`, restore with
+   `git stash apply <sha>` (never `pop`), then re-find the entry by tag and
+   drop it. `cw guard-git-stash` refuses the unsafe forms in a Claude-hosted
+   headless worker's Bash call (#1418).
 
 `auto-dev-review.md`'s Step 3a dispatch-shape section carries a sibling
 instance of this rule's principle for reviewer dispatch: a teammate/agent-team

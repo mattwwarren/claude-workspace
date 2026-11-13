@@ -46,7 +46,7 @@ _FILING = "cw.gh.filing"
 
 _PACKAGE_DIR = Path(cw.gh.__file__).parent
 
-# Owning submodule for every name on the package surface (77 names).
+# Owning submodule for every name on the package surface (82 names).
 _OWNER: dict[str, str] = {
     "FETCH_COMMENTS_TIMEOUT": _RUNNER,
     "_POST_COMMENT_TIMEOUT_SECONDS": _RUNNER,
@@ -91,6 +91,9 @@ _OWNER: dict[str, str] = {
     "_parse_required_checks": _PR_READS,
     "fetch_required_failing_checks": _PR_READS,
     "OpenPrLookup": _PR_READS,
+    "OpenPrHead": _PR_READS,
+    "fetch_open_pr_heads": _PR_READS,
+    "fetch_pr_changed_files": _PR_READS,
     "_first_open_pr_url": _PR_READS,
     "pr_exists_for_branch": _PR_READS,
     "TIMED_OUT_MERGED_LOOKBACK_DAYS": _MERGED,
@@ -106,6 +109,8 @@ _OWNER: dict[str, str] = {
     "branch_head_sha_on_origin": _BRANCHES,
     "add_pr_reviewer": _PR_WRITES,
     "disarm_pr_auto_merge": _PR_WRITES,
+    "create_pr": _PR_WRITES,
+    "edit_pr_body": _PR_WRITES,
     "_CREATE_TIMEOUT": _FILING,
     "_ISSUE_URL_NUMBER_RE": _FILING,
     "_body_file": _FILING,
@@ -229,7 +234,7 @@ def _package_files() -> list[Path]:
 
 def test_owner_table_covers_the_surface() -> None:
     """The owner and constant tables describe the same names."""
-    assert len(_OWNER) == 77
+    assert len(_OWNER) == 82
     assert _CONSTANTS.issubset(_OWNER)
 
 

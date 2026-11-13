@@ -30,6 +30,7 @@ from cw.codex_review._audit_events import (
     _parse_codex_audit_events,
 )
 from cw.codex_review._const import (
+    _AUDIT_ARGV_FLAGS,
     _CATEGORY_TO_REASON,
     _MIN_ROLE_TIMEOUT_SECONDS,
     CODEX_BUDGET_EXHAUSTED,
@@ -40,6 +41,7 @@ from cw.codex_review._const import (
     format_input_sizes,
 )
 from cw.codex_review._context import _parse_reviewer_document
+from cw.codex_runner import relabeled
 from cw.config import state_dir
 from cw.executor_diagnostics import (
     build_executor_failure,
@@ -69,10 +71,6 @@ _log = logging.getLogger(__name__)
 #: Filesystem-safe slug for a reviewer role name. One definition, shared with
 #: the engine manifest loader through the light constants module (#3216).
 _slug = role_slug
-
-# The two audit flags #1710 adds to every generic reviewer invocation. Kept as
-# one tuple so the argv builder and the degrade-and-retry strip cannot drift.
-_AUDIT_ARGV_FLAGS = ("--json", "--ephemeral")
 
 # clap-style "you passed a flag I don't know" phrasings. An older codex-cli
 # that predates --json/--ephemeral rejects the whole invocation with one of
@@ -186,30 +184,42 @@ def _build_generic_codex_argv(
     return argv
 
 
+def _parse_codex_output[T](
+    content: str | None, *, validator: Callable[[object], T]
+) -> tuple[T | None, ExecutorFailureCategory | None]:
+    """Parse codex output into *validator*'s document, or classify the failure.
+
+    Returns ``(model, None)`` for valid content and ``(None, category)``
+    otherwise. Keeping the JSON parsing and validation here lets each codex
+    output consumer use the same failure taxonomy without hard-coding the
+    document model, and lets a consumer that needs the model parse once (#3432).
+    """
+    if content is None:
+        return None, "missing_output"
+    if not content.strip():
+        return None, "empty_output"
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, RecursionError):
+        return None, "invalid_json"
+    try:
+        model = validator(data)
+    except RecursionError:
+        return None, "invalid_json"
+    except ValueError:
+        return None, "schema_mismatch"
+    return model, None
+
+
 def _classify_codex_output(
     content: str | None, *, validator: Callable[[object], object]
 ) -> ExecutorFailureCategory | None:
     """Classify codex output, using *validator* for its target document.
 
-    ``None`` means the content is valid for the target document. Keeping the
-    JSON parsing and validation here lets each codex output consumer use the
-    same failure taxonomy without hard-coding the document model.
+    ``None`` means the content is valid for the target document; see
+    :func:`_parse_codex_output` for the taxonomy.
     """
-    if content is None:
-        return "missing_output"
-    if not content.strip():
-        return "empty_output"
-    try:
-        data = json.loads(content)
-    except (json.JSONDecodeError, RecursionError):
-        return "invalid_json"
-    try:
-        validator(data)
-    except RecursionError:
-        return "invalid_json"
-    except ValueError:
-        return "schema_mismatch"
-    return None
+    return _parse_codex_output(content, validator=validator)[1]
 
 
 def _classify_codex_output_failure(content: str | None) -> ExecutorFailureCategory:
@@ -429,6 +439,33 @@ def _persist_codex_role_document(
         )
 
 
+def _run_codex_with_audit_degrade(
+    runner: CodexRunner,
+    worktree: Path,
+    argv: list[str],
+    timeout_seconds: int | None,
+    stdin: str,
+) -> tuple[CodexRunResult, list[str]]:
+    """Run *argv* once, retried once without the audit flags on a rejection.
+
+    The retry fires only for an ordinary non-zero exit (never a timeout or a
+    spawn error) whose stderr is :func:`_is_audit_flag_rejection`. Returns the
+    final result and the argv that actually ran, so a caller's diagnostics name
+    the stripped invocation after a retry. Shared by :func:`_run_codex_role`
+    and the engine aggregation turn (#3432).
+    """
+    result = runner.run(worktree, argv, timeout_seconds, stdin=stdin)
+    if (
+        not result.timed_out
+        and result.returncode != 0
+        and _classify_codex_failure(result) == "nonzero_exit"
+        and _is_audit_flag_rejection(result)
+    ):
+        argv = [flag for flag in argv if flag not in _AUDIT_ARGV_FLAGS]
+        result = runner.run(worktree, argv, timeout_seconds, stdin=stdin)
+    return result, argv
+
+
 def _run_codex_role(
     *,
     runner: CodexRunner,
@@ -494,15 +531,9 @@ def _run_codex_role(
         sandbox_mode=reviewer_sandbox_mode,
     )
     start = time.monotonic()
-    result = runner.run(worktree, argv, timeout_seconds, stdin=prompt)
-    if (
-        not result.timed_out
-        and result.returncode != 0
-        and _classify_codex_failure(result) == "nonzero_exit"
-        and _is_audit_flag_rejection(result)
-    ):
-        argv = [flag for flag in argv if flag not in _AUDIT_ARGV_FLAGS]
-        result = runner.run(worktree, argv, timeout_seconds, stdin=prompt)
+    result, argv = _run_codex_with_audit_degrade(
+        runner, worktree, argv, timeout_seconds, prompt
+    )
     # Exactly two time.monotonic() reads per call, retry or not (a retry is a
     # second subprocess, not a second clock read) — so *duration* is total wall
     # time across both invocations when one happened. The invariant is asserted
@@ -672,7 +703,7 @@ def run_codex_roles(
                 )
                 continue
             doc, failure, metrics, rejected = _run_codex_role(
-                runner=runner,
+                runner=relabeled(runner, role=role),
                 worktree=worktree,
                 role=role,
                 prompt=prompts_by_role[role],

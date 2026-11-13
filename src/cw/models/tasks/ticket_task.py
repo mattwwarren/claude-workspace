@@ -344,6 +344,10 @@ class TicketTask(BaseModel):
     # Populated by _accumulate_task_cost in consume_completed_sessions.
     # None when no cost data has been recorded yet. See GitHub issue #124.
     total_cost_usd: float | None = None
+    # Cumulative input + output tokens across all attempts whose session
+    # recorded usage (#3063, RFC 0018 C4). Populated by _accumulate_task_cost.
+    # None until a session with recorded tokens completes.
+    total_tokens: int | None = None
     # The source of the implementation plan for this ticket. Carried into
     # cw-context.json so workers can emit the correct plan_source in their
     # AutoDevResult sentinel without rediscovering it at runtime (#314).
@@ -363,6 +367,10 @@ class TicketTask(BaseModel):
     lane: str = DEFAULT_LANE
     # RFC 0005 A1 — dormant; no dispatch wiring yet (GitHub #612).
     stage: Stage = DEFAULT_STAGE
+    # ISO-8601 UTC stamp of the last ``stage`` change (GitHub #2155), written
+    # only by ``cw.dev_queue.stage_entry.enter_stage``. ``None`` for pre-v60
+    # rows; no validator or default_factory stamps on load.
+    stage_entered_at: str | None = None
     stage_base_ref: str | None = None
     # Terminal disposition for this ticket — the AutoDevResult status (or a
     # reconcile reason string) that caused the task to reach COMPLETED,

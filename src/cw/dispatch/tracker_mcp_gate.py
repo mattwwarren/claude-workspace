@@ -50,8 +50,10 @@ Contracts:
   row (#3060, RFC 0018 C1) is checked the same way against
   ``servers["codex"]``, and on a non-GitHub tracker an unset or unusable
   ``servers.codex`` is itself a hit; codex REVIEW/IMPL rows are not gated
-  here (``cw doctor`` reports them). One tracker resolution and one config
-  read per backend per tick.
+  here (``cw doctor`` reports them). A **codex FINALIZE** row is gated the
+  same way as codex PLAN, because its PR-link post writes through the tracker
+  MCP; FINALIZE rows on other backends are never gated. One tracker
+  resolution and one config read per backend per tick.
 
 Non-goal: probing whether the tracker's credential (e.g. an API-key env var)
 is present. That is a runtime property of the spawned session's environment,
@@ -94,6 +96,13 @@ _ENABLED_PLUGINS_KEY = "enabledPlugins"
 # tracker's comments -- the #2415 failure). Mirrors pr_gate's PLAN/IMPL scope;
 # re-checked at the point of use in cw.dispatch.claim.screening.
 _GATED_STAGES: frozenset[Stage] = frozenset({Stage.PLAN, Stage.IMPL})
+
+# The stages that enter ``_gated_candidates``. FINALIZE is a candidate only so a
+# codex FINALIZE row can be gated (RFC 0018 C3); ``_evaluate_task`` returns
+# ``None`` for a FINALIZE row on any other backend.
+_CANDIDATE_STAGES: frozenset[Stage] = frozenset(
+    {Stage.PLAN, Stage.IMPL, Stage.FINALIZE}
+)
 
 # Warn-once dedupe for fail-open outcomes: (client, branch) -> the reason last
 # warned. The dispatch loop re-resolves every tick, so without this a single
@@ -298,7 +307,7 @@ _CODEX_SERVER_UNSET = "servers.codex (unset)"
 def _evaluate_codex_plan(
     client: ClientConfig, gate: TrackerMcpGateConfig, branch: str, tick: _GateTick
 ) -> TrackerMcpGateHit | None:
-    """A codex PLAN row's check (#3060): ``servers.codex`` must be usable.
+    """A codex PLAN or FINALIZE row's check (#3060): ``servers.codex`` must be usable.
 
     GitHub needs no MCP and an unset tracker fails open (both through
     :func:`_evaluate_backend_server`). On any other tracker a missing or
@@ -324,16 +333,20 @@ def _evaluate_task(
 
     claude-native: the branch/plugin path, only when ``plugin_id`` is set.
     opencode: the server path, only when ``servers["opencode"]`` is set.
-    codex: PLAN rows only (#3060), through :func:`_evaluate_codex_plan`.
-    Other codex stages, ``local`` and anything else are not gated here.
+    codex: PLAN rows (#3060) and FINALIZE rows (the PR-link post writes through
+    the tracker MCP), through :func:`_evaluate_codex_plan`. A FINALIZE row on
+    any other backend is never gated. Other codex stages, ``local`` and
+    anything else are not gated here.
     """
     backend = resolve_executor_config(task.stage, task, client).backend
+    if task.stage == Stage.FINALIZE and backend != CODEX_BACKEND:
+        return None
     branch = resolve_feature_branch(task.ticket_id, client, task)
     if backend == CLAUDE_NATIVE_BACKEND:
         if gate.plugin_id is None:
             return None
         return _evaluate_branch(client, gate, branch)
-    if backend == CODEX_BACKEND and task.stage == Stage.PLAN:
+    if backend == CODEX_BACKEND and task.stage in (Stage.PLAN, Stage.FINALIZE):
         return _evaluate_codex_plan(client, gate, branch, tick)
     server = (gate.servers or {}).get(backend)
     if backend != OPENCODE_BACKEND or server is None:
@@ -356,7 +369,7 @@ def _gated_candidates(
         for task in queue_snapshot.tasks
         if task.client == client_name
         and task.status == QueueItemStatus.PENDING
-        and task.stage in _GATED_STAGES
+        and task.stage in _CANDIDATE_STAGES
     ]
 
 

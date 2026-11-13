@@ -126,7 +126,7 @@ review:
   claude-native lane, or a codex lane whose manifest loads, gets no warning.
   `cw review converge config` emits the `engine` and `engine_error` keys for
   `--loop-backend claude-native` and `codex`, and null for the others.
-- **An all-codex engine lane needs `review.confirm_backend: none` or `codex`.**
+- **An all-codex engine lane needs `review.confirm_backend: none` or `codex`.** See "All-codex lane (RFC 0018 D1, #3064)" below for the full lane setup.
   The confirm-backend default is unchanged: after a codex engine pass the
   default independent confirm round is Claude. Set `confirm_backend: none` (no
   confirm; the ledger converges on the engine round) or `codex` to keep every
@@ -220,10 +220,11 @@ and `fix`. A purpose is a static spawn-time label; it is not the pipeline
 
 ### Downgrading to a pre-#3054 build
 
-The `CwState` schema remains version `19`, but a pre-#3054 build cannot parse
-the new `plan`, `review` or `finalize` enum values. Before downgrading, stop
+The `CwState` schema was version `19` at #3054 and is `20` from #3063 (RFC 0018
+C4, `Session.usage`); a pre-#3054 build cannot parse the new `plan`, `review` or
+`finalize` enum values. Before downgrading, stop
 the dispatch loop and run this gate from the #3054 (or newer) checkout. It is
-versioned and fail-closed: it requires `schema_version == 19`, refuses the
+versioned and fail-closed: it requires `schema_version == 20`, refuses the
 downgrade if any new-purpose session is non-terminal or still bound to a
 dev-queue row, writes a timestamped JSONL archive, and preserves a complete
 copy of the original `sessions.json` before rewriting it.
@@ -238,7 +239,7 @@ from cw.config import load_state, save_state, sessions_lock, state_dir, state_fi
 from cw.dev_queue import load_dev_queue
 from cw.reconcile import ticket_id_for_session
 
-EXPECTED_STATE_SCHEMA = 19
+EXPECTED_STATE_SCHEMA = 20
 NEW_PURPOSES = {"plan", "review", "finalize"}
 TERMINAL_STATUSES = {"completed", "timed_out"}
 
@@ -483,6 +484,62 @@ clients:
               reasoning_effort: max
 ```
 
+### Model Prices and Usage Accounting
+
+Every codex stage turn (PLAN, the plan review stations, IMPL, FINALIZE, the
+review roles, the fix loop and the tracker-IO post) records its token usage into
+`Session.usage` (#3063, RFC 0018 C4); `cw session show` prints a `usage:` line
+and `--json` carries the whole record. `TicketTask.total_tokens` sums input plus
+output tokens across the ticket's sessions. A turn that exits 0 but reports no
+usage is not silently zero: the session records state `unavailable`, logs one
+`usage_unavailable:` warning and appends a `usage_unavailable:` token to the
+stage result's `friction_highlights`.
+
+`model_prices` is an optional, operator-supplied map on a stage config, keyed by
+the exact `model` string, that turns those tokens into a dollar estimate. No
+price table ships with cw, so the map is empty by default and a model with no
+entry records tokens only (that is not the unavailable marker). Prices are USD
+per million tokens:
+
+- `input_usd_per_mtok`, `cached_input_usd_per_mtok` and `output_usd_per_mtok`
+  are required and non-negative; keys must be non-empty and match `model`
+  exactly (`gpt-x` does not match `gpt-x-mini`).
+- `cached_input_tokens` is a subset of `input_tokens`: the estimate is
+  `(max(input - cached, 0) x input_price + cached x cached_price + output x
+  output_price) / 1e6`. Reasoning tokens are a subset of output and add
+  nothing; `cache_write_input_tokens` is recorded but never priced.
+- The estimate lands in `Session.cost_breakdown`, keyed by the configured model
+  string, never in `Session.cost_usd` (which stays the producer's own figure).
+  `TicketTask.total_cost_usd` adds the breakdown only for a session whose
+  `cost_usd` is absent, so a session is never double-counted.
+- A model gets a dollar figure only when every recorded turn for it reported
+  input, cached input and output; otherwise it has tokens only.
+- Like `model`, a lane's stage config replaces the client's wholesale, so repeat
+  `model_prices` on the lane.
+
+```yaml
+clients:
+  my-project:
+    workspace_path: /path/to/repo
+    lanes:
+      - name: default
+        pipeline:
+          executors:
+            review:
+              backend: codex
+              model: gpt-5.6-luna
+              model_prices:
+                gpt-5.6-luna:
+                  input_usd_per_mtok: 1.25
+                  cached_input_usd_per_mtok: 0.125
+                  output_usd_per_mtok: 10.0
+```
+
+The prices above are illustrative, not cw's claim about any model's price.
+opencode and local (aider) sessions record the `unavailable` state with reason
+`backend_output_unpinned` (no pinned output shape for the backend; see #3552),
+so a price map has nothing to price there.
+
 ### Codex Sandbox Mode
 
 Two fields on the `review` stage config of a `backend: codex` stage pick the
@@ -507,6 +564,9 @@ hence two fields.
   knob: they always run `--sandbox read-only -c approval_policy=never` (cw
   writes the plan artifacts outside the sandbox). Neither field above is
   read for PLAN, and setting one on a `plan` stage config changes nothing.
+- The codex FINALIZE turn (#3062) has no sandbox knob either: it always runs
+  `--sandbox read-only -c approval_policy=never` and returns judgement text
+  only (cw does the push, PR and arm outside the sandbox).
 - Codex backend only: an explicit non-default value on any other backend is a
   config error (the defaults are simply unused there).
 - Like `model` and `reasoning_effort`, a lane's stage config replaces the
@@ -653,6 +713,58 @@ tickets in that lane, even when the client's own default pipeline includes
 it. `approve` and `requeue` refuse with a `CwError` naming the lane and its
 resolved stages when a target stage isn't in that resolved list — they never
 silently fall back to the client default.
+
+### All-codex lane (RFC 0018 D1, #3064)
+
+A lane whose stages all run on the `codex` backend (plan, impl, review and
+finalize, each in `CODEX_SUPPORTED_STAGES`) is an all-codex lane. Every stage
+runs in codex, so no Claude executor runs the ticket. Set it on the lane:
+
+```yaml
+lanes:
+  - name: all-codex
+    pipeline:
+      executors:
+        plan:     { backend: codex }
+        impl:     { backend: codex }
+        review:   { backend: codex }
+        finalize: { backend: codex }
+```
+
+**The confirm default still reaches Claude.** In clean mode
+(`review.convergence: clean`) with `review.confirm_backend` unset, the
+independent confirm round defaults to `claude -p`. The lane therefore needs the
+`claude` binary on `PATH` and a Claude login. A missing binary parks the ticket
+`confirm_backend_unavailable` (uncharged), not skipped. In blocking mode there is
+no confirm round, so the lane needs no Claude executor at all.
+
+**Claude-free opt-outs** for a clean all-codex lane:
+
+- `review.confirm_backend: none`: no confirm round runs. The lane is Claude-free
+  and forfeits the independent round. The ledger converges on the codex loop
+  alone, and the sentinel records `none`.
+- `review.confirm_backend: codex`: the confirm round stays on codex. The lane is
+  Claude-free but not independent of the loop, and the sentinel records it as
+  not independent.
+
+**Doctor.** `cw doctor` reports each all-codex lane as
+`all-codex-lane/<client>/<lane>`. `[OK]` in blocking mode. In clean mode with
+REVIEW present and `confirm_backend` unset it is `[WARN]`, naming the `claude`
+binary dependency and the two opt-outs above. An explicit `confirm_backend` gives
+`[OK]` with the resolved confirm note. A clean lane without a REVIEW stage gives
+`[OK]`, since the confirm round does not apply. Every result carries the tracker
+pointer below.
+
+**Tracker MCP.** GitHub is reached through `gh` and needs nothing more. A
+non-GitHub tracker (Linear or another MCP-backed tracker) needs the codex-side
+MCP server installed, enabled, configured and authenticated for the codex
+backend. Declare its server name under `tracker_mcp_gate.servers.codex`. The
+report for it is `tracker-mcp/<client>/<lane>/codex`. Daemon-only tracker writes
+go through the narrow tracker-IO agent turn, described in
+`docs/dispatch-runbook.md` under "Tracker-IO turn (#3057, RFC 0018 A2)".
+
+**Smoke probe.** An opt-in operator probe runs one codex create and resume, and
+the MCP load check, outside default CI. See `docs/codex-live-session-smoke.md`.
 
 ### Recommended Per-Stage Defaults
 
@@ -935,7 +1047,10 @@ lanes:
   see [Quality Gate Autofix](#quality-gate-autofix-quality_gatesautofix-3412))
   has the autofix run and the same gate re-checked (#3412); the cycle parks
   `codex_fix_gate_failed` only if the re-check still fails, with the original
-  output.
+  output. Ecosystem-default lint autofixes (`ruff check --fix`,
+  `npm run lint -- --fix`) are adopted (#3421); an autofix may not delete or
+  rename a path (#3427), and a revert that cannot restore the tree parks
+  `codex_error` (#3423).
 - **Divergence report.** `fix_loop_diverging` now also lists findings the loop
   itself generated (a finding on lines added since the loop began, or a
   file-level finding on a file the loop created) so the operator can tell new
@@ -950,16 +1065,7 @@ guard, the scope fence, the revert guard, the sensitive-path guard, the
 hook-failure park, or the divergence guard's absolute threshold and its stall
 count. The stall count has its own knob, `codex_fix_loop_stall_cycles`.
 
-**Recovery text and the refused-cycle ref (#2967).** A cycle that parks without committing (a growth, constraint, hook, scope drift, scope violation or revert-guard breach, a failed fix invocation, or a git error after staging) first pins its edits under `refs/cw/refused-cycles/<ticket>/cycle-<N>-<reason>-<UTC timestamp>`, a `git stash create` commit that `git stash apply <ref>` restores. Only then does it run `git reset --hard HEAD`. Ignored files and untracked cw review artifacts are left alone; a tracked, modified review artifact is reverted in the worktree, and its content stays in the ref. The park's `recovery_hint` names the ref, and a plain `cw dev-queue requeue` starts a clean cycle. If the ref cannot be written, nothing is dropped; if the reset or the clean re-check fails after the ref is written, the park names the ref and the dirty paths. On a cumulative growth park (#2648) only the current cycle is dropped; earlier cycles' commits stay on the branch. This supersedes the earlier "every guard parks uncommitted and reports; none auto-reverts" resolution for these exits.
-
-If the patch cannot be saved or verified, nothing is restored and the park keeps the
-old advice (edits left staged, `git reset --hard HEAD` after inspecting) plus one
-sentence naming why. The restore is skipped when `HEAD` moved during the cycle (a
-fix that committed itself, or a push failure after cw's own real commit keeps its
-commit) and for the staged-set mismatch (`codex_fix_scope_drift` with "Staged but
-not measured"), where cw cannot tell which staged paths are the cycle's own work; that
-one path can still leave a dirty tree, so a requeue there parks
-`codex_fix_dirty_start`.
+**Recovery text and the refused-cycle ref (#2967).** A cycle that parks without committing (a growth, constraint, hook, a restorable scope drift, scope violation or revert-guard breach, a failed fix invocation, or a git error in the cycle's commit path) first pins its edits under `refs/cw/refused-cycles/<ticket>/cycle-<N>-<reason>-<UTC timestamp>`, a `git stash create` commit that `git stash apply <ref>` restores. Only then does it run `git reset --hard HEAD`. A ref is pinned only when `git update-ref` succeeds. After that, an audit-event failure, a failed `git reset --hard HEAD`, a failed `HEAD` read or a failed clean re-check still keep the ref, and the park names the ref and the dirty paths. For an audit-event failure no reset is attempted, so the tree stays dirty with the ref kept. A git error before the ref exists (taking the restore lock, collecting the cycle's paths, `git stash create` failing or saving nothing, or `git update-ref`) pins nothing and resets nothing: the park says cw neither saved nor discarded the changes and names the dirty paths, and the edits stay in the worktree. For the lock, path-collection, `git stash create` (when it errors) and `git update-ref` failures the park also names a `Failed step:`; when `git stash create` saves nothing it names no step. The non-restorable staged-set mismatch (`codex_fix_scope_drift` with "Staged but not measured") is the exception: cw cannot tell which staged paths are the cycle's own work, so it pins nothing and leaves the tree dirty, and a requeue there parks `codex_fix_dirty_start`. Ignored files and untracked cw review artifacts are left alone; a tracked, modified review artifact is reverted in the worktree, and its content stays in the ref. The park's `recovery_hint` names the ref. A plain `cw dev-queue requeue` starts a clean cycle only when the park reports the changes saved and the worktree reset. When the park instead says cw neither saved nor discarded the changes, or could not reset the worktree, or is the staged-set `codex_fix_scope_drift` ("Staged but not measured"), the tree is still dirty and a requeue parks `codex_fix_dirty_start`: inspect and clean it first, using `git stash apply <ref>` when the park names a ref. On a cumulative growth park (#2648) only the current cycle is dropped; earlier cycles' commits stay on the branch. This supersedes the earlier "every guard parks uncommitted and reports; none auto-reverts" resolution for these exits.
 
 **Settled findings that come back reworded.** This ticket does not add fuzzy
 suppression of paraphrased settled findings. The existing claim tier (#2210) can
@@ -1399,6 +1505,61 @@ substitution is not reliably caught.
 `settings.local.json`, which codex and opencode runners do not write, so a
 worker on those backends is not guarded. `cw doctor`'s
 `hook-install-python/<client>` check reports a hook such a worker installed.
+
+#### Shared-Stash Guard (#1418)
+
+`cw guard-git-stash` — a PreToolUse hook wired as the fifth command on the
+`"Bash"` matcher (after `cw guard-cwd`, `cw guard-busy-wait`,
+`cw background-tool-guard-pre` and `cw guard-hook-install`). Its help line:
+
+Refuse bare git stash, stash pop and other shared-stack stash use from a headless worker's Bash call.
+
+The git stash stack is one reflog shared by every worktree of the repository
+and by every concurrent session. A `git stash pop` applies and drops the newest
+entry, which may be another session's work, and a stash a worker never recovers
+silently loses its own. In a **headless** worker the guard refuses the forms
+that act on the default (newest) entry or push an untagged one:
+
+- bare `git stash`, and `git stash -u`, `-k`, `-a` or `-- <paths>` with no message
+- `git stash push` and `git stash store` with no non-empty message
+- `git stash save` (deprecated), every `git stash pop`, and `git stash clear`
+- `git stash apply` and `git stash drop` with no stash argument
+- `git stash branch` with fewer than two positionals
+
+These stay allowed because they name their target or tag their entry:
+`git stash push -m <tag>` (also `-um`, `--message=`), `git stash apply <sha>`
+(with `--index` or `-q`), `git stash drop <ref>`, `git stash store -m <tag> <sha>`,
+`git stash branch <name> <ref>`, and the read-only `list`, `show` and `create`.
+Detection sees through global options (`-C`, `-c`, `--git-dir`), `/usr/bin/git`,
+`command git`, `env`, an env assignment, redirections, any line of a multi-line
+command, and `bash -c` / `eval` (followed two levels deep). The words inside a
+quoted argument (a commit message, an `echo`) are allowed. The refusal text
+begins `BLOCKED (#1418): ` and ends with the safe form:
+
+If you must stash, run `git stash push -u -m "<unique-tag>"`, capture the new entry's SHA with `git stash list --format='%H %gs'`, restore with `git stash apply <sha>` (never pop), then re-find the entry by tag and drop it.
+
+Prefer a temporary WIP commit to a stash. The guard cannot verify that a tag is
+unique or that a `drop <ref>` was re-found by tag; it only requires that the
+stash names its target.
+
+Interactive and operator sessions are never refused, and any cwd with no
+ancestor `.claude/cw-context.json` is exempt. There is no config toggle and no
+event. Worktrees pick the guard up on their next spawn (the settings file is
+rewritten then); a session already running keeps the hooks it started with.
+
+The guard is best-effort and fails open: unreadable stdin, an unexpected
+payload shape, an unparseable command (an unterminated quote) and a fault
+reading the worker's context file are all allowed. The handler catches only
+`OSError`, `ValueError` and `TypeError`. Not caught: a git alias that expands to
+`stash` (`-c alias.x=stash`), backtick substitution, and scripts that call git
+internally. An unquoted `echo git stash pop` is a deliberate false positive; a
+command that only mentions these words should put the text in a file
+(`git commit -F <file>`).
+
+**Coverage gap:** the guard lives in the Claude worker's
+`settings.local.json`, which codex and opencode runners do not write, so a
+worker on those backends is covered by prompt text only (the shared stage
+preamble and the codex fix-prompt scope rules), not by a hard check.
 
 ## Orchestrator Configuration (`~/.claude-workspace/orchestrator.yaml`)
 
@@ -2520,6 +2681,69 @@ This key is unrelated to the `quality_gates:` key removed by #1616 (that one was
 never read). `claude-workspace` sets `pre-commit: 600`: its full hook suite runs
 the test suite and outgrew the 480 s default.
 
+## Quality Gate CI Evidence (`quality_gates.ci_evidence`)
+
+Opt-in. On the open-PR reuse path, finalize Step 4c.6 re-runs the repo's quality
+gates locally before arming auto-merge. A repo whose CI already runs those same
+gates (often sharded across runners, so faster than a local single-process run)
+can declare that, and finalize then trusts green CI at the PR's current head
+instead of re-running the gate:
+
+```yaml
+# .claude/project-config.yaml
+quality_gates:
+  ci_evidence:
+    lint: ci-status            # gate name (as detect-gates prints it) -> CI check name
+    tests: [ci-status, e2e]    # a list means every listed check must be green
+```
+
+`prep_pr_state.py gate-ci-evidence <gate-name> --pr <N> [--repo owner/name]
+[--base main]` prints JSON (`gate`, `skip`, `reason`, `sha`, `checks`, plus
+`live_sha` / `live_base` / `pr_state` / `failed_check` when relevant). It exits 0
+for every decision it makes; finalize also treats a non-zero exit or unparseable
+output as "run the gate". `skip` is `true` only when all of these hold:
+
+- the gate has an exact entry in the map (no prefix matching), read from the
+  **committed** `.claude/project-config.yaml` on `origin/<base>`, not the working
+  tree, so the PR being finalized cannot opt itself in;
+- the PR is open and targets `<base>`;
+- local `HEAD` equals the PR head read live from GitHub (`gh pr view`), never a
+  value cached on a row;
+- every mapped check has at least one entry on that exact commit, and every
+  entry of that name is a finished success (a check run `completed` with
+  conclusion `success`, or a commit status in state `success`).
+
+Everything else is `skip: false` and the gate runs locally exactly as it did
+before: `pyyaml-unavailable`, `no-map-entry`, `head-unresolved`,
+`ci-signal-unavailable` (`gh` failed, timed out, returned junk, or reported an
+incomplete page), `pr-not-open`, `pr-base-mismatch`, `head-mismatch`,
+`check-missing`, `check-not-success` (pending, red, cancelled, skipped, neutral).
+
+- **Choosing check names.** Map a gate only to a check that really runs that
+  gate on the same scope. An aggregate check that the repo requires for merge
+  is usually the safest value. A check that is skipped for some changes (draft
+  PRs, path filters) simply yields `check-not-success` and the gate runs
+  locally.
+- **Names are trusted, not authenticated.** A match is by check name on that
+  commit; it does not bind the producer. Any workflow job in the PR's own
+  workflow files, or anything that can post a commit status, could report a
+  check with the mapped name. Pick a name your required-checks protection
+  already treats as authoritative, and do not rely on this feature to defend
+  against a PR that rewrites CI.
+- **Lookup.** Check runs and commit statuses are queried by name for the PR's
+  head commit through `gh api`, not read from the PR's `statusCheckRollup`,
+  which `gh pr view` caps at 100 entries.
+- **Invalid entries.** Each value must be a non-empty check name or a non-empty
+  list of them. A bad entry is skipped with a warning on stderr and does not
+  affect its siblings.
+- **Requires PyYAML.** Unlike `quality_gates.timeouts`, this map has no
+  bare-`python3` fallback. Under an interpreter without PyYAML every gate
+  reports `reason: pyyaml-unavailable` and runs locally (fail closed), so a repo
+  that opts in should make sure the interpreter that runs `prep_pr_state.py` has
+  PyYAML. The `quality_gates.timeouts` scanner ignores this sibling key.
+- **Rollout.** Because the map comes from `origin/<base>`, a PR that adds or
+  changes it benefits only after it merges.
+
 ## Quality Gate Autofix (`quality_gates.autofix`, #3412)
 
 The codex fix loop runs the repo's quality gates before each fix commit. A gate
@@ -2539,10 +2763,27 @@ quality_gates:
 - **Matching.** Exact gate name, as `detect-gates` prints it; there is no prefix
   match (unlike `timeouts`). A key naming no detected gate is ignored.
 - **Precedence.** A `detect-gates` `autofix` wins over this map.
+- **Ecosystem defaults are adopted (#3421).** The `detect-gates` ecosystem
+  defaults carry an autofix too: `uv run ruff check --fix .` for the `ruff` gate
+  and `npm run lint -- --fix` for the `lint` gate. A red lint gate with such a
+  default is autofixed and committed in-cycle instead of parking. The safety
+  fence below is the only confinement. A repo that wants no autofix declares its
+  gates in a `CLAUDE.md` bash block, which carries no autofix (the ecosystem
+  defaults then do not apply). There is no per-gate opt-out key; one is a
+  possible follow-up.
 - **Safety.** The autofix runs only for a `red` failure that left the tree
   alone, must exit 0, must change at least one path, and may change only paths
-  the cycle already changed; the re-check must exit 0 and not dirty the tree.
-  Anything else reverts the autofix and parks with the original output.
+  the cycle already changed, and may not delete or rename one (#3427); the
+  re-check must exit 0 and not dirty the tree. Anything else reverts the
+  autofix and parks with the original output.
+- **Revert.** A revert never deletes a file that was git-ignored on disk before
+  the autofix ran, even when the autofix rewrote the ignore rules (#3420). It
+  restores the changed paths first; if that fails or leaves the tree different,
+  it logs `codex_fix_gate_autofix_revert_incomplete` and falls back to
+  `git read-tree --reset -u`, which keeps review artifacts and those ignored
+  files, and logs `codex_fix_gate_autofix_revert_fallback outcome=<restored|failed>`
+  (#3423). If neither restores the tree the cycle parks `codex_error` with the
+  live tree pinned, instead of `codex_fix_gate_failed` over a half-reverted tree.
 - **Fail-closed.** A missing, malformed, wrongly-typed or non-UTF-8 file, a
   non-mapping `quality_gates` / `autofix`, and a non-string or blank command all
   mean no config-declared autofix; the gate parks as it does without one. It

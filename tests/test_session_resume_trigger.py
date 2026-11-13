@@ -9,7 +9,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from cw.auto_dev_result import KNOWN_BLOCKER_REASONS, PAUSED_FOR_USER_INPUT_STATUSES
 from cw.config import load_state, save_state
+from cw.dev_queue import _derive_disposition
 from cw.models import (
     CwState,
     QueueItemStatus,
@@ -18,7 +20,9 @@ from cw.models import (
     SessionStatus,
 )
 from cw.native_daemon import FakeNativeDaemonClient
+from cw.reconcile._shared import _STOPPED_WITHOUT_SENTINEL_REASON
 from cw.session_resume_trigger import (
+    _MESSAGE_RESOLVABLE_DISPOSITIONS,
     DEFERRED_LIVE_DELIVERY_REASON,
     FakeResumeTriggerAdapter,
     NativeDaemonResumeTriggerAdapter,
@@ -30,6 +34,7 @@ from tests._clients_yaml import write_clients_yaml
 from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from cw.models import ClientConfig, Session
@@ -150,6 +155,7 @@ class TestGate:
             client="test-client",
             status=QueueItemStatus.BLOCKED_ON_USER,
             session_id=session.id,
+            disposition="ambiguities_pending_resolution",
         )
         adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
 
@@ -198,6 +204,330 @@ class TestGate:
 
         assert result.delivered is False
         assert mock_native_daemon.spawn_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Gate: park disposition (#2287) -- a message only resumes a park it can clear
+# ---------------------------------------------------------------------------
+
+# The ticket's four message-resolvable parks plus the abandoned-exit park
+# (ADR-0017). Written out here, not imported from the module, so the test has
+# a source of truth independent of the implementation's constant.
+_RESOLVABLE_DISPOSITIONS = sorted(
+    PAUSED_FOR_USER_INPUT_STATUSES | {"stopped_without_sentinel"}
+)
+# The mechanical parks the ticket names: a message cannot clear any of them.
+_NAMED_MECHANICAL_DISPOSITIONS = [
+    "dirty_worktree",
+    "stale_dispatch_gate",
+    "codex_review_orphaned_at_boot",
+    "merge_gate_blocked",
+    "attempt_cap_blocked",
+    "terminal_sibling",
+    "fix_dispatch_ref_unresolved",
+]
+_REFUSED_DISPOSITIONS = [
+    *_NAMED_MECHANICAL_DISPOSITIONS,
+    "finalize_gate_held",
+    "awaiting_operator",
+    "needs_salvage",
+]
+
+
+class TestParkDispositionGate:
+    """``_gate_refusal`` resumes only a park an operator message can clear."""
+
+    def _run(
+        self,
+        sample_client: ClientConfig,
+        daemon: FakeNativeDaemonClient,
+        *,
+        session_status: SessionStatus,
+        task_overrides: dict[str, object] | None = None,
+    ) -> ResumeTriggerResult:
+        write_clients_yaml(sample_client)
+        session = _eligible_session(sample_client, status=session_status)
+        _persist(session)
+        overrides: dict[str, object] = {
+            "ticket_id": "2287",
+            "client": "test-client",
+            "status": QueueItemStatus.BLOCKED_ON_USER,
+            "session_id": session.id,
+        }
+        overrides.update(task_overrides or {})
+        task = _make_ticket_task(**overrides)
+        adapter = NativeDaemonResumeTriggerAdapter(native_daemon=daemon)
+        with patch("cw.session_resume_trigger.list_tickets", return_value=[task]):
+            return adapter.trigger(session, _MESSAGE)
+
+    def _assert_refused_untouched(
+        self,
+        daemon: FakeNativeDaemonClient,
+        run: Callable[[], ResumeTriggerResult],
+    ) -> ResumeTriggerResult:
+        """Run *run*; assert a refusal that never touched the daemon (Invariant 4)."""
+        with patch.object(
+            daemon,
+            "list_live_session_short_ids",
+            wraps=daemon.list_live_session_short_ids,
+        ) as live_ids:
+            result = run()
+        assert result.delivered is False
+        assert daemon.spawn_calls == []
+        assert daemon.stop_calls == []
+        live_ids.assert_not_called()
+        return result
+
+    @pytest.mark.parametrize("disposition", _RESOLVABLE_DISPOSITIONS)
+    def test_resolvable_disposition_resumes_an_active_session(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        disposition: str,
+    ) -> None:
+        result = self._run(
+            sample_client,
+            mock_native_daemon,
+            session_status=SessionStatus.ACTIVE,
+            task_overrides={"disposition": disposition},
+        )
+        assert result.delivered is True
+        assert len(mock_native_daemon.spawn_calls) == 1
+
+    @pytest.mark.parametrize(
+        "session_status", [SessionStatus.ACTIVE, SessionStatus.IDLE]
+    )
+    def test_blocked_with_plan_ambiguous_resumes(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        session_status: SessionStatus,
+    ) -> None:
+        result = self._run(
+            sample_client,
+            mock_native_daemon,
+            session_status=session_status,
+            task_overrides={
+                "disposition": "blocked",
+                "blocked_reason": "plan_ambiguous",
+            },
+        )
+        assert result.delivered is True
+        assert len(mock_native_daemon.spawn_calls) == 1
+
+    @pytest.mark.parametrize(
+        "session_status", [SessionStatus.ACTIVE, SessionStatus.IDLE]
+    )
+    @pytest.mark.parametrize("disposition", _REFUSED_DISPOSITIONS)
+    def test_mechanical_park_is_refused_with_its_disposition_named(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        disposition: str,
+        session_status: SessionStatus,
+    ) -> None:
+        """The IDLE variant is the regression for the short-circuit that used
+        to resume an IDLE session before looking at its row at all."""
+        result = self._assert_refused_untouched(
+            mock_native_daemon,
+            lambda: self._run(
+                sample_client,
+                mock_native_daemon,
+                session_status=session_status,
+                task_overrides={"disposition": disposition},
+            ),
+        )
+        assert f"disposition '{disposition}'" in result.reason
+        assert "cannot clear" in result.reason
+        assert "stays queued" in result.reason
+        assert "cw dev-queue show 2287 -c test-client" in result.reason
+        assert DEFERRED_LIVE_DELIVERY_REASON not in result.reason
+        assert "#2255" not in result.reason
+
+    @pytest.mark.parametrize(
+        ("blocked_reason", "wording"),
+        [
+            ("agent_block", "(blocker reason 'agent_block')"),
+            (None, "(no blocker reason recorded)"),
+        ],
+    )
+    def test_blocked_with_other_reason_is_refused(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        blocked_reason: str | None,
+        wording: str,
+    ) -> None:
+        result = self._assert_refused_untouched(
+            mock_native_daemon,
+            lambda: self._run(
+                sample_client,
+                mock_native_daemon,
+                session_status=SessionStatus.ACTIVE,
+                task_overrides={
+                    "disposition": "blocked",
+                    "blocked_reason": blocked_reason,
+                },
+            ),
+        )
+        assert f"disposition 'blocked' {wording}" in result.reason
+
+    @pytest.mark.parametrize(
+        "session_status", [SessionStatus.ACTIVE, SessionStatus.IDLE]
+    )
+    def test_no_recorded_disposition_is_refused_fail_closed(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        session_status: SessionStatus,
+    ) -> None:
+        result = self._assert_refused_untouched(
+            mock_native_daemon,
+            lambda: self._run(
+                sample_client,
+                mock_native_daemon,
+                session_status=session_status,
+                task_overrides={"disposition": None},
+            ),
+        )
+        assert "no recorded disposition" in result.reason
+        assert "cannot clear" in result.reason
+
+    @pytest.mark.parametrize(
+        "status", [QueueItemStatus.RUNNING, QueueItemStatus.COMPLETED, None]
+    )
+    def test_idle_session_without_a_blocked_row_is_still_eligible(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        status: QueueItemStatus | None,
+    ) -> None:
+        """No BLOCKED_ON_USER row owns the session: IDLE-only behaviour."""
+        write_clients_yaml(sample_client)
+        session = _eligible_session(sample_client, status=SessionStatus.IDLE)
+        _persist(session)
+        tasks = (
+            []
+            if status is None
+            else [
+                _make_ticket_task(
+                    ticket_id="2287",
+                    client="test-client",
+                    status=status,
+                    session_id=session.id,
+                )
+            ]
+        )
+        adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
+
+        with patch("cw.session_resume_trigger.list_tickets", return_value=tasks):
+            result = adapter.trigger(session, _MESSAGE)
+
+        assert result.delivered is True
+        assert len(mock_native_daemon.spawn_calls) == 1
+
+    def test_active_session_with_a_running_row_keeps_the_deferred_reason(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        result = self._assert_refused_untouched(
+            mock_native_daemon,
+            lambda: self._run(
+                sample_client,
+                mock_native_daemon,
+                session_status=SessionStatus.ACTIVE,
+                task_overrides={"status": QueueItemStatus.RUNNING},
+            ),
+        )
+        assert result.reason == DEFERRED_LIVE_DELIVERY_REASON
+
+    def test_codex_orphan_link_is_matched_and_refused(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """``session_id`` is cleared on the codex boot-orphan park; the row
+        links back only through ``codex_orphan_session_id``."""
+        result = self._assert_refused_untouched(
+            mock_native_daemon,
+            lambda: self._run(
+                sample_client,
+                mock_native_daemon,
+                session_status=SessionStatus.ACTIVE,
+                task_overrides={
+                    "session_id": None,
+                    "codex_orphan_session_id": "sess2212",
+                    "disposition": "codex_review_orphaned_at_boot",
+                },
+            ),
+        )
+        assert "disposition 'codex_review_orphaned_at_boot'" in result.reason
+        assert DEFERRED_LIVE_DELIVERY_REASON not in result.reason
+
+    def test_park_changed_to_mechanical_between_outer_check_and_lock_is_refused(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """The locked recheck applies the same disposition gate: a row that
+        moved from a resolvable park to a mechanical one is refused."""
+        write_clients_yaml(sample_client)
+        session = _eligible_session(sample_client, status=SessionStatus.ACTIVE)
+        _persist(session)
+        common: dict[str, object] = {
+            "ticket_id": "2287",
+            "client": "test-client",
+            "status": QueueItemStatus.BLOCKED_ON_USER,
+            "session_id": session.id,
+        }
+        resumable = _make_ticket_task(
+            **common, disposition="ambiguities_pending_resolution"
+        )
+        mechanical = _make_ticket_task(**common, disposition="merge_gate_blocked")
+        adapter = NativeDaemonResumeTriggerAdapter(native_daemon=mock_native_daemon)
+
+        with patch(
+            "cw.session_resume_trigger.list_tickets",
+            side_effect=[[resumable], [mechanical]],
+        ):
+            result = adapter.trigger(session, _MESSAGE)
+
+        assert result.delivered is False
+        assert "disposition 'merge_gate_blocked'" in result.reason
+        assert mock_native_daemon.spawn_calls == []
+        assert mock_native_daemon.stop_calls == []
+
+
+class TestParkGateDriftGuards:
+    """Pin the gate's literals to the vocabularies they mirror (#2287)."""
+
+    def test_plan_ambiguous_is_a_registered_blocker_reason(self) -> None:
+        assert "plan_ambiguous" in KNOWN_BLOCKER_REASONS
+
+    def test_a_blocked_sentinel_is_stamped_with_the_literal_the_gate_matches(
+        self,
+    ) -> None:
+        assert _derive_disposition("blocked") == "blocked"
+
+    def test_resolvable_set_matches_the_reconcile_constant(self) -> None:
+        assert (
+            PAUSED_FOR_USER_INPUT_STATUSES | {_STOPPED_WITHOUT_SENTINEL_REASON}
+        ) == _MESSAGE_RESOLVABLE_DISPOSITIONS
+
+    def test_no_named_mechanical_disposition_is_resolvable(self) -> None:
+        assert (
+            not set(_NAMED_MECHANICAL_DISPOSITIONS) & _MESSAGE_RESOLVABLE_DISPOSITIONS
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -577,6 +907,7 @@ class TestConcurrentSendGuard:
             client="test-client",
             status=QueueItemStatus.BLOCKED_ON_USER,
             session_id=session.id,
+            disposition="ambiguities_pending_resolution",
         )
         running_task = _make_ticket_task(
             ticket_id="2212",

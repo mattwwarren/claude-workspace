@@ -19,9 +19,13 @@ from cw.gh import (
     branch_exists_on_origin,
     branch_head_sha_on_origin,
     check_gh_availability,
+    create_pr,
     current_gh_login,
     disarm_pr_auto_merge,
+    edit_pr_body,
     fetch_approved_plan_comment,
+    fetch_open_pr_heads,
+    fetch_pr_changed_files,
     fetch_pr_head,
     fetch_pr_view,
     github_pr_url,
@@ -2251,6 +2255,172 @@ class TestDisarmPrAutoMerge:
         monkeypatch.setattr("cw.gh._sp.run", _raise)
 
         assert disarm_pr_auto_merge(self._PR_URL) is None
+
+
+def _raise_timeout(*_a: object, **_kw: object) -> Any:
+    raise subprocess.TimeoutExpired(["gh"], 30)
+
+
+class TestCreatePr:
+    """create_pr: policy-free gh pr create with --body-file, never draft (#3062)."""
+
+    def test_argv_cwd_and_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: list[tuple[list[str], dict[str, object]]] = []
+        sentinel = _make_run_result(0, "https://github.com/o/r/pull/9\n")
+
+        def _fake_run(args: list[str], **kwargs: object) -> Any:
+            captured.append((list(args), kwargs))
+            return sentinel
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        body = Path("/tmp/body.md")
+        result = create_pr(
+            base="main",
+            head="dev/9",
+            title="feat: x (#9)",
+            body_file=body,
+            cwd=Path("/repo"),
+            timeout=7,
+        )
+        assert result is sentinel
+        argv, kwargs = captured[0]
+        assert argv == [
+            "gh",
+            "pr",
+            "create",
+            "--base",
+            "main",
+            "--head",
+            "dev/9",
+            "--title",
+            "feat: x (#9)",
+            "--body-file",
+            str(body),
+        ]
+        assert "--draft" not in argv
+        assert kwargs["cwd"] == Path("/repo")
+        assert kwargs["timeout"] == 7
+
+    def test_timeout_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cw.gh._sp.run", _raise_timeout)
+        assert create_pr(base="m", head="h", title="t", body_file=Path("/b")) is None
+
+
+class TestEditPrBody:
+    """edit_pr_body: policy-free gh pr edit --body-file (#3062)."""
+
+    def test_argv(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: list[list[str]] = []
+        sentinel = _make_run_result(0, "")
+
+        def _fake_run(args: list[str], **_kwargs: object) -> Any:
+            captured.append(list(args))
+            return sentinel
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        assert edit_pr_body("9", body_file=Path("/b")) is sentinel
+        assert captured == [["gh", "pr", "edit", "9", "--body-file", "/b"]]
+
+    def test_timeout_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cw.gh._sp.run", _raise_timeout)
+        assert edit_pr_body("9", body_file=Path("/b")) is None
+
+
+class TestFetchOpenPrHeads:
+    """fetch_open_pr_heads: fail-closed open-PR inventory (#3062)."""
+
+    def test_author_and_parse(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: list[list[str]] = []
+        payload = json.dumps(
+            [{"number": 4, "headRefName": "dev/4"}, {"number": 5, "headRefName": "x"}]
+        )
+
+        def _fake_run(args: list[str], **_kwargs: object) -> Any:
+            captured.append(list(args))
+            return _make_run_result(0, payload)
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        heads = fetch_open_pr_heads("@me")
+        assert heads == [(4, "dev/4"), (5, "x")]
+        assert captured[0][:7] == [
+            "gh",
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--author",
+            "@me",
+        ]
+        assert "--limit" in captured[0]
+
+    def test_no_author_lists_every_pr(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: list[list[str]] = []
+
+        def _fake_run(args: list[str], **_kwargs: object) -> Any:
+            captured.append(list(args))
+            return _make_run_result(0, "[]")
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        assert fetch_open_pr_heads(None) == []
+        assert "--author" not in captured[0]
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            "not json",
+            "{}",
+            '[{"number": "4", "headRefName": "x"}]',
+            '[{"number": 4}]',
+            "[1]",
+        ],
+    )
+    def test_malformed_is_none(
+        self, monkeypatch: pytest.MonkeyPatch, stdout: str
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(0, stdout)
+        )
+        assert fetch_open_pr_heads("@me") is None
+
+    def test_truncated_listing_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cw.gh.pr_reads import _OPEN_PR_HEADS_LIMIT
+
+        payload = json.dumps(
+            [{"number": i, "headRefName": f"b{i}"} for i in range(_OPEN_PR_HEADS_LIMIT)]
+        )
+        monkeypatch.setattr(
+            "cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(0, payload)
+        )
+        assert fetch_open_pr_heads(None) is None
+
+    def test_nonzero_and_timeout_are_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(1, ""))
+        assert fetch_open_pr_heads("@me") is None
+        monkeypatch.setattr("cw.gh._sp.run", _raise_timeout)
+        assert fetch_open_pr_heads("@me") is None
+
+
+class TestFetchPrChangedFiles:
+    """fetch_pr_changed_files: gh pr diff --name-only, fail closed (#3062)."""
+
+    def test_parses_names(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: list[list[str]] = []
+
+        def _fake_run(args: list[str], **_kwargs: object) -> Any:
+            captured.append(list(args))
+            return _make_run_result(0, "a.py\n\nb/c.py\n")
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        assert fetch_pr_changed_files(7) == ["a.py", "b/c.py"]
+        assert captured == [["gh", "pr", "diff", "7", "--name-only"]]
+
+    def test_failure_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(1, ""))
+        assert fetch_pr_changed_files(7) is None
+        monkeypatch.setattr("cw.gh._sp.run", _raise_timeout)
+        assert fetch_pr_changed_files(7) is None
 
 
 class TestPostIssueComment:

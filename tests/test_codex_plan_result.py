@@ -12,12 +12,17 @@ from cw.auto_dev_result.parse import extract_block
 from cw.codex_plan._result import (
     MODEL_TEXT_DISCARDED_FRICTION,
     PLAN_MD_RELATIVE_PATH,
+    PLAN_MD_REPLACED_PREFIX,
     ROUND_ZERO_LINE,
     PlanTurn,
     PlanTurnFailure,
+    backup_plan_md,
     clean_plan_text,
+    draft_fingerprint_on_disk,
+    existing_plan_md_fingerprint,
     parse_plan_turn,
     plan_blocked,
+    plan_md_replaced_token,
     read_resume_draft,
     stamp_plan_result,
     write_plan_draft,
@@ -298,6 +303,156 @@ class TestWriteDraft:
         with pytest.raises(OSError, match="existing plan draft is empty"):
             write_plan_draft(tmp_path, _PLAN)
         assert path.read_bytes() == original
+        assert _draft_backups(tmp_path) == []
+
+    def test_a_differing_rewrite_backs_up_the_prior_draft(self, tmp_path: Path) -> None:
+        """#3490: a re-park keeps the operator's prior text in a backup."""
+        prior = ROUND_ZERO_LINE + "operator-edited body\n"
+        _draft(tmp_path, prior)
+
+        write_plan_draft(tmp_path, _PLAN)
+
+        (backup,) = _draft_backups(tmp_path)
+        assert backup.read_text(encoding="utf-8") == prior
+
+    def test_a_first_write_makes_no_backup(self, tmp_path: Path) -> None:
+        write_plan_draft(tmp_path, _PLAN)
+
+        assert _draft_backups(tmp_path) == []
+
+    def test_an_identical_rewrite_makes_no_backup(self, tmp_path: Path) -> None:
+        """Repeated identical re-parks do not evict distinct operator edits."""
+        write_plan_draft(tmp_path, _PLAN)
+
+        write_plan_draft(tmp_path, _PLAN)
+
+        assert _draft_backups(tmp_path) == []
+
+    def test_an_unreadable_draft_is_refused_before_any_backup(
+        self, tmp_path: Path
+    ) -> None:
+        _draft_bytes(tmp_path, b"\xff\xfe")
+
+        with pytest.raises(OSError, match="existing plan draft is unreadable"):
+            write_plan_draft(tmp_path, _PLAN)
+
+        assert _draft_backups(tmp_path) == []
+
+    def test_a_backup_failure_does_not_block_the_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _draft(tmp_path, ROUND_ZERO_LINE + "prior body\n")
+
+        def _fail(*_args: object, **_kwargs: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.atomic.shutil.copy2", _fail)
+
+        path = write_plan_draft(tmp_path, _PLAN)
+
+        assert path.read_text(encoding="utf-8") == ROUND_ZERO_LINE + _PLAN
+        assert _draft_backups(tmp_path) == []
+
+
+def _plan_md(worktree: Path, data: bytes) -> Path:
+    path = worktree / PLAN_MD_RELATIVE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+def _plan_md_backups(worktree: Path) -> list[Path]:
+    path = worktree / PLAN_MD_RELATIVE_PATH
+    return sorted(path.parent.glob(f"{path.name}.bak-*"))
+
+
+class TestDraftFingerprintOnDisk:
+    """#3526: the blocked exits read the draft's digest from disk."""
+
+    def test_the_digest_of_the_written_draft(self, tmp_path: Path) -> None:
+        path = write_plan_draft(tmp_path, _PLAN)
+
+        assert draft_fingerprint_on_disk(tmp_path) == compute_plan_draft_fingerprint(
+            path.read_text(encoding="utf-8")
+        )
+
+    def test_none_when_absent(self, tmp_path: Path) -> None:
+        assert draft_fingerprint_on_disk(tmp_path) is None
+
+    def test_none_when_not_utf8(self, tmp_path: Path) -> None:
+        _draft_bytes(tmp_path, b"\xff\xfe")
+
+        assert draft_fingerprint_on_disk(tmp_path) is None
+
+
+class TestPlanMdReplacement:
+    """#3498: the helpers behind replacing an existing ``.cw/plan.md``."""
+
+    def test_write_plan_md_is_a_pure_atomic_write(self, tmp_path: Path) -> None:
+        write_plan_md(tmp_path, "first\n")
+        write_plan_md(tmp_path, "second\n")
+
+        assert (tmp_path / PLAN_MD_RELATIVE_PATH).read_text() == "second\n"
+        assert _plan_md_backups(tmp_path) == []
+
+    def test_backup_plan_md_snapshots_the_existing_plan(self, tmp_path: Path) -> None:
+        _plan_md(tmp_path, b"old plan\n")
+
+        assert backup_plan_md(tmp_path) is True
+
+        (backup,) = _plan_md_backups(tmp_path)
+        assert backup.read_bytes() == b"old plan\n"
+
+    def test_backup_plan_md_reports_a_failed_snapshot(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _plan_md(tmp_path, b"old plan\n")
+
+        def _fail(*_args: object, **_kwargs: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.atomic.shutil.copy2", _fail)
+
+        assert backup_plan_md(tmp_path) is False
+
+    def test_the_fingerprint_is_none_when_absent(self, tmp_path: Path) -> None:
+        assert existing_plan_md_fingerprint(tmp_path) is None
+
+    def test_the_fingerprint_is_unreadable_for_non_utf8(self, tmp_path: Path) -> None:
+        _plan_md(tmp_path, b"\xff\xfe")
+
+        assert existing_plan_md_fingerprint(tmp_path) == "unreadable"
+
+    def test_the_fingerprint_is_the_raw_text_digest(self, tmp_path: Path) -> None:
+        _plan_md(tmp_path, b"old plan\n")
+
+        assert existing_plan_md_fingerprint(tmp_path) == compute_plan_draft_fingerprint(
+            "old plan\n"
+        )
+
+    @pytest.mark.parametrize(
+        ("backup_ok", "suffix"), [(True, "backup=ok"), (False, "backup=failed")]
+    )
+    def test_the_token_names_both_fingerprints_and_the_backup(
+        self, backup_ok: bool, suffix: str
+    ) -> None:
+        token = plan_md_replaced_token("aaa", "bbb", backup_ok=backup_ok)
+
+        assert token == f"{PLAN_MD_REPLACED_PREFIX}old=aaa new=bbb {suffix}"
+        assert token.startswith("plan_md_replaced: ")
+
+
+def _draft_bytes(worktree: Path, data: bytes) -> None:
+    path = worktree / PLAN_DRAFT_RELATIVE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
+def _draft_backups(worktree: Path) -> list[Path]:
+    draft = worktree / PLAN_DRAFT_RELATIVE_PATH
+    return sorted(draft.parent.glob(f"{draft.name}.bak-*"))
 
 
 def test_plan_md_is_written_with_both_markers(tmp_path: Path) -> None:

@@ -8,7 +8,9 @@ that correctly leaves baselined debt unfixed is failed by a stricter re-check
 downstream. The gate prose itself has no parser (sibling pattern:
 `tests/test_scope_conformance_gate_docs.py`); the deferred-findings entry it
 tells the orchestrator to hand-write does, so that shape is round-tripped
-through the real parser here.
+through the real parser here. Gate 4's failure text is pinned to the Stage 2
+fix-all rule the same way: both slices must quote one sentence, so the two
+cannot drift apart.
 """
 
 from cw.review_adjudication._deferred_md import (
@@ -18,7 +20,7 @@ from cw.review_adjudication._deferred_md import (
     _DEFERRED_SENTINEL,
     parse_deferred_findings_md,
 )
-from tests._shared.workflow_text import _cmd
+from tests._shared.workflow_text import _cmd, _norm, _section_between
 
 _SECTION = "Type check gate: mypy baseline detection and comparison"
 
@@ -81,3 +83,51 @@ def test_documented_skeleton_and_entry_parse_as_one_deferral() -> None:
     assert len(entries) == 1
     assert entries[0].outcome == "defer"
     assert entries[0].file == "src/app.py"
+
+
+_FIX_ALL_RULE = (
+    "fix every mypy error in touched files, pre-existing ones included — "
+    "treat those as active bugs, not noise to inherit"
+)
+_STAGE2_START = "Type check gate (do NOT declare complete until clean)"
+_STAGE2_END = "**Override sweep.**"
+_GATE4_START = "4. **Mypy/ruff clean on touched files**"
+_GATE4_END = "5. **Incremental commit discipline**"
+
+
+def _stage2_gate() -> str:
+    return _norm(_section_between(_cmd("auto-dev-impl.md"), _STAGE2_START, _STAGE2_END))
+
+
+def _gate4() -> str:
+    return _norm(_section_between(_cmd("auto-dev-impl.md"), _GATE4_START, _GATE4_END))
+
+
+def test_fix_all_rule_is_quoted_in_stage2_gate_and_gate4() -> None:
+    """Gate 4's failure text quotes the Stage 2 fix-all rule as written."""
+    assert _FIX_ALL_RULE in _stage2_gate()
+    assert _FIX_ALL_RULE in _gate4()
+
+
+def test_gate4_failure_text_names_scope_and_verbatim_errors() -> None:
+    """Gate 4's failure text carries the verbatim errors and the touched-file scope."""
+    gate4 = _gate4()
+    assert "Gate 4 failure text" in gate4
+    assert "verbatim mypy output" in gate4
+    assert "names the scope: the touched files the re-run covered" in gate4
+
+
+def test_gate4_forbids_fork_point_delta_framing() -> None:
+    """No-baseline and strict-override branches never reason from fork-point deltas."""
+    gate4 = _gate4()
+    assert "Never reason from fork-point error-count deltas" in gate4
+    assert "never describe pre-existing errors in a touched file as tolerated" in gate4
+    assert (
+        "`$FORK_POINT` is used only for baseline detection "
+        "and the baseline no-growth check" in gate4
+    )
+
+
+def test_review_gate_3b_still_delegates_to_gate4() -> None:
+    """Stage 3 gate 3b inherits gate 4's rule by reference, not by copy."""
+    assert "Step 2.5 gate 4 applies" in _flat("auto-dev-review.md")

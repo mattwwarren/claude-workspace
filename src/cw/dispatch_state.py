@@ -329,9 +329,14 @@ def record_usage_limit_armed(
     The single arming audit for both the dispatch loop's spawn-time arm (#1409)
     and reconcile's mid-turn arm (#2324). *until* is the deadline
     :func:`resolve_usage_limited_until` already picked from *reset_at*; it was
-    taken from the parsed reset iff the two are equal. Callers persist the
-    window only after this returns, so a failed event write never leaves a
-    lockout without its audit record.
+    taken from the parsed reset iff the two are equal.
+
+    The two callers deliberately use different orders. Reconcile's mid-turn arm
+    audits FIRST, then persists; it relies on that order for resume-idempotence
+    (``_lockout_covers`` skips re-arming once the window lands). The dispatch
+    loop's arm persists FIRST, reads back, then audits, so an armed event never
+    names a window the write lost (#2276). See ``docs/events.md`` for the
+    rationale.
     """
     source = (
         USAGE_LIMIT_SOURCE_PARSED_RESET
@@ -383,7 +388,9 @@ def merge_and_save_usage_limited_until(
     ``availability_probe`` key (RFC 0011 A5) is preserved rather than
     clobbered (#1157). Creates STATE_DIR if needed. Silently swallows write
     errors — a failed persist just means the next loop start won't honour the
-    backoff (acceptable degradation).
+    backoff (acceptable degradation). The swallow is by design: a caller that
+    must know whether the window landed reads it back (``_arm_usage_limit_windows``,
+    ``_arm_lockout``).
     """
     try:
         refuse_real_state_write(DISPATCH_STATE_FILE)
@@ -404,6 +411,8 @@ def merge_and_save_usage_limited_until(
 
 def load_usage_limit_armed_at() -> datetime | None:
     """Load the persisted usage-limit backoff arm timestamp (#1343).
+
+    FLEET-LEVEL (#2276): the latest arm time across clients, not per client.
 
     Unlike :func:`load_usage_limited_until`, this is a historical marker, not
     a forward-looking deadline: it is NOT expiry-checked against "now", so it
@@ -427,6 +436,10 @@ def load_usage_limit_armed_at() -> datetime | None:
 
 def save_usage_limit_armed_at(dt: datetime | None) -> None:
     """Persist (or clear) the usage-limit backoff arm timestamp (#1343).
+
+    FLEET-LEVEL (#2276): the value is the LATEST arm time across clients, not a
+    per-client arm time; no per-client arm time is recorded. It feeds the single
+    ``dispatch.usage_limit_cleared`` ``detected_at``.
 
     Writes ``{"usage_limit_armed_at": "<iso>"}`` when *dt* is set; writes
     ``{"usage_limit_armed_at": null}`` to clear it. Read-merge-writes the

@@ -4,6 +4,7 @@ Pure-markdown assertions over the auto-dev pipeline instruction files. Mirrors t
 ``read_text()`` + literal-substring convention of ``test_auto_dev_model_pins.py``.
 """
 
+import re
 from pathlib import Path
 
 from tests._shared.workflow_text import _appendix, _cmd
@@ -699,3 +700,193 @@ def test_step1c_exit_gating_ignores_deferred() -> None:
     assert "`deferred` never gates" in section
     window = _after(section, "Keys on `parked` and `unverified` ONLY", span=600)
     assert "`self_verified` and/or `deferred`" in window
+
+
+# ---------------------------------------------------------------------------
+# Recommendation-token omission: re-prompt + tolerant adoption (#1500)
+# ---------------------------------------------------------------------------
+
+_HEADLESS_ANCHOR = "4. **Headless mode:**"
+_FORMAT_CHECK_HEADING = (
+    "**Step 4a.0 — Recommendation format check (pre-partition, headless only, #1500).**"
+)
+_PARTITION_HEADING = "**Step 4a — Partition"
+_TOLERANT_HEADING = (
+    "**Tolerant prose-adoption (#1500, headless only; applies only after Step 4a.0).**"
+)
+_ALLOWED_PLAN_STAGE_NAMES = {
+    "scan-round",
+    "last-evaluated",
+    "settled",
+    "resolutions-attempted",
+    "approval-revoked",
+    "resolutions-applied",
+}
+
+
+def _format_check_text() -> str:
+    """Step 4a.0 paragraph: from its heading up to the Step 4a partition."""
+    headless = _step1c_section()
+    headless = headless[headless.index(_HEADLESS_ANCHOR) :]
+    start = headless.index(_FORMAT_CHECK_HEADING)
+    return headless[start : headless.index(_PARTITION_HEADING)]
+
+
+def _tolerant_text() -> str:
+    """Tolerant prose-adoption paragraph: heading up to the premises partition."""
+    headless = _step1c_section()
+    headless = headless[headless.index(_HEADLESS_ANCHOR) :]
+    start = headless.index(_TOLERANT_HEADING)
+    end = headless.index("**Same partition, mirrored for premises", start)
+    return headless[start:end]
+
+
+def test_step1b_emit_requires_literal_token_even_when_prose_resolves() -> None:
+    """Step 1b tells the emitter to write the literal token even when prose resolves."""
+    section = _step1b_section()
+    assert (
+        "Emit the literal `Recommendation:` line on every item even when your "
+        "prose already resolves the question"
+    ) in section
+    assert "Recommendation is mandatory on every item — never omit it." in section
+    assert "is treated as PARK downstream" in section
+
+
+def test_step4a_format_check_precedes_partition() -> None:
+    """Step 4a.0 sits in the headless branch, ahead of the Step 4a partition."""
+    section = _step1c_section()
+    headless = section[section.index(_HEADLESS_ANCHOR) :]
+    assert _FORMAT_CHECK_HEADING in headless
+    assert headless.index(_FORMAT_CHECK_HEADING) < headless.index(_PARTITION_HEADING)
+
+
+def test_step4a_format_check_reprompts_exactly_once_emitting_agent() -> None:
+    """The format check re-spawns the emitting agent once, with no loop or budget."""
+    text = _format_check_text()
+    for phrase in (
+        "exactly once",
+        "the Plan agent when Step 1c.1 took the Step 1b self-emitted "
+        "`## Ambiguities` section",
+        "Product Manager Reviewer",
+        "fresh agent (not `SendMessage`)",
+        "same N questions",
+        "exact ordered identity match",
+        "original question and plan-assumption text",
+        "not just the item count",
+        "no loop",
+        "does not consume the Step 1f revision-cycle budget",
+        "persists no bookkeeping line",
+        "keep every originally well-formed item verbatim",
+        "reject the whole re-emit",
+    ):
+        assert phrase in text, phrase
+
+
+def test_step4a_format_check_exhaustion_fails_closed_to_1274_default() -> None:
+    """A still-malformed item after the one re-prompt falls to the #1274 default."""
+    text = _format_check_text()
+    assert "still missing or malformed after that single re-prompt" in text
+    assert "the existing #1274 default (malformed → PARK)" in text
+    assert "treat a failed re-prompt as exhausted" in text
+
+
+def test_step4a_tolerant_prose_adoption_rule_text() -> None:
+    """The tolerant rule carries closed criteria and fail-closed safety phrases."""
+    text = _tolerant_text()
+    for phrase in (
+        "safe to auto-adopt",
+        "keep the plan's (current) assumption",
+        "no human/operator decision is needed/required",
+        "already settled/resolved/answered by",
+        "a well-formed `PARK` is never converted",
+        "product/scope intent, public-contract shape",
+        "destructive-action semantics",
+        "Any doubt → parked",
+        "no sentence quotable verbatim → parked",
+        "tolerant adopt (no literal Recommendation token):",
+    ):
+        assert phrase in text, phrase
+
+
+def test_step4a_tolerant_rule_documents_1279_and_unresolved_examples() -> None:
+    """The rule documents the #1279 shape (adopted) and an unresolved one (parked)."""
+    text = _tolerant_text()
+    assert "#1279 attempt 1" in text
+    assert "adopted" in text
+    assert "parked" in text
+    assert "(documented example, not an executed fixture)" in text
+
+
+def test_step4a_partition_carve_out_replaces_no_exceptions() -> None:
+    """The partition's bare 'no exceptions' now names the tolerant carve-out."""
+    section = _step1c_section()
+    window = _after(section, _PARTITION_HEADING, span=900)
+    assert "no exceptions beyond the Tolerant prose-adoption carve-out below" in window
+    assert (
+        "a missing `Recommendation:` sub-bullet, or any unparseable/malformed "
+        "value all default-safe to parked"
+    ) in window
+
+
+def test_malformed_recommendation_tally_counts_post_retry_post_tolerance() -> None:
+    """The tally is taken after the re-prompt and the tolerant adoption rule."""
+    section = _step1c_section()
+    window = _after(section, "**Malformed-recommendation tally", span=1500)
+    assert "Counted after Step 4a.0 and the tolerant prose-adoption rule" in window
+    assert "including one the tolerance rule examined and refused" in window
+    assert "tally `malformed_recommendation_count`" in window
+    assert "does not introduce a third partition bucket" in window
+    assert (
+        "excluding items that parked via a well-formed, explicit "
+        "`Recommendation: PARK — ...` line"
+    ) in window
+
+
+def test_new_1500_rules_are_headless_only() -> None:
+    """Both new paragraphs sit in the headless branch, after the interactive one."""
+    content = _cmd("auto-dev-plan.md")
+    headless_idx = content.index(_HEADLESS_ANCHOR)
+    assert content.index(_FORMAT_CHECK_HEADING) > headless_idx
+    assert content.index(_TOLERANT_HEADING) > headless_idx
+    interactive = content.index(
+        "**`AMBIGUITIES — N items`** → present each ambiguity to the user via "
+        "AskUserQuestion"
+    )
+    assert interactive < headless_idx
+
+
+def test_step1c1_names_step4a0_as_bounded_exception_to_no_respawn() -> None:
+    """Step 1c.1's 'do NOT re-spawn' bullet points at the one Step 4a.0 exception."""
+    section = _step1c_section()
+    window = _after(
+        section,
+        "use that list directly — do NOT re-spawn an agent.",
+        span=900,
+    )
+    assert "Step 4a.0" in window
+    assert "no ambiguity-scan agent is spawned" in window
+
+
+def test_pm_reviewer_mode1_reemit_request_and_tolerance_language() -> None:
+    """The PM reviewer's Mode 1 spec documents the re-emit request and tolerance."""
+    content = _agent("product-manager-reviewer.md")
+    for phrase in (
+        "**Re-emit request (#1500).**",
+        "same items, same order",
+        "re-prompted once",
+        "unless the item's own prose unambiguously adopts",
+        "ADOPT only when getting it wrong is cheap to unwind",
+        "a missing or malformed `Recommendation` line",
+        "is treated as PARK downstream",
+    ):
+        assert phrase in content, phrase
+
+
+def test_reemit_does_not_touch_premises_or_bookkeeping_grammar() -> None:
+    """Premises are not re-prompted and the closed plan-stage grammar is unchanged."""
+    assert (
+        "Premises (`Verified:`/`Impact:`) are not re-prompted" in _format_check_text()
+    )
+    content = _cmd("auto-dev-plan.md")
+    names = set(re.findall(r"plan-stage-([a-z]+(?:-[a-z]+)*)", content))
+    assert names <= _ALLOWED_PLAN_STAGE_NAMES, names - _ALLOWED_PLAN_STAGE_NAMES

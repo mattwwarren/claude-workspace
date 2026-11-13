@@ -27,12 +27,11 @@ from cw.worktree._git import (
 )
 from cw.worktree._paths import worktree_path_for
 from cw.worktree._refresh import _raise_if_occupied, _refresh_reused_worktree
-from cw.worktree._refresh_types import ReuseRefreshReport
+from cw.worktree._refresh_types import ReuseRefreshOptions, ReuseRefreshReport
 from cw.worktree._unsaved import worktree_has_unsaved_work
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig
-    from cw.native_daemon import NativeDaemonClient
 
 _log = logging.getLogger(__name__)
 
@@ -176,10 +175,7 @@ def create_worktree(
     *,
     force: bool = False,
     allow_dirty_reuse: bool = False,
-    refresh_on_reuse: bool = False,
-    refresh_report: ReuseRefreshReport | None = None,
-    ticket_id: str | None = None,
-    native_daemon: NativeDaemonClient | None = None,
+    refresh: ReuseRefreshOptions | None = None,
 ) -> Path:
     """Create a git worktree for the given branch.
 
@@ -190,10 +186,11 @@ def create_worktree(
 
     By default reuse is path resolution only: no fetch, no fast-forward.
 
-    *refresh_on_reuse* (#2213) opts a caller into a best-effort refresh of a
-    reused worktree, for callers whose purpose is a fresh per-ticket worktree
-    (dispatch claim, fix-agent dispatch). It has side effects a path-resolution
-    call would not suggest:
+    *refresh* (#2213, #2238), a :class:`ReuseRefreshOptions`, opts a caller
+    into a best-effort refresh of a reused worktree, for callers whose purpose
+    is a fresh per-ticket worktree (dispatch claim, fix-agent dispatch). Its
+    presence IS the opt-in; ``None`` (the default) is path resolution only.
+    The refresh has side effects a path-resolution call would not suggest:
 
     - **Network:** it runs ``git fetch origin <branch>``, which can be slow or
       fail. A failed fetch skips the fast-forward entirely and uses the
@@ -226,38 +223,37 @@ def create_worktree(
       the branch has diverged from origin (WARNING), ``--ff-only`` itself
       refuses (WARNING), ``origin/<branch>`` does not exist, or it already
       matches origin. This function returns the path; the reason is on
-      *refresh_report* and, for failures, in a note. A wrong branch is
+      ``refresh.report`` and, for failures, in a note. A wrong branch is
       stricter still: the identity guard above raises :exc:`StaleWorktreeError`
       before any refresh, and the pre-merge re-check raises the same error if
       the branch changed during the fetch (see :func:`_ff_reused_worktree`) --
       neither is returned as ``NOT_REFRESHED``.
 
-    *refresh_report* (#2213) is an out-parameter (:class:`ReuseRefreshReport`)
-    for callers that want more than the path. Its ``notes`` receive one line per
-    refresh FAILURE (fetch failed, with git's reason; fast-forward refused by
-    git; diverged; an OS error; a submodule sync failed), each naming the
-    worktree and the reason. Its
-    ``outcome`` and ``reason`` are the verdict, filled in before this function
-    returns or raises. The occupancy refusal does not depend on it: it is the
-    exception. Ignored unless *refresh_on_reuse* is set.
+    The options' three fields:
 
-    *ticket_id* (#2213) names the ticket the caller is working, for the audit
-    event only: a refresh that actually moves HEAD records one
-    ``worktree.fast_forwarded`` event (see ``docs/events.md``) with it as the
-    payload's ``ticket_id`` and the ``correlation_id`` (``None`` when the
-    caller has no ticket). It has no other effect and is ignored unless
-    *refresh_on_reuse* is set. The audit write is best-effort: an ``OSError``
-    from it is logged and never changes the outcome.
-
-    *native_daemon* (#2213 round 7) is the caller's own
-    :class:`~cw.native_daemon.NativeDaemonClient`, threaded through to the
-    occupancy check's daemon-roster read (:func:`live_home_reason`) instead of
-    this function defaulting to :func:`~cw.native_daemon.get_native_daemon_client`
-    internally. Defaults to that real client when omitted -- the same shape as
-    :func:`cw.session.start_session` -- so a caller that injects
-    :class:`~cw.native_daemon.FakeNativeDaemonClient` (dispatch claim, tests) is
-    actually consulted, and the host's real roster is never read out from under
-    an injected fake. Ignored unless *refresh_on_reuse* is set.
+    - ``report`` is an optional out-parameter (:class:`ReuseRefreshReport`) for
+      callers that want more than the path. Its ``notes`` receive one line per
+      refresh FAILURE (fetch failed, with git's reason; fast-forward refused by
+      git; diverged; an OS error; a submodule sync failed), each naming the
+      worktree and the reason. Its ``outcome`` and ``reason`` are the verdict,
+      filled in before this function returns or raises. The occupancy refusal
+      does not depend on it: it is the exception. ``None`` refreshes into a
+      throwaway report.
+    - ``ticket_id`` names the ticket the caller is working, for the audit event
+      only: a refresh that actually moves HEAD records one
+      ``worktree.fast_forwarded`` event (see ``docs/events.md``) with it as the
+      payload's ``ticket_id`` and the ``correlation_id`` (``None`` when the
+      caller has no ticket). It has no other effect. The audit write is
+      best-effort: an ``OSError`` from it is logged and never changes the
+      outcome.
+    - ``native_daemon`` (#2213 round 7) is the caller's own
+      :class:`~cw.native_daemon.NativeDaemonClient`, threaded through to the
+      occupancy check's daemon-roster read (:func:`live_home_reason`).
+      ``None`` uses :func:`~cw.native_daemon.get_native_daemon_client` -- the
+      same shape as :func:`cw.session.start_session` -- so a caller that
+      injects :class:`~cw.native_daemon.FakeNativeDaemonClient` (dispatch
+      claim, tests) is actually consulted, and the host's real roster is never
+      read out from under an injected fake.
 
     See :func:`_refresh_reused_worktree`.
 
@@ -306,19 +302,22 @@ def create_worktree(
                 f"Commit or push the work, then re-dispatch."
             )
             raise StaleWorktreeError(msg)
-        if refresh_on_reuse:
-            daemon = native_daemon or get_native_daemon_client()
-            refresh = _refresh_reused_worktree(
+        if refresh is not None:
+            daemon = refresh.native_daemon or get_native_daemon_client()
+            report = (
+                refresh.report if refresh.report is not None else ReuseRefreshReport()
+            )
+            result = _refresh_reused_worktree(
                 client,
                 branch,
                 wt_path,
-                refresh_report if refresh_report is not None else ReuseRefreshReport(),
-                ticket_id=ticket_id,
+                report,
+                ticket_id=refresh.ticket_id,
                 daemon=daemon,
             )
             # Occupied means another worker may be using the tree: no path
             # is handed back. Every other outcome is the caller's to use.
-            _raise_if_occupied(refresh, branch, wt_path)
+            _raise_if_occupied(result, branch, wt_path)
         return wt_path
 
     wt_path.parent.mkdir(parents=True, exist_ok=True)

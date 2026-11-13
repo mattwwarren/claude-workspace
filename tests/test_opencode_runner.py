@@ -23,10 +23,12 @@ from cw.auto_dev_result import (
     StageReached,
     parse_stdout,
 )
+from cw.contract_manifest._render import CLAUDE_ONLY_DENYLIST
 from cw.executor_diagnostics import diagnostics_bundle_dir, render_bundle_path
 from cw.models import Stage
 from cw.opencode_clean_review import REVIEW_CONFIG_INSTRUCTION
 from cw.opencode_runner import (
+    GIT_STASH_RULE,
     OPENCODE_LOG_RELATIVE_PATH,
     OPENCODE_NO_OUTPUT,
     OPENCODE_NOT_FOUND,
@@ -1363,10 +1365,14 @@ def test_build_stage_prompt_unsupported_stage_raises(tmp_path: Path) -> None:
 #: the blocking text moved by exactly that block and nothing else. Re-pinned ON
 #: PURPOSE again by #3055: the prompt gains ``REVIEW_NO_TRACKER_LINE`` right
 #: after that block; removing that one line restores the #3038 digests
-#: (``test_review_prompt_differs_from_3038_by_the_tracker_line_only``).
+#: (``test_review_prompt_differs_from_3038_by_the_tracker_and_stash_lines_only``).
+#: Re-pinned ON PURPOSE a third time by #1418: the shared preamble gains
+#: ``GIT_STASH_RULE`` after its "never run git mutations against any other
+#: checkout." sentence; removing that one sentence (and the tracker line)
+#: restores the pre-#3055 digests below.
 _BLOCKING_REVIEW_PROMPT_SHA256 = {
-    None: "1c809fe25bd378fdd50059c38bbc1777106602205de19ac8bdb27f254c33e416",
-    "abc123": "83cbac071e905bd8d4ac7c5c8ff4afd7a208ba514e6b844eff14e7809f7bf3ca",
+    None: "3f37bb07753a205ee7aed05692c883775d9d8541173ad6610f5d72db917dfd2f",
+    "abc123": "cf4dc8399c456a86089994835d63a6765adeb6e8108f09260ad2065f049e5a4e",
 }
 _PRE_3055_REVIEW_PROMPT_SHA256 = {
     None: "d6f3195f494af63e2dac66d20acbdf6a9da9bfbbff401153a577a3f2aea56f7a",
@@ -1383,11 +1389,13 @@ def test_review_prompt_blocking_is_byte_identical(session_id: str | None) -> Non
 
 
 @pytest.mark.parametrize("session_id", [None, "abc123"])
-def test_review_prompt_differs_from_3038_by_the_tracker_line_only(
+def test_review_prompt_differs_from_3038_by_the_tracker_and_stash_lines_only(
     session_id: str | None,
 ) -> None:
     prompt = build_stage_prompt("review", "T-1", Path("/wt"), session_id=session_id)
-    without = prompt.replace(f"{REVIEW_NO_TRACKER_LINE}\n", "", 1)
+    without = prompt.replace(f"{REVIEW_NO_TRACKER_LINE}\n", "", 1).replace(
+        f"{GIT_STASH_RULE} ", "", 1
+    )
     digest = hashlib.sha256(without.encode()).hexdigest()
     assert digest == _PRE_3055_REVIEW_PROMPT_SHA256[session_id]
 
@@ -1524,6 +1532,39 @@ _CANONICAL_DEFAULT_BRANCH_SENTENCE = (
     "`git symbolic-ref --short refs/remotes/origin/HEAD` prints with its leading "
     "`origin/` removed, or `main` when that command fails."
 )
+
+
+_GIT_STASH_RULE_LITERAL = (
+    "Never run `git stash`, `git stash pop` or `git stash clear`: the stash "
+    "stack is shared by every worktree of the repository, so a pop can apply "
+    "another session's work and an unrecovered stash silently loses yours. "
+    "Set work aside with a temporary WIP commit instead."
+)
+
+
+class TestGitStashRule:
+    """#1418: every opencode stage prompt carries the shared-stash rule."""
+
+    def test_the_constant_is_pinned(self) -> None:
+        assert GIT_STASH_RULE == _GIT_STASH_RULE_LITERAL
+        assert "git stash pop" in GIT_STASH_RULE
+        assert "temporary WIP commit" in GIT_STASH_RULE
+        assert not any(token in GIT_STASH_RULE for token in CLAUDE_ONLY_DENYLIST)
+
+    @pytest.mark.parametrize("stage", ["plan", "impl", "review"])
+    def test_stage_preamble_and_prompt_carry_it(self, stage: str) -> None:
+        assert GIT_STASH_RULE in _stage_preamble(stage, "T-1")
+        prompt = build_stage_prompt(stage, "T-1", Path("/wt"), session_id="abc123")
+
+        assert GIT_STASH_RULE in prompt
+        assert prompt.startswith(_stage_preamble(stage, "T-1"))
+
+    def test_clean_review_prompt_carries_it(self) -> None:
+        prompt = build_stage_prompt(
+            "review", "T-1", Path("/wt"), session_id="abc123", clean_review=True
+        )
+
+        assert GIT_STASH_RULE in prompt
 
 
 class TestReviewConfigInstruction:

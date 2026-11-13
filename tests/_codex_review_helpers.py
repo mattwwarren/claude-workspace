@@ -18,6 +18,7 @@ import pytest
 
 from cw.auto_dev_result import Review
 from cw.codex_fix_loop.baseline import CycleBaseline, cycle_touched_paths
+from cw.codex_fix_loop.cycle_restore import REF_ROOT
 from cw.codex_fix_loop.duplicate_reader import check_duplicate_reader
 from cw.codex_review import _prepare_review_pass, run_review
 from cw.codex_review._shard import plan_prompt_shards, split_diff_by_file
@@ -422,15 +423,15 @@ def assert_clean_after_refusal(worktree: Path, start_sha: str) -> str:
     """Assert a refused cycle left a clean tree plus a pinned edit ref.
 
     Empty ``git status --porcelain``, ``HEAD`` still *start_sha*, and a commit
-    pinned under ``refs/cw/refused-cycles/``. Returns that ref name. Git runs
+    pinned under ``REF_ROOT``. Returns that ref name. Git runs
     through ``tests/_git_sandbox``.
     """
     assert git_in(worktree, "status", "--porcelain") == ""
     assert git_in(worktree, "rev-parse", "HEAD") == start_sha
     refs = git_in(
-        worktree, "for-each-ref", "--format=%(refname)", "refs/cw/refused-cycles/"
+        worktree, "for-each-ref", "--format=%(refname)", f"{REF_ROOT}/"
     ).split()
-    assert refs, "no edit ref pinned under refs/cw/refused-cycles/"
+    assert refs, f"no edit ref pinned under {REF_ROOT}/"
     ref = refs[-1]
     assert git_in(worktree, "cat-file", "-t", ref) == "commit"
     return ref
@@ -563,11 +564,15 @@ class _FakeRunner:
 
     By default a fix invocation changes nothing (a tolerated no-op cycle).
     With *edit*, each fix invocation writes a new file, so the cycle commits
-    and moves ``HEAD``.
+    and moves ``HEAD``. *extra_writes* (``relpath -> content``) is written on
+    every fix invocation too, after the *edit* file.
     """
 
-    def __init__(self, *, edit: bool = False) -> None:
+    def __init__(
+        self, *, edit: bool = False, extra_writes: Mapping[str, str] | None = None
+    ) -> None:
         self._edit = edit
+        self._extra_writes = dict(extra_writes or {})
         self.fix_calls = 0
 
     def run(
@@ -583,6 +588,8 @@ class _FakeRunner:
             if self._edit:
                 path = worktree / f"fix_cycle_{self.fix_calls}.py"
                 path.write_text(f"cycle = {self.fix_calls}\n", encoding="utf-8")
+            for relpath, content in self._extra_writes.items():
+                (worktree / relpath).write_text(content, encoding="utf-8")
         return CodexRunResult(returncode=0, stdout="", stderr="")
 
 
@@ -896,6 +903,51 @@ def seed_codex_impl_run(
     seed_codex_stage_run(
         worktree=worktree,
         stage=Stage.IMPL,
+        ticket_id=ticket_id,
+        session_id=session_id,
+        task_updates=task_updates,
+    )
+    exclude_cw_dir(worktree)
+
+
+def fresh_finalize_repo(
+    make_git_repo: Callable[..., Path],
+    name: str,
+    branch: str,
+    *,
+    unpushed_commits: int = 0,
+) -> tuple[Path, Path]:
+    """A FINALIZE worktree on *branch*: one implementation commit, pushed.
+
+    ``main`` and *branch* sit on a bare origin, so the branch is a real
+    non-empty one (the review-complete state a FINALIZE row starts from).
+    *unpushed_commits* adds that many commits after the push, leaving the
+    branch ahead of ``origin/<branch>`` for the ahead-push path. Returns
+    ``(worktree, origin)``.
+    """
+    repo = make_git_repo(name)
+    git_in(repo, "checkout", "-b", branch)
+    commit_tracked_file(repo, "feature.py")
+    origin = add_bare_origin(repo)
+    for index in range(unpushed_commits):
+        commit_tracked_file(repo, f"ahead_{index}.py")
+    return repo, origin
+
+
+def seed_codex_finalize_run(
+    *,
+    worktree: Path,
+    ticket_id: str,
+    session_id: str,
+    task_updates: Mapping[str, object] | None = None,
+) -> None:
+    """Seed a FINALIZE session and RUNNING row, and git-exclude ``.cw/``.
+
+    Builds no repo: pair it with :func:`fresh_finalize_repo`.
+    """
+    seed_codex_stage_run(
+        worktree=worktree,
+        stage=Stage.FINALIZE,
         ticket_id=ticket_id,
         session_id=session_id,
         task_updates=task_updates,

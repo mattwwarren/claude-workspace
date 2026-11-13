@@ -30,10 +30,13 @@ from cw.codex_review import (
 from cw.codex_review._audit_events import _extract_terminal_error_message
 from cw.codex_review._const import _exec_policy_argv
 from cw.codex_review._roles import (
+    _classify_codex_output,
     _input_too_large,
+    _parse_codex_output,
     _role_budget,
     _role_deadline,
     _RoleBudget,
+    _run_codex_with_audit_degrade,
 )
 from cw.codex_runner import CodexRunResult
 from cw.config import state_dir
@@ -1454,6 +1457,131 @@ class TestRunCodexRoleFlagRejectionRetry:
         assert "--json" not in persisted.argv_sanitized
         assert "--ephemeral" not in persisted.argv_sanitized
         assert "still broken" in persisted.stderr_excerpt
+
+
+# ---------------------------------------------------------------------------
+# _run_codex_with_audit_degrade — the shared degrade-and-retry (#3432)
+# ---------------------------------------------------------------------------
+
+_FLAG_REJECTED = "error: unexpected argument '--json' found"
+_DEGRADE_ARGV = ["codex", "exec", "--json", "--ephemeral", "-o", "out.json"]
+
+
+def _degrade(
+    runner: _SequencedRunner, tmp_path: Path
+) -> tuple[CodexRunResult, list[str]]:
+    return _run_codex_with_audit_degrade(
+        runner, tmp_path, list(_DEGRADE_ARGV), 30, "prompt"
+    )
+
+
+class TestRunCodexWithAuditDegrade:
+    def test_a_rejection_retries_with_the_flags_stripped_and_returns_that_argv(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _SequencedRunner([CodexRunResult(2, "", _FLAG_REJECTED), _ok_result()])
+
+        result, argv = _degrade(runner, tmp_path)
+
+        assert result.returncode == 0
+        assert argv == ["codex", "exec", "-o", "out.json"]
+        assert runner.calls[1]["argv"] == argv
+        assert runner.calls[0]["stdin"] == runner.calls[1]["stdin"] == "prompt"
+
+    def test_a_second_rejection_is_not_retried_a_third_time(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _SequencedRunner(
+            [
+                CodexRunResult(2, "", _FLAG_REJECTED),
+                CodexRunResult(2, "", _FLAG_REJECTED),
+            ]
+        )
+
+        result, _argv = _degrade(runner, tmp_path)
+
+        assert len(runner.calls) == 2
+        assert result.returncode == 2
+
+    def test_an_ordinary_nonzero_exit_is_not_retried(self, tmp_path: Path) -> None:
+        runner = _SequencedRunner([CodexRunResult(1, "", "some other codex error")])
+
+        _result, argv = _degrade(runner, tmp_path)
+
+        assert len(runner.calls) == 1
+        assert argv == _DEGRADE_ARGV
+
+    def test_a_timeout_is_not_retried(self, tmp_path: Path) -> None:
+        runner = _SequencedRunner(
+            [CodexRunResult(-1, "", _FLAG_REJECTED, timed_out=True)]
+        )
+
+        _degrade(runner, tmp_path)
+
+        assert len(runner.calls) == 1
+
+    def test_a_spawn_error_naming_an_audit_flag_is_not_retried(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _SequencedRunner(
+            [CodexRunResult(127, "", "codex: command not found; " + _FLAG_REJECTED)]
+        )
+
+        _result, argv = _degrade(runner, tmp_path)
+
+        assert len(runner.calls) == 1
+        assert argv == _DEGRADE_ARGV
+
+
+# ---------------------------------------------------------------------------
+# _parse_codex_output — parse once, classify on failure (#3432)
+# ---------------------------------------------------------------------------
+
+
+class TestParseCodexOutput:
+    def test_valid_content_returns_the_model(self) -> None:
+        content = _ok_result().output_file_content
+
+        model, category = _parse_codex_output(
+            content, validator=ReviewerFindingsDocument.model_validate
+        )
+
+        assert isinstance(model, ReviewerFindingsDocument)
+        assert category is None
+
+    @pytest.mark.parametrize(
+        ("content", "category"),
+        [
+            (None, "missing_output"),
+            ("", "empty_output"),
+            ("  \n", "empty_output"),
+            ("{not json", "invalid_json"),
+            ('{"status": "ok"}', "schema_mismatch"),
+            ("[" * 10_000 + "0" + "]" * 10_000, "invalid_json"),
+        ],
+        ids=["missing", "empty", "whitespace", "invalid-json", "schema", "deep"],
+    )
+    def test_unusable_content_returns_no_model_and_the_category(
+        self, content: str | None, category: str
+    ) -> None:
+        model, got = _parse_codex_output(
+            content, validator=ReviewerFindingsDocument.model_validate
+        )
+
+        assert model is None
+        assert got == category
+        assert (
+            _classify_codex_output(
+                content, validator=ReviewerFindingsDocument.model_validate
+            )
+            == category
+        )
+
+    def test_a_validator_recursion_error_is_invalid_json(self) -> None:
+        def _recurse(_data: object) -> object:
+            raise RecursionError
+
+        assert _parse_codex_output("{}", validator=_recurse) == (None, "invalid_json")
 
 
 # ---------------------------------------------------------------------------

@@ -71,9 +71,14 @@ COMMON_TURN_FAULTS: tuple[type[Exception], ...] = (
     subprocess.SubprocessError,
 )
 
-#: Which comment a skip dropped: a parsed verdict, an unparseable one, or the
-#: codex PLAN executor's plan or park comment (``plan``, #3060).
-VerdictCommentKind = Literal["verdict", "unparseable", "plan"]
+#: Which comment a skip dropped: a parsed verdict, an unparseable one, the
+#: codex PLAN executor's plan or park comment (``plan``, #3060), or the codex
+#: FINALIZE executor's PR-link comment (``pr_link``, #3062).
+VerdictCommentKind = Literal["verdict", "unparseable", "plan", "pr_link"]
+
+#: The log label each comment kind's skipped/unverified lines carry; a kind
+#: absent here logs as ``review``.
+_KIND_LOG_LABELS: dict[str, str] = {"plan": "plan", "pr_link": "pr_link"}
 
 
 @dataclass(frozen=True)
@@ -349,7 +354,7 @@ def surface_tracker_io_outcome(
             content=content,
         )
         return
-    label = "plan" if identity.kind == "plan" else "review"
+    label = _KIND_LOG_LABELS.get(identity.kind, "review")
     if outcome.public_state is PublicState.NONE:
         _log.warning(
             "%s_comment_skipped ticket=%s tracker=%s reason=%s: durable copy at %s",

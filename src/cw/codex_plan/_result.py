@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from cw.atomic import atomic_write_text
+from cw.atomic import atomic_write_text, rotate_backup
 from cw.auto_dev_result import AutoDevResult
 from cw.auto_dev_result.parse import (
     BLOCKER_REASON_NO_RESULT_EMITTED,
@@ -69,6 +69,10 @@ RESUME_FRICTION: Final = (
 )
 MODEL_TEXT_DISCARDED_FRICTION: Final = "plan_resume_model_text_discarded"
 DECISIONS_NOT_RECORDED_PREFIX: Final = "plan_decisions_not_recorded: "
+#: A completing run replaced an existing ``.cw/plan.md`` (#3498):
+#: ``plan_md_replaced: old=<fp|unreadable> new=<fp> backup=<ok|failed>``.
+PLAN_MD_REPLACED_PREFIX: Final = "plan_md_replaced: "
+UNREADABLE_PLAN_MD: Final = "unreadable"
 
 # PLAN status vocabulary shared by the turn parser and gate transitions.
 PLAN_STAGE_COMPLETE: Final = "stage_complete"
@@ -290,12 +294,17 @@ def clean_plan_text(text: str) -> str:
     return "".join(kept)
 
 
-def _on_disk_leading(worktree: Path) -> str:
+def _read_on_disk_draft(worktree: Path) -> str | None:
+    """The on-disk draft's text, ``None`` when absent.
+
+    Raises :class:`PlanDraftError` when it exists but is unreadable or empty,
+    so a rewrite never replaces a draft cw could not read first.
+    """
     path = worktree / PLAN_DRAFT_RELATIVE_PATH
     try:
         path.lstat()
     except FileNotFoundError:
-        return ""
+        return None
     except OSError as exc:
         raise PlanDraftError(path, empty=False) from exc
     try:
@@ -304,7 +313,7 @@ def _on_disk_leading(worktree: Path) -> str:
         raise PlanDraftError(path, empty=False) from exc
     if not text.strip():
         raise PlanDraftError(path, empty=True)
-    return text[: leading_bookkeeping_end(text)]
+    return text
 
 
 def write_plan_draft(worktree: Path, plan_text: str) -> Path:
@@ -312,16 +321,37 @@ def write_plan_draft(worktree: Path, plan_text: str) -> Path:
 
     The on-disk leading block (any lane's round line, last-evaluated,
     settled or revocation lines) is carried verbatim; with none, the explicit
-    round-0 line is written. *plan_text* is cleaned first.
+    round-0 line is written. *plan_text* is cleaned first. A prior draft that
+    differs from the new text is snapshotted first (``plan-draft.md.bak-<ns>``,
+    best-effort, newest 5 kept), so a re-park never silently discards an
+    operator's edit (#3490).
     """
-    leading = _on_disk_leading(worktree) or ROUND_ZERO_LINE
+    prior = _read_on_disk_draft(worktree)
+    carried = prior[: leading_bookkeeping_end(prior)] if prior is not None else ""
+    leading = carried or ROUND_ZERO_LINE
     body = clean_plan_text(plan_text)
     if not body.endswith("\n"):
         body += "\n"
+    text = leading + body
     path = worktree / PLAN_DRAFT_RELATIVE_PATH
+    if prior is not None and prior != text:
+        rotate_backup(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, leading + body)
+    atomic_write_text(path, text)
     return path
+
+
+def draft_fingerprint_on_disk(worktree: Path) -> str | None:
+    """The fingerprint of the on-disk ``.cw/plan-draft.md``, ``None`` if unreadable.
+
+    The disk is the truth (#3526): the same rule ``bind_claimed_fingerprint``
+    applies, so a blocked exit never re-derives the draft's normalization.
+    """
+    try:
+        text = (worktree / PLAN_DRAFT_RELATIVE_PATH).read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return compute_plan_draft_fingerprint(text)
 
 
 def write_plan_md(worktree: Path, text: str) -> Path:
@@ -330,6 +360,33 @@ def write_plan_md(worktree: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, text)
     return path
+
+
+def existing_plan_md_fingerprint(worktree: Path) -> str | None:
+    """The existing ``.cw/plan.md``'s raw-text fingerprint (#3498).
+
+    ``None`` when there is none, :data:`UNREADABLE_PLAN_MD` when it cannot be
+    read as UTF-8 text.
+    """
+    path = worktree / PLAN_MD_RELATIVE_PATH
+    if not path.exists():
+        return None
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return UNREADABLE_PLAN_MD
+    return compute_plan_draft_fingerprint(text)
+
+
+def backup_plan_md(worktree: Path) -> bool:
+    """Snapshot the existing ``.cw/plan.md``; ``False`` when that failed."""
+    return rotate_backup(worktree / PLAN_MD_RELATIVE_PATH) is not None
+
+
+def plan_md_replaced_token(old: str, new: str, *, backup_ok: bool) -> str:
+    """The friction token auditing a replaced ``.cw/plan.md`` (#3498)."""
+    backup = "ok" if backup_ok else "failed"
+    return f"{PLAN_MD_REPLACED_PREFIX}old={old} new={new} backup={backup}"
 
 
 def plan_blocked(

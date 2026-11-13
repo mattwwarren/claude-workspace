@@ -25,7 +25,11 @@ from cw.models import (
 )
 from cw.models.client import ReviewConfig, ReviewEngineConfig
 from cw.review_engine.manifest_source import ManifestRead, read_default_branch_manifest
-from tests._review_engine_helpers import copy_engine_fixture, make_engine_repo
+from tests._review_engine_helpers import (
+    copy_engine_fixture,
+    make_engine_repo,
+    manifest_directory_engine,
+)
 from tests._shared.git_repos import git_in
 
 if TYPE_CHECKING:
@@ -169,6 +173,23 @@ def test_codex_lane_with_an_invalid_manifest_names_reason_and_field_path(
     assert f"cause={manifest.cause}" in result.detail
     assert f"{manifest.error.reason}: {manifest.error.field_path}" in result.detail
     assert "manifest_version" in result.detail
+    assert "review_engine_unsupported_backend" in result.detail
+
+
+def test_codex_lane_with_a_manifest_directory_warns_as_invalid(
+    make_git_repo: Callable[..., Path], tmp_path: Path
+) -> None:
+    """#3445: a directory named cw-engine.json reads INVALID (was ABSENT)."""
+    engine = manifest_directory_engine(tmp_path, STUB_DIR)
+    repo = make_engine_repo(make_git_repo, engine_files=engine)
+
+    (result,) = _check_review_engine({"acme": _codex_client(repo.worktree)})
+
+    assert (result.ok, result.warn) == (True, True)
+    assert "cause=manifest_invalid" in result.detail
+    assert "unreadable: -" in result.detail
+    assert "cause=no_codex_manifest" not in result.detail
+    assert "cannot be verified" not in result.detail
     assert "review_engine_unsupported_backend" in result.detail
 
 

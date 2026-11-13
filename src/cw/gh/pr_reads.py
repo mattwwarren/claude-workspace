@@ -463,3 +463,93 @@ def pr_exists_for_branch(
         return OpenPrLookup(len(data) > 0, True, _first_open_pr_url(data))
     except (ValueError, AttributeError):
         return OpenPrLookup(None, True)
+
+
+#: The ``--limit`` of :func:`fetch_open_pr_heads`; a listing that reaches it
+#: is treated as truncated and fails closed (#3062).
+_OPEN_PR_HEADS_LIMIT = 1000
+
+
+class OpenPrHead(NamedTuple):
+    """One open PR's number and head branch, as ``gh pr list`` reports it."""
+
+    number: int
+    head_ref_name: str
+
+
+def _parse_open_pr_heads(stdout: str) -> list[OpenPrHead] | None:
+    try:
+        data = json.loads(stdout)
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(data, list) or len(data) >= _OPEN_PR_HEADS_LIMIT:
+        return None
+    heads: list[OpenPrHead] = []
+    for item in data:
+        if not isinstance(item, dict):
+            return None
+        number = item.get("number")
+        ref = item.get("headRefName")
+        if type(number) is not int or not isinstance(ref, str):
+            return None
+        heads.append(OpenPrHead(number, ref))
+    return heads
+
+
+def fetch_open_pr_heads(
+    author: str | None,
+    *,
+    timeout: int = _PR_VIEW_TIMEOUT,
+    cwd: Path | None = None,
+) -> list[OpenPrHead] | None:
+    """Every open PR's ``(number, headRefName)``, or None on any failure (#3062).
+
+    *author* (``@me`` or a login) narrows the listing to ``--author``; None
+    lists every open PR. Fails closed: a non-zero exit, timeout, missing
+    ``gh``, malformed JSON, an item off the documented shape, or a listing
+    that reaches ``_OPEN_PR_HEADS_LIMIT`` (possibly truncated) is None.
+    """
+    argv = ["gh", "pr", "list", "--state", "open"]
+    if author is not None:
+        argv += ["--author", author]
+    argv += ["--json", "number,headRefName", "--limit", str(_OPEN_PR_HEADS_LIMIT)]
+    try:
+        result = _sp.run(
+            argv,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            cwd=cwd,
+        )
+    except (OSError, _sp.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return _parse_open_pr_heads(result.stdout)
+
+
+def fetch_pr_changed_files(
+    pr_number: int,
+    *,
+    timeout: int = _PR_VIEW_TIMEOUT,
+    cwd: Path | None = None,
+) -> list[str] | None:
+    """The files PR *pr_number* changes (``gh pr diff --name-only``), or None.
+
+    Fails closed to None on a non-zero exit, timeout or a missing ``gh``.
+    """
+    try:
+        result = _sp.run(
+            ["gh", "pr", "diff", str(pr_number), "--name-only"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            cwd=cwd,
+        )
+    except (OSError, _sp.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return [line for line in result.stdout.splitlines() if line.strip()]

@@ -558,8 +558,10 @@ class OrchestratorEventType(StrEnum):
     # REVIEW_FINDING_VOIDED above: the refusal is a mechanical decision nobody
     # asked to see, and this event is the only durable record it happened.
     REVIEW_TREADMILL_DETECTED = "review.treadmill_detected"
-    # GitHub #2394 -- the fix loop grew the diff for 2+ consecutive cycles
-    # while resolving none of the originally-found MUST_FIX findings. Sibling
+    # GitHub #2394 -- the fix loop grew the diff for the configured number of
+    # consecutive cycles while making no net progress on the originally-found
+    # MUST_FIX findings (resolved originals minus loop-attributed new findings,
+    # #2665). Sibling
     # of REVIEW_TREADMILL_DETECTED (same review.* namespace, same "durable
     # record of a mechanical decision nobody asked to see" rationale) but
     # loop-wide rather than per-finding. Deliberately NOT added to

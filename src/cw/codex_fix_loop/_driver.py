@@ -119,6 +119,7 @@ from cw.codex_review import (
 )
 from cw.codex_review._const import FIX_CYCLE_FLOOR_SECONDS
 from cw.codex_review_signals import constraints_source
+from cw.codex_runner import relabeled
 from cw.local_runner import resolve_tier
 from cw.models.enums import (
     DEFAULT_FIX_SANDBOX_MODE,
@@ -126,6 +127,7 @@ from cw.models.enums import (
     SandboxMode,
 )
 from cw.models.operator_constraint import split_constraints
+from cw.models.usage import UsageStage
 from cw.review_convergence import unread_from_verdict
 from cw.review_findings import has_contested_decision
 from cw.tracker import tracker_kind
@@ -691,7 +693,7 @@ def run_review_with_fix_loop(
         )
         if park is None:
             park, commit_sha = _run_fix_and_commit(
-                runner=runner,
+                runner=relabeled(runner, UsageStage.FIX),
                 task=task,
                 worktree=worktree,
                 open_findings=open_findings,

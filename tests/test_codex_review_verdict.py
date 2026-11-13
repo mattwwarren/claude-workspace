@@ -15,8 +15,15 @@ from typing import TYPE_CHECKING
 import pytest
 
 import cw
-from cw.auto_dev_result import AgentHealthEntry, OperatorConstraintsSource, Review
+from cw.auto_dev_result import (
+    AgentHealthEntry,
+    OperatorConstraintsSource,
+    Review,
+    StageReached,
+)
+from cw.auto_dev_result.schema._vocab import EMPTY_DIFF_STATUS
 from cw.codex_review import (
+    _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS,
     _CODEX_IMPL_BLOCKED_NEXT_ACTIONS,
     _CODEX_PLAN_BLOCKED_NEXT_ACTIONS,
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
@@ -618,6 +625,26 @@ class TestMakeCodexBlocked:
         assert result.next_actions is not _CODEX_IMPL_BLOCKED_NEXT_ACTIONS
         assert result.blocker is not None
         assert result.blocker.stage == "stage2_impl"
+
+    @pytest.mark.parametrize(
+        "stage", ["stage4a_merge_gate", "stage4b_pr_create", "stage5_post_create"]
+    )
+    def test_make_codex_blocked_finalize_stages_carry_finalize_next_actions(
+        self, make_git_repo: Callable[[str], Path], stage: StageReached
+    ) -> None:
+        """#3062: every finalize wire stage carries the FINALIZE label, a copy."""
+        worktree = make_git_repo(f"wt-make-codex-blocked-{stage}")
+        result = make_codex_blocked(
+            ticket_id="T-1",
+            worktree=worktree,
+            reason="whatever",
+            stage_reached=stage,
+        )
+        assert result.next_actions == _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS
+        assert result.next_actions == ["user_resolve_codex_finalize_failure"]
+        assert result.next_actions is not _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS
+        assert result.blocker is not None
+        assert result.blocker.stage == stage
 
     def test_make_codex_blocked_stage_reached_override_still_works(
         self, make_git_repo: Callable[[str], Path]
@@ -3815,7 +3842,7 @@ class TestEmptyDiffCleanReview:
             fix_loop_enabled=False,
         )
 
-        assert result.status == "empty_diff_blocked"
+        assert result.status == EMPTY_DIFF_STATUS
         assert result.stage_reached == "stage3_review"
         assert result.scope.files == 0
         assert result.scope.lines_actual == 0

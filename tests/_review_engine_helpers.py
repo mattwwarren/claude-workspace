@@ -253,6 +253,26 @@ def copy_engine_fixture(
     return copy
 
 
+def manifest_directory_engine(
+    tmp_path: Path, source: Path, *, name: str = "engine-files"
+) -> Path:
+    """A copy of *source* whose ``cw-engine.json`` is a directory, not a file.
+
+    Every file except the manifest is copied; ``cw-engine.json/marker`` makes
+    git commit a directory at the manifest path (#3445).
+    """
+    engine = tmp_path / name
+    for path in source.rglob("*"):
+        if path.is_file() and path.name != "cw-engine.json":
+            target = engine / path.relative_to(source)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(path.read_bytes())
+    marker = engine / "cw-engine.json" / "marker"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("not a manifest", encoding="utf-8")
+    return engine
+
+
 def make_engine_repo(
     make_git_repo: Callable[..., Path],
     *,

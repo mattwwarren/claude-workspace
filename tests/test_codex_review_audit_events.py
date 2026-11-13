@@ -17,6 +17,7 @@ terminal-event warning is emitted one layer up by ``_run_codex_role``
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,10 @@ import pytest
 from cw.codex_review._audit_events import (
     _extract_terminal_error_message,
     _parse_codex_audit_events,
+    parse_turn_usage,
 )
+from cw.models.usage import TurnUsage, UsageUnavailable, UsageUnavailableReason
+from tests._tool_fakes import codex_usage_stdout
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "codex_audit_events"
 
@@ -303,3 +307,119 @@ class TestExtractTerminalErrorMessage:
             '{"type":"turn.failed","error":"boom"}\n'
         )
         assert _extract_terminal_error_message(stdout) is None
+
+
+class TestParseTurnUsage:
+    """``parse_turn_usage`` (#3063, RFC 0018 C4).
+
+    ``clean_structured_answer_0_167_0.jsonl`` is the codex-cli 0.167.0 capture,
+    byte-for-byte with only the thread id redacted: ``echo 'Reply with
+    answer=pong. Do not run any commands.' | codex exec --sandbox read-only
+    --json --ephemeral --output-schema schema.json -o out.json`` run in a git
+    repo (parked draft on #2837). Its numbers are pinned and must not be
+    re-captured. ``impl_turn_write_items_composed.jsonl`` is COMPOSED: the
+    capture's shape plus ``file_change`` and ``mcp_tool_call`` items.
+    """
+
+    def test_the_old_reviewer_parser_already_reads_the_capture(self) -> None:
+        # Control: passes before the new parser exists.
+        metrics = _parse_codex_audit_events(
+            _fixture("clean_structured_answer_0_167_0.jsonl"), duration_seconds=1.0
+        )
+        assert metrics["input_tokens"] == 18588
+        assert metrics["reasoning_tokens"] == 20
+
+    def test_the_0_167_0_capture(self) -> None:
+        parsed = parse_turn_usage(_fixture("clean_structured_answer_0_167_0.jsonl"))
+
+        assert parsed == TurnUsage(
+            input_tokens=18588,
+            cached_input_tokens=0,
+            cache_write_input_tokens=0,
+            output_tokens=37,
+            reasoning_tokens=20,
+        )
+
+    def test_sums_across_multiple_turn_completed_events(self) -> None:
+        stdout = codex_usage_stdout(
+            input_tokens=100, cached_input_tokens=10, output_tokens=5
+        ) + codex_usage_stdout(
+            input_tokens=200,
+            cached_input_tokens=20,
+            output_tokens=7,
+            reasoning_output_tokens=3,
+            cache_write_input_tokens=4,
+        )
+
+        assert parse_turn_usage(stdout) == TurnUsage(300, 30, 4, 12, 3)
+
+    def test_composed_impl_capture_parses_write_capable_items(self) -> None:
+        parsed = parse_turn_usage(_fixture("impl_turn_write_items_composed.jsonl"))
+
+        assert parsed == TurnUsage(52000, 40000, 0, 900, 300)
+
+    @pytest.mark.parametrize(
+        ("stdout", "reason"),
+        [
+            ("", UsageUnavailableReason.NO_OUTPUT),
+            ("plain text, not jsonl\n", UsageUnavailableReason.NO_OUTPUT),
+            (
+                '{"type":"turn.started"}\n{"type":"turn.completed"}\n',
+                UsageUnavailableReason.NO_USAGE_BLOCK,
+            ),
+            (
+                '{"type":"turn.completed","usage":7}\n',
+                UsageUnavailableReason.NO_USAGE_BLOCK,
+            ),
+            (
+                '{"type":"turn.completed","usage":[1]}\n',
+                UsageUnavailableReason.NO_USAGE_BLOCK,
+            ),
+            (
+                '{"type":"turn.completed","usage":{"input_tokens":true,'
+                '"output_tokens":"4"}}\n',
+                UsageUnavailableReason.USAGE_FIELDS_NULL,
+            ),
+            (
+                codex_usage_stdout(input_tokens=0, output_tokens=0, completed=False),
+                UsageUnavailableReason.TURN_FAILED,
+            ),
+        ],
+    )
+    def test_unavailable_cases(
+        self, stdout: str, reason: UsageUnavailableReason
+    ) -> None:
+        assert parse_turn_usage(stdout) == UsageUnavailable(reason)
+
+    def test_a_bool_or_str_field_is_none_for_that_field_only(self) -> None:
+        stdout = (
+            '{"type":"turn.completed","usage":{"input_tokens":"4",'
+            '"cached_input_tokens":2,"output_tokens":true}}\n'
+        )
+
+        assert parse_turn_usage(stdout) == TurnUsage(None, 2, None, None, None)
+
+    def test_partial_usage_keeps_the_present_fields(self) -> None:
+        stdout = '{"type":"turn.completed","usage":{"input_tokens":9}}\n'
+
+        assert parse_turn_usage(stdout) == TurnUsage(9, None, None, None, None)
+
+    def test_a_completed_event_wins_over_a_failed_one(self) -> None:
+        stdout = codex_usage_stdout(
+            input_tokens=0, output_tokens=0, completed=False
+        ) + codex_usage_stdout(input_tokens=5, output_tokens=1)
+
+        assert parse_turn_usage(stdout) == TurnUsage(5, 0, 0, 1, 0)
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            "\x00\xff\xfe random bytes {{{",
+            '{"type":"turn.completed","usage":{"input_tokens":1',
+            "[1, 2, 3]\n",
+            '{"type":"turn.completed","usage":7}',
+            json.dumps({"type": "turn.completed", "usage": None}),
+        ],
+    )
+    def test_never_raises(self, stdout: str) -> None:
+        assert isinstance(parse_turn_usage(stdout), (TurnUsage, UsageUnavailable))

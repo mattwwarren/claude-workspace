@@ -1242,7 +1242,10 @@ This is unrelated to `cw event prune`, which trims the event log itself.
 ## 6a. Answer a paused session (`cw session send`)
 
 A worker that pauses to ask you something parks its row `BLOCKED_ON_USER` and
-then sits there. Before #2212 the only way to answer was lossy: close the
+then sits there. (Not every `BLOCKED_ON_USER` park is a question: a mechanical
+park such as a merge gate or a dirty worktree is also `BLOCKED_ON_USER`, and a
+message cannot clear it. See "Which parks does a message resume?" below.)
+Before #2212 the only way to answer was lossy: close the
 session, requeue the ticket, and let a fresh worker rediscover the context you
 were about to hand it. `cw session send` collapses that into one command that
 preserves the transcript, the worktree, the dev-queue row, and the row's
@@ -1290,11 +1293,44 @@ is the point: a queued message survives whether or not the session could be
 woken right now. Exit 1 means nothing was queued at all — unknown session,
 terminal session, or bad flags.
 
+**Which parks does a message resume?** The owning row's `disposition`
+decides (#2287). `cw session send` respawns the session only when an operator
+message can clear the park:
+
+- Resumes: `ambiguities_pending_resolution`, `premises_pending_verification`,
+  `plan_pending_approval`, `review_pending_approval`, `stopped_without_sentinel`
+  (the worker posted a park comment and exited), and `blocked` with blocker
+  reason `plan_ambiguous` (the agent has an open question).
+- Does not resume: every other park, including `merge_gate_blocked`,
+  `dirty_worktree`, `stale_dispatch_gate`, `attempt_cap_blocked`,
+  `terminal_sibling`, `fix_dispatch_ref_unresolved`,
+  `codex_review_orphaned_at_boot`, `awaiting_operator`, `finalize_gate_held`,
+  `blocked` with any other reason, and a row with no recorded disposition. An
+  allowlist, so an unknown disposition is refused. An `IDLE` session does not
+  bypass this: the row's park wins.
+
+A refused session is not respawned and the message stays queued (exit 0):
+
+```
+Message <id> queued for session <id>.
+Warning: not delivered yet — session's task is parked for disposition
+'merge_gate_blocked', which an operator message cannot clear; the session was
+not respawned and the message stays queued (inspect with
+`cw dev-queue show <ticket> -c <client>`)
+```
+
+Fix the park the usual way (`cw dev-queue requeue`, resolve the gate, etc.).
+Manual `cw resume <session>` is not gated on the disposition: use it when you
+deliberately want to attach to a mechanically parked session and fix it by
+hand. The gate only matches a row that still links to the session
+(`session_id`, or `codex_orphan_session_id`); a park that clears `session_id`
+is not seen, and an `IDLE` session with no matching row behaves as before.
+
 **What it does not do.** It does not transition the dev-queue row. The row
 stays `BLOCKED_ON_USER`; releasing it is still the separate, explicit action
 it always was (`cw dev-queue requeue`, `cw plan approve`, etc.).
 
-**The one case it cannot handle yet.** A session that is genuinely live and
+**The live case it cannot handle yet.** A session that is genuinely live and
 mid-task (`RUNNING` row, `ACTIVE` session) cannot be woken — there is no way
 to deliver into a running `claude --bg` turn, per #1889's spike. You will see:
 
@@ -1939,11 +1975,11 @@ Three same-cause parks at one sha are the cap; the next failure escalates to an
 
 **Confirm prompt-size rejections (#2864).** A confirm diff over the codex prompt limit is sharded per directory and reviewed shard by shard, so a large diff no longer fails the round. `input_too_large` or `file_too_large` is content-level and parks as `agent_block` with `actual_chars=<n> max_chars=<m>` in the details. For `file_too_large` split or shrink the named file, then requeue. `input_too_large` has two sources, and a bare requeue re-sends the same prompts and fails identically: (a) a rendered shard prompt still over the planner's limit (`CODEX_MAX_PROMPT_CHARS`), where the fix is on the input; or (b) a real codex size rejection of a prompt the planner thought fit, which means `CODEX_MAX_PROMPT_CHARS` is too high for the backend, so the fix is lowering that constant in code before the requeue, not the input. Setting `review.confirm_backend: claude` is an interim workaround that trades away other-family independence and can fail on size too; the Claude backend is not sharded.
 
-**Codex fix-loop refused-cycle recovery (#2967).** A fix cycle that parks without committing pins its edits under `refs/cw/refused-cycles/<ticket>/` (`git stash apply <ref>` restores them) and resets the worktree to HEAD (`git reset --hard HEAD`), so `cw dev-queue requeue <T> -c <C>` starts a clean cycle. The park names the ref. The clean-start refusal (`codex_fix_dirty_start`) never drops anything; the operator inspects and cleans the tree. Requeue is the only action for a parked refused cycle; nothing else needs to be undone first.
+**Codex fix-loop refused-cycle recovery (#2967).** A fix cycle that parks without committing pins its edits under `refs/cw/refused-cycles/<ticket>/` (`git stash apply <ref>` restores them) and resets the worktree to HEAD (`git reset --hard HEAD`), so `cw dev-queue requeue <T> -c <C>` starts a clean cycle. The park names the ref. The clean-start refusal (`codex_fix_dirty_start`) never drops anything; the operator inspects and cleans the tree. A plain requeue is the only action needed when the park reports the changes saved and the worktree reset. When the park says cw neither saved nor discarded the changes (it names the dirty paths, and a `Failed step:` for some git failures) or could not reset the worktree, or for a non-restorable staged-set `codex_fix_scope_drift` (`Staged but not measured`, which pins no ref), the tree is still dirty and a plain requeue parks `codex_fix_dirty_start`; inspect and clean the tree first, running `git stash apply <ref>` when the park names a ref, as for the clean-start refusal.
 
 **Codex fix-loop quality gates (#3056).** Before a fix cycle that changed files is committed, the repo's gates (`prep_pr_state.py detect-gates`, read once per cycle from the clean cycle-start tree) run in order. Gates run with `TMPDIR`, `TMP` and `TEMP` unset (and no `GIT_*` variables), not the worker's `<worktree>/.cw/tmp`, so they see the platform default tmp dir as CI does; a gate that needs a project-local tmp dir must create it itself, and the worker's own convention is unchanged (#3392). A gate that exits non-zero, a gate that dirties the tree, and a missing, stale or failing detector park `codex_fix_gate_failed`, with the cycle's edits pinned under `refs/cw/refused-cycles/<ticket>/` as in the paragraph above; fix what the gate reports (or install `prep_pr_state.py`) and requeue. A gate or the detector that runs past its ceiling is never killed, parked or reset on elapsed time: a `codex_fix.gate_slow` event (`cw event tail --type codex_fix.gate_slow`) names the ticket, cycle, gate and elapsed seconds, and the runner keeps waiting for the real exit code. A gate that truly hangs HOLDS THE REVIEW until the operator acts. Recovery is evidence-driven and operator-run: stop the codex job and its gate first (the detached `cw codex run` job is its own session leader, so `kill -- -<job pid>` stops the job and the gate child together, and `cw spawn close` alone does not stop a codex job), then run `cw spawn close <session> --requeue`. Without the stop step the requeue starts a second worker on the same worktree.
 
-**Declared gate autofix (#3412).** A gate that fails red and declares an autofix gets that autofix run, then the SAME gate command re-checked, and the cycle parks only if the re-check still fails. The autofix comes from the `detect-gates` `autofix` field, else from the exact-name `quality_gates.autofix.<gate-name>` map in `.claude/project-config.yaml` (read once at cycle start; an unreadable or malformed config means no autofix). It runs only for a `red` failure that left the tree alone, must exit 0, must change at least one path, and may change only paths already in the cycle's measured set; the re-check must exit 0 and not dirty the tree. Anything else reverts the autofix and parks exactly as without one: the original gate output and exit code, with the cycle's original edits pinned. Success appends the friction token `codex_fix_gate_autofixed`; a WARNING `codex_fix_gate_autofix ... outcome=<applied|reverted_red|reverted_scope|reverted_failed|skipped_tree_changed|unchanged>` names each attempt in `.cw/codex_driver.log`. A slow autofix emits `codex_fix.gate_slow` with gate `<name>:autofix` and is never killed (signal-only ceiling). A gate with no declared autofix parks exactly as before. Option considered and not taken: feeding the gate output to a later fix turn (a park ends the loop, and a repair turn costs a full `codex exec`).
+**Declared gate autofix (#3412).** A gate that fails red and declares an autofix gets that autofix run, then the SAME gate command re-checked, and the cycle parks only if the re-check still fails. The autofix comes from the `detect-gates` `autofix` field, else from the exact-name `quality_gates.autofix.<gate-name>` map in `.claude/project-config.yaml` (read once at cycle start; an unreadable or malformed config means no autofix). It runs only for a `red` failure that left the tree alone, must exit 0, must change at least one path, and may change only paths already in the cycle's measured set, and may not delete or rename one (#3427); the re-check must exit 0 and not dirty the tree. Ecosystem-default autofixes are adopted (#3421): a red `ruff` gate (`uv run ruff check --fix .`) or `lint` gate (`npm run lint -- --fix`) from the `detect-gates` defaults is autofixed and committed in-cycle instead of parking; a repo that wants no autofix declares its gates in a `CLAUDE.md` bash block (no per-gate opt-out key exists yet). A revert keeps files that were git-ignored on disk before the autofix (#3420); if the path-targeted revert fails or leaves the tree different it logs `codex_fix_gate_autofix_revert_incomplete` and falls back to `git read-tree --reset -u`, logging `codex_fix_gate_autofix_revert_fallback outcome=<restored|failed>` (both lines carry ticket, session, cycle and gate); a fallback that cannot restore the tree parks `codex_error` with the live tree pinned (#3423). Anything else reverts the autofix and parks exactly as without one: the original gate output and exit code, with the cycle's original edits pinned. Success appends the friction token `codex_fix_gate_autofixed`; a WARNING `codex_fix_gate_autofix ... outcome=<applied|reverted_red|reverted_scope|reverted_failed|skipped_tree_changed|unchanged>` names each attempt in `.cw/codex_driver.log`. A slow autofix emits `codex_fix.gate_slow` with gate `<name>:autofix` and is never killed (signal-only ceiling). A gate with no declared autofix parks exactly as before. Option considered and not taken: feeding the gate output to a later fix turn (a park ends the loop, and a repair turn costs a full `codex exec`).
 
 **Lane review prompt-size handling (#2867).** A codex REVIEW lane's cycle-0 review (fix loop enabled or disabled) now gets the same `CODEX_MAX_PROMPT_CHARS` limit: a diff over it is sharded per directory and reviewed shard by shard, and the verdict carries one `ShardRecord` per shard (in clean mode the loop round records the shard tally, so `confirm_round_sharded` appears). A diff the planner cannot shard parks before any codex call as `agent_block` with `retry_eligible: false`, the cause (`file_too_large` naming the file, or `input_too_large`) and `actual_chars=<n> max_chars=<m>` in the details; nothing was reviewed, truncated or retried. A bare requeue fails identically: split or shrink the named file, or fix the oversize input, then requeue. A real codex size rejection of a prompt the planner thought fit stays the non-retryable `codex_review_unparseable` / `codex_review_partial` park with `codex_input_too_large` and the sizes in the details. A fix-loop re-review delta over the limit is sharded with the same planner (#2877); a delta that cannot be sharded parks as `agent_block` (`retry_eligible: false`) before any codex call for that cycle, naming the cycle, the cause, the file and the sizes. The fix commits through the failed cycle (including the commit whose delta went unreviewed) are already pushed and stay on the branch, and a requeue restarts at cycle 0 over the whole diff, which is re-planned from scratch (so it carries no inlined prior-findings overhead).
 
@@ -2080,7 +2116,9 @@ lane is blocked (both below).
   (`effective_max_cycles + 1` loop runs). The cost is the CLI's self-reported
   `total_cost_usd`, visible only in the INFO log line `claude review role ...
   finished in ... (total_cost_usd=...)`; it is not recorded in the ledger or in
-  `cw review history`. To bound cost today, set `review.confirm_backend: none`
+  `cw review history`. Since #3063 the role's token counts and model are
+  recorded on the reviewer run record, but the cost still is not. To bound cost
+  today, set `review.confirm_backend: none`
   or `review.convergence: blocking`. `cw review confirm --backend claude` is
   covered by the same decision.
 - **Ledgers written before #2800.** A ledger with no `diff_base` needs no
@@ -3360,6 +3398,38 @@ for the CHANGELOG recipe.
   `arm_script_missing`, `disarm_failed`, `rearm_failed`, `post_push_failed`
   — as for the CHANGELOG recipe above.
 
+### Usage accounting for non-claude stage turns (#3063)
+
+RFC 0018 C4. Every codex stage turn records its token usage into the session:
+
+- `Session.usage` holds per-stage and per-model token totals and a state
+  (`recorded`, `partial` or `unavailable`). `cw session show <id>` prints one
+  `usage:` line; `cw session show <id> --json` and `cw session list --json` carry
+  the full record, enum values as strings.
+- `Session.cost_breakdown` holds the dollar estimate per configured model, only
+  when the stage config carries a `model_prices` entry for that model (see
+  `config/CONFIG_REFERENCE.md`, "Model Prices and Usage Accounting").
+  `Session.cost_usd` is never written by cw: it stays the producer's figure.
+- `TicketTask.total_tokens` (dev-queue schema 59) sums input plus output tokens
+  across the ticket's attempts; `total_cost_usd` adds a session's
+  `cost_breakdown` only when that session reported no `cost_usd`.
+- A completed turn that reports no token usage is not silently zero: the
+  session records `usage: unavailable (reason=..., turns=N)`, one
+  `usage_unavailable:` WARNING is logged, and a `usage_unavailable:` token joins
+  the stage result's `friction_highlights`. That token reflects only the turns
+  before the completion door; a tracker-IO turn that runs after it reaches
+  `Session.usage` and the warning only.
+- opencode and local (aider) sessions record the `unavailable` state with reason
+  `backend_output_unpinned` at harvest completion (`no pinned output shape for
+  this backend; see #3552`); the friction token is added only to a result the
+  harvest itself synthesizes, never to a worker-emitted one. Other `COMPLETED`
+  writers (`cw spawn close`, the stop hook, stalled and idle reconcile) leave a
+  session at `usage: none`.
+- The codex fix and tracker-IO turns now run with `--json` so their usage is
+  readable; the fix turn still runs without `--ephemeral`.
+
+There is no per-model, per-stage spend report yet (#3551).
+
 ### Legacy codex session recovery (`cw codex migrate-legacy`, RFC 0014 B1)
 
 A *legacy* codex session predates RFC 0014 A2: its review ran on a thread
@@ -3936,6 +4006,37 @@ Two UNVERIFIED items: whether MCP tool calls run under
 and whether the pre-flight resolutions marker survives on Linear. The tests
 cover the row-delivered and the comment channel and never assert survival.
 
+**Codex FINALIZE (#3062, RFC 0018 C3).** A lane whose FINALIZE stage resolves
+to `codex` runs `cw codex run --stage finalize`: one `read-only` `codex exec`
+turn (a fixed argv, no knob, no cw timer, ADR-0014) that returns only the
+judgement text (PR title, PR body, the adjudication section and the operator
+override section). The turn never edits, stages, commits, pushes or runs `gh`.
+cw does every mechanical or ordering-critical step in Python:
+
+- **Guards, in order.** The MUST_FIX override check, the tier resolution
+  (`scope_tier_unresolvable` when it cannot be resolved), the checked-out
+  branch against the feature branch (`external_state_block`), then the
+  Detector Guard: an OPEN PR takes the reuse path, a CLOSED PR blocks
+  `pr_already_terminal` (`retry_eligible: false`), no PR takes the create path.
+- **Approval fence.** Steps 4.0 and 4.0b park `review_pending_approval` (a
+  Large tier, or an unconverged clean-mode review) and are re-run immediately
+  before the arm.
+- **Create path.** Step 4a merge gate (`merge_gate_blocked`,
+  `prior_pipeline_pr_open`), the repo quality gates (`agent_block` on a red
+  gate; nothing is pushed), the default-branch merge probe
+  (`merge_conflict_post_push`; cw never resolves a conflict), the push with
+  origin verification (`push_auth_failed` or `impl_not_pushed`), `gh pr
+  create`, the mergeability check, then the arm through `prep_pr_finalize.py`
+  with a read-back (`automerge_not_armed`). The reuse path runs the quality
+  gates, then the same live bind, probe, arm and verification.
+- **Result.** cw stamps the sentinel (`stage_reached`, `branch`, `commits`,
+  `pr`, `review`, `scope.tier`, `plan_source`), takes `pr.auto_merge` from the
+  verified PR head, never from the model, emits the stage events and posts the
+  PR-link comment (`kind: pr_link`). A failure of either post is friction,
+  not a block.
+- **Deferred.** The review-debt re-file (Step 4d, #3543) and the
+  `classify_merge_conflict.py` resolution round (#3542).
+
 **#1717 coordination.** `pending_operator_comment` is stamped at the shared
 `_stage_regress` chokepoint alongside #1794's `regressed_into_stage`. #1717's
 `finalize_regress_branch_head` is designed to stamp at the same point; per
@@ -3962,6 +4063,36 @@ timing (see the field's comment in `src/cw/models/tasks.py` for the full
 reasoning). Whether `pending_operator_comment` and
 `finalize_regress_branch_head` share the same exposure is an open,
 out-of-scope question if this is ever revisited.
+
+**All-codex lane (RFC 0018 D1, #3064).** A lane whose stages all resolve to
+the `codex` backend runs the whole ticket on codex. Setup, in order:
+
+1. Set the lane's `pipeline.executors` for plan, impl, review and finalize to
+   `codex` (`config/CONFIG_REFERENCE.md`, "All-codex lane (RFC 0018 D1, #3064)").
+2. Pick the confirm backend for a clean client. Unset means the independent
+   confirm round is `claude -p`, so the lane needs the `claude` binary on `PATH`
+   and a Claude login. For a Claude-free lane set `review.confirm_backend: none`
+   (forfeits the independent round) or `review.confirm_backend: codex` (stays on
+   codex, not independent). Blocking clients run no confirm round.
+3. For a non-GitHub tracker, install, enable, configure and authenticate the
+   tracker's MCP server for the codex backend, and declare its name under
+   `tracker_mcp_gate.servers.codex`. GitHub uses `gh` and needs nothing more.
+   The daemon-only tracker writes go through the narrow turn in "Tracker-IO
+   turn (#3057, RFC 0018 A2)" above.
+4. Run `cw doctor`. Read the `all-codex-lane/<client>/<lane>` line: `[OK]` in
+   blocking mode; `[WARN]` in clean mode with REVIEW present and
+   `confirm_backend` unset, naming the Claude dependency and the two opt-outs;
+   `[OK]` with a resolved confirm note otherwise. The `tracker-mcp/<client>/<lane>/codex`
+   line reports step 3.
+
+A clean all-codex lane with `confirm_backend` unset and no `claude` binary on
+`PATH` parks the ticket `confirm_backend_unavailable` at the confirm round. The
+park is uncharged and no confirm round runs. Fix the binary or set one of the
+opt-outs above, then requeue. The park does not fail the codex loop itself.
+
+Smoke probe: an opt-in operator run of one codex create and resume lives in
+`docs/codex-live-session-smoke.md`. It never runs in default CI, and it does
+not validate queue or executor integration.
 
 ### Attempt-cap reset (environmental burn)
 
@@ -4082,6 +4213,16 @@ reason. Wait for the annotation to clear; only a tick line still reading
   PENDING row in the "Pending tickets held by dispatch" block, `Z`-suffixed
   timestamps, `[]` when none. A client with a held row but no tick and no
   paused lane still gets an entry, with null tick fields.
+  Each entry also carries live per-client queue-row counts (#1586) -- `pending`,
+  `running`, `blocked`, `completed`, `cancelled`, `failed`, the same numbers as
+  the text table's columns -- and `tick_ts`, the `Z`-suffixed time of the client
+  tick that `skip_reason`, `freshness_detail`, `blocked_branch` and
+  `effective.last_tick_cap` were read from (`null` when the client has no
+  tick). The counts are read from the queue at call time, not from the tick.
+  `blocked` counts `blocked_on_user` rows only, and `awaiting_operator_signoff`
+  rows appear in none of the six keys, so `pending + running + blocked` is not
+  lane occupancy. A client with queued tickets but no tick, pause or held row
+  now gets an entry too.
 - **Auto-resume.** A circuit-breaker pause lifts on its own after
   `lane_circuit_auto_resume_minutes` (default `15`; set to `0` to disable), doubling
   per consecutive trip with no spawn success in between up to
@@ -4483,6 +4624,23 @@ a PAST window, not the current one. Before pausing a wave:
 answers, the wall is gone. During a genuine wall, STOP the dispatch loop
 (each tick burns an attempt per pending ticket into the wall).
 
+### Usage-limit back-off windows
+
+- Windows are per client. `usage_limited_until` in `dispatch_state.json` maps
+  client name to deadline; one client's limit does not park the fleet.
+- `usage_limit_armed_at` is FLEET-LEVEL (#2276): the LATEST arm time across
+  clients, not a per-client time. Do not read it as "when client X was
+  limited". It feeds only the single fleet-level `dispatch.usage_limit_cleared`
+  `detected_at`. It is a historical marker, not expiry-checked.
+- A transcript-derived (reconcile) detection does not touch a client whose
+  window is still open. It arms only the known clients with no open window.
+- A failed persist of a window logs a warning and emits no
+  `dispatch.usage_limit_armed` event. The loop still backs off in memory for
+  that process. Check the log for `did not persist` when an expected armed
+  event is missing. If the event write fails after the window is persisted,
+  the next restart recovers the missing audit event before dispatch resumes.
+- A per-client arm time is a separate ticket if it is wanted.
+
 ---
 
 ## Review debt filing
@@ -4811,9 +4969,10 @@ from the artifact's final state. A per-round filer opened one issue per
 wording, because a reviewer rewords a finding from round to round and the dedup
 key is the finding's text (one ticket produced 39 issues over six rounds,
 another 24). The engine-confirm path (`file_confirm_deferrals`) still files at
-record time. A codex lane runs PLAN, IMPL and REVIEW only (#3060, #3061); its
-finalize runs on the claude-native executor, so item 2a is the normal-completion path, not only a
-retry. The review-debt filer registry (`register_debt_filer`) is gone: nothing
+record time. A codex lane runs PLAN, IMPL, REVIEW and FINALIZE (#3060, #3061, #3062);
+the codex FINALIZE executor does not run item 2a (the debt re-file is deferred
+to #3543), so item 2a is the normal-completion path only on a claude-native
+finalize, not only a retry. The review-debt filer registry (`register_debt_filer`) is gone: nothing
 files from the codex process.
 
 **Stale-defer filter.** The ledger's `settled` entries carry an additive

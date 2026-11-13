@@ -307,6 +307,11 @@ s1_plan_generated`) itself from the driver, with `correlation_id` the ticket. Th
 codex IMPL executor (#3061) records `s2_impl_started` (`prev_stage:
 s1_plan_reviewed`) immediately before its turn and `s2_impl_complete`
 (`prev_stage: s2_impl_started`) only after cw's commit and verified push.
+The codex FINALIZE executor (#3062) records `s4_pr_created` (`prev_stage:
+s3_review_complete`) as a `stage.entered` event when the stage starts, and
+`s5_ci_waiting` (`prev_stage: s4_pr_created`) then `done` (`prev_stage:
+s5_ci_waiting`) only on a shipped result. A block records `stage.errored` at
+`s4_pr_created` with `error_kind` set to the blocker reason.
 
 ### `stage.errored`
 
@@ -635,7 +640,34 @@ time that parsed (and survived the 7-day clamp), `flat_backoff` when it did
 not and the window fell back to `usage_limit_backoff_seconds`. The phantom
 sweep's transcript-derived detection (`ReconcileReport.usage_limited`, a
 roster-absent session) names no client at all, so the dispatch loop arms every
-known client with `source: "flat_backoff"` for it. The mid-turn sweep (#2324)
+known client with no open window with `source: "flat_backoff"` for it. A
+client whose window is still open is left alone: re-arming it would overwrite
+a live parsed deadline with the flat one (#2276).
+
+Startup recovery of a persisted window whose armed event is missing also uses
+`source: "flat_backoff"`: the sidecar stores the deadline, but not the parser
+provenance.
+
+**Order decision (#2276, recorded once here; the docstrings point at this
+section).** The two arming paths deliberately differ. On the dispatch-loop
+path (`_arm_usage_limit_windows`) the window is PERSISTED first, read back to
+verify, and only then is this event recorded: an armed event must never claim
+a window the write lost. The save swallows `OSError`, so the read-back is the
+only check. A failed save records no event and logs a warning, but the window
+stays in the returned map and the loop still backs off in memory for this
+process. Reconcile's mid-turn path (`cw.reconcile.usage_limit_mid_turn`) is
+the reverse, audit FIRST then persist, by design: its resume path skips
+re-arming once the window lands (`_lockout_covers`), so the audit must
+precede the write to stay idempotent. The residual cost of the dispatch-loop
+order: an event-write failure after a successful persist leaves a durable
+window with no audit line. The loop errors out rather than continuing. On
+restart, before the first normal tick, the loop compares active sidecar
+windows with the retained armed events and records a recovery event for each
+missing audit line; if recovery cannot be recorded, normal dispatch does not
+resume. Because the original failing event write raises before
+`save_usage_limit_armed_at` runs, the fleet-level marker may remain stale or
+null; recovery repairs the audit line without changing that marker. The
+mid-turn sweep (#2324)
 is different: it detects a roster-present worker whose transcript tail is the
 limit message, arms only that session's client, and parses the message's reset
 time, so it can report either `source` — see `"usage_limited_mid_turn"` under
@@ -667,8 +699,10 @@ usage-limit back-off window (`usage_limited_until`) transition from active
 to lapsed — never per-client; `clients_affected` carries the full cohort in
 a single event. `clients_affected` and `sessions_affected` are computed by
 scanning `session.timed_out` events with `cause: "usage_limit_cutoff"`
-recorded since `detected_at`. `detected_at` is the persisted arm timestamp
-(the moment the window was opened, not derived from
+recorded since `detected_at`. `detected_at` is the persisted arm timestamp,
+which is fleet-level: the LATEST arm time across clients, not a per-client
+time (#2276; no per-client arm time is recorded). It is the moment the window
+was opened, not derived from
 `usage_limit_backoff_seconds`); it is `null` when that timestamp failed to
 persist or predates this window's arming — the event still fires rather
 than being dropped, but the cohort scan degrades to unbounded history in
@@ -1708,7 +1742,10 @@ coordination stream, and the body lives in the session's own
 `inboxes/<session_id>/inbox.jsonl`. No `correlation_id` is set.
 
 Until #2255 lands, the common outcome for a session that is genuinely live
-and mid-task is queued-but-not-delivered; see ADR-0017.
+and mid-task is queued-but-not-delivered. A session whose owning task is
+`BLOCKED_ON_USER` for a park a message cannot clear (a mechanical disposition
+such as `merge_gate_blocked`, or no recorded disposition) is likewise queued
+but not respawned, with a reason naming the disposition (#2287); see ADR-0017.
 
 ### `session.result_emitted`
 
@@ -2618,7 +2655,7 @@ its legacy skip, and (#3057) a tracker-IO turn whose outcome is `NONE`
   "client": "<str>",
   "tracker": "<str>",
   "backend": "codex",
-  "kind": "verdict | unparseable | plan",
+  "kind": "verdict | unparseable | plan | pr_link",
   "reason": "non_github_tracker | tracker_mcp_not_enabled | mcp_server_unnamed | tracker_unsupported | plan_refused | scratch_unwritable | codex_unavailable | tool_unavailable | turn_reported_failure | github_post_failed",
   "artifact_path": "<str | null>",
   "reviewed_sha": "<str | null>",
@@ -2630,6 +2667,7 @@ verdict (`kind: verdict`) or a zero-documents result (`kind: unparseable`)
 whose ticket comment was not posted, because the client's
 `tracking.primary.system` is set and is not `github-issues`: the daemon's only
 tracker client is GitHub-only (ADR-0013). Before this the skip was a log line.
+`kind: pr_link` (#3062) is the codex FINALIZE executor's PR-link comment.
 `client` is the client name. `artifact_path` is the durable worktree copy that
 now carries the verdict (`.claude/review-verdict.md` or
 `.claude/review-verdict-unparseable.md`), `null` if that write failed.
@@ -2683,7 +2721,7 @@ tracker-IO turn's outcome is `POSSIBLE` or `CONFIRMED` but not verified
   "client": "<str>",
   "tracker": "<str>",
   "backend": "codex",
-  "kind": "verdict | unparseable | plan",
+  "kind": "verdict | unparseable | plan | pr_link",
   "reason": "<TrackerIoReason>",
   "artifact_path": "<str | null>",
   "reviewed_sha": "<str | null>",
@@ -2734,7 +2772,7 @@ called after a tracker-IO turn's self-attested verification succeeds
   "client": "<str>",
   "tracker": "<str>",
   "backend": "codex",
-  "kind": "verdict | unparseable | plan",
+  "kind": "verdict | unparseable | plan | pr_link",
   "posted": [{"index": 1, "comment_id": "<str>", "url": "<str>"}],
   "reviewed_sha": "<str | null>",
   "session_id": "<str>",
@@ -3364,9 +3402,7 @@ run, immediately before the loop parks with `blocker.reason =
   ]
 }
 ```
-**Semantics:** GitHub #2394. `threshold` and `anchor_lines` are additive keys (#2666);
-`loop_attributed` per cycle is additive (#2665).
-The event's semantics: GitHub #2394. The fix loop made no net progress on the originally-found
+**Semantics:** GitHub #2394. The fix loop made no net progress on the originally-found
 (cycle-0) MUST_FIX findings for the configured number of consecutive cycles
 (`codex_fix_loop_stall_cycles`, default 1 since #2633; a lane can override it)
 while its cumulative fix
@@ -3376,8 +3412,9 @@ branch diff), max(40, 8 × anchor_lines))` when `anchor_lines` is set, else
 `max(150, 0.5 × the pre-loop branch diff)` (#2666). `threshold` is the bar
 applied; `anchor_lines` is the summed line count of the original findings'
 anchors (`null` when the relative term did not apply: a file-level or
-unanchored original finding, or the growth-guard switch off). Both
-conditions are required. The loop parks before reaching its cycle cap instead
+unanchored original finding, or the growth-guard switch off). `threshold` and
+`anchor_lines` are additive keys (#2666); `loop_attributed` per cycle is additive (#2665).
+Both conditions are required. The loop parks before reaching its cycle cap instead
 of spending the remaining cycles growing the diff further.
 
 `pre_loop_head_sha` is the cycle-0 reviewed head, so an operator can reset to
@@ -4283,7 +4320,7 @@ follow-up if this proves to fire in practice.
 ### `worktree.fast_forwarded`
 
 **Emitter:** `_ff_reused_worktree` (`cw.worktree`), reached from
-`create_worktree(..., refresh_on_reuse=True)` — the dispatch claim path and
+`create_worktree(..., refresh=ReuseRefreshOptions(...))` — the dispatch claim path and
 `dispatch_fix_agent`.
 **Payload:**
 ```json

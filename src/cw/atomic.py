@@ -49,7 +49,7 @@ def atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
-def rotate_backup(path: Path, *, keep: int = _DEFAULT_BACKUP_KEEP) -> None:
+def rotate_backup(path: Path, *, keep: int = _DEFAULT_BACKUP_KEEP) -> Path | None:
     """Snapshot *path* to a timestamped backup sibling before it is overwritten.
 
     No-op if *path* doesn't exist yet (nothing to back up on the first write).
@@ -58,15 +58,18 @@ def rotate_backup(path: Path, *, keep: int = _DEFAULT_BACKUP_KEEP) -> None:
     ones are pruned. Best-effort: any OSError during snapshot or prune is
     logged and swallowed — a failed backup must never block the primary
     write. See GitHub #1017 (dev_queue.json write-ahead backup rotation).
+
+    Returns the snapshot's path, or ``None`` when *path* is absent or the
+    snapshot failed (#3498). A prune failure still returns the snapshot.
     """
     if not path.exists():
-        return
+        return None
     backup = path.parent / f"{path.name}{_BACKUP_SUFFIX}{time.time_ns()}"
     try:
         shutil.copy2(path, backup)
     except OSError:
         logger.warning("rotate_backup: failed to snapshot %s", path)
-        return
+        return None
     try:
         existing = sorted(
             path.parent.glob(f"{path.name}{_BACKUP_SUFFIX}*"),
@@ -75,7 +78,8 @@ def rotate_backup(path: Path, *, keep: int = _DEFAULT_BACKUP_KEEP) -> None:
         )
     except OSError:
         logger.warning("rotate_backup: failed to list backups for %s", path)
-        return
+        return backup
     for stale in existing[keep:]:
         with contextlib.suppress(OSError):
             stale.unlink()
+    return backup

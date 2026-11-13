@@ -11,6 +11,7 @@ Subcommands:
   gate-timeout  — Foreground/poll timeout ceilings for a named gate
   gate-elapsed  — Elapsed time since a timestamp vs a ceiling
   gate-pass     — Record a gate pass at HEAD, or check whether one still applies
+  gate-ci-evidence — Whether green CI at a PR's live head proves a gate (opt-in)
 """
 
 from __future__ import annotations
@@ -249,10 +250,12 @@ def _git_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
 
-def _run_git(args: list[str], *, default: str = "") -> str:
+def _run_git(args: list[str], *, default: str = "", quiet: bool = False) -> str:
     """Run a git command and return stdout.
 
     Returns *default* (empty string unless given) on failure instead of raising.
+    A failure is logged unless *quiet*, for callers where failing is the normal
+    fallback path rather than a problem worth a warning.
     """
     cmd = ["git", *args]
     try:
@@ -264,10 +267,14 @@ def _run_git(args: list[str], *, default: str = "") -> str:
             env=_git_env(),
         )
     except FileNotFoundError:
-        logger.exception("git not found")
+        if not quiet:
+            logger.exception("git not found")
         return default
     except subprocess.CalledProcessError as e:
-        logger.warning("git command failed: %s\n%s", " ".join(cmd), e.stderr.strip())
+        if not quiet:
+            logger.warning(
+                "git command failed: %s\n%s", " ".join(cmd), e.stderr.strip()
+            )
         return default
     return result.stdout.strip()
 
@@ -783,7 +790,15 @@ def _parse_claude_md_gates(claude_md_path: Path) -> ClaudeMdGates:
         content = claude_md_path.read_text()
     except OSError:
         return ClaudeMdGates(gates=[], authoritative=False)
+    return _parse_claude_md_gates_text(content)
 
+
+def _parse_claude_md_gates_text(content: str) -> ClaudeMdGates:
+    """``_parse_claude_md_gates`` over CLAUDE.md text already read.
+
+    See ``_parse_claude_md_gates`` for the formats. Split out so the text can
+    come from git (the default branch's committed copy) rather than a file.
+    """
     in_gates_section = False
     in_bash_fence = False
     fence_lines: list[str] = []
@@ -829,10 +844,21 @@ def _parse_claude_md_gates(claude_md_path: Path) -> ClaudeMdGates:
     return ClaudeMdGates(gates=merged, authoritative=bool(block_gates))
 
 
+# Where detect_gates read CLAUDE.md from (the ``claude_md_source`` result key).
+CLAUDE_MD_SOURCE_DEFAULT_BRANCH = "default-branch"
+CLAUDE_MD_SOURCE_WORKTREE = "worktree"
+
+# Sentinel default for quiet git reads: distinguishes failure from empty output.
+_GIT_QUIET_FAILED = "git-quiet-failed"
+
+
 def detect_gates(claude_md_path: Path | None = None) -> dict[str, Any]:
     """Auto-detect quality gates from project files and CLAUDE.md overrides.
 
-    Returns dict with 'gates' list and 'detected_from' list.
+    Returns dict with 'gates' list, 'detected_from' list, and
+    'claude_md_source' (``default-branch`` when CLAUDE.md came from the remote
+    default branch's committed copy, ``worktree`` otherwise; an explicit
+    ``claude_md_path`` is always ``worktree``).
 
     A CLAUDE.md bash block that yields at least one gate is authoritative:
     ecosystem defaults are dropped and ``detected_from`` lists only
@@ -849,11 +875,20 @@ def detect_gates(claude_md_path: Path | None = None) -> dict[str, Any]:
             detected_from.append(marker)
             gates.extend(default_gates)
 
-    # Check for CLAUDE.md overrides
-    if claude_md_path is None:
-        claude_md_path = cwd / "CLAUDE.md"
-
-    parsed = _parse_claude_md_gates(claude_md_path)
+    # Check for CLAUDE.md overrides. Gates are repo policy, so with no explicit
+    # path they come from the default branch's committed CLAUDE.md: a branch cut
+    # before a gate change, or one that edits its own gates, is still held to the
+    # default branch's gates. Not a git repo, no origin/HEAD, or no such file
+    # there -> the worktree's CLAUDE.md, as before. An explicit path always wins.
+    source = CLAUDE_MD_SOURCE_WORKTREE
+    default_branch_text = (
+        _default_branch_claude_md() if claude_md_path is None else None
+    )
+    if default_branch_text is not None:
+        parsed = _parse_claude_md_gates_text(default_branch_text)
+        source = CLAUDE_MD_SOURCE_DEFAULT_BRANCH
+    else:
+        parsed = _parse_claude_md_gates(claude_md_path or cwd / "CLAUDE.md")
     if parsed.authoritative:
         # The bash block is the complete gate set: drop every ecosystem default.
         gates = []
@@ -868,7 +903,30 @@ def detect_gates(claude_md_path: Path | None = None) -> dict[str, Any]:
     return {
         "gates": [g.to_dict() for g in gates],
         "detected_from": detected_from,
+        "claude_md_source": source,
     }
+
+
+def _default_branch_claude_md() -> str | None:
+    """``./CLAUDE.md`` as committed on the remote default branch, or None.
+
+    The default branch is whatever ``origin/HEAD`` points at. ``./`` keeps the
+    path relative to the current directory, so a subdirectory with its own
+    CLAUDE.md reads that one. Quiet on purpose: outside a git repo, with no
+    ``origin/HEAD``, or with no such file there, None is the normal fallback
+    (the worktree copy), not a failure worth a warning.
+    """
+    ref = _run_git(
+        ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+        default=_GIT_QUIET_FAILED,
+        quiet=True,
+    )
+    if not ref or ref == _GIT_QUIET_FAILED:
+        return None
+    text = _run_git(
+        ["show", f"{ref}:./CLAUDE.md"], default=_GIT_QUIET_FAILED, quiet=True
+    )
+    return None if text == _GIT_QUIET_FAILED else text
 
 
 # --- Gate-Pass Stamps (#2758) ---
@@ -1002,6 +1060,262 @@ def gate_pass_record(name: str, base: str) -> dict[str, Any]:
     )
     save_state(state)
     return {"gate": name, "recorded": True, "sha": head}
+
+
+# --- CI Evidence (open-PR reuse path) ---
+
+# project-config.yaml, opt-in per repo: quality_gates.ci_evidence maps a gate
+# name (exactly as detect-gates prints it) to the CI check name(s) whose
+# success at the PR's live head already proves that gate. The map is read from
+# the committed file on origin/<base>, never from the working tree, so a PR
+# cannot opt itself in. A repo with no map, or a gate with no entry, never
+# skips anything.
+GATE_CI_EVIDENCE_CONFIG_KEY = "ci_evidence"
+GH_CALL_TIMEOUT_SECONDS = 60
+GH_API_PAGE_SIZE = 100
+CI_CHECK_SUCCESS = "success"
+CI_CHECK_COMPLETED = "completed"
+CI_PR_OPEN = "open"
+
+
+def _ci_evidence_entry(key: object, value: object) -> list[str] | None:
+    """One map entry as a non-empty list of check names, else None (invalid)."""
+    if not isinstance(key, str):
+        return None
+    names = [value] if isinstance(value, str) else value
+    if (
+        not isinstance(names, list)
+        or not names
+        or not all(isinstance(n, str) and n.strip() for n in names)
+    ):
+        return None
+    return [str(n).strip() for n in names]
+
+
+def _parse_ci_evidence(text: str) -> Mapping[object, object]:
+    """The raw ``quality_gates.ci_evidence`` mapping from config *text*.
+
+    Needs PyYAML (``parse_ci_evidence_map`` checks); absent or null is empty.
+    """
+    if yaml is None:
+        return {}
+    doc = yaml.safe_load(text)
+    if doc is None:
+        return {}
+    if not isinstance(doc, dict):
+        msg = "root is not a mapping"
+        raise TypeError(msg)
+    section = _nested_mapping(doc, GATE_TIMEOUT_CONFIG_SECTION)
+    return _nested_mapping(section, GATE_CI_EVIDENCE_CONFIG_KEY)
+
+
+def parse_ci_evidence_map(text: str, source: str) -> dict[str, list[str]]:
+    """Valid ``quality_gates.ci_evidence`` entries from config *text*.
+
+    Fail closed: no PyYAML, or a malformed document, yields ``{}``, which makes
+    every gate run locally. An invalid entry is logged (naming *source*) and
+    skipped without affecting its siblings.
+    """
+    if yaml is None:
+        return {}
+    try:
+        raw = _parse_ci_evidence(text)
+    except (ValueError, TypeError, RecursionError, yaml.YAMLError) as exc:
+        logger.warning("Ignoring gate CI evidence in %s: %s", source, exc)
+        return {}
+    evidence: dict[str, list[str]] = {}
+    for key, value in raw.items():
+        checks = _ci_evidence_entry(key, value)
+        if checks is None:
+            logger.warning(
+                "Ignoring %s.%s.%s = %r in %s: want a check name or a list of them",
+                GATE_TIMEOUT_CONFIG_SECTION,
+                GATE_CI_EVIDENCE_CONFIG_KEY,
+                key,
+                value,
+                source,
+            )
+            continue
+        evidence[str(key)] = checks
+    return evidence
+
+
+def _base_config_text(base: str) -> str:
+    """Committed project config on ``origin/<base>``; ``""`` if absent or unreadable.
+
+    Read from git, not the working tree: the code under review must not be able
+    to declare its own gates proven.
+    """
+    ref = f"origin/{base}:{PROJECT_CONFIG_PATH.as_posix()}"
+    try:
+        result = subprocess.run(
+            ["git", "show", ref],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=_git_env(),
+            timeout=GH_CALL_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout if result.returncode == 0 else ""
+
+
+def _gh_json(args: list[str]) -> Any | None:
+    """Parsed JSON stdout of ``gh <args>``, or None on any failure."""
+    try:
+        result = subprocess.run(
+            ["gh", *args],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=GH_CALL_TIMEOUT_SECONDS,
+        )
+        return json.loads(result.stdout)
+    except (
+        OSError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        ValueError,
+    ) as exc:
+        logger.warning("gh %s failed: %s", " ".join(args[:2]), exc)
+        return None
+
+
+def _pr_state(pr: int, repo: str | None) -> dict[str, Any] | None:
+    """Live ``headRefOid``, ``baseRefName`` and ``state`` of PR *pr*, or None."""
+    args = ["pr", "view", str(pr), "--json", "headRefOid,baseRefName,state"]
+    if repo:
+        args += ["--repo", repo]
+    parsed = _gh_json(args)
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _commit_api_path(repo: str | None, sha: str, leaf: str) -> str:
+    """REST path under a commit; ``{owner}/{repo}`` is gh's current-repo placeholder."""
+    slug = repo or "{owner}/{repo}"
+    return f"repos/{slug}/commits/{sha}/{leaf}"
+
+
+def _check_entries(
+    repo: str | None, sha: str, check: str
+) -> list[dict[str, Any]] | None:
+    """Latest check runs and commit statuses named *check* on *sha*.
+
+    Queried by name rather than through the PR's ``statusCheckRollup``, which
+    ``gh`` caps at 100 entries. None when GitHub cannot say (gh failure, odd
+    shape, or an incomplete page), so the caller fails closed.
+    """
+    page = ["-f", f"per_page={GH_API_PAGE_SIZE}"]
+    runs = _gh_json(
+        [
+            "api",
+            "-X",
+            "GET",
+            _commit_api_path(repo, sha, "check-runs"),
+            "-f",
+            f"check_name={check}",
+            "-f",
+            "filter=latest",
+            *page,
+        ]
+    )
+    statuses = _gh_json(
+        ["api", "-X", "GET", _commit_api_path(repo, sha, "status"), *page]
+    )
+    if not isinstance(runs, dict) or not isinstance(statuses, dict):
+        return None
+    run_items = runs.get("check_runs")
+    status_items = statuses.get("statuses")
+    if not isinstance(run_items, list) or not isinstance(status_items, list):
+        return None
+    if runs.get("total_count") != len(run_items):
+        return None
+    entries = [e for e in run_items if isinstance(e, dict) and e.get("name") == check]
+    entries += [
+        e for e in status_items if isinstance(e, dict) and e.get("context") == check
+    ]
+    return entries
+
+
+def _lower(value: object) -> str:
+    """*value* lower-cased if a string else ``""`` (GraphQL is upper, REST lower)."""
+    return value.lower() if isinstance(value, str) else ""
+
+
+def _entry_succeeded(entry: Mapping[str, Any]) -> bool:
+    """Whether a check run or commit status is a finished success."""
+    if "state" in entry and "conclusion" not in entry:
+        return _lower(entry.get("state")) == CI_CHECK_SUCCESS
+    return (
+        _lower(entry.get("status")) == CI_CHECK_COMPLETED
+        and _lower(entry.get("conclusion")) == CI_CHECK_SUCCESS
+    )
+
+
+def gate_ci_evidence(
+    name: str,
+    pr: int,
+    repo: str | None = None,
+    base: str = "main",
+) -> dict[str, Any]:
+    """Whether green CI at the PR's live head already proves gate *name*.
+
+    ``skip`` is true only when the gate has an exact ``ci_evidence`` entry on
+    ``origin/<base>``, the PR is open against *base*, local HEAD equals the PR
+    head read live from GitHub, and every mapped check has at least one entry
+    on that commit with every entry a finished success. Every other outcome
+    (no PyYAML, no entry, GitHub unreachable, PR closed or retargeted, head
+    moved, check missing, pending, red, cancelled, skipped or neutral) is
+    ``skip: false`` with the reason, so the caller runs the gate locally.
+    """
+    verdict: dict[str, Any] = {
+        "gate": name,
+        "skip": False,
+        "reason": "",
+        "sha": None,
+        "checks": [],
+    }
+    if yaml is None:
+        # Distinct from "no-map-entry": the map cannot be read at all, so a
+        # configured repo must be able to see why nothing is being skipped.
+        return {**verdict, "reason": "pyyaml-unavailable"}
+    checks = parse_ci_evidence_map(_base_config_text(base), f"origin/{base}").get(
+        name, []
+    )
+    head = _run_git(["rev-parse", "HEAD"])
+    verdict = {**verdict, "sha": head or None, "checks": checks}
+    if not checks:
+        return {**verdict, "reason": "no-map-entry"}
+    if not head:
+        return {**verdict, "reason": "head-unresolved"}
+    state = _pr_state(pr, repo)
+    if state is None:
+        return {**verdict, "reason": "ci-signal-unavailable"}
+    if _lower(state.get("state")) != CI_PR_OPEN:
+        return {**verdict, "reason": "pr-not-open", "pr_state": state.get("state")}
+    if state.get("baseRefName") != base:
+        return {
+            **verdict,
+            "reason": "pr-base-mismatch",
+            "live_base": state.get("baseRefName"),
+        }
+    live_head = state.get("headRefOid")
+    if live_head != head:
+        return {**verdict, "reason": "head-mismatch", "live_sha": live_head}
+    for check in checks:
+        entries = _check_entries(repo, head, check)
+        if entries is None:
+            return {
+                **verdict,
+                "reason": "ci-signal-unavailable",
+                "failed_check": check,
+            }
+        if not entries:
+            return {**verdict, "reason": "check-missing", "failed_check": check}
+        if not all(_entry_succeeded(e) for e in entries):
+            return {**verdict, "reason": "check-not-success", "failed_check": check}
+    return {**verdict, "skip": True, "reason": "matched"}
 
 
 # --- Scope Tracking ---
@@ -1224,6 +1538,12 @@ def cmd_gate_pass(args: argparse.Namespace) -> None:
     print(json.dumps(result, indent=2))
 
 
+def cmd_gate_ci_evidence(args: argparse.Namespace) -> None:
+    """Handle gate-ci-evidence subcommand."""
+    result = gate_ci_evidence(args.name, args.pr, args.repo, args.base)
+    print(json.dumps(result, indent=2))
+
+
 def cmd_gate_elapsed(args: argparse.Namespace) -> None:
     """Handle gate-elapsed subcommand."""
     try:
@@ -1329,9 +1649,36 @@ def main() -> None:
         ),
     )
 
+    # gate-ci-evidence
+    gate_ci_parser = subparsers.add_parser(
+        "gate-ci-evidence",
+        help=(
+            "Report whether green CI at the PR's live head already proves a"
+            " gate (open-PR reuse path; opt-in via quality_gates.ci_evidence)"
+        ),
+    )
+    gate_ci_parser.add_argument(
+        "name", help="Gate name exactly as detect-gates printed it"
+    )
+    gate_ci_parser.add_argument(
+        "--pr", type=int, required=True, help="Pull request number"
+    )
+    gate_ci_parser.add_argument(
+        "--repo", default=None, help="owner/name (default: gh's current repo)"
+    )
+    gate_ci_parser.add_argument(
+        "--base",
+        default="main",
+        help=(
+            "Base branch the PR targets; the ci_evidence map is read from the"
+            " committed config on origin/<base> (default: main)"
+        ),
+    )
+
     args = parser.parse_args()
 
     dispatch = {
+        "gate-ci-evidence": cmd_gate_ci_evidence,
         "detect-gates": cmd_detect_gates,
         "snapshot": cmd_snapshot,
         "check-scope": cmd_check_scope,

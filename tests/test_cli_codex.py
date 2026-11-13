@@ -43,6 +43,33 @@ def test_codex_run_stage_impl_invokes_driver(tmp_config_dir: Path) -> None:
     )
 
 
+def test_codex_run_stage_finalize_invokes_driver(tmp_config_dir: Path) -> None:
+    with patch("cw.cli.codex.run_codex_finalize_stage") as driver_mock:
+        result = CliRunner().invoke(
+            main,
+            ["codex", "run", "--stage", "finalize", "--session-id", "sess-1", "T-1"],
+        )
+
+    assert result.exit_code == 0, result.output
+    driver_mock.assert_called_once_with(
+        ticket_id="T-1",
+        session_id="sess-1",
+        wall_clock_budget_seconds=None,
+    )
+
+
+def test_codex_run_unsupported_stage_message_names_finalize(
+    tmp_config_dir: Path,
+) -> None:
+    result = CliRunner().invoke(
+        main,
+        ["codex", "run", "--stage", "harden", "--session-id", "sess-1", "T-1"],
+    )
+
+    assert result.exit_code != 0
+    assert "supported: plan, impl, review, finalize" in result.output
+
+
 def test_codex_run_help_no_longer_says_not_implemented(tmp_config_dir: Path) -> None:
     result = CliRunner().invoke(main, ["codex", "run", "--help"])
     assert result.exit_code == 0, result.output

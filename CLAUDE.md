@@ -679,6 +679,26 @@ only when it cannot resolve it itself — ADR-0020):
 - Command doesn't support `-C`, `--dir`, or path arguments
 - Running multiple sequential commands that all need the same directory
 
+### Git stash is shared across worktrees (#1418)
+
+The git stash stack is one reflog shared by every worktree of a repository and
+by every concurrent session. Never run a bare `git stash`, `git stash pop` or
+`git stash clear` (including `stash push` with no message, `stash save`, and
+`stash apply` / `stash drop` with no stash argument). Two failure modes: a pop
+applies and drops the newest entry, which may be another session's work; and a
+stash you never recover silently loses yours.
+
+- Prefer a temporary WIP commit to set work aside, and restore a file with
+  `git checkout -- <file>`.
+- If a stash is unavoidable: `git stash push -u -m "<unique-tag>"`, capture your
+  entry's SHA with `git stash list --format='%H %gs'`, restore with
+  `git stash apply <sha>` (never `pop`), then re-find the entry by tag and drop it.
+- `cw guard-git-stash` enforces this for Claude-hosted headless workers by
+  refusing the unsafe forms in their Bash calls. Codex and opencode workers
+  write no `settings.local.json`, so for them the rule is prompt-only (the
+  shared stage preamble and the codex fix-prompt scope rules). See
+  [config/CONFIG_REFERENCE.md](config/CONFIG_REFERENCE.md#shared-stash-guard-1418).
+
 ---
 
 # Context Management

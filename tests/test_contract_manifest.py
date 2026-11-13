@@ -1025,7 +1025,7 @@ _RFC_0017_A4_MEMBERS = (
     "review.fourth-trigger-review-engine-modified-park",
     "review.fifth-trigger-review-confirm-must-fix-park",
 )
-#: The finalize members, retargeted to the codex FINALIZE ticket (C3, #3062).
+#: The finalize members, retargeted to the finalize review-debt follow-up (#3543).
 _RFC_0017_FINALIZE_MEMBERS = (
     "finalize.gate-review-debt-re-file",
     "finalize.review-sign-off",
@@ -1059,19 +1059,26 @@ _CLEAN_BODY_REF = CodeRef(
     kind="code", path="src/cw/opencode_clean_review.py", symbol="clean_review_body"
 )
 
-_CODEX_STAGE_TICKETS = {"finalize": 3062}
+_CODEX_STAGE_TICKETS: dict[str, int] = {}
+#: The C3 ticket (#3062, codex FINALIZE executor); no cell may defer to it once
+#: it lands. Its finalize-stage cells are implemented,
+#: not-applicable, or deferred to one of its three follow-ups.
+_C3_TICKET = 3062
+_CODEX_FINALIZE_FOLLOW_UPS = frozenset({3542, 3543, 3544})
 #: The C1 ticket (#3060, codex PLAN executor); no cell may defer to it once it
-#: lands. Its plan-stage cells are implemented, fails-closed, not-applicable,
+#: lands. Its plan-stage cells are implemented, not-applicable,
 #: or deferred to one of its two follow-ups.
 _C1_TICKET = 3060
 _CODEX_PLAN_FOLLOW_UPS = frozenset({3464, 3465})
 #: The C2 ticket (#3061, codex IMPL executor); no cell may defer to it once it
-#: lands. Its impl-stage cells are implemented, fails-closed, not-applicable,
+#: lands. Its impl-stage cells are implemented, not-applicable,
 #: or deferred to one of its three follow-ups.
 _C2_TICKET = 3061
 _CODEX_IMPL_FOLLOW_UPS = frozenset({3529, 3530, 3531})
 # #3055 closed with RFC 0018 S3: its codex review cells moved to #3057 (A2).
-_CODEX_REVIEW_TICKETS = frozenset({3318, 2464, 3063, 3057})
+_CODEX_REVIEW_TICKETS = frozenset({3318, 2464, 3057})
+#: The C4 ticket (#3063, usage accounting); no cell may defer to it once it lands.
+_C4_TICKET = 3063
 #: The S3 ticket; no cell may defer to it once it lands (#3055).
 _S3_TICKET = 3055
 #: The A1 ticket; no cell may defer to it once it lands (#3056).
@@ -1225,13 +1232,21 @@ def test_every_status_and_blocker_reason_is_covered() -> None:
 
 
 def test_gate_timeout_sentinel_element() -> None:
-    """#3372: the reuse-path gate-timeout sentinel carries the four backend
-    cells of its finalize sibling ``finalize.sentinel-automerge-not-armed``."""
+    """#3372: the reuse-path gate-timeout sentinel carries the claude-native,
+    opencode and local cells of its finalize sibling
+    ``finalize.sentinel-automerge-not-armed``. Its codex cell differs (#3062):
+    no cw timer bounds a codex FINALIZE gate (ADR-0014), so ``gate_timeout`` is
+    never produced there and the cell is not-applicable."""
     elements = _manifest().elements
     element = elements["finalize.sentinel-gate-timeout"]
     sibling = elements["finalize.sentinel-automerge-not-armed"]
     assert list(element.covers) == ["gate_timeout"]
-    assert element.cells == sibling.cells
+    for backend in set(element.cells) - {CODEX_BACKEND}:
+        assert element.cells[backend] == sibling.cells[backend], backend
+    codex = element.cells[CODEX_BACKEND]
+    assert isinstance(codex, NotApplicableDisposition)
+    assert "ADR-0014" in codex.reason
+    assert isinstance(sibling.cells[CODEX_BACKEND], ImplementedDisposition)
 
 
 def test_element_count_floor() -> None:
@@ -1260,11 +1275,11 @@ def test_rfc_0017_member_cells(tmp_path: Path) -> None:
     for element_id in _RFC_0017_FINALIZE_MEMBERS:
         codex = _real_cell(element_id, CODEX_BACKEND)
         assert isinstance(codex, DeferredDisposition), element_id
-        assert codex.ref == TicketRef(kind="ticket", number=3062)
+        assert codex.ref == TicketRef(kind="ticket", number=3543)
         opencode = _real_cell(element_id, OPENCODE_BACKEND)
         assert isinstance(opencode, FailsClosedDisposition), element_id
         assert opencode.guard_pending
-        assert opencode.ref == TicketRef(kind="ticket", number=3062)
+        assert opencode.ref == TicketRef(kind="ticket", number=3543)
     debt = _real_cell("review.review-debt-filing", CODEX_BACKEND)
     assert isinstance(debt, DeferredDisposition)
     assert debt.ref == TicketRef(kind="ticket", number=3216)
@@ -1331,7 +1346,7 @@ def test_local_ticket_citations_follow_the_stage_split() -> None:
 
 def _assert_codex_plan_cell(element_id: str, cell: object) -> int | None:
     """A codex PLAN cell (#3060): a code ref, a reason, or a C1 follow-up."""
-    if isinstance(cell, (ImplementedDisposition, FailsClosedDisposition)):
+    if isinstance(cell, ImplementedDisposition):
         assert isinstance(cell.ref, CodeRef), element_id
         assert cell.ref.path.startswith("src/cw/"), element_id
         return None
@@ -1345,7 +1360,7 @@ def _assert_codex_plan_cell(element_id: str, cell: object) -> int | None:
 
 def _assert_codex_impl_cell(element_id: str, cell: object) -> int | None:
     """A codex IMPL cell (#3061): a code ref, a reason, or a C2 follow-up."""
-    if isinstance(cell, (ImplementedDisposition, FailsClosedDisposition)):
+    if isinstance(cell, ImplementedDisposition):
         assert isinstance(cell.ref, CodeRef), element_id
         assert cell.ref.path.startswith("src/cw/"), element_id
         return None
@@ -1357,10 +1372,25 @@ def _assert_codex_impl_cell(element_id: str, cell: object) -> int | None:
     return cell.ref.number
 
 
+def _assert_codex_finalize_cell(element_id: str, cell: object) -> int | None:
+    """A codex FINALIZE cell (#3062): a code ref, a reason, or a C3 follow-up."""
+    if isinstance(cell, ImplementedDisposition):
+        assert isinstance(cell.ref, CodeRef), element_id
+        assert cell.ref.path.startswith("src/cw/codex_finalize/"), element_id
+        return None
+    if isinstance(cell, NotApplicableDisposition):
+        assert cell.reason.strip(), element_id
+        return None
+    assert isinstance(cell, DeferredDisposition), element_id
+    assert cell.ref.number in _CODEX_FINALIZE_FOLLOW_UPS, element_id
+    return cell.ref.number
+
+
 def test_codex_cells_follow_the_stage_ticket_map() -> None:
     used: set[int] = set()
     plan_follow_ups: set[int] = set()
     impl_follow_ups: set[int] = set()
+    finalize_follow_ups: set[int] = set()
     for element_id, element in _manifest().elements.items():
         if element_id == "review.review-debt-filing":
             continue
@@ -1375,6 +1405,10 @@ def test_codex_cells_follow_the_stage_ticket_map() -> None:
             follow_up = _assert_codex_impl_cell(element_id, cell)
             if follow_up is not None:
                 impl_follow_ups.add(follow_up)
+        elif stage == "finalize":
+            follow_up = _assert_codex_finalize_cell(element_id, cell)
+            if follow_up is not None:
+                finalize_follow_ups.add(follow_up)
         elif stage in _CODEX_STAGE_TICKETS:
             assert isinstance(cell, DeferredDisposition), element_id
             assert cell.ref.number == _CODEX_STAGE_TICKETS[stage], element_id
@@ -1387,6 +1421,7 @@ def test_codex_cells_follow_the_stage_ticket_map() -> None:
     assert used == set(_CODEX_STAGE_TICKETS.values())
     assert plan_follow_ups == _CODEX_PLAN_FOLLOW_UPS
     assert impl_follow_ups == _CODEX_IMPL_FOLLOW_UPS
+    assert finalize_follow_ups == _CODEX_FINALIZE_FOLLOW_UPS
 
 
 #: The codex IMPL cells that point at a ``cw.codex_impl`` symbol (#3061).
@@ -1414,7 +1449,7 @@ _C2_CODE_CELLS = {
 @pytest.mark.parametrize("element_id", sorted(_C2_CODE_CELLS))
 def test_codex_impl_code_cells_resolve_to_the_package(element_id: str) -> None:
     cell = _real_cell(element_id, CODEX_BACKEND)
-    assert isinstance(cell, (ImplementedDisposition, FailsClosedDisposition))
+    assert isinstance(cell, ImplementedDisposition)
     filename, symbol = _C2_CODE_CELLS[element_id]
     assert cell.ref == CodeRef(
         kind="code", path=f"src/cw/codex_impl/{filename}", symbol=symbol
@@ -1439,6 +1474,160 @@ def test_no_cell_defers_to_the_landed_c2_ticket() -> None:
         for backend, cell in element.cells.items():
             if isinstance(cell, DeferredDisposition):
                 assert cell.ref.number != _C2_TICKET, (element_id, backend)
+
+
+def test_no_cell_defers_to_the_landed_c3_ticket() -> None:
+    for element_id, element in _manifest().elements.items():
+        for backend, cell in element.cells.items():
+            if isinstance(cell, DeferredDisposition):
+                assert cell.ref.number != _C3_TICKET, (element_id, backend)
+
+
+def test_no_cell_defers_to_the_landed_c4_ticket() -> None:
+    for element_id, element in _manifest().elements.items():
+        for backend, cell in element.cells.items():
+            if isinstance(cell, DeferredDisposition):
+                assert cell.ref.number != _C4_TICKET, (element_id, backend)
+
+
+def test_codex_usage_accounting_cell_is_implemented_with_a_code_ref() -> None:
+    cell = _manifest().elements["orch.sentinel-structured-output"].cells["codex"]
+
+    assert isinstance(cell, ImplementedDisposition)
+    assert cell.ref == CodeRef(
+        kind="code", path="src/cw/codex_usage.py", symbol="UsageAccumulator"
+    )
+
+
+#: The codex FINALIZE implemented cells that point at a
+#: ``cw.codex_finalize`` symbol (#3062): element id -> (file, symbol).
+_C3_CODE_CELLS = {
+    "finalize.claude-review-verdict-md-if-present-is-this": (
+        "_gates.py",
+        "run_must_fix_override",
+    ),
+    "finalize.resolve-carried-through-context-before-emitting": (
+        "_gates.py",
+        "resolve_tier",
+    ),
+    "finalize.must-fix-override-verification": ("_gates.py", "run_must_fix_override"),
+    "finalize.pre-stage-detector-guard": ("_pr.py", "detect_branch_pr"),
+    "finalize.large-tier-review-approval-check": ("_gates.py", "run_approval_fence"),
+    "finalize.clean-mode-final-tip-check": ("_gates.py", "run_approval_fence"),
+    "finalize.what-it-runs": ("_gates.py", "run_approval_fence"),
+    "finalize.on-failure": ("_gates.py", "run_approval_fence"),
+    "finalize.merge-gate-disabled-merge-gate-disabled-by-client-config": (
+        "_merge_gate.py",
+        "run_merge_gate",
+    ),
+    "finalize.unavailability-classifier": ("_result.py", "classify_unavailability"),
+    "finalize.self-heal-arm-only-when-automerge-enabled": ("_arm.py", "arm"),
+    "finalize.post-push-mergeability-verification": ("_pr.py", "check_mergeability"),
+    "finalize.reuse-path-quality-gates": ("_gates.py", "run_finalize_quality_gates"),
+    "finalize.scope": ("_run.py", "run_finalize_stage_and_complete"),
+    "finalize.failure-headless": ("_result.py", "finalize_blocked"),
+    "finalize.post-to-linear": ("_post.py", "post_pr_link_comment"),
+    "finalize.stage-4-5-completion": ("_run.py", "run_finalize_stage_and_complete"),
+    "finalize.emit-through-cw-then-frame": ("_result.py", "finalize_shipped"),
+    "finalize.merge-gate-check": ("_merge_gate.py", "run_merge_gate"),
+    "finalize.adopted-pr-inventory-fails": ("_merge_gate.py", "run_merge_gate"),
+    "finalize.absent-from-both-locations": ("_merge_gate.py", "run_merge_gate"),
+    "finalize.compose-pr-title-in-parent": ("_result.py", "compose_pr_title"),
+    "finalize.main-session-re-verification": ("_arm.py", "verify_pr_state"),
+    "finalize.enable-auto-merge": ("_arm.py", "arm"),
+    "finalize.sentinel-merge-conflict-post-push": ("_pr.py", "probe_default"),
+    "finalize.unavailability-classifier-signature-table-sentinel": (
+        "_result.py",
+        "classify_unavailability",
+    ),
+    "finalize.cw-side-classification": ("_result.py", "classify_unavailability"),
+    "finalize.push-sites-covered": ("_pr.py", "push_ahead"),
+    "finalize.sentinel-automerge-not-armed": ("_arm.py", "arm"),
+    "finalize.reuse-path-gate-failure-agent-block-sentinel": (
+        "_gates.py",
+        "run_finalize_quality_gates",
+    ),
+}
+
+
+def test_codex_finalize_code_cell_table_is_exactly_the_code_cells() -> None:
+    """The 30 implemented codex finalize code cells, no others."""
+    code_cells = {
+        element_id
+        for element_id, element in _manifest().elements.items()
+        if scope_stage(element_id, CODEX_BACKEND) == "finalize"
+        and isinstance(
+            element.cells[CODEX_BACKEND],
+            ImplementedDisposition,
+        )
+    }
+    assert code_cells == set(_C3_CODE_CELLS)
+    assert len(_C3_CODE_CELLS) == 30
+    implemented = set(elements_with(CODEX_BACKEND, "implemented"))
+    assert len(implemented & set(_C3_CODE_CELLS)) == 30
+
+
+@pytest.mark.parametrize("element_id", sorted(_C3_CODE_CELLS))
+def test_codex_finalize_code_cells_resolve_to_the_package(
+    element_id: str, tmp_path: Path
+) -> None:
+    cell = _real_cell(element_id, CODEX_BACKEND)
+    assert isinstance(cell, ImplementedDisposition)
+    filename, symbol = _C3_CODE_CELLS[element_id]
+    assert cell.ref == CodeRef(
+        kind="code", path=f"src/cw/codex_finalize/{filename}", symbol=symbol
+    )
+    resolve = make_resolver(_REPO_ROOT, _prompt_for_stage(tmp_path))
+    assert resolve(cell.ref) is None
+
+
+def test_codex_finalize_follow_up_cells_cover_the_three_tickets() -> None:
+    by_ticket: dict[int, int] = {}
+    for element_id, element in _manifest().elements.items():
+        cell = element.cells[CODEX_BACKEND]
+        if scope_stage(element_id, CODEX_BACKEND) != "finalize":
+            continue
+        if isinstance(cell, DeferredDisposition):
+            by_ticket[cell.ref.number] = by_ticket.get(cell.ref.number, 0) + 1
+    assert set(by_ticket) == _CODEX_FINALIZE_FOLLOW_UPS
+    assert sum(by_ticket.values()) == 24
+
+
+def test_codex_prep_pr_and_ship_it_cells_are_not_applicable() -> None:
+    ids = [
+        element_id
+        for element_id in _manifest().elements
+        if element_id.startswith(("prep-pr.", "ship-it."))
+    ]
+    assert len([i for i in ids if i.startswith("prep-pr.")]) == 12
+    assert len([i for i in ids if i.startswith("ship-it.")]) == 8
+    for element_id in ids:
+        cell = _real_cell(element_id, CODEX_BACKEND)
+        assert isinstance(cell, NotApplicableDisposition), element_id
+        assert "cw does this in Python" in cell.reason, element_id
+    gates = _real_cell("prep-pr.run-quality-gates", CODEX_BACKEND)
+    assert isinstance(gates, NotApplicableDisposition)
+    assert "codex_finalize/_gates.py::run_finalize_quality_gates" in gates.reason
+
+
+def test_no_codex_cell_is_fails_closed() -> None:
+    """RFC 0018 D1 (#3064): codex has no stage-level refusal left, so no codex
+    cell is fails-closed. Every former fails-closed codex cell is implemented
+    with the cw-run gate that carries it."""
+    assert elements_with(CODEX_BACKEND, "fails-closed") == ()
+
+
+def test_codex_finalize_cell_counts() -> None:
+    counts: dict[str, int] = {}
+    for element_id, element in _manifest().elements.items():
+        if element_id.split(".")[0] in {"finalize", "prep-pr", "ship-it"}:
+            cell = element.cells[CODEX_BACKEND]
+            counts[cell.disposition] = counts.get(cell.disposition, 0) + 1
+    assert counts == {
+        "implemented": 30,
+        "not-applicable": 32,
+        "deferred": 24,
+    }
 
 
 def test_no_cell_defers_to_the_landed_c1_ticket() -> None:

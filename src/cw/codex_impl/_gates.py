@@ -20,17 +20,18 @@ import json
 import re
 import subprocess
 import sys
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 from cw._git import git_clean_env, git_output, run_git
 from cw.auto_dev_result.schema._vocab import (
     EMPTY_DIFF_BLOCKER_REASON,
+    EMPTY_DIFF_STATUS,
     PLAN_SCOPE_DRIFT_BLOCKER_REASON,
 )
-from cw.codex_fix_loop.commit import _scope_violations
+from cw.codex_fix_loop.commit import scope_violations
 from cw.codex_fix_loop.fence import scope_violation_breach
 from cw.codex_fix_loop.gates import run_cycle_gates
+from cw.codex_fix_loop.guard_script import find_guard_script, script_marker_ok
 from cw.codex_fix_loop.hook_failure import CommitHookFailedError, hook_failure_breach
 from cw.codex_fix_loop.posted_text import redact_and_cap
 from cw.codex_impl._result import (
@@ -51,6 +52,7 @@ from cw.worktree import _parse_numstat_totals
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
+    from pathlib import Path
 
     from cw.auto_dev_result.schema._vocab import ScopeTier
     from cw.codex_fix_loop.baseline import CycleBaseline, DirtyStart
@@ -70,9 +72,6 @@ UNPARSED_FRICTION_PREFIX: Final = "impl_scope_conformance_unparsed: "
 GROWTH_FRICTION_PREFIX: Final = "impl_scope_growth: "
 APPROVAL_STALE_PREFIX: Final = "scope_drift_approval_stale: "
 
-_MARKER_HEAD_LINES: Final = 5
-_MARKER_LINE: Final = re.compile(r"#\s*cw-script-version:\s*(\S*)\s*")
-_MARKER_TOKEN: Final = re.compile(r"[0-9]{1,6}")
 _APPROVED_HEAD: Final = re.compile(r"[0-9a-f]{40,64}")
 _EXIT_DRIFT: Final = 1
 _EXIT_USAGE: Final = 2
@@ -188,7 +187,7 @@ def check_empty_diff(worktree: Path, base: str) -> ImplBlock | None:
         "the IMPL turn left no net change against the fork point "
         f"{base[:_SHA_PREFIX_CHARS]}: the staged diff is empty, so there is "
         "nothing to commit",
-        status="empty_diff_blocked",
+        status=EMPTY_DIFF_STATUS,
     )
 
 
@@ -197,26 +196,12 @@ def check_empty_diff(worktree: Path, base: str) -> ImplBlock | None:
 
 def _scope_script(worktree: Path) -> Path | None:
     """The scope-conformance script: repo-local first, then ``~/.claude/scripts``."""
-    for root in (worktree, Path.home()):
-        candidate = root / ".claude" / "scripts" / SCOPE_SCRIPT_NAME
-        if candidate.is_file():
-            return candidate
-    return None
+    return find_guard_script(worktree, SCOPE_SCRIPT_NAME)
 
 
 def _marker_block(script: Path) -> ImplBlock | None:
     """The strict ``cw-script-version`` marker rule; ``None`` when it holds."""
-    try:
-        head = script.read_text(encoding="utf-8").splitlines()[:_MARKER_HEAD_LINES]
-    except (OSError, UnicodeDecodeError):
-        head = []
-    token = ""
-    for line in head:
-        match = _MARKER_LINE.fullmatch(line)
-        if match is not None:
-            token = match.group(1)
-            break
-    if _MARKER_TOKEN.fullmatch(token) and int(token) >= MIN_SCOPE_SCRIPT_VERSION:
+    if script_marker_ok(script, MIN_SCOPE_SCRIPT_VERSION):
         return None
     return ImplBlock(
         IMPL_FAILED,
@@ -278,7 +263,7 @@ def no_plan_sensitive_block(
     default_branch: str,
 ) -> ImplBlock | None:
     """Run the shared sensitive-path check for a no-plan repair fence."""
-    violations = _scope_violations(
+    violations = scope_violations(
         worktree,
         touched,
         allowed_files,

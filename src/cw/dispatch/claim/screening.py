@@ -167,14 +167,14 @@ def _park_tracker_mcp_gated_task(
 def _is_tracker_mcp_gated(
     task: TicketTask, tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit]
 ) -> bool:
-    """True iff *task* is a PLAN/IMPL-stage row the tracker-MCP gate holds (#2442).
+    """True iff *task* is a PLAN/IMPL/FINALIZE row the tracker-MCP gate holds (#2442).
 
     Stage-scoped at the point of use, like :func:`_is_stale_pr_gated`: a row
-    that advanced past IMPL since the lock-free snapshot is never held on a
-    stale hit.
+    that advanced past FINALIZE since the lock-free snapshot is never held on
+    a stale hit. Hits only ever exist for a codex FINALIZE row (RFC 0018 C3).
     """
     return (
-        task.stage in (Stage.PLAN, Stage.IMPL)
+        task.stage in (Stage.PLAN, Stage.IMPL, Stage.FINALIZE)
         and task.ticket_id in tracker_mcp_gate_hits
     )
 

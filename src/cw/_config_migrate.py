@@ -92,6 +92,7 @@ def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
             _fill_session_consecutive_sentinel_mismatch_vetoes_default(session_raw)
             _fill_session_liveness_attention_next_eligible_at_default(session_raw)
             _fill_session_local_liveness_backend_default(session_raw)
+            _fill_session_usage_default(session_raw)
     # Bump persisted schema_version to current after all migration steps.
     raw["schema_version"] = CW_STATE_SCHEMA_VERSION
     return raw
@@ -264,6 +265,16 @@ def _fill_session_local_liveness_backend_default(session_raw: dict[str, Any]) ->
             session_raw.get("id", "<unknown>"),
         )
         handle["backend"] = DEFAULT_LOCAL_LIVENESS_BACKEND
+
+
+def _fill_session_usage_default(session_raw: dict[str, Any]) -> None:
+    """Fill Session.usage introduced in schema v20 (#3063, RFC 0018 C4).
+
+    ``None`` means "never accounted", which is exactly what a pre-v20 session
+    is. Idempotent: an existing value is preserved.
+    """
+    if "usage" not in session_raw:
+        session_raw["usage"] = None
 
 
 def _clear_non_hex_surface_refs(session_raw: dict[str, Any]) -> None:

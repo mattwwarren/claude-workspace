@@ -24,13 +24,12 @@ from typing import TYPE_CHECKING
 from cw.atomic import atomic_write_text
 from cw.codex_review._const import _CATEGORY_TO_REASON
 from cw.codex_review._roles import (
-    _AUDIT_ARGV_FLAGS,
     _build_generic_codex_argv,
     _classify_codex_failure,
-    _classify_codex_output,
     _codex_scratch_dir,
-    _is_audit_flag_rejection,
+    _parse_codex_output,
     _refined_nonzero_reason,
+    _run_codex_with_audit_degrade,
 )
 from cw.codex_review._shard import ReviewInputTooLargeError
 from cw.models.enums import SandboxMode
@@ -41,6 +40,7 @@ from cw.review_engine.aggregate import (
     render_aggregation_envelope,
 )
 from cw.review_engine.constants import (
+    AGGREGATION_FAILED_REASONS,
     AGGREGATION_REASON_MISSING_OUTPUT,
     FRICTION,
     EngineRoundFailure,
@@ -60,43 +60,82 @@ _OUTPUT_FILENAME = "aggregation-output.json"
 
 
 def _aggregation_failure(reason: str) -> SummaryFailure:
+    """The ``engine_aggregation_failed`` failure for a vocabulary *reason*.
+
+    An unknown *reason* is an internal-contract violation (#3441): every
+    producer in this module maps onto ``AGGREGATION_FAILED_REASONS``.
+    """
+    if reason not in AGGREGATION_FAILED_REASONS:
+        msg = f"unknown aggregation failure reason: {reason!r}"
+        raise ValueError(msg)
     failure = EngineRoundFailure.ENGINE_AGGREGATION_FAILED
-    return SummaryFailure(failure, FRICTION[failure].format(reason=reason))
-
-
-def _output_failure_reason(content: str | None) -> str | None:
-    """The exit-0 output failure kind, or ``None`` when *content* is valid."""
-    return _classify_codex_output(
-        content, validator=EngineAggregationOutput.model_validate
+    return SummaryFailure(
+        failure, FRICTION[failure].format(reason=reason), failure_reason=reason
     )
 
 
-def _run_once(
-    runner: CodexRunner,
-    worktree: Path,
-    argv: list[str],
-    timeout_seconds: int | None,
-    stdin: str,
-) -> CodexRunResult:
-    """One run, retried once without the audit flags on an older codex-cli."""
-    result = runner.run(worktree, argv, timeout_seconds, stdin=stdin)
-    if _is_audit_flag_rejection(result):
-        stripped = [flag for flag in argv if flag not in _AUDIT_ARGV_FLAGS]
-        result = runner.run(worktree, stripped, timeout_seconds, stdin=stdin)
-    return result
+def _no_summary(summary_path: Path) -> SummaryFailure:
+    """The ``engine_no_summary`` failure naming *summary_path*."""
+    reason = EngineRoundFailure.ENGINE_NO_SUMMARY
+    return SummaryFailure(reason, FRICTION[reason].format(path=str(summary_path)))
 
 
 def _write_summary(
-    content: str, head_sha: str, summary_path: Path
+    output: EngineAggregationOutput, head_sha: str, summary_path: Path
 ) -> SummaryFailure | None:
-    output = EngineAggregationOutput.model_validate_json(content)
     try:
         summary_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(summary_path, json.dumps(assemble_summary(output, head_sha)))
     except OSError:
-        reason = EngineRoundFailure.ENGINE_NO_SUMMARY
-        return SummaryFailure(reason, FRICTION[reason].format(path=str(summary_path)))
+        return _no_summary(summary_path)
     return None
+
+
+def _run_turn(
+    runner: CodexRunner,
+    worktree: Path,
+    envelope: str,
+    *,
+    summary_path: Path,
+    model: str | None,
+    reasoning_effort: str | None,
+    timeout_seconds: int | None,
+) -> CodexRunResult | SummaryFailure:
+    """Write the schema to a fresh scratch dir and run the aggregation turn.
+
+    A scratch-dir or schema-write ``OSError`` is ``engine_no_summary`` before
+    any codex call (#3436): cw cannot produce the summary, and a plain requeue
+    would hit the same unwritable state dir.
+    """
+    try:
+        scratch = _codex_scratch_dir(uuid.uuid4().hex)
+    except OSError:
+        _log.warning("codex aggregation scratch dir is unwritable", exc_info=True)
+        return _no_summary(summary_path)
+    try:
+        schema_path = scratch / _SCHEMA_FILENAME
+        try:
+            schema_path.write_text(
+                json.dumps(engine_aggregation_schema()), encoding="utf-8"
+            )
+        except OSError:
+            _log.warning(
+                "codex aggregation schema write failed: %s", schema_path, exc_info=True
+            )
+            return _no_summary(summary_path)
+        argv = _build_generic_codex_argv(
+            model=model,
+            reasoning_effort=reasoning_effort,
+            schema_path=schema_path,
+            output_path=scratch / _OUTPUT_FILENAME,
+            sandbox_mode=SandboxMode.READ_ONLY,
+        )
+        result, _argv = _run_codex_with_audit_degrade(
+            runner, worktree, argv, timeout_seconds, envelope
+        )
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    return result
 
 
 def run_codex_aggregator(
@@ -129,22 +168,17 @@ def run_codex_aggregator(
         raise ReviewInputTooLargeError(
             actual_chars=len(envelope), max_chars=max_prompt_chars
         )
-    scratch = _codex_scratch_dir(uuid.uuid4().hex)
-    try:
-        schema_path = scratch / _SCHEMA_FILENAME
-        schema_path.write_text(
-            json.dumps(engine_aggregation_schema()), encoding="utf-8"
-        )
-        argv = _build_generic_codex_argv(
-            model=model,
-            reasoning_effort=reasoning_effort,
-            schema_path=schema_path,
-            output_path=scratch / _OUTPUT_FILENAME,
-            sandbox_mode=SandboxMode.READ_ONLY,
-        )
-        result = _run_once(runner, worktree, argv, timeout_seconds, envelope)
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+    result = _run_turn(
+        runner,
+        worktree,
+        envelope,
+        summary_path=summary_path,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        timeout_seconds=timeout_seconds,
+    )
+    if isinstance(result, SummaryFailure):
+        return result
     if result.timed_out or result.returncode != 0:
         category = _classify_codex_failure(result)
         reason = _CATEGORY_TO_REASON[category]
@@ -152,7 +186,9 @@ def run_codex_aggregator(
             refined, _ = _refined_nonzero_reason(result)
             reason = refined or reason
         return _aggregation_failure(reason)
-    output_reason = _output_failure_reason(result.output_file_content)
-    if output_reason is not None or result.output_file_content is None:
+    output, output_reason = _parse_codex_output(
+        result.output_file_content, validator=EngineAggregationOutput.model_validate
+    )
+    if output is None:
         return _aggregation_failure(output_reason or AGGREGATION_REASON_MISSING_OUTPUT)
-    return _write_summary(result.output_file_content, head_sha, summary_path)
+    return _write_summary(output, head_sha, summary_path)

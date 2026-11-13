@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, cast, get_args
 
 from cw._git import run_git
 from cw.auto_dev_result import AutoDevResult, PlanSource
+from cw.auto_dev_result.schema._vocab import EMPTY_DIFF_STATUS
 from cw.codex_review._const import is_fix_cycle_commit_subject
 from cw.exceptions import CwError
 from cw.review_convergence import resolve_diff_base
@@ -46,7 +47,6 @@ _log = logging.getLogger(__name__)
 _PLAN_SOURCES = frozenset(get_args(PlanSource))
 _PLAN_NONE: PlanSource = "none"
 _PLAN_NONE_PREFIX = "codex_plan_source_none"
-_EMPTY_DIFF_STATUS = "empty_diff_blocked"
 
 
 def resolve_plan_source(
@@ -123,7 +123,7 @@ def stamp_stage_facts(
     *result* itself for ``empty_diff_blocked``. Re-validated, so a bad value
     fails here at the source rather than at the door.
     """
-    if result.status == _EMPTY_DIFF_STATUS:
+    if result.status == EMPTY_DIFF_STATUS:
         return result
     plan_source, note = resolve_plan_source(task, worktree)
     fork, commits = fix_loop_facts(

@@ -69,6 +69,7 @@ from cw.codex_review_persist import (
     REVIEW_VERDICT_OWNER_STAMP_FORMAT,
     _persist_review_verdict,
 )
+from cw.codex_usage import UsageAccumulator
 from cw.config import load_state, save_state
 from cw.dev_queue import add_ticket, load_dev_queue, save_dev_queue
 from cw.dispatch_state import load_executor_blocked_markers
@@ -89,6 +90,14 @@ from cw.models import (
     TicketTask,
 )
 from cw.models.client import ReviewConfig
+from cw.models.usage import (
+    SessionUsage,
+    TurnUsage,
+    UsageStage,
+    UsageState,
+    UsageUnavailable,
+    UsageUnavailableReason,
+)
 from cw.review_convergence import LEDGER_RELATIVE_PATH, load_ledger
 from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from cw.review_findings import (
@@ -417,6 +426,164 @@ def test_run_codex_review_and_complete_success_path(
     assert persisted.blocker.reason == CODEX_REVIEW_UNPARSEABLE
     assert len(events) == 1
     post_mock.assert_called_once()
+
+
+def _run_with_usage(
+    *, sid: str, task: TicketTask, worktree: Path, usage: UsageAccumulator
+) -> None:
+    _run_codex_review_and_complete(
+        runner=_UnusedRunner(),
+        task=task,
+        worktree=worktree,
+        client=_client(worktree),
+        wall_clock_budget_seconds=None,
+        sid=sid,
+        sess_name=f"test/auto-dev/{task.ticket_id}",
+        config_model=None,
+        config_reasoning_effort=None,
+        usage=usage,
+    )
+
+
+def _usage_acc(sid: str, ticket_id: str) -> UsageAccumulator:
+    return UsageAccumulator(sid, ticket_id, {})
+
+
+def test_review_thread_persists_usage_and_flushes_the_late_tracker_io_turn(
+    tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+) -> None:
+    """#3063: the door writes the pre-post usage; one late flush adds the post turn."""
+    worktree = make_git_repo("wt-bg-usage")
+    _seed_session("bg-usage")
+    task = TicketTask(ticket_id="T-usage", client="test", stage=Stage.REVIEW)
+    result = make_blocked(
+        ticket_id="T-usage",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+    acc = _usage_acc("bg-usage", "T-usage")
+    acc.record_turn(
+        UsageStage.REVIEW_ROLE,
+        "security",
+        "gpt-x",
+        TurnUsage(1000, 0, 0, 100, 0),
+        completed=True,
+    )
+    door_usage: list[object] = []
+    events: list[object] = []
+
+    def _post(*_args: object, **_kwargs: object) -> None:
+        door_usage.append(load_state().sessions[0].usage)
+        acc.record_turn(
+            UsageStage.TRACKER_IO,
+            "tracker_io",
+            "unknown",
+            UsageUnavailable(UsageUnavailableReason.NO_OUTPUT),
+            completed=True,
+        )
+
+    with (
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            return_value=(result, None),
+        ),
+        patch(
+            "cw.codex_background._record_orchestrator_event",
+            side_effect=lambda *_args, **_kw: events.append(
+                load_state().sessions[0].usage
+            ),
+        ),
+        patch("cw.codex_background._post_daemon_verdict_comment", side_effect=_post),
+    ):
+        _run_with_usage(sid="bg-usage", task=task, worktree=worktree, usage=acc)
+
+    # At the post, the door had already persisted the review-role usage only.
+    before = door_usage[0]
+    assert isinstance(before, SessionUsage)
+    assert set(before.by_stage) == {UsageStage.REVIEW_ROLE}
+    assert before.unavailable_turns == 0
+    # SESSION_COMPLETED fires after the late flush rewrote the superset.
+    (at_event,) = events
+    assert isinstance(at_event, SessionUsage)
+    assert at_event.unavailable_turns == 1
+    final = load_state().sessions[0].usage
+    assert final == at_event
+    # The late turn is in Session.usage only, never in the persisted friction.
+    persisted = AutoDevResult.model_validate(load_state().sessions[0].last_result)
+    assert not any(
+        f.startswith("usage_unavailable") for f in persisted.friction_highlights
+    )
+
+
+def test_review_thread_adds_the_unavailable_friction_token_before_the_door(
+    tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+) -> None:
+    worktree = make_git_repo("wt-bg-usage-friction")
+    _seed_session("bg-uf")
+    task = TicketTask(ticket_id="T-uf", client="test", stage=Stage.REVIEW)
+    result = make_blocked(
+        ticket_id="T-uf",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+    acc = _usage_acc("bg-uf", "T-uf")
+    acc.record_turn(
+        UsageStage.REVIEW_ROLE,
+        "security",
+        "gpt-x",
+        UsageUnavailable(UsageUnavailableReason.NO_USAGE_BLOCK),
+        completed=True,
+    )
+
+    with (
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            return_value=(result, None),
+        ),
+        patch("cw.codex_background._record_orchestrator_event"),
+        patch("cw.codex_background._post_daemon_verdict_comment"),
+    ):
+        _run_with_usage(sid="bg-uf", task=task, worktree=worktree, usage=acc)
+
+    session = load_state().sessions[0]
+    persisted = AutoDevResult.model_validate(session.last_result)
+    assert persisted.friction_highlights[-1] == (
+        "usage_unavailable: 1 completed codex turn(s) reported no token usage "
+        "(reason=no_usage_block)"
+    )
+    assert session.usage is not None
+    assert session.usage.state is UsageState.UNAVAILABLE
+
+
+def test_review_thread_crash_still_persists_the_tokens_it_spent(
+    tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+) -> None:
+    worktree = make_git_repo("wt-bg-usage-crash")
+    _seed_session("bg-crash")
+    task = TicketTask(ticket_id="T-crash", client="test", stage=Stage.REVIEW)
+    acc = _usage_acc("bg-crash", "T-crash")
+    acc.record_turn(
+        UsageStage.REVIEW_ROLE,
+        "security",
+        "gpt-x",
+        TurnUsage(1000, 0, 0, 100, 0),
+        completed=True,
+    )
+
+    with (
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            side_effect=RuntimeError("boom"),
+        ),
+        patch("cw.codex_background.revert_claimed_row_after_unexpected_error"),
+    ):
+        _run_with_usage(sid="bg-crash", task=task, worktree=worktree, usage=acc)
+
+    usage = load_state().sessions[0].usage
+    assert usage is not None
+    assert usage.total_tokens == 1100
 
 
 def test_run_codex_review_and_complete_posts_verdict_comment(

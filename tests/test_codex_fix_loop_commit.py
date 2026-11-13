@@ -15,6 +15,11 @@ import pytest
 from cw._git import git_output as _real_git_output
 from cw.codex_fix_loop import _build_fix_prompt, _commit_fix_cycle, commit
 from cw.codex_fix_loop.baseline import CycleBaseline, DirtyStart
+from cw.codex_fix_loop.commit import (
+    _FIX_SCOPE_RULES,
+    _build_repair_prompt,
+    _repair_standing_sections,
+)
 from cw.codex_fix_loop.fence import (
     StagedSetMismatchError,
     scope_violation_breach,
@@ -748,15 +753,53 @@ class TestFixPromptConstraints:
         assert scope < constraints < fence
 
 
+_GIT_STASH_BULLET = (
+    "- Never run `git stash`, `git stash pop` or `git stash clear`: the stash "
+    "stack is shared by every worktree of the repository. Set work aside with "
+    "a temporary WIP commit instead."
+)
+
+
+class TestFixPromptGitStashRule:
+    """#1418: the shared-stash rule rides the fix prompt and the repair prompt."""
+
+    def test_the_rule_is_the_last_scope_bullet(self) -> None:
+        assert _FIX_SCOPE_RULES.endswith(_GIT_STASH_BULLET)
+        assert "toggles unless a finding explicitly requires one.\n- Never run" in (
+            _FIX_SCOPE_RULES
+        )
+
+    def test_fix_prompt_carries_it(self) -> None:
+        prompt = _build_fix_prompt(
+            [_make_finding(file="new.py", summary="MFA")],
+            plan_text=None,
+            ticket_text=None,
+            cycle=1,
+        )
+
+        assert _GIT_STASH_BULLET in prompt
+
+    def test_repair_prompt_carries_it_through_the_real_standing_sections(
+        self,
+    ) -> None:
+        prompt = _build_repair_prompt(
+            "hook said no",
+            cycle=1,
+            standing_sections=_repair_standing_sections(None, None),
+        )
+
+        assert _GIT_STASH_BULLET in prompt
+
+
 class TestScopeViolationsConfigSource:
-    """``_scope_violations`` reads the registry from the default branch (#3038)."""
+    """``scope_violations`` reads the registry from the default branch (#3038)."""
 
     def test_a_resolved_ref_with_no_manifest_is_empty(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-scope-no-manifest")
 
-        hits = commit._scope_violations(
+        hits = commit.scope_violations(
             worktree, ["pyproject.toml"], frozenset(), "small", "main"
         )
 
@@ -768,7 +811,7 @@ class TestScopeViolationsConfigSource:
         worktree = _worktree(make_git_repo, "wt-scope-manifest", manifest=_SENSITIVE)
         _write(worktree / ".claude" / "sensitive-files.yml", "sensitive_files: []\n")
 
-        hits = commit._scope_violations(
+        hits = commit.scope_violations(
             worktree, ["pyproject.toml"], frozenset(), "small", "main"
         )
 
@@ -779,7 +822,7 @@ class TestScopeViolationsConfigSource:
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-scope-unresolved", manifest=_SENSITIVE)
 
-        hits = commit._scope_violations(
+        hits = commit.scope_violations(
             worktree,
             ["a.py", "pyproject.toml", "kept.py"],
             frozenset({"kept.py"}),
@@ -802,7 +845,7 @@ class TestScopeViolationsConfigSource:
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-scope-unresolved-clean")
 
-        hits = commit._scope_violations(
+        hits = commit.scope_violations(
             worktree, ["kept.py"], frozenset({"kept.py"}), "small", "no-such-branch"
         )
 
@@ -812,7 +855,7 @@ class TestScopeViolationsConfigSource:
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-scope-unresolved-park")
-        hits = commit._scope_violations(
+        hits = commit.scope_violations(
             worktree, ["a.py"], frozenset(), "small", "no-such-branch"
         )
 

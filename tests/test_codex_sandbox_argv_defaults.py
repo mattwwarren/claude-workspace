@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import cw
+from cw.codex_finalize._argv import build_finalize_argv
 from cw.codex_fix_loop.commit import _build_fix_codex_argv
 from cw.codex_impl._argv import build_impl_argv
 from cw.codex_plan._argv import build_plan_argv
@@ -54,6 +55,7 @@ _LAUNCH_SITES = frozenset(
         "tracker_io/_argv.py",
         "codex_plan/_argv.py",
         "codex_impl/_argv.py",
+        "codex_finalize/_argv.py",
     }
 )
 _MODE_LITERALS = frozenset({"read-only", "workspace-write", "danger-full-access"})
@@ -63,6 +65,7 @@ _MODE_SCOPED_PACKAGES = (
     "tracker_io",
     "codex_plan",
     "codex_impl",
+    "codex_finalize",
 )
 _OVERRIDE = ["-c", "approval_policy=never"]
 _LEGAL_MODES = (SandboxMode.READ_ONLY, SandboxMode.WORKSPACE_WRITE)
@@ -130,6 +133,7 @@ _FIX_LITERAL = [
     "workspace-write",
     "-c",
     "approval_policy=never",
+    "--json",
     "-c",
     "model_reasoning_effort=high",
     "-m",
@@ -171,6 +175,8 @@ _IMPL_LITERAL = [
     "-m",
     "m",
 ]
+#: The FINALIZE turn's argv: fixed read-only, like PLAN (#3062).
+_FINALIZE_LITERAL = _PLAN_LITERAL
 _PROBE_LITERAL = [
     "codex",
     "exec",
@@ -241,6 +247,16 @@ class TestDefaultArgvLiterals:
             other_servers=(),
         )
         assert argv == _PLAN_LITERAL
+
+    def test_finalize_default_argv(self) -> None:
+        argv = build_finalize_argv(
+            schema_path=_S,
+            output_path=_O,
+            model="m",
+            reasoning_effort="high",
+            other_servers=(),
+        )
+        assert argv == _FINALIZE_LITERAL
 
     def test_impl_default_argv(self) -> None:
         assert _impl_argv(StageExecutorConfig().fix_sandbox_mode) == _IMPL_LITERAL
@@ -320,6 +336,17 @@ class TestEveryLaunchSiteCarriesTheOverride:
             mcp_server=None,
             tracker=None,
             other_servers=(),
+        )
+        _assert_override_after_sandbox(argv, "read-only")
+
+    def test_finalize_launch(self) -> None:
+        # The FINALIZE turn has no sandbox knob: read-only is the only mode.
+        argv = build_finalize_argv(
+            schema_path=_S,
+            output_path=_O,
+            model=None,
+            reasoning_effort=None,
+            other_servers=("linear",),
         )
         _assert_override_after_sandbox(argv, "read-only")
 

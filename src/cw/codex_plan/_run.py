@@ -59,15 +59,18 @@ from cw.codex_plan._result import (
     MODEL_TEXT_DISCARDED_FRICTION,
     PARK_STATUSES,
     PLAN_BLOCKED,
-    PLAN_MD_RELATIVE_PATH,
     PLAN_NO_OP,
     RESUME_FRICTION,
     PlanDraftError,
     PlanTurnFailure,
     ResumeDraft,
+    backup_plan_md,
     clean_plan_text,
+    draft_fingerprint_on_disk,
+    existing_plan_md_fingerprint,
     parse_plan_turn,
     plan_blocked,
+    plan_md_replaced_token,
     read_resume_draft,
     stamp_plan_result,
     write_plan_draft,
@@ -82,7 +85,13 @@ from cw.codex_review import (
     _is_model_capacity_error,
 )
 from cw.codex_review_signals import record_event_best_effort
-from cw.codex_stage_completion import complete_session_through_door, run_guarded_stage
+from cw.codex_stage_completion import (
+    complete_session_through_door,
+    flush_late_usage,
+    run_guarded_stage,
+    with_usage_friction,
+)
+from cw.codex_usage import NO_USAGE, UsageAccumulator
 from cw.contract_manifest import RenderError
 from cw.dev_queue import _PRE_DISPATCH_TRACKER_MCP_REASON
 from cw.dev_queue.lifecycle import _plan_body_signoff_ok
@@ -149,6 +158,7 @@ class _Run:
     sess_name: str
     model: str | None
     reasoning_effort: str | None
+    usage: UsageAccumulator = NO_USAGE
 
     # -- events -------------------------------------------------------------
 
@@ -356,25 +366,34 @@ def _bound(
     )
 
 
-def _write_draft_best_effort(run: _Run, plan_text: str) -> bool:
+def _write_draft_best_effort(run: _Run, plan_text: str) -> str | None:
+    """Write the draft; its on-disk fingerprint, or ``None`` when not written."""
     try:
         write_plan_draft(run.worktree, plan_text)
     except PlanDraftError:
         raise
     except OSError:
         _log.warning("codex plan draft not written ticket=%s", run.task.ticket_id)
-        return False
-    return True
-
-
-def _draft_fingerprint(plan_text: str, *, written: bool) -> str | None:
-    """Return the fingerprint only when this run wrote the draft."""
-    if not written:
         return None
-    body = clean_plan_text(plan_text)
-    if not body.endswith("\n"):
-        body += "\n"
-    return compute_plan_draft_fingerprint(body)
+    return draft_fingerprint_on_disk(run.worktree)
+
+
+def _blocked_with_draft(
+    run: _Run,
+    reason: str,
+    details: str,
+    *,
+    fingerprint: str | None,
+    retry_eligible: bool = False,
+) -> _Exit:
+    """A blocked exit after the stations ran, carrying the draft's fingerprint."""
+    return run.blocked(
+        STAGE_PLAN_REVIEWED,
+        reason,
+        details,
+        retry_eligible=retry_eligible,
+        plan_draft_fingerprint=fingerprint,
+    )
 
 
 def _record_decisions(run: _Run, plan_text: str) -> str | None:
@@ -398,8 +417,8 @@ def _record_decisions(run: _Run, plan_text: str) -> str | None:
 
 def _park(run: _Run, plan_text: str, check: ApprovalCheck) -> _Exit:
     """A park exit: write the draft, run advisory stations, render the comment."""
-    draft_written = _write_draft_best_effort(run, plan_text)
-    result = _bound(run, check.result, bind_draft=draft_written)
+    draft_fingerprint = _write_draft_best_effort(run, plan_text)
+    result = _bound(run, check.result, bind_draft=draft_fingerprint is not None)
     stations = run_plan_stations(
         runner=run.runner,
         worktree=run.worktree,
@@ -422,24 +441,13 @@ def _park(run: _Run, plan_text: str, check: ApprovalCheck) -> _Exit:
 
 
 def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
-    """A completing exit: binding stations, the stamped plan, the decisions."""
-    plan_path = run.worktree / PLAN_MD_RELATIVE_PATH
-    if plan_path.exists():
-        try:
-            old_text = plan_path.read_text(encoding="utf-8")
-            old_fingerprint = compute_plan_draft_fingerprint(clean_plan_text(old_text))
-        except OSError as exc:
-            old_fingerprint = f"unreadable ({exc})"
-        new_fingerprint = compute_plan_draft_fingerprint(clean_plan_text(plan_text))
-        return run.blocked(
-            STAGE_PLAN_GENERATED,
-            CODEX_PLAN_ARTIFACT_MISSING,
-            "refusing to replace existing authoritative .cw/plan.md; "
-            f"old fingerprint: {old_fingerprint}; "
-            f"proposed replacement fingerprint: {new_fingerprint}; "
-            "an explicit re-plan/regress operation must clear or version the "
-            "existing artifact first",
-        )
+    """A completing exit: binding stations, the stamped plan, the decisions.
+
+    An existing ``.cw/plan.md`` (the normal state after a regress into PLAN)
+    is replaced only once both stations are clean and both markers verify; it
+    is snapshotted first and the replacement is audited as a friction token
+    (#3498).
+    """
     stations = run_plan_stations(
         runner=run.runner,
         worktree=run.worktree,
@@ -450,44 +458,46 @@ def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
         binding=True,
     )
     if stations.block is not None:
-        draft_written = _write_draft_best_effort(run, plan_text)
         block = stations.block
-        return run.blocked(
-            STAGE_PLAN_REVIEWED,
+        return _blocked_with_draft(
+            run,
             block.reason,
             block.details,
+            fingerprint=_write_draft_best_effort(run, plan_text),
             retry_eligible=block.retry_eligible,
-            plan_draft_fingerprint=_draft_fingerprint(plan_text, written=draft_written),
         )
     marked = stamp_markers(clean_plan_text(plan_text), today=datetime.now(UTC).date())
     if not _plan_body_signoff_ok(marked):
-        draft_written = _write_draft_best_effort(run, plan_text)
-        return run.blocked(
-            STAGE_PLAN_REVIEWED,
+        return _blocked_with_draft(
+            run,
             CODEX_PLAN_ARTIFACT_MISSING,
             "stamped plan does not carry both sign-off markers",
-            plan_draft_fingerprint=_draft_fingerprint(plan_text, written=draft_written),
+            fingerprint=_write_draft_best_effort(run, plan_text),
         )
-    draft_written = False
+    old_fingerprint = existing_plan_md_fingerprint(run.worktree)
+    backup_ok = False
+    fingerprint: str | None = None
     try:
         write_plan_draft(run.worktree, plan_text)
-        draft_written = True
+        fingerprint = draft_fingerprint_on_disk(run.worktree)
         result = _bound(run, result)
+        if old_fingerprint is not None:
+            backup_ok = backup_plan_md(run.worktree)
         plan_path = write_plan_md(run.worktree, marked)
         written = plan_path.read_text(encoding="utf-8")
     except OSError as exc:
-        return run.blocked(
-            STAGE_PLAN_REVIEWED,
+        return _blocked_with_draft(
+            run,
             CODEX_PLAN_ARTIFACT_MISSING,
             f".cw/plan.md: {exc}",
-            plan_draft_fingerprint=_draft_fingerprint(plan_text, written=draft_written),
+            fingerprint=fingerprint,
         )
     if not _plan_body_signoff_ok(written):
-        return run.blocked(
-            STAGE_PLAN_REVIEWED,
+        return _blocked_with_draft(
+            run,
             CODEX_PLAN_ARTIFACT_MISSING,
             ".cw/plan.md does not carry both sign-off markers",
-            plan_draft_fingerprint=_draft_fingerprint(plan_text, written=draft_written),
+            fingerprint=fingerprint,
         )
     run.emit(
         OrchestratorEventType.STAGE_ENTERED,
@@ -502,9 +512,22 @@ def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
             run.task.ticket_id,
             exc_info=True,
         )
+    tokens = _replacement_friction(old_fingerprint, marked, backup_ok=backup_ok)
     token = _record_decisions(run, written)
-    result = _with_friction(result, [token] if token else [])
+    result = _with_friction(result, [*tokens, *([token] if token else [])])
     return _Exit(result, marked, plan_path)
+
+
+def _replacement_friction(
+    old_fingerprint: str | None, marked: str, *, backup_ok: bool
+) -> list[str]:
+    """The ``plan_md_replaced`` token when a prior ``.cw/plan.md`` was replaced."""
+    if old_fingerprint is None:
+        return []
+    new_fingerprint = compute_plan_draft_fingerprint(marked)
+    return [
+        plan_md_replaced_token(old_fingerprint, new_fingerprint, backup_ok=backup_ok)
+    ]
 
 
 def _after_turn(
@@ -564,7 +587,8 @@ def _plan(run: _Run) -> _Exit:
 def _execute(run: _Run) -> None:
     """Plan, complete through the door, post, then emit ``session.completed``."""
     exit_ = _plan(run)
-    complete_session_through_door(run.sid, exit_.result.model_dump(mode="json"))
+    payload = with_usage_friction(exit_.result.model_dump(mode="json"), run.usage)
+    complete_session_through_door(run.sid, payload, usage=run.usage)
     if exit_.post_text is not None:
         post_plan_comment(
             task=run.task,
@@ -575,6 +599,7 @@ def _execute(run: _Run) -> None:
             text=exit_.post_text,
             artifact_path=exit_.artifact_path,
         )
+    flush_late_usage(run.sid, run.usage)
     record_event_best_effort(
         OrchestratorEventType.SESSION_COMPLETED,
         {
@@ -596,11 +621,14 @@ def run_plan_stage_and_complete(
     sess_name: str,
     model: str | None,
     reasoning_effort: str | None,
+    usage: UsageAccumulator = NO_USAGE,
 ) -> None:
     """Run the codex PLAN stage for *task* and complete session *sid*.
 
     *model* and *reasoning_effort* are the PLAN stage's resolved
     ``StageExecutorConfig`` values; no sandbox or timeout setting is read.
+    *usage* (#3063) is the run's accumulator; its recording runner is already
+    inside *runner*.
     """
     run = _Run(
         runner=runner,
@@ -611,6 +639,7 @@ def run_plan_stage_and_complete(
         sess_name=sess_name,
         model=model,
         reasoning_effort=reasoning_effort,
+        usage=usage,
     )
     run_guarded_stage(
         client_name=client.name,
@@ -619,6 +648,7 @@ def run_plan_stage_and_complete(
         sid=sid,
         stage_reached=STAGE1_PLAN,
         body=lambda: _execute(run),
+        usage=usage,
     )
 
 

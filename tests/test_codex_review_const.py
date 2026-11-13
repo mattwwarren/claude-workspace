@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import get_args
 
 import pytest
 
 from cw.codex_review import (
     _CATEGORY_TO_REASON,
+    _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS,
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     _TRANSIENT_FAILURE_REASONS,
     BACKEND_DOWN_REASONS,
@@ -21,8 +23,12 @@ from cw.codex_review import (
     CODEX_MAX_PROMPT_CHARS,
     CODEX_MODEL_CAPACITY,
     INPUT_SIZES_PATTERN,
+    STAGE4A_MERGE_GATE,
+    STAGE4B_PR_CREATE,
+    STAGE5_POST_CREATE,
     format_input_sizes,
 )
+from cw.codex_review._const import _AUDIT_ARGV_FLAGS, _EPHEMERAL_FLAG, _JSON_FLAG
 from cw.executor_diagnostics import ExecutorFailureCategory
 
 
@@ -43,6 +49,23 @@ def test_codex_review_blocked_next_actions_is_user_directed() -> None:
     assert _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS[0].startswith(
         ("user_resolve_", "user_decide_", "user_verify_")
     )
+
+
+def test_codex_finalize_blocked_next_actions_is_user_directed() -> None:
+    """#3062: the FINALIZE label must satisfy USER_DIRECTED_PREFIXES too."""
+    assert _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS == [
+        "user_resolve_codex_finalize_failure"
+    ]
+    assert _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS[0].startswith(
+        ("user_resolve_", "user_decide_", "user_verify_")
+    )
+
+
+def test_finalize_stage_constants_are_the_wire_values() -> None:
+    """#3062: the three StageReached constants codex FINALIZE owns."""
+    assert STAGE4A_MERGE_GATE == "stage4a_merge_gate"
+    assert STAGE4B_PR_CREATE == "stage4b_pr_create"
+    assert STAGE5_POST_CREATE == "stage5_post_create"
 
 
 def test_codex_model_capacity_is_transient() -> None:
@@ -105,3 +128,22 @@ def test_input_sizes_format_round_trips_through_the_shared_pattern() -> None:
     match = INPUT_SIZES_PATTERN.search(f"role (codex_input_too_large): {text}")
     assert match is not None
     assert match.groups() == ("1379349", "1048576")
+
+
+def test_audit_argv_flags_are_the_json_and_ephemeral_pair() -> None:
+    assert _AUDIT_ARGV_FLAGS == (_JSON_FLAG, _EPHEMERAL_FLAG)
+    assert _AUDIT_ARGV_FLAGS == ("--json", "--ephemeral")
+
+
+@pytest.mark.parametrize(
+    "module", ["codex_plan", "codex_impl", "codex_finalize", "tracker_io"]
+)
+def test_stage_argv_modules_keep_no_private_audit_flag_copy(module: str) -> None:
+    """One definition of the pair (#3063): the stage builders import it."""
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "cw" / module / "_argv.py"
+    ).read_text(encoding="utf-8")
+
+    assert "_AUDIT_FLAGS" not in source
+    assert '("--json", "--ephemeral")' not in source
+    assert "_AUDIT_ARGV_FLAGS" in source

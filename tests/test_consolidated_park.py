@@ -47,7 +47,10 @@ def _park_block() -> str:
     # 5000, not 3600: step 3a (#2135) lengthens the section past the old window.
     # 6500, not 5000: the `### How to answer` sub-section (#2626) adds ~900
     # characters ahead of the furthest pinned text.
-    return _after(_appendix("plan"), PARK_ANCHOR, span=6500)
+    # 8000, not 6500: the Still-open / Decided-pending-edit split, flat-shape clause,
+    # carried-Decided clause and `advisory findings decided` friction line (#2258)
+    # add several hundred characters ahead of the furthest pinned text.
+    return _after(_appendix("plan"), PARK_ANCHOR, span=8000)
 
 
 # ---------------------------------------------------------------------------

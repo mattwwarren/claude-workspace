@@ -7,6 +7,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from cw.auto_dev_result.schema._vocab import (
+    PLAN_UNREVIEWABLE_BLOCKER_REASON,
+    PLAN_UNSOUND_BLOCKER_REASON,
+)
 from cw.codex_plan._result import (
     PLAN_SOUNDNESS_MARKER_VERSION,
     PLAN_SPEC_MARKER_VERSION,
@@ -14,18 +18,27 @@ from cw.codex_plan._result import (
 from cw.codex_plan._stations import (
     PLAN_REVIEWER,
     PLAN_SOUNDNESS_REVIEWER,
+    PLAN_STATIONS,
+    STATION_BLOCK_REASONS,
     STATION_OUTPUT_INSTRUCTIONS,
     build_station_prompt,
     run_plan_stations,
     stamp_markers,
 )
-from cw.codex_review import CODEX_MODEL_CAPACITY, PLAN_STATION_AGENT_FILES
+from cw.codex_review import (
+    CODEX_MODEL_CAPACITY,
+    PLAN_REVIEWER_ROLE,
+    PLAN_SOUNDNESS_REVIEWER_ROLE,
+    PLAN_STATION_AGENT_FILES,
+)
 from cw.codex_runner import CodexRunResult
+from cw.codex_usage import UsageAccumulator
 from cw.dev_queue.lifecycle import (
     _PLAN_SOUNDNESS_MARKER,
     _PLAN_SPEC_MARKER,
     _plan_body_signoff_ok,
 )
+from cw.models.usage import UsageStage
 from tests._codex_review_helpers import _populate_global_agents_dir
 from tests._tool_fakes import (
     ScriptedCodexRunner,
@@ -168,6 +181,46 @@ class TestVerdicts:
         assert len(runner.calls) == 2
         assert len(outcome.findings) == 2
 
+    def test_advisory_mixed_severities_list_each_finding_once(
+        self, tmp_path: Path
+    ) -> None:
+        """#3527: a MUST_FIX restatement is never re-appended beside SHOULD_FIX."""
+        runner = _runner(
+            station_findings_doc(
+                PLAN_REVIEWER, severity="MUST_FIX", severities=("SHOULD_FIX",)
+            ),
+            _clean(PLAN_SOUNDNESS_REVIEWER),
+        )
+
+        outcome = _stations(runner, tmp_path, binding=False)
+
+        assert outcome.block is None
+        assert len(outcome.findings) == 2
+        must_fix = [f for f in outcome.findings if "MUST_FIX finding from" in f]
+        assert len(must_fix) == 1
+        assert not any("MUST_FIX findings:" in f for f in outcome.findings)
+
+    def test_advisory_degraded_status_with_findings_keeps_its_detail(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _runner(
+            station_findings_doc(
+                PLAN_REVIEWER,
+                severity="SHOULD_FIX",
+                status="degraded",
+                detail="ticket unreadable",
+            ),
+            _clean(PLAN_SOUNDNESS_REVIEWER),
+        )
+
+        outcome = _stations(runner, tmp_path, binding=False)
+
+        assert outcome.block is None
+        assert any(
+            "returned status degraded: ticket unreadable" in f for f in outcome.findings
+        )
+        assert any("SHOULD_FIX finding from" in f for f in outcome.findings)
+
     def test_advisory_failure_detail_is_preserved(self, tmp_path: Path) -> None:
         runner = _runner(
             station_findings_doc(
@@ -191,6 +244,23 @@ class TestVerdicts:
             "Plan Reviewer station failed" in finding for finding in outcome.findings
         )
         assert len(runner.calls) == 2
+
+
+class TestStationNames:
+    def test_the_station_order_is_an_explicit_declaration(self) -> None:
+        """#3484: order and names no longer derive from mapping insertion order."""
+        assert PLAN_STATIONS == ("Plan Reviewer", "Plan Soundness Reviewer")
+        assert PLAN_STATIONS == (PLAN_REVIEWER, PLAN_SOUNDNESS_REVIEWER)
+        assert PLAN_REVIEWER is PLAN_REVIEWER_ROLE
+        assert PLAN_SOUNDNESS_REVIEWER is PLAN_SOUNDNESS_REVIEWER_ROLE
+        assert set(PLAN_STATION_AGENT_FILES) == set(PLAN_STATIONS)
+
+    def test_the_block_reasons_are_the_vocab_constants(self) -> None:
+        """#3499: no inline reason literals."""
+        assert {
+            PLAN_REVIEWER: PLAN_UNREVIEWABLE_BLOCKER_REASON,
+            PLAN_SOUNDNESS_REVIEWER: PLAN_UNSOUND_BLOCKER_REASON,
+        } == STATION_BLOCK_REASONS
 
 
 class TestLaunch:
@@ -251,3 +321,38 @@ class TestSpecResolution:
         assert "GLOBAL REVIEWER" in str(runner.calls[0]["stdin"])
         assert "GLOBAL SOUNDNESS" in str(runner.calls[1]["stdin"])
         assert set(PLAN_STATION_AGENT_FILES) == {PLAN_REVIEWER, PLAN_SOUNDNESS_REVIEWER}
+
+
+class TestUsageRecording:
+    """#3063: station turns record as PLAN_STATION under their real role names."""
+
+    def test_each_station_records_under_its_role_name(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        acc = UsageAccumulator("sess-st", "T-st", {})
+        scripted = _runner(_clean(PLAN_REVIEWER), _clean(PLAN_SOUNDNESS_REVIEWER))
+        recorder = acc.recording_runner(UsageStage.PLAN, scripted)
+
+        with caplog.at_level("WARNING", logger="cw.codex_usage"):
+            run_plan_stations(
+                runner=recorder,
+                worktree=tmp_path,
+                plan_text=_PLAN,
+                model="gpt-plan",
+                reasoning_effort="high",
+                session_id="sess-st",
+                binding=True,
+            )
+
+        # The scripted stations return no usage, so each completed turn warns
+        # with its real role name and the PLAN_STATION stage.
+        usage_messages = [
+            r.getMessage() for r in caplog.records if r.name == "cw.codex_usage"
+        ]
+        assert len(usage_messages) == 2
+        for role in (PLAN_REVIEWER, PLAN_SOUNDNESS_REVIEWER):
+            assert any(f"role={role} " in m for m in usage_messages)
+        assert all("stage=plan_station" in m for m in usage_messages)
+        snapshot = acc.snapshot()
+        assert snapshot is not None
+        assert snapshot.usage.unavailable_turns == 2

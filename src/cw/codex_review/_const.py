@@ -27,6 +27,13 @@ STAGE1_PLAN: StageReached = "stage1_plan"
 #: The codex IMPL executor's wire stage (#3061); ``make_codex_blocked`` keys the
 #: impl ``next_actions`` label on it.
 STAGE2_IMPL: StageReached = "stage2_impl"
+#: The codex FINALIZE executor's wire stages (#3062); ``make_codex_blocked``
+#: keys the finalize ``next_actions`` label on all three. ``stage4a_merge_gate``
+#: labels the gate parks and pre-PR faults, ``stage4b_pr_create`` a pre-PR
+#: failure and ``stage5_post_create`` a failure once a PR exists.
+STAGE4A_MERGE_GATE: StageReached = "stage4a_merge_gate"
+STAGE4B_PR_CREATE: StageReached = "stage4b_pr_create"
+STAGE5_POST_CREATE: StageReached = "stage5_post_create"
 
 #: Step 4b comment title and artifact-header label for a codex-built result.
 #: The Claude sibling is ``cw.claude_review.core.CLAUDE_REVIEWER_LABEL``.
@@ -89,6 +96,16 @@ def _exec_policy_argv(mode: str) -> list[str]:
     included) raises ``ValueError`` here as well as at config load.
     """
     return [_SANDBOX_FLAG, SandboxMode(mode).value, *_APPROVAL_POLICY_ARGV]
+
+
+# The JSONL event stream and the no-rollout flags, emitted together by every
+# argv that wants its usage read (#3063). One definition for the reviewer,
+# PLAN, IMPL, FINALIZE and tracker-IO builders; the flag-rejection retries
+# strip exactly this pair. The fix argv takes ``_JSON_FLAG`` alone: it keeps
+# its rollouts, so no ``--ephemeral``.
+_JSON_FLAG = "--json"
+_EPHEMERAL_FLAG = "--ephemeral"
+_AUDIT_ARGV_FLAGS = (_JSON_FLAG, _EPHEMERAL_FLAG)
 
 
 class _SpawnProbeResult(Protocol):
@@ -265,10 +282,13 @@ CODEX_REVIEW_WORKTREE_MUTATED = "codex_review_worktree_mutated"
 
 # Fix-loop divergence guard (#2394): the fix loop grew the diff for a
 # configured number of consecutive cycles (default 1 since #2633,
-# ``codex_fix_loop_stall_cycles``) while resolving none of the originally-found
-# MUST_FIX findings — distinct from CODEX_MUST_FIX_FINDINGS (the cap was reached
-# but findings may still be shrinking) and from REVIEW_TREADMILL_DETECTED (a
-# single refused self-inflicted finding, not a loop-wide progress signal).
+# ``codex_fix_loop_stall_cycles``) while making no net progress on the
+# originally-found MUST_FIX findings: resolved originals minus new findings
+# attributed to the loop's own code (#2665), so it also fires when resolved
+# originals are offset by loop-attributed findings. Distinct from
+# CODEX_MUST_FIX_FINDINGS (the cap was reached but findings may still be
+# shrinking) and from REVIEW_TREADMILL_DETECTED (a single refused self-inflicted
+# finding, not a loop-wide progress signal).
 # Stops the loop BEFORE the cycle cap, unlike every other reason above.
 FIX_LOOP_DIVERGING = "fix_loop_diverging"
 
@@ -319,6 +339,12 @@ _CODEX_PLAN_BLOCKED_NEXT_ACTIONS: list[str] = ["user_resolve_codex_plan_failure"
 
 # next_actions label for a codex IMPL blocked result (#3061), keyed the same way.
 _CODEX_IMPL_BLOCKED_NEXT_ACTIONS: list[str] = ["user_resolve_codex_impl_failure"]
+
+# next_actions label for a codex FINALIZE blocked result (#3062), keyed the
+# same way on the three finalize stages.
+_CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS: list[str] = [
+    "user_resolve_codex_finalize_failure"
+]
 
 # Backend-side failure reasons: the codex/claude backend itself errored or was
 # at capacity, so nothing says it is up. A round whose every failed role is one

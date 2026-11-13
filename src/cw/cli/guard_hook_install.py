@@ -28,7 +28,6 @@ the guard can only refuse a worker something it must not do.
 
 from __future__ import annotations
 
-import shlex
 from typing import Final
 
 from cw.cli._base import main
@@ -39,6 +38,7 @@ from cw.cli._hook_io import (
     enforce,
 )
 from cw.cli._lazy import GUARD_HOOK_INSTALL_NAME
+from cw.cli._shell_scan import basename, command_matches
 from cw.models import BASH_TOOL_NAME
 
 OPERATOR_COMMAND: Final = "uv run pre-commit install --hook-type pre-commit"
@@ -62,35 +62,6 @@ _PRE_COMMIT_NAMES: Final = frozenset({"pre-commit", "pre_commit"})
 _REFUSED_SUBCOMMANDS: Final = frozenset({"install", "uninstall"})
 # pre-commit's global options that take a separate value (``-c cfg.yaml``).
 _VALUE_OPTIONS: Final = frozenset({"-c", "--config", "--color"})
-_SHELLS: Final = frozenset({"bash", "sh", "zsh", "dash"})
-_EVAL: Final = "eval"
-# ``bash -c "bash -c '...'"`` is followed this many levels, then given up on.
-_MAX_NESTING: Final = 2
-# Newline is punctuation rather than whitespace so each line is its own
-# segment, and a ``#`` comment line consumes only itself.
-_PUNCTUATION: Final = "();<>|&\n"
-_SEPARATOR_CHARS: Final = frozenset("();|&\n")
-
-
-def _segments(command: str) -> list[list[str]]:
-    """*command* as simple commands: token lists split on shell separators.
-
-    Raises ``ValueError`` on an unterminated quote or escape.
-    """
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=_PUNCTUATION)
-    lexer.whitespace = lexer.whitespace.replace("\n", "")
-    lexer.whitespace_split = True
-    segments: list[list[str]] = [[]]
-    for token in lexer:
-        if token and set(token) <= _SEPARATOR_CHARS:
-            segments.append([])
-        else:
-            segments[-1].append(token)
-    return [segment for segment in segments if segment]
-
-
-def _basename(token: str) -> str:
-    return token.rsplit("/", 1)[-1]
 
 
 def _first_positional(args: list[str]) -> str | None:
@@ -110,47 +81,10 @@ def _first_positional(args: list[str]) -> str | None:
 def _invokes_hook_install(segment: list[str]) -> bool:
     """Whether *segment* runs ``pre-commit install`` or ``pre-commit uninstall``."""
     return any(
-        _basename(token) in _PRE_COMMIT_NAMES
+        basename(token) in _PRE_COMMIT_NAMES
         and _first_positional(segment[index + 1 :]) in _REFUSED_SUBCOMMANDS
         for index, token in enumerate(segment)
     )
-
-
-def _dash_c_script(args: list[str]) -> str | None:
-    """The script a shell's ``-c`` (alone or in a cluster like ``-lc``) runs."""
-    for index, arg in enumerate(args):
-        if not arg.startswith("-"):
-            return None
-        if not arg.startswith("--") and "c" in arg[1:]:
-            return args[index + 1] if index + 1 < len(args) else None
-    return None
-
-
-def _nested_scripts(segment: list[str]) -> list[str]:
-    """Scripts *segment* hands to ``bash -c`` (or another shell) or ``eval``."""
-    scripts: list[str] = []
-    for index, token in enumerate(segment):
-        name = _basename(token)
-        if name == _EVAL:
-            scripts.append(" ".join(segment[index + 1 :]))
-        elif name in _SHELLS:
-            script = _dash_c_script(segment[index + 1 :])
-            if script is not None:
-                scripts.append(script)
-    return scripts
-
-
-def _command_installs_hooks(command: str, depth: int = 0) -> bool:
-    """Whether *command*, or a script it nests, runs a hook install/uninstall."""
-    for segment in _segments(command):
-        if _invokes_hook_install(segment):
-            return True
-        if depth < _MAX_NESTING and any(
-            _command_installs_hooks(script, depth + 1)
-            for script in _nested_scripts(segment)
-        ):
-            return True
-    return False
 
 
 def _ignore_warning(_detail: str) -> None:
@@ -173,7 +107,7 @@ def classify_hook_install(payload: dict[str, object] | None) -> str | None:
     if command is None:
         return None
     try:
-        refused = _command_installs_hooks(command)
+        refused = command_matches(command, _invokes_hook_install)
     except ValueError:
         return None
     return REFUSAL_REASON if refused else None

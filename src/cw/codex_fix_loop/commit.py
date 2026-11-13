@@ -78,6 +78,7 @@ from cw.codex_review import (
     _SensitiveHit,
     resolve_review_config_source,
 )
+from cw.codex_review._const import _JSON_FLAG
 from cw.models.enums import DEFAULT_FIX_SANDBOX_MODE, SandboxMode
 
 if TYPE_CHECKING:
@@ -129,6 +130,9 @@ def _build_fix_codex_argv(
         "codex",
         "exec",
         *_exec_policy_argv(sandbox_mode),
+        # JSONL stdout so the turn's token usage can be read (#3063). No
+        # ``--ephemeral``: a fix cycle keeps its rollout under ~/.codex.
+        _JSON_FLAG,
         *_reasoning_effort_argv(reasoning_effort),
     ]
     if model:
@@ -149,7 +153,10 @@ _FIX_SCOPE_RULES = (
     "- Do not revert, re-add, or rewrite work from earlier commits on this "
     "branch beyond what a finding explicitly requires.\n"
     "- Do not add new configuration flags, environment variables, or opt-in "
-    "toggles unless a finding explicitly requires one."
+    "toggles unless a finding explicitly requires one.\n"
+    "- Never run `git stash`, `git stash pop` or `git stash clear`: the stash "
+    "stack is shared by every worktree of the repository. Set work aside with "
+    "a temporary WIP commit instead."
 )
 
 
@@ -352,7 +359,7 @@ def _commit_fix_cycle(
     return sha
 
 
-def _scope_violations(
+def scope_violations(
     worktree: Path,
     paths: Iterable[str],
     cycle0_files: frozenset[str] | set[str],
@@ -442,15 +449,25 @@ class _CycleContext:
 
     def park_gates(
         self, baseline: CycleBaseline, touched: frozenset[str]
-    ) -> _Park | None:
+    ) -> tuple[_Park | None, frozenset[str]]:
         """Run the pinned gates on a cycle that changed paths; park if one refuses.
 
-        ``None`` for a no-op cycle (nothing to gate) or when every gate passed.
-        A refusal parks ``codex_fix_gate_failed`` through :meth:`park_breach`,
-        which pins and resets the cycle's edits.
+        Returns ``(park, measured)``. The park is ``None`` for a no-op cycle
+        (nothing to gate) or when every gate passed. A refusal parks
+        ``codex_fix_gate_failed`` through :meth:`park_breach`, which pins and
+        resets the cycle's edits; a git error parks ``codex_error``.
+
+        ``measured`` is the cycle's path set re-measured AFTER the gates when
+        they passed (#3424): an applied autofix may return a touched path to
+        its baseline content, and the commit's staged set must equal what is
+        about to be committed. It is intersected with *touched*, so a path
+        that never passed the fence and growth guards can never enter it; such
+        a path still trips the commit's staged-set guard. The re-measure sits
+        inside the git-error ``try`` so its failure parks like any other
+        gate-step git failure. Every other branch returns *touched* unchanged.
         """
         if not touched:
-            return None
+            return None, touched
         try:
             failure = run_cycle_gates(
                 self.gate_plan,
@@ -460,11 +477,16 @@ class _CycleContext:
                 tokens=self.gate_tokens,
                 touched=touched,
             )
+            measured = (
+                frozenset(cycle_touched_paths(self.worktree, baseline)) & touched
+                if failure is None
+                else touched
+            )
         except subprocess.CalledProcessError as exc:
-            return self.park_git_error(exc)
+            return self.park_git_error(exc), touched
         if failure is None:
-            return None
-        return self.park_breach(gate_failure_breach(failure, self.cycle))
+            return None, measured
+        return self.park_breach(gate_failure_breach(failure, self.cycle)), touched
 
     def _restore(self, reason: str) -> CycleRestore | None:
         """Pin the cycle's edits under a ref and reset to HEAD (#2967)."""
@@ -648,7 +670,7 @@ def _cycle_breach(
     guard, as before #2633; the switchable growth and constraint guards last.
     """
     touched = cycle_touched_paths(ctx.worktree, baseline)
-    violations = _scope_violations(
+    violations = scope_violations(
         ctx.worktree, touched, cycle0_files, scope_tier, default_branch
     )
     if violations:
@@ -746,7 +768,7 @@ def _recommit_after_repair(
     breach, touched = measure()
     if breach is not None:
         return ctx.park_breach(breach), None
-    gate_park = ctx.park_gates(baseline, touched)
+    gate_park, touched = ctx.park_gates(baseline, touched)
     if gate_park is not None:
         return gate_park, None
     try:
@@ -802,7 +824,7 @@ def _commit_or_repair(
     breach, touched = measure()
     if breach is not None:
         return ctx.park_breach(breach), None
-    gate_park = ctx.park_gates(baseline, touched)
+    gate_park, touched = ctx.park_gates(baseline, touched)
     if gate_park is not None:
         return gate_park, None
     try:

@@ -19,24 +19,41 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 from cw import codex_background, codex_stage_completion
+from cw._lock_guard import LockRank, is_rank_held
 from cw.auto_dev_result import AutoDevResult
-from cw.codex_review import _CODEX_PLAN_BLOCKED_NEXT_ACTIONS
+from cw.codex_review import (
+    _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS,
+    _CODEX_PLAN_BLOCKED_NEXT_ACTIONS,
+    make_codex_blocked,
+)
 from cw.codex_stage_completion import (
     STAGE_FAULTS,
     clear_stage_blocked_marker,
     complete_session_as_unexpected_error,
     complete_session_through_door,
+    flush_late_usage,
     revert_claimed_row_after_unexpected_error,
     run_guarded_stage,
     save_stage_blocked_marker,
     stamp_session_id_on_running_task,
 )
-from cw.config import load_state
+from cw.codex_usage import UsageAccumulator
+from cw.config import load_state, save_state
 from cw.dev_queue import add_ticket, load_dev_queue
 from cw.dispatch_state import load_executor_blocked_markers
 from cw.exceptions import CwError
 from cw.local_runner import UNEXPECTED_ERROR
-from cw.models import QueueItemStatus, SessionStatus, Stage, TicketTask
+from cw.models import CwState, QueueItemStatus, SessionStatus, Stage, TicketTask
+from cw.models.orchestrator_config.stage import ModelPrice
+from cw.models.usage import (
+    TurnUsage,
+    UsageSnapshot,
+    UsageStage,
+    UsageState,
+    UsageUnavailable,
+    UsageUnavailableReason,
+)
+from tests._shared.session_seeding import _make_daemon_session
 from tests.test_codex_background import _client, _run, _seed_session
 
 
@@ -165,7 +182,10 @@ class TestDoorAndUnexpectedError:
                 "sid-d", {"status": "x"}, guard_already_completed=True
             )
         door.assert_called_once_with(
-            sid="sid-d", payload={"status": "x"}, guard_already_completed=True
+            sid="sid-d",
+            payload={"status": "x"},
+            guard_already_completed=True,
+            usage=None,
         )
 
     def test_unexpected_error_completes_real_session_without_reentering_lock(
@@ -198,6 +218,251 @@ class TestDoorAndUnexpectedError:
         persisted = AutoDevResult.model_validate(load_state().sessions[0].last_result)
         assert persisted.stage_reached == "stage1_plan"
         assert persisted.next_actions == _CODEX_PLAN_BLOCKED_NEXT_ACTIONS
+
+    def test_unexpected_error_at_the_merge_gate_carries_finalize_next_actions(
+        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """#3062: the finalize wire stage keys the finalize label, not review's."""
+        worktree = make_git_repo("wt-stage-finalize")
+        _seed_session("sid-fin")
+        task = TicketTask(ticket_id="T-fin", client="test", stage=Stage.FINALIZE)
+
+        complete_session_as_unexpected_error(
+            "sid-fin", task, worktree, stage_reached="stage4a_merge_gate"
+        )
+
+        persisted = AutoDevResult.model_validate(load_state().sessions[0].last_result)
+        assert persisted.stage_reached == "stage4a_merge_gate"
+        assert persisted.blocker is not None
+        assert persisted.blocker.reason == UNEXPECTED_ERROR
+        assert persisted.next_actions == _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS
+
+
+def _payload(make_git_repo: Callable[[str], Path]) -> dict[str, object]:
+    """A schema-valid terminal payload for the door."""
+    task = TicketTask(ticket_id="T-u", client="test", stage=Stage.REVIEW)
+    return make_codex_blocked(
+        ticket_id=task.ticket_id,
+        worktree=make_git_repo("wt-usage-payload"),
+        reason=UNEXPECTED_ERROR,
+        stage_reached="stage3_review",
+    ).model_dump(mode="json")
+
+
+def _acc(session_id: str = "sid-u") -> UsageAccumulator:
+    price = ModelPrice(
+        input_usd_per_mtok=1.0, cached_input_usd_per_mtok=0.5, output_usd_per_mtok=2.0
+    )
+    return UsageAccumulator(session_id, "T-u", {"gpt-x": price})
+
+
+def _record(acc: UsageAccumulator, kind: UsageStage = UsageStage.PLAN) -> None:
+    acc.record_turn(
+        kind, kind.value, "gpt-x", TurnUsage(1000, 0, 0, 100, 0), completed=True
+    )
+
+
+class TestUsagePersistence:
+    """#3063: the door persists the run's usage; parse and price run unlocked."""
+
+    def test_door_persists_usage_and_cost_breakdown(
+        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        _seed_session("sid-u")
+        acc = _acc()
+        _record(acc)
+
+        complete_session_through_door("sid-u", _payload(make_git_repo), usage=acc)
+
+        session = load_state().sessions[0]
+        assert session.usage is not None
+        assert session.usage.state is UsageState.RECORDED
+        assert session.usage.by_stage[UsageStage.PLAN].input_tokens == 1000
+        assert session.cost_breakdown == pytest.approx({"gpt-x": 0.0012})
+
+    def test_default_no_usage_leaves_both_fields_none(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        _seed_session("sid-u")
+
+        complete_session_through_door("sid-u", _payload(make_git_repo))
+
+        session = load_state().sessions[0]
+        assert session.usage is None
+        assert session.cost_breakdown is None
+
+    def test_snapshot_and_parse_run_without_the_sessions_lock(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        _seed_session("sid-u")
+        acc = _acc()
+        _record(acc)
+        held: dict[str, bool] = {}
+        original = UsageAccumulator.snapshot
+
+        def spy_snapshot(self: UsageAccumulator) -> UsageSnapshot | None:
+            held["snapshot"] = is_rank_held(LockRank.SESSIONS)
+            return original(self)
+
+        def spy_door(**kwargs: object) -> None:
+            held["door"] = is_rank_held(LockRank.SESSIONS)
+            held["ready_snapshot"] = isinstance(kwargs["usage"], UsageSnapshot)
+
+        monkeypatch.setattr(UsageAccumulator, "snapshot", spy_snapshot)
+        monkeypatch.setattr("cw.executor._complete_session_via_door", spy_door)
+
+        complete_session_through_door("sid-u", _payload(make_git_repo), usage=acc)
+
+        assert held == {"snapshot": False, "door": True, "ready_snapshot": True}
+
+    def test_door_retry_writes_the_same_snapshot_idempotently(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        _seed_session("sid-u")
+        acc = _acc()
+        _record(acc)
+
+        complete_session_through_door("sid-u", _payload(make_git_repo), usage=acc)
+        first = load_state().sessions[0].usage
+        complete_session_through_door("sid-u", _payload(make_git_repo), usage=acc)
+
+        assert load_state().sessions[0].usage == first
+
+    def test_unexpected_error_persists_tokens_spent_before_a_crash(
+        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-usage-crash")
+        _seed_session("sid-u")
+        acc = _acc()
+        _record(acc)
+        task = TicketTask(ticket_id="T-u", client="test", stage=Stage.REVIEW)
+
+        complete_session_as_unexpected_error("sid-u", task, worktree, usage=acc)
+
+        usage = load_state().sessions[0].usage
+        assert usage is not None
+        assert usage.total_tokens == 1100
+
+    def test_guarded_stage_carries_usage_into_the_crash_path(
+        self, tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-usage-guarded")
+        _seed_session("sid-u")
+        acc = _acc()
+        task = _running_task("sid-u")
+
+        def body() -> None:
+            _record(acc)
+            msg = "boom"
+            raise CwError(msg)
+
+        run_guarded_stage(
+            client_name="test",
+            task=task,
+            worktree=worktree,
+            sid="sid-u",
+            stage_reached="stage1_plan",
+            body=body,
+            usage=acc,
+        )
+
+        usage = load_state().sessions[0].usage
+        assert usage is not None
+        assert usage.total_tokens == 1100
+
+
+class TestFlushLateUsage:
+    def test_rewrites_the_superset_once_then_is_a_no_op(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        _seed_session("sid-u")
+        acc = _acc()
+        _record(acc)
+        complete_session_through_door("sid-u", _payload(make_git_repo), usage=acc)
+        _record(acc, UsageStage.TRACKER_IO)
+        held: list[bool] = []
+        original = UsageAccumulator.snapshot
+
+        def spy_snapshot(self: UsageAccumulator) -> UsageSnapshot | None:
+            held.append(is_rank_held(LockRank.SESSIONS))
+            return original(self)
+
+        monkeypatch.setattr(UsageAccumulator, "snapshot", spy_snapshot)
+
+        flush_late_usage("sid-u", acc)
+        usage = load_state().sessions[0].usage
+        assert usage is not None
+        assert set(usage.by_stage) == {UsageStage.PLAN, UsageStage.TRACKER_IO}
+        assert usage.total_tokens == 2200
+
+        flush_late_usage("sid-u", acc)
+        assert held == [False]
+
+    def test_no_op_when_the_session_id_is_absent_from_state(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        save_state(CwState(sessions=[_make_daemon_session(id="other")]))
+        acc = _acc("gone")
+        _record(acc)
+        before = load_state().model_dump(mode="json")
+
+        flush_late_usage("gone", acc)
+
+        assert load_state().model_dump(mode="json") == before
+        assert load_state().sessions[0].usage is None
+
+    def test_clean_accumulator_never_touches_state(self, tmp_config_dir: Path) -> None:
+        with patch("cw.codex_stage_completion.mutate_state") as mutate:
+            flush_late_usage("sid-u", _acc())
+
+        mutate.assert_not_called()
+
+    def test_writes_through_mutate_state_once(self, tmp_config_dir: Path) -> None:
+        _seed_session("sid-u")
+        acc = _acc()
+        _record(acc)
+
+        with patch(
+            "cw.codex_stage_completion.mutate_state",
+            wraps=codex_stage_completion.mutate_state,
+        ) as mutate:
+            flush_late_usage("sid-u", acc)
+
+        mutate.assert_called_once()
+        assert load_state().sessions[0].usage is not None
+
+    def test_dirty_accumulator_with_nothing_recorded_skips_the_write(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        # A recorded-then-ignored turn marks the accumulator dirty but leaves
+        # nothing to persist.
+        acc = _acc()
+        acc.record_turn(
+            UsageStage.PLAN,
+            "plan",
+            "gpt-x",
+            UsageUnavailable(UsageUnavailableReason.TURN_FAILED),
+            completed=True,
+        )
+
+        with patch("cw.codex_stage_completion.mutate_state") as mutate:
+            flush_late_usage("sid-u", acc)
+
+        mutate.assert_not_called()
 
 
 class TestRunGuardedStage:

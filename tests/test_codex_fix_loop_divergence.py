@@ -671,6 +671,17 @@ class TestRelativeReport:
             "(absolute: max(150, 0.5 x pre-loop diff))."
         )
 
+    def test_absolute_threshold_text_follows_constants(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(divergence, "_DIVERGENCE_MIN_LINES", 200)
+        monkeypatch.setattr(divergence, "_DIVERGENCE_PRE_LOOP_FRACTION", 0.25)
+        report = render_divergence_report(_state(stall_cycles=1))
+        assert report.splitlines()[1] == (
+            "Divergence threshold: 200 line(s) of cumulative churn "
+            "(absolute: max(200, 0.25 x pre-loop diff))."
+        )
+
     def test_report_threshold_line_names_anchor_when_relative(self) -> None:
         report = render_divergence_report(_anchored(6))
         assert report.splitlines()[1] == (
@@ -724,6 +735,15 @@ def abc():
 
 def __weird__():
     return 2
+
+
+annotated_limit: int = 5
+compare_result == 3
+
+
+def scale_rows(rows):
+    local_scale = 4
+    return rows
 """
 _UTIL_EDITED = (
     "def existing_fn():\n    return 0\n\n\ndef edited_fn(arg):\n    return 1\n"
@@ -790,6 +810,9 @@ class TestLoopCitation:
             ({"suggested_fix": "inline `fetch_rows`"}, 1),
             ({"summary": "`_ROSTER_LIMIT` is a magic number"}, 1),
             ({"summary": "`grown_1_0` is dead"}, 1),
+            ({"summary": "`annotated_limit` is a magic number"}, 1),
+            ({"summary": "`compare_result` is dead"}, 0),
+            ({"summary": "`local_scale` shadows"}, 0),
             ({"summary": "`abc` is too short a name"}, 0),
             ({"summary": "`__weird__` is odd"}, 0),
             ({"summary": "`edited_fn` changed signature"}, 0),

@@ -17,6 +17,7 @@ from cw.exceptions import WorktreeOccupiedError
 from cw.models import CwState, SessionStatus
 from cw.worktree import (
     RefreshOutcome,
+    ReuseRefreshOptions,
     _normalize_path,
     create_worktree,
     live_home_reason,
@@ -256,7 +257,10 @@ class TestUnreadableStatePostures:
             pytest.raises(WorktreeOccupiedError) as excinfo,
         ):
             create_worktree(
-                client, _REUSE_BRANCH, allow_dirty_reuse=True, refresh_on_reuse=True
+                client,
+                _REUSE_BRANCH,
+                allow_dirty_reuse=True,
+                refresh=ReuseRefreshOptions(),
             )
 
         assert excinfo.value.path == wt
@@ -376,8 +380,7 @@ class TestReuseOccupancyRosterAndPaths:
                 client,
                 _REUSE_BRANCH,
                 allow_dirty_reuse=True,
-                refresh_on_reuse=True,
-                native_daemon=fake,
+                refresh=ReuseRefreshOptions(native_daemon=fake),
             )
 
         assert excinfo.value.path == wt
@@ -403,8 +406,7 @@ class TestReuseOccupancyRosterAndPaths:
                 client,
                 _REUSE_BRANCH,
                 allow_dirty_reuse=True,
-                refresh_on_reuse=True,
-                native_daemon=fake,
+                refresh=ReuseRefreshOptions(native_daemon=fake),
             )
 
         assert excinfo.value.path == wt

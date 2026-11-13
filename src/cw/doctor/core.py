@@ -27,6 +27,7 @@ from cw.doctor._shared import (
     WedgeFinding,
 )
 from cw.doctor.agent_spec_drift import _check_agent_spec_drift
+from cw.doctor.all_codex_lane import _check_all_codex_lane
 from cw.doctor.codex_fix_loop import _check_codex_fix_loop
 from cw.doctor.commit_hook import _check_commit_hook, _check_hook_install_python
 from cw.doctor.config_checks import (
@@ -380,6 +381,7 @@ def _client_config_checks(clients: dict[str, ClientConfig]) -> list[CheckResult]
         *_check_codex_fix_loop(clients),
         *_check_tracker_mcp(clients),
         *_check_review_convergence(clients),
+        *_check_all_codex_lane(clients),
         *_check_review_engine(clients),
         *_check_merge_gate_disabled(clients),
         *_check_commit_hook(clients),

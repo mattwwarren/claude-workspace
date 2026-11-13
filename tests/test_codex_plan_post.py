@@ -208,7 +208,7 @@ class TestGitHub:
         worktree = _worktree(tmp_path)
         FakeGhComment().install(monkeypatch)
         with patch(
-            "cw.codex_plan._post.plan_turn_parts", side_effect=ValueError("no plan")
+            "cw.codex_stage_post.plan_turn_parts", side_effect=ValueError("no plan")
         ):
             _post(client, worktree, _PLAN)
         (event,) = _events()
@@ -219,7 +219,7 @@ class TestGitHub:
     ) -> None:
         client = codex_tracker_client(tmp_path)
         worktree = _worktree(tmp_path)
-        with patch("cw.codex_plan._post.post_parts", side_effect=OSError("disk")):
+        with patch("cw.codex_stage_post.post_parts", side_effect=OSError("disk")):
             _post(client, worktree, _PLAN)
         assert _events() == []
 
@@ -239,7 +239,7 @@ class TestGitHub:
             ),
             2,
         )
-        with patch("cw.codex_plan._post.post_parts", return_value=partial):
+        with patch("cw.codex_stage_post.post_parts", return_value=partial):
             _post(client, worktree, _PLAN)
         (event,) = _events()
         assert event["type"] == "review.verdict_comment_unverified"
@@ -260,7 +260,7 @@ class TestGitHub:
         client = codex_tracker_client(tmp_path)
         worktree = _worktree(tmp_path)
         unknown = PostResult(PostStatus.PARTIAL, PostReason.POST_OUTCOME_UNKNOWN, (), 1)
-        with patch("cw.codex_plan._post.post_parts", return_value=unknown):
+        with patch("cw.codex_stage_post.post_parts", return_value=unknown):
             _post(client, worktree, _PLAN)
         (event,) = _events()
         assert event["type"] == "review.verdict_comment_unverified"
@@ -273,7 +273,7 @@ class TestGitHub:
         client = codex_tracker_client(tmp_path)
         worktree = _worktree(tmp_path)
         refused = PostResult(PostStatus.REFUSED, PostReason.POST_FAILED, (), 1)
-        with patch("cw.codex_plan._post.post_parts", return_value=refused):
+        with patch("cw.codex_stage_post.post_parts", return_value=refused):
             _post(client, worktree, _PLAN)
         (event,) = _events()
         assert event["type"] == "review.verdict_comment_skipped"

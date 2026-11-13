@@ -178,6 +178,14 @@ jobs:
       - name: Smoke test - impl command doc packaged
         run: unzip -l dist/*.whl | grep -q 'cw/data/commands/auto-dev-impl.md'
 
+      # The codex FINALIZE executor (#3062) reads the finalize command doc and
+      # the prep-pr command doc it delegates to the same way.
+      - name: Smoke test - finalize command doc packaged
+        run: unzip -l dist/*.whl | grep -q 'cw/data/commands/auto-dev-finalize.md'
+
+      - name: Smoke test - prep-pr command doc packaged
+        run: unzip -l dist/*.whl | grep -q 'cw/data/commands/prep-pr.md'
+
       - name: Install wheel into clean env
         run: uv tool install --no-cache dist/*.whl
 

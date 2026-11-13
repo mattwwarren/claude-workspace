@@ -15,9 +15,11 @@ import pytest
 
 from cw.codex_review._const import _is_spawn_error
 from cw.codex_runner import CodexRunResult, FakeCodexRunner
+from cw.codex_usage import UsageAccumulator
 from cw.config import state_dir
 from cw.gh import AGENT_COMMENT_MARKER
 from cw.models.client import TrackerMcpGateConfig
+from cw.models.usage import USAGE_UNKNOWN_MODEL, UsageStage
 from cw.tracker import TRACKER_LINEAR
 from cw.tracker_io import (
     TURN_TIMEOUT_SECONDS,
@@ -33,7 +35,7 @@ from tests._backend_mcp_helpers import (
     codex_tracker_client,
     stage_mcp_config,
 )
-from tests._tool_fakes import tracker_io_turn_result
+from tests._tool_fakes import codex_usage_stdout, tracker_io_turn_result
 
 if TYPE_CHECKING:
     from cw.codex_runner import CodexRunner
@@ -490,3 +492,50 @@ def test_runner_oserror_is_codex_unavailable(
     assert outcome.public_state is PublicState.NONE
     (cwd,) = runner.cwds
     assert not cwd.exists()
+
+
+# --- usage accounting (#3063) -------------------------------------------------
+
+
+def _recorded_turn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stdout: str
+) -> tuple[UsageAccumulator, TrackerIoOutcome]:
+    _stage(monkeypatch, tmp_path)
+    placeholder = _context(tmp_path, FakeCodexRunner())
+    inner = _verified_runner(placeholder, "verdict text")
+    inner.stdout = stdout
+    acc = UsageAccumulator("s-1", _TICKET, {})
+    context = TrackerIoContext(
+        runner=acc.recording_runner(UsageStage.TRACKER_IO, inner),
+        client=placeholder.client,
+        worktree=placeholder.worktree,
+    )
+    return acc, _turn(context)
+
+
+def test_the_turn_reaches_the_accumulator_under_tracker_io(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The tracker-IO argv carries ``--json`` and no ``-m``: unknown model."""
+    acc, outcome = _recorded_turn(
+        monkeypatch, tmp_path, codex_usage_stdout(input_tokens=300, output_tokens=30)
+    )
+
+    assert outcome.verified
+    snapshot = acc.snapshot()
+    assert snapshot is not None
+    assert list(snapshot.usage.by_stage) == [UsageStage.TRACKER_IO]
+    assert list(snapshot.usage.by_model) == [USAGE_UNKNOWN_MODEL]
+    assert snapshot.usage.by_stage[UsageStage.TRACKER_IO].input_tokens == 300
+
+
+def test_an_exit_zero_turn_without_usage_warns(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="cw.codex_usage"):
+        acc, _outcome = _recorded_turn(monkeypatch, tmp_path, "")
+
+    assert [m for m in caplog.messages if "role=tracker_io " in m]
+    assert acc.friction_token() is not None

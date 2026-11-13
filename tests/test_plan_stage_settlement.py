@@ -895,7 +895,8 @@ def test_settled_item_cannot_yield_second_resolution_evidence_candidate() -> Non
 
 
 # ---------------------------------------------------------------------------
-# #2154 -- draft-fold + round-cap reset + resolution_consumed emission scope
+# #2154 -- round-cap reset, fingerprint grammar and resolution_consumed emission scope
+# (the draft-fold half was split out; see test_plan_operator_fold.py, #2258)
 # ---------------------------------------------------------------------------
 
 LAST_EVALUATED_MARKER = "plan-stage-last-evaluated"
@@ -1055,8 +1056,9 @@ def test_fingerprint_read_cites_provenance_rule_by_name_only() -> None:
     """
     block = _step1c0_block()
     window = _after(block, FINGERPRINT_READ_ANCHOR, span=900)
-    assert "Comment provenance rule" in window
-    assert ".claude/commands/auto-dev.md" in window
+    # The fingerprint is defined once, by the core Tracker-state-delta reset (#2258).
+    assert "Tracker-state-delta reset" in window
+    assert "Comment provenance rule" not in window
     for restated in (
         "cw-agent-authored",
         "pipeline fixed header",
@@ -1107,21 +1109,27 @@ def test_provenance_criteria_stated_exactly_once_in_step1c0() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_fingerprint_has_exactly_two_components_everywhere() -> None:
-    """Both fingerprint-read sites (appendix step 0, core-doc cap check) agree.
+def test_fingerprint_definition_is_single_and_cited_by_name() -> None:
+    """The fingerprint is defined once (core cap check); the appendix cites it (#2258).
 
     Operator round-2 disposition, item 2: `operator_comment` (a comment id,
     or `none`) and `body_sha` (the output of `cw body-sha`, #2761) -- and
     nothing else. No `updated_at`/`updatedAt`, no `plan_approved_at`, no
     comment timestamp, anywhere in either copy. Neither copy describes the
     hash itself any more ("computed over the raw string"): the command is
-    the one definition, so a paraphrase cannot drift from it.
+    the one definition, so a paraphrase cannot drift from it. The appendix
+    step-0 copy is a by-name citation only (#2181 item 2), so it no longer
+    restates the two-component definition.
     """
     block = _step1c0_block()
     fingerprint_window = _after(block, FINGERPRINT_READ_ANCHOR, span=900)
+    assert "Tracker-state-delta reset" in fingerprint_window
+    assert "cw body-sha" in fingerprint_window
+    assert "exactly two components" not in fingerprint_window
+    assert "operator_comment" not in fingerprint_window
     cap = _cap_check_block()
     cap_window = _after(cap, DELTA_RESET_ANCHOR, span=1900)
-    for window in (fingerprint_window, cap_window):
+    for window in (cap_window,):
         assert "operator_comment" in window
         assert "body_sha" in window
         assert "exactly two components" in window
@@ -1273,8 +1281,11 @@ def test_settlement_marker_grammar_documents_fingerprint_coexistence() -> None:
     assert "never onto the fingerprint's own line" in window
 
 
-def test_draft_with_both_bookkeeping_markers_present_parses_unambiguously() -> None:
-    """A draft carrying both a settlement marker and a fingerprint parses.
+def test_bookkeeping_order_prose_agrees_between_grammar_and_persistence_rule() -> None:
+    """The bookkeeping-order prose agrees across the grammar and the persistence rule.
+
+    Prose-only (#2258): it asserts substrings of the two docs. The real-fixture
+    parse of a full draft lives in test_plan_operator_fold.py.
 
     Two independent statements of the same bookkeeping order must agree:
     the settlement-marker grammar (this test's primary anchor), which states

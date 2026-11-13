@@ -23,7 +23,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Final, Literal, Protocol, runtime_checkable
 
 from cw.auto_dev_result import (
     BLOCKER_REASON_NO_RESULT_EMITTED,
@@ -296,13 +296,27 @@ def resolve_finalize_command_file(worktree: Path) -> Path:
 # exits, and the exact sentinel shape.
 
 
+# #1418: the one shared-stash rule sentence. It rides the preamble, which the
+# opencode prompts and the codex contract renders (contract_manifest._render)
+# both reuse, so every runner without a PreToolUse hook still gets it. The
+# stash stack is one reflog shared by every worktree, hence "pop" is unsafe.
+GIT_STASH_RULE: Final = (
+    "Never run `git stash`, `git stash pop` or `git stash clear`: the stash "
+    "stack is shared by every worktree of the repository, so a pop can apply "
+    "another session's work and an unrecovered stash silently loses yours. "
+    "Set work aside with a temporary WIP commit instead."
+)
+
+
 def _stage_preamble(stage_value: str, ticket_id: str) -> str:
     return (
         f"You are the auto-dev {stage_value.upper()} stage worker for ticket "
         f"{ticket_id}, running with --headless semantics: fire-and-forget, no "
         "TTY, no human available mid-run. Work only inside the current "
         "working directory (the session worktree); never run git mutations "
-        "against any other checkout. If a required input or tool is missing, "
+        "against any other checkout. "
+        f"{GIT_STASH_RULE} "
+        "If a required input or tool is missing, "
         "stop and emit an honest blocked sentinel instead of improvising "
         "around it.\n\n"
     )

@@ -23,7 +23,9 @@ from cw.codex_review_signals import (
     emit_verdict_comment_skipped,
     surface_tracker_io_outcome,
 )
+from cw.codex_runner import relabeled
 from cw.gh import post_issue_comment
+from cw.models.usage import UsageStage
 from cw.review_findings import (
     REVIEW_VERDICT_JSON_RELATIVE_PATH,
     render_review_verdict_envelope,
@@ -240,7 +242,11 @@ def _post_daemon_verdict_comment(
         cwd=_git_dir(client),
         tracker=resolve_tracker(client.workspace_path),
         artifact_path=artifact_path,
-        tracker_io=TrackerIoContext(runner=runner, client=client, worktree=worktree),
+        tracker_io=TrackerIoContext(
+            runner=relabeled(runner, UsageStage.TRACKER_IO),
+            client=client,
+            worktree=worktree,
+        ),
     )
 
 

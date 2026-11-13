@@ -643,7 +643,15 @@ class TestHookRepairTurn:
             calls["n"] += 1
             if calls["n"] == 1:
                 return None
-            return GateFailure("red", "lint", "ruff", 1, 0.1, "still red", None)
+            return GateFailure(
+                kind="red",
+                gate="lint",
+                command="ruff",
+                exit_code=1,
+                seconds=0.1,
+                output="still red",
+                why=None,
+            )
 
         monkeypatch.setattr(commit_module, "run_cycle_gates", _run)
 
