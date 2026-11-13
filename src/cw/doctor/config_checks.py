@@ -30,7 +30,7 @@ from cw.disk import (
     inodes_exhausted,
 )
 from cw.doctor import _deps
-from cw.doctor._shared import CheckResult
+from cw.doctor._shared import CheckResult, orchestrator_config_or_default
 from cw.events import inbox_path
 from cw.exceptions import CwError
 from cw.models import OrchestratorConfig
@@ -420,20 +420,6 @@ def _check_dev_queue() -> CheckResult:
     return CheckResult("dev_queue.json", ok=True, detail="parseable")
 
 
-def _orchestrator_config_or_default() -> OrchestratorConfig:
-    """Load orchestrator.yaml, degrading to defaults on any load failure.
-
-    Degrade rather than raise: a bad orchestrator.yaml is already reported by
-    _check_orchestrator_config(). Letting it propagate from a later check
-    would crash run_doctor() before that ok=False result is ever printed.
-    See GitHub #1200.
-    """
-    try:
-        return load_orchestrator_config()
-    except (OSError, yaml.YAMLError, CwError, ValidationError):
-        return OrchestratorConfig()
-
-
 def _check_inbox_size() -> CheckResult:
     """Warn when events/inbox.jsonl exceeds its configured size/line thresholds.
 
@@ -444,7 +430,7 @@ def _check_inbox_size() -> CheckResult:
     if not inbox.exists():
         return CheckResult("inbox-size", ok=True, detail="no inbox file")
 
-    config = _orchestrator_config_or_default()
+    config = orchestrator_config_or_default()
     size_bytes = inbox.stat().st_size
     with inbox.open("r", encoding="utf-8") as f:
         line_count = sum(1 for _ in f)
@@ -491,7 +477,7 @@ def _check_sessions_size() -> CheckResult:
             _SESSIONS_SIZE_CHECK_NAME, ok=True, warn=True, detail=stat_failed
         )
 
-    config = _orchestrator_config_or_default()
+    config = orchestrator_config_or_default()
     if size_bytes > config.sessions_size_warn_bytes:
         too_big = (
             f"size {size_bytes}B exceeds sessions_size_warn_bytes"
@@ -605,5 +591,5 @@ def _check_worker_tmp_pressure(clients: dict[str, ClientConfig]) -> list[CheckRe
     dispatch gate (which fails open), an unprobeable mount is reported as a
     failure here: doctor is a diagnostic, not a spawn path.
     """
-    config = _orchestrator_config_or_default()
+    config = orchestrator_config_or_default()
     return [_worker_tmp_result(client, config) for client in clients.values()]

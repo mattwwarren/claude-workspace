@@ -8,8 +8,8 @@ the dispatch gate uses, a bounded tree measurement, and the last retention run
 from its ``worker_tmp_retention.json`` sidecar. ``ok=False`` on a shortfall;
 ``warn=True`` only when the last retention run failed.
 
-Leaf module apart from ``config_checks._orchestrator_config_or_default``, which
-it reuses rather than copying a third time.
+Leaf module apart from ``_shared.orchestrator_config_or_default``, the one
+degrade-to-defaults config loader every doctor check shares.
 """
 
 from __future__ import annotations
@@ -24,8 +24,7 @@ from cw.disk import (
     effective_min_free_inodes,
     inodes_exhausted,
 )
-from cw.doctor._shared import CheckResult
-from cw.doctor.config_checks import _orchestrator_config_or_default
+from cw.doctor._shared import CheckResult, orchestrator_config_or_default
 from cw.worker_tmp_retention import (
     MEASURE_LIMIT,
     RetentionStatus,
@@ -110,7 +109,7 @@ def _retention_detail(
 
 def _check_worker_tmp_fallback() -> CheckResult:
     """Report the ``~/.cw/tmp`` mount, its tree size and the last retention run."""
-    config = _orchestrator_config_or_default()
+    config = orchestrator_config_or_default()
     root = resolve_fallback_worker_tmpdir()
     try:
         headroom, shortfalls, notes = _mount_findings(root, config)

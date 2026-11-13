@@ -7,39 +7,23 @@ the per-run cap left more eligible sessions behind. Advisory only, like
 ``sessions-size`` and ``lock-holds``: always ``ok=True``; ``warn=True`` only
 when the last run failed. Read-only: it never calls ``load_state()`` and never
 prunes (ADR-0014). Leaf module -- no cross-``doctor`` dependencies beyond
-``CheckResult``.
+``_shared``.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-
-import yaml
-from pydantic import ValidationError
+from typing import TYPE_CHECKING
 
 from cw._util import format_compact_age
-from cw.config import load_orchestrator_config
-from cw.doctor._shared import CheckResult
-from cw.exceptions import CwError
-from cw.models import OrchestratorConfig
+from cw.doctor._shared import CheckResult, orchestrator_config_or_default
 from cw.session_auto_prune import AutoPruneStatus, read_auto_prune_status
+
+if TYPE_CHECKING:
+    from cw.models import OrchestratorConfig
 
 _CHECK_NAME = "sessions-auto-prune"
 _ENABLE_KEY = "sessions_auto_prune_enabled"
-
-
-def _config_or_default() -> OrchestratorConfig:
-    """Load orchestrator.yaml, degrading to defaults on any load failure.
-
-    A bad orchestrator.yaml is already reported by the orchestrator-config
-    check; raising here would crash ``run_doctor()`` before that result prints.
-    Same policy as ``config_checks._orchestrator_config_or_default``, kept
-    local so this stays a leaf module.
-    """
-    try:
-        return load_orchestrator_config()
-    except (OSError, yaml.YAMLError, CwError, ValidationError):
-        return OrchestratorConfig()
 
 
 def _schedule_summary(config: OrchestratorConfig) -> str:
@@ -68,7 +52,7 @@ def _last_run_detail(status: AutoPruneStatus, now: datetime) -> str:
 
 def _check_sessions_auto_prune() -> CheckResult:
     """Report the last automatic sessions prune run (advisory, read-only)."""
-    config = _config_or_default()
+    config = orchestrator_config_or_default()
     status = read_auto_prune_status()
     if status is None:
         if not config.sessions_auto_prune_enabled:
