@@ -37,6 +37,7 @@ The agent receives:
 - Linear ticket ID and description (if applicable)
 - Target repo path (worktree root)
 - Current marker version (so the agent can call `v2` a stale `v1`)
+- Operator decisions on record (optional input): the `Decided:` lines the orchestrator supplies, each an identifier and a verbatim quote from an operator decision. The input may be absent. Label a finding `Decided` only when a supplied decision fully answers it and you can quote that decision from this input; an unquoted claim must not be labelled `Decided`. Decided does not change the verdict tier.
 
 ## The Four Checks
 
@@ -156,6 +157,7 @@ Output the verdict at the top, then findings grouped by category. Match the exis
 - What's missing: <specific gap>
 - Why it matters: <concrete consequence — what will drift in implementation>
 - How to fix: <one or two sentences of suggested plan revision>
+- Decided: <identifier> — "<verbatim quote>" (optional; only when a supplied operator decision fully answers this finding)
 
 (repeat per finding)
 

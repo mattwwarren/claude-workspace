@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Plan-stage resumed rounds fold operator answers into the plan before review (#2258, #2176, #2181).** A new Step 1c.0a folds the operator's answers to parked ambiguities and to advisory plan-review findings into the draft before the stations re-review it, and the Working-plan rule makes the validated text the only plan the rest of the round reads. Station prompts carry the decisions, and a finding a decision fully answers is labelled `Decided:` with a verified verbatim quote. The label never changes severity or gating. Prose only: no schema, `blocker.reason` or status change, and codex parity is deferred (#3464).
+
 ### Added
 
 - **`TicketTask.stage_entered_at` records when a row entered its current stage (#2155).** ISO-8601 UTC, whole seconds, `Z` suffix. Set at enqueue and on every stage advance or regress; unchanged by a same-stage requeue (including `requeue --from-completed` at finalize). Lets a consumer tell a between-stage `pending` wait from a lane-cap wait without a first-seen ledger. Present in `cw dev-queue tasks --json` and `cw schema show ticket-task`; the dev-queue schema moves to 60, the field is nullable, and pre-v60 rows load `None`. Dispatch behavior is unchanged.
