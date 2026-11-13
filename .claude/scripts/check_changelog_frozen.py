@@ -62,7 +62,8 @@ is accepted and ignored; `--changelog` names only the repo-relative path read
 from REF and from the merged tree. Exit 0 also when merge-tree reports a
 conflict or REF has no CHANGELOG (a note on stderr: the host reports such a PR
 conflicting and the conflict machinery owns it). `--warn-on-error` (valid only
-with `--merge-into`) turns a git/config error into a stderr warning and exit 0
+with `--merge-into`) turns a git/config error, including a git that cannot be
+launched, into a stderr warning and exit 0
 with nothing on stdout (a `::warning::` annotation under GitHub Actions); it
 never hides a violation. The human summary's last line names the repair,
 `cw worktree changelog-sync --base <REF without origin/>`.
@@ -184,13 +185,18 @@ def _git_env() -> dict[str, str]:
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", "-C", str(cwd), *args],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=_git_env(),
-    )
+    """Run git; a launch failure (no git, a bad cwd) is a FreezeCheckError (#3322)."""
+    try:
+        return subprocess.run(
+            ["git", "-C", str(cwd), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=_git_env(),
+        )
+    except OSError as exc:
+        message = f"could not run git: {exc}"
+        raise FreezeCheckError(message) from exc
 
 
 def _repo_root(changelog: Path) -> Path:
