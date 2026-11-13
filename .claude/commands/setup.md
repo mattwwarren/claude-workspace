@@ -96,6 +96,7 @@ Present discovery results and ask focused questions to fill gaps. Only ask what 
   - Show the proposed commands
 - "Want to use these, or adjust?"
 - If nothing found: "What commands verify your code is correct? (lint, typecheck, test)"
+- If the project's CLAUDE.md names a required post-checkout step (e.g. Godot's `--import` pass), offer `tests.prepare` (#2179): "This project needs `<command>` after checkout before tests run. Add it as `tests.prepare`?"
 
 **PR creation:**
 - If `gh` found: "Use `gh pr create` for PRs?" (default yes)
@@ -162,6 +163,10 @@ pr:
   auto_merge: true                    # run `gh pr merge --auto --squash` after creation
   draft_default: false                # create PRs as draft
   title_format: "{ticket-id}: {summary}"  # tokens: {ticket-id}, {summary}, {type}, {branch}
+
+# Optional (#2179): a post-checkout step the impl gate runs before the test command.
+# tests:
+#   prepare: <shell command>          # e.g. godot --headless --path game --import
 
 plan_exit:
   mode: <suggest|ask|auto>
