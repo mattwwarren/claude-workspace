@@ -84,6 +84,16 @@ def _by_name(entries: Iterable[Any]) -> dict[str, Any]:
     return {e.name: e for e in entries}
 
 
+def _table_rows(lines: list[str], title: str) -> list[str]:
+    """Bucket names under ``title``: indented rows up to the next unindented line."""
+    rows: list[str] = []
+    for line in lines[lines.index(title) + 1 :]:
+        if not line.startswith("  "):
+            break
+        rows.append(line.split()[0])
+    return rows
+
+
 def _report(tree: SimpleNamespace, content: str | None = _LISTING) -> Any:
     demand = _mod.enumerate_demand(tree.repo, tree.home)
     raw = None if content is None else _mod.RawListing(content, 6)
@@ -433,9 +443,17 @@ class TestMain:
 
         lines = capsys.readouterr().out.splitlines()
         assert f"delivered chars: {len(_LISTING)}" in lines
-        joined = "\n".join(lines)
-        for bucket in ("repo-skill", "repo-command", "global-claude", "bundled/other"):
-            assert bucket in joined
+        # Exact table rows, not a substring: "repo-command" is in the demand
+        # table only, because rcmd is never delivered (#3417).
+        delivered = _table_rows(lines, "delivered by source")
+        assert set(delivered) == {
+            "repo-skill",
+            "global-claude",
+            "ns:slack",
+            "bundled/other",
+        }
+        assert "repo-command" not in delivered
+        assert "repo-command" in _table_rows(lines, "demand by source")
 
     def test_debug_log_budget_line(
         self,
@@ -518,3 +536,159 @@ class TestMain:
         data = json.loads(capsys.readouterr().out)
         assert set(data) == _JSON_KEYS
         assert data["delivered_chars"] == len(_LISTING)
+
+
+# --- #3414: dangling symlinks, non-files and unreadable demand entries ---------
+
+
+def test_enumerate_demand_skips_dangling_symlinks_and_non_files(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    claude = repo / ".claude"
+    write_skill(claude, "good", "ok")
+    broken_skill = claude / "skills" / "broken"
+    broken_skill.mkdir(parents=True)
+    (broken_skill / "SKILL.md").symlink_to(tmp_path / "missing-target")
+    (claude / "commands").mkdir(parents=True)
+    (claude / "commands" / "broken.md").symlink_to(tmp_path / "missing-cmd")
+    (claude / "commands" / "odd.md").mkdir()
+
+    demand = _mod.enumerate_demand(repo, tmp_path / "home")
+
+    assert {entry.name for entry in demand} == {"good"}
+
+
+def test_enumerate_demand_unreadable_file_exits_with_name_only(
+    tree: SimpleNamespace,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    denied = OSError("denied")
+
+    def _denied(path: Path) -> str:
+        raise denied
+
+    monkeypatch.setattr(_mod, "_read", _denied)
+
+    with pytest.raises(SystemExit) as exc:
+        _mod.enumerate_demand(tree.repo, tree.home)
+
+    message = str(exc.value)
+    assert "cannot read" in message
+    assert "rskill-a" in message
+    assert str(tmp_path) not in message
+
+
+# --- #3415: edge inputs to parsing, summary and share arithmetic --------------
+
+
+def test_parse_listing_empty_content_has_no_entries() -> None:
+    assert _mod.parse_listing("") == ()
+
+
+@pytest.mark.parametrize("content", ["preamble only\nstill nothing", "- \n- "])
+def test_parse_listing_no_parseable_entries(content: str) -> None:
+    assert _mod.parse_listing(content) == ()
+
+
+def test_parse_listing_trailing_newline_invariant() -> None:
+    content = "- a: x\n- b\n"
+    entries = _mod.parse_listing(content)
+    assert [e.name for e in entries] == ["a", "b"]
+    # Pins the invariant only, not how the trailing newline is attributed.
+    assert sum(e.chars for e in entries) + (len(entries) - 1) == len(content)
+
+
+def test_summarize_empty_listing(tree: SimpleNamespace) -> None:
+    demand = _mod.enumerate_demand(tree.repo, tree.home)
+    report = _mod.summarize(
+        demand,
+        _mod.RawListing("", 0),
+        _mod.known_names(demand),
+        None,
+        _mod.gap_components(tree.home, 0),
+    )
+    assert report.delivered_chars == 0
+    assert report.delivered_entries == 0
+    assert report.by_source == {}
+    assert "delivered by source" in _mod.render_text(report)
+    json.loads(_mod.render_json(report))
+
+
+def test_with_shares_zero_total_is_zero_pct() -> None:
+    # Unreachable from real input (every entry has chars >= 2), so the private
+    # helper is called directly to reach the ``if total else 0.0`` branch.
+    assert _mod._stats_by_bucket([("x", 0, True)])["x"].share_pct == 0.0
+
+
+# --- #3416: error and defensive branches ---------------------------------------
+
+
+@pytest.mark.parametrize("kind", ["missing", "directory"])
+def test_load_listing_unreadable_transcript_exits(tmp_path: Path, kind: str) -> None:
+    path = tmp_path / "transcript.jsonl"
+    if kind == "directory":
+        path.mkdir()
+
+    with pytest.raises(SystemExit) as exc:
+        _mod.load_listing(path)
+
+    message = str(exc.value)
+    assert "cannot read transcript transcript.jsonl" in message
+    assert str(tmp_path) not in message
+
+
+def test_main_missing_debug_log_exits(tree: SimpleNamespace, tmp_path: Path) -> None:
+    transcript = tmp_path / "t.jsonl"
+    make_transcript(transcript, [skill_listing_record(_LISTING, 6)])
+    missing = tmp_path / "nope.log"
+    argv = [
+        "--repo",
+        str(tree.repo),
+        "--home",
+        str(tree.home),
+        "--transcript",
+        str(transcript),
+        "--debug-log",
+        str(missing),
+    ]
+
+    with pytest.raises(SystemExit) as exc:
+        _mod.main(argv)
+
+    message = str(exc.value)
+    assert "cannot read debug log nope.log" in message
+    assert str(tmp_path) not in message
+
+
+def test_load_listing_skips_non_object_and_malformed_lines(tmp_path: Path) -> None:
+    path = tmp_path / "t.jsonl"
+    non_str_content = skill_listing_record("x", 1)
+    non_str_content["attachment"]["content"] = 123
+    lines = [
+        "{not json",
+        "[1, 2]",
+        "42",
+        '"s"',
+        "null",
+        json.dumps({"attachment": ["not", "a", "dict"]}),
+        json.dumps(non_str_content),
+        json.dumps(skill_listing_record("- a: x", 1)),
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    assert _mod.load_listing(path) == _mod.RawListing("- a: x", 1)
+
+
+@pytest.mark.parametrize("count", ["7", None, 1.5, "MISSING"])
+def test_load_listing_skill_count_fallback(tmp_path: Path, count: object) -> None:
+    record = skill_listing_record("- a", 1)
+    if count == "MISSING":
+        del record["attachment"]["skillCount"]
+    else:
+        record["attachment"]["skillCount"] = count
+    path = tmp_path / "t.jsonl"
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    assert _mod.load_listing(path) == _mod.RawListing("- a", 0)
