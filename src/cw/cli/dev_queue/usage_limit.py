@@ -4,9 +4,11 @@ Order (ADR-0019): unlocked reads build the plan; nothing to clear or
 ``--dry-run`` stops there. Then the operator login is resolved and, unless
 ``--force``, the account is probed, both with no lock held. Only then does
 :func:`cw.usage_limit_window.apply_usage_limit_clear` take its two STATE
-locks in sequence, after recording the audit event first (a failed event write
-refuses the clear and changes nothing). A probe ERROR fails closed: the
-clear refuses and names ``--force``; the probe runs once, with no retry.
+locks in sequence (window and clear mark, then row release), and records the
+audit event after both are released. A failed event write after the state
+change does not roll the clear back: the command prints what was cleared and
+exits non-zero. A probe ERROR fails closed: the clear refuses and names
+``--force``; the probe runs once, with no retry.
 """
 
 from __future__ import annotations

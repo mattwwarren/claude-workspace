@@ -4716,16 +4716,23 @@ client's window after the account limit was reset by hand.
   its next tick, and its post-tick arm never re-persists the stale copy.
 - It records one `dispatch.usage_limit_cleared` with `trigger: "operator"`
   (see `docs/events.md`); the loop does not emit its own lapse event for it.
-- The audit event is written first. If it cannot be written, the command
-  refuses with `refusing to clear <client>: the dispatch.usage_limit_cleared
-  audit event could not be recorded (<error>); nothing was cleared`, exits
-  non-zero, and changes no state. Fix the event log and re-run the clear.
-- If the window clear fails after the event was written, the command exits
-  non-zero with `could not clear the usage-limit window for <client>: ...;
-  the dispatch.usage_limit_cleared audit event was already recorded and
-  nothing was cleared`. The event stays on record; re-run the clear.
-- If the row release fails after the window was cleared, the event is already
-  recorded and a re-run releases the remaining rows.
+- The state changes come first: the window pop and clear mark, then the row
+  release. The audit event is recorded after both, so its payload reports what
+  the clear actually did. If the window clear itself fails, no event is
+  written and the error propagates; nothing was cleared.
+- If the audit event cannot be written after the state has changed, the
+  clear is NOT rolled back. The command prints the success summary
+  (`cleared usage-limit window for <client> (was until <iso>)`, plus the rows
+  released), then exits non-zero with `usage-limit window for <client> was
+  cleared (was until <iso>; released <n> row(s)) but the
+  dispatch.usage_limit_cleared audit event could not be recorded: <error>`.
+  The window stays cleared, so a re-run finds nothing to clear and exits 0
+  without recording a second event. That audit line is lost; the stdout
+  summary and the non-zero exit are the record. Fix the event log before the
+  next clear.
+- If the row release fails after the window was cleared, the command still
+  records the event (its `rows_released` lists only the rows actually
+  released) and then exits non-zero. A re-run releases the remaining rows.
 
 A clear can be overridden by a detection that really happened. Each of these
 re-arms the window after a clear; the remedy is to re-run the clear:
