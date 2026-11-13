@@ -115,6 +115,36 @@ _CARRIED_ROUTES = ("IMPACT", "RESOLUTION")
 _ROUTES = ("VERIFIED", "IMPACT", "RESOLUTION")
 _REASON_ROUTE_INVALID = "route-missing-or-invalid"
 _REASON_DUPLICATE_KEY = "duplicate-key"
+_REASON_OBSERVED_AT_MISSING = "observed-at-missing"
+_REASON_OBSERVED_AT_MALFORMED = "observed-at-malformed"
+_REASON_OBSERVED_BEFORE_WINDOW = "observed-before-window"
+_REASON_OBSERVED_IN_FUTURE = "observed-in-future"
+_REASON_KIND_INVALID = "kind-missing-or-invalid"
+_REASON_TOOL_CALL_MISSING = "tool-call-missing"
+_REASON_TOOL_CALL_MALFORMED = "tool-call-malformed"
+_REASON_OBSERVED_ATTEMPT_INVALID = "observed-attempt-invalid"
+_REASON_CONTEXT_UNAVAILABLE = "context-unavailable"
+_REASON_LEGACY_NO_METADATA = "legacy-no-metadata"
+_REASON_RELABELED_WITHOUT_FRESH_CHECK = "relabeled-without-fresh-check"
+_REASON_UNPARSEABLE_LEGACY = "unparseable-legacy"
+_REASON_CODES = frozenset(
+    {
+        _REASON_ROUTE_INVALID,
+        _REASON_DUPLICATE_KEY,
+        _REASON_OBSERVED_AT_MISSING,
+        _REASON_OBSERVED_AT_MALFORMED,
+        _REASON_OBSERVED_BEFORE_WINDOW,
+        _REASON_OBSERVED_IN_FUTURE,
+        _REASON_KIND_INVALID,
+        _REASON_TOOL_CALL_MISSING,
+        _REASON_TOOL_CALL_MALFORMED,
+        _REASON_OBSERVED_ATTEMPT_INVALID,
+        _REASON_CONTEXT_UNAVAILABLE,
+        _REASON_LEGACY_NO_METADATA,
+        _REASON_RELABELED_WITHOUT_FRESH_CHECK,
+        _REASON_UNPARSEABLE_LEGACY,
+    }
+)
 
 VERDICT_BOUND = "BOUND"
 VERDICT_UNBOUND = "UNBOUND"
@@ -209,22 +239,22 @@ def _observed_at_reasons(
     value: str | None, window_start: datetime | None, now: datetime
 ) -> list[str]:
     if not value:
-        return ["observed-at-missing"]
+        return [_REASON_OBSERVED_AT_MISSING]
     observed = _parse_observed_at(value)
     if observed is None:
-        return ["observed-at-malformed"]
+        return [_REASON_OBSERVED_AT_MALFORMED]
     if observed > now + timedelta(seconds=_CLOCK_SKEW_SECONDS):
-        return ["observed-in-future"]
+        return [_REASON_OBSERVED_IN_FUTURE]
     if window_start is not None and observed < window_start:
-        return ["observed-before-window"]
+        return [_REASON_OBSERVED_BEFORE_WINDOW]
     return []
 
 
 def _tool_call_reasons(value: str | None) -> list[str]:
     if not value:
-        return ["tool-call-missing"]
+        return [_REASON_TOOL_CALL_MISSING]
     if not _TOOL_CALL_RE.fullmatch(value):
-        return ["tool-call-malformed"]
+        return [_REASON_TOOL_CALL_MALFORMED]
     return []
 
 
@@ -237,12 +267,12 @@ def _freshness_reasons(
     observed_at, kind, tool_call, observed_attempt = stamp
     reasons = _observed_at_reasons(observed_at, window_start, now)
     if kind not in _KINDS:
-        reasons.append("kind-missing-or-invalid")
+        reasons.append(_REASON_KIND_INVALID)
     reasons.extend(_tool_call_reasons(tool_call))
     if observed_attempt is not None and not _ATTEMPT_RE.fullmatch(observed_attempt):
-        reasons.append("observed-attempt-invalid")
+        reasons.append(_REASON_OBSERVED_ATTEMPT_INVALID)
     if window_start is None:
-        reasons.append("context-unavailable")
+        reasons.append(_REASON_CONTEXT_UNAVAILABLE)
     return reasons
 
 
@@ -451,16 +481,16 @@ def _verified_entry_verdict(
     entry: _Entry, window_start: datetime | None, now: datetime
 ) -> tuple[str, list[str]]:
     if entry.form != "b" or not entry.has_new_form_keys():
-        reasons = ["legacy-no-metadata"]
+        reasons = [_REASON_LEGACY_NO_METADATA]
         if window_start is None:
-            reasons.append("context-unavailable")
+            reasons.append(_REASON_CONTEXT_UNAVAILABLE)
         return VERDICT_STALE, reasons
     stamp = (entry.observed_at, entry.kind, entry.tool_call, entry.observed_attempt)
     reasons = [] if entry.route in _ROUTES else [_REASON_ROUTE_INVALID]
     reasons.extend(_freshness_reasons(stamp, window_start, now))
     if not reasons:
         return VERDICT_FRESH, []
-    if reasons == ["observed-before-window"] and entry.kind == "STATIC":
+    if reasons == [_REASON_OBSERVED_BEFORE_WINDOW] and entry.kind == "STATIC":
         return VERDICT_CARRIED, []
     return VERDICT_STALE, reasons
 
@@ -469,14 +499,14 @@ def _entry_verdict(
     entry: _Entry, window_start: datetime | None, now: datetime
 ) -> tuple[str, list[str]]:
     if entry.form == "unparseable":
-        return VERDICT_CARRIED, ["unparseable-legacy"]
+        return VERDICT_CARRIED, [_REASON_UNPARSEABLE_LEGACY]
     if entry.structural_reasons:
         return VERDICT_STALE, list(entry.structural_reasons)
     if _entry_route(entry) in _CARRIED_ROUTES:
         return VERDICT_CARRIED, []
     verdict, reasons = _verified_entry_verdict(entry, window_start, now)
     if verdict != VERDICT_FRESH and _is_relabeled(entry.text):
-        return VERDICT_STALE, [*reasons, "relabeled-without-fresh-check"]
+        return VERDICT_STALE, [*reasons, _REASON_RELABELED_WITHOUT_FRESH_CHECK]
     return verdict, reasons
 
 
