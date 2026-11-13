@@ -2018,7 +2018,8 @@ sessions_auto_prune_interval_minutes: 60
 # files and symlinks older than retention_days (by the newer of mtime/ctime)
 # that no live process holds open or as cwd (Linux /proc; age-only elsewhere).
 # Runs from the dispatch loop on its own interval. Not a reap_policy act.
-# `cw doctor`'s "worker-tmp-fallback" check reports the mount and the last run.
+# `cw doctor`'s "worker-tmp-fallback" check reports the mount, the last run and
+# the /proc guard state (warns only when retention is enabled and the run failed).
 worker_tmp_fallback_retention_enabled: true
 worker_tmp_fallback_retention_days: 7
 worker_tmp_fallback_retention_interval_minutes: 60

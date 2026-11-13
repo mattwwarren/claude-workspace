@@ -4537,7 +4537,12 @@ device are skipped. A run is capped at 5000 removals.
 
 - *Ownership:* on Linux, `/proc/<pid>/cwd` and `/proc/<pid>/fd/*` protect the
   path and its ancestors up to the root. Without `/proc` the sweep is age-only,
-  and the sidecar records `proc_guard: false`. Residual risk: an unheld file
+  and the sidecar records `proc_guard: false`. A `/proc/<pid>` entry that cannot
+  be read (any error other than the process vanishing) protects nothing and is
+  counted, once per pid, as `unreadable_procs` in the sidecar; same-uid cw
+  workers are readable, so foreign-uid entries are the expected count. An empty
+  or missing root skips the scan but still records whether `/proc` is readable.
+  Residual risk: an unheld file
   re-read by path after more than the retention window of idleness. A bound
   unix-socket file is never removed: the `/proc` fd guard cannot see a socket as
   a path, so the sweep keeps it regardless of age.
@@ -4546,8 +4551,11 @@ device are skipped. A run is capped at 5000 removals.
   WARN line and the skip and bypass events name the mount (`disk_gb_mount`,
   `disk_inode_mount`).
 - *Doctor:* `cw doctor` check `worker-tmp-fallback` reports the mount's free GB
-  and inodes, a bounded tree measurement, and the last run. It is `ok=false` on a
-  shortfall, and warns only when the last retention run failed.
+  and inodes, a bounded tree measurement, and the last run, including the guard
+  state (`/proc guard on`, `/proc guard on, N processes unreadable` or `age-only
+  (no /proc guard)`). It is `ok=false` on a shortfall, and warns only when
+  retention is enabled and the last retention run failed. The guard state never
+  warns.
 - Disable with `worker_tmp_fallback_retention_enabled: false`. Retention is not
   gated by `reap_policy`.
 
