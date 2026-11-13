@@ -1143,8 +1143,10 @@ class TestReleaseCutException:
         assert (
             "| `cw worktree changelog-sync --base <b>` | After a release cut, merge"
             " `origin/<b>` into HEAD and re-home the branch's CHANGELOG bullets under"
-            " `[Unreleased]`; JSON plus exit 0 (clean or moved) / 1 (conflict or"
-            " refused: read `state`) / 3 (unavailable); never fetches |"
+            " `[Unreleased]`; JSON plus exit 0 (clean or moved) / 1 (conflict, or"
+            " refused for a rebuild refusal, a branch that already contains"
+            " `origin/<b>`, an in-progress merge or a dirty tree: read `state`) / 3"
+            " (unavailable); never fetches |"
         ) in readme
         assert readme.index("`cw worktree merge-probe") < readme.index(
             "`cw worktree changelog-sync --base <b>`"

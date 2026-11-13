@@ -985,6 +985,29 @@ class TestMcpExtraMsg:
         assert "install.sh" in MCP_EXTRA_MSG
 
 
+class TestNoClientsMsg:
+    """Tests for NO_CLIENTS_MSG (the single no-clients remediation message)."""
+
+    def test_text_is_pinned(self) -> None:
+        from cw._util import NO_CLIENTS_MSG
+
+        assert (
+            NO_CLIENTS_MSG
+            == "No clients configured. Add one to ~/.config/cw/clients.yaml."
+        )
+
+    def test_single_definition_in_src(self) -> None:
+        """A re-inlined copy of the literal anywhere else in src/cw fails here."""
+        src_root = Path(__file__).resolve().parent.parent / "src" / "cw"
+        needle = "No clients configured. Add one"
+        holders = sorted(
+            path.relative_to(src_root).as_posix()
+            for path in src_root.rglob("*.py")
+            if needle in path.read_text(encoding="utf-8")
+        )
+        assert holders == ["_util.py"]
+
+
 class TestFormatCompactAge:
     """Tests for format_compact_age (shared Nm/Nh/Nd age formatter)."""
 

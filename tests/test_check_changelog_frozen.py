@@ -47,6 +47,7 @@ from tests._changelog_cut_helpers import (
     squash_onto_origin_main,
 )
 from tests._shared.git_repos import git_in, list_tags, write_pyproject_override
+from tests._tool_fakes import AbsentToolCli
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = _REPO_ROOT / ".claude" / "scripts" / "check_changelog_frozen.py"
@@ -1100,3 +1101,74 @@ def test_simulated_cut_squash_turns_main_red_without_sync_green_with_sync(
     assert _section(squashed, "## [1.1.0]", "## [1.0.0]") == _section(
         released, "## [1.1.0]", "## [1.0.0]"
     )
+
+
+# ---------------------------------------------------------------------------
+# #3322: a git that cannot be launched is a FreezeCheckError, not a traceback
+# ---------------------------------------------------------------------------
+
+_GIT_LAUNCH_MSG = "could not run git"
+
+
+def test_git_launch_oserror_becomes_freeze_check_error(
+    mod: types.ModuleType,
+    released_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    AbsentToolCli({"git"}).install(monkeypatch)
+
+    with pytest.raises(mod.FreezeCheckError, match=_GIT_LAUNCH_MSG) as exc:
+        mod._git(released_repo, "status")
+
+    assert isinstance(exc.value.__cause__, FileNotFoundError)
+
+
+def test_warn_on_error_git_missing_passes_with_warning(
+    mod: types.ModuleType,
+    straddle: ReleaseMovedRepo,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    AbsentToolCli({"git"}).install(monkeypatch)
+
+    code, payload, err = _merge_run(mod, straddle.clone, capsys, "--warn-on-error")
+
+    assert code == 0
+    assert payload == {}
+    assert "WARNING" in err
+    assert _GIT_LAUNCH_MSG in err
+    assert "Traceback" not in err
+
+
+def test_git_missing_without_warn_on_error_fails_cleanly(
+    mod: types.ModuleType,
+    straddle: ReleaseMovedRepo,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    AbsentToolCli({"git"}).install(monkeypatch)
+
+    code, payload, err = _merge_run(mod, straddle.clone, capsys)
+
+    assert code == 1
+    assert payload == {}
+    assert _GIT_LAUNCH_MSG in err
+    assert "Traceback" not in err
+
+
+def test_git_missing_in_the_tag_mode_fails_cleanly(
+    mod: types.ModuleType,
+    released_repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    AbsentToolCli({"git"}).install(monkeypatch)
+
+    code = mod.main(["--changelog", str(released_repo / "CHANGELOG.md")])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert captured.out == ""
+    assert _GIT_LAUNCH_MSG in captured.err
+    assert "Traceback" not in captured.err
