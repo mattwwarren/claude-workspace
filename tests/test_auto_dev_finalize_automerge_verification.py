@@ -646,5 +646,15 @@ def test_prep_pr_step9_documents_monitor_downgrade() -> None:
         for line in content.splitlines()
         if line.startswith("Then re-run finalize with `--require-monitor`")
     )
+    lead_in = next(
+        line
+        for line in content.splitlines()
+        if line.startswith("**If monitor registration is missing**")
+    )
     assert "pr.auto_merge: false" in monitor_bullet
     assert "pr.auto_merge: false" in rerun_line
+    # The first Step 9 verify runs without --require-monitor, so an unregistered
+    # monitor shows ``○`` on every repo: the skip must key on the config, not
+    # the optional marker.
+    assert "pr.auto_merge: false" in lead_in
+    assert "shows as optional" not in lead_in

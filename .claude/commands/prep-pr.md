@@ -476,7 +476,7 @@ Output is the canonical Ship Summary (markdown). For programmatic callers (e.g. 
   `details:` the verbatim failed checks). Never emit a Ship Summary that claims
   success when `verify` failed.
 
-**If monitor registration is missing** (skip this step when `monitor-registered` shows as optional `○`: `pr.auto_merge: false` is the repo's deliberate state, as with the `automerge-enabled` exception above), run it now:
+**If monitor registration is missing** (skip this step only when `.claude/project-config.yaml` sets `pr.auto_merge: false`, the repo's deliberate state, as with the `automerge-enabled` exception above; a `○` on this first run, which does not pass `--require-monitor`, does not mean the monitor was downgraded), run it now:
 ```bash
 PR_NUMBER=$(gh pr view --json number --jq .number)
 REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
