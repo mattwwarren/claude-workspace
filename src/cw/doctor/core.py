@@ -72,6 +72,7 @@ from cw.doctor.sessions_auto_prune import _check_sessions_auto_prune
 from cw.doctor.skills_drift import _check_skills_commands_drift
 from cw.doctor.spared_workers import _check_spared_unrecorded_workers
 from cw.doctor.tracker_mcp import _check_tracker_mcp
+from cw.doctor.usage_limit import _check_usage_limit_windows
 from cw.doctor.user_level_hooks import _check_user_level_stop_hook
 from cw.doctor.versions import (
     _check_bypass_disclaimer,
@@ -424,7 +425,7 @@ def run_doctor(
     report.checks.extend(_client_config_checks(_clients))
     state_check, link_state = _check_state_file()
     report.checks.append(state_check)
-    report.checks.append(_check_dev_queue())
+    report.checks.extend([_check_dev_queue(), *_check_usage_limit_windows()])
     # #1201 anomaly layer: review-recipe liveness + attention-state census.
     report.checks.extend(_check_review_recipe_liveness(_clients))
     report.checks.append(_check_attention_state_census())
