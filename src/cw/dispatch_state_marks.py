@@ -40,22 +40,6 @@ if TYPE_CHECKING:
 _EXPECTED_UNSET = object()
 
 
-def _load_dispatch_state_for_clear() -> dict[str, object]:
-    """Read the state strictly; a clear must not turn a read failure into data loss."""
-    path = dispatch_state.DISPATCH_STATE_FILE
-    if not path.exists():
-        return {}
-    try:
-        raw = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
-        msg = f"could not read dispatch state: {exc}"
-        raise OSError(msg) from exc
-    if not isinstance(raw, dict):
-        msg = "dispatch state must contain a JSON object"
-        raise OSError(msg)
-    return raw
-
-
 def load_usage_limit_clear_marks() -> dict[str, datetime]:
     """Load the per-client operator clear marks, unlocked like the other loaders.
 
@@ -84,7 +68,7 @@ def clear_usage_limited_until(
     refuse_real_state_write(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with dispatch_state_lock():
-        payload = _load_dispatch_state_for_clear()
+        payload = _load_dispatch_state_raw(strict=True)
         windows = _usage_limited_until_from_payload(payload)
         old_until = windows.pop(client, None)
         if expected_until is not _EXPECTED_UNSET and old_until != expected_until:

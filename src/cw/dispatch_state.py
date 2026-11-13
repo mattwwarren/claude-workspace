@@ -201,22 +201,32 @@ def dispatch_state_lock() -> Iterator[None]:
             fd.close()
 
 
-def _load_dispatch_state_raw() -> dict[str, Any]:
-    """Read DISPATCH_STATE_FILE as a dict, or ``{}`` if absent/corrupt/unreadable.
+def _load_dispatch_state_raw(*, strict: bool = False) -> dict[str, Any]:
+    """Read DISPATCH_STATE_FILE as a dict, fail-open unless *strict* is true.
 
     Shared read-side of the read-merge-write save helpers
     (``merge_and_save_usage_limited_until`` / ``save_availability_probe_cache``)
     so that neither clobbers the other's key in the shared sidecar (#1157). A corrupt
-    or non-object existing file is treated as empty rather than raising.
+    or non-object existing file is treated as empty rather than raising unless
+    *strict* is true. The strict mode is for destructive state mutations that
+    must not turn an unreadable file into an empty replacement.
     """
     path = DISPATCH_STATE_FILE
     if not path.exists():
         return {}
     try:
         raw = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+    except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
+        if strict:
+            msg = f"could not read dispatch state: {exc}"
+            raise OSError(msg) from exc
         return {}
-    return raw if isinstance(raw, dict) else {}
+    if isinstance(raw, dict):
+        return raw
+    if strict:
+        msg = "dispatch state must contain a JSON object"
+        raise OSError(msg)
+    return {}
 
 
 def _parse_future_instant(value: object, now: datetime) -> datetime | None:
