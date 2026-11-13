@@ -17,8 +17,10 @@ from cw.models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Mapping
+    from datetime import datetime
 
+    from cw.dispatch.tick import DispatchTickResult
     from tests._changelog_repair_helpers import FakeArmScript, FakeGhHead, LogEntry
 
 
@@ -235,3 +237,90 @@ def review_monitor_state_dir(
     central = helpers.isolate_state(monkeypatch, tmp_path)
     yield central
     helpers.get("_get_our_username").cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Usage-limit window and clear helpers (#3547)
+# ---------------------------------------------------------------------------
+
+
+def advancing_tick(
+    real_tick: Callable[..., DispatchTickResult],
+    captured: list[dict[str, datetime]],
+    *,
+    after: Mapping[int, Callable[[], None]],
+    stop_on_call: int = 3,
+) -> Callable[..., DispatchTickResult]:
+    """A ``dispatch_tick`` stand-in for multi-tick ``run_dispatch_loop`` tests.
+
+    Each call records the ``usage_limited_until`` it was handed into
+    *captured*, raises ``KeyboardInterrupt`` on call *stop_on_call*, and
+    otherwise runs *real_tick* and then ``after[n]()`` (1-based) when present,
+    so a hook lands inside the tick, before the loop's post-tick arm. The
+    three older local copies in ``tests/test_dispatch.py`` stay as they are.
+    """
+    calls = 0
+
+    def _tick(*args: object, **kwargs: object) -> DispatchTickResult:
+        nonlocal calls
+        calls += 1
+        windows = kwargs.get("usage_limited_until")
+        if not isinstance(windows, dict):
+            msg = f"dispatch_tick was called without a window mapping: {windows!r}"
+            raise TypeError(msg)
+        captured.append(dict(windows))
+        if calls == stop_on_call:
+            raise KeyboardInterrupt
+        result = real_tick(*args, **kwargs)
+        hook = after.get(calls)
+        if hook is not None:
+            hook()
+        return result
+
+    return _tick
+
+
+def seed_usage_limit_window(client: str, until: datetime) -> None:
+    """Persist one client's usage-limit window through the production writer."""
+    from cw.dispatch_state import merge_and_save_usage_limited_until
+
+    merge_and_save_usage_limited_until({client: until})
+
+
+def seed_stamped_row(
+    client: str, ticket_id: str, *, next_eligible_at: datetime, **overrides: object
+) -> None:
+    """Enqueue one PENDING row carrying a ``next_eligible_at`` stamp."""
+    from cw.dev_queue import add_ticket
+    from tests._shared.session_seeding import _make_ticket_task
+
+    task = _make_ticket_task(
+        ticket_id=ticket_id,
+        client=client,
+        next_eligible_at=next_eligible_at,
+        **overrides,
+    )
+    if not add_ticket(task):
+        msg = f"seed_stamped_row: {client}/{ticket_id} was not inserted"
+        raise AssertionError(msg)
+
+
+def write_client_with_operator(
+    workspace_path: Path,
+    *,
+    name: str = "test-client",
+    login: str = "operator-login",
+    worker_model: str | None = None,
+) -> None:
+    """Write one client whose ``operator_github_login`` is set, so no gh runs."""
+    from tests._clients_yaml import ClientSpec, write_clients_yaml
+
+    write_clients_yaml(
+        ClientSpec(
+            name,
+            workspace_path,
+            worker_model=worker_model,
+            extra={"operator_github_login": login},
+        ),
+        ensure_workspaces=True,
+    )

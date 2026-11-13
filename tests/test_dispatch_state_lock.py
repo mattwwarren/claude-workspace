@@ -651,3 +651,88 @@ class TestOpenPrProbeEntriesBatch:
 
         cache = load_open_pr_probe_cache()
         assert set(cache) == {"acme/single", "acme/batch"}
+
+
+class TestMergeAndSaveClearMarkFilter:
+    """``merge_and_save_usage_limited_until``'s ``fresh`` / ``clears_seen`` (#3547)."""
+
+    def test_carried_entry_with_unseen_mark_is_not_persisted(
+        self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from cw.dispatch_state_marks import clear_usage_limited_until
+
+        now = datetime.now(UTC)
+        until = now + timedelta(hours=1)
+        clear_usage_limited_until("acme", cleared_at=now)
+
+        with caplog.at_level("INFO", logger="cw.dispatch_state"):
+            merged = merge_and_save_usage_limited_until(
+                {"acme": until, "beta": until}, clears_seen={}
+            )
+
+        assert merged == {"beta": until}
+        assert load_usage_limited_until() == {"beta": until}
+        assert any(
+            "dispatch_state: dropped carried usage_limited_until for" in r.getMessage()
+            and "acme" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_fresh_entry_for_an_unseen_mark_client_is_persisted(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from cw.dispatch_state_marks import clear_usage_limited_until
+
+        now = datetime.now(UTC)
+        stale = now + timedelta(hours=3)
+        fresh = now + timedelta(hours=1)
+        clear_usage_limited_until("acme", cleared_at=now)
+
+        merged = merge_and_save_usage_limited_until(
+            {"acme": stale}, fresh={"acme": fresh}, clears_seen={}
+        )
+
+        assert merged == {"acme": fresh}
+        assert load_usage_limited_until() == {"acme": fresh}
+
+    def test_seen_mark_and_absent_mark_are_retained(self, tmp_config_dir: Path) -> None:
+        from cw.dispatch_state_marks import clear_usage_limited_until
+
+        now = datetime.now(UTC)
+        until = now + timedelta(hours=1)
+        clear_usage_limited_until("acme", cleared_at=now)
+
+        merged = merge_and_save_usage_limited_until(
+            {"acme": until, "beta": until}, clears_seen={"acme": now, "beta": now}
+        )
+
+        assert merged == {"acme": until, "beta": until}
+        assert load_usage_limited_until() == {"acme": until, "beta": until}
+
+    def test_os_error_fallback_returns_windows_merged_with_fresh(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        now = datetime.now(UTC)
+        until = now + timedelta(hours=1)
+
+        def _boom(_path: Path, _text: str) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.dispatch_state.atomic_write_text", _boom)
+
+        merged = merge_and_save_usage_limited_until(
+            {"acme": until}, fresh={"beta": until}, clears_seen={}
+        )
+
+        assert merged == {"acme": until, "beta": until}
+
+    def test_defaults_keep_todays_behaviour(self, tmp_config_dir: Path) -> None:
+        from cw.dispatch_state_marks import clear_usage_limited_until
+
+        now = datetime.now(UTC)
+        until = now + timedelta(hours=1)
+        clear_usage_limited_until("acme", cleared_at=now)
+
+        assert merge_and_save_usage_limited_until({"acme": until}) == {"acme": until}
+        assert load_usage_limited_until() == {"acme": until}
