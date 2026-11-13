@@ -358,6 +358,7 @@ def test_scan_reason_observed_at_empty_is_missing() -> None:
         "2026-11-13T04:55:00",
         "2026-11-13T04:55:00+00:00",
         "2026-11-13T04:55:00.123Z",
+        "2026-11-13T4:55:00Z",
         "2026-13-45T04:55:00Z",
         "yesterday",
     ],
@@ -502,6 +503,11 @@ def test_draft_split_entries_collects_continuations() -> None:
         "  Plan depends on this for: z",
     ]
     assert entries[1] == ["- second one"]
+
+
+def test_draft_split_entries_trims_trailing_blank_lines() -> None:
+    text = "## Self-Verified Premises\n\n- one\n  more\n\n\n- two\n\n"
+    assert _mod._split_entries(text) == [["- one", "  more"], ["- two"]]
 
 
 def test_draft_split_entries_no_heading() -> None:

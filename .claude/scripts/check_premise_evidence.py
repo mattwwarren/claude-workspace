@@ -148,11 +148,8 @@ def _utcnow() -> datetime:
 
 def _parse_context_timestamp(raw: str) -> datetime | None:
     """Lenient ``stage_started_at`` parse: naive, microseconds, ``+00:00``, ``Z``."""
-    text = raw.strip()
-    if text.endswith("Z"):
-        text = f"{text[:-1]}+00:00"
     try:
-        parsed = datetime.fromisoformat(text)
+        parsed = datetime.fromisoformat(raw.strip())
     except ValueError:
         return None
     if parsed.tzinfo is None:
@@ -370,7 +367,7 @@ def _parse_form_b(text: str) -> _Entry | None:
 
 def _parse_form_c(text: str) -> _Entry | None:
     claim, sep, rest = text.partition(_SEP)
-    if not sep or not claim.strip():
+    if not sep:
         return None
     remainder = rest.strip()
     return _Entry(
