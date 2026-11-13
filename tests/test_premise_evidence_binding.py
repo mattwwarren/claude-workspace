@@ -261,9 +261,11 @@ def test_pre_pass_lists_stale_entries_for_reverification() -> None:
     assert RE_VERIFY_HEADING in para
     assert "removed from the plan copy handed to the reviewer" in para
     assert "`context-unavailable`" in para
-    assert "also fails open" in para
-    assert "preserve the authoritative entries" in para
-    assert "skip stale-premise reconciliation" in para
+    assert "returns `context-unavailable`" in para
+    assert (
+        "route non-Impact/non-Resolution entries through re-verification and "
+        "reconciliation" in para
+    )
 
 
 def test_pre_pass_states_working_plan_rule_is_not_violated() -> None:
@@ -437,7 +439,15 @@ def test_reconciliation_bullet_buckets_and_synthesized_premise() -> None:
         "self-verified premise downgraded: <claim> — re-verification failed: <reason>"
         in recon
     )
-    assert 'The old "verified" value is never preserved' in recon
+    assert (
+        "keep the original stale entry unchanged in the authoritative working plan"
+        in recon
+    )
+    assert "persist an explicit audit record in `friction_highlights`" in recon
+    assert (
+        "only an explicit reviewer classification may remove or replace the stale entry"
+        in recon
+    )
 
 
 def test_reconciliation_bullet_settled_item_precedence() -> None:

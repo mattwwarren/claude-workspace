@@ -649,6 +649,15 @@ def test_parse_form_c_prose() -> None:
     assert entry.depends_on == "seen in --help output"
 
 
+def test_parse_evidence_prefixed_form_c_without_depends_on() -> None:
+    entry = _mod._parse_entry(
+        ["- Evidence: prior observation — Evidence: cited output"]
+    )
+    assert entry.form == "c"
+    assert entry.claim == "Evidence: prior observation"
+    assert entry.evidence == "Evidence: cited output"
+
+
 def test_parse_claim_label_never_reread_as_other_forms() -> None:
     entry = _mod._parse_entry(["- Claim: x — y"])
     assert entry.form == "unparseable"

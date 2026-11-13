@@ -85,6 +85,7 @@ _TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _EM = "—"
 _SEP = f" {_EM} "
 _SEP_EVIDENCE = f"{_SEP}Evidence: "
+_SEP_DEPENDS = f"{_SEP}Depends on: "
 _KEY_SPLIT_RE = re.compile(
     f" {_EM} (Evidence|Depends on|Route|Observed-at|Kind|Tool-call|Observed-attempt): "
 )
@@ -394,6 +395,19 @@ def _parse_form_b(text: str) -> _Entry | None:
     idx = text.find(_SEP_EVIDENCE)
     if idx < 0:
         return None
+    has_legacy_key_pair = _SEP_DEPENDS in text
+    has_new_form_metadata = any(
+        marker in text
+        for marker in (
+            f"{_SEP}Route: ",
+            f"{_SEP}Observed-at: ",
+            f"{_SEP}Kind: ",
+            f"{_SEP}Tool-call: ",
+            f"{_SEP}Observed-attempt: ",
+        )
+    )
+    if not has_legacy_key_pair and not has_new_form_metadata:
+        return None
     claim = text[:idx].strip()
     if not claim:
         return None
@@ -444,7 +458,7 @@ def _parse_entry(lines: list[str]) -> _Entry:
         parsed = _parse_form_a(lines)
     else:
         parsed = _parse_form_b(text)
-        if parsed is None and _SEP_EVIDENCE not in text:
+        if parsed is None:
             parsed = _parse_form_c(text)
     if parsed is not None:
         return parsed
