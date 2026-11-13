@@ -88,6 +88,16 @@ def _rearm_owed_fields(t: TicketTask) -> dict[str, Any]:
     }
 
 
+def _stop_continuation_fields(t: TicketTask) -> dict[str, Any]:
+    """The auto-continuation count (GitHub #2348), omitted until a continuation ran.
+
+    Omitted when unset so every existing row representation stays byte-identical.
+    """
+    if t.stop_continuations is None:
+        return {}
+    return {"stop_continuations": t.stop_continuations}
+
+
 def load_attention_tasks(client: str | None) -> list[TicketTask]:
     """Return the peek tasks (see :func:`is_peek_row`), optionally by client."""
     return [t for t in list_tickets(client) if is_peek_row(t)]
@@ -182,6 +192,7 @@ def _awaiting_operator_row(t: TicketTask) -> dict[str, Any]:
         "stage_high_water": t.stage_high_water,
         "pipeline_stage": t.stage,
         **_rearm_owed_fields(t),
+        **_stop_continuation_fields(t),
     }
 
 
@@ -242,6 +253,7 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
             "stage_high_water": t.stage_high_water,
             "pipeline_stage": t.stage,
             **_rearm_owed_fields(t),
+            **_stop_continuation_fields(t),
         }
 
     claim_age = minutes_since(info.get("claim_started_at"), now)
@@ -304,6 +316,7 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
         "stage_high_water": t.stage_high_water,
         "pipeline_stage": t.stage,
         **_rearm_owed_fields(t),
+        **_stop_continuation_fields(t),
     }
 
 

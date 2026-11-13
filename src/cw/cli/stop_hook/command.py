@@ -26,6 +26,7 @@ from cw.cli.stop_hook.agent_stamp import (
     _snapshot_agent_spawn_stamp,
     _summarize_background_tasks,
 )
+from cw.cli.stop_hook.continuation import maybe_continue_headless_turn
 from cw.cli.stop_hook.locked import _resolve_stop_under_lock
 from cw.cli.stop_hook.payload import _resolve_signal_stop_context
 from cw.cli.stop_hook.staged_emit import _peek_staged_emit_result
@@ -151,6 +152,10 @@ def signal_stop() -> None:
 
     if resolution.rescued is None:
         _handle_unrouted_stop(session, context, resolution, bg_count)
+        if resolution.continuation_candidate and not bg_count:
+            maybe_continue_headless_turn(
+                session, context, hook_payload, cwd_value, claude_session_id
+            )
         return
 
     if bg_count:

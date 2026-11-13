@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from cw import queue_peek
+from cw.models import QueueItemStatus, Stage
+from tests._shared.session_seeding import _make_ticket_task
 
 # ---------------------------------------------------------------------------
 # print_table
@@ -133,3 +137,29 @@ class TestPrintTable:
         queue_peek.print_table([blind_row])
         captured = capsys.readouterr()
         assert "Suggested stops:" not in captured.out
+
+
+def test_print_table_shows_auto_continued_line_only_when_set(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An auto-continued line prints only once the counter is set (#2348)."""
+    now = datetime.now(UTC)
+    continued = queue_peek.format_row(
+        _make_ticket_task(
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            stage=Stage.IMPL,
+            stop_continuations=2,
+        ),
+        {},
+        now,
+    )
+    queue_peek.render.print_table([continued])
+    assert "auto-continued: 2" in capsys.readouterr().out
+
+    plain = queue_peek.format_row(
+        _make_ticket_task(status=QueueItemStatus.BLOCKED_ON_USER),
+        {},
+        now,
+    )
+    queue_peek.render.print_table([plain])
+    assert "auto-continued" not in capsys.readouterr().out
