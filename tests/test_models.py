@@ -48,6 +48,7 @@ from cw.models import (
     WatchedPr,
     counts_toward_client_ceiling,
 )
+from cw.models.client import TrackerMcpGateConfig
 from cw.models.gate_block import GateBlockBackoff
 from cw.models.operator_constraint import (
     PLAN_ACTOR,
@@ -415,6 +416,24 @@ class TestClientConfig:
         """#2442: omitted from clients.yaml -> the gate never runs."""
         c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
         assert c.tracker_mcp_gate is None
+
+    @pytest.mark.parametrize(
+        ("gate", "backend", "expected"),
+        [
+            (None, "codex", None),
+            (TrackerMcpGateConfig(plugin_id="linear@acme"), "codex", None),
+            (TrackerMcpGateConfig(servers={"codex": "linear"}), "codex", "linear"),
+            (TrackerMcpGateConfig(servers={"codex": "linear"}), "opencode", None),
+        ],
+    )
+    def test_tracker_mcp_server_lookup(
+        self, gate: TrackerMcpGateConfig | None, backend: str, expected: str | None
+    ) -> None:
+        """#3309: one lookup for every site that reads a backend's MCP server."""
+        c = ClientConfig(
+            name="test", workspace_path=Path("/dev/null"), tracker_mcp_gate=gate
+        )
+        assert c.tracker_mcp_server(backend) == expected
 
     def test_tracker_mcp_gate_config_defaults(self) -> None:
         from cw.models.client import TrackerMcpGateConfig

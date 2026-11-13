@@ -2319,7 +2319,7 @@ agent's own loop round.
 
 #### Opencode fail-closed guards (#3059)
 
-Three opencode pre-flight refusals, each before any agent runs (RFC 0018 B1):
+Two opencode pre-flight refusals fire before any agent runs (RFC 0018 B1), and one prompt convention keeps the opencode PLAN and IMPL stages consistent:
 
 - **Repair feedback.** An IMPL row carrying `review_feedback` is refused with
   `repair_entry_unsupported_backend`, because the opencode IMPL prompt does not
@@ -2331,7 +2331,7 @@ Three opencode pre-flight refusals, each before any agent runs (RFC 0018 B1):
   `executors.finalize` is opencode parks every ticket at FINALIZE; no `cw doctor`
   check warns beforehand. Fix: set `executors.finalize` to `claude-native`, then
   `cw dev-queue requeue`.
-- **Plan marker.** The opencode PLAN writes a cw-owned `<!-- cw-opencode-plan:
+- **Plan marker (a convention, not a refusal).** The opencode PLAN writes a cw-owned `<!-- cw-opencode-plan:
   <ticket> -->` marker as the last line of its audit-copy comment; the opencode
   IMPL prompt reads it alongside the claude-native `<!-- plan-spec-reviewed`
   marker. PLAN never writes a review sign-off marker.
@@ -2380,7 +2380,8 @@ is the safer failure. A silently dropped finding is not.
 **Visibility limit.** `reviewer_reprompted:` in the sentinel `friction_highlights`
 is the interim record. The marker copy is garbage-collected with the worktree,
 and nothing aggregates these entries across tickets until the follow-up
-`cw doctor` per-role counter ships.
+`cw doctor` per-role `frame_missing` / `reviewer_failed` counter ships; #3331
+tracks it.
 
 ### Review configuration is read from the default branch (#3038)
 
@@ -3826,7 +3827,7 @@ for Linear), passes it the redacted, marked parts `cw post-comment
 --emit-only` would write, and verifies the JSON the agent returns. The turn
 runs `--sandbox read-only` with `-c approval_policy=never`, `--ephemeral`,
 low reasoning effort, in a scratch directory that is removed afterwards, with
-every other user-layer MCP server disabled. It is best-effort and runs after
+every other MCP server the user and system layers declare disabled. It is best-effort and runs after
 the review result is persisted: no outcome holds the row.
 
 Setup, per client:
@@ -3873,8 +3874,8 @@ middle of a part cannot be detected, and a tracker-side markdown
 normalisation can cause `readback_mismatch` on a faithful post: on
 `readback_mismatch`, read the ticket. On `POSSIBLE` or `CONFIRMED`, check the
 ticket for a duplicate or stray comment before re-running anything; cw never
-retries a post. A verified post emits no event and logs its comment ids at
-info.
+retries a post. A verified post emits `review.verdict_comment_posted` (not an
+unverified or skipped event) and logs its comment ids at info.
 
 Hidden-marker record. Linear marker survival: **UNVERIFIED**. Whether
 Linear's markdown keeps the `<!-- cw-agent-authored -->` marker has not been
@@ -4630,7 +4631,10 @@ inspect those sessions' transcripts before deciding a cause.
 
 **Doctor.** The `session-outcomes` check shows the 7-day rate, the largest cause
 and the command to run. It is informational on the rate and never warns on it.
-It warns only when the inbox or history cannot be read.
+It warns only when the inbox or history cannot be read. That warning names the
+exception type and its message (for a file error, the `OSError` text with the
+failing path) and points at `cw event session-outcomes --days 7`, which reads
+the same files and reproduces the error (#3123).
 
 **Follow-up procedure.** Run the command on the real host, attach the output to
 the tracking ticket, and file one fix ticket per non-empty cause, largest first.
@@ -4955,10 +4959,15 @@ clients:
   so only a crash or failed event write in the narrow gap between the save and the event
   leaves a row without them. That stays at-most-once: the replay hits `row_exists` and
   does not re-emit.
-- **Known limitation (R10).** If a debt row is pruned and the cursor file is also lost, a
-  replay could re-enqueue that debt. Pruning keeps the newest contiguous suffix of the inbox,
-  so a pruned cursor event alone does not replay consumed merges; only a deleted cursor file
-  or a restored old inbox can, and a missing cursor is forward-only.
+- **Known limitation (R10).** A replay can re-enqueue a pruned debt row only when the cursor
+  file survives but the inbox is replaced by an older copy (a restored backup or a rotated
+  inbox) that lacks the cursor's event: `read_events` logs `cursor <id> not found in inbox;
+  replaying from start` and re-reads every retained `pr.merged`, and `row_exists` no longer
+  protects a pruned row. Pruning alone does not do this: it keeps the newest contiguous suffix
+  of the inbox, so a pruned cursor event leaves only merges newer than the cursor, none already
+  consumed. A deleted cursor file does not replay either: it is forward-only, because
+  `init_cursor_at_end` re-seeds the cursor at the inbox end, so merges recorded between the
+  loss and the next tick are skipped, not replayed.
 - **Skip reasons.** `one_level`, `row_exists`, `no_parent_row`, `lane_undeclared`,
   `pr_mismatch` and `unknown_client`, all carried by `review.debt_enqueue_skipped`; see
   [events](events.md).
@@ -5420,8 +5429,11 @@ Two options, either works — this repo does not prescribe or automate either:
 Either way, the relay's job is just to forward POST bodies unmodified from
 the public internet to the local `/pr-event` endpoint — it does not need to
 understand the payload shape. It does need to leave the body unmodified: the
-HMAC signature and `event_id` stability both depend on the exact bytes (see
-[`pr-channel.md`](pr-channel.md)).
+HMAC signature is computed over the exact request bytes, so a relay that
+re-serializes the body breaks verification. `event_id` does not depend on the
+bytes: it is derived from the identity fields only (`schema_version`, `repo`
+case-folded, `pr_number`, `event_type`, `source_id`), with no body hash (see
+[`pr-channel.md`](pr-channel.md), "Event identity").
 
 ### 10.2 Secret wiring
 

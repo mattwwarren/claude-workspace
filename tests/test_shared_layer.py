@@ -102,15 +102,36 @@ def _pytest_plugins(tree: ast.Module) -> list[str]:
     return []
 
 
+def _fixture_names(tree: ast.Module) -> set[str]:
+    """Spellings that name ``pytest.fixture`` in this module.
+
+    Bounded to ``import pytest [as x]`` and ``from pytest import fixture [as x]``.
+    No yield_fixture, star imports or dataflow: every current shared fixture is
+    a literal spelling, so anything else is simply not matched.
+    """
+    names = {"pytest.fixture"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "pytest":
+                    names.add(f"{alias.asname or 'pytest'}.fixture")
+        elif isinstance(node, ast.ImportFrom) and node.module == "pytest":
+            for alias in node.names:
+                if alias.name == "fixture":
+                    names.add(alias.asname or "fixture")
+    return names
+
+
 def _fixture_decorators(tree: ast.Module) -> list[tuple[str, ast.expr]]:
     """Return ``(function name, decorator)`` for every ``pytest.fixture`` use."""
+    names = _fixture_names(tree)
     found: list[tuple[str, ast.expr]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
         for decorator in node.decorator_list:
             target = decorator.func if isinstance(decorator, ast.Call) else decorator
-            if ast.unparse(target) == "pytest.fixture":
+            if ast.unparse(target) in names:
                 found.append((node.name, decorator))
     return found
 
@@ -119,8 +140,14 @@ def _keyword(decorator: ast.expr, name: str) -> object:
     if not isinstance(decorator, ast.Call):
         return None
     for keyword in decorator.keywords:
-        if keyword.arg == name and isinstance(keyword.value, ast.Constant):
-            return keyword.value.value
+        if keyword.arg != name:
+            continue
+        # A non-literal value must not read as None: that would pass an autouse
+        # pin vacuously. Fail closed instead.
+        assert isinstance(keyword.value, ast.Constant), (
+            f"fixture keyword {name!r} must be a literal: {ast.unparse(keyword.value)}"
+        )
+        return keyword.value.value
     return None
 
 
@@ -296,3 +323,61 @@ def test_shared_modules_get_assertion_rewriting() -> None:
     """Helper asserts keep pytest's introspection after leaving conftest."""
     module = importlib.import_module(f"{_SHARED_PACKAGE}.guard_fences")
     assert "@pytest_ar" in vars(module)
+
+
+# --- #3467: the fixture matcher sees every spelling, and fails closed ---------
+
+_FIXTURE_SPELLINGS = [
+    "import pytest\n@pytest.fixture\ndef f(): ...\n",
+    "import pytest\n@pytest.fixture(autouse=True)\ndef f(): ...\n",
+    "import pytest as pt\n@pt.fixture\ndef f(): ...\n",
+    "from pytest import fixture\n@fixture\ndef f(): ...\n",
+    "from pytest import fixture as fx\n@fx(autouse=True)\ndef f(): ...\n",
+]
+
+
+@pytest.mark.parametrize("src", _FIXTURE_SPELLINGS)
+def test_fixture_matcher_sees_every_spelling(src: str) -> None:
+    """Positive control: each supported spelling yields exactly one fixture."""
+    found = _fixture_decorators(ast.parse(src))
+    assert [name for name, _ in found] == ["f"]
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        "import other\n@other.fixture\ndef f(): ...\n",
+        "import pytest\n@pytest.mark.slow\ndef f(): ...\n",
+        "def f(): ...\n",
+    ],
+)
+def test_fixture_matcher_ignores_non_fixtures(src: str) -> None:
+    assert _fixture_decorators(ast.parse(src)) == []
+
+
+def test_autouse_detected_through_alias() -> None:
+    tree = ast.parse(
+        "from pytest import fixture as fx\n@fx(autouse=True)\ndef f(): ...\n"
+    )
+    ((_, decorator),) = _fixture_decorators(tree)
+    assert _keyword(decorator, "autouse") is True
+
+
+def test_non_literal_fixture_keyword_fails_closed() -> None:
+    # A non-literal autouse= must not read as None, which would pass the pin
+    # vacuously.
+    src = (
+        "import pytest\nSOME_FLAG = True\n"
+        "@pytest.fixture(autouse=SOME_FLAG)\ndef f(): ...\n"
+    )
+    tree = ast.parse(src)
+    ((_, decorator),) = _fixture_decorators(tree)
+    with pytest.raises(AssertionError, match="must be a literal"):
+        _keyword(decorator, "autouse")
+
+
+def test_matcher_sees_real_layer_autouse_fixtures() -> None:
+    """Real-tree control: the scan is not empty, so the pins above are not vacuous."""
+    found = _fixture_decorators(_parse(_SHARED_DIR / "autouse_isolation.py"))
+    assert found
+    assert any(_keyword(decorator, "autouse") is True for _, decorator in found)

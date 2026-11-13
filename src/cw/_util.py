@@ -25,6 +25,8 @@ MCP_EXTRA_MSG = (
     "(or run ./scripts/install.sh from a local clone)."
 )
 
+NO_CLIENTS_MSG = "No clients configured. Add one to ~/.config/cw/clients.yaml."
+
 
 def format_compact_age(delta: timedelta) -> str:
     """Compact Nm/Nh/Nd age; a negative delta (clock skew) renders 0m. Pure."""

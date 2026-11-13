@@ -89,6 +89,13 @@ except ImportError:  # pragma: no cover - downstream repo without PyYAML
 
 def _load_project_config_module() -> ModuleType | None:
     """Load the shared config reader from source or an installed package."""
+    # An already-imported cw.project_config is the shared reader: re-executing
+    # the same source file under another module name makes a second module
+    # object, which under pytest-xdist drops coverage of the reader's bodies
+    # (#2179). A fresh interpreter has no entry and takes the path load below.
+    already = sys.modules.get("cw.project_config")
+    if already is not None:
+        return already
     source = Path(__file__).resolve().parents[2] / "src" / "cw" / "project_config.py"
     if source.exists():
         spec = importlib.util.spec_from_file_location("cw_project_config", source)
@@ -730,6 +737,7 @@ def arm_automerge(
     backoff_seconds: float = ARM_BACKOFF_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
     cwd: Path | None = None,
+    before_arm: Callable[[], ArmResult | None] | None = None,
 ) -> ArmResult:
     """Arm auto-merge with bounded retry, trusting the read-back over gh's exit.
 
@@ -746,8 +754,15 @@ def arm_automerge(
     to the verified SHA at arm time (closing the verify-to-arm window). The
     pin applies only to arms this call issues: an already-armed or MERGED PR
     is a no-op success and is not re-pinned.
+
+    ``before_arm`` is a guard run at most once, after the first read-back finds
+    the PR neither armed nor MERGED and before the first `gh pr merge` (#3329).
+    A non-``None`` return is a refusal: it is returned unchanged and no merge
+    is attempted. An already-armed or MERGED PR never runs it, and retries do
+    not re-run it.
     """
     result = ArmResult(pr_number=pr_number, max_attempts=attempts)
+    guard = before_arm
     merge_cmd = [
         "gh",
         "pr",
@@ -764,6 +779,11 @@ def arm_automerge(
             return result
         if result.attempts >= attempts:
             return _finish_failed(result, read_error)
+        if guard is not None:
+            refusal = guard()
+            guard = None
+            if refusal is not None:
+                return refusal
         merge = run(merge_cmd, cwd=cwd)
         result.attempts += 1
         result.gh_exit_code = merge.returncode
@@ -1193,8 +1213,10 @@ def check_merge_freeze(
     return _run_freeze_script(script, repo_path, base, head_sha)
 
 
-def _merge_freeze_refusal(args: argparse.Namespace, repo_path: Path) -> int | None:
-    """Exit 1 with a refusal ArmResult on a definite violation, else None."""
+def _merge_freeze_refusal(
+    args: argparse.Namespace, repo_path: Path
+) -> ArmResult | None:
+    """A refusal ArmResult on a definite violation, else None (warns on a skip)."""
     check = check_merge_freeze(repo_path, args.head_sha, pr_number=args.pr_number)
     if check.status == "skipped" and check.reason:
         sys.stderr.write(
@@ -1203,7 +1225,7 @@ def _merge_freeze_refusal(args: argparse.Namespace, repo_path: Path) -> int | No
         )
     if check.status != "refused":
         return None
-    refused = ArmResult(
+    return ArmResult(
         pr_number=args.pr_number,
         max_attempts=args.attempts,
         status=ARM_STATUS_FAILED,
@@ -1215,9 +1237,18 @@ def _merge_freeze_refusal(args: argparse.Namespace, repo_path: Path) -> int | No
             " CHANGELOG section"
         ),
     )
-    print(json.dumps(refused.to_dict(), indent=2))
-    sys.stderr.write(f"ERROR: {check.reason}\n")
-    return 1
+
+
+def _report_arm_failure(result: ArmResult) -> None:
+    """Write the stderr line for a failed arm: a freeze refusal or gh's failure."""
+    if result.gh_stderr.startswith(f"{MERGE_FREEZE_PREFIX}:"):
+        sys.stderr.write(f"ERROR: {result.gh_stderr}\n")
+        return
+    sys.stderr.write(
+        f"ERROR: gh pr merge --auto failed after {result.attempts}/"
+        f"{result.max_attempts} attempts (exit {result.gh_exit_code}): "
+        f"{result.gh_stderr}\n"
+    )
 
 
 def cmd_arm_automerge(args: argparse.Namespace) -> int:
@@ -1228,7 +1259,8 @@ def cmd_arm_automerge(args: argparse.Namespace) -> int:
     calls and exits 3 (#2046). Prints one JSON result object on stdout; a
     persistent failure also writes gh's last stderr to stderr and exits 1.
     Before any gh pr merge call it runs the merge-time CHANGELOG freeze guard
-    (`check_merge_freeze`, #3190): a definite violation also exits 1, with
+    (`check_merge_freeze`, #3190), but only when the read-back shows the PR is
+    neither armed nor MERGED (#3329): a definite violation also exits 1, with
     `status: failed`, `attempts: 0` and a `gh_stderr` beginning
     `changelog_merge_freeze:`; a guard that cannot evaluate warns on stderr
     and arms.
@@ -1261,24 +1293,17 @@ def cmd_arm_automerge(args: argparse.Namespace) -> int:
         print(json.dumps(skipped.to_dict(), indent=2))
         return EXIT_ARM_DISALLOWED
 
-    refusal = _merge_freeze_refusal(args, repo_path)
-    if refusal is not None:
-        return refusal
-
     result = arm_automerge(
         args.pr_number,
         head_sha=args.head_sha,
         attempts=args.attempts,
         backoff_seconds=args.backoff_seconds,
         cwd=repo_path,
+        before_arm=lambda: _merge_freeze_refusal(args, repo_path),
     )
     print(json.dumps(result.to_dict(), indent=2))
     if result.status == ARM_STATUS_FAILED:
-        sys.stderr.write(
-            f"ERROR: gh pr merge --auto failed after {result.attempts}/"
-            f"{result.max_attempts} attempts (exit {result.gh_exit_code}): "
-            f"{result.gh_stderr}\n"
-        )
+        _report_arm_failure(result)
         return 1
     return 0
 

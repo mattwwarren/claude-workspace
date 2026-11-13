@@ -45,6 +45,7 @@ from cw.orchestrator_session import remove_orchestrator_mcp_config
 from cw.reconcile import ticket_id_for_session
 from cw.reconcile.emitted_result import route_emitted_result
 from cw.reconcile.session_close import record_operator_close
+from cw.session_event_vocabulary import OPERATOR_CLOSE_DETAIL
 from cw.spawn import spawn_create_impl
 
 if TYPE_CHECKING:
@@ -52,9 +53,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# ``detail`` of the one history record every operator session close leaves
-# (#2694): ``cw spawn close``.
-OPERATOR_CLOSE_DETAIL = "operator_close"
 _SPAWN_CLOSE_COMMAND = "cw spawn close"
 
 

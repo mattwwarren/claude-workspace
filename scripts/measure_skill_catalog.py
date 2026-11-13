@@ -183,17 +183,32 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def _read_demand(path: Path) -> str:
+    """Read a demand entry; an unreadable file exits by name, never by absolute path."""
+    try:
+        return _read(path)
+    except OSError:
+        msg = f"cannot read {path.parent.name}/{path.name}"
+        raise SystemExit(msg) from None
+
+
 def _skills(claude: Path, source: str) -> list[DemandEntry]:
+    # Dangling symlinks and directories are not offerings; skipping them matches
+    # _chars_of's is_file() check (#3414).
     return [
-        demand_entry(p.parent.name, source, description_of(parse_frontmatter(_read(p))))
+        demand_entry(
+            p.parent.name, source, description_of(parse_frontmatter(_read_demand(p)))
+        )
         for p in sorted(claude.glob("skills/*/SKILL.md"))
+        if p.is_file()
     ]
 
 
 def _commands(claude: Path, source: str) -> list[DemandEntry]:
     return [
-        demand_entry(p.stem, source, description_of(parse_frontmatter(_read(p))))
+        demand_entry(p.stem, source, description_of(parse_frontmatter(_read_demand(p))))
         for p in sorted(claude.glob("commands/*.md"))
+        if p.is_file()
     ]
 
 

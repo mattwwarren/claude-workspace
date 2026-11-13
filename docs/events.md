@@ -2757,8 +2757,8 @@ normalisation can produce `readback_mismatch` on a faithful post.
 cw never retries a post. On this event the operator reads the ticket for a
 duplicate or stray comment before any re-run. Emitted after Step 4 and
 best-effort: it never holds the row or changes the persisted result (the
-durable worktree artifact is already written). A verified post emits nothing
-and logs its ids at info. `correlation_id` is the `ticket_id`. In
+durable worktree artifact is already written). A verified post emits `review.verdict_comment_posted` (below) instead of this event and
+logs its ids at info. `correlation_id` is the `ticket_id`. In
 `_DEFAULT_OPERATOR_EVENT_TYPES`.
 
 ### `review.verdict_comment_posted`
@@ -2783,8 +2783,12 @@ called after a tracker-IO turn's self-attested verification succeeds
 ```
 **Semantics:** GitHub #3057 (RFC 0018 A2). This append-only audit record
 contains the ticket, model-reported part/comment ids, client, session,
-reviewed SHA, posting timestamp and a hash of the rendered verdict text. The
-event records cw's verification result; it is not independent proof of
+reviewed SHA, posting timestamp and a hash of the marked, redacted bodies as
+sent (one body hashes to itself; several bodies join with a newline before
+hashing; a GitHub post hashes the marked comment body it posted). The hash
+was of the pre-redaction text before #3353, so events older than that change
+carry the old definition with no discriminator. The event records cw's
+verification result; it is not independent proof of
 delivery. It is not forwarded by default. `correlation_id` is the `ticket_id`.
 
 ### `review.operator_context_undelivered`

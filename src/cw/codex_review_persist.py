@@ -289,8 +289,9 @@ def _post_review_comment(
     *tracker_io* (#3057, RFC 0018 A2): on a non-GitHub tracker, when the
     caller supplies it, the comment is posted through the tracker-IO agent
     turn (:func:`cw.tracker_io.post_parts_via_turn`) instead of skipped. A
-    verified post logs at info; a refusal records the skipped event with the
-    turn's reason; an unconfirmed post records
+    verified post records ``review.verdict_comment_posted`` and logs at info;
+    a refusal records the skipped event with the turn's reason; an unconfirmed
+    post records
     ``review.verdict_comment_unverified``. Without it the skip is unchanged.
     The GitHub path never uses it.
     """
@@ -379,22 +380,20 @@ def _post_via_tracker_io(
             identity.artifact_path,
             exc_info=True,
         )
-        surface_tracker_io_outcome(
-            ticket_id,
-            review_text,
-            tracker=tracker,
-            outcome=TrackerIoOutcome(
-                public_state=PublicState.POSSIBLE,
-                reason=TrackerIoReason.TURN_EXCEPTION,
-                parts_total=0,
-            ),
-            identity=identity,
+        outcome = TrackerIoOutcome(
+            public_state=PublicState.POSSIBLE,
+            reason=TrackerIoReason.TURN_EXCEPTION,
+            parts_total=0,
         )
-        return
-    surface_tracker_io_outcome(
-        ticket_id,
-        review_text,
-        tracker=tracker,
-        outcome=outcome,
-        identity=identity,
-    )
+    try:
+        surface_tracker_io_outcome(
+            ticket_id, tracker=tracker, outcome=outcome, identity=identity
+        )
+    except _TURN_FAULTS:
+        _log.warning(
+            "tracker_io_surface_failed ticket=%s tracker=%s: durable copy at %s",
+            ticket_id,
+            tracker,
+            identity.artifact_path,
+            exc_info=True,
+        )

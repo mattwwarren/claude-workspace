@@ -56,6 +56,7 @@ from cw.models import (
     LastResultSource,
     LocalLivenessHandle,
     QueueItemStatus,
+    SessionPurpose,
     SessionStatus,
     Stage,
     StageExecutorConfig,
@@ -253,6 +254,38 @@ def test_codex_executor_finalize_is_supported_and_launches(
     argv = call["argv"]
     assert isinstance(argv, list)
     assert argv[argv.index("--stage") + 1] == "finalize"
+
+
+@pytest.mark.parametrize(
+    ("stage", "purpose"),
+    [
+        (Stage.REVIEW, SessionPurpose.REVIEW),
+        (Stage.PLAN, SessionPurpose.PLAN),
+        (Stage.IMPL, SessionPurpose.IMPL),
+        (Stage.FINALIZE, SessionPurpose.FINALIZE),
+    ],
+)
+def test_codex_executor_session_and_context_carry_stage_purpose(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    fake_runner: FakeFireAndForgetRunner,
+    stage: Stage,
+    purpose: SessionPurpose,
+) -> None:
+    """#3253: the session and its cw-context.json record the stage's purpose."""
+    worktree = make_git_repo(f"wt-codex-purpose-{stage.value}")
+    executor = _codex_executor(runner=fake_runner)
+    task = TicketTask(ticket_id="T-1", client="test", stage=stage)
+
+    with patch(_WHICH, return_value=_CODEX_PATH):
+        sid = executor.spawn(
+            stage=stage, task=task, worktree=worktree, client=_client(worktree)
+        )
+
+    session = next(s for s in load_state().sessions if s.id == sid)
+    assert session.purpose is purpose
+    context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+    assert context["purpose"] == purpose.value
 
 
 def test_codex_executor_plan_codex_not_found_carries_plan_labels(

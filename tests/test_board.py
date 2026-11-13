@@ -496,6 +496,15 @@ class TestRenderBoardDetail:
         assert "sess-abc" not in output
         assert "Sessions (detail)" not in output
 
+    def test_detail_panel_shows_review_purpose(self) -> None:
+        """#3253: a codex REVIEW session's purpose renders in the detail row."""
+        state = _state_with_task(
+            running_sessions=[_session_summary("sess-r", purpose="review")],
+        )
+        output = _render(state, detail=True)
+        row = next(line for line in output.splitlines() if "sess-r" in line)
+        assert "review" in row
+
     def test_detail_panel_renders_with_no_sessions(self) -> None:
         """detail=True with empty running_sessions/pending_tickets renders."""
         state = _state_with_task(running_sessions=[], pending_tickets=[])

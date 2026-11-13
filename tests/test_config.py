@@ -1932,6 +1932,37 @@ class TestMigrateCwState:
         assert backup.read_bytes() == original
         assert backup.stat().st_mtime_ns == first_mtime
 
+    def test_save_state_failed_backup_keeps_legacy_original_and_retries(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A partial backup copy never leaves a truncated final backup (#3119).
+
+        The failed save raises before ``atomic_write_text``, so the legacy file
+        keeps its bytes. The retry then produces a complete backup.
+        """
+        from tests._shared.session_seeding import write_legacy_sessions_json
+
+        state_dir = tmp_config_dir / ".local" / "share" / "cw"
+        sf = write_legacy_sessions_json(state_dir)
+        original = sf.read_bytes()
+        backup = state_dir / ".sessions.json.0.x-backup"
+
+        disk_full = OSError("disk full")
+
+        def _partial_then_fail(src: Path, dst: Path) -> None:
+            Path(dst).write_bytes(b"{trunc")
+            raise disk_full
+
+        with monkeypatch.context() as patched:
+            patched.setattr(cw._state_backup.shutil, "copy2", _partial_then_fail)
+            with pytest.raises(OSError, match="disk full"):
+                save_state(load_state())
+        assert sf.read_bytes() == original
+        assert not backup.exists()
+
+        save_state(load_state())
+        assert backup.read_bytes() == original
+
     def test_mutate_state_backs_up_legacy_file_once(self, tmp_config_dir: Path) -> None:
         """mutate_state() over a legacy file backs it up on its save (#2951)."""
         from tests._shared.session_seeding import write_legacy_sessions_json

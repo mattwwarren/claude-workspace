@@ -2496,23 +2496,124 @@ def _arm_args(repo: Path) -> object:
     )
 
 
+def _armed_after_merge_gh() -> Callable[[list[str]], subprocess.CompletedProcess[str]]:
+    """``gh`` answers: an OPEN un-armed view until a ``pr merge``, armed after."""
+    merged: list[bool] = []
+
+    def _handler(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            merged.append(True)
+            return _cp()
+        return _cp(stdout=ARM_VIEW_ARMED if merged else ARM_VIEW_OPEN)
+
+    return _handler
+
+
+def _refusal_result() -> object:
+    return _mod.ArmResult(
+        pr_number=42,
+        max_attempts=4,
+        status="failed",
+        attempts=0,
+        gh_stderr="changelog_merge_freeze: v1.1.0",
+        detail="changelog_merge_freeze: refused",
+    )
+
+
+@pytest.mark.parametrize(
+    "view", [ARM_VIEW_ARMED, _ARM_VIEW_MERGED], ids=["armed", "merged"]
+)
+def test_arm_automerge_before_arm_skipped_when_already_done(
+    monkeypatch: pytest.MonkeyPatch, view: str
+) -> None:
+    _patch_run(monkeypatch, lambda _cmd: _cp(stdout=view))
+    hook_calls: list[str] = []
+
+    def _hook() -> None:
+        hook_calls.append("hook")
+
+    result = _mod.arm_automerge(42, head_sha=_SHA, before_arm=_hook)
+
+    assert hook_calls == []
+    assert result.attempts == 0
+    assert result.status in {"armed", "merged"}
+
+
+def test_arm_automerge_before_arm_runs_once_before_the_first_merge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    def _handler(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            events.append("merge")
+            return _cp(returncode=1, stderr="nope")
+        events.append("view")
+        return _cp(stdout=ARM_VIEW_OPEN)
+
+    _patch_run(monkeypatch, _handler)
+
+    def _hook() -> None:
+        events.append("hook")
+
+    result = _mod.arm_automerge(
+        42,
+        head_sha=_SHA,
+        attempts=3,
+        backoff_seconds=0.0,
+        sleep=lambda _s: None,
+        before_arm=_hook,
+    )
+
+    assert result.attempts == 3
+    assert events.count("hook") == 1
+    assert events[:4] == ["view", "hook", "merge", "view"]
+    assert events.index("hook") < events.index("merge")
+
+
+def test_arm_automerge_before_arm_refusal_is_returned_with_no_merge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _patch_run(monkeypatch, lambda _cmd: _cp(stdout=ARM_VIEW_OPEN))
+    refusal = _refusal_result()
+
+    result = _mod.arm_automerge(42, head_sha=_SHA, before_arm=lambda: refusal)
+
+    assert result is refusal
+    assert [c for c in calls if c[:3] == ["gh", "pr", "merge"]] == []
+
+
+def test_cmd_arm_automerge_already_armed_never_runs_the_freeze_guard(
+    arm_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
+
+    def _must_not_run(*_a: object, **_k: object) -> object:
+        msg = "the freeze guard must not run for an already armed PR"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(_mod, "check_merge_freeze", _must_not_run)
+    _patch_run(monkeypatch, lambda _cmd: _cp(stdout=ARM_VIEW_ARMED))
+
+    code = _mod.cmd_arm_automerge(_arm_args(arm_repo))
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "armed"
+
+
 def test_cmd_arm_automerge_refusal_never_arms(
     arm_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     refusal = _mod.MergeFreezeCheck("refused", "changelog_merge_freeze: v1.1.0", "main")
     monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
     monkeypatch.setattr(_mod, "check_merge_freeze", lambda *_a, **_k: refusal)
-
-    def _never(*_a: object, **_k: object) -> object:
-        msg = "arm_automerge must not run after a refusal"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(_mod, "arm_automerge", _never)
+    calls = _patch_run(monkeypatch, lambda _cmd: _cp(stdout=ARM_VIEW_OPEN))
 
     code = _mod.cmd_arm_automerge(_arm_args(arm_repo))
     captured = capsys.readouterr()
 
     assert code == 1
+    assert [c for c in calls if c[:3] == ["gh", "pr", "merge"]] == []
     out = json.loads(captured.out)
     assert (out["status"], out["attempts"]) == ("failed", 0)
     assert out["gh_stderr"] == "changelog_merge_freeze: v1.1.0"
@@ -2520,7 +2621,7 @@ def test_cmd_arm_automerge_refusal_never_arms(
         "changelog_merge_freeze: arm refused before any gh pr merge call; merging"
         " this PR into origin/main would change a released CHANGELOG section"
     )
-    assert captured.err.startswith("ERROR: ")
+    assert captured.err == "ERROR: changelog_merge_freeze: v1.1.0\n"
 
 
 def test_cmd_arm_automerge_skip_with_a_reason_warns_and_arms(
@@ -2529,13 +2630,13 @@ def test_cmd_arm_automerge_skip_with_a_reason_warns_and_arms(
     skip = _mod.MergeFreezeCheck("skipped", "git fetch origin main exited 128", "main")
     monkeypatch.setattr(_mod.shutil, "which", lambda _name: "/usr/bin/gh")
     monkeypatch.setattr(_mod, "check_merge_freeze", lambda *_a, **_k: skip)
-    armed = _mod.ArmResult(pr_number=42, max_attempts=4, status="armed", attempts=1)
-    monkeypatch.setattr(_mod, "arm_automerge", lambda *_a, **_k: armed)
+    calls = _patch_run(monkeypatch, _armed_after_merge_gh())
 
     code = _mod.cmd_arm_automerge(_arm_args(arm_repo))
     err = capsys.readouterr().err
 
     assert code == 0
+    assert len([c for c in calls if c[:3] == ["gh", "pr", "merge"]]) == 1
     assert err == (
         "WARNING: changelog_merge_freeze not evaluated (git fetch origin main"
         " exited 128); arming without the merge-time check\n"
@@ -2593,7 +2694,26 @@ def test_arm_automerge_refuses_a_merge_into_a_released_section(
     assert "cw worktree changelog-sync --base main" in out["gh_stderr"]
     assert out["detail"].startswith("changelog_merge_freeze:")
     assert "ERROR:" in result.stderr
-    assert_gh_calls(fake_bin, [_BASE_VIEW])
+    assert_gh_calls(fake_bin, [_VIEW, _BASE_VIEW])
+
+
+def test_arm_automerge_already_armed_pr_is_not_refused_by_a_release_cut(
+    tmp_path: Path, cut_clone: ReleaseMovedRepo
+) -> None:
+    armed_with_base = (
+        '{"state":"OPEN","autoMergeRequest":{"mergeMethod":"SQUASH"},'
+        '"baseRefName":"main"}'
+    )
+    fake_bin = stub_gh_arm(
+        tmp_path, [(0, "", ARM_VIEW_ARMED)], initial_view=armed_with_base
+    )
+
+    result = _run_arm(cut_clone.clone, fake_bin, head_sha=cut_clone.branch_sha)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["status"] == "armed"
+    assert_gh_calls(fake_bin, [_VIEW])
+    assert _merge_count(fake_bin) == 0
 
 
 def test_arm_automerge_ignores_an_inherited_git_dir(
@@ -2629,7 +2749,7 @@ def test_arm_automerge_arms_once_the_changelog_is_synced(
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["status"] == "armed"
     merge = [*_MERGE[:-1], synced.head_sha]
-    assert_gh_calls(fake_bin, [_BASE_VIEW, _VIEW, merge, _VIEW])
+    assert_gh_calls(fake_bin, [_VIEW, _BASE_VIEW, merge, _VIEW])
     assert "WARNING" not in result.stderr
 
 
@@ -2646,4 +2766,4 @@ def test_arm_automerge_fetch_failure_warns_and_arms(
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["status"] == "armed"
     assert "WARNING: changelog_merge_freeze not evaluated" in result.stderr
-    assert_gh_calls(fake_bin, [_BASE_VIEW, _VIEW, _MERGE, _VIEW])
+    assert_gh_calls(fake_bin, [_VIEW, _BASE_VIEW, _MERGE, _VIEW])

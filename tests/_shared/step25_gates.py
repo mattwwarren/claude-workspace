@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -15,12 +16,16 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from tests._shared.guard_fences import load_guard_script_module
+from tests._shared.git_repos import _clean_git_env
+from tests._shared.guard_fences import (
+    load_guard_script_module,
+    substitute_fence_placeholders,
+)
 from tests._shared.workflow_text import _REPO_ROOT, _bash_fences, _cmd
 
 if TYPE_CHECKING:
     import types
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Mapping
 
 
 # --- Step 2.5 gate key (#2436) ----------------------------------------------
@@ -198,3 +203,102 @@ def impl_gate_setup_fence() -> str:
 def monolith_gate_fence() -> str:
     """``auto-dev.md``'s Mitigation 1 fence: the one that arms the cleanup trap."""
     return _fence_containing("auto-dev.md", "trap gate_wt_cleanup EXIT")
+
+
+# --- Executed fence bed (#2179: hoisted from tests/test_gate_key_fences.py) ----
+# Shared by tests/test_gate_key_fences.py and tests/test_gate3_prepare_fence.py,
+# so the executed-fence runner is spelled once.
+
+GATE_BRANCH = "feature"
+GATE_STALE_SESSION = "9141a90d"
+
+
+def link_cw_shim(bin_dir: Path) -> Path:
+    """Put an executable ``cw`` shim in *bin_dir* running this interpreter's cw.
+
+    Gate 3 calls ``cw tests-prepare``; the shim keeps executed fences off any
+    host ``cw`` the venv never vetted. Returns *bin_dir*.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    shim = bin_dir / "cw"
+    shim.unlink(missing_ok=True)
+    interpreter = shlex.quote(sys.executable)
+    shim.write_text(f'#!/bin/sh\nexec {interpreter} -m cw "$@"\n', encoding="utf-8")
+    shim.chmod(0o755)
+    return bin_dir
+
+
+def run_fence_body(
+    body: str,
+    *,
+    cwd: Path,
+    home: Path,
+    gate_root: Path,
+    bin_dir: Path,
+    extra_env: Mapping[str, str] | None = None,
+    timeout: float = 120.0,
+) -> subprocess.CompletedProcess[str]:
+    """Run a filled fence body (or several) in one ``bash -c``."""
+    env = _clean_git_env()
+    env.update(
+        {
+            "HOME": str(home),
+            "PATH": f"{bin_dir}:{env.get('PATH', '')}",
+            "CW_GATE_ROOT": str(gate_root),
+            "CW_SESSION": GATE_STALE_SESSION,
+        }
+    )
+    env.update(extra_env or {})
+    return subprocess.run(
+        ["bash", "-c", body],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=timeout,
+    )
+
+
+class GateBed:
+    """One executed-fence test bed: home with the script, python3, cw, gate root."""
+
+    def __init__(self, tmp_path: Path, *, install: bool = True) -> None:
+        self.tmp_path = tmp_path
+        self.home = tmp_path / "home"
+        self.home.mkdir(parents=True, exist_ok=True)
+        self.script = install_gate_key(self.home) if install else None
+        self.gate_root = tmp_path / "gate-root"
+        self.gate_root.mkdir(parents=True, exist_ok=True)
+        self.bin_dir = link_real_python3(tmp_path / "bin")
+        link_cw_shim(self.bin_dir)
+
+    def run(
+        self,
+        body: str,
+        cwd: Path,
+        extra_env: Mapping[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        return run_fence_body(
+            body,
+            cwd=cwd,
+            home=self.home,
+            gate_root=self.gate_root,
+            bin_dir=self.bin_dir,
+            extra_env=extra_env,
+        )
+
+    def paths(self, repo: Path) -> tuple[Path, Path, Path]:
+        key = gate_key_for(repo, GATE_BRANCH)
+        return (
+            self.gate_root / f"cw-gate-wt-{key}",
+            self.gate_root / f"cw-gate-tmp-{key}",
+            self.gate_root / f"cw-gate-owner-{key}.json",
+        )
+
+
+def fill_gate_fence(fence: str, test_command: str = "true") -> str:
+    """Fill a gate fence's ``<branch-name>`` and ``<test_command>`` placeholders."""
+    return substitute_fence_placeholders(
+        fence, {"branch-name": GATE_BRANCH, "test_command": test_command}
+    )

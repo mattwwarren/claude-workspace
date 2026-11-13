@@ -2,7 +2,9 @@
 
 Fixture inventory: autouse ``tmp_config_dir`` + ``_isolate_home`` only. ``_ev``
 is local to this file. ``freeze_time`` and ``cw.events.record_event`` seed the
-I/O section. ``tmp_events_dir`` and ``capture_events`` are not used.
+I/O section. ``tests._shared.session_seeding._make_daemon_session`` builds the
+state sessions for ``live_ids_from_state``. ``tmp_events_dir`` and
+``capture_events`` are not used.
 """
 
 from __future__ import annotations
@@ -17,15 +19,23 @@ from freezegun import freeze_time
 from cw.events import record_event
 from cw.history import EventType as HistoryEventType
 from cw.history import HistoryEvent, append_event
-from cw.models import OrchestratorEvent, OrchestratorEventType
+from cw.models import (
+    TERMINAL_SESSION_STATUSES,
+    CwState,
+    OrchestratorEvent,
+    OrchestratorEventType,
+    SessionStatus,
+)
 from cw.session_outcomes import (
     NoResultCause,
     OutcomeReport,
     build_report,
     classify_sessions,
     format_report,
+    live_ids_from_state,
     report_to_json,
 )
+from tests._shared.session_seeding import _make_daemon_session
 
 T = OrchestratorEventType
 C = NoResultCause
@@ -253,6 +263,58 @@ def test_predecessor_spawned_before_window_still_counts_for_superseded() -> None
     report = _classify(events)
     assert report.spawned == 1
     assert _nonzero(report) == {C.LATE_SENTINEL_SUPERSEDED: 1}
+
+
+@pytest.mark.parametrize(
+    ("requeued_at", "expected"),
+    [
+        pytest.param(T0 - HOUR, C.UNCLASSIFIED, id="before-predecessor-spawn"),
+        pytest.param(T0, C.LATE_SENTINEL_SUPERSEDED, id="at-predecessor-spawn"),
+    ],
+)
+def test_requeue_release_lower_bound_is_predecessor_spawn(
+    requeued_at: datetime, expected: C
+) -> None:
+    """#3130: only a requeue at or after the predecessor's spawn releases it."""
+    events = [
+        _ev(T.TICKET_REQUEUED, requeued_at, ticket_id="T-1", client="acme"),
+        _spawn("a", T0),
+        _spawn("s", T0 + 2 * HOUR),
+        _ev(T.SESSION_RESULT_EMITTED, T0 + 3 * HOUR, session_id="a"),
+    ]
+    assert _nonzero(_classify(events)) == {expected: 1}
+
+
+def test_needs_attention_then_clean_completion_is_not_parked() -> None:
+    """#3130: a terminal event after the park ends it; the session completed."""
+    events = [
+        _spawn("s1", T0),
+        _s1(T.SESSION_NEEDS_ATTENTION, paused_status="x"),
+        _ev(T.SESSION_COMPLETED, T0 + 2 * MIN, session_id="s1", crashed=False),
+    ]
+    assert _nonzero(_classify(events)) == {C.COMPLETED_NO_RESULT: 1}
+
+
+# ---- live_ids_from_state (#3129) ---------------------------------------------
+
+
+def test_live_ids_from_state_excludes_terminal_statuses() -> None:
+    state = CwState(
+        sessions=[
+            _make_daemon_session(id=f"s-{status.value}", status=status)
+            for status in SessionStatus
+        ]
+    )
+    live = live_ids_from_state(state)
+    expected = {
+        f"s-{status.value}"
+        for status in SessionStatus
+        if status not in TERMINAL_SESSION_STATUSES
+    }
+    assert live == expected
+    assert "s-completed" not in live
+    assert "s-timed_out" not in live
+    assert {"s-active", "s-idle", "s-backgrounded"} <= live
 
 
 # ---- Window ------------------------------------------------------------------

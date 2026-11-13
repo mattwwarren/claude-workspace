@@ -49,6 +49,7 @@ from cw.contract_manifest._models import (
 )
 from cw.contract_manifest._stages import scope_stage
 from cw.contract_manifest._tags import STRICT_RANGE_TAG, scan_doc_tags
+from cw.models.enums import Stage
 from cw.models.orchestrator_config.constants import CODEX_BACKEND
 
 if TYPE_CHECKING:
@@ -89,13 +90,13 @@ CLAUDE_ONLY_DENYLIST: tuple[str, ...] = (
 )
 
 RENDER_BACKENDS: tuple[str, ...] = (CODEX_BACKEND,)
-RENDER_STAGES: tuple[str, ...] = ("plan", "impl", "finalize")
+RENDER_STAGES: tuple[str, ...] = (Stage.PLAN, Stage.IMPL, Stage.FINALIZE)
 
 #: The docs each stage renders from, in order.
 _STAGE_DOCS: dict[str, tuple[str, ...]] = {
-    "plan": ("auto-dev-plan.md",),
-    "impl": ("auto-dev-impl.md",),
-    "finalize": ("auto-dev-finalize.md", "prep-pr.md"),
+    Stage.PLAN: ("auto-dev-plan.md",),
+    Stage.IMPL: ("auto-dev-impl.md",),
+    Stage.FINALIZE: ("auto-dev-finalize.md", "prep-pr.md"),
 }
 _SHIP_IT_DOC = "ship-it.md"
 
@@ -285,13 +286,13 @@ _FINALIZE_CODEX_ADDENDUM = (
 
 def _stage_addendum(stage: str) -> str:
     """The codex stage addendum appended last to *stage*'s render, or ``""``."""
-    if stage == "plan":
+    if stage == Stage.PLAN:
         return "\n" + _PLAN_CODEX_ADDENDUM
-    if stage == "impl":
+    if stage == Stage.IMPL:
         from cw.codex_impl._result import IMPL_COMPLETE_TRAILER
 
         return "\n" + _IMPL_CODEX_ADDENDUM.replace(_TRAILER_SLOT, IMPL_COMPLETE_TRAILER)
-    if stage == "finalize":
+    if stage == Stage.FINALIZE:
         return "\n" + _FINALIZE_CODEX_ADDENDUM
     return ""
 
@@ -325,7 +326,8 @@ def _check_target(stage: str, backend: str) -> None:
         msg = f"cannot render for backend {backend!r}; supported: {RENDER_BACKENDS}"
         raise UnsupportedBackendError(msg)
     if stage not in RENDER_STAGES:
-        msg = f"cannot render stage {stage!r}; supported: {RENDER_STAGES}"
+        supported = tuple(str(s) for s in RENDER_STAGES)
+        msg = f"cannot render stage {stage!r}; supported: {supported}"
         raise UnsupportedStageError(msg)
 
 
@@ -353,7 +355,7 @@ def _ship_it_text(docs_root: Path) -> str | None:
 def _load_docs(stage: str, docs_root: Path) -> dict[str, str]:
     """The stage's docs (plus a tagged ship-it for finalize), scanned clean."""
     docs = {name: _read(docs_root, name) for name in _STAGE_DOCS[stage]}
-    if stage == "finalize":
+    if stage == Stage.FINALIZE:
         ship_it = _ship_it_text(docs_root)
         if ship_it is not None:
             docs[_SHIP_IT_DOC] = ship_it
@@ -454,9 +456,9 @@ def _sentinel_section(stage: str, session_id: str | None) -> str:
     )
 
     rules = _sentinel_rules(session_id)
-    if stage == "plan":
+    if stage == Stage.PLAN:
         return rules + _PLAN_SENTINEL_TEMPLATE
-    if stage == "impl":
+    if stage == Stage.IMPL:
         return rules + _IMPL_SENTINEL_TEMPLATE
     return rules + _FINALIZE_SENTINEL_NOTE
 
@@ -494,7 +496,7 @@ def render_stage_prompt(
         _CONTRACT_INTRO + "\n\n",
         "\n\n".join(block.text for block in blocks) + "\n",
     ]
-    if stage == "finalize" and not any(b.doc == _SHIP_IT_DOC for b in blocks):
+    if stage == Stage.FINALIZE and not any(b.doc == _SHIP_IT_DOC for b in blocks):
         parts.append("\n" + _SHIP_IT_FALLBACK + "\n")
     parts.append(_sentinel_section(stage, session_id))
     parts.append(_stage_addendum(stage))

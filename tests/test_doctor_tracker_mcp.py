@@ -177,6 +177,7 @@ class TestCodex:
 
         assert (result.ok, result.warn) == (True, True)
         assert f"server linear is {state}" in result.detail
+        assert f"declaration-only check; {_CAVEAT_TAIL}" in result.detail
 
     @pytest.mark.parametrize("state", ["absent", "disabled"])
     def test_plan_lane_gate_on_and_missing_fails(
@@ -278,6 +279,21 @@ class TestOpencode:
         assert (result.ok, result.warn) == (True, True)
         assert "tracker_tool_unavailable" in result.detail
         assert "tracker unset" in result.detail
+        assert "MCP declaration not read: tracker is unset" in result.detail
+        assert "no tracker_mcp_gate.servers entry" not in result.detail
+
+    def test_unset_tracker_codex_names_the_skipped_read(self, tmp_path: Path) -> None:
+        client = _client(
+            tmp_path,
+            tracker=None,
+            executors={Stage.PLAN: CODEX_BACKEND},
+            gate=_gate(server="linear"),
+        )
+
+        result = _only(client)
+
+        assert "MCP declaration not read: tracker is unset" in result.detail
+        assert "no tracker_mcp_gate.servers entry" not in result.detail
 
     def test_no_server_named_warns(self, tmp_path: Path) -> None:
         result = _only(self._client(tmp_path, _gate(server=None), "linear"))
@@ -319,6 +335,7 @@ class TestOpencode:
 
         assert result.ok is False
         assert f"server linear is {state} in {path}" in result.detail
+        assert f"declaration-only check; {_CAVEAT_TAIL}" in result.detail
 
     @pytest.mark.parametrize("state", ["absent", "disabled"])
     def test_gate_off_and_missing_warns(
@@ -354,6 +371,7 @@ class TestOpencode:
 
         assert (result.ok, result.warn) == (True, True)
         assert "MCP declaration unverified" in result.detail
+        assert f"declaration-only check; {_CAVEAT_TAIL}" in result.detail
 
     def test_probe_found_layer_warns_not_fails(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

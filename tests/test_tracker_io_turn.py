@@ -34,6 +34,7 @@ from tests._backend_mcp_helpers import (
     McpStage,
     codex_tracker_client,
     stage_mcp_config,
+    write_system_layer,
 )
 from tests._tool_fakes import codex_usage_stdout, tracker_io_turn_result
 
@@ -190,6 +191,68 @@ def test_other_declared_servers_are_disabled(
     assert isinstance(argv, list)
     assert "mcp_servers.github.enabled=false" in argv
     assert "mcp_servers.linear.enabled=false" not in argv
+
+
+def test_system_layer_declared_servers_are_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#3368: a server only the system layer declares is disabled too."""
+    _stage(monkeypatch, tmp_path)
+    write_system_layer(
+        monkeypatch,
+        tmp_path,
+        "codex",
+        text='[mcp_servers.notion]\ncommand = "x"\n',
+    )
+    runner = FakeCodexRunner()
+    _turn(_context(tmp_path, runner))
+    argv = runner.calls[0]["argv"]
+    assert isinstance(argv, list)
+    assert "mcp_servers.notion.enabled=false" in argv
+    assert "mcp_servers.linear.enabled=false" not in argv
+
+
+def test_unaddressable_system_layer_name_refuses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#3368: a system name the turn cannot address refuses before any launch."""
+    _stage(monkeypatch, tmp_path)
+    write_system_layer(
+        monkeypatch,
+        tmp_path,
+        "codex",
+        text='[mcp_servers."bad.name"]\ncommand = "x"\n',
+    )
+    runner = FakeCodexRunner()
+    outcome = _turn(_context(tmp_path, runner))
+    assert outcome.reason is TrackerIoReason.MCP_SERVER_UNNAMED
+    assert runner.calls == []
+
+
+def test_verified_outcome_carries_the_emitted_bodies(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#3353: the audit hash is taken from exactly the bodies handed to the turn."""
+    _stage(monkeypatch, tmp_path)
+    context = _context(tmp_path, FakeCodexRunner())
+    text = "verdict text"
+    context = TrackerIoContext(
+        runner=_verified_runner(context, text),
+        client=context.client,
+        worktree=context.worktree,
+    )
+    outcome = _turn(context, text)
+    assert outcome.verified
+    assert outcome.emitted == plan_turn_parts(text, context)
+
+
+def test_refused_outcome_emits_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _stage(monkeypatch, tmp_path)
+    outcome = _turn(_context(tmp_path, FakeCodexRunner(returncode=3)))
+    assert not outcome.verified
+    assert outcome.emitted == ()
 
 
 # --- scratch (R7) --------------------------------------------------------------

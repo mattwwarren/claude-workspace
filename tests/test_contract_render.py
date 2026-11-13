@@ -41,6 +41,7 @@ from cw.contract_manifest import (
 )
 from cw.contract_manifest import _render as render_module
 from cw.contract_manifest._render import _stage_addendum
+from cw.models.enums import Stage
 from cw.models.orchestrator_config.constants import CODEX_BACKEND
 from cw.opencode_runner import (
     _IMPL_SENTINEL_TEMPLATE,
@@ -213,6 +214,24 @@ def test_backend_is_checked_before_stage() -> None:
 def test_render_constants() -> None:
     assert render_module.RENDER_BACKENDS == (CODEX_BACKEND,)
     assert render_module.RENDER_STAGES == _STAGES
+
+
+def test_render_stage_constants_are_stage_members() -> None:
+    assert all(isinstance(s, Stage) for s in render_module.RENDER_STAGES)
+    assert set(render_module._STAGE_DOCS) == set(render_module.RENDER_STAGES)
+    assert all(isinstance(s, Stage) for s in render_module._STAGE_DOCS)
+    assert tuple(Stage(s) for s in _STAGES) == render_module.RENDER_STAGES
+
+
+def test_render_module_has_no_bare_stage_literal_comparisons() -> None:
+    source = Path(render_module.__file__).read_text(encoding="utf-8")
+    assert re.findall(r"stage\s*==\s*[\"'](?:plan|impl|finalize)[\"']", source) == []
+
+
+def test_unsupported_stage_message_lists_plain_stage_names() -> None:
+    with pytest.raises(UnsupportedStageError) as exc:
+        render_stage_prompt("bogus", CODEX_BACKEND, docs_root=_COMMANDS_ROOT)
+    assert "supported: ('plan', 'impl', 'finalize')" in str(exc.value)
 
 
 def test_public_names_are_re_exported() -> None:

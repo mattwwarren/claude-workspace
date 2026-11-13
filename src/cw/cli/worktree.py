@@ -8,6 +8,7 @@ from pathlib import Path
 
 import click
 
+from cw._util import NO_CLIENTS_MSG
 from cw.changelog_sync import SyncState, sync_changelog
 from cw.cli._base import _complete_client, handle_errors, main
 from cw.config import load_clients
@@ -166,7 +167,7 @@ def worktree_gc(
     clients = load_clients()
 
     if not clients:
-        click.echo("No clients configured. Add one to ~/.config/cw/clients.yaml.")
+        click.echo(NO_CLIENTS_MSG)
         return
 
     if client_name is not None:
@@ -310,10 +311,12 @@ def worktree_changelog_sync(worktree: Path, base: str) -> None:
     moved, conflict, refused, unavailable), disposition, conflicted_files,
     inserted and detail. Exit 0: clean (nothing to do) or moved (one merge
     commit made; head_sha is the new HEAD). Exit 1: conflict (origin/<base> does
-    not merge cleanly) or refused (a changelog_* rebuild refusal or
-    dirty_worktree); nothing was changed either way, and only `state` tells them
-    apart. Exit 3: unavailable (an unresolvable ref, a git error, git older than
-    2.38); the worktree is left as it was.
+    not merge cleanly) or refused (a changelog_* rebuild refusal; origin/<base>
+    already an ancestor of HEAD while a released section still differs; a merge
+    already in progress in the worktree; or dirty_worktree); nothing was changed
+    either way, and only `state` tells them apart. Exit 3: unavailable (an
+    unresolvable ref, a git error, git older than 2.38); the worktree is left
+    as it was.
     """
     synced = sync_changelog(worktree, base)
     payload = {

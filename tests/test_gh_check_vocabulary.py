@@ -150,18 +150,23 @@ class TestEnumHygiene:
 
 
 class TestReviewMonitorScriptDrift:
-    """The review-monitor script keeps a hand copy it cannot import ``cw`` to share.
+    """The review-monitor script keeps hand copies it cannot import ``cw`` to share.
 
-    AST-extract the two frozensets it hand-duplicates and pin them to the
-    shared sets, so a one-sided edit fails here.
+    AST-extract the two frozensets and the (FAILURE, ERROR) tuple it
+    hand-duplicates and pin them to the shared sets, so a one-sided edit fails
+    here.
     """
 
     @staticmethod
-    def _script_frozenset(name: str) -> frozenset[str]:
-        tree = ast.parse(
+    def _script_tree() -> ast.Module:
+        return ast.parse(
             _REVIEW_MONITOR_ATTENTION.read_text(encoding="utf-8"),
             filename=str(_REVIEW_MONITOR_ATTENTION),
         )
+
+    @classmethod
+    def _script_frozenset(cls, name: str) -> frozenset[str]:
+        tree = cls._script_tree()
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.AnnAssign)
@@ -187,3 +192,28 @@ class TestReviewMonitorScriptDrift:
         copy = self._script_frozenset("_PENDING_CHECKRUN_STATUSES")
         assert copy
         assert copy == PENDING_CHECKRUN_STATUSES
+
+    @classmethod
+    def _script_failed_state_tuple(cls) -> frozenset[str]:
+        # The ``state_str in (...)`` literal in ``_summarize_status_checks``.
+        # Anchored on the left name so an unrelated ``in (...)`` never matches,
+        # and a rename of ``state_str`` fails closed here.
+        for node in ast.walk(cls._script_tree()):
+            if (
+                isinstance(node, ast.Compare)
+                and len(node.ops) == 1
+                and isinstance(node.ops[0], ast.In)
+                and isinstance(node.left, ast.Name)
+                and node.left.id == "state_str"
+                and isinstance(node.comparators[0], ast.Tuple)
+            ):
+                return frozenset(
+                    str(item) for item in ast.literal_eval(node.comparators[0])
+                )
+        message = "state_str tuple not found in review-monitor script"
+        raise AssertionError(message)
+
+    def test_failed_state_tuple_copy_matches_shared_set(self) -> None:
+        copy = self._script_failed_state_tuple()
+        assert copy
+        assert copy == FAILED_STATUS_CONTEXT_STATES

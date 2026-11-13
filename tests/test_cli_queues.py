@@ -3,25 +3,35 @@
 NEW file, 1:1 with ``src/cw/cli/queues.py``. Fixture inventory: ``CliRunner``,
 autouse ``tmp_config_dir`` + ``_isolate_home``, ``cw.events.record_event`` for
 seeding, ``tests.conftest._make_daemon_session`` + ``_seed_sessions`` for the
-live-session case, and a raw write to ``inbox_path()`` for corrupt-line cases.
+live- and terminal-session cases, ``freeze_time`` for the window boundary,
+and a raw write to ``inbox_path()`` for corrupt-line cases.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from click.testing import CliRunner, Result
+from freezegun import freeze_time
 
 from cw.cli import main
 from cw.events import inbox_path, record_event
 from cw.models import OrchestratorEventType, SessionStatus
 from tests._shared.session_seeding import _make_daemon_session, _seed_sessions
 
+NOW = datetime(2026, 11, 9, 12, 0, tzinfo=UTC)
+
 
 def _invoke(*args: str) -> Result:
     return CliRunner().invoke(main, ["event", "session-outcomes", *args])
+
+
+def _bucket(payload: dict[str, Any], cause: str) -> dict[str, Any]:
+    return next(b for b in payload["buckets"] if b["cause"] == cause)
 
 
 def _seed_spawn_and_crash(sid: str, client: str = "acme") -> None:
@@ -31,7 +41,7 @@ def _seed_spawn_and_crash(sid: str, client: str = "acme") -> None:
     )
     record_event(
         OrchestratorEventType.SESSION_COMPLETED,
-        {"session_id": sid, "crashed": True},
+        {"session_id": sid, "crashed": True, "client": client},
     )
 
 
@@ -70,6 +80,11 @@ def test_client_filter_accepts_repeat_and_comma(args: tuple[str, ...]) -> None:
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["spawned"] == 2
+    assert payload["without_result"] == 2
+    assert payload["clients"] == ["acme", "other"]
+    crash = _bucket(payload, "crash")
+    assert crash["count"] == 2
+    assert set(crash["sample_session_ids"]) == {"s1", "s2"}
 
 
 def test_single_client_filter_limits_spawns() -> None:
@@ -78,6 +93,39 @@ def test_single_client_filter_limits_spawns() -> None:
     result = _invoke("-c", "acme", "--json")
     payload = json.loads(result.output)
     assert payload["spawned"] == 1
+    assert _bucket(payload, "crash")["sample_session_ids"] == ["s1"]
+    assert payload["largest_cause"] == "crash"
+    assert payload["clients"] == ["acme"]
+
+
+def test_days_window_and_default_14() -> None:
+    """#3126: the default window is exactly 14 days and ``--days`` moves it."""
+    boundary = NOW - timedelta(days=14)
+    with freeze_time(NOW):
+        with freeze_time(boundary):
+            _seed_spawn_and_crash("edge")
+        with freeze_time(boundary - timedelta(seconds=1)):
+            _seed_spawn_and_crash("outside")
+        default = json.loads(_invoke("--json").output)
+        narrower = json.loads(_invoke("--days", "13", "--json").output)
+        wider = json.loads(_invoke("--days", "15", "--json").output)
+    assert default["spawned"] == 1
+    assert default["window"]["start"] == boundary.isoformat()
+    assert narrower["spawned"] == 0
+    assert wider["spawned"] == 2
+
+
+@pytest.mark.parametrize("status", [SessionStatus.COMPLETED, SessionStatus.TIMED_OUT])
+def test_completed_session_in_state_is_not_in_flight(status: SessionStatus) -> None:
+    """#3129: a terminal session in state is not counted as in flight."""
+    record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"session_id": "done1", "ticket_id": "T-done", "client": "acme"},
+    )
+    _seed_sessions(_make_daemon_session(id="done1", status=status))
+    payload = json.loads(_invoke("--json").output)
+    assert _bucket(payload, "in_flight")["count"] == 0
+    assert _bucket(payload, "unclassified")["count"] == 1
 
 
 @pytest.mark.parametrize("bad", ["0", "-3"])

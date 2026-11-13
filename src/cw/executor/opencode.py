@@ -54,14 +54,6 @@ if TYPE_CHECKING:
     from cw.native_daemon import NativeDaemonClient
 
 
-def _opencode_tracker_server(client: ClientConfig) -> str | None:
-    """The tracker MCP server the client's gate names for opencode (#3055)."""
-    gate = client.tracker_mcp_gate
-    if gate is None or gate.servers is None:
-        return None
-    return gate.servers.get(OPENCODE_BACKEND)
-
-
 def _opencode_preflight(
     config: StageExecutorConfig,
     task: TicketTask,
@@ -177,7 +169,7 @@ def _opencode_preflight(
         session_id=sess.id,
         clean_review=client.review.is_clean,
         tracker=tracker_kind(client.workspace_path),
-        tracker_server=_opencode_tracker_server(client),
+        tracker_server=client.tracker_mcp_server(OPENCODE_BACKEND),
     )
     return _PreflightOK(
         argv=build_opencode_argv(config.model, worktree, prompt),
@@ -214,7 +206,8 @@ class OpencodeExecutor:
 
     opencode has no ``--output-schema`` (probe-confirmed, #1669 R3); the result
     travels as free-form text in ``text`` event payloads, harvested via the
-    ``<<<AUTO_DEV_RESULT>>>`` sentinel pattern. Appropriate only for
+    ``<<<AUTO_DEV_RESULT`` / ``AUTO_DEV_RESULT>>>`` sentinel block pattern.
+    Appropriate only for
     max_parallel=1 lanes (mirrors CodexExecutor).
     """
 

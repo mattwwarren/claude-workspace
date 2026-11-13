@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from cw.exceptions import CwError
 from cw.history import EventType, HistoryEvent
 from cw.history import record_event as record_history_event
+from cw.session_event_vocabulary import OPERATOR_CLOSE_DETAIL
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -24,7 +25,7 @@ def record_operator_close(
     prior_status: SessionStatus,
     ticket_id: str,
     details: Mapping[str, str] | None = None,
-    detail: str = "operator_close",
+    detail: str = OPERATOR_CLOSE_DETAIL,
     record: Callable[[str, HistoryEvent], None] = record_history_event,
 ) -> None:
     """Write the durable history event for an explicit operator close."""

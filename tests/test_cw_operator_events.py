@@ -384,6 +384,68 @@ class TestSubscribeWithCursorOperatorChannel:
         finally:
             unsubscribe(q)
 
+    def test_live_items_equal_replay_items_with_contiguous_offsets(
+        self, tmp_events_dir: Path
+    ) -> None:
+        # The live fan-out and a fresh client's replay must carry the same
+        # persisted records, offsets included (#3214).
+        live_q = subscribe()
+        try:
+            for i in range(3):
+                broadcast(
+                    {
+                        "notification_type": _NOTIFICATION_TYPE,
+                        "message": f"m{i}",
+                        "title": "t",
+                    }
+                )
+            live: list[dict[str, object]] = []
+            while not live_q.empty():
+                live.append(live_q.get_nowait())
+        finally:
+            unsubscribe(live_q)
+
+        assert [r["offset"] for r in live] == [0, 1, 2]
+        assert _operator_mod._read_events_from_offset(0) == live
+
+        q = subscribe_with_cursor("fresh-client")
+        try:
+            replay: list[dict[str, object]] = []
+            while not q.empty():
+                replay.append(q.get_nowait())
+        finally:
+            unsubscribe(q)
+        assert replay == live
+
+    def test_resume_from_acked_cursor_replays_only_the_tail_equal_to_live(
+        self, tmp_events_dir: Path
+    ) -> None:
+        live_q = subscribe()
+        try:
+            for i in range(3):
+                broadcast(
+                    {
+                        "notification_type": _NOTIFICATION_TYPE,
+                        "message": f"m{i}",
+                        "title": "t",
+                    }
+                )
+            live: list[dict[str, object]] = []
+            while not live_q.empty():
+                live.append(live_q.get_nowait())
+        finally:
+            unsubscribe(live_q)
+
+        ack_offset("sub-resume", 2)
+        q = subscribe_with_cursor("sub-resume")
+        try:
+            tail: list[dict[str, object]] = []
+            while not q.empty():
+                tail.append(q.get_nowait())
+        finally:
+            unsubscribe(q)
+        assert tail == [live[2]]
+
 
 # ---------------------------------------------------------------------------
 # TestPollAndForwardOperatorChannel

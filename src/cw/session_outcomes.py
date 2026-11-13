@@ -28,16 +28,14 @@ from cw.models import (
     OrchestratorEventType,
     ReapReason,
 )
+from cw.session_event_vocabulary import (
+    CAUSE_USAGE_LIMIT_CUTOFF,
+    OPERATOR_CLOSE_DETAIL,
+    PHANTOM_REAP_MERGED_REASON,
+    USAGE_LIMITED_MID_TURN,
+)
 
 SCHEMA_VERSION = 1
-
-# Literal values read from payloads. Not imported from cw.reconcile, which
-# this module must not depend on (audit-only rule).
-_REASON_USAGE_MID_TURN = "usage_limited_mid_turn"
-_CAUSE_USAGE_LIMIT_CUTOFF = "usage_limit_cutoff"
-_PAUSED_USAGE_MID_TURN = "usage_limited_mid_turn"
-_REASON_PHANTOM_REAP_MERGED = "phantom_reap_merged"
-_OPERATOR_CLOSE_DETAIL = "operator_close"
 
 _USAGE_REAP_REASONS = frozenset(
     {ReapReason.USAGE_LIMIT_CUTOFF.value, ReapReason.USAGE_LIMIT_MID_TURN.value}
@@ -298,13 +296,13 @@ def _is_operator_close(session_id: str, index: _Index) -> bool:
 
 def _usage_signal(ev: _Event) -> bool:
     if ev.etype == OrchestratorEventType.SESSION_COMPLETED:
-        return ev.payload.get("reason") == _REASON_USAGE_MID_TURN
+        return ev.payload.get("reason") == USAGE_LIMITED_MID_TURN
     if ev.etype == OrchestratorEventType.SESSION_TIMED_OUT:
-        return ev.payload.get("cause") == _CAUSE_USAGE_LIMIT_CUTOFF
+        return ev.payload.get("cause") == CAUSE_USAGE_LIMIT_CUTOFF
     if ev.etype == OrchestratorEventType.SESSION_REAP_PROPOSED:
         return ev.payload.get("reason") in _USAGE_REAP_REASONS
     if ev.etype == OrchestratorEventType.SESSION_NEEDS_ATTENTION:
-        return ev.payload.get("paused_status") == _PAUSED_USAGE_MID_TURN
+        return ev.payload.get("paused_status") == USAGE_LIMITED_MID_TURN
     return False
 
 
@@ -318,7 +316,7 @@ def _phantom_signal(ev: _Event) -> bool:
     if ev.etype == OrchestratorEventType.SESSION_REAP_PROPOSED:
         return ev.payload.get("reason") in _PHANTOM_REAP_REASONS
     if ev.etype == OrchestratorEventType.SESSION_COMPLETED:
-        return ev.payload.get("reason") == _REASON_PHANTOM_REAP_MERGED
+        return ev.payload.get("reason") == PHANTOM_REAP_MERGED_REASON
     return False
 
 
@@ -473,7 +471,7 @@ def _operator_closed_ids(clients: list[str]) -> frozenset[str]:
             client, event_types=[HistoryEventType.SESSION_COMPLETED]
         ):
             session_id = entry.metadata.get("session_id")
-            if entry.detail == _OPERATOR_CLOSE_DETAIL and session_id:
+            if entry.detail == OPERATOR_CLOSE_DETAIL and session_id:
                 closed.add(session_id)
     return frozenset(closed)
 

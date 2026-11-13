@@ -184,20 +184,10 @@ def build_pr_event_message(
     )
 
 
-_V1_OPTIONAL_KEYS: Final = frozenset(
-    {"kind", "source_id", "event_id", "head_sha", "event_time", "received_at"}
-)
-_MESSAGE_KEYS: Final = (
-    frozenset(
-        {
-            "schema_version",
-            "repo",
-            "pr_number",
-            "event_type",
-            "payload",
-        }
-    )
-    | _V1_OPTIONAL_KEYS
+# Wire keys a v1 message must carry explicitly, null when unknown (#3284).
+# ``kind`` and ``received_at`` are already rejected when null for v1 below.
+_V1_NULLABLE_WIRE_KEYS: Final = frozenset(
+    {"source_id", "event_id", "head_sha", "event_time"}
 )
 
 
@@ -237,6 +227,15 @@ class PREventMessage(BaseModel):
                 raise ValueError(msg)
             if self.received_at is None:
                 msg = "schema_version >= 1 requires received_at"
+                raise ValueError(msg)
+            # model_fields_set holds keys sent as JSON null and keyword args
+            # passed as None, so explicit null satisfies it; absent does not.
+            missing = _V1_NULLABLE_WIRE_KEYS - self.model_fields_set
+            if missing:
+                msg = (
+                    "schema_version >= 1 requires keys (null when unknown): "
+                    + ", ".join(sorted(missing))
+                )
                 raise ValueError(msg)
         expected = derive_event_id(
             schema_version=self.schema_version,
@@ -280,6 +279,11 @@ class PREventMessage(BaseModel):
             return cls.model_validate_json(json.dumps(data))
         except ValidationError:
             return None
+
+
+# Derived, not hand-listed: a field added to the model is kept by from_wire
+# without a second edit here (#3286). from_wire reads it at call time.
+_MESSAGE_KEYS: Final = frozenset(PREventMessage.model_fields)
 
 
 __all__ = [
