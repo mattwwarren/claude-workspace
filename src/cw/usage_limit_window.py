@@ -233,9 +233,12 @@ def _release_rows(plan: ClearPlan, now: datetime) -> tuple[list[str], Exception 
                     task.next_eligible_at = _restore_target(task, now)
                     released.append(task.ticket_id)
             if released:
-                save_dev_queue(store)
-    except (OSError, TypeError, ValueError) as exc:
-        return [], exc
+                try:
+                    save_dev_queue(store)
+                except Exception as exc:  # noqa: BLE001 — no rows persisted on save failure
+                    return [], exc
+    except Exception as exc:  # noqa: BLE001 — preserve the audit path for row failures
+        return released, exc
     return released, None
 
 
