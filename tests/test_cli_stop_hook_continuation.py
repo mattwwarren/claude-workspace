@@ -108,7 +108,6 @@ def _row_counter() -> int | None:
 
 @pytest.fixture
 def worktree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setenv("CW_STOP_CONTINUATION_MODE", "enabled")
     session = _seed_session(tmp_path)
     assert session.worktree_path is not None
     _write_hook_context_file(session.worktree_path, headless=True)
@@ -175,26 +174,6 @@ class TestContinuationHappyPath:
 
 
 class TestContinuationCap:
-    def test_shadow_mode_records_qualifying_stop_without_mutation(
-        self,
-        worktree: Path,
-        recorded: list[tuple[object, dict[str, object]]],
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """The default rollout observes qualifying stops without continuing."""
-        monkeypatch.delenv("CW_STOP_CONTINUATION_MODE")
-        caplog.set_level("INFO")
-        _seed_row()
-        _write_transcript(worktree, [_assistant(PLAIN_TEXT)])
-
-        result = _stop(worktree, last_assistant_message=PLAIN_TEXT)
-
-        assert result.stdout.strip() == ""
-        assert _row_counter() is None
-        assert recorded == []
-        assert "stop continuation shadowed" in caplog.text
-
     def test_cap_two_then_falls_through(
         self, worktree: Path, recorded: list[tuple[object, dict[str, object]]]
     ) -> None:

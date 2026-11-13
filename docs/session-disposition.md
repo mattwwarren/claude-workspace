@@ -826,12 +826,8 @@ same-stage requeue. After the cap the hook falls through unchanged to §6c and
 parked; it surfaces through the §6e liveness page, as it did before this change.
 
 The continuation is evidence-driven and bounded, not a retry timer (ADR-0014).
-Rollout is operator-controlled with `CW_STOP_CONTINUATION_MODE`: it defaults to
-`shadow`, which logs qualifying stops without changing the row, recording the
-continuation event or printing a block decision; `enabled` permits the counter,
-event and block decision, while `off` suppresses the behavior. The audit event
-is `session.stop_continued` (see `docs/events.md`) and is emitted only in the
-enabled scope.
+The audit event is `session.stop_continued` (see `docs/events.md`) and is
+emitted when the counter is persisted before the block decision is printed.
 
 ---
 

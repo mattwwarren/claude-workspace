@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import click
@@ -49,9 +48,6 @@ if TYPE_CHECKING:
     from cw.models import Session
 
 logger = logging.getLogger(_LOGGER_NAME)
-
-_STOP_CONTINUATION_MODE_ENV = "CW_STOP_CONTINUATION_MODE"
-_STOP_CONTINUATION_MODES = frozenset({"off", "shadow", "enabled"})
 
 
 class _ContinuationClaim(NamedTuple):
@@ -88,32 +84,11 @@ def maybe_continue_headless_turn(
     transcripts = _find_transcripts(session, cwd_value, claude_session_id)
     if not transcripts or any(_turn_ended_in_tool_error(path) for path in transcripts):
         return
-    mode = _continuation_rollout_mode()
-    if mode != "enabled":
-        if mode == "shadow":
-            logger.info(
-                "stop continuation shadowed: client=%s lane=%s ticket=%s session=%s",
-                task.client,
-                task.lane,
-                ticket_id,
-                session.id,
-            )
-        return
     claim = _claim_stop_continuation(ticket_id, session)
     if claim is None:
         return
     _record_continuation_event(session, claude_session_id, ticket_id, claim)
     _emit_block_decision()
-
-
-def _continuation_rollout_mode() -> str:
-    """Return the operator-controlled continuation rollout mode.
-
-    The default is shadow mode so a fresh install never mutates queue state or
-    blocks a Claude turn. Invalid values fail safe to shadow as well.
-    """
-    mode = os.environ.get(_STOP_CONTINUATION_MODE_ENV, "shadow").strip().lower()
-    return mode if mode in _STOP_CONTINUATION_MODES else "shadow"
 
 
 def _continuation_payload_qualifies(
