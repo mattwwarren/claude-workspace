@@ -386,3 +386,24 @@ class TestApply:
         assert plan.window_until is None
         assert [r.ticket_id for r in plan.rows] == ["A-1", "A-2"]
         assert _apply(plan).rows_released == ("A-1", "A-2")
+
+    def test_window_clear_failure_raises_and_records_nothing(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seed_usage_limit_window(_ACME, _UNTIL)
+        seed_stamped_row(_ACME, "A-1", next_eligible_at=_STAMP)
+
+        def _boom(_client: str, *, cleared_at: datetime) -> None:
+            msg = "state disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.usage_limit_window.clear_usage_limited_until", _boom)
+
+        with pytest.raises(
+            CwError, match=f"could not clear the usage-limit window for {_ACME}"
+        ):
+            _apply()
+
+        assert load_usage_limited_until() == {_ACME: _UNTIL}
+        assert _row("A-1").next_eligible_at == _STAMP
+        assert _cleared_events() == []
