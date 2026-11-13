@@ -7,7 +7,8 @@ can drive every disposition without spawning a real subprocess.
 Fire-and-forget: like AiderRunner, launch() returns a live Popen and the
 caller captures PID + start-time as a LocalLivenessHandle. The opencode run
 completes asynchronously; reconcile/local harvest detects the dead process
-and parses the JSONL log for the ``<<<AUTO_DEV_RESULT>>>`` sentinel.
+and parses the JSONL log for the ``<<<AUTO_DEV_RESULT`` ... ``AUTO_DEV_RESULT>>>``
+sentinel block.
 
 opencode has no ``--output-schema`` (unlike codex); the result travels as
 free-form text in ``text`` event payloads, harvested via the sentinel pattern
@@ -683,15 +684,12 @@ def build_stage_prompt(
     their command files require Claude Code-only machinery an opencode
     subprocess cannot execute (see the shared-fragment note above). Raises
     ``KeyError`` for an unsupported stage value.
-    unsupported stage value.
 
     ``session_id``, when known at spawn time, threads into every stage's
     sentinel rules (FINALIZE included, #3059) so the worker pushes its result
     via ``cw result emit --session-id`` instead of only validating it
     (#2430). FINALIZE's prompt still points at a command file for the flow
     itself; only its emit-then-frame text is the shared fragment.
-    receives it — that stage's prompt points at a command file, not a
-    self-contained sentinel-rules fragment.
 
     ``clean_review`` (the client's ``review.is_clean``, #2806) switches only
     the REVIEW stage to the converge-to-clean prompt, which drives the
@@ -799,7 +797,8 @@ def extract_text_from_jsonl(log_content: str) -> str:
     opencode's ``--format json`` stream emits events with a ``type`` field.
     Text content lives in ``text`` events:
     ``{"type": "text", "part": {"text": "..."}}``. The sentinel
-    (``<<<AUTO_DEV_RESULT>>>``) is embedded in these text events. Returns the
+    (opened by ``<<<AUTO_DEV_RESULT``, closed by ``AUTO_DEV_RESULT>>>``) is
+    embedded in these text events. Returns the
     concatenation of all text event payloads, or empty string if no text events
     are found or the JSONL is unparseable.
 

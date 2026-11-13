@@ -206,7 +206,8 @@ class OpencodeExecutor:
 
     opencode has no ``--output-schema`` (probe-confirmed, #1669 R3); the result
     travels as free-form text in ``text`` event payloads, harvested via the
-    ``<<<AUTO_DEV_RESULT>>>`` sentinel pattern. Appropriate only for
+    ``<<<AUTO_DEV_RESULT`` / ``AUTO_DEV_RESULT>>>`` sentinel block pattern.
+    Appropriate only for
     max_parallel=1 lanes (mirrors CodexExecutor).
     """
 

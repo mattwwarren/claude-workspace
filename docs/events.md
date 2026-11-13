@@ -2757,8 +2757,8 @@ normalisation can produce `readback_mismatch` on a faithful post.
 cw never retries a post. On this event the operator reads the ticket for a
 duplicate or stray comment before any re-run. Emitted after Step 4 and
 best-effort: it never holds the row or changes the persisted result (the
-durable worktree artifact is already written). A verified post emits nothing
-and logs its ids at info. `correlation_id` is the `ticket_id`. In
+durable worktree artifact is already written). A verified post emits `review.verdict_comment_posted` (below) instead of this event and
+logs its ids at info. `correlation_id` is the `ticket_id`. In
 `_DEFAULT_OPERATOR_EVENT_TYPES`.
 
 ### `review.verdict_comment_posted`

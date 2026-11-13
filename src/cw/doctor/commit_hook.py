@@ -356,9 +356,9 @@ def _install_python_findings(
 ) -> Iterator[_InstallPythonFinding]:
     """Each shared hook of *repo* whose interpreter is in a base, missing, or both.
 
-    The missing-interpreter test runs only for a hook whose interpreter is
-    absent from every base's lexical match, and the stale-``pre-commit`` dedup
-    reads the config only when the interpreter is actually missing.
+    The missing-interpreter test runs for every hook, whether or not its
+    interpreter lies in a base (a hook can be both), and the stale-``pre-commit``
+    dedup reads the config only when the interpreter is not an executable file.
     """
     try:
         hooks = git_hooks_dir(repo, timeout=timeout)
