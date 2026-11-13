@@ -22,6 +22,8 @@ from cw.dispatch_state import (
     resolve_usage_limited_until,
     save_usage_limit_armed_at,
 )
+from cw.dispatch_state_marks import load_usage_limit_clear_marks
+from cw.dispatch_state_marks_parse import drop_unseen_cleared, unseen_clear_marks
 from cw.events import read_events
 from cw.models import OrchestratorEventType
 
@@ -53,11 +55,73 @@ def _merge_persisted_usage_limited_until(
     return merge_usage_limited_until(usage_limited_until, load_usage_limited_until())
 
 
+def _drop_operator_cleared_windows(
+    windows: Mapping[str, datetime],
+    clears_seen: dict[str, datetime],
+) -> tuple[dict[str, datetime], set[str]]:
+    """Drop the in-memory window of every client an operator cleared (#3547).
+
+    Runs at tick start, BEFORE the merge with disk. A clear mark that differs
+    from the one in *clears_seen* is an operator clear this loop has not
+    observed: that client's in-memory window is dropped, so the later-of merge
+    cannot keep the stale copy alive, and disk becomes authoritative (the
+    entry is gone, or it is a legitimately fresh arm). Returns the pruned map
+    and every newly observed client, whether or not it had a window in
+    memory. The ONLY mutator of *clears_seen*, so this edge-triggered observe
+    is the single place that reports an operator clear.
+    """
+    marks = load_usage_limit_clear_marks()
+    observed = unseen_clear_marks(marks, clears_seen)
+    kept = {c: until for c, until in windows.items() if c not in observed}
+    for client in sorted(observed):
+        if client in windows:
+            _log.info(
+                "dispatch: operator cleared the usage limit window for %s "
+                "(was until %s); dropped it from memory",
+                client,
+                windows[client],
+            )
+        else:
+            _log.info(
+                "dispatch: operator clear mark observed for %s; "
+                "no in-memory window to drop",
+                client,
+            )
+    clears_seen.update({client: marks[client] for client in observed})
+    return kept, observed
+
+
+def _carried_windows(
+    usage_limited_until: Mapping[str, datetime],
+    clears_seen: Mapping[str, datetime] | None,
+) -> dict[str, datetime]:
+    """This tick's in-memory windows, minus stale carries of a cleared client.
+
+    With *clears_seen* None nothing is filtered. Otherwise a client whose
+    on-disk clear mark this loop has not observed yet is left out, so the arm
+    step never re-persists the copy the operator just cleared (#3547). Never
+    mutates *clears_seen*: the tick-start observe consumes marks, not this.
+    """
+    if clears_seen is None:
+        return dict(usage_limited_until)
+    kept, dropped = drop_unseen_cleared(
+        usage_limited_until, load_usage_limit_clear_marks(), clears_seen
+    )
+    for client in sorted(dropped):
+        _log.info(
+            "dispatch: not re-persisting the stale usage limit window for %s; "
+            "an operator clear mark has not been observed yet",
+            client,
+        )
+    return kept
+
+
 def _arm_usage_limit_windows(
     usage_limited_until: Mapping[str, datetime],
     detections: Mapping[str, datetime | None],
     *,
     backoff_seconds: int,
+    clears_seen: Mapping[str, datetime] | None = None,
 ) -> dict[str, datetime]:
     """Open a back-off window for each client that hit a limit this tick (#1409).
 
@@ -85,18 +149,30 @@ def _arm_usage_limit_windows(
     this process still backs off. The reconcile mid-turn arm is the opposite
     order (audit first, then persist) for resume-idempotence; see
     ``docs/events.md`` for the decision.
+
+    With *clears_seen* (#3547) a stale carry of an operator-cleared client is
+    left out (:func:`_carried_windows`), and the detections are passed to the
+    save as ``fresh``, which is never filtered: a real detection beats a clear.
     """
     now = datetime.now(UTC)
     previously_known = merge_usage_limited_until(
-        usage_limited_until, load_usage_limited_until()
+        _carried_windows(usage_limited_until, clears_seen),
+        load_usage_limited_until(),
     )
     armed = previously_known
+    fresh: dict[str, datetime] = {}
     resolved: dict[str, tuple[datetime, datetime | None]] = {}
     for client, reset_at in detections.items():
         until = resolve_usage_limited_until(now, reset_at, backoff_seconds)
         armed = merge_usage_limited_until(armed, {client: until})
+        fresh = merge_usage_limited_until(fresh, {client: until})
         resolved[client] = (until, reset_at)
-    merged = merge_and_save_usage_limited_until(armed)
+    if clears_seen is None:
+        merged = merge_and_save_usage_limited_until(armed)
+    else:
+        merged = merge_and_save_usage_limited_until(
+            armed, fresh=fresh, clears_seen=clears_seen
+        )
     persisted = load_usage_limited_until()
     for client, (until, reset_at) in resolved.items():
         effective_until = merged.get(client)
@@ -181,13 +257,14 @@ def _arm_and_persist_usage_limit_window(
     usage_limit_clients: Mapping[str, datetime | None],
     *,
     backoff_seconds: int,
+    clears_seen: Mapping[str, datetime] | None = None,
 ) -> tuple[dict[str, datetime], datetime]:
     """Arm a fresh usage-limit window per detecting client and persist it.
 
     Called from the dispatch loop only when a tick reports a usage limit that
     is not already inside an active window. Returns the merged, persisted
     mapping and the fleet-level arm timestamp (#1343 R2) so the caller can
-    carry both forward.
+    carry both forward. *clears_seen* is passed through to the arm (#3547).
     """
     # Persist, verify and audit happen inside _arm_usage_limit_windows (#2276).
     # Its save is a read-merge-write under ONE lock (#1409 review round 4), so
@@ -196,6 +273,7 @@ def _arm_and_persist_usage_limit_window(
         usage_limited_until,
         usage_limit_clients,
         backoff_seconds=backoff_seconds,
+        clears_seen=clears_seen,
     )
     # #1343 R2: stamp the arm timestamp on every fresh detection so the
     # eventual cleared-event's detected_at is exact, not derived from

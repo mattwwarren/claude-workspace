@@ -35,6 +35,7 @@ from cw.dispatch_state import (
     load_usage_limit_armed_at,
     load_usage_limited_until,
 )
+from cw.dispatch_state_marks import load_usage_limit_clear_marks
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import (
     ConfigValidationError,
@@ -84,6 +85,7 @@ from cw.dispatch.session_completions import _apply_events_to_store
 from cw.dispatch.tick import dispatch_tick
 from cw.dispatch.usage_limit_windows import (
     _arm_and_persist_usage_limit_window,
+    _drop_operator_cleared_windows,
     _merge_persisted_usage_limited_until,
     _reconcile_unannounced_usage_limit_windows,
     _usage_limit_window_is_active,
@@ -262,6 +264,7 @@ def _handle_usage_limit_window_transition(
     *,
     usage_limited_until: Mapping[str, datetime],
     armed_at: datetime | None,
+    operator_cleared: bool = False,
 ) -> bool:
     """Detect an armed->cleared usage-limit backoff transition; emit for it (#1343).
 
@@ -286,11 +289,58 @@ def _handle_usage_limit_window_transition(
     loop-per-fleet invariant (documented, not enforced; #1362, confirmed
     still OPEN). A second concurrent loop would each independently observe
     the same transition and double-emit.
+
+    *operator_cleared* (#3547) is True on the tick that newly observed an
+    operator clear mark: the ``cw dev-queue usage-limit clear`` event is then
+    the one audit line, so this emission is suppressed.
     """
     now_active = _usage_limit_window_is_active(usage_limited_until)
     if was_active and not now_active:
-        _emit_usage_limit_cleared(armed_at, cleared_at=datetime.now(UTC))
+        if operator_cleared:
+            _log.info(
+                "dispatch: usage limit window cleared by the operator; suppressing"
+                " the loop's dispatch.usage_limit_cleared (the operator event is"
+                " the audit line)"
+            )
+        else:
+            _emit_usage_limit_cleared(armed_at, cleared_at=datetime.now(UTC))
     return now_active
+
+
+def _refresh_usage_limit_windows(
+    usage_limited_until: Mapping[str, datetime],
+    *,
+    clears_seen: dict[str, datetime],
+    was_active: bool,
+    armed_at: datetime | None,
+    once: bool,
+) -> tuple[dict[str, datetime], bool]:
+    """Per-tick window refresh: observe operator clears, merge disk, transition.
+
+    Re-reads the shared back-off sidecar every tick (#1346) -- see
+    :func:`_merge_persisted_usage_limited_until` for why this must merge
+    rather than overwrite. An operator clear is dropped from memory first
+    (#3547), so the merge cannot keep the stale copy alive. #1343 R3: the
+    transition check is skipped in --once mode. A single tick's
+    pre-loop-loaded *was_active* could otherwise appear to "lapse" within that
+    one tick (e.g. a window that was seconds from expiry at loop start), which
+    would violate --once's "never emits" contract -- the natural multi-tick
+    invariant this check relies on doesn't hold for a single-tick run.
+    Returns the refreshed windows and this tick's active state.
+    """
+    windows, operator_cleared = _drop_operator_cleared_windows(
+        usage_limited_until, clears_seen
+    )
+    windows = _merge_persisted_usage_limited_until(windows)
+    if once:
+        return windows, was_active
+    active = _handle_usage_limit_window_transition(
+        was_active,
+        usage_limited_until=windows,
+        armed_at=armed_at,
+        operator_cleared=bool(operator_cleared),
+    )
+    return windows, active
 
 
 def _reload_tick_config(
@@ -832,6 +882,9 @@ def _run_dispatch_loop_body(
     # immediately (#804).
     # Keyed by client name since #1409 -- one client's parsed reset must not
     # park the rest of the fleet.
+    # Operator clear marks this loop has observed (#3547), seeded before the
+    # windows so a clear landing in between is still seen on the first tick.
+    usage_limit_clears_seen = load_usage_limit_clear_marks()
     usage_limited_until: dict[str, datetime] = load_usage_limited_until()
     # Recover an armed event that was lost after its sidecar write, before the
     # first normal dispatch tick can run (#2276).
@@ -849,25 +902,15 @@ def _run_dispatch_loop_body(
         while True:
             config = _reload_tick_config(config, max_parallel)
 
-            # Re-read the shared back-off sidecar every tick (#1346) -- see
-            # _merge_persisted_usage_limited_until for why this must merge
-            # rather than overwrite.
-            usage_limited_until = _merge_persisted_usage_limited_until(
-                usage_limited_until
-            )
-            # #1343 R3: skip the transition check in --once mode. A single
-            # tick's pre-loop-loaded `usage_limit_window_active` could
-            # otherwise appear to "lapse" within that one tick (e.g. a
-            # window that was seconds from expiry at loop start), which
-            # would violate --once's "never emits" contract -- the natural
-            # multi-tick invariant this check relies on doesn't hold for a
-            # single-tick run.
-            if not once:
-                usage_limit_window_active = _handle_usage_limit_window_transition(
-                    usage_limit_window_active,
-                    usage_limited_until=usage_limited_until,
+            usage_limited_until, usage_limit_window_active = (
+                _refresh_usage_limit_windows(
+                    usage_limited_until,
+                    clears_seen=usage_limit_clears_seen,
+                    was_active=usage_limit_window_active,
                     armed_at=usage_limit_window_armed_at,
+                    once=once,
                 )
+            )
 
             consume_completed_sessions()
             _run_stale_dispatch_watch_registration_guarded()
@@ -910,6 +953,7 @@ def _run_dispatch_loop_body(
                         usage_limited_until,
                         result.usage_limit_clients,
                         backoff_seconds=config.usage_limit_backoff_seconds,
+                        clears_seen=usage_limit_clears_seen,
                     )
                 )
 

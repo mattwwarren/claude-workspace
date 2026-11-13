@@ -7004,9 +7004,10 @@ class TestDispatchUsageLimitBackoff:
 
         def capturing_merge_and_save(
             windows: Mapping[str, datetime],
+            **kwargs: Mapping[str, datetime] | None,
         ) -> dict[str, datetime]:
             saved.append(windows)
-            return real_merge_and_save(windows)
+            return real_merge_and_save(windows, **kwargs)
 
         monkeypatch.setattr(
             "cw.dispatch.usage_limit_windows.merge_and_save_usage_limited_until",
@@ -7667,9 +7668,10 @@ class TestUsageLimitResetThreading:
 
         def capturing_merge_and_save(
             windows: Mapping[str, datetime],
+            **kwargs: Mapping[str, datetime] | None,
         ) -> dict[str, datetime]:
             saved.append(windows)
-            return real_merge_and_save(windows)
+            return real_merge_and_save(windows, **kwargs)
 
         monkeypatch.setattr(
             "cw.dispatch.usage_limit_windows.merge_and_save_usage_limited_until",
