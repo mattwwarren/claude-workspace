@@ -18,6 +18,7 @@ import pytest
 
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_finalize import _gates
+from cw.codex_finalize._ci_evidence import CiContext, DeferredGate
 from cw.codex_finalize._gates import (
     APPROVAL_CHECK_PREFIX,
     APPROVAL_NOT_REQUIRED,
@@ -26,6 +27,7 @@ from cw.codex_finalize._gates import (
     OVERRIDE_FRICTION,
     OVERRIDE_SCRIPT_NAME,
     TIP_CHECK_PREFIX,
+    FinalizeGateRun,
     check_branch,
     gate_scope,
     resolve_tier,
@@ -632,8 +634,23 @@ def gated(repo: Path) -> Path:
     return repo
 
 
+_PR_URL = "https://github.com/o/r/pull/7"
+
+
+def _ci(path: str) -> CiContext:
+    """The CI context a path carries: the create path has no PR yet."""
+    if path == "create":
+        return CiContext(base="main", head=_HEAD)
+    return CiContext(base="main", pr_number=7, pr_url=_PR_URL, head=_HEAD)
+
+
+def _gate_run(repo: Path, path: str) -> FinalizeGateRun:
+    return run_finalize_quality_gates(repo, scope=_SCOPE, path=path, ci=_ci(path))
+
+
 def _gates_run(repo: Path, path: str) -> tuple[FinalizeBlock | None, list[str]]:
-    return run_finalize_quality_gates(repo, scope=_SCOPE, path=path)
+    run = _gate_run(repo, path)
+    return run.block, run.friction
 
 
 @pytest.mark.parametrize("path", ["reuse", "create"])
@@ -768,3 +785,202 @@ def test_gate_scope_labels_cycle_zero() -> None:
         _CLIENT,
         "sess-1",
     )
+
+
+# --- CI evidence (#3618) ------------------------------------------------------
+
+
+def _logging_gates(log: Path, *names: str) -> tuple[tuple[str, str, float], ...]:
+    """Gates that append their name to *log* (outside the worktree) when run."""
+    return tuple((name, f"echo {name} >> {log}", 5.0) for name in names)
+
+
+def _ran(log: Path) -> list[str]:
+    return log.read_text(encoding="utf-8").split() if log.exists() else []
+
+
+class TestCreateCiEvidence:
+    def test_a_deferred_gate_is_dropped_and_reported(
+        self, gated: Path, tmp_path: Path
+    ) -> None:
+        log = tmp_path / "ran.log"
+        stub = install_home_prep_pr_state(
+            tmp_path / "state", *_logging_gates(log, "lint", "fmt")
+        )
+        stub.defer(("lint", ("ci-lint", "ci-lint-2")))
+        run = _gate_run(gated, "create")
+        assert run.block is None
+        assert run.deferred == (DeferredGate("lint", ("ci-lint", "ci-lint-2")),)
+        assert run.friction == [
+            "create_path_gate_ci_deferred: lint via ci-lint, ci-lint-2",
+            "create_path_gates: passed",
+        ]
+        assert _ran(log) == ["fmt"]
+        assert "ci-deferral --base main" in stub.calls()
+
+    def test_every_gate_deferred_reports_only_the_deferral(
+        self, gated: Path, tmp_path: Path
+    ) -> None:
+        log = tmp_path / "ran.log"
+        stub = install_home_prep_pr_state(
+            tmp_path / "state", *_logging_gates(log, "lint")
+        )
+        stub.defer(("lint", ("ci-lint",)))
+        run = _gate_run(gated, "create")
+        assert run.block is None
+        assert run.friction == ["create_path_gate_ci_deferred: lint via ci-lint"]
+        assert [d.gate for d in run.deferred] == ["lint"]
+        assert _ran(log) == []
+
+    def test_no_map_runs_every_gate_with_nothing_deferred(
+        self, gated: Path, tmp_path: Path
+    ) -> None:
+        log = tmp_path / "ran.log"
+        install_home_prep_pr_state(tmp_path / "state", *_logging_gates(log, "lint"))
+        run = _gate_run(gated, "create")
+        assert run.deferred == ()
+        assert run.friction == ["create_path_gates: passed"]
+        assert _ran(log) == ["lint"]
+
+    def test_an_unavailable_consult_runs_every_gate_locally(
+        self, gated: Path, tmp_path: Path
+    ) -> None:
+        log = tmp_path / "ran.log"
+        stub = install_home_prep_pr_state(
+            tmp_path / "state", *_logging_gates(log, "lint", "fmt")
+        )
+        stub.set(deferral_exit=1)
+        run = _gate_run(gated, "create")
+        assert run.block is None
+        assert run.deferred == ()
+        assert run.friction == [
+            "ci_evidence_unavailable: ci-deferral exit 1",
+            "create_path_gates: passed",
+        ]
+        assert _ran(log) == ["lint", "fmt"]
+
+    def test_zero_detected_gates_never_consult(
+        self, gated: Path, tmp_path: Path
+    ) -> None:
+        stub = install_home_prep_pr_state(tmp_path / "state")
+        run = _gate_run(gated, "create")
+        assert run.friction == ["create_path_gates: none_detected"]
+        assert not any(call.startswith("ci-") for call in stub.calls())
+
+    def test_a_red_local_gate_still_blocks_beside_a_deferred_one(
+        self, gated: Path, tmp_path: Path
+    ) -> None:
+        stub = install_home_prep_pr_state(
+            tmp_path / "state", ("lint", "true", 5.0), ("fmt", "exit 3", 5.0)
+        )
+        stub.defer(("lint", ("ci-lint",)))
+        run = _gate_run(gated, "create")
+        assert run.block is not None
+        assert run.block.reason == AGENT_BLOCK
+        assert "`fmt`" in run.block.details
+
+
+def _park(flavor: str, state: str, url: str | None = None) -> dict[str, object]:
+    return {
+        "flavor": flavor,
+        "gate": "lint",
+        "checks": ["ci-lint"],
+        "failed_check": "ci-lint",
+        "check_state": state,
+        "failed_url": url,
+        "sha": _HEAD,
+    }
+
+
+class TestReuseCiEvidence:
+    def test_a_pending_park_blocks_without_running_any_gate(
+        self, gated: Path, tmp_path: Path
+    ) -> None:
+        log = tmp_path / "ran.log"
+        stub = install_home_prep_pr_state(
+            tmp_path / "state", *_logging_gates(log, "lint", "fmt")
+        )
+        stub.reuse_plan(park=_park("pending", "in_progress"))
+        run = _gate_run(gated, "reuse")
+        block = run.block
+        assert block is not None
+        assert block.reason == "awaiting_ci_evidence"
+        assert block.retry_eligible is True
+        assert block.stage == "stage5_post_create"
+        assert block.details == (
+            f"ci_evidence_pending: PR #7 ({_PR_URL}) at head {_HEAD}: gate lint "
+            "mapped to check ci-lint is in_progress; cw did not arm auto-merge "
+            "and did not run the gate locally."
+        )
+        assert block.pr_info == {
+            "number": 7,
+            "url": _PR_URL,
+            "auto_merge": False,
+            "base": "main",
+        }
+        assert _ran(log) == []
+        assert "ci-reuse-plan --pr 7 --base main" in stub.calls()
+
+    def test_a_red_park_is_not_retry_eligible(
+        self, gated: Path, tmp_path: Path
+    ) -> None:
+        stub = install_home_prep_pr_state(tmp_path / "state", ("lint", "true", 5.0))
+        stub.reuse_plan(park=_park("red", "failure", "https://ci/run/1"))
+        block = _gate_run(gated, "reuse").block
+        assert block is not None
+        assert block.reason == "awaiting_ci_evidence"
+        assert block.retry_eligible is False
+        assert block.details.startswith(
+            f"ci_evidence_red: PR #7 ({_PR_URL}) at head {_HEAD}: gate lint mapped "
+            "to check ci-lint concluded failure (https://ci/run/1). This is a "
+            "failing CI check, not a gate failure;"
+        )
+
+    def test_a_skipped_gate_is_dropped_and_logged(
+        self, gated: Path, tmp_path: Path
+    ) -> None:
+        log = tmp_path / "ran.log"
+        stub = install_home_prep_pr_state(
+            tmp_path / "state", *_logging_gates(log, "lint", "fmt")
+        )
+        stub.reuse_plan(skip=(("lint", ("ci-lint",)),))
+        run = _gate_run(gated, "reuse")
+        assert run.block is None
+        assert run.deferred == ()
+        assert run.friction == [
+            "reuse_path_gate_ci_covered: lint via ci-lint",
+            "reuse_path_gates: passed",
+        ]
+        assert _ran(log) == ["fmt"]
+
+    def test_every_gate_covered_passes_without_running_any(
+        self, gated: Path, tmp_path: Path
+    ) -> None:
+        log = tmp_path / "ran.log"
+        stub = install_home_prep_pr_state(
+            tmp_path / "state", *_logging_gates(log, "lint")
+        )
+        stub.reuse_plan(skip=(("lint", ("ci-lint",)),))
+        run = _gate_run(gated, "reuse")
+        assert run.block is None
+        assert run.friction == [
+            "reuse_path_gate_ci_covered: lint via ci-lint",
+            "reuse_path_gates: passed",
+        ]
+        assert _ran(log) == []
+
+    def test_an_unavailable_plan_runs_every_gate_locally(
+        self, gated: Path, tmp_path: Path
+    ) -> None:
+        log = tmp_path / "ran.log"
+        stub = install_home_prep_pr_state(
+            tmp_path / "state", *_logging_gates(log, "lint")
+        )
+        stub.set(reuse_plan_raw="not json")
+        run = _gate_run(gated, "reuse")
+        assert run.block is None
+        assert run.friction == [
+            "ci_evidence_unavailable: ci-reuse-plan output is not JSON",
+            "reuse_path_gates: passed",
+        ]
+        assert _ran(log) == ["lint"]
