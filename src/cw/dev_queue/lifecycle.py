@@ -33,6 +33,7 @@ from cw.dev_queue.review_attestation import (
     attest_review_exit,
     record_review_attestation,
 )
+from cw.dev_queue.stage_entry import enter_stage
 from cw.dev_queue.storage import load_dev_queue
 from cw.events import record_event
 from cw.gh import fetch_approved_plan_comment
@@ -424,7 +425,8 @@ def _consume_red_recovery_evidence(
     moved past the feedback's ``reviewed_sha``; keeping it would park every
     later IMPL entry (a FINALIZE self-heal regress, ``requeue --regress``) on
     ``review_feedback_stale``. So every mutator that moves a row OUT of IMPL
-    calls this: the four ``task.stage =`` writers in this module
+    calls this: the four stage writers in this module, each routed through
+    :func:`~cw.dev_queue.stage_entry.enter_stage`
     (``_advance_stage``, ``_stamp_salvage_stage``, ``_advance_task_pointer``,
     ``_stage_regress``); the fifth write, ``dispatch/claim/spawn.py``'s
     in-memory mirror of a stored PLAN-to-IMPL move, never has
@@ -459,7 +461,8 @@ def _advance_stage(task: TicketTask, stages: list[Stage], target_stage: Stage) -
     keeps that ownership. Returns the pre-mutation stage.
     """
     old_stage = task.stage
-    task.stage = target_stage
+    if target_stage != old_stage:
+        enter_stage(task, target_stage)
     _consume_red_recovery_evidence(task, old_stage, target_stage)
     _raise_stage_high_water(task, stages, target_stage)
     _emit_stage_change(task, old_stage, target_stage, "advance")
@@ -512,7 +515,8 @@ def _stamp_salvage_stage(task: TicketTask) -> None:
     distinguishability is ever needed.
     """
     old_stage = task.stage
-    task.stage = Stage.FINALIZE
+    if old_stage != Stage.FINALIZE:
+        enter_stage(task, Stage.FINALIZE)
     _consume_red_recovery_evidence(task, old_stage, Stage.FINALIZE)
     _emit_stage_change(task, old_stage, Stage.FINALIZE, "advance")
 
@@ -532,7 +536,7 @@ def _advance_task_pointer(task: TicketTask, stages: list[Stage]) -> None:
     """
     old_stage = task.stage
     idx = stages.index(task.stage)
-    task.stage = stages[idx + 1]
+    enter_stage(task, stages[idx + 1])
     _consume_red_recovery_evidence(task, old_stage, task.stage)
     _raise_stage_high_water(task, stages, task.stage)
     # unproductive=False (GitHub #1750): this is the shared chokepoint for
@@ -729,7 +733,8 @@ def _stage_regress(
     function stays pure mutation, with no git I/O.
     """
     old_stage = task.stage
-    task.stage = target_stage
+    if target_stage != old_stage:
+        enter_stage(task, target_stage)
     _consume_red_recovery_evidence(task, old_stage, target_stage)
     task.regress_attempts += 1
     task.regressed_into_stage = target_stage
