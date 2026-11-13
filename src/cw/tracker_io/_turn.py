@@ -95,6 +95,9 @@ class TrackerIoOutcome:
     parts_total: int
     posted: tuple[PostedComment, ...] = ()
     marker_survived: bool | None = None
+    # The exact marked, redacted bodies handed to the turn (#3353). Empty for a
+    # refusal, where nothing was emitted; the audit hash is computed from these.
+    emitted: tuple[str, ...] = ()
 
     @property
     def verified(self) -> bool:
@@ -133,13 +136,6 @@ def plan_turn_parts(
     return tuple(agent_marked_body(body) for body in plan.bodies)
 
 
-def _server_name(client: ClientConfig) -> str | None:
-    gate = client.tracker_mcp_gate
-    if gate is None or gate.servers is None:
-        return None
-    return gate.servers.get(CODEX_BACKEND)
-
-
 def _preflight(
     ticket_id: str, tracker: str, client: ClientConfig
 ) -> tuple[str, tuple[str, str]] | TrackerIoReason:
@@ -147,7 +143,7 @@ def _preflight(
     try:
         tools = comment_tools_for(tracker)
         # A missing servers.codex entry is "" here: MCP_SERVER_UNNAMED too.
-        server = validate_server_name(_server_name(client) or "")
+        server = validate_server_name(client.tracker_mcp_server(CODEX_BACKEND) or "")
         validate_ticket_id(ticket_id)
     except TrackerIoConfigError as exc:
         return exc.reason
@@ -191,6 +187,7 @@ def _classify(
         total,
         verified.posted,
         verified.marker_survived,
+        emitted=parts,
     )
 
 

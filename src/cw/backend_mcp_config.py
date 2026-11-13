@@ -220,18 +220,12 @@ def _other_layers(backend: str, root: Path, user_path: Path) -> str | None:
     return None
 
 
-def declared_server_names(backend: str) -> tuple[str, ...] | None:
-    """The MCP server names *backend*'s user-layer config declares (#3057).
+def _layer_server_names(path: Path) -> tuple[str, ...] | None:
+    """The ``mcp_servers`` names one codex config file declares, or ``None``.
 
-    Codex only, in declaration order; ``()`` when the file parses and has no
-    ``mcp_servers`` section. ``None`` when the answer is unknown: another
-    backend, a missing or unreadable file, a parse error or a non-table
-    section. The tracker-IO turn disables every name it gets and none on
-    ``None``; project and system layers are not read.
+    ``None`` for a missing or unreadable file, a parse error or a non-table
+    section: the answer for that layer is unknown.
     """
-    path = user_layer_path(backend) if backend == _CODEX else None
-    if path is None:
-        return None
     loaded = _load(path, _parse_toml)
     if isinstance(loaded, str):
         return None
@@ -239,6 +233,30 @@ def declared_server_names(backend: str) -> tuple[str, ...] | None:
     if not isinstance(container, dict):
         return None
     return tuple(str(name) for name in container)
+
+
+def declared_server_names(backend: str) -> tuple[str, ...] | None:
+    """The MCP server names *backend*'s user and system layers declare (#3057, #3368).
+
+    Codex only: the user layer then the system layer (``/etc/codex/config.toml``),
+    user names first, de-duplicated, in declaration order. A system-layer server
+    is enabled for every codex turn unless disabled, so a caller that disables
+    every name it gets must see those too. A project layer is not read: the
+    tracker-IO turn's cwd is a cw-owned scratch directory, so none reaches it.
+
+    ``()`` when a layer parses and has no ``mcp_servers`` section. ``None`` when
+    no layer's answer is known (another backend, or every layer missing,
+    unreadable, unparseable or holding a non-table section); callers disable
+    nothing on ``None``.
+    """
+    if backend != _CODEX:
+        return None
+    user_path = user_layer_path(backend)
+    paths = (*((user_path,) if user_path else ()), *_SYSTEM_LAYERS.get(backend, ()))
+    answers = [names for names in map(_layer_server_names, paths) if names is not None]
+    if not answers:
+        return None
+    return tuple(dict.fromkeys(name for names in answers for name in names))
 
 
 def read_backend_mcp(backend: str, server: str, root: Path) -> McpConfigReading:

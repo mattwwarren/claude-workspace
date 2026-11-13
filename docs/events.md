@@ -2783,8 +2783,12 @@ called after a tracker-IO turn's self-attested verification succeeds
 ```
 **Semantics:** GitHub #3057 (RFC 0018 A2). This append-only audit record
 contains the ticket, model-reported part/comment ids, client, session,
-reviewed SHA, posting timestamp and a hash of the rendered verdict text. The
-event records cw's verification result; it is not independent proof of
+reviewed SHA, posting timestamp and a hash of the marked, redacted bodies as
+sent (one body hashes to itself; several bodies join with a newline before
+hashing; a GitHub post hashes the marked comment body it posted). The hash
+was of the pre-redaction text before #3353, so events older than that change
+carry the old definition with no discriminator. The event records cw's
+verification result; it is not independent proof of
 delivery. It is not forwarded by default. `correlation_id` is the `ticket_id`.
 
 ### `review.operator_context_undelivered`

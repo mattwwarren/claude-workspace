@@ -267,6 +267,14 @@ def emit_verdict_comment_unverified(
     )
 
 
+def posted_content_sha256(bodies: Sequence[str]) -> str:
+    """Audit hash of the bodies as posted: one body hashes to itself.
+
+    Several bodies are joined with a newline before hashing.
+    """
+    return hashlib.sha256("\n".join(bodies).encode("utf-8")).hexdigest()
+
+
 def verdict_comment_posted_payload(
     *,
     ticket_id: str,
@@ -277,7 +285,7 @@ def verdict_comment_posted_payload(
     reviewed_sha: str | None,
     session_id: str,
     posted: Sequence[Mapping[str, object]],
-    content: str,
+    bodies: Sequence[str],
 ) -> dict[str, object]:
     """The append-only audit payload for a verified tracker comment post."""
     return {
@@ -290,7 +298,7 @@ def verdict_comment_posted_payload(
         "reviewed_sha": reviewed_sha or None,
         "session_id": session_id,
         "posted_at": datetime.now(UTC).isoformat(),
-        "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "content_sha256": posted_content_sha256(bodies),
         "artifact_path": str(artifact_path) if artifact_path is not None else None,
     }
 
@@ -305,7 +313,7 @@ def emit_verdict_comment_posted(
     reviewed_sha: str | None,
     session_id: str,
     posted: Sequence[Mapping[str, object]],
-    content: str,
+    bodies: Sequence[str],
 ) -> None:
     """Record a verified tracker-IO post as an append-only audit event."""
     payload = verdict_comment_posted_payload(
@@ -317,7 +325,7 @@ def emit_verdict_comment_posted(
         reviewed_sha=reviewed_sha,
         session_id=session_id,
         posted=posted,
-        content=content,
+        bodies=bodies,
     )
     record_event_best_effort(
         OrchestratorEventType.REVIEW_VERDICT_COMMENT_POSTED, payload, ticket_id
@@ -326,7 +334,6 @@ def emit_verdict_comment_posted(
 
 def surface_tracker_io_outcome(
     ticket_id: str,
-    content: str,
     *,
     tracker: str,
     outcome: TrackerIoOutcome,
@@ -351,7 +358,7 @@ def surface_tracker_io_outcome(
             reviewed_sha=identity.reviewed_sha,
             session_id=identity.session_id,
             posted=posted,
-            content=content,
+            bodies=outcome.emitted,
         )
         return
     label = _KIND_LOG_LABELS.get(identity.kind, "review")

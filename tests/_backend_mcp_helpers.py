@@ -133,12 +133,16 @@ def write_project_layer(root: Path, backend: str) -> Path:
 
 
 def write_system_layer(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, backend: str
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    backend: str,
+    *,
+    text: str = "{}\n",
 ) -> Path:
     """Create a fake system-layer file and point ``_SYSTEM_LAYERS`` at it."""
     path = tmp_path / "etc" / backend / "config"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{}\n", encoding="utf-8")
+    path.write_text(text, encoding="utf-8")
     monkeypatch.setattr(cw.backend_mcp_config, "_SYSTEM_LAYERS", {backend: (path,)})
     return path
 

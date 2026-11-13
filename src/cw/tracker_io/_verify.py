@@ -26,7 +26,7 @@ from cw.tracker_post import normalize_for_compare, strip_trailing_marker
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from cw.tracker_io._prompt import TurnPart, TurnResult
+    from cw.tracker_io._prompt import TurnPart, TurnResult, TurnStatus
 
 
 class TrackerIoReason(StrEnum):
@@ -87,7 +87,7 @@ _NO_REPORT = frozenset(
         TrackerIoReason.RESULT_UNPARSEABLE,
     }
 )
-_STATUS_REASON = {
+_STATUS_REASON: dict[TurnStatus, TrackerIoReason] = {
     "tool_unavailable": TrackerIoReason.TOOL_UNAVAILABLE,
     "failed": TrackerIoReason.TURN_REPORTED_FAILURE,
 }
