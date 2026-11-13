@@ -3826,7 +3826,7 @@ for Linear), passes it the redacted, marked parts `cw post-comment
 --emit-only` would write, and verifies the JSON the agent returns. The turn
 runs `--sandbox read-only` with `-c approval_policy=never`, `--ephemeral`,
 low reasoning effort, in a scratch directory that is removed afterwards, with
-every other user-layer MCP server disabled. It is best-effort and runs after
+every other MCP server the user and system layers declare disabled. It is best-effort and runs after
 the review result is persisted: no outcome holds the row.
 
 Setup, per client:

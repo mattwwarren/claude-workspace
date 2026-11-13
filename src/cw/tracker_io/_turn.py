@@ -35,7 +35,11 @@ import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from cw.backend_mcp_config import McpState, declared_server_names, read_backend_mcp
+from cw.backend_mcp_config import (
+    McpState,
+    read_backend_mcp,
+    tracker_io_other_server_names,
+)
 from cw.codex_review import _codex_scratch_dir
 from cw.codex_review._const import _is_spawn_error
 from cw.gh import agent_marked_body
@@ -95,6 +99,9 @@ class TrackerIoOutcome:
     parts_total: int
     posted: tuple[PostedComment, ...] = ()
     marker_survived: bool | None = None
+    # The exact marked, redacted bodies handed to the turn (#3353). Empty for a
+    # refusal, where nothing was emitted; the audit hash is computed from these.
+    emitted: tuple[str, ...] = ()
 
     @property
     def verified(self) -> bool:
@@ -157,7 +164,7 @@ def _preflight(
 
 
 def _other_servers() -> tuple[str, ...]:
-    names = declared_server_names(CODEX_BACKEND)
+    names = tracker_io_other_server_names()
     if names is None:
         _log.info("tracker_io_other_servers_unknown: none disabled")
         return ()
@@ -184,6 +191,7 @@ def _classify(
         total,
         verified.posted,
         verified.marker_survived,
+        emitted=parts,
     )
 
 

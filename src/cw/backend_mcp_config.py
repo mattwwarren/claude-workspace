@@ -220,18 +220,12 @@ def _other_layers(backend: str, root: Path, user_path: Path) -> str | None:
     return None
 
 
-def declared_server_names(backend: str) -> tuple[str, ...] | None:
-    """The MCP server names *backend*'s user-layer config declares (#3057).
+def _layer_server_names(path: Path) -> tuple[str, ...] | None:
+    """The ``mcp_servers`` names one codex config file declares, or ``None``.
 
-    Codex only, in declaration order; ``()`` when the file parses and has no
-    ``mcp_servers`` section. ``None`` when the answer is unknown: another
-    backend, a missing or unreadable file, a parse error or a non-table
-    section. The tracker-IO turn disables every name it gets and none on
-    ``None``; project and system layers are not read.
+    ``None`` for a missing or unreadable file, a parse error or a non-table
+    section: the answer for that layer is unknown.
     """
-    path = user_layer_path(backend) if backend == _CODEX else None
-    if path is None:
-        return None
     loaded = _load(path, _parse_toml)
     if isinstance(loaded, str):
         return None
@@ -239,6 +233,40 @@ def declared_server_names(backend: str) -> tuple[str, ...] | None:
     if not isinstance(container, dict):
         return None
     return tuple(str(name) for name in container)
+
+
+def declared_server_names(backend: str) -> tuple[str, ...] | None:
+    """The MCP server names *backend*'s user-layer config declares (#3057).
+
+    Codex only, in declaration order; ``()`` when the file parses and has no
+    ``mcp_servers`` section. ``None`` when the answer is unknown: another
+    backend, a missing or unreadable file, a parse error or a non-table
+    section. Project and system layers are not read here.
+    """
+    path = user_layer_path(backend) if backend == _CODEX else None
+    if path is None:
+        return None
+    return _layer_server_names(path)
+
+
+def _optional(path: Path | None) -> tuple[Path, ...]:
+    return () if path is None else (path,)
+
+
+def tracker_io_other_server_names() -> tuple[str, ...] | None:
+    """The codex MCP server names the tracker-IO turn must disable (#3368).
+
+    The user layer plus the system layer (``/etc/codex/config.toml``), user
+    names first and de-duplicated. A system-layer server is enabled for every
+    codex turn unless disabled, so the turn must name it. The turn's cwd is a
+    cw-owned scratch directory, so no project layer can reach it. ``None``
+    when no layer's answer is known, which disables nothing.
+    """
+    layers = [*_optional(user_layer_path(_CODEX)), *_SYSTEM_LAYERS.get(_CODEX, ())]
+    answers = [names for names in map(_layer_server_names, layers) if names is not None]
+    if not answers:
+        return None
+    return tuple(dict.fromkeys(name for names in answers for name in names))
 
 
 def read_backend_mcp(backend: str, server: str, root: Path) -> McpConfigReading:

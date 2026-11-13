@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -22,6 +23,7 @@ from cw.codex_review_signals import (
     emit_verdict_comment_skipped,
     emit_verdict_comment_unverified,
     operator_context_undelivered_payload,
+    posted_content_sha256,
     surface_tracker_io_outcome,
     undelivered_operator_context,
     verdict_comment_skipped_payload,
@@ -493,7 +495,6 @@ class TestPrLinkKind:
         with caplog.at_level(logging.WARNING, logger="cw.codex_review_signals"):
             surface_tracker_io_outcome(
                 "GEN-9",
-                "body",
                 tracker="linear",
                 outcome=outcome,
                 identity=_identity(kind),
@@ -515,7 +516,6 @@ class TestPrLinkKind:
         with caplog.at_level(logging.WARNING, logger="cw.codex_review_signals"):
             surface_tracker_io_outcome(
                 "GEN-9",
-                "body",
                 tracker="linear",
                 outcome=outcome,
                 identity=_identity("pr_link"),
@@ -531,10 +531,10 @@ class TestPrLinkKind:
             None,
             parts_total=1,
             posted=(PostedComment(index=1, comment_id="c1", url="u"),),
+            emitted=("body",),
         )
         surface_tracker_io_outcome(
             "GEN-9",
-            "body",
             tracker="linear",
             outcome=outcome,
             identity=_identity("pr_link"),
@@ -561,3 +561,43 @@ class TestEventsDocEnumeratesEveryKind:
         members = set(get_args(VerdictCommentKind))
         for enumeration in enumerations:
             assert members <= enumeration, members - enumeration
+
+
+class TestPostedContentHash:
+    """#3353: the audit hash is over the marked, redacted bodies as sent."""
+
+    def test_one_body_hashes_to_itself(self) -> None:
+        body = "marked body"
+        assert (
+            posted_content_sha256((body,)) == hashlib.sha256(body.encode()).hexdigest()
+        )
+
+    def test_several_bodies_join_with_a_newline(self) -> None:
+        bodies = ("part one", "part two [REDACTED]")
+        expected = hashlib.sha256("\n".join(bodies).encode()).hexdigest()
+        assert posted_content_sha256(bodies) == expected
+
+    def test_differs_from_any_pre_redaction_text(self) -> None:
+        redacted = ("token [REDACTED]",)
+        raw = "token sk-secret-value"
+        assert (
+            posted_content_sha256(redacted) != hashlib.sha256(raw.encode()).hexdigest()
+        )
+
+    def test_surface_hashes_the_emitted_bodies_not_the_raw_text(self) -> None:
+        outcome = TrackerIoOutcome(
+            PublicState.CONFIRMED,
+            None,
+            parts_total=2,
+            posted=(PostedComment(index=1, comment_id="c1", url="u"),),
+            emitted=("part one", "part two [REDACTED]"),
+        )
+        surface_tracker_io_outcome(
+            "GEN-9",
+            tracker="linear",
+            outcome=outcome,
+            identity=_identity("verdict"),
+        )
+        (event,) = _events(OrchestratorEventType.REVIEW_VERDICT_COMMENT_POSTED)
+        expected = hashlib.sha256(b"part one\npart two [REDACTED]").hexdigest()
+        assert event.payload["content_sha256"] == expected
