@@ -634,10 +634,12 @@ def test_absent_owner_record_decision_is_recorded_in_all_three_places() -> None:
         paragraph = text[start : text.index("\n\n", start)]
         assert "treated as unowned" in paragraph
         assert "gates 2-4" in paragraph
+        assert "#3210" in paragraph
         paragraphs.append(paragraph)
     assert paragraphs[0] == paragraphs[1]
     assert "treated as unowned" in module_doc
     assert "gates 2-4" in module_doc
+    assert "#3210" in module_doc
 
 
 def test_setup_fence_runs_without_cw_session_env(
