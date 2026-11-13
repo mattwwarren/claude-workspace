@@ -986,7 +986,7 @@ Every `stage` and `prev_stage` payload value MUST match one of:
 - `stage` (str) — the stage being entered or that errored; MUST match the closed enum in §10.2.
 - `started_at` (str) — ISO8601 UTC timestamp, e.g. `2026-05-23T13:01:42Z`.
 
-`session_id` (str, the cw session that owns the run) is on every recorded `stage.entered` / `stage.errored` event but is not supplied by producers: `cw event record` fills it from the nearest `.claude/cw-context.json` (§10.4, #2651).
+`session_id` (str, the cw session that owns the run) is on every recorded `stage.entered` / `stage.errored` event but is not supplied by producers: `cw event record` fills it from the nearest `.claude/cw-context.json` (§10.4, #2651), unless that context belongs to another ticket (#3312).
 
 **Optional:**
 
@@ -1010,7 +1010,7 @@ cw event record stage.entered \
 
 The §10.2 enum is enforced, not just documented (#2429): `cw event record` rejects a `stage.entered` / `stage.errored` payload whose `stage` is missing or outside §10.2, or whose `prev_stage` is present and outside §10.2, exiting non-zero with `Unknown stage '<value>'. Valid stages: …` (or `Unknown prev_stage '<value>'. …`) and recording nothing. `error_kind` stays open (§10.3) and is not checked.
 
-`cw event record` fills `session_id` on `stage.entered` and `stage.errored` from the nearest `.claude/cw-context.json`; a conflicting value in the payload is replaced and a warning goes to stderr. The producer omits `session_id` (#2651). When no `.claude/cw-context.json` is found, or the nearest one has no string `session_id`, the payload is recorded as given, so a payload without `session_id` is recorded without one and does not set `last_stage` (§10.5).
+`cw event record` fills `session_id` on `stage.entered` and `stage.errored` from the nearest `.claude/cw-context.json`; a conflicting value in the payload is replaced and a warning goes to stderr. The producer omits `session_id` (#2651). When the context carries a `ticket_id` and the payload a non-empty `ticket_id` that differs from it (compared after `str()`, stripping whitespace and a leading `#`; case-sensitive), the context is another ticket's: `session_id` is not derived from it, the payload is recorded as given, and stderr gets `warning: payload ticket_id '<p>' differs from cw-context.json ticket_id '<c>'; not deriving session_id from that context` (#3312). When no `.claude/cw-context.json` is found, or the nearest one has no string `session_id`, the payload is recorded as given, so a payload without `session_id` is recorded without one and does not set `last_stage` (§10.5); if the payload supplies no non-empty string `session_id` either, stderr gets `warning: stage event recorded without a session_id: no cw-context.json session_id was found from the working directory upward and the payload supplies none` (#3314).
 
 Since #2443, this check runs inside `record_event` itself (`cw.events`), not only in the `cw event record` CLI command — every internal producer that calls `record_event` directly is validated at the same chokepoint and raises the same rejection, closing the bypass an in-process caller previously had.
 
