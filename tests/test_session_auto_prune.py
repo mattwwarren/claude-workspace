@@ -449,7 +449,7 @@ class TestAutoPruneSessions:
             msg = "read-only state dir"
             raise OSError(msg)
 
-        monkeypatch.setattr("cw.session_auto_prune.atomic_write_text", _boom)
+        monkeypatch.setattr("cw.sidecar_status.atomic_write_text", _boom)
 
         with freeze_time(_NOW), caplog.at_level("WARNING"):
             result = auto_prune_sessions(OrchestratorConfig())

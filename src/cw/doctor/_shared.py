@@ -13,6 +13,13 @@ import shlex
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import yaml
+from pydantic import ValidationError
+
+from cw.config import load_orchestrator_config
+from cw.exceptions import CwError
+from cw.models import OrchestratorConfig
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -67,6 +74,21 @@ def _read_settings(path: Path) -> dict[str, object] | SettingsReadFailure:
     if not isinstance(data, dict):
         return SettingsReadFailure("not a JSON object")
     return data
+
+
+def orchestrator_config_or_default() -> OrchestratorConfig:
+    """Load orchestrator.yaml, degrading to defaults on any load failure.
+
+    Degrade rather than raise: a bad orchestrator.yaml is already reported by
+    ``_check_orchestrator_config()``. Letting it propagate from a later check
+    would crash ``run_doctor()`` before that ``ok=False`` result is ever
+    printed. See GitHub #1200. The one loader for every doctor check that only
+    needs the thresholds; shared in #3162 from three verbatim copies.
+    """
+    try:
+        return load_orchestrator_config()
+    except (OSError, yaml.YAMLError, CwError, ValidationError):
+        return OrchestratorConfig()
 
 
 @dataclass(frozen=True)

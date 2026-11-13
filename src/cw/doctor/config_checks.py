@@ -23,14 +23,9 @@ from cw.config import (
     orchestrator_config_file,
     state_file,
 )
-from cw.disk import (
-    check_disk_usage,
-    check_inode_usage,
-    effective_min_free_inodes,
-    inodes_exhausted,
-)
+from cw.disk import assess_mount, check_disk_usage, check_inode_usage
 from cw.doctor import _deps
-from cw.doctor._shared import CheckResult
+from cw.doctor._shared import CheckResult, orchestrator_config_or_default
 from cw.events import inbox_path
 from cw.exceptions import CwError
 from cw.models import OrchestratorConfig
@@ -47,7 +42,7 @@ from cw.worktree import resolve_worktree_base
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.disk import DiskUsage, InodeUsage
+    from cw.disk import DiskUsage, InodeUsage, MountAssessment
     from cw.models import ClientConfig, CwState, TicketTask
 
 
@@ -420,20 +415,6 @@ def _check_dev_queue() -> CheckResult:
     return CheckResult("dev_queue.json", ok=True, detail="parseable")
 
 
-def _orchestrator_config_or_default() -> OrchestratorConfig:
-    """Load orchestrator.yaml, degrading to defaults on any load failure.
-
-    Degrade rather than raise: a bad orchestrator.yaml is already reported by
-    _check_orchestrator_config(). Letting it propagate from a later check
-    would crash run_doctor() before that ok=False result is ever printed.
-    See GitHub #1200.
-    """
-    try:
-        return load_orchestrator_config()
-    except (OSError, yaml.YAMLError, CwError, ValidationError):
-        return OrchestratorConfig()
-
-
 def _check_inbox_size() -> CheckResult:
     """Warn when events/inbox.jsonl exceeds its configured size/line thresholds.
 
@@ -444,7 +425,7 @@ def _check_inbox_size() -> CheckResult:
     if not inbox.exists():
         return CheckResult("inbox-size", ok=True, detail="no inbox file")
 
-    config = _orchestrator_config_or_default()
+    config = orchestrator_config_or_default()
     size_bytes = inbox.stat().st_size
     with inbox.open("r", encoding="utf-8") as f:
         line_count = sum(1 for _ in f)
@@ -491,7 +472,7 @@ def _check_sessions_size() -> CheckResult:
             _SESSIONS_SIZE_CHECK_NAME, ok=True, warn=True, detail=stat_failed
         )
 
-    config = _orchestrator_config_or_default()
+    config = orchestrator_config_or_default()
     if size_bytes > config.sessions_size_warn_bytes:
         too_big = (
             f"size {size_bytes}B exceeds sessions_size_warn_bytes"
@@ -505,20 +486,15 @@ def _check_sessions_size() -> CheckResult:
 
 
 def _inode_shortfall(
-    client: ClientConfig, inodes: InodeUsage, config: OrchestratorConfig
+    client: ClientConfig,
+    inodes: InodeUsage,
+    config: OrchestratorConfig,
+    assessment: MountAssessment,
 ) -> str | None:
     """Return the failing-detail fragment for a low-inode mount, else None."""
-    if not inodes_exhausted(
-        inodes,
-        min_free_inodes=config.disk_pressure_min_free_inodes,
-        min_free_inode_fraction=config.disk_pressure_min_free_inode_fraction,
-    ):
+    floor = assessment.inode_floor
+    if not assessment.inode_short or floor is None:
         return None
-    floor = effective_min_free_inodes(
-        inodes.total_inodes,
-        min_free_inodes=config.disk_pressure_min_free_inodes,
-        min_free_inode_fraction=config.disk_pressure_min_free_inode_fraction,
-    )
     return (
         f"worktree-base mount for '{client.name}' has"
         f" {inodes.free_inodes:,} free inodes, below the {floor:,} floor"
@@ -529,10 +505,13 @@ def _inode_shortfall(
 
 
 def _space_shortfall(
-    client: ClientConfig, disk: DiskUsage, config: OrchestratorConfig
+    client: ClientConfig,
+    disk: DiskUsage,
+    config: OrchestratorConfig,
+    assessment: MountAssessment,
 ) -> str | None:
     """Return the failing-detail fragment for a low-space mount, else None."""
-    if disk.free_gb >= config.disk_pressure_min_free_gb:
+    if not assessment.space_short:
         return None
     return (
         f"worktree-base mount for '{client.name}' has {disk.free_gb:.1f} GB free,"
@@ -541,22 +520,21 @@ def _space_shortfall(
 
 
 def _healthy_worker_tmp_detail(
-    disk: DiskUsage, inodes: InodeUsage, config: OrchestratorConfig
+    disk: DiskUsage,
+    inodes: InodeUsage,
+    config: OrchestratorConfig,
+    assessment: MountAssessment,
 ) -> str:
     """Summarize a healthy mount: free inodes (when reported) and free space."""
     space = (
         f"{disk.free_gb:.1f} GB free (min {config.disk_pressure_min_free_gb:.1f} GB)"
     )
-    if inodes.total_inodes == 0:
+    floor = assessment.inode_floor
+    if floor is None:
         return (
             f"worktree-base mount has {space};"
             " inode count not reported (dynamic inode allocation)"
         )
-    floor = effective_min_free_inodes(
-        inodes.total_inodes,
-        min_free_inodes=config.disk_pressure_min_free_inodes,
-        min_free_inode_fraction=config.disk_pressure_min_free_inode_fraction,
-    )
     return (
         f"worktree-base mount has {inodes.free_inodes:,} free inodes"
         f" (min {floor:,}), {space}"
@@ -574,18 +552,27 @@ def _worker_tmp_result(client: ClientConfig, config: OrchestratorConfig) -> Chec
         return CheckResult(
             name, ok=False, detail=f"could not probe worktree-base mount {base}: {exc}"
         )
+    assessment = assess_mount(
+        disk,
+        inodes,
+        min_free_gb=config.disk_pressure_min_free_gb,
+        min_free_inodes=config.disk_pressure_min_free_inodes,
+        min_free_inode_fraction=config.disk_pressure_min_free_inode_fraction,
+    )
     problems = [
         p
         for p in (
-            _space_shortfall(client, disk, config),
-            _inode_shortfall(client, inodes, config),
+            _space_shortfall(client, disk, config, assessment),
+            _inode_shortfall(client, inodes, config, assessment),
         )
         if p is not None
     ]
     if problems:
         return CheckResult(name, ok=False, detail="; ".join(problems))
     return CheckResult(
-        name, ok=True, detail=_healthy_worker_tmp_detail(disk, inodes, config)
+        name,
+        ok=True,
+        detail=_healthy_worker_tmp_detail(disk, inodes, config, assessment),
     )
 
 
@@ -605,5 +592,5 @@ def _check_worker_tmp_pressure(clients: dict[str, ClientConfig]) -> list[CheckRe
     dispatch gate (which fails open), an unprobeable mount is reported as a
     failure here: doctor is a diagnostic, not a spawn path.
     """
-    config = _orchestrator_config_or_default()
+    config = orchestrator_config_or_default()
     return [_worker_tmp_result(client, config) for client in clients.values()]

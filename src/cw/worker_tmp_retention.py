@@ -6,7 +6,11 @@ dir is one flat shared tree, so ownership by a live worker cannot be read from
 its layout. The sweep therefore protects, on Linux, every path a live process
 holds open or as its ``cwd`` (plus that path's ancestors up to the root), and
 ages out everything else by ``max(mtime, ctime)``. Where ``/proc`` is unreadable
-it falls back to age alone, and the status record says so.
+it falls back to age alone, and the status record says so. The guard is partial
+where a single ``/proc/<pid>`` entry is unreadable (another uid's process, say):
+that process can still hold a file open unseen, so each such pid is counted into
+``unreadable_procs``. The count is accounting only; it protects nothing and
+never blocks a removal.
 
 The caller is the dispatch loop's guarded post-tick step
 (``cw.dispatch.loop._run_worker_tmp_retention_guarded``), which holds no guarded
@@ -32,9 +36,8 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from pydantic import BaseModel
 
-from cw.atomic import atomic_write_text
-from cw.config import state_dir
 from cw.exceptions import CwError, CwLockOrderError, CwLockReentrancyError
+from cw.sidecar_status import is_due, read_sidecar, write_sidecar
 from cw.worktree import resolve_fallback_worker_tmpdir
 
 if TYPE_CHECKING:
@@ -55,9 +58,12 @@ MAX_SCAN_ENTRIES = 200_000
 MEASURE_LIMIT = 50_000
 
 _NOT_EMPTY_ERRNOS = frozenset({errno.ENOTEMPTY, errno.EEXIST})
+# A process (or one of its fds) that went away mid-scan, as opposed to one whose
+# ``/proc`` entry exists but cannot be read.
+_VANISHED = (FileNotFoundError, ProcessLookupError)
 
 # Process-local record of the last due run, keyed ``_ATTEMPT_KEY``. The sidecar
-# is the cross-process cadence record, but ``_write_status`` swallows a write
+# is the cross-process cadence record, but ``write_sidecar`` swallows a write
 # failure (a full or read-only state mount, the pressure this sweep targets),
 # and without this stamp every ~30 s dispatch tick would then find no record and
 # repeat the full sweep. Cleared between tests by the autouse conftest fixture.
@@ -78,12 +84,17 @@ class RetentionStatus(BaseModel):
     retention_days: int
     capped: bool = False
     proc_guard: bool = False
+    unreadable_procs: int = 0
     error: str | None = None
 
 
 @dataclass
 class SweepResult:
-    """What one sweep did. ``proc_guard`` is False when ``/proc`` was unreadable."""
+    """What one sweep did.
+
+    ``proc_guard`` is False when ``/proc`` was unreadable; ``unreadable_procs``
+    counts processes whose entry could not be read while it was on.
+    """
 
     removed_files: int = 0
     removed_dirs: int = 0
@@ -92,6 +103,21 @@ class SweepResult:
     errors: int = 0
     capped: bool = False
     proc_guard: bool = False
+    unreadable_procs: int = 0
+
+
+class HeldPaths(NamedTuple):
+    """Paths live processes hold under the root, and how many pids went unread."""
+
+    paths: frozenset[Path]
+    unreadable_procs: int
+
+
+class _ProcTargets(NamedTuple):
+    """One process's readable link targets, and whether any link was unreadable."""
+
+    targets: list[Path]
+    unreadable: bool
 
 
 class TmpUsage(NamedTuple):
@@ -107,25 +133,9 @@ def _lstat(path: str | os.PathLike[str]) -> os.stat_result:
     return os.lstat(path)
 
 
-def _status_path() -> Path:
-    return state_dir() / _STATUS_FILENAME
-
-
 def read_retention_status() -> RetentionStatus | None:
     """Return the last run's record, or None when absent or unreadable (fail-open)."""
-    try:
-        return RetentionStatus.model_validate_json(_status_path().read_text())
-    except (OSError, ValueError):
-        return None
-
-
-def _write_status(status: RetentionStatus) -> None:
-    """Persist *status* atomically; a write failure is logged, never raised."""
-    try:
-        state_dir().mkdir(parents=True, exist_ok=True)
-        atomic_write_text(_status_path(), status.model_dump_json(indent=2))
-    except OSError:
-        _log.warning("could not write %s; continuing", _STATUS_FILENAME, exc_info=True)
+    return read_sidecar(_STATUS_FILENAME, RetentionStatus)
 
 
 def _is_due(config: OrchestratorConfig, now: datetime) -> bool:
@@ -140,9 +150,7 @@ def _is_due(config: OrchestratorConfig, now: datetime) -> bool:
     if attempted is not None and timedelta(0) <= now - attempted < interval:
         return False
     last = read_retention_status()
-    if last is None:
-        return True
-    return not timedelta(0) <= now - last.last_run_at < interval
+    return is_due(last.last_run_at if last else None, interval, now)
 
 
 def _is_stale(st: os.stat_result, cutoff_ts: float) -> bool:
@@ -292,40 +300,68 @@ def sweep_fallback_tmp(
     return result
 
 
-def held_paths(root: Path, proc_root: Path = _PROC_ROOT) -> frozenset[Path] | None:
+def _numeric_pids(proc_root: Path) -> list[str] | None:
+    """Return the numeric entry names of *proc_root*, or None when unreadable."""
+    try:
+        return [entry.name for entry in proc_root.iterdir() if entry.name.isdigit()]
+    except OSError:
+        return None
+
+
+def _proc_readable(proc_root: Path) -> bool:
+    """True when *proc_root* can be listed, so the open-file guard could run."""
+    return _numeric_pids(proc_root) is not None
+
+
+def held_paths(root: Path, proc_root: Path = _PROC_ROOT) -> HeldPaths | None:
     """Return every path under *root* a live process holds, plus its ancestors.
 
     Reads each numeric entry's ``cwd`` and ``fd/*`` symlinks. Returns None when
     *proc_root* is unreadable (macOS, or no ``/proc``), so the caller falls back
-    to age alone. Vanished processes and permission errors are skipped. Returned
-    paths carry the canonical root prefix (ancestor symlinks resolved), matching
-    the kernel's ``/proc`` link targets.
+    to age alone. A vanished process is skipped. A process with an entry that
+    fails for any other reason (a permission error) is skipped too, but counted
+    once into ``unreadable_procs``. Returned paths carry the canonical root
+    prefix (ancestor symlinks resolved), matching the kernel's ``/proc`` link
+    targets.
     """
     root = _canonical_root(root)
-    try:
-        pids = [entry.name for entry in proc_root.iterdir() if entry.name.isdigit()]
-    except OSError:
+    pids = _numeric_pids(proc_root)
+    if pids is None:
         return None
     held: set[Path] = set()
+    unreadable = 0
     for pid in pids:
-        for target in _process_targets(proc_root / pid):
+        scan = _process_targets(proc_root / pid)
+        unreadable += scan.unreadable
+        for target in scan.targets:
             held.update(_protected_chain(target, root))
-    return frozenset(held)
+    return HeldPaths(frozenset(held), unreadable)
 
 
-def _process_targets(pdir: Path) -> list[Path]:
-    """Return the readable ``cwd`` and ``fd`` link targets of one process."""
+def _process_targets(pdir: Path) -> _ProcTargets:
+    """Return the readable ``cwd`` and ``fd`` link targets of one process.
+
+    ``FileNotFoundError`` and ``ProcessLookupError`` mean the process or fd went
+    away mid-scan. Any other ``OSError`` (EACCES on another uid's process) marks
+    the process unreadable.
+    """
+    unreadable = False
     try:
         fds = list((pdir / "fd").iterdir())
+    except _VANISHED:
+        fds = []
     except OSError:
         fds = []
+        unreadable = True
     targets: list[Path] = []
     for link in [pdir / "cwd", *fds]:
         try:
             targets.append(Path(link.readlink()))
-        except OSError:
+        except _VANISHED:
             continue
-    return targets
+        except OSError:
+            unreadable = True
+    return _ProcTargets(targets, unreadable)
 
 
 def _protected_chain(target: Path, root: Path) -> list[Path]:
@@ -372,10 +408,21 @@ def _is_empty(root: Path) -> bool:
 
 
 def _run_sweep(root: Path, cutoff: datetime) -> SweepResult:
-    """Sweep *root*; a missing or empty root skips the ``/proc`` scan entirely."""
+    """Sweep *root*; a missing or empty root skips the ``/proc`` scan.
+
+    The skipped scan still records whether ``/proc`` is readable, so the doctor
+    check reports the real guard state rather than a hard-coded off. ``_PROC_ROOT``
+    is passed explicitly, not left to ``held_paths``'s def-time default, so a test
+    can redirect it.
+    """
     if not os.path.lexists(root) or _is_empty(root):
-        return SweepResult(proc_guard=False)
-    return sweep_fallback_tmp(root, cutoff=cutoff, protected=held_paths(root))
+        return SweepResult(proc_guard=_proc_readable(_PROC_ROOT))
+    scan = held_paths(root, proc_root=_PROC_ROOT)
+    result = sweep_fallback_tmp(
+        root, cutoff=cutoff, protected=scan.paths if scan else None
+    )
+    result.unreadable_procs = scan.unreadable_procs if scan else 0
+    return result
 
 
 def auto_sweep_fallback_tmp(
@@ -401,17 +448,20 @@ def auto_sweep_fallback_tmp(
         raise
     except (CwError, OSError, ValueError) as exc:
         _log.exception("fallback tmp retention failed; will retry next interval")
-        _write_status(
+        write_sidecar(
+            _STATUS_FILENAME,
             RetentionStatus(
                 last_run_at=run_at,
                 status="failed",
                 retention_days=days,
                 error=f"{type(exc).__name__}: {exc}",
-            )
+            ),
+            _log,
         )
         return None
 
-    _write_status(
+    write_sidecar(
+        _STATUS_FILENAME,
         RetentionStatus(
             last_run_at=run_at,
             status="ok",
@@ -423,7 +473,9 @@ def auto_sweep_fallback_tmp(
             retention_days=days,
             capped=result.capped,
             proc_guard=result.proc_guard,
-        )
+            unreadable_procs=result.unreadable_procs,
+        ),
+        _log,
     )
     if result.removed_files + result.removed_dirs > 0:
         _log.info(
