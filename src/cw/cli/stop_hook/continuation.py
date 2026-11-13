@@ -32,12 +32,13 @@ from cw._util import claude_project_dir
 from cw.cli.stop_hook._constants import (
     _LOGGER_NAME,
     MAX_STOP_CONTINUATIONS,
+    STOP_CONTINUATION_ENABLED_CLIENTS,
     STOP_CONTINUATION_NUDGE,
 )
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import USAGE_LIMIT_RE
-from cw.models import OrchestratorEventType, QueueItemStatus
+from cw.models import OrchestratorEventType, QueueItemStatus, SessionStatus
 from cw.reconcile import find_running_task_for_session
 from cw.reconcile._shared import _DEV_QUEUE_LOAD_ERRORS, _lookup_matching_task
 from cw.reconcile.liveness_page import _API_ERROR_PREFIX
@@ -81,8 +82,16 @@ def maybe_continue_headless_turn(
     task = find_running_task_for_session(ticket_id, session.id)
     if task is None or (task.stop_continuations or 0) >= MAX_STOP_CONTINUATIONS:
         return
-    transcript = _find_transcript(session, cwd_value, claude_session_id)
-    if transcript is None or _turn_ended_in_tool_error(transcript):
+    transcripts = _find_transcripts(session, cwd_value, claude_session_id)
+    if not transcripts or any(_turn_ended_in_tool_error(path) for path in transcripts):
+        return
+    if session.client not in STOP_CONTINUATION_ENABLED_CLIENTS:
+        logger.info(
+            "stop continuation shadow candidate: client=%s lane=%s ticket=%s",
+            session.client,
+            task.lane,
+            ticket_id,
+        )
         return
     claim = _claim_stop_continuation(ticket_id, session)
     if claim is None:
@@ -111,29 +120,55 @@ def _continuation_payload_qualifies(
         return False
     if message.startswith(_API_ERROR_PREFIX):
         return False
-    return session.local_liveness is None
+    return session.status is SessionStatus.ACTIVE and session.local_liveness is None
+
+
+def _transcript_candidates(
+    session: Session, cwd_value: str, claude_session_id: object
+) -> tuple[Path, ...]:
+    """Return distinct transcript candidates from both known directories.
+
+    This is deliberately path-only; callers retain their own scan decisions.
+    Both locations are considered because EnterWorktree can leave divergent
+    transcripts in the hook cwd and the recorded worktree.
+    """
+    if not isinstance(claude_session_id, str) or not claude_session_id:
+        return ()
+    search_dirs: list[str] = [cwd_value]
+    if session.worktree_path is not None:
+        search_dirs.append(str(session.worktree_path))
+    return tuple(
+        claude_project_dir(search_dir) / f"{claude_session_id}.jsonl"
+        for search_dir in dict.fromkeys(search_dirs)
+    )
+
+
+def _find_transcripts(
+    session: Session, cwd_value: str, claude_session_id: object
+) -> tuple[Path, ...]:
+    """Return every existing transcript candidate, or none when unavailable."""
+    try:
+        return tuple(
+            candidate
+            for candidate in _transcript_candidates(
+                session, cwd_value, claude_session_id
+            )
+            if candidate.is_file()
+        )
+    except OSError:
+        return ()
 
 
 def _find_transcript(
     session: Session, cwd_value: str, claude_session_id: object
 ) -> Path | None:
-    """The session's transcript, from the hook ``cwd`` or the recorded worktree.
+    """Return the first transcript for legacy direct callers.
 
-    Same two-directory search as ``park._sentinel_frame_follows_marker``, but
-    the first transcript that exists is the one this turn ended in. ``None``
-    when the session id is unusable or no transcript exists; the caller treats
-    that as fail-closed.
+    The continuation path uses :func:`_find_transcripts` so it never makes a
+    decision from only the first existing candidate.
     """
-    if not isinstance(claude_session_id, str) or not claude_session_id:
-        return None
-    search_dirs = [cwd_value]
-    if session.worktree_path is not None:
-        search_dirs.append(str(session.worktree_path))
-    for search_dir in dict.fromkeys(search_dirs):
-        candidate = claude_project_dir(search_dir) / f"{claude_session_id}.jsonl"
-        if candidate.is_file():
-            return candidate
-    return None
+    transcripts = _find_transcripts(session, cwd_value, claude_session_id)
+    return transcripts[0] if transcripts else None
 
 
 def _turn_ended_in_tool_error(transcript: Path) -> bool:

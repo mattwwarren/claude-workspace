@@ -16,19 +16,20 @@ against a captured payload.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
 
-from cw._util import claude_project_dir
 from cw.cli.stop_hook._constants import (
     MAX_STOP_CONTINUATIONS,
     STOP_CONTINUATION_NUDGE,
 )
+from cw.config import load_state, save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.dev_queue.stage_entry import enter_stage
-from cw.models import OrchestratorEventType, QueueItemStatus, Stage
+from cw.models import OrchestratorEventType, QueueItemStatus, SessionStatus, Stage
 from cw.models.orchestrator_config.operator_forward import _DEFAULT_OPERATOR_EVENT_TYPES
 from cw.models.tasks.store import DevQueueStore
 from tests._shared.session_seeding import _make_ticket_task
@@ -37,11 +38,10 @@ from tests._shared.stop_hook_context import (
     _seed_session,
     _stop_payload,
     _write_hook_context_file,
+    _write_stop_hook_transcript,
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from click.testing import Result
 
 TICKET_ID = "940"
@@ -76,10 +76,9 @@ def _tool_result(*, is_error: bool) -> dict[str, object]:
 
 
 def _write_transcript(worktree: Path, records: list[dict[str, object]]) -> None:
-    project = claude_project_dir(str(worktree))
-    project.mkdir(parents=True, exist_ok=True)
-    body = "\n".join(json.dumps(record) for record in records) + "\n"
-    (project / f"{CLAUDE_SESSION_ID}.jsonl").write_text(body, encoding="utf-8")
+    _write_stop_hook_transcript(
+        Path.home(), worktree, CLAUDE_SESSION_ID, records=records
+    )
 
 
 def _seed_row(
@@ -127,6 +126,15 @@ def recorded(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, dict[str, ob
 
     monkeypatch.setattr("cw.cli.stop_hook.continuation.record_event", _record)
     return events
+
+
+@pytest.fixture(autouse=True)
+def continuation_rollout_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Enable the explicitly opted-in test tenant for continuation coverage."""
+    monkeypatch.setattr(
+        "cw.cli.stop_hook.continuation.STOP_CONTINUATION_ENABLED_CLIENTS",
+        frozenset({"client-a"}),
+    )
 
 
 def _stop(worktree: Path, **extra: object) -> Result:
@@ -193,6 +201,71 @@ class TestContinuationCap:
 
 
 class TestContinuationExclusions:
+    def test_backgrounded_daemon_session_never_continues(
+        self, worktree: Path, recorded: list[tuple[object, dict[str, object]]]
+    ) -> None:
+        _seed_row()
+        _write_transcript(worktree, [_assistant(PLAIN_TEXT)])
+        state = load_state()
+        session = next(s for s in state.sessions if s.id == SESSION_ID)
+        session.status = SessionStatus.BACKGROUNDED
+        save_state(state)
+
+        result = _stop(worktree, last_assistant_message=PLAIN_TEXT)
+
+        assert result.stdout.strip() == ""
+        assert _row_counter() is None
+        assert _continued_events(recorded) == []
+
+    def test_disabled_client_records_shadow_candidate_only(
+        self,
+        worktree: Path,
+        recorded: list[tuple[object, dict[str, object]]],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _seed_row()
+        _write_transcript(worktree, [_assistant(PLAIN_TEXT)])
+        monkeypatch.setattr(
+            "cw.cli.stop_hook.continuation.STOP_CONTINUATION_ENABLED_CLIENTS",
+            frozenset(),
+        )
+        caplog.set_level(20, logger="cw.cli.stop_hook")
+
+        result = _stop(worktree, last_assistant_message=PLAIN_TEXT)
+
+        assert result.stdout.strip() == ""
+        assert _row_counter() is None
+        assert _continued_events(recorded) == []
+        assert "shadow candidate" in caplog.text
+
+    def test_divergent_transcripts_fail_closed(
+        self,
+        worktree: Path,
+        recorded: list[tuple[object, dict[str, object]]],
+        tmp_path: Path,
+    ) -> None:
+        _seed_row()
+        _write_transcript(worktree, [_assistant(PLAIN_TEXT)])
+        alternate = tmp_path / "alternate-worktree"
+        alternate.mkdir()
+        _write_stop_hook_transcript(
+            Path.home(),
+            alternate,
+            CLAUDE_SESSION_ID,
+            records=[_tool_result(is_error=True)],
+        )
+        state = load_state()
+        session = next(s for s in state.sessions if s.id == SESSION_ID)
+        session.worktree_path = alternate
+        save_state(state)
+
+        result = _stop(worktree, last_assistant_message=PLAIN_TEXT)
+
+        assert result.stdout.strip() == ""
+        assert _row_counter() is None
+        assert _continued_events(recorded) == []
+
     def test_blocked_sentinel_never_continues(
         self, worktree: Path, recorded: list[tuple[object, dict[str, object]]]
     ) -> None:
