@@ -234,7 +234,7 @@ def _release_rows(plan: ClearPlan, now: datetime) -> tuple[list[str], Exception 
                     released.append(task.ticket_id)
             if released:
                 save_dev_queue(store)
-    except Exception as exc:  # noqa: BLE001 - every ordinary row failure is audited
+    except (OSError, TypeError, ValueError) as exc:
         return [], exc
     return released, None
 
