@@ -587,6 +587,12 @@ elements:
       codex: {disposition: deferred, ref: {kind: ticket, number: 3464}, note: "codex PLAN findings travel in blocker.details; the #1815 blocking-findings comment is deferred"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the opencode PLAN prompt has no plan-review stations"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
+  plan.ticket-quote-pre-pass:
+    cells:
+      claude-native: {disposition: implemented}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3464}, note: "the ticket-quote pre-pass is not wired into cw.codex_plan"}
+      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the opencode PLAN prompt has no plan-review stations"}
+      local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   plan.headless-only-checkpoint-revised-draft:
     cells:
       claude-native: {disposition: implemented}
