@@ -835,6 +835,129 @@ class TestResumeSession:
         extra = mock_native_daemon.spawn_extra_args[0]
         assert extra == ["--resume", "550e8400-e29b-41d4-a716-446655440000"]
 
+    @staticmethod
+    def _seed_resume(
+        client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        origin: SessionOrigin = SessionOrigin.DAEMON,
+    ) -> None:
+        """Seed one dead-surface session with a claude transcript, origin as given."""
+        write_clients_yaml(client)
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+        save_state(
+            CwState(
+                sessions=[
+                    Session(
+                        id="resumeef1",
+                        name="test-client/impl",
+                        client="test-client",
+                        purpose=SessionPurpose.IMPL,
+                        origin=origin,
+                        status=SessionStatus.BACKGROUNDED,
+                        workspace_path=client.workspace_path,
+                        worktree_path=client.workspace_path.parent / "wt-resume-ef",
+                        surface_ref="deadbeef",
+                        claude_session_id="550e8400-e29b-41d4-a716-446655440000",
+                    )
+                ]
+            )
+        )
+
+    def test_resume_daemon_opus_55_pin_defaults_effort_to_medium(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.worker_effort import WORKER_EFFORT_FLAG
+
+        self._seed_resume(
+            sample_client.model_copy(update={"worker_model": "claude-opus-5-5"}),
+            monkeypatch,
+        )
+        resume_session("test-client/impl", native_daemon=mock_native_daemon)
+        assert mock_native_daemon.spawn_extra_args[0] == [
+            "--resume",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--model",
+            "claude-opus-5-5",
+            WORKER_EFFORT_FLAG,
+            "medium",
+        ]
+
+    def test_resume_daemon_explicit_effort_forwarded(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.models.worker_effort import WorkerEffort
+        from cw.worker_effort import WORKER_EFFORT_FLAG
+
+        self._seed_resume(
+            sample_client.model_copy(
+                update={
+                    "worker_model": "claude-sonnet-5-5",
+                    "worker_effort": WorkerEffort.XHIGH,
+                }
+            ),
+            monkeypatch,
+        )
+        resume_session("test-client/impl", native_daemon=mock_native_daemon)
+        extra = mock_native_daemon.spawn_extra_args[0]
+        assert extra is not None
+        assert extra[-2:] == [WORKER_EFFORT_FLAG, "xhigh"]
+
+    def test_resume_daemon_inherit_on_opus_pin_emits_no_effort(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.models.worker_effort import WorkerEffort
+
+        self._seed_resume(
+            sample_client.model_copy(
+                update={
+                    "worker_model": "claude-opus-5-5",
+                    "worker_effort": WorkerEffort.INHERIT,
+                }
+            ),
+            monkeypatch,
+        )
+        resume_session("test-client/impl", native_daemon=mock_native_daemon)
+        extra = mock_native_daemon.spawn_extra_args[0]
+        assert extra is not None
+        assert "--effort" not in extra
+
+    def test_resume_user_session_ignores_worker_effort(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.models.worker_effort import WorkerEffort
+
+        self._seed_resume(
+            sample_client.model_copy(
+                update={
+                    "worker_model": "claude-opus-5-5",
+                    "worker_effort": WorkerEffort.HIGH,
+                }
+            ),
+            monkeypatch,
+            origin=SessionOrigin.USER,
+        )
+        resume_session("test-client/impl", native_daemon=mock_native_daemon)
+        assert mock_native_daemon.spawn_extra_args[0] == [
+            "--resume",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ]
+
     def test_resume_daemon_session_with_worker_model_pins_model(
         self,
         tmp_config_dir: Path,
