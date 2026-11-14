@@ -9,7 +9,6 @@ subprocess (SHOULD_FIX 11, #1236). Consumed by ``core``'s review-pass assembly.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import re
 import subprocess
@@ -20,13 +19,13 @@ from cw.exceptions import CwError
 from cw.plan_files import is_large_diff
 from cw.review_convergence import resolve_loop_diff_base
 from cw.review_findings import CapturedDiff
+from cw.worktree import _parse_numstat_totals
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
 _log = logging.getLogger(__name__)
-_NUMSTAT_MIN_COLS = 3
 
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 # Matches every ``diff --git a/<path> b/<path>`` header, including files with
@@ -230,16 +229,10 @@ def _branch_diff_totals(worktree: Path, default_branch: str) -> tuple[int, int]:
     """
     base = resolve_loop_diff_base(worktree, default_branch)
     numstat = git_output(["diff", "--numstat", f"{base}...HEAD"], cwd=worktree)
-    files = 0
-    lines = 0
-    for row in numstat.splitlines():
-        parts = row.split("\t")
-        if len(parts) < _NUMSTAT_MIN_COLS:
-            continue
-        files += 1
-        with contextlib.suppress(ValueError):
-            lines += int(parts[0]) + int(parts[1])
-    return files, lines
+    # Git emits ``-\t-\tpath`` for binaries. Normalize that marker to a
+    # zero-line change so the canonical parser counts the file without
+    # duplicating its numstat parsing logic.
+    return _parse_numstat_totals(numstat.replace("-\t-\t", "0\t0\t"))
 
 
 def _measure_large_diff(worktree: Path, default_branch: str) -> bool:
