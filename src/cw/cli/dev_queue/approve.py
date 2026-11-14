@@ -240,6 +240,15 @@ def _approve_scope_drift(
         f" {result['approved_head'][:_HEAD_SHA_DISPLAY_LEN]}; the next dispatch"
         " re-runs the scope-conformance gate with them allowed."
     )
+    dropped = result["dropped_review_feedback_sha"]
+    if dropped is not None:
+        click.echo(
+            f"Dropped stale review feedback pinned to {dropped[:_HEAD_SHA_DISPLAY_LEN]}"
+            " (the branch head moved past it). The re-run implements the plan"
+            " without it; for a fresh report, requeue with"
+            f" `cw dev-queue requeue {ticket_id} -c {resolved} --stage impl"
+            " --review-feedback-file <file>`."
+        )
     echo_resulting_row(ticket_id, resolved)
     _close_orphans_after_approve(
         ticket_id, resolved, config, command="approve --scope-drift"

@@ -973,7 +973,9 @@ every refusal names the right one for the row (`Run: ...`), and
   The delays are not configurable. To turn the gate off for a client, see
   `merge_gate_enabled` (#2851) in `config/CONFIG_REFERENCE.md`.
 - `plan_scope_drift` (IMPL): `approve --scope-drift <paths>`, or `requeue`
-  to re-run impl without them.
+  to re-run impl without them. The grant drops stored review feedback whose
+  `reviewed_sha` is no longer the branch head (#3637); the CLI names the dropped
+  sha and the `requeue --stage impl --review-feedback-file` recovery command.
 - Codex MUST_FIX park (`codex_must_fix_findings`):
   `approve --override-must-fix --reason "<why>"`, then
   `requeue --stage finalize` (§7); if the ticket or lane has a finalize
