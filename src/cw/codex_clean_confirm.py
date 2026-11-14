@@ -59,6 +59,7 @@ from cw.claude_review import (
     run_claude_review,
 )
 from cw.codex_engine_confirm import engine_confirm_park, pending_lines
+from cw.codex_engine_defers import engine_defer_findings, record_codex_engine_defers
 from cw.codex_review import (
     CODEX_CONVERGENCE_LEDGER_ERROR,
     CODEX_MUST_FIX_FINDINGS,
@@ -296,12 +297,16 @@ def _record_loop_round(
     (#2867) keeps its shard tally.
     """
     shard_count, shards_reviewed = shard_tally_from_verdict(verdict)
+    # #3636: an engine-only pass whose gating findings are all deferrable SHOULD_FIX
+    # settles them on the ledger (and the row, below). Any other pass stays [].
+    findings = engine_defer_findings(verdict, LOOP_DEFER_RATIONALE)
+    prior = ledger
     ledger, report = record_round(
         ledger,
         kind="loop",
         backend=CODEX_BACKEND,
         reviewed_sha=verdict.reviewed_sha,
-        findings=[],
+        findings=findings,
         roster=[record.reviewer_role for record in verdict.agents_run],
         now=_now(),
         unread=unread_from_verdict(verdict),
@@ -310,6 +315,26 @@ def _record_loop_round(
         shards_reviewed=shards_reviewed,
         engine=verdict_ran_engine(verdict),
     )
+    if findings:
+        # File before the row and the ledger commit (#3137): a re-run dedupes by
+        # key. ``prior`` is the PRE-record ledger, as file_codex_deferrals expects.
+        file_codex_deferrals(
+            task=gate.task,
+            client=gate.client,
+            worktree=gate.worktree,
+            sid=gate.sid,
+            findings=findings,
+            ledger=prior,
+            round_number=report.round,
+            now=_now(),
+        )
+        record_codex_engine_defers(
+            task=gate.task,
+            client=gate.client,
+            head=verdict.reviewed_sha,
+            findings=findings,
+            engine=True,
+        )
     save_ledger(gate.ledger_path, ledger)
     gate.ledger = ledger
     return ledger, report

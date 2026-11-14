@@ -53,6 +53,7 @@ from cw.codex_clean_confirm import (
     _pinned,
     stop_details,
 )
+from cw.codex_engine_defers import record_codex_engine_defers
 from cw.codex_fix_loop.convergence import _open_finding_key
 from cw.codex_fix_loop.rounds import RoundStop
 from cw.codex_review import CODEX_CONVERGENCE_LEDGER_ERROR
@@ -241,6 +242,17 @@ class LoopRoundRecorder:
             ledger=ledger,
             round_number=report.round,
             now=_now(),
+        )
+        # #3636: both lanes share one settlement writer. Seam A is a structural
+        # no-op while _GATING_OUTCOMES keeps this round dirty (it always holds a
+        # non-defer gating finding, so no fingerprint set is all-deferrable); it
+        # is wired so the codex lane has one decision point for engine defers.
+        record_codex_engine_defers(
+            task=self.gate.task,
+            client=self.gate.client,
+            head=verdict.reviewed_sha,
+            findings=findings,
+            engine=verdict_ran_engine(verdict),
         )
         self._save_round(cycle_round, recorded, report)
         return self._stop_for(recorded, report)
