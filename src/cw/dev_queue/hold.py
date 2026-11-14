@@ -262,15 +262,9 @@ def hold_ticket(
     """
     result = _hold_locked(ticket_id, client, pr_number, repo=repo, bounded=bounded)
     if result.outcome != "unchanged":
-        try:
-            record_event(
-                OrchestratorEventType.TICKET_HELD,
-                {**asdict(result), "repo": repo},
-                correlation_id=result.ticket_id,
-            )
-        except (OSError, ValueError, CwError):
-            _log.exception(
-                "dependency hold applied but ticket.held audit failed ticket=%s",
-                result.ticket_id,
-            )
+        record_event(
+            OrchestratorEventType.TICKET_HELD,
+            {**asdict(result), "repo": repo},
+            correlation_id=result.ticket_id,
+        )
     return result
