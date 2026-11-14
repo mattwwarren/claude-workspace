@@ -154,6 +154,17 @@ rules below are tracker-aware.
    sentinel from this summary alone. Not a substitute for `cw`'s own
    pre-dispatch gate (`disposition: "stale_dispatch_gate"`).
 
+   **Step 3 dependency check (#2321) — only when the ticket declares an
+   unmerged upstream dependency PR.** If the ticket body or comments say this
+   work cannot proceed until an upstream PR merges, EXIT before any stage
+   starts, and before the `stage.entered` event for `s0_intake`, with the
+   `blocked` / `dependency_unmerged` sentinel. The exact template and the rules
+   for the optional `depends_on_pr` field (a positive same-repo PR number,
+   omitted for ticket ids or other repos) live in
+   `.claude/commands/auto-dev-intake-appendix.md`, section "Dependency-unmerged
+   exit (#2260, #2321): sentinel and depends_on_pr". Read it now if this
+   condition applies; do not improvise the sentinel or the field from memory.
+
    **Headless only — initialize correlation context and emit `stage.entered` (`s0_intake`):**
    ```bash
    CW_CTX=".claude/cw-context.json"

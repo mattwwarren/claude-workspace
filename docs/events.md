@@ -414,7 +414,9 @@ top-level key — deliberately *not* nested inside `lanes`, since
 `orchestrate.py`'s `_extract_lanes` hard-filters `lanes` values to
 numerics and would silently strip a nested ticket-id string, #1243) and
 `occupied` (int, total occupant count across lanes) are present on that
-same set of ticks. `host_running` (int) and `host_budget` (int | null) are
+same set of ticks. Since #2321, `blocked` and `lane_occupants` no longer list
+a `dependency_hold` row that carries a `blocked_on_pr`: `occupies_lane_slot`
+frees its lane slot, the same way it already excludes a `terminal_sibling` row. `host_running` (int) and `host_budget` (int | null) are
 present only on the main claim-loop tick — the one tick that can carry
 `host_capacity_gated`. `disk_free_gb` / `disk_min_free_gb` (float) and
 `disk_free_inodes` / `disk_min_free_inodes` (int | null — null when the
@@ -1574,7 +1576,9 @@ open enum; consumers MUST tolerate unknown values. Known values:
   unavailability, not a broken leg (RFC 0011 A1). Overrides the generic
   `"blocked"` paused_status for this park only; `breadcrumbs` still carries
   the specific `blocker.reason` verbatim. The task is BLOCKED_ON_USER.
-  See #1155.
+  See #1155. Exception (#2321): a `dependency_unmerged` blocker carrying a
+  valid `depends_on_pr` is parked as disposition `dependency_hold` and frees
+  its lane slot; it still reports this `paused_status`.
 - `"host_tmp_exhausted"` — the claim-time disk-pressure gate found a mount
   that holds worker scratch space below its free-inode floor (#2470): either
   the client's worktree-base mount (home of every worker's `.cw/tmp` TMPDIR)
@@ -1979,6 +1983,15 @@ emission time. Subsequent reconcile ticks skip sessions already stamped,
 preventing duplicate events across ticks for the same session.
 
 `correlation_id` is the `ticket_id` when resolvable, else the `session_id`.
+
+`dependency_hold_pr_closed_unmerged` (#2321, reason `stale_gate`) is emitted by
+the serve tick's `release_stale_gated_tasks`, not by `_reconcile_locked`, when a
+`dependency_hold` row's blocking PR is observed CLOSED without merging. It is
+proposal-only: nothing releases the row. `evidence` is `{"blocked_on_pr": <int>}`
+instead of the timing keys above. It is emitted once per episode, latched by the
+row's `stale_gate_detected_at` (cleared by any transition or a `hold` update),
+and `session_id` is null for an operator hold. A MERGED PR emits the existing
+`release_stale_gate_variant_b` action instead.
 
 `lane` is the owning task's lane name, or `"default"` for candidates not
 associated with a task (phantom sessions without a matching queue entry).
@@ -4419,6 +4432,16 @@ simply set); this event fires only for the genuine collision, where the
 existing watch already belongs to someone else.
 
 `correlation_id` is `client`.
+
+`colliding_source` can be `dependency_hold` since #2321 (the `WatchedPr.source`
+value for a `cw dev-queue hold` or a worker `dependency_unmerged` park with
+`depends_on_pr`). The hold verb refuses a colliding hold on a read-only
+pre-check inside its lock, before any mutation, and that refusal emits no
+event. The hold verb emits this event only in the narrow race where another
+client registers the same repo and PR after the pre-check and before the
+verb's own registration; the verb then exits non-zero and the row stays held.
+The serve-tick registration emits it on every tick while a collision persists.
+No code retires a `WatchedPr` (#3654), so a leftover watch keeps colliding.
 
 Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
 (`orchestrator_config/operator_forward.py`): the condition requires two dev-queue clients

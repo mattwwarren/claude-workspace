@@ -1185,7 +1185,9 @@ common wedge conditions:
   `review_engine_modified`, `tracker_mcp_gate` (#3055: fix the branch
   settings file or the backend's MCP config, then `cw dev-queue requeue`) or
   `gate_timeout` (#3372: see **Park: `gate_timeout`** below),
-  `awaiting_ci_evidence` (#3618: see **Park: `awaiting_ci_evidence`** below), or
+  `awaiting_ci_evidence` (#3618: see **Park: `awaiting_ci_evidence`** below),
+  `dependency_hold` (#2321: reported only when it has no `blocked_on_pr`, since
+  a hold with an id frees its slot; see **Dependency holds (#2321)**), or
   disposition `blocked` with a `codex_fix_*` `blocked_reason`. These rows look dead but wait on an operator, so
   `wedge/blocked-on-user-dead-session` skips them; this class is the visible
   counterpart, so a lane slot held by such a row is not left unexplained.
@@ -4247,7 +4249,9 @@ What does not charge the counter (#2695): `ambiguities_pending_resolution`,
 `operator_unavailable`, `dependency_unmerged`, `confirm_backend_unavailable` or
 `impl_comments_unreadable_after_regress`; and a no-worker spawn failure that is
 a raw `OSError` or a missing `claude` binary (`ClaudeBinaryNotFoundError`,
-#2722). Residuals the ceiling still owns or no longer bounds:
+#2722). Since #2321 a worker `dependency_unmerged` park that carries a
+structured `blocker.depends_on_pr` is stamped disposition `dependency_hold`
+(still a non-charging park) rather than `awaiting_operator`. Residuals the ceiling still owns or no longer bounds:
 
 - `plan_pending_approval` still charges, deliberately: `auto_adopt_clean_plan`
   (on by default; `gate_recipes_enabled`, or the lane's recipe switch, turns it
@@ -4358,7 +4362,13 @@ reason. Wait for the annotation to clear; only a tick line still reading
   a stale snapshot: no lane of that client is paused any more, and the next
   tick will dispatch.
 - `BLOCKED_ON_USER` rows hold lane slots by design; a parked ticket can
-  starve its lane. Requeue or remove to free the slot.
+  starve its lane. Requeue or remove to free the slot. Two carve-outs, both in
+  `occupies_lane_slot` (`src/cw/models/tasks/store.py`): a `terminal_sibling`
+  row (#2100) and, since #2321, a `dependency_hold` row that carries a
+  `blocked_on_pr`. The second waits on a merge the serve tick observes, so it
+  does not starve the lane; see **Dependency holds (#2321)** below. A
+  dependency park with no id still holds its slot, because nothing would ever
+  release it.
 - A session wedged in `needs_salvage` with a park marker poisons every
   respawn of its ticket (claim → revert → attempts+1, plus per-tick
   `session.salvage_skipped` noise): `cw spawn close --confirmed-dead <sid>`
@@ -4482,6 +4492,83 @@ reason. Wait for the annotation to clear; only a tick line still reading
   or observer outside the host's initial pid namespace (a container or a
   sandboxed shell) stamps no marker and honours no "process gone" verdict,
   so such a row only ever waits or pages.
+
+### Dependency holds (#2321)
+
+A row that cannot start until an upstream PR merges is parked as a
+`dependency_hold`: `BLOCKED_ON_USER`, `blocked_reason: dependency_unmerged`,
+`blocked_on_pr: <N>`. It frees its lane slot (see
+`occupies_lane_slot`, `src/cw/models/tasks/store.py`), so a waiting row no
+longer starves its lane. The per-client ceiling is unchanged: it is session
+based, so a still-live old session of the row keeps counting toward it.
+
+Two ways in:
+
+- **Operator:** `cw dev-queue hold <ticket> --until-pr-merged <N> -c <client>`
+  replaces the old cancel, comment and requeue workaround. `<N>` is a positive
+  same-repo PR number only; cross-repo `owner/repo#N` and ticket-id references
+  are not supported (follow-up debt). The verb makes one `gh pr view` call
+  outside any lock and refuses a PR that is MERGED (requeue instead), CLOSED,
+  not found or unverifiable, or that lives in another repo than the client's
+  origin.
+- **Worker:** a `blocked` sentinel with `blocker.reason: "dependency_unmerged"`
+  and `blocker.depends_on_pr` set (positive same-repo integer) is routed to the
+  same `dependency_hold` disposition. Without the id the park stays
+  `awaiting_operator` and keeps its slot, because nothing would release it. A
+  worker park with an id emits `session.needs_attention` (the existing
+  worker-park emission is unchanged) and, because `dependency_hold` is not an
+  attention-digest disposition, is not digest-buffered.
+
+**Refusals.** `hold` accepts PENDING and BLOCKED_ON_USER rows. It refuses
+RUNNING, COMPLETED, FAILED, AWAITING_OPERATOR_SIGNOFF and CANCELLED rows (the
+last with a `requeue --from-cancelled` hint). It refuses a row that already has
+a PR (`row already has PR #<n>; a hold applies before a PR exists`) and a row
+whose bound session is still live (close it first with `cw spawn close`; `hold`
+stops no session and never leaves an unowned ceiling session). It is an
+operator verb: a dispatched worker may not call it.
+
+**Repeats and conversion.** A repeat with the same N on an operator hold (no
+bound session) is `unchanged`, exit 0, with no gh call. A different N moves the
+hold in place. `hold` on a worker-parked `dependency_hold` clears `session_id`
+and reports `updated (converted from worker park)`, so the row then releases on
+merge under any `reap_policy`.
+
+**Overwriting a parked row.** Holding an already-BLOCKED_ON_USER row replaces
+its disposition and `blocked_reason`. `hold` prints what it replaced
+(`replaced disposition <d>, blocked_reason <r>`) and writes an INFO log line. A
+same-status move emits no `task.transition` event, so the printed line and the
+log are the only trace; do not look for an audit event.
+
+**Release.** Release is serve-tick only (`release_stale_gated_tasks`); there is
+no other hook, and `cw dev-queue drain` and `cw doctor --reap` do not touch a
+hold.
+
+- An operator hold (no bound session) releases to PENDING when the PR merges,
+  whatever the lane's `reap_policy`.
+- A worker park with an id follows `reap_policy`: under the default
+  `signal_only` the tick only stamps `stale_gate_detected_at`; under `auto` it
+  releases.
+- A PR closed unmerged never releases a hold. The tick emits one
+  `session.reap_proposed` per episode with `proposed_action:
+  dependency_hold_pr_closed_unmerged` and `evidence {"blocked_on_pr": N}`; the
+  row stays held until you requeue or re-hold it.
+- An unknown PR state releases nothing.
+
+`dev-queue wait` on a held row returns exit 2 immediately, since the row is
+BLOCKED_ON_USER. Cancelled rows are not swept; the hold verb is the supported
+path instead of cancelling.
+
+**Accepted limits (#3654).** No code retires a hold's `WatchedPr`: it stays
+active after the PR merges or closes, hydration re-fetches every active watch
+each pass with no cap and no terminal skip, and a leftover client-tagged watch
+makes another client's hold or watch on the same repo and PR number collide
+(the hold verb then refuses with a message naming the colliding client). The
+older #1927 stale-dispatch watches share this limit. There is also no `tasks`
+or board badge for a held row whose PR closed unmerged or whose id cannot be
+resolved: the one `session.reap_proposed` event is the only signal. An older cw
+reading a `WatchedPr` with `source: dependency_hold` fails validation of that
+field. Retirement, a per-pass cap, ignoring dismissed watches in the collision
+check and the badge are tracked in #3654.
 
 ### Dispatch-loop staleness page (`dispatch_loop_stale`)
 

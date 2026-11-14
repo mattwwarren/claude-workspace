@@ -280,6 +280,12 @@ these acts run on every lane.
   operator's `requeue` frees the slot. The ceiling slot is session-status
   based: the release frees it by flipping the session; a record-missing row
   had no Session and never counted.
+  *Amendment note (2026-11-14, #2321):* the lane slot follows
+  `occupies_lane_slot` (`src/cw/models/tasks/store.py`), which starts from
+  `OCCUPIED_LANE_STATUSES` and carves out two BLOCKED_ON_USER rows: a
+  `terminal_sibling` park (#2100) and, since #2321, a `dependency_hold` park
+  that carries `blocked_on_pr`. The ceiling slot is still session-status based
+  and is unchanged.
 - **Park scope, in words.** The park covers only a bound row whose Session
   record is missing. A roster-absent live session stays with the phantom
   sweep (after its 30 s grace); a terminal session stays with the backstops
