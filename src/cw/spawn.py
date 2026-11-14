@@ -53,6 +53,7 @@ from cw.native_daemon import (
 )
 from cw.reconcile import _csid_from_transcript, ticket_id_for_session
 from cw.session_retention import find_session_by_id
+from cw.worker_effort import resolve_worker_effort_args
 from cw.worktree import is_genuinely_live_home_reason, live_home_reason
 
 if TYPE_CHECKING:
@@ -878,6 +879,9 @@ def spawn_create_impl(
     final_extra: list[str] = []
     if client.worker_model:
         final_extra.extend(["--model", client.worker_model])
+    final_extra.extend(
+        resolve_worker_effort_args(client.worker_model, client.worker_effort)
+    )
     final_extra.extend(
         build_disallowed_tools_arg(load_orchestrator_config().disallowed_mcp_tools)
     )

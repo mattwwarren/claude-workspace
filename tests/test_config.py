@@ -339,6 +339,61 @@ class TestLoadClients:
 
     @pytest.mark.parametrize(
         ("yaml_value", "expected"),
+        [("high", "high"), ("inherit", "inherit")],
+    )
+    def test_load_clients_with_worker_effort(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        yaml_value: str,
+        expected: str,
+    ) -> None:
+        from cw.models.worker_effort import WorkerEffort
+
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "clients:\n"
+            "  acme:\n"
+            f"    workspace_path: {ws_dir}\n"
+            f"    worker_effort: {yaml_value}\n"
+        )
+        result = load_clients()
+        assert result["acme"].worker_effort is WorkerEffort(expected)
+
+    def test_default_worker_effort_is_none_when_unset(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(f"clients:\n  acme:\n    workspace_path: {ws_dir}\n")
+        assert load_clients()["acme"].worker_effort is None
+
+    def test_worker_effort_unknown_level_fails_loud_at_load(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        from cw.exceptions import ConfigValidationError
+
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "clients:\n"
+            "  acme:\n"
+            f"    workspace_path: {ws_dir}\n"
+            "    worker_effort: turbo\n"
+        )
+        with pytest.raises(ConfigValidationError, match="worker_effort"):
+            load_clients()
+
+    @pytest.mark.parametrize(
+        ("yaml_value", "expected"),
         [("false", False), ("true", True), (None, True)],
         ids=["false", "true", "unset"],
     )
