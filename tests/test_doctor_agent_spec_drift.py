@@ -74,7 +74,7 @@ def test_role_falls_back_to_global_when_repo_missing(
 
     result = results[0]
     assert result.warn is False
-    assert "8 repo" in result.detail
+    assert "9 repo" in result.detail
     assert "1 global" in result.detail
 
 
