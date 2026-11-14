@@ -17,7 +17,11 @@ from cw.dev_queue.storage import load_dev_queue, save_dev_queue
 from cw.exceptions import DEV_QUEUE_LOCK_NAME, CwError
 from cw.models import QueueItemStatus, Stage
 from tests._cli_review_helpers import _seed_review_row
-from tests._shared.session_seeding import _make_ticket_task
+from tests._shared.session_seeding import (
+    _make_daemon_session,
+    _make_ticket_task,
+    _seed_sessions,
+)
 
 if TYPE_CHECKING:
     from cw.models import DevQueueStore
@@ -116,3 +120,20 @@ def test_a_failed_save_propagates_oserror(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr("cw.dev_queue.review_engine_settlements.save_dev_queue", refuse)
     with pytest.raises(OSError, match="disk full"):
         record_engine_settlement(_TICKET, _CLIENT, _HEAD, ["fp-1"], recorded_at=_WHEN)
+
+
+def test_a_trusted_dispatch_session_cannot_bypass_the_worker_guard() -> None:
+    _seed_review_row(
+        _TICKET, _CLIENT, status=QueueItemStatus.RUNNING, session_id="cw-worker"
+    )
+    _seed_sessions(
+        _make_daemon_session(
+            id="cw-worker",
+            claude_session_id="claude-worker",
+            status="active",
+        )
+    )
+    before = load_dev_queue().model_dump_json()
+    with pytest.raises(CwError, match="dispatch worker"):
+        record_engine_settlement(_TICKET, _CLIENT, _HEAD, ["fp-1"], recorded_at=_WHEN)
+    assert load_dev_queue().model_dump_json() == before
