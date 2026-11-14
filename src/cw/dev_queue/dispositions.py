@@ -8,7 +8,8 @@ URL from a session's sentinel (``_derive_disposition``,
 ``_hold_aware_disposition``, ``_result_blocker_reason``, ``_extract_pr_url``,
 ``_extract_pr_url_or_info``).
 
-A leaf: it imports only ``cw.auto_dev_result``, so ``lifecycle``, ``gates``,
+A leaf: it imports only ``cw.auto_dev_result`` and ``cw.models.enums`` (for the
+re-exported ``DEPENDENCY_HOLD_DISPOSITION``, #2321), so ``lifecycle``, ``gates``,
 ``next_commands`` and ``dispatch.claim.screening`` import it at module level
 without a cycle. Nothing here does I/O or is a monkeypatch target.
 """
@@ -28,6 +29,9 @@ from cw.auto_dev_result import (
     STAGE_SUCCESS_STATUSES,
     AutoDevResult,
     BlockedResult,
+)
+from cw.models.enums import (
+    DEPENDENCY_HOLD_DISPOSITION as _MODELS_DEPENDENCY_HOLD_DISPOSITION,
 )
 
 # Disposition stamped when a ticket is parked AWAITING_OPERATOR_SIGNOFF by
@@ -272,11 +276,14 @@ TRACKER_MCP_GATE_DISPOSITION: Final = "tracker_mcp_gate"
 # GitHub #2321 -- the dependency hold: BLOCKED_ON_USER waiting on a PR merge.
 # Stamped by ``cw dev-queue hold`` and by routing for a worker
 # ``dependency_unmerged`` park carrying ``depends_on_pr``. The constant lives in
-# ``cw.models.enums`` (the ``cw.models`` slot predicate keys on it); import it
-# from there, and from ``cw.dev_queue`` for the package-level name.
+# ``cw.models.enums`` (the ``cw.models`` slot predicate keys on it); this module
+# re-binds that same object beside its sibling dispositions (a rebinding, not
+# an ``X as X`` import, which ruff PLC0414 forbids and mypy --strict needs for
+# a re-export), and ``cw.dev_queue`` re-exports it from here.
 # Deliberately NOT a HOLD_DISPOSITIONS member: ``drain`` cannot release it, and
 # it is not a digest-eligible attention item. It is an
 # operator-gated park: ``cw doctor --reap`` never reverts it.
+DEPENDENCY_HOLD_DISPOSITION: Final = _MODELS_DEPENDENCY_HOLD_DISPOSITION
 
 # ``TicketTask.blocked_reason`` stamped alongside TRACKER_MCP_GATE_DISPOSITION
 # (#2442). The ``_pre_dispatch`` suffix follows _PRE_DISPATCH_STALE_PR_REASON's

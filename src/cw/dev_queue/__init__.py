@@ -113,6 +113,7 @@ from cw.dev_queue.dispositions import (
     AWAITING_CI_EVIDENCE_DISPOSITION,
     AWAITING_OPERATOR_DISPOSITION,
     BRANCH_STALENESS_GATE_DISPOSITION,
+    DEPENDENCY_HOLD_DISPOSITION,
     EMPTY_DIFF_GATE_DISPOSITION,
     FINALIZE_GATE_HELD_DISPOSITION,
     GATE_TIMEOUT_DISPOSITION,
@@ -189,7 +190,6 @@ from cw.dev_queue.storage import (
     save_plan,
 )
 from cw.exceptions import LaneNotFoundError
-from cw.models.enums import DEPENDENCY_HOLD_DISPOSITION
 
 __all__ = [
     "ADOPTED_HEAD_DRIFT_DISPOSITION",
