@@ -122,7 +122,11 @@ def test_a_failed_save_propagates_oserror(monkeypatch: pytest.MonkeyPatch) -> No
         record_engine_settlement(_TICKET, _CLIENT, _HEAD, ["fp-1"], recorded_at=_WHEN)
 
 
-def test_a_trusted_dispatch_session_cannot_bypass_the_worker_guard() -> None:
+def test_record_succeeds_from_inside_a_dispatch_worker_on_a_running_review_row() -> (
+    None
+):
+    # The writer's intended caller is `record-round` inside the review worker, so a
+    # live daemon session bound to the row must not refuse the write.
     _seed_review_row(
         _TICKET, _CLIENT, status=QueueItemStatus.RUNNING, session_id="cw-worker"
     )
@@ -133,7 +137,5 @@ def test_a_trusted_dispatch_session_cannot_bypass_the_worker_guard() -> None:
             status="active",
         )
     )
-    before = load_dev_queue().model_dump_json()
-    with pytest.raises(CwError, match="dispatch worker"):
-        record_engine_settlement(_TICKET, _CLIENT, _HEAD, ["fp-1"], recorded_at=_WHEN)
-    assert load_dev_queue().model_dump_json() == before
+    record_engine_settlement(_TICKET, _CLIENT, _HEAD, ["fp-1"], recorded_at=_WHEN)
+    assert _row_settlements() == [(_HEAD, ["fp-1"])]

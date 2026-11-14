@@ -3,12 +3,11 @@
 ``record_engine_settlement`` is the only code that writes the settlement list.
 It runs under ``dev_queue_lock`` only, never takes ``sessions_lock``, and spawns
 no process (ADR-0019). Its guarantee is exact: **the reviewed branch cannot
-edit the file this lives in.** It is cw state outside the worktree. The worker
-guard also refuses a headless dispatch worker, so a reviewed branch cannot use
-its own ``record-round`` payload to mint the settlement that authorizes its
-attestation. The remaining row gate refuses unless the resolved row is
-REVIEW-stage and RUNNING, and writes nothing otherwise, so a refusal leaves no
-attestation and never a false PASS.
+edit the file this lives in.** It is cw state outside the worktree. The row
+gate refuses unless the resolved row is REVIEW-stage and RUNNING, and writes
+nothing otherwise, so a refusal leaves no attestation and never a false PASS.
+This writer does not defend against a process in the worker session invoking
+the CLI; the row gate and the reviewed-branch boundary are the whole defence.
 
 The pure reader and the reconciler live in
 :mod:`cw.dev_queue.review_engine_reconcile`, which imports no ``crud`` and so
@@ -18,22 +17,13 @@ cannot close an import cycle through ``lifecycle`` and ``review_attestation``.
 from __future__ import annotations
 
 import logging
-import os
 import re
 from typing import TYPE_CHECKING, Final
 
-from cw.cli._base import SESSION_ENV_VAR
-from cw.cli._worker_guard import refuse_inside_dispatch_worker
-from cw.config import load_state
 from cw.dev_queue.crud import _find_ticket
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.exceptions import CwError
-from cw.models import (
-    TERMINAL_SESSION_STATUSES,
-    QueueItemStatus,
-    SessionOrigin,
-    Stage,
-)
+from cw.models import QueueItemStatus, Stage
 from cw.models.review_attestation import HEAD_SHA_PATTERN
 from cw.models.review_engine_settlement import ReviewEngineSettlement
 
@@ -49,47 +39,6 @@ _log = logging.getLogger(__name__)
 MAX_SETTLEMENT_HEADS: Final = 8
 
 _HEAD_RE: Final = re.compile(HEAD_SHA_PATTERN)
-_SETTLEMENT_IN_WORKER_MSG: Final = (
-    "refusing to record an engine settlement inside a dispatch worker; "
-    "a reviewed branch cannot authorize its own attestation"
-)
-_SESSION_STATE_UNAVAILABLE: Final = (
-    "cannot verify the dispatch session before recording an engine settlement"
-)
-
-
-def _refuse_if_trusted_dispatch_session(task: TicketTask) -> None:
-    """Refuse a live daemon session identified by trusted session state.
-
-    The worktree context and ``TMPDIR`` are branch-adjacent signals: a worker
-    can change directory or clear the environment before invoking cw. The
-    queue row's session binding is the primary check. The Claude session
-    id is an additional process signal, and its daemon/headless provenance is
-    checked against cw's state file rather than the worktree. A missing session
-    id remains the operator-side path when the row is unbound; the existing
-    path guard covers older workers that do not export it.
-    """
-    claude_session_id = os.environ.get(SESSION_ENV_VAR)
-    if task.session_id is None and not claude_session_id:
-        return
-    try:
-        state = load_state()
-    except (CwError, OSError, ValueError) as exc:
-        raise CwError(_SESSION_STATE_UNAVAILABLE) from exc
-    if task.session_id is not None and any(
-        session.id == task.session_id
-        and session.origin is SessionOrigin.DAEMON
-        and session.status not in TERMINAL_SESSION_STATUSES
-        for session in state.sessions
-    ):
-        raise CwError(_SETTLEMENT_IN_WORKER_MSG)
-    if claude_session_id and any(
-        session.origin is SessionOrigin.DAEMON
-        and session.status not in TERMINAL_SESSION_STATUSES
-        and claude_session_id in {session.id, session.claude_session_id}
-        for session in state.sessions
-    ):
-        raise CwError(_SETTLEMENT_IN_WORKER_MSG)
 
 
 def _require_review_running(task: TicketTask) -> None:
@@ -129,7 +78,6 @@ def record_engine_settlement(
             ``(ticket_id, client_name)``, or the row is not a RUNNING REVIEW row.
         OSError: if the store could not be written.
     """
-    refuse_inside_dispatch_worker(_SETTLEMENT_IN_WORKER_MSG)
     if _HEAD_RE.fullmatch(head_sha) is None:
         msg = f"review engine settlement needs a 40-hex head_sha, got {head_sha!r}"
         raise CwError(msg)
@@ -141,7 +89,6 @@ def record_engine_settlement(
     with _lock():
         store = load_dev_queue()
         task = _find_ticket(store, ticket_id, client_name)
-        _refuse_if_trusted_dispatch_session(task)
         _require_review_running(task)
         task.review_engine_settlements = _upsert_bounded(
             task.review_engine_settlements, record

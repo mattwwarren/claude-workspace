@@ -1802,7 +1802,9 @@ record-round` into the dev-queue row. The reviewed branch cannot edit that
 file, because it lives in cw state outside the worktree. That is the
 guarantee, not that the branch cannot cause a write: the writer refuses unless
 the row is in the REVIEW stage and RUNNING, and it fails closed to no
-attestation, never a false PASS. The worktree ledger can only corroborate,
+attestation, never a false PASS. The writer does not stop a process in the
+worker session from invoking the CLI; the row gate is the whole defence. The
+worktree ledger can only corroborate,
 never grant. The reconciler never reconciles a MUST_FIX, `coverage.*` or
 `acceptance.*` finding.
 

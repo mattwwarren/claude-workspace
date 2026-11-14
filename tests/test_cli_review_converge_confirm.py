@@ -821,17 +821,3 @@ class TestEngineSettlementRecording:
         assert result.exit_code == 0, result.output
         assert [r for r in caplog.records if _WARNING_TEXT in r.getMessage()]
         assert _stored(repo).rounds[-1].engine is True
-
-    def test_a_dispatch_worker_payload_cannot_create_a_settlement(
-        self,
-        repo: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        _write_session_context(repo, headless=True, client=_CLIENT, ticket_id=_TICKET)
-        monkeypatch.setenv("TMPDIR", str(repo / ".cw" / "tmp"))
-        with caplog.at_level(logging.WARNING, logger=_ENGINE_LOG):
-            result = _record(repo, _engine_round(engine_round_finding("fp-00000a1")))
-        assert result.exit_code == 0, result.output
-        assert _settlements() == []
-        assert len([r for r in caplog.records if _WARNING_TEXT in r.getMessage()]) == 1
