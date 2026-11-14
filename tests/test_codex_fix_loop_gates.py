@@ -712,6 +712,25 @@ class TestScratchRoot:
             )
             assert gates._scratch_root() == str(real_dir)
 
+    def test_skips_a_directory_that_is_not_writable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        locked.chmod(0o500)
+        try:
+            if os.access(locked, os.W_OK):
+                pytest.skip("directory permissions are not enforced (root)")
+            monkeypatch.setattr(
+                gates, "_SCRATCH_ROOT_CANDIDATES", (str(locked), str(real_dir))
+            )
+
+            assert gates._scratch_root() == str(real_dir)
+        finally:
+            locked.chmod(0o700)
+
     def test_no_candidate_raises_oserror(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
