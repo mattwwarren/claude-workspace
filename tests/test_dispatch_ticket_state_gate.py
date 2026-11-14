@@ -20,7 +20,7 @@ import pytest
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.dev_queue.requeue import requeue_ticket
 from cw.dispatch import ticket_state_gate as gate
-from cw.dispatch.claim.screening import _claim_next_pending
+from cw.dispatch.claim.screening import _claim_next_pending, _live_closed_ticket_hit
 from cw.dispatch.lanes import _resolve_closed_ticket_hits_if_gated
 from cw.dispatch.ticket_state_gate import (
     _FAILED_READ_BACKOFF_SECONDS,
@@ -409,6 +409,23 @@ def test_duplicate_ticket_rows_read_once(client: ClientConfig, cli: FakeGhCli) -
 
     assert hits == {"7": ClosedTicketHit(first.created_at, defer=False)}
     assert len(cli.records) == 1
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"pr_url": "https://github.com/o/r/pull/1"},
+        {"adopted_pr_url": "https://github.com/o/r/pull/1"},
+    ],
+    ids=["pr-url-added", "adopted-pr-added"],
+)
+def test_closed_hit_is_ignored_if_pr_fields_changed_under_the_lock(
+    overrides: dict[str, object],
+) -> None:
+    row = _row(**overrides)
+    hit = ClosedTicketHit(row.created_at, defer=False)
+
+    assert _live_closed_ticket_hit(row, {row.ticket_id: hit}) is None
 
 
 def test_a_stamped_row_is_sticky_but_a_fresh_enqueue_is_read(

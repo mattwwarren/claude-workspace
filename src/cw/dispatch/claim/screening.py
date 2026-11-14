@@ -309,15 +309,18 @@ def _live_closed_ticket_hit(
 ) -> ClosedTicketHit | None:
     """The closed-ticket hit that still applies to *task* under the lock (#1605).
 
-    Ignored when the row left PENDING, left PLAN/IMPL, or is a different row
-    (``created_at`` identity) than the one the lock-free resolve judged. Hits
-    are rebuilt every tick, so a hit is only ever acted on in its own tick.
+    Ignored when the row left PENDING, left PLAN/IMPL, gained a PR or adopted
+    PR, or is a different row (``created_at`` identity) than the one the
+    lock-free resolve judged. Hits are rebuilt every tick, so a hit is only
+    ever acted on in its own tick.
     """
     hit = hits.get(task.ticket_id)
     if (
         hit is None
         or task.status != QueueItemStatus.PENDING
         or task.stage not in (Stage.PLAN, Stage.IMPL)
+        or task.pr_url is not None
+        or task.adopted_pr_url is not None
         or task.created_at != hit.created_at
     ):
         return None

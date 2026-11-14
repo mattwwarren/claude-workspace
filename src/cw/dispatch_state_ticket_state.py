@@ -54,9 +54,14 @@ class TicketStateProbe(NamedTuple):
     attempted_at: datetime | None = None
 
 
+def ticket_state_client_prefix(client: str) -> str:
+    """The sidecar-key prefix shared by row keys and client pruning."""
+    return f"{client}/"
+
+
 def ticket_state_key(client: str, ticket_id: str, created_at: datetime) -> str:
     """The sidecar key for one queue-row identity."""
-    return f"{client}/{ticket_id}::{created_at.isoformat()}"
+    return f"{ticket_state_client_prefix(client)}{ticket_id}::{created_at.isoformat()}"
 
 
 class _MalformedEntryError(Exception):
@@ -180,7 +185,7 @@ def save_ticket_state_probes(
     (#1157). No write when nothing changes. ``OSError`` is logged and
     swallowed: a lost write only costs a re-read next tick.
     """
-    prefix = f"{client}/"
+    prefix = ticket_state_client_prefix(client)
     keep = frozenset(prune_to_keys)
 
     def _merge(raw: dict[str, object]) -> bool:
