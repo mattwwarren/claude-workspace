@@ -9,6 +9,7 @@ subprocess (SHOULD_FIX 11, #1236). Consumed by ``core``'s review-pass assembly.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import subprocess
@@ -19,13 +20,13 @@ from cw.exceptions import CwError
 from cw.plan_files import is_large_diff
 from cw.review_convergence import resolve_loop_diff_base
 from cw.review_findings import CapturedDiff
-from cw.worktree import _parse_numstat_totals
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
 _log = logging.getLogger(__name__)
+_NUMSTAT_MIN_COLS = 3
 
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 # Matches every ``diff --git a/<path> b/<path>`` header, including files with
@@ -221,15 +222,24 @@ def _branch_diff_totals(worktree: Path, default_branch: str) -> tuple[int, int]:
 
     The same range as :func:`_capture_diff` (*base* from
     :func:`~cw.review_convergence.resolve_loop_diff_base`, so a pinned full
-    sha passes through). *lines* is added + removed; binary files are skipped
-    (:func:`~cw.worktree._parse_numstat_totals`). Raises on any git or
-    base-resolution failure: the fix loop's divergence baseline
+    sha passes through). *lines* is added + removed; binary files count as
+    changed files with zero lines, matching ``git diff --stat``. Raises on any
+    git or base-resolution failure: the fix loop's divergence baseline
     (``pre_loop_diff_lines``) depends on that, and only
     :func:`_measure_large_diff` fails open.
     """
     base = resolve_loop_diff_base(worktree, default_branch)
     numstat = git_output(["diff", "--numstat", f"{base}...HEAD"], cwd=worktree)
-    return _parse_numstat_totals(numstat)
+    files = 0
+    lines = 0
+    for row in numstat.splitlines():
+        parts = row.split("\t")
+        if len(parts) < _NUMSTAT_MIN_COLS:
+            continue
+        files += 1
+        with contextlib.suppress(ValueError):
+            lines += int(parts[0]) + int(parts[1])
+    return files, lines
 
 
 def _measure_large_diff(worktree: Path, default_branch: str) -> bool:

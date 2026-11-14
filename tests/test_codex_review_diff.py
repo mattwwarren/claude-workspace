@@ -240,7 +240,7 @@ class TestBranchDiffTotals:
         assert totals == (4, 5)
         assert totals == _numstat_totals(repo, "main")
 
-    def test_a_binary_file_is_skipped(
+    def test_a_binary_file_counts_as_a_changed_file_with_no_lines(
         self, make_git_repo: Callable[[str], Path]
     ) -> None:
         repo = make_git_repo("wt-totals-binary")
@@ -249,7 +249,7 @@ class TestBranchDiffTotals:
         git_in(repo, "add", "blob.bin")
         git_in(repo, "commit", "-m", "add blob")
 
-        assert _branch_diff_totals(repo, "main") == (1, 1)
+        assert _branch_diff_totals(repo, "main") == (2, 1)
 
     def test_a_pinned_full_sha_base_passes_through(
         self, make_git_repo: Callable[[str], Path]

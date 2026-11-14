@@ -53,6 +53,7 @@ from cw.codex_review._context import (
     _render_adjudicated_findings_block,
     _select_output_instructions,
 )
+from cw.codex_review._context._agent_spec import TRANSITIVE_IMPACT_REVIEWER_ROLE
 from cw.codex_review._context._prompt_text import (
     _ADJUDICATED_INSTRUCTIONS,
     _CONSTRAINTS_HEADER,
@@ -225,7 +226,7 @@ class TestCategorizeChangedFiles:
 # ---------------------------------------------------------------------------
 
 
-_TRANSITIVE = "Transitive Impact Reviewer"
+_TRANSITIVE = TRANSITIVE_IMPACT_REVIEWER_ROLE
 
 
 class TestSelectReviewerRoles:
