@@ -9,6 +9,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **The Stop hook's transcript-candidate discovery has one definition (#3623).** The hook cwd and the recorded worktree, de-duplicated and resolved through `claude_project_dir`, were located by two copies, one in the #2135 park and one in the #2348 auto-continuation. Both now call `cw.cli.stop_hook.transcripts._transcript_candidates`. Internal: no behavior change.
+### Fixed
+
+- **The pre-push diff-cover hook no longer loses the push to an idle ssh connection (#3222):** `/ship-it` Step 2 exports a `ServerAliveInterval`/`ServerAliveCountMax` keepalive for ssh remotes when no ssh setting already exists, and the contributor docs (CLAUDE.md, INSTALL.md) describe the `~/.ssh/config` fix. The hook's checks are unchanged.
 
 ## [1.100.0] - 2026-11-14
 

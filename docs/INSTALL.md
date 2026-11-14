@@ -127,6 +127,8 @@ uv run cw --help           # Run without global install
 
 Use this exact command, not a bare `uv sync`. `uv sync` is exact: it removes any package the lock does not list, and without `--extra mcp` that includes the `mcp` extra itself. A venv left behind by a bare sync (or one that predates an `mcp` version bump) then fails `mypy` with `[arg-type]` errors that CI never sees. `--locked` makes the command fail rather than rewrite a stale `uv.lock`. `--dev` is the default and is kept only so the command is identical to CI's install step and to gate 2 in `CLAUDE.md`. Anything you installed by hand with `uv pip install` is still removed.
 
+If you opt into the pre-push `diff-cover` hook, the push can lose its ssh connection while the roughly 13-minute hook run is in progress (#3222). Keep the connection alive with a `Host github.com` stanza in `~/.ssh/config` that sets `ServerAliveInterval 20` and `ServerAliveCountMax 6`, or set `GIT_SSH_COMMAND` to `ssh -o ServerAliveInterval=20 -o ServerAliveCountMax=6` for one push. Project `/ship-it` sets this itself when nothing else configures ssh. See the CLAUDE.md "Quality Gates" section for details.
+
 ### Upgrading
 
 ```bash
