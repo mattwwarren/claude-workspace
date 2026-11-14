@@ -16,7 +16,9 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -88,11 +90,26 @@ _CAFE = "café.py"
 _CAFE_QUOTED = '"caf\\303\\251.py"'
 _CAFE_CHECK = f"grep -q '^z = 1$' {_CAFE}"
 _CAFE_FIX = f"printf 'z = 1\\n' > {_CAFE}"
+_SCRATCH_PREFIX = "cw-gate-"
+_RENDEZVOUS_POLLS = 200
+_RENDEZVOUS_SLEEP_S = 0.05
+_THREAD_JOIN_S = 30.0
+# The real default, captured before the autouse fixture below swaps it out.
+_REAL_SCRATCH_ROOTS = gates._SCRATCH_ROOT_CANDIDATES
 
 
 @pytest.fixture(autouse=True)
 def _fast_poll(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gates, "_POLL_SECONDS", 0.05)
+
+
+@pytest.fixture(autouse=True)
+def scratch_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Keep every gate's private scratch dir off the real ``/tmp`` (#3646)."""
+    root = tmp_path / "scratch-root"
+    root.mkdir()
+    monkeypatch.setattr(gates, "_SCRATCH_ROOT_CANDIDATES", (str(root),))
+    return root
 
 
 @pytest.fixture
@@ -477,6 +494,220 @@ def _write_project_config(repo: Path, text: str) -> None:
     config.write_text(text, encoding="utf-8")
 
 
+def _rendezvous_body(mine: Path, other: Path, result: Path) -> str:
+    """Publish ``$TMPDIR``, wait (bounded) for *other*'s, record if it is alive."""
+    q = shlex.quote
+    return (
+        f'printf %s "$TMPDIR" > {q(str(mine) + ".tmp")} '
+        f"&& mv {q(str(mine) + '.tmp')} {q(str(mine))}; i=0; "
+        f"while [ ! -s {q(str(other))} ] && [ $i -lt {_RENDEZVOUS_POLLS} ]; "
+        f"do sleep {_RENDEZVOUS_SLEEP_S}; i=$((i+1)); done; "
+        f'if [ -d "$(cat {q(str(other))})" ]; then echo alive > {q(str(result))}; '
+        f"else echo dead > {q(str(result))}; fi"
+    )
+
+
+def _recording_watch(monkeypatch: pytest.MonkeyPatch, error: Exception) -> list[str]:
+    """Make ``_run_watched`` record its ``TMPDIR`` (which must exist), then raise."""
+    seen: list[str] = []
+
+    def _wrapper(argv: Any, **kwargs: Any) -> Any:
+        tmpdir = kwargs["env"]["TMPDIR"]
+        assert Path(tmpdir).is_dir()
+        seen.append(tmpdir)
+        raise error
+
+    monkeypatch.setattr(gates, "_run_watched", _wrapper)
+    return seen
+
+
+class TestGateScratch:
+    """Each gate subprocess gets its own private scratch dir (#3646)."""
+
+    def test_two_concurrent_runs_for_different_worktrees_get_distinct_scratch_dirs(
+        self, repo: Path, state: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo_b = make_git_repo("gates-wt-b")
+        files = {n: state / f"{n}.dir" for n in "ab"}
+        results = {n: state / f"{n}.result" for n in "ab"}
+        failures: dict[str, GateFailure | None] = {}
+
+        def _go(name: str, worktree: Path, other: str) -> None:
+            body = _rendezvous_body(files[name], files[other], results[name])
+            failures[name] = _run(_plan((name, body, _CEILING)), worktree)
+
+        threads = [
+            threading.Thread(target=_go, args=("a", repo, "b")),
+            threading.Thread(target=_go, args=("b", repo_b, "a")),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=_THREAD_JOIN_S)
+
+        assert not any(t.is_alive() for t in threads)
+        assert failures == {"a": None, "b": None}
+        dirs = {n: Path(f.read_text(encoding="utf-8")) for n, f in files.items()}
+        assert dirs["a"] != dirs["b"]
+        for name, worktree in (("a", repo), ("b", repo_b)):
+            assert results[name].read_text(encoding="utf-8").strip() == "alive"
+            assert not dirs[name].is_relative_to(worktree)
+            assert not dirs[name].is_relative_to(Path.home())
+            assert not dirs[name].exists()
+
+    def test_scratch_removed_after_a_red_gate(
+        self, repo: Path, scratch_root: Path
+    ) -> None:
+        body = 'echo junk > "$TMPDIR/junk.txt"; exit 1'
+
+        failure = _run(_plan(("t", body, _CEILING)), repo)
+
+        assert failure is not None
+        assert failure.kind == "red"
+        assert list(scratch_root.iterdir()) == []
+
+    def test_scratch_removed_after_a_dirtied_gate(
+        self, repo: Path, scratch_root: Path
+    ) -> None:
+        body = 'echo junk > "$TMPDIR/junk.txt"; echo y >> tracked.py'
+
+        failure = _run(_plan(("t", body, _CEILING)), repo)
+
+        assert failure is not None
+        assert failure.kind == "dirtied"
+        assert list(scratch_root.iterdir()) == []
+
+    def test_scratch_removed_after_a_green_gate(
+        self, repo: Path, scratch_root: Path
+    ) -> None:
+        body = 'echo junk > "$TMPDIR/junk.txt"'
+
+        assert _run(_plan(("t", body, _CEILING)), repo) is None
+        assert list(scratch_root.iterdir()) == []
+
+    def test_scratch_removed_when_the_watch_raises(
+        self, repo: Path, scratch_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen = _recording_watch(monkeypatch, RuntimeError("torn down"))
+
+        with pytest.raises(RuntimeError, match="torn down"):
+            _run(_plan(("t", "true", _CEILING)), repo)
+
+        assert len(seen) == 1
+        assert not Path(seen[0]).exists()
+        assert list(scratch_root.iterdir()) == []
+
+    def test_scratch_removed_when_the_start_fails_with_oserror(
+        self, repo: Path, scratch_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen = _recording_watch(monkeypatch, OSError("no exec"))
+
+        failure = _run(_plan(("t", "true", _CEILING)), repo)
+
+        assert failure is not None
+        assert failure.kind == "unavailable"
+        assert len(seen) == 1
+        assert list(scratch_root.iterdir()) == []
+
+    def test_no_usable_scratch_root_is_unavailable(
+        self, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            gates, "_SCRATCH_ROOT_CANDIDATES", (str(tmp_path / "missing"),)
+        )
+        real_popen = subprocess.Popen
+
+        def _no_gate_popen(argv: list[str], *args: Any, **kwargs: Any) -> Any:
+            if argv[0] == "sh":
+                raise AssertionError
+            return real_popen(argv, *args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "Popen", _no_gate_popen)
+
+        failure = _run(_plan(("t", "true", _CEILING)), repo)
+
+        assert failure is not None
+        assert failure.kind == "unavailable"
+        assert failure.why is not None
+        assert "could not be started" in failure.why
+
+    def test_scratch_leftover_logs_a_warning(
+        self,
+        repo: Path,
+        scratch_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        real_rmtree = shutil.rmtree
+        monkeypatch.setattr(shutil, "rmtree", lambda *_a, **_k: None)
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            assert _run(_plan(("leaky", "true", _CEILING)), repo) is None
+
+        left = list(scratch_root.iterdir())
+        try:
+            assert len(left) == 1
+            messages = [r.getMessage() for r in caplog.records]
+            assert any(
+                "codex_fix_gate_scratch_leftover" in m
+                and "gate=leaky" in m
+                and str(left[0]) in m
+                and _SCRATCH_PREFIX in m
+                for m in messages
+            )
+        finally:
+            real_rmtree(left[0], ignore_errors=True)
+
+    def test_scratch_dir_is_private(self, repo: Path, state: Path) -> None:
+        seen = state / "mode.txt"
+        body = f'ls -ld "$TMPDIR" | cut -c1-10 > {shlex.quote(str(seen))}'
+
+        assert _run(_plan(("t", body, _CEILING)), repo) is None
+        assert seen.read_text(encoding="utf-8").strip() == "drwx------"
+
+
+class TestScratchRoot:
+    """The root is picked from POSIX fallbacks, never the process env (#3646)."""
+
+    def test_default_candidates_are_the_posix_fallbacks(self) -> None:
+        assert _REAL_SCRATCH_ROOTS == ("/tmp", "/var/tmp", "/usr/tmp")
+
+    def test_ignores_inherited_tmp_vars(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for name in gates._WORKER_SCRATCH_VARS:
+            monkeypatch.setenv(name, str(repo / ".cw" / "tmp"))
+        monkeypatch.setattr(gates, "_SCRATCH_ROOT_CANDIDATES", _REAL_SCRATCH_ROOTS)
+
+        root = gates._scratch_root()
+
+        assert root in _REAL_SCRATCH_ROOTS
+        assert not Path(root).is_relative_to(repo)
+        assert not Path(root).is_relative_to(Path.home())
+
+    def test_skips_a_candidate_that_is_not_a_writable_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        a_file = tmp_path / "file"
+        a_file.write_text("x", encoding="utf-8")
+
+        for bad in (a_file, tmp_path / "nope"):
+            monkeypatch.setattr(
+                gates, "_SCRATCH_ROOT_CANDIDATES", (str(bad), str(real_dir))
+            )
+            assert gates._scratch_root() == str(real_dir)
+
+    def test_no_candidate_raises_oserror(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for candidates in ((), (str(tmp_path / "nope"),)):
+            monkeypatch.setattr(gates, "_SCRATCH_ROOT_CANDIDATES", candidates)
+            with pytest.raises(OSError, match="scratch"):
+                gates._scratch_root()
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -584,7 +815,7 @@ class TestRunner:
         assert failure.why == "script STALE"
 
     def test_popen_oserror_is_unavailable(
-        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+        self, repo: Path, scratch_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         real_popen = subprocess.Popen
 
@@ -602,6 +833,7 @@ class TestRunner:
         assert failure.kind == "unavailable"
         assert failure.why is not None
         assert "cannot exec sh" in failure.why
+        assert not list(scratch_root.iterdir())
 
     def test_zero_gates_warns_and_tokens_once(
         self, repo: Path, caplog: pytest.LogCaptureFixture
@@ -640,21 +872,36 @@ class TestRunner:
     def test_gitignored_artifact_stays_green(self, repo: Path) -> None:
         assert _run(_plan(("cov", "echo x > .coverage", _CEILING)), repo) is None
 
-    def test_gate_runs_without_the_worker_scratch_vars(
-        self, repo: Path, state: Path, monkeypatch: pytest.MonkeyPatch
+    def test_gate_runs_in_a_private_scratch_dir(
+        self,
+        repo: Path,
+        state: Path,
+        scratch_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        scratch = state / "scratch"
-        scratch.mkdir()
+        inherited = state / "scratch"
+        inherited.mkdir()
         for name in gates._WORKER_SCRATCH_VARS:
-            monkeypatch.setenv(name, str(scratch))
+            monkeypatch.setenv(name, str(inherited))
         seen = state / "seen.txt"
         body = (
-            f'printf \'%s,%s,%s\' "${{TMPDIR-UNSET}}" "${{TMP-UNSET}}" '
-            f'"${{TEMP-UNSET}}" > {shlex.quote(str(seen))}'
+            f'printf \'%s,%s,%s,\' "${{TMPDIR-UNSET}}" "${{TMP-UNSET}}" '
+            f'"${{TEMP-UNSET}}" > {shlex.quote(str(seen))}; '
+            f'if [ -d "$TMPDIR" ]; then printf yes >> {shlex.quote(str(seen))}; '
+            f"else printf no >> {shlex.quote(str(seen))}; fi"
         )
 
         assert _run(_plan(("env", body, _CEILING)), repo) is None
-        assert seen.read_text(encoding="utf-8") == "UNSET,UNSET,UNSET"
+
+        tmpdir, tmp, temp, existed = seen.read_text(encoding="utf-8").split(",")
+        assert tmpdir == tmp == temp
+        assert tmpdir not in ("", "UNSET", str(inherited))
+        assert Path(tmpdir).parent == scratch_root
+        assert Path(tmpdir).name.startswith(_SCRATCH_PREFIX)
+        assert existed == "yes"
+        assert not Path(tmpdir).is_relative_to(repo)
+        assert not Path(tmpdir).is_relative_to(Path.home())
+        assert not Path(tmpdir).exists()
 
     def test_a_dirty_cycle_that_a_gate_leaves_alone_stays_green(
         self, repo: Path
@@ -1229,20 +1476,64 @@ class TestAutofix:
         assert _tracked(repo) == "x = 1\n"
         assert [e[1]["gate"] for e in slow_events] == ["fmt:autofix"]
 
-    def test_autofix_runs_with_the_gate_env(
-        self, repo: Path, state: Path, monkeypatch: pytest.MonkeyPatch
+    def test_autofix_gate_and_recheck_each_get_a_private_scratch_dir(
+        self,
+        repo: Path,
+        state: Path,
+        scratch_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        inherited = state / "inherited"
+        inherited.mkdir()
         for name in gates._WORKER_SCRATCH_VARS:
-            monkeypatch.setenv(name, str(state))
-        seen = state / "seen.txt"
-        fix = (
-            f"printf '%s' \"${{TMPDIR-UNSET}}\" > {shlex.quote(str(seen))}; {_FMT_FIX}"
-        )
+            monkeypatch.setenv(name, str(inherited))
+        seen_check = state / "seen_check.txt"
+        seen_fix = state / "seen_fix.txt"
+        check = f'echo "$TMPDIR" >> {shlex.quote(str(seen_check))}; {_FMT_CHECK}'
+        fix = f'echo "$TMPDIR" >> {shlex.quote(str(seen_fix))}; {_FMT_FIX}'
         _cycle_edit(repo)
-        plan = _plan_of(PlannedGate("fmt", _FMT_CHECK, _CEILING, fix))
+        plan = _plan_of(PlannedGate("fmt", check, _CEILING, fix))
 
         assert _run(plan, repo, touched=_TRACKED_TOUCHED) is None
-        assert seen.read_text(encoding="utf-8") == "UNSET"
+
+        checks = seen_check.read_text(encoding="utf-8").splitlines()
+        fixes = seen_fix.read_text(encoding="utf-8").splitlines()
+        assert len(checks) == 2
+        assert len(fixes) == 1
+        dirs = [Path(d) for d in (*checks, *fixes)]
+        assert len(set(dirs)) == 3
+        for d in dirs:
+            assert str(d) != str(inherited)
+            assert d.parent == scratch_root
+            assert not d.exists()
+
+    def test_autofix_scratch_failure_reverts_and_keeps_the_original_failure(
+        self,
+        repo: Path,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        real_root = gates._scratch_root
+        calls: list[int] = []
+
+        def _flaky_root() -> str:
+            calls.append(1)
+            if len(calls) > 1:
+                msg = "scratch root vanished"
+                raise OSError(msg)
+            return real_root()
+
+        monkeypatch.setattr(gates, "_scratch_root", _flaky_root)
+        _cycle_edit(repo)
+        before = _tracked(repo)
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(_fmt_plan(), repo, touched=_TRACKED_TOUCHED)
+
+        assert failure is not None
+        assert (failure.kind, failure.gate) == ("red", "fmt")
+        assert _autofix_outcomes(caplog) == ["reverted_failed"]
+        assert _tracked(repo) == before
 
     def _cafe_cycle(self, repo: Path) -> frozenset[str]:
         """Commit ``café.py``, edit it as a cycle would; return the measured set."""
