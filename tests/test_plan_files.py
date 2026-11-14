@@ -13,6 +13,7 @@ from cw.plan_files import (
     SMALL_TIER_MAX_FILES,
     SMALL_TIER_MAX_LINES,
     _looks_like_path,
+    is_large_diff,
     parse_plan_files_modified,
     parse_plan_scope_tier,
     resolve_review_scope_tier,
@@ -256,6 +257,21 @@ def test_resolve_measured_diff_boundaries() -> None:
     assert resolve_review_scope_tier(None, None, (10, 500)) == "small"
     assert resolve_review_scope_tier(None, None, (11, 500)) == "large"
     assert resolve_review_scope_tier(None, None, (10, 501)) == "large"
+
+
+def test_is_large_diff_boundaries_are_or_semantics() -> None:
+    """``large_diff`` (#2086): over the file cap OR over the line cap."""
+    assert is_large_diff(SMALL_TIER_MAX_FILES, SMALL_TIER_MAX_LINES) is False
+    assert is_large_diff(SMALL_TIER_MAX_FILES + 1, 0) is True
+    assert is_large_diff(0, SMALL_TIER_MAX_LINES + 1) is True
+    assert is_large_diff(0, 0) is False
+
+
+def test_resolve_measured_branch_is_the_complement_of_is_large_diff() -> None:
+    """The measured tier is ``large`` exactly when the diff is ``large_diff``."""
+    for measured in ((10, 500), (11, 500), (10, 501), (0, 0), (99, 9999)):
+        expected = "large" if is_large_diff(*measured) else "small"
+        assert resolve_review_scope_tier(None, None, measured) == expected
 
 
 def test_resolve_no_source_returns_none() -> None:
