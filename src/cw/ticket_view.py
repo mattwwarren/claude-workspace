@@ -259,6 +259,7 @@ def build_ticket_view(
         stage=task.stage,
         disposition=task.disposition,
         blocked_reason=task.blocked_reason,
+        blocked_on_pr=task.blocked_on_pr,
         blocker_details=_blocker_details(session),
         advisory_note=task.advisory_note,
         lane=task.lane,
@@ -748,6 +749,10 @@ def render_ticket_view(view: TicketView, *, now: datetime | None = None) -> str:
         ("stage", view.stage.value),
         ("disposition", _or_absent(view.disposition)),
         ("reason", _reason_text(view)),
+        (
+            "blocked_on_pr",
+            _ABSENT if view.blocked_on_pr is None else str(view.blocked_on_pr),
+        ),
         ("details", _details_text(view)),
         ("lane", view.lane),
         ("priority", str(view.priority)),

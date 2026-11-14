@@ -201,6 +201,12 @@ unchanged. This is not a general rule that parked rows are free:
 only counts `RUNNING` tasks as occupying a lane will over-admit into a lane
 that is actually full of parked, awaiting-operator work. Occupancy counting is
 task-join based (not session-based) per ADR-0006 / RFC 0004 Phase 4a scope.
+Every reader that counts occupants goes through `occupies_lane_slot`: dispatch
+admission (`lane_stats.py`, `tick.py`), the board, `cw doctor`, and the
+`cw dev-queue status` lane breakdown (`src/cw/cli/dev_queue/status.py`), so a
+freed row is never reported as a lane occupant. The raw `OCCUPIED_LANE_STATUSES`
+membership is kept only by row-protection and session-pinning checks, which
+guard a row rather than count a slot.
 
 See `src/cw/dispatch/host_capacity.py` and `src/cw/dispatch/claim.py` module
 and function docstrings for the full reasoning, and `docs/dispatch-runbook.md`

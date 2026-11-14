@@ -1025,6 +1025,47 @@ class TestDevQueueLaneBreakdownOccupants:
         assert result.exit_code == 0, result.output
         assert "lane full: GEN-5175 (awaiting_operator_signoff)" in result.output
 
+    def test_freed_dependency_hold_is_not_a_lane_occupant(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2321: the breakdown counts occupants with ``occupies_lane_slot``.
+
+        A dependency hold with a PR id is still a blocked row (the lane is
+        noteworthy) but frees its slot, so it is not listed as an occupant and
+        the lane is not reported full.
+        """
+        _write_orchestrator_yaml(
+            tmp_orchestrator_config,
+            "default_ceiling: 2\nper_client_ceiling: {}\n",
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-HOLD",
+                client="genhealth",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+                disposition="dependency_hold",
+                blocked_reason="dependency_unmerged",
+                blocked_on_pr=42,
+            )
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-RUN",
+                client="genhealth",
+                status=QueueItemStatus.RUNNING,
+            )
+        )
+        _patch_tick_for(monkeypatch, "genhealth")
+        result = CliRunner().invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "blocked=1" in result.output
+        assert "lane occupants: GEN-RUN (running)" in result.output
+        assert "GEN-HOLD (blocked_on_user)" not in result.output
+        assert "lane full" not in result.output
+
     def test_default_lane_running_under_cap_output_unchanged(
         self,
         tmp_dev_queue: Path,

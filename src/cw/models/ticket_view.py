@@ -192,6 +192,10 @@ class TicketView(BaseModel):
     stage: Stage
     disposition: str | None
     blocked_reason: str | None
+    # GitHub #2321: additive, no TICKET_VIEW_SCHEMA_VERSION bump.
+    blocked_on_pr: int | None = Field(
+        default=None, description="PR this held row waits on; null when none."
+    )
     blocker_details: str | None = Field(
         description=(
             "Full blocker details from the bound session's last result;"

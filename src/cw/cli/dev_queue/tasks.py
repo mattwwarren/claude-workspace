@@ -174,10 +174,11 @@ def _print_tasks_human(
         "REASON",
         "PR",
         "ATTENTION",
+        "BLOCKED_ON",
         "STALE_GATE",
         "NEXT",
     ]
-    col_widths = [12, 16, 16, 12, 8, 12, 12, 12, 20, 10, 20, 20, 10, 18, 10, 44]
+    col_widths = [12, 16, 16, 12, 8, 12, 12, 12, 20, 10, 20, 20, 10, 18, 10, 10, 44]
     rows: list[list[str]] = []
     for t in tasks:
         attention = _attention_cell(t, sessions_by_id)
@@ -196,6 +197,8 @@ def _print_tasks_human(
             _reason_cell(t.blocked_reason, t.advisory_note),
             _pr_cell(t.pr_url)[:10],
             attention[:18],
+            # GitHub #2321: the PR a dependency hold waits on.
+            ("—" if t.blocked_on_pr is None else f"#{t.blocked_on_pr}")[:10],
             ("yes" if t.stale_gate_detected_at else "—")[:10],
             # Never truncated: the column fits the longest first command.
             _next_cell(t, sessions_by_id, sources),
