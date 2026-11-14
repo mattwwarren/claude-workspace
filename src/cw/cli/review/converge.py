@@ -45,6 +45,7 @@ from cw.cli.review.converge_confirm import (
     prepare_engine_confirm,
     round_ran_engine,
 )
+from cw.cli.review.converge_engine_defers import record_engine_defers
 from cw.exceptions import CwError
 from cw.models import CLAUDE_NATIVE_BACKEND, HOOK_CONTEXT_RELATIVE_PATH
 from cw.models.client import DEFAULT_BLOCKING_MAX_CYCLES, DEFAULT_CLEAN_MAX_CYCLES
@@ -663,6 +664,10 @@ def converge_record_round(
     SHOULD_FIX parks with `decision: stop_confirm_must_fix` (exit 0), prints
     `friction: confirm_escalated: <reason> round=<n>` and records a
     `review.confirm_escalated` event after the save.
+
+    An engine loop round whose SHOULD_FIX findings are all `defer` also records
+    their fingerprints on the dev-queue row at the reviewed head (best-effort,
+    #3625), so the review attestation can reconcile the round's FAIL summary.
     """
     payload = _parse_payload_or_exit(path, RoundInput)
     if defer_should_fix:
@@ -694,6 +699,7 @@ def converge_record_round(
     # File the confirm deferrals before the commit point, so a re-run dedupes.
     file_confirm_deferrals(ledger, payload, findings, client, ticket, now=now)
     file_round_deferrals(ledger, payload, findings, now=now)
+    record_engine_defers(payload, findings, client, ticket, now=now)
     # The ledger write is the commit point and comes last. The verdict files are
     # derived data named by the round number the ledger is about to assign, so a
     # crash before the commit leaves only files the next call rewrites at the
