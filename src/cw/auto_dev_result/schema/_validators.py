@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any, NewType
 
 from cw.auto_dev_result.schema._vocab import IMPACT_REASON_KEY
+from cw.models.enums import is_positive_real_int
 
 # GitHub #2321 — a same-repo PR number a dependency park waits on. Defined here
 # (not in _models) so the pure validator below and the model share it without a cycle.
@@ -27,7 +28,7 @@ def parse_depends_on_pr(value: object) -> DependsOnPr | None:
     ``type(...) is int`` rejects ``bool`` (a subclass of int), floats, digit
     strings and every other non-int. Zero and negatives are not PR numbers.
     """
-    if type(value) is int and value > 0:
+    if is_positive_real_int(value):
         return DependsOnPr(value)
     return None
 

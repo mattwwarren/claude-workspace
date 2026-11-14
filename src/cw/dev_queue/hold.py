@@ -28,6 +28,7 @@ from cw.exceptions import CwError
 from cw.gh import parse_pr_url
 from cw.models import OrchestratorEventType, QueueItemStatus, WatchedPr
 from cw.models.enums import DEPENDENCY_HOLD_DISPOSITION, TERMINAL_SESSION_STATUSES
+from cw.models.events import watched_pr_collides
 
 if TYPE_CHECKING:
     from cw.models import CwState, DevQueueStore, TicketTask
@@ -130,13 +131,7 @@ def _watch_collision(
     may not grow (#2321 R7/R8).
     """
     for existing in store.watched_prs:
-        if (
-            existing.repo == repo
-            and existing.pr_number == pr_number
-            and existing.status == "active"
-            and existing.client is not None
-            and existing.client != client
-        ):
+        if watched_pr_collides(existing, repo=repo, pr_number=pr_number, client=client):
             return existing
     return None
 

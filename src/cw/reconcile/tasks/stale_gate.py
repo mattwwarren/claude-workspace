@@ -38,6 +38,7 @@ from cw.models import (
     ReapReason,
     TicketTask,
 )
+from cw.models.enums import is_positive_real_int
 from cw.pr_hydrate import _parse_pr_url
 from cw.queue_rows import (
     _AUTOMERGE_NOT_ARMED_REASON,
@@ -149,7 +150,7 @@ def _is_variant_b_gate_task(task: TicketTask) -> bool:
     """
     if task.status != QueueItemStatus.BLOCKED_ON_USER:
         return False
-    if task.blocked_on_pr is None:
+    if not is_positive_real_int(task.blocked_on_pr):
         return False
     # GitHub #2321: a dependency hold waits on its blocking PR the same way.
     if task.disposition == DEPENDENCY_HOLD_DISPOSITION:

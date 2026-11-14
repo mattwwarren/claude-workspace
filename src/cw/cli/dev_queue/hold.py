@@ -25,7 +25,14 @@ from cw.dev_queue.hold import (
 )
 from cw.dev_queue.storage import load_dev_queue
 from cw.exceptions import CwError
-from cw.gh import fetch_pr_view, github_pr_url, parse_pr_url
+from cw.gh import (
+    _GH_PR_STATE_CLOSED,
+    _GH_PR_STATE_MERGED,
+    _GH_PR_STATE_OPEN,
+    fetch_pr_view,
+    github_pr_url,
+    parse_pr_url,
+)
 from cw.models import WatchedPr
 from cw.models.enums import WATCHED_PR_SOURCE_DEPENDENCY_HOLD
 from cw.pr_hydrate import _resolve_repo_slug
@@ -69,16 +76,16 @@ def _verify_dependency_pr(
     if view is None:
         raise _unverified(pr_number)
     pr_state = view.get("state")
-    if pr_state == "MERGED":
+    if pr_state == _GH_PR_STATE_MERGED:
         msg = (
             f"PR #{pr_number} is already merged;"
             " requeue instead (`cw dev-queue requeue`)"
         )
         raise CwError(msg)
-    if pr_state == "CLOSED":
+    if pr_state == _GH_PR_STATE_CLOSED:
         msg = f"PR #{pr_number} is closed unmerged; nothing to wait for"
         raise CwError(msg)
-    if pr_state != "OPEN":
+    if pr_state != _GH_PR_STATE_OPEN:
         raise _unverified(pr_number)
     slug = _resolve_repo_slug(git_dir)
     if slug is None:
