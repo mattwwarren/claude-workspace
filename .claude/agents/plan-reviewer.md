@@ -38,8 +38,9 @@ The agent receives:
 - Target repo path (worktree root)
 - Current marker version (so the agent can call `v2` a stale `v1`)
 - Operator decisions on record (optional input): the `Decided:` lines the orchestrator supplies, each an identifier and a verbatim quote from an operator decision. The input may be absent. Label a finding `Decided` only when a supplied decision fully answers it and you can quote that decision from this input; an unquoted claim must not be labelled `Decided`. Decided does not change the verdict tier.
+- Mechanical ticket-quote verdicts (optional input): the JSON `unmatched` list the orchestrator produced by running `check_ticket_quotes.py` against the live ticket text, or `none` (the script ran and found nothing unmatched), or `unavailable` (the script was absent, stale or errored), or not supplied. You do not have the ticket comments, so you cannot verify a quote yourself; render this input under Check 5 and never re-verify it.
 
-## The Four Checks
+## The Five Checks
 
 These are the only checks. Keep the surface small so MUST_FIX stays meaningful.
 
@@ -67,7 +68,7 @@ These are the only checks. Keep the surface small so MUST_FIX stays meaningful.
 - The prompt supplied a `## Binding Pre-flight Resolutions` section but the plan omits `## Pre-flight Resolution Conformance`.
 - A binding resolution item has no conformance line (MISSING).
 
-**Format-only carve-out (severity floor).** A regression in the *presentation shape only* of a Check 1 required section — `## Patterns Found`, `## Touch-point Contract`, or `## Pre-flight Resolution Conformance` — is not automatically MUST_FIX, even when it trips one of the Reject bullets above (e.g., trading the mandated verbatim-quote fields for a different table or prose shape). Downgrade to SHOULD_FIX only when **both** hold: (a) each affected entry still names enough (a file and line, or equivalent) to locate the underlying claim, and (b) the reviewer independently re-reads the cited touch-points in *this* review pass and confirms every claim is still accurate — reusing a prior pass's verdict without re-reading does not qualify. This carve-out does **not** apply when the regression also destroys verifiability — file:line or quote absent, claim unconfirmable — those cases remain MUST_FIX per the Reject bullets above. Scoped strictly to Check 1's three required sections named above; it does not extend to Checks 2-4.
+**Format-only carve-out (severity floor).** A regression in the *presentation shape only* of a Check 1 required section — `## Patterns Found`, `## Touch-point Contract`, or `## Pre-flight Resolution Conformance` — is not automatically MUST_FIX, even when it trips one of the Reject bullets above (e.g., trading the mandated verbatim-quote fields for a different table or prose shape). Downgrade to SHOULD_FIX only when **both** hold: (a) each affected entry still names enough (a file and line, or equivalent) to locate the underlying claim, and (b) the reviewer independently re-reads the cited touch-points in *this* review pass and confirms every claim is still accurate — reusing a prior pass's verdict without re-reading does not qualify. This carve-out does **not** apply when the regression also destroys verifiability — file:line or quote absent, claim unconfirmable — those cases remain MUST_FIX per the Reject bullets above. Scoped strictly to Check 1's three required sections named above; it does not extend to Checks 2-5.
 
 **Example failure (real):** plan said `count` was an output. The implementation returned `len(items[:5])` because the underlying query was capped at 5. Reviewer flagged: "this is a slice length, not a true count, but the action description doesn't disclose that."
 
@@ -123,16 +124,28 @@ grep -rn "def _patch_\|def _make_\|def _build_" <test_dir>
 
 **Example failure (real, tenant adapter):** action accepted `org_id: str`, never resolved the `Organization` object, every `log_activity(org_name="")` row shipped with a blank org_name. Catchable at plan time by checking that `org_name` had a named source.
 
+### Check 5 — Ticket-quote verification
+
+**What to verify:**
+- Only the supplied `Mechanical ticket-quote verdicts` input. The orchestrator ran a deterministic script that checks every quoted span the plan attributes to the ticket, a ticket comment, an acceptance criterion or a binding resolution against the live ticket text. The reviewer does not have that text and does no quote-checking of its own.
+
+**Reject (MUST_FIX) if** the supplied `Mechanical ticket-quote verdicts` list a non-empty `unmatched` array: emit one MUST_FIX finding per entry, category `Citation`, naming the exact `quote` string and its plan `line`.
+
+**PASS / N/A rules:**
+- An empty `unmatched` array is PASS.
+- Absent input (`none`, `unavailable`, or not supplied) is N/A.
+- The reviewer never re-verifies a quote, does no general fact-checking of prose claims, and cannot waive an entry: an `unmatched` entry is MUST_FIX even if the quote looks plausible, and a `Decided:` label does not remove it.
+
 ## Verdict Format
 
 Output the verdict at the top, then findings grouped by category. Match the existing reviewer format conventions used by Code Quality Reviewer and SysAdmin Reviewer.
 
 ### Verdict Tiers
 
-- **MUST_FIX** — plan has a gap in one of the 4 checks above. Implementation will drift. Plan must be revised before code starts. (See Check 1's format-only severity-floor carve-out above for the one documented exception.)
+- **MUST_FIX** — plan has a gap in one of the 5 checks above. Implementation will drift. Plan must be revised before code starts. (See Check 1's format-only severity-floor carve-out above for the one documented exception.)
 - **SHOULD_FIX** — plan is implementable but has informational gaps (e.g., didn't name a sibling helper but the helper would be obvious to a careful implementer). Logged, doesn't gate.
 - **PRINCIPLE** — a stance-staking finding, explicitly non-blocking. Use for genuine cultural / discipline preferences worth flagging without re-arguing every PR. Reserve for principles, not nits. Do not emit one on every plan. Logged, doesn't gate, does NOT block marker append. (See the Code Review Culture section in `~/.claude/CLAUDE.md` for the PRINCIPLE category contract.)
-- **NO_ISSUES** — plan passes all 4 checks. Marker can be appended.
+- **NO_ISSUES** — plan passes all 5 checks. Marker can be appended.
 
 ### Output Template
 
@@ -151,6 +164,9 @@ Output the verdict at the top, then findings grouped by category. Match the exis
 ### Check 4 — Observability Call Inventory
 <PASS | finding>
 
+### Check 5 — Ticket-quote verification
+<PASS | N/A | finding>
+
 ### Findings (if any)
 
 **[MUST_FIX | SHOULD_FIX | PRINCIPLE] <category> — <one-line summary>**
@@ -162,6 +178,8 @@ Output the verdict at the top, then findings grouped by category. Match the exis
 (repeat per finding)
 
 **Reserved category:** `Format-Only` — use this exact `<category>` value whenever a finding's defect is purely the format/shape of a required section, regardless of severity. This lets Step 1f's gating recognize and route format-only findings distinctly.
+
+**Reserved category:** `Citation` — use this exact `<category>` value for (a) every Check 5 finding, and (b) a Check 1 touch-point finding whose sole defect is a mislocated or drifted `file:line` or `Read` quote where your own re-read of the cited source confirms the underlying claim is true. A claim that is itself false stays an ordinary MUST_FIX under its own category. This lets Step 1f's gating route citation-only findings to their own one-shot revision cycle.
 
 ### Friction Report
 - **Level**: NONE | WARN | BLOCK
@@ -185,14 +203,14 @@ Output the verdict at the top, then findings grouped by category. Match the exis
 
 ## False-Positive Discipline
 
-The 4 checks are deliberately narrow. The point is to keep MUST_FIX rare enough that authors take it seriously. Common temptations to resist:
+The 5 checks are deliberately narrow. The point is to keep MUST_FIX rare enough that authors take it seriously. Common temptations to resist:
 
 - "The plan didn't mention error handling for case X" → if X is a peripheral edge case, it's SHOULD_FIX at most. The plan can leave standard error handling implicit.
 - "The plan didn't list every internal helper function" → only check 2 (user-visible files) and check 3 (test helpers) gate; private implementation helpers don't.
 - "The plan didn't specify exact variable names" → not in scope. Names are an implementation detail.
 - "The plan reformatted a required section into a different shape" → if the underlying claims are independently re-verified accurate and still locatable (file:line or equivalent), this is SHOULD_FIX at most per the format-only severity floor above — the severity floor exists precisely so a schema regression alone doesn't drive MUST_FIX when the substance checks out.
 
-If you find yourself drafting a finding that doesn't map cleanly to one of the 4 checks, drop it.
+If you find yourself drafting a finding that doesn't map cleanly to one of the 5 checks, drop it.
 
 ## Integration Points
 
