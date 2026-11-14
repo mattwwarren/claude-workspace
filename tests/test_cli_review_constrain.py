@@ -440,6 +440,21 @@ class TestParsePreview:
             " forbidden kinds: lock. The fix loop parks a cycle that introduces"
             " one of them."
         ) in _flat(result.stderr)
+        assert "separate sentence" in _flat(result.stderr)
+
+    def test_approved_path_in_the_same_sentence_is_not_listed(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        _seed()
+        result = _invoke(
+            runner,
+            tmp_path,
+            "Do not add new helpers; the approved edit to `src/pkg/a.py` stays.",
+        )
+        assert result.exit_code == 0, result.output
+        stderr = _flat(result.stderr)
+        assert "forbidden tokens: none" in stderr
+        assert "separate sentence" in stderr
 
     def test_matched_sentence_without_tokens_says_none(
         self, runner: CliRunner, tmp_path: Path
@@ -529,6 +544,8 @@ class TestHelp:
         assert "Restart `cw dev-queue serve`" in text
         assert "refused only inside a headless dispatch worker" in text
         assert "append-only" in text
+        assert "separate sentence" in text
+        assert "next ';'" in text
         assert "The row is the source of truth" in text
         assert "fails, and prints no mirror, on every tracker" in text
 
