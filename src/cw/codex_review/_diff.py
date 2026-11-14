@@ -9,16 +9,23 @@ subprocess (SHOULD_FIX 11, #1236). Consumed by ``core``'s review-pass assembly.
 
 from __future__ import annotations
 
+import logging
 import re
+import subprocess
 from typing import TYPE_CHECKING
 
 from cw._git import capture_head_sha, git_output
+from cw.exceptions import CwError
+from cw.plan_files import is_large_diff
 from cw.review_convergence import resolve_loop_diff_base
 from cw.review_findings import CapturedDiff
+from cw.worktree import _parse_numstat_totals
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 # Matches every ``diff --git a/<path> b/<path>`` header, including files with
@@ -207,6 +214,41 @@ def _capture_diff(
     )
     diff, changed_files = _build_captured_diff(diff_text)
     return diff, reviewed_sha, changed_files
+
+
+def _branch_diff_totals(worktree: Path, default_branch: str) -> tuple[int, int]:
+    """``(files, lines)`` of the whole branch: ``git diff --numstat <base>...HEAD``.
+
+    The same range as :func:`_capture_diff` (*base* from
+    :func:`~cw.review_convergence.resolve_loop_diff_base`, so a pinned full
+    sha passes through). *lines* is added + removed; binary files are skipped
+    (:func:`~cw.worktree._parse_numstat_totals`). Raises on any git or
+    base-resolution failure: the fix loop's divergence baseline
+    (``pre_loop_diff_lines``) depends on that, and only
+    :func:`_measure_large_diff` fails open.
+    """
+    base = resolve_loop_diff_base(worktree, default_branch)
+    numstat = git_output(["diff", "--numstat", f"{base}...HEAD"], cwd=worktree)
+    return _parse_numstat_totals(numstat)
+
+
+def _measure_large_diff(worktree: Path, default_branch: str) -> bool:
+    """Whether the whole branch is ``large_diff`` (#2086), failing OPEN.
+
+    ``large_diff`` is an advisory cost flag that scales the reviewer roster;
+    it must never abort a review, fix-loop or confirm pass. Any git or
+    base-resolution failure logs one WARNING naming the failure class and
+    returns ``False``, the unscaled roster.
+    """
+    try:
+        return is_large_diff(*_branch_diff_totals(worktree, default_branch))
+    except (subprocess.CalledProcessError, CwError, OSError) as exc:
+        _log.warning(
+            "large_diff unmeasurable in %s (%s); reviewing with the unscaled roster",
+            worktree,
+            type(exc).__name__,
+        )
+        return False
 
 
 def _limited_to_paths(argv: Sequence[str], paths: Sequence[str]) -> list[str]:
