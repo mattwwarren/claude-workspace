@@ -2546,9 +2546,10 @@ _BOUNDED_FORWARDERS_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/dev_queue/crud.py", "remove_ticket"): 1,
     ("cw/dev_queue/crud.py", "cancel_ticket"): 1,
     # #2321: hold_ticket forwards its caller's bounded choice to its locked
-    # window _hold_locked, which forwards it to _lock(), as cancel_ticket does.
+    # window _hold_locked, which forwards it to both the outer sessions lock
+    # and the inner dev-queue lock.
     ("cw/dev_queue/hold.py", "hold_ticket"): 1,
-    ("cw/dev_queue/hold.py", "_hold_locked"): 1,
+    ("cw/dev_queue/hold.py", "_hold_locked"): 2,
     ("cw/dev_queue/crud.py", "clear_tickets"): 1,
     ("cw/dev_queue/crud.py", "prune_tickets"): 1,
     ("cw/dev_queue/approval.py", "approve_ticket"): 1,

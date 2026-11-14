@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Literal
 
 from cw.auto_dev_result import DEPENDENCY_UNMERGED_BLOCKER_REASON
-from cw.config import load_state
+from cw.config import load_state, sessions_lock
 from cw.dev_queue.crud import _find_ticket
 from cw.dev_queue.lifecycle import transition_task_status
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
@@ -86,9 +86,10 @@ def check_holdable(task: TicketTask, state: CwState) -> None:
             " a hold applies to a PENDING or BLOCKED_ON_USER row"
         )
         raise CwError(msg)
-    if task.pr_url is not None:
+    existing_pr_url = task.pr_url if task.pr_url is not None else task.adopted_pr_url
+    if existing_pr_url is not None:
         msg = (
-            f"row already has PR {_pr_label(task.pr_url)};"
+            f"row already has PR {_pr_label(existing_pr_url)};"
             " a hold applies before a PR exists"
         )
         raise CwError(msg)
@@ -175,10 +176,9 @@ def _hold_locked(
     ticket_id: str, client: str, pr_number: int, *, repo: str, bounded: bool
 ) -> HoldResult:
     """The check-then-mutate window of :func:`hold_ticket`, under the queue lock."""
-    with _lock(bounded=bounded):
-        # Why: the session snapshot is read INSIDE the queue lock, right before
-        # the liveness check, so it is no older than the row it guards.
-        # load_state takes no lock (a pure read), so nothing nests under ours.
+    # Why: sessions_lock is outermost by ADR-0019, so a session writer cannot
+    # become live between this validation and clearing the queue binding.
+    with sessions_lock(bounded=bounded), _lock(bounded=bounded):
         state = load_state()
         store = load_dev_queue()
         task = _find_ticket(store, ticket_id, client, warn=False)
@@ -262,9 +262,15 @@ def hold_ticket(
     """
     result = _hold_locked(ticket_id, client, pr_number, repo=repo, bounded=bounded)
     if result.outcome != "unchanged":
-        record_event(
-            OrchestratorEventType.TICKET_HELD,
-            {**asdict(result), "repo": repo},
-            correlation_id=result.ticket_id,
-        )
+        try:
+            record_event(
+                OrchestratorEventType.TICKET_HELD,
+                {**asdict(result), "repo": repo},
+                correlation_id=result.ticket_id,
+            )
+        except Exception:  # noqa: BLE001 — audit failure must not undo the hold.
+            _log.exception(
+                "dependency hold applied but ticket.held audit failed ticket=%s",
+                result.ticket_id,
+            )
     return result

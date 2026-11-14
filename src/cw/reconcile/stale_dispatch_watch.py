@@ -51,6 +51,7 @@ from cw.dev_queue import DEPENDENCY_HOLD_DISPOSITION, load_dev_queue
 from cw.dev_queue.crud import register_or_adopt_watched_pr
 from cw.gh import github_pr_url
 from cw.models import WatchedPr
+from cw.models.enums import WATCHED_PR_SOURCE_DEPENDENCY_HOLD
 from cw.pr_hydrate import _resolve_repo_slug
 from cw.reconcile.tasks import (
     _client_cwd,
@@ -66,17 +67,15 @@ if TYPE_CHECKING:
 # "cli") in any future dismiss/report path.
 _WATCHED_PR_SOURCE_STALE_DISPATCH_PARK: Final = "stale_dispatch_park"
 
+
 # GitHub #2321 -- a watch registered for a dependency hold (``cw dev-queue hold``
 # or a worker ``dependency_unmerged`` park carrying ``depends_on_pr``).
-_WATCHED_PR_SOURCE_DEPENDENCY_HOLD: Final = "dependency_hold"
-
-
 def _watched_pr_source(
     task: TicketTask,
 ) -> Literal["stale_dispatch_park", "dependency_hold"]:
     """The ``WatchedPr.source`` a park's watch is registered under (#2321)."""
     if task.disposition == DEPENDENCY_HOLD_DISPOSITION:
-        return _WATCHED_PR_SOURCE_DEPENDENCY_HOLD
+        return WATCHED_PR_SOURCE_DEPENDENCY_HOLD
     return _WATCHED_PR_SOURCE_STALE_DISPATCH_PARK
 
 

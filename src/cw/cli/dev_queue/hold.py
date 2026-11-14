@@ -27,6 +27,7 @@ from cw.dev_queue.storage import load_dev_queue
 from cw.exceptions import CwError
 from cw.gh import fetch_pr_view, github_pr_url, parse_pr_url
 from cw.models import WatchedPr
+from cw.models.enums import WATCHED_PR_SOURCE_DEPENDENCY_HOLD
 from cw.pr_hydrate import _resolve_repo_slug
 from cw.ticket_view import ViewSources
 from cw.worktree import _git_dir
@@ -133,7 +134,7 @@ def _register_hold_watch(result: HoldResult, repo: str) -> None:
             repo=repo,
             pr_number=result.pr_number,
             client=result.client,
-            source="dependency_hold",
+            source=WATCHED_PR_SOURCE_DEPENDENCY_HOLD,
         )
     )
     if outcome == "collision":

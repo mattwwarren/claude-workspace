@@ -117,6 +117,8 @@ OCCUPIED_LANE_STATUSES: frozenset[QueueItemStatus] = frozenset(
 # id frees its lane slot; one without keeps it.
 DEPENDENCY_HOLD_DISPOSITION: Final = "dependency_hold"
 
+# Shared persisted discriminator for watches created by dependency holds.
+WATCHED_PR_SOURCE_DEPENDENCY_HOLD: Final = "dependency_hold"
 
 # Genuinely terminal QueueItemStatus values -- distinct from "outside
 # OCCUPIED_LANE_STATUSES", which also includes PENDING (redispatch-eligible,
