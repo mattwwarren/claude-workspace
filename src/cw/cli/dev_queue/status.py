@@ -82,6 +82,7 @@ from cw.reconcile.routed_result_sessions import (
     format_orphan_sessions,
     unowned_ceiling_sessions,
 )
+from cw.usage_limit_window import render_usage_limit_lines, usage_limit_window_views
 from cw.worktree import _git_dir
 
 from ._group import _DEFAULT_DISPLAY_STATUSES, _PAUSED_LANE_MARKER, dev_queue
@@ -602,6 +603,8 @@ def _status_json(client: str | None) -> dict[str, dict[str, object]]:
     names = [c for c in tick_data if client is None or c == client]
     names += sorted({v.client for v in views} - set(names))
     names += sorted({t.client for t in tasks} - set(names))
+    windows = {v.client: v for v in usage_limit_window_views(client)}
+    names += sorted(set(windows) - set(names))
     payload: dict[str, dict[str, object]] = {}
     for name in names:
         tick = tick_data.get(name)
@@ -625,6 +628,7 @@ def _status_json(client: str | None) -> dict[str, dict[str, object]]:
                 )
             ),
             "pending_skips": _pending_skips_json(held.get(name, [])),
+            "usage_limit": windows[name].to_json() if name in windows else None,
         }
     return payload
 
@@ -731,6 +735,7 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
     if not tasks:
         click.echo("Dev queue is empty.")
         _echo_paused_lanes(views, now=now)
+        _echo_usage_limit_windows(client)
         _echo_commit_hook_warnings(declared, client)
         return
 
@@ -755,6 +760,7 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
     events = _read_tick_events()
     tick_data = client_tick_snapshots(events)
     _echo_paused_lanes(views, now=now)
+    _echo_usage_limit_windows(client)
     _echo_commit_hook_warnings(declared, client)
     _echo_effective_config(
         clients_seen,
@@ -777,6 +783,15 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
     _echo_pending_skips(clients_seen, _held_by_client(tasks, events, now=now), now=now)
 
     _echo_longest_lock_holds()
+
+
+def _echo_usage_limit_windows(client: str | None) -> None:
+    """Print the active usage-limit windows, if any (#3547)."""
+    lines = render_usage_limit_lines(usage_limit_window_views(client))
+    if lines:
+        click.echo("")
+        for line in lines:
+            click.echo(line)
 
 
 def _echo_longest_lock_holds() -> None:

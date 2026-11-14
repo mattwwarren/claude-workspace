@@ -676,16 +676,24 @@ not already reach its `until`, so resuming an interrupted act does not
 re-emit this event.
 
 Operator-relevant: this is how you find out a window is open and how long it
-runs, without reading the dispatch log. Nothing clears a window early —
-`_merge_persisted_usage_limited_until` never shortens one — so a
+runs, without reading the dispatch log. Only an operator clear lifts a window
+early (`cw dev-queue usage-limit clear`, #3547, recorded as
+`dispatch.usage_limit_cleared` with `trigger: "operator"`);
+`_merge_persisted_usage_limited_until` never shortens one, so a
 `parsed_reset` far in the future is the line to check when dispatch looks
 idle. `--once` mode never arms a window and so never emits this.
 
 ### `dispatch.usage_limit_cleared`
 
-**Emitter:** `run_dispatch_loop` in `cw.dispatch.loop` (via
-`_handle_usage_limit_window_transition`/`_emit_usage_limit_cleared`)
-**Payload:**
+**Emitters:** two.
+- The lapse: `run_dispatch_loop` in `cw.dispatch.loop` (via
+  `_handle_usage_limit_window_transition`/`_emit_usage_limit_cleared`). Its
+  payload carries no `trigger` key; an absent `trigger` means a lapse.
+- The operator clear (#3547): `cw dev-queue usage-limit clear`, via
+  `apply_usage_limit_clear` in `cw.usage_limit_window`, with
+  `trigger: "operator"`.
+
+**Payload (lapse):**
 ```json
 {
   "clients_affected": ["<str>", "..."],
@@ -694,7 +702,45 @@ idle. `--once` mode never arms a window and so never emits this.
   "cleared_at": "<iso8601>"
 }
 ```
-**Semantics:** Fires exactly once, on the tick that observes the fleet-wide
+**Payload (operator clear):** the same four keys plus additive ones.
+```json
+{
+  "clients_affected": ["<client>"],
+  "sessions_affected": 0,
+  "detected_at": "<iso8601 | null>",
+  "cleared_at": "<iso8601>",
+  "trigger": "operator",
+  "cleared_by": "<github login, or empty>",
+  "old_until": "<iso8601 | null>",
+  "rows_released": ["<ticket_id>", "..."],
+  "forced": false,
+  "probe": "available | skipped"
+}
+```
+The operator variant is per client and fleet-agnostic: `clients_affected` is
+the one cleared client and `sessions_affected` is always `0` (no
+`session.timed_out` cohort scan runs). `detected_at` is
+`load_usage_limit_armed_at()` (the fleet-level arm time) or `null`; the clear
+never writes that marker. `old_until` is the removed deadline, `null` when
+only a clear mark was recorded. `rows_released` lists the PENDING rows whose
+`next_eligible_at` wait was released. `forced` is `--force`; `probe` is
+`skipped` when forced. State changes happen first: the window and clear mark
+are written, then qualifying rows are released, and only then is the event
+recorded outside both locks. `rows_released` records only the rows actually
+released; a row that no longer qualifies under the lock is left alone. If the
+audit write fails, the cleared window and rows remain cleared, the command
+prints that result and exits non-zero, and a re-run is safe and idempotent. A
+row-release failure is likewise reported after the audit event is recorded,
+with `rows_released` containing only rows released before the failure; a
+re-run can release the remainder.
+
+**One audit line per lift.** The running loop suppresses its own lapse
+emission on the tick where it newly observes an operator clear mark, so an
+operator clear of the last open window produces only the operator event.
+Edge: the suppression is fleet-level, like the lapse event, so if an operator
+clear and the natural lapse of another client's last window land on the same
+tick, only the operator event is emitted.
+**Semantics (lapse):** Fires exactly once, on the tick that observes the fleet-wide
 usage-limit back-off window (`usage_limited_until`) transition from active
 to lapsed — never per-client; `clients_affected` carries the full cohort in
 a single event. `clients_affected` and `sessions_affected` are computed by

@@ -2074,3 +2074,181 @@ def test_stalled_status_is_documented() -> None:
     assert "escalated_at" in bullet
     assert "ADR-0014" in bullet
     assert "act started {age_seconds}s ago; stop still pending" in bullet
+
+
+# ---------------------------------------------------------------------------
+# Act -- an operator clear makes an act decided before it moot (#3547)
+# ---------------------------------------------------------------------------
+
+_MOOT_LINE = "was decided before the operator cleared"
+
+
+def _clear_mark(at: datetime) -> None:
+    from cw.dispatch_state_marks import clear_usage_limited_until
+
+    clear_usage_limited_until(_CLIENT, cleared_at=at)
+
+
+def _seed_gone_session_act() -> None:
+    """A row carrying an ``auto`` act (started at ``_NOW``) whose session is gone."""
+    store = load_dev_queue()
+    store.tasks[0].usage_limit_act = UsageLimitAct(
+        session_id=_SID,
+        branch="auto",
+        started_at=_NOW,
+        reset_at=_RESET_AT,
+        until=_RESET_AT,
+        audited_at=_NOW,
+    )
+    save_dev_queue(store)
+    save_state(CwState(sessions=[]))
+
+
+def test_arm_lockout_skips_a_moot_act(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    act = _in_flight_auto_act(state)
+    _clear_mark(_NOW + timedelta(minutes=1))
+    saves: list[object] = []
+    monkeypatch.setattr(
+        "cw.reconcile.usage_limit_mid_turn.merge_and_save_usage_limited_until",
+        saves.append,
+    )
+
+    with caplog.at_level("INFO", logger="cw.reconcile.usage_limit_mid_turn"):
+        assert mid_turn._arm_lockout(act, moot=True) is True
+
+    assert saves == []
+    assert _events(OrchestratorEventType.USAGE_LIMIT_ARMED) == []
+    assert _lockout() == {}
+    assert any(_SID in m and _MOOT_LINE in m for m in _log_messages(caplog))
+
+
+def test_moot_live_act_requeues_without_stamp_or_arm(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+) -> None:
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    _in_flight_auto_act(state)
+    _clear_mark(_NOW + timedelta(minutes=1))
+
+    assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == []
+    assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == [_SID]
+
+    assert _events(OrchestratorEventType.USAGE_LIMIT_ARMED) == []
+    assert _lockout() == {}
+    task = _owned_row()
+    assert task.status is QueueItemStatus.PENDING
+    assert task.next_eligible_at is None
+
+
+def test_act_started_after_the_mark_arms_and_stamps(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+) -> None:
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    _clear_mark(_NOW - timedelta(minutes=1))
+    _in_flight_auto_act(state)
+
+    assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == []
+    assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == [_SID]
+
+    assert [e["client"] for e in _events(OrchestratorEventType.USAGE_LIMIT_ARMED)] == [
+        _CLIENT
+    ]
+    assert _owned_row().next_eligible_at == _RESET_AT
+
+
+def _audit_then(
+    monkeypatch: pytest.MonkeyPatch, side_effect: Callable[[], None]
+) -> None:
+    real_audit = mid_turn._audit
+
+    def _audit(act: mid_turn._Act) -> bool:
+        side_effect()
+        return real_audit(act)
+
+    monkeypatch.setattr("cw.reconcile.usage_limit_mid_turn._audit", _audit)
+
+
+def test_moot_is_computed_once_a_later_mark_does_not_unstamp(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mark written after the compute, before ``_finish``, is not seen."""
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    _in_flight_auto_act(state)
+    assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == []
+    _audit_then(monkeypatch, lambda: _clear_mark(_LATER))
+
+    assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == [_SID]
+
+    assert _owned_row().next_eligible_at == _RESET_AT
+
+
+def test_moot_is_computed_once_a_removed_mark_still_unstamps(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cw.dispatch_state
+
+    state, _ = _seed(home, tmp_path, _limit_tail())
+    _in_flight_auto_act(state)
+    assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == []
+    _clear_mark(_NOW + timedelta(minutes=1))
+    _audit_then(
+        monkeypatch,
+        lambda: cw.dispatch_state.DISPATCH_STATE_FILE.write_text("{}"),
+    )
+
+    assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == [_SID]
+
+    assert _owned_row().next_eligible_at is None
+
+
+def test_gone_session_path_honours_the_mark(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+) -> None:
+    _seed(home, tmp_path, _limit_tail())
+    _seed_gone_session_act()
+    _clear_mark(_NOW + timedelta(minutes=1))
+
+    assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == [_SID]
+
+    task = _owned_row()
+    assert task.status is QueueItemStatus.PENDING
+    assert task.next_eligible_at is None
+
+
+def test_gone_session_path_with_an_older_mark_stamps(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    home: Path,
+    daemon: FakeNativeDaemonClient,
+) -> None:
+    _seed(home, tmp_path, _limit_tail())
+    _seed_gone_session_act()
+    _clear_mark(_NOW - timedelta(minutes=1))
+
+    assert _tick(load_state(), _auto_config(), daemon, at=_LATER) == [_SID]
+
+    assert _owned_row().next_eligible_at == _RESET_AT
