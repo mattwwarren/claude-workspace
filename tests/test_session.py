@@ -918,6 +918,7 @@ class TestResumeSession:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from cw.models.worker_effort import WorkerEffort
+        from cw.worker_effort import WORKER_EFFORT_FLAG
 
         self._seed_resume(
             sample_client.model_copy(
@@ -931,7 +932,7 @@ class TestResumeSession:
         resume_session("test-client/impl", native_daemon=mock_native_daemon)
         extra = mock_native_daemon.spawn_extra_args[0]
         assert extra is not None
-        assert "--effort" not in extra
+        assert WORKER_EFFORT_FLAG not in extra
 
     def test_resume_user_session_ignores_worker_effort(
         self,
