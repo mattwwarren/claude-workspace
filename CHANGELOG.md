@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.100.0] - 2026-11-14
+
 ### Added
 
 - **Dispatch cancels a PENDING PLAN/IMPL row whose GitHub issue is already CLOSED instead of spawning a worker for it (#1605).** Before the claim, dispatch reads the issue state with `gh issue view <T> --json state` outside every lock (GitHub-tracked clients only; Linear, other and unset trackers are never read). A CLOSED issue moves the row to `CANCELLED` with no attempt charged and records a per-task `dispatch.tick` with `skip_reason: "ticket_closed"` and `cancel_reason: "ticket_closed"` (new additive enum value). A failed or ambiguous read never cancels. Reads are capped at 10 per client per tick with a 25 s budget; a row past the cap is held `PENDING` for that tick and read on a later one, never claimed unchecked. Reverse with `cw dev-queue requeue <T> -c <client> --from-cancelled`; the requeue sticks while the issue stays closed, and neither the concierge cancelled-row restore nor `auto_fix_ci` un-cancels a guard-cancelled row. The cache lives in `dispatch_state.json` under `ticket_state_probe`.
