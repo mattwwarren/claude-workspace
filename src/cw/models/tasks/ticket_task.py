@@ -25,6 +25,7 @@ from cw.models.operator_constraint import OperatorConstraint
 from cw.models.operator_resolution import OperatorResolution
 from cw.models.review_attestation import ReviewAttestation
 from cw.models.review_debt_record import ReviewDebtRecord
+from cw.models.review_engine_settlement import ReviewEngineSettlement
 from cw.models.review_feedback import ReviewFeedback
 from cw.models.tasks.records import (
     LaunchedFixWorker,
@@ -680,6 +681,16 @@ class TicketTask(BaseModel):
     # gh calls (cw.dev_queue.review_debt_records). No clear site, like
     # operator_resolutions: a filed ticket is a durable fact about the row.
     review_debt: list[ReviewDebtRecord] = Field(default_factory=list)
+    # GitHub #3625 — one ReviewEngineSettlement per reviewed head: the same-round
+    # engine SHOULD_FIX fingerprints that were all deferred. Written only by the
+    # single writer cw.dev_queue.review_engine_settlements, under dev_queue_lock,
+    # and only while the row is REVIEW-stage and RUNNING. The attestation builder
+    # only reads it (cw.dev_queue.review_engine_reconcile). Upserted by head_sha
+    # and bounded to the newest MAX_SETTLEMENT_HEADS heads, so there is no clear
+    # site. Never a branch-readable source: the reviewed branch cannot edit it.
+    review_engine_settlements: list[ReviewEngineSettlement] = Field(
+        default_factory=list
+    )
     # GitHub #1713 — durable detection latch for
     # cw.reconcile.tasks.release_stale_gated_tasks: stamped when a
     # BLOCKED_ON_USER row's gate condition is observed to have cleared (its

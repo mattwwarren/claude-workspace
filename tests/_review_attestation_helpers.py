@@ -42,6 +42,7 @@ from tests._review_approval_helpers import (
 from tests._review_convergence_helpers import (
     confirmed_ledger,
     make_review_client,
+    round_finding,
     write_ledger,
 )
 from tests._review_engine_helpers import SHA, make_summary, write_summary
@@ -57,6 +58,8 @@ if TYPE_CHECKING:
     from click.testing import Result
 
     from cw.models import TicketTask
+    from cw.review_adjudication import AdjudicationOutcome
+    from cw.review_convergence import GatingSeverity, RoundFinding
 
 #: The 40-hex reviewed head every seeded review record carries.
 SEEDED_REVIEW_SHA = "0123456789abcdef0123456789abcdef01234567"
@@ -93,6 +96,24 @@ def review_row(worktree: Path | None, **overrides: object) -> TicketTask:
     }
     fields.update(overrides)
     return _make_ticket_task(**fields)
+
+
+def engine_round_finding(
+    fingerprint: str | None,
+    *,
+    severity: GatingSeverity = "SHOULD_FIX",
+    outcome: AdjudicationOutcome = "defer",
+    rule_id: str | None = "style.naming",
+    file: str = "src/a.py",
+) -> RoundFinding:
+    """Build one fingerprinted engine finding for a convergence round."""
+    return round_finding(
+        severity,
+        f"finding {fingerprint}",
+        file=file,
+        outcome=outcome,
+        rationale="deferred",
+    ).model_copy(update={"fingerprint": fingerprint, "rule_id": rule_id})
 
 
 def review_clients(

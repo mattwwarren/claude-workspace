@@ -247,7 +247,7 @@ These are firm leans, decided to unblock the breakout. Each one can be reversed 
 - **Using the posted PR review as the attestation.** No PR exists at review time, a review skill may forbid posting without approval, and any writer can forge a comment.
 - **A worktree file as the attestation.** It is writable by the agents it attests, and it is lost with the worktree.
 - **cw and the engine both adjudicating.** The engine re-raises anything cw rejects, which makes oscillation structural and pays for adjudication twice.
-- **Settlements the engine can read.** Deferred until an engine accepts operator-settled findings as input.
+- **Settlements the engine can read.** Deferred until an engine accepts operator-settled findings as input. Same-round engine SHOULD_FIX defers are reconciled at attestation time from the dev-queue row (#3625); engine-side reading stays deferred.
 - **Filing debt at merge.** A missed sweep loses debt, and the attestation could only promise a ticket.
 - **Skipping the confirm round after an engine pass.** It removes the only independent check.
 - **Confirm findings with full blocking weight.** That creates a second judge, contrary to D-5.

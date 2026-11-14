@@ -274,7 +274,15 @@ from cw.models.enums import Stage
 #      reset by ``enter_stage`` and kept across a same-stage requeue. ``| None``
 #      with a ``None`` default, so a pre-v61 row loads with it unset and needs
 #      no migration filler.
-DEV_QUEUE_SCHEMA_VERSION = 61
+# v62: added TicketTask.review_engine_settlements (GitHub #3625) — one
+#      ReviewEngineSettlement per reviewed head, listing the same-round engine
+#      SHOULD_FIX fingerprints that were all deferred. Written only by
+#      cw.dev_queue.review_engine_settlements (the REVIEW/RUNNING-gated writer);
+#      read by the attestation reconciler. A ``Field(default_factory=list)``
+#      list, so a pre-v62 row loads with ``[]`` and needs no migration filler.
+#      Take the next free number at merge if another PR takes v62 first (the
+#      v57 history line records the same practice).
+DEV_QUEUE_SCHEMA_VERSION = 62
 # Provenance of a v48 review approval: the human `approve` or the gate recipe.
 ReviewApproverKind = Literal["operator", "recipe"]
 DEFAULT_LANE: str = "default"

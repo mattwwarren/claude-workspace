@@ -1531,7 +1531,8 @@ and Rule 3) and `_record_review_approval` (`approve` and the
   ticket, is converged and its `last_clean_sha` equals `reviewed_sha`;
 - an engine summary, when one is found at the reviewed head, has
   `coverage: COMPLETE` and `verdict: PASS` (a found summary that contradicts
-  this skips with `engine_mismatch`). When an engine-configured claude-native
+  this skips with `engine_mismatch`), except as the same-round rule below
+  reconciles it. When an engine-configured claude-native
   client's round left no usable summary at the reviewed head (no worktree, no
   engine directory, no match, only invalid files), the attestation is written
   ledger-only (`engine: null`, no `acceptance`/`risk`/`gate_signals`, counts
@@ -1540,6 +1541,16 @@ and Rule 3) and `_record_review_approval` (`approve` and the
   is logged on the same logger. That line is a downgrade note, not a skip
   token. A codex or opencode lane is never scanned and keeps its `engine`
   label.
+- Same-round defers (#3625): a FAIL summary whose gating findings are all
+  deferrable SHOULD_FIX, each recorded on the row at that head
+  (`review_engine_settlements`, written by `cw review converge record-round`)
+  and also settled `defer` in the ledger, is reconciled to PASS, with those
+  findings counted as `debt`. Any other FAIL summary still skips
+  `engine_mismatch` and writes nothing: the row is unattested, not
+  "ledger-only". The reconciled case logs one INFO line,
+  `review attestation engine summary reconciled: ticket=<id> client=<name>
+  deferred=<n>`, which is not a skip token. A codex lane never writes the
+  record, so its same-round FAIL still skips as before (#3636).
 
 The binding's third condition, "the staleness gate passes", needs git, so the
 builder does not evaluate it. At the auto-advance the REVIEW staleness and
@@ -1618,6 +1629,11 @@ outstanding); an engine-backed one copies `summary.counts`, which S1 pins to
 `0`/`0` for a `PASS`. On an engine-less attestation `debt`, `nit` and
 `principle` are `0` meaning "not measured", not "none exist". Ship gates check
 `counts.must_fix == 0 and counts.should_fix == 0`.
+
+A same-round reconciled attestation (#3625) is `verdict: PASS` with
+`must_fix` and `should_fix` `0`; its deferred SHOULD_FIX findings are counted
+under `debt` and listed in `deferrals`. No marker field records the
+reconciliation.
 
 **`found_during_review`.** Optional and informational, never a ship-gate
 input. On an engine-less attestation it holds the sentinel's
@@ -1780,6 +1796,18 @@ attestation, and it also covers an engine-configured client whose round left no
 valid summary. A project ship gate should skip its own reviewer only when
 `engine` names the engine it would run, and should run
 `cw review attestation check` rather than compare SHAs itself.
+
+Settlement source (#3625): the same-round reconciler reads
+`TicketTask.review_engine_settlements`, written by `cw review converge
+record-round` into the dev-queue row. The reviewed branch cannot edit that
+file, because it lives in cw state outside the worktree. That is the
+guarantee, not that the branch cannot cause a write: the writer refuses unless
+the row is in the REVIEW stage and RUNNING, and it fails closed to no
+attestation, never a false PASS. The writer does not stop a process in the
+worker session from invoking the CLI; the row gate is the whole defence. The
+worktree ledger can only corroborate,
+never grant. The reconciler never reconciles a MUST_FIX, `coverage.*` or
+`acceptance.*` finding.
 
 `cw dev-queue show` prints one `attestation:` line
 (`<head_sha[:12]> engine=<engine|-> backend=<backend>`, or `-`), and
