@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Codex fix-loop gates no longer share one tmp root, so a concurrent run cannot prune a live pytest basetemp (#3646, follow-up to #3392).** With `TMPDIR`/`TMP`/`TEMP` unset (#3392), every gate run used the platform default, so gates for different worktrees shared `/tmp/pytest-of-<user>/` and pytest's startup pruning could delete a sibling's live basetemp mid-run. Each gate subprocess, each declared autofix and each autofix re-check now gets its own private `cw-gate-*` dir (mode 0700) with `TMPDIR`, `TMP` and `TEMP` all set to it, outside the worktree and `$HOME` as before, removed when the gate returns. The parent is the first usable of `/tmp`, `/var/tmp`, `/usr/tmp`, never the process env, which in the detached codex driver is the worker's `<worktree>/.cw/tmp`. A scratch dir that cannot be made parks `codex_fix_gate_failed` as `unavailable`; a dir that cannot be removed logs `codex_fix_gate_scratch_leftover`. Operator note: a hard-killed cw can leave a stale `cw-gate-*` dir (safe to delete); the `detect-gates` and `gate-timeout` launches keep the variables unset, and the worker `<worktree>/.cw/tmp` convention is unchanged.
+
 ## [1.99.0] - 2026-11-14
 
 ### Added
