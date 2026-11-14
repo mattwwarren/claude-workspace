@@ -494,16 +494,27 @@ def _write_project_config(repo: Path, text: str) -> None:
     config.write_text(text, encoding="utf-8")
 
 
-def _rendezvous_body(mine: Path, other: Path, result: Path) -> str:
-    """Publish ``$TMPDIR``, wait (bounded) for *other*'s, record if it is alive."""
+def _rendezvous_body(mine: Path, other: Path, result: Path, other_result: Path) -> str:
+    """Publish ``$TMPDIR``, wait (bounded) for *other*'s, record if it is alive.
+
+    A second barrier keeps both gates running until each has looked, so neither
+    dir can be removed before its sibling checked it.
+    """
     q = shlex.quote
+    wait = (
+        "i=0; while [ ! -s {f} ] && [ $i -lt " + str(_RENDEZVOUS_POLLS) + " ]; "
+        "do sleep " + str(_RENDEZVOUS_SLEEP_S) + "; i=$((i+1)); done; "
+    )
+    done = q(str(result) + ".done")
+    other_done = q(str(other_result) + ".done")
     return (
         f'printf %s "$TMPDIR" > {q(str(mine) + ".tmp")} '
-        f"&& mv {q(str(mine) + '.tmp')} {q(str(mine))}; i=0; "
-        f"while [ ! -s {q(str(other))} ] && [ $i -lt {_RENDEZVOUS_POLLS} ]; "
-        f"do sleep {_RENDEZVOUS_SLEEP_S}; i=$((i+1)); done; "
-        f'if [ -d "$(cat {q(str(other))})" ]; then echo alive > {q(str(result))}; '
-        f"else echo dead > {q(str(result))}; fi"
+        f"&& mv {q(str(mine) + '.tmp')} {q(str(mine))}; "
+        + wait.format(f=q(str(other)))
+        + f'if [ -d "$(cat {q(str(other))})" ]; then echo alive > {q(str(result))}; '
+        f"else echo dead > {q(str(result))}; fi; echo x > {done}; "
+        + wait.format(f=other_done)
+        + "true"
     )
 
 
@@ -533,7 +544,9 @@ class TestGateScratch:
         failures: dict[str, GateFailure | None] = {}
 
         def _go(name: str, worktree: Path, other: str) -> None:
-            body = _rendezvous_body(files[name], files[other], results[name])
+            body = _rendezvous_body(
+                files[name], files[other], results[name], results[other]
+            )
             failures[name] = _run(_plan((name, body, _CEILING)), worktree)
 
         threads = [
