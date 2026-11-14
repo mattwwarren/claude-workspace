@@ -43,6 +43,7 @@ from cw.gh_check_vocabulary import (
     CHECK_RUN_CONCLUSIONS,
     CHECK_RUN_STATUSES,
     STATUS_CONTEXT_STATES,
+    CheckRunStatus,
 )
 from cw.models import QueueItemStatus, Stage, TicketTask
 from cw.pr_feedback import FeedbackSynthesisError, synthesize_pr_feedback
@@ -170,7 +171,11 @@ def _check_refusals(
 def _validate_classification_payload(
     payload: dict[str, object], pr_number: int
 ) -> None:
-    """Refuse incomplete GitHub data before it can be classified as green."""
+    """Refuse incomplete GitHub data before it can be classified as green.
+
+    An in-flight CheckRun's empty-string conclusion is read as no conclusion
+    yet (pending); a COMPLETED run's empty conclusion is refused.
+    """
     mergeable = payload.get("mergeable")
     if not isinstance(mergeable, str) or mergeable not in _MERGEABLE_VALUES:
         raise _malformed_classification(pr_number, f"mergeable data ({mergeable!r})")
@@ -197,6 +202,11 @@ def _validate_classification_payload(
                     pr_number, f"CheckRun statusCheckRollup entry {index}"
                 )
             conclusion = check.get("conclusion")
+            # An in-flight CheckRun reports "" (not null) before it has a
+            # conclusion (#3627, #3207): no conclusion yet, i.e. pending. A
+            # COMPLETED run with "" is still malformed.
+            if conclusion == "" and status != CheckRunStatus.COMPLETED:
+                conclusion = None
             if conclusion is not None and (
                 not isinstance(conclusion, str)
                 or conclusion not in CHECK_RUN_CONCLUSIONS

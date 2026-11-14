@@ -83,6 +83,7 @@ from cw.models import (
 from cw.plan_fingerprint import compute_body_sha
 from cw.reconcile.liveness_page import close_command
 from cw.worktree import is_genuinely_live_home_reason, worktree_path_for
+from tests._adopt_pr_helpers import make_repair_feedback
 from tests._cli_review_helpers import _enter_operator_machine
 from tests._clients_yaml import ClientSpec, pipeline_stages_extra, write_clients_yaml
 from tests._reconcile_helpers import (
@@ -121,6 +122,7 @@ if TYPE_CHECKING:
     from click.testing import Result
 
     from cw.models import ReapReason, Session
+    from cw.models.review_feedback import ReviewFeedback
     from cw.native_daemon import FakeNativeDaemonClient
     from cw.review_convergence import ConvergenceLedger
     from cw.review_findings import ReviewVerdict
@@ -8028,6 +8030,7 @@ class TestApproveScopeDrift:
         status: QueueItemStatus = QueueItemStatus.BLOCKED_ON_USER,
         stage: Stage = Stage.IMPL,
         blocked_reason: str = "plan_scope_drift",
+        review_feedback: ReviewFeedback | None = None,
     ) -> list[tuple[str, Path | None]]:
         """Persist one parked row and stub the gh HEAD lookup; return its calls."""
         _write_client_yaml(tmp_config_dir, tmp_path)
@@ -8035,6 +8038,7 @@ class TestApproveScopeDrift:
             status=status, stage=stage, blocked_reason=blocked_reason
         )
         task.stage_base_ref = "base0000"
+        task.review_feedback = review_feedback
         save_dev_queue(DevQueueStore(tasks=[task]))
         calls: list[tuple[str, Path | None]] = []
 
@@ -8071,6 +8075,7 @@ class TestApproveScopeDrift:
             "client": "genhealth",
             "extra_files": ["src/a.py", "src/b.py"],
             "approved_head": _APPROVED_HEAD,
+            "dropped_review_feedback_sha": None,
         }
         assert calls == [("dev/GEN-500", tmp_path / "ws")]
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
@@ -8080,6 +8085,7 @@ class TestApproveScopeDrift:
         assert t.stage_base_ref is None
         assert t.scope_drift_approved_extra_files == ["src/a.py", "src/b.py"]
         assert t.scope_drift_approved_head == _APPROVED_HEAD
+        assert t.review_feedback is None
 
     def test_extra_files_are_deduped_and_sorted(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -8095,6 +8101,177 @@ class TestApproveScopeDrift:
         assert result["extra_files"] == ["a.py", "m.py", "z.py"]
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
         assert t.scope_drift_approved_extra_files == ["a.py", "m.py", "z.py"]
+
+    @staticmethod
+    def _capture_events(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> dict[OrchestratorEventType, dict[str, object]]:
+        payloads: dict[OrchestratorEventType, dict[str, object]] = {}
+
+        def _record(
+            event_type: OrchestratorEventType,
+            payload: dict[str, object],
+            **_kwargs: object,
+        ) -> None:
+            payloads[event_type] = payload
+
+        monkeypatch.setattr("cw.dev_queue.scope_drift.record_event", _record)
+        return payloads
+
+    def test_stale_review_feedback_is_dropped_when_head_moved_past_it(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3637: feedback pinned to a superseded head is dropped with the grant."""
+        from cw.dev_queue import approve_scope_drift_ticket
+
+        stale = "b" * 40
+        self._seed(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            review_feedback=make_repair_feedback(reviewed_sha=stale),
+        )
+        store = load_dev_queue()
+        next(
+            t for t in store.tasks if t.ticket_id == "GEN-500"
+        ).red_pr_recovery_sha = stale
+        save_dev_queue(store)
+        payloads = self._capture_events(monkeypatch)
+
+        result = approve_scope_drift_ticket("GEN-500", "genhealth", ["a.py"])
+
+        assert result["dropped_review_feedback_sha"] == stale
+        assert result["approved_head"] == _APPROVED_HEAD
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.review_feedback is None
+        assert t.red_pr_recovery_sha is None
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.IMPL
+        assert t.scope_drift_approved_head == _APPROVED_HEAD
+        assert (
+            payloads[OrchestratorEventType.TICKET_APPROVED][
+                "dropped_review_feedback_sha"
+            ]
+            == stale
+        )
+
+    def test_review_feedback_kept_when_it_names_the_current_head(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex parks before its commit, so feedback still names the head."""
+        from cw.dev_queue import approve_scope_drift_ticket
+
+        feedback = make_repair_feedback(reviewed_sha=_APPROVED_HEAD)
+        self._seed(tmp_config_dir, tmp_path, monkeypatch, review_feedback=feedback)
+        payloads = self._capture_events(monkeypatch)
+
+        result = approve_scope_drift_ticket("GEN-500", "genhealth", ["a.py"])
+
+        assert result["dropped_review_feedback_sha"] is None
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.review_feedback == feedback
+        assert (
+            "dropped_review_feedback_sha"
+            not in payloads[OrchestratorEventType.TICKET_APPROVED]
+        )
+
+    def test_no_review_feedback_leaves_the_row_and_payload_unchanged(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_scope_drift_ticket
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        payloads = self._capture_events(monkeypatch)
+
+        result = approve_scope_drift_ticket("GEN-500", "genhealth", ["a.py"])
+
+        assert result["dropped_review_feedback_sha"] is None
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.review_feedback is None
+        assert (
+            "dropped_review_feedback_sha"
+            not in payloads[OrchestratorEventType.TICKET_APPROVED]
+        )
+
+    def test_event_failure_rolls_back_the_dropped_review_feedback(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_scope_drift_ticket
+
+        self._seed(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            review_feedback=make_repair_feedback(reviewed_sha="b" * 40),
+        )
+        before = load_dev_queue().model_dump()
+
+        def _raise_event(*_args: object, **_kwargs: object) -> None:
+            msg = "event inbox unavailable"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.dev_queue.scope_drift.record_event", _raise_event)
+
+        with pytest.raises(OSError, match="event inbox unavailable"):
+            approve_scope_drift_ticket("GEN-500", "genhealth", ["a.py"])
+
+        assert load_dev_queue().model_dump() == before
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.review_feedback is not None
+        assert t.review_feedback.reviewed_sha == "b" * 40
+
+    def test_compensation_event_carries_the_dropped_sha(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_scope_drift_ticket
+
+        self._seed(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            review_feedback=make_repair_feedback(reviewed_sha="b" * 40),
+        )
+        failure_payloads: list[dict[str, object]] = []
+
+        def _event_then_fail(
+            event_type: OrchestratorEventType,
+            payload: dict[str, object],
+            **_kwargs: object,
+        ) -> None:
+            if event_type == OrchestratorEventType.TICKET_APPROVED:
+                error = "simulated post-write failure"
+                raise OSError(error)
+            failure_payloads.append(payload)
+
+        monkeypatch.setattr("cw.dev_queue.scope_drift.record_event", _event_then_fail)
+
+        with pytest.raises(OSError, match="simulated post-write failure"):
+            approve_scope_drift_ticket("GEN-500", "genhealth", ["a.py"])
+
+        assert len(failure_payloads) == 1
+        approval_payload = failure_payloads[0]["approval_payload"]
+        assert isinstance(approval_payload, dict)
+        assert approval_payload["dropped_review_feedback_sha"] == "b" * 40
+
+    def test_head_unresolvable_refusal_keeps_the_feedback(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_scope_drift_ticket
+        from cw.exceptions import ApproveGateError
+
+        self._seed(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            head=(None, False),
+            review_feedback=make_repair_feedback(reviewed_sha="b" * 40),
+        )
+        before = load_dev_queue().model_dump()
+
+        with pytest.raises(ApproveGateError, match="could not resolve"):
+            approve_scope_drift_ticket("GEN-500", "genhealth", ["a.py"])
+
+        assert load_dev_queue().model_dump() == before
 
     @pytest.mark.parametrize(
         ("status", "stage", "blocked_reason", "match"),

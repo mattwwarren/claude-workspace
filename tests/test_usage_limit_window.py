@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+import freezegun
 import pytest
 
 from cw.dev_queue import list_tickets, save_dev_queue
@@ -37,10 +39,23 @@ from tests._shared.lock_helpers import (
     spy_no_locks_held,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
 _ACME = "acme"
-_NOW = datetime.now(UTC).replace(microsecond=0)
+# A fixed instant, frozen for every test below. Deriving it from the real clock
+# at import made assertions depend on how long the suite had been running: a
+# window planned as "still in the future" had lapsed by the time a test ran in
+# a 10+ minute CI job (#3642).
+_NOW = datetime(2026, 11, 14, 12, 0, tzinfo=UTC)
 _UNTIL = _NOW + timedelta(hours=2)
 _STAMP = _NOW + timedelta(hours=1)
+
+
+@pytest.fixture(autouse=True)
+def _frozen_clock() -> Iterator[None]:
+    with freezegun.freeze_time(_NOW):
+        yield
 
 
 def _cleared_events() -> list[dict[str, object]]:
@@ -61,6 +76,12 @@ def _apply(plan: ClearPlan | None = None) -> ClearResult:
         forced=False,
         probe_verdict="available",
     )
+
+
+class TestClock:
+    def test_every_test_runs_at_the_frozen_instant(self) -> None:
+        """Tripwire: the fixed ``_NOW`` and the clock cannot drift apart (#3642)."""
+        assert datetime.now(UTC) == _NOW
 
 
 class TestViews:

@@ -46,6 +46,7 @@ from cw.models import (
     StagePipelineConfig,
     TicketTask,
     WatchedPr,
+    WorkerEffort,
     counts_toward_client_ceiling,
 )
 from cw.models.client import TrackerMcpGateConfig
@@ -312,6 +313,32 @@ class TestClientConfig:
     def test_worker_model_defaults_to_none(self) -> None:
         c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
         assert c.worker_model is None
+
+    def test_worker_effort_defaults_to_none(self) -> None:
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        assert c.worker_effort is None
+
+    @pytest.mark.parametrize("level", list(WorkerEffort), ids=lambda m: m.value)
+    def test_worker_effort_accepts_every_member_and_round_trips(
+        self, level: WorkerEffort
+    ) -> None:
+        c = ClientConfig(
+            name="test", workspace_path=Path("/dev/null"), worker_effort=level
+        )
+        assert c.worker_effort is level
+        dumped = c.model_dump(mode="json")
+        assert dumped["worker_effort"] == level.value
+        assert ClientConfig(**dumped).worker_effort is level
+
+    def test_worker_effort_rejects_unknown_level(self) -> None:
+        with pytest.raises(ValidationError):
+            ClientConfig.model_validate(
+                {
+                    "name": "test",
+                    "workspace_path": "/dev/null",
+                    "worker_effort": "turbo",
+                }
+            )
 
     def test_worker_model_accepts_opaque_string(self) -> None:
         c = ClientConfig(
@@ -3556,6 +3583,7 @@ class TestPackageExportCompleteness:
             "ReapPolicy",
             "ReapReason",
             "ReasoningEffort",
+            "WorkerEffort",
             "SandboxMode",
             "ReviewFeedback",
             "Session",

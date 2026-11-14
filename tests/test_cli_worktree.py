@@ -20,12 +20,20 @@ from tests._changelog_cut_helpers import (
     pyproject,
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.cli_preflight import _write_tracker_config
+from tests._shared.git_repos import commit_tracked_file, git_in, init_repo_with_remote
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 
+@pytest.fixture
+def github_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Treat every client repo as GitHub-hosted (#3534): gc gates on origin."""
+    monkeypatch.setattr("cw.cli.worktree._resolve_repo_slug", lambda _d: "o/r")
+
+
+@pytest.mark.usefixtures("github_origin")
 class TestWorktreeGcMultiClient:
     """cw worktree gc default (all-clients) run — per-client isolation (#1389)."""
 
@@ -35,16 +43,13 @@ class TestWorktreeGcMultiClient:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Regression guard: every configured GitHub-tracked client is actually
+        """Regression guard: every configured GitHub-hosted client is actually
         called, not silently truncated (the ticket's literal complaint)."""
         ws_a, ws_b = tmp_path / "ws-a", tmp_path / "ws-b"
         ws_a.mkdir()
         ws_b.mkdir()
         write_clients_yaml(
             ClientSpec("client-a", str(ws_a)), ClientSpec("client-b", str(ws_b))
-        )
-        monkeypatch.setattr(
-            "cw.cli.worktree.resolve_tracker", lambda _root: TRACKER_GITHUB_ISSUES
         )
 
         called: list[str] = []
@@ -74,9 +79,6 @@ class TestWorktreeGcMultiClient:
         write_clients_yaml(
             ClientSpec("client-a", str(ws_a)), ClientSpec("client-b", str(ws_b))
         )
-        monkeypatch.setattr(
-            "cw.cli.worktree.resolve_tracker", lambda _root: TRACKER_GITHUB_ISSUES
-        )
 
         called: list[str] = []
 
@@ -103,9 +105,6 @@ class TestWorktreeGcMultiClient:
         ws_a = tmp_path / "ws-a"
         ws_a.mkdir()
         write_clients_yaml(ClientSpec("client-a", str(ws_a)))
-        monkeypatch.setattr(
-            "cw.cli.worktree.resolve_tracker", lambda _root: TRACKER_GITHUB_ISSUES
-        )
 
         def _mock_gc(_git_cwd: Path, **_kwargs: object) -> WorktreeGcReport:
             msg = "gh timed out"
@@ -127,9 +126,6 @@ class TestWorktreeGcMultiClient:
         ws_a = tmp_path / "ws-a"
         ws_a.mkdir()
         write_clients_yaml(ClientSpec("client-a", str(ws_a)))
-        monkeypatch.setattr(
-            "cw.cli.worktree.resolve_tracker", lambda _root: TRACKER_GITHUB_ISSUES
-        )
 
         def _mock_gc(_git_cwd: Path, **_kwargs: object) -> WorktreeGcReport:
             msg = "boom"
@@ -151,9 +147,6 @@ class TestWorktreeGcMultiClient:
         ws_b.mkdir()
         write_clients_yaml(
             ClientSpec("client-a", str(ws_a)), ClientSpec("client-b", str(ws_b))
-        )
-        monkeypatch.setattr(
-            "cw.cli.worktree.resolve_tracker", lambda _root: TRACKER_GITHUB_ISSUES
         )
 
         entry = WorktreeEntry(path=tmp_path / "wt1", branch="dev/1", locked=False)
@@ -184,9 +177,6 @@ class TestWorktreeGcMultiClient:
         ws_a = tmp_path / "ws-a"
         ws_a.mkdir()
         write_clients_yaml(ClientSpec("client-a", str(ws_a)))
-        monkeypatch.setattr(
-            "cw.cli.worktree.resolve_tracker", lambda _root: TRACKER_GITHUB_ISSUES
-        )
 
         def _mock_gc(_git_cwd: Path, **_kwargs: object) -> WorktreeGcReport:
             msg = "boom"
@@ -197,6 +187,151 @@ class TestWorktreeGcMultiClient:
         result = CliRunner().invoke(main, ["worktree", "gc", "--client", "client-a"])
         assert result.exit_code == 0
         assert "[client-a] ERROR" in result.output
+
+
+class TestWorktreeGcCodeHostGate:
+    """``cw worktree gc`` gates on the code host (origin), not the tracker (#3534).
+
+    Real git repos and no ``_resolve_repo_slug`` patch, so the probe reads origin.
+    """
+
+    @staticmethod
+    def _client_repo(
+        tmp_path: Path,
+        name: str,
+        remote_url: str | None,
+        tracker: str | None = None,
+    ) -> Path:
+        repo = init_repo_with_remote(tmp_path / name, remote_url)
+        if tracker is not None:
+            _write_tracker_config(repo, tracker)
+        write_clients_yaml(ClientSpec(name, str(repo)))
+        return repo
+
+    @staticmethod
+    def _stub_gc(
+        monkeypatch: pytest.MonkeyPatch, report: WorktreeGcReport | None = None
+    ) -> list[str]:
+        called: list[str] = []
+
+        def _mock_gc(git_cwd: Path, **_kwargs: object) -> WorktreeGcReport:
+            called.append(str(git_cwd))
+            return report or WorktreeGcReport(results=[])
+
+        monkeypatch.setattr("cw.cli.worktree.run_worktree_gc", _mock_gc)
+        return called
+
+    def test_linear_tracked_github_hosted_client_is_examined(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = self._client_repo(
+            tmp_path, "lin-client", "git@github.com:o/r.git", tracker="linear"
+        )
+        entry = WorktreeEntry(path=tmp_path / "wt1", branch="dev/1", locked=False)
+        report = WorktreeGcReport(
+            results=[
+                WorktreeGcResult(
+                    entry=entry, verdict=GcVerdict.REMOVE_MERGED, pr_number=5
+                ),
+                WorktreeGcResult(
+                    entry=entry, verdict=GcVerdict.KEEP_NO_PR, pr_number=None
+                ),
+                WorktreeGcResult(
+                    entry=entry, verdict=GcVerdict.SKIP_DIRTY, pr_number=None
+                ),
+            ]
+        )
+        called = self._stub_gc(monkeypatch, report)
+
+        result = CliRunner().invoke(main, ["worktree", "gc"])
+        assert result.exit_code == 0, result.output
+        assert str(repo) in called
+        assert "[lin-client] skipped" not in result.output
+        assert "origin is not a github.com repository" not in result.output
+        assert "REMOVE" in result.output
+        assert "KEEP" in result.output
+        assert "SKIP" in result.output
+
+    @pytest.mark.parametrize(
+        "remote_url", ["https://gitlab.com/o/r.git", None], ids=["gitlab", "no-origin"]
+    )
+    def test_non_github_origin_is_skipped_naming_code_host(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        remote_url: str | None,
+    ) -> None:
+        self._client_repo(tmp_path, "nongh-client", remote_url)
+        called = self._stub_gc(monkeypatch)
+
+        result = CliRunner().invoke(main, ["worktree", "gc"])
+        assert result.exit_code == 0, result.output
+        assert called == []
+        assert (
+            "[nongh-client] skipped — origin is not a github.com repository"
+            in result.output
+        )
+        assert "tracker" not in result.output.lower()
+        assert "GitHub-tracked" not in result.output
+
+    def test_github_tracked_client_unchanged(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = self._client_repo(
+            tmp_path, "gh-client", "https://github.com/o/r.git", TRACKER_GITHUB_ISSUES
+        )
+        called = self._stub_gc(monkeypatch)
+
+        result = CliRunner().invoke(main, ["worktree", "gc"])
+        assert result.exit_code == 0, result.output
+        assert str(repo) in called
+        assert "examined" in result.output
+
+    def test_untracked_client_with_github_origin_is_examined(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = self._client_repo(tmp_path, "bare-client", "https://github.com/o/r.git")
+        called = self._stub_gc(monkeypatch)
+
+        result = CliRunner().invoke(main, ["worktree", "gc"])
+        assert result.exit_code == 0, result.output
+        assert str(repo) in called
+
+    def test_mixed_clients_non_github_skipped_others_examined(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        gl_repo = init_repo_with_remote(
+            tmp_path / "gitlab-client", "https://gitlab.com/o/r.git"
+        )
+        gh_repo = init_repo_with_remote(
+            tmp_path / "gh-client", "https://github.com/o/r.git"
+        )
+        write_clients_yaml(
+            ClientSpec("gitlab-client", str(gl_repo)),
+            ClientSpec("gh-client", str(gh_repo)),
+        )
+        called = self._stub_gc(monkeypatch)
+
+        result = CliRunner().invoke(main, ["worktree", "gc"])
+        assert result.exit_code == 0, result.output
+        assert called == [str(gh_repo)]
+        assert str(gl_repo) not in called
+        assert "[gitlab-client] skipped" in result.output
+        assert "[gh-client]" in result.output
+
+    def test_all_clients_skipped_prints_github_hosted_fallback(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._client_repo(tmp_path, "gitlab-only", "https://gitlab.com/o/r.git")
+        self._stub_gc(monkeypatch)
+
+        result = CliRunner().invoke(main, ["worktree", "gc"])
+        assert result.exit_code == 0, result.output
+        assert (
+            result.output.strip().splitlines()[-1] == "No GitHub-hosted clients found."
+        )
+        assert "GitHub-tracked" not in result.output
 
 
 class TestWorktreeMergeProbe:

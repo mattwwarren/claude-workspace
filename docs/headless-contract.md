@@ -878,7 +878,8 @@ A PR adopted with `cw dev-queue add <ticket> --adopt-pr <N>` is a row pinned
 to the PR's head (`adopted_head_sha`): a green PR enters at review, and since
 #2944 a CONFLICTING or red one enters at impl with synthesized repair feedback
 (`review_feedback`) instead of parking. That feedback lives for the row's
-IMPL round and is cleared on any exit from IMPL (an IMPL park and resume keeps
+IMPL round and is cleared on any exit from IMPL, and by a `--scope-drift`
+grant when the branch head has moved past its `reviewed_sha` (#3637). An IMPL park and resume keeps
 it). Two dispositions park such a row, and
 a third, legacy one may still sit in a queue written by v1.87.0. Like
 `stale_dispatch_gate`, **no session ever ran** for any of them:
