@@ -17,6 +17,7 @@ import subprocess as _sp
 import tomllib
 import urllib.parse
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 from cw.doctor._shared import CheckResult, SettingsReadFailure, _read_settings
@@ -55,6 +56,9 @@ _CW_REINSTALL_CMD = "uv tool install --reinstall claude-workspace"
 
 # Package name used for importlib.metadata lookups.
 _CW_PACKAGE_NAME = "claude-workspace"
+
+# Public clone URL for cw; remediation text falls back to it (#3579).
+_CW_REPO_URL = "https://github.com/mattwwarren/claude-workspace.git"
 
 # Separator characters that terminate a PEP 508 dependency name (extras
 # bracket, version specifiers, environment markers, whitespace) — mirrors
@@ -219,53 +223,121 @@ def _check_codex_capability() -> CheckResult:
     return CheckResult("codex-capability", ok=True, warn=False, detail=probe.detail)
 
 
-def _resolve_cw_source_path() -> Path | CheckResult:
-    """Resolve the local source dir for the installed cw, or a skip CheckResult.
+class _InstallKind(StrEnum):
+    """How the installed cw distribution was installed, from ``direct_url.json``."""
 
-    Returns the source :class:`Path` for an editable/local install. For a
-    registry/PyPI install (no package metadata, no/foreign ``direct_url.json``)
-    returns an ``ok=True, warn=False`` skip :class:`CheckResult` that the
-    caller propagates unchanged.
+    LOCAL = "local"
+    GIT = "git"
+    REGISTRY = "registry"
+    MALFORMED = "malformed"
+
+
+@dataclass(frozen=True)
+class CwInstall:
+    """Install classification. Carries no version: read lazily by callers."""
+
+    kind: _InstallKind
+    source_path: Path | None
+    url: str | None
+    requested_revision: str | None
+    commit_id: str | None
+
+
+_REGISTRY_INSTALL = CwInstall(
+    kind=_InstallKind.REGISTRY,
+    source_path=None,
+    url=None,
+    requested_revision=None,
+    commit_id=None,
+)
+_MALFORMED_INSTALL = CwInstall(
+    kind=_InstallKind.MALFORMED,
+    source_path=None,
+    url=None,
+    requested_revision=None,
+    commit_id=None,
+)
+
+
+def _str_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _git_install(url: str, vcs_info: dict[str, object]) -> CwInstall:
+    return CwInstall(
+        kind=_InstallKind.GIT,
+        source_path=None,
+        url=url,
+        requested_revision=_str_or_none(vcs_info.get("requested_revision")),
+        commit_id=_str_or_none(vcs_info.get("commit_id")),
+    )
+
+
+def _install_from_payload(direct_url: dict[str, object]) -> CwInstall:
+    """Classify a parsed ``direct_url.json`` object (LOCAL, GIT or REGISTRY)."""
+    url = direct_url.get("url")
+    if not isinstance(url, str):
+        return _REGISTRY_INSTALL
+    if url.startswith("file://"):
+        return CwInstall(
+            kind=_InstallKind.LOCAL,
+            source_path=Path(urllib.parse.urlparse(url).path),
+            url=url,
+            requested_revision=None,
+            commit_id=None,
+        )
+    vcs_info = direct_url.get("vcs_info")
+    if isinstance(vcs_info, dict):
+        return _git_install(url, vcs_info)
+    return _REGISTRY_INSTALL
+
+
+def _classify_cw_install() -> CwInstall:
+    """Classify the installed cw as local, git, registry or malformed.
+
+    ``file://`` URLs are checked first (LOCAL). Otherwise a ``vcs_info`` dict
+    marks a GIT install. Missing metadata, a missing ``url``, a non-str
+    ``url`` or a non-VCS URL is REGISTRY. Unparseable JSON or a non-object
+    payload is MALFORMED.
     """
     try:
         dist = importlib.metadata.distribution(_CW_PACKAGE_NAME)
     except importlib.metadata.PackageNotFoundError:
-        return CheckResult(
-            _CW_VERSION_CHECK_NAME,
-            ok=True,
-            warn=False,
-            detail="installed from registry; skipping source check",
-        )
+        return _REGISTRY_INSTALL
 
     direct_url_text = dist.read_text("direct_url.json")
     if direct_url_text is None:
-        return CheckResult(
-            _CW_VERSION_CHECK_NAME,
-            ok=True,
-            warn=False,
-            detail="installed from registry; skipping source check",
-        )
+        return _REGISTRY_INSTALL
 
     try:
-        direct_url: dict[str, object] = json.loads(direct_url_text)
+        direct_url: object = json.loads(direct_url_text)
     except json.JSONDecodeError:
-        return CheckResult(
-            _CW_VERSION_CHECK_NAME,
-            ok=True,
-            warn=False,
-            detail="malformed direct_url.json; skipping source check",
-        )
+        return _MALFORMED_INSTALL
+    if not isinstance(direct_url, dict):
+        return _MALFORMED_INSTALL
 
-    url = direct_url.get("url", "")
-    if not isinstance(url, str) or not url.startswith("file://"):
-        return CheckResult(
-            _CW_VERSION_CHECK_NAME,
-            ok=True,
-            warn=False,
-            detail="installed from registry; skipping source check",
-        )
+    return _install_from_payload(direct_url)
 
-    return Path(urllib.parse.urlparse(url).path)
+
+def _resolve_cw_source_path() -> Path | CheckResult:
+    """Resolve the local source dir for the installed cw, or a skip CheckResult.
+
+    Returns the source :class:`Path` for an editable/local install. Every
+    non-local install returns an ``ok=True, warn=False`` skip
+    :class:`CheckResult` that the caller propagates unchanged. A git install's
+    skip names its revision; registry and malformed texts are unchanged.
+    """
+    install = _classify_cw_install()
+    if install.source_path is not None:
+        return install.source_path
+    if install.kind is _InstallKind.MALFORMED:
+        detail = "malformed direct_url.json; skipping source check"
+    elif install.kind is _InstallKind.GIT:
+        revision = install.requested_revision or install.commit_id or "unpinned"
+        detail = f"installed from git ({revision}); skipping source check"
+    else:
+        detail = "installed from registry; skipping source check"
+    return CheckResult(_CW_VERSION_CHECK_NAME, ok=True, warn=False, detail=detail)
 
 
 def _check_cw_version() -> CheckResult:

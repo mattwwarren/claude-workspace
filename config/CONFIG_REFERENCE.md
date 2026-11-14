@@ -24,6 +24,8 @@ cw init my-project --path /path/to/repo
 cw start my-project
 ```
 
+This installs the CLI only, not cw's skills, commands or helper scripts. To install those, clone the repo at the matching tag and run `./scripts/install-skills.sh` (see docs/INSTALL.md).
+
 ## Config File Location
 
 ```

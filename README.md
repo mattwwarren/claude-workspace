@@ -24,6 +24,8 @@ cd claude-workspace
 uv tool install --editable ".[mcp]"
 ```
 
+This path installs the CLI only. It does **not** install cw's skills, commands, or helper scripts. To install those, clone the repo at the matching tag and run `./scripts/install-skills.sh` from that clone; the installed links point into the clone, so keep it. Replace `<version>` with the release you installed: `git clone https://github.com/mattwwarren/claude-workspace.git && cd claude-workspace && git checkout v<version> && ./scripts/install-skills.sh`.
+
 > **Stale binary warning:** `uv tool install --force` caches by version string. After pulling new code,
 > use `--reinstall --no-cache` and verify with a subcommand `--help`, not `cw --version`.
 
