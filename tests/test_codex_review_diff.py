@@ -2,19 +2,31 @@
 
 from __future__ import annotations
 
+import logging
+import subprocess
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
 
-from cw.codex_review import _capture_delta_diff, _capture_diff, _parse_unified_diff
+from cw._git import git_output
+from cw.codex_review import (
+    _branch_diff_totals,
+    _capture_delta_diff,
+    _capture_diff,
+    _measure_large_diff,
+    _parse_unified_diff,
+)
 from cw.codex_review._diff import (
     _capture_branch_context,
     _capture_tree_diff,
     _limited_to_paths,
 )
+from cw.exceptions import CwError
+from cw.plan_files import SMALL_TIER_MAX_FILES
+from cw.worktree import _parse_numstat_totals
 from tests import _git_sandbox
-from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.git_repos import commit_small_py_files, commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -193,6 +205,144 @@ class TestCaptureDiff:
         assert changed_files == ["new.py"]
         assert "decoy.py" not in diff.text
         assert reviewed_sha == git_in(repo, "rev-parse", "HEAD")
+
+
+_DIFF_LOGGER = "cw.codex_review._diff"
+
+
+def _numstat_totals(repo: Path, base: str) -> tuple[int, int]:
+    """The ``(files, lines)`` numstat of ``<base>...HEAD``, independently parsed."""
+    return _parse_numstat_totals(
+        git_output(["diff", "--numstat", f"{base}...HEAD"], cwd=repo)
+    )
+
+
+def _diff_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        r
+        for r in caplog.records
+        if r.name == _DIFF_LOGGER and r.levelno == logging.WARNING
+    ]
+
+
+class TestBranchDiffTotals:
+    """``_branch_diff_totals`` — the whole-branch numstat (#2086)."""
+
+    def test_totals_match_the_branch_numstat(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-totals")
+        commit_small_py_files(repo, 3)
+        commit_tracked_file(repo, "two.py", "a = 1\nb = 2\n")
+
+        totals = _branch_diff_totals(repo, "main")
+
+        assert totals == (4, 5)
+        assert totals == _numstat_totals(repo, "main")
+
+    def test_a_binary_file_counts_as_a_changed_file_with_no_lines(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-totals-binary")
+        commit_small_py_files(repo, 1)
+        (repo / "blob.bin").write_bytes(b"\x00\x01\x02binary\x00")
+        git_in(repo, "add", "blob.bin")
+        git_in(repo, "commit", "-m", "add blob")
+
+        assert _branch_diff_totals(repo, "main") == (2, 1)
+
+    def test_a_pinned_full_sha_base_passes_through(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-totals-pinned")
+        base = git_in(repo, "rev-parse", "main")
+        commit_small_py_files(repo, 2)
+
+        assert _branch_diff_totals(repo, base) == _branch_diff_totals(repo, "main")
+        assert _branch_diff_totals(repo, base) == (2, 2)
+
+    def test_an_unresolvable_base_raises(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """The totals reader never swallows: ``pre_loop_diff_lines`` relies on it."""
+        repo = make_git_repo("wt-totals-raise")
+        commit_small_py_files(repo, 1)
+
+        with pytest.raises(subprocess.CalledProcessError):
+            _branch_diff_totals(repo, "no-such-branch")
+
+
+class TestMeasureLargeDiff:
+    """``_measure_large_diff`` — the fail-open advisory flag (#2086)."""
+
+    def test_eleven_files_is_large(self, make_git_repo: Callable[[str], Path]) -> None:
+        repo = make_git_repo("wt-measure-large")
+        commit_small_py_files(repo, SMALL_TIER_MAX_FILES + 1)
+
+        assert _measure_large_diff(repo, "main") is True
+
+    def test_two_files_is_not_large(self, make_git_repo: Callable[[str], Path]) -> None:
+        repo = make_git_repo("wt-measure-small")
+        commit_small_py_files(repo, 2)
+
+        assert _measure_large_diff(repo, "main") is False
+
+    def test_a_failing_git_diff_fails_open_with_one_warning(
+        self,
+        make_git_repo: Callable[[str], Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        repo = make_git_repo("wt-measure-git-fail")
+        commit_small_py_files(repo, SMALL_TIER_MAX_FILES + 1)
+        caplog.set_level(logging.WARNING)
+
+        assert _measure_large_diff(repo, "no-such-branch") is False
+
+        warnings = _diff_warnings(caplog)
+        assert len(warnings) == 1
+        assert "CalledProcessError" in warnings[0].getMessage()
+
+    def test_an_unresolvable_base_fails_open_with_one_warning(
+        self,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        repo = make_git_repo("wt-measure-base-fail")
+        commit_small_py_files(repo, SMALL_TIER_MAX_FILES + 1)
+
+        def _unresolvable(_worktree: Path, _default: str) -> str:
+            msg = "merge-base failed"
+            raise CwError(msg)
+
+        monkeypatch.setattr(
+            "cw.codex_review._diff.resolve_loop_diff_base", _unresolvable
+        )
+        caplog.set_level(logging.WARNING)
+
+        assert _measure_large_diff(repo, "main") is False
+
+        warnings = _diff_warnings(caplog)
+        assert len(warnings) == 1
+        assert "CwError" in warnings[0].getMessage()
+
+    def test_an_os_error_fails_open(
+        self,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        repo = make_git_repo("wt-measure-os-fail")
+
+        def _no_git(*_args: object, **_kwargs: object) -> str:
+            msg = "git vanished"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.codex_review._diff.git_output", _no_git)
+        caplog.set_level(logging.WARNING)
+
+        assert _measure_large_diff(repo, "main") is False
+        assert len(_diff_warnings(caplog)) == 1
 
 
 class TestCaptureDeltaDiff:

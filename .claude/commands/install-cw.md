@@ -32,6 +32,8 @@ Ask the user which installation method they prefer:
 2. **From local clone** (for development): Clone the repo, then run `./scripts/install.sh`
 3. **Development mode** (editable): Clone the repo, run `uv sync --locked --dev --extra mcp`, use `uv run cw`
 
+Option 1 installs the CLI only, not skills or commands; install those in Step 5 from a clone checked out at the matching tag.
+
 Run the appropriate installation command based on their choice.
 
 ## Step 3: Verify Installation
@@ -71,7 +73,7 @@ Install the cw slash commands to `~/.claude/commands/` so they're available glob
 ./scripts/install-skills.sh
 ```
 
-Or if working from a non-local install, find the project source and run the script yourself. The skills include:
+Or if working from a non-local install, clone the project at the installed tag and run the script from that clone: `git clone https://github.com/mattwwarren/claude-workspace.git && cd claude-workspace && git checkout v<version> && ./scripts/install-skills.sh` (the links point into the clone, so keep it). The skills include:
 - `/session-done` - Wrap up work session with handoff generation
 - `/handoff` - Generate session handoff for abnormal endings
 - `/orchestrate-phase` - Automated phase implementation with GitHub Issue integration

@@ -18,6 +18,7 @@ clients:
   #   notifications: true                   # desktop notifications on session events
   #   auto_background_threshold: 50         # auto-background after N conversation turns
   #   worker_model: claude-sonnet-5-5  # pin Sonnet for auto-dev workers
+  #   worker_effort: medium            # --effort for auto-dev workers (inherit = no flag)
   #   quality_gate_commands: "npm run lint && npm test"
   #                                         # non-Python client: replaces the
   #                                         # ruff/mypy/pytest gate sentence in

@@ -46,6 +46,7 @@ from cw.models import (
     StagePipelineConfig,
     TicketTask,
     WatchedPr,
+    WorkerEffort,
     counts_toward_client_ceiling,
 )
 from cw.models.client import TrackerMcpGateConfig
@@ -312,6 +313,32 @@ class TestClientConfig:
     def test_worker_model_defaults_to_none(self) -> None:
         c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
         assert c.worker_model is None
+
+    def test_worker_effort_defaults_to_none(self) -> None:
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        assert c.worker_effort is None
+
+    @pytest.mark.parametrize("level", list(WorkerEffort), ids=lambda m: m.value)
+    def test_worker_effort_accepts_every_member_and_round_trips(
+        self, level: WorkerEffort
+    ) -> None:
+        c = ClientConfig(
+            name="test", workspace_path=Path("/dev/null"), worker_effort=level
+        )
+        assert c.worker_effort is level
+        dumped = c.model_dump(mode="json")
+        assert dumped["worker_effort"] == level.value
+        assert ClientConfig(**dumped).worker_effort is level
+
+    def test_worker_effort_rejects_unknown_level(self) -> None:
+        with pytest.raises(ValidationError):
+            ClientConfig.model_validate(
+                {
+                    "name": "test",
+                    "workspace_path": "/dev/null",
+                    "worker_effort": "turbo",
+                }
+            )
 
     def test_worker_model_accepts_opaque_string(self) -> None:
         c = ClientConfig(
@@ -2104,7 +2131,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 61
+        assert DEV_QUEUE_SCHEMA_VERSION == 62
 
     def test_ticket_task_branch_defaults_none_on_a_pre_v49_blob(self) -> None:
         """#2948 (v49): a row persisted before the field existed loads unset,
@@ -3556,6 +3583,7 @@ class TestPackageExportCompleteness:
             "ReapPolicy",
             "ReapReason",
             "ReasoningEffort",
+            "WorkerEffort",
             "SandboxMode",
             "ReviewFeedback",
             "Session",
@@ -4309,7 +4337,7 @@ class TestLaunchMarker:
 
         assert marker.start_since_boot_ns is None
         assert marker.boot_id is None
-        assert DEV_QUEUE_SCHEMA_VERSION == 61
+        assert DEV_QUEUE_SCHEMA_VERSION == 62
 
     def test_new_shape_round_trips_through_json_on_a_row(self) -> None:
         from cw.models import LaunchMarker

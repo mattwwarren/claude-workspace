@@ -995,6 +995,34 @@
      "title": "ReviewEngineAllow",
      "type": "object"
     },
+    "ReviewEngineSettlement": {
+     "description": "The deferred SHOULD_FIX fingerprints of one engine round at one head.\n\n``head_sha`` is a plain ``str``: the writer validates the 40-hex shape and\nraises :class:`cw.exceptions.CwError`, so a malformed value never becomes a\npydantic error on the seam that must never raise.",
+     "properties": {
+      "head_sha": {
+       "title": "Head Sha",
+       "type": "string"
+      },
+      "fingerprints": {
+       "items": {
+        "type": "string"
+       },
+       "title": "Fingerprints",
+       "type": "array"
+      },
+      "recorded_at": {
+       "format": "date-time",
+       "title": "Recorded At",
+       "type": "string"
+      }
+     },
+     "required": [
+      "head_sha",
+      "fingerprints",
+      "recorded_at"
+     ],
+     "title": "ReviewEngineSettlement",
+     "type": "object"
+    },
     "ReviewFeedback": {
      "additionalProperties": false,
      "description": "One repo-qualified PR review captured against an exact head commit.",
@@ -2117,6 +2145,13 @@
      "title": "Review Debt",
      "type": "array"
     },
+    "review_engine_settlements": {
+     "items": {
+      "$ref": "#/$defs/ReviewEngineSettlement"
+     },
+     "title": "Review Engine Settlements",
+     "type": "array"
+    },
     "stale_gate_detected_at": {
      "anyOf": [
       {
@@ -3190,6 +3225,34 @@
      "title": "ReviewEngineAllow",
      "type": "object"
     },
+    "ReviewEngineSettlement": {
+     "description": "The deferred SHOULD_FIX fingerprints of one engine round at one head.\n\n``head_sha`` is a plain ``str``: the writer validates the 40-hex shape and\nraises :class:`cw.exceptions.CwError`, so a malformed value never becomes a\npydantic error on the seam that must never raise.",
+     "properties": {
+      "head_sha": {
+       "title": "Head Sha",
+       "type": "string"
+      },
+      "fingerprints": {
+       "items": {
+        "type": "string"
+       },
+       "title": "Fingerprints",
+       "type": "array"
+      },
+      "recorded_at": {
+       "format": "date-time",
+       "title": "Recorded At",
+       "type": "string"
+      }
+     },
+     "required": [
+      "head_sha",
+      "fingerprints",
+      "recorded_at"
+     ],
+     "title": "ReviewEngineSettlement",
+     "type": "object"
+    },
     "ReviewFeedback": {
      "additionalProperties": false,
      "description": "One repo-qualified PR review captured against an exact head commit.",
@@ -4236,6 +4299,13 @@
         "$ref": "#/$defs/ReviewDebtRecord"
        },
        "title": "Review Debt",
+       "type": "array"
+      },
+      "review_engine_settlements": {
+       "items": {
+        "$ref": "#/$defs/ReviewEngineSettlement"
+       },
+       "title": "Review Engine Settlements",
        "type": "array"
       },
       "stale_gate_detected_at": {
@@ -5406,6 +5476,34 @@
      "title": "ReviewEngineAllow",
      "type": "object"
     },
+    "ReviewEngineSettlement": {
+     "description": "The deferred SHOULD_FIX fingerprints of one engine round at one head.\n\n``head_sha`` is a plain ``str``: the writer validates the 40-hex shape and\nraises :class:`cw.exceptions.CwError`, so a malformed value never becomes a\npydantic error on the seam that must never raise.",
+     "properties": {
+      "head_sha": {
+       "title": "Head Sha",
+       "type": "string"
+      },
+      "fingerprints": {
+       "items": {
+        "type": "string"
+       },
+       "title": "Fingerprints",
+       "type": "array"
+      },
+      "recorded_at": {
+       "format": "date-time",
+       "title": "Recorded At",
+       "type": "string"
+      }
+     },
+     "required": [
+      "head_sha",
+      "fingerprints",
+      "recorded_at"
+     ],
+     "title": "ReviewEngineSettlement",
+     "type": "object"
+    },
     "ReviewFeedback": {
      "additionalProperties": false,
      "description": "One repo-qualified PR review captured against an exact head commit.",
@@ -6454,6 +6552,13 @@
        "title": "Review Debt",
        "type": "array"
       },
+      "review_engine_settlements": {
+       "items": {
+        "$ref": "#/$defs/ReviewEngineSettlement"
+       },
+       "title": "Review Engine Settlements",
+       "type": "array"
+      },
       "stale_gate_detected_at": {
        "anyOf": [
         {
@@ -6693,7 +6798,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 61,
+     "default": 62,
      "title": "Schema Version",
      "type": "integer"
     },
@@ -7902,6 +8007,34 @@
      "title": "ReviewEngineAllow",
      "type": "object"
     },
+    "ReviewEngineSettlement": {
+     "description": "The deferred SHOULD_FIX fingerprints of one engine round at one head.\n\n``head_sha`` is a plain ``str``: the writer validates the 40-hex shape and\nraises :class:`cw.exceptions.CwError`, so a malformed value never becomes a\npydantic error on the seam that must never raise.",
+     "properties": {
+      "head_sha": {
+       "title": "Head Sha",
+       "type": "string"
+      },
+      "fingerprints": {
+       "items": {
+        "type": "string"
+       },
+       "title": "Fingerprints",
+       "type": "array"
+      },
+      "recorded_at": {
+       "format": "date-time",
+       "title": "Recorded At",
+       "type": "string"
+      }
+     },
+     "required": [
+      "head_sha",
+      "fingerprints",
+      "recorded_at"
+     ],
+     "title": "ReviewEngineSettlement",
+     "type": "object"
+    },
     "ReviewFeedback": {
      "additionalProperties": false,
      "description": "One repo-qualified PR review captured against an exact head commit.",
@@ -9024,6 +9157,13 @@
      "title": "Review Debt",
      "type": "array"
     },
+    "review_engine_settlements": {
+     "items": {
+      "$ref": "#/$defs/ReviewEngineSettlement"
+     },
+     "title": "Review Engine Settlements",
+     "type": "array"
+    },
     "stale_gate_detected_at": {
      "anyOf": [
       {
@@ -10097,6 +10237,34 @@
      "title": "ReviewEngineAllow",
      "type": "object"
     },
+    "ReviewEngineSettlement": {
+     "description": "The deferred SHOULD_FIX fingerprints of one engine round at one head.\n\n``head_sha`` is a plain ``str``: the writer validates the 40-hex shape and\nraises :class:`cw.exceptions.CwError`, so a malformed value never becomes a\npydantic error on the seam that must never raise.",
+     "properties": {
+      "head_sha": {
+       "title": "Head Sha",
+       "type": "string"
+      },
+      "fingerprints": {
+       "items": {
+        "type": "string"
+       },
+       "title": "Fingerprints",
+       "type": "array"
+      },
+      "recorded_at": {
+       "format": "date-time",
+       "title": "Recorded At",
+       "type": "string"
+      }
+     },
+     "required": [
+      "head_sha",
+      "fingerprints",
+      "recorded_at"
+     ],
+     "title": "ReviewEngineSettlement",
+     "type": "object"
+    },
     "ReviewFeedback": {
      "additionalProperties": false,
      "description": "One repo-qualified PR review captured against an exact head commit.",
@@ -11145,6 +11313,13 @@
        "title": "Review Debt",
        "type": "array"
       },
+      "review_engine_settlements": {
+       "items": {
+        "$ref": "#/$defs/ReviewEngineSettlement"
+       },
+       "title": "Review Engine Settlements",
+       "type": "array"
+      },
       "stale_gate_detected_at": {
        "anyOf": [
         {
@@ -11384,7 +11559,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 61,
+     "default": 62,
      "title": "Schema Version",
      "type": "integer"
     },

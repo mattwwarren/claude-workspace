@@ -28,6 +28,48 @@ def _patch_cw_dist_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(importlib.metadata, "distribution", _raise)
 
 
+class FakeCwDist:
+    """Fake cw distribution: ``read_text("direct_url.json")`` and ``.version``.
+
+    Only the surface the doctor install classifier and release-install check
+    read. The five inline per-test ``FakeDist`` copies in
+    ``tests/test_doctor.py`` predate this helper and are NOT migrated here;
+    migrating them onto ``FakeCwDist`` is follow-up debt for #3579.
+    """
+
+    def __init__(self, direct_url_text: str | None, version: str = "0.0.0") -> None:
+        self._direct_url_text = direct_url_text
+        self.version = version
+
+    def read_text(self, filename: str) -> str | None:
+        if filename == "direct_url.json":
+            return self._direct_url_text
+        return None
+
+
+def _patch_cw_dist(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    direct_url_text: str | None,
+    version: str = "0.0.0",
+) -> FakeCwDist:
+    """Patch importlib.metadata.distribution() to return a FakeCwDist.
+
+    ``importlib.metadata.version(name)`` resolves through the same module-level
+    ``distribution`` attribute, so one patch drives both the install-kind read
+    and the version read. Shared helper (#3579).
+    """
+    import importlib.metadata
+
+    dist = FakeCwDist(direct_url_text, version)
+
+    def _return(_pkg: str) -> FakeCwDist:
+        return dist
+
+    monkeypatch.setattr(importlib.metadata, "distribution", _return)
+    return dist
+
+
 def _write_project_config_yaml(root: Path, content: str | bytes) -> None:
     """Write .claude/project-config.yaml under *root*.
 

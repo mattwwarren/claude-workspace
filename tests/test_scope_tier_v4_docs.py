@@ -165,6 +165,26 @@ def test_review_reviewer_set_selection_is_scoped_to_the_two_lists() -> None:
     assert "**Large scope:** Spawn full reviewer set" in content
 
 
+def test_review_large_list_adds_transitive_impact_on_large_diff_only() -> None:
+    """#2086: the Transitive Impact lane and tree access ride large_diff."""
+    content = _cmd("auto-dev-review.md")
+    start = content.index("**Large scope:** Spawn full reviewer set")
+    large_list = content[start : content.index("After selecting the full roster")]
+    lane = next(
+        line
+        for line in large_list.splitlines()
+        if line.startswith("- Transitive Impact")
+    )
+    assert "only when the diff is `large_diff`" in lane
+    tree_access = content.index("**Transitive Impact and tree access (#2086).**")
+    paragraph = content[tree_access : content.index("\n\n", tree_access)]
+    assert '`isolation: "worktree"`' in paragraph
+    assert "`large_diff`" in paragraph
+    # It cites the one definition instead of restating the numbers.
+    assert "`auto-dev.md`" in paragraph
+    assert "*Size is advisory*" in paragraph
+
+
 def test_review_fallback_rederives_by_forbidden_area_only() -> None:
     """The sentinel tier fallback no longer counts files and lines."""
     content = _cmd("auto-dev-review.md")

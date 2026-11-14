@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from cw.codex_review._context._agent_spec import TRANSITIVE_IMPACT_REVIEWER_ROLE
 from cw.codex_review._context._prompt_text import (
     _ADJUDICATED_HEADER,
     _ADJUDICATED_INSTRUCTIONS,
@@ -23,6 +24,7 @@ from cw.codex_review._context._prompt_text import (
     _DECIDED_SCOPE_INSTRUCTIONS,
     _DELTA_MODE_INSTRUCTIONS,
     _MERGE_DELTA_INSTRUCTIONS,
+    _TRANSITIVE_IMPACT_FRAMING,
     _codex_output_format_supplement,
     _select_output_instructions,
 )
@@ -179,6 +181,20 @@ def _branch_context_section(
     ]
 
 
+def _role_framing(role: str) -> str | None:
+    """The role-keyed responsibility block, or ``None`` for every other role.
+
+    Only the Transitive Impact role (#2086) carries one: it runs on the
+    SysAdmin spec, so without this block it would not be a distinct lane.
+    A sibling of ``_codex_output_format_supplement`` rather than an overload
+    of it, which is about unreachable doc references. Every other role's
+    prompt is byte-unchanged.
+    """
+    if role != TRANSITIVE_IMPACT_REVIEWER_ROLE:
+        return None
+    return _TRANSITIVE_IMPACT_FRAMING.format(role=role)
+
+
 def _build_reviewer_prompt(
     role: str,
     *,
@@ -263,6 +279,9 @@ def _build_reviewer_prompt(
     supplement = _codex_output_format_supplement(role)
     if supplement:
         parts.append(supplement)
+    framing = _role_framing(role)
+    if framing:
+        parts.append(framing)
     if ticket_text:
         parts.append(f"## Ticket Context\n{ticket_text}")
     parts.extend(_row_constraint_parts(operator_constraints_text, decided_scope_text))

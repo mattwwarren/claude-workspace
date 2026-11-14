@@ -28,6 +28,14 @@ A downgraded write (an engine-configured claude-native client whose round left
 no usable summary at the reviewed head) is stored ledger-only and logs one
 ``review attestation engine evidence unavailable`` INFO line; that line is not
 a skip token.
+
+Same-round engine defers (#3625): the builder also reads the row's in-memory
+``review_engine_settlements`` record for the head (no file, lock or subprocess).
+A FAIL summary whose gating SHOULD_FIX findings are all recorded there and
+settled ``defer`` in the ledger is reconciled to PASS before the engine check
+(:func:`cw.dev_queue.review_engine_reconcile.reconcile_deferred_summary`). The
+reconciled line is an INFO line, not a skip token; a FAIL summary that does not
+reconcile still skips ``engine_mismatch``.
 """
 
 from __future__ import annotations
@@ -41,6 +49,10 @@ from typing import TYPE_CHECKING, Final
 from pydantic import ValidationError
 
 from cw.auto_dev_result import STAGE_SUCCESS_STATUSES
+from cw.dev_queue.review_engine_reconcile import (
+    engine_settled_fingerprints,
+    reconcile_deferred_summary,
+)
 from cw.events import record_event
 from cw.models import OrchestratorEventType, Stage
 from cw.models.review_attestation import (
@@ -213,7 +225,37 @@ def _engine_summary_for_exit(
             task.ticket_id,
             task.client,
         )
-    return summary
+        return None
+    return _reconciled_or_same(task, summary, ledger, head)
+
+
+def _reconciled_or_same(
+    task: TicketTask,
+    summary: ReviewEngineSummary,
+    ledger: ConvergenceLedger | None,
+    head: str,
+) -> ReviewEngineSummary:
+    """*summary* as a PASS when its same-round defers reconcile (#3625), else itself.
+
+    A miss returns the summary unchanged, which then skips ``engine_mismatch``
+    exactly as before. A hit logs one INFO line, which is not a skip token.
+    """
+    if summary.verdict == _ENGINE_CLEAN_VERDICT or ledger is None:
+        return summary
+    reconciled = reconcile_deferred_summary(
+        summary,
+        ledger=ledger,
+        settled_fingerprints=engine_settled_fingerprints(task, head),
+    )
+    if reconciled is None:
+        return summary
+    _log.info(
+        "review attestation engine summary reconciled: ticket=%s client=%s deferred=%d",
+        task.ticket_id,
+        task.client,
+        sum(1 for finding in summary.findings if finding.severity == "SHOULD_FIX"),
+    )
+    return reconciled
 
 
 def _engine_label(

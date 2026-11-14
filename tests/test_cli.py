@@ -68,6 +68,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.sprint import AppliedBuildout, BuildoutPlan
+from tests._adopt_pr_helpers import make_repair_feedback
 from tests._cli_review_helpers import _enter_operator_machine
 from tests._clients_yaml import ClientSpec, staged_client, write_clients_yaml
 from tests._reconcile_helpers import (
@@ -96,6 +97,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
 
     from cw.models import QueueItemStatus
+    from cw.models.review_feedback import ReviewFeedback
     from cw.native_daemon import FakeNativeDaemonClient
 
 
@@ -13233,6 +13235,7 @@ class TestDevQueueApproveCli:
         monkeypatch: pytest.MonkeyPatch,
         *,
         blocked_reason: str = "plan_scope_drift",
+        review_feedback: ReviewFeedback | None = None,
     ) -> list[tuple[object, dict[str, object]]]:
         """Park ACME-1 at IMPL for *blocked_reason*; stub gh; capture events."""
         from cw.dev_queue import save_dev_queue
@@ -13249,6 +13252,7 @@ class TestDevQueueApproveCli:
                         status=QueueItemStatus.BLOCKED_ON_USER,
                         session_id="sess-scope-drift",
                         blocked_reason=blocked_reason,
+                        review_feedback=review_feedback,
                     )
                 ]
             )
@@ -13263,6 +13267,69 @@ class TestDevQueueApproveCli:
             lambda event_type, payload, **_kw: events.append((event_type, payload)),
         )
         return events
+
+    def test_approve_scope_drift_echoes_dropped_review_feedback(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3637: stale feedback is dropped, named on the CLI, and on the event."""
+        from cw.dev_queue import load_dev_queue
+        from cw.models import OrchestratorEventType
+
+        events = self._seed_scope_drift(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            review_feedback=make_repair_feedback(reviewed_sha="b" * 40),
+        )
+        result = CliRunner().invoke(
+            main,
+            [
+                "dev-queue",
+                "approve",
+                "ACME-1",
+                "--client",
+                "acme",
+                "--scope-drift",
+                "a.py",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Dropped stale review feedback pinned to bbbbbbbbbbbb" in result.output
+        assert "requeue" in result.output
+        assert "--review-feedback-file" in result.output
+        event_type, payload = events[0]
+        assert event_type == OrchestratorEventType.TICKET_APPROVED
+        assert payload["dropped_review_feedback_sha"] == "b" * 40
+        assert load_dev_queue().tasks[0].review_feedback is None
+
+    def test_approve_scope_drift_keeps_current_head_feedback_silently(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Feedback naming the current head is kept and not echoed as dropped."""
+        from cw.dev_queue import load_dev_queue
+
+        feedback = make_repair_feedback(reviewed_sha=self._SCOPE_DRIFT_HEAD)
+        events = self._seed_scope_drift(
+            tmp_config_dir, tmp_path, monkeypatch, review_feedback=feedback
+        )
+        result = CliRunner().invoke(
+            main,
+            [
+                "dev-queue",
+                "approve",
+                "ACME-1",
+                "--client",
+                "acme",
+                "--scope-drift",
+                "a.py",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Dropped stale review feedback" not in result.output
+        assert "dropped_review_feedback_sha" not in events[0][1]
+        assert load_dev_queue().tasks[0].review_feedback == feedback
 
     def test_approve_scope_drift_happy_path(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

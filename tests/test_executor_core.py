@@ -131,6 +131,88 @@ def test_spawn_client_worker_model(
     assert args[args.index("--model") + 1] == "sonnet"
 
 
+def test_spawn_effort_follows_effective_model_stage_wins(
+    tmp_config_dir: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Stage model claude-opus-5-5 beats client sonnet; effort is medium (#2350)."""
+    from cw.worker_effort import WORKER_EFFORT_FLAG
+
+    worktree = make_git_repo("wt-effort-stage-wins")
+    client = ClientConfig(
+        name="test",
+        workspace_path=worktree,
+        worker_model="sonnet",
+        pipeline=StagePipelineConfig(
+            executors={Stage.IMPL: StageExecutorConfig(model="claude-opus-5-5")}
+        ),
+    )
+    task = TicketTask(ticket_id="T-1", client="test")
+    config = resolve_executor_config(Stage.IMPL, task, client)
+    executor = ClaudeNativeExecutor(config=config, native_daemon=mock_native_daemon)
+
+    executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+
+    args = mock_native_daemon.spawn_extra_args[0]
+    assert args is not None
+    assert args[-2:] == [WORKER_EFFORT_FLAG, "medium"]
+
+
+def test_spawn_stage_sonnet_over_opus_pin_omits_effort(
+    tmp_config_dir: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Stage model sonnet over a client pinned to Opus 5.5: no effort flag (#2350)."""
+    worktree = make_git_repo("wt-effort-stage-sonnet")
+    client = ClientConfig(
+        name="test",
+        workspace_path=worktree,
+        worker_model="claude-opus-5-5",
+        pipeline=StagePipelineConfig(
+            executors={Stage.IMPL: StageExecutorConfig(model="sonnet")}
+        ),
+    )
+    task = TicketTask(ticket_id="T-1", client="test")
+    config = resolve_executor_config(Stage.IMPL, task, client)
+    executor = ClaudeNativeExecutor(config=config, native_daemon=mock_native_daemon)
+
+    executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+
+    args = mock_native_daemon.spawn_extra_args[0]
+    assert args is not None
+    assert "--effort" not in args
+
+
+def test_spawn_client_worker_effort_survives_model_copy(
+    tmp_config_dir: Path,
+    mock_native_daemon: FakeNativeDaemonClient,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Client worker_effort=high survives model_copy and is forwarded (#2350)."""
+    from cw.models.worker_effort import WorkerEffort
+    from cw.worker_effort import WORKER_EFFORT_FLAG
+
+    worktree = make_git_repo("wt-effort-client-high")
+    client = ClientConfig(
+        name="test",
+        workspace_path=worktree,
+        worker_model="sonnet",
+        worker_effort=WorkerEffort.HIGH,
+    )
+    task = TicketTask(ticket_id="T-1", client="test")
+    executor = ClaudeNativeExecutor(
+        config=StageExecutorConfig(), native_daemon=mock_native_daemon
+    )
+
+    executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+
+    args = mock_native_daemon.spawn_extra_args[0]
+    assert args is not None
+    assert args[-2:] == [WORKER_EFFORT_FLAG, "high"]
+
+
 def test_spawn_stage_model_wins(
     tmp_config_dir: Path,
     mock_native_daemon: FakeNativeDaemonClient,

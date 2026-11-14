@@ -15,7 +15,9 @@ The result is a frozen :class:`GatePlan`, the only input to
 :func:`run_cycle_gates`, so a fix that edits ``CLAUDE.md`` or the detector
 itself cannot change which gate commands run in its own cycle. The gate
 commands still execute the fix's code (a test runs the code under test); that
-is inherent, and is not sandboxed here.
+is inherent, and is not sandboxed here. Each gate and autofix subprocess runs
+with its own private scratch dir as ``TMPDIR`` (#3646), so concurrent gate runs
+for different worktrees never share, and never prune, one pytest basetemp.
 
 **A clock only emits a signal.** ``gate-timeout`` is a ceiling at which
 :func:`_run_watched` emits one ``codex_fix.gate_slow`` event and one WARNING,
@@ -56,11 +58,13 @@ import json
 import logging
 import math
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
@@ -81,7 +85,7 @@ from cw.exceptions import CwError
 from cw.models.enums import OrchestratorEventType
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
 _log = logging.getLogger(__name__)
 
@@ -95,8 +99,16 @@ _TAIL_MAX_CHARS = 1500
 _COMMAND_MAX_CHARS = 200
 # The scratch-dir variables the worker convention force-sets to
 # ``<worktree>/.cw/tmp`` (``cw.worktree.apply_worker_tmpdir``). ``tempfile``
-# falls back from TMPDIR to TEMP then TMP, so all three go (#3392).
+# falls back from TMPDIR to TEMP then TMP, so all three go (#3392). They are
+# scrubbed from the base env, then re-set to a per-run private dir by
+# ``_gate_scratch_env`` (#3646).
 _WORKER_SCRATCH_VARS = ("TMPDIR", "TMP", "TEMP")
+# Where a gate's private scratch dir is minted: Python's own POSIX fallback
+# order for the default tmp dir, hard-coded because the process env cannot be
+# consulted (it carries the worker's ``<worktree>/.cw/tmp``). A constant so a
+# test can point it at a throwaway root.
+_SCRATCH_ROOT_CANDIDATES = tuple(f"{os.sep}{p}" for p in ("tmp", "var/tmp", "usr/tmp"))
+_SCRATCH_PREFIX = "cw-gate-"
 
 # `/prep-pr` Step 2's probe order: the repo copies first, the installed path
 # last; the first file that exists wins, and a stale first hit stops the step.
@@ -351,13 +363,57 @@ def _gate_env() -> dict[str, str]:
     ``tempfile.gettempdir()`` falls back to ``TEMP`` and then ``TMP``. Unset,
     the platform default applies, as in CI. A gate that needs a
     project-local tmp dir must create it itself. Every other variable is
-    kept. Used for the gates and for the ``detect-gates``/``gate-timeout``
-    helpers so all launches see the same environment.
+    kept. This is the scrub-only base: the ``detect-gates``/``gate-timeout``
+    launches use it directly, and :func:`_gate_scratch_env` builds the gate and
+    autofix env on top of it.
     """
     env = git_clean_env()
     for name in _WORKER_SCRATCH_VARS:
         env.pop(name, None)
     return env
+
+
+def _scratch_root() -> str:
+    """The first usable scratch parent, independent of the process env.
+
+    Never ``tempfile.gettempdir()``: the detached ``cw codex run`` driver has
+    ``TMPDIR``/``TMP``/``TEMP`` set to ``<worktree>/.cw/tmp``, so the platform
+    default would land inside the worktree and undo #3392.
+    """
+    for candidate in _SCRATCH_ROOT_CANDIDATES:
+        if Path(candidate).is_dir() and os.access(candidate, os.W_OK | os.X_OK):
+            return candidate
+    msg = f"no usable scratch root among {', '.join(_SCRATCH_ROOT_CANDIDATES)}"
+    raise FileNotFoundError(msg)
+
+
+@contextmanager
+def _gate_scratch_env(label: str) -> Iterator[dict[str, str]]:
+    """Yield the gate env with ``TMPDIR``/``TMP``/``TEMP`` on a private dir.
+
+    Concurrent gate runs (one per worktree) used to share the platform default
+    tmp root, so pytest's startup pruning of ``/tmp/pytest-of-<user>`` could
+    delete a live sibling run's basetemp (#3646). Each subprocess now gets its
+    own ``cw-gate-*`` dir (mode 0700) under :func:`_scratch_root`, outside the
+    worktree and ``$HOME`` as #3392 requires, removed on every exit. *label* is
+    the gate name, so a leftover warning says whose dir it was.
+
+    Gates are never killed (ADR-0014): if cw's thread is torn down mid-wait the
+    ``finally`` removes the dir under a still-running child whose result is
+    discarded anyway. A hard-killed cw leaves a stale ``cw-gate-*`` dir, not swept.
+    """
+    scratch = tempfile.mkdtemp(prefix=_SCRATCH_PREFIX, dir=_scratch_root())
+    try:
+        env = _gate_env()
+        for name in _WORKER_SCRATCH_VARS:
+            env[name] = scratch
+        yield env
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+        if Path(scratch).exists():
+            _log.warning(
+                "codex_fix_gate_scratch_leftover gate=%s path=%s", label, scratch
+            )
 
 
 def _run_watched(
@@ -550,16 +606,21 @@ def _run_one_gate(
     scope: GateScope,
     tree_before: str,
 ) -> GateFailure | None:
-    """Run one pinned gate; return why it refused the cycle, if it did."""
+    """Run one pinned gate; return why it refused the cycle, if it did.
+
+    The gate runs in its own private scratch dir (:func:`_gate_scratch_env`); a
+    scratch dir that cannot be made is ``unavailable`` like a failed start.
+    """
     try:
-        watched = _run_watched(
-            ["sh", "-c", gate.command],
-            cwd=worktree,
-            env=_gate_env(),
-            ceiling_s=gate.ceiling_s,
-            gate=gate.name,
-            scope=scope,
-        )
+        with _gate_scratch_env(gate.name) as env:
+            watched = _run_watched(
+                ["sh", "-c", gate.command],
+                cwd=worktree,
+                env=env,
+                ceiling_s=gate.ceiling_s,
+                gate=gate.name,
+                scope=scope,
+            )
     except OSError as exc:
         why = f"gate {gate.name} could not be started: {exc}"
         return GateFailure(
@@ -649,9 +710,10 @@ def _apply_autofix(
 
     ``tree_after`` is set only for outcome ``applied``; every other outcome has
     already restored the tree to *tree_before* (or never changed it). The
-    autofix runs exactly as a gate does: signal-only ceiling, the gate env, no
-    lock, no kill (ADR-0014, ADR-0019). An autofix that deletes (or renames) a
-    path is ``reverted_scope`` like one that leaves *touched* (#3427). A revert
+    autofix runs exactly as a gate does: signal-only ceiling, its own private
+    scratch dir, no lock, no kill (ADR-0014, ADR-0019). An autofix that deletes
+    (or renames) a path is ``reverted_scope`` like one that leaves *touched*
+    (#3427). A revert
     keeps *preserve*, the ignored files on disk before the autofix ran, and
     raises ``CalledProcessError`` only when it cannot restore the tree.
     """
@@ -659,14 +721,15 @@ def _apply_autofix(
     if staged_cycle_tree(worktree, review_artifacts) != tree_before:
         return _Autofix("skipped_tree_changed", None)
     try:
-        watched = _run_watched(
-            ["sh", "-c", command],
-            cwd=worktree,
-            env=_gate_env(),
-            ceiling_s=gate.ceiling_s,
-            gate=f"{gate.name}:autofix",
-            scope=scope,
-        )
+        with _gate_scratch_env(f"{gate.name}:autofix") as env:
+            watched = _run_watched(
+                ["sh", "-c", command],
+                cwd=worktree,
+                env=env,
+                ceiling_s=gate.ceiling_s,
+                gate=f"{gate.name}:autofix",
+                scope=scope,
+            )
     except OSError:
         _log.warning("codex_fix_gate_autofix could not be started", exc_info=True)
         return _Autofix("reverted_failed", None)

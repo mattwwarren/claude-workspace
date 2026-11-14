@@ -123,6 +123,15 @@ def test_review_large_scope_pins_sonnet() -> None:
     assert '(per `/review` command patterns) (all `model: "sonnet"`' in content
 
 
+def test_review_transitive_impact_lane_pins_sonnet() -> None:
+    """#2086: the Transitive Impact reviewer spawn carries model: "sonnet"."""
+    content = _cmd("auto-dev-review.md")
+    assert (
+        'Transitive Impact (`subagent_type: "SysAdmin Reviewer", model: "sonnet"`'
+        in content
+    )
+
+
 def test_review_fix_agent_dispatched_as_cw_session() -> None:
     """Fix agent in review stage carries no model pin because it is not a subagent.
 

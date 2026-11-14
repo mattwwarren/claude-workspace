@@ -44,7 +44,8 @@ re-exports. Submodules:
 - ``versions`` — claude/cw version + dependency checks, bypass disclaimer,
   daemon reachability.
 - ``skills_drift`` — repo-tracked ``.claude/skills``/``.claude/commands`` vs
-  ``~/.claude`` drift detection.
+  ``~/.claude`` drift detection; a git or registry install instead checks the
+  wheel's packaged command docs and any linked checkout's version (#3579).
 - ``agent_spec_drift`` — per-client reviewer agent-spec resolution (repo /
   global fallback / absent) drift detection.
 - ``codex_fix_loop`` — per-lane effective codex fix-loop state and its source

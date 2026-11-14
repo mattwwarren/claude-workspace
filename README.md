@@ -24,6 +24,8 @@ cd claude-workspace
 uv tool install --editable ".[mcp]"
 ```
 
+This path installs the CLI only. It does **not** install cw's skills, commands, or helper scripts. To install those, clone the repo at the matching tag and run `./scripts/install-skills.sh` from that clone; the installed links point into the clone, so keep it. Replace `<version>` with the release you installed: `git clone https://github.com/mattwwarren/claude-workspace.git && cd claude-workspace && git checkout v<version> && ./scripts/install-skills.sh`.
+
 > **Stale binary warning:** `uv tool install --force` caches by version string. After pulling new code,
 > use `--reinstall --no-cache` and verify with a subcommand `--help`, not `cw --version`.
 
@@ -370,6 +372,7 @@ clients:
     default_branch: main
     auto_purposes: [impl, idea, debt]
     worker_model: claude-sonnet-5-5   # pin model for autonomous workers
+    worker_effort: high               # --effort for autonomous workers (inherit = no flag)
     lanes:
       - name: default
         max_parallel: 2
@@ -385,6 +388,7 @@ Key fields:
 |-------|-------------|
 | `workspace_path` | Absolute path to the project repo (or use `repo_path` + `branch` for worktree mode) |
 | `worker_model` | Model for DAEMON-origin workers (`claude --bg`). USER-origin sessions inherit the operator's default. |
+| `worker_effort` | Effort for DAEMON-origin workers (`--effort`): `low`, `medium`, `high`, `xhigh`, `max`, or `inherit` (no flag). Default `medium` on `claude-opus-5-5` pins only. USER-origin sessions ignore it. |
 | `lanes` | Named dispatch lanes with `max_parallel`, `reap_policy`, and `priority` |
 | `auto_purposes` | Session purposes to start with `cw start`: `impl`, `idea`, `debt`. Two more exist that `auto_purposes` never selects: `orchestrate` (`cw orchestrate start`) and `fix` (the REVIEW stage's fix-agent sessions). A purpose is a static spawn label, not the pipeline `stage`. |
 

@@ -53,9 +53,23 @@ if TYPE_CHECKING:
 # gate recipe, which passes no plan text on purpose and re-derives the tier
 # from ``scope_hint`` and the measured numbers alone. A size-only ``large``
 # from here only ever reaches the gate recipes, which release it without a
-# person. Retiring this rule is #2846.
+# person. Retiring this rule is #2846. The same numbers also back the advisory
+# ``large_diff`` flag (:func:`is_large_diff`) that scales the codex reviewer
+# roster (#2086), so retiring the tier rule must keep that predicate.
 SMALL_TIER_MAX_FILES = 10
 SMALL_TIER_MAX_LINES = 500
+
+
+def is_large_diff(files: int, lines: int) -> bool:
+    """Whether a ``(files, lines)`` diff stat is ``large_diff`` (#2086).
+
+    Over :data:`SMALL_TIER_MAX_FILES` files OR over
+    :data:`SMALL_TIER_MAX_LINES` lines: the Python twin of the one prose
+    definition in ``auto-dev.md`` (*Size is advisory*). Advisory only: it
+    scales how much review runs and never parks a gate.
+    """
+    return files > SMALL_TIER_MAX_FILES or lines > SMALL_TIER_MAX_LINES
+
 
 # The canonical Stage 1g marker line. Looser phrasings (``tier: small``,
 # ``**Scope:** Small``) are deliberately not matched: they fall through to the
@@ -273,7 +287,6 @@ def resolve_review_scope_tier(
         return SCOPE_TIER_SMALL
     if measured is None:
         return None
-    files, lines = measured
-    if files <= SMALL_TIER_MAX_FILES and lines <= SMALL_TIER_MAX_LINES:
+    if not is_large_diff(*measured):
         return SCOPE_TIER_SMALL
     return SCOPE_TIER_LARGE

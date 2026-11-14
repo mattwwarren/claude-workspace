@@ -281,7 +281,16 @@ class TestUnknownRepoll:
 class TestNotGreen:
     @pytest.mark.parametrize(
         ("status", "conclusion"),
-        [("PENDING", None), ("COMPLETED", "STARTUP_FAILURE")],
+        [
+            ("PENDING", None),
+            ("COMPLETED", "STARTUP_FAILURE"),
+            # gh reports "" (not null) for a CheckRun with no conclusion yet (#3627).
+            ("IN_PROGRESS", ""),
+            ("QUEUED", ""),
+            ("PENDING", ""),
+            ("WAITING", ""),
+            ("REQUESTED", ""),
+        ],
     )
     def test_valid_checkrun_status_and_conclusion_values_are_accepted(
         self,
@@ -300,6 +309,39 @@ class TestNotGreen:
         ]
         _stub(monkeypatch, payload)
         assert _read(client).disposition is None
+
+    def test_empty_conclusion_on_inflight_checkrun_is_pending_not_malformed(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rollup = load_adopt_fixture()["statusCheckRollup"]
+        assert isinstance(rollup, list)
+        # mutated from capture: statusCheckRollup (one CheckRun field)
+        payload = _green()
+        payload["statusCheckRollup"] = [
+            dict(rollup[0], status="IN_PROGRESS", conclusion=""),
+            *rollup[1:],
+        ]
+        _stub(monkeypatch, payload)
+        intake = _read(client)
+        # Pending, not failing: no not-green reasons, so no repair feedback.
+        assert intake.disposition is None
+        assert intake.reasons == ()
+        assert intake.repair is False
+
+    def test_unknown_conclusion_on_inflight_checkrun_still_refuses(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rollup = load_adopt_fixture()["statusCheckRollup"]
+        assert isinstance(rollup, list)
+        # mutated from capture: statusCheckRollup (one CheckRun field)
+        payload = _green()
+        payload["statusCheckRollup"] = [
+            dict(rollup[0], status="IN_PROGRESS", conclusion="BRAND_NEW"),
+            *rollup[1:],
+        ]
+        _stub(monkeypatch, payload)
+        with pytest.raises(AdoptionRefusedError, match="malformed"):
+            _read(client)
 
     def test_conflicting_capture_names_one_condition_and_synthesizes(
         self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
@@ -488,6 +530,8 @@ class TestCheckStatusVocabulary:
             ("status", "in_progress"),
             ("conclusion", "BRAND_NEW"),
             ("conclusion", "success"),
+            # COMPLETED + "" is still refused (#3627).
+            ("conclusion", ""),
         ],
     )
     def test_unknown_checkrun_value_refuses_as_malformed(

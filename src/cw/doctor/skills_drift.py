@@ -18,13 +18,24 @@ cross-``doctor`` dependencies.
 
 from __future__ import annotations
 
+import importlib.metadata
+import importlib.resources
+import shlex
 import subprocess as _sp
+import tomllib
 from enum import StrEnum
 from pathlib import Path
 
 from cw._git import run_git
 from cw.doctor._shared import CheckResult
-from cw.doctor.versions import _resolve_cw_source_path
+from cw.doctor.versions import (
+    _CW_PACKAGE_NAME,
+    _CW_REPO_URL,
+    CwInstall,
+    _classify_cw_install,
+    _InstallKind,
+    _resolve_cw_source_path,
+)
 
 
 class _DriftCategory(StrEnum):
@@ -58,6 +69,16 @@ _MAX_EXAMPLES = 3
 
 # Timeout (seconds) for the git subprocess call.
 _GIT_TIMEOUT = 10
+
+# How many parents above a command-doc link target are searched for the
+# checkout's pyproject.toml (#3579). Bounded so a stray link cannot walk to /.
+_CHECKOUT_WALK_DEPTH = 6
+
+# Operator-facing statement that the install did not bring skills or scripts.
+_RELEASE_NOTICE = (
+    "uv tool install does not install cw's skills, commands or scripts; "
+    "to install them run:"
+)
 
 # Tracked root -> repo-relative path of the installer's exclusion list for it.
 # Entries name paths relative to the root (a bare ``ship-it.md`` for the flat
@@ -167,11 +188,13 @@ def _build_detail(
 def _check_skills_commands_drift() -> CheckResult:
     """Compare repo-tracked .claude/{skills,commands,scripts} against ~/.claude.
 
-    Silent-skips (ok=True, warn=False) for registry/PyPI cw installs (no
-    local source repo to diff against — same skip condition as
-    _check_cw_version/_check_cw_deps), and when _CLAUDE_HOME/skills doesn't
-    exist at all. Warns (ok=True, warn=True) when git ls-files fails, or when
-    one or more tracked files are missing, content-differs, or is a symlink
+    Non-local (git or registry) cw installs have no source repo to diff
+    against, so they are checked by ``_check_release_install_skills`` instead:
+    the wheel's packaged command docs and the version of any checkout the
+    links point into (#3579). Detection only. Silent-skips
+    (ok=True, warn=False) when _CLAUDE_HOME/skills doesn't exist at all.
+    Warns (ok=True, warn=True) when git ls-files fails, or when one or more
+    tracked files are missing, content-differs, or is a symlink
     pointing somewhere other than the tracked repo path. Commands and scripts
     listed in the installer's exclusion files (_EXCLUSION_FILES) are never
     installed globally, so they are excluded from tracking before
@@ -179,12 +202,7 @@ def _check_skills_commands_drift() -> CheckResult:
     """
     source_path = _resolve_cw_source_path()
     if isinstance(source_path, CheckResult):
-        return CheckResult(
-            _CHECK_NAME,
-            ok=source_path.ok,
-            warn=source_path.warn,
-            detail=source_path.detail,
-        )
+        return _check_release_install_skills(_classify_cw_install())
 
     claude_skills = _CLAUDE_HOME / "skills"
     if not claude_skills.exists():
@@ -237,4 +255,175 @@ def _check_skills_commands_drift() -> CheckResult:
         detail=_build_detail(
             total=len(tracked), missing=missing, differs=differs, symlink=symlink
         ),
+    )
+
+
+def _packaged_commands_dir() -> Path | None:
+    """Return the wheel's packaged command-doc dir, or None when absent/empty.
+
+    Duplicates the three-line lookup in ``cw.codex_plan._prompt`` on purpose:
+    importing ``cw.codex_plan`` would load the codex executor stack into
+    ``cw doctor`` (#3579).
+    """
+    candidate = Path(str(importlib.resources.files("cw").joinpath("data", "commands")))
+    if candidate.is_dir() and any(candidate.glob("*.md")):
+        return candidate
+    return None
+
+
+def _classify_release_doc(ref: Path, counterpart: Path) -> _DriftCategory | None:
+    """Classify one packaged doc against its ~/.claude/commands counterpart.
+
+    Unlike ``_classify``, a symlink counterpart is compared by bytes: a release
+    install's links point into a checkout, which is the expected steady state,
+    so their target path is not drift. ``Path.exists`` follows symlinks, so a
+    dangling link reads as MISSING.
+    """
+    if not counterpart.exists():
+        return _DriftCategory.MISSING
+    if ref.read_bytes() != counterpart.read_bytes():
+        return _DriftCategory.DIFFERS
+    return None
+
+
+def _linked_checkout_version(counterpart: Path) -> str | None:
+    """Return the ``claude-workspace`` version of the checkout a link targets.
+
+    Only symlinks carry a checkout. Walks up at most ``_CHECKOUT_WALK_DEPTH``
+    parents from the resolved target to the nearest ``pyproject.toml``. Returns
+    None when nothing usable is found or when the file cannot be read or parsed.
+    """
+    if not counterpart.is_symlink():
+        return None
+    try:
+        target = counterpart.resolve()
+        for parent in target.parents[:_CHECKOUT_WALK_DEPTH]:
+            pyproject = parent / "pyproject.toml"
+            if not pyproject.is_file():
+                continue
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            project = data.get("project")
+            if not isinstance(project, dict) or project.get("name") != _CW_PACKAGE_NAME:
+                return None
+            version = project.get("version")
+            return version if isinstance(version, str) else None
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return None
+    return None
+
+
+def _examples(names: list[str]) -> str:
+    """Render at most ``_MAX_EXAMPLES`` sorted names, then ``, +N more``."""
+    ordered = sorted(names)
+    shown = ", ".join(ordered[:_MAX_EXAMPLES])
+    extra = len(ordered) - _MAX_EXAMPLES
+    return f"{shown}, +{extra} more" if extra > 0 else shown
+
+
+def _remediation_cmd(install: CwInstall, version: str) -> str:
+    """Return the clone-at-revision plus install-skills command for this install."""
+    url = (
+        install.url
+        if install.kind is _InstallKind.GIT and install.url
+        else _CW_REPO_URL
+    )
+    revision = install.commit_id or install.requested_revision or f"v{version}"
+    return (
+        f"git clone {shlex.quote(url)} && cd claude-workspace && "
+        f"git checkout {shlex.quote(revision)} && ./scripts/install-skills.sh"
+    )
+
+
+def _skip(detail: str) -> CheckResult:
+    return CheckResult(_CHECK_NAME, ok=True, warn=False, detail=detail)
+
+
+def _release_findings(
+    version: str, docs: list[Path], claude_commands: Path
+) -> tuple[list[str], list[str], list[tuple[str, str]], int]:
+    """Classify each packaged doc into missing, differs or version-mismatched."""
+    missing: list[str] = []
+    differs: list[str] = []
+    mismatch: list[tuple[str, str]] = []
+    for ref in docs:
+        counterpart = claude_commands / ref.name
+        category = _classify_release_doc(ref, counterpart)
+        if category == _DriftCategory.MISSING:
+            missing.append(ref.name)
+        elif category == _DriftCategory.DIFFERS:
+            differs.append(ref.name)
+        else:
+            linked = _linked_checkout_version(counterpart)
+            if linked is not None and linked != version:
+                mismatch.append((ref.name, linked))
+    return missing, differs, mismatch, len(docs)
+
+
+def _check_release_install_skills(install: CwInstall) -> CheckResult:
+    """Check a git or registry install's packaged command docs and link versions.
+
+    Partial by design: a wheel carries only four command docs, and skills and
+    scripts cannot be verified without a checkout. Findings warn and name the
+    command that installs the rest; nothing is synced (#3579).
+    """
+    if install.kind is _InstallKind.MALFORMED:
+        return _skip("malformed direct_url.json; skipping source check")
+    try:
+        version = importlib.metadata.version(_CW_PACKAGE_NAME)
+    except importlib.metadata.PackageNotFoundError:
+        return _skip("package metadata not found; skipping skills check")
+
+    cmd = _remediation_cmd(install, version)
+    packaged = _packaged_commands_dir()
+    if packaged is None:
+        return CheckResult(
+            _CHECK_NAME,
+            ok=True,
+            warn=True,
+            detail=(
+                f"cannot verify command docs: installed cw {version} carries no "
+                f"packaged command docs. {_RELEASE_NOTICE} {cmd}"
+            ),
+        )
+
+    claude_commands = _CLAUDE_HOME / "commands"
+    missing, differs, mismatch, total = _release_findings(
+        version, sorted(packaged.glob("*.md")), claude_commands
+    )
+    findings: list[str] = []
+    if missing:
+        findings.append(
+            f"{len(missing)} of {total} shipped command docs missing from "
+            f"{claude_commands} ({_examples(missing)})"
+        )
+    if differs:
+        findings.append(
+            f"{len(differs)} of {total} shipped command docs differ from the copy "
+            f"in installed cw {version} ({_examples(differs)})"
+        )
+    if mismatch:
+        linked = [f"{name}@{linked_version}" for name, linked_version in mismatch]
+        findings.append(
+            f"{len(mismatch)} of {total} command doc links point at a checkout whose "
+            f"version differs from installed cw {version} ({_examples(linked)})"
+        )
+    if not (_CLAUDE_HOME / "skills").exists():
+        findings.append(f"{_CLAUDE_HOME / 'skills'} not found")
+
+    if not findings:
+        return CheckResult(
+            _CHECK_NAME,
+            ok=True,
+            warn=False,
+            detail=(
+                f"{total} of {total} shipped command docs match installed cw "
+                f"{version}; "
+                "skills and scripts cannot be verified without a checkout"
+            ),
+        )
+    return CheckResult(
+        _CHECK_NAME,
+        ok=True,
+        warn=True,
+        detail=f"{'; '.join(findings)}. {_RELEASE_NOTICE} {cmd}",
     )

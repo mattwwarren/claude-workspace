@@ -28,6 +28,7 @@ from cw.models.orchestrator_config import (
     StagePipelineConfig,
 )
 from cw.models.tasks import DEFAULT_LANE
+from cw.models.worker_effort import WorkerEffort
 
 DEFAULT_AUTO_PURPOSES: list[SessionPurpose] = [
     SessionPurpose.IDEA,
@@ -486,6 +487,12 @@ class ClientConfig(BaseModel):
     # Default ``None`` inherits the user's logged-in default model.
     # See issue #248.
     worker_model: str | None = None
+    # Effort level forwarded as ``--effort <level>`` to ``claude --bg`` for
+    # DAEMON-origin spawns only (USER-origin ignores it). An explicit level is
+    # always forwarded; ``inherit`` emits no flag. ``None`` means cw applies
+    # ``medium`` only when the resolved worker model is a full ``claude-opus-5-5*``
+    # id, and omits the flag otherwise. See :mod:`cw.worker_effort` and #2350.
+    worker_effort: WorkerEffort | None = None
     # Per-client override for the gate command(s) named in the impl/debt session
     # prompts (default: "ruff check, mypy, pytest"). Opaque, unvalidated string,
     # consumed only by get_purpose_prompt(). None = inherit the default triad;

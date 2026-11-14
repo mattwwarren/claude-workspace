@@ -142,9 +142,11 @@ from cw.codex_review._context import (
 from cw.codex_review._diff import (
     _DIFF_GIT_HEADER_RE,
     _HUNK_RE,
+    _branch_diff_totals,
     _capture_delta_diff,
     _capture_diff,
     _capture_head_sha,
+    _measure_large_diff,
     _parse_hunk_new_start,
     _parse_unified_diff,
 )
@@ -244,6 +246,7 @@ __all__ = [
     "_ReviewPassInputs",
     "_RuffLintConfig",
     "_SensitiveHit",
+    "_branch_diff_totals",
     "_build_generic_codex_argv",
     "_build_reviewer_prompt",
     "_capture_delta_diff",
@@ -267,6 +270,7 @@ __all__ = [
     "_load_ruff_lint_config",
     "_load_sensitive_hits",
     "_load_ticket_context",
+    "_measure_large_diff",
     "_parse_codex_audit_events",
     "_parse_hunk_new_start",
     "_parse_review_policy",

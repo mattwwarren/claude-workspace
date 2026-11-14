@@ -20,7 +20,9 @@ from cw.dev_queue.review_attestation import (
     record_review_attestation,
 )
 from cw.models.review_attestation import FoundDuringReview
+from cw.models.review_engine_settlement import ReviewEngineSettlement
 from cw.models.review_engine_summary import MAX_ENGINE_SUMMARY_BYTES
+from cw.review_convergence import SettledEntry, finding_identity
 from cw.review_engine.constants import ENGINE_STATE_RELATIVE_DIR
 from tests._review_attestation_helpers import (
     LOGGER,
@@ -36,7 +38,11 @@ from tests._review_attestation_helpers import (
     with_review_backend,
     write_round_summary,
 )
-from tests._review_convergence_helpers import confirmed_ledger, make_review_client
+from tests._review_convergence_helpers import (
+    confirmed_ledger,
+    make_review_client,
+    write_ledger,
+)
 from tests._review_engine_helpers import SHA, make_finding, make_summary, write_summary
 
 if TYPE_CHECKING:
@@ -75,8 +81,9 @@ def _exit(
     client: ClientConfig,
     *,
     last_result: dict[str, object] | None = None,
+    task: TicketTask | None = None,
 ) -> tuple[TicketTask, ReviewAttestation | None]:
-    task = review_row(worktree)
+    task = review_row(worktree) if task is None else task
     result = clean_sentinel(SHA) if last_result is None else last_result
     return task, attest_review_exit(task, last_result=result, client=client)
 
@@ -500,3 +507,170 @@ class TestGolden:
             mode="json"
         )
         assert produced == json.loads(GOLDEN.read_text(encoding="utf-8"))
+
+
+_DEFER_FPS = ("fp-00000a1", "fp-00000a2")
+
+
+def _defer(fingerprint: str, *, severity: str = "SHOULD_FIX") -> SettledEntry:
+    identity = finding_identity(
+        "MUST_FIX" if severity == "MUST_FIX" else "SHOULD_FIX",
+        "src/a.py",
+        f"finding {fingerprint}",
+        fingerprint=fingerprint,
+    )
+    return SettledEntry(
+        identity=identity, outcome="defer", rationale="deferred", round=1
+    )
+
+
+def _settled_worktree(
+    tmp_path: Path,
+    fingerprints: tuple[str, ...],
+    *,
+    extra: tuple[SettledEntry, ...] = (),
+) -> Path:
+    """A worktree whose converged ledger at ``SHA`` also settles *fingerprints*."""
+    worktree = _worktree(tmp_path, ledger=False)
+    ledger = confirmed_ledger(sha=SHA, ticket_id="T-1")
+    settled = [_defer(fp) for fp in fingerprints] + list(extra)
+    write_ledger(worktree, ledger.model_copy(update={"settled": settled}))
+    return worktree
+
+
+def _row_with(worktree: Path, *fingerprints: str, head: str = SHA) -> TicketTask:
+    record = ReviewEngineSettlement(
+        head_sha=head, fingerprints=list(fingerprints), recorded_at=WRITTEN_AT
+    )
+    return review_row(worktree, review_engine_settlements=[record])
+
+
+class TestSameRoundDeferral:
+    """A FAIL engine summary reconciles to PASS only from the row (#3625)."""
+
+    def test_all_deferred_shouldfix_reconciles_to_a_pass_attestation(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        worktree = _settled_worktree(tmp_path, _DEFER_FPS)
+        write_round_summary(
+            worktree,
+            "round-1",
+            make_summary(
+                [
+                    make_finding(fingerprint=fp, severity="SHOULD_FIX")
+                    for fp in _DEFER_FPS
+                ]
+            ),
+        )
+        row = _row_with(worktree, *_DEFER_FPS)
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            task, att = _exit(worktree, engine_client(tmp_path), task=row)
+        assert att is not None
+        assert task.review_attestation == att
+        assert att.engine == "code-review"
+        assert att.verdict == "PASS"
+        assert att.counts.must_fix == 0
+        assert att.counts.should_fix == 0
+        assert att.counts.debt == 2
+        assert att.deferrals is not None
+        assert len(att.deferrals) == 2
+        reconciled = [m for m in _records(caplog) if "reconciled" in m]
+        assert len(reconciled) == 1
+        assert not any("unavailable" in m for m in _records(caplog))
+
+    def test_a_must_fix_withholds_the_attestation(self, tmp_path: Path) -> None:
+        worktree = _settled_worktree(tmp_path, _DEFER_FPS)
+        write_round_summary(
+            worktree,
+            "round-1",
+            make_summary(
+                [
+                    make_finding(fingerprint=_DEFER_FPS[0], severity="SHOULD_FIX"),
+                    make_finding(fingerprint="fp-00000m1", severity="MUST_FIX"),
+                ]
+            ),
+        )
+        _, att = _exit(
+            worktree, engine_client(tmp_path), task=_row_with(worktree, *_DEFER_FPS)
+        )
+        assert att is None
+
+    def test_coverage_shouldfix_withholds_the_attestation(self, tmp_path: Path) -> None:
+        worktree = _settled_worktree(tmp_path, _DEFER_FPS)
+        write_round_summary(
+            worktree,
+            "round-1",
+            make_summary(
+                [
+                    make_finding(
+                        fingerprint=_DEFER_FPS[0],
+                        severity="SHOULD_FIX",
+                        rule_id="coverage.missing",
+                    )
+                ]
+            ),
+        )
+        _, att = _exit(
+            worktree, engine_client(tmp_path), task=_row_with(worktree, *_DEFER_FPS)
+        )
+        assert att is None
+
+    def test_ledger_without_a_row_record_withholds(self, tmp_path: Path) -> None:
+        worktree = _settled_worktree(tmp_path, _DEFER_FPS)
+        write_round_summary(
+            worktree,
+            "round-1",
+            make_summary(
+                [make_finding(fingerprint=_DEFER_FPS[0], severity="SHOULD_FIX")]
+            ),
+        )
+        _, att = _exit(worktree, engine_client(tmp_path), task=review_row(worktree))
+        assert att is None
+
+    def test_row_record_at_another_head_withholds(self, tmp_path: Path) -> None:
+        worktree = _settled_worktree(tmp_path, _DEFER_FPS)
+        write_round_summary(
+            worktree,
+            "round-1",
+            make_summary(
+                [make_finding(fingerprint=_DEFER_FPS[0], severity="SHOULD_FIX")]
+            ),
+        )
+        row = _row_with(worktree, *_DEFER_FPS, head=OTHER_SHA)
+        _, att = _exit(worktree, engine_client(tmp_path), task=row)
+        assert att is None
+
+    def test_legacy_row_with_no_settlements_withholds(self, tmp_path: Path) -> None:
+        worktree = _settled_worktree(tmp_path, _DEFER_FPS)
+        write_round_summary(
+            worktree,
+            "round-1",
+            make_summary(
+                [make_finding(fingerprint=_DEFER_FPS[0], severity="SHOULD_FIX")]
+            ),
+        )
+        _, att = _exit(worktree, engine_client(tmp_path), task=review_row(worktree))
+        assert att is None
+
+    def test_pass_through_operator_must_fix_entry_does_not_change_the_decision(
+        self, tmp_path: Path
+    ) -> None:
+        worktree = _settled_worktree(
+            tmp_path, _DEFER_FPS, extra=(_defer("fp-00000m1", severity="MUST_FIX"),)
+        )
+        write_round_summary(
+            worktree,
+            "round-1",
+            make_summary(
+                [
+                    make_finding(fingerprint=fp, severity="SHOULD_FIX")
+                    for fp in _DEFER_FPS
+                ]
+            ),
+        )
+        _, att = _exit(
+            worktree, engine_client(tmp_path), task=_row_with(worktree, *_DEFER_FPS)
+        )
+        assert att is not None
+        assert att.counts.should_fix == 0
+        assert att.counts.debt == 2

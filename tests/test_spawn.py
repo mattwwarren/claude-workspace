@@ -523,6 +523,128 @@ class TestSpawnCreate:
         assert sess.lane is None
 
 
+class TestSpawnCreateImplWorkerEffort:
+    """ClientConfig.worker_effort forwarding through spawn_create_impl (#2350)."""
+
+    def _spawn(
+        self,
+        client: ClientConfig,
+        make_git_repo: Callable[[str], Path],
+        label: str,
+    ) -> list[str] | None:
+        from cw.spawn import spawn_create_impl
+
+        daemon = FakeNativeDaemonClient()
+        spawn_create_impl(
+            client=client,
+            worktree=make_git_repo(label),
+            prompt="Do the thing.",
+            label=None,
+            native_daemon=daemon,
+        )
+        return daemon.spawn_extra_args[0]
+
+    def test_opus_55_pin_defaults_to_medium(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        from cw.worker_effort import WORKER_EFFORT_FLAG
+
+        client = ClientConfig(
+            name="acme",
+            workspace_path=tmp_path,
+            worker_model="claude-opus-5-5",
+        )
+        assert self._spawn(client, make_git_repo, "wt-effort-opus-default") == [
+            "--model",
+            "claude-opus-5-5",
+            WORKER_EFFORT_FLAG,
+            "medium",
+        ]
+
+    def test_opus_55_pin_with_inherit_emits_no_effort_flag(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        from cw.models.worker_effort import WorkerEffort
+
+        client = ClientConfig(
+            name="acme",
+            workspace_path=tmp_path,
+            worker_model="claude-opus-5-5",
+            worker_effort=WorkerEffort.INHERIT,
+        )
+        assert self._spawn(client, make_git_repo, "wt-effort-inherit") == [
+            "--model",
+            "claude-opus-5-5",
+        ]
+
+    def test_explicit_high_on_sonnet_forwards(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        from cw.models.worker_effort import WorkerEffort
+        from cw.worker_effort import WORKER_EFFORT_FLAG
+
+        client = ClientConfig(
+            name="acme",
+            workspace_path=tmp_path,
+            worker_model="claude-sonnet-5-5",
+            worker_effort=WorkerEffort.HIGH,
+        )
+        assert self._spawn(client, make_git_repo, "wt-effort-high") == [
+            "--model",
+            "claude-sonnet-5-5",
+            WORKER_EFFORT_FLAG,
+            "high",
+        ]
+
+    def test_unpinned_unset_effort_emits_no_args(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        client = ClientConfig(name="acme", workspace_path=tmp_path)
+        assert self._spawn(client, make_git_repo, "wt-effort-unpinned") is None
+
+    def test_effort_orders_after_model_before_disallow_and_caller_extras(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        from cw.models.worker_effort import WorkerEffort
+        from cw.spawn import spawn_create_impl
+        from cw.worker_effort import WORKER_EFFORT_FLAG
+
+        client = ClientConfig(
+            name="acme",
+            workspace_path=tmp_path,
+            worker_model="claude-opus-5-5",
+            worker_effort=WorkerEffort.LOW,
+        )
+        daemon = FakeNativeDaemonClient()
+        spawn_create_impl(
+            client=client,
+            worktree=make_git_repo("wt-effort-order"),
+            prompt="Do the thing.",
+            label=None,
+            native_daemon=daemon,
+            extra_args=["--caller-extra"],
+        )
+        args = daemon.spawn_extra_args[0]
+        assert args is not None
+        assert args[:4] == ["--model", "claude-opus-5-5", WORKER_EFFORT_FLAG, "low"]
+        assert args[-1] == "--caller-extra"
+
+
 class TestSpawnCreateImplWorkerModel:
     """Tests for ClientConfig.worker_model forwarding through spawn_create_impl
     to ``claude --bg`` via ``extra_args`` (issue #248).

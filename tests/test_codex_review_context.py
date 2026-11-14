@@ -45,6 +45,7 @@ from cw.codex_review._context import (
     _OUTPUT_INSTRUCTIONS_CAPABLE,
     _OUTPUT_INSTRUCTIONS_INLINED_ONLY,
     _REVIEWER_ROLE_AGENT_FILES,
+    EngineRoster,
     _load_finding_dispositions,
     _load_operator_comments,
     _load_pending_operator_comment_marker,
@@ -52,6 +53,7 @@ from cw.codex_review._context import (
     _render_adjudicated_findings_block,
     _select_output_instructions,
 )
+from cw.codex_review._context._agent_spec import TRANSITIVE_IMPACT_REVIEWER_ROLE
 from cw.codex_review._context._prompt_text import (
     _ADJUDICATED_INSTRUCTIONS,
     _CONSTRAINTS_HEADER,
@@ -60,6 +62,7 @@ from cw.codex_review._context._prompt_text import (
     _DECIDED_SCOPE_INSTRUCTIONS,
     _OUTPUT_INSTRUCTIONS_CLAUDE,
     _OUTPUT_SPEC_PRECEDENCE,
+    _TRANSITIVE_IMPACT_RESPONSIBILITY,
 )
 from cw.codex_runner import FakeCodexRunner
 from cw.events import read_events
@@ -67,6 +70,7 @@ from cw.gh import AGENT_COMMENT_MARKER
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH, SessionOrigin
 from cw.models.enums import OrchestratorEventType
 from cw.models.operator_constraint import OperatorConstraint
+from cw.plan_files import SMALL_TIER_MAX_FILES
 from cw.review_adjudication import render_voided_findings_block
 from cw.review_finding_dispositions import (
     FindingDisposition,
@@ -86,7 +90,7 @@ from tests._codex_review_helpers import (
     _task,
     _write,
 )
-from tests._shared.git_repos import git_in
+from tests._shared.git_repos import commit_small_py_files, git_in
 from tests._shared.review_builders import (
     _make_constraint,
     _make_diff,
@@ -99,6 +103,7 @@ from tests.test_review_adjudication import _make_voided_finding
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from cw.codex_review import _ReviewPassInputs
     from cw.models import TicketTask
 
 
@@ -221,6 +226,9 @@ class TestCategorizeChangedFiles:
 # ---------------------------------------------------------------------------
 
 
+_TRANSITIVE = TRANSITIVE_IMPACT_REVIEWER_ROLE
+
+
 class TestSelectReviewerRoles:
     def test_small_mandatory_only(self) -> None:
         cats = _categorize_changed_files(["docs/readme.md"])
@@ -229,6 +237,7 @@ class TestSelectReviewerRoles:
             categories=cats,
             mutates_persisted_state=False,
             has_ticket_context=False,
+            large_diff=False,
         )
         assert roles == ["Code Quality Reviewer", "SysAdmin Reviewer"]
 
@@ -239,6 +248,7 @@ class TestSelectReviewerRoles:
             categories=cats,
             mutates_persisted_state=True,
             has_ticket_context=True,
+            large_diff=False,
         )
         assert roles == [
             "Code Quality Reviewer",
@@ -255,6 +265,7 @@ class TestSelectReviewerRoles:
             categories=cats,
             mutates_persisted_state=False,
             has_ticket_context=False,
+            large_diff=False,
         )
         assert roles[0] == "SysAdmin Reviewer"
         assert "Code Quality Reviewer" not in roles
@@ -267,6 +278,7 @@ class TestSelectReviewerRoles:
             categories=cats,
             mutates_persisted_state=True,
             has_ticket_context=True,
+            large_diff=False,
         )
         assert roles[:2] == ["Code Quality Reviewer", "SysAdmin Reviewer"]
         assert "Architecture Reviewer" in roles
@@ -283,8 +295,83 @@ class TestSelectReviewerRoles:
             categories=cats,
             mutates_persisted_state=False,
             has_ticket_context=False,
+            large_diff=False,
         )
         assert "API Contract Validator" not in roles
+
+    # -- #2086: the Transitive Impact lane, scaled by large_diff --------------
+
+    @staticmethod
+    def _python_and_tests(
+        scope_tier: str, *, large_diff: bool, files: list[str] | None = None
+    ) -> list[str]:
+        return _select_reviewer_roles(
+            scope_tier,
+            categories=_categorize_changed_files(
+                files or ["src/cw/foo.py", "tests/test_foo.py"]
+            ),
+            mutates_persisted_state=True,
+            has_ticket_context=True,
+            large_diff=large_diff,
+        )
+
+    def test_small_not_large_diff_roster_is_unchanged(self) -> None:
+        roles = self._python_and_tests("small", large_diff=False)
+        assert roles == [
+            "Code Quality Reviewer",
+            "SysAdmin Reviewer",
+            "Data Safety Reviewer",
+            "Product Manager Reviewer",
+        ]
+
+    def test_small_large_diff_python_gets_the_large_list_plus_transitive(
+        self,
+    ) -> None:
+        roles = self._python_and_tests("small", large_diff=True)
+        assert roles == [
+            "Code Quality Reviewer",
+            "SysAdmin Reviewer",
+            "Architecture Reviewer",
+            "Test Reviewer",
+            "Performance Reviewer",
+            _TRANSITIVE,
+            "Data Safety Reviewer",
+            "Product Manager Reviewer",
+        ]
+
+    def test_large_tier_large_diff_gets_the_same_set(self) -> None:
+        assert self._python_and_tests(
+            "large", large_diff=True
+        ) == self._python_and_tests("small", large_diff=True)
+
+    def test_large_tier_without_large_diff_has_no_transitive(self) -> None:
+        """Literal R1: the lane rides ``large_diff``, never the tier alone."""
+        assert _TRANSITIVE not in self._python_and_tests("large", large_diff=False)
+
+    def test_docs_only_large_diff_has_no_transitive(self) -> None:
+        roles = self._python_and_tests(
+            "small", large_diff=True, files=["docs/a.md", "docs/b.md"]
+        )
+        assert _TRANSITIVE not in roles
+        assert "SysAdmin Reviewer" in roles
+
+    def test_transitive_follows_deployment_and_precedes_data_safety(self) -> None:
+        roles = self._python_and_tests(
+            "small", large_diff=True, files=["src/cw/foo.py", "Dockerfile"]
+        )
+        at = roles.index(_TRANSITIVE)
+        assert roles[at - 1] == "Deployment Reviewer"
+        assert roles[at + 1] == "Data Safety Reviewer"
+
+    def test_frontend_only_large_diff_gets_transitive(self) -> None:
+        roles = self._python_and_tests("small", large_diff=True, files=["ui/app.tsx"])
+        assert _TRANSITIVE in roles
+
+    def test_small_large_diff_is_the_large_tier_minus_transitive(self) -> None:
+        """Pins "Large OR large_diff": the only extra is Transitive Impact."""
+        small_large_diff = self._python_and_tests("small", large_diff=True)
+        large_tier = self._python_and_tests("large", large_diff=False)
+        assert [r for r in small_large_diff if r != _TRANSITIVE] == large_tier
 
 
 # ---------------------------------------------------------------------------
@@ -1428,6 +1515,48 @@ class TestBuildReviewerPrompt:
 # ---------------------------------------------------------------------------
 
 
+class TestTransitiveImpactFraming:
+    """#2086: only the Transitive Impact role's prompt carries its framing."""
+
+    @staticmethod
+    def _prompt(role: str) -> str:
+        return _build_reviewer_prompt(
+            role,
+            agent_spec_text="SPEC",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+        )
+
+    def test_transitive_prompt_carries_responsibility_and_role_name(self) -> None:
+        prompt = self._prompt(_TRANSITIVE)
+        assert _TRANSITIVE_IMPACT_RESPONSIBILITY == (
+            "trace changed producers/contracts through real callers, consumers,"
+            " persisted data, reruns, rollout"
+        )
+        assert _TRANSITIVE_IMPACT_RESPONSIBILITY in prompt
+        assert f"`reviewer_role` to {_TRANSITIVE}" in prompt
+        # The framing sits right after the agent specification.
+        assert prompt.index("## Agent Specification") < prompt.index(
+            _TRANSITIVE_IMPACT_RESPONSIBILITY
+        )
+
+    @pytest.mark.parametrize(
+        "role", sorted(set(_REVIEWER_ROLE_AGENT_FILES) - {_TRANSITIVE})
+    )
+    def test_other_roles_carry_no_framing(self, role: str) -> None:
+        prompt = self._prompt(role)
+        assert _TRANSITIVE_IMPACT_RESPONSIBILITY not in prompt
+        assert "`reviewer_role` to" not in prompt
+
+    def test_transitive_role_maps_to_the_sysadmin_spec(self) -> None:
+        assert _REVIEWER_ROLE_AGENT_FILES[_TRANSITIVE] == "sysadmin-reviewer.md"
+
+
 class TestSelectOutputInstructions:
     def test_capable_selects_the_capable_variant(self) -> None:
         assert _select_output_instructions(True) is _OUTPUT_INSTRUCTIONS_CAPABLE
@@ -2025,6 +2154,7 @@ class TestPrepareReviewPass:
             categories=_categorize_changed_files(["mod.py"]),
             mutates_persisted_state=True,
             has_ticket_context=False,
+            large_diff=False,
         )
         # Every selected role has a materialized prompt.
         assert set(prepared.prompts_by_role) == set(prepared.roles)
@@ -2033,6 +2163,113 @@ class TestPrepareReviewPass:
         assert "mod.py" in prepared.diff.files
         head = _git_sandbox.run("rev-parse", "HEAD", cwd=str(repo)).stdout.strip()
         assert prepared.reviewed_sha == head
+
+    # -- #2086: the roster scales with the measured large_diff ---------------
+
+    @staticmethod
+    def _prepare(
+        repo: Path,
+        default_branch: str = "main",
+        *,
+        delta_from_sha: str | None = None,
+        engine_roster: EngineRoster | None = None,
+    ) -> _ReviewPassInputs:
+        return _prepare_review_pass(
+            _task(scope_hint="small"),
+            repo,
+            default_branch,
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-large-diff",
+            delta_from_sha=delta_from_sha,
+            engine_roster=engine_roster,
+        )
+
+    def test_a_large_diff_branch_adds_transitive_impact(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-large-diff")
+        commit_small_py_files(repo, SMALL_TIER_MAX_FILES + 1)
+
+        prepared = self._prepare(repo)
+
+        assert _TRANSITIVE in prepared.roles
+        assert "Architecture Reviewer" in prepared.roles
+        transitive_prompt = prepared.prompts_by_role[_TRANSITIVE]
+        assert _TRANSITIVE_IMPACT_RESPONSIBILITY in transitive_prompt
+
+    def test_a_small_branch_keeps_the_small_roster(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-small-diff")
+        paths = commit_small_py_files(repo, 2)
+
+        prepared = self._prepare(repo)
+
+        assert prepared.roles == _select_reviewer_roles(
+            "small",
+            categories=_categorize_changed_files(paths),
+            mutates_persisted_state=True,
+            has_ticket_context=False,
+            large_diff=False,
+        )
+        assert _TRANSITIVE not in prepared.roles
+
+    def test_a_delta_pass_roster_follows_branch_size_not_delta_size(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-large-diff-delta")
+        commit_small_py_files(repo, SMALL_TIER_MAX_FILES + 1)
+        first = git_in(repo, "rev-parse", "HEAD")
+        (repo / "mod_0.py").write_text("value_mod_0 = 2\n", encoding="utf-8")
+        git_in(repo, "commit", "-am", "tweak one module")
+
+        delta = self._prepare(repo, delta_from_sha=first)
+
+        assert delta.delta_changed_files == frozenset({"mod_0.py"})
+        assert _TRANSITIVE in delta.roles
+
+    def test_an_unresolvable_base_on_a_delta_pass_fails_open(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """The advisory measurement never aborts a pass that used to succeed."""
+        repo = make_git_repo("wt-large-diff-unresolvable")
+        commit_small_py_files(repo, SMALL_TIER_MAX_FILES + 1)
+        first = git_in(repo, "rev-parse", "HEAD")
+        (repo / "mod_0.py").write_text("value_mod_0 = 2\n", encoding="utf-8")
+        git_in(repo, "commit", "-am", "tweak one module")
+
+        delta = self._prepare(repo, "no-such-branch", delta_from_sha=first)
+
+        assert delta.roles == _select_reviewer_roles(
+            "small",
+            categories=_categorize_changed_files(["mod_0.py"]),
+            mutates_persisted_state=True,
+            has_ticket_context=False,
+            large_diff=False,
+        )
+
+    def test_an_engine_roster_pass_never_measures(
+        self,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repo = make_git_repo("wt-large-diff-engine")
+        commit_small_py_files(repo, SMALL_TIER_MAX_FILES + 1)
+
+        def _unreachable(*_args: object, **_kwargs: object) -> bool:
+            msg = "an engine roster pass must not measure large_diff"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.codex_review._context.core._measure_large_diff", _unreachable
+        )
+
+        prepared = self._prepare(
+            repo, engine_roster=EngineRoster((("engine", "ENGINE SPEC\n"),))
+        )
+
+        assert prepared.roles == ["engine"]
 
     def test_render_prompts_over_the_whole_diff_is_prompts_by_role(
         self, make_git_repo: Callable[[str], Path]
@@ -3011,6 +3248,7 @@ class TestDeltaModeReviewPass:
             categories=_categorize_changed_files(["notes.md"]),
             mutates_persisted_state=False,
             has_ticket_context=False,
+            large_diff=False,
         )
         assert set(delta.roles) < set(full.roles)
         assert delta.delta_diff is not None

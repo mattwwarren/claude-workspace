@@ -568,6 +568,25 @@ class TestNativeDaemonResumeTriggerAdapter:
         # branch does not call it either.
         assert mock_native_daemon.stop_calls == []
 
+    def test_resume_trigger_forwards_effort_for_opus_55_pin(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """Trigger respawn runs _resume_spawn_args, so it gets effort (#2350)."""
+        from cw.worker_effort import WORKER_EFFORT_FLAG
+
+        pinned = sample_client.model_copy(update={"worker_model": "claude-opus-5-5"})
+        session = _eligible_session(pinned)
+        result = self._trigger(tmp_config_dir, pinned, mock_native_daemon, session)
+
+        assert result.delivered is True
+        extra_args = mock_native_daemon.spawn_extra_args[0]
+        assert extra_args is not None
+        assert extra_args[-2:] == [WORKER_EFFORT_FLAG, "medium"]
+        assert extra_args[extra_args.index("--model") + 1] == "claude-opus-5-5"
+
     def test_spawn_cwd_is_the_resolved_resume_cwd(
         self,
         tmp_config_dir: Path,
