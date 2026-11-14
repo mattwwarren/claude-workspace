@@ -25,8 +25,8 @@ Contracts:
   unevaluated (unlike ``pr_gate``'s capped-out candidates, which claim). No
   call here runs under ``sessions_lock``, ``dev_queue_lock`` or any state lock
   (ADR-0019); the cache write takes ``dispatch_state_lock`` only.
-* **Cache.** Closed verdicts never expire; open verdicts live for
-  ``_OPEN_STATE_TTL_SECONDS``; a failed read backs off for
+* **Cache.** Closed and open verdicts live for
+  ``_STATE_VERDICT_TTL_SECONDS``; a failed read backs off for
   ``_FAILED_READ_BACKOFF_SECONDS`` so a persistently failing issue cannot
   monopolise the cap. The read window is least-recently-attempted first,
   then claim order. A row the guard cancelled carries a ``cancelled_at``
@@ -48,7 +48,7 @@ from cw.dispatch_state_ticket_state import (
     ticket_state_key,
 )
 from cw.gh import fetch_issue_state
-from cw.models import QueueItemStatus, Stage
+from cw.models import DispatchSkipReason, QueueItemStatus, Stage
 from cw.tracker import TrackerClass, tracker_kind
 from cw.worktree import _git_dir
 
@@ -60,7 +60,7 @@ if TYPE_CHECKING:
 _log = logging.getLogger("cw.dispatch")
 
 #: ``cancel_reason`` on the guard's ``dispatch.tick`` event (no row field).
-TICKET_CLOSED_CANCEL_REASON: Final = "ticket_closed"
+TICKET_CLOSED_CANCEL_REASON: Final = DispatchSkipReason.TICKET_CLOSED.value
 
 _GH_ISSUE_STATE_CLOSED: Final = "CLOSED"
 _GH_ISSUE_STATE_OPEN: Final = "OPEN"
@@ -70,6 +70,7 @@ _STATE_READ_TIMEOUT_SECONDS: Final = 5
 _MAX_STATE_READS_PER_TICK: Final = 10
 _STATE_READ_BUDGET_SECONDS: Final = 25.0
 _OPEN_STATE_TTL_SECONDS: Final = 300
+_STATE_VERDICT_TTL_SECONDS: Final = _OPEN_STATE_TTL_SECONDS
 _FAILED_READ_BACKOFF_SECONDS: Final = 90
 _GATED_STAGES: Final = frozenset({Stage.PLAN, Stage.IMPL})
 
@@ -157,11 +158,11 @@ def _age_seconds(now: datetime, then: datetime | None) -> float | None:
 
 
 def _needs_read(probe: TicketStateProbe | None, now: datetime) -> bool:
-    """False for a fresh OPEN verdict or a failed read still in backoff."""
+    """False for a fresh verdict or a failed read still in backoff."""
     if probe is None:
         return True
-    open_age = _age_seconds(now, probe.checked_at)
-    if open_age is not None and open_age < _OPEN_STATE_TTL_SECONDS:
+    verdict_age = _age_seconds(now, probe.checked_at)
+    if verdict_age is not None and verdict_age < _STATE_VERDICT_TTL_SECONDS:
         return False
     failed_age = _age_seconds(now, probe.attempted_at)
     return failed_age is None or failed_age >= _FAILED_READ_BACKOFF_SECONDS
@@ -253,7 +254,7 @@ def resolve_closed_ticket_hits(
     to_read: list[tuple[datetime, int, TicketTask]] = []
     for index, task in enumerate(candidates):
         probe = cache.get(_row_key(task))
-        if probe is not None and probe.closed:
+        if probe is not None and probe.closed and not _needs_read(probe, resolved_now):
             hits[task.ticket_id] = ClosedTicketHit(task.created_at, defer=False)
         elif _needs_read(probe, resolved_now):
             to_read.append((_last_attempt(probe), index, task))

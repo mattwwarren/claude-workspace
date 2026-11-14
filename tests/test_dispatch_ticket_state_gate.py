@@ -297,24 +297,23 @@ def test_failing_reads_do_not_starve_a_healthy_row(
     assert len(cli.records) == _MAX_STATE_READS_PER_TICK + 1
 
 
-def test_a_closed_verdict_is_never_re_read_and_skips_the_cap(
+def test_an_expired_closed_verdict_is_re_read_before_cancelling(
     client: ClientConfig, cli: FakeGhCli
 ) -> None:
     cli.reply("gh", "issue", "view", stdout=_OPEN)
-    rows = _staggered(_MAX_STATE_READS_PER_TICK + 1)
-    closed = rows[-1]
+    closed = _row()
     save_ticket_state_probes(
         _CLIENT,
         {_key(closed): TicketStateProbe(checked_at=_T0, closed=True)},
-        prune_to_keys=[_key(r) for r in rows],
+        prune_to_keys=[_key(closed)],
     )
 
     far = _T0 + timedelta(days=30)
-    hits = _resolve(client, *rows, now=far)
+    hits = _resolve(client, closed, now=far)
 
-    assert hits == {closed.ticket_id: ClosedTicketHit(closed.created_at, False)}
-    assert closed.ticket_id not in _read_ids(cli)
-    assert len(cli.records) == _MAX_STATE_READS_PER_TICK
+    assert hits == {}
+    assert _read_ids(cli) == [closed.ticket_id]
+    assert load_ticket_state_probes()[_key(closed)].closed is False
 
 
 def test_the_deferral_logs_one_summary(

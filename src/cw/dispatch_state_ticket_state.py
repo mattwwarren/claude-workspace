@@ -12,7 +12,8 @@ un-cancel a guard-cancelled row.
 Entry semantics (all transient, no schema version, same posture as
 ``OpenPrProbeCache``):
 
-* ``closed=True``: positive evidence the issue is CLOSED; never expires.
+* ``closed=True``: positive evidence the issue is CLOSED, TTL-bounded by the
+  caller like an OPEN verdict so a reopened issue is revalidated.
 * ``closed=False`` with ``checked_at``: an OPEN verdict, TTL-bounded by the
   caller.
 * ``attempted_at``: the last read that produced no verdict (timeout, gh
@@ -141,15 +142,18 @@ def guard_cancelled_row_keys() -> frozenset[str]:
     )
 
 
-def _write_entries(
+def _merge_dispatch_state(
     label: str,
     keys: Collection[str],
     mutate: Callable[[dict[str, object]], bool],
 ) -> None:
-    """Read-merge-write the key under ``dispatch_state_lock``; swallow OSError.
+    """Run one generic raw-sidecar read/merge/write operation.
 
-    *mutate* edits the raw entries in place and reports whether anything
-    changed; an unchanged payload is not rewritten.
+    This is the leaf persistence primitive: callers own the sidecar-specific
+    parsing and mutation, while the shared file path, lock, atomic write and
+    fail-safe error policy stay in one place. *mutate* edits the full payload
+    in place and reports whether anything changed; an unchanged payload is not
+    rewritten.
     """
     path = dispatch_state.DISPATCH_STATE_FILE
     try:
@@ -157,10 +161,8 @@ def _write_entries(
         path.parent.mkdir(parents=True, exist_ok=True)
         with dispatch_state_lock():
             payload = _load_dispatch_state_raw()
-            entries = _raw_entries(payload)
-            if not mutate(entries):
+            if not mutate(payload):
                 return
-            payload[TICKET_STATE_PROBE_KEY] = entries
             atomic_write_text(path, json.dumps(payload))
     except OSError:
         logger.warning(
@@ -188,24 +190,28 @@ def save_ticket_state_probes(
     prefix = ticket_state_client_prefix(client)
     keep = frozenset(prune_to_keys)
 
-    def _merge(raw: dict[str, object]) -> bool:
+    def _merge(payload: dict[str, object]) -> bool:
+        raw = _raw_entries(payload)
         stale = [k for k in raw if k.startswith(prefix) and k not in keep]
         for key in stale:
             del raw[key]
         for key, entry in entries.items():
             raw[key] = _serialize(entry)
+        payload[TICKET_STATE_PROBE_KEY] = raw
         return bool(stale or entries)
 
-    _write_entries("persist", list(entries), _merge)
+    _merge_dispatch_state("persist", list(entries), _merge)
 
 
 def mark_ticket_closed_cancelled(key: str, *, at: datetime) -> None:
     """Stamp *key* as cancelled by the guard at *at* (best effort, logged)."""
 
-    def _stamp(raw: dict[str, object]) -> bool:
+    def _stamp(payload: dict[str, object]) -> bool:
+        raw = _raw_entries(payload)
         current = _parse_ticket_state_entry(raw.get(key))
         base = current if current is not None else TicketStateProbe(at, closed=True)
         raw[key] = _serialize(base._replace(closed=True, cancelled_at=at))
+        payload[TICKET_STATE_PROBE_KEY] = raw
         return True
 
-    _write_entries("stamp", [key], _stamp)
+    _merge_dispatch_state("stamp", [key], _stamp)
