@@ -104,6 +104,10 @@ repos:
       # run from a linked worktree, and pytest would pass it to every test
       # that shells out to git without a stripped env, pointing them at the
       # pushing worktree's repository instead of their own tmp repos.
+      # #3222: this hook runs ~13 minutes after `git push` has opened its ssh
+      # connection. An idle connection is dropped, so the push fails with
+      # `Connection to github.com closed by remote host` while the hook is green.
+      # Remedy: ServerAliveInterval/ServerAliveCountMax (see CLAUDE.md, INSTALL.md).
       - id: diff-cover
         name: diff-cover (vs origin/main, 90%)
         stages: [pre-push]

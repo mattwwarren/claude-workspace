@@ -15,7 +15,9 @@ on ``main``. Submodules, in dependency order:
   :data:`_LOGGER_NAME`. Imports from no sibling.
 - ``payload`` -- stdin payload and ``cw-context.json`` resolution. Imports
   from no sibling.
-- ``park`` -- the #2135 abandoned-exit park. Imports from no sibling.
+- ``transcripts`` -- transcript-candidate discovery shared by ``park`` and
+  ``continuation`` (#3623). Imports from no sibling.
+- ``park`` -- the #2135 abandoned-exit park. Imports ``transcripts``.
 - ``agent_stamp`` -- ``agent_spawn_stamp`` snapshot and clear. Imports
   ``_constants``.
 - ``sentinel`` -- headless sentinel parse, scope check, reconstruction and
@@ -27,8 +29,8 @@ on ``main``. Submodules, in dependency order:
   Imports ``sentinel``, ``park`` and ``staged_emit``.
 - ``continuation`` -- the #2348 Stop-hook auto-continuation for a no-sentinel
   headless turn: the qualifying gates, the capped dev-queue counter and the
-  ``block`` decision on stdout. Imports ``_constants`` only (plus
-  ``cw.dev_queue``, ``cw.reconcile``, ``cw.events``).
+  ``block`` decision on stdout. Imports ``_constants`` and ``transcripts``
+  only (plus ``cw.dev_queue``, ``cw.reconcile``, ``cw.events``).
 - ``locked`` -- the ``sessions_lock`` window and the lockless pre-lock
   sentinel step that precedes it (#2566); the only submodule that imports
   ``sessions_lock`` or ``load_state``. Imports ``_constants``, ``headless``

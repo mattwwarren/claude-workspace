@@ -34,8 +34,25 @@ fi
 
 ```bash
 BRANCH=$(git branch --show-current)
+# #3222: an opt-in pre-push hook (diff-cover, ~13 min) runs after git has opened
+# its ssh connection; an idle connection is dropped. Add a keepalive only when
+# nothing else configures ssh for this push, and only for an ssh remote.
+REMOTE_URL=$(git remote get-url --push origin 2>/dev/null)
+case "$REMOTE_URL" in
+  ssh://*) SSH_HOST=${REMOTE_URL#ssh://}; SSH_HOST=${SSH_HOST%%/*}; SSH_HOST=${SSH_HOST%%:*} ;;
+  *://*)   SSH_HOST="" ;;
+  *@*:*)   SSH_HOST=${REMOTE_URL%%:*} ;;
+  *)       SSH_HOST="" ;;
+esac
+if [ -n "$SSH_HOST" ] && [ -z "${GIT_SSH_COMMAND:-}" ] && [ -z "${GIT_SSH:-}" ] \
+   && [ -z "$(git config --get core.sshCommand)" ] \
+   && [ "$(ssh -G "$SSH_HOST" 2>/dev/null | awk '$1=="serveraliveinterval"{print $2}')" = "0" ]; then
+  export GIT_SSH_COMMAND="ssh -o ServerAliveInterval=20 -o ServerAliveCountMax=6"
+fi
 git push -u origin "$BRANCH" 2>&1
 ```
+
+The keepalive export is skipped when any ssh setting already exists (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`, or a user `ssh -G` `serveraliveinterval` other than 0). It is a no-op for non-ssh remotes and for workers with no pre-push hook. It never changes the force-push rule. A user-less scp-style remote (`example.test:o/r.git`) is not recognized and gets no automatic keepalive; the `~/.ssh/config` stanza in CLAUDE.md covers that case.
 
 If push fails (e.g., diverged), BLOCK and park for the orchestrator — never force-push from here. A force-push of a cw-owned branch is the orchestrator's, after its evidence checks (ADR-0020).
 
