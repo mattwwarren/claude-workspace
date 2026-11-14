@@ -4,7 +4,8 @@ The cost-ordered preconditions (RUNNING row, park flag, the worker's own
 ``park_comment_marker``) and the transcript's negative evidence that decide
 whether a Stop with no sentinel parks its ticket's row. Ships dark: with the
 park flag off it defers exactly as before #2135. Imports nothing from its
-siblings. Split out of the flat ``cli/stop_hook.py`` (#2496).
+siblings except ``transcripts``. Split out of the flat ``cli/stop_hook.py``
+(#2496).
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from cw._util import claude_project_dir
 from cw.cli._sentinels import _sentinel_frame_after
+from cw.cli.stop_hook.transcripts import _transcript_candidates
 from cw.models import read_park_comment_marker
 from cw.reconcile import (
     _route_stopped_without_sentinel,
@@ -79,17 +81,18 @@ def _sentinel_frame_follows_marker(
     transcript a late frame cannot be ruled out, and the cost of being wrong
     that way is a silent non-park rather than a park that hides a real blocker
     reason behind the wrong disposition.
+
+    Candidate discovery is the shared
+    :func:`~cw.cli.stop_hook.transcripts._transcript_candidates`.
     """
-    if not isinstance(claude_session_id, str) or not claude_session_id:
-        return True
-    search_dirs = [cwd_value]
-    if session.worktree_path is not None:
-        search_dirs.append(str(session.worktree_path))
     found_transcript = False
-    # ``dict.fromkeys`` drops a repeated directory (the common case: the hook's
-    # cwd IS the worktree) so the hot path never reads the same file twice.
-    for search_dir in dict.fromkeys(search_dirs):
-        transcript_path = claude_project_dir(search_dir) / f"{claude_session_id}.jsonl"
+    # A missing or ill-typed Claude session id yields no candidates, so the loop
+    # is skipped and the final line returns True (no transcript, cannot rule a
+    # late frame out). The shared helper de-duplicates a repeated directory, so
+    # the hot path never reads the same file twice.
+    for transcript_path in _transcript_candidates(
+        session, cwd_value, claude_session_id, claude_project_dir
+    ):
         if not transcript_path.is_file():
             continue
         found_transcript = True
