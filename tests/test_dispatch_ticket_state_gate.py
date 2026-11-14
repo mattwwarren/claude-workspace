@@ -202,7 +202,7 @@ def test_a_failed_read_after_an_expired_open_keeps_no_fresh_verdict(
 
     assert _resolve(client, row) == {}
     probe = load_ticket_state_probes()[_key(row)]
-    assert probe.checked_at == old
+    assert probe.checked_at is None
     assert probe.attempted_at == _T0
 
 
@@ -399,16 +399,20 @@ def test_non_candidates_are_not_read(
     assert cli.records == []
 
 
-def test_ambiguous_ticket_rows_are_never_read_or_cancelled(
+def test_duplicate_candidate_rows_share_one_read_and_each_get_a_hit(
     client: ClientConfig, cli: FakeGhCli
 ) -> None:
-    """Rule 2: several non-terminal rows for one ticket fail closed."""
+    """Duplicate candidate rows must not bypass the closed-ticket guard."""
     cli.reply("gh", "issue", "view", stdout=_CLOSED)
     first = _row("7")
     second = _row("7", created_at=_T0 + timedelta(seconds=5))
 
-    assert _resolve(client, second, first) == {}
-    assert cli.records == []
+    hits = _resolve(client, second, first)
+    assert hits == {
+        "7": ClosedTicketHit(first.created_at, defer=False),
+        _key(second): ClosedTicketHit(second.created_at, defer=False),
+    }
+    assert len(cli.records) == 1
 
 
 @pytest.mark.parametrize(
@@ -791,7 +795,7 @@ def test_an_unused_stamp_is_cleared_after_the_claim(
     _seed(row)
     hits = _resolve(client, row)
     assert _key(row) in load_ticket_state_probes()
-    assert load_ticket_state_probes()[_key(row)].cancelled_at is not None
+    assert load_ticket_state_probes()[_key(row)].cancelled_at is None
 
     assert _claim(client, hits, occupied_ticket_reasons={"101": "live s-1"}) is None
 

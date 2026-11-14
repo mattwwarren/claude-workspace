@@ -4,8 +4,8 @@ Persisted in the shared ``dispatch_state.json`` sidecar under the
 ``"ticket_state_probe"`` key, one entry per queue-row identity
 ``f"{client}/{ticket_id}::{created_at}"`` (the #2219 row identity: a requeue
 keeps ``created_at``, a fresh enqueue gets a new one). Written by
-``cw.dispatch.ticket_state_gate`` (lock-free resolve) and by the claim path's
-post-release ``cancelled_at`` stamp; read lock-free by the concierge
+``cw.dispatch.ticket_state_gate`` (lock-free resolve) and by the claim path
+after its queue save; read lock-free by the concierge
 cancelled-row restore and the ``auto_fix_ci`` recipe, which must never
 un-cancel a guard-cancelled row.
 
@@ -214,10 +214,9 @@ def save_ticket_state_probes(
 def clear_ticket_closed_stamps(keys: Collection[str]) -> None:
     """Drop the ``cancelled_at`` stamp on *keys* that were not cancelled.
 
-    The resolver stamps a CLOSED row before the claim cancels it (so the
-    CANCELLED row is never visible without its stamp). A stamp the claim did
-    not turn into a cancel is removed here, after the queue lock is released.
-    Best effort: a failed write is logged, like the other sidecar writes.
+    Clear stale cancellation markers without disturbing the rest of the
+    sidecar. Best effort: a failed write is logged, like the other sidecar
+    writes.
     """
 
     def _clear(payload: dict[str, object]) -> bool:
@@ -234,3 +233,20 @@ def clear_ticket_closed_stamps(keys: Collection[str]) -> None:
 
     if keys:
         _merge_dispatch_state("clear", keys, _clear)
+
+
+def mark_ticket_closed_cancelled(key: str, *, at: datetime) -> bool:
+    """Mark *key* after its queue row was durably transitioned to CANCELLED."""
+
+    def _mark(payload: dict[str, object]) -> bool:
+        raw = _raw_entries(payload)
+        current = _parse_ticket_state_entry(raw.get(key))
+        if current is None:
+            current = TicketStateProbe(checked_at=at, closed=True)
+        if current.cancelled_at == at:
+            return False
+        raw[key] = _serialize(current._replace(cancelled_at=at))
+        payload[TICKET_STATE_PROBE_KEY] = raw
+        return True
+
+    return _merge_dispatch_state("mark cancelled", [key], _mark)
