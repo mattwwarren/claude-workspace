@@ -268,7 +268,7 @@ def hold_ticket(
                 {**asdict(result), "repo": repo},
                 correlation_id=result.ticket_id,
             )
-        except Exception:  # noqa: BLE001 — audit failure must not undo the hold.
+        except (OSError, ValueError, CwError):
             _log.exception(
                 "dependency hold applied but ticket.held audit failed ticket=%s",
                 result.ticket_id,

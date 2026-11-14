@@ -251,6 +251,21 @@ class TestHoldTicketCore:
         assert held.payload["previous_pr"] == 9
         assert held.payload["pr_number"] == 11
 
+    def test_unexpected_hold_audit_failure_propagates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seed_queue([_hold(session_id=None, blocked_on_pr=9)])
+        error = "unexpected audit failure"
+
+        def fail_unexpectedly(*args: object, **kwargs: object) -> None:
+            raise TypeError(error)
+
+        monkeypatch.setattr(hold_module, "record_event", fail_unexpectedly)
+
+        with pytest.raises(TypeError, match="unexpected audit failure"):
+            hold_ticket(ACME_TICKET, ACME, 11, repo="foo/bar")
+        assert queue_row().blocked_on_pr == 11
+
 
 def _auto_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
