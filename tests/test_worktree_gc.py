@@ -23,7 +23,6 @@ from cw.models import (
     SessionStatus,
     TicketTask,
 )
-from cw.tracker import TRACKER_GITHUB_ISSUES
 from cw.worktree_gc import (
     _GIT_BRANCH_DELETE_FLAG,
     GC_KEEP_VERDICTS,
@@ -1600,8 +1599,6 @@ class TestLiveWorktreePaths:
 # CLI integration
 # ---------------------------------------------------------------------------
 
-_GITHUB_TRACKER = TRACKER_GITHUB_ISSUES
-
 
 def _cli_patches(
     tmp_path: Path,
@@ -1612,7 +1609,7 @@ def _cli_patches(
     return [
         patch("cw.cli.worktree.load_clients", return_value=clients),
         patch("cw.cli.worktree.run_worktree_gc", return_value=report),
-        patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+        patch("cw.cli.worktree._resolve_repo_slug", return_value="o/r"),
         patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
         patch(
             "cw.cli.worktree.effective_worktree_bases",
@@ -1651,7 +1648,7 @@ class TestWorktreeGcCli:
         with (
             patch("cw.cli.worktree.load_clients", return_value={"test-client": client}),
             patch("cw.cli.worktree.run_worktree_gc", return_value=report),
-            patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+            patch("cw.cli.worktree._resolve_repo_slug", return_value="o/r"),
             patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
             patch(
                 "cw.cli.worktree.effective_worktree_bases",
@@ -1679,7 +1676,7 @@ class TestWorktreeGcCli:
         with (
             patch("cw.cli.worktree.load_clients", return_value={"test-client": client}),
             patch("cw.cli.worktree.run_worktree_gc", return_value=report) as mock_gc,
-            patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+            patch("cw.cli.worktree._resolve_repo_slug", return_value="o/r"),
             patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
             patch(
                 "cw.cli.worktree.effective_worktree_bases",
@@ -1714,7 +1711,7 @@ class TestWorktreeGcCli:
         with (
             patch("cw.cli.worktree.load_clients", return_value={"test-client": client}),
             patch("cw.cli.worktree.run_worktree_gc", return_value=report),
-            patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+            patch("cw.cli.worktree._resolve_repo_slug", return_value="o/r"),
             patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
             patch(
                 "cw.cli.worktree.effective_worktree_bases",
@@ -1742,7 +1739,7 @@ class TestWorktreeGcCli:
         with (
             patch("cw.cli.worktree.load_clients", return_value={"test-client": client}),
             patch("cw.cli.worktree.run_worktree_gc", return_value=report) as mock_gc,
-            patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+            patch("cw.cli.worktree._resolve_repo_slug", return_value="o/r"),
             patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
             patch(
                 "cw.cli.worktree.effective_worktree_bases",
@@ -1769,7 +1766,7 @@ class TestWorktreeGcCli:
         with (
             patch("cw.cli.worktree.load_clients", return_value={"test-client": client}),
             patch("cw.cli.worktree.run_worktree_gc", return_value=report) as mock_gc,
-            patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+            patch("cw.cli.worktree._resolve_repo_slug", return_value="o/r"),
             patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
             patch(
                 "cw.cli.worktree.effective_worktree_bases",
@@ -1785,7 +1782,7 @@ class TestWorktreeGcCli:
         assert kwargs.get("include_closed") is True
 
     def test_multi_client_no_filter_iterates_all(self, tmp_path: Path) -> None:
-        """Without --client, all configured GitHub-tracked clients are processed."""
+        """Without --client, all configured GitHub-hosted clients are processed."""
         from click.testing import CliRunner
 
         from cw.cli import main as cli_main
@@ -1800,7 +1797,7 @@ class TestWorktreeGcCli:
         with (
             patch("cw.cli.worktree.load_clients", return_value=clients),
             patch("cw.cli.worktree.run_worktree_gc", return_value=report) as mock_gc,
-            patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+            patch("cw.cli.worktree._resolve_repo_slug", return_value="o/r"),
             patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
             patch(
                 "cw.cli.worktree.effective_worktree_bases",
@@ -1812,8 +1809,8 @@ class TestWorktreeGcCli:
         assert result.exit_code == 0
         assert mock_gc.call_count == 2
 
-    def test_non_github_tracker_client_skipped(self, tmp_path: Path) -> None:
-        """Clients not tracked by GitHub Issues are skipped."""
+    def test_non_github_origin_client_skipped(self, tmp_path: Path) -> None:
+        """Clients whose origin is not github.com are skipped, naming the code host."""
         from click.testing import CliRunner
 
         from cw.cli import main as cli_main
@@ -1825,7 +1822,7 @@ class TestWorktreeGcCli:
         with (
             patch("cw.cli.worktree.load_clients", return_value={"test-client": client}),
             patch("cw.cli.worktree.run_worktree_gc", return_value=report) as mock_gc,
-            patch("cw.cli.worktree.resolve_tracker", return_value="linear"),
+            patch("cw.cli.worktree._resolve_repo_slug", return_value=None),
             patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
             patch(
                 "cw.cli.worktree.effective_worktree_bases",
@@ -1835,7 +1832,8 @@ class TestWorktreeGcCli:
             result = runner.invoke(cli_main, ["worktree", "gc"])
 
         assert result.exit_code == 0
-        assert "skipped" in result.output
+        assert "origin is not a github.com repository" in result.output
+        assert "tracker" not in result.output.lower()
         mock_gc.assert_not_called()
 
     def test_no_client_single_client_auto_selects(self, tmp_path: Path) -> None:
@@ -1850,7 +1848,7 @@ class TestWorktreeGcCli:
         with (
             patch("cw.cli.worktree.load_clients", return_value={"test-client": client}),
             patch("cw.cli.worktree.run_worktree_gc", return_value=report),
-            patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+            patch("cw.cli.worktree._resolve_repo_slug", return_value="o/r"),
             patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
             patch(
                 "cw.cli.worktree.effective_worktree_bases",
@@ -1904,7 +1902,7 @@ class TestWorktreeGcCli:
         with (
             patch("cw.cli.worktree.load_clients", return_value={"test-client": client}),
             patch("cw.cli.worktree.run_worktree_gc", return_value=report) as mock_gc,
-            patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+            patch("cw.cli.worktree._resolve_repo_slug", return_value="o/r"),
             patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
             patch("cw.cli.worktree.effective_worktree_bases", return_value=wt_bases),
         ):
@@ -1926,7 +1924,7 @@ class TestWorktreeGcCli:
         with (
             patch("cw.cli.worktree.load_clients", return_value={"test-client": client}),
             patch("cw.cli.worktree.run_worktree_gc", return_value=report) as mock_gc,
-            patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+            patch("cw.cli.worktree._resolve_repo_slug", return_value="o/r"),
             patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
             patch(
                 "cw.cli.worktree.effective_worktree_bases",
@@ -1963,7 +1961,7 @@ class TestWorktreeGcCli:
         with (
             patch("cw.cli.worktree.load_clients", return_value={"test-client": client}),
             patch("cw.cli.worktree.run_worktree_gc", return_value=report),
-            patch("cw.cli.worktree.resolve_tracker", return_value=_GITHUB_TRACKER),
+            patch("cw.cli.worktree._resolve_repo_slug", return_value="o/r"),
             patch("cw.cli.worktree._git_dir", return_value=tmp_path / "repo"),
             patch(
                 "cw.cli.worktree.effective_worktree_bases",
