@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The Stop hook's transcript-candidate discovery has one definition (#3623).** The hook cwd and the recorded worktree, de-duplicated and resolved through `claude_project_dir`, were located by two copies, one in the #2135 park and one in the #2348 auto-continuation. Both now call `cw.cli.stop_hook.transcripts._transcript_candidates`. Internal: no behavior change.
+
 ## [1.100.0] - 2026-11-14
 
 ### Added
