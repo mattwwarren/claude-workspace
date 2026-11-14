@@ -524,9 +524,12 @@ def _provenance_ok(body: str) -> bool:
 
 
 def _optional_text(data: dict[str, object], key: str) -> str:
-    value = data.get(key)
-    if value is None:
+    if key not in data:
         return ""
+    value = data[key]
+    if value is None:
+        message = f"corpus field {key!s} must be a string"
+        raise CorpusError(message)
     if isinstance(value, str):
         return value
     message = f"corpus field {key!s} must be a string"
@@ -545,9 +548,12 @@ def _comment_bodies(data: dict[str, object]) -> list[str]:
         if not isinstance(comment, dict):
             message = "each corpus comment must be an object"
             raise CorpusError(message)
-        body = comment.get("body")
-        if body is None:
+        if "body" not in comment:
             continue
+        body = comment["body"]
+        if body is None:
+            message = "each corpus comment body must be a string"
+            raise CorpusError(message)
         if not isinstance(body, str):
             message = "each corpus comment body must be a string"
             raise CorpusError(message)

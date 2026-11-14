@@ -202,15 +202,13 @@ def test_step1f3_citation_fallthrough_bullet() -> None:
     assert "one-shot, not a second standard cycle" in window
 
 
-def test_citation_bullets_sit_after_format_only_fallthrough() -> None:
+def test_citation_bullets_precede_generic_first_cycle() -> None:
     content = _cmd("auto-dev-plan.md")
-    format_fallthrough = content.index(
-        "- **MUST_FIX persists after the format-only cycle (still all `Format-Only`)**"
-    )
     gating = content.index(CITATION_BULLET_ANCHOR)
     fallthrough = content.index(CITATION_FALLTHROUGH_ANCHOR)
+    generic = content.index("- **MUST_FIX, 1st cycle, Small or interactive**")
     soundness = content.index("*Plan Soundness Reviewer verdicts:*")
-    assert format_fallthrough < gating < fallthrough < soundness
+    assert gating < fallthrough < generic < soundness
 
 
 def test_mixed_category_goes_through_standard_cycle() -> None:
