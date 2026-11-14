@@ -1,0 +1,31 @@
+{
+  "title": "Add retry budget to the dispatch loop",
+  "body": "## Summary\n\nThe dispatch loop should stop retrying after three attempts.\nOperators need a visible counter on `cw status` so they can tell a stuck ticket\nfrom a slow one.\n\n## Acceptance criteria\n\n1. AC1: Retry count must be capped at three per ticket.\n2. AC2: The status output shows the remaining retry budget.\n",
+  "comments": [
+    {
+      "id": "c1",
+      "body": "Operator note: keep the cap configurable, but default to three attempts.",
+      "author": {
+        "login": "operator"
+      },
+      "createdAt": "2026-11-01T10:00:00Z"
+    },
+    {
+      "id": "c2",
+      "body": "R1 \u2014 use the existing lane config rather than a new setting.",
+      "author": {
+        "login": "operator"
+      },
+      "createdAt": "2026-11-01T10:05:00Z"
+    },
+    {
+      "id": "c3",
+      "body": "Analysis: the loop silently doubles the budget on resume.\n\n<!-- cw-agent-authored -->",
+      "author": {
+        "login": "operator"
+      },
+      "createdAt": "2026-11-01T10:09:00Z"
+    }
+  ],
+  "number": 1502
+}
