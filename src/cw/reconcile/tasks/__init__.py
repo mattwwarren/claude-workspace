@@ -34,6 +34,7 @@ from cw.reconcile.tasks.merged_completion import (
     complete_timed_out_merged_tasks,
 )
 from cw.reconcile.tasks.stale_gate import (
+    _PROPOSED_ACTION_DEPENDENCY_PR_CLOSED_UNMERGED,
     _PROPOSED_ACTION_VARIANT_A,
     _PROPOSED_ACTION_VARIANT_B,
     _STALE_GATE_CONSUMER,
@@ -59,6 +60,7 @@ from cw.reconcile.tasks.terminal_siblings import (
 
 __all__ = [
     "_COMPLETION_ROUTING_GRACE_SECONDS",
+    "_PROPOSED_ACTION_DEPENDENCY_PR_CLOSED_UNMERGED",
     "_PROPOSED_ACTION_VARIANT_A",
     "_PROPOSED_ACTION_VARIANT_B",
     "_STALE_GATE_CONSUMER",

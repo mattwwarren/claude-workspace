@@ -97,6 +97,11 @@ _PROPOSED_ACTION_VARIANT_A = "release_stale_gate_variant_a"
 _PROPOSED_ACTION_VARIANT_B = "release_stale_gate_variant_b"
 
 
+# GitHub #2321: a dependency hold whose PR closed unmerged. Never releases the
+# row; emitted once per episode, latched by ``stale_gate_detected_at``.
+_PROPOSED_ACTION_DEPENDENCY_PR_CLOSED_UNMERGED = "dependency_hold_pr_closed_unmerged"
+
+
 def _is_variant_a_gate_task(task: TicketTask) -> bool:
     """True iff *task* is a BLOCKED_ON_USER row parked behind its own PR gate."""
     if task.status != QueueItemStatus.BLOCKED_ON_USER:
@@ -305,8 +310,7 @@ def _scan_variant_b(
                             task.ticket_id,
                             task.client,
                             task.lane,
-                            # Closed unmerged: nothing to wait for; never releases.
-                            "dependency_hold_pr_closed_unmerged",
+                            _PROPOSED_ACTION_DEPENDENCY_PR_CLOSED_UNMERGED,
                             orig_session_id,
                             {"blocked_on_pr": pr},
                         )
