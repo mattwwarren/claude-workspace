@@ -113,10 +113,15 @@ class TestSkipReasonPartition:
 
     @pytest.mark.parametrize(
         "code",
-        ["attempt_cap_blocked", "stale_pr_blocked", "tracker_mcp_gate_blocked"],
+        [
+            "attempt_cap_blocked",
+            "stale_pr_blocked",
+            "tracker_mcp_gate_blocked",
+            "ticket_closed",
+        ],
     )
     def test_parking_codes_are_not_pending_needs_action(self, code: str) -> None:
-        # Dispatch parks these rows BLOCKED_ON_USER with a page; `wait` exits 2.
+        # Dispatch parks (or, for ticket_closed, cancels) these rows; never PENDING.
         assert code in SELF_CLEARING_SKIP_REASONS
 
 
@@ -177,6 +182,16 @@ class TestClassifyPending:
         _seed_pending()
         _client_tick(code, _NOW - timedelta(seconds=5))
         assert classify_pending(_view()) is None
+
+    def test_a_requeued_row_after_a_ticket_closed_cancel_is_not_stuck(self) -> None:
+        # #1605: the operator requeued a guard-cancelled row; the stale
+        # per-ticket ticket_closed tick is self-clearing.
+        _seed_pending()
+        _ticket_tick("ticket_closed", _NOW - timedelta(seconds=5))
+        view = _view()
+        assert view.dispatch is not None
+        assert view.dispatch.skip_reason == "ticket_closed"
+        assert classify_pending(view) is None
 
     def test_attempt_cap_on_the_row_is_never_stuck(self) -> None:
         # A PENDING row at its ceiling exists only until dispatch parks it.

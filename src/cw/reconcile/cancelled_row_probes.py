@@ -21,6 +21,7 @@ from functools import partial
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.config import get_client
+from cw.dispatch_state_ticket_state import guard_cancelled_row_keys, ticket_state_key
 from cw.exceptions import CwError
 from cw.models import QueueItemStatus
 from cw.reconcile.probe_store import BoundedProbeStore, ProbeStoreUnavailableError
@@ -71,10 +72,17 @@ def new_cancelled_row_probes(
 
 def cancelled_row_targets(tasks: list[TicketTask]) -> list[CancelledRowKey]:
     """The rows recipe 3 would ask git about: CANCELLED, with an existing
-    worktree, on a configured client."""
+    worktree, on a configured client, and not cancelled by the closed-ticket
+    guard (#1605 R4: a guard cancel is reversed only by an operator requeue)."""
     keys: list[CancelledRowKey] = []
+    guard_cancelled = guard_cancelled_row_keys()
     for task in tasks:
         if task.status != QueueItemStatus.CANCELLED:
+            continue
+        if (
+            ticket_state_key(task.client, task.ticket_id, task.created_at)
+            in guard_cancelled
+        ):
             continue
         if task.worktree_path is None or not task.worktree_path.exists():
             continue

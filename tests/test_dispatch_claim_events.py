@@ -257,3 +257,20 @@ class TestPreDispatchAttentionBuilder:
             ("zeta", 1),
             ("alpha", 2),
         ]
+
+
+class TestTicketClosedCancelTick:
+    def test_payload_pins_the_per_task_shape(self) -> None:
+        from cw.dispatch.claim.events import _emit_ticket_closed_cancel_event
+
+        _emit_ticket_closed_cancel_event(_CLIENT, "1605", "ticket_closed")
+
+        events = read_events(event_types=[OrchestratorEventType.DISPATCH_TICK])
+        assert len(events) == 1
+        assert list(events[0].payload.items()) == [
+            ("client", _CLIENT),
+            ("claimed", 0),
+            ("skip_reason", "ticket_closed"),
+            ("ticket_id", "1605"),
+            ("cancel_reason", "ticket_closed"),
+        ]

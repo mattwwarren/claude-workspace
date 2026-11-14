@@ -1,0 +1,329 @@
+"""Pre-dispatch closed-ticket guard: the lock-free resolve half (#1605).
+
+The incident this closes: a PENDING PLAN/IMPL row whose GitHub issue was
+already CLOSED was claimed and a worker spent a whole session on a ticket
+nobody wanted any more. This module answers, before any lock is taken, the
+one question the claim path needs: **is this PENDING row's issue CLOSED?**
+The claim path (``cw.dispatch.claim.screening``) turns a ``defer=False`` hit
+into a CANCELLED row and a ``defer=True`` hit into a no-write hold.
+
+Contracts:
+
+* **GitHub only (ADR-0013, R2).** A client whose tracker is not
+  ``github-issues`` (Linear, another system, or unset) is never read. Cancel
+  is the destructive action, so an unknown tracker is never guessed at.
+* **Positive evidence only.** A hit comes from a CLOSED verdict or from an
+  explicit "not evaluated this tick" marker (``defer=True``), never from a
+  failed read. A read returning None or any state other than ``OPEN`` /
+  ``CLOSED`` records a negative attempt, yields no hit, and the row
+  dispatches as it would without the guard.
+* **Bounded, lock-free reads (R3, ARCHITECTURE 7.16).** At most
+  ``_MAX_STATE_READS_PER_TICK`` reads per client per tick, each bounded by
+  ``_STATE_READ_TIMEOUT_SECONDS``, and a ``_STATE_READ_BUDGET_SECONDS``
+  wall-clock budget. A candidate that needs a read but falls past the cap or
+  the budget gets a ``defer=True`` hit: held PENDING, never claimed
+  unevaluated (unlike ``pr_gate``'s capped-out candidates, which claim). No
+  call here runs under ``sessions_lock``, ``dev_queue_lock`` or any state lock
+  (ADR-0019); the cache write takes ``dispatch_state_lock`` only.
+* **Cache.** An OPEN verdict lives for ``_STATE_VERDICT_TTL_SECONDS``. A
+  cached CLOSED verdict is never trusted to cancel: it is read again every
+  pass, so a cancel needs a live CLOSED read in the current tick (#1605 rule
+  1). A failed read backs off for ``_FAILED_READ_BACKOFF_SECONDS`` so a
+  persistently failing issue cannot monopolise the cap. The read window is
+  least-recently-attempted first, then claim order.
+* **Stamp after cancel.** A live CLOSED read is cached without a cancellation
+  stamp. After the claim saves the row as CANCELLED, it writes ``cancelled_at``
+  for that exact row. A row that is PENDING again carries the stamp because the
+  operator requeued it, and the guard leaves it alone. An interrupted claim
+  therefore retries safely.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Final, NamedTuple
+
+from cw.dispatch_state_ticket_state import (
+    TicketStateProbe,
+    load_ticket_state_probes,
+    save_ticket_state_probes,
+    ticket_state_key,
+)
+from cw.gh import fetch_issue_state
+from cw.models import DispatchSkipReason, QueueItemStatus, Stage
+from cw.tracker import TrackerClass, tracker_kind
+from cw.worktree import _git_dir
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Collection, Mapping, Sequence
+
+    from cw.models import ClientConfig, DevQueueStore, LaneConfig, TicketTask
+
+_log = logging.getLogger("cw.dispatch")
+
+#: ``cancel_reason`` on the guard's ``dispatch.tick`` event (no row field).
+TICKET_CLOSED_CANCEL_REASON: Final = DispatchSkipReason.TICKET_CLOSED.value
+
+_GH_ISSUE_STATE_CLOSED: Final = "CLOSED"
+_GH_ISSUE_STATE_OPEN: Final = "OPEN"
+# Internal tuning constants, no external contract (local because
+# review_debt_filing/_constants.py is private to that package).
+_STATE_READ_TIMEOUT_SECONDS: Final = 5
+_MAX_STATE_READS_PER_TICK: Final = 10
+_STATE_READ_BUDGET_SECONDS: Final = 25.0
+_OPEN_STATE_TTL_SECONDS: Final = 300
+_STATE_VERDICT_TTL_SECONDS: Final = _OPEN_STATE_TTL_SECONDS
+_FAILED_READ_BACKOFF_SECONDS: Final = 90
+_GATED_STAGES: Final = frozenset({Stage.PLAN, Stage.IMPL})
+
+
+class ClosedTicketHit(NamedTuple):
+    """A guard verdict for one PENDING row, keyed by ticket id in the result.
+
+    ``defer=False``: the issue is CLOSED, so the claim cancels the row.
+    ``defer=True``: not evaluated this tick (read cap or budget), so the claim
+    holds the row PENDING with no write. ``created_at`` is the row identity
+    the claim re-checks under the lock.
+    """
+
+    created_at: datetime
+    defer: bool
+
+
+def claimable_lane_names(
+    effective_lanes: Sequence[LaneConfig], running_by_lane: Mapping[str, int]
+) -> frozenset[str]:
+    """Lanes that can claim this tick: not paused and with a free slot.
+
+    Mirrors the per-lane grant arithmetic in ``_dispatch_client_lanes``, so a
+    row in a lane that cannot reach the claim is never read or deferred.
+    """
+    return frozenset(
+        lane.name
+        for lane in effective_lanes
+        if not lane.paused and lane.max_parallel - running_by_lane.get(lane.name, 0) > 0
+    )
+
+
+def _row_key(task: TicketTask) -> str:
+    return ticket_state_key(task.client, task.ticket_id, task.created_at)
+
+
+def _is_candidate(task: TicketTask, client_name: str, lanes: Collection[str]) -> bool:
+    return (
+        task.client == client_name
+        and task.status == QueueItemStatus.PENDING
+        and task.stage in _GATED_STAGES
+        and task.adopted_pr_url is None
+        and task.pr_url is None
+        and task.ticket_id.isdecimal()
+        and task.lane in lanes
+    )
+
+
+def _candidates(
+    client_name: str,
+    queue_snapshot: DevQueueStore,
+    *,
+    claimable_lanes: Collection[str],
+    priority_ticket_ids: Sequence[str],
+    cache: Mapping[str, TicketStateProbe],
+) -> list[TicketTask]:
+    """Guard candidates in claim order.
+
+    Priority ids first (list order), then ``(-priority, created_at)``, which is
+    the order ``_claim_next_pending`` visits rows. A row carrying a
+    ``cancelled_at`` stamp was requeued by the operator and is skipped.
+    """
+    eligible = [
+        task
+        for task in queue_snapshot.tasks
+        if _is_candidate(task, client_name, claimable_lanes)
+        and ((probe := cache.get(_row_key(task))) is None or probe.cancelled_at is None)
+    ]
+    ranked = sorted(eligible, key=lambda t: (-t.priority, t.created_at))
+    ordered = [
+        task for tid in priority_ticket_ids for task in ranked if task.ticket_id == tid
+    ]
+    ordered.extend(task for task in ranked if task.ticket_id not in priority_ticket_ids)
+    return ordered
+
+
+def _age_seconds(now: datetime, then: datetime | None) -> float | None:
+    return None if then is None else (now - then).total_seconds()
+
+
+def _needs_read(probe: TicketStateProbe | None, now: datetime) -> bool:
+    """False only for a fresh OPEN verdict or a failed read still in backoff.
+
+    A cached CLOSED verdict is never trusted to cancel (rule 1): it has no
+    lifetime of its own and is always read again in this pass.
+    """
+    if probe is None or probe.closed:
+        return True
+    verdict_age = _age_seconds(now, probe.checked_at)
+    if verdict_age is not None and verdict_age < _STATE_VERDICT_TTL_SECONDS:
+        return False
+    failed_age = _age_seconds(now, probe.attempted_at)
+    return failed_age is None or failed_age >= _FAILED_READ_BACKOFF_SECONDS
+
+
+def _last_attempt(probe: TicketStateProbe | None) -> datetime:
+    """When this row was last read (any outcome); never-read sorts first."""
+    stamps = [] if probe is None else [probe.checked_at, probe.attempted_at]
+    return max(
+        (s for s in stamps if s is not None), default=datetime.min.replace(tzinfo=UTC)
+    )
+
+
+def _read_state(
+    client: ClientConfig,
+    task: TicketTask,
+    now: datetime,
+) -> TicketStateProbe:
+    """Read one issue's state; a non-verdict is a negative attempt, never a hit."""
+    state = fetch_issue_state(
+        task.ticket_id, _STATE_READ_TIMEOUT_SECONDS, cwd=_git_dir(client)
+    )
+    if state == _GH_ISSUE_STATE_CLOSED:
+        return TicketStateProbe(checked_at=now, closed=True)
+    if state == _GH_ISSUE_STATE_OPEN:
+        return TicketStateProbe(checked_at=now, closed=False)
+    _log.info(
+        "dispatch: closed-ticket guard could not read %s/%s (state=%s);"
+        " dispatching as usual, retry after %ds",
+        client.name,
+        task.ticket_id,
+        state,
+        _FAILED_READ_BACKOFF_SECONDS,
+    )
+    return TicketStateProbe(
+        checked_at=None,
+        closed=False,
+        attempted_at=now,
+    )
+
+
+class _ReadBudget:
+    """The per-client, per-tick read cap plus wall-clock deadline."""
+
+    def __init__(self, clock: Callable[[], float], budget_seconds: float) -> None:
+        self.clock = clock
+        self.budget_seconds = budget_seconds
+        self.deadline = clock() + budget_seconds
+        self.reads = 0
+
+    def take(self) -> bool:
+        """Consume one read slot, or False when the cap or deadline is hit."""
+        if self.reads >= _MAX_STATE_READS_PER_TICK or self.clock() >= self.deadline:
+            return False
+        self.reads += 1
+        return True
+
+
+def resolve_closed_ticket_hits(
+    client: ClientConfig,
+    queue_snapshot: DevQueueStore,
+    *,
+    claimable_lanes: Collection[str],
+    priority_ticket_ids: Sequence[str] | None = None,
+    now: datetime | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    budget_seconds: float = _STATE_READ_BUDGET_SECONDS,
+) -> dict[str, ClosedTicketHit]:
+    """Ticket id -> guard hit for *client*'s PENDING PLAN/IMPL candidates.
+
+    Runs lock-free (see the module docstring). *now*, *clock* and
+    *budget_seconds* are injectable for tests; production callers omit them.
+    """
+    # ADR-0013 / R2: only a GitHub tracker is read. OTHER (Linear, ...) and
+    # UNSET do nothing; there is no way to read their state without guessing.
+    if tracker_kind(client.workspace_path).tracker_class is not TrackerClass.GITHUB:
+        return {}
+    resolved_now = now if now is not None else datetime.now(UTC)
+    cache = load_ticket_state_probes()
+    candidates = _candidates(
+        client.name,
+        queue_snapshot,
+        claimable_lanes=claimable_lanes,
+        priority_ticket_ids=priority_ticket_ids or [],
+        cache=cache,
+    )
+    hits: dict[str, ClosedTicketHit] = {}
+    groups: dict[str, list[TicketTask]] = {}
+    for task in candidates:
+        groups.setdefault(task.ticket_id, []).append(task)
+    to_read: list[tuple[datetime, int, list[TicketTask]]] = []
+    for index, group in enumerate(groups.values()):
+        probes = [cache.get(_row_key(task)) for task in group]
+        if any(_needs_read(probe, resolved_now) for probe in probes):
+            prior = min(probes, key=_last_attempt, default=None)
+            to_read.append((_last_attempt(prior), index, group))
+    to_read.sort(key=lambda item: (item[0], item[1]))
+    new_entries = _read_window(
+        client,
+        [group for _, _, group in to_read],
+        hits,
+        resolved_now,
+        _ReadBudget(clock, budget_seconds),
+    )
+    keep = {_row_key(t) for t in queue_snapshot.tasks if t.client == client.name}
+    prefix = f"{client.name}/"
+    if new_entries or any(k.startswith(prefix) and k not in keep for k in cache):
+        saved = save_ticket_state_probes(client.name, new_entries, prune_to_keys=keep)
+        if not saved:
+            # A failed cache write must not cancel, and must not be claimed
+            # unchecked either (R3), so every closed hit is held for retry.
+            return {
+                tid: ClosedTicketHit(hit.created_at, defer=True)
+                for tid, hit in hits.items()
+            }
+    return hits
+
+
+def _read_window(
+    client: ClientConfig,
+    to_read: Sequence[Sequence[TicketTask]],
+    hits: dict[str, ClosedTicketHit],
+    now: datetime,
+    budget: _ReadBudget,
+) -> dict[str, TicketStateProbe]:
+    """Read *to_read* in order within *budget*; defer the rest into *hits*.
+
+    Every read, successful or not, consumes one slot, and one failed read does
+    not stop the rest (a short-circuit would let one failing issue starve
+    every later row).
+    """
+    new_entries: dict[str, TicketStateProbe] = {}
+    deferred = 0
+    for group in to_read:
+        if not budget.take():
+            for index, task in enumerate(group):
+                hit_key = task.ticket_id if index == 0 else _row_key(task)
+                hits[hit_key] = ClosedTicketHit(task.created_at, defer=True)
+            deferred += 1
+            continue
+        task = group[0]
+        entry = _read_state(client, task, now)
+        for member in group:
+            new_entries[_row_key(member)] = entry
+        if entry.closed:
+            # One issue-state read must not cancel every duplicate queue row:
+            # only the first row in claim order has independently earned the
+            # CLOSED verdict. Hold the remaining row identities so they are
+            # read independently after the first row leaves the queue.
+            hits[task.ticket_id] = ClosedTicketHit(task.created_at, defer=False)
+            for member in group[1:]:
+                hits[_row_key(member)] = ClosedTicketHit(member.created_at, defer=True)
+    if deferred:
+        _log.info(
+            "dispatch: closed-ticket guard deferred %d candidate(s) for %s past its"
+            " per-tick read cap (%d) or budget (%ss); held PENDING, read next tick",
+            deferred,
+            client.name,
+            _MAX_STATE_READS_PER_TICK,
+            budget.budget_seconds,
+        )
+    return new_entries

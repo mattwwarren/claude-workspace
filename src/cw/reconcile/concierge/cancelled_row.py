@@ -16,6 +16,7 @@ from cw.dev_queue import (
     save_dev_queue,
     transition_task_status,
 )
+from cw.dispatch_state_ticket_state import guard_cancelled_row_keys, ticket_state_key
 from cw.events import record_event
 from cw.models import OrchestratorEventType, QueueItemStatus
 from cw.reconcile.cancelled_row_probes import (
@@ -35,6 +36,8 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Recipe 3: cancelled-row dead-end normalization
 # ---------------------------------------------------------------------------
+
+_ROW_KEY_EVIDENCE = "_ticket_state_row_key"
 
 
 def _detect_cancelled_row_candidates(
@@ -60,20 +63,32 @@ def _detect_cancelled_row_candidates(
     intentional, not a defect.
     """
     candidates: list[ConciergeCandidate] = []
-    for key in cancelled_row_targets(tasks):
+    target_keys = dict.fromkeys(cancelled_row_targets(tasks))
+    for key in target_keys:
         if not cancelled_row_has_commits(probes, key):
             continue
-        candidates.append(
-            ConciergeCandidate(
-                ticket_id=key.ticket_id,
-                client=key.client,
-                recipe=RECIPE_CANCELLED_ROW_RESTORE,
-                evidence={
-                    "worktree_path": str(key.worktree_path),
-                    "default_branch": key.default_branch,
-                },
+        for task in tasks:
+            if (
+                task.status != QueueItemStatus.CANCELLED
+                or task.client != key.client
+                or task.ticket_id != key.ticket_id
+                or task.worktree_path != key.worktree_path
+            ):
+                continue
+            candidates.append(
+                ConciergeCandidate(
+                    ticket_id=task.ticket_id,
+                    client=task.client,
+                    recipe=RECIPE_CANCELLED_ROW_RESTORE,
+                    evidence={
+                        "worktree_path": str(key.worktree_path),
+                        "default_branch": key.default_branch,
+                        _ROW_KEY_EVIDENCE: ticket_state_key(
+                            task.client, task.ticket_id, task.created_at
+                        ),
+                    },
+                )
             )
-        )
     return candidates
 
 
@@ -86,24 +101,40 @@ def _act_on_cancelled_row_candidates(candidates: list[ConciergeCandidate]) -> li
     """
     if not candidates:
         return []
-    by_ticket = {c.ticket_id: c for c in candidates}
+    # Match on the complete queue-row identity, not just (client, ticket_id).
+    by_row = {
+        c.evidence[_ROW_KEY_EVIDENCE]: c
+        for c in candidates
+        if isinstance(c.evidence.get(_ROW_KEY_EVIDENCE), str)
+    }
     recovered: list[str] = []
     with dev_queue_lock():
         store = load_dev_queue()
         changed = False
+        guard_cancelled = guard_cancelled_row_keys()
         for task in store.tasks:
-            candidate = by_ticket.get(task.ticket_id)
+            row_key = ticket_state_key(task.client, task.ticket_id, task.created_at)
+            candidate = by_row.get(row_key)
             if candidate is None:
                 continue
             if task.status != QueueItemStatus.CANCELLED:
                 continue
+            # Re-check under the queue lock immediately before restoring: a
+            # guard cancel is reversible only through an operator requeue (R4).
+            if row_key in guard_cancelled:
+                continue
+            event_evidence = {
+                key: value
+                for key, value in candidate.evidence.items()
+                if key != _ROW_KEY_EVIDENCE
+            }
             record_event(
                 OrchestratorEventType.CONCIERGE_RECOVERED,
                 {
                     "ticket_id": task.ticket_id,
                     "client": task.client,
                     "recipe": RECIPE_CANCELLED_ROW_RESTORE,
-                    "evidence": candidate.evidence,
+                    "evidence": event_evidence,
                 },
                 correlation_id=task.ticket_id,
             )

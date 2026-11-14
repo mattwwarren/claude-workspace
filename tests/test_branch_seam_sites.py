@@ -312,6 +312,7 @@ def test_occupied_skip_log_names_the_row_branch_worktree(
         tracker_mcp_gate_hits={},
         adopted_head_drifts={},
         review_approval_holds={},
+        closed_ticket_hits={},
         store=DevQueueStore(tasks=[task]),
         now=datetime.now(UTC),
     )
