@@ -321,52 +321,62 @@ def _spans_from(
     trigger: str,
     *,
     first_only: bool = False,
-    continue_lines: bool = False,
 ) -> list[Span]:
-    """Spans opened at or after ``col`` on line ``idx``."""
+    """Spans opened at or after ``col`` on line ``idx``.
+
+    A span may wrap onto following lines (bounded by ``_find_span``). After one
+    wrap, openers are read only on the closing line of that wrapped span, and a
+    second wrap stops the scan, so no scan advances past the span's own closing
+    line.
+    """
     spans: list[Span] = []
-    current_idx = idx
+    current = idx
     pos = col
+    wrapped = False
     while True:
-        opener = _OPEN_RE.search(doc.masked[current_idx], pos)
+        opener = _OPEN_RE.search(doc.masked[current], pos)
         if opener is None:
-            if (
-                not continue_lines
-                or _ends_paragraph(doc.masked[current_idx])
-                or current_idx + 1 >= len(doc.masked)
-            ):
-                break
-            current_idx += 1
-            pos = 0
-            continue
-        found = _find_span(doc, current_idx, opener.start())
+            break
+        found = _find_span(doc, current, opener.start())
         if found is None:
             break
         text, end_idx, end_col = found
-        spans.append(Span(text, current_idx + 1, trigger, opener.start()))
+        spans.append(Span(text, current + 1, trigger, opener.start()))
         if first_only:
             break
-        current_idx = end_idx
+        if end_idx != current:
+            if wrapped:
+                break
+            wrapped = True
+        current = end_idx
         pos = end_col + 1
-        if not continue_lines and end_idx != idx:
-            break
     return spans
 
 
+def _field_continuation_idx(doc: _Doc, idx: int) -> int | None:
+    """The line after a label-only line, when it may carry the field's quote."""
+    nxt = idx + 1
+    if nxt >= len(doc.masked):
+        return None
+    line = doc.masked[nxt]
+    if _ends_paragraph(line) or _FIELD_RE.match(line) is not None:
+        return None
+    return nxt
+
+
 def _field_spans(doc: _Doc) -> list[Span]:
+    """One pass: each label scans its own line, else only the next line."""
     spans: list[Span] = []
     for idx, line in enumerate(doc.masked):
         match = _FIELD_RE.match(line)
-        if match is not None:
-            spans.extend(
-                _spans_from(
-                    doc,
-                    idx,
-                    match.end(),
-                    TRIGGER_FIELD,
-                    continue_lines=True,
-                )
-            )
+        if match is None:
+            continue
+        own = _spans_from(doc, idx, match.end(), TRIGGER_FIELD)
+        spans.extend(own)
+        if not own:
+            nxt = _field_continuation_idx(doc, idx)
+            if nxt is not None:
+                spans.extend(_spans_from(doc, nxt, 0, TRIGGER_FIELD))
     return spans
 
 

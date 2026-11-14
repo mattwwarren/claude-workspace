@@ -397,6 +397,91 @@ def test_field_without_label_or_quote_yields_nothing(line: str) -> None:
     assert _check(line + "\n") == {"quotes_checked": 0, "unmatched": []}
 
 
+def test_field_does_not_attribute_later_prose_quote() -> None:
+    # (a) a label's own quote does not license scanning the prose below it.
+    plan = (
+        f'Ticket quote: "{_FAB}"\n'
+        'Unrelated prose mentions "separate invented phrase here" only.\n'
+    )
+    assert _quotes(_check(plan)) == [_FAB]
+
+
+def test_field_label_alone_takes_quote_on_next_line() -> None:
+    # (b) a label alone on its line: the next line's quote is the field's.
+    verdict = _check(f'Ticket quote:\n"{_FAB}"\n')
+    assert _quotes(verdict) == [_FAB]
+    assert _entries(verdict)[0]["line"] == 2
+
+
+@pytest.mark.parametrize(
+    "next_line",
+    [
+        f'- "{_FAB}"',
+        f'1. "{_FAB}"',
+        f'## "{_FAB}"',
+        f'# "{_FAB}"',
+    ],
+)
+def test_field_label_alone_ignores_quote_on_list_or_heading(next_line: str) -> None:
+    # (c) the immediately following line is a list item or heading: not the field's.
+    assert _check(f"Ticket quote:\n{next_line}\n") == {
+        "quotes_checked": 0,
+        "unmatched": [],
+    }
+
+
+def test_field_wrapped_quote_is_one_span_with_correct_end() -> None:
+    # (d) opens on the label line, closes on the next; trailing prose is excluded.
+    plan = (
+        'Ticket quote: "fabricated words that\n'
+        'appear nowhere at all" and then prose\n'
+        'Unrelated "second invented phrase here" line.\n'
+    )
+    verdict = _check(plan)
+    assert _quotes(verdict) == ["fabricated words that\nappear nowhere at all"]
+
+
+def test_field_scan_stops_after_second_wrap() -> None:
+    # The second span opens on the first span's closing line and wraps once; it is
+    # read. A third quote after that second wrap is not: no further wrap is followed.
+    plan = (
+        'Ticket quote: "fabricated words that\n'
+        'appear nowhere" and "second invented\n'
+        'phrase continues here" and "third invented phrase"\n'
+    )
+    assert _quotes(_check(plan)) == [
+        "fabricated words that\nappear nowhere",
+        "second invented\nphrase continues here",
+    ]
+
+
+def test_two_labels_each_yield_only_their_own_quote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # (e) two labelled fields in one paragraph: each yields its own quote, and
+    # each label is scanned exactly once (no per-field rescan).
+    calls: list[str] = []
+    real = _mod._spans_from
+
+    def counting(*args: object, **kwargs: object) -> object:
+        # _field_spans passes the trigger positionally (4th argument).
+        if len(args) > 3 and args[3] == _mod.TRIGGER_FIELD:
+            calls.append("field")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(_mod, "_spans_from", counting)
+    plan = f'Ticket quote: "{_FAB}"\nTicket quote: "second invented phrase here"\n'
+    verdict = _check(plan)
+    assert _quotes(verdict) == [_FAB, "second invented phrase here"]
+    assert len(calls) == 2
+
+
+def test_label_alone_before_another_label_takes_no_next_line() -> None:
+    # A label-only line followed by another label does not borrow that label's quote.
+    plan = 'Ticket quote:\nTicket quote: "second invented phrase here"\n'
+    assert _quotes(_check(plan)) == ["second invented phrase here"]
+
+
 # ---------------------------------------------------------------------------
 # T2: attribution sentence
 # ---------------------------------------------------------------------------
