@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Adopting a PR with an in-progress CheckRun no longer refuses it as malformed (#3627, #3207).** gh reports `"conclusion": ""` for a QUEUED or IN_PROGRESS CheckRun; the adopt classifier now treats that as no conclusion yet (pending). A COMPLETED CheckRun with an empty conclusion and any unknown non-empty conclusion are still refused.
+
 ### Added
 
 - **A `large_diff` review adds a Transitive Impact lane and tree access, on both review paths (#2086).** When the branch diff is `large_diff` and code changed, the reviewer roster gains a Transitive Impact Reviewer (the SysAdmin spec, framed to trace changed producers and contracts through real callers, consumers, persisted data, reruns and rollout). On the Claude-native path Architecture, Test Quality and Transitive Impact also get their own isolation worktree, checked out at the pushed branch, falling back to a degraded diff-only lane. The codex lane now measures `large_diff` over the whole branch on every pass (it used the hint-only tier before), so a Small-tier `large_diff` branch gets the Large list there too; the measurement fails open to the unscaled roster. Small-tier diffs that are not `large_diff` keep the same 3 to 4 lanes. No new config key or event.
