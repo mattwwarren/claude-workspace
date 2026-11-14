@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Adopting a PR with an in-progress CheckRun no longer refuses it as malformed (#3627, #3207).** gh reports `"conclusion": ""` for a QUEUED or IN_PROGRESS CheckRun; the adopt classifier now treats that as no conclusion yet (pending). A COMPLETED CheckRun with an empty conclusion and any unknown non-empty conclusion are still refused.
+
 ### Added
 
 - **`cw dev-queue usage-limit clear -c <client>` lifts a usage-limit back-off window early, and `status`/`doctor` show active windows (#3547).** After a manual account reset, the clear probes the account (`claude -p "Reply with exactly: WORKER-OK"`), refuses while it is still limited or when the probe cannot tell (`--force` skips the probe), then removes the client's window and releases every future `next_eligible_at` wait on its PENDING rows; gate-block waits and `spawn_error_count` are kept. `--dry-run` prints the plan and changes nothing. A running dispatch loop drops the window on its next tick through a new per-client clear mark (`usage_limit_cleared` in `dispatch_state.json`); no restart. The clear records `dispatch.usage_limit_cleared` with `trigger: "operator"` and additive keys, and the loop suppresses its own lapse event on that tick. `cw dev-queue status` gains a `Usage-limit windows:` block and a per-client `usage_limit` key in `--json` (additive); `cw doctor` adds an advisory `usage-limit/<client>` line per active window. Operator note: a detection that really happens after the clear re-arms the window; re-run the clear.
