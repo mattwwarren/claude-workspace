@@ -94,6 +94,22 @@ _HUGE_FILE = "huge/blob.py"
 _FILLER_SHARDS = 12
 
 
+@pytest.fixture(autouse=True)
+def _unscaled_roster(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hold ``large_diff`` off so the roster stays the cycle-0 roster (#2086).
+
+    These tests pin delta sharding and coverage-gap carry, and their scripted
+    runners are sized by the cycle-0 roles. A fix cycle here adds eight
+    100-line files, which takes the whole branch past the ``large_diff``
+    threshold and would grow the re-review roster mid-loop; that growth is
+    pinned in ``test_codex_review_context.py``, not here.
+    """
+    monkeypatch.setattr(
+        "cw.codex_review._context.core._measure_large_diff",
+        lambda _worktree, _default_branch: False,
+    )
+
+
 def _add_files(paths: Sequence[str], lines: int = _LINES) -> Callable[[Path], None]:
     """A fix-cycle edit that writes *paths* (``_stem_content`` of *lines*)."""
 

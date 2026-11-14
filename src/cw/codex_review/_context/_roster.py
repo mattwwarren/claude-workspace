@@ -40,12 +40,14 @@ def resolve_roster(
     categories: _FileCategories,
     mutates_persisted_state: bool,
     has_ticket_context: bool,
+    large_diff: bool,
 ) -> tuple[list[str], dict[str, str], list[AgentSpecStatus]]:
     """``(roles, agent spec text by role, per-role spec status)`` for one pass.
 
     With *engine_roster* the ids and texts pass through verbatim, each status
     ``source="repo"``; no ``.claude/agents`` file is read, in the worktree or
-    globally. Without one it is today's built-in selection and resolution.
+    globally, and *large_diff* is ignored. Without one it is the built-in
+    selection (scaled by *large_diff*, #2086) and resolution.
     """
     if engine_roster is not None:
         roles = [role for role, _ in engine_roster.roles]
@@ -59,6 +61,7 @@ def resolve_roster(
         categories=categories,
         mutates_persisted_state=mutates_persisted_state,
         has_ticket_context=has_ticket_context,
+        large_diff=large_diff,
     )
     fallback_enabled = _load_agent_spec_fallback_gate(worktree)
     resolutions = {
