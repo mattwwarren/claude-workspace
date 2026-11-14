@@ -309,12 +309,24 @@ def test_multiline_span_is_joined_and_checked() -> None:
     plan = 'Ticket quote: "alpha beta\ngamma delta\nepsilon zeta"\n'
     assert _check(plan, body="alpha beta gamma delta epsilon zeta")["unmatched"] == []
     flagged = _check(plan, body="something else")
-    assert _quotes(flagged) == ["alpha beta gamma delta epsilon zeta"]
+    assert _quotes(flagged) == ["alpha beta\ngamma delta\nepsilon zeta"]
+
+
+def test_multiline_unmatched_result_preserves_raw_quote_and_later_field_quote() -> None:
+    plan = (
+        'Ticket quote: "first fabricated\n'
+        'quote words here" and "second fabricated quote"\n'
+    )
+    verdict = _check(plan, body="nothing relevant")
+    assert _quotes(verdict) == [
+        "first fabricated\nquote words here",
+        "second fabricated quote",
+    ]
 
 
 def test_unterminated_span_within_three_lines_is_closed() -> None:
     plan = 'Ticket quote: "one two\nthree\nfour\nfive six"\n'
-    assert _quotes(_check(plan, body="x")) == ["one two three four five six"]
+    assert _quotes(_check(plan, body="x")) == ["one two\nthree\nfour\nfive six"]
 
 
 def test_unterminated_span_beyond_three_lines_is_skipped() -> None:
@@ -821,6 +833,25 @@ def test_main_unreadable_resolutions(
         tmp_path, "x", {"title": "t"}, ["--resolutions", str(tmp_path / "absent.txt")]
     )
     _assert_exit_2(_mod.main(args), capsys)
+
+
+def test_main_filtered_empty_corpus_is_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, _, args = _cli(
+        tmp_path,
+        _field(_QUOTE),
+        {
+            "title": "",
+            "body": "",
+            "comments": [{"body": f"<!-- cw-agent-authored -->\n{_QUOTE}"}],
+        },
+    )
+    rc = _mod.main(args)
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    assert "provenance filtering" in captured.err
 
 
 def test_main_missing_plan_option_is_usage_error(

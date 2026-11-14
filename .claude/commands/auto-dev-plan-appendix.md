@@ -209,7 +209,7 @@ Fires from the trigger stub in `.claude/commands/auto-dev-plan.md` Step 1f.2: be
 
 **Corpus recipes (per tracker).**
 
-- `github-issues`: `gh issue view <n> --json title,body,comments > "$SESSION_WT/.cw/ticket-quote-corpus.json"`, run in the foreground. The live fetch is redirected to the file mechanically, with no model transcription (precedent: `auto-dev-impl.md` redirects `touched-files.txt` into `$SESSION_WT/.cw/` the same way).
+- `github-issues`: resolve the intended repository as `$TARGET_REPO` from the active tracker configuration, verify it is the target `<owner>/<repo>`, then run `(cd "$SESSION_WT" && gh issue view <n> --repo "$TARGET_REPO" --json title,body,comments > "$SESSION_WT/.cw/ticket-quote-corpus.json")` in the foreground. The explicit `--repo` prevents ambient-repository selection; accept the corpus only after the command succeeds for that verified repository. The live fetch is redirected to the file mechanically, with no model transcription (precedent: `auto-dev-impl.md` redirects `touched-files.txt` into `$SESSION_WT/.cw/` the same way).
 - `linear`: write `{"title": ..., "body": <the issue description>, "comments": [{"id": ..., "body": ...}]}` with the Write tool from the live `get_issue` + `list_comments` results. `description` is accepted in place of `body`.
 
 **Residual gap (linear only).** For `linear`, the corpus is written by the orchestrator through the Write tool, which is LLM transcription, the same trust class this ticket removes: a mistranscribed corpus could match a fabricated quote or miss a real one. The `github-issues` path is a mechanical redirect and has no such gap. This gap is accepted and stated here, not closed; do not claim the linear verdict is mechanically sourced.

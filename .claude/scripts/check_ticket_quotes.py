@@ -295,14 +295,8 @@ def _ends_paragraph(line: str) -> bool:
     return not line.strip() or _PARAGRAPH_BREAK_RE.match(line) is not None
 
 
-def _join_parts(parts: list[str]) -> str:
-    if len(parts) == 1:
-        return parts[0]
-    return " ".join(part.strip() for part in parts)
-
-
 def _find_span(doc: _Doc, idx: int, col: int) -> tuple[str, int, int] | None:
-    """The span opened at ``doc.masked[idx][col]``: (text, end line, end column)."""
+    """The span opened at ``doc.masked[idx][col]``: (raw text, end line, end column)."""
     parts: list[str] = []
     start = col + 1
     for offset in range(_MAX_CONTINUATION_LINES + 1):
@@ -314,7 +308,7 @@ def _find_span(doc: _Doc, idx: int, col: int) -> tuple[str, int, int] | None:
         close = _CLOSE_RE.search(doc.masked[line_idx], start)
         if close is not None:
             parts.append(doc.raw[line_idx][start : close.start()])
-            return _join_parts(parts), line_idx, close.start()
+            return "\n".join(parts), line_idx, close.start()
         parts.append(doc.raw[line_idx][start:])
         start = 0
     return None
@@ -327,22 +321,35 @@ def _spans_from(
     trigger: str,
     *,
     first_only: bool = False,
+    continue_lines: bool = False,
 ) -> list[Span]:
     """Spans opened at or after ``col`` on line ``idx``."""
     spans: list[Span] = []
+    current_idx = idx
     pos = col
     while True:
-        opener = _OPEN_RE.search(doc.masked[idx], pos)
+        opener = _OPEN_RE.search(doc.masked[current_idx], pos)
         if opener is None:
-            break
-        found = _find_span(doc, idx, opener.start())
+            if (
+                not continue_lines
+                or _ends_paragraph(doc.masked[current_idx])
+                or current_idx + 1 >= len(doc.masked)
+            ):
+                break
+            current_idx += 1
+            pos = 0
+            continue
+        found = _find_span(doc, current_idx, opener.start())
         if found is None:
             break
         text, end_idx, end_col = found
-        spans.append(Span(text, idx + 1, trigger, opener.start()))
-        if first_only or end_idx != idx:
+        spans.append(Span(text, current_idx + 1, trigger, opener.start()))
+        if first_only:
             break
+        current_idx = end_idx
         pos = end_col + 1
+        if not continue_lines and end_idx != idx:
+            break
     return spans
 
 
@@ -351,7 +358,15 @@ def _field_spans(doc: _Doc) -> list[Span]:
     for idx, line in enumerate(doc.masked):
         match = _FIELD_RE.match(line)
         if match is not None:
-            spans.extend(_spans_from(doc, idx, match.end(), TRIGGER_FIELD))
+            spans.extend(
+                _spans_from(
+                    doc,
+                    idx,
+                    match.end(),
+                    TRIGGER_FIELD,
+                    continue_lines=True,
+                )
+            )
     return spans
 
 
@@ -537,11 +552,12 @@ def build_corpus(data: object, resolutions: str = "") -> list[str]:
         raise CorpusError(message)
     texts = [_optional_text(data, key) for key in ("title", "body", "description")]
     bodies = _comment_bodies(data)
-    if not any(text.strip() for text in [*texts, *bodies]):
-        message = "corpus has no text"
-        raise CorpusError(message)
     kept = [*texts, *(body for body in bodies if _provenance_ok(body)), resolutions]
-    return [piece for piece in map(_normalize, kept) if piece]
+    normalized = [piece for piece in map(_normalize, kept) if piece]
+    if not normalized:
+        message = "corpus has no text after provenance filtering"
+        raise CorpusError(message)
+    return normalized
 
 
 # ---------------------------------------------------------------------------
