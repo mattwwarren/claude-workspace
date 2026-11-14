@@ -44,6 +44,7 @@ EXPECTED_EXPORTS = frozenset(
         "_COMPLETION_ROUTING_GRACE_SECONDS",
         "_PROPOSED_ACTION_VARIANT_A",
         "_PROPOSED_ACTION_VARIANT_B",
+        "_scan_variant_b",
         "_STALE_GATE_CONSUMER",
         "_TERMINAL_SIBLING_STATUSES",
         "_VARIANT_A_BLOCKED_DISPOSITION",
@@ -131,6 +132,7 @@ _STALE_GATE_NAMES = (
     "_closed_pr_numbers_by_client",
     "_release_variant_a",
     "_release_variant_b",
+    "_scan_variant_b",
     "release_stale_gated_tasks",
 )
 _OWNED_NAMES: dict[str, tuple[str, ...]] = {

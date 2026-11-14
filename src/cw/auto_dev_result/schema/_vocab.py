@@ -155,6 +155,13 @@ REVIEW_NOT_CONVERGING_BLOCKER_REASON: Literal["review_not_converging"] = (
 CONFIRM_BACKEND_UNAVAILABLE_BLOCKER_REASON: Literal["confirm_backend_unavailable"] = (
     "confirm_backend_unavailable"
 )
+# GitHub #2321 — a worker dependency park: the upstream PR must merge first.
+# Optionally carries ``Blocker.depends_on_pr`` (same-repo PR number); with it,
+# routing stamps a ``dependency_hold`` row that frees its lane slot. Additive
+# on the sentinel: no ``schema_version`` bump.
+DEPENDENCY_UNMERGED_BLOCKER_REASON: Literal["dependency_unmerged"] = (
+    "dependency_unmerged"
+)
 # blocker.reason (open enum, §4.2) paired with the stale_dispatch status above.
 # Named for the same reason EMPTY_DIFF_BLOCKER_REASON is: two producers write
 # it (the auto-dev-intake Stage 0 self-check and the auto-dev-plan Stage 1
@@ -206,7 +213,7 @@ OPERATOR_UNAVAILABLE_BLOCKER_REASONS: frozenset[str] = frozenset(
     {
         "push_auth_failed",
         "operator_unavailable",
-        "dependency_unmerged",
+        DEPENDENCY_UNMERGED_BLOCKER_REASON,
         IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
         # #2787: converge-to-clean confirm round could not run (backend
         # unavailable) -- an operator-recoverable park, not a broken leg.

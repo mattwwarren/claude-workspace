@@ -141,6 +141,8 @@ _FIND_BY_NAME_OR_ID_ALLOWLIST: dict[tuple[str, str], _Classification] = {
     ("cw/session.py", "start_session.<locals>._append"): ("id-only", ()),
     # task.session_id values cleared by cancel_ticket.
     ("cw/cli/dev_queue/crud.py", "dev_queue_cancel"): ("id-only", ()),
+    # #2321: the liveness probe looks up the row's own bound session id.
+    ("cw/dev_queue/hold.py", "check_holdable"): ("id-only", ()),
     ("cw/dev_queue/requeue.py", "unblock_ticket"): ("id-only", ()),
     # Called with session.id.
     (_RESUME_TRIGGER, "NativeDaemonResumeTriggerAdapter._recheck_gate"): (

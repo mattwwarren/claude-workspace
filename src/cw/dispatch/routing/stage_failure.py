@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import (
     AWAITING_CI_EVIDENCE_BLOCKER_REASON,
+    DEPENDENCY_UNMERGED_BLOCKER_REASON,
     FINALIZE_REGRESS_BLOCKER_REASONS,
     FINALIZE_REGRESS_CAP,
     GATE_TIMEOUT_BLOCKER_REASON,
@@ -34,6 +35,7 @@ from cw.auto_dev_result import (
     STAGE_FAILURE_STATUSES,
     STALE_DISPATCH_BLOCKER_REASON,
     is_known_blocker_reason,
+    parse_depends_on_pr,
 )
 from cw.branch_ahead import merge_in_progress
 from cw.codex_review import (
@@ -41,6 +43,7 @@ from cw.codex_review import (
     CODEX_REVIEW_UNPARSEABLE,
 )
 from cw.dev_queue import (
+    DEPENDENCY_HOLD_DISPOSITION,
     REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
     _extract_pr_url_or_info,
     _stage_regress,
@@ -279,6 +282,43 @@ def _park_must_fix_mechanically_rejected(task: TicketTask) -> None:
     )
 
 
+def _dependency_park_pr(blocker_reason: str | None, blocker: object) -> int | None:
+    """The upstream PR a ``dependency_unmerged`` park waits on, or None (#2321).
+
+    Read only from the structured ``depends_on_pr`` field, never parsed out of
+    ``details``. Only the dependency reason is honoured, so the field is
+    ignored on any other blocker reason.
+    """
+    if blocker_reason != DEPENDENCY_UNMERGED_BLOCKER_REASON or not isinstance(
+        blocker, dict
+    ):
+        return None
+    dependency_pr = parse_depends_on_pr(blocker.get("depends_on_pr"))
+    return None if dependency_pr is None else int(dependency_pr)
+
+
+def _stamp_blocked_on_pr(
+    task: TicketTask,
+    blocker_reason: str | None,
+    blocker: object,
+    dependency_pr: int | None,
+) -> None:
+    """Stamp ``task.blocked_on_pr`` AFTER ``transition_task_status`` (#1713, #2321).
+
+    Must run after the transition: its unconditional clear zeroes the field, so
+    a stamp taken before the call is immediately wiped.
+    """
+    if dependency_pr is not None:
+        task.blocked_on_pr = dependency_pr
+        return
+    if blocker_reason in (
+        _PRIOR_PIPELINE_PR_OPEN_REASON,
+        STALE_DISPATCH_BLOCKER_REASON,
+    ):
+        details = blocker.get("details") if isinstance(blocker, dict) else None
+        task.blocked_on_pr = _extract_blocked_on_pr(details)
+
+
 def _route_stage_failure(
     task: TicketTask,
     clients: dict[str, ClientConfig],
@@ -509,6 +549,10 @@ def _route_stage_failure(
     #
     # #3618: an awaiting_ci_evidence park waits on CI by design (the gates
     # were deferred or the mapped checks are not yet green), not a crashloop.
+    #
+    # #2321: a dependency_unmerged park waits on an upstream PR merging, not on
+    # this ticket's own progress. Exempt it, so a park-and-release cycle never
+    # charges unproductive_attempts.
     rule5_unproductive = (
         False
         if status == "stale_dispatch"
@@ -517,9 +561,15 @@ def _route_stage_failure(
             CODEX_REVIEW_UNPARSEABLE,
             GATE_TIMEOUT_BLOCKER_REASON,
             AWAITING_CI_EVIDENCE_BLOCKER_REASON,
+            DEPENDENCY_UNMERGED_BLOCKER_REASON,
         )
         else claim_unproductive
     )
+    # #2321: a dependency park with a structured depends_on_pr is a
+    # dependency_hold row (waits on that PR's merge; frees its lane slot).
+    dependency_pr = _dependency_park_pr(blocker_reason, blocker)
+    if dependency_pr is not None:
+        disposition = DEPENDENCY_HOLD_DISPOSITION
     transition_task_status(
         task,
         QueueItemStatus.BLOCKED_ON_USER,
@@ -555,9 +605,4 @@ def _route_stage_failure(
     # release_stale_gated_tasks's Variant B cross-reference scan. The
     # rescan is retroactive, so a row stamped here needs no cooperation
     # from this call site beyond the stamp itself.
-    if blocker_reason in (
-        _PRIOR_PIPELINE_PR_OPEN_REASON,
-        STALE_DISPATCH_BLOCKER_REASON,
-    ):
-        details = blocker.get("details") if isinstance(blocker, dict) else None
-        task.blocked_on_pr = _extract_blocked_on_pr(details)
+    _stamp_blocked_on_pr(task, blocker_reason, blocker, dependency_pr)

@@ -24,6 +24,7 @@ from cw.dev_queue.dispositions import (
     TRACKER_MCP_GATE_DISPOSITION,
 )
 from cw.models import DispatchSkipReason
+from cw.models.enums import DEPENDENCY_HOLD_DISPOSITION
 
 # Pinned logger name for every record this package emits. Deliberately a
 # literal, not ``__name__``: the pre-split ``doctor/wedge.py`` logged under
@@ -98,6 +99,10 @@ _OPERATOR_GATED_PARK_DISPOSITIONS: frozenset[str] = frozenset(
     {
         FINALIZE_GATE_HELD_DISPOSITION,
         STALE_DISPATCH_GATE_DISPOSITION,
+        # #2321: the dependency hold waits on its PR merging; a reap revert would
+        # re-park it. With an id it holds no lane slot, so class 13 never reports
+        # it; without an id it holds one and class 13 reports it.
+        DEPENDENCY_HOLD_DISPOSITION,
         DispatchSkipReason.ATTEMPT_CAP_BLOCKED.value,
         ADOPTED_HEAD_DRIFT_DISPOSITION,
         LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,

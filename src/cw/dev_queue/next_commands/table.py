@@ -26,6 +26,8 @@ from cw.dev_queue.next_commands.parked import (
     _confirm_must_fix_overridden,
     _confirm_must_fix_overridden_commands,
     _confirm_must_fix_overridden_held_commands,
+    _dependency_held,
+    _dependency_hold_commands,
     _drain_commands,
     _drain_held,
     _finalize_approval_park_commands,
@@ -187,6 +189,9 @@ _RULES: tuple[_Rule, ...] = (
     _Rule(_attempt_capped, _attempt_capped_commands),  # 6b
     _Rule(_salvage_parked, _salvage_commands),  # 7
     _Rule(_drain_held, _drain_commands),  # 8
+    # GitHub #2321: must outrank rule 9, so a held row bound to a gate session
+    # is not told to `approve`.
+    _Rule(_dependency_held, _dependency_hold_commands),  # 8b
     _Rule(
         _at_approval_gate, _gate_commands, terminal_commands=_gate_terminal_commands
     ),  # 9

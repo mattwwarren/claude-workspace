@@ -8,6 +8,7 @@ rationale and DAG order.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Final
 
 
 class SessionPurpose(StrEnum):
@@ -107,6 +108,14 @@ OCCUPIED_LANE_STATUSES: frozenset[QueueItemStatus] = frozenset(
         QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
     ]
 )
+
+# GitHub #2321 — the dependency hold: a BLOCKED_ON_USER row waiting on a PR
+# merge. Stamped by ``cw dev-queue hold`` and by routing for a worker
+# ``dependency_unmerged`` park carrying ``depends_on_pr``. Keyed by the
+# ``cw.models`` slot predicate (``occupies_lane_slot``), so it lives here;
+# ``cw.dev_queue.dispositions`` re-exports it. A row with a ``blocked_on_pr``
+# id frees its lane slot; one without keeps it.
+DEPENDENCY_HOLD_DISPOSITION: Final = "dependency_hold"
 
 
 # Genuinely terminal QueueItemStatus values -- distinct from "outside

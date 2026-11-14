@@ -48,6 +48,7 @@ from cw.reconcile.tasks.stale_gate import (
     _pr_numbers_by_client_in_state,
     _release_variant_a,
     _release_variant_b,
+    _scan_variant_b,
     release_stale_gated_tasks,
 )
 from cw.reconcile.tasks.terminal_siblings import (
@@ -83,6 +84,7 @@ __all__ = [
     "_resolve_task_policy",
     "_revert_running_tasks_for_sessions",
     "_revert_terminal_backstop",
+    "_scan_variant_b",
     "_sessions_past_completion_grace",
     "backstop_targets",
     "capture_backstop_dirty_checks",

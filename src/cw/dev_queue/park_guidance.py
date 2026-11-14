@@ -24,6 +24,7 @@ from cw.dev_queue.gates import (
     MERGE_GATE_BLOCKED_STATUS,
     PREMISES_PENDING_VERIFICATION_STATUS,
 )
+from cw.models.enums import DEPENDENCY_HOLD_DISPOSITION
 
 RESOLVE_COMMAND = "cw dev-queue resolve --file <decisions.md>"
 
@@ -31,6 +32,15 @@ RESOLVE_COMMAND = "cw dev-queue resolve --file <decisions.md>"
 # refusal's commands. Dispositions without an entry fall through to the rule
 # commands alone.
 PARK_GUIDANCE: dict[str, str] = {
+    # GitHub #2321: waits on the PR named by blocked_on_pr. The serve loop
+    # releases it on merge; a PR that closes unmerged leaves it held and emits
+    # a session.reap_proposed event.
+    DEPENDENCY_HOLD_DISPOSITION: (
+        "This ticket is held until its blocking PR merges. The serve loop"
+        " releases it on merge by itself. If the PR closes unmerged the row"
+        " stays held and a session.reap_proposed event names it. Release it now"
+        " with `cw dev-queue requeue`."
+    ),
     AMBIGUITIES_PENDING_RESOLUTION_STATUS: (
         "The worker parked on open ambiguities. Answer them on the ticket, then"
         f" re-run the stage. At the plan stage, `{RESOLVE_COMMAND}` records"

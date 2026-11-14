@@ -14,6 +14,13 @@ a store-level PR watch, independent of any task row, already hydrated every
 serve tick by ``cw.pr_hydrate._hydrate_watched_prs`` (RFC 0011 S2, #1154).
 The mechanism is not new -- this is a third producer for it.
 
+Since #2321 the same registration covers every releasable park
+(``_is_variant_b_gate_task``): a dependency hold registers under
+``source="dependency_hold"``, and a ``prior_pipeline_pr_open`` park whose PR no
+other row carries is also watched. No code retires these watches (#3654). A
+leftover client-tagged watch makes another client's registration for the same
+repo and PR collide, the same limit #1927's stale-dispatch watches carry.
+
 Shape mirrors ``cw.dispatch.pr_gate``: a small, single-purpose, tick-scoped
 module. Three phases, deliberately ordered so no network/subprocess work ever
 runs under ``dev_queue_lock``:
@@ -37,10 +44,10 @@ lack of a ``client`` dimension is the reason registration goes through
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
 
 from cw.config import load_clients
-from cw.dev_queue import STALE_DISPATCH_DISPOSITION, load_dev_queue
+from cw.dev_queue import DEPENDENCY_HOLD_DISPOSITION, load_dev_queue
 from cw.dev_queue.crud import register_or_adopt_watched_pr
 from cw.gh import github_pr_url
 from cw.models import WatchedPr
@@ -59,25 +66,30 @@ if TYPE_CHECKING:
 # "cli") in any future dismiss/report path.
 _WATCHED_PR_SOURCE_STALE_DISPATCH_PARK: Final = "stale_dispatch_park"
 
+# GitHub #2321 -- a watch registered for a dependency hold (``cw dev-queue hold``
+# or a worker ``dependency_unmerged`` park carrying ``depends_on_pr``).
+_WATCHED_PR_SOURCE_DEPENDENCY_HOLD: Final = "dependency_hold"
+
+
+def _watched_pr_source(
+    task: TicketTask,
+) -> Literal["stale_dispatch_park", "dependency_hold"]:
+    """The ``WatchedPr.source`` a park's watch is registered under (#2321)."""
+    if task.disposition == DEPENDENCY_HOLD_DISPOSITION:
+        return _WATCHED_PR_SOURCE_DEPENDENCY_HOLD
+    return _WATCHED_PR_SOURCE_STALE_DISPATCH_PARK
+
 
 def _is_stale_dispatch_park(task: TicketTask) -> bool:
-    """True iff *task* is a BLOCKED_ON_USER ``stale_dispatch`` park.
+    """True iff *task* is a releasable park that needs an independent PR watch.
 
-    Delegates to ``cw.reconcile.tasks._is_variant_b_gate_task`` rather than
-    re-encoding its ``status``/``blocked_on_pr``/``blocked_reason`` checks: it
-    already reaches the identical ``stale_dispatch`` result on its non-Variant-B
-    branch, and duplicating that logic here would let a future widening of the
-    shared predicate (the same shape of change #1902 already made once) update
-    one copy and silently strand the other. The added ``disposition`` conjunct
-    is what narrows it to just this producer -- ``_is_variant_b_gate_task``
-    also admits the ``merge_gate_blocked``/``prior_pipeline_pr_open`` producer,
-    whose blocking PR belongs to a DIFFERENT ticket that already carries it as
-    a ``pr_url`` on its own store row, so only THIS producer's PR is
-    unreachable and needs a watch.
+    Since #2321 this covers every releasable park, not only ``stale_dispatch``:
+    it delegates to ``cw.reconcile.tasks._is_variant_b_gate_task``, which admits
+    the ``merge_gate_blocked``/``prior_pipeline_pr_open`` park (including a PR
+    that is not another row's ``pr_url``), the ``stale_dispatch`` park, and the
+    dependency hold. The name is kept for the existing callers and tests.
     """
-    return (
-        _is_variant_b_gate_task(task) and task.disposition == STALE_DISPATCH_DISPOSITION
-    )
+    return _is_variant_b_gate_task(task)
 
 
 def _unwatched_park_candidates(
@@ -167,7 +179,7 @@ def register_stale_dispatch_watched_prs() -> list[str]:
                 repo=repo,
                 pr_number=pr_number,
                 client=task.client,
-                source=_WATCHED_PR_SOURCE_STALE_DISPATCH_PARK,
+                source=_watched_pr_source(task),
             )
         )
         if outcome != "collision":

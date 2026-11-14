@@ -253,6 +253,7 @@ _EXPECTED_RULES = (
     ("_attempt_capped", "_attempt_capped_commands"),
     ("_salvage_parked", "_salvage_commands"),
     ("_drain_held", "_drain_commands"),
+    ("_dependency_held", "_dependency_hold_commands"),
     ("_at_approval_gate", "_gate_commands"),
     ("_sessionless", "_sessionless_commands"),
     ("_anything", "_generic_commands"),

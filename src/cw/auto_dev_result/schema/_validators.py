@@ -12,9 +12,24 @@ Package split: issue #2193.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NewType
 
 from cw.auto_dev_result.schema._vocab import IMPACT_REASON_KEY
+
+# GitHub #2321 — a same-repo PR number a dependency park waits on. Defined here
+# (not in _models) so the pure validator below and the model share it without a cycle.
+DependsOnPr = NewType("DependsOnPr", int)
+
+
+def parse_depends_on_pr(value: object) -> DependsOnPr | None:
+    """Return *value* as a :data:`DependsOnPr` iff it is a positive real int.
+
+    ``type(...) is int`` rejects ``bool`` (a subclass of int), floats, digit
+    strings and every other non-int. Zero and negatives are not PR numbers.
+    """
+    if type(value) is int and value > 0:
+        return DependsOnPr(value)
+    return None
 
 
 def _reject_empty_string_items(v: list[str], field_name: str) -> list[str]:

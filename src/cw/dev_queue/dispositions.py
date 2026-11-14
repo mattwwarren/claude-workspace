@@ -269,6 +269,15 @@ _PRE_DISPATCH_STALE_PR_REASON: Final = "pr_already_open_pre_dispatch"
 # It is an operator-gated park (#3055): `cw doctor --reap` never reverts it.
 TRACKER_MCP_GATE_DISPOSITION: Final = "tracker_mcp_gate"
 
+# GitHub #2321 -- the dependency hold: BLOCKED_ON_USER waiting on a PR merge.
+# Stamped by ``cw dev-queue hold`` and by routing for a worker
+# ``dependency_unmerged`` park carrying ``depends_on_pr``. The constant lives in
+# ``cw.models.enums`` (the ``cw.models`` slot predicate keys on it); import it
+# from there, and from ``cw.dev_queue`` for the package-level name.
+# Deliberately NOT a HOLD_DISPOSITIONS member: ``drain`` cannot release it, and
+# it is not a digest-eligible attention item. It is an
+# operator-gated park: ``cw doctor --reap`` never reverts it.
+
 # ``TicketTask.blocked_reason`` stamped alongside TRACKER_MCP_GATE_DISPOSITION
 # (#2442). The ``_pre_dispatch`` suffix follows _PRE_DISPATCH_STALE_PR_REASON's
 # convention: it tells "the loop refused to spawn this" apart from anything an

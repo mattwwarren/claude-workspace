@@ -14,6 +14,7 @@ from cw.auto_dev_result import (
 )
 from cw.config import load_clients, load_orchestrator_config
 from cw.dev_queue import (
+    DEPENDENCY_HOLD_DISPOSITION,
     GATE_TIMEOUT_DISPOSITION,
     STALE_DISPATCH_DISPOSITION,
     dev_queue_lock,
@@ -28,7 +29,9 @@ from cw.gh import (
     _GH_PR_STATE_MERGED,
 )
 from cw.models import (
+    ClientConfig,
     DevQueueStore,
+    OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
     ReapPolicy,
@@ -131,11 +134,21 @@ def _is_variant_b_gate_task(task: TicketTask) -> bool:
     client-tagged WatchedPr, which hydrates on the same serve tick and folds
     into the same per-client index. (Before #1927 this branch was
     unit-test-reachable but production-unreachable -- see #1902 R3.)
+
+    Since #2321 a third producer joins: a dependency hold
+    (disposition ``DEPENDENCY_HOLD_DISPOSITION``, with a structured
+    ``blocked_on_pr``), stamped by ``cw dev-queue hold`` or by routing for a
+    ``dependency_unmerged`` park carrying ``depends_on_pr``. Its blocking PR is
+    registered as a ``dependency_hold`` WatchedPr, so it has an independent
+    state source too. No code retires those watches (#3654).
     """
     if task.status != QueueItemStatus.BLOCKED_ON_USER:
         return False
     if task.blocked_on_pr is None:
         return False
+    # GitHub #2321: a dependency hold waits on its blocking PR the same way.
+    if task.disposition == DEPENDENCY_HOLD_DISPOSITION:
+        return True
     if task.disposition == _VARIANT_B_DISPOSITION:
         return task.blocked_reason == _PRIOR_PIPELINE_PR_OPEN_REASON
     return (
@@ -225,9 +238,19 @@ def _release_variant_a(task: TicketTask, policy: ReapPolicy) -> None:
         task.stale_gate_detected_at = datetime.now(UTC)
 
 
-def _release_variant_b(task: TicketTask, policy: ReapPolicy) -> None:
-    """Apply the SIGNAL_ONLY/AUTO release for a Variant B gate task."""
-    if policy is ReapPolicy.AUTO:
+def _release_variant_b(
+    task: TicketTask,
+    policy: ReapPolicy,
+    *,
+    operator_hold: bool = False,
+) -> None:
+    """Apply the SIGNAL_ONLY/AUTO release for a Variant B gate task.
+
+    ``operator_hold`` (#2321) forces the AUTO release for an operator hold
+    whatever the reap policy, because the operator asked for the hold. This
+    is one flag on this function, not a copy of it.
+    """
+    if operator_hold or policy is ReapPolicy.AUTO:
         transition_task_status(task, QueueItemStatus.PENDING)
         task.session_id = None
         # Why: the release fired on MERGED/CLOSED evidence, so the gate cleared
@@ -235,6 +258,79 @@ def _release_variant_b(task: TicketTask, policy: ReapPolicy) -> None:
         clear_gate_block_wait(task)
     else:
         task.stale_gate_detected_at = datetime.now(UTC)
+
+
+def _scan_variant_b(
+    store: DevQueueStore,
+    clients: dict[str, ClientConfig],
+    orchestrator_config: OrchestratorConfig,
+) -> tuple[
+    list[str], list[tuple[str, str, str, str, str | None, dict[str, int]]], bool
+]:
+    """Variant B cross-reference scan; caller holds ``dev_queue_lock`` (#2321).
+
+    Returns (released ids, pending events to emit after the lock, changed).
+    Dependency holds take the merged/closed split of their own class; every
+    other Variant B row keeps its pre-#2321 behavior.
+    """
+    released_ids: list[str] = []
+    pending: list[tuple[str, str, str, str, str | None, dict[str, int]]] = []
+    changed = False
+    merged_by_client = _merged_pr_numbers_by_client(store)
+    closed_by_client = _closed_pr_numbers_by_client(store)
+    for task in store.tasks:
+        if not _is_variant_b_gate_task(task):
+            continue
+        pr = task.blocked_on_pr
+        if pr is None:  # _is_variant_b_gate_task already excludes this
+            continue
+        merged = pr in merged_by_client.get(task.client, set())
+        closed = pr in closed_by_client.get(task.client, set())
+        if not merged and not closed:
+            continue  # unknown or still open: fail closed, release nothing
+        orig_session_id = task.session_id
+        policy = _resolve_task_policy(
+            task.client, task.lane, clients, orchestrator_config
+        )
+        # GitHub #2321: a dependency hold (the gate admits it only with an id).
+        dependency_hold = task.disposition == DEPENDENCY_HOLD_DISPOSITION
+        if dependency_hold:
+            if not merged:
+                # Closed unmerged: nothing to wait for. Latch the event once
+                # per episode.
+                if task.stale_gate_detected_at is None:
+                    task.stale_gate_detected_at = datetime.now(UTC)
+                    pending.append(
+                        (
+                            task.ticket_id,
+                            task.client,
+                            task.lane,
+                            # Closed unmerged: nothing to wait for; never releases.
+                            "dependency_hold_pr_closed_unmerged",
+                            orig_session_id,
+                            {"blocked_on_pr": pr},
+                        )
+                    )
+                    changed = True
+                continue
+            # An operator hold (no session) releases under any policy.
+            operator_hold = task.session_id is None
+            _release_variant_b(task, policy, operator_hold=operator_hold)
+        else:
+            _release_variant_b(task, policy)
+        released_ids.append(task.ticket_id)
+        pending.append(
+            (
+                task.ticket_id,
+                task.client,
+                task.lane,
+                _PROPOSED_ACTION_VARIANT_B,
+                orig_session_id,
+                {},
+            )
+        )
+        changed = True
+    return released_ids, pending, changed
 
 
 def release_stale_gated_tasks() -> list[str]:
@@ -278,12 +374,20 @@ def release_stale_gated_tasks() -> list[str]:
     PENDING requeue) via ``transition_task_status``, whose unconditional
     latch-clear then clears ``stale_gate_detected_at`` in the same call.
 
-    Residual blind spot (binding operator resolution, not closed here):
-    Variant B is cross-reference-only -- a blocking PR that merged or closed
-    and then left the queue entirely (its task row removed/never tracked) has
-    no ``pr_state`` for this scan to match against, so that row stays parked
-    until the orchestrator requeues or closes it. No ``gh pr view`` fallback is
-    attempted.
+    Since #2321 every releasable park registers a client-tagged ``WatchedPr``
+    (see ``cw.reconcile.stale_dispatch_watch``), so an orphaned
+    ``blocked_on_pr`` whose PR sits on no store row now releases. This
+    SUPERSEDES the earlier "residual blind spot" note. The multi-PR regex
+    fail-closed and the default ``signal_only`` stamp-only behavior for worker
+    parks are unchanged. No code retires those watches yet (#3654), the same
+    limit #1927's stale-dispatch watches already carry.
+
+    Dependency holds (#2321) follow their own rule: an operator hold
+    (``session_id is None``) releases to PENDING on MERGED under any policy; a
+    worker park with an id follows ``reap_policy``. A PR that CLOSED UNMERGED
+    never releases a dependency hold: it emits
+    ``dependency_hold_pr_closed_unmerged`` once per episode and leaves the row
+    held. An unknown PR state fails closed.
 
     Does NOT require ``sessions_lock`` -- operates on the dev queue and the
     events inbox only. Returns the list of ticket_ids released or stamped.
@@ -301,7 +405,7 @@ def release_stale_gated_tasks() -> list[str]:
     # captured BEFORE _release_variant_a/_release_variant_b run (both clear
     # task.session_id under the AUTO branch) -- mirrors
     # park_terminal_sibling_tasks's orig_session_id precedent exactly.
-    pending_events: list[tuple[str, str, str, str, str | None]] = []
+    pending_events: list[tuple[str, str, str, str, str | None, dict[str, int]]] = []
 
     # PR_MERGED event IDs processed by the Variant A loop below, deferred
     # until AFTER save_dev_queue succeeds (see the advance_cursor loop below
@@ -337,6 +441,7 @@ def release_stale_gated_tasks() -> list[str]:
                         task.lane,
                         _PROPOSED_ACTION_VARIANT_A,
                         orig_session_id,
+                        {},
                     )
                 )
                 changed = True
@@ -344,31 +449,12 @@ def release_stale_gated_tasks() -> list[str]:
 
         # Variant B: dev-queue-wide cross-reference scan (no event stream
         # names these rows directly -- see docstring).
-        merged_by_client = _merged_pr_numbers_by_client(store)
-        closed_by_client = _closed_pr_numbers_by_client(store)
-        for task in store.tasks:
-            if not _is_variant_b_gate_task(task):
-                continue
-            if task.blocked_on_pr not in merged_by_client.get(
-                task.client, set()
-            ) and task.blocked_on_pr not in closed_by_client.get(task.client, set()):
-                continue
-            orig_session_id = task.session_id
-            policy = _resolve_task_policy(
-                task.client, task.lane, clients, orchestrator_config
-            )
-            _release_variant_b(task, policy)
-            released_ids.append(task.ticket_id)
-            pending_events.append(
-                (
-                    task.ticket_id,
-                    task.client,
-                    task.lane,
-                    _PROPOSED_ACTION_VARIANT_B,
-                    orig_session_id,
-                )
-            )
-            changed = True
+        variant_b_released, variant_b_pending, variant_b_changed = _scan_variant_b(
+            store, clients, orchestrator_config
+        )
+        released_ids.extend(variant_b_released)
+        pending_events.extend(variant_b_pending)
+        changed = changed or variant_b_changed
 
         if changed:
             save_dev_queue(store)
@@ -397,7 +483,14 @@ def release_stale_gated_tasks() -> list[str]:
             advance_cursor(_STALE_GATE_CONSUMER, event_id)
 
     # Emit events after dev_queue_lock releases (ADR-0019 permits either).
-    for ticket_id, client, lane, proposed_action, session_id in pending_events:
+    for (
+        ticket_id,
+        client,
+        lane,
+        proposed_action,
+        session_id,
+        evidence,
+    ) in pending_events:
         record_event(
             OrchestratorEventType.SESSION_REAP_PROPOSED,
             {
@@ -408,7 +501,7 @@ def release_stale_gated_tasks() -> list[str]:
                 "lane": lane,
                 "proposed_action": proposed_action,
                 "reason": ReapReason.STALE_GATE.value,
-                "evidence": {},
+                "evidence": evidence,
             },
             correlation_id=ticket_id,
         )
