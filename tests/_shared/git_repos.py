@@ -163,6 +163,26 @@ def commit_tracked_file(worktree: Path, relpath: str, content: str = "x = 1\n") 
     _git_sandbox.run("commit", "-m", f"add {relpath}", cwd=worktree)
 
 
+def commit_small_py_files(
+    repo: Path, count: int, *, branch: str = "feature", prefix: str = "mod"
+) -> list[str]:
+    """Check out *branch* in *repo* and commit *count* one-line ``.py`` files.
+
+    The "N small python files on a branch" builder the #2086 ``large_diff``
+    tests share (``test_codex_review_diff.py`` and
+    ``test_codex_review_context.py``): a count past the file cap makes the
+    branch ``large_diff`` while its line total stays tiny. Returns the
+    committed relative paths in creation order.
+    """
+    _git_sandbox.run("checkout", "-b", branch, cwd=repo)
+    paths = [f"{prefix}_{index}.py" for index in range(count)]
+    for relpath in paths:
+        (repo / relpath).write_text(f"value_{relpath[:-3]} = 1\n", encoding="utf-8")
+    _git_sandbox.run("add", *paths, cwd=repo)
+    _git_sandbox.run("commit", "-m", f"add {count} small modules", cwd=repo)
+    return paths
+
+
 #: The non-UTF-8 byte string the #3419 tests name a file with.
 NON_UTF8_NAME_BYTES = b"bad-\xff.txt"
 

@@ -55,7 +55,7 @@ Expected output for a healthy setup:
 - `[WARN] bypass-disclaimer — ...` — disclaimer not yet accepted; a human must run `claude --dangerously-skip-permissions` interactively (physical-human exception: needs a TTY).
 - `[OK] claude-version` — `claude` binary found and responsive.
 - `[WARN] daemon-reachable` — the Claude native daemon has not been started yet; this resolves automatically when `cw` first spawns a worker session.
-- `[OK/WARN] skills-commands-drift` — repo-tracked `.claude/skills`/`.claude/commands`/`.claude/scripts` files compared against `~/.claude`; `[WARN]` means at least one tracked file is missing, content differs, or its `~/.claude` counterpart is a symlink pointing somewhere other than this checkout. A `differ` on `.claude/scripts/prep_pr_state.py` is the #2090 shape: a stale copy of a cw-owned script at `~/.claude/scripts/` — re-run `scripts/install-skills.sh`.
+- `[OK/WARN] skills-commands-drift` — on a local checkout, repo-tracked `.claude/skills`/`.claude/commands`/`.claude/scripts` files compared against `~/.claude`; `[WARN]` means at least one tracked file is missing, content differs, or its `~/.claude` counterpart is a symlink pointing somewhere other than this checkout. A `differ` on `.claude/scripts/prep_pr_state.py` is the #2090 shape: a stale copy of a cw-owned script at `~/.claude/scripts/` — re-run `scripts/install-skills.sh`. On a git or registry install there is no checkout, so the check is partial: it compares the four command docs shipped in the wheel (`auto-dev-plan`, `auto-dev-impl`, `auto-dev-finalize`, `prep-pr`) byte for byte with `~/.claude/commands/`, checks whether `~/.claude/skills` exists, and checks the version of any checkout a command link points into. `[WARN]` names what differs and the command to fix it (a clone at the matching tag plus `./scripts/install-skills.sh`). Skills and scripts are not verified on these installs.
 - `[OK/WARN] cw-deps-drift` — for an editable install, compares the installed version of each package declared in `[project.optional-dependencies]` (`mcp`, `starlette`, `uvicorn`) against the pin in the source tree's `uv.lock`. `[WARN]` names each package that differs (`mcp 1.27.1 installed != 2.1.1 locked (extra mcp)`) and the fix, `uv tool install --reinstall -e '<source path>[mcp]'` (the command lists every extra still in use, since the reinstall replaces the tool environment). An extra whose packages are not installed is skipped, as is a registry install or an unreadable `pyproject.toml`/`uv.lock`; only drift warns.
 - `[OK/WARN] agent-spec-drift/<client>` — per-client reviewer agent-spec resolution (repo-local / global fallback / absent); `[WARN]` names any reviewer role with no usable spec.
 - `[OK/WARN] dispatch-loop-code` — compares the code identity (package version and checkout commit) that the running `cw dev-queue serve` loop recorded at start with the current checkout; `[WARN]` means the loop predates the checkout, so restart `cw dev-queue serve`. No lock holder recorded, or a loop that started before this check existed (identity unknown), is `[OK]`. The check compares the checkout HEAD only, does not see a `serve --force` loop (it records nothing), and silence is not proof the loop is current.
@@ -79,6 +79,8 @@ cw's Stop hook is **worktree-scoped**: `cw` injects it into `<worktree>/.claude/
 ```bash
 uv tool install "claude-workspace[mcp] @ git+https://github.com/mattwwarren/claude-workspace.git"
 ```
+
+This path installs the CLI only. It does **not** install cw's skills, commands, or helper scripts. To install those, clone the repo at the matching tag and run `./scripts/install-skills.sh` from that clone; the installed links point into the clone, so keep it. Replace `<version>` with the release you installed: `git clone https://github.com/mattwwarren/claude-workspace.git && cd claude-workspace && git checkout v<version> && ./scripts/install-skills.sh`.
 
 Pin to a specific release:
 
@@ -136,6 +138,8 @@ cd claude-workspace
 git pull
 ./scripts/install.sh
 ```
+
+`uv tool install --force` and `uv tool upgrade` update only the CLI. They do not refresh the skill, command and script links in `~/.claude/`. After a GitHub upgrade, clone the repo at the new tag and run `./scripts/install-skills.sh` from that clone.
 
 ## Post-Install Setup
 

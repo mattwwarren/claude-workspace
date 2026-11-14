@@ -367,6 +367,23 @@ _CODEX_TESTING_CHECKLIST_SUPPLEMENT = (
 )
 
 
+# The Transitive Impact lane's one responsibility (#2086). Shared verbatim with
+# ``.claude/commands/auto-dev-review.md``; ``tests/test_codex_review_roster.py``
+# pins the two copies together so the review paths cannot drift.
+_TRANSITIVE_IMPACT_RESPONSIBILITY = (
+    "trace changed producers/contracts through real callers, consumers, "
+    "persisted data, reruns, rollout"
+)
+# Rendered by ``_prompt_render._role_framing`` for that role only.
+_TRANSITIVE_IMPACT_FRAMING = (
+    "## Role Framing: {role}\n"
+    "Your one responsibility: " + _TRANSITIVE_IMPACT_RESPONSIBILITY + ". "
+    "Read the checkout for every caller and consumer of what the diff "
+    "changes; the diff stays the anchor and evidence is quoted from it.\n"
+    "Set `reviewer_role` to {role} in your findings document."
+)
+
+
 def _codex_output_format_supplement(role: str) -> str | None:
     """Return inlined replacement content for *role*'s dangling doc references,
     or ``None`` if *role*'s spec carries no such reference (#1548).

@@ -313,7 +313,8 @@ class TicketTask(BaseModel):
     # implementation prompt treats it as untrusted evidence. Kept while the row
     # stays at IMPL (parks, resumes, same-stage requeues); cleared when it
     # leaves IMPL by any route, whoever set it (#3018, lifecycle.
-    # _consume_red_recovery_evidence).
+    # _consume_red_recovery_evidence). Exception (#3637): a scope-drift grant
+    # drops it when the head has moved past its reviewed_sha.
     review_feedback: ReviewFeedback | None = None
     # Red-shipped-PR episode latch (v53, #2945): one page per episode, cleared
     # by transition_task_status when the row leaves COMPLETED.

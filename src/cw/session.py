@@ -45,6 +45,7 @@ from cw.spawn import (
     _write_hook_context,
     build_disallowed_tools_arg,
 )
+from cw.worker_effort import resolve_worker_effort_args
 from cw.worktree import (
     _git_dir,
     check_not_main_checkout,
@@ -412,7 +413,8 @@ def _resume_spawn_args(
     Mirrors the ``spawn_create_impl`` chokepoint. ``--resume <uuid>`` re-enters
     the Claude transcript when available. For DAEMON-origin sessions only
     (USER-origin inherits the operator's interactive defaults): forward
-    ``--model`` from ``client.worker_model`` (#248), forward any
+    ``--model`` from ``client.worker_model`` (#248), forward ``--effort``
+    from ``client.worker_effort`` (#2350), forward any
     ``OrchestratorConfig.disallowed_mcp_tools`` restriction (replaces the
     former tracker-gated Linear block, #726), and fall back to
     ``bypassPermissions`` when the pinned model lacks ``--permission-mode
@@ -427,6 +429,10 @@ def _resume_spawn_args(
 
     if client.worker_model:
         extra_args = [*extra_args, "--model", client.worker_model]
+    extra_args = [
+        *extra_args,
+        *resolve_worker_effort_args(client.worker_model, client.worker_effort),
+    ]
     extra_args = [
         *extra_args,
         *build_disallowed_tools_arg(load_orchestrator_config().disallowed_mcp_tools),

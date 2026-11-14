@@ -52,6 +52,7 @@ from cw.codex_review._diff import (
     _capture_diff,
     _capture_head_sha,
     _capture_tree_diff,
+    _measure_large_diff,
 )
 from cw.gh import (
     FETCH_COMMENTS_TIMEOUT,
@@ -742,6 +743,10 @@ def _prepare_review_pass(
         categories=categories,
         mutates_persisted_state=mutates_persisted_state,
         has_ticket_context=ticket_text is not None,
+        # #2086: whole-branch size on every pass, so the roster is stable
+        # across fix-loop rounds; an engine roster ignores it, so skip it.
+        large_diff=engine_roster is None
+        and _measure_large_diff(worktree, default_branch),
     )
     render_prompts: _PromptRenderer = functools.partial(
         _render_role_prompts,
