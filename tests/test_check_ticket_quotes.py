@@ -532,6 +532,12 @@ def test_blockquote_lead_in_without_article_counts() -> None:
     assert _quotes(_check(plan)) == [_FAB]
 
 
+def test_blockquote_lead_in_is_never_another_blockquote() -> None:
+    plan = f"The ticket says:\n\n> the ticket describes a genuine thing\n\n> {_FAB}\n"
+    verdict = _check(plan, body="The ticket describes a genuine thing")
+    assert verdict == {"quotes_checked": 1, "unmatched": []}
+
+
 def test_blockquote_run_ends_at_first_non_quote_line() -> None:
     plan = f"The ticket says:\n> {_FAB}\nnot quoted text here\n"
     assert _quotes(_check(plan)) == [_FAB]
@@ -699,6 +705,7 @@ def test_linear_shape_uses_description_for_body() -> None:
         {"title": "t", "body": 5},
         {"title": "t", "description": 5},
         {"title": "t", "comments": "nope"},
+        {"title": "t", "comments": {}},
         {"title": "t", "comments": ["nope"]},
         {"title": "t", "comments": [{"body": 5}]},
         {},

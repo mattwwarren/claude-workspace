@@ -325,11 +325,10 @@ def _spans_from(
     idx: int,
     col: int,
     trigger: str,
-    seen: set[tuple[int, int]],
     *,
     first_only: bool = False,
 ) -> list[Span]:
-    """Spans opened at or after ``col`` on line ``idx``; ``seen`` dedupes openers."""
+    """Spans opened at or after ``col`` on line ``idx``."""
     spans: list[Span] = []
     pos = col
     while True:
@@ -340,39 +339,36 @@ def _spans_from(
         if found is None:
             break
         text, end_idx, end_col = found
-        key = (idx, opener.start())
-        if key not in seen:
-            seen.add(key)
-            spans.append(Span(text, idx + 1, trigger, opener.start()))
+        spans.append(Span(text, idx + 1, trigger, opener.start()))
         if first_only or end_idx != idx:
             break
         pos = end_col + 1
     return spans
 
 
-def _field_spans(doc: _Doc, seen: set[tuple[int, int]]) -> list[Span]:
+def _field_spans(doc: _Doc) -> list[Span]:
     spans: list[Span] = []
     for idx, line in enumerate(doc.masked):
         match = _FIELD_RE.match(line)
         if match is not None:
-            spans.extend(_spans_from(doc, idx, match.end(), TRIGGER_FIELD, seen))
+            spans.extend(_spans_from(doc, idx, match.end(), TRIGGER_FIELD))
     return spans
 
 
-def _identifier_spans(doc: _Doc, seen: set[tuple[int, int]]) -> list[Span]:
+def _identifier_spans(doc: _Doc) -> list[Span]:
     spans: list[Span] = []
     for idx, line in enumerate(doc.masked):
         match = _ID_RE.match(line)
         if match is not None:
             spans.extend(
                 _spans_from(
-                    doc, idx, match.end(), TRIGGER_RESOLUTION_ID, seen, first_only=True
+                    doc, idx, match.end(), TRIGGER_RESOLUTION_ID, first_only=True
                 )
             )
     return spans
 
 
-def _attribution_spans(doc: _Doc, seen: set[tuple[int, int]]) -> list[Span]:
+def _attribution_spans(doc: _Doc) -> list[Span]:
     spans: list[Span] = []
     for idx, line in enumerate(doc.masked):
         for pattern in (_ATTRIBUTION_VERB_RE, _ATTRIBUTION_PREFIX_RE):
@@ -383,7 +379,6 @@ def _attribution_spans(doc: _Doc, seen: set[tuple[int, int]]) -> list[Span]:
                         idx,
                         match.end() - 1,
                         TRIGGER_ATTRIBUTION,
-                        seen,
                         first_only=True,
                     )
                 )
@@ -425,11 +420,10 @@ def _blockquote_spans(doc: _Doc) -> list[Span]:
 def extract_spans(plan_text: str) -> list[Span]:
     """Every attributed quoted span in plan order, identical quotes once."""
     doc = _prepare(plan_text)
-    seen: set[tuple[int, int]] = set()
     spans = [
-        *_field_spans(doc, seen),
-        *_identifier_spans(doc, seen),
-        *_attribution_spans(doc, seen),
+        *_field_spans(doc),
+        *_identifier_spans(doc),
+        *_attribution_spans(doc),
         *_blockquote_spans(doc),
     ]
     unique: dict[str, Span] = {}
