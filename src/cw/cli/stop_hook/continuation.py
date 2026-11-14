@@ -16,8 +16,8 @@ means the continuation was *decided and persisted* before the block was printed;
 it does not mean Claude Code delivered or honoured it. A crash between the
 persist and the print records one continuation that was never delivered.
 
-Imports nothing from its siblings except ``_constants``. Logs under the pinned
-package logger name.
+Imports nothing from its siblings except ``_constants`` and ``transcripts``.
+Logs under the pinned package logger name.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ from cw.cli.stop_hook._constants import (
     MAX_STOP_CONTINUATIONS,
     STOP_CONTINUATION_NUDGE,
 )
+from cw.cli.stop_hook.transcripts import _transcript_candidates
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import USAGE_LIMIT_RE
@@ -114,35 +115,21 @@ def _continuation_payload_qualifies(
     return session.status is SessionStatus.ACTIVE and session.local_liveness is None
 
 
-def _transcript_candidates(
-    session: Session, cwd_value: str, claude_session_id: object
-) -> tuple[Path, ...]:
-    """Return distinct transcript candidates from both known directories.
-
-    This is deliberately path-only; callers retain their own scan decisions.
-    Both locations are considered because EnterWorktree can leave divergent
-    transcripts in the hook cwd and the recorded worktree.
-    """
-    if not isinstance(claude_session_id, str) or not claude_session_id:
-        return ()
-    search_dirs: list[str] = [cwd_value]
-    if session.worktree_path is not None:
-        search_dirs.append(str(session.worktree_path))
-    return tuple(
-        claude_project_dir(search_dir) / f"{claude_session_id}.jsonl"
-        for search_dir in dict.fromkeys(search_dirs)
-    )
-
-
 def _find_transcripts(
     session: Session, cwd_value: str, claude_session_id: object
 ) -> tuple[Path, ...]:
-    """Return every existing transcript candidate, or none when unavailable."""
+    """Return every existing transcript candidate, or none when unavailable.
+
+    Candidates are the shared :func:`_transcript_candidates`, resolved through
+    this module's own ``claude_project_dir``. Both locations are considered
+    because EnterWorktree can leave divergent transcripts in the hook cwd and
+    the recorded worktree.
+    """
     try:
         return tuple(
             candidate
             for candidate in _transcript_candidates(
-                session, cwd_value, claude_session_id
+                session, cwd_value, claude_session_id, claude_project_dir
             )
             if candidate.is_file()
         )
