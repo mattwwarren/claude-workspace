@@ -60,6 +60,10 @@ def test_check_premise_evidence_in_groups() -> None:
     assert "check_premise_evidence" in _scripts_group()
 
 
+def test_check_ticket_quotes_in_groups() -> None:
+    assert "check_ticket_quotes" in _scripts_group()
+
+
 def test_gate_key_in_groups() -> None:
     assert "gate_key" in _scripts_group()
 

@@ -72,13 +72,13 @@ def test_reviewer_reserves_format_only_category() -> None:
 
 
 def test_reviewer_carveout_scoped_to_required_sections_only() -> None:
-    """The carve-out is scoped to Check 1's 3 required sections, not Checks 2-4."""
+    """The carve-out is scoped to Check 1's 3 required sections, not Checks 2-5."""
     content = _agent("plan-reviewer.md")
     window = _after(content, CARVEOUT_ANCHOR, span=1200)
     assert "## Patterns Found" in window
     assert "## Touch-point Contract" in window
     assert "## Pre-flight Resolution Conformance" in window
-    assert "does not extend to Checks 2-4" in window
+    assert "does not extend to Checks 2-5" in window
 
 
 def test_plan_step1f3_grants_independent_format_only_cycle() -> None:
