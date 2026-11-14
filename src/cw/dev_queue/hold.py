@@ -15,7 +15,7 @@ PR, or whose bound session is still live, so it never orphans a ceiling session.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Literal
 
 from cw.auto_dev_result import DEPENDENCY_UNMERGED_BLOCKER_REASON
@@ -23,9 +23,10 @@ from cw.config import load_state
 from cw.dev_queue.crud import _find_ticket
 from cw.dev_queue.lifecycle import transition_task_status
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
+from cw.events import record_event
 from cw.exceptions import CwError
 from cw.gh import parse_pr_url
-from cw.models import QueueItemStatus, WatchedPr
+from cw.models import OrchestratorEventType, QueueItemStatus, WatchedPr
 from cw.models.enums import DEPENDENCY_HOLD_DISPOSITION, TERMINAL_SESSION_STATUSES
 
 if TYPE_CHECKING:
@@ -40,8 +41,9 @@ class HoldResult:
 
     ``previous_disposition`` and ``previous_blocked_reason`` are set only when
     the row was already BLOCKED_ON_USER and this hold overwrote them. No
-    ``task.transition`` event carries them (a same-status move emits none), so
-    the echoed line and the INFO log are the only trace.
+    ``task.transition`` event carries them (a same-status move emits none);
+    the ``ticket.held`` event :func:`hold_ticket` records does, as do the
+    echoed line and the INFO log.
     """
 
     ticket_id: str
@@ -169,24 +171,15 @@ def _update_existing_hold(
     )
 
 
-def hold_ticket(
-    ticket_id: str,
-    client: str,
-    pr_number: int,
-    *,
-    repo: str,
-    bounded: bool = False,
+def _hold_locked(
+    ticket_id: str, client: str, pr_number: int, *, repo: str, bounded: bool
 ) -> HoldResult:
-    """Park a row as a dependency hold on *pr_number* (#2321).
-
-    The row is saved before this returns. The caller registers the
-    ``WatchedPr`` afterwards (outside this lock) unless the outcome is
-    ``"unchanged"``. Raises :class:`CwError` on any refusal, before mutating.
-    """
-    # Why: a lockless read, taken before the queue lock, so no sessions lock
-    # nests under it (the liveness probe needs only the session records).
-    state = load_state()
+    """The check-then-mutate window of :func:`hold_ticket`, under the queue lock."""
     with _lock(bounded=bounded):
+        # Why: the session snapshot is read INSIDE the queue lock, right before
+        # the liveness check, so it is no older than the row it guards.
+        # load_state takes no lock (a pure read), so nothing nests under ours.
+        state = load_state()
         store = load_dev_queue()
         task = _find_ticket(store, ticket_id, client, warn=False)
         check_holdable(task, state)
@@ -247,3 +240,31 @@ def hold_ticket(
             converted_from_worker_park=False,
             cleared_session_id=cleared,
         )
+
+
+def hold_ticket(
+    ticket_id: str,
+    client: str,
+    pr_number: int,
+    *,
+    repo: str,
+    bounded: bool = False,
+) -> HoldResult:
+    """Park a row as a dependency hold on *pr_number* (#2321).
+
+    The row is saved before this returns. The caller registers the
+    ``WatchedPr`` afterwards (outside this lock) unless the outcome is
+    ``"unchanged"``. Raises :class:`CwError` on any refusal, before mutating.
+
+    Every mutating outcome records one ``ticket.held`` event after the lock
+    is released (ADR-0019): it is the durable audit trail for a same-status
+    overwrite, which emits no ``task.transition``.
+    """
+    result = _hold_locked(ticket_id, client, pr_number, repo=repo, bounded=bounded)
+    if result.outcome != "unchanged":
+        record_event(
+            OrchestratorEventType.TICKET_HELD,
+            {**asdict(result), "repo": repo},
+            correlation_id=result.ticket_id,
+        )
+    return result

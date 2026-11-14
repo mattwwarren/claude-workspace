@@ -600,7 +600,8 @@ for which park" in §5).
 
 `--json` emits the `TicketView` model (`cw schema show ticket-view`):
 `schema_version`, `ticket_id`, `client`, `status`, `stage`, `disposition`,
-`blocked_reason`, `blocker_details`, `advisory_note`, `lane`, `priority`,
+`blocked_reason`, `blocked_on_pr` (the PR a dependency hold waits on, null
+when none, #2321), `blocker_details`, `advisory_note`, `lane`, `priority`,
 `scope_hint`, `attempts`, `unproductive_attempts`, `attempt_ceiling` (null =
 no ceiling), `session` (null, or `id`/`status`/`liveness_bucket`/
 `in_roster`/`attention_state`; `status` null = session no longer in state),
@@ -4536,8 +4537,10 @@ merge under any `reap_policy`.
 **Overwriting a parked row.** Holding an already-BLOCKED_ON_USER row replaces
 its disposition and `blocked_reason`. `hold` prints what it replaced
 (`replaced disposition <d>, blocked_reason <r>`) and writes an INFO log line. A
-same-status move emits no `task.transition` event, so the printed line and the
-log are the only trace; do not look for an audit event.
+same-status move emits no `task.transition` event; the audit record is the
+`ticket.held` event every mutating `hold` records (held, moved or converted),
+which carries `previous_disposition`, `previous_blocked_reason`, `previous_pr`
+and `cleared_session_id`. An `unchanged` repeat records none.
 
 **Release.** Release is serve-tick only (`release_stale_gated_tasks`); there is
 no other hook, and `cw dev-queue drain` and `cw doctor --reap` do not touch a

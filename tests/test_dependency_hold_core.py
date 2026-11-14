@@ -3,26 +3,51 @@ routing stamp, and the serve-tick release/latch behaviour."""
 
 from __future__ import annotations
 
+import contextlib
+from typing import TYPE_CHECKING
+
 import pytest
 from pydantic import ValidationError
 
+import cw.dev_queue.hold as hold_module
 from cw.auto_dev_result import Blocker, parse_depends_on_pr
-from cw.dev_queue import DEPENDENCY_HOLD_DISPOSITION, load_dev_queue, save_dev_queue
+from cw.config import load_state, save_state
+from cw.dev_queue import (
+    DEPENDENCY_HOLD_DISPOSITION,
+    hold_ticket,
+    load_dev_queue,
+    save_dev_queue,
+)
 from cw.dispatch.routing.stage_failure import (
     _dependency_park_pr,
     _stamp_blocked_on_pr,
 )
+from cw.exceptions import CwError
 from cw.models import (
     DevQueueStore,
+    OrchestratorConfig,
     OrchestratorEventType,
     PrState,
     QueueItemStatus,
+    ReapPolicy,
+    SessionStatus,
     TicketTask,
     WatchedPr,
 )
 from cw.models.tasks.store import occupies_lane_slot
 from cw.reconcile.tasks import release_stale_gated_tasks
-from tests._ticket_view_helpers import events_of, make_task, queue_row, seed_queue
+from tests._ticket_view_helpers import (
+    ACME,
+    ACME_TICKET,
+    bound_session_for,
+    events_of,
+    make_task,
+    queue_row,
+    seed_queue,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 _HOLD = DEPENDENCY_HOLD_DISPOSITION
 
@@ -180,3 +205,122 @@ class TestServeTickRelease:
         assert release_stale_gated_tasks() == []
         assert queue_row().stale_gate_detected_at is None
         assert events_of(OrchestratorEventType.SESSION_REAP_PROPOSED) == []
+
+
+class TestHoldTicketCore:
+    def test_liveness_snapshot_is_read_under_the_queue_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A session that goes live before the lock is taken still refuses."""
+        task = make_task(status=QueueItemStatus.PENDING, session_id="sess-1")
+        seed_queue([task], [bound_session_for(task, status=SessionStatus.COMPLETED)])
+        real_lock = hold_module._lock
+
+        @contextlib.contextmanager
+        def _revive_then_lock(*, bounded: bool) -> Iterator[None]:
+            state = load_state()
+            [session] = state.sessions
+            session.status = SessionStatus.ACTIVE
+            save_state(state)
+            with real_lock(bounded=bounded):
+                yield
+
+        monkeypatch.setattr(hold_module, "_lock", _revive_then_lock)
+
+        with pytest.raises(CwError, match="close the session first"):
+            hold_ticket(ACME_TICKET, ACME, 9, repo="foo/bar")
+        assert queue_row().status == QueueItemStatus.PENDING
+        assert events_of(OrchestratorEventType.TICKET_HELD) == []
+
+    def test_unchanged_hold_records_no_audit_event(self) -> None:
+        seed_queue([_hold(session_id=None, blocked_on_pr=9)])
+
+        result = hold_ticket(ACME_TICKET, ACME, 9, repo="foo/bar")
+
+        assert result.outcome == "unchanged"
+        assert events_of(OrchestratorEventType.TICKET_HELD) == []
+
+    def test_moved_hold_records_audit_event_with_previous_pr(self) -> None:
+        seed_queue([_hold(session_id=None, blocked_on_pr=9)])
+
+        result = hold_ticket(ACME_TICKET, ACME, 11, repo="foo/bar")
+
+        assert result.outcome == "updated"
+        assert queue_row().blocked_on_pr == 11
+        [held] = events_of(OrchestratorEventType.TICKET_HELD)
+        assert held.payload["previous_pr"] == 9
+        assert held.payload["pr_number"] == 11
+
+
+def _auto_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "cw.reconcile.tasks.stale_gate.load_orchestrator_config",
+        lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
+    )
+
+
+def _seed_with_watch(task: TicketTask, state: str) -> None:
+    save_dev_queue(DevQueueStore(tasks=[task], watched_prs=[_watch(42, state)]))
+
+
+class TestWorkerParkReleasePolicy:
+    """A worker dependency park (session bound) follows ``reap_policy`` (#2321 R5)."""
+
+    def test_worker_park_under_auto_policy_releases_on_merge(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _auto_policy(monkeypatch)
+        _seed_with_watch(_hold(session_id="sess-1"), "MERGED")
+
+        assert release_stale_gated_tasks() == ["ACM-1"]
+
+        row = queue_row()
+        assert row.status == QueueItemStatus.PENDING
+        assert row.session_id is None
+        [event] = events_of(OrchestratorEventType.SESSION_REAP_PROPOSED)
+        assert event.payload["session_id"] == "sess-1"
+        assert event.payload["proposed_action"] == "release_stale_gate_variant_b"
+
+    def test_worker_park_under_auto_policy_never_releases_on_close(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _auto_policy(monkeypatch)
+        _seed_with_watch(_hold(session_id="sess-1"), "CLOSED")
+
+        assert release_stale_gated_tasks() == []
+
+        row = queue_row()
+        assert row.status == QueueItemStatus.BLOCKED_ON_USER
+        assert row.session_id == "sess-1"
+        [event] = events_of(OrchestratorEventType.SESSION_REAP_PROPOSED)
+        assert event.payload["proposed_action"] == "dependency_hold_pr_closed_unmerged"
+
+    def test_variant_b_park_still_releases_on_close(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The per-class flag did not widen closed-unmerged handling to Variant B."""
+        _auto_policy(monkeypatch)
+        _seed_with_watch(
+            _hold(
+                disposition="merge_gate_blocked",
+                blocked_reason="prior_pipeline_pr_open",
+                session_id="sess-1",
+            ),
+            "CLOSED",
+        )
+
+        assert release_stale_gated_tasks() == ["ACM-1"]
+        assert queue_row().status == QueueItemStatus.PENDING
+
+
+def test_disposition_is_one_object_across_its_three_homes() -> None:
+    """#2321 R1: enums defines it; dispositions and the package re-export it."""
+    import cw.dev_queue
+    from cw.dev_queue import dispositions
+    from cw.models import enums
+
+    assert enums.DEPENDENCY_HOLD_DISPOSITION == "dependency_hold"
+    assert dispositions.DEPENDENCY_HOLD_DISPOSITION is enums.DEPENDENCY_HOLD_DISPOSITION
+    assert cw.dev_queue.DEPENDENCY_HOLD_DISPOSITION is (
+        dispositions.DEPENDENCY_HOLD_DISPOSITION
+    )

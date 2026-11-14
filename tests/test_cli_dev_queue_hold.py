@@ -10,6 +10,7 @@ import pytest
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.models import (
     DevQueueStore,
+    OrchestratorEventType,
     QueueItemStatus,
     SessionStatus,
     WatchedPr,
@@ -19,6 +20,7 @@ from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
     bound_session_for,
+    events_of,
     install_acme_client,
     invoke_dev_queue,
     make_task,
@@ -63,6 +65,13 @@ def test_happy_path_holds_pending_row_and_registers_watch(
     assert row.blocked_on_pr == 9
     assert row.session_id is None
     assert "Held ACM-1 in acme dev-queue until PR #9 merges" in result.output
+    # The echoed row exposes the PR the hold waits on (#2321 R7).
+    assert "blocked_on_pr: 9" in result.output
+    [held] = events_of(OrchestratorEventType.TICKET_HELD)
+    assert held.correlation_id == ACME_TICKET
+    assert held.payload["outcome"] == "held"
+    assert held.payload["pr_number"] == 9
+    assert held.payload["repo"] == "foo/bar"
     [watch] = _watches()
     assert watch.source == "dependency_hold"
     assert watch.client == ACME
@@ -162,6 +171,10 @@ def test_worker_park_is_converted_to_operator_hold(
     assert row.session_id is None
     assert row.blocked_on_pr == 9
     assert len(fake.records) == 1
+    [held] = events_of(OrchestratorEventType.TICKET_HELD)
+    assert held.payload["outcome"] == "updated"
+    assert held.payload["converted_from_worker_park"] is True
+    assert held.payload["cleared_session_id"] == "sess-1"
 
 
 def test_repeat_on_operator_hold_is_unchanged_with_zero_gh_calls(
@@ -187,9 +200,11 @@ def test_repeat_on_operator_hold_is_unchanged_with_zero_gh_calls(
 
     assert result.exit_code == 0, result.output
     assert "unchanged" in result.output
+    assert "blocked_on_pr: 9" in result.output
     assert queue_row().model_dump() == before
     assert fake.records == []
     assert _watches() == []
+    assert events_of(OrchestratorEventType.TICKET_HELD) == []
 
 
 @pytest.mark.parametrize(
@@ -319,6 +334,12 @@ def test_previous_disposition_is_reported_when_overwriting_a_block(
         in result.output
     )
     assert queue_row().disposition == DEPENDENCY_HOLD_DISPOSITION
+    # A same-status overwrite emits no task.transition; ticket.held is the
+    # durable audit record of what it replaced.
+    assert events_of(OrchestratorEventType.TASK_TRANSITION) == []
+    [held] = events_of(OrchestratorEventType.TICKET_HELD)
+    assert held.payload["previous_disposition"] == "awaiting_operator"
+    assert held.payload["previous_blocked_reason"] == "agent_block"
 
 
 @pytest.mark.parametrize("bad", ["0", "-1", "abc"])
