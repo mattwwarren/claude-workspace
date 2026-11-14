@@ -894,6 +894,36 @@ re-running `approve`. A session whose background work is still draining is
 left running. Approvals made by unattended paths (the auto-adopt gate recipe,
 `drain`, `auto_fix_ci`) do not close it; the doctor class reports the fix.
 
+Also not a sentinel status, and the row is not parked but cancelled:
+`ticket_closed` (#1605), the closed-ticket guard. Before a PENDING PLAN/IMPL
+row is claimed, dispatch reads its GitHub issue state (`gh issue view <T>
+--json state`, scoped to the client's git dir) outside every lock. A CLOSED
+issue cancels the row instead of spawning a worker: the row goes `CANCELLED`
+with no attempt charged, a `dispatch.tick` event carries
+`skip_reason=ticket_closed` and `cancel_reason=ticket_closed`, and the
+dispatcher log names the reversal. Scope and safety:
+
+- **GitHub only.** A client whose `tracking.primary.system` is not
+  `github-issues` (Linear, other, or unset) is never read (ADR-0013).
+- **Fail open.** A timeout, a missing `gh`, a non-zero exit, bad JSON or a
+  state other than `OPEN`/`CLOSED` never cancels; the row dispatches as
+  usual and the read is retried after 90 s.
+- **Bounded.** At most 10 reads per client per tick (5 s timeout each, 25 s
+  budget), only for rows in lanes that can claim this tick, in claim order.
+  A row past the cap or budget is held `PENDING` for that tick (no event, no
+  write) and read on a later one; it is never claimed unchecked.
+- **Not guarded:** REVIEW/FINALIZE rows, adopted rows, rows already carrying
+  a `pr_url`, non-numeric ticket ids, and RUNNING rows (a ticket closed under
+  a running session is out of scope).
+- **Reverse it** with `cw dev-queue requeue <T> -c <client> --from-cancelled`.
+  The requeue sticks even while the issue stays CLOSED: the guard stamps the
+  cancelled row in `dispatch_state.json` (`ticket_state_probe`, keyed by
+  `client/ticket::created_at`) and leaves a requeued row with that stamp
+  alone. A fresh `cw dev-queue add` is a new row and is guarded again. The
+  concierge cancelled-row restore and `auto_fix_ci` never un-cancel a
+  stamped row. Closed verdicts are cached for the row; OPEN verdicts for
+  300 s.
+
 Also not a sentinel status:
 `validation_failed` — the sentinel was emitted but malformed. The queue
 auto-requeues the ticket to PENDING (clearing `session_id`) until the

@@ -349,7 +349,7 @@ with `error_kind` the `blocker.reason` (an existing reason, for example
   "pending": 2,
   "running": 1,
   "cap": 3,
-  "skip_reason": "availability_gate | ssh_key_gate | disk_pressure_gate | freshness_gate | usage_limited | host_capacity_gated | cap_full | lane_cap_blocked | attempt_cap_blocked | stale_pr_blocked | worktree_occupied | spawn_error | lane_circuit_paused | spawn_error_backoff | no_pending | none"
+  "skip_reason": "availability_gate | ssh_key_gate | disk_pressure_gate | freshness_gate | usage_limited | host_capacity_gated | cap_full | lane_cap_blocked | attempt_cap_blocked | stale_pr_blocked | worktree_occupied | ticket_closed | spawn_error | lane_circuit_paused | spawn_error_backoff | no_pending | none"
 }
 ```
 **Semantics:** Emitted once per client per tick. `claimed` is the number of
@@ -378,7 +378,7 @@ circuit breaker tripped after consecutive spawn errors, #875) →
 `spawn_error_backoff` (pending tasks exist but all in exponential backoff
 after spawn_error, next_eligible_at in the future; the same claim backoff also
 covers a gate-block park's wait, #2717, which reuses this value) → `no_pending` (nothing
-to claim) → `none` (at least one session spawned). Three values sit outside
+to claim) → `none` (at least one session spawned). Four values sit outside
 this per-client precedence chain, emitted **per task** instead:
 `attempt_cap_blocked` (payload carries `ticket_id`) when the attempt
 ceiling parks a task, additionally carrying `attempt_ceiling` (int) — the
@@ -393,15 +393,22 @@ caught either by the pre-claim occupancy screen (before the row is claimed)
 or by a genuinely-live `HookContextConflictError` during spawn (after a claim
 that must now be released) — payload carries `ticket_id`, no
 `attempt_ceiling`. The pre-existing post-claim `WorktreeOccupiedError`
-release (#2213) emits the same event. None of these is a failure: no attempt
+release (#2213) emits the same event. `ticket_closed` (#1605) when the
+closed-ticket guard cancels a PENDING PLAN/IMPL-stage task whose GitHub issue
+is CLOSED — payload carries `ticket_id` and `cancel_reason: "ticket_closed"`
+(the row loses `disposition` on CANCELLED, so the reason lives here), no
+`attempt_ceiling`; a `task.transition` PENDING→CANCELLED accompanies it, and
+the dispatcher log names the reversal `cw dev-queue requeue <T> -c <client>
+--from-cancelled`. A row the guard's per-tick read cap or budget defers emits
+no event at all. None of these is a failure: no attempt
 is charged and the lane circuit breaker is not incremented.
 
 Optional extra keys, grouped by which skip-reason path emits them: `lanes`
 (per-lane breakdown) is present on the main claim-loop tick and every
 per-client skip path (`availability_gate`, `ssh_key_gate`,
 `disk_pressure_gate`, `freshness_gate`, `usage_limited`), but absent on the
-three per-task ticks (`attempt_cap_blocked`, `stale_pr_blocked`,
-`worktree_occupied`).
+four per-task ticks (`attempt_cap_blocked`, `stale_pr_blocked`,
+`worktree_occupied`, `ticket_closed`).
 `lane_occupants` (`dict[str, list[{"ticket_id": str, "status": str}]]`, a
 top-level key — deliberately *not* nested inside `lanes`, since
 `orchestrate.py`'s `_extract_lanes` hard-filters `lanes` values to
