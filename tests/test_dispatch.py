@@ -11335,6 +11335,32 @@ class TestApplyStagedDecision:
         assert task.disposition == "awaiting_operator"
         assert task.blocked_on_pr is None
 
+    def test_dependency_unmerged_park_does_not_charge_unproductive_attempt(
+        self, tmp_path: Path
+    ) -> None:
+        """#2321 R10: a dependency park is not evidence the claim did no work.
+
+        The evidence-free payload would charge via the ordinary Rule 5
+        computation; ``dependency_unmerged`` in the ``rule5_unproductive``
+        exemption keeps a park-and-release cycle off ``attempt_cap_blocked``.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("HOLD-DEP-4", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {
+                "stage": "stage3_review",
+                "reason": "dependency_unmerged",
+                "depends_on_pr": 88,
+            },
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.blocked_reason == "dependency_unmerged"
+        assert task.unproductive_attempts == 0
+
     def test_dependency_unmerged_never_regexes_details(self, tmp_path: Path) -> None:
         """#2321: a PR number in free-text details does not become the id."""
         from cw.dispatch import apply_staged_decision
