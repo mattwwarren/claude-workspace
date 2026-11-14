@@ -10,6 +10,7 @@ checkout's ``.cw/``.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -19,11 +20,16 @@ from click.testing import CliRunner
 
 from cw.cli import main
 from cw.cli.review.converge_confirm import prepare_engine_confirm, round_ran_engine
-from cw.models import OrchestratorEventType
+from cw.dev_queue import add_ticket, remove_ticket
+from cw.dev_queue.review_records import find_ticket_row
+from cw.models import OrchestratorEventType, QueueItemStatus, Stage
+from cw.review_adjudication import AdjudicationOutcome
 from cw.review_convergence import (
     CONFIRM_ENGINE_DEFER_RATIONALE,
     CONFIRM_ENGINE_PARK_RATIONALE,
     ConvergenceLedger,
+    GatingSeverity,
+    RoundFinding,
     RoundInput,
     decide_confirm_verdict,
     load_ledger,
@@ -34,6 +40,7 @@ from cw.review_debt_filing import artifact_debt_entries
 from cw.review_engine.constants import ENGINE_ROLE
 from tests._cli_review_helpers import (
     _isolated_cwd,
+    _seed_review_row,
     _session_repo,
     _write_session_context,
 )
@@ -58,7 +65,8 @@ from tests._review_debt_helpers import (
     register_confirm_client,
     stub_run_debt_filing,
 )
-from tests._review_engine_helpers import engine_loop_verdict
+from tests._review_engine_helpers import SHA, engine_loop_verdict
+from tests._shared.session_seeding import _make_ticket_task
 from tests._tool_fakes import FakeGhCli
 
 if TYPE_CHECKING:
@@ -665,3 +673,164 @@ class TestSharedHelperEquivalence:
         )
         for verdict in (engine, mixed):
             assert round_ran_engine(_loop(verdict)) is verdict_ran_engine(verdict)
+
+
+_ENGINE_LOG = "cw.cli.review.converge_engine_defers"
+_WARNING_TEXT = "review engine settlement not recorded"
+
+
+def _defer_finding(
+    fingerprint: str,
+    *,
+    severity: GatingSeverity = "SHOULD_FIX",
+    rule_id: str = "style.naming",
+    outcome: AdjudicationOutcome = "defer",
+) -> RoundFinding:
+    return round_finding(
+        severity,
+        f"finding {fingerprint}",
+        outcome=outcome,
+        rationale="deferred",
+    ).model_copy(update={"fingerprint": fingerprint, "rule_id": rule_id})
+
+
+def _engine_round(*findings: RoundFinding, sha: str = SHA) -> dict[str, object]:
+    return round_payload("loop", "claude-native", sha, *findings, roster=[ENGINE_ROLE])
+
+
+def _settlements() -> list[tuple[str, list[str]]]:
+    row = find_ticket_row(_TICKET, _CLIENT)
+    return [(s.head_sha, s.fingerprints) for s in row.review_engine_settlements]
+
+
+class TestEngineSettlementRecording:
+    """The engine round's deferred SHOULD_FIX fingerprints reach the row (#3625)."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh(self, repo: Path) -> None:
+        write_ledger(repo, fresh_ledger(confirm="codex", ticket_id=_TICKET))
+        _seed_review_row(
+            _TICKET, _CLIENT, status=QueueItemStatus.RUNNING, worktree_path=repo
+        )
+
+    def test_all_deferred_shouldfix_is_recorded_at_the_head(
+        self, repo: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        payload = _engine_round(
+            _defer_finding("fp-00000a1"), _defer_finding("fp-00000a2")
+        )
+        with caplog.at_level(logging.WARNING, logger=_ENGINE_LOG):
+            result = _record(repo, payload)
+        assert result.exit_code == 0, result.output
+        assert _settlements() == [(SHA, ["fp-00000a1", "fp-00000a2"])]
+        assert not [r for r in caplog.records if _WARNING_TEXT in r.getMessage()]
+
+    def test_the_write_is_idempotent_for_the_same_round(self, repo: Path) -> None:
+        payload = _engine_round(_defer_finding("fp-00000a1"))
+        _record(repo, payload)
+        _record(repo, payload)
+        assert _settlements() == [(SHA, ["fp-00000a1"])]
+
+    def test_a_must_fix_deferral_records_nothing(self, repo: Path) -> None:
+        payload = _engine_round(
+            _defer_finding("fp-00000a1"),
+            _defer_finding("fp-00000m1", severity="MUST_FIX"),
+        )
+        assert _record(repo, payload).exit_code == 0
+        assert _settlements() == []
+
+    def test_a_coverage_rule_deferral_records_nothing(self, repo: Path) -> None:
+        payload = _engine_round(_defer_finding("fp-00000a1", rule_id="coverage.x"))
+        assert _record(repo, payload).exit_code == 0
+        assert _settlements() == []
+
+    def test_a_mixed_fix_and_defer_round_records_nothing(self, repo: Path) -> None:
+        payload = _engine_round(
+            _defer_finding("fp-00000a1"),
+            _defer_finding("fp-00000a2", outcome="fix"),
+        )
+        assert _record(repo, payload).exit_code == 0
+        assert _settlements() == []
+
+    def test_a_mixed_roster_round_records_nothing(self, repo: Path) -> None:
+        payload = round_payload(
+            "loop",
+            "claude-native",
+            SHA,
+            _defer_finding("fp-00000a1"),
+            roster=[ENGINE_ROLE, "Test Reviewer"],
+        )
+        assert _record(repo, payload).exit_code == 0
+        assert _settlements() == []
+
+    def test_no_identity_warns_once_and_still_commits_the_ledger(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        root = _session_repo(
+            make_git_repo, monkeypatch, "no-identity-repo", ticket_id=_TICKET
+        )
+        write_ledger(root, fresh_ledger(confirm="codex", ticket_id=_TICKET))
+        with caplog.at_level(logging.WARNING, logger=_ENGINE_LOG):
+            result = _record(root, _engine_round(_defer_finding("fp-00000a1")))
+        assert result.exit_code == 0, result.output
+        assert len([r for r in caplog.records if _WARNING_TEXT in r.getMessage()]) == 1
+        assert _stored(root).rounds[-1].engine is True
+
+    def test_no_row_warns_once_and_still_commits_the_ledger(
+        self, repo: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        remove_ticket(_TICKET, _CLIENT)
+        with caplog.at_level(logging.WARNING, logger=_ENGINE_LOG):
+            result = _record(repo, _engine_round(_defer_finding("fp-00000a1")))
+        assert result.exit_code == 0, result.output
+        assert _stored(repo).rounds[-1].engine is True
+        assert [r for r in caplog.records if _WARNING_TEXT in r.getMessage()]
+
+    def test_a_row_outside_review_warns(
+        self, repo: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        remove_ticket(_TICKET, _CLIENT)
+        add_ticket(
+            _make_ticket_task(
+                ticket_id=_TICKET,
+                client=_CLIENT,
+                stage=Stage.IMPL,
+                status=QueueItemStatus.RUNNING,
+            )
+        )
+        with caplog.at_level(logging.WARNING, logger=_ENGINE_LOG):
+            result = _record(repo, _engine_round(_defer_finding("fp-00000a1")))
+        assert result.exit_code == 0, result.output
+        assert [r for r in caplog.records if _WARNING_TEXT in r.getMessage()]
+
+    def test_a_non_40_hex_head_warns_and_records_nothing(
+        self, repo: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        payload = _engine_round(_defer_finding("fp-00000a1"), sha=DEFAULT_SHA)
+        with caplog.at_level(logging.WARNING, logger=_ENGINE_LOG):
+            result = _record(repo, payload)
+        assert result.exit_code == 0, result.output
+        assert [r for r in caplog.records if _WARNING_TEXT in r.getMessage()]
+        assert _settlements() == []
+
+    def test_a_failed_save_warns_and_never_changes_the_exit(
+        self,
+        repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        def refuse(*_args: object, **_kwargs: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr(
+            "cw.cli.review.converge_engine_defers.record_engine_settlement", refuse
+        )
+        with caplog.at_level(logging.WARNING, logger=_ENGINE_LOG):
+            result = _record(repo, _engine_round(_defer_finding("fp-00000a1")))
+        assert result.exit_code == 0, result.output
+        assert [r for r in caplog.records if _WARNING_TEXT in r.getMessage()]
+        assert _stored(repo).rounds[-1].engine is True

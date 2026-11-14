@@ -2104,7 +2104,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 61
+        assert DEV_QUEUE_SCHEMA_VERSION == 62
 
     def test_ticket_task_branch_defaults_none_on_a_pre_v49_blob(self) -> None:
         """#2948 (v49): a row persisted before the field existed loads unset,
@@ -4309,7 +4309,7 @@ class TestLaunchMarker:
 
         assert marker.start_since_boot_ns is None
         assert marker.boot_id is None
-        assert DEV_QUEUE_SCHEMA_VERSION == 61
+        assert DEV_QUEUE_SCHEMA_VERSION == 62
 
     def test_new_shape_round_trips_through_json_on_a_row(self) -> None:
         from cw.models import LaunchMarker
