@@ -399,10 +399,10 @@ def test_non_candidates_are_not_read(
     assert cli.records == []
 
 
-def test_duplicate_candidate_rows_share_one_read_and_each_get_a_hit(
+def test_duplicate_candidate_rows_only_cancel_the_first_row(
     client: ClientConfig, cli: FakeGhCli
 ) -> None:
-    """Duplicate candidate rows must not bypass the closed-ticket guard."""
+    """A CLOSED read holds duplicate rows for independent evaluation."""
     cli.reply("gh", "issue", "view", stdout=_CLOSED)
     first = _row("7")
     second = _row("7", created_at=_T0 + timedelta(seconds=5))
@@ -410,7 +410,7 @@ def test_duplicate_candidate_rows_share_one_read_and_each_get_a_hit(
     hits = _resolve(client, second, first)
     assert hits == {
         "7": ClosedTicketHit(first.created_at, defer=False),
-        _key(second): ClosedTicketHit(second.created_at, defer=False),
+        _key(second): ClosedTicketHit(second.created_at, defer=True),
     }
     assert len(cli.records) == 1
 

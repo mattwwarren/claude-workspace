@@ -310,9 +310,13 @@ def _read_window(
         for member in group:
             new_entries[_row_key(member)] = entry
         if entry.closed:
-            for index, member in enumerate(group):
-                hit_key = member.ticket_id if index == 0 else _row_key(member)
-                hits[hit_key] = ClosedTicketHit(member.created_at, defer=False)
+            # One issue-state read must not cancel every duplicate queue row:
+            # only the first row in claim order has independently earned the
+            # CLOSED verdict. Hold the remaining row identities so they are
+            # read independently after the first row leaves the queue.
+            hits[task.ticket_id] = ClosedTicketHit(task.created_at, defer=False)
+            for member in group[1:]:
+                hits[_row_key(member)] = ClosedTicketHit(member.created_at, defer=True)
     if deferred:
         _log.info(
             "dispatch: closed-ticket guard deferred %d candidate(s) for %s past its"
