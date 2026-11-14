@@ -14,7 +14,7 @@ from cw.cli._base import _complete_client, handle_errors, main
 from cw.config import load_clients
 from cw.exceptions import CwError
 from cw.merge_probe import probe_default_merge
-from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
+from cw.pr_hydrate import _resolve_repo_slug
 from cw.worktree import _git_dir, effective_worktree_bases
 from cw.worktree_gc import (
     GC_REMOVE_VERDICTS,
@@ -162,7 +162,9 @@ def worktree_gc(
     worktrees where the PR is MERGED (or CLOSED with --include-closed).
     Dry-run by default; pass --apply to act.
     Locked, dirty, and live-session worktrees are always skipped.
-    Runs against all configured GitHub-tracked clients by default.
+    Runs against all configured clients whose origin remote is a github.com
+    repository by default; a client whose origin is missing or not on GitHub is
+    skipped. The ticket tracker is not consulted.
     """
     clients = load_clients()
 
@@ -181,16 +183,18 @@ def worktree_gc(
 
     any_output = False
     for name, client in selected.items():
-        tracker_root = client.repo_path or client.workspace_path
-        if resolve_tracker(tracker_root) != TRACKER_GITHUB_ISSUES:
-            click.echo(f"[{name}] skipped — not a GitHub-tracked client")
+        git_cwd = _git_dir(client)
+        if _resolve_repo_slug(git_cwd) is None:
+            click.echo(
+                f"[{name}] skipped — origin is not a github.com repository"
+                " (no origin remote, or a non-GitHub code host)"
+            )
             continue
 
         if len(selected) > 1:
             click.echo(f"[{name}]")
 
         try:
-            git_cwd = _git_dir(client)
             wt_bases = effective_worktree_bases(client)
             report = run_worktree_gc(
                 git_cwd,
@@ -217,7 +221,7 @@ def worktree_gc(
         any_output = True
 
     if not any_output:
-        click.echo("No GitHub-tracked clients found.")
+        click.echo("No GitHub-hosted clients found.")
 
 
 #: ``cw worktree merge-probe`` exit codes (#2979): no merge needed, a merge is

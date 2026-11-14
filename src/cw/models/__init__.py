@@ -39,6 +39,8 @@ each submodule only imports from those above it (no cycles):
   ``tasks.ticket_task`` imports; not re-exported, import it by submodule path.
 - ``session_inbox`` — ``SessionInboxMessage``, one operator message in a
   session's inbound mailbox (#2212). Also a DAG root.
+- ``worker_effort`` — ``WorkerEffort``, the closed per-client effort level for
+  Claude workers (#2350). A DAG root, re-exported here.
 - ``session`` — ``LocalLivenessBackend``, ``LocalLivenessHandle``, ``Session``.
 - ``client`` — ``ClientConfig`` and ``DEFAULT_AUTO_PURPOSES``.
 - ``branch`` — ``resolve_feature_branch``, the one per-row branch seam (#2948).
@@ -165,6 +167,7 @@ from cw.models.tasks import (
     _validate_review_recipe_keys,
     occupies_lane_slot,
 )
+from cw.models.worker_effort import WorkerEffort
 
 __all__ = [
     "AGENT_SPAWN_LAST_STAMPED_AT_KEY",
@@ -261,6 +264,7 @@ __all__ = [
     "UnresolvedEntry",
     "UsageLimitAct",
     "WatchedPr",
+    "WorkerEffort",
     "_validate_gate_recipe_keys",
     "_validate_review_recipe_keys",
     "counts_toward_client_ceiling",

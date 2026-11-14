@@ -2620,6 +2620,19 @@
      },
      "title": "TrackerMcpGateConfig",
      "type": "object"
+    },
+    "WorkerEffort": {
+     "description": "Effort level for an autonomous Claude worker, or ``INHERIT`` to opt out.",
+     "enum": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "inherit"
+     ],
+     "title": "WorkerEffort",
+     "type": "string"
     }
    },
    "additionalProperties": false,
@@ -2708,6 +2721,17 @@
      ],
      "default": null,
      "title": "Worker Model"
+    },
+    "worker_effort": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/WorkerEffort"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
     },
     "quality_gate_commands": {
      "anyOf": [
