@@ -97,7 +97,7 @@ def test_invented_quote_exits_1_with_exact_string() -> None:
     entry = _entries(verdict)[0]
     assert entry["quote"] == "The loop must never retry after two failures."
     assert entry["fragment"] == "The loop must never retry after two failures."
-    assert entry["line"] == 8
+    assert entry["line"] == 9
     assert entry["trigger"] == "field"
 
 
@@ -281,7 +281,7 @@ def test_unclosed_fence_swallows_rest_of_plan() -> None:
 
 
 def test_inline_code_quotes_are_ignored() -> None:
-    plan = 'Ticket says `grep "inline invented words"` then.\n'
+    plan = 'The ticket says `grep "inline invented words"` then.\n'
     assert _check(plan) == {"quotes_checked": 0, "unmatched": []}
 
 
