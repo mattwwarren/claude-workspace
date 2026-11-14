@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Final
 
 from cw.cli.review.converge_confirm import round_ran_engine
 from cw.cli.review.debt import resolve_identity
+from cw.dev_queue.review_engine_reconcile import GATING_SEVERITIES, SHOULD_FIX
 from cw.dev_queue.review_engine_settlements import record_engine_settlement
 from cw.exceptions import CwError
 from cw.review_engine.route import is_non_deferrable_rule
@@ -30,7 +31,6 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
-_GATING: Final = frozenset({"MUST_FIX", "SHOULD_FIX"})
 _WARNING: Final = (
     "review engine settlement not recorded (no identity, no REVIEW-stage "
     "RUNNING queue row, or the write failed): client=%s ticket=%s head=%s"
@@ -47,10 +47,10 @@ def _deferred_fingerprints(findings: Sequence[RoundFinding]) -> list[str]:
     """
     fingerprints: list[str] = []
     for finding in findings:
-        if finding.severity not in _GATING:
+        if finding.severity not in GATING_SEVERITIES:
             continue
         if (
-            finding.severity != "SHOULD_FIX"
+            finding.severity != SHOULD_FIX
             or finding.outcome != "defer"
             or finding.fingerprint is None
             or is_non_deferrable_rule(finding.rule_id)

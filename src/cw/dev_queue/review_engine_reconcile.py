@@ -34,8 +34,8 @@ if TYPE_CHECKING:
     from cw.models.review_engine_summary import EngineFinding
     from cw.review_convergence import ConvergenceLedger
 
-_GATING: Final = frozenset({"MUST_FIX", "SHOULD_FIX"})
-_RECONCILED_SEVERITY: Final = "SHOULD_FIX"
+GATING_SEVERITIES: Final = frozenset({"MUST_FIX", "SHOULD_FIX"})
+SHOULD_FIX: Final = "SHOULD_FIX"
 _DEBT_SEVERITY: Final = "DEBT"
 
 
@@ -52,9 +52,7 @@ def _ledger_defers(finding: EngineFinding, ledger: ConvergenceLedger) -> bool:
     """Whether the ledger holds a ``defer`` that silences *finding* as a SHOULD_FIX."""
     return any(
         entry.identity.fingerprint == finding.fingerprint
-        and settled_applies(
-            entry, _RECONCILED_SEVERITY, finding.fingerprint, finding.rule_id
-        )
+        and settled_applies(entry, SHOULD_FIX, finding.fingerprint, finding.rule_id)
         for entry in ledger.settled
     )
 
@@ -65,7 +63,7 @@ def _reconcilable(
     settled_fingerprints: Collection[str],
 ) -> bool:
     return (
-        finding.severity == _RECONCILED_SEVERITY
+        finding.severity == SHOULD_FIX
         and not is_non_deferrable_rule(finding.rule_id)
         and finding.fingerprint in settled_fingerprints
         and _ledger_defers(finding, ledger)
@@ -88,7 +86,9 @@ def reconcile_deferred_summary(
     """
     if summary.verdict != "FAIL" or summary.coverage != "COMPLETE":
         return None
-    gating = [finding for finding in summary.findings if finding.severity in _GATING]
+    gating = [
+        finding for finding in summary.findings if finding.severity in GATING_SEVERITIES
+    ]
     if not gating:
         return None
     if not all(
@@ -97,7 +97,7 @@ def reconcile_deferred_summary(
         return None
     remapped = [
         finding.model_copy(update={"severity": _DEBT_SEVERITY})
-        if finding.severity in _GATING
+        if finding.severity in GATING_SEVERITIES
         else finding
         for finding in summary.findings
     ]

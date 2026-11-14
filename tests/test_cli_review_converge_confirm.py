@@ -23,12 +23,10 @@ from cw.cli.review.converge_confirm import prepare_engine_confirm, round_ran_eng
 from cw.dev_queue import add_ticket, remove_ticket
 from cw.dev_queue.review_records import find_ticket_row
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
-from cw.review_adjudication import AdjudicationOutcome
 from cw.review_convergence import (
     CONFIRM_ENGINE_DEFER_RATIONALE,
     CONFIRM_ENGINE_PARK_RATIONALE,
     ConvergenceLedger,
-    GatingSeverity,
     RoundFinding,
     RoundInput,
     decide_confirm_verdict,
@@ -44,6 +42,7 @@ from tests._cli_review_helpers import (
     _session_repo,
     _write_session_context,
 )
+from tests._review_attestation_helpers import engine_round_finding
 from tests._review_convergence_helpers import (
     DEFAULT_SHA,
     TICKET_ID,
@@ -679,21 +678,6 @@ _ENGINE_LOG = "cw.cli.review.converge_engine_defers"
 _WARNING_TEXT = "review engine settlement not recorded"
 
 
-def _defer_finding(
-    fingerprint: str,
-    *,
-    severity: GatingSeverity = "SHOULD_FIX",
-    rule_id: str = "style.naming",
-    outcome: AdjudicationOutcome = "defer",
-) -> RoundFinding:
-    return round_finding(
-        severity,
-        f"finding {fingerprint}",
-        outcome=outcome,
-        rationale="deferred",
-    ).model_copy(update={"fingerprint": fingerprint, "rule_id": rule_id})
-
-
 def _engine_round(*findings: RoundFinding, sha: str = SHA) -> dict[str, object]:
     return round_payload("loop", "claude-native", sha, *findings, roster=[ENGINE_ROLE])
 
@@ -709,6 +693,7 @@ class TestEngineSettlementRecording:
     @pytest.fixture(autouse=True)
     def _fresh(self, repo: Path) -> None:
         write_ledger(repo, fresh_ledger(confirm="codex", ticket_id=_TICKET))
+        _write_session_context(repo, headless=False, client=_CLIENT, ticket_id=_TICKET)
         _seed_review_row(
             _TICKET, _CLIENT, status=QueueItemStatus.RUNNING, worktree_path=repo
         )
@@ -717,7 +702,7 @@ class TestEngineSettlementRecording:
         self, repo: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         payload = _engine_round(
-            _defer_finding("fp-00000a1"), _defer_finding("fp-00000a2")
+            engine_round_finding("fp-00000a1"), engine_round_finding("fp-00000a2")
         )
         with caplog.at_level(logging.WARNING, logger=_ENGINE_LOG):
             result = _record(repo, payload)
@@ -726,28 +711,30 @@ class TestEngineSettlementRecording:
         assert not [r for r in caplog.records if _WARNING_TEXT in r.getMessage()]
 
     def test_the_write_is_idempotent_for_the_same_round(self, repo: Path) -> None:
-        payload = _engine_round(_defer_finding("fp-00000a1"))
+        payload = _engine_round(engine_round_finding("fp-00000a1"))
         _record(repo, payload)
         _record(repo, payload)
         assert _settlements() == [(SHA, ["fp-00000a1"])]
 
     def test_a_must_fix_deferral_records_nothing(self, repo: Path) -> None:
         payload = _engine_round(
-            _defer_finding("fp-00000a1"),
-            _defer_finding("fp-00000m1", severity="MUST_FIX"),
+            engine_round_finding("fp-00000a1"),
+            engine_round_finding("fp-00000m1", severity="MUST_FIX"),
         )
         assert _record(repo, payload).exit_code == 0
         assert _settlements() == []
 
     def test_a_coverage_rule_deferral_records_nothing(self, repo: Path) -> None:
-        payload = _engine_round(_defer_finding("fp-00000a1", rule_id="coverage.x"))
+        payload = _engine_round(
+            engine_round_finding("fp-00000a1", rule_id="coverage.x")
+        )
         assert _record(repo, payload).exit_code == 0
         assert _settlements() == []
 
     def test_a_mixed_fix_and_defer_round_records_nothing(self, repo: Path) -> None:
         payload = _engine_round(
-            _defer_finding("fp-00000a1"),
-            _defer_finding("fp-00000a2", outcome="fix"),
+            engine_round_finding("fp-00000a1"),
+            engine_round_finding("fp-00000a2", outcome="fix"),
         )
         assert _record(repo, payload).exit_code == 0
         assert _settlements() == []
@@ -757,7 +744,7 @@ class TestEngineSettlementRecording:
             "loop",
             "claude-native",
             SHA,
-            _defer_finding("fp-00000a1"),
+            engine_round_finding("fp-00000a1"),
             roster=[ENGINE_ROLE, "Test Reviewer"],
         )
         assert _record(repo, payload).exit_code == 0
@@ -774,7 +761,7 @@ class TestEngineSettlementRecording:
         )
         write_ledger(root, fresh_ledger(confirm="codex", ticket_id=_TICKET))
         with caplog.at_level(logging.WARNING, logger=_ENGINE_LOG):
-            result = _record(root, _engine_round(_defer_finding("fp-00000a1")))
+            result = _record(root, _engine_round(engine_round_finding("fp-00000a1")))
         assert result.exit_code == 0, result.output
         assert len([r for r in caplog.records if _WARNING_TEXT in r.getMessage()]) == 1
         assert _stored(root).rounds[-1].engine is True
@@ -784,7 +771,7 @@ class TestEngineSettlementRecording:
     ) -> None:
         remove_ticket(_TICKET, _CLIENT)
         with caplog.at_level(logging.WARNING, logger=_ENGINE_LOG):
-            result = _record(repo, _engine_round(_defer_finding("fp-00000a1")))
+            result = _record(repo, _engine_round(engine_round_finding("fp-00000a1")))
         assert result.exit_code == 0, result.output
         assert _stored(repo).rounds[-1].engine is True
         assert [r for r in caplog.records if _WARNING_TEXT in r.getMessage()]
@@ -802,14 +789,14 @@ class TestEngineSettlementRecording:
             )
         )
         with caplog.at_level(logging.WARNING, logger=_ENGINE_LOG):
-            result = _record(repo, _engine_round(_defer_finding("fp-00000a1")))
+            result = _record(repo, _engine_round(engine_round_finding("fp-00000a1")))
         assert result.exit_code == 0, result.output
         assert [r for r in caplog.records if _WARNING_TEXT in r.getMessage()]
 
     def test_a_non_40_hex_head_warns_and_records_nothing(
         self, repo: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        payload = _engine_round(_defer_finding("fp-00000a1"), sha=DEFAULT_SHA)
+        payload = _engine_round(engine_round_finding("fp-00000a1"), sha=DEFAULT_SHA)
         with caplog.at_level(logging.WARNING, logger=_ENGINE_LOG):
             result = _record(repo, payload)
         assert result.exit_code == 0, result.output
@@ -830,7 +817,21 @@ class TestEngineSettlementRecording:
             "cw.cli.review.converge_engine_defers.record_engine_settlement", refuse
         )
         with caplog.at_level(logging.WARNING, logger=_ENGINE_LOG):
-            result = _record(repo, _engine_round(_defer_finding("fp-00000a1")))
+            result = _record(repo, _engine_round(engine_round_finding("fp-00000a1")))
         assert result.exit_code == 0, result.output
         assert [r for r in caplog.records if _WARNING_TEXT in r.getMessage()]
         assert _stored(repo).rounds[-1].engine is True
+
+    def test_a_dispatch_worker_payload_cannot_create_a_settlement(
+        self,
+        repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _write_session_context(repo, headless=True, client=_CLIENT, ticket_id=_TICKET)
+        monkeypatch.setenv("TMPDIR", str(repo / ".cw" / "tmp"))
+        with caplog.at_level(logging.WARNING, logger=_ENGINE_LOG):
+            result = _record(repo, _engine_round(engine_round_finding("fp-00000a1")))
+        assert result.exit_code == 0, result.output
+        assert _settlements() == []
+        assert len([r for r in caplog.records if _WARNING_TEXT in r.getMessage()]) == 1

@@ -3,12 +3,12 @@
 ``record_engine_settlement`` is the only code that writes the settlement list.
 It runs under ``dev_queue_lock`` only, never takes ``sessions_lock``, and spawns
 no process (ADR-0019). Its guarantee is exact: **the reviewed branch cannot
-edit the file this lives in.** It is cw state outside the worktree. It is not
-that the branch cannot cause a write: a worker running ``cw review converge
-record-round`` in its own session reaches this writer by design. The gate below
-keeps that write narrow. It refuses unless the resolved row is REVIEW-stage and
-RUNNING, and it writes nothing otherwise, so a refusal leaves no attestation and
-never a false PASS.
+edit the file this lives in.** It is cw state outside the worktree. The worker
+guard also refuses a headless dispatch worker, so a reviewed branch cannot use
+its own ``record-round`` payload to mint the settlement that authorizes its
+attestation. The remaining row gate refuses unless the resolved row is
+REVIEW-stage and RUNNING, and writes nothing otherwise, so a refusal leaves no
+attestation and never a false PASS.
 
 The pure reader and the reconciler live in
 :mod:`cw.dev_queue.review_engine_reconcile`, which imports no ``crud`` and so
@@ -21,6 +21,7 @@ import logging
 import re
 from typing import TYPE_CHECKING, Final
 
+from cw.cli._worker_guard import refuse_inside_dispatch_worker
 from cw.dev_queue.crud import _find_ticket
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.exceptions import CwError
@@ -40,6 +41,10 @@ _log = logging.getLogger(__name__)
 MAX_SETTLEMENT_HEADS: Final = 8
 
 _HEAD_RE: Final = re.compile(HEAD_SHA_PATTERN)
+_SETTLEMENT_IN_WORKER_MSG: Final = (
+    "refusing to record an engine settlement inside a dispatch worker; "
+    "a reviewed branch cannot authorize its own attestation"
+)
 
 
 def _require_review_running(task: TicketTask) -> None:
@@ -79,6 +84,7 @@ def record_engine_settlement(
             ``(ticket_id, client_name)``, or the row is not a RUNNING REVIEW row.
         OSError: if the store could not be written.
     """
+    refuse_inside_dispatch_worker(_SETTLEMENT_IN_WORKER_MSG)
     if _HEAD_RE.fullmatch(head_sha) is None:
         msg = f"review engine settlement needs a 40-hex head_sha, got {head_sha!r}"
         raise CwError(msg)
