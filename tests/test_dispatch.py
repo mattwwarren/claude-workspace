@@ -11340,22 +11340,32 @@ class TestApplyStagedDecision:
     ) -> None:
         """#2321 R10: a dependency park is not evidence the claim did no work.
 
-        The evidence-free payload would charge via the ordinary Rule 5
-        computation; ``dependency_unmerged`` in the ``rule5_unproductive``
-        exemption keeps a park-and-release cycle off ``attempt_cap_blocked``.
+        The Rule 5 body is driven directly with ``claim_unproductive=True``
+        (the evidence-free claim the generic computation would charge), so
+        only ``dependency_unmerged`` in the ``rule5_unproductive`` exemption
+        keeps a park-and-release cycle off ``attempt_cap_blocked``. Through
+        ``apply_staged_decision`` the human-input-park evidence signal would
+        already zero ``claim_unproductive`` and mask the exemption.
         """
-        from cw.dispatch import apply_staged_decision
+        from cw.dispatch.routing.stage_failure import _route_stage_failure
 
         task = self._make_running_task("HOLD-DEP-4", stage=Stage.REVIEW)
-        last_result: dict[str, object] = {
-            "status": "blocked",
-            "blocker": {
-                "stage": "stage3_review",
-                "reason": "dependency_unmerged",
-                "depends_on_pr": 88,
-            },
+        blocker: dict[str, object] = {
+            "stage": "stage3_review",
+            "reason": "dependency_unmerged",
+            "depends_on_pr": 88,
         }
-        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+        last_result: dict[str, object] = {"status": "blocked", "blocker": blocker}
+        _route_stage_failure(
+            task,
+            self._clients(tmp_path),
+            "blocked",
+            last_result,
+            blocker,
+            "dependency_unmerged",
+            "awaiting_operator",
+            claim_unproductive=True,
+        )
 
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.blocked_reason == "dependency_unmerged"
