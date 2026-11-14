@@ -28,8 +28,13 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
+# The ``large_diff`` lane (#2086): the SysAdmin spec, framed by a role-keyed
+# prompt block (``_prompt_text._role_framing``) to trace a change's callers.
+TRANSITIVE_IMPACT_REVIEWER_ROLE: Final = "Transitive Impact Reviewer"
+
 # Reviewer role name -> authoritative agent-spec file under .claude/agents/.
-# Role names match the `/review` Step 3 table and each agent file's `name:`.
+# Role names match the `/review` Step 3 table and each agent file's `name:`,
+# except the Transitive Impact role, which shares the SysAdmin spec file.
 _REVIEWER_ROLE_AGENT_FILES: dict[str, str] = {
     "Code Quality Reviewer": "code-reviewer.md",
     "SysAdmin Reviewer": "sysadmin-reviewer.md",
@@ -40,6 +45,7 @@ _REVIEWER_ROLE_AGENT_FILES: dict[str, str] = {
     "Performance Reviewer": "performance-reviewer.md",
     "API Contract Validator": "api-contract-validator.md",
     "Deployment Reviewer": "deployment-reviewer.md",
+    TRANSITIVE_IMPACT_REVIEWER_ROLE: "sysadmin-reviewer.md",
 }
 
 # Plan review station name -> agent-spec file (#3060). Kept OUT of

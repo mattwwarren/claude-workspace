@@ -58,6 +58,9 @@ class ScopeDriftApproval(TypedDict):
     client: str
     extra_files: list[str]
     approved_head: str
+    # Set only when stored review feedback was pinned to a head the drifting
+    # round moved past; the feedback was dropped with the grant (#3637).
+    dropped_review_feedback_sha: str | None
 
 
 def _write_scope_drift_recovery_marker(payload: dict[str, object]) -> None:
@@ -216,6 +219,15 @@ def _approve_scope_drift_locked(
     from_stage = task.stage.value
     task.scope_drift_approved_extra_files = approved_files
     task.scope_drift_approved_head = head_sha
+    # Why: the drifting round moved the head past the feedback's pin, so the
+    # Stage 2 review-feedback guard would refuse it and park impl_failed. Feedback
+    # still naming the current head (codex parks before its commit) stays valid.
+    dropped_feedback_sha: str | None = None
+    feedback = task.review_feedback
+    if feedback is not None and feedback.reviewed_sha != head_sha.lower():
+        dropped_feedback_sha = feedback.reviewed_sha
+        task.review_feedback = None
+        task.red_pr_recovery_sha = None
     _reset_for_same_stage_requeue(task)
     approval_payload: dict[str, object] = {
         "ticket_id": ticket_id,
@@ -225,6 +237,8 @@ def _approve_scope_drift_locked(
         SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY: approved_files,
         SCOPE_DRIFT_APPROVED_HEAD_KEY: head_sha,
     }
+    if dropped_feedback_sha is not None:
+        approval_payload["dropped_review_feedback_sha"] = dropped_feedback_sha
     save_dev_queue(store)
     try:
         record_event(
@@ -274,4 +288,5 @@ def _approve_scope_drift_locked(
         "client": client_name,
         "extra_files": approved_files,
         "approved_head": head_sha,
+        "dropped_review_feedback_sha": dropped_feedback_sha,
     }

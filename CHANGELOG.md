@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Adopting a PR with an in-progress CheckRun no longer refuses it as malformed (#3627, #3207).** gh reports `"conclusion": ""` for a QUEUED or IN_PROGRESS CheckRun; the adopt classifier now treats that as no conclusion yet (pending). A COMPLETED CheckRun with an empty conclusion and any unknown non-empty conclusion are still refused.
+
 ### Added
 
 - **Per-client worker effort** (`ClientConfig.worker_effort`, #2350): forwards
@@ -16,8 +20,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unaffected. No per-stage override. The effort is not persisted on the
   session; a recorded `Session.worker_effort` is a follow-up.
 
+- **A `large_diff` review adds a Transitive Impact lane and tree access, on both review paths (#2086).** When the branch diff is `large_diff` and code changed, the reviewer roster gains a Transitive Impact Reviewer (the SysAdmin spec, framed to trace changed producers and contracts through real callers, consumers, persisted data, reruns and rollout). On the Claude-native path Architecture, Test Quality and Transitive Impact also get their own isolation worktree, checked out at the pushed branch, falling back to a degraded diff-only lane. The codex lane now measures `large_diff` over the whole branch on every pass (it used the hint-only tier before), so a Small-tier `large_diff` branch gets the Large list there too; the measurement fails open to the unscaled roster. Small-tier diffs that are not `large_diff` keep the same 3 to 4 lanes. No new config key or event.
 - **`cw dev-queue usage-limit clear -c <client>` lifts a usage-limit back-off window early, and `status`/`doctor` show active windows (#3547).** After a manual account reset, the clear probes the account (`claude -p "Reply with exactly: WORKER-OK"`), refuses while it is still limited or when the probe cannot tell (`--force` skips the probe), then removes the client's window and releases every future `next_eligible_at` wait on its PENDING rows; gate-block waits and `spawn_error_count` are kept. `--dry-run` prints the plan and changes nothing. A running dispatch loop drops the window on its next tick through a new per-client clear mark (`usage_limit_cleared` in `dispatch_state.json`); no restart. The clear records `dispatch.usage_limit_cleared` with `trigger: "operator"` and additive keys, and the loop suppresses its own lapse event on that tick. `cw dev-queue status` gains a `Usage-limit windows:` block and a per-client `usage_limit` key in `--json` (additive); `cw doctor` adds an advisory `usage-limit/<client>` line per active window. Operator note: a detection that really happens after the clear re-arms the window; re-run the clear.
 - **Headless workers that end a turn with text and no sentinel get one fixed nudge, up to twice per stage (#2348).** The Stop hook sends a `block` decision with a fixed reason asking the worker to finish and emit its sentinel or a blocked sentinel. The counter lives on the dev-queue row and resets on stage change. Each continuation records `session.stop_continued`. Claude-hosted workers only; usage-limit, API-error, scheduled-wakeup, background-task and tool-error turns are excluded.
+
+### Fixed
+
+- **`cw dev-queue approve --scope-drift` drops review feedback pinned to a superseded head (#3637).** A drifting IMPL round can move the branch head past the stored `review_feedback`'s `reviewed_sha`; the re-run then refused that feedback at its Stage 2 guard (`review_feedback_stale`) and parked `impl_failed`. The grant now drops the feedback (and `red_pr_recovery_sha`) in the same save when the head no longer matches, and keeps it when it still names the current head (codex parks before its commit). The CLI prints the dropped sha and the `requeue --stage impl --review-feedback-file` recovery command; the `ticket.approved` event gains `dropped_review_feedback_sha` only when something was dropped. Operator note: to re-run with a fresh report, requeue with `--review-feedback-file`.
 
 ## [1.98.0] - 2026-11-13
 
