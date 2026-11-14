@@ -8,6 +8,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Per-client worker effort** (`ClientConfig.worker_effort`, #2350): forwards
+  `--effort <level>` to `claude --bg` for DAEMON-origin workers, from both the
+  initial spawn and resume re-spawn. Closed set `low`, `medium`, `high`,
+  `xhigh`, `max`, plus `inherit` to emit no flag. Unset defaults to `medium`
+  only on full `claude-opus-5-5*` model ids. USER-origin sessions are
+  unaffected. No per-stage override. The effort is not persisted on the
+  session; a recorded `Session.worker_effort` is a follow-up.
+
 - **Headless workers that end a turn with text and no sentinel get one fixed nudge, up to twice per stage (#2348).** The Stop hook sends a `block` decision with a fixed reason asking the worker to finish and emit its sentinel or a blocked sentinel. The counter lives on the dev-queue row and resets on stage change. Each continuation records `session.stop_continued`. Claude-hosted workers only; usage-limit, API-error, scheduled-wakeup, background-task and tool-error turns are excluded.
 
 ## [1.98.0] - 2026-11-13
