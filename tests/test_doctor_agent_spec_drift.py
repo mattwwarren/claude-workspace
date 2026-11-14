@@ -41,7 +41,7 @@ def test_all_roles_repo_local_resolves_clean(sample_client: ClientConfig) -> Non
     assert result.name == "agent-spec-drift/test-client"
     assert result.ok is True
     assert result.warn is False
-    assert "9/9" in result.detail
+    assert "10/10" in result.detail
 
 
 def test_no_agents_dir_at_all_produces_actionable_warning(
@@ -146,7 +146,7 @@ def test_blank_repo_file_recovered_by_global_fallback_reports_resolved(
 
     result = results[0]
     assert result.warn is False
-    assert "9/9" in result.detail
+    assert "10/10" in result.detail
     assert "1 global" in result.detail
 
 
@@ -164,7 +164,7 @@ def test_repo_path_wins_over_workspace_path(tmp_path: Path) -> None:
 
     result = results[0]
     assert result.warn is False
-    assert "9/9" in result.detail
+    assert "10/10" in result.detail
 
 
 def test_multiple_clients_get_independent_check_results(

@@ -15,9 +15,15 @@ import pytest
 
 from cw.codex_review import _prepare_review_pass
 from cw.codex_review._context import EngineRoster
-from cw.codex_review._context._file_selection import _categorize_changed_files
+from cw.codex_review._context._agent_spec import TRANSITIVE_IMPACT_REVIEWER_ROLE
+from cw.codex_review._context._file_selection import (
+    _categorize_changed_files,
+    _select_reviewer_roles,
+)
+from cw.codex_review._context._prompt_text import _TRANSITIVE_IMPACT_RESPONSIBILITY
 from cw.codex_review._context._roster import resolve_roster
 from tests._codex_review_helpers import _populate_global_agents_dir, _task, _write
+from tests._shared.workflow_text import _cmd
 from tests._tool_fakes import ScriptedCodexRunner
 
 if TYPE_CHECKING:
@@ -73,6 +79,7 @@ class TestResolveRoster:
             categories=_categorize_changed_files(["a.py"]),
             mutates_persisted_state=False,
             has_ticket_context=False,
+            large_diff=False,
         )
 
         assert roles == ["security", "quality"]
@@ -97,6 +104,7 @@ class TestResolveRoster:
             categories=_categorize_changed_files(["a.py"]),
             mutates_persisted_state=False,
             has_ticket_context=False,
+            large_diff=False,
         )
 
         assert _BUILTIN_ROLE in roles
@@ -105,6 +113,94 @@ class TestResolveRoster:
         by_role = {s.role: s for s in statuses}
         assert by_role[_BUILTIN_ROLE].source == "repo"
         assert set(specs) == set(roles)
+
+    def test_an_engine_roster_ignores_large_diff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _poison_every_builtin_source(tmp_path, tmp_path / "global", monkeypatch)
+
+        roles, _specs, _statuses = resolve_roster(
+            tmp_path,
+            _ROSTER,
+            scope_tier="small",
+            categories=_categorize_changed_files(["a.py"]),
+            mutates_persisted_state=True,
+            has_ticket_context=True,
+            large_diff=True,
+        )
+
+        assert roles == ["security", "quality"]
+
+    def test_large_diff_is_forwarded_to_the_selector(self, tmp_path: Path) -> None:
+        roles, specs, _statuses = resolve_roster(
+            tmp_path,
+            None,
+            scope_tier="small",
+            categories=_categorize_changed_files(["a.py"]),
+            mutates_persisted_state=False,
+            has_ticket_context=False,
+            large_diff=True,
+        )
+
+        assert TRANSITIVE_IMPACT_REVIEWER_ROLE in roles
+        assert TRANSITIVE_IMPACT_REVIEWER_ROLE in specs
+
+
+def _large_scope_list(content: str) -> str:
+    """The "Large scope" reviewer list of ``auto-dev-review.md``, up to its end."""
+    start = content.index("**Large scope:** Spawn full reviewer set")
+    end = content.index("After selecting the full roster", start)
+    return content[start:end]
+
+
+class TestRosterDocLockstep:
+    """#2086: the Claude-native prose and the codex selector name one lane."""
+
+    def test_the_large_scope_list_names_transitive_impact_on_large_diff(
+        self,
+    ) -> None:
+        lane = next(
+            line
+            for line in _large_scope_list(_cmd("auto-dev-review.md")).splitlines()
+            if line.startswith("- Transitive Impact")
+        )
+        assert "`large_diff`" in lane
+        assert 'subagent_type: "SysAdmin Reviewer"' in lane
+        assert f"`{TRANSITIVE_IMPACT_REVIEWER_ROLE}`" in lane
+
+    def test_the_prose_carries_the_shared_responsibility_verbatim(self) -> None:
+        assert _TRANSITIVE_IMPACT_RESPONSIBILITY in _cmd("auto-dev-review.md")
+
+    def test_the_prose_names_the_roster_role(self) -> None:
+        assert TRANSITIVE_IMPACT_REVIEWER_ROLE == "Transitive Impact Reviewer"
+        assert TRANSITIVE_IMPACT_REVIEWER_ROLE in _cmd("auto-dev-review.md")
+
+    def test_the_prose_cites_the_selector_and_the_definition(self) -> None:
+        content = _cmd("auto-dev-review.md")
+        assert "`_select_reviewer_roles`" in content
+        assert "src/cw/codex_review/_context/_file_selection.py" in content
+        assert "`auto-dev.md`" in content
+
+    def test_the_selector_and_the_prose_agree_on_the_large_diff_extra(
+        self,
+    ) -> None:
+        """The codex selector adds exactly the one lane the prose list adds."""
+        categories = _categorize_changed_files(["src/cw/a.py"])
+
+        def _roles(scope_tier: str, *, large_diff: bool) -> list[str]:
+            return _select_reviewer_roles(
+                scope_tier,
+                categories=categories,
+                mutates_persisted_state=False,
+                has_ticket_context=False,
+                large_diff=large_diff,
+            )
+
+        large_diff_roles = _roles("small", large_diff=True)
+        large_tier_roles = _roles("large", large_diff=False)
+        assert set(large_diff_roles) - set(large_tier_roles) == {
+            TRANSITIVE_IMPACT_REVIEWER_ROLE
+        }
 
 
 class TestPrepareReviewPassWithARoster:
