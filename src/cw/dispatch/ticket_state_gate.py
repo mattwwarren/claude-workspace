@@ -25,19 +25,26 @@ Contracts:
   unevaluated (unlike ``pr_gate``'s capped-out candidates, which claim). No
   call here runs under ``sessions_lock``, ``dev_queue_lock`` or any state lock
   (ADR-0019); the cache write takes ``dispatch_state_lock`` only.
-* **Cache.** Closed and open verdicts live for
-  ``_STATE_VERDICT_TTL_SECONDS``; a failed read backs off for
-  ``_FAILED_READ_BACKOFF_SECONDS`` so a persistently failing issue cannot
-  monopolise the cap. The read window is least-recently-attempted first,
-  then claim order. A row the guard cancelled carries a ``cancelled_at``
-  stamp; if it is PENDING again the operator requeued it, and it is left
-  alone.
+* **Cache.** An OPEN verdict lives for ``_STATE_VERDICT_TTL_SECONDS``. A
+  cached CLOSED verdict is never trusted to cancel: it is read again every
+  pass, so a cancel needs a live CLOSED read in the current tick (#1605 rule
+  1). A failed read backs off for ``_FAILED_READ_BACKOFF_SECONDS`` so a
+  persistently failing issue cannot monopolise the cap. The read window is
+  least-recently-attempted first, then claim order.
+* **Stamp before cancel.** A live CLOSED read writes a ``cancelled_at`` stamp
+  in this lock-free save, before the claim takes the queue lock. The claim
+  settles any stamp it did not turn into a cancel. A row the guard cancelled
+  and that is PENDING again carries the stamp; the operator requeued it, and
+  the guard leaves it alone.
+* **Ambiguous tickets fail closed.** More than one non-terminal row for one
+  ticket id means no row of that ticket is cancelled (rule 2).
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from collections import Counter
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, NamedTuple
 
@@ -73,6 +80,10 @@ _OPEN_STATE_TTL_SECONDS: Final = 300
 _STATE_VERDICT_TTL_SECONDS: Final = _OPEN_STATE_TTL_SECONDS
 _FAILED_READ_BACKOFF_SECONDS: Final = 90
 _GATED_STAGES: Final = frozenset({Stage.PLAN, Stage.IMPL})
+# A ticket with several rows is ambiguous only among non-terminal rows (rule 2).
+_TERMINAL_STATUSES: Final = frozenset(
+    {QueueItemStatus.COMPLETED, QueueItemStatus.FAILED, QueueItemStatus.CANCELLED}
+)
 
 
 class ClosedTicketHit(NamedTuple):
@@ -119,6 +130,29 @@ def _is_candidate(task: TicketTask, client_name: str, lanes: Collection[str]) ->
     )
 
 
+def _ambiguous_ticket_ids(client_name: str, queue_snapshot: DevQueueStore) -> set[str]:
+    """Ticket ids with more than one non-terminal row for this client (rule 2).
+
+    Such a ticket fails closed: none of its rows is cancelled, and the claim
+    loop's own ordering is never reproduced to pick one.
+    """
+    counts: Counter[str] = Counter(
+        task.ticket_id
+        for task in queue_snapshot.tasks
+        if task.client == client_name and task.status not in _TERMINAL_STATUSES
+    )
+    ambiguous = {tid for tid, count in counts.items() if count > 1}
+    for tid in sorted(ambiguous):
+        _log.info(
+            "dispatch: closed-ticket guard skipped %s/%s: %d non-terminal rows"
+            " share this ticket id; none is cancelled",
+            client_name,
+            tid,
+            counts[tid],
+        )
+    return ambiguous
+
+
 def _candidates(
     client_name: str,
     queue_snapshot: DevQueueStore,
@@ -127,16 +161,18 @@ def _candidates(
     priority_ticket_ids: Sequence[str],
     cache: Mapping[str, TicketStateProbe],
 ) -> list[TicketTask]:
-    """Guard candidates in claim order, one per ticket id.
+    """Guard candidates in claim order, unambiguous ticket ids only.
 
     Priority ids first (list order), then ``(-priority, created_at)``, which is
     the order ``_claim_next_pending`` visits rows. A row carrying a
     ``cancelled_at`` stamp was requeued by the operator and is skipped.
     """
+    ambiguous = _ambiguous_ticket_ids(client_name, queue_snapshot)
     eligible = [
         task
         for task in queue_snapshot.tasks
         if _is_candidate(task, client_name, claimable_lanes)
+        and task.ticket_id not in ambiguous
         and ((probe := cache.get(_row_key(task))) is None or probe.cancelled_at is None)
     ]
     ranked = sorted(eligible, key=lambda t: (-t.priority, t.created_at))
@@ -144,13 +180,7 @@ def _candidates(
         task for tid in priority_ticket_ids for task in ranked if task.ticket_id == tid
     ]
     ordered.extend(task for task in ranked if task.ticket_id not in priority_ticket_ids)
-    seen: set[str] = set()
-    unique: list[TicketTask] = []
-    for task in ordered:
-        if task.ticket_id not in seen:
-            seen.add(task.ticket_id)
-            unique.append(task)
-    return unique
+    return ordered
 
 
 def _age_seconds(now: datetime, then: datetime | None) -> float | None:
@@ -158,8 +188,12 @@ def _age_seconds(now: datetime, then: datetime | None) -> float | None:
 
 
 def _needs_read(probe: TicketStateProbe | None, now: datetime) -> bool:
-    """False for a fresh verdict or a failed read still in backoff."""
-    if probe is None:
+    """False only for a fresh OPEN verdict or a failed read still in backoff.
+
+    A cached CLOSED verdict is never trusted to cancel (rule 1): it has no
+    lifetime of its own and is always read again in this pass.
+    """
+    if probe is None or probe.closed:
         return True
     verdict_age = _age_seconds(now, probe.checked_at)
     if verdict_age is not None and verdict_age < _STATE_VERDICT_TTL_SECONDS:
@@ -187,7 +221,10 @@ def _read_state(
         task.ticket_id, _STATE_READ_TIMEOUT_SECONDS, cwd=_git_dir(client)
     )
     if state == _GH_ISSUE_STATE_CLOSED:
-        return TicketStateProbe(checked_at=now, closed=True)
+        # Stamped BEFORE the claim cancels the row (rule 3): the stamp is
+        # written in this lock-free save, so a CANCELLED row never exists
+        # without it. The claim settles unused stamps after its lock.
+        return TicketStateProbe(checked_at=now, closed=True, cancelled_at=now)
     if state == _GH_ISSUE_STATE_OPEN:
         return TicketStateProbe(checked_at=now, closed=False)
     _log.info(
@@ -254,9 +291,7 @@ def resolve_closed_ticket_hits(
     to_read: list[tuple[datetime, int, TicketTask]] = []
     for index, task in enumerate(candidates):
         probe = cache.get(_row_key(task))
-        if probe is not None and probe.closed and not _needs_read(probe, resolved_now):
-            hits[task.ticket_id] = ClosedTicketHit(task.created_at, defer=False)
-        elif _needs_read(probe, resolved_now):
+        if _needs_read(probe, resolved_now):
             to_read.append((_last_attempt(probe), index, task))
     to_read.sort(key=lambda item: (item[0], item[1]))
     new_entries = _read_window(
@@ -270,7 +305,15 @@ def resolve_closed_ticket_hits(
     keep = {_row_key(t) for t in queue_snapshot.tasks if t.client == client.name}
     prefix = f"{client.name}/"
     if new_entries or any(k.startswith(prefix) and k not in keep for k in cache):
-        save_ticket_state_probes(client.name, new_entries, prune_to_keys=keep)
+        saved = save_ticket_state_probes(client.name, new_entries, prune_to_keys=keep)
+        if not saved:
+            # Stamp before cancel (rule 3): a closed verdict whose stamp did not
+            # persist must not cancel, and must not be claimed unchecked either
+            # (R3), so it is held as a deferral and re-read next tick.
+            return {
+                tid: ClosedTicketHit(hit.created_at, defer=True)
+                for tid, hit in hits.items()
+            }
     return hits
 
 

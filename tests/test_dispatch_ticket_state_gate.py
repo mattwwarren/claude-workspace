@@ -399,15 +399,16 @@ def test_non_candidates_are_not_read(
     assert cli.records == []
 
 
-def test_duplicate_ticket_rows_read_once(client: ClientConfig, cli: FakeGhCli) -> None:
+def test_ambiguous_ticket_rows_are_never_read_or_cancelled(
+    client: ClientConfig, cli: FakeGhCli
+) -> None:
+    """Rule 2: several non-terminal rows for one ticket fail closed."""
     cli.reply("gh", "issue", "view", stdout=_CLOSED)
     first = _row("7")
     second = _row("7", created_at=_T0 + timedelta(seconds=5))
 
-    hits = _resolve(client, second, first)
-
-    assert hits == {"7": ClosedTicketHit(first.created_at, defer=False)}
-    assert len(cli.records) == 1
+    assert _resolve(client, second, first) == {}
+    assert cli.records == []
 
 
 @pytest.mark.parametrize(
@@ -612,6 +613,7 @@ def test_a_closed_hit_cancels_the_row_without_charging_it(
 ) -> None:
     row = _row(attempts=2, unproductive_attempts=1, session_id="s-old")
     _seed(row)
+    _pre_stamp(row)
 
     assert _claim(client, _closed(row)) is None
 
@@ -755,11 +757,14 @@ def test_a_hit_is_ignored_when_the_row_changed(
         assert stored.status == QueueItemStatus.RUNNING
 
 
-def test_a_failed_stamp_keeps_the_cancel_and_warns(
+def test_a_failed_stamp_write_cancels_nothing(
     client: ClientConfig,
+    cli: FakeGhCli,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Rule 3: a CANCELLED row must never exist without its stamp."""
+    cli.reply("gh", "issue", "view", stdout=_CLOSED)
     row = _row()
     _seed(row)
 
@@ -769,10 +774,38 @@ def test_a_failed_stamp_keeps_the_cancel_and_warns(
 
     monkeypatch.setattr("cw.dispatch_state_ticket_state.atomic_write_text", _boom)
     with caplog.at_level(logging.WARNING):
-        assert _claim(client, _closed(row)) is None
+        hits = _resolve(client, row)
+        assert _claim(client, hits) is None
 
-    assert _stored("101").status == QueueItemStatus.CANCELLED
-    assert "failed to stamp ticket_state_probe" in caplog.text
+    assert hits == {"101": ClosedTicketHit(row.created_at, defer=True)}
+    assert _stored("101").status == QueueItemStatus.PENDING
+    assert "failed to persist ticket_state_probe" in caplog.text
+
+
+def test_an_unused_stamp_is_cleared_after_the_claim(
+    client: ClientConfig, cli: FakeGhCli
+) -> None:
+    """A CLOSED row the claim did not cancel must not keep its stamp."""
+    cli.reply("gh", "issue", "view", stdout=_CLOSED)
+    row = _row()
+    _seed(row)
+    hits = _resolve(client, row)
+    assert _key(row) in load_ticket_state_probes()
+    assert load_ticket_state_probes()[_key(row)].cancelled_at is not None
+
+    assert _claim(client, hits, occupied_ticket_reasons={"101": "live s-1"}) is None
+
+    assert _stored("101").status == QueueItemStatus.PENDING
+    assert load_ticket_state_probes()[_key(row)].cancelled_at is None
+
+
+def _pre_stamp(row: TicketTask) -> None:
+    """Seed the stamp the lock-free resolve writes before a cancel."""
+    save_ticket_state_probes(
+        _CLIENT,
+        {_key(row): TicketStateProbe(_T0, closed=True, cancelled_at=_T0)},
+        prune_to_keys=[_key(row)],
+    )
 
 
 def test_the_cancel_warning_names_the_requeue(

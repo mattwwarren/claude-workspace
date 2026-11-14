@@ -1686,7 +1686,8 @@ def test_act_auto_fix_ci_never_uncancels_a_guard_cancelled_row(
 ) -> None:
     """#1605 R4: a closed-ticket guard cancel is reversed only by the operator."""
     from cw.dispatch_state_ticket_state import (
-        mark_ticket_closed_cancelled,
+        TicketStateProbe,
+        save_ticket_state_probes,
         ticket_state_key,
     )
 
@@ -1699,7 +1700,12 @@ def test_act_auto_fix_ci_never_uncancels_a_guard_cancelled_row(
     save_dev_queue(DevQueueStore(tasks=[task]))
     if stamped:
         key = ticket_state_key(task.client, task.ticket_id, task.created_at)
-        mark_ticket_closed_cancelled(key, at=datetime.now(UTC))
+        now = datetime.now(UTC)
+        save_ticket_state_probes(
+            "acme",
+            {key: TicketStateProbe(now, closed=True, cancelled_at=now)},
+            prune_to_keys=[key],
+        )
 
     act_then_dispatch(
         _act_auto_fix_ci,

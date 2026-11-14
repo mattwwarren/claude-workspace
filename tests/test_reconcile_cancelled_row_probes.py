@@ -18,7 +18,8 @@ from freezegun import freeze_time
 from cw.config import save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.dispatch_state_ticket_state import (
-    mark_ticket_closed_cancelled,
+    TicketStateProbe,
+    save_ticket_state_probes,
     ticket_state_key,
 )
 from cw.models import CwState, DevQueueStore, OrchestratorConfig, QueueItemStatus
@@ -118,8 +119,11 @@ class TestTargets:
         write_clients_yaml(ClientSpec("acme", tmp_path, default_branch="main"))
         guarded = _cancelled(tmp_path, ticket_id="1605")
         ordinary = _cancelled(tmp_path, ticket_id="1606")
-        mark_ticket_closed_cancelled(
-            ticket_state_key("acme", "1605", guarded.created_at), at=_NOW
+        key = ticket_state_key("acme", "1605", guarded.created_at)
+        save_ticket_state_probes(
+            "acme",
+            {key: TicketStateProbe(_NOW, closed=True, cancelled_at=_NOW)},
+            prune_to_keys=[key],
         )
 
         keys = cancelled_row_targets([guarded, ordinary])

@@ -13,9 +13,9 @@ from cw.dispatch_state import save_open_pr_probe_entry
 from cw.dispatch_state_ticket_state import (
     TICKET_STATE_PROBE_KEY,
     TicketStateProbe,
+    clear_ticket_closed_stamps,
     guard_cancelled_row_keys,
     load_ticket_state_probes,
-    mark_ticket_closed_cancelled,
     save_ticket_state_probes,
     ticket_state_key,
 )
@@ -24,6 +24,16 @@ _T0 = datetime(2026, 11, 13, 12, 0, tzinfo=UTC)
 _A = ticket_state_key("acme", "1", _T0)
 _B = ticket_state_key("acme", "2", _T0)
 _C = ticket_state_key("acme", "3", _T0)
+
+
+def _stamp(key: str, *, at: datetime) -> None:
+    """Stamp *key* as cancelled, keeping its existing verdict fields."""
+    current = load_ticket_state_probes().get(key, TicketStateProbe(at, closed=True))
+    save_ticket_state_probes(
+        "acme",
+        {key: current._replace(cancelled_at=at)},
+        prune_to_keys=[k for k in load_ticket_state_probes() if k.startswith("acme/")],
+    )
 
 
 def _raw() -> dict[str, object]:
@@ -46,7 +56,7 @@ def test_round_trip() -> None:
     }
 
     save_ticket_state_probes("acme", entries, prune_to_keys=list(entries))
-    mark_ticket_closed_cancelled(_A, at=_T0 + timedelta(minutes=1))
+    _stamp(_A, at=_T0 + timedelta(minutes=1))
 
     loaded = load_ticket_state_probes()
     assert loaded[_A] == TicketStateProbe(
@@ -58,7 +68,7 @@ def test_round_trip() -> None:
 
 
 def test_stamp_without_an_entry_creates_a_closed_one() -> None:
-    mark_ticket_closed_cancelled(_A, at=_T0)
+    _stamp(_A, at=_T0)
 
     assert load_ticket_state_probes()[_A] == TicketStateProbe(
         checked_at=_T0, closed=True, cancelled_at=_T0
@@ -150,13 +160,39 @@ def test_a_write_oserror_is_swallowed_with_a_warning(
         msg = "read-only"
         raise OSError(msg)
 
+    stamped = TicketStateProbe(_T0, closed=True, cancelled_at=_T0)
+    assert save_ticket_state_probes("acme", {_A: stamped}, prune_to_keys=[_A])
+
     monkeypatch.setattr("cw.dispatch_state_ticket_state.atomic_write_text", _boom)
     with caplog.at_level(logging.WARNING):
-        save_ticket_state_probes(
-            "acme", {_A: TicketStateProbe(_T0, closed=True)}, prune_to_keys=[_A]
+        assert not save_ticket_state_probes(
+            "acme", {_B: TicketStateProbe(_T0, closed=True)}, prune_to_keys=[_A, _B]
         )
-        mark_ticket_closed_cancelled(_A, at=_T0)
+        clear_ticket_closed_stamps([_A])
 
     assert "failed to persist ticket_state_probe" in caplog.text
-    assert "failed to stamp ticket_state_probe" in caplog.text
-    assert load_ticket_state_probes() == {}
+    assert "failed to clear ticket_state_probe" in caplog.text
+    assert load_ticket_state_probes() == {_A: stamped}
+
+
+def test_a_stamp_survives_a_probe_save_from_an_older_snapshot() -> None:
+    """Rule 4: a stale probe write never erases a cancelled_at stamp."""
+    save_ticket_state_probes(
+        "acme", {_A: TicketStateProbe(_T0, closed=True)}, prune_to_keys=[_A]
+    )
+    _stamp_entry(_A, _T0 + timedelta(minutes=1))
+
+    save_ticket_state_probes(
+        "acme",
+        {_A: TicketStateProbe(_T0, closed=True)},
+        prune_to_keys=[_A],
+    )
+
+    assert guard_cancelled_row_keys() == frozenset({_A})
+
+
+def _stamp_entry(key: str, at: datetime) -> None:
+    current = load_ticket_state_probes()[key]
+    save_ticket_state_probes(
+        "acme", {key: current._replace(cancelled_at=at)}, prune_to_keys=[key]
+    )

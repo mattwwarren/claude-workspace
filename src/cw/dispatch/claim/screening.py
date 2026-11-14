@@ -49,7 +49,7 @@ from cw.dispatch.claim.events import (
 )
 from cw.dispatch.ticket_state_gate import TICKET_CLOSED_CANCEL_REASON
 from cw.dispatch_state_ticket_state import (
-    mark_ticket_closed_cancelled,
+    clear_ticket_closed_stamps,
     ticket_state_key,
 )
 from cw.launch_marker import current_launch_marker
@@ -334,7 +334,8 @@ def _cancel_closed_ticket_task(
 
     ``transition_task_status`` emits ``task.transition``; the ``dispatch.tick``
     carries the reason. No attempt is charged: a PENDING row is not a RUNNING
-    exit. The caller stamps the cache after ``dev_queue_lock`` is released.
+    exit. The ``cancelled_at`` stamp was already written by the lock-free
+    resolve, so the CANCELLED row is never visible without it.
     """
     transition_task_status(task, QueueItemStatus.CANCELLED)
     task.session_id = None
@@ -363,7 +364,8 @@ def _hold_for_ticket_state(
 
     A deferred hit (read cap or budget) writes nothing: the row stays PENDING
     and is read on a later tick, never claimed unevaluated (R3). A cancel
-    appends the row key to *cancelled_row_keys* for the post-lock stamp.
+    appends the row key to *cancelled_row_keys* so the post-lock settle keeps
+    its stamp.
     """
     hit = _live_closed_ticket_hit(task, hits)
     if hit is None:
@@ -382,16 +384,25 @@ def _hold_for_ticket_state(
     return True
 
 
-def _stamp_guard_cancels(cancelled_row_keys: list[str]) -> None:
-    """Stamp each guard-cancelled row in the cache, after the queue lock.
+def _settle_guard_stamps(
+    client_name: str,
+    closed_hits: Mapping[str, ClosedTicketHit],
+    cancelled_row_keys: list[str],
+) -> None:
+    """Clear the pre-cancel stamp of every CLOSED hit this claim did not cancel.
 
-    Taken outside ``dev_queue_lock`` so the claim adds no STATE-to-STATE lock
-    nesting (ADR-0019). Best effort: a failed write logs a warning and the
-    cancel stands; without the stamp the guard re-cancels after a requeue.
+    Runs after ``dev_queue_lock`` is released (ADR-0019: no STATE-to-STATE
+    nesting). A stamp left on a row that stays PENDING would make the sticky
+    skip ignore it, so an unused stamp is removed here. Best effort: a failed
+    write logs a warning through ``dispatch_state``.
     """
-    now = datetime.now(UTC)
-    for key in cancelled_row_keys:
-        mark_ticket_closed_cancelled(key, at=now)
+    cancelled = set(cancelled_row_keys)
+    unused = [
+        ticket_state_key(client_name, ticket_id, hit.created_at)
+        for ticket_id, hit in closed_hits.items()
+        if not hit.defer
+    ]
+    clear_ticket_closed_stamps([key for key in unused if key not in cancelled])
 
 
 def _park_if_pre_dispatch_gated(
@@ -713,8 +724,9 @@ def _claim_next_pending(
     hit cancels the PENDING PLAN/IMPL row (``skip_reason=ticket_closed``); a
     ``defer=True`` hit (read cap or budget) leaves it PENDING with no write.
     A hit is ignored when the row's ``created_at``, status or stage changed
-    since the snapshot. Each cancelled row is stamped in the guard cache after
-    ``dev_queue_lock`` is released. ``None`` (the default) screens nothing.
+    since the snapshot. The resolver stamped each CLOSED row before this call;
+    stamps this claim did not cancel are cleared after ``dev_queue_lock`` is
+    released. ``None`` (the default) screens nothing.
 
     Returns a tuple (task, spawn_backoff_skipped) where spawn_backoff_skipped
     is True when at least one PENDING task was skipped due to active
@@ -732,8 +744,6 @@ def _claim_next_pending(
     # per-tick (an in-function read would be N reads/tick instead of one),
     # and claim.py is pure state-transition logic under dev_queue_lock with
     # no I/O -- reading the file here would break that invariant.
-    if usage_limited_until is not None and now < usage_limited_until:
-        return None, False
     stale_prs = stale_pr_ticket_ids if stale_pr_ticket_ids is not None else {}
     reasons = occupied_ticket_reasons if occupied_ticket_reasons is not None else {}
     mcp_hits = tracker_mcp_gate_hits if tracker_mcp_gate_hits is not None else {}
@@ -741,7 +751,11 @@ def _claim_next_pending(
     approval_holds = review_approval_holds if review_approval_holds is not None else {}
     closed_hits = closed_ticket_hits if closed_ticket_hits is not None else {}
     cancelled_row_keys: list[str] = []
+    # The settle runs on every exit, including the usage-limit early return
+    # below, so a pre-cancel stamp never outlives this claim pass.
     try:
+        if usage_limited_until is not None and now < usage_limited_until:
+            return None, False
         return _claim_under_lock(
             client_name,
             lane=lane,
@@ -755,7 +769,7 @@ def _claim_next_pending(
             now=now,
         )
     finally:
-        _stamp_guard_cancels(cancelled_row_keys)
+        _settle_guard_stamps(client_name, closed_hits, cancelled_row_keys)
 
 
 class _ClaimScreens(NamedTuple):

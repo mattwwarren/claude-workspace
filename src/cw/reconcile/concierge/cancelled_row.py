@@ -86,13 +86,15 @@ def _act_on_cancelled_row_candidates(candidates: list[ConciergeCandidate]) -> li
     """
     if not candidates:
         return []
-    by_ticket = {c.ticket_id: c for c in candidates}
+    # Match on (client, ticket_id): a ticket number alone is not a row
+    # identity across clients (#1605 review, rule 5).
+    by_row = {(c.client, c.ticket_id): c for c in candidates}
     recovered: list[str] = []
     with dev_queue_lock():
         store = load_dev_queue()
         changed = False
         for task in store.tasks:
-            candidate = by_ticket.get(task.ticket_id)
+            candidate = by_row.get((task.client, task.ticket_id))
             if candidate is None:
                 continue
             if task.status != QueueItemStatus.CANCELLED:

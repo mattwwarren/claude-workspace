@@ -146,7 +146,7 @@ def _merge_dispatch_state(
     label: str,
     keys: Collection[str],
     mutate: Callable[[dict[str, object]], bool],
-) -> None:
+) -> bool:
     """Run one generic raw-sidecar read/merge/write operation.
 
     This is the leaf persistence primitive: callers own the sidecar-specific
@@ -161,9 +161,8 @@ def _merge_dispatch_state(
         path.parent.mkdir(parents=True, exist_ok=True)
         with dispatch_state_lock():
             payload = _load_dispatch_state_raw()
-            if not mutate(payload):
-                return
-            atomic_write_text(path, json.dumps(payload))
+            if mutate(payload):
+                atomic_write_text(path, json.dumps(payload))
     except OSError:
         logger.warning(
             "dispatch_state: failed to %s ticket_state_probe entry/entries (%s)",
@@ -171,6 +170,8 @@ def _merge_dispatch_state(
             sorted(keys),
             exc_info=True,
         )
+        return False
+    return True
 
 
 def save_ticket_state_probes(
@@ -178,14 +179,15 @@ def save_ticket_state_probes(
     entries: Mapping[str, TicketStateProbe],
     *,
     prune_to_keys: Collection[str],
-) -> None:
+) -> bool:
     """Merge *entries* for *client* and drop its entries absent from *prune_to_keys*.
 
     *prune_to_keys* is the key of EVERY row of *client* in the snapshot (not
     only the candidates), so a guard-cancelled row's stamp survives while the
     row exists. Other clients' entries and other sidecar keys are untouched
     (#1157). No write when nothing changes. ``OSError`` is logged and
-    swallowed: a lost write only costs a re-read next tick.
+    swallowed, and reported as False: the resolver must not cancel on a
+    closed verdict whose stamp did not persist (stamp before cancel).
     """
     prefix = ticket_state_client_prefix(client)
     keep = frozenset(prune_to_keys)
@@ -195,23 +197,40 @@ def save_ticket_state_probes(
         stale = [k for k in raw if k.startswith(prefix) and k not in keep]
         for key in stale:
             del raw[key]
-        for key, entry in entries.items():
-            raw[key] = _serialize(entry)
+        for key, probe in entries.items():
+            # A probe built from an older snapshot must never erase a
+            # cancelled_at stamp another pass wrote (#1605 review, rule 4).
+            current = _parse_ticket_state_entry(raw.get(key))
+            kept = probe
+            if current is not None and current.cancelled_at is not None:
+                kept = probe._replace(cancelled_at=current.cancelled_at)
+            raw[key] = _serialize(kept)
         payload[TICKET_STATE_PROBE_KEY] = raw
         return bool(stale or entries)
 
-    _merge_dispatch_state("persist", list(entries), _merge)
+    return _merge_dispatch_state("persist", list(entries), _merge)
 
 
-def mark_ticket_closed_cancelled(key: str, *, at: datetime) -> None:
-    """Stamp *key* as cancelled by the guard at *at* (best effort, logged)."""
+def clear_ticket_closed_stamps(keys: Collection[str]) -> None:
+    """Drop the ``cancelled_at`` stamp on *keys* that were not cancelled.
 
-    def _stamp(payload: dict[str, object]) -> bool:
+    The resolver stamps a CLOSED row before the claim cancels it (so the
+    CANCELLED row is never visible without its stamp). A stamp the claim did
+    not turn into a cancel is removed here, after the queue lock is released.
+    Best effort: a failed write is logged, like the other sidecar writes.
+    """
+
+    def _clear(payload: dict[str, object]) -> bool:
         raw = _raw_entries(payload)
-        current = _parse_ticket_state_entry(raw.get(key))
-        base = current if current is not None else TicketStateProbe(at, closed=True)
-        raw[key] = _serialize(base._replace(closed=True, cancelled_at=at))
+        changed = False
+        for key in keys:
+            current = _parse_ticket_state_entry(raw.get(key))
+            if current is None or current.cancelled_at is None:
+                continue
+            raw[key] = _serialize(current._replace(cancelled_at=None))
+            changed = True
         payload[TICKET_STATE_PROBE_KEY] = raw
-        return True
+        return changed
 
-    _merge_dispatch_state("stamp", [key], _stamp)
+    if keys:
+        _merge_dispatch_state("clear", keys, _clear)
