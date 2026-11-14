@@ -18,7 +18,11 @@ Call-site classes (post-change set, MUST_FIX 4):
   intentionally changed, the same engine finding stays gating;
 - delta: ``converge_delta._record``: unreachable for an engine finding, the
   delta verdict is built by built-in reviewers, so a built-in look-alike is
-  unchanged.
+  unchanged;
+- seam B final pass: ``codex_engine_defers.engine_defer_findings`` (codex
+  post-loop clean pass): an engine ``coverage.*`` / ``acceptance.*`` SHOULD_FIX
+  stays a ``fix``, so nothing is deferred or recorded; a plain engine SHOULD_FIX
+  defers and is recorded (#3636).
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ from cw.cli.review.converge import _apply_defer_should_fix
 from cw.cli.review.converge_confirm import prepare_engine_confirm
 from cw.cli.review.converge_delta import delta_defer_rationale
 from cw.codex_clean_confirm import CONFIRM_DEFER_RATIONALE, LOOP_DEFER_RATIONALE
+from cw.codex_engine_defers import engine_defer_findings
 from cw.codex_fix_loop.rounds import CycleRound
 from cw.codex_loop_rounds import _round_findings
 from cw.review_convergence import (
@@ -43,7 +48,9 @@ from cw.review_convergence import (
     decide_verdict,
     decided_finding,
     from_verdict,
+    verdict_ran_engine,
 )
+from cw.review_engine.constants import ENGINE_ROLE
 from cw.review_findings import AcceptedFinding, ReviewVerdict
 from tests._codex_review_helpers import _loop_verdict
 from tests._review_convergence_helpers import (
@@ -340,6 +347,8 @@ _CLASSIFIED: dict[str, frozenset[str]] = {
     "cli/review/converge.py": frozenset({"decide_verdict"}),
     # delta class, unreachable for engine findings (TestDeltaPath).
     "cli/review/converge_delta.py": frozenset({"decide_verdict"}),
+    # seam B final-pass class: engine_defer_findings (TestEngineDeferFindings).
+    "codex_engine_defers.py": frozenset({"decide_verdict"}),
 }
 
 
@@ -367,6 +376,36 @@ def _called_tracked_names(path: Path) -> frozenset[str]:
         if called in _TRACKED:
             names.add(called)
     return frozenset(names)
+
+
+def _engine_only(verdict: ReviewVerdict) -> ReviewVerdict:
+    """*verdict* with its roster restamped to the engine alone.
+
+    ``engine_confirm_verdict``'s roster is not guaranteed engine-only, and an
+    empty early return would pass these tests vacuously, so the roster is set.
+    """
+    agents = [
+        record.model_copy(update={"reviewer_role": ENGINE_ROLE})
+        for record in verdict.agents_run[:1]
+    ]
+    return verdict.model_copy(update={"agents_run": agents})
+
+
+class TestEngineDeferFindings:
+    """``codex_engine_defers.engine_defer_findings``: seam B final pass (#3636)."""
+
+    @pytest.mark.parametrize("rule", _NEVER_DEFERRABLE)
+    def test_never_deferrable_engine_finding_stays_a_fix(self, rule: str) -> None:
+        verdict = _engine_only(_verdict("engine", should_fix=(rule,)))
+        assert verdict_ran_engine(verdict)
+        assert engine_defer_findings(verdict, LOOP_DEFER_RATIONALE) == []
+
+    def test_plain_engine_should_fix_defers_with_the_loop_rationale(self) -> None:
+        verdict = _engine_only(_verdict("engine", should_fix=(_PLAIN,)))
+        assert verdict_ran_engine(verdict)
+        findings = engine_defer_findings(verdict, LOOP_DEFER_RATIONALE)
+        assert [finding.outcome for finding in findings] == ["defer"]
+        assert findings[0].rationale == LOOP_DEFER_RATIONALE
 
 
 class TestCallSiteDriftGuard:

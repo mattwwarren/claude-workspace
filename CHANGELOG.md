@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The codex lane writes the engine-defer settlement row (#3636).** A codex fix loop's final clean pass that ran the review engine alone and whose gating findings were all deferrable SHOULD_FIX never wrote the dev-queue settlement row, so the review attestation could not reconcile the engine's FAIL summary and the lane never reached an engine-backed PASS. Both lanes now call one decision core (`cw.dev_queue.review_engine_defers`), and the codex clean pass files its defers and records the row before the ledger commit. Any other pass is unchanged; the row write stays best-effort and fail-closed.
 - **The codex fix-loop prohibition parser takes backticked names only from the prohibition clause (#3204).** A backticked name is forbidden only when it sits after a matching prohibition phrase and before the first `;`, reuse/keep/approved/allowed word, or colon that follows an already-named item. Approved paths in the same sentence no longer park a cycle. Already-recorded row entries benefit on their next fix-loop run; no migration. `TicketTask`-style names inside the prohibition clause are still forbidden. An allow word placed after a name (e.g. "`X` is allowed") does not exempt it. The observed #2633 resolutions comment now yields one forbidden token instead of two.
 ### Changed
 

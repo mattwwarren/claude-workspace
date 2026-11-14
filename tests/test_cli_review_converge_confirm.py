@@ -674,7 +674,7 @@ class TestSharedHelperEquivalence:
             assert round_ran_engine(_loop(verdict)) is verdict_ran_engine(verdict)
 
 
-_ENGINE_LOG = "cw.cli.review.converge_engine_defers"
+_ENGINE_LOG = "cw.dev_queue.review_engine_defers"
 _WARNING_TEXT = "review engine settlement not recorded"
 
 
@@ -814,7 +814,7 @@ class TestEngineSettlementRecording:
             raise OSError(msg)
 
         monkeypatch.setattr(
-            "cw.cli.review.converge_engine_defers.record_engine_settlement", refuse
+            "cw.dev_queue.review_engine_defers.record_engine_settlement", refuse
         )
         with caplog.at_level(logging.WARNING, logger=_ENGINE_LOG):
             result = _record(repo, _engine_round(engine_round_finding("fp-00000a1")))

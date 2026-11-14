@@ -9,6 +9,7 @@ so no real ``claude`` binary is ever reached.
 
 from __future__ import annotations
 
+import logging
 import time
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -47,9 +48,10 @@ from cw.codex_review import (
     make_codex_blocked,
     synthesize_codex_review_result,
 )
+from cw.dev_queue.storage import load_dev_queue
 from cw.dispatch_state import load_executor_blocked_markers
 from cw.events import read_events
-from cw.models import ClientConfig, OrchestratorEventType
+from cw.models import ClientConfig, OrchestratorEventType, QueueItemStatus
 from cw.models.client import ReviewConfig
 from cw.review_convergence import (
     CONFIRM_ENGINE_DEFER_RATIONALE,
@@ -75,6 +77,7 @@ from tests._claude_review_helpers import (
     error_envelope,
     review_envelope,
 )
+from tests._cli_review_helpers import _seed_review_row
 from tests._codex_review_helpers import _doc_json, _finding_payload, _task
 from tests._review_convergence_helpers import (
     MAIN_ONLY_FILE,
@@ -93,7 +96,7 @@ from tests._review_convergence_helpers import (
     write_ledger,
 )
 from tests._shared.git_repos import commit_tracked_file, git_in
-from tests._shared.review_builders import _make_diff, _make_reviewer_doc
+from tests._shared.review_builders import _make_diff, _make_finding, _make_reviewer_doc
 from tests.test_review_convergence import _sharded
 
 if TYPE_CHECKING:
@@ -104,7 +107,7 @@ if TYPE_CHECKING:
     from cw.codex_clean_confirm import _Gate
     from cw.models import OrchestratorEvent
     from cw.review_convergence import ConfirmBackend, RoundFinding
-    from cw.review_findings import ReviewVerdict
+    from cw.review_findings import Finding, ReviewVerdict
 
 _MUST_FIX_SUMMARY = "feature constant is wrong"
 _SHOULD_FIX_SUMMARY = "feature constant needs a name"
@@ -2101,3 +2104,127 @@ class TestNonEngineConfirmUnchanged:
         assert blocker.retry_eligible is not False
         assert _ledger(wt).status == "in_progress"
         assert _confirm_events() == []
+
+
+def _engine_codex_with(
+    wt: Path, *findings: Finding
+) -> tuple[AutoDevResult, ReviewVerdict]:
+    """A clean codex result whose engine roster carries *findings* (#3636)."""
+    result, verdict = synthesize_codex_review_result(
+        task=_task(),
+        worktree=wt,
+        documents=[_make_reviewer_doc(*findings, reviewer_role=ENGINE_ROLE)],
+        failures=[],
+        diff=_make_diff("x = 1", files={"feature.py": [1]}),
+        reviewed_sha=_head(wt),
+        session_id="s-codex",
+        default_branch="main",
+        fix_loop_enabled=True,
+    )
+    assert result.blocker is None
+    assert verdict is not None
+    return result, verdict
+
+
+def _engine_should_fix(summary: str, fingerprint: str, rule_id: str) -> Finding:
+    return _make_finding(
+        severity="SHOULD_FIX",
+        summary=summary,
+        source="engine",
+        fingerprint=fingerprint,
+        rule_id=rule_id,
+    )
+
+
+_SETTLE_LOGGER = "cw.dev_queue.review_engine_defers"
+
+
+class TestEngineDeferSettlement:
+    """Seam B (#3636): a fully deferrable final engine pass settles and records."""
+
+    def test_positive_path_settles_records_and_files_the_defers(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        filed: list[list[str]] = []
+
+        def _spy(**kwargs: Any) -> None:
+            loop = [
+                f for f in kwargs["findings"] if f.rationale == LOOP_DEFER_RATIONALE
+            ]
+            if loop:
+                filed.append([f.fingerprint or "" for f in loop])
+
+        monkeypatch.setattr("cw.codex_clean_confirm.file_codex_deferrals", _spy)
+        _seed_review_row(_task().ticket_id, "test", status=QueueItemStatus.RUNNING)
+        codex = _engine_codex_with(
+            wt,
+            _engine_should_fix("naming a", "fp-a", "style.naming"),
+            _engine_should_fix("naming b", "fp-b", "style.naming"),
+        )
+        runner = RoleAwareClaudeRunner(_only_role("SHOULD_FIX", _SHOULD_FIX_SUMMARY))
+
+        outcome = _apply(wt, _client(wt), runner, codex=codex)
+
+        assert outcome.result.blocker is None
+        assert filed == [["fp-a", "fp-b"]]
+        ledger = _ledger(wt)
+        loop_defers = [e for e in ledger.settled if e.rationale == LOOP_DEFER_RATIONALE]
+        assert len(loop_defers) == 2
+        row = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == _task().ticket_id
+        )
+        settlements = row.review_engine_settlements
+        assert [(s.head_sha, s.fingerprints) for s in settlements] == [
+            (_head(wt), ["fp-a", "fp-b"])
+        ]
+
+    def test_a_coverage_finding_records_no_settlement(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        filed: list[object] = []
+        monkeypatch.setattr(
+            "cw.codex_clean_confirm.file_codex_deferrals",
+            lambda **kwargs: filed.append(
+                [f for f in kwargs["findings"] if f.rationale == LOOP_DEFER_RATIONALE]
+            ),
+        )
+        _seed_review_row(_task().ticket_id, "test", status=QueueItemStatus.RUNNING)
+        codex = _engine_codex_with(
+            wt, _engine_should_fix("cover it", "fp-c", "coverage.untested-branch")
+        )
+
+        _apply(
+            wt,
+            _client(wt),
+            RoleAwareClaudeRunner(_only_role("SHOULD_FIX", _SHOULD_FIX_SUMMARY)),
+            codex=codex,
+        )
+
+        assert filed == [[]]
+        assert not [
+            e for e in _ledger(wt).settled if e.rationale == LOOP_DEFER_RATIONALE
+        ]
+        rows = [t for t in load_dev_queue().tasks if t.ticket_id == _task().ticket_id]
+        assert rows[0].review_engine_settlements == []
+
+    def test_no_row_warns_and_the_lane_still_converges(
+        self, wt: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        codex = _engine_codex_with(
+            wt, _engine_should_fix("naming a", "fp-a", "style.naming")
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger="cw.dev_queue.review_engine_defers"
+        ):
+            outcome = _apply(
+                wt,
+                _client(wt),
+                RoleAwareClaudeRunner(_only_role("SHOULD_FIX", _SHOULD_FIX_SUMMARY)),
+                codex=codex,
+            )
+
+        assert outcome.result.blocker is None
+        assert outcome.result.review.converged is True
+        settle = [r for r in caplog.records if r.name == _SETTLE_LOGGER]
+        assert len(settle) == 1
