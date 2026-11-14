@@ -1172,7 +1172,8 @@
       "review.attestation_cleared",
       "review.attestation_rejected",
       "session.result_emitted",
-      "daemon.leaked_worker_stopped"
+      "daemon.leaked_worker_stopped",
+     "session.stop_continued"
      ],
      "title": "OrchestratorEventType",
      "type": "string"
@@ -1363,7 +1364,8 @@
       "review.attestation_cleared",
       "review.attestation_rejected",
       "session.result_emitted",
-      "daemon.leaked_worker_stopped"
+      "daemon.leaked_worker_stopped",
+     "session.stop_continued"
      ],
      "title": "OrchestratorEventType",
      "type": "string"
@@ -2976,7 +2978,8 @@
       "review.attestation_cleared",
       "review.attestation_rejected",
       "session.result_emitted",
-      "daemon.leaked_worker_stopped"
+      "daemon.leaked_worker_stopped",
+     "session.stop_continued"
      ],
      "title": "OrchestratorEventType",
      "type": "string"

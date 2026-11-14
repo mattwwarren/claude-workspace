@@ -52,7 +52,9 @@ def _write_stop_hook_transcript(
     home: Path,
     worktree: Path,
     claude_session_id: str,
-    assistant_text: str,
+    assistant_text: str = "",
+    *,
+    records: list[dict[str, Any]] | None = None,
 ) -> Path:
     """Write ``<claude_session_id>.jsonl`` under *worktree*'s project dir.
 
@@ -69,15 +71,21 @@ def _write_stop_hook_transcript(
     encoded = str(worktree).replace("/", "-").replace(".", "-")
     project_dir = home / ".claude" / "projects" / encoded
     project_dir.mkdir(parents=True, exist_ok=True)
-    record = {
-        "type": "assistant",
-        "message": {
-            "role": "assistant",
-            "content": [{"type": "text", "text": assistant_text}],
-        },
-    }
+    if records is None:
+        records = [
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": assistant_text}],
+                },
+            }
+        ]
     path = project_dir / f"{claude_session_id}.jsonl"
-    path.write_text(json.dumps(record) + "\n")
+    path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
     return path
 
 

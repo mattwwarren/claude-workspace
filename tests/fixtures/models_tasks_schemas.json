@@ -1692,6 +1692,18 @@
      "default": null,
      "title": "Stage Entered At"
     },
+    "stop_continuations": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Stop Continuations"
+    },
     "stage_base_ref": {
      "anyOf": [
       {
@@ -3800,6 +3812,18 @@
        ],
        "default": null,
        "title": "Stage Entered At"
+      },
+      "stop_continuations": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Stop Continuations"
       },
       "stage_base_ref": {
        "anyOf": [
@@ -6005,6 +6029,18 @@
        "default": null,
        "title": "Stage Entered At"
       },
+      "stop_continuations": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Stop Continuations"
+      },
       "stage_base_ref": {
        "anyOf": [
         {
@@ -6657,7 +6693,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 60,
+     "default": 61,
      "title": "Schema Version",
      "type": "integer"
     },
@@ -8562,6 +8598,18 @@
      ],
      "default": null,
      "title": "Stage Entered At"
+    },
+    "stop_continuations": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Stop Continuations"
     },
     "stage_base_ref": {
      "anyOf": [
@@ -10672,6 +10720,18 @@
        "default": null,
        "title": "Stage Entered At"
       },
+      "stop_continuations": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Stop Continuations"
+      },
       "stage_base_ref": {
        "anyOf": [
         {
@@ -11324,7 +11384,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 60,
+     "default": 61,
      "title": "Schema Version",
      "type": "integer"
     },

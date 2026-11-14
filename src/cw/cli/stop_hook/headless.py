@@ -98,6 +98,11 @@ class _HeadlessResolution(NamedTuple):
     stage_mismatch_refused: bool = False
     parked_abandoned: bool = False
     sentinel_unroutable_already_paged: bool = False
+    # #2348: True only on the no-sentinel bail that neither parked nor came
+    # from a staged ``cw result emit``. ``signal_stop`` then considers the
+    # Stop-hook auto-continuation (``continuation.maybe_continue_headless_turn``),
+    # which applies the remaining gates after ``sessions_lock`` is released.
+    continuation_candidate: bool = False
 
 
 def _resolve_and_complete_headless_session(
@@ -236,6 +241,7 @@ def _resolve_and_complete_headless_session(
                 landed_terminal=False,
                 parked_abandoned=parked,
                 sentinel_unroutable_already_paged=already_paged,
+                continuation_candidate=not parked and not has_staged_emit_source,
             )
 
     # Issue #251: directly update the dev-queue task *before* marking the

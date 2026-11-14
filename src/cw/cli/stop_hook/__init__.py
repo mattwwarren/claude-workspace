@@ -25,13 +25,17 @@ on ``main``. Submodules, in dependency order:
   ``_constants``.
 - ``headless`` -- :class:`_HeadlessResolution` and the headless resolution.
   Imports ``sentinel``, ``park`` and ``staged_emit``.
+- ``continuation`` -- the #2348 Stop-hook auto-continuation for a no-sentinel
+  headless turn: the qualifying gates, the capped dev-queue counter and the
+  ``block`` decision on stdout. Imports ``_constants`` only (plus
+  ``cw.dev_queue``, ``cw.reconcile``, ``cw.events``).
 - ``locked`` -- the ``sessions_lock`` window and the lockless pre-lock
   sentinel step that precedes it (#2566); the only submodule that imports
   ``sessions_lock`` or ``load_state``. Imports ``_constants``, ``headless``
   and ``sentinel``.
 - ``command`` -- the ``signal-stop`` click command and its post-lock actions.
-  Imports ``_constants``, ``payload``, ``agent_stamp``, ``staged_emit`` and
-  ``locked``.
+  Imports ``_constants``, ``payload``, ``agent_stamp``, ``staged_emit``,
+  ``locked`` and ``continuation``.
 
 Every submodule logs under the pinned name ``cw.cli.stop_hook`` (never
 ``__name__``), so the emitted logger name is unchanged by the split.
@@ -53,6 +57,8 @@ from cw.cli.stop_hook._constants import (
     _SENTINEL_UNROUTABLE_REASON,
     _STAGED_ROUTE_RESCUED_KEY,
     _STAGED_ROUTE_TASK_ALREADY_TERMINAL_KEY,
+    MAX_STOP_CONTINUATIONS,
+    STOP_CONTINUATION_NUDGE,
 )
 from cw.cli.stop_hook.agent_stamp import (
     _agent_spawn_stamp_is_clear,
@@ -65,6 +71,11 @@ from cw.cli.stop_hook.command import (
     _page_sentinel_unroutable,
     _sentinel_unroutable,
     signal_stop,
+)
+from cw.cli.stop_hook.continuation import (
+    _claim_stop_continuation,
+    _turn_ended_in_tool_error,
+    maybe_continue_headless_turn,
 )
 from cw.cli.stop_hook.headless import (
     _HeadlessResolution,
@@ -108,6 +119,8 @@ from cw.cli.stop_hook.staged_emit import (
 logger = logging.getLogger(_LOGGER_NAME)
 
 __all__ = [
+    "MAX_STOP_CONTINUATIONS",
+    "STOP_CONTINUATION_NUDGE",
     "_SENTINEL_UNROUTABLE_PAGED_KEY",
     "_SENTINEL_UNROUTABLE_REASON",
     "_STAGED_ROUTE_RESCUED_KEY",
@@ -118,6 +131,7 @@ __all__ = [
     "_agent_spawn_stamp_is_clear",
     "_armed_running_task",
     "_build_completed_payload",
+    "_claim_stop_continuation",
     "_clear_agent_spawn_stamp",
     "_clear_staged_emit_result_marker",
     "_handle_headless_no_sentinel",
@@ -144,7 +158,9 @@ __all__ = [
     "_sentinel_unroutable_already_paged",
     "_snapshot_agent_spawn_stamp",
     "_stamp_staged_route_outcome",
+    "_turn_ended_in_tool_error",
     "_verify_headless_scope",
     "logger",
+    "maybe_continue_headless_turn",
     "signal_stop",
 ]

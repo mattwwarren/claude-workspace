@@ -371,6 +371,11 @@ class TicketTask(BaseModel):
     # only by ``cw.dev_queue.stage_entry.enter_stage``. ``None`` for pre-v60
     # rows; no validator or default_factory stamps on load.
     stage_entered_at: str | None = None
+    # Automatic Stop-hook continuations sent for the current stage (GitHub
+    # #2348). Written by ``cw.cli.stop_hook.continuation`` under
+    # ``dev_queue_lock``; reset to ``None`` by ``enter_stage`` on every real
+    # stage change, kept across a same-stage requeue. ``None`` for pre-v61 rows.
+    stop_continuations: int | None = None
     stage_base_ref: str | None = None
     # Terminal disposition for this ticket — the AutoDevResult status (or a
     # reconcile reason string) that caused the task to reach COMPLETED,

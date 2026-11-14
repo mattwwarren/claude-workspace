@@ -358,6 +358,11 @@ If you are scripting a long-running monitor loop, prefer driving it off `cw
 queue peek --json` (the recommend ladder) over re-deriving health from raw task
 fields.
 
+A row's `stop_continuations` key (`cw queue peek --json`, and the `└─ auto-continued: N`
+line in the text table) appears only once the Stop hook has auto-continued a
+no-sentinel turn for the row's current stage (#2348, `session-disposition.md` §6f).
+Absent means none; it is not a stall signal on its own.
+
 ---
 
 ## 3. Dispatch

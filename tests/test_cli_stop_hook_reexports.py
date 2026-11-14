@@ -40,8 +40,11 @@ if TYPE_CHECKING:
 
 _PKG = "cw.cli.stop_hook"
 
-# The four reason/key constants the flat module bound at top level.
+# The six constants: the four reason/key constants the flat module bound at
+# top level, plus the two #2348 auto-continuation constants.
 _CONSTANTS = {
+    "MAX_STOP_CONTINUATIONS",
+    "STOP_CONTINUATION_NUDGE",
     "_SENTINEL_UNROUTABLE_PAGED_KEY",
     "_SENTINEL_UNROUTABLE_REASON",
     "_STAGED_ROUTE_RESCUED_KEY",
@@ -50,12 +53,13 @@ _CONSTANTS = {
 
 # The complete importable surface: every project-defined top-level name the
 # flat ``cli/stop_hook.py`` bound before the split, plus the four #2566
-# pre-lock sentinel helpers (34 defs and classes, the four constants, and
-# ``logger``). Third-party/stdlib names the old module merely imported
-# (``get_native_daemon_client``, ``load_state``, ...) are deliberately NOT part
+# pre-lock sentinel helpers and the three #2348 continuation defs (37 defs and
+# classes, the six constants, and ``logger``). Third-party/stdlib names the old
+# module merely imported (``get_native_daemon_client``, ``load_state``, ...) are
+# deliberately NOT part
 # of the surface -- see ``TestPatchOwnership.test_package_binds_no_patched_global``.
 EXPECTED_EXPORTS = {
-    # Defs and classes (34)
+    # Defs and classes (37)
     "_HeadlessResolution",
     "_LockedStop",
     "_PreparedSentinel",
@@ -63,6 +67,7 @@ EXPECTED_EXPORTS = {
     "_armed_running_task",
     "_build_completed_payload",
     "_clear_agent_spawn_stamp",
+    "_claim_stop_continuation",
     "_clear_staged_emit_result_marker",
     "_handle_headless_no_sentinel",
     "_handle_unrouted_stop",
@@ -88,9 +93,11 @@ EXPECTED_EXPORTS = {
     "_sentinel_unroutable_already_paged",
     "_snapshot_agent_spawn_stamp",
     "_stamp_staged_route_outcome",
+    "_turn_ended_in_tool_error",
     "_verify_headless_scope",
+    "maybe_continue_headless_turn",
     "signal_stop",
-    # Constants (4)
+    # Constants (6)
     *_CONSTANTS,
     # The module logger
     "logger",
@@ -133,7 +140,7 @@ class TestPackageExportCompleteness:
     """Guards that ``cw.cli.stop_hook`` keeps its full pre-split surface."""
 
     def test_expected_surface_size(self) -> None:
-        assert len(EXPECTED_EXPORTS) == 39
+        assert len(EXPECTED_EXPORTS) == 44
 
     def test_project_defined_names_match_surface(self) -> None:
         """Every def/class/command bound on the package is in the surface."""
@@ -263,7 +270,7 @@ class TestPatchOwnership:
     def test_package_binds_no_patched_global(self) -> None:
         """A stale ``cw.cli.stop_hook.<global>`` target fails loudly.
 
-        The package re-exports only its own 39 names, never a third-party
+        The package re-exports only its own 44 names, never a third-party
         global a submodule imports, so a patch left on the package raises
         instead of resolving and silently not intercepting. A global with any
         reader still in the package itself is exempt until that reader moves.
@@ -411,7 +418,7 @@ class TestLoggerNamePinned:
 
 # Submodules that log. Each binds its own ``logger`` to the pinned name via
 # ``_constants._LOGGER_NAME``, never ``__name__``.
-LOGGING_SUBMODULES = ["agent_stamp", "command", "locked", "sentinel"]
+LOGGING_SUBMODULES = ["agent_stamp", "command", "continuation", "locked", "sentinel"]
 
 
 class TestLoggerObjectsPinned:

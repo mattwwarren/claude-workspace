@@ -804,6 +804,36 @@ IDLE sessions with no ticket row, unobservable sessions without one, and
 ticket-less daemon sessions have no surface after the 24-hour window; the
 event log still holds the page.
 
+### 6f. Stop-hook auto-continue (#2348)
+
+A headless worker whose turn ends in plain text, with no `AUTO_DEV_RESULT`
+or `blocked` sentinel, is sent a fixed nudge instead of stalling. The Stop
+hook prints `{"decision": "block", "reason": <nudge>}` on stdout and exits 0,
+per the Claude Code hooks reference (Stop section). The nudge continues the
+turn; it is not a timer.
+
+It fires only when all hold: no sentinel was parsed and nothing was parked by
+§6c; no staged `cw result emit` result; no pending `background_tasks` and no
+`session_crons`; a non-blank `last_assistant_message` that is neither usage-limit
+nor `API Error` text; the session is Claude-hosted; the row is RUNNING; and the
+transcript does not end on a `tool_result` with `is_error`. The check is
+fail-closed on a missing or unreadable transcript.
+
+The action is on for every client and lane with no configuration: there is no
+rollout mode, scope allowlist or environment switch. The operator decided this
+(#2348 review feedback); a reviewer asking for a shadow or kill-switch mode is
+asking to reopen that decision.
+
+The counter is `TicketTask.stop_continuations` on the row. The cap is 2 per
+stage: `enter_stage` resets it on a real stage change, and it survives a
+same-stage requeue. After the cap the hook falls through unchanged to §6c and
+§6d. The §6c park ships dark, so with default config an exhausted run is not
+parked; it surfaces through the §6e liveness page, as it did before this change.
+
+The continuation is evidence-driven and bounded, not a retry timer (ADR-0014).
+The audit event is `session.stop_continued` (see `docs/events.md`) and is
+emitted when the counter is persisted before the block decision is printed.
+
 ---
 
 ## 7. Cross-references

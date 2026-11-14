@@ -2590,6 +2590,29 @@ fires from all four call sites; only the Stop-hook one currently acts on
 
 `correlation_id` is the `ticket_id`.
 
+### `session.stop_continued`
+
+**Emitter:** `maybe_continue_headless_turn` (`cw.cli.stop_hook.continuation`)
+**Payload:**
+- `session_id`, `session_name`, `client`: the Stop-hook session's identity
+- `ticket_id`: the dev-queue row's ticket
+- `claude_session_id`: the Stop-hook payload's `session_id`
+- `stage`, `lane`: the row's stage and lane at the moment of the continuation
+- `continuation`: the 1-based count after the increment
+- `cap`: `MAX_STOP_CONTINUATIONS` (2)
+
+`correlation_id` is the `ticket_id`.
+
+The event means the continuation was **decided and persisted**: the row's
+`stop_continuations` was incremented in the dev queue before the `block`
+decision was printed on stdout. It does not mean Claude Code delivered or
+honoured the block. A crash between the persist and the print records one
+continuation that was never delivered. See `docs/session-disposition.md`
+§6f for when a continuation is sent.
+
+Non-paging audit record. Deliberately not an operator-forward default
+(`_DEFAULT_OPERATOR_EVENT_TYPES`).
+
 ### `dispatch.scope_routing_decision`
 
 **Emitter:** `_route_scope_gated_approval`, `_route_stage_success`,
