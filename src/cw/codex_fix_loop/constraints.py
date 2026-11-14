@@ -88,6 +88,18 @@ _PROHIBITION = re.compile(
     re.IGNORECASE,
 )
 _BACKTICKED = re.compile(r"`([^`\n]+)`")
+# Words after which a backticked span is something the operator approved or
+# told the implementer to reuse (#3204). Bare `use` is excluded ("no new use
+# of `x`" is a prohibition); `use`/`using` count only right before a span.
+_ALLOW_WORDS = (
+    r"\b(?:re-?use|reusing|keep|keeping|approved|allowed)\b"
+    r"|\b(?:use|using)\s+(?=`)"
+)
+# A backticked span is consumed whole, so `;`, `:` or a word inside it never
+# ends a clause. A colon ends one only after a span has been named (#3204).
+_CLAUSE_SCAN = re.compile(
+    rf"(?P<span>`[^`\n]*`)|(?P<end>;|{_ALLOW_WORDS})|(?P<colon>:)", re.IGNORECASE
+)
 # Stripped from both ends of a backticked span, after surrounding whitespace.
 _SPAN_EDGE_CHARS = ".,:;!?'\"()[]{}"
 _TOKEN_SHAPE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:[./-][A-Za-z0-9_]+)*")
@@ -204,15 +216,54 @@ def _sentence_kinds(sentence: str) -> frozenset[AdditionKind]:
     return frozenset(kinds)
 
 
+def _clause_end(sentence: str, start: int) -> int:
+    """Return where the prohibition clause that begins at *start* ends (#3204).
+
+    Scans the whole sentence so backtick pairing always starts at the sentence
+    start. A ``;``, an allow word, or a colon after an already-named span ends
+    the clause; a bare colon before any span does not. Spans are consumed whole.
+    """
+    named = False
+    for hit in _CLAUSE_SCAN.finditer(sentence):
+        if hit.start() < start:
+            continue
+        if hit.lastgroup == "span":
+            named = True
+        elif hit.lastgroup == "end" or (hit.lastgroup == "colon" and named):
+            return hit.start()
+    return len(sentence)
+
+
+def _prohibited_spans(sentence: str) -> list[str]:
+    """Return the backticked spans inside a prohibition clause of *sentence*.
+
+    Each prohibition phrase gets its own region, starting at the phrase's end;
+    spans before the verb, or after the region's cut, are not forbidden.
+    """
+    spans: list[str] = []
+    for match in _PROHIBITION.finditer(sentence):
+        region_end = _clause_end(sentence, match.end())
+        spans.extend(
+            span.group(1)
+            for span in _BACKTICKED.finditer(sentence)
+            if span.start() >= match.end() and span.end() <= region_end
+        )
+    return spans
+
+
 def constraint_rules(
     body: str, *, from_row: bool = False
 ) -> tuple[ConstraintRule, ...]:
-    """Return one rule per sentence of *body* that matches the prohibition regex."""
+    """Return one rule per prohibition sentence of *body* (#2633, #3204).
+
+    Tokens come only from the clause after each prohibition phrase, up to the
+    first ``;``, allow word, or colon-after-a-named-span. Kinds stay whole-sentence.
+    """
     rules: list[ConstraintRule] = []
     for sentence in _SENTENCE_SPLIT.split(body):
         if not _PROHIBITION.search(sentence):
             continue
-        cleaned = (_clean_token(span) for span in _BACKTICKED.findall(sentence))
+        cleaned = (_clean_token(span) for span in _prohibited_spans(sentence))
         tokens = frozenset(token for token in cleaned if token is not None)
         rules.append(
             ConstraintRule(
