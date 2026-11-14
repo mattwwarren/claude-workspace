@@ -404,6 +404,7 @@ class TestJson:
                     "last_tick_cap": 2,
                 },
                 "pending_skips": [],
+                "usage_limit": None,
             }
         }
 
@@ -1155,3 +1156,72 @@ def test_non_repository_commit_hook_probe_emits_no_git_stderr(
 
     assert "Commit hooks:" not in result.output
     assert "fatal:" not in capfd.readouterr().err
+
+
+class TestUsageLimitWindows:
+    """The per-client usage-limit window in ``status`` (#3547)."""
+
+    @staticmethod
+    def _seed(client: str, until: datetime) -> None:
+        from tests._shared.dispatch_fixtures import seed_usage_limit_window
+
+        with freeze_time(_NOW):
+            seed_usage_limit_window(client, until)
+
+    def test_json_active_window_block(self) -> None:
+        add_ticket(TicketTask(ticket_id="ACM-1", client="acme"))
+        self._seed("acme", _NOW + timedelta(hours=1))
+
+        data = _json()
+
+        assert data["acme"]["usage_limit"] == {
+            "client": "acme",
+            "until": "2026-10-18T13:05:00Z",
+            "armed_at": None,
+            "source": None,
+        }
+
+    def test_json_window_only_client_appears(self) -> None:
+        self._seed("beta", _NOW + timedelta(hours=1))
+
+        data = _json()
+
+        assert list(data) == ["beta"]
+        usage_limit = data["beta"]["usage_limit"]
+        assert isinstance(usage_limit, dict)
+        assert usage_limit["until"] == "2026-10-18T13:05:00Z"
+
+    def test_json_lapsed_window_is_null(self) -> None:
+        add_ticket(TicketTask(ticket_id="ACM-1", client="acme"))
+        self._seed("acme", _NOW - timedelta(minutes=1))
+
+        assert _json()["acme"]["usage_limit"] is None
+
+    def test_text_block_and_client_filter(self) -> None:
+        add_ticket(TicketTask(ticket_id="ACM-1", client="acme"))
+        self._seed("acme", _NOW + timedelta(hours=1))
+        self._seed("beta", _NOW + timedelta(hours=2))
+
+        lines = _block(_status().output, "Usage-limit windows:")
+        filtered = _block(_status("--client", "beta").output, "Usage-limit windows:")
+
+        assert lines == [
+            "Usage-limit windows:",
+            "  acme: until 2026-10-18T13:05:00Z (armed-at none, fleet-level;"
+            " source none)",
+            "  beta: until 2026-10-18T14:05:00Z (armed-at none, fleet-level;"
+            " source none)",
+        ]
+        assert filtered == [
+            "Usage-limit windows:",
+            "  beta: until 2026-10-18T14:05:00Z (armed-at none, fleet-level;"
+            " source none)",
+        ]
+
+    def test_text_block_with_empty_queue(self) -> None:
+        self._seed("acme", _NOW + timedelta(hours=1))
+
+        output = _status().output
+
+        assert "Dev queue is empty." in output
+        assert "Usage-limit windows:" in output

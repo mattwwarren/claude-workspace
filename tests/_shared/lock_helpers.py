@@ -17,13 +17,18 @@ from typing import TYPE_CHECKING, NoReturn
 import pytest
 
 from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
+from cw._lock_guard import held_locks
 from cw._lock_hold import LockHoldRecord
 from cw._lock_hold import day_path as lock_hold_day_path
 from cw.config import sessions_lock_file, state_dir
+from cw.exceptions import DEV_QUEUE_LOCK_NAME
+from tests._lock_invariants import observing
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
     from typing import IO
+
+    from cw._lock_guard import GuardEvent, HeldLock
 
 
 @contextlib.contextmanager
@@ -237,3 +242,66 @@ def recording_lock_path(
 ) -> _RecordingLockPath:
     """The sessions-lock form of :func:`record_lock_path`."""
     return record_lock_path("cw.config.sessions_lock_file", sessions_lock_file())
+
+
+# The two STATE-rank locks the usage-limit clear takes, in sequence (#3547).
+DISPATCH_STATE_LOCK_NAME = "dispatch_state"
+_RECORDED_STATE_LOCKS = frozenset({DISPATCH_STATE_LOCK_NAME, DEV_QUEUE_LOCK_NAME})
+
+
+class StateLockRecorder:
+    """Guard observer recording the ``dispatch_state`` and ``dev_queue`` events.
+
+    ``tests/_lock_invariants.LockTrace`` only flags subprocesses under
+    ``sessions_lock``; this answers how often a STATE lock was taken and
+    whether one was taken while the other was held (#3547).
+    """
+
+    def __init__(self) -> None:
+        self.events: list[GuardEvent] = []
+
+    def __call__(self, event: GuardEvent) -> None:
+        if event.lock_name in _RECORDED_STATE_LOCKS:
+            self.events.append(event)
+
+    def acquires(self, name: str) -> int:
+        """How many times the lock *name* was acquired."""
+        return sum(
+            1 for e in self.events if e.kind == "acquire" and e.lock_name == name
+        )
+
+    def acquired_while_held(self, inner: str, outer: str) -> bool:
+        """Was *inner* acquired while this thread held *outer*?"""
+        return any(
+            e.kind == "acquire"
+            and e.lock_name == inner
+            and any(held.name == outer for held in e.held_snapshot)
+            for e in self.events
+        )
+
+
+@contextlib.contextmanager
+def record_state_locks() -> Iterator[StateLockRecorder]:
+    """Install a :class:`StateLockRecorder` for the block, chained in front."""
+    recorder = StateLockRecorder()
+    with observing(recorder):
+        yield recorder
+
+
+def spy_no_locks_held(
+    monkeypatch: pytest.MonkeyPatch, target: str, *, returns: object
+) -> list[tuple[HeldLock, ...]]:
+    """Replace *target* with a stub that records the held locks at each call.
+
+    The stub returns *returns*. The returned list holds one
+    ``cw._lock_guard.held_locks()`` snapshot per call, so ``== [()]`` proves
+    a single call made with no lock held.
+    """
+    snapshots: list[tuple[HeldLock, ...]] = []
+
+    def _spy(*_args: object, **_kwargs: object) -> object:
+        snapshots.append(held_locks())
+        return returns
+
+    monkeypatch.setattr(target, _spy)
+    return snapshots

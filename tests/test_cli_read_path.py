@@ -483,6 +483,7 @@ def test_dev_queue_status_json_payload_is_the_seeded_world(
         "failed": 0,
         "paused_lanes": [],
         "pending_skips": [],
+        "usage_limit": None,
     }
     effective = entry["effective"]
     assert set(effective) == {

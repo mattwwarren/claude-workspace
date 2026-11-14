@@ -59,6 +59,8 @@ re-exports. Submodules:
   convergence ledger (#2797).
 - ``merge_gate`` — clients with ``merge_gate_enabled: false`` (the Stage 4a
   merge gate switched off) listed as advisory warnings (#2851).
+- ``usage_limit`` — one advisory ``usage-limit/<client>`` per active usage-limit
+  back-off window, naming the command that lifts it early (#3547).
 - ``commit_hook`` — per-client advisory warning when ``.pre-commit-config.yaml``
   declares commit-stage hooks but ``git commit`` would run none: hook absent,
   not executable, bypassed by ``core.hooksPath`` or recording a dead
@@ -127,6 +129,7 @@ from cw.doctor.sessions_auto_prune import _check_sessions_auto_prune
 from cw.doctor.skills_drift import _check_skills_commands_drift
 from cw.doctor.spared_workers import _check_spared_unrecorded_workers
 from cw.doctor.tracker_mcp import _check_tracker_mcp
+from cw.doctor.usage_limit import _check_usage_limit_windows
 from cw.doctor.user_level_hooks import _check_user_level_stop_hook
 from cw.doctor.versions import (
     _CW_DEPS_CHECK_NAME,
@@ -197,6 +200,7 @@ __all__ = [
     "_check_ssh_key_loaded",
     "_check_timed_out_merged",
     "_check_tracker_mcp",
+    "_check_usage_limit_windows",
     "_check_user_level_stop_hook",
     "_check_wedge_repo_ahead",
     "_check_wedge_task_running_completed_session",
