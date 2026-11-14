@@ -21,7 +21,8 @@ is on.
   needs_attention page -- ``attempt_cap_blocked``, ``stale_pr_blocked`` and
   ``tracker_mcp_gate_blocked`` -- since ``wait`` already exits 2 on such a
   park and a PENDING row carries the code only briefly (before the park) or
-  from a stale per-ticket tick after a requeue.
+  from a stale per-ticket tick after a requeue. Likewise ``ticket_closed``,
+  which dispatch reports while cancelling the row (already terminal).
 
 Freshness: the ssh-key and disk-pressure gates are re-emitted on every
 dispatch tick while they hold (client-wide ``dispatch.tick``), so an
@@ -75,6 +76,7 @@ SELF_CLEARING_SKIP_REASONS: frozenset[str] = frozenset(
         DispatchSkipReason.ATTEMPT_CAP_BLOCKED.value,
         DispatchSkipReason.STALE_PR_BLOCKED.value,
         DispatchSkipReason.TRACKER_MCP_GATE_BLOCKED.value,
+        DispatchSkipReason.TICKET_CLOSED.value,
         DispatchSkipReason.CAP_FULL.value,
         DispatchSkipReason.LANE_CAP_BLOCKED.value,
         DispatchSkipReason.HOST_CAPACITY_GATED.value,

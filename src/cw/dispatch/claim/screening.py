@@ -3,7 +3,8 @@
 Everything that decides, under ``dev_queue_lock()``, whether a PENDING row is
 claimed: the precomputed worktree-occupancy screen (#2077), spawn-error
 backoff, the fix-dispatch hold, the pre-dispatch open-PR gate (#1862), the
-pre-dispatch tracker-MCP gate (#2442), the lane-resolved attempt ceiling, and
+pre-dispatch tracker-MCP gate (#2442), the closed-ticket guard's cancel and
+deferral hold (#1605), the lane-resolved attempt ceiling, and
 :func:`_claim_next_pending` itself.
 Extracted verbatim from the historical flat ``cw.dispatch.claim`` module by
 the package split (#2378).
@@ -13,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from cw.dev_queue import (
     ADOPTED_HEAD_DRIFT_DISPOSITION,
@@ -40,10 +41,16 @@ from cw.dispatch.claim.events import (
     _emit_review_approval_gate_attention_event,
     _emit_stale_dispatch_attention_event,
     _emit_stale_dispatch_blocked_event,
+    _emit_ticket_closed_cancel_event,
     _emit_tracker_mcp_gate_attention_event,
     _emit_tracker_mcp_gate_blocked_event,
     _emit_worktree_occupied_skip_event,
     emit_adoption_attention_event,
+)
+from cw.dispatch.ticket_state_gate import TICKET_CLOSED_CANCEL_REASON
+from cw.dispatch_state_ticket_state import (
+    mark_ticket_closed_cancelled,
+    ticket_state_key,
 )
 from cw.launch_marker import current_launch_marker
 from cw.models import QueueItemStatus, Stage, resolve_feature_branch
@@ -56,6 +63,7 @@ if TYPE_CHECKING:
 
     from cw.dispatch.adopted_head_gate import AdoptedHeadDrift
     from cw.dispatch.review_approval_gate import ReviewApprovalHold
+    from cw.dispatch.ticket_state_gate import ClosedTicketHit
     from cw.dispatch.tracker_mcp_gate import TrackerMcpGateHit
     from cw.models import (
         ClientConfig,
@@ -296,11 +304,100 @@ def _park_review_approval_hold(
     )
 
 
+def _live_closed_ticket_hit(
+    task: TicketTask, hits: Mapping[str, ClosedTicketHit]
+) -> ClosedTicketHit | None:
+    """The closed-ticket hit that still applies to *task* under the lock (#1605).
+
+    Ignored when the row left PENDING, left PLAN/IMPL, or is a different row
+    (``created_at`` identity) than the one the lock-free resolve judged. Hits
+    are rebuilt every tick, so a hit is only ever acted on in its own tick.
+    """
+    hit = hits.get(task.ticket_id)
+    if (
+        hit is None
+        or task.status != QueueItemStatus.PENDING
+        or task.stage not in (Stage.PLAN, Stage.IMPL)
+        or task.created_at != hit.created_at
+    ):
+        return None
+    return hit
+
+
+def _cancel_closed_ticket_task(
+    task: TicketTask, client_name: str, store: DevQueueStore
+) -> None:
+    """Cancel a PENDING row whose GitHub issue is CLOSED (#1605, R1).
+
+    ``transition_task_status`` emits ``task.transition``; the ``dispatch.tick``
+    carries the reason. No attempt is charged: a PENDING row is not a RUNNING
+    exit. The caller stamps the cache after ``dev_queue_lock`` is released.
+    """
+    transition_task_status(task, QueueItemStatus.CANCELLED)
+    task.session_id = None
+    save_dev_queue(store)
+    _emit_ticket_closed_cancel_event(
+        client_name, task.ticket_id, TICKET_CLOSED_CANCEL_REASON
+    )
+    _log.warning(
+        "dispatch: issue %s for %s is CLOSED; cancelled its PENDING row instead"
+        " of claiming it. Reverse with `%s`",
+        task.ticket_id,
+        client_name,
+        dev_queue_command("requeue", task, "--from-cancelled"),
+    )
+
+
+def _hold_for_ticket_state(
+    task: TicketTask,
+    hits: Mapping[str, ClosedTicketHit],
+    *,
+    client_name: str,
+    store: DevQueueStore,
+    cancelled_row_keys: list[str],
+) -> bool:
+    """Cancel a closed-ticket row or hold a deferred one; True when either ran.
+
+    A deferred hit (read cap or budget) writes nothing: the row stays PENDING
+    and is read on a later tick, never claimed unevaluated (R3). A cancel
+    appends the row key to *cancelled_row_keys* for the post-lock stamp.
+    """
+    hit = _live_closed_ticket_hit(task, hits)
+    if hit is None:
+        return False
+    if hit.defer:
+        _log.debug(
+            "dispatch: closed-ticket guard deferred %s/%s this tick",
+            client_name,
+            task.ticket_id,
+        )
+        return True
+    _cancel_closed_ticket_task(task, client_name, store)
+    cancelled_row_keys.append(
+        ticket_state_key(task.client, task.ticket_id, task.created_at)
+    )
+    return True
+
+
+def _stamp_guard_cancels(cancelled_row_keys: list[str]) -> None:
+    """Stamp each guard-cancelled row in the cache, after the queue lock.
+
+    Taken outside ``dev_queue_lock`` so the claim adds no STATE-to-STATE lock
+    nesting (ADR-0019). Best effort: a failed write logs a warning and the
+    cancel stands; without the stamp the guard re-cancels after a requeue.
+    """
+    now = datetime.now(UTC)
+    for key in cancelled_row_keys:
+        mark_ticket_closed_cancelled(key, at=now)
+
+
 def _park_if_pre_dispatch_gated(
     task: TicketTask,
     *,
     client_name: str,
     lane: str,
+    closed_ticket_hits: Mapping[str, ClosedTicketHit],
+    cancelled_row_keys: list[str],
     stale_pr_ticket_ids: Mapping[str, str | None],
     tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit],
     adopted_head_drifts: Mapping[str, AdoptedHeadDrift],
@@ -309,7 +406,9 @@ def _park_if_pre_dispatch_gated(
 ) -> bool:
     """Park *task* under the first pre-dispatch gate that holds it; report it.
 
-    Stale-PR gate (#1862) first, then the tracker-MCP gate (#2442), then the
+    The closed-ticket guard (#1605) runs first, so a closed ticket is
+    cancelled rather than parked on a stale PR (a deferral holds with no
+    write). Then the stale-PR gate (#1862), the tracker-MCP gate (#2442), the
     adopted-head drift gate (#2943), then the large-tier review-approval gate
     (#2773; a deferral hold returns True with no write, like the settle-flag
     skip above, leaving the row PENDING). Grouped so :func:`_screen_and_claim`
@@ -318,7 +417,15 @@ def _park_if_pre_dispatch_gated(
     # The session-end settle may have been marked after the lock-free
     # precompute. Re-check the durable marker under the claim lock so a newly
     # flagged adopted row cannot slip through before the next tick settles it.
-    if task.adopted_head_sha is not None and task.adopted_repin_due:
+    if (
+        task.adopted_head_sha is not None and task.adopted_repin_due
+    ) or _hold_for_ticket_state(
+        task,
+        closed_ticket_hits,
+        client_name=client_name,
+        store=store,
+        cancelled_row_keys=cancelled_row_keys,
+    ):
         return True
     if _is_stale_pr_gated(task, stale_pr_ticket_ids):
         _park_stale_pr_task(
@@ -409,6 +516,8 @@ def _screen_and_claim(
     tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit],
     adopted_head_drifts: Mapping[str, AdoptedHeadDrift],
     review_approval_holds: Mapping[str, ReviewApprovalHold],
+    closed_ticket_hits: Mapping[str, ClosedTicketHit],
+    cancelled_row_keys: list[str],
     store: DevQueueStore,
     now: datetime,
 ) -> str:
@@ -457,6 +566,8 @@ def _screen_and_claim(
         task,
         client_name=client_name,
         lane=lane,
+        closed_ticket_hits=closed_ticket_hits,
+        cancelled_row_keys=cancelled_row_keys,
         stale_pr_ticket_ids=stale_pr_ticket_ids,
         tracker_mcp_gate_hits=tracker_mcp_gate_hits,
         adopted_head_drifts=adopted_head_drifts,
@@ -502,6 +613,7 @@ def _claim_next_pending(
     tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit] | None = None,
     adopted_head_drifts: Mapping[str, AdoptedHeadDrift] | None = None,
     review_approval_holds: Mapping[str, ReviewApprovalHold] | None = None,
+    closed_ticket_hits: Mapping[str, ClosedTicketHit] | None = None,
 ) -> tuple[TicketTask | None, bool]:
     """Atomically claim the next PENDING task for a client in a specific lane.
 
@@ -593,6 +705,14 @@ def _claim_next_pending(
     ignored when the row's approval fields changed since the snapshot.
     ``None`` (the default) screens nothing.
 
+    *closed_ticket_hits* (GitHub #1605): ticket id -> closed-ticket guard hit,
+    resolved lock-free by ``cw.dispatch.ticket_state_gate``. A ``defer=False``
+    hit cancels the PENDING PLAN/IMPL row (``skip_reason=ticket_closed``); a
+    ``defer=True`` hit (read cap or budget) leaves it PENDING with no write.
+    A hit is ignored when the row's ``created_at``, status or stage changed
+    since the snapshot. Each cancelled row is stamped in the guard cache after
+    ``dev_queue_lock`` is released. ``None`` (the default) screens nothing.
+
     Returns a tuple (task, spawn_backoff_skipped) where spawn_backoff_skipped
     is True when at least one PENDING task was skipped due to active
     spawn_error backoff (next_eligible_at in the future). See GitHub #868.
@@ -616,6 +736,53 @@ def _claim_next_pending(
     mcp_hits = tracker_mcp_gate_hits if tracker_mcp_gate_hits is not None else {}
     drifts = adopted_head_drifts if adopted_head_drifts is not None else {}
     approval_holds = review_approval_holds if review_approval_holds is not None else {}
+    closed_hits = closed_ticket_hits if closed_ticket_hits is not None else {}
+    cancelled_row_keys: list[str] = []
+    try:
+        return _claim_under_lock(
+            client_name,
+            lane=lane,
+            client=client,
+            config=config,
+            priority_ticket_ids=priority_ticket_ids,
+            screens=_ClaimScreens(
+                stale_prs, reasons, mcp_hits, drifts, approval_holds, closed_hits
+            ),
+            cancelled_row_keys=cancelled_row_keys,
+            now=now,
+        )
+    finally:
+        _stamp_guard_cancels(cancelled_row_keys)
+
+
+class _ClaimScreens(NamedTuple):
+    """The normalised screen mappings :func:`_claim_under_lock` threads through."""
+
+    stale_prs: Mapping[str, str | None]
+    reasons: dict[str, str]
+    mcp_hits: Mapping[str, TrackerMcpGateHit]
+    drifts: Mapping[str, AdoptedHeadDrift]
+    approval_holds: Mapping[str, ReviewApprovalHold]
+    closed_hits: Mapping[str, ClosedTicketHit]
+
+
+def _claim_under_lock(
+    client_name: str,
+    *,
+    lane: str,
+    client: ClientConfig,
+    config: OrchestratorConfig,
+    priority_ticket_ids: list[str] | None,
+    screens: _ClaimScreens,
+    cancelled_row_keys: list[str],
+    now: datetime,
+) -> tuple[TicketTask | None, bool]:
+    """The locked half of :func:`_claim_next_pending` (both claim loops).
+
+    Split out (#1605) so the caller's ``finally`` can stamp guard-cancelled
+    rows strictly after ``dev_queue_lock`` is released.
+    """
+    stale_prs, reasons, mcp_hits, drifts, approval_holds, closed_hits = screens
     with dev_queue_lock():
         store = load_dev_queue()
         spawn_backoff_skipped = False
@@ -639,6 +806,8 @@ def _claim_next_pending(
                             tracker_mcp_gate_hits=mcp_hits,
                             adopted_head_drifts=drifts,
                             review_approval_holds=approval_holds,
+                            closed_ticket_hits=closed_hits,
+                            cancelled_row_keys=cancelled_row_keys,
                             store=store,
                             now=now,
                         )
@@ -669,6 +838,8 @@ def _claim_next_pending(
                 tracker_mcp_gate_hits=mcp_hits,
                 adopted_head_drifts=drifts,
                 review_approval_holds=approval_holds,
+                closed_ticket_hits=closed_hits,
+                cancelled_row_keys=cancelled_row_keys,
                 store=store,
                 now=now,
             )

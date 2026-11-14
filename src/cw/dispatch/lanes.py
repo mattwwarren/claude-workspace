@@ -78,6 +78,11 @@ from cw.dispatch.review_approval_gate import (
     resolve_review_approval_holds,
 )
 from cw.dispatch.stale_breadcrumbs import build_stale_breadcrumbs
+from cw.dispatch.ticket_state_gate import (
+    ClosedTicketHit,
+    claimable_lane_names,
+    resolve_closed_ticket_hits,
+)
 from cw.dispatch.tracker_mcp_gate import (
     TrackerMcpGateHit,
     resolve_tracker_mcp_gate_hits,
@@ -519,6 +524,30 @@ def _resolve_review_approval_holds_if_gated(
     return resolve_review_approval_holds(client, queue_snapshot)
 
 
+def _resolve_closed_ticket_hits_if_gated(
+    client: ClientConfig,
+    queue_snapshot: DevQueueStore,
+    *,
+    effective_lanes: list[LaneConfig],
+    running_by_lane: Mapping[str, int],
+    priority_ids: list[str] | None,
+    available_client_slots: int,
+) -> dict[str, ClosedTicketHit]:
+    """The #1605 closed-ticket guard's resolve call, slot-gated like its siblings.
+
+    Restricted to lanes that can claim this tick; all logic lives in
+    :mod:`cw.dispatch.ticket_state_gate`. No config toggle.
+    """
+    if available_client_slots <= 0:
+        return {}
+    return resolve_closed_ticket_hits(
+        client,
+        queue_snapshot,
+        claimable_lanes=claimable_lane_names(effective_lanes, running_by_lane),
+        priority_ticket_ids=priority_ids,
+    )
+
+
 class _PreClaimScreens(NamedTuple):
     """The per-client, per-tick precomputes :func:`_claim_next_pending` consumes."""
 
@@ -527,6 +556,7 @@ class _PreClaimScreens(NamedTuple):
     tracker_mcp_gate_hits: dict[str, TrackerMcpGateHit]
     adopted_head_drifts: dict[str, AdoptedHeadDrift]
     review_approval_holds: dict[str, ReviewApprovalHold]
+    closed_ticket_hits: dict[str, ClosedTicketHit]
 
 
 def _resolve_pre_claim_screens(
@@ -537,6 +567,9 @@ def _resolve_pre_claim_screens(
     available_client_slots: int,
     resolved_native_daemon: NativeDaemonClient,
     warned_unresolvable: set[UnresolvablePathWarningKey] | None,
+    effective_lanes: list[LaneConfig],
+    running_by_lane: Mapping[str, int],
+    priority_ids: list[str] | None,
 ) -> _PreClaimScreens:
     """Resolve every pre-claim screen once for *client*, outside every lock.
 
@@ -570,6 +603,10 @@ def _resolve_pre_claim_screens(
       ref and ancestry against the client's git dir; see
       :func:`_resolve_review_approval_holds_if_gated`. The claim re-checks each
       hit against the row's approval fields under the lock.
+    * Closed-ticket guard (#1605) -- ``gh issue view`` reads for GitHub-tracked
+      PENDING PLAN/IMPL rows in lanes that can claim this tick; see
+      :func:`_resolve_closed_ticket_hits_if_gated`. The claim re-checks each
+      hit's row identity under the lock.
     """
     return _PreClaimScreens(
         stale_pr_ticket_ids=_resolve_stale_pr_ticket_ids_if_gated(
@@ -594,6 +631,14 @@ def _resolve_pre_claim_screens(
         ),
         review_approval_holds=_resolve_review_approval_holds_if_gated(
             client, queue_snapshot, available_client_slots=available_client_slots
+        ),
+        closed_ticket_hits=_resolve_closed_ticket_hits_if_gated(
+            client,
+            queue_snapshot,
+            effective_lanes=effective_lanes,
+            running_by_lane=running_by_lane,
+            priority_ids=priority_ids,
+            available_client_slots=available_client_slots,
         ),
     )
 
@@ -688,6 +733,9 @@ def _dispatch_client_lanes(
         available_client_slots=available_client_slots,
         resolved_native_daemon=resolved_native_daemon,
         warned_unresolvable=warned_unresolvable,
+        effective_lanes=effective_lanes,
+        running_by_lane=running_by_lane,
+        priority_ids=priority_ids,
     )
 
     for lane_cfg in effective_lanes:
@@ -745,6 +793,7 @@ def _dispatch_client_lanes(
                 tracker_mcp_gate_hits=screens.tracker_mcp_gate_hits,
                 adopted_head_drifts=screens.adopted_head_drifts,
                 review_approval_holds=screens.review_approval_holds,
+                closed_ticket_hits=screens.closed_ticket_hits,
             )
             spawn_backoff_skipped |= backoff_skipped
             if task is None:

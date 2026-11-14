@@ -897,6 +897,7 @@ class TestSkipReasonRemedy:
             "tracker_mcp_gate_blocked",
             "stale_pr_blocked",
             "lane_cap_blocked",
+            "ticket_closed",
         ],
     )
     def test_other_codes_gain_no_remedy(self, code: str) -> None:

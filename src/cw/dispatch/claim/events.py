@@ -204,6 +204,27 @@ def _emit_worktree_occupied_skip_event(client_name: str, ticket_id: str) -> None
     )
 
 
+def _emit_ticket_closed_cancel_event(
+    client_name: str, ticket_id: str, cancel_reason: str
+) -> None:
+    """Emit a dispatch.tick event when the closed-ticket guard cancels a row (#1605).
+
+    Same per-task shape as :func:`_emit_worktree_occupied_skip_event`, outside
+    the precedence chain. The row loses ``disposition`` on CANCELLED, so the
+    reason rides here as ``cancel_reason``. A cap deferral emits nothing.
+    """
+    record_event(
+        OrchestratorEventType.DISPATCH_TICK,
+        {
+            "client": client_name,
+            "claimed": 0,
+            "skip_reason": DispatchSkipReason.TICKET_CLOSED,
+            "ticket_id": ticket_id,
+            "cancel_reason": cancel_reason,
+        },
+    )
+
+
 def _emit_stale_dispatch_attention_event(
     task: TicketTask, client_name: str, lane: str
 ) -> None:

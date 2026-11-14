@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
+from cw.dispatch_state_ticket_state import guard_cancelled_row_keys, ticket_state_key
 from cw.exceptions import CwError, RequeueLiveSessionError
 from cw.models import TERMINAL_QUEUE_STATUSES, QueueItemStatus
 from cw.pr_hydrate import _parse_pr_url
@@ -189,6 +190,16 @@ def _prepare_auto_fix_ci_job(
         pr_state is None
         or pr_state.attention_state != _ATTENTION_CI_FAILING
         or task.auto_fix_ci_fired_at is not None
+    ):
+        return None
+    # #1605 R4: never auto-uncancel a row the closed-ticket guard cancelled.
+    # Unreachable today (the guard only cancels rows with no pr_url, the
+    # CANCELLED transition resets pr_url to adopted_pr_url, and
+    # pr_hydrate's _is_candidate needs a pr_url); pinned against drift. The
+    # status check short-circuits so only CANCELLED rows read the sidecar.
+    if task.status == QueueItemStatus.CANCELLED and (
+        ticket_state_key(task.client, task.ticket_id, task.created_at)
+        in guard_cancelled_row_keys()
     ):
         return None
     payload_base = _review_payload_base(

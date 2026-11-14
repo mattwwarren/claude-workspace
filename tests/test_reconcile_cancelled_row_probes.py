@@ -17,6 +17,10 @@ from freezegun import freeze_time
 
 from cw.config import save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.dispatch_state_ticket_state import (
+    mark_ticket_closed_cancelled,
+    ticket_state_key,
+)
 from cw.models import CwState, DevQueueStore, OrchestratorConfig, QueueItemStatus
 from cw.reconcile import cancelled_row_probes, reconcile
 from cw.reconcile.cancelled_row_probes import (
@@ -108,6 +112,19 @@ class TestTargets:
         assert keys == [CancelledRowKey("acme", "GEN-1", tmp_path, "dev")]
         assert keys[0].worktree_path == tmp_path
         assert keys[0].default_branch == "dev"
+
+    def test_a_guard_cancelled_row_is_never_a_target(self, tmp_path: Path) -> None:
+        """#1605 R4: only an operator requeue reverses a closed-ticket cancel."""
+        write_clients_yaml(ClientSpec("acme", tmp_path, default_branch="main"))
+        guarded = _cancelled(tmp_path, ticket_id="1605")
+        ordinary = _cancelled(tmp_path, ticket_id="1606")
+        mark_ticket_closed_cancelled(
+            ticket_state_key("acme", "1605", guarded.created_at), at=_NOW
+        )
+
+        keys = cancelled_row_targets([guarded, ordinary])
+
+        assert keys == [CancelledRowKey("acme", "1606", tmp_path, "main")]
 
 
 class TestCapture:

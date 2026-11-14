@@ -1680,6 +1680,45 @@ def test_act_auto_fix_ci_requeues_completed_row_in_place(
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
 
 
+@pytest.mark.parametrize("stamped", [True, False], ids=["guard-cancelled", "plain"])
+def test_act_auto_fix_ci_never_uncancels_a_guard_cancelled_row(
+    tmp_config_dir: Path, *, stamped: bool
+) -> None:
+    """#1605 R4: a closed-ticket guard cancel is reversed only by the operator."""
+    from cw.dispatch_state_ticket_state import (
+        mark_ticket_closed_cancelled,
+        ticket_state_key,
+    )
+
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
+    task = _make_task(
+        status=QueueItemStatus.CANCELLED,
+        pr_url=_PR_URL,
+        pr_state=_pr_state(attention_state="ci_failing", failing_checks=["lint"]),
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    if stamped:
+        key = ticket_state_key(task.client, task.ticket_id, task.created_at)
+        mark_ticket_closed_cancelled(key, at=datetime.now(UTC))
+
+    act_then_dispatch(
+        _act_auto_fix_ci,
+        _dispatch_auto_fix_ci_jobs,
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
+
+    after = load_dev_queue().tasks[0]
+    taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+    if stamped:
+        assert after.status == QueueItemStatus.CANCELLED
+        assert taken == []
+        assert after.auto_fix_ci_fired_at is None
+    else:
+        assert after.status == QueueItemStatus.PENDING
+        assert len(taken) == 1
+
+
 def test_act_auto_fix_ci_existing_blocked_row_is_left_alone(
     tmp_config_dir: Path,
 ) -> None:
