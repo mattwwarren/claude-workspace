@@ -484,7 +484,7 @@ def test_closed_list_of_plan_stage_markers_is_unchanged() -> None:
 def test_no_new_el_anchors_were_added() -> None:
     root = ROOT / ".claude" / "commands"
     assert (root / "auto-dev-plan.md").read_text().count("<!-- el:") == 44
-    assert (root / "auto-dev-plan-appendix.md").read_text().count("<!-- el:") == 7
+    assert (root / "auto-dev-plan-appendix.md").read_text().count("<!-- el:") == 8
 
 
 def test_new_prose_never_mentions_transcripts() -> None:
