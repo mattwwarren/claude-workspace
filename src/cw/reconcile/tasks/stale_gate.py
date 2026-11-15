@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from cw._predicates import is_positive_real_int
 from cw.auto_dev_result import (
     GATE_TIMEOUT_BLOCKER_REASON,
     STALE_DISPATCH_BLOCKER_REASON,
@@ -38,7 +39,6 @@ from cw.models import (
     ReapReason,
     TicketTask,
 )
-from cw.models.enums import is_positive_real_int
 from cw.pr_hydrate import _parse_pr_url
 from cw.queue_rows import (
     _AUTOMERGE_NOT_ARMED_REASON,

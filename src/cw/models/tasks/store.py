@@ -10,12 +10,12 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from cw._predicates import is_positive_real_int
 from cw.models.enums import (
     DEPENDENCY_HOLD_DISPOSITION,
     OCCUPIED_LANE_STATUSES,
     QueueItemStatus,
     ReapReason,
-    is_positive_real_int,
 )
 from cw.models.events import WatchedPr
 from cw.models.tasks.schema import DEV_QUEUE_SCHEMA_VERSION

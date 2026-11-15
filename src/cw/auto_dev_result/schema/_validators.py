@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from typing import Any, NewType
 
+from cw._predicates import is_positive_real_int
 from cw.auto_dev_result.schema._vocab import IMPACT_REASON_KEY
-from cw.models.enums import is_positive_real_int
 
 # GitHub #2321 — a same-repo PR number a dependency park waits on. Defined here
 # (not in _models) so the pure validator below and the model share it without a cycle.

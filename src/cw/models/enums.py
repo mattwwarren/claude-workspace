@@ -8,12 +8,7 @@ rationale and DAG order.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Final, TypeGuard
-
-
-def is_positive_real_int(value: object) -> TypeGuard[int]:
-    """Return whether *value* is a positive, non-boolean integer."""
-    return type(value) is int and value > 0
+from typing import Final
 
 
 class SessionPurpose(StrEnum):
