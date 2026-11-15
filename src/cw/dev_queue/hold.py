@@ -124,11 +124,11 @@ def is_operator_hold_on(task: TicketTask, pr_number: int) -> bool:
 def _watch_collision(
     store: DevQueueStore, repo: str, pr_number: int, client: str
 ) -> WatchedPr | None:
-    """A read-only twin of the collision check in ``register_or_adopt_watched_pr``.
+    """Return the active watch on *repo*/*pr_number* owned by another client, if any.
 
     Emits no event and takes no lock: it reads the store the caller already
-    holds. It duplicates the three-part match on purpose, because ``crud.py``
-    may not grow (#2321 R7/R8).
+    holds. The rule itself lives in ``watched_pr_collides``, which
+    ``register_or_adopt_watched_pr`` also calls, so the two paths cannot diverge.
     """
     for existing in store.watched_prs:
         if watched_pr_collides(existing, repo=repo, pr_number=pr_number, client=client):

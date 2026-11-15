@@ -9,8 +9,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_serializer, model_validator
-from pydantic.json_schema import SkipJsonSchema  # noqa: TC002
+from pydantic import BaseModel, Field
 
 from cw.models.enums import OrchestratorEventType
 
@@ -104,12 +103,10 @@ class WatchedPr(BaseModel):
     dismiss transition can re-open registration (RFC 0011 S2, adopted #5).
 
     Since #2321 ``source="dependency_hold"`` is registered by ``cw dev-queue hold``
-    and by ``cw.reconcile.stale_dispatch_watch`` for dependency parks. The JSON
-    reader/writer carries a private compatibility marker and the old
-    ``stale_dispatch_park`` wire value, so an older cw can read the store during
-    a rollback; the current reader restores the more precise source. No schema
-    bump accompanies this compatibility encoding. No code retires a watch yet
-    (#3654).
+    and by ``cw.reconcile.stale_dispatch_watch`` for dependency parks. An older
+    cw reading the new value fails validation on ``source``; rolling back after
+    a hold has registered a watch needs that watch removed first. No code
+    retires a watch yet (#3654).
     """
 
     # NOT extra=forbid — persisted/runtime state, see #1200
@@ -131,41 +128,9 @@ class WatchedPr(BaseModel):
     client: str | None = None
     pr_state: PrState | None = None
 
-    @model_validator(mode="before")
-    @classmethod
-    def _restore_dependency_hold_source(cls, value: Any) -> Any:
-        """Read the rollback-safe wire form used for dependency-hold watches."""
-        if not isinstance(value, dict):
-            return value
-        if (
-            value.get("dependency_hold_compat") is True
-            and value.get("source") == "stale_dispatch_park"
-        ):
-            restored = dict(value)
-            restored["source"] = "dependency_hold"
-            return restored
-        if value.get("source") == "dependency_hold":
-            marked = dict(value)
-            marked["dependency_hold_compat"] = True
-            return marked
-        return value
-
-    @field_serializer("source", when_used="json")
-    def _serialize_dependency_hold_source(self, value: str) -> str:
-        """Emit an old-source wire value so rollback readers still load it."""
-        if value == "dependency_hold":
-            return "stale_dispatch_park"
-        return value
-
-    # Hidden from the JSON schema because it is only a rollback wire marker;
-    # older cw versions ignore unknown fields while retaining the old source.
-    dependency_hold_compat: SkipJsonSchema[bool | None] = Field(
-        default=None, exclude_if=lambda value: value is None, repr=False
-    )
-
 
 def watched_pr_collides(
-    existing: WatchedPr, *, repo: str, pr_number: int, client: str
+    existing: WatchedPr, *, repo: str, pr_number: int, client: str | None
 ) -> bool:
     """Return whether *existing* blocks a watch owned by another client."""
     return (

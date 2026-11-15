@@ -17430,6 +17430,37 @@ class TestRegisterOrAdoptWatchedPr:
         assert len(store.watched_prs) == 1
         assert store.watched_prs[0].client == "client-a"
 
+    @pytest.mark.parametrize(
+        ("existing_client", "existing_status", "incoming_client", "expect_collision"),
+        [
+            ("client-a", "active", "client-b", True),
+            ("client-a", "dismissed", "client-b", False),
+            (None, "active", "client-b", False),
+            ("client-a", "active", "client-a", False),
+            ("client-a", "active", None, True),
+        ],
+    )
+    def test_crud_and_hold_collision_paths_agree(
+        self,
+        tmp_config_dir: Path,
+        existing_client: str | None,
+        existing_status: str,
+        incoming_client: str | None,
+        expect_collision: bool,
+    ) -> None:
+        """The crud path and the dependency-hold path share one predicate
+        (``watched_pr_collides``); both must give the same answer per case."""
+        from cw.dev_queue.hold import _watch_collision
+
+        existing = self._watched(existing_client).model_copy(
+            update={"status": existing_status}
+        )
+        save_dev_queue(DevQueueStore(watched_prs=[existing]))
+        hold_hit = _watch_collision(load_dev_queue(), "foo/bar", 70, incoming_client)
+        result = register_or_adopt_watched_pr(self._watched(incoming_client))
+        assert (result == "collision") is expect_collision
+        assert (hold_hit is not None) is expect_collision
+
     def test_collision_emits_watched_pr_collision_event(
         self,
         tmp_config_dir: Path,
