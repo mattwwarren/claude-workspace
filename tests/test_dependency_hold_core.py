@@ -241,6 +241,15 @@ class TestHoldTicketCore:
         assert result.outcome == "unchanged"
         assert events_of(OrchestratorEventType.TICKET_HELD) == []
 
+    def test_record_hold_event_skips_unchanged_outcome(self) -> None:
+        seed_queue([_hold(session_id=None, blocked_on_pr=9)])
+        result = hold_ticket(ACME_TICKET, ACME, 9, repo="foo/bar")
+
+        record_hold_event(result, "foo/bar")
+
+        assert result.outcome == "unchanged"
+        assert events_of(OrchestratorEventType.TICKET_HELD) == []
+
     def test_moved_hold_records_audit_event_with_previous_pr(self) -> None:
         seed_queue([_hold(session_id=None, blocked_on_pr=9)])
 
