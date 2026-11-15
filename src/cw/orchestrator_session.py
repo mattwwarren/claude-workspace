@@ -157,9 +157,13 @@ def unreachable_warning(base_url: str) -> str:
     )
 
 
+def _attach_argv(ref: str) -> list[str]:
+    return ["claude", "attach", ref]
+
+
 def attach_command(ref: str) -> str:
     """The ``claude attach`` command line for *ref*, as an operator would type it."""
-    return shlex.join(["claude", "attach", ref])
+    return shlex.join(_attach_argv(ref))
 
 
 def stdio_is_tty() -> bool:
@@ -181,7 +185,7 @@ def attach_session(ref: str) -> int | None:
     caller decides whether to warn; it never sets the process exit code from this.
     """
     try:
-        return subprocess.run(["claude", "attach", ref], check=False).returncode
+        return subprocess.run(_attach_argv(ref), check=False).returncode
     except OSError as exc:
         logger.warning("could not launch `%s`: %s", attach_command(ref), exc)
         return None

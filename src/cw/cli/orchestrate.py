@@ -815,7 +815,7 @@ def _attach_ref(session_id: str) -> str | None:
     """
     try:
         session = load_state().find_by_name_or_id(session_id)
-    except (CwError, OSError):
+    except (CwError, OSError, ValueError):
         return None
     return session.surface_ref if session is not None else None
 
