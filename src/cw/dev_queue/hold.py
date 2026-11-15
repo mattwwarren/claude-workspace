@@ -144,6 +144,7 @@ def _update_existing_hold(
     repo: str,
 ) -> HoldResult:
     """Move or convert a dependency hold that already exists (caller holds the lock)."""
+    original_store = store.model_copy(deep=True)
     previous_disposition = task.disposition
     previous_reason = task.blocked_reason
     converted = task.session_id is not None
@@ -162,8 +163,7 @@ def _update_existing_hold(
         converted_from_worker_park=converted,
         cleared_session_id=cleared,
     )
-    save_dev_queue(store)
-    record_hold_event(result, repo)
+    _save_hold_and_audit(store, original_store, result, repo)
     _log.info(
         "dependency hold updated ticket=%s client=%s pr=%s previous_pr=%s converted=%s",
         task.ticket_id,
@@ -173,6 +173,30 @@ def _update_existing_hold(
         converted,
     )
     return result
+
+
+def _save_hold_and_audit(
+    store: DevQueueStore,
+    original_store: DevQueueStore,
+    result: HoldResult,
+    repo: str,
+) -> None:
+    """Commit a mutating hold, restoring the row if its audit write fails."""
+    save_dev_queue(store)
+    try:
+        record_hold_event(result, repo)
+    except Exception as event_error:
+        try:
+            save_dev_queue(original_store)
+        except Exception as rollback_error:
+            _log.critical(
+                "dependency hold rollback failed for %s/%s after audit failure",
+                result.client,
+                result.ticket_id,
+                exc_info=True,
+            )
+            raise rollback_error from event_error
+        raise
 
 
 def _hold_locked(
@@ -213,6 +237,7 @@ def _hold_locked(
         if task.status == QueueItemStatus.BLOCKED_ON_USER:
             previous_disposition = task.disposition
             previous_reason = task.blocked_reason
+        original_store = store.model_copy(deep=True)
         cleared = task.session_id
         transition_task_status(
             task,
@@ -233,8 +258,7 @@ def _hold_locked(
             converted_from_worker_park=False,
             cleared_session_id=cleared,
         )
-        save_dev_queue(store)
-        record_hold_event(result, repo)
+        _save_hold_and_audit(store, original_store, result, repo)
         _log.info(
             "dependency hold placed ticket=%s client=%s pr=%s replaced_disposition=%s"
             " replaced_blocked_reason=%s",
@@ -257,12 +281,10 @@ def hold_ticket(
 ) -> HoldResult:
     """Park a row as a dependency hold on *pr_number* (#2321).
 
-    The row is saved before the ``ticket.held`` audit is appended. A failed
-    save therefore leaves no audit event claiming a hold that never persisted;
-    the trade-off is that an audit-write failure after the save leaves a held
-    row without its event, and the error still propagates. The caller registers
-    the ``WatchedPr`` afterwards (outside this lock) unless the outcome is
-    ``"unchanged"``.
+    The row and ``ticket.held`` audit are committed as one compensating
+    transaction: an audit failure restores the pre-hold queue snapshot before
+    the error propagates. The caller registers the ``WatchedPr`` afterwards
+    (outside this lock) unless the outcome is ``"unchanged"``.
     Raises :class:`CwError` on any refusal, before mutating.
     """
     return _hold_locked(ticket_id, client, pr_number, repo=repo, bounded=bounded)
