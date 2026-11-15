@@ -230,7 +230,6 @@ class TestHoldTicketCore:
         with pytest.raises(CwError, match="close the session first"):
             hold_ticket(ACME_TICKET, ACME, 9, repo="foo/bar")
         assert queue_row().status == QueueItemStatus.PENDING
-        assert events_of(OrchestratorEventType.TICKET_HELD) == []
 
     def test_unchanged_hold_records_no_audit_event(self) -> None:
         seed_queue([_hold(session_id=None, blocked_on_pr=9)])
@@ -238,33 +237,6 @@ class TestHoldTicketCore:
         result = hold_ticket(ACME_TICKET, ACME, 9, repo="foo/bar")
 
         assert result.outcome == "unchanged"
-        assert events_of(OrchestratorEventType.TICKET_HELD) == []
-
-    def test_moved_hold_records_audit_event_with_previous_pr(self) -> None:
-        seed_queue([_hold(session_id=None, blocked_on_pr=9)])
-
-        result = hold_ticket(ACME_TICKET, ACME, 11, repo="foo/bar")
-
-        assert result.outcome == "updated"
-        assert queue_row().blocked_on_pr == 11
-        [held] = events_of(OrchestratorEventType.TICKET_HELD)
-        assert held.payload["previous_pr"] == 9
-        assert held.payload["pr_number"] == 11
-
-    def test_unexpected_hold_audit_failure_propagates(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        seed_queue([_hold(session_id=None, blocked_on_pr=9)])
-        error = "unexpected audit failure"
-
-        def fail_unexpectedly(*args: object, **kwargs: object) -> None:
-            raise TypeError(error)
-
-        monkeypatch.setattr(hold_module, "record_event", fail_unexpectedly)
-
-        with pytest.raises(TypeError, match="unexpected audit failure"):
-            hold_ticket(ACME_TICKET, ACME, 11, repo="foo/bar")
-        assert queue_row().blocked_on_pr == 11
 
 
 def _auto_policy(monkeypatch: pytest.MonkeyPatch) -> None:

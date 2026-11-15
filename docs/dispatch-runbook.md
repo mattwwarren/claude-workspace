@@ -4537,10 +4537,8 @@ merge under any `reap_policy`.
 **Overwriting a parked row.** Holding an already-BLOCKED_ON_USER row replaces
 its disposition and `blocked_reason`. `hold` prints what it replaced
 (`replaced disposition <d>, blocked_reason <r>`) and writes an INFO log line. A
-same-status move emits no `task.transition` event; the audit record is the
-`ticket.held` event every mutating `hold` records (held, moved or converted),
-which carries `previous_disposition`, `previous_blocked_reason`, `previous_pr`
-and `cleared_session_id`. An `unchanged` repeat records none.
+same-status move emits no `task.transition` event; the printed line and INFO
+log are the audit trail. An `unchanged` repeat reports no replacement.
 
 **Release.** Release is serve-tick only (`release_stale_gated_tasks`); there is
 no other hook, and `cw dev-queue drain` and `cw doctor --reap` do not touch a
