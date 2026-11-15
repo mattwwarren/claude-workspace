@@ -257,9 +257,47 @@ class TestHoldTicketCore:
 
         assert result.outcome == "updated"
         assert queue_row().blocked_on_pr == 11
+        assert result.previous_disposition == _HOLD
+        assert result.previous_blocked_reason == "dependency_unmerged"
         [held] = events_of(OrchestratorEventType.TICKET_HELD)
         assert held.payload["previous_pr"] == 9
+        assert held.payload["previous_disposition"] == _HOLD
+        assert held.payload["previous_blocked_reason"] == "dependency_unmerged"
         assert held.payload["pr_number"] == 11
+
+    def test_worker_hold_conversion_records_previous_state(self) -> None:
+        seed_queue([_hold(session_id="sess-1", blocked_on_pr=9)])
+
+        result = hold_ticket(ACME_TICKET, ACME, 11, repo="foo/bar")
+
+        assert result.outcome == "updated"
+        assert result.converted_from_worker_park is True
+        assert result.previous_disposition == _HOLD
+        assert result.previous_blocked_reason == "dependency_unmerged"
+        [held] = events_of(OrchestratorEventType.TICKET_HELD)
+        assert held.payload["previous_disposition"] == _HOLD
+        assert held.payload["previous_blocked_reason"] == "dependency_unmerged"
+        assert queue_row().session_id is None
+
+    def test_new_hold_audit_failure_leaves_durable_row_without_event(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seed_queue([make_task(status=QueueItemStatus.PENDING)])
+        error = "unexpected audit failure"
+
+        def fail_unexpectedly(*args: object, **kwargs: object) -> None:
+            raise TypeError(error)
+
+        monkeypatch.setattr(hold_module, "record_event", fail_unexpectedly)
+
+        with pytest.raises(TypeError, match=error):
+            hold_ticket(ACME_TICKET, ACME, 11, repo="foo/bar")
+
+        row = queue_row()
+        assert row.status == QueueItemStatus.BLOCKED_ON_USER
+        assert row.disposition == _HOLD
+        assert row.blocked_on_pr == 11
+        assert events_of(OrchestratorEventType.TICKET_HELD) == []
 
     def test_unexpected_hold_audit_failure_propagates(
         self, monkeypatch: pytest.MonkeyPatch
@@ -277,6 +315,7 @@ class TestHoldTicketCore:
         # Save-then-audit (MUST_FIX hold.py:234): the row is persisted before the
         # audit write, so the failed audit leaves a held row without its event.
         assert queue_row().blocked_on_pr == 11
+        assert events_of(OrchestratorEventType.TICKET_HELD) == []
 
 
 def _auto_policy(monkeypatch: pytest.MonkeyPatch) -> None:

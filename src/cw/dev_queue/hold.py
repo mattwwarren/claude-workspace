@@ -144,6 +144,8 @@ def _update_existing_hold(
     repo: str,
 ) -> HoldResult:
     """Move or convert a dependency hold that already exists (caller holds the lock)."""
+    previous_disposition = task.disposition
+    previous_reason = task.blocked_reason
     converted = task.session_id is not None
     cleared = task.session_id
     task.session_id = None
@@ -155,8 +157,8 @@ def _update_existing_hold(
         pr_number=pr_number,
         outcome="updated",
         previous_pr=current,
-        previous_disposition=None,
-        previous_blocked_reason=None,
+        previous_disposition=previous_disposition,
+        previous_blocked_reason=previous_reason,
         converted_from_worker_park=converted,
         cleared_session_id=cleared,
     )
