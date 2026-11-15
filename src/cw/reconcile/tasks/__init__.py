@@ -34,7 +34,6 @@ from cw.reconcile.tasks.merged_completion import (
     complete_timed_out_merged_tasks,
 )
 from cw.reconcile.tasks.stale_gate import (
-    _PROPOSED_ACTION_DEPENDENCY_PR_CLOSED_UNMERGED,
     _PROPOSED_ACTION_VARIANT_A,
     _PROPOSED_ACTION_VARIANT_B,
     _STALE_GATE_CONSUMER,
@@ -49,7 +48,6 @@ from cw.reconcile.tasks.stale_gate import (
     _pr_numbers_by_client_in_state,
     _release_variant_a,
     _release_variant_b,
-    _scan_variant_b,
     release_stale_gated_tasks,
 )
 from cw.reconcile.tasks.terminal_siblings import (
@@ -60,7 +58,6 @@ from cw.reconcile.tasks.terminal_siblings import (
 
 __all__ = [
     "_COMPLETION_ROUTING_GRACE_SECONDS",
-    "_PROPOSED_ACTION_DEPENDENCY_PR_CLOSED_UNMERGED",
     "_PROPOSED_ACTION_VARIANT_A",
     "_PROPOSED_ACTION_VARIANT_B",
     "_STALE_GATE_CONSUMER",
@@ -86,7 +83,6 @@ __all__ = [
     "_resolve_task_policy",
     "_revert_running_tasks_for_sessions",
     "_revert_terminal_backstop",
-    "_scan_variant_b",
     "_sessions_past_completion_grace",
     "backstop_targets",
     "capture_backstop_dirty_checks",

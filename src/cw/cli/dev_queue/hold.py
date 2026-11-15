@@ -192,8 +192,9 @@ def dev_queue_hold(ticket: str, pr_number: int, client: str) -> None:
     result = hold_ticket(
         task.ticket_id, task.client, pr_number, repo=repo, bounded=True
     )
+    # Persist the hold audit before any post-mutation watch-registration error.
+    record_hold_event(result, repo)
     if result.outcome != "unchanged":
         _register_hold_watch(result, repo)
-    record_hold_event(result, repo)
     _echo_hold(result)
     echo_resulting_row(result.ticket_id, result.client, sources=ViewSources())

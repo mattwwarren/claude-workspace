@@ -36,17 +36,20 @@ if TYPE_CHECKING:
 
 PACKAGE = "cw.reconcile.tasks"
 
-# The full public-and-private surface: the flat module's 8 constants and 26
-# functions, plus #2321's ``_PROPOSED_ACTION_DEPENDENCY_PR_CLOSED_UNMERGED`` and
-# ``_scan_variant_b`` (9 constants and 27 functions). Hardcoded on purpose:
-# deriving it from the package would let a moved or dropped name pass silently.
+# New stale-gate implementation details stay in their owner module rather
+# than becoming package attributes (#2321).
+_UNEXPORTED_PRIVATE_NAMES = frozenset(
+    {"_PROPOSED_ACTION_DEPENDENCY_PR_CLOSED_UNMERGED", "_scan_variant_b"}
+)
+
+# The full public-and-private surface of the flat module: 8 constants and 26
+# functions. Hardcoded on purpose: deriving it from the package would let a
+# moved or dropped name pass silently.
 EXPECTED_EXPORTS = frozenset(
     {
         "_COMPLETION_ROUTING_GRACE_SECONDS",
-        "_PROPOSED_ACTION_DEPENDENCY_PR_CLOSED_UNMERGED",
         "_PROPOSED_ACTION_VARIANT_A",
         "_PROPOSED_ACTION_VARIANT_B",
-        "_scan_variant_b",
         "_STALE_GATE_CONSUMER",
         "_TERMINAL_SIBLING_STATUSES",
         "_VARIANT_A_BLOCKED_DISPOSITION",
@@ -126,7 +129,6 @@ _STALE_GATE_NAMES = (
     "_VARIANT_B_DISPOSITION",
     "_PROPOSED_ACTION_VARIANT_A",
     "_PROPOSED_ACTION_VARIANT_B",
-    "_PROPOSED_ACTION_DEPENDENCY_PR_CLOSED_UNMERGED",
     "_is_variant_a_gate_task",
     "_is_variant_b_gate_task",
     "_index_variant_a_candidates",
@@ -135,7 +137,6 @@ _STALE_GATE_NAMES = (
     "_closed_pr_numbers_by_client",
     "_release_variant_a",
     "_release_variant_b",
-    "_scan_variant_b",
     "release_stale_gated_tasks",
 )
 _OWNED_NAMES: dict[str, tuple[str, ...]] = {
@@ -243,10 +244,11 @@ def _top_level_names(tree: ast.Module) -> set[str]:
 
 
 def test_name_set_matches_hardcoded_surface() -> None:
-    """The package's project-defined top-level names are exactly the 36 names."""
+    """The package's project-defined top-level names are exactly the 34 names."""
     defined: set[str] = set()
     for path in _package_files(PACKAGE):
         defined |= _top_level_names(_parse(path))
+    defined -= _UNEXPORTED_PRIVATE_NAMES
     assert defined == set(EXPECTED_EXPORTS)
     for name in EXPECTED_EXPORTS:
         assert hasattr(pkg, name), name
@@ -324,12 +326,13 @@ def test_every_name_is_defined_where_the_owner_table_says() -> None:
         (name, _module_name(path, PACKAGE))
         for path in _package_files(PACKAGE)
         for name in _top_level_names(_parse(path))
+        if name not in _UNEXPORTED_PRIVATE_NAMES
     ]
     assert sorted(defined) == sorted(_OWNER.items())
 
 
-def test_constant_set_is_the_nine_surface_constants() -> None:
-    assert len(_CONSTANTS) == 9
+def test_constant_set_is_the_eight_flat_module_constants() -> None:
+    assert len(_CONSTANTS) == 8
 
 
 @pytest.mark.parametrize("name", sorted(_OWNER.keys() - _CONSTANTS))

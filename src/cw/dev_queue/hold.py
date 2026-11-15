@@ -28,7 +28,6 @@ from cw.exceptions import CwError
 from cw.gh import parse_pr_url
 from cw.models import OrchestratorEventType, QueueItemStatus, WatchedPr
 from cw.models.enums import DEPENDENCY_HOLD_DISPOSITION, TERMINAL_SESSION_STATUSES
-from cw.models.events import watched_pr_collides
 
 if TYPE_CHECKING:
     from cw.models import CwState, DevQueueStore, TicketTask
@@ -127,11 +126,18 @@ def _watch_collision(
     """Return the active watch on *repo*/*pr_number* owned by another client, if any.
 
     Emits no event and takes no lock: it reads the store the caller already
-    holds. The rule itself lives in ``watched_pr_collides``, which
-    ``register_or_adopt_watched_pr`` also calls, so the two paths cannot diverge.
+    holds. This deliberately duplicates the three-part match in
+    ``register_or_adopt_watched_pr`` because this read-only check must run
+    inside the hold mutation lock without changing the over-ceiling CRUD module.
     """
     for existing in store.watched_prs:
-        if watched_pr_collides(existing, repo=repo, pr_number=pr_number, client=client):
+        if not (
+            existing.repo == repo
+            and existing.pr_number == pr_number
+            and existing.status == "active"
+        ):
+            continue
+        if existing.client is not None and existing.client != client:
             return existing
     return None
 
@@ -249,8 +255,9 @@ def hold_ticket(
 
     The row is saved before this returns. The caller registers the
     ``WatchedPr`` afterwards (outside this lock) unless the outcome is
-    ``"unchanged"``, then calls :func:`record_hold_event` last. Raises
-    :class:`CwError` on any refusal, before mutating.
+    ``"unchanged"``. The CLI records the hold audit before registering the
+    watch, so a post-mutation registration failure cannot hide the hold.
+    Raises :class:`CwError` on any refusal, before mutating.
     """
     return _hold_locked(ticket_id, client, pr_number, repo=repo, bounded=bounded)
 
@@ -259,7 +266,7 @@ def record_hold_event(result: HoldResult, repo: str) -> None:
     """Record the ``ticket.held`` audit event for one mutating hold (#2321).
 
     The durable audit trail for a same-status overwrite, which emits no
-    ``task.transition``. Written last, after the queue write and the watch
+    ``task.transition``. Written after the queue write and before watch
     registration (state first, then event); no handler wraps it, so a failed
     write propagates. An ``unchanged`` repeat records nothing.
     """
