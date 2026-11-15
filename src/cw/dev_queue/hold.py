@@ -28,6 +28,7 @@ from cw.exceptions import CwError
 from cw.gh import parse_pr_url
 from cw.models import OrchestratorEventType, QueueItemStatus, WatchedPr
 from cw.models.enums import DEPENDENCY_HOLD_DISPOSITION, TERMINAL_SESSION_STATUSES
+from cw.models.events import watched_pr_collides
 
 if TYPE_CHECKING:
     from cw.models import CwState, DevQueueStore, TicketTask
@@ -126,24 +127,21 @@ def _watch_collision(
     """Return the active watch on *repo*/*pr_number* owned by another client, if any.
 
     Emits no event and takes no lock: it reads the store the caller already
-    holds. This deliberately duplicates the three-part match in
-    ``register_or_adopt_watched_pr`` because this read-only check must run
-    inside the hold mutation lock without changing the over-ceiling CRUD module.
+    holds. It uses the same predicate as ``register_or_adopt_watched_pr``;
+    only the read-only scan is kept here so it can run inside the mutation lock.
     """
     for existing in store.watched_prs:
-        if not (
-            existing.repo == repo
-            and existing.pr_number == pr_number
-            and existing.status == "active"
-        ):
-            continue
-        if existing.client is not None and existing.client != client:
+        if watched_pr_collides(existing, repo=repo, pr_number=pr_number, client=client):
             return existing
     return None
 
 
 def _update_existing_hold(
-    store: DevQueueStore, task: TicketTask, pr_number: int, current: int
+    store: DevQueueStore,
+    task: TicketTask,
+    pr_number: int,
+    current: int,
+    repo: str,
 ) -> HoldResult:
     """Move or convert a dependency hold that already exists (caller holds the lock)."""
     converted = task.session_id is not None
@@ -151,16 +149,7 @@ def _update_existing_hold(
     task.session_id = None
     task.blocked_on_pr = pr_number
     task.stale_gate_detected_at = None
-    save_dev_queue(store)
-    _log.info(
-        "dependency hold updated ticket=%s client=%s pr=%s previous_pr=%s converted=%s",
-        task.ticket_id,
-        task.client,
-        pr_number,
-        current,
-        converted,
-    )
-    return HoldResult(
+    result = HoldResult(
         ticket_id=task.ticket_id,
         client=task.client,
         pr_number=pr_number,
@@ -171,6 +160,17 @@ def _update_existing_hold(
         converted_from_worker_park=converted,
         cleared_session_id=cleared,
     )
+    record_hold_event(result, repo)
+    save_dev_queue(store)
+    _log.info(
+        "dependency hold updated ticket=%s client=%s pr=%s previous_pr=%s converted=%s",
+        task.ticket_id,
+        task.client,
+        pr_number,
+        current,
+        converted,
+    )
+    return result
 
 
 def _hold_locked(
@@ -205,7 +205,7 @@ def _hold_locked(
             raise CwError(msg)
         current = existing_hold_pr(task)
         if current is not None:
-            return _update_existing_hold(store, task, pr_number, current)
+            return _update_existing_hold(store, task, pr_number, current, repo)
         previous_disposition = None
         previous_reason = None
         if task.status == QueueItemStatus.BLOCKED_ON_USER:
@@ -220,17 +220,7 @@ def _hold_locked(
         )
         task.session_id = None
         task.blocked_on_pr = pr_number  # after the transition, which clears it
-        save_dev_queue(store)
-        _log.info(
-            "dependency hold placed ticket=%s client=%s pr=%s replaced_disposition=%s"
-            " replaced_blocked_reason=%s",
-            task.ticket_id,
-            task.client,
-            pr_number,
-            previous_disposition,
-            previous_reason,
-        )
-        return HoldResult(
+        result = HoldResult(
             ticket_id=task.ticket_id,
             client=task.client,
             pr_number=pr_number,
@@ -241,6 +231,18 @@ def _hold_locked(
             converted_from_worker_park=False,
             cleared_session_id=cleared,
         )
+        record_hold_event(result, repo)
+        save_dev_queue(store)
+        _log.info(
+            "dependency hold placed ticket=%s client=%s pr=%s replaced_disposition=%s"
+            " replaced_blocked_reason=%s",
+            task.ticket_id,
+            task.client,
+            pr_number,
+            previous_disposition,
+            previous_reason,
+        )
+        return result
 
 
 def hold_ticket(
@@ -253,10 +255,10 @@ def hold_ticket(
 ) -> HoldResult:
     """Park a row as a dependency hold on *pr_number* (#2321).
 
-    The row is saved before this returns. The caller registers the
-    ``WatchedPr`` afterwards (outside this lock) unless the outcome is
-    ``"unchanged"``. The CLI records the hold audit before registering the
-    watch, so a post-mutation registration failure cannot hide the hold.
+    The hold audit is appended before the row is saved, so an audit-write
+    failure cannot leave a persisted hold without its durable audit event. The
+    caller registers the ``WatchedPr`` afterwards (outside this lock) unless
+    the outcome is ``"unchanged"``.
     Raises :class:`CwError` on any refusal, before mutating.
     """
     return _hold_locked(ticket_id, client, pr_number, repo=repo, bounded=bounded)
@@ -266,9 +268,9 @@ def record_hold_event(result: HoldResult, repo: str) -> None:
     """Record the ``ticket.held`` audit event for one mutating hold (#2321).
 
     The durable audit trail for a same-status overwrite, which emits no
-    ``task.transition``. Written after the queue write and before watch
-    registration (state first, then event); no handler wraps it, so a failed
-    write propagates. An ``unchanged`` repeat records nothing.
+    ``task.transition``. Mutating callers append it before saving the queue
+    row; no handler wraps it, so a failed write propagates. An ``unchanged``
+    repeat records nothing.
     """
     if result.outcome == "unchanged":
         return

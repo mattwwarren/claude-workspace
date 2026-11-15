@@ -254,7 +254,6 @@ class TestHoldTicketCore:
         seed_queue([_hold(session_id=None, blocked_on_pr=9)])
 
         result = hold_ticket(ACME_TICKET, ACME, 11, repo="foo/bar")
-        record_hold_event(result, "foo/bar")
 
         assert result.outcome == "updated"
         assert queue_row().blocked_on_pr == 11
@@ -273,10 +272,9 @@ class TestHoldTicketCore:
 
         monkeypatch.setattr(hold_module, "record_event", fail_unexpectedly)
 
-        result = hold_ticket(ACME_TICKET, ACME, 11, repo="foo/bar")
         with pytest.raises(TypeError, match="unexpected audit failure"):
-            record_hold_event(result, "foo/bar")
-        assert queue_row().blocked_on_pr == 11
+            hold_ticket(ACME_TICKET, ACME, 11, repo="foo/bar")
+        assert queue_row().blocked_on_pr == 9
 
 
 def _auto_policy(monkeypatch: pytest.MonkeyPatch) -> None:

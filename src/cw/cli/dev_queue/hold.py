@@ -22,7 +22,6 @@ from cw.dev_queue.hold import (
     check_holdable,
     hold_ticket,
     is_operator_hold_on,
-    record_hold_event,
 )
 from cw.dev_queue.storage import load_dev_queue
 from cw.exceptions import CwError
@@ -192,8 +191,6 @@ def dev_queue_hold(ticket: str, pr_number: int, client: str) -> None:
     result = hold_ticket(
         task.ticket_id, task.client, pr_number, repo=repo, bounded=True
     )
-    # Persist the hold audit before any post-mutation watch-registration error.
-    record_hold_event(result, repo)
     if result.outcome != "unchanged":
         _register_hold_watch(result, repo)
     _echo_hold(result)

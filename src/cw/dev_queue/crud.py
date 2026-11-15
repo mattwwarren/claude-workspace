@@ -38,6 +38,7 @@ from cw.models import (
     Stage,
     TicketTask,
 )
+from cw.models.events import watched_pr_collides
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -363,26 +364,31 @@ def register_or_adopt_watched_pr(
                 and existing.status == "active"
             ):
                 continue
+            if watched_pr_collides(
+                existing,
+                repo=watched.repo,
+                pr_number=watched.pr_number,
+                client=watched.client,
+            ):
+                # Why: emit inline under dev_queue_lock, mirroring
+                # _emit_task_deleted below; the inbox lock is a leaf (ADR-0019).
+                record_event(
+                    OrchestratorEventType.WATCHED_PR_COLLISION,
+                    {
+                        "client": watched.client,
+                        "repo": watched.repo,
+                        "pr_number": watched.pr_number,
+                        "colliding_client": existing.client,
+                        "colliding_source": existing.source,
+                    },
+                    correlation_id=watched.client,
+                )
+                return "collision"
             if existing.client is None:
                 existing.client = watched.client
                 save_dev_queue(store)
                 return "adopted"
-            if existing.client == watched.client:
-                return "already_active"
-            # Why: emit inline under dev_queue_lock, mirroring
-            # _emit_task_deleted below; the inbox lock is a leaf (ADR-0019).
-            record_event(
-                OrchestratorEventType.WATCHED_PR_COLLISION,
-                {
-                    "client": watched.client,
-                    "repo": watched.repo,
-                    "pr_number": watched.pr_number,
-                    "colliding_client": existing.client,
-                    "colliding_source": existing.source,
-                },
-                correlation_id=watched.client,
-            )
-            return "collision"
+            return "already_active"
         store.watched_prs.append(watched)
         save_dev_queue(store)
     return "inserted"
