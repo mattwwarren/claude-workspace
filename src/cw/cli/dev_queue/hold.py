@@ -22,6 +22,7 @@ from cw.dev_queue.hold import (
     check_holdable,
     hold_ticket,
     is_operator_hold_on,
+    record_hold_event,
 )
 from cw.dev_queue.storage import load_dev_queue
 from cw.exceptions import CwError
@@ -191,7 +192,14 @@ def dev_queue_hold(ticket: str, pr_number: int, client: str) -> None:
     result = hold_ticket(
         task.ticket_id, task.client, pr_number, repo=repo, bounded=True
     )
-    if result.outcome != "unchanged":
-        _register_hold_watch(result, repo)
+    # State first, then event: the row is already saved; the watch follows; the
+    # ``ticket.held`` audit is written last, in ``finally``, so a watch collision
+    # (the row stays held) still leaves its audit record. record_hold_event skips
+    # the unchanged repeat itself.
+    try:
+        if result.outcome != "unchanged":
+            _register_hold_watch(result, repo)
+    finally:
+        record_hold_event(result, repo)
     _echo_hold(result)
     echo_resulting_row(result.ticket_id, result.client, sources=ViewSources())
