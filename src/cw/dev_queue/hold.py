@@ -160,8 +160,8 @@ def _update_existing_hold(
         converted_from_worker_park=converted,
         cleared_session_id=cleared,
     )
-    record_hold_event(result, repo)
     save_dev_queue(store)
+    record_hold_event(result, repo)
     _log.info(
         "dependency hold updated ticket=%s client=%s pr=%s previous_pr=%s converted=%s",
         task.ticket_id,
@@ -231,8 +231,8 @@ def _hold_locked(
             converted_from_worker_park=False,
             cleared_session_id=cleared,
         )
-        record_hold_event(result, repo)
         save_dev_queue(store)
+        record_hold_event(result, repo)
         _log.info(
             "dependency hold placed ticket=%s client=%s pr=%s replaced_disposition=%s"
             " replaced_blocked_reason=%s",
@@ -255,10 +255,12 @@ def hold_ticket(
 ) -> HoldResult:
     """Park a row as a dependency hold on *pr_number* (#2321).
 
-    The hold audit is appended before the row is saved, so an audit-write
-    failure cannot leave a persisted hold without its durable audit event. The
-    caller registers the ``WatchedPr`` afterwards (outside this lock) unless
-    the outcome is ``"unchanged"``.
+    The row is saved before the ``ticket.held`` audit is appended. A failed
+    save therefore leaves no audit event claiming a hold that never persisted;
+    the trade-off is that an audit-write failure after the save leaves a held
+    row without its event, and the error still propagates. The caller registers
+    the ``WatchedPr`` afterwards (outside this lock) unless the outcome is
+    ``"unchanged"``.
     Raises :class:`CwError` on any refusal, before mutating.
     """
     return _hold_locked(ticket_id, client, pr_number, repo=repo, bounded=bounded)
@@ -268,9 +270,9 @@ def record_hold_event(result: HoldResult, repo: str) -> None:
     """Record the ``ticket.held`` audit event for one mutating hold (#2321).
 
     The durable audit trail for a same-status overwrite, which emits no
-    ``task.transition``. Mutating callers append it before saving the queue
-    row; no handler wraps it, so a failed write propagates. An ``unchanged``
-    repeat records nothing.
+    ``task.transition``. Mutating callers append it after the row save; no
+    handler wraps it, so a failed write propagates. An ``unchanged`` repeat
+    records nothing.
     """
     if result.outcome == "unchanged":
         return

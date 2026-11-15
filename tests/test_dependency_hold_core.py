@@ -274,7 +274,9 @@ class TestHoldTicketCore:
 
         with pytest.raises(TypeError, match="unexpected audit failure"):
             hold_ticket(ACME_TICKET, ACME, 11, repo="foo/bar")
-        assert queue_row().blocked_on_pr == 9
+        # Save-then-audit (MUST_FIX hold.py:234): the row is persisted before the
+        # audit write, so the failed audit leaves a held row without its event.
+        assert queue_row().blocked_on_pr == 11
 
 
 def _auto_policy(monkeypatch: pytest.MonkeyPatch) -> None:
