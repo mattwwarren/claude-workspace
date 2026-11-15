@@ -2346,6 +2346,20 @@ class TestWatchedPrModel:
         assert restored.source == "stale_dispatch_park"
         assert restored.client == "acme"
 
+    def test_watched_pr_dependency_hold_source_is_rollback_safe(self) -> None:
+        watched = WatchedPr(
+            pr_url="https://github.com/acme/widgets/pull/10",
+            repo="acme/widgets",
+            pr_number=10,
+            client="acme",
+            source="dependency_hold",
+        )
+        wire = watched.model_dump(mode="json")
+
+        assert wire["source"] == "stale_dispatch_park"
+        assert wire["dependency_hold_compat"] is True
+        assert WatchedPr.model_validate(wire).source == "dependency_hold"
+
     def test_watched_pr_rejects_bad_source(self) -> None:
         with pytest.raises(ValidationError):
             WatchedPr(
