@@ -322,7 +322,9 @@ disposition to report"), not an error.
 An orchestrator started with `cw orchestrator-start` gets this wiring per
 session: it writes a client-scoped `cw-operator` MCP config under the state
 dir, launches with `--mcp-config <file>` and `server:cw-operator`, and leaves
-the repo's `.mcp.json` alone (`cw spawn close` removes the file). It warns on
+the repo's `.mcp.json` alone (`cw spawn close` removes the file). On a
+terminal it also opens in your terminal by default; `--detach` is the opt-out
+(#3667). It warns on
 stderr when `cw queue-channel serve` is not reachable at launch; that session
 then uses the fallback below. A session started any other way needs
 `cw-operator` in `.mcp.json`.

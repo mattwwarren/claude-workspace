@@ -58,3 +58,23 @@ def test_orchestrate_sprint_phase4_mentions_orchestrator_start() -> None:
     assert '<channel source="cw-operator">' in phase4
     assert "timeout_ms: 1800000" in phase4
     assert "re-arm only when it expires" in phase4
+
+
+def test_operator_channel_doc_documents_default_attach_and_detach() -> None:
+    doc = _norm(_read(OPERATOR_DOC))
+    assert "--detach" in doc
+    assert "claude attach" in doc
+
+
+def test_cw_orchestration_watching_mentions_detach_and_attach() -> None:
+    content = _read(SKILLS / "cw-orchestration" / "SKILL.md")
+    watching = _between(content, "- **Watching.**", "- **Posting tracker comments.**")
+    assert "--detach" in watching
+    assert "claude attach" in watching
+
+
+def test_orchestrate_sprint_phase4_mentions_detach_and_attach() -> None:
+    content = _read(SKILLS / "orchestrate-sprint" / "SKILL.md")
+    phase4 = _between(content, "### Phase 4", "### Phase 5")
+    assert "--detach" in phase4
+    assert "claude attach" in phase4

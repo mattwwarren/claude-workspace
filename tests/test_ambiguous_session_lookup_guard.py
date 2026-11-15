@@ -134,7 +134,7 @@ _FIND_BY_NAME_OR_ID_ALLOWLIST: dict[tuple[str, str], _Classification] = {
         "user-name-reachable:handle_errors",
         ((_CODEX_CLI, "codex_run"),),
     ),
-    # --- id-only (13) ---
+    # --- id-only (14) ---
     # prior_session_id is read back from cw-context.json, which cw writes.
     ("cw/spawn.py", "_write_hook_context"): ("id-only", ()),
     # parent_session.id, already resolved by start_session's own lookup.
@@ -166,6 +166,8 @@ _FIND_BY_NAME_OR_ID_ALLOWLIST: dict[tuple[str, str], _Classification] = {
     ("cw/reconcile/gate_recipes.py", "_detect_auto_adopt_plan"): ("id-only", ()),
     ("cw/reconcile/gate_recipes.py", "_act_auto_approve_review"): ("id-only", ()),
     ("cw/reconcile/gate_recipes.py", "_act_auto_adopt_plan"): ("id-only", ()),
+    # cw id returned by spawn_create_impl in orchestrator_start (#3667).
+    ("cw/cli/orchestrate.py", "_attach_ref"): ("id-only", ()),
 }
 
 

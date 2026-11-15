@@ -18,7 +18,10 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 import socket
+import subprocess
+import sys
 import urllib.parse
 from typing import TYPE_CHECKING
 
@@ -152,3 +155,33 @@ def unreachable_warning(base_url: str) -> str:
         f"start it with: {serve}. The session will still start and falls back "
         "to the cw orchestrate watch Monitor."
     )
+
+
+def attach_command(ref: str) -> str:
+    """The ``claude attach`` command line for *ref*, as an operator would type it."""
+    return shlex.join(["claude", "attach", ref])
+
+
+def stdio_is_tty() -> bool:
+    """True only when stdin and stdout are both a terminal (#3667).
+
+    A stream without ``isatty`` or a closed stream counts as not a terminal.
+    """
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def attach_session(ref: str) -> int | None:
+    """Attach the current terminal to ``claude attach <ref>`` (#3667).
+
+    The child inherits stdio, so it blocks until the operator detaches. Returns
+    the child's exit code, or ``None`` when ``claude`` cannot be launched. The
+    caller decides whether to warn; it never sets the process exit code from this.
+    """
+    try:
+        return subprocess.run(["claude", "attach", ref], check=False).returncode
+    except OSError as exc:
+        logger.warning("could not launch `%s`: %s", attach_command(ref), exc)
+        return None
