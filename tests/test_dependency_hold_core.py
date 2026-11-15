@@ -18,6 +18,7 @@ from cw.dev_queue import (
     load_dev_queue,
     save_dev_queue,
 )
+from cw.dev_queue.hold import record_hold_event
 from cw.dispatch.routing.stage_failure import (
     _dependency_park_pr,
     _stamp_blocked_on_pr,
@@ -244,6 +245,7 @@ class TestHoldTicketCore:
         seed_queue([_hold(session_id=None, blocked_on_pr=9)])
 
         result = hold_ticket(ACME_TICKET, ACME, 11, repo="foo/bar")
+        record_hold_event(result, "foo/bar")
 
         assert result.outcome == "updated"
         assert queue_row().blocked_on_pr == 11
@@ -262,8 +264,9 @@ class TestHoldTicketCore:
 
         monkeypatch.setattr(hold_module, "record_event", fail_unexpectedly)
 
+        result = hold_ticket(ACME_TICKET, ACME, 11, repo="foo/bar")
         with pytest.raises(TypeError, match="unexpected audit failure"):
-            hold_ticket(ACME_TICKET, ACME, 11, repo="foo/bar")
+            record_hold_event(result, "foo/bar")
         assert queue_row().blocked_on_pr == 11
 
 

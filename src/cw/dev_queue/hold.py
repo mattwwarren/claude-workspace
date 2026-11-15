@@ -43,7 +43,7 @@ class HoldResult:
     ``previous_disposition`` and ``previous_blocked_reason`` are set only when
     the row was already BLOCKED_ON_USER and this hold overwrote them. No
     ``task.transition`` event carries them (a same-status move emits none);
-    the ``ticket.held`` event :func:`hold_ticket` records does, as do the
+    the ``ticket.held`` event :func:`record_hold_event` records does, as do the
     echoed line and the INFO log.
     """
 
@@ -249,17 +249,24 @@ def hold_ticket(
 
     The row is saved before this returns. The caller registers the
     ``WatchedPr`` afterwards (outside this lock) unless the outcome is
-    ``"unchanged"``. Raises :class:`CwError` on any refusal, before mutating.
-
-    Every mutating outcome records one ``ticket.held`` event after the lock
-    is released (ADR-0019): it is the durable audit trail for a same-status
-    overwrite, which emits no ``task.transition``.
+    ``"unchanged"``, then calls :func:`record_hold_event` last. Raises
+    :class:`CwError` on any refusal, before mutating.
     """
-    result = _hold_locked(ticket_id, client, pr_number, repo=repo, bounded=bounded)
-    if result.outcome != "unchanged":
-        record_event(
-            OrchestratorEventType.TICKET_HELD,
-            {**asdict(result), "repo": repo},
-            correlation_id=result.ticket_id,
-        )
-    return result
+    return _hold_locked(ticket_id, client, pr_number, repo=repo, bounded=bounded)
+
+
+def record_hold_event(result: HoldResult, repo: str) -> None:
+    """Record the ``ticket.held`` audit event for one mutating hold (#2321).
+
+    The durable audit trail for a same-status overwrite, which emits no
+    ``task.transition``. Written last, after the queue write and the watch
+    registration (state first, then event); no handler wraps it, so a failed
+    write propagates. An ``unchanged`` repeat records nothing.
+    """
+    if result.outcome == "unchanged":
+        return
+    record_event(
+        OrchestratorEventType.TICKET_HELD,
+        {**asdict(result), "repo": repo},
+        correlation_id=result.ticket_id,
+    )

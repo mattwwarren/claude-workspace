@@ -22,6 +22,7 @@ from cw.dev_queue.hold import (
     check_holdable,
     hold_ticket,
     is_operator_hold_on,
+    record_hold_event,
 )
 from cw.dev_queue.storage import load_dev_queue
 from cw.exceptions import CwError
@@ -193,5 +194,6 @@ def dev_queue_hold(ticket: str, pr_number: int, client: str) -> None:
     )
     if result.outcome != "unchanged":
         _register_hold_watch(result, repo)
+    record_hold_event(result, repo)
     _echo_hold(result)
     echo_resulting_row(result.ticket_id, result.client, sources=ViewSources())
