@@ -53,9 +53,12 @@ from cw.orchestrate import (
 )
 from cw.orchestrator_session import (
     ORCHESTRATOR_AGENT,
+    attach_command,
+    attach_session,
     operator_channel_reachable,
     orchestrator_launch_args,
     remove_orchestrator_mcp_config,
+    stdio_is_tty,
     unreachable_warning,
     write_orchestrator_mcp_config,
 )
@@ -744,10 +747,16 @@ _ORCHESTRATOR_PROMPT = (
         "current directory; refuses if it cannot be inferred."
     ),
 )
+@click.option(
+    "--detach",
+    is_flag=True,
+    help="Spawn and return without attaching this terminal to the session.",
+)
 @handle_errors
 def orchestrator_start(
     name: str,
     client: str | None,
+    detach: bool,
     native_daemon: NativeDaemonClient | None = None,
 ) -> None:
     """Spawn a long-running cw orchestrator session driven by the cw-operator channel.
@@ -757,6 +766,12 @@ def orchestrator_start(
     file under the state dir (removed by ``cw spawn close``). The repo's
     ``.mcp.json`` is not touched. Without ``--client`` the client is inferred
     from the current directory.
+
+    On a terminal (stdin and stdout both a TTY) the command then attaches this
+    terminal to the session, which blocks until you detach. ``--detach`` skips
+    the attach and prints the ``claude attach`` command. A non-TTY caller never
+    attaches. An attach failure never fails the spawn: the command prints the
+    attach command to stderr and exits 0.
     """
     client_cfg = _resolve_client_or_infer(client)
     base_url = resolve_base_url()
@@ -783,3 +798,41 @@ def orchestrator_start(
         remove_orchestrator_mcp_config(sid)
         raise
     click.echo(f"Spawned orchestrator session: {session_id}")
+    _attach_or_print_command(session_id, detach=detach)
+
+
+_ATTACH_HINT = (
+    "Detach with Ctrl+Z (the session keeps running). Do NOT use Ctrl+D"
+    " (terminates the daemon session in all attached terminals)."
+)
+
+
+def _attach_ref(session_id: str) -> str | None:
+    """Daemon short id of the session just spawned, or ``None`` if unknown.
+
+    The cw id is not a valid ``claude attach`` target; the short id stored on
+    ``surface_ref`` is. A state read problem must not fail a completed spawn.
+    """
+    try:
+        session = load_state().find_by_name_or_id(session_id)
+    except (CwError, OSError, ValueError):
+        return None
+    return session.surface_ref if session is not None else None
+
+
+def _attach_or_print_command(session_id: str, *, detach: bool) -> None:
+    """Attach the terminal on a TTY, else print the command. Never fails the spawn."""
+    ref = _attach_ref(session_id)
+    if ref is None:
+        click.echo("Attach with: run `claude agents`, then `claude attach <id|name>`.")
+        return
+    if detach or not stdio_is_tty():
+        click.echo(f"Attach with: {attach_command(ref)}")
+        return
+    click.echo(_ATTACH_HINT)
+    result = attach_session(ref)
+    if result is None or result != 0:
+        click.echo(
+            f"warning: could not attach; attach yourself with: {attach_command(ref)}",
+            err=True,
+        )

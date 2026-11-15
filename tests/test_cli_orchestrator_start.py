@@ -33,6 +33,32 @@ def _channel_reachable(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+class _AttachRecorder:
+    """Stands in for ``attach_session``: records refs, returns a scripted code."""
+
+    def __init__(self, result: int | None = 0) -> None:
+        self.result = result
+        self.refs: list[str] = []
+
+    def __call__(self, ref: str) -> int | None:
+        self.refs.append(ref)
+        return self.result
+
+
+@pytest.fixture
+def attach_recorder() -> _AttachRecorder:
+    return _AttachRecorder()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_attach(
+    monkeypatch: pytest.MonkeyPatch, attach_recorder: _AttachRecorder
+) -> None:
+    """Default to a non-TTY caller and a recording attach: no test reaches claude."""
+    monkeypatch.setattr("cw.cli.orchestrate.stdio_is_tty", lambda: False)
+    monkeypatch.setattr("cw.cli.orchestrate.attach_session", attach_recorder)
+
+
 @pytest.fixture
 def daemon(
     mock_native_daemon: FakeNativeDaemonClient, monkeypatch: pytest.MonkeyPatch
@@ -361,3 +387,156 @@ def test_no_clients_configured_message_kept() -> None:
 
     assert result.exit_code != 0
     assert "No clients configured" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Default attach on a TTY, --detach, and the failure fallback (#3667)
+# ---------------------------------------------------------------------------
+
+
+def _tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("cw.cli.orchestrate.stdio_is_tty", lambda: True)
+
+
+def test_tty_default_attaches_by_short_id(
+    daemon: FakeNativeDaemonClient,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    attach_recorder: _AttachRecorder,
+) -> None:
+    ws = make_git_repo("ws-tty")
+    write_clients_yaml(ClientSpec("tty-client", ws))
+    _tty(monkeypatch)
+    attach_recorder.result = 0
+
+    result = _invoke("-c", "tty-client")
+
+    assert result.exit_code == 0, result.output
+    assert "Spawned orchestrator session:" in result.stdout
+    assert attach_recorder.refs == ["00000001"]
+    assert "Ctrl+Z" in result.stdout
+    assert "Ctrl+D" in result.stdout
+
+
+def test_detach_flag_skips_attach_and_prints_command(
+    daemon: FakeNativeDaemonClient,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    attach_recorder: _AttachRecorder,
+) -> None:
+    ws = make_git_repo("ws-detach")
+    write_clients_yaml(ClientSpec("detach-client", ws))
+    _tty(monkeypatch)
+
+    result = _invoke("-c", "detach-client", "--detach")
+
+    assert result.exit_code == 0, result.output
+    assert attach_recorder.refs == []
+    assert "claude attach 00000001" in result.stdout
+
+
+def test_non_tty_never_attaches_and_prints_command(
+    daemon: FakeNativeDaemonClient,
+    make_git_repo: Callable[..., Path],
+    attach_recorder: _AttachRecorder,
+) -> None:
+    ws = make_git_repo("ws-nontty")
+    write_clients_yaml(ClientSpec("nontty-client", ws))
+
+    result = _invoke("-c", "nontty-client")
+
+    assert result.exit_code == 0, result.output
+    assert attach_recorder.refs == []
+    assert "claude attach 00000001" in result.stdout
+
+
+def test_attach_nonzero_prints_command_exit_zero_keeps_session(
+    daemon: FakeNativeDaemonClient,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    attach_recorder: _AttachRecorder,
+) -> None:
+    ws = make_git_repo("ws-attach-fail")
+    write_clients_yaml(ClientSpec("fail-client", ws))
+    _tty(monkeypatch)
+    attach_recorder.result = 1
+
+    result = _invoke("-c", "fail-client")
+
+    assert result.exit_code == 0, result.output
+    assert "claude attach 00000001" in result.stderr
+    sid = _spawned_id(result)
+    assert orchestrator_mcp_config_path(sid).exists()
+    assert daemon.stop_calls == []
+
+
+def test_attach_launch_failure_prints_command_exit_zero(
+    daemon: FakeNativeDaemonClient,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    attach_recorder: _AttachRecorder,
+) -> None:
+    ws = make_git_repo("ws-attach-missing")
+    write_clients_yaml(ClientSpec("missing-client", ws))
+    _tty(monkeypatch)
+    attach_recorder.result = None
+
+    result = _invoke("-c", "missing-client")
+
+    assert result.exit_code == 0, result.output
+    assert "claude attach 00000001" in result.stderr
+    sid = _spawned_id(result)
+    assert orchestrator_mcp_config_path(sid).exists()
+    assert daemon.stop_calls == []
+
+
+def test_state_lookup_miss_falls_back_to_generic_hint(
+    daemon: FakeNativeDaemonClient,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    attach_recorder: _AttachRecorder,
+) -> None:
+    ws = make_git_repo("ws-lookup-miss")
+    write_clients_yaml(ClientSpec("miss-client", ws))
+    _tty(monkeypatch)
+
+    def _broken() -> None:
+        msg = "state unreadable"
+        raise CwError(msg)
+
+    monkeypatch.setattr("cw.cli.orchestrate.load_state", _broken)
+
+    result = _invoke("-c", "miss-client")
+
+    assert result.exit_code == 0, result.output
+    assert attach_recorder.refs == []
+    assert "claude agents" in result.stdout
+
+
+def test_detach_in_help() -> None:
+    result = CliRunner().invoke(main, ["orchestrator-start", "--help"])
+    assert result.exit_code == 0
+    assert "--detach" in result.output
+
+
+def test_tty_attach_real_subprocess_one_launch(
+    daemon: FakeNativeDaemonClient,
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cw.orchestrator_session import attach_session as real_attach
+    from tests._tool_fakes import fake_claude_cli, prepend_to_path, restore_real_run
+
+    shim = fake_claude_cli(tmp_path)
+    restore_real_run(monkeypatch)
+    prepend_to_path(monkeypatch, shim.bin_dir)
+    monkeypatch.setattr("cw.cli.orchestrate.attach_session", real_attach)
+    _tty(monkeypatch)
+    ws = make_git_repo("ws-e2e")
+    write_clients_yaml(ClientSpec("e2e-client", ws))
+
+    result = _invoke("-c", "e2e-client")
+
+    assert result.exit_code == 0, result.output
+    assert shim.calls == [["attach", "00000001"]]

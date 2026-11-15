@@ -13,14 +13,18 @@ from cw.config import state_dir
 from cw.orchestrator_session import (
     ORCHESTRATOR_AGENT,
     ORCHESTRATOR_CHANNEL,
+    attach_command,
+    attach_session,
     build_orchestrator_mcp_config,
     operator_channel_reachable,
     orchestrator_launch_args,
     orchestrator_mcp_config_path,
     remove_orchestrator_mcp_config,
+    stdio_is_tty,
     unreachable_warning,
     write_orchestrator_mcp_config,
 )
+from tests._tool_fakes import GhReply, RecordingShim, prepend_to_path, restore_real_run
 
 _EXAMPLE = (
     Path(__file__).parent.parent / "config" / "cw-operator-events.mcp.json.example"
@@ -161,3 +165,85 @@ def test_operator_channel_reachable_https_default_port(
 
     assert operator_channel_reachable("https://example.invalid") is False
     assert seen == [("example.invalid", 443)]
+
+
+# ---------------------------------------------------------------------------
+# Default attach helpers (#3667)
+# ---------------------------------------------------------------------------
+
+
+class _Stream:
+    def __init__(self, *, tty: bool) -> None:
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+
+@pytest.mark.parametrize(
+    ("stdin_tty", "stdout_tty", "expected"),
+    [
+        (True, True, True),
+        (True, False, False),
+        (False, True, False),
+        (False, False, False),
+    ],
+)
+def test_stdio_is_tty_requires_both_streams(
+    monkeypatch: pytest.MonkeyPatch, stdin_tty: bool, stdout_tty: bool, expected: bool
+) -> None:
+    monkeypatch.setattr("sys.stdin", _Stream(tty=stdin_tty))
+    monkeypatch.setattr("sys.stdout", _Stream(tty=stdout_tty))
+    assert stdio_is_tty() is expected
+
+
+def test_stdio_is_tty_false_for_stream_without_isatty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.stdin", object())
+    monkeypatch.setattr("sys.stdout", _Stream(tty=True))
+    assert stdio_is_tty() is False
+
+
+def test_attach_command_uses_short_id() -> None:
+    assert attach_command("00000001") == "claude attach 00000001"
+
+
+def test_attach_session_success_records_one_attach(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shim = RecordingShim(tmp_path, "claude", responses={"attach": GhReply()})
+    restore_real_run(monkeypatch)
+    prepend_to_path(monkeypatch, shim.bin_dir)
+
+    assert attach_session("00000001") == 0
+    assert shim.calls == [["attach", "00000001"]]
+
+
+def test_attach_session_returns_nonzero_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shim = RecordingShim(
+        tmp_path, "claude", responses={"attach": GhReply(returncode=3)}
+    )
+    restore_real_run(monkeypatch)
+    prepend_to_path(monkeypatch, shim.bin_dir)
+
+    assert attach_session("00000001") == 3
+
+
+@pytest.mark.parametrize(
+    "error", [FileNotFoundError("claude"), PermissionError("claude")]
+)
+def test_attach_session_launch_failure_returns_none_and_warns(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    error: OSError,
+) -> None:
+    def _raise(*_a: object, **_k: object) -> None:
+        raise error
+
+    monkeypatch.setattr("cw.orchestrator_session.subprocess.run", _raise)
+    with caplog.at_level(logging.WARNING, logger="cw.orchestrator_session"):
+        assert attach_session("00000001") is None
+    assert any("claude attach" in r.getMessage() for r in caplog.records)

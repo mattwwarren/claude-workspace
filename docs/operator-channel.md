@@ -213,6 +213,16 @@ session it spawns, and into no other session:
   --dangerously-load-development-channels server:cw-operator`.
   `--strict-mcp-config` is not passed, so the session keeps its normal MCP
   servers as well. The repo's `.mcp.json` is not touched.
+- It attaches this terminal to the session by default (#3667). When stdin and
+  stdout are both a TTY, it runs `claude attach <short id>` and blocks until
+  you detach, after a one-line hint: detach with Ctrl+Z; do NOT use Ctrl+D,
+  which terminates the daemon session in all attached terminals. The short id
+  is the daemon roster id from `claude agents` (the session's `surface_ref`),
+  not the cw session id and not `--name`. `--detach`, or a non-TTY caller,
+  skips the attach and prints `Attach with: claude attach <id>` instead. A
+  non-TTY caller never blocks. An attach failure (`claude` missing, or a
+  non-zero attach) prints the attach command to stderr and never fails or
+  removes the session: the command exits 0 whenever the spawn succeeded.
 - `cw spawn close <id>` removes the file, on a first close and on a re-close of
   an already-completed session. Other completion paths (reconcile, the Stop
   hook, `cw session done`) leave it behind; it is a small file named by the

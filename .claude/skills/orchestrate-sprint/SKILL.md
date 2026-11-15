@@ -274,7 +274,7 @@ client-scoped `cw-operator` channel through a per-session `--mcp-config` file,
 so attention events arrive as `<channel source="cw-operator">` pushes: skip
 the Monitor below and triage each push as it lands. If `cw orchestrator-start`
 warned at launch that the channel server was not reachable, no pushes will
-come; arm the Monitor below instead. Every other start (an interactive
+come; arm the Monitor below instead. On a terminal, `cw orchestrator-start` attaches your terminal to the session by default (`--detach` opts out); an agent running it from a Bash tool call is non-TTY, so it never attaches and gets the printed `claude attach` command. Every other start (an interactive
 session, `/orchestrate-sprint` in a plain terminal) uses the Monitor.
 
 Arm **one** `Monitor` on the attention stream, once per sprint:
