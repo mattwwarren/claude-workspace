@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The codex lane writes the engine-defer settlement row (#3636).** A codex fix loop's final clean pass that ran the review engine alone and whose gating findings were all deferrable SHOULD_FIX never wrote the dev-queue settlement row, so the review attestation could not reconcile the engine's FAIL summary and the lane never reached an engine-backed PASS. Both lanes now call one decision core (`cw.dev_queue.review_engine_defers`), and the codex clean pass files its defers and records the row before the ledger commit. Any other pass is unchanged; the row write stays best-effort and fail-closed.
+- **The codex fix-loop prohibition parser takes backticked names only from the prohibition clause (#3204).** A backticked name is forbidden only when it sits after a matching prohibition phrase and before the first `;`, reuse/keep/approved/allowed word, or colon that follows an already-named item. Approved paths in the same sentence no longer park a cycle. Already-recorded row entries benefit on their next fix-loop run; no migration. `TicketTask`-style names inside the prohibition clause are still forbidden. An allow word placed after a name (e.g. "`X` is allowed") does not exempt it. The observed #2633 resolutions comment now yields one forbidden token instead of two.
+### Changed
+
+- **The Stop hook's transcript-candidate discovery has one definition (#3623).** The hook cwd and the recorded worktree, de-duplicated and resolved through `claude_project_dir`, were located by two copies, one in the #2135 park and one in the #2348 auto-continuation. Both now call `cw.cli.stop_hook.transcripts._transcript_candidates`. Internal: no behavior change.
+### Fixed
+
+- **The pre-push diff-cover hook no longer loses the push to an idle ssh connection (#3222):** `/ship-it` Step 2 exports a `ServerAliveInterval`/`ServerAliveCountMax` keepalive for ssh remotes when no ssh setting already exists, and the contributor docs (CLAUDE.md, INSTALL.md) describe the `~/.ssh/config` fix. The hook's checks are unchanged.
+
+## [1.100.0] - 2026-11-14
+
 ### Added
 
 - **Dispatch cancels a PENDING PLAN/IMPL row whose GitHub issue is already CLOSED instead of spawning a worker for it (#1605).** Before the claim, dispatch reads the issue state with `gh issue view <T> --json state` outside every lock (GitHub-tracked clients only; Linear, other and unset trackers are never read). A CLOSED issue moves the row to `CANCELLED` with no attempt charged and records a per-task `dispatch.tick` with `skip_reason: "ticket_closed"` and `cancel_reason: "ticket_closed"` (new additive enum value). A failed or ambiguous read never cancels. Reads are capped at 10 per client per tick with a 25 s budget; a row past the cap is held `PENDING` for that tick and read on a later one, never claimed unchecked. Reverse with `cw dev-queue requeue <T> -c <client> --from-cancelled`; the requeue sticks while the issue stays closed, and neither the concierge cancelled-row restore nor `auto_fix_ci` un-cancels a guard-cancelled row. The cache lives in `dispatch_state.json` under `ticket_state_probe`.

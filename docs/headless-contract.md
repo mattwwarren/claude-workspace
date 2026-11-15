@@ -1551,14 +1551,15 @@ and Rule 3) and `_record_review_approval` (`approve` and the
   label.
 - Same-round defers (#3625): a FAIL summary whose gating findings are all
   deferrable SHOULD_FIX, each recorded on the row at that head
-  (`review_engine_settlements`, written by `cw review converge record-round`)
+  (`review_engine_settlements`, written by `cw review converge record-round` and by the codex lane's fix-loop ledger seams)
   and also settled `defer` in the ledger, is reconciled to PASS, with those
   findings counted as `debt`. Any other FAIL summary still skips
   `engine_mismatch` and writes nothing: the row is unattested, not
   "ledger-only". The reconciled case logs one INFO line,
   `review attestation engine summary reconciled: ticket=<id> client=<name>
-  deferred=<n>`, which is not a skip token. A codex lane never writes the
-  record, so its same-round FAIL still skips as before (#3636).
+  deferred=<n>`, which is not a skip token. The codex lane writes the record
+  too (#3636) when its final clean pass is engine-only and every gating
+  finding is a deferrable SHOULD_FIX; any other codex pass writes nothing.
 
 The binding's third condition, "the staleness gate passes", needs git, so the
 builder does not evaluate it. At the auto-advance the REVIEW staleness and
@@ -1807,7 +1808,8 @@ valid summary. A project ship gate should skip its own reviewer only when
 
 Settlement source (#3625): the same-round reconciler reads
 `TicketTask.review_engine_settlements`, written by `cw review converge
-record-round` into the dev-queue row. The reviewed branch cannot edit that
+record-round` and by the codex lane's fix-loop seams (#3636, the same single
+writer) into the dev-queue row. The reviewed branch cannot edit that
 file, because it lives in cw state outside the worktree. That is the
 guarantee, not that the branch cannot cause a write: the writer refuses unless
 the row is in the REVIEW stage and RUNNING, and it fails closed to no

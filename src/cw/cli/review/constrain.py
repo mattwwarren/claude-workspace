@@ -87,6 +87,11 @@ _NO_PROHIBITION_NOTE = (
     "fix-loop guard has nothing to enforce for this constraint; the text is "
     "still delivered verbatim to the codex review prompt and the fix prompt."
 )
+_SENTENCE_RULE_HINT = (
+    "Only backticked names after a prohibition phrase and before the next ';',"
+    " a colon that follows a named item, or a reuse/keep/approved/allowed word"
+    " are forbidden; put approved paths in a separate sentence."
+)
 
 
 def _read_constraint_text(path: str) -> str:
@@ -135,7 +140,7 @@ def _parse_preview(text: str) -> str:
         f"Parsed {len(rules)} prohibition sentence(s): forbidden tokens:"
         f" {', '.join(tokens) or 'none'}; forbidden kinds:"
         f" {', '.join(kinds) or 'none'}. The fix loop parks a cycle that"
-        " introduces one of them."
+        f" introduces one of them. {_SENTENCE_RULE_HINT}"
     )
 
 
@@ -219,6 +224,13 @@ def review_constrain(ticket: str, constraint_file: str, client: str | None) -> N
     independent of any tracker comment, provenance marker or login, and the
     fix loop parks a cycle that introduces a mechanism a "do not add `x`"
     sentence forbids.
+
+    The fix-loop guard reads each sentence that matches a prohibition phrase
+    ("do not add", "no new", ...). Backticked names after that phrase, up to
+    the next ';', a colon after a named item, or a reuse/keep/approved/allowed
+    word, become forbidden tokens. Put prohibitions and approved paths in
+    separate sentences: entries are append-only (#2968), so a wrongly recorded
+    entry cannot be retracted.
 
     Constraints are append-only: there is no edit, supersede or revoke here
     (retraction is tracked in #2968). Re-running with the text of an existing

@@ -3582,7 +3582,10 @@ class TestLoadConstraintsObservability:
             "codex fix loop: operator constraints active (ticket=%s, "
             "comment_created_at=%s, tokens=%d, kinds=%d)"
         )
-        assert record.args == ("T-1", "2026-10-07T22:06:12Z", 2, 1)
+        # #3204: the observed comment's `;` after "A7" now cuts the Deferred
+        # sentence before `TicketTask`, so tokens drop {TicketTask, sessions_lock}
+        # to {sessions_lock}. Kinds stay {LOCK}.
+        assert record.args == ("T-1", "2026-10-07T22:06:12Z", 1, 1)
 
     def test_no_marker_comment_logs_nothing(
         self,

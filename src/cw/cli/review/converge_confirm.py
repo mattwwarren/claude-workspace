@@ -31,6 +31,7 @@ import click
 from cw.cli.review._debt_session import default_artifact, ensure_default_artifact
 from cw.cli.review.debt import resolve_identity, run_debt_filing
 from cw.codex_review_debt import round_deferral
+from cw.dev_queue.review_engine_reconcile import GATING_SEVERITIES, SHOULD_FIX
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
@@ -91,9 +92,6 @@ TICKET_OPTION_HELP: Final = (
     ".claude/cw-context.json; see -c."
 )
 
-_GATING: Final = frozenset({"MUST_FIX", "SHOULD_FIX"})
-_SHOULD_FIX: Final = "SHOULD_FIX"
-
 
 def identity_options[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
     """The ``-c/--client`` and ``--ticket`` overrides of the cw-context identity."""
@@ -153,7 +151,7 @@ def _accepted_by_identity(
     by_identity: dict[FindingIdentity, Finding] = {}
     for item in verdict.accepted:
         finding = item.finding
-        if finding.severity not in _GATING:
+        if finding.severity not in GATING_SEVERITIES:
             continue
         identity = finding_identity(
             finding.severity,
@@ -173,7 +171,7 @@ def _deferral(
 ) -> Adjudication:
     """The debt ``Adjudication`` of one deferred confirm SHOULD_FIX."""
     return Adjudication(
-        severity=_SHOULD_FIX,
+        severity=SHOULD_FIX,
         file=finding.file,
         line_start=source.line_start if source is not None else None,
         line_end=source.line_end if source is not None else None,

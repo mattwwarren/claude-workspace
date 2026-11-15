@@ -153,6 +153,8 @@ for an executable `pre-commit` file.
 hook as the advisory `commit-hook/<client>` warning, any shared hook whose `INSTALL_PYTHON` lies inside a dispatch-worktree base or is not an executable file as `hook-install-python/<client>` (a `pre-commit` hook that `commit-hook/<client>` already reports as stale is not repeated),
 and `core.bare=true` as `repo-bare/<client>`.
 
+The opt-in pre-push hook outlives its ssh connection (#3222): `git push` opens the ssh connection before the hook's roughly 13-minute `diff-cover` run, and GitHub closes an idle connection with `Connection to github.com closed by remote host` while the hook is still green. The durable fix is a `Host github.com` stanza in `~/.ssh/config` with `ServerAliveInterval 20` and `ServerAliveCountMax 6`. A one-off alternative is `GIT_SSH_COMMAND="ssh -o ServerAliveInterval=20 -o ServerAliveCountMax=6"`. Project `/ship-it` Step 2 sets that keepalive itself when nothing else configures ssh for the push. The hook is deliberately not shortened: its pytest run writes the `coverage.xml` that the 90% patch gate reads.
+
 Gate 7 compares each released `## [X.Y.Z]` section of `CHANGELOG.md` with the
 copy its release tag captured, for `[tool.cw.changelog_freeze].since_tag` and
 every later tag (#2304). Run locally it warns and passes when release tags have

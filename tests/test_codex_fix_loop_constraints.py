@@ -55,6 +55,10 @@ _ITEM_10 = (
     "No ADR edits, no `# noqa`, no `# type: ignore`, no new per-file-ignore, "
     "no new lock, no subprocess under `sessions_lock`."
 )
+_RESOLUTION_2321 = (
+    "No new persisted `TicketTask` field: reuse `blocked_on_pr`, `blocked_reason`, "
+    "the new disposition constant and the widened `WatchedPr.source`."
+)
 
 
 def _body(comment: dict[str, object]) -> str:
@@ -286,14 +290,134 @@ class TestExtractForbidden:
         )
 
     def test_whole_observed_resolutions_comment(self) -> None:
-        """`TicketTask` is the known false positive (item 9's quoted list name)."""
+        """The Deferred sentence's `;` after "A7" cuts before `TicketTask` (#3204)."""
         body = _body(_resolutions())
 
         assert _ITEM_8 in body
         assert extract_forbidden(body) == (
-            frozenset({"TicketTask", "sessions_lock"}),
+            frozenset({"sessions_lock"}),
             frozenset({AdditionKind.LOCK}),
         )
+
+    def test_semicolon_joined_approved_paths_are_not_forbidden(self) -> None:
+        """Ticket reproduction 1: the `;` ends the region before approved paths."""
+        assert extract_forbidden(
+            "Do not add new helpers; the approved edit to `src/pkg/a.py` and "
+            "`src/pkg/b.py` stays."
+        ) == (frozenset(), frozenset())
+
+    def test_two_sentence_form_still_yields_nothing(self) -> None:
+        """Ticket reproduction 2: the two-sentence form yields nothing."""
+        assert extract_forbidden(
+            "Do not add new helpers. The approved edit to `src/pkg/a.py` stays."
+        ) == (frozenset(), frozenset())
+
+    def test_worked_example_2321_reuse_list_is_not_forbidden(self) -> None:
+        """`TicketTask` is the documented residual (Design 5); reuse list is clear."""
+        tokens = extract_forbidden(_RESOLUTION_2321)[0]
+
+        assert tokens == frozenset({"TicketTask"})
+        assert not {"blocked_on_pr", "blocked_reason", "WatchedPr.source"} & tokens
+
+    def test_colon_after_named_span_drops_list_without_reuse_word(self) -> None:
+        assert extract_forbidden(
+            "No new persisted `TicketTask` field: `blocked_on_pr`, `blocked_reason`."
+        )[0] == frozenset({"TicketTask"})
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Do not add `foo_bar`, reuse `baz_qux`.",
+            "Do not add `foo_bar`, keep `baz_qux`.",
+            "Do not add `foo_bar`, keeping `baz_qux`.",
+            "Do not add `foo_bar`, reusing `baz_qux`.",
+            "Do not add `foo_bar`, use `baz_qux` instead.",
+            "Do not add `foo_bar`, using `baz_qux`.",
+            "Do not add `foo_bar`; the approved `baz_qux` stays.",
+        ],
+    )
+    def test_allow_word_ends_the_region(self, text: str) -> None:
+        assert extract_forbidden(text)[0] == frozenset({"foo_bar"})
+
+    def test_allow_word_after_the_span_does_not_cut(self) -> None:
+        """Documented residual (Design 5): trailing allow phrase fails closed."""
+        assert extract_forbidden("Do not add `foo_bar` but `baz_qux` is allowed.")[
+            0
+        ] == frozenset({"foo_bar", "baz_qux"})
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("no new use of `foo_bar`.", {"foo_bar"}),
+            ("Do not add `a_one` for unapproved `baz_qux`.", {"a_one", "baz_qux"}),
+        ],
+    )
+    def test_non_allow_lookalikes_keep_spans_forbidden(
+        self, text: str, expected: set[str]
+    ) -> None:
+        assert extract_forbidden(text)[0] == frozenset(expected)
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                "Do not add the following: `foo_bar`, `baz_qux`.",
+                {"foo_bar", "baz_qux"},
+            ),
+            ("Never create: `src/cw/x.py`.", {"src/cw/x.py"}),
+        ],
+    )
+    def test_bare_colon_after_the_verb_does_not_end_the_region(
+        self, text: str, expected: set[str]
+    ) -> None:
+        assert extract_forbidden(text)[0] == frozenset(expected)
+
+    def test_colon_after_a_named_span_ends_the_region(self) -> None:
+        assert extract_forbidden("Do not add `foo_bar`: `baz_qux` is fine.")[
+            0
+        ] == frozenset({"foo_bar"})
+
+    def test_spans_before_the_prohibition_verb_are_not_forbidden(self) -> None:
+        assert extract_forbidden("In `src/cw/x.py` do not add `foo_bar`.")[
+            0
+        ] == frozenset({"foo_bar"})
+
+    def test_each_prohibition_in_a_sentence_gets_its_own_region(self) -> None:
+        assert extract_forbidden("Do not add `foo_bar`; never create `baz_qux`.")[
+            0
+        ] == frozenset({"foo_bar", "baz_qux"})
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("Do not add `a;b` or `foo_bar`.", {"foo_bar"}),
+            ("Do not add `keep` and `foo_bar`.", {"keep", "foo_bar"}),
+            ("Do not add `no new` or `foo_bar`.", {"foo_bar"}),
+        ],
+    )
+    def test_separator_and_allow_word_inside_a_backticked_span_do_not_cut(
+        self, text: str, expected: set[str]
+    ) -> None:
+        assert extract_forbidden(text)[0] == frozenset(expected)
+
+    def test_kinds_stay_whole_sentence(self) -> None:
+        """Deliberate (Design 4): kinds scan the whole sentence, not the region."""
+        assert extract_forbidden("Do not add helpers; keep the existing lock.") == (
+            frozenset(),
+            frozenset({AdditionKind.LOCK}),
+        )
+
+    def test_constraint_rule_keeps_whole_sentence_text(self) -> None:
+        (rule,) = constraint_rules(
+            "Do not add `foo_bar`; the approved edit to `src/pkg/a.py` stays.",
+            from_row=True,
+        )
+
+        assert rule.sentence == (
+            "Do not add `foo_bar`; the approved edit to `src/pkg/a.py` stays."
+        )
+        assert rule.tokens == frozenset({"foo_bar"})
+        assert rule.from_row is True
 
 
 def _constraints(text: str, created_at: str | None = None) -> OperatorConstraints:

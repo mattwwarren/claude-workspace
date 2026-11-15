@@ -3618,7 +3618,13 @@ entry to the row's `operator_constraints`; the row is the source of truth.
 The codex review prompt renders it as `## Binding Operator Constraints`, and
 the fix loop parses its prohibition sentences and parks a cycle that
 introduces a forbidden token or mechanism (`codex_fix_constraint_violation`).
-The printed stdout block is a human-readable mirror; post it with your
+Only backticked names after a prohibition phrase, up to the next `;`, an allow
+word (`reuse`, `keep`, `approved`, `allowed`, or `use` directly before a span),
+or a colon that follows an already-named item, are forbidden (#3204). Put
+approved paths in a separate sentence. An allow word must come BEFORE the name
+it exempts: "`X` is allowed" after the name does not cut, so `X` stays
+forbidden. A bare colon right after the verb phrase is not a separator. The
+printed stdout block is a human-readable mirror; post it with your
 tracker's own tool if you want one, but nothing reads it back. Constraints are
 append-only: there is no edit, supersede or revoke yet (retraction is tracked
 in #2968), so record only what is binding. Each entry is capped at 16 KiB and
