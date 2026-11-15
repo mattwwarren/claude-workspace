@@ -54,6 +54,7 @@ from cw.dev_queue.next_commands._common import (
     is_human_kept_gate,
 )
 from cw.models import DispatchSkipReason, QueueItemStatus, ReapReason, Stage
+from cw.models.enums import DEPENDENCY_HOLD_DISPOSITION
 from cw.models.ticket_view import NextCommand
 from cw.review_convergence import TIP_CHECK_FETCH_FAILED
 
@@ -146,6 +147,10 @@ def _at_approval_gate(task: TicketTask, session: Session | None) -> bool:
         and session is not None
         and not _not_at_approval_gate(session, task)
     )
+
+
+def _dependency_held(task: TicketTask, _session: Session | None) -> bool:
+    return _is_blocked(task) and task.disposition == DEPENDENCY_HOLD_DISPOSITION
 
 
 def _sessionless(task: TicketTask, session: Session | None) -> bool:
@@ -380,6 +385,16 @@ def _salvage_commands(task: TicketTask) -> list[NextCommand]:
             purpose="clear the salvage park and requeue the ticket",
         ),
         _rerun(task),
+    ]
+
+
+def _dependency_hold_commands(task: TicketTask) -> list[NextCommand]:
+    return [
+        _requeue(
+            task,
+            "release the dependency hold now (the PR merged, or you no longer need it);"
+            " the serve loop releases it on merge by itself",
+        ),
     ]
 
 

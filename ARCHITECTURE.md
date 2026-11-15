@@ -91,7 +91,12 @@ shipped release (#2715, ADR-0006 amendment): its target session was live at
 detect time, it acts only on a recorded `shipped` result whose own PR is OPEN
 or MERGED, and it fails closed on an absent, unreadable or foreign drain stamp. Callers must count `BLOCKED_ON_USER`/`REAP_PROPOSED` sessions as
 occupying capacity — a stalled, signal-only session does not free its slot
-just because it stopped making progress.
+just because it stopped making progress. That sentence now governs the
+per-client (session) ceiling: `counts_toward_client_ceiling`
+(`src/cw/models/session.py`) stays session-status based, so a lane slot freed
+under §4 (the `terminal_sibling` and id-bearing `dependency_hold` carve-outs)
+never frees a ceiling slot, and a held row's still-live old Session keeps
+counting toward the ceiling.
 
 **ADR-0009 — branch-absence is diagnostic, not completion.** When the reaper
 times out a headless session with no parseable sentinel and no merged PR, an
@@ -178,13 +183,30 @@ count via a join on `TicketTask.session_id == Session.id` — otherwise a
 "ghost" session parked under `signal_only` would permanently consume one unit
 of host budget until an operator intervened.
 
-**Lane occupancy (`src/cw/dispatch/claim.py`).** `_lane_stats_for_client`'s
-docstring states the rule directly: "BLOCKED_ON_USER occupies its lane slot
-per ADR-0006, so `running + blocked + signoff` is the total occupied count."
-Occupancy counting is task-join based (not session-based) per ADR-0006 /
-RFC 0004 Phase 4a scope. A dispatch admission check that only counts `RUNNING`
-tasks as occupying a lane will over-admit into a lane that is actually full of
-parked, awaiting-operator work.
+**Lane occupancy (`src/cw/dispatch/claim/lane_stats.py`).**
+`_lane_stats_for_client`'s docstring states the rule directly:
+"BLOCKED_ON_USER occupies its lane slot per ADR-0006, so
+`running + blocked + signoff` is the total occupied count." The rule has
+exactly two carve-outs, both in `occupies_lane_slot`
+(`src/cw/models/tasks/store.py`) and nowhere else: (1) the `terminal_sibling`
+park (#2100), a duplicate row for a ticket whose real row already reached a
+terminal status, which is never counted; (2) the id-bearing `dependency_hold`
+park (#2321), a `BLOCKED_ON_USER` row with disposition `dependency_hold` and
+`blocked_on_pr` not None, which waits on a merge the serve tick observes. In
+the same terms: a `dependency_unmerged` park with no `blocked_on_pr` keeps its
+slot (a park with no release trigger must stay visible); `merge_gate_blocked`
+and `stale_dispatch` parks keep theirs; every other `BLOCKED_ON_USER` row is
+unchanged. This is not a general rule that parked rows are free:
+`AWAITING_OPERATOR_SIGNOFF` still occupies, and a dispatch admission check that
+only counts `RUNNING` tasks as occupying a lane will over-admit into a lane
+that is actually full of parked, awaiting-operator work. Occupancy counting is
+task-join based (not session-based) per ADR-0006 / RFC 0004 Phase 4a scope.
+Every reader that counts occupants goes through `occupies_lane_slot`: dispatch
+admission (`lane_stats.py`, `tick.py`), the board, `cw doctor`, and the
+`cw dev-queue status` lane breakdown (`src/cw/cli/dev_queue/status.py`), so a
+freed row is never reported as a lane occupant. The raw `OCCUPIED_LANE_STATUSES`
+membership is kept only by row-protection and session-pinning checks, which
+guard a row rather than count a slot.
 
 See `src/cw/dispatch/host_capacity.py` and `src/cw/dispatch/claim.py` module
 and function docstrings for the full reasoning, and `docs/dispatch-runbook.md`
@@ -293,8 +315,11 @@ cites one of these.
    optional host-wide ceiling on concurrent DAEMON sessions, folded into
    the per-client ceiling. — Source: `src/cw/dispatch/host_capacity.py`
 4. Dispatch admission, lane occupancy: `BLOCKED_ON_USER` tasks continue to
-   occupy their lane slot; occupied count = running + blocked + signoff. —
-   Source: `src/cw/dispatch/claim.py`
+   occupy their lane slot except the two `occupies_lane_slot` carve-outs
+   (`terminal_sibling`, #2100; id-bearing `dependency_hold`, #2321);
+   occupied count = running + blocked + signoff over the rows
+   `occupies_lane_slot` accepts. — Source: `src/cw/models/tasks/store.py`
+   and `src/cw/dispatch/claim/lane_stats.py`
 5. Sentinel/emit contract: the Stop hook is the sole completion-event
    source; the result-publishing door emits no events and routes no
    tasks (save for one narrow, audit-only exception with no task-routing
@@ -386,10 +411,12 @@ principle, grounded in the same source document.
    that computes lane/client capacity without folding in
    `resolve_host_capacity()`'s fleet-wide budget. — Source:
    `src/cw/dispatch/host_capacity.py`
-4. A dispatch admission check that treats parked (`BLOCKED_ON_USER`) tasks
-   as free lane capacity — counting only `RUNNING` tasks as occupying a
-   lane and admitting new work into a lane that is actually full of
-   awaiting-operator work. — Source: `src/cw/dispatch/claim.py`
+4. A dispatch admission check that frees a `BLOCKED_ON_USER` row's lane slot
+   by any rule other than the two `occupies_lane_slot` carve-outs in §7.4 —
+   whether by counting only `RUNNING` tasks as occupying a lane, or by
+   patching one call site instead of the predicate — and so admits new work
+   into a lane that is actually full of awaiting-operator work. — Source:
+   `src/cw/models/tasks/store.py` and `src/cw/dispatch/claim/lane_stats.py`
 5. A new completion-event source competing with the Stop hook — any code
    path that both writes a result and emits its own completion event
    instead of routing through the existing Stop-hook /

@@ -8,6 +8,7 @@ rationale and DAG order.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Final
 
 
 class SessionPurpose(StrEnum):
@@ -108,6 +109,16 @@ OCCUPIED_LANE_STATUSES: frozenset[QueueItemStatus] = frozenset(
     ]
 )
 
+# GitHub #2321 — the dependency hold: a BLOCKED_ON_USER row waiting on a PR
+# merge. Stamped by ``cw dev-queue hold`` and by routing for a worker
+# ``dependency_unmerged`` park carrying ``depends_on_pr``. Keyed by the
+# ``cw.models`` slot predicate (``occupies_lane_slot``), so it lives here;
+# ``cw.dev_queue.dispositions`` re-exports it. A row with a ``blocked_on_pr``
+# id frees its lane slot; one without keeps it.
+DEPENDENCY_HOLD_DISPOSITION: Final = "dependency_hold"
+
+# Shared persisted discriminator for watches created by dependency holds.
+WATCHED_PR_SOURCE_DEPENDENCY_HOLD: Final = "dependency_hold"
 
 # Genuinely terminal QueueItemStatus values -- distinct from "outside
 # OCCUPIED_LANE_STATUSES", which also includes PENDING (redispatch-eligible,
@@ -360,6 +371,11 @@ class OrchestratorEventType(StrEnum):
     TICKET_APPROVAL_FAILED = "ticket.approval_failed"
     TICKET_REQUEUED = "ticket.requeued"
     TICKET_UNBLOCKED = "ticket.unblocked"
+    # #2321 -- audit trail for `cw dev-queue hold`: a row was parked as a
+    # dependency hold, or an existing hold was moved or converted. Carries the
+    # disposition/blocked_reason it replaced, which no task.transition records
+    # for a same-status (BLOCKED_ON_USER -> BLOCKED_ON_USER) move.
+    TICKET_HELD = "ticket.held"
     SESSION_STAGE_TIMED_OUT_RETRIED = "session.stage_timed_out_retried"
     WAVE_COLLISION = "wave.collision"
     # RFC 0008 W1 orchestrator push-channel producers (closes #978). Emitted

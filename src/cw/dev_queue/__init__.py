@@ -113,6 +113,7 @@ from cw.dev_queue.dispositions import (
     AWAITING_CI_EVIDENCE_DISPOSITION,
     AWAITING_OPERATOR_DISPOSITION,
     BRANCH_STALENESS_GATE_DISPOSITION,
+    DEPENDENCY_HOLD_DISPOSITION,
     EMPTY_DIFF_GATE_DISPOSITION,
     FINALIZE_GATE_HELD_DISPOSITION,
     GATE_TIMEOUT_DISPOSITION,
@@ -140,6 +141,7 @@ from cw.dev_queue.drain import (
     select_held_tickets,
 )
 from cw.dev_queue.gates import APPROVAL_GATE_REASON, DRAIN_DISPOSITIONS
+from cw.dev_queue.hold import HoldResult, hold_ticket
 from cw.dev_queue.lifecycle import (
     _PLAN_SOUNDNESS_MARKER,
     _PLAN_SPEC_MARKER,
@@ -199,6 +201,7 @@ __all__ = [
     "BRANCH_STALENESS_GATE_DISPOSITION",
     "DEAD_SESSION_PAGED_STATE",
     "DEFAULT_PRUNE_OLDER_THAN_DAYS",
+    "DEPENDENCY_HOLD_DISPOSITION",
     "DRAIN_DISPOSITIONS",
     "EMPTY_DIFF_GATE_DISPOSITION",
     "FINALIZE_GATE_HELD_DISPOSITION",
@@ -224,6 +227,7 @@ __all__ = [
     "_PRE_DISPATCH_REVIEW_APPROVAL_REASON",
     "_PRE_DISPATCH_STALE_PR_REASON",
     "_PRE_DISPATCH_TRACKER_MCP_REASON",
+    "HoldResult",
     "LaneNotFoundError",
     "RecordedDispositions",
     "_advance_task_pointer",
@@ -257,6 +261,7 @@ __all__ = [
     "dev_queue_lock",
     "drain_held_tickets",
     "find_ticket_row",
+    "hold_ticket",
     "is_pending_requeue_noop",
     "list_tickets",
     "load_dev_queue",

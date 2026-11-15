@@ -47,12 +47,14 @@ from cw.auto_dev_result.schema._result import (
     BlockedResult,
 )
 from cw.auto_dev_result.schema._validators import (
+    DependsOnPr,
     _has_usable_premise_text,
     _has_usable_question,
     _is_blank,
     _is_no_impact_premise,
     _is_resolved_premise,
     _reject_empty_string_items,
+    parse_depends_on_pr,
 )
 from cw.auto_dev_result.schema._vocab import (
     _MIN_V2_SCHEMA_VERSION,
@@ -62,6 +64,7 @@ from cw.auto_dev_result.schema._vocab import (
     _V2_STATUSES,
     _V4_STATUSES,
     AWAITING_CI_EVIDENCE_BLOCKER_REASON,
+    DEPENDENCY_UNMERGED_BLOCKER_REASON,
     DESTRUCTIVE_DIRECTIVE_BLOCKER_REASON,
     EMPTY_DIFF_BLOCKER_REASON,
     EXTERNAL_STATE_BLOCKER_REASON,
@@ -100,6 +103,7 @@ from cw.auto_dev_result.schema._vocab import (
 
 __all__ = [
     "AWAITING_CI_EVIDENCE_BLOCKER_REASON",
+    "DEPENDENCY_UNMERGED_BLOCKER_REASON",
     "DESTRUCTIVE_DIRECTIVE_BLOCKER_REASON",
     "EMPTY_DIFF_BLOCKER_REASON",
     "EXTERNAL_STATE_BLOCKER_REASON",
@@ -139,6 +143,7 @@ __all__ = [
     "AutoDevResult",
     "BlockedResult",
     "Blocker",
+    "DependsOnPr",
     "Health",
     "OperatorConstraintsSource",
     "PlanSource",
@@ -158,5 +163,6 @@ __all__ = [
     "_is_resolved_premise",
     "_reject_empty_string_items",
     "is_known_blocker_reason",
+    "parse_depends_on_pr",
     "queue_status_for_terminal_sentinel",
 ]

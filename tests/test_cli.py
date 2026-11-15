@@ -11305,6 +11305,43 @@ class TestDevQueueTasksPrState:
         assert rows_by_ticket["GEN-1713"] == "yes"
         assert rows_by_ticket["GEN-1714"] == "—"
 
+    def test_dev_queue_tasks_human_output_shows_blocked_on_column(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """#2321: a BLOCKED_ON column shows the PR a dependency hold waits on."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-2321",
+                        client="attn-client",
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        disposition="dependency_hold",
+                        blocked_reason="dependency_unmerged",
+                        blocked_on_pr=88,
+                    ),
+                    TicketTask(
+                        ticket_id="GEN-2322",
+                        client="attn-client",
+                        status=QueueItemStatus.PENDING,
+                    ),
+                ]
+            )
+        )
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        output_lines = [line for line in result.output.splitlines() if line.strip()]
+        header_line, *data_lines = [
+            line for line in output_lines if not line.startswith("-")
+        ]
+        index = header_line.split().index("BLOCKED_ON")
+        cells = {line.split()[0]: line.split()[index] for line in data_lines}
+        assert cells["GEN-2321"] == "#88"
+        assert cells["GEN-2322"] == "—"
+
     def test_dev_queue_tasks_human_output_renders_pr_column_as_number(
         self, tmp_config_dir: Path
     ) -> None:

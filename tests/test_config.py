@@ -2459,6 +2459,9 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/cli/dev_queue/crud.py", "dev_queue_requeue"): 1,
     ("cw/cli/dev_queue/crud.py", "dev_queue_remove"): 1,
     ("cw/cli/dev_queue/crud.py", "dev_queue_cancel"): 1,
+    # #2321: operator verb; only read-only state and one gh read precede the
+    # lock, and it is not reachable from dispatch_tick.
+    ("cw/cli/dev_queue/hold.py", "dev_queue_hold"): 1,
     ("cw/cli/dev_queue/crud.py", "dev_queue_clear"): 1,
     ("cw/cli/dev_queue/crud.py", "dev_queue_prune"): 1,
     ("cw/cli/dev_queue/approve.py", "revoke_plan_approval_command"): 1,
@@ -2542,6 +2545,11 @@ _BOUNDED_FORWARDERS_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/dev_queue/crud.py", "move_ticket"): 1,
     ("cw/dev_queue/crud.py", "remove_ticket"): 1,
     ("cw/dev_queue/crud.py", "cancel_ticket"): 1,
+    # #2321: hold_ticket forwards its caller's bounded choice to its locked
+    # window _hold_locked, which forwards it to both the outer sessions lock
+    # and the inner dev-queue lock.
+    ("cw/dev_queue/hold.py", "hold_ticket"): 1,
+    ("cw/dev_queue/hold.py", "_hold_locked"): 2,
     ("cw/dev_queue/crud.py", "clear_tickets"): 1,
     ("cw/dev_queue/crud.py", "prune_tickets"): 1,
     ("cw/dev_queue/approval.py", "approve_ticket"): 1,

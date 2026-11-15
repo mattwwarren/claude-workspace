@@ -206,6 +206,54 @@ claimed.
 
 ---
 
+<!-- el: intake.sentinel-dependency-unmerged -->
+## Dependency-unmerged exit (#2260, #2321): sentinel and depends_on_pr
+
+Reached from the Step 3 dependency check of the core doc, and only when the
+ticket body or its comments declare an upstream dependency whose PR is not yet
+merged. Nothing here is required on the common path. EXIT before any stage
+starts, and before the `stage.entered` event for `s0_intake`, with:
+
+```json
+{
+  "status": "blocked",
+  "stage_reached": "stage1_pre_flight",
+  "branch": null,
+  "pr": null,
+  "blocker": {
+    "stage": "pre_flight",
+    "reason": "dependency_unmerged",
+    "details": "<which upstream PR must merge first, and where the ticket says so>",
+    "depends_on_pr": <N>,
+    "retry_eligible": true,
+    "retry_delay_seconds": null
+  },
+  "next_actions": ["manual_intervention"]
+}
+```
+
+**`depends_on_pr` rules.**
+
+- It is the bare same-repo PR number of the upstream PR that must merge, for
+  example `88`.
+- It is a positive integer, not a string, and not `owner/repo#N`.
+- Emit it only when the ticket body or comments name exactly one blocking open
+  PR in this repo, and that PR is verified open with
+  `gh pr view <N> --json state`.
+- If the dependency is a ticket id or lives in another repo, OMIT the field.
+  The park then stays an `awaiting_operator` hold that keeps its lane slot.
+- Do NOT put the id only in `details` prose: cw never parses `details` for it.
+
+**Why the field matters.** With `depends_on_pr`, cw parks the row as
+`dependency_hold`: it frees its lane slot and the serve tick releases it once
+that PR merges (a worker park follows the lane's `reap_policy`; the default
+`signal_only` only stamps `stale_gate_detected_at`). Without it the park holds
+its slot and nothing releases it. The field is additive and needs no
+`schema_version` bump. A mid-run dependency discovery in the impl or finalize
+stages is out of scope for this template.
+
+---
+
 ## Batch mode (interactive only)
 
 Batch mode is undefined in headless mode; this procedure runs only from an

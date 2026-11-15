@@ -101,6 +101,12 @@ class WatchedPr(BaseModel):
     ``status`` reserves a ``"dismissed"`` terminal that no code sets this slice —
     the ``(repo, pr_number)`` dedup guard is scoped to ``"active"`` so a future
     dismiss transition can re-open registration (RFC 0011 S2, adopted #5).
+
+    Since #2321 ``source="dependency_hold"`` is registered by ``cw dev-queue hold``
+    and by ``cw.reconcile.stale_dispatch_watch`` for dependency parks. An older
+    cw reading the new value fails validation on ``source``; rolling back after
+    a hold has registered a watch needs that watch removed first. No code
+    retires a watch yet (#3654).
     """
 
     # NOT extra=forbid — persisted/runtime state, see #1200
@@ -109,7 +115,7 @@ class WatchedPr(BaseModel):
     pr_number: int
     requested_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     requester_login: str | None = None
-    source: Literal["webhook", "cli", "stale_dispatch_park"]
+    source: Literal["webhook", "cli", "stale_dispatch_park", "dependency_hold"]
     status: Literal["active", "dismissed"] = "active"
     # GitHub #1927 — the owning dev-queue client, mirroring ``TicketTask.client``'s
     # role for ``cw.reconcile.tasks._merged_pr_numbers_by_client``: that index is
@@ -121,3 +127,16 @@ class WatchedPr(BaseModel):
     # ``None`` default, so every persisted pre-#1927 blob still parses.
     client: str | None = None
     pr_state: PrState | None = None
+
+
+def watched_pr_collides(
+    existing: WatchedPr, *, repo: str, pr_number: int, client: str | None
+) -> bool:
+    """Return whether *existing* blocks a watch owned by another client."""
+    return (
+        existing.repo == repo
+        and existing.pr_number == pr_number
+        and existing.status == "active"
+        and existing.client is not None
+        and existing.client != client
+    )

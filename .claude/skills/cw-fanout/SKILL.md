@@ -98,6 +98,14 @@ cw dev-queue add <T1> <T2> <T3> -c <CLIENT>
 Record the exact ticket set you enqueued — that is the **wave set** every later
 step keys off. Tickets dropped in Step 1 are not part of it.
 
+A ticket that must wait for an unmerged same-repo PR (typically another wave
+member's) is parked with `cw dev-queue hold <T> --until-pr-merged <N> -c <CLIENT>`,
+not by cancelling, commenting and requeueing it later. The held row frees its
+lane slot and the serve tick releases it when the PR merges. `hold` applies
+before a PR exists: it refuses a row that already has a PR, and a row bound to a
+live session (close that session first with `cw spawn close`). A PR that closes
+unmerged never releases the row; `session.reap_proposed` is the only signal.
+
 ### Step 3 — start the dispatch loop
 
 ```bash

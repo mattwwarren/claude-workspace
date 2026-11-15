@@ -26,8 +26,10 @@ from pydantic import (
 )
 
 from cw.auto_dev_result.schema._validators import (
+    DependsOnPr,
     _is_blank,
     _reject_empty_string_items,
+    parse_depends_on_pr,
 )
 from cw.auto_dev_result.schema._vocab import (
     _LOGGER_NAME,
@@ -331,6 +333,22 @@ class Blocker(BaseModel):
     # means the orchestrator must triage it.
     retry_eligible: bool | None = None
     retry_delay_seconds: int | None = None
+    # GitHub #2321 — the same-repo PR number a ``dependency_unmerged`` park
+    # waits on. Meaningful only with that reason (no cross-field check: routing
+    # ignores it for other reasons). Additive, so no ``schema_version`` bump.
+    depends_on_pr: DependsOnPr | None = None
+
+    # Why: #2321 — a before-validator, so pydantic's lax int coercion cannot
+    # accept ``"7"``, ``7.0`` or ``True`` for this field.
+    @field_validator("depends_on_pr", mode="before")
+    @classmethod
+    def _check_depends_on_pr(cls, v: object) -> object:
+        if v is None:
+            return None
+        if parse_depends_on_pr(v) is None:
+            msg = f"depends_on_pr must be a positive integer PR number, got {v!r}"
+            raise ValueError(msg)
+        return v
 
     # Why: #2097 -- warn-only, never reject. The open-enum contract (§4.2)
     # forbids failing a parse on an unrecognized reason, so this returns the

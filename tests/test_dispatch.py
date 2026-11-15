@@ -11290,6 +11290,105 @@ class TestApplyStagedDecision:
         assert task.disposition == "awaiting_operator"
         assert task.blocked_reason == "dependency_unmerged"
 
+    def test_dependency_unmerged_with_depends_on_pr_stamps_dependency_hold(
+        self, tmp_path: Path
+    ) -> None:
+        """#2321: a dependency park with a structured depends_on_pr is a
+        dependency_hold row that carries its PR id and frees its lane slot."""
+        from cw.dispatch import apply_staged_decision
+        from cw.models.tasks.store import occupies_lane_slot
+
+        task = self._make_running_task("HOLD-DEP-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {
+                "stage": "s4_finalize",
+                "reason": "dependency_unmerged",
+                "depends_on_pr": 88,
+            },
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "dependency_hold"
+        assert task.blocked_reason == "dependency_unmerged"
+        assert task.blocked_on_pr == 88
+        assert occupies_lane_slot(task) is False
+
+    @pytest.mark.parametrize("depends_on_pr", [True, "7", 0, -1, 7.5, None])
+    def test_dependency_unmerged_unparseable_depends_on_pr_keeps_awaiting_operator(
+        self, tmp_path: Path, depends_on_pr: object
+    ) -> None:
+        """#2321: an id that is not a positive int never becomes a hold."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("HOLD-DEP-2", stage=Stage.FINALIZE)
+        blocker: dict[str, object] = {
+            "stage": "s4_finalize",
+            "reason": "dependency_unmerged",
+        }
+        if depends_on_pr is not None:
+            blocker["depends_on_pr"] = depends_on_pr
+        last_result: dict[str, object] = {"status": "blocked", "blocker": blocker}
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.disposition == "awaiting_operator"
+        assert task.blocked_on_pr is None
+
+    def test_dependency_unmerged_park_does_not_charge_unproductive_attempt(
+        self, tmp_path: Path
+    ) -> None:
+        """#2321 R10: a dependency park is not evidence the claim did no work.
+
+        The Rule 5 body is driven directly with ``claim_unproductive=True``
+        (the evidence-free claim the generic computation would charge), so
+        only ``dependency_unmerged`` in the ``rule5_unproductive`` exemption
+        keeps a park-and-release cycle off ``attempt_cap_blocked``. Through
+        ``apply_staged_decision`` the human-input-park evidence signal would
+        already zero ``claim_unproductive`` and mask the exemption.
+        """
+        from cw.dispatch.routing.stage_failure import _route_stage_failure
+
+        task = self._make_running_task("HOLD-DEP-4", stage=Stage.REVIEW)
+        blocker: dict[str, object] = {
+            "stage": "stage3_review",
+            "reason": "dependency_unmerged",
+            "depends_on_pr": 88,
+        }
+        last_result: dict[str, object] = {"status": "blocked", "blocker": blocker}
+        _route_stage_failure(
+            task,
+            self._clients(tmp_path),
+            "blocked",
+            last_result,
+            blocker,
+            "dependency_unmerged",
+            "awaiting_operator",
+            claim_unproductive=True,
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.blocked_reason == "dependency_unmerged"
+        assert task.unproductive_attempts == 0
+
+    def test_dependency_unmerged_never_regexes_details(self, tmp_path: Path) -> None:
+        """#2321: a PR number in free-text details does not become the id."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("HOLD-DEP-3", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {
+                "stage": "s4_finalize",
+                "reason": "dependency_unmerged",
+                "details": "split from #2233",
+            },
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.disposition == "awaiting_operator"
+        assert task.blocked_on_pr is None
+
     def test_stage_failure_confirm_backend_unavailable_stamps_awaiting_operator(
         self, tmp_path: Path
     ) -> None:

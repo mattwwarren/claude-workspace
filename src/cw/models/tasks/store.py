@@ -10,7 +10,13 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from cw.models.enums import OCCUPIED_LANE_STATUSES, QueueItemStatus, ReapReason
+from cw._predicates import is_positive_real_int
+from cw.models.enums import (
+    DEPENDENCY_HOLD_DISPOSITION,
+    OCCUPIED_LANE_STATUSES,
+    QueueItemStatus,
+    ReapReason,
+)
 from cw.models.events import WatchedPr
 from cw.models.tasks.schema import DEV_QUEUE_SCHEMA_VERSION
 from cw.models.tasks.ticket_task import TicketTask
@@ -37,10 +43,17 @@ def occupies_lane_slot(task: TicketTask) -> bool:
     """
     if task.status not in OCCUPIED_LANE_STATUSES:
         return False
-    return not (
-        task.status == QueueItemStatus.BLOCKED_ON_USER
-        and task.disposition == ReapReason.TERMINAL_SIBLING.value
-    )
+    if task.status == QueueItemStatus.BLOCKED_ON_USER:
+        if task.disposition == ReapReason.TERMINAL_SIBLING.value:
+            return False
+        # GitHub #2321 — a dependency hold with a PR id frees its slot: it
+        # waits on a merge the serve tick observes. A hold with no id keeps
+        # its slot, because no release trigger would ever free it.
+        if task.disposition == DEPENDENCY_HOLD_DISPOSITION and is_positive_real_int(
+            task.blocked_on_pr
+        ):
+            return False
+    return True
 
 
 class DispatchPlan(BaseModel):

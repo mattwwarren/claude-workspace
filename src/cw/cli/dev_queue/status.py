@@ -69,12 +69,12 @@ from cw.lane_pause import (
 )
 from cw.models import (
     DEFAULT_LANE,
-    OCCUPIED_LANE_STATUSES,
     DispatchSkipReason,
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
     TicketTask,
+    occupies_lane_slot,
 )
 from cw.orchestrate import client_tick_snapshots
 from cw.pending_skip_streak import pending_skip_streaks
@@ -178,7 +178,8 @@ def _emit_dev_queue_lane_breakdown(
             for t in lane_tasks
             if t.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
         )
-        occupants = [t for t in lane_tasks if t.status in OCCUPIED_LANE_STATUSES]
+        # The one occupancy rule (#2321): a freed dependency hold is no occupant.
+        occupants = [t for t in lane_tasks if occupies_lane_slot(t)]
         cap = lane_caps.get(lane_name, 1)
         at_cap = len(occupants) >= cap
         override = overrides.lanes.get(f"{lane_tasks[0].client}/{lane_name}")

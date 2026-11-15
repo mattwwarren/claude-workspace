@@ -94,6 +94,7 @@ _TEXT_KEYS = [
     "stage",
     "disposition",
     "reason",
+    "blocked_on_pr",
     "details",
     "lane",
     "priority",
@@ -122,6 +123,7 @@ _DOCUMENTED_FIELDS = {
     "stage",
     "disposition",
     "blocked_reason",
+    "blocked_on_pr",
     "blocker_details",
     "advisory_note",
     "lane",
@@ -864,6 +866,28 @@ class TestRenderer:
             assert after
             assert all(ln.startswith("  cw ") for ln in after)
             assert len(after) == len(view.next)
+
+    def test_blocked_on_pr_is_built_and_rendered(self) -> None:
+        """#2321: a dependency hold shows the PR it waits on; others show ``-``."""
+        seed_queue(
+            [
+                make_task(
+                    status=QueueItemStatus.BLOCKED_ON_USER,
+                    disposition="dependency_hold",
+                    blocked_reason="dependency_unmerged",
+                    blocked_on_pr=9,
+                )
+            ]
+        )
+        view = _build()
+        assert view.blocked_on_pr == 9
+        assert _line(_text(view), "blocked_on_pr") == "blocked_on_pr: 9"
+
+    def test_blocked_on_pr_absent_renders_dash(self) -> None:
+        seed_queue([make_task()])
+        view = _build()
+        assert view.blocked_on_pr is None
+        assert _line(_text(view), "blocked_on_pr") == "blocked_on_pr: -"
 
     def test_first_lines(self) -> None:
         seed_queue([make_task(lane="default", priority=4)])

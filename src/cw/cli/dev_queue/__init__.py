@@ -20,6 +20,7 @@ below is what registers those commands. Submodules:
   announcement and the ``TICKET_REQUEUED`` event (#2692), used by ``crud``.
 - ``adopted_prs`` — the read-only ``adopted-prs`` command: ``<number> <branch>``
   lines for live adopted rows, backing finalize Step 4a (#2949).
+- ``hold`` — the ``hold`` command (#2321): park a row until a same-repo PR merges.
 - ``approve`` — the ``approve`` command (plan/review/operator-signoff gate
   clearing, ``--post-marker``, ``--scope-drift``), split out of ``crud``
   (#2337).
@@ -54,6 +55,7 @@ from cw.cli.dev_queue import (  # noqa: F401  (command registration side effects
     approve,
     crud,
     fix_handoff,
+    hold,
     plan_decisions,
     recover,
     resolve,

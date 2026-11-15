@@ -36,6 +36,12 @@ if TYPE_CHECKING:
 
 PACKAGE = "cw.reconcile.tasks"
 
+# New stale-gate implementation details stay in their owner module rather
+# than becoming package attributes (#2321).
+_UNEXPORTED_PRIVATE_NAMES = frozenset(
+    {"_PROPOSED_ACTION_DEPENDENCY_PR_CLOSED_UNMERGED", "_scan_variant_b"}
+)
+
 # The full public-and-private surface of the flat module: 8 constants and 26
 # functions. Hardcoded on purpose: deriving it from the package would let a
 # moved or dropped name pass silently.
@@ -242,6 +248,7 @@ def test_name_set_matches_hardcoded_surface() -> None:
     defined: set[str] = set()
     for path in _package_files(PACKAGE):
         defined |= _top_level_names(_parse(path))
+    defined -= _UNEXPORTED_PRIVATE_NAMES
     assert defined == set(EXPECTED_EXPORTS)
     for name in EXPECTED_EXPORTS:
         assert hasattr(pkg, name), name
@@ -319,6 +326,7 @@ def test_every_name_is_defined_where_the_owner_table_says() -> None:
         (name, _module_name(path, PACKAGE))
         for path in _package_files(PACKAGE)
         for name in _top_level_names(_parse(path))
+        if name not in _UNEXPORTED_PRIVATE_NAMES
     ]
     assert sorted(defined) == sorted(_OWNER.items())
 

@@ -192,6 +192,11 @@ a sentinel carries one — and they never share values, so always say which.
   `operator_unavailable`, `dependency_unmerged`, `confirm_backend_unavailable`,
   `impl_comments_unreadable_after_regress`), and no-worker spawn failures that
   are a raw `OSError` or a missing `claude` binary (`ClaudeBinaryNotFoundError`).
+  (#2321: a `blocked` result with that dependency reason may carry
+  `blocker.depends_on_pr`, a positive same-repo PR number. With the id the row
+  parks as `dependency_hold`, frees its lane slot, and the serve tick releases
+  it when that PR merges. Without it the park holds its slot and has no
+  release trigger.)
   `plan_pending_approval` still charges (`auto_adopt_clean_plan` can re-claim
   it without a human), and SSH/adapter/CLI-flag failures that surface as a
   non-zero `claude --bg` exit still charge.
@@ -368,6 +373,11 @@ cw dev-queue resolve <ticket> -c <client> --file <decisions.md>
 cw dev-queue unblock <ticket> -c <client>        # clear salvage-park markers and requeue
 cw dev-queue move <ticket> -c <client> --to|--lane <lane>   # re-lane
 cw dev-queue cancel|remove -c <client>           # queue hygiene, one ticket at a time
+cw dev-queue hold <ticket> --until-pr-merged <N> -c <client>
+                                                 # park behind an unmerged same-repo PR (#2321);
+                                                 #   frees the lane slot, released on merge.
+                                                 #   Applies before a PR exists: refuses a row
+                                                 #   with a PR or a live bound session
 cw dev-queue prune --older-than <days> -c <c>    # bulk-retire stale terminal rows (dry-run
                                                  #   by default; needs --confirm to delete)
 cw dev-queue clear -c <client> [-s <status>]     # DESTRUCTIVE: previews by default; needs

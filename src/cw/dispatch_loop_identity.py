@@ -49,6 +49,7 @@ from pathlib import Path
 
 import cw
 from cw._git import capture_head_sha
+from cw._predicates import is_positive_real_int
 from cw.config import PID_KEY, dispatch_loop_lock_file
 from cw.local_runner import read_process_start_time_ns
 
@@ -201,12 +202,6 @@ class _LoopRecord:
     identity: CodeIdentity | None
 
 
-def _positive_int(value: object) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        return None
-    return value
-
-
 def _str_or_none(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
@@ -224,8 +219,8 @@ def _read_record() -> _LoopRecord | None:
         return None
     if not isinstance(data, dict):
         return None
-    pid = _positive_int(data.get(PID_KEY))
-    if pid is None:
+    pid = data.get(PID_KEY)
+    if not is_positive_real_int(pid):
         return None
     identity = (
         CodeIdentity(
@@ -235,7 +230,10 @@ def _read_record() -> _LoopRecord | None:
         if VERSION_KEY in data
         else None
     )
-    return _LoopRecord(pid, _positive_int(data.get(PROC_START_KEY)), identity)
+    proc_start = data.get(PROC_START_KEY)
+    return _LoopRecord(
+        pid, proc_start if is_positive_real_int(proc_start) else None, identity
+    )
 
 
 def _holder_alive(record: _LoopRecord) -> bool:

@@ -1025,6 +1025,47 @@ class TestDevQueueLaneBreakdownOccupants:
         assert result.exit_code == 0, result.output
         assert "lane full: GEN-5175 (awaiting_operator_signoff)" in result.output
 
+    def test_freed_dependency_hold_is_not_a_lane_occupant(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#2321: the breakdown counts occupants with ``occupies_lane_slot``.
+
+        A dependency hold with a PR id is still a blocked row (the lane is
+        noteworthy) but frees its slot, so it is not listed as an occupant and
+        the lane is not reported full.
+        """
+        _write_orchestrator_yaml(
+            tmp_orchestrator_config,
+            "default_ceiling: 2\nper_client_ceiling: {}\n",
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-HOLD",
+                client="genhealth",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+                disposition="dependency_hold",
+                blocked_reason="dependency_unmerged",
+                blocked_on_pr=42,
+            )
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-RUN",
+                client="genhealth",
+                status=QueueItemStatus.RUNNING,
+            )
+        )
+        _patch_tick_for(monkeypatch, "genhealth")
+        result = CliRunner().invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "blocked=1" in result.output
+        assert "lane occupants: GEN-RUN (running)" in result.output
+        assert "GEN-HOLD (blocked_on_user)" not in result.output
+        assert "lane full" not in result.output
+
     def test_default_lane_running_under_cap_output_unchanged(
         self,
         tmp_dev_queue: Path,
@@ -17388,6 +17429,37 @@ class TestRegisterOrAdoptWatchedPr:
         store = load_dev_queue()
         assert len(store.watched_prs) == 1
         assert store.watched_prs[0].client == "client-a"
+
+    @pytest.mark.parametrize(
+        ("existing_client", "existing_status", "incoming_client", "expect_collision"),
+        [
+            ("client-a", "active", "client-b", True),
+            ("client-a", "dismissed", "client-b", False),
+            (None, "active", "client-b", False),
+            ("client-a", "active", "client-a", False),
+            ("client-a", "active", None, True),
+        ],
+    )
+    def test_crud_and_hold_collision_paths_agree(
+        self,
+        tmp_config_dir: Path,
+        existing_client: str | None,
+        existing_status: str,
+        incoming_client: str | None,
+        expect_collision: bool,
+    ) -> None:
+        """The crud path and the dependency-hold path share one predicate
+        (``watched_pr_collides``); both must give the same answer per case."""
+        from cw.dev_queue.hold import _watch_collision
+
+        existing = self._watched(existing_client).model_copy(
+            update={"status": existing_status}
+        )
+        save_dev_queue(DevQueueStore(watched_prs=[existing]))
+        hold_hit = _watch_collision(load_dev_queue(), "foo/bar", 70, incoming_client)
+        result = register_or_adopt_watched_pr(self._watched(incoming_client))
+        assert (result == "collision") is expect_collision
+        assert (hold_hit is not None) is expect_collision
 
     def test_collision_emits_watched_pr_collision_event(
         self,
