@@ -125,7 +125,7 @@ Based on discovery and user input, construct the exact commands. Use the project
 |----------------|-------------|-------------|-------------|
 | `pyproject.toml` + ruff + uv | `uv run ruff check .` | `uv run mypy .` | `uv run pytest -x` |
 | `pyproject.toml` + ruff (no uv) | `ruff check .` | `mypy .` | `pytest -x` |
-| `package.json` + eslint | `npm run lint` (if script exists) or `npx eslint .` | `npx tsc --noEmit` | `npm test` |
+| `package.json` + eslint | `npm run lint` (if script exists) or `npx eslint .` | `npm run typecheck` (if script exists) or `npx tsc --noEmit` (root tsconfig) | `npm test` |
 | `Cargo.toml` | `cargo clippy -- -D warnings` | (included in clippy) | `cargo test` |
 | `go.mod` | `golangci-lint run` or `go vet ./...` | (included in vet) | `go test ./...` |
 
