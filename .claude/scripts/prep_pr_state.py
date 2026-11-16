@@ -287,6 +287,9 @@ def _run_git(args: list[str], *, default: str = "", quiet: bool = False) -> str:
 # What `npm init` writes as scripts.test: a placeholder, not a test suite.
 _NPM_INIT_TEST_PLACEHOLDER = 'echo "Error: no test specified" && exit 1'
 _TSCONFIG = "tsconfig.json"
+_NPM_SCRIPT_LINT = "lint"
+_NPM_SCRIPT_TYPECHECK = "typecheck"
+_NPM_SCRIPT_TEST = "test"
 
 
 def _package_json_scripts(path: Path) -> dict[str, object]:
@@ -324,19 +327,23 @@ def _package_json_gates(cwd: Path) -> list[Gate]:
     """
     scripts = _package_json_scripts(cwd / "package.json")
     gates: list[Gate] = []
-    if _usable_script(scripts, "lint"):
+    if _usable_script(scripts, _NPM_SCRIPT_LINT):
         gates.append(
-            Gate(name="lint", command="npm run lint", autofix="npm run lint -- --fix")
+            Gate(
+                name=_NPM_SCRIPT_LINT,
+                command="npm run lint",
+                autofix="npm run lint -- --fix",
+            )
         )
-    if _usable_script(scripts, "typecheck"):
-        gates.append(Gate(name="typecheck", command="npm run typecheck"))
+    if _usable_script(scripts, _NPM_SCRIPT_TYPECHECK):
+        gates.append(Gate(name=_NPM_SCRIPT_TYPECHECK, command="npm run typecheck"))
     elif (cwd / _TSCONFIG).is_file():
-        gates.append(Gate(name="typecheck", command="npx tsc --noEmit"))
+        gates.append(Gate(name=_NPM_SCRIPT_TYPECHECK, command="npx tsc --noEmit"))
     if (
-        _usable_script(scripts, "test")
-        and str(scripts["test"]).strip() != _NPM_INIT_TEST_PLACEHOLDER
+        _usable_script(scripts, _NPM_SCRIPT_TEST)
+        and str(scripts[_NPM_SCRIPT_TEST]).strip() != _NPM_INIT_TEST_PLACEHOLDER
     ):
-        gates.append(Gate(name="test", command="npm test"))
+        gates.append(Gate(name=_NPM_SCRIPT_TEST, command="npm test"))
     return gates
 
 
