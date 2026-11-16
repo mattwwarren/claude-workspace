@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 import pytest
 
 from cw.dev_queue import load_dev_queue, save_dev_queue
-from cw.models import DevQueueStore, PrState, QueueItemStatus, WatchedPr
+from cw.models import DevQueueStore, PrState, QueueItemStatus, TicketTask, WatchedPr
 from cw.pr_hydrate.transitions import _is_watched_candidate
 from cw.pr_hydrate.watched import (
     WATCHED_HYDRATION_CAP_PER_PASS,
@@ -24,7 +25,7 @@ def _watch(
     pr_number: int = 42,
     *,
     client: str | None = "client-a",
-    status: str = "active",
+    status: Literal["active", "dismissed"] = "active",
     state: str | None = None,
     hydrated_at: datetime | None = None,
 ) -> WatchedPr:
@@ -37,12 +38,12 @@ def _watch(
         pr_number=pr_number,
         client=client,
         source="stale_dispatch_park",
-        status=status,  # type: ignore[arg-type]
+        status=status,
         pr_state=pr_state,
     )
 
 
-def _referencing_row(pr_number: int = 42, *, client: str = "client-a") -> object:
+def _referencing_row(pr_number: int = 42, *, client: str = "client-a") -> TicketTask:
     return _make_ticket_task(
         ticket_id=f"REF-{pr_number}-{client}",
         client=client,
@@ -67,7 +68,10 @@ class TestIsWatchedCandidate:
         ],
     )
     def test_candidate_predicate(
-        self, status: str, state: str | None, expected: bool
+        self,
+        status: Literal["active", "dismissed"],
+        state: str | None,
+        expected: bool,
     ) -> None:
         assert _is_watched_candidate(_watch(status=status, state=state)) is expected
 
