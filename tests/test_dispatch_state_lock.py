@@ -20,7 +20,7 @@ import json
 import logging
 import threading
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import pytest
 
@@ -30,6 +30,8 @@ from cw.dispatch_state import (
     AvailabilityProbeCache,
     ExecutorBlockedMarker,
     OpenPrProbeCache,
+    clear_all_executor_blocked_markers,
+    clear_executor_blocked_marker,
     load_availability_probe_cache,
     load_executor_blocked_markers,
     load_open_pr_probe_cache,
@@ -41,13 +43,14 @@ from cw.dispatch_state import (
     save_main_drift_latches,
     save_open_pr_probe_entries,
     save_open_pr_probe_entry,
+    save_usage_limit_armed_at,
 )
 from cw.exceptions import CwError
 from tests._shared.lock_helpers import DISPATCH_STATE_LOCK_NAME, record_state_locks
 from tests._shared.sidecar_failures import fail_state_writes
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
 
@@ -710,6 +713,186 @@ class TestMutateDispatchState:
             mutate_dispatch_state(_raises, failure_msg=None)
 
         assert attempts == []
+
+
+_NOW = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
+_SIBLING_SEED: dict[str, Any] = {"sibling": {"k": 1}}
+
+
+def _blocked_marker() -> ExecutorBlockedMarker:
+    return ExecutorBlockedMarker(
+        client="client-a",
+        ticket_id="1723",
+        executor="codex",
+        reviewer_role=None,
+        started_at=_NOW,
+        session_id="sid-1723",
+    )
+
+
+class _FailSite(NamedTuple):
+    """One migrated sidecar writer and the warning its failure must log (#3638)."""
+
+    call: Callable[[], object]
+    message: str
+    exc_info: bool
+    seed: dict[str, Any]
+
+
+_FAIL_SITES = {
+    "save_usage_limit_armed_at": _FailSite(
+        lambda: save_usage_limit_armed_at(_NOW),
+        "dispatch_state: failed to persist usage_limit_armed_at",
+        False,
+        _SIBLING_SEED,
+    ),
+    "save_availability_probe_cache": _FailSite(
+        lambda: save_availability_probe_cache(
+            AvailabilityProbeCache(probed_at=_NOW, available=True, latched=False)
+        ),
+        "dispatch_state: failed to persist availability_probe",
+        False,
+        _SIBLING_SEED,
+    ),
+    "save_main_drift_latches": _FailSite(
+        lambda: save_main_drift_latches({"b": True, "a": False}),
+        "dispatch_state: failed to persist main_drift_latches (clients=['a', 'b'])",
+        True,
+        _SIBLING_SEED,
+    ),
+    "save_executor_blocked_marker": _FailSite(
+        lambda: save_executor_blocked_marker(_blocked_marker()),
+        "dispatch_state: failed to persist executor_blocked marker (client-a/1723)",
+        True,
+        _SIBLING_SEED,
+    ),
+    "clear_executor_blocked_marker": _FailSite(
+        lambda: clear_executor_blocked_marker("client-a", "1723"),
+        "dispatch_state: failed to clear executor_blocked marker (client-a/1723)",
+        True,
+        {
+            **_SIBLING_SEED,
+            "executor_blocked": {"client-a/1723": {"client": "client-a"}},
+        },
+    ),
+    "clear_all_executor_blocked_markers": _FailSite(
+        clear_all_executor_blocked_markers,
+        "dispatch_state: failed to clear executor_blocked markers at boot",
+        True,
+        _SIBLING_SEED,
+    ),
+    "save_open_pr_probe_entry": _FailSite(
+        lambda: save_open_pr_probe_entry(
+            "acme", "1862", OpenPrProbeCache(probed_at=_NOW, has_open_pr=True)
+        ),
+        "dispatch_state: failed to persist 1 open_pr_probe entry/entries"
+        " (['acme/1862'])",
+        True,
+        _SIBLING_SEED,
+    ),
+}
+
+
+class TestSidecarFailContract:
+    """Per-site fail-soft contract of every migrated sidecar writer (#3638).
+
+    Pins what the primitive's callers hand it: the exact formatted warning
+    (so swapped ``failure_args`` or a changed format string fail), whether a
+    traceback rides along, the ``cw.dispatch_state`` logger at WARNING, and that
+    a failed write leaves the sidecar bytes untouched.
+    """
+
+    @pytest.mark.parametrize("site", list(_FAIL_SITES))
+    def test_failed_write_logs_the_exact_warning_and_leaves_the_file_alone(
+        self,
+        site: str,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        spec = _FAIL_SITES[site]
+        state_file = cw.dispatch_state.DISPATCH_STATE_FILE
+        state_file.write_text(json.dumps(spec.seed))
+        before = state_file.read_bytes()
+        attempts = fail_state_writes(monkeypatch)
+
+        with caplog.at_level(logging.DEBUG, logger="cw.dispatch_state"):
+            spec.call()
+
+        assert len(attempts) == 1
+        records = [r for r in caplog.records if r.name == "cw.dispatch_state"]
+        assert len(records) == 1
+        record = records[0]
+        assert record.levelno == logging.WARNING
+        assert record.getMessage() == spec.message
+        assert bool(record.exc_info) is spec.exc_info
+        assert state_file.read_bytes() == before
+
+    def test_merge_and_save_fallback_returns_windows_and_logs_without_traceback(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        until = _NOW + timedelta(hours=1)
+        state_file = cw.dispatch_state.DISPATCH_STATE_FILE
+        state_file.write_text(json.dumps(_SIBLING_SEED))
+        before = state_file.read_bytes()
+        fail_state_writes(monkeypatch)
+
+        with caplog.at_level(logging.DEBUG, logger="cw.dispatch_state"):
+            merged = merge_and_save_usage_limited_until(
+                {"acme": until}, fresh={"beta": until}, clears_seen={}
+            )
+
+        assert merged == {"acme": until, "beta": until}
+        records = [r for r in caplog.records if r.name == "cw.dispatch_state"]
+        assert len(records) == 1
+        assert records[0].levelno == logging.WARNING
+        assert (
+            records[0].getMessage()
+            == "dispatch_state: failed to persist usage_limited_until"
+        )
+        assert not records[0].exc_info
+        assert state_file.read_bytes() == before
+
+
+class TestSidecarWriteShapes:
+    """Persisted shapes the writer migration must keep byte-for-byte (#3638)."""
+
+    def test_clear_marker_on_an_absent_file_creates_nothing(
+        self, tmp_config_dir: Path
+    ) -> None:
+        clear_executor_blocked_marker("client-a", "1723")
+
+        assert not cw.dispatch_state.DISPATCH_STATE_FILE.exists()
+
+    def test_clear_marker_with_a_non_dict_value_writes_nothing(
+        self, tmp_config_dir: Path
+    ) -> None:
+        state_file = cw.dispatch_state.DISPATCH_STATE_FILE
+        state_file.write_text('{"executor_blocked": ["not", "a", "dict"]}')
+        before = state_file.read_bytes()
+
+        clear_executor_blocked_marker("client-a", "1723")
+
+        assert state_file.read_bytes() == before
+
+    def test_arming_none_persists_json_null(self, tmp_config_dir: Path) -> None:
+        save_usage_limit_armed_at(None)
+
+        stored = json.loads(cw.dispatch_state.DISPATCH_STATE_FILE.read_text())
+        assert stored == {"usage_limit_armed_at": None}
+
+    def test_clear_all_markers_persists_an_empty_dict(
+        self, tmp_config_dir: Path
+    ) -> None:
+        save_executor_blocked_marker(_blocked_marker())
+
+        clear_all_executor_blocked_markers()
+
+        stored = json.loads(cw.dispatch_state.DISPATCH_STATE_FILE.read_text())
+        assert stored == {"executor_blocked": {}}
 
 
 class TestOpenPrProbeEntriesBatch:
