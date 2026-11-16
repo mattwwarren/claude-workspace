@@ -8,22 +8,21 @@ R3's never-raise contract and R5's exact output shape.
 
 from __future__ import annotations
 
-import time
 from typing import TYPE_CHECKING
 
 import pytest
 import yaml
 
+from cw.client_resolution import client_roots
 from cw.config import (
     _save_concurrency_overrides,
     clients_file,
     focus_file,
     load_clients,
 )
-from cw.dev_queue import save_dev_queue
+from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.focus import set_focus
 from cw.models import (
-    ClientConfig,
     ConcurrencyOverrides,
     DevQueueStore,
     LaneConcurrencyOverride,
@@ -35,32 +34,18 @@ from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from cw.models import TicketTask
 
 _SESSION = "sess-statusline-1"
 _PR_URL = "https://github.com/acme/widgets/pull/7"
-# Loose wall-clock backstop for gross slowness (e.g. an accidental O(n^2)
-# walk in resolve_client_for_cwd's step-2 walk) — NOT the subprocess/network
-# guarantee. That guarantee now lives in each test's deterministic
-# _assert_no_subprocess_calls guard plus the load_clients call-count
-# assertion (#2006), which cannot flake and cannot be defeated by a fast
-# subprocess the way a wall-clock budget can.
-#
-# A CPU-time assertion (process_time) lived here briefly and was removed: it
-# was introduced to dodge scheduler contention, but coverage instrumentation
-# burns real CPU, so process_time does not escape it. Two successive budgets
-# (0.05s wall, then 0.15s CPU) were both set against a fast local baseline and
-# both failed on CI under --cov (0.1938s, then 0.2367s / 0.1740s). A guard that
-# has to be widened every time it fires is measuring the runner, not the code.
-#
-# 300ms is the number the design actually specifies (the statusline debounce
-# budget) — but this ceiling no longer pins that spec exactly: it was
-# widened to 1.0s to absorb loaded-CI-runner variance (0.527s observed on
-# macOS, #2005) with margin, now that it is a backstop rather than the
-# primary guard.
-_WALL_CLOCK_BUDGET_SECONDS = 1.0
+# The speed premise is pinned by work counts, not wall-clock: a wall-clock
+# budget measures the runner, and every widening of one was a symptom of
+# that (#2005, #2006). Counting calls cannot flake under load.
+_PERF_CLIENTS = 17
+_PERF_LANES = 10
 
 
 def _write_clients(tmp_path: Path) -> Path:
@@ -697,106 +682,99 @@ class TestNeverRaises:
         assert render_work_segment(_SESSION, tmp_config_dir) == "client-a/impl 0▶ 0⧗"
 
 
+def _seed_large_fixture(tmp_config_dir: Path) -> Path:
+    """~17 clients x ~10 lanes, 340 tasks (R1's speed premise). Returns base."""
+    base = tmp_config_dir / "perf"
+    base.mkdir(parents=True, exist_ok=True)
+    lanes = [{"name": f"lane-{i}"} for i in range(_PERF_LANES)]
+    clients_file().write_text(
+        yaml.safe_dump(
+            {
+                "clients": {
+                    f"client-{c}": {
+                        "workspace_path": str(base / f"client-{c}"),
+                        "lanes": lanes,
+                    }
+                    for c in range(_PERF_CLIENTS)
+                }
+            }
+        )
+    )
+    tasks = [
+        _make_ticket_task(
+            ticket_id=f"T-{c}-{i}",
+            client=f"client-{c}",
+            lane=f"lane-{i % _PERF_LANES}",
+            status=QueueItemStatus.RUNNING if i % 2 else QueueItemStatus.PENDING,
+        )
+        for c in range(_PERF_CLIENTS)
+        for i in range(20)
+    ]
+    _seed_queue(*tasks)
+    return base
+
+
+def _count_calls(
+    monkeypatch: pytest.MonkeyPatch, target: str, real: Callable[..., object]
+) -> list[None]:
+    """Patch *target* with a wrapper that records each call and calls *real*."""
+    calls: list[None] = []
+
+    def _counting(*args: object, **kwargs: object) -> object:
+        calls.append(None)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(target, _counting)
+    return calls
+
+
 class TestPerformance:
-    def test_large_fixture_renders_well_inside_budget(
+    def test_large_fixture_focused_path_does_bounded_work(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """~17 clients x ~10 lanes, several hundred tasks (R1's speed premise)."""
         _assert_no_subprocess_calls(monkeypatch)
-        n_clients = 17
-        n_lanes = 10
-        base = tmp_config_dir / "perf"
-        base.mkdir(parents=True, exist_ok=True)
-        lanes = [{"name": f"lane-{i}"} for i in range(n_lanes)]
-        clients_file().write_text(
-            yaml.safe_dump(
-                {
-                    "clients": {
-                        f"client-{c}": {
-                            "workspace_path": str(base / f"client-{c}"),
-                            "lanes": lanes,
-                        }
-                        for c in range(n_clients)
-                    }
-                }
-            )
-        )
-        tasks = [
-            _make_ticket_task(
-                ticket_id=f"T-{c}-{i}",
-                client=f"client-{c}",
-                lane=f"lane-{i % n_lanes}",
-                status=QueueItemStatus.RUNNING if i % 2 else QueueItemStatus.PENDING,
-            )
-            for c in range(n_clients)
-            for i in range(20)
-        ]
-        _seed_queue(*tasks)
+        _seed_large_fixture(tmp_config_dir)
         set_focus(_SESSION, "client-3", "lane-4")
+        clients_calls = _count_calls(
+            monkeypatch, "cw.statusline.load_clients", load_clients
+        )
+        queue_calls = _count_calls(
+            monkeypatch, "cw.statusline.load_dev_queue", load_dev_queue
+        )
+        roots_calls = _count_calls(
+            monkeypatch, "cw.client_resolution.client_roots", client_roots
+        )
 
-        wall_started = time.perf_counter()
         segment = render_work_segment(_SESSION, tmp_config_dir)
-        wall_elapsed = time.perf_counter() - wall_started
 
         assert segment.startswith("client-3/lane-4 ")
-        assert wall_elapsed < _WALL_CLOCK_BUDGET_SECONDS, (
-            f"wall clock {wall_elapsed:.4f}s"
-        )
+        assert len(clients_calls) == 1, "clients.yaml parsed more than once"
+        assert len(queue_calls) == 1, "dev queue loaded more than once"
+        assert len(roots_calls) == 0, "focused path walked client roots"
 
-    def test_cwd_fallback_path_renders_well_inside_budget(
+    def test_large_fixture_cwd_fallback_does_bounded_work(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Same fixture, but no focus set — forces resolve_client_for_cwd's
-        step-2 walk (the more expensive path pre-`cw focus set` adoption,
-        and the one that a redundant clients.yaml re-parse would hit)."""
+        """No focus set: forces resolve_client_for_cwd's step-2 walk (the path
+        a redundant clients.yaml re-parse would hit)."""
         _assert_no_subprocess_calls(monkeypatch)
-        n_clients = 17
-        n_lanes = 10
-        base = tmp_config_dir / "perf"
-        base.mkdir(parents=True, exist_ok=True)
-        lanes = [{"name": f"lane-{i}"} for i in range(n_lanes)]
-        clients_file().write_text(
-            yaml.safe_dump(
-                {
-                    "clients": {
-                        f"client-{c}": {
-                            "workspace_path": str(base / f"client-{c}"),
-                            "lanes": lanes,
-                        }
-                        for c in range(n_clients)
-                    }
-                }
-            )
+        base = _seed_large_fixture(tmp_config_dir)
+        clients_calls = _count_calls(
+            monkeypatch, "cw.statusline.load_clients", load_clients
         )
-        tasks = [
-            _make_ticket_task(
-                ticket_id=f"T-{c}-{i}",
-                client=f"client-{c}",
-                lane=f"lane-{i % n_lanes}",
-                status=QueueItemStatus.RUNNING if i % 2 else QueueItemStatus.PENDING,
-            )
-            for c in range(n_clients)
-            for i in range(20)
-        ]
-        _seed_queue(*tasks)
+        queue_calls = _count_calls(
+            monkeypatch, "cw.statusline.load_dev_queue", load_dev_queue
+        )
+        roots_calls = _count_calls(
+            monkeypatch, "cw.client_resolution.client_roots", client_roots
+        )
 
-        load_clients_calls = 0
-
-        def _counting_load_clients() -> dict[str, ClientConfig]:
-            nonlocal load_clients_calls
-            load_clients_calls += 1
-            return load_clients()
-
-        monkeypatch.setattr("cw.statusline.load_clients", _counting_load_clients)
-
-        wall_started = time.perf_counter()
         segment = render_work_segment(None, base / "client-3")
-        wall_elapsed = time.perf_counter() - wall_started
 
         assert segment.startswith("client-3 ")
-        assert load_clients_calls == 1, (
-            f"clients.yaml parsed {load_clients_calls} times, expected 1"
-        )
-        assert wall_elapsed < _WALL_CLOCK_BUDGET_SECONDS, (
-            f"wall clock {wall_elapsed:.4f}s"
+        assert len(clients_calls) == 1, "clients.yaml parsed more than once"
+        assert len(queue_calls) == 1, "dev queue loaded more than once"
+        # One client_roots call per client in exactly one _deepest_hits pass.
+        assert len(roots_calls) == _PERF_CLIENTS, (
+            f"client_roots called {len(roots_calls)} times, expected {_PERF_CLIENTS}"
         )
