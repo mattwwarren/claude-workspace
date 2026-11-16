@@ -28,7 +28,12 @@ from cw.codex_review import (
     STAGE5_POST_CREATE,
     format_input_sizes,
 )
-from cw.codex_review._const import _AUDIT_ARGV_FLAGS, _EPHEMERAL_FLAG, _JSON_FLAG
+from cw.codex_review._const import (
+    _AUDIT_ARGV_FLAGS,
+    _EPHEMERAL_FLAG,
+    _JSON_FLAG,
+    _lean_profile_argv,
+)
 from cw.executor_diagnostics import ExecutorFailureCategory
 
 
@@ -147,3 +152,46 @@ def test_stage_argv_modules_keep_no_private_audit_flag_copy(module: str) -> None
     assert "_AUDIT_FLAGS" not in source
     assert '("--json", "--ephemeral")' not in source
     assert "_AUDIT_ARGV_FLAGS" in source
+
+
+# The ten features verified on codex 0.167.0 (#1711), in the operator's order.
+# Test-local on purpose: an independent copy, so a drift in src fails here.
+_LEAN_FEATURES = [
+    "hooks",
+    "memories",
+    "multi_agent",
+    "multi_agent_v2",
+    "plugins",
+    "plugin_sharing",
+    "browser_use",
+    "browser_use_external",
+    "browser_use_full_cdp_access",
+    "computer_use",
+]
+_LEAN_LITERAL = [
+    "--ignore-user-config",
+    "--strict-config",
+    "-c",
+    "project_doc_max_bytes=0",
+    "-c",
+    "mcp_servers={}",
+    *[token for feature in _LEAN_FEATURES for token in ("--disable", feature)],
+]
+
+
+def test_lean_profile_argv_is_the_pinned_literal() -> None:
+    argv = _lean_profile_argv()
+    assert argv == _LEAN_LITERAL
+    assert argv.count("--disable") == 10
+    assert "personality" not in argv
+
+
+def test_lean_profile_argv_never_repeats_the_exec_policy_flags() -> None:
+    argv = _lean_profile_argv()
+    assert "--sandbox" not in argv
+    assert not any("approval_policy" in token for token in argv)
+
+
+def test_lean_profile_argv_returns_a_fresh_list() -> None:
+    _lean_profile_argv().append("--mutated")
+    assert _lean_profile_argv() == _LEAN_LITERAL

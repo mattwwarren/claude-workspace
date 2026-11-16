@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cw.codex_review._context import _prepare_review_pass
+from cw.codex_review._profile import _persist_review_profile, build_review_profile
 from cw.codex_review._roles import run_codex_roles
 from cw.codex_review._shard import plan_prompt_shards
 from cw.codex_review._shard_run import ShardedRun, run_sharded_roles
@@ -55,7 +56,12 @@ def run_prepared_roles(
     is empty. A planner that cannot fit the input raises
     :class:`~cw.codex_review._shard.ReviewInputTooLargeError` before any codex
     call. ``reviewer_sandbox_mode`` (#1767) reaches every role on both paths.
+    Writes the lean-profile diagnostics record once per pass (#1711).
     """
+    _persist_review_profile(
+        session_id,
+        build_review_profile(prepared, model=model, reasoning_effort=reasoning_effort),
+    )
     shards = (
         plan_prompt_shards(prepared, max_prompt_chars)
         if max_prompt_chars is not None

@@ -53,7 +53,8 @@ class StageExecutorConfig(BaseModel):
     # reviewer and fix invocation, which beats ~/.codex/config.toml. Defaults
     # to "high" (#1711 R1: a reviewer's failure mode is a missed MUST_FIX, so
     # depth beats token savings) -- a starting position, not a benchmarked
-    # optimum. Explicit null unpins it, leaving codex's own config in force.
+    # optimum. Explicit null unpins it: codex's built-in default effort applies,
+    # since the lean profile ignores the operator's config.toml (#1711).
     # Resolved like `model`: a lane's stage config replaces the client's
     # wholesale (resolve_executor_config), so a lane omitting it gets high.
     reasoning_effort: ReasoningEffort | None = ReasoningEffort.HIGH

@@ -614,6 +614,27 @@ class TestFixInvocation:
         bundle = diagnostics_bundle_dir("s-fix-error")
         assert list(bundle.glob("fix-cycle-1-nonzero_exit-*.json"))
 
+    def test_park_argv_retains_host_safety_policy_and_effort_pin(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#1711: park diagnostics use the host-safe fix builder."""
+        worktree = _worktree(make_git_repo, "wt-fix-park-argv")
+        runner = _FixLoopRunner(
+            [_MF_DOC],
+            fix_behaviors=[CodexRunResult(returncode=1, stdout="", stderr="boom")],
+        )
+        _run_loop(
+            runner, worktree, session_id="s-fix-park-argv", reasoning_effort="high"
+        )
+
+        (path,) = diagnostics_bundle_dir("s-fix-park-argv").glob(
+            "fix-cycle-1-nonzero_exit-*.json"
+        )
+        argv = json.loads(path.read_text(encoding="utf-8"))["argv_sanitized"]
+        assert "--ignore-user-config" not in argv
+        assert "--strict-config" not in argv
+        assert "model_reasoning_effort=high" in argv
+
     def test_fix_capacity_failure_keeps_todays_classification_with_jsonl_stdout(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
@@ -2555,10 +2576,12 @@ class TestFixPromptAndArgv:
         assert "--output-schema" not in argv
         assert "-o" not in argv
         assert argv[-2:] == ["-m", "gpt-x"]
-        # An unpinned effort emits no model_reasoning_effort pair (codex's own
-        # config stays in force); the approval override (#1767) always rides.
+        # An unpinned effort emits no model_reasoning_effort pair (codex's
+        # built-in default applies when no effort is pinned;
+        # the approval override (#1767) always rides.
         assert not any(a.startswith("model_reasoning_effort=") for a in argv)
         assert argv[4:6] == ["-c", "approval_policy=never"]
+        assert argv[6] == "--json"
 
     def test_argv_pins_reasoning_effort(self) -> None:
         argv = _build_fix_codex_argv(model="gpt-x", reasoning_effort="max")

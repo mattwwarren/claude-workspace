@@ -130,6 +130,7 @@ def _build_fix_codex_argv(
         "codex",
         "exec",
         *_exec_policy_argv(sandbox_mode),
+        # Fix cycles retain the host's mutation-safety policy (#1711).
         # JSONL stdout so the turn's token usage can be read (#3063). No
         # ``--ephemeral``: a fix cycle keeps its rollout under ~/.codex.
         _JSON_FLAG,
