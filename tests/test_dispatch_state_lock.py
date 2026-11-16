@@ -15,6 +15,7 @@ So this test suite validates real cross-writer serialization, not a no-op.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import threading
@@ -24,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 import cw.dispatch_state
+from cw.config import _REAL_STATE_DIR
 from cw.dispatch_state import (
     AvailabilityProbeCache,
     ExecutorBlockedMarker,
@@ -45,6 +47,7 @@ from tests._shared.lock_helpers import DISPATCH_STATE_LOCK_NAME, record_state_lo
 from tests._shared.sidecar_failures import fail_state_writes
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 
@@ -534,7 +537,10 @@ class TestMutateDispatchState:
             )
 
         assert ok is False
-        record = next(r for r in caplog.records if r.name == "cw.dispatch_state")
+        records = [r for r in caplog.records if r.name == "cw.dispatch_state"]
+        assert len(records) == 1
+        record = records[0]
+        assert record.levelno == logging.WARNING
         assert record.getMessage() == (
             "dispatch_state: failed to persist thing (['a', 'b'])"
         )
@@ -608,16 +614,47 @@ class TestMutateDispatchState:
         assert mutate_dispatch_state(_set) is True
         assert seen == [{}]
 
-    def test_one_lock_acquisition_covers_load_and_write(
-        self, tmp_config_dir: Path
+    def test_one_lock_acquisition_covers_load_mutate_and_write(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        lock_held = False
+        real_lock = cw.dispatch_state.dispatch_state_lock
+
+        @contextlib.contextmanager
+        def tracking_lock() -> Iterator[None]:
+            nonlocal lock_held
+            with real_lock():
+                lock_held = True
+                try:
+                    yield
+                finally:
+                    lock_held = False
+
+        held_at: dict[str, bool] = {}
+        real_load = cw.dispatch_state._load_dispatch_state_raw
+        real_write = cw.dispatch_state.atomic_write_text
+
+        def spying_load(*, strict: bool = False) -> dict[str, Any]:
+            held_at["load"] = lock_held
+            return real_load(strict=strict)
+
+        def spying_write(path: Path, text: str) -> None:
+            held_at["write"] = lock_held
+            real_write(path, text)
+
+        monkeypatch.setattr(cw.dispatch_state, "dispatch_state_lock", tracking_lock)
+        monkeypatch.setattr(cw.dispatch_state, "_load_dispatch_state_raw", spying_load)
+        monkeypatch.setattr(cw.dispatch_state, "atomic_write_text", spying_write)
+
         def _set(payload: dict[str, Any]) -> bool:
+            held_at["mutate"] = lock_held
             payload["x"] = 1
             return True
 
         with record_state_locks() as recorder:
             assert mutate_dispatch_state(_set) is True
 
+        assert held_at == {"load": True, "mutate": True, "write": True}
         assert recorder.acquires(DISPATCH_STATE_LOCK_NAME) == 1
 
     def test_cwerror_propagates_and_releases_lock(self, tmp_config_dir: Path) -> None:
@@ -638,6 +675,41 @@ class TestMutateDispatchState:
 
         assert mutate_dispatch_state(lambda p: p.update(a=1) or True) is True
         assert json.loads(alt.read_text()) == {"a": 1}
+
+    def test_real_state_guard_propagates_even_with_failure_msg(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.dispatch_state.DISPATCH_STATE_FILE",
+            _REAL_STATE_DIR / "dispatch_state.json",
+        )
+        attempts = fail_state_writes(monkeypatch)
+
+        with pytest.raises(CwError, match="refusing real-state write"):
+            mutate_dispatch_state(lambda _p: True, failure_msg="x")
+
+        assert attempts == []
+
+    def test_oserror_from_mutate_follows_the_failure_policy(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        attempts = fail_state_writes(monkeypatch)
+
+        def _raises(_payload: dict[str, Any]) -> bool:
+            msg = "mutate blew up"
+            raise OSError(msg)
+
+        with caplog.at_level(logging.WARNING, logger="cw.dispatch_state"):
+            assert mutate_dispatch_state(_raises, failure_msg="swallowed") is False
+        assert [r.getMessage() for r in caplog.records] == ["swallowed"]
+
+        with pytest.raises(OSError, match="mutate blew up"):
+            mutate_dispatch_state(_raises, failure_msg=None)
+
+        assert attempts == []
 
 
 class TestOpenPrProbeEntriesBatch:
