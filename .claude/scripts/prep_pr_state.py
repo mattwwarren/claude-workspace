@@ -1165,7 +1165,7 @@ CI_PARK_HOLD_ERROR = "hold_error"
 CI_REASON_PYYAML_UNAVAILABLE = "pyyaml-unavailable"
 _PYYAML_DECLARED = (
     "quality_gates.ci_evidence is declared on origin/{base} but PyYAML is"
-    " unavailable to this python3 (pyyaml-unavailable)"
+    f" unavailable to this python3 ({CI_REASON_PYYAML_UNAVAILABLE})"
 )
 # A ``ci_evidence`` key, bare or quoted, anywhere on a line; ``value`` is the rest.
 _CI_EVIDENCE_KEY_RE = re.compile(
