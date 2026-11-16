@@ -56,6 +56,7 @@ from cw.pr_hydrate import (
     resolve_and_register_review_request,
     summarize_status_checks,
 )
+from cw.pr_hydrate.watched import WATCHED_HYDRATION_CAP_PER_PASS
 from tests._review_monitor_helpers import checkrun as _checkrun
 from tests._review_monitor_helpers import status_context
 from tests._shared.git_repos import init_repo_with_remote
@@ -2414,11 +2415,13 @@ def _watched(
     status: str = "active",
     source: str = "cli",
     pr_state: PrState | None = None,
+    client: str | None = None,
 ) -> WatchedPr:
     return WatchedPr(
         pr_url=f"https://github.com/acme/widgets/pull/{pr_number}",
         repo="acme/widgets",
         pr_number=pr_number,
+        client=client,
         source=source,  # type: ignore[arg-type]
         status=status,  # type: ignore[arg-type]
         pr_state=pr_state,
@@ -2563,6 +2566,237 @@ class TestHydrateWatchedPrs:
             frozen.tick(delta=timedelta(seconds=120))
             hydrate_pr_states(config)
             assert len(calls) == 2  # interval elapsed — fetched again
+
+
+_OLD_STAMP = datetime(2026, 11, 1, tzinfo=UTC)
+
+
+def _record_fetches(
+    monkeypatch: pytest.MonkeyPatch, *, state: str = "OPEN"
+) -> list[str]:
+    """Patch ``fetch_pr_view``; return the live list of PR URLs it was asked for."""
+    urls: list[str] = []
+
+    def _fetch(pr_url: str, *_a: Any, **_kw: Any) -> dict[str, Any]:
+        urls.append(pr_url)
+        return _pr_view_payload(state=state)
+
+    monkeypatch.setattr("cw.pr_hydrate.fetch_pr_view", _fetch)
+    return urls
+
+
+def _watch_url(pr_number: int) -> str:
+    return f"https://github.com/acme/widgets/pull/{pr_number}"
+
+
+def _referencing_row(pr_number: int, *, client: str = "acme") -> TicketTask:
+    """A non-terminal row parked on *pr_number*: keeps a same-client watch alive."""
+    return TicketTask(
+        ticket_id=f"REF-{pr_number}",
+        client=client,
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        blocked_on_pr=pr_number,
+    )
+
+
+class TestHydrateWatchedPrsTerminalAndCap:
+    """#3654: terminal watches are never fetched, the per-pass fetch is capped
+    oldest-first, and a watch observed terminal is retired in the same pass."""
+
+    _CONFIG = OrchestratorConfig(pr_hydration_interval_seconds=0)
+
+    @pytest.mark.parametrize("terminal", ["MERGED", "CLOSED"])
+    def test_terminal_state_watch_is_not_fetched(
+        self, monkeypatch: pytest.MonkeyPatch, terminal: str
+    ) -> None:
+        # Referenced by a live row, so the sweep keeps it active: only the
+        # fetch loop's terminal skip can keep it out of the fetch list.
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[_referencing_row(42)],
+                watched_prs=[
+                    _watched(
+                        client="acme",
+                        pr_state=_pr_state(state=terminal, hydrated_at=_OLD_STAMP),
+                    )
+                ],
+            )
+        )
+        urls = _record_fetches(monkeypatch)
+
+        hydrate_pr_states(self._CONFIG)
+
+        assert urls == []
+        reloaded = load_dev_queue().watched_prs[0]
+        assert reloaded.status == "active"
+        assert reloaded.pr_state is not None
+        assert reloaded.pr_state.state == terminal
+
+    def test_open_and_unhydrated_watches_still_fetched(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                watched_prs=[
+                    _watched(
+                        1, pr_state=_pr_state(state="OPEN", hydrated_at=_OLD_STAMP)
+                    ),
+                    _watched(2, pr_state=None),
+                ]
+            )
+        )
+        urls = _record_fetches(monkeypatch)
+
+        hydrate_pr_states(self._CONFIG)
+
+        assert sorted(urls) == [_watch_url(1), _watch_url(2)]
+
+    def test_per_pass_cap_fetches_exactly_cap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        total = WATCHED_HYDRATION_CAP_PER_PASS + 3
+        save_dev_queue(
+            DevQueueStore(watched_prs=[_watched(n) for n in range(1, total + 1)])
+        )
+        urls = _record_fetches(monkeypatch)
+
+        hydrate_pr_states(self._CONFIG)
+
+        assert len(urls) == WATCHED_HYDRATION_CAP_PER_PASS
+        assert len(set(urls)) == WATCHED_HYDRATION_CAP_PER_PASS
+
+    def test_cap_rotates_oldest_first_across_two_passes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        total = WATCHED_HYDRATION_CAP_PER_PASS + 3
+        everything = {_watch_url(n) for n in range(1, total + 1)}
+        save_dev_queue(
+            DevQueueStore(watched_prs=[_watched(n) for n in range(1, total + 1)])
+        )
+        urls = _record_fetches(monkeypatch)
+
+        with freeze_time("2026-07-04 12:00:00") as frozen:
+            hydrate_pr_states(self._CONFIG)
+            first_pass = set(urls)
+            urls.clear()
+            frozen.tick(delta=timedelta(seconds=60))
+            hydrate_pr_states(self._CONFIG)
+            second_pass = set(urls)
+
+        # Pass 2 fetches the 3 never-hydrated watches first, then tops up to the
+        # cap with the oldest-hydrated of pass 1, so it makes exactly CAP calls
+        # and the two passes together cover every watch.
+        assert len(first_pass) == WATCHED_HYDRATION_CAP_PER_PASS
+        assert len(everything - first_pass) == 3
+        assert everything - first_pass <= second_pass
+        assert len(second_pass) == WATCHED_HYDRATION_CAP_PER_PASS
+        assert first_pass | second_pass == everything
+
+    def test_cap_not_consumed_by_terminal_watches(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        terminal_numbers = range(100, 100 + WATCHED_HYDRATION_CAP_PER_PASS)
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[_referencing_row(n) for n in terminal_numbers],
+                watched_prs=[
+                    *[
+                        _watched(
+                            n,
+                            client="acme",
+                            pr_state=_pr_state(state="MERGED", hydrated_at=_OLD_STAMP),
+                        )
+                        for n in terminal_numbers
+                    ],
+                    _watched(1, pr_state=None),
+                    _watched(2, pr_state=None),
+                ],
+            )
+        )
+        urls = _record_fetches(monkeypatch)
+
+        hydrate_pr_states(self._CONFIG)
+
+        assert sorted(urls) == [_watch_url(1), _watch_url(2)]
+
+    def test_hydrate_pass_retires_watch_observed_terminal_same_pass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_dev_queue(DevQueueStore(watched_prs=[_watched(client="acme")]))
+        urls = _record_fetches(monkeypatch, state="MERGED")
+
+        hydrate_pr_states(self._CONFIG)
+
+        assert urls == [_watch_url(42)]
+        reloaded = load_dev_queue().watched_prs[0]
+        assert reloaded.status == "dismissed"
+        assert reloaded.pr_state is not None
+        assert reloaded.pr_state.state == "MERGED"
+
+    def test_hydrate_pass_keeps_referenced_terminal_watch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[_referencing_row(42)],
+                watched_prs=[_watched(client="acme")],
+            )
+        )
+        _record_fetches(monkeypatch, state="MERGED")
+
+        hydrate_pr_states(self._CONFIG)
+
+        reloaded = load_dev_queue().watched_prs[0]
+        assert reloaded.status == "active"
+        assert reloaded.pr_state is not None
+        assert reloaded.pr_state.state == "MERGED"
+
+    def test_dismissed_watch_never_fetched_after_retirement(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_dev_queue(DevQueueStore(watched_prs=[_watched(client="acme")]))
+        urls = _record_fetches(monkeypatch, state="MERGED")
+
+        hydrate_pr_states(self._CONFIG)
+        assert len(urls) == 1
+        hydrate_pr_states(self._CONFIG)
+
+        assert len(urls) == 1  # the retired watch is not fetched on pass 2
+        assert load_dev_queue().watched_prs[0].status == "dismissed"
+
+    @pytest.mark.parametrize("referenced", [False, True])
+    @pytest.mark.parametrize("terminal", ["MERGED", "CLOSED"])
+    def test_gh_login_not_resolved_when_all_watches_terminal(
+        self, monkeypatch: pytest.MonkeyPatch, terminal: str, *, referenced: bool
+    ) -> None:
+        # Mirrors test_not_called_when_only_dismissed_watched_prs: a terminal
+        # watch is never fetched, so resolving the operator login for it is a
+        # wasted ``gh api user`` call. Unreferenced watches are retired by the
+        # sweep after the (skipped) fetch; referenced ones stay active.
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[_referencing_row(42)] if referenced else [],
+                watched_prs=[
+                    _watched(
+                        client="acme" if referenced else None,
+                        pr_state=_pr_state(state=terminal, hydrated_at=_OLD_STAMP),
+                    )
+                ],
+            )
+        )
+        urls = _record_fetches(monkeypatch)
+        calls: list[None] = []
+
+        def _counting_login() -> str | None:
+            calls.append(None)
+            return "the-operator"
+
+        monkeypatch.setattr("cw.operator_identity.cached_gh_login", _counting_login)
+
+        hydrate_pr_states(self._CONFIG)
+
+        assert calls == []
+        assert urls == []
 
 
 class TestHydratePrStatesRepoOverride:
