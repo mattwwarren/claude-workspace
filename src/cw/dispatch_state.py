@@ -6,8 +6,8 @@ state — usage-limit backoff expiry, the fleet-wide gh-availability probe cache
 a per-(client, ticket) marker recording an in-flight blocking review, so
 ``cw dev-queue status``/``cw doctor`` can distinguish a dead dispatch loop from
 one legitimately busy (#1742), the per-(client, ticket) open-PR probe cache
-backing the pre-dispatch stale-dispatch gate (#1862), and the per-client
-worker-tmp inode-exhaustion attention latches (#2470).
+backing the pre-dispatch stale-dispatch gate (#1862). The per-client worker-tmp
+inode-exhaustion attention latches (#2470) live in ``cw.dispatch_state_host_tmp``.
 Extracted from ``cw.config``; depends on ``cw.config`` for the state-dir
 accessors and the #1017 write guard, one-directional (``cw.config`` never
 imports this module).
