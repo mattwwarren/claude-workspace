@@ -17,9 +17,9 @@ The mechanism is not new -- this is a third producer for it.
 Since #2321 the same registration covers every releasable park
 (``_is_variant_b_gate_task``): a dependency hold registers under
 ``source="dependency_hold"``, and a ``prior_pipeline_pr_open`` park whose PR no
-other row carries is also watched. No code retires these watches (#3654). A
-leftover client-tagged watch makes another client's registration for the same
-repo and PR collide, the same limit #1927's stale-dispatch watches carry.
+other row carries is also watched. A watch retires (``status="dismissed"``)
+once its PR is terminal and no non-terminal row still references it (#3654).
+A dismissed entry never collides with a new registration.
 
 Shape mirrors ``cw.dispatch.pr_gate``: a small, single-purpose, tick-scoped
 module. Three phases, deliberately ordered so no network/subprocess work ever

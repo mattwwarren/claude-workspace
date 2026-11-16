@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Watched PRs retire, and hydration is capped (#3654).** A `WatchedPr` is dismissed (`status: dismissed`, kept, not deleted) once its PR is MERGED or CLOSED and no non-terminal row of its client references it through `blocked_on_pr`. The release tick retires it in the same save that releases the referencing row, and the hydrate pass sweeps it. Hydration skips dismissed and terminal watches and fetches at most 20 active watches per pass, oldest-hydrated first. The release evidence index ignores dismissed watches, and a dismissed watch never collides with a new registration. Operator note, accepted limits: a CLOSED-unmerged dependency hold whose PR is later reopened is no longer re-observed and stays parked until requeued or re-held; watches that always fail to fetch take a slot each pass; dismissed entries are not pruned; the board badge for such holds is deferred. See `docs/dispatch-runbook.md`.
+
 ## [1.101.0] - 2026-11-15
 
 ### Added

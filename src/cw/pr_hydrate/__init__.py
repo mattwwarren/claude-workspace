@@ -88,6 +88,7 @@ from cw.pr_hydrate.transitions import (
     _TERMINAL_PR_STATES,
     _diff_transitions,
     _is_candidate,
+    _is_watched_candidate,
 )
 from cw.pr_hydrate.watched import (
     WATCHED_PR_COUNTERPARTY,
@@ -96,6 +97,8 @@ from cw.pr_hydrate.watched import (
     _throttled,
     derive_counterparty,
     resolve_and_register_review_request,
+    select_watched_hydration_batch,
+    sweep_terminal_watched_prs,
 )
 
 if TYPE_CHECKING:
@@ -210,7 +213,9 @@ def _hydrate_watched_prs(
     (#1195) once-per-tick fallback; ``config.operator_github_login_by_repo``
     (#1171) is consulted per ``watched.repo`` via a pure dict lookup
     (``resolve_operator_login_for_repo``) — no extra ``gh api user`` call. A
-    ``dismissed`` watched PR is skipped (never fetched). A transient fetch
+    ``dismissed`` or terminal-state watched PR is skipped (never fetched), and
+    at most ``WATCHED_HYDRATION_CAP_PER_PASS`` watches are fetched per pass,
+    oldest-hydrated first (#3654). A transient fetch
     failure (``_derive_pr_state`` -> None) leaves the prior ``pr_state``
     untouched, mirroring the task path's best-effort contract. Each persist
     re-reads the store under ``dev_queue_lock()`` and matches by ``(repo,
@@ -219,9 +224,7 @@ def _hydrate_watched_prs(
     """
     from cw.operator_identity import resolve_operator_login_for_repo
 
-    for watched in watched_prs:
-        if watched.status != "active":
-            continue
+    for watched in select_watched_hydration_batch(watched_prs):
         effective_login = resolve_operator_login_for_repo(
             watched.repo, config, fallback=self_login
         )
@@ -455,7 +458,7 @@ def hydrate_pr_states(config: OrchestratorConfig) -> None:
         if t.auto_merge_rearm_pr_url is not None
         and t.auto_merge_rearm_pr_url != t.pr_url
     ]
-    has_active_watched_prs = any(w.status == "active" for w in store.watched_prs)
+    has_active_watched_prs = any(_is_watched_candidate(w) for w in store.watched_prs)
     self_login = (
         cached_gh_login()
         if candidates or owed_candidates or has_active_watched_prs
@@ -499,6 +502,10 @@ def hydrate_pr_states(config: OrchestratorConfig) -> None:
     # candidates (RFC 0011 S2) — the early ``if not candidates: return`` was
     # removed so a watched-PR-only store still hydrates.
     _hydrate_watched_prs(store.watched_prs, config=config, self_login=self_login)
+    # Retire watches whose PR reached a terminal state and that no row still
+    # references (#3654). Runs after the fetch so a just-observed MERGED/CLOSED
+    # is retired in the same pass; the release tick retires the rest.
+    sweep_terminal_watched_prs()
 
 
 __all__ = [

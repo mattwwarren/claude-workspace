@@ -4442,7 +4442,9 @@ event. The hold verb emits this event only in the narrow race where another
 client registers the same repo and PR after the pre-check and before the
 verb's own registration; the verb then exits non-zero and the row stays held.
 The serve-tick registration emits it on every tick while a collision persists.
-No code retires a `WatchedPr` (#3654), so a leftover watch keeps colliding.
+A `WatchedPr` retired by #3654 (dismissed once its PR is terminal and no row
+references it) no longer collides; a still-referenced terminal watch keeps
+colliding.
 
 Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
 (`orchestrator_config/operator_forward.py`): the condition requires two dev-queue clients
