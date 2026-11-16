@@ -274,8 +274,9 @@ GATE_TIMEOUT_BLOCKER_REASON: Literal["gate_timeout"] = "gate_timeout"
 # blocker.reason headless finalize emits when the base branch's
 # `quality_gates.ci_evidence` maps a gate to CI checks that have not all
 # finished green at the PR head (#3618): the create path deferred the gate to
-# CI, or the reuse pass found a mapped check pending, missing or red. The PR
-# exists (carried in `pr_info`) and cw did not arm auto-merge; the row parks
+# CI, or the reuse pass found a mapped check pending, missing or red, or the
+# base branch declares `ci_evidence` but PyYAML is unavailable. The PR exists
+# (carried in `pr_info`) and cw did not arm auto-merge; the row parks
 # BLOCKED_ON_USER at FINALIZE and `cw dev-queue requeue` releases it. Absent
 # from FINALIZE_REGRESS_BLOCKER_REASONS (waiting on CI is not an impl defect;
 # a red mapped check takes the operator's parked-row `--regress` route) and
