@@ -62,15 +62,19 @@ def test_appendix_park_sourced_hold_error_strings_are_verbatim() -> None:
     ) in text
 
 
-def test_changelog_fixed_entry_under_unreleased() -> None:
+def test_changelog_fixed_entry_under_fixed_heading() -> None:
+    # The entry sits under [Unreleased] until a release cut moves it into its
+    # version section, so find it wherever it lives and check that its nearest
+    # heading is "### Fixed".
     lines = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8").splitlines()
-    start = lines.index("## [Unreleased]")
-    end = next(i for i in range(start + 1, len(lines)) if lines[i].startswith("## ["))
-    section = "\n".join(lines[start:end])
-    assert "### Fixed" in section
-    entry = next(
-        line for line in lines[start:end] if "no longer silently ignores" in line
+    entry_index = next(
+        i for i, line in enumerate(lines) if "no longer silently ignores" in line
     )
+    heading = next(
+        line for line in reversed(lines[:entry_index]) if line.startswith("### ")
+    )
+    assert heading == "### Fixed"
+    entry = lines[entry_index]
     for token in (
         "#3673",
         "pyyaml-unavailable",
