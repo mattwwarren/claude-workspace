@@ -633,7 +633,7 @@ class TestFixInvocation:
         )
         argv = json.loads(path.read_text(encoding="utf-8"))["argv_sanitized"]
         assert argv[6 : 6 + len(_LEAN_FIX_LITERAL)] == _LEAN_FIX_LITERAL
-        assert "--ignore-user-config" not in argv
+        assert "--ignore-user-config" in argv
         assert "model_reasoning_effort=high" in argv
 
     def test_fix_capacity_failure_keeps_todays_classification_with_jsonl_stdout(
@@ -2582,10 +2582,9 @@ class TestFixPromptAndArgv:
         # the approval override (#1767) always rides.
         assert not any(a.startswith("model_reasoning_effort=") for a in argv)
         assert argv[4:6] == ["-c", "approval_policy=never"]
-        # The fix lean block (#1711) follows the policy pair and precedes --json,
-        # and keeps the host config: no --ignore-user-config.
+        # The fix lean block (#1711) follows the policy pair and precedes --json.
         assert argv[6 : 6 + len(_LEAN_FIX_LITERAL)] == _LEAN_FIX_LITERAL
-        assert "--ignore-user-config" not in argv
+        assert "--ignore-user-config" in argv
         assert argv[6 + len(_LEAN_FIX_LITERAL)] == "--json"
 
     def test_argv_pins_reasoning_effort(self) -> None:

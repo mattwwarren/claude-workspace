@@ -179,32 +179,31 @@ _LEAN_LITERAL = [
 ]
 
 
-# The fix-cycle form: the reviewer block minus --ignore-user-config (#1711).
-_LEAN_FIX_LITERAL = [arg for arg in _LEAN_LITERAL if arg != "--ignore-user-config"]
+# The fix-cycle form uses the same shared profile block (#1711).
+_LEAN_FIX_LITERAL = [*_LEAN_LITERAL]
 
 
 def test_lean_profile_argv_is_the_pinned_literal() -> None:
-    argv = _lean_profile_argv(ignore_user_config=True)
+    argv = _lean_profile_argv()
     assert argv == _LEAN_LITERAL
     assert argv.count("--disable") == 10
     assert "personality" not in argv
 
 
-def test_lean_profile_argv_fix_form_keeps_host_config() -> None:
-    argv = _lean_profile_argv(ignore_user_config=False)
+def test_lean_profile_argv_fix_form_is_the_shared_profile() -> None:
+    argv = _lean_profile_argv()
     assert argv == _LEAN_FIX_LITERAL
-    assert "--ignore-user-config" not in argv
+    assert "--ignore-user-config" in argv
     assert "--strict-config" in argv
     assert argv.count("--disable") == 10
 
 
 def test_lean_profile_argv_never_repeats_the_exec_policy_flags() -> None:
-    for ignore_user_config in (True, False):
-        argv = _lean_profile_argv(ignore_user_config=ignore_user_config)
-        assert "--sandbox" not in argv
-        assert not any("approval_policy" in token for token in argv)
+    argv = _lean_profile_argv()
+    assert "--sandbox" not in argv
+    assert not any("approval_policy" in token for token in argv)
 
 
 def test_lean_profile_argv_returns_a_fresh_list() -> None:
-    _lean_profile_argv(ignore_user_config=True).append("--mutated")
-    assert _lean_profile_argv(ignore_user_config=True) == _LEAN_LITERAL
+    _lean_profile_argv().append("--mutated")
+    assert _lean_profile_argv() == _LEAN_LITERAL
