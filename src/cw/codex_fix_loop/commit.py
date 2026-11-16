@@ -78,7 +78,7 @@ from cw.codex_review import (
     _SensitiveHit,
     resolve_review_config_source,
 )
-from cw.codex_review._const import _JSON_FLAG, _lean_profile_argv
+from cw.codex_review._const import _JSON_FLAG
 from cw.models.enums import DEFAULT_FIX_SANDBOX_MODE, SandboxMode
 
 if TYPE_CHECKING:
@@ -130,8 +130,7 @@ def _build_fix_codex_argv(
         "codex",
         "exec",
         *_exec_policy_argv(sandbox_mode),
-        # Lean profile (#1711); park.py rebuilds this from the same builder.
-        *_lean_profile_argv(),
+        # Fix cycles retain the host's mutation-safety policy (#1711).
         # JSONL stdout so the turn's token usage can be read (#3063). No
         # ``--ephemeral``: a fix cycle keeps its rollout under ~/.codex.
         _JSON_FLAG,

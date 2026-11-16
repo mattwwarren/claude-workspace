@@ -179,23 +179,11 @@ _LEAN_LITERAL = [
 ]
 
 
-# The fix-cycle form uses the same shared profile block (#1711).
-_LEAN_FIX_LITERAL = [*_LEAN_LITERAL]
-
-
 def test_lean_profile_argv_is_the_pinned_literal() -> None:
     argv = _lean_profile_argv()
     assert argv == _LEAN_LITERAL
     assert argv.count("--disable") == 10
     assert "personality" not in argv
-
-
-def test_lean_profile_argv_fix_form_is_the_shared_profile() -> None:
-    argv = _lean_profile_argv()
-    assert argv == _LEAN_FIX_LITERAL
-    assert "--ignore-user-config" in argv
-    assert "--strict-config" in argv
-    assert argv.count("--disable") == 10
 
 
 def test_lean_profile_argv_never_repeats_the_exec_policy_flags() -> None:

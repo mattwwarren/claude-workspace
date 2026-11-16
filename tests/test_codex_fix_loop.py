@@ -98,7 +98,6 @@ from tests._shared.review_builders import (
 )
 from tests._shared.session_seeding import _make_ticket_task
 from tests._tool_fakes import codex_usage_stdout
-from tests.test_codex_review_const import _LEAN_FIX_LITERAL
 from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:
@@ -615,10 +614,10 @@ class TestFixInvocation:
         bundle = diagnostics_bundle_dir("s-fix-error")
         assert list(bundle.glob("fix-cycle-1-nonzero_exit-*.json"))
 
-    def test_park_argv_carries_the_lean_flags_and_effort_pin(
+    def test_park_argv_retains_host_safety_policy_and_effort_pin(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
-        """#1711 R3: ``_park_fix_failure`` rebuilds from the one fix builder."""
+        """#1711: park diagnostics use the host-safe fix builder."""
         worktree = _worktree(make_git_repo, "wt-fix-park-argv")
         runner = _FixLoopRunner(
             [_MF_DOC],
@@ -632,8 +631,8 @@ class TestFixInvocation:
             "fix-cycle-1-nonzero_exit-*.json"
         )
         argv = json.loads(path.read_text(encoding="utf-8"))["argv_sanitized"]
-        assert argv[6 : 6 + len(_LEAN_FIX_LITERAL)] == _LEAN_FIX_LITERAL
-        assert "--ignore-user-config" in argv
+        assert "--ignore-user-config" not in argv
+        assert "--strict-config" not in argv
         assert "model_reasoning_effort=high" in argv
 
     def test_fix_capacity_failure_keeps_todays_classification_with_jsonl_stdout(
@@ -2578,14 +2577,11 @@ class TestFixPromptAndArgv:
         assert "-o" not in argv
         assert argv[-2:] == ["-m", "gpt-x"]
         # An unpinned effort emits no model_reasoning_effort pair (codex's
-        # built-in default applies; the lean profile ignores config.toml, #1711);
+        # built-in default applies when no effort is pinned;
         # the approval override (#1767) always rides.
         assert not any(a.startswith("model_reasoning_effort=") for a in argv)
         assert argv[4:6] == ["-c", "approval_policy=never"]
-        # The fix lean block (#1711) follows the policy pair and precedes --json.
-        assert argv[6 : 6 + len(_LEAN_FIX_LITERAL)] == _LEAN_FIX_LITERAL
-        assert "--ignore-user-config" in argv
-        assert argv[6 + len(_LEAN_FIX_LITERAL)] == "--json"
+        assert argv[6] == "--json"
 
     def test_argv_pins_reasoning_effort(self) -> None:
         argv = _build_fix_codex_argv(model="gpt-x", reasoning_effort="max")
@@ -2607,7 +2603,6 @@ class TestFixPromptAndArgv:
             "read-only",
             "-c",
             "approval_policy=never",
-            *_LEAN_FIX_LITERAL,
             "--json",
         ]
 

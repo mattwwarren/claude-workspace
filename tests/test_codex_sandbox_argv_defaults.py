@@ -40,7 +40,7 @@ from cw.codex_runner import FakeCodexRunner
 from cw.models import SandboxMode, StageExecutorConfig
 from tests._codex_review_helpers import _doc_json, _is_fix_argv
 from tests.test_codex_fix_loop import _MF_DOC, _run_loop, _worktree
-from tests.test_codex_review_const import _LEAN_FIX_LITERAL, _LEAN_LITERAL
+from tests.test_codex_review_const import _LEAN_LITERAL
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -142,7 +142,6 @@ _FIX_LITERAL = [
     "workspace-write",
     "-c",
     "approval_policy=never",
-    *_LEAN_FIX_LITERAL,
     "--json",
     "-c",
     "model_reasoning_effort=high",
