@@ -178,6 +178,8 @@ Run the resolved script to auto-detect quality gates:
 
 This scans for `pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod` and checks the project's `CLAUDE.md` for `## Quality Gates` overrides. `CLAUDE.md` remains the canonical contract filename even when this workflow is reused from Codex.
 
+- **`package.json` gates come from the declared `scripts`.** `scripts.lint` gives `npm run lint` (autofix `npm run lint -- --fix`), `scripts.test` gives `npm test`, and `scripts.typecheck` gives `npm run typecheck`. Without a typecheck script, `npx tsc --noEmit` runs only when a root `tsconfig.json` exists. A repo with neither gets no such gate, and `detected_from` still lists `package.json`. The npm-init placeholder test script is not a test gate. These scripts are read from the branch's own `package.json` in the worktree, unlike CLAUDE.md gate policy, which comes from the default branch.
+
 How the `## Quality Gates` section is read:
 
 - **Source: the default branch's committed `CLAUDE.md`.** With no `--claude-md` path, `detect-gates` reads `./CLAUDE.md` as committed on the remote default branch (whatever `origin/HEAD` points at), so a branch cut before a gate change, or one that edits its own gate list, is still held to the default branch's gates; a branch's own gate edits count once they merge. When there is no git repo, no `origin/HEAD`, or no such file on that branch, it falls back to the worktree's `CLAUDE.md`, as before. The result's `claude_md_source` (`default-branch` or `worktree`) says which copy was used; `detected_from` is unchanged. An explicit `--claude-md` path always wins.
