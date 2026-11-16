@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 
@@ -29,6 +29,7 @@ from tests._shared.ci_evidence_fakes import (
 )
 from tests._shared.git_repos import add_bare_origin, git_in
 from tests._tool_fakes import gh_calls, shim_env, stub_gh_ci
+from tests.test_prep_pr_finalize import _python
 from tests.test_prep_pr_state import _SCRIPT, _mod
 
 if TYPE_CHECKING:
@@ -163,13 +164,39 @@ class TestCiDeferral:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _gates(monkeypatch, GATE)
-        _config(monkeypatch, CONFIG)
+        _config(monkeypatch, "quality_gates:\n  timeouts:\n    tests: 5\n")
         monkeypatch.setattr(_mod, "yaml", None)
         assert _mod.ci_deferral("main") == {
             "deferred": [],
             "local": [GATE],
             "reason": "pyyaml-unavailable",
         }
+
+    @pytest.mark.parametrize("config", ["", "quality_gates:\n  ci_evidence: {}\n"])
+    def test_without_pyyaml_an_undeclared_key_keeps_the_reason(
+        self, monkeypatch: pytest.MonkeyPatch, config: str
+    ) -> None:
+        _gates(monkeypatch, GATE)
+        _config(monkeypatch, config)
+        monkeypatch.setattr(_mod, "yaml", None)
+        assert _mod.ci_deferral("main") == {
+            "deferred": [],
+            "local": [GATE],
+            "reason": "pyyaml-unavailable",
+        }
+
+    def test_without_pyyaml_a_declared_key_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _gates(monkeypatch, GATE)
+        _config(monkeypatch, CONFIG)
+        monkeypatch.setattr(_mod, "yaml", None)
+        with pytest.raises(_mod.CiEvidenceUnreadableError) as info:
+            _mod.ci_deferral("main")
+        text = str(info.value).lower()
+        assert "pyyaml" in text
+        assert "pyyaml-unavailable" in text
+        assert "origin/main" in text
 
     def test_no_gates_detected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _gates(monkeypatch)
@@ -184,6 +211,7 @@ class TestCiDeferral:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _gates(monkeypatch)
+        _config(monkeypatch, "")
         monkeypatch.setattr(_mod, "yaml", None)
         assert _mod.ci_deferral("main")["reason"] == "pyyaml-unavailable"
 
@@ -444,13 +472,53 @@ class TestCiReusePlan:
         plan = _reuse_plan(monkeypatch, Github(pr(), _green()), config="")
         assert plan == {"park": None, "skip": [], "run": [GATE, "ruff"]}
 
-    def test_without_pyyaml_everything_runs_locally(
+    def test_without_pyyaml_a_declared_key_parks_hold_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _gates(monkeypatch, GATE)
         monkeypatch.setattr(_mod, "yaml", None)
-        plan = _reuse_plan(monkeypatch, Github(pr(), _green()))
+        github = Github(pr(), _green())
+        plan = _reuse_plan(monkeypatch, github)
+        assert plan == {
+            "park": {
+                "flavor": "hold_error",
+                "cause": "pyyaml-unavailable",
+                "gate": None,
+                "checks": [],
+                "failed_check": None,
+                "check_state": None,
+                "failed_url": None,
+                "sha": HEAD,
+            },
+            "skip": [],
+            "run": [],
+        }
+        assert github.pr_calls == []
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            "",
+            "quality_gates:\n  timeouts:\n    tests: 5\n",
+            "quality_gates:\n  ci_evidence: {}\n",
+        ],
+        ids=["absent", "no-key", "empty-map"],
+    )
+    def test_without_pyyaml_and_no_declared_key_runs_locally(
+        self, monkeypatch: pytest.MonkeyPatch, config: str
+    ) -> None:
+        _gates(monkeypatch, GATE)
+        monkeypatch.setattr(_mod, "yaml", None)
+        plan = _reuse_plan(monkeypatch, Github(pr(), _green()), config=config)
         assert plan == {"park": None, "skip": [], "run": [GATE]}
+
+    def test_hold_error_park_has_null_sha_when_head_unresolved(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(_mod, "_run_git", git_returning(""))
+        park = _mod._pyyaml_park()
+        assert park["flavor"] == "hold_error"
+        assert park["sha"] is None
 
     def test_repo_and_base_are_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _gates(monkeypatch, GATE)
@@ -569,8 +637,14 @@ class TestOriginBaseIsTheOnlyMapSource:
         assert result["reason"] == "mapped"
 
 
-class TestRealCliThroughGhShim:
-    """The real script as a subprocess, with ``gh`` replaced by ``stub_gh_ci``."""
+class _ShimHarness:
+    """The real script as a subprocess, with ``gh`` replaced by ``stub_gh_ci``.
+
+    Not collected by pytest. ``_NO_SITE`` picks the interpreter: ``True`` runs
+    the script under ``python -S``, where PyYAML is not importable.
+    """
+
+    _NO_SITE: ClassVar[bool] = False
 
     def _run(
         self,
@@ -579,7 +653,7 @@ class TestRealCliThroughGhShim:
         *argv: str,
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [sys.executable, str(_SCRIPT), *argv],
+            [*_python(self._NO_SITE), str(_SCRIPT), *argv],
             cwd=repo,
             env=shim_env(bin_dir, HOME=str(repo)),
             capture_output=True,
@@ -589,6 +663,10 @@ class TestRealCliThroughGhShim:
 
     def _head(self, repo: Path) -> str:
         return git_in(repo, "rev-parse", "HEAD")
+
+
+class TestRealCliThroughGhShim(_ShimHarness):
+    """The real script as a subprocess, with ``gh`` replaced by ``stub_gh_ci``."""
 
     def test_ci_deferral_defers_the_mapped_gate(
         self, tmp_path: Path, make_git_repo: Callable[..., Path]

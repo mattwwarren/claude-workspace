@@ -1161,6 +1161,61 @@ def parse_ci_evidence_map(text: str, source: str) -> dict[str, list[str]]:
     return evidence
 
 
+CI_PARK_HOLD_ERROR = "hold_error"
+CI_REASON_PYYAML_UNAVAILABLE = "pyyaml-unavailable"
+_PYYAML_DECLARED = (
+    "quality_gates.ci_evidence is declared on origin/{base} but PyYAML is"
+    " unavailable to this python3 (pyyaml-unavailable)"
+)
+# A ``ci_evidence`` key, bare or quoted, anywhere on a line; ``value`` is the rest.
+_CI_EVIDENCE_KEY_RE = re.compile(
+    rf"""(?<![\w-])["']?{GATE_CI_EVIDENCE_CONFIG_KEY}["']?\s*:(?P<value>.*)"""
+)
+# The only inline values that mean "declares no map" (exact case: Null/NULL do not).
+_CI_EVIDENCE_EMPTY_VALUES = frozenset({"{}", "null", "~"})
+
+
+class CiEvidenceUnreadableError(Exception):
+    """The base config declares ``ci_evidence`` but PyYAML is missing (#3673)."""
+
+
+def _declares_ci_evidence(text: str) -> bool:
+    """Whether *text* declares a ``ci_evidence`` key with a non-empty inline value.
+
+    A text-level, nesting-blind, fail-closed scan: it does not track
+    ``quality_gates:`` nesting, so an unrelated key of the same name also counts.
+    A false positive yields a named park or friction with a stated remedy; a
+    false negative is the silent local-run bug this scan exists to prevent.
+    """
+    for raw in text.splitlines():
+        line = _strip_inline_comment(raw)
+        if line.lstrip().startswith("#"):
+            continue
+        match = _CI_EVIDENCE_KEY_RE.search(line)
+        if match and match["value"].strip() not in _CI_EVIDENCE_EMPTY_VALUES:
+            return True
+    return False
+
+
+def _ci_evidence_unreadable(base: str) -> bool:
+    """Whether ``origin/<base>`` declares ``ci_evidence`` and PyYAML cannot read it."""
+    return yaml is None and _declares_ci_evidence(_base_config_text(base))
+
+
+def _pyyaml_park() -> dict[str, Any]:
+    """The ``hold_error`` park for a declared map that no PyYAML can read (#3673)."""
+    return {
+        "flavor": CI_PARK_HOLD_ERROR,
+        "cause": CI_REASON_PYYAML_UNAVAILABLE,
+        "gate": None,
+        "checks": [],
+        "failed_check": None,
+        "check_state": None,
+        "failed_url": None,
+        "sha": _run_git(["rev-parse", "HEAD"]) or None,
+    }
+
+
 def _base_config_text(base: str) -> str:
     """Committed project config on ``origin/<base>``; ``""`` if absent or unreadable.
 
@@ -1390,7 +1445,14 @@ def gate_ci_evidence(
     if yaml is None:
         # Distinct from "no-map-entry": the map cannot be read at all, so a
         # configured repo must be able to see why nothing is being skipped.
-        return {**verdict, "reason": "pyyaml-unavailable"}
+        if _ci_evidence_unreadable(base):
+            logger.warning(
+                "%s; gate %s runs locally and the opt-in is ignored. Install PyYAML"
+                " into the interpreter that runs prep_pr_state.py.",
+                _PYYAML_DECLARED.format(base=base),
+                name,
+            )
+        return {**verdict, "reason": CI_REASON_PYYAML_UNAVAILABLE}
     checks = parse_ci_evidence_map(_base_config_text(base), f"origin/{base}").get(
         name, []
     )
@@ -1427,9 +1489,17 @@ def ci_deferral(base: str) -> dict[str, Any]:
 
     A gate is deferred only on an exact-name ``quality_gates.ci_evidence``
     entry; everything else, including an unreadable or malformed map, stays
-    local. ``deferred`` and ``local`` follow detect order and are disjoint.
-    No PR is needed and GitHub is never consulted.
+    local, except PyYAML missing with the key declared, which raises
+    ``CiEvidenceUnreadableError`` (the create path cannot park). ``deferred``
+    and ``local`` follow detect order and are disjoint. No PR is needed and
+    GitHub is never consulted.
     """
+    if _ci_evidence_unreadable(base):
+        raise CiEvidenceUnreadableError(
+            _PYYAML_DECLARED.format(base=base)
+            + "; install PyYAML into the interpreter that runs prep_pr_state.py,"
+            " or remove the entry"
+        )
     names = _gate_names()
     mapping = (
         parse_ci_evidence_map(_base_config_text(base), f"origin/{base}")
@@ -1440,7 +1510,7 @@ def ci_deferral(base: str) -> dict[str, Any]:
     if deferred:
         reason = "mapped"
     elif yaml is None:
-        reason = "pyyaml-unavailable"
+        reason = CI_REASON_PYYAML_UNAVAILABLE
     elif not names:
         reason = "no-gates"
     else:
@@ -1472,11 +1542,15 @@ def _reuse_park(verdicts: list[dict[str, Any]]) -> dict[str, Any] | None:
 def ci_reuse_plan(pr: int, repo: str | None, base: str) -> dict[str, Any]:
     """Per detected gate: skip (mapped checks green at the live head), park or run.
 
-    A mapped check that is pending, missing or red parks the whole run, so
-    ``skip`` and ``run`` are then empty. Otherwise every gate whose checks are
-    all green is in ``skip`` and every other gate is in ``run``: a consumer
-    runs any gate not named in ``skip`` locally.
+    A mapped check that is pending, missing or red parks the whole run, and so
+    does a base branch that declares ``ci_evidence`` when PyYAML is unavailable
+    (``hold_error``, cause ``pyyaml-unavailable``); ``skip`` and ``run`` are
+    then empty. Otherwise every gate whose checks are all green is in ``skip``
+    and every other gate is in ``run``: a consumer runs any gate not named in
+    ``skip`` locally.
     """
+    if _ci_evidence_unreadable(base):
+        return {"park": _pyyaml_park(), "skip": [], "run": []}
     verdicts = [gate_ci_evidence(n, pr, repo, base) for n in _gate_names()]
     park = _reuse_park(verdicts)
     if park is not None:
@@ -1720,7 +1794,12 @@ def cmd_gate_ci_evidence(args: argparse.Namespace) -> None:
 
 def cmd_ci_deferral(args: argparse.Namespace) -> None:
     """Handle ci-deferral subcommand."""
-    print(json.dumps(ci_deferral(args.base), indent=2))
+    try:
+        result = ci_deferral(args.base)
+    except CiEvidenceUnreadableError:
+        logger.exception("ci-deferral refused: PyYAML is unavailable")
+        sys.exit(1)
+    print(json.dumps(result, indent=2))
 
 
 def cmd_ci_reuse_plan(args: argparse.Namespace) -> None:
@@ -1777,7 +1856,9 @@ def _add_ci_evidence_parsers(
         help=(
             "Report which detected gates the base branch's"
             " quality_gates.ci_evidence maps to CI checks (create path: those"
-            " gates are deferred to CI instead of run locally); exit 0 always"
+            " gates are deferred to CI instead of run locally); exit 0, except"
+            " exit 1 when PyYAML is missing and the base config declares"
+            " ci_evidence"
         ),
     )
     deferral_parser.add_argument(
@@ -1795,7 +1876,8 @@ def _add_ci_evidence_parsers(
         help=(
             "For every detected gate decide skip (mapped checks green at the"
             " PR's live head), park (a mapped check is pending, missing or"
-            " red) or run locally; one JSON object, exit 0"
+            " red, or the base config declares ci_evidence without PyYAML) or"
+            " run locally; one JSON object, exit 0"
         ),
     )
     reuse_parser.add_argument(
