@@ -772,6 +772,7 @@ def seed_codex_stage_run(
 _PREP_PR_STATE_STUB_TEMPLATE = '''\
 """prep_pr_state stub: understands gate-timeout, ci-deferral, ci-reuse-plan."""
 import json
+import os
 import sys
 import time
 
@@ -780,14 +781,37 @@ CALLS = __CALLS__
 cfg = json.load(open(SIDE))
 with open(CALLS, "a") as handle:
     handle.write(" ".join(sys.argv[1:]) + "\\n")
+
+
+def _hold(pair):
+    # Same protocol as tests/_hold_clock.py Hold.shell: block until the
+    # test-side clock creates the release file (bounded, ~60 s).
+    if pair is None:
+        return
+    marker, release = pair
+    try:
+        os.remove(release)
+    except FileNotFoundError:
+        pass
+    open(marker, "w").close()
+    i = 0
+    while not os.path.exists(release) and i < 3000:
+        time.sleep(0.02)
+        i += 1
+    try:
+        os.remove(marker)
+    except FileNotFoundError:
+        pass
+
+
 if sys.argv[1] == "detect-gates":
-    time.sleep(cfg["detect_delay"])
+    _hold(cfg["detect_hold"])
     raw = cfg["detect_raw"]
     print(raw if raw is not None else json.dumps(
         {"gates": cfg["gates"], "detected_from": []}))
     sys.exit(cfg["detect_exit"])
 if sys.argv[1] == "gate-timeout":
-    time.sleep(cfg["ceiling_delay"])
+    _hold(cfg["ceiling_hold"])
     raw = cfg["ceiling_raw"]
     print(raw if raw is not None else json.dumps(
         {"gate": sys.argv[2], "foreground_ceiling_s": cfg["ceilings"][sys.argv[2]]}))
@@ -818,8 +842,8 @@ class PrepPrStateStub:
         self.config: dict[str, object] = {
             "gates": [],
             "ceilings": {},
-            "detect_delay": 0,
-            "ceiling_delay": 0,
+            "detect_hold": None,
+            "ceiling_hold": None,
             "detect_raw": None,
             "detect_exit": 0,
             "ceiling_raw": None,

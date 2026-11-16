@@ -19,7 +19,6 @@ import shlex
 import shutil
 import subprocess
 import threading
-import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -54,6 +53,7 @@ from tests._codex_review_helpers import (
     _FakeRunner,
     assert_clean_after_refusal,
 )
+from tests._hold_clock import Hold, HoldClock, install_hold_clock, wait_for_path
 from tests._shared.git_repos import (
     DIR_TO_FILE_SH,
     add_bare_origin,
@@ -77,7 +77,6 @@ _LOGGER = "cw.codex_fix_loop.gates"
 _SCOPE = GateScope(ticket_id="T-1", client="test", session_id="s-1", cycle=1)
 _CEILING = 5.0
 _SLOW_CEILING = 0.2
-_SLOW_SLEEP = "0.7"
 _INTERRUPT_TICK = 2
 _MIN_OUTPUT_GAP_S = 0.3
 _NONE_FRICTION = "codex_fix_gates_none_detected"
@@ -115,6 +114,12 @@ def scratch_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 @pytest.fixture
 def slow_events(capture_events: Callable[..., list[tuple]]) -> list[tuple]:
     return capture_events(_LOGGER, OrchestratorEventType.CODEX_FIX_GATE_SLOW)
+
+
+@pytest.fixture
+def hold_clock(state: Path, monkeypatch: pytest.MonkeyPatch) -> HoldClock:
+    """Gate timing advances only while a held child is in flight (#3585)."""
+    return install_hold_clock(monkeypatch, gates, state)
 
 
 @pytest.fixture
@@ -1040,11 +1045,12 @@ class TestSlowGate:
         repo: Path,
         state: Path,
         slow_events: list[tuple],
+        hold_clock: HoldClock,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _forbid_kill(monkeypatch)
         marker = state / "done"
-        cmd = f"sleep {_SLOW_SLEEP}; echo done > {shlex.quote(str(marker))}"
+        cmd = hold_clock.hold.shell(f"echo done > {shlex.quote(str(marker))}")
 
         assert _run(_plan(("slow", cmd, _SLOW_CEILING)), repo) is None
 
@@ -1057,18 +1063,21 @@ class TestSlowGate:
         assert payload["cycle"] == 1
         assert payload["gate"] == "slow"
         assert payload["elapsed_s"] >= _SLOW_CEILING
+        assert payload["elapsed_s"] == hold_clock.step
         assert payload["ceiling_s"] == _SLOW_CEILING
+        assert hold_clock.total_held_reads >= hold_clock.polls
 
     def test_slow_red_gate_keeps_its_real_exit_code(
         self,
         repo: Path,
         slow_events: list[tuple],
+        hold_clock: HoldClock,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _forbid_kill(monkeypatch)
 
         failure = _run(
-            _plan(("slow", f"sleep {_SLOW_SLEEP}; exit 3", _SLOW_CEILING)), repo
+            _plan(("slow", hold_clock.hold.shell("exit 3"), _SLOW_CEILING)), repo
         )
 
         assert len(slow_events) == 1
@@ -1085,8 +1094,9 @@ class TestSlowGate:
         self,
         repo: Path,
         slow_events: list[tuple],
+        hold_clock: HoldClock,
     ) -> None:
-        cmd = f"sleep {_SLOW_SLEEP}"
+        cmd = hold_clock.hold.shell()
 
         assert (
             _run(_plan(("a", cmd, _SLOW_CEILING), ("b", cmd, _SLOW_CEILING)), repo)
@@ -1100,11 +1110,12 @@ class TestSlowGate:
         repo: Path,
         home_stub: PrepPrStateStub,
         slow_events: list[tuple],
+        hold_clock: HoldClock,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(gates, "SLOW_HELPER_SECONDS", 0.1)
         home_stub.gates(("lint", "true", 5))
-        home_stub.set(detect_delay=0.4)
+        home_stub.set(detect_hold=hold_clock.hold.config())
 
         plan = plan_cycle_gates(repo, _SCOPE)
 
@@ -1112,7 +1123,7 @@ class TestSlowGate:
         assert [e[1]["gate"] for e in slow_events] == ["detect-gates"]
 
         slow_events.clear()
-        home_stub.set(detect_delay=0, ceiling_delay=0.4)
+        home_stub.set(detect_hold=None, ceiling_hold=hold_clock.hold.config())
 
         plan = plan_cycle_gates(repo, _SCOPE)
 
@@ -1120,17 +1131,24 @@ class TestSlowGate:
         assert [e[1]["gate"] for e in slow_events] == ["gate-timeout lint"]
 
     def test_a_failed_emit_never_changes_the_outcome(
-        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        repo: Path,
+        hold_clock: HoldClock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        calls = {"n": 0}
+
         def _fail(*_a: object, **_k: object) -> None:
+            calls["n"] += 1
             msg = "inbox unwritable"
             raise OSError(msg)
 
         monkeypatch.setattr(gates, "record_event", _fail)
 
-        assert (
-            _run(_plan(("slow", f"sleep {_SLOW_SLEEP}", _SLOW_CEILING)), repo) is None
-        )
+        outcome = _run(_plan(("slow", hold_clock.hold.shell(), _SLOW_CEILING)), repo)
+
+        assert outcome is None
+        assert calls["n"] == 1
 
     def test_source_never_names_a_kill_mechanism(self) -> None:
         source = Path(gates.__file__).read_text(encoding="utf-8")
@@ -1151,8 +1169,9 @@ class TestSlowGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _forbid_kill(monkeypatch)
+        hold = Hold(state)
         marker = state / "survivor"
-        cmd = f"sleep 0.6; echo alive > {shlex.quote(str(marker))}"
+        cmd = hold.shell(f"echo alive > {shlex.quote(str(marker))}")
         real = gates._stream_new
         ticks = {"n": 0}
 
@@ -1164,12 +1183,17 @@ class TestSlowGate:
 
         monkeypatch.setattr(gates, "_stream_new", _interrupt)
 
-        with pytest.raises(KeyboardInterrupt):
-            _run(_plan(("sleeper", cmd, _CEILING)), repo)
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                _run(_plan(("sleeper", cmd, _CEILING)), repo)
 
-        deadline = time.monotonic() + 1.5
-        while not marker.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
+            # The child must pass its start-of-hold ``rm -f RELEASE`` before the
+            # release is touched, or it would delete the release and hang.
+            assert wait_for_path(hold.marker)
+            hold.release.touch()
+            assert wait_for_path(marker)
+        finally:
+            hold.release.touch()
         assert marker.exists()
 
 
@@ -1495,11 +1519,12 @@ class TestAutofix:
         self,
         repo: Path,
         slow_events: list[tuple],
+        hold_clock: HoldClock,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _forbid_kill(monkeypatch)
         _cycle_edit(repo)
-        fix = f"sleep {_SLOW_SLEEP}; {_FMT_FIX}"
+        fix = hold_clock.hold.shell(_FMT_FIX)
         plan = _plan_of(PlannedGate("fmt", _FMT_CHECK, _SLOW_CEILING, fix))
 
         failure = _run(plan, repo, touched=_TRACKED_TOUCHED)
