@@ -501,27 +501,31 @@ clients:
 
 ### Codex Lean Reviewer Profile
 
-Every codex reviewer role and fix cycle (#1711) runs `codex exec` with a fixed,
-cw-owned lean profile, placed right after the `--sandbox` / `approval_policy`
-pair: `--ignore-user-config`, `--strict-config`, `-c project_doc_max_bytes=0`,
+Every codex reviewer role (#1711) runs `codex exec` with a fixed, cw-owned lean
+profile, placed right after the `--sandbox` / `approval_policy` pair:
+`--ignore-user-config`, `--strict-config`, `-c project_doc_max_bytes=0`,
 `-c mcp_servers={}` and one `--disable` for each of `hooks`, `memories`,
 `multi_agent`, `multi_agent_v2`, `plugins`, `plugin_sharing`, `browser_use`,
 `browser_use_external`, `browser_use_full_cdp_access` and `computer_use`. It is
-hard-coded: no per-lane override and no opt-out. The plan, impl, finalize and
-tracker-IO turns and the capability probe are unchanged.
+hard-coded: no per-lane override and no opt-out. The fix cycle runs the same
+block without `--ignore-user-config`, so it keeps the host's sandbox and
+shell-environment policy. The plan, impl, finalize and tracker-IO turns and the
+capability probe are unchanged.
 
 - **What reaches the reviewer:** the agent spec, `.claude/review-extras.md`,
-  and the repo policy cw inlines into the prompt. Nothing else is read from the
-  host.
+  and the repo policy cw inlines into the prompt. The reviewer ignores the
+  operator's personal `config.toml`; the fix cycle keeps it.
 - **AGENTS.md:** `project_doc_max_bytes=0` drops any `AGENTS.md`-based policy
   of a client repo, because no cw module inlines `AGENTS.md`. Put required
   review policy in `.claude/review-extras.md` or `.claude/review-policy.md`.
-- **`~/.codex/config.toml`:** it no longer influences review or fix runs. Auth
-  in `$CODEX_HOME` still works. A host whose credentials or provider are
-  selected by `config.toml` keys fails its reviews loudly.
-- **Fix cycle:** `[sandbox_workspace_write]` and `shell_environment_policy` in
-  a host config are dropped. Whether a fix cycle still writes and finishes
-  under `--ignore-user-config` is not probed; the first live fix cycle shows it.
+- **`~/.codex/config.toml`:** reviewers do not read it. Auth in `$CODEX_HOME`
+  still works. A host whose credentials or provider are selected by
+  `config.toml` keys fails its reviews loudly. A fix cycle keeps its sandbox and
+  shell-environment policy and loses only project docs, MCP and the listed
+  features.
+- **Fix cycle:** `--ignore-user-config` is omitted, so `[sandbox_workspace_write]`
+  and `shell_environment_policy` from the host config still apply. The fix argv
+  is not probed live; the first live fix cycle shows it.
 - **MCP:** `-c mcp_servers={}` is the blanket switch. Whether it removes a
   server defined in the system or project layer is not probed.
 - **Version skew:** flags were probed on codex-cli 0.167.0 only. A codex that

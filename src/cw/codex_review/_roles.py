@@ -174,7 +174,7 @@ def _build_generic_codex_argv(
         "codex",
         "exec",
         *_exec_policy_argv(sandbox_mode),
-        *_lean_profile_argv(),
+        *_lean_profile_argv(ignore_user_config=True),
         *_AUDIT_ARGV_FLAGS,
         *_reasoning_effort_argv(reasoning_effort),
         "--output-schema",

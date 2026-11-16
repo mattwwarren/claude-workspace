@@ -130,7 +130,9 @@ def _build_fix_codex_argv(
         "codex",
         "exec",
         *_exec_policy_argv(sandbox_mode),
-        *_lean_profile_argv(),  # lean reviewer profile (#1711); park.py rebuilds this
+        # Lean profile (#1711) minus --ignore-user-config: the write-capable fix
+        # keeps the host's sandbox and shell-environment policy. park.py rebuilds this.
+        *_lean_profile_argv(ignore_user_config=False),
         # JSONL stdout so the turn's token usage can be read (#3063). No
         # ``--ephemeral``: a fix cycle keeps its rollout under ~/.codex.
         _JSON_FLAG,

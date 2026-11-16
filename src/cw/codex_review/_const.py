@@ -132,14 +132,17 @@ _LEAN_DISABLED_FEATURES = (
 )
 
 
-def _lean_profile_argv() -> list[str]:
-    """Return the lean reviewer profile block, a fresh list each call (#1711)."""
-    argv = [
-        _IGNORE_USER_CONFIG_FLAG,
-        _STRICT_CONFIG_FLAG,
-        *_PROJECT_DOC_ARGV,
-        *_NO_MCP_ARGV,
-    ]
+def _lean_profile_argv(*, ignore_user_config: bool) -> list[str]:
+    """Return the lean profile block, a fresh list each call (#1711).
+
+    The reviewer passes ``ignore_user_config=True``: a read-only reviewer
+    ignores the operator's personal ``config.toml``. The fix builder passes
+    ``False``: a write-capable fix keeps the host's ``[sandbox_workspace_write]``
+    and ``shell_environment_policy``, and keeps every other flag in the block.
+    """
+    argv = [_STRICT_CONFIG_FLAG, *_PROJECT_DOC_ARGV, *_NO_MCP_ARGV]
+    if ignore_user_config:
+        argv.insert(0, _IGNORE_USER_CONFIG_FLAG)
     for feature in _LEAN_DISABLED_FEATURES:
         argv += ["--disable", feature]
     return argv

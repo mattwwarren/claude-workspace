@@ -208,6 +208,9 @@ _MF_DOC = _doc([_MF_A])
 _MF_AB_DOC = _doc([_MF_A, _MF_B])
 _MF_SF_DOC = _doc([_MF_A, _SF])
 _SF_DOC = _doc([_SF])
+# The fix form (#1711): no --ignore-user-config, which the write-capable fix keeps.
+_LEAN_FIX_LITERAL = _LEAN_LITERAL[1:]
+
 _CLEAN_DOC = _doc([])
 _MF_MECH_REJECTED_DOC = _doc([_MF_MECHANICAL_DEFECT])
 
@@ -632,7 +635,7 @@ class TestFixInvocation:
             "fix-cycle-1-nonzero_exit-*.json"
         )
         argv = json.loads(path.read_text(encoding="utf-8"))["argv_sanitized"]
-        assert argv[6 : 6 + len(_LEAN_LITERAL)] == _LEAN_LITERAL
+        assert argv[6 : 6 + len(_LEAN_FIX_LITERAL)] == _LEAN_FIX_LITERAL
         assert "model_reasoning_effort=high" in argv
 
     def test_fix_capacity_failure_keeps_todays_classification_with_jsonl_stdout(
@@ -2582,8 +2585,8 @@ class TestFixPromptAndArgv:
         assert not any(a.startswith("model_reasoning_effort=") for a in argv)
         assert argv[4:6] == ["-c", "approval_policy=never"]
         # The lean block (#1711) follows the policy pair and precedes --json.
-        assert argv[6 : 6 + len(_LEAN_LITERAL)] == _LEAN_LITERAL
-        assert argv[6 + len(_LEAN_LITERAL)] == "--json"
+        assert argv[6 : 6 + len(_LEAN_FIX_LITERAL)] == _LEAN_FIX_LITERAL
+        assert argv[6 + len(_LEAN_FIX_LITERAL)] == "--json"
 
     def test_argv_pins_reasoning_effort(self) -> None:
         argv = _build_fix_codex_argv(model="gpt-x", reasoning_effort="max")
@@ -2605,7 +2608,7 @@ class TestFixPromptAndArgv:
             "read-only",
             "-c",
             "approval_policy=never",
-            *_LEAN_LITERAL,
+            *_LEAN_FIX_LITERAL,
             "--json",
         ]
 
