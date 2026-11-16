@@ -40,6 +40,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.pr_hydrate import _parse_pr_url
+from cw.pr_hydrate.watched import retire_terminal_watched_prs
 from cw.queue_rows import (
     _AUTOMERGE_NOT_ARMED_REASON,
     _PRIOR_PIPELINE_PR_OPEN_REASON,
@@ -146,7 +147,8 @@ def _is_variant_b_gate_task(task: TicketTask) -> bool:
     ``blocked_on_pr``), stamped by ``cw dev-queue hold`` or by routing for a
     ``dependency_unmerged`` park carrying ``depends_on_pr``. Its blocking PR is
     registered as a ``dependency_hold`` WatchedPr, so it has an independent
-    state source too. No code retires those watches (#3654).
+    state source too. A terminal watch is retired once no row references it
+    (#3654, see ``release_stale_gated_tasks``).
     """
     if task.status != QueueItemStatus.BLOCKED_ON_USER:
         return False
@@ -186,6 +188,9 @@ def _pr_numbers_by_client_in_state(
       tick by ``_hydrate_watched_prs`` -- reaches a blocking PR that NO task
       row owns, which is exactly the ``stale_dispatch`` park's own earlier
       self-PR (see ``cw.reconcile.stale_dispatch_watch``, the producer).
+      Only ``status == "active"`` watches count (#3654, D5): a dismissed
+      watch's last state is stale evidence and must not release a fresh park
+      on a reopened PR.
 
     Both are scoped per-client, matching the Self-Verified Premise that a
     dev-queue client is bound to exactly one repo, so a bare PR number is
@@ -205,7 +210,7 @@ def _pr_numbers_by_client_in_state(
         _, pr_number = parsed
         by_client.setdefault(t.client, set()).add(pr_number)
     for w in store.watched_prs:
-        if w.client is None:
+        if w.client is None or w.status != "active":
             continue
         if w.pr_state is None or w.pr_state.state != pr_state_value:
             continue
@@ -384,8 +389,10 @@ def release_stale_gated_tasks() -> list[str]:
     ``blocked_on_pr`` whose PR sits on no store row now releases. This
     SUPERSEDES the earlier "residual blind spot" note. The multi-PR regex
     fail-closed and the default ``signal_only`` stamp-only behavior for worker
-    parks are unchanged. No code retires those watches yet (#3654), the same
-    limit #1927's stale-dispatch watches already carry.
+    parks are unchanged. A watch is retired (``status="dismissed"``) in the
+    same tick once its PR is MERGED or CLOSED and the release clears the last
+    row that referenced it (#3654). A still-referenced terminal watch is kept
+    so the release pass can observe it.
 
     Dependency holds (#2321) follow their own rule: an operator hold
     (``session_id is None``) releases to PENDING on MERGED under any policy; a
@@ -460,6 +467,12 @@ def release_stale_gated_tasks() -> list[str]:
         released_ids.extend(variant_b_released)
         pending_events.extend(variant_b_pending)
         changed = changed or variant_b_changed
+        # GitHub #3654: retire terminal watches no row references any more. Runs
+        # after the release loops, so a row this tick released (clearing
+        # blocked_on_pr) stops referencing its watch in the same save. The
+        # helper does not save; the save below persists it.
+        retired = retire_terminal_watched_prs(store)
+        changed = changed or bool(retired)
 
         if changed:
             save_dev_queue(store)

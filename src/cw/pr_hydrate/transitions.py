@@ -11,7 +11,7 @@ from cw.gh import _GH_PR_STATE_CLOSED, _GH_PR_STATE_MERGED
 from cw.models import OrchestratorEventType
 
 if TYPE_CHECKING:
-    from cw.models import PrState, TicketTask
+    from cw.models import PrState, TicketTask, WatchedPr
 
 # pr.mergeable fires on ENTERING one of GitHub's genuinely-mergeable statuses
 # from outside the set — not on merely leaving a blocking status into
@@ -87,3 +87,14 @@ def _is_candidate(task: TicketTask) -> bool:
     if not task.pr_url:
         return False
     return task.pr_state is None or task.pr_state.state not in _TERMINAL_PR_STATES
+
+
+def _is_watched_candidate(watched: WatchedPr) -> bool:
+    """An active watch is hydratable until its PR reaches MERGED or CLOSED (#3654).
+
+    Accepted limit: a terminal-state watch is not re-fetched, so a CLOSED-unmerged
+    dependency hold whose PR is later reopened is not re-observed by this pass.
+    """
+    if watched.status != "active":
+        return False
+    return watched.pr_state is None or watched.pr_state.state not in _TERMINAL_PR_STATES

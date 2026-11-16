@@ -8,13 +8,19 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
-from cw.dev_queue import register_watched_pr
-from cw.models import WatchedPr
+from cw.dev_queue import (
+    dev_queue_lock,
+    load_dev_queue,
+    register_watched_pr,
+    save_dev_queue,
+)
+from cw.models import TERMINAL_QUEUE_STATUSES, WatchedPr
+from cw.pr_hydrate.transitions import _TERMINAL_PR_STATES, _is_watched_candidate
 
 if TYPE_CHECKING:
-    from cw.models import TicketTask
+    from cw.models import DevQueueStore, TicketTask
 
 logger = logging.getLogger("cw.pr_hydrate")
 
@@ -32,6 +38,92 @@ Counterparty = Literal["self", "external"]
 # from "it is a WatchedPr" and carrying a redundant field would let the two
 # drift.
 WATCHED_PR_COUNTERPARTY: Counterparty = "external"
+
+# GitHub #3654 — hydration fetches at most this many active watches per pass.
+# Why: without a cap every active watch costs one ``gh pr view`` per pass, so
+# the pass cost grows with the watch list (which now accrues dismissed entries
+# only as garbage, but active ones grow with requests). A module constant
+# matches WATCHED_PR_COUNTERPARTY; promote to an OrchestratorConfig field only
+# if operators need tuning.
+WATCHED_HYDRATION_CAP_PER_PASS: Final[int] = 20
+
+# Sort key sentinel for a watch never hydrated: sorts before every real stamp,
+# so new watches are fetched first and the cap becomes a rotation.
+_WATCH_NEVER_HYDRATED: Final = datetime.min.replace(tzinfo=UTC)
+
+
+def _hydrated_at_or_never(watched: WatchedPr) -> datetime:
+    """Sort key: the watch's last ``hydrated_at``, or the never-hydrated sentinel."""
+    if watched.pr_state is None:
+        return _WATCH_NEVER_HYDRATED
+    return watched.pr_state.hydrated_at
+
+
+def select_watched_hydration_batch(watched_prs: list[WatchedPr]) -> list[WatchedPr]:
+    """Pick the watches one hydration pass may fetch (#3654).
+
+    Only hydratable watches (active, non-terminal) are considered. Oldest-first
+    by ``hydrated_at`` before the slice, so each pass fetches the watches that
+    were fetched longest ago; a bare ``[:CAP]`` would refetch the head of the
+    list forever.
+    """
+    candidates = [w for w in watched_prs if _is_watched_candidate(w)]
+    candidates.sort(key=_hydrated_at_or_never)
+    return candidates[:WATCHED_HYDRATION_CAP_PER_PASS]
+
+
+def retire_terminal_watched_prs(store: DevQueueStore) -> list[WatchedPr]:
+    """Dismiss active watches whose PR is MERGED/CLOSED and unreferenced (#3654).
+
+    A watch is referenced when a non-terminal row of the same client carries
+    ``blocked_on_pr`` equal to the watch's PR number. Referenced watches are
+    kept so the release pass can still observe the terminal state. Pure with
+    respect to persistence: the caller holds ``dev_queue_lock`` and saves.
+    Dismissed entries are kept, not deleted (follow-up debt).
+    """
+    referenced = {
+        (task.client, task.blocked_on_pr)
+        for task in store.tasks
+        if task.status not in TERMINAL_QUEUE_STATUSES and task.blocked_on_pr is not None
+    }
+    retired: list[WatchedPr] = []
+    for watched in store.watched_prs:
+        if watched.status != "active":
+            continue
+        if (
+            watched.pr_state is None
+            or watched.pr_state.state not in _TERMINAL_PR_STATES
+        ):
+            continue
+        if (
+            watched.client is not None
+            and (watched.client, watched.pr_number) in referenced
+        ):
+            continue
+        watched.status = "dismissed"
+        retired.append(watched)
+        logger.info(
+            "retired terminal watched PR repo=%s pr_number=%s client=%s "
+            "source=%s state=%s",
+            watched.repo,
+            watched.pr_number,
+            watched.client,
+            watched.source,
+            watched.pr_state.state,
+        )
+    return retired
+
+
+def sweep_terminal_watched_prs() -> None:
+    """Self-locking sweep: retire terminal unreferenced watches and persist (#3654).
+
+    Saves only when something was retired, so a no-op pass leaves the file
+    untouched.
+    """
+    with dev_queue_lock():
+        store = load_dev_queue()
+        if retire_terminal_watched_prs(store):
+            save_dev_queue(store)
 
 
 def derive_counterparty(

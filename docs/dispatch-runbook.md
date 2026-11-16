@@ -4569,17 +4569,33 @@ hold.
 BLOCKED_ON_USER. Cancelled rows are not swept; the hold verb is the supported
 path instead of cancelling.
 
-**Accepted limits (#3654).** No code retires a hold's `WatchedPr`: it stays
-active after the PR merges or closes, hydration re-fetches every active watch
-each pass with no cap and no terminal skip, and a leftover client-tagged watch
-makes another client's hold or watch on the same repo and PR number collide
-(the hold verb then refuses with a message naming the colliding client). The
-older #1927 stale-dispatch watches share this limit. There is also no `tasks`
-or board badge for a held row whose PR closed unmerged or whose id cannot be
-resolved: the one `session.reap_proposed` event is the only signal. An older cw
-reading a `WatchedPr` with `source: dependency_hold` fails validation of that
-field. Retirement, a per-pass cap, ignoring dismissed watches in the collision
-check and the badge are tracked in #3654.
+**Watch retirement and hydration cap (#3654).** A `WatchedPr` is dismissed
+(`status: dismissed`, kept in the store, not deleted) once its PR is MERGED or
+CLOSED and no non-terminal row of its client still references it through
+`blocked_on_pr`. Retirement runs in the serve tick's release pass, and the
+hydrate pass sweeps it too. Hydration fetches at most 20 active watches per
+pass, oldest-hydrated first, and never fetches a dismissed or terminal watch.
+A dismissed watch neither collides with a new registration nor feeds the
+release evidence index.
+
+Accepted limits, operator-visible:
+
+- **Reopened closed-unmerged holds regress.** A CLOSED-unmerged dependency
+  hold whose PR is later reopened and merged is no longer re-observed, because
+  a terminal watch is not fetched while still referenced. The hold stays parked
+  until the operator requeues or re-holds it. Before this change the watch was
+  re-fetched and the hold released on merge.
+- **Failing fetches take a slot.** A watch whose fetch always fails keeps no
+  `pr_state`, sorts first and costs one of the 20 slots every pass. More than
+  20 such watches would starve the rest. Follow-up debt, not fixed here.
+- **Dismissed entries accumulate.** Dismissed watches are never pruned. Follow-up
+  debt (prune or age-out).
+- **No board badge.** A held row whose PR closed unmerged or whose id cannot be
+  resolved has no `tasks` or board badge; the one `session.reap_proposed` event
+  is the only signal. Follow-up debt.
+
+An older cw reading a `WatchedPr` with `source: dependency_hold` fails
+validation of that field.
 
 ### Dispatch-loop staleness page (`dispatch_loop_stale`)
 

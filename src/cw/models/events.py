@@ -98,15 +98,20 @@ class WatchedPr(BaseModel):
     serve-tick pass (``cw.pr_hydrate._hydrate_watched_prs``) exactly like
     ``TicketTask.pr_state``.
 
-    ``status`` reserves a ``"dismissed"`` terminal that no code sets this slice —
-    the ``(repo, pr_number)`` dedup guard is scoped to ``"active"`` so a future
-    dismiss transition can re-open registration (RFC 0011 S2, adopted #5).
+    ``status`` gains a ``"dismissed"`` terminal (see #3654 below); the
+    ``(repo, pr_number)`` dedup guard is scoped to ``"active"`` so a dismissed
+    entry can re-open registration (RFC 0011 S2, adopted #5).
 
     Since #2321 ``source="dependency_hold"`` is registered by ``cw dev-queue hold``
     and by ``cw.reconcile.stale_dispatch_watch`` for dependency parks. An older
     cw reading the new value fails validation on ``source``; rolling back after
-    a hold has registered a watch needs that watch removed first. No code
-    retires a watch yet (#3654).
+    a hold has registered a watch needs that watch removed first.
+
+    Since #3654 a watch is dismissed (``status="dismissed"``) once its PR is
+    MERGED or CLOSED and no non-terminal row of its client still references it
+    (``blocked_on_pr``). Dismissed entries are kept, not deleted. The dedup
+    guard is active-scoped, so a dismissed entry neither collides nor shadows a
+    new registration.
     """
 
     # NOT extra=forbid — persisted/runtime state, see #1200

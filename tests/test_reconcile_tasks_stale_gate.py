@@ -274,6 +274,43 @@ def test_release_stale_gated_tasks_auto_policy_completes_variant_a(
     assert reap_events[0].payload["proposed_action"] == "release_stale_gate_variant_a"
 
 
+def test_release_stale_gated_tasks_dismisses_watch_released_same_tick(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3654: the release clears the only row referencing a MERGED watch, so the
+    same tick's retirement dismisses that watch."""
+    blocking = _make_ticket_task(
+        ticket_id="SG-W-BLOCKER",
+        client="client-a",
+        status=QueueItemStatus.COMPLETED,
+        pr_url="https://github.com/foo/bar/pull/50",
+        pr_state=PrState(state="MERGED"),
+    )
+    blocked = _make_ticket_task(
+        ticket_id="SG-W1",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="merge_gate_blocked",
+        blocked_reason="prior_pipeline_pr_open",
+        blocked_on_pr=50,
+        session_id="sess-w1",
+    )
+    watch = _make_watched_pr(pr_number=50, client="client-a", state="MERGED")
+    save_dev_queue(DevQueueStore(tasks=[blocking, blocked], watched_prs=[watch]))
+    save_state(CwState(sessions=[]))
+    monkeypatch.setattr(
+        "cw.reconcile.tasks.stale_gate.load_orchestrator_config",
+        lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
+    )
+
+    released = release_stale_gated_tasks()
+
+    assert released == ["SG-W1"]
+    reloaded = load_dev_queue()
+    assert reloaded.watched_prs[0].status == "dismissed"
+
+
 def test_release_stale_gated_tasks_auto_policy_requeues_variant_b(
     tmp_config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -839,6 +876,14 @@ class TestMergedPrNumbersByClient:
     """The Variant B cross-reference index, now fed by two sources (#1927):
     task rows' hydrated ``pr_state`` and client-tagged ``WatchedPr`` entries.
     """
+
+    def test_dismissed_watch_excluded(self) -> None:
+        """#3654 D5: a retired watch's last state is stale evidence."""
+        dismissed = _make_watched_pr()
+        dismissed.status = "dismissed"
+        assert (
+            _merged_pr_numbers_by_client(DevQueueStore(watched_prs=[dismissed])) == {}
+        )
 
     def test_merged_client_tagged_watch_contributes(self) -> None:
         store = DevQueueStore(watched_prs=[_make_watched_pr()])
