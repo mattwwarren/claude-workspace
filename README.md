@@ -246,6 +246,7 @@ The `/sprint-buildout` skill wraps this pair end-to-end — presenting the one a
 | `cw body-sha <ticket> -c <client>` / `cw body-sha --body-file <path>` | Print a ticket body's `body_sha` (the value `cw dev-queue approve` recomputes; `-` reads stdin; exit 1 when no body can be read) |
 | `cw post-comment <ticket> --body-file <path>` | Redact an agent-authored body (paths, secret shapes), wrap and split it, post it to the GitHub issue and read every part back; one JSON result (exit 0 posted, 1 refused with nothing public, 3 partial with a comment possibly public). `--emit-only --out-dir <dir>` writes the parts for Linear instead |
 | `cw completion <shell>` | Print shell completion snippet |
+| `cw resolve-installed <candidate>...` | Print the first candidate that is a non-empty regular file, polling up to 10 s on a miss (used by the Step 2.5 gate-key fences; exit 1 with per-candidate state on stderr) |
 | `cw result validate -` / `cw result emit` | Validate, or record onto a session, an AUTO_DEV_RESULT sentinel |
 | `cw event record/tail/wait/prune` | Record, read, block-until, or prune events on the orchestrator bus |
 | `cw review register <pr-url>` | Register a PR you were asked to review as a watched PR |

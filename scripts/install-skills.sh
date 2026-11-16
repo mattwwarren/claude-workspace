@@ -163,6 +163,71 @@ fi
 # safe for the agents symlink-into-global-claude layout described above.
 mkdir -p "$COMMANDS_DST" "$SKILLS_DST" "$AGENTS_DST" "$AGENTS_BASELINE_DIR"
 
+# _detect_mv_nofollow (#3662): set MV_NOFOLLOW to the mv flag that renames over
+# a symlink-to-directory WITHOUT moving the source inside it: -T (GNU) or -h
+# (BSD). Empty when neither works, and the skill-directory relink then falls
+# back to rm -rf + ln -s. Probed functionally, not by platform name, because
+# `mv -T` is GNU-only and `mv -h` is BSD-only.
+_detect_mv_nofollow() {
+    local scratch flag ok
+    MV_NOFOLLOW=""
+    scratch="$(mktemp -d)" || return 0
+    for flag in -T -h; do
+        mkdir "$scratch/dir"
+        ln -s "$scratch/dir" "$scratch/link"
+        : > "$scratch/src"
+        ok=0
+        if mv -f "$flag" "$scratch/src" "$scratch/link" 2>/dev/null \
+            && [ ! -L "$scratch/link" ] && [ -f "$scratch/link" ] \
+            && [ ! -e "$scratch/dir/src" ]; then
+            ok=1
+        fi
+        rm -rf "$scratch/dir" "$scratch/link" "$scratch/src"
+        if [ "$ok" -eq 1 ]; then
+            MV_NOFOLLOW="$flag"
+            break
+        fi
+    done
+    rm -rf "$scratch"
+}
+_detect_mv_nofollow
+
+# _link_atomic <target> <dst> (#3662): make dst a symlink to target with no
+# window in which dst is absent. The link is built beside dst under a hidden
+# temp name and renamed over dst, so readers see the old link or the new one,
+# never nothing. Already-correct links are left untouched (no mtime change).
+# Refuses a real directory at dst; a symlink-to-directory needs MV_NOFOLLOW
+# and returns 1 without it, so the caller can fall back.
+_link_atomic() {
+    local target="$1" dst="$2" tmp rc
+    if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$target" ]; then
+        return 0
+    fi
+    if [ -d "$dst" ] && [ ! -L "$dst" ]; then
+        echo "install-skills: refusing to replace real directory $dst" >&2
+        return 1
+    fi
+    if [ -d "$dst" ] && [ -z "$MV_NOFOLLOW" ]; then
+        return 1
+    fi
+    tmp="$(dirname "$dst")/.$(basename "$dst").cw-tmp.$$"
+    rm -f "$tmp"
+    if ! ln -s "$target" "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    rc=0
+    if [ -d "$dst" ]; then
+        mv -f "$MV_NOFOLLOW" "$tmp" "$dst" || rc=$?
+    else
+        mv -f "$tmp" "$dst" || rc=$?
+    fi
+    if [ "$rc" -ne 0 ]; then
+        rm -f "$tmp"
+        return "$rc"
+    fi
+}
+
 # _agent_conflict_reason <src_file> <dst_file> <baseline_file>
 # Echoes a reason and returns 0 if installing src_file over dst_file would
 # clobber a change cw did not itself make. Returns 1 (safe to install) when
@@ -286,7 +351,7 @@ for src_file in "$COMMANDS_SRC"/*.md; do
         excluded_count=$((excluded_count + 1))
         continue
     fi
-    ln -sf "$src_file" "$COMMANDS_DST/$name"
+    _link_atomic "$src_file" "$COMMANDS_DST/$name"
     new_entries+=("commands/$name")
     cmd_count=$((cmd_count + 1))
 done
@@ -348,8 +413,13 @@ if [ -d "$SKILLS_SRC" ]; then
         # to a directory as "install inside that directory" rather than
         # replacing it — silently planting a self-referential symlink inside
         # the real source tree on every steady-state re-run (#1535 review).
+        # #3662: a wrong link (or a dangling one) is replaced by rename, so
+        # the path is never absent mid-install. rm -rf stays only for a real
+        # directory (the migration case) and for hosts with no safe rename.
         if [ -L "$dst_dir" ] && [ "$(readlink "$dst_dir")" = "$src_dir_abs" ]; then
             : # already correctly linked — nothing to do
+        elif [ -n "$MV_NOFOLLOW" ] && { [ ! -d "$dst_dir" ] || [ -L "$dst_dir" ]; }; then
+            _link_atomic "$src_dir_abs" "$dst_dir"
         else
             if [ -e "$dst_dir" ] || [ -L "$dst_dir" ]; then
                 rm -rf "$dst_dir"
@@ -407,7 +477,7 @@ if [ -d "$SCRIPTS_SRC" ]; then
                 _warn_script_local_changes "$rel" "$dst_file" "$backup"
             fi
         fi
-        ln -sf "$src_file" "$dst_file"
+        _link_atomic "$src_file" "$dst_file"
         new_entries+=("scripts/$rel")
         script_count=$((script_count + 1))
     done < <(find "$SCRIPTS_SRC" -type f ! -name '*.pyc' ! -path '*/__pycache__/*' | LC_ALL=C sort)
