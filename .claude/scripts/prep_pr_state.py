@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
     from types import ModuleType
 
 try:
@@ -284,8 +284,65 @@ def _run_git(args: list[str], *, default: str = "", quiet: bool = False) -> str:
 # --- Gate Detection ---
 
 
-# Default gate commands per ecosystem marker file
-ECOSYSTEM_GATES: dict[str, list[Gate]] = {
+# What `npm init` writes as scripts.test: a placeholder, not a test suite.
+_NPM_INIT_TEST_PLACEHOLDER = 'echo "Error: no test specified" && exit 1'
+_TSCONFIG = "tsconfig.json"
+
+
+def _package_json_scripts(path: Path) -> dict[str, object]:
+    """``scripts`` declared in *path*, or ``{}`` when unreadable or malformed.
+
+    Read errors warn and degrade to no scripts, as the gate-timeout reader does.
+    There is no fallback to a static gate triple: a package.json that cannot be
+    parsed cannot run ``npm run`` anyway.
+    """
+    try:
+        data: object = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("Ignoring scripts in %s: %s", path, exc)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    scripts = data.get("scripts")
+    if not isinstance(scripts, dict):
+        return {}
+    return {key: value for key, value in scripts.items() if isinstance(key, str)}
+
+
+def _usable_script(scripts: dict[str, object], name: str) -> bool:
+    """True when *name* is declared as a non-blank string."""
+    value = scripts.get(name)
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _package_json_gates(cwd: Path) -> list[Gate]:
+    """npm gates derived from the branch's own package.json and root tsconfig.
+
+    lint and test come from declared ``scripts``; typecheck prefers
+    ``scripts.typecheck`` (a workspaces root has no tsconfig) and falls back to
+    ``npx tsc --noEmit`` only when a root tsconfig.json exists.
+    """
+    scripts = _package_json_scripts(cwd / "package.json")
+    gates: list[Gate] = []
+    if _usable_script(scripts, "lint"):
+        gates.append(
+            Gate(name="lint", command="npm run lint", autofix="npm run lint -- --fix")
+        )
+    if _usable_script(scripts, "typecheck"):
+        gates.append(Gate(name="typecheck", command="npm run typecheck"))
+    elif (cwd / _TSCONFIG).is_file():
+        gates.append(Gate(name="typecheck", command="npx tsc --noEmit"))
+    if (
+        _usable_script(scripts, "test")
+        and str(scripts["test"]).strip() != _NPM_INIT_TEST_PLACEHOLDER
+    ):
+        gates.append(Gate(name="test", command="npm test"))
+    return gates
+
+
+# Default gate commands per ecosystem marker file. A value is either a fixed list
+# or a resolver that inspects the project (package.json scripts).
+ECOSYSTEM_GATES: dict[str, list[Gate] | Callable[[Path], list[Gate]]] = {
     "pyproject.toml": [
         Gate(
             name="ruff",
@@ -300,11 +357,7 @@ ECOSYSTEM_GATES: dict[str, list[Gate]] = {
         Gate(name="mypy", command="uv run mypy ."),
         Gate(name="pytest", command="uv run pytest"),
     ],
-    "package.json": [
-        Gate(name="lint", command="npm run lint", autofix="npm run lint -- --fix"),
-        Gate(name="typecheck", command="npx tsc --noEmit"),
-        Gate(name="test", command="npm test"),
-    ],
+    "package.json": _package_json_gates,
     "Cargo.toml": [
         Gate(name="clippy", command="cargo clippy -- -D warnings"),
         Gate(name="test", command="cargo test"),
@@ -865,16 +918,20 @@ def detect_gates(claude_md_path: Path | None = None) -> dict[str, Any]:
     A CLAUDE.md bash block that yields at least one gate is authoritative:
     ecosystem defaults are dropped and ``detected_from`` lists only
     ``CLAUDE.md``. Otherwise CLAUDE.md bullet gates override same-named
-    ecosystem defaults.
+    ecosystem defaults. package.json gates are derived from its ``scripts``
+    and the root tsconfig.json.
     """
     cwd = Path.cwd()
     gates: list[Gate] = []
     detected_from: list[str] = []
 
     # Scan for ecosystem marker files
-    for marker, default_gates in ECOSYSTEM_GATES.items():
+    for marker, ecosystem_gates in ECOSYSTEM_GATES.items():
         if (cwd / marker).exists():
             detected_from.append(marker)
+            default_gates = (
+                ecosystem_gates(cwd) if callable(ecosystem_gates) else ecosystem_gates
+            )
             gates.extend(default_gates)
 
     # Check for CLAUDE.md overrides. Gates are repo policy, so with no explicit

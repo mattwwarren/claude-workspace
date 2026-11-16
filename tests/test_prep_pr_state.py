@@ -1721,3 +1721,240 @@ class TestGatePassMainDispatch:
         with pytest.raises(SystemExit) as excinfo:
             _mod.main()
         assert excinfo.value.code != 0
+
+
+# ---------------------------------------------------------------------------
+# #3665: ECOSYSTEM_GATES["package.json"] derived from declared scripts
+# ---------------------------------------------------------------------------
+
+
+def _detect_npm_gates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    package_json: str | dict[str, object],
+    *,
+    tsconfig: bool = False,
+    claude_md: str | None = None,
+) -> dict[str, Any]:
+    """Run ``detect_gates`` in a tmp project with only a ``package.json`` marker.
+
+    ``_detect_gates`` always writes a pyproject marker, which would mix ruff,
+    mypy and pytest gates into npm results, so npm tests use this helper.
+    """
+    text = package_json if isinstance(package_json, str) else json.dumps(package_json)
+    (tmp_path / "package.json").write_text(text, encoding="utf-8")
+    if tsconfig:
+        (tmp_path / "tsconfig.json").write_text("{}", encoding="utf-8")
+    if claude_md is not None:
+        _write_claude_md(tmp_path, claude_md)
+    monkeypatch.chdir(tmp_path)
+    return cast("dict[str, Any]", _mod.detect_gates())
+
+
+def _npm_gates_by_name(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {g["name"]: g for g in result["gates"]}
+
+
+_NPM_PLACEHOLDER = 'echo "Error: no test specified" && exit 1'
+
+
+class TestEcosystemGatesPackageJson:
+    def test_workspaces_root_uses_typecheck_script_without_tsconfig(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = _detect_npm_gates(
+            tmp_path,
+            monkeypatch,
+            {"scripts": {"typecheck": "npm run typecheck --workspaces --if-present"}},
+        )
+        assert _npm_gates_by_name(result)["typecheck"]["command"] == (
+            "npm run typecheck"
+        )
+
+    def test_single_package_with_tsconfig_and_no_script_keeps_tsc(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = _detect_npm_gates(
+            tmp_path, monkeypatch, {"scripts": {}}, tsconfig=True
+        )
+        assert _npm_gates_by_name(result)["typecheck"]["command"] == (
+            "npx tsc --noEmit"
+        )
+
+    def test_neither_script_nor_tsconfig_emits_no_typecheck_gate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = _detect_npm_gates(
+            tmp_path, monkeypatch, {"scripts": {"lint": "eslint ."}}
+        )
+        assert "typecheck" not in _npm_gates_by_name(result)
+
+    def test_script_wins_over_tsconfig(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = _detect_npm_gates(
+            tmp_path,
+            monkeypatch,
+            {"scripts": {"typecheck": "tsc -b"}},
+            tsconfig=True,
+        )
+        assert _npm_gates_by_name(result)["typecheck"]["command"] == (
+            "npm run typecheck"
+        )
+
+    def test_all_scripts_yield_lint_typecheck_test_in_order(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = _detect_npm_gates(
+            tmp_path,
+            monkeypatch,
+            {
+                "scripts": {
+                    "lint": "eslint .",
+                    "typecheck": "tsc -b",
+                    "test": "vitest run",
+                }
+            },
+        )
+        names = [g["name"] for g in result["gates"]]
+        assert names == ["lint", "typecheck", "test"]
+        by_name = _npm_gates_by_name(result)
+        assert by_name["lint"]["autofix"] == "npm run lint -- --fix"
+        assert by_name["test"]["command"] == "npm test"
+
+    @pytest.mark.parametrize("dropped", ["lint", "test"])
+    def test_missing_lint_or_test_script_drops_that_gate(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        dropped: str,
+    ) -> None:
+        scripts = {
+            name: f"run {name}"
+            for name in ("lint", "typecheck", "test")
+            if name != dropped
+        }
+        result = _detect_npm_gates(tmp_path, monkeypatch, {"scripts": scripts})
+        names = [g["name"] for g in result["gates"]]
+        assert dropped not in names
+        assert "typecheck" in names
+
+    @pytest.mark.parametrize("value", ["", "   ", 1, None, ["x"], {}])
+    def test_unusable_script_value_is_absent(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        value: object,
+    ) -> None:
+        scripts = {"lint": value, "typecheck": value, "test": value}
+        result = _detect_npm_gates(tmp_path, monkeypatch, {"scripts": scripts})
+        assert result["gates"] == []
+
+    def test_npm_init_placeholder_test_script_is_not_a_gate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = _detect_npm_gates(
+            tmp_path, monkeypatch, {"scripts": {"test": _NPM_PLACEHOLDER}}
+        )
+        assert "test" not in _npm_gates_by_name(result)
+
+    def test_real_test_script_is_kept_as_gate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = _detect_npm_gates(
+            tmp_path, monkeypatch, {"scripts": {"test": "vitest run"}}
+        )
+        assert _npm_gates_by_name(result)["test"]["command"] == "npm test"
+
+    @pytest.mark.parametrize(
+        "package_json",
+        [
+            pytest.param("{not json", id="malformed-json"),
+            pytest.param("[1, 2]", id="top-level-list"),
+            pytest.param({"scripts": ["lint"]}, id="scripts-is-list"),
+            pytest.param({"scripts": "vitest"}, id="scripts-is-string"),
+            pytest.param({"name": "x"}, id="no-scripts-key"),
+        ],
+    )
+    def test_unusable_package_json_yields_no_script_gates(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        package_json: str | dict[str, object],
+    ) -> None:
+        result = _detect_npm_gates(tmp_path, monkeypatch, package_json, tsconfig=True)
+        assert [g["name"] for g in result["gates"]] == ["typecheck"]
+        assert result["gates"][0]["command"] == "npx tsc --noEmit"
+
+    def test_malformed_package_json_logs_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.WARNING)
+        _detect_npm_gates(tmp_path, monkeypatch, "{not json")
+        assert any("Ignoring scripts in" in m for m in _warnings(caplog))
+
+    def test_package_json_directory_is_read_error_not_crash(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.WARNING)
+        (tmp_path / "package.json").mkdir()
+        monkeypatch.chdir(tmp_path)
+        result = cast("dict[str, Any]", _mod.detect_gates())
+        assert result["gates"] == []
+        assert result["detected_from"] == ["package.json"]
+        assert any("Ignoring scripts in" in m for m in _warnings(caplog))
+
+    def test_package_json_marker_still_listed_when_no_gates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = _detect_npm_gates(tmp_path, monkeypatch, {"name": "x"})
+        assert result["gates"] == []
+        assert result["detected_from"] == ["package.json"]
+
+    def test_multi_ecosystem_order_preserved(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n')
+        result = _detect_npm_gates(
+            tmp_path,
+            monkeypatch,
+            {"scripts": {"lint": "eslint .", "test": "vitest run"}},
+        )
+        names = [g["name"] for g in result["gates"]]
+        assert names == ["ruff", "ruff-format", "mypy", "pytest", "lint", "test"]
+        assert result["detected_from"] == ["pyproject.toml", "package.json"]
+
+    def test_claude_md_bullet_overrides_derived_typecheck(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = _detect_npm_gates(
+            tmp_path,
+            monkeypatch,
+            {"scripts": {}},
+            tsconfig=True,
+            claude_md=_gates_section("- typecheck: pnpm tsc -b"),
+        )
+        assert _npm_gates_by_name(result)["typecheck"]["command"] == "pnpm tsc -b"
+        assert result["detected_from"] == ["package.json", "CLAUDE.md"]
+
+    def test_claude_md_bash_block_remains_authoritative(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = _detect_npm_gates(
+            tmp_path,
+            monkeypatch,
+            {"scripts": {"lint": "eslint .", "test": "vitest run"}},
+            tsconfig=True,
+            claude_md=_gates_section(_bash_block("uv run pytest -q")),
+        )
+        assert result["detected_from"] == ["CLAUDE.md"]
+        names = [g["name"] for g in result["gates"]]
+        assert "lint" not in names
+        assert "typecheck" not in names
+        assert "test" not in names
