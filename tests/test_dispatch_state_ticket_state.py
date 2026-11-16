@@ -163,7 +163,7 @@ def test_a_write_oserror_is_swallowed_with_a_warning(
     stamped = TicketStateProbe(_T0, closed=True, cancelled_at=_T0)
     assert save_ticket_state_probes("acme", {_A: stamped}, prune_to_keys=[_A])
 
-    monkeypatch.setattr("cw.dispatch_state_ticket_state.atomic_write_text", _boom)
+    monkeypatch.setattr("cw.dispatch_state.atomic_write_text", _boom)
     with caplog.at_level(logging.WARNING):
         assert not save_ticket_state_probes(
             "acme", {_B: TicketStateProbe(_T0, closed=True)}, prune_to_keys=[_A, _B]

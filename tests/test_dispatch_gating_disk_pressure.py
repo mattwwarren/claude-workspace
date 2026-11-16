@@ -25,7 +25,7 @@ from cw.dispatch.gating.disk_pressure import (
     _merge_pressure,
     _resolve_disk_pressure,
 )
-from cw.dispatch_state import load_host_tmp_probe_cache
+from cw.dispatch_state_host_tmp import load_host_tmp_probe_cache
 from cw.events import read_events
 from cw.models import (
     DEFAULT_DISK_PRESSURE_MIN_FREE_GB,

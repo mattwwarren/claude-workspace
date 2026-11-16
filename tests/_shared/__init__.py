@@ -38,4 +38,6 @@ Concern -> module:
   (plugin)
 - session-scope autouse guards (``_git_sandbox_root``): ``session_guards``
   (plugin)
+- failing dispatch-sidecar writer for failure-path tests
+  (``fail_state_writes``): ``sidecar_failures``
 """

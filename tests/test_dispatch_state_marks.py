@@ -114,7 +114,7 @@ class TestClearUsageLimitedUntil:
             msg = "disk full"
             raise OSError(msg)
 
-        monkeypatch.setattr("cw.dispatch_state_marks.atomic_write_text", _boom)
+        monkeypatch.setattr("cw.dispatch_state.atomic_write_text", _boom)
 
         with pytest.raises(OSError, match="disk full"):
             clear_usage_limited_until("acme", cleared_at=_NOW)

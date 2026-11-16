@@ -776,7 +776,7 @@ def test_a_failed_stamp_write_cancels_nothing(
         msg = "disk full"
         raise OSError(msg)
 
-    monkeypatch.setattr("cw.dispatch_state_ticket_state.atomic_write_text", _boom)
+    monkeypatch.setattr("cw.dispatch_state.atomic_write_text", _boom)
     with caplog.at_level(logging.WARNING):
         hits = _resolve(client, row)
         assert _claim(client, hits) is None
