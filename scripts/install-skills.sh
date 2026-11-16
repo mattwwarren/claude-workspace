@@ -226,6 +226,7 @@ _link_atomic() {
         rm -f "$tmp"
         return "$rc"
     fi
+    return 0
 }
 
 # _agent_conflict_reason <src_file> <dst_file> <baseline_file>
