@@ -40,7 +40,17 @@ least one path, change only paths already in the cycle's measured ``touched``
 set (which passed the scope, fence and growth checks), and delete none (a
 rename counts as a deletion, #3427). Format-only is therefore
 a property proved by a declaration plus a green re-check, never guessed from a
-gate's name or output. Feeding a failing gate's output to a later fix turn was
+gate's name or output.
+
+**A hook rewrite is accepted on the fix loop only (#3684).** Under
+``HookRewritePolicy.RECHECK`` (opted in by ``codex_fix_loop.commit``) a red gate
+whose own run rewrote files, with no autofix involved, is re-run once after the
+rewrite. An in-scope, non-deleting, non-renaming rewrite whose re-run is green
+and leaves the tree alone is accepted (``rewrite_applied``, the
+``codex_fix_gate_autofixed`` token). Anything else parks with the original
+failure (``rewrite_rejected_scope`` or ``rewrite_rejected_red``). The default
+``PARK`` keeps the pre-#3684 behaviour for the IMPL and FINALIZE callers.
+Feeding a failing gate's output to a later fix turn was
 considered and rejected here: a park ends the loop, so no such turn exists
 in-process, and a repair turn would cost a full ``codex exec`` and change how
 non-format failures park. A config problem means no config-declared autofix,
@@ -73,10 +83,11 @@ from cw._git import git_clean_env
 from cw.codex_fix_loop.baseline import staged_cycle_tree
 from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, FenceBreach
 from cw.codex_fix_loop.gate_autofix import (
-    changed_paths,
+    HookRewritePolicy,
     declared_autofixes,
     ignored_on_disk,
     revert_to_tree,
+    vet_changes,
 )
 from cw.codex_fix_loop.posted_text import redact_and_cap, withhold_secret_lines
 from cw.codex_review import CODEX_FIX_GATE_FAILED
@@ -739,17 +750,60 @@ def _apply_autofix(
         )
         return _Autofix("reverted_failed", None)
     tree_after = staged_cycle_tree(worktree, review_artifacts)
-    changed = changed_paths(worktree, tree_before, tree_after)
-    if not changed:
+    vet = vet_changes(worktree, tree_before, tree_after, touched)
+    if not vet.paths:
         return _Autofix("unchanged", None)
-    spelled = changed_paths(worktree, tree_before, tree_after, c_quoted=True)
-    deleted = changed_paths(worktree, tree_before, tree_after, diff_filter="D")
-    if deleted or not spelled <= touched:
+    if not vet.within_touched:
         revert_to_tree(
             worktree, review_artifacts, tree_before, preserve=preserve, context=context
         )
-        return _Autofix("reverted_scope", None, len(changed))
-    return _Autofix("applied", tree_after, len(changed))
+        return _Autofix("reverted_scope", None, vet.paths)
+    return _Autofix("applied", tree_after, vet.paths)
+
+
+def _note_autofixed(tokens: list[str]) -> None:
+    """Record the ``codex_fix_gate_autofixed`` friction token once."""
+    if GATE_AUTOFIXED_FRICTION not in tokens:
+        tokens.append(GATE_AUTOFIXED_FRICTION)
+
+
+def _recheck_after_rewrite(
+    gate: PlannedGate,
+    failure: GateFailure,
+    *,
+    worktree: Path,
+    review_artifacts: frozenset[str],
+    scope: GateScope,
+    touched: frozenset[str],
+    tree_before: str,
+    rewritten: str,
+    tokens: list[str],
+) -> tuple[GateFailure | None, str]:
+    """Accept a red gate whose own run rewrote files, after one green re-run (#3684).
+
+    Only in-scope, non-deleting, non-renaming rewrites reach the re-run. The
+    re-run must be clean (not red, dirtied or unavailable) against the rewritten
+    tree. On rejection the original *failure* is returned unchanged and nothing
+    is reverted: the caller's park path pins and resets the cycle as it does for
+    any red gate that rewrote files.
+    """
+    vet = vet_changes(worktree, tree_before, rewritten, touched)
+    if not vet.within_touched:
+        _log_autofix(scope, gate, "rewrite_rejected_scope", vet.paths)
+        return failure, tree_before
+    recheck = _run_one_gate(
+        gate,
+        worktree=worktree,
+        review_artifacts=review_artifacts,
+        scope=scope,
+        tree_before=rewritten,
+    )
+    if recheck is not None:
+        _log_autofix(scope, gate, "rewrite_rejected_red", vet.paths)
+        return failure, tree_before
+    _log_autofix(scope, gate, "rewrite_applied", vet.paths)
+    _note_autofixed(tokens)
+    return None, rewritten
 
 
 def _run_gate_with_autofix(
@@ -761,6 +815,7 @@ def _run_gate_with_autofix(
     touched: frozenset[str],
     tree_before: str,
     tokens: list[str],
+    hook_rewrite: HookRewritePolicy = HookRewritePolicy.PARK,
 ) -> tuple[GateFailure | None, str]:
     """Run one gate; on a red result with a declared autofix, fix and re-check.
 
@@ -769,6 +824,10 @@ def _run_gate_with_autofix(
     (so the formatter's rewrite is not ``dirtied``). Whenever the autofix is not
     proved by a green re-check of the same gate, its changes are reverted and
     the ORIGINAL failure is returned.
+
+    Under ``HookRewritePolicy.RECHECK`` a red gate whose own run rewrote files
+    takes :func:`_recheck_after_rewrite` instead, and the declared autofix is
+    not run. Under ``PARK`` (the default) this function is unchanged.
     """
     failure = _run_one_gate(
         gate,
@@ -777,7 +836,23 @@ def _run_gate_with_autofix(
         scope=scope,
         tree_before=tree_before,
     )
-    if failure is None or failure.kind != "red" or gate.autofix is None:
+    if failure is None or failure.kind != "red":
+        return failure, tree_before
+    if hook_rewrite is HookRewritePolicy.RECHECK:
+        rewritten = staged_cycle_tree(worktree, review_artifacts)
+        if rewritten != tree_before:
+            return _recheck_after_rewrite(
+                gate,
+                failure,
+                worktree=worktree,
+                review_artifacts=review_artifacts,
+                scope=scope,
+                touched=touched,
+                tree_before=tree_before,
+                rewritten=rewritten,
+                tokens=tokens,
+            )
+    if gate.autofix is None:
         return failure, tree_before
     preserve = ignored_on_disk(worktree)
     fixed = _apply_autofix(
@@ -811,8 +886,7 @@ def _run_gate_with_autofix(
         _log_autofix(scope, gate, "reverted_red", fixed.paths)
         return failure, tree_before
     _log_autofix(scope, gate, fixed.outcome, fixed.paths)
-    if GATE_AUTOFIXED_FRICTION not in tokens:
-        tokens.append(GATE_AUTOFIXED_FRICTION)
+    _note_autofixed(tokens)
     return None, fixed.tree_after
 
 
@@ -824,6 +898,7 @@ def run_cycle_gates(
     scope: GateScope,
     tokens: list[str],
     touched: frozenset[str],
+    hook_rewrite: HookRewritePolicy = HookRewritePolicy.PARK,
 ) -> GateFailure | None:
     """Run the pinned gates in order on the cycle's changes; fail fast.
 
@@ -833,8 +908,10 @@ def run_cycle_gates(
     compared after every green gate: a gate that changes it is ``dirtied``. The
     snapshot is re-taken after an applied autofix, so the formatter's rewrite is
     part of the cycle, not dirt. *touched* is the cycle's measured path set,
-    the only paths an autofix may change. Only the git calls raise
-    (``CalledProcessError``).
+    the only paths an autofix or an accepted hook rewrite may change.
+    *hook_rewrite* is the opt-in (#3684): ``RECHECK`` accepts a red gate whose
+    own run rewrote only *touched* paths after one green re-run; the default
+    ``PARK`` parks it. Only the git calls raise (``CalledProcessError``).
     """
     if plan.why_unavailable is not None:
         return GateFailure(
@@ -867,6 +944,7 @@ def run_cycle_gates(
             touched=touched,
             tree_before=tree,
             tokens=tokens,
+            hook_rewrite=hook_rewrite,
         )
         if failure is not None:
             return failure

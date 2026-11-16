@@ -51,6 +51,7 @@ from cw.codex_fix_loop.fence import (
     scope_violation_breach,
     staged_set_breach,
 )
+from cw.codex_fix_loop.gate_autofix import HookRewritePolicy
 from cw.codex_fix_loop.gates import (
     GatePlan,
     GateScope,
@@ -456,7 +457,10 @@ class _CycleContext:
         Returns ``(park, measured)``. The park is ``None`` for a no-op cycle
         (nothing to gate) or when every gate passed. A refusal parks
         ``codex_fix_gate_failed`` through :meth:`park_breach`, which pins and
-        resets the cycle's edits; a git error parks ``codex_error``.
+        resets the cycle's edits; a git error parks ``codex_error``. A gate whose
+        only failure was a hook rewriting the cycle's touched files is accepted
+        after one green re-run (#3684), and the #3424 re-measure then commits the
+        rewritten content.
 
         ``measured`` is the cycle's path set re-measured AFTER the gates when
         they passed (#3424): an applied autofix may return a touched path to
@@ -477,6 +481,7 @@ class _CycleContext:
                 scope=self.gate_scope(),
                 tokens=self.gate_tokens,
                 touched=touched,
+                hook_rewrite=HookRewritePolicy.RECHECK,
             )
             measured = (
                 frozenset(cycle_touched_paths(self.worktree, baseline)) & touched

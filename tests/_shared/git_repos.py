@@ -189,6 +189,12 @@ NON_UTF8_NAME_BYTES = b"bad-\xff.txt"
 #: Shell twin of :func:`replace_dir_with_file` for a gate-level autofix command.
 DIR_TO_FILE_SH = "rm -r pkg && printf x > pkg"
 
+#: A non-ASCII file name, as a gate command or a test writes it.
+CAFE_NAME = "café.py"
+#: git's C-quoted spelling of :data:`CAFE_NAME`, as ``cycle_touched_paths``
+#: reports it (#3425).
+CAFE_QUOTED = '"caf\\303\\251.py"'
+
 
 def write_non_utf8_named_file(repo: Path, content: str = "x\n") -> str:
     """Create a file whose name is not valid UTF-8 and return its ``fsdecode`` name.

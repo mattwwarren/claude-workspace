@@ -11,6 +11,7 @@ is proved by rewriting the detector and CLAUDE.md during the fix turn.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import json
 import logging
 import os
@@ -55,6 +56,8 @@ from tests._codex_review_helpers import (
 )
 from tests._hold_clock import Hold, HoldClock, install_hold_clock, wait_for_path
 from tests._shared.git_repos import (
+    CAFE_NAME,
+    CAFE_QUOTED,
     DIR_TO_FILE_SH,
     add_bare_origin,
     commit_tracked_file,
@@ -84,9 +87,9 @@ _AUTOFIXED_FRICTION = "codex_fix_gate_autofixed"
 _FMT_CHECK = "grep -q '^x = 1$' tracked.py"
 _FMT_FIX = "printf 'x = 1\\n' > tracked.py"
 _TRACKED_TOUCHED = frozenset({"tracked.py"})
-_CAFE = "café.py"
-# git's C-quoted spelling of _CAFE, as cycle_touched_paths reports it (#3425).
-_CAFE_QUOTED = '"caf\\303\\251.py"'
+# The non-ASCII name and its C-quoted spelling live once, in tests._shared.
+_CAFE = CAFE_NAME
+_CAFE_QUOTED = CAFE_QUOTED
 _CAFE_CHECK = f"grep -q '^z = 1$' {_CAFE}"
 _CAFE_FIX = f"printf 'z = 1\\n' > {_CAFE}"
 _SCRATCH_PREFIX = "cw-gate-"
@@ -162,6 +165,7 @@ def _run(
     tokens: list[str] | None = None,
     *,
     touched: frozenset[str] = frozenset(),
+    hook_rewrite: gate_autofix.HookRewritePolicy = gate_autofix.HookRewritePolicy.PARK,
 ) -> GateFailure | None:
     return run_cycle_gates(
         plan,
@@ -170,6 +174,7 @@ def _run(
         scope=_SCOPE,
         tokens=tokens if tokens is not None else [],
         touched=touched,
+        hook_rewrite=hook_rewrite,
     )
 
 
@@ -2182,3 +2187,284 @@ class TestCycleStartPin:
             "gate:a",
             "gate:b",
         ]
+
+
+# ---------------------------------------------------------------------------
+# Hook rewrite re-run (#3684): a red gate that rewrote its own touched files
+# ---------------------------------------------------------------------------
+
+_RECHECK = gate_autofix.HookRewritePolicy.RECHECK
+_PARK = gate_autofix.HookRewritePolicy.PARK
+# Fails on the first run after rewriting tracked.py; passes on the second.
+_HOOK_BODY = (
+    "grep -q '^x = 1$' tracked.py || { printf 'x = 1\\n' > tracked.py; exit 1; }"
+)
+_CAFE_HOOK = f"grep -q '^z = 1$' {_CAFE} || {{ printf 'z = 1\\n' > {_CAFE}; exit 1; }}"
+
+
+class TestHookRewriteRecheck:
+    """``hook_rewrite=RECHECK``: accept an in-scope rewrite after one green re-run."""
+
+    def test_in_scope_rewrite_is_accepted_and_committed_content_kept(
+        self, repo: Path, state: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        log = state / "ran.log"
+        _cycle_edit(repo)
+        plan = _plan_of(PlannedGate("fmt", _log_cmd(log, "r", _HOOK_BODY), _CEILING))
+        tokens: list[str] = []
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(
+                plan, repo, tokens, touched=_TRACKED_TOUCHED, hook_rewrite=_RECHECK
+            )
+
+        assert failure is None
+        assert _tracked(repo) == "x = 1\n"
+        assert tokens == [_AUTOFIXED_FRICTION]
+        assert _autofix_outcomes(caplog) == ["rewrite_applied"]
+        assert len(log.read_text(encoding="utf-8").splitlines()) == 2
+
+    def test_declared_autofix_is_not_run_on_the_rewrite_path(
+        self, repo: Path, state: Path
+    ) -> None:
+        log = state / "ran.log"
+        _cycle_edit(repo)
+        plan = _plan_of(
+            PlannedGate(
+                "fmt",
+                _log_cmd(log, "r", _HOOK_BODY),
+                _CEILING,
+                "touch autofix-ran",
+            )
+        )
+
+        failure = _run(plan, repo, [], touched=_TRACKED_TOUCHED, hook_rewrite=_RECHECK)
+
+        assert failure is None
+        assert not (repo / "autofix-ran").exists()
+
+    @pytest.mark.parametrize(
+        ("body", "touched"),
+        [
+            pytest.param(
+                "test -f other.py || { printf ok > other.py; exit 1; }",
+                _TRACKED_TOUCHED,
+                id="out-of-touched-tracked",
+            ),
+            pytest.param(
+                "test -f new.py || { printf ok > new.py; exit 1; }",
+                _TRACKED_TOUCHED,
+                id="untracked-outside-touched",
+            ),
+            pytest.param(
+                "test ! -f tracked.py || { rm tracked.py; exit 1; }",
+                _TRACKED_TOUCHED,
+                id="deletion",
+            ),
+            pytest.param(
+                "test ! -f tracked.py || { mv tracked.py renamed.py; exit 1; }",
+                frozenset({"tracked.py", "renamed.py"}),
+                id="rename",
+            ),
+        ],
+    )
+    def test_out_of_scope_rewrite_parks_with_first_run_output(
+        self,
+        repo: Path,
+        state: Path,
+        caplog: pytest.LogCaptureFixture,
+        body: str,
+        touched: frozenset[str],
+    ) -> None:
+        log = state / "ran.log"
+        plan = _plan_of(PlannedGate("fmt", _log_cmd(log, "r", body), _CEILING))
+        tokens: list[str] = []
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(plan, repo, tokens, touched=touched, hook_rewrite=_RECHECK)
+
+        assert failure is not None
+        assert failure.kind == "red"
+        assert failure.exit_code == 1
+        assert _autofix_outcomes(caplog) == ["rewrite_rejected_scope"]
+        assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+        assert tokens == []
+
+    def test_red_rerun_rejects_and_leaves_rewrites_in_place(
+        self, repo: Path, state: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        log = state / "ran.log"
+        body = "printf 'x = 9\\n' > tracked.py; exit 3"
+        plan = _plan_of(PlannedGate("fmt", _log_cmd(log, "r", body), _CEILING))
+        tokens: list[str] = []
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(
+                plan, repo, tokens, touched=_TRACKED_TOUCHED, hook_rewrite=_RECHECK
+            )
+
+        assert failure is not None
+        assert failure.exit_code == 3
+        assert _autofix_outcomes(caplog) == ["rewrite_rejected_red"]
+        assert tokens == []
+        # No revert on rejection: the first run's rewrite stays on disk.
+        assert _tracked(repo) == "x = 9\n"
+
+    def test_green_rerun_that_dirties_the_tree_is_rejected(
+        self, repo: Path, state: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        log = state / "ran.log"
+        quoted = shlex.quote(str(log))
+        body = (
+            f'if [ "$(wc -l < {quoted})" -ge 2 ]; then '
+            "echo more >> tracked.py; exit 0; fi; "
+            "echo more >> tracked.py; exit 1"
+        )
+        plan = _plan_of(PlannedGate("fmt", _log_cmd(log, "r", body), _CEILING))
+        tokens: list[str] = []
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(
+                plan, repo, tokens, touched=_TRACKED_TOUCHED, hook_rewrite=_RECHECK
+            )
+
+        assert failure is not None
+        assert failure.kind == "red"
+        assert _autofix_outcomes(caplog) == ["rewrite_rejected_red"]
+        assert tokens == []
+
+    def test_non_format_red_gate_runs_once_with_no_rewrite_outcome(
+        self, repo: Path, state: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        log = state / "ran.log"
+        plan = _plan_of(
+            PlannedGate(
+                "lint", _log_cmd(log, "lint", "echo lint-went-wrong; exit 9"), _CEILING
+            )
+        )
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(plan, repo, [], hook_rewrite=_RECHECK)
+
+        assert failure is not None
+        assert failure.exit_code == 9
+        assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+        assert _autofix_outcomes(caplog) == []
+
+    def test_later_clean_gate_passes_after_accepted_rewrite(
+        self, repo: Path, state: Path
+    ) -> None:
+        log = state / "ran.log"
+        _cycle_edit(repo)
+        plan = _plan_of(
+            PlannedGate("fmt", _log_cmd(log, "r", _HOOK_BODY), _CEILING),
+            PlannedGate("after", "true", _CEILING),
+        )
+
+        failure = _run(plan, repo, [], touched=_TRACKED_TOUCHED, hook_rewrite=_RECHECK)
+
+        assert failure is None
+
+    def test_later_gate_that_dirties_after_accepted_rewrite_still_refuses(
+        self, repo: Path, state: Path
+    ) -> None:
+        log = state / "ran.log"
+        _cycle_edit(repo)
+        plan = _plan_of(
+            PlannedGate("fmt", _log_cmd(log, "r", _HOOK_BODY), _CEILING),
+            PlannedGate("dirty", "echo z >> tracked.py", _CEILING),
+        )
+
+        failure = _run(plan, repo, [], touched=_TRACKED_TOUCHED, hook_rewrite=_RECHECK)
+
+        assert failure is not None
+        assert failure.kind == "dirtied"
+        assert failure.gate == "dirty"
+
+    def test_token_is_recorded_once_across_two_cycles(
+        self, repo: Path, state: Path
+    ) -> None:
+        log = state / "ran.log"
+        plan = _plan_of(PlannedGate("fmt", _log_cmd(log, "r", _HOOK_BODY), _CEILING))
+        tokens: list[str] = []
+
+        for _cycle in range(2):
+            _cycle_edit(repo)
+            assert (
+                _run(
+                    plan, repo, tokens, touched=_TRACKED_TOUCHED, hook_rewrite=_RECHECK
+                )
+                is None
+            )
+
+        assert tokens == [_AUTOFIXED_FRICTION]
+
+    def test_non_ascii_rewrite_accepted_with_quoted_spelling(
+        self, repo: Path, state: Path
+    ) -> None:
+        log = state / "ran.log"
+        commit_tracked_file(repo, _CAFE, "z = 1\n")
+        (repo / _CAFE).write_text("z   =   1\n", encoding="utf-8")
+        plan = _plan_of(PlannedGate("fmt", _log_cmd(log, "r", _CAFE_HOOK), _CEILING))
+
+        failure = _run(
+            plan, repo, [], touched=frozenset({_CAFE_QUOTED}), hook_rewrite=_RECHECK
+        )
+
+        assert failure is None
+        assert (repo / _CAFE).read_text(encoding="utf-8") == "z = 1\n"
+
+    def test_non_ascii_rewrite_rejected_with_real_spelling(
+        self, repo: Path, state: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        log = state / "ran.log"
+        commit_tracked_file(repo, _CAFE, "z = 1\n")
+        (repo / _CAFE).write_text("z   =   1\n", encoding="utf-8")
+        plan = _plan_of(PlannedGate("fmt", _log_cmd(log, "r", _CAFE_HOOK), _CEILING))
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(
+                plan, repo, [], touched=frozenset({_CAFE}), hook_rewrite=_RECHECK
+            )
+
+        assert failure is not None
+        assert _autofix_outcomes(caplog) == ["rewrite_rejected_scope"]
+
+
+class TestHookRewriteDefaultOff:
+    """The default is ``PARK``: a red gate that rewrote files parks, unchanged."""
+
+    def test_default_policy_is_park_on_both_entry_points(self) -> None:
+        for fn in (gates.run_cycle_gates, gates._run_gate_with_autofix):
+            default = inspect.signature(fn).parameters["hook_rewrite"].default
+            assert default is gate_autofix.HookRewritePolicy.PARK
+
+    def test_default_parks_the_self_rewriting_gate(
+        self, repo: Path, state: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        log = state / "ran.log"
+        _cycle_edit(repo)
+        plan = _plan_of(PlannedGate("fmt", _log_cmd(log, "r", _HOOK_BODY), _CEILING))
+        tokens: list[str] = []
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(plan, repo, tokens, touched=_TRACKED_TOUCHED)
+
+        assert failure is not None
+        assert failure.kind == "red"
+        assert failure.exit_code == 1
+        assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+        assert _autofix_outcomes(caplog) == []
+        assert tokens == []
+        # The rewrite is still on disk: parking pins and resets it, not the gate.
+        assert _tracked(repo) == "x = 1\n"
+
+    def test_explicit_park_matches_default(self, repo: Path, state: Path) -> None:
+        log = state / "ran.log"
+        _cycle_edit(repo)
+        plan = _plan_of(PlannedGate("fmt", _log_cmd(log, "r", _HOOK_BODY), _CEILING))
+
+        failure = _run(plan, repo, [], touched=_TRACKED_TOUCHED, hook_rewrite=_PARK)
+
+        assert failure is not None
+        assert failure.exit_code == 1

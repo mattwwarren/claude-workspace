@@ -41,7 +41,8 @@ import contextlib
 import logging
 import stat
 import subprocess
-from typing import TYPE_CHECKING
+from enum import StrEnum
+from typing import TYPE_CHECKING, NamedTuple
 
 from cw._git import git_output
 from cw.codex_fix_loop.baseline import staged_cycle_tree
@@ -129,6 +130,43 @@ def changed_paths(
     )
     separator = "\n" if c_quoted else "\0"
     return frozenset(line for line in out.split(separator) if line)
+
+
+class HookRewritePolicy(StrEnum):
+    """Whether a red gate that rewrote its own touched files may be accepted.
+
+    ``PARK`` is the default: a red gate parks as before. ``RECHECK`` (#3684)
+    re-runs the gate once after the rewrite and accepts the cycle when the
+    rewrite is in scope and the re-run is green and leaves the tree alone.
+    """
+
+    PARK = "park"
+    RECHECK = "recheck"
+
+
+class ChangeVet(NamedTuple):
+    """What a tree-to-tree change set is allowed to be (see :func:`vet_changes`)."""
+
+    paths: int  # count of changed paths; 0 means nothing changed
+    within_touched: bool  # no deletion or rename, and every path is in touched
+
+
+def vet_changes(
+    worktree: Path, tree_before: str, tree_after: str, touched: frozenset[str]
+) -> ChangeVet:
+    """Vet the change set between two trees against the cycle's *touched* set.
+
+    The one definition of an acceptable rewrite, shared by the declared autofix
+    and the hook-rewrite re-run: a change inside *touched* (C-quoted spelling,
+    as ``cycle_touched_paths`` reports it, #3425), with no deletion and no
+    rename (a rename reports as a deletion under ``--no-renames``, #3427).
+    """
+    changed = changed_paths(worktree, tree_before, tree_after)
+    if not changed:
+        return ChangeVet(0, True)
+    spelled = changed_paths(worktree, tree_before, tree_after, c_quoted=True)
+    deleted = changed_paths(worktree, tree_before, tree_after, diff_filter="D")
+    return ChangeVet(len(changed), not deleted and spelled <= touched)
 
 
 def ignored_on_disk(worktree: Path) -> frozenset[str]:
