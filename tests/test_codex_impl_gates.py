@@ -676,3 +676,40 @@ class TestCommitFailure:
         block = commit_failure_block(exc)
         assert block.reason == CODEX_ERROR
         assert "fatal: boom" in block.details
+
+
+# --- hook-rewrite pin (#3684): IMPL keeps the PARK default ---------------------
+
+
+class TestHookRewritePinned:
+    def test_a_red_hook_rewrite_is_never_accepted(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """A rewrite inside ``touched`` is accepted only with the flag on."""
+        log = tmp_path / "ran.log"
+        hook = (
+            f"echo ran >> {log}; "
+            "grep -q '^x = 2$' src/a.py || { printf 'x = 2\\n' > src/a.py; exit 1; }"
+        )
+        install_home_prep_pr_state(tmp_path / "state", ("fmt", hook, 5.0))
+        baseline = capture_cycle_baseline(repo)
+        assert isinstance(baseline, CycleBaseline)
+        plan = plan_cycle_gates(repo, _SCOPE)
+        _stage(repo)
+        with patch.object(
+            _gates_module, "run_cycle_gates", wraps=_gates_module.run_cycle_gates
+        ) as spy:
+            block = run_quality_gates(
+                plan,
+                worktree=repo,
+                baseline=baseline,
+                scope=_SCOPE,
+                tokens=[],
+                touched=frozenset({"src/a.py"}),
+            )
+
+        assert block is not None
+        assert block.reason == IMPL_FAILED
+        assert "exit code 1" in block.details
+        assert log.read_text(encoding="utf-8").splitlines() == ["ran"]
+        assert "hook_rewrite" not in spy.call_args.kwargs

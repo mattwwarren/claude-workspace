@@ -8,6 +8,7 @@ the shared :class:`FakeCwCli`; no real ``gh``, ``codex`` or repo gate runs.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -984,3 +985,33 @@ class TestReuseCiEvidence:
             "reuse_path_gates: passed",
         ]
         assert _ran(log) == ["lint"]
+
+
+# --- hook-rewrite pin (#3684): FINALIZE keeps the PARK default -----------------
+
+
+@pytest.mark.parametrize("path", ["reuse", "create"])
+class TestHookRewritePinned:
+    def test_a_red_hook_rewrite_is_never_rechecked(
+        self, gated: Path, tmp_path: Path, path: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        log = tmp_path / "ran.log"
+        hook = (
+            f"echo ran >> {log}; "
+            "grep -q '^x = 2$' src/a.py || { printf 'x = 2\\n' > src/a.py; exit 1; }"
+        )
+        install_home_prep_pr_state(tmp_path / "state", ("fmt", hook, 5.0))
+        with (
+            patch.object(
+                _gates, "run_cycle_gates", wraps=_gates.run_cycle_gates
+            ) as spy,
+            caplog.at_level(logging.WARNING, logger="cw.codex_fix_loop.gates"),
+        ):
+            run = _gate_run(gated, path)
+
+        assert run.block is not None
+        assert run.block.reason == AGENT_BLOCK
+        assert "exit code 1" in run.block.details
+        assert _ran(log) == ["ran"]
+        assert "hook_rewrite" not in spy.call_args.kwargs
+        assert not [r for r in caplog.records if "outcome=rewrite_" in r.getMessage()]
