@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
 import freezegun
 import pytest
@@ -15,7 +16,12 @@ from cw.auto_dev_result import GATE_TIMEOUT_BLOCKER_REASON
 from cw.config import (
     save_state,
 )
-from cw.dev_queue import GATE_TIMEOUT_DISPOSITION, load_dev_queue, save_dev_queue
+from cw.dev_queue import (
+    DEPENDENCY_HOLD_DISPOSITION,
+    GATE_TIMEOUT_DISPOSITION,
+    load_dev_queue,
+    save_dev_queue,
+)
 from cw.events import read_events, record_event
 from cw.models import (
     CwState,
@@ -39,6 +45,7 @@ from cw.reconcile.tasks import (
     _closed_pr_numbers_by_client,
     _is_variant_a_gate_task,
     _merged_pr_numbers_by_client,
+    _pr_numbers_by_client_in_state,
 )
 from tests._reconcile_helpers import (
     _client_with_lane,
@@ -309,6 +316,143 @@ def test_release_stale_gated_tasks_dismisses_watch_released_same_tick(
     assert released == ["SG-W1"]
     reloaded = load_dev_queue()
     assert reloaded.watched_prs[0].status == "dismissed"
+
+
+def test_release_stale_gated_tasks_retires_unreferenced_terminal_watch_without_release(
+    tmp_config_dir: Path,
+) -> None:
+    """#3654: no gated row exists, so nothing is released or stamped, yet the
+    tick still persists the retirement of a MERGED watch no row references.
+    Pins ``changed = changed or bool(retired)``: without it the dismissal is
+    computed in memory and never saved."""
+    save_dev_queue(DevQueueStore(watched_prs=[_make_watched_pr(pr_number=51)]))
+    save_state(CwState(sessions=[]))
+
+    released = release_stale_gated_tasks()
+
+    assert released == []
+    reloaded = load_dev_queue()
+    assert reloaded.tasks == []
+    assert [w.status for w in reloaded.watched_prs] == ["dismissed"]
+
+
+def test_release_stale_gated_tasks_keeps_watch_for_signal_only_park(
+    tmp_config_dir: Path,
+) -> None:
+    """#3654: under the default signal_only policy the park is stamped, not
+    released, so it still references its MERGED watch and the watch stays
+    active (the evidence must survive until the row actually clears)."""
+    parked = _make_ticket_task(
+        ticket_id="SG-W2",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="merge_gate_blocked",
+        blocked_reason="prior_pipeline_pr_open",
+        blocked_on_pr=52,
+        session_id="sess-w2",
+    )
+    save_dev_queue(
+        DevQueueStore(tasks=[parked], watched_prs=[_make_watched_pr(pr_number=52)])
+    )
+    save_state(CwState(sessions=[]))
+
+    release_stale_gated_tasks()
+
+    reloaded = load_dev_queue()
+    row = reloaded.tasks[0]
+    assert row.status == QueueItemStatus.BLOCKED_ON_USER
+    assert row.blocked_on_pr == 52
+    assert row.stale_gate_detected_at is not None
+    assert reloaded.watched_prs[0].status == "active"
+
+
+def test_release_stale_gated_tasks_keeps_closed_unmerged_dependency_hold_watch(
+    tmp_config_dir: Path,
+) -> None:
+    """#3654: a dependency hold never releases on a CLOSED-unmerged PR, so its
+    CLOSED watch must stay active across ticks (still referenced), and the
+    ``dependency_hold_pr_closed_unmerged`` event latches to one emission."""
+    hold = _make_ticket_task(
+        ticket_id="SG-W3",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition=DEPENDENCY_HOLD_DISPOSITION,
+        blocked_reason="dependency_unmerged",
+        blocked_on_pr=53,
+        session_id="sess-w3",
+    )
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[hold],
+            watched_prs=[_make_watched_pr(pr_number=53, state="CLOSED")],
+        )
+    )
+    save_state(CwState(sessions=[]))
+
+    assert release_stale_gated_tasks() == []
+    assert release_stale_gated_tasks() == []  # second tick must not re-emit
+
+    reloaded = load_dev_queue()
+    assert reloaded.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+    assert reloaded.watched_prs[0].status == "active"
+    closed_events = [
+        e
+        for e in read_events()
+        if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        and e.payload.get("proposed_action") == "dependency_hold_pr_closed_unmerged"
+    ]
+    assert len(closed_events) == 1
+
+
+def test_release_after_dismissal_ignores_stale_evidence(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3654 D5 end to end: once tick 1 releases the only row on a MERGED watch
+    and dismisses the watch, a NEW park on the same PR (reopened) must not be
+    released by the dismissed watch's stale MERGED state on tick 2.
+
+    No task row carries the PR, so the watch is the only evidence source.
+    """
+    first = _make_ticket_task(
+        ticket_id="SG-W4A",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="merge_gate_blocked",
+        blocked_reason="prior_pipeline_pr_open",
+        blocked_on_pr=54,
+        session_id="sess-w4a",
+    )
+    save_dev_queue(
+        DevQueueStore(tasks=[first], watched_prs=[_make_watched_pr(pr_number=54)])
+    )
+    save_state(CwState(sessions=[]))
+    monkeypatch.setattr(
+        "cw.reconcile.tasks.stale_gate.load_orchestrator_config",
+        lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
+    )
+
+    assert release_stale_gated_tasks() == ["SG-W4A"]
+    store = load_dev_queue()
+    assert store.watched_prs[0].status == "dismissed"
+
+    second = _make_ticket_task(
+        ticket_id="SG-W4B",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="merge_gate_blocked",
+        blocked_reason="prior_pipeline_pr_open",
+        blocked_on_pr=54,
+        session_id="sess-w4b",
+    )
+    store.tasks.append(second)
+    save_dev_queue(store)
+
+    assert release_stale_gated_tasks() == []
+
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-W4B")
+    assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
+    assert reloaded.blocked_on_pr == 54
 
 
 def test_release_stale_gated_tasks_auto_policy_requeues_variant_b(
@@ -861,6 +1005,7 @@ def _make_watched_pr(
     pr_number: int = 90,
     client: str | None = "client-a",
     state: str = "MERGED",
+    status: Literal["active", "dismissed"] = "active",
 ) -> WatchedPr:
     return WatchedPr(
         pr_url=f"https://github.com/foo/bar/pull/{pr_number}",
@@ -868,6 +1013,7 @@ def _make_watched_pr(
         pr_number=pr_number,
         client=client,
         source="stale_dispatch_park",
+        status=status,
         pr_state=PrState(state=state),
     )
 
@@ -877,13 +1023,13 @@ class TestMergedPrNumbersByClient:
     task rows' hydrated ``pr_state`` and client-tagged ``WatchedPr`` entries.
     """
 
-    def test_dismissed_watch_excluded(self) -> None:
-        """#3654 D5: a retired watch's last state is stale evidence."""
-        dismissed = _make_watched_pr()
-        dismissed.status = "dismissed"
-        assert (
-            _merged_pr_numbers_by_client(DevQueueStore(watched_prs=[dismissed])) == {}
-        )
+    @pytest.mark.parametrize("state", ["MERGED", "CLOSED"])
+    def test_dismissed_watch_excluded(self, state: str) -> None:
+        """#3654 D5: a retired watch's last state is stale evidence, for both
+        terminal states the shared ``_pr_numbers_by_client_in_state`` indexes."""
+        dismissed = _make_watched_pr(state=state, status="dismissed")
+        store = DevQueueStore(watched_prs=[dismissed])
+        assert _pr_numbers_by_client_in_state(store, state) == {}
 
     def test_merged_client_tagged_watch_contributes(self) -> None:
         store = DevQueueStore(watched_prs=[_make_watched_pr()])
