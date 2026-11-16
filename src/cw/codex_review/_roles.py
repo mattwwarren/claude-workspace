@@ -38,6 +38,7 @@ from cw.codex_review._const import (
     CODEX_MODEL_CAPACITY,
     _exec_policy_argv,
     _is_spawn_error,
+    _lean_profile_argv,
     format_input_sizes,
 )
 from cw.codex_review._context import _parse_reviewer_document
@@ -130,8 +131,8 @@ def _reasoning_effort_argv(reasoning_effort: str | None) -> list[str]:
 
     Shared by the reviewer and fix-cycle argv builders so every invocation in
     one review runs at the same depth. A ``-c`` override beats
-    ``~/.codex/config.toml``; ``None`` emits nothing, leaving codex's own
-    config (else the model default) in force.
+    ``~/.codex/config.toml``; ``None`` emits nothing, so codex's built-in default
+    effort applies (``--ignore-user-config`` means ``config.toml`` is not read).
     """
     if reasoning_effort is None:
         return []
@@ -165,13 +166,15 @@ def _build_generic_codex_argv(
     written normally. They are inserted before ``--output-schema`` so the
     trailing ``-m <model>`` append contract stays intact. The optional
     reasoning-effort pin (:func:`_reasoning_effort_argv`) sits in the same
-    pre-schema slot for the same reason.
+    pre-schema slot for the same reason. The lean profile block (#1711,
+    ``_lean_profile_argv``) sits between the policy pair and ``--json``.
     """
     # Sandbox + approval override: one seam, see _const._exec_policy_argv.
     argv = [
         "codex",
         "exec",
         *_exec_policy_argv(sandbox_mode),
+        *_lean_profile_argv(),
         *_AUDIT_ARGV_FLAGS,
         *_reasoning_effort_argv(reasoning_effort),
         "--output-schema",

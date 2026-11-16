@@ -474,7 +474,8 @@ longer depends on the operator's personal codex config.
 - Not every model supports every level (see `~/.codex/models_cache.json`); an
   unsupported level fails at codex runtime, not at config load.
 - Default `high` (#1711): a starting position, not a benchmarked optimum.
-  An explicit `null` emits nothing, and codex's own config decides.
+  An explicit `null` emits nothing, so codex's built-in default effort applies
+  (the lean profile below ignores `~/.codex/config.toml`).
 - Codex backend only: explicitly setting a level on any other backend is a
   config error (the `high` default is simply unused there).
 - Cost multiplies: the pin governs every codex call in a review, meaning each
@@ -497,6 +498,41 @@ clients:
               model: gpt-5.6-luna
               reasoning_effort: max
 ```
+
+### Codex Lean Reviewer Profile
+
+Every codex reviewer role and fix cycle (#1711) runs `codex exec` with a fixed,
+cw-owned lean profile, placed right after the `--sandbox` / `approval_policy`
+pair: `--ignore-user-config`, `--strict-config`, `-c project_doc_max_bytes=0`,
+`-c mcp_servers={}` and one `--disable` for each of `hooks`, `memories`,
+`multi_agent`, `multi_agent_v2`, `plugins`, `plugin_sharing`, `browser_use`,
+`browser_use_external`, `browser_use_full_cdp_access` and `computer_use`. It is
+hard-coded: no per-lane override and no opt-out. The plan, impl, finalize and
+tracker-IO turns and the capability probe are unchanged.
+
+- **What reaches the reviewer:** the agent spec, `.claude/review-extras.md`,
+  and the repo policy cw inlines into the prompt. Nothing else is read from the
+  host.
+- **AGENTS.md:** `project_doc_max_bytes=0` drops any `AGENTS.md`-based policy
+  of a client repo, because no cw module inlines `AGENTS.md`. Put required
+  review policy in `.claude/review-extras.md` or `.claude/review-policy.md`.
+- **`~/.codex/config.toml`:** it no longer influences review or fix runs. Auth
+  in `$CODEX_HOME` still works. A host whose credentials or provider are
+  selected by `config.toml` keys fails its reviews loudly.
+- **Fix cycle:** `[sandbox_workspace_write]` and `shell_environment_policy` in
+  a host config are dropped. Whether a fix cycle still writes and finishes
+  under `--ignore-user-config` is not probed; the first live fix cycle shows it.
+- **MCP:** `-c mcp_servers={}` is the blanket switch. Whether it removes a
+  server defined in the system or project layer is not probed.
+- **Version skew:** flags were probed on codex-cli 0.167.0 only. A codex that
+  rejects one fails the role as `codex_error`: the audit-flag retry strips only
+  `--json` and `--ephemeral`, and there is no minimum-version gate.
+- **Diagnostics:** each pass writes `codex-review-profile.json` beside
+  `codex-capability.json` in the session diagnostics dir. Fields:
+  `profile_version`, `cli_version`, `configured_model` (`codex-default` when no
+  `-m`), `reasoning_effort`, `instruction_sources` (per role),
+  `disabled_features`, `mcp` and `not_recorded` (`effective_model`,
+  `enabled_tool_classes`).
 
 ### Model Prices and Usage Accounting
 

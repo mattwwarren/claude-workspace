@@ -107,6 +107,43 @@ _JSON_FLAG = "--json"
 _EPHEMERAL_FLAG = "--ephemeral"
 _AUDIT_ARGV_FLAGS = (_JSON_FLAG, _EPHEMERAL_FLAG)
 
+# The lean reviewer profile (#1711), probed on codex-cli 0.167.0 only. Reviewer
+# and fix-cycle argvs append it right after the policy pair and before
+# ``--json``. ``-c`` overrides survive ``--ignore-user-config``, so the policy
+# pair stays unrepeated. The retry strips only ``_AUDIT_ARGV_FLAGS``, so a
+# codex that rejects a lean flag fails the role loudly. ``personality`` is
+# left out: 0.167.0 lists it as removed. ``-c mcp_servers={}`` is blanket
+# only; whether it clears system- or project-layer servers is unprobed.
+_IGNORE_USER_CONFIG_FLAG = "--ignore-user-config"
+_STRICT_CONFIG_FLAG = "--strict-config"
+_PROJECT_DOC_ARGV = ("-c", "project_doc_max_bytes=0")
+_NO_MCP_ARGV = ("-c", "mcp_servers={}")
+_LEAN_DISABLED_FEATURES = (
+    "hooks",
+    "memories",
+    "multi_agent",
+    "multi_agent_v2",
+    "plugins",
+    "plugin_sharing",
+    "browser_use",
+    "browser_use_external",
+    "browser_use_full_cdp_access",
+    "computer_use",
+)
+
+
+def _lean_profile_argv() -> list[str]:
+    """Return the lean reviewer profile block, a fresh list each call (#1711)."""
+    argv = [
+        _IGNORE_USER_CONFIG_FLAG,
+        _STRICT_CONFIG_FLAG,
+        *_PROJECT_DOC_ARGV,
+        *_NO_MCP_ARGV,
+    ]
+    for feature in _LEAN_DISABLED_FEATURES:
+        argv += ["--disable", feature]
+    return argv
+
 
 class _SpawnProbeResult(Protocol):
     """The two fields of a runner result that identify a spawn failure.

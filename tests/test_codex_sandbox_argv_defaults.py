@@ -247,6 +247,7 @@ class TestDefaultArgvLiterals:
         assert list(_PROBE_ARGV) == _PROBE_LITERAL
 
     def test_plan_default_argv(self) -> None:
+        # The plan, impl, finalize and probe literals stay lean-free (#1711).
         argv = build_plan_argv(
             schema_path=_S,
             output_path=_O,
@@ -526,42 +527,3 @@ class TestNoSandboxLiteralOutsideTheSeam:
             if fragment in node.value
         }
         assert holders == {_SEAM_MODULE}
-
-
-class TestNonReviewerLaunchSitesStayLean:
-    """#1711 scopes the lean profile to the reviewer and fix argvs only."""
-
-    @staticmethod
-    def _assert_no_lean_flags(argv: list[str]) -> None:
-        for fragment in (*_LEAN_FLAG_FRAGMENTS, "mcp_servers={}", "--disable"):
-            assert not any(fragment in token for token in argv), (fragment, argv)
-
-    def test_plan_argv_has_no_lean_flags(self) -> None:
-        self._assert_no_lean_flags(
-            build_plan_argv(
-                schema_path=_S,
-                output_path=_O,
-                model="m",
-                reasoning_effort="high",
-                mcp_server=None,
-                tracker=None,
-                other_servers=(),
-            )
-        )
-
-    def test_impl_argv_has_no_lean_flags(self) -> None:
-        self._assert_no_lean_flags(_impl_argv(SandboxMode.WORKSPACE_WRITE))
-
-    def test_finalize_argv_has_no_lean_flags(self) -> None:
-        self._assert_no_lean_flags(
-            build_finalize_argv(
-                schema_path=_S,
-                output_path=_O,
-                model="m",
-                reasoning_effort="high",
-                other_servers=(),
-            )
-        )
-
-    def test_probe_argv_has_no_lean_flags(self) -> None:
-        self._assert_no_lean_flags(list(_PROBE_ARGV))

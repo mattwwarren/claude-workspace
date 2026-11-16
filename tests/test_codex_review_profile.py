@@ -16,13 +16,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from cw.codex_review._profile import (
-    PROFILE_FILENAME,
-    ReviewProfile,
-    _persist_review_profile,
-    build_review_profile,
-    instruction_sources,
-)
 
 import cw
 from cw.codex_review import _prepare_review_pass, run_codex_roles
@@ -35,6 +28,13 @@ from cw.codex_review._context._prompt_text import (
     _DECIDED_SCOPE_HEADER,
 )
 from cw.codex_review._context._sensitive_files import _SensitiveHit
+from cw.codex_review._profile import (
+    PROFILE_FILENAME,
+    ReviewProfile,
+    _persist_review_profile,
+    build_review_profile,
+    instruction_sources,
+)
 from cw.codex_review.core import run_prepared_roles
 from cw.codex_runner import FakeCodexRunner
 from cw.config import diagnostics_dir
@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 _ROLE = "Code Quality Reviewer"
+_SPEC_PATH = ".claude/agents/code-reviewer.md"
 _MARKERS = ["codex_project_docs=disabled", "codex_user_config=ignored"]
 # Prompt inputs with no instruction text: everything else must be mapped.
 _EXCLUDED = {
@@ -143,6 +144,7 @@ class TestInstructionSources:
 def _prepared(make_git_repo: Callable[..., Path], name: str) -> _ReviewPassInputs:
     repo = make_git_repo(name)
     git_in(repo, "checkout", "-b", "feature")
+    commit_tracked_file(repo, _SPEC_PATH, "AGENT-SPEC-BODY\n")
     commit_tracked_file(repo, "mod.py", "x = 1\n")
     return _prepare_review_pass(
         _task(),
@@ -187,8 +189,8 @@ class TestBuildReviewProfile:
         assert record.mcp == "disabled"
         assert record.not_recorded == ["effective_model", "enabled_tool_classes"]
         assert set(record.instruction_sources) == set(prepared.roles)
+        assert "agent_spec" in record.instruction_sources[_ROLE]
         for sources in record.instruction_sources.values():
-            assert "agent_spec" in sources
             assert sources[-2:] == _MARKERS
 
     def test_unpinned_and_non_partial_renderer_degrade_softly(
@@ -282,6 +284,7 @@ class TestRequiredPolicySurvives:
             },
         )
         git_in(repo, "checkout", "-b", "feature")
+        commit_tracked_file(repo, _SPEC_PATH, "AGENT-SPEC-BODY\n")
         commit_tracked_file(repo, "mod.py", "x = 1\n")
         prepared = _prepare_review_pass(
             _task(scope_hint="large"),

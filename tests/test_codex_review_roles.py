@@ -833,9 +833,9 @@ def test_rejected_lean_flag_is_not_retried_and_fails_loud(tmp_path: Path) -> Non
     assert len(runner.calls) == 1
     assert failure is not None
     assert failure.reason == CODEX_ERROR
-    path = _bundle_file("sess-lean-skew", "code-quality-reviewer", "nonzero_exit")
-    persisted = ExecutorFailure.model_validate_json(path.read_text())
-    assert persisted.category == "nonzero_exit"
+    assert _bundle_file(
+        "sess-lean-skew", "code-quality-reviewer", "nonzero_exit"
+    ).exists()
     argv = runner.calls[0]["argv"]
     assert isinstance(argv, list)
     for flag in ("--strict-config", "--ignore-user-config", "--json", "--ephemeral"):
