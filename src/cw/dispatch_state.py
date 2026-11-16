@@ -156,12 +156,13 @@ def _open_pr_probe_key(client: str, ticket_id: str) -> str:
 def dispatch_state_lock() -> Iterator[None]:
     """Acquire an exclusive file lock over the DISPATCH_STATE_FILE write window.
 
-    Hold this across every load→mutate→write sequence in
-    ``merge_and_save_usage_limited_until``, ``save_availability_probe_cache``,
-    and ``save_main_drift_latches`` so concurrent ``cw`` processes cannot
-    clobber each other's edits (lost update, #1256). Rank STATE, so
-    ``sessions_lock()`` → ``dispatch_state_lock()`` is permitted (reconcile's
-    main-drift act takes it) and the reverse is not. Lock discipline: ADR-0019.
+    :func:`mutate_dispatch_state` is the single entry point that takes this
+    lock around a load→mutate→write sequence, so concurrent ``cw`` processes
+    cannot clobber each other's edits (lost update, #1256). New sidecar
+    writers must go through it instead of taking the lock themselves. Rank
+    STATE, so ``sessions_lock()`` → ``dispatch_state_lock()`` is permitted
+    (reconcile's main-drift act takes it) and the reverse is not. Lock
+    discipline: ADR-0019.
     """
     lock_path = dispatch_state_lock_file()
     with lock_guard("dispatch_state", lock_path, LockRank.STATE):
@@ -178,12 +179,12 @@ def dispatch_state_lock() -> Iterator[None]:
 def _load_dispatch_state_raw(*, strict: bool = False) -> dict[str, Any]:
     """Read DISPATCH_STATE_FILE as a dict, fail-open unless *strict* is true.
 
-    Shared read-side of the read-merge-write save helpers
-    (``merge_and_save_usage_limited_until`` / ``save_availability_probe_cache``)
-    so that neither clobbers the other's key in the shared sidecar (#1157). A corrupt
-    or non-object existing file is treated as empty rather than raising unless
-    *strict* is true. The strict mode is for destructive state mutations that
-    must not turn an unreadable file into an empty replacement.
+    Shared read-side of :func:`mutate_dispatch_state` (its ``strict`` parameter
+    is passed straight through), so no sidecar writer clobbers another's key in
+    the shared file (#1157). A corrupt or non-object existing file is treated
+    as empty rather than raising unless *strict* is true. The strict mode is
+    for destructive state mutations that must not turn an unreadable file into
+    an empty replacement.
     """
     path = DISPATCH_STATE_FILE
     if not path.exists():
