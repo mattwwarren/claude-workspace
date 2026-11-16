@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Installed `~/.claude` links no longer vanish mid-install; gate-key fences retry a transient miss (#3662).** `scripts/install-skills.sh` builds each command, script and skill link under a hidden temp name and renames it over the old one (skill repoints need `mv -T` or `mv -h`, probed at runtime, else the old `rm -rf` plus `ln -s`); links already pointing at the right target are left untouched. The four `gate_key.py` fences resolve the helper through the new `cw resolve-installed`, which polls up to 10 s and accepts only a non-empty regular file, logging each candidate's state on failure. Operator note: reinstall cw so `cw resolve-installed` exists; `No such command 'resolve-installed'` means the installed cw is older. The cause of the 2026-11-14 transient gaps is not established, and this does not claim to fix it.
+
 ## [1.102.0] - 2026-11-16
 
 ### Changed

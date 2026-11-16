@@ -854,6 +854,12 @@ elements:
       codex: {disposition: not-applicable, reason: "cw runs the gates; a missing prep_pr_state.py parks impl_failed through run_quality_gates"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
+  impl.appendix-read-retry:
+    cells:
+      claude-native: {disposition: implemented}
+      codex: {disposition: not-applicable, reason: "cw runs the gates and reads its own appendix; the model never Reads a ~/.claude file in the codex IMPL path"}
+      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
+      local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.absent-owner-record:
     cells:
       claude-native: {disposition: implemented}

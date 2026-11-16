@@ -237,6 +237,14 @@ LAZY_COMMANDS: Final[dict[str, LazyCommand]] = {
         "queue_channel",
         "Queue channel server: push MCP notifications to subscribed Claude sessions.",
     ),
+    "resolve-installed": LazyCommand(
+        "cw.cli.resolve_installed",
+        "resolve_installed",
+        (
+            "Print the first CANDIDATE that is a non-empty regular file, retrying"
+            " briefly on a miss."
+        ),
+    ),
     "result": LazyCommand(
         "cw.result",
         "result",

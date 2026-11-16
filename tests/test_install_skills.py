@@ -1222,3 +1222,153 @@ class TestInstallSkillsNeverWritesHooks:
 
         assert settings.read_text(encoding="utf-8") == original
         assert "hooks" not in json.loads(settings.read_text(encoding="utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# #3662: relinks are renames, never unlink-then-create
+# ---------------------------------------------------------------------------
+
+_REAL_TOOL = {name: shutil.which(name) for name in ("rm", "ln", "mv")}
+
+
+def _logging_bin(
+    tmp_path: Path, *, mv_rejects_flags: bool = False
+) -> tuple[Path, Path]:
+    """PATH shims for rm/ln/mv that log argv, then exec the real tool.
+
+    With *mv_rejects_flags*, mv exits 64 on -T and -h, which is the fallback
+    host (neither no-follow rename flag works).
+    """
+    bin_dir = tmp_path / "shimbin"
+    bin_dir.mkdir(exist_ok=True)
+    log = tmp_path / "shim.log"
+    log.touch()
+    for name in ("rm", "ln", "mv"):
+        reject = ""
+        if name == "mv" and mv_rejects_flags:
+            reject = 'for a in "$@"; do case "$a" in -T|-h) exit 64;; esac; done\n'
+        body = (
+            "#!/bin/sh\n"
+            f'printf "{name} %s\\n" "$*" >> "{log}"\n'
+            f"{reject}"
+            f'exec "{_REAL_TOOL[name]}" "$@"\n'
+        )
+        shim = bin_dir / name
+        shim.write_text(body, encoding="utf-8")
+        shim.chmod(0o755)
+    return bin_dir, log
+
+
+def _run_shimmed(
+    script: Path, fake_home: Path, bin_dir: Path
+) -> subprocess.CompletedProcess[str]:
+    env = {
+        **os.environ,
+        "HOME": str(fake_home),
+        "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+    }
+    return subprocess.run(
+        ["bash", str(script)], capture_output=True, text=True, env=env, check=False
+    )
+
+
+def _calls_on(log: Path, dst: Path, verbs: tuple[str, ...]) -> list[str]:
+    return [
+        line
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if line.split(" ", 1)[0] in verbs and str(dst) in line.split()
+    ]
+
+
+class TestAtomicRelink:
+    def test_wrong_target_command_link_is_renamed_over_not_unlinked(
+        self, tmp_path: Path, fake_repo: Path, fake_home: Path, script: Path
+    ) -> None:
+        assert _run(script, fake_home).returncode == 0
+        dst = fake_home / ".claude" / "commands" / "auto-dev.md"
+        decoy = tmp_path / "decoy.md"
+        decoy.write_text("decoy\n", encoding="utf-8")
+        dst.unlink()
+        Path(dst).symlink_to(decoy)
+        bin_dir, log = _logging_bin(tmp_path)
+
+        result = _run_shimmed(script, fake_home, bin_dir)
+
+        assert result.returncode == 0, result.stderr
+        assert str(Path(dst).readlink()) == str(
+            fake_repo / ".claude" / "commands" / "auto-dev.md"
+        )
+        assert _calls_on(log, dst, ("rm", "ln")) == []
+        assert any(line.endswith(f" {dst}") for line in _calls_on(log, dst, ("mv",)))
+
+    def test_skill_repoint_renames_and_leaves_decoy_clean(
+        self, tmp_path: Path, fake_repo: Path, fake_home: Path, script: Path
+    ) -> None:
+        assert _run(script, fake_home).returncode == 0
+        skill_dst = fake_home / ".claude" / "skills" / "cw-fanout"
+        decoy_dir = tmp_path / "decoy-skill"
+        decoy_dir.mkdir()
+        (decoy_dir / "SKILL.md").write_text("decoy\n", encoding="utf-8")
+        skill_dst.unlink()
+        Path(skill_dst).symlink_to(decoy_dir)
+        bin_dir, _log = _logging_bin(tmp_path)
+
+        result = _run_shimmed(script, fake_home, bin_dir)
+
+        assert result.returncode == 0, result.stderr
+        assert str(Path(skill_dst).readlink()) == str(
+            fake_repo / ".claude" / "skills" / "cw-fanout"
+        )
+        # A mv that followed the symlink would have planted the new link
+        # inside the decoy directory.
+        assert sorted(p.name for p in decoy_dir.iterdir()) == ["SKILL.md"]
+
+    def test_already_correct_links_are_not_touched(
+        self, tmp_path: Path, fake_repo: Path, fake_home: Path, script: Path
+    ) -> None:
+        assert _run(script, fake_home).returncode == 0
+        cmd = fake_home / ".claude" / "commands" / "review.md"
+        past = 1_000_000_000
+        os.utime(cmd, (past, past), follow_symlinks=False)
+        bin_dir, log = _logging_bin(tmp_path)
+
+        result = _run_shimmed(script, fake_home, bin_dir)
+
+        assert result.returncode == 0, result.stderr
+        assert os.lstat(cmd).st_mtime == past
+        assert _calls_on(log, cmd, ("ln", "mv", "rm")) == []
+
+    def test_no_temp_names_left_behind(
+        self, fake_repo: Path, fake_home: Path, script: Path
+    ) -> None:
+        assert _run(script, fake_home).returncode == 0
+        assert _run(script, fake_home).returncode == 0
+        leftovers = [
+            p
+            for base in (
+                fake_home / ".claude" / "commands",
+                fake_home / ".claude" / "skills",
+            )
+            for p in base.glob(".*cw-tmp*")
+        ]
+        assert leftovers == []
+
+    def test_mv_without_no_follow_flags_falls_back_to_rm_and_ln(
+        self, tmp_path: Path, fake_repo: Path, fake_home: Path, script: Path
+    ) -> None:
+        assert _run(script, fake_home).returncode == 0
+        skill_dst = fake_home / ".claude" / "skills" / "cw-fanout"
+        decoy_dir = tmp_path / "decoy-skill"
+        decoy_dir.mkdir()
+        (decoy_dir / "SKILL.md").write_text("decoy\n", encoding="utf-8")
+        skill_dst.unlink()
+        Path(skill_dst).symlink_to(decoy_dir)
+        bin_dir, _log = _logging_bin(tmp_path, mv_rejects_flags=True)
+
+        result = _run_shimmed(script, fake_home, bin_dir)
+
+        assert result.returncode == 0, result.stderr
+        assert str(Path(skill_dst).readlink()) == str(
+            fake_repo / ".claude" / "skills" / "cw-fanout"
+        )
+        assert sorted(p.name for p in decoy_dir.iterdir()) == ["SKILL.md"]

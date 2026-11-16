@@ -1146,10 +1146,7 @@ GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
   "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
 [ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
-KEY_SCRIPT=""
-for candidate in "$GUARD_ROOT/.claude/scripts/gate_key.py" "$HOME/.claude/scripts/gate_key.py"; do
-  if [ -f "$candidate" ]; then KEY_SCRIPT="$candidate"; break; fi
-done
+KEY_SCRIPT=$(cw resolve-installed "$GUARD_ROOT/.claude/scripts/gate_key.py" "$HOME/.claude/scripts/gate_key.py") || KEY_SCRIPT=""
 [ -n "$KEY_SCRIPT" ] || { echo "GATE_KEY_HELPER_MISSING: gate_key.py not found (\$GUARD_ROOT/.claude/scripts, ~/.claude/scripts); run scripts/install-skills.sh"; exit 1; }
 GATE_KEY=$(python3 "$KEY_SCRIPT" --branch '<branch-name>') && [[ "$GATE_KEY" =~ ^[0-9a-f]{16}$ ]] || { echo "IMPL_FAILED: gate_key.py could not compute the gate key ($KEY_SCRIPT; $(python3 --version 2>&1))"; exit 1; }
 TMPWT="${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$GATE_KEY"

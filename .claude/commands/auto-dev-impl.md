@@ -365,7 +365,10 @@ resolver).
 
 <!-- el-end: impl.guard-script-path-resolution-and-staleness -->
 <!-- el: impl.tool-scripts-outside-table -->
-**Tool scripts outside the table (#2436).** `gate_key.py` is invoked from the Step 2.5 fences but is deliberately not a row above: it has no stale-versus-current behaviour to gate (it computes a key, and `--claim` fails closed), so it follows the tool-script convention of `prep_pr_state.py`: probe the session worktree or `$GUARD_ROOT` copy, then `$HOME/.claude/scripts`, and hard-stop when it is absent with one line ending `run scripts/install-skills.sh`. A missing helper never falls back to a `$CW_SESSION`- or `$$`-keyed path. Commands reach a client-repo worker as soon as the checkout updates, but scripts are linked per file, so until the installer is re-run `~/.claude/scripts/gate_key.py` is absent there and Step 2.5 stops with that remedy. Each fence validates the printed key against `^[0-9a-f]{16}$` instead of trusting the script's presence.
+**Tool scripts outside the table (#2436).** `gate_key.py` is invoked from the Step 2.5 fences but is deliberately not a row above: it has no stale-versus-current behaviour to gate (it computes a key, and `--claim` fails closed), so it follows the tool-script convention of `prep_pr_state.py`: probe the session worktree or `$GUARD_ROOT` copy, then `$HOME/.claude/scripts`, and hard-stop when it is absent with one line ending `run scripts/install-skills.sh`. A missing helper never falls back to a `$CW_SESSION`- or `$$`-keyed path. Commands reach a client-repo worker as soon as the checkout updates, but scripts are linked per file, so until the installer is re-run `~/.claude/scripts/gate_key.py` is absent there and Step 2.5 stops with that remedy. Each fence validates the printed key against `^[0-9a-f]{16}$` instead of trusting the script's presence. The fences resolve the helper through `cw resolve-installed`, which polls for up to 10 s on a miss (a fast-forward can briefly leave the `~/.claude` link absent, dangling or zero-length), accepts only a non-empty regular file, and logs each candidate's state (absent, dangling with its target, empty, git in flight) on stderr. `No such command 'resolve-installed'` in that output means the installed `cw` predates this command: reinstall cw, then re-run.
+
+<!-- el: impl.appendix-read-retry -->
+**Appendix and installed-file reads retry before failing the stage (#3662).** When a Read of `.claude/commands/auto-dev-impl-appendix.md`, or of any `~/.claude` file this stage needs, reports the file missing, run `cw resolve-installed "<worktree>/.claude/commands/<name>" "$HOME/.claude/commands/<name>"` and Read the path it prints. Only if it exits non-zero, EXIT `blocked` with `blocker.reason: "impl_failed"` and the cw output in `blocker.details`. Do not improvise a substitute path.
 
 <!-- el: impl.pre-stage-detector-guard -->
 ### Pre-Stage Detector Guard
@@ -554,10 +557,7 @@ GUARD_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
   "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
 [ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
-KEY_SCRIPT=""
-for candidate in "$GUARD_ROOT/.claude/scripts/gate_key.py" "$HOME/.claude/scripts/gate_key.py"; do
-  if [ -f "$candidate" ]; then KEY_SCRIPT="$candidate"; break; fi
-done
+KEY_SCRIPT=$(cw resolve-installed "$GUARD_ROOT/.claude/scripts/gate_key.py" "$HOME/.claude/scripts/gate_key.py") || KEY_SCRIPT=""
 [ -n "$KEY_SCRIPT" ] || { echo "GATE_KEY_HELPER_MISSING: gate_key.py not found (\$GUARD_ROOT/.claude/scripts, ~/.claude/scripts); run scripts/install-skills.sh"; exit 1; }
 GATE_KEY=$(python3 "$KEY_SCRIPT" --branch '<branch-name>') && [[ "$GATE_KEY" =~ ^[0-9a-f]{16}$ ]] || { echo "IMPL_FAILED: gate_key.py could not compute the gate key ($KEY_SCRIPT; $(python3 --version 2>&1))"; exit 1; }
 TMPWT="${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$GATE_KEY"
@@ -613,7 +613,7 @@ git worktree add --detach "$TMPWT" origin/<branch-name> || { echo "IMPL_FAILED: 
 All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT run those against the cw session worktree with origin-qualified refs — that cwd confusion is the bug this step fixes. The gate paths are keyed by `gate_key.py` (clone identity plus branch), never by `$CW_SESSION`. Shell state does not persist between fenced Bash calls, so the setup fence's ownership claim, its `EXIT` trap and the `$GATE_KEY`, `$TMPWT`, `$TMPDIR` and `$FORK_POINT` it computes cover the setup call only. Gate 2's fence, gate 3's fence and gate 4's re-runs re-derive the gate key and the paths themselves from `gate_key.py` (gate 2 also re-derives `$FORK_POINT`). FORK_POINT is recomputed from `origin` refs; do not trust the impl agent's reported value. **Exception:** gate 2's guard-script resolver and its `--plan` argument target the cw session worktree, not `$TMPWT` (the detached checkout has no `.claude/cw-context.json` and no uncommitted `.cw/` state). Gate 2 derives that worktree **inside its own fence** from `git worktree list`, keyed on the branch, because shell variables do not persist between fenced Bash calls.
 
 <!-- el: impl.gate-helper-missing -->
-**Gate helper missing (#2436).** A fence that cannot resolve `gate_key.py` prints one line ending `run scripts/install-skills.sh` and exits non-zero before touching any gate path; it never falls back to a `$CW_SESSION`- or `$$`-keyed path. In headless mode EXIT `blocked` with `blocker.reason: "impl_failed"` and `blocker.details: "Step 2.5 gate setup: gate_key.py not found — run scripts/install-skills.sh"`, so the orchestrator can self-resolve (ADR-0020) instead of reading a generic implementation failure.
+**Gate helper missing (#2436).** A fence that cannot resolve `gate_key.py` (after the `cw resolve-installed` poll; its stderr names each candidate's state) prints one line ending `run scripts/install-skills.sh` and exits non-zero before touching any gate path; it never falls back to a `$CW_SESSION`- or `$$`-keyed path. In headless mode EXIT `blocked` with `blocker.reason: "impl_failed"` and `blocker.details: "Step 2.5 gate setup: gate_key.py not found — run scripts/install-skills.sh"`, so the orchestrator can self-resolve (ADR-0020) instead of reading a generic implementation failure.
 
 <!-- el-begin: impl.absent-owner-record -->
 <!-- el: impl.absent-owner-record -->
@@ -658,10 +658,7 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
      SESSION_WT=$(git worktree list --porcelain \
        | awk -v b="branch refs/heads/<branch-name>" '/^worktree /{w=substr($0,10)} $0==b{print w; exit}')
    fi
-   KEY_SCRIPT=""
-   for candidate in ${SESSION_WT:+"$SESSION_WT/.claude/scripts/gate_key.py"} "$HOME/.claude/scripts/gate_key.py"; do
-     if [ -f "$candidate" ]; then KEY_SCRIPT="$candidate"; break; fi
-   done
+   KEY_SCRIPT=$(cw resolve-installed ${SESSION_WT:+"$SESSION_WT/.claude/scripts/gate_key.py"} "$HOME/.claude/scripts/gate_key.py") || KEY_SCRIPT=""
    if [ -z "$KEY_SCRIPT" ]; then
      echo "GATE_KEY_HELPER_MISSING: Step 2.5 gate 2: gate_key.py not found (session worktree, ~/.claude/scripts); run scripts/install-skills.sh"
      exit 3
@@ -778,10 +775,7 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
    CTX_WORKTREE=$(jq -r '.worktree_path // empty' \
      "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
    [ -n "$CTX_WORKTREE" ] && GUARD_ROOT="$CTX_WORKTREE"
-   KEY_SCRIPT=""
-   for candidate in "$GUARD_ROOT/.claude/scripts/gate_key.py" "$HOME/.claude/scripts/gate_key.py"; do
-     if [ -f "$candidate" ]; then KEY_SCRIPT="$candidate"; break; fi
-   done
+   KEY_SCRIPT=$(cw resolve-installed "$GUARD_ROOT/.claude/scripts/gate_key.py" "$HOME/.claude/scripts/gate_key.py") || KEY_SCRIPT=""
    [ -n "$KEY_SCRIPT" ] || { echo "GATE_KEY_HELPER_MISSING: Step 2.5 gate 3: gate_key.py not found (\$GUARD_ROOT/.claude/scripts, ~/.claude/scripts); run scripts/install-skills.sh"; exit 3; }
    GATE_KEY=$(python3 "$KEY_SCRIPT" --branch '<branch-name>') && [[ "$GATE_KEY" =~ ^[0-9a-f]{16}$ ]] || { echo "IMPL_FAILED: Step 2.5 gate 3: gate_key.py could not compute the gate key ($KEY_SCRIPT; $(python3 --version 2>&1))"; exit 3; }
    TMPWT="${CW_GATE_ROOT:-/var/tmp}/cw-gate-wt-$GATE_KEY"

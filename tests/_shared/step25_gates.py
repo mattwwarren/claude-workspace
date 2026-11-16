@@ -211,13 +211,18 @@ def monolith_gate_fence() -> str:
 
 GATE_BRANCH = "feature"
 GATE_STALE_SESSION = "9141a90d"
+# The fences resolve gate_key.py through `cw resolve-installed`, which retries
+# up to 10 s on a miss. Executed fences must never wait; the retry itself is
+# covered by fake-clock unit tests (#3662).
+RESOLVE_INSTALLED_NO_WAIT_ENV: Mapping[str, str] = {"CW_RESOLVE_INSTALLED_WAIT_S": "0"}
 
 
 def link_cw_shim(bin_dir: Path) -> Path:
     """Put an executable ``cw`` shim in *bin_dir* running this interpreter's cw.
 
-    Gate 3 calls ``cw tests-prepare``; the shim keeps executed fences off any
-    host ``cw`` the venv never vetted. Returns *bin_dir*.
+    Gate 3 calls ``cw tests-prepare`` and the gate-key fences call
+    ``cw resolve-installed``; the shim keeps executed fences off any host
+    ``cw`` the venv never vetted. Returns *bin_dir*.
     """
     bin_dir.mkdir(parents=True, exist_ok=True)
     shim = bin_dir / "cw"
@@ -248,6 +253,7 @@ def run_fence_body(
             "CW_SESSION": GATE_STALE_SESSION,
         }
     )
+    env.update(RESOLVE_INSTALLED_NO_WAIT_ENV)
     env.update(extra_env or {})
     return subprocess.run(
         ["bash", "-c", body],
