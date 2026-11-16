@@ -466,7 +466,8 @@ clients:
 
 `reasoning_effort` pins codex's `model_reasoning_effort` on a `backend: codex`
 stage. cw emits `-c model_reasoning_effort=<value>` on every reviewer and
-fix-cycle invocation, which overrides `~/.codex/config.toml` for those calls.
+fix-cycle invocation, which overrides `~/.codex/config.toml`, so review depth no
+longer depends on the operator's personal codex config.
 
 - Accepted values: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`,
   `ultra`. Anything else fails config load.
@@ -500,7 +501,7 @@ clients:
 
 ### Codex Lean Reviewer Profile
 
-Every codex reviewer role (#1711) runs `codex exec` with a fixed,
+Every codex reviewer role and fix cycle (#1711) runs `codex exec` with a fixed,
 cw-owned lean profile, placed right after the `--sandbox` / `approval_policy`
 pair: `--ignore-user-config`, `--strict-config`, `-c project_doc_max_bytes=0`,
 `-c mcp_servers={}` and one `--disable` for each of `hooks`, `memories`,
@@ -515,13 +516,12 @@ tracker-IO turns and the capability probe are unchanged.
 - **AGENTS.md:** `project_doc_max_bytes=0` drops any `AGENTS.md`-based policy
   of a client repo, because no cw module inlines `AGENTS.md`. Put required
   review policy in `.claude/review-extras.md` or `.claude/review-policy.md`.
-- **`~/.codex/config.toml`:** it no longer influences reviewer runs. Auth in
-  `$CODEX_HOME` still works. Fix cycles retain the host's safety settings; a
-  host whose credentials or provider are selected by `config.toml` keys fails
-  its reviews loudly.
-- **Fix cycle:** the lean profile is intentionally not applied to the
-  write-capable invocation, so `[sandbox_workspace_write]` and
-  `shell_environment_policy` from the host remain in force.
+- **`~/.codex/config.toml`:** it no longer influences review or fix runs. Auth
+  in `$CODEX_HOME` still works. A host whose credentials or provider are
+  selected by `config.toml` keys fails its reviews loudly.
+- **Fix cycle:** `[sandbox_workspace_write]` and `shell_environment_policy` in
+  a host config are dropped. Whether a fix cycle still writes and finishes
+  under `--ignore-user-config` is not probed; the first live fix cycle shows it.
 - **MCP:** `-c mcp_servers={}` is the blanket switch. Whether it removes a
   server defined in the system or project layer is not probed.
 - **Version skew:** flags were probed on codex-cli 0.167.0 only. A codex that

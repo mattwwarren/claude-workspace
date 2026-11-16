@@ -98,6 +98,7 @@ from tests._shared.review_builders import (
 )
 from tests._shared.session_seeding import _make_ticket_task
 from tests._tool_fakes import codex_usage_stdout
+from tests.test_codex_review_const import _LEAN_LITERAL
 from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:
@@ -613,6 +614,26 @@ class TestFixInvocation:
         assert out.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
         bundle = diagnostics_bundle_dir("s-fix-error")
         assert list(bundle.glob("fix-cycle-1-nonzero_exit-*.json"))
+
+    def test_park_argv_carries_the_lean_flags_and_effort_pin(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#1711 R3: ``_park_fix_failure`` rebuilds from the one fix builder."""
+        worktree = _worktree(make_git_repo, "wt-fix-park-argv")
+        runner = _FixLoopRunner(
+            [_MF_DOC],
+            fix_behaviors=[CodexRunResult(returncode=1, stdout="", stderr="boom")],
+        )
+        _run_loop(
+            runner, worktree, session_id="s-fix-park-argv", reasoning_effort="high"
+        )
+
+        (path,) = diagnostics_bundle_dir("s-fix-park-argv").glob(
+            "fix-cycle-1-nonzero_exit-*.json"
+        )
+        argv = json.loads(path.read_text(encoding="utf-8"))["argv_sanitized"]
+        assert argv[6 : 6 + len(_LEAN_LITERAL)] == _LEAN_LITERAL
+        assert "model_reasoning_effort=high" in argv
 
     def test_fix_capacity_failure_keeps_todays_classification_with_jsonl_stdout(
         self, make_git_repo: Callable[..., Path]
@@ -2560,6 +2581,9 @@ class TestFixPromptAndArgv:
         # the approval override (#1767) always rides.
         assert not any(a.startswith("model_reasoning_effort=") for a in argv)
         assert argv[4:6] == ["-c", "approval_policy=never"]
+        # The lean block (#1711) follows the policy pair and precedes --json.
+        assert argv[6 : 6 + len(_LEAN_LITERAL)] == _LEAN_LITERAL
+        assert argv[6 + len(_LEAN_LITERAL)] == "--json"
 
     def test_argv_pins_reasoning_effort(self) -> None:
         argv = _build_fix_codex_argv(model="gpt-x", reasoning_effort="max")
@@ -2581,6 +2605,7 @@ class TestFixPromptAndArgv:
             "read-only",
             "-c",
             "approval_policy=never",
+            *_LEAN_LITERAL,
             "--json",
         ]
 
