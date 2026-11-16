@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **npm gates are derived from the project's declared `scripts`, not a fixed triple (#3665).** `detect-gates` on a `package.json` project now emits `lint` only when `scripts.lint` is declared, `test` only when `scripts.test` is declared (the `npm init` placeholder is skipped), and `typecheck` as `npm run typecheck` when `scripts.typecheck` is declared, otherwise `npx tsc --noEmit` only when a root `tsconfig.json` exists. Workspaces monorepos whose root has no tsconfig now get their declared typecheck script on the codex fix loop instead of a failing `tsc` run. Operator note: a repo with no `scripts.test` now has no test gate where it previously had a failing `npm test` gate. An unparseable `package.json` logs a warning and yields no script-derived gates. `detected_from` still lists `package.json`.
+
 ### Changed
 
 - **Codex reviewers run a lean, cw-owned profile (#1711); fix cycles retain host safety policy.** Reviewer argv adds `--ignore-user-config`, `--strict-config`, `-c project_doc_max_bytes=0`, `-c mcp_servers={}` and ten `--disable` features right after the sandbox and approval pair. Fix argv keeps the explicit cw-owned sandbox and approval pair and the host `config.toml` safety controls. Each reviewer pass writes `codex-review-profile.json` to the session diagnostics dir. Operator note: the personal `~/.codex/config.toml` no longer influences cw review runs (auth in `$CODEX_HOME` still works), and a host whose credentials or provider are selected by `config.toml` keys fails its reviews loudly (not probed). `project_doc_max_bytes=0` drops a client repo's `AGENTS.md` policy, because no cw module inlines it; the agent spec, `.claude/review-extras.md` and the repo policy cw inlines survive. Also not probed: whether `mcp_servers={}` removes system- or project-layer servers. Flags were probed on codex 0.167.0 only; an older codex fails the reviewer as `codex_error`. See `config/CONFIG_REFERENCE.md`.

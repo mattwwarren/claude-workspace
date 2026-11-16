@@ -2873,7 +2873,7 @@ quality_gates:
 - **Precedence.** A `detect-gates` `autofix` wins over this map.
 - **Ecosystem defaults are adopted (#3421).** The `detect-gates` ecosystem
   defaults carry an autofix too: `uv run ruff check --fix .` for the `ruff` gate
-  and `npm run lint -- --fix` for the `lint` gate. A red lint gate with such a
+  and `npm run lint -- --fix` for the `lint` gate (when `package.json` declares `scripts.lint`). A red lint gate with such a
   default is autofixed and committed in-cycle instead of parking. The safety
   fence below is the only confinement. A repo that wants no autofix declares its
   gates in a `CLAUDE.md` bash block, which carries no autofix (the ecosystem
