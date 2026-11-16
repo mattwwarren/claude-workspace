@@ -507,8 +507,9 @@ profile, placed right after the `--sandbox` / `approval_policy` pair:
 `-c mcp_servers={}` and one `--disable` for each of `hooks`, `memories`,
 `multi_agent`, `multi_agent_v2`, `plugins`, `plugin_sharing`, `browser_use`,
 `browser_use_external`, `browser_use_full_cdp_access` and `computer_use`. It is
-hard-coded: no per-lane override and no opt-out. The fix cycle runs the same
-block, including `--ignore-user-config`. The profile is limited to codex
+hard-coded: no per-lane override and no opt-out. The reviewer block includes
+`--ignore-user-config`; the fix cycle runs the same block without it, so it
+keeps the host's `config.toml`. The profile is limited to codex
 review roles, confirm/re-review roles and fix cycles; plan stations, plan,
 impl, finalize, tracker-IO and the capability probe are unchanged.
 
@@ -520,11 +521,10 @@ impl, finalize, tracker-IO and the capability probe are unchanged.
   review policy in `.claude/review-extras.md` or `.claude/review-policy.md`.
 - **`~/.codex/config.toml`:** reviewers do not read it. Auth in `$CODEX_HOME`
   still works. A host whose credentials or provider are selected by
-  `config.toml` keys fails its reviews loudly (not probed). The same isolation
-  applies to fix cycles, so `[sandbox_workspace_write]` and
-  `shell_environment_policy` from a host config are dropped.
-- **Fix cycle:** it uses the full lean block, including
-  `--ignore-user-config`; the live fix cycle under that flag is not probed.
+  `config.toml` keys fails its reviews loudly (not probed).
+- **Fix cycle:** it reads the host `config.toml`, so `[sandbox_workspace_write]`
+  and `shell_environment_policy` still apply to a write-capable fix. It loses
+  project docs, MCP servers and the ten listed features like the reviewer does.
 - **MCP:** `-c mcp_servers={}` is the blanket switch. Whether it removes a
   server defined in the system or project layer is not probed.
 - **Version skew:** flags were probed on codex-cli 0.167.0 only. A codex that
