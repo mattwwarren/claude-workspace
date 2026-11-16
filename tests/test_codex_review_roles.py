@@ -55,6 +55,7 @@ from tests._codex_review_helpers import (
     _SequencedRunner,
 )
 from tests._shared.review_builders import _without_evidence
+from tests.test_codex_review_const import _LEAN_LITERAL
 
 _AUDIT_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "codex_audit_events"
 
@@ -120,7 +121,8 @@ class TestBuildGenericCodexArgv:
         assert argv[-2:] == ["-m", "gpt-5"]
 
     def test_unpinned_reasoning_effort_emits_no_override(self, tmp_path: Path) -> None:
-        # None must leave codex's own config in force: no effort pair at all.
+        # None emits no effort pair at all: codex's built-in default effort
+        # applies, because the lean profile ignores the operator's config.toml.
         # The approval override (#1767) is not an effort pin and always rides.
         argv = _build_generic_codex_argv(
             model=None,
@@ -194,6 +196,30 @@ class TestBuildGenericCodexArgv:
         # The trailing "-m <model>" append contract is unchanged.
         if model is not None:
             assert argv[-2:] == ["-m", model]
+
+
+class TestLeanProfileInReviewerArgv:
+    """The lean block (#1711) sits right after the policy pair, before ``--json``."""
+
+    @pytest.mark.parametrize(
+        "mode", [SandboxMode.READ_ONLY, SandboxMode.WORKSPACE_WRITE], ids=str
+    )
+    def test_lean_block_follows_the_policy_pair(
+        self, tmp_path: Path, mode: SandboxMode
+    ) -> None:
+        argv = _build_generic_codex_argv(
+            model="gpt-5",
+            reasoning_effort="high",
+            schema_path=tmp_path / "s.json",
+            output_path=tmp_path / "o.json",
+            sandbox_mode=mode,
+        )
+        assert argv[2:6] == _exec_policy_argv(mode)
+        assert argv[6 : 6 + len(_LEAN_LITERAL)] == _LEAN_LITERAL
+        assert argv[6 + len(_LEAN_LITERAL)] == "--json"
+        assert argv[-2:] == ["-m", "gpt-5"]
+        assert argv.count("--sandbox") == 1
+        assert argv.count("approval_policy=never") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -789,6 +815,31 @@ def test_run_codex_role_capacity_phrasing_in_stderr_only_still_codex_error(
     )
     assert failure is not None
     assert failure.reason == CODEX_ERROR
+
+
+def test_rejected_lean_flag_is_not_retried_and_fails_loud(tmp_path: Path) -> None:
+    """#1711 R9: a codex too old for ``--strict-config`` fails the role at once.
+
+    ``_is_audit_flag_rejection`` retries only on ``--json`` / ``--ephemeral``,
+    so the lean flags are never stripped: one runner call, ``codex_error``.
+    """
+    stderr = "error: unexpected argument '--strict-config' found"
+    result = CodexRunResult(returncode=2, stdout="", stderr=stderr)
+    assert _is_audit_flag_rejection(result) is False
+    runner = _SequencedRunner([result])
+    _doc, failure, _metrics, _rejected = _run_one_role(
+        runner, tmp_path, session_id="sess-lean-skew"
+    )
+    assert len(runner.calls) == 1
+    assert failure is not None
+    assert failure.reason == CODEX_ERROR
+    path = _bundle_file("sess-lean-skew", "code-quality-reviewer", "nonzero_exit")
+    persisted = ExecutorFailure.model_validate_json(path.read_text())
+    assert persisted.category == "nonzero_exit"
+    argv = runner.calls[0]["argv"]
+    assert isinstance(argv, list)
+    for flag in ("--strict-config", "--ignore-user-config", "--json", "--ephemeral"):
+        assert flag in argv
 
 
 # ---------------------------------------------------------------------------

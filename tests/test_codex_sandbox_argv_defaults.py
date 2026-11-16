@@ -40,6 +40,7 @@ from cw.codex_runner import FakeCodexRunner
 from cw.models import SandboxMode, StageExecutorConfig
 from tests._codex_review_helpers import _doc_json, _is_fix_argv
 from tests.test_codex_fix_loop import _MF_DOC, _run_loop, _worktree
+from tests.test_codex_review_const import _LEAN_LITERAL
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -68,6 +69,12 @@ _MODE_SCOPED_PACKAGES = (
     "codex_finalize",
 )
 _OVERRIDE = ["-c", "approval_policy=never"]
+#: Substrings of the lean-profile flags (#1711) that only the seam may spell.
+_LEAN_FLAG_FRAGMENTS = (
+    "--ignore-user-config",
+    "--strict-config",
+    "project_doc_max_bytes",
+)
 _LEGAL_MODES = (SandboxMode.READ_ONLY, SandboxMode.WORKSPACE_WRITE)
 
 _S = Path("/scratch/schema.json")
@@ -101,6 +108,7 @@ _REVIEWER_LITERAL = [
     "read-only",
     "-c",
     "approval_policy=never",
+    *_LEAN_LITERAL,
     "--json",
     "--ephemeral",
     "-c",
@@ -119,6 +127,7 @@ _REVIEWER_UNPINNED_LITERAL = [
     "read-only",
     "-c",
     "approval_policy=never",
+    *_LEAN_LITERAL,
     "--json",
     "--ephemeral",
     "--output-schema",
@@ -133,6 +142,7 @@ _FIX_LITERAL = [
     "workspace-write",
     "-c",
     "approval_policy=never",
+    *_LEAN_LITERAL,
     "--json",
     "-c",
     "model_reasoning_effort=high",
@@ -502,3 +512,56 @@ class TestNoSandboxLiteralOutsideTheSeam:
             if node.value == literal
         }
         assert holders == {_SEAM_MODULE}
+
+    @pytest.mark.parametrize("fragment", _LEAN_FLAG_FRAGMENTS)
+    def test_lean_flag_literal_lives_only_in_the_seam_module(
+        self, fragment: str
+    ) -> None:
+        # Substring containment: the project-doc flag is spelled
+        # ``project_doc_max_bytes=0``, so equality would never match it.
+        holders = {
+            rel
+            for rel, tree in _modules()
+            for node in _str_constants(tree)
+            if fragment in node.value
+        }
+        assert holders == {_SEAM_MODULE}
+
+
+class TestNonReviewerLaunchSitesStayLean:
+    """#1711 scopes the lean profile to the reviewer and fix argvs only."""
+
+    @staticmethod
+    def _assert_no_lean_flags(argv: list[str]) -> None:
+        for fragment in (*_LEAN_FLAG_FRAGMENTS, "mcp_servers={}", "--disable"):
+            assert not any(fragment in token for token in argv), (fragment, argv)
+
+    def test_plan_argv_has_no_lean_flags(self) -> None:
+        self._assert_no_lean_flags(
+            build_plan_argv(
+                schema_path=_S,
+                output_path=_O,
+                model="m",
+                reasoning_effort="high",
+                mcp_server=None,
+                tracker=None,
+                other_servers=(),
+            )
+        )
+
+    def test_impl_argv_has_no_lean_flags(self) -> None:
+        self._assert_no_lean_flags(_impl_argv(SandboxMode.WORKSPACE_WRITE))
+
+    def test_finalize_argv_has_no_lean_flags(self) -> None:
+        self._assert_no_lean_flags(
+            build_finalize_argv(
+                schema_path=_S,
+                output_path=_O,
+                model="m",
+                reasoning_effort="high",
+                other_servers=(),
+            )
+        )
+
+    def test_probe_argv_has_no_lean_flags(self) -> None:
+        self._assert_no_lean_flags(list(_PROBE_ARGV))
