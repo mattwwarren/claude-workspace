@@ -21,7 +21,7 @@ from cw.disk import (
     space_exhausted,
 )
 from cw.dispatch.gating.context_json import _LOGGER_NAME
-from cw.dispatch_state import (
+from cw.dispatch_state_host_tmp import (
     HostTmpProbeCache,
     load_host_tmp_probe_cache,
     save_host_tmp_probe_cache,
@@ -369,7 +369,7 @@ def _record_host_tmp_exhausted_block(
 
     Per-client sibling of :func:`_record_availability_block` (#2470): same
     edge-triggered ``session.needs_attention`` shape, but the latch lives in
-    a per-client :class:`~cw.dispatch_state.HostTmpProbeCache` entry and the
+    a per-client :class:`~cw.dispatch_state_host_tmp.HostTmpProbeCache` entry and the
     event carries the real ``client`` name -- threaded through the way
     :func:`~cw.dispatch.lanes._record_client_freshness_block` threads it --
     because the disk-pressure gate probes each client's own mount. Only the

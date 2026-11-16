@@ -6,8 +6,8 @@ state — usage-limit backoff expiry, the fleet-wide gh-availability probe cache
 a per-(client, ticket) marker recording an in-flight blocking review, so
 ``cw dev-queue status``/``cw doctor`` can distinguish a dead dispatch loop from
 one legitimately busy (#1742), the per-(client, ticket) open-PR probe cache
-backing the pre-dispatch stale-dispatch gate (#1862), and the per-client
-worker-tmp inode-exhaustion attention latches (#2470).
+backing the pre-dispatch stale-dispatch gate (#1862). The per-client worker-tmp
+inode-exhaustion attention latches (#2470) live in ``cw.dispatch_state_host_tmp``.
 Extracted from ``cw.config``; depends on ``cw.config`` for the state-dir
 accessors and the #1017 write guard, one-directional (``cw.config`` never
 imports this module).
@@ -33,7 +33,7 @@ from cw.events import record_event
 from cw.models import OrchestratorEventType
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Callable, Iterator, Mapping, Sequence
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -132,32 +132,6 @@ class OpenPrProbeCache(NamedTuple):
     pr_url: str | None = None
 
 
-class HostTmpProbeCache(NamedTuple):
-    """One client's worker-tmp inode-exhaustion latch (#2470).
-
-    Persisted in DISPATCH_STATE_FILE under the ``"host_tmp_probe"`` key, one
-    entry per client name. Per-client (like :func:`load_main_drift_latches`
-    and :class:`OpenPrProbeCache`) rather than fleet-wide (like
-    :class:`AvailabilityProbeCache`): the disk-pressure gate it instruments
-    probes each client's own worktree-base mount, so one client's exhausted
-    mount must never clobber or mask another client's entry. A NamedTuple
-    for the same transient-state reason as :class:`AvailabilityProbeCache`.
-    """
-
-    probed_at: datetime
-    exhausted: bool
-    latched: bool  # True once SESSION_NEEDS_ATTENTION has fired for this
-    # client's current unbroken run of exhausted probes; False once a
-    # subsequent probe is healthy (edge-triggered reset).
-
-
-# A failed sidecar write must not erase an edge-triggered latch in the current
-# process: the next probe would otherwise re-emit SESSION_NEEDS_ATTENTION.
-# Include the state-file path because tests, and callers embedding cw, can
-# redirect state between independent stores in one process.
-_HOST_TMP_PROBE_FALLBACK: dict[tuple[str, str], HostTmpProbeCache] = {}
-
-
 def _executor_blocked_key(client: str, ticket_id: str) -> str:
     """Composite sidecar key for one (client, ticket) marker.
 
@@ -182,12 +156,13 @@ def _open_pr_probe_key(client: str, ticket_id: str) -> str:
 def dispatch_state_lock() -> Iterator[None]:
     """Acquire an exclusive file lock over the DISPATCH_STATE_FILE write window.
 
-    Hold this across every load→mutate→write sequence in
-    ``merge_and_save_usage_limited_until``, ``save_availability_probe_cache``,
-    and ``save_main_drift_latches`` so concurrent ``cw`` processes cannot
-    clobber each other's edits (lost update, #1256). Rank STATE, so
-    ``sessions_lock()`` → ``dispatch_state_lock()`` is permitted (reconcile's
-    main-drift act takes it) and the reverse is not. Lock discipline: ADR-0019.
+    :func:`mutate_dispatch_state` is the single entry point that takes this
+    lock around a load→mutate→write sequence, so concurrent ``cw`` processes
+    cannot clobber each other's edits (lost update, #1256). New sidecar
+    writers must go through it instead of taking the lock themselves. Rank
+    STATE, so ``sessions_lock()`` → ``dispatch_state_lock()`` is permitted
+    (reconcile's main-drift act takes it) and the reverse is not. Lock
+    discipline: ADR-0019.
     """
     lock_path = dispatch_state_lock_file()
     with lock_guard("dispatch_state", lock_path, LockRank.STATE):
@@ -204,12 +179,12 @@ def dispatch_state_lock() -> Iterator[None]:
 def _load_dispatch_state_raw(*, strict: bool = False) -> dict[str, Any]:
     """Read DISPATCH_STATE_FILE as a dict, fail-open unless *strict* is true.
 
-    Shared read-side of the read-merge-write save helpers
-    (``merge_and_save_usage_limited_until`` / ``save_availability_probe_cache``)
-    so that neither clobbers the other's key in the shared sidecar (#1157). A corrupt
-    or non-object existing file is treated as empty rather than raising unless
-    *strict* is true. The strict mode is for destructive state mutations that
-    must not turn an unreadable file into an empty replacement.
+    Shared read-side of :func:`mutate_dispatch_state` (its ``strict`` parameter
+    is passed straight through), so no sidecar writer clobbers another's key in
+    the shared file (#1157). A corrupt or non-object existing file is treated
+    as empty rather than raising unless *strict* is true. The strict mode is
+    for destructive state mutations that must not turn an unreadable file into
+    an empty replacement.
     """
     path = DISPATCH_STATE_FILE
     if not path.exists():
@@ -227,6 +202,54 @@ def _load_dispatch_state_raw(*, strict: bool = False) -> dict[str, Any]:
         msg = "dispatch state must contain a JSON object"
         raise OSError(msg)
     return {}
+
+
+def mutate_dispatch_state(
+    mutate: Callable[[dict[str, Any]], bool],
+    *,
+    failure_msg: str | None = None,
+    failure_args: Sequence[object] = (),
+    exc_info: bool = True,
+    strict: bool = False,
+) -> bool:
+    """Run one locked read-merge-write over DISPATCH_STATE_FILE (#3638).
+
+    The single persistence primitive for every sidecar writer. Refuses a real
+    state write, creates the state dir, takes :func:`dispatch_state_lock` once,
+    loads the payload, calls *mutate* on it, and atomically writes it back only
+    when *mutate* returns True. ``mutate`` runs inside the lock: it must not take
+    ``sessions_lock`` or spawn a subprocess (ADR-0019).
+
+    Returns True when the payload was persisted or there was nothing to persist,
+    and False when an ``OSError`` was swallowed. With *failure_msg* set, an
+    ``OSError`` is logged on the ``cw.dispatch_state`` logger as
+    ``failure_msg % failure_args`` (with the traceback when *exc_info*) and
+    swallowed. With *failure_msg* None it propagates. ``CwError`` is never an
+    ``OSError``, so the write guard always propagates. *strict* makes an
+    unreadable or non-object file raise ``OSError`` instead of reading as ``{}``.
+
+    ``DISPATCH_STATE_FILE``, ``atomic_write_text``, ``dispatch_state_lock`` and
+    ``_load_dispatch_state_raw`` are read as module globals at call time, so the
+    suite's ``cw.dispatch_state.*`` patches reach this function.
+    """
+    path = DISPATCH_STATE_FILE
+    try:
+        refuse_real_state_write(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with dispatch_state_lock():
+            payload = (
+                _load_dispatch_state_raw(strict=True)
+                if strict
+                else _load_dispatch_state_raw()
+            )
+            if mutate(payload):
+                atomic_write_text(path, json.dumps(payload))
+    except OSError:
+        if failure_msg is None:
+            raise
+        logger.warning(failure_msg, *failure_args, exc_info=exc_info)
+        return False
+    return True
 
 
 def _parse_future_instant(value: object, now: datetime) -> datetime | None:
@@ -411,33 +434,36 @@ def merge_and_save_usage_limited_until(
     holds this tick's real detections and is never filtered.
     """
     extra = fresh or {}
-    try:
-        refuse_real_state_write(DISPATCH_STATE_FILE)
-        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with dispatch_state_lock():
-            payload = _load_dispatch_state_raw()
-            persisted = _usage_limited_until_from_payload(payload)
-            kept: Mapping[str, datetime] = windows
-            if clears_seen is not None:
-                marks = usage_limit_clear_marks_from_payload(payload)
-                kept, dropped = drop_unseen_cleared(windows, marks, clears_seen)
-                for client in sorted(dropped):
-                    logger.info(
-                        "dispatch_state: dropped carried usage_limited_until for %s;"
-                        " an operator clear mark has not been observed yet",
-                        client,
-                    )
-            merged = merge_usage_limited_until(
-                merge_usage_limited_until(kept, extra), persisted
-            )
-            payload["usage_limited_until"] = {
-                name: dt.isoformat() for name, dt in merged.items()
-            }
-            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
-    except OSError:
-        logger.warning("dispatch_state: failed to persist usage_limited_until")
-        return merge_usage_limited_until(windows, extra)
-    return merged
+    merged: dict[str, datetime] = {}
+
+    def _merge(payload: dict[str, Any]) -> bool:
+        nonlocal merged
+        persisted = _usage_limited_until_from_payload(payload)
+        kept: Mapping[str, datetime] = windows
+        if clears_seen is not None:
+            marks = usage_limit_clear_marks_from_payload(payload)
+            kept, dropped = drop_unseen_cleared(windows, marks, clears_seen)
+            for client in sorted(dropped):
+                logger.info(
+                    "dispatch_state: dropped carried usage_limited_until for %s;"
+                    " an operator clear mark has not been observed yet",
+                    client,
+                )
+        merged = merge_usage_limited_until(
+            merge_usage_limited_until(kept, extra), persisted
+        )
+        payload["usage_limited_until"] = {
+            name: dt.isoformat() for name, dt in merged.items()
+        }
+        return True
+
+    if mutate_dispatch_state(
+        _merge,
+        failure_msg="dispatch_state: failed to persist usage_limited_until",
+        exc_info=False,
+    ):
+        return merged
+    return merge_usage_limited_until(windows, extra)
 
 
 def load_usage_limit_armed_at() -> datetime | None:
@@ -481,15 +507,16 @@ def save_usage_limit_armed_at(dt: datetime | None) -> None:
     event degrades ``detected_at`` to null rather than being suppressed
     (acceptable degradation).
     """
-    try:
-        refuse_real_state_write(DISPATCH_STATE_FILE)
-        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with dispatch_state_lock():
-            payload = _load_dispatch_state_raw()
-            payload["usage_limit_armed_at"] = dt.isoformat() if dt is not None else None
-            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
-    except OSError:
-        logger.warning("dispatch_state: failed to persist usage_limit_armed_at")
+
+    def _set(payload: dict[str, Any]) -> bool:
+        payload["usage_limit_armed_at"] = dt.isoformat() if dt is not None else None
+        return True
+
+    mutate_dispatch_state(
+        _set,
+        failure_msg="dispatch_state: failed to persist usage_limit_armed_at",
+        exc_info=False,
+    )
 
 
 def load_availability_probe_cache() -> AvailabilityProbeCache | None:
@@ -533,19 +560,20 @@ def save_availability_probe_cache(cache: AvailabilityProbeCache) -> None:
     Silently swallows write errors — a failed persist just means the next tick
     re-probes rather than reading the cache (acceptable degradation).
     """
-    try:
-        refuse_real_state_write(DISPATCH_STATE_FILE)
-        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with dispatch_state_lock():
-            payload = _load_dispatch_state_raw()
-            payload["availability_probe"] = {
-                "probed_at": cache.probed_at.isoformat(),
-                "available": cache.available,
-                "latched": cache.latched,
-            }
-            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
-    except OSError:
-        logger.warning("dispatch_state: failed to persist availability_probe")
+
+    def _set(payload: dict[str, Any]) -> bool:
+        payload["availability_probe"] = {
+            "probed_at": cache.probed_at.isoformat(),
+            "available": cache.available,
+            "latched": cache.latched,
+        }
+        return True
+
+    mutate_dispatch_state(
+        _set,
+        failure_msg="dispatch_state: failed to persist availability_probe",
+        exc_info=False,
+    )
 
 
 def load_main_drift_latches() -> dict[str, bool]:
@@ -590,25 +618,22 @@ def save_main_drift_latches(latches: dict[str, bool]) -> None:
     the full latch dict), so a lost update only ever costs one client's one
     flip, never another client's state.
     """
-    try:
-        refuse_real_state_write(DISPATCH_STATE_FILE)
-        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        # Why: file-locked (dispatch_state_lock, #1256) — reconcile() runs
-        # from independent, short-lived processes (cw start, cw doctor --reap,
-        # every dispatch_tick), so concurrent read-merge-writes for
-        # different clients previously could race and lose one flip. The
-        # lock serializes this critical section against the other two
-        # DISPATCH_STATE_FILE writers, closing that race.
-        with dispatch_state_lock():
-            payload = _load_dispatch_state_raw()
-            payload["main_drift_latches"] = latches
-            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
-    except OSError:
-        logger.warning(
-            "dispatch_state: failed to persist main_drift_latches (clients=%s)",
-            sorted(latches),
-            exc_info=True,
-        )
+
+    # Why: file-locked (dispatch_state_lock, #1256) — reconcile() runs
+    # from independent, short-lived processes (cw start, cw doctor --reap,
+    # every dispatch_tick), so concurrent read-merge-writes for
+    # different clients previously could race and lose one flip. The
+    # primitive takes that lock, serializing this critical section against the
+    # other DISPATCH_STATE_FILE writers, closing that race.
+    def _set(payload: dict[str, Any]) -> bool:
+        payload["main_drift_latches"] = latches
+        return True
+
+    mutate_dispatch_state(
+        _set,
+        failure_msg="dispatch_state: failed to persist main_drift_latches (clients=%s)",
+        failure_args=(sorted(latches),),
+    )
 
 
 def _parse_executor_blocked_entry(entry: object) -> ExecutorBlockedMarker | None:
@@ -686,31 +711,27 @@ def save_executor_blocked_marker(marker: ExecutorBlockedMarker) -> None:
     means ``cw dev-queue status`` reports ``[STALE]`` instead of ``[BLOCKED]``
     for this review (acceptable degradation: legibility, not correctness).
     """
-    try:
-        refuse_real_state_write(DISPATCH_STATE_FILE)
-        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with dispatch_state_lock():
-            payload = _load_dispatch_state_raw()
-            entries = payload.get("executor_blocked")
-            if not isinstance(entries, dict):
-                entries = {}
-            entries[_executor_blocked_key(marker.client, marker.ticket_id)] = {
-                "client": marker.client,
-                "ticket_id": marker.ticket_id,
-                "executor": marker.executor,
-                "reviewer_role": marker.reviewer_role,
-                "started_at": marker.started_at.isoformat(),
-                "session_id": marker.session_id,
-            }
-            payload["executor_blocked"] = entries
-            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
-    except OSError:
-        logger.warning(
-            "dispatch_state: failed to persist executor_blocked marker (%s/%s)",
-            marker.client,
-            marker.ticket_id,
-            exc_info=True,
-        )
+
+    def _set(payload: dict[str, Any]) -> bool:
+        entries = payload.get("executor_blocked")
+        if not isinstance(entries, dict):
+            entries = {}
+        entries[_executor_blocked_key(marker.client, marker.ticket_id)] = {
+            "client": marker.client,
+            "ticket_id": marker.ticket_id,
+            "executor": marker.executor,
+            "reviewer_role": marker.reviewer_role,
+            "started_at": marker.started_at.isoformat(),
+            "session_id": marker.session_id,
+        }
+        payload["executor_blocked"] = entries
+        return True
+
+    mutate_dispatch_state(
+        _set,
+        failure_msg="dispatch_state: failed to persist executor_blocked marker (%s/%s)",
+        failure_args=(marker.client, marker.ticket_id),
+    )
 
 
 def clear_executor_blocked_marker(client: str, ticket_id: str) -> None:
@@ -720,24 +741,20 @@ def clear_executor_blocked_marker(client: str, ticket_id: str) -> None:
     a swallowed failure leaves a stale marker that the next process boot's
     ``clear_all_executor_blocked_markers()`` sweeps up anyway.
     """
-    try:
-        refuse_real_state_write(DISPATCH_STATE_FILE)
-        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with dispatch_state_lock():
-            payload = _load_dispatch_state_raw()
-            entries = payload.get("executor_blocked")
-            if not isinstance(entries, dict):
-                return
-            entries.pop(_executor_blocked_key(client, ticket_id), None)
-            payload["executor_blocked"] = entries
-            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
-    except OSError:
-        logger.warning(
-            "dispatch_state: failed to clear executor_blocked marker (%s/%s)",
-            client,
-            ticket_id,
-            exc_info=True,
-        )
+
+    def _drop(payload: dict[str, Any]) -> bool:
+        entries = payload.get("executor_blocked")
+        if not isinstance(entries, dict):
+            return False
+        entries.pop(_executor_blocked_key(client, ticket_id), None)
+        payload["executor_blocked"] = entries
+        return True
+
+    mutate_dispatch_state(
+        _drop,
+        failure_msg="dispatch_state: failed to clear executor_blocked marker (%s/%s)",
+        failure_args=(client, ticket_id),
+    )
 
 
 def clear_all_executor_blocked_markers() -> None:
@@ -748,18 +765,15 @@ def clear_all_executor_blocked_markers() -> None:
     process. This is the crash-durability story for a deliberately
     non-durable marker, and the reason it carries no schema version.
     """
-    try:
-        refuse_real_state_write(DISPATCH_STATE_FILE)
-        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with dispatch_state_lock():
-            payload = _load_dispatch_state_raw()
-            payload["executor_blocked"] = {}
-            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
-    except OSError:
-        logger.warning(
-            "dispatch_state: failed to clear executor_blocked markers at boot",
-            exc_info=True,
-        )
+
+    def _clear_all(payload: dict[str, Any]) -> bool:
+        payload["executor_blocked"] = {}
+        return True
+
+    mutate_dispatch_state(
+        _clear_all,
+        failure_msg="dispatch_state: failed to clear executor_blocked markers at boot",
+    )
 
 
 def _parse_open_pr_probe_entry(entry: object) -> OpenPrProbeCache | None:
@@ -838,29 +852,27 @@ def _write_open_pr_probe_entries(keyed_entries: dict[str, OpenPrProbeCache]) -> 
     """
     if not keyed_entries:
         return
-    try:
-        refuse_real_state_write(DISPATCH_STATE_FILE)
-        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with dispatch_state_lock():
-            payload = _load_dispatch_state_raw()
-            entries = payload.get("open_pr_probe")
-            if not isinstance(entries, dict):
-                entries = {}
-            for key, entry in keyed_entries.items():
-                entries[key] = {
-                    "probed_at": entry.probed_at.isoformat(),
-                    "has_open_pr": entry.has_open_pr,
-                    "pr_url": entry.pr_url,
-                }
-            payload["open_pr_probe"] = entries
-            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
-    except OSError:
-        logger.warning(
-            "dispatch_state: failed to persist %d open_pr_probe entry/entries (%s)",
-            len(keyed_entries),
-            sorted(keyed_entries),
-            exc_info=True,
-        )
+
+    def _merge(payload: dict[str, Any]) -> bool:
+        entries = payload.get("open_pr_probe")
+        if not isinstance(entries, dict):
+            entries = {}
+        for key, entry in keyed_entries.items():
+            entries[key] = {
+                "probed_at": entry.probed_at.isoformat(),
+                "has_open_pr": entry.has_open_pr,
+                "pr_url": entry.pr_url,
+            }
+        payload["open_pr_probe"] = entries
+        return True
+
+    mutate_dispatch_state(
+        _merge,
+        failure_msg=(
+            "dispatch_state: failed to persist %d open_pr_probe entry/entries (%s)"
+        ),
+        failure_args=(len(keyed_entries), sorted(keyed_entries)),
+    )
 
 
 def save_open_pr_probe_entry(
@@ -894,101 +906,3 @@ def save_open_pr_probe_entries(
             for ticket_id, entry in entries_by_ticket_id.items()
         }
     )
-
-
-def _parse_host_tmp_probe_entry(entry: object) -> HostTmpProbeCache | None:
-    """Validate one raw ``"host_tmp_probe"`` entry, or None when malformed.
-
-    Per-entry, same reasoning as :func:`_parse_open_pr_probe_entry`: one bad
-    client entry must not blind the reader to its well-formed siblings.
-    """
-    if not isinstance(entry, dict):
-        return None
-    probed_at = entry.get("probed_at")
-    exhausted = entry.get("exhausted")
-    latched = entry.get("latched")
-    if (
-        not isinstance(probed_at, str)
-        or not isinstance(exhausted, bool)
-        or not isinstance(latched, bool)
-    ):
-        return None
-    try:
-        parsed_probed_at = datetime.fromisoformat(probed_at)
-    except ValueError:
-        return None
-    return HostTmpProbeCache(
-        probed_at=parsed_probed_at, exhausted=exhausted, latched=latched
-    )
-
-
-def load_host_tmp_probe_cache() -> dict[str, HostTmpProbeCache]:
-    """Load every per-client worker-tmp inode latch (#2470), keyed by client.
-
-    Returns ``{}`` when the file is absent, unreadable, malformed, or missing
-    the ``"host_tmp_probe"`` key. Individual malformed entries are dropped.
-    """
-    cache: dict[str, HostTmpProbeCache] = {}
-    path = DISPATCH_STATE_FILE
-    if path.exists():
-        try:
-            raw = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError, ValueError, TypeError):
-            raw = None
-        if isinstance(raw, dict):
-            entries = raw.get("host_tmp_probe")
-            if isinstance(entries, dict):
-                for client_name, entry in entries.items():
-                    parsed = _parse_host_tmp_probe_entry(entry)
-                    if parsed is not None:
-                        cache[client_name] = parsed
-    state_path = str(DISPATCH_STATE_FILE)
-    cache.update(
-        {
-            client_name: entry
-            for (fallback_path, client_name), entry in _HOST_TMP_PROBE_FALLBACK.items()
-            if fallback_path == state_path
-        }
-    )
-    return cache
-
-
-def save_host_tmp_probe_cache(client_name: str, cache: HostTmpProbeCache) -> bool:
-    """Persist one client's worker-tmp inode latch (#2470).
-
-    Read-merge-writes the shared sidecar (other keys preserved, #1157) and
-    merges into the existing ``"host_tmp_probe"`` dict so other clients keep
-    their own entries. Silently swallows write errors, same posture as
-    :func:`save_main_drift_latches`. When persistence fails, retain a
-    process-local per-client fallback so a set cannot re-fire attention on
-    every tick; a later healthy probe replaces that fallback with an
-    unlatched entry.
-
-    Returns whether the sidecar write succeeded.
-    """
-    try:
-        refuse_real_state_write(DISPATCH_STATE_FILE)
-        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with dispatch_state_lock():
-            payload = _load_dispatch_state_raw()
-            entries = payload.get("host_tmp_probe")
-            if not isinstance(entries, dict):
-                entries = {}
-            entries[client_name] = {
-                "probed_at": cache.probed_at.isoformat(),
-                "exhausted": cache.exhausted,
-                "latched": cache.latched,
-            }
-            payload["host_tmp_probe"] = entries
-            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
-    except OSError:
-        _HOST_TMP_PROBE_FALLBACK[(str(DISPATCH_STATE_FILE), client_name)] = cache
-        logger.warning(
-            "dispatch_state: failed to persist host_tmp_probe (client=%s)",
-            client_name,
-            exc_info=True,
-        )
-        return False
-    else:
-        _HOST_TMP_PROBE_FALLBACK.pop((str(DISPATCH_STATE_FILE), client_name), None)
-        return True

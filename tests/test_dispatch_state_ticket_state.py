@@ -16,9 +16,11 @@ from cw.dispatch_state_ticket_state import (
     clear_ticket_closed_stamps,
     guard_cancelled_row_keys,
     load_ticket_state_probes,
+    mark_ticket_closed_cancelled,
     save_ticket_state_probes,
     ticket_state_key,
 )
+from tests._shared.sidecar_failures import fail_state_writes
 
 _T0 = datetime(2026, 11, 13, 12, 0, tzinfo=UTC)
 _A = ticket_state_key("acme", "1", _T0)
@@ -156,23 +158,25 @@ def test_an_unchanged_save_does_not_write() -> None:
 def test_a_write_oserror_is_swallowed_with_a_warning(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    def _boom(*_a: object, **_k: object) -> None:
-        msg = "read-only"
-        raise OSError(msg)
-
     stamped = TicketStateProbe(_T0, closed=True, cancelled_at=_T0)
     assert save_ticket_state_probes("acme", {_A: stamped}, prune_to_keys=[_A])
 
-    monkeypatch.setattr("cw.dispatch_state_ticket_state.atomic_write_text", _boom)
+    fail_state_writes(monkeypatch, message="read-only")
     with caplog.at_level(logging.WARNING):
         assert not save_ticket_state_probes(
             "acme", {_B: TicketStateProbe(_T0, closed=True)}, prune_to_keys=[_A, _B]
         )
         clear_ticket_closed_stamps([_A])
+        assert not mark_ticket_closed_cancelled(_B, at=_T0)
 
     assert "failed to persist ticket_state_probe" in caplog.text
     assert "failed to clear ticket_state_probe" in caplog.text
+    assert "failed to mark cancelled ticket_state_probe" in caplog.text
     assert load_ticket_state_probes() == {_A: stamped}
+    # #3638: the primitive logs, so these warnings now come from cw.dispatch_state.
+    warned = [r for r in caplog.records if "ticket_state_probe" in r.getMessage()]
+    assert len(warned) == 3
+    assert {r.name for r in warned} == {"cw.dispatch_state"}
 
 
 def test_a_stamp_survives_a_probe_save_from_an_older_snapshot() -> None:

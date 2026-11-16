@@ -26,6 +26,7 @@ from cw.dispatch_state_marks import (
 from cw.dispatch_state_marks_parse import CLEAR_MARK_RETENTION, CLEAR_MARKS_KEY
 from tests._shared.dispatch_fixtures import seed_usage_limit_window
 from tests._shared.lock_helpers import DISPATCH_STATE_LOCK_NAME, record_state_locks
+from tests._shared.sidecar_failures import fail_state_writes
 
 _NOW = datetime.now(UTC)
 _UNTIL = _NOW + timedelta(hours=2)
@@ -110,15 +111,31 @@ class TestClearUsageLimitedUntil:
     ) -> None:
         seed_usage_limit_window("acme", _UNTIL)
 
-        def _boom(_path: Path, _text: str) -> None:
-            msg = "disk full"
-            raise OSError(msg)
-
-        monkeypatch.setattr("cw.dispatch_state_marks.atomic_write_text", _boom)
+        fail_state_writes(monkeypatch)
 
         with pytest.raises(OSError, match="disk full"):
             clear_usage_limited_until("acme", cleared_at=_NOW)
         assert load_usage_limited_until() == {"acme": _UNTIL}
+
+    @pytest.mark.parametrize(
+        ("payload", "message"),
+        [
+            ("{not json", "could not read dispatch state"),
+            ("[]", "dispatch state must contain a JSON object"),
+        ],
+    )
+    def test_unreadable_sidecar_raises_and_is_left_untouched(
+        self, tmp_config_dir: Path, payload: str, message: str
+    ) -> None:
+        """The clear reads strict, so it never rewrites a sidecar it cannot parse."""
+        path = cw.dispatch_state.DISPATCH_STATE_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload)
+
+        with pytest.raises(OSError, match=message):
+            clear_usage_limited_until("acme", cleared_at=_NOW)
+
+        assert path.read_text() == payload
 
     def test_writes_the_isolated_path(self, tmp_config_dir: Path) -> None:
         """The path is read at call time, so the autouse patch reaches it."""

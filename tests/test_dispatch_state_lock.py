@@ -15,33 +15,42 @@ So this test suite validates real cross-writer serialization, not a no-op.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import threading
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import pytest
 
+import cw.dispatch_state
+from cw.config import _REAL_STATE_DIR
 from cw.dispatch_state import (
     AvailabilityProbeCache,
     ExecutorBlockedMarker,
-    HostTmpProbeCache,
     OpenPrProbeCache,
+    clear_all_executor_blocked_markers,
+    clear_executor_blocked_marker,
     load_availability_probe_cache,
     load_executor_blocked_markers,
-    load_host_tmp_probe_cache,
     load_open_pr_probe_cache,
     load_usage_limited_until,
     merge_and_save_usage_limited_until,
+    mutate_dispatch_state,
     save_availability_probe_cache,
     save_executor_blocked_marker,
-    save_host_tmp_probe_cache,
     save_main_drift_latches,
     save_open_pr_probe_entries,
     save_open_pr_probe_entry,
+    save_usage_limit_armed_at,
 )
+from cw.exceptions import CwError
+from tests._shared.lock_helpers import DISPATCH_STATE_LOCK_NAME, record_state_locks
+from tests._shared.sidecar_failures import fail_state_writes
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
 
@@ -468,11 +477,7 @@ class TestOpenPrProbeCacheSidecar:
     ) -> None:
         """Fail-soft persistence: a failed write costs one extra probe, not a raise."""
 
-        def _boom(*_args: object, **_kwargs: object) -> None:
-            msg = "disk full"
-            raise OSError(msg)
-
-        monkeypatch.setattr("cw.dispatch_state.atomic_write_text", _boom)
+        fail_state_writes(monkeypatch)
 
         save_open_pr_probe_entry(
             "acme", "1862", OpenPrProbeCache(datetime.now(UTC), has_open_pr=True)
@@ -481,107 +486,413 @@ class TestOpenPrProbeCacheSidecar:
         assert load_open_pr_probe_cache() == {}
 
 
-class TestHostTmpProbeCacheSidecar:
-    """Round-trip + fail-soft contract for the #2470 per-client inode latch."""
+class TestMutateDispatchState:
+    """The #3638 shared locked read-merge-write primitive, directly."""
 
-    def test_round_trip_and_per_client_entries_coexist(
+    def test_true_writes_mutated_payload_keeping_siblings(
         self, tmp_config_dir: Path
     ) -> None:
-        now = datetime.now(UTC)
-        save_host_tmp_probe_cache(
-            "acme", HostTmpProbeCache(probed_at=now, exhausted=True, latched=True)
-        )
-        save_host_tmp_probe_cache(
-            "other", HostTmpProbeCache(probed_at=now, exhausted=False, latched=False)
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text(
+            json.dumps({"sibling": {"k": 1}})
         )
 
-        cache = load_host_tmp_probe_cache()
+        def _set(payload: dict[str, Any]) -> bool:
+            payload["new"] = 2
+            return True
 
-        assert set(cache) == {"acme", "other"}
-        assert cache["acme"].latched is True
-        assert cache["acme"].exhausted is True
-        assert cache["other"].latched is False
-        assert abs((cache["acme"].probed_at - now).total_seconds()) < 1
+        assert mutate_dispatch_state(_set) is True
+        stored = json.loads(cw.dispatch_state.DISPATCH_STATE_FILE.read_text())
+        assert stored == {"sibling": {"k": 1}, "new": 2}
 
-    def test_absent_file_returns_empty(self, tmp_config_dir: Path) -> None:
-        assert load_host_tmp_probe_cache() == {}
-
-    def test_corrupt_file_returns_empty(self, tmp_config_dir: Path) -> None:
-        import cw.dispatch_state
-
-        cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        cw.dispatch_state.DISPATCH_STATE_FILE.write_text("{not json")
-
-        assert load_host_tmp_probe_cache() == {}
-
-    @pytest.mark.parametrize(
-        "payload",
-        [["not", "a", "dict"], {"host_tmp_probe": ["not", "a", "dict"]}],
-    )
-    def test_non_dict_shapes_return_empty(
-        self, tmp_config_dir: Path, payload: object
-    ) -> None:
-        import cw.dispatch_state
-
-        cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        cw.dispatch_state.DISPATCH_STATE_FILE.write_text(json.dumps(payload))
-
-        assert load_host_tmp_probe_cache() == {}
-
-    def test_malformed_entry_is_dropped_not_poisoning_siblings(
-        self, tmp_config_dir: Path
-    ) -> None:
-        import cw.dispatch_state
-
-        save_host_tmp_probe_cache(
-            "good",
-            HostTmpProbeCache(datetime.now(UTC), exhausted=True, latched=True),
-        )
-        payload = json.loads(cw.dispatch_state.DISPATCH_STATE_FILE.read_text())
-        payload["host_tmp_probe"]["bad-shape"] = {"probed_at": 42}
-        payload["host_tmp_probe"]["bad-ts"] = {
-            "probed_at": "not-a-timestamp",
-            "exhausted": True,
-            "latched": True,
-        }
-        payload["host_tmp_probe"]["not-a-dict"] = "nope"
-        cw.dispatch_state.DISPATCH_STATE_FILE.write_text(json.dumps(payload))
-
-        assert set(load_host_tmp_probe_cache()) == {"good"}
-
-    def test_write_preserves_sibling_keys(self, tmp_config_dir: Path) -> None:
-        save_open_pr_probe_entry(
-            "acme", "1862", OpenPrProbeCache(datetime.now(UTC), has_open_pr=True)
-        )
-
-        save_host_tmp_probe_cache(
-            "acme", HostTmpProbeCache(datetime.now(UTC), exhausted=True, latched=True)
-        )
-
-        assert "acme/1862" in load_open_pr_probe_cache()
-        assert "acme" in load_host_tmp_probe_cache()
-
-    def test_write_failure_is_swallowed(
+    def test_false_skips_write_and_leaves_absent_file_absent(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def _boom(*_args: object, **_kwargs: object) -> None:
-            msg = "disk full"
+        attempts = fail_state_writes(monkeypatch)
+
+        assert mutate_dispatch_state(lambda _p: False) is True
+        assert attempts == []
+        assert not cw.dispatch_state.DISPATCH_STATE_FILE.exists()
+
+    def test_false_leaves_existing_bytes_unmodified(self, tmp_config_dir: Path) -> None:
+        original = '{"a": 1}'
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text(original)
+
+        assert mutate_dispatch_state(lambda _p: False) is True
+        assert cw.dispatch_state.DISPATCH_STATE_FILE.read_text() == original
+
+    def test_oserror_with_message_logs_exact_text_and_returns_false(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        fail_state_writes(monkeypatch)
+
+        def _set(payload: dict[str, Any]) -> bool:
+            payload["x"] = 1
+            return True
+
+        with caplog.at_level(logging.WARNING, logger="cw.dispatch_state"):
+            ok = mutate_dispatch_state(
+                _set,
+                failure_msg="dispatch_state: failed to %s thing (%s)",
+                failure_args=("persist", ["a", "b"]),
+            )
+
+        assert ok is False
+        records = [r for r in caplog.records if r.name == "cw.dispatch_state"]
+        assert len(records) == 1
+        record = records[0]
+        assert record.levelno == logging.WARNING
+        assert record.getMessage() == (
+            "dispatch_state: failed to persist thing (['a', 'b'])"
+        )
+        assert isinstance(record.exc_info, tuple)
+
+    def test_exc_info_false_omits_traceback(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        fail_state_writes(monkeypatch)
+
+        def _set(payload: dict[str, Any]) -> bool:
+            payload["x"] = 1
+            return True
+
+        with caplog.at_level(logging.WARNING, logger="cw.dispatch_state"):
+            mutate_dispatch_state(_set, failure_msg="plain", exc_info=False)
+
+        record = next(r for r in caplog.records if r.name == "cw.dispatch_state")
+        assert record.getMessage() == "plain"
+        # logging stores the argument as given (False), not None.
+        assert not record.exc_info
+
+    def test_oserror_without_message_propagates(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fail_state_writes(monkeypatch)
+
+        def _set(payload: dict[str, Any]) -> bool:
+            payload["x"] = 1
+            return True
+
+        with pytest.raises(OSError, match="disk full"):
+            mutate_dispatch_state(_set)
+
+    def test_strict_corrupt_file_raises_oserror_without_message(
+        self, tmp_config_dir: Path
+    ) -> None:
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text("{not json")
+
+        with pytest.raises(OSError, match="could not read dispatch state"):
+            mutate_dispatch_state(lambda _p: True, strict=True)
+
+    def test_strict_corrupt_file_swallowed_when_message_given(
+        self,
+        tmp_config_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text("{not json")
+
+        with caplog.at_level(logging.WARNING, logger="cw.dispatch_state"):
+            ok = mutate_dispatch_state(
+                lambda _p: True, failure_msg="strict failed", strict=True
+            )
+
+        assert ok is False
+        assert cw.dispatch_state.DISPATCH_STATE_FILE.read_text() == "{not json"
+
+    def test_lenient_corrupt_file_hands_empty_dict_to_mutate(
+        self, tmp_config_dir: Path
+    ) -> None:
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text("{not json")
+        seen: list[dict[str, Any]] = []
+
+        def _set(payload: dict[str, Any]) -> bool:
+            seen.append(dict(payload))
+            return False
+
+        assert mutate_dispatch_state(_set) is True
+        assert seen == [{}]
+
+    def test_one_lock_acquisition_covers_load_mutate_and_write(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lock_held = False
+        real_lock = cw.dispatch_state.dispatch_state_lock
+
+        @contextlib.contextmanager
+        def tracking_lock() -> Iterator[None]:
+            nonlocal lock_held
+            with real_lock():
+                lock_held = True
+                try:
+                    yield
+                finally:
+                    lock_held = False
+
+        held_at: dict[str, bool] = {}
+        real_load = cw.dispatch_state._load_dispatch_state_raw
+        real_write = cw.dispatch_state.atomic_write_text
+
+        def spying_load(*, strict: bool = False) -> dict[str, Any]:
+            held_at["load"] = lock_held
+            return real_load(strict=strict)
+
+        def spying_write(path: Path, text: str) -> None:
+            held_at["write"] = lock_held
+            real_write(path, text)
+
+        monkeypatch.setattr(cw.dispatch_state, "dispatch_state_lock", tracking_lock)
+        monkeypatch.setattr(cw.dispatch_state, "_load_dispatch_state_raw", spying_load)
+        monkeypatch.setattr(cw.dispatch_state, "atomic_write_text", spying_write)
+
+        def _set(payload: dict[str, Any]) -> bool:
+            held_at["mutate"] = lock_held
+            payload["x"] = 1
+            return True
+
+        with record_state_locks() as recorder:
+            assert mutate_dispatch_state(_set) is True
+
+        assert held_at == {"load": True, "mutate": True, "write": True}
+        assert recorder.acquires(DISPATCH_STATE_LOCK_NAME) == 1
+
+    def test_cwerror_propagates_and_releases_lock(self, tmp_config_dir: Path) -> None:
+        def _refuse(_payload: dict[str, Any]) -> bool:
+            msg = "refused by mutate"
+            raise CwError(msg)
+
+        with pytest.raises(CwError, match="refused by mutate"):
+            mutate_dispatch_state(_refuse, failure_msg="must not swallow")
+
+        assert mutate_dispatch_state(lambda _p: True) is True
+
+    def test_reads_state_file_at_call_time(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        alt = tmp_config_dir / "alt" / "s.json"
+        monkeypatch.setattr("cw.dispatch_state.DISPATCH_STATE_FILE", alt)
+
+        assert mutate_dispatch_state(lambda p: p.update(a=1) or True) is True
+        assert json.loads(alt.read_text()) == {"a": 1}
+
+    def test_real_state_guard_propagates_even_with_failure_msg(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.dispatch_state.DISPATCH_STATE_FILE",
+            _REAL_STATE_DIR / "dispatch_state.json",
+        )
+        attempts = fail_state_writes(monkeypatch)
+
+        with pytest.raises(CwError, match="refusing real-state write"):
+            mutate_dispatch_state(lambda _p: True, failure_msg="x")
+
+        assert attempts == []
+
+    def test_oserror_from_mutate_follows_the_failure_policy(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        attempts = fail_state_writes(monkeypatch)
+
+        def _raises(_payload: dict[str, Any]) -> bool:
+            msg = "mutate blew up"
             raise OSError(msg)
 
-        monkeypatch.setattr("cw.dispatch_state.atomic_write_text", _boom)
+        with caplog.at_level(logging.WARNING, logger="cw.dispatch_state"):
+            assert mutate_dispatch_state(_raises, failure_msg="swallowed") is False
+        assert [r.getMessage() for r in caplog.records] == ["swallowed"]
 
-        save_host_tmp_probe_cache(
-            "acme", HostTmpProbeCache(datetime.now(UTC), exhausted=True, latched=True)
+        with pytest.raises(OSError, match="mutate blew up"):
+            mutate_dispatch_state(_raises, failure_msg=None)
+
+        assert attempts == []
+
+
+_NOW = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
+_SIBLING_SEED: dict[str, Any] = {"sibling": {"k": 1}}
+
+
+def _blocked_marker() -> ExecutorBlockedMarker:
+    return ExecutorBlockedMarker(
+        client="client-a",
+        ticket_id="1723",
+        executor="codex",
+        reviewer_role=None,
+        started_at=_NOW,
+        session_id="sid-1723",
+    )
+
+
+class _FailSite(NamedTuple):
+    """One migrated sidecar writer and the warning its failure must log (#3638)."""
+
+    call: Callable[[], object]
+    message: str
+    exc_info: bool
+    seed: dict[str, Any]
+
+
+_FAIL_SITES = {
+    "save_usage_limit_armed_at": _FailSite(
+        lambda: save_usage_limit_armed_at(_NOW),
+        "dispatch_state: failed to persist usage_limit_armed_at",
+        False,
+        _SIBLING_SEED,
+    ),
+    "save_availability_probe_cache": _FailSite(
+        lambda: save_availability_probe_cache(
+            AvailabilityProbeCache(probed_at=_NOW, available=True, latched=False)
+        ),
+        "dispatch_state: failed to persist availability_probe",
+        False,
+        _SIBLING_SEED,
+    ),
+    "save_main_drift_latches": _FailSite(
+        lambda: save_main_drift_latches({"b": True, "a": False}),
+        "dispatch_state: failed to persist main_drift_latches (clients=['a', 'b'])",
+        True,
+        _SIBLING_SEED,
+    ),
+    "save_executor_blocked_marker": _FailSite(
+        lambda: save_executor_blocked_marker(_blocked_marker()),
+        "dispatch_state: failed to persist executor_blocked marker (client-a/1723)",
+        True,
+        _SIBLING_SEED,
+    ),
+    "clear_executor_blocked_marker": _FailSite(
+        lambda: clear_executor_blocked_marker("client-a", "1723"),
+        "dispatch_state: failed to clear executor_blocked marker (client-a/1723)",
+        True,
+        {
+            **_SIBLING_SEED,
+            "executor_blocked": {"client-a/1723": {"client": "client-a"}},
+        },
+    ),
+    "clear_all_executor_blocked_markers": _FailSite(
+        clear_all_executor_blocked_markers,
+        "dispatch_state: failed to clear executor_blocked markers at boot",
+        True,
+        _SIBLING_SEED,
+    ),
+    "save_open_pr_probe_entry": _FailSite(
+        lambda: save_open_pr_probe_entry(
+            "acme", "1862", OpenPrProbeCache(probed_at=_NOW, has_open_pr=True)
+        ),
+        "dispatch_state: failed to persist 1 open_pr_probe entry/entries"
+        " (['acme/1862'])",
+        True,
+        _SIBLING_SEED,
+    ),
+}
+
+
+class TestSidecarFailContract:
+    """Per-site fail-soft contract of every migrated sidecar writer (#3638).
+
+    Pins what the primitive's callers hand it: the exact formatted warning
+    (so swapped ``failure_args`` or a changed format string fail), whether a
+    traceback rides along, the ``cw.dispatch_state`` logger at WARNING, and that
+    a failed write leaves the sidecar bytes untouched.
+    """
+
+    @pytest.mark.parametrize("site", list(_FAIL_SITES))
+    def test_failed_write_logs_the_exact_warning_and_leaves_the_file_alone(
+        self,
+        site: str,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        spec = _FAIL_SITES[site]
+        state_file = cw.dispatch_state.DISPATCH_STATE_FILE
+        state_file.write_text(json.dumps(spec.seed))
+        before = state_file.read_bytes()
+        attempts = fail_state_writes(monkeypatch)
+
+        with caplog.at_level(logging.DEBUG, logger="cw.dispatch_state"):
+            spec.call()
+
+        assert len(attempts) == 1
+        records = [r for r in caplog.records if r.name == "cw.dispatch_state"]
+        assert len(records) == 1
+        record = records[0]
+        assert record.levelno == logging.WARNING
+        assert record.getMessage() == spec.message
+        assert bool(record.exc_info) is spec.exc_info
+        assert state_file.read_bytes() == before
+
+    def test_merge_and_save_fallback_returns_windows_and_logs_without_traceback(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        until = _NOW + timedelta(hours=1)
+        state_file = cw.dispatch_state.DISPATCH_STATE_FILE
+        state_file.write_text(json.dumps(_SIBLING_SEED))
+        before = state_file.read_bytes()
+        fail_state_writes(monkeypatch)
+
+        with caplog.at_level(logging.DEBUG, logger="cw.dispatch_state"):
+            merged = merge_and_save_usage_limited_until(
+                {"acme": until}, fresh={"beta": until}, clears_seen={}
+            )
+
+        assert merged == {"acme": until, "beta": until}
+        records = [r for r in caplog.records if r.name == "cw.dispatch_state"]
+        assert len(records) == 1
+        assert records[0].levelno == logging.WARNING
+        assert (
+            records[0].getMessage()
+            == "dispatch_state: failed to persist usage_limited_until"
         )
+        assert not records[0].exc_info
+        assert state_file.read_bytes() == before
 
-        # The process-local fallback keeps the just-set latch visible even
-        # when the sidecar write fails, preventing repeated attention events.
-        assert load_host_tmp_probe_cache()["acme"].latched is True
 
-        save_host_tmp_probe_cache(
-            "acme", HostTmpProbeCache(datetime.now(UTC), exhausted=False, latched=False)
-        )
-        assert load_host_tmp_probe_cache()["acme"].latched is False
+class TestSidecarWriteShapes:
+    """Persisted shapes the writer migration must keep byte-for-byte (#3638)."""
+
+    def test_clear_marker_on_an_absent_file_creates_nothing(
+        self, tmp_config_dir: Path
+    ) -> None:
+        clear_executor_blocked_marker("client-a", "1723")
+
+        assert not cw.dispatch_state.DISPATCH_STATE_FILE.exists()
+
+    def test_clear_marker_with_a_non_dict_value_writes_nothing(
+        self, tmp_config_dir: Path
+    ) -> None:
+        state_file = cw.dispatch_state.DISPATCH_STATE_FILE
+        state_file.write_text('{"executor_blocked": ["not", "a", "dict"]}')
+        before = state_file.read_bytes()
+
+        clear_executor_blocked_marker("client-a", "1723")
+
+        assert state_file.read_bytes() == before
+
+    def test_arming_none_persists_json_null(self, tmp_config_dir: Path) -> None:
+        save_usage_limit_armed_at(None)
+
+        stored = json.loads(cw.dispatch_state.DISPATCH_STATE_FILE.read_text())
+        assert stored == {"usage_limit_armed_at": None}
+
+    def test_clear_all_markers_persists_an_empty_dict(
+        self, tmp_config_dir: Path
+    ) -> None:
+        save_executor_blocked_marker(_blocked_marker())
+
+        clear_all_executor_blocked_markers()
+
+        stored = json.loads(cw.dispatch_state.DISPATCH_STATE_FILE.read_text())
+        assert stored == {"executor_blocked": {}}
 
 
 class TestOpenPrProbeEntriesBatch:
@@ -715,11 +1026,7 @@ class TestMergeAndSaveClearMarkFilter:
         now = datetime.now(UTC)
         until = now + timedelta(hours=1)
 
-        def _boom(_path: Path, _text: str) -> None:
-            msg = "disk full"
-            raise OSError(msg)
-
-        monkeypatch.setattr("cw.dispatch_state.atomic_write_text", _boom)
+        fail_state_writes(monkeypatch)
 
         merged = merge_and_save_usage_limited_until(
             {"acme": until}, fresh={"beta": until}, clears_seen={}

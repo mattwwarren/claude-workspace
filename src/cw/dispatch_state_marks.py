@@ -15,16 +15,12 @@ because the suite isolates state by patching that module attribute.
 
 from __future__ import annotations
 
-import json
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from cw import dispatch_state
-from cw.atomic import atomic_write_text
-from cw.config import refuse_real_state_write
 from cw.dispatch_state import (
     _load_dispatch_state_raw,
     _usage_limited_until_from_payload,
-    dispatch_state_lock,
 )
 from cw.dispatch_state_marks_parse import (
     CLEAR_MARK_RETENTION,
@@ -64,11 +60,10 @@ def clear_usage_limited_until(
     removed deadline, or None. ``OSError`` propagates: unlike the merge-save
     helper, the operator must know whether the clear landed.
     """
-    path = dispatch_state.DISPATCH_STATE_FILE
-    refuse_real_state_write(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with dispatch_state_lock():
-        payload = _load_dispatch_state_raw(strict=True)
+    old_until: datetime | None = None
+
+    def _clear(payload: dict[str, Any]) -> bool:
+        nonlocal old_until
         windows = _usage_limited_until_from_payload(payload)
         old_until = windows.pop(client, None)
         if expected_until is not _EXPECTED_UNSET and old_until != expected_until:
@@ -96,5 +91,8 @@ def clear_usage_limited_until(
         payload[CLEAR_MARKS_KEY] = {
             name: mark.isoformat() for name, mark in marks.items()
         }
-        atomic_write_text(path, json.dumps(payload))
+        return True
+
+    # failure_msg=None: OSError propagates, the operator must know the clear landed.
+    dispatch_state.mutate_dispatch_state(_clear, failure_msg=None, strict=True)
     return old_until
