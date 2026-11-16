@@ -3813,7 +3813,7 @@ it, committed on the base branch), and the finalize stage is waiting on CI, not
 failed. On the create path, a headless `/prep-pr` Step 7 deferred a mapped gate
 instead of running it, opened the PR unarmed (a per-worktree `ci-hold`), and
 finalize parked. On the reuse pass (Step 4c.6), `ci-reuse-plan` found a mapped
-check pending, missing or red at the PR head. Either way the PR exists, cw did
+check pending, missing or red at the PR head, or the base branch declares `ci_evidence` but PyYAML is unavailable. Either way the PR exists, cw did
 not arm auto-merge, and the gate was not run locally. The row parks
 `BLOCKED_ON_USER` at finalize with `blocker.reason: "awaiting_ci_evidence"` and
 disposition `awaiting_ci_evidence`; it is never regressed to impl and charges no
@@ -3829,8 +3829,13 @@ orchestrator):
    failure. Follow the `ci_failing` parked-row route: `cw dev-queue requeue <T>
    -c <C> --stage impl --regress`, adding `--review-feedback-file <file>` when
    you hold head-pinned evidence of the failure.
-3. `ci_evidence_hold_error:` (`ci-hold status` or `ci-hold release` failed):
-   fix the cause in `details`, usually a stale `prep_pr_finalize.py` copy, then
+3. `ci_evidence_hold_error:` (`ci-hold status` or `ci-hold release` failed, or
+   `ci-reuse-plan` could not read the map because the `python3` that runs
+   `prep_pr_state.py` has no PyYAML, cause `pyyaml-unavailable`): fix the cause
+   in `details`. For `ci-hold`, usually a stale `prep_pr_finalize.py` copy. For
+   `pyyaml-unavailable`, install PyYAML into that `python3` (or remove the
+   `quality_gates.ci_evidence` entry on the base branch); a requeue alone
+   re-parks until then, and the parked row holds its lane slot meanwhile. Then
    `cw dev-queue requeue <T> -c <C>`.
 4. A mapped check that never reports (renamed or path-filtered) parks every
    requeue, because there is no timer fallback (ADR-0014). Correct or remove its

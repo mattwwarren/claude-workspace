@@ -2803,7 +2803,7 @@ failure, every gate runs locally and the hold is cleared.
 **Reuse pass.** After the park, `cw dev-queue requeue <T> -c <C>` re-enters Step
 4c.6, which makes one call, `prep_pr_state.py ci-reuse-plan --pr <N> --base
 <b>`, and decides for all gates at once: `park` (a pending, missing or red
-mapped check: park `awaiting_ci_evidence` again, run nothing locally, arm
+mapped check, or the base branch declares `ci_evidence` but PyYAML is unavailable (`hold_error`, `cause: pyyaml-unavailable`): park `awaiting_ci_evidence` again, run nothing locally, arm
 nothing), `skip` (every mapped check green at the PR's live head: the gate is
 skipped, friction `reuse_path_gate_ci_covered: <gate> via <checks>`) and `run`
 (everything else runs locally). A non-zero exit or unparseable output runs

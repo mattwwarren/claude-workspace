@@ -599,8 +599,7 @@ bare retry would time the same gate out again.
 
 Reached from two places in the core doc, both headless: the Step 4c
 create-path check (a deferred gate left a CI-evidence hold on the worktree) and
-Step 4c.6 (the reuse pass found a mapped check pending, missing or red, or
-could not read or release the hold). The PR exists, cw did not arm auto-merge,
+Step 4c.6 (the reuse pass found a mapped check pending, missing or red, or the base branch declares `ci_evidence` but PyYAML is unavailable, or the pass could not read or release the hold). The PR exists, cw did not arm auto-merge,
 and no mapped gate was run locally. The decision is `prep_pr_state.py`'s
 (`ci-deferral`, `ci-reuse-plan`); the hold is `prep_pr_finalize.py`'s
 (`ci-hold`); this section only builds the sentinel.
@@ -682,13 +681,26 @@ Every `details` string is copied verbatim:
   -c <client> --stage impl --regress, adding --review-feedback-file <file> when
   you hold head-pinned evidence of the failure.` `retry_eligible` is `false`
   for `red` (a hint only; routing never reads it).
-- `hold_error` (either place: `ci-hold status` or `ci-hold release` failed).
+- `hold_error` (either place: `ci-hold status` or `ci-hold release` failed, or Step 4c.6's `ci-reuse-plan` returned `park.flavor: hold_error`).
   `details`: `ci_evidence_hold_error: PR #<n> (<url>) at head <sha>: ci-hold
   <status|release> failed (<cause>). cw did not arm auto-merge.`
   `retry_eligible: true`. `message`: `the CI-evidence hold could not be read or
   released; cw did not arm auto-merge`. `recovery_hint`: `Orchestrator: fix the
   cause in details (usually a stale prep_pr_finalize.py copy), then cw dev-queue
   requeue <ticket> -c <client>.`
+
+  The park-sourced `hold_error` (Step 4c.6's `ci-reuse-plan` returned
+  `park.flavor: hold_error`, cause `park.cause`, which is `pyyaml-unavailable`
+  when PyYAML is missing; `<sha>` is `park.sha`, or `HEAD_SHA` when null) uses
+  these verbatim strings, `retry_eligible: true`. `details`:
+  `ci_evidence_hold_error: PR #<n> (<url>) at head <sha>: ci-reuse-plan could
+  not read quality_gates.ci_evidence (<cause>). cw did not arm auto-merge and
+  did not run any gate locally.` `message`: `quality_gates.ci_evidence could not
+  be read without PyYAML; cw did not arm auto-merge and a requeue re-parks until
+  PyYAML is installed or the config changes`. `recovery_hint`: `Orchestrator:
+  install PyYAML into the python3 that runs prep_pr_state.py (or remove the
+  quality_gates.ci_evidence entry on the base branch); cw dev-queue requeue
+  <ticket> -c <client> re-parks until then.`
 
 The wording is "cw did not arm" because a project ship-it that bypasses the
 arm seam, or a human, could have armed the PR: the claim is about cw's own

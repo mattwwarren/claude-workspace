@@ -147,14 +147,31 @@ class TestFailClosed:
         assert github.pr_calls == []
 
     def test_without_pyyaml_nothing_is_skipped_and_the_reason_says_why(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         monkeypatch.setattr(_mod, "yaml", None)
         github = Github(pr(), {CHECK: [check_run(CHECK)]})
         verdict = _evidence(monkeypatch, github)
         assert verdict["skip"] is False
+        assert verdict["outcome"] == "local"
         assert verdict["reason"] == "pyyaml-unavailable"
         assert github.pr_calls == []
+        warnings = caplog.text.lower()
+        assert "pyyaml" in warnings
+        assert "pyyaml-unavailable" in warnings
+
+    @pytest.mark.parametrize("config", ["", "quality_gates:\n  ci_evidence: {}\n"])
+    def test_without_pyyaml_and_no_declared_key_nothing_is_warned(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        config: str,
+    ) -> None:
+        monkeypatch.setattr(_mod, "yaml", None)
+        monkeypatch.setattr(_mod, "_base_config_text", config_returning(config))
+        verdict = _evidence(monkeypatch, Github(pr()))
+        assert verdict["reason"] == "pyyaml-unavailable"
+        assert "pyyaml" not in caplog.text.lower()
 
     def test_unresolvable_local_head(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(_mod, "_run_git", git_returning(""))
@@ -957,3 +974,97 @@ class TestMainDispatch:
         with pytest.raises(SystemExit) as excinfo:
             _mod.main()
         assert excinfo.value.code != 0
+
+
+class TestDeclaresCiEvidence:
+    """The PyYAML-free detector: text-level, nesting-blind, fail closed."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "quality_gates:\n  ci_evidence:\n    tests: x\n",
+            "  ci_evidence:\n",
+            "  ci_evidence:   # note\n",
+            "  ci_evidence: {tests: x} # c\n",
+            "quality_gates: {ci_evidence: {tests: x}}",
+            "quality_gates: {ci_evidence: {}}",
+            '"ci_evidence":\n    tests: x\n',
+            "'ci_evidence':\n",
+            "ci_evidence: Null\n",
+            "ci_evidence: NULL\n",
+            "ci_evidence: { }\n",
+            'ci_evidence: ""\n',
+            "other:\n  ci_evidence:\n    a: b\n",
+        ],
+        ids=[
+            "block",
+            "bare",
+            "bare-with-comment",
+            "flow-with-comment",
+            "flow-parent",
+            "flow-parent-empty",
+            "double-quoted",
+            "single-quoted",
+            "Null",
+            "NULL",
+            "spaced-braces",
+            "empty-string",
+            "unrelated-section",
+        ],
+    )
+    def test_declared_forms_are_detected(self, text: str) -> None:
+        assert _mod._declares_ci_evidence(text) is True
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "",
+            "# ci_evidence:\n",
+            "  # ci_evidence:\n  x: 1",
+            "quality_gates:\n  timeouts:\n    tests: 5\n",
+            "uses ci_evidence for gates\n",
+            "my_ci_evidence: x\n",
+            "x-ci_evidence: y\n",
+            "ci_evidence: {}\n",
+            "  ci_evidence: {}\n",
+            "ci_evidence: null\n",
+            "ci_evidence: ~\n",
+            '"ci_evidence": {}\n',
+            "ci_evidence: {} # none\n",
+            "ci_evidence: null # unset\n",
+            "ci_evidence: ~ # unset\n",
+        ],
+        ids=[
+            "empty",
+            "commented-key",
+            "indented-comment",
+            "no-key",
+            "prose",
+            "suffix-word",
+            "prefix-word",
+            "empty-braces",
+            "indented-empty-braces",
+            "empty-null",
+            "empty-tilde",
+            "quoted-empty-braces",
+            "empty-braces-comment",
+            "empty-null-comment",
+            "empty-tilde-comment",
+        ],
+    )
+    def test_undeclared_forms_are_not_detected(self, text: str) -> None:
+        assert _mod._declares_ci_evidence(text) is False
+
+    def test_unreadable_only_without_pyyaml_and_a_declared_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def no_git(_base: str) -> str:
+            pytest.fail("PyYAML present: the base config must not be read")
+
+        monkeypatch.setattr(_mod, "_base_config_text", no_git)
+        assert _mod._ci_evidence_unreadable("main") is False
+        monkeypatch.setattr(_mod, "yaml", None)
+        monkeypatch.setattr(_mod, "_base_config_text", config_returning(CONFIG))
+        assert _mod._ci_evidence_unreadable("main") is True
+        monkeypatch.setattr(_mod, "_base_config_text", config_returning(""))
+        assert _mod._ci_evidence_unreadable("main") is False
