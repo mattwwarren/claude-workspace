@@ -117,6 +117,26 @@ class TestClearUsageLimitedUntil:
             clear_usage_limited_until("acme", cleared_at=_NOW)
         assert load_usage_limited_until() == {"acme": _UNTIL}
 
+    @pytest.mark.parametrize(
+        ("payload", "message"),
+        [
+            ("{not json", "could not read dispatch state"),
+            ("[]", "dispatch state must contain a JSON object"),
+        ],
+    )
+    def test_unreadable_sidecar_raises_and_is_left_untouched(
+        self, tmp_config_dir: Path, payload: str, message: str
+    ) -> None:
+        """The clear reads strict, so it never rewrites a sidecar it cannot parse."""
+        path = cw.dispatch_state.DISPATCH_STATE_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload)
+
+        with pytest.raises(OSError, match=message):
+            clear_usage_limited_until("acme", cleared_at=_NOW)
+
+        assert path.read_text() == payload
+
     def test_writes_the_isolated_path(self, tmp_config_dir: Path) -> None:
         """The path is read at call time, so the autouse patch reaches it."""
         clear_usage_limited_until("acme", cleared_at=_NOW)
