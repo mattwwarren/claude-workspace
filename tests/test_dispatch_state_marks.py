@@ -26,6 +26,7 @@ from cw.dispatch_state_marks import (
 from cw.dispatch_state_marks_parse import CLEAR_MARK_RETENTION, CLEAR_MARKS_KEY
 from tests._shared.dispatch_fixtures import seed_usage_limit_window
 from tests._shared.lock_helpers import DISPATCH_STATE_LOCK_NAME, record_state_locks
+from tests._shared.sidecar_failures import fail_state_writes
 
 _NOW = datetime.now(UTC)
 _UNTIL = _NOW + timedelta(hours=2)
@@ -110,11 +111,7 @@ class TestClearUsageLimitedUntil:
     ) -> None:
         seed_usage_limit_window("acme", _UNTIL)
 
-        def _boom(_path: Path, _text: str) -> None:
-            msg = "disk full"
-            raise OSError(msg)
-
-        monkeypatch.setattr("cw.dispatch_state.atomic_write_text", _boom)
+        fail_state_writes(monkeypatch)
 
         with pytest.raises(OSError, match="disk full"):
             clear_usage_limited_until("acme", cleared_at=_NOW)

@@ -50,6 +50,7 @@ from cw.models import (
 from cw.models.orchestrator_config.lane import LaneConfig
 from tests._review_debt_helpers import _register_debt_client
 from tests._shared.session_seeding import _make_ticket_task
+from tests._shared.sidecar_failures import fail_state_writes
 from tests._tool_fakes import FakeGhCli
 
 if TYPE_CHECKING:
@@ -772,11 +773,7 @@ def test_a_failed_stamp_write_cancels_nothing(
     row = _row()
     _seed(row)
 
-    def _boom(*_a: object, **_k: object) -> None:
-        msg = "disk full"
-        raise OSError(msg)
-
-    monkeypatch.setattr("cw.dispatch_state.atomic_write_text", _boom)
+    fail_state_writes(monkeypatch)
     with caplog.at_level(logging.WARNING):
         hits = _resolve(client, row)
         assert _claim(client, hits) is None
