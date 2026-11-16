@@ -156,7 +156,7 @@ class TestSaveHostTmpPrimitiveContract:
         assert len(records) == 1
         assert records[0].levelno == logging.WARNING
         assert records[0].getMessage() == _WARNING_TEXT
-        assert records[0].exc_info is not None
+        assert isinstance(records[0].exc_info, tuple)
 
     def test_failure_stores_fallback_and_success_pops_it(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch

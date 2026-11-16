@@ -547,7 +547,7 @@ class TestMutateDispatchState:
         assert record.getMessage() == (
             "dispatch_state: failed to persist thing (['a', 'b'])"
         )
-        assert record.exc_info is not None
+        assert isinstance(record.exc_info, tuple)
 
     def test_exc_info_false_omits_traceback(
         self,
