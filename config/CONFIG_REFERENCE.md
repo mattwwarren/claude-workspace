@@ -508,24 +508,23 @@ profile, placed right after the `--sandbox` / `approval_policy` pair:
 `multi_agent`, `multi_agent_v2`, `plugins`, `plugin_sharing`, `browser_use`,
 `browser_use_external`, `browser_use_full_cdp_access` and `computer_use`. It is
 hard-coded: no per-lane override and no opt-out. The fix cycle runs the same
-block without `--ignore-user-config`, so it keeps the host's sandbox and
-shell-environment policy. The plan, impl, finalize and tracker-IO turns and the
-capability probe are unchanged.
+block, including `--ignore-user-config`. The profile is limited to codex
+review roles, confirm/re-review roles and fix cycles; plan stations, plan,
+impl, finalize, tracker-IO and the capability probe are unchanged.
 
 - **What reaches the reviewer:** the agent spec, `.claude/review-extras.md`,
-  and the repo policy cw inlines into the prompt. The reviewer ignores the
-  operator's personal `config.toml`; the fix cycle keeps it.
+  and the repo policy cw inlines into the prompt. Review and fix prompts use
+  those cw-owned channels; the operator's personal `config.toml` is ignored.
 - **AGENTS.md:** `project_doc_max_bytes=0` drops any `AGENTS.md`-based policy
   of a client repo, because no cw module inlines `AGENTS.md`. Put required
   review policy in `.claude/review-extras.md` or `.claude/review-policy.md`.
 - **`~/.codex/config.toml`:** reviewers do not read it. Auth in `$CODEX_HOME`
   still works. A host whose credentials or provider are selected by
-  `config.toml` keys fails its reviews loudly. A fix cycle keeps its sandbox and
-  shell-environment policy and loses only project docs, MCP and the listed
-  features.
-- **Fix cycle:** `--ignore-user-config` is omitted, so `[sandbox_workspace_write]`
-  and `shell_environment_policy` from the host config still apply. The fix argv
-  is not probed live; the first live fix cycle shows it.
+  `config.toml` keys fails its reviews loudly (not probed). The same isolation
+  applies to fix cycles, so `[sandbox_workspace_write]` and
+  `shell_environment_policy` from a host config are dropped.
+- **Fix cycle:** it uses the full lean block, including
+  `--ignore-user-config`; the live fix cycle under that flag is not probed.
 - **MCP:** `-c mcp_servers={}` is the blanket switch. Whether it removes a
   server defined in the system or project layer is not probed.
 - **Version skew:** flags were probed on codex-cli 0.167.0 only. A codex that

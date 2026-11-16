@@ -180,25 +180,18 @@ _LEAN_LITERAL = [
 
 
 def test_lean_profile_argv_is_the_pinned_literal() -> None:
-    argv = _lean_profile_argv(ignore_user_config=True)
+    argv = _lean_profile_argv()
     assert argv == _LEAN_LITERAL
     assert argv.count("--disable") == 10
     assert "personality" not in argv
 
 
-def test_lean_profile_argv_fix_form_drops_only_ignore_user_config() -> None:
-    fix_argv = _lean_profile_argv(ignore_user_config=False)
-    assert fix_argv == _LEAN_LITERAL[1:]
-    assert "--ignore-user-config" not in fix_argv
-    assert "--strict-config" in fix_argv
-
-
 def test_lean_profile_argv_never_repeats_the_exec_policy_flags() -> None:
-    argv = _lean_profile_argv(ignore_user_config=True)
+    argv = _lean_profile_argv()
     assert "--sandbox" not in argv
     assert not any("approval_policy" in token for token in argv)
 
 
 def test_lean_profile_argv_returns_a_fresh_list() -> None:
-    _lean_profile_argv(ignore_user_config=True).append("--mutated")
-    assert _lean_profile_argv(ignore_user_config=True) == _LEAN_LITERAL
+    _lean_profile_argv().append("--mutated")
+    assert _lean_profile_argv() == _LEAN_LITERAL

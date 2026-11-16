@@ -41,7 +41,11 @@ from cw.codex_review._const import (
     _lean_profile_argv,
     format_input_sizes,
 )
-from cw.codex_review._context import _parse_reviewer_document
+from cw.codex_review._context import (
+    PLAN_REVIEWER_ROLE,
+    PLAN_SOUNDNESS_REVIEWER_ROLE,
+    _parse_reviewer_document,
+)
 from cw.codex_runner import relabeled
 from cw.config import state_dir
 from cw.executor_diagnostics import (
@@ -72,6 +76,9 @@ _log = logging.getLogger(__name__)
 #: Filesystem-safe slug for a reviewer role name. One definition, shared with
 #: the engine manifest loader through the light constants module (#3216).
 _slug = role_slug
+# Plan stations share the role runner but are a separate, unchanged launch
+# lane; every ordinary review/confirm/re-review role uses the fixed profile.
+_PLAN_STATION_ROLES = frozenset({PLAN_REVIEWER_ROLE, PLAN_SOUNDNESS_REVIEWER_ROLE})
 
 # clap-style "you passed a flag I don't know" phrasings. An older codex-cli
 # that predates --json/--ephemeral rejects the whole invocation with one of
@@ -146,6 +153,7 @@ def _build_generic_codex_argv(
     schema_path: Path,
     output_path: Path,
     sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
+    lean_profile: bool = True,
 ) -> list[str]:
     """Return the generic ``codex exec`` argv (no ``review``/``--base``).
 
@@ -168,13 +176,15 @@ def _build_generic_codex_argv(
     reasoning-effort pin (:func:`_reasoning_effort_argv`) sits in the same
     pre-schema slot for the same reason. The lean profile block (#1711,
     ``_lean_profile_argv``) sits between the policy pair and ``--json``.
+    ``lean_profile`` is false only for the two plan-station roles, which use
+    this shared runner without belonging to the reviewer-profile rollout.
     """
     # Sandbox + approval override: one seam, see _const._exec_policy_argv.
     argv = [
         "codex",
         "exec",
         *_exec_policy_argv(sandbox_mode),
-        *_lean_profile_argv(ignore_user_config=True),
+        *(_lean_profile_argv() if lean_profile else ()),
         *_AUDIT_ARGV_FLAGS,
         *_reasoning_effort_argv(reasoning_effort),
         "--output-schema",
@@ -532,6 +542,7 @@ def _run_codex_role(
         schema_path=schema_path,
         output_path=output_path,
         sandbox_mode=reviewer_sandbox_mode,
+        lean_profile=role not in _PLAN_STATION_ROLES,
     )
     start = time.monotonic()
     result, argv = _run_codex_with_audit_degrade(

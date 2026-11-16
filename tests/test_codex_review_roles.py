@@ -717,6 +717,20 @@ def _run_one_role(
     )
 
 
+@pytest.mark.parametrize("role", ["Plan Reviewer", "Plan Soundness Reviewer"])
+def test_plan_station_roles_do_not_receive_the_reviewer_profile(
+    tmp_path: Path, role: str
+) -> None:
+    runner = _SequencedRunner([_ok_result()])
+    _run_one_role(runner, tmp_path, role=role)
+
+    argv = runner.calls[0]["argv"]
+    assert isinstance(argv, list)
+    assert "--ignore-user-config" not in argv
+    assert "--strict-config" not in argv
+    assert "project_doc_max_bytes=0" not in argv
+
+
 def test_run_codex_role_spawn_error_surfaces_codex_error_reason(
     tmp_path: Path,
 ) -> None:
