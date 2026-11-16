@@ -1104,7 +1104,11 @@ lanes:
   output. Ecosystem-default lint autofixes (`ruff check --fix`,
   `npm run lint -- --fix`) are adopted (#3421); an autofix may not delete or
   rename a path (#3427), and a revert that cannot restore the tree parks
-  `codex_error` (#3423).
+  `codex_error` (#3423). Hook rewrite re-run (#3684): on the fix loop only, a
+  red gate that rewrote its own touched files (no autofix involved) is re-run
+  once after the rewrite. Outcomes `rewrite_applied`, `rewrite_rejected_scope`
+  and `rewrite_rejected_red` are logged; the IMPL and FINALIZE gates still park
+  such a gate (#3686).
 - **Divergence report.** `fix_loop_diverging` now also lists findings the loop
   itself generated (a finding on lines added since the loop began, or a
   file-level finding on a file the loop created) so the operator can tell new
@@ -2883,7 +2887,9 @@ quality_gates:
   alone, must exit 0, must change at least one path, and may change only paths
   the cycle already changed, and may not delete or rename one (#3427); the
   re-check must exit 0 and not dirty the tree. Anything else reverts the
-  autofix and parks with the original output.
+  autofix and parks with the original output. On the codex fix loop, a red gate
+  that rewrote files with no autofix takes the re-run path instead (#3684); the
+  autofix is never run on that path.
 - **Revert.** A revert never deletes a file that was git-ignored on disk before
   the autofix ran, even when the autofix rewrote the ignore rules (#3420). It
   restores the changed paths first; if that fails or leaves the tree different,
