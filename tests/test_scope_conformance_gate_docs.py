@@ -51,11 +51,13 @@ from tests._shared.guard_fences import (
     write_guard_stub_bin,
 )
 from tests._shared.step25_gates import (
+    RESOLVE_INSTALLED_NO_WAIT_ENV,
     assert_gate_key_helper_missing,
     gate2_fence,
     gate2_section,
     gate_key_for,
     install_gate_key,
+    link_cw_shim,
     link_real_python3,
 )
 from tests._shared.workflow_text import _appendix, _bash_fences, _cmd
@@ -1248,7 +1250,12 @@ def _run_gate2_fence(
     if gate_worktree:
         git_in(repo, "worktree", "add", "--detach", str(tmpwt), _GATE2_BRANCH)
 
-    bin_dir = link_real_python3(write_guard_stub_bin(tmp_path, names=("uv",)))
+    # The gate-key fences call `cw resolve-installed` on PATH; the shim keeps
+    # that off any host `cw`, and RESOLVE_INSTALLED_NO_WAIT_ENV keeps every
+    # case a single attempt (#3662).
+    bin_dir = link_cw_shim(
+        link_real_python3(write_guard_stub_bin(tmp_path, names=("uv",)))
+    )
     if break_git_diff:
         _write_failing_git_diff_stub(bin_dir)
     # Computed the same way the fence itself resolves `$SESSION_WT` (the
@@ -1272,6 +1279,7 @@ def _run_gate2_fence(
         "CW_GATE_ROOT": str(root),
         "SESSION_ROOT": str(tmpwt),
         "GUARD_ROOT": str(tmpwt),
+        **RESOLVE_INSTALLED_NO_WAIT_ENV,
     }
     if not omit_cw_session:
         env["CW_SESSION"] = cw_session_override or _GATE2_STALE_SESSION
@@ -1806,6 +1814,13 @@ def test_gate2_fence_hard_stops_when_gate_key_script_is_missing(
     assert result.returncode == 3, result.stdout
     assert _INVOKED not in result.stdout
     assert_gate_key_helper_missing(result.stdout)
+    # The resolver's stderr names the candidates, proving gate 2's
+    # ${SESSION_WT:+...} and $HOME arguments reach `cw resolve-installed`
+    # in order (#3662).
+    assert "resolve-installed" in result.stderr
+    assert str(tmp_path / "home" / ".claude" / "scripts" / "gate_key.py") in (
+        result.stderr
+    )
 
 
 def test_gate2_fence_resolves_gate_key_from_the_session_worktree_copy(

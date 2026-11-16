@@ -865,3 +865,61 @@ def test_setup_fence_from_a_non_git_cwd_exits_non_zero(tmp_path: Path) -> None:
     result = bed.run(_setup_body(), plain, {"GIT_CEILING_DIRECTORIES": str(tmp_path)})
     assert result.returncode != 0
     assert not [path for path in bed.gate_root.iterdir() if "cw-gate-" in path.name]
+
+
+# --- #3662: the fences resolve gate_key.py through `cw resolve-installed` ----
+
+
+@pytest.mark.parametrize("name", list(_FENCES))
+def test_fence_resolves_helper_through_cw_before_the_key_call(name: str) -> None:
+    fence = _FENCES[name]()
+    assert "cw resolve-installed" in fence
+    assert fence.index("cw resolve-installed") < fence.index(_KEY_CALL)
+    # The old one-line `[ -f ]` probe accepted a zero-length helper; no
+    # fence may keep it.
+    assert 'if [ -f "$candidate" ]; then KEY_SCRIPT=' not in fence
+
+
+@pytest.mark.parametrize(
+    ("name", "code"), [("setup", 1), ("gate3", 3), ("monolith", 1)]
+)
+def test_dangling_helper_is_a_miss_with_the_target_on_stderr(
+    tmp_path: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    name: str,
+    code: int,
+) -> None:
+    import time
+
+    bed = GateBed(tmp_path, install=False)
+    gone = tmp_path / "gone" / "gate_key.py"
+    scripts = bed.home / ".claude" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "gate_key.py").symlink_to(gone)
+    repo, _ = make_git_repo_with_origin("clone")
+    started = time.monotonic()
+    result = bed.run(fill_gate_fence(_FENCES[name]()), repo)
+    elapsed = time.monotonic() - started
+    assert result.returncode == code, result.stdout + result.stderr
+    assert_gate_key_helper_missing(result.stdout)
+    assert "dangling" in result.stderr
+    assert str(gone) in result.stderr
+    # The executed fence must not wait out the 10 s default budget (#3662).
+    assert elapsed < 5.0
+    assert not [path for path in bed.gate_root.iterdir() if "cw-gate-" in path.name]
+
+
+@pytest.mark.parametrize("name", ["setup", "gate3", "monolith"])
+def test_zero_length_helper_is_treated_as_a_miss(
+    tmp_path: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    name: str,
+) -> None:
+    bed = GateBed(tmp_path, install=False)
+    scripts = bed.home / ".claude" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "gate_key.py").write_text("", encoding="utf-8")
+    repo, _ = make_git_repo_with_origin("clone")
+    result = bed.run(fill_gate_fence(_FENCES[name]()), repo)
+    assert_gate_key_helper_missing(result.stdout)
+    assert "empty" in result.stderr

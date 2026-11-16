@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -32,6 +33,17 @@ pytestmark = [
 
 _TEST_MARKER = "ran-test"
 _PREPARE_OK = "touch prepared"
+
+
+# A host cw that predates `tests-prepare`: it fails that command, but must
+# still answer `resolve-installed` (#3662) through the interpreter's own cw.
+_TESTS_PREPARE_MISSING_CW = (
+    "#!/bin/sh\n"
+    'if [ "$1" = "resolve-installed" ]; then\n'
+    f'  exec {sys.executable} -m cw "$@"\n'
+    "fi\n"
+    "exit 2\n"
+)
 
 
 def _prepare_yaml(command: str) -> str:
@@ -279,7 +291,7 @@ def test_cw_without_the_command_fails_closed(
     tmpwt, _, _ = bed.paths(repo)
     tmpwt.mkdir()
     _write_project_config_yaml(tmpwt, _prepare_yaml("true"))
-    write_bin_stub(bed.bin_dir.parent, "cw", "#!/bin/sh\nexit 2\n")
+    write_bin_stub(bed.bin_dir.parent, "cw", _TESTS_PREPARE_MISSING_CW)
     result = bed.run(fill_gate_fence(impl_gate3_fence(), "printf RAN"), repo)
     assert result.returncode == 3, result.stdout + result.stderr
     assert "could not be read" in result.stdout
@@ -296,7 +308,7 @@ def test_cw_without_the_command_is_harmless_without_a_config_file(
     repo, _ = make_git_repo_with_origin("clone")
     tmpwt, _, _ = bed.paths(repo)
     tmpwt.mkdir()
-    write_bin_stub(bed.bin_dir.parent, "cw", "#!/bin/sh\nexit 2\n")
+    write_bin_stub(bed.bin_dir.parent, "cw", _TESTS_PREPARE_MISSING_CW)
     result = bed.run(fill_gate_fence(impl_gate3_fence(), "printf RAN"), repo)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "RAN" in result.stdout
