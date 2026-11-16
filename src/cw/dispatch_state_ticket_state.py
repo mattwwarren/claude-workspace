@@ -28,20 +28,14 @@ because the suite isolates state by patching that module attribute.
 
 from __future__ import annotations
 
-import json
-import logging
 from datetime import datetime
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw import dispatch_state
-from cw.atomic import atomic_write_text
-from cw.config import refuse_real_state_write
-from cw.dispatch_state import _load_dispatch_state_raw, dispatch_state_lock
+from cw.dispatch_state import _load_dispatch_state_raw
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping
-
-logger = logging.getLogger(__name__)
+    from collections.abc import Collection, Mapping
 
 TICKET_STATE_PROBE_KEY = "ticket_state_probe"
 
@@ -142,38 +136,6 @@ def guard_cancelled_row_keys() -> frozenset[str]:
     )
 
 
-def _merge_dispatch_state(
-    label: str,
-    keys: Collection[str],
-    mutate: Callable[[dict[str, object]], bool],
-) -> bool:
-    """Run one generic raw-sidecar read/merge/write operation.
-
-    This is the leaf persistence primitive: callers own the sidecar-specific
-    parsing and mutation, while the shared file path, lock, atomic write and
-    fail-safe error policy stay in one place. *mutate* edits the full payload
-    in place and reports whether anything changed; an unchanged payload is not
-    rewritten.
-    """
-    path = dispatch_state.DISPATCH_STATE_FILE
-    try:
-        refuse_real_state_write(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with dispatch_state_lock():
-            payload = _load_dispatch_state_raw()
-            if mutate(payload):
-                atomic_write_text(path, json.dumps(payload))
-    except OSError:
-        logger.warning(
-            "dispatch_state: failed to %s ticket_state_probe entry/entries (%s)",
-            label,
-            sorted(keys),
-            exc_info=True,
-        )
-        return False
-    return True
-
-
 def save_ticket_state_probes(
     client: str,
     entries: Mapping[str, TicketStateProbe],
@@ -208,7 +170,13 @@ def save_ticket_state_probes(
         payload[TICKET_STATE_PROBE_KEY] = raw
         return bool(stale or entries)
 
-    return _merge_dispatch_state("persist", list(entries), _merge)
+    return dispatch_state.mutate_dispatch_state(
+        _merge,
+        failure_msg=(
+            "dispatch_state: failed to persist ticket_state_probe entry/entries (%s)"
+        ),
+        failure_args=(sorted(entries),),
+    )
 
 
 def clear_ticket_closed_stamps(keys: Collection[str]) -> None:
@@ -232,7 +200,13 @@ def clear_ticket_closed_stamps(keys: Collection[str]) -> None:
         return changed
 
     if keys:
-        _merge_dispatch_state("clear", keys, _clear)
+        dispatch_state.mutate_dispatch_state(
+            _clear,
+            failure_msg=(
+                "dispatch_state: failed to clear ticket_state_probe entry/entries (%s)"
+            ),
+            failure_args=(sorted(keys),),
+        )
 
 
 def mark_ticket_closed_cancelled(key: str, *, at: datetime) -> bool:
@@ -249,4 +223,11 @@ def mark_ticket_closed_cancelled(key: str, *, at: datetime) -> bool:
         payload[TICKET_STATE_PROBE_KEY] = raw
         return True
 
-    return _merge_dispatch_state("mark cancelled", [key], _mark)
+    return dispatch_state.mutate_dispatch_state(
+        _mark,
+        failure_msg=(
+            "dispatch_state: failed to mark cancelled ticket_state_probe "
+            "entry/entries (%s)"
+        ),
+        failure_args=([key],),
+    )
