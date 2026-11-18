@@ -8,7 +8,7 @@ orphan and is ignored.
 
 ``atomic_write_text`` does not fsync, on purpose (R22): the store is
 mirror-only and ``claim()`` verifies the body's sha256, so a torn or missing
-body surfaces as ``failed/body_unreadable`` rather than a bad post.
+body remains retryable rather than becoming a bad post or a terminal state.
 
 Imports ``_models``.
 """
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
@@ -44,6 +45,7 @@ FILE_MODE = 0o600
 
 _OUTBOX_DIRNAME = "outbox"
 _LOCK_NAME = ".outbox.lock"
+_AUDIT_NAME = ".outbox.audit.jsonl"
 _RECORD_SUFFIX = ".json"
 _BODY_SUFFIX = ".body"
 
@@ -58,6 +60,10 @@ def client_dir(client: str) -> Path:
 
 def lock_path(client: str) -> Path:
     return client_dir(client) / _LOCK_NAME
+
+
+def audit_path(client: str) -> Path:
+    return client_dir(client) / _AUDIT_NAME
 
 
 def record_path(client: str, entry_id: str) -> Path:
@@ -111,7 +117,7 @@ def read_body_bytes(client: str, entry_id: str) -> bytes:
     return body_path(client, entry_id).read_bytes()
 
 
-def _parse_record(path: Path) -> OutboxEntry:
+def _parse_record(path: Path, client: str) -> OutboxEntry:
     try:
         raw = path.read_text(encoding="utf-8")
         data = json.loads(raw)
@@ -120,6 +126,9 @@ def _parse_record(path: Path) -> OutboxEntry:
         raise OutboxRecordError(msg) from exc
     if not isinstance(data, dict):
         msg = f"outbox record {path.name} is not a JSON object"
+        raise OutboxRecordError(msg)
+    if "schema_version" in data and type(data["schema_version"]) is not int:
+        msg = f"outbox record {path.name} has a non-integer schema_version"
         raise OutboxRecordError(msg)
     version = data.get("schema_version")
     if (
@@ -139,12 +148,36 @@ def _parse_record(path: Path) -> OutboxEntry:
     if entry.id != path.stem:
         msg = f"outbox record {path.name} does not match its entry id"
         raise OutboxRecordError(msg)
+    if entry.client != client:
+        msg = f"outbox record {path.name} belongs to another client"
+        raise OutboxRecordError(msg)
     return entry
 
 
 def read_record(client: str, entry_id: str) -> OutboxEntry:
     """Read one record. Raises on a missing, corrupt or too-new record."""
-    return _parse_record(record_path(client, entry_id))
+    return _parse_record(record_path(client, entry_id), client)
+
+
+def append_audit_event(client: str, event: dict[str, object]) -> None:
+    """Durably append one transition event before its record replacement."""
+    path = audit_path(client)
+    refuse_real_state_write(path)
+    fd = -1
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, FILE_MODE)
+        with os.fdopen(fd, "a", encoding="utf-8") as stream:
+            fd = -1
+            stream.write(json.dumps(event, separators=(",", ":")) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        path.chmod(FILE_MODE)
+    except OSError as exc:
+        msg = f"cannot append outbox audit event {path.name}"
+        raise OutboxRecordError(msg) from exc
+    finally:
+        if fd != -1:
+            os.close(fd)
 
 
 def scan_entries(client: str) -> list[OutboxEntry]:
@@ -160,7 +193,7 @@ def scan_entries(client: str) -> list[OutboxEntry]:
     entries: list[OutboxEntry] = []
     for path in sorted(directory.glob(f"*{_RECORD_SUFFIX}")):
         try:
-            entries.append(_parse_record(path))
+            entries.append(_parse_record(path, client))
         except (OutboxRecordError, OutboxSchemaError) as exc:
             logger.warning(
                 "skipping outbox record %s (%s)", path.name, type(exc).__name__

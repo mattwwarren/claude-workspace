@@ -14,7 +14,14 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal, NamedTuple, Self
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    model_validator,
+)
 
 from cw.exceptions import CwError
 from cw.models import LaunchMarker
@@ -228,7 +235,7 @@ class OutboxEntry(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = OUTBOX_SCHEMA_VERSION
+    schema_version: StrictInt = OUTBOX_SCHEMA_VERSION
     id: str
     client: str
     role: OutboxRole
@@ -275,7 +282,7 @@ class OutboxEntry(BaseModel):
         check_ticket(self.ticket)
         check_marker(self.marker)
         check_producer(self.producer)
-        if len(self.body_sha256) != SHA256_HEX_LENGTH:
+        if not re.fullmatch(rf"[0-9a-f]{{{SHA256_HEX_LENGTH}}}", self.body_sha256):
             msg = "body_sha256 must be a sha256 hex digest"
             raise ValueError(msg)
         _check_spans(self.parts, self.body_bytes)

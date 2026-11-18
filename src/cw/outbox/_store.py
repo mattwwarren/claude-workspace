@@ -58,8 +58,6 @@ if TYPE_CHECKING:
 
     from cw.models import LaunchMarker
 
-_UNREADABLE_DETAIL = "body file is missing or does not match its recorded sha256/size"
-
 
 class _Body(NamedTuple):
     text: str
@@ -152,6 +150,37 @@ def _apply_settle(
         claimed_at=None,
         claimed_from=None,
         updated_at=now,
+    )
+
+
+def _audit_transition(
+    client: str,
+    before: OutboxEntry,
+    after: OutboxEntry,
+    *,
+    initiator: str,
+    now: datetime,
+    event: str = "transition",
+    reason: OutboxReason | None = None,
+) -> None:
+    """Write the write-ahead audit event for a state mutation."""
+    claimant = after.claimant or before.claimant
+    claim_token = after.claim_token or before.claim_token
+    effective_reason = reason or after.reason or before.reason
+    layout.append_audit_event(
+        client,
+        {
+            "event": event,
+            "entry_id": after.id,
+            "client": client,
+            "before_state": before.state.value,
+            "after_state": after.state.value,
+            "claimant": claimant.model_dump(mode="json") if claimant else None,
+            "claim_token": claim_token,
+            "initiator": initiator,
+            "timestamp": now.isoformat(),
+            "reason": effective_reason.value if effective_reason else None,
+        },
     )
 
 
@@ -295,7 +324,10 @@ def _recover_locked(client: str) -> None:
             LaunchOwnerState.OWNER_GONE
         ):
             continue
-        layout.write_record(client, _recovered(entry, _now()))
+        now = _now()
+        recovered = _recovered(entry, now)
+        _audit_transition(client, entry, recovered, initiator="recovery", now=now)
+        layout.write_record(client, recovered)
 
 
 def _body_intact(client: str, entry: OutboxEntry) -> bool:
@@ -303,6 +335,8 @@ def _body_intact(client: str, entry: OutboxEntry) -> bool:
 
     A missing file or a sha256/size mismatch is ``False`` (a torn or absent
     body). Any other ``OSError`` is transient: it raises and settles nothing.
+    A false result remains retryable; repairing the body lets a later claim
+    succeed.
     """
     try:
         data = layout.read_body_bytes(client, entry.id)
@@ -317,20 +351,6 @@ def _body_intact(client: str, entry: OutboxEntry) -> bool:
     )
 
 
-def _body_unreadable(
-    entry: OutboxEntry, claimant: LaunchMarker | None, now: datetime
-) -> OutboxEntry:
-    """The one settle the store makes itself: ``claimed -> failed`` in one write."""
-    claimed = _apply_claim(entry, claimant=claimant, now=now)
-    return _apply_settle(
-        claimed,
-        state=OutboxState.FAILED,
-        reason=OutboxReason.BODY_UNREADABLE,
-        detail=_UNREADABLE_DETAIL,
-        now=now,
-    )
-
-
 def _claim_locked(
     client: str, *, state: OutboxState, limit: int, claimant: LaunchMarker | None
 ) -> list[OutboxEntry]:
@@ -338,8 +358,8 @@ def _claim_locked(
 
     Verify-then-claim: every body this call will return is verified before any
     claim record is written, so a transient read error raises with nothing
-    claimed. An unreadable body is settled failed and does not count toward
-    *limit*.
+    claimed. An unreadable body remains in its prior retryable state and does
+    not count toward *limit*.
     """
     candidates = sorted(
         (e for e in layout.scan_entries(client) if e.state is state),
@@ -352,10 +372,22 @@ def _claim_locked(
         if _body_intact(client, entry):
             selected.append(entry)
         else:
-            layout.write_record(client, _body_unreadable(entry, claimant, _now()))
+            now = _now()
+            _audit_transition(
+                client,
+                entry,
+                entry,
+                initiator="claim",
+                now=now,
+                event="automatic_failure",
+                reason=OutboxReason.BODY_UNREADABLE,
+            )
     claimed: list[OutboxEntry] = []
     for entry in selected:
         record = _apply_claim(entry, claimant=claimant, now=_now())
+        _audit_transition(
+            client, entry, record, initiator="claim", now=record.updated_at
+        )
         layout.write_record(client, record)
         claimed.append(record)
     return claimed
@@ -420,6 +452,9 @@ def settle(
             raise OutboxClaimError(msg)
         settled = _apply_settle(
             entry, state=state, reason=reason, detail=detail, now=_now()
+        )
+        _audit_transition(
+            client, entry, settled, initiator="settle", now=settled.updated_at
         )
         layout.write_record(client, settled)
     return settled

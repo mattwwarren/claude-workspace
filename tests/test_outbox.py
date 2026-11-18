@@ -574,8 +574,19 @@ class TestPersistence:
         entry = _enqueue().entry
         data = json.loads(_record_file(entry.id).read_text(encoding="utf-8"))
 
-        with pytest.raises(ValidationError):
-            OutboxEntry.model_validate({**data, "body_sha256": "abc"})
+        for digest in ("abc", "g" * 64):
+            with pytest.raises(ValidationError):
+                OutboxEntry.model_validate({**data, "body_sha256": digest})
+
+    def test_record_client_must_match_directory(self) -> None:
+        entry = _enqueue("acme").entry
+        _enqueue("other")
+        _record_file(entry.id, "other").write_bytes(
+            _record_file(entry.id, "acme").read_bytes()
+        )
+
+        with pytest.raises(OutboxRecordError):
+            _layout.read_record("other", entry.id)
 
     def test_unwritable_store_root_raises_record_error(self) -> None:
         state_dir().mkdir(parents=True, exist_ok=True)
@@ -843,7 +854,7 @@ class TestClaim:
 
         assert len(tokens) == 2
 
-    def test_claim_verifies_sha_missing_body_settles_failed_body_unreadable(
+    def test_claim_verifies_sha_missing_body_remains_retryable(
         self,
     ) -> None:
         entry = _enqueue().entry
@@ -852,21 +863,27 @@ class TestClaim:
         assert claim(_CLIENT) == []
 
         (stored,) = list_entries(_CLIENT)
-        assert stored.state is OutboxState.FAILED
-        assert stored.reason is OutboxReason.BODY_UNREADABLE
+        assert stored.state is OutboxState.PENDING
+        assert stored.reason is None
         assert stored.claim_token is None
         assert stored.claimant is None
 
+        _body_file(entry.id).write_bytes(_BODY.encode())
+        assert [e.id for e in claim(_CLIENT)] == [entry.id]
+
     @pytest.mark.parametrize("replacement", ["XXXXX world", "short"])
-    def test_claim_sha_mismatch_settles_failed(self, replacement: str) -> None:
+    def test_claim_sha_mismatch_remains_retryable(self, replacement: str) -> None:
         entry = _enqueue().entry
         _body_file(entry.id).write_text(replacement, encoding="utf-8")
 
         assert claim(_CLIENT) == []
 
         (stored,) = list_entries(_CLIENT)
-        assert stored.state is OutboxState.FAILED
-        assert stored.reason is OutboxReason.BODY_UNREADABLE
+        assert stored.state is OutboxState.PENDING
+        assert stored.reason is None
+
+        _body_file(entry.id).write_bytes(_BODY.encode())
+        assert [e.id for e in claim(_CLIENT)] == [entry.id]
 
     def test_unreadable_body_not_counted_toward_limit(self) -> None:
         with freeze_time("2026-11-01T10:00:00Z"):
@@ -880,7 +897,9 @@ class TestClaim:
         got = claim(_CLIENT, limit=2)
 
         assert [e.id for e in got] == [good_a.id, good_b.id]
-        assert _states()[broken.id] is OutboxState.FAILED
+        assert _states()[broken.id] is OutboxState.PENDING
+        _body_file(broken.id).write_bytes(_BODY.encode())
+        assert [e.id for e in claim(_CLIENT)] == [broken.id]
 
     def test_claim_transient_oserror_on_body_read_does_not_settle(
         self, monkeypatch: pytest.MonkeyPatch
