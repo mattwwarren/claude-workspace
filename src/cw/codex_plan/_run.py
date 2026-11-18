@@ -214,16 +214,20 @@ class _Run:
     def mcp_target(self) -> _McpTarget | _Exit:
         """The tracker read path, or the run-time tracker-MCP backstop's block."""
         kind = tracker_kind(self.client.workspace_path)
-        if kind.tracker_class is not TrackerClass.OTHER or kind.system is None:
-            return _McpTarget()
-        if self.client.bindings.tickets is None:
+        tickets = self.client.bindings.tickets
+        if tickets is None:
+            if kind.tracker_class is not TrackerClass.OTHER or kind.system is None:
+                return _McpTarget()
             return self._mcp_blocked(f"tracker {kind.system!r}: tracker_mcp_gate unset")
-        server = self.client.tracker_mcp_server(CODEX_BACKEND) or ""
+        if tickets.cli == "gh":
+            return _McpTarget()
+        tracker = str(tickets.system or kind.system or "")
+        server = tickets.mcp_server(CODEX_BACKEND) or ""
         try:
             validate_server_name(server)
-            tools = read_tools_for(kind.system, self.client.bindings.tickets)
+            tools = read_tools_for(tracker, tickets, CODEX_BACKEND)
         except TrackerIoConfigError as exc:
-            return self._mcp_blocked(f"tracker {kind.system!r}: {exc}")
+            return self._mcp_blocked(f"tracker {tracker!r}: {exc}")
         reading = read_backend_mcp(CODEX_BACKEND, server, self.client.workspace_path)
         if reading.state in (McpState.ABSENT, McpState.DISABLED):
             state = reading.state.value

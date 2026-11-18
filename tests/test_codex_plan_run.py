@@ -37,6 +37,7 @@ from cw.models import (
     Stage,
     StageExecutorConfig,
 )
+from cw.models.bindings import Bindings
 from cw.models.orchestrator_config.stage import ModelPrice
 from cw.models.usage import UsageStage, UsageState, UsageUnavailableReason
 from cw.plan_fingerprint import PLAN_DRAFT_RELATIVE_PATH, compute_plan_draft_fingerprint
@@ -984,6 +985,51 @@ def test_bound_renamed_tools_reach_the_plan_launch_allowlist(
         in argv
     )
     assert 'mcp_servers.linear.enabled_tools=["get_issue"' not in " ".join(argv)
+
+
+def test_github_tracker_with_codex_mcp_binding_uses_mcp(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h = harness()
+    _other_tracker(
+        h,
+        tmp_path,
+        monkeypatch,
+        servers={"codex": "linear"},
+        tracker=TRACKER_GITHUB_ISSUES,
+    )
+    h.client = h.client.model_copy(
+        update={
+            "bindings": Bindings.model_validate(
+                {
+                    "tickets": {
+                        "system": TRACKER_GITHUB_ISSUES,
+                        "mcp": {
+                            "codex": {
+                                "server": "linear",
+                                "tools": {
+                                    "get": "github_get_issue",
+                                    "list_comments": "github_list_comments",
+                                },
+                            }
+                        },
+                    }
+                }
+            )
+        }
+    )
+    add_stations(add_turn(h.runner))
+    h.run()
+    (call,) = h.plan_calls
+    argv = call["argv"]
+    assert isinstance(argv, list)
+    assert (
+        'mcp_servers.linear.enabled_tools=["github_get_issue","github_list_comments"]'
+        in argv
+    )
+    assert not [r for r in h.gh.records if r.argv[-1] == "body"]
 
 
 @pytest.mark.parametrize("tracker", [TRACKER_GITHUB_ISSUES, None])
