@@ -2451,6 +2451,10 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     ("cw/cli/spawn.py", "_spawn_complete_impl"): 2,
     # `cw dev-queue unblock`: sessions_lock + nested _lock (#2501)
     ("cw/dev_queue/requeue.py", "unblock_ticket"): 2,
+    # `cw ticket snapshot` / codex PLAN snapshot write (RFC 0019 T1, #3711): the
+    # gh fetch and the content-addressed store write precede the lock; an orphan
+    # store file is harmless. Never reached from dispatch_tick (no cw/dispatch entry).
+    ("cw/ticket_snapshot/_record.py", "record_snapshot"): 1,
     # `cw dev-queue ...` operator commands, dev_queue lock (#2501)
     ("cw/cli/dev_queue/crud.py", "dev_queue_add"): 1,
     # `cw dev-queue add --adopt-pr` (#2943): only lock-free gh reads precede it

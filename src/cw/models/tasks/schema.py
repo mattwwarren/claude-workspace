@@ -282,7 +282,13 @@ from cw.models.enums import Stage
 #      list, so a pre-v62 row loads with ``[]`` and needs no migration filler.
 #      Take the next free number at merge if another PR takes v62 first (the
 #      v57 history line records the same practice).
-DEV_QUEUE_SCHEMA_VERSION = 62
+# v63: added TicketTask.snapshot_digest and TicketTask.snapshot_fetched_at
+#      (RFC 0019 T1, GitHub #3711) — the content digest and fetch time of the
+#      digest-keyed ticket snapshot the row's .cw/context.json renders from.
+#      Written only by cw.ticket_snapshot (the store, under dev_queue_lock).
+#      Both ``| None`` with a ``None`` default, so a pre-v63 row loads with
+#      them unset and needs no migration filler.
+DEV_QUEUE_SCHEMA_VERSION = 63
 # Provenance of a v48 review approval: the human `approve` or the gate recipe.
 ReviewApproverKind = Literal["operator", "recipe"]
 DEFAULT_LANE: str = "default"

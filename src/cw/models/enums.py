@@ -361,6 +361,13 @@ class OrchestratorEventType(StrEnum):
     # #2964 -- cw review constrain recorded a binding operator constraint on
     # the row.
     OPERATOR_CONSTRAINT_RECORDED = "ticket.constraint_recorded"
+    # RFC 0019 T1 (#3711) -- the ticket snapshot store recorded a snapshot and
+    # stamped the row's digest (cw ticket snapshot, codex PLAN).
+    TICKET_SNAPSHOT_RECORDED = "ticket.snapshot_recorded"
+    # RFC 0019 T1 (#3711) -- a dispatch spawn could not render .cw/context.json
+    # from the snapshot store. Deliberately NOT in _DEFAULT_OPERATOR_EVENT_TYPES:
+    # the spawn proceeds without the file and the row is not parked.
+    TICKET_SNAPSHOT_RENDER_FAILED = "ticket.snapshot_render_failed"
     PLAN_APPROVAL_REVOKED = "plan.approval_revoked"
     # #2311 -- advisory audit trail: `cw dev-queue approve` found the ticket
     # body changed since the plan stage last evaluated it. Never blocks.

@@ -14,6 +14,7 @@ Submodules:
 - ``availability`` — the fleet-wide TTL-cached ``gh auth status`` probe
   (RFC 0011 A5), its edge-triggered outage latch, and the skip event.
 - ``context_json`` — pre-spawn invalidation of a stale ``.cw/context.json``
+  and its re-render from the ticket snapshot store (RFC 0019 T1, #3711)
   (#1046); also the one home of ``_LOGGER_NAME``, the ``cw.dispatch`` logger
   name every submodule logs on.
 - ``disk_pressure`` — the worktree-base free-bytes (#1887) and free-inodes
@@ -43,6 +44,7 @@ from cw.dispatch.gating.context_json import (
 )
 from cw.dispatch.gating.context_json import (
     _invalidate_stale_context_json,
+    _render_context_json_from_snapshot,
 )
 from cw.dispatch.gating.disk_pressure import (
     _HOST_TMP_EXHAUSTED_REASON,
@@ -104,6 +106,7 @@ __all__ = [
     "_reconcile_usage_limited",
     "_record_availability_block",
     "_record_host_tmp_exhausted_block",
+    "_render_context_json_from_snapshot",
     "_reset_availability_block",
     "_reset_host_tmp_exhausted_block",
     "_resolve_availability",

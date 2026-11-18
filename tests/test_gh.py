@@ -38,6 +38,7 @@ from cw.gh import (
 )
 from cw.models import PrState
 from tests._shared.session_seeding import _make_ticket_task
+from tests._shared.ticket_context import observed_issue_envelope
 from tests._tool_fakes import ARM_VIEW_ARMED, ARM_VIEW_OPEN
 
 #: Captured ``gh`` auth-failure stderr (#3041), shared with the debt tests.
@@ -3427,3 +3428,73 @@ class TestFetchRequiredFailingChecks:
             "fetch_required_failing_checks",
         ):
             assert name in gh.__all__
+
+
+class TestFetchIssueSnapshot:
+    """Tests for fetch_issue_snapshot (RFC 0019 R17): one gh call for the envelope."""
+
+    def test_returns_envelope_and_asserts_argv_and_cwd(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+        envelope = observed_issue_envelope()
+
+        def _fake_run(args: list[str], **kwargs: object) -> Any:
+            calls.append(list(args))
+            assert kwargs["cwd"] == Path("/repo")
+            return _make_run_result(0, json.dumps(envelope))
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        result = gh.fetch_issue_snapshot("2633", timeout=5, cwd=Path("/repo"))
+        assert result == envelope
+        assert calls == [
+            ["gh", "issue", "view", "2633", "--json", "title,body,url,comments"]
+        ]
+
+    def test_returns_none_on_gh_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(1, ""))
+        assert gh.fetch_issue_snapshot("2633", timeout=5) is None
+
+    def test_returns_none_on_malformed_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(0, "not json{{")
+        )
+        assert gh.fetch_issue_snapshot("2633", timeout=5) is None
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            [],
+            {"title": 1, "body": "b", "url": "u", "comments": []},
+            {"title": "t", "body": None, "url": "u", "comments": []},
+            {"title": "t", "body": "b", "url": None, "comments": []},
+            {"title": "t", "body": "b", "url": "u", "comments": "nope"},
+        ],
+    )
+    def test_returns_none_on_wrong_field_types(
+        self, monkeypatch: pytest.MonkeyPatch, payload: object
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: _make_run_result(0, json.dumps(payload)),
+        )
+        assert gh.fetch_issue_snapshot("2633", timeout=5) is None
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            FileNotFoundError("gh"),
+            OSError("boom"),
+            subprocess.TimeoutExpired(cmd="gh", timeout=5),
+        ],
+    )
+    def test_returns_none_when_gh_cannot_run(
+        self, monkeypatch: pytest.MonkeyPatch, exc: BaseException
+    ) -> None:
+        def _raise(*_a: object, **_kw: object) -> None:
+            raise exc
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+        assert gh.fetch_issue_snapshot("2633", timeout=5) is None

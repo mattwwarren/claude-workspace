@@ -46,5 +46,5 @@ def test_field_sits_directly_after_review_debt() -> None:
     assert names.index("review_engine_settlements") == names.index("review_debt") + 1
 
 
-def test_schema_version_is_62() -> None:
-    assert DEV_QUEUE_SCHEMA_VERSION == 62
+def test_schema_version_is_63() -> None:
+    assert DEV_QUEUE_SCHEMA_VERSION == 63

@@ -89,6 +89,54 @@ def fetch_issue_comments(
     return comments
 
 
+def fetch_issue_snapshot(
+    ticket_id: str, timeout: int, *, cwd: Path | None = None
+) -> dict[str, Any] | None:
+    """Return the issue's title, body, url and comments, or None on any error.
+
+    One ``gh issue view --json title,body,url,comments`` call (RFC 0019 R17),
+    shaped after :func:`fetch_issue_comments`. The dict is returned as ``gh``
+    reports it; ``cw.ticket_snapshot`` maps the fields. Returns None on a
+    failed call, malformed JSON, or a field of the wrong type. *cwd* scopes the
+    call to the client's repo; multi-client callers MUST pass it.
+    """
+    try:
+        result = _sp.run(
+            ["gh", "issue", "view", ticket_id, "--json", "title,body,url,comments"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            cwd=cwd,
+        )
+    except FileNotFoundError:
+        return None
+    except (OSError, _sp.TimeoutExpired):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    try:
+        data: object = json.loads(result.stdout)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or not _snapshot_shape_ok(data):
+        return None
+    envelope: dict[str, Any] = data
+    return envelope
+
+
+def _snapshot_shape_ok(data: dict[str, Any]) -> bool:
+    """True when *data* carries the four envelope fields with the right types."""
+    return (
+        isinstance(data.get("title"), str)
+        and isinstance(data.get("body"), str)
+        and isinstance(data.get("url"), str)
+        and isinstance(data.get("comments"), list)
+    )
+
+
 def fetch_issue_body(
     ticket_id: str, timeout: int, *, cwd: Path | None = None
 ) -> str | None:

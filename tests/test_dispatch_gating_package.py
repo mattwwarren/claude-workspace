@@ -4,7 +4,7 @@
 families. The split must keep three things true that the behavioral suite
 cannot see on its own:
 
-1. The historic import surface survives: every one of the 34 top-level names
+1. The import surface survives: every one of the 35 top-level names
    stays an attribute of ``cw.dispatch.gating``, and the 21 that
    ``cw.dispatch`` re-exports stay attributes of ``cw.dispatch``.
 2. Each name is *defined in* the module the owner table names, and every
@@ -41,7 +41,9 @@ _SSH_KEY = f"{_GATING}.ssh_key"
 _FRESHNESS = f"{_GATING}.freshness"
 _DISK_PRESSURE = f"{_GATING}.disk_pressure"
 
-# Owning module for each of the 34 historic top-level names of the flat
+# Owning module for each of the 35 top-level names of the flat ``gating.py``
+# (the 34 historic names plus ``_render_context_json_from_snapshot``, RFC 0019
+# T1 #3711)
 # ``gating.py``. Each extraction commit of the split edits only the entries it
 # moves.
 _OWNER: dict[str, str] = {
@@ -79,6 +81,7 @@ _OWNER: dict[str, str] = {
     "_update_host_tmp_latch": _DISK_PRESSURE,
     "_apply_disk_pressure_gate": _DISK_PRESSURE,
     "_invalidate_stale_context_json": _CONTEXT_JSON,
+    "_render_context_json_from_snapshot": _CONTEXT_JSON,
 }
 
 # Module-level ``str``/``int`` constants: they carry no ``__module__``, so their
@@ -168,8 +171,8 @@ def _owner(name: str) -> ModuleType:
 
 
 def test_owner_table_covers_the_historic_surface() -> None:
-    """The owner table names exactly the 34 historic top-level names."""
-    assert len(_OWNER) == 34
+    """The owner table names exactly the 35 top-level names."""
+    assert len(_OWNER) == 35
     assert _CONSTANTS.issubset(_OWNER)
     assert set(_DISPATCH_REEXPORTS).issubset(_OWNER)
 
@@ -234,7 +237,7 @@ def test_logger_name_is_defined_once_and_kept_out_of_all() -> None:
 
 
 def test_package_all_is_the_historic_surface() -> None:
-    """``__all__`` lists exactly the 34 historic names."""
+    """``__all__`` lists exactly the 35 top-level names."""
     assert sorted(cw.dispatch.gating.__all__) == sorted(_OWNER)
 
 

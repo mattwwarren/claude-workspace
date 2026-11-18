@@ -368,19 +368,19 @@ elements:
   intake.materialize-cw-context-json:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: not-applicable, reason: "a codex PLAN run live-fetches its ticket and needs no .cw/context.json"}
+      codex: {disposition: not-applicable, reason: "cw writes the snapshot in Python"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   intake.populating-comments:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: not-applicable, reason: "a codex PLAN run live-fetches its ticket and needs no .cw/context.json"}
+      codex: {disposition: not-applicable, reason: "cw writes the snapshot in Python"}
       opencode: {disposition: implemented, ref: {kind: prompt, stage: plan, needle: plan_missing_context}, note: "the read-failure reason, present in every tracker variant of the prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   intake.key-names-are-reader-contract:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: not-applicable, reason: "a codex PLAN run live-fetches its ticket and needs no .cw/context.json"}
+      codex: {disposition: not-applicable, reason: "cw writes the snapshot in Python"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3219}, note: "local runs IMPL only; this stage on aider is unbuilt"}
   intake.origin-sync-divergence-handling:

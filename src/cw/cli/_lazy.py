@@ -319,6 +319,11 @@ LAZY_COMMANDS: Final[dict[str, LazyCommand]] = {
             " or nothing when it is unset."
         ),
     ),
+    "ticket": LazyCommand(
+        "cw.cli.ticket",
+        "ticket_group",
+        "Snapshot a ticket into the digest-keyed store.",
+    ),
     "upgrade-workers": LazyCommand(
         "cw.cli.maintenance",
         "upgrade_workers",

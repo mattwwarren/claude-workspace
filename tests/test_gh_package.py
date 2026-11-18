@@ -46,7 +46,7 @@ _FILING = "cw.gh.filing"
 
 _PACKAGE_DIR = Path(cw.gh.__file__).parent
 
-# Owning submodule for every name on the package surface (82 names).
+# Owning submodule for every name on the package surface (83 names).
 _OWNER: dict[str, str] = {
     "FETCH_COMMENTS_TIMEOUT": _RUNNER,
     "_POST_COMMENT_TIMEOUT_SECONDS": _RUNNER,
@@ -62,6 +62,7 @@ _OWNER: dict[str, str] = {
     "AGENT_COMMENT_MARKER": _ISSUES,
     "fetch_issue_comments": _ISSUES,
     "fetch_issue_body": _ISSUES,
+    "fetch_issue_snapshot": _ISSUES,
     "_comment_has_marker": _ISSUES,
     "is_agent_authored": _ISSUES,
     "fetch_approved_plan_comment": _ISSUES,
@@ -234,7 +235,7 @@ def _package_files() -> list[Path]:
 
 def test_owner_table_covers_the_surface() -> None:
     """The owner and constant tables describe the same names."""
-    assert len(_OWNER) == 82
+    assert len(_OWNER) == 83
     assert _CONSTANTS.issubset(_OWNER)
 
 

@@ -1,5 +1,9 @@
 """The ``.claude/cw-context.json`` schema version and its history.
 
+Also the schema version of the sibling ``.cw/context.json`` (the ticket
+context file the stage docs read), which is a different file with its own
+version (``CW_TICKET_CONTEXT_SCHEMA_VERSION``, RFC 0019 T1 #3711).
+
 Extracted from ``cw.spawn`` (#3040) so the history can grow without pushing
 that module past the size ceiling. ``cw.spawn`` re-exports
 ``CW_CONTEXT_SCHEMA_VERSION`` and stamps it into every context it writes.
@@ -116,3 +120,11 @@ from __future__ import annotations
 #     null when the writer had no block to stamp. A context below 21 reads as
 #     no bindings block.
 CW_CONTEXT_SCHEMA_VERSION = 21
+
+# Schema version for ``.cw/context.json`` (the ticket context file, not the
+# ``.claude/cw-context.json`` above). History:
+# v1: the first stamped version (RFC 0019 T1, #3711). Written by
+#     cw.ticket_snapshot.render from the digest-keyed snapshot store. The
+#     #1794/#2700 heredoc form the stage docs used to write carried no
+#     schema_version, so a context below 1 reads as a pre-T1 hand-written file.
+CW_TICKET_CONTEXT_SCHEMA_VERSION = 1

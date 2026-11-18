@@ -103,6 +103,7 @@ from cw.stage_verification.plan_gates import (
     check_scope_tier,
     has_approval_evidence,
 )
+from cw.ticket_snapshot import record_snapshot_from_github
 from cw.tracker import TRACKER_GITHUB_ISSUES, TrackerClass, tracker_kind
 from cw.tracker_io import TrackerIoConfigError
 from cw.tracker_io._argv import validate_server_name
@@ -115,6 +116,26 @@ if TYPE_CHECKING:
     from cw.models import ClientConfig, TicketTask
 
 _log = logging.getLogger(__name__)
+
+
+def _record_ticket_snapshot(ticket_id: str, client_name: str, cwd: Path) -> None:
+    """Write the GitHub ticket snapshot for this PLAN run; non-fatal (RFC 0019 T1).
+
+    The PLAN prompt is still built from ``prefetch_ticket``. This is a separate
+    third ``gh`` call, so the stored snapshot can differ from the text the agent
+    saw if the issue changed between calls (named T1 limitation, source skew).
+    Sources for the log are the row (``task.ticket_id``, ``task.client``).
+    """
+    try:
+        record_snapshot_from_github(ticket_id, client_name, cwd)
+    except (CwError, OSError):
+        _log.warning(
+            "codex plan: ticket snapshot not recorded ticket_id=%s client=%s",
+            ticket_id,
+            client_name,
+            exc_info=True,
+        )
+
 
 NO_OP: Final = PLAN_NO_OP
 
@@ -271,6 +292,9 @@ class _Run:
                     PLAN_MISSING_CONTEXT_BLOCKER_REASON,
                     f"gh could not fetch ticket {self.task.ticket_id} body/comments",
                 )
+            _record_ticket_snapshot(
+                self.task.ticket_id, self.task.client, self.client.workspace_path
+            )
         try:
             return render_plan_prompt(
                 ticket_id=self.task.ticket_id,
