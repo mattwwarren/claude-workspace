@@ -106,11 +106,6 @@ def write_record(client: str, entry: OutboxEntry) -> None:
     _write(record_path(client, entry.id), entry.model_dump_json())
 
 
-def restore_record(client: str, entry: OutboxEntry) -> None:
-    """Restore a previously read record during a failed batch write."""
-    _write(record_path(client, entry.id), entry.model_dump_json())
-
-
 def read_body_bytes(client: str, entry_id: str) -> bytes:
     """The raw body bytes. Raises the raw ``OSError``; the caller classifies it."""
     return body_path(client, entry_id).read_bytes()

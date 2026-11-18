@@ -33,6 +33,7 @@ from cw.outbox._models import (
     MAX_DETAIL_CHARS,
     MAX_PART_CHARS,
     MAX_PARTS,
+    MAX_TRANSITIONS,
     OUTBOX_SCHEMA_VERSION,
     REASONS_BY_STATE,
     EnqueueResult,
@@ -42,6 +43,7 @@ from cw.outbox._models import (
     OutboxRecordError,
     OutboxRole,
     OutboxState,
+    OutboxTransition,
     OutboxTransitionError,
     OutboxValidationError,
     check_client,
@@ -57,6 +59,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from cw.models import LaunchMarker
+    from cw.outbox._models import ClaimantVerdict, TransitionInitiator
 
 
 class _Body(NamedTuple):
@@ -118,9 +121,56 @@ def _rebuild(entry: OutboxEntry, **updates: object) -> OutboxEntry:
     return OutboxEntry.model_validate(data)
 
 
+class _History(NamedTuple):
+    transitions: list[OutboxTransition]
+    dropped: int
+
+
+def _append_transition(
+    entry: OutboxEntry,
+    *,
+    to_state: OutboxState,
+    reason: OutboxReason | None,
+    detail: str | None,
+    initiator: TransitionInitiator,
+    now: datetime,
+    claimant: LaunchMarker | None,
+    claimant_verdict: ClaimantVerdict | None = None,
+) -> _History:
+    """*entry*'s transitions plus one item for this change, as a ring buffer.
+
+    The item travels in the same record write as the state it describes (22a),
+    so the audit trail needs no separate file. Past ``MAX_TRANSITIONS`` the
+    oldest items are dropped and counted in ``dropped``; the cap never refuses
+    or fails a transition.
+    """
+    item = OutboxTransition(
+        from_state=entry.state,
+        to_state=to_state,
+        reason=reason,
+        detail=detail,
+        at=now,
+        initiator=initiator,
+        claimant=claimant,
+        claimant_verdict=claimant_verdict,
+    )
+    items = [*entry.transitions, item]
+    overflow = max(0, len(items) - MAX_TRANSITIONS)
+    return _History(items[overflow:], entry.transitions_dropped + overflow)
+
+
 def _apply_claim(
     entry: OutboxEntry, *, claimant: LaunchMarker | None, now: datetime
 ) -> OutboxEntry:
+    history = _append_transition(
+        entry,
+        to_state=OutboxState.CLAIMED,
+        reason=entry.reason,
+        detail=None,
+        initiator="claim",
+        now=now,
+        claimant=claimant,
+    )
     return _rebuild(
         entry,
         state=OutboxState.CLAIMED,
@@ -128,6 +178,8 @@ def _apply_claim(
         claimant=claimant,
         claimed_at=now,
         claimed_from=entry.state,
+        transitions=history.transitions,
+        transitions_dropped=history.dropped,
         updated_at=now,
     )
 
@@ -140,6 +192,15 @@ def _apply_settle(
     detail: str | None,
     now: datetime,
 ) -> OutboxEntry:
+    history = _append_transition(
+        entry,
+        to_state=state,
+        reason=reason,
+        detail=detail,
+        initiator="settle",
+        now=now,
+        claimant=entry.claimant,
+    )
     return _rebuild(
         entry,
         state=state,
@@ -149,6 +210,8 @@ def _apply_settle(
         claimant=None,
         claimed_at=None,
         claimed_from=None,
+        transitions=history.transitions,
+        transitions_dropped=history.dropped,
         updated_at=now,
     )
 
@@ -218,6 +281,14 @@ def enqueue(
         state=OutboxState.PENDING,
         created_at=now,
         updated_at=now,
+        transitions=[
+            OutboxTransition(
+                from_state=None,
+                to_state=OutboxState.PENDING,
+                at=now,
+                initiator="enqueue",
+            )
+        ],
     )
     with _outbox_lock(client):
         existing = _existing_entry(client, entry.id)
@@ -291,6 +362,17 @@ def _recovered(entry: OutboxEntry, now: datetime) -> OutboxEntry:
     reason = (
         OutboxReason.CLAIM_RECOVERED if target is OutboxState.PENDING else entry.reason
     )
+    history = _append_transition(
+        entry,
+        to_state=target,
+        reason=reason,
+        detail=None,
+        initiator="recovery",
+        now=now,
+        claimant=entry.claimant,
+        # Recovery runs only on OWNER_GONE (see _recover_locked).
+        claimant_verdict="owner_gone",
+    )
     return _rebuild(
         entry,
         state=target,
@@ -299,6 +381,8 @@ def _recovered(entry: OutboxEntry, now: datetime) -> OutboxEntry:
         claimant=None,
         claimed_at=None,
         claimed_from=None,
+        transitions=history.transitions,
+        transitions_dropped=history.dropped,
         updated_at=now,
     )
 
@@ -335,28 +419,16 @@ def _body_intact(client: str, entry: OutboxEntry) -> bool:
     )
 
 
-def _write_claim_batch(
-    client: str, changes: list[tuple[OutboxEntry, OutboxEntry]]
-) -> None:
-    """Write claim results, restoring every attempted record on failure."""
-    attempted: list[OutboxEntry] = []
-    try:
-        for original, changed in changes:
-            attempted.append(original)
-            layout.write_record(client, changed)
-    except Exception:
-        for original in reversed(attempted):
-            layout.restore_record(client, original)
-        raise
-
-
 def _claim_locked(
     client: str, *, state: OutboxState, limit: int, claimant: LaunchMarker | None
 ) -> list[OutboxEntry]:
     """Claim up to *limit* oldest entries in *state*. Lock held.
 
-    Verify-then-claim: every body is verified before any record is written, so
-    a transient read error raises with nothing written. A missing or corrupt
+    Each entry is its own atomic record write (22d), so the transition item and
+    the state change commit together per entry. An entry whose write or body
+    read fails is left exactly as it was. When an earlier entry already
+    committed, the committed claims are returned and the failure stops the
+    batch; when nothing committed, the failure propagates. A missing or corrupt
     body is settled ``failed/body_unreadable`` by this store (22b) and does not
     count toward *limit*; the claim continues with the next entry.
     """
@@ -364,26 +436,24 @@ def _claim_locked(
         (e for e in layout.scan_entries(client) if e.state is state),
         key=lambda e: (e.created_at, e.id),
     )
-    selected: list[OutboxEntry] = []
-    unreadable: list[OutboxEntry] = []
-    for entry in candidates:
-        if len(selected) == limit:
-            break
-        if _body_intact(client, entry):
-            selected.append(entry)
-        else:
-            unreadable.append(entry)
-    # Build every record in memory first, so a failure building one raises with
-    # nothing written and no live claim is stranded by a partial batch.
     now = _now()
-    claimed = [_apply_claim(entry, claimant=claimant, now=now) for entry in selected]
-    settled = [
-        _settled_unreadable(entry, claimant=claimant, now=now) for entry in unreadable
-    ]
-    changes = list(zip(selected, claimed, strict=True)) + list(
-        zip(unreadable, settled, strict=True)
-    )
-    _write_claim_batch(client, changes)
+    claimed: list[OutboxEntry] = []
+    for entry in candidates:
+        if len(claimed) == limit:
+            break
+        try:
+            if _body_intact(client, entry):
+                record = _apply_claim(entry, claimant=claimant, now=now)
+                layout.write_record(client, record)
+                claimed.append(record)
+            else:
+                layout.write_record(
+                    client, _settled_unreadable(entry, claimant=claimant, now=now)
+                )
+        except OutboxRecordError:
+            if not claimed:
+                raise
+            break
     return claimed
 
 

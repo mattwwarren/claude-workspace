@@ -43,6 +43,11 @@ MAX_MARKER_CHARS = 128
 MAX_TICKET_CHARS = 64
 MAX_PRODUCER_CHARS = 64
 MAX_DETAIL_CHARS = 500
+# The audit trail lives inside the entry record (operator resolution 22a): one
+# item per state change, kept as a ring buffer of at most MAX_TRANSITIONS items.
+# Past the cap the oldest item is dropped and ``transitions_dropped`` counts it,
+# so truncation is visible and never blocks a transition (22a).
+MAX_TRANSITIONS = 32
 ENTRY_ID_LENGTH = 32
 DEFAULT_CLAIM_LIMIT = 1
 SHA256_HEX_LENGTH = 64
@@ -230,7 +235,28 @@ def _check_spans(parts: list[tuple[int, int]], body_bytes: int) -> None:
         raise ValueError(msg)
 
 
+TransitionInitiator = Literal["enqueue", "claim", "settle", "recovery"]
 ClaimantVerdict = Literal["in_flight", "owner_gone", "unknown"]
+
+
+class OutboxTransition(BaseModel):
+    """One audit item inside the entry record: a single persisted state change.
+
+    Written in the same atomic record write as the state it describes, so a
+    change never commits without its item and an item never exists without its
+    change. ``claim_token`` is deliberately absent: it is a capability.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    from_state: OutboxState | None
+    to_state: OutboxState
+    reason: OutboxReason | None = None
+    detail: str | None = Field(default=None, max_length=MAX_DETAIL_CHARS)
+    at: AwareDatetime
+    initiator: TransitionInitiator
+    claimant: LaunchMarker | None = None
+    claimant_verdict: ClaimantVerdict | None = None
 
 
 class OutboxEntry(BaseModel):
@@ -262,6 +288,13 @@ class OutboxEntry(BaseModel):
     # Display only. No decision may compare it against a threshold (ADR-0014).
     claimed_at: AwareDatetime | None = None
     claimed_from: OutboxState | None = None
+    # Bounded audit trail, oldest first; the last item always describes the
+    # current state (checked below).
+    transitions: list[OutboxTransition] = Field(
+        min_length=1, max_length=MAX_TRANSITIONS
+    )
+    # Items the ring buffer has dropped from the front of ``transitions``.
+    transitions_dropped: int = Field(default=0, ge=0)
 
     def _check_claim_fields(self) -> None:
         claimed = self.state is OutboxState.CLAIMED
@@ -292,6 +325,10 @@ class OutboxEntry(BaseModel):
         self._check_claim_fields()
         if self.reason is not None and self.reason not in REASONS_BY_STATE[self.state]:
             msg = f"reason {self.reason.value} is not allowed in state {self.state}"
+            raise ValueError(msg)
+        last = self.transitions[-1]
+        if last.to_state is not self.state or last.reason != self.reason:
+            msg = "the last transition must describe the entry's current state"
             raise ValueError(msg)
         return self
 

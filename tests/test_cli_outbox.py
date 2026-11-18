@@ -22,6 +22,7 @@ from cw.outbox import (
     OutboxReason,
     OutboxRole,
     OutboxState,
+    OutboxTransition,
     claim,
     enqueue,
 )
@@ -93,13 +94,25 @@ def _json(*args: str) -> dict[str, Any]:
 
 
 def _force_delivered(entry: OutboxEntry) -> None:
-    """Rewrite *entry*'s record as delivered (seeding only; the store is bypassed)."""
+    """Rewrite *entry*'s record as delivered (seeding only; the store is bypassed).
+
+    The record is built through the model, so its last transition describes the
+    delivered state and the model's consistency check accepts it.
+    """
     path = state_dir() / "outbox" / entry.client / f"{entry.id}.json"
+    delivered = OutboxTransition(
+        from_state=entry.state,
+        to_state=OutboxState.DELIVERED,
+        reason=OutboxReason.POSTED,
+        at=entry.updated_at,
+        initiator="settle",
+    )
     seeded = OutboxEntry.model_validate(
         {
             **entry.model_dump(),
             "state": OutboxState.DELIVERED,
             "reason": OutboxReason.POSTED,
+            "transitions": [*entry.transitions, delivered],
         }
     )
     path.write_text(seeded.model_dump_json(), encoding="utf-8")
