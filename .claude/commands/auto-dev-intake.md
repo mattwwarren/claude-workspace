@@ -17,45 +17,36 @@ Stage 0 runs first in every pipeline invocation, interactive and headless. It re
 <!-- el: intake.tracker-resolution -->
 ## Tracker Resolution (read first — before Stage 0)
 
-This pipeline is **tracker-agnostic**; the prose below is written in Linear
-terms for historical reasons. Resolve the active tracker once per invocation
-and substitute its operations everywhere.
+Tracker operations in this pipeline are `tickets` role operations. The active
+tracker and how to call each operation are stated once, in the `Bindings` block:
+the text between `=== BEGIN CW-INJECTED: Bindings ===` and
+`=== END CW-INJECTED: Bindings ===`. In a codex, opencode or local prompt it is
+inlined; in a claude-native session read it from the `bindings_block` key of
+`.claude/cw-context.json`. Where this pipeline says "post to the `tickets` role",
+"fetch the ticket" or "list comments", use the get-issue operation for the fetch
+and the list-comments operation for comments, or the create-comment operation
+for a post, as the block names them. If the block names no tool for an
+operation, or a call fails, emit the blocked reason the block names; do not
+improvise. When no block is present (an interactive run outside cw), resolve
+the tracker from `.claude/project-config.yaml` `tracking.primary.system`
+(`github-issues` or `linear`; default `linear`).
 
-**Resolve the tracker:** read `.claude/project-config.yaml` →
-`tracking.primary.system`. Recognized values: `github-issues` or `linear`;
-absent file or missing key defaults to `linear`. Repos tracking work in
-GitHub Issues MUST set `github-issues`.
-
-**Operation mapping** — wherever this document says "Linear", `get_issue`,
-`list_comments`, or "post to the Linear ticket", perform the active tracker's
-equivalent:
-
-| Operation | `linear` | `github-issues` |
-|-----------|----------|-----------------|
-| Fetch ticket body | `get_issue(<id>)` | `gh issue view <n> --json title,body,state,url,comments` |
-| Fetch ticket comments | `list_comments(<id>)` | `gh issue view <n> --json comments` |
-| Post a comment | Linear create-comment | `gh issue comment <n> --body <text>` (or `--body-file`) |
-| Read plan/marker comments | scan Linear comments | scan `gh issue view <n> --json comments` (markers are HTML comments in the body, identical syntax) |
-| Close on ship | Linear status → Done | `gh issue close <n>` — or rely on the PR's `Closes #<n>` trailer |
-| Batch select (`--cycle`/`--label`/…) | `list_issues(filters)` | `gh issue list --json number,title,labels,state [--label …]` |
-
-**`github-issues` mode — hard rules:**
-- A bare integer argument (e.g. `403`) is a **GitHub issue number**. It is NOT
-  free text and NOT a Linear ID. Resolve it with `gh issue view <n>`.
-- **NEVER call the Linear MCP** (`get_issue` / `list_issues` /
-  `mcp__plugin_linear_*` / Linear authenticate). If you are about to authorize
-  Linear, you are in the wrong tracker mode — stop and use `gh`. Headless, the
-  Linear OAuth prompt cannot be answered and the session stalls silently until
-  reaped (2026-05-30 fanout-cascade RCA).
-- All downstream "post to Linear" / "post the plan/ambiguities/premises to the
-  ticket" instructions operate on the GitHub issue via `gh issue comment <n>`.
+**When the Bindings block names `github-issues` or `cli: gh` — hard rules:**
+- A bare integer argument such as `403` is a **GitHub issue number**. It is NOT
+  free text and NOT a Linear ID. Resolve it with the get-issue operation.
+- Use only `gh`. Never authorize or call a tracker MCP tool or its authenticate
+  flow: if you are about to, you are in the wrong tracker mode, so stop and use
+  `gh`. Headless, the OAuth prompt cannot be answered and the session stalls
+  silently until reaped (2026-05-30 fanout-cascade RCA).
+- Downstream "post to the `tickets` role" instructions use the create-comment
+  operation on the GitHub issue.
 - Tool output or findings text (review, plan and finalize findings, the
-  convergence history comment) is never posted with the raw op above: it goes
-  through `cw post-comment`, per the *Tracker post seam (#2810)* in
-  `.claude/commands/auto-dev.md`, which redacts it first. The raw op stays for
+  convergence history comment) is never posted with the raw create-comment
+  operation: it goes through `cw post-comment`, per the *Tracker post seam (#2810)*
+  in `.claude/commands/auto-dev.md`, which redacts it first. The raw op stays for
   the seam's allow-listed posts.
   Plan signoff markers (`<!-- plan-quality-reviewed -->` etc.) are HTML comments
-  embedded in the issue comment body, exactly as in the Linear flow.
+  embedded in the issue comment body, exactly as in any other tracker flow.
 - `gh` runs against the repo at the worktree's `origin` remote — confirm with
   `gh repo view --json nameWithOwner` if ambiguous.
 
@@ -100,25 +91,28 @@ improvise the wait cadence or the sentinel from this summary alone.
 
 ## Stage 0: Ticket Intake
 
-First resolve the active tracker per **Tracker Resolution** above; the parse
-rules below are tracker-aware.
+First read the tracker pointer in **Tracker Resolution** above (the `Bindings`
+block); the parse rules below are tracker-aware.
 
 1. Parse `$ARGUMENTS`:
    - **Ticket ID** → single-ticket mode, skip selection. What counts as an ID is
      tracker-dependent: `linear` takes an issue ID like `PROJ-1234`;
      `github-issues` takes a **bare integer** like `403` (or `#403`) — do NOT
-     treat that as free text, and do NOT query Linear for it.
+     treat that as free text, and do NOT call a tracker MCP tool for it.
    - **Filter flags** (`--cycle`, `--project`, `--label`, `--team`, `--state`, `--assignee`, `--priority`) → batch mode
    - **Free text** (no ID pattern, no flags) → use as description directly, no tracker lookup, no existing plan
    - **Mode flag** `--headless` → suppress all AskUserQuestion calls; apply the Headless Mode gate-collapse table at every downstream decision point. Independent of the input forms above (batch mode in headless is undefined).
 
 2. **Parse constraint flags** (used by the `/auto-debt` alias): `--scope-limit small` (reject Large tickets), `--branch-prefix <prefix>` (override the default `dev` prefix), `--forbidden <comma-separated areas>` (hard-reject tickets touching those areas).
 
-3. **Single-ticket mode:** Fetch the issue via the **active tracker's** fetch op
-   (`get_issue(<id>)` for `linear`; `gh issue view <n> --json title,body,state,url,comments`
-   for `github-issues`, whose single call carries the comments too). For `linear`,
-   `list_comments(<id>)` is a **mandatory op that MUST run before Step 0d** so the
-   comments are in hand before context is materialized. Proceed to Stage 1.
+3. **Single-ticket mode:** Fetch the issue via the get-issue operation of the
+   `tickets` role. On `github-issues` that is
+   `gh issue view <n> --json title,body,state,url,comments` (`cli: gh`), whose single call
+   carries the comments too; Step 0d needs the `state`, `url` and comment
+   `author`/`createdAt` that the block's own read line omits. For a tracker whose
+   get-issue result has no comments, the list-comments operation is a **mandatory
+   op that MUST run before Step 0d** so the comments are in hand before context is
+   materialized. Proceed to Stage 1.
 
    **Step 3 fetch-failure handling (fatal, #1156 — RFC 0011 A2):** a fetch that
    exits non-zero or returns error text instead of issue data is rare — the
@@ -207,8 +201,8 @@ CWCTXEOF
 
 <!-- el: intake.populating-comments -->
 **Populating `comments` (from a real fetch, never model initiative):** the `comments` array MUST be filled from an actual tracker fetch — never guessed, never left `[]` by default. **Each entry is an object, not a bare body string (#1794):** map the tracker's fields onto `{"author": ..., "created_at": ..., "body": ...}` **on write** — `github-issues` gives `author.login` → `author` and `createdAt` → `created_at`; `linear` gives the comment's user identity and creation timestamp. The timestamp is load-bearing: Stage 2's Pre-Stage Detector Guard compares the newest comment's `created_at` against branch HEAD's commit date to decide whether an `Auto-Dev-Stage: impl-complete` trailer is still authoritative (`.claude/scripts/check_impl_guard_staleness.py`), and a timestamp-less comment is invisible to that check.
-- **`github-issues` mode:** use the `comments` returned by the Step 3 fetch (`gh issue view <n> --json title,body,state,url,comments`), which already carries `createdAt` and `author.login`; do not re-fetch.
-- **`linear` mode:** `list_comments(<id>)` is a **mandatory op that MUST run before Step 0d** — run it explicitly and populate `comments` from its result. Do NOT rely on model initiative to decide whether comments are worth fetching.
+- **`github-issues` (`cli: gh`) mode:** use the `comments` returned by the Step 3 fetch (`gh issue view <n> --json title,body,state,url,comments`), which already carries `createdAt` and `author.login`; do not re-fetch.
+- **MCP-tracker mode (for example `linear`):** the list-comments operation is a **mandatory op that MUST run before Step 0d** — run it explicitly and populate `comments` from its result. Do NOT rely on model initiative to decide whether comments are worth fetching.
 
 <!-- el: intake.key-names-are-reader-contract -->
 **Key names are a reader contract (#2700).** `ticket_title` and `ticket_body` are read by two Python readers (`_load_ticket_context` in `src/cw/codex_review/_context/core.py` and `build_task_message` in `src/cw/local_runner.py`), pinned by `tests/test_auto_dev_intake_context_schema.py`; a rename must change the heredoc, both readers, and that test together. `comments` entries written here are always `{author, created_at, body}` — GitHub's verbatim `createdAt`/`author.login` shape appears only in the live-fetched `.cw/impl-comments.json`.
@@ -223,7 +217,7 @@ failed; do not improvise the event name or payload from memory.
 
 Stamp `materialized_by_session` with the current `session_id` (from `.claude/cw-context.json`). This is what makes the idempotency guard below requeue-safe.
 
-**Idempotency (requeue-safe):** skip re-fetch and re-write **only** if ALL of the following hold: `.cw/context.json` exists, its `ticket_id` matches, AND its `materialized_by_session` equals the current `session_id` (from `.claude/cw-context.json`). Otherwise — a different/missing `materialized_by_session` means a **new session is running against a reused worktree (i.e. a `requeue`)** — you MUST re-fetch the ticket (`gh issue view <n> --json title,body,comments`) and **overwrite** `.cw/context.json` so newly-added operator comments and resolutions reach this run. Read the existing file and compare both fields before deciding to skip.
+**Idempotency (requeue-safe):** skip re-fetch and re-write **only** if ALL of the following hold: `.cw/context.json` exists, its `ticket_id` matches, AND its `materialized_by_session` equals the current `session_id` (from `.claude/cw-context.json`). Otherwise — a different/missing `materialized_by_session` means a **new session is running against a reused worktree (i.e. a `requeue`)** — you MUST re-fetch the ticket with the get-issue operation and **overwrite** `.cw/context.json` so newly-added operator comments and resolutions reach this run. Read the existing file and compare both fields before deciding to skip.
 
 **Changing this idempotency guard, or debugging a stale `.cw/context.json`,** is
 rare — the rationale (#837) and the `.cw/context.json` vs `.claude/cw-context.json`

@@ -18,7 +18,7 @@ Scope determines which approvals are automatic vs manual.
 
 ## Tracker Resolution
 
-**Delegated to `auto-dev-intake.md`.** The tracker resolution logic (project-config.yaml lookup, operation mapping table, github-issues hard rules) is defined once in `.claude/commands/auto-dev-intake.md`. Read and follow those instructions. Do not copy or paraphrase the logic here.
+**Delegated to `auto-dev-intake.md`.** Tracker operations are `tickets` role operations; which tracker is active and how to call each operation is stated once in the `Bindings` block, as `.claude/commands/auto-dev-intake.md` (Tracker Resolution) explains, along with the project-config fallback and the `github-issues` hard rules. Read and follow those instructions. Do not copy or paraphrase the logic here.
 
 ---
 
@@ -111,9 +111,9 @@ The rows below define the deterministic headless action for every interactive ga
 | Stage / gate | Headless behavior |
 |---|---|
 | Pre-flight, local main not in sync with origin/main | EXIT `blocked` with `blocker.reason: "local_main_diverged_from_origin"`, `retry_eligible: true`, `next_actions: ["sync_local_main"]` (see Pre-flight section) |
-| S1 plan, plan in Linear | AUTO-SKIP plan-approval question (ambiguity scan still runs) |
-| S1 plan, no Linear plan, small | Generate → AUTO-APPROVE (ambiguity scan still runs) |
-| S1 plan, no Linear plan, large | Generate → EXIT `plan_pending_approval` through the consolidated park (#1650): one `## Pending Verification Scan` comment carrying advisory Step-1f findings, `### Approval requested`, and the full draft; draft persisted to `.cw/plan-draft.md`; no branch |
+| S1 plan, plan on the ticket | AUTO-SKIP plan-approval question (ambiguity scan still runs) |
+| S1 plan, no ticket plan, small | Generate → AUTO-APPROVE (ambiguity scan still runs) |
+| S1 plan, no ticket plan, large | Generate → EXIT `plan_pending_approval` through the consolidated park (#1650): one `## Pending Verification Scan` comment carrying advisory Step-1f findings, `### Approval requested`, and the full draft; draft persisted to `.cw/plan-draft.md`; no branch |
 | S1 ambiguity scan, no ambiguities | AUTO-CONTINUE |
 | S1 ambiguity scan, ambiguities found (parked) | EXIT `ambiguities_pending_resolution` through the consolidated park (#1650): parked questions + advisory Step-1f findings (+ `### Approval requested` when Large) + draft, ONE comment; draft persisted; no branch |
 | S1 ambiguity scan, non-empty `PREMISES TO VERIFY` (unverified) | EXIT `premises_pending_verification` through the consolidated park (#1650): unverified premises (+ parked ambiguities) + advisory Step-1f findings + draft, ONE comment; draft persisted; no branch — verification is investigation work for the orchestrator, not a plan revision |
@@ -477,8 +477,7 @@ history.
   corrupt its `<!-- auto-dev-comment-approval -->` token line and `Recommendation:` grammar;
 - the voided-findings comment (`auto-dev-review.md` Checkpoint 3a step 5): its
   machine-parsed `VOIDED-REVIEW-FINDINGS` JSON block does not survive redaction (a rewritten
-  path changes the void's content fingerprint, and a `token:` shape breaks the JSON);
-- the generic tracker-operation mapping in `auto-dev-intake.md`.
+  path changes the void's content fingerprint, and a `token:` shape breaks the JSON).
 
 **Known unrouted in-package posters.** `codex_review_persist._post_review_comment`
 (`src/cw/codex_review_persist.py`) and `cli/dev_queue/resolve.py` post agent, tool or
@@ -786,7 +785,7 @@ Two independent axes control approval automation.
 
 | Condition | Plan Approval Checkpoint |
 |-----------|----------------|
-| Plan found in Linear issue (or issue description is sufficient) | AUTO-SKIP — pre-approved by authoring it |
+| Plan found on the ticket (or issue description is sufficient) | AUTO-SKIP — pre-approved by authoring it |
 | No plan / partial plan only | AskUserQuestion |
 
 <!-- el: orch.marker-plan-signoff -->
@@ -899,11 +898,11 @@ The pipeline records deferred review findings in the PR body (Stage 4 Step 4d) b
 
 2. **Extract** the `DEFERRED-REVIEW-FINDINGS` block from each candidate's body (the content between the `<!-- DEFERRED-REVIEW-FINDINGS` and `DEFERRED-REVIEW-FINDINGS -->` sentinels). No block → nothing to file; apply the harvested label (step 5) anyway so the PR is skipped next sweep.
 
-3. **Resolve the tracker** for the merged PR's repo from its `.claude/project-config.yaml` (per **Tracker Resolution**). Deferred tickets land in the **code's own repo** — `linear` or `github-issues` as that repo configures, not a central backlog.
+3. **Resolve the tracker** for the merged PR's repo (per **Tracker Resolution**: the `Bindings` block when present, else that repo's `.claude/project-config.yaml`). Deferred tickets land in the **code's own repo** — `linear` or `github-issues` as that repo configures, not a central backlog.
 
 <!-- el: orch.for-each-finding-dedup-then -->
 4. **For each finding — dedup, then file:** skip any entry that carries a `ticket:` line; `cw review adjudicate` already filed (or recorded) its debt ticket at deferral time (#3041, RFC 0017 (pending merge)). Several entries can name the same `ticket:` (cw lists a queue ticket's findings in one `review-debt` roll-up issue); that is one filed issue, not a duplicate.
-   - **Dedup:** search the tracker's open issues for the same summary/file before filing (prior-art culture — do not create duplicates). `gh issue list --search "<summary> in:title"` for `github-issues`; the `search_issues` op for `linear`. A plausible match → skip filing, log `deferred finding already tracked: <summary>`.
+   - **Dedup:** search the tracker's open issues for the same summary/file before filing (prior-art culture — do not create duplicates) with the tracker's own search (a search is not a `tickets` role operation). A plausible match → skip filing, log `deferred finding already tracked: <summary>`.
    - **File** the ticket against that repo with a `review-debt` label: title = the finding summary, body = file + rationale + a backlink to the source PR.
 
 5. **Mark harvested:** apply the `review-debt-harvested` label (`REVIEW_DEBT_HARVESTED_LABEL`) so the next sweep skips the PR:
