@@ -36,12 +36,12 @@ if TYPE_CHECKING:
     from cw.auto_dev_result import AutoDevResult, Health, Review
     from cw.codex_fix_loop.convergence import _OpenFindingKey
     from cw.codex_fix_loop.coverage import DeltaGap
-    from cw.codex_fix_loop.fence import FenceBreach
     from cw.codex_fix_loop.snapshot import _PersistedSnapshot
     from cw.executor_diagnostics import ExecutorFailureCategory
     from cw.models import TicketTask
     from cw.review_convergence import UnreadFindings
     from cw.review_findings import AcceptedFinding, ReviewVerdict
+    from cw.stage_verification.fence import FenceBreach
 
 _log = logging.getLogger(__name__)
 

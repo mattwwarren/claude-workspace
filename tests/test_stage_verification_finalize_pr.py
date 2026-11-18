@@ -1,9 +1,10 @@
-"""Tests for cw.codex_finalize._pr: detector guard, bind, probe, push, create (#3062).
+"""Tests for cw.stage_verification.finalize_pr: detector guard, bind, probe, push,
+    create (#3062).
 
 ``gh`` is a scripted :class:`FakeGhCli`; git runs for real in sandboxed repos
 with a bare origin through ``tests/_git_sandbox``. The default-branch probe is
 the imported C2 ``probe_default_branch``, whose seam is
-``cw.codex_impl._feedback.probe_default_merge``.
+``cw.stage_verification.impl_feedback.probe_default_merge``.
 """
 
 from __future__ import annotations
@@ -17,8 +18,9 @@ from unittest.mock import patch
 
 import pytest
 
-from cw.codex_finalize import _pr
-from cw.codex_finalize._pr import (
+from cw.merge_probe import MergeProbe
+from cw.stage_verification import finalize_pr as _pr
+from cw.stage_verification.finalize_pr import (
     BEHIND_FRICTION,
     PROBE_UNAVAILABLE,
     BoundPr,
@@ -31,15 +33,16 @@ from cw.codex_finalize._pr import (
     probe_default,
     push_ahead,
 )
-from cw.codex_finalize._result import (
+from cw.stage_verification.finalize_result import (
     IMPL_NOT_PUSHED,
     MERGE_CONFLICT_POST_PUSH,
     PR_ALREADY_TERMINAL,
     PUSH_AUTH_FAILED,
     FinalizeBlock,
 )
-from cw.codex_impl._feedback import PROBE_UNAVAILABLE as C2_PROBE_UNAVAILABLE
-from cw.merge_probe import MergeProbe
+from cw.stage_verification.impl_feedback import (
+    PROBE_UNAVAILABLE as C2_PROBE_UNAVAILABLE,
+)
 from tests._codex_review_helpers import fresh_impl_repo
 from tests._shared.git_repos import git_in
 from tests._tool_fakes import FakeGhCli
@@ -52,7 +55,7 @@ _REPO = "o/r"
 _NUMBER = 7
 _URL = f"https://github.com/{_REPO}/pull/{_NUMBER}"
 _HEAD = "a" * 40
-_PROBE = "cw.codex_impl._feedback.probe_default_merge"
+_PROBE = "cw.stage_verification.impl_feedback.probe_default_merge"
 
 
 @pytest.fixture
@@ -372,7 +375,9 @@ class TestPushAhead:
         error = subprocess.CalledProcessError(
             128, "git push", stderr="fatal: Authentication failed for 'x'"
         )
-        with patch("cw.codex_finalize._pr.push_and_verify_head", side_effect=error):
+        with patch(
+            "cw.stage_verification.finalize_pr.push_and_verify_head", side_effect=error
+        ):
             block = push_ahead(worktree, branch=_BRANCH, head_sha=_HEAD)
         assert block is not None
         assert block.reason == PUSH_AUTH_FAILED
@@ -390,7 +395,8 @@ class TestPushAhead:
 
     def test_an_oserror_is_impl_not_pushed(self, worktree: Path) -> None:
         with patch(
-            "cw.codex_finalize._pr.push_and_verify_head", side_effect=OSError("boom")
+            "cw.stage_verification.finalize_pr.push_and_verify_head",
+            side_effect=OSError("boom"),
         ):
             block = push_ahead(worktree, branch=_BRANCH, head_sha=_HEAD)
         assert block is not None
@@ -409,7 +415,7 @@ class TestPushAhead:
         git_in(worktree, "checkout", "-b", "dev/elsewhere")
         head = _commit(worktree)
         before = git_in(worktree, "ls-remote", "origin")
-        with patch("cw.codex_finalize._pr.push_and_verify_head") as push:
+        with patch("cw.stage_verification.finalize_pr.push_and_verify_head") as push:
             block = push_ahead(worktree, branch=_BRANCH, head_sha=head)
         assert block is not None
         assert block.reason == "external_state_block"

@@ -13,11 +13,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from cw.auto_dev_result import SCOPE_TIER_LARGE
-from cw.codex_plan._result import (
-    PLAN_APPROVAL_NEXT_ACTIONS,
-    PLAN_PENDING_APPROVAL,
-    PLAN_STAGE_COMPLETE,
-)
 from cw.plan_files import (
     _SCOPE_TIER_MARKER,
     _strip_fenced_lines,
@@ -28,6 +23,12 @@ from cw.plan_files import (
 if TYPE_CHECKING:
     from cw.auto_dev_result import AutoDevResult
     from cw.models import TicketTask
+
+# PLAN status vocabulary the gate transitions read. Defined here, below the codex
+# package, so ``cw.codex_plan._result`` imports them back (#3710).
+PLAN_STAGE_COMPLETE: Final = "stage_complete"
+PLAN_PENDING_APPROVAL: Final = "plan_pending_approval"
+PLAN_APPROVAL_NEXT_ACTIONS: Final = ("user_decide_plan_approval",)
 
 #: The plan text cw would write is missing or empty.
 CODEX_PLAN_ARTIFACT_MISSING: Final = "codex_plan_artifact_missing"

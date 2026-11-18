@@ -23,7 +23,19 @@ from typing import TYPE_CHECKING, Final
 
 from cw._git import git_clean_env, git_output
 from cw.auto_dev_result.schema._vocab import EXTERNAL_STATE_BLOCKER_REASON
-from cw.codex_finalize._ci_evidence import (
+from cw.codex_fix_loop.gates import (
+    GateFailure,
+    GatePlan,
+    GateScope,
+    plan_cycle_gates,
+    run_cycle_gates,
+)
+from cw.codex_fix_loop.guard_script import find_guard_script, script_marker_ok
+from cw.codex_review import CODEX_FIX_DIRTY_START
+from cw.dev_queue.gates import APPROVAL_PARK_FRICTION_PREFIX, STALE_TIP_FRICTION_PREFIX
+from cw.plan_files import resolve_review_scope_tier
+from cw.stage_verification.baseline import DirtyStart, capture_cycle_baseline
+from cw.stage_verification.finalize_ci_evidence import (
     CiContext,
     DeferredGate,
     _HoldReleaseError,
@@ -31,7 +43,7 @@ from cw.codex_finalize._ci_evidence import (
     consult_create,
     consult_reuse,
 )
-from cw.codex_finalize._result import (
+from cw.stage_verification.finalize_result import (
     AGENT_BLOCK,
     CODEX_MUST_FIX_FINDINGS,
     OPERATOR_UNAVAILABLE,
@@ -43,19 +55,7 @@ from cw.codex_finalize._result import (
     FinalizeFacts,
     finalize_approval_park,
 )
-from cw.codex_fix_loop.baseline import DirtyStart, capture_cycle_baseline
-from cw.codex_fix_loop.gates import (
-    GateFailure,
-    GatePlan,
-    GateScope,
-    plan_cycle_gates,
-    run_cycle_gates,
-)
-from cw.codex_fix_loop.guard_script import find_guard_script, script_marker_ok
-from cw.codex_fix_loop.posted_text import redact_and_cap
-from cw.codex_review import CODEX_FIX_DIRTY_START
-from cw.dev_queue.gates import APPROVAL_PARK_FRICTION_PREFIX, STALE_TIP_FRICTION_PREFIX
-from cw.plan_files import resolve_review_scope_tier
+from cw.stage_verification.posted_text import redact_and_cap
 
 if TYPE_CHECKING:
     from pathlib import Path

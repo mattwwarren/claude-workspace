@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw.codex_fix_loop import gate_autofix
-from cw.codex_fix_loop.baseline import staged_cycle_tree
 from cw.codex_fix_loop.gate_autofix import (
     changed_paths,
     declared_autofixes,
@@ -26,6 +25,7 @@ from cw.codex_fix_loop.gate_autofix import (
     revert_to_tree,
 )
 from cw.review_findings import REVIEW_VERDICT_JSON_RELATIVE_PATH
+from cw.stage_verification.baseline import staged_cycle_tree
 from tests._shared.git_repos import (
     commit_tracked_file,
     git_in,

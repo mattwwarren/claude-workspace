@@ -17,19 +17,19 @@ from typing import TYPE_CHECKING, Final
 
 from cw._git import git_clean_env
 from cw.auto_dev_result.schema._vocab import EXTERNAL_STATE_BLOCKER_REASON
-from cw.codex_finalize._pr import PR_MERGED, PR_OPEN
-from cw.codex_finalize._result import (
-    AUTOMERGE_NOT_ARMED,
-    OPERATOR_UNAVAILABLE,
-    FinalizeBlock,
-)
-from cw.codex_fix_loop.posted_text import redact_and_cap
 from cw.gh import fetch_pr_head, fetch_required_failing_checks
 from cw.reconcile.review_recipes.repair_git import (
     RepairStopError,
     _probe_arm_script,
     _run_arm,
 )
+from cw.stage_verification.finalize_pr import PR_MERGED, PR_OPEN
+from cw.stage_verification.finalize_result import (
+    AUTOMERGE_NOT_ARMED,
+    OPERATOR_UNAVAILABLE,
+    FinalizeBlock,
+)
+from cw.stage_verification.posted_text import redact_and_cap
 
 if TYPE_CHECKING:
     from pathlib import Path

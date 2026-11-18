@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.codex_fix_loop.fence import LEFT_STAGED_HINT
 from cw.codex_fix_loop.hook_failure import (
     CommitHookFailedError,
     as_hook_failure,
@@ -17,8 +16,9 @@ from cw.codex_fix_loop.hook_failure import (
     installed_hook,
     summarize_hook_output,
 )
-from cw.codex_fix_loop.posted_text import TRUNCATION_MARKER
 from cw.codex_review import CODEX_FIX_HOOK_FAILED
+from cw.stage_verification.fence import LEFT_STAGED_HINT
+from cw.stage_verification.posted_text import TRUNCATION_MARKER
 from tests._codex_review_helpers import _install_pre_commit_hook, _write
 from tests._shared.git_repos import git_in
 

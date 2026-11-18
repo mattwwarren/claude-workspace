@@ -24,7 +24,7 @@ revert guard always runs.
 
 Since #2633 the fence measures the cycle from its own start: the caller
 measures the cycle's touched paths once against the clean-start baseline
-(:mod:`cw.codex_fix_loop.baseline`) and hands them in. This module also builds
+(:mod:`cw.stage_verification.baseline`) and hands them in. This module also builds
 the breach records for the other guards that park a cycle uncommitted: the
 dirty-start refusal, the sensitive-path scope violation and the staged-set
 mismatch.
@@ -42,6 +42,9 @@ from cw.codex_review import (
     CODEX_FIX_SCOPE_DRIFT,
     CODEX_FIX_SCOPE_VIOLATION,
     REVIEW_CONFIG_UNAVAILABLE_CATEGORY,
+    _load_sensitive_hits,
+    _SensitiveHit,
+    resolve_review_config_source,
 )
 from cw.plan_files import parse_plan_files_modified
 from cw.review_convergence import resolve_loop_diff_base
@@ -50,8 +53,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
     from pathlib import Path
 
-    from cw.codex_fix_loop.baseline import DirtyStart
-    from cw.codex_review import _SensitiveHit
+    from cw.auto_dev_result import ScopeTier
+    from cw.stage_verification.baseline import DirtyStart
 
 # Shared tail for every guard park's recovery hint: the rejected changes are
 # left staged (never committed or pushed), so the operator can inspect them.
@@ -226,7 +229,7 @@ def check_fix_fence(
 ) -> FenceBreach | None:
     """Return the first fence breach for the cycle's staged changes, or ``None``.
 
-    *touched* is the set :func:`~cw.codex_fix_loop.baseline.cycle_touched_paths`
+    *touched* is the set :func:`~cw.stage_verification.baseline.cycle_touched_paths`
     measured against the cycle's clean-start baseline; that call also staged
     the cycle's changes (``git add -A``) so new files count toward the net
     diff. The revert guard is checked first: a cycle that undoes the branch is
@@ -420,3 +423,50 @@ def scope_violation_breach(violations: list[_SensitiveHit], cycle: int) -> Fence
         details,
         hint,
     )
+
+
+def scope_violations(
+    worktree: Path,
+    paths: Iterable[str],
+    cycle0_files: frozenset[str] | set[str],
+    scope_tier: ScopeTier,
+    default_branch: str,
+) -> list[_SensitiveHit]:
+    """Return sensitive-registry hits among this cycle's out-of-scope paths.
+
+    *paths* is the cycle's touched set, measured once against its clean-start
+    baseline (#2633) — not ``git status`` against ``HEAD``, which read a
+    staged merge's files as the cycle's own. A path is out of scope if it was
+    not part of the cycle-0 reviewed diff's file set. Only out-of-scope paths
+    are checked against the sensitive-files registry (via
+    ``_load_sensitive_hits``, the single source of truth for that match) — an
+    in-scope sensitive edit is always allowed, and an out-of-scope
+    non-sensitive addition is always allowed. Both conditions must hold for a
+    path to appear in the returned list.
+
+    The registry is read from *default_branch* (#3038), never the cycle's own
+    working tree, so a fix that rewrites ``.claude/sensitive-files.yml`` cannot
+    wave through the sensitive edit it was made alongside. When neither
+    ``origin/<default_branch>`` nor ``<default_branch>`` resolves the registry
+    cannot be read, so the gate fails CLOSED: every out-of-scope path is
+    returned as a ``review-config-unavailable`` hit (the cycle parks) rather
+    than treated as "no registry". That closes the unresolved-ref hole only: a
+    read error against a resolved commit (git failure, non-UTF-8 or malformed
+    manifest) still reads as no registry, as the working-tree read did.
+    """
+    out_of_scope = sorted(p for p in paths if p not in cycle0_files)
+    if not out_of_scope:
+        return []
+    source = resolve_review_config_source(worktree, default_branch)
+    if not source.resolved:
+        reason = (
+            f"review configuration unavailable (neither origin/{default_branch} "
+            f"nor {default_branch} resolves): the sensitive-files registry cannot "
+            "be read, so this out-of-scope fix-cycle change is parked rather "
+            "than allowed unchecked"
+        )
+        return [
+            _SensitiveHit(path, REVIEW_CONFIG_UNAVAILABLE_CATEGORY, reason)
+            for path in out_of_scope
+        ]
+    return _load_sensitive_hits(source, out_of_scope, scope_tier)

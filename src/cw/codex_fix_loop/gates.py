@@ -80,8 +80,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from cw._git import git_clean_env
-from cw.codex_fix_loop.baseline import staged_cycle_tree
-from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, FenceBreach
 from cw.codex_fix_loop.gate_autofix import (
     HookRewritePolicy,
     declared_autofixes,
@@ -89,11 +87,13 @@ from cw.codex_fix_loop.gate_autofix import (
     revert_to_tree,
     vet_changes,
 )
-from cw.codex_fix_loop.posted_text import redact_and_cap, withhold_secret_lines
 from cw.codex_review import CODEX_FIX_GATE_FAILED
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models.enums import OrchestratorEventType
+from cw.stage_verification.baseline import staged_cycle_tree
+from cw.stage_verification.fence import LEFT_STAGED_HINT, FenceBreach
+from cw.stage_verification.posted_text import redact_and_cap, withhold_secret_lines
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence

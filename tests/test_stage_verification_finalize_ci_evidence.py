@@ -1,4 +1,5 @@
-"""Tests for cw.codex_finalize._ci_evidence: the codex CI-evidence consult (#3618).
+"""Tests for cw.stage_verification.finalize_ci_evidence: the codex CI-evidence consult
+    (#3618).
 
 The decision lives only in ``prep_pr_state.py`` (``ci-deferral`` and
 ``ci-reuse-plan``); the wrapper shells that script and consumes its JSON. The
@@ -19,7 +20,9 @@ from unittest.mock import patch
 
 import pytest
 
-from cw.codex_finalize._ci_evidence import (
+from cw.reconcile.review_recipes.repair_git import RepairStopError
+from cw.repair_disposition import RepairDisposition
+from cw.stage_verification.finalize_ci_evidence import (
     CI_DEFERRAL_COMMAND,
     CI_HOLD_COMMAND,
     CI_HOLD_RELEASE_ACTION,
@@ -35,8 +38,6 @@ from cw.codex_finalize._ci_evidence import (
     consult_reuse,
     release_ci_hold,
 )
-from cw.reconcile.review_recipes.repair_git import RepairStopError
-from cw.repair_disposition import RepairDisposition
 from tests._codex_review_helpers import PrepPrStateStub, install_home_prep_pr_state
 from tests._shared.ci_evidence_fakes import CHECK, GATE, check_run, commit_status, pr
 from tests._shared.git_repos import add_bare_origin, git_in
@@ -139,7 +140,10 @@ class TestConsultCreate:
     def test_a_timeout_or_launch_failure_is_unavailable(
         self, stub: PrepPrStateStub, tmp_path: Path, error: BaseException, cause: str
     ) -> None:
-        with patch("cw.codex_finalize._ci_evidence.subprocess.run", side_effect=error):
+        with patch(
+            "cw.stage_verification.finalize_ci_evidence.subprocess.run",
+            side_effect=error,
+        ):
             deferred, friction = consult_create(stub.script, tmp_path, "main")
         assert deferred == ()
         assert friction == [f"ci_evidence_unavailable: ci-deferral {cause}"]
@@ -149,7 +153,8 @@ class TestConsultCreate:
     ) -> None:
         done = subprocess.CompletedProcess([], 0, '{"deferred": []}', "")
         with patch(
-            "cw.codex_finalize._ci_evidence.subprocess.run", return_value=done
+            "cw.stage_verification.finalize_ci_evidence.subprocess.run",
+            return_value=done,
         ) as run:
             consult_create(stub.script, tmp_path, "trunk")
         assert run.call_args.args[0] == [
@@ -315,7 +320,7 @@ class TestConsultReuse:
         self, stub: PrepPrStateStub, tmp_path: Path
     ) -> None:
         with patch(
-            "cw.codex_finalize._ci_evidence.subprocess.run",
+            "cw.stage_verification.finalize_ci_evidence.subprocess.run",
             side_effect=subprocess.TimeoutExpired("x", 300),
         ):
             plan = consult_reuse(stub.script, tmp_path, _REUSE)
@@ -444,7 +449,9 @@ class TestReleaseCiHold:
         del tmp_config_dir
         stub_prep_pr_finalize(tmp_path)
         done = subprocess.CompletedProcess([], 0, '{"hold": "active"}', "")
-        with patch("cw.codex_finalize._ci_evidence._launch", return_value=done):
+        with patch(
+            "cw.stage_verification.finalize_ci_evidence._launch", return_value=done
+        ):
             block = release_ci_hold(tmp_path, self._info(), head=_HEAD)
         assert block is not None
         assert "release output does not confirm hold: released" in block.details
@@ -457,7 +464,7 @@ class TestReleaseCiHold:
         finalize.script.write_text(
             "import sys\nsys.exit(2)  # an older prep_pr_finalize\n", encoding="utf-8"
         )
-        with patch("cw.codex_finalize._ci_evidence.subprocess.run") as run:
+        with patch("cw.stage_verification.finalize_ci_evidence.subprocess.run") as run:
             assert release_ci_hold(tmp_path, self._info(), head=_HEAD) is None
         run.assert_not_called()
 
@@ -497,7 +504,8 @@ class TestReleaseCiHold:
             RepairDisposition.ARM_SCRIPT_MISSING, "no script anywhere"
         )
         with patch(
-            "cw.codex_finalize._ci_evidence._probe_arm_script", side_effect=error
+            "cw.stage_verification.finalize_ci_evidence._probe_arm_script",
+            side_effect=error,
         ):
             block = release_ci_hold(tmp_path, self._info(), head=_HEAD)
         assert block is not None
@@ -519,7 +527,10 @@ class TestReleaseCiHold:
     ) -> None:
         del tmp_config_dir
         stub_prep_pr_finalize(Path.home())
-        with patch("cw.codex_finalize._ci_evidence.subprocess.run", side_effect=error):
+        with patch(
+            "cw.stage_verification.finalize_ci_evidence.subprocess.run",
+            side_effect=error,
+        ):
             block = release_ci_hold(tmp_path, self._info(), head=_HEAD)
         assert block is not None
         assert f"release failed ({cause})" in block.details

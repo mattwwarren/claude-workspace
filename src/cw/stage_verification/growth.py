@@ -28,13 +28,6 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, NamedTuple
 
-from cw.codex_fix_loop.baseline import cycle_diff, diff_since
-from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, SETTLE_FINDING_HINT, FenceBreach
-from cw.codex_fix_loop.posted_text import (
-    POSTED_TEXT_MAX_CHARS,
-    describe_added_line,
-    redact_and_cap,
-)
 from cw.codex_review import (
     CODEX_FIX_GROWTH_BUDGET,
     CODEX_FIX_LOOP_GROWTH_GUARD_KEY,
@@ -42,14 +35,25 @@ from cw.codex_review import (
     is_test_path,
 )
 from cw.codex_review._const import CODEX_FIX_LOOP_CUMULATIVE_GROWTH_BUDGET_KEY
+from cw.stage_verification.baseline import cycle_diff, diff_since
+from cw.stage_verification.fence import (
+    LEFT_STAGED_HINT,
+    SETTLE_FINDING_HINT,
+    FenceBreach,
+)
+from cw.stage_verification.posted_text import (
+    POSTED_TEXT_MAX_CHARS,
+    describe_added_line,
+    redact_and_cap,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
 
-    from cw.codex_fix_loop.baseline import CycleBaseline
     from cw.codex_fix_loop.convergence import _OpenFindingKey
     from cw.review_findings import Finding
+    from cw.stage_verification.baseline import CycleBaseline
 
 DEFAULT_GROWTH_BUDGET_LINES = 40
 # Loop-wide net-line budget per originally-found finding (#2648); pinned to

@@ -971,7 +971,7 @@ disposition `awaiting_ci_evidence`
   the PR unarmed; the reuse pass (Step 4c.6) parks on a pending, missing or red
   mapped check, or when the base branch declares `ci_evidence` but PyYAML is
   unavailable, and never runs the gate locally. Codex FINALIZE applies the same
-  rule from Python (`cw.codex_finalize._ci_evidence`).
+  rule from Python (`cw.stage_verification.finalize_ci_evidence`).
 - **No regress, no charge.** The reason is not in
   `FINALIZE_REGRESS_BLOCKER_REASONS` (still `{"agent_block"}`) and not in
   `OPERATOR_UNAVAILABLE_BLOCKER_REASONS`, so Rule 5 falls through to the

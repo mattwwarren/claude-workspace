@@ -1,4 +1,5 @@
-"""Tests for cw.codex_plan._gates: gate set B and its named reasons (#3060 R6)."""
+"""Tests for cw.stage_verification.plan_gates: gate set B and its named reasons (#3060
+R6)."""
 
 from __future__ import annotations
 
@@ -7,7 +8,8 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from cw.auto_dev_result.parse import extract_block
-from cw.codex_plan._gates import (
+from cw.codex_plan._result import parse_plan_turn, stamp_plan_result
+from cw.stage_verification.plan_gates import (
     APPROVAL_NEXT_ACTIONS,
     CODEX_PLAN_ARTIFACT_MISSING,
     CODEX_PLAN_GATE_FAILED,
@@ -17,7 +19,6 @@ from cw.codex_plan._gates import (
     check_scope_tier,
     has_approval_evidence,
 )
-from cw.codex_plan._result import parse_plan_turn, stamp_plan_result
 from tests._shared.session_seeding import _make_ticket_task
 from tests._tool_fakes import plan_sentinel
 

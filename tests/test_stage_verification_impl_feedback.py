@@ -1,4 +1,5 @@
-"""Tests for cw.codex_impl._feedback: the live-PR bind and the merge (#3061).
+"""Tests for cw.stage_verification.impl_feedback: the live-PR bind and the merge
+    (#3061).
 
 ``gh`` is a scripted ``FakeGhCli`` answering with unpolished, observed-shape
 payloads (sparse, null-riddled); git is real and sandboxed.
@@ -15,16 +16,16 @@ from unittest.mock import patch
 
 import pytest
 
-from cw.codex_impl._feedback import (
+from cw.merge_probe import MergeProbe, MergeTreeResult
+from cw.models import TicketTask
+from cw.models.review_feedback import ReviewFeedback
+from cw.stage_verification.impl_block import IMPL_FAILED, ImplBlock
+from cw.stage_verification.impl_feedback import (
     STALE_PREFIX,
     merge_default_on_conflict,
     probe_default_branch,
     verify_review_feedback,
 )
-from cw.codex_impl._result import IMPL_FAILED, ImplBlock
-from cw.merge_probe import MergeProbe, MergeTreeResult
-from cw.models import TicketTask
-from cw.models.review_feedback import ReviewFeedback
 from tests._codex_review_helpers import fresh_impl_repo
 from tests._shared.git_repos import (
     commit_tracked_file,
@@ -156,7 +157,7 @@ class TestVerifyReviewFeedback:
     ) -> None:
         _script(repo, gh)
         boom = subprocess.CalledProcessError(128, "rev-parse")
-        with patch("cw.codex_impl._feedback.git_output", side_effect=boom):
+        with patch("cw.stage_verification.impl_feedback.git_output", side_effect=boom):
             _stale(verify_review_feedback(_task(repo), repo))
 
     def test_gh_nonzero_exit(self, repo: Path, gh: FakeGhCli) -> None:
@@ -202,7 +203,7 @@ class TestProbeDefaultBranch:
 
     def test_a_fetch_that_cannot_run_is_friction_and_no_merge(self, repo: Path) -> None:
         timeout = subprocess.TimeoutExpired(cmd="fetch", timeout=1)
-        with patch("cw.codex_impl._feedback.run_git", side_effect=timeout):
+        with patch("cw.stage_verification.impl_feedback.run_git", side_effect=timeout):
             outcome = probe_default_branch(repo, default_branch="main", repair=True)
         assert outcome.needs_merge is False
         assert outcome.friction[0].startswith("merge_probe_unavailable")
@@ -262,7 +263,8 @@ class TestProbeDefaultBranch:
     ) -> None:
         unavailable = MergeProbe("unavailable", None, (), "merge-tree too old")
         with patch(
-            "cw.codex_impl._feedback.probe_default_merge", return_value=unavailable
+            "cw.stage_verification.impl_feedback.probe_default_merge",
+            return_value=unavailable,
         ):
             outcome = probe_default_branch(repo, default_branch="main", repair=True)
         assert outcome.block is None
@@ -301,7 +303,9 @@ class TestMergeDefaultOnConflict:
         self, repo: Path
     ) -> None:
         unavailable = MergeTreeResult("unavailable", None, (), "too old")
-        with patch("cw.codex_impl._feedback.merge_tree", return_value=unavailable):
+        with patch(
+            "cw.stage_verification.impl_feedback.merge_tree", return_value=unavailable
+        ):
             outcome = merge_default_on_conflict(repo, default_branch="main")
         assert isinstance(outcome, ImplBlock)
         assert "too old" in outcome.details

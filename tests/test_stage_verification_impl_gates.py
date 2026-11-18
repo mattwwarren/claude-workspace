@@ -1,4 +1,5 @@
-"""Tests for cw.codex_impl._gates: guards, gates 1-2, quality gates, mappers (#3061).
+"""Tests for cw.stage_verification.impl_gates: guards, gates 1-2, quality gates,
+    mappers (#3061).
 
 Real ``git`` repos through ``tests/_git_sandbox`` and stubs under the per-test
 HOME: no real ``gh``, ``codex`` or repo gate runs.
@@ -21,18 +22,30 @@ from cw.auto_dev_result.schema._vocab import (
     EMPTY_DIFF_STATUS,
     PLAN_SCOPE_DRIFT_BLOCKER_REASON,
 )
-from cw.codex_fix_loop.baseline import (
+from cw.codex_fix_loop.commit import _git_commit
+from cw.codex_fix_loop.gates import GateScope, plan_cycle_gates
+from cw.codex_fix_loop.hook_failure import as_hook_failure
+from cw.codex_review import (
+    CODEX_ERROR,
+    CODEX_FIX_DIRTY_START,
+    CODEX_FIX_GROWTH_BUDGET,
+    CODEX_FIX_HOOK_FAILED,
+    CODEX_FIX_REVERTED_BRANCH,
+    CODEX_FIX_SCOPE_DRIFT,
+    CODEX_FIX_SCOPE_VIOLATION,
+)
+from cw.local_runner import git_facts
+from cw.models import TicketTask
+from cw.models.review_feedback import ReviewFeedback
+from cw.stage_verification import impl_gates as _gates_module
+from cw.stage_verification.baseline import (
     CycleBaseline,
     DirtyStart,
     capture_cycle_baseline,
 )
-from cw.codex_fix_loop.commit import _git_commit
-from cw.codex_fix_loop.fence import FenceBreach, staged_set_breach
-from cw.codex_fix_loop.gates import GateScope, plan_cycle_gates
-from cw.codex_fix_loop.hook_failure import as_hook_failure
-from cw.codex_fix_loop.push import push_and_verify_head
-from cw.codex_impl import _gates as _gates_module
-from cw.codex_impl._gates import (
+from cw.stage_verification.fence import FenceBreach, staged_set_breach
+from cw.stage_verification.impl_block import IMPL_FAILED, PLAN_MISSING, ImplBlock
+from cw.stage_verification.impl_gates import (
     MIN_SCOPE_SCRIPT_VERSION,
     check_empty_diff,
     check_existing_branch_work,
@@ -46,19 +59,7 @@ from cw.codex_impl._gates import (
     run_scope_conformance,
     staged_totals,
 )
-from cw.codex_impl._result import IMPL_FAILED, PLAN_MISSING, ImplBlock
-from cw.codex_review import (
-    CODEX_ERROR,
-    CODEX_FIX_DIRTY_START,
-    CODEX_FIX_GROWTH_BUDGET,
-    CODEX_FIX_HOOK_FAILED,
-    CODEX_FIX_REVERTED_BRANCH,
-    CODEX_FIX_SCOPE_DRIFT,
-    CODEX_FIX_SCOPE_VIOLATION,
-)
-from cw.local_runner import git_facts
-from cw.models import TicketTask
-from cw.models.review_feedback import ReviewFeedback
+from cw.stage_verification.push import push_and_verify_head
 from tests._codex_review_helpers import (
     _install_pre_commit_hook,
     fresh_impl_repo,
@@ -130,7 +131,7 @@ def _scope(
 
 
 class TestNoPlanSensitiveBlock:
-    """#3536: the repair fence calls the public ``commit.scope_violations``."""
+    """#3536: the repair fence calls the public ``fence.scope_violations``."""
 
     def test_an_out_of_scope_path_with_no_registry_fails_closed(
         self, repo: Path
@@ -368,7 +369,8 @@ class TestGate2:
     ) -> None:
         install_home_scope_script(0, "{}", "")
         with patch(
-            "cw.codex_impl._gates.subprocess.run", side_effect=OSError("no exec")
+            "cw.stage_verification.impl_gates.subprocess.run",
+            side_effect=OSError("no exec"),
         ):
             block, _ = _scope(repo, tmp_path)
         assert block is not None

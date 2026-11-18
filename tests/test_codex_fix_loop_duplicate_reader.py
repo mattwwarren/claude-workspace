@@ -11,7 +11,6 @@ import pytest
 
 from cw.codex_fix_loop import commit as commit_module
 from cw.codex_fix_loop import duplicate_reader
-from cw.codex_fix_loop.baseline import cycle_touched_paths
 from cw.codex_fix_loop.commit import _GrowthGuards
 from cw.codex_fix_loop.duplicate_reader import (
     _DEF,
@@ -22,20 +21,21 @@ from cw.codex_fix_loop.duplicate_reader import (
     is_reader_name,
     new_defs,
 )
-from cw.codex_fix_loop.fence import (
-    LEFT_STAGED_HINT,
-    SETTLE_FINDING_HINT,
-    FenceBreach,
-)
-from cw.codex_fix_loop.posted_text import (
-    POSTED_TEXT_MAX_CHARS,
-    TRUNCATION_MARKER,
-    WITHHELD,
-)
 from cw.codex_review import (
     CODEX_FIX_GROWTH_BUDGET,
     CODEX_FIX_LOOP_GROWTH_GUARD_KEY,
     _parse_unified_diff,
+)
+from cw.stage_verification.baseline import cycle_touched_paths
+from cw.stage_verification.fence import (
+    LEFT_STAGED_HINT,
+    SETTLE_FINDING_HINT,
+    FenceBreach,
+)
+from cw.stage_verification.posted_text import (
+    POSTED_TEXT_MAX_CHARS,
+    TRUNCATION_MARKER,
+    WITHHELD,
 )
 from tests._codex_review_helpers import (
     _check_duplicate_reader,
@@ -45,15 +45,15 @@ from tests._codex_review_helpers import (
 )
 from tests._shared.git_repos import git_in
 from tests._shared.review_builders import _make_finding
-from tests.test_codex_fix_loop_growth import _diff, _loop_budget
+from tests.test_stage_verification_growth import _diff, _loop_budget
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
     from cw.codex_fix_loop.commit import _CycleContext
-    from cw.codex_fix_loop.growth import LoopGrowthBudget
     from cw.review_findings import Finding
+    from cw.stage_verification.growth import LoopGrowthBudget
 
 _DUP = "duplicates the native parser `_read_roster_workers`"
 

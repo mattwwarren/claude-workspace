@@ -45,11 +45,6 @@ from cw.codex_background import (
 from cw.codex_clean_confirm import CleanConfirmOutcome
 from cw.codex_fix_loop.convergence import _open_finding_key
 from cw.codex_fix_loop.divergence import _DIVERGENCE_STALL_CYCLES
-from cw.codex_fix_loop.growth import (
-    DEFAULT_CUMULATIVE_GROWTH_BUDGET_LINES,
-    DEFAULT_GROWTH_BUDGET_LINES,
-    RunGrowth,
-)
 from cw.codex_fix_loop.rounds import CycleRound
 from cw.codex_loop_rounds import LoopRoundRecorder
 from cw.codex_review import (
@@ -105,6 +100,11 @@ from cw.review_findings import (
     AcceptedFinding,
     ReviewVerdictEnvelope,
     consolidate_verdict,
+)
+from cw.stage_verification.growth import (
+    DEFAULT_CUMULATIVE_GROWTH_BUDGET_LINES,
+    DEFAULT_GROWTH_BUDGET_LINES,
+    RunGrowth,
 )
 from tests._claude_review_helpers import RoleAwareClaudeRunner, review_envelope
 from tests._codex_review_helpers import _doc_json, _finding_payload, _loop_verdict

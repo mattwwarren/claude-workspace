@@ -24,7 +24,6 @@ from cw.codex_fix_loop.convergence import (
     _survivors_only_verdict,
     _track_open_findings,
 )
-from cw.codex_fix_loop.growth import LoopGrowthBudget, RunGrowth
 from cw.codex_fix_loop.park import _park_survivors
 from cw.codex_fix_loop.rounds import CycleRound, RoundStop
 from cw.codex_fix_loop.snapshot import _PersistedSnapshot
@@ -38,6 +37,7 @@ from cw.review_findings import (
     ReviewVerdict,
     _dedup_key,
 )
+from cw.stage_verification.growth import LoopGrowthBudget, RunGrowth
 from tests._codex_review_helpers import (
     FAKE_REREVIEW_REASON,
     _drive_loop,
