@@ -437,14 +437,13 @@ def _resolve_tracker_mcp_gate_hits_if_gated(
     """The #2442 pre-dispatch tracker-MCP gate's resolve call, guarded.
 
     The toggle is checked first and is per-client only: a client whose
-    ``ClientConfig.tracker_mcp_gate`` is unset or disabled (the default) never
+    ``bindings.tickets.preflight`` is unset or disabled (the default) never
     reaches the resolver, so its branches' settings files are never read.
     There is deliberately no ``OrchestratorConfig`` switch. Also skipped when
     this client has no capacity to claim anything this tick, exactly like
     :func:`_resolve_stale_pr_ticket_ids_if_gated`.
     """
-    gate = client.tracker_mcp_gate
-    if gate is None or not gate.enabled or available_client_slots <= 0:
+    if not client.tickets_preflight.enabled or available_client_slots <= 0:
         return {}
     return resolve_tracker_mcp_gate_hits(client, queue_snapshot)
 

@@ -1,7 +1,8 @@
 """Client workspace configuration model.
 
-Depends on ``cw.models.enums``, ``cw.models.tasks`` (for ``DEFAULT_LANE``), and
-``cw.models.orchestrator_config``. See ``cw.models.__init__`` for the full DAG.
+Depends on ``cw.models.enums``, ``cw.models.tasks`` (for ``DEFAULT_LANE``),
+``cw.models.orchestrator_config`` and ``cw.models.bindings`` (the per-role
+``bindings`` block, RFC 0019). See ``cw.models.__init__`` for the full DAG.
 """
 
 from __future__ import annotations
@@ -20,8 +21,10 @@ from pydantic import (
     model_validator,
 )
 
+from cw.models.bindings import BindingPreflight, Bindings
 from cw.models.enums import SessionPurpose
 from cw.models.orchestrator_config import (
+    CLAUDE_NATIVE_BACKEND,
     CODEX_BACKEND,
     OPENCODE_BACKEND,
     LaneConfig,
@@ -189,6 +192,58 @@ _WARNED_RETIRED_REVIEW_KEYS: set[str] = set()
 
 #: The ``review`` key retired with the delta confirm round (#2918, #2979).
 _RETIRED_DELTA_CONFIRM_KEY: Final = "default_merge_delta_confirm"
+
+#: Client names already warned about the deprecated ``tracker_mcp_gate`` key
+#: (RFC 0019 R1), so a reload or a multi-client load warns once per client.
+_WARNED_LEGACY_TRACKER_GATE: set[str] = set()
+
+#: The deprecated client key migrated into ``bindings.tickets`` (RFC 0019 R1).
+_LEGACY_TRACKER_GATE_KEY: Final = "tracker_mcp_gate"
+_BINDINGS_KEY: Final = "bindings"
+_TICKETS_KEY: Final = "tickets"
+#: The warning's client label when the input carries no string ``name``.
+_UNNAMED_CLIENT: Final = "<unnamed>"
+
+
+def _legacy_tickets_binding(gate: TrackerMcpGateConfig) -> dict[str, object]:
+    """The ``bindings.tickets`` mapping of a validated legacy gate.
+
+    ``plugin_id`` becomes the claude-native realization, each ``servers``
+    entry its backend's realization, and the preflight keeps both of its
+    keys explicit. ``system`` and ``tools`` stay unset.
+    """
+    mcp: dict[str, dict[str, str]] = {}
+    if gate.plugin_id is not None:
+        mcp[CLAUDE_NATIVE_BACKEND] = {"plugin_id": gate.plugin_id}
+    for backend, server in (gate.servers or {}).items():
+        mcp[backend] = {"server": server}
+    return {
+        "mcp": mcp,
+        "preflight": {"enabled": gate.enabled, "settings_path": gate.settings_path},
+    }
+
+
+def _bindings_dict(value: object) -> dict[str, object] | None:
+    """The ``bindings`` input as a fresh dict, or None when it is malformed."""
+    if value is None:
+        return {}
+    if isinstance(value, Bindings):
+        return value.model_dump(exclude_unset=True)
+    if isinstance(value, dict):
+        return dict(value)
+    return None
+
+
+def _warn_legacy_tracker_gate(name: str) -> None:
+    if name in _WARNED_LEGACY_TRACKER_GATE:
+        return
+    _WARNED_LEGACY_TRACKER_GATE.add(name)
+    _log.warning(
+        "client %s: tracker_mcp_gate is deprecated and was migrated to "
+        "bindings.tickets (RFC 0019); move it under bindings.tickets in "
+        "clients.yaml",
+        name,
+    )
 
 
 #: A bare skill name: the repo provides the skill files, so there is no
@@ -560,12 +615,15 @@ class ClientConfig(BaseModel):
     # the fixed 60-second-to-900-second backoff enabled; False disables new
     # gate stamps and releases an existing gate-owned wait.
     gate_block_backoff_enabled: bool = True
-    # Per-client opt-in for the #2442 pre-dispatch tracker-MCP gate. None (the
-    # default) means the gate never runs for this client -- it never even
-    # reads the branch's settings file. There is deliberately no fleet-wide
-    # OrchestratorConfig companion toggle: per-client opt-in IS the rollout
-    # control. See TrackerMcpGateConfig above.
-    tracker_mcp_gate: TrackerMcpGateConfig | None = None
+    # RFC 0019 R1 (#3702): per-role tool bindings. ``bindings.tickets`` now
+    # carries what the deprecated ``tracker_mcp_gate`` key held; that key is
+    # still accepted on input and migrated by _migrate_tracker_mcp_gate below.
+    # The #2442 pre-dispatch tracker-MCP check runs only when
+    # ``bindings.tickets.preflight.enabled`` is true -- there is deliberately
+    # no fleet-wide OrchestratorConfig toggle: per-client opt-in IS the
+    # rollout control. Read it only through the resolver accessors
+    # (tracker_mcp_server, tickets_plugin_id, tickets_preflight).
+    bindings: Bindings = Field(default_factory=Bindings)
     # Per-client opt-in for the #2917 repair_mechanical_conflict recipe. None
     # (the default) means the recipe never fires for this client; the entry
     # also carries the globs and commands. See MechanicalConflictRepairConfig.
@@ -595,11 +653,60 @@ class ClientConfig(BaseModel):
         return {lane.name for lane in self.effective_lanes}
 
     def tracker_mcp_server(self, backend: str) -> str | None:
-        """The MCP server name tracker_mcp_gate.servers names for *backend*, or None."""
-        gate = self.tracker_mcp_gate
-        if gate is None or gate.servers is None:
-            return None
-        return gate.servers.get(backend)
+        """The MCP server the tickets binding names for *backend*, or None.
+
+        Independent of ``preflight.enabled``.
+        """
+        tickets = self.bindings.tickets
+        return None if tickets is None else tickets.mcp_server(backend)
+
+    @property
+    def tickets_plugin_id(self) -> str | None:
+        """The tickets binding's claude-native plugin id, or None."""
+        tickets = self.bindings.tickets
+        return None if tickets is None else tickets.claude_plugin_id
+
+    @property
+    def tickets_preflight(self) -> BindingPreflight:
+        """The tickets binding's preflight; the disabled default without one."""
+        tickets = self.bindings.tickets
+        return BindingPreflight() if tickets is None else tickets.preflight
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_tracker_mcp_gate(cls, data: object) -> object:
+        """Move a legacy ``tracker_mcp_gate`` into ``bindings.tickets`` (RFC 0019).
+
+        The legacy value (a dict or a ``TrackerMcpGateConfig``) is validated by
+        ``TrackerMcpGateConfig`` first, so its messages survive; ``None`` is
+        absent. Setting it beside ``bindings.tickets`` is an error. Warns once
+        per client name, after a successful migration. Returns a copy.
+        """
+        if not isinstance(data, dict) or _LEGACY_TRACKER_GATE_KEY not in data:
+            return data
+        migrated = dict(data)
+        legacy = migrated.pop(_LEGACY_TRACKER_GATE_KEY)
+        if legacy is None:
+            return migrated
+        gate = (
+            legacy
+            if isinstance(legacy, TrackerMcpGateConfig)
+            else TrackerMcpGateConfig.model_validate(legacy)
+        )
+        bindings = _bindings_dict(migrated.get(_BINDINGS_KEY))
+        if bindings is None:
+            return migrated
+        if bindings.get(_TICKETS_KEY) is not None:
+            msg = (
+                "tracker_mcp_gate and bindings.tickets are both set; "
+                "tracker_mcp_gate is deprecated -- keep only bindings.tickets"
+            )
+            raise ValueError(msg)
+        bindings[_TICKETS_KEY] = _legacy_tickets_binding(gate)
+        migrated[_BINDINGS_KEY] = bindings
+        name = data.get("name")
+        _warn_legacy_tracker_gate(name if isinstance(name, str) else _UNNAMED_CLIENT)
+        return migrated
 
     @model_validator(mode="after")
     def _validate_path_config(self) -> ClientConfig:

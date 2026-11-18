@@ -214,8 +214,7 @@ class _Run:
         kind = tracker_kind(self.client.workspace_path)
         if kind.tracker_class is not TrackerClass.OTHER or kind.system is None:
             return _McpTarget()
-        gate = self.client.tracker_mcp_gate
-        if gate is None:
+        if self.client.bindings.tickets is None:
             return self._mcp_blocked(f"tracker {kind.system!r}: tracker_mcp_gate unset")
         server = self.client.tracker_mcp_server(CODEX_BACKEND) or ""
         try:

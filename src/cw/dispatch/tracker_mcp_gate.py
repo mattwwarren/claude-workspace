@@ -14,13 +14,13 @@ than a claim.
 Contracts:
 
 * **Per-client opt-in, default off.** The gate runs only for a client whose
-  ``ClientConfig.tracker_mcp_gate`` is set with ``enabled: true``; otherwise
+  ``bindings.tickets.preflight`` is set with ``enabled: true``; otherwise
   :func:`resolve_tracker_mcp_gate_hits` returns before any git call. There is
   no fleet-wide toggle -- per-client opt-in is the rollout control.
-* **Explicit plugin id, exact match.** ``TrackerMcpGateConfig.plugin_id`` is
-  the exact ``enabledPlugins`` key the operator's tracker plugin registers
-  under. No tracker->plugin mapping, no ``@``-suffix stripping, no case
-  folding.
+* **Explicit plugin id, exact match.** The tickets binding's claude-native
+  ``plugin_id`` (``ClientConfig.tickets_plugin_id``) is the exact
+  ``enabledPlugins`` key the operator's tracker plugin registers under.
+  No tracker->plugin mapping, no ``@``-suffix stripping, no case folding.
 * **Fail open on anything ambiguous.** No branch yet (a first-time PLAN
   dispatch), no settings file on an existing branch, malformed JSON, a
   non-object top level, no ``enabledPlugins`` key, an unrecognized
@@ -83,7 +83,7 @@ from cw.worktree import _git_dir, _ref_exists, _run_git
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, DevQueueStore, TicketTask
-    from cw.models.client import TrackerMcpGateConfig
+    from cw.models.bindings import BindingPreflight
 
 _log = logging.getLogger("cw.dispatch")
 
@@ -230,20 +230,20 @@ def _plugin_enabled(enabled_plugins_raw: object, plugin_id: str) -> bool | None:
 
 
 def _evaluate_branch(
-    client: ClientConfig, gate: TrackerMcpGateConfig, branch: str
+    client: ClientConfig, preflight: BindingPreflight, branch: str
 ) -> TrackerMcpGateHit | None:
     """Return a hit iff *branch*'s settings file verifiably lacks the plugin."""
-    settings = _read_branch_json(client, branch, gate.settings_path)
+    settings = _read_branch_json(client, branch, preflight.settings_path)
     if settings is None:
         return None
     if _ENABLED_PLUGINS_KEY not in settings:
         _warn_fail_open_once(
             client.name,
             branch,
-            f"no {_ENABLED_PLUGINS_KEY} key in {gate.settings_path}",
+            f"no {_ENABLED_PLUGINS_KEY} key in {preflight.settings_path}",
         )
         return None
-    plugin_id = gate.plugin_id
+    plugin_id = client.tickets_plugin_id
     if plugin_id is None:
         return None
     verdict = _plugin_enabled(settings[_ENABLED_PLUGINS_KEY], plugin_id)
@@ -251,7 +251,7 @@ def _evaluate_branch(
         _warn_fail_open_once(
             client.name,
             branch,
-            f"unrecognized {_ENABLED_PLUGINS_KEY} shape in {gate.settings_path}",
+            f"unrecognized {_ENABLED_PLUGINS_KEY} shape in {preflight.settings_path}",
         )
         return None
     _WARNED_FAIL_OPEN.pop((client.name, branch), None)
@@ -259,7 +259,7 @@ def _evaluate_branch(
         return None
     return TrackerMcpGateHit(
         branch=branch,
-        file_inspected=gate.settings_path,
+        file_inspected=preflight.settings_path,
         expected=plugin_id,
     )
 
@@ -327,7 +327,10 @@ def _evaluate_codex_plan(
 
 
 def _evaluate_task(
-    client: ClientConfig, gate: TrackerMcpGateConfig, task: TicketTask, tick: _GateTick
+    client: ClientConfig,
+    preflight: BindingPreflight,
+    task: TicketTask,
+    tick: _GateTick,
 ) -> TrackerMcpGateHit | None:
     """Route one candidate by its resolved backend (A12).
 
@@ -343,9 +346,9 @@ def _evaluate_task(
         return None
     branch = resolve_feature_branch(task.ticket_id, client, task)
     if backend == CLAUDE_NATIVE_BACKEND:
-        if gate.plugin_id is None:
+        if client.tickets_plugin_id is None:
             return None
-        return _evaluate_branch(client, gate, branch)
+        return _evaluate_branch(client, preflight, branch)
     if backend == CODEX_BACKEND and task.stage in (Stage.PLAN, Stage.FINALIZE):
         return _evaluate_codex_plan(client, branch, tick)
     server = client.tracker_mcp_server(backend)
@@ -379,21 +382,21 @@ def resolve_tracker_mcp_gate_hits(
     """Ticket id -> gate hit for *client*'s tickets that must not spawn (#2442).
 
     Returns ``{}`` immediately -- before any git call -- when the client has
-    not opted in (``tracker_mcp_gate`` unset or ``enabled: false``). Otherwise
-    scans *queue_snapshot* for the client's PENDING PLAN/IMPL-stage tasks and
-    checks each by its resolved backend (see :func:`_evaluate_task`).
+    not opted in (no ``bindings.tickets``, or ``preflight.enabled: false``).
+    Otherwise scans *queue_snapshot* for the client's PENDING PLAN/IMPL-stage
+    tasks and checks each by its resolved backend (see :func:`_evaluate_task`).
 
     Callers must treat the result as "positive evidence the plugin is
     missing", never its complement as a guarantee the plugin is enabled --
     this function fails open at every unresolvable step.
     """
-    gate = client.tracker_mcp_gate
-    if gate is None or not gate.enabled:
+    preflight = client.tickets_preflight
+    if not preflight.enabled:
         return {}
     hits: dict[str, TrackerMcpGateHit] = {}
     tick = _GateTick(client)
     for task in _gated_candidates(client.name, queue_snapshot):
-        hit = _evaluate_task(client, gate, task, tick)
+        hit = _evaluate_task(client, preflight, task, tick)
         if hit is not None:
             hits[task.ticket_id] = hit
     if hits:
