@@ -47,6 +47,7 @@ from tests._backend_mcp_helpers import (
     stage_mcp_config,
 )
 from tests._codex_review_helpers import exclude_cw_dir, seed_codex_stage_run
+from tests._shared.bindings_builders import LINEAR_RENAMED_TOOLS, bindings_linear_mcp
 from tests._shared.cli_preflight import _write_tracker_config
 from tests._tool_fakes import (
     FakeGhCli,
@@ -955,6 +956,34 @@ def test_unknown_mcp_state_fails_open_with_the_read_allowlist(
     assert any("mcp_servers.linear.enabled_tools=" in a for a in argv)
     assert "=== BEGIN CW-INJECTED: Ticket ===" not in str(call["stdin"])
     assert not [r for r in h.gh.records if "view" in r.argv]
+
+
+def test_bound_renamed_tools_reach_the_plan_launch_allowlist(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3703: a tickets binding's tool names, not the Linear defaults, reach argv."""
+    h = harness()
+    _other_tracker(h, tmp_path, monkeypatch, servers={"codex": "linear"})
+    h.client = h.client.model_copy(
+        update={"bindings": bindings_linear_mcp(tools=LINEAR_RENAMED_TOOLS)}
+    )
+    add_stations(add_turn(h.runner))
+    h.runner.add(
+        lambda argv, _stdin: "--skip-git-repo-check" in argv,
+        CodexRunResult(returncode=1, stdout="", stderr="post refused"),
+    )
+    h.run()
+    (call,) = h.plan_calls
+    raw_argv = call["argv"]
+    assert isinstance(raw_argv, list)
+    argv = [str(a) for a in raw_argv]
+    assert (
+        'mcp_servers.linear.enabled_tools=["linear_get_issue","linear_list_comments"]'
+        in argv
+    )
+    assert 'mcp_servers.linear.enabled_tools=["get_issue"' not in " ".join(argv)
 
 
 @pytest.mark.parametrize("tracker", [TRACKER_GITHUB_ISSUES, None])

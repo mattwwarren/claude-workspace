@@ -6922,6 +6922,10 @@ class TestBindingsBlockWriterGuard:
                 value = keyword.value
                 is_none = isinstance(value, ast.Constant) and value.value is None
                 assert not is_none, f"{rel}:{call.lineno} passes bindings_block=None"
+                # The value must be the renderer's output, not a literal or a stub.
+                assert isinstance(value, ast.Call), f"{rel}:{call.lineno} is not a call"
+                renderer = _callee_name(value)
+                assert renderer == "bindings_block_for", f"{rel}:{call.lineno}"
 
 
 def _callee_name(call: ast.Call) -> str | None:
