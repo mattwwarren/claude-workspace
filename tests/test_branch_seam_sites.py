@@ -39,6 +39,7 @@ from cw.models.client import TrackerMcpGateConfig
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.repair_disposition import RepairDisposition
 from cw.worktree import resolve_task_worktree, worktree_path_for
+from tests._backend_mcp_helpers import with_tracker_gate
 from tests._changelog_repair_helpers import make_client, make_repair_job, repair_task
 from tests._clients_yaml import write_clients_yaml
 from tests._shared.git_repos import occupy_worktree
@@ -363,12 +364,9 @@ def test_tracker_mcp_gate_reads_the_row_branch(
 ) -> None:
     from cw.dispatch.tracker_mcp_gate import resolve_tracker_mcp_gate_hits
 
-    client = sample_client_config.model_copy(
-        update={
-            "tracker_mcp_gate": TrackerMcpGateConfig(
-                enabled=True, plugin_id="tracker@example"
-            )
-        }
+    client = with_tracker_gate(
+        sample_client_config,
+        TrackerMcpGateConfig(enabled=True, plugin_id="tracker@example"),
     )
     recorder = _BranchRecorder()
 

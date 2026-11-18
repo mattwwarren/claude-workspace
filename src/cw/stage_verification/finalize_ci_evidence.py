@@ -24,13 +24,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 
 from cw._git import git_clean_env
-from cw.codex_finalize._result import AWAITING_CI_EVIDENCE, FinalizeBlock
-from cw.codex_fix_loop.posted_text import redact_and_cap
 from cw.codex_review import STAGE5_POST_CREATE
 from cw.reconcile.review_recipes.repair_git import (
     RepairStopError,
     _probe_arm_script,
 )
+from cw.stage_verification.finalize_result import AWAITING_CI_EVIDENCE, FinalizeBlock
+from cw.stage_verification.posted_text import redact_and_cap
 
 if TYPE_CHECKING:
     from pathlib import Path

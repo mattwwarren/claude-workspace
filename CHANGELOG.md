@@ -10,6 +10,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Detached codex, opencode and aider workers no longer inherit the dispatcher's stdin (#3696).** `_launch_logged_subprocess` now passes `stdin=subprocess.DEVNULL`, which removes the inherited-stdin precondition for a child that blocks reading stdin. The operator-reported opencode hang was not reproduced in cw, so this fix does not confirm that hang's cause.
 
+## [1.103.1] - 2026-11-18
+
+### Fixed
+
+- **Independent review confirmation survives foreground tool limits.** Claude and OpenCode workers start or resume full confirmation through `cw review converge confirm-job`, and finalize uses the same command for conflict-resolution confirmation. The reviewer runs without a deadline, and bounded foreground polls retrieve its durable result for the exact HEAD and diff base. An interrupted review cannot supply a verdict. Upgrade the installed cw CLI together with the worker commands.
+
+### Deprecated
+
+- **`tracker_mcp_gate` is deprecated in favor of the new per-role `bindings` block (RFC 0019 R1, #3702).** A client's `bindings` names, for each of `tickets`, `knowledge`, `code_host` and `chat`, the system playing the role and how each harness reaches it (an MCP server or plugin per harness, or `cli: gh`); `cw schema show bindings` prints the schema. An existing `tracker_mcp_gate` still loads: it is migrated into `bindings.tickets` with one warning per client, and setting both is an error. No consumer changes behavior. Operator note: `cw doctor` now shows a `bindings/<client>` warning for every migrated client until `bindings.tickets.system` is set, and fails it when that system differs from the project's `tracking.primary.system`. See `config/CONFIG_REFERENCE.md` (Role bindings).
+
 ## [1.103.0] - 2026-11-16
 
 ### Fixed

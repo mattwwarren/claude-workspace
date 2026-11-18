@@ -25,9 +25,9 @@ import subprocess
 from typing import TYPE_CHECKING, Literal
 
 from cw._git import git_hooks_dir
-from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, FenceBreach
-from cw.codex_fix_loop.posted_text import redact_and_cap, withhold_secret_lines
 from cw.codex_review import CODEX_FIX_HOOK_FAILED
+from cw.stage_verification.fence import LEFT_STAGED_HINT, FenceBreach
+from cw.stage_verification.posted_text import redact_and_cap, withhold_secret_lines
 
 if TYPE_CHECKING:
     from collections.abc import Iterable

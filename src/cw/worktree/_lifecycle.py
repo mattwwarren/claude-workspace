@@ -41,7 +41,7 @@ _log = logging.getLogger(__name__)
 # the ephemeral per-session ``.cw/`` directory and the dispatch-written
 # ``.claude/cw-context.json`` plus its ``.lock`` sibling (#2447), and the three
 # cw-written review artifacts (#2689; pinned to
-# ``codex_fix_loop.baseline._CW_REVIEW_ARTIFACTS`` by a lockstep test). The
+# ``stage_verification.baseline._CW_REVIEW_ARTIFACTS`` by a lockstep test). The
 # embedded slash anchors a pattern to the worktree root, and the trailing ``*``
 # covers the lock file. An exclude hides only untracked files; a tracked review
 # artifact is handled by the fix-loop baseline.

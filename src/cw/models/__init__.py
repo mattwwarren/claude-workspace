@@ -42,6 +42,10 @@ each submodule only imports from those above it (no cycles):
 - ``worker_effort`` — ``WorkerEffort``, the closed per-client effort level for
   Claude workers (#2350). A DAG root, re-exported here.
 - ``session`` — ``LocalLivenessBackend``, ``LocalLivenessHandle``, ``Session``.
+- ``bindings`` — ``Bindings`` and the per-role binding models of a client's
+  ``bindings`` block (RFC 0019 R1, #3702). Depends only on
+  ``orchestrator_config.constants`` and ``cw.tracker``; imported by submodule
+  path, not re-exported.
 - ``client`` — ``ClientConfig`` and ``DEFAULT_AUTO_PURPOSES``.
 - ``branch`` — ``resolve_feature_branch``, the one per-row branch seam (#2948).
   Imports ``client`` and ``tasks`` only under ``TYPE_CHECKING``.

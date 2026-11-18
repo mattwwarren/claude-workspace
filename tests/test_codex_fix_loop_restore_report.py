@@ -13,7 +13,7 @@ from cw.codex_fix_loop.cycle_restore import (
     failure_note,
     preserve_and_reset,
 )
-from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, FenceBreach
+from cw.stage_verification.fence import LEFT_STAGED_HINT, FenceBreach
 
 
 def test_cycle_restore_reexports_are_the_same_objects() -> None:

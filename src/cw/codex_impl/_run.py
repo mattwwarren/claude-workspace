@@ -41,53 +41,14 @@ from cw._git import git_output
 from cw.auto_dev_result.parse import BLOCKER_REASON_VALIDATION_FAILED
 from cw.auto_dev_result.schema._vocab import PLAN_MISSING_CONTEXT_BLOCKER_REASON
 from cw.backend_mcp_config import declared_server_names
-from cw.codex_fix_loop.baseline import (
-    CycleBaseline,
-    DirtyStart,
-    capture_cycle_baseline,
-    cycle_touched_paths,
-    stage_cycle,
-)
 from cw.codex_fix_loop.commit import _git_commit, _staged_paths
 from cw.codex_fix_loop.cycle_restore import preserve_and_reset
-from cw.codex_fix_loop.fence import (
-    check_fix_fence,
-    fix_scope_allowlist,
-    staged_set_breach,
-)
 from cw.codex_fix_loop.gates import GateScope, plan_cycle_gates
-from cw.codex_fix_loop.growth import check_growth_budget
 from cw.codex_fix_loop.hook_failure import as_hook_failure
-from cw.codex_fix_loop.posted_text import redact_and_cap
-from cw.codex_fix_loop.push import push_and_verify_head
 from cw.codex_impl._argv import build_impl_argv, require_impl_sandbox_argv
-from cw.codex_impl._feedback import (
-    MergeOutcome,
-    merge_default_on_conflict,
-    probe_default_branch,
-    verify_review_feedback,
-)
-from cw.codex_impl._gates import (
-    approved_extra,
-    check_empty_diff,
-    check_existing_branch_work,
-    check_on_branch,
-    check_plan_present,
-    commit_failure_block,
-    dirty_start_block,
-    fence_block,
-    no_plan_sensitive_block,
-    repair_allowed_files,
-    run_quality_gates,
-    run_scope_conformance,
-    staged_totals,
-)
 from cw.codex_impl._prompt import IMPL_DOCS, IMPL_TURN_SCHEMA, render_impl_prompt
 from cw.codex_impl._result import (
-    IMPL_BLOCKED,
-    IMPL_FAILED,
     IMPL_NOT_PUSHED,
-    ImplBlock,
     ImplTurnFailure,
     impl_blocked,
     impl_commit_message,
@@ -121,6 +82,47 @@ from cw.models import CODEX_BACKEND, OrchestratorEventType
 from cw.models.branch import resolve_feature_branch
 from cw.models.enums import StageIdentifier
 from cw.plan_files import resolve_review_scope_tier
+from cw.stage_verification.baseline import (
+    CycleBaseline,
+    DirtyStart,
+    capture_cycle_baseline,
+    cycle_touched_paths,
+    stage_cycle,
+)
+from cw.stage_verification.fence import (
+    check_fix_fence,
+    fix_scope_allowlist,
+    staged_set_breach,
+)
+from cw.stage_verification.growth import check_growth_budget
+from cw.stage_verification.impl_block import (
+    IMPL_BLOCKED,
+    IMPL_FAILED,
+    ImplBlock,
+)
+from cw.stage_verification.impl_feedback import (
+    MergeOutcome,
+    merge_default_on_conflict,
+    probe_default_branch,
+    verify_review_feedback,
+)
+from cw.stage_verification.impl_gates import (
+    approved_extra,
+    check_empty_diff,
+    check_existing_branch_work,
+    check_on_branch,
+    check_plan_present,
+    commit_failure_block,
+    dirty_start_block,
+    fence_block,
+    no_plan_sensitive_block,
+    repair_allowed_files,
+    run_quality_gates,
+    run_scope_conformance,
+    staged_totals,
+)
+from cw.stage_verification.posted_text import redact_and_cap
+from cw.stage_verification.push import push_and_verify_head
 from cw.tracker import TrackerClass, tracker_kind
 from cw.tracker_io import TrackerIoConfigError
 

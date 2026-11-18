@@ -607,7 +607,7 @@ def _ship_it_implemented_manifest() -> Manifest:
         "disposition": "implemented",
         "ref": {
             "kind": "code",
-            "path": "src/cw/codex_finalize/_pr.py",
+            "path": "src/cw/stage_verification/finalize_pr.py",
             "symbol": "create_pr_for",
         },
     }

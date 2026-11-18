@@ -6,11 +6,12 @@ helper lives anywhere else in :mod:`cw.codex_finalize`.
 * :func:`detect_branch_pr` is the Pre-Stage Detector Guard. The branch is the
   row's resolved feature branch (``resolve_feature_branch``), never
   ``git branch --show-current``.
-* :func:`bind_live_pr` follows :func:`cw.codex_impl._feedback.verify_review_feedback`:
+* :func:`bind_live_pr` follows
+  :func:`cw.stage_verification.impl_feedback.verify_review_feedback`:
   every lookup is live (``gh repo view``, then ``gh pr view`` by URL) and it
   fails closed. Later reads address the PR by the bound URL.
 * :func:`probe_default` is a thin call into the C2 default-branch
-  fetch-and-probe (:func:`cw.codex_impl._feedback.probe_default_branch` with
+  fetch-and-probe (:func:`cw.stage_verification.impl_feedback.probe_default_branch` with
   ``repair=True``, which never blocks). A conflict blocks
   ``merge_conflict_post_push`` and is never resolved (#3542).
 """
@@ -23,18 +24,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from cw.auto_dev_result.schema._vocab import EXTERNAL_STATE_BLOCKER_REASON
-from cw.codex_finalize._gates import check_branch
-from cw.codex_finalize._result import (
-    IMPL_NOT_PUSHED,
-    MERGE_CONFLICT_POST_PUSH,
-    OPERATOR_UNAVAILABLE,
-    PR_ALREADY_TERMINAL,
-    FinalizeBlock,
-    classify_unavailability,
-)
-from cw.codex_fix_loop.posted_text import redact_and_cap
-from cw.codex_fix_loop.push import push_and_verify_head
-from cw.codex_impl._feedback import PROBE_UNAVAILABLE, probe_default_branch
 from cw.gh import (
     create_pr,
     fetch_branch_prs,
@@ -43,6 +32,18 @@ from cw.gh import (
     github_pr_url,
     parse_pr_url,
 )
+from cw.stage_verification.finalize_gates import check_branch
+from cw.stage_verification.finalize_result import (
+    IMPL_NOT_PUSHED,
+    MERGE_CONFLICT_POST_PUSH,
+    OPERATOR_UNAVAILABLE,
+    PR_ALREADY_TERMINAL,
+    FinalizeBlock,
+    classify_unavailability,
+)
+from cw.stage_verification.impl_feedback import PROBE_UNAVAILABLE, probe_default_branch
+from cw.stage_verification.posted_text import redact_and_cap
+from cw.stage_verification.push import push_and_verify_head
 
 if TYPE_CHECKING:
     from pathlib import Path

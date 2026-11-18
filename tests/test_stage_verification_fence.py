@@ -1,16 +1,24 @@
-"""Tests for cw.codex_fix_loop.fence — fix-cycle scope fence + revert guard."""
+"""Tests for cw.stage_verification.fence — fix-cycle scope fence + revert guard."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cw.codex_fix_loop.baseline import (
+from cw.codex_review import (
+    CODEX_FIX_DIRTY_START,
+    CODEX_FIX_REVERTED_BRANCH,
+    CODEX_FIX_SCOPE_DRIFT,
+    CODEX_FIX_SCOPE_VIOLATION,
+    REVIEW_CONFIG_UNAVAILABLE_CATEGORY,
+    _SensitiveHit,
+)
+from cw.stage_verification.baseline import (
     CycleBaseline,
     DirtyStart,
     capture_cycle_baseline,
     cycle_touched_paths,
 )
-from cw.codex_fix_loop.fence import (
+from cw.stage_verification.fence import (
     LEFT_STAGED_HINT,
     SETTLE_FINDING_HINT,
     StagedSetMismatchError,
@@ -19,14 +27,6 @@ from cw.codex_fix_loop.fence import (
     fix_scope_allowlist,
     scope_violation_breach,
     staged_set_breach,
-)
-from cw.codex_review import (
-    CODEX_FIX_DIRTY_START,
-    CODEX_FIX_REVERTED_BRANCH,
-    CODEX_FIX_SCOPE_DRIFT,
-    CODEX_FIX_SCOPE_VIOLATION,
-    REVIEW_CONFIG_UNAVAILABLE_CATEGORY,
-    _SensitiveHit,
 )
 from tests._codex_review_helpers import (
     _measured_from_head,
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from cw.codex_fix_loop.fence import FenceBreach
+    from cw.stage_verification.fence import FenceBreach
 
 _PLAN = """\
 # Plan

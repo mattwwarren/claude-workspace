@@ -143,8 +143,7 @@ def _severity(
         return True, True
     if reading.state is McpState.ENABLED:
         return True, entry.backend == CODEX_BACKEND
-    gate = entry.client.tracker_mcp_gate
-    gate_on = gate is not None and gate.enabled
+    gate_on = entry.client.tickets_preflight.enabled
     if gate_on and gated.intersection(entry.stages):
         return False, False
     return True, True

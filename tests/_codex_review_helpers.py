@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import pytest
 
 from cw.auto_dev_result import Review
-from cw.codex_fix_loop.baseline import CycleBaseline, cycle_touched_paths
 from cw.codex_fix_loop.cycle_restore import REF_ROOT
 from cw.codex_fix_loop.duplicate_reader import check_duplicate_reader
 from cw.codex_review import _prepare_review_pass, run_review
@@ -28,6 +27,7 @@ from cw.dev_queue import save_dev_queue
 from cw.local_runner import make_blocked
 from cw.models import CwState, DevQueueStore, QueueItemStatus, Stage, TicketTask
 from cw.review_findings import AcceptedFinding, CapturedDiff, ReviewVerdict
+from cw.stage_verification.baseline import CycleBaseline, cycle_touched_paths
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._shared.git_repos import add_bare_origin, commit_tracked_file, git_in
 from tests._shared.review_builders import _make_diff
@@ -37,11 +37,11 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from cw.auto_dev_result import AutoDevResult
-    from cw.codex_fix_loop.fence import FenceBreach
-    from cw.codex_fix_loop.growth import LoopGrowthBudget
     from cw.codex_review import _ReviewPassInputs
     from cw.codex_review._shard import _ShardPlan
     from cw.review_findings import Finding
+    from cw.stage_verification.fence import FenceBreach
+    from cw.stage_verification.growth import LoopGrowthBudget
 
 # The redacted observed `gh issue view 2633 --json comments` payload (#2633).
 _OBSERVED_COMMENTS_FIXTURE = (

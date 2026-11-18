@@ -213,7 +213,7 @@ def cycle_touched_paths(worktree: Path, baseline: CycleBaseline) -> set[str]:
 
     This is where a cycle is first staged — after its fix invocation, never
     before it. ``--no-renames``: a rename reports both sides, matching
-    :func:`cw.codex_fix_loop.fence._name_only`.
+    :func:`cw.stage_verification.fence._name_only`.
     """
     new_tree = staged_cycle_tree(worktree, baseline.review_artifacts)
     out = git_output(

@@ -43,6 +43,10 @@ from cw.plan_fingerprint import (
     compute_plan_draft_fingerprint,
     leading_bookkeeping_end,
 )
+from cw.stage_verification.plan_gates import (
+    PLAN_PENDING_APPROVAL,
+    PLAN_STAGE_COMPLETE,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -75,8 +79,6 @@ PLAN_MD_REPLACED_PREFIX: Final = "plan_md_replaced: "
 UNREADABLE_PLAN_MD: Final = "unreadable"
 
 # PLAN status vocabulary shared by the turn parser and gate transitions.
-PLAN_STAGE_COMPLETE: Final = "stage_complete"
-PLAN_PENDING_APPROVAL: Final = "plan_pending_approval"
 PLAN_AMBIGUITIES_PENDING: Final = "ambiguities_pending_resolution"
 PLAN_PREMISES_PENDING: Final = "premises_pending_verification"
 PLAN_NO_OP: Final = "no_op"
@@ -94,7 +96,6 @@ PLAN_STATUSES: Final = frozenset(
 PARK_STATUSES: Final = frozenset(
     {PLAN_PENDING_APPROVAL, PLAN_AMBIGUITIES_PENDING, PLAN_PREMISES_PENDING}
 )
-PLAN_APPROVAL_NEXT_ACTIONS: Final = ("user_decide_plan_approval",)
 
 _SENTINEL_OPEN: Final = "<<<AUTO_DEV_RESULT"
 # Any 64-char lowercase hex digest: bind_claimed_fingerprint reads a non-null

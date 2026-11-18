@@ -1,4 +1,5 @@
-"""Tests for cw.codex_finalize._result: turn document and results (#3062)."""
+"""Tests for cw.stage_verification.finalize_result: turn document and results
+(#3062)."""
 
 from __future__ import annotations
 
@@ -11,18 +12,26 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic import ValidationError
 
-import cw.codex_finalize._arm as arm_module
-import cw.codex_finalize._gates as gates_module
-import cw.codex_finalize._merge_gate as merge_gate_module
-import cw.codex_finalize._pr as pr_module
-import cw.codex_finalize._result as result_module
+import cw.stage_verification.finalize_arm as arm_module
+import cw.stage_verification.finalize_gates as gates_module
+import cw.stage_verification.finalize_merge_gate as merge_gate_module
+import cw.stage_verification.finalize_pr as pr_module
+import cw.stage_verification.finalize_result as result_module
 from cw.auto_dev_result import AutoDevResult
 from cw.auto_dev_result.parse import (
     BLOCKER_REASON_NO_RESULT_EMITTED,
     BLOCKER_REASON_VALIDATION_FAILED,
 )
 from cw.auto_dev_result.schema._vocab import KNOWN_BLOCKER_REASONS
-from cw.codex_finalize._result import (
+from cw.codex_review import (
+    CODEX_ERROR,
+    CODEX_MODEL_CAPACITY,
+    STAGE4A_MERGE_GATE,
+    STAGE4B_PR_CREATE,
+    STAGE5_POST_CREATE,
+)
+from cw.dev_queue.gates import FINALIZE_PARK_STAGE_REACHED
+from cw.stage_verification.finalize_result import (
     AGENT_BLOCK,
     AUTOMERGE_NOT_ARMED,
     CODEX_MUST_FIX_FINDINGS,
@@ -48,14 +57,6 @@ from cw.codex_finalize._result import (
     finalize_shipped,
     parse_finalize_turn,
 )
-from cw.codex_review import (
-    CODEX_ERROR,
-    CODEX_MODEL_CAPACITY,
-    STAGE4A_MERGE_GATE,
-    STAGE4B_PR_CREATE,
-    STAGE5_POST_CREATE,
-)
-from cw.dev_queue.gates import FINALIZE_PARK_STAGE_REACHED
 from cw.unavailability import UNAVAILABILITY_SIGNATURES
 from tests._tool_fakes import finalize_document
 

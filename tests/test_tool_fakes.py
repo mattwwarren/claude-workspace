@@ -18,15 +18,15 @@ from pathlib import Path
 
 import pytest
 
-import cw.codex_finalize._gates as gates_module
-import cw.codex_finalize._merge_gate as merge_gate_module
 import cw.executor.codex
 import cw.executor.core
 import cw.native_daemon
-from cw.codex_finalize._result import FinalizeTurnDocument
+import cw.stage_verification.finalize_gates as gates_module
+import cw.stage_verification.finalize_merge_gate as merge_gate_module
 from cw.codex_runner import CodexRunResult
 from cw.gh import GhFailure
 from cw.sprint import GhClient, GhSurface
+from cw.stage_verification.finalize_result import FinalizeTurnDocument
 from tests import _changelog_repair_helpers, _tool_fakes
 from tests._tool_fakes import (
     ARM_VIEW_ARMED,

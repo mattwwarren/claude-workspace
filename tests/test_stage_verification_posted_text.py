@@ -1,4 +1,5 @@
-"""Tests for cw.codex_fix_loop.posted_text — the one redact-and-cap helper (#2633)."""
+"""Tests for cw.stage_verification.posted_text — the one redact-and-cap helper
+(#2633)."""
 
 from __future__ import annotations
 
@@ -7,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import cw.codex_fix_loop
-from cw.codex_fix_loop.posted_text import (
+from cw.stage_verification.posted_text import (
     ADDED_LINE_MAX_CHARS,
     TRUNCATION_MARKER,
     WITHHELD,
@@ -83,11 +84,18 @@ class TestDescribeAddedLine:
 
 class TestRedactAndCapIsTheOnlyPostedPath:
     @pytest.mark.parametrize(
-        "module", ["constraints", "duplicate_reader", "growth", "hook_failure"]
+        ("subpackage", "module"),
+        [
+            ("codex_fix_loop", "constraints"),
+            ("codex_fix_loop", "duplicate_reader"),
+            ("stage_verification", "growth"),
+            ("codex_fix_loop", "hook_failure"),
+        ],
     )
-    def test_guards_import_the_helper(self, module: str) -> None:
-        package = Path(cw.codex_fix_loop.__file__).parent
-        source = (package / f"{module}.py").read_text(encoding="utf-8")
+    def test_guards_import_the_helper(self, subpackage: str, module: str) -> None:
+        source = (Path(cw.__file__).parent / subpackage / f"{module}.py").read_text(
+            encoding="utf-8"
+        )
 
         assert "posted_text" in source
         assert "cw._text" not in source

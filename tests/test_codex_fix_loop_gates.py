@@ -26,13 +26,6 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from cw.codex_fix_loop import commit, gate_autofix, gates
-from cw.codex_fix_loop.baseline import (
-    CycleBaseline,
-    capture_cycle_baseline,
-    cycle_touched_paths,
-    staged_cycle_tree,
-)
-from cw.codex_fix_loop.fence import LEFT_STAGED_HINT
 from cw.codex_fix_loop.gates import (
     GateFailure,
     GatePlan,
@@ -47,6 +40,13 @@ from cw.codex_fix_loop.gates import (
 from cw.codex_review import CODEX_ERROR, CODEX_FIX_GATE_FAILED
 from cw.codex_runner import CodexRunResult
 from cw.models.enums import OrchestratorEventType
+from cw.stage_verification.baseline import (
+    CycleBaseline,
+    capture_cycle_baseline,
+    cycle_touched_paths,
+    staged_cycle_tree,
+)
+from cw.stage_verification.fence import LEFT_STAGED_HINT
 from tests._codex_review_helpers import (
     FAKE_REREVIEW_REASON,
     PrepPrStateStub,

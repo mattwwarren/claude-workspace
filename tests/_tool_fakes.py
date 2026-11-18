@@ -1752,8 +1752,8 @@ class FakeCwCli:
 
 
 _CW_CLI_TARGETS = (
-    "cw.codex_finalize._gates.run_cw_cli",
-    "cw.codex_finalize._merge_gate.run_cw_cli",
+    "cw.stage_verification.finalize_gates.run_cw_cli",
+    "cw.stage_verification.finalize_merge_gate.run_cw_cli",
 )
 
 

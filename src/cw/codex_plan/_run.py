@@ -37,16 +37,6 @@ from typing import TYPE_CHECKING, Final
 from cw.auto_dev_result.schema._vocab import PLAN_MISSING_CONTEXT_BLOCKER_REASON
 from cw.backend_mcp_config import McpState, declared_server_names, read_backend_mcp
 from cw.codex_plan._argv import build_plan_argv, read_tools_for, require_read_only_argv
-from cw.codex_plan._gates import (
-    CODEX_PLAN_ARTIFACT_MISSING,
-    ApprovalCheck,
-    GateFailure,
-    check_artifact,
-    check_large_tier_approval,
-    check_plan_files,
-    check_scope_tier,
-    has_approval_evidence,
-)
 from cw.codex_plan._post import post_plan_comment, render_park_comment
 from cw.codex_plan._prompt import (
     PLAN_TURN_SCHEMA,
@@ -101,6 +91,16 @@ from cw.models import CODEX_BACKEND, OrchestratorEventType, Stage
 from cw.models.enums import StageIdentifier
 from cw.plan_decisions import parse_plan_decisions
 from cw.plan_fingerprint import PLAN_DRAFT_RELATIVE_PATH, compute_plan_draft_fingerprint
+from cw.stage_verification.plan_gates import (
+    CODEX_PLAN_ARTIFACT_MISSING,
+    ApprovalCheck,
+    GateFailure,
+    check_artifact,
+    check_large_tier_approval,
+    check_plan_files,
+    check_scope_tier,
+    has_approval_evidence,
+)
 from cw.tracker import TrackerClass, tracker_kind
 from cw.tracker_io import TrackerIoConfigError
 from cw.tracker_io._argv import validate_server_name
@@ -214,8 +214,7 @@ class _Run:
         kind = tracker_kind(self.client.workspace_path)
         if kind.tracker_class is not TrackerClass.OTHER or kind.system is None:
             return _McpTarget()
-        gate = self.client.tracker_mcp_gate
-        if gate is None:
+        if self.client.bindings.tickets is None:
             return self._mcp_blocked(f"tracker {kind.system!r}: tracker_mcp_gate unset")
         server = self.client.tracker_mcp_server(CODEX_BACKEND) or ""
         try:

@@ -1,12 +1,12 @@
 """One fix cycle's invoke-scope-check-commit step for the codex fix loop.
 
 Refuses to start a cycle on a dirty worktree (#2633,
-:mod:`cw.codex_fix_loop.baseline`), builds the write-capable ``codex exec``
+:mod:`cw.stage_verification.baseline`), builds the write-capable ``codex exec``
 argv and the fix prompt (with the operator's binding constraints, #2633),
 runs the fix invocation, measures the cycle against its clean-start baseline,
 rejects a cycle whose changes touch a sensitive out-of-scope path, breach the
-scope fence / revert guard (:mod:`cw.codex_fix_loop.fence`), or trip the
-switchable growth and constraint guards (:mod:`cw.codex_fix_loop.growth`,
+scope fence / revert guard (:mod:`cw.stage_verification.fence`), or trip the
+switchable growth and constraint guards (:mod:`cw.stage_verification.growth`,
 :mod:`cw.codex_fix_loop.constraints`), and commits (then pushes and verifies,
 #2354) exactly the paths the cycle was measured to touch. A failure at any
 step parks through the builders in :mod:`cw.codex_fix_loop.park`.
@@ -28,14 +28,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from cw._git import git_output, run_git
-from cw.codex_fix_loop.baseline import (
-    CycleBaseline,
-    DirtyStart,
-    capture_cycle_baseline,
-    cycle_touched_paths,
-    stage_cycle,
-    unstage_review_artifacts,
-)
 from cw.codex_fix_loop.constraints import constraint_breach, render_section
 from cw.codex_fix_loop.cycle_restore import (
     CycleRestore,
@@ -44,13 +36,6 @@ from cw.codex_fix_loop.cycle_restore import (
     preserve_and_reset,
 )
 from cw.codex_fix_loop.duplicate_reader import check_duplicate_reader
-from cw.codex_fix_loop.fence import (
-    StagedSetMismatchError,
-    check_fix_fence,
-    cycle_start_breach,
-    scope_violation_breach,
-    staged_set_breach,
-)
 from cw.codex_fix_loop.gate_autofix import HookRewritePolicy
 from cw.codex_fix_loop.gates import (
     GatePlan,
@@ -59,7 +44,6 @@ from cw.codex_fix_loop.gates import (
     plan_cycle_gates,
     run_cycle_gates,
 )
-from cw.codex_fix_loop.growth import DEFAULT_GROWTH_BUDGET_LINES, check_growth_budget
 from cw.codex_fix_loop.hook_failure import (
     CommitHookFailedError,
     as_hook_failure,
@@ -67,35 +51,51 @@ from cw.codex_fix_loop.hook_failure import (
     repair_excerpt,
 )
 from cw.codex_fix_loop.park import _park_fence_breach, _park_fix_failure
-from cw.codex_fix_loop.push import push_and_verify_head
 from cw.codex_review import (
     _CATEGORY_TO_REASON,
     FIX_CYCLE_COMMIT_PREFIX,
-    REVIEW_CONFIG_UNAVAILABLE_CATEGORY,
     _classify_codex_failure,
     _exec_policy_argv,
-    _load_sensitive_hits,
     _reasoning_effort_argv,
-    _SensitiveHit,
-    resolve_review_config_source,
 )
 from cw.codex_review._const import _JSON_FLAG
 from cw.models.enums import DEFAULT_FIX_SANDBOX_MODE, SandboxMode
+from cw.stage_verification.baseline import (
+    CycleBaseline,
+    DirtyStart,
+    capture_cycle_baseline,
+    cycle_touched_paths,
+    stage_cycle,
+    unstage_review_artifacts,
+)
+from cw.stage_verification.fence import (
+    StagedSetMismatchError,
+    check_fix_fence,
+    cycle_start_breach,
+    scope_violation_breach,
+    scope_violations,
+    staged_set_breach,
+)
+from cw.stage_verification.growth import (
+    DEFAULT_GROWTH_BUDGET_LINES,
+    check_growth_budget,
+)
+from cw.stage_verification.push import push_and_verify_head
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable
     from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult, Review, ScopeTier
     from cw.codex_fix_loop.constraints import OperatorConstraints
     from cw.codex_fix_loop.convergence import _OpenFindingKey
-    from cw.codex_fix_loop.fence import FenceBreach
-    from cw.codex_fix_loop.growth import LoopGrowthBudget
     from cw.codex_fix_loop.snapshot import _PersistedSnapshot
     from cw.codex_runner import CodexRunner, CodexRunResult
     from cw.executor_diagnostics import ExecutorFailureCategory
     from cw.models import TicketTask
     from cw.review_findings import AcceptedFinding, Finding, ReviewVerdict
+    from cw.stage_verification.fence import FenceBreach
+    from cw.stage_verification.growth import LoopGrowthBudget
 
     _Park = tuple[AutoDevResult, ReviewVerdict | None]
 
@@ -194,7 +194,7 @@ def _build_fix_prompt(
     :func:`_build_fix_codex_argv`), which by construction can reach the
     worktree (#1709). The scope rules and, when a plan manifest exists, the
     file fence (#2485) follow the context, so the fix sees the same limits
-    :func:`~cw.codex_fix_loop.fence.check_fix_fence` enforces afterwards.
+    :func:`~cw.stage_verification.fence.check_fix_fence` enforces afterwards.
     ``constraints_section`` (#2633, the operator's binding resolutions) sits
     between the scope rules and the fence; without it the prompt is
     byte-identical to the pre-#2633 one.
@@ -312,7 +312,7 @@ def _commit_fix_cycle(
     what the hook rewrote and is not re-checked.
 
     A real commit is then pushed and its origin tip verified (#2354) via
-    :func:`~cw.codex_fix_loop.push.push_and_verify_head`, so a fix cycle's
+    :func:`~cw.stage_verification.push.push_and_verify_head`, so a fix cycle's
     work never exists only in the local worktree. A failed push or tip
     mismatch raises ``CalledProcessError`` too, and parks the same way.
     """
@@ -359,53 +359,6 @@ def _commit_fix_cycle(
     sha = git_output(["rev-parse", "HEAD"], cwd=worktree).strip()
     push_and_verify_head(worktree, sha)
     return sha
-
-
-def scope_violations(
-    worktree: Path,
-    paths: Iterable[str],
-    cycle0_files: frozenset[str] | set[str],
-    scope_tier: ScopeTier,
-    default_branch: str,
-) -> list[_SensitiveHit]:
-    """Return sensitive-registry hits among this cycle's out-of-scope paths.
-
-    *paths* is the cycle's touched set, measured once against its clean-start
-    baseline (#2633) — not ``git status`` against ``HEAD``, which read a
-    staged merge's files as the cycle's own. A path is out of scope if it was
-    not part of the cycle-0 reviewed diff's file set. Only out-of-scope paths
-    are checked against the sensitive-files registry (via
-    ``_load_sensitive_hits``, the single source of truth for that match) — an
-    in-scope sensitive edit is always allowed, and an out-of-scope
-    non-sensitive addition is always allowed. Both conditions must hold for a
-    path to appear in the returned list.
-
-    The registry is read from *default_branch* (#3038), never the cycle's own
-    working tree, so a fix that rewrites ``.claude/sensitive-files.yml`` cannot
-    wave through the sensitive edit it was made alongside. When neither
-    ``origin/<default_branch>`` nor ``<default_branch>`` resolves the registry
-    cannot be read, so the gate fails CLOSED: every out-of-scope path is
-    returned as a ``review-config-unavailable`` hit (the cycle parks) rather
-    than treated as "no registry". That closes the unresolved-ref hole only: a
-    read error against a resolved commit (git failure, non-UTF-8 or malformed
-    manifest) still reads as no registry, as the working-tree read did.
-    """
-    out_of_scope = sorted(p for p in paths if p not in cycle0_files)
-    if not out_of_scope:
-        return []
-    source = resolve_review_config_source(worktree, default_branch)
-    if not source.resolved:
-        reason = (
-            f"review configuration unavailable (neither origin/{default_branch} "
-            f"nor {default_branch} resolves): the sensitive-files registry cannot "
-            "be read, so this out-of-scope fix-cycle change is parked rather "
-            "than allowed unchecked"
-        )
-        return [
-            _SensitiveHit(path, REVIEW_CONFIG_UNAVAILABLE_CATEGORY, reason)
-            for path in out_of_scope
-        ]
-    return _load_sensitive_hits(source, out_of_scope, scope_tier)
 
 
 # The default of ``_CycleContext.gate_plan`` (#3056): a context built without

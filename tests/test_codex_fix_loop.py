@@ -26,7 +26,6 @@ from cw.codex_fix_loop import (
 )
 from cw.codex_fix_loop.constraints import RESOLUTIONS_MARKER
 from cw.codex_fix_loop.convergence import _open_finding_key, _track_open_findings
-from cw.codex_fix_loop.growth import LoopGrowthBudget, RunGrowth
 from cw.codex_fix_loop.park import _ESCALATE_AT_CYCLE
 from cw.codex_fix_loop.snapshot import _verdict_snapshot_filename
 from cw.codex_review import (
@@ -75,6 +74,7 @@ from cw.review_findings import (
     has_contested_decision,
     write_review_verdict,
 )
+from cw.stage_verification.growth import LoopGrowthBudget, RunGrowth
 from tests import _git_sandbox
 from tests._codex_review_helpers import (
     _Clock,

@@ -14,11 +14,14 @@ Submodules:
 
 - ``_argv`` — the fixed read-only argv and its policy check.
 - ``_prompt`` — the rendered contract plus cw's injected sections.
-- ``_result`` — the turn document, the block value and the result builders.
-- ``_gates`` — the override check, the approval fence and the quality gates.
-- ``_merge_gate`` — Step 4a.
-- ``_pr`` — the Detector Guard, the live bind, push, create, mergeability.
-- ``_arm`` — the seam check, the arm and the verification.
+- ``cw.stage_verification.finalize_result`` — the turn document, the block value and
+  the result builders.
+- ``cw.stage_verification.finalize_gates`` — the override check, the approval fence and
+  the quality gates.
+- ``cw.stage_verification.finalize_merge_gate`` — Step 4a.
+- ``cw.stage_verification.finalize_pr`` — the Detector Guard, the live bind, push,
+  create, mergeability.
+- ``cw.stage_verification.finalize_arm`` — the seam check, the arm and the verification.
 - ``_post`` — the PR-link comment.
 - ``_run`` — the ordered flow.
 """
@@ -29,14 +32,14 @@ from cw.codex_finalize._argv import (
     build_finalize_argv,
     require_read_only_finalize_argv,
 )
-from cw.codex_finalize._result import (
+from cw.codex_finalize._run import run_finalize_stage_and_complete
+from cw.stage_verification.finalize_result import (
     MERGE_CONFLICT_POST_PUSH,
     PR_ALREADY_TERMINAL,
     SCOPE_TIER_UNRESOLVABLE,
     FinalizeBlock,
     FinalizeTurnDocument,
 )
-from cw.codex_finalize._run import run_finalize_stage_and_complete
 
 __all__ = [
     "FINALIZE_READ_ONLY_ARGV",

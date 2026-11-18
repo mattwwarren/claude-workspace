@@ -17,10 +17,8 @@ from cw.auto_dev_result.schema._vocab import (
 )
 from cw.codex_impl._result import (
     IMPL_COMPLETE_TRAILER,
-    IMPL_FAILED,
     IMPL_NOT_PUSHED,
     IMPL_STATUSES,
-    PLAN_MISSING,
     ImplTurnDocument,
     ImplTurnFailure,
     impl_blocked,
@@ -33,6 +31,7 @@ from cw.codex_review import _CODEX_IMPL_BLOCKED_NEXT_ACTIONS
 from cw.contract_manifest._render import _IMPL_CODEX_ADDENDUM, _stage_addendum
 from cw.local_runner import GitFacts
 from cw.models import TicketTask
+from cw.stage_verification.impl_block import IMPL_FAILED, PLAN_MISSING
 from tests._tool_fakes import impl_sentinel
 
 if TYPE_CHECKING:

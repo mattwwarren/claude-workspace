@@ -356,6 +356,13 @@ class TestFromConfig:
 
         assert first == second
 
+    def test_legacy_gate_is_written_as_bindings(self) -> None:
+        """#3702: a migrated legacy gate round-trips as ``bindings``, not the key."""
+        text = write_clients_yaml(_FIDELITY_CASES["tracker_gate"]).read_text()
+
+        assert "bindings" in text
+        assert "tracker_mcp_gate" not in text
+
     def test_name_is_not_duplicated_inside_the_entry(self) -> None:
         write_clients_yaml(ClientConfig(name="a", workspace_path=Path("/tmp/ws-a")))
 

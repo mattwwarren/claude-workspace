@@ -8,7 +8,7 @@ failure fails closed as ``impl_failed`` with details beginning
 :data:`STALE_PREFIX`.
 
 The default-branch merge is two steps, split because
-:func:`cw.codex_fix_loop.baseline.capture_cycle_baseline` refuses a worktree
+:func:`cw.stage_verification.baseline.capture_cycle_baseline` refuses a worktree
 with ``MERGE_HEAD`` or unmerged paths: :func:`probe_default_branch` is read-only
 and runs before the baseline; :func:`merge_default_on_conflict` runs after it,
 only when the probe saw a conflict on a repair row, and leaves the conflicts
@@ -22,10 +22,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from cw._git import LOCAL_GIT_TIMEOUT_SECONDS, git_output, run_git
-from cw.codex_fix_loop.posted_text import redact_and_cap
-from cw.codex_impl._result import IMPL_FAILED, ImplBlock
 from cw.gh import fetch_pr_view, fetch_repo_name_with_owner, github_pr_url
 from cw.merge_probe import merge_tree, probe_default_merge
+from cw.stage_verification.impl_block import IMPL_FAILED, ImplBlock
+from cw.stage_verification.posted_text import redact_and_cap
 
 if TYPE_CHECKING:
     from pathlib import Path

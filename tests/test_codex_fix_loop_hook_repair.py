@@ -17,9 +17,7 @@ import pytest
 from cw._git import run_git as real_run_git
 from cw.codex_fix_loop import commit as commit_module
 from cw.codex_fix_loop.commit import _build_repair_prompt
-from cw.codex_fix_loop.fence import LEFT_STAGED_HINT
 from cw.codex_fix_loop.gates import GateFailure, GatePlan
-from cw.codex_fix_loop.growth import DEFAULT_GROWTH_BUDGET_LINES
 from cw.codex_fix_loop.hook_failure import (
     CommitHookFailedError,
     RepairOutcome,
@@ -34,6 +32,8 @@ from cw.codex_review import (
     CODEX_FIX_SCOPE_VIOLATION,
 )
 from cw.codex_runner import CodexRunResult
+from cw.stage_verification.fence import LEFT_STAGED_HINT
+from cw.stage_verification.growth import DEFAULT_GROWTH_BUDGET_LINES
 from tests._codex_review_helpers import _install_pre_commit_hook
 from tests._shared.git_repos import commit_tracked_file, git_in
 from tests.test_codex_fix_loop import (

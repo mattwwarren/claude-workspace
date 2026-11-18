@@ -1916,6 +1916,87 @@
   },
   "ClientConfig": {
    "$defs": {
+    "BindingPreflight": {
+     "additionalProperties": false,
+     "description": "The tickets role's pre-dispatch MCP check (the former tracker-MCP gate).\n\n``enabled`` opts the client into the check; ``settings_path`` is the\nclaude-native settings file read from the ticket's branch. It is opaque.",
+     "properties": {
+      "enabled": {
+       "default": false,
+       "title": "Enabled",
+       "type": "boolean"
+      },
+      "settings_path": {
+       "default": ".claude/settings.json",
+       "title": "Settings Path",
+       "type": "string"
+      }
+     },
+     "title": "BindingPreflight",
+     "type": "object"
+    },
+    "Bindings": {
+     "additionalProperties": false,
+     "description": "A client's ``bindings`` block: one optional binding per :class:`Role`.",
+     "properties": {
+      "tickets": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/TicketsBinding"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "knowledge": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/RoleBinding"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "code_host": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/RoleBinding"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "chat": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/RoleBinding"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "title": "Bindings",
+     "type": "object"
+    },
+    "Harness": {
+     "description": "The harnesses an ``mcp`` map is keyed by (the backend constants).",
+     "enum": [
+      "claude-native",
+      "local",
+      "codex",
+      "opencode"
+     ],
+     "title": "Harness",
+     "type": "string"
+    },
     "LaneConfig": {
      "additionalProperties": false,
      "description": "Configuration for a named dispatch lane.\n\nLanes provide a scheduling boundary for TicketTasks.\nPhase 1 (data model only): no dispatch wiring yet \u2014 see #558.",
@@ -2184,6 +2265,56 @@
       "name"
      ],
      "title": "LaneConfig",
+     "type": "object"
+    },
+    "McpRealization": {
+     "additionalProperties": false,
+     "description": "How one harness reaches a role's system over MCP.\n\nExactly one of ``server`` (the MCP server name the harness's own config\ndeclares) or ``plugin_id`` (the claude-native ``enabledPlugins`` key) is\nset. ``tools`` optionally maps each ticket operation to the server's tool\nname; no consumer reads it yet.",
+     "properties": {
+      "server": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Server"
+      },
+      "plugin_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Plugin Id"
+      },
+      "tools": {
+       "anyOf": [
+        {
+         "additionalProperties": {
+          "type": "string"
+         },
+         "propertyNames": {
+          "$ref": "#/$defs/TicketOp"
+         },
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Tools"
+      }
+     },
+     "title": "McpRealization",
      "type": "object"
     },
     "MechanicalConflictRepairConfig": {
@@ -2455,6 +2586,57 @@
      "title": "ReviewEngineConfig",
      "type": "object"
     },
+    "RoleBinding": {
+     "additionalProperties": false,
+     "description": "One role's binding: a system plus exactly one realization.\n\nThe realization is a non-empty ``mcp`` map keyed by harness, or ``cli``.\nAn explicit ``null`` for either counts as absent, so a binding reloads\nfrom its own full dump. The role-aware rules live in :meth:`check`,\nwhich :class:`Bindings` calls with the role name.",
+     "properties": {
+      "system": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "System"
+      },
+      "mcp": {
+       "anyOf": [
+        {
+         "additionalProperties": {
+          "$ref": "#/$defs/McpRealization"
+         },
+         "propertyNames": {
+          "$ref": "#/$defs/Harness"
+         },
+         "type": "object"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Mcp"
+      },
+      "cli": {
+       "anyOf": [
+        {
+         "const": "gh",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Cli"
+      }
+     },
+     "title": "RoleBinding",
+     "type": "object"
+    },
     "SandboxMode": {
      "description": "Codex ``--sandbox`` modes a codex reviewer or fix role may run under.\n\nThe report/fix boundary: a reviewer reports what is wrong and a fix role\nrepairs it, so the reviewer defaults to ``read-only`` and the fix loop to\n``workspace-write`` (``StageExecutorConfig.reviewer_sandbox_mode`` /\n``fix_sandbox_mode``, #1767). ``danger-full-access`` is deliberately not a\nmember: no cw role needs writes outside the worktree, so a typo or an\nexperiment cannot reach it through config.",
      "enum": [
@@ -2578,37 +2760,41 @@
      "title": "StagePipelineConfig",
      "type": "object"
     },
-    "TrackerMcpGateConfig": {
+    "TicketOp": {
+     "description": "The ``tickets`` role's operations, the keys of a ``tools`` map.",
+     "enum": [
+      "get",
+      "list_comments",
+      "comment",
+      "close",
+      "create"
+     ],
+     "title": "TicketOp",
+     "type": "string"
+    },
+    "TicketsBinding": {
      "additionalProperties": false,
-     "description": "Per-client opt-in for the #2442 pre-dispatch tracker-MCP gate.\n\nBefore a PLAN/IMPL-stage PENDING ticket is claimed, dispatch reads\n``settings_path`` from the ticket's own branch (``git show``, no checkout)\nand parks the ticket when that file's ``enabledPlugins`` verifiably lacks\n``plugin_id`` -- a worker spawned there could not reach the tracker MCP.\n\n``plugin_id`` is the exact ``enabledPlugins`` key the tracker's MCP plugin\nregisters under (e.g. ``\"linear@acme-marketplace\"``); matching is exact,\nwith no ``@``-suffix stripping and no case folding. Anything ambiguous --\nno branch yet, no settings file, malformed JSON, an unrecognized\n``enabledPlugins`` shape -- fails open (the spawn proceeds).\n\n``plugin_id`` and ``settings_path`` apply to claude-native rows only.\n``servers`` (#3055, RFC 0018 S3) maps a non-Claude backend (``codex`` or\n``opencode``) to the MCP server name its own config declares for the\ntracker; ``servers[backend]`` applies to that backend's rows only, and in\nS3 only opencode PLAN/IMPL rows are gated on it. At least one of\n``plugin_id`` or a non-empty ``servers`` is required. The server check is\ndeclaration-only: auth, env and headless load stay unverified.",
+     "description": "The ``tickets`` role: a tracker system, plus operator ids and preflight.\n\n``operator_ids`` are the operator's identities on the tracker, kept\nexactly as written (no normalisation, no dedupe); no consumer reads them\nyet. ``preflight`` is always present and off by default.",
      "properties": {
-      "enabled": {
-       "default": false,
-       "title": "Enabled",
-       "type": "boolean"
-      },
-      "plugin_id": {
+      "system": {
        "anyOf": [
         {
-         "type": "string"
+         "$ref": "#/$defs/TicketsSystem"
         },
         {
          "type": "null"
         }
        ],
-       "default": null,
-       "title": "Plugin Id"
+       "default": null
       },
-      "settings_path": {
-       "default": ".claude/settings.json",
-       "title": "Settings Path",
-       "type": "string"
-      },
-      "servers": {
+      "mcp": {
        "anyOf": [
         {
          "additionalProperties": {
-          "type": "string"
+          "$ref": "#/$defs/McpRealization"
+         },
+         "propertyNames": {
+          "$ref": "#/$defs/Harness"
          },
          "type": "object"
         },
@@ -2617,11 +2803,43 @@
         }
        ],
        "default": null,
-       "title": "Servers"
+       "title": "Mcp"
+      },
+      "cli": {
+       "anyOf": [
+        {
+         "const": "gh",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Cli"
+      },
+      "operator_ids": {
+       "items": {
+        "type": "string"
+       },
+       "title": "Operator Ids",
+       "type": "array"
+      },
+      "preflight": {
+       "$ref": "#/$defs/BindingPreflight"
       }
      },
-     "title": "TrackerMcpGateConfig",
+     "title": "TicketsBinding",
      "type": "object"
+    },
+    "TicketsSystem": {
+     "description": "The systems the ``tickets`` role accepts (the tracker constants).",
+     "enum": [
+      "github-issues",
+      "linear"
+     ],
+     "title": "TicketsSystem",
+     "type": "string"
     },
     "WorkerEffort": {
      "description": "Effort level for an autonomous Claude worker, or ``INHERIT`` to opt out.",
@@ -2798,16 +3016,8 @@
      "title": "Gate Block Backoff Enabled",
      "type": "boolean"
     },
-    "tracker_mcp_gate": {
-     "anyOf": [
-      {
-       "$ref": "#/$defs/TrackerMcpGateConfig"
-      },
-      {
-       "type": "null"
-      }
-     ],
-     "default": null
+    "bindings": {
+     "$ref": "#/$defs/Bindings"
     },
     "mechanical_conflict_repair": {
      "anyOf": [

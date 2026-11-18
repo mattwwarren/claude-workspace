@@ -35,6 +35,9 @@ from cw.codex_review import (
     STAGE2_IMPL,
     make_codex_blocked,
 )
+from cw.stage_verification.impl_block import (
+    IMPL_BLOCKED,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -50,12 +53,9 @@ if TYPE_CHECKING:
 IMPL_COMPLETE_TRAILER: Final = "Auto-Dev-Stage: impl-complete"
 
 #: Existing blocker reasons the IMPL stage reuses (none is new to the vocabulary).
-IMPL_FAILED: Final = "impl_failed"
-PLAN_MISSING: Final = "plan_missing"
 IMPL_NOT_PUSHED: Final = "impl_not_pushed"
 
 IMPL_STAGE_COMPLETE: Final = "stage_complete"
-IMPL_BLOCKED: Final = "blocked"
 IMPL_STATUSES: Final = frozenset({IMPL_STAGE_COMPLETE, IMPL_BLOCKED})
 
 _SENTINEL_OPEN: Final = "<<<AUTO_DEV_RESULT"
@@ -68,21 +68,6 @@ class ImplTurnDocument(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     sentinel: str
-
-
-@dataclass(frozen=True)
-class ImplBlock:
-    """A cw-decided IMPL park: the reason, details and status.
-
-    The one block value the guard, gate and feedback functions return, so no
-    REVIEW-worded fence or gate text reaches an IMPL result. *status* is
-    ``blocked`` except for the empty-diff park (``empty_diff_blocked``).
-    """
-
-    reason: str
-    details: str
-    retry_eligible: bool = False
-    status: str = IMPL_BLOCKED
 
 
 @dataclass(frozen=True)
