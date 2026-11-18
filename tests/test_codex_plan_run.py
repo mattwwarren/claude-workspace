@@ -987,7 +987,7 @@ def test_bound_renamed_tools_reach_the_plan_launch_allowlist(
     assert 'mcp_servers.linear.enabled_tools=["get_issue"' not in " ".join(argv)
 
 
-def test_github_tracker_with_codex_mcp_binding_uses_mcp(
+def test_github_tracker_with_codex_mcp_binding_uses_the_gh_path(
     harness: Callable[..., Harness],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1025,11 +1025,8 @@ def test_github_tracker_with_codex_mcp_binding_uses_mcp(
     (call,) = h.plan_calls
     argv = call["argv"]
     assert isinstance(argv, list)
-    assert (
-        'mcp_servers.linear.enabled_tools=["github_get_issue","github_list_comments"]'
-        in argv
-    )
-    assert not [r for r in h.gh.records if r.argv[-1] == "body"]
+    assert not any("enabled_tools" in a for a in argv)
+    assert [r for r in h.gh.records if r.argv[-1] == "body"]
 
 
 def test_legacy_gate_on_github_tracker_stays_on_github_path(
@@ -1053,6 +1050,26 @@ def test_legacy_gate_on_github_tracker_stays_on_github_path(
     argv = call["argv"]
     assert isinstance(argv, list)
     assert not any("enabled_tools" in a for a in argv)
+
+
+def test_legacy_gate_on_linear_tracker_targets_codex_mcp(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h = harness()
+    _other_tracker(h, tmp_path, monkeypatch, servers={"codex": "linear"})
+    add_stations(add_turn(h.runner))
+    h.runner.add(
+        lambda argv, _stdin: "--skip-git-repo-check" in argv,
+        CodexRunResult(returncode=1, stdout="", stderr="post refused"),
+    )
+    h.run()
+    (call,) = h.plan_calls
+    argv = call["argv"]
+    assert isinstance(argv, list)
+    assert 'mcp_servers.linear.enabled_tools=["get_issue","list_comments"]' in argv
+    assert not [r for r in h.gh.records if r.argv[-1] == "body"]
 
 
 @pytest.mark.parametrize("tracker", [TRACKER_GITHUB_ISSUES, None])

@@ -102,12 +102,18 @@ def _github_line(ticket_id: str) -> str:
     )
 
 
-def _label(tickets: TicketsBinding | None, tracker_system: str | None) -> str | None:
+def effective_tickets_system(
+    tickets: TicketsBinding | None, project_system: str | None
+) -> str | None:
+    """Resolve the tickets system, preferring the binding over the project."""
     if tickets is not None and tickets.system is not None:
         return str(tickets.system)
-    if tracker_system:
-        return _quote(tracker_system)
-    return None
+    return project_system
+
+
+def _label(tickets: TicketsBinding | None, tracker_system: str | None) -> str | None:
+    system = effective_tickets_system(tickets, tracker_system)
+    return None if not system else _quote(system)
 
 
 def _op_phrases(tickets: TicketsBinding | None, harness: Harness) -> str:
@@ -163,10 +169,10 @@ def _tickets_lines(
     tracker_system: str | None,
 ) -> list[str]:
     """The tickets section: its line, then the failure paragraph where it applies."""
+    if effective_tickets_system(tickets, tracker_system) == TRACKER_GITHUB_ISSUES:
+        return [_github_line(ticket_id), _FAILURE_PARAGRAPH]
     if tickets is None:
         return _derived_lines(harness, ticket_id, tracker_system)
-    if tickets.cli == "gh":
-        return [_github_line(ticket_id), _FAILURE_PARAGRAPH]
     return _bound_mcp_lines(tickets, harness, tracker_system)
 
 
@@ -174,11 +180,12 @@ def _derived_lines(
     harness: Harness, ticket_id: str, tracker_system: str | None
 ) -> list[str]:
     """The back-compat tickets lines for a client with no ``tickets`` binding."""
-    if not tracker_system:
+    system = effective_tickets_system(None, tracker_system)
+    if not system:
         return [_UNSET_LINE]
-    if tracker_system == TRACKER_GITHUB_ISSUES:
+    if system == TRACKER_GITHUB_ISSUES:
         return [_github_line(ticket_id), _FAILURE_PARAGRAPH]
-    text = _mcp_text(_quote(tracker_system), "", _op_phrases(None, harness))
+    text = _mcp_text(_quote(system), "", _op_phrases(None, harness))
     return [text, _FAILURE_PARAGRAPH]
 
 

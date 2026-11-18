@@ -291,7 +291,7 @@ bindings:
 cw renders one delimited `Bindings` block per client and harness, from the
 `bindings` block above and the project tracker (`tracking.primary.system`).
 It tells the agent how to read and post on the `tickets` system and which
-system plays each other role. The block is written into every worktree's
+system plays each other role. The block is written into each non-local worktree's
 `.claude/cw-context.json` as `bindings_block` (schema v21), and inlined into
 the codex PLAN/IMPL/FINALIZE prompts and the opencode PLAN/IMPL prompts, so
 the context key and the prompt carry the same bytes. The local harness
@@ -302,12 +302,13 @@ gets the `gh` lines, any other system gets the generic MCP line with no tool
 names, and no tracker at all gets "Tracker unknown".
 
 **Migrated `tracker_mcp_gate` on a GitHub-tracker client.** A leftover gate on
-a GitHub client was inert before. Its migrated binding (MCP realization, no
-`cli`, no `system`) now wins over the project tracker: opencode sees an MCP
-line labelled `github-issues` when `servers.opencode` is set, or a "not
-reachable from harness opencode" line when only `plugin_id` is set. `cw doctor`
-already warns about the unset `system`. Replace the stale gate with
-`bindings: {tickets: {system: github-issues, cli: gh}}`.
+a GitHub client remains inert, as before. Its migrated binding (MCP realization,
+no `cli`, no `system`) uses the effective project tracker: the bindings block
+renders the `gh` lines and codex PLAN has no MCP target. On a non-GitHub project,
+the migrated binding still names the MCP server for that harness. `cw doctor`
+warns about the unset `system`; replace the stale gate with
+`bindings: {tickets: {system: github-issues, cli: gh}}` when configuring GitHub
+explicitly.
 
 **Manual dogfood check (not automated).** Real harnesses are checked by hand
 after a change to the renderer:

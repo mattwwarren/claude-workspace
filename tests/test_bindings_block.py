@@ -230,15 +230,15 @@ def test_no_bindings_falls_back_to_the_tracker_system(
 # -- binding wins over tracker_system ----------------------------------------
 
 
-def test_legacy_gate_on_a_github_client_renders_the_binding_not_the_gh_line() -> None:
+def test_legacy_gate_on_a_github_client_uses_the_effective_gh_path() -> None:
     text = render_bindings_block(
         _legacy_gate_binding(),
         Harness.OPENCODE,
         ticket_id=_TID,
         tracker_system="github-issues",
     )
-    assert "gh issue view" not in text
-    assert "Tracker: github-issues. Use the github-issues MCP tools" in text
+    assert "gh issue view 4242 --json title,body,comments" in text
+    assert "github-issues MCP tools" not in text
 
 
 def test_plugin_only_legacy_gate_is_not_reachable_from_opencode() -> None:

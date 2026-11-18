@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Final
 
 from cw.auto_dev_result.schema._vocab import PLAN_MISSING_CONTEXT_BLOCKER_REASON
 from cw.backend_mcp_config import McpState, declared_server_names, read_backend_mcp
-from cw.bindings_block import bindings_block_for
+from cw.bindings_block import bindings_block_for, effective_tickets_system
 from cw.codex_plan._argv import build_plan_argv, read_tools_for, require_read_only_argv
 from cw.codex_plan._post import post_plan_comment, render_park_comment
 from cw.codex_plan._prompt import (
@@ -103,7 +103,7 @@ from cw.stage_verification.plan_gates import (
     check_scope_tier,
     has_approval_evidence,
 )
-from cw.tracker import TrackerClass, tracker_kind
+from cw.tracker import TRACKER_GITHUB_ISSUES, TrackerClass, tracker_kind
 from cw.tracker_io import TrackerIoConfigError
 from cw.tracker_io._argv import validate_server_name
 
@@ -215,23 +215,20 @@ class _Run:
         """The tracker read path, or the run-time tracker-MCP backstop's block."""
         kind = tracker_kind(self.client.workspace_path)
         tickets = self.client.bindings.tickets
+        effective_system = effective_tickets_system(tickets, kind.system)
+        if effective_system == TRACKER_GITHUB_ISSUES:
+            return _McpTarget()
         if tickets is None:
             if kind.tracker_class is not TrackerClass.OTHER or kind.system is None:
                 return _McpTarget()
             return self._mcp_blocked(f"tracker {kind.system!r}: tracker_mcp_gate unset")
-        # A migrated legacy tracker_mcp_gate has no tickets.system. On a GitHub
-        # project it stays inert, as before the binding existed (#3703 review).
-        if tickets.cli == "gh" or (
-            kind.tracker_class is TrackerClass.GITHUB and tickets.system is None
-        ):
-            return _McpTarget()
-        return self._binding_target(tickets, kind.system)
+        return self._binding_target(tickets, effective_system)
 
     def _binding_target(
-        self, tickets: TicketsBinding, project_system: str | None
+        self, tickets: TicketsBinding, effective_system: str | None
     ) -> _McpTarget | _Exit:
         """The codex MCP read target named by a tickets binding."""
-        tracker = str(tickets.system or project_system or "")
+        tracker = effective_system or ""
         server = tickets.mcp_server(CODEX_BACKEND) or ""
         try:
             validate_server_name(server)
