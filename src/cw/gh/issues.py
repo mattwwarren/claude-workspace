@@ -51,6 +51,31 @@ _SELF_DISCLOSURE_RE = re.compile(
 )
 
 
+def _fetch_issue_json(
+    ticket_id: str, fields: str, timeout: int, cwd: Path | None
+) -> dict[str, Any] | None:
+    """Run ``gh issue view`` and return its JSON object, or None on failure."""
+    try:
+        result = _sp.run(
+            ["gh", "issue", "view", ticket_id, "--json", fields],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            cwd=cwd,
+        )
+    except (FileNotFoundError, OSError, _sp.TimeoutExpired):
+        return None
+
+    if result.returncode != 0:
+        return None
+    try:
+        data: object = json.loads(result.stdout)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def fetch_issue_comments(
     ticket_id: str, timeout: int, *, cwd: Path | None = None
 ) -> list[dict[str, Any]] | None:
@@ -64,29 +89,11 @@ def fetch_issue_comments(
     thread into every reviewer prompt, so this is no longer a module-private
     helper of ``fetch_approved_plan_comment``. Behavior is unchanged.
     """
-    try:
-        result = _sp.run(
-            ["gh", "issue", "view", ticket_id, "--json", "comments"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
-            cwd=cwd,
-        )
-    except FileNotFoundError:
+    data = _fetch_issue_json(ticket_id, "comments", timeout, cwd)
+    if data is None:
         return None
-    except (OSError, _sp.TimeoutExpired):
-        return None
-
-    if result.returncode != 0:
-        return None
-
-    try:
-        data: dict[str, Any] = json.loads(result.stdout)
-        comments: list[dict[str, Any]] = data.get("comments") or []
-    except (ValueError, AttributeError):
-        return None
-    return comments
+    comments = data.get("comments") or []
+    return comments if isinstance(comments, list) else None
 
 
 def fetch_issue_snapshot(
@@ -100,31 +107,10 @@ def fetch_issue_snapshot(
     failed call, malformed JSON, or a field of the wrong type. *cwd* scopes the
     call to the client's repo; multi-client callers MUST pass it.
     """
-    try:
-        result = _sp.run(
-            ["gh", "issue", "view", ticket_id, "--json", "title,body,url,comments"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
-            cwd=cwd,
-        )
-    except FileNotFoundError:
+    data = _fetch_issue_json(ticket_id, "title,body,url,comments", timeout, cwd)
+    if data is None or not _snapshot_shape_ok(data):
         return None
-    except (OSError, _sp.TimeoutExpired):
-        return None
-
-    if result.returncode != 0:
-        return None
-
-    try:
-        data: object = json.loads(result.stdout)
-    except ValueError:
-        return None
-    if not isinstance(data, dict) or not _snapshot_shape_ok(data):
-        return None
-    envelope: dict[str, Any] = data
-    return envelope
+    return data
 
 
 def _snapshot_shape_ok(data: dict[str, Any]) -> bool:
@@ -150,28 +136,10 @@ def fetch_issue_body(
     ticket-body drift check (#2311) and ``cw body-sha`` both hash this value,
     and the drift check fails open on None.
     """
-    try:
-        result = _sp.run(
-            ["gh", "issue", "view", ticket_id, "--json", "body"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
-            cwd=cwd,
-        )
-    except FileNotFoundError:
+    data = _fetch_issue_json(ticket_id, "body", timeout, cwd)
+    if data is None:
         return None
-    except (OSError, _sp.TimeoutExpired):
-        return None
-
-    if result.returncode != 0:
-        return None
-
-    try:
-        data: dict[str, Any] = json.loads(result.stdout)
-        body = data.get("body")
-    except (ValueError, AttributeError):
-        return None
+    body = data.get("body")
     return body if isinstance(body, str) else None
 
 
@@ -185,26 +153,10 @@ def fetch_issue_state(
     close sweep re-reads it after a failed close (#3044). None means unknown:
     a non-zero exit, a timeout, a missing ``gh`` or malformed JSON.
     """
-    try:
-        result = _sp.run(
-            ["gh", "issue", "view", ticket_id, "--json", "state"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
-            cwd=cwd,
-        )
-    except (OSError, _sp.TimeoutExpired):
+    data = _fetch_issue_json(ticket_id, "state", timeout, cwd)
+    if data is None:
         return None
-
-    if result.returncode != 0:
-        return None
-
-    try:
-        data: dict[str, Any] = json.loads(result.stdout)
-        state = data.get("state")
-    except (ValueError, AttributeError):
-        return None
+    state = data.get("state")
     return state if isinstance(state, str) else None
 
 

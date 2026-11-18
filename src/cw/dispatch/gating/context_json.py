@@ -8,7 +8,7 @@ sibling can import the logger name from here without a cycle.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING
 
 from cw.events import record_event
 from cw.exceptions import CwError
@@ -40,16 +40,6 @@ _LOGGER_NAME = "cw.dispatch"
 _log = logging.getLogger(_LOGGER_NAME)
 
 _RENDER_ERROR: RenderFailureCause = "render_error"
-
-
-class ContextJsonCleanupError(CwError):
-    """Refuse a spawn when stale context remains at the reader path."""
-
-    __slots__ = ()
-
-
-def _raise_context_json_cleanup_error() -> NoReturn:
-    raise ContextJsonCleanupError
 
 
 def _invalidate_stale_context_json(

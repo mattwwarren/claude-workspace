@@ -227,7 +227,7 @@ failed; do not improvise the event name or payload from memory.
 
 Stamp `materialized_by_session` with the current `session_id` (from `.claude/cw-context.json`). This is what makes the idempotency guard below requeue-safe.
 
-**Idempotency (requeue-safe):** skip re-fetch and re-write **only** if ALL of the following hold: `.cw/context.json` exists, its `ticket_id` matches, AND its `materialized_by_session` equals the current `session_id` (from `.claude/cw-context.json`). Otherwise — a different/missing `materialized_by_session` means a **new session is running against a reused worktree (i.e. a `requeue`)** — you MUST re-fetch the ticket (`gh issue view <n> --json title,body,comments`) and **overwrite** `.cw/context.json` so newly-added operator comments and resolutions reach this run. Read the existing file and compare both fields before deciding to skip.
+**Idempotency (requeue-safe):** skip re-fetch and re-write **only** if ALL of the following hold: `.cw/context.json` exists, its `ticket_id` matches, AND its `materialized_by_session` equals the current `session_id` (from `.claude/cw-context.json`). Otherwise — a different/missing `materialized_by_session` means a **new session is running against a reused worktree (i.e. a `requeue`)** — you MUST rerun the tracker-specific `cw ticket snapshot` command above and **overwrite** `.cw/context.json` so newly-added operator comments and resolutions reach this run. Read the existing file and compare both fields before deciding to skip.
 
 **Changing this idempotency guard, or debugging a stale `.cw/context.json`,** is
 rare — the rationale (#837) and the `.cw/context.json` vs `.claude/cw-context.json`

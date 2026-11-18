@@ -736,13 +736,11 @@ def _spawn_claimed_task(
         # ticket cites).
         from cw.dispatch.gating.context_json import (
             _invalidate_stale_context_json,
-            _raise_context_json_cleanup_error,
             _render_context_json_from_snapshot,
         )
 
         _invalidate_stale_context_json(task, client, worktree_path)
-        if not _render_context_json_from_snapshot(task, worktree_path):
-            _raise_context_json_cleanup_error()
+        _render_context_json_from_snapshot(task, worktree_path)
 
         executor = resolve_executor(task, client, native_daemon=resolved_native_daemon)
         # wall_clock_budget_seconds is always None since the process-kill-
