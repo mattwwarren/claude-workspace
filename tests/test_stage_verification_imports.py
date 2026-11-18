@@ -10,7 +10,7 @@ Caveat: the rule is direct, not transitive. ``cw.codex_review.__init__`` pulls
 ``_roles`` and ``core`` (which reach ``codex_runner`` and ``_profile``), and
 ``cw.codex_review_persist`` imports ``codex_runner``. A transitive purity test
 is unreachable without moving ``codex_review`` constants. Remaining coupling is
-recorded in ``_ALLOWED`` and tracked in the retained-coupling scope of #3710 for
+recorded in ``_ALLOWED`` and tracked by follow-up #3718 for
 the ``codex_fix_loop`` modules (``gates``, ``gate_autofix``, ``hook_failure``,
 ``guard_script``).
 """
