@@ -1,5 +1,8 @@
 """The ``cw outbox`` command group (#3705, RFC 0019 O1).
 
+``cw outbox drain`` (#3706, RFC 0019 O2) lives in :mod:`cw.cli.outbox_drain`
+and registers onto this group; the lazy map imports it alongside this module.
+
 ``cw outbox list`` is a pure read of the per-client outbox: it never reads a
 body, never recovers a claim and never writes. A claimed entry is annotated
 with the claimant verdict so an operator can tell a live claim from an orphaned
@@ -27,6 +30,8 @@ from cw.outbox import (
 )
 
 LIST_LIMIT_DEFAULT = 50
+# Also the static ``short_help`` in ``cw.cli._lazy`` (the two must agree).
+OUTBOX_GROUP_HELP = "Inspect and drain the per-client outbox of prose posts."
 
 _NO_ENTRIES = "No outbox entries."
 _HEADERS = ("id", "client", "state", "reason", "ticket", "producer", "created")
@@ -117,7 +122,7 @@ def _print_table(envelope: OutboxListEnvelope) -> None:
     )
 
 
-@main.group("outbox", help="Inspect the per-client outbox of prose posts.")
+@main.group("outbox", help=OUTBOX_GROUP_HELP)
 def outbox_group() -> None:
     """Inspect the outbox store (``state_dir()/outbox/<client>``)."""
 

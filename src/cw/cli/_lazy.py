@@ -207,7 +207,8 @@ LAZY_COMMANDS: Final[dict[str, LazyCommand]] = {
     "outbox": LazyCommand(
         "cw.cli.outbox",
         "outbox_group",
-        "Inspect the per-client outbox of prose posts.",
+        "Inspect and drain the per-client outbox of prose posts.",
+        also_import=("cw.cli.outbox_drain",),
     ),
     "peek": LazyCommand(
         "cw.cli.sessions",
