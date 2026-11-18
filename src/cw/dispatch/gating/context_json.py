@@ -8,7 +8,7 @@ sibling can import the logger name from here without a cycle.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 from cw.events import record_event
 from cw.exceptions import CwError
@@ -40,6 +40,16 @@ _LOGGER_NAME = "cw.dispatch"
 _log = logging.getLogger(_LOGGER_NAME)
 
 _RENDER_ERROR: RenderFailureCause = "render_error"
+
+
+class ContextJsonCleanupError(CwError):
+    """Refuse a spawn when stale context remains at the reader path."""
+
+    __slots__ = ()
+
+
+def _raise_context_json_cleanup_error() -> NoReturn:
+    raise ContextJsonCleanupError
 
 
 def _invalidate_stale_context_json(
@@ -86,7 +96,7 @@ def _emit_render_failure(
     """
     digest = digest_or_none(task.snapshot_digest)
     _log.warning(
-        "dispatch: ticket snapshot not rendered; spawning without .cw/context.json"
+        "dispatch: ticket snapshot not rendered; .cw/context.json unavailable"
         " ticket_id=%s client=%s cause=%s error_class=%s",
         task.ticket_id,
         task.client,
@@ -112,7 +122,7 @@ def _emit_render_failure(
         )
 
 
-def _remove_stale_context(task: TicketTask, worktree_path: Path) -> None:
+def _remove_stale_context(task: TicketTask, worktree_path: Path) -> bool:
     """Quarantine any ``.cw/context.json`` left by a prior session.
 
     The invalidation helper skips LOCAL executors, so a failed render must
@@ -121,6 +131,16 @@ def _remove_stale_context(task: TicketTask, worktree_path: Path) -> None:
     """
     stale_context = worktree_path / CONTEXT_JSON_RELATIVE_PATH
     quarantine = stale_context.with_name(f"{stale_context.name}.quarantined")
+
+    def _is_absent() -> bool:
+        try:
+            stale_context.stat()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return False
+
     try:
         # Rename first so the old content is never visible at the reader path
         # after a successful cleanup, even if the quarantine file already
@@ -128,7 +148,7 @@ def _remove_stale_context(task: TicketTask, worktree_path: Path) -> None:
         # available but unlink is.
         stale_context.replace(quarantine)
     except FileNotFoundError:
-        return
+        return _is_absent()
     except OSError as exc:
         try:
             stale_context.unlink(missing_ok=True)
@@ -140,7 +160,7 @@ def _remove_stale_context(task: TicketTask, worktree_path: Path) -> None:
                 task.client,
                 type(unlink_exc).__name__,
             )
-            return
+            return False
         _log.warning(
             "dispatch: quarantined stale .cw/context.json with fallback unlink"
             " ticket_id=%s client=%s error_class=%s",
@@ -148,17 +168,19 @@ def _remove_stale_context(task: TicketTask, worktree_path: Path) -> None:
             task.client,
             type(exc).__name__,
         )
+    return _is_absent()
 
 
-def _render_context_json_from_snapshot(task: TicketTask, worktree_path: Path) -> None:
+def _render_context_json_from_snapshot(task: TicketTask, worktree_path: Path) -> bool:
     """Re-render ``.cw/context.json`` from the snapshot store on spawn (RFC 0019 T1).
 
     A no-op without a row digest. Store-only: no tracker call, no lock. On a
-    failure any existing file is removed or quarantined, the spawn proceeds
-    without it, and the failure is recorded through :func:`_emit_render_failure`.
+    failure any existing file is removed or quarantined, the failure is
+    recorded through :func:`_emit_render_failure`, and the return value says
+    whether the spawn may safely proceed without the file.
     """
     if task.snapshot_digest is None:
-        return
+        return True
     cause: RenderFailureCause
     try:
         render_for_task(task, worktree_path)
@@ -167,6 +189,7 @@ def _render_context_json_from_snapshot(task: TicketTask, worktree_path: Path) ->
     except OSError as exc:
         cause, error_class = _RENDER_ERROR, type(exc).__name__
     else:
-        return
-    _remove_stale_context(task, worktree_path)
+        return True
+    cleanup_succeeded = _remove_stale_context(task, worktree_path)
     _emit_render_failure(task, cause, error_class)
+    return cleanup_succeeded

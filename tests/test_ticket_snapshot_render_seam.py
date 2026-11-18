@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -16,8 +17,6 @@ from tests._shared.ticket_context import make_snapshot
 from tests._ticket_view_helpers import ACME, ACME_TICKET, events_of, make_task
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from cw.models import TicketTask
 
 
@@ -120,13 +119,37 @@ def test_failed_render_removes_stale_context_json(tmp_path: Path) -> None:
     assert event.payload["cause"] == "missing"
 
 
-def test_render_failure_with_unremovable_context_still_spawns(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+def test_render_failure_with_unremovable_context_blocks_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    task, worktree = _seeded_task(tmp_path)
-    (worktree / ".cw").write_text("a regular file, not a dir", encoding="utf-8")
+    stale = tmp_path / "wt" / ".cw" / "context.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text('{"sentinel": "stale"}', encoding="utf-8")
+    original_replace = Path.replace
+    original_unlink = Path.unlink
+
+    def _reject_replace(self: Path, target: Path) -> None:
+        if self == stale:
+            msg = "rename denied"
+            raise OSError(msg)
+        original_replace(self, target)
+
+    def _reject_unlink(self: Path, *, missing_ok: bool = False) -> None:
+        if self == stale:
+            msg = "unlink denied"
+            raise OSError(msg)
+        original_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "replace", _reject_replace)
+    monkeypatch.setattr(Path, "unlink", _reject_unlink)
     with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
-        _render_context_json_from_snapshot(task, worktree)
+        can_spawn = _render_context_json_from_snapshot(
+            make_task(snapshot_digest="c" * 64), tmp_path / "wt"
+        )
+    assert not can_spawn
+    assert stale.exists()
     assert "could not remove stale .cw/context.json" in caplog.text
     (event,) = events_of(OrchestratorEventType.TICKET_SNAPSHOT_RENDER_FAILED)
-    assert event.payload["cause"] == "render_error"
+    assert event.payload["cause"] == "missing"
