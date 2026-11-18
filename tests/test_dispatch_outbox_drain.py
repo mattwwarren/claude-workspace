@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from cw.outbox_drain import run_drain
 
 from cw.config import state_dir
 from cw.dispatch import dispatch_tick
@@ -37,6 +36,7 @@ from cw.outbox import (
     clear_held,
     write_marker,
 )
+from cw.outbox_drain import run_drain
 from tests._clients_yaml import write_clients_yaml
 from tests._shared.lock_helpers import _hold_flock, spy_no_locks_held
 from tests._shared.outbox_builders import CLIENT, GhThread, client_config, enqueue
@@ -595,7 +595,7 @@ class TestTickPlacement:
 
         def _locked(**_kwargs: object) -> bool:
             msg = "held"
-            raise SessionsLockTimeoutError(msg)
+            raise SessionsLockTimeoutError(msg, lock_path=tmp_path, waited_s=0.0)
 
         monkeypatch.setattr("cw.dispatch.tick._reconcile_usage_limited", _locked)
 

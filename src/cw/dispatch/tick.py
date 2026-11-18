@@ -64,6 +64,7 @@ from cw.dispatch.lanes import (
     _record_client_freshness_block,
     _reset_client_freshness_blocks,
 )
+from cw.dispatch.outbox_drain import launch_outbox_drains
 
 _log = logging.getLogger("cw.dispatch")
 
@@ -178,6 +179,27 @@ def _reset_freshness_latch_unless_degraded(client_name: str) -> None:
     if gate is not None and gate.degraded(client_name):
         return
     _reset_client_freshness_blocks(client_name)
+
+
+def _tick_clients(
+    client_filter: str | None,
+) -> tuple[dict[str, ClientConfig], tuple[str, ...]]:
+    """This tick's clients (narrowed by *client_filter*) and every known name.
+
+    Launches the outbox drains for the narrowed clients. Extracted from
+    ``dispatch_tick`` (#3706) to keep it under the PLR statement cap.
+    """
+    clients = load_effective_clients()
+    # Captured before ``client_filter`` narrows the loop: a reconcile-derived
+    # limit is fleet-wide, so it arms every KNOWN client, not just the filtered
+    # one -- matching what the pre-#1409 single scalar did on that path.
+    known_client_names = tuple(clients)
+    if client_filter is not None:
+        clients = {client_filter: clients[client_filter]}
+    # Outbox drains (#3706): before every early return, so a usage-limited fleet
+    # still drains. A gh drain needs no lane, worktree or git.
+    launch_outbox_drains(clients)
+    return clients, known_client_names
 
 
 def _sweep_expired_diagnostics(config: OrchestratorConfig) -> None:
@@ -613,13 +635,7 @@ def dispatch_tick(
     usage_limit_clients: dict[str, datetime | None] = {}
     windows = usage_limited_until or {}
     _sweep_expired_diagnostics(config)
-    clients = load_effective_clients()
-    # Captured before ``client_filter`` narrows the loop: a reconcile-derived
-    # limit is fleet-wide, so it arms every KNOWN client, not just the filtered
-    # one -- matching what the pre-#1409 single scalar did on that path.
-    known_client_names = tuple(clients)
-    if client_filter is not None:
-        clients = {client_filter: clients[client_filter]}
+    clients, known_client_names = _tick_clients(client_filter)
     state = load_state()
     spawned = 0
 
