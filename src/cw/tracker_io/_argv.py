@@ -30,13 +30,17 @@ from cw.codex_review import (
     _exec_policy_argv,
     _reasoning_effort_argv,
 )
+from cw.models.bindings import TicketOp
 from cw.models.enums import SandboxMode
+from cw.models.orchestrator_config.constants import CODEX_BACKEND
 from cw.tracker import TRACKER_LINEAR
 from cw.tracker_io._verify import TrackerIoReason
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
+
+    from cw.models.bindings import TicketsBinding
 
 _log = logging.getLogger(__name__)
 
@@ -74,13 +78,40 @@ def validate_server_name(server: str) -> str:
     return server
 
 
-def comment_tools_for(tracker: str) -> tuple[str, str]:
-    """The (create, list) tools for *tracker*, or ``TRACKER_UNSUPPORTED``."""
-    tools = TRACKER_COMMENT_TOOLS.get(tracker)
-    if tools is None:
+def resolve_ticket_tool(
+    tickets: TicketsBinding | None,
+    backend: str,
+    op: TicketOp,
+    default: str | None,
+) -> str | None:
+    """The binding's tool name for *op* under *backend*, else *default*."""
+    if tickets is not None:
+        named = tickets.tool_name(backend, op)
+        if named is not None:
+            return named
+    return default
+
+
+def comment_tools_for(
+    tracker: str,
+    tickets: TicketsBinding | None = None,
+    backend: str = CODEX_BACKEND,
+) -> tuple[str, str]:
+    """The (create, list) tools for *tracker* under *backend*.
+
+    A tool the ``tickets`` binding names wins; the table is the default for
+    each. Raises ``TRACKER_UNSUPPORTED`` when either tool resolves to nothing.
+    """
+    defaults = TRACKER_COMMENT_TOOLS.get(tracker)
+    create_default, list_default = defaults if defaults is not None else (None, None)
+    create = resolve_ticket_tool(tickets, backend, TicketOp.COMMENT, create_default)
+    listing = resolve_ticket_tool(
+        tickets, backend, TicketOp.LIST_COMMENTS, list_default
+    )
+    if create is None or listing is None:
         msg = f"no tracker-IO comment tools for tracker {tracker!r}"
         raise TrackerIoConfigError(TrackerIoReason.TRACKER_UNSUPPORTED, msg)
-    return tools
+    return create, listing
 
 
 def _disable_others(server: str, other_servers: Sequence[str]) -> list[str]:
@@ -109,17 +140,17 @@ def _disable_others(server: str, other_servers: Sequence[str]) -> list[str]:
 def build_tracker_io_argv(
     *,
     server: str,
-    tracker: str,
+    tools: tuple[str, str],
     schema_path: Path,
     output_path: Path,
     other_servers: Sequence[str],
 ) -> list[str]:
     """Return the tracker-IO turn's ``codex exec`` argv (prompt goes on stdin).
 
-    Raises :class:`TrackerIoConfigError` for an unsupported *tracker* or a
+    *tools* is the pre-resolved (create, list) pair from
+    :func:`comment_tools_for`. Raises :class:`TrackerIoConfigError` for a
     *server* name that is not a plain identifier.
     """
-    tools = comment_tools_for(tracker)
     validate_server_name(server)
     allowlist = json.dumps(list(tools), separators=(",", ":"))
     return [

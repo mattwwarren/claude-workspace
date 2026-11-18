@@ -251,8 +251,13 @@ def build_task_message(
     *,
     ticket_id: str | None = None,
     plan_fetcher: PlanFetcher | None = None,
+    bindings_block: str | None = None,
 ) -> str | None:
     """Materialise the aider task context and return the path-free instruction.
+
+    *bindings_block* (#3703, RFC 0019 R2), when given, is prepended to the
+    task-context file: aider's whole prompt for the local harness, so the
+    block reaches the model through ``--read``. ``None`` prepends nothing.
 
     Reads .cw/plan.md plus the optional .cw/context.json ticket header exactly
     as before, but writes the concatenation to TASK_CONTEXT_RELATIVE_PATH and
@@ -299,6 +304,8 @@ def build_task_message(
             pass
 
     content = f"{header}## Implementation Plan\n\n{plan}"
+    if bindings_block is not None:
+        content = f"{bindings_block}\n{content}"
     task_context_path = worktree / TASK_CONTEXT_RELATIVE_PATH
     task_context_path.parent.mkdir(parents=True, exist_ok=True)
     # Truncating write: a retry into the same worktree must not read a prior

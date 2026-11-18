@@ -41,6 +41,7 @@ from cw._git import git_output
 from cw.auto_dev_result.parse import BLOCKER_REASON_VALIDATION_FAILED
 from cw.auto_dev_result.schema._vocab import PLAN_MISSING_CONTEXT_BLOCKER_REASON
 from cw.backend_mcp_config import declared_server_names
+from cw.bindings_block import bindings_block_for
 from cw.codex_fix_loop.commit import _git_commit, _staged_paths
 from cw.codex_fix_loop.cycle_restore import preserve_and_reset
 from cw.codex_fix_loop.gates import GateScope, plan_cycle_gates
@@ -79,6 +80,7 @@ from cw.contract_manifest import RenderError
 from cw.dev_queue import _PRE_DISPATCH_TRACKER_MCP_REASON
 from cw.local_runner import GitFacts, git_facts
 from cw.models import CODEX_BACKEND, OrchestratorEventType
+from cw.models.bindings import Harness
 from cw.models.branch import resolve_feature_branch
 from cw.models.enums import StageIdentifier
 from cw.plan_files import resolve_review_scope_tier
@@ -343,6 +345,9 @@ class _Run:
                 feedback=self.task.review_feedback,
                 allowed_files=allowed_files,
                 merge_note=merge_note,
+                bindings_block=bindings_block_for(
+                    self.client, Harness.CODEX, self.task.ticket_id
+                ),
             )
         except RenderError as exc:
             return ImplBlock(

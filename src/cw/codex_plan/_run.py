@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Final
 
 from cw.auto_dev_result.schema._vocab import PLAN_MISSING_CONTEXT_BLOCKER_REASON
 from cw.backend_mcp_config import McpState, declared_server_names, read_backend_mcp
+from cw.bindings_block import bindings_block_for
 from cw.codex_plan._argv import build_plan_argv, read_tools_for, require_read_only_argv
 from cw.codex_plan._post import post_plan_comment, render_park_comment
 from cw.codex_plan._prompt import (
@@ -88,6 +89,7 @@ from cw.dev_queue.lifecycle import _plan_body_signoff_ok
 from cw.dev_queue.operator_constraints import record_plan_constraints
 from cw.exceptions import CwError
 from cw.models import CODEX_BACKEND, OrchestratorEventType, Stage
+from cw.models.bindings import Harness
 from cw.models.enums import StageIdentifier
 from cw.plan_decisions import parse_plan_decisions
 from cw.plan_fingerprint import PLAN_DRAFT_RELATIVE_PATH, compute_plan_draft_fingerprint
@@ -130,7 +132,7 @@ class _McpTarget:
     """The turn's tracker read path: GitHub prefetch, or one MCP server."""
 
     server: str | None = None
-    tracker: str | None = None
+    tools: tuple[str, str] | None = None
 
     @property
     def github(self) -> bool:
@@ -219,7 +221,7 @@ class _Run:
         server = self.client.tracker_mcp_server(CODEX_BACKEND) or ""
         try:
             validate_server_name(server)
-            read_tools_for(kind.system)
+            tools = read_tools_for(kind.system, self.client.bindings.tickets)
         except TrackerIoConfigError as exc:
             return self._mcp_blocked(f"tracker {kind.system!r}: {exc}")
         reading = read_backend_mcp(CODEX_BACKEND, server, self.client.workspace_path)
@@ -228,7 +230,7 @@ class _Run:
             return self._mcp_blocked(
                 f"codex MCP server {server!r} is {state}: {reading.reason}"
             )
-        return _McpTarget(server=server, tracker=kind.system)
+        return _McpTarget(server=server, tools=tools)
 
     def _mcp_blocked(self, details: str) -> _Exit:
         return self.blocked(
@@ -265,6 +267,9 @@ class _Run:
                 ticket=ticket,
                 resume=resume,
                 approval_matches=approval,
+                bindings_block=bindings_block_for(
+                    self.client, Harness.CODEX, self.task.ticket_id
+                ),
             )
         except RenderError as exc:
             return self.blocked(
@@ -286,7 +291,7 @@ class _Run:
                     model=self.model,
                     reasoning_effort=self.reasoning_effort,
                     mcp_server=target.server,
-                    tracker=target.tracker,
+                    read_tools=target.tools,
                     other_servers=declared_server_names(CODEX_BACKEND) or (),
                 )
             except TrackerIoConfigError as exc:
