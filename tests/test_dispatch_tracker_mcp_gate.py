@@ -55,6 +55,21 @@ def _reset_warn_dedupe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("cw.dispatch.tracker_mcp_gate._WARNED_FAIL_OPEN", {})
 
 
+def _dispatch_warning_records(
+    caplog: pytest.LogCaptureFixture,
+) -> list[logging.LogRecord]:
+    """The gate's own WARNING records (``cw.dispatch``).
+
+    A client built from the legacy ``tracker_mcp_gate`` also logs the
+    ``cw.models.client`` deprecation warning (#3702), which is not the gate's.
+    """
+    return [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == "cw.dispatch"
+    ]
+
+
 def _client(
     repo: Path,
     gate: TrackerMcpGateConfig | None,
@@ -174,7 +189,7 @@ class TestFailOpen:
         with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
             assert _resolve(_client(repo, _enabled_gate()), _snapshot()) == {}
 
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        warnings = _dispatch_warning_records(caplog)
         assert len(warnings) == 1
         assert "missing" in warnings[0].getMessage()
         assert _BRANCH in warnings[0].getMessage()
@@ -190,7 +205,7 @@ class TestFailOpen:
             _resolve(client, _snapshot())
             _resolve(client, _snapshot())
 
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        warnings = _dispatch_warning_records(caplog)
         assert len(warnings) == 1
 
     def test_enabled_branch_does_not_exist_yet_fails_open(
@@ -203,7 +218,7 @@ class TestFailOpen:
             assert _resolve(_client(repo, _enabled_gate()), _snapshot()) == {}
 
         # The normal first-dispatch case is not warning-worthy.
-        assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert not _dispatch_warning_records(caplog)
 
     def test_enabled_malformed_json_fails_open_and_logs(
         self, make_git_repo: Callable[..., Path], caplog: pytest.LogCaptureFixture
@@ -213,7 +228,7 @@ class TestFailOpen:
         with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
             assert _resolve(_client(repo, _enabled_gate()), _snapshot()) == {}
 
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        warnings = _dispatch_warning_records(caplog)
         assert len(warnings) == 1
         assert "malformed" in warnings[0].getMessage()
 
@@ -225,7 +240,7 @@ class TestFailOpen:
         with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
             assert _resolve(_client(repo, _enabled_gate()), _snapshot()) == {}
 
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        warnings = _dispatch_warning_records(caplog)
         assert len(warnings) == 1
 
     def test_enabled_plugins_field_missing_entirely_fails_open_and_logs(
@@ -237,7 +252,7 @@ class TestFailOpen:
         with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
             assert _resolve(_client(repo, _enabled_gate()), _snapshot()) == {}
 
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        warnings = _dispatch_warning_records(caplog)
         assert len(warnings) == 1
         assert "enabledPlugins" in warnings[0].getMessage()
 
@@ -249,7 +264,7 @@ class TestFailOpen:
         with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
             assert _resolve(_client(repo, _enabled_gate()), _snapshot()) == {}
 
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        warnings = _dispatch_warning_records(caplog)
         assert len(warnings) == 1
         assert "enabledPlugins" in warnings[0].getMessage()
 
@@ -421,7 +436,7 @@ class TestScoping:
             git_in(repo, "checkout", "main")
             _resolve(client, _snapshot())
 
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        warnings = _dispatch_warning_records(caplog)
         assert len(warnings) == 2
 
 
@@ -455,7 +470,7 @@ def _count_reads(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
 
 
 def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
-    return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    return [r.getMessage() for r in _dispatch_warning_records(caplog)]
 
 
 _TRACKERS = ("github-issues", "linear", None)
