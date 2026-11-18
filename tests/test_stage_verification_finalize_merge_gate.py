@@ -1,4 +1,5 @@
-"""Tests for cw.codex_finalize._merge_gate: Step 4a as cw-run Python (#3062).
+"""Tests for cw.stage_verification.finalize_merge_gate: Step 4a as cw-run Python
+    (#3062).
 
 ``gh`` is a scripted :class:`FakeGhCli`, ``cw dev-queue adopted-prs`` the
 shared :class:`FakeCwCli`; git runs for real in sandboxed repos. The overlap
@@ -16,14 +17,14 @@ from unittest.mock import patch
 
 import pytest
 
-from cw.codex_finalize._merge_gate import (
+from cw.merge_probe import MergeTreeResult
+from cw.stage_verification.finalize_merge_gate import (
     ABSENT_FRICTION,
     DISABLED_FRICTION,
     OVERLAP_SCRIPT_NAME,
     MergeGateResult,
     run_merge_gate,
 )
-from cw.merge_probe import MergeTreeResult
 from tests._codex_review_helpers import fresh_impl_repo
 from tests._shared.git_repos import git_in
 from tests._tool_fakes import FakeCwCli, FakeGhCli, GhReply, stub_cw_cli
@@ -38,7 +39,7 @@ _ADOPTED = ["dev-queue", "adopted-prs", "-c", _CLIENT]
 _REAL_SCRIPT = (
     Path(__file__).resolve().parents[1] / ".claude" / "scripts" / OVERLAP_SCRIPT_NAME
 )
-_MERGE_TREE = "cw.codex_finalize._merge_gate._merge_tree"
+_MERGE_TREE = "cw.stage_verification.finalize_merge_gate._merge_tree"
 
 
 def _heads(*items: tuple[int, str]) -> str:
@@ -109,7 +110,7 @@ def h(make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch) -> Ha
 @pytest.fixture
 def real_script(monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(
-        "cw.codex_finalize._merge_gate.find_guard_script",
+        "cw.stage_verification.finalize_merge_gate.find_guard_script",
         lambda _worktree, _name: _REAL_SCRIPT,
     )
     return _REAL_SCRIPT
@@ -304,7 +305,7 @@ class TestFilterFailures:
             return real_run(argv, *args, **kwargs)
 
         with patch(
-            "cw.codex_finalize._merge_gate.subprocess.run",
+            "cw.stage_verification.finalize_merge_gate.subprocess.run",
             side_effect=_fail_the_filter,
         ):
             (clause,) = h.run().conflicts
@@ -473,7 +474,8 @@ class TestRealMergeTree:
         self._other_pr_ref(h, 9, "x = 2\n")
         unavailable = MergeTreeResult("unavailable", None, (), "git too old")
         with patch(
-            "cw.codex_finalize._merge_gate.merge_tree", return_value=unavailable
+            "cw.stage_verification.finalize_merge_gate.merge_tree",
+            return_value=unavailable,
         ):
             (clause,) = h.run().conflicts
         assert "merge-tree probe failed" in clause

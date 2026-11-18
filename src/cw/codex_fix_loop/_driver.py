@@ -92,12 +92,6 @@ from cw.codex_fix_loop.divergence import (
     render_divergence_report,
     total_anchor_lines,
 )
-from cw.codex_fix_loop.fence import fix_scope_allowlist
-from cw.codex_fix_loop.growth import (
-    DEFAULT_CUMULATIVE_GROWTH_BUDGET_LINES,
-    DEFAULT_GROWTH_BUDGET_LINES,
-    start_loop_budget,
-)
 from cw.codex_fix_loop.park import (
     _clean_exit,
     _contested_exit,
@@ -130,6 +124,12 @@ from cw.models.operator_constraint import split_constraints
 from cw.models.usage import UsageStage
 from cw.review_convergence import unread_from_verdict
 from cw.review_findings import has_contested_decision
+from cw.stage_verification.fence import fix_scope_allowlist
+from cw.stage_verification.growth import (
+    DEFAULT_CUMULATIVE_GROWTH_BUDGET_LINES,
+    DEFAULT_GROWTH_BUDGET_LINES,
+    start_loop_budget,
+)
 from cw.tracker import tracker_kind
 
 if TYPE_CHECKING:
@@ -146,7 +146,6 @@ if TYPE_CHECKING:
     from cw.codex_fix_loop.convergence import _OpenFindingKey
     from cw.codex_fix_loop.coverage import DeltaGap
     from cw.codex_fix_loop.divergence import DivergenceState
-    from cw.codex_fix_loop.growth import RunGrowth
     from cw.codex_fix_loop.rounds import CycleObserver
     from cw.codex_fix_loop.snapshot import _PersistedSnapshot
     from cw.codex_review._engine_round import EngineRoundSpec
@@ -158,6 +157,7 @@ if TYPE_CHECKING:
         DebtRecord,
         ReviewVerdict,
     )
+    from cw.stage_verification.growth import RunGrowth
 
 # Maximum fix cycles attempted before parking a still-blocking review.
 _MAX_FIX_CYCLES = 5
@@ -549,7 +549,7 @@ def run_review_with_fix_loop(
     forwarded as ``settled_suppression`` to cycle 0 and every re-review.
     ``run_growth`` (#2816) shares the cumulative growth budget's anchor and
     finding union across every loop call of one clean-mode run
-    (:func:`cw.codex_fix_loop.growth.start_loop_budget`). Both default to
+    (:func:`cw.stage_verification.growth.start_loop_budget`). Both default to
     ``None``, which leaves the loop unchanged (blocking mode).
 
     ``max_prompt_chars`` (#2867) is the backend's prompt limit, forwarded to

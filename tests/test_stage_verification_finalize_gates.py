@@ -1,4 +1,5 @@
-"""Tests for cw.codex_finalize._gates: override, branch, fence, gates (#3062).
+"""Tests for cw.stage_verification.finalize_gates: override, branch, fence, gates
+    (#3062).
 
 Real ``git`` repos through ``tests/_git_sandbox`` and stubs under the per-test
 HOME. The ``cw review ...`` CLI the fence shells out to is replaced by
@@ -18,9 +19,15 @@ from unittest.mock import patch
 import pytest
 
 from cw.auto_dev_result import AutoDevResult
-from cw.codex_finalize import _gates
-from cw.codex_finalize._ci_evidence import CiContext, DeferredGate
-from cw.codex_finalize._gates import (
+from cw.codex_fix_loop.gates import GateFailure, GatePlan, PlannedGate
+from cw.codex_review import CODEX_FIX_DIRTY_START
+from cw.dev_queue.gates import APPROVAL_PARK_FRICTION_PREFIX, STALE_TIP_FRICTION_PREFIX
+from cw.local_runner import git_facts
+from cw.models import ClientConfig, TicketTask
+from cw.models.branch import resolve_feature_branch
+from cw.stage_verification import finalize_gates as _gates
+from cw.stage_verification.finalize_ci_evidence import CiContext, DeferredGate
+from cw.stage_verification.finalize_gates import (
     APPROVAL_CHECK_PREFIX,
     APPROVAL_NOT_REQUIRED,
     APPROVAL_RECORDED,
@@ -37,7 +44,7 @@ from cw.codex_finalize._gates import (
     run_finalize_quality_gates,
     run_must_fix_override,
 )
-from cw.codex_finalize._result import (
+from cw.stage_verification.finalize_result import (
     AGENT_BLOCK,
     CODEX_MUST_FIX_FINDINGS,
     OPERATOR_UNAVAILABLE,
@@ -46,12 +53,6 @@ from cw.codex_finalize._result import (
     FinalizeBlock,
     FinalizeFacts,
 )
-from cw.codex_fix_loop.gates import GateFailure, GatePlan, PlannedGate
-from cw.codex_review import CODEX_FIX_DIRTY_START
-from cw.dev_queue.gates import APPROVAL_PARK_FRICTION_PREFIX, STALE_TIP_FRICTION_PREFIX
-from cw.local_runner import git_facts
-from cw.models import ClientConfig, TicketTask
-from cw.models.branch import resolve_feature_branch
 from tests._codex_review_helpers import fresh_impl_repo, install_home_prep_pr_state
 from tests._shared.git_repos import git_in
 from tests._tool_fakes import FakeCwCli, GhReply, stub_cw_cli
@@ -91,7 +92,9 @@ def _park_word(payload: dict[str, Any]) -> str:
 class TestRunCwCli:
     def test_runs_python_dash_m_cw_in_the_worktree(self, tmp_path: Path) -> None:
         done = subprocess.CompletedProcess([], 0, "ok", "")
-        with patch("cw.codex_finalize._gates.subprocess.run", return_value=done) as run:
+        with patch(
+            "cw.stage_verification.finalize_gates.subprocess.run", return_value=done
+        ) as run:
             assert run_cw_cli(tmp_path, ["review", "x"]) is done
         argv = run.call_args.args[0]
         assert argv == [sys.executable, "-m", "cw", "review", "x"]
@@ -103,7 +106,9 @@ class TestRunCwCli:
     def test_a_launch_failure_or_timeout_is_none(
         self, tmp_path: Path, error: BaseException
     ) -> None:
-        with patch("cw.codex_finalize._gates.subprocess.run", side_effect=error):
+        with patch(
+            "cw.stage_verification.finalize_gates.subprocess.run", side_effect=error
+        ):
             assert run_cw_cli(tmp_path, ["review"]) is None
 
 
@@ -123,7 +128,8 @@ class TestResolveTier:
     def test_an_unresolved_tier_is_a_block_never_a_guess(self, repo: Path) -> None:
         task = TicketTask(ticket_id=_TICKET, client=_CLIENT)
         with patch(
-            "cw.codex_finalize._gates.resolve_review_scope_tier", return_value=None
+            "cw.stage_verification.finalize_gates.resolve_review_scope_tier",
+            return_value=None,
         ):
             block = resolve_tier(task, None, git_facts(repo, "main"))
         assert isinstance(block, FinalizeBlock)
@@ -316,7 +322,9 @@ class TestMustFixOverride:
         self, repo: Path, error: BaseException
     ) -> None:
         _override_script(code=0)
-        with patch("cw.codex_finalize._gates.subprocess.run", side_effect=error):
+        with patch(
+            "cw.stage_verification.finalize_gates.subprocess.run", side_effect=error
+        ):
             block = run_must_fix_override(repo, _HEAD).block
         assert block is not None
         assert block.reason == OPERATOR_UNAVAILABLE
@@ -738,8 +746,14 @@ class TestQualityGates:
 
         head = git_in(gated, "rev-parse", "HEAD")
         with (
-            patch("cw.codex_finalize._gates.plan_cycle_gates", return_value=plan),
-            patch("cw.codex_finalize._gates.run_cycle_gates", side_effect=_capture),
+            patch(
+                "cw.stage_verification.finalize_gates.plan_cycle_gates",
+                return_value=plan,
+            ),
+            patch(
+                "cw.stage_verification.finalize_gates.run_cycle_gates",
+                side_effect=_capture,
+            ),
         ):
             block, friction = _gates_run(gated, path)
         assert block is None
@@ -763,8 +777,14 @@ class TestQualityGates:
             why=None,
         )
         with (
-            patch("cw.codex_finalize._gates.plan_cycle_gates", return_value=plan),
-            patch("cw.codex_finalize._gates.run_cycle_gates", return_value=failure),
+            patch(
+                "cw.stage_verification.finalize_gates.plan_cycle_gates",
+                return_value=plan,
+            ),
+            patch(
+                "cw.stage_verification.finalize_gates.run_cycle_gates",
+                return_value=failure,
+            ),
         ):
             block, _ = _gates_run(gated, path)
         assert block is not None

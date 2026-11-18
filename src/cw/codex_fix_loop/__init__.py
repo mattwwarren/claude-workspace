@@ -22,16 +22,18 @@ must target the submodule that looks it up at call time
   delta re-review, with the prompt-size park (#2867, #2877, #2888).
 - ``commit`` — one cycle's fix invocation, out-of-scope sensitive-path check,
   and commit (argv/prompt builders included).
-- ``baseline`` — the per-cycle clean-start baseline and the measurement of
+- ``stage_verification.baseline`` — the per-cycle clean-start baseline and the
+  measurement of
   what a cycle itself changed (#2633).
 - ``cycle_restore`` — pins a refused cycle's edits under
   ``refs/cw/refused-cycles/`` and resets the worktree to HEAD, so the worktree
   reads clean for a requeue (#2967).
 - ``restore_report`` — the ``CycleRestore`` outcome record and its park text,
   re-exported by ``cycle_restore`` (#3268).
-- ``fence`` — the fix-cycle scope fence (#2485) and revert guard (#2492),
+- ``stage_verification.fence`` — the fix-cycle scope fence (#2485) and revert guard
+  (#2492),
   checked on the cycle's measured changes before it is committed.
-- ``growth`` — the in-file growth budget and its lock, state-file and
+- ``stage_verification.growth`` — the in-file growth budget and its lock, state-file and
   path-constant detectors (#2633), plus :class:`RunGrowth`, the cumulative
   budget's anchor shared across one clean-mode run's loop calls (#2816).
 - ``constraints`` — the operator's binding constraints from the resolutions
@@ -51,7 +53,8 @@ must target the submodule that looks it up at call time
 - ``duplicate_reader`` — the duplicate-reader signal (#2667): parks a cycle
   that adds a reader, parser or snapshot helper while an open finding says it
   duplicates an existing function. Hooked from ``commit._growth_breach``.
-- ``posted_text`` — the one redact-and-cap helper for text a guard posts.
+- ``stage_verification.posted_text`` — the one redact-and-cap helper for text a guard
+  posts.
 - ``park`` — the terminal park/clean-exit builders and the terminal
   ``Review`` reconstruction.
 - ``snapshot`` — per-cycle ``ReviewVerdict`` snapshot persist/finalize and the
@@ -65,7 +68,7 @@ must target the submodule that looks it up at call time
   (#2665).
 - ``loop_citation`` — loop-added symbol extraction and the finding-text match
   behind that attribution (#2665); pure, no git.
-- ``push`` — push-and-verify for fix-cycle commits (#2354).
+- ``stage_verification.push`` — push-and-verify for fix-cycle commits (#2354).
 - ``seed`` — merges a dirty Claude confirm round's MUST_FIX findings into the
   cycle-0 verdict (#2807).
 - ``rounds`` — the per-cycle observer seam (``CycleRound``, ``RoundStop``,
@@ -83,9 +86,9 @@ from cw.codex_fix_loop.commit import (
     _build_fix_prompt,
     _commit_fix_cycle,
 )
-from cw.codex_fix_loop.growth import RunGrowth
 from cw.codex_fix_loop.rounds import CycleObserver, CycleRound, RoundStop
 from cw.codex_review._const import FIX_CYCLE_FLOOR_SECONDS
+from cw.stage_verification.growth import RunGrowth
 
 __all__ = [
     "FIX_CYCLE_FLOOR_SECONDS",

@@ -1,4 +1,5 @@
-"""Tests for cw.codex_finalize._arm: the seam check, the arm, verification (#3062).
+"""Tests for cw.stage_verification.finalize_arm: the seam check, the arm, verification
+    (#3062).
 
 ``prep_pr_finalize.py`` is a stub under the per-test HOME (the arm goes through
 that script only; cw never calls ``gh pr merge``). ``gh`` reads for the
@@ -15,7 +16,8 @@ from unittest.mock import patch
 
 import pytest
 
-from cw.codex_finalize._arm import (
+from cw.reconcile.review_recipes.repair_git import ArmOutcome
+from cw.stage_verification.finalize_arm import (
     _VERIFIED_STATES,
     FAILING_CHECKS_PREFIX,
     FREEZE_PREFIX,
@@ -24,9 +26,8 @@ from cw.codex_finalize._arm import (
     check_automerge_allowed,
     verify_pr_state,
 )
-from cw.codex_finalize._pr import PR_MERGED, PR_OPEN
-from cw.codex_finalize._result import FinalizeBlock
-from cw.reconcile.review_recipes.repair_git import ArmOutcome
+from cw.stage_verification.finalize_pr import PR_MERGED, PR_OPEN
+from cw.stage_verification.finalize_result import FinalizeBlock
 from tests._tool_fakes import FakeGhCli, ScriptStub, stub_prep_pr_finalize
 
 _URL = "https://github.com/o/r/pull/7"
@@ -100,7 +101,9 @@ class TestCheckAutomergeAllowed:
         self, repo: Path, error: BaseException
     ) -> None:
         _stub()
-        with patch("cw.codex_finalize._arm.subprocess.run", side_effect=error):
+        with patch(
+            "cw.stage_verification.finalize_arm.subprocess.run", side_effect=error
+        ):
             block = _blocked(check_automerge_allowed(repo, _PR_INFO))
         assert block.reason == "operator_unavailable"
         assert block.retry_eligible is True
@@ -200,7 +203,7 @@ class TestArm:
     ) -> None:
         _stub()
         outcome = ArmOutcome(returncode=None, status="", stderr_tail="timed out")
-        with patch("cw.codex_finalize._arm._run_arm", return_value=outcome):
+        with patch("cw.stage_verification.finalize_arm._run_arm", return_value=outcome):
             block = _arm(repo).block
         assert block is not None
         assert block.reason == "operator_unavailable"
@@ -278,7 +281,7 @@ def _verify(
 
 class TestVerifyPrState:
     def test_the_verified_states_are_the_shared_pr_constants(self) -> None:
-        """#3550: the PR states come from ``codex_finalize._pr``."""
+        """#3550: the PR states come from ``stage_verification.finalize_pr``."""
         assert {PR_OPEN, PR_MERGED} == _VERIFIED_STATES
 
     def test_an_armed_open_pr_with_green_checks_verifies(

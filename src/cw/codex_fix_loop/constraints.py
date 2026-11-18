@@ -39,14 +39,6 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw._git import git_output
-from cw.codex_fix_loop.baseline import cycle_diff
-from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, SETTLE_FINDING_HINT, FenceBreach
-from cw.codex_fix_loop.growth import AdditionKind, detect_additions, is_source_path
-from cw.codex_fix_loop.posted_text import (
-    POSTED_TEXT_MAX_CHARS,
-    describe_added_line,
-    redact_and_cap,
-)
 from cw.codex_review import (
     CODEX_FIX_CONSTRAINT_VIOLATION,
     CODEX_FIX_LOOP_GROWTH_GUARD_KEY,
@@ -59,13 +51,25 @@ from cw.models.operator_constraint import (
     render_decided_entries,
     split_constraints,
 )
+from cw.stage_verification.baseline import cycle_diff
+from cw.stage_verification.fence import (
+    LEFT_STAGED_HINT,
+    SETTLE_FINDING_HINT,
+    FenceBreach,
+)
+from cw.stage_verification.growth import AdditionKind, detect_additions, is_source_path
+from cw.stage_verification.posted_text import (
+    POSTED_TEXT_MAX_CHARS,
+    describe_added_line,
+    redact_and_cap,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
     from pathlib import Path
 
-    from cw.codex_fix_loop.baseline import CycleBaseline
     from cw.models.operator_constraint import OperatorConstraint
+    from cw.stage_verification.baseline import CycleBaseline
 
 RESOLUTIONS_MARKER = "<!-- auto-dev-preflight-resolutions -->"
 # Pipeline-authored comments that quote the marker but never direct anything.

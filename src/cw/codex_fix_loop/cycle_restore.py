@@ -45,16 +45,16 @@ from typing import TYPE_CHECKING
 
 from cw._git import git_output
 from cw._lock_guard import LockRank, lock_guard
-from cw.codex_fix_loop.baseline import (
+from cw.codex_fix_loop.restore_report import CycleRestore, apply_to_breach, failure_note
+from cw.events import record_event
+from cw.exceptions import CwError
+from cw.models.enums import OrchestratorEventType
+from cw.stage_verification.baseline import (
     CycleBaseline,
     best_effort_dirty_paths,
     capture_cycle_baseline,
     unstage_review_artifacts,
 )
-from cw.codex_fix_loop.restore_report import CycleRestore, apply_to_breach, failure_note
-from cw.events import record_event
-from cw.exceptions import CwError
-from cw.models.enums import OrchestratorEventType
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

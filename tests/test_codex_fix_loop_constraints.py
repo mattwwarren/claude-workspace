@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.codex_fix_loop.baseline import cycle_touched_paths
 from cw.codex_fix_loop.constraints import (
     RESOLUTIONS_MARKER,
     SECTION_HEADING,
@@ -22,15 +21,16 @@ from cw.codex_fix_loop.constraints import (
     select_constraint_comment,
     with_row_constraints,
 )
-from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, SETTLE_FINDING_HINT
-from cw.codex_fix_loop.growth import AdditionKind
-from cw.codex_fix_loop.posted_text import WITHHELD
 from cw.codex_review import CODEX_FIX_CONSTRAINT_VIOLATION
 from cw.models.operator_constraint import (
     OperatorConstraint,
     render_constraint_entries,
     render_decided_entries,
 )
+from cw.stage_verification.baseline import cycle_touched_paths
+from cw.stage_verification.fence import LEFT_STAGED_HINT, SETTLE_FINDING_HINT
+from cw.stage_verification.growth import AdditionKind
+from cw.stage_verification.posted_text import WITHHELD
 from tests._codex_review_helpers import _head_baseline, _observed_comments, _write
 from tests._shared.git_repos import git_in
 from tests._shared.review_builders import _make_constraint
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.codex_fix_loop.constraints import ConstraintViolation, OperatorConstraints
-    from cw.codex_fix_loop.fence import FenceBreach
+    from cw.stage_verification.fence import FenceBreach
 
 _LOGIN = "operator-login"
 _RESOLUTIONS_HEADER = "## Pre-flight Resolutions (operator)"

@@ -1,4 +1,5 @@
-"""Tests for cw.codex_fix_loop.baseline — the per-cycle clean-start baseline (#2633).
+"""Tests for cw.stage_verification.baseline — the per-cycle clean-start baseline
+    (#2633).
 
 Every capture test also asserts that capture never stages: the index and the
 unmerged entries are the same afterwards as before.
@@ -12,7 +13,9 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw import codex_review_persist
-from cw.codex_fix_loop.baseline import (
+from cw.codex_review import _parse_unified_diff
+from cw.review_findings import REVIEW_VERDICT_JSON_RELATIVE_PATH
+from cw.stage_verification.baseline import (
     _CW_REVIEW_ARTIFACTS,
     CycleBaseline,
     DirtyStart,
@@ -23,8 +26,6 @@ from cw.codex_fix_loop.baseline import (
     diff_since,
     staged_cycle_tree,
 )
-from cw.codex_review import _parse_unified_diff
-from cw.review_findings import REVIEW_VERDICT_JSON_RELATIVE_PATH
 from tests._codex_review_helpers import (
     _head_baseline,
     _seed_conflicting_cherry_pick,
@@ -506,7 +507,7 @@ class TestBestEffortDirtyPaths:
         monkeypatch: pytest.MonkeyPatch,
         error: BaseException,
     ) -> None:
-        from cw.codex_fix_loop import baseline
+        from cw.stage_verification import baseline
 
         repo = _repo(make_git_repo, "bdp-fail")
 

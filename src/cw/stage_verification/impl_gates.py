@@ -1,6 +1,6 @@
 """cw-run guards and gates for the codex IMPL stage (#3061, RFC 0018 C2).
 
-Every function returns an :class:`~cw.codex_impl._result.ImplBlock` (or
+Every function returns an :class:`~cw.stage_verification.impl_block.ImplBlock` (or
 ``None``): the one IMPL-worded block value. The fix-loop breach builders in
 :mod:`cw.codex_fix_loop` word their ``details`` and ``recovery_hint`` for a
 REVIEW cycle ("requeue REVIEW", ``cw review settle``); :func:`fence_block`
@@ -28,17 +28,9 @@ from cw.auto_dev_result.schema._vocab import (
     EMPTY_DIFF_STATUS,
     PLAN_SCOPE_DRIFT_BLOCKER_REASON,
 )
-from cw.codex_fix_loop.commit import scope_violations
-from cw.codex_fix_loop.fence import scope_violation_breach
 from cw.codex_fix_loop.gates import run_cycle_gates
 from cw.codex_fix_loop.guard_script import find_guard_script, script_marker_ok
 from cw.codex_fix_loop.hook_failure import CommitHookFailedError, hook_failure_breach
-from cw.codex_fix_loop.posted_text import redact_and_cap
-from cw.codex_impl._result import (
-    IMPL_FAILED,
-    PLAN_MISSING,
-    ImplBlock,
-)
 from cw.codex_review import (
     CODEX_ERROR,
     CODEX_FIX_DIRTY_START,
@@ -48,6 +40,13 @@ from cw.codex_review import (
     CODEX_FIX_SCOPE_DRIFT,
 )
 from cw.executor._repair_entry import is_adopted_repair_entry
+from cw.stage_verification.fence import scope_violation_breach, scope_violations
+from cw.stage_verification.impl_block import (
+    IMPL_FAILED,
+    PLAN_MISSING,
+    ImplBlock,
+)
+from cw.stage_verification.posted_text import redact_and_cap
 from cw.worktree import _parse_numstat_totals
 
 if TYPE_CHECKING:
@@ -55,11 +54,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.auto_dev_result.schema._vocab import ScopeTier
-    from cw.codex_fix_loop.baseline import CycleBaseline, DirtyStart
-    from cw.codex_fix_loop.fence import FenceBreach
     from cw.codex_fix_loop.gates import GatePlan, GateScope
     from cw.local_runner import GitFacts
     from cw.models import TicketTask
+    from cw.stage_verification.baseline import CycleBaseline, DirtyStart
+    from cw.stage_verification.fence import FenceBreach
 
 SCOPE_SCRIPT_NAME: Final = "check_plan_scope_conformance.py"
 #: ``# cw-script-version: N`` minimum for the scope-conformance script (the

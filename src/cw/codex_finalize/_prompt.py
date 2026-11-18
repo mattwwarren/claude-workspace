@@ -24,7 +24,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
-from cw.codex_finalize._result import FinalizeTurnDocument
 from cw.codex_impl._prompt import _escape_injected_fences
 from cw.codex_plan._prompt import TICKET_SECTION, _section
 from cw.codex_plan._result import PLAN_MD_RELATIVE_PATH
@@ -33,6 +32,7 @@ from cw.contract_manifest._render import _STAGE_DOCS
 from cw.models import CODEX_BACKEND
 from cw.openai_strict_schema import to_openai_strict_schema
 from cw.review_adjudication import DEFERRED_FINDINGS_RELATIVE_PATH
+from cw.stage_verification.finalize_result import FinalizeTurnDocument
 
 if TYPE_CHECKING:
     from pathlib import Path

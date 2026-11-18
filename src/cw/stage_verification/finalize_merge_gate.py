@@ -25,12 +25,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from cw._git import git_clean_env, git_output, run_git
-from cw.codex_finalize._gates import run_cw_cli
-from cw.codex_finalize._result import AGENT_BLOCK, FinalizeBlock
 from cw.codex_fix_loop.guard_script import find_guard_script, script_marker_ok
-from cw.codex_fix_loop.posted_text import redact_and_cap
 from cw.gh import OpenPrHead, fetch_open_pr_heads, fetch_pr_changed_files
 from cw.merge_probe import merge_tree
+from cw.stage_verification.finalize_gates import run_cw_cli
+from cw.stage_verification.finalize_result import AGENT_BLOCK, FinalizeBlock
+from cw.stage_verification.posted_text import redact_and_cap
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

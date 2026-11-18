@@ -23,9 +23,7 @@ from freezegun import freeze_time
 
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_driver import run_codex_impl_stage
-from cw.codex_fix_loop.push import SYNTHETIC_MISMATCH_PREFIX
 from cw.codex_impl._argv import ImplArgvPolicyError
-from cw.codex_impl._result import ImplBlock
 from cw.codex_plan._argv import PLAN_READ_ONLY_ARGV, build_plan_argv
 from cw.codex_review import _CODEX_IMPL_BLOCKED_NEXT_ACTIONS, _exec_policy_argv
 from cw.codex_review._roles import _build_generic_codex_argv
@@ -48,6 +46,8 @@ from cw.models import (
 from cw.models.orchestrator_config.stage import ModelPrice
 from cw.models.review_feedback import ReviewFeedback
 from cw.models.usage import UsageStage, UsageState, UsageUnavailableReason
+from cw.stage_verification.impl_block import ImplBlock
+from cw.stage_verification.push import SYNTHETIC_MISMATCH_PREFIX
 from cw.tracker import TRACKER_LINEAR
 from cw.tracker_io._argv import build_tracker_io_argv
 from tests._backend_mcp_helpers import codex_tracker_client
@@ -515,7 +515,9 @@ def test_merge_conflict_with_default_branch_on_fresh_row_blocks(
 ) -> None:
     h = harness()
     conflict = MergeProbe("conflict", "a" * 40, ("clash.py",), "")
-    with patch("cw.codex_impl._feedback.probe_default_merge", return_value=conflict):
+    with patch(
+        "cw.stage_verification.impl_feedback.probe_default_merge", return_value=conflict
+    ):
         result = h.run()
     _assert_block(result, "impl_failed")
     assert result.blocker is not None

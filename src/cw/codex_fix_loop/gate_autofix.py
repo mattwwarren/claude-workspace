@@ -21,7 +21,7 @@ parks only if that still fails. This module holds the pure pieces:
   keeps review artifacts and preserved ignored files intact, and raises
   ``CalledProcessError`` only when neither restores the tree (#3423).
 
-**Path spelling.** ``cw.codex_fix_loop.baseline.cycle_touched_paths`` reads
+**Path spelling.** ``cw.stage_verification.baseline.cycle_touched_paths`` reads
 ``git diff-tree --name-only`` without ``-z``, so a special or non-ASCII path
 arrives C-quoted (``"caf\\303\\251.py"``). The fence's ``touched`` set keeps
 that spelling. :func:`changed_paths` therefore has two modes: ``c_quoted=True``
@@ -45,8 +45,8 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw._git import git_output
-from cw.codex_fix_loop.baseline import staged_cycle_tree
 from cw.project_config import load_project_config_dict
+from cw.stage_verification.baseline import staged_cycle_tree
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

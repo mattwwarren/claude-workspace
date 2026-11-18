@@ -44,7 +44,6 @@ from cw.codex_confirm_feedback import (
     with_feedback_tokens,
 )
 from cw.codex_fix_loop import RunGrowth, run_review_with_fix_loop
-from cw.codex_fix_loop.push import push_and_verify_head, remote_branch_tip
 from cw.codex_lane_config import (
     _DEFAULT_CODEX_REVIEW_TIER_ENABLED,
     CodexFixLoopResolution,
@@ -99,6 +98,7 @@ from cw.models.enums import (
 )
 from cw.operator_identity import resolve_operator_login
 from cw.review_finding_dispositions import merge_finding_dispositions
+from cw.stage_verification.push import push_and_verify_head, remote_branch_tip
 from cw.tracker import tracker_kind
 from cw.worktree import _checked_out_branch
 

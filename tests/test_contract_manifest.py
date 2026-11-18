@@ -1253,7 +1253,7 @@ def test_awaiting_ci_evidence_sentinel_element() -> None:
     """#3618: the CI-evidence park sentinel carries the claude-native, opencode
     and local cells of its finalize sibling
     ``finalize.sentinel-automerge-not-armed``, and so does its codex cell: cw
-    builds the block in Python (``codex_finalize/_ci_evidence.py``)."""
+    builds the block in Python (``stage_verification/finalize_ci_evidence.py``)."""
     elements = _manifest().elements
     element = elements["finalize.sentinel-awaiting-ci-evidence"]
     sibling = elements["finalize.sentinel-automerge-not-armed"]
@@ -1264,7 +1264,7 @@ def test_awaiting_ci_evidence_sentinel_element() -> None:
     assert isinstance(codex, ImplementedDisposition)
     assert codex.ref == CodeRef(
         kind="code",
-        path="src/cw/codex_finalize/_ci_evidence.py",
+        path="src/cw/stage_verification/finalize_ci_evidence.py",
         symbol="awaiting_ci_evidence_block",
     )
 
@@ -1290,7 +1290,7 @@ def test_codex_gate_reasons_name_the_ci_evidence_deferral() -> None:
     for element_id in ("prep-pr.detect-quality-gates", "prep-pr.run-quality-gates"):
         cell = _real_cell(element_id, CODEX_BACKEND)
         assert isinstance(cell, NotApplicableDisposition)
-        assert "codex_finalize/_ci_evidence.py" in cell.reason, element_id
+        assert "stage_verification/finalize_ci_evidence.py" in cell.reason, element_id
         assert "quality_gates.ci_evidence" in cell.reason, element_id
         assert "awaiting_ci_evidence" in cell.reason, element_id
 
@@ -1422,7 +1422,9 @@ def _assert_codex_finalize_cell(element_id: str, cell: object) -> int | None:
     """A codex FINALIZE cell (#3062): a code ref, a reason, or a C3 follow-up."""
     if isinstance(cell, ImplementedDisposition):
         assert isinstance(cell.ref, CodeRef), element_id
-        assert cell.ref.path.startswith("src/cw/codex_finalize/"), element_id
+        assert cell.ref.path.startswith(
+            ("src/cw/codex_finalize/", "src/cw/stage_verification/")
+        ), element_id
         return None
     if isinstance(cell, NotApplicableDisposition):
         assert cell.reason.strip(), element_id
@@ -1472,21 +1474,45 @@ def test_codex_cells_follow_the_stage_ticket_map() -> None:
 
 #: The codex IMPL cells that point at a ``cw.codex_impl`` symbol (#3061).
 _C2_CODE_CELLS = {
-    "impl.review-feedback-guard": ("_feedback.py", "verify_review_feedback"),
-    "impl.repair-entry-no-plan": ("_gates.py", "run_scope_conformance"),
-    "impl.repair-entry-with-plan": ("_prompt.py", "render_impl_prompt"),
-    "impl.stage-2-completion": ("_result.py", "stamp_impl_result"),
-    "impl.marker-s2-completion": ("_result.py", "impl_commit_message"),
-    "impl.emit-through-cw-then-frame": ("_result.py", "parse_impl_turn"),
-    "impl.guard-script-path-resolution-and-staleness": (
-        "_gates.py",
+    "impl.review-feedback-guard": (
+        "src/cw/stage_verification/impl_feedback.py",
+        "verify_review_feedback",
+    ),
+    "impl.repair-entry-no-plan": (
+        "src/cw/stage_verification/impl_gates.py",
         "run_scope_conformance",
     ),
-    "impl.gate-orchestrator-completion": ("_gates.py", "run_quality_gates"),
-    "impl.file-set-is-within-plan-s": ("_gates.py", "run_scope_conformance"),
-    "impl.gate-1-why-empty-diff-check": ("_gates.py", "check_empty_diff"),
+    "impl.repair-entry-with-plan": (
+        "src/cw/codex_impl/_prompt.py",
+        "render_impl_prompt",
+    ),
+    "impl.stage-2-completion": ("src/cw/codex_impl/_result.py", "stamp_impl_result"),
+    "impl.marker-s2-completion": (
+        "src/cw/codex_impl/_result.py",
+        "impl_commit_message",
+    ),
+    "impl.emit-through-cw-then-frame": (
+        "src/cw/codex_impl/_result.py",
+        "parse_impl_turn",
+    ),
+    "impl.guard-script-path-resolution-and-staleness": (
+        "src/cw/stage_verification/impl_gates.py",
+        "run_scope_conformance",
+    ),
+    "impl.gate-orchestrator-completion": (
+        "src/cw/stage_verification/impl_gates.py",
+        "run_quality_gates",
+    ),
+    "impl.file-set-is-within-plan-s": (
+        "src/cw/stage_verification/impl_gates.py",
+        "run_scope_conformance",
+    ),
+    "impl.gate-1-why-empty-diff-check": (
+        "src/cw/stage_verification/impl_gates.py",
+        "check_empty_diff",
+    ),
     "orch.post-impl-scope-conformance-threshold": (
-        "_gates.py",
+        "src/cw/stage_verification/impl_gates.py",
         "run_scope_conformance",
     ),
 }
@@ -1497,9 +1523,7 @@ def test_codex_impl_code_cells_resolve_to_the_package(element_id: str) -> None:
     cell = _real_cell(element_id, CODEX_BACKEND)
     assert isinstance(cell, ImplementedDisposition)
     filename, symbol = _C2_CODE_CELLS[element_id]
-    assert cell.ref == CodeRef(
-        kind="code", path=f"src/cw/codex_impl/{filename}", symbol=symbol
-    )
+    assert cell.ref == CodeRef(kind="code", path=filename, symbol=symbol)
 
 
 _C2_CW_RUN_GATES = (
@@ -1549,52 +1573,124 @@ def test_codex_usage_accounting_cell_is_implemented_with_a_code_ref() -> None:
 #: ``cw.codex_finalize`` symbol (#3062): element id -> (file, symbol).
 _C3_CODE_CELLS = {
     "finalize.claude-review-verdict-md-if-present-is-this": (
-        "_gates.py",
+        "src/cw/stage_verification/finalize_gates.py",
         "run_must_fix_override",
     ),
     "finalize.resolve-carried-through-context-before-emitting": (
-        "_gates.py",
+        "src/cw/stage_verification/finalize_gates.py",
         "resolve_tier",
     ),
-    "finalize.must-fix-override-verification": ("_gates.py", "run_must_fix_override"),
-    "finalize.pre-stage-detector-guard": ("_pr.py", "detect_branch_pr"),
-    "finalize.large-tier-review-approval-check": ("_gates.py", "run_approval_fence"),
-    "finalize.clean-mode-final-tip-check": ("_gates.py", "run_approval_fence"),
-    "finalize.what-it-runs": ("_gates.py", "run_approval_fence"),
-    "finalize.on-failure": ("_gates.py", "run_approval_fence"),
+    "finalize.must-fix-override-verification": (
+        "src/cw/stage_verification/finalize_gates.py",
+        "run_must_fix_override",
+    ),
+    "finalize.pre-stage-detector-guard": (
+        "src/cw/stage_verification/finalize_pr.py",
+        "detect_branch_pr",
+    ),
+    "finalize.large-tier-review-approval-check": (
+        "src/cw/stage_verification/finalize_gates.py",
+        "run_approval_fence",
+    ),
+    "finalize.clean-mode-final-tip-check": (
+        "src/cw/stage_verification/finalize_gates.py",
+        "run_approval_fence",
+    ),
+    "finalize.what-it-runs": (
+        "src/cw/stage_verification/finalize_gates.py",
+        "run_approval_fence",
+    ),
+    "finalize.on-failure": (
+        "src/cw/stage_verification/finalize_gates.py",
+        "run_approval_fence",
+    ),
     "finalize.merge-gate-disabled-merge-gate-disabled-by-client-config": (
-        "_merge_gate.py",
+        "src/cw/stage_verification/finalize_merge_gate.py",
         "run_merge_gate",
     ),
-    "finalize.unavailability-classifier": ("_result.py", "classify_unavailability"),
-    "finalize.self-heal-arm-only-when-automerge-enabled": ("_arm.py", "arm"),
-    "finalize.post-push-mergeability-verification": ("_pr.py", "check_mergeability"),
-    "finalize.reuse-path-quality-gates": ("_gates.py", "run_finalize_quality_gates"),
-    "finalize.scope": ("_run.py", "run_finalize_stage_and_complete"),
-    "finalize.failure-headless": ("_result.py", "finalize_blocked"),
-    "finalize.post-to-linear": ("_post.py", "post_pr_link_comment"),
-    "finalize.stage-4-5-completion": ("_run.py", "run_finalize_stage_and_complete"),
-    "finalize.emit-through-cw-then-frame": ("_result.py", "finalize_shipped"),
-    "finalize.merge-gate-check": ("_merge_gate.py", "run_merge_gate"),
-    "finalize.adopted-pr-inventory-fails": ("_merge_gate.py", "run_merge_gate"),
-    "finalize.absent-from-both-locations": ("_merge_gate.py", "run_merge_gate"),
-    "finalize.compose-pr-title-in-parent": ("_result.py", "compose_pr_title"),
-    "finalize.main-session-re-verification": ("_arm.py", "verify_pr_state"),
-    "finalize.enable-auto-merge": ("_arm.py", "arm"),
-    "finalize.sentinel-merge-conflict-post-push": ("_pr.py", "probe_default"),
-    "finalize.unavailability-classifier-signature-table-sentinel": (
-        "_result.py",
+    "finalize.unavailability-classifier": (
+        "src/cw/stage_verification/finalize_result.py",
         "classify_unavailability",
     ),
-    "finalize.cw-side-classification": ("_result.py", "classify_unavailability"),
-    "finalize.push-sites-covered": ("_pr.py", "push_ahead"),
-    "finalize.sentinel-automerge-not-armed": ("_arm.py", "arm"),
+    "finalize.self-heal-arm-only-when-automerge-enabled": (
+        "src/cw/stage_verification/finalize_arm.py",
+        "arm",
+    ),
+    "finalize.post-push-mergeability-verification": (
+        "src/cw/stage_verification/finalize_pr.py",
+        "check_mergeability",
+    ),
+    "finalize.reuse-path-quality-gates": (
+        "src/cw/stage_verification/finalize_gates.py",
+        "run_finalize_quality_gates",
+    ),
+    "finalize.scope": (
+        "src/cw/codex_finalize/_run.py",
+        "run_finalize_stage_and_complete",
+    ),
+    "finalize.failure-headless": (
+        "src/cw/stage_verification/finalize_result.py",
+        "finalize_blocked",
+    ),
+    "finalize.post-to-linear": (
+        "src/cw/codex_finalize/_post.py",
+        "post_pr_link_comment",
+    ),
+    "finalize.stage-4-5-completion": (
+        "src/cw/codex_finalize/_run.py",
+        "run_finalize_stage_and_complete",
+    ),
+    "finalize.emit-through-cw-then-frame": (
+        "src/cw/stage_verification/finalize_result.py",
+        "finalize_shipped",
+    ),
+    "finalize.merge-gate-check": (
+        "src/cw/stage_verification/finalize_merge_gate.py",
+        "run_merge_gate",
+    ),
+    "finalize.adopted-pr-inventory-fails": (
+        "src/cw/stage_verification/finalize_merge_gate.py",
+        "run_merge_gate",
+    ),
+    "finalize.absent-from-both-locations": (
+        "src/cw/stage_verification/finalize_merge_gate.py",
+        "run_merge_gate",
+    ),
+    "finalize.compose-pr-title-in-parent": (
+        "src/cw/stage_verification/finalize_result.py",
+        "compose_pr_title",
+    ),
+    "finalize.main-session-re-verification": (
+        "src/cw/stage_verification/finalize_arm.py",
+        "verify_pr_state",
+    ),
+    "finalize.enable-auto-merge": ("src/cw/stage_verification/finalize_arm.py", "arm"),
+    "finalize.sentinel-merge-conflict-post-push": (
+        "src/cw/stage_verification/finalize_pr.py",
+        "probe_default",
+    ),
+    "finalize.unavailability-classifier-signature-table-sentinel": (
+        "src/cw/stage_verification/finalize_result.py",
+        "classify_unavailability",
+    ),
+    "finalize.cw-side-classification": (
+        "src/cw/stage_verification/finalize_result.py",
+        "classify_unavailability",
+    ),
+    "finalize.push-sites-covered": (
+        "src/cw/stage_verification/finalize_pr.py",
+        "push_ahead",
+    ),
+    "finalize.sentinel-automerge-not-armed": (
+        "src/cw/stage_verification/finalize_arm.py",
+        "arm",
+    ),
     "finalize.sentinel-awaiting-ci-evidence": (
-        "_ci_evidence.py",
+        "src/cw/stage_verification/finalize_ci_evidence.py",
         "awaiting_ci_evidence_block",
     ),
     "finalize.reuse-path-gate-failure-agent-block-sentinel": (
-        "_gates.py",
+        "src/cw/stage_verification/finalize_gates.py",
         "run_finalize_quality_gates",
     ),
 }
@@ -1624,9 +1720,7 @@ def test_codex_finalize_code_cells_resolve_to_the_package(
     cell = _real_cell(element_id, CODEX_BACKEND)
     assert isinstance(cell, ImplementedDisposition)
     filename, symbol = _C3_CODE_CELLS[element_id]
-    assert cell.ref == CodeRef(
-        kind="code", path=f"src/cw/codex_finalize/{filename}", symbol=symbol
-    )
+    assert cell.ref == CodeRef(kind="code", path=filename, symbol=symbol)
     resolve = make_resolver(_REPO_ROOT, _prompt_for_stage(tmp_path))
     assert resolve(cell.ref) is None
 
@@ -1657,7 +1751,10 @@ def test_codex_prep_pr_and_ship_it_cells_are_not_applicable() -> None:
         assert "cw does this in Python" in cell.reason, element_id
     gates = _real_cell("prep-pr.run-quality-gates", CODEX_BACKEND)
     assert isinstance(gates, NotApplicableDisposition)
-    assert "codex_finalize/_gates.py::run_finalize_quality_gates" in gates.reason
+    assert (
+        "stage_verification/finalize_gates.py::run_finalize_quality_gates"
+        in gates.reason
+    )
 
 
 def test_no_codex_cell_is_fails_closed() -> None:

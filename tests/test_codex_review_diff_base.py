@@ -22,10 +22,10 @@ import pytest
 
 from cw._git import git_output
 from cw.codex_fix_loop.divergence import pre_loop_diff_lines
-from cw.codex_fix_loop.fence import check_fix_fence
 from cw.codex_review import CODEX_FIX_REVERTED_BRANCH, _capture_diff
 from cw.codex_review._capability import _CodexFilesystemCapability, _CodexFingerprint
 from cw.codex_review._context import _prepare_review_pass
+from cw.stage_verification.fence import check_fix_fence
 from cw.worktree import _parse_numstat_totals
 from tests._codex_review_helpers import _measured_from_head, _task
 from tests._review_convergence_helpers import (

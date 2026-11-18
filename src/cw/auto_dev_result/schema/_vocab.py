@@ -373,7 +373,7 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             "codex_must_fix_findings",
             "codex_must_fix_mechanically_rejected",
             # #3060 (RFC 0018 C1): the codex PLAN executor's own gate set B;
-            # owned by cw.codex_plan._gates.
+            # owned by cw.stage_verification.plan_gates.
             "codex_plan_artifact_missing",
             "codex_plan_gate_failed",
             "codex_review_partial",
@@ -384,7 +384,7 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             "no_result_emitted",
             "pr_already_open_pre_dispatch",
             # #3062 (RFC 0018 C3): the codex FINALIZE executor's own reasons;
-            # owned by cw.codex_finalize._result (lockstep-pinned in
+            # owned by cw.stage_verification.finalize_result (lockstep-pinned in
             # tests/test_auto_dev_result.py).
             "pr_already_terminal",
             "merge_conflict_post_push",

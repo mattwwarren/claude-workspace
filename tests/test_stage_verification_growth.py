@@ -1,4 +1,4 @@
-"""Tests for cw.codex_fix_loop.growth — the in-file growth budget (#2633)."""
+"""Tests for cw.stage_verification.growth — the in-file growth budget (#2633)."""
 
 from __future__ import annotations
 
@@ -7,9 +7,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.codex_fix_loop.baseline import cycle_touched_paths
-from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, SETTLE_FINDING_HINT
-from cw.codex_fix_loop.growth import (
+from cw.codex_review import CODEX_FIX_GROWTH_BUDGET, _parse_unified_diff
+from cw.stage_verification.baseline import cycle_touched_paths
+from cw.stage_verification.fence import LEFT_STAGED_HINT, SETTLE_FINDING_HINT
+from cw.stage_verification.growth import (
     DEFAULT_GROWTH_BUDGET_LINES,
     AdditionKind,
     LoopGrowthBudget,
@@ -22,12 +23,11 @@ from cw.codex_fix_loop.growth import (
     net_source_lines,
     start_loop_budget,
 )
-from cw.codex_fix_loop.posted_text import (
+from cw.stage_verification.posted_text import (
     POSTED_TEXT_MAX_CHARS,
     TRUNCATION_MARKER,
     describe_added_line,
 )
-from cw.codex_review import CODEX_FIX_GROWTH_BUDGET, _parse_unified_diff
 from tests._codex_review_helpers import _head_baseline, _write
 from tests._shared.git_repos import git_in
 from tests._shared.review_builders import _make_finding
@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from cw.codex_fix_loop.fence import FenceBreach
+    from cw.stage_verification.fence import FenceBreach
 
 
 def _diff(path: str, added: list[str], removed: tuple[str, ...] = ()) -> str:
