@@ -38,40 +38,12 @@ from typing import TYPE_CHECKING, Any, Final
 from cw._git import git_output
 from cw.auto_dev_result.schema._vocab import PLAN_MISSING_CONTEXT_BLOCKER_REASON
 from cw.backend_mcp_config import McpState, declared_server_names, read_backend_mcp
+from cw.bindings_block import bindings_block_for
 from cw.codex_finalize._argv import (
     build_finalize_argv,
     require_read_only_finalize_argv,
 )
-from cw.codex_finalize._arm import arm, check_automerge_allowed, verify_pr_state
-from cw.codex_finalize._ci_evidence import (
-    CiContext,
-    DeferredGate,
-    awaiting_ci_evidence_block,
-    ci_pr_info,
-    release_ci_hold,
-)
-from cw.codex_finalize._gates import (
-    check_branch,
-    gate_scope,
-    resolve_tier,
-    run_approval_fence,
-    run_finalize_quality_gates,
-    run_must_fix_override,
-)
-from cw.codex_finalize._merge_gate import run_merge_gate
 from cw.codex_finalize._post import post_pr_link_comment
-from cw.codex_finalize._pr import (
-    PR_MERGED,
-    BoundPr,
-    DetectedPr,
-    apply_override_section,
-    bind_live_pr,
-    check_mergeability,
-    create_pr_for,
-    detect_branch_pr,
-    probe_default,
-    push_ahead,
-)
 from cw.codex_finalize._prompt import (
     FINALIZE_DOCS,
     FINALIZE_TURN_SCHEMA,
@@ -79,19 +51,6 @@ from cw.codex_finalize._prompt import (
     read_artifact,
     render_finalize_prompt,
 )
-from cw.codex_finalize._result import (
-    OPERATOR_UNAVAILABLE,
-    PRIOR_PIPELINE_PR_OPEN,
-    FinalizeBlock,
-    FinalizeFacts,
-    FinalizeTurnDocument,
-    compose_pr_title,
-    finalize_blocked,
-    finalize_merge_gate_blocked,
-    finalize_shipped,
-    parse_finalize_turn,
-)
-from cw.codex_fix_loop.posted_text import redact_and_cap
 from cw.codex_plan._prompt import command_docs_root, prefetch_ticket
 from cw.codex_review import (
     CODEX_ERROR,
@@ -121,8 +80,55 @@ from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     OrchestratorEventType,
 )
+from cw.models.bindings import Harness
 from cw.models.branch import resolve_feature_branch
 from cw.models.enums import StageIdentifier
+from cw.stage_verification.finalize_arm import (
+    arm,
+    check_automerge_allowed,
+    verify_pr_state,
+)
+from cw.stage_verification.finalize_ci_evidence import (
+    CiContext,
+    DeferredGate,
+    awaiting_ci_evidence_block,
+    ci_pr_info,
+    release_ci_hold,
+)
+from cw.stage_verification.finalize_gates import (
+    check_branch,
+    gate_scope,
+    resolve_tier,
+    run_approval_fence,
+    run_finalize_quality_gates,
+    run_must_fix_override,
+)
+from cw.stage_verification.finalize_merge_gate import run_merge_gate
+from cw.stage_verification.finalize_pr import (
+    PR_MERGED,
+    BoundPr,
+    DetectedPr,
+    apply_override_section,
+    bind_live_pr,
+    check_mergeability,
+    create_pr_for,
+    detect_branch_pr,
+    probe_default,
+    push_ahead,
+)
+from cw.stage_verification.finalize_result import (
+    OPERATOR_UNAVAILABLE,
+    PRIOR_PIPELINE_PR_OPEN,
+    FinalizeBlock,
+    FinalizeFacts,
+    FinalizeTurnDocument,
+    compose_pr_title,
+    finalize_blocked,
+    finalize_merge_gate_blocked,
+    finalize_shipped,
+    parse_finalize_turn,
+)
+from cw.stage_verification.posted_text import redact_and_cap
 from cw.tracker import TrackerClass, tracker_kind
 from cw.tracker_io import TrackerIoConfigError
 from cw.tracker_io._argv import validate_server_name
@@ -328,6 +334,9 @@ def _document(
             ticket=ticket,
             branch_facts=_branch_facts(state),
             override_json=state.override_json,
+            bindings_block=bindings_block_for(
+                run.client, Harness.CODEX, run.task.ticket_id
+            ),
         )
     except RenderError as exc:
         return FinalizeBlock(

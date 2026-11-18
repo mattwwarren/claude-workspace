@@ -27,28 +27,32 @@ import subprocess
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw._git import run_git
-from cw.codex_fix_loop.baseline import cycle_diff, diff_since
-from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, SETTLE_FINDING_HINT, FenceBreach
-from cw.codex_fix_loop.growth import is_source_path, removed_lines
-from cw.codex_fix_loop.posted_text import (
-    POSTED_TEXT_MAX_CHARS,
-    describe_added_line,
-    redact_and_cap,
-    withhold_secret_lines,
-)
 from cw.codex_review import (
     CODEX_FIX_GROWTH_BUDGET,
     CODEX_FIX_LOOP_GROWTH_GUARD_KEY,
     _parse_unified_diff,
+)
+from cw.stage_verification.baseline import cycle_diff, diff_since
+from cw.stage_verification.fence import (
+    LEFT_STAGED_HINT,
+    SETTLE_FINDING_HINT,
+    FenceBreach,
+)
+from cw.stage_verification.growth import is_source_path, removed_lines
+from cw.stage_verification.posted_text import (
+    POSTED_TEXT_MAX_CHARS,
+    describe_added_line,
+    redact_and_cap,
+    withhold_secret_lines,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
 
-    from cw.codex_fix_loop.baseline import CycleBaseline
-    from cw.codex_fix_loop.growth import LoopGrowthBudget
     from cw.review_findings import Finding
+    from cw.stage_verification.baseline import CycleBaseline
+    from cw.stage_verification.growth import LoopGrowthBudget
 
 # A reader-like helper: a name token that starts with one of these stems.
 _READER_STEMS = ("read", "pars", "load", "snapshot", "decod", "extract")

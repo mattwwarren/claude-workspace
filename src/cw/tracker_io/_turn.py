@@ -141,7 +141,7 @@ def _preflight(
 ) -> tuple[str, tuple[str, str]] | TrackerIoReason:
     """The server name and tools, or why the turn must not launch."""
     try:
-        tools = comment_tools_for(tracker)
+        tools = comment_tools_for(tracker, client.bindings.tickets, CODEX_BACKEND)
         # A missing servers.codex entry is "" here: MCP_SERVER_UNNAMED too.
         server = validate_server_name(client.tracker_mcp_server(CODEX_BACKEND) or "")
         validate_ticket_id(ticket_id)
@@ -197,7 +197,6 @@ def _launch(
     *,
     server: str,
     tools: tuple[str, str],
-    tracker: str,
     context: TrackerIoContext,
 ) -> TrackerIoOutcome:
     """Run the turn once in a fresh scratch directory, always removed."""
@@ -217,7 +216,7 @@ def _launch(
         try:
             argv = build_tracker_io_argv(
                 server=server,
-                tracker=tracker,
+                tools=tools,
                 schema_path=schema,
                 output_path=scratch / _RESULT_NAME,
                 other_servers=_other_servers(),
@@ -260,9 +259,7 @@ def post_parts_via_turn(
         parts = ()
     if not parts:
         return _refused(TrackerIoReason.PLAN_REFUSED)
-    outcome = _launch(
-        ticket_id, parts, server=server, tools=tools, tracker=tracker, context=context
-    )
+    outcome = _launch(ticket_id, parts, server=server, tools=tools, context=context)
     if outcome.verified:
         _log.info(
             "tracker_io_posted ticket=%s session=%s ids=%s",

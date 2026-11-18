@@ -81,6 +81,7 @@ from cw.cli.review import (  # noqa: F401  (command registration side effects)
     check_approval,
     commands,
     confirm,
+    confirm_job,
     consolidate,
     constrain,
     converge,

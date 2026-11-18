@@ -9,8 +9,10 @@ the cw-stamped sentinel, the stage events and the completion door.
 
 Modules: :mod:`._argv` (the launch site), :mod:`._prompt` (the rendered prompt
 and its injected sections), :mod:`._result` (the turn document, the stamper,
-blocked results and the commit message), :mod:`._gates` (the guards, gates and
-breach mappers), :mod:`._feedback` (the live-PR bind and the default-branch
+blocked results and the commit message), :mod:`cw.stage_verification.impl_gates` (the
+guards, gates and
+breach mappers), :mod:`cw.stage_verification.impl_feedback` (the live-PR bind and the
+default-branch
 merge) and :mod:`._run` (the ordered flow, :func:`run_impl_stage_and_complete`).
 It composes the stage-neutral :mod:`cw.codex_fix_loop` primitives and calls
 neither ``_run_fix_and_commit`` nor ``_commit_fix_cycle``.
@@ -25,15 +27,17 @@ from cw.codex_impl._argv import (
 )
 from cw.codex_impl._prompt import render_impl_prompt
 from cw.codex_impl._result import (
-    IMPL_BLOCKED,
     IMPL_COMPLETE_TRAILER,
-    IMPL_FAILED,
     IMPL_NOT_PUSHED,
     IMPL_STAGE_COMPLETE,
     IMPL_STATUSES,
-    PLAN_MISSING,
 )
 from cw.codex_impl._run import run_impl_stage_and_complete
+from cw.stage_verification.impl_block import (
+    IMPL_BLOCKED,
+    IMPL_FAILED,
+    PLAN_MISSING,
+)
 
 __all__ = [
     "IMPL_BLOCKED",

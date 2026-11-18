@@ -744,7 +744,7 @@ _GIT_ARGV_DATA_ALLOWLIST: dict[tuple[str, str, str], int] = {
     ): 1,
     ("tests/test_codex_fix_loop_hook_repair.py", "_failure", "argv-data"): 1,
     (
-        "tests/test_codex_fix_loop_push.py",
+        "tests/test_stage_verification_push.py",
         "test_push_and_verify_head_raises_on_push_failure",
         "comparison",
     ): 1,

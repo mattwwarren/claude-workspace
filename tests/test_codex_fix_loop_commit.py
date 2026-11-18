@@ -14,17 +14,11 @@ import pytest
 
 from cw._git import git_output as _real_git_output
 from cw.codex_fix_loop import _build_fix_prompt, _commit_fix_cycle, commit
-from cw.codex_fix_loop.baseline import CycleBaseline, DirtyStart
 from cw.codex_fix_loop.commit import (
     _FIX_SCOPE_RULES,
     _build_repair_prompt,
     _repair_standing_sections,
 )
-from cw.codex_fix_loop.fence import (
-    StagedSetMismatchError,
-    scope_violation_breach,
-)
-from cw.codex_fix_loop.growth import LoopGrowthBudget
 from cw.codex_review import (
     CODEX_FIX_DIRTY_START,
     CODEX_FIX_HOOK_FAILED,
@@ -35,6 +29,13 @@ from cw.codex_review import (
 )
 from cw.codex_runner import CodexRunResult
 from cw.executor_diagnostics import diagnostics_bundle_dir
+from cw.stage_verification import fence
+from cw.stage_verification.baseline import CycleBaseline, DirtyStart
+from cw.stage_verification.fence import (
+    StagedSetMismatchError,
+    scope_violation_breach,
+)
+from cw.stage_verification.growth import LoopGrowthBudget
 from tests._codex_review_helpers import (
     _install_pre_commit_hook,
     _measured_from_head,
@@ -63,7 +64,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult
-    from cw.codex_fix_loop.fence import FenceBreach
+    from cw.stage_verification.fence import FenceBreach
 
 _SENSITIVE = {
     ".claude/sensitive-files.yml": _MANIFEST,
@@ -799,7 +800,7 @@ class TestScopeViolationsConfigSource:
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-scope-no-manifest")
 
-        hits = commit.scope_violations(
+        hits = fence.scope_violations(
             worktree, ["pyproject.toml"], frozenset(), "small", "main"
         )
 
@@ -811,7 +812,7 @@ class TestScopeViolationsConfigSource:
         worktree = _worktree(make_git_repo, "wt-scope-manifest", manifest=_SENSITIVE)
         _write(worktree / ".claude" / "sensitive-files.yml", "sensitive_files: []\n")
 
-        hits = commit.scope_violations(
+        hits = fence.scope_violations(
             worktree, ["pyproject.toml"], frozenset(), "small", "main"
         )
 
@@ -822,7 +823,7 @@ class TestScopeViolationsConfigSource:
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-scope-unresolved", manifest=_SENSITIVE)
 
-        hits = commit.scope_violations(
+        hits = fence.scope_violations(
             worktree,
             ["a.py", "pyproject.toml", "kept.py"],
             frozenset({"kept.py"}),
@@ -845,7 +846,7 @@ class TestScopeViolationsConfigSource:
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-scope-unresolved-clean")
 
-        hits = commit.scope_violations(
+        hits = fence.scope_violations(
             worktree, ["kept.py"], frozenset({"kept.py"}), "small", "no-such-branch"
         )
 
@@ -855,7 +856,7 @@ class TestScopeViolationsConfigSource:
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-scope-unresolved-park")
-        hits = commit.scope_violations(
+        hits = fence.scope_violations(
             worktree, ["a.py"], frozenset(), "small", "no-such-branch"
         )
 

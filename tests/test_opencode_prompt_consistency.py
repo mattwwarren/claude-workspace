@@ -6,6 +6,9 @@ Three properties, each pinned here rather than in the older prompt test file:
   IMPL prompt reads it alongside the claude-native ``plan-spec-reviewed`` marker;
 * the PLAN prompt forges no review sign-off marker (it runs no review stations);
 * the FINALIZE prompt emits and frames its result exactly as the doc does.
+
+The tracker wording comes from the rendered ``Bindings`` block (#3703), one
+variant per shape: gh, Linear MCP, unset, and no block passed (the default).
 """
 
 from __future__ import annotations
@@ -15,34 +18,56 @@ from pathlib import Path
 
 import pytest
 
+from cw.bindings_block import render_bindings_block
+from cw.models.bindings import Bindings, Harness
 from cw.opencode_runner import (
     PLAN_AUDIT_MARKER,
     _sentinel_rules,
     build_stage_prompt,
 )
-from cw.opencode_tracker_prompt import tracker_ops_fragment
-from cw.tracker import TrackerKind
-from tests._opencode_helpers import GH_TRACKER, LINEAR_TRACKER, UNSET_TRACKER
+from tests._shared.bindings_builders import bindings_github_cli, bindings_linear_mcp
 from tests._shared.workflow_text import _cmd
 
-_TRACKERS = [GH_TRACKER, LINEAR_TRACKER, UNSET_TRACKER, None]
+_TICKET = "T-1"
+_UNSET_BLOCK = render_bindings_block(Bindings(), Harness.OPENCODE, ticket_id=_TICKET)
+_BLOCKS: list[str | None] = [
+    render_bindings_block(bindings_github_cli(), Harness.OPENCODE, ticket_id=_TICKET),
+    render_bindings_block(bindings_linear_mcp(), Harness.OPENCODE, ticket_id=_TICKET),
+    _UNSET_BLOCK,
+    None,
+]
+_BLOCK_IDS = ["gh", "linear", "unset", "none"]
 _MARKER_LINE = "<!-- cw-opencode-plan: T-1 -->"
 _MARKER_RE = re.compile(r"<!-- [a-z-]+")
 _SRC = Path(__file__).parent.parent / "src" / "cw"
 
+#: The step-1 sentences and the manifest needle set the rewritten prompts carry.
+_PLAN_STEP_ONE = (
+    "Live-fetch the ticket body and ALL comments using the `tickets` binding in "
+    "the bindings block above."
+)
+_IMPL_STEP_ONE = (
+    "Read and post comments with the `tickets` binding in the bindings block above."
+)
+_NEEDLES = (
+    "tracker_tool_unavailable",
+    "plan_missing_context",
+    "body and ALL comments",
+    "Write the full plan verbatim to .cw/plan.md",
+)
+
 
 def _prompt(
     stage: str,
-    tracker: TrackerKind | None = None,
+    block: str | None = None,
     session_id: str | None = None,
 ) -> str:
     return build_stage_prompt(
         stage,
-        "T-1",
+        _TICKET,
         Path("/wt"),
         session_id,
-        tracker=tracker,
-        tracker_server="linear",
+        bindings_block=block,
     )
 
 
@@ -50,11 +75,11 @@ def test_plan_audit_marker_constant() -> None:
     assert PLAN_AUDIT_MARKER == "<!-- cw-opencode-plan"
 
 
-@pytest.mark.parametrize("tracker", _TRACKERS, ids=["gh", "linear", "unset", "none"])
+@pytest.mark.parametrize("block", _BLOCKS, ids=_BLOCK_IDS)
 def test_plan_prompt_tells_the_audit_copy_to_end_with_the_marker_line(
-    tracker: TrackerKind | None,
+    block: str | None,
 ) -> None:
-    plan = _prompt("plan", tracker)
+    plan = _prompt("plan", block)
     assert (
         "The last line of the audit-copy comment must be exactly "
         f"`{_MARKER_LINE}`" in plan
@@ -63,11 +88,31 @@ def test_plan_prompt_tells_the_audit_copy_to_end_with_the_marker_line(
     assert "Write the full plan verbatim to .cw/plan.md" in plan
 
 
-@pytest.mark.parametrize("tracker", _TRACKERS, ids=["gh", "linear", "unset", "none"])
-def test_impl_prompt_reads_the_marker_the_plan_writes(
-    tracker: TrackerKind | None,
-) -> None:
-    impl = _prompt("impl", tracker)
+@pytest.mark.parametrize("block", _BLOCKS, ids=_BLOCK_IDS)
+def test_plan_and_impl_step_one_name_the_bindings_block(block: str | None) -> None:
+    plan = _prompt("plan", block)
+    impl = _prompt("impl", block)
+    assert _PLAN_STEP_ONE in plan
+    assert _IMPL_STEP_ONE in impl
+
+
+@pytest.mark.parametrize("block", _BLOCKS, ids=_BLOCK_IDS)
+def test_plan_carries_the_manifest_needle_set(block: str | None) -> None:
+    prompt = _prompt("plan", block)
+    for needle in _NEEDLES:
+        assert needle in prompt, needle
+
+
+@pytest.mark.parametrize("block", _BLOCKS, ids=_BLOCK_IDS)
+def test_plan_and_impl_always_name_the_blocker_for_no_tool(block: str | None) -> None:
+    """The failure paragraph or unset line is rendered for every variant."""
+    for stage in ("plan", "impl"):
+        assert "`tracker_tool_unavailable`" in _prompt(stage, block), stage
+
+
+@pytest.mark.parametrize("block", _BLOCKS, ids=_BLOCK_IDS)
+def test_impl_prompt_reads_the_marker_the_plan_writes(block: str | None) -> None:
+    impl = _prompt("impl", block)
     assert (
         "ticket comment containing either marker: the ticket-specific marker "
         "`<!-- cw-opencode-plan: T-1 -->` (written by an opencode PLAN; it "
@@ -83,23 +128,23 @@ def test_impl_prompt_reads_the_marker_the_plan_writes(
     assert PLAN_AUDIT_MARKER in impl
     assert ".cw/plan.md" in impl
     assert "plan_missing" in impl
-    assert tracker_ops_fragment("T-1", tracker, "linear") in impl
+    assert (block or _UNSET_BLOCK) in impl
 
 
-@pytest.mark.parametrize("tracker", _TRACKERS, ids=["gh", "linear", "unset", "none"])
-def test_plan_prompt_forges_no_review_signoff(tracker: TrackerKind | None) -> None:
+@pytest.mark.parametrize("block", _BLOCKS, ids=_BLOCK_IDS)
+def test_plan_prompt_forges_no_review_signoff(block: str | None) -> None:
     """Kill-check against the rejected option: PLAN must not write a review marker."""
-    plan = _prompt("plan", tracker)
+    plan = _prompt("plan", block)
     assert "plan-spec-reviewed" not in plan
     assert "plan-soundness-reviewed" not in plan
     assert "write no review sign-off marker of any kind" in plan
     assert set(_MARKER_RE.findall(plan)) == {PLAN_AUDIT_MARKER}
 
 
-@pytest.mark.parametrize("tracker", _TRACKERS, ids=["gh", "linear", "unset", "none"])
-def test_impl_prompt_markers_all_have_a_writer(tracker: TrackerKind | None) -> None:
+@pytest.mark.parametrize("block", _BLOCKS, ids=_BLOCK_IDS)
+def test_impl_prompt_markers_all_have_a_writer(block: str | None) -> None:
     """Equality, not subset: also fails if a reader is dropped."""
-    impl = _prompt("impl", tracker)
+    impl = _prompt("impl", block)
     assert set(_MARKER_RE.findall(impl)) == {
         PLAN_AUDIT_MARKER,
         "<!-- plan-spec-reviewed",

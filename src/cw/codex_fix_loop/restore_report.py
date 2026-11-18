@@ -12,7 +12,7 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass
 
-from cw.codex_fix_loop.fence import LEFT_STAGED_HINT, FenceBreach
+from cw.stage_verification.fence import LEFT_STAGED_HINT, FenceBreach
 
 MAX_NAMED_PATHS = 20
 

@@ -241,6 +241,17 @@ class TicketsBinding(RoleBinding):
         realization = self.realization(backend)
         return None if realization is None else realization.server
 
+    def tool_name(self, backend: str, op: TicketOp) -> str | None:
+        """The configured tool name for *op* under *backend*, or None.
+
+        None when the harness has no realization, or the realization names no
+        tool for *op*. Callers fall back to their own defaults.
+        """
+        realization = self.realization(backend)
+        if realization is None or realization.tools is None:
+            return None
+        return realization.tools.get(op)
+
     @property
     def claude_plugin_id(self) -> str | None:
         """The claude-native ``enabledPlugins`` key of the tracker plugin, or None."""

@@ -36,17 +36,8 @@ from typing import TYPE_CHECKING, Final
 
 from cw.auto_dev_result.schema._vocab import PLAN_MISSING_CONTEXT_BLOCKER_REASON
 from cw.backend_mcp_config import McpState, declared_server_names, read_backend_mcp
+from cw.bindings_block import bindings_block_for, effective_tickets_system
 from cw.codex_plan._argv import build_plan_argv, read_tools_for, require_read_only_argv
-from cw.codex_plan._gates import (
-    CODEX_PLAN_ARTIFACT_MISSING,
-    ApprovalCheck,
-    GateFailure,
-    check_artifact,
-    check_large_tier_approval,
-    check_plan_files,
-    check_scope_tier,
-    has_approval_evidence,
-)
 from cw.codex_plan._post import post_plan_comment, render_park_comment
 from cw.codex_plan._prompt import (
     PLAN_TURN_SCHEMA,
@@ -98,10 +89,21 @@ from cw.dev_queue.lifecycle import _plan_body_signoff_ok
 from cw.dev_queue.operator_constraints import record_plan_constraints
 from cw.exceptions import CwError
 from cw.models import CODEX_BACKEND, OrchestratorEventType, Stage
+from cw.models.bindings import Harness, TicketsBinding
 from cw.models.enums import StageIdentifier
 from cw.plan_decisions import parse_plan_decisions
 from cw.plan_fingerprint import PLAN_DRAFT_RELATIVE_PATH, compute_plan_draft_fingerprint
-from cw.tracker import TrackerClass, tracker_kind
+from cw.stage_verification.plan_gates import (
+    CODEX_PLAN_ARTIFACT_MISSING,
+    ApprovalCheck,
+    GateFailure,
+    check_artifact,
+    check_large_tier_approval,
+    check_plan_files,
+    check_scope_tier,
+    has_approval_evidence,
+)
+from cw.tracker import TRACKER_GITHUB_ISSUES, TrackerClass, tracker_kind
 from cw.tracker_io import TrackerIoConfigError
 from cw.tracker_io._argv import validate_server_name
 
@@ -130,7 +132,7 @@ class _McpTarget:
     """The turn's tracker read path: GitHub prefetch, or one MCP server."""
 
     server: str | None = None
-    tracker: str | None = None
+    tools: tuple[str, str] | None = None
 
     @property
     def github(self) -> bool:
@@ -212,23 +214,34 @@ class _Run:
     def mcp_target(self) -> _McpTarget | _Exit:
         """The tracker read path, or the run-time tracker-MCP backstop's block."""
         kind = tracker_kind(self.client.workspace_path)
-        if kind.tracker_class is not TrackerClass.OTHER or kind.system is None:
+        tickets = self.client.bindings.tickets
+        effective_system = effective_tickets_system(tickets, kind.system)
+        if effective_system == TRACKER_GITHUB_ISSUES:
             return _McpTarget()
-        if self.client.bindings.tickets is None:
+        if tickets is None:
+            if kind.tracker_class is not TrackerClass.OTHER or kind.system is None:
+                return _McpTarget()
             return self._mcp_blocked(f"tracker {kind.system!r}: tracker_mcp_gate unset")
-        server = self.client.tracker_mcp_server(CODEX_BACKEND) or ""
+        return self._binding_target(tickets, effective_system)
+
+    def _binding_target(
+        self, tickets: TicketsBinding, effective_system: str | None
+    ) -> _McpTarget | _Exit:
+        """The codex MCP read target named by a tickets binding."""
+        tracker = effective_system or ""
+        server = tickets.mcp_server(CODEX_BACKEND) or ""
         try:
             validate_server_name(server)
-            read_tools_for(kind.system)
+            tools = read_tools_for(tracker, tickets, CODEX_BACKEND)
         except TrackerIoConfigError as exc:
-            return self._mcp_blocked(f"tracker {kind.system!r}: {exc}")
+            return self._mcp_blocked(f"tracker {tracker!r}: {exc}")
         reading = read_backend_mcp(CODEX_BACKEND, server, self.client.workspace_path)
         if reading.state in (McpState.ABSENT, McpState.DISABLED):
             state = reading.state.value
             return self._mcp_blocked(
                 f"codex MCP server {server!r} is {state}: {reading.reason}"
             )
-        return _McpTarget(server=server, tracker=kind.system)
+        return _McpTarget(server=server, tools=tools)
 
     def _mcp_blocked(self, details: str) -> _Exit:
         return self.blocked(
@@ -265,6 +278,9 @@ class _Run:
                 ticket=ticket,
                 resume=resume,
                 approval_matches=approval,
+                bindings_block=bindings_block_for(
+                    self.client, Harness.CODEX, self.task.ticket_id
+                ),
             )
         except RenderError as exc:
             return self.blocked(
@@ -286,7 +302,7 @@ class _Run:
                     model=self.model,
                     reasoning_effort=self.reasoning_effort,
                     mcp_server=target.server,
-                    tracker=target.tracker,
+                    read_tools=target.tools,
                     other_servers=declared_server_names(CODEX_BACKEND) or (),
                 )
             except TrackerIoConfigError as exc:

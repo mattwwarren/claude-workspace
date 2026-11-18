@@ -23,7 +23,6 @@ import pytest
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_driver import run_codex_finalize_stage
 from cw.codex_finalize import _run
-from cw.codex_finalize._ci_evidence import CiContext
 from cw.codex_finalize._run import _context
 from cw.codex_review import _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS
 from cw.codex_runner import CodexRunResult
@@ -40,6 +39,7 @@ from cw.models import (
 )
 from cw.models.orchestrator_config.stage import ModelPrice
 from cw.models.usage import UsageStage, UsageState, UsageUnavailableReason
+from cw.stage_verification.finalize_ci_evidence import CiContext
 from cw.tracker import TRACKER_LINEAR
 from cw.tracker_io import TrackerIoContext, plan_turn_parts
 from tests._backend_mcp_helpers import codex_tracker_client, stage_mcp_config
@@ -608,7 +608,9 @@ def test_a_reused_conflicting_pr_is_not_armed(
     h = harness()
     h.gh.reply("pr", "list", "--head", BRANCH, stdout=_pr_list("OPEN"))
     conflict = MergeProbe("conflict", "a" * 40, ("clash.py",), "")
-    with patch("cw.codex_impl._feedback.probe_default_merge", return_value=conflict):
+    with patch(
+        "cw.stage_verification.impl_feedback.probe_default_merge", return_value=conflict
+    ):
         result = h.run()
     _assert_block(result, "merge_conflict_post_push", stage="stage5_post_create")
     assert result.blocker is not None
@@ -973,7 +975,10 @@ def test_a_scope_tier_that_cannot_be_resolved_blocks_never_guesses(
     harness: Callable[..., Harness],
 ) -> None:
     h = harness(plan=None)
-    with patch("cw.codex_finalize._gates.resolve_review_scope_tier", return_value=None):
+    with patch(
+        "cw.stage_verification.finalize_gates.resolve_review_scope_tier",
+        return_value=None,
+    ):
         result = h.run()
     _assert_block(result, "scope_tier_unresolvable")
     assert h.gh.calls == []
@@ -1043,7 +1048,9 @@ def test_the_default_branch_conflict_blocks_before_the_push(
     h = harness(unpushed=1)
     tip = h.origin_tip()
     conflict = MergeProbe("conflict", "a" * 40, ("clash.py",), "")
-    with patch("cw.codex_impl._feedback.probe_default_merge", return_value=conflict):
+    with patch(
+        "cw.stage_verification.impl_feedback.probe_default_merge", return_value=conflict
+    ):
         result = h.run()
     _assert_block(result, "merge_conflict_post_push", stage="stage4b_pr_create")
     assert result.blocker is not None
@@ -1059,7 +1066,10 @@ def test_an_unavailable_probe_is_friction_and_the_run_continues(
     h = harness()
     h.turn()
     unavailable = MergeProbe("unavailable", None, (), "merge-tree broke")
-    with patch("cw.codex_impl._feedback.probe_default_merge", return_value=unavailable):
+    with patch(
+        "cw.stage_verification.impl_feedback.probe_default_merge",
+        return_value=unavailable,
+    ):
         result = h.run()
     assert result.status == "shipped"
     assert any(
@@ -1114,7 +1124,9 @@ def test_a_conflicting_sibling_pr_parks_merge_gate_blocked(
         stdout=json.dumps([{"number": 9, "headRefName": "dev/other"}]),
     )
     h.gh.reply("pr", "diff", "9", stdout="feature.py\n")
-    with patch("cw.codex_finalize._merge_gate._merge_tree", return_value="1"):
+    with patch(
+        "cw.stage_verification.finalize_merge_gate._merge_tree", return_value="1"
+    ):
         result = h.run()
     assert result.status == "merge_gate_blocked"
     assert result.stage_reached == "stage4a_merge_gate"

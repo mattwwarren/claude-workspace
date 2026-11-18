@@ -168,7 +168,8 @@ _PLAN_CODEX_ADDENDUM = (
     "plan_approved_at, plan_approved_fingerprint, plan_source): use jq, or "
     "cat the file if jq is absent.\n"
     "4. The ticket body and comments are injected below on GitHub; on any "
-    "other tracker read them with the MCP get_issue and list_comments tools.\n"
+    'other tracker read them with the tickets operations named in the "Bindings" '
+    "section injected below.\n"
     '5. If a "Resumed plan draft" section is injected below, it is the '
     "persisted draft from a prior park (the resume check): do not regenerate "
     "it from scratch; re-run the scan; return it as plan_markdown, changed "

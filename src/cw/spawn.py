@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from cw._text import redact
 from cw.atomic import atomic_write_text
 from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
+from cw.bindings_block import bindings_block_for
 from cw.cli._lazy import GUARD_GIT_STASH_COMMAND, GUARD_HOOK_INSTALL_COMMAND
 from cw.config import (
     load_orchestrator_config,
@@ -44,6 +45,7 @@ from cw.models import (
     SessionPurpose,
     TicketTask,
 )
+from cw.models.bindings import Harness
 from cw.models.client import CLIENT_CONTEXT_KEY, ReviewConfig
 from cw.native_daemon import (
     daemon_worker_tmpdir_env,
@@ -567,6 +569,7 @@ def _write_hook_context(
     review_config: ReviewConfig | None = None,
     write_stop_hook: bool = True,
     daemon: NativeDaemonClient | None = None,
+    bindings_block: str | None = None,
 ) -> None:
     """Write hook config + correlation context into the worktree pre-spawn.
 
@@ -702,6 +705,10 @@ def _write_hook_context(
         "merge_gate_ignore_paths": merge_gate_ignore_paths or [],
         "merge_gate_enabled": merge_gate_enabled,
         "review": (review_config or ReviewConfig()).to_context(),
+        # Why: the one rendered Bindings block, stamped so a worker reads the
+        # same text the codex/opencode prompts carry (#3703). Null only for a
+        # direct test caller; the production writers always pass one.
+        "bindings_block": bindings_block,
         "purpose": purpose,
         "ticket_id": ticket_id,
         "headless": headless,
@@ -874,6 +881,7 @@ def spawn_create_impl(
         merge_gate_enabled=client.merge_gate_enabled,
         review_config=client.review,
         daemon=daemon,
+        bindings_block=bindings_block_for(client, Harness.CLAUDE_NATIVE, ticket_id),
     )
 
     final_extra: list[str] = []

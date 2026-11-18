@@ -1,0 +1,4 @@
+=== BEGIN CW-INJECTED: Bindings ===
+Tracker: linear. Use the linear MCP tools exposed in this session (plugin `linear@marketplace`): the get-issue operation, the list-comments operation, and the create-comment operation. No shell command reaches this tracker.
+If no tool for this tracker is available in this session, or a call fails, do not improvise or skip: emit status blocked with blocker.reason `tracker_tool_unavailable` (for a write) or `plan_missing_context` (for a read), with blocker.details naming the tracker, the operation and the error.
+=== END CW-INJECTED: Bindings ===

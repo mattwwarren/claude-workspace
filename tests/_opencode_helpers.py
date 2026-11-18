@@ -44,7 +44,6 @@ from cw.auto_dev_result import AutoDevResult
 from cw.config import load_state
 from cw.models import LastResultSource
 from cw.opencode_runner import OPENCODE_LOG_RELATIVE_PATH, make_blocked
-from cw.tracker import TrackerClass, TrackerKind
 from tests._shared.session_seeding import find_completed_session
 
 if TYPE_CHECKING:
@@ -55,9 +54,6 @@ LogLine = dict[str, object] | str
 
 # Tracker constants shared by the executor and prompt tests (public names of the
 # former ``_GH`` / ``_LIN`` / ``_UNS`` in test_opencode_runner.py).
-GH_TRACKER = TrackerKind(TrackerClass.GITHUB, "github-issues")
-LINEAR_TRACKER = TrackerKind(TrackerClass.OTHER, "linear")
-UNSET_TRACKER = TrackerKind(TrackerClass.UNSET, None)
 
 
 def blocked_result() -> AutoDevResult:

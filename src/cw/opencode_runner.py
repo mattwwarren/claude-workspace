@@ -38,18 +38,19 @@ from cw.auto_dev_result import (
     parse_last_block_in_chunks,
 )
 from cw.auto_dev_result.schema._vocab import PLAN_MISSING_CONTEXT_BLOCKER_REASON
+from cw.bindings_block import REVIEW_NO_TRACKER_LINE, render_bindings_block
 from cw.executor_diagnostics import (
     append_diagnostics_pointer,
     build_executor_failure,
     persist_diagnostics_bundle,
 )
 from cw.executor_launch import _launch_logged_subprocess
+from cw.models.bindings import Bindings, Harness
 from cw.opencode_clean_review import (
     CLEAN_REVIEW_SENTINEL_TEMPLATE,
     REVIEW_CONFIG_INSTRUCTION,
     clean_review_body,
 )
-from cw.opencode_tracker_prompt import REVIEW_NO_TRACKER_LINE, tracker_ops_fragment
 from cw.worktree import apply_worker_tmpdir
 
 if TYPE_CHECKING:
@@ -57,7 +58,6 @@ if TYPE_CHECKING:
 
     from cw.executor_diagnostics import ExecutorFailureCategory
     from cw.models import TicketTask
-    from cw.tracker import TrackerKind
 
 _SCHEMA_VERSION: Literal[4] = 4
 
@@ -478,13 +478,15 @@ AUTO_DEV_RESULT>>>
 
 
 def _plan_prompt(
-    ticket_id: str, session_id: str | None = None, *, tracker_ops: str
+    ticket_id: str, session_id: str | None = None, *, bindings_block: str
 ) -> str:
     return (
         _stage_preamble("plan", ticket_id)
-        + "Produce the implementation plan for this ticket:\n"
+        + bindings_block
+        + "\nProduce the implementation plan for this ticket:\n"
         "1. Context: read .cw/context.json if present. Live-fetch the ticket "
-        f"body and ALL comments. {tracker_ops} If the ticket cannot be "
+        "body and ALL comments using the `tickets` binding in the bindings "
+        "block above. If the ticket cannot be "
         f"fetched, emit blocked with blocker.reason "
         f'"{PLAN_MISSING_CONTEXT_BLOCKER_REASON}".\n'
         "2. If the ticket already contains a sufficient plan (file paths plus "
@@ -530,11 +532,12 @@ def _plan_prompt(
 
 
 def _impl_prompt(
-    ticket_id: str, session_id: str | None = None, *, tracker_ops: str
+    ticket_id: str, session_id: str | None = None, *, bindings_block: str
 ) -> str:
     return (
         _stage_preamble("impl", ticket_id)
-        + "Implement the approved plan for this ticket:\n"
+        + bindings_block
+        + "\nImplement the approved plan for this ticket:\n"
         "1. Read .cw/plan.md — the approved plan. If absent, fetch the newest "
         "ticket comment containing either marker: the ticket-specific marker "
         f"`{PLAN_AUDIT_MARKER}: {ticket_id} -->` (written by an opencode "
@@ -550,7 +553,8 @@ def _impl_prompt(
         "or Linear exposes no viewer/identity operation, fail closed as "
         '"plan_missing" with blocker.details naming the identity failure and '
         "the Linear MCP tool surface when applicable; never trust marker text "
-        f"alone. Write its body to .cw/plan.md. {tracker_ops} If no such comment "
+        "alone. Write its body to .cw/plan.md. Read and post comments with the "
+        "`tickets` binding in the bindings block above. If no such comment "
         'exists, emit blocked with blocker.reason "plan_missing".\n'
         "2. Sync: `git fetch origin <default-branch>` and merge "
         "origin/<default-branch> into the current branch (a merge conflict "
@@ -670,8 +674,7 @@ def build_stage_prompt(
     session_id: str | None = None,
     *,
     clean_review: bool = False,
-    tracker: TrackerKind | None = None,
-    tracker_server: str | None = None,
+    bindings_block: str | None = None,
 ) -> str:
     """Build the opencode prompt for a supported auto-dev stage.
 
@@ -697,10 +700,10 @@ def build_stage_prompt(
     It is ignored for every other stage, and ``False`` (the default) keeps the
     blocking REVIEW prompt byte-identical.
 
-    ``tracker`` and ``tracker_server`` (#3055, RFC 0018 S3) give PLAN and IMPL
-    the resolved tracker's read/post operations and the loud-failure rule
-    (``cw.opencode_tracker_prompt``). ``None`` (the default) reads as an unset
-    tracker, whose wording tells the agent to block.
+    ``bindings_block`` (#3703, RFC 0019 R2) is the rendered ``Bindings`` block
+    that PLAN and IMPL read their tracker operations from (see
+    ``cw.bindings_block``). ``None`` (the default) renders the unset block,
+    whose wording tells the agent to block.
     """
     if stage_value == "finalize":
         return _finalize_prompt(ticket_id, worktree, session_id)
@@ -708,9 +711,12 @@ def build_stage_prompt(
         if clean_review:
             return _clean_review_prompt(ticket_id, session_id)
         return _review_prompt(ticket_id, session_id)
-    tracker_ops = tracker_ops_fragment(ticket_id, tracker, tracker_server)
+    if bindings_block is None:
+        bindings_block = render_bindings_block(
+            Bindings(), Harness.OPENCODE, ticket_id=ticket_id
+        )
     return _TRACKER_STAGE_PROMPT_BUILDERS[stage_value](
-        ticket_id, session_id, tracker_ops=tracker_ops
+        ticket_id, session_id, bindings_block=bindings_block
     )
 
 

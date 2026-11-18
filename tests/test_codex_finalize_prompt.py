@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import cw.codex_plan._prompt as plan_prompt_module
+from cw.bindings_block import render_bindings_block
 from cw.codex_finalize._prompt import (
     BRANCH_SECTION,
     DEFERRED_RELATIVE,
@@ -35,11 +36,14 @@ from cw.contract_manifest._render import (
     _stage_addendum,
 )
 from cw.models import CODEX_BACKEND
+from cw.models.bindings import Harness
 from cw.review_adjudication import DEFERRED_FINDINGS_RELATIVE_PATH
+from tests._shared.bindings_builders import bindings_github_cli
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _COMMANDS_ROOT = _REPO_ROOT / ".claude" / "commands"
 _TICKET = "4242"
+_BLOCK = render_bindings_block(bindings_github_cli(), Harness.CODEX, ticket_id=_TICKET)
 _DEFAULT_TICKET = render_ticket_text("TICKET-BODY-XYZ", [])
 _BRANCH_FACTS = "branch: dev/4242\nahead: 2"
 _PLAN = "## Summary\n\nPLAN-TEXT-XYZ\n"
@@ -81,6 +85,7 @@ def _render(
         ticket=ticket,
         branch_facts=branch_facts,
         override_json=override_json,
+        bindings_block=_BLOCK,
     )
 
 

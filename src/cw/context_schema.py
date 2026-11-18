@@ -110,4 +110,9 @@ from __future__ import annotations
 #     attestation, or null; the key is always present). Verified by
 #     `cw review attestation check`, which treats it as a claim. A context
 #     below 20 reads as no attestation.
-CW_CONTEXT_SCHEMA_VERSION = 20
+# v21: added `bindings_block` (#3703, RFC 0019 R2) — the one rendered Bindings
+#     block (a delimited text block naming the tickets and other role systems)
+#     for the harness that owns this worktree; the key is always present, and
+#     null when the writer had no block to stamp. A context below 21 reads as
+#     no bindings block.
+CW_CONTEXT_SCHEMA_VERSION = 21

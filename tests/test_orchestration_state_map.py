@@ -499,9 +499,9 @@ def test_confirm_backend_unavailable_entry_requeues_and_bounds_the_reason() -> N
     for content_failure in ("partial review", "unparseable output", "discarded unread"):
         assert content_failure in text, content_failure
     assert "surfaces as `agent_block` with the cause in `details`" in text
-    assert '"diff too large for one foreground round"' in text
-    assert 'NOT "restore the backend"' in text
-    assert "600 s" in text
+    assert "persists across foreground polling calls" in text
+    assert "An interrupted poll can resume by job ID" in text
+    assert "A terminal interruption or stale job surfaces as `agent_block`" in text
 
 
 def test_review_not_converging_entry_releases_per_stop() -> None:

@@ -607,7 +607,7 @@ def _ship_it_implemented_manifest() -> Manifest:
         "disposition": "implemented",
         "ref": {
             "kind": "code",
-            "path": "src/cw/codex_finalize/_pr.py",
+            "path": "src/cw/stage_verification/finalize_pr.py",
             "symbol": "create_pr_for",
         },
     }
@@ -870,3 +870,12 @@ def test_render_module_imports_codex_impl_lazily() -> None:
 @pytest.mark.parametrize("stage", _STAGES)
 def test_golden(stage: str) -> None:
     _assert_golden(stage, _render(stage))
+
+
+def test_plan_addendum_names_the_bindings_section_not_a_tool() -> None:
+    """Item 4 points at the injected Bindings section, never at a tool name (#3703)."""
+    from cw.bindings_block import BINDINGS_SECTION
+
+    addendum = render_module._PLAN_CODEX_ADDENDUM
+    assert f'the "{BINDINGS_SECTION}" section injected below' in addendum
+    assert "get_issue" not in addendum

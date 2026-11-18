@@ -166,9 +166,12 @@ def render_plan_prompt(
     ticket: TicketText | None,
     resume: ResumeDraft | None,
     approval_matches: bool,
+    bindings_block: str,
 ) -> str:
     """The PLAN turn's stdin prompt.
 
+    *bindings_block* is the pre-delimited ``Bindings`` block from
+    :func:`cw.bindings_block.bindings_block_for`; it goes last, unwrapped.
     Raises :class:`cw.contract_manifest.RenderError` when the contract cannot
     be rendered from *docs_root*. ``session_id`` is ``None``: cw, not the
     model, records the result.
@@ -186,4 +189,5 @@ def render_plan_prompt(
     if resume is not None:
         approval = APPROVAL_MATCHES if approval_matches else APPROVAL_NONE
         parts.append("\n" + _section(RESUME_SECTION, f"{approval}\n\n{resume.body}"))
+    parts.append("\n" + bindings_block)
     return "".join(parts)

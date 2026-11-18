@@ -29,7 +29,7 @@ review. Both emitters catch ``OSError`` from ``record_event`` (the inbox write
 and lock path) only, log one warning, and return.
 
 Leaf module: it must not import ``cw.codex_fix_loop`` or
-``cw.codex_review_persist`` (``codex_fix_loop.baseline`` imports
+``cw.codex_review_persist`` (``stage_verification.baseline`` imports
 ``codex_review_persist``, which imports this module).
 """
 

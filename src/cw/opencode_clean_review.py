@@ -23,15 +23,8 @@ separate builder there and never reads this module.
 
 from __future__ import annotations
 
+from cw.bindings_block import REVIEW_NO_TRACKER_LINE
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH, OPENCODE_BACKEND
-from cw.opencode_tracker_prompt import REVIEW_NO_TRACKER_LINE
-
-#: Shell ceiling on the foreground ``cw review confirm`` call, in seconds. The
-#: same 600 s ceiling the Claude-native prose uses: a harness limit, not a
-#: cw-imposed budget (ADR-0014). An overrun parks ``agent_block``.
-CONFIRM_TIMEOUT_SECONDS = 600
-#: The matching explicit tool timeout for the Bash call that runs it.
-CONFIRM_TOOL_TIMEOUT_MS = CONFIRM_TIMEOUT_SECONDS * 1000
 
 #: ``jq`` filter turning the exit-0 stdout of ``cw review confirm`` into a
 #: ``record-round`` confirm payload. The verdict is passed raw; the prompt pipes
@@ -185,11 +178,14 @@ def _confirm_call(ticket_id: str) -> str:
         "2>.cw/diff-base-stderr.txt\n"
         '          DIFF_BASE_RC=$?; echo "DIFF_BASE_RC=$DIFF_BASE_RC"\n'
         '          if [ "$DIFF_BASE_RC" -eq 0 ]; then\n'
-        f"            timeout {CONFIRM_TIMEOUT_SECONDS} cw review confirm "
+        "            cw review converge confirm-job full "
         f'--ticket-id {ticket_id} -c "{_CLIENT_FROM_CONTEXT}" '
-        '--backend "$CONFIRM_BACKEND" >.cw/confirm-stdout.json '
+        ">.cw/confirm-stdout.json "
         "2>.cw/confirm-stderr.txt\n"
-        '            echo "CONFIRM_RC=$?"\n'
+        '            CONFIRM_RC=$?; echo "CONFIRM_RC=$CONFIRM_RC"\n'
+        '            if [ "$CONFIRM_RC" -eq 75 ]; then\n'
+        "              sed -n 's/^CONFIRM_JOB_ID=//p' .cw/confirm-stderr.txt\n"
+        "            fi\n"
         "          else tail -n 20 .cw/diff-base-stderr.txt; fi ;;\n"
         '        *) echo "CONFIRM_SKIPPED" ;;\n'
         "      esac\n"
@@ -215,20 +211,25 @@ def _confirm_step(ticket_id: str) -> str:
     return (
         "4. Confirm round — an independent reviewer, no fix loop. The "
         "confirm backend is the one the ledger stamped (the only one "
-        "record-round accepts). Run this as ONE foreground Bash call with "
-        f"the tool timeout parameter set explicitly to "
-        f"{CONFIRM_TOOL_TIMEOUT_MS} (milliseconds); never run it in the "
-        "background and never accept a background continuation:\n"
+        "record-round accepts). Start the cw-managed job in the foreground:\n"
         + _confirm_call(ticket_id)
         + "   Branch on what it printed:\n"
         "   - CONFIRM_SKIPPED (CONFIRM_BACKEND is none, empty or null; a "
         "healthy ledger never gets here, because none converges at Step 3 "
         'without a confirm round) → agent_block, details "confirm step '
         "reached with confirm backend '<CONFIRM_BACKEND>'\". Do NOT run "
-        "cw review confirm.\n"
+        "`cw review converge confirm-job`.\n"
         "   - DIFF_BASE_RC non-zero → agent_block quoting the tail of "
         ".cw/diff-base-stderr.txt, friction `confirm_invocation_error: "
         "exit=<DIFF_BASE_RC>`.\n"
+        "   - CONFIRM_RC=75: pending. Use the printed job ID and repeat "
+        "`cw review converge confirm-job full` with the same ticket and client, "
+        "`--job-id <id>`, and the same stdout and stderr redirects, in a fresh "
+        "foreground call. Print CONFIRM_RC after each call. Keep polling on "
+        "75. If start returns 75 without an ID, repeat start to attach. If a "
+        "poll is interrupted, resume by ID or repeat start. cw bounds each "
+        "poll wait and persists the result. Use no shell timeout, sleeps or "
+        "background tool calls. The detached review has no deadline.\n"
         "   - CONFIRM_RC=0: a verdict, NOT a clean signal. Decide on "
         ".result_blocker_reason in .cw/confirm-stdout.json BEFORE recording:\n"
         "     - null, codex_must_fix_findings, scope_tier_unresolvable or "
@@ -265,14 +266,7 @@ def _confirm_step(ticket_id: str) -> str:
         "   - CONFIRM_RC=2 (a usage error) → agent_block quoting "
         ".cw/confirm-stderr.txt, friction `confirm_invocation_error: "
         "exit=2`.\n"
-        "   - CONFIRM_RC=124, or no CONFIRM_RC because the tool timeout ended "
-        "the call (an overrun, NOT an outage) → agent_block, details "
-        f'"foreground ceiling {CONFIRM_TIMEOUT_SECONDS}s exceeded; not '
-        "backgrounded (headless). Last captured output: <tail of "
-        '.cw/confirm-stdout.json, else of .cw/confirm-stderr.txt>", friction '
-        "`confirm_invocation_error: exit=timeout`. Never "
-        "confirm_backend_unavailable.\n"
-        '   - any other CONFIRM_RC → agent_block, details "cw review confirm '
+        '   - any other CONFIRM_RC → agent_block, details "confirm-job '
         'exited <n>: <stderr tail>", friction `confirm_invocation_error: '
         "exit=<n>`.\n"
     )

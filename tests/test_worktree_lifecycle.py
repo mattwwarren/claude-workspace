@@ -11,7 +11,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from cw.codex_fix_loop.baseline import _CW_REVIEW_ARTIFACTS
 from cw.exceptions import (
     FetchSkippedError,
     GitTimeoutError,
@@ -21,6 +20,7 @@ from cw.exceptions import (
 from cw.models import (
     ClientConfig,
 )
+from cw.stage_verification.baseline import _CW_REVIEW_ARTIFACTS
 from cw.worktree import (
     _CW_EXCLUDE_PATTERNS,
     TickFetchGate,
