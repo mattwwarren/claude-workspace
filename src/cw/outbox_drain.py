@@ -208,14 +208,12 @@ def _deliver(
     _emit(OrchestratorEventType.OUTBOX_ENTRY_DELIVERED, entry, reason, posted=posted)
 
 
-def _to_unverified(
+def _resettle_unverified(
     run: _Run,
     entry: OutboxEntry,
     reason: OutboxReason = OutboxReason.READBACK_UNVERIFIED,
-    *,
-    posted: Sequence[PostedPart] = (),
-    announce: bool = True,
 ) -> None:
+    """Settle *entry* ``unverified`` and count it; announcing is the caller's."""
     settle(
         run.client,
         entry.id,
@@ -224,10 +222,17 @@ def _to_unverified(
         reason=reason,
     )
     run.unverified += 1
-    if announce:
-        _emit(
-            OrchestratorEventType.OUTBOX_ENTRY_UNVERIFIED, entry, reason, posted=posted
-        )
+
+
+def _to_unverified(
+    run: _Run,
+    entry: OutboxEntry,
+    reason: OutboxReason = OutboxReason.READBACK_UNVERIFIED,
+    *,
+    posted: Sequence[PostedPart] = (),
+) -> None:
+    _resettle_unverified(run, entry, reason)
+    _emit(OrchestratorEventType.OUTBOX_ENTRY_UNVERIFIED, entry, reason, posted=posted)
 
 
 def _hold(run: _Run, entry: OutboxEntry) -> None:
@@ -257,24 +262,39 @@ def _per_item_failure(run: _Run, entry: OutboxEntry) -> None:
         _to_unverified(run, entry)
 
 
-def _announce(run: _Run, entry: OutboxEntry, marker: UnreachableMarker) -> None:
+def _announce(
+    run: _Run, entry: OutboxEntry, marker: UnreachableMarker, *, persist: bool = False
+) -> None:
     """Return *entry* to a legal state with no ``gh`` call, under *marker*.
 
-    Pending releases with the marker's reason; unverified re-settles. The event
-    is emitted once per entry per episode (``announced``).
+    Pending releases with the marker's reason; unverified re-settles. Crash
+    consistency (plan P5, item 31): the entry's state change is persisted
+    first, then the marker record (always when *persist*, else only when this
+    entry joins the episode), then the event, once per entry per episode
+    (``announced``).
     """
     first = entry.id not in marker.announced
     if first:
         marker = marker.model_copy(update={"announced": [*marker.announced, entry.id]})
-        write_marker(run.client, marker)
+    is_pending = entry.claimed_from is OutboxState.PENDING
+    if is_pending:
+        release(run.client, entry.id, claim_token=_token(entry), reason=marker.reason)
+        run.released += 1
+    else:
+        _resettle_unverified(run, entry)
     run.broken[entry.role] = marker
-    if entry.claimed_from is not OutboxState.PENDING:
-        _to_unverified(run, entry, announce=first)
+    if first or persist:
+        write_marker(run.client, marker)
+    if not first:
         return
-    release(run.client, entry.id, claim_token=_token(entry), reason=marker.reason)
-    run.released += 1
-    if first:
+    if is_pending:
         _emit(OrchestratorEventType.OUTBOX_ENTRY_PENDING, entry, marker.reason)
+    else:
+        _emit(
+            OrchestratorEventType.OUTBOX_ENTRY_UNVERIFIED,
+            entry,
+            OutboxReason.READBACK_UNVERIFIED,
+        )
 
 
 def _binding_fault(run: _Run, entry: OutboxEntry, reason: OutboxReason) -> None:
@@ -282,8 +302,7 @@ def _binding_fault(run: _Run, entry: OutboxEntry, reason: OutboxReason) -> None:
     existing = read_marker(run.client, entry.role)
     announced = [] if existing is None else existing.announced
     marker = UnreachableMarker(role=entry.role, reason=reason, announced=announced)
-    write_marker(run.client, marker)
-    _announce(run, entry, marker)
+    _announce(run, entry, marker, persist=True)
 
 
 def _post_operator_part(ticket: str, body: str, *, cwd: Path) -> PostResult:

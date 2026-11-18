@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from freezegun import freeze_time
 
+from cw import outbox_drain
 from cw.exceptions import CwError
 from cw.gh import AGENT_COMMENT_MARKER, agent_marked_body
 from cw.models import OrchestratorEventType
@@ -1054,6 +1055,119 @@ class TestDrainReport:
             report.drained = 1
         with pytest.raises(ValueError, match="extra"):
             DrainReport.model_validate({**report.model_dump(), "bogus": 1})
+
+
+def _fail_with_record_error(*_args: object, **_kwargs: object) -> None:
+    msg = "entry write failed"
+    raise OutboxRecordError(msg)
+
+
+class TestCrashConsistency:
+    """Item 31: entry state first, then the held or marker record, then the event."""
+
+    def test_binding_absent_release_failure_persists_no_marker_and_no_event(
+        self,
+        tmp_path: Path,
+        gh: GhThread,
+        events: list[CapturedEvent],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        entry = enqueue().entry
+        monkeypatch.setattr("cw.outbox_drain.release", _fail_with_record_error)
+
+        with pytest.raises(OutboxRecordError):
+            _drain(tmp_path, bindings=Bindings())
+
+        assert marked_roles(CLIENT) == frozenset()
+        assert read_marker(CLIENT, OutboxRole.TICKETS) is None
+        assert events == []
+        assert _state(entry.id)[0] is OutboxState.CLAIMED
+
+    def test_unreadable_listing_release_failure_persists_no_marker(
+        self,
+        tmp_path: Path,
+        gh: GhThread,
+        events: list[CapturedEvent],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        enqueue()
+        gh.unreadable("T-1")
+        monkeypatch.setattr("cw.outbox_drain.release", _fail_with_record_error)
+
+        with pytest.raises(OutboxRecordError):
+            _drain(tmp_path)
+
+        assert marked_roles(CLIENT) == frozenset()
+        assert events == []
+
+    def test_unverified_resettle_failure_persists_no_marker(
+        self,
+        tmp_path: Path,
+        gh: GhThread,
+        events: list[CapturedEvent],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _unverified(0, role=OutboxRole.KNOWLEDGE, marker="a")
+        monkeypatch.setattr("cw.outbox_drain.settle", _fail_with_record_error)
+
+        with pytest.raises(OutboxRecordError):
+            _drain(tmp_path)
+
+        assert marked_roles(CLIENT) == frozenset()
+        assert events == []
+
+    @pytest.mark.parametrize("unverified", [False, True])
+    def test_marker_is_written_after_the_entry_and_before_the_event(
+        self,
+        tmp_path: Path,
+        gh: GhThread,
+        monkeypatch: pytest.MonkeyPatch,
+        unverified: bool,
+    ) -> None:
+        if unverified:
+            _unverified(0, role=OutboxRole.KNOWLEDGE, marker="a")
+        else:
+            enqueue()
+        order: list[str] = []
+        for name in ("release", "settle", "write_marker", "record_event"):
+            real = getattr(outbox_drain, name)
+
+            def _spy(
+                *args: Any, _real: Any = real, _name: str = name, **kw: Any
+            ) -> Any:
+                order.append(_name)
+                return _real(*args, **kw)
+
+            monkeypatch.setattr(f"cw.outbox_drain.{name}", _spy)
+
+        _drain(tmp_path, bindings=None if unverified else Bindings())
+
+        entry_write = "settle" if unverified else "release"
+        assert order == [entry_write, "write_marker", "record_event"]
+
+    def test_held_entry_is_released_before_the_held_record(
+        self,
+        tmp_path: Path,
+        gh: GhThread,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        enqueue()
+        monkeypatch.setattr("cw.outbox_drain.read_parts", _raise_record_error)
+        order: list[str] = []
+        for name in ("release", "append_held", "record_event"):
+            real = getattr(outbox_drain, name)
+
+            def _spy(
+                *args: Any, _real: Any = real, _name: str = name, **kw: Any
+            ) -> Any:
+                order.append(_name)
+                return _real(*args, **kw)
+
+            monkeypatch.setattr(f"cw.outbox_drain.{name}", _spy)
+
+        _drain(tmp_path)
+
+        assert order == ["release", "append_held", "record_event"]
 
 
 class TestEvents:
