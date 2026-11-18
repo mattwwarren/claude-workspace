@@ -163,6 +163,54 @@ def commit_tracked_file(worktree: Path, relpath: str, content: str = "x = 1\n") 
     _git_sandbox.run("commit", "-m", f"add {relpath}", cwd=worktree)
 
 
+def branch_with_file(
+    make_git_repo: Callable[..., Path],
+    relpath: str,
+    content: str | bytes,
+    *,
+    branch: str = "feature",
+    name: str = "branch-repo",
+) -> Path:
+    """Repo whose *branch* commits *relpath*; ``main`` checked out on return.
+
+    *content* is text (committed as UTF-8 via ``commit_tracked_file``) or raw
+    bytes (written verbatim, so a test can commit a non-UTF-8 blob). The shared
+    form of the private ``_branch_with_file`` in
+    ``tests/test_dispatch_tracker_mcp_gate.py``, with the repo name and branch
+    parameterized.
+    """
+    repo = make_git_repo(name)
+    git_in(repo, "checkout", "-b", branch)
+    if isinstance(content, bytes):
+        path = repo / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        git_in(repo, "add", relpath)
+        git_in(repo, "commit", "-m", f"add {relpath}")
+    else:
+        commit_tracked_file(repo, relpath, content)
+    git_in(repo, "checkout", "main")
+    return repo
+
+
+def branch_with_settings(
+    make_git_repo: Callable[..., Path],
+    settings: object,
+    *,
+    settings_path: str = ".claude/settings.json",
+    branch: str = "feature",
+    name: str = "branch-repo",
+) -> Path:
+    """Repo whose *branch* commits *settings* as JSON at *settings_path*."""
+    return branch_with_file(
+        make_git_repo,
+        settings_path,
+        json.dumps(settings),
+        branch=branch,
+        name=name,
+    )
+
+
 def commit_small_py_files(
     repo: Path, count: int, *, branch: str = "feature", prefix: str = "mod"
 ) -> list[str]:
