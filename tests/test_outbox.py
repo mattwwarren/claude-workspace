@@ -58,6 +58,7 @@ from cw.outbox import (
     OutboxClaimError,
     OutboxEntry,
     OutboxError,
+    OutboxHistoryFullError,
     OutboxReason,
     OutboxRecordError,
     OutboxRole,
@@ -559,11 +560,19 @@ class TestPersistence:
     def test_claimed_from_must_be_pending_or_unverified(self) -> None:
         entry = _enqueue().entry
         data = json.loads(_record_file(entry.id).read_text(encoding="utf-8"))
+        claim_item = {
+            "from_state": "pending",
+            "to_state": "claimed",
+            "reason": None,
+            "at": "2026-11-01T10:00:00Z",
+            "initiator": "claim",
+        }
         claimed = {
             **data,
             "state": "claimed",
             "claim_token": "tok",
             "claimed_at": "2026-11-01T10:00:00Z",
+            "transitions": [*data["transitions"], claim_item],
         }
 
         assert OutboxEntry.model_validate({**claimed, "claimed_from": "pending"})
@@ -1523,3 +1532,133 @@ def _install_launch_hook(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     for name in _EXEC_NAMES:
         monkeypatch.setattr(os, name, make_spy(name))
     return violations
+
+
+class TestTransitionHistory:
+    """The audit trail lives inside the entry record (operator resolution 22a)."""
+
+    def test_enqueue_writes_one_enqueue_item(self) -> None:
+        _enqueue()
+        (stored,) = list_entries(_CLIENT)
+        (item,) = stored.transitions
+        assert item.initiator == "enqueue"
+        assert item.from_state is None
+        assert item.to_state is OutboxState.PENDING
+        assert item.reason is None
+
+    def test_claim_appends_one_claim_item_with_claimant(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        marker = live_launch_marker()
+        _enqueue()
+        _claim_as(monkeypatch, marker)
+        (stored,) = list_entries(_CLIENT)
+        assert [t.initiator for t in stored.transitions] == ["enqueue", "claim"]
+        item = stored.transitions[-1]
+        assert item.from_state is OutboxState.PENDING
+        assert item.to_state is OutboxState.CLAIMED
+        assert item.claimant == marker
+        assert item.claimant_verdict is None
+
+    def test_settle_appends_one_settle_item(self) -> None:
+        claimed = _claim_one()
+        assert claimed.claim_token is not None
+        settle(
+            _CLIENT,
+            claimed.id,
+            claim_token=claimed.claim_token,
+            state=OutboxState.DELIVERED,
+            reason=OutboxReason.POSTED,
+        )
+        (stored,) = list_entries(_CLIENT)
+        assert [t.initiator for t in stored.transitions] == [
+            "enqueue",
+            "claim",
+            "settle",
+        ]
+        item = stored.transitions[-1]
+        assert item.from_state is OutboxState.CLAIMED
+        assert item.to_state is OutboxState.DELIVERED
+        assert item.reason is OutboxReason.POSTED
+
+    def test_recovery_appends_item_with_owner_gone_verdict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        marker = dead_launch_marker()
+        _patch_probe_for(monkeypatch, marker, present=False)
+        _enqueue()
+        _claim_as(monkeypatch, marker)
+        assert claim(_CLIENT, state=OutboxState.UNVERIFIED) == []
+        (stored,) = list_entries(_CLIENT)
+        assert [t.initiator for t in stored.transitions] == [
+            "enqueue",
+            "claim",
+            "recovery",
+        ]
+        item = stored.transitions[-1]
+        assert item.from_state is OutboxState.CLAIMED
+        assert item.to_state is OutboxState.PENDING
+        assert item.reason is OutboxReason.CLAIM_RECOVERED
+        assert item.claimant == marker
+        assert item.claimant_verdict == "owner_gone"
+
+    def test_no_separate_audit_file_is_written(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _enqueue()
+        claimed = _claim_as(monkeypatch, live_launch_marker())[0]
+        assert claimed.claim_token is not None
+        settle(
+            _CLIENT,
+            claimed.id,
+            claim_token=claimed.claim_token,
+            state=OutboxState.FAILED,
+            reason=OutboxReason.TURN_FAILED,
+        )
+        assert not [p for p in _client_dir().iterdir() if "audit" in p.name]
+
+    def test_history_cap_refuses_claim_and_writes_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _enqueue()
+        monkeypatch.setattr("cw.outbox._store.MAX_TRANSITIONS", 1)
+        with pytest.raises(OutboxHistoryFullError):
+            claim(_CLIENT)
+        (stored,) = list_entries(_CLIENT)
+        assert stored.state is OutboxState.PENDING
+        assert len(stored.transitions) == 1
+
+    def test_failed_settle_write_leaves_claim_intact(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        claimed = _claim_one()
+        assert claimed.claim_token is not None
+        token = claimed.claim_token
+
+        def failing_write(client: str, entry: OutboxEntry) -> None:
+            msg = f"cannot write outbox record for {client}"
+            raise OutboxRecordError(msg)
+
+        monkeypatch.setattr("cw.outbox._layout.write_record", failing_write)
+        with pytest.raises(OutboxRecordError):
+            settle(
+                _CLIENT,
+                claimed.id,
+                claim_token=token,
+                state=OutboxState.DELIVERED,
+                reason=OutboxReason.POSTED,
+            )
+        (stored,) = list_entries(_CLIENT)
+        assert stored.state is OutboxState.CLAIMED
+        assert stored.claim_token == token
+        assert len(stored.transitions) == 2
+
+    def test_record_whose_last_transition_disagrees_is_corrupt(self) -> None:
+        entry = _enqueue().entry
+        path = _record_file(entry.id)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["transitions"][-1]["to_state"] = "failed"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(OutboxRecordError):
+            _layout.read_record(_CLIENT, entry.id)
+        assert list_entries(_CLIENT) == []

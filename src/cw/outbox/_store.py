@@ -33,15 +33,18 @@ from cw.outbox._models import (
     MAX_DETAIL_CHARS,
     MAX_PART_CHARS,
     MAX_PARTS,
+    MAX_TRANSITIONS,
     OUTBOX_SCHEMA_VERSION,
     REASONS_BY_STATE,
     EnqueueResult,
     OutboxClaimError,
     OutboxEntry,
+    OutboxHistoryFullError,
     OutboxReason,
     OutboxRecordError,
     OutboxRole,
     OutboxState,
+    OutboxTransition,
     OutboxTransitionError,
     OutboxValidationError,
     check_client,
@@ -57,6 +60,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from cw.models import LaunchMarker
+    from cw.outbox._models import ClaimantVerdict, TransitionInitiator
 
 
 class _Body(NamedTuple):
@@ -118,9 +122,51 @@ def _rebuild(entry: OutboxEntry, **updates: object) -> OutboxEntry:
     return OutboxEntry.model_validate(data)
 
 
+def _append_transition(
+    entry: OutboxEntry,
+    *,
+    to_state: OutboxState,
+    reason: OutboxReason | None,
+    detail: str | None,
+    initiator: TransitionInitiator,
+    now: datetime,
+    claimant: LaunchMarker | None,
+    claimant_verdict: ClaimantVerdict | None = None,
+) -> list[OutboxTransition]:
+    """*entry*'s transitions plus one item for this change.
+
+    The item travels in the same record write as the state it describes (22a),
+    so the audit trail needs no separate file. Refuses past ``MAX_TRANSITIONS``
+    instead of dropping history.
+    """
+    if len(entry.transitions) >= MAX_TRANSITIONS:
+        msg = f"outbox entry {entry.id} is at {MAX_TRANSITIONS} transitions"
+        raise OutboxHistoryFullError(msg)
+    item = OutboxTransition(
+        from_state=entry.state,
+        to_state=to_state,
+        reason=reason,
+        detail=detail,
+        at=now,
+        initiator=initiator,
+        claimant=claimant,
+        claimant_verdict=claimant_verdict,
+    )
+    return [*entry.transitions, item]
+
+
 def _apply_claim(
     entry: OutboxEntry, *, claimant: LaunchMarker | None, now: datetime
 ) -> OutboxEntry:
+    transitions = _append_transition(
+        entry,
+        to_state=OutboxState.CLAIMED,
+        reason=entry.reason,
+        detail=None,
+        initiator="claim",
+        now=now,
+        claimant=claimant,
+    )
     return _rebuild(
         entry,
         state=OutboxState.CLAIMED,
@@ -128,6 +174,7 @@ def _apply_claim(
         claimant=claimant,
         claimed_at=now,
         claimed_from=entry.state,
+        transitions=transitions,
         updated_at=now,
     )
 
@@ -140,6 +187,15 @@ def _apply_settle(
     detail: str | None,
     now: datetime,
 ) -> OutboxEntry:
+    transitions = _append_transition(
+        entry,
+        to_state=state,
+        reason=reason,
+        detail=detail,
+        initiator="settle",
+        now=now,
+        claimant=entry.claimant,
+    )
     return _rebuild(
         entry,
         state=state,
@@ -149,37 +205,8 @@ def _apply_settle(
         claimant=None,
         claimed_at=None,
         claimed_from=None,
+        transitions=transitions,
         updated_at=now,
-    )
-
-
-def _audit_transition(
-    client: str,
-    before: OutboxEntry,
-    after: OutboxEntry,
-    *,
-    initiator: str,
-    now: datetime,
-    reason: OutboxReason | None = None,
-) -> None:
-    """Append the audit record after the state record has been persisted."""
-    claimant = after.claimant or before.claimant
-    claim_token = after.claim_token or before.claim_token
-    effective_reason = reason or after.reason or before.reason
-    layout.append_audit_event(
-        client,
-        {
-            "event": "transition",
-            "entry_id": after.id,
-            "client": client,
-            "before_state": before.state.value,
-            "after_state": after.state.value,
-            "initiator": initiator,
-            "timestamp": now.isoformat(),
-            "claimant": claimant.model_dump(mode="json") if claimant else None,
-            "claim_token": claim_token,
-            "reason": effective_reason.value if effective_reason else None,
-        },
     )
 
 
@@ -229,6 +256,14 @@ def enqueue(
         state=OutboxState.PENDING,
         created_at=now,
         updated_at=now,
+        transitions=[
+            OutboxTransition(
+                from_state=None,
+                to_state=OutboxState.PENDING,
+                at=now,
+                initiator="enqueue",
+            )
+        ],
     )
     with _outbox_lock(client):
         existing = _existing_entry(client, entry.id)
@@ -302,6 +337,17 @@ def _recovered(entry: OutboxEntry, now: datetime) -> OutboxEntry:
     reason = (
         OutboxReason.CLAIM_RECOVERED if target is OutboxState.PENDING else entry.reason
     )
+    transitions = _append_transition(
+        entry,
+        to_state=target,
+        reason=reason,
+        detail=None,
+        initiator="recovery",
+        now=now,
+        claimant=entry.claimant,
+        # Recovery runs only on OWNER_GONE (see _recover_locked).
+        claimant_verdict="owner_gone",
+    )
     return _rebuild(
         entry,
         state=target,
@@ -310,6 +356,7 @@ def _recovered(entry: OutboxEntry, now: datetime) -> OutboxEntry:
         claimant=None,
         claimed_at=None,
         claimed_from=None,
+        transitions=transitions,
         updated_at=now,
     )
 
@@ -323,10 +370,7 @@ def _recover_locked(client: str) -> None:
             LaunchOwnerState.OWNER_GONE
         ):
             continue
-        now = _now()
-        recovered = _recovered(entry, now)
-        layout.write_record(client, recovered)
-        _audit_transition(client, entry, recovered, initiator="recovery", now=now)
+        layout.write_record(client, _recovered(entry, _now()))
 
 
 def _body_intact(client: str, entry: OutboxEntry) -> bool:
@@ -370,15 +414,12 @@ def _claim_locked(
             break
         if _body_intact(client, entry):
             selected.append(entry)
-    claimed: list[OutboxEntry] = []
-    for entry in selected:
-        record = _apply_claim(entry, claimant=claimant, now=_now())
+    # Build every claimed record in memory first: a refusal (history cap) then
+    # raises with nothing written, so no live claim is stranded by a partial batch.
+    records = [_apply_claim(entry, claimant=claimant, now=_now()) for entry in selected]
+    for record in records:
         layout.write_record(client, record)
-        _audit_transition(
-            client, entry, record, initiator="claim", now=record.updated_at
-        )
-        claimed.append(record)
-    return claimed
+    return records
 
 
 def claim(
@@ -442,7 +483,4 @@ def settle(
             entry, state=state, reason=reason, detail=detail, now=_now()
         )
         layout.write_record(client, settled)
-        _audit_transition(
-            client, entry, settled, initiator="settle", now=settled.updated_at
-        )
     return settled

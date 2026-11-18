@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
@@ -45,7 +44,6 @@ FILE_MODE = 0o600
 
 _OUTBOX_DIRNAME = "outbox"
 _LOCK_NAME = ".outbox.lock"
-_AUDIT_NAME = ".outbox.audit.jsonl"
 _RECORD_SUFFIX = ".json"
 _BODY_SUFFIX = ".body"
 
@@ -60,10 +58,6 @@ def client_dir(client: str) -> Path:
 
 def lock_path(client: str) -> Path:
     return client_dir(client) / _LOCK_NAME
-
-
-def audit_path(client: str) -> Path:
-    return client_dir(client) / _AUDIT_NAME
 
 
 def record_path(client: str, entry_id: str) -> Path:
@@ -157,27 +151,6 @@ def _parse_record(path: Path, client: str) -> OutboxEntry:
 def read_record(client: str, entry_id: str) -> OutboxEntry:
     """Read one record. Raises on a missing, corrupt or too-new record."""
     return _parse_record(record_path(client, entry_id), client)
-
-
-def append_audit_event(client: str, event: dict[str, object]) -> None:
-    """Durably append one audit event for a persisted state transition."""
-    path = audit_path(client)
-    refuse_real_state_write(path)
-    fd = -1
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, FILE_MODE)
-        with os.fdopen(fd, "a", encoding="utf-8") as stream:
-            fd = -1
-            stream.write(json.dumps(event, separators=(",", ":")) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        path.chmod(FILE_MODE)
-    except OSError as exc:
-        msg = f"cannot append outbox audit event {path.name}"
-        raise OutboxRecordError(msg) from exc
-    finally:
-        if fd != -1:
-            os.close(fd)
 
 
 def scan_entries(client: str) -> list[OutboxEntry]:
