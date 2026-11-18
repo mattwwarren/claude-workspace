@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **One bindings-block renderer, injected at spawn for every harness (RFC 0019 R2, #3703).** `cw` renders a single delimited `Bindings` block per client and harness from the `bindings` config and the project tracker. The effective tickets system is `bindings.tickets.system` when set, otherwise the project tracker; GitHub therefore uses the `gh` path and no MCP PLAN target, including for migrated legacy gates. The block is written into `cw-context.json` as `bindings_block` (context schema v21), inlined into the codex PLAN/IMPL/FINALIZE and opencode PLAN/IMPL prompts, and prepended to the local harness's task-context file. The opencode-only `opencode_tracker_prompt.py` is replaced by it. A new `mcp.<harness>.tools` map names each ticket operation's MCP tool; the codex PLAN turn and the tracker-IO turn use the named tools and keep the Linear defaults for any they do not name. The codex addendum names the tickets operations instead of hard-coding `get_issue`/`list_comments`. **Operator note:** replace a migrated legacy gate with `bindings: {tickets: {system: github-issues, cli: gh}}` when configuring GitHub explicitly. See `config/CONFIG_REFERENCE.md` (Role bindings).
+
 ### Fixed
 
 - **Detached codex, opencode and aider workers no longer inherit the dispatcher's stdin (#3696).** `_launch_logged_subprocess` now passes `stdin=subprocess.DEVNULL`, which removes the inherited-stdin precondition for a child that blocks reading stdin. The operator-reported opencode hang was not reproduced in cw, so this fix does not confirm that hang's cause.

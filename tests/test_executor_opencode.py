@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from cw.auto_dev_result import AutoDevResult
+from cw.bindings_block import BINDINGS_BEGIN, bindings_block_for
 from cw.config import load_state
 from cw.executor import OpencodeExecutor, resolve_executor
 from cw.executor.core import FakeFireAndForgetRunner, _PreflightOK
@@ -30,6 +31,7 @@ from cw.models import (
     StagePipelineConfig,
     TicketTask,
 )
+from cw.models.bindings import Harness
 from cw.models.client import ReviewConfig, TrackerMcpGateConfig
 from cw.opencode_runner import (
     OPENCODE_NOT_FOUND,
@@ -37,7 +39,6 @@ from cw.opencode_runner import (
     OpencodeRunner,
     build_stage_prompt,
 )
-from cw.tracker import TrackerClass, TrackerKind
 from cw.worktree import resolve_worker_tmpdir
 from tests._shared.cli_preflight import _write_tracker_config
 from tests._shared.session_seeding import find_completed_session
@@ -349,38 +350,30 @@ def test_opencode_preflight_env_tmpdir_resolves_against_worktree(
 
 
 @pytest.mark.parametrize(
-    ("tracker", "gate", "expected_tracker", "expected_server"),
+    ("tracker", "gate", "expected_fragment"),
     [
         (
             "linear",
             TrackerMcpGateConfig(enabled=True, servers={"opencode": "lin"}),
-            TrackerKind(TrackerClass.OTHER, "linear"),
-            "lin",
+            "(names carry the `lin_` prefix)",
         ),
         (
             "linear",
             TrackerMcpGateConfig(enabled=True, plugin_id="p@m"),
-            TrackerKind(TrackerClass.OTHER, "linear"),
-            None,
+            "not reachable from harness opencode",
         ),
-        (
-            "github-issues",
-            None,
-            TrackerKind(TrackerClass.GITHUB, "github-issues"),
-            None,
-        ),
-        (None, None, TrackerKind(TrackerClass.UNSET, None), None),
+        ("github-issues", None, "gh issue view T-1"),
+        (None, None, "Tracker unknown"),
     ],
 )
-def test_opencode_preflight_threads_tracker_and_server(
+def test_opencode_preflight_threads_the_bindings_block(
     tmp_path: Path,
     tracker: str | None,
     gate: TrackerMcpGateConfig | None,
-    expected_tracker: TrackerKind,
-    expected_server: str | None,
+    expected_fragment: str,
 ) -> None:
-    """#3055: the prompt builder gets the workspace tracker and the gate's
-    opencode server (None when no gate or no server is named)."""
+    """#3703: the prompt builder gets the opencode harness's bindings block,
+    the same block the context stamp carries for this client and ticket."""
     if tracker is not None:
         _write_tracker_config(tmp_path, tracker)
     config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
@@ -398,9 +391,10 @@ def test_opencode_preflight_threads_tracker_and_server(
         )
 
     assert isinstance(result, _PreflightOK)
-    kwargs = build_mock.call_args.kwargs
-    assert kwargs["tracker"] == expected_tracker
-    assert kwargs["tracker_server"] == expected_server
+    block = build_mock.call_args.kwargs["bindings_block"]
+    assert block == bindings_block_for(client, Harness.OPENCODE, "T-1")
+    assert block.count(BINDINGS_BEGIN) == 1
+    assert expected_fragment in block
 
 
 def _sess() -> Session:

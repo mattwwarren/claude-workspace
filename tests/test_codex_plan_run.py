@@ -37,6 +37,7 @@ from cw.models import (
     Stage,
     StageExecutorConfig,
 )
+from cw.models.bindings import Bindings
 from cw.models.orchestrator_config.stage import ModelPrice
 from cw.models.usage import UsageStage, UsageState, UsageUnavailableReason
 from cw.plan_fingerprint import PLAN_DRAFT_RELATIVE_PATH, compute_plan_draft_fingerprint
@@ -47,6 +48,7 @@ from tests._backend_mcp_helpers import (
     stage_mcp_config,
 )
 from tests._codex_review_helpers import exclude_cw_dir, seed_codex_stage_run
+from tests._shared.bindings_builders import LINEAR_RENAMED_TOOLS, bindings_linear_mcp
 from tests._shared.cli_preflight import _write_tracker_config
 from tests._tool_fakes import (
     FakeGhCli,
@@ -955,6 +957,119 @@ def test_unknown_mcp_state_fails_open_with_the_read_allowlist(
     assert any("mcp_servers.linear.enabled_tools=" in a for a in argv)
     assert "=== BEGIN CW-INJECTED: Ticket ===" not in str(call["stdin"])
     assert not [r for r in h.gh.records if "view" in r.argv]
+
+
+def test_bound_renamed_tools_reach_the_plan_launch_allowlist(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3703: a tickets binding's tool names, not the Linear defaults, reach argv."""
+    h = harness()
+    _other_tracker(h, tmp_path, monkeypatch, servers={"codex": "linear"})
+    h.client = h.client.model_copy(
+        update={"bindings": bindings_linear_mcp(tools=LINEAR_RENAMED_TOOLS)}
+    )
+    add_stations(add_turn(h.runner))
+    h.runner.add(
+        lambda argv, _stdin: "--skip-git-repo-check" in argv,
+        CodexRunResult(returncode=1, stdout="", stderr="post refused"),
+    )
+    h.run()
+    (call,) = h.plan_calls
+    raw_argv = call["argv"]
+    assert isinstance(raw_argv, list)
+    argv = [str(a) for a in raw_argv]
+    assert (
+        'mcp_servers.linear.enabled_tools=["linear_get_issue","linear_list_comments"]'
+        in argv
+    )
+    assert 'mcp_servers.linear.enabled_tools=["get_issue"' not in " ".join(argv)
+
+
+def test_github_tracker_with_codex_mcp_binding_uses_the_gh_path(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h = harness()
+    _other_tracker(
+        h,
+        tmp_path,
+        monkeypatch,
+        servers={"codex": "linear"},
+        tracker=TRACKER_GITHUB_ISSUES,
+    )
+    h.client = h.client.model_copy(
+        update={
+            "bindings": Bindings.model_validate(
+                {
+                    "tickets": {
+                        "system": TRACKER_GITHUB_ISSUES,
+                        "mcp": {
+                            "codex": {
+                                "server": "linear",
+                                "tools": {
+                                    "get": "github_get_issue",
+                                    "list_comments": "github_list_comments",
+                                },
+                            }
+                        },
+                    }
+                }
+            )
+        }
+    )
+    add_stations(add_turn(h.runner))
+    h.run()
+    (call,) = h.plan_calls
+    argv = call["argv"]
+    assert isinstance(argv, list)
+    assert not any("enabled_tools" in a for a in argv)
+    assert [r for r in h.gh.records if r.argv[-1] == "body"]
+
+
+def test_legacy_gate_on_github_tracker_stays_on_github_path(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A leftover tracker_mcp_gate on a GitHub client is inert, not a block (#3703)."""
+    h = harness()
+    _other_tracker(
+        h,
+        tmp_path,
+        monkeypatch,
+        servers={"codex": "linear"},
+        tracker=TRACKER_GITHUB_ISSUES,
+    )
+    add_stations(add_turn(h.runner))
+    result = h.run()
+    assert result.status == "stage_complete"
+    (call,) = h.plan_calls
+    argv = call["argv"]
+    assert isinstance(argv, list)
+    assert not any("enabled_tools" in a for a in argv)
+
+
+def test_legacy_gate_on_linear_tracker_targets_codex_mcp(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h = harness()
+    _other_tracker(h, tmp_path, monkeypatch, servers={"codex": "linear"})
+    add_stations(add_turn(h.runner))
+    h.runner.add(
+        lambda argv, _stdin: "--skip-git-repo-check" in argv,
+        CodexRunResult(returncode=1, stdout="", stderr="post refused"),
+    )
+    h.run()
+    (call,) = h.plan_calls
+    argv = call["argv"]
+    assert isinstance(argv, list)
+    assert 'mcp_servers.linear.enabled_tools=["get_issue","list_comments"]' in argv
+    assert not [r for r in h.gh.records if r.argv[-1] == "body"]
 
 
 @pytest.mark.parametrize("tracker", [TRACKER_GITHUB_ISSUES, None])

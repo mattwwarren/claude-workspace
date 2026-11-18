@@ -645,3 +645,35 @@ class TestBoundaryGuard:
     def test_no_gh_argv_literal(self, rel: str) -> None:
         tree = ast.parse((_REPO_ROOT / rel).read_text(encoding="utf-8"))
         assert _direct_gh_call_linenos(tree) == []
+
+
+class TestTicketsToolName:
+    """``TicketsBinding.tool_name``: the binding's tool for an op, or None (#3703)."""
+
+    @staticmethod
+    def _tickets(mcp: dict[str, object]) -> TicketsBinding:
+        bindings = Bindings.model_validate({"tickets": {"mcp": mcp}})
+        assert bindings.tickets is not None
+        return bindings.tickets
+
+    def test_a_named_tool_is_returned(self) -> None:
+        tickets = self._tickets(
+            {"codex": {"server": "linear", "tools": {"get": "linear_get_issue"}}}
+        )
+        assert tickets.tool_name("codex", TicketOp.GET) == "linear_get_issue"
+
+    def test_an_unnamed_op_returns_none(self) -> None:
+        tickets = self._tickets(
+            {"codex": {"server": "linear", "tools": {"get": "linear_get_issue"}}}
+        )
+        assert tickets.tool_name("codex", TicketOp.COMMENT) is None
+
+    def test_a_harness_without_a_realization_returns_none(self) -> None:
+        tickets = self._tickets(
+            {"codex": {"server": "linear", "tools": {"get": "linear_get_issue"}}}
+        )
+        assert tickets.tool_name("opencode", TicketOp.GET) is None
+
+    def test_a_realization_without_tools_returns_none(self) -> None:
+        tickets = self._tickets({"codex": {"server": "linear"}})
+        assert tickets.tool_name("codex", TicketOp.GET) is None

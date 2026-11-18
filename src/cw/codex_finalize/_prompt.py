@@ -74,6 +74,7 @@ def render_finalize_prompt(
     ticket: TicketText | None,
     branch_facts: str,
     override_json: str | None,
+    bindings_block: str,
 ) -> str:
     """The FINALIZE turn's stdin prompt.
 
@@ -102,4 +103,5 @@ def render_finalize_prompt(
         for name, body in sections
         if body is not None
     )
+    parts.append("\n" + bindings_block)
     return "".join(parts)

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import cw.codex_plan._prompt as prompt_module
+from cw.bindings_block import BINDINGS_BEGIN, render_bindings_block
 from cw.codex_plan._prompt import (
     APPROVAL_MATCHES,
     APPROVAL_NONE,
@@ -25,12 +26,15 @@ from cw.contract_manifest import CLAUDE_ONLY_DENYLIST, RenderError, render_stage
 from cw.contract_manifest._render import _PLAN_CODEX_ADDENDUM, _STAGE_DOCS
 from cw.gh import AGENT_COMMENT_MARKER
 from cw.models import CODEX_BACKEND
+from cw.models.bindings import Harness
+from tests._shared.bindings_builders import bindings_github_cli
 from tests._tool_fakes import FakeGhCli
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _COMMANDS_ROOT = _REPO_ROOT / ".claude" / "commands"
 
 _TICKET = "4242"
+_BLOCK = render_bindings_block(bindings_github_cli(), Harness.CODEX, ticket_id=_TICKET)
 
 
 def _render(
@@ -45,6 +49,7 @@ def _render(
         ticket=ticket,
         resume=resume,
         approval_matches=approval,
+        bindings_block=_BLOCK,
     )
 
 
@@ -153,14 +158,19 @@ class TestRender:
         contract = render_stage_prompt(
             "plan", CODEX_BACKEND, docs_root=_COMMANDS_ROOT, ticket_id=_TICKET
         )
-        assert text == contract
+        assert text == contract + "\n" + _BLOCK
         preamble = text.splitlines()[0]
         assert f"ticket {_TICKET}" in preamble
         assert "<ticket-id>" not in preamble
 
-    def test_addendum_is_last_and_names_the_plan_template(self) -> None:
+    def test_bindings_block_is_last_once_and_the_addendum_precedes_it(self) -> None:
         text = _render()
-        assert text.rstrip("\n").endswith(_PLAN_CODEX_ADDENDUM.rstrip("\n"))
+        assert text.rstrip("\n").endswith(_BLOCK.rstrip("\n"))
+        assert text.count(BINDINGS_BEGIN) == 1
+        assert _PLAN_CODEX_ADDENDUM.rstrip("\n") in text
+        assert text.index(_PLAN_CODEX_ADDENDUM.splitlines()[0]) < text.index(
+            BINDINGS_BEGIN
+        )
         assert "stage1_plan" in _PLAN_CODEX_ADDENDUM
         assert "lines_actual null" in _PLAN_CODEX_ADDENDUM
 
@@ -203,7 +213,8 @@ class TestRender:
 
     def test_no_resume_section_without_a_draft(self) -> None:
         assert RESUME_SECTION not in _render().split(_PLAN_CODEX_ADDENDUM)[-1]
-        assert "CW-INJECTED" not in _render()
+        # The Bindings block is always present; nothing else is injected.
+        assert "CW-INJECTED" not in _render().replace(_BLOCK, "")
 
     def test_contract_passes_the_denylist(self) -> None:
         text = _render()
@@ -226,6 +237,7 @@ class TestRender:
                 ticket=None,
                 resume=None,
                 approval_matches=False,
+                bindings_block=_BLOCK,
             )
 
 
