@@ -44,8 +44,9 @@ MAX_TICKET_CHARS = 64
 MAX_PRODUCER_CHARS = 64
 MAX_DETAIL_CHARS = 500
 # The audit trail lives inside the entry record (operator resolution 22a): one
-# bounded item per state change. Past the cap the store refuses the change
-# rather than silently dropping history.
+# item per state change, kept as a ring buffer of at most MAX_TRANSITIONS items.
+# Past the cap the oldest item is dropped and ``transitions_dropped`` counts it,
+# so truncation is visible and never blocks a transition (22a).
 MAX_TRANSITIONS = 32
 ENTRY_ID_LENGTH = 32
 DEFAULT_CLAIM_LIMIT = 1
@@ -94,12 +95,6 @@ class OutboxClaimError(OutboxError):
 
 class OutboxTransitionError(OutboxError):
     """An illegal target state or reason."""
-
-    __slots__ = ()
-
-
-class OutboxHistoryFullError(OutboxError):
-    """The entry's transitions list is at ``MAX_TRANSITIONS``; the change is refused."""
 
     __slots__ = ()
 
@@ -298,6 +293,8 @@ class OutboxEntry(BaseModel):
     transitions: list[OutboxTransition] = Field(
         min_length=1, max_length=MAX_TRANSITIONS
     )
+    # Items the ring buffer has dropped from the front of ``transitions``.
+    transitions_dropped: int = Field(default=0, ge=0)
 
     def _check_claim_fields(self) -> None:
         claimed = self.state is OutboxState.CLAIMED
@@ -363,7 +360,7 @@ class OutboxListRow(BaseModel):
     created_at: datetime
     updated_at: datetime
     claimed_at: datetime | None
-    claimant_verdict: Literal["in_flight", "owner_gone", "unknown"] | None
+    claimant_verdict: ClaimantVerdict | None
     part_count: int
     body_bytes: int
 

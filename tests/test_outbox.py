@@ -58,7 +58,6 @@ from cw.outbox import (
     OutboxClaimError,
     OutboxEntry,
     OutboxError,
-    OutboxHistoryFullError,
     OutboxReason,
     OutboxRecordError,
     OutboxRole,
@@ -863,36 +862,37 @@ class TestClaim:
 
         assert len(tokens) == 2
 
-    def test_claim_verifies_sha_missing_body_remains_retryable(
-        self,
-    ) -> None:
+    def test_claim_missing_body_settles_failed_body_unreadable(self) -> None:
         entry = _enqueue().entry
         _body_file(entry.id).unlink()
 
         assert claim(_CLIENT) == []
 
         (stored,) = list_entries(_CLIENT)
-        assert stored.state is OutboxState.PENDING
-        assert stored.reason is None
+        assert stored.state is OutboxState.FAILED
+        assert stored.reason is OutboxReason.BODY_UNREADABLE
         assert stored.claim_token is None
         assert stored.claimant is None
-
-        _body_file(entry.id).write_bytes(_BODY.encode())
-        assert [e.id for e in claim(_CLIENT)] == [entry.id]
+        assert [(t.from_state, t.to_state) for t in stored.transitions] == [
+            (None, OutboxState.PENDING),
+            (OutboxState.PENDING, OutboxState.CLAIMED),
+            (OutboxState.CLAIMED, OutboxState.FAILED),
+        ]
+        assert stored.transitions[-1].reason is OutboxReason.BODY_UNREADABLE
+        assert claim(_CLIENT) == []
 
     @pytest.mark.parametrize("replacement", ["XXXXX world", "short"])
-    def test_claim_sha_mismatch_remains_retryable(self, replacement: str) -> None:
+    def test_claim_sha_mismatch_settles_failed_body_unreadable(
+        self, replacement: str
+    ) -> None:
         entry = _enqueue().entry
         _body_file(entry.id).write_text(replacement, encoding="utf-8")
 
         assert claim(_CLIENT) == []
 
         (stored,) = list_entries(_CLIENT)
-        assert stored.state is OutboxState.PENDING
-        assert stored.reason is None
-
-        _body_file(entry.id).write_bytes(_BODY.encode())
-        assert [e.id for e in claim(_CLIENT)] == [entry.id]
+        assert stored.state is OutboxState.FAILED
+        assert stored.reason is OutboxReason.BODY_UNREADABLE
 
     def test_unreadable_body_not_counted_toward_limit(self) -> None:
         with freeze_time("2026-11-01T10:00:00Z"):
@@ -906,9 +906,7 @@ class TestClaim:
         got = claim(_CLIENT, limit=2)
 
         assert [e.id for e in got] == [good_a.id, good_b.id]
-        assert _states()[broken.id] is OutboxState.PENDING
-        _body_file(broken.id).write_bytes(_BODY.encode())
-        assert [e.id for e in claim(_CLIENT)] == [broken.id]
+        assert _states()[broken.id] is OutboxState.FAILED
 
     def test_claim_transient_oserror_on_body_read_does_not_settle(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1617,16 +1615,37 @@ class TestTransitionHistory:
         )
         assert not [p for p in _client_dir().iterdir() if "audit" in p.name]
 
-    def test_history_cap_refuses_claim_and_writes_nothing(
+    def test_history_cap_drops_oldest_and_counts_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        entry = _enqueue().entry
+        monkeypatch.setattr("cw.outbox._store.MAX_TRANSITIONS", 2)
+        claimed = claim(_CLIENT)[0]
+        assert claimed.claim_token is not None
+        settle(
+            _CLIENT,
+            entry.id,
+            claim_token=claimed.claim_token,
+            state=OutboxState.DELIVERED,
+            reason=OutboxReason.POSTED,
+        )
+        (stored,) = list_entries(_CLIENT)
+        assert stored.state is OutboxState.DELIVERED
+        assert [t.to_state for t in stored.transitions] == [
+            OutboxState.CLAIMED,
+            OutboxState.DELIVERED,
+        ]
+        assert stored.transitions_dropped == 1
+
+    def test_history_cap_never_blocks_a_claim(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _enqueue()
         monkeypatch.setattr("cw.outbox._store.MAX_TRANSITIONS", 1)
-        with pytest.raises(OutboxHistoryFullError):
-            claim(_CLIENT)
-        (stored,) = list_entries(_CLIENT)
-        assert stored.state is OutboxState.PENDING
-        assert len(stored.transitions) == 1
+        (claimed,) = claim(_CLIENT)
+        assert claimed.state is OutboxState.CLAIMED
+        assert len(claimed.transitions) == 1
+        assert claimed.transitions_dropped == 1
 
     def test_failed_settle_write_leaves_claim_intact(
         self, monkeypatch: pytest.MonkeyPatch
