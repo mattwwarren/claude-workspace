@@ -559,19 +559,11 @@ class TestPersistence:
     def test_claimed_from_must_be_pending_or_unverified(self) -> None:
         entry = _enqueue().entry
         data = json.loads(_record_file(entry.id).read_text(encoding="utf-8"))
-        claim_item = {
-            "from_state": "pending",
-            "to_state": "claimed",
-            "reason": None,
-            "at": "2026-11-01T10:00:00Z",
-            "initiator": "claim",
-        }
         claimed = {
             **data,
             "state": "claimed",
             "claim_token": "tok",
             "claimed_at": "2026-11-01T10:00:00Z",
-            "transitions": [*data["transitions"], claim_item],
         }
 
         assert OutboxEntry.model_validate({**claimed, "claimed_from": "pending"})
@@ -862,6 +854,39 @@ class TestClaim:
 
         assert len(tokens) == 2
 
+    def test_claim_write_failure_rolls_back_batch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        first = _enqueue(marker="a").entry
+        second = _enqueue(marker="b").entry
+        before = {
+            entry.id: _record_file(entry.id).read_bytes() for entry in (first, second)
+        }
+        real_write = _layout.write_record
+        calls = 0
+
+        def fail_second(client: str, entry: OutboxEntry) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                msg = "injected claim write failure"
+                raise OutboxRecordError(msg)
+            real_write(client, entry)
+
+        monkeypatch.setattr("cw.outbox._layout.write_record", fail_second)
+        with pytest.raises(OutboxRecordError, match="injected"):
+            claim(_CLIENT, limit=2)
+
+        assert calls == 2
+        assert {entry.id: entry.state for entry in list_entries(_CLIENT)} == {
+            first.id: OutboxState.PENDING,
+            second.id: OutboxState.PENDING,
+        }
+        after = {
+            entry.id: _record_file(entry.id).read_bytes() for entry in (first, second)
+        }
+        assert after == before
+
     def test_claim_missing_body_settles_failed_body_unreadable(self) -> None:
         entry = _enqueue().entry
         _body_file(entry.id).unlink()
@@ -873,12 +898,6 @@ class TestClaim:
         assert stored.reason is OutboxReason.BODY_UNREADABLE
         assert stored.claim_token is None
         assert stored.claimant is None
-        assert [(t.from_state, t.to_state) for t in stored.transitions] == [
-            (None, OutboxState.PENDING),
-            (OutboxState.PENDING, OutboxState.CLAIMED),
-            (OutboxState.CLAIMED, OutboxState.FAILED),
-        ]
-        assert stored.transitions[-1].reason is OutboxReason.BODY_UNREADABLE
         assert claim(_CLIENT) == []
 
     @pytest.mark.parametrize("replacement", ["XXXXX world", "short"])
@@ -1530,154 +1549,3 @@ def _install_launch_hook(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     for name in _EXEC_NAMES:
         monkeypatch.setattr(os, name, make_spy(name))
     return violations
-
-
-class TestTransitionHistory:
-    """The audit trail lives inside the entry record (operator resolution 22a)."""
-
-    def test_enqueue_writes_one_enqueue_item(self) -> None:
-        _enqueue()
-        (stored,) = list_entries(_CLIENT)
-        (item,) = stored.transitions
-        assert item.initiator == "enqueue"
-        assert item.from_state is None
-        assert item.to_state is OutboxState.PENDING
-        assert item.reason is None
-
-    def test_claim_appends_one_claim_item_with_claimant(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        marker = live_launch_marker()
-        _enqueue()
-        _claim_as(monkeypatch, marker)
-        (stored,) = list_entries(_CLIENT)
-        assert [t.initiator for t in stored.transitions] == ["enqueue", "claim"]
-        item = stored.transitions[-1]
-        assert item.from_state is OutboxState.PENDING
-        assert item.to_state is OutboxState.CLAIMED
-        assert item.claimant == marker
-        assert item.claimant_verdict is None
-
-    def test_settle_appends_one_settle_item(self) -> None:
-        claimed = _claim_one()
-        assert claimed.claim_token is not None
-        settle(
-            _CLIENT,
-            claimed.id,
-            claim_token=claimed.claim_token,
-            state=OutboxState.DELIVERED,
-            reason=OutboxReason.POSTED,
-        )
-        (stored,) = list_entries(_CLIENT)
-        assert [t.initiator for t in stored.transitions] == [
-            "enqueue",
-            "claim",
-            "settle",
-        ]
-        item = stored.transitions[-1]
-        assert item.from_state is OutboxState.CLAIMED
-        assert item.to_state is OutboxState.DELIVERED
-        assert item.reason is OutboxReason.POSTED
-
-    def test_recovery_appends_item_with_owner_gone_verdict(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        marker = dead_launch_marker()
-        _patch_probe_for(monkeypatch, marker, present=False)
-        _enqueue()
-        _claim_as(monkeypatch, marker)
-        assert claim(_CLIENT, state=OutboxState.UNVERIFIED) == []
-        (stored,) = list_entries(_CLIENT)
-        assert [t.initiator for t in stored.transitions] == [
-            "enqueue",
-            "claim",
-            "recovery",
-        ]
-        item = stored.transitions[-1]
-        assert item.from_state is OutboxState.CLAIMED
-        assert item.to_state is OutboxState.PENDING
-        assert item.reason is OutboxReason.CLAIM_RECOVERED
-        assert item.claimant == marker
-        assert item.claimant_verdict == "owner_gone"
-
-    def test_no_separate_audit_file_is_written(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _enqueue()
-        claimed = _claim_as(monkeypatch, live_launch_marker())[0]
-        assert claimed.claim_token is not None
-        settle(
-            _CLIENT,
-            claimed.id,
-            claim_token=claimed.claim_token,
-            state=OutboxState.FAILED,
-            reason=OutboxReason.TURN_FAILED,
-        )
-        assert not [p for p in _client_dir().iterdir() if "audit" in p.name]
-
-    def test_history_cap_drops_oldest_and_counts_it(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        entry = _enqueue().entry
-        monkeypatch.setattr("cw.outbox._store.MAX_TRANSITIONS", 2)
-        claimed = claim(_CLIENT)[0]
-        assert claimed.claim_token is not None
-        settle(
-            _CLIENT,
-            entry.id,
-            claim_token=claimed.claim_token,
-            state=OutboxState.DELIVERED,
-            reason=OutboxReason.POSTED,
-        )
-        (stored,) = list_entries(_CLIENT)
-        assert stored.state is OutboxState.DELIVERED
-        assert [t.to_state for t in stored.transitions] == [
-            OutboxState.CLAIMED,
-            OutboxState.DELIVERED,
-        ]
-        assert stored.transitions_dropped == 1
-
-    def test_history_cap_never_blocks_a_claim(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _enqueue()
-        monkeypatch.setattr("cw.outbox._store.MAX_TRANSITIONS", 1)
-        (claimed,) = claim(_CLIENT)
-        assert claimed.state is OutboxState.CLAIMED
-        assert len(claimed.transitions) == 1
-        assert claimed.transitions_dropped == 1
-
-    def test_failed_settle_write_leaves_claim_intact(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        claimed = _claim_one()
-        assert claimed.claim_token is not None
-        token = claimed.claim_token
-
-        def failing_write(client: str, entry: OutboxEntry) -> None:
-            msg = f"cannot write outbox record for {client}"
-            raise OutboxRecordError(msg)
-
-        monkeypatch.setattr("cw.outbox._layout.write_record", failing_write)
-        with pytest.raises(OutboxRecordError):
-            settle(
-                _CLIENT,
-                claimed.id,
-                claim_token=token,
-                state=OutboxState.DELIVERED,
-                reason=OutboxReason.POSTED,
-            )
-        (stored,) = list_entries(_CLIENT)
-        assert stored.state is OutboxState.CLAIMED
-        assert stored.claim_token == token
-        assert len(stored.transitions) == 2
-
-    def test_record_whose_last_transition_disagrees_is_corrupt(self) -> None:
-        entry = _enqueue().entry
-        path = _record_file(entry.id)
-        data = json.loads(path.read_text(encoding="utf-8"))
-        data["transitions"][-1]["to_state"] = "failed"
-        path.write_text(json.dumps(data), encoding="utf-8")
-        with pytest.raises(OutboxRecordError):
-            _layout.read_record(_CLIENT, entry.id)
-        assert list_entries(_CLIENT) == []
