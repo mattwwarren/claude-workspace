@@ -129,7 +129,7 @@ def test_plan_substantive_must_fix_branches_unchanged() -> None:
     assert (
         "**MUST_FIX persists after 1 revision cycle, headless** → EXIT "
         '`blocked` with `blocker.reason: "plan_unreviewable"`. Do NOT post '
-        "the stale plan to Linear."
+        "the stale plan to the ticket."
     ) in content
 
 

@@ -70,7 +70,7 @@ def test_orientation_branches_by_tracker_for_plan_recovery() -> None:
     exists at all (#1906)."""
     section = _orientation_section()
     assert "**Linear" in section
-    assert "list_comments(<id>)" in section
+    assert "the list-comments operation" in section
 
 
 def test_orientation_github_branch_byte_identical() -> None:

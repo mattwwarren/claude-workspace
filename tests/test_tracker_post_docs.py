@@ -86,12 +86,6 @@ BACKTICKED_TOKEN = re.compile(r"`([a-z]+(?:_[a-z]+)*)`")
 # {doc: [(anchor substring, reason)]}. A raw-post line must contain one of its
 # doc's anchors; every anchor must still be in its doc.
 ALLOW_LIST: dict[str, list[tuple[str, str]]] = {
-    "auto-dev-intake.md": [
-        (
-            "| Post a comment | Linear create-comment | `gh issue comment <n> --body",
-            "generic tracker-operation mapping table, not a post site",
-        ),
-    ],
     "auto-dev.md": [
         (
             "write op itself (an allow-listed raw post: `gh issue comment`, Linear "
@@ -112,7 +106,8 @@ ALLOW_LIST: dict[str, list[tuple[str, str]]] = {
     ],
     "auto-dev-finalize.md": [
         (
-            "**Post to Linear:** Comment on the issue with PR link",
+            "**Post to Linear:** Comment on the ticket (the `tickets` role's "
+            "create-comment operation) with the PR link",
             "PR-link comment: a PR URL and a fixed sentence",
         ),
     ],
@@ -301,7 +296,6 @@ def test_seam_section_lists_every_allow_listed_site() -> None:
         "PR-link comment",
         "consolidated park comment",
         "voided-findings comment",
-        "`auto-dev-intake.md`",
     ):
         assert site in allow, site
     assert "tests/test_tracker_post_docs.py" in allow

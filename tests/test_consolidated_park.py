@@ -223,7 +223,7 @@ def test_auto_dev_decision_rows_reference_consolidated_park() -> None:
     """The three S1 exit rows in auto-dev.md route through the park."""
     content = _cmd("auto-dev.md")
     for row_anchor in (
-        "| S1 plan, no Linear plan, large |",
+        "| S1 plan, no ticket plan, large |",
         "| S1 ambiguity scan, ambiguities found (parked) |",
         "| S1 ambiguity scan, non-empty `PREMISES TO VERIFY` (unverified) |",
     ):

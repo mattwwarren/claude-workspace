@@ -231,10 +231,10 @@ def test_blocking_findings_rule_still_forbids_posting_plan_text() -> None:
     section = _step1f3_section()
 
     unreviewable_window = _after(section, UNREVIEWABLE_PERSISTS_ANCHOR, span=400)
-    assert "Do NOT post the stale plan to Linear." in unreviewable_window
+    assert "Do NOT post the stale plan to the ticket." in unreviewable_window
 
     unsound_first_cycle_window = _after(section, UNSOUND_FIRST_CYCLE_ANCHOR, span=400)
-    assert "Do NOT post the plan to Linear." in unsound_first_cycle_window
+    assert "Do NOT post the plan to the ticket." in unsound_first_cycle_window
 
 
 # ---------------------------------------------------------------------------
