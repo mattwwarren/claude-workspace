@@ -33,6 +33,12 @@ from cw.models.orchestrator_config import (
 from cw.models.tasks import DEFAULT_LANE
 from cw.models.worker_effort import WorkerEffort
 
+# The ceiling of ``outbox.max_entries_per_run`` and of ``cw outbox drain
+# --limit`` (#3706). Lives here, not in ``cw.outbox``: the models layer must
+# not import the outbox package.
+OUTBOX_MAX_ENTRIES_PER_RUN_CEILING: Final = 100
+OUTBOX_MAX_ENTRIES_PER_RUN_DEFAULT: Final = 20
+
 DEFAULT_AUTO_PURPOSES: list[SessionPurpose] = [
     SessionPurpose.IDEA,
     SessionPurpose.IMPL,
@@ -372,6 +378,28 @@ class ReviewDebtAutoEnqueueConfig(BaseModel):
     lane: str = Field(min_length=1)
 
 
+class OutboxConfig(BaseModel):
+    """Per-client outbox drain settings (#3706, RFC 0019 O2).
+
+    ``enabled: false`` stops the dispatch tick from launching a drain for the
+    client and from emitting outbox events; ``enqueue`` is unaffected, so
+    entries wait. It is distinct from an absent tickets binding, where the
+    drain still runs and releases entries ``binding_unreachable``. A plain
+    ``cw outbox drain -c <client>`` on a disabled client is refused;
+    ``--force`` drains it anyway. ``max_entries_per_run`` caps the entries one
+    drain run claims (``--limit`` overrides it).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    max_entries_per_run: int = Field(
+        default=OUTBOX_MAX_ENTRIES_PER_RUN_DEFAULT,
+        ge=1,
+        le=OUTBOX_MAX_ENTRIES_PER_RUN_CEILING,
+    )
+
+
 class ReviewConfig(BaseModel):
     """Per-client Stage 3 review settings (#2787 converge-to-clean mode).
 
@@ -624,6 +652,8 @@ class ClientConfig(BaseModel):
     # rollout control. Read it only through the resolver accessors
     # (tracker_mcp_server, tickets_plugin_id, tickets_preflight).
     bindings: Bindings = Field(default_factory=Bindings)
+    # RFC 0019 O2 (#3706): the outbox drain switch and per-run cap.
+    outbox: OutboxConfig = Field(default_factory=OutboxConfig)
     # Per-client opt-in for the #2917 repair_mechanical_conflict recipe. None
     # (the default) means the recipe never fires for this client; the entry
     # also carries the globs and commands. See MechanicalConflictRepairConfig.

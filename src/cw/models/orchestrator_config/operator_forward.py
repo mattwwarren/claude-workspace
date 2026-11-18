@@ -85,6 +85,15 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         # REQUEUE_REVIEW_DELIVERY_DEGRADED -- a codex review ran without the
         # operator's tracker comments, voided findings and settle markers.
         OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED,
+        # GitHub #3706 (RFC 0019 O2): an outbox post that may be public but is
+        # unconfirmed, one the store gave up on (unreadable body), and one
+        # returned to pending (binding unreachable, or held after a per-entry
+        # failure until `cw outbox drain --force`) each need the operator.
+        # OUTBOX_ENTRY_DELIVERED is deliberately EXCLUDED: an audit record only
+        # (contrast REVIEW_VERDICT_COMMENT_POSTED, excluded the same way).
+        OrchestratorEventType.OUTBOX_ENTRY_UNVERIFIED,
+        OrchestratorEventType.OUTBOX_ENTRY_SKIPPED,
+        OrchestratorEventType.OUTBOX_ENTRY_PENDING,
     }
 )
 _DEFAULT_OPERATOR_TASK_TRANSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
