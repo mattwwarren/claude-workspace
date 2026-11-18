@@ -473,9 +473,18 @@ class TestOutboxConfig:
         with pytest.raises(ValidationError):
             OutboxConfig(max_entries_per_run=value)
 
-    def test_enabled_rejects_a_non_bool(self) -> None:
+    @pytest.mark.parametrize("value", [True, False])
+    def test_enabled_accepts_a_real_bool(self, value: bool) -> None:
+        assert OutboxConfig.model_validate({"enabled": value}).enabled is value
+
+    @pytest.mark.parametrize(
+        "value", ["sometimes", "yes", "no", "true", "false", "1", 0, 1, None, []]
+    )
+    def test_enabled_rejects_a_non_bool_instead_of_coercing(
+        self, value: object
+    ) -> None:
         with pytest.raises(ValidationError):
-            OutboxConfig.model_validate({"enabled": "sometimes"})
+            OutboxConfig.model_validate({"enabled": value})
 
     def test_extra_forbidden(self) -> None:
         with pytest.raises(ValidationError):

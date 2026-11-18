@@ -392,7 +392,7 @@ class OutboxConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = True
+    enabled: StrictBool = True
     max_entries_per_run: int = Field(
         default=OUTBOX_MAX_ENTRIES_PER_RUN_DEFAULT,
         ge=1,
