@@ -493,4 +493,4 @@ These could not be settled from the code.
 
 ## Issues
 
-Issues: _(filled by `/sprint-buildout`)_
+Issues: Epic I #3698 · Epic II #3699 · Epic III #3700 · Epic IV #3701 · R1 #3702 · R2 #3703 · R3 #3704 · O1 #3705 · O2 #3706 · O3 #3707 · H1 #3708 · H2 #3709 · H3 #3710 · T1 #3711 · T2 #3712 · X1 #3713 · Milestone https://github.com/mattwwarren/claude-workspace/milestone/25
