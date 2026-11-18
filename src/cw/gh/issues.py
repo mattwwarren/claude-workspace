@@ -132,7 +132,8 @@ def _snapshot_shape_ok(data: dict[str, Any]) -> bool:
     return (
         isinstance(data.get("title"), str)
         and isinstance(data.get("body"), str)
-        and isinstance(data.get("url"), str)
+        and "url" in data
+        and (data["url"] is None or isinstance(data["url"], str))
         and isinstance(data.get("comments"), list)
     )
 

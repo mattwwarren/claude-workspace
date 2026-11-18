@@ -15,7 +15,7 @@ from __future__ import annotations
 import contextlib
 import logging
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 from cw.config import _load_concurrency_overrides
 from cw.dev_queue import (
@@ -82,6 +82,12 @@ _log = logging.getLogger("cw.dispatch")
 # queued behind it. Fixed rather than exponential because nothing is failing:
 # this is a wait, not a retry of a broken operation.
 _OCCUPIED_DEFER_SECONDS: int = 30
+
+
+def _raise_context_cleanup_failure() -> NoReturn:
+    """Stop before spawning when stale ticket context could not be removed."""
+    raise OSError
+
 
 # Why: no-worker spawn failures of these types revert WITHOUT charging the
 # unproductive-attempt ceiling (#2695, #2722). A raw ``OSError`` is the infra
@@ -739,7 +745,8 @@ def _spawn_claimed_task(
         )
 
         _invalidate_stale_context_json(task, client, worktree_path)
-        _render_context_json_from_snapshot(task, worktree_path)
+        if not _render_context_json_from_snapshot(task, worktree_path):
+            _raise_context_cleanup_failure()
 
         executor = resolve_executor(task, client, native_daemon=resolved_native_daemon)
         # wall_clock_budget_seconds is always None since the process-kill-

@@ -3469,7 +3469,6 @@ class TestFetchIssueSnapshot:
             [],
             {"title": 1, "body": "b", "url": "u", "comments": []},
             {"title": "t", "body": None, "url": "u", "comments": []},
-            {"title": "t", "body": "b", "url": None, "comments": []},
             {"title": "t", "body": "b", "url": "u", "comments": "nope"},
         ],
     )

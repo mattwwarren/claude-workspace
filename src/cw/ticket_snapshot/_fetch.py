@@ -73,8 +73,11 @@ def _gh_comment(raw: Any) -> SnapshotComment:
     if not isinstance(created_at, str):
         msg = "gh comment has no createdAt"
         raise SnapshotRefusedError(msg)
-    author_login = _gh_author_login(raw.get("author"))
-    minimized = raw.get("isMinimized", False)
+    if "author" not in raw:
+        msg = "gh comment has no author field"
+        raise SnapshotRefusedError(msg)
+    author_login = _gh_author_login(raw["author"])
+    minimized = raw.get("isMinimized")
     if not isinstance(minimized, bool):
         msg = "gh comment isMinimized is not a boolean"
         raise SnapshotRefusedError(msg)

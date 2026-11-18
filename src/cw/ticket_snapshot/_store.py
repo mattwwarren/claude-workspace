@@ -104,7 +104,10 @@ def read(task: TicketTask) -> TicketSnapshot | None:
         msg = "snapshot is not a JSON object"
         raise SnapshotUntrustedError(msg, reason="invalid")
     version = data.get("schema_version")
-    if isinstance(version, int) and version > SNAPSHOT_SCHEMA_VERSION:
+    if type(version) is not int:
+        msg = "snapshot schema_version is not an integer"
+        raise SnapshotUntrustedError(msg, reason="invalid")
+    if version > SNAPSHOT_SCHEMA_VERSION:
         msg = "snapshot schema_version is newer than this cw reads"
         raise SnapshotUntrustedError(msg, reason="too_new")
     try:
