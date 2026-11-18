@@ -253,7 +253,7 @@ class TestDefaultArgvLiterals:
             model="m",
             reasoning_effort="high",
             mcp_server=None,
-            tracker=None,
+            read_tools=None,
             other_servers=(),
         )
         assert argv == _PLAN_LITERAL
@@ -344,7 +344,7 @@ class TestEveryLaunchSiteCarriesTheOverride:
             model=None,
             reasoning_effort=None,
             mcp_server=None,
-            tracker=None,
+            read_tools=None,
             other_servers=(),
         )
         _assert_override_after_sandbox(argv, "read-only")

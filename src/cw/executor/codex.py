@@ -6,6 +6,7 @@ import shutil
 from typing import TYPE_CHECKING, Any
 
 from cw.auto_dev_result import AutoDevResult
+from cw.bindings_block import bindings_block_for
 from cw.codex_review import make_codex_blocked
 from cw.codex_runner import (
     RealCodexJobRunner,
@@ -22,6 +23,7 @@ from cw.executor.core import (
     purpose_for_stage,
 )
 from cw.models import SessionOrigin, Stage
+from cw.models.bindings import Harness
 from cw.native_daemon import get_native_daemon_client
 from cw.opencode_runner import stage_entry_marker
 from cw.spawn import _write_hook_context
@@ -99,6 +101,7 @@ def _codex_preflight(
         merge_gate_ignore_paths=client.merge_gate_ignore_paths,
         merge_gate_enabled=client.merge_gate_enabled,
         review_config=client.review,
+        bindings_block=bindings_block_for(client, Harness.CODEX, task.ticket_id),
         write_stop_hook=False,
         daemon=daemon,
     )

@@ -23,8 +23,8 @@ separate builder there and never reads this module.
 
 from __future__ import annotations
 
+from cw.bindings_block import REVIEW_NO_TRACKER_LINE
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH, OPENCODE_BACKEND
-from cw.opencode_tracker_prompt import REVIEW_NO_TRACKER_LINE
 
 #: ``jq`` filter turning the exit-0 stdout of ``cw review confirm`` into a
 #: ``record-round`` confirm payload. The verdict is passed raw; the prompt pipes

@@ -23,9 +23,11 @@ from cw.auto_dev_result import (
     StageReached,
     parse_stdout,
 )
+from cw.bindings_block import REVIEW_NO_TRACKER_LINE, render_bindings_block
 from cw.contract_manifest._render import CLAUDE_ONLY_DENYLIST
 from cw.executor_diagnostics import diagnostics_bundle_dir, render_bundle_path
 from cw.models import Stage
+from cw.models.bindings import Bindings, Harness
 from cw.opencode_clean_review import REVIEW_CONFIG_INSTRUCTION
 from cw.opencode_runner import (
     GIT_STASH_RULE,
@@ -48,13 +50,8 @@ from cw.opencode_runner import (
     stage_entry_marker,
     synthesize_opencode_result,
 )
-from cw.opencode_tracker_prompt import REVIEW_NO_TRACKER_LINE
-from cw.tracker import TrackerKind
 from cw.worktree import resolve_worker_tmpdir
 from tests._opencode_helpers import (
-    GH_TRACKER,
-    LINEAR_TRACKER,
-    UNSET_TRACKER,
     earlier_stage_then_final_log,
     framed,
     invalid_merge_gate_frame,
@@ -62,6 +59,7 @@ from tests._opencode_helpers import (
     text_event,
     write_opencode_log,
 )
+from tests._shared.bindings_builders import bindings_github_cli, bindings_linear_mcp
 from tests._tool_fakes import path_with_stub
 
 if TYPE_CHECKING:
@@ -1400,8 +1398,21 @@ def test_review_prompt_differs_from_3038_by_the_tracker_and_stash_lines_only(
     assert digest == _PRE_3055_REVIEW_PROMPT_SHA256[session_id]
 
 
-# --- #3055 (RFC 0018 S3): tracker operations in the opencode prompts --------
+# --- #3055 (RFC 0018 S3) / #3703 (RFC 0019 R2): tracker operations in the
+# opencode prompts, now rendered from the bindings block -----------------------
 
+_GH_BLOCK = render_bindings_block(
+    bindings_github_cli(), Harness.OPENCODE, ticket_id="T-1"
+)
+#: A migrated-shape binding (server, no tools): the legacy prefix parenthetical.
+_LINEAR_SERVER_BLOCK = render_bindings_block(
+    bindings_linear_mcp(), Harness.OPENCODE, ticket_id="T-1"
+)
+#: No ``tickets`` binding, the project tracker is Linear: the derived line.
+_LINEAR_DERIVED_BLOCK = render_bindings_block(
+    Bindings(), Harness.OPENCODE, ticket_id="T-1", tracker_system="linear"
+)
+_UNSET_BLOCK = render_bindings_block(Bindings(), Harness.OPENCODE, ticket_id="T-1")
 _GH_LINE = (
     "Tracker: github-issues. Read: `gh issue view T-1 --json title,body,comments`."
     " Post: `gh issue comment T-1 --body-file <file>`."
@@ -1424,19 +1435,17 @@ _FAILURE = (
     "read), with blocker.details naming the tracker, the operation and the error."
 )
 _UNSET = "Tracker unknown: emit blocked `tracker_tool_unavailable`."
+_BLOCKS = [_GH_BLOCK, _LINEAR_SERVER_BLOCK, _LINEAR_DERIVED_BLOCK, _UNSET_BLOCK]
 
 
-def _tracker_prompt(stage: str, tracker: TrackerKind | None, server: str | None) -> str:
-    return build_stage_prompt(
-        stage, "T-1", Path("/wt"), tracker=tracker, tracker_server=server
-    )
+def _tracker_prompt(stage: str, block: str | None) -> str:
+    return build_stage_prompt(stage, "T-1", Path("/wt"), bindings_block=block)
 
 
 @pytest.mark.parametrize("stage", ["plan", "impl"])
 class TestTrackerOpsInPrompts:
-    @pytest.mark.parametrize("server", ["linear", None])
-    def test_github(self, stage: str, server: str | None) -> None:
-        prompt = _tracker_prompt(stage, GH_TRACKER, server)
+    def test_github(self, stage: str) -> None:
+        prompt = _tracker_prompt(stage, _GH_BLOCK)
 
         assert _GH_LINE in prompt
         assert _FAILURE in prompt
@@ -1444,25 +1453,22 @@ class TestTrackerOpsInPrompts:
         assert "MCP tools" not in prompt
 
     def test_other_with_server(self, stage: str) -> None:
-        prompt = _tracker_prompt(stage, LINEAR_TRACKER, "linear")
+        prompt = _tracker_prompt(stage, _LINEAR_SERVER_BLOCK)
 
         assert _OTHER_WITH_SERVER in prompt
         assert _FAILURE in prompt
         assert "gh issue view" not in prompt
 
     def test_other_without_server(self, stage: str) -> None:
-        prompt = _tracker_prompt(stage, LINEAR_TRACKER, None)
+        prompt = _tracker_prompt(stage, _LINEAR_DERIVED_BLOCK)
 
         assert _OTHER_NO_SERVER in prompt
         assert "prefix" not in prompt
         assert _FAILURE in prompt
 
-    @pytest.mark.parametrize("tracker", [UNSET_TRACKER, None])
-    @pytest.mark.parametrize("server", ["linear", None])
-    def test_unset(
-        self, stage: str, tracker: TrackerKind | None, server: str | None
-    ) -> None:
-        prompt = _tracker_prompt(stage, tracker, server)
+    @pytest.mark.parametrize("block", [_UNSET_BLOCK, None])
+    def test_unset(self, stage: str, block: str | None) -> None:
+        prompt = _tracker_prompt(stage, block)
 
         assert _UNSET in prompt
         assert _FAILURE not in prompt
@@ -1474,25 +1480,23 @@ class TestTrackerOpsInPrompts:
         assert _UNSET in prompt
         assert "tracker_tool_unavailable" in prompt
 
-    @pytest.mark.parametrize("tracker", [GH_TRACKER, LINEAR_TRACKER, UNSET_TRACKER])
-    def test_writable_wording_is_gone(self, stage: str, tracker: TrackerKind) -> None:
-        assert "when the tracker is writable" not in _tracker_prompt(
-            stage, tracker, "linear"
-        )
+    @pytest.mark.parametrize("block", _BLOCKS)
+    def test_writable_wording_is_gone(self, stage: str, block: str) -> None:
+        assert "when the tracker is writable" not in _tracker_prompt(stage, block)
 
 
-@pytest.mark.parametrize("tracker", [GH_TRACKER, LINEAR_TRACKER, UNSET_TRACKER, None])
-def test_plan_prompt_keeps_its_manifest_needles(tracker: TrackerKind | None) -> None:
-    prompt = _tracker_prompt("plan", tracker, "linear")
+@pytest.mark.parametrize("block", _BLOCKS)
+def test_plan_prompt_keeps_its_manifest_needles(block: str) -> None:
+    prompt = _tracker_prompt("plan", block)
 
     assert "body and ALL comments" in prompt
     assert "Write the full plan verbatim to .cw/plan.md" in prompt
     assert "plan_missing_context" in prompt
 
 
-@pytest.mark.parametrize("tracker", [GH_TRACKER, LINEAR_TRACKER, UNSET_TRACKER, None])
-def test_review_prompt_has_no_tracker_ops(tracker: TrackerKind | None) -> None:
-    prompt = _tracker_prompt("review", tracker, "linear")
+@pytest.mark.parametrize("block", _BLOCKS)
+def test_review_prompt_has_no_tracker_ops(block: str) -> None:
+    prompt = _tracker_prompt("review", block)
 
     assert REVIEW_NO_TRACKER_LINE in prompt
     assert REVIEW_NO_TRACKER_LINE == "This stage performs no tracker operations."

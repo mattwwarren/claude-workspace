@@ -1647,3 +1647,33 @@ def test_make_blocked_is_total_over_every_stage_reached(tmp_path: Path) -> None:
 
         AutoDevResult.model_validate(result.model_dump(mode="json"))
         assert (result.scope.lines_actual is None) is (marker in _PRE_IMPL_MARKERS)
+
+
+def test_build_task_message_prepends_the_bindings_block(tmp_path: Path) -> None:
+    """#3703: the local harness's whole prompt is the task-context file."""
+    plan = tmp_path / ".cw" / "plan.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("PLAN BODY\n", encoding="utf-8")
+    block = (
+        "=== BEGIN CW-INJECTED: Bindings ===\nX\n=== END CW-INJECTED: Bindings ===\n"
+    )
+
+    message = build_task_message(tmp_path, bindings_block=block)
+
+    assert message is not None
+    content = (tmp_path / TASK_CONTEXT_RELATIVE_PATH).read_text(encoding="utf-8")
+    assert content.startswith(block)
+    assert "## Implementation Plan" in content
+    assert "PLAN BODY" in content
+
+
+def test_build_task_message_without_a_block_writes_no_block(tmp_path: Path) -> None:
+    plan = tmp_path / ".cw" / "plan.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("PLAN BODY\n", encoding="utf-8")
+
+    assert build_task_message(tmp_path) is not None
+
+    content = (tmp_path / TASK_CONTEXT_RELATIVE_PATH).read_text(encoding="utf-8")
+    assert content.startswith("## Implementation Plan")
+    assert "CW-INJECTED" not in content

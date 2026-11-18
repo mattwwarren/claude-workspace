@@ -78,6 +78,7 @@ def render_impl_prompt(
     feedback: ReviewFeedback | None,
     allowed_files: frozenset[str] | None,
     merge_note: str | None,
+    bindings_block: str,
 ) -> str:
     """The IMPL turn's stdin prompt.
 
@@ -109,4 +110,5 @@ def render_impl_prompt(
         for name, body in sections
         if body is not None
     )
+    parts.append("\n" + bindings_block)
     return "".join(parts)

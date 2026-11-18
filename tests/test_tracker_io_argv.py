@@ -8,6 +8,7 @@ import pytest
 
 from cw.codex_review import _exec_policy_argv
 from cw.models import SandboxMode
+from cw.models.orchestrator_config.constants import CODEX_BACKEND
 from cw.tracker import TRACKER_LINEAR
 from cw.tracker_io import (
     TRACKER_COMMENT_TOOLS,
@@ -16,6 +17,7 @@ from cw.tracker_io import (
     build_tracker_io_argv,
     comment_tools_for,
 )
+from tests._shared.bindings_builders import LINEAR_RENAMED_TOOLS, bindings_linear_mcp
 
 _SCHEMA = Path("/scratch/schema.json")
 _OUT = Path("/scratch/result.json")
@@ -29,7 +31,7 @@ def _argv(
 ) -> list[str]:
     return build_tracker_io_argv(
         server=server,
-        tracker=tracker,
+        tools=comment_tools_for(tracker),
         schema_path=_SCHEMA,
         output_path=_OUT,
         other_servers=other_servers,
@@ -129,3 +131,38 @@ def test_comment_tools_for_linear() -> None:
 
 def test_build_is_deterministic() -> None:
     assert _argv(other_servers=("x",)) == _argv(other_servers=("x",))
+
+
+class TestResolvedTicketTools:
+    """Binding tool names reach the allowlist; the table is the default (#3703)."""
+
+    def test_default_tools_are_the_table_for_linear(self) -> None:
+        assert comment_tools_for(TRACKER_LINEAR) == ("create_comment", "list_comments")
+
+    def test_renamed_bound_tools_reach_the_allowlist(self) -> None:
+        tickets = bindings_linear_mcp(tools=LINEAR_RENAMED_TOOLS).tickets
+        tools = comment_tools_for(TRACKER_LINEAR, tickets, CODEX_BACKEND)
+        assert tools == ("linear_save_comment", "linear_list_comments")
+        argv = build_tracker_io_argv(
+            server="linear",
+            tools=tools,
+            schema_path=_SCHEMA,
+            output_path=_OUT,
+            other_servers=(),
+        )
+        assert (
+            'mcp_servers.linear.enabled_tools=["linear_save_comment",'
+            '"linear_list_comments"]'
+        ) in argv
+
+    def test_unsupported_tracker_without_a_binding_raises(self) -> None:
+        with pytest.raises(TrackerIoConfigError) as excinfo:
+            comment_tools_for("jira")
+        assert excinfo.value.reason is TrackerIoReason.TRACKER_UNSUPPORTED
+
+    def test_a_binding_supplies_tools_for_an_unsupported_system(self) -> None:
+        tickets = bindings_linear_mcp(tools=LINEAR_RENAMED_TOOLS).tickets
+        assert comment_tools_for("jira", tickets, CODEX_BACKEND) == (
+            "linear_save_comment",
+            "linear_list_comments",
+        )

@@ -8,6 +8,7 @@ from cw.auto_dev_result import (
     REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
     AutoDevResult,
 )
+from cw.bindings_block import bindings_block_for
 from cw.executor._capabilities import OPENCODE_CAPABILITIES
 from cw.executor._engine_guard import engine_block_details
 from cw.executor._finalize_guard import (
@@ -20,6 +21,7 @@ from cw.executor._repair_entry import (
 )
 from cw.executor.core import FireAndForgetRunner, _PreflightOK, _spawn_fire_and_forget
 from cw.models import OPENCODE_BACKEND, SessionOrigin, SessionPurpose
+from cw.models.bindings import Harness
 from cw.native_daemon import get_native_daemon_client
 from cw.opencode_runner import (
     OPENCODE_NOT_FOUND,
@@ -40,7 +42,6 @@ from cw.opencode_runner import (
     make_blocked as make_opencode_blocked,
 )
 from cw.spawn import _write_hook_context
-from cw.tracker import tracker_kind
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -109,6 +110,7 @@ def _opencode_preflight(
         merge_gate_ignore_paths=client.merge_gate_ignore_paths,
         merge_gate_enabled=client.merge_gate_enabled,
         review_config=client.review,
+        bindings_block=bindings_block_for(client, Harness.OPENCODE, task.ticket_id),
         write_stop_hook=False,
         daemon=daemon,
     )
@@ -170,8 +172,7 @@ def _opencode_preflight(
         worktree,
         session_id=sess.id,
         clean_review=client.review.is_clean,
-        tracker=tracker_kind(client.workspace_path),
-        tracker_server=client.tracker_mcp_server(OPENCODE_BACKEND),
+        bindings_block=bindings_block_for(client, Harness.OPENCODE, task.ticket_id),
     )
     return _PreflightOK(
         argv=build_opencode_argv(config.model, worktree, prompt),

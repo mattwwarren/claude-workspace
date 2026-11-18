@@ -1,0 +1,5 @@
+=== BEGIN CW-INJECTED: Bindings ===
+Tracker: github-issues. Read: `gh issue view 4242 --json title,body,comments`. Post: `gh issue comment 4242 --body-file <file>`.
+If no tool for this tracker is available in this session, or a call fails, do not improvise or skip: emit status blocked with blocker.reason `tracker_tool_unavailable` (for a write) or `plan_missing_context` (for a read), with blocker.details naming the tracker, the operation and the error.
+code_host (github): cli gh.
+=== END CW-INJECTED: Bindings ===

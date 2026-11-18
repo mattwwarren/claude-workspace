@@ -9,6 +9,7 @@ from cw.auto_dev_result import (
     REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
     AutoDevResult,
 )
+from cw.bindings_block import bindings_block_for
 from cw.executor._capabilities import LOCAL_CAPABILITIES
 from cw.executor._clean_review import (
     CLEAN_REVIEW_UNSUPPORTED_BACKEND,
@@ -36,6 +37,7 @@ from cw.local_runner import (
     make_blocked,
 )
 from cw.models import LOCAL_BACKEND
+from cw.models.bindings import Harness
 from cw.opencode_runner import stage_entry_marker
 from cw.plan_files import parse_plan_files_modified
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
@@ -135,6 +137,7 @@ def _local_preflight(
         worktree,
         ticket_id=task.ticket_id,
         plan_fetcher=plan_fetcher,
+        bindings_block=bindings_block_for(client, Harness.LOCAL, task.ticket_id),
     )
     if task_message is None:
         return make_blocked(

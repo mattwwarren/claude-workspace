@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any, Final
 from cw._git import git_output
 from cw.auto_dev_result.schema._vocab import PLAN_MISSING_CONTEXT_BLOCKER_REASON
 from cw.backend_mcp_config import McpState, declared_server_names, read_backend_mcp
+from cw.bindings_block import bindings_block_for
 from cw.codex_finalize._argv import (
     build_finalize_argv,
     require_read_only_finalize_argv,
@@ -79,6 +80,7 @@ from cw.models import (
     HOOK_CONTEXT_RELATIVE_PATH,
     OrchestratorEventType,
 )
+from cw.models.bindings import Harness
 from cw.models.branch import resolve_feature_branch
 from cw.models.enums import StageIdentifier
 from cw.stage_verification.finalize_arm import (
@@ -332,6 +334,9 @@ def _document(
             ticket=ticket,
             branch_facts=_branch_facts(state),
             override_json=state.override_json,
+            bindings_block=bindings_block_for(
+                run.client, Harness.CODEX, run.task.ticket_id
+            ),
         )
     except RenderError as exc:
         return FinalizeBlock(

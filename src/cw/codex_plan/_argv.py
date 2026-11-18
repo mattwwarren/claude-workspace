@@ -30,14 +30,22 @@ from cw.codex_review import (
     _exec_policy_argv,
     _reasoning_effort_argv,
 )
+from cw.models.bindings import TicketOp
 from cw.models.enums import SandboxMode
+from cw.models.orchestrator_config.constants import CODEX_BACKEND
 from cw.tracker import TRACKER_LINEAR
 from cw.tracker_io import TrackerIoConfigError, TrackerIoReason
-from cw.tracker_io._argv import _disable_others, validate_server_name
+from cw.tracker_io._argv import (
+    _disable_others,
+    resolve_ticket_tool,
+    validate_server_name,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
+
+    from cw.models.bindings import TicketsBinding
 
 #: The PLAN turn's sandbox and approval policy: the seam's read-only output,
 #: named once. :func:`require_read_only_argv` compares a launch against it.
@@ -56,24 +64,38 @@ class PlanArgvPolicyError(ValueError):
     """A PLAN argv does not carry exactly the fixed read-only policy."""
 
 
-def read_tools_for(tracker: str) -> tuple[str, str]:
-    """The read tools for *tracker*; raises ``TrackerIoConfigError`` when none."""
-    tools = PLAN_TRACKER_READ_TOOLS.get(tracker)
-    if tools is None:
+def read_tools_for(
+    tracker: str,
+    tickets: TicketsBinding | None = None,
+    backend: str = CODEX_BACKEND,
+) -> tuple[str, str]:
+    """The (get, list-comments) read tools for *tracker* under *backend*.
+
+    A tool the ``tickets`` binding names wins; the table is the default for
+    each. Raises ``TrackerIoConfigError`` when either resolves to nothing.
+    """
+    defaults = PLAN_TRACKER_READ_TOOLS.get(tracker)
+    get_default, list_default = defaults if defaults is not None else (None, None)
+    fetch = resolve_ticket_tool(tickets, backend, TicketOp.GET, get_default)
+    listing = resolve_ticket_tool(
+        tickets, backend, TicketOp.LIST_COMMENTS, list_default
+    )
+    if fetch is None or listing is None:
         msg = f"no codex PLAN read tools for tracker {tracker!r}"
         raise TrackerIoConfigError(TrackerIoReason.TRACKER_UNSUPPORTED, msg)
-    return tools
+    return fetch, listing
 
 
 def _mcp_argv(
-    mcp_server: str | None, tracker: str | None, other_servers: Sequence[str]
+    mcp_server: str | None,
+    read_tools: tuple[str, str] | None,
+    other_servers: Sequence[str],
 ) -> list[str]:
     """The MCP ``-c`` overrides: the read allowlist, or every server disabled."""
-    if mcp_server is None or tracker is None:
+    if mcp_server is None or read_tools is None:
         return _disable_others("", other_servers)
-    tools = read_tools_for(tracker)
     validate_server_name(mcp_server)
-    allowlist = json.dumps(list(tools), separators=(",", ":"))
+    allowlist = json.dumps(list(read_tools), separators=(",", ":"))
     return [
         "-c",
         f"mcp_servers.{mcp_server}.enabled_tools={allowlist}",
@@ -88,15 +110,15 @@ def build_plan_argv(
     model: str | None,
     reasoning_effort: str | None,
     mcp_server: str | None,
-    tracker: str | None,
+    read_tools: tuple[str, str] | None,
     other_servers: Sequence[str],
 ) -> list[str]:
     """Return the PLAN turn's ``codex exec`` argv (the prompt goes on stdin).
 
-    *mcp_server* and *tracker* are both set on a non-GitHub tracker and both
-    ``None`` on GitHub. Raises :class:`~cw.tracker_io.TrackerIoConfigError`
-    for a tracker with no read allowlist or a server name that is not a plain
-    identifier.
+    *mcp_server* and *read_tools* (from :func:`read_tools_for`) are both set on
+    a non-GitHub tracker and both ``None`` on GitHub. Raises
+    :class:`~cw.tracker_io.TrackerIoConfigError` for a server name that is not
+    a plain identifier.
     """
     argv = [
         "codex",
@@ -104,7 +126,7 @@ def build_plan_argv(
         *PLAN_READ_ONLY_ARGV,
         *_AUDIT_ARGV_FLAGS,
         *_reasoning_effort_argv(reasoning_effort),
-        *_mcp_argv(mcp_server, tracker, other_servers),
+        *_mcp_argv(mcp_server, read_tools, other_servers),
         "--output-schema",
         str(schema_path),
         "-o",

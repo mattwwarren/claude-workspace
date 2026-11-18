@@ -11,6 +11,7 @@ import click
 if TYPE_CHECKING:
     from pathlib import Path
 
+from cw.bindings_block import bindings_block_for
 from cw.config import (
     get_client,
     load_orchestrator_config,
@@ -30,6 +31,7 @@ from cw.models import (
     SessionPurpose,
     SessionStatus,
 )
+from cw.models.bindings import Harness
 from cw.native_daemon import (
     NativeDaemonClient,
     _is_native_surface_ref,
@@ -235,6 +237,7 @@ def start_session(
         merge_gate_ignore_paths=client.merge_gate_ignore_paths,
         merge_gate_enabled=client.merge_gate_enabled,
         review_config=client.review,
+        bindings_block=bindings_block_for(client, Harness.CLAUDE_NATIVE, None),
     )
 
     # Build per-purpose system prompt for the session.
