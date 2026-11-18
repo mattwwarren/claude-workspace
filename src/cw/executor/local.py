@@ -9,6 +9,7 @@ from cw.auto_dev_result import (
     REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
     AutoDevResult,
 )
+from cw.executor._capabilities import LOCAL_CAPABILITIES
 from cw.executor._clean_review import (
     CLEAN_REVIEW_UNSUPPORTED_BACKEND,
     clean_review_block_details,
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
         StageExecutorConfig,
         TicketTask,
     )
+    from cw.models.capabilities import HarnessCapabilities
 
 
 def _entry_guard(
@@ -199,6 +201,9 @@ class LocalExecutor:
         self._runner: FireAndForgetRunner = (
             runner if runner is not None else RealAiderRunner()
         )
+
+    def capabilities(self) -> HarnessCapabilities:
+        return LOCAL_CAPABILITIES
 
     def spawn(
         self,
