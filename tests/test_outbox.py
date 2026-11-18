@@ -550,6 +550,52 @@ class TestPersistence:
         with pytest.raises(ValidationError):
             OutboxEntry.model_validate({**data, "state": "claimed"})
 
+    def test_claimant_requires_claimed_state(self) -> None:
+        entry = _enqueue().entry
+        data = json.loads(_record_file(entry.id).read_text(encoding="utf-8"))
+
+        with pytest.raises(ValidationError):
+            OutboxEntry.model_validate(
+                {**data, "claimant": {"pid": 1, "start_time_ns": 1}}
+            )
+
+    def test_claimed_from_must_be_pending_or_unverified(self) -> None:
+        entry = _enqueue().entry
+        data = json.loads(_record_file(entry.id).read_text(encoding="utf-8"))
+        claimed = {
+            **data,
+            "state": "claimed",
+            "claim_token": "tok",
+            "claimed_at": "2026-11-01T10:00:00Z",
+        }
+
+        assert OutboxEntry.model_validate({**claimed, "claimed_from": "pending"})
+        with pytest.raises(ValidationError):
+            OutboxEntry.model_validate({**claimed, "claimed_from": "failed"})
+
+    def test_body_sha256_must_be_a_digest(self) -> None:
+        entry = _enqueue().entry
+        data = json.loads(_record_file(entry.id).read_text(encoding="utf-8"))
+
+        with pytest.raises(ValidationError):
+            OutboxEntry.model_validate({**data, "body_sha256": "abc"})
+
+    def test_unwritable_store_root_raises_record_error(self) -> None:
+        state_dir().mkdir(parents=True, exist_ok=True)
+        (state_dir() / "outbox").write_text("a file, not a directory", encoding="utf-8")
+
+        with pytest.raises(OutboxRecordError):
+            _enqueue()
+
+    def test_unopenable_lock_file_raises_record_error(self) -> None:
+        _enqueue()
+        lock_file = _client_dir() / ".outbox.lock"
+        lock_file.unlink()
+        lock_file.mkdir()
+
+        with pytest.raises(OutboxRecordError):
+            _enqueue(marker="m2")
+
     def test_reason_must_belong_to_state(self) -> None:
         entry = _enqueue().entry
         data = json.loads(_record_file(entry.id).read_text(encoding="utf-8"))

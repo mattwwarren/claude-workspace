@@ -209,6 +209,16 @@ class TestListText:
         pending_line = next(ln for ln in text.splitlines() if "T-PEND" in ln)
         assert "claimed" not in pending_line
 
+    def test_long_cells_are_truncated_with_a_marker(self) -> None:
+        long_ticket = "T" * 40
+        _seed(ticket=long_ticket)
+
+        text = _invoke("list").output
+
+        assert long_ticket not in text
+        assert "T" * 15 + "~" in text
+        assert _json()["entries"][0]["ticket"] == long_ticket
+
     def test_list_does_not_recover_a_dead_claim(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
