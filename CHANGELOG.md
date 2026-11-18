@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Harness capability declarations, declared not enforced (RFC 0019 H1, #3708).** A frozen `HarnessCapabilities` model (`cw.models.capabilities`) declares what each harness supports: stages, skills, subagents, binding probe, sandbox modes, clean-mode review, review engine, repair entry, tool narrowing and usage source. `cw schema show harness-capabilities` publishes it. A `harness-capabilities/<client>/<lane>/<backend>` doctor check lists the declarations per lane and never warns. `cw.binding_probe.probe_binding` reports a tri-state tickets-binding reach, with no callers yet. No dispatch path reads the declarations in this release.
+
 ### Fixed
 
 - **Detached codex, opencode and aider workers no longer inherit the dispatcher's stdin (#3696).** `_launch_logged_subprocess` now passes `stdin=subprocess.DEVNULL`, which removes the inherited-stdin precondition for a child that blocks reading stdin. The operator-reported opencode hang was not reproduced in cw, so this fix does not confirm that hang's cause.
