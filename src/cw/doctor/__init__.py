@@ -60,6 +60,9 @@ re-exports. Submodules:
   convergence ledger (#2797).
 - ``merge_gate`` — clients with ``merge_gate_enabled: false`` (the Stage 4a
   merge gate switched off) listed as advisory warnings (#2851).
+- ``bindings`` — per-client ``bindings/<client>``: ``bindings.tickets.system``
+  against the project's ``tracking.primary.system``; FAIL when they differ, an
+  advisory warning when either is unset (RFC 0019 R1, #3702).
 - ``usage_limit`` — one advisory ``usage-limit/<client>`` per active usage-limit
   back-off window, naming the command that lifts it early (#3547).
 - ``commit_hook`` — per-client advisory warning when ``.pre-commit-config.yaml``
@@ -90,6 +93,7 @@ from __future__ import annotations
 from cw.doctor._shared import CheckResult, DoctorReport, ReapScope, WedgeFinding
 from cw.doctor.agent_spec_drift import _check_agent_spec_drift
 from cw.doctor.all_codex_lane import _check_all_codex_lane
+from cw.doctor.bindings import _check_bindings
 from cw.doctor.codex_fix_loop import _check_codex_fix_loop
 from cw.doctor.commit_hook import _check_commit_hook, _check_hook_install_python
 from cw.doctor.config_checks import (
@@ -168,6 +172,7 @@ __all__ = [
     "_check_agent_spec_drift",
     "_check_all_codex_lane",
     "_check_attention_state_census",
+    "_check_bindings",
     "_check_claude_version",
     "_check_codex_capability",
     "_check_codex_fix_loop",
