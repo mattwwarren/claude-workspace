@@ -39,7 +39,7 @@ from cw.outbox import (
     peek_pending,
     read_held,
 )
-from cw.outbox._layout import client_dir
+from cw.outbox._layout import drain_log_path
 
 if TYPE_CHECKING:
     import subprocess
@@ -48,8 +48,6 @@ if TYPE_CHECKING:
     from cw.models import ClientConfig
 
 _log = logging.getLogger("cw.dispatch")
-
-_DRAIN_LOG = Path("drain.log")
 
 
 @dataclass(frozen=True)
@@ -75,9 +73,8 @@ def spawn_drain(client: str) -> subprocess.Popen[bytes]:
     ``state_dir()/outbox/<client>/drain.log`` (truncated per launch).
     """
     argv = [sys.executable, "-m", "cw", "outbox", "drain", "--client", client]
-    return _launch_logged_subprocess(
-        client_dir(client), argv, dict(os.environ), _DRAIN_LOG
-    )
+    log = drain_log_path(client)
+    return _launch_logged_subprocess(log.parent, argv, dict(os.environ), Path(log.name))
 
 
 def _stalled(client: str, previous: _Launch | None, pending: frozenset[str]) -> bool:

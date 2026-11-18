@@ -19,6 +19,7 @@ from cw.outbox import (
     DrainLeaseHeldError,
     HeldList,
     OutboxReason,
+    OutboxRecordError,
     OutboxRole,
     UnreachableMarker,
     _layout,
@@ -77,6 +78,18 @@ class TestDrainLease:
     def test_bad_client_refused(self) -> None:
         with pytest.raises(ValueError, match="client"), drain_lease("../x"):
             pass
+
+    def test_unopenable_lock_file_is_a_record_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _denied(*_args: object, **_kwargs: object) -> None:
+            msg = "denied"
+            raise PermissionError(msg)
+
+        monkeypatch.setattr(Path, "open", _denied)
+
+        with pytest.raises(OutboxRecordError), drain_lease(CLIENT):
+            pytest.fail("the lease must not be granted")
 
 
 class TestDrainLeaseHeld:
@@ -153,6 +166,44 @@ class TestUnreachableMarker:
             "announced": [_ID_A, _ID_B],
         }
         assert path.name == "drain.unreachable.knowledge"
+
+    def test_marker_filed_under_another_role_keeps_this_role(self) -> None:
+        write_marker(
+            CLIENT,
+            UnreachableMarker(
+                role=OutboxRole.KNOWLEDGE,
+                reason=OutboxReason.BINDING_UNREACHABLE,
+                announced=[_ID_A],
+            ),
+        )
+        source = _layout.unreachable_path(CLIENT, OutboxRole.KNOWLEDGE)
+        target = _layout.unreachable_path(CLIENT, OutboxRole.TICKETS)
+        target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+
+        marker = read_marker(CLIENT, OutboxRole.TICKETS)
+
+        assert marker == UnreachableMarker(
+            role=OutboxRole.TICKETS, reason=OutboxReason.BINDING_UNREACHABLE
+        )
+
+    def test_unremovable_marker_is_a_record_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_marker(
+            CLIENT,
+            UnreachableMarker(
+                role=OutboxRole.TICKETS, reason=OutboxReason.TRANSIENT_FAILURE
+            ),
+        )
+
+        def _busy(*_args: object, **_kwargs: object) -> None:
+            msg = "busy"
+            raise PermissionError(msg)
+
+        monkeypatch.setattr(Path, "unlink", _busy)
+
+        with pytest.raises(OutboxRecordError):
+            clear_marker(CLIENT, OutboxRole.TICKETS)
 
     def test_non_release_reason_refused(self) -> None:
         with pytest.raises(ValueError, match="reason"):
