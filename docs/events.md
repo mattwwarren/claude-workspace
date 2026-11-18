@@ -2949,6 +2949,128 @@ Relation to `requeue.review_delivery_degraded`: that event covers a REVIEW
 this one covers the **first entry** of every codex review on such a tracker.
 A requeued codex review on a Linear client emits both.
 
+### `outbox.entry_delivered`
+
+**Emitter:** `cw.outbox_drain` (`cw outbox drain`, run by hand or launched by
+the dispatch tick), after it settles an entry `delivered`
+**Payload:**
+```json
+{
+  "client": "<str>",
+  "ticket": "<str>",
+  "role": "tickets | knowledge | code_host | chat",
+  "marker": "<str>",
+  "producer": "<str>",
+  "entry_id": "<32 hex>",
+  "reason": "<OutboxReason value>",
+  "posted": [{"index": 1, "url": "<str>"}],
+  "held": false
+}
+```
+**Semantics:** GitHub #3706 (RFC 0019 O2). The drain posted every missing part
+of the entry and each read back (`reason: posted`), or one comment listing
+already carried every part's `<!-- cw-outbox:<marker>:<i>/<n> -->` line
+(`reason: marker_already_present`, `posted: []`). `posted` lists the parts
+posted in this run, 1-based. The payload never carries body text. Audit only:
+not forwarded by default. `correlation_id` is the `ticket`. Every outbox event
+is best-effort: a failed write logs one warning and never changes the entry.
+
+### `outbox.entry_unverified`
+
+**Emitter:** `cw.outbox_drain`, on every settle to `unverified`, including a
+re-check that stays `unverified`
+**Payload:**
+```json
+{
+  "client": "<str>",
+  "ticket": "<str>",
+  "role": "tickets | knowledge | code_host | chat",
+  "marker": "<str>",
+  "producer": "<str>",
+  "entry_id": "<32 hex>",
+  "reason": "readback_unverified | readback_mismatch",
+  "posted": [{"index": 1, "url": "<str>"}],
+  "held": false
+}
+```
+**Semantics:** GitHub #3706. A part may be public but is not confirmed: a part
+failed after an earlier one was posted or was already present, `gh` timed out
+or could not run (outcome unknown), it printed no comment URL, the read-back
+never found the comment (`readback_unverified`), or the read-back text differed
+(`readback_mismatch`). An entry claimed from `unverified` is never returned to
+`pending` (that would re-post blind). The next drain re-checks it against one
+listing and posts only the parts whose marker line is missing. A binding-level
+fault (see `outbox.entry_pending`) re-settling an `unverified` entry emits this
+once per entry per episode. Forwarded by default. `correlation_id` is the
+`ticket`.
+
+### `outbox.entry_skipped`
+
+**Emitter:** `cw.outbox_drain`, after its claims, for each entry the store
+settled `failed/body_unreadable` during this run
+**Payload:**
+```json
+{
+  "client": "<str>",
+  "ticket": "<str>",
+  "role": "tickets | knowledge | code_host | chat",
+  "marker": "<str>",
+  "producer": "<str>",
+  "entry_id": "<32 hex>",
+  "reason": "body_unreadable",
+  "posted": [{"index": 1, "url": "<str>"}],
+  "held": false
+}
+```
+**Semantics:** GitHub #3706. The entry's body file was missing or did not match
+its record when it was claimed, so the store settled it terminal and the drain
+does not retry it. Forwarded by default. `correlation_id` is the `ticket`.
+
+### `outbox.entry_pending`
+
+**Emitter:** `cw.outbox_drain`, when it releases an entry back to `pending`
+**Payload:**
+```json
+{
+  "client": "<str>",
+  "ticket": "<str>",
+  "role": "tickets | knowledge | code_host | chat",
+  "marker": "<str>",
+  "producer": "<str>",
+  "entry_id": "<32 hex>",
+  "reason": "binding_unreachable | transient_failure",
+  "posted": [{"index": 1, "url": "<str>"}],
+  "held": true
+}
+```
+**Semantics:** GitHub #3706. Two causes, told apart by `held`:
+
+- **Binding-level marker release** (`held: false`). The client has no usable
+  tickets binding for the entry's role (absent, not `cli: gh`, or a role other
+  than `tickets`: `binding_unreachable`), or `gh` could not read the ticket's
+  comment listing (`transient_failure`). The drain writes the per-role marker
+  `outbox/<client>/drain.unreachable.<role>` and handles the rest of that role
+  in the run without `gh`. The event is emitted once per entry per episode;
+  `cw outbox drain --force` clears the marker and starts a new episode, and a
+  run that delivers an entry of the role clears it too.
+- **Per-entry held release** (`held: true`, `transient_failure`). One entry
+  failed on its own (its first part was refused with nothing public, or its
+  body could not be read). The entry is added to `outbox/<client>/drain.held`
+  and is skipped by every later drain and by the tick until
+  `cw outbox drain --force` retries it. One event per hold. It never blocks
+  another ticket's entries and never sets a marker.
+
+No timer retries either case (ADR-0014). Forwarded by default.
+`correlation_id` is the `ticket`.
+
+**Relation to the `review.verdict_comment_*` events (#3468 decision record).**
+`review.verdict_comment_posted`, `review.verdict_comment_skipped` and
+`review.verdict_comment_unverified` stay with their in-line producers until
+RFC 0019 O3 migrates those producers onto the outbox and deletes the three
+events. O3 also re-homes the verdict metadata they carry (`kind`,
+`reviewed_sha`, `session_id`, `artifact_path`), because `OutboxEntry` has none
+of those fields. Nothing enqueues to the outbox before O3.
+
 ### `session.park_vetoed` — historical (ADR-0014)
 
 **Emitter:** none since the process-kill-timeout removal (was
@@ -4524,7 +4646,9 @@ events plus `pr.action_taken`/`pr.action_failed`), `session.liveness_changed`
 with cursor name `"operator-channel-bridge"`. `concierge.recovered`,
 `concierge.recovery_backoff_armed` and
 `concierge.hook_context_conflict_refused` are deliberately excluded
-(audit-only), as is `worktree.fast_forwarded`.
+(audit-only), as is `worktree.fast_forwarded`. The outbox drain's
+`outbox.entry_unverified`, `outbox.entry_skipped` and `outbox.entry_pending`
+(#3706) are forwarded by default; `outbox.entry_delivered` is audit-only.
 See [`docs/operator-channel.md`](operator-channel.md) for the filter
 reference, subscription instructions, and degradation contract.
 

@@ -3938,6 +3938,9 @@ Setup, per client:
   per-ticket operator action, and the operator must check the ticket and the
   `review.verdict_comment_posted` audit event before relying on a successful
   post. The prompt and model-echoed ticket id check are consistency checks only.
+  (The `review.verdict_comment_*` events are unchanged by the outbox drain,
+  #3706; RFC 0019 O3 moves these posts onto the outbox and retires them. See
+  [Outbox drain](#outbox-drain).)
 
 Outcomes, by `reason` (on `review.verdict_comment_skipped` when nothing was
 posted, on `review.verdict_comment_unverified` otherwise):
@@ -3968,7 +3971,8 @@ normalisation can cause `readback_mismatch` on a faithful post: on
 `readback_mismatch`, read the ticket. On `POSSIBLE` or `CONFIRMED`, check the
 ticket for a duplicate or stray comment before re-running anything; cw never
 retries a post. A verified post emits `review.verdict_comment_posted` (not an
-unverified or skipped event) and logs its comment ids at info.
+unverified or skipped event) and logs its comment ids at info. This event is
+unchanged until RFC 0019 O3 (see [Outbox drain](#outbox-drain)).
 
 Hidden-marker record. Linear marker survival: **UNVERIFIED**. Whether
 Linear's markdown keeps the `<!-- cw-agent-authored -->` marker has not been
@@ -5309,6 +5313,93 @@ defers is not recorded (`codex_loop_rounds.py`, `_record`), so a re-raise in
 it does not move `last_seen_round`; and the interactive Step H3 harvest still
 reads the PR body's artifact copy, where a skipped entry has no `ticket:`
 line.
+
+## Outbox drain
+
+RFC 0019 O2 (#3706). The per-client outbox (`state_dir()/outbox/<client>/`)
+holds prose posts made with no agent present. `cw outbox drain` posts them to
+the client's `bindings.tickets` tracker when that binding has `cli: gh`.
+Nothing enqueues to the outbox until RFC 0019 O3 migrates the producers, so on
+a running cw this changes nothing yet.
+
+**Tick launch.** Each dispatch tick launches at most one detached
+`python -m cw outbox drain --client <c>` per client, before the usage-limit
+returns (a usage-limited fleet still drains) and outside every lock. It
+launches only when the client has `outbox.enabled: true`, at least one
+`pending` entry that is not held, a pending role without an unreachable
+marker, no drain already running, and progress since its last launch (below).
+A lone `unverified` entry does not trigger a launch: the next launched or
+manual drain re-checks it. The tick reads at most the 200 newest records per
+client and warns once (naming #3715) when there are more; run
+`cw outbox drain -c <client>` to drain the rest. The drain's output goes to
+`state_dir()/outbox/<client>/drain.log`, truncated on each launch.
+
+**`cw outbox drain`.** Options: `-c/--client` (default: every configured
+client that has an outbox directory), `--limit N` (1 to 100; default the
+client's `outbox.max_entries_per_run`), `--force`, `--json`. One line per
+client on stdout:
+
+```text
+<client>: drained=<n> delivered=<n> unverified=<n> skipped=<n> released=<n> held=<n> lease_held=yes|no unreachable=<roles or ->
+```
+
+`drained` is `delivered + unverified + skipped`. `released` counts entries
+returned to `pending` and `held` the subset added to the held list. `skipped`
+(bodies the store found unreadable) is not bounded by `--limit`. Clients with
+no usable `gh` tickets binding are listed on stderr as `unconfigured`; a
+configured one still runs, so its entries are released and announced. `--json`
+prints `{"schema_version": 1, "clients": [...], "unconfigured": [...]}`.
+Exit codes: `0` drained or nothing to do; `1` an internal error, an unknown
+`-c` client, or a plain drain of a client with `outbox.enabled: false`
+(refused: run it with `--force`); `2` a usage error; `75`
+(`EX_TEMPFAIL`) another drain holds the client's lease. With several clients
+the precedence is `1`, then `75`, then `0`.
+
+**Dedup.** Each posted part ends with a
+`<!-- cw-outbox:<marker>:<i>/<n> -->` line. Before posting, the drain lists
+the ticket's comments once and posts only the parts whose line is missing, so
+an entry whose record was lost and re-enqueued settles
+`delivered/marker_already_present` with no second comment.
+
+**Unreachable marker versus held entries.** Two different stops:
+
+- *Binding-level* (the role has no usable binding, or `gh` cannot read the
+  ticket's comment listing): the drain writes
+  `outbox/<client>/drain.unreachable.<role>` and handles the rest of that role
+  in the run without `gh`. Pending entries go back to `pending`
+  (`binding_unreachable` or `transient_failure`) and `outbox.entry_pending` is
+  emitted once per entry per episode. The tick does not launch for a client
+  whose every pending role is marked. A manual `cw outbox drain -c <client>`
+  still runs (it is the probe) and clears the marker when it delivers.
+- *Per-entry* (the first part was refused with nothing public, or the body
+  could not be read): that entry alone is released `transient_failure` and
+  added to `outbox/<client>/drain.held`, with one `outbox.entry_pending`
+  (`held: true`). Every later drain and the tick skip it. It never blocks
+  another ticket.
+
+After fixing the cause, run `cw outbox drain --force -c <client>`: it clears
+the held list and every marker first, so those entries are retried. There is
+no timer-based retry of either.
+
+**Anything that may be public settles `unverified`** (a later part failed, a
+timeout, no comment URL, a read-back that is missing or differs), with
+`outbox.entry_unverified`. Check the ticket; the next drain re-checks the
+entry against one listing and posts only missing parts. An entry claimed from
+`unverified` never goes back to `pending`.
+
+**No-progress bound.** A drain that exits without changing the non-held
+pending set (for example one that crashes at startup) is not relaunched until
+that set changes (a new enqueue, or a run that made progress). The tick logs
+one WARNING naming `cw outbox drain -c <client>`: run it to see the error. The
+bound lives in the loop's memory, so a restarted loop tries once more.
+
+**Claimant and orphan claims.** A drain claims entries as
+`current_launch_marker()`. Outside the initial pid namespace (a container) the
+claimant is `None`, and such a claim is never auto-recovered: an operator acts.
+A drain killed mid-entry leaves that entry `claimed`; the next drain's claim
+recovers it once its owner is provably gone. The tick does not launch for a
+`claimed` entry alone, so run `cw outbox drain -c <client>` if one lingers
+(`cw outbox list --state claimed` shows the claimant verdict).
 
 ## Orchestrator permission allowlist
 
