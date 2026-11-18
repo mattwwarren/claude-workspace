@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from cw.outbox_drain import DrainReport, part_marker_line, run_drain, select_target
 from freezegun import freeze_time
 
 from cw.exceptions import CwError
@@ -34,6 +33,7 @@ from cw.outbox import (
     read_marker,
     settle,
 )
+from cw.outbox_drain import DrainReport, part_marker_line, run_drain, select_target
 from cw.worktree import _git_dir
 from tests._reconcile_helpers import live_launch_marker
 from tests._shared.bindings_builders import bindings_linear_mcp
@@ -826,6 +826,25 @@ class TestRunLoop:
         marker = read_marker(CLIENT, OutboxRole.TICKETS)
         assert marker is not None
         assert marker.announced == [first.id, second.id]
+
+    def test_unreadable_listing_breaks_the_role_for_later_tickets(
+        self, tmp_path: Path, gh: GhThread, events: list[CapturedEvent]
+    ) -> None:
+        first = _at(0, ticket="A", marker="a")
+        second = _at(1, ticket="B", marker="b")
+        gh.unreadable("A")
+
+        report = _drain(tmp_path)
+
+        for entry in (first, second):
+            assert _state(entry.id) == (
+                OutboxState.PENDING,
+                OutboxReason.TRANSIENT_FAILURE,
+            )
+        assert [r.argv[3] for r in gh.records] == ["A"]
+        assert _types(events) == [OrchestratorEventType.OUTBOX_ENTRY_PENDING] * 2
+        assert read_held(CLIENT) == frozenset()
+        assert report.released == len((first, second))
 
     def test_announce_only_resettles_unverified_without_gh(
         self, tmp_path: Path, gh: GhThread, events: list[CapturedEvent]
