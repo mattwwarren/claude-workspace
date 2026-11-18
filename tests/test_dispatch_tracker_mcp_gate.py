@@ -126,7 +126,7 @@ class TestGateToggle:
 
         monkeypatch.setattr("cw.dispatch.tracker_mcp_gate._read_branch_json", _spy)
         client = ClientConfig(name=_CLIENT, workspace_path=repo)
-        assert client.tracker_mcp_gate is None
+        assert client.bindings.tickets is None
 
         assert _resolve(client, _snapshot()) == {}
         assert calls == []

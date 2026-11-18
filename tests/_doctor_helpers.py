@@ -23,6 +23,7 @@ from cw.models import (
     StageExecutorConfig,
     StagePipelineConfig,
 )
+from cw.models.bindings import Bindings
 from cw.models.client import ReviewConfig, TrackerMcpGateConfig
 from cw.native_daemon import FakeNativeDaemonClient
 
@@ -127,14 +128,17 @@ def make_client(
     executors: Mapping[Stage, str] | None = None,
     tracker_mcp_gate: TrackerMcpGateConfig | None = None,
     workspace_path: Path | None = None,
+    bindings: Bindings | None = None,
 ) -> ClientConfig:
     """A client whose client-level REVIEW stage runs on *backend*.
 
     *review* ``None`` keeps the default ``ReviewConfig`` (blocking mode).
     *executors* sets other client-level stage backends; *workspace_path*
     defaults to ``/tmp/x`` (doctor tests pass ``tmp_path`` so the tracker and
-    the layer probe are real).
+    the layer probe are real). *bindings* is forwarded only when set, so the
+    legacy *tracker_mcp_gate* keeps migrating into an empty block (#3702).
     """
+    extra: dict[str, Bindings] = {} if bindings is None else {"bindings": bindings}
     return ClientConfig(
         name=name,
         workspace_path=workspace_path if workspace_path is not None else Path("/tmp/x"),
@@ -142,4 +146,5 @@ def make_client(
         pipeline=make_stage_pipeline({**(executors or {}), Stage.REVIEW: backend}),
         review=review if review is not None else ReviewConfig(),
         tracker_mcp_gate=tracker_mcp_gate,
+        **extra,
     )

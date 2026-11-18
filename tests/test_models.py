@@ -49,6 +49,7 @@ from cw.models import (
     WorkerEffort,
     counts_toward_client_ceiling,
 )
+from cw.models.bindings import Harness
 from cw.models.client import TrackerMcpGateConfig
 from cw.models.gate_block import GateBlockBackoff
 from cw.models.operator_constraint import (
@@ -442,7 +443,7 @@ class TestClientConfig:
     def test_tracker_mcp_gate_defaults_to_none(self) -> None:
         """#2442: omitted from clients.yaml -> the gate never runs."""
         c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
-        assert c.tracker_mcp_gate is None
+        assert c.bindings.tickets is None
 
     @pytest.mark.parametrize(
         ("gate", "backend", "expected"),
@@ -532,10 +533,12 @@ class TestClientConfig:
         )
         data = original.model_dump(mode="json")
         restored = ClientConfig.model_validate(data)
-        assert restored.tracker_mcp_gate is not None
-        assert restored.tracker_mcp_gate.enabled is True
-        assert restored.tracker_mcp_gate.plugin_id == "linear@acme"
-        assert restored.tracker_mcp_gate.settings_path == ".claude/settings.json"
+        tickets = restored.bindings.tickets
+        assert tickets is not None
+        assert tickets.mcp is not None
+        assert tickets.mcp[Harness.CLAUDE_NATIVE].plugin_id == "linear@acme"
+        assert tickets.preflight.enabled is True
+        assert tickets.preflight.settings_path == ".claude/settings.json"
 
     def test_review_config_defaults(self) -> None:
         """#2787: omitted -> blocking mode, no ceiling or backend override."""

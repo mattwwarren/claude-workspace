@@ -24,6 +24,7 @@ class TestSchemaList:
         assert "review-history" in result.output
         assert "review-engine-summary" in result.output
         assert "review-engine-manifest" in result.output
+        assert "bindings" in result.output
 
     def test_list_json_is_valid_array(self) -> None:
         runner = CliRunner()
@@ -40,7 +41,8 @@ class TestSchemaList:
         assert "review-engine-summary" in parsed
         assert "review-engine-manifest" in parsed
         assert "pr-channel-event" in parsed
-        assert len(parsed) == 9
+        assert "bindings" in parsed
+        assert len(parsed) == 10
 
 
 class TestSchemaShow:

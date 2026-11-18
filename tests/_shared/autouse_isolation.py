@@ -688,6 +688,18 @@ def _reset_opencode_flag_probe() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _reset_legacy_tracker_gate_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each test an empty legacy ``tracker_mcp_gate`` warn-once set (#3702).
+
+    ``cw.models.client`` warns once per process per client name when it
+    migrates the deprecated key into ``bindings.tickets``; without a reset the
+    first test to load a gated client would silence every later test's
+    warning assertion.
+    """
+    monkeypatch.setattr("cw.models.client._WARNED_LEGACY_TRACKER_GATE", set())
+
+
+@pytest.fixture(autouse=True)
 def _lock_invariants(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[None]:

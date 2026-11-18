@@ -167,3 +167,14 @@ def codex_tracker_client(
         default_branch="main",
         tracker_mcp_gate=gate,
     )
+
+
+def with_tracker_gate(client: ClientConfig, gate: TrackerMcpGateConfig) -> ClientConfig:
+    """*client* with *gate* migrated into its ``bindings`` (#3702, RFC 0019 R1).
+
+    ``model_copy(update={"tracker_mcp_gate": ...})`` no longer works: the field
+    is gone and ``model_copy`` runs no validator. The migration runs on a
+    throwaway client, so the mapping lives only in ``ClientConfig``.
+    """
+    migrated = ClientConfig(name="x", workspace_path=Path("/x"), tracker_mcp_gate=gate)
+    return client.model_copy(update={"bindings": migrated.bindings})

@@ -22233,13 +22233,10 @@ class TestClaimNextPendingTrackerMcpGate:
 
     def _gated_client(self, client: ClientConfig) -> ClientConfig:
         from cw.models.client import TrackerMcpGateConfig
+        from tests._backend_mcp_helpers import with_tracker_gate
 
-        return client.model_copy(
-            update={
-                "tracker_mcp_gate": TrackerMcpGateConfig(
-                    enabled=True, plugin_id=self._PLUGIN
-                )
-            }
+        return with_tracker_gate(
+            client, TrackerMcpGateConfig(enabled=True, plugin_id=self._PLUGIN)
         )
 
     def _stub_resolver(
@@ -22347,17 +22344,17 @@ class TestClaimNextPendingTrackerMcpGate:
         from cw.dev_queue import TRACKER_MCP_GATE_DISPOSITION
         from cw.dev_queue.dispositions import _PRE_DISPATCH_TRACKER_MCP_REASON
         from cw.models.client import TrackerMcpGateConfig
-        from tests._backend_mcp_helpers import stage_mcp_config
+        from tests._backend_mcp_helpers import stage_mcp_config, with_tracker_gate
         from tests._doctor_helpers import make_stage_pipeline
         from tests._shared.cli_preflight import _write_tracker_config
 
         config_path = stage_mcp_config(monkeypatch, tmp_path, "opencode", "absent")
         _write_tracker_config(sample_client_config.workspace_path, "linear")
-        client = sample_client_config.model_copy(
+        client = with_tracker_gate(
+            sample_client_config,
+            TrackerMcpGateConfig(enabled=True, servers={"opencode": "linear"}),
+        ).model_copy(
             update={
-                "tracker_mcp_gate": TrackerMcpGateConfig(
-                    enabled=True, servers={"opencode": "linear"}
-                ),
                 "pipeline": make_stage_pipeline(
                     {Stage.PLAN: "opencode", Stage.IMPL: "opencode"}
                 ),
@@ -22440,7 +22437,7 @@ class TestClaimNextPendingTrackerMcpGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """R6 case 4: ``tracker_mcp_gate`` unset -> the resolver never runs."""
-        assert sample_client_config.tracker_mcp_gate is None
+        assert sample_client_config.bindings.tickets is None
         write_clients_yaml(sample_client_config)
 
         def _explode(client: ClientConfig, snapshot: DevQueueStore) -> None:
