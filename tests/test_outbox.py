@@ -288,6 +288,28 @@ class TestEnqueue:
         assert entry.redacted is True
         assert read_parts(entry) == parts
 
+    def test_read_parts_missing_body_raises_record_error(self) -> None:
+        entry = _enqueue().entry
+        _body_file(entry.id).unlink()
+
+        with pytest.raises(OutboxRecordError):
+            read_parts(entry)
+
+    def test_read_parts_mismatched_body_raises_record_error(self) -> None:
+        entry = _enqueue().entry
+        _body_file(entry.id).write_text("HELLO WORLD", encoding="utf-8")
+
+        with pytest.raises(OutboxRecordError):
+            read_parts(entry)
+
+    def test_read_parts_span_inside_a_character_raises_record_error(self) -> None:
+        entry = _enqueue(parts=("\u00e9",)).entry
+        data = json.loads(_record_file(entry.id).read_text(encoding="utf-8"))
+        torn = OutboxEntry.model_validate({**data, "parts": [[0, 1], [1, 2]]})
+
+        with pytest.raises(OutboxRecordError):
+            read_parts(torn)
+
     def test_duplicate_same_body_returns_existing_created_false_body_matches_true(
         self,
     ) -> None:
