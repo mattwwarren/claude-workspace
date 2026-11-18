@@ -2856,6 +2856,11 @@ class TestOperatorChannelForward:
                 OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED,
                 OrchestratorEventType.REVIEW_VERDICT_COMMENT_UNVERIFIED,
                 OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED,
+                # #3706 (RFC 0019 O2): outbox attention signals; the
+                # delivered audit record is deliberately absent.
+                OrchestratorEventType.OUTBOX_ENTRY_UNVERIFIED,
+                OrchestratorEventType.OUTBOX_ENTRY_SKIPPED,
+                OrchestratorEventType.OUTBOX_ENTRY_PENDING,
             }
         )
 

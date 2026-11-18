@@ -415,24 +415,26 @@ class TestErrorsAndHelp:
         result = _invoke("list", "-c", "../escape")
 
         assert result.exit_code != 0
-        assert "drain" not in result.output.lower()
 
-    def test_help_never_mentions_drain(self) -> None:
+    def test_help_lists_drain(self) -> None:
+        """#3706 (RFC 0019 O2) added ``drain``; ``list`` still exists."""
         ctx = click.Context(main)
         group = main.get_command(ctx, "outbox")
         assert isinstance(group, click.Group)
-        list_cmd = group.commands["list"]
-        texts = [group.help, group.short_help, list_cmd.help, list_cmd.short_help]
-        texts.extend(p.help for p in list_cmd.params if isinstance(p, click.Option))
-        texts.append(_invoke("--help").output)
-        texts.append(_invoke("list", "--help").output)
+        drain_cmd = group.commands["drain"]
+        assert "list" in group.commands
+        option_helps = [p.help for p in drain_cmd.params if isinstance(p, click.Option)]
 
-        assert any(texts)
-        for text in texts:
-            assert text is None or "drain" not in text.lower()
+        assert group.help is not None
+        assert "drain" in group.help.lower()
+        assert drain_cmd.help
+        assert option_helps
+        assert all(option_helps)
+        assert "drain" in _invoke("--help").output.lower()
+        assert "drain" in _invoke("drain", "--help").output.lower()
 
-    def test_group_lists_only_list(self) -> None:
+    def test_group_lists_list_and_drain(self) -> None:
         group = main.get_command(click.Context(main), "outbox")
         assert isinstance(group, click.Group)
 
-        assert sorted(group.commands) == ["list"]
+        assert sorted(group.commands) == ["drain", "list"]

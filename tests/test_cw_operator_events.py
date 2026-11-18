@@ -185,6 +185,28 @@ class TestAdmitsFilterEngine:
         event = OrchestratorEvent(type=event_type, payload={})
         assert _admits(event, self._default_forward()) is True
 
+    @pytest.mark.parametrize(
+        "event_type",
+        [
+            OrchestratorEventType.OUTBOX_ENTRY_UNVERIFIED,
+            OrchestratorEventType.OUTBOX_ENTRY_SKIPPED,
+            OrchestratorEventType.OUTBOX_ENTRY_PENDING,
+        ],
+    )
+    def test_outbox_attention_signals_admitted_by_default(
+        self, event_type: OrchestratorEventType
+    ) -> None:
+        """The #3706 outbox drain's attention events forward unconditionally."""
+        event = OrchestratorEvent(type=event_type, payload={})
+        assert _admits(event, self._default_forward()) is True
+
+    def test_outbox_entry_delivered_not_admitted_by_default(self) -> None:
+        """``outbox.entry_delivered`` is an audit record only (#3706)."""
+        event = OrchestratorEvent(
+            type=OrchestratorEventType.OUTBOX_ENTRY_DELIVERED, payload={}
+        )
+        assert _admits(event, self._default_forward()) is False
+
     def test_concierge_recovered_not_admitted_by_default(self) -> None:
         """CONCIERGE_RECOVERED is audit-trail only — NOT in the default
         forward set (#1015, Q3)."""
