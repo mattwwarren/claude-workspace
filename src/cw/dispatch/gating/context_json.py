@@ -112,38 +112,53 @@ def _emit_render_failure(
         )
 
 
-def _remove_stale_context(task: TicketTask, worktree_path: Path) -> bool:
-    """Unlink any ``.cw/context.json`` left by a prior session, for every backend.
+def _remove_stale_context(task: TicketTask, worktree_path: Path) -> None:
+    """Quarantine any ``.cw/context.json`` left by a prior session.
 
     The invalidation helper skips LOCAL executors, so a failed render must
-    remove the file itself: a stale file must never survive a failed render
-    (RFC 0019 T1 review item 26).
+    remove or quarantine the file itself: a stale file must never remain at
+    the path a worker reads after a failed render (RFC 0019 T1 review item 26).
     """
+    stale_context = worktree_path / CONTEXT_JSON_RELATIVE_PATH
+    quarantine = stale_context.with_name(f"{stale_context.name}.quarantined")
     try:
-        (worktree_path / CONTEXT_JSON_RELATIVE_PATH).unlink(missing_ok=True)
+        # Rename first so the old content is never visible at the reader path
+        # after a successful cleanup, even if the quarantine file already
+        # exists.  The fallback handles filesystems where replace is not
+        # available but unlink is.
+        stale_context.replace(quarantine)
+    except FileNotFoundError:
+        return
     except OSError as exc:
+        try:
+            stale_context.unlink(missing_ok=True)
+        except OSError as unlink_exc:
+            _log.warning(
+                "dispatch: could not remove stale .cw/context.json ticket_id=%s"
+                " client=%s error_class=%s",
+                task.ticket_id,
+                task.client,
+                type(unlink_exc).__name__,
+            )
+            return
         _log.warning(
-            "dispatch: could not remove stale .cw/context.json ticket_id=%s"
-            " client=%s error_class=%s",
+            "dispatch: quarantined stale .cw/context.json with fallback unlink"
+            " ticket_id=%s client=%s error_class=%s",
             task.ticket_id,
             task.client,
             type(exc).__name__,
         )
-        return False
-    return True
 
 
-def _render_context_json_from_snapshot(task: TicketTask, worktree_path: Path) -> bool:
+def _render_context_json_from_snapshot(task: TicketTask, worktree_path: Path) -> None:
     """Re-render ``.cw/context.json`` from the snapshot store on spawn (RFC 0019 T1).
 
     A no-op without a row digest. Store-only: no tracker call, no lock. On a
-    failure any existing file is removed, the spawn proceeds without it, and the
-    failure is recorded through :func:`_emit_render_failure`. The return value
-    is false only when cleanup itself failed, in which case the caller must not
-    spawn against a potentially stale context file.
+    failure any existing file is removed or quarantined, the spawn proceeds
+    without it, and the failure is recorded through :func:`_emit_render_failure`.
     """
     if task.snapshot_digest is None:
-        return True
+        return
     cause: RenderFailureCause
     try:
         render_for_task(task, worktree_path)
@@ -152,9 +167,6 @@ def _render_context_json_from_snapshot(task: TicketTask, worktree_path: Path) ->
     except OSError as exc:
         cause, error_class = _RENDER_ERROR, type(exc).__name__
     else:
-        return True
-    cleanup_succeeded = _remove_stale_context(task, worktree_path)
-    if not cleanup_succeeded:
-        cause, error_class = _RENDER_ERROR, "CleanupError"
+        return
+    _remove_stale_context(task, worktree_path)
     _emit_render_failure(task, cause, error_class)
-    return cleanup_succeeded
