@@ -27,7 +27,7 @@ from cw.ticket_snapshot import (
     snapshot_path,
     write_snapshot,
 )
-from cw.ticket_snapshot._models import canonical_json, digest_of
+from cw.ticket_snapshot._models import canonical_json, digest_of, digest_or_none
 from tests._shared.ticket_context import make_snapshot, observed_issue_envelope
 from tests._ticket_view_helpers import (
     ACME,
@@ -375,3 +375,118 @@ def test_comment_model_forbids_extra() -> None:
                 "extra": 1,
             }
         )
+
+
+# --- RFC 0019 T1 review round 1 (items 27-31) ---
+
+
+def test_fetched_at_keeps_microseconds_so_same_second_refresh_differs() -> None:
+    base = make_snapshot()
+    first = base.model_copy(
+        update={"fetched_at": base.fetched_at.replace(microsecond=1)}
+    )
+    second = base.model_copy(
+        update={"fetched_at": base.fetched_at.replace(microsecond=2)}
+    )
+    assert ".000001Z" in canonical_json(first)
+    assert write_snapshot(first) != write_snapshot(second)
+
+
+def test_read_non_utf8_bytes_with_matching_hash_raises_invalid() -> None:
+    raw = b'{"x": "\xff"}'
+    digest = hashlib.sha256(raw).hexdigest()
+    path = snapshot_path(ACME, digest)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    with pytest.raises(SnapshotUntrustedError) as info:
+        read(make_task(snapshot_digest=digest))
+    assert info.value.reason == "invalid"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, None),
+        ("a" * 64, "a" * 64),
+        ("A" * 64, None),
+        ("a" * 63, None),
+        ("x" * 64, None),
+    ],
+)
+def test_digest_or_none_is_the_one_shape_check(
+    value: str | None, expected: str | None
+) -> None:
+    assert digest_or_none(value) == expected
+
+
+def _gh_doc(**overrides: Any) -> dict[str, Any]:
+    doc: dict[str, Any] = {
+        "title": "T",
+        "body": "B",
+        "url": "https://example.test/3711",
+        "comments": [],
+    }
+    doc.update(overrides)
+    return doc
+
+
+def _gh_raw_comment(**overrides: Any) -> dict[str, Any]:
+    raw: dict[str, Any] = {
+        "id": "IC_1",
+        "body": "hello",
+        "createdAt": "2026-11-18T20:00:00Z",
+        "author": {"login": "octo"},
+        "isMinimized": False,
+    }
+    raw.update(overrides)
+    return raw
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        _gh_doc(title=None),
+        _gh_doc(body=3),
+        _gh_doc(url=["x"]),
+        _gh_doc(comments="nope"),
+    ],
+)
+def test_github_malformed_top_level_refused(
+    doc: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_fetch, "fetch_issue_snapshot", lambda *_a, **_k: doc)
+    with pytest.raises(SnapshotRefusedError):
+        snapshot_from_github("3711", ACME, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "not-a-dict",
+        _gh_raw_comment(author="octo"),
+        _gh_raw_comment(author={"login": 7}),
+        _gh_raw_comment(isMinimized="yes"),
+    ],
+)
+def test_github_malformed_comment_refused_never_coerced(
+    raw: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        _fetch, "fetch_issue_snapshot", lambda *_a, **_k: _gh_doc(comments=[raw])
+    )
+    with pytest.raises(SnapshotRefusedError):
+        snapshot_from_github("3711", ACME, tmp_path)
+
+
+def test_github_null_author_and_null_url_recorded_as_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = _gh_doc(url=None, comments=[_gh_raw_comment(author=None)])
+    monkeypatch.setattr(_fetch, "fetch_issue_snapshot", lambda *_a, **_k: doc)
+    snapshot = snapshot_from_github("#3711", ACME, tmp_path)
+    assert snapshot.ticket_url is None
+    assert snapshot.ticket_id == "3711"
+    (comment,) = snapshot.comments
+    assert comment.author_id is None
+    assert comment.author is None
+    assert comment.minimized is False

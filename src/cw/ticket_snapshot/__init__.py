@@ -35,6 +35,7 @@ from cw.ticket_snapshot._models import (
     SnapshotRefusedError,
     SnapshotUntrustedError,
     TicketSnapshot,
+    digest_or_none,
     normalize_ticket_id,
 )
 from cw.ticket_snapshot._record import (
@@ -64,6 +65,7 @@ __all__ = [
     "StdinComment",
     "StdinDocument",
     "TicketSnapshot",
+    "digest_or_none",
     "normalize_ticket_id",
     "read",
     "record_snapshot",

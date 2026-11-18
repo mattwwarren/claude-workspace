@@ -73,9 +73,11 @@ def _gh_comment(raw: Any) -> SnapshotComment:
     if not isinstance(created_at, str):
         msg = "gh comment has no createdAt"
         raise SnapshotRefusedError(msg)
-    author = raw.get("author")
-    login = author.get("login") if isinstance(author, dict) else None
-    author_login = login if isinstance(login, str) else None
+    author_login = _gh_author_login(raw.get("author"))
+    minimized = raw.get("isMinimized", False)
+    if not isinstance(minimized, bool):
+        msg = "gh comment isMinimized is not a boolean"
+        raise SnapshotRefusedError(msg)
     return SnapshotComment(
         id=comment_id,
         author_id=author_login,
@@ -83,8 +85,35 @@ def _gh_comment(raw: Any) -> SnapshotComment:
         created_at=created_at,
         body=body,
         agent_authored=is_agent_authored(body),
-        minimized=raw.get("isMinimized") is True,
+        minimized=minimized,
     )
+
+
+def _gh_author_login(author: Any) -> str | None:
+    """The login of a gh ``author``; null is None, any other malformed shape refused.
+
+    A deleted account reports a null author, which is recorded as None. A
+    present author with a non-string or missing login is malformed and refused,
+    never coerced to None (RFC 0019 T1 review item 28).
+    """
+    if author is None:
+        return None
+    login = author.get("login") if isinstance(author, dict) else None
+    if not isinstance(login, str):
+        msg = "gh comment author has no login"
+        raise SnapshotRefusedError(msg)
+    return login
+
+
+def _gh_text(data: dict[str, Any], key: str, *, nullable: bool) -> str | None:
+    """A top-level gh string field; a wrong type is refused, never ``str()``-coerced."""
+    value = data.get(key)
+    if value is None and nullable:
+        return None
+    if not isinstance(value, str):
+        msg = f"gh issue field {key} is not a string"
+        raise SnapshotRefusedError(msg)
+    return value
 
 
 def snapshot_from_github(ticket_id: str, client: str, cwd: Path) -> TicketSnapshot:
@@ -94,16 +123,18 @@ def snapshot_from_github(ticket_id: str, client: str, cwd: Path) -> TicketSnapsh
     if data is None:
         msg = "gh issue view failed or returned a malformed document"
         raise SnapshotRefusedError(msg)
-    raw_comments: list[Any] = list(data.get("comments") or [])
+    raw_comments = data.get("comments")
+    if not isinstance(raw_comments, list):
+        msg = "gh issue field comments is not a list"
+        raise SnapshotRefusedError(msg)
     comments = [_gh_comment(raw) for raw in raw_comments]
-    url = data.get("url")
     return TicketSnapshot(
         ticket_id=normalized,
         client=client,
-        ticket_url=url if isinstance(url, str) else None,
+        ticket_url=_gh_text(data, "url", nullable=True),
         fetched_at=_now(),
-        title=str(data.get("title", "")),
-        body=str(data.get("body", "")),
+        title=_gh_text(data, "title", nullable=False) or "",
+        body=_gh_text(data, "body", nullable=False) or "",
         comments=comments,
     )
 

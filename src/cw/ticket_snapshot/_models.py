@@ -33,7 +33,9 @@ MAX_COMMENTS = 1000
 _CLIENT_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _DIGEST_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 _TICKET_HASH_PREFIX = "#"
-_FETCHED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+# Microsecond precision: two refreshes in one second with different content must
+# never share a digest through truncation (RFC 0019 T1 review item 30).
+_FETCHED_AT_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 
 SnapshotFailureCause = Literal["missing", "mismatch", "invalid", "too_new"]
 RenderFailureCause = Literal[
@@ -51,6 +53,8 @@ class SnapshotRefusedError(SnapshotError):
 
 class SnapshotUntrustedError(SnapshotError):
     """A stored snapshot failed a read check; ``reason`` names which one."""
+
+    reason: SnapshotFailureCause
 
     def __init__(self, message: str, *, reason: SnapshotFailureCause) -> None:
         super().__init__(message)
@@ -103,11 +107,11 @@ class TicketSnapshot(BaseModel):
 
     @field_validator("fetched_at")
     @classmethod
-    def _fetched_at_utc_seconds(cls, value: datetime) -> datetime:
+    def _fetched_at_utc(cls, value: datetime) -> datetime:
         if value.tzinfo is None:
             msg = "fetched_at must be timezone-aware"
             raise ValueError(msg)
-        return value.astimezone(UTC).replace(microsecond=0)
+        return value.astimezone(UTC)
 
     @field_serializer("fetched_at")
     def _serialize_fetched_at(self, value: datetime) -> str:
@@ -128,6 +132,17 @@ def check_digest(digest: str) -> str:
         msg = "snapshot digest is not a sha256 hex digest"
         raise SnapshotRefusedError(msg)
     return digest
+
+
+def digest_or_none(value: str | None) -> str | None:
+    """The one digest-shape validator: *value* if sha256 hex, else None.
+
+    Shared by the store and every caller that must not carry raw row text
+    (RFC 0019 T1 review item 27).
+    """
+    if value is None or _DIGEST_RE.match(value) is None:
+        return None
+    return value
 
 
 def normalize_ticket_id(raw: str) -> str:

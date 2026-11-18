@@ -93,7 +93,10 @@ def read(task: TicketTask) -> TicketSnapshot | None:
         msg = "snapshot bytes do not hash to the row digest"
         raise SnapshotUntrustedError(msg, reason="mismatch")
     try:
-        data: Any = json.loads(raw)
+        data: Any = json.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        msg = "snapshot is not valid UTF-8"
+        raise SnapshotUntrustedError(msg, reason="invalid") from exc
     except ValueError as exc:
         msg = "snapshot is not valid JSON"
         raise SnapshotUntrustedError(msg, reason="invalid") from exc

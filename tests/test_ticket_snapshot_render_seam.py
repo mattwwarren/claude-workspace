@@ -107,3 +107,26 @@ def test_failure_log_carries_no_ticket_text(
         _render_context_json_from_snapshot(task, worktree)
     assert "Authored test ticket body" not in caplog.text
     assert "cause=mismatch" in caplog.text
+
+
+def test_failed_render_removes_stale_context_json(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    (worktree / ".cw").mkdir(parents=True)
+    stale = worktree / ".cw" / "context.json"
+    stale.write_text("{}", encoding="utf-8")
+    _render_context_json_from_snapshot(make_task(snapshot_digest="c" * 64), worktree)
+    assert not stale.exists()
+    (event,) = events_of(OrchestratorEventType.TICKET_SNAPSHOT_RENDER_FAILED)
+    assert event.payload["cause"] == "missing"
+
+
+def test_render_failure_with_unremovable_context_still_spawns(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    task, worktree = _seeded_task(tmp_path)
+    (worktree / ".cw").write_text("a regular file, not a dir", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
+        _render_context_json_from_snapshot(task, worktree)
+    assert "could not remove stale .cw/context.json" in caplog.text
+    (event,) = events_of(OrchestratorEventType.TICKET_SNAPSHOT_RENDER_FAILED)
+    assert event.payload["cause"] == "render_error"
