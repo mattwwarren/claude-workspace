@@ -154,7 +154,7 @@ def test_checkpoint1_auto_skip_covers_both_sources_in_one_condition() -> None:
     """The headless auto-skip clause covers tracker-plan AND resumed-draft."""
     section = _checkpoint1_section()
     assert (
-        f"if plan in Linear or resumed from `{DRAFT_FILE}` → AUTO-SKIP "
+        f"if plan on the ticket or resumed from `{DRAFT_FILE}` → AUTO-SKIP "
         "plan-approval question"
     ) in section
     # Exactly one auto-skip clause — not a duplicated parallel branch.

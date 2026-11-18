@@ -249,7 +249,7 @@ def test_finalize_semantic_resolve_cross_references_the_gate() -> None:
 def test_plan_of_record_post_appends_the_marker() -> None:
     window = _after(
         _cmd("auto-dev-plan.md"),
-        "**THEN** post the same plan as a comment on the Linear issue",
+        "**THEN** post the same plan as a comment on the ticket",
         span=800,
     )
     assert AGENT_COMMENT_MARKER in window
@@ -304,7 +304,8 @@ def test_finalize_pr_link_comment_appends_the_marker() -> None:
     """The PR-link comment (#2097: previously unmarked and header-less)."""
     window = _after(
         _cmd("auto-dev-finalize.md"),
-        "4. **Post to Linear:** Comment on the issue with PR link",
+        "4. **Post to Linear:** Comment on the ticket (the `tickets` role's "
+        "create-comment operation) with the PR link",
         span=700,
     )
     assert AGENT_COMMENT_MARKER in window
