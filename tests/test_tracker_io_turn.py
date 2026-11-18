@@ -34,6 +34,7 @@ from tests._backend_mcp_helpers import (
     McpStage,
     codex_tracker_client,
     stage_mcp_config,
+    with_tracker_gate,
     write_system_layer,
 )
 from tests._tool_fakes import codex_usage_stdout, tracker_io_turn_result
@@ -375,12 +376,8 @@ def test_tracker_mcp_gate_enabled_flag_is_ignored(
     _stage(monkeypatch, tmp_path)
     runner = FakeCodexRunner()
     client = codex_tracker_client(tmp_path)
-    client = client.model_copy(
-        update={
-            "tracker_mcp_gate": TrackerMcpGateConfig(
-                enabled=False, servers={"codex": "linear"}
-            )
-        }
+    client = with_tracker_gate(
+        client, TrackerMcpGateConfig(enabled=False, servers={"codex": "linear"})
     )
     context = TrackerIoContext(runner=runner, client=client, worktree=tmp_path)
     outcome = _turn(context)

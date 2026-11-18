@@ -658,9 +658,11 @@ def schema_list(as_json: bool) -> None:
 def schema_show(name: str, fmt: str) -> None:
     """Show schema for NAME.
 
-    Available schemas: auto-dev-result, pr-channel-event, review-engine-manifest,
-    review-engine-summary, review-history, review-verdict, session, ticket-task,
-    ticket-view.
+    \b
+    Available schemas: auto-dev-result, bindings, pr-channel-event,
+    review-engine-manifest, review-engine-summary, review-history,
+    review-verdict, session, ticket-task, ticket-view.
+
     --format=json outputs raw model_json_schema() with no cw_version or
     other envelope.  --format=tldr (default) outputs a compact human-
     readable field table plus enum tables for Status / Tier fields.

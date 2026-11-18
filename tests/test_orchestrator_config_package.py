@@ -9,7 +9,9 @@ this file pins the things that suite cannot see:
    unsplit module and is compared as ``json.dumps`` strings, so a reordered
    field, an edited docstring (schema ``description``) or a changed default
    fails here. Validators are invisible to the schema, which is why the
-   default-instance dumps are pinned too.
+   default-instance dumps are pinned too. The ``ClientConfig`` validation
+   entry alone was re-captured for RFC 0019 R1 (#3702), when its
+   ``tracker_mcp_gate`` field became the ``bindings`` block.
 2. The import surface is frozen. ``EXPECTED_EXPORTS`` is hard-coded, not
    re-derived from the package, so a dropped re-export fails loudly, and every
    ``cw.models`` re-export is the same object as the package's.
