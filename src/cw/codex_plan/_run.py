@@ -89,7 +89,7 @@ from cw.dev_queue.lifecycle import _plan_body_signoff_ok
 from cw.dev_queue.operator_constraints import record_plan_constraints
 from cw.exceptions import CwError
 from cw.models import CODEX_BACKEND, OrchestratorEventType, Stage
-from cw.models.bindings import Harness
+from cw.models.bindings import Harness, TicketsBinding
 from cw.models.enums import StageIdentifier
 from cw.plan_decisions import parse_plan_decisions
 from cw.plan_fingerprint import PLAN_DRAFT_RELATIVE_PATH, compute_plan_draft_fingerprint
@@ -219,9 +219,19 @@ class _Run:
             if kind.tracker_class is not TrackerClass.OTHER or kind.system is None:
                 return _McpTarget()
             return self._mcp_blocked(f"tracker {kind.system!r}: tracker_mcp_gate unset")
-        if tickets.cli == "gh":
+        # A migrated legacy tracker_mcp_gate has no tickets.system. On a GitHub
+        # project it stays inert, as before the binding existed (#3703 review).
+        if tickets.cli == "gh" or (
+            kind.tracker_class is TrackerClass.GITHUB and tickets.system is None
+        ):
             return _McpTarget()
-        tracker = str(tickets.system or kind.system or "")
+        return self._binding_target(tickets, kind.system)
+
+    def _binding_target(
+        self, tickets: TicketsBinding, project_system: str | None
+    ) -> _McpTarget | _Exit:
+        """The codex MCP read target named by a tickets binding."""
+        tracker = str(tickets.system or project_system or "")
         server = tickets.mcp_server(CODEX_BACKEND) or ""
         try:
             validate_server_name(server)

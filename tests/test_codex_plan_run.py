@@ -1032,6 +1032,29 @@ def test_github_tracker_with_codex_mcp_binding_uses_mcp(
     assert not [r for r in h.gh.records if r.argv[-1] == "body"]
 
 
+def test_legacy_gate_on_github_tracker_stays_on_github_path(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A leftover tracker_mcp_gate on a GitHub client is inert, not a block (#3703)."""
+    h = harness()
+    _other_tracker(
+        h,
+        tmp_path,
+        monkeypatch,
+        servers={"codex": "linear"},
+        tracker=TRACKER_GITHUB_ISSUES,
+    )
+    add_stations(add_turn(h.runner))
+    result = h.run()
+    assert result.status == "stage_complete"
+    (call,) = h.plan_calls
+    argv = call["argv"]
+    assert isinstance(argv, list)
+    assert not any("enabled_tools" in a for a in argv)
+
+
 @pytest.mark.parametrize("tracker", [TRACKER_GITHUB_ISSUES, None])
 def test_github_and_unset_launch_with_no_mcp_tool(
     harness: Callable[..., Harness], tracker: str | None
