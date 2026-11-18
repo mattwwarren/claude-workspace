@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from cw.auto_dev_result import AutoDevResult
 from cw.models import Session, TicketTask
+from cw.models.bindings import Bindings
 from cw.models.pr_channel_event import PREventMessage
 from cw.models.review_engine_manifest import EngineManifest
 from cw.models.review_engine_summary import ReviewEngineSummary
@@ -44,6 +45,8 @@ REGISTRY: dict[str, type[BaseModel]] = {
     "review-engine-manifest": EngineManifest,
     # The v1 `message` JSON of a PR channel event (#3173); see docs/pr-channel.md.
     "pr-channel-event": PREventMessage,
+    # A client's clients.yaml `bindings` block (RFC 0019 R1, #3702).
+    "bindings": Bindings,
 }
 
 # Fields absent from model_json_schema() `required` arrays but enforced at
