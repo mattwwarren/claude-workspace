@@ -8,13 +8,15 @@ one.
 
 from __future__ import annotations
 
-from typing import Literal
-
 import click
 
 from cw.cli._base import handle_errors, main, print_fixed_width_table
 from cw.launch_marker import LaunchOwnerState
 from cw.outbox import (
+    VERDICT_IN_FLIGHT,
+    VERDICT_OWNER_GONE,
+    VERDICT_UNKNOWN,
+    ClaimantVerdict,
     OutboxEntry,
     OutboxListEnvelope,
     OutboxListRow,
@@ -33,12 +35,10 @@ _HEADERS = ("id", "client", "state", "reason", "ticket", "producer", "created")
 _COL_WIDTHS = (32, 16, 22, 22, 16, 18, 20)
 _CREATED_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _CELL_ELLIPSIS = "~"
-_VERDICT_NAMES: dict[
-    LaunchOwnerState, Literal["in_flight", "owner_gone", "unknown"]
-] = {
-    LaunchOwnerState.IN_FLIGHT: "in_flight",
-    LaunchOwnerState.OWNER_GONE: "owner_gone",
-    LaunchOwnerState.UNKNOWN: "unknown",
+_VERDICT_NAMES: dict[LaunchOwnerState, ClaimantVerdict] = {
+    LaunchOwnerState.IN_FLIGHT: VERDICT_IN_FLIGHT,
+    LaunchOwnerState.OWNER_GONE: VERDICT_OWNER_GONE,
+    LaunchOwnerState.UNKNOWN: VERDICT_UNKNOWN,
 }
 
 

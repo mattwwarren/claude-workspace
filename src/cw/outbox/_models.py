@@ -12,7 +12,7 @@ import re
 from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal, NamedTuple, Self
+from typing import Final, Literal, NamedTuple, Self
 
 from pydantic import (
     AwareDatetime,
@@ -237,6 +237,11 @@ def _check_spans(parts: list[tuple[int, int]], body_bytes: int) -> None:
 
 TransitionInitiator = Literal["enqueue", "claim", "settle", "recovery"]
 ClaimantVerdict = Literal["in_flight", "owner_gone", "unknown"]
+# The verdict literals, named once: the store writes VERDICT_OWNER_GONE into a
+# recovery transition and the CLI prints all three, so neither spells them out.
+VERDICT_IN_FLIGHT: Final[ClaimantVerdict] = "in_flight"
+VERDICT_OWNER_GONE: Final[ClaimantVerdict] = "owner_gone"
+VERDICT_UNKNOWN: Final[ClaimantVerdict] = "unknown"
 
 
 class OutboxTransition(BaseModel):

@@ -36,6 +36,7 @@ from cw.outbox._models import (
     MAX_TRANSITIONS,
     OUTBOX_SCHEMA_VERSION,
     REASONS_BY_STATE,
+    VERDICT_OWNER_GONE,
     EnqueueResult,
     OutboxClaimError,
     OutboxEntry,
@@ -371,7 +372,7 @@ def _recovered(entry: OutboxEntry, now: datetime) -> OutboxEntry:
         now=now,
         claimant=entry.claimant,
         # Recovery runs only on OWNER_GONE (see _recover_locked).
-        claimant_verdict="owner_gone",
+        claimant_verdict=VERDICT_OWNER_GONE,
     )
     return _rebuild(
         entry,
