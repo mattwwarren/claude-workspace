@@ -30,6 +30,10 @@ def _launch_logged_subprocess(
     every call so a retry into the same worktree does not bleed a prior
     attempt's output into the next harvest read. ``start_new_session=True``
     puts the child in its own process group (#2367).
+
+    stdin is ``/dev/null``: nothing writes to the child's stdin on this path,
+    and an inherited open non-TTY stdin can hang a child such as ``opencode run``
+    (#3696).
     """
     log_path = worktree / log_relative_path
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -38,6 +42,7 @@ def _launch_logged_subprocess(
             argv,
             env=env,
             cwd=worktree,
+            stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=subprocess.STDOUT,
             start_new_session=True,

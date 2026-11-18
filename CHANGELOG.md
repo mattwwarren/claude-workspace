@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Detached codex, opencode and aider workers no longer inherit the dispatcher's stdin (#3696).** `_launch_logged_subprocess` now passes `stdin=subprocess.DEVNULL`, which removes the inherited-stdin precondition for a child that blocks reading stdin. The operator-reported opencode hang was not reproduced in cw, so this fix does not confirm that hang's cause.
+
 ## [1.103.0] - 2026-11-16
 
 ### Fixed
