@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.103.1] - 2026-11-18
+
 ### Fixed
 
 - **Independent review confirmation survives foreground tool limits.** Claude and OpenCode workers start or resume full confirmation through `cw review converge confirm-job`, and finalize uses the same command for conflict-resolution confirmation. The reviewer runs without a deadline, and bounded foreground polls retrieve its durable result for the exact HEAD and diff base. An interrupted review cannot supply a verdict. Upgrade the installed cw CLI together with the worker commands.
