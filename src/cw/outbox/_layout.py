@@ -53,6 +53,7 @@ _BODY_SUFFIX = ".body"
 _DRAIN_LOCK_NAME = "drain.lock"
 _DRAIN_LOG_NAME = "drain.log"
 _DRAIN_HELD_NAME = "drain.held"
+_DRAIN_PROGRESS_NAME = "drain.progress"
 _DRAIN_UNREACHABLE_PREFIX = "drain.unreachable."
 
 
@@ -78,6 +79,10 @@ def drain_log_path(client: str) -> Path:
 
 def held_path(client: str) -> Path:
     return client_dir(client) / _DRAIN_HELD_NAME
+
+
+def progress_path(client: str) -> Path:
+    return client_dir(client) / _DRAIN_PROGRESS_NAME
 
 
 def unreachable_path(client: str, role: OutboxRole) -> Path:

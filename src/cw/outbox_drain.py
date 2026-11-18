@@ -46,6 +46,7 @@ from cw.outbox import (
     OutboxRole,
     OutboxState,
     UnreachableMarker,
+    add_progress,
     append_held,
     claim,
     clear_all_markers,
@@ -190,6 +191,16 @@ def _token(entry: OutboxEntry) -> str:
     return entry.claim_token or ""
 
 
+def _note_left_pending(run: _Run, entry: OutboxEntry) -> None:
+    """Count one entry that left ``pending``, after its state change persisted.
+
+    The dispatch tick's no-progress guard reads this monotonic counter: its
+    bounded record scan cannot see work done outside the scan window (item 32).
+    """
+    if entry.claimed_from is OutboxState.PENDING:
+        add_progress(run.client, 1)
+
+
 def _deliver(
     run: _Run,
     entry: OutboxEntry,
@@ -203,6 +214,7 @@ def _deliver(
         state=OutboxState.DELIVERED,
         reason=reason,
     )
+    _note_left_pending(run, entry)
     run.delivered += 1
     run.delivered_roles.add(entry.role)
     _emit(OrchestratorEventType.OUTBOX_ENTRY_DELIVERED, entry, reason, posted=posted)
@@ -221,6 +233,7 @@ def _resettle_unverified(
         state=OutboxState.UNVERIFIED,
         reason=reason,
     )
+    _note_left_pending(run, entry)
     run.unverified += 1
 
 
@@ -474,6 +487,7 @@ def _run_leased(
     _drain_state(run, OutboxState.UNVERIFIED, cap)
     _drain_state(run, OutboxState.PENDING, cap)
     skipped = _emit_skipped(client, before)
+    add_progress(client, skipped)
     for role in run.delivered_roles - set(run.broken):
         clear_marker(client, role)
     drained = run.delivered + run.unverified + skipped

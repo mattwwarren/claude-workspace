@@ -20,14 +20,15 @@ package:
 - ``_store`` — ``enqueue``, ``claim``, ``settle``, ``release``, the reads and
   ``peek_pending``. Imports ``_layout``, ``_lock`` and ``_models``.
 - ``_lease`` — ``drain_lease`` (the unguarded per-client drain lease),
-  ``drain_lease_held``, and the unreachable-marker and held-list IO. Imports
-  ``_layout`` and ``_models``.
+  ``drain_lease_held``, and the unreachable-marker, held-list and
+  progress-counter IO. Imports ``_layout`` and ``_models``.
 
 Tests that patch a name patch it on the submodule that calls it, not here: a
 patch on this package rebinds only the re-export.
 """
 
 from cw.outbox._lease import (
+    add_progress,
     append_held,
     clear_all_markers,
     clear_held,
@@ -37,6 +38,7 @@ from cw.outbox._lease import (
     marked_roles,
     read_held,
     read_marker,
+    read_progress,
     write_marker,
 )
 from cw.outbox._models import (
@@ -130,6 +132,7 @@ __all__ = [
     "OutboxValidationError",
     "PendingPeek",
     "UnreachableMarker",
+    "add_progress",
     "append_held",
     "claim",
     "claimant_state",
@@ -147,6 +150,7 @@ __all__ = [
     "read_held",
     "read_marker",
     "read_parts",
+    "read_progress",
     "release",
     "settle",
     "transition_allowed",

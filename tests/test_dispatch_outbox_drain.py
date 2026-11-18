@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import os
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -339,6 +340,56 @@ class TestNoProgressBound:
         tick_drain.launch_outbox_drains(clients)
 
         assert spawner.launched == [CLIENT, CLIENT]
+
+    def test_progress_on_a_backlog_beyond_the_scan_bound_relaunches(
+        self, tmp_path: Path, spawner: _Spawner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Progress outside the tick's bounded window must still earn a relaunch.
+
+        The tick parses only the newest records. A drain that delivers entries
+        outside that window leaves the visible pending id set unchanged when
+        the record mtimes do not move (a filesystem with coarse timestamps
+        pins them), so the id set alone cannot see the progress.
+        """
+        GhThread().install(monkeypatch)
+        monkeypatch.setattr("cw.tracker_post._READBACK_DELAY_SECONDS", 0.0)
+        monkeypatch.setattr(tick_drain, "TICK_SCAN_MAX_RECORDS", 2)
+        entries = [enqueue(marker=marker).entry for marker in "abcd"]
+
+        def _pin_mtimes() -> None:
+            for age, entry in enumerate(entries):
+                ns = (10 + age) * 10**9
+                os.utime(_layout.record_path(CLIENT, entry.id), ns=(ns, ns))
+
+        _pin_mtimes()
+        clients = _clients(tmp_path)
+        tick_drain.launch_outbox_drains(clients)
+        assert tick_drain._LAUNCHED[CLIENT].pending_ids == {
+            entries[2].id,
+            entries[3].id,
+        }
+
+        report = run_drain(CLIENT, clients[CLIENT], limit=1, force=False)
+        _pin_mtimes()
+        spawner.procs[0].code = 0
+        tick_drain.launch_outbox_drains(clients)
+
+        assert report.delivered == 1
+        assert spawner.launched == [CLIENT, CLIENT]
+
+    def test_a_run_that_made_no_progress_still_stalls_beyond_the_scan_bound(
+        self, tmp_path: Path, spawner: _Spawner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(tick_drain, "TICK_SCAN_MAX_RECORDS", 2)
+        for marker in "abc":
+            enqueue(marker=marker)
+        clients = _clients(tmp_path)
+        tick_drain.launch_outbox_drains(clients)
+        spawner.procs[0].code = 1
+
+        tick_drain.launch_outbox_drains(clients)
+
+        assert spawner.launched == [CLIENT]
 
     def test_g2_becomes_held_so_no_crash_loop(
         self, tmp_path: Path, spawner: _Spawner, monkeypatch: pytest.MonkeyPatch

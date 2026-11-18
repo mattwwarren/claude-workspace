@@ -16,6 +16,10 @@ decision.
 - ``drain.held`` (``HeldList``): entries held after a per-item failure. A
   missing, corrupt or unreadable file reads as empty; the next hold rewrites
   it.
+- ``drain.progress``: a monotonic count of entries that left ``pending`` under
+  a drain (settled, or skipped as unreadable). The tick compares it across
+  launches, because its bounded record scan cannot see progress made outside
+  its window. A missing, corrupt or unreadable file reads as 0.
 
 The drain is the only writer, under the lease; the tick reads lock-free.
 Imports ``_layout`` and ``_models``; no subprocess, no tracker code.
@@ -28,8 +32,6 @@ import fcntl
 import logging
 from typing import TYPE_CHECKING
 
-from pydantic import ValidationError
-
 from cw._flock import try_flock_until
 from cw.outbox._layout import (
     _write,
@@ -37,6 +39,7 @@ from cw.outbox._layout import (
     drain_lock_path,
     ensure_client_dir,
     held_path,
+    progress_path,
     unreachable_path,
 )
 from cw.outbox._models import (
@@ -116,12 +119,14 @@ def read_marker(client: str, role: OutboxRole) -> UnreachableMarker | None:
     (``transient_failure``, nothing announced).
     """
     path = unreachable_path(client, role)
+    # A ValueError is a corrupt file: invalid UTF-8 (UnicodeDecodeError) or
+    # invalid JSON / shape (pydantic's ValidationError).
     try:
         text = _read_text(path)
         if text is None:
             return None
         marker = UnreachableMarker.model_validate_json(text)
-    except (OSError, ValidationError):
+    except (OSError, ValueError):
         logger.warning("outbox: unreadable drain marker %s counts as set", path.name)
         return UnreachableMarker(role=role, reason=OutboxReason.TRANSIENT_FAILURE)
     if marker.role is not role:
@@ -168,7 +173,7 @@ def read_held(client: str) -> frozenset[str]:
         if text is None:
             return frozenset()
         return frozenset(HeldList.model_validate_json(text).entry_ids)
-    except (OSError, ValidationError):
+    except (OSError, ValueError):
         logger.warning("outbox: unreadable held list %s reads as empty", path.name)
         return frozenset()
 
@@ -180,7 +185,7 @@ def append_held(client: str, entry_id: str) -> None:
     try:
         text = _read_text(path)
         current = [] if text is None else HeldList.model_validate_json(text).entry_ids
-    except (OSError, ValidationError):
+    except (OSError, ValueError):
         current = []
     if entry_id in current:
         return
@@ -189,3 +194,22 @@ def append_held(client: str, entry_id: str) -> None:
 
 def clear_held(client: str) -> None:
     _unlink(held_path(client))
+
+
+def read_progress(client: str) -> int:
+    """How many entries have left ``pending`` under a drain; 0 when unreadable."""
+    path = progress_path(client)
+    try:
+        text = _read_text(path)
+        return 0 if text is None else max(0, int(text.strip()))
+    except (OSError, ValueError):
+        logger.warning("outbox: unreadable drain progress %s reads as 0", path.name)
+        return 0
+
+
+def add_progress(client: str, count: int) -> None:
+    """Add *count* to the progress counter (the drain, under its lease, only)."""
+    if count <= 0:
+        return
+    ensure_client_dir(client)
+    _write(progress_path(client), str(read_progress(client) + count))
