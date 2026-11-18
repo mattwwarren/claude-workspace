@@ -17,6 +17,7 @@ from cw.codex_review._const import _CODEX_VERSION_RE
 from cw.config import load_state, save_state, sessions_lock
 from cw.events import record_event as _record_orchestrator_event
 from cw.exceptions import CwError, EmitSessionNotFoundError, WorkerLaunchedError
+from cw.executor._capabilities import CLAUDE_NATIVE_CAPABILITIES
 from cw.executor_diagnostics import (
     append_diagnostics_pointer,
     build_executor_failure,
@@ -52,6 +53,7 @@ if TYPE_CHECKING:
 
     from cw.executor_diagnostics import ExecutorName
     from cw.models import LocalLivenessBackend
+    from cw.models.capabilities import HarnessCapabilities
     from cw.models.usage import UsageSnapshot
     from cw.native_daemon import NativeDaemonClient
 
@@ -190,6 +192,10 @@ class StageExecutor(Protocol):
         """Return the expected JSON schema for this stage's result sentinel."""
         ...
 
+    def capabilities(self) -> HarnessCapabilities:
+        """Return the static capability declaration (declared, not enforced)."""
+        ...
+
 
 class ClaudeNativeExecutor:
     """StageExecutor backed by claude --bg via spawn_create_impl (RFC 0005 A2).
@@ -240,6 +246,9 @@ class ClaudeNativeExecutor:
         # Why: per-stage result models do not exist until A3 (#614).
         # Bridge via the current monolith sentinel until then.
         return AutoDevResult.model_json_schema()
+
+    def capabilities(self) -> HarnessCapabilities:
+        return CLAUDE_NATIVE_CAPABILITIES
 
 
 def _complete_session_via_door(

@@ -9,6 +9,7 @@ from cw.auto_dev_result import (
     AutoDevResult,
 )
 from cw.bindings_block import bindings_block_for
+from cw.executor._capabilities import OPENCODE_CAPABILITIES
 from cw.executor._engine_guard import engine_block_details
 from cw.executor._finalize_guard import (
     FINALIZE_UNSUPPORTED_BACKEND,
@@ -52,6 +53,7 @@ if TYPE_CHECKING:
         StageExecutorConfig,
         TicketTask,
     )
+    from cw.models.capabilities import HarnessCapabilities
     from cw.native_daemon import NativeDaemonClient
 
 
@@ -222,6 +224,9 @@ class OpencodeExecutor:
         self._runner: FireAndForgetRunner = (
             runner if runner is not None else RealOpencodeRunner()
         )
+
+    def capabilities(self) -> HarnessCapabilities:
+        return OPENCODE_CAPABILITIES
 
     def spawn(
         self,

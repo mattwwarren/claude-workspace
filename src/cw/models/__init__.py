@@ -53,6 +53,8 @@ each submodule only imports from those above it (no cycles):
 
 This ``__init__`` re-exports the full historical public + private surface so
 every ``from cw.models import X`` import site keeps working unchanged.
+- ``capabilities`` — per-harness capability declarations (RFC 0019 H1, #3708).
+  A frozen pure-data model, imported by submodule path, not re-exported here.
 """
 
 from __future__ import annotations

@@ -234,6 +234,8 @@ differs from the project's `tracking.primary.system`, and a warning when
 either is unset. A client migrated from `tracker_mcp_gate` has no `system` and
 warns until you set it.
 
+`cw doctor` also reports `harness-capabilities/<client>/<lane>/<backend>`, one per lane and backend: the stages the lane routes to that backend beside what the backend declares. It is declared, not enforced (RFC 0019 H1, #3708): it never warns or fails, and a stage routed to a backend that does not declare it gets a note, not a severity change. Inspect the declaration shape with `cw schema show harness-capabilities`. An empty `sandbox_modes` set means the harness manages its own sandbox, not that it cannot write.
+
 GitHub Issues through the GitHub client:
 
 ```yaml

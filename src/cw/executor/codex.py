@@ -14,6 +14,7 @@ from cw.codex_runner import (
     build_codex_run_env,
 )
 from cw.codex_stage_completion import stamp_session_id_on_running_task
+from cw.executor._capabilities import CODEX_CAPABILITIES
 from cw.executor.core import (
     CODEX_NOT_FOUND,
     FireAndForgetRunner,
@@ -36,6 +37,7 @@ if TYPE_CHECKING:
         StageExecutorConfig,
         TicketTask,
     )
+    from cw.models.capabilities import HarnessCapabilities
     from cw.native_daemon import NativeDaemonClient
 
 # Session-level CodexExecutor pre-flight blocker reason code (RFC 0005 F1);
@@ -175,6 +177,9 @@ class CodexExecutor:
         self._runner: FireAndForgetRunner = (
             runner if runner is not None else RealCodexJobRunner()
         )
+
+    def capabilities(self) -> HarnessCapabilities:
+        return CODEX_CAPABILITIES
 
     def spawn(
         self,

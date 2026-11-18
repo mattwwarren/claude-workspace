@@ -63,6 +63,10 @@ re-exports. Submodules:
 - ``bindings`` — per-client ``bindings/<client>``: ``bindings.tickets.system``
   against the project's ``tracking.primary.system``; FAIL when they differ, an
   advisory warning when either is unset (RFC 0019 R1, #3702).
+- ``harness-capabilities`` — per (client, lane, backend),
+  ``harness-capabilities/<client>/<lane>/<backend>``: the stages the lane
+  routes to that backend beside what the backend declares. Declared, not
+  enforced; always OK (RFC 0019 H1, #3708).
 - ``usage_limit`` — one advisory ``usage-limit/<client>`` per active usage-limit
   back-off window, naming the command that lifts it early (#3547).
 - ``commit_hook`` — per-client advisory warning when ``.pre-commit-config.yaml``
@@ -94,6 +98,7 @@ from cw.doctor._shared import CheckResult, DoctorReport, ReapScope, WedgeFinding
 from cw.doctor.agent_spec_drift import _check_agent_spec_drift
 from cw.doctor.all_codex_lane import _check_all_codex_lane
 from cw.doctor.bindings import _check_bindings
+from cw.doctor.capabilities import _check_harness_capabilities
 from cw.doctor.codex_fix_loop import _check_codex_fix_loop
 from cw.doctor.commit_hook import _check_commit_hook, _check_hook_install_python
 from cw.doctor.config_checks import (
@@ -184,6 +189,7 @@ __all__ = [
     "_check_cw_version",
     "_check_dev_queue",
     "_check_dispatch_repo_head",
+    "_check_harness_capabilities",
     "_check_hook_install_python",
     "_check_inbox_size",
     "_check_linkage",
