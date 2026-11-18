@@ -153,6 +153,36 @@ def _apply_settle(
     )
 
 
+def _audit_transition(
+    client: str,
+    before: OutboxEntry,
+    after: OutboxEntry,
+    *,
+    initiator: str,
+    now: datetime,
+    reason: OutboxReason | None = None,
+) -> None:
+    """Append the audit record after the state record has been persisted."""
+    claimant = after.claimant or before.claimant
+    claim_token = after.claim_token or before.claim_token
+    effective_reason = reason or after.reason or before.reason
+    layout.append_audit_event(
+        client,
+        {
+            "event": "transition",
+            "entry_id": after.id,
+            "client": client,
+            "before_state": before.state.value,
+            "after_state": after.state.value,
+            "initiator": initiator,
+            "timestamp": now.isoformat(),
+            "claimant": claimant.model_dump(mode="json") if claimant else None,
+            "claim_token": claim_token,
+            "reason": effective_reason.value if effective_reason else None,
+        },
+    )
+
+
 def _existing_entry(client: str, entry_id: str) -> OutboxEntry | None:
     if not layout.record_exists(client, entry_id):
         return None
@@ -296,6 +326,7 @@ def _recover_locked(client: str) -> None:
         now = _now()
         recovered = _recovered(entry, now)
         layout.write_record(client, recovered)
+        _audit_transition(client, entry, recovered, initiator="recovery", now=now)
 
 
 def _body_intact(client: str, entry: OutboxEntry) -> bool:
@@ -343,6 +374,9 @@ def _claim_locked(
     for entry in selected:
         record = _apply_claim(entry, claimant=claimant, now=_now())
         layout.write_record(client, record)
+        _audit_transition(
+            client, entry, record, initiator="claim", now=record.updated_at
+        )
         claimed.append(record)
     return claimed
 
@@ -408,4 +442,7 @@ def settle(
             entry, state=state, reason=reason, detail=detail, now=_now()
         )
         layout.write_record(client, settled)
+        _audit_transition(
+            client, entry, settled, initiator="settle", now=settled.updated_at
+        )
     return settled
