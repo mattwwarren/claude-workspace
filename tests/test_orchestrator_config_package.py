@@ -11,7 +11,11 @@ this file pins the things that suite cannot see:
    fails here. Validators are invisible to the schema, which is why the
    default-instance dumps are pinned too. The ``ClientConfig`` validation
    entry alone was re-captured for RFC 0019 R1 (#3702), when its
-   ``tracker_mcp_gate`` field became the ``bindings`` block.
+   ``tracker_mcp_gate`` field became the ``bindings`` block. RFC 0019 O2
+   (#3706) re-captured it again (the ``outbox`` block) together with the four
+   lists that enumerate the event types (the ``OperatorChannelForward`` and
+   ``OrchestratorConfig`` schemas and the ``OrchestratorConfig`` default dump),
+   when the four ``outbox.*`` events were added.
 2. The import surface is frozen. ``EXPECTED_EXPORTS`` is hard-coded, not
    re-derived from the package, so a dropped re-export fails loudly, and every
    ``cw.models`` re-export is the same object as the package's.
