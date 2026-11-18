@@ -232,15 +232,15 @@ class TestRelease:
             msg = "disk full"
             raise OutboxRecordError(msg)
 
-        monkeypatch.setattr("cw.outbox._store.layout.write_record", _boom)
-        with pytest.raises(OutboxRecordError):
-            release(
-                CLIENT,
-                entry_id,
-                claim_token=token,
-                reason=OutboxReason.TRANSIENT_FAILURE,
-            )
-        monkeypatch.undo()
+        with monkeypatch.context() as patch:
+            patch.setattr("cw.outbox._store.layout.write_record", _boom)
+            with pytest.raises(OutboxRecordError):
+                release(
+                    CLIENT,
+                    entry_id,
+                    claim_token=token,
+                    reason=OutboxReason.TRANSIENT_FAILURE,
+                )
 
         entry = list_entries(CLIENT)[0]
         assert entry.state is OutboxState.CLAIMED
@@ -350,9 +350,9 @@ def _set_mtime(entry_id: str, stamp: int) -> None:
 
 class TestPeekPending:
     def test_only_pending_roles_and_ids(self) -> None:
+        entry_id, token = _claimed(marker="d")
         pending = enqueue(marker="p").entry
         knowledge = enqueue(marker="k", role=OutboxRole.KNOWLEDGE).entry
-        entry_id, token = _claimed(marker="d")
         settle(
             CLIENT,
             entry_id,

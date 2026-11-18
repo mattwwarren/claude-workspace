@@ -1,9 +1,9 @@
-"""The outbox store: enqueue, list, claim (with recovery), settle.
+"""The outbox store: enqueue, list, claim (with recovery), settle, release.
 
 Every public mutating function takes the client's outbox lock. ``_claim_locked``
 and ``_recover_locked`` run under it and never call a public function, because
 re-entry of a guarded lock raises. ``list_entries``, ``list_clients``,
-``claimant_state`` and ``read_parts`` are lock-free reads.
+``claimant_state``, ``read_parts`` and ``peek_pending`` are lock-free reads.
 
 Nothing here compares ``claimed_at`` against a threshold (ADR-0014 invariant
 1): a claim is recovered only on positive evidence that its owner process is
@@ -36,6 +36,9 @@ from cw.outbox._models import (
     MAX_TRANSITIONS,
     OUTBOX_SCHEMA_VERSION,
     REASONS_BY_STATE,
+    RELEASE_REASONS,
+    SETTLE_STATES,
+    TICK_SCAN_MAX_RECORDS,
     VERDICT_OWNER_GONE,
     EnqueueResult,
     OutboxClaimError,
@@ -47,6 +50,7 @@ from cw.outbox._models import (
     OutboxTransition,
     OutboxTransitionError,
     OutboxValidationError,
+    PendingPeek,
     check_client,
     check_entry_id,
     check_marker,
@@ -107,10 +111,8 @@ def _coerce_role(role: OutboxRole | str) -> OutboxRole:
         raise OutboxValidationError(msg) from exc
 
 
-def _require_transition(
-    frm: OutboxState, to: OutboxState, *, recovery: bool = False
-) -> None:
-    if not transition_allowed(frm, to, recovery=recovery):
+def _require_transition(frm: OutboxState, to: OutboxState) -> None:
+    if not transition_allowed(frm, to):
         msg = f"illegal outbox transition {frm.value} -> {to.value}"
         raise OutboxTransitionError(msg)
 
@@ -192,13 +194,15 @@ def _apply_settle(
     reason: OutboxReason,
     detail: str | None,
     now: datetime,
+    initiator: TransitionInitiator = "settle",
 ) -> OutboxEntry:
+    """*entry* moved off its claim to *state*; the claim fields are cleared."""
     history = _append_transition(
         entry,
         to_state=state,
         reason=reason,
         detail=detail,
-        initiator="settle",
+        initiator=initiator,
         now=now,
         claimant=entry.claimant,
     )
@@ -251,6 +255,7 @@ def enqueue(
     producer: str,
     parts: Sequence[str],
     redacted: bool,
+    operator_authored: bool = False,
 ) -> EnqueueResult:
     """Store a prose post for *client*, idempotently on ``(role, ticket, marker)``.
 
@@ -258,7 +263,8 @@ def enqueue(
     it (embedding it in the posted text is the producer's or courier's job). A
     duplicate returns the existing entry unchanged with ``created=False`` and
     never overwrites or raises (D-B1). The body is written first and the record
-    last: the record is the commit point.
+    last: the record is the commit point. *operator_authored* (#3706) posts
+    the parts without the agent provenance marker.
     """
     check_client(client)
     role = _coerce_role(role)
@@ -276,6 +282,7 @@ def enqueue(
         marker=marker,
         producer=producer,
         redacted=redacted,
+        operator_authored=operator_authored,
         parts=body.spans,
         body_sha256=body.sha256,
         body_bytes=body.size,
@@ -359,7 +366,7 @@ def _recovered(entry: OutboxEntry, now: datetime) -> OutboxEntry:
     """
     # ``claimed_from`` is always set while claimed (the model enforces it).
     target = entry.claimed_from or OutboxState.PENDING
-    _require_transition(OutboxState.CLAIMED, target, recovery=True)
+    _require_transition(OutboxState.CLAIMED, target)
     reason = (
         OutboxReason.CLAIM_RECOVERED if target is OutboxState.PENDING else entry.reason
     )
@@ -421,7 +428,12 @@ def _body_intact(client: str, entry: OutboxEntry) -> bool:
 
 
 def _claim_locked(
-    client: str, *, state: OutboxState, limit: int, claimant: LaunchMarker | None
+    client: str,
+    *,
+    state: OutboxState,
+    limit: int,
+    claimant: LaunchMarker | None,
+    exclude_ids: frozenset[str],
 ) -> list[OutboxEntry]:
     """Claim up to *limit* oldest entries in *state*. Lock held.
 
@@ -431,10 +443,15 @@ def _claim_locked(
     committed, the committed claims are returned and the failure stops the
     batch; when nothing committed, the failure propagates. A missing or corrupt
     body is settled ``failed/body_unreadable`` by this store (22b) and does not
-    count toward *limit*; the claim continues with the next entry.
+    count toward *limit*; the claim continues with the next entry. Entries
+    whose id is in *exclude_ids* are never candidates.
     """
     candidates = sorted(
-        (e for e in layout.scan_entries(client) if e.state is state),
+        (
+            e
+            for e in layout.scan_entries(client)
+            if e.state is state and e.id not in exclude_ids
+        ),
         key=lambda e: (e.created_at, e.id),
     )
     now = _now()
@@ -463,11 +480,13 @@ def claim(
     *,
     state: OutboxState = OutboxState.PENDING,
     limit: int = DEFAULT_CLAIM_LIMIT,
+    exclude_ids: frozenset[str] = frozenset(),
 ) -> list[OutboxEntry]:
     """Claim up to *limit* oldest entries in *state* (``pending`` or ``unverified``).
 
     Recovery of dead-owner claims runs first, inside the same lock hold. The
-    claimant marker is read before the lock is taken.
+    claimant marker is read before the lock is taken. *exclude_ids* (#3706)
+    skips entries a drain has already handled this run or holds.
     """
     _require_transition(state, OutboxState.CLAIMED)
     if limit < 1:
@@ -476,19 +495,45 @@ def claim(
     claimant = current_launch_marker()
     with _outbox_lock(client):
         _recover_locked(client)
-        return _claim_locked(client, state=state, limit=limit, claimant=claimant)
+        return _claim_locked(
+            client,
+            state=state,
+            limit=limit,
+            claimant=claimant,
+            exclude_ids=exclude_ids,
+        )
+
+
+def _check_detail(detail: str | None) -> None:
+    if detail is not None and len(detail) > MAX_DETAIL_CHARS:
+        msg = f"detail is longer than {MAX_DETAIL_CHARS} characters"
+        raise OutboxValidationError(msg)
 
 
 def _validate_settle_target(
     state: OutboxState, reason: OutboxReason, detail: str | None
 ) -> None:
     _require_transition(OutboxState.CLAIMED, state)
+    if state not in SETTLE_STATES:
+        # ``claimed -> pending`` is a table edge, but only ``release`` takes it.
+        msg = f"settle cannot target {state.value}; use release"
+        raise OutboxTransitionError(msg)
     if reason not in REASONS_BY_STATE[state]:
         msg = f"reason {reason.value} is not allowed for state {state.value}"
         raise OutboxTransitionError(msg)
-    if detail is not None and len(detail) > MAX_DETAIL_CHARS:
-        msg = f"detail is longer than {MAX_DETAIL_CHARS} characters"
-        raise OutboxValidationError(msg)
+    _check_detail(detail)
+
+
+def _live_claim(client: str, entry_id: str, claim_token: str) -> OutboxEntry:
+    """The claimed entry whose token is *claim_token*. Lock held."""
+    entry = _existing_entry(client, entry_id)
+    if entry is None:
+        msg = f"no outbox entry {entry_id}"
+        raise OutboxClaimError(msg)
+    if entry.state is not OutboxState.CLAIMED or entry.claim_token != claim_token:
+        msg = f"the claim on outbox entry {entry_id} is not live"
+        raise OutboxClaimError(msg)
+    return entry
 
 
 def settle(
@@ -508,15 +553,71 @@ def settle(
     check_entry_id(entry_id)
     _validate_settle_target(state, reason, detail)
     with _outbox_lock(client):
-        entry = _existing_entry(client, entry_id)
-        if entry is None:
-            msg = f"no outbox entry {entry_id}"
-            raise OutboxClaimError(msg)
-        if entry.state is not OutboxState.CLAIMED or entry.claim_token != claim_token:
-            msg = f"the claim on outbox entry {entry_id} is not live"
-            raise OutboxClaimError(msg)
+        entry = _live_claim(client, entry_id, claim_token)
         settled = _apply_settle(
             entry, state=state, reason=reason, detail=detail, now=_now()
         )
         layout.write_record(client, settled)
     return settled
+
+
+def release(
+    client: str,
+    entry_id: str,
+    *,
+    claim_token: str,
+    reason: OutboxReason,
+    detail: str | None = None,
+) -> OutboxEntry:
+    """Return a claimed entry to ``pending`` with *reason* (#3706, RFC 0019 O2).
+
+    Only the drain's two release reasons are accepted, and only for an entry
+    claimed from ``pending``: one claimed from ``unverified`` may already be
+    public, so it is settled, never released (that would re-post blind). The
+    token rules are ``settle``'s. The claimant stays on the audit item.
+    """
+    check_entry_id(entry_id)
+    if reason not in RELEASE_REASONS:
+        msg = f"reason {reason.value} is not a release reason"
+        raise OutboxTransitionError(msg)
+    _check_detail(detail)
+    with _outbox_lock(client):
+        entry = _live_claim(client, entry_id, claim_token)
+        if entry.claimed_from is not OutboxState.PENDING:
+            msg = f"outbox entry {entry_id} was not claimed from pending"
+            raise OutboxTransitionError(msg)
+        released = _apply_settle(
+            entry,
+            state=OutboxState.PENDING,
+            reason=reason,
+            detail=detail,
+            now=_now(),
+            initiator="release",
+        )
+        layout.write_record(client, released)
+    return released
+
+
+def peek_pending(
+    client: str,
+    *,
+    scan_limit: int = TICK_SCAN_MAX_RECORDS,
+    exclude_ids: frozenset[str] = frozenset(),
+) -> PendingPeek:
+    """The roles and ids of *client*'s pending entries, for the dispatch tick.
+
+    A lock-free read of at most *scan_limit* newest-by-mtime records; it never
+    creates the client directory. Ids in *exclude_ids* (the held list) count
+    for neither ``roles`` nor ``entry_ids``.
+    """
+    check_client(client)
+    pending = [
+        e
+        for e in layout.scan_entries(client, newest=scan_limit)
+        if e.state is OutboxState.PENDING and e.id not in exclude_ids
+    ]
+    return PendingPeek(
+        roles=frozenset(e.role for e in pending),
+        entry_ids=frozenset(e.id for e in pending),
+        truncated=layout.record_count(client) > scan_limit,
+    )

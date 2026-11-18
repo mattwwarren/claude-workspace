@@ -28,8 +28,10 @@ from cw.models import LaunchMarker
 
 # The persisted entry record (``<id>.json``). A reader refuses a record newer
 # than this rather than rewrite it, because a stale process would drop the
-# fields it does not know on the rewrite (R24).
-OUTBOX_SCHEMA_VERSION = 1
+# fields it does not know on the rewrite (R24). Version 2 (#3706) adds
+# ``operator_authored``; a version 1 record still loads (the field defaults to
+# False), so there is no migration.
+OUTBOX_SCHEMA_VERSION = 2
 # The ``cw outbox list --json`` envelope and row shape, versioned independently
 # of the entry record.
 OUTBOX_LIST_SCHEMA_VERSION = 1
@@ -51,6 +53,9 @@ MAX_TRANSITIONS = 32
 ENTRY_ID_LENGTH = 32
 DEFAULT_CLAIM_LIMIT = 1
 SHA256_HEX_LENGTH = 64
+# The dispatch tick parses at most this many newest-by-mtime records per
+# client when deciding whether to launch a drain (#3706, P8).
+TICK_SCAN_MAX_RECORDS = 200
 
 _CLIENT_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _TICKET_RE = re.compile(r"\A[A-Za-z0-9_-]+\Z")
@@ -99,6 +104,12 @@ class OutboxTransitionError(OutboxError):
     __slots__ = ()
 
 
+class DrainLeaseHeldError(OutboxError):
+    """Another drain holds the client's ``drain.lock`` lease (#3706)."""
+
+    __slots__ = ()
+
+
 class OutboxRole(StrEnum):
     """Which tracker role an entry posts to (RFC 0019 D-A2).
 
@@ -129,10 +140,19 @@ class OutboxReason(StrEnum):
     TURN_FAILED = "turn_failed"
     BODY_UNREADABLE = "body_unreadable"
     CLAIM_RECOVERED = "claim_recovered"
+    # #3706: the drain's two release reasons (claimed -> pending).
+    BINDING_UNREACHABLE = "binding_unreachable"
+    TRANSIENT_FAILURE = "transient_failure"
 
+
+# The reasons ``release`` accepts. ``claim_recovered`` stays store-only.
+RELEASE_REASONS: frozenset[OutboxReason] = frozenset(
+    {OutboxReason.BINDING_UNREACHABLE, OutboxReason.TRANSIENT_FAILURE}
+)
 
 # The closed reason set per state (R8). ``claimed`` retains the reason the entry
-# carried before the claim; ``pending`` carries one only after a recovery.
+# carried before the claim; ``pending`` carries one only after a recovery or a
+# drain release.
 REASONS_BY_STATE: Mapping[OutboxState, frozenset[OutboxReason]] = {
     OutboxState.DELIVERED: frozenset(
         {OutboxReason.POSTED, OutboxReason.MARKER_ALREADY_PRESENT}
@@ -147,19 +167,22 @@ REASONS_BY_STATE: Mapping[OutboxState, frozenset[OutboxReason]] = {
             OutboxReason.BODY_UNREADABLE,
         }
     ),
-    OutboxState.PENDING: frozenset({OutboxReason.CLAIM_RECOVERED}),
+    OutboxState.PENDING: frozenset({OutboxReason.CLAIM_RECOVERED, *RELEASE_REASONS}),
     OutboxState.CLAIMED: frozenset(
         {
             OutboxReason.CLAIM_RECOVERED,
             OutboxReason.READBACK_UNVERIFIED,
             OutboxReason.READBACK_MISMATCH,
+            *RELEASE_REASONS,
         }
     ),
 }
 
-# The R9 decision table. ``delivered`` and ``failed`` are terminal. The one
-# extra edge, ``claimed -> pending``, is the store's own dead-owner recovery
-# and is reachable only with ``recovery=True``.
+# The R9 decision table. ``delivered`` and ``failed`` are terminal.
+# ``claimed -> pending`` serves two callers: the store's dead-owner recovery and
+# the drain's ``release`` (#3706), which also requires ``claimed_from`` pending
+# so an entry claimed from ``unverified`` is never re-posted blind. ``settle``
+# refuses ``pending`` through its own settle-target check.
 ALLOWED_TRANSITIONS: frozenset[tuple[OutboxState, OutboxState]] = frozenset(
     {
         (OutboxState.PENDING, OutboxState.CLAIMED),
@@ -167,18 +190,18 @@ ALLOWED_TRANSITIONS: frozenset[tuple[OutboxState, OutboxState]] = frozenset(
         (OutboxState.CLAIMED, OutboxState.DELIVERED),
         (OutboxState.CLAIMED, OutboxState.UNVERIFIED),
         (OutboxState.CLAIMED, OutboxState.FAILED),
+        (OutboxState.CLAIMED, OutboxState.PENDING),
     }
 )
-_RECOVERY_EDGE = (OutboxState.CLAIMED, OutboxState.PENDING)
+# The states ``settle`` may target.
+SETTLE_STATES: frozenset[OutboxState] = frozenset(
+    {OutboxState.DELIVERED, OutboxState.UNVERIFIED, OutboxState.FAILED}
+)
 
 
-def transition_allowed(
-    frm: OutboxState, to: OutboxState, *, recovery: bool = False
-) -> bool:
-    """Whether ``frm -> to`` is a legal edge; *recovery* adds the store-only one."""
-    if (frm, to) in ALLOWED_TRANSITIONS:
-        return True
-    return recovery and (frm, to) == _RECOVERY_EDGE
+def transition_allowed(frm: OutboxState, to: OutboxState) -> bool:
+    """Whether ``frm -> to`` is a legal edge of the decision table."""
+    return (frm, to) in ALLOWED_TRANSITIONS
 
 
 def _check(pattern: re.Pattern[str], value: str, what: str, limit: int | None) -> str:
@@ -235,7 +258,7 @@ def _check_spans(parts: list[tuple[int, int]], body_bytes: int) -> None:
         raise ValueError(msg)
 
 
-TransitionInitiator = Literal["enqueue", "claim", "settle", "recovery"]
+TransitionInitiator = Literal["enqueue", "claim", "settle", "recovery", "release"]
 ClaimantVerdict = Literal["in_flight", "owner_gone", "unknown"]
 # The verdict literals, named once: the store writes VERDICT_OWNER_GONE into a
 # recovery transition and the CLI prints all three, so neither spells them out.
@@ -277,6 +300,8 @@ class OutboxEntry(BaseModel):
     marker: str
     producer: str
     redacted: bool
+    # #3706 (schema v2): post without the agent provenance marker.
+    operator_authored: bool = False
     # Contiguous ``[start, end)`` byte spans of the parts inside the one body.
     parts: list[tuple[int, int]]
     body_sha256: str
@@ -348,6 +373,51 @@ class EnqueueResult(NamedTuple):
     entry: OutboxEntry
     created: bool
     body_matches: bool
+
+
+class PendingPeek(NamedTuple):
+    """What ``peek_pending`` saw: the pending roles and ids, minus exclusions.
+
+    ``truncated`` is whether more record files exist than were parsed.
+    """
+
+    roles: frozenset[OutboxRole]
+    entry_ids: frozenset[str]
+    truncated: bool
+
+
+class UnreachableMarker(BaseModel):
+    """``drain.unreachable.<role>``: a binding-level fault episode (#3706, P5).
+
+    No timestamp: no age or wall clock drives any decision (ADR-0014).
+    ``announced`` lists the entry ids already reported this episode.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    role: OutboxRole
+    reason: OutboxReason
+    announced: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _release_reason(self) -> Self:
+        if self.reason not in RELEASE_REASONS:
+            msg = f"unreachable marker reason {self.reason.value} is not a release"
+            raise ValueError(msg)
+        return self
+
+
+class HeldList(BaseModel):
+    """``drain.held``: entries held after a per-item failure (#3706, P11).
+
+    No timestamp; only ``cw outbox drain --force`` clears it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    entry_ids: list[str] = Field(default_factory=list)
 
 
 class OutboxListRow(BaseModel):
