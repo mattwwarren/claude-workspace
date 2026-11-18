@@ -21,7 +21,6 @@ from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING
 
 import pytest
-from cw.outbox._lock import _outbox_lock
 
 from cw import events, history, session_inbox
 from cw._lock_guard import (
@@ -49,6 +48,7 @@ from cw.exceptions import (
     SessionsLockTimeoutError,
 )
 from cw.focus import focus_lock
+from cw.outbox._lock import _outbox_lock
 from tests._lock_invariants import observing
 from tests._shared.workflow_text import _SRC_ROOT, _iter_src_files
 

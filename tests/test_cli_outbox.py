@@ -12,6 +12,10 @@ from typing import TYPE_CHECKING, Any
 import click
 import pytest
 from click.testing import CliRunner
+from freezegun import freeze_time
+
+from cw.cli import main
+from cw.config import state_dir
 from cw.outbox import (
     OUTBOX_LIST_SCHEMA_VERSION,
     OutboxEntry,
@@ -20,10 +24,6 @@ from cw.outbox import (
     claim,
     enqueue,
 )
-from freezegun import freeze_time
-
-from cw.cli import main
-from cw.config import state_dir
 from tests._reconcile_helpers import dead_launch_marker, live_launch_marker
 
 if TYPE_CHECKING:
@@ -180,10 +180,11 @@ class TestListText:
     def test_list_annotates_claimed_with_verdict(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # The dead claimant goes last: any later ``claim`` would recover it.
         cases: list[tuple[str, LaunchMarker | None, str, str | None]] = [
             ("T-LIVE", live_launch_marker(), "in_flight", "claimed (in_flight)"),
-            ("T-DEAD", dead_launch_marker(), "owner_gone", "claimed (owner_gone)"),
             ("T-NONE", None, "unknown", "claimed (unknown)"),
+            ("T-DEAD", dead_launch_marker(), "owner_gone", "claimed (owner_gone)"),
         ]
         for index, (ticket, marker, _verdict, _label) in enumerate(cases):
             _seed("acme", ticket=ticket, marker=f"m{index}", at=_hour(10 + index))

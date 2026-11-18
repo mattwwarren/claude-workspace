@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Outbox store for prose posts made with no agent present (#3705, RFC 0019 O1).** A per-client store under `state_dir()/outbox/<client>/`: one `<id>.body` and one `<id>.json` record per entry, keyed by the idempotency key `(role, ticket, marker)` so a repeated enqueue returns the existing entry instead of storing a second post. Entries move `pending`, `claimed`, then `delivered`, `unverified` or `failed`, and a claim whose owning process is provably gone is restored to its prior state by the next `claim` (never by age). The store is guarded by a new leaf lock named `outbox` (ADR-0019). `cw outbox list` shows entries newest first, with `-c/--client`, `--state`, `--limit` and `--json`, and never reads a body or recovers a claim. Operator note: this is the store only. There is no drain, no producer wired to it, no events and no retention yet, so nothing writes to it in a running cw; follow-up tickets add those.
+
 ### Deprecated
 
 - **`tracker_mcp_gate` is deprecated in favor of the new per-role `bindings` block (RFC 0019 R1, #3702).** A client's `bindings` names, for each of `tickets`, `knowledge`, `code_host` and `chat`, the system playing the role and how each harness reaches it (an MCP server or plugin per harness, or `cli: gh`); `cw schema show bindings` prints the schema. An existing `tracker_mcp_gate` still loads: it is migrated into `bindings.tickets` with one warning per client, and setting both is an error. No consumer changes behavior. Operator note: `cw doctor` now shows a `bindings/<client>` warning for every migrated client until `bindings.tickets.system` is set, and fails it when that system differs from the project's `tracking.primary.system`. See `config/CONFIG_REFERENCE.md` (Role bindings).

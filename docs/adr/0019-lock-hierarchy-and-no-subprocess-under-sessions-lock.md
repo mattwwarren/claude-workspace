@@ -30,7 +30,7 @@ keeps that order and extends it to every other state-file lock.
      `dispatch_state_lock`, the focus lock
    - `LEAF` (2): the event inbox lock (`events._inbox_lock`), a session inbox
      lock (`session_inbox._inbox_lock`), a client history lock
-     (`history._history_lock`)
+     (`history._history_lock`), a client outbox lock (`outbox._outbox_lock`)
 
    Two different locks of the same rank may nest (for example
    `dev_queue_lock` then `clients_lock`). Taking a lower rank while a higher

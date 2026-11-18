@@ -23,8 +23,27 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-import cw.outbox as outbox_pkg
 import pytest
+from freezegun import freeze_time
+from pydantic import ValidationError
+
+import cw.outbox as outbox_pkg
+from cw._lock_guard import (
+    CwLockOrderError,
+    HeldLock,
+    LockRank,
+    held_locks,
+)
+from cw.config import sessions_lock, state_dir
+from cw.dev_queue.storage import dev_queue_lock
+from cw.history import _history_lock
+from cw.launch_marker import (
+    LaunchOwnerState,
+    ProbeState,
+    ProcessProbe,
+    current_launch_marker,
+)
+from cw.models import LaunchMarker
 from cw.outbox import (
     ALLOWED_TRANSITIONS,
     DEFAULT_CLAIM_LIMIT,
@@ -57,25 +76,6 @@ from cw.outbox import (
     transition_allowed,
 )
 from cw.outbox._lock import _outbox_lock
-from freezegun import freeze_time
-from pydantic import ValidationError
-
-from cw._lock_guard import (
-    CwLockOrderError,
-    HeldLock,
-    LockRank,
-    held_locks,
-)
-from cw.config import sessions_lock, state_dir
-from cw.dev_queue.storage import dev_queue_lock
-from cw.history import _history_lock
-from cw.launch_marker import (
-    LaunchOwnerState,
-    ProbeState,
-    ProcessProbe,
-    current_launch_marker,
-)
-from cw.models import LaunchMarker
 from tests._reconcile_helpers import dead_launch_marker, live_launch_marker
 from tests._shared.lock_helpers import _hold_flock
 

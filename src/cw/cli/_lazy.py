@@ -204,6 +204,11 @@ LAZY_COMMANDS: Final[dict[str, LazyCommand]] = {
             " cw-operator channel."
         ),
     ),
+    "outbox": LazyCommand(
+        "cw.cli.outbox",
+        "outbox_group",
+        "Inspect the per-client outbox of prose posts.",
+    ),
     "peek": LazyCommand(
         "cw.cli.sessions",
         "peek",
