@@ -15,7 +15,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, get_args
 
@@ -33,8 +32,8 @@ from cw.cli import main
 from cw.cli.review.confirm import (
     CONFIRM_ROUND_FAILED_EXIT_CODE,
     CONFIRM_UNAVAILABLE_EXIT_CODE,
-    review_confirm,
 )
+from cw.cli.review.confirm_job import confirm_job
 from cw.codex_review import (
     CODEX_MUST_FIX_FINDINGS,
     CODEX_MUST_FIX_MECHANICALLY_REJECTED,
@@ -43,8 +42,6 @@ from cw.models import OPENCODE_BACKEND
 from cw.opencode_clean_review import (
     CLEAN_REVIEW_SENTINEL_TEMPLATE,
     CONFIRM_RECORD_JQ,
-    CONFIRM_TIMEOUT_SECONDS,
-    CONFIRM_TOOL_TIMEOUT_MS,
     clean_review_body,
 )
 from cw.opencode_runner import build_stage_prompt
@@ -153,10 +150,10 @@ def _is_branch(decision: str, text: str) -> bool:
 
 
 def _confirm_rc_branch(prompt: str, code: int) -> str:
-    """The ``CONFIRM_RC=<code>`` branch, up to the next ``CONFIRM_RC=`` marker."""
+    """The ``CONFIRM_RC=<code>`` branch, up to the next top-level bullet."""
     marker = f"   - CONFIRM_RC={code}"
     start = prompt.index(marker)
-    end = prompt.find("CONFIRM_RC=", start + len(marker))
+    end = prompt.find("\n   - ", start + len(marker))
     return prompt[start:] if end == -1 else prompt[start:end]
 
 
@@ -191,11 +188,11 @@ class TestCliContract:
         assert {"--cause", "--detail"} <= seen["confirm-failed"]
 
     def test_every_confirm_flag_exists(self, prompt: str) -> None:
-        segments = _segments(prompt, "cw review confirm ")
+        segments = _segments(prompt, "cw review converge confirm-job full ")
         assert segments
         flags = set().union(*(set(_LONG_FLAG.findall(s)) for s in segments))
-        assert {"--ticket-id", "--backend"} <= flags
-        assert flags <= _options(review_confirm)
+        assert "--ticket-id" in flags
+        assert flags <= _options(confirm_job)
 
     def test_every_loop_backend_the_prompt_names_is_the_opencode_constant(
         self, prompt: str
@@ -249,9 +246,8 @@ class TestTypedExits:
             '"agent_block"',
             f"CONFIRM_RC={CONFIRM_ROUND_FAILED_EXIT_CODE}",
             "CONFIRM_RC=2",
-            "CONFIRM_RC=124",
+            "CONFIRM_RC=75",
             "any other CONFIRM_RC",
-            "confirm_invocation_error: exit=timeout",
             "convergence_record_round_failed: exit=<n>",
             "stop.release_hint",
             "stop.settle_payload",
@@ -270,11 +266,10 @@ class TestTypedExits:
         assert "agent_block" in branch
         assert "Step 3" not in branch
 
-    def test_an_overrun_is_never_a_backend_outage(self, prompt: str) -> None:
-        overrun = prompt[prompt.index("CONFIRM_RC=124") :]
-        overrun = overrun[: overrun.index("\n")]
-        assert "agent_block" in overrun
-        assert "Never confirm_backend_unavailable" in overrun
+    def test_pending_requires_another_poll(self, prompt: str) -> None:
+        pending = _confirm_rc_branch(prompt, 75)
+        assert "Keep polling on 75" in pending
+        assert "confirm_backend_unavailable" not in pending
 
     def test_a_backend_outage_is_exit_3_only(self, prompt: str) -> None:
         outage = _confirm_rc_branch(prompt, CONFIRM_UNAVAILABLE_EXIT_CODE)
@@ -387,12 +382,12 @@ class TestTypedExits:
 
 
 class TestConfirmCall:
-    def test_the_confirm_is_a_foreground_capped_call(self, prompt: str) -> None:
-        assert CONFIRM_TOOL_TIMEOUT_MS == CONFIRM_TIMEOUT_SECONDS * 1000
-        assert f"timeout {CONFIRM_TIMEOUT_SECONDS} cw review confirm" in prompt
-        assert f"set explicitly to {CONFIRM_TOOL_TIMEOUT_MS}" in prompt
+    def test_managed_confirm_uses_bounded_foreground_polls(self, prompt: str) -> None:
+        fence = _confirm_fence(prompt)
+        assert "cw review converge confirm-job full" in fence
+        assert "CONFIRM_JOB_ID=" in fence
+        assert "timeout " not in fence
         assert "run_in_background" not in prompt
-        assert "never run it in the background" in prompt
 
     def test_the_backend_comes_from_the_ledger_not_the_cli_default(
         self, prompt: str
@@ -401,7 +396,6 @@ class TestConfirmCall:
             'CONFIRM_BACKEND="$(cw review converge status | jq -r '
             '.sentinel_review.confirm_backend)"'
         ) in prompt
-        assert '--backend "$CONFIRM_BACKEND"' in prompt
         for literal in ("--backend none", "--backend codex", "--backend claude"):
             assert literal not in prompt
 
@@ -411,7 +405,7 @@ class TestConfirmCall:
         skipped = skipped[: skipped.index("\n")]
         assert "none, empty or null" in skipped
         assert "agent_block" in skipped
-        assert "Do NOT run cw review confirm" in skipped
+        assert "Do NOT run `cw review converge confirm-job`" in skipped
 
     @pytest.mark.parametrize("backend", ["claude", "codex", "none"])
     def test_the_status_jq_path_matches_status_summary(
@@ -428,15 +422,16 @@ class TestConfirmCall:
         assert node == backend
 
 
-#: Stub ``cw``: ``confirm`` records its argv, sleeps, then exits with
-#: ``STUB_CONFIRM_RC``; ``diff-base`` exits with ``STUB_DIFF_RC``.
+#: Stub cw returns the CLI status and a token for a pending job.
 _CW_STUB = """#!/usr/bin/env bash
 case "$1 $2 $3" in
   "review converge status") echo '{"sentinel_review": {}}' ;;
   "review converge diff-base") echo '{"diff_base": "base"}'; exit "$STUB_DIFF_RC" ;;
-  "review confirm "*)
+  "review converge confirm-job")
     echo "$@" > confirm-args.txt
-    sleep "$STUB_CONFIRM_SLEEP"
+    if [ "$STUB_CONFIRM_RC" -eq 75 ]; then
+      echo "CONFIRM_JOB_ID=job-a" >&2
+    fi
     exit "$STUB_CONFIRM_RC" ;;
 esac
 """
@@ -446,25 +441,6 @@ case "$2" in
   .sentinel_review.confirm_backend) printf '%s\\n' "$STUB_BACKEND" ;;
   .client) echo client-a ;;
 esac
-"""
-#: Stub ``timeout`` (coreutils ``timeout SECONDS COMMAND...``): stock macOS CI has
-#: no unprefixed ``timeout``, so the fence test installs this shim to stay hermetic.
-#: Runs the command, returns its status, and exits 124 on overrun (killing the
-#: command's whole process group so a lingering child cannot hold the pipes open).
-_TIMEOUT_STUB = f"""#!{sys.executable}
-import os
-import signal
-import subprocess
-import sys
-
-seconds = float(sys.argv[1])
-proc = subprocess.Popen(sys.argv[2:], start_new_session=True)
-try:
-    sys.exit(proc.wait(timeout=seconds))
-except subprocess.TimeoutExpired:
-    os.killpg(proc.pid, signal.SIGKILL)
-    proc.wait()
-    sys.exit(124)
 """
 
 
@@ -495,36 +471,27 @@ class TestConfirmFenceExecutes:
         backend: str,
         diff_base_rc: int = 0,
         confirm_rc: int = 0,
-        confirm_sleep: float = 0,
-        timeout: int = CONFIRM_TIMEOUT_SECONDS,
     ) -> subprocess.CompletedProcess[str]:
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
         for name, body in (
             ("cw", _CW_STUB),
             ("jq", _JQ_STUB),
-            ("timeout", _TIMEOUT_STUB),
         ):
             (bin_dir / name).write_text(body, encoding="utf-8")
             (bin_dir / name).chmod(0o755)
         work = tmp_path / "work"
         (work / ".cw").mkdir(parents=True)
         fence = _confirm_fence(prompt)
-        shortened = fence.replace(
-            f"timeout {CONFIRM_TIMEOUT_SECONDS} cw review confirm",
-            f"timeout {timeout} cw review confirm",
-        )
-        assert timeout == CONFIRM_TIMEOUT_SECONDS or shortened != fence
         env = {
             **os.environ,
             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
             "STUB_BACKEND": backend,
             "STUB_DIFF_RC": str(diff_base_rc),
             "STUB_CONFIRM_RC": str(confirm_rc),
-            "STUB_CONFIRM_SLEEP": str(confirm_sleep),
         }
         return subprocess.run(
-            ["bash", "-c", shortened],
+            ["bash", "-c", fence],
             cwd=work,
             env=env,
             capture_output=True,
@@ -556,7 +523,7 @@ class TestConfirmFenceExecutes:
         assert f"CONFIRM_RC={CONFIRM_UNAVAILABLE_EXIT_CODE}" in lines
         assert "CONFIRM_SKIPPED" not in lines
         args = (tmp_path / "work" / "confirm-args.txt").read_text(encoding="utf-8")
-        assert f"--backend {backend}" in args
+        assert "review converge confirm-job full" in args
         assert f"--ticket-id {TICKET}" in args
         assert "-c client-a" in args
 
@@ -568,9 +535,12 @@ class TestConfirmFenceExecutes:
         assert "CONFIRM_RC" not in ran.stdout
         assert not (tmp_path / "work" / "confirm-args.txt").exists()
 
-    def test_an_overrun_reports_exit_124(self, prompt: str, tmp_path: Path) -> None:
-        ran = self._run(prompt, tmp_path, backend="claude", confirm_sleep=5, timeout=1)
-        assert "CONFIRM_RC=124" in ran.stdout.splitlines()
+    def test_pending_job_id_survives_stderr_redirection(
+        self, prompt: str, tmp_path: Path
+    ) -> None:
+        ran = self._run(prompt, tmp_path, backend="claude", confirm_rc=75)
+        assert "CONFIRM_RC=75" in ran.stdout.splitlines()
+        assert "job-a" in ran.stdout.splitlines()
 
 
 _LOOP_ROUND_FIRST = "cat > .cw/loop-round.json <<'JSON'\n"

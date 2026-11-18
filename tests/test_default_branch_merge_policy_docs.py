@@ -434,7 +434,7 @@ class TestStep4c5:
         section = _step_4c5()
         assert "normal full review round" in section
         assert "#2980" in section
-        assert "delta-confirm" in section
+        assert "confirm-job delta" in section
         assert "delta_confirm_eligible" in section
 
 
@@ -614,8 +614,7 @@ class TestStep40:
             "`findings`",
             "`stopped`",
             "`still_stale`",
-            'timeout 600 cw review converge delta-confirm --ticket-id "$TICKET" '
-            '-c "$CLIENT"',
+            'cw review converge confirm-job delta --ticket-id "$TICKET" -c "$CLIENT"',
             "never run `converge finalize` in between",
             "`ledger_not_confirmable`",
             "`delta_confirm_eligible` is advisory",
@@ -642,7 +641,7 @@ class TestRunbook:
             "**Merge at most once, and only on a conflict.**",
             "**A clean merge never causes a review.**",
             "#2980",
-            "`delta-confirm`",
+            "`confirm-job delta`",
             "`behind_default_no_action`",
             "`merge_probe_unavailable`",
             "**Diagnosing a tip that reads stale despite a clean merge.**",
