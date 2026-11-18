@@ -65,6 +65,7 @@ from cw.outbox import (
     OutboxState,
     OutboxTransitionError,
     OutboxValidationError,
+    _layout,
     claim,
     claimant_state,
     enqueue,
@@ -354,8 +355,6 @@ class TestEnqueue:
     def test_write_order_body_before_record(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from cw.outbox import _layout
-
         order: list[str] = []
         real_body = _layout.write_body
         real_record = _layout.write_record
@@ -398,8 +397,6 @@ class TestEnqueue:
     def test_oserror_on_write_raises_outbox_record_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from cw.outbox import _layout
-
         real = _layout.atomic_write_text
 
         def fail_on_record(path: Path, text: str) -> None:
@@ -584,6 +581,8 @@ class TestPersistence:
         state_dir().mkdir(parents=True, exist_ok=True)
         (state_dir() / "outbox").write_text("a file, not a directory", encoding="utf-8")
 
+        with pytest.raises(OutboxRecordError):
+            _layout.ensure_client_dir(_CLIENT)
         with pytest.raises(OutboxRecordError):
             _enqueue()
 
@@ -910,8 +909,6 @@ class TestClaim:
     def test_transient_error_raises_before_any_claim_is_written(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from cw.outbox import _layout
-
         with freeze_time("2026-11-01T10:00:00Z"):
             first = _enqueue(marker="first").entry
         with freeze_time("2026-11-01T11:00:00Z"):
