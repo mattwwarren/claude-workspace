@@ -153,37 +153,6 @@ def _apply_settle(
     )
 
 
-def _audit_transition(
-    client: str,
-    before: OutboxEntry,
-    after: OutboxEntry,
-    *,
-    initiator: str,
-    now: datetime,
-    event: str = "transition",
-    reason: OutboxReason | None = None,
-) -> None:
-    """Write the write-ahead audit event for a state mutation."""
-    claimant = after.claimant or before.claimant
-    claim_token = after.claim_token or before.claim_token
-    effective_reason = reason or after.reason or before.reason
-    layout.append_audit_event(
-        client,
-        {
-            "event": event,
-            "entry_id": after.id,
-            "client": client,
-            "before_state": before.state.value,
-            "after_state": after.state.value,
-            "claimant": claimant.model_dump(mode="json") if claimant else None,
-            "claim_token": claim_token,
-            "initiator": initiator,
-            "timestamp": now.isoformat(),
-            "reason": effective_reason.value if effective_reason else None,
-        },
-    )
-
-
 def _existing_entry(client: str, entry_id: str) -> OutboxEntry | None:
     if not layout.record_exists(client, entry_id):
         return None
@@ -326,7 +295,6 @@ def _recover_locked(client: str) -> None:
             continue
         now = _now()
         recovered = _recovered(entry, now)
-        _audit_transition(client, entry, recovered, initiator="recovery", now=now)
         layout.write_record(client, recovered)
 
 
@@ -371,23 +339,9 @@ def _claim_locked(
             break
         if _body_intact(client, entry):
             selected.append(entry)
-        else:
-            now = _now()
-            _audit_transition(
-                client,
-                entry,
-                entry,
-                initiator="claim",
-                now=now,
-                event="automatic_failure",
-                reason=OutboxReason.BODY_UNREADABLE,
-            )
     claimed: list[OutboxEntry] = []
     for entry in selected:
         record = _apply_claim(entry, claimant=claimant, now=_now())
-        _audit_transition(
-            client, entry, record, initiator="claim", now=record.updated_at
-        )
         layout.write_record(client, record)
         claimed.append(record)
     return claimed
@@ -452,9 +406,6 @@ def settle(
             raise OutboxClaimError(msg)
         settled = _apply_settle(
             entry, state=state, reason=reason, detail=detail, now=_now()
-        )
-        _audit_transition(
-            client, entry, settled, initiator="settle", now=settled.updated_at
         )
         layout.write_record(client, settled)
     return settled
