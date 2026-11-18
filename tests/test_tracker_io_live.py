@@ -122,7 +122,7 @@ def test_turn_argv_loads_the_server_with_only_the_allowlist() -> None:
         out = scratch / "result.json"
         argv = build_tracker_io_argv(
             server=_SERVER,
-            tracker=_TRACKER,
+            tools=comment_tools_for(_TRACKER),
             schema_path=schema,
             output_path=out,
             other_servers=(),

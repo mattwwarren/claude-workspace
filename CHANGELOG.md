@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **One bindings-block renderer, injected at spawn for every harness (RFC 0019 R2, #3703).** `cw` renders a single delimited `Bindings` block per client and harness from the `bindings` config and the project tracker. The block is written into `cw-context.json` as `bindings_block` (context schema v21), inlined into the codex PLAN/IMPL/FINALIZE and opencode PLAN/IMPL prompts, and prepended to the local harness's task-context file. The opencode-only `opencode_tracker_prompt.py` is replaced by it. A new `mcp.<harness>.tools` map names each ticket operation's MCP tool; the codex PLAN turn and the tracker-IO turn use the named tools and keep the Linear defaults for any they do not name. The codex addendum names the tickets operations instead of hard-coding `get_issue`/`list_comments`. **Operator note:** a `tracker_mcp_gate` left on a GitHub-tracker client now renders its MCP binding in opencode prompts rather than the `gh` line; replace it with `bindings: {tickets: {system: github-issues, cli: gh}}`. See `config/CONFIG_REFERENCE.md` (Role bindings).
+
 ### Deprecated
 
 - **`tracker_mcp_gate` is deprecated in favor of the new per-role `bindings` block (RFC 0019 R1, #3702).** A client's `bindings` names, for each of `tickets`, `knowledge`, `code_host` and `chat`, the system playing the role and how each harness reaches it (an MCP server or plugin per harness, or `cli: gh`); `cw schema show bindings` prints the schema. An existing `tracker_mcp_gate` still loads: it is migrated into `bindings.tickets` with one warning per client, and setting both is an error. No consumer changes behavior. Operator note: `cw doctor` now shows a `bindings/<client>` warning for every migrated client until `bindings.tickets.system` is set, and fails it when that system differs from the project's `tracking.primary.system`. See `config/CONFIG_REFERENCE.md` (Role bindings).

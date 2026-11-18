@@ -264,6 +264,65 @@ bindings:
       enabled: true
 ```
 
+#### Tool names (`mcp.<harness>.tools`)
+
+A realization may name the MCP tool behind each ticket operation with
+`tools`, keyed by `get`, `list_comments`, `comment`, `close` and `create`.
+The codex PLAN turn and the tracker-IO turn read `get`/`list_comments` and
+`comment`/`list_comments` from it; a tool it does not name keeps the built-in
+Linear default (`get_issue`, `list_comments`, `create_comment`). Names are
+`[A-Za-z0-9_-]+`. Example for a host whose Linear plugin exposes these names:
+
+```yaml
+bindings:
+  tickets:
+    system: linear
+    mcp:
+      codex:
+        server: linear
+        tools:
+          get: linear_get_issue
+          list_comments: linear_list_comments
+          comment: linear_save_comment
+```
+
+#### The Bindings block (`cw-context.json`, prompts)
+
+cw renders one delimited `Bindings` block per client and harness, from the
+`bindings` block above and the project tracker (`tracking.primary.system`).
+It tells the agent how to read and post on the `tickets` system and which
+system plays each other role. The block is written into every worktree's
+`.claude/cw-context.json` as `bindings_block` (schema v21), and inlined into
+the codex PLAN/IMPL/FINALIZE prompts and the opencode PLAN/IMPL prompts, so
+the context key and the prompt carry the same bytes. The local harness
+prepends it to its task-context file. REVIEW stages carry no block.
+
+A client with no `bindings` is read from the project tracker: `github-issues`
+gets the `gh` lines, any other system gets the generic MCP line with no tool
+names, and no tracker at all gets "Tracker unknown".
+
+**Migrated `tracker_mcp_gate` on a GitHub-tracker client.** A leftover gate on
+a GitHub client was inert before. Its migrated binding (MCP realization, no
+`cli`, no `system`) now wins over the project tracker: opencode sees an MCP
+line labelled `github-issues` when `servers.opencode` is set, or a "not
+reachable from harness opencode" line when only `plugin_id` is set. `cw doctor`
+already warns about the unset `system`. Replace the stale gate with
+`bindings: {tickets: {system: github-issues, cli: gh}}`.
+
+**Manual dogfood check (not automated).** Real harnesses are checked by hand
+after a change to the renderer:
+
+1. Add the `bindings` block to this client's entry in your `clients.yaml`
+   (it is not checked in). Confirm `cw doctor` shows `bindings/<client>` ok.
+2. `cw dev-queue add` one throwaway ticket per installed lane (claude-native,
+   codex, opencode, local).
+3. In each worktree, read `.claude/cw-context.json`'s `bindings_block`
+   (claude-native, codex, opencode); for local, read the `.cw` task-context
+   file. Confirm exactly one block naming `gh` for `tickets` and `code_host`.
+4. For codex and opencode, the in-prompt block is byte-identical to the context
+   key. The prompt is not persisted unredacted, so the context key is the
+   observable.
+
 ## Session Purposes
 
 Each client can have sessions for different purposes:

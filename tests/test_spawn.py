@@ -18,6 +18,7 @@ from cw import _flock
 from cw._flock import SESSIONS_LOCK_TIMEOUT_ENV
 from cw._lock_guard import held_locks
 from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION, Status
+from cw.bindings_block import BINDINGS_BEGIN
 from cw.cli import main
 from cw.codex_review import CODEX_REVIEW_UNPARSEABLE
 from cw.config import load_state, orchestrator_config_file, save_state
@@ -5016,17 +5017,17 @@ class TestCwContextWorkspacePath:
         assert "workspace_path" in context
         assert context["workspace_path"] is None
 
-    def test_schema_version_is_20(
+    def test_schema_version_is_21(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """cw-context.json schema_version is current (20 after the
-        ``review_attestation`` addition, #3040)."""
+        """cw-context.json schema_version is current (21 after the
+        ``bindings_block`` addition, #3703)."""
         from cw.spawn import CW_CONTEXT_SCHEMA_VERSION, spawn_create_impl
 
-        assert CW_CONTEXT_SCHEMA_VERSION == 20
+        assert CW_CONTEXT_SCHEMA_VERSION == 21
 
         client = _make_client(tmp_path, name="schema-v2-client")
         daemon = FakeNativeDaemonClient()
@@ -5041,7 +5042,8 @@ class TestCwContextWorkspacePath:
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
-        assert context["schema_version"] == 20
+        assert context["schema_version"] == 21
+        assert context["bindings_block"].count(BINDINGS_BEGIN) == 1
 
 
 class TestCwContextMergeGateEnabledStamp:
@@ -6883,3 +6885,49 @@ def test_spawn_cli_never_stops_a_daemon_under_sessions_lock() -> None:
         f"{finder.stop_lines}: capture the surface_ref under the lock and stop "
         "after it releases (ADR-0019, #2547)"
     )
+
+
+class TestBindingsBlockWriterGuard:
+    """Every production ``_write_hook_context`` caller stamps a real block (#3703).
+
+    An AST scan, in the style of ``tests/test_codex_usage_launch_sites.py``.
+    A new writer must be added to the expected set deliberately, and must pass
+    ``bindings_block=`` with a value that is not the constant ``None``.
+    """
+
+    _EXPECTED_FILES = frozenset(
+        {"spawn.py", "session.py", "executor/codex.py", "executor/opencode.py"}
+    )
+
+    def test_each_production_writer_passes_a_block(self) -> None:
+        src_root = Path(__file__).resolve().parents[1] / "src" / "cw"
+        writers: dict[str, list[ast.Call]] = {}
+        for path in sorted(src_root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            calls = [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and _callee_name(node) == "_write_hook_context"
+            ]
+            if calls:
+                writers[path.relative_to(src_root).as_posix()] = calls
+        assert set(writers) == self._EXPECTED_FILES
+        for rel, calls in writers.items():
+            for call in calls:
+                keyword = next(
+                    (kw for kw in call.keywords if kw.arg == "bindings_block"), None
+                )
+                assert keyword is not None, f"{rel}:{call.lineno} omits bindings_block"
+                value = keyword.value
+                is_none = isinstance(value, ast.Constant) and value.value is None
+                assert not is_none, f"{rel}:{call.lineno} passes bindings_block=None"
+
+
+def _callee_name(call: ast.Call) -> str | None:
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None

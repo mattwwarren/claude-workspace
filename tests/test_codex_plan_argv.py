@@ -12,12 +12,15 @@ from cw.codex_plan._argv import (
     PLAN_TRACKER_READ_TOOLS,
     PlanArgvPolicyError,
     build_plan_argv,
+    read_tools_for,
     require_read_only_argv,
 )
 from cw.codex_review import _exec_policy_argv
 from cw.models import SandboxMode
+from cw.models.orchestrator_config.constants import CODEX_BACKEND
 from cw.tracker import TRACKER_LINEAR
 from cw.tracker_io import TrackerIoConfigError, TrackerIoReason
+from tests._shared.bindings_builders import LINEAR_RENAMED_TOOLS, bindings_linear_mcp
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -38,7 +41,7 @@ def _argv(
         model=model,
         reasoning_effort=reasoning_effort,
         mcp_server=mcp_server,
-        tracker=tracker,
+        read_tools=None if tracker is None else read_tools_for(tracker),
         other_servers=other_servers,
     )
 
@@ -131,3 +134,40 @@ def test_unsupported_tracker_is_refused(tmp_path: Path) -> None:
     with pytest.raises(TrackerIoConfigError) as excinfo:
         _argv(tmp_path, mcp_server="jira", tracker="jira")
     assert excinfo.value.reason is TrackerIoReason.TRACKER_UNSUPPORTED
+
+
+class TestResolvedReadTools:
+    """The PLAN read tools come from the binding; the table is the default (#3703)."""
+
+    def test_default_read_tools_are_the_table_for_linear(self) -> None:
+        assert read_tools_for(TRACKER_LINEAR) == ("get_issue", "list_comments")
+
+    def test_renamed_bound_read_tools_reach_the_allowlist(self, tmp_path: Path) -> None:
+        tickets = bindings_linear_mcp(tools=LINEAR_RENAMED_TOOLS).tickets
+        tools = read_tools_for(TRACKER_LINEAR, tickets, CODEX_BACKEND)
+        assert tools == ("linear_get_issue", "linear_list_comments")
+        argv = build_plan_argv(
+            schema_path=tmp_path / "schema.json",
+            output_path=tmp_path / "out.json",
+            model=None,
+            reasoning_effort=None,
+            mcp_server="linear",
+            read_tools=tools,
+            other_servers=(),
+        )
+        assert (
+            'mcp_servers.linear.enabled_tools=["linear_get_issue",'
+            '"linear_list_comments"]'
+        ) in argv
+
+    def test_unsupported_tracker_without_a_binding_raises(self) -> None:
+        with pytest.raises(TrackerIoConfigError) as excinfo:
+            read_tools_for("jira")
+        assert excinfo.value.reason is TrackerIoReason.TRACKER_UNSUPPORTED
+
+    def test_a_binding_supplies_read_tools_for_an_unsupported_system(self) -> None:
+        tickets = bindings_linear_mcp(tools=LINEAR_RENAMED_TOOLS).tickets
+        assert read_tools_for("jira", tickets, CODEX_BACKEND) == (
+            "linear_get_issue",
+            "linear_list_comments",
+        )

@@ -48,7 +48,7 @@ BINDINGS_END: Final = f"=== END CW-INJECTED: {BINDINGS_SECTION} ==="
 REVIEW_NO_TRACKER_LINE: Final = "This stage performs no tracker operations."
 
 _PLACEHOLDER_ID: Final = "<ticket-id>"
-_SAFE_RE: Final = re.compile(r"[A-Za-z0-9_.-]+")
+_SAFE_RE: Final = re.compile(r"[A-Za-z0-9_.@-]+")
 
 _FAILURE_PARAGRAPH: Final = (
     "If no tool for this tracker is available in this session, or a call "
