@@ -108,7 +108,8 @@ How a ticket branch meets `origin/<default>` follows three rules:
   `not_textually_clean` and reports `delta_confirm_eligible: true` (exactly one
   default-branch merge after the last clean round carries a resolution or hand
   edit, and the ledger is converged with an independent confirm), finalize
-  Step 4.0b runs `cw review converge delta-confirm`. It reviews the diff from
+  Step 4.0b starts `cw review converge confirm-job delta`. The job runs
+  `cw review converge delta-confirm`, which reviews the diff from
   the tree `git merge-tree --write-tree` writes for that merge's parents
   (conflict markers left in) to the merge commit's own tree, with the branch's
   own hunks in those files as context, on the ledger's confirm backend for

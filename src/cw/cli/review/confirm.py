@@ -46,6 +46,7 @@ import click
 
 from cw.cli._base import handle_errors
 from cw.config import get_client
+from cw.confirmation_jobs import validate_managed_round
 from cw.dev_queue import load_dev_queue
 from cw.dev_queue.crud import _find_ticket
 from cw.exceptions import CwError
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from cw.auto_dev_result import AutoDevResult
+    from cw.confirmation_jobs import ConfirmationRun
     from cw.models import TicketTask
     from cw.review_convergence import ResolutionSpec
     from cw.review_findings import CapturedDiff, ReviewVerdict
@@ -553,11 +555,17 @@ def _finish_round(
     worktree: Path,
     before: tuple[str, str],
     outcome: RoundOutcome,
+    managed: ConfirmationRun | None,
 ) -> None:
     """Map a completed round onto exit 4, exit 3, or the exit-0 verdict print."""
     verdict, reason = verified_verdict(
         backend=backend, worktree=worktree, before=before, outcome=outcome
     )
+    if managed is not None:
+        managed.pin.check(worktree)
+        if verdict.reviewed_sha != managed.pin.head:
+            msg = "independent confirmation returned a verdict for a different HEAD"
+            raise CwError(msg)
     click.echo(
         json.dumps(
             {
@@ -669,6 +677,9 @@ def review_confirm(
         default_branch=configured_base,
     )
     before = worktree_state(worktree)
+    managed = validate_managed_round(
+        worktree, head=before[0], backend=backend, diff_base=confirmation_base
+    )
     outcome = run_backend_round(
         backend=backend,
         task=task,
@@ -678,4 +689,10 @@ def review_confirm(
         model=model,
         reasoning_effort=reasoning_effort,
     )
-    _finish_round(backend=backend, worktree=worktree, before=before, outcome=outcome)
+    _finish_round(
+        backend=backend,
+        worktree=worktree,
+        before=before,
+        outcome=outcome,
+        managed=managed,
+    )

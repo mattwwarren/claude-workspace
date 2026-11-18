@@ -58,6 +58,7 @@ from cw.cli.review.converge import (
     require_ledger,
 )
 from cw.config import get_client
+from cw.confirmation_jobs import ledger_digest, validate_managed_round
 from cw.exceptions import CwError
 from cw.review_convergence import (
     REJECT_GIT_UNREADABLE,
@@ -77,6 +78,7 @@ from cw.review_convergence import (
 
 if TYPE_CHECKING:
     from cw.cli.review.confirm import RoundOutcome
+    from cw.confirmation_jobs import ConfirmationRun
     from cw.review_convergence import (
         ConvergenceLedger,
         ResolutionPlan,
@@ -161,6 +163,7 @@ def _record(
     *,
     backend: str,
     head: str,
+    managed: ConfirmationRun | None,
 ) -> RoundReport:
     """Record the ``delta`` round; the verdict file first, the ledger last.
 
@@ -192,6 +195,8 @@ def _record(
     )
     save_round_verdict(ledger_path, report.round, decided)
     save_ledger(ledger_path, updated)
+    if managed is not None:
+        managed.recorded_ledger = ledger_digest(updated)
     return report
 
 
@@ -285,6 +290,7 @@ def converge_delta_confirm(
     backend = ledger.confirm_backend
     require_backend_binary(backend)
     before = worktree_state(worktree)
+    managed = validate_managed_round(worktree, head=head, backend=backend)
     outcome = run_backend_round(
         backend=backend,
         task=task,
@@ -298,7 +304,11 @@ def converge_delta_confirm(
     verdict = _validated(
         worktree=worktree, head=head, backend=backend, before=before, outcome=outcome
     )
-    report = _record(ledger_path, ledger, verdict, backend=backend, head=head)
+    if managed is not None:
+        managed.pin.check(worktree)
+    report = _record(
+        ledger_path, ledger, verdict, backend=backend, head=head, managed=managed
+    )
     body = report.model_dump(mode="json")
     body[RESOLUTION_FILES_KEY] = list(plan.spec.paths)
     emit_json(body)
