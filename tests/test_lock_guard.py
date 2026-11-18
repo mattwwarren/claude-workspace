@@ -48,6 +48,7 @@ from cw.exceptions import (
     SessionsLockTimeoutError,
 )
 from cw.focus import focus_lock
+from cw.outbox._lock import _outbox_lock
 from tests._lock_invariants import observing
 from tests._shared.workflow_text import _SRC_ROOT, _iter_src_files
 
@@ -73,6 +74,7 @@ _GUARDED_CMS: dict[str, Callable[[], AbstractContextManager[None]]] = {
     "events_inbox": events._inbox_lock,
     "session_inbox": lambda: session_inbox._inbox_lock("s"),
     "history": lambda: history._history_lock("c"),
+    "outbox": lambda: _outbox_lock("c"),
 }
 
 
@@ -286,7 +288,9 @@ def test_descending_order_raises_under_debug(
 
 
 @pytest.mark.lock_violations_expected("order")
-@pytest.mark.parametrize("inner_id", ["history", "session_inbox", "dev_queue"])
+@pytest.mark.parametrize(
+    "inner_id", ["history", "session_inbox", "dev_queue", "outbox"]
+)
 def test_nothing_acquired_under_a_leaf(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch, inner_id: str
 ) -> None:
@@ -576,6 +580,7 @@ _GUARDED: frozenset[tuple[str, str]] = frozenset(
         ("cw/events.py", "_inbox_lock"),
         ("cw/session_inbox.py", "_inbox_lock"),
         ("cw/history.py", "_history_lock"),
+        ("cw/outbox/_lock.py", "_outbox_lock"),
         ("cw/codex_fix_loop/cycle_restore.py", "_worktree_lock"),
     }
 )
