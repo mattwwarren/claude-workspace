@@ -14,8 +14,7 @@ The load-bearing contracts:
 - exit 0 from ``cw review confirm`` is a verdict, never a clean signal, and
   ``result_blocker_reason`` is read before the first confirm ``record-round``;
 - only confirm exit 3 maps to the uncharged ``confirm_backend_unavailable``;
-- the confirm call is a foreground Bash call at the 600000 ms cap, with an
-  overrun mapped to ``agent_block``;
+- independent confirmation runs in a detached cw-managed job, with foreground polls;
 - finalize Step 4.0b stays outside the slice ``tests/test_stage.py`` reads;
 - every reason list that enumerates the operator-unavailable reasons names
   ``confirm_backend_unavailable``.
@@ -154,12 +153,14 @@ def test_core_names_converge_and_sparse_skip_never_fires_in_clean_mode() -> None
 def test_core_pins_the_diff_base_before_the_confirm_call() -> None:
     """#2800: the confirm fence re-pins the diff base before it runs the round."""
     [fence] = [
-        b for b in _fences(_confirm_section(), "bash") if "cw review confirm" in b
+        b
+        for b in _fences(_confirm_section(), "bash")
+        if "cw review converge confirm-job" in b
     ]
     pin = fence.index(
         "cw review converge diff-base >.cw/diff-base.json 2>.cw/diff-base-stderr.txt"
     )
-    call = fence.index("timeout 600 cw review confirm")
+    call = fence.index("cw review converge confirm-job full")
     status = fence.index("DIFF_BASE_RC=$?")
     surfaced = fence.index('echo "DIFF_BASE_RC=$DIFF_BASE_RC"')
     assert pin < status < surfaced < call
@@ -263,7 +264,9 @@ def test_core_names_the_new_reasons_and_status_stopped_branch() -> None:
 def test_confirm_step_derives_ticket_and_client_before_the_call() -> None:
     section = _confirm_section()
     jq_client = section.index("""CLIENT="$(jq -r '.client' "$CW_CTX")\"""")
-    call = section.index('cw review confirm --ticket-id "$TICKET" -c "$CLIENT"')
+    call = section.index(
+        'cw review converge confirm-job full --ticket-id "$TICKET" -c "$CLIENT"'
+    )
     assert jq_client < call
 
 
@@ -275,7 +278,7 @@ def test_confirm_exit_code_table_lists_every_exit() -> None:
         "| 4 |",
         "| 2 |",
         "| 1 |",
-        "| 124, or no exit status |",
+        "| 75 |",
     ):
         assert row in section, row
 
@@ -332,7 +335,7 @@ def test_confirm_exit_four_names_the_prompt_size_causes() -> None:
     for needle in (
         "`actual_chars=<n> max_chars=<m>`",
         "the backend is not at fault",
-        "roles x shards",
+        "each role on each shard sequentially",
         'NOT "restore the backend"',
         "discarded_findings",
         '"agent_block"',
@@ -518,31 +521,33 @@ def test_record_round_failures_take_agent_block_and_name_friction_lines() -> Non
         assert friction in window
 
 
-def test_confirm_bash_call_is_foreground_at_the_600000_ms_cap() -> None:
+def test_confirm_waits_on_a_durable_job_from_foreground_polls() -> None:
     section = _confirm_section()
     guard = section[section.index("**Bash call guard (R23).**") :]
     guard = guard[: guard.index("\n\n")]
-    assert "`600000`" in guard
-    assert "120000" in guard
-    assert "`timeout 600`" in guard
-    assert "Worker Execution Discipline rule 3" in guard
-    assert "never pass `run_in_background`" in guard
-    assert "never accept a harness-offered background continuation" in guard
-    bash_blocks = [b for b in _fences(section, "bash") if "cw review confirm" in b]
-    assert len(bash_blocks) == 1
-    assert "timeout 600 cw review confirm" in bash_blocks[0]
-    assert "run_in_background" not in bash_blocks[0]
+    for needle in (
+        "Exit 75 means pending",
+        "`--job-id <id>`",
+        "fresh foreground",
+        "no deadline",
+    ):
+        assert needle in guard
+    [fence] = _fences(section, "bash")
+    assert "cw review converge confirm-job full" in fence
+    assert "CONFIRM_JOB_ID=" in fence
+    assert "timeout " not in fence
 
 
-def test_confirm_overrun_maps_to_agent_block_never_to_an_outage() -> None:
-    bullet = _bullet(_confirm_section(), "Overrun")
+def test_interrupted_or_stale_job_is_an_invocation_fault() -> None:
+    section = _confirm_section()
+    assert (
+        "terminal exit 1 for an interrupted or stale job is an invocation fault"
+        in section
+    )
+    bullet = _bullet(section, "Anything else")
     assert '"agent_block"' in bullet
-    assert "600s" in bullet
-    assert "Last captured output" in bullet
-    assert "Do not run `converge confirm-failed`" in bullet
-    assert "never use `confirm_backend_unavailable`" in bullet
-    assert "diff too large for one foreground round" in bullet
-    assert 'NOT "restore the backend"' in bullet
+    assert "do not record a confirm failure" in bullet
+    assert "Do not continue as clean" in bullet
 
 
 def test_core_states_the_config_error_rule_once_and_others_cite_it() -> None:
@@ -1080,7 +1085,7 @@ def test_config_reference_states_the_opencode_lane_default_on_egress() -> None:
 
 
 def test_opencode_lane_clean_mode_is_documented() -> None:
-    """#2806: the runbook section names the default, egress and the ceiling."""
+    """#2806: the runbook section names the default, egress and the job."""
     runbook = _read("docs/dispatch-runbook.md")
     heading = "#### Opencode-lane clean mode (#2806)"
     assert runbook.count(heading) == 1
@@ -1091,9 +1096,9 @@ def test_opencode_lane_clean_mode_is_documented() -> None:
         "only `none` avoids egress",
         "forfeits the independent round",
         "begin Claude egress on their first requeue",
-        "`timeout 600`",
-        "600000",
-        "OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS",
+        "`cw review converge confirm-job full`",
+        "`--job-id`",
+        "reviewer has no deadline",
         "`converge status`",
         "`review_not_converging`",
         "`confirm_backend_unavailable`",
