@@ -11,7 +11,7 @@
    pending id set is the one recorded at that launch, and the client's
    monotonic progress counter (``drain.progress``: entries that left
    ``pending``) has not moved, so it made no progress whatever its exit code.
-   Skip, with one WARNING per (client, id set). A new enqueue, or a run that
+   Skip, with one WARNING per client stalled state. A new enqueue, or a run that
    drained something, earns one more launch. The counter, not the id set,
    sees work done outside the tick's bounded scan window. The bound is in
    memory: a restarted loop gets one more try.
@@ -68,7 +68,9 @@ class _Launch:
 # progress count bound relaunches of a drain that makes no progress (P11).
 _LAUNCHED: dict[str, _Launch] = {}
 _WARNED_TRUNCATED: set[str] = set()
-_WARNED_STALLED: set[tuple[str, frozenset[str]]] = set()
+# One entry per client (its latest stalled state), so the registry is bounded by
+# the client count however many id sets a long-lived loop sees.
+_WARNED_STALLED: dict[str, tuple[frozenset[str], int]] = {}
 
 
 def spawn_drain(client: str) -> subprocess.Popen[bytes]:
@@ -91,9 +93,9 @@ def _stalled(
         or previous.progress != progress
     ):
         return False
-    key = (client, pending)
-    if key not in _WARNED_STALLED:
-        _WARNED_STALLED.add(key)
+    state = (pending, progress)
+    if _WARNED_STALLED.get(client) != state:
+        _WARNED_STALLED[client] = state
         _log.warning(
             "outbox: the last drain of client %s made no progress on its %d"
             " pending entries; not relaunching until the set changes. Run"

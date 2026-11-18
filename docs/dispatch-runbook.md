@@ -5388,8 +5388,11 @@ entry against one listing and posts only missing parts. An entry claimed from
 `unverified` never goes back to `pending`.
 
 **No-progress bound.** A drain that exits without changing the non-held
-pending set (for example one that crashes at startup) is not relaunched until
-that set changes (a new enqueue, or a run that made progress). The tick logs
+pending set and without moving the client's progress counter (for example one
+that crashes at startup) is not relaunched until one of them changes (a new
+enqueue, or a run that made progress). The counter is the monotonic
+`outbox/<client>/drain.progress` file, a count of entries that left `pending`
+under a drain; it sees work done beyond the tick's bounded scan window. The tick logs
 one WARNING naming `cw outbox drain -c <client>`: run it to see the error. The
 bound lives in the loop's memory, so a restarted loop tries once more.
 

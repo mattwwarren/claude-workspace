@@ -75,7 +75,7 @@ class _Spawner:
 def _fresh_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tick_drain, "_LAUNCHED", {})
     monkeypatch.setattr(tick_drain, "_WARNED_TRUNCATED", set())
-    monkeypatch.setattr(tick_drain, "_WARNED_STALLED", set())
+    monkeypatch.setattr(tick_drain, "_WARNED_STALLED", {})
 
 
 @pytest.fixture
@@ -376,6 +376,18 @@ class TestNoProgressBound:
 
         assert report.delivered == 1
         assert spawner.launched == [CLIENT, CLIENT]
+
+    def test_stall_warning_registry_holds_one_state_per_client(
+        self, tmp_path: Path, spawner: _Spawner
+    ) -> None:
+        clients = _clients(tmp_path)
+        for marker in ("a", "b", "c"):
+            enqueue(marker=marker)
+            tick_drain.launch_outbox_drains(clients)
+            spawner.procs[-1].code = 1
+            tick_drain.launch_outbox_drains(clients)
+
+        assert list(tick_drain._WARNED_STALLED) == [CLIENT]
 
     def test_a_run_that_made_no_progress_still_stalls_beyond_the_scan_bound(
         self, tmp_path: Path, spawner: _Spawner, monkeypatch: pytest.MonkeyPatch
