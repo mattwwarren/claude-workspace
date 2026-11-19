@@ -36,6 +36,7 @@ from cw.auto_dev_result import (
     STALE_DISPATCH_BLOCKER_REASON,
     is_known_blocker_reason,
     parse_depends_on_pr,
+    parse_depends_on_pr_ref,
 )
 from cw.branch_ahead import merge_in_progress
 from cw.codex_review import (
@@ -62,6 +63,7 @@ from cw.models import (
     QueueItemStatus,
     Stage,
 )
+from cw.models.pr_ref import PrRef
 from cw.queue_rows import (
     _AUTOMERGE_NOT_ARMED_REASON,
     _PRIOR_PIPELINE_PR_OPEN_REASON,
@@ -282,26 +284,37 @@ def _park_must_fix_mechanically_rejected(task: TicketTask) -> None:
     )
 
 
-def _dependency_park_pr(blocker_reason: str | None, blocker: object) -> int | None:
+def _dependency_park_pr(blocker_reason: str | None, blocker: object) -> PrRef | None:
     """The upstream PR a ``dependency_unmerged`` park waits on, or None (#2321).
 
-    Read only from the structured ``depends_on_pr`` field, never parsed out of
-    ``details``. Only the dependency reason is honoured, so the field is
-    ignored on any other blocker reason.
+    Read only from the structured ``depends_on_pr`` (int) or, since #3634,
+    ``depends_on_pr_ref`` (``"owner/repo#N"``) field, never parsed out of
+    ``details``. Only the dependency reason is honoured, so the fields are
+    ignored on any other blocker reason. Both set is contradictory and yields
+    None (fail closed). Routing stamps an explicit ref as given (syntactically
+    valid only): it has no git and no slug, so the own-repo bound on a
+    worker-supplied ref is enforced by the stale-dispatch registrar (D7).
     """
     if blocker_reason != DEPENDENCY_UNMERGED_BLOCKER_REASON or not isinstance(
         blocker, dict
     ):
         return None
-    dependency_pr = parse_depends_on_pr(blocker.get("depends_on_pr"))
-    return None if dependency_pr is None else int(dependency_pr)
+    raw_pr = blocker.get("depends_on_pr")
+    raw_ref = blocker.get("depends_on_pr_ref")
+    if raw_pr is not None and raw_ref is not None:
+        return None
+    dependency_pr = parse_depends_on_pr(raw_pr)
+    if dependency_pr is not None:
+        return PrRef(number=int(dependency_pr))
+    dependency_ref = parse_depends_on_pr_ref(raw_ref)
+    return None if dependency_ref is None else PrRef.parse(dependency_ref)
 
 
 def _stamp_blocked_on_pr(
     task: TicketTask,
     blocker_reason: str | None,
     blocker: object,
-    dependency_pr: int | None,
+    dependency_pr: PrRef | None,
 ) -> None:
     """Stamp ``task.blocked_on_pr`` AFTER ``transition_task_status`` (#1713, #2321).
 
@@ -316,7 +329,7 @@ def _stamp_blocked_on_pr(
         STALE_DISPATCH_BLOCKER_REASON,
     ):
         details = blocker.get("details") if isinstance(blocker, dict) else None
-        task.blocked_on_pr = _extract_blocked_on_pr(details)
+        task.blocked_on_pr = PrRef.from_number(_extract_blocked_on_pr(details))
 
 
 def _route_stage_failure(

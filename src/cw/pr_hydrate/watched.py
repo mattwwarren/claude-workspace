@@ -17,6 +17,7 @@ from cw.dev_queue import (
     save_dev_queue,
 )
 from cw.models import TERMINAL_QUEUE_STATUSES, WatchedPr
+from cw.models.pr_ref import pr_evidence_keys
 from cw.pr_hydrate.transitions import _TERMINAL_PR_STATES, _is_watched_candidate
 
 if TYPE_CHECKING:
@@ -75,14 +76,17 @@ def select_watched_hydration_batch(watched_prs: list[WatchedPr]) -> list[Watched
 def retire_terminal_watched_prs(store: DevQueueStore) -> list[WatchedPr]:
     """Dismiss active watches whose PR is MERGED/CLOSED and unreferenced (#3654).
 
-    A watch is referenced when a non-terminal row of the same client carries
-    ``blocked_on_pr`` equal to the watch's PR number. Referenced watches are
+    A watch is referenced when a non-terminal row of the same client carries a
+    ``blocked_on_pr`` ref whose key is one of the watch's evidence keys
+    (``cw.models.pr_ref.pr_evidence_keys``, #3634): a ``cross_repo=True`` watch
+    is never referenced by a same-repo ref on the same number, nor a same-repo
+    watch by an explicit ref to another repo. Referenced watches are
     kept so the release pass can still observe the terminal state. Pure with
     respect to persistence: the caller holds ``dev_queue_lock`` and saves.
     Dismissed entries are kept, not deleted (follow-up debt).
     """
     referenced = {
-        (task.client, task.blocked_on_pr)
+        (task.client, task.blocked_on_pr.key())
         for task in store.tasks
         if task.status not in TERMINAL_QUEUE_STATUSES and task.blocked_on_pr is not None
     }
@@ -95,9 +99,11 @@ def retire_terminal_watched_prs(store: DevQueueStore) -> list[WatchedPr]:
             or watched.pr_state.state not in _TERMINAL_PR_STATES
         ):
             continue
-        if (
-            watched.client is not None
-            and (watched.client, watched.pr_number) in referenced
+        if watched.client is not None and any(
+            (watched.client, key) in referenced
+            for key in pr_evidence_keys(
+                watched.repo, watched.pr_number, cross_repo=watched.cross_repo
+            )
         ):
             continue
         watched.status = "dismissed"

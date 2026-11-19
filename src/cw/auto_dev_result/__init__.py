@@ -119,6 +119,7 @@ from cw.auto_dev_result.schema import (
     BlockedResult,
     Blocker,
     DependsOnPr,
+    DependsOnPrRef,
     Health,
     OperatorConstraintsSource,
     PlanSource,
@@ -138,6 +139,7 @@ from cw.auto_dev_result.schema import (
     _reject_empty_string_items,
     is_known_blocker_reason,
     parse_depends_on_pr,
+    parse_depends_on_pr_ref,
     queue_status_for_terminal_sentinel,
 )
 
@@ -206,6 +208,7 @@ __all__ = [
     "BlockedResult",
     "Blocker",
     "DependsOnPr",
+    "DependsOnPrRef",
     "Health",
     "OperatorConstraintsSource",
     "PlanSource",
@@ -251,6 +254,7 @@ __all__ = [
     "is_documented_example",
     "is_known_blocker_reason",
     "parse_depends_on_pr",
+    "parse_depends_on_pr_ref",
     "parse_last_block",
     "parse_last_block_in_chunks",
     "parse_last_block_per_chunk",

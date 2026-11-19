@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any, NewType
 
-from cw._predicates import is_positive_real_int
+from cw._predicates import is_positive_real_int, parse_repo_pr_ref
 from cw.auto_dev_result.schema._vocab import IMPACT_REASON_KEY
 
 # GitHub #2321 — a same-repo PR number a dependency park waits on. Defined here
@@ -31,6 +31,23 @@ def parse_depends_on_pr(value: object) -> DependsOnPr | None:
     if is_positive_real_int(value):
         return DependsOnPr(value)
     return None
+
+
+# GitHub #3634 — an explicit ``owner/repo#N`` ref a dependency park waits on.
+DependsOnPrRef = NewType("DependsOnPrRef", str)
+
+
+def parse_depends_on_pr_ref(value: object) -> DependsOnPrRef | None:
+    """Return *value* as a canonical :data:`DependsOnPrRef`, or None.
+
+    Accepts only a string ``"owner/repo#N"`` (N positive, no leading zero, no
+    ``.``/``..`` segment); a bare number, a ``#N`` shorthand and every non-str
+    are rejected.
+    """
+    parsed = parse_repo_pr_ref(value)
+    if parsed is None:
+        return None
+    return DependsOnPrRef(f"{parsed[0]}#{parsed[1]}")
 
 
 def _reject_empty_string_items(v: list[str], field_name: str) -> list[str]:

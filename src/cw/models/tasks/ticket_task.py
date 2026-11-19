@@ -15,7 +15,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from cw._git import FULL_COMMIT_ID_RE
 from cw.models.enums import QueueItemStatus, Stage
@@ -23,6 +29,12 @@ from cw.models.events import PrState, ShippedRedEpisode
 from cw.models.gate_block import GateBlockBackoff
 from cw.models.operator_constraint import OperatorConstraint
 from cw.models.operator_resolution import OperatorResolution
+from cw.models.pr_ref import (
+    BLOCKED_ON_PR_JSON_SCHEMA,
+    PrRef,
+    coerce_blocked_on,
+    dump_blocked_on,
+)
 from cw.models.review_attestation import ReviewAttestation
 from cw.models.review_debt_record import ReviewDebtRecord
 from cw.models.review_engine_settlement import ReviewEngineSettlement
@@ -708,9 +720,14 @@ class TicketTask(BaseModel):
     # clears it on any real status transition) -- a fresh parked episode
     # always starts with a clean latch.
     stale_gate_detected_at: datetime | None = None
-    # GitHub #1713 — Variant B's blocking PR number: bare int, no owner/repo
-    # qualifier (a dev-queue client is bound to exactly one repo; see the
-    # ticket's Self-Verified Premises). Stamped by dispatch/routing.py's Rule
+    # GitHub #1713 — Variant B's blocking PR. Since #3634 a typed ``PrRef``:
+    # ``repo=None`` names a PR in the row's own client repo (every legacy
+    # bare int loads as that) and is written back as the bare int; an
+    # explicit ``owner/repo`` is written back as ``{"repo", "number"}``. The
+    # persisted row therefore accepts and stores an int or that object, which
+    # is why the field carries a JSON-schema hint; the read surfaces
+    # (``TicketView``, ``tasks --json``) keep an int plus ``blocked_on_repo``
+    # (R6). Stamped by dispatch/routing.py's Rule
     # 5 when a `merge_gate_blocked`/`prior_pipeline_pr_open` park or a
     # `stale_dispatch`/`pr_already_open` park (GitHub #1902 fast-follow to
     # #1862) has a blocker.details naming the blocking PR. Cross-referenced
@@ -720,7 +737,9 @@ class TicketTask(BaseModel):
     # ticket's own and lives on no task row), against the client-tagged
     # WatchedPr that cw.reconcile.stale_dispatch_watch registers for it
     # (GitHub #1927).
-    blocked_on_pr: int | None = None
+    blocked_on_pr: PrRef | None = Field(
+        default=None, json_schema_extra=BLOCKED_ON_PR_JSON_SCHEMA
+    )
     # GitHub #2017 — the review fix loop's asynchronous handoff pair. The
     # REVIEW session records `pending_fix_dispatch` and exits; a later
     # reconcile tick (cw.reconcile.fix_dispatch) dispatches the fix session
@@ -746,6 +765,17 @@ class TicketTask(BaseModel):
     # GitHub #2324 — the mid-turn usage-limit act's write-ahead intent; see
     # UsageLimitAct. Only ever set on a RUNNING row.
     usage_limit_act: UsageLimitAct | None = None
+
+    @field_validator("blocked_on_pr", mode="before")
+    @classmethod
+    def _coerce_blocked_on_pr(cls, value: object) -> object:
+        return coerce_blocked_on(value)
+
+    @field_serializer("blocked_on_pr")
+    def _dump_blocked_on_pr(
+        self, value: PrRef | None
+    ) -> int | dict[str, object] | None:
+        return dump_blocked_on(value)
 
     @field_validator("gate_recipes")
     @classmethod

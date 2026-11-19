@@ -112,6 +112,11 @@ class WatchedPr(BaseModel):
     (``blocked_on_pr``). Dismissed entries are kept, not deleted. The dedup
     guard is active-scoped, so a dismissed entry neither collides nor shadows a
     new registration.
+
+    Since #3634 ``cross_repo=True`` marks a watch registered for an explicit
+    cross-repo hold reference. An older cw ignores the flag and would read such
+    a watch as an own-repo ``(client, number)`` fact, so rolling back needs
+    every ``cross_repo: true`` watch dismissed or removed first.
     """
 
     # NOT extra=forbid — persisted/runtime state, see #1200
@@ -131,15 +136,25 @@ class WatchedPr(BaseModel):
     # DEV_QUEUE_SCHEMA_VERSION bump accompanies this field: it is additive with a
     # ``None`` default, so every persisted pre-#1927 blob still parses.
     client: str | None = None
+    # GitHub #3634 — set only for a watch registered for an explicit
+    # cross-repo ``owner/repo#N`` hold reference. Such a watch is excluded from
+    # same-repo ``(None, n)`` merge evidence, so a merged ``other/repo#5``
+    # never releases a same-repo hold on ``#5``. No DEV_QUEUE_SCHEMA_VERSION
+    # bump accompanies this field: it is additive with a ``False`` default, so
+    # every persisted pre-#3634 blob still parses.
+    cross_repo: bool = False
     pr_state: PrState | None = None
 
 
 def watched_pr_collides(
     existing: WatchedPr, *, repo: str, pr_number: int, client: str | None
 ) -> bool:
-    """Return whether *existing* blocks a watch owned by another client."""
+    """Return whether *existing* blocks a watch owned by another client.
+
+    The slug compares case-insensitively (#3634): github slugs are.
+    """
     return (
-        existing.repo == repo
+        existing.repo.lower() == repo.lower()
         and existing.pr_number == pr_number
         and existing.status == "active"
         and existing.client is not None

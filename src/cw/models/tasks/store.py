@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from cw._predicates import is_positive_real_int
 from cw.models.enums import (
     DEPENDENCY_HOLD_DISPOSITION,
     OCCUPIED_LANE_STATUSES,
@@ -49,8 +48,9 @@ def occupies_lane_slot(task: TicketTask) -> bool:
         # GitHub #2321 — a dependency hold with a PR id frees its slot: it
         # waits on a merge the serve tick observes. A hold with no id keeps
         # its slot, because no release trigger would ever free it.
-        if task.disposition == DEPENDENCY_HOLD_DISPOSITION and is_positive_real_int(
-            task.blocked_on_pr
+        if (
+            task.disposition == DEPENDENCY_HOLD_DISPOSITION
+            and task.blocked_on_pr is not None
         ):
             return False
     return True

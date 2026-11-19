@@ -157,9 +157,10 @@ CONFIRM_BACKEND_UNAVAILABLE_BLOCKER_REASON: Literal["confirm_backend_unavailable
     "confirm_backend_unavailable"
 )
 # GitHub #2321 — a worker dependency park: the upstream PR must merge first.
-# Optionally carries ``Blocker.depends_on_pr`` (same-repo PR number); with it,
-# routing stamps a ``dependency_hold`` row that frees its lane slot. Additive
-# on the sentinel: no ``schema_version`` bump.
+# Optionally carries ``Blocker.depends_on_pr`` (same-repo PR number) or, since
+# #3634, ``Blocker.depends_on_pr_ref`` (``"owner/repo#N"``, armed only for the
+# holder's own repo); with one, routing stamps a ``dependency_hold`` row that
+# frees its lane slot. Additive on the sentinel: no ``schema_version`` bump.
 DEPENDENCY_UNMERGED_BLOCKER_REASON: Literal["dependency_unmerged"] = (
     "dependency_unmerged"
 )

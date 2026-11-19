@@ -37,6 +37,9 @@ each submodule only imports from those above it (no cycles):
 - ``review_attestation`` — the lenient row-state ``ReviewAttestation``, the
   head-pinned review sign-off (#3040). A pure-pydantic DAG root that
   ``tasks.ticket_task`` imports; not re-exported, import it by submodule path.
+- ``pr_ref`` — ``PrRef``, the typed (optionally cross-repo) PR reference a
+  dependency hold waits on (#3634). A pure-pydantic DAG root that
+  ``tasks.ticket_task`` imports; not re-exported, import it by submodule path.
 - ``session_inbox`` — ``SessionInboxMessage``, one operator message in a
   session's inbound mailbox (#2212). Also a DAG root.
 - ``worker_effort`` — ``WorkerEffort``, the closed per-client effort level for

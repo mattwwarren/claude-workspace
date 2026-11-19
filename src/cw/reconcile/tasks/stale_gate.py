@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from cw._predicates import is_positive_real_int
 from cw.auto_dev_result import (
     GATE_TIMEOUT_BLOCKER_REASON,
     STALE_DISPATCH_BLOCKER_REASON,
@@ -39,6 +38,7 @@ from cw.models import (
     ReapReason,
     TicketTask,
 )
+from cw.models.pr_ref import PrRef, PrRefKey, pr_evidence_keys
 from cw.pr_hydrate import _parse_pr_url
 from cw.pr_hydrate.watched import retire_terminal_watched_prs
 from cw.queue_rows import (
@@ -149,10 +149,13 @@ def _is_variant_b_gate_task(task: TicketTask) -> bool:
     registered as a ``dependency_hold`` WatchedPr, so it has an independent
     state source too. A terminal watch is retired once no row references it
     (#3654, see ``release_stale_gated_tasks``).
+
+    Since #3634 ``blocked_on_pr`` is a typed ref, same-repo or an explicit
+    ``owner/repo#N`` (see ``_pr_numbers_by_client_in_state`` for the match key).
     """
     if task.status != QueueItemStatus.BLOCKED_ON_USER:
         return False
-    if not is_positive_real_int(task.blocked_on_pr):
+    if task.blocked_on_pr is None:
         return False
     # GitHub #2321: a dependency hold waits on its blocking PR the same way.
     if task.disposition == DEPENDENCY_HOLD_DISPOSITION:
@@ -176,8 +179,16 @@ def _index_variant_a_candidates(
 
 def _pr_numbers_by_client_in_state(
     store: DevQueueStore, pr_state_value: str
-) -> dict[str, set[int]]:
-    """client -> set of PR numbers this store has observed in *pr_state_value*.
+) -> dict[str, set[PrRefKey]]:
+    """client -> set of PR evidence keys observed in *pr_state_value*.
+
+    Since #3634 the keys are ``(repo.lower(), number)`` plus ``(None, number)``
+    (see ``cw.models.pr_ref.pr_evidence_keys``): an explicit ref matches only
+    its exact repo, and a same-repo ref looks up ``(None, number)``, which a
+    task row and a ``cross_repo=False`` watch emit but a ``cross_repo=True``
+    watch never does. Known limit: a task row's ``pr_url`` repo is not compared
+    with the client's slug (that needs git, which cannot run under the lock),
+    so a same-repo ref keeps the per-client bare-number semantics there.
 
     Two independent sources, unioned per client:
 
@@ -198,7 +209,7 @@ def _pr_numbers_by_client_in_state(
     operator-review producers) carries no client context and is therefore
     excluded rather than attributed to a guessed client (#1269).
     """
-    by_client: dict[str, set[int]] = {}
+    by_client: dict[str, set[PrRefKey]] = {}
     for t in store.tasks:
         if t.pr_state is None or t.pr_state.state != pr_state_value:
             continue
@@ -207,33 +218,49 @@ def _pr_numbers_by_client_in_state(
         parsed = _parse_pr_url(t.pr_url)
         if parsed is None:
             continue
-        _, pr_number = parsed
-        by_client.setdefault(t.client, set()).add(pr_number)
+        repo, pr_number = parsed
+        by_client.setdefault(t.client, set()).update(
+            pr_evidence_keys(repo, pr_number, cross_repo=False)
+        )
     for w in store.watched_prs:
         if w.client is None or w.status != "active":
             continue
         if w.pr_state is None or w.pr_state.state != pr_state_value:
             continue
-        by_client.setdefault(w.client, set()).add(w.pr_number)
+        by_client.setdefault(w.client, set()).update(
+            pr_evidence_keys(w.repo, w.pr_number, cross_repo=w.cross_repo)
+        )
     return by_client
 
 
-def _merged_pr_numbers_by_client(store: DevQueueStore) -> dict[str, set[int]]:
-    """client -> set of PR numbers this store has observed MERGED (via pr_state).
+def _merged_pr_numbers_by_client(store: DevQueueStore) -> dict[str, set[PrRefKey]]:
+    """client -> set of PR evidence keys this store has observed MERGED.
 
     See ``_pr_numbers_by_client_in_state`` for the two-source contract.
     """
     return _pr_numbers_by_client_in_state(store, _GH_PR_STATE_MERGED)
 
 
-def _closed_pr_numbers_by_client(store: DevQueueStore) -> dict[str, set[int]]:
-    """client -> set of PR numbers this store has observed CLOSED unmerged
+def _closed_pr_numbers_by_client(store: DevQueueStore) -> dict[str, set[PrRefKey]]:
+    """client -> set of PR evidence keys this store has observed CLOSED unmerged
     (via pr_state). GitHub #1920: a Variant B park's blocking PR that is
     CLOSED without merging must release the park identically to a MERGED
     one -- see ``_pr_numbers_by_client_in_state`` for the shared two-source
     contract.
     """
     return _pr_numbers_by_client_in_state(store, _GH_PR_STATE_CLOSED)
+
+
+def _closed_evidence(pr: PrRef) -> dict[str, int | str]:
+    """``session.reap_proposed`` evidence for a closed-unmerged dependency PR.
+
+    ``blocked_on_pr`` stays the int number; ``blocked_on_repo`` is added only
+    for an explicit ref (#3634, R6).
+    """
+    evidence: dict[str, int | str] = {"blocked_on_pr": pr.number}
+    if pr.repo is not None:
+        evidence["blocked_on_repo"] = pr.repo
+    return evidence
 
 
 def _release_variant_a(task: TicketTask, policy: ReapPolicy) -> None:
@@ -276,7 +303,7 @@ def _scan_variant_b(
     clients: dict[str, ClientConfig],
     orchestrator_config: OrchestratorConfig,
 ) -> tuple[
-    list[str], list[tuple[str, str, str, str, str | None, dict[str, int]]], bool
+    list[str], list[tuple[str, str, str, str, str | None, dict[str, int | str]]], bool
 ]:
     """Variant B cross-reference scan; caller holds ``dev_queue_lock`` (#2321).
 
@@ -285,7 +312,7 @@ def _scan_variant_b(
     other Variant B row keeps its pre-#2321 behavior.
     """
     released_ids: list[str] = []
-    pending: list[tuple[str, str, str, str, str | None, dict[str, int]]] = []
+    pending: list[tuple[str, str, str, str, str | None, dict[str, int | str]]] = []
     changed = False
     merged_by_client = _merged_pr_numbers_by_client(store)
     closed_by_client = _closed_pr_numbers_by_client(store)
@@ -295,8 +322,8 @@ def _scan_variant_b(
         pr = task.blocked_on_pr
         if pr is None:  # _is_variant_b_gate_task already excludes this
             continue
-        merged = pr in merged_by_client.get(task.client, set())
-        closed = pr in closed_by_client.get(task.client, set())
+        merged = pr.key() in merged_by_client.get(task.client, set())
+        closed = pr.key() in closed_by_client.get(task.client, set())
         if not merged and not closed:
             continue  # unknown or still open: fail closed, release nothing
         orig_session_id = task.session_id
@@ -318,12 +345,15 @@ def _scan_variant_b(
                             task.lane,
                             _PROPOSED_ACTION_DEPENDENCY_PR_CLOSED_UNMERGED,
                             orig_session_id,
-                            {"blocked_on_pr": pr},
+                            _closed_evidence(pr),
                         )
                     )
                     changed = True
                 continue
             # An operator hold (no session) releases under any policy.
+            # Invariant: no writer clears session_id on a BLOCKED_ON_USER
+            # dependency_hold worker park before the registrar vets it, so None
+            # here means an operator hold.
             operator_hold = task.session_id is None
             _release_variant_b(task, policy, operator_hold=operator_hold)
         else:
@@ -417,7 +447,9 @@ def release_stale_gated_tasks() -> list[str]:
     # captured BEFORE _release_variant_a/_release_variant_b run (both clear
     # task.session_id under the AUTO branch) -- mirrors
     # park_terminal_sibling_tasks's orig_session_id precedent exactly.
-    pending_events: list[tuple[str, str, str, str, str | None, dict[str, int]]] = []
+    pending_events: list[
+        tuple[str, str, str, str, str | None, dict[str, int | str]]
+    ] = []
 
     # PR_MERGED event IDs processed by the Variant A loop below, deferred
     # until AFTER save_dev_queue succeeds (see the advance_cursor loop below

@@ -259,7 +259,8 @@ def build_ticket_view(
         stage=task.stage,
         disposition=task.disposition,
         blocked_reason=task.blocked_reason,
-        blocked_on_pr=task.blocked_on_pr,
+        blocked_on_pr=None if task.blocked_on_pr is None else task.blocked_on_pr.number,
+        blocked_on_repo=None if task.blocked_on_pr is None else task.blocked_on_pr.repo,
         blocker_details=_blocker_details(session),
         advisory_note=task.advisory_note,
         lane=task.lane,
@@ -733,6 +734,15 @@ def _attestation_text(approval: ApprovalView | None) -> str:
     )
 
 
+def _blocked_on_text(view: TicketView) -> str:
+    """``9`` for a same-repo hold, ``o/r#9`` for a cross-repo one (#3634)."""
+    if view.blocked_on_pr is None:
+        return _ABSENT
+    if view.blocked_on_repo is None:
+        return str(view.blocked_on_pr)
+    return f"{view.blocked_on_repo}#{view.blocked_on_pr}"
+
+
 def render_ticket_view(view: TicketView, *, now: datetime | None = None) -> str:
     """The view as text: one ``key: value`` per line, fixed key order.
 
@@ -751,7 +761,7 @@ def render_ticket_view(view: TicketView, *, now: datetime | None = None) -> str:
         ("reason", _reason_text(view)),
         (
             "blocked_on_pr",
-            _ABSENT if view.blocked_on_pr is None else str(view.blocked_on_pr),
+            _blocked_on_text(view),
         ),
         ("details", _details_text(view)),
         ("lane", view.lane),

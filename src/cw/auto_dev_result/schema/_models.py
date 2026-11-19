@@ -27,9 +27,11 @@ from pydantic import (
 
 from cw.auto_dev_result.schema._validators import (
     DependsOnPr,
+    DependsOnPrRef,
     _is_blank,
     _reject_empty_string_items,
     parse_depends_on_pr,
+    parse_depends_on_pr_ref,
 )
 from cw.auto_dev_result.schema._vocab import (
     _LOGGER_NAME,
@@ -337,6 +339,12 @@ class Blocker(BaseModel):
     # waits on. Meaningful only with that reason (no cross-field check: routing
     # ignores it for other reasons). Additive, so no ``schema_version`` bump.
     depends_on_pr: DependsOnPr | None = None
+    # GitHub #3634 — the same dependency as an explicit ``"owner/repo#N"``
+    # string, mutually exclusive with ``depends_on_pr`` (both set: routing
+    # stamps no id). Routing stamps it as given; the stale-dispatch registrar
+    # arms an auto-release only when the repo is the holder's own. Additive,
+    # so no ``schema_version`` bump; an older cw ignores the key.
+    depends_on_pr_ref: DependsOnPrRef | None = None
 
     # Why: #2321 — a before-validator, so pydantic's lax int coercion cannot
     # accept ``"7"``, ``7.0`` or ``True`` for this field.
@@ -349,6 +357,17 @@ class Blocker(BaseModel):
             msg = f"depends_on_pr must be a positive integer PR number, got {v!r}"
             raise ValueError(msg)
         return v
+
+    @field_validator("depends_on_pr_ref", mode="before")
+    @classmethod
+    def _check_depends_on_pr_ref(cls, v: object) -> object:
+        if v is None:
+            return None
+        ref = parse_depends_on_pr_ref(v)
+        if ref is None:
+            msg = f"depends_on_pr_ref must be an owner/repo#N PR reference, got {v!r}"
+            raise ValueError(msg)
+        return ref
 
     # Why: #2097 -- warn-only, never reject. The open-enum contract (§4.2)
     # forbids failing a parse on an unrecognized reason, so this returns the
