@@ -588,8 +588,11 @@ def _prepare_review_pass(
     ``snapshots`` (#3712) says how this pass obtains the ticket snapshot its
     comment readers bind against; ``snapshots.resolve`` runs once, before the
     ticket context is read, because a refreshing context re-renders
-    ``.cw/context.json``. Dropping that one call is the documented reversal of
-    the per-pass refresh.
+    ``.cw/context.json``. The call also supplies the snapshot the comment,
+    voided-finding and disposition readers consume, so it is not the switch for
+    the per-pass refresh: that reversal is removing ``refresh=True`` from the
+    ``context_for_client(...)`` calls (the non-refreshing context then reads
+    the stored snapshot); the stage-entry refresh stays.
     """
     if resolution is not None and delta_from_sha is not None:
         msg = "resolution and delta_from_sha are mutually exclusive"
