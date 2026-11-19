@@ -43,13 +43,17 @@ _LEGACY_STATUSES: tuple[TurnStatus, ...] = tuple(
     status for status in STATUS_WORDS if status != ALREADY_PRESENT
 )
 
-# One clause per status, in the post turn's words. The legacy clause is the
-# same text it always was: the three non-courier statuses, in the same order.
+# The meaning of each status, in the post turn's words. The status word itself is
+# taken from the typed key, so the vocabulary lives only in ``TurnStatus``; the
+# rendered clause is byte-identical to the legacy prompt's text.
+_STATUS_MEANINGS: dict[TurnStatus, str] = {
+    "ok": "when every part was posted",
+    "already_present": "when every part is already on the ticket",
+    "tool_unavailable": "when the tools are not available to you",
+    "failed": "otherwise",
+}
 _STATUS_CLAUSES: dict[TurnStatus, str] = {
-    "ok": '"ok" when every part was posted',
-    "already_present": '"already_present" when every part is already on the ticket',
-    "tool_unavailable": '"tool_unavailable" when the tools are not available to you',
-    "failed": '"failed" otherwise',
+    status: f'"{status}" {_STATUS_MEANINGS[status]}' for status in STATUS_WORDS
 }
 
 
