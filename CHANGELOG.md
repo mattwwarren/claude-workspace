@@ -14,6 +14,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Every cw daemon worker runs under `--permission-mode auto`, whatever its pinned model (#3626).** The `bypassPermissions` fallback for non-auto-capable pins is removed, along with the model allowlist behind it. Unpinned and pinned clients alike now get `auto`. Operator note: (a) a pinned model that does not support `auto` upstream (for example Haiku 4.5) now fails upstream instead of running under bypass; the way to keep bypass for a single call is an explicit `permission_mode`. (b) There is no per-client permission override; to change a client's mode, change the code. (c) Only cw's native daemon permission mode changes; the Opus 5.5 effort default is unchanged.
 - **Unreadable config layers now refuse a launched write-capable turn (#3368, R22).** A codex config layer that exists but cannot be read or parsed refuses the turn before launch (`MCP_SERVER_UNNAMED`). This also reaches `codex_stage_post` (stage posts) and `codex_review_persist` (codex verdict persist), both through `post_parts_via_turn`. A missing config still proceeds.
 - **Outbox drain help and unconfigured wording.** `cw outbox drain` names the tickets binding instead of `gh`.
 

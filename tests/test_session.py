@@ -1076,14 +1076,14 @@ class TestResumeSession:
             "550e8400-e29b-41d4-a716-446655440000",
         ]
 
-    def test_resume_daemon_non_auto_model_derives_bypass_permissions(
+    def test_resume_daemon_non_auto_model_derives_default_auto(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """DAEMON resume with a Haiku pin spawns with bypassPermissions (#1111)."""
+        """DAEMON resume with a Haiku pin derives default auto, not bypass (#3626)."""
         write_clients_yaml(
             sample_client.model_copy(
                 update={"worker_model": "claude-haiku-4-5-20251001"}
@@ -1111,7 +1111,7 @@ class TestResumeSession:
 
         resume_session("test-client/impl", native_daemon=mock_native_daemon)
 
-        assert mock_native_daemon.spawn_permission_modes[0] == "bypassPermissions"
+        assert mock_native_daemon.spawn_permission_modes[0] is None
 
     def test_resume_daemon_auto_capable_model_permission_mode_none(
         self,

@@ -65,46 +65,13 @@ def _is_native_surface_ref(ref: str) -> bool:
 # behavior the issue documents.
 _DEFAULT_PERMISSION_MODE = "auto"
 
-# Conservative allowlist of model-id prefixes confirmed to support
-# ``--permission-mode auto`` per the Claude Code docs
-# (code.claude.com/docs/en/permission-modes): Opus 4.6+, Sonnet 4.6+/
-# Sonnet 5, Haiku 5.5, Opus 4.7/4.8 (gateway). Haiku 4.5 is NOT auto-capable;
-# the "claude-haiku-5-5" prefix deliberately does not match it. worker_model
-# is a forwarded opaque string that in practice carries dated/suffixed ids
-# (e.g. "claude-sonnet-4-6-20251015"), so this is matched as a prefix, not an
-# exact set — see #1111, #2624.
-_AUTO_CAPABLE_MODEL_PREFIXES: tuple[str, ...] = (
-    "claude-opus-4-6",
-    "claude-opus-4-7",
-    "claude-opus-4-8",
-    "claude-sonnet-4-6",
-    "claude-sonnet-5",
-    "claude-haiku-5-5",
-)
-
-# Permission mode for workers whose pinned model does not support
-# ``auto`` (#1111) — the same non-interactive posture already-supported
-# Sonnet/Opus workers run under. Requires the bypass-permissions
-# disclaimer to already be accepted (`claude --dangerously-skip-permissions`
-# once, interactively); an unaccepted disclaimer raises
-# DisclaimerNotAcceptedError (see RealNativeDaemonClient.spawn_bg).
-SKIP_PERMISSIONS_MODE = "bypassPermissions"
-
-
-def model_supports_auto(worker_model: str | None) -> bool:
-    """Return True if *worker_model* supports ``--permission-mode auto``.
-
-    ``None`` (no pin) is treated as auto-capable so unpinned workers keep
-    today's behavior unchanged. A non-``None`` value is matched via prefix
-    against a conservative allowlist of known auto-capable model families;
-    an unrecognized non-``None`` id is treated as NOT auto-capable — a hard
-    ``--bg`` hang that holds a lane slot is worse than a worker running with
-    fewer guardrails in an isolated, review-gated worktree. See #1111.
-    """
-    if not worker_model:
-        return True
-    normalized = worker_model.strip().lower()
-    return normalized.startswith(_AUTO_CAPABLE_MODEL_PREFIXES)
+# Every worker model defaults to ``auto`` (#3626, operator decision on dev-queue
+# row:2, 2026-11-19). There is no per-model allowlist and no bypass fallback:
+# ``auto`` is the default for all ``worker_model`` values, including unpinned
+# and unseen ids. A pinned model that does not support ``auto`` upstream fails
+# upstream; the per-call way to keep bypass is an explicit ``permission_mode``.
+# The operator has never used bypass permissions. See #1111 for the old
+# fallback this supersedes, and CONFIG_REFERENCE.md for the reversal.
 
 
 def resolve_permission_mode(
@@ -113,24 +80,14 @@ def resolve_permission_mode(
     """Derive the effective ``--permission-mode`` for a DAEMON-origin spawn.
 
     Shared by both DAEMON-origin spawn chokepoints (``spawn_create_impl`` and
-    ``resume_session``) so the ``model_supports_auto`` fallback rule can't
-    drift between them (#1111). *explicit* — a caller-supplied
-    ``permission_mode`` — always wins. Otherwise falls back to
-    :data:`SKIP_PERMISSIONS_MODE` when *worker_model* does not support
-    ``auto``; returns ``None`` (letting ``spawn_bg`` apply
-    ``_DEFAULT_PERMISSION_MODE``) when it does.
+    ``resume_session``) so the derivation can't drift between them. *explicit*
+    — a caller-supplied ``permission_mode`` — always wins. Otherwise returns
+    ``None`` for every *worker_model*, letting ``spawn_bg`` apply
+    ``_DEFAULT_PERMISSION_MODE`` (``auto``). *worker_model* is accepted so the
+    call sites keep one signature; the decision no longer depends on it (#3626).
     """
-    if explicit is not None:
-        return explicit
-    if model_supports_auto(worker_model):
-        return None
-    _log.warning(
-        "worker_model %r does not support --permission-mode auto; "
-        "falling back to %s (#1111)",
-        worker_model,
-        SKIP_PERMISSIONS_MODE,
-    )
-    return SKIP_PERMISSIONS_MODE
+    del worker_model  # decision is model-independent (#3626)
+    return explicit
 
 
 # Path to the daemon's roster file. Keys under ``workers`` are short

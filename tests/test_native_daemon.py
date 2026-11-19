@@ -13,14 +13,12 @@ import pytest
 
 from cw.exceptions import ClaudeBinaryNotFoundError, CwError
 from cw.native_daemon import (
-    SKIP_PERMISSIONS_MODE,
     FakeNativeDaemonClient,
     RealNativeDaemonClient,
     WorkerHome,
     _is_native_surface_ref,
     daemon_worker_tmpdir_env,
     get_native_daemon_client,
-    model_supports_auto,
     read_supervisor_resume_session_id,
     resolve_permission_mode,
     wait_for_roster_presence,
@@ -1726,97 +1724,50 @@ class TestWaitForRosterPresence:
         assert sleeps == [0.25]
 
 
-class TestModelSupportsAuto:
-    """model_supports_auto gates ``--permission-mode auto`` by worker_model (#1111)."""
+class TestResolvePermissionModeDefault:
+    """Every worker_model defaults to auto; no per-model bypass fallback (#3626)."""
 
-    def test_none_is_auto_capable(self) -> None:
-        """No pin (None) keeps today's behavior — treated as auto-capable."""
-        assert model_supports_auto(None) is True
+    @pytest.mark.parametrize(
+        "model",
+        [
+            None,
+            "",
+            "claude-opus-5-5",
+            "claude-opus-5-5-20260101",
+            "claude-sonnet-5-6",
+            "claude-fable-5",
+            "claude-mythos-5",
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-6-20251015",
+            "us.anthropic.claude-opus-5-5",
+            "opus",
+            "some-unseen-model-id",
+        ],
+    )
+    def test_every_model_resolves_to_default(self, model: str | None) -> None:
+        assert resolve_permission_mode(model) is None
 
-    def test_empty_string_is_auto_capable(self) -> None:
-        """Falsy value matches the ``if client.worker_model:`` truthiness convention."""
-        assert model_supports_auto("") is True
+    def test_explicit_bypass_wins_over_default(self) -> None:
+        """A caller-supplied permission_mode is the per-call bypass path."""
+        assert (
+            resolve_permission_mode("claude-opus-5-5", explicit="bypassPermissions")
+            == "bypassPermissions"
+        )
 
-    def test_bare_sonnet_alias_is_auto_capable(self) -> None:
-        assert model_supports_auto("claude-sonnet-5") is True
-
-    def test_dated_sonnet_id_is_auto_capable(self) -> None:
-        """Prefix match, not exact-set — dated/suffixed ids still resolve."""
-        assert model_supports_auto("claude-sonnet-4-6-20251015") is True
-
-    def test_opus_is_auto_capable(self) -> None:
-        assert model_supports_auto("claude-opus-4-8") is True
-
-    def test_known_haiku_is_not_auto_capable(self) -> None:
-        assert model_supports_auto("claude-haiku-4-5-20251001") is False
-
-    def test_haiku_5_5_is_auto_capable(self) -> None:
-        assert model_supports_auto("claude-haiku-5-5") is True
-        assert model_supports_auto("claude-haiku-5-5-20260101") is True
-
-    def test_unknown_ids_are_not_auto_capable(self) -> None:
-        """An unrecognized non-None id is conservatively NOT auto-capable."""
-        assert model_supports_auto("claude-fable-5") is False
-        assert model_supports_auto("claude-mythos-5") is False
-
-    def test_case_and_whitespace_insensitive(self) -> None:
-        assert model_supports_auto("  CLAUDE-SONNET-5-x  ") is True
-
-    def test_skip_permissions_mode_literal(self) -> None:
-        """Lock the fallback mode literal."""
-        assert SKIP_PERMISSIONS_MODE == "bypassPermissions"
-
-
-class TestResolvePermissionMode:
-    """resolve_permission_mode: shared derivation for both spawn chokepoints (#1111)."""
-
-    def test_explicit_wins_over_non_auto_model(self) -> None:
-        """A caller-supplied permission_mode always wins over the derivation."""
+    def test_explicit_wins_over_any_model(self) -> None:
         assert (
             resolve_permission_mode("claude-haiku-4-5-20251001", explicit="acceptEdits")
             == "acceptEdits"
         )
 
-    def test_explicit_wins_over_auto_capable_model(self) -> None:
-        assert (
-            resolve_permission_mode("claude-sonnet-5", explicit="acceptEdits")
-            == "acceptEdits"
-        )
-
-    def test_auto_capable_model_returns_none(self) -> None:
-        assert resolve_permission_mode("claude-sonnet-4-6-20251015") is None
-
-    def test_no_pin_returns_none(self) -> None:
-        assert resolve_permission_mode(None) is None
-
-    def test_non_auto_model_returns_skip_mode(self) -> None:
-        assert (
-            resolve_permission_mode("claude-haiku-4-5-20251001")
-            == SKIP_PERMISSIONS_MODE
-        )
-
-    def test_non_auto_model_logs_warning(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """The bypassPermissions fallback is audit-logged, not silent (#1111)."""
-        import logging
-
-        with caplog.at_level(logging.WARNING):
-            resolve_permission_mode("claude-haiku-4-5-20251001")
-
-        assert any(
-            "claude-haiku-4-5-20251001" in rec.message
-            and "bypassPermissions" in rec.message
-            for rec in caplog.records
-        )
-
-    def test_auto_capable_model_does_not_log_warning(
+    def test_no_warning_logged_for_any_model(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         import logging
 
         with caplog.at_level(logging.WARNING):
-            resolve_permission_mode("claude-sonnet-5")
+            resolve_permission_mode("claude-haiku-4-5-20251001")
+            resolve_permission_mode("some-unseen-model-id")
 
         assert caplog.records == []
 
