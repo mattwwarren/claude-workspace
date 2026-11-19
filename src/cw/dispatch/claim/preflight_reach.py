@@ -140,11 +140,17 @@ class ReachReader:
         return self._tools[backend]
 
 
-def _unknown(key: str, probe: BindingProbe) -> Assessment:
+def _unknown(
+    key: str, probe: BindingProbe, tools: ToolCheck | None = None
+) -> Assessment:
     """A read that could not resolve: warn once under *key*, fail open."""
     reason = probe.reason
     return Assessment(
-        ReachState.UNKNOWN, warn=(key, reason), detail=reason, source=probe.source
+        ReachState.UNKNOWN,
+        warn=(key, reason),
+        detail=reason,
+        source=probe.source,
+        tools=tools,
     )
 
 
@@ -180,21 +186,28 @@ def _needs_tickets(backend: str, stage: Stage) -> bool:
 def _assess_plugin(reader: ReachReader, branch: str | None) -> Assessment:
     """claude-native: the branch ``enabledPlugins`` read; tracker not consulted."""
     plugin_id = reader.client.tickets_plugin_id
+    tools = reader.tool_check(CLAUDE_NATIVE_BACKEND, plugin_id or "")
     if plugin_id is None:
-        return Assessment(ReachState.UNBOUND, detail=_UNBOUND_PLUGIN)
+        return Assessment(ReachState.UNBOUND, detail=_UNBOUND_PLUGIN, tools=tools)
     probe = probe_binding(
         CLAUDE_NATIVE_BACKEND, reader.client, branch=branch, root=reader.root
     )
     # A ``None`` branch always probes NO_BRANCH; the test narrows the type.
     if probe.cause is ProbeCause.NO_BRANCH or branch is None:
-        return Assessment(ReachState.NO_BRANCH, detail=probe.reason)
+        return Assessment(ReachState.NO_BRANCH, detail=probe.reason, tools=tools)
     if probe.cause is not ProbeCause.READ:
-        return _unknown(branch, probe)
+        return _unknown(branch, probe, tools)
     if probe.state is Reach.ENABLED:
-        return Assessment(ReachState.REACHABLE, rearm=branch, source=probe.source)
+        return Assessment(
+            ReachState.REACHABLE, rearm=branch, source=probe.source, tools=tools
+        )
     hit = BindingHit(branch, reader.client.tickets_preflight.settings_path, plugin_id)
     return Assessment(
-        ReachState.UNREACHABLE, hit=hit, rearm=branch, source=probe.source
+        ReachState.UNREACHABLE,
+        hit=hit,
+        rearm=branch,
+        source=probe.source,
+        tools=tools,
     )
 
 
@@ -235,8 +248,9 @@ def _assess_server(
         return gated
     probe = reader.server_probe(backend)
     label = f"{backend}:{probe.source}"
+    tools = reader.tool_check(backend, server)
     if probe.state is Reach.UNKNOWN:
-        return _unknown(label, probe)
+        return _unknown(label, probe, tools)
     if probe.state is Reach.ENABLED:
         return _reachable_server(reader, backend, server, branch, probe)
     hit = _server_hit(branch, backend, server, probe)
@@ -246,6 +260,7 @@ def _assess_server(
         rearm=label,
         detail=probe.reason,
         source=probe.source,
+        tools=tools,
     )
 
 

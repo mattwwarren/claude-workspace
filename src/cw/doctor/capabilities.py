@@ -137,20 +137,21 @@ _FIXED_REACH_TEXT: dict[ReachState, str] = {
 def _reach_text(assessment: Assessment) -> str:
     """The tickets-binding clause for one backend's assessment."""
     state = assessment.state
+    tool_line = _tool_line(assessment.tools)
     fixed = _FIXED_REACH_TEXT.get(state)
     if fixed is not None:
-        return fixed
+        return fixed + tool_line
     if state is ReachState.UNBOUND:
-        return f"unbound ({assessment.detail})"
+        return f"unbound ({assessment.detail})" + tool_line
     if state is ReachState.UNKNOWN:
-        return f"unknown ({assessment.detail}; {_DECLARED_ONLY})"
+        return f"unknown ({assessment.detail}; {_DECLARED_ONLY})" + tool_line
     if state is ReachState.UNREACHABLE:
         return (
             f"unreachable (absent or disabled in {assessment.source}:"
-            f" {assessment.detail}; {_DECLARED_ONLY})"
+            f" {assessment.detail}; {_DECLARED_ONLY}){tool_line}"
         )
     text = f"reachable (declared in {assessment.source}; {_UNVERIFIED})"
-    return text + _tool_line(assessment.tools)
+    return text + tool_line
 
 
 def _assess_lane(
