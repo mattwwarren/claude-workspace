@@ -479,10 +479,10 @@ history.
   machine-parsed `VOIDED-REVIEW-FINDINGS` JSON block does not survive redaction (a rewritten
   path changes the void's content fingerprint, and a `token:` shape breaks the JSON).
 
-**Known unrouted in-package posters.** `codex_review_persist._post_review_comment`
-(`src/cw/codex_review_persist.py`) and `cli/dev_queue/resolve.py` post agent, tool or
-operator text through `cw.gh.post_issue_comment` without this seam. They are a known
-unrouted path, tracked as follow-up work.
+**Known unrouted in-package posters.** The two former direct posters, `cw dev-queue
+resolve --post` and `cw dev-queue approve --post-marker`, no longer call
+`cw.gh.post_issue_comment`. Both now enqueue their text through the outbox, and the outbox
+drain delivers it on any tracker, so neither is an unrouted path any more (RFC 0019 O3b).
 
 ---
 

@@ -1513,6 +1513,40 @@ class TestFetchApprovedPlanComment:
         result = fetch_approved_plan_comment("896")
         assert result == new_plan
 
+    def test_queued_but_undelivered_newer_round_leaves_the_reader_on_the_previous_round(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RFC 0019 R7: round 2 is queued in the outbox, so the thread still
+        holds only round 1 and the reader returns it until the drain delivers."""
+        round_one = "plan round 1\n<!-- plan-spec-reviewed: 2026-01-01 v1 -->"
+        comments = [
+            {"body": "unrelated chatter", "author": {"login": "someone-else"}},
+            {"body": round_one, "author": {"login": "mattwwarren"}},
+        ]
+        calls: list[list[str]] = []
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            self._make_dispatched_run(comments, "mattwwarren", calls),
+        )
+
+        result = fetch_approved_plan_comment("896")
+
+        assert result == round_one
+        assert "round 2" not in (result or "")
+        assert any("comments" in argv for argv in calls)
+
+    def test_no_marker_comment_yet_returns_none_so_callers_use_the_plan_file(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round 1 itself still queued: nothing on the thread, reader says None."""
+        comments = [{"body": "chatter", "author": {"login": "mattwwarren"}}]
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            self._make_dispatched_run(comments, "mattwwarren"),
+        )
+
+        assert fetch_approved_plan_comment("896") is None
+
     def test_no_matching_comments_returns_none(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

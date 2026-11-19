@@ -4,7 +4,7 @@
 every review pass reads first on every tracker. When the row cannot be
 recorded the outcome depends on the client's tracker (R1): a client whose
 ``tracking.primary.system`` is exactly ``github-issues`` degrades to
-mirror-only, because the GitHub review pass reads the printed marker back;
+mirror-only, because the GitHub review pass reads the queued marker back;
 every other tracker, and an unresolvable one, fails, because a marker no
 review pass reads would be inert. The table below drives every failure mode
 across every tracker shape.
@@ -12,6 +12,7 @@ across every tracker shape.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -26,7 +27,11 @@ from cw.codex_review import _prepare_review_pass
 from cw.codex_runner import FakeCodexRunner
 from cw.dev_queue import find_ticket_row, load_dev_queue
 from cw.events import read_events
+from cw.gh import agent_marked_body
 from cw.models import QueueItemStatus
+from cw.outbox import MAX_PART_CHARS
+from cw.outbox_drain import part_marker_line
+from cw.outbox_producer import SKIP_ENQUEUE_FAILED, EnqueueOutcome
 from cw.review_finding_dispositions import (
     FindingDisposition,
     _disposition_key,
@@ -43,6 +48,8 @@ from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._shared.cli_preflight import _write_project_config_yaml
 from tests._shared.git_repos import git_in
 from tests._shared.lock_helpers import _hold_flock
+from tests._shared.outbox_builders import ProducedEntry, entries_for
+from tests._tool_fakes import FakeGhCli
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -129,6 +136,25 @@ def _rows() -> list[TicketTask]:
     ]
 
 
+def _queued() -> list[ProducedEntry]:
+    """Every ``review-settle`` entry queued for the test ticket, oldest first."""
+    return entries_for(_CLIENT, ticket=_TICKET, producer="review-settle")
+
+
+def _queued_block() -> str:
+    """The one disposition block the settle queued: a single, unsplit part."""
+    (produced,) = _queued()
+    (part,) = produced.parts
+    return part
+
+
+def _queued_line(entry_id: str) -> str:
+    return (
+        f"settle: queued the disposition marker for {_TICKET} ({_CLIENT})"
+        f" (outbox entry {entry_id}).\n"
+    )
+
+
 def _arrange_failure(case: str, monkeypatch: pytest.MonkeyPatch) -> str:
     """Arrange *case* and return the reason text the output must carry."""
     if case == "missing_row":
@@ -179,8 +205,11 @@ class TestRowCannotBeRecorded:
         result = _invoke_case(case, runner, out)
 
         assert result.exit_code == 0, result.output
-        assert result.stdout.startswith(_MARKER_HEADING)
-        ledger, refused = parse_finding_disposition_block([result.stdout])
+        (produced,) = _queued()
+        assert result.stdout == _queued_line(produced.entry.id)
+        block = _queued_block()
+        assert block.startswith(_MARKER_HEADING)
+        ledger, refused = parse_finding_disposition_block([block])
         assert refused == []
         assert len(ledger) == 1
         stderr = " ".join(result.stderr.split())
@@ -190,7 +219,13 @@ class TestRowCannotBeRecorded:
         assert reason in stderr
         assert f"ticket '{_TICKET}'" in stderr
         assert f"client '{_CLIENT}'" in stderr
-        assert out.exists()
+        assert (
+            "The queued marker comment is the only record of it: the GitHub codex"
+            " lane reads it back and folds it into the row on the next review"
+            " pass, and `cw review dispositions` will not list it until then."
+        ) in stderr
+        assert "marker on stdout" not in stderr
+        assert out.read_text(encoding="utf-8") == block
         assert len(read_events()) == 1
         assert all(row.finding_dispositions == {} for row in _rows())
 
@@ -207,10 +242,12 @@ class TestRowCannotBeRecorded:
         assert result.stdout == ""
         assert not out.exists()
         assert read_events() == []
+        assert entries_for(_CLIENT) == []
         stderr = " ".join(result.stderr.split())
         assert "Cannot record this settle: No dev-queue task found" in stderr
         assert _TRACKERS[tracker][2] in stderr
         assert "Nothing was recorded" in stderr
+        assert "a posted marker is never read back" in stderr
 
     @pytest.mark.parametrize("case", ["oserror_on_save", "lock_timeout"])
     @pytest.mark.parametrize("tracker", _NON_GITHUB)
@@ -232,12 +269,14 @@ class TestRowCannotBeRecorded:
         assert result.stdout == ""
         assert not out.exists()
         assert len(read_events()) == 1
+        assert entries_for(_CLIENT) == []
         stderr = " ".join(result.stderr.split())
         assert (
             "The settle audit events were recorded, but the dev-queue row write failed"
         ) in stderr
         assert reason in stderr
         assert _TRACKERS[tracker][2] in stderr
+        assert "No marker was queued and no --out file was written" in stderr
         assert all(row.finding_dispositions == {} for row in _rows())
 
     def test_a_row_that_vanishes_after_the_preflight_fails_non_github(
@@ -260,6 +299,7 @@ class TestRowCannotBeRecorded:
         assert "the dev-queue row write failed: No dev-queue task found" in stderr
         assert not out.exists()
         assert len(read_events()) == 1
+        assert entries_for(_CLIENT) == []
 
 
 class TestRecordedOnTheRow:
@@ -275,7 +315,7 @@ class TestRecordedOnTheRow:
 
         assert result.exit_code == 0, result.output
         assert result.stderr == ""
-        ledger, refused = parse_finding_disposition_block([result.stdout])
+        ledger, refused = parse_finding_disposition_block([_queued_block()])
         assert refused == []
         assert _rows()[0].finding_dispositions == ledger
         assert parse_finding_disposition_block([out.read_text(encoding="utf-8")])[
@@ -328,7 +368,8 @@ class TestRecordedOnTheRow:
             f"Note: ticket '{_TICKET}' only has a terminal row ({status.value})"
         ) in stderr
         assert "re-run this settle on the new row" in stderr
-        assert result.stdout.startswith(_MARKER_HEADING)
+        assert _queued_block().startswith(_MARKER_HEADING)
+        assert "Note:" not in _queued_block()
         assert "Note:" not in result.stdout
         assert len(_rows()[0].finding_dispositions) == 1
 
@@ -402,6 +443,190 @@ class TestRecordedOnTheRow:
         assert result.stdout == ""
         assert not out.exists()
         assert read_events() == []
+        assert entries_for(_CLIENT) == []
+
+
+class TestEnqueuedMarker:
+    """``enqueue_settle_marker``: the block is queued, never printed (RFC 0019 O3b)."""
+
+    @freeze_time("2026-11-19T12:00:00Z")
+    def test_settle_enqueues_review_settle_entry(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        _configure("github", tmp_path)
+        _seed_review_row(_TICKET, _CLIENT)
+        out = tmp_path / "marker.md"
+
+        result = _settle(runner, out, None, "-c", _CLIENT)
+
+        assert result.exit_code == 0, result.output
+        rendered = out.read_text(encoding="utf-8")
+        (produced,) = _queued()
+        entry = produced.entry
+        assert entry.producer == "review-settle"
+        assert entry.marker == (
+            f"settle-{hashlib.sha256(rendered.encode()).hexdigest()[:24]}"
+        )
+        assert entry.operator_authored is False
+        assert entry.redacted is False
+        assert produced.parts == [rendered]
+        assert produced.parts[0].startswith(_MARKER_HEADING)
+        assert result.stdout == _queued_line(entry.id)
+        assert _MARKER_HEADING not in result.stdout
+        assert result.stderr == ""
+
+    @freeze_time("2026-11-19T12:00:00Z")
+    def test_settle_part_opens_the_delivered_comment_body(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """R7: the drain appends its lines after the part, so the anchor holds."""
+        _configure("github", tmp_path)
+        _seed_review_row(_TICKET, _CLIENT)
+        assert _settle(runner, tmp_path / "m.md", None, "-c", _CLIENT).exit_code == 0
+        (produced,) = _queued()
+        (part,) = produced.parts
+        delivered = agent_marked_body(
+            f"{part}\n\n{part_marker_line(produced.entry.marker, 1, 1)}"
+        )
+
+        ledger, refused = parse_finding_disposition_block([delivered])
+
+        assert refused == []
+        assert ledger == _rows()[0].finding_dispositions
+        assert len(ledger) == 1
+
+    def test_settle_rerun_with_fresh_recorded_at_is_a_new_entry(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        _configure("github", tmp_path)
+        _seed_review_row(_TICKET, _CLIENT)
+        out = tmp_path / "marker.md"
+        with freeze_time("2026-11-19T12:00:00Z"):
+            assert _settle(runner, out, None, "-c", _CLIENT).exit_code == 0
+        with freeze_time("2026-11-19T13:00:00Z"):
+            second = _settle(runner, out, None, "-c", _CLIENT)
+
+        assert second.exit_code == 0, second.output
+        first_entry, second_entry = _queued()
+        assert first_entry.entry.marker != second_entry.entry.marker
+        assert "2026-11-19T12:00:00Z" in first_entry.parts[0]
+        assert "2026-11-19T13:00:00Z" in second_entry.parts[0]
+        assert second.stdout == _queued_line(second_entry.entry.id)
+
+    @freeze_time("2026-11-19T12:00:00Z")
+    def test_settle_retry_of_same_render_dedups(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        _configure("github", tmp_path)
+        _seed_review_row(_TICKET, _CLIENT)
+        out = tmp_path / "marker.md"
+        assert _settle(runner, out, None, "-c", _CLIENT).exit_code == 0
+        (produced,) = _queued()
+
+        retry = _settle(runner, out, None, "-c", _CLIENT)
+
+        assert retry.exit_code == 0, retry.output
+        assert len(_queued()) == 1
+        assert retry.stdout == (
+            f"settle: the disposition marker for {_TICKET} ({_CLIENT}) is already"
+            f" queued (entry {produced.entry.id}, state pending) — no duplicate"
+            " queued.\n"
+        )
+
+    @pytest.mark.parametrize("failure", ["enqueue", "marker"])
+    def test_settle_enqueue_failure_warns_and_exits_zero(
+        self,
+        failure: str,
+        runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        _configure("linear", tmp_path)
+        _seed_review_row(_TICKET, _CLIENT)
+        if failure == "enqueue":
+            monkeypatch.setattr(
+                "cw.cli.review._settle_store.enqueue_prose",
+                lambda *_a, **_k: EnqueueOutcome(None, False, SKIP_ENQUEUE_FAILED),
+            )
+        else:
+            monkeypatch.setattr(
+                "cw.cli.review._settle_store.try_content_marker",
+                lambda *_a, **_k: None,
+            )
+        out = tmp_path / "marker.md"
+
+        result = _settle(runner, out, None, "-c", _CLIENT)
+
+        assert result.exit_code == 0, result.output
+        assert result.stdout == ""
+        assert result.stderr == (
+            f"settle: could not queue the disposition marker for {_TICKET}"
+            f" ({_CLIENT}) (outbox_enqueue_failed); the settle is recorded on the"
+            " row regardless.\n"
+        )
+        assert _queued() == []
+        assert len(_rows()[0].finding_dispositions) == 1
+        assert out.read_text(encoding="utf-8").startswith(_MARKER_HEADING)
+
+    def test_settle_over_cap_ledger_warns_and_never_splits(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        _configure("linear", tmp_path)
+        _seed_review_row(_TICKET, _CLIENT)
+        out = tmp_path / "marker.md"
+        payload = _settle_payload(_settle_entry(summary="x" * (MAX_PART_CHARS + 1)))
+
+        result = _settle(runner, out, payload, "-c", _CLIENT)
+
+        assert result.exit_code == 0, result.output
+        rendered = out.read_text(encoding="utf-8")
+        assert len(rendered) > MAX_PART_CHARS
+        assert result.stdout == ""
+        assert result.stderr == (
+            f"settle: the rendered ledger is {len(rendered)} characters, over the"
+            f" {MAX_PART_CHARS}-character part cap, so it was not queued (the"
+            " block must open the comment body, so it is never split). Settle"
+            " fewer findings per call, or post the --out file by hand.\n"
+        )
+        assert entries_for(_CLIENT) == []
+        assert len(_rows()[0].finding_dispositions) == 1
+
+    def test_settle_outbox_disabled_still_enqueues(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        workspace = _configure("linear", tmp_path)
+        write_clients_yaml(
+            ClientSpec(
+                _CLIENT, workspace_path=workspace, extra={"outbox": {"enabled": False}}
+            )
+        )
+        _seed_review_row(_TICKET, _CLIENT)
+
+        result = _settle(runner, tmp_path / "marker.md", None, "-c", _CLIENT)
+
+        assert result.exit_code == 0, result.output
+        (produced,) = _queued()
+        assert result.stdout == _queued_line(produced.entry.id)
+        assert produced.parts[0].startswith(_MARKER_HEADING)
+
+    @pytest.mark.parametrize("tracker", ["linear", "no-project-config"])
+    def test_settle_linear_queues_without_gh(
+        self,
+        tracker: str,
+        runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        _configure(tracker, tmp_path)
+        _seed_review_row(_TICKET, _CLIENT)
+        gh = FakeGhCli().install(monkeypatch)
+
+        result = _settle(runner, tmp_path / "marker.md", None, "-c", _CLIENT)
+
+        assert result.exit_code == 0, result.output
+        (produced,) = _queued()
+        assert result.stdout == _queued_line(produced.entry.id)
+        assert gh.records == []
 
 
 class TestNoTrackerIO:

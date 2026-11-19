@@ -8,7 +8,7 @@ itself run inside a headless dispatch worker.
 
 from __future__ import annotations
 
-import subprocess
+import hashlib
 import sys
 from typing import TYPE_CHECKING
 
@@ -16,15 +16,23 @@ import click
 import pytest
 
 from cw.cli.dev_queue._settle import SettleOutcome
-from cw.codex_fix_loop.constraints import RESOLUTIONS_MARKER
+from cw.codex_fix_loop.constraints import RESOLUTIONS_MARKER, select_constraint_comment
 from cw.dev_queue import load_dev_queue
 from cw.dev_queue.operator_resolutions import MAX_RESOLUTION_BYTES
 from cw.events import read_events
 from cw.exceptions import CwError
-from cw.gh import AGENT_COMMENT_MARKER
-from cw.models import OrchestratorEventType, QueueItemStatus, Stage
+from cw.gh import AGENT_COMMENT_MARKER, agent_marked_body
+from cw.models import DEFAULT_LANE, OrchestratorEventType, QueueItemStatus, Stage
+from cw.outbox import MAX_PART_CHARS
+from cw.outbox_drain import part_marker_line
+from cw.outbox_producer import SKIP_BODY_TOO_LONG, SKIP_ENQUEUE_FAILED, EnqueueOutcome
 from cw.plan_fingerprint import compute_plan_draft_fingerprint
-from tests._cli_review_helpers import _enter_operator_machine, _write_session_context
+from tests._cli_review_helpers import (
+    _OPERATOR,
+    _enter_operator_machine,
+    _write_session_context,
+)
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._loop_identity_helpers import (
     COMMIT_A,
     COMMIT_B,
@@ -32,6 +40,7 @@ from tests._loop_identity_helpers import (
     write_loop_record,
 )
 from tests._shared.cli_preflight import _write_project_config_yaml
+from tests._shared.outbox_builders import entries_for
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -43,6 +52,7 @@ from tests._ticket_view_helpers import (
     patch_roster,
     seed_queue,
 )
+from tests._tool_fakes import FakeGhCli
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -51,6 +61,7 @@ if TYPE_CHECKING:
     from click.testing import Result
 
     from cw.models import OrchestratorEvent, TicketTask
+    from tests._shared.outbox_builders import ProducedEntry
 
 _FINGERPRINT = "b" * 64
 _GATE: dict[str, object] = {
@@ -146,26 +157,25 @@ class TestTotalCap:
         )
 
 
-def _record_posts(
-    monkeypatch: pytest.MonkeyPatch, returncode: int | None = 0
-) -> list[tuple[str, str, dict[str, object]]]:
-    calls: list[tuple[str, str, dict[str, object]]] = []
-
-    def _fake(
-        ticket_id: str, body: str, **kwargs: object
-    ) -> subprocess.CompletedProcess[bytes] | None:
-        calls.append((ticket_id, body, kwargs))
-        if returncode is None:
-            return None
-        return subprocess.CompletedProcess(args=[], returncode=returncode)
-
-    monkeypatch.setattr("cw.cli.dev_queue.resolve.post_issue_comment", _fake)
-    return calls
-
-
 def _no_gh(*_a: object, **_k: object) -> None:
     msg = "gh must not be called"
     raise AssertionError(msg)
+
+
+def _relay_part(round_: int = 1, text: str = _DECISIONS) -> str:
+    """The queued relay body, spelled out independently of ``_relay_body``."""
+    return (
+        f"### Operator resolutions (round {round_}, recorded via cw)\n\n"
+        f"{text}\n\n{RESOLUTIONS_MARKER}"
+    )
+
+
+def _relay_marker(part: str, round_: int = 1) -> str:
+    return f"resolve-r{round_}-{hashlib.sha256(part.encode()).hexdigest()[:16]}"
+
+
+def _queued() -> list[ProducedEntry]:
+    return entries_for(ACME, ticket=ACME_TICKET, producer="resolve-post")
 
 
 class TestHappyPath:
@@ -267,7 +277,7 @@ class TestLinear:
     ) -> None:
         _write_project_config_yaml(tmp_path / "ws", _LINEAR_CONFIG)
         _seed(_GATE)
-        monkeypatch.setattr("cw.cli.dev_queue.resolve.post_issue_comment", _no_gh)
+        gh = FakeGhCli().install(monkeypatch)
         monkeypatch.setattr("cw.gh.fetch_issue_comments", _no_gh)
         monkeypatch.setattr(
             "cw.dev_queue.lifecycle.fetch_approved_plan_comment", _no_gh
@@ -278,30 +288,18 @@ class TestLinear:
         row = _row()
         assert row.status == QueueItemStatus.PENDING
         assert [e.text for e in row.operator_resolutions] == [_DECISIONS]
-        if "--post" in extra:
-            assert "not GitHub" in result.output
-
-    def test_linear_post_skip_message_is_exact_and_on_stdout(
-        self, tmp_path: Path, decisions: Path
-    ) -> None:
-        """Pins the whole skip line (#2732): the shared gate must not drift it."""
-        _write_project_config_yaml(tmp_path / "ws", _LINEAR_CONFIG)
-        _seed()
-        result = _resolve(decisions, "--post")
-        assert result.exit_code == 0, result.output
-        assert (
-            f"--post: tracker is 'linear', not GitHub — the relay block is not"
-            f" posted to {ACME_TICKET} ({ACME}). The resolutions are recorded"
-            " on the dev-queue row, which the plan stage reads.\n"
-        ) in result.stdout
-        assert "not GitHub" not in result.stderr
+        assert gh.records == []
+        assert len(_queued()) == ("--post" in extra)
+        assert "not GitHub" not in result.output
 
 
 class TestPost:
     @pytest.mark.parametrize(
-        "config", [None, _GITHUB_CONFIG], ids=["unresolved", "github"]
+        "config",
+        [None, _GITHUB_CONFIG, _LINEAR_CONFIG],
+        ids=["unresolved", "github", "linear"],
     )
-    def test_posts_once_without_the_agent_marker(
+    def test_post_enqueues_resolve_entry(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -311,78 +309,155 @@ class TestPost:
         if config is not None:
             _write_project_config_yaml(tmp_path / "ws", config)
         _seed()
-        calls = _record_posts(monkeypatch)
+        gh = FakeGhCli().install(monkeypatch)
         result = _resolve(decisions, "--post")
         assert result.exit_code == 0, result.output
-        ((ticket_id, body, kwargs),) = calls
-        assert ticket_id == ACME_TICKET
-        assert _DECISIONS in body
-        assert RESOLUTIONS_MARKER in body
-        assert AGENT_COMMENT_MARKER not in body
-        assert kwargs.get("operator_authored", False) is False
-
-    @pytest.mark.parametrize("returncode", [None, 1], ids=["no-result", "nonzero"])
-    def test_failed_post_warns_and_exits_zero(
-        self, monkeypatch: pytest.MonkeyPatch, decisions: Path, returncode: int | None
-    ) -> None:
-        _seed()
-        _record_posts(monkeypatch, returncode=returncode)
-        result = _resolve(decisions, "--post")
-        assert result.exit_code == 0, result.output
-        assert "failed to post" in result.stderr
-        assert len(_row().operator_resolutions) == 1
-
-    def test_posted_message_is_exact_and_on_stdout(
-        self, monkeypatch: pytest.MonkeyPatch, decisions: Path
-    ) -> None:
-        """Pins the whole success line (#2732)."""
-        _seed()
-        _record_posts(monkeypatch)
-        result = _resolve(decisions, "--post")
-        assert result.exit_code == 0, result.output
+        part = _relay_part()
+        (produced,) = _queued()
+        entry = produced.entry
+        assert entry.producer == "resolve-post"
+        assert entry.marker == _relay_marker(part)
+        assert entry.operator_authored is False
+        assert entry.redacted is False
+        assert produced.parts == [part]
+        assert AGENT_COMMENT_MARKER not in produced.parts[0]
         assert (
-            f"--post: posted the relay block to {ACME_TICKET} ({ACME}).\n"
+            f"--post: queued the relay block for {ACME_TICKET} ({ACME})"
+            f" (outbox entry {entry.id}).\n"
         ) in result.stdout
-        assert "--post: posted" not in result.stderr
+        assert "--post:" not in result.stderr
+        assert gh.records == []
 
-    @pytest.mark.parametrize("returncode", [None, 1], ids=["no-result", "nonzero"])
-    def test_failed_message_is_exact_and_on_stderr(
-        self, monkeypatch: pytest.MonkeyPatch, decisions: Path, returncode: int | None
+    @pytest.mark.parametrize("failure", ["enqueue", "marker"])
+    def test_failed_enqueue_warns_and_exits_zero(
+        self, monkeypatch: pytest.MonkeyPatch, decisions: Path, failure: str
     ) -> None:
-        """Pins the whole failure line and its stream (#2732)."""
         _seed()
-        _record_posts(monkeypatch, returncode=returncode)
+        if failure == "enqueue":
+            monkeypatch.setattr(
+                "cw.cli.dev_queue.resolve.enqueue_prose",
+                lambda *_a, **_k: EnqueueOutcome(None, False, SKIP_ENQUEUE_FAILED),
+            )
+        else:
+            monkeypatch.setattr(
+                "cw.cli.dev_queue.resolve.try_content_marker", lambda *_a, **_k: None
+            )
         result = _resolve(decisions, "--post")
         assert result.exit_code == 0, result.output
         assert (
-            f"--post: failed to post the relay block to {ACME_TICKET} ({ACME})"
-            " — see the gh error above. The resolution is recorded on the row"
+            f"--post: could not queue the relay block for {ACME_TICKET} ({ACME})"
+            " (outbox_enqueue_failed); the resolution is recorded on the row"
             " regardless.\n"
         ) in result.stderr
-        assert "failed to post" not in result.stdout
+        assert "--post:" not in result.stdout
+        assert len(_row().operator_resolutions) == 1
+        assert _queued() == []
 
-    def test_duplicate_rerun_skips_the_post(
+    def test_over_cap_relay_block_warns_and_exits_zero(self, tmp_path: Path) -> None:
+        _seed()
+        path = tmp_path / "big.md"
+        path.write_text("x" * (MAX_PART_CHARS + 1), encoding="utf-8")
+        result = _resolve(path, "--post")
+        assert result.exit_code == 0, result.output
+        assert (
+            f"--post: could not queue the relay block for {ACME_TICKET} ({ACME})"
+            f" ({SKIP_BODY_TOO_LONG}); the resolution is recorded on the row"
+            " regardless.\n"
+        ) in result.stderr
+        assert _queued() == []
+        assert len(_row().operator_resolutions) == 1
+
+    def test_duplicate_rerun_echoes_the_entry(
         self, monkeypatch: pytest.MonkeyPatch, decisions: Path
     ) -> None:
         _seed()
         patch_roster(monkeypatch, {_SURFACE})
-        calls = _record_posts(monkeypatch)
         first = _resolve(decisions, "--post")
         assert first.exit_code != 0
-        assert len(calls) == 1
+        (produced,) = _queued()
         patch_roster(monkeypatch, set())
         second = _resolve(decisions, "--post")
         assert second.exit_code == 0, second.output
-        assert len(calls) == 1
-        assert "Skipped --post: identical to the latest recorded entry" in second.output
+        assert len(_queued()) == 1
+        assert (
+            f"--post: the relay block for {ACME_TICKET} ({ACME}) is already queued"
+            f" (entry {produced.entry.id}, state pending) — no duplicate queued.\n"
+        ) in second.stdout
+        assert "Skipped --post" not in second.output
+        assert "--post: queued" not in second.stdout
 
-    def test_no_post_flag_posts_nothing(
-        self, monkeypatch: pytest.MonkeyPatch, decisions: Path
-    ) -> None:
+    def test_second_round_is_a_new_entry(self, tmp_path: Path, decisions: Path) -> None:
         _seed()
-        monkeypatch.setattr("cw.cli.dev_queue.resolve.post_issue_comment", _no_gh)
+        assert _resolve(decisions, "--post").exit_code == 0
+        reparked = _row()
+        reparked.status = QueueItemStatus.BLOCKED_ON_USER
+        reparked.session_id = "sess-1"
+        seed_queue([reparked])
+        second = tmp_path / "second.md"
+        second.write_text("3. A new answer.\n", encoding="utf-8")
+        assert _resolve(second, "--post").exit_code == 0
+        assert [p.entry.marker for p in _queued()] == [
+            _relay_marker(_relay_part()),
+            _relay_marker(_relay_part(2, "3. A new answer."), 2),
+        ]
+
+    def test_no_post_flag_enqueues_nothing(self, decisions: Path) -> None:
+        _seed()
         result = _resolve(decisions)
         assert result.exit_code == 0, result.output
+        assert entries_for(ACME) == []
+        assert "--post:" not in result.output
+
+    def test_outbox_disabled_still_enqueues(
+        self, tmp_path: Path, decisions: Path
+    ) -> None:
+        write_clients_yaml(
+            ClientSpec(
+                ACME,
+                tmp_path / "ws",
+                lanes=[{"name": DEFAULT_LANE}, {"name": "fast"}],
+                extra={"outbox": {"enabled": False}},
+            ),
+            ensure_workspaces=True,
+        )
+        _seed()
+        result = _resolve(decisions, "--post")
+        assert result.exit_code == 0, result.output
+        (produced,) = _queued()
+        assert produced.parts == [_relay_part()]
+
+    def test_queued_resolutions_comment_is_never_a_binding_constraint(
+        self, decisions: Path
+    ) -> None:
+        """R7: the delivered mirror carries the agent marker, so it never binds."""
+        _seed()
+        assert _resolve(decisions, "--post").exit_code == 0
+        (produced,) = _queued()
+        (part,) = produced.parts
+        assert RESOLUTIONS_MARKER in part
+        delivered = agent_marked_body(
+            f"{part}\n\n{part_marker_line(produced.entry.marker, 1, 1)}"
+        )
+        comment: dict[str, object] = {
+            "body": delivered,
+            "author": {"login": _OPERATOR},
+            "createdAt": "2026-11-19T00:00:00Z",
+        }
+        assert (
+            select_constraint_comment(
+                [comment], operator_login=_OPERATOR, ticket_text=None
+            )
+            is None
+        )
+        # Control: the same text without the agent marker (an operator-authored
+        # comment) is what binds, so the None above comes from the marker.
+        operator_comment = {**comment, "body": part}
+        assert (
+            select_constraint_comment(
+                [operator_comment], operator_login=_OPERATOR, ticket_text=None
+            )
+            == operator_comment
+        )
 
 
 class TestFileErrors:

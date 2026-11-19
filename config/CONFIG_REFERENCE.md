@@ -1229,7 +1229,7 @@ lanes:
   login, so a resolutions comment it writes (without the
   `<!-- cw-agent-authored -->` marker) counts as operator-written; the
   mechanism is unchanged (ADR-0020), and for plan approvals the orchestrator
-  uses `cw dev-queue approve --post-marker`. Sentences such as "do not add `foo_bar`" or
+  queues the audit marker with `cw dev-queue approve --post-marker`. Sentences such as "do not add `foo_bar`" or
   "no new lock" become forbidden tokens or detector kinds, and a cycle that
   **introduces** one in non-test source (a new file at that path, a new
   identifier, or a net-new lock or state file) parks. Mentioning a token in
@@ -2421,8 +2421,8 @@ finalize force-hold: the orchestrator notifies the human and never approves it
 itself (ADR-0020). Nor do they release a row that is not at the gate's own stage, and the review
 recipe never releases a row with an armed finalize hold. Dispatch does not
 page (`session.needs_attention`) for a Large park a recipe will release on the
-next reconcile tick. Each release emits `gate.auto_approved` and posts an
-audit comment on the ticket.
+next reconcile tick. Each release emits `gate.auto_approved` and queues an
+audit comment on the ticket through the outbox.
 
 Whether a recipe fires for a given ticket is resolved with 3-tier precedence,
 highest first:

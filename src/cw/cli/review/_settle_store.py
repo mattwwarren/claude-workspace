@@ -5,13 +5,18 @@ every review pass reads first on every tracker. This module owns what happens
 when that row cannot be recorded, which depends on the client's tracker (R1):
 
 - **GitHub-tracked** (``tracking.primary.system`` is exactly
-  ``github-issues``): degrade to mirror-only. The marker still prints, with a
+  ``github-issues``): degrade to mirror-only. The marker is still queued, with a
   loud stderr WARNING, because the GitHub review pass reads it back off the
   thread and folds it into the row.
 - **Anything else** (linear, jira, an unset or unreadable project-config, a
   client missing from ``clients.yaml``): fail with a non-zero exit and no
-  marker. Nothing reads a marker there, so printing one would be the inert
+  marker. Nothing reads a marker there, so queuing one would be the inert
   settle this ticket removes.
+
+Once the row is recorded (or degraded on GitHub), :func:`enqueue_settle_marker`
+queues the rendered block as the ticket's disposition comment through the
+outbox (RFC 0019 O3b). It is the last mirror step, never raises, and never
+changes the exit status.
 
 The polarity is the strict one the codex review pass's snapshot context
 (``ticket_snapshot._binding.context_for_client``) uses: it reads a marker back
@@ -27,6 +32,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple
 
+import click
+
 from cw.config import get_client
 from cw.dev_queue.review_records import (
     TERMINAL_ROW_STATUSES,
@@ -34,6 +41,16 @@ from cw.dev_queue.review_records import (
     record_finding_dispositions,
 )
 from cw.exceptions import CwError
+from cw.outbox import MAX_PART_CHARS
+from cw.outbox_producer import (
+    SKIP_ALREADY_POSTED,
+    SKIP_BODY_TOO_LONG,
+    SKIP_ENQUEUE_FAILED,
+    EnqueueOutcome,
+    enqueue_prose,
+    entry_state_label,
+    try_content_marker,
+)
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
@@ -41,22 +58,23 @@ if TYPE_CHECKING:
 
 _DEGRADED_WARNING = (
     "WARNING: this settle was NOT recorded on the cw dev-queue row for ticket "
-    "'{ticket}' (client '{client}'): {reason}. The marker on stdout is the only "
-    "record of it, so post it as its own comment, unedited: the GitHub codex "
-    "lane reads it back and folds it into the row on the next review pass, and "
-    "`cw review dispositions` will not list it until then."
+    "'{ticket}' (client '{client}'): {reason}. The queued marker comment is the "
+    "only record of it: the GitHub codex lane reads it back and folds it into "
+    "the row on the next review pass, and `cw review dispositions` will not "
+    "list it until then."
 )
 _NO_ROW_REFUSAL = (
     "Cannot record this settle: {reason} Tracker for client '{client}' is "
-    "{tracker_label}, not github-issues, so a printed marker is never read "
+    "{tracker_label}, not github-issues, so a posted marker is never read "
     "back and the settle would be inert. Nothing was recorded: no audit event, "
     "no marker, no --out file. Enqueue the ticket and re-run the same payload."
 )
 _WRITE_FAILED = (
     "The settle audit events were recorded, but the dev-queue row write "
     "failed: {reason}. Tracker for client '{client}' is {tracker_label}, not "
-    "github-issues, so a printed marker would never be read back and the "
-    "settle would be inert. No marker and no --out file were written. Re-run "
+    "github-issues, so a posted marker would never be read back and the "
+    "settle would be inert. No marker was queued and no --out file was written. "
+    "Re-run "
     "the same payload once the cause is fixed."
 )
 _TERMINAL_ROW_NOTE = (
@@ -70,6 +88,8 @@ _NOT_APPLIED_NOTE = (
     "already holds a newer record for the same key: {keys}. Check "
     "`cw review dispositions {ticket} -c {client}`."
 )
+#: Digest characters kept in the settle marker: sha256 of the rendered block.
+_SETTLE_MARKER_DIGEST_CHARS = 24
 #: ``tracker_label`` when the project-config names no tracker system.
 _UNSET_TRACKER_LABEL = "unset (no tracking.primary.system in its project-config)"
 #: ``tracker_label`` when the client itself cannot be resolved.
@@ -200,3 +220,56 @@ def settle_stderr_lines(
         )
     lines.extend(outcome.notes)
     return lines
+
+
+def enqueue_settle_marker(
+    rendered: str, ticket: str, client: str, row_outcome: SettleRowOutcome
+) -> None:
+    """Queue *rendered* as the disposition marker comment, and echo the outcome.
+
+    The block is one part, never split: it must open the delivered comment
+    body for ``parse_finding_disposition_block``. The marker is the digest of
+    the block, so a retry of the same render dedups and a re-settle with a
+    fresh ``recorded_at`` is a new entry. Every outcome is echoed and none
+    raises: stdout names the queued entry, stderr names a failure or an
+    over-cap ledger, and the exit status is unchanged.
+    """
+    marker = try_content_marker("settle", rendered, chars=_SETTLE_MARKER_DIGEST_CHARS)
+    if marker is None:
+        outcome = EnqueueOutcome(None, False, SKIP_ENQUEUE_FAILED)
+    else:
+        outcome = enqueue_prose(client, ticket, "review-settle", marker, (rendered,))
+    if outcome.created:
+        click.echo(
+            f"settle: queued the disposition marker for {ticket} ({client})"
+            f" (outbox entry {outcome.entry_id})."
+        )
+        return
+    if outcome.skipped_reason == SKIP_ALREADY_POSTED:
+        state = entry_state_label(client, outcome.entry_id or "")
+        click.echo(
+            f"settle: the disposition marker for {ticket} ({client}) is already"
+            f" queued (entry {outcome.entry_id}, state {state}) — no duplicate"
+            " queued."
+        )
+        return
+    if outcome.skipped_reason == SKIP_BODY_TOO_LONG:
+        click.echo(
+            f"settle: the rendered ledger is {len(rendered)} characters, over the"
+            f" {MAX_PART_CHARS}-character part cap, so it was not queued (the"
+            " block must open the comment body, so it is never split). Settle"
+            " fewer findings per call, or post the --out file by hand.",
+            err=True,
+        )
+        return
+    row_status = (
+        "the settle was not recorded on the row because row recording had already"
+        " degraded"
+        if row_outcome.degraded_reason is not None
+        else "the settle is recorded on the row regardless"
+    )
+    click.echo(
+        f"settle: could not queue the disposition marker for {ticket} ({client})"
+        f" ({outcome.skipped_reason}); {row_status}.",
+        err=True,
+    )

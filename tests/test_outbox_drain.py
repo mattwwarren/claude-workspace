@@ -1048,6 +1048,40 @@ class TestRunLoop:
         )
         assert len(gh.comment_records()) == 1
 
+    def test_reenqueued_plan_approved_marker_dedups_on_the_marker(
+        self, tmp_path: Path, gh: GhThread
+    ) -> None:
+        fingerprint = "ab" * 32
+        marker = f"plan-approved-{fingerprint}"
+        part = f"<!-- auto-dev-plan-approved: {fingerprint} -->"
+        entry = enqueue(
+            ticket="9",
+            marker=marker,
+            producer="approve-post-marker",
+            parts=(part,),
+            operator_authored=True,
+        ).entry
+        _drain(tmp_path)
+        (first,) = gh.comment_records()
+        assert AGENT_COMMENT_MARKER.encode() not in (first.stdin or b"")
+        _layout.record_path(CLIENT, entry.id).unlink()
+
+        again = enqueue(
+            ticket="9",
+            marker=marker,
+            producer="approve-post-marker",
+            parts=(part,),
+            operator_authored=True,
+        )
+        assert again.created is True
+        _drain(tmp_path)
+
+        assert _state(entry.id) == (
+            OutboxState.DELIVERED,
+            OutboxReason.MARKER_ALREADY_PRESENT,
+        )
+        assert len(gh.comment_records()) == 1
+
 
 class TestDrainReport:
     def test_mixed_run(

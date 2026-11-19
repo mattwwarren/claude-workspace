@@ -29,6 +29,7 @@ from cw.outbox import (
     OutboxError,
     OutboxRole,
     enqueue,
+    list_entries,
 )
 
 if TYPE_CHECKING:
@@ -54,18 +55,35 @@ class EnqueueOutcome(NamedTuple):
     skipped_reason: str | None
 
 
-def content_marker(prefix: str, text: str) -> str:
-    """``<prefix>-<sha256(text)[:16]>``: stable for identical text, else distinct."""
+def content_marker(prefix: str, text: str, *, chars: int = _MARKER_DIGEST_CHARS) -> str:
+    """``<prefix>-<sha256(text)[:chars]>``: stable for identical text, else distinct."""
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    return f"{prefix}-{digest[:_MARKER_DIGEST_CHARS]}"
+    return f"{prefix}-{digest[:chars]}"
 
 
-def try_content_marker(prefix: str, text: str) -> str | None:
+def try_content_marker(
+    prefix: str, text: str, *, chars: int = _MARKER_DIGEST_CHARS
+) -> str | None:
     """Return a marker, or ``None`` when *text* is not valid UTF-8."""
     try:
-        return content_marker(prefix, text)
+        return content_marker(prefix, text, chars=chars)
     except UnicodeEncodeError:
         return None
+
+
+def entry_state_label(client: str, entry_id: str) -> str:
+    """The stored state of entry *entry_id*, else ``unknown``.
+
+    A read-only lookup for the duplicate echo; a missing entry or a store fault
+    reads as ``unknown`` and never raises.
+    """
+    try:
+        for entry in list_entries(client):
+            if entry.id == entry_id:
+                return str(entry.state.value)
+    except (OutboxError, OSError) as exc:
+        _log.warning("outbox_state_lookup_failed entry=%s: %s", entry_id, exc)
+    return "unknown"
 
 
 def _body_too_long(parts: Sequence[str]) -> bool:

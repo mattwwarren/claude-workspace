@@ -97,6 +97,7 @@ from tests._reconcile_helpers import (
     use_reconcile_daemon,
 )
 from tests._shared.daemon_fakes import CapturedEvent
+from tests._shared.outbox_builders import entries_for
 from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 from tests.test_pr_hydrate import _pr_state
 from tests.test_reconcile_gate_recipes import _GATE_LANES, _clean_result
@@ -3573,10 +3574,11 @@ def test_reconcile_recipe_gh_calls_run_with_sessions_lock_free(
 
     reconcile(dispatch_review_jobs=dispatch_review_jobs)
 
-    assert gh_calls == [
-        (("gh", "issue", "comment"), True),
-        (("gh", "pr", "edit"), True),
-    ]
+    # The gate recipe's audit comment is queued on the outbox, not sent to gh,
+    # so the only gh call left is the reviewer request's PR edit (#3754 O3b).
+    assert gh_calls == [(("gh", "pr", "edit"), True)]
+    queued = entries_for("acme", ticket="GEN-1", producer="gate-recipe")
+    assert len(queued) == 1
     rows = {t.ticket_id: t for t in load_dev_queue().tasks}
     assert rows["GEN-1"].stage == Stage.FINALIZE
     assert rows["GEN-2"].request_reviewer_fired_at is not None

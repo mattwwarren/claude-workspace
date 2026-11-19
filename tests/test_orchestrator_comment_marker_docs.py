@@ -111,8 +111,8 @@ def test_cw_followup_close_routes_through_post_comment() -> None:
 
 def test_cw_followup_mirrors_are_documented() -> None:
     text = _norm(_skill("cw-followup"))
-    assert "already carries the marker" in text
-    assert "deliberate exception" in text
+    assert "queues the `REVIEW-FINDING-DISPOSITIONS` block" in text
+    assert "The block opens the comment body" in text
 
 
 def test_adopt_pr_comment_body_ends_with_the_marker() -> None:

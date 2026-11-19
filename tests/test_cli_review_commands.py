@@ -58,6 +58,7 @@ from tests._cli_review_helpers import (
     _write_session_context,
 )
 from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.outbox_builders import entries_for
 from tests._shared.review_builders import _make_diff, _make_finding, _make_reviewer_doc
 from tests._shared.workflow_text import _cmd
 
@@ -999,8 +1000,16 @@ class TestReviewSettle:
             input=json.dumps(payload),
         )
 
-    def _only_entry(self, output: str) -> FindingDisposition:
-        return next(iter(parse_finding_disposition_block([output])[0].values()))
+    @staticmethod
+    def _block(ticket: str = _SETTLE_TICKET) -> str:
+        """The disposition block the settle queued for *ticket* (one part)."""
+        produced = entries_for(_SETTLE_CLIENT, ticket=ticket, producer="review-settle")
+        assert len(produced) == 1
+        (part,) = produced[0].parts
+        return part
+
+    def _only_entry(self, block: str) -> FindingDisposition:
+        return next(iter(parse_finding_disposition_block([block])[0].values()))
 
     def _row(self, ticket: str = _SETTLE_TICKET) -> TicketTask:
         return next(
@@ -1037,7 +1046,7 @@ class TestReviewSettle:
         assert entry.outcome == "REJECTED"
         assert (
             self._row().finding_dispositions
-            == (parse_finding_disposition_block([result.stdout])[0])
+            == (parse_finding_disposition_block([self._block()])[0])
         )
 
     def test_success_is_silent_on_stderr(self, runner: CliRunner) -> None:
@@ -1045,7 +1054,11 @@ class TestReviewSettle:
 
         assert result.exit_code == 0, result.output
         assert result.stderr == ""
-        assert result.stdout.startswith("## Review Finding Dispositions")
+        assert result.stdout.startswith(
+            f"settle: queued the disposition marker for {_SETTLE_TICKET}"
+            f" ({_SETTLE_CLIENT}) (outbox entry "
+        )
+        assert self._block().startswith("## Review Finding Dispositions")
 
     def test_events_are_correlated_to_the_ticket(self, runner: CliRunner) -> None:
         result = self._invoke(runner, _settle_payload())
@@ -1062,6 +1075,7 @@ class TestReviewSettle:
         assert result.exit_code != 0
         assert "dispatch worker" in result.output
         assert self._row().finding_dispositions == {}
+        assert entries_for(_SETTLE_CLIENT) == []
 
     def test_a_failed_audit_event_leaves_the_row_unchanged(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
@@ -1077,6 +1091,7 @@ class TestReviewSettle:
         assert result.exit_code != 0
         assert _EVENT_STORE_FAILURE in result.output
         assert self._row().finding_dispositions == {}
+        assert entries_for(_SETTLE_CLIENT) == []
 
     def test_help_states_the_row_first_ordering_and_the_degrade(
         self, runner: CliRunner
@@ -1091,12 +1106,13 @@ class TestReviewSettle:
         assert "Client that owns the ticket's dev-queue row." in text
         assert "-c, --client" in text
 
-    def test_happy_path_renders_the_postable_marker(self, runner: CliRunner) -> None:
+    def test_happy_path_renders_the_queued_marker(self, runner: CliRunner) -> None:
         result = self._invoke(runner, _settle_payload())
 
         assert result.exit_code == 0, result.output
-        assert result.output.startswith("## Review Finding Dispositions")
-        ledger, refused = parse_finding_disposition_block([result.output])
+        assert "## Review Finding Dispositions" not in result.output
+        assert self._block().startswith("## Review Finding Dispositions")
+        ledger, refused = parse_finding_disposition_block([self._block()])
         assert refused == []
         assert list(ledger) == [_disposition_key("src/cw/foo.py", "Bug here")]
         assert next(iter(ledger.values())).outcome == "REJECTED"
@@ -1113,7 +1129,7 @@ class TestReviewSettle:
         result = self._invoke(runner, _settle_payload())
 
         assert result.exit_code == 0, result.output
-        ledger, refused = parse_finding_disposition_block([result.output])
+        ledger, refused = parse_finding_disposition_block([self._block()])
         assert refused == []
         ((key, entry),) = ledger.items()
         assert entry.summary == "Bug here"
@@ -1138,7 +1154,7 @@ class TestReviewSettle:
         result = self._invoke(runner, _settle_payload())
 
         assert result.exit_code == 0, result.output
-        entry = self._only_entry(result.output)
+        entry = self._only_entry(self._block())
         assert entry.actor == _OPERATOR
         assert entry.recorded_at == "2026-09-20T12:00:00Z"
         assert entry.reviewed_sha == "abc1234"
@@ -1172,6 +1188,7 @@ class TestReviewSettle:
 
         assert result.exit_code != 0
         assert "REVIEW-FINDING-DISPOSITIONS" not in result.output
+        assert entries_for(_SETTLE_CLIENT) == []
         assert not out_path.exists()
         assert read_events() == []
 
@@ -1181,7 +1198,7 @@ class TestReviewSettle:
         )
 
         assert result.exit_code == 0, result.output
-        assert self._only_entry(result.output).rationale == "this one specifically"
+        assert self._only_entry(self._block()).rationale == "this one specifically"
 
     def test_operator_supplied_recorded_at_is_refused(self, runner: CliRunner) -> None:
         """``recorded_at`` is audit data, so only the CLI clock may set it."""
@@ -1220,13 +1237,13 @@ class TestReviewSettle:
         )
 
         assert result.exit_code == 0, result.output
-        assert self._only_entry(result.output).reviewed_sha == "deadbee"
+        assert self._only_entry(self._block()).reviewed_sha == "deadbee"
 
     def test_entry_sha_wins_over_the_option(self, runner: CliRunner) -> None:
         result = self._invoke(runner, _settle_payload(), "--reviewed-sha", "deadbee")
 
         assert result.exit_code == 0, result.output
-        assert self._only_entry(result.output).reviewed_sha == "abc1234"
+        assert self._only_entry(self._block()).reviewed_sha == "abc1234"
 
     def test_unresolvable_actor_is_refused_and_writes_nothing(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1308,6 +1325,7 @@ class TestReviewSettle:
         assert result.exit_code != 0
         assert not out_path.exists()
         assert "REVIEW-FINDING-DISPOSITIONS" not in result.output
+        assert entries_for(_SETTLE_CLIENT) == []
         # The message must name the finding that failed and the failure.
         assert "src/cw/foo.py" in result.output
         assert _EVENT_STORE_FAILURE in result.output
@@ -1345,6 +1363,7 @@ class TestReviewSettle:
         assert result.exit_code != 0
         assert not out_path.exists()
         assert "REVIEW-FINDING-DISPOSITIONS" not in result.output
+        assert entries_for(_SETTLE_CLIENT) == []
         assert len(read_events()) == 1
 
     def test_duplicate_entries_settle_once_and_emit_one_event(
@@ -1358,7 +1377,7 @@ class TestReviewSettle:
         )
 
         assert result.exit_code == 0, result.output
-        ledger, refused = parse_finding_disposition_block([result.output])
+        ledger, refused = parse_finding_disposition_block([self._block()])
         assert refused == []
         assert len(ledger) == 1
         assert next(iter(ledger.values())).rationale == "newer"
@@ -1375,6 +1394,7 @@ class TestReviewSettle:
         assert result.exit_code != 0
         assert "dispatch worker" in result.output
         assert "REVIEW-FINDING-DISPOSITIONS" not in result.output
+        assert entries_for(_SETTLE_CLIENT) == []
         assert not out_path.exists()
         assert read_events() == []
 
@@ -1395,7 +1415,7 @@ class TestReviewSettle:
         result = self._invoke(runner, _settle_payload())
 
         assert result.exit_code == 0, result.output
-        assert "REVIEW-FINDING-DISPOSITIONS" in result.output
+        assert "REVIEW-FINDING-DISPOSITIONS" in self._block()
 
     def test_a_reversed_outcome_renders_a_marker(self, runner: CliRunner) -> None:
         """#2232: rollback is settle with a third outcome, not a new command."""
@@ -1404,7 +1424,7 @@ class TestReviewSettle:
         )
 
         assert result.exit_code == 0, result.output
-        ledger, refused = parse_finding_disposition_block([result.output])
+        ledger, refused = parse_finding_disposition_block([self._block()])
         assert refused == []
         assert list(ledger) == [_disposition_key("src/cw/foo.py", "Bug here")]
         assert next(iter(ledger.values())).outcome == "REVERSED"
@@ -1527,7 +1547,7 @@ class TestReviewSettle:
         result = self._invoke(runner, _settle_payload())
 
         assert result.exit_code == 0, result.output
-        assert "REVIEW-FINDING-DISPOSITIONS" in result.output
+        assert "REVIEW-FINDING-DISPOSITIONS" in self._block()
         assert len(read_events()) == 1
 
     def test_no_context_outside_any_repository_proceeds(
@@ -1543,7 +1563,7 @@ class TestReviewSettle:
         result = self._invoke(runner, _settle_payload())
 
         assert result.exit_code == 0, result.output
-        assert "REVIEW-FINDING-DISPOSITIONS" in result.output
+        assert "REVIEW-FINDING-DISPOSITIONS" in self._block()
         assert len(read_events()) == 1
 
     def test_no_context_in_a_main_checkout_proceeds(
@@ -1564,7 +1584,7 @@ class TestReviewSettle:
         result = self._invoke(runner, _settle_payload())
 
         assert result.exit_code == 0, result.output
-        assert "REVIEW-FINDING-DISPOSITIONS" in result.output
+        assert "REVIEW-FINDING-DISPOSITIONS" in self._block()
 
     def test_no_context_in_a_linked_worktree_proceeds(
         self,
@@ -1588,7 +1608,7 @@ class TestReviewSettle:
         result = self._invoke(runner, _settle_payload())
 
         assert result.exit_code == 0, result.output
-        assert "REVIEW-FINDING-DISPOSITIONS" in result.output
+        assert "REVIEW-FINDING-DISPOSITIONS" in self._block()
 
     def test_a_worker_tmpdir_refuses_even_after_changing_directory(
         self,
@@ -1715,7 +1735,7 @@ class TestReviewSettle:
 
         result = self._invoke(runner, payloads[0])
         assert result.exit_code == 0, result.output
-        ledger, refused = parse_finding_disposition_block([result.output])
+        ledger, refused = parse_finding_disposition_block([self._block()])
         assert refused == []
         assert next(iter(ledger.values())).reviewed_sha == "sha"
 
