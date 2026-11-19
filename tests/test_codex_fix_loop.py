@@ -152,21 +152,6 @@ def _task(*, scope_hint: str | None = None) -> TicketTask:
     )
 
 
-def test_read_for_stage_degrades_on_store_oserror(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    def _unreadable(_task: TicketTask) -> object:
-        msg = "permission denied"
-        raise PermissionError(msg)
-
-    monkeypatch.setattr(_driver, "read_current", _unreadable)
-    with caplog.at_level(logging.WARNING, logger="cw.codex_fix_loop._driver"):
-        assert _driver.read_for_stage(_task(), "review") is None
-
-    assert "PermissionError" in caplog.text
-    assert "permission denied" not in caplog.text
-
-
 def _finding_dict(
     *, severity: str, line: int, evidence: str, summary: str
 ) -> dict[str, object]:
@@ -1979,7 +1964,7 @@ class TestFixLoopDisabledGate:
             raise AssertionError
 
         monkeypatch.setattr(commit, "capture_cycle_baseline", _unreachable)
-        monkeypatch.setattr(_driver, "read_for_stage", _unreachable)
+        monkeypatch.setattr(_driver, "_loop_inputs", _unreachable)
         runner = _FixLoopRunner([_MF_DOC])
 
         out, _ = _run_loop(
@@ -3447,6 +3432,23 @@ class TestGuardSwitch:
 
 
 class TestConstraintsThroughLoop:
+    def test_loop_setup_reuses_cycle_zeros_snapshot_without_a_second_read(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3712: one resolve across cycle 0 and loop setup; constraints still load."""
+        worktree = _worktree(make_git_repo, "wt-one-read")
+        served = _serve_comments(monkeypatch, _observed_comments())
+        # The fix fails, so no re-review runs: only cycle 0 and loop setup read.
+        runner = _FixLoopRunner(
+            [_MF_DOC],
+            fix_behaviors=[CodexRunResult(returncode=1, stdout="", stderr="boom")],
+        )
+
+        _run_loop(runner, worktree, session_id="s-one-read", snapshots=served.ctx)
+
+        assert served.resolved == ["T-1"]
+        assert _CONSTRAINTS_HEADING in _fix_prompts(runner)[0]
+
     def test_marker_constraint_in_fix_prompt(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3456,7 +3458,6 @@ class TestConstraintsThroughLoop:
 
         _run_loop(runner, worktree, session_id="s-c-prompt", snapshots=served.ctx)
 
-        assert served.asked == ["T-1"]
         prompt = _fix_prompts(runner)[0]
         assert _CONSTRAINTS_HEADING in prompt
         assert "Do not attach up to 4,000 characters" in prompt

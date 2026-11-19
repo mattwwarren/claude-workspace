@@ -66,6 +66,7 @@ while the loop runs is not seen until the next run.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from typing import TYPE_CHECKING, NamedTuple
@@ -132,9 +133,7 @@ from cw.stage_verification.growth import (
 from cw.ticket_snapshot import (
     DEFAULT_SNAPSHOT_CONTEXT,
     Purpose,
-    SnapshotUntrustedError,
     bound_comments,
-    read_current,
 )
 
 if TYPE_CHECKING:
@@ -172,22 +171,24 @@ _MUST_FIX = "MUST_FIX"
 _log = logging.getLogger(__name__)
 
 
-def read_for_stage(task: TicketTask, _stage: str) -> TicketSnapshot | None:
-    """Read the row snapshot for loop constraints without emitting an event.
+def _record_cycle0_snapshot(
+    ctx: SnapshotContext, seen: list[TicketSnapshot | None]
+) -> SnapshotContext:
+    """Wrap *ctx*'s resolver so cycle 0's resolved snapshot is kept in *seen*.
 
-    Kept as a small local seam for callers/tests that supplied the pass snapshot
-    through this module before the stage resolver became event-emitting.
+    Cycle 0's pass resolves the ticket snapshot once (one stage read, one
+    event); the loop's one-time constraint load reuses that value instead of
+    reading again (#3712). Only the first call is recorded.
     """
-    try:
-        return read_current(task)
-    except SnapshotUntrustedError:
-        return None
-    except OSError as exc:
-        _log.warning(
-            "fix-loop snapshot read failed; degrading to None error=%s",
-            type(exc).__name__,
-        )
-        return None
+    inner = ctx.resolve
+
+    def resolve(task: TicketTask, stage: str) -> TicketSnapshot | None:
+        snapshot = inner(task, stage)
+        if not seen:
+            seen.append(snapshot)
+        return snapshot
+
+    return dataclasses.replace(ctx, resolve=resolve)
 
 
 def _remaining_budget(deadline: float | None) -> float | None:
@@ -384,19 +385,16 @@ def _loop_inputs(
     task: TicketTask,
     default_branch: str,
     snapshots: SnapshotContext,
+    snapshot: TicketSnapshot | None,
 ) -> _LoopInputs:
     """Resolve the fix loop's per-run inputs once, before cycle 1.
 
-    The snapshot is the row's current one (no refresh): cycle 0's pass already
-    refreshed it, and the constraints load once per run (#3712).
+    *snapshot* is the one cycle 0's pass already resolved (#3712); it feeds the
+    one-time constraint load, so setup does no second read and emits no event.
     """
     _, _, cycle0_changed = _capture_diff(worktree, default_branch)
     cycle0_files = frozenset(cycle0_changed)
     plan_text, ticket_text = _load_ticket_context(worktree)
-    # Cycle 0 already resolved this pass's snapshot. The loop needs the row's
-    # current value for the one-time constraint load, but must not resolve it
-    # through the event-emitting stage helper a second time (#3712).
-    snapshot = read_for_stage(task, "review")
     constraints = _load_constraints(snapshot, snapshots, task, ticket_text)
     return _LoopInputs(
         cycle0_files=cycle0_files,
@@ -619,6 +617,7 @@ def run_review_with_fix_loop(
         else time.monotonic() + wall_clock_budget_seconds
     )
     suppression = None if cycle_observer is None else cycle_observer.suppress
+    cycle0_snapshot: list[TicketSnapshot | None] = []
     result, verdict = _review_cycle_zero(
         runner=runner,
         task=task,
@@ -635,7 +634,7 @@ def run_review_with_fix_loop(
         max_prompt_chars=max_prompt_chars,
         reviewer_sandbox_mode=reviewer_sandbox_mode,
         engine=engine,
-        snapshots=snapshots,
+        snapshots=_record_cycle0_snapshot(snapshots, cycle0_snapshot),
     )
     if _should_seed(verdict, result, seed_findings, fix_loop_enabled):
         verdict = seed_verdict(verdict, seed_findings)
@@ -653,7 +652,13 @@ def run_review_with_fix_loop(
     cycle0_unread = unread_from_verdict(verdict)
     # #2877: and what a sharded re-review left unread of its own delta.
     delta_gap = NO_DELTA_GAP
-    inputs = _loop_inputs(worktree, task, default_branch, snapshots)
+    inputs = _loop_inputs(
+        worktree,
+        task,
+        default_branch,
+        snapshots,
+        cycle0_snapshot[0] if cycle0_snapshot else None,
+    )
     cycle0_review = cycle0_review.model_copy(
         update={"operator_constraints_source": inputs.constraints_source}
     )

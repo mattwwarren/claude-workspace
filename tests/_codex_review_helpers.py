@@ -523,14 +523,13 @@ SERVED_LOGIN = "operator-login"
 class ServedSnapshot(NamedTuple):
     """What :func:`_serve_comments` built, and what it was asked for.
 
-    ``asked`` is the ticket ids the fix loop's constraint read
-    (``read_for_stage``) was asked for; ``resolved`` is the ticket ids a review
-    pass resolved through ``ctx.resolve``.
+    ``resolved`` is the ticket ids a review pass resolved through
+    ``ctx.resolve``; the fix loop's constraint load reuses cycle 0's value and
+    never resolves (#3712).
     """
 
     ctx: SnapshotContext
     snapshot: TicketSnapshot | None
-    asked: list[str]
     resolved: list[str]
 
 
@@ -581,29 +580,22 @@ def _serve_comments(
 
     *comments* are legacy GitHub comment dicts, authored by their own login;
     ``None`` means no readable snapshot. The returned context resolves to the
-    built snapshot, and the fix loop's constraint read (``read_for_stage``) is
-    patched to the same one.
+    built snapshot; the fix loop takes its constraints from cycle 0's value.
     """
     snapshot = None if comments is None else snapshot_of(comments)
-    asked: list[str] = []
     resolved: list[str] = []
-
-    def _read(task: TicketTask, _stage: str) -> TicketSnapshot | None:
-        asked.append(task.ticket_id)
-        return snapshot
 
     def _resolve(task: TicketTask, _stage: str) -> TicketSnapshot | None:
         resolved.append(task.ticket_id)
         return snapshot
 
-    monkeypatch.setattr("cw.codex_fix_loop._driver.read_for_stage", _read)
     ctx = SnapshotContext(
         operator_ids=operator_ids,
         operator_login=login,
         github=github,
         resolve=_resolve,
     )
-    return ServedSnapshot(ctx, snapshot, asked, resolved)
+    return ServedSnapshot(ctx, snapshot, resolved)
 
 
 # ---------------------------------------------------------------------------
