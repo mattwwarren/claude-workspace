@@ -39,13 +39,12 @@ from cw.dev_queue import (
     transition_task_status,
 )
 from cw.dispatch import (
-    _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD,
     _CODEX_CAPABILITY_PROBE_TTL_SECONDS,
+    _PARK_STREAK_CIRCUIT_THRESHOLD,
     TICK_STALE_SECONDS,
     DispatchTickResult,
     _accumulate_task_cost,
     _cached_codex_capability_diagnosis,
-    _codex_capability_gate,
     _notify_stale_clients_with_pending,
     _park_running_task_blocked_on_user,
     _reset_codex_capability_cache,
@@ -54,9 +53,10 @@ from cw.dispatch import (
     _stale_pending_clients,
     consume_completed_sessions,
     dispatch_tick,
+    preflight_before_spawn,
     run_dispatch_loop,
 )
-from cw.dispatch.claim.codex_capability import _SpawnOutcome
+from cw.dispatch.claim.outcome import _SpawnOutcome
 from cw.dispatch.claim.spawn import _handle_post_launch_failure
 from cw.dispatch.loop import (
     _run_shipped_red_scan_guarded,
@@ -4743,7 +4743,7 @@ class TestDispatchCodexCapabilityGate:
             _counting_probe,
         )
         monkeypatch.setattr(
-            "cw.dispatch.claim.codex_capability.resolve_executor_config",
+            "cw.dispatch.claim.preflight_reach.resolve_executor_config",
             lambda *_a, **_k: StageExecutorConfig(backend=CODEX_BACKEND),
         )
 
@@ -4752,7 +4752,7 @@ class TestDispatchCodexCapabilityGate:
 
         first = _cached_codex_capability_diagnosis()
         second = _cached_codex_capability_diagnosis()
-        third = _codex_capability_gate(task, sample_client_config)
+        third = preflight_before_spawn(task, sample_client_config)
 
         assert len(calls) == 1, "second call within the TTL must reuse the cache"
         assert first == second
@@ -4793,7 +4793,7 @@ class TestDispatchCodexCapabilityGate:
     ) -> None:
         """A systemically-wrong probe verdict eventually engages spawn_error.
 
-        Below _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD consecutive parks the
+        Below _PARK_STREAK_CIRCUIT_THRESHOLD consecutive parks the
         gate must stay decoupled from spawn_error (per the prior fix cycle);
         at/above it, spawn_error must also be set so the existing per-lane
         circuit breaker provides a bounded backstop (#1238 review finding —
@@ -4808,22 +4808,22 @@ class TestDispatchCodexCapabilityGate:
             ),
         )
         monkeypatch.setattr(
-            "cw.dispatch.claim.codex_capability.resolve_executor_config",
+            "cw.dispatch.claim.preflight_reach.resolve_executor_config",
             lambda *_a, **_k: StageExecutorConfig(backend=CODEX_BACKEND),
         )
 
         outcomes = []
-        for i in range(_CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD + 1):
+        for i in range(_PARK_STREAK_CIRCUIT_THRESHOLD + 1):
             add_ticket(TicketTask(ticket_id=f"GEN-CDX6-{i}", client="test-client"))
             task = load_dev_queue().tasks[-1]
-            outcomes.append(_codex_capability_gate(task, sample_client_config))
+            outcomes.append(preflight_before_spawn(task, sample_client_config))
 
         assert all(o is not None and o.capability_parked for o in outcomes)
-        below_threshold = outcomes[: _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD - 1]
+        below_threshold = outcomes[: _PARK_STREAK_CIRCUIT_THRESHOLD - 1]
         assert all(o is not None and not o.spawn_error for o in below_threshold), (
             "isolated parks must not trip the circuit breaker"
         )
-        at_threshold = outcomes[_CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD - 1]
+        at_threshold = outcomes[_PARK_STREAK_CIRCUIT_THRESHOLD - 1]
         assert at_threshold is not None
         assert at_threshold.spawn_error, (
             "reaching the threshold must engage the circuit-breaker backstop"
@@ -4840,7 +4840,7 @@ class TestDispatchCodexCapabilityGate:
         park counter never reset on a capable probe result, so it behaved as a
         lifetime total rather than a consecutive-parks count — meaning a
         long-lived dispatch-loop process that had ever accumulated
-        _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD parks (however isolated, however
+        _PARK_STREAK_CIRCUIT_THRESHOLD parks (however isolated, however
         long ago, however fully recovered in between) would trip spawn_error on
         every future park forever after. Drives: park, park, capable, park — the
         final park is isolated (only one consecutive park since the last capable
@@ -4856,7 +4856,7 @@ class TestDispatchCodexCapabilityGate:
         from cw.executor import CODEX_VERSION_UNKNOWN, CodexCapabilityDiagnosis
 
         monkeypatch.setattr(
-            "cw.dispatch.claim.codex_capability.resolve_executor_config",
+            "cw.dispatch.claim.preflight_reach.resolve_executor_config",
             lambda *_a, **_k: StageExecutorConfig(backend=CODEX_BACKEND),
         )
 
@@ -4873,7 +4873,7 @@ class TestDispatchCodexCapabilityGate:
             )
             add_ticket(TicketTask(ticket_id=f"GEN-CDX7-{idx}", client="test-client"))
             task = load_dev_queue().tasks[-1]
-            return _codex_capability_gate(task, sample_client_config)
+            return preflight_before_spawn(task, sample_client_config)
 
         first = _probe_result(0, incapable)
         second = _probe_result(1, incapable)
@@ -6678,35 +6678,35 @@ class TestSpawnErrorTickFields:
         assert _spawn_error_tick_fields(None) == {}
 
     def test_error_text_carried_in_last_error_key(self) -> None:
-        from cw.dispatch.claim.codex_capability import _SpawnOutcome
         from cw.dispatch.claim.events import _spawn_error_tick_fields
+        from cw.dispatch.claim.outcome import _SpawnOutcome
 
         outcome = _SpawnOutcome(spawn_error=True, error="backend outage")
 
         assert _spawn_error_tick_fields(outcome) == {"last_error": "backend outage"}
 
     def test_empty_error_yields_empty_string_key_present(self) -> None:
-        from cw.dispatch.claim.codex_capability import _SpawnOutcome
         from cw.dispatch.claim.events import _spawn_error_tick_fields
+        from cw.dispatch.claim.outcome import _SpawnOutcome
 
         outcome = _SpawnOutcome(spawn_error=True, error="")
 
         assert _spawn_error_tick_fields(outcome) == {"last_error": ""}
 
     def test_multiline_error_collapsed_to_single_line(self) -> None:
-        from cw.dispatch.claim.codex_capability import _SpawnOutcome
         from cw.dispatch.claim.events import _spawn_error_tick_fields
+        from cw.dispatch.claim.outcome import _SpawnOutcome
 
         outcome = _SpawnOutcome(spawn_error=True, error="a\n  b\t\tc\r\nd")
 
         assert _spawn_error_tick_fields(outcome) == {"last_error": "a b c d"}
 
     def test_error_at_cap_not_truncated(self) -> None:
-        from cw.dispatch.claim.codex_capability import _SpawnOutcome
         from cw.dispatch.claim.events import (
             _SPAWN_ERROR_TEXT_MAX_CHARS,
             _spawn_error_tick_fields,
         )
+        from cw.dispatch.claim.outcome import _SpawnOutcome
 
         text = "x" * _SPAWN_ERROR_TEXT_MAX_CHARS
         outcome = _SpawnOutcome(spawn_error=True, error=text)
@@ -6714,11 +6714,11 @@ class TestSpawnErrorTickFields:
         assert _spawn_error_tick_fields(outcome) == {"last_error": text}
 
     def test_error_over_cap_truncated_with_ellipsis(self) -> None:
-        from cw.dispatch.claim.codex_capability import _SpawnOutcome
         from cw.dispatch.claim.events import (
             _SPAWN_ERROR_TEXT_MAX_CHARS,
             _spawn_error_tick_fields,
         )
+        from cw.dispatch.claim.outcome import _SpawnOutcome
 
         outcome = _SpawnOutcome(
             spawn_error=True, error="x" * (_SPAWN_ERROR_TEXT_MAX_CHARS + 25)
@@ -6728,8 +6728,8 @@ class TestSpawnErrorTickFields:
         assert result == "x" * _SPAWN_ERROR_TEXT_MAX_CHARS + "…"
 
     def test_secret_shaped_text_redacted(self) -> None:
-        from cw.dispatch.claim.codex_capability import _SpawnOutcome
         from cw.dispatch.claim.events import _spawn_error_tick_fields
+        from cw.dispatch.claim.outcome import _SpawnOutcome
 
         outcome = _SpawnOutcome(
             spawn_error=True, error="401 from api: Authorization: Bearer abc.def"
@@ -6740,11 +6740,11 @@ class TestSpawnErrorTickFields:
         assert "<redacted>" in result
 
     def test_secret_straddling_cap_is_redacted_before_truncation(self) -> None:
-        from cw.dispatch.claim.codex_capability import _SpawnOutcome
         from cw.dispatch.claim.events import (
             _SPAWN_ERROR_TEXT_MAX_CHARS,
             _spawn_error_tick_fields,
         )
+        from cw.dispatch.claim.outcome import _SpawnOutcome
 
         # The secret starts ~14 chars before the cap: a truncate-then-redact
         # order would leave a partial `sk-...` fragment (under the pattern's
@@ -6758,8 +6758,8 @@ class TestSpawnErrorTickFields:
         assert "<redacted>" in result
 
     def test_codex_breaker_outcome_error_carried(self) -> None:
-        from cw.dispatch.claim.codex_capability import _SpawnOutcome
         from cw.dispatch.claim.events import _spawn_error_tick_fields
+        from cw.dispatch.claim.outcome import _SpawnOutcome
 
         outcome = _SpawnOutcome(
             capability_parked=True, spawn_error=True, error="codex_version_unknown"
@@ -10245,13 +10245,13 @@ class TestParkPreSpawnDuplicateRunning:
             ),
         )
         monkeypatch.setattr(
-            "cw.dispatch.claim.codex_capability.resolve_executor_config",
+            "cw.dispatch.claim.preflight_reach.resolve_executor_config",
             lambda *_a, **_k: StageExecutorConfig(backend=CODEX_BACKEND),
         )
         _worktree, row_a, row_b = _seed_duplicate_running_rows(sample_client_config)
         row_a_before = _rows_by_created_at()[row_a.created_at].model_dump()
 
-        outcome = _codex_capability_gate(row_b.model_copy(), sample_client_config)
+        outcome = preflight_before_spawn(row_b.model_copy(), sample_client_config)
 
         assert outcome is not None
         assert outcome.capability_parked is True
@@ -22215,11 +22215,11 @@ class TestClaimNextPendingStalePr:
 
 
 class TestClaimNextPendingTrackerMcpGate:
-    """The pre-dispatch tracker-MCP gate in ``_claim_next_pending`` (#2442).
+    """The binding reachability park in ``_claim_next_pending`` (#2442, #3744).
 
     Mirrors ``TestClaimNextPendingStalePr``: drive a real ``dispatch_tick`` and
-    assert the task is parked instead of claimed. The gate's *resolution* is
-    covered by ``tests/test_dispatch_tracker_mcp_gate.py``; this class pins the
+    assert the task is parked instead of claimed. The *resolution* is covered
+    by ``tests/test_preflight_reachability.py``; this class pins the
     per-client toggle guard and the claim-path wiring.
     """
 
@@ -22243,16 +22243,16 @@ class TestClaimNextPendingTrackerMcpGate:
         self, monkeypatch: pytest.MonkeyPatch, *ticket_ids: str
     ) -> list[str]:
         """Patch the lanes-level resolver to report a hit per *ticket_ids*."""
-        from cw.dispatch.tracker_mcp_gate import TrackerMcpGateHit
+        from cw.dispatch.claim.preflight_reach import BindingHit
 
         calls: list[str] = []
 
         def _fake(
             client: ClientConfig, snapshot: DevQueueStore
-        ) -> dict[str, TrackerMcpGateHit]:
+        ) -> dict[str, BindingHit]:
             calls.append(client.name)
             return {
-                tid: TrackerMcpGateHit(
+                tid: BindingHit(
                     branch=f"dev/{tid}",
                     file_inspected=".claude/settings.json",
                     expected=self._PLUGIN,
@@ -22260,7 +22260,7 @@ class TestClaimNextPendingTrackerMcpGate:
                 for tid in ticket_ids
             }
 
-        monkeypatch.setattr("cw.dispatch.lanes.resolve_tracker_mcp_gate_hits", _fake)
+        monkeypatch.setattr("cw.dispatch.lanes.resolve_binding_hits", _fake)
         return calls
 
     def _seed(self, ticket_id: str, stage: Stage = Stage.PLAN) -> TicketTask:
@@ -22280,7 +22280,7 @@ class TestClaimNextPendingTrackerMcpGate:
     ) -> None:
         """R6 case 3: parked BLOCKED_ON_USER, nothing charged, nothing spawned,
         and the attention event carries the R1 additive detail fields."""
-        from cw.dev_queue import TRACKER_MCP_GATE_DISPOSITION
+        from cw.dev_queue import BINDING_UNREACHABLE_DISPOSITION
         from cw.dev_queue.dispositions import _PRE_DISPATCH_TRACKER_MCP_REASON
 
         write_clients_yaml(self._gated_client(sample_client_config))
@@ -22292,7 +22292,7 @@ class TestClaimNextPendingTrackerMcpGate:
 
         parked = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-2442")
         assert parked.status == QueueItemStatus.BLOCKED_ON_USER
-        assert parked.disposition == TRACKER_MCP_GATE_DISPOSITION
+        assert parked.disposition == BINDING_UNREACHABLE_DISPOSITION
         assert parked.blocked_reason == _PRE_DISPATCH_TRACKER_MCP_REASON
         assert parked.attempts == 0
         assert parked.unproductive_attempts == 0
@@ -22308,15 +22308,14 @@ class TestClaimNextPendingTrackerMcpGate:
         tick_events = [
             e
             for e in events
-            if e.payload.get("skip_reason")
-            == DispatchSkipReason.TRACKER_MCP_GATE_BLOCKED
+            if e.payload.get("skip_reason") == DispatchSkipReason.BINDING_BLOCKED
         ]
         assert len(tick_events) == 1
         assert tick_events[0].payload["ticket_id"] == "GEN-2442"
         attention = [
             e
             for e in events
-            if e.payload.get("paused_status") == TRACKER_MCP_GATE_DISPOSITION
+            if e.payload.get("paused_status") == BINDING_UNREACHABLE_DISPOSITION
         ]
         assert len(attention) == 1
         payload = attention[0].payload
@@ -22331,6 +22330,8 @@ class TestClaimNextPendingTrackerMcpGate:
             "branch=dev/GEN-2442; file_inspected=.claude/settings.json;"
             f" expected_plugin={self._PLUGIN}"
         )
+        assert payload["need"] == "tickets"
+        assert list(payload)[-1] == "need"
 
     @pytest.mark.usefixtures("isolated_backend_layers")
     def test_tracker_mcp_gate_parks_opencode_row_missing_its_server(
@@ -22341,7 +22342,7 @@ class TestClaimNextPendingTrackerMcpGate:
     ) -> None:
         """#3055: the real resolver parks an opencode PLAN row on a Linear
         tracker whose opencode.json lacks the gate's server; no spawn."""
-        from cw.dev_queue import TRACKER_MCP_GATE_DISPOSITION
+        from cw.dev_queue import BINDING_UNREACHABLE_DISPOSITION
         from cw.dev_queue.dispositions import _PRE_DISPATCH_TRACKER_MCP_REASON
         from cw.models.client import TrackerMcpGateConfig
         from tests._backend_mcp_helpers import stage_mcp_config, with_tracker_gate
@@ -22368,7 +22369,7 @@ class TestClaimNextPendingTrackerMcpGate:
 
         parked = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-3055")
         assert parked.status == QueueItemStatus.BLOCKED_ON_USER
-        assert parked.disposition == TRACKER_MCP_GATE_DISPOSITION
+        assert parked.disposition == BINDING_UNREACHABLE_DISPOSITION
         assert parked.blocked_reason == _PRE_DISPATCH_TRACKER_MCP_REASON
         assert parked.attempts == 0
         assert daemon.spawn_calls == []
@@ -22379,7 +22380,7 @@ class TestClaimNextPendingTrackerMcpGate:
         attention = [
             e
             for e in events
-            if e.payload.get("paused_status") == TRACKER_MCP_GATE_DISPOSITION
+            if e.payload.get("paused_status") == BINDING_UNREACHABLE_DISPOSITION
         ]
         assert len(attention) == 1
         payload = attention[0].payload
@@ -22417,10 +22418,11 @@ class TestClaimNextPendingTrackerMcpGate:
         write_clients_yaml(self._gated_client(sample_client_config))
         reads: list[str] = []
 
-        def _missing(client: ClientConfig, branch: str, relpath: str) -> None:
+        def _missing(client: ClientConfig, branch: str, relpath: str) -> str:
             reads.append(f"{branch}:{relpath}")
+            return f"settings file {relpath} missing on {branch}"
 
-        monkeypatch.setattr("cw.dispatch.tracker_mcp_gate._read_branch_json", _missing)
+        monkeypatch.setattr("cw.binding_probe._branch_settings", _missing)
         self._seed("GEN-missing")
 
         dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
@@ -22444,7 +22446,7 @@ class TestClaimNextPendingTrackerMcpGate:
             msg = "tracker-MCP resolver must not run for an opted-out client"
             raise AssertionError(msg)
 
-        monkeypatch.setattr("cw.dispatch.lanes.resolve_tracker_mcp_gate_hits", _explode)
+        monkeypatch.setattr("cw.dispatch.lanes.resolve_binding_hits", _explode)
         self._seed("GEN-default")
 
         dispatch_tick(self._config(), native_daemon=FakeNativeDaemonClient())
@@ -22506,7 +22508,7 @@ class TestClaimNextPendingTrackerMcpGate:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """RFC 0018 C3: the claim-time re-check covers a FINALIZE row with a hit."""
-        from cw.dev_queue import TRACKER_MCP_GATE_DISPOSITION
+        from cw.dev_queue import BINDING_UNREACHABLE_DISPOSITION
 
         write_clients_yaml(self._gated_client(sample_client_config))
         self._stub_resolver(monkeypatch, "GEN-fin")
@@ -22517,7 +22519,7 @@ class TestClaimNextPendingTrackerMcpGate:
 
         parked = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-fin")
         assert parked.status == QueueItemStatus.BLOCKED_ON_USER
-        assert parked.disposition == TRACKER_MCP_GATE_DISPOSITION
+        assert parked.disposition == BINDING_UNREACHABLE_DISPOSITION
         assert daemon.spawn_calls == []
 
     def test_tracker_mcp_gate_never_holds_a_finalize_row_without_a_hit(

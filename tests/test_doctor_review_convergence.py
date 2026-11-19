@@ -242,3 +242,77 @@ def test_clean_mode_without_a_declared_review_stage_is_guarded(
     (result,) = _check_review_convergence({"client-a": client})
     assert result.ok is False
     assert f"with reason {_STAGE_REASON}" in result.detail
+
+
+# --- the all-codex lane WARN (RFC 0018 D1 #3064, moved here by #3744) -------
+
+_ALL_CODEX: dict[Stage, str] = {
+    Stage.PLAN: CODEX_BACKEND,
+    Stage.IMPL: CODEX_BACKEND,
+    Stage.REVIEW: CODEX_BACKEND,
+    Stage.FINALIZE: CODEX_BACKEND,
+}
+_ALL_CODEX_NOTE = "all-codex lane: every stage runs on codex"
+
+
+def _all_codex_client(
+    executors: dict[Stage, str] | None = None,
+    review: ReviewConfig | None = None,
+    stages: list[Stage] | None = None,
+) -> object:
+    merged = {**_ALL_CODEX, **(executors or {})}
+    lanes = () if stages is None else (make_lane("default", stages=stages),)
+    return make_client(
+        *lanes,
+        backend=merged[Stage.REVIEW],
+        executors={k: v for k, v in merged.items() if k is not Stage.REVIEW},
+        review=review,
+    )
+
+
+def test_all_codex_clean_unset_confirm_warns_with_claude_dependency() -> None:
+    (result,) = _check_review_convergence(
+        {"client-a": _all_codex_client(review=_clean())}
+    )
+    assert result.ok is True
+    assert result.warn is True
+    for needle in (
+        _ALL_CODEX_NOTE,
+        "claude -p",
+        "claude binary on PATH",
+        "confirm_backend_unavailable",
+        "review.confirm_backend: none",
+        "review.confirm_backend: codex",
+    ):
+        assert needle in result.detail
+
+
+@pytest.mark.parametrize("confirm", ["none", "codex", "claude"])
+def test_all_codex_explicit_confirm_does_not_warn(confirm: str) -> None:
+    client = _all_codex_client(review=_clean(confirm))
+    (result,) = _check_review_convergence({"client-a": client})
+    assert (result.ok, result.warn) == (True, False)
+    assert _ALL_CODEX_NOTE not in result.detail
+
+
+@pytest.mark.parametrize("stage", [Stage.PLAN, Stage.IMPL, Stage.FINALIZE])
+@pytest.mark.parametrize("other", [CLAUDE_NATIVE_BACKEND, OPENCODE_BACKEND])
+def test_a_lane_with_a_non_codex_stage_does_not_warn(stage: Stage, other: str) -> None:
+    client = _all_codex_client({stage: other}, review=_clean())
+    (result,) = _check_review_convergence({"client-a": client})
+    assert result.warn is False
+    assert _ALL_CODEX_NOTE not in result.detail
+
+
+def test_an_unsupported_codex_stage_does_not_count_as_all_codex() -> None:
+    client = _all_codex_client(
+        {Stage.HARDEN: CODEX_BACKEND},
+        review=_clean(),
+        stages=[Stage.HARDEN, Stage.REVIEW],
+    )
+    (result,) = _check_review_convergence({"client-a": client})
+    assert result.warn is False
+
+
+def test_an_all_codex_blocking_client_emits_nothing() -> None:
+    assert _check_review_convergence({"client-a": _all_codex_client()}) == []

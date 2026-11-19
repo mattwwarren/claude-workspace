@@ -1,0 +1,1912 @@
+{
+  "claude/at_suffix/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/at_suffix/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      ".claude/settings.json",
+      "linear@acme",
+      "claude-native"
+    ],
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/at_suffix/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      ".claude/settings.json",
+      "linear@acme",
+      "claude-native"
+    ],
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/at_suffix/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/case_mismatch/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/case_mismatch/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      ".claude/settings.json",
+      "linear@acme",
+      "claude-native"
+    ],
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/case_mismatch/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      ".claude/settings.json",
+      "linear@acme",
+      "claude-native"
+    ],
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/case_mismatch/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/dict_absent/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/dict_absent/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      ".claude/settings.json",
+      "linear@acme",
+      "claude-native"
+    ],
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/dict_absent/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      ".claude/settings.json",
+      "linear@acme",
+      "claude-native"
+    ],
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/dict_absent/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/dict_false/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/dict_false/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      ".claude/settings.json",
+      "linear@acme",
+      "claude-native"
+    ],
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/dict_false/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      ".claude/settings.json",
+      "linear@acme",
+      "claude-native"
+    ],
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/dict_false/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/dict_true/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/dict_true/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/dict_true/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/dict_true/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/list_absent/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/list_absent/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      ".claude/settings.json",
+      "linear@acme",
+      "claude-native"
+    ],
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/list_absent/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      ".claude/settings.json",
+      "linear@acme",
+      "claude-native"
+    ],
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/list_absent/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/list_present/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/list_present/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/list_present/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/list_present/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/malformed/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/malformed/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "claude/malformed/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "claude/malformed/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/missing_file/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/missing_file/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "claude/missing_file/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "claude/missing_file/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/no_branch/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/no_branch/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/no_branch/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/no_branch/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/no_key/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/no_key/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "claude/no_key/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "claude/no_key/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/non_bool/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/non_bool/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "claude/non_bool/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "claude/non_bool/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/top_list/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/top_list/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "claude/top_list/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "claude/top_list/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/wrong_shape/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "claude/wrong_shape/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "claude/wrong_shape/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "claude/wrong_shape/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "local/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "local/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "local/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "local/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/codex/absent/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/codex/absent/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/codex/absent/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/codex/absent/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/codex/disabled/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/codex/disabled/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/codex/disabled/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/codex/disabled/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/codex/enabled/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/codex/enabled/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/codex/enabled/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/codex/enabled/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/codex/malformed/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/codex/malformed/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/codex/malformed/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/codex/malformed/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/opencode/absent/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/opencode/absent/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/opencode/absent/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/opencode/absent/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/opencode/disabled/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/opencode/disabled/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/opencode/disabled/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/opencode/disabled/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/opencode/enabled/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/opencode/enabled/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/opencode/enabled/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/opencode/enabled/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/opencode/malformed/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/opencode/malformed/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/opencode/malformed/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/github-issues/opencode/malformed/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/linear/codex/absent/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      "<tmp>/codex-home/config.toml",
+      "linear",
+      "codex"
+    ],
+    "reads": 1,
+    "warnings": 0
+  },
+  "server/linear/codex/absent/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/linear/codex/absent/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      "<tmp>/codex-home/config.toml",
+      "linear",
+      "codex"
+    ],
+    "reads": 1,
+    "warnings": 0
+  },
+  "server/linear/codex/absent/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/linear/codex/disabled/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      "<tmp>/codex-home/config.toml",
+      "linear",
+      "codex"
+    ],
+    "reads": 1,
+    "warnings": 0
+  },
+  "server/linear/codex/disabled/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/linear/codex/disabled/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      "<tmp>/codex-home/config.toml",
+      "linear",
+      "codex"
+    ],
+    "reads": 1,
+    "warnings": 0
+  },
+  "server/linear/codex/disabled/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/linear/codex/enabled/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 1,
+    "warnings": 0
+  },
+  "server/linear/codex/enabled/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/linear/codex/enabled/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 1,
+    "warnings": 0
+  },
+  "server/linear/codex/enabled/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/linear/codex/malformed/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 1,
+    "warnings": 1
+  },
+  "server/linear/codex/malformed/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/linear/codex/malformed/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 1,
+    "warnings": 1
+  },
+  "server/linear/codex/malformed/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/linear/opencode/absent/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/linear/opencode/absent/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      "<tmp>/_home/.config/opencode/opencode.json",
+      "linear",
+      "opencode"
+    ],
+    "reads": 1,
+    "warnings": 0
+  },
+  "server/linear/opencode/absent/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      "<tmp>/_home/.config/opencode/opencode.json",
+      "linear",
+      "opencode"
+    ],
+    "reads": 1,
+    "warnings": 0
+  },
+  "server/linear/opencode/absent/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/linear/opencode/disabled/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/linear/opencode/disabled/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      "<tmp>/_home/.config/opencode/opencode.json",
+      "linear",
+      "opencode"
+    ],
+    "reads": 1,
+    "warnings": 0
+  },
+  "server/linear/opencode/disabled/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      "<tmp>/_home/.config/opencode/opencode.json",
+      "linear",
+      "opencode"
+    ],
+    "reads": 1,
+    "warnings": 0
+  },
+  "server/linear/opencode/disabled/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/linear/opencode/enabled/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/linear/opencode/enabled/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 1,
+    "warnings": 0
+  },
+  "server/linear/opencode/enabled/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 1,
+    "warnings": 0
+  },
+  "server/linear/opencode/enabled/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/linear/opencode/malformed/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/linear/opencode/malformed/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 1,
+    "warnings": 1
+  },
+  "server/linear/opencode/malformed/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 1,
+    "warnings": 1
+  },
+  "server/linear/opencode/malformed/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/unset/codex/absent/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "server/unset/codex/absent/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/unset/codex/absent/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "server/unset/codex/absent/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/unset/codex/disabled/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "server/unset/codex/disabled/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/unset/codex/disabled/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "server/unset/codex/disabled/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/unset/codex/enabled/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "server/unset/codex/enabled/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/unset/codex/enabled/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "server/unset/codex/enabled/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/unset/codex/malformed/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "server/unset/codex/malformed/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/unset/codex/malformed/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "server/unset/codex/malformed/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/unset/opencode/absent/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/unset/opencode/absent/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "server/unset/opencode/absent/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "server/unset/opencode/absent/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/unset/opencode/disabled/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/unset/opencode/disabled/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "server/unset/opencode/disabled/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "server/unset/opencode/disabled/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/unset/opencode/enabled/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/unset/opencode/enabled/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "server/unset/opencode/enabled/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "server/unset/opencode/enabled/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/unset/opencode/malformed/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "server/unset/opencode/malformed/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "server/unset/opencode/malformed/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "server/unset/opencode/malformed/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "unbound/github-issues/invalid/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "unbound/github-issues/invalid/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "unbound/github-issues/invalid/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "unbound/github-issues/invalid/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "unbound/github-issues/unset/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "unbound/github-issues/unset/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "unbound/github-issues/unset/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "unbound/github-issues/unset/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "unbound/linear/invalid/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      "clients.yaml tracker_mcp_gate.servers",
+      "a.b",
+      "codex"
+    ],
+    "reads": 0,
+    "warnings": 0
+  },
+  "unbound/linear/invalid/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "unbound/linear/invalid/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      "clients.yaml tracker_mcp_gate.servers",
+      "a.b",
+      "codex"
+    ],
+    "reads": 0,
+    "warnings": 0
+  },
+  "unbound/linear/invalid/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "unbound/linear/unset/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      "clients.yaml tracker_mcp_gate.servers",
+      "servers.codex (unset)",
+      "codex"
+    ],
+    "reads": 0,
+    "warnings": 0
+  },
+  "unbound/linear/unset/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "unbound/linear/unset/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": [
+      "dev/T-2442",
+      "clients.yaml tracker_mcp_gate.servers",
+      "servers.codex (unset)",
+      "codex"
+    ],
+    "reads": 0,
+    "warnings": 0
+  },
+  "unbound/linear/unset/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "unbound/unset/invalid/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "unbound/unset/invalid/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "unbound/unset/invalid/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "unbound/unset/invalid/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "unbound/unset/unset/finalize": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "unbound/unset/unset/impl": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  },
+  "unbound/unset/unset/plan": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 1
+  },
+  "unbound/unset/unset/review": {
+    "disabled": {
+      "hit": null,
+      "reads": 0,
+      "warnings": 0
+    },
+    "hit": null,
+    "reads": 0,
+    "warnings": 0
+  }
+}

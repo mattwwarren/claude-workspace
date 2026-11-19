@@ -1406,8 +1406,24 @@ def test_local_non_impl_cells_fail_closed_on_the_stage_preflight() -> None:
     assert flipped == _LOCAL_STAGE_PARK_CELLS
 
 
+def test_binding_reasons_are_covered_by_the_blocker_reason_table() -> None:
+    """RFC 0019 H2b (#3744): the binding parks ride the blocker-reason element."""
+    covers = set(_manifest().elements["orch.blocker-reason-table"].covers)
+    assert {
+        "binding_blocked",
+        "binding_tool_missing",
+        "binding_unbound",
+        "binding_unreachable",
+    } <= covers
+    assert not {"tracker_mcp_gate", "tracker_mcp_gate_blocked"} & covers
+
+
 def test_old_stage_reasons_are_covered_through_their_canonical_name() -> None:
-    """Covers lists carry new names; each legacy alias resolves to a covered one."""
+    """Covers lists carry new names; each legacy alias resolves to a covered one.
+
+    The aliases are the old stage reasons (H2, #3709) and the old binding
+    disposition and skip reason (H2b, #3744).
+    """
     covered = {c for e in _manifest().elements.values() for c in e.covers}
     assert PreflightReason.STAGE_UNSUPPORTED.value in covered
     for old in LEGACY_REASON_ALIASES:

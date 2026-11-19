@@ -114,8 +114,29 @@ class TestLeadingRun:
 
         streak = _single([_row()], events, _now_after(events))
 
-        assert streak.skip_reason == "tracker_mcp_gate_blocked"
+        # canonical_reason (#3744): the legacy string reads as its new name.
+        assert streak.skip_reason == "binding_blocked"
         assert streak.consecutive == len(newest)
+
+    def test_a_streak_spans_the_binding_blocked_rename(self) -> None:
+        """#3744: legacy and new skip reasons count as one consecutive run."""
+        older = skip_tick_events(
+            ACME, ACME_TICKET, "tracker_mcp_gate_blocked", count=3, start=_T0
+        )
+        newer = skip_tick_events(
+            ACME,
+            ACME_TICKET,
+            "binding_blocked",
+            count=2,
+            start=older[-1].created_at + timedelta(seconds=30),
+        )
+        events = older + newer
+
+        streak = _single([_row()], events, _now_after(events))
+
+        assert streak.skip_reason == "binding_blocked"
+        assert streak.consecutive == len(older) + len(newer)
+        assert streak.first_at == older[0].created_at
 
     def test_identical_timestamps_resolve_independent_of_input_order(self) -> None:
         at = _T0

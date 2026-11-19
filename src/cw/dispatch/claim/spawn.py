@@ -27,8 +27,9 @@ from cw.dev_queue import (
 from cw.dev_queue.lifecycle import _advance_stage
 from cw.dev_queue.stage_entry import enter_stage
 from cw.dispatch.claim.claimed_row import _stamp_spawn_success
-from cw.dispatch.claim.codex_capability import _codex_capability_gate, _SpawnOutcome
 from cw.dispatch.claim.events import _emit_worktree_occupied_skip_event
+from cw.dispatch.claim.outcome import _SpawnOutcome
+from cw.dispatch.claim.preflight_reach import preflight_before_spawn
 from cw.events import record_event
 from cw.exceptions import (
     ClaudeBinaryNotFoundError,
@@ -135,7 +136,7 @@ def _apply_plan_bypass_if_available(
     plan anyway if the local check misses.
 
     Extracted from :func:`_spawn_claimed_task` to keep that function inside
-    the PLR branch/statement budget, mirroring :func:`_codex_capability_gate`
+    the PLR branch/statement budget, mirroring :func:`preflight_before_spawn`
     and :func:`_stamp_spawn_success`'s extractions for the same reason. Sole
     caller; ``task.stage`` must already be ``Stage.PLAN`` on entry.
 
@@ -590,7 +591,7 @@ def _spawn_claimed_task(
         # keep this function within the PLR branch/statement budget; no-op for
         # non-codex backends. Runs first so a codex-incapable host never pays
         # for worktree provisioning on a task that's about to be parked.
-        parked = _codex_capability_gate(task, client)
+        parked = preflight_before_spawn(task, client)
         if parked is not None:
             return parked
 

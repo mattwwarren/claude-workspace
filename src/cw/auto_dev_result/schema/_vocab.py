@@ -16,7 +16,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from cw.models import QueueItemStatus
+from cw.models import DispatchSkipReason, QueueItemStatus
 from cw.stage_preflight import PreflightReason, canonical_reason
 
 # Pinned logger name for every record the schema package emits. Deliberately a
@@ -348,6 +348,15 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             # opencode_<stage>_not_implemented) are known through
             # canonical_reason in is_known_blocker_reason.
             PreflightReason.STAGE_UNSUPPORTED.value,
+            # RFC 0019 H2b (#3744): the tick-side binding reachability parks
+            # and their dispatch.tick skip reason. Dispositions and skip
+            # reasons, not emitted blocker.reason values; registered so their
+            # legacy names (tracker_mcp_gate, tracker_mcp_gate_blocked) are
+            # known through canonical_reason in is_known_blocker_reason.
+            PreflightReason.BINDING_UNBOUND.value,
+            PreflightReason.BINDING_UNREACHABLE.value,
+            PreflightReason.BINDING_TOOL_MISSING.value,
+            DispatchSkipReason.BINDING_BLOCKED.value,
             "local_main_diverged_from_origin",
             "plan_ambiguous",
             "plan_missing",

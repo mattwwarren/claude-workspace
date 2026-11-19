@@ -39,6 +39,7 @@ from cw.doctor.wedge._constants import (
 from cw.models import QueueItemStatus, ReapReason, occupies_lane_slot
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile._shared import resolve_session_for_task
+from cw.stage_preflight import canonical_reason
 from cw.ticket_view import ViewSources, next_command_facts
 
 if TYPE_CHECKING:
@@ -101,7 +102,10 @@ def _is_operator_gated_park(task: TicketTask) -> bool:
     (:func:`_check_wedge_operator_gated_park`) so the three can never
     disagree.
     """
-    if task.disposition in _OPERATOR_GATED_PARK_DISPOSITIONS:
+    if (
+        task.disposition is not None
+        and canonical_reason(task.disposition) in _OPERATOR_GATED_PARK_DISPOSITIONS
+    ):
         return True
     return bool(
         task.blocked_reason

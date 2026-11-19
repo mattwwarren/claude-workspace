@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 from cw.dispatch import TICK_STALE_SECONDS
 from cw.models import OrchestratorEventType, QueueItemStatus
+from cw.stage_preflight import canonical_reason
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -81,7 +82,10 @@ def _per_ticket_skip(
         and isinstance(reason, str)
     ):
         return None
-    return (client, ticket_id), _SkipEvent(at=event.created_at, reason=str(reason))
+    # canonical_reason (#3744): a streak spans the tracker_mcp_gate_blocked ->
+    # binding_blocked rename, so a row parked across an upgrade keeps counting.
+    skip = _SkipEvent(at=event.created_at, reason=canonical_reason(str(reason)))
+    return (client, ticket_id), skip
 
 
 def _events_by_key(

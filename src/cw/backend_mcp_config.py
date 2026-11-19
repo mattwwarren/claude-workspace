@@ -54,6 +54,8 @@ _CODEX_HOME_ENV = "CODEX_HOME"
 _CODEX_SERVERS_KEY = "mcp_servers"
 _OPENCODE_SERVERS_KEY = "mcp"
 _ENABLED_KEY = "enabled"
+# The codex per-server tool allowlist key (#3744).
+_ENABLED_TOOLS_KEY = "enabled_tools"
 # The repo-root marker the project-layer walk stops at.
 _GIT_MARKER = ".git"
 
@@ -106,6 +108,21 @@ class McpConfigReading:
     """One reading: the state, the user-layer path it came from, and why."""
 
     state: McpState
+    path: Path
+    reason: str
+
+
+@dataclass(frozen=True)
+class EnabledToolsReading:
+    """A codex server's ``enabled_tools`` allowlist, as far as it is known (#3744).
+
+    ``known`` is False on any fail-open case. When ``known``, ``tools`` is the
+    allowlist, or ``None`` when the server sets no ``enabled_tools`` key (no
+    tool is excluded).
+    """
+
+    known: bool
+    tools: tuple[str, ...] | None
     path: Path
     reason: str
 
@@ -282,3 +299,55 @@ def read_backend_mcp(backend: str, server: str, root: Path) -> McpConfigReading:
         if layer is not None:
             return McpConfigReading(McpState.UNKNOWN, path, f"{reason}, but {layer}")
     return McpConfigReading(state, path, reason)
+
+
+def _allowlist(entry: object, label: str) -> tuple[str, ...] | None | str:
+    """The ``enabled_tools`` list of one server *entry*, ``None``, or a reason."""
+    if not isinstance(entry, dict):
+        return f"{label} is not a table"
+    if _ENABLED_TOOLS_KEY not in entry:
+        return None
+    raw = entry[_ENABLED_TOOLS_KEY]
+    if not isinstance(raw, list) or not all(isinstance(t, str) for t in raw):
+        return f"{label}.{_ENABLED_TOOLS_KEY} is not a list of strings"
+    return tuple(raw)
+
+
+def _server_allowlist(
+    loaded: dict[str, object], server: str, label: str
+) -> tuple[str, ...] | None | str:
+    """*server*'s ``enabled_tools`` in one parsed codex config, or a reason."""
+    container = loaded.get(_CODEX_SERVERS_KEY)
+    if not isinstance(container, dict) or server not in container:
+        return f"{label} is not declared"
+    return _allowlist(container[server], label)
+
+
+def read_enabled_tools(backend: str, server: str, root: Path) -> EnabledToolsReading:
+    """Read codex MCP *server*'s ``enabled_tools`` allowlist (#3744).
+
+    Codex only, from the user layer, in process. Fails open (``known=False``)
+    for another backend, an unreadable or unparseable file, a server the file
+    does not declare as a table, a malformed allowlist, or any other config
+    layer present: another layer may change the allowlist, and it is not
+    parsed here (other layers downgrade, never upgrade).
+    """
+    path = user_layer_path(backend)
+    if backend != _CODEX or path is None:
+        return EnabledToolsReading(
+            False, None, path or Path(), f"no tool allowlist reader for {backend}"
+        )
+    loaded = _load(path, _parse_toml)
+    if isinstance(loaded, str):
+        return EnabledToolsReading(False, None, path, loaded)
+    label = f"{_CODEX_SERVERS_KEY}.{server}"
+    allowlist = _server_allowlist(loaded, server, label)
+    if isinstance(allowlist, str):
+        return EnabledToolsReading(False, None, path, allowlist)
+    layer = _other_layers(backend, root, path)
+    if layer is not None:
+        return EnabledToolsReading(False, None, path, layer)
+    if allowlist is None:
+        reason = f"{label} sets no {_ENABLED_TOOLS_KEY}"
+        return EnabledToolsReading(True, None, path, reason)
+    return EnabledToolsReading(True, allowlist, path, f"{label}.{_ENABLED_TOOLS_KEY}")

@@ -175,9 +175,8 @@ def branch_with_file(
 
     *content* is text (committed as UTF-8 via ``commit_tracked_file``) or raw
     bytes (written verbatim, so a test can commit a non-UTF-8 blob). The shared
-    form of the private ``_branch_with_file`` in
-    ``tests/test_dispatch_tracker_mcp_gate.py``, with the repo name and branch
-    parameterized.
+    form of the private ``_branch_with_file`` the retired tracker-MCP gate tests
+    carried (#3744), with the repo name and branch parameterized.
     """
     repo = make_git_repo(name)
     git_in(repo, "checkout", "-b", branch)

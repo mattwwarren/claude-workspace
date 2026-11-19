@@ -16,9 +16,12 @@ from elsewhere must target the submodule that looks it up at call time
   former siblings (the #2219 re-find, revert, park, and the stamp's pure field
   half shared with ``cw.reconcile.unowned_running``, #2591) moved to the
   ``cw.queue_rows`` leaf (#2613) and are re-exported here.
-- ``codex_capability`` — TTL-cached codex CLI probe and pre-spawn gate
-  (#1238); also holds the ``_SpawnOutcome`` record returned by both the gate
-  and the spawn path.
+- ``codex_capability`` — the TTL-cached codex CLI probe (#1238).
+- ``outcome`` — the ``_SpawnOutcome`` record returned by every pre-spawn and
+  spawn step, and ``park_before_spawn`` with its circuit-breaker streak
+  (RFC 0019 H2b, #3744).
+- ``preflight_reach`` — the tick-side binding reachability preflight and the
+  post-claim codex CLI park ``preflight_before_spawn`` (#3744).
 - ``lane_stats`` — per-lane occupant lists and occupancy counts (ADR-0006).
 - ``screening`` — candidate screening and the atomic claim transaction. Its
   pure fix-dispatch-hold / backstop-exempt predicates moved to the
@@ -32,14 +35,10 @@ from __future__ import annotations
 from cw.dispatch.claim.claimed_row import _stamp_spawn_success
 from cw.dispatch.claim.codex_capability import (
     _CODEX_CAPABILITY_GATE_TIMEOUT_SECONDS,
-    _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD,
     _CODEX_CAPABILITY_PROBE_TTL_SECONDS,
     _cached_codex_capability_diagnosis,
     _codex_capability_cache,
-    _codex_capability_gate,
-    _codex_capability_park_count,
     _reset_codex_capability_cache,
-    _SpawnOutcome,
 )
 from cw.dispatch.claim.events import (
     _emit_attempt_cap_attention_event,
@@ -53,6 +52,12 @@ from cw.dispatch.claim.lane_stats import (
     _lane_occupants_for_client,
     _lane_stats_for_client,
 )
+from cw.dispatch.claim.outcome import (
+    _PARK_STREAK_CIRCUIT_THRESHOLD,
+    _park_streak,
+    _SpawnOutcome,
+)
+from cw.dispatch.claim.preflight_reach import preflight_before_spawn
 from cw.dispatch.claim.screening import (
     _CLAIM_BACKOFF,
     _CLAIM_CLAIMED,
@@ -88,9 +93,9 @@ __all__ = [
     "_CLAIM_CLAIMED",
     "_CLAIM_SKIPPED",
     "_CODEX_CAPABILITY_GATE_TIMEOUT_SECONDS",
-    "_CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD",
     "_CODEX_CAPABILITY_PROBE_TTL_SECONDS",
     "_OCCUPIED_DEFER_SECONDS",
+    "_PARK_STREAK_CIRCUIT_THRESHOLD",
     "_SPAWN_ERROR_BACKOFF_CAP_SECONDS",
     "_SPAWN_ERROR_BACKOFF_INITIAL_SECONDS",
     "_SpawnOutcome",
@@ -99,8 +104,6 @@ __all__ = [
     "_cached_codex_capability_diagnosis",
     "_claim_next_pending",
     "_codex_capability_cache",
-    "_codex_capability_gate",
-    "_codex_capability_park_count",
     "_defer_genuinely_live_hook_conflict",
     "_defer_occupied_claim",
     "_emit_attempt_cap_attention_event",
@@ -117,6 +120,7 @@ __all__ = [
     "_lane_stats_for_client",
     "_park_running_task_blocked_on_user",
     "_park_stale_pr_task",
+    "_park_streak",
     "_raise_if_stale_tree_occupied",
     "_reset_codex_capability_cache",
     "_revert_claimed_task_to_pending",
@@ -124,5 +128,6 @@ __all__ = [
     "_spawn_claimed_task",
     "_spawn_error_tick_fields",
     "_stamp_spawn_success",
+    "preflight_before_spawn",
     "resolve_occupied_ticket_ids",
 ]

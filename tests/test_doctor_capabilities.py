@@ -1,4 +1,8 @@
-"""Tests for the declared-only ``harness-capabilities`` doctor check (#3708)."""
+"""Tests for the ``harness-capabilities`` doctor check (#3708, RFC 0019 H2b #3744).
+
+The declaration half. The tickets-binding reach half, which absorbed the
+retired ``tracker-mcp`` check, is in ``tests/test_doctor_capabilities_reach.py``.
+"""
 
 from __future__ import annotations
 
@@ -42,7 +46,7 @@ def _result_for(backend: str) -> CheckResult:
     return match
 
 
-def test_one_result_per_client_lane_backend_and_always_ok() -> None:
+def test_one_result_per_client_lane_backend_and_never_warns() -> None:
     client = make_client(_lane_on(CODEX_BACKEND), name="client-a")
     results = _check_harness_capabilities({"client-a": client})
     names = [r.name for r in results]
@@ -51,14 +55,27 @@ def test_one_result_per_client_lane_backend_and_always_ok() -> None:
     assert all(r.ok and not r.warn for r in results)
 
 
-@pytest.mark.parametrize(
-    "backend", [CLAUDE_NATIVE_BACKEND, CODEX_BACKEND, OPENCODE_BACKEND, LOCAL_BACKEND]
-)
-def test_every_backend_result_is_ok(backend: str) -> None:
+@pytest.mark.parametrize("backend", [CLAUDE_NATIVE_BACKEND, CODEX_BACKEND])
+def test_a_backend_declaring_every_routed_stage_is_ok(backend: str) -> None:
     result = _result_for(backend)
     assert result.ok is True
     assert result.warn is False
     assert _CAVEAT in result.detail
+
+
+@pytest.mark.parametrize("backend", [OPENCODE_BACKEND, LOCAL_BACKEND])
+def test_a_routed_stage_the_backend_does_not_declare_fails(backend: str) -> None:
+    """R8 (#3744): ``first_unmet`` would park it ``stage_unsupported``."""
+    result = _result_for(backend)
+    assert result.ok is False
+    assert result.warn is False
+    assert _CAVEAT in result.detail
+
+
+def test_an_unrecognized_backend_fails() -> None:
+    result = _result_for("nope")
+    assert result.ok is False
+    assert "unrecognized backend 'nope'" in result.detail
 
 
 def test_detail_is_deterministic_across_runs() -> None:
@@ -86,7 +103,7 @@ def test_mixed_lane_yields_one_result_per_backend_in_first_appearance_order() ->
     ]
 
 
-def test_mismatch_note_names_routed_stage_without_severity_change() -> None:
+def test_mismatch_note_names_the_routed_stage_and_fails() -> None:
     lane = make_lane(
         "default", executors={Stage.PLAN: LOCAL_BACKEND}, stages=[Stage.PLAN]
     )
@@ -95,17 +112,18 @@ def test_mismatch_note_names_routed_stage_without_severity_change() -> None:
     assert "declared, not enforced" not in result.detail
     assert "parks such a spawn as stage_unsupported" in result.detail
     assert "routes plan to local" in result.detail
-    assert result.ok is True
+    assert result.ok is False
     assert result.warn is False
 
 
-def test_opencode_finalize_carries_the_note() -> None:
+def test_opencode_finalize_carries_the_note_and_fails() -> None:
     lane = make_lane(
         "default", executors={Stage.FINALIZE: OPENCODE_BACKEND}, stages=[Stage.FINALIZE]
     )
     client = make_client(lane, name="client-a")
     (result,) = _check_harness_capabilities({"client-a": client})
     assert "routes finalize to opencode" in result.detail
+    assert result.ok is False
     assert result.warn is False
 
 

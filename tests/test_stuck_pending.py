@@ -19,6 +19,7 @@ from cw.models import (
     QueueItemStatus,
 )
 from cw.result import reconstruct_staged_sentinel
+from cw.stage_preflight import canonical_reason
 from cw.stuck_pending import (
     HANDOFF_STUCK_SECONDS,
     NEEDS_ACTION_SKIP_REASONS,
@@ -116,13 +117,15 @@ class TestSkipReasonPartition:
         [
             "attempt_cap_blocked",
             "stale_pr_blocked",
+            "binding_blocked",
             "tracker_mcp_gate_blocked",
             "ticket_closed",
         ],
     )
     def test_parking_codes_are_not_pending_needs_action(self, code: str) -> None:
         # Dispatch parks (or, for ticket_closed, cancels) these rows; never PENDING.
-        assert code in SELF_CLEARING_SKIP_REASONS
+        # The pre-#3744 tracker_mcp_gate_blocked reads through canonical_reason.
+        assert canonical_reason(code) in SELF_CLEARING_SKIP_REASONS
 
 
 class TestClassifyPending:

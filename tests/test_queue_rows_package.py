@@ -122,15 +122,18 @@ _CYCLE_PREFIXES = ("cw.dispatch.", "cw.reconcile", "cw.executor.", "cw.spawn")
 
 # ``cw.dispatch.claim.__all__`` before #2613, hardcoded rather than re-derived:
 # the move changes import sources only, never the re-exported surface.
+# #3744 (RFC 0019 H2b) renamed three of them one for one: the codex gate became
+# ``preflight_before_spawn`` and its threshold and counter became the shared
+# park streak's ``_PARK_STREAK_CIRCUIT_THRESHOLD`` and ``_park_streak``.
 _CLAIM_ALL = frozenset(
     {
         "_CLAIM_BACKOFF",
         "_CLAIM_CLAIMED",
         "_CLAIM_SKIPPED",
         "_CODEX_CAPABILITY_GATE_TIMEOUT_SECONDS",
-        "_CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD",
         "_CODEX_CAPABILITY_PROBE_TTL_SECONDS",
         "_OCCUPIED_DEFER_SECONDS",
+        "_PARK_STREAK_CIRCUIT_THRESHOLD",
         "_SPAWN_ERROR_BACKOFF_CAP_SECONDS",
         "_SPAWN_ERROR_BACKOFF_INITIAL_SECONDS",
         "_SpawnOutcome",
@@ -139,8 +142,6 @@ _CLAIM_ALL = frozenset(
         "_cached_codex_capability_diagnosis",
         "_claim_next_pending",
         "_codex_capability_cache",
-        "_codex_capability_gate",
-        "_codex_capability_park_count",
         "_defer_genuinely_live_hook_conflict",
         "_defer_occupied_claim",
         "_emit_attempt_cap_attention_event",
@@ -156,6 +157,7 @@ _CLAIM_ALL = frozenset(
         "_lane_occupants_for_client",
         "_lane_stats_for_client",
         "_park_running_task_blocked_on_user",
+        "_park_streak",
         "_park_stale_pr_task",
         "_raise_if_stale_tree_occupied",
         "_reset_codex_capability_cache",
@@ -163,6 +165,7 @@ _CLAIM_ALL = frozenset(
         "_screen_and_claim",
         "_spawn_claimed_task",
         "_spawn_error_tick_fields",
+        "preflight_before_spawn",
         "_stamp_spawn_success",
         "resolve_occupied_ticket_ids",
     }

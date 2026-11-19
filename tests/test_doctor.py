@@ -5400,11 +5400,14 @@ class TestCheckProjectConfigs:
         assert check.ok is True
         assert "confirm backend claude" in check.detail
 
-    def test_run_doctor_includes_all_codex_lane_check(
+    def test_run_doctor_warns_an_all_codex_lane_through_review_convergence(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
         """A clean all-codex client WARNs about the confirm default (#3064), the
         report stays ok and not clean, and a claude-native client adds nothing.
+
+        The WARN moved from the retired ``all-codex-lane`` check onto the
+        lane's ``review-convergence`` row (RFC 0019 H2b, #3744).
         """
         from cw.models import (
             CLAUDE_NATIVE_BACKEND,
@@ -5444,11 +5447,16 @@ class TestCheckProjectConfigs:
 
         report = run_doctor()
 
-        checks = [c for c in report.checks if c.name.startswith("all-codex-lane")]
-        assert [c.name for c in checks] == ["all-codex-lane/client-a/default"]
+        assert not [c for c in report.checks if c.name.startswith("all-codex-lane")]
+        checks = [
+            c
+            for c in report.checks
+            if c.name.startswith("review-convergence/") and c.warn
+        ]
+        assert [c.name for c in checks] == ["review-convergence/client-a/default"]
         (check,) = checks
         assert check.ok is True
-        assert check.warn is True
+        assert "all-codex lane" in check.detail
         assert report.ok is True
         assert report.clean is False
 

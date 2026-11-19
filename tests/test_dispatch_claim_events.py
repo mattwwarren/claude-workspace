@@ -15,7 +15,12 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw.events import read_events
-from cw.models import CLAUDE_NATIVE_BACKEND, OPENCODE_BACKEND, OrchestratorEventType
+from cw.models import (
+    CLAUDE_NATIVE_BACKEND,
+    CODEX_BACKEND,
+    OPENCODE_BACKEND,
+    OrchestratorEventType,
+)
 from tests._adopt_pr_helpers import make_adopted_task
 
 if TYPE_CHECKING:
@@ -78,51 +83,48 @@ class TestStaleDispatchAttention:
         )
 
 
-class TestTrackerMcpGateAttention:
+class TestBindingAttention:
+    """The binding park's SESSION_NEEDS_ATTENTION shape (#2442, #3055, #3744)."""
+
     def test_payload_pins_common_fields_then_gate_extras(self) -> None:
-        from cw.dispatch.claim.events import _emit_tracker_mcp_gate_attention_event
+        from cw.dispatch.claim.events import _emit_binding_attention_event
+        from cw.dispatch.claim.preflight_reach import BindingHit
 
         task = make_adopted_task()
-        _emit_tracker_mcp_gate_attention_event(
-            task,
-            _CLIENT,
-            _LANE,
-            branch="B",
-            file_inspected="F",
-            expected="P",
-            backend=CLAUDE_NATIVE_BACKEND,
-        )
+        hit = BindingHit(branch="B", file_inspected="F", expected="P")
+        _emit_binding_attention_event(task, _CLIENT, _LANE, hit)
 
         ev = _only_event()
         assert ev.type == OrchestratorEventType.SESSION_NEEDS_ATTENTION
         assert ev.correlation_id == "T-1"
         assert list(ev.payload.items()) == [
-            *_common(session_id="", paused_status="tracker_mcp_gate"),
+            *_common(session_id="", paused_status="binding_unreachable"),
             ("branch", "B"),
             ("file_inspected", "F"),
             ("expected_plugin", "P"),
-            ("backend", "claude-native"),
+            ("backend", CLAUDE_NATIVE_BACKEND),
             ("details", "branch=B; file_inspected=F; expected_plugin=P"),
+            ("need", "tickets"),
         ]
 
     def test_opencode_payload_names_the_server(self) -> None:
-        """#3055: a non-Claude hit carries expected_server, not expected_plugin."""
-        from cw.dispatch.claim.events import _emit_tracker_mcp_gate_attention_event
+        """#3055: a server hit carries expected_server, not expected_plugin."""
+        from cw.dispatch.claim.events import _emit_binding_attention_event
+        from cw.dispatch.claim.preflight_reach import BindingHit
 
         task = make_adopted_task()
-        _emit_tracker_mcp_gate_attention_event(
-            task,
-            _CLIENT,
-            _LANE,
+        hit = BindingHit(
             branch="B",
             file_inspected="/h/.config/opencode/opencode.json",
             expected="linear",
             backend=OPENCODE_BACKEND,
+            expected_kind="server",
         )
+        _emit_binding_attention_event(task, _CLIENT, _LANE, hit)
 
         ev = _only_event()
         assert list(ev.payload.items()) == [
-            *_common(session_id="", paused_status="tracker_mcp_gate"),
+            *_common(session_id="", paused_status="binding_unreachable"),
             ("branch", "B"),
             ("file_inspected", "/h/.config/opencode/opencode.json"),
             ("backend", "opencode"),
@@ -132,7 +134,34 @@ class TestTrackerMcpGateAttention:
                 "branch=B; file_inspected=/h/.config/opencode/opencode.json;"
                 " backend=opencode; expected_server=linear",
             ),
+            ("need", "tickets"),
         ]
+
+    def test_tool_missing_payload_appends_the_missing_names(self) -> None:
+        """#3744: the reason is the paused status and details names the tools."""
+        from cw.dispatch.claim.events import _emit_binding_attention_event
+        from cw.dispatch.claim.preflight_reach import BindingHit
+        from cw.stage_preflight import PreflightReason
+
+        task = make_adopted_task()
+        hit = BindingHit(
+            branch="B",
+            file_inspected="C",
+            expected="linear",
+            backend=CODEX_BACKEND,
+            reason=PreflightReason.BINDING_TOOL_MISSING,
+            expected_kind="server",
+            missing_tools=("a", "b"),
+        )
+        _emit_binding_attention_event(task, _CLIENT, _LANE, hit)
+
+        payload = _only_event().payload
+        assert payload["paused_status"] == "binding_tool_missing"
+        assert payload["details"] == (
+            "branch=B; file_inspected=C; backend=codex; expected_server=linear;"
+            " missing_tools=a,b"
+        )
+        assert list(payload)[-1] == "need"
 
 
 class TestReviewApprovalGateAttention:

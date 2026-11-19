@@ -422,9 +422,24 @@ def test_every_old_stage_reason_canonicalizes_to_stage_unsupported(old: str) -> 
     assert is_known_blocker_reason(old)
 
 
-def test_the_alias_table_is_exactly_the_old_stage_reasons() -> None:
-    assert sorted(LEGACY_REASON_ALIASES) == sorted(_LEGACY)
+#: RFC 0019 H2b (#3744): the tracker-MCP gate's disposition and skip reason.
+_BINDING_LEGACY = {
+    "tracker_mcp_gate": PreflightReason.BINDING_UNREACHABLE.value,
+    "tracker_mcp_gate_blocked": "binding_blocked",
+}
+
+
+def test_the_alias_table_is_the_old_stage_and_binding_reasons() -> None:
+    assert sorted(LEGACY_REASON_ALIASES) == sorted([*_LEGACY, *_BINDING_LEGACY])
     assert isinstance(LEGACY_REASON_ALIASES, MappingProxyType)
+
+
+@pytest.mark.parametrize(("old", "new"), sorted(_BINDING_LEGACY.items()))
+def test_every_old_binding_string_canonicalizes_to_its_new_name(
+    old: str, new: str
+) -> None:
+    assert canonical_reason(old) == new
+    assert is_known_blocker_reason(old)
 
 
 @pytest.mark.parametrize(

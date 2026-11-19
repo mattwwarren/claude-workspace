@@ -1026,6 +1026,22 @@ class TestKnownBlockerReasons:
         """RFC 0019 H2 (#3709): every stage pre-flight park reason is known."""
         assert {r.value for r in PreflightReason} <= KNOWN_BLOCKER_REASONS
 
+    def test_registry_covers_the_binding_reasons_and_their_legacy_aliases(
+        self,
+    ) -> None:
+        """RFC 0019 H2b (#3744): new names registered, old ones only by alias."""
+        from cw.models import DispatchSkipReason
+
+        assert {
+            PreflightReason.BINDING_UNBOUND.value,
+            PreflightReason.BINDING_UNREACHABLE.value,
+            PreflightReason.BINDING_TOOL_MISSING.value,
+            DispatchSkipReason.BINDING_BLOCKED.value,
+        } <= KNOWN_BLOCKER_REASONS
+        for old in ("tracker_mcp_gate", "tracker_mcp_gate_blocked"):
+            assert old not in KNOWN_BLOCKER_REASONS
+            assert is_known_blocker_reason(old)
+
     def test_old_stage_reasons_are_known_through_their_alias(self) -> None:
         """A row parked before H2 under an old stage reason is still known."""
         assert "finalize_unsupported_backend" not in KNOWN_BLOCKER_REASONS

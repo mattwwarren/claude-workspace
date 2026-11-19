@@ -310,7 +310,7 @@ def test_occupied_skip_log_names_the_row_branch_worktree(
         config=simple_config,
         stale_pr_ticket_ids={},
         occupied_ticket_reasons={_TICKET: "live session"},
-        tracker_mcp_gate_hits={},
+        binding_hits={},
         adopted_head_drifts={},
         review_approval_holds={},
         closed_ticket_hits={},
@@ -356,13 +356,14 @@ def test_open_pr_gate_probes_the_row_branch(
 
 
 @_ROWS
-def test_tracker_mcp_gate_reads_the_row_branch(
+def test_binding_preflight_reads_the_row_branch(
     branch: str | None,
     expected: str,
     sample_client_config: ClientConfig,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from cw.dispatch.tracker_mcp_gate import resolve_tracker_mcp_gate_hits
+    from cw.binding_probe import BindingProbe, Reach
+    from cw.dispatch.claim.preflight_reach import resolve_binding_hits
 
     client = with_tracker_gate(
         sample_client_config,
@@ -370,12 +371,22 @@ def test_tracker_mcp_gate_reads_the_row_branch(
     )
     recorder = _BranchRecorder()
 
-    def _evaluate(_client: ClientConfig, _gate: object, branch_name: str) -> None:
-        recorder.branches.append(branch_name)
+    def _probe(
+        _backend: str,
+        _client: ClientConfig,
+        *,
+        branch: str | None = None,
+        root: Path | None = None,
+    ) -> BindingProbe:
+        recorder.branches.append(str(branch))
+        # The tick reader's root is the client workspace; the claude-native probe
+        # must not fall back to the probe's own default root (MUST_FIX, #3744).
+        assert root == _client.workspace_path
+        return BindingProbe(Reach.ENABLED, bound=True, reason="", source=None)
 
-    monkeypatch.setattr("cw.dispatch.tracker_mcp_gate._evaluate_branch", _evaluate)
+    monkeypatch.setattr("cw.dispatch.claim.preflight_reach.probe_binding", _probe)
 
-    hits = resolve_tracker_mcp_gate_hits(client, DevQueueStore(tasks=[_row(branch)]))
+    hits = resolve_binding_hits(client, DevQueueStore(tasks=[_row(branch)]))
 
     assert hits == {}
     assert recorder.branches == [expected]

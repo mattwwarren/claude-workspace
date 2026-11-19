@@ -27,7 +27,6 @@ from cw.doctor._shared import (
     WedgeFinding,
 )
 from cw.doctor.agent_spec_drift import _check_agent_spec_drift
-from cw.doctor.all_codex_lane import _check_all_codex_lane
 from cw.doctor.bindings import _check_bindings
 from cw.doctor.capabilities import _check_harness_capabilities
 from cw.doctor.codex_fix_loop import _check_codex_fix_loop
@@ -73,7 +72,6 @@ from cw.doctor.session_outcomes import _check_session_outcomes
 from cw.doctor.sessions_auto_prune import _check_sessions_auto_prune
 from cw.doctor.skills_drift import _check_skills_commands_drift
 from cw.doctor.spared_workers import _check_spared_unrecorded_workers
-from cw.doctor.tracker_mcp import _check_tracker_mcp
 from cw.doctor.usage_limit import _check_usage_limit_windows
 from cw.doctor.user_level_hooks import _check_user_level_stop_hook
 from cw.doctor.versions import (
@@ -383,11 +381,9 @@ def _client_config_checks(clients: dict[str, ClientConfig]) -> list[CheckResult]
         *_check_review_strategy(clients),
         *_check_agent_spec_drift(clients),
         *_check_codex_fix_loop(clients),
-        *_check_tracker_mcp(clients),
         *_check_bindings(clients),
         *_check_harness_capabilities(clients),
         *_check_review_convergence(clients),
-        *_check_all_codex_lane(clients),
         *_check_review_engine(clients),
         *_check_merge_gate_disabled(clients),
         *_check_commit_hook(clients),
