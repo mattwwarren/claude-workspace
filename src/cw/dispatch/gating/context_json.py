@@ -44,7 +44,7 @@ _RENDER_ERROR: RenderFailureCause = "render_error"
 
 def _invalidate_stale_context_json(
     task: TicketTask, client: ClientConfig, worktree_path: Path
-) -> None:
+) -> bool:
     """Delete a stale ``.cw/context.json`` before spawning a re-spawned task.
 
     Requeue idempotency guard (#1046): a re-spawned task (``attempts > 1``,
@@ -60,9 +60,9 @@ def _invalidate_stale_context_json(
     ``## Ticket:`` header if it is missing (the #952 regression class).
     """
     if task.attempts <= 1:
-        return
+        return True
     if resolve_executor_config(task.stage, task, client).backend == LOCAL_BACKEND:
-        return
+        return True
     stale_context = worktree_path / CONTEXT_JSON_RELATIVE_PATH
     if stale_context.exists():
         _log.info(
@@ -72,7 +72,31 @@ def _invalidate_stale_context_json(
             task.attempts,
             worktree_path,
         )
-    stale_context.unlink(missing_ok=True)
+    try:
+        stale_context.unlink(missing_ok=True)
+    except OSError as exc:
+        _log.warning(
+            "dispatch: could not invalidate stale .cw/context.json"
+            " ticket_id=%s client=%s error_class=%s",
+            task.ticket_id,
+            task.client,
+            type(exc).__name__,
+        )
+        return False
+    try:
+        stale_context.stat()
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        _log.warning(
+            "dispatch: could not verify stale .cw/context.json invalidation"
+            " ticket_id=%s client=%s error_class=%s",
+            task.ticket_id,
+            task.client,
+            type(exc).__name__,
+        )
+        return False
+    return False
 
 
 def _emit_render_failure(
@@ -159,6 +183,20 @@ def _remove_stale_context(task: TicketTask, worktree_path: Path) -> bool:
             type(exc).__name__,
         )
     return _is_absent()
+
+
+def _ensure_context_json_safe(
+    task: TicketTask,
+    client: ClientConfig,
+    worktree_path: Path,
+) -> None:
+    """Refuse the spawn unless the context reader path is safe."""
+    if not _invalidate_stale_context_json(task, client, worktree_path):
+        msg = "stale .cw/context.json could not be invalidated"
+        raise CwError(msg)
+    if not _render_context_json_from_snapshot(task, worktree_path):
+        msg = ".cw/context.json could not be safely rendered"
+        raise CwError(msg)
 
 
 def _render_context_json_from_snapshot(task: TicketTask, worktree_path: Path) -> bool:

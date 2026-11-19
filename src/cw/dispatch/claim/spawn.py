@@ -734,13 +734,9 @@ def _spawn_claimed_task(
         # claim must defer its own reach back into gating.context_json
         # (mirrors the #698 reconcile/_shared -> cw.dispatch precedent the
         # ticket cites).
-        from cw.dispatch.gating.context_json import (
-            _invalidate_stale_context_json,
-            _render_context_json_from_snapshot,
-        )
+        from cw.dispatch.gating.context_json import _ensure_context_json_safe
 
-        _invalidate_stale_context_json(task, client, worktree_path)
-        _render_context_json_from_snapshot(task, worktree_path)
+        _ensure_context_json_safe(task, client, worktree_path)
 
         executor = resolve_executor(task, client, native_daemon=resolved_native_daemon)
         # wall_clock_budget_seconds is always None since the process-kill-
