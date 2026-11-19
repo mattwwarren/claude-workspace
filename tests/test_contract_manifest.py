@@ -1366,6 +1366,7 @@ def test_named_gap_dispositions(
     assert _ticket_of(cell) == ticket
     assert element_id in elements_with(backend, disposition)
     if (element_id, backend) == ("impl.review-feedback-guard", OPENCODE_BACKEND):
+        assert not isinstance(cell, NotApplicableDisposition)
         assert cell.ref == _PREFLIGHT_REF
 
 
