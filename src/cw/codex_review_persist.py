@@ -21,7 +21,7 @@ from cw.codex_review_signals import (
     emit_verdict_comment_skipped,
     tracker_label,
 )
-from cw.outbox_producer import content_marker, enqueue_prose
+from cw.outbox_producer import SKIP_ENQUEUE_FAILED, enqueue_prose, try_content_marker
 from cw.review_findings import (
     REVIEW_VERDICT_JSON_RELATIVE_PATH,
     render_review_verdict_envelope,
@@ -225,13 +225,34 @@ def _post_daemon_verdict_comment(
     record in every case.
     """
     sha_part = (reviewed_sha or "none")[:12]
-    marker = content_marker(f"{kind}-{sha_part}", review_text)
+    marker = try_content_marker(f"{kind}-{sha_part}", review_text)
+    tracker = tracker_label(client)
+    if marker is None:
+        reason = SKIP_ENQUEUE_FAILED
+        _log.warning(
+            "review_comment_skipped ticket=%s tracker=%s reason=%s: durable copy at %s",
+            ticket_id,
+            tracker,
+            reason,
+            artifact_path,
+        )
+        emit_verdict_comment_skipped(
+            ticket_id=ticket_id,
+            client=client.name,
+            tracker=tracker,
+            kind=kind,
+            artifact_path=artifact_path,
+            reviewed_sha=reviewed_sha,
+            session_id=session_id,
+            reason=reason,
+            entry_id=None,
+        )
+        return
     outcome = enqueue_prose(
         client.name, ticket_id, VERDICT_PRODUCER, marker, (review_text,)
     )
     if outcome.skipped_reason is None:
         return
-    tracker = tracker_label(client)
     _log.warning(
         "review_comment_skipped ticket=%s tracker=%s reason=%s: durable copy at %s",
         ticket_id,

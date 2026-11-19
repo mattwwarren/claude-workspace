@@ -22,7 +22,11 @@ from cw.codex_review_signals import (
     tracker_label,
 )
 from cw.codex_stage_completion import STAGE_FAULTS
-from cw.outbox_producer import content_marker, enqueue_prose
+from cw.outbox_producer import (
+    SKIP_ENQUEUE_FAILED,
+    enqueue_prose,
+    try_content_marker,
+)
 from cw.outbox_prose_plan import plan_prose_parts
 
 if TYPE_CHECKING:
@@ -153,12 +157,16 @@ def post_stage_comment(
             return
         parts, redacted = planned
         source = marker_source if marker_source is not None else "".join(parts)
+        marker = try_content_marker(marker_prefix, source)
+        if marker is None:
+            post.skipped(SKIP_ENQUEUE_FAILED)
+            return
         _enqueue_or_skip(
             post,
             client=client,
             task=task,
             producer=producer,
-            marker=content_marker(marker_prefix, source),
+            marker=marker,
             parts=parts,
             redacted=redacted,
         )

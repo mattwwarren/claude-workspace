@@ -126,13 +126,13 @@ class GhTarget:
 def _fallback_target(cfg: ClientConfig) -> GhTarget | None:
     """The target for a client with no ``bindings.tickets`` block (RFC 0019 O3 R9).
 
-    A GitHub or unresolved tracker gets ``gh`` in the client's git dir, the same
-    fail-open polarity as every other tracker gate. Any other tracker system has
-    no ``gh`` path and stays unreachable (``None``). Compares the system string
-    rather than reading ``TrackerClass``, so the branch guard is not widened.
+    Only an explicitly resolved GitHub tracker gets ``gh`` in the client's git
+    dir. An unresolved or other tracker system has no validated ``gh`` path and
+    stays unreachable (``None``). Compares the system string rather than
+    reading ``TrackerClass``, so the branch guard is not widened.
     """
     system = resolve_tracker(cfg.workspace_path)
-    if not system or system == TRACKER_GITHUB_ISSUES:
+    if system == TRACKER_GITHUB_ISSUES:
         return GhTarget(cwd=_git_dir(cfg))
     return None
 
@@ -141,9 +141,10 @@ def select_target(cfg: ClientConfig) -> GhTarget | None:
     """The ``gh`` target of *cfg*'s tickets binding, or ``None`` if unusable.
 
     An absent ``bindings.tickets`` block falls back to :func:`_fallback_target`
-    (GitHub or unresolved tracker: ``gh``; other trackers: ``None``). A present
-    block is usable only with a ``cli`` realization (the binding model admits
-    only ``gh`` there, on ``github-issues``); an mcp-only block stays ``None``.
+    (an explicitly resolved GitHub tracker gets ``gh``; unresolved and other
+    trackers get ``None``). A present block is usable only with a ``cli``
+    realization (the binding model admits only ``gh`` there, on
+    ``github-issues``); an mcp-only block stays ``None``.
     """
     tickets = cfg.bindings.tickets
     if tickets is None:

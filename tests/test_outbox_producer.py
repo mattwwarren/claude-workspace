@@ -114,6 +114,11 @@ def test_outbox_error_is_enqueue_failed(monkeypatch: pytest.MonkeyPatch) -> None
     assert _enqueue() == EnqueueOutcome(None, False, SKIP_ENQUEUE_FAILED)
 
 
+def test_unicode_encode_failure_is_enqueue_failed() -> None:
+    assert _enqueue(parts=("\ud800",)).skipped_reason == SKIP_ENQUEUE_FAILED
+    assert _enqueue(marker="\ud800").skipped_reason == SKIP_ENQUEUE_FAILED
+
+
 def test_overlong_marker_is_enqueue_failed() -> None:
     assert _enqueue(marker="m" * (MAX_MARKER_CHARS + 1)).skipped_reason == (
         SKIP_ENQUEUE_FAILED

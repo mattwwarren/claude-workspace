@@ -60,6 +60,14 @@ def content_marker(prefix: str, text: str) -> str:
     return f"{prefix}-{digest[:_MARKER_DIGEST_CHARS]}"
 
 
+def try_content_marker(prefix: str, text: str) -> str | None:
+    """Return a marker, or ``None`` when *text* is not valid UTF-8."""
+    try:
+        return content_marker(prefix, text)
+    except UnicodeEncodeError:
+        return None
+
+
 def _body_too_long(parts: Sequence[str]) -> bool:
     if len(parts) > MAX_PARTS:
         return True
@@ -86,6 +94,14 @@ def enqueue_prose(
     overlong or malformed ticket) is ``outbox_enqueue_failed``.
     """
     ticket_id = ticket.lstrip("#")
+    try:
+        ticket_id.encode("utf-8")
+        marker.encode("utf-8")
+        for part in parts:
+            part.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        _log.warning("outbox_enqueue_failed ticket=%s: %s", ticket_id, exc)
+        return EnqueueOutcome(None, False, SKIP_ENQUEUE_FAILED)
     if _body_too_long(parts):
         return EnqueueOutcome(None, False, SKIP_BODY_TOO_LONG)
     if len(ticket_id) > MAX_TICKET_CHARS:

@@ -171,10 +171,11 @@ class TestSelectTargetFallback:
         assert target is not None
         assert target.cwd == _git_dir(cfg)
 
-    def test_no_bindings_unresolved_tracker_targets_gh(self, tmp_path: Path) -> None:
+    def test_no_bindings_unresolved_tracker_stays_unreachable(
+        self, tmp_path: Path
+    ) -> None:
         target = select_target(client_config(tmp_path, bindings=Bindings()))
-        assert target is not None
-        assert target.cwd == _git_dir(client_config(tmp_path))
+        assert target is None
 
     def test_no_bindings_non_github_is_none(self, tmp_path: Path) -> None:
         cfg = client_config(tmp_path, bindings=Bindings(), tracker="linear")
