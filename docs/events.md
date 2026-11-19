@@ -2810,59 +2810,26 @@ exists (pending or terminal); the event does not carry its state.
   "tracker": "<str>",
   "backend": "codex",
   "kind": "verdict | unparseable | plan | pr_link",
-  "reason": "non_github_tracker | tracker_mcp_not_enabled | mcp_server_unnamed | tracker_unsupported | plan_refused | scratch_unwritable | codex_unavailable | tool_unavailable | turn_reported_failure | github_post_failed",
+  "reason": "outbox_enqueue_failed | plan_refused | body_too_long | free_text_ticket | already_posted",
   "artifact_path": "<str | null>",
   "reviewed_sha": "<str | null>",
-  "session_id": "<str>"
+  "session_id": "<str>",
+  "entry_id": "<str | null>"
 }
 ```
-**Semantics:** GitHub #3055 (RFC 0018 S3, Case A). A codex review produced a
-verdict (`kind: verdict`) or a zero-documents result (`kind: unparseable`)
-whose ticket comment was not posted, because the client's
-`tracking.primary.system` is set and is not `github-issues`: the daemon's only
-tracker client is GitHub-only (ADR-0013). Before this the skip was a log line.
-`kind: pr_link` (#3062) is the codex FINALIZE executor's PR-link comment.
-`client` is the client name. `artifact_path` is the durable worktree copy that
-now carries the verdict (`.claude/review-verdict.md` or
-`.claude/review-verdict-unparseable.md`), `null` if that write failed.
-`reviewed_sha` is the verdict's sha, or the HEAD captured for the unparseable
-artifact; `null` when that capture failed. An unset tracker still posts
-(fail-open) and emits nothing. Emitted after Step 4 and best-effort: a failed
-event write logs one warning and never affects the review or the row.
-`kind: plan` (#3060, RFC 0018 C1) is the codex PLAN executor's plan or park
-comment (`cw.codex_plan._post.post_plan_comment`, on GitHub as well as other
-trackers): `reviewed_sha` is always `null`, `artifact_path` is `.cw/plan.md`
-(a completing exit) or `.cw/plan-draft.md` (a park), and `reason:
-plan_refused` means the planner refused the text (no enqueue). The `kind` value
-is the same on the historical `review.verdict_comment_unverified` and
-`review.verdict_comment_posted`, which no producer emits since O3.
-`correlation_id` is the `ticket_id`. In `_DEFAULT_OPERATOR_EVENT_TYPES`: the
-comment otherwise exists only in the local artifact. `entry_id` (`<str | null>`,
-RFC 0019 O3) is the last payload key.
-
-Since #3057 (RFC 0018 A2) the non-GitHub branch posts through the tracker-IO
-agent turn (`cw.tracker_io.post_parts_via_turn`) whenever the caller passes
-its context, which both Step 4b call sites do. `reason` then says why nothing
-was posted:
-
-- `non_github_tracker`: the legacy skip, no tracker-IO context.
-- `tracker_mcp_not_enabled`: the codex user-layer config lacks the server
-  named by `tracker_mcp_gate.servers.codex`, or sets `enabled = false` on it.
-- `mcp_server_unnamed`: no `tracker_mcp_gate.servers.codex` entry, or a name
-  that is not `[A-Za-z0-9_-]+`.
-- `tracker_unsupported`: no comment-tool allowlist for this tracker (only
-  `linear` has one).
-- `plan_refused`: the ticket id is not `[A-Za-z0-9_-]+`, or the text is
-  blank or cannot be split into comment parts.
-- `scratch_unwritable`: the turn's scratch directory could not be created.
-- `codex_unavailable`: the `codex` binary could not be launched.
-- `tool_unavailable`, `turn_reported_failure`: the agent reported it could
-  not post (tools unavailable, or another failure) and returned no comment
-  ids.
-
-The first six are refusals before launch: nothing was posted. The last two
-are the agent's own word: also unconfirmed, not proof that nothing was posted,
-so check the ticket for a stray or duplicate comment before any re-run.
+**Semantics:** A codex verdict (`kind: verdict` or `unparseable`), PLAN or park
+comment (`kind: plan`), or FINALIZE PR-link comment (`kind: pr_link`) was not
+enqueued. `outbox_enqueue_failed` covers a validation, storage, or operating
+system failure; `plan_refused` covers planner refusal; `body_too_long` covers
+the outbox body caps; `free_text_ticket` means FINALIZE had no usable ticket;
+and `already_posted` means an entry with the marker was already enqueued.
+`entry_id` is null unless an existing entry is available for
+`already_posted`. `artifact_path`, `reviewed_sha`, and `session_id` retain the
+producer context for the verdict or plan operation. The producer slug and
+marker identify the enqueued content; the outbox delivery events report its
+eventual state. `correlation_id` is the `ticket_id`. In
+`_DEFAULT_OPERATOR_EVENT_TYPES`, this producer-side non-enqueue event remains
+forwarded; the historical unverified event is no longer in the default set.
 
 ### `review.verdict_comment_unverified` — historical (RFC 0019 O3, #3707)
 
