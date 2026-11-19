@@ -309,7 +309,9 @@ class TestJson:
         _configure(
             monkeypatch,
             client_config(tmp_path),
-            _named(client_config(tmp_path, bindings=Bindings()), _OTHER),
+            _named(
+                client_config(tmp_path, bindings=Bindings(), tracker="linear"), _OTHER
+            ),
         )
         enqueue()
         enqueue(_OTHER)

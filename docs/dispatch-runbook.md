@@ -3922,12 +3922,12 @@ without your free-text comments, voided findings and settle markers (row
 constraints from `cw review constrain` and settled dispositions still reach
 it). That is the first-entry signal; `requeue.review_delivery_degraded` stays
 the re-entry signal, and a requeued review emits both. When the review ends,
-`review.verdict_comment_skipped` says the verdict was not posted to the
-ticket and names the worktree artifact that holds it; since #3057 the verdict
-is posted through the tracker-IO turn below when the client names its codex
-MCP server, and the event then fires only when that turn refused to launch or
-the agent reported it could not post. Read the artifact, and record anything
-the loop must obey with `cw review constrain`. `cw doctor` reports such lanes
+`review.verdict_comment_skipped` says the verdict was not enqueued to the
+outbox (RFC 0019 O3, #3707) and names the worktree artifact that holds it. The
+verdict is enqueued under the `codex-verdict` producer and the drain delivers
+it; the event fires only when nothing was enqueued (`outbox_enqueue_failed`,
+`body_too_long`, or `already_posted` for an identical retry). Read the
+artifact, and record anything the loop must obey with `cw review constrain`. `cw doctor` reports such lanes
 on their `harness-capabilities/<client>/<lane>/codex` row (the retired
 `tracker-mcp/<client>/<lane>/codex` row before RFC 0019 H2b, #3744).
 
@@ -3955,14 +3955,14 @@ Setup, per client:
   not expose target metadata that cw can verify independently, the daemon turn
   is not a target-binding security boundary: posting must be an explicit
   per-ticket operator action, and the operator must check the ticket and the
-  `review.verdict_comment_posted` audit event before relying on a successful
-  post. The prompt and model-echoed ticket id check are consistency checks only.
-  (The `review.verdict_comment_*` events are unchanged by the outbox drain,
-  #3706; RFC 0019 O3 moves these posts onto the outbox and retires them. See
+  outbox entry's `outbox.entry_*` events before relying on a successful post.
+  The prompt and model-echoed ticket id check are consistency checks only.
+  (Since RFC 0019 O3, #3707, no cw producer calls this turn: codex comments are
+  enqueued and the outbox drain delivers them. O2b replaces the turn. See
   [Outbox drain](#outbox-drain).)
 
-Outcomes, by `reason` (on `review.verdict_comment_skipped` when nothing was
-posted, on `review.verdict_comment_unverified` otherwise):
+Outcomes, by `reason` (historical: since O3 no producer emits these, see the
+outbox events above):
 
 - `tracker_mcp_not_enabled`: the server is absent from the user-layer config
   or `enabled = false`. Declare or enable it.
@@ -3989,9 +3989,9 @@ middle of a part cannot be detected, and a tracker-side markdown
 normalisation can cause `readback_mismatch` on a faithful post: on
 `readback_mismatch`, read the ticket. On `POSSIBLE` or `CONFIRMED`, check the
 ticket for a duplicate or stray comment before re-running anything; cw never
-retries a post. A verified post emits `review.verdict_comment_posted` (not an
-unverified or skipped event) and logs its comment ids at info. This event is
-unchanged until RFC 0019 O3 (see [Outbox drain](#outbox-drain)).
+retries a post. Since RFC 0019 O3 (#3707) a verified post emits no
+`review.verdict_comment_posted` event; delivery is reported by
+`outbox.entry_delivered` (see [Outbox drain](#outbox-drain)).
 
 Hidden-marker record. Linear marker survival: **UNVERIFIED**. Whether
 Linear's markdown keeps the `<!-- cw-agent-authored -->` marker has not been
@@ -4072,9 +4072,10 @@ does everything else:
   first PLAN, so it parks as a git error rather than requeueing.
 - **Posting.** After the result persists, cw posts the stamped
   `.cw/plan.md` (or, on a park, the consolidated `## Pending Verification
-  Scan` comment) through `gh` or the tracker-IO turn above, best-effort and
-  never retried. A refusal is a `review.verdict_comment_skipped` /
-  `_unverified` event with `kind: plan`, never a row hold. On a non-GitHub
+  Scan` comment) is enqueued to the outbox under the `codex-plan` producer
+  (`plan-` or `park-` marker prefix), best-effort and never retried. A refusal
+  or an oversize body is a `review.verdict_comment_skipped` event with
+  `kind: plan`, never a row hold. Delivery lags by up to one dispatch tick. On a non-GitHub
   tracker `.cw/plan.md` in the reused worktree is the only durable copy; a
   rebuilt worktree loses it (codex IMPL retrieval is C2).
 - **Deferred.** Comment-path approval, the operator-authority delta, the
@@ -5365,8 +5366,10 @@ the client's `bindings.tickets` tracker when that binding has `cli: gh`, or
 through one codex courier turn per entry (1 to 3 turns, ADR-0023) when it has a
 codex MCP realization. A `--force` drain clears each unreachable marker and with
 it the episode's gate-record bit.
-Nothing enqueues to the outbox until RFC 0019 O3 migrates the producers, so on
-a running cw this changes nothing yet.
+Since RFC 0019 O3 (#3707) the codex verdict, PLAN and PR-link comments enqueue
+under `codex-verdict`, `codex-plan` (`plan-` and `park-` markers) and
+`codex-pr-link`. A non-GitHub entry drains only through a codex MCP realization;
+without one it stays `binding_unreachable`.
 
 **Tick launch.** Each dispatch tick launches at most one detached
 `python -m cw outbox drain --client <c>` per client, before the usage-limit
@@ -5393,7 +5396,11 @@ client on stdout:
 returned to `pending` and `held` the subset added to the held list. `skipped`
 (bodies the store found unreadable) is not bounded by `--limit`. Clients with
 no usable `gh` tickets binding are listed on stderr as `unconfigured`; a
-configured one still runs, so its entries are released and announced. `--json`
+configured one still runs, so its entries are released and announced. A client
+with no `bindings.tickets` block and an explicitly resolved GitHub tracker targets
+`gh` in its git dir and is not listed (RFC 0019 O3, R9); an unresolved tracker
+also uses this fail-open fallback, while a non-GitHub tracker with no block
+stays unreachable. `--json`
 prints `{"schema_version": 1, "clients": [...], "unconfigured": [...]}`.
 Exit codes: `0` drained or nothing to do; `1` an internal error, an unknown
 `-c` client, or a plain drain of a client with `outbox.enabled: false`

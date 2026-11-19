@@ -1,15 +1,14 @@
-"""The PR-link ticket comment after the result persists (#3062 R11).
+"""The PR-link ticket comment after the result persists (#3062 R11, RFC 0019 O3).
 
 Best-effort and never a hold (C1's rule): the post runs after the door, and a
-refusal or an unconfirmed post is an event. The events are the three
-verdict-comment events with ``kind: "pr_link"``, ``reviewed_sha: null`` and
-``artifact_path: null``. GitHub tickets post through the shared poster; other
-trackers through the A2 tracker-IO turn (both in :mod:`cw.codex_stage_post`).
+refusal, an oversize body or a failed enqueue is one skipped event. The comment
+is enqueued under the ``codex-pr-link`` producer with marker
+``pr-link-<sha256(pr_url)[:16]>``, so a requeue that reaches the same PR dedups
+on the outbox instead of re-reading the ticket's comments (RFC 0019 O3 retired
+the ``gh issue view`` read).
 
 A free-text ticket (``plan_source == "free_text"``) has no ticket to comment
-on and skips with a reason. A requeue that reaches an already-shipped PR does
-not re-post on GitHub: when the ticket's comments already carry the PR URL the
-post is skipped as ``already_posted``.
+on and skips with a reason.
 """
 
 from __future__ import annotations
@@ -17,23 +16,30 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Final
 
-from cw.codex_review_signals import emit_verdict_comment_skipped
+from cw.codex_review_signals import emit_verdict_comment_skipped, tracker_label
 from cw.codex_stage_completion import STAGE_FAULTS
-from cw.codex_stage_post import post_stage_comment, tracker_label
-from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_comments
+from cw.codex_stage_post import post_stage_comment
+from cw.outbox_producer import SKIP_ALREADY_POSTED
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.codex_runner import CodexRunner
     from cw.models import ClientConfig, TicketTask
 
 _log = logging.getLogger(__name__)
 
 PR_LINK_KIND: Final = "pr_link"
+PR_LINK_PRODUCER: Final = "codex-pr-link"
+PR_LINK_MARKER_PREFIX: Final = "pr-link"
 FREE_TEXT_PLAN_SOURCE: Final = "free_text"
 SKIP_FREE_TEXT: Final = "free_text_ticket"
-SKIP_ALREADY_POSTED: Final = "already_posted"
+
+__all__ = [
+    "SKIP_ALREADY_POSTED",
+    "SKIP_FREE_TEXT",
+    "compose_pr_link_comment",
+    "post_pr_link_comment",
+]
 
 
 def compose_pr_link_comment(pr_url: str, *, parent_pr: int | None = None) -> str:
@@ -44,21 +50,11 @@ def compose_pr_link_comment(pr_url: str, *, parent_pr: int | None = None) -> str
     return text
 
 
-def _already_posted(task: TicketTask, client: ClientConfig, pr_url: str) -> bool:
-    comments = fetch_issue_comments(
-        task.ticket_id, FETCH_COMMENTS_TIMEOUT, cwd=client.workspace_path
-    )
-    if not comments:
-        return False
-    return any(pr_url in str(comment.get("body") or "") for comment in comments)
-
-
 def _skip(task: TicketTask, client: ClientConfig, sid: str, reason: str) -> None:
-    tracker, _github = tracker_label(client)
     emit_verdict_comment_skipped(
         ticket_id=task.ticket_id,
         client=client.name,
-        tracker=tracker,
+        tracker=tracker_label(client),
         kind=PR_LINK_KIND,
         artifact_path=None,
         reviewed_sha=None,
@@ -73,30 +69,27 @@ def post_pr_link_comment(
     client: ClientConfig,
     worktree: Path,
     sid: str,
-    runner: CodexRunner,
     pr_url: str,
     plan_source: str,
 ) -> None:
-    """Post the PR link to the ticket, best-effort; never raises a stage fault."""
+    """Enqueue the PR link to the ticket, best-effort; never raises a stage fault."""
     try:
         if plan_source == FREE_TEXT_PLAN_SOURCE:
             _skip(task, client, sid, SKIP_FREE_TEXT)
-            return
-        _tracker, github = tracker_label(client)
-        if github and _already_posted(task, client, pr_url):
-            _skip(task, client, sid, SKIP_ALREADY_POSTED)
             return
         post_stage_comment(
             task=task,
             client=client,
             worktree=worktree,
             sid=sid,
-            runner=runner,
             text=compose_pr_link_comment(pr_url),
             artifact_path=None,
             kind=PR_LINK_KIND,
+            producer=PR_LINK_PRODUCER,
+            marker_prefix=PR_LINK_MARKER_PREFIX,
+            marker_source=pr_url,
         )
     except STAGE_FAULTS:
         _log.exception(
-            "pr_link comment post failed ticket=%s session=%s", task.ticket_id, sid
+            "pr_link comment enqueue failed ticket=%s session=%s", task.ticket_id, sid
         )

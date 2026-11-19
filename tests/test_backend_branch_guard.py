@@ -87,7 +87,6 @@ _ALLOWLIST: Final[dict[str, int]] = {
 #: Grandfathered ``TrackerClass`` sites, ``{src-relative path: exact count}``.
 _TRACKER_ALLOWLIST: Final[dict[str, int]] = {
     "cw/codex_review_signals.py": 2,
-    "cw/codex_stage_post.py": 1,
     "cw/dispatch/ticket_state_gate.py": 1,
 }
 
@@ -214,7 +213,7 @@ def test_the_exempt_prefix_set_is_pinned() -> None:
 def test_the_scan_is_not_vacuous() -> None:
     compares, trackers = _scan()
     assert compares["cw/models/bindings.py"] == _ALLOWLIST["cw/models/bindings.py"]
-    assert trackers["cw/codex_stage_post.py"] == 1
+    assert trackers["cw/codex_review_signals.py"] == 2
 
 
 def test_the_collectors_flag_every_detected_shape() -> None:

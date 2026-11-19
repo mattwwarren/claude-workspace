@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
@@ -13,21 +12,18 @@ from unittest.mock import patch
 
 import pytest
 
+from cw import codex_review_signals
 from cw.auto_dev_result import OperatorConstraintsSource
 from cw.codex_review_signals import (
     UNDELIVERED_OPERATOR_CONTEXT,
-    VerdictCommentIdentity,
     VerdictCommentKind,
     constraints_source,
     emit_confirm_escalated,
     emit_verdict_comment_skipped,
-    emit_verdict_comment_unverified,
     operator_context_undelivered_payload,
-    posted_content_sha256,
-    surface_tracker_io_outcome,
+    tracker_label,
     undelivered_operator_context,
     verdict_comment_skipped_payload,
-    verdict_comment_unverified_payload,
 )
 from cw.events import read_events
 from cw.exceptions import CwError
@@ -41,12 +37,8 @@ from cw.models import (
 from cw.models.operator_constraint import PLAN_ACTOR, OperatorConstraint
 from cw.review_finding_dispositions import FindingDisposition
 from cw.tracker import TrackerClass, TrackerKind
-from cw.tracker_io import (
-    PostedComment,
-    PublicState,
-    TrackerIoOutcome,
-    TrackerIoReason,
-)
+from tests._doctor_helpers import make_client
+from tests._shared.cli_preflight import _write_tracker_config
 
 _GITHUB = TrackerKind(TrackerClass.GITHUB, "github-issues")
 _LINEAR = TrackerKind(TrackerClass.OTHER, "linear")
@@ -135,11 +127,11 @@ class TestVerdictCommentSkipped:
             artifact_path=tmp_path / ".cw" / "plan.md",
             reviewed_sha=None,
             session_id="s-1",
-            reason="github_post_failed",
+            reason="plan_refused",
         )
         assert payload["kind"] == "plan"
         assert payload["reviewed_sha"] is None
-        assert payload["reason"] == "github_post_failed"
+        assert payload["reason"] == "plan_refused"
 
     def test_payload_fields(self, tmp_path: Path) -> None:
         payload = verdict_comment_skipped_payload(
@@ -150,6 +142,7 @@ class TestVerdictCommentSkipped:
             artifact_path=tmp_path / "a.md",
             reviewed_sha="",
             session_id="s-1",
+            reason="outbox_enqueue_failed",
         )
 
         assert payload == {
@@ -158,10 +151,11 @@ class TestVerdictCommentSkipped:
             "tracker": "linear",
             "backend": "codex",
             "kind": "unparseable",
-            "reason": "non_github_tracker",
+            "reason": "outbox_enqueue_failed",
             "artifact_path": str(tmp_path / "a.md"),
             "reviewed_sha": None,
             "session_id": "s-1",
+            "entry_id": None,
         }
         json.dumps(payload)
 
@@ -174,6 +168,7 @@ class TestVerdictCommentSkipped:
             artifact_path=None,
             reviewed_sha="abc",
             session_id="s-1",
+            reason="outbox_enqueue_failed",
         )
 
         (event,) = _events(OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED)
@@ -194,6 +189,7 @@ class TestVerdictCommentSkipped:
                 artifact_path=None,
                 reviewed_sha=None,
                 session_id="s-1",
+                reason="outbox_enqueue_failed",
             )
 
         (record,) = caplog.records
@@ -213,6 +209,7 @@ class TestVerdictCommentSkipped:
                 artifact_path=None,
                 reviewed_sha=None,
                 session_id="s-1",
+                reason="outbox_enqueue_failed",
             )
 
         (record,) = caplog.records
@@ -221,7 +218,7 @@ class TestVerdictCommentSkipped:
 
 
 class TestVerdictCommentSkippedReason:
-    """#3057: the tracker-IO turn names why nothing was posted."""
+    """The producer names why nothing was enqueued."""
 
     def test_reason_override_keeps_key_order(self) -> None:
         payload = verdict_comment_skipped_payload(
@@ -245,6 +242,7 @@ class TestVerdictCommentSkippedReason:
             "artifact_path",
             "reviewed_sha",
             "session_id",
+            "entry_id",
         ]
         assert payload["reason"] == "tracker_mcp_not_enabled"
 
@@ -264,85 +262,87 @@ class TestVerdictCommentSkippedReason:
         assert event.payload["reason"] == "mcp_server_unnamed"
 
 
-_POSTED = [{"index": 1, "comment_id": "c-1", "url": "https://linear.app/x#c-1"}]
-
-
-class TestVerdictCommentUnverified:
-    def test_payload_fields_in_order(self, tmp_path: Path) -> None:
-        payload = verdict_comment_unverified_payload(
+class TestSkippedEntryId:
+    def test_skipped_payload_carries_entry_id_last(self) -> None:
+        payload = verdict_comment_skipped_payload(
             ticket_id="GEN-9",
             client="acme",
             tracker="linear",
             kind="verdict",
-            reason="readback_mismatch",
-            artifact_path=tmp_path / "a.md",
+            artifact_path=None,
             reviewed_sha="abc",
             session_id="s-1",
-            public_state="confirmed",
-            posted=_POSTED,
-            marker_survived=False,
+            reason="already_posted",
+            entry_id="e-1",
         )
 
-        assert list(payload.items()) == [
-            ("ticket_id", "GEN-9"),
-            ("client", "acme"),
-            ("tracker", "linear"),
-            ("backend", "codex"),
-            ("kind", "verdict"),
-            ("reason", "readback_mismatch"),
-            ("artifact_path", str(tmp_path / "a.md")),
-            ("reviewed_sha", "abc"),
-            ("session_id", "s-1"),
-            ("public_state", "confirmed"),
-            ("posted", _POSTED),
-            ("marker_survived", False),
-        ]
-        assert payload["posted"] is not _POSTED
-        json.dumps(payload)
+        assert list(payload)[-2:] == ["session_id", "entry_id"]
+        assert payload["entry_id"] == "e-1"
 
-    def test_emit_records_with_ticket_correlation(self, tmp_path: Path) -> None:
-        emit_verdict_comment_unverified(
+    def test_entry_id_defaults_none(self) -> None:
+        payload = verdict_comment_skipped_payload(
             ticket_id="GEN-9",
             client="acme",
             tracker="linear",
-            kind="unparseable",
-            reason="turn_timeout",
+            kind="verdict",
             artifact_path=None,
             reviewed_sha=None,
             session_id="s-1",
-            public_state="possible",
-            posted=[],
-            marker_survived=None,
+            reason="outbox_enqueue_failed",
         )
 
-        (event,) = _events(OrchestratorEventType.REVIEW_VERDICT_COMMENT_UNVERIFIED)
-        assert event.correlation_id == "GEN-9"
-        assert event.payload["public_state"] == "possible"
-        assert event.payload["marker_survived"] is None
-        assert tmp_path.exists()
+        assert payload["entry_id"] is None
 
-    def test_emit_swallows_oserror(self, caplog: pytest.LogCaptureFixture) -> None:
-        with (
-            patch("cw.codex_review_signals.record_event", side_effect=OSError("x")),
-            caplog.at_level(logging.WARNING, logger="cw.codex_review_signals"),
-        ):
-            emit_verdict_comment_unverified(
-                ticket_id="GEN-9",
-                client="acme",
-                tracker="linear",
-                kind="verdict",
-                reason="ids_count_mismatch",
-                artifact_path=None,
-                reviewed_sha=None,
-                session_id="s-1",
-                public_state="confirmed",
-                posted=_POSTED,
-                marker_survived=True,
-            )
+    def test_emit_forwards_the_entry_id(self) -> None:
+        emit_verdict_comment_skipped(
+            ticket_id="GEN-9",
+            client="acme",
+            tracker="linear",
+            kind="verdict",
+            artifact_path=None,
+            reviewed_sha="abc",
+            session_id="s-1",
+            reason="already_posted",
+            entry_id="e-7",
+        )
 
-        (record,) = caplog.records
-        assert "GEN-9" in record.getMessage()
-        assert "review.verdict_comment_unverified" in record.getMessage()
+        (event,) = _events(OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED)
+        assert event.payload["entry_id"] == "e-7"
+
+
+class TestTrackerLabel:
+    def test_unset_tracker_is_github_issues(self, tmp_path: Path) -> None:
+        client = make_client(name="acme", workspace_path=tmp_path)
+        assert tracker_label(client) == "github-issues"
+
+    def test_github_tracker(self, tmp_path: Path) -> None:
+        _write_tracker_config(tmp_path, "github-issues")
+        client = make_client(name="acme", workspace_path=tmp_path)
+        assert tracker_label(client) == "github-issues"
+
+    def test_linear_tracker(self, tmp_path: Path) -> None:
+        _write_tracker_config(tmp_path, "linear")
+        client = make_client(name="acme", workspace_path=tmp_path)
+        assert tracker_label(client) == "linear"
+
+
+class TestRetiredEmittersAreGone:
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "VerdictCommentIdentity",
+            "NON_GITHUB_TRACKER_REASON",
+            "emit_verdict_comment_posted",
+            "emit_verdict_comment_unverified",
+            "verdict_comment_posted_payload",
+            "verdict_comment_unverified_payload",
+            "posted_content_sha256",
+            "surface_tracker_io_outcome",
+            "_KIND_LOG_LABELS",
+        ],
+    )
+    def test_retired_emitters_are_gone(self, name: str) -> None:
+        assert not hasattr(codex_review_signals, name)
 
 
 class TestOperatorContextUndelivered:
@@ -455,16 +455,6 @@ class TestEmitConfirmEscalated:
         assert "review.confirm_escalated" in message
 
 
-def _identity(kind: VerdictCommentKind) -> VerdictCommentIdentity:
-    return VerdictCommentIdentity(
-        client="acme",
-        session_id="s-1",
-        kind=kind,
-        reviewed_sha=None,
-        artifact_path=None,
-    )
-
-
 class TestPrLinkKind:
     """#3062: the codex FINALIZE PR-link comment reuses the three events."""
 
@@ -477,70 +467,10 @@ class TestPrLinkKind:
             artifact_path=None,
             reviewed_sha=None,
             session_id="s-1",
-            reason="github_post_failed",
+            reason="outbox_enqueue_failed",
         )
         assert payload["kind"] == "pr_link"
         assert payload["reviewed_sha"] is None
-
-    @pytest.mark.parametrize(
-        ("kind", "label"),
-        [("pr_link", "pr_link"), ("plan", "plan"), ("verdict", "review")],
-    )
-    def test_skipped_log_label_per_kind(
-        self, kind: VerdictCommentKind, label: str, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        outcome = TrackerIoOutcome(
-            PublicState.NONE, TrackerIoReason.TOOL_UNAVAILABLE, parts_total=1
-        )
-        with caplog.at_level(logging.WARNING, logger="cw.codex_review_signals"):
-            surface_tracker_io_outcome(
-                "GEN-9",
-                tracker="linear",
-                outcome=outcome,
-                identity=_identity(kind),
-            )
-        (record,) = caplog.records
-        assert record.getMessage().startswith(f"{label}_comment_skipped ")
-        (event,) = _events(OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED)
-        assert event.payload["kind"] == kind
-
-    def test_unverified_log_label_and_event_carry_pr_link(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        outcome = TrackerIoOutcome(
-            PublicState.POSSIBLE,
-            TrackerIoReason.TURN_TIMEOUT,
-            parts_total=1,
-            posted=(PostedComment(index=1, comment_id="c1", url="u"),),
-        )
-        with caplog.at_level(logging.WARNING, logger="cw.codex_review_signals"):
-            surface_tracker_io_outcome(
-                "GEN-9",
-                tracker="linear",
-                outcome=outcome,
-                identity=_identity("pr_link"),
-            )
-        (record,) = caplog.records
-        assert record.getMessage().startswith("pr_link_comment_unverified ")
-        (event,) = _events(OrchestratorEventType.REVIEW_VERDICT_COMMENT_UNVERIFIED)
-        assert event.payload["kind"] == "pr_link"
-
-    def test_verified_post_emits_a_posted_event_with_pr_link_kind(self) -> None:
-        outcome = TrackerIoOutcome(
-            PublicState.CONFIRMED,
-            None,
-            parts_total=1,
-            posted=(PostedComment(index=1, comment_id="c1", url="u"),),
-            emitted=("body",),
-        )
-        surface_tracker_io_outcome(
-            "GEN-9",
-            tracker="linear",
-            outcome=outcome,
-            identity=_identity("pr_link"),
-        )
-        (event,) = _events(OrchestratorEventType.REVIEW_VERDICT_COMMENT_POSTED)
-        assert event.payload["kind"] == "pr_link"
 
 
 _EVENTS_DOC = Path(__file__).resolve().parent.parent / "docs" / "events.md"
@@ -561,43 +491,3 @@ class TestEventsDocEnumeratesEveryKind:
         members = set(get_args(VerdictCommentKind))
         for enumeration in enumerations:
             assert members <= enumeration, members - enumeration
-
-
-class TestPostedContentHash:
-    """#3353: the audit hash is over the marked, redacted bodies as sent."""
-
-    def test_one_body_hashes_to_itself(self) -> None:
-        body = "marked body"
-        assert (
-            posted_content_sha256((body,)) == hashlib.sha256(body.encode()).hexdigest()
-        )
-
-    def test_several_bodies_join_with_a_newline(self) -> None:
-        bodies = ("part one", "part two [REDACTED]")
-        expected = hashlib.sha256("\n".join(bodies).encode()).hexdigest()
-        assert posted_content_sha256(bodies) == expected
-
-    def test_differs_from_any_pre_redaction_text(self) -> None:
-        redacted = ("token [REDACTED]",)
-        raw = "token sk-secret-value"
-        assert (
-            posted_content_sha256(redacted) != hashlib.sha256(raw.encode()).hexdigest()
-        )
-
-    def test_surface_hashes_the_emitted_bodies_not_the_raw_text(self) -> None:
-        outcome = TrackerIoOutcome(
-            PublicState.CONFIRMED,
-            None,
-            parts_total=2,
-            posted=(PostedComment(index=1, comment_id="c1", url="u"),),
-            emitted=("part one", "part two [REDACTED]"),
-        )
-        surface_tracker_io_outcome(
-            "GEN-9",
-            tracker="linear",
-            outcome=outcome,
-            identity=_identity("verdict"),
-        )
-        (event,) = _events(OrchestratorEventType.REVIEW_VERDICT_COMMENT_POSTED)
-        expected = hashlib.sha256(b"part one\npart two [REDACTED]").hexdigest()
-        assert event.payload["content_sha256"] == expected

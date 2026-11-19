@@ -88,8 +88,6 @@ _WIRING: Final[list[tuple[str, str]]] = [
         "relabeled(inputs.runner, UsageStage.ENGINE_AGGREGATE)",
     ),
     ("codex_fix_loop/_driver.py", "relabeled(runner, UsageStage.FIX)"),
-    ("codex_review_persist.py", "relabeled(runner, UsageStage.TRACKER_IO)"),
-    ("codex_stage_post.py", "relabeled(runner, UsageStage.TRACKER_IO)"),
 ]
 
 

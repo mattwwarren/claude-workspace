@@ -694,33 +694,23 @@ class OrchestratorEventType(StrEnum):
     # warns rather than aborting the pass. Distinct from CLAIM_SHADOWED, whose
     # counterfactual is "the gate was closed", not "the code moved".
     REVIEW_FINDING_DISPOSITION_STALE = "review.finding_disposition_stale"
-    # GitHub #3055 (RFC 0018 S3, Case A) -- a codex review produced a verdict
-    # (or an unparseable result) whose ticket comment was NOT posted because
-    # the client's tracker is not GitHub Issues: the daemon has no tracker
-    # client for it. Before this the skip was a log line only. Emitted
-    # best-effort from `codex_review_persist._post_review_comment`'s skip
-    # branch (a failed write warns, never aborts the review). In
-    # _DEFAULT_OPERATOR_EVENT_TYPES: the operator otherwise never learns the
-    # verdict exists only in the local artifact. `correlation_id` is the
-    # ticket. Since A2 (#3057) a client whose `tracker_mcp_gate.servers.codex`
-    # names the tracker's MCP server posts through the tracker-IO agent turn
-    # instead; this event then carries that turn's refusal `reason` (nothing
-    # posted: refused before launch, or the agent reported it could not post).
+    # GitHub #3055 (RFC 0018 S3), producer-side since RFC 0019 O3 (#3707): a
+    # codex comment (verdict, unparseable, plan, park or PR link) was NOT
+    # enqueued to the outbox. Reasons: outbox_enqueue_failed, plan_refused,
+    # body_too_long, free_text_ticket, already_posted. Emitted best-effort by
+    # the producer, only when no entry was created. `entry_id` is null unless
+    # an existing entry is the reason. Delivery of an enqueued entry is the
+    # outbox's `outbox.entry_*` events, not this one. In
+    # _DEFAULT_OPERATOR_EVENT_TYPES. `correlation_id` is the ticket.
     REVIEW_VERDICT_COMMENT_SKIPPED = "review.verdict_comment_skipped"
-    # GitHub #3057 (RFC 0018 A2) -- the tracker-IO agent turn that posts a
-    # codex verdict to a non-GitHub tracker ended unconfirmed: it may have
-    # posted (timeout, nonzero exit, unparseable result: `public_state`
-    # `possible`) or it posted but its self-attested report failed
-    # verification (`confirmed`). The ids are model-echoed, not proof of
-    # delivery. Emitted best-effort from
-    # `codex_review_persist._post_review_comment` after the result persisted;
-    # it never holds the row. In _DEFAULT_OPERATOR_EVENT_TYPES: the operator
-    # must check the ticket for a stray or duplicate comment (cw never
-    # retries). `correlation_id` is the ticket.
+    # GitHub #3057 (RFC 0018 A2) -- historical. No cw producer emits this since
+    # RFC 0019 O3 (#3707); the enqueue path reports delivery through the outbox
+    # `outbox.entry_unverified` event. Kept so old logs still parse and explicit
+    # `event_types` entries stay accepted. Not in _DEFAULT_OPERATOR_EVENT_TYPES.
     REVIEW_VERDICT_COMMENT_UNVERIFIED = "review.verdict_comment_unverified"
-    # GitHub #3057 (RFC 0018 A2) -- append-only audit record for a verified
-    # tracker-IO verdict comment post. This is deliberately not in the
-    # operator-forward set: the unverified sibling is the attention signal.
+    # GitHub #3057 (RFC 0018 A2) -- historical. No cw producer emits this since
+    # RFC 0019 O3 (#3707); the outbox's `outbox.entry_delivered` event is the
+    # audit record now. Kept for reading old logs.
     REVIEW_VERDICT_COMMENT_POSTED = "review.verdict_comment_posted"
     # GitHub #3055 (RFC 0018 S3, Case B) -- a codex review started on a
     # non-GitHub (or unset) tracker, so the operator's free-text comments,

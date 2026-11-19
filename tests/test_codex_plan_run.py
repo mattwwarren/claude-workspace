@@ -29,6 +29,7 @@ from cw.dev_queue import load_dev_queue
 from cw.dev_queue.lifecycle import _plan_body_signoff_ok
 from cw.events import read_events
 from cw.exceptions import CwError
+from cw.gh import AGENT_COMMENT_MARKER
 from cw.local_runner import UNEXPECTED_ERROR
 from cw.models import (
     ClientConfig,
@@ -50,6 +51,7 @@ from tests._backend_mcp_helpers import (
 from tests._codex_review_helpers import exclude_cw_dir, seed_codex_stage_run
 from tests._shared.bindings_builders import LINEAR_RENAMED_TOOLS, bindings_linear_mcp
 from tests._shared.cli_preflight import _write_tracker_config
+from tests._shared.outbox_builders import entries_for
 from tests._tool_fakes import (
     FakeGhCli,
     ScriptedCodexRunner,
@@ -63,6 +65,8 @@ from tests._tool_fakes import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from pathlib import Path
+
+    from tests._shared.outbox_builders import ProducedEntry
 
 pytestmark = pytest.mark.usefixtures("isolated_backend_layers")
 
@@ -119,9 +123,16 @@ class Harness:
     def plan_calls(self) -> list[dict[str, object]]:
         return [c for c in self.runner.calls if PLAN_TURN in str(c["stdin"])]
 
-    def posts(self) -> list[Any]:
-        """Every ``gh issue comment`` launch, in order."""
-        return [r for r in self.gh.records if list(r.argv[1:3]) == ["issue", "comment"]]
+    def entries(self) -> list[ProducedEntry]:
+        """Every outbox entry the run enqueued for the ticket, oldest first.
+
+        The enqueue replaced the inline post, so no ``gh issue comment`` launch
+        may appear: that is checked on every read.
+        """
+        assert not [
+            r for r in self.gh.records if list(r.argv[1:3]) == ["issue", "comment"]
+        ]
+        return entries_for("test", ticket=TICKET)
 
     def plan_md(self) -> str:
         return (self.worktree / PLAN_MD_RELATIVE_PATH).read_text(encoding="utf-8")
@@ -154,11 +165,6 @@ def script_gh(
         "--json",
         "comments",
         stdout=json.dumps({"comments": comments or []}),
-    )
-    gh.reply(
-        "issue",
-        "comment",
-        stdout="https://github.com/o/r/issues/42#issuecomment-9\n",
     )
     return gh
 
@@ -242,8 +248,24 @@ def test_small_stage_complete_writes_the_marked_plan(
     assert "Add the widget." in plan
     assert not h.draft_path().exists()
     assert result.plan_draft_fingerprint is not None
-    posted = h.posts()
-    assert len(posted) == 1
+
+
+@freeze_time(NOW)
+def test_complete_exit_enqueues_with_the_plan_marker_prefix(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    add_stations(add_turn(h.runner))
+    result = h.run()
+    assert result.status == "stage_complete"
+    (produced,) = h.entries()
+    assert produced.entry.producer == "codex-plan"
+    assert produced.entry.marker.startswith("plan-")
+    assert not produced.entry.marker.startswith("park-")
+    body = "".join(produced.parts)
+    assert body.rstrip("\n") == h.plan_md().rstrip("\n")
+    assert _plan_body_signoff_ok(body)
+    assert AGENT_COMMENT_MARKER not in body
 
 
 @freeze_time(NOW)
@@ -332,7 +354,7 @@ def test_invalid_sentinel_is_validation_failed(harness: Callable[..., Harness]) 
     assert result.blocker.retry_eligible is False
 
 
-def test_ambiguities_park_passes_through_and_posts_the_park_comment(
+def test_park_exit_enqueues_with_the_park_marker_prefix(
     harness: Callable[..., Harness],
 ) -> None:
     h = harness()
@@ -350,12 +372,35 @@ def test_ambiguities_park_passes_through_and_posts_the_park_comment(
     assert h.draft_path().is_file()
     assert not (h.worktree / PLAN_MD_RELATIVE_PATH).exists()
     assert result.plan_draft_fingerprint is not None
-    posted = h.posts()
-    (record,) = posted
-    assert "## Pending Verification Scan" in str(record.stdin)
-    assert "plan-spec-reviewed" not in str(record.stdin)
+    (produced,) = h.entries()
+    assert produced.entry.producer == "codex-plan"
+    assert produced.entry.marker.startswith("park-")
+    body = "".join(produced.parts)
+    assert "## Pending Verification Scan" in body
+    assert "plan-spec-reviewed" not in body
     kinds = [(t, p.get("stage")) for t, p, _ in stage_events()]
     assert ("stage.errored", "s1_plan_generated") not in kinds
+
+
+def test_pending_approval_park_also_gets_the_park_prefix(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    add_stations(
+        add_turn(
+            h.runner,
+            plan=LARGE_PLAN,
+            tier="large",
+            status="plan_pending_approval",
+            next_actions=["user_decide_plan_approval"],
+        )
+    )
+    result = h.run()
+    assert result.status == "plan_pending_approval"
+    (produced,) = h.entries()
+    assert produced.entry.producer == "codex-plan"
+    assert produced.entry.marker.startswith("park-")
+    assert "### Approval requested" in "".join(produced.parts)
 
 
 def test_park_completes_with_null_fingerprint_when_draft_write_fails(
@@ -514,7 +559,7 @@ def test_a_failed_readback_after_replacement_keeps_the_backup(
     assert backup.read_text(encoding="utf-8") == _OLD_PLAN
 
 
-def test_no_op_passes_through_and_posts_nothing(
+def test_no_op_passes_through_and_enqueues_nothing(
     harness: Callable[..., Harness],
 ) -> None:
     h = harness()
@@ -522,7 +567,8 @@ def test_no_op_passes_through_and_posts_nothing(
     result = h.run()
     assert result.status == "no_op"
     assert not h.draft_path().exists()
-    assert not h.posts()
+    assert h.entries() == []
+    assert entries_for("test") == []
     assert len(h.runner.calls) == 1
 
 
@@ -536,6 +582,8 @@ def test_model_blocked_passes_through(harness: Callable[..., Harness]) -> None:
     assert result.blocker.reason == "plan_ambiguous"
     errored = [p for t, p, _ in stage_events() if t == "stage.errored"]
     assert [p["error_kind"] for p in errored] == ["plan_ambiguous"]
+    assert h.entries() == []
+    assert entries_for("test") == []
 
 
 # --- plan decisions ----------------------------------------------------------
@@ -794,18 +842,25 @@ def test_an_event_write_failure_is_swallowed(
     assert result.status == "stage_complete"
 
 
-def test_a_post_refusal_leaves_the_result_and_plan(
+def test_an_enqueue_fault_leaves_the_result_and_plan(
     harness: Callable[..., Harness],
 ) -> None:
     h = harness()
-    h.gh.reply("issue", "comment", returncode=1, stderr="refused")
     add_stations(add_turn(h.runner))
-    result = h.run()
+    with patch("cw.outbox_producer.enqueue", side_effect=OSError("disk")):
+        result = h.run()
     assert result.status == "stage_complete"
     assert persisted_result() == result
     assert _plan_body_signoff_ok(h.plan_md())
     (task,) = load_dev_queue().tasks
     assert task.status is QueueItemStatus.RUNNING
+    assert h.entries() == []
+    (event,) = read_events(
+        event_types=[OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED]
+    )
+    assert event.payload["reason"] == "outbox_enqueue_failed"
+    assert event.payload["kind"] == "plan"
+    assert event.payload["entry_id"] is None
 
 
 def test_prefetch_failure_is_plan_missing_context(

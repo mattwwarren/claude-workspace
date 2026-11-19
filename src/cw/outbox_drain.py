@@ -71,6 +71,7 @@ from cw.outbox_needs_you import (
     build_gate_payload,
     file_gate_record,
 )
+from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.tracker_io._dedup import CourierPart
 from cw.tracker_io._drain import (
     CourierContext,
@@ -140,6 +141,20 @@ class GhTarget:
     cwd: Path
 
 
+def _fallback_target(cfg: ClientConfig) -> GhTarget | None:
+    """The target for a client with no ``bindings.tickets`` block (RFC 0019 O3 R9).
+
+    An unresolved or explicitly resolved GitHub tracker gets ``gh`` in the
+    client's git dir. Any other tracker system has no validated ``gh`` path and
+    stays unreachable (``None``). Compares the system string rather than
+    reading ``TrackerClass``, so the branch guard is not widened.
+    """
+    system = resolve_tracker(cfg.workspace_path)
+    if not system or system == TRACKER_GITHUB_ISSUES:
+        return GhTarget(cwd=_git_dir(cfg))
+    return None
+
+
 @dataclass(frozen=True)
 class McpTarget:
     """A tickets binding with a codex MCP realization: the courier posts (O2b)."""
@@ -150,13 +165,16 @@ class McpTarget:
 def select_target(cfg: ClientConfig) -> GhTarget | McpTarget | None:
     """The target of *cfg*'s tickets binding, or ``None`` if unusable.
 
-    A ``cli`` realization is ``gh`` (the binding model admits only ``gh`` there).
-    Otherwise a codex MCP realization is the courier's target. ``None`` when the
-    binding is absent or has neither (no codex realization, O2b G1).
+    An absent ``bindings.tickets`` block falls back to :func:`_fallback_target`
+    (R9: an unresolved or explicitly resolved GitHub tracker gets ``gh``; other
+    trackers get ``None``). A ``cli`` realization is ``gh`` (the binding model
+    admits only ``gh`` there, on ``github-issues``). Otherwise a codex MCP
+    realization is the courier's target (O2b). ``None`` when the binding has
+    neither (no codex realization, O2b G1).
     """
     tickets = cfg.bindings.tickets
     if tickets is None:
-        return None
+        return _fallback_target(cfg)
     if tickets.cli is not None:
         return GhTarget(cwd=_git_dir(cfg))
     server = tickets.mcp_server(CODEX_BACKEND)

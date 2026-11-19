@@ -2854,7 +2854,8 @@ class TestOperatorChannelForward:
                 OrchestratorEventType.DISK_PRESSURE_GATE_BYPASSED,
                 OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
                 OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED,
-                OrchestratorEventType.REVIEW_VERDICT_COMMENT_UNVERIFIED,
+                # RFC 0019 O3 (#3707): REVIEW_VERDICT_COMMENT_UNVERIFIED is
+                # historical and deliberately absent from the default set.
                 OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED,
                 # #3706 (RFC 0019 O2): outbox attention signals; the
                 # delivered audit record is deliberately absent.

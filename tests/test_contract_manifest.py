@@ -1829,22 +1829,35 @@ def test_no_cell_defers_to_the_landed_c1_ticket() -> None:
                 assert cell.ref.number != _C1_TICKET, (element_id, backend)
 
 
-#: The codex cells A2 (#3057) implements with the tracker-IO turn.
-_A2_TRACKER_IO_CELLS = (
+#: The codex cells that name the producer that enqueues the comment (RFC 0019 O3).
+_O3_ENQUEUE_CELLS = (
     "orch.tracker-post-seam",
     "orch.comment-provenance-rule",
     "orch.marker-cw-agent-authored",
+)
+_O3_VERDICT_CELLS = (
     "review.blocking-findings-comment-rule",
     "review.blocking-findings-comment-rule-body-shape",
 )
 
 
-@pytest.mark.parametrize("element_id", _A2_TRACKER_IO_CELLS)
-def test_a2_cells_point_at_the_tracker_io_turn(element_id: str) -> None:
+@pytest.mark.parametrize("element_id", _O3_ENQUEUE_CELLS)
+def test_o3_enqueue_cells_point_at_enqueue_prose(element_id: str) -> None:
     cell = _real_cell(element_id, CODEX_BACKEND)
     assert isinstance(cell, ImplementedDisposition), element_id
     assert cell.ref == CodeRef(
-        kind="code", path="src/cw/tracker_io/_turn.py", symbol="post_parts_via_turn"
+        kind="code", path="src/cw/outbox_producer.py", symbol="enqueue_prose"
+    )
+
+
+@pytest.mark.parametrize("element_id", _O3_VERDICT_CELLS)
+def test_o3_verdict_cells_point_at_the_daemon_verdict_enqueue(element_id: str) -> None:
+    cell = _real_cell(element_id, CODEX_BACKEND)
+    assert isinstance(cell, ImplementedDisposition), element_id
+    assert cell.ref == CodeRef(
+        kind="code",
+        path="src/cw/codex_review_persist.py",
+        symbol="_post_daemon_verdict_comment",
     )
 
 

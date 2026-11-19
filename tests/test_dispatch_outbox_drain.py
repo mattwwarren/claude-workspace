@@ -171,7 +171,9 @@ class TestEnabled:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         entry = enqueue().entry
-        clients = {CLIENT: client_config(tmp_path, bindings=Bindings())}
+        clients = {
+            CLIENT: client_config(tmp_path, bindings=Bindings(), tracker="linear")
+        }
 
         tick_drain.launch_outbox_drains(clients)
         assert spawner.launched == [CLIENT]
@@ -189,7 +191,9 @@ class TestEnabled:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         entry = enqueue().entry
-        disabled_binding = client_config(tmp_path, bindings=Bindings())
+        disabled_binding = client_config(
+            tmp_path, bindings=Bindings(), tracker="linear"
+        )
 
         def _fail_marker(*_args: object, **_kwargs: object) -> None:
             msg = "marker sidecar is unwritable"

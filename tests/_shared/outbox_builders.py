@@ -18,12 +18,13 @@ import json
 import subprocess
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from cw import outbox
 from cw.outbox import EnqueueResult, OutboxEntry, OutboxRole
 from tests._doctor_helpers import make_client
 from tests._shared.bindings_builders import bindings_github_cli
+from tests._shared.cli_preflight import _write_tracker_config
 from tests._tool_fakes import GH_UNAUTHENTICATED, FakeGhCli, GhCall
 
 if TYPE_CHECKING:
@@ -84,13 +85,39 @@ def claim_as(
         return outbox.claim(client, **kwargs)
 
 
-def client_config(tmp_path: Path, *, bindings: Bindings | None = None) -> ClientConfig:
-    """A client bound to GitHub through ``gh`` unless *bindings* says otherwise."""
+def client_config(
+    tmp_path: Path, *, bindings: Bindings | None = None, tracker: str | None = None
+) -> ClientConfig:
+    """A client bound to GitHub through ``gh`` unless *bindings* says otherwise.
+
+    *tracker*, when set, also writes a project-config naming that tracker system.
+    """
+    if tracker is not None:
+        _write_tracker_config(tmp_path, tracker)
     return make_client(
         name=CLIENT,
         workspace_path=tmp_path,
         bindings=bindings_github_cli() if bindings is None else bindings,
     )
+
+
+class ProducedEntry(NamedTuple):
+    """One outbox entry with its stored parts, as a producer wrote it."""
+
+    entry: OutboxEntry
+    parts: list[str]
+
+
+def entries_for(
+    client: str = CLIENT, *, ticket: str | None = None, producer: str | None = None
+) -> list[ProducedEntry]:
+    """Entries of *client* (filtered if given), oldest first, with their parts."""
+    return [
+        ProducedEntry(entry, outbox.read_parts(entry))
+        for entry in reversed(outbox.list_entries(client))
+        if (ticket is None or entry.ticket == ticket)
+        and (producer is None or entry.producer == producer)
+    ]
 
 
 def observed_comment(url: str, body: str) -> dict[str, object]:

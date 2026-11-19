@@ -708,7 +708,7 @@ impl, finalize, tracker-IO and the capability probe are unchanged.
 ### Model Prices and Usage Accounting
 
 Every codex stage turn (PLAN, the plan review stations, IMPL, FINALIZE, the
-review roles, the fix loop and the tracker-IO post) records its token usage into
+review roles and the fix loop) records its token usage into
 `Session.usage` (#3063, RFC 0018 C4); `cw session show` prints a `usage:` line
 and `--json` carries the whole record. `TicketTask.total_tokens` sums input plus
 output tokens across the ticket's sessions. A turn that exits 0 but reports no
@@ -982,7 +982,8 @@ backend. Declare its server name under `bindings.tickets.mcp.codex.server`
 (the deprecated `tracker_mcp_gate.servers.codex` still migrates). The report
 for it is the lane's `harness-capabilities/<client>/<lane>/codex` row (the
 retired `tracker-mcp/<client>/<lane>/codex` before #3744). Daemon-only tracker writes
-go through the narrow tracker-IO agent turn, described in
+go through the outbox (RFC 0019 O3, #3707): codex comments are enqueued and the
+drain delivers them. The retired tracker-IO agent turn is described in
 `docs/dispatch-runbook.md` under "Tracker-IO turn (#3057, RFC 0018 A2)".
 
 **Smoke probe.** An opt-in operator probe runs one codex create and resume, and
@@ -2302,8 +2303,7 @@ operator_channel_forward:
     - gate.ssh_key_bypassed     # GitHub #1437 — operator bypassed the ssh-key gate probe
     - gate.disk_pressure_bypassed  # GitHub #1887 — operator bypassed the disk-pressure gate probe
     - requeue.review_delivery_degraded  # GitHub #1730 — a review requeue ran without the operator's send-back
-    - review.verdict_comment_skipped  # GitHub #3055 — a codex verdict was not posted to a non-GitHub tracker
-    - review.verdict_comment_unverified  # GitHub #3057 — a codex verdict post to a non-GitHub tracker could not be confirmed
+    - review.verdict_comment_skipped  # GitHub #3055, RFC 0019 O3 — a codex comment was not enqueued to the outbox (durable copy only)
     - review.operator_context_undelivered  # GitHub #3055 — a codex review ran without the operator's tracker comments
     - outbox.entry_unverified   # GitHub #3706 — an outbox post may be public but is unconfirmed
     - outbox.entry_skipped      # GitHub #3706 — an outbox entry's body was unreadable; it is not retried

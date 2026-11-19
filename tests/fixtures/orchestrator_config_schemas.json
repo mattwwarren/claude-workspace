@@ -4259,7 +4259,6 @@
      "requeue.review_delivery_degraded",
      "review.operator_context_undelivered",
      "review.verdict_comment_skipped",
-     "review.verdict_comment_unverified",
      "session.liveness_changed",
      "session.needs_attention",
      "task.deleted",

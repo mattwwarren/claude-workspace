@@ -41,7 +41,6 @@ from cw.models.orchestrator_config.stage import ModelPrice
 from cw.models.usage import UsageStage, UsageState, UsageUnavailableReason
 from cw.stage_verification.finalize_ci_evidence import CiContext
 from cw.tracker import TRACKER_LINEAR
-from cw.tracker_io import TrackerIoContext, plan_turn_parts
 from tests._backend_mcp_helpers import codex_tracker_client, stage_mcp_config
 from tests._codex_review_helpers import (
     fresh_finalize_repo,
@@ -50,20 +49,19 @@ from tests._codex_review_helpers import (
 )
 from tests._shared.cli_preflight import _write_tracker_config
 from tests._shared.git_repos import git_in
+from tests._shared.outbox_builders import entries_for
 from tests._tool_fakes import (
     FakeCwCli,
     FakeGhCli,
     GhReply,
     ScriptedCodexRunner,
     ScriptStub,
-    any_call,
     codex_usage_stdout,
     finalize_document,
     finalize_turn_result,
     stdin_contains,
     stub_cw_cli,
     stub_prep_pr_finalize,
-    tracker_io_turn_result,
 )
 from tests.test_codex_plan_run import SID, TICKET, persisted_result, script_gh
 
@@ -1463,20 +1461,17 @@ def test_an_override_turn_failure_on_reuse_blocks(
 # --- AC4: the PR-link comment ---------------------------------------------------
 
 
-def test_the_pr_link_is_posted_to_a_github_ticket_after_the_door(
+def test_the_pr_link_is_enqueued_for_a_github_ticket_after_the_door(
     harness: Callable[..., Harness],
 ) -> None:
     h = harness()
     h.turn()
     result = h.run()
     assert result.status == "shipped"
-    (post,) = [r for r in h.gh.records if r.argv[1:3] == ["issue", "comment"]]
-    assert post.argv[3] == TICKET
-    assert PR_URL in str(post.stdin)
-    (event,) = comment_events()
-    assert event[1]["kind"] == "pr_link"
-    assert event[1]["reviewed_sha"] is None
-    assert event[1]["artifact_path"] is None
+    assert [r for r in h.gh.records if r.argv[1:3] == ["issue", "comment"]] == []
+    (produced,) = entries_for("test", ticket=TICKET, producer="codex-pr-link")
+    assert PR_URL in "".join(produced.parts)
+    assert comment_events() == []
 
 
 def test_the_comment_is_posted_after_the_session_is_completed(
@@ -1540,7 +1535,7 @@ def _linear_client(
     return client.model_copy(update={"name": "test"})
 
 
-def test_a_non_github_tracker_posts_the_link_through_the_a2_turn(
+def test_a_non_github_tracker_enqueues_the_link_without_a_tracker_io_turn(
     harness: Callable[..., Harness],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1548,28 +1543,14 @@ def test_a_non_github_tracker_posts_the_link_through_the_a2_turn(
     h = harness()
     h.client = _linear_client(tmp_path, monkeypatch, h.worktree, "enabled")
     h.turn()
-    parts = plan_turn_parts(
-        f"PR: {PR_URL}\n",
-        TrackerIoContext(runner=h.runner, client=h.client, worktree=h.worktree),
-    )
-    h.runner.add(
-        any_call,
-        CodexRunResult(
-            returncode=0,
-            stdout="",
-            stderr="",
-            output_file_content=tracker_io_turn_result(TICKET, parts),
-        ),
-    )
     result = h.run()
     assert result.status == "shipped"
     assert [r for r in h.gh.records if r.argv[1:3] == ["issue", "comment"]] == []
     assert h.gh_argvs("issue", "view") == []
-    (event,) = comment_events()
-    assert event[0] == "review.verdict_comment_posted"
-    assert event[1]["kind"] == "pr_link"
-    assert event[1]["tracker"] == TRACKER_LINEAR
-    assert len(h.runner.calls) == 2
+    (produced,) = entries_for("test", ticket=TICKET, producer="codex-pr-link")
+    assert PR_URL in "".join(produced.parts)
+    assert len(h.runner.calls) == 1
+    assert not [e for e in comment_events() if e[0] == "review.verdict_comment_posted"]
 
 
 def test_a_non_github_tracker_with_a_disabled_server_parks_pre_dispatch(
