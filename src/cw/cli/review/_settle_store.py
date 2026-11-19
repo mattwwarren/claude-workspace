@@ -222,7 +222,9 @@ def settle_stderr_lines(
     return lines
 
 
-def enqueue_settle_marker(rendered: str, ticket: str, client: str) -> None:
+def enqueue_settle_marker(
+    rendered: str, ticket: str, client: str, row_outcome: SettleRowOutcome
+) -> None:
     """Queue *rendered* as the disposition marker comment, and echo the outcome.
 
     The block is one part, never split: it must open the delivered comment
@@ -260,9 +262,14 @@ def enqueue_settle_marker(rendered: str, ticket: str, client: str) -> None:
             err=True,
         )
         return
+    row_status = (
+        "the settle was not recorded on the row because row recording had already"
+        " degraded"
+        if row_outcome.degraded_reason is not None
+        else "the settle is recorded on the row regardless"
+    )
     click.echo(
         f"settle: could not queue the disposition marker for {ticket} ({client})"
-        f" ({outcome.skipped_reason}); the settle is recorded on the row"
-        " regardless.",
+        f" ({outcome.skipped_reason}); {row_status}.",
         err=True,
     )

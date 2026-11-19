@@ -763,7 +763,7 @@ def review_settle(
         atomic_write_text(out, rendered)
     for line in settle_stderr_lines(outcome, ticket, resolved_client):
         click.echo(line, err=True)
-    enqueue_settle_marker(rendered, ticket, resolved_client)
+    enqueue_settle_marker(rendered, ticket, resolved_client, outcome)
 
 
 class _VerifyFixesInput(BaseModel):
