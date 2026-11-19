@@ -2179,7 +2179,9 @@ class TestRenderSettlePayloads:
         comment = self._comment(_make_finding(severity="MUST_FIX"))
         assert "--ticket <ticket> -c <client>" in comment
         assert "cw dev-queue row" in comment
-        assert "`settle.md` is the human-readable mirror of it" in comment
+        assert "queues the disposition marker as its own ticket comment" in comment
+        assert "through the outbox" in comment
+        assert "with your tracker's own tool" not in comment
         assert "This works only on GitHub-tracked tickets" not in comment
 
     @pytest.mark.parametrize(

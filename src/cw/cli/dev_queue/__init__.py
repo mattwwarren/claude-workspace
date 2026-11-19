@@ -8,14 +8,11 @@ below is what registers those commands. Submodules:
 
 - ``_group`` — the ``dev_queue`` group object plus the ``_WAIT_EXIT_*`` /
   status-rendering constants shared across submodules.
-- ``_plan_marker`` — pure builders/matchers for the ``approve --post-marker``
-  plan-approved audit comment (bare and draft-fingerprint-bound forms, #2194),
-  used by ``approve``.
+- ``_plan_marker`` — pure builders for the plan-approved audit comment that
+  ``approve --post-marker`` queues on the outbox (bare and draft-fingerprint-bound
+  forms, #2194), used by ``approve``.
 - ``_settle`` — the CLI-layer row-lag settle (#2692) approve and requeue run
   first; also the read-only live-session note for the requeue no-op.
-- ``_tracker_post`` — the tracker-posting policy shared by ``resolve --post`` and
-  ``approve --post-marker``: the GitHub-or-unknown tracker gate, the ``gh``
-  working directory and the post-outcome echo (#2732).
 - ``_requeue_echo`` — the requeue no-op echo, the inferred ``--regress``
   announcement and the ``TICKET_REQUEUED`` event (#2692), used by ``crud``.
 - ``adopted_prs`` — the read-only ``adopted-prs`` command: ``<number> <branch>``

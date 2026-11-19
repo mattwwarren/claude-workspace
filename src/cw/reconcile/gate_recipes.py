@@ -87,21 +87,17 @@ from cw.dev_queue import (
 )
 from cw.events import record_event
 from cw.exceptions import CwError
-from cw.gh import fetch_approved_plan_comment, post_issue_comment
+from cw.gh import fetch_approved_plan_comment
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
 from cw.queue_rows import resolve_hold_finalize
 from cw.reconcile.gate_plan_probes import PlanProbeUnavailableError, lookup_plan_probe
 from cw.reconcile.gate_predicates import (
     _PLAN_PENDING_APPROVAL,
     _REVIEW_PENDING_APPROVAL,
-    _SNAPSHOT_KEY_FILES,
     _SNAPSHOT_KEY_FINGERPRINT,
-    _SNAPSHOT_KEY_FORBIDDEN,
-    _SNAPSHOT_KEY_LINES,
     _SNAPSHOT_KEY_REVIEWED,
     _SNAPSHOT_KEY_SOUNDNESS,
     _SNAPSHOT_KEY_SPEC,
-    _SNAPSHOT_KEY_TIER,
     _clean_review_snapshot,
     _plan_gate_snapshot,
     _plan_predicate_holds,
@@ -110,15 +106,14 @@ from cw.reconcile.gate_predicates import (
     _row_eligible,
 )
 from cw.reconcile.gate_recipe_comments import (
-    AUTO_ADOPT_COMMENT_TEMPLATE,
-    AUTO_APPROVE_COMMENT_TEMPLATE,
     defer_gate_recipe_comment_jobs,
+    post_auto_adopt_comment,
+    post_auto_approve_comment,
 )
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
     from datetime import datetime
-    from pathlib import Path
 
     from cw.models import (
         ClientConfig,
@@ -537,79 +532,6 @@ def capture_plan_probes(
     )
 
 
-def _post_auto_approve_comment(
-    ticket_id: str, snapshot: dict[str, object], *, cwd: Path | None = None
-) -> None:
-    """Post the auto-approve audit comment to the ticket (best-effort, logged).
-
-    A distinct helper from ``codex_review_persist._post_review_comment``: that one
-    swallows failures with zero logging, whereas the ticket's OQ2 resolution
-    requires a comment-write failure to be logged (the event remains the
-    source-of-truth audit trail — a failed comment never undoes the approve).
-
-    *cwd* scopes the gh call to the client's repo (GitHub #1269/#1279).
-    """
-    body = AUTO_APPROVE_COMMENT_TEMPLATE.format(
-        recipe=RECIPE_AUTO_APPROVE_REVIEW,
-        must_fix_initial=snapshot["must_fix_initial"],
-        deferred=snapshot["deferred"],
-        recommendation=snapshot["recommendation"],
-        forbidden_touched=snapshot["forbidden_touched"],
-        agents_run=snapshot["agents_run"],
-    )
-    result = post_issue_comment(ticket_id, body, cwd=cwd)
-    if result is None:
-        _log.warning("gate_recipe_comment_failed ticket=%s: gh call failed", ticket_id)
-        return
-    if result.returncode != 0:
-        _log.warning(
-            "gate_recipe_comment_failed ticket=%s rc=%s: %s",
-            ticket_id,
-            result.returncode,
-            result.stderr.decode(errors="replace").strip(),
-        )
-
-
-def _post_auto_adopt_comment(
-    ticket_id: str, snapshot: dict[str, object], *, cwd: Path | None = None
-) -> None:
-    """Post the auto-adopt audit comment to the ticket (best-effort, logged).
-
-    Mirrors :func:`_post_auto_approve_comment` exactly (same ``gh issue
-    comment`` subprocess call, same best-effort log-on-failure behavior),
-    formatting the plan template with the predicate snapshot's fields.
-
-    *cwd* scopes the gh call to the client's repo (GitHub #1269/#1279).
-    """
-    # Explicit named args, not **snapshot: this writes to a public,
-    # append-only GitHub comment, so the fields exposed there must stay
-    # grep-able and reviewable at this call site. Unpacking the full
-    # snapshot dict would auto-expose any future key added to
-    # _clean_plan_snapshot with no code change here to acknowledge the new
-    # public disclosure, and would raise TypeError if a future key ever
-    # collided with the `recipe=` kwarg.
-    body = AUTO_ADOPT_COMMENT_TEMPLATE.format(
-        recipe=RECIPE_AUTO_ADOPT_PLAN,
-        tier=snapshot.get(_SNAPSHOT_KEY_TIER),
-        files=snapshot.get(_SNAPSHOT_KEY_FILES),
-        lines_estimate=snapshot.get(_SNAPSHOT_KEY_LINES),
-        forbidden_touched=snapshot.get(_SNAPSHOT_KEY_FORBIDDEN),
-        plan_draft_fingerprint=snapshot.get(_SNAPSHOT_KEY_FINGERPRINT),
-        plan_reviewed=snapshot.get(_SNAPSHOT_KEY_REVIEWED),
-    )
-    result = post_issue_comment(ticket_id, body, cwd=cwd)
-    if result is None:
-        _log.warning("gate_recipe_comment_failed ticket=%s: gh call failed", ticket_id)
-        return
-    if result.returncode != 0:
-        _log.warning(
-            "gate_recipe_comment_failed ticket=%s rc=%s: %s",
-            ticket_id,
-            result.returncode,
-            result.stderr.decode(errors="replace").strip(),
-        )
-
-
 def _find_blocked_task(
     store: DevQueueStore, ticket_id: str, client: str
 ) -> TicketTask | None:
@@ -761,7 +683,7 @@ def _act_auto_approve_review(
     # tick's `clients` snapshot when the comment is queued rather than the
     # detect-time candidate, matching how every other field here is
     # re-validated rather than taken from detect-time state (GitHub #1279).
-    comment_jobs: list[tuple[str, str, dict[str, object]]] = []
+    comment_jobs: list[tuple[str, str, dict[str, object], str]] = []
     with dev_queue_lock():
         # Loaded once: dev_queue_lock() is the exclusive writer lock for this
         # file, so no concurrent process can change it mid-loop, and every
@@ -835,11 +757,11 @@ def _act_auto_approve_review(
                 )
                 continue
             approved.append(task.ticket_id)
-            comment_jobs.append((task.ticket_id, task.client, snapshot))
+            comment_jobs.append((task.ticket_id, task.client, snapshot, session.id))
     defer_gate_recipe_comment_jobs(
         comment_jobs,
         clients,
-        _post_auto_approve_comment,
+        post_auto_approve_comment,
         recipe=RECIPE_AUTO_APPROVE_REVIEW,
         deferred=deferred,
     )
@@ -878,7 +800,7 @@ def _act_auto_adopt_plan(
     approved: list[str] = []
     # (ticket_id, client, snapshot): see _act_auto_approve_review for why the
     # client name is deferred across the lock boundary (GitHub #1279 R7).
-    comment_jobs: list[tuple[str, str, dict[str, object]]] = []
+    comment_jobs: list[tuple[str, str, dict[str, object], str]] = []
     with dev_queue_lock():
         # Both loaded once, unlike the sibling _act_auto_approve_review (which
         # reloads state per candidate): that function re-derives a fresh
@@ -941,11 +863,11 @@ def _act_auto_adopt_plan(
                 )
                 continue
             approved.append(task.ticket_id)
-            comment_jobs.append((task.ticket_id, task.client, snapshot))
+            comment_jobs.append((task.ticket_id, task.client, snapshot, session.id))
     defer_gate_recipe_comment_jobs(
         comment_jobs,
         clients,
-        _post_auto_adopt_comment,
+        post_auto_adopt_comment,
         recipe=RECIPE_AUTO_ADOPT_PLAN,
         deferred=deferred,
     )

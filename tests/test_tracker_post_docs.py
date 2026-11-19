@@ -548,11 +548,14 @@ def test_seam_section_states_the_linear_residual() -> None:
 
 
 def test_seam_section_names_the_known_unrouted_in_package_posters() -> None:
-    """Advisory soundness note 3: classified, not silently left open."""
+    """Advisory soundness note 3: the two former direct posters now enqueue."""
     block = _flat(_seam_block("**Known unrouted in-package posters.**", "\n---"))
-    assert "codex_review_persist._post_review_comment" in block
-    assert "cli/dev_queue/resolve.py" in block
-    assert "known unrouted path" in block
+    assert "codex_review_persist._post_review_comment" not in block
+    assert "cw dev-queue resolve --post" in block
+    assert "cw dev-queue approve --post-marker" in block
+    assert "enqueue their text through the outbox" in block
+    assert "outbox drain delivers it on any tracker" in block
+    assert "known unrouted path" not in block
 
 
 def test_seam_marker_is_appended_by_the_command() -> None:
