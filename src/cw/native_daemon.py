@@ -24,7 +24,7 @@ import subprocess
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Final, NamedTuple, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from cw._text import _bounded, redact
@@ -36,6 +36,7 @@ from cw.exceptions import (
     UsageLimitError,
     parse_usage_limit_reset,
 )
+from cw.model_family import parse_model_id
 
 if TYPE_CHECKING:
     from datetime import tzinfo
@@ -65,21 +66,26 @@ def _is_native_surface_ref(ref: str) -> bool:
 # behavior the issue documents.
 _DEFAULT_PERMISSION_MODE = "auto"
 
-# Conservative allowlist of model-id prefixes confirmed to support
-# ``--permission-mode auto`` per the Claude Code docs
-# (code.claude.com/docs/en/permission-modes): Opus 4.6+, Sonnet 4.6+/
-# Sonnet 5, Haiku 5.5, Opus 4.7/4.8 (gateway). Haiku 4.5 is NOT auto-capable;
-# the "claude-haiku-5-5" prefix deliberately does not match it. worker_model
-# is a forwarded opaque string that in practice carries dated/suffixed ids
-# (e.g. "claude-sonnet-4-6-20251015"), so this is matched as a prefix, not an
-# exact set — see #1111, #2624.
+# Every parseable Claude model id at major version 5 or later is auto-capable
+# (#3626, operator decision recorded on dev-queue row:1). The rule is keyed on
+# the major version, not a prefix per release, so a new 5.x or 6.x model needs
+# no edit here. Only ids that ``cw.model_family.parse_model_id`` recognizes
+# qualify. An id it cannot parse (an alias such as ``opus``, a provider-prefixed
+# id, a truncated id) stays fail-closed and falls back to ``bypassPermissions``:
+# a wrong guess is a hard ``--bg`` hang that holds a lane slot (#1111).
+_AUTO_CAPABLE_MIN_MAJOR: Final = 5
+
+# Pre-5 models confirmed to support ``--permission-mode auto`` per the Claude
+# Code docs (code.claude.com/docs/en/permission-modes): Opus 4.6, 4.7 and 4.8
+# (gateway), Sonnet 4.6. Any other pre-5 id, Haiku 4.5 included, is NOT
+# auto-capable. Matched as a prefix because worker_model is a forwarded opaque
+# string that in practice carries dated/suffixed ids (e.g.
+# "claude-sonnet-4-6-20251015") — see #1111, #2624, #3626.
 _AUTO_CAPABLE_MODEL_PREFIXES: tuple[str, ...] = (
     "claude-opus-4-6",
     "claude-opus-4-7",
     "claude-opus-4-8",
     "claude-sonnet-4-6",
-    "claude-sonnet-5",
-    "claude-haiku-5-5",
 )
 
 # Permission mode for workers whose pinned model does not support
@@ -95,13 +101,17 @@ def model_supports_auto(worker_model: str | None) -> bool:
     """Return True if *worker_model* supports ``--permission-mode auto``.
 
     ``None`` (no pin) is treated as auto-capable so unpinned workers keep
-    today's behavior unchanged. A non-``None`` value is matched via prefix
-    against a conservative allowlist of known auto-capable model families;
-    an unrecognized non-``None`` id is treated as NOT auto-capable — a hard
-    ``--bg`` hang that holds a lane slot is worse than a worker running with
-    fewer guardrails in an isolated, review-gated worktree. See #1111.
+    today's behavior unchanged. A non-``None`` id the shared parser recognizes
+    at major version >= :data:`_AUTO_CAPABLE_MIN_MAJOR` is auto-capable (#3626).
+    Otherwise the id is matched via prefix against the pre-5 allowlist. An id
+    matching neither is treated as NOT auto-capable — a hard ``--bg`` hang that
+    holds a lane slot is worse than a worker running with fewer guardrails in
+    an isolated, review-gated worktree. See #1111.
     """
     if not worker_model:
+        return True
+    parsed = parse_model_id(worker_model)
+    if parsed is not None and parsed.major >= _AUTO_CAPABLE_MIN_MAJOR:
         return True
     normalized = worker_model.strip().lower()
     return normalized.startswith(_AUTO_CAPABLE_MODEL_PREFIXES)

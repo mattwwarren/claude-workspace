@@ -1754,10 +1754,73 @@ class TestModelSupportsAuto:
         assert model_supports_auto("claude-haiku-5-5") is True
         assert model_supports_auto("claude-haiku-5-5-20260101") is True
 
-    def test_unknown_ids_are_not_auto_capable(self) -> None:
-        """An unrecognized non-None id is conservatively NOT auto-capable."""
-        assert model_supports_auto("claude-fable-5") is False
-        assert model_supports_auto("claude-mythos-5") is False
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "claude-opus-5-5",
+            "claude-opus-5-5-20260101",
+            "claude-opus-5",
+            "claude-sonnet-5-6",
+            "claude-sonnet-5-20260101",
+            "claude-haiku-5",
+            "claude-opus-6",
+            "claude-opus-6-1-20270101",
+            "claude-opus-10",
+            "claude-fable-5",
+            "claude-mythos-5",
+            "claude-fable-5-2",
+        ],
+    )
+    def test_major_5_and_later_is_auto_capable(self, model: str) -> None:
+        """#3626 R1: every parseable Claude id at major >= 5 is auto-capable."""
+        assert model_supports_auto(model) is True
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "us.anthropic.claude-opus-5-5",
+            "anthropic.claude-opus-5-5",
+            "claude-opus-",
+            "claude-opus-x",
+            "claude-5",
+            "gpt-5",
+            "opus",
+            "sonnet",
+            "haiku",
+            "claude-sonnet-20250101",
+            "claude-3-7-sonnet",
+        ],
+    )
+    def test_unparseable_ids_stay_fail_closed(self, model: str) -> None:
+        """#3626 R1: an id the parser cannot recognize is NOT auto-capable."""
+        assert model_supports_auto(model) is False
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "claude-haiku-4-5-20251001",
+            "claude-opus-4-5",
+            "claude-opus-4-1-20250805",
+            "claude-opus-4",
+            "claude-sonnet-4-5",
+        ],
+    )
+    def test_pre_5_ids_not_covered_by_a_prefix_are_not_auto_capable(
+        self, model: str
+    ) -> None:
+        assert model_supports_auto(model) is False
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "claude-opus-4-6",
+            "claude-opus-4-7",
+            "claude-opus-4-8-20260101",
+            "claude-sonnet-4-6-20251015",
+        ],
+    )
+    def test_explicit_pre_5_prefixes_stay_auto_capable(self, model: str) -> None:
+        assert model_supports_auto(model) is True
 
     def test_case_and_whitespace_insensitive(self) -> None:
         assert model_supports_auto("  CLAUDE-SONNET-5-x  ") is True
@@ -1819,6 +1882,24 @@ class TestResolvePermissionMode:
             resolve_permission_mode("claude-sonnet-5")
 
         assert caplog.records == []
+
+    def test_opus_5_5_returns_none_and_does_not_warn(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """#3626: Opus 5.5 is auto-capable under the major >= 5 rule."""
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            assert resolve_permission_mode("claude-opus-5-5") is None
+
+        assert caplog.records == []
+
+    def test_unparseable_id_returns_skip_mode(self) -> None:
+        """Fail-closed fallback end to end for an id the parser cannot read."""
+        assert (
+            resolve_permission_mode("us.anthropic.claude-opus-5-5")
+            == SKIP_PERMISSIONS_MODE
+        )
 
 
 class TestReadSupervisorResumeSessionId:
