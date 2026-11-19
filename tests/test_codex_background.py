@@ -144,12 +144,7 @@ def _no_real_gh_login(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _no_real_snapshot_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No test in this module may launch ``gh`` for a snapshot refresh (#3712).
-
-    A GitHub-tracked fixture reaches the live refresh through the context built
-    in ``_review_and_confirm``; a failed fetch falls back to the row's snapshot.
-    Linear and unset-tracker fixtures never refresh.
-    """
+    """No test in this module may launch ``gh`` for a snapshot refresh (#3712)."""
     monkeypatch.setattr(
         "cw.ticket_snapshot._fetch.fetch_issue_snapshot", lambda *_a, **_kw: None
     )
@@ -2084,7 +2079,7 @@ def test_fix_loop_receives_a_context_for_the_clients_tracker(
     tracker: str | None,
     github: bool,
 ) -> None:
-    """#3712: one refreshing context per run; GitHub is the exact tracker test."""
+    """#3712: one row-reading context per run; GitHub is the exact tracker test."""
     worktree = make_git_repo("wt-bg-ctx")
     if tracker is not None:
         _write_tracker_config(worktree, tracker)
@@ -2111,7 +2106,7 @@ def test_disabled_fix_loop_does_not_resolve_operator_login(
 
     snapshots = fix_loop_mock.call_args.kwargs["snapshots"]
     assert snapshots.operator_login is None
-    assert snapshots.resolve is not read_for_stage
+    assert snapshots.resolve is read_for_stage
     _login_mock().assert_not_called()
 
 
