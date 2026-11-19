@@ -152,9 +152,7 @@ def coerce_blocked_on(value: object) -> object:
     rather than failing the whole store load. A dict or ``PrRef`` passes
     through to normal validation.
     """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
+    if isinstance(value, int):  # bool too: from_number rejects it
         return PrRef.from_number(value)
     return value
 

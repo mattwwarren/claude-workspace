@@ -46,6 +46,7 @@ from cw.reconcile.stale_dispatch_watch import register_stale_dispatch_watched_pr
 from cw.reconcile.tasks import (
     _closed_pr_numbers_by_client,
     _is_variant_a_gate_task,
+    _is_variant_b_gate_task,
     _merged_pr_numbers_by_client,
     _pr_numbers_by_client_in_state,
 )
@@ -1623,3 +1624,9 @@ def test_completed_dependency_without_merged_state_never_releases(
     released, row = _release_with([dependency, _dep_hold(_OR_5)], [])
     assert released == []
     assert row.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+def test_dependency_hold_without_an_id_is_not_a_variant_b_gate_task() -> None:
+    """#3634: a typed-ref gate needs an id; a no-id hold is not releasable."""
+    assert _is_variant_b_gate_task(_dep_hold(None)) is False
+    assert _is_variant_b_gate_task(_dep_hold(_OR_5)) is True
