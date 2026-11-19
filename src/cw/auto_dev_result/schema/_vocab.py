@@ -260,9 +260,11 @@ REVIEW_ENGINE_MODIFIED_BLOCKER_REASON: Literal["review_engine_modified"] = (
 # no usable cw-engine.json (cause=no_codex_manifest, codex_not_declared or
 # manifest_invalid). Never retryable: the operator fixes the config or the
 # manifest, then requeues.
+# Compatibility export: the canonical value lives in the neutral stage
+# pre-flight vocabulary so producers and readers share one definition.
 REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON: Literal[
     "review_engine_unsupported_backend"
-] = "review_engine_unsupported_backend"
+] = PreflightReason.REVIEW_ENGINE_UNSUPPORTED_BACKEND.value
 # blocker.reason headless finalize Step 4c.6 emits when the executor's per-call
 # foreground timeout cut a reuse-path quality gate call off (#3372). The row
 # parks BLOCKED_ON_USER at FINALIZE for the orchestrator to run the gate by
