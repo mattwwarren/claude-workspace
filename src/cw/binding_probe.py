@@ -12,9 +12,10 @@ The codex and opencode reads are in-process file reads through
 :func:`cw.backend_mcp_config.read_backend_mcp`.
 
 No observability emissions: no ``log_event``, ``record_event``, ``logging`` or
-``warnings`` call, and no lock. The branch reader is private to this module, so
-the gate's warn-once state (``tracker_mcp_gate._WARNED_FAIL_OPEN``) is never
-touched. Only the pure classifier ``_plugin_enabled`` is shared with the gate.
+``warnings`` call, and no lock. The caller owns any logging: each result carries
+a closed :class:`ProbeCause`, so a caller tells a missing branch (debug) from an
+unreadable read (warn) without parsing ``reason`` (RFC 0019 H2b, #3744). The
+pure ``enabledPlugins`` classifier :func:`_plugin_enabled` lives here (#3309).
 """
 
 from __future__ import annotations
@@ -25,7 +26,6 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from cw.backend_mcp_config import McpState, read_backend_mcp
-from cw.dispatch.tracker_mcp_gate import _plugin_enabled
 from cw.executor._capabilities import declared_capabilities
 from cw.models.capabilities import BindingProbeKind
 from cw.worktree import _git_dir, _ref_exists, _run_git
@@ -47,22 +47,87 @@ class Reach(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ProbeCause(StrEnum):
+    """Why a probe ended where it did (#3744).
+
+    ``READ``: a verdict was read (``ENABLED`` or ``ABSENT``). ``UNBOUND``: the
+    client binds nothing this harness can read. ``NO_BRANCH``: the claude-native
+    read had no branch to read (none given, or not created yet). ``UNREADABLE``:
+    a read was attempted and could not resolve.
+    """
+
+    READ = "read"
+    UNBOUND = "unbound"
+    NO_BRANCH = "no_branch"
+    UNREADABLE = "unreadable"
+
+
 @dataclass(frozen=True)
 class BindingProbe:
     """One probe result.
 
     ``bound`` says whether the client binds the role for this harness at all;
     ``state`` is the reach verdict and is meaningful only when ``bound``.
+    ``cause`` is the closed discriminator a caller branches on.
     """
 
     state: Reach
     bound: bool
     reason: str
     source: str | None
+    cause: ProbeCause = ProbeCause.READ
 
 
 def _unbound(reason: str) -> BindingProbe:
-    return BindingProbe(Reach.UNKNOWN, bound=False, reason=reason, source=None)
+    return BindingProbe(
+        Reach.UNKNOWN,
+        bound=False,
+        reason=reason,
+        source=None,
+        cause=ProbeCause.UNBOUND,
+    )
+
+
+def _unreadable(reason: str, source: str | None) -> BindingProbe:
+    return BindingProbe(
+        Reach.UNKNOWN,
+        bound=True,
+        reason=reason,
+        source=source,
+        cause=ProbeCause.UNREADABLE,
+    )
+
+
+def _plugin_enabled(enabled_plugins_raw: object, plugin_id: str) -> bool | None:
+    """Exact-match *plugin_id* against an ``enabledPlugins`` value.
+
+    An object (Claude Code's documented ``"<plugin>@<marketplace>": bool``
+    shape) resolves to ``False`` when the key is absent, and to its value when
+    that value is a boolean; a list of plugin-id strings resolves by
+    membership. The complete container must match those shapes. Anything else
+    -- including a non-string key, a non-boolean value, or a non-string list
+    item -- returns ``None``: unrecognized, so the caller fails open.
+    """
+    if isinstance(enabled_plugins_raw, dict):
+        if not all(
+            isinstance(key, str) and isinstance(value, bool)
+            for key, value in enabled_plugins_raw.items()
+        ):
+            return None
+        if plugin_id not in enabled_plugins_raw:
+            return False
+        return bool(enabled_plugins_raw[plugin_id])
+    if isinstance(enabled_plugins_raw, list):
+        if not all(isinstance(plugin, str) for plugin in enabled_plugins_raw):
+            return None
+        return plugin_id in enabled_plugins_raw
+    return None
+
+
+class _NoBranch(str):
+    """A :func:`_branch_settings` failure reason meaning the branch is absent."""
+
+    __slots__ = ()
 
 
 def _parse_settings(text: str, relpath: str, branch: str) -> dict[str, object] | str:
@@ -87,7 +152,7 @@ def _branch_settings(
     git_cwd = _git_dir(client)
     try:
         if not _ref_exists(branch, git_cwd):
-            return f"branch {branch} does not exist"
+            return _NoBranch(f"branch {branch} does not exist")
         result = _run_git("show", f"{branch}:{relpath}", cwd=git_cwd, check=False)
     except OSError:
         return "git unavailable"
@@ -98,32 +163,41 @@ def _branch_settings(
     return _parse_settings(result.stdout, relpath, branch)
 
 
+def _no_branch(reason: str, source: str | None) -> BindingProbe:
+    return BindingProbe(
+        Reach.UNKNOWN,
+        bound=True,
+        reason=reason,
+        source=source,
+        cause=ProbeCause.NO_BRANCH,
+    )
+
+
 def _probe_plugin_branch(client: ClientConfig, branch: str | None) -> BindingProbe:
     plugin_id = client.tickets_plugin_id
     if plugin_id is None:
         return _unbound("claude-native tickets realization has no plugin_id")
     if branch is None:
-        return BindingProbe(Reach.UNKNOWN, bound=True, reason="no branch", source=None)
+        return _no_branch("no branch", None)
     relpath = client.tickets_preflight.settings_path
     source = f"{branch}:{relpath}"
     settings = _branch_settings(client, branch, relpath)
     if isinstance(settings, str):
-        return BindingProbe(Reach.UNKNOWN, bound=True, reason=settings, source=source)
+        if isinstance(settings, _NoBranch):
+            return _no_branch(str(settings), source)
+        return _unreadable(settings, source)
+    return _plugin_verdict(settings, plugin_id, relpath, source)
+
+
+def _plugin_verdict(
+    settings: dict[str, object], plugin_id: str, relpath: str, source: str
+) -> BindingProbe:
+    """Classify a parsed settings object's ``enabledPlugins`` for *plugin_id*."""
     if _ENABLED_PLUGINS_KEY not in settings:
-        return BindingProbe(
-            Reach.UNKNOWN,
-            bound=True,
-            reason=f"{_ENABLED_PLUGINS_KEY} key missing from {relpath}",
-            source=source,
-        )
+        return _unreadable(f"{_ENABLED_PLUGINS_KEY} key missing from {relpath}", source)
     verdict = _plugin_enabled(settings[_ENABLED_PLUGINS_KEY], plugin_id)
     if verdict is None:
-        return BindingProbe(
-            Reach.UNKNOWN,
-            bound=True,
-            reason=f"{_ENABLED_PLUGINS_KEY} shape not recognized",
-            source=source,
-        )
+        return _unreadable(f"{_ENABLED_PLUGINS_KEY} shape not recognized", source)
     reach = Reach.ENABLED if verdict else Reach.ABSENT
     return BindingProbe(
         reach, bound=True, reason=f"{plugin_id} {reach.value}", source=source
@@ -147,7 +221,7 @@ def _probe_mcp_config(backend: str, client: ClientConfig, root: Path) -> Binding
     if reading.state is McpState.DISABLED:
         reason = "disabled: " + reading.reason
         return BindingProbe(Reach.ABSENT, bound=True, reason=reason, source=source)
-    return BindingProbe(Reach.UNKNOWN, bound=True, reason=reading.reason, source=source)
+    return _unreadable(reading.reason, source)
 
 
 def probe_binding(

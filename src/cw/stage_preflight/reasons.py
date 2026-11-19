@@ -14,7 +14,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from cw.models.enums import Stage
+from cw.models.enums import DispatchSkipReason, Stage
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -24,13 +24,18 @@ class PreflightReason(StrEnum):
     """Why the stage pre-flight refused a spawn before any agent ran.
 
     ``STAGE_UNSUPPORTED`` replaces the per-backend stage reasons. The three
-    capability reasons keep their pre-H2 names.
+    capability reasons keep their pre-H2 names. The three ``BINDING_*`` values
+    are the tick-side reachability dispositions (RFC 0019 H2b, #3744), which
+    replace the tracker-MCP gate's ``tracker_mcp_gate``.
     """
 
     STAGE_UNSUPPORTED = "stage_unsupported"
     CLEAN_REVIEW_UNSUPPORTED_BACKEND = "clean_review_unsupported_backend"
     REVIEW_ENGINE_UNSUPPORTED_BACKEND = "review_engine_unsupported_backend"
     REPAIR_ENTRY_UNSUPPORTED_BACKEND = "repair_entry_unsupported_backend"
+    BINDING_UNBOUND = "binding_unbound"
+    BINDING_UNREACHABLE = "binding_unreachable"
+    BINDING_TOOL_MISSING = "binding_tool_missing"
 
 
 #: Pre-H2 reason strings and the reason each one is read as now.
@@ -44,6 +49,10 @@ LEGACY_REASON_ALIASES: Mapping[str, str] = MappingProxyType(
             )
             for stage in Stage
         },
+        # RFC 0019 H2b (#3744): the tracker-MCP gate's disposition, which
+        # covered both unbound and unreachable, and its skip reason.
+        "tracker_mcp_gate": PreflightReason.BINDING_UNREACHABLE.value,
+        "tracker_mcp_gate_blocked": DispatchSkipReason.BINDING_BLOCKED.value,
     }
 )
 

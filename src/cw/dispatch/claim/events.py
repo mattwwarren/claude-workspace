@@ -254,7 +254,7 @@ def _emit_tracker_mcp_gate_blocked_event(client_name: str, ticket_id: str) -> No
         {
             "client": client_name,
             "claimed": 0,
-            "skip_reason": DispatchSkipReason.TRACKER_MCP_GATE_BLOCKED,
+            "skip_reason": DispatchSkipReason.BINDING_BLOCKED,
             "ticket_id": ticket_id,
         },
     )

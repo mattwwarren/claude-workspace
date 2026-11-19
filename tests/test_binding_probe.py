@@ -11,8 +11,7 @@ from typing import Any
 import pytest
 
 import cw.binding_probe as probe_mod
-from cw.binding_probe import Reach, probe_binding
-from cw.dispatch.tracker_mcp_gate import _plugin_enabled
+from cw.binding_probe import ProbeCause, Reach, _plugin_enabled, probe_binding
 from cw.models import ClientConfig
 from cw.models.bindings import Bindings
 from cw.models.orchestrator_config.constants import (
@@ -81,18 +80,41 @@ def test_claude_native_branch_verdicts(
         ({_PLUGIN: None}, Reach.UNKNOWN),
     ],
 )
-def test_probe_and_gate_classifier_agree(
+def test_probe_reach_matches_the_settings_fixture(
     make_git_repo: Any, raw_value: dict[str, object], expected: Reach
 ) -> None:
-    gate_verdict = _plugin_enabled(raw_value, _PLUGIN)
+    """The probe's verdict on a committed ``enabledPlugins`` value (#3744).
+
+    ``_plugin_enabled`` now lives in the probe, so comparing the two would be a
+    tautology; the expected reach is the hand-written oracle instead.
+    """
     repo = branch_with_settings(
         make_git_repo, {"enabledPlugins": raw_value}, branch=_BRANCH
     )
     result = probe_binding(CLAUDE_NATIVE_BACKEND, _client(repo), branch=_BRANCH)
-    mapped = {True: Reach.ENABLED, False: Reach.ABSENT, None: Reach.UNKNOWN}[
-        gate_verdict
-    ]
-    assert result.state is expected is mapped
+    assert result.state is expected
+    unknown = expected is Reach.UNKNOWN
+    assert result.cause is (ProbeCause.UNREADABLE if unknown else ProbeCause.READ)
+
+
+@pytest.mark.parametrize(
+    ("raw", "verdict"),
+    [
+        ({_PLUGIN: True}, True),
+        ({_PLUGIN: False}, False),
+        ({"other@x": True}, False),
+        ({_PLUGIN: "yes"}, None),
+        ({1: True}, None),
+        ([_PLUGIN], True),
+        (["other@x"], False),
+        ([_PLUGIN, 3], None),
+        (_PLUGIN, None),
+    ],
+)
+def test_plugin_enabled_classifies_every_shape(
+    raw: object, verdict: bool | None
+) -> None:
+    assert _plugin_enabled(raw, _PLUGIN) is verdict
 
 
 def test_enabled_plugins_key_missing_is_unknown_naming_key(make_git_repo: Any) -> None:
@@ -145,6 +167,7 @@ def test_branch_does_not_exist_is_unknown(make_git_repo: Any) -> None:
     )
     assert result.state is Reach.UNKNOWN
     assert "does not exist" in result.reason
+    assert result.cause is ProbeCause.NO_BRANCH
 
 
 def test_custom_settings_path_is_honored(make_git_repo: Any) -> None:
@@ -170,6 +193,7 @@ def test_git_unavailable_is_unknown_without_mock(tmp_path: Path) -> None:
     result = probe_binding(CLAUDE_NATIVE_BACKEND, client, branch=_BRANCH)
     assert result.state is Reach.UNKNOWN
     assert result.reason == "git unavailable"
+    assert result.cause is ProbeCause.UNREADABLE
 
 
 def test_no_branch_is_unknown_and_bound(make_git_repo: Any) -> None:
@@ -180,6 +204,7 @@ def test_no_branch_is_unknown_and_bound(make_git_repo: Any) -> None:
     assert result.state is Reach.UNKNOWN
     assert result.bound is True
     assert result.reason == "no branch"
+    assert result.cause is ProbeCause.NO_BRANCH
 
 
 def test_claude_native_server_only_realization_is_unbound(make_git_repo: Any) -> None:
@@ -230,6 +255,8 @@ def test_mcp_config_states_map_to_reach(
     result = probe_binding(backend, client, root=ancestor_free_dir)
     assert result.state is expected
     assert result.bound is True
+    unknown = expected is Reach.UNKNOWN
+    assert result.cause is (ProbeCause.UNREADABLE if unknown else ProbeCause.READ)
     assert reason_part in result.reason
     assert result.source is not None
 
@@ -255,6 +282,7 @@ def test_codex_without_server_is_unbound(tmp_path: Path) -> None:
     result = probe_binding(CODEX_BACKEND, client, root=tmp_path)
     assert result.bound is False
     assert result.state is Reach.UNKNOWN
+    assert result.cause is ProbeCause.UNBOUND
 
 
 # --- short circuits -----------------------------------------------------------

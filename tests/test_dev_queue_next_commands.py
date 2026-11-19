@@ -894,6 +894,7 @@ class TestSkipReasonRemedy:
             "attempt_cap_blocked",
             "ssh_key_gate",
             "disk_pressure_gate",
+            "binding_blocked",
             "tracker_mcp_gate_blocked",
             "stale_pr_blocked",
             "lane_cap_blocked",

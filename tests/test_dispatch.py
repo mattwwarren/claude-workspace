@@ -22308,8 +22308,7 @@ class TestClaimNextPendingTrackerMcpGate:
         tick_events = [
             e
             for e in events
-            if e.payload.get("skip_reason")
-            == DispatchSkipReason.TRACKER_MCP_GATE_BLOCKED
+            if e.payload.get("skip_reason") == DispatchSkipReason.BINDING_BLOCKED
         ]
         assert len(tick_events) == 1
         assert tick_events[0].payload["ticket_id"] == "GEN-2442"

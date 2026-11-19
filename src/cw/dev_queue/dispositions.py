@@ -33,6 +33,7 @@ from cw.auto_dev_result import (
 from cw.models.enums import (
     DEPENDENCY_HOLD_DISPOSITION as _MODELS_DEPENDENCY_HOLD_DISPOSITION,
 )
+from cw.stage_preflight import PreflightReason
 
 # Disposition stamped when a ticket is parked AWAITING_OPERATOR_SIGNOFF by
 # either dispatch's staged-decision routing (RFC 0007 Phase 3, dispatch.py) or
@@ -271,7 +272,19 @@ _PRE_DISPATCH_STALE_PR_REASON: Final = "pr_already_open_pre_dispatch"
 # "proceed anyway" -- and membership would make it eligible for concierge's
 # false-park auto-requeue recipe, re-dispatching into the same missing plugin.
 # It is an operator-gated park (#3055): `cw doctor --reap` never reverts it.
+# RFC 0019 H2b (#3744): no longer written. The tick-side reachability check
+# writes the three BINDING_*_DISPOSITION names below; this legacy string stays
+# readable through ``cw.stage_preflight.canonical_reason`` (it aliases to
+# ``binding_unreachable``) until the alias-removal ticket named in CHANGELOG.
 TRACKER_MCP_GATE_DISPOSITION: Final = "tracker_mcp_gate"
+
+# RFC 0019 H2b (#3744): the tick-side binding reachability parks, sourced from
+# ``PreflightReason`` so the strings cannot drift. Same shape and gating as the
+# legacy disposition above: BLOCKED_ON_USER before any spawn, not a
+# HOLD_DISPOSITIONS member, operator-gated (`cw doctor --reap` never reverts).
+BINDING_UNBOUND_DISPOSITION: Final = PreflightReason.BINDING_UNBOUND.value
+BINDING_UNREACHABLE_DISPOSITION: Final = PreflightReason.BINDING_UNREACHABLE.value
+BINDING_TOOL_MISSING_DISPOSITION: Final = PreflightReason.BINDING_TOOL_MISSING.value
 
 # GitHub #2321 -- the dependency hold: BLOCKED_ON_USER waiting on a PR merge.
 # Stamped by ``cw dev-queue hold`` and by routing for a worker
@@ -286,9 +299,10 @@ TRACKER_MCP_GATE_DISPOSITION: Final = "tracker_mcp_gate"
 DEPENDENCY_HOLD_DISPOSITION: Final = _MODELS_DEPENDENCY_HOLD_DISPOSITION
 
 # ``TicketTask.blocked_reason`` stamped alongside TRACKER_MCP_GATE_DISPOSITION
-# (#2442). The ``_pre_dispatch`` suffix follows _PRE_DISPATCH_STALE_PR_REASON's
-# convention: it tells "the loop refused to spawn this" apart from anything an
-# agent might report on its own sentinel.
+# (#2442) and, since #3744, the three BINDING_*_DISPOSITION names. The
+# ``_pre_dispatch`` suffix follows _PRE_DISPATCH_STALE_PR_REASON's convention:
+# it tells "the loop refused to spawn this" apart from anything an agent might
+# report on its own sentinel.
 _PRE_DISPATCH_TRACKER_MCP_REASON: Final = "tracker_mcp_unavailable_pre_dispatch"
 
 # Dispositions for an RFC 0016 adopted PR (#2943). The drift park and the

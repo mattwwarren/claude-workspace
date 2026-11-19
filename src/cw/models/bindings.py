@@ -87,7 +87,7 @@ class McpRealization(BaseModel):
     Exactly one of ``server`` (the MCP server name the harness's own config
     declares) or ``plugin_id`` (the claude-native ``enabledPlugins`` key) is
     set. ``tools`` optionally maps each ticket operation to the server's tool
-    name; no consumer reads it yet.
+    name; the tick-side tool-name check reads it (``cw.binding_tools``, #3744).
     """
 
     model_config = ConfigDict(extra="forbid")

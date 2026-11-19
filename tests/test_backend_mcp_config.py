@@ -13,6 +13,7 @@ from cw.backend_mcp_config import (
     McpState,
     declared_server_names,
     read_backend_mcp,
+    read_enabled_tools,
     user_layer_path,
 )
 from cw.models.orchestrator_config import CODEX_BACKEND, OPENCODE_BACKEND
@@ -426,3 +427,91 @@ class TestDeclaredServerNames:
     ) -> None:
         stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, "missing")
         assert declared_server_names(CODEX_BACKEND) is None
+
+
+def _codex_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, text: str) -> Path:
+    """Write a codex user-layer config holding *text* and return its path."""
+    path = stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, "missing")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+class TestReadEnabledTools:
+    """#3744: the codex ``enabled_tools`` allowlist, the tool check's one source."""
+
+    def test_allowlist_is_read(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        path = _codex_config(
+            monkeypatch,
+            tmp_path,
+            '[mcp_servers.linear]\ncommand = "x"\nenabled_tools = ["a", "b"]\n',
+        )
+        reading = read_enabled_tools(CODEX_BACKEND, "linear", _root(tmp_path))
+        assert reading.known is True
+        assert reading.tools == ("a", "b")
+        assert reading.path == path
+
+    def test_no_allowlist_key_excludes_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, "enabled")
+        reading = read_enabled_tools(CODEX_BACKEND, "linear", _root(tmp_path))
+        assert reading.known is True
+        assert reading.tools is None
+        assert "sets no enabled_tools" in reading.reason
+
+    @pytest.mark.parametrize(
+        ("text", "needle"),
+        [
+            ("[mcp_servers.other]\ncommand = 'x'\n", "is not declared"),
+            ("mcp_servers = 'x'\n", "is not declared"),
+            ("[mcp_servers]\nlinear = 3\n", "is not a table"),
+            (
+                "[mcp_servers.linear]\nenabled_tools = 'a'\n",
+                "is not a list of strings",
+            ),
+            ("[mcp_servers.linear]\nenabled_tools = [1]\n", "not a list of strings"),
+            ("not [valid toml\n", "does not parse"),
+        ],
+    )
+    def test_unusable_config_is_unknown(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        text: str,
+        needle: str,
+    ) -> None:
+        _codex_config(monkeypatch, tmp_path, text)
+        reading = read_enabled_tools(CODEX_BACKEND, "linear", _root(tmp_path))
+        assert reading.known is False
+        assert reading.tools is None
+        assert needle in reading.reason
+
+    def test_missing_file_is_unknown(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, "missing")
+        reading = read_enabled_tools(CODEX_BACKEND, "linear", _root(tmp_path))
+        assert reading.known is False
+        assert "does not exist" in reading.reason
+
+    def test_another_layer_makes_it_unknown(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _codex_config(
+            monkeypatch,
+            tmp_path,
+            '[mcp_servers.linear]\nenabled_tools = ["a"]\n',
+        )
+        system = write_system_layer(monkeypatch, tmp_path, CODEX_BACKEND)
+        reading = read_enabled_tools(CODEX_BACKEND, "linear", _root(tmp_path))
+        assert reading.known is False
+        assert str(system) in reading.reason
+
+    def test_other_backends_are_unknown(self, tmp_path: Path) -> None:
+        reading = read_enabled_tools(OPENCODE_BACKEND, "linear", tmp_path)
+        assert reading.known is False
+        assert "no tool allowlist reader" in reading.reason
+        assert read_enabled_tools("nope", "linear", tmp_path).path == Path()

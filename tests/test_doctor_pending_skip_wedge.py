@@ -101,10 +101,11 @@ class TestDetector:
 
         assert _check(monkeypatch, [_row()], events) == []
 
+    @pytest.mark.parametrize("reason", ["binding_blocked", "tracker_mcp_gate_blocked"])
     def test_other_newest_reason_yields_none(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, reason: str
     ) -> None:
-        events = _run(PENDING_SKIP_WEDGE_THRESHOLD, reason="tracker_mcp_gate_blocked")
+        events = _run(PENDING_SKIP_WEDGE_THRESHOLD, reason=reason)
 
         assert _check(monkeypatch, [_row()], events) == []
 

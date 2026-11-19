@@ -852,8 +852,12 @@ def test_doctor_help_lists_the_gate_timeout_park() -> None:
 def test_tracker_mcp_gate_is_an_operator_gated_park(
     tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#3055 (R4): the realistic gate park is reported, never reverted by --reap."""
-    assert TRACKER_MCP_GATE_DISPOSITION in _OPERATOR_GATED_PARK_DISPOSITIONS
+    """#3055 (R4): the realistic gate park is reported, never reverted by --reap.
+
+    Since #3744 the legacy string is gated through ``canonical_reason`` (it
+    reads as ``binding_unreachable``), not by its own set entry.
+    """
+    assert TRACKER_MCP_GATE_DISPOSITION not in _OPERATOR_GATED_PARK_DISPOSITIONS
     assert TRACKER_MCP_GATE_DISPOSITION not in _HUMAN_GATED_PARK_DISPOSITIONS
     task = _row(TRACKER_MCP_GATE_DISPOSITION, _PRE_DISPATCH_TRACKER_MCP_REASON)
     assert _is_operator_gated_park(task)
@@ -875,11 +879,17 @@ def test_doctor_help_lists_the_tracker_mcp_gate_park() -> None:
     assert "tracker_mcp_gate" in result.output
 
 
+_STAGE_ALIASES = {
+    old
+    for old, new in LEGACY_REASON_ALIASES.items()
+    if new == PreflightReason.STAGE_UNSUPPORTED.value
+}
+_BINDING_ALIASES = set(LEGACY_REASON_ALIASES) - _STAGE_ALIASES
+
+
 @pytest.mark.parametrize(
     "reason",
-    sorted(
-        {PreflightReason.STAGE_UNSUPPORTED.value, *LEGACY_REASON_ALIASES},
-    ),
+    sorted({PreflightReason.STAGE_UNSUPPORTED.value, *_STAGE_ALIASES}),
 )
 def test_a_stage_unsupported_park_is_not_operator_gated(reason: str) -> None:
     """RFC 0019 H2 (#3709) adds no disposition: a stage park stays ``blocked``.
@@ -893,3 +903,23 @@ def test_a_stage_unsupported_park_is_not_operator_gated(reason: str) -> None:
     assert disposition == "blocked"
     assert disposition not in _OPERATOR_GATED_PARK_DISPOSITIONS
     assert _is_operator_gated_park(_row(disposition, reason)) is False
+
+
+def test_the_binding_aliases_are_the_two_tracker_mcp_gate_strings() -> None:
+    assert {"tracker_mcp_gate", "tracker_mcp_gate_blocked"} == _BINDING_ALIASES
+
+
+@pytest.mark.parametrize(
+    "disposition",
+    [
+        PreflightReason.BINDING_UNBOUND.value,
+        PreflightReason.BINDING_UNREACHABLE.value,
+        PreflightReason.BINDING_TOOL_MISSING.value,
+        TRACKER_MCP_GATE_DISPOSITION,
+    ],
+)
+def test_a_binding_park_is_operator_gated(disposition: str) -> None:
+    """RFC 0019 H2b (#3744): every binding park, new name or legacy, is gated."""
+    task = _row(disposition, _PRE_DISPATCH_TRACKER_MCP_REASON)
+    assert _is_operator_gated_park(task) is True
+    assert disposition not in _HUMAN_GATED_PARK_DISPOSITIONS

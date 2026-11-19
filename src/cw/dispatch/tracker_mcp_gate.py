@@ -68,6 +68,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from cw.backend_mcp_config import McpConfigReading, McpState, read_backend_mcp
+from cw.binding_probe import _plugin_enabled
 from cw.executor import resolve_executor_config
 from cw.models import (
     CLAUDE_NATIVE_BACKEND,
@@ -201,32 +202,6 @@ def _read_branch_json(
         )
         return None
     return parsed
-
-
-def _plugin_enabled(enabled_plugins_raw: object, plugin_id: str) -> bool | None:
-    """Exact-match *plugin_id* against an ``enabledPlugins`` value.
-
-    An object (Claude Code's documented ``"<plugin>@<marketplace>": bool``
-    shape) resolves to ``False`` when the key is absent, and to its value when
-    that value is a boolean; a list of plugin-id strings resolves by
-    membership. The complete container must match those shapes. Anything else
-    -- including a non-string key, a non-boolean value, or a non-string list
-    item -- returns ``None``: unrecognized, so the caller fails open.
-    """
-    if isinstance(enabled_plugins_raw, dict):
-        if not all(
-            isinstance(key, str) and isinstance(value, bool)
-            for key, value in enabled_plugins_raw.items()
-        ):
-            return None
-        if plugin_id not in enabled_plugins_raw:
-            return False
-        return bool(enabled_plugins_raw[plugin_id])
-    if isinstance(enabled_plugins_raw, list):
-        if not all(isinstance(plugin, str) for plugin in enabled_plugins_raw):
-            return None
-        return plugin_id in enabled_plugins_raw
-    return None
 
 
 def _evaluate_branch(
