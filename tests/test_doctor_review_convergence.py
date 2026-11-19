@@ -228,3 +228,17 @@ def test_lanes_and_clients_listed_in_declared_order() -> None:
         ("review-convergence/client-a/b", False),
         ("review-convergence/client-a/c", True),
     ]
+
+
+def test_clean_mode_without_a_declared_review_stage_is_guarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Supported needs both REVIEW declared and clean mode, not clean mode alone."""
+    caps = synthetic_capabilities(stages=frozenset({Stage.IMPL}))
+    monkeypatch.setattr(
+        "cw.doctor.review_convergence.declared_capabilities", lambda _backend: caps
+    )
+    client = make_client(backend=CODEX_BACKEND, review=_clean())
+    (result,) = _check_review_convergence({"client-a": client})
+    assert result.ok is False
+    assert f"with reason {_STAGE_REASON}" in result.detail
