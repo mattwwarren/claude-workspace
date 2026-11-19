@@ -1593,20 +1593,77 @@ def test_dismissed_or_clientless_watch_is_not_evidence(
     assert released == []
 
 
-def test_worker_park_with_explicit_ref_obeys_reap_policy(
-    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    watch = _make_watched_pr(pr_number=5, repo="o/r", cross_repo=True)
-    released, row = _release_with([_dep_hold(_OR_5, session_id="sess-1")], [watch])
-    assert released == ["DH-1"]
-    assert row.status == QueueItemStatus.BLOCKED_ON_USER
-    assert row.stale_gate_detected_at is not None
-
+def _auto_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "cw.reconcile.tasks.stale_gate.load_orchestrator_config",
         lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
     )
+
+
+def _merged_task_row_evidence() -> TicketTask:
+    """A same-client task row whose hydrated pr_state says ``o/r#5`` MERGED."""
+    return _make_ticket_task(
+        ticket_id="DH-EVIDENCE",
+        client="client-a",
+        status=QueueItemStatus.COMPLETED,
+        pr_url="https://github.com/o/r/pull/5",
+        pr_state=PrState(state="MERGED"),
+    )
+
+
+@pytest.mark.parametrize("state", ["MERGED", "CLOSED"])
+def test_worker_park_with_explicit_ref_is_never_released_by_a_watch(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    """D7: an unvetted worker ref is not releasable, even under AUTO, and
+    leaves no ``dependency_hold_pr_closed_unmerged`` latch either."""
+    _auto_policy(monkeypatch)
+    watch = _make_watched_pr(pr_number=5, repo="o/r", cross_repo=True, state=state)
     released, row = _release_with([_dep_hold(_OR_5, session_id="sess-1")], [watch])
+    assert released == []
+    assert row.status == QueueItemStatus.BLOCKED_ON_USER
+    assert row.session_id == "sess-1"
+    assert row.blocked_on_pr == _OR_5
+    assert row.stale_gate_detected_at is None
+    assert _reap_events() == []
+
+
+def test_operator_hold_on_the_same_explicit_ref_still_releases(
+    tmp_config_dir: Path,
+) -> None:
+    watch = _make_watched_pr(pr_number=5, repo="o/r", cross_repo=True)
+    released, row = _release_with([_dep_hold(_OR_5, session_id=None)], [watch])
+    assert released == ["DH-1"]
+    assert row.status == QueueItemStatus.PENDING
+
+
+def test_worker_park_with_explicit_ref_not_released_by_task_row_evidence(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The own slug was unresolved (or registration failed), so the registrar
+    has not vetted the ref: a matching MERGED task row must not release it."""
+    _auto_policy(monkeypatch)
+    released, row = _release_with(
+        [_dep_hold(_OR_5, session_id="sess-1"), _merged_task_row_evidence()], []
+    )
+    assert released == []
+    assert row.status == QueueItemStatus.BLOCKED_ON_USER
+    assert row.blocked_on_pr == _OR_5
+
+
+def test_vetted_worker_park_with_bare_ref_releases_under_reap_policy(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once the registrar normalised the ref to a bare same-repo ref, the
+    worker park obeys the reap policy as before."""
+    watch = _make_watched_pr(pr_number=5, repo="o/r", cross_repo=False)
+    released, row = _release_with([_dep_hold(5, session_id="sess-1")], [watch])
+    assert released == ["DH-1"]
+    assert row.status == QueueItemStatus.BLOCKED_ON_USER
+    assert row.stale_gate_detected_at is not None
+
+    _auto_policy(monkeypatch)
+    released, row = _release_with([_dep_hold(5, session_id="sess-1")], [watch])
     assert released == ["DH-1"]
     assert row.status == QueueItemStatus.PENDING
 

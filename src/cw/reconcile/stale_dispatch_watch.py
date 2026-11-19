@@ -127,7 +127,8 @@ def _unwatched_park_candidates(
     ``client is None`` watch (webhook/cli producer) is therefore not a match --
     it could name that number in an entirely different repo. This is purely an
     optimization that skips a pointless ``git`` call before a candidate reaches
-    registration; it is NOT the authority on whether a candidate can safely be
+    registration (it never skips a worker park's explicit ref, which always
+    needs vetting, D7); it is NOT the authority on whether a candidate can safely be
     registered. That authority is ``register_or_adopt_watched_pr``, which
     handles the case this filter cannot see -- a same-repo, same-PR-number
     watch already held by a DIFFERENT client (or by no client at all) --
@@ -145,7 +146,13 @@ def _unwatched_park_candidates(
         ref = task.blocked_on_pr
         if ref is None or not _is_stale_dispatch_park(task):
             continue
-        if (task.client, ref.key()) in already_watched:
+        # D7: a worker park's explicit ref is never deduped away, whatever
+        # watch already covers it (e.g. an operator's cross_repo watch on the
+        # same o/r#N): it must reach _vet_worker_ref so an off-repo ref is
+        # restamped and paged instead of keeping its id and being releasable.
+        # Operator holds and bare same-repo refs may still skip when watched.
+        unvetted_worker_ref = ref.repo is not None and task.session_id is not None
+        if not unvetted_worker_ref and (task.client, ref.key()) in already_watched:
             continue
         candidates.append((task, ref))
     return candidates

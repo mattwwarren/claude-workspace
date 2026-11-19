@@ -531,6 +531,76 @@ class TestWorkerRefBound:
         )
         assert event.correlation_id == "DH-1"
 
+    def test_other_repo_ref_is_refused_despite_an_existing_cross_repo_watch(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An operator's active cross_repo watch on the same o/r#N must not
+        dedupe the worker park away before it is vetted (D7)."""
+        operator_watch = WatchedPr(
+            pr_url="https://github.com/other/repo/pull/5",
+            repo="other/repo",
+            pr_number=5,
+            client="client-a",
+            source="dependency_hold",
+            cross_repo=True,
+        )
+        save_dev_queue(
+            DevQueueStore(tasks=[_dep_park(_OTHER_5)], watched_prs=[operator_watch])
+        )
+        _no_clients(monkeypatch)
+        calls = _stub_slug(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            assert register_stale_dispatch_watched_prs() == []
+            assert register_stale_dispatch_watched_prs() == []
+
+        row = _row()
+        assert row.blocked_on_pr is None
+        assert row.disposition == "awaiting_operator"
+        assert _is_variant_b_gate_task(row) is False
+        assert len(calls) == 1
+        [warning] = _refusal_warnings(caplog)
+        assert warning.args == ("DH-1", "client-a", "other/repo#5")
+        [event] = _refusal_pages()
+        assert event.payload["paused_status"] == "dependency_ref_not_own_repo"
+        assert [(w.repo, w.cross_repo) for w in load_dev_queue().watched_prs] == [
+            ("other/repo", True)
+        ]
+
+    def test_own_repo_ref_with_an_existing_watch_is_normalised_without_a_page(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        existing = WatchedPr(
+            pr_url="https://github.com/foo/bar/pull/5",
+            repo=_SLUG,
+            pr_number=5,
+            client="client-a",
+            source="dependency_hold",
+            cross_repo=True,
+        )
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[_dep_park(PrRef(repo=_SLUG, number=5))],
+                watched_prs=[existing],
+            )
+        )
+        _no_clients(monkeypatch)
+        _stub_slug(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            assert register_stale_dispatch_watched_prs() == ["DH-1"]
+
+        assert _row().blocked_on_pr == PrRef(number=5)
+        assert len(load_dev_queue().watched_prs) == 1
+        assert _refusal_warnings(caplog) == []
+        assert _refusal_pages() == []
+
     def test_unresolvable_own_slug_is_indeterminate(
         self,
         tmp_config_dir: Path,

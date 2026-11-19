@@ -310,6 +310,20 @@ def _scan_variant_b(
         pr = task.blocked_on_pr
         if pr is None:  # _is_variant_b_gate_task already excludes this
             continue
+        # D7 (#3634), fail closed: a dependency hold that is a worker park
+        # (session_id set) still carrying an explicit ref has not been vetted
+        # by the registrar yet (own-repo ref normalised to a bare ref, any
+        # other repo restamped to no id). Its ref is unvetted worker output, so
+        # no MERGED or CLOSED evidence may release it, whether that evidence
+        # came from an operator's watch or a task row's pr_url. Invariant: no
+        # writer clears session_id on a BLOCKED_ON_USER dependency_hold worker
+        # park before the registrar vets it, so a set session_id is a worker park.
+        if (
+            task.disposition == DEPENDENCY_HOLD_DISPOSITION
+            and pr.repo is not None
+            and task.session_id is not None
+        ):
+            continue
         merged = pr.key() in merged_by_client.get(task.client, set())
         closed = pr.key() in closed_by_client.get(task.client, set())
         if not merged and not closed:
@@ -346,7 +360,8 @@ def _scan_variant_b(
             # An operator hold (no session) releases under any policy.
             # Invariant: no writer clears session_id on a BLOCKED_ON_USER
             # dependency_hold worker park before the registrar vets it, so None
-            # here means an operator hold.
+            # here means an operator hold. A worker park still carrying an
+            # explicit ref never reaches here (skipped above, D7).
             operator_hold = task.session_id is None
             _release_variant_b(task, policy, operator_hold=operator_hold)
         else:
