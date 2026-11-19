@@ -216,6 +216,7 @@ class TestServerRead:
 
         assert (result.ok, result.warn) == (True, False)
         assert f"reachable (declared in {path}; {_UNVERIFIED})" in result.detail
+        assert "tools:" not in result.detail, "no tools declared, no tool line"
 
     @pytest.mark.parametrize("state", ["missing", "malformed"])
     def test_an_unreadable_config_is_unknown_with_the_caveat(
