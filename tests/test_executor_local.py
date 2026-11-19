@@ -5,6 +5,7 @@ RFC 0005 F3.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
@@ -51,9 +52,16 @@ from cw.models import (
 from cw.opencode_runner import stage_entry_marker
 from cw.result import EmitOutcome
 from cw.stage_preflight import PreflightReason
-from cw.ticket_snapshot import SnapshotContext, TicketSnapshot, normalize_ticket_id
+from cw.ticket_snapshot import (
+    SnapshotContext,
+    TicketSnapshot,
+    context_for_client,
+    normalize_ticket_id,
+)
 from cw.worktree import resolve_worker_tmpdir
+from tests._shared.bindings_builders import bindings_github_cli
 from tests._shared.git_repos import commit_tracked_file
+from tests._shared.outbox_builders import client_config
 from tests._shared.session_seeding import find_completed_session
 from tests._shared.stage_preflight_builders import (
     engine_client,
@@ -728,7 +736,8 @@ def _fetch_plan(
     ticket_id: str = "896",
 ) -> str | None:
     task = seeded_row(snapshot, ticket_id="896", client="test")
-    return SnapshotPlanFetcher(task, ctx, gh_login=login).fetch(ticket_id)
+    bound = replace(ctx, operator_login=login)
+    return SnapshotPlanFetcher(task, bound).fetch(ticket_id)
 
 
 def test_snapshot_plan_fetcher_github_returns_the_last_gh_login_plan(
@@ -784,11 +793,47 @@ def test_snapshot_plan_fetcher_is_bound_to_its_own_ticket(
 def test_snapshot_plan_fetcher_without_a_usable_snapshot_is_none(
     tmp_config_dir: Path,
 ) -> None:
-    ctx = SnapshotContext(github=True)
+    ctx = SnapshotContext(github=True, operator_login=_OPERATOR)
     no_digest = TicketTask(ticket_id="896", client="test", stage=Stage.IMPL)
     untrusted = no_digest.model_copy(update={"snapshot_digest": "0" * 64})
-    assert SnapshotPlanFetcher(no_digest, ctx, gh_login=_OPERATOR).fetch("896") is None
-    assert SnapshotPlanFetcher(untrusted, ctx, gh_login=_OPERATOR).fetch("896") is None
+    assert SnapshotPlanFetcher(no_digest, ctx).fetch("896") is None
+    assert SnapshotPlanFetcher(untrusted, ctx).fetch("896") is None
+
+
+def test_local_executor_context_recovers_plan_via_cached_login_without_override(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A GitHub client with no operator_github_login still resolves its plan.
+
+    The executor's context resolves the login (override, else cached gh login),
+    so the plan authored by the cached login binds instead of comparing to null.
+    """
+    monkeypatch.setattr("cw.operator_identity.cached_gh_login", lambda: _OPERATOR)
+    client = client_config(
+        tmp_path, bindings=bindings_github_cli(), tracker="github-issues"
+    )
+    assert client.operator_github_login is None
+    snapshot = _plan_snapshot()
+    task = seeded_row(snapshot, ticket_id="896", client="test")
+    ctx = context_for_client(client, tmp_path, resolve_login=True)
+    assert SnapshotPlanFetcher(task, ctx).fetch("896") == _PLAN_BODY
+
+
+def test_local_executor_context_operator_override_wins_over_cached_login(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With operator_github_login set, the override decides, not the cached login."""
+    monkeypatch.setattr("cw.operator_identity.cached_gh_login", lambda: "cached-login")
+    client = client_config(
+        tmp_path, bindings=bindings_github_cli(), tracker="github-issues"
+    ).model_copy(update={"operator_github_login": _OPERATOR})
+    task = seeded_row(_plan_snapshot(), ticket_id="896", client="test")
+    ctx = context_for_client(client, tmp_path, resolve_login=True)
+    assert ctx.operator_login == _OPERATOR
+    assert SnapshotPlanFetcher(task, ctx).fetch("896") == _PLAN_BODY
+    impostor = _plan_snapshot(author_id="cached-login")
+    impostor_task = seeded_row(impostor, ticket_id="896", client="test")
+    assert SnapshotPlanFetcher(impostor_task, ctx).fetch("896") is None
 
 
 def test_local_preflight_success_returns_preflight_ok(

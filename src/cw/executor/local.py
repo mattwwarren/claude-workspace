@@ -58,18 +58,17 @@ class SnapshotPlanFetcher:
     :class:`FakePlanFetcher` keep their ``fetch(ticket_id)`` shape.
     """
 
-    def __init__(
-        self, task: TicketTask, ctx: SnapshotContext, *, gh_login: str | None = None
-    ) -> None:
+    def __init__(self, task: TicketTask, ctx: SnapshotContext) -> None:
         self._task = task
         self._ctx = ctx
-        self._gh_login = gh_login if gh_login is not None else ctx.operator_login
 
     def fetch(self, ticket_id: str) -> str | None:
         if ticket_id != self._task.ticket_id:
             return None  # bound to one task; another ticket's plan never binds
         snapshot = read_for_stage(self._task, "impl")
-        return approved_plan_text(snapshot, self._ctx, gh_login=self._gh_login)
+        return approved_plan_text(
+            snapshot, self._ctx, gh_login=self._ctx.operator_login
+        )
 
 
 def _local_preflight(
@@ -118,10 +117,8 @@ def _local_preflight(
             retry_eligible=True,
             retry_delay_seconds=0,
         )
-    ctx = context_for_client(client, worktree, resolve_login=False)
-    plan_fetcher: PlanFetcher = SnapshotPlanFetcher(
-        task, ctx, gh_login=client.operator_github_login
-    )
+    ctx = context_for_client(client, worktree, resolve_login=True)
+    plan_fetcher: PlanFetcher = SnapshotPlanFetcher(task, ctx)
     task_message = build_task_message(
         worktree,
         ticket_id=task.ticket_id,

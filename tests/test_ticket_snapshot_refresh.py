@@ -28,6 +28,7 @@ from cw.ticket_snapshot import (
 )
 from cw.ticket_snapshot import _models as models
 from cw.ticket_snapshot import _refresh as refresh_mod
+from cw.ticket_snapshot._record import current_row
 from cw.ticket_snapshot._refresh import emit_degraded, is_github
 from tests._shared.outbox_builders import client_config
 from tests._shared.ticket_context import (
@@ -592,3 +593,21 @@ def test_read_current_is_none_without_a_row() -> None:
     stored = _row_snapshot()
     task = seeded_row(stored, seed=False)
     assert read_current(task) is None
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [OSError("queue file vanished"), ValueError("Expecting value: line 1")],
+    ids=["oserror", "valueerror"],
+)
+def test_current_row_degrades_to_none_on_queue_read_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, exc: Exception
+) -> None:
+    def _raise() -> object:
+        raise exc
+
+    monkeypatch.setattr("cw.ticket_snapshot._record.load_dev_queue", _raise)
+    with caplog.at_level(logging.WARNING, logger="cw.ticket_snapshot"):
+        assert current_row("896", "test") is None
+    assert type(exc).__name__ in caplog.text
+    assert str(exc) not in caplog.text

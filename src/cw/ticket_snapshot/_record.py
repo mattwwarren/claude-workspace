@@ -66,6 +66,17 @@ def current_row(ticket_id: str, client: str) -> TicketTask | None:
         return _find_ticket(load_dev_queue(), ticket_id, client, warn=False)
     except CwError:
         return None
+    except (OSError, ValueError) as exc:
+        # Never-raise contract: a queue-store read can fail with OSError or a
+        # JSON decode error (ValueError). Log the class only, never its text.
+        _log.warning(
+            "ticket snapshot current row unreadable; degrading to None"
+            " ticket_id=%s client=%s error=%s",
+            ticket_id,
+            client,
+            type(exc).__name__,
+        )
+        return None
 
 
 def _previous_snapshot(snapshot: TicketSnapshot) -> TicketSnapshot | None:
