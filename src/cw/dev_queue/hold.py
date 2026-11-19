@@ -21,8 +21,10 @@ registrar uses to vet a worker-supplied explicit ref (D7).
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
+from urllib.parse import urlsplit
 
 from cw.auto_dev_result import DEPENDENCY_UNMERGED_BLOCKER_REASON
 from cw.config import load_state, sessions_lock
@@ -72,6 +74,41 @@ class HoldResult:
     pr_repo: str | None = None
     previous_pr_repo: str | None = None
     via_ticket: str | None = None
+
+
+_GITHUB_HOST: Final = "github.com"
+_PULL_PATH_RE: Final = re.compile(r"/([^/\s]+)/([^/\s]+)/pull/([1-9][0-9]*)/?")
+
+
+def parse_github_pull_url(url: str) -> tuple[str, int] | None:
+    """Strictly parse ``(owner/repo, number)`` from a github.com pull url (#3634).
+
+    Unlike the unanchored :func:`cw.gh.parse_pr_url`, which finds a
+    ``github.com/o/r/pull/N`` fragment anywhere in a string, this accepts only
+    an ``http(s)`` url whose host is exactly ``github.com`` (no userinfo, no
+    port) and whose path is exactly ``/<owner>/<repo>/pull/<n>`` with an
+    optional trailing slash. A lookalike host, a fragment buried in another
+    url's path and ``.../pull/5abc`` all return ``None``. Used wherever a url
+    could arm a hold on a PR the operator never named.
+    """
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        return None
+    if (
+        parts.scheme not in ("https", "http")
+        or host != _GITHUB_HOST
+        or port is not None
+        or parts.username is not None
+        or parts.password is not None
+    ):
+        return None
+    match = _PULL_PATH_RE.fullmatch(parts.path)
+    if match is None:
+        return None
+    return f"{match.group(1)}/{match.group(2)}", int(match.group(3))
 
 
 def _pr_label(pr_url: str) -> str:
@@ -176,7 +213,7 @@ def resolve_ticket_pr(
             " hold on the PR number once it exists (--until-pr-merged)"
         )
         raise CwError(msg)
-    parsed = parse_pr_url(pr_url)
+    parsed = parse_github_pull_url(pr_url)
     ref = None if parsed is None else PrRef.parse(f"{parsed[0]}#{parsed[1]}")
     if ref is None:
         msg = (

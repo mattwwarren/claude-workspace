@@ -810,3 +810,77 @@ def test_until_ticket_merged_refusals(
     assert message in _norm(result.output)
     assert queue_row().status == QueueItemStatus.PENDING
     assert _watches() == []
+
+
+_LOOKALIKE_URLS = [
+    ("https://notgithub.com/other/repo/pull/5", "other/repo"),
+    ("https://github.com.evil.example/o/r/pull/5", "o/r"),
+    ("https://example.com/github.com/o/r/pull/5", "o/r"),
+    ("https://user@github.com/o/r/pull/5", "o/r"),
+    ("https://github.com:8443/o/r/pull/5", "o/r"),
+    ("https://github.com/o/r/pull/5abc", "o/r"),
+    ("https://github.com/o/r/pull/5/files", "o/r"),
+    ("https://github.com/o/r/issues/5", "o/r"),
+    ("ftp://github.com/o/r/pull/5", "o/r"),
+]
+
+
+@pytest.mark.parametrize(("url", "repo"), _LOOKALIKE_URLS)
+def test_until_ticket_merged_refuses_a_lookalike_recorded_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    repo_slug: None,
+    url: str,
+    repo: str,
+) -> None:
+    """The recorded url must be a real github.com pull url: a fragment of one
+    inside another url never arms a hold on the PR it would reconstruct to."""
+    install_acme_client(tmp_path, monkeypatch)
+    seed_queue([make_task(), _dep_row(pr_url=url)])
+    before = load_dev_queue().model_dump_json()
+    fake = (
+        FakeGhCli()
+        .install(monkeypatch)
+        .reply("pr", "view", stdout=gh_pr_view_json(repo, 5))
+    )
+
+    result = invoke_dev_queue(*_hold_args("--until-ticket-merged", "ACM-2"))
+
+    assert result.exit_code != 0
+    assert (
+        f"ticket ACM-2 in client acme records PR url {url},"
+        " which is not a github pull request url;"
+        " hold on the PR with --until-pr-merged"
+    ) in _norm(result.output)
+    assert fake.argvs() == []
+    assert load_dev_queue().model_dump_json() == before
+    assert _watches() == []
+    assert events_of(OrchestratorEventType.TICKET_HELD) == []
+
+
+@pytest.mark.parametrize(
+    "args",
+    [("--until-pr-merged", "o/r#9"), ("--until-pr-merged", "9")],
+)
+def test_hold_refuses_a_lookalike_url_returned_by_gh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    repo_slug: None,
+    args: tuple[str, ...],
+) -> None:
+    install_acme_client(tmp_path, monkeypatch)
+    seed_queue([make_task()])
+    before = load_dev_queue().model_dump_json()
+    reply = json.dumps(
+        {"state": "OPEN", "url": "https://notgithub.com/o/r/pull/9"}
+        if args[1] != "9"
+        else {"state": "OPEN", "url": "https://github.com.evil.example/foo/bar/pull/9"}
+    )
+    FakeGhCli().install(monkeypatch).reply("pr", "view", stdout=reply)
+
+    result = invoke_dev_queue("hold", ACME_TICKET, *args, "-c", ACME)
+
+    assert result.exit_code != 0
+    assert load_dev_queue().model_dump_json() == before
+    assert _watches() == []
+    assert events_of(OrchestratorEventType.TICKET_HELD) == []

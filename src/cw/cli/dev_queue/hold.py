@@ -26,6 +26,7 @@ from cw.dev_queue.hold import (
     check_holdable,
     hold_ticket,
     is_operator_hold_on,
+    parse_github_pull_url,
     record_hold_event,
     resolve_ticket_pr,
 )
@@ -37,7 +38,6 @@ from cw.gh import (
     _GH_PR_STATE_OPEN,
     fetch_pr_view,
     github_pr_url,
-    parse_pr_url,
 )
 from cw.models import WatchedPr
 from cw.models.enums import WATCHED_PR_SOURCE_DEPENDENCY_HOLD
@@ -123,7 +123,7 @@ def _check_open(view: dict[str, object] | None, ref: PrRef) -> dict[str, object]
 
 def _view_pr(view: dict[str, object]) -> tuple[str, int] | None:
     url = view.get("url")
-    return parse_pr_url(url) if isinstance(url, str) else None
+    return parse_github_pull_url(url) if isinstance(url, str) else None
 
 
 def _verify_dependency_pr(

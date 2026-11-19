@@ -24,7 +24,9 @@ from cw.dev_queue import (
 )
 from cw.dev_queue.hold import (
     is_operator_hold_on,
+    parse_github_pull_url,
     record_hold_event,
+    resolve_ticket_pr,
     restamp_unvetted_hold_ref,
 )
 from cw.dispatch.routing.stage_failure import (
@@ -653,3 +655,70 @@ class TestRestampUnvettedHoldRef:
 
         assert restamp_unvetted_hold_ref(ACME_TICKET, ACME, _OR_5, None)
         assert taken == ["dev_queue_lock"]
+
+
+class TestStrictPullUrl:
+    """#3634: the recorded url must be a github.com pull url, not a lookalike."""
+
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            ("https://github.com/o/r/pull/5", ("o/r", 5)),
+            ("http://github.com/o/r/pull/5/", ("o/r", 5)),
+            ("https://GitHub.com/Foo/Bar-x.y/pull/12", ("Foo/Bar-x.y", 12)),
+            ("https://github.com/o/r/pull/5?x=1#issuecomment-2", ("o/r", 5)),
+        ],
+    )
+    def test_accepts_a_real_pull_url(self, url: str, expected: tuple[str, int]) -> None:
+        assert parse_github_pull_url(url) == expected
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://notgithub.com/other/repo/pull/5",
+            "https://github.com.evil.example/o/r/pull/5",
+            "https://example.com/github.com/o/r/pull/5",
+            "https://evil.example/?u=https://github.com/o/r/pull/5",
+            "https://user@github.com/o/r/pull/5",
+            "https://user:pw@github.com/o/r/pull/5",
+            "https://github.com:8443/o/r/pull/5",
+            "https://github.com:notaport/o/r/pull/5",
+            "ftp://github.com/o/r/pull/5",
+            "github.com/o/r/pull/5",
+            "https://github.com/o/r/pull/5abc",
+            "https://github.com/o/r/pull/05",
+            "https://github.com/o/r/pull/0",
+            "https://github.com/o/r/pull/5/files",
+            "https://github.com/o/r/issues/5",
+            "https://github.com/o/pull/5",
+            "https://github.com//r/pull/5",
+            "",
+        ],
+    )
+    def test_rejects_a_lookalike_or_malformed_url(self, url: str) -> None:
+        assert parse_github_pull_url(url) is None
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://notgithub.com/other/repo/pull/5",
+            "https://github.com.evil.example/o/r/pull/5",
+            "https://example.com/github.com/o/r/pull/5",
+            "https://github.com/o/r/pull/5abc",
+        ],
+    )
+    def test_resolve_ticket_pr_refuses_a_lookalike(self, url: str) -> None:
+        dep = make_task(ticket_id="ACM-2", pr_url=url)
+        store = DevQueueStore(tasks=[make_task(), dep])
+
+        with pytest.raises(CwError, match="is not a github pull request url"):
+            resolve_ticket_pr(store, "ACM-2", ACME_TICKET, ACME)
+
+    def test_resolve_ticket_pr_accepts_a_real_url(self) -> None:
+        dep = make_task(ticket_id="ACM-2", pr_url="https://github.com/o/r/pull/5")
+        store = DevQueueStore(tasks=[make_task(), dep])
+
+        assert resolve_ticket_pr(store, "ACM-2", ACME_TICKET, ACME) == (
+            PrRef(repo="o/r", number=5),
+            "ACM-2",
+        )
