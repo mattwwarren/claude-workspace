@@ -37,20 +37,23 @@ TurnStatus = Literal["ok", "already_present", "tool_unavailable", "failed"]
 
 #: Every status word, in declaration order.
 STATUS_WORDS: tuple[TurnStatus, ...] = get_args(TurnStatus)
-#: Only the courier reports this; the legacy single-turn prompt never names it.
-ALREADY_PRESENT: Final[TurnStatus] = "already_present"
+#: Named status constants keep the vocabulary derived from ``TurnStatus``.
+STATUS_OK: Final[TurnStatus] = STATUS_WORDS[0]
+STATUS_ALREADY_PRESENT: Final[TurnStatus] = STATUS_WORDS[1]
+STATUS_TOOL_UNAVAILABLE: Final[TurnStatus] = STATUS_WORDS[2]
+STATUS_FAILED: Final[TurnStatus] = STATUS_WORDS[3]
 _LEGACY_STATUSES: tuple[TurnStatus, ...] = tuple(
-    status for status in STATUS_WORDS if status != ALREADY_PRESENT
+    status for status in STATUS_WORDS if status != STATUS_ALREADY_PRESENT
 )
 
 # The meaning of each status, in the post turn's words. The status word itself is
 # taken from the typed key, so the vocabulary lives only in ``TurnStatus``; the
 # rendered clause is byte-identical to the legacy prompt's text.
 _STATUS_MEANINGS: dict[TurnStatus, str] = {
-    "ok": "when every part was posted",
-    "already_present": "when every part is already on the ticket",
-    "tool_unavailable": "when the tools are not available to you",
-    "failed": "otherwise",
+    STATUS_OK: "when every part was posted",
+    STATUS_ALREADY_PRESENT: "when every part is already on the ticket",
+    STATUS_TOOL_UNAVAILABLE: "when the tools are not available to you",
+    STATUS_FAILED: "otherwise",
 }
 _STATUS_CLAUSES: dict[TurnStatus, str] = {
     status: f'"{status}" {_STATUS_MEANINGS[status]}' for status in STATUS_WORDS
@@ -151,7 +154,7 @@ reword, summarise, reformat, translate or add to it.
 as readback_head and readback_tail. Do the same for each part you found in rule 1.
 4. Call no other tool, post to no other ticket, and never re-post a part that \
 was found or created, even after an error.
-5. If you cannot see every existing comment, report "failed" and post nothing.
+5. If you cannot see every existing comment, report "{failed}" and post nothing.
 6. Echo the ticket id exactly as given ({ticket}) in ticket_id.
 7. Reply with only the JSON object the output schema describes: status {status}; \
 detail says why in one sentence; parts lists one entry per part in part order \
@@ -172,19 +175,19 @@ Marker lines, one per part, in part order:
 
 Rules:
 1. List every existing comment on ticket {ticket} with `{list}`, reading every \
-page to the end. If you cannot see every comment, report "failed".
+page to the end. If you cannot see every comment, report "{failed}".
 2. For each marker line that an existing comment contains, record that comment \
 as a part: its 1-based index in the marker list above, its comment id, its URL, \
 and readback_head and readback_tail (the first and last {window} characters of \
 its body, verbatim).
-3. Report "already_present" only when every marker line is found, with a part \
-for each; otherwise report "ok" with parts as an empty list.
+3. Report "{already_present}" only when every marker line is found, with a part \
+for each; otherwise report "{ok}" with parts as an empty list.
 4. Call no other tool, and never create, edit or delete a comment.
 5. Echo the ticket id exactly as given ({ticket}) in ticket_id.
 6. Reply with only the JSON object the output schema describes: status \
-"already_present" when every marker line is found, "ok" otherwise, \
-"tool_unavailable" when the tools are not available to you, "failed" when you \
-cannot see every comment; detail says why in one sentence.
+"{already_present}" when every marker line is found, "{ok}" otherwise, \
+"{tool_unavailable}" when the tools are not available to you, "{failed}" when \
+you cannot see every comment; detail says why in one sentence.
 """
 
 _SNAPSHOT_INSTRUCTIONS = """\
@@ -201,12 +204,12 @@ when there is none) and its label names, sorted.
 end. For each comment, report its id together with the marker lines from the \
 list above that this one comment itself contains (an empty list when it has \
 none). Never move a marker line to another comment. If you cannot see every \
-comment, report "failed".
+comment, report "{failed}".
 3. Call no other tool, and never create, edit or delete anything.
 4. Echo the ticket id exactly as given ({ticket}) in ticket_id.
-5. Reply with only the JSON object the output schema describes: status "ok" \
-when you read everything, "tool_unavailable" when the tools are not available \
-to you, "failed" otherwise; detail says why in one sentence; comments (each \
+5. Reply with only the JSON object the output schema describes: status "{ok}" \
+when you read everything, "{tool_unavailable}" when the tools are not available \
+to you, "{failed}" otherwise; detail says why in one sentence; comments (each \
 with its id and marker_lines), state, assignee and labels as described above.
 """
 
@@ -280,6 +283,7 @@ def render_post_prompt(
         noun=_noun(app),
         window=READBACK_WINDOW,
         status=_status_clause(STATUS_WORDS),
+        failed=STATUS_FAILED,
         markers=_marker_list(marker_lines),
     )
     return head + "\n" + _blocks(parts) + "\n"
@@ -302,6 +306,10 @@ def render_verify_prompt(
         list=list_tool,
         markers=_marker_list(marker_lines),
         window=READBACK_WINDOW,
+        already_present=STATUS_ALREADY_PRESENT,
+        ok=STATUS_OK,
+        tool_unavailable=STATUS_TOOL_UNAVAILABLE,
+        failed=STATUS_FAILED,
     )
 
 
@@ -325,4 +333,7 @@ def render_snapshot_prompt(
         get=get_tool,
         list=list_tool,
         markers=_marker_list(marker_lines),
+        ok=STATUS_OK,
+        tool_unavailable=STATUS_TOOL_UNAVAILABLE,
+        failed=STATUS_FAILED,
     )

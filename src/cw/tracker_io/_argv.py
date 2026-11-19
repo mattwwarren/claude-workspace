@@ -116,15 +116,20 @@ def comment_tools_for(
     return create, listing
 
 
-def _disable_others(server: str, other_servers: Sequence[str]) -> list[str]:
-    """``-c mcp_servers.<other>.enabled=false`` for each other declared server.
+def _disable_others(
+    server: str,
+    other_servers: Sequence[str],
+    *,
+    disable_target: bool = False,
+) -> list[str]:
+    """Disable each declared MCP server outside the app's active surface.
 
     A declared name that ``-c`` cannot address as one key segment (a dot, a
     space) is a configuration failure: continuing would leave an MCP server
     enabled outside the turn's explicit allowlist.
     """
     argv: list[str] = []
-    seen = {server}
+    seen = set() if disable_target else {server}
     for other in other_servers:
         if other in seen:
             continue
@@ -225,7 +230,11 @@ def build_tracker_io_argv(
         *_AUDIT_ARGV_FLAGS,
         *_reasoning_effort_argv(TURN_REASONING_EFFORT),
         *scoped,
-        *_disable_others(server, other_servers),
+        *_disable_others(
+            server,
+            other_servers,
+            disable_target=narrowing is not ToolNarrowing.PER_TOOL,
+        ),
         "--output-schema",
         str(schema_path),
         "-o",

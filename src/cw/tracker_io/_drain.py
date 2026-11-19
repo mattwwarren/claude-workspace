@@ -34,6 +34,9 @@ from cw.tracker_io._argv import (
 from cw.tracker_io._dedup import bodies, expected_markers
 from cw.tracker_io._prompt import (
     RESULT_SCHEMA,
+    STATUS_ALREADY_PRESENT,
+    STATUS_OK,
+    STATUS_TOOL_UNAVAILABLE,
     parse_turn_result,
     render_post_prompt,
     render_snapshot_prompt,
@@ -181,7 +184,7 @@ def _settle(
             CourierDisposition.DELIVERED,
             None,
             already_present=already_present,
-            posted=outcome.posted,
+            posted=() if already_present else outcome.posted,
             turns=turns,
             layers_unreadable=layers,
         )
@@ -252,10 +255,13 @@ def _judge_verify(
     if refusal is not None:
         return refusal, False
     result = parse_turn_result(run.output_file_content)
-    if result is not None and result.status == "ok":
+    if result is not None and result.status == STATUS_OK:
         return None, False
     outcome, _ = _judge_result(run, ticket_id, emitted)
-    return outcome, result is not None and result.status == "already_present"
+    return (
+        outcome,
+        result is not None and result.status == STATUS_ALREADY_PRESENT,
+    )
 
 
 def _read_snapshot(
@@ -291,11 +297,11 @@ def _read_snapshot(
         return _SnapshotRead(
             None, _refused(TrackerIoReason.RESULT_UNPARSEABLE, total), turn
         )
-    if snapshot.status == "tool_unavailable":
+    if snapshot.status == STATUS_TOOL_UNAVAILABLE:
         return _SnapshotRead(
             None, _refused(TrackerIoReason.TOOL_UNAVAILABLE, total), turn
         )
-    if snapshot.status != "ok":
+    if snapshot.status != STATUS_OK:
         return _SnapshotRead(
             None, _refused(TrackerIoReason.TURN_REPORTED_FAILURE, total), turn
         )
@@ -352,7 +358,7 @@ def _post_once(
     return _settle(
         outcome,
         turns=turns,
-        already_present=result is not None and result.status == "already_present",
+        already_present=result is not None and result.status == STATUS_ALREADY_PRESENT,
     )
 
 
@@ -421,11 +427,12 @@ def _post_with_delta(
             posted=outcome.posted,
             turns=turns,
         )
+    already_present = result is not None and result.status == STATUS_ALREADY_PRESENT
     return CourierResult(
         CourierDisposition.DELIVERED,
         None,
-        already_present=result is not None and result.status == "already_present",
-        posted=outcome.posted,
+        already_present=already_present,
+        posted=() if already_present else outcome.posted,
         turns=turns,
     )
 
