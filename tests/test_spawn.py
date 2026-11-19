@@ -5017,17 +5017,17 @@ class TestCwContextWorkspacePath:
         assert "workspace_path" in context
         assert context["workspace_path"] is None
 
-    def test_schema_version_is_21(
+    def test_schema_version_is_22(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """cw-context.json schema_version is current (21 after the
-        ``bindings_block`` addition, #3703)."""
+        """cw-context.json schema_version is current (22 after the
+        ``regress_review_findings`` addition, #3694)."""
         from cw.spawn import CW_CONTEXT_SCHEMA_VERSION, spawn_create_impl
 
-        assert CW_CONTEXT_SCHEMA_VERSION == 21
+        assert CW_CONTEXT_SCHEMA_VERSION == 22
 
         client = _make_client(tmp_path, name="schema-v2-client")
         daemon = FakeNativeDaemonClient()
@@ -5042,7 +5042,7 @@ class TestCwContextWorkspacePath:
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
-        assert context["schema_version"] == 21
+        assert context["schema_version"] == 22
         assert context["bindings_block"].count(BINDINGS_BEGIN) == 1
 
 
