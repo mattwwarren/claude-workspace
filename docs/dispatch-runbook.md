@@ -226,7 +226,13 @@ park and resume (`requeue`, `--reset-attempts`). It is cleared when the row
 leaves IMPL by any route (advance to review, salvage stamp,
 `requeue --stage <non-impl>`, regress to PLAN), whatever set it. A later IMPL
 entry (a finalize self-heal regress, or `requeue --stage impl --regress` after
-a review MUST_FIX) therefore starts with no feedback. To repair the PR then,
+a review MUST_FIX) therefore starts with no feedback. The one exception is a
+REVIEW regress into IMPL (#3694): the blocking REVIEW verdict's MUST_FIX findings
+are delivered from the worktree's `.claude/review-verdict.json`, with or without a
+PR, for claude-native and codex IMPL runs only; opencode and local receive nothing
+(RFC 0018 D-4). Operator direction and a claude-native REVIEW park's verdict are
+not delivered. A fix outside the plan's files still needs
+`cw dev-queue approve <T> -c <C> --scope-drift <paths>`. To repair the PR then,
 attach a fresh head-pinned file with `requeue --stage impl
 --review-feedback-file`. That applies to adopted rows too: they have no plan,
 so without feedback Stage 2 parks `plan_missing`; and if the row's own PR is
@@ -3583,7 +3589,10 @@ to `impl`) is a regress: since #2692 it is inferred without `--regress` and
 announced on stdout before the `Requeued` line, with the new
 `regress_attempts` and the evidence the regress cleared (into `plan`: the plan
 approval; into `review`: any recorded MUST_FIX override). `--regress` is still
-accepted and makes the regress explicit. A ticket that is already `PENDING`
+accepted and makes the regress explicit.
+A REVIEW or FINALIZE regress into IMPL also reports `regress_review_findings:
+delivered` or `withheld (<reason>)` on stdout (#3694), so an operator sees whether
+the findings will reach the IMPL run. A ticket that is already `PENDING`
 (no `--stage`, or its own stage) is an idempotent no-op: `requeue` exits 0,
 prints `... is already PENDING at <stage>; nothing to requeue.`, stops and
 closes nothing, records no event, and names any daemon-live session for the
