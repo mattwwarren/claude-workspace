@@ -333,6 +333,72 @@ def _classify(
     )
 
 
+@dataclass(frozen=True)
+class TurnLaunch:
+    """One launched turn: the runner result, or the refusal that stopped it.
+
+    *layers_unreadable* lists the unreadable config layers behind a pre-launch
+    refusal (R22). A refusal before the runner is called costs no turn.
+    """
+
+    run: CodexRunResult | None
+    refusal: TrackerIoOutcome | None
+    layers_unreadable: tuple[str, ...] = ()
+
+    @property
+    def launched(self) -> int:
+        """1 when the runner ran (a counted turn), else 0."""
+        return 0 if self.run is None else 1
+
+
+def launch_turn(
+    runner: CodexRunner,
+    *,
+    schema: object,
+    prompt: str,
+    server: str,
+    allowlist: tuple[str, ...],
+    write_capable: bool,
+    parts_total: int,
+    narrowing: ToolNarrowing = ToolNarrowing.PER_TOOL,
+) -> TurnLaunch:
+    """Run one tracker-IO turn in a fresh scratch directory, always removed.
+
+    The one launch site for the legacy turn and the courier (O2b): argv, the
+    scratch-scoped ``other_servers`` disable list, the runner call and the
+    unavailable-codex mapping live here only.
+    """
+    try:
+        with turn_scratch(schema) as scratch:
+            try:
+                argv = build_tracker_io_argv(
+                    server=server,
+                    tools=allowlist,
+                    schema_path=scratch / _SCHEMA_NAME,
+                    output_path=scratch / _RESULT_NAME,
+                    other_servers=other_servers_for(
+                        scratch, write_capable=write_capable
+                    ),
+                    narrowing=narrowing,
+                )
+            except TrackerIoLayerError as exc:
+                _log.warning("tracker_io_layer_refused: %s", exc)
+                return TurnLaunch(None, _refused(exc.reason, parts_total), exc.paths)
+            except TrackerIoConfigError as exc:
+                _log.warning("tracker_io_config_refused: %s", exc)
+                return TurnLaunch(None, _refused(exc.reason, parts_total))
+            try:
+                run = runner.run(scratch, argv, TURN_TIMEOUT_SECONDS, stdin=prompt)
+            except OSError:
+                _log.warning("tracker_io_codex_unavailable", exc_info=True)
+                return TurnLaunch(
+                    None, _refused(TrackerIoReason.CODEX_UNAVAILABLE, parts_total)
+                )
+            return TurnLaunch(run, None)
+    except TrackerIoConfigError as exc:
+        return TurnLaunch(None, _refused(exc.reason, parts_total))
+
+
 def _launch(
     ticket_id: str,
     parts: tuple[str, ...],
@@ -341,31 +407,19 @@ def _launch(
     tools: tuple[str, str],
     context: TrackerIoContext,
 ) -> TrackerIoOutcome:
-    """Run the legacy turn once in a fresh scratch directory, always removed."""
-    prompt = render_prompt(ticket_id, parts, server=server, tools=tools)
-    try:
-        with turn_scratch(RESULT_SCHEMA) as scratch:
-            try:
-                argv = build_tracker_io_argv(
-                    server=server,
-                    tools=tools,
-                    schema_path=scratch / _SCHEMA_NAME,
-                    output_path=scratch / _RESULT_NAME,
-                    other_servers=other_servers_for(scratch, write_capable=True),
-                )
-            except TrackerIoConfigError as exc:
-                _log.warning("tracker_io_config_refused: %s", exc)
-                return _refused(exc.reason, len(parts))
-            try:
-                run = context.runner.run(
-                    scratch, argv, TURN_TIMEOUT_SECONDS, stdin=prompt
-                )
-            except OSError:
-                _log.warning("tracker_io_codex_unavailable", exc_info=True)
-                return _refused(TrackerIoReason.CODEX_UNAVAILABLE, len(parts))
-            return _classify(run, ticket_id, parts)
-    except TrackerIoConfigError as exc:
-        return _refused(exc.reason, len(parts))
+    """Run the legacy turn once; the launch itself is :func:`launch_turn`."""
+    launch = launch_turn(
+        context.runner,
+        schema=RESULT_SCHEMA,
+        prompt=render_prompt(ticket_id, parts, server=server, tools=tools),
+        server=server,
+        allowlist=tools,
+        write_capable=True,
+        parts_total=len(parts),
+    )
+    if launch.run is None:
+        return launch.refusal or _refused(TrackerIoReason.CODEX_UNAVAILABLE, len(parts))
+    return _classify(launch.run, ticket_id, parts)
 
 
 def post_parts_via_turn(

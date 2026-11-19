@@ -28,9 +28,7 @@ from typing import TYPE_CHECKING
 from cw.models.capabilities import ToolNarrowing
 from cw.outbox_needs_you import UnreachableCause
 from cw.tracker_io._argv import (
-    TrackerIoConfigError,
     TurnKind,
-    build_tracker_io_argv,
     turn_tools,
 )
 from cw.tracker_io._dedup import bodies, expected_markers
@@ -45,19 +43,16 @@ from cw.tracker_io._snapshot_check import (
     SNAPSHOT_SCHEMA,
     IssueSnapshot,
     compare_snapshots,
+    markers_present,
     parse_snapshot,
 )
 from cw.tracker_io._turn import (
-    _RESULT_NAME,
-    _SCHEMA_NAME,
-    TURN_TIMEOUT_SECONDS,
-    TrackerIoLayerError,
     TrackerIoOutcome,
+    TurnLaunch,
     _refused,
     courier_preflight,
-    other_servers_for,
+    launch_turn,
     transport_refusal,
-    turn_scratch,
 )
 from cw.tracker_io._verify import (
     PostedComment,
@@ -125,26 +120,12 @@ class CourierResult:
 
 
 @dataclass(frozen=True)
-class _Turn:
-    """One turn's launch: the runner result, or the refusal that stopped it."""
-
-    run: CodexRunResult | None
-    refusal: TrackerIoOutcome | None
-    layers_unreadable: tuple[str, ...] = ()
-
-    @property
-    def launched(self) -> int:
-        """1 when the runner ran (a counted turn), else 0."""
-        return 0 if self.run is None else 1
-
-
-@dataclass(frozen=True)
 class _SnapshotRead:
     """A snapshot turn's read: the parsed snapshot, or why it could not be used."""
 
     snapshot: IssueSnapshot | None
     refusal: TrackerIoOutcome | None
-    turn: _Turn
+    turn: TurnLaunch
 
 
 def _disposition(outcome: TrackerIoOutcome) -> CourierDisposition:
@@ -222,41 +203,22 @@ def _run_turn(
     allowlist: tuple[str, ...],
     write_capable: bool,
     parts_total: int,
-) -> _Turn:
-    """Launch one courier turn in a fresh scratch directory (the only run site).
+) -> TurnLaunch:
+    """Launch one courier turn through the shared :func:`launch_turn`.
 
-    A refusal before the runner is called (unreadable layer, bad argv, scratch)
-    is returned as ``refusal`` and is not counted as a turn.
+    The only courier run site. A refusal before the runner is called is not
+    counted as a turn.
     """
-    try:
-        with turn_scratch(schema) as scratch:
-            try:
-                argv = build_tracker_io_argv(
-                    server=target.server,
-                    tools=allowlist,
-                    schema_path=scratch / _SCHEMA_NAME,
-                    output_path=scratch / _RESULT_NAME,
-                    other_servers=other_servers_for(
-                        scratch, write_capable=write_capable
-                    ),
-                    narrowing=target.narrowing,
-                )
-            except TrackerIoLayerError as exc:
-                return _Turn(None, _refused(exc.reason, parts_total), exc.paths)
-            except TrackerIoConfigError as exc:
-                return _Turn(None, _refused(exc.reason, parts_total))
-            try:
-                run = context.runner.run(
-                    scratch, argv, TURN_TIMEOUT_SECONDS, stdin=prompt
-                )
-            except OSError:
-                _log.warning("tracker_io_codex_unavailable", exc_info=True)
-                return _Turn(
-                    None, _refused(TrackerIoReason.CODEX_UNAVAILABLE, parts_total)
-                )
-            return _Turn(run, None)
-    except TrackerIoConfigError as exc:
-        return _Turn(None, _refused(exc.reason, parts_total))
+    return launch_turn(
+        context.runner,
+        schema=schema,
+        prompt=prompt,
+        server=target.server,
+        allowlist=allowlist,
+        write_capable=write_capable,
+        parts_total=parts_total,
+        narrowing=target.narrowing,
+    )
 
 
 def _judge_result(
@@ -346,7 +308,7 @@ def _post_turn(
     ticket_id: str,
     emitted: Sequence[str],
     markers: Sequence[str],
-) -> _Turn:
+) -> TurnLaunch:
     return _run_turn(
         context,
         target,
@@ -416,7 +378,7 @@ def _post_with_delta(
             turns=turns,
             layers=before.turn.layers_unreadable,
         )
-    expected = expected_markers(parts, before.snapshot.markers)
+    expected = expected_markers(parts, markers_present(before.snapshot))
     post = _post_turn(context, target, ticket_id, emitted, markers)
     turns += post.launched
     if post.run is None:

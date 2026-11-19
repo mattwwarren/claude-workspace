@@ -3,8 +3,11 @@
 A plugin app's full tool surface is not narrowed by cw, so the snapshot delta
 is the guard: a snapshot of the one ticket is read before and after the post
 turn, and only the expected marker comments may appear between them. The
-comparator is pure; the reasons it returns are fixed strings so a failed delta
-is diagnosable from the event alone (R8, R24).
+comments are paired with the marker lines each one carries, so a new comment
+is accepted only when it carries exactly one expected marker, and an existing
+comment may not gain or lose one. The comparator is pure; the reasons it
+returns are fixed strings so a failed delta is diagnosable from the event
+alone (R8, R24).
 """
 
 from __future__ import annotations
@@ -18,19 +21,27 @@ from cw.openai_strict_schema import to_openai_strict_schema
 from cw.tracker_io._prompt import TurnStatus
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
+
+
+class SnapshotComment(BaseModel):
+    """One comment on the ticket and the marker lines it itself contains."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    id: str
+    marker_lines: tuple[str, ...]
 
 
 class IssueSnapshot(BaseModel):
-    """One read of a ticket: its comments, the markers among them, and its fields."""
+    """One read of a ticket: its comments with their markers, and its fields."""
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     status: TurnStatus
     detail: str
     ticket_id: str
-    comment_ids: tuple[str, ...]
-    markers: tuple[str, ...]
+    comments: tuple[SnapshotComment, ...]
     state: str
     assignee: str
     labels: tuple[str, ...]
@@ -76,83 +87,110 @@ def _field_reason(before: IssueSnapshot, after: IssueSnapshot) -> str | None:
     return None
 
 
+def markers_present(snapshot: IssueSnapshot) -> tuple[str, ...]:
+    """Every marker line on the ticket, across all its comments."""
+    return tuple(line for comment in snapshot.comments for line in comment.marker_lines)
+
+
+def _by_id(snapshot: IssueSnapshot) -> dict[str, tuple[str, ...]]:
+    """Comment id to its marker lines. Callers reject duplicate ids first."""
+    return {comment.id: comment.marker_lines for comment in snapshot.comments}
+
+
 def _duplicate_reason(snapshot: IssueSnapshot, label: str) -> str | None:
     """A read may not repeat a comment id or a marker line: that is inconsistent."""
-    dup_ids = sorted(k for k, n in Counter(snapshot.comment_ids).items() if n > 1)
+    ids = Counter(comment.id for comment in snapshot.comments)
+    dup_ids = sorted(k for k, n in ids.items() if n > 1)
     if dup_ids:
         return f"{label} snapshot repeats comment ids: {dup_ids}"
-    dup_markers = sorted(k for k, n in Counter(snapshot.markers).items() if n > 1)
+    lines = Counter(
+        line for comment in snapshot.comments for line in comment.marker_lines
+    )
+    dup_markers = sorted(k for k, n in lines.items() if n > 1)
     if dup_markers:
         return f"{label} snapshot repeats marker lines: {dup_markers}"
     return None
 
 
-def _multiset_removed(before: Counter[str], after: Counter[str]) -> list[str]:
-    """Items present before the turn and absent (by count) after it."""
-    return sorted((before - after).keys())
+def _removed_reason(
+    before: Mapping[str, tuple[str, ...]], after: Mapping[str, tuple[str, ...]]
+) -> str | None:
+    """No comment the turn started with may disappear, nor lose a marker line."""
+    removed_ids = sorted(cid for cid in before if cid not in after)
+    if removed_ids:
+        return f"comment ids removed: {removed_ids}"
+    lost = sorted(
+        line
+        for cid, lines in before.items()
+        for line in lines
+        if line not in after[cid]
+    )
+    if lost:
+        return f"marker lines removed: {lost}"
+    return None
+
+
+def _existing_reason(
+    before: Mapping[str, tuple[str, ...]], after: Mapping[str, tuple[str, ...]]
+) -> str | None:
+    """A comment present before the turn may not gain a marker line in it."""
+    gained = sorted(
+        line
+        for cid, lines in after.items()
+        if cid in before
+        for line in lines
+        if line not in before[cid]
+    )
+    if gained:
+        return f"marker lines added to an existing comment: {gained}"
+    return None
+
+
+def _pairing_reason(
+    before: Mapping[str, tuple[str, ...]],
+    after: Mapping[str, tuple[str, ...]],
+    expected_markers: Sequence[str],
+) -> str | None:
+    """Each new comment carries exactly one expected marker; each expected once."""
+    expected = set(expected_markers)
+    if len(expected_markers) != len(expected):
+        return "expected marker lines repeat: the turn expects each marker once"
+    carried: Counter[str] = Counter()
+    for cid, lines in after.items():
+        if cid in before:
+            continue
+        if len(lines) != 1:
+            return f"new comment {cid!r} carries {len(lines)} marker lines, expected 1"
+        (line,) = lines
+        if line not in expected:
+            return f"unexpected marker line appeared: {line!r}"
+        carried[line] += 1
+    missing = sorted(expected - set(carried))
+    if missing:
+        return f"expected marker lines missing after the turn: {missing}"
+    return None
 
 
 def _delta_reason(
     before: IssueSnapshot, after: IssueSnapshot, expected_markers: Sequence[str]
 ) -> str | None:
-    """Only the expected markers, one new comment id each, may appear.
+    """Only the expected markers, each on one new comment, may appear.
 
-    Comparison is by multiset count, never by set: a set collapses repeats and
-    hides a removal or an extra copy. Duplicates within a single read are
-    rejected first, so the counts below are over distinct per-read values.
+    Duplicates within a single read are rejected first. The comparison is by
+    comment id and by the marker lines each comment carries, so an edit that
+    adds a marker to an existing comment is caught even when the new comment
+    count still matches.
     """
     for snapshot, label in ((before, "before"), (after, "after")):
         duplicate = _duplicate_reason(snapshot, label)
         if duplicate is not None:
             return duplicate
+    old, new = _by_id(before), _by_id(after)
     return (
-        _removed_reason(before, after)
-        or _marker_reason(before, after, expected_markers)
-        or _new_id_reason(before, after, expected_markers)
+        _removed_reason(old, new)
+        or _existing_reason(old, new)
+        or _pairing_reason(old, new, expected_markers)
     )
-
-
-def _removed_reason(before: IssueSnapshot, after: IssueSnapshot) -> str | None:
-    """No comment id or marker line the turn started with may disappear."""
-    removed_ids = _multiset_removed(
-        Counter(before.comment_ids), Counter(after.comment_ids)
-    )
-    if removed_ids:
-        return f"comment ids removed: {removed_ids}"
-    removed_markers = _multiset_removed(Counter(before.markers), Counter(after.markers))
-    if removed_markers:
-        return f"marker lines removed: {removed_markers}"
-    return None
-
-
-def _marker_reason(
-    before: IssueSnapshot, after: IssueSnapshot, expected_markers: Sequence[str]
-) -> str | None:
-    """The new marker lines are exactly the expected set, each expected once."""
-    expected = set(expected_markers)
-    new_markers = set(after.markers) - set(before.markers)
-    missing = expected - new_markers
-    if missing:
-        return f"expected marker lines missing after the turn: {sorted(missing)}"
-    unexpected = new_markers - expected
-    if unexpected:
-        return f"unexpected marker lines appeared: {sorted(unexpected)}"
-    if len(expected_markers) != len(expected):
-        return "expected marker lines repeat: the turn expects each marker once"
-    return None
-
-
-def _new_id_reason(
-    before: IssueSnapshot, after: IssueSnapshot, expected_markers: Sequence[str]
-) -> str | None:
-    """Exactly one new comment id per expected marker line."""
-    new_ids = Counter(after.comment_ids) - Counter(before.comment_ids)
-    added = sum(new_ids.values())
-    if added != len(expected_markers):
-        return (
-            f"{added} new comment ids for {len(expected_markers)} expected marker lines"
-        )
-    return None
 
 
 def compare_snapshots(
@@ -164,10 +202,10 @@ def compare_snapshots(
 ) -> str | None:
     """``None`` when the delta is exactly *expected_markers*; else a reason.
 
-    Accepted: one new comment id per expected marker, the expected markers
-    newly present, and the state, assignee and sorted labels unchanged. Any
-    removed comment or marker, any unexpected new marker or comment, or a
-    changed field is rejected with its own reason.
+    Accepted: each expected marker on exactly one new comment, nothing removed,
+    no existing comment gaining a marker, and the state, assignee and sorted
+    labels unchanged. Any other new comment, or a changed field, is rejected
+    with its own reason.
     """
     return (
         _identity_reason(before, after, ticket_id)

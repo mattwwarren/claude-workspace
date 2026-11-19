@@ -63,8 +63,7 @@ def _parts(*texts: str) -> list[CourierPart]:
 def _snapshot(
     *,
     status: str = "ok",
-    comment_ids: list[str] | None = None,
-    markers: list[str] | None = None,
+    comments: list[tuple[str, list[str]]] | None = None,
     state: str = "Todo",
     assignee: str = "",
     labels: list[str] | None = None,
@@ -74,8 +73,9 @@ def _snapshot(
             "status": status,
             "detail": "",
             "ticket_id": _TICKET,
-            "comment_ids": comment_ids or [],
-            "markers": markers or [],
+            "comments": [
+                {"id": cid, "marker_lines": lines} for cid, lines in comments or []
+            ],
             "state": state,
             "assignee": assignee,
             "labels": labels or [],
@@ -239,14 +239,14 @@ class TestPluginAppPerServer:
         emitted = bodies(parts, operator_authored=False)
         runner = (
             ScriptedCodexRunner()
-            .add(stdin_contains("snapshot turn"), _run(_snapshot(markers=[])), times=1)
+            .add(stdin_contains("snapshot turn"), _run(_snapshot()), times=1)
             .add(
                 stdin_contains("post turn"),
                 _run(tracker_io_turn_result(_TICKET, emitted)),
             )
             .add(
                 stdin_contains("snapshot turn"),
-                _run(_snapshot(comment_ids=["c1"], markers=[_LINE_1])),
+                _run(_snapshot(comments=[("c1", [_LINE_1])])),
             )
         )
 
@@ -278,7 +278,7 @@ class TestPluginAppPerServer:
             )
             .add(
                 stdin_contains("snapshot turn"),
-                _run(_snapshot(state="Done", comment_ids=["c1"], markers=[_LINE_1])),
+                _run(_snapshot(state="Done", comments=[("c1", [_LINE_1])])),
             )
         )
 
@@ -303,7 +303,7 @@ class TestPluginAppPerServer:
             )
             .add(
                 stdin_contains("snapshot turn"),
-                _run(_snapshot(comment_ids=["c1"], markers=[])),
+                _run(_snapshot(comments=[("c1", [])])),
             )
         )
 

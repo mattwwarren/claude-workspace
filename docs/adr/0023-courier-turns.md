@@ -96,6 +96,10 @@ enumeration later is a one-parameter change to the argv builder.
   only by the delta.
 - A cause change inside one gate episode does not file a second record. The
   marker clears on the first delivered role or on `cw outbox drain --force`.
+- Courier turns have no owning session, so they record no usage. The launch
+  site is shared with the legacy turn (`launch_turn`, `cw.tracker_io._turn`),
+  which records through `flush_late_usage`; a courier turn's usage is lost
+  (known gap, debt).
 - `OutboxConfig.enabled` defaults to true, so every client with an MCP tickets
   binding and a codex realization starts making agent turns on the next tick
   after upgrade. Opt out per client with `outbox.enabled: false`.

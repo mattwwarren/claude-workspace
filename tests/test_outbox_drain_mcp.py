@@ -233,6 +233,38 @@ class TestUnreachableRelease:
         assert marker.gate_filed is False
         assert len(attempts) == 2
 
+    def test_failed_filing_is_retried_by_the_next_tick_and_then_sticks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A gate that fails to file on one tick files on the next (#3740 review).
+
+        The next tick re-probes the marked role (``run.broken`` starts empty each
+        tick), so the cause reaches ``_file_gate_once`` again. Once it files, the
+        bit sticks and a third tick files nothing more.
+        """
+        stage_mcp_config(monkeypatch, tmp_path, "codex", "enabled", server="linear")
+        enqueue(ticket=_TICKET, parts=("body",))
+        outcomes = iter([False, True])
+        attempts: list[object] = []
+
+        def _flaky(payload: dict[str, object]) -> bool:
+            attempts.append(payload)
+            return next(outcomes, True)
+
+        monkeypatch.setattr("cw.outbox_drain.file_gate_record", _flaky)
+        runner = ScriptedCodexRunner().add(
+            stdin_contains("post turn"), _status("tool_unavailable")
+        )
+
+        _drain(tmp_path, runner)
+        _drain(tmp_path, runner)
+        _drain(tmp_path, runner)
+
+        marker = read_marker(CLIENT, OutboxRole.TICKETS)
+        assert marker is not None
+        assert marker.gate_filed is True
+        assert len(attempts) == 2
+
 
 class TestUnverifiedPaths:
     def test_timeout_is_unverified_with_one_call_and_no_retry(
@@ -258,7 +290,7 @@ class TestUnverifiedPaths:
         stage_mcp_config(monkeypatch, tmp_path, "codex", "missing", server="linear")
         enqueue(ticket=_TICKET, parts=("body",))
         before = _snapshot(state="Todo")
-        after = _snapshot(state="Done", comment_ids=["c1"], markers=[_LINE])
+        after = _snapshot(state="Done", comments=[("c1", [_LINE])])
         runner = (
             ScriptedCodexRunner()
             .add(
@@ -284,8 +316,7 @@ class TestUnverifiedPaths:
 def _snapshot(
     *,
     state: str,
-    comment_ids: list[str] | None = None,
-    markers: list[str] | None = None,
+    comments: list[tuple[str, list[str]]] | None = None,
 ) -> str:
     import json
 
@@ -294,8 +325,9 @@ def _snapshot(
             "status": "ok",
             "detail": "",
             "ticket_id": _TICKET,
-            "comment_ids": comment_ids or [],
-            "markers": markers or [],
+            "comments": [
+                {"id": cid, "marker_lines": lines} for cid, lines in comments or []
+            ],
             "state": state,
             "assignee": "",
             "labels": [],

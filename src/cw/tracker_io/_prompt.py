@@ -198,15 +198,16 @@ Rules:
 1. Read the issue with `{get}`. Report its state name, its assignee (empty \
 when there is none) and its label names, sorted.
 2. List every comment on the issue with `{list}`, reading every page to the \
-end. Report each comment id, and report each marker line above that an \
-existing comment contains, in marker-list order. If you cannot see every \
+end. For each comment, report its id together with the marker lines from the \
+list above that this one comment itself contains (an empty list when it has \
+none). Never move a marker line to another comment. If you cannot see every \
 comment, report "failed".
 3. Call no other tool, and never create, edit or delete anything.
 4. Echo the ticket id exactly as given ({ticket}) in ticket_id.
 5. Reply with only the JSON object the output schema describes: status "ok" \
 when you read everything, "tool_unavailable" when the tools are not available \
-to you, "failed" otherwise; detail says why in one sentence; comment_ids, \
-markers, state, assignee and labels as described above.
+to you, "failed" otherwise; detail says why in one sentence; comments (each \
+with its id and marker_lines), state, assignee and labels as described above.
 """
 
 

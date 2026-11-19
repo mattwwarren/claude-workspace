@@ -6,19 +6,25 @@ import pytest
 
 from cw.tracker_io import IssueSnapshot, compare_snapshots
 from cw.tracker_io._prompt import TurnStatus
-from cw.tracker_io._snapshot_check import SNAPSHOT_SCHEMA, parse_snapshot
+from cw.tracker_io._snapshot_check import (
+    SNAPSHOT_SCHEMA,
+    SnapshotComment,
+    markers_present,
+    parse_snapshot,
+)
 
 _TICKET = "ENG-1"
 _M1 = "<!-- cw-outbox:m:1/2 -->"
 _M2 = "<!-- cw-outbox:m:2/2 -->"
+
+Comments = tuple[tuple[str, tuple[str, ...]], ...]
 
 
 def _snap(
     *,
     status: TurnStatus = "ok",
     ticket_id: str = _TICKET,
-    comment_ids: tuple[str, ...] = (),
-    markers: tuple[str, ...] = (),
+    comments: Comments = (),
     state: str = "Todo",
     assignee: str = "",
     labels: tuple[str, ...] = (),
@@ -27,8 +33,9 @@ def _snap(
         status=status,
         detail="",
         ticket_id=ticket_id,
-        comment_ids=comment_ids,
-        markers=markers,
+        comments=tuple(
+            SnapshotComment(id=cid, marker_lines=lines) for cid, lines in comments
+        ),
         state=state,
         assignee=assignee,
         labels=labels,
@@ -38,28 +45,38 @@ def _snap(
 class TestParse:
     def test_valid_document_parses(self) -> None:
         doc = (
-            '{"status":"ok","detail":"","ticket_id":"ENG-1","comment_ids":["c1"],'
-            '"markers":[],"state":"Todo","assignee":"","labels":["a"]}'
+            '{"status":"ok","detail":"","ticket_id":"ENG-1",'
+            '"comments":[{"id":"c1","marker_lines":["x"]}],'
+            '"state":"Todo","assignee":"","labels":["a"]}'
         )
 
         parsed = parse_snapshot(doc)
 
         assert parsed is not None
-        assert parsed.comment_ids == ("c1",)
+        assert parsed.comments == (SnapshotComment(id="c1", marker_lines=("x",)),)
+        assert markers_present(parsed) == ("x",)
         assert parsed.labels == ("a",)
 
     def test_extra_key_is_rejected(self) -> None:
         doc = (
-            '{"status":"ok","detail":"","ticket_id":"ENG-1","comment_ids":[],'
-            '"markers":[],"state":"","assignee":"","labels":[],"extra":1}'
+            '{"status":"ok","detail":"","ticket_id":"ENG-1","comments":[],'
+            '"state":"","assignee":"","labels":[],"extra":1}'
+        )
+
+        assert parse_snapshot(doc) is None
+
+    def test_comment_without_marker_lines_key_is_rejected(self) -> None:
+        doc = (
+            '{"status":"ok","detail":"","ticket_id":"ENG-1",'
+            '"comments":[{"id":"c1"}],"state":"","assignee":"","labels":[]}'
         )
 
         assert parse_snapshot(doc) is None
 
     def test_bad_status_is_rejected(self) -> None:
         doc = (
-            '{"status":"maybe","detail":"","ticket_id":"ENG-1","comment_ids":[],'
-            '"markers":[],"state":"","assignee":"","labels":[]}'
+            '{"status":"maybe","detail":"","ticket_id":"ENG-1","comments":[],'
+            '"state":"","assignee":"","labels":[]}'
         )
 
         assert parse_snapshot(doc) is None
@@ -74,8 +91,7 @@ class TestParse:
             "status",
             "detail",
             "ticket_id",
-            "comment_ids",
-            "markers",
+            "comments",
             "state",
             "assignee",
             "labels",
@@ -84,8 +100,8 @@ class TestParse:
 
 class TestAccepted:
     def test_delta_is_exactly_the_expected_markers(self) -> None:
-        before = _snap(comment_ids=("c0",), markers=())
-        after = _snap(comment_ids=("c0", "c1", "c2"), markers=(_M1, _M2))
+        before = _snap(comments=(("c0", ()),))
+        after = _snap(comments=(("c0", ()), ("c1", (_M1,)), ("c2", (_M2,))))
 
         assert (
             compare_snapshots(
@@ -95,8 +111,8 @@ class TestAccepted:
         )
 
     def test_empty_delta_with_empty_expected_set_is_accepted(self) -> None:
-        before = _snap(comment_ids=("c0",), markers=(_M1,))
-        after = _snap(comment_ids=("c0",), markers=(_M1,))
+        before = _snap(comments=(("c0", (_M1,)),))
+        after = _snap(comments=(("c0", (_M1,)),))
 
         assert (
             compare_snapshots(before, after, ticket_id=_TICKET, expected_markers=())
@@ -119,38 +135,59 @@ class TestRejected:
         [
             pytest.param(
                 _snap(),
-                _snap(comment_ids=("c1",), markers=(_M1,)),
+                _snap(comments=(("c1", (_M1,)),)),
                 (),
                 "unexpected marker",
                 id="extra-marker",
             ),
             pytest.param(
                 _snap(),
-                _snap(comment_ids=("c1",)),
+                _snap(comments=(("c1", ()),)),
                 (_M1,),
-                "missing after the turn",
+                "carries 0 marker lines",
                 id="expected-marker-stripped",
             ),
             pytest.param(
                 _snap(),
-                _snap(comment_ids=("c1", "c2"), markers=(_M1,)),
+                _snap(comments=(("c1", (_M1,)), ("c2", ()))),
                 (_M1,),
-                "new comment ids",
-                id="extra-comment-id",
+                "carries 0 marker lines",
+                id="extra-unmarked-comment",
             ),
             pytest.param(
-                _snap(comment_ids=("c0",)),
+                _snap(),
+                _snap(comments=(("c1", (_M1, _M2)),)),
+                (_M1, _M2),
+                "carries 2 marker lines",
+                id="one-comment-two-markers",
+            ),
+            pytest.param(
+                _snap(),
+                _snap(comments=(("c1", (_M1,)), ("c2", (_M1,)))),
+                (_M1,),
+                "repeats marker lines",
+                id="marker-on-two-comments",
+            ),
+            pytest.param(
+                _snap(comments=(("c0", ()),)),
                 _snap(),
                 (),
                 "comment ids removed",
                 id="removed-comment-id",
             ),
             pytest.param(
-                _snap(markers=(_M1,)),
-                _snap(),
+                _snap(comments=(("c0", (_M1,)),)),
+                _snap(comments=(("c0", ()),)),
                 (),
                 "marker lines removed",
                 id="removed-marker",
+            ),
+            pytest.param(
+                _snap(comments=(("c0", ()),)),
+                _snap(comments=(("c0", (_M1,)), ("c1", (_M2,)))),
+                (_M1,),
+                "marker lines added to an existing comment",
+                id="marker-added-to-existing-comment-plus-new-comment",
             ),
             pytest.param(
                 _snap(state="Todo"),
@@ -188,6 +225,24 @@ class TestRejected:
 
         assert reason is not None
         assert fragment in reason
+
+    def test_repeated_comment_id_in_one_read_is_rejected(self) -> None:
+        dup = _snap(comments=(("c1", ()), ("c1", ())))
+
+        reason = compare_snapshots(dup, _snap(), ticket_id=_TICKET, expected_markers=())
+
+        assert reason is not None
+        assert "repeats comment ids" in reason
+
+    def test_repeated_expected_marker_is_rejected(self) -> None:
+        after = _snap(comments=(("c1", (_M1,)),))
+
+        reason = compare_snapshots(
+            _snap(), after, ticket_id=_TICKET, expected_markers=(_M1, _M1)
+        )
+
+        assert reason is not None
+        assert "repeat" in reason
 
     @pytest.mark.parametrize(
         "status", ["failed", "tool_unavailable", "already_present"]
