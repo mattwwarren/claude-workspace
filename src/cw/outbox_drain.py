@@ -192,12 +192,13 @@ def _token(entry: OutboxEntry) -> str:
 
 
 def _note_left_pending(run: _Run, entry: OutboxEntry) -> None:
-    """Best-effort count before the state change leaves ``pending``.
+    """Best-effort count after the state change leaves ``pending``.
 
     The dispatch tick's no-progress guard reads this monotonic counter: its
     bounded record scan cannot see work done outside the scan window (item 32).
-    Writing first means a crash before the record commit only earns a safe
-    extra launch. A counter write failure must not abort the drain.
+    The record transition is authoritative; a counter write failure must not
+    undo it or abort the drain. An unreadable counter is retained as an
+    unknown generation, which permits at most one recovery launch.
     """
     if entry.claimed_from is OutboxState.PENDING:
         try:
@@ -216,7 +217,6 @@ def _deliver(
     reason: OutboxReason,
     posted: Sequence[PostedPart] = (),
 ) -> None:
-    _note_left_pending(run, entry)
     settle(
         run.client,
         entry.id,
@@ -224,6 +224,7 @@ def _deliver(
         state=OutboxState.DELIVERED,
         reason=reason,
     )
+    _note_left_pending(run, entry)
     run.delivered += 1
     run.delivered_roles.add(entry.role)
     _emit(OrchestratorEventType.OUTBOX_ENTRY_DELIVERED, entry, reason, posted=posted)
@@ -235,7 +236,6 @@ def _resettle_unverified(
     reason: OutboxReason = OutboxReason.READBACK_UNVERIFIED,
 ) -> None:
     """Settle *entry* ``unverified`` and count it; announcing is the caller's."""
-    _note_left_pending(run, entry)
     settle(
         run.client,
         entry.id,
@@ -243,6 +243,7 @@ def _resettle_unverified(
         state=OutboxState.UNVERIFIED,
         reason=reason,
     )
+    _note_left_pending(run, entry)
     run.unverified += 1
 
 

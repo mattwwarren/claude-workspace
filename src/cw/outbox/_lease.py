@@ -93,7 +93,7 @@ def drain_lease_held(client: str) -> bool:
     """
     path = drain_lock_path(client)
     try:
-        handle = path.open("a+", encoding="utf-8")
+        handle = path.open("r+", encoding="utf-8")
     except FileNotFoundError:
         return False
     with handle:

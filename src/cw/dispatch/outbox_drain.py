@@ -38,7 +38,6 @@ from cw.executor_launch import _launch_logged_subprocess
 from cw.outbox import (
     TICK_SCAN_MAX_RECORDS,
     drain_lease_held,
-    ensure_progress,
     marked_roles,
     peek_pending,
     progress_status,
@@ -140,10 +139,9 @@ def _maybe_launch(client: str, cfg: ClientConfig) -> None:
         return
     if peek.roles <= marked_roles(client) or drain_lease_held(client):
         return
-    ensure_progress(client)
-    _LAUNCHED[client] = _Launch(
-        spawn_drain(client), peek.entry_ids, progress_status(client)
-    )
+    # The counter is advisory.  A missing or corrupt counter is a persistent
+    # unknown baseline, not a reason to make launching fail.
+    _LAUNCHED[client] = _Launch(spawn_drain(client), peek.entry_ids, progress)
 
 
 def launch_outbox_drains(clients: Mapping[str, ClientConfig]) -> None:

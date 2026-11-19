@@ -432,7 +432,7 @@ def _body_intact(client: str, entry: OutboxEntry) -> bool:
 
 
 def _note_unreadable_progress(client: str) -> None:
-    """Best-effort progress marker before settling an unreadable body."""
+    """Best-effort progress marker after settling an unreadable body."""
     try:
         add_progress(client, 1)
     except (OSError, OutboxRecordError) as exc:
@@ -481,10 +481,10 @@ def _claim_locked(
                 layout.write_record(client, record)
                 claimed.append(record)
             else:
-                _note_unreadable_progress(client)
                 layout.write_record(
                     client, _settled_unreadable(entry, claimant=claimant, now=now)
                 )
+                _note_unreadable_progress(client)
         except OutboxRecordError:
             if not claimed:
                 raise
