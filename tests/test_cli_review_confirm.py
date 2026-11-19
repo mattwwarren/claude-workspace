@@ -57,6 +57,7 @@ from cw.review_convergence import (
     worktree_state,
 )
 from cw.review_findings import ReviewVerdict
+from cw.ticket_snapshot import read_for_stage
 from tests._claude_review_helpers import (
     error_envelope,
     review_envelope,
@@ -1965,6 +1966,19 @@ def test_run_backend_round_launches_a_claude_round_with_the_resolution(
     assert seen["base_ref"] == "base"
     assert seen["resolution"] == _DELTA
     assert "reasoning_effort" not in seen
+
+
+def test_delta_round_default_builds_a_refreshing_snapshot_context(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The delta-confirm caller omits the kwarg but must not fail closed."""
+    calls = _stub_rounds(monkeypatch)
+
+    _backend_round("codex", harness, delta=_DELTA)
+
+    [seen] = calls["codex"]
+    snapshots = seen["snapshots"]
+    assert snapshots.resolve is not read_for_stage
 
 
 def test_run_backend_round_launches_a_codex_round_with_the_effort_default(

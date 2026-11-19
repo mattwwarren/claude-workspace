@@ -487,7 +487,7 @@ def run_backend_round(
     model: str | None,
     reasoning_effort: str | None,
     resolution: ResolutionSpec | None = None,
-    snapshots: SnapshotContext = DEFAULT_SNAPSHOT_CONTEXT,
+    snapshots: SnapshotContext | None = None,
 ) -> RoundOutcome:
     """One review round on *backend*; exit 3/4 come from inside (#2980).
 
@@ -497,6 +497,13 @@ def run_backend_round(
     codex default. *resolution* makes it a conflict-resolution round over that
     spec. *snapshots* (#3712) is how the pass obtains the ticket snapshot.
     """
+    # ``converge delta-confirm`` shares this helper and predates the snapshot
+    # context kwarg. Resolve its omitted context here so resolution rounds
+    # receive the same per-client refresh as regular confirm rounds.
+    if snapshots is None:
+        snapshots = context_for_client(
+            get_client(task.client), worktree, resolve_login=False, refresh=True
+        )
     if backend == _CLAUDE:
         return _run_claude_round(
             task=task,

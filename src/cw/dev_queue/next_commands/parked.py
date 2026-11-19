@@ -10,10 +10,10 @@ import shlex
 from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import (
-    CODEX_MUST_FIX_FINDINGS_BLOCKER_REASON,
     PLAN_SCOPE_DRIFT_BLOCKER_REASON,
     REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON,
 )
+from cw.auto_dev_result.schema._vocab import CODEX_MUST_FIX_FINDINGS
 from cw.dev_queue.dispositions import (
     FINALIZE_GATE_HELD_DISPOSITION,
     REVIEW_APPROVAL_GATE_DISPOSITION,
@@ -103,10 +103,7 @@ def _scope_drift(task: TicketTask, _session: Session | None) -> bool:
 
 
 def _must_fix(task: TicketTask, _session: Session | None) -> bool:
-    return (
-        _is_blocked(task)
-        and task.blocked_reason == CODEX_MUST_FIX_FINDINGS_BLOCKER_REASON
-    )
+    return _is_blocked(task) and task.blocked_reason == CODEX_MUST_FIX_FINDINGS
 
 
 def _must_fix_overridden(task: TicketTask, session: Session | None) -> bool:

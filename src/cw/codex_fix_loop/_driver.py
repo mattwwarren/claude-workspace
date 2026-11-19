@@ -132,8 +132,9 @@ from cw.stage_verification.growth import (
 from cw.ticket_snapshot import (
     DEFAULT_SNAPSHOT_CONTEXT,
     Purpose,
+    SnapshotUntrustedError,
     bound_comments,
-    read_for_stage,
+    read_current,
 )
 
 if TYPE_CHECKING:
@@ -169,6 +170,18 @@ _MAX_FIX_CYCLES = 5
 _MUST_FIX = "MUST_FIX"
 
 _log = logging.getLogger(__name__)
+
+
+def read_for_stage(task: TicketTask, _stage: str) -> TicketSnapshot | None:
+    """Read the row snapshot for loop constraints without emitting an event.
+
+    Kept as a small local seam for callers/tests that supplied the pass snapshot
+    through this module before the stage resolver became event-emitting.
+    """
+    try:
+        return read_current(task)
+    except SnapshotUntrustedError:
+        return None
 
 
 def _remaining_budget(deadline: float | None) -> float | None:
@@ -374,6 +387,9 @@ def _loop_inputs(
     _, _, cycle0_changed = _capture_diff(worktree, default_branch)
     cycle0_files = frozenset(cycle0_changed)
     plan_text, ticket_text = _load_ticket_context(worktree)
+    # Cycle 0 already resolved this pass's snapshot. The loop needs the row's
+    # current value for the one-time constraint load, but must not resolve it
+    # through the event-emitting stage helper a second time (#3712).
     snapshot = read_for_stage(task, "review")
     constraints = _load_constraints(snapshot, snapshots, task, ticket_text)
     return _LoopInputs(
