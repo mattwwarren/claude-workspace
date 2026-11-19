@@ -70,6 +70,18 @@ def _turn(
     )
 
 
+@pytest.fixture(autouse=True)
+def _stop_project_walk_at_state_dir() -> None:
+    """Stop the project-layer walk at the test state dir (O2b hermeticity).
+
+    The turn's scratch cwd sits under ``state_dir()``, which is not under the
+    test HOME, so the walk would otherwise climb to the developer's real home
+    and read its ``~/.codex/config.toml``. A ``.git`` marker at ``state_dir()``
+    ends the walk there, the same guard the backend project-chain tests use.
+    """
+    (state_dir() / ".git").mkdir(parents=True, exist_ok=True)
+
+
 def _stage(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: McpStage = "enabled"
 ) -> Path:

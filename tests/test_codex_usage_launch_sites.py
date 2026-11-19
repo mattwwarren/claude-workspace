@@ -53,6 +53,10 @@ _SITES: Final[dict[tuple[str, str], tuple[str, str]]] = {
     # Tracker-IO: recorded through the late flush.
     ("tracker_io/_argv.py", "build_tracker_io_argv"): (RECORDED, "tracker-IO argv"),
     ("tracker_io/_turn.py", "_launch"): (RECORDED, "TRACKER_IO via flush_late_usage"),
+    ("tracker_io/_drain.py", "_run_turn"): (
+        UNREACHABLE,
+        "courier has no owning session",
+    ),
     # Not a turn: the capability probe has no --json and is skipped.
     ("codex_review/_capability.py", "_build_probe_argv"): (
         UNREACHABLE,

@@ -8,9 +8,15 @@ builds the argv, parses the agent's JSON report and verifies it; the agent
 does the tracker I/O. The verification is self-attested: the ids and
 read-back windows are model-echoed, not proof of delivery.
 
-Modules: :mod:`._argv` (the launch site), :mod:`._prompt` (prompt and result
-schema), :mod:`._verify` (reasons, public state, checks), :mod:`._turn` (the
-orchestration, :func:`post_parts_via_turn`).
+The O2b courier (RFC 0019, ADR-0023) runs post, verify and snapshot turns for
+the outbox drain: :func:`courier_drain` returns a :class:`CourierResult`, and a
+plugin app is checked by a before/after :func:`compare_snapshots` delta.
+
+Modules: :mod:`._argv` (the launch site and narrowing), :mod:`._prompt` (prompts
+and result schema), :mod:`._verify` (reasons, public state, checks),
+:mod:`._snapshot_check` (the delta), :mod:`._dedup` (courier parts and
+provenance), :mod:`._turn` (the single-turn orchestration,
+:func:`post_parts_via_turn`), :mod:`._drain` (the courier turn loop).
 """
 
 from __future__ import annotations
@@ -18,8 +24,19 @@ from __future__ import annotations
 from cw.tracker_io._argv import (
     TRACKER_COMMENT_TOOLS,
     TrackerIoConfigError,
+    TurnKind,
     build_tracker_io_argv,
     comment_tools_for,
+    get_tool_for,
+    narrowing_for,
+    turn_tools,
+)
+from cw.tracker_io._dedup import CourierPart
+from cw.tracker_io._drain import (
+    CourierContext,
+    CourierDisposition,
+    CourierResult,
+    courier_drain,
 )
 from cw.tracker_io._prompt import (
     READBACK_WINDOW,
@@ -28,6 +45,11 @@ from cw.tracker_io._prompt import (
     TurnResult,
     parse_turn_result,
     render_prompt,
+)
+from cw.tracker_io._snapshot_check import (
+    SNAPSHOT_SCHEMA,
+    IssueSnapshot,
+    compare_snapshots,
 )
 from cw.tracker_io._turn import (
     TURN_TIMEOUT_SECONDS,
@@ -48,23 +70,35 @@ from cw.tracker_io._verify import (
 __all__ = [
     "READBACK_WINDOW",
     "RESULT_SCHEMA",
+    "SNAPSHOT_SCHEMA",
     "TRACKER_COMMENT_TOOLS",
     "TURN_TIMEOUT_SECONDS",
+    "CourierContext",
+    "CourierDisposition",
+    "CourierPart",
+    "CourierResult",
+    "IssueSnapshot",
     "PostedComment",
     "PublicState",
     "TrackerIoConfigError",
     "TrackerIoContext",
     "TrackerIoOutcome",
     "TrackerIoReason",
+    "TurnKind",
     "TurnPart",
     "TurnResult",
     "VerifyOutcome",
     "build_tracker_io_argv",
     "comment_tools_for",
+    "compare_snapshots",
+    "courier_drain",
+    "get_tool_for",
+    "narrowing_for",
     "parse_turn_result",
     "plan_turn_parts",
     "post_parts_via_turn",
     "public_state_for",
     "render_prompt",
+    "turn_tools",
     "verify_turn_result",
 ]
