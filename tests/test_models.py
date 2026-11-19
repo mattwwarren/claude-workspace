@@ -2856,7 +2856,9 @@ class TestOperatorChannelForward:
                 OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED,
                 # RFC 0019 O3 (#3707): REVIEW_VERDICT_COMMENT_UNVERIFIED is
                 # historical and deliberately absent from the default set.
-                OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED,
+                # RFC 0019 T2 (#3712): REVIEW_OPERATOR_CONTEXT_UNDELIVERED is
+                # historical and TICKET_SNAPSHOT_DEGRADED is deliberately absent.
+                OrchestratorEventType.TICKET_SNAPSHOT_AUTHOR_CONFLICT,
                 # #3706 (RFC 0019 O2): outbox attention signals; the
                 # delivered audit record is deliberately absent.
                 OrchestratorEventType.OUTBOX_ENTRY_UNVERIFIED,

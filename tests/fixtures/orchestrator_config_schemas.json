@@ -1110,6 +1110,8 @@
       "ticket.constraint_recorded",
       "ticket.snapshot_recorded",
       "ticket.snapshot_render_failed",
+      "ticket.snapshot_author_conflict",
+      "ticket.snapshot_degraded",
       "plan.approval_revoked",
       "plan.approval_body_drift_warned",
       "plan.draft_promoted",
@@ -1309,6 +1311,8 @@
       "ticket.constraint_recorded",
       "ticket.snapshot_recorded",
       "ticket.snapshot_render_failed",
+      "ticket.snapshot_author_conflict",
+      "ticket.snapshot_degraded",
       "plan.approval_revoked",
       "plan.approval_body_drift_warned",
       "plan.draft_promoted",
@@ -2806,7 +2810,7 @@
     },
     "TicketsBinding": {
      "additionalProperties": false,
-     "description": "The ``tickets`` role: a tracker system, plus operator ids and preflight.\n\n``operator_ids`` are the operator's identities on the tracker, kept\nexactly as written (no normalisation, no dedupe); no consumer reads them\nyet. ``preflight`` is always present and off by default.",
+     "description": "The ``tickets`` role: a tracker system, plus operator ids and preflight.\n\n``operator_ids`` are the operator's identities on the tracker, kept\nexactly as written (no normalisation, no dedupe). The trust evaluator\n(``cw.ticket_snapshot._binding``) reads them on non-GitHub trackers only,\ncasefolded at evaluation: a comment binds when its ``author_id`` is one of\nthem. GitHub ignores them. Empty (the default) binds nothing, so an\noperator opts in. ``preflight`` is always present and off by default.",
      "properties": {
       "system": {
        "anyOf": [
@@ -3187,6 +3191,8 @@
       "ticket.constraint_recorded",
       "ticket.snapshot_recorded",
       "ticket.snapshot_render_failed",
+      "ticket.snapshot_author_conflict",
+      "ticket.snapshot_degraded",
       "plan.approval_revoked",
       "plan.approval_body_drift_warned",
       "plan.draft_promoted",
@@ -4257,13 +4263,13 @@
      "pr.registered",
      "pr.review_received",
      "requeue.review_delivery_degraded",
-     "review.operator_context_undelivered",
      "review.verdict_comment_skipped",
      "session.liveness_changed",
      "session.needs_attention",
      "task.deleted",
      "task.transition",
-     "ticket.approval_failed"
+     "ticket.approval_failed",
+     "ticket.snapshot_author_conflict"
     ],
     "task_transition_statuses": [
      "awaiting_operator_signoff",

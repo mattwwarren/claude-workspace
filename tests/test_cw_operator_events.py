@@ -174,15 +174,29 @@ class TestAdmitsFilterEngine:
         "event_type",
         [
             OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED,
-            OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED,
+            OrchestratorEventType.TICKET_SNAPSHOT_AUTHOR_CONFLICT,
         ],
     )
-    def test_rfc0018_s3_review_signals_admitted_by_default(
+    def test_review_attention_signals_admitted_by_default(
         self, event_type: OrchestratorEventType
     ) -> None:
-        """The #3055 codex review signals forward unconditionally."""
+        """The #3055 comment-skipped and #3712 author-conflict signals forward."""
         event = OrchestratorEvent(type=event_type, payload={})
         assert _admits(event, self._default_forward()) is True
+
+    @pytest.mark.parametrize(
+        "event_type",
+        [
+            OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED,
+            OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED,
+        ],
+    )
+    def test_retired_and_per_pass_events_not_forwarded_by_default(
+        self, event_type: OrchestratorEventType
+    ) -> None:
+        """RFC 0019 T2 (#3712): the retired signal and the per-pass noise stay out."""
+        event = OrchestratorEvent(type=event_type, payload={})
+        assert _admits(event, self._default_forward()) is False
 
     def test_retired_verdict_comment_unverified_not_forwarded_by_default(self) -> None:
         """RFC 0019 O3 (#3707): the member stays historical, out of the default set.
