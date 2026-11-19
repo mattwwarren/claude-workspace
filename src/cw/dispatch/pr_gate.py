@@ -55,6 +55,7 @@ from cw.dispatch_state import (
 )
 from cw.gh import github_pr_url, pr_exists_for_branch
 from cw.models import QueueItemStatus, Stage, resolve_feature_branch
+from cw.models.tasks.schema import REGRESSED_OWN_BRANCH_HIGH_WATER
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
@@ -89,14 +90,6 @@ _MAX_PROBES_PER_TICK = 20
 # stages legitimately HAS an open PR -- that is the artifact under review --
 # so gating there would park the entire healthy tail of the pipeline.
 _GATED_STAGES: frozenset[Stage] = frozenset({Stage.PLAN, Stage.IMPL})
-
-# The stage high water that marks a row as having produced its own feature-branch
-# work (#3248). ``Stage`` is a plain ``StrEnum`` whose lexicographic ordering is
-# not pipeline order (see ``lifecycle.py``), so "reached REVIEW or later" is an
-# explicit membership test. A ``None`` high water is not a member and fails closed.
-_REGRESSED_OWN_BRANCH_HIGH_WATER: frozenset[Stage] = frozenset(
-    {Stage.REVIEW, Stage.FINALIZE}
-)
 
 
 def _probe_cache_ticket_id(ticket_id: str, branch: str) -> str:
@@ -189,7 +182,7 @@ def _is_regressed_own_branch(task: TicketTask) -> bool:
     return (
         task.stage == Stage.IMPL
         and task.regressed_into_stage == Stage.IMPL
-        and task.stage_high_water in _REGRESSED_OWN_BRANCH_HIGH_WATER
+        and task.stage_high_water in REGRESSED_OWN_BRANCH_HIGH_WATER
     )
 
 

@@ -38,6 +38,11 @@ OPERATOR_RESOLUTIONS_SOURCE_KEY = "operator_resolutions_source"
 REVIEW_APPROVAL_KEY = "review_approval"
 """The ``queue_metadata`` wire key carrying the row's review approval (#2767)."""
 BRANCH_KEY = "branch"
+# Derived at spawn (#3694), not by build_queue_metadata: the REVIEW verdict's
+# MUST_FIX findings for a regress into IMPL, or null. It reads the worktree, so
+# the pure serializer never sets it; cw.stage_verification.impl_regress_findings
+# owns the value.
+REGRESS_REVIEW_FINDINGS_KEY = "regress_review_findings"
 """The ``queue_metadata`` wire key carrying the row's recorded branch (#2948)."""
 
 _ROW_SOURCE_PREFIX = "row"

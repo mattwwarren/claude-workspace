@@ -293,3 +293,13 @@ DEV_QUEUE_SCHEMA_VERSION = 63
 ReviewApproverKind = Literal["operator", "recipe"]
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
+
+# The stage high water that marks a row as having produced its own feature-branch
+# work (#3248). ``Stage`` is a plain ``StrEnum`` whose lexicographic ordering is
+# not pipeline order (see ``lifecycle.py``), so "reached REVIEW or later" is an
+# explicit membership test. A ``None`` high water is not a member and fails closed.
+# Public (#3694) so ``cw.dispatch.pr_gate`` and the regress-findings rule share
+# one set without an import cycle through ``cw.spawn``.
+REGRESSED_OWN_BRANCH_HIGH_WATER: frozenset[Stage] = frozenset(
+    {Stage.REVIEW, Stage.FINALIZE}
+)
