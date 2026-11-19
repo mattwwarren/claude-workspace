@@ -14,7 +14,11 @@ States, evaluated in order:
    (:func:`cw.executor._capabilities.declared_capabilities`) declares REVIEW
    and ``clean_mode_review`` (claude-native, codex, opencode): ``ok=True``; an
    opencode lane with ``review.confirm_backend`` unset also carries the
-   default-on Claude egress note (#2806);
+   default-on Claude egress note (#2806). An all-codex lane (every resolved
+   stage on codex, RFC 0018 D1 #3064) with ``review.confirm_backend`` unset
+   also ``warn=True``s: the confirm round defaults to ``claude -p``, so the
+   lane needs the claude binary and login (moved from the retired
+   ``all-codex-lane`` check, RFC 0019 H2b #3744);
 3. any other declared backend (``local``): ``ok=False``, and the detail names
    the reason the stage pre-flight (:func:`cw.stage_preflight.first_unmet`)
    parks a clean REVIEW spawn with, before the review agent runs. For
@@ -36,7 +40,8 @@ from typing import TYPE_CHECKING
 from cw.doctor._shared import CheckResult
 from cw.executor import resolve_executor_config, resolve_pipeline_stages
 from cw.executor._capabilities import declared_capabilities
-from cw.models import OPENCODE_BACKEND, Stage, TicketTask
+from cw.executor.codex import CODEX_SUPPORTED_STAGES
+from cw.models import CODEX_BACKEND, OPENCODE_BACKEND, Stage, TicketTask
 from cw.review_convergence import resolve_confirm_backend
 from cw.stage_preflight import PreflightReason, SpawnFacts, first_unmet
 from cw.stage_preflight.details import remediation
@@ -70,6 +75,15 @@ _OPENCODE_EGRESS_NOTE = (
     f" {PreflightReason.CLEAN_REVIEW_UNSUPPORTED_BACKEND.value} begin this"
     " egress on their next"
     " requeue."
+)
+# RFC 0018 D1 (#3064), moved from the retired all-codex-lane check (#3744).
+_CONFIRM_UNSET = (
+    " all-codex lane: every stage runs on codex. The clean-mode confirm round"
+    " defaults to claude -p, so this lane needs the claude binary on PATH and a"
+    " Claude login; a missing binary parks confirm_backend_unavailable."
+    " Claude-free opt-outs: review.confirm_backend: none (no confirm round,"
+    " forfeits independence) or review.confirm_backend: codex (stays on codex,"
+    " not independent)."
 )
 _CLIENT_REF = "client '{client}' in clients.yaml"
 _GUARDED = (
@@ -119,6 +133,16 @@ def _no_review_stage_result(name: str, task: TicketTask) -> CheckResult:
     )
 
 
+def _all_codex(task: TicketTask, client: ClientConfig) -> bool:
+    """True when the lane has stages and every one runs on codex, supported."""
+    stages = resolve_pipeline_stages(task, client)
+    return bool(stages) and all(
+        resolve_executor_config(stage, task, client).backend == CODEX_BACKEND
+        and stage in CODEX_SUPPORTED_STAGES
+        for stage in stages
+    )
+
+
 def _supported_result(
     name: str, task: TicketTask, client: ClientConfig, backend: str
 ) -> CheckResult:
@@ -130,6 +154,9 @@ def _supported_result(
         note = _NOT_INDEPENDENT_NOTE
     if backend == OPENCODE_BACKEND and client.review.confirm_backend is None:
         note += _OPENCODE_EGRESS_NOTE
+    warn = client.review.confirm_backend is None and _all_codex(task, client)
+    if warn:
+        note += _CONFIRM_UNSET
     detail = _SUPPORTED.format(
         backend=backend,
         confirm=resolved.name,
@@ -137,7 +164,7 @@ def _supported_result(
         max_cycles=client.review.effective_max_cycles,
         note=note,
     )
-    return CheckResult(_result_name(name, task), ok=True, detail=detail)
+    return CheckResult(_result_name(name, task), ok=True, detail=detail, warn=warn)
 
 
 def _fix(name: str) -> str:

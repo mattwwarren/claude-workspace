@@ -73,6 +73,15 @@ BINDING_STAGES: frozenset[Stage] = frozenset(
 _CODEX_SERVERS_FILE = "clients.yaml tracker_mcp_gate.servers"
 _CODEX_SERVER_UNSET = "servers.codex (unset)"
 _TRACKER_UNSET = "tracker unset in .claude/project-config.yaml"
+_UNBOUND_PLUGIN = (
+    "no bindings.tickets.mcp.claude-native.plugin_id names this harness's"
+    " tracker plugin"
+)
+
+
+def _unbound_server(backend: str) -> str:
+    return f"no bindings.tickets.mcp.{backend}.server names this harness's MCP server"
+
 
 # Warn-once dedupe for fail-open outcomes: (client, key) -> the reason last
 # warned. The key is the branch (claude-native), "<backend>:<config path>" or
@@ -184,7 +193,7 @@ def _assess_plugin(reader: ReachReader, branch: str | None) -> Assessment:
     """claude-native: the branch ``enabledPlugins`` read; tracker not consulted."""
     plugin_id = reader.client.tickets_plugin_id
     if plugin_id is None:
-        return Assessment(ReachState.UNBOUND, detail="no plugin_id is bound")
+        return Assessment(ReachState.UNBOUND, detail=_UNBOUND_PLUGIN)
     if branch is None:
         return Assessment(ReachState.NO_BRANCH, detail="no branch to read")
     probe = probe_binding(CLAUDE_NATIVE_BACKEND, reader.client, branch=branch)
@@ -296,9 +305,10 @@ def _assess_codex_unbound(
         reason=PreflightReason.BINDING_UNBOUND,
         expected_kind="server",
     )
-    return Assessment(
-        ReachState.UNBOUND, hit=hit, detail="no usable codex MCP server is bound"
-    )
+    detail = _unbound_server(CODEX_BACKEND)
+    if server is not None:
+        detail += f" (servers.codex {server!r} is not a valid name)"
+    return Assessment(ReachState.UNBOUND, hit=hit, detail=detail)
 
 
 def assess_binding(
@@ -318,7 +328,7 @@ def assess_binding(
     if backend == CODEX_BACKEND and (server is None or not is_valid_name(server)):
         return _assess_codex_unbound(reader, server, row_branch)
     if server is None:
-        return Assessment(ReachState.UNBOUND, detail=f"no {backend} server is bound")
+        return Assessment(ReachState.UNBOUND, detail=_unbound_server(backend))
     return _assess_server(reader, backend, server, row_branch)
 
 

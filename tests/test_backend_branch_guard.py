@@ -74,11 +74,9 @@ _ALLOWLIST: Final[dict[str, int]] = {
     "cw/contract_manifest/_stages.py": 1,
     "cw/dev_queue/requeue.py": 2,
     "cw/dispatch/gating/context_json.py": 1,
-    "cw/doctor/all_codex_lane.py": 1,
     "cw/doctor/codex_fix_loop.py": 1,
-    "cw/doctor/review_convergence.py": 1,
+    "cw/doctor/review_convergence.py": 2,
     "cw/doctor/review_engine.py": 1,
-    "cw/doctor/tracker_mcp.py": 4,
     "cw/doctor/wedge/orphans.py": 1,
     "cw/executor_diagnostics.py": 1,
     "cw/models/bindings.py": 2,
@@ -91,11 +89,10 @@ _TRACKER_ALLOWLIST: Final[dict[str, int]] = {
     "cw/codex_review_signals.py": 2,
     "cw/codex_stage_post.py": 1,
     "cw/dispatch/ticket_state_gate.py": 1,
-    "cw/doctor/tracker_mcp.py": 4,
 }
 
 #: Cap on the grandfathered total (both lists), so growth is a visible edit.
-_ALLOWLIST_CEILING: Final = 34
+_ALLOWLIST_CEILING: Final = 24
 
 
 def _is_backend_operand(node: ast.expr) -> bool:

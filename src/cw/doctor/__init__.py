@@ -50,14 +50,15 @@ re-exports. Submodules:
   global fallback / absent) drift detection.
 - ``codex_fix_loop`` — per-lane effective codex fix-loop state and its source
   (lane vs global default) for lanes with a codex review executor (#2542).
-- ``tracker_mcp`` — per-lane tracker-MCP reachability for opencode and codex
-  lanes on a non-GitHub tracker: FAIL when the gate would park the row (#3055).
-- ``all_codex_lane`` — per-lane advisory for lanes whose stages all run on
-  codex: the clean-mode confirm default's ``claude`` dependency, the Claude-free
-  opt-outs and the tracker MCP pointer (RFC 0018 D1, #3064).
+- ``capabilities`` — per-(client, lane, backend) declared capabilities and
+  tickets-binding reach: FAIL for an undeclared routed stage or when the tick
+  would park the row (RFC 0019 H1 #3708, H2b #3744; it absorbs the retired
+  ``tracker_mcp`` check, #3055).
 - ``review_convergence`` — per-lane effective ``review.convergence: clean``
   support for clean clients: FAIL for a lane whose REVIEW backend writes no
-  convergence ledger (#2797).
+  convergence ledger (#2797); WARN for an all-codex lane whose confirm round
+  defaults to ``claude -p`` (moved from the retired ``all_codex_lane`` check,
+  RFC 0018 D1 #3064, #3744).
 - ``merge_gate`` — clients with ``merge_gate_enabled: false`` (the Stage 4a
   merge gate switched off) listed as advisory warnings (#2851).
 - ``bindings`` — per-client ``bindings/<client>``: ``bindings.tickets.system``
@@ -96,7 +97,6 @@ from __future__ import annotations
 
 from cw.doctor._shared import CheckResult, DoctorReport, ReapScope, WedgeFinding
 from cw.doctor.agent_spec_drift import _check_agent_spec_drift
-from cw.doctor.all_codex_lane import _check_all_codex_lane
 from cw.doctor.bindings import _check_bindings
 from cw.doctor.capabilities import _check_harness_capabilities
 from cw.doctor.codex_fix_loop import _check_codex_fix_loop
@@ -138,7 +138,6 @@ from cw.doctor.session_outcomes import _check_session_outcomes
 from cw.doctor.sessions_auto_prune import _check_sessions_auto_prune
 from cw.doctor.skills_drift import _check_skills_commands_drift
 from cw.doctor.spared_workers import _check_spared_unrecorded_workers
-from cw.doctor.tracker_mcp import _check_tracker_mcp
 from cw.doctor.usage_limit import _check_usage_limit_windows
 from cw.doctor.user_level_hooks import _check_user_level_stop_hook
 from cw.doctor.versions import (
@@ -175,7 +174,6 @@ __all__ = [
     "ReapScope",
     "WedgeFinding",
     "_check_agent_spec_drift",
-    "_check_all_codex_lane",
     "_check_attention_state_census",
     "_check_bindings",
     "_check_claude_version",
@@ -211,7 +209,6 @@ __all__ = [
     "_check_spared_unrecorded_workers",
     "_check_ssh_key_loaded",
     "_check_timed_out_merged",
-    "_check_tracker_mcp",
     "_check_usage_limit_windows",
     "_check_user_level_stop_hook",
     "_check_wedge_repo_ahead",
