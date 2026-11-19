@@ -134,9 +134,12 @@ def _no_review_stage_result(name: str, task: TicketTask) -> CheckResult:
 
 
 def _all_codex(task: TicketTask, client: ClientConfig) -> bool:
-    """True when the lane has stages and every one runs on codex, supported."""
+    """True when every stage of the lane runs on codex, each one supported.
+
+    Only reached for a lane whose stages include REVIEW, so never empty.
+    """
     stages = resolve_pipeline_stages(task, client)
-    return bool(stages) and all(
+    return all(
         resolve_executor_config(stage, task, client).backend == CODEX_BACKEND
         and stage in CODEX_SUPPORTED_STAGES
         for stage in stages

@@ -194,10 +194,10 @@ def _assess_plugin(reader: ReachReader, branch: str | None) -> Assessment:
     plugin_id = reader.client.tickets_plugin_id
     if plugin_id is None:
         return Assessment(ReachState.UNBOUND, detail=_UNBOUND_PLUGIN)
-    if branch is None:
-        return Assessment(ReachState.NO_BRANCH, detail="no branch to read")
     probe = probe_binding(CLAUDE_NATIVE_BACKEND, reader.client, branch=branch)
-    if probe.cause is ProbeCause.NO_BRANCH:
+    # ``branch is None`` (doctor) always probes NO_BRANCH; the second test only
+    # narrows the type for the reads below.
+    if probe.cause is ProbeCause.NO_BRANCH or branch is None:
         return Assessment(ReachState.NO_BRANCH, detail=probe.reason)
     if probe.cause is not ProbeCause.READ:
         return Assessment(

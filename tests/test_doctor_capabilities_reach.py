@@ -177,6 +177,22 @@ class TestServerRead:
         assert "unreachable" in result.detail
         assert "parks such a row" not in result.detail
 
+    def test_a_later_stage_that_needs_the_binding_is_reported(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """codex IMPL needs no binding, its FINALIZE does: FINALIZE is reported."""
+        path = stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, "enabled")
+        client = _client(
+            tmp_path,
+            executors={Stage.IMPL: CODEX_BACKEND, Stage.FINALIZE: CODEX_BACKEND},
+            gate=_gate(),
+        )
+
+        result = _row(client, CODEX_BACKEND)
+
+        assert result.ok is True
+        assert f"reachable (declared in {path}" in result.detail
+
     def test_a_review_only_codex_lane_does_not_need_the_binding(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
