@@ -669,3 +669,56 @@ def test_history_comment_shape_survives_when_it_carries_no_path_or_secret() -> N
     )
     assert leaked.redacted
     assert HOME not in leaked.bodies[0]
+
+
+# ---------------------------------------------------------------------------
+# part_label / unwrap_part (RFC 0019 T2, #3712)
+# ---------------------------------------------------------------------------
+
+
+def _unwrapped(bodies: tuple[str, ...]) -> list[str | None]:
+    total = len(bodies)
+    return [tp.unwrap_part(body, i, total) for i, body in enumerate(bodies, start=1)]
+
+
+def test_part_label_is_none_for_a_single_part_and_labelled_otherwise() -> None:
+    assert tp.part_label(1, 1) is None
+    assert tp.part_label(2, 3) == "(part 2 of 3)"
+
+
+def test_unwrap_part_single_part_is_returned_verbatim() -> None:
+    assert tp.unwrap_part("plain\ntext\n", 1, 1) == "plain\ntext\n"
+    plan = _plan("single comment body\n")
+    assert _unwrapped(plan.bodies) == ["single comment body\n"]
+
+
+def test_unwrap_part_round_trips_a_multi_part_plan() -> None:
+    text = "".join(f"plan line {n} with some words\n" for n in range(6000))
+    plan = _plan(text)
+    assert len(plan.bodies) > 1
+    pieces = _unwrapped(plan.bodies)
+    assert None not in pieces
+    assert "".join(piece for piece in pieces if piece is not None) == text
+
+
+def test_unwrap_part_round_trips_a_crlf_split() -> None:
+    long_line = ("ab cd " * 10_000)[: tp.PART_TEXT_CHARS - 1] + "\r\n"
+    text = long_line + "tail line\r\n"
+    plan = _plan(text)
+    assert len(plan.bodies) > 1
+    pieces = _unwrapped(plan.bodies)
+    assert "".join(piece for piece in pieces if piece is not None) == text
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "no label at all",
+        "(part 2 of 2)\n\ntext",
+        "(part 1 of 2)\ntext",
+        "(part 1 of 3)\n\ntext",
+        "header\n\n(part 1 of 2)\n\ntext",
+    ],
+)
+def test_unwrap_part_bad_label_is_none(body: str) -> None:
+    assert tp.unwrap_part(body, 1, 2) is None

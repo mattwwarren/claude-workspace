@@ -61,3 +61,12 @@ def test_ticket_snapshot_events_round_trip_and_are_not_operator_defaults() -> No
         etype = OrchestratorEventType[member]
         assert etype.value == value
         assert etype not in _DEFAULT_OPERATOR_EVENT_TYPES
+
+
+def test_new_t2_event_kinds_round_trip_and_forward_set_membership() -> None:
+    conflict = OrchestratorEventType("ticket.snapshot_author_conflict")
+    degraded = OrchestratorEventType("ticket.snapshot_degraded")
+    assert conflict is OrchestratorEventType.TICKET_SNAPSHOT_AUTHOR_CONFLICT
+    assert degraded is OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED
+    assert conflict in _DEFAULT_OPERATOR_EVENT_TYPES
+    assert degraded not in _DEFAULT_OPERATOR_EVENT_TYPES
