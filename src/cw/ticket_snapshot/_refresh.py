@@ -113,10 +113,9 @@ def refresh_snapshot(
     return snapshot
 
 
-def _row_of(task: TicketTask) -> TicketTask:
-    """The current queue row for *task*, or *task* itself when no row matches."""
-    row = current_row(task.ticket_id, task.client)
-    return row if row is not None else task
+def _row_of(task: TicketTask) -> TicketTask | None:
+    """The current queue row for *task*, or None when no row matches."""
+    return current_row(task.ticket_id, task.client)
 
 
 def read_current(task: TicketTask) -> TicketSnapshot | None:
@@ -124,7 +123,8 @@ def read_current(task: TicketTask) -> TicketSnapshot | None:
 
     Raises :class:`SnapshotUntrustedError` as ``read`` does.
     """
-    return read(_row_of(task))
+    row = _row_of(task)
+    return None if row is None else read(row)
 
 
 def emit_degraded(
@@ -185,7 +185,8 @@ def read_for_stage(task: TicketTask, stage: str) -> TicketSnapshot | None:
     row with no digest is None silently; an untrusted read records one
     ``read_untrusted`` event.
     """
-    return _read_or_degrade(_row_of(task), stage=stage)
+    row = _row_of(task)
+    return None if row is None else _read_or_degrade(row, stage=stage)
 
 
 def snapshot_for_stage(
@@ -216,6 +217,10 @@ def snapshot_for_stage(
         stage,
     )
     row = _row_of(task)
+    if row is None:
+        # The task object may carry an old digest, but with no current queue
+        # row there is no trusted snapshot to fall back to.
+        row = task.model_copy(update={"snapshot_digest": None})
     if row.snapshot_digest is None:
         emit_degraded(row, kind="read_untrusted", reason="missing", stage=stage)
         return None

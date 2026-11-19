@@ -588,16 +588,15 @@ def test_local_executor_fetches_plan_from_snapshot_when_absent(
         backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
     )
     executor = LocalExecutor(config=config, runner=fake_runner)
-    client = ClientConfig(name="test", workspace_path=workspace)
+    client = ClientConfig(
+        name="test", workspace_path=workspace, operator_github_login=_OPERATOR
+    )
     task = seeded_row(
-        _plan_snapshot(), seed=False, ticket_id="896", client="test", stage=Stage.IMPL
+        _plan_snapshot(), ticket_id="896", client="test", stage=Stage.IMPL
     )
 
     try:
-        with (
-            patch("cw.executor.local.aider_available", return_value=True),
-            patch("cw.executor.local.cached_gh_login", return_value=_OPERATOR),
-        ):
+        with patch("cw.executor.local.aider_available", return_value=True):
             executor.spawn(
                 stage=Stage.IMPL, task=task, worktree=worktree, client=client
             )
@@ -629,10 +628,7 @@ def test_local_executor_github_row_without_a_digest_is_plan_missing(
     client = ClientConfig(name="test", workspace_path=workspace)
     task = TicketTask(ticket_id="896", client="test", stage=Stage.IMPL)
 
-    with (
-        patch("cw.executor.local.aider_available", return_value=True),
-        patch("cw.executor.local.cached_gh_login", return_value=_OPERATOR),
-    ):
+    with patch("cw.executor.local.aider_available", return_value=True):
         executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
 
     assert len(fake_runner.calls) == 0
@@ -695,16 +691,15 @@ def test_local_executor_launch_reached_after_snapshot_plan(
         backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
     )
     executor = LocalExecutor(config=config, runner=fake_runner)
-    client = ClientConfig(name="test", workspace_path=workspace)
+    client = ClientConfig(
+        name="test", workspace_path=workspace, operator_github_login=_OPERATOR
+    )
     task = seeded_row(
-        _plan_snapshot(), seed=False, ticket_id="896", client="test", stage=Stage.IMPL
+        _plan_snapshot(), ticket_id="896", client="test", stage=Stage.IMPL
     )
 
     try:
-        with (
-            patch("cw.executor.local.aider_available", return_value=True),
-            patch("cw.executor.local.cached_gh_login", return_value=_OPERATOR),
-        ):
+        with patch("cw.executor.local.aider_available", return_value=True):
             sid = executor.spawn(
                 stage=Stage.IMPL, task=task, worktree=worktree, client=client
             )
@@ -732,9 +727,8 @@ def _fetch_plan(
     login: str | None = _OPERATOR,
     ticket_id: str = "896",
 ) -> str | None:
-    task = seeded_row(snapshot, seed=False, ticket_id="896", client="test")
-    with patch("cw.executor.local.cached_gh_login", return_value=login):
-        return SnapshotPlanFetcher(task, ctx).fetch(ticket_id)
+    task = seeded_row(snapshot, ticket_id="896", client="test")
+    return SnapshotPlanFetcher(task, ctx, gh_login=login).fetch(ticket_id)
 
 
 def test_snapshot_plan_fetcher_github_returns_the_last_gh_login_plan(
@@ -793,9 +787,8 @@ def test_snapshot_plan_fetcher_without_a_usable_snapshot_is_none(
     ctx = SnapshotContext(github=True)
     no_digest = TicketTask(ticket_id="896", client="test", stage=Stage.IMPL)
     untrusted = no_digest.model_copy(update={"snapshot_digest": "0" * 64})
-    with patch("cw.executor.local.cached_gh_login", return_value=_OPERATOR):
-        assert SnapshotPlanFetcher(no_digest, ctx).fetch("896") is None
-        assert SnapshotPlanFetcher(untrusted, ctx).fetch("896") is None
+    assert SnapshotPlanFetcher(no_digest, ctx, gh_login=_OPERATOR).fetch("896") is None
+    assert SnapshotPlanFetcher(untrusted, ctx, gh_login=_OPERATOR).fetch("896") is None
 
 
 def test_local_preflight_success_returns_preflight_ok(

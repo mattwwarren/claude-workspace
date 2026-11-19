@@ -174,9 +174,6 @@ def record_snapshot(
             "previous_digest": previous,
             "refresh": refresh,
             "comments": comments,
-            # The mandatory recorded event carries the trust mutation's
-            # audit count even if the supplementary conflict event is lost.
-            "author_conflicts": newly,
             "row_updated": task is not None,
         }
         record_event(

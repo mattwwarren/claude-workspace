@@ -24,6 +24,7 @@ import logging
 from typing import TYPE_CHECKING, Literal
 
 from cw.codex_plan._post import PLAN_MARKER_PREFIX, PLAN_PRODUCER
+from cw.codex_plan._result import PLAN_MD_RELATIVE_PATH
 from cw.exceptions import CwError
 from cw.gh import _PLAN_MARKER
 from cw.models.repair_entry import is_adopted_repair_entry
@@ -44,7 +45,6 @@ _log = logging.getLogger("cw.ticket_snapshot")
 PlanSource = Literal["outbox", "snapshot"]
 #: The friction entry prefix IMPL records for a recovered plan.
 PLAN_RECOVERED_FRICTION = "plan_recovered"
-PLAN_RELATIVE_PATH = (".cw", "plan.md")
 
 
 def _is_plan_entry(entry: OutboxEntry, ticket: str) -> bool:
@@ -103,7 +103,7 @@ def recover_plan(
     Returns the source used, or None when the file already exists, the row is
     an adopted repair entry, or neither source holds a reviewed plan.
     """
-    plan_path = worktree.joinpath(*PLAN_RELATIVE_PATH)
+    plan_path = worktree / PLAN_MD_RELATIVE_PATH
     if plan_path.exists() or is_adopted_repair_entry(task):
         return None
     source: PlanSource = "outbox"

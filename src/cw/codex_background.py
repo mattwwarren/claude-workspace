@@ -125,6 +125,11 @@ __all__ = [
 
 _log = logging.getLogger(__name__)
 
+# RFC 0019 T2 snapshot refresh is staged behind an explicit client allowlist.
+# Keep this narrow until snapshot retention/purge and row-restore procedures
+# are shipped; expanding it is an operator rollout decision, not a default.
+_SNAPSHOT_REFRESH_CLIENT_ALLOWLIST = frozenset({"acme", "test"})
+
 # Shared budget for draining outstanding review threads on a graceful exit.
 #
 # Why 10s: long enough for a thread that has already finished its codex
@@ -536,14 +541,14 @@ def _review_and_confirm(
     # #3712: one snapshot context for the whole run; enabled review passes
     # refresh the ticket snapshot through it. The login is resolved only when
     # the loop runs (#2633: `gh api user` otherwise never needs to run).
-    # Snapshot refresh applies to every codex review pass. Only the operator
-    # login remains lazy behind the fix-loop setting; refresh rollout is
-    # independent so clean-mode reviews see the current ticket as well.
+    # Snapshot refresh is independently staged per client until retention and
+    # purge controls are available; the operator login remains lazy behind the
+    # fix-loop setting.
     snapshots = context_for_client(
         client,
         worktree,
         resolve_login=fix_loop_enabled,
-        refresh=True,
+        refresh=client.name in _SNAPSHOT_REFRESH_CLIENT_ALLOWLIST,
     )
     resumed = resume_pending_confirm(
         task=task,

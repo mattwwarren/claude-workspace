@@ -350,15 +350,13 @@ def test_fallback_uses_the_current_row_digest_not_the_stale_task(
     assert event.payload["snapshot_digest"] == record.snapshot_digest
 
 
-def test_fallback_uses_the_task_itself_when_no_row_matches(
-    tmp_path: Path, worktree: Path
-) -> None:
+def test_fallback_is_none_when_no_row_matches(tmp_path: Path, worktree: Path) -> None:
     stored = _row_snapshot()
     task = seeded_row(stored, seed=False)
     result = snapshot_for_stage(
         task, _client(tmp_path, "linear"), worktree, stage=STAGE
     )
-    assert result == stored
+    assert result is None
     assert len(events_of(DEGRADED)) == 1
 
 
@@ -590,7 +588,7 @@ def test_read_current_raises_untrusted_unlike_read_for_stage() -> None:
     assert _degraded() == []
 
 
-def test_read_current_falls_back_to_the_task_without_a_row() -> None:
+def test_read_current_is_none_without_a_row() -> None:
     stored = _row_snapshot()
     task = seeded_row(stored, seed=False)
-    assert read_current(task) == stored
+    assert read_current(task) is None
