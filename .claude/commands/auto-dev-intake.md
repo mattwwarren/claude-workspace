@@ -182,21 +182,25 @@ block); the parse rules below are tracker-aware.
 <!-- el: intake.materialize-cw-context-json -->
 ### Step 0d: Materialize `.cw/context.json`
 
-After ticket fetch (single-ticket mode), write the orientation context for downstream per-stage files:
+After ticket fetch (single-ticket mode), snapshot the ticket and materialize the orientation context for downstream per-stage files. `cw ticket snapshot` is the only writer of `.cw/context.json` (RFC 0019 T1, #3711): it records the snapshot in the store, stamps the row's digest, and renders the file, with `materialized_by_session` taken from `.claude/cw-context.json`. Do not hand-write the file.
+
+- **`github-issues` client:** cw fetches the issue itself; no JSON is passed.
 
 ```bash
-mkdir -p .cw
-cat > .cw/context.json << 'CWCTXEOF'
+cw ticket snapshot <n> -c <client>
+```
+
+- **Any other tracker (`linear`, or an unset tracker):** the model reports the ticket as one cw-defined document on stdin. `agent_authored` is never supplied here; cw computes it from each body.
+
+```bash
+cw ticket snapshot <ID> -c <client> --from-json - <<'CWSNAPEOF'
 {
-  "ticket_id": "<TICKET>",
-  "ticket_title": "<title from ticket fetch>",
-  "ticket_body": "<body from ticket fetch>",
-  "comments": [{"author": "<login>", "created_at": "<ISO8601 createdAt>", "body": "<comment text>"}, "..."],
-  "scope_hint": null,
-  "prior_decisions": [],
-  "materialized_by_session": "<session_id from .claude/cw-context.json>"
+  "ticket_url": "<ticket url or null>",
+  "title": "<title from ticket fetch>",
+  "body": "<body from ticket fetch>",
+  "comments": [{"id": "<comment id>", "author_id": "<user id or null>", "author": "<login or name>", "created_at": "<ISO8601 creation timestamp>", "body": "<comment text>", "minimized": false}]
 }
-CWCTXEOF
+CWSNAPEOF
 ```
 
 <!-- el: intake.populating-comments -->
@@ -205,7 +209,7 @@ CWCTXEOF
 - **MCP-tracker mode (for example `linear`):** the list-comments operation is a **mandatory op that MUST run before Step 0d** — run it explicitly and populate `comments` from its result. Do NOT rely on model initiative to decide whether comments are worth fetching.
 
 <!-- el: intake.key-names-are-reader-contract -->
-**Key names are a reader contract (#2700).** `ticket_title` and `ticket_body` are read by two Python readers (`_load_ticket_context` in `src/cw/codex_review/_context/core.py` and `build_task_message` in `src/cw/local_runner.py`), pinned by `tests/test_auto_dev_intake_context_schema.py`; a rename must change the heredoc, both readers, and that test together. `comments` entries written here are always `{author, created_at, body}` — GitHub's verbatim `createdAt`/`author.login` shape appears only in the live-fetched `.cw/impl-comments.json`.
+**Key names are a reader contract (#2700).** `ticket_title` and `ticket_body` are read by two Python readers (`_load_ticket_context` in `src/cw/codex_review/_context/core.py` and `build_task_message` in `src/cw/local_runner.py`), pinned by `tests/test_auto_dev_intake_context_schema.py`; a rename must change the renderer (`cw.ticket_snapshot._render`), both readers, and that test together. `comments` entries written here are always `{author, created_at, body}` — GitHub's verbatim `createdAt`/`author.login` shape appears only in the live-fetched `.cw/impl-comments.json`.
 
 **WARN on comments-fetch failure:** a comments fetch that exits non-zero or
 returns malformed JSON is rare — emit an attention signal and continue with
@@ -217,7 +221,7 @@ failed; do not improvise the event name or payload from memory.
 
 Stamp `materialized_by_session` with the current `session_id` (from `.claude/cw-context.json`). This is what makes the idempotency guard below requeue-safe.
 
-**Idempotency (requeue-safe):** skip re-fetch and re-write **only** if ALL of the following hold: `.cw/context.json` exists, its `ticket_id` matches, AND its `materialized_by_session` equals the current `session_id` (from `.claude/cw-context.json`). Otherwise — a different/missing `materialized_by_session` means a **new session is running against a reused worktree (i.e. a `requeue`)** — you MUST re-fetch the ticket with the get-issue operation and **overwrite** `.cw/context.json` so newly-added operator comments and resolutions reach this run. Read the existing file and compare both fields before deciding to skip.
+**Idempotency (requeue-safe):** skip re-fetch and re-write **only** if ALL of the following hold: `.cw/context.json` exists, its `ticket_id` matches, AND its `materialized_by_session` equals the current `session_id` (from `.claude/cw-context.json`). Otherwise — a different/missing `materialized_by_session` means a **new session is running against a reused worktree (i.e. a `requeue`)** — you MUST rerun the tracker-specific `cw ticket snapshot` command above and **overwrite** `.cw/context.json` so newly-added operator comments and resolutions reach this run. Read the existing file and compare both fields before deciding to skip.
 
 **Changing this idempotency guard, or debugging a stale `.cw/context.json`,** is
 rare — the rationale (#837) and the `.cw/context.json` vs `.claude/cw-context.json`

@@ -2152,6 +2152,31 @@
      "title": "Review Engine Settlements",
      "type": "array"
     },
+    "snapshot_digest": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Snapshot Digest"
+    },
+    "snapshot_fetched_at": {
+     "anyOf": [
+      {
+       "format": "date-time",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Snapshot Fetched At"
+    },
     "stale_gate_detected_at": {
      "anyOf": [
       {
@@ -4307,6 +4332,31 @@
        },
        "title": "Review Engine Settlements",
        "type": "array"
+      },
+      "snapshot_digest": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Snapshot Digest"
+      },
+      "snapshot_fetched_at": {
+       "anyOf": [
+        {
+         "format": "date-time",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Snapshot Fetched At"
       },
       "stale_gate_detected_at": {
        "anyOf": [
@@ -6559,6 +6609,31 @@
        "title": "Review Engine Settlements",
        "type": "array"
       },
+      "snapshot_digest": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Snapshot Digest"
+      },
+      "snapshot_fetched_at": {
+       "anyOf": [
+        {
+         "format": "date-time",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Snapshot Fetched At"
+      },
       "stale_gate_detected_at": {
        "anyOf": [
         {
@@ -6799,7 +6874,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 62,
+     "default": 63,
      "title": "Schema Version",
      "type": "integer"
     },
@@ -9165,6 +9240,31 @@
      "title": "Review Engine Settlements",
      "type": "array"
     },
+    "snapshot_digest": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Snapshot Digest"
+    },
+    "snapshot_fetched_at": {
+     "anyOf": [
+      {
+       "format": "date-time",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Snapshot Fetched At"
+    },
     "stale_gate_detected_at": {
      "anyOf": [
       {
@@ -11321,6 +11421,31 @@
        "title": "Review Engine Settlements",
        "type": "array"
       },
+      "snapshot_digest": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Snapshot Digest"
+      },
+      "snapshot_fetched_at": {
+       "anyOf": [
+        {
+         "format": "date-time",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Snapshot Fetched At"
+      },
       "stale_gate_detected_at": {
        "anyOf": [
         {
@@ -11561,7 +11686,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 62,
+     "default": 63,
      "title": "Schema Version",
      "type": "integer"
     },

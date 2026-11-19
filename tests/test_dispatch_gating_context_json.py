@@ -7,16 +7,27 @@ Covers ``cw.dispatch.gating.context_json``. Split out of
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from cw.dev_queue import add_ticket
+from cw.dev_queue import add_ticket, load_dev_queue
+from cw.dev_queue.requeue import requeue_ticket
+from cw.dev_queue.stage_entry import enter_stage
 from cw.dispatch import dispatch_tick
 from cw.models import (
     ClientConfig,
     OrchestratorConfig,
+    QueueItemStatus,
+    Stage,
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
+from cw.ticket_snapshot import write_snapshot
 from tests._clients_yaml import write_clients_yaml
+from tests._shared.ticket_context import make_snapshot
+from tests._tool_fakes import FakeGhCli
+
+if TYPE_CHECKING:
+    import pytest
 
 # ---------------------------------------------------------------------------
 # TestSpawnInvalidatesStaleContextJson (#1046)
@@ -104,3 +115,206 @@ class TestSpawnInvalidatesStaleContextJson:
 
         assert context_file.exists()
         assert context_file.read_text() == '{"sentinel": "preserved"}'
+
+
+class TestSpawnRendersContextJsonFromSnapshot:
+    """Dispatch spawns re-materialize the snapshot-backed context."""
+
+    @staticmethod
+    def _snapshot_digest(ticket_id: str, client: str) -> str:
+        return write_snapshot(make_snapshot(ticket_id=ticket_id, client=client))
+
+    def test_requeue_respawn_rerenders_from_store(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.worktree import create_worktree
+
+        write_clients_yaml(sample_client_config)
+        ticket_id = "GEN-SNAPSHOT-REQUEUE"
+        digest = self._snapshot_digest(ticket_id, sample_client_config.name)
+        branch = f"{sample_client_config.feature_branch_prefix}/{ticket_id}"
+        worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
+        context_file = worktree / ".cw" / "context.json"
+        context_file.parent.mkdir(parents=True, exist_ok=True)
+        context_file.write_text('{"sentinel": "stale"}')
+        add_ticket(
+            TicketTask(
+                ticket_id=ticket_id,
+                client=sample_client_config.name,
+                status=QueueItemStatus.BLOCKED_ON_USER,
+                session_id="sess-snapshot",
+                attempts=1,
+                snapshot_digest=digest,
+            )
+        )
+        requeue_ticket(
+            ticket_id,
+            sample_client_config.name,
+            native_daemon=FakeNativeDaemonClient(),
+        )
+        gh = FakeGhCli().install(monkeypatch)
+
+        result = dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
+
+        assert result.spawned == 1
+        assert not any(call[1:3] == ["issue", "view"] for call in gh.calls)
+        assert context_file.exists()
+        assert '"sentinel": "stale"' not in context_file.read_text()
+        assert '"ticket_id": "GEN-SNAPSHOT-REQUEUE"' in context_file.read_text()
+
+    def test_stage_advance_rerenders_from_store(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        from cw.worktree import create_worktree
+
+        write_clients_yaml(sample_client_config)
+        ticket_id = "GEN-SNAPSHOT-STAGE"
+        digest = self._snapshot_digest(ticket_id, sample_client_config.name)
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client=sample_client_config.name,
+            attempts=1,
+            snapshot_digest=digest,
+        )
+        enter_stage(task, Stage.IMPL)
+        add_ticket(task)
+        branch = f"{sample_client_config.feature_branch_prefix}/{ticket_id}"
+        worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
+
+        result = dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
+
+        assert result.spawned == 1
+        assert (
+            next(
+                row for row in load_dev_queue().tasks if row.ticket_id == ticket_id
+            ).attempts
+            > 1
+        )
+        assert (worktree / ".cw" / "context.json").exists()
+
+    def test_local_render_failure_still_spawns_without_reader_file(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        from cw.worktree import create_worktree
+
+        config_dir = tmp_dispatch_dirs / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            "  test-client:\n"
+            f"    workspace_path: {sample_client_config.workspace_path}\n"
+            f"    default_branch: {sample_client_config.default_branch}\n"
+            f"    worktree_base: {sample_client_config.worktree_base}\n"
+            "    pipeline:\n"
+            "      executors:\n"
+            "        plan:\n"
+            "          backend: local\n"
+        )
+        ticket_id = "GEN-SNAPSHOT-LOCAL"
+        branch = f"{sample_client_config.feature_branch_prefix}/{ticket_id}"
+        worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
+        context_file = worktree / ".cw" / "context.json"
+        context_file.parent.mkdir(parents=True, exist_ok=True)
+        context_file.write_text('{"sentinel": "stale"}')
+        add_ticket(
+            TicketTask(
+                ticket_id=ticket_id,
+                client=sample_client_config.name,
+                attempts=1,
+                snapshot_digest="c" * 64,
+            )
+        )
+
+        result = dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
+
+        assert result.spawned == 1
+        assert not context_file.exists()
+
+    def test_unremovable_reader_file_does_not_abort_spawn(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.dispatch.gating import context_json
+        from cw.worktree import create_worktree
+
+        write_clients_yaml(sample_client_config)
+        ticket_id = "GEN-SNAPSHOT-CLEANUP"
+        branch = f"{sample_client_config.feature_branch_prefix}/{ticket_id}"
+        worktree = create_worktree(sample_client_config, branch, allow_dirty_reuse=True)
+        context_file = worktree / ".cw" / "context.json"
+        context_file.parent.mkdir(parents=True, exist_ok=True)
+        context_file.write_text('{"sentinel": "stale"}')
+        add_ticket(
+            TicketTask(
+                ticket_id=ticket_id,
+                client=sample_client_config.name,
+                attempts=1,
+                snapshot_digest="c" * 64,
+            )
+        )
+        monkeypatch.setattr(context_json, "_unlink_stale_context", lambda *_a: False)
+        monkeypatch.setattr(
+            context_json, "_invalidate_stale_context_json", lambda *_a: True
+        )
+
+        result = dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
+
+        assert result.spawned == 1
+        assert context_file.exists()
+
+
+class TestUnlinkStaleContext:
+    """The one stale-context removal (RFC 0019 T1 review item 33)."""
+
+    def test_unlink_failure_returns_false_and_logs_ids_and_class_only(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from cw.dispatch.gating import context_json
+        from cw.models import TicketTask
+
+        stale = tmp_path / ".cw" / "context.json"
+        stale.parent.mkdir(parents=True)
+        stale.write_text('{"body": "secret ticket text"}')
+
+        denied = "denied"
+
+        def _refuse(self: Path, missing_ok: bool = False) -> None:
+            raise PermissionError(denied)
+
+        monkeypatch.setattr(Path, "unlink", _refuse)
+        task = TicketTask(ticket_id="GEN-UNLINK", client="acme")
+
+        with caplog.at_level("WARNING", logger="cw.dispatch"):
+            ok = context_json._unlink_stale_context(task, tmp_path)
+
+        assert ok is False
+        message = caplog.records[-1].getMessage()
+        assert "ticket_id=GEN-UNLINK" in message
+        assert "client=acme" in message
+        assert "error_class=PermissionError" in message
+        assert "secret ticket text" not in message
+
+    def test_unlink_success_removes_file_and_returns_true(self, tmp_path: Path) -> None:
+        from cw.dispatch.gating import context_json
+        from cw.models import TicketTask
+
+        stale = tmp_path / ".cw" / "context.json"
+        stale.parent.mkdir(parents=True)
+        stale.write_text("{}")
+        task = TicketTask(ticket_id="GEN-UNLINK", client="acme")
+
+        assert context_json._unlink_stale_context(task, tmp_path) is True
+        assert not stale.exists()

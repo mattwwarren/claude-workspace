@@ -691,6 +691,13 @@ class TicketTask(BaseModel):
     review_engine_settlements: list[ReviewEngineSettlement] = Field(
         default_factory=list
     )
+    # GitHub #3711 (RFC 0019 T1) — the digest and fetch time of the row's
+    # ticket snapshot (cw.ticket_snapshot). Durable like operator_resolutions:
+    # no clear site, survives requeue and regress. Written only by the
+    # snapshot writer under dev_queue_lock. Never a binding source by itself;
+    # the store is read through cw.ticket_snapshot, which checks the digest.
+    snapshot_digest: str | None = None
+    snapshot_fetched_at: datetime | None = None
     # GitHub #1713 — durable detection latch for
     # cw.reconcile.tasks.release_stale_gated_tasks: stamped when a
     # BLOCKED_ON_USER row's gate condition is observed to have cleared (its

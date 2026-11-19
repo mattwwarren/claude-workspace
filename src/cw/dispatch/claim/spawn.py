@@ -83,6 +83,7 @@ _log = logging.getLogger("cw.dispatch")
 # this is a wait, not a retry of a broken operation.
 _OCCUPIED_DEFER_SECONDS: int = 30
 
+
 # Why: no-worker spawn failures of these types revert WITHOUT charging the
 # unproductive-attempt ceiling (#2695, #2722). A raw ``OSError`` is the infra
 # signal for adapter and auth-fetch failures. The missing ``claude`` binary is
@@ -733,9 +734,9 @@ def _spawn_claimed_task(
         # claim must defer its own reach back into gating.context_json
         # (mirrors the #698 reconcile/_shared -> cw.dispatch precedent the
         # ticket cites).
-        from cw.dispatch.gating.context_json import _invalidate_stale_context_json
+        from cw.dispatch.gating.context_json import _ensure_context_json_safe
 
-        _invalidate_stale_context_json(task, client, worktree_path)
+        _ensure_context_json_safe(task, client, worktree_path)
 
         executor = resolve_executor(task, client, native_daemon=resolved_native_daemon)
         # wall_clock_budget_seconds is always None since the process-kill-

@@ -5,14 +5,13 @@ Two contracts live here:
 - #1794: each comment is ``{author, created_at, body}``, not a bare body string.
 - #2700: the ticket text is keyed ``ticket_title``/``ticket_body``. The two
   Python readers (``_load_ticket_context``, ``build_task_message``) read those
-  keys; the tests below extract the literal heredoc JSON from the intake prose
-  and drive both real readers with it, so a key rename on either side fails here.
+  keys; the tests below render the context from the real renderer and drive
+  both real readers with it, so a key rename on either side fails here.
 """
 
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,15 +19,16 @@ from cw.codex_review import _load_ticket_context
 from cw.codex_review._context import _prepare_review_pass
 from cw.codex_runner import FakeCodexRunner
 from cw.local_runner import TASK_CONTEXT_RELATIVE_PATH, build_task_message
+from cw.ticket_snapshot import render_context
 from tests._codex_review_helpers import _task
 from tests._shared.git_repos import git_in
+from tests._shared.ticket_context import make_snapshot, write_context_json
 from tests._shared.workflow_text import _cmd
 from tests.test_check_impl_guard_staleness import _run
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-_HEREDOC_PATTERN = re.compile(r"<< 'CWCTXEOF'\n(.*?)\nCWCTXEOF", re.DOTALL)
 _COMMENT_KEYS = {"author", "created_at", "body"}
 _STALE_COMMENT_AT = "2026-08-11T03:28:16Z"
 _HEAD_COMMIT_AT = "2026-08-10T22:53:27-04:00"
@@ -41,15 +41,9 @@ _SMALL_TIER_NO_TICKET = ["Code Quality Reviewer", "SysAdmin Reviewer"]
 
 
 def _example_context() -> dict[str, object]:
-    """Parse the literal ``CWCTXEOF`` heredoc JSON out of the intake prose."""
-    content = _cmd("auto-dev-intake.md")
-    match = _HEREDOC_PATTERN.search(content)
-    if match is None:
-        msg = "auto-dev-intake.md has no `<< 'CWCTXEOF'` heredoc block"
-        raise AssertionError(msg)
-    data = json.loads(match.group(1))
-    assert isinstance(data, dict)
-    return data
+    """The rendered ``.cw/context.json`` for the observed snapshot (real renderer)."""
+    snapshot = make_snapshot()
+    return dict(render_context(snapshot, "0" * 64, materialized_by_session=None))
 
 
 def _example_text(example: dict[str, object], key: str) -> str:
@@ -68,12 +62,6 @@ def _example_comment(example: dict[str, object]) -> dict[str, object]:
             return entry
     msg = "intake example has no dict comment entry"
     raise AssertionError(msg)
-
-
-def _write_context(worktree: Path, payload: dict[str, object]) -> None:
-    cw_dir = worktree / ".cw"
-    cw_dir.mkdir(exist_ok=True)
-    (cw_dir / "context.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _docs_only_feature_repo(make_git_repo: Callable[[str], Path], name: str) -> Path:
@@ -115,7 +103,7 @@ def test_codex_review_reader_loads_intake_example(tmp_path: Path) -> None:
     example = _example_context()
     title = _example_text(example, "ticket_title")
     body = _example_text(example, "ticket_body")
-    _write_context(tmp_path, example)
+    write_context_json(tmp_path, example)
 
     _plan, ticket_text = _load_ticket_context(tmp_path)
 
@@ -128,7 +116,7 @@ def test_local_runner_reader_loads_intake_example(tmp_path: Path) -> None:
     example = _example_context()
     title = _example_text(example, "ticket_title")
     body = _example_text(example, "ticket_body")
-    _write_context(tmp_path, example)
+    write_context_json(tmp_path, example)
     (tmp_path / ".cw" / "plan.md").write_text("plan content", encoding="utf-8")
 
     build_task_message(tmp_path)
@@ -140,14 +128,40 @@ def test_local_runner_reader_loads_intake_example(tmp_path: Path) -> None:
 
 
 def test_example_comment_entry_shape() -> None:
+    """Superset: the T1 fields are additive; the three reader keys stay (R5)."""
     entry = _example_comment(_example_context())
-    assert set(entry) == _COMMENT_KEYS
+    assert set(entry) >= _COMMENT_KEYS
+
+
+def test_rendered_file_pins_all_seven_2700_keys_by_name() -> None:
+    example = _example_context()
+    for key in (
+        "ticket_id",
+        "ticket_title",
+        "ticket_body",
+        "comments",
+        "scope_hint",
+        "prior_decisions",
+        "materialized_by_session",
+    ):
+        assert key in example
 
 
 def test_example_comment_shape_accepted_by_staleness_script(tmp_path: Path) -> None:
     """The context.json comment shape (snake_case ``created_at``) is read by
     the impl-guard staleness script, not silently skipped."""
-    entry = dict(_example_comment(_example_context()))
+    # The captured comments include agent-marked ones, which the script skips by
+    # design (#2438); the operator-authored capture is the one this shape must reach.
+    comments = _example_context()["comments"]
+    assert isinstance(comments, list)
+    entry = dict(
+        next(
+            c
+            for c in comments
+            if isinstance(c, dict)
+            and "<!-- cw-agent-authored -->" not in str(c["body"])
+        )
+    )
     entry["created_at"] = _STALE_COMMENT_AT
     comments_file = tmp_path / "comments.json"
     comments_file.write_text(json.dumps([entry]), encoding="utf-8")
@@ -169,7 +183,7 @@ def test_intake_example_adds_product_manager_to_small_tier_roster(
     title = _example_text(example, "ticket_title")
     body = _example_text(example, "ticket_body")
     repo = _docs_only_feature_repo(make_git_repo, "wt-intake-roster")
-    _write_context(repo, example)  # untracked: the reviewed diff is unaffected
+    write_context_json(repo, example)  # untracked: the reviewed diff is unaffected
 
     prepared = _prepare_review_pass(
         _task(),

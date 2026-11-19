@@ -10,10 +10,19 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from cw.events import record_event
+from cw.exceptions import CwError
 from cw.executor import resolve_executor_config
 from cw.models import (
     CONTEXT_JSON_RELATIVE_PATH,
     LOCAL_BACKEND,
+    OrchestratorEventType,
+)
+from cw.ticket_snapshot import (
+    RenderFailureCause,
+    SnapshotUntrustedError,
+    digest_or_none,
+    render_for_task,
 )
 
 if TYPE_CHECKING:
@@ -30,10 +39,12 @@ _LOGGER_NAME = "cw.dispatch"
 
 _log = logging.getLogger(_LOGGER_NAME)
 
+_RENDER_ERROR: RenderFailureCause = "render_error"
+
 
 def _invalidate_stale_context_json(
     task: TicketTask, client: ClientConfig, worktree_path: Path
-) -> None:
+) -> bool:
     """Delete a stale ``.cw/context.json`` before spawning a re-spawned task.
 
     Requeue idempotency guard (#1046): a re-spawned task (``attempts > 1``,
@@ -49,9 +60,9 @@ def _invalidate_stale_context_json(
     ``## Ticket:`` header if it is missing (the #952 regression class).
     """
     if task.attempts <= 1:
-        return
+        return True
     if resolve_executor_config(task.stage, task, client).backend == LOCAL_BACKEND:
-        return
+        return True
     stale_context = worktree_path / CONTEXT_JSON_RELATIVE_PATH
     if stale_context.exists():
         _log.info(
@@ -61,4 +72,107 @@ def _invalidate_stale_context_json(
             task.attempts,
             worktree_path,
         )
-    stale_context.unlink(missing_ok=True)
+    if not _unlink_stale_context(task, worktree_path):
+        _log.warning(
+            "dispatch: could not verify stale .cw/context.json invalidation"
+            " ticket_id=%s client=%s",
+            task.ticket_id,
+            task.client,
+        )
+        return False
+    return True
+
+
+def _emit_render_failure(
+    task: TicketTask, cause: RenderFailureCause, error_class: str
+) -> None:
+    """Log and record ``ticket.snapshot_render_failed``. Never parks, never raises.
+
+    Sources are the task row (RFC 0019 R31). The payload and the log carry the
+    closed ``cause`` and the exception class name, never exception text or
+    ticket content.
+    """
+    digest = digest_or_none(task.snapshot_digest)
+    _log.warning(
+        "dispatch: ticket snapshot not rendered; .cw/context.json unavailable"
+        " ticket_id=%s client=%s cause=%s error_class=%s",
+        task.ticket_id,
+        task.client,
+        cause,
+        error_class,
+    )
+    try:
+        record_event(
+            OrchestratorEventType.TICKET_SNAPSHOT_RENDER_FAILED,
+            {
+                "ticket_id": task.ticket_id,
+                "client": task.client,
+                "snapshot_digest": digest,
+                "cause": cause,
+            },
+            correlation_id=task.ticket_id,
+        )
+    except (CwError, OSError):
+        _log.warning(
+            "dispatch: ticket.snapshot_render_failed event not recorded ticket_id=%s",
+            task.ticket_id,
+            exc_info=True,
+        )
+
+
+def _unlink_stale_context(task: TicketTask, worktree_path: Path) -> bool:
+    """Remove any ``.cw/context.json`` left by a prior session.
+
+    The single stale-context removal. The invalidation helper skips LOCAL
+    executors, so a failed render calls this too: a stale file must never
+    remain at the path a worker reads after a failed render (RFC 0019 T1
+    review item 26). Returns False only when the unlink itself raises
+    ``OSError``, which is logged with ids and error class, never ticket text.
+    """
+    stale_context = worktree_path / CONTEXT_JSON_RELATIVE_PATH
+    try:
+        stale_context.unlink(missing_ok=True)
+    except OSError as exc:
+        _log.warning(
+            "dispatch: could not remove stale .cw/context.json ticket_id=%s"
+            " client=%s error_class=%s",
+            task.ticket_id,
+            task.client,
+            type(exc).__name__,
+        )
+        return False
+    return True
+
+
+def _ensure_context_json_safe(
+    task: TicketTask,
+    client: ClientConfig,
+    worktree_path: Path,
+) -> None:
+    """Best-effort context preparation; expected failures do not block spawn."""
+    _invalidate_stale_context_json(task, client, worktree_path)
+    _render_context_json_from_snapshot(task, worktree_path)
+
+
+def _render_context_json_from_snapshot(task: TicketTask, worktree_path: Path) -> bool:
+    """Re-render ``.cw/context.json`` from the snapshot store on spawn (RFC 0019 T1).
+
+    A no-op without a row digest. Store-only: no tracker call, no lock. On a
+    failure any existing file is removed, the failure is
+    recorded through :func:`_emit_render_failure`, and the return value says
+    whether the spawn may safely proceed without the file.
+    """
+    if task.snapshot_digest is None:
+        return True
+    cause: RenderFailureCause
+    try:
+        render_for_task(task, worktree_path)
+    except SnapshotUntrustedError as exc:
+        cause, error_class = exc.reason, type(exc).__name__
+    except OSError as exc:
+        cause, error_class = _RENDER_ERROR, type(exc).__name__
+    else:
+        return True
+    cleanup_succeeded = _unlink_stale_context(task, worktree_path)
+    _emit_render_failure(task, cause, error_class)
+    return cleanup_succeeded
