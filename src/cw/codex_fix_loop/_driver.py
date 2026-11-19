@@ -182,6 +182,12 @@ def read_for_stage(task: TicketTask, _stage: str) -> TicketSnapshot | None:
         return read_current(task)
     except SnapshotUntrustedError:
         return None
+    except OSError as exc:
+        _log.warning(
+            "fix-loop snapshot read failed; degrading to None error=%s",
+            type(exc).__name__,
+        )
+        return None
 
 
 def _remaining_budget(deadline: float | None) -> float | None:

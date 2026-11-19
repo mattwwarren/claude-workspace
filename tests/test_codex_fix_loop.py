@@ -152,6 +152,21 @@ def _task(*, scope_hint: str | None = None) -> TicketTask:
     )
 
 
+def test_read_for_stage_degrades_on_store_oserror(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def _unreadable(_task: TicketTask) -> object:
+        msg = "permission denied"
+        raise PermissionError(msg)
+
+    monkeypatch.setattr(_driver, "read_current", _unreadable)
+    with caplog.at_level(logging.WARNING, logger="cw.codex_fix_loop._driver"):
+        assert _driver.read_for_stage(_task(), "review") is None
+
+    assert "PermissionError" in caplog.text
+    assert "permission denied" not in caplog.text
+
+
 def _finding_dict(
     *, severity: str, line: int, evidence: str, summary: str
 ) -> dict[str, object]:

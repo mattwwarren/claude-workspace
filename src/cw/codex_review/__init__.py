@@ -41,7 +41,9 @@ Submodules:
 
 from __future__ import annotations
 
-from cw.auto_dev_result.schema._vocab import CODEX_MUST_FIX_FINDINGS
+from cw.auto_dev_result.schema._vocab import (
+    CODEX_MUST_FIX_FINDINGS_BLOCKER_REASON as CODEX_MUST_FIX_FINDINGS,
+)
 from cw.codex_review._audit_events import (
     _EXPECTED_REVIEWER_ITEM_TYPES,
     _extract_terminal_error_message,

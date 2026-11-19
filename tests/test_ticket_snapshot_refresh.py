@@ -318,6 +318,26 @@ def test_cap_failure_end_to_end_returns_last_snapshot(
     assert event.payload["reason"] == "cap"
 
 
+def test_valueerror_in_record_step_falls_back_to_last_snapshot(
+    tmp_path: Path, worktree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stored = _row_snapshot()
+    task = seeded_row(stored)
+
+    def _malformed_queue(*_args: object, **_kwargs: object) -> object:
+        msg = "Expecting value: line 1 column 1"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(refresh_mod, "snapshot_from_github", lambda *_args: stored)
+    monkeypatch.setattr(refresh_mod, "record_snapshot", _malformed_queue)
+    result = snapshot_for_stage(task, _client(tmp_path), worktree, stage=STAGE)
+
+    assert result == stored
+    (event,) = events_of(DEGRADED)
+    assert event.payload["kind"] == "refresh_failed"
+    assert event.payload["reason"] == "refused"
+
+
 def test_no_binding_runs_on_the_last_snapshot(tmp_path: Path, worktree: Path) -> None:
     stored = _row_snapshot()
     task = seeded_row(stored)

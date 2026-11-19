@@ -107,7 +107,7 @@ def refresh_snapshot(
     except SnapshotRefusedError as exc:
         msg = "the refreshed snapshot was refused by a size or count cap"
         raise RefreshError(msg, reason="cap") from exc
-    except (CwError, OSError) as exc:
+    except (CwError, OSError, ValueError) as exc:
         msg = f"snapshot record step failed ({type(exc).__name__})"
         raise RefreshError(msg, reason="refused") from exc
     return snapshot

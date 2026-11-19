@@ -95,6 +95,15 @@ def _previous_snapshot(snapshot: TicketSnapshot) -> TicketSnapshot | None:
             exc.reason,
         )
         return None
+    except OSError as exc:
+        _log.warning(
+            "ticket snapshot previous unreadable; author conflicts not compared"
+            " ticket_id=%s client=%s error=%s",
+            snapshot.ticket_id,
+            snapshot.client,
+            type(exc).__name__,
+        )
+        return None
 
 
 def _author_ids(comments: list[SnapshotComment]) -> dict[str, set[str]]:

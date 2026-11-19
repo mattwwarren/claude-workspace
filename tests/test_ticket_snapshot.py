@@ -696,6 +696,28 @@ def test_record_with_untrusted_previous_compares_nothing_and_does_not_raise(
     assert _flags(stored) == {"c1": False}
 
 
+def test_record_with_unreadable_previous_still_records_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    seeded_row(_snap(make_comment("c1", author_id="alice")))
+
+    def _unreadable(_task: object) -> TicketSnapshot:
+        msg = "permission denied"
+        raise PermissionError(msg)
+
+    monkeypatch.setattr(_record, "read", _unreadable)
+    with caplog.at_level(logging.WARNING, logger="cw.ticket_snapshot"):
+        record = record_snapshot(
+            _snap(make_comment("c1", author_id="mallory")),
+            detect_author_conflicts=True,
+        )
+
+    assert record.row_updated is True
+    assert "PermissionError" in caplog.text
+    assert "permission denied" not in caplog.text
+
+
 def test_conflict_event_failure_does_not_break_record(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
