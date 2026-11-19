@@ -36,7 +36,6 @@ from cw.executor_diagnostics import (
     persist_diagnostics_bundle,
 )
 from cw.executor_launch import _launch_logged_subprocess
-from cw.gh import fetch_approved_plan_comment
 from cw.models import CONTEXT_JSON_RELATIVE_PATH
 from cw.worktree import _parse_numstat_totals, apply_worker_tmpdir
 
@@ -213,22 +212,6 @@ class PlanFetcher(Protocol):
         ...
 
 
-class GithubIssuePlanFetcher:
-    """Fetches the approved plan from a GitHub issue's comments (production).
-
-    *cwd* is the ticket's client repo, bound at construction (#2884): it is a
-    per-spawn fixed fact, so :class:`PlanFetcher` and :class:`FakePlanFetcher`
-    keep their ``fetch(ticket_id)`` shape. ``None`` is the ambient working
-    directory (single-client behavior).
-    """
-
-    def __init__(self, cwd: Path | None = None) -> None:
-        self._cwd = cwd
-
-    def fetch(self, ticket_id: str) -> str | None:
-        return fetch_approved_plan_comment(ticket_id, cwd=self._cwd)
-
-
 class FakePlanFetcher:
     """Test double for PlanFetcher.
 
@@ -267,10 +250,10 @@ def build_task_message(
     becomes ``--message``, which does not.
 
     When .cw/plan.md is absent and both *ticket_id* and *plan_fetcher* are
-    provided, fetches the approved plan from the tracker (GitHub issue comment
-    carrying the ``<!-- plan-spec-reviewed`` marker). On a successful fetch the
-    plan is materialised to .cw/plan.md so subsequent retries do not need to
-    re-fetch.
+    provided, fetches the approved plan from the stored ticket snapshot (the
+    comment carrying the ``<!-- plan-spec-reviewed`` marker). On a successful
+    fetch the plan is materialised to .cw/plan.md so subsequent retries do not
+    need to re-fetch.
 
     Returns None when no plan is available — either .cw/plan.md is absent and
     the tracker also has no approved plan, or no fetcher/ticket_id was provided.

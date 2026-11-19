@@ -147,9 +147,12 @@ def snapshot(*, stage: Stage = Stage.PLAN, ticket_id: str = TICKET) -> DevQueueS
 
 
 def gated(backend: str, stage: Stage) -> bool:
-    """Whether a server row is checked: opencode PLAN/IMPL, codex PLAN/FINALIZE."""
+    """Whether a server row is checked: opencode PLAN/IMPL, codex PLAN only.
+
+    codex FINALIZE reads the ticket snapshot (RFC 0019 T2), not the tickets MCP.
+    """
     if backend == CODEX_BACKEND:
-        return stage in (Stage.PLAN, Stage.FINALIZE)
+        return stage is Stage.PLAN
     return stage in (Stage.PLAN, Stage.IMPL)
 
 

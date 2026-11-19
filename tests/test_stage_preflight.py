@@ -361,7 +361,7 @@ def test_an_empty_declaration_names_none() -> None:
 #: R4: the stages whose prompt reads the tickets binding, per harness.
 _TRACKER_MATRIX: dict[Harness, set[Stage]] = {
     Harness.CLAUDE_NATIVE: {Stage.PLAN, Stage.IMPL},
-    Harness.CODEX: {Stage.PLAN, Stage.FINALIZE},
+    Harness.CODEX: {Stage.PLAN},
     Harness.OPENCODE: {Stage.PLAN, Stage.IMPL},
     Harness.LOCAL: set(),
 }

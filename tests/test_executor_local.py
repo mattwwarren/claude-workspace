@@ -16,6 +16,7 @@ from cw.config import load_state
 from cw.exceptions import EmitSessionNotFoundError
 from cw.executor import (
     LocalExecutor,
+    SnapshotPlanFetcher,
     StageExecutor,
     _local_preflight,
     _PreflightOK,
@@ -50,6 +51,7 @@ from cw.models import (
 from cw.opencode_runner import stage_entry_marker
 from cw.result import EmitOutcome
 from cw.stage_preflight import PreflightReason
+from cw.ticket_snapshot import SnapshotContext, TicketSnapshot, normalize_ticket_id
 from cw.worktree import resolve_worker_tmpdir
 from tests._shared.git_repos import commit_tracked_file
 from tests._shared.session_seeding import find_completed_session
@@ -58,6 +60,7 @@ from tests._shared.stage_preflight_builders import (
     repair_row,
     review_client,
 )
+from tests._shared.ticket_context import make_comment, make_snapshot_from, seeded_row
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -546,94 +549,74 @@ def _write_tracker_config(workspace: Path, tracker: str) -> None:
     )
 
 
-def test_local_executor_fetches_plan_from_tracker_when_absent(
+_PLAN_BODY = "## Plan\n\nDo the thing.\n<!-- plan-spec-reviewed: 2026-01-01 v1 -->"
+_OPERATOR = "operator"
+
+
+def _plan_snapshot(
+    *,
+    body: str = _PLAN_BODY,
+    author_id: str | None = _OPERATOR,
+    agent_authored: bool = False,
+    author_conflict: bool = False,
+) -> TicketSnapshot:
+    """A snapshot of ticket 896 whose one comment is *body* by *author_id*."""
+    comment = make_comment(
+        "p1",
+        body=body,
+        author_id=author_id,
+        agent_authored=agent_authored,
+        author_conflict=author_conflict,
+    )
+    return make_snapshot_from(
+        [comment],
+        ticket_id=normalize_ticket_id("896"),
+        client="test",
+    )
+
+
+def test_local_executor_fetches_plan_from_snapshot_when_absent(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """No .cw/plan.md + github-issues tracker + fetcher returns plan → aider runs."""
+    """No .cw/plan.md + github-issues row on a plan snapshot -> aider runs (no gh)."""
     workspace = make_git_repo("wt-tracker-fetch-workspace")
     worktree = make_git_repo("wt-tracker-fetch")
     _write_tracker_config(workspace, "github-issues")
-
-    plan_body = "## Plan\n\nDo the thing.\n<!-- plan-spec-reviewed: 2026-01-01 v1 -->"
-
     fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
     )
     executor = LocalExecutor(config=config, runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=workspace)
-    task = TicketTask(ticket_id="896", client="test", stage=Stage.IMPL)
-
-    try:
-        with (
-            patch("cw.executor.local.aider_available", return_value=True),
-            patch(
-                "cw.executor.GithubIssuePlanFetcher.fetch",
-                return_value=plan_body,
-            ),
-        ):
-            executor.spawn(
-                stage=Stage.IMPL, task=task, worktree=worktree, client=client
-            )
-
-        # aider was launched (pre-flight passed the plan check)
-        assert len(fake_runner.calls) == 1
-    finally:
-        for proc in fake_runner.procs:
-            proc.kill()
-            proc.wait()
-
-
-@pytest.mark.parametrize("use_repo_path", [True, False])
-def test_local_executor_scopes_plan_fetch_to_client_repo(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-    *,
-    use_repo_path: bool,
-) -> None:
-    """The tracker plan read runs in the client's repo dir, not ambient CWD (#2884)."""
-    workspace = make_git_repo("wt-fetch-cwd-workspace")
-    worktree = make_git_repo("wt-fetch-cwd")
-    _write_tracker_config(workspace, "github-issues")
-    repo_path = make_git_repo("wt-fetch-cwd-repo") if use_repo_path else None
-    plan_body = "## Plan\n\nDo the thing.\n<!-- plan-spec-reviewed: 2026-01-01 v1 -->"
-
-    seen_cwds: list[Path | None] = []
-
-    def _fake_fetch(_ticket_id: str, *, cwd: Path | None = None) -> str:
-        seen_cwds.append(cwd)
-        return plan_body
-
-    fake_runner = FakeFireAndForgetRunner()
-    config = StageExecutorConfig(
-        backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
+    task = seeded_row(
+        _plan_snapshot(), seed=False, ticket_id="896", client="test", stage=Stage.IMPL
     )
-    executor = LocalExecutor(config=config, runner=fake_runner)
-    client = ClientConfig(name="test", workspace_path=workspace, repo_path=repo_path)
-    task = TicketTask(ticket_id="896", client="test", stage=Stage.IMPL)
 
     try:
         with (
             patch("cw.executor.local.aider_available", return_value=True),
-            patch("cw.local_runner.fetch_approved_plan_comment", _fake_fetch),
+            patch("cw.executor.local.cached_gh_login", return_value=_OPERATOR),
         ):
             executor.spawn(
                 stage=Stage.IMPL, task=task, worktree=worktree, client=client
             )
 
-        assert seen_cwds == [repo_path or workspace]
+        # aider was launched (pre-flight passed the plan check) and the plan
+        # was materialised from the snapshot, with no gh launch.
+        assert len(fake_runner.calls) == 1
+        assert (worktree / ".cw" / "plan.md").read_text(encoding="utf-8") == _PLAN_BODY
     finally:
         for proc in fake_runner.procs:
             proc.kill()
             proc.wait()
 
 
-def test_local_executor_plan_missing_when_tracker_returns_none(
+def test_local_executor_github_row_without_a_digest_is_plan_missing(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """No .cw/plan.md + github-issues tracker + fetcher returns None → plan_missing."""
+    """Accepted narrowing (RFC 0019 T2): no snapshot digest, no live gh fallback."""
     workspace = make_git_repo("wt-tracker-none-workspace")
     worktree = make_git_repo("wt-tracker-none")
     _write_tracker_config(workspace, "github-issues")
@@ -648,7 +631,7 @@ def test_local_executor_plan_missing_when_tracker_returns_none(
 
     with (
         patch("cw.executor.local.aider_available", return_value=True),
-        patch("cw.executor.GithubIssuePlanFetcher.fetch", return_value=None),
+        patch("cw.executor.local.cached_gh_login", return_value=_OPERATOR),
     ):
         executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
 
@@ -693,11 +676,11 @@ def test_local_executor_no_tracker_no_plan_is_plan_missing(
     assert result.blocker.reason == PLAN_MISSING
 
 
-def test_local_executor_launch_reached_after_tracker_fetch(
+def test_local_executor_launch_reached_after_snapshot_plan(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """Plan fetched from tracker → launch() reached and liveness recorded.
+    """Plan recovered from the snapshot -> launch() reached and liveness recorded.
 
     The fire-and-forget launch no longer synthesizes a result inline, so there
     is no plan_source threading to assert; the observable contract is that
@@ -707,20 +690,20 @@ def test_local_executor_launch_reached_after_tracker_fetch(
     worktree = make_git_repo("wt-plansrc")
     _write_tracker_config(workspace, "github-issues")
 
-    plan_body = "## Plan\n\nDo the thing.\n<!-- plan-spec-reviewed: 2026-01-01 v1 -->"
-
     fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(
         backend=LOCAL_BACKEND, model="m", endpoint="http://localhost:1234/v1"
     )
     executor = LocalExecutor(config=config, runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=workspace)
-    task = TicketTask(ticket_id="896", client="test", stage=Stage.IMPL)
+    task = seeded_row(
+        _plan_snapshot(), seed=False, ticket_id="896", client="test", stage=Stage.IMPL
+    )
 
     try:
         with (
             patch("cw.executor.local.aider_available", return_value=True),
-            patch("cw.executor.GithubIssuePlanFetcher.fetch", return_value=plan_body),
+            patch("cw.executor.local.cached_gh_login", return_value=_OPERATOR),
         ):
             sid = executor.spawn(
                 stage=Stage.IMPL, task=task, worktree=worktree, client=client
@@ -735,6 +718,84 @@ def test_local_executor_launch_reached_after_tracker_fetch(
         for proc in fake_runner.procs:
             proc.kill()
             proc.wait()
+
+
+# ---------------------------------------------------------------------------
+# SnapshotPlanFetcher (RFC 0019 T2): the approved plan from the stored snapshot
+# ---------------------------------------------------------------------------
+
+
+def _fetch_plan(
+    snapshot: TicketSnapshot,
+    ctx: SnapshotContext,
+    *,
+    login: str | None = _OPERATOR,
+    ticket_id: str = "896",
+) -> str | None:
+    task = seeded_row(snapshot, seed=False, ticket_id="896", client="test")
+    with patch("cw.executor.local.cached_gh_login", return_value=login):
+        return SnapshotPlanFetcher(task, ctx).fetch(ticket_id)
+
+
+def test_snapshot_plan_fetcher_github_returns_the_last_gh_login_plan(
+    tmp_config_dir: Path,
+) -> None:
+    older = make_comment("p1", body=_PLAN_BODY + "\nold", author_id=_OPERATOR)
+    newer = make_comment("p2", body=_PLAN_BODY + "\nnew", author_id=_OPERATOR)
+    snapshot = make_snapshot_from(
+        [older, newer], ticket_id=normalize_ticket_id("896"), client="test"
+    )
+    assert _fetch_plan(snapshot, SnapshotContext(github=True)) == _PLAN_BODY + "\nnew"
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "login"),
+    [
+        (_plan_snapshot(author_id="someone-else"), _OPERATOR),
+        (_plan_snapshot(body="no marker here"), _OPERATOR),
+        (_plan_snapshot(), None),
+    ],
+    ids=["not-the-gh-login", "no-marker", "no-gh-login"],
+)
+def test_snapshot_plan_fetcher_github_binds_nothing_untrusted(
+    tmp_config_dir: Path, snapshot: TicketSnapshot, login: str | None
+) -> None:
+    assert _fetch_plan(snapshot, SnapshotContext(github=True), login=login) is None
+
+
+def test_snapshot_plan_fetcher_github_ignores_the_agent_marker_on_the_trusted_login(
+    tmp_config_dir: Path,
+) -> None:
+    agent = _plan_snapshot(agent_authored=True)
+    assert _fetch_plan(agent, SnapshotContext(github=True)) == _PLAN_BODY
+
+
+def test_snapshot_plan_fetcher_mcp_binds_operator_ids_only(
+    tmp_config_dir: Path,
+) -> None:
+    ctx = SnapshotContext(operator_ids=("OPERATOR",))
+    assert _fetch_plan(_plan_snapshot(), ctx) == _PLAN_BODY
+    assert _fetch_plan(_plan_snapshot(author_id="other"), ctx) is None
+    assert _fetch_plan(_plan_snapshot(author_conflict=True), ctx) is None
+    assert _fetch_plan(_plan_snapshot(), SnapshotContext()) is None
+
+
+def test_snapshot_plan_fetcher_is_bound_to_its_own_ticket(
+    tmp_config_dir: Path,
+) -> None:
+    ctx = SnapshotContext(github=True)
+    assert _fetch_plan(_plan_snapshot(), ctx, ticket_id="897") is None
+
+
+def test_snapshot_plan_fetcher_without_a_usable_snapshot_is_none(
+    tmp_config_dir: Path,
+) -> None:
+    ctx = SnapshotContext(github=True)
+    no_digest = TicketTask(ticket_id="896", client="test", stage=Stage.IMPL)
+    untrusted = no_digest.model_copy(update={"snapshot_digest": "0" * 64})
+    with patch("cw.executor.local.cached_gh_login", return_value=_OPERATOR):
+        assert SnapshotPlanFetcher(no_digest, ctx).fetch("896") is None
+        assert SnapshotPlanFetcher(untrusted, ctx).fetch("896") is None
 
 
 def test_local_preflight_success_returns_preflight_ok(

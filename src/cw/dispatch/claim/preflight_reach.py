@@ -9,7 +9,7 @@ harness verifiably fail to reach the tickets binding for a stage that needs it?
 and every log line. :func:`preflight_before_spawn` is the codex CLI park.
 
 The one allowed ``TrackerClass`` site until X1 (#3713): a GitHub tracker is
-never read, an unset one fails open with one warning, and codex PLAN/FINALIZE
+never read, an unset one fails open with one warning, and codex PLAN
 on any other tracker with an unusable ``servers.codex`` parks ``binding_unbound``
 before any read (the only fail-closed case); a missing branch is debug only and
 any other unknown warns once. Every logger is ``cw.dispatch``, as before.
@@ -47,8 +47,8 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger("cw.dispatch")
 
-#: Every stage some harness needs the tickets binding for: {PLAN, IMPL,
-#: FINALIZE}. The tick scans these rows; the claim screen re-checks under lock.
+#: Every stage some harness needs the tickets binding for: {PLAN, IMPL}. The
+#: tick scans these rows; the claim screen re-checks under lock.
 BINDING_STAGES: frozenset[Stage] = frozenset(
     stage for (_, stage), needs in STAGE_NEEDS.items() if Role.TICKETS in needs.bindings
 )
@@ -70,7 +70,7 @@ _WARNED_FAIL_OPEN: dict[tuple[str, str], str] = {}
 class ReachState(StrEnum):
     """Where :func:`assess_binding` ended for one (harness, stage).
 
-    ``UNBOUND`` parks only for codex PLAN/FINALIZE; ``NO_BRANCH`` (no
+    ``UNBOUND`` parks only for codex PLAN; ``NO_BRANCH`` (no
     claude-native branch to read) is debug only; ``UNKNOWN`` (a read that
     could not resolve) and ``TRACKER_UNSET`` fail open with a warning.
     """
@@ -267,7 +267,7 @@ def _assess_server(
 def _assess_codex_unbound(
     reader: ReachReader, server: str | None, branch: str
 ) -> Assessment:
-    """codex PLAN/FINALIZE with no usable ``servers.codex`` (R4)."""
+    """codex PLAN with no usable ``servers.codex`` (R4)."""
     gated = _tracker_gate(reader, CODEX_BACKEND)
     if gated is not None:
         return gated

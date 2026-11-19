@@ -15,7 +15,6 @@ from cw.local_runner import (
     ENDPOINT_NOT_CONFIGURED,
     PLAN_MISSING,
     TASK_CONTEXT_RELATIVE_PATH,
-    GithubIssuePlanFetcher,
     PlanFetcher,
     RealAiderRunner,
     aider_available,
@@ -26,9 +25,14 @@ from cw.local_runner import (
     make_blocked,
 )
 from cw.models.bindings import Harness
+from cw.operator_identity import cached_gh_login
 from cw.plan_files import parse_plan_files_modified
-from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
-from cw.worktree import _git_dir
+from cw.ticket_snapshot import (
+    Purpose,
+    bound_comments,
+    context_for_client,
+    read_for_stage,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -40,6 +44,36 @@ if TYPE_CHECKING:
         TicketTask,
     )
     from cw.models.capabilities import HarnessCapabilities
+    from cw.ticket_snapshot import SnapshotContext
+
+
+class SnapshotPlanFetcher:
+    """The approved plan from the row's stored ticket snapshot (RFC 0019 T2).
+
+    A snapshot read only: no refresh and no network. It lives here, not in
+    ``cw.local_runner``, because ``cw.ticket_snapshot`` imports back into
+    ``local_runner`` (a module-level import there closes a cycle). The plan is the last
+    comment the trust evaluator binds for the approved-plan purpose under
+    *ctx*, so a GitHub row without a snapshot digest yields ``None`` (the
+    ``plan_missing`` block), a narrowing from the former live ``gh`` read.
+    *task* and *ctx* are per-spawn fixed facts, so :class:`PlanFetcher` and
+    :class:`FakePlanFetcher` keep their ``fetch(ticket_id)`` shape.
+    """
+
+    def __init__(self, task: TicketTask, ctx: SnapshotContext) -> None:
+        self._task = task
+        self._ctx = ctx
+
+    def fetch(self, ticket_id: str) -> str | None:
+        if ticket_id != self._task.ticket_id:
+            return None  # bound to one task; another ticket's plan never binds
+        snapshot = read_for_stage(self._task, "impl")
+        login = cached_gh_login() if self._ctx.github else None
+        bound = bound_comments(
+            snapshot, self._ctx, Purpose.APPROVED_PLAN, gh_login=login
+        )
+        body = bound[-1]["body"] if bound else None
+        return body if isinstance(body, str) else None
 
 
 def _local_preflight(
@@ -88,9 +122,8 @@ def _local_preflight(
             retry_eligible=True,
             retry_delay_seconds=0,
         )
-    plan_fetcher: PlanFetcher | None = None
-    if resolve_tracker(client.workspace_path) == TRACKER_GITHUB_ISSUES:
-        plan_fetcher = GithubIssuePlanFetcher(cwd=_git_dir(client))
+    ctx = context_for_client(client, worktree, resolve_login=False)
+    plan_fetcher: PlanFetcher = SnapshotPlanFetcher(task, ctx)
     task_message = build_task_message(
         worktree,
         ticket_id=task.ticket_id,
