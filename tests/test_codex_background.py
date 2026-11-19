@@ -2106,7 +2106,7 @@ def test_disabled_fix_loop_does_not_resolve_operator_login(
 
     snapshots = fix_loop_mock.call_args.kwargs["snapshots"]
     assert snapshots.operator_login is None
-    assert snapshots.resolve is read_for_stage
+    assert snapshots.resolve is not read_for_stage
     _login_mock().assert_not_called()
 
 

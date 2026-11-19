@@ -533,15 +533,16 @@ def _review_and_confirm(
     engine = engine_round_spec(client, task, worktree)
     if isinstance(engine, AutoDevResult):  # #3216: refused before any codex call
         return ReviewOutcome(engine, None, False, CODEX_REVIEWER_LABEL)
-    # #3712: one snapshot context for the whole run. Background review passes
-    # read the current row snapshot; per-pass refresh stays disabled until
-    # snapshot retention and purge controls are available. The login is
+    # #3712: one snapshot context for the whole run; every review pass
+    # refreshes the ticket snapshot through it (R10: no per-client toggle, the
+    # one-line reversal is dropping ``refresh=True`` here). The login is
     # resolved only when the loop runs (#2633: `gh api user` otherwise never
     # needs to run).
     snapshots = context_for_client(
         client,
         worktree,
         resolve_login=fix_loop_enabled,
+        refresh=True,
     )
     resumed = resume_pending_confirm(
         task=task,
