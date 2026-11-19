@@ -130,12 +130,20 @@ def _parse_json(text: str) -> object:
     return parsed
 
 
-def _load(path: Path, parse: Callable[[str], object]) -> dict[str, object] | str:
-    """The parsed top-level object at *path*, or a fail-open reason string."""
+def _read_layer(
+    path: Path, parse: Callable[[str], object]
+) -> dict[str, object] | str | None:
+    """The parsed top-level object at *path*.
+
+    ``None`` when the file is absent (``FileNotFoundError``, or a missing
+    directory component: ``NotADirectoryError``). A ``str`` is the reason the
+    layer exists but cannot be read or parsed (O2b, R22). A missing layer is
+    never unreadable.
+    """
     try:
         text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return f"{path} does not exist"
+    except (FileNotFoundError, NotADirectoryError):
+        return None
     except (OSError, UnicodeDecodeError) as exc:
         return f"{path} is unreadable ({exc})"
     try:
@@ -145,6 +153,14 @@ def _load(path: Path, parse: Callable[[str], object]) -> dict[str, object] | str
     if not isinstance(parsed, dict):
         return f"{path} top level is not an object"
     return parsed
+
+
+def _load(path: Path, parse: Callable[[str], object]) -> dict[str, object] | str:
+    """The parsed top-level object at *path*, or a fail-open reason string."""
+    loaded = _read_layer(path, parse)
+    if loaded is None:
+        return f"{path} does not exist"
+    return loaded
 
 
 def _entry_state(entry: dict[object, object], label: str) -> tuple[McpState, str]:
@@ -220,43 +236,86 @@ def _other_layers(backend: str, root: Path, user_path: Path) -> str | None:
     return None
 
 
-def _layer_server_names(path: Path) -> tuple[str, ...] | None:
-    """The ``mcp_servers`` names one codex config file declares, or ``None``.
+@dataclass(frozen=True)
+class DeclaredServers:
+    """What the config layers say about declared MCP servers (O2b, R22).
 
-    ``None`` for a missing or unreadable file, a parse error or a non-table
-    section: the answer for that layer is unknown.
+    ``names`` is de-duplicated, user layer first. ``answered`` is true when at
+    least one layer was readable. ``unreadable`` lists ``"<path>: <reason>"``
+    for every layer that exists but cannot be read, parsed or used.
     """
-    loaded = _load(path, _parse_toml)
-    if isinstance(loaded, str):
-        return None
-    container = loaded.get(_CODEX_SERVERS_KEY, {})
-    if not isinstance(container, dict):
-        return None
-    return tuple(str(name) for name in container)
+
+    names: tuple[str, ...]
+    answered: bool
+    unreadable: tuple[str, ...]
 
 
-def declared_server_names(backend: str) -> tuple[str, ...] | None:
-    """The MCP server names *backend*'s user and system layers declare (#3057, #3368).
+_NO_DECLARED = DeclaredServers((), False, ())
 
-    Codex only: the user layer then the system layer (``/etc/codex/config.toml``),
-    user names first, de-duplicated, in declaration order. A system-layer server
-    is enabled for every codex turn unless disabled, so a caller that disables
-    every name it gets must see those too. A project layer is not read: the
-    tracker-IO turn's cwd is a cw-owned scratch directory, so none reaches it.
+
+def scan_declared_servers(backend: str, root: Path | None = None) -> DeclaredServers:
+    """Scan codex's config layers and separate absent from unreadable (O2b, R22).
+
+    Layers in order: the user layer, the system layer, then, when *root* is
+    given, the project layers of its cwd chain. A missing layer is ignored; a
+    layer that exists but cannot be read, parsed, or whose ``mcp_servers`` is
+    not a table is recorded in ``unreadable``. Other backends return no layers.
+    """
+    if backend != _CODEX:
+        return _NO_DECLARED
+    user_path = user_layer_path(backend)
+    project = (
+        [
+            d / name
+            for d in _project_dirs(root)
+            for name in _PROJECT_LAYER_NAMES.get(backend, ())
+        ]
+        if root is not None
+        else []
+    )
+    system = list(_SYSTEM_LAYERS.get(backend, ()))
+    candidates = [p for p in ((user_path, *system, *project)) if p is not None]
+    names: list[str] = []
+    unreadable: list[str] = []
+    answered = False
+    for path in dict.fromkeys(candidates):
+        loaded = _read_layer(path, _parse_toml)
+        if loaded is None:
+            continue
+        if isinstance(loaded, str):
+            unreadable.append(loaded)
+            continue
+        container = loaded.get(_CODEX_SERVERS_KEY, {})
+        if not isinstance(container, dict):
+            unreadable.append(f"{path} {_CODEX_SERVERS_KEY} is not a table")
+            continue
+        answered = True
+        names.extend(str(name) for name in container)
+    return DeclaredServers(tuple(dict.fromkeys(names)), answered, tuple(unreadable))
+
+
+def declared_server_names(
+    backend: str, root: Path | None = None
+) -> tuple[str, ...] | None:
+    """The MCP server names *backend*'s config layers declare (#3057, #3368).
+
+    Codex only: the user layer, then the system layer (``/etc/codex/config.toml``),
+    then, when *root* is given, the project layers of its cwd chain. User names
+    first, de-duplicated, in declaration order. A system-layer server is enabled
+    for every codex turn unless disabled, so a caller that disables every name it
+    gets must see those too. Without *root* no project layer is read (the
+    pre-O2b contract, kept for the sibling callers).
 
     ``()`` when a layer parses and has no ``mcp_servers`` section. ``None`` when
     no layer's answer is known (another backend, or every layer missing,
     unreadable, unparseable or holding a non-table section); callers disable
-    nothing on ``None``.
+    nothing on ``None``. Unreadable layers are ignored here; use
+    :func:`scan_declared_servers` to see them.
     """
-    if backend != _CODEX:
+    scan = scan_declared_servers(backend, root)
+    if not scan.answered:
         return None
-    user_path = user_layer_path(backend)
-    paths = (*((user_path,) if user_path else ()), *_SYSTEM_LAYERS.get(backend, ()))
-    answers = [names for names in map(_layer_server_names, paths) if names is not None]
-    if not answers:
-        return None
-    return tuple(dict.fromkeys(name for names in answers for name in names))
+    return scan.names
 
 
 def read_backend_mcp(backend: str, server: str, root: Path) -> McpConfigReading:

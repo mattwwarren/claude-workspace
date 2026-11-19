@@ -273,11 +273,18 @@ def test_every_reason_has_a_mapping_row() -> None:
 def test_status_reason_covers_every_non_ok_turn_status() -> None:
     """#3383 drift guard: the reason map and the TurnStatus literal stay in step.
 
-    ``"ok"`` is the success status and maps to no reason. The real enforcement
-    is the ``dict[TurnStatus, TrackerIoReason]`` annotation under mypy --strict.
+    ``"ok"`` and ``"already_present"`` are success statuses and map to no
+    reason. The map is keyed by every ``TurnStatus`` member (O2b, R12), so a new
+    status without a row fails here and under mypy --strict.
     """
     statuses = set(get_args(TurnStatus))
-    assert set(_STATUS_REASON) | {"ok"} == statuses
+    assert set(_STATUS_REASON) == statuses
+    assert {status for status, reason in _STATUS_REASON.items() if reason is None} == {
+        "ok",
+        "already_present",
+    }
     assert all(
-        isinstance(reason, TrackerIoReason) for reason in _STATUS_REASON.values()
+        isinstance(reason, TrackerIoReason)
+        for status, reason in _STATUS_REASON.items()
+        if status not in {"ok", "already_present"}
     )

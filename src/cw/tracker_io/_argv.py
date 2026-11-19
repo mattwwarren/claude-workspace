@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from cw.codex_review import (
@@ -31,6 +32,7 @@ from cw.codex_review import (
     _reasoning_effort_argv,
 )
 from cw.models.bindings import TicketOp
+from cw.models.capabilities import ToolNarrowing
 from cw.models.enums import SandboxMode
 from cw.models.orchestrator_config.constants import CODEX_BACKEND
 from cw.tracker import TRACKER_LINEAR
@@ -137,22 +139,84 @@ def _disable_others(server: str, other_servers: Sequence[str]) -> list[str]:
     return argv
 
 
+class TurnKind(StrEnum):
+    """Which courier turn an allowlist is for (O2b, R7).
+
+    REFRESH is built by the T1/T2 tickets, not here; the enum stays open for it.
+    """
+
+    POST = "post"
+    VERIFY = "verify"
+
+
+def turn_tools(kind: TurnKind, post_tools: tuple[str, str]) -> tuple[str, ...]:
+    """The tool allowlist for *kind*: POST gets create and list, VERIFY list only."""
+    if kind is TurnKind.POST:
+        return post_tools
+    return (post_tools[1],)
+
+
+#: Per tracker system: the ``get`` tool the snapshot turn reads one issue with.
+TRACKER_GET_TOOLS: Mapping[str, str] = {TRACKER_LINEAR: "get_issue"}
+
+
+def get_tool_for(
+    tracker: str,
+    tickets: TicketsBinding | None = None,
+    backend: str = CODEX_BACKEND,
+) -> str:
+    """The ``get`` tool for *tracker*: the binding's name wins, else the table.
+
+    Raises ``TRACKER_UNSUPPORTED`` when nothing resolves (O2b, R8).
+    """
+    get = resolve_ticket_tool(
+        tickets, backend, TicketOp.GET, TRACKER_GET_TOOLS.get(tracker)
+    )
+    if get is None:
+        msg = f"no tracker-IO get tool for tracker {tracker!r}"
+        raise TrackerIoConfigError(TrackerIoReason.TRACKER_UNSUPPORTED, msg)
+    return get
+
+
+def narrowing_for(server: str, declared: Sequence[str]) -> ToolNarrowing:
+    """Narrowing for *server*: a declared server is per tool, an app is per server.
+
+    *declared* is the user and system layers' server names (R3). This refines
+    H1's codex ``PER_TOOL`` declaration per binding; a server absent from those
+    layers is a plugin app and is addressed by ``apps.<id>``.
+    """
+    return ToolNarrowing.PER_TOOL if server in declared else ToolNarrowing.PER_SERVER
+
+
 def build_tracker_io_argv(
     *,
     server: str,
-    tools: tuple[str, str],
+    tools: tuple[str, ...],
     schema_path: Path,
     output_path: Path,
     other_servers: Sequence[str],
+    narrowing: ToolNarrowing = ToolNarrowing.PER_TOOL,
 ) -> list[str]:
     """Return the tracker-IO turn's ``codex exec`` argv (prompt goes on stdin).
 
-    *tools* is the pre-resolved (create, list) pair from
-    :func:`comment_tools_for`. Raises :class:`TrackerIoConfigError` for a
-    *server* name that is not a plain identifier.
+    *tools* is the allowlist for this turn (see :func:`turn_tools`). Under
+    ``PER_TOOL`` it becomes ``mcp_servers.<server>.enabled_tools``. Under
+    ``PER_SERVER`` or ``NONE`` (a plugin app, #3695) the server is addressed as
+    ``apps.<server>.default_tools_enabled=true`` and *tools* is ignored: the
+    app's full surface is what the snapshot delta then checks (R5, R19).
+    The ``=true`` key is an unverified premise until run on a plugin-app Linear
+    host (R23). Raises :class:`TrackerIoConfigError` for a *server* name that is
+    not a plain identifier.
     """
     validate_server_name(server)
-    allowlist = json.dumps(list(tools), separators=(",", ":"))
+    if narrowing is ToolNarrowing.PER_TOOL:
+        allowlist = json.dumps(list(tools), separators=(",", ":"))
+        scoped = [
+            "-c",
+            f"mcp_servers.{server}.enabled_tools={allowlist}",
+        ]
+    else:
+        scoped = ["-c", f"apps.{server}.default_tools_enabled=true"]
     return [
         "codex",
         "exec",
@@ -160,8 +224,7 @@ def build_tracker_io_argv(
         "--skip-git-repo-check",
         *_AUDIT_ARGV_FLAGS,
         *_reasoning_effort_argv(TURN_REASONING_EFFORT),
-        "-c",
-        f"mcp_servers.{server}.enabled_tools={allowlist}",
+        *scoped,
         *_disable_others(server, other_servers),
         "--output-schema",
         str(schema_path),
