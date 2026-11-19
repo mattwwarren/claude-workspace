@@ -1,9 +1,11 @@
-"""Tests for ``cw.dispatch.claim.codex_capability`` — the codex capability gate (#2908).
+"""Tests for ``cw.dispatch.claim.codex_capability``, the codex CLI probe (#2908).
 
 Mirrors ``tests/test_dispatch_pr_gate.py``'s naming/shape: one test module per
-dispatch submodule. Covers the gate, the verdict cache TTL and the consecutive
-park counter. The probe-classification matrix (timeout, unparseable output,
-missing binary, healthy version) lives in ``tests/test_codex_executor.py`` and
+dispatch submodule. Covers the verdict cache TTL, and the park it feeds
+(``preflight_reach.preflight_before_spawn``, #3744) with its consecutive park
+streak (``cw.dispatch.claim.outcome``). The probe-classification matrix
+(timeout, unparseable output, missing binary, healthy version) lives in
+``tests/test_codex_executor.py`` and
 is not duplicated here.
 
 Every test is hermetic: the subprocess call and the clock are stubbed, so no
@@ -22,12 +24,12 @@ from freezegun import freeze_time
 from cw.dev_queue import add_ticket, load_dev_queue
 from cw.dispatch import (
     _CODEX_CAPABILITY_GATE_TIMEOUT_SECONDS,
-    _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD,
     _CODEX_CAPABILITY_PROBE_TTL_SECONDS,
+    _PARK_STREAK_CIRCUIT_THRESHOLD,
     _cached_codex_capability_diagnosis,
-    _codex_capability_gate,
     _reset_codex_capability_cache,
     dispatch_tick,
+    preflight_before_spawn,
 )
 from cw.dispatch.claim.codex_capability import (
     _CODEX_CAPABILITY_PROBE_TIMEOUT_TTL_SECONDS,
@@ -274,21 +276,21 @@ class TestGateTimeoutPark:
         """Timeout parks count toward the breaker exactly like unknown-version."""
         _stub_probe(monkeypatch, lambda **_kwargs: _TIMEOUT_DIAGNOSIS)
         monkeypatch.setattr(
-            "cw.dispatch.claim.codex_capability.resolve_executor_config",
+            "cw.dispatch.claim.preflight_reach.resolve_executor_config",
             lambda *_a, **_k: StageExecutorConfig(backend=CODEX_BACKEND),
         )
 
         outcomes = []
-        for i in range(_CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD):
+        for i in range(_PARK_STREAK_CIRCUIT_THRESHOLD):
             add_ticket(TicketTask(ticket_id=f"GEN-CDX-T2-{i}", client="test-client"))
             task = load_dev_queue().tasks[-1]
-            outcomes.append(_codex_capability_gate(task, sample_client_config))
+            outcomes.append(preflight_before_spawn(task, sample_client_config))
 
         assert all(o is not None and o.capability_parked for o in outcomes)
         assert all(
             o is not None and o.error == CODEX_VERSION_PROBE_TIMEOUT for o in outcomes
         )
-        below = outcomes[: _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD - 1]
+        below = outcomes[: _PARK_STREAK_CIRCUIT_THRESHOLD - 1]
         assert all(o is not None and not o.spawn_error for o in below)
         at_threshold = outcomes[-1]
         assert at_threshold is not None

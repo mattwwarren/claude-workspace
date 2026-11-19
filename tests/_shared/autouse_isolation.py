@@ -707,7 +707,7 @@ def _reset_reachability_warn_state(monkeypatch: pytest.MonkeyPatch) -> None:
     on a fail-open read; without a reset the first test to warn would silence
     every later test's warning assertion.
     """
-    monkeypatch.setattr("cw.dispatch.tracker_mcp_gate._WARNED_FAIL_OPEN", {})
+    monkeypatch.setattr("cw.dispatch.claim.preflight_reach._WARNED_FAIL_OPEN", {})
 
 
 @pytest.fixture(autouse=True)

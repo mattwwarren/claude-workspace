@@ -20,7 +20,6 @@ from cw.dev_queue import (
     ADOPTED_HEAD_DRIFT_DISPOSITION,
     REVIEW_APPROVAL_GATE_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
-    TRACKER_MCP_GATE_DISPOSITION,
     dev_queue_lock,
     load_dev_queue,
     save_dev_queue,
@@ -38,15 +37,16 @@ from cw.dev_queue.next_commands import dev_queue_command
 from cw.dispatch.claim.events import (
     _emit_attempt_cap_attention_event,
     _emit_attempt_cap_blocked_event,
+    _emit_binding_attention_event,
+    _emit_binding_blocked_event,
     _emit_review_approval_gate_attention_event,
     _emit_stale_dispatch_attention_event,
     _emit_stale_dispatch_blocked_event,
     _emit_ticket_closed_cancel_event,
-    _emit_tracker_mcp_gate_attention_event,
-    _emit_tracker_mcp_gate_blocked_event,
     _emit_worktree_occupied_skip_event,
     emit_adoption_attention_event,
 )
+from cw.dispatch.claim.preflight_reach import BINDING_STAGES
 from cw.dispatch.ticket_state_gate import TICKET_CLOSED_CANCEL_REASON
 from cw.dispatch_state_ticket_state import (
     mark_ticket_closed_cancelled,
@@ -62,9 +62,9 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from cw.dispatch.adopted_head_gate import AdoptedHeadDrift
+    from cw.dispatch.claim.preflight_reach import BindingHit
     from cw.dispatch.review_approval_gate import ReviewApprovalHold
     from cw.dispatch.ticket_state_gate import ClosedTicketHit
-    from cw.dispatch.tracker_mcp_gate import TrackerMcpGateHit
     from cw.models import (
         ClientConfig,
         DevQueueStore,
@@ -137,54 +137,43 @@ def _is_stale_pr_gated(
     )
 
 
-def _park_tracker_mcp_gated_task(
+def _park_binding_gated_task(
     task: TicketTask,
     client_name: str,
     lane: str,
     store: DevQueueStore,
-    hit: TrackerMcpGateHit,
+    hit: BindingHit,
 ) -> None:
-    """Park one tracker-MCP gate hit BLOCKED_ON_USER and emit both signals (#2442).
+    """Park one binding reachability hit BLOCKED_ON_USER and emit both signals.
 
+    #2442, RFC 0019 H2b (#3744). The disposition is the hit's reason;
+    ``blocked_reason`` stays ``tracker_mcp_unavailable_pre_dispatch``.
     ``unproductive=False`` for the same reason as :func:`_park_stale_pr_task`:
     no session was ever spawned for this claim. *hit* names the branch, the
-    file inspected, the expected plugin id or MCP server, and the backend
-    (#3055), carried on the
-    SESSION_NEEDS_ATTENTION event only (transient, event-only detail).
+    file inspected, the expected plugin id or MCP server, and the backend,
+    carried on the SESSION_NEEDS_ATTENTION event only (transient, event-only
+    detail).
     """
     transition_task_status(
         task,
         QueueItemStatus.BLOCKED_ON_USER,
-        disposition=TRACKER_MCP_GATE_DISPOSITION,
+        disposition=hit.reason.value,
         blocked_reason=_PRE_DISPATCH_TRACKER_MCP_REASON,
         unproductive=False,
     )
     save_dev_queue(store)
-    _emit_tracker_mcp_gate_blocked_event(client_name, task.ticket_id)
-    _emit_tracker_mcp_gate_attention_event(
-        task,
-        client_name,
-        lane,
-        branch=hit.branch,
-        file_inspected=hit.file_inspected,
-        expected=hit.expected,
-        backend=hit.backend,
-    )
+    _emit_binding_blocked_event(client_name, task.ticket_id)
+    _emit_binding_attention_event(task, client_name, lane, hit)
 
 
-def _is_tracker_mcp_gated(
-    task: TicketTask, tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit]
-) -> bool:
-    """True iff *task* is a PLAN/IMPL/FINALIZE row the tracker-MCP gate holds (#2442).
+def _is_binding_gated(task: TicketTask, binding_hits: Mapping[str, BindingHit]) -> bool:
+    """True iff *task* is a :data:`BINDING_STAGES` row with a binding hit.
 
     Stage-scoped at the point of use, like :func:`_is_stale_pr_gated`: a row
     that advanced past FINALIZE since the lock-free snapshot is never held on
-    a stale hit. Hits only ever exist for a codex FINALIZE row (RFC 0018 C3).
+    a stale hit.
     """
-    return (
-        task.stage in (Stage.PLAN, Stage.IMPL, Stage.FINALIZE)
-        and task.ticket_id in tracker_mcp_gate_hits
-    )
+    return task.stage in BINDING_STAGES and task.ticket_id in binding_hits
 
 
 def _live_adopted_head_drift(
@@ -392,7 +381,7 @@ def _park_if_pre_dispatch_gated(
     lane: str,
     closed_ticket_hits: Mapping[str, ClosedTicketHit],
     stale_pr_ticket_ids: Mapping[str, str | None],
-    tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit],
+    binding_hits: Mapping[str, BindingHit],
     adopted_head_drifts: Mapping[str, AdoptedHeadDrift],
     review_approval_holds: Mapping[str, ReviewApprovalHold],
     store: DevQueueStore,
@@ -424,9 +413,9 @@ def _park_if_pre_dispatch_gated(
             task, client_name, lane, store, stale_pr_ticket_ids[task.ticket_id]
         )
         return True
-    if _is_tracker_mcp_gated(task, tracker_mcp_gate_hits):
-        _park_tracker_mcp_gated_task(
-            task, client_name, lane, store, tracker_mcp_gate_hits[task.ticket_id]
+    if _is_binding_gated(task, binding_hits):
+        _park_binding_gated_task(
+            task, client_name, lane, store, binding_hits[task.ticket_id]
         )
         return True
     drift = _live_adopted_head_drift(task, adopted_head_drifts)
@@ -505,7 +494,7 @@ def _screen_and_claim(
     config: OrchestratorConfig,
     stale_pr_ticket_ids: Mapping[str, str | None],
     occupied_ticket_reasons: dict[str, str],
-    tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit],
+    binding_hits: Mapping[str, BindingHit],
     adopted_head_drifts: Mapping[str, AdoptedHeadDrift],
     review_approval_holds: Mapping[str, ReviewApprovalHold],
     closed_ticket_hits: Mapping[str, ClosedTicketHit],
@@ -559,7 +548,7 @@ def _screen_and_claim(
         lane=lane,
         closed_ticket_hits=closed_ticket_hits,
         stale_pr_ticket_ids=stale_pr_ticket_ids,
-        tracker_mcp_gate_hits=tracker_mcp_gate_hits,
+        binding_hits=binding_hits,
         adopted_head_drifts=adopted_head_drifts,
         review_approval_holds=review_approval_holds,
         store=store,
@@ -600,7 +589,7 @@ def _claim_next_pending(
     usage_limited_until: datetime | None = None,
     stale_pr_ticket_ids: Mapping[str, str | None] | None = None,
     occupied_ticket_reasons: dict[str, str] | None = None,
-    tracker_mcp_gate_hits: Mapping[str, TrackerMcpGateHit] | None = None,
+    binding_hits: Mapping[str, BindingHit] | None = None,
     adopted_head_drifts: Mapping[str, AdoptedHeadDrift] | None = None,
     review_approval_holds: Mapping[str, ReviewApprovalHold] | None = None,
     closed_ticket_hits: Mapping[str, ClosedTicketHit] | None = None,
@@ -669,12 +658,13 @@ def _claim_next_pending(
     default) screens nothing, so any caller that has not resolved it keeps
     the post-claim occupancy handling as its only guard.
 
-    *tracker_mcp_gate_hits* (GitHub #2442): ticket id -> gate hit for every
-    PLAN/IMPL-stage ticket whose branch's settings file verifiably lacks the
-    client's configured tracker MCP plugin. A task named here is parked
-    BLOCKED_ON_USER with ``disposition=tracker_mcp_gate`` instead of claimed.
+    *binding_hits* (GitHub #2442, RFC 0019 H2b #3744): ticket id -> park for
+    every PLAN/IMPL/FINALIZE ticket whose harness verifiably cannot reach the
+    client's tickets binding. A task named here is parked BLOCKED_ON_USER with
+    the hit's reason (``binding_unreachable``, ``binding_unbound`` or
+    ``binding_tool_missing``) as its disposition instead of claimed.
     Resolved once per client per tick by
-    ``cw.dispatch.tracker_mcp_gate.resolve_tracker_mcp_gate_hits`` and passed
+    ``cw.dispatch.claim.preflight_reach.resolve_binding_hits`` and passed
     in precomputed for the same no-I/O-under-the-lock reason. ``None`` (the
     default) screens nothing.
 
@@ -722,7 +712,7 @@ def _claim_next_pending(
     # no I/O -- reading the file here would break that invariant.
     stale_prs = stale_pr_ticket_ids if stale_pr_ticket_ids is not None else {}
     reasons = occupied_ticket_reasons if occupied_ticket_reasons is not None else {}
-    mcp_hits = tracker_mcp_gate_hits if tracker_mcp_gate_hits is not None else {}
+    mcp_hits = binding_hits if binding_hits is not None else {}
     drifts = adopted_head_drifts if adopted_head_drifts is not None else {}
     approval_holds = review_approval_holds if review_approval_holds is not None else {}
     closed_hits = closed_ticket_hits if closed_ticket_hits is not None else {}
@@ -746,7 +736,7 @@ class _ClaimScreens(NamedTuple):
 
     stale_prs: Mapping[str, str | None]
     reasons: dict[str, str]
-    mcp_hits: Mapping[str, TrackerMcpGateHit]
+    mcp_hits: Mapping[str, BindingHit]
     drifts: Mapping[str, AdoptedHeadDrift]
     approval_holds: Mapping[str, ReviewApprovalHold]
     closed_hits: Mapping[str, ClosedTicketHit]
@@ -788,7 +778,7 @@ def _claim_under_lock(
                             config=config,
                             stale_pr_ticket_ids=stale_prs,
                             occupied_ticket_reasons=reasons,
-                            tracker_mcp_gate_hits=mcp_hits,
+                            binding_hits=mcp_hits,
                             adopted_head_drifts=drifts,
                             review_approval_holds=approval_holds,
                             closed_ticket_hits=closed_hits,
@@ -819,7 +809,7 @@ def _claim_under_lock(
                 config=config,
                 stale_pr_ticket_ids=stale_prs,
                 occupied_ticket_reasons=reasons,
-                tracker_mcp_gate_hits=mcp_hits,
+                binding_hits=mcp_hits,
                 adopted_head_drifts=drifts,
                 review_approval_holds=approval_holds,
                 closed_ticket_hits=closed_hits,

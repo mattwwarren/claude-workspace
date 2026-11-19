@@ -49,8 +49,9 @@ def _stamp_spawn_success(
     stage_base_ref.
 
     Extracted from :func:`_spawn_claimed_task` to keep that function inside the
-    PLR statement budget, mirroring :func:`_codex_capability_gate`'s extraction
-    for the same reason. Sole caller; it runs after the executor returns, so
+    PLR statement budget, mirroring the extraction of
+    :func:`~cw.dispatch.claim.preflight_reach.preflight_before_spawn` for the
+    same reason. Sole caller; it runs after the executor returns, so
     every write here is predicated on a spawn that genuinely succeeded.
 
     The stored row is re-found by the spawned task's ``created_at`` via

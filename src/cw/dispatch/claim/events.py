@@ -15,20 +15,17 @@ from cw._text import redact
 from cw.dev_queue import (
     REVIEW_APPROVAL_GATE_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
-    TRACKER_MCP_GATE_DISPOSITION,
 )
 from cw.dev_queue.next_commands import dev_queue_command
 from cw.events import record_event
-from cw.models import (
-    CLAUDE_NATIVE_BACKEND,
-    DispatchSkipReason,
-    OrchestratorEventType,
-)
+from cw.models import DispatchSkipReason, OrchestratorEventType
+from cw.models.bindings import Role
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from cw.dispatch.claim.codex_capability import _SpawnOutcome
+    from cw.dispatch.claim.outcome import _SpawnOutcome
+    from cw.dispatch.claim.preflight_reach import BindingHit
     from cw.models import TicketTask
 
 # Hard cap on the spawn-failure text carried on a dispatch.tick (#1679). Same
@@ -243,11 +240,12 @@ def _emit_stale_dispatch_attention_event(
     )
 
 
-def _emit_tracker_mcp_gate_blocked_event(client_name: str, ticket_id: str) -> None:
-    """Emit a dispatch.tick event when the tracker-MCP gate parks a task (#2442).
+def _emit_binding_blocked_event(client_name: str, ticket_id: str) -> None:
+    """Emit a dispatch.tick event when a binding reachability park fires (#2442).
 
     Sibling of :func:`_emit_stale_dispatch_blocked_event`: per-task, outside
-    the per-client-tick precedence chain.
+    the per-client-tick precedence chain. ``skip_reason`` is
+    ``binding_blocked`` (``tracker_mcp_gate_blocked`` before #3744).
     """
     record_event(
         OrchestratorEventType.DISPATCH_TICK,
@@ -260,65 +258,61 @@ def _emit_tracker_mcp_gate_blocked_event(client_name: str, ticket_id: str) -> No
     )
 
 
-def _tracker_mcp_gate_attention_extra(
-    branch: str, file_inspected: str, expected: str, backend: str
-) -> dict[str, str]:
-    """The gate park's additive SESSION_NEEDS_ATTENTION keys, in payload order.
+def _binding_attention_extra(hit: BindingHit) -> dict[str, str]:
+    """The park's additive SESSION_NEEDS_ATTENTION keys, in payload order.
 
-    A claude-native hit keeps ``expected_plugin`` and its pre-#3055
-    ``details`` string byte for byte, plus ``backend``. A non-Claude hit
-    (RFC 0018 S3) names the MCP server as ``expected_server`` instead.
+    A plugin hit (claude-native) keeps ``expected_plugin`` and its pre-#3055
+    ``details`` string byte for byte, plus ``backend``. A server hit (RFC 0018
+    S3) names the MCP server as ``expected_server`` instead. A tool-missing
+    hit appends ``; missing_tools=<a,b>`` to ``details``. ``need`` (the role,
+    #3744) is appended last.
     """
-    if backend == CLAUDE_NATIVE_BACKEND:
-        return {
-            "branch": branch,
-            "file_inspected": file_inspected,
-            "expected_plugin": expected,
-            "backend": backend,
+    if hit.expected_kind == "plugin":
+        extra = {
+            "branch": hit.branch,
+            "file_inspected": hit.file_inspected,
+            "expected_plugin": hit.expected,
+            "backend": hit.backend,
             "details": (
-                f"branch={branch}; file_inspected={file_inspected};"
-                f" expected_plugin={expected}"
+                f"branch={hit.branch}; file_inspected={hit.file_inspected};"
+                f" expected_plugin={hit.expected}"
             ),
         }
-    return {
-        "branch": branch,
-        "file_inspected": file_inspected,
-        "backend": backend,
-        "expected_server": expected,
-        "details": (
-            f"branch={branch}; file_inspected={file_inspected};"
-            f" backend={backend}; expected_server={expected}"
-        ),
-    }
+    else:
+        extra = {
+            "branch": hit.branch,
+            "file_inspected": hit.file_inspected,
+            "backend": hit.backend,
+            "expected_server": hit.expected,
+            "details": (
+                f"branch={hit.branch}; file_inspected={hit.file_inspected};"
+                f" backend={hit.backend}; expected_server={hit.expected}"
+            ),
+        }
+    if hit.missing_tools:
+        extra["details"] += f"; missing_tools={','.join(hit.missing_tools)}"
+    extra["need"] = Role.TICKETS.value
+    return extra
 
 
-def _emit_tracker_mcp_gate_attention_event(
-    task: TicketTask,
-    client_name: str,
-    lane: str,
-    *,
-    branch: str,
-    file_inspected: str,
-    expected: str,
-    backend: str,
+def _emit_binding_attention_event(
+    task: TicketTask, client_name: str, lane: str, hit: BindingHit
 ) -> None:
-    """Emit SESSION_NEEDS_ATTENTION for a pre-dispatch tracker-MCP gate park (#2442).
+    """Emit SESSION_NEEDS_ATTENTION for a binding reachability park (#2442, #3744).
 
-    ``branch``, ``file_inspected``, the expected plugin (claude-native) or MCP
-    server (opencode, #3055) and ``backend`` name exactly what the
-    orchestrator must fix, and ``details`` composes them into one
-    human-readable string. This detail is transient and event-only by design
-    -- ``TicketTask.advisory_note`` is cleared by the very
+    ``paused_status`` is the hit's reason. ``branch``, ``file_inspected``, the
+    expected plugin (claude-native) or MCP server and ``backend`` name exactly
+    what the orchestrator must fix, ``details`` composes them, and ``need``
+    names the role. This detail is transient and event-only by design --
+    ``TicketTask.advisory_note`` is cleared by the very
     ``transition_task_status`` call that performs the park.
     """
     _record_pre_dispatch_attention_event(
         task,
         client_name,
         lane,
-        paused_status=TRACKER_MCP_GATE_DISPOSITION,
-        extra=_tracker_mcp_gate_attention_extra(
-            branch, file_inspected, expected, backend
-        ),
+        paused_status=hit.reason.value,
+        extra=_binding_attention_extra(hit),
     )
 
 

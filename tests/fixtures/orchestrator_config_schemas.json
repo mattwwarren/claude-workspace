@@ -2281,7 +2281,7 @@
     },
     "McpRealization": {
      "additionalProperties": false,
-     "description": "How one harness reaches a role's system over MCP.\n\nExactly one of ``server`` (the MCP server name the harness's own config\ndeclares) or ``plugin_id`` (the claude-native ``enabledPlugins`` key) is\nset. ``tools`` optionally maps each ticket operation to the server's tool\nname; no consumer reads it yet.",
+     "description": "How one harness reaches a role's system over MCP.\n\nExactly one of ``server`` (the MCP server name the harness's own config\ndeclares) or ``plugin_id`` (the claude-native ``enabledPlugins`` key) is\nset. ``tools`` optionally maps each ticket operation to the server's tool\nname; the tick-side tool-name check reads it (``cw.binding_tools``, #3744).",
      "properties": {
       "server": {
        "anyOf": [

@@ -73,12 +73,14 @@ from tests._shared.reach_cases import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-#: The resolver under test, as ``module:function``.
-_RESOLVE = "cw.dispatch.tracker_mcp_gate:resolve_tracker_mcp_gate_hits"
+#: The resolver under test, as ``module:function``. Phase 1 pointed it at the
+#: old gate (``cw.dispatch.tracker_mcp_gate:resolve_tracker_mcp_gate_hits``)
+#: to prove the replay green on the code the fixture was captured from.
+_RESOLVE = "cw.dispatch.claim.preflight_reach:resolve_binding_hits"
 #: Modules whose ``read_backend_mcp`` binding the resolver reads through.
-_READ_SITES: tuple[str, ...] = ("cw.dispatch.tracker_mcp_gate",)
+_READ_SITES: tuple[str, ...] = ("cw.binding_probe",)
 #: Modules whose ``_run_git`` / ``_ref_exists`` bindings the claude read uses.
-_GIT_SITES: tuple[str, ...] = ("cw.dispatch.tracker_mcp_gate",)
+_GIT_SITES: tuple[str, ...] = ("cw.binding_probe",)
 
 _FIXTURE = (
     Path(__file__).resolve().parent
@@ -786,3 +788,184 @@ class TestBackendServerGate:
 
         assert _resolve(client, snapshot(stage=Stage.IMPL)) == {}
         assert reads == []
+
+
+# --- RFC 0019 H2b (#3744): reasons, tool check, stage set, doctor mode --------
+
+
+@pytest.mark.usefixtures("isolated_backend_layers")
+@pytest.mark.parametrize("key", sorted(k for k, v in _OLD.items() if v["hit"]))
+def test_every_parity_hit_carries_its_new_reason(
+    key: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+) -> None:
+    from cw.dispatch.claim.preflight_reach import BindingHit
+    from cw.stage_preflight import PreflightReason
+
+    client, queue = build_case(
+        key, monkeypatch=monkeypatch, tmp_path=tmp_path, make_git_repo=make_git_repo
+    )
+    hit = _resolve(client, queue)[TICKET]
+    assert isinstance(hit, BindingHit)
+    unbound = key.startswith("unbound/")
+    expected = (
+        PreflightReason.BINDING_UNBOUND
+        if unbound
+        else PreflightReason.BINDING_UNREACHABLE
+    )
+    assert hit.reason is expected
+    assert hit.expected_kind == ("plugin" if key.startswith("claude/") else "server")
+    assert hit.missing_tools == ()
+
+
+def _tools_client(
+    workspace: Path, tools: dict[str, str] | None, *, enabled: bool = True
+) -> ClientConfig:
+    from cw.models.bindings import Bindings
+
+    realization: dict[str, object] = {"server": SERVER}
+    if tools is not None:
+        realization["tools"] = tools
+    bindings = Bindings.model_validate(
+        {
+            "tickets": {
+                "system": "linear",
+                "mcp": {CODEX_BACKEND: realization},
+                "preflight": {"enabled": enabled},
+            }
+        }
+    )
+    _write_tracker_config(workspace, "linear")
+    return ClientConfig(
+        name=CLIENT,
+        workspace_path=workspace,
+        bindings=bindings,
+        pipeline=make_stage_pipeline(on(CODEX_BACKEND)),
+    )
+
+
+def _codex_allowlist(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    path = stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, "enabled")
+    text = path.read_text(encoding="utf-8").replace(
+        f"[mcp_servers.{SERVER}]\n",
+        f'[mcp_servers.{SERVER}]\nenabled_tools = ["get_issue"]\n',
+    )
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+@pytest.mark.usefixtures("isolated_backend_layers")
+class TestToolNameCheck:
+    def test_an_excluded_declared_tool_parks_tool_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from cw.stage_preflight import PreflightReason
+
+        path = _codex_allowlist(monkeypatch, tmp_path)
+        workspace = tmp_path / "ws"
+        (workspace / ".git").mkdir(parents=True)
+        client = _tools_client(
+            workspace, {"get": "get_issue", "comment": "save_comment"}
+        )
+
+        (hit,) = _resolve(client, snapshot(stage=Stage.FINALIZE)).values()
+
+        assert hit.reason is PreflightReason.BINDING_TOOL_MISSING
+        assert hit.missing_tools == ("save_comment",)
+        assert _hit_tuple(hit, tmp_path) == [
+            BRANCH,
+            str(path).replace(str(tmp_path), "<tmp>"),
+            SERVER,
+            CODEX_BACKEND,
+        ]
+
+    @pytest.mark.parametrize(
+        "tools", [None, {"get": "get_issue"}], ids=["undeclared", "allowed"]
+    )
+    def test_no_park_when_nothing_declared_is_excluded(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        tools: dict[str, str] | None,
+    ) -> None:
+        _codex_allowlist(monkeypatch, tmp_path)
+        workspace = tmp_path / "ws"
+        (workspace / ".git").mkdir(parents=True)
+
+        assert _resolve(_tools_client(workspace, tools), snapshot()) == {}
+
+    def test_another_layer_fails_the_tool_check_open(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from tests._backend_mcp_helpers import write_project_layer
+
+        _codex_allowlist(monkeypatch, tmp_path)
+        workspace = tmp_path / "ws"
+        (workspace / ".git").mkdir(parents=True)
+        write_project_layer(workspace, CODEX_BACKEND)
+        client = _tools_client(workspace, {"comment": "save_comment"})
+
+        assert _resolve(client, snapshot()) == {}
+
+    def test_an_opted_out_client_runs_no_tool_check(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _codex_allowlist(monkeypatch, tmp_path)
+        workspace = tmp_path / "ws"
+        (workspace / ".git").mkdir(parents=True)
+        client = _tools_client(workspace, {"comment": "x"}, enabled=False)
+
+        assert _resolve(client, snapshot()) == {}
+
+
+def test_the_binding_stages_derive_from_stage_needs() -> None:
+    from cw.dispatch.claim.preflight_reach import BINDING_STAGES
+
+    assert {Stage.PLAN, Stage.IMPL, Stage.FINALIZE} == BINDING_STAGES
+
+
+@pytest.mark.parametrize(
+    ("backend", "stage", "needed"),
+    [
+        *((CLAUDE_NATIVE_BACKEND, s, s in (Stage.PLAN, Stage.IMPL)) for s in STAGES),
+        *((OPENCODE_BACKEND, s, gated(OPENCODE_BACKEND, s)) for s in STAGES),
+        *((CODEX_BACKEND, s, gated(CODEX_BACKEND, s)) for s in STAGES),
+        *(("local", s, False) for s in STAGES),
+        ("nope", Stage.PLAN, False),
+    ],
+)
+def test_the_needed_set_matches_the_hand_written_oracle(
+    backend: str, stage: Stage, needed: bool
+) -> None:
+    from cw.dispatch.claim.preflight_reach import ReachState, assess_binding
+
+    reader = _reader(ClientConfig(name=CLIENT, workspace_path=Path("/nonexistent")))
+    state = assess_binding(reader, backend, stage, BRANCH).state
+    assert (state is not ReachState.NOT_NEEDED) is needed
+
+
+def _reader(client: ClientConfig) -> object:
+    from cw.dispatch.claim.preflight_reach import ReachReader
+
+    return ReachReader(client, client.workspace_path)
+
+
+def test_a_branchless_claude_assessment_is_no_branch_without_a_read(
+    make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Doctor mode: no branch to read is ``no_branch``, never a park or a read."""
+    from cw.dispatch.claim.preflight_reach import ReachState, assess_binding
+
+    repo = branch_with_settings(
+        make_git_repo, {"enabledPlugins": {}}, branch=BRANCH, name="reach-repo"
+    )
+    calls = _count_git(monkeypatch)
+    reader = _reader(reach_client(repo, enabled_gate()))
+
+    assessment = assess_binding(reader, CLAUDE_NATIVE_BACKEND, Stage.PLAN, None)
+
+    assert assessment.state is ReachState.NO_BRANCH
+    assert assessment.hit is None
+    assert calls == []

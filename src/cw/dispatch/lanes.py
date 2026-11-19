@@ -72,6 +72,7 @@ from cw.dispatch.claim import (
     _spawn_error_tick_fields,
     resolve_occupied_ticket_ids,
 )
+from cw.dispatch.claim.preflight_reach import BindingHit, resolve_binding_hits
 from cw.dispatch.pr_gate import resolve_stale_pr_ticket_ids
 from cw.dispatch.review_approval_gate import (
     ReviewApprovalHold,
@@ -82,10 +83,6 @@ from cw.dispatch.ticket_state_gate import (
     ClosedTicketHit,
     claimable_lane_names,
     resolve_closed_ticket_hits,
-)
-from cw.dispatch.tracker_mcp_gate import (
-    TrackerMcpGateHit,
-    resolve_tracker_mcp_gate_hits,
 )
 
 _log = logging.getLogger("cw.dispatch")
@@ -428,13 +425,13 @@ def _resolve_stale_pr_ticket_ids_if_gated(
     return resolve_stale_pr_ticket_ids(client, queue_snapshot)
 
 
-def _resolve_tracker_mcp_gate_hits_if_gated(
+def _resolve_binding_hits_if_gated(
     client: ClientConfig,
     queue_snapshot: DevQueueStore,
     *,
     available_client_slots: int,
-) -> dict[str, TrackerMcpGateHit]:
-    """The #2442 pre-dispatch tracker-MCP gate's resolve call, guarded.
+) -> dict[str, BindingHit]:
+    """The binding reachability preflight's resolve call, guarded (#2442, #3744).
 
     The toggle is checked first and is per-client only: a client whose
     ``bindings.tickets.preflight`` is unset or disabled (the default) never
@@ -445,7 +442,7 @@ def _resolve_tracker_mcp_gate_hits_if_gated(
     """
     if not client.tickets_preflight.enabled or available_client_slots <= 0:
         return {}
-    return resolve_tracker_mcp_gate_hits(client, queue_snapshot)
+    return resolve_binding_hits(client, queue_snapshot)
 
 
 def _resolve_occupied_ticket_ids(
@@ -552,7 +549,7 @@ class _PreClaimScreens(NamedTuple):
 
     stale_pr_ticket_ids: Mapping[str, str | None]
     occupied_ticket_reasons: dict[str, str]
-    tracker_mcp_gate_hits: dict[str, TrackerMcpGateHit]
+    binding_hits: dict[str, BindingHit]
     adopted_head_drifts: dict[str, AdoptedHeadDrift]
     review_approval_holds: dict[str, ReviewApprovalHold]
     closed_ticket_hits: dict[str, ClosedTicketHit]
@@ -590,9 +587,9 @@ def _resolve_pre_claim_screens(
       global ``OrchestratorConfig`` setting and the per-client
       ``ClientConfig`` override (#2396) -- see
       :func:`_resolve_occupied_ticket_ids`.
-    * Pre-dispatch tracker-MCP gate (#2442) -- runs ``git show`` against the
-      client's git dir. Per-client opt-in; see
-      :func:`_resolve_tracker_mcp_gate_hits_if_gated`. Same stage re-check
+    * Binding reachability preflight (#2442, #3744) -- ``git show`` and MCP
+      config reads. Per-client opt-in; see
+      :func:`_resolve_binding_hits_if_gated`. Same stage re-check
       under the lock as the open-PR gate.
     * Adopted-PR head drift gate (RFC 0016, #2943) -- the session-end pin
       settle and the origin-head scan, both ``gh`` + ``git``; see
@@ -622,7 +619,7 @@ def _resolve_pre_claim_screens(
             resolved_native_daemon=resolved_native_daemon,
             warned_unresolvable=warned_unresolvable,
         ),
-        tracker_mcp_gate_hits=_resolve_tracker_mcp_gate_hits_if_gated(
+        binding_hits=_resolve_binding_hits_if_gated(
             client, queue_snapshot, available_client_slots=available_client_slots
         ),
         adopted_head_drifts=_resolve_adopted_head_drifts_if_gated(
@@ -789,7 +786,7 @@ def _dispatch_client_lanes(
                 usage_limited_until=usage_limited_until,
                 stale_pr_ticket_ids=screens.stale_pr_ticket_ids,
                 occupied_ticket_reasons=screens.occupied_ticket_reasons,
-                tracker_mcp_gate_hits=screens.tracker_mcp_gate_hits,
+                binding_hits=screens.binding_hits,
                 adopted_head_drifts=screens.adopted_head_drifts,
                 review_approval_holds=screens.review_approval_holds,
                 closed_ticket_hits=screens.closed_ticket_hits,
