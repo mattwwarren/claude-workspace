@@ -10,8 +10,9 @@ former ``cw/executor.py`` module exposed so import sites stay stable:
 - ``opencode`` — OpencodeExecutor.
 - ``codex``    — CodexExecutor.
 - ``_resolve`` — backend/lane resolution (imports all four executors).
-- ``_clean_review`` — the clean-mode REVIEW guard the local pre-flight uses
-                 (#2797).
+- ``_preflight`` — the call into the generic stage pre-flight
+                 (``cw.stage_preflight``) the local, opencode and codex
+                 pre-flights share (RFC 0019 H2).
 
 Patch a name where its bare-name lookup happens (e.g.
 ``cw.executor.local.aider_available``), not on this package.
@@ -25,7 +26,7 @@ from cw.executor._resolve import (
     resolve_executor_config,
     resolve_pipeline_stages,
 )
-from cw.executor.codex import CODEX_REVIEW_ONLY, CodexExecutor, _codex_preflight
+from cw.executor.codex import CodexExecutor, _codex_preflight
 from cw.executor.core import (
     _DEFAULT_PROBE_TIMEOUT_SECONDS,
     CODEX_NOT_FOUND,
@@ -46,7 +47,6 @@ from cw.local_runner import GithubIssuePlanFetcher
 
 __all__ = [
     "CODEX_NOT_FOUND",
-    "CODEX_REVIEW_ONLY",
     "CODEX_VERSION_PROBE_TIMEOUT",
     "CODEX_VERSION_UNKNOWN",
     "_DEFAULT_PROBE_TIMEOUT_SECONDS",

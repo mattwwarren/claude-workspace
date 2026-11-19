@@ -6,10 +6,10 @@ published through ``cw schema show harness-capabilities``, so every field is a
 closed ``StrEnum``, a ``frozenset`` of one, a ``bool`` or an ``int``: no dict
 fields and no callables.
 
-Declared, not enforced: the declarations are static data in H1. No dispatch
-path reads them yet, and the existing predicates (``clean_mode_supported``,
-``engine_supported``, ``finalize_block_details``, ``repair_entry_block_details``,
-``CODEX_SUPPORTED_STAGES``) stay the enforcement point until H2. Auth, env and
+The declarations are static data, read by the executor stage pre-flight
+(``cw.stage_preflight``, RFC 0019 H2). The older predicates
+(``clean_mode_supported``, ``engine_supported``, ``CODEX_SUPPORTED_STAGES``)
+remain and are pinned to the declarations by parity tests. Auth, env and
 headless load are unverified by these declarations.
 
 Imported by submodule path (``cw.models.capabilities``), not re-exported from

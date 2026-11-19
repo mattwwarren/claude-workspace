@@ -1,11 +1,11 @@
 """Static per-harness capability declarations (RFC 0019 H1, #3708).
 
-Declared, not enforced. These constants are data: no dispatch path, guard or
-predicate reads them in H1. ``clean_mode_supported``, ``engine_supported``,
-``finalize_block_details``, ``repair_entry_block_details`` and
-``CODEX_SUPPORTED_STAGES`` remain the enforcement points until H2 (#3219). The
-parity tests in ``tests/test_executor_capabilities.py`` pin each declaration to
-those predicates. No availability probe here: no ``shutil.which``, no
+These constants are data. The stage pre-flight (``cw.stage_preflight``, called
+from ``cw.executor._preflight``) reads them to park a spawn before any agent
+runs (RFC 0019 H2, #3709). ``clean_mode_supported``, ``engine_supported`` and
+``CODEX_SUPPORTED_STAGES`` remain for their other readers; the parity tests in
+``tests/test_executor_capabilities.py`` pin each declaration to those
+predicates. No availability probe here: no ``shutil.which``, no
 ``build_argv``, so the declaration cannot change with the host's binaries.
 """
 
@@ -23,10 +23,9 @@ from cw.models.enums import SandboxMode, Stage
 
 # Ground: claude-native runs the full pipeline through the Skill tool, Agent
 # subagents and hooks (the `.claude/commands/auto-dev-*.md` files). Its
-# repair entry is `supported`: the commands define "Repair entry: no plan"
-# and no executor guard calls the predicate. Tool narrowing is the deny-list
-# built by `build_disallowed_tools_arg`. Usage is a cost figure from
-# `signal_stop` only.
+# repair entry is `supported`: the commands define "Repair entry: no plan".
+# Tool narrowing is the deny-list built by `build_disallowed_tools_arg`. Usage
+# is a cost figure from `signal_stop` only.
 CLAUDE_NATIVE_CAPABILITIES = HarnessCapabilities(
     harness=Harness.CLAUDE_NATIVE,
     stages=frozenset({Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE}),
@@ -45,7 +44,8 @@ CLAUDE_NATIVE_CAPABILITIES = HarnessCapabilities(
 # `review_feedback` itself (codex_impl/_run.py:196-199, 343, 420, via
 # `verify_review_feedback`) and tolerates an adopted no-plan row
 # (stage_verification/impl_gates.py:99-100), so its repair entry is
-# `supported`, and no codex guard calls the predicate. Sandbox is the two
+# `supported`. HARDEN is not declared, so the stage pre-flight parks it as
+# `stage_unsupported` (formerly `codex_review_only`). Sandbox is the two
 # `SandboxMode` values codex accepts. Narrowing is per tool
 # (`-c mcp_servers.<server>.enabled_tools`); app-addressed bindings are
 # per server, which O2 handles. Usage comes from the `--json` events.
@@ -63,11 +63,12 @@ CODEX_CAPABILITIES = HarnessCapabilities(
     usage_source=UsageSource.CODEX_JSON_EVENTS,
 )
 
-# Ground: FINALIZE is refused for opencode by `finalize_block_details`
-# (_finalize_guard.py:34-42, called at opencode.py:122), so opencode does NOT
-# declare FINALIZE
-# (H2 must reproduce `finalize_unsupported_backend`). `repair_entry` is
-# `blocks_any_feedback` (opencode.py:145-147). Usage is unavailable because
+# Ground: opencode's FINALIZE prompt points at the claude-native
+# auto-dev-finalize.md, whose Claude-only steps no real opencode run has
+# verified (RFC 0018 B1, #3059), so opencode does NOT declare FINALIZE and the
+# stage pre-flight parks it (and HARDEN) as `stage_unsupported`. `repair_entry`
+# is `blocks_any_feedback`: the opencode IMPL prompt reads no feedback (#2983).
+# Usage is unavailable because
 # the backend output is unpinned (`BACKEND_OUTPUT_UNPINNED`).
 OPENCODE_CAPABILITIES = HarnessCapabilities(
     harness=Harness.OPENCODE,
@@ -83,10 +84,10 @@ OPENCODE_CAPABILITIES = HarnessCapabilities(
     usage_source=UsageSource.UNAVAILABLE,
 )
 
-# Ground: `_local_preflight` has no stage check (local.py:91-164), so local
-# keeps running any stage. Declaring IMPL only is "declared, not enforced"
-# (#3219 stays open). `repair_entry` is `blocks_adopted` via the default
-# flag of `repair_entry_block_details` (local.py:75). Local has no MCP, so
+# Ground: aider runs the IMPL task message only, so local declares IMPL and
+# the stage pre-flight parks every other stage as `stage_unsupported` (#3219).
+# `repair_entry` is `blocks_adopted`: an adopted repair row parks, a plain
+# feedback row without an adoption branch runs (#2944). Local has no MCP, so
 # no binding read and no tool narrowing.
 LOCAL_CAPABILITIES = HarnessCapabilities(
     harness=Harness.LOCAL,

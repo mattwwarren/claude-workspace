@@ -17,6 +17,7 @@ from enum import StrEnum
 from typing import Literal
 
 from cw.models import QueueItemStatus
+from cw.stage_preflight import PreflightReason, canonical_reason
 
 # Pinned logger name for every record the schema package emits. Deliberately a
 # literal, not ``__name__``: the pre-split ``schema.py`` logged under this fixed
@@ -340,7 +341,11 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
         {
             "automerge_not_armed",
             "clean_review_unsupported_backend",
-            "finalize_unsupported_backend",
+            # RFC 0019 H2 (#3709): the one stage pre-flight park. Its pre-H2
+            # names (finalize_unsupported_backend, codex_review_only,
+            # opencode_<stage>_not_implemented) are known through
+            # canonical_reason in is_known_blocker_reason.
+            PreflightReason.STAGE_UNSUPPORTED.value,
             "local_main_diverged_from_origin",
             "plan_ambiguous",
             "plan_missing",
@@ -476,9 +481,11 @@ def is_known_blocker_reason(reason: str) -> bool:
     carve-out cannot be honored at one site and missed at another.
 
     Never a gate — ``blocker.reason`` remains an open enum (§4.2). A False
-    answer means "surface it as unrecognized," never "reject it."
+    answer means "surface it as unrecognized," never "reject it." A pre-H2
+    stage reason is read through :func:`cw.stage_preflight.canonical_reason`,
+    so a row parked before RFC 0019 H2 (#3709) is still known.
     """
-    return reason in KNOWN_BLOCKER_REASONS or reason.startswith(
+    return canonical_reason(reason) in KNOWN_BLOCKER_REASONS or reason.startswith(
         FREEFORM_BLOCKER_REASON_PREFIX
     )
 

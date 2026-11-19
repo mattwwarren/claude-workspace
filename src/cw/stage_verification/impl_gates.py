@@ -39,7 +39,7 @@ from cw.codex_review import (
     CODEX_FIX_REVERTED_BRANCH,
     CODEX_FIX_SCOPE_DRIFT,
 )
-from cw.executor._repair_entry import is_adopted_repair_entry
+from cw.models.repair_entry import is_adopted_repair_entry
 from cw.stage_verification.fence import scope_violation_breach, scope_violations
 from cw.stage_verification.impl_block import (
     IMPL_FAILED,

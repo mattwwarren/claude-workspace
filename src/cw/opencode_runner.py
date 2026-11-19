@@ -269,13 +269,13 @@ def stage_entry_marker(stage_value: str) -> StageReached:
 # The FINALIZE prompt points at the auto-dev-finalize.md command file. That
 # flow was last judged backend-neutral at #1670 R6 (gh/git commands only); the
 # doc has since gained Claude-only steps (the Skill tool for /prep-pr, Agent
-# subagents), so the opencode executor refuses FINALIZE before spawn
-# (``cw.executor._finalize_guard``, #3059) and this prompt is kept consistent
-# with the doc for when that guard lifts. Resolution order: the worktree's own
-# git-tracked copy first (per CLAUDE.md it is "the authoritative copy for
-# anything a dispatched worker loads", and the global tree can silently
-# drift), falling back to ``~/.claude/commands/`` for client-repo worktrees
-# that carry no ``.claude/commands/`` of their own.
+# subagents), so opencode does not declare FINALIZE and the stage pre-flight
+# (``cw.stage_preflight``, #3059, #3709) refuses it before spawn; this prompt is
+# kept consistent with the doc for when the declaration grows. Resolution
+# order: the worktree's own git-tracked copy first (per CLAUDE.md it is "the
+# authoritative copy for anything a dispatched worker loads", and the global
+# tree can silently drift), falling back to ``~/.claude/commands/`` for
+# client-repo worktrees that carry no ``.claude/commands/`` of their own.
 _FINALIZE_COMMAND_RELPATH = Path(".claude", "commands", "auto-dev-finalize.md")
 
 
@@ -680,9 +680,9 @@ def build_stage_prompt(
 
     FINALIZE points at the ``auto-dev-finalize.md`` command file, resolved
     worktree-first via ``resolve_finalize_command_file`` (#1670 R6 judged that
-    flow backend-neutral; the opencode executor now refuses FINALIZE before
-    spawn, see ``cw.executor._finalize_guard``, and this prompt is kept
-    consistent with the doc for when the guard lifts). PLAN/IMPL/REVIEW get
+    flow backend-neutral; the stage pre-flight now refuses opencode FINALIZE
+    before spawn, see ``cw.stage_preflight``, and this prompt is kept
+    consistent with the doc for when the declaration grows). PLAN/IMPL/REVIEW get
     self-contained prompts carrying the stage's essential headless contract —
     their command files require Claude Code-only machinery an opencode
     subprocess cannot execute (see the shared-fragment note above). Raises

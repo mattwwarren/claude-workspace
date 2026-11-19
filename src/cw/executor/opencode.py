@@ -4,29 +4,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from cw.auto_dev_result import (
-    REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
-    AutoDevResult,
-)
+from cw.auto_dev_result import AutoDevResult
 from cw.bindings_block import bindings_block_for
 from cw.executor._capabilities import OPENCODE_CAPABILITIES
-from cw.executor._engine_guard import engine_block_details
-from cw.executor._finalize_guard import (
-    FINALIZE_UNSUPPORTED_BACKEND,
-    finalize_block_details,
-)
-from cw.executor._repair_entry import (
-    REPAIR_ENTRY_UNSUPPORTED_BACKEND,
-    repair_entry_block_details,
-)
+from cw.executor._preflight import park_if_unmet
 from cw.executor.core import FireAndForgetRunner, _PreflightOK, _spawn_fire_and_forget
-from cw.models import OPENCODE_BACKEND, SessionOrigin, SessionPurpose
+from cw.models import SessionOrigin, SessionPurpose
 from cw.models.bindings import Harness
 from cw.native_daemon import get_native_daemon_client
 from cw.opencode_runner import (
     OPENCODE_NOT_FOUND,
-    STAGE4A_MERGE_GATE,
-    SUPPORTED_STAGES,
     RealOpencodeRunner,
     build_stage_prompt,
     opencode_available,
@@ -76,19 +63,25 @@ def _opencode_preflight(
     opencode has no Claude turn loop to signal-stop. Written before the
     binary / stage checks so even a blocked park carries a fresh context.
 
-    Returns a blocked ``AutoDevResult`` on binary-missing or unsupported
-    stage; returns ``_PreflightOK`` with the resolved argv + env (stage
+    Then the generic stage pre-flight (``park_if_unmet``, RFC 0019 H2) parks
+    an undeclared stage (HARDEN, FINALIZE: ``stage_unsupported``), an
+    engine-configured REVIEW (``review_engine_unsupported_backend``, #3216) and
+    any IMPL row carrying repair feedback (``repair_entry_unsupported_backend``,
+    #2983), all before the binary probe.
+
+    Returns a blocked ``AutoDevResult`` on a pre-flight park or binary-missing;
+    returns ``_PreflightOK`` with the resolved argv + env (stage
     prompt) when the binary is available and the stage is supported. A
     REVIEW spawn for a ``review.convergence: clean`` client gets the
     converge-to-clean prompt (``clean_review=client.review.is_clean``, #2806),
     which drives the convergence ledger itself; the schema-15 ``review``
     object stamped into the context below is what its ``cw review converge``
     commands read.
-    FINALIZE is accepted by ``SUPPORTED_STAGES`` but refused by
-    ``finalize_block_details`` before the binary probe (RFC 0018 B1, #3059);
-    its prompt (the ``auto-dev-finalize.md`` command file, worktree copy first,
-    home fallback — #1670 R6) is kept consistent with the doc for when the
-    guard lifts. PLAN/IMPL/REVIEW get self-contained prompts, and every
+    FINALIZE is not declared for opencode, so the pre-flight refuses it
+    before the binary probe (RFC 0018 B1, #3059); its prompt (the
+    ``auto-dev-finalize.md`` command file, worktree copy first, home
+    fallback — #1670 R6) is kept consistent with the doc for when the
+    declaration grows. PLAN/IMPL/REVIEW get self-contained prompts, and every
     stage's prompt carries *session_id* so the worker can push its result via
     ``cw result emit --session-id`` (#2430; see ``build_stage_prompt``). Every
     blocked result carries the dispatched stage's own entry marker so dispatch
@@ -114,49 +107,16 @@ def _opencode_preflight(
         write_stop_hook=False,
         daemon=daemon,
     )
-    if stage.value not in SUPPORTED_STAGES:
-        return make_opencode_blocked(
-            ticket_id=task.ticket_id,
-            worktree=worktree,
-            reason=f"opencode_{stage.value}_not_implemented",
-            stage_reached=STAGE4A_MERGE_GATE,
-        )
-    # RFC 0018 B1 (#3059): FINALIZE fails closed; the claude-native doc's
-    # Claude-only steps are unverified on opencode.
-    finalize_details = finalize_block_details(stage, OPENCODE_BACKEND)
-    if finalize_details is not None:
-        return make_opencode_blocked(
-            ticket_id=task.ticket_id,
-            worktree=worktree,
-            reason=FINALIZE_UNSUPPORTED_BACKEND,
-            details=finalize_details,
-            retry_eligible=False,
-            stage_reached=stage_entry_marker(stage.value),
-        )
-    # #3216: an engine-configured REVIEW never runs the built-in roster here.
-    engine_details = engine_block_details(client, stage, OPENCODE_BACKEND)
-    if engine_details is not None:
-        return make_opencode_blocked(
-            ticket_id=task.ticket_id,
-            worktree=worktree,
-            reason=REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
-            details=engine_details,
-            retry_eligible=False,
-            stage_reached=stage_entry_marker(stage.value),
-        )
-    # #2944 repair rows, extended to any row carrying review_feedback: #2983
-    # decided fail-closed for opencode (RFC 0018 B1, #3059).
-    repair_details = repair_entry_block_details(
-        task, stage, OPENCODE_BACKEND, block_any_feedback=True
+    blocked = park_if_unmet(
+        OPENCODE_CAPABILITIES,
+        task=task,
+        client=client,
+        stage=stage,
+        worktree=worktree,
+        blocked=make_opencode_blocked,
     )
-    if repair_details is not None:
-        return make_opencode_blocked(
-            ticket_id=task.ticket_id,
-            worktree=worktree,
-            reason=REPAIR_ENTRY_UNSUPPORTED_BACKEND,
-            details=repair_details,
-            stage_reached=stage_entry_marker(stage.value),
-        )
+    if blocked is not None:
+        return blocked
     if not opencode_available():
         return make_opencode_blocked(
             ticket_id=task.ticket_id,
@@ -183,15 +143,15 @@ def _opencode_preflight(
 class OpencodeExecutor:
     """StageExecutor backed by a fire-and-forget opencode subprocess (#1669).
 
-    FINALIZE is refused in pre-flight with
-    ``reason=finalize_unsupported_backend`` (RFC 0018 B1, #3059; no real
-    opencode FINALIZE run has verified the claude-native doc); its prompt is
-    kept consistent with the doc for when the guard lifts. PLAN/IMPL/REVIEW
+    FINALIZE is refused in pre-flight with ``reason=stage_unsupported``
+    (opencode does not declare it: RFC 0018 B1, #3059; no real opencode
+    FINALIZE run has verified the claude-native doc); its prompt is kept
+    consistent with the doc for when the declaration grows. PLAN/IMPL/REVIEW
     carry self-contained stage contracts because their command files require
     Claude Code-only machinery (see ``opencode_runner.build_stage_prompt``).
     Every prompt instructs opencode to emit the sentinel with the correct
-    ``stage_reached`` marker (R1). Unsupported stages (e.g. HARDEN) are blocked
-    with ``reason=opencode_<stage>_not_implemented``.
+    ``stage_reached`` marker (R1). Other undeclared stages (e.g. HARDEN) are
+    blocked with ``reason=stage_unsupported`` too.
 
     spawn() is non-blocking on the launch path: after synchronous pre-flight
     checks, it launches opencode via ``OpencodeRunner.launch`` (Popen, no wait),
@@ -200,7 +160,7 @@ class OpencodeExecutor:
     asynchronously; reconcile/local harvest later detects the dead process,
     parses the JSONL log for the sentinel, and completes the session.
 
-    Pre-flight failures (binary missing, FINALIZE or repair-entry refused) stay
+    Pre-flight failures (binary missing, a stage pre-flight park) stay
     synchronous: they persist a
     blocked result to Session.last_result via the door
     (``emit_result_locked``, source=EXECUTOR_DIRECT — RFC 0012 A2), mark the

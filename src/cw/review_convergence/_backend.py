@@ -72,9 +72,10 @@ def clean_mode_supported(loop_backend: str) -> bool:
 
     Derived from :data:`_LOOP_FAMILY` and :data:`_FAMILYLESS_LOOPS`, the
     loop backends the engine can confirm, so wiring a new backend into clean
-    mode is one entry in one of them. The executor pre-flight guard
-    (``cw.executor._clean_review``) and the ``review-convergence`` doctor check
-    both read this one predicate (#2797).
+    mode is one entry in one of them. The stage pre-flight
+    (``cw.stage_preflight``) reads each harness's ``clean_mode_review``
+    declaration instead, which the harness capability parity tests pin equal
+    to this predicate (#2797, #3709).
     """
     return loop_backend in _LOOP_FAMILY or loop_backend in _FAMILYLESS_LOOPS
 
@@ -87,8 +88,10 @@ _ENGINE_BACKENDS: frozenset[str] = frozenset({CLAUDE_NATIVE_BACKEND, CODEX_BACKE
 def engine_supported(backend: str) -> bool:
     """True when *backend*'s REVIEW lane can run a repo review engine round.
 
-    The one predicate ``converge config``, the review attestation scan, the
-    ``review-engine`` doctor check and the opencode/local pre-flight guard
-    (``cw.executor._engine_guard``) read (RFC 0018 A4, R25).
+    The one predicate ``converge config``, the review attestation scan and the
+    ``review-engine`` doctor check read (RFC 0018 A4, R25). The stage
+    pre-flight (``cw.stage_preflight``) reads the ``review_engine``
+    declaration, which the harness capability parity tests pin equal to this
+    predicate.
     """
     return backend in _ENGINE_BACKENDS
