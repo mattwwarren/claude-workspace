@@ -136,6 +136,19 @@ superseded by the rescope this ADR records.
   tracker API; it builds the argv, hands over the parts and verifies the
   agent's self-attested report (`src/cw/tracker_io/`). Not a new allowlist
   entry and not a new ADR.
+- **Update (2026-11-18): #3706 (RFC 0019 O2) added the outbox drain.** Prose
+  posts made with no agent present are enqueued to the per-client outbox
+  (`src/cw/outbox/`) and drained by `cw outbox drain`
+  (`src/cw/outbox_drain.py`) to a `bindings.tickets` binding with `cli: gh`,
+  through `cw.gh.post_issue_comment` and `cw.gh.fetch_issue_comments` (agent
+  posts go through `cw.tracker_post.post_parts`). That is GitHub work through
+  the existing `cw/gh/` wrappers, so the allowlist stays `{cw/gh/}` and no
+  argv literal is added outside it. The dispatch tick only launches the drain
+  as a detached process and makes no tracker call itself, keeping the tick's
+  no-unbounded-external-calls convention; the drain holds no lock but its own
+  per-client lease across `gh` calls (ADR-0019). The MCP half (a courier turn
+  for non-GitHub trackers) is a later change. Not a new allowlist entry and
+  not a new ADR.
 
 ## Alternatives considered
 

@@ -1,7 +1,10 @@
 """Outbox on-disk layout: paths, directory creation, atomic record and body IO.
 
 ``state_dir() / "outbox" / <client>`` holds one ``<id>.body`` and one
-``<id>.json`` per entry plus the ``.outbox.lock`` file. The path is composed at
+``<id>.json`` per entry plus the ``.outbox.lock`` file and the drain sidecars
+(#3706): ``drain.lock``, ``drain.log``, ``drain.held`` and
+``drain.unreachable.<role>``. No sidecar ends in ``.json``, so none is ever
+parsed as an entry. The path is composed at
 call time, never bound at module level, so the autouse ``tmp_config_dir``
 redirects it. The record is the commit point: a body without a record is an
 orphan and is ignored.
@@ -27,6 +30,7 @@ from cw.outbox._models import (
     OUTBOX_SCHEMA_VERSION,
     OutboxEntry,
     OutboxRecordError,
+    OutboxRole,
     OutboxSchemaError,
     check_client,
     check_entry_id,
@@ -46,6 +50,10 @@ _OUTBOX_DIRNAME = "outbox"
 _LOCK_NAME = ".outbox.lock"
 _RECORD_SUFFIX = ".json"
 _BODY_SUFFIX = ".body"
+_DRAIN_LOCK_NAME = "drain.lock"
+_DRAIN_LOG_NAME = "drain.log"
+_DRAIN_HELD_NAME = "drain.held"
+_DRAIN_UNREACHABLE_PREFIX = "drain.unreachable."
 
 
 def outbox_root() -> Path:
@@ -58,6 +66,22 @@ def client_dir(client: str) -> Path:
 
 def lock_path(client: str) -> Path:
     return client_dir(client) / _LOCK_NAME
+
+
+def drain_lock_path(client: str) -> Path:
+    return client_dir(client) / _DRAIN_LOCK_NAME
+
+
+def drain_log_path(client: str) -> Path:
+    return client_dir(client) / _DRAIN_LOG_NAME
+
+
+def held_path(client: str) -> Path:
+    return client_dir(client) / _DRAIN_HELD_NAME
+
+
+def unreachable_path(client: str, role: OutboxRole) -> Path:
+    return client_dir(client) / f"{_DRAIN_UNREACHABLE_PREFIX}{role.value}"
 
 
 def record_path(client: str, entry_id: str) -> Path:
@@ -153,18 +177,40 @@ def read_record(client: str, entry_id: str) -> OutboxEntry:
     return _parse_record(record_path(client, entry_id), client)
 
 
-def scan_entries(client: str) -> list[OutboxEntry]:
-    """Every readable record of *client*, unordered.
-
-    Pure read, lock-free, and it never creates the client directory. Orphan
-    bodies and ``*.tmp`` leftovers do not match ``*.json`` and are ignored. A
-    corrupt or too-new record is skipped with a WARNING and never rewritten.
-    """
+def _record_paths(client: str) -> list[Path]:
     directory = client_dir(client)
     if not directory.is_dir():
         return []
+    return sorted(directory.glob(f"*{_RECORD_SUFFIX}"))
+
+
+def _mtime_ns(path: Path) -> int:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        # Vanished between the glob and the stat: order it oldest.
+        return -1
+
+
+def record_count(client: str) -> int:
+    """How many record files *client* has. Pure read; parses nothing."""
+    return len(_record_paths(client))
+
+
+def scan_entries(client: str, *, newest: int | None = None) -> list[OutboxEntry]:
+    """Every readable record of *client*, unordered.
+
+    Pure read, lock-free, and it never creates the client directory. Orphan
+    bodies, ``*.tmp`` leftovers and the ``drain.*`` sidecars do not match
+    ``*.json`` and are ignored. A corrupt or too-new record is skipped with a
+    WARNING and never rewritten. With *newest*, the record files are ordered by
+    mtime (a stat pass) and only the newest *newest* are parsed, newest first.
+    """
+    paths = _record_paths(client)
+    if newest is not None:
+        paths = sorted(paths, key=_mtime_ns, reverse=True)[:newest]
     entries: list[OutboxEntry] = []
-    for path in sorted(directory.glob(f"*{_RECORD_SUFFIX}")):
+    for path in paths:
         try:
             entries.append(_parse_record(path, client))
         except (OutboxRecordError, OutboxSchemaError) as exc:

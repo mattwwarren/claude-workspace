@@ -731,6 +731,20 @@ class OrchestratorEventType(StrEnum):
     # covers re-entry. In _DEFAULT_OPERATOR_EVENT_TYPES for the same reason
     # as that event. `correlation_id` is the ticket.
     REVIEW_OPERATOR_CONTEXT_UNDELIVERED = "review.operator_context_undelivered"
+    # GitHub #3706 (RFC 0019 O2) -- the outbox drain's per-entry outcomes,
+    # emitted best-effort from `cw.outbox_drain` with `correlation_id` = the
+    # ticket. Payload keys: client, ticket, role, marker, producer, entry_id,
+    # reason, posted, held (never body text). `entry_delivered` is an audit
+    # record only and is NOT in _DEFAULT_OPERATOR_EVENT_TYPES (same convention
+    # as REVIEW_VERDICT_COMMENT_POSTED). `entry_unverified` (a settle to
+    # unverified: the post may be public), `entry_skipped` (the store settled
+    # the entry failed/body_unreadable) and `entry_pending` (a release: a
+    # binding-level marker release, once per entry per episode, or a per-entry
+    # held release, once per hold) are forwarded by default.
+    OUTBOX_ENTRY_DELIVERED = "outbox.entry_delivered"
+    OUTBOX_ENTRY_UNVERIFIED = "outbox.entry_unverified"
+    OUTBOX_ENTRY_SKIPPED = "outbox.entry_skipped"
+    OUTBOX_ENTRY_PENDING = "outbox.entry_pending"
     # GitHub #1927 -- a stale_dispatch park's WatchedPr registration found an
     # active watch for the same (repo, pr_number) already owned by a
     # DIFFERENT, non-None client. register_or_adopt_watched_pr refuses to

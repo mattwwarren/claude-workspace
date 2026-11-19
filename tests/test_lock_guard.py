@@ -565,6 +565,10 @@ _UNGUARDED: dict[tuple[str, str], str] = {
     ("cw/session_resume_trigger.py", "_resume_trigger_lock"): (
         "per-session, held across a spawn that takes sessions_lock (ADR follow-up)"
     ),
+    ("cw/outbox/_lease.py", "drain_lease"): (
+        "per-client long-held drain lease (#3706); non-blocking try_flock_until"
+        " fails fast with DrainLeaseHeldError; never the rank-LEAF outbox lock"
+    ),
 }
 
 _GUARDED: frozenset[tuple[str, str]] = frozenset(

@@ -96,6 +96,8 @@ _MARKER_START_NS = 1_000_000
 _ANCIENT = "2020-01-01T00:00:00Z"
 _RECENT = "2026-11-18T12:00:00Z"
 _UNKNOWN_SCHEMA = OUTBOX_SCHEMA_VERSION + 1
+# #3706 bumped the record schema to 2 (``operator_authored``); no migration.
+_EXPECTED_SCHEMA = 2
 _BAD_TOKEN = "0" * 32
 
 
@@ -253,7 +255,7 @@ class TestEnqueue:
         assert entry.state is OutboxState.PENDING
         assert entry.reason is None
         assert entry.client == _CLIENT
-        assert entry.schema_version == OUTBOX_SCHEMA_VERSION
+        assert entry.schema_version == OUTBOX_SCHEMA_VERSION == _EXPECTED_SCHEMA
         assert entry.claim_token is None
         assert entry.claimant is None
         assert _body_file(entry.id).read_bytes() == _BODY.encode()
@@ -692,6 +694,9 @@ _LEGAL = {
     (OutboxState.CLAIMED, OutboxState.DELIVERED),
     (OutboxState.CLAIMED, OutboxState.UNVERIFIED),
     (OutboxState.CLAIMED, OutboxState.FAILED),
+    # #3706: the release edge (and the store's dead-owner recovery) is now a
+    # table member; ``release`` additionally requires ``claimed_from`` pending.
+    (OutboxState.CLAIMED, OutboxState.PENDING),
 }
 
 
@@ -700,22 +705,12 @@ class TestTransitionMatrix:
     def test_5x5(self, frm: OutboxState, to: OutboxState) -> None:
         assert transition_allowed(frm, to) is ((frm, to) in _LEGAL)
 
-    @pytest.mark.parametrize(("frm", "to"), _ALL_PAIRS)
-    def test_5x5_with_recovery_adds_only_claimed_to_pending(
-        self, frm: OutboxState, to: OutboxState
-    ) -> None:
-        recovery_edge = (frm, to) == (OutboxState.CLAIMED, OutboxState.PENDING)
-        expected = (frm, to) in _LEGAL or recovery_edge
-        assert transition_allowed(frm, to, recovery=True) is expected
-
     def test_allowed_transitions_is_exactly_the_legal_set(self) -> None:
         assert set(ALLOWED_TRANSITIONS) == _LEGAL
 
     def test_terminal_states_have_no_outgoing_edge(self) -> None:
         for terminal in (OutboxState.DELIVERED, OutboxState.FAILED):
-            assert not any(
-                transition_allowed(terminal, to, recovery=True) for to in OutboxState
-            )
+            assert not any(transition_allowed(terminal, to) for to in OutboxState)
 
     @pytest.mark.parametrize("target", [OutboxState.PENDING, OutboxState.CLAIMED])
     def test_settle_only_targets_settle_states(self, target: OutboxState) -> None:
@@ -728,6 +723,26 @@ class TestTransitionMatrix:
                 claim_token=claimed.claim_token or "",
                 state=target,
                 reason=OutboxReason.CLAIM_RECOVERED,
+            )
+
+        assert _states() == {claimed.id: OutboxState.CLAIMED}
+
+    @pytest.mark.parametrize(
+        "reason",
+        [OutboxReason.BINDING_UNREACHABLE, OutboxReason.TRANSIENT_FAILURE],
+    )
+    def test_settle_refuses_pending_even_with_a_release_reason(
+        self, reason: OutboxReason
+    ) -> None:
+        claimed = _claim_one()
+
+        with pytest.raises(OutboxTransitionError):
+            settle(
+                _CLIENT,
+                claimed.id,
+                claim_token=claimed.claim_token or "",
+                state=OutboxState.PENDING,
+                reason=reason,
             )
 
         assert _states() == {claimed.id: OutboxState.CLAIMED}
@@ -747,12 +762,20 @@ class TestTransitionMatrix:
                     OutboxReason.BODY_UNREADABLE,
                 }
             ),
-            OutboxState.PENDING: frozenset({OutboxReason.CLAIM_RECOVERED}),
+            OutboxState.PENDING: frozenset(
+                {
+                    OutboxReason.CLAIM_RECOVERED,
+                    OutboxReason.BINDING_UNREACHABLE,
+                    OutboxReason.TRANSIENT_FAILURE,
+                }
+            ),
             OutboxState.CLAIMED: frozenset(
                 {
                     OutboxReason.CLAIM_RECOVERED,
                     OutboxReason.READBACK_UNVERIFIED,
                     OutboxReason.READBACK_MISMATCH,
+                    OutboxReason.BINDING_UNREACHABLE,
+                    OutboxReason.TRANSIENT_FAILURE,
                 }
             ),
         }
@@ -765,6 +788,8 @@ class TestTransitionMatrix:
             "turn_failed",
             "body_unreadable",
             "claim_recovered",
+            "binding_unreachable",
+            "transient_failure",
         }
         assert {s.value for s in OutboxState} == {
             "pending",

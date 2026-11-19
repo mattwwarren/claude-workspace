@@ -1167,6 +1167,10 @@
       "review.verdict_comment_unverified",
       "review.verdict_comment_posted",
       "review.operator_context_undelivered",
+      "outbox.entry_delivered",
+      "outbox.entry_unverified",
+      "outbox.entry_skipped",
+      "outbox.entry_pending",
       "watched_pr.collision",
       "sentinel.race_miss",
       "worktree.fast_forwarded",
@@ -1176,7 +1180,7 @@
       "review.attestation_rejected",
       "session.result_emitted",
       "daemon.leaked_worker_stopped",
-     "session.stop_continued"
+      "session.stop_continued"
      ],
      "title": "OrchestratorEventType",
      "type": "string"
@@ -1362,6 +1366,10 @@
       "review.verdict_comment_unverified",
       "review.verdict_comment_posted",
       "review.operator_context_undelivered",
+      "outbox.entry_delivered",
+      "outbox.entry_unverified",
+      "outbox.entry_skipped",
+      "outbox.entry_pending",
       "watched_pr.collision",
       "sentinel.race_miss",
       "worktree.fast_forwarded",
@@ -1371,7 +1379,7 @@
       "review.attestation_rejected",
       "session.result_emitted",
       "daemon.leaked_worker_stopped",
-     "session.stop_continued"
+      "session.stop_continued"
      ],
      "title": "OrchestratorEventType",
      "type": "string"
@@ -2398,6 +2406,26 @@
      "title": "ModelPrice",
      "type": "object"
     },
+    "OutboxConfig": {
+     "additionalProperties": false,
+     "description": "Per-client outbox drain settings (#3706, RFC 0019 O2).\n\n``enabled: false`` stops the dispatch tick from launching a drain for the\nclient and from emitting outbox events; ``enqueue`` is unaffected, so\nentries wait. It is distinct from an absent tickets binding, where the\ndrain still runs and releases entries ``binding_unreachable``. A plain\n``cw outbox drain -c <client>`` on a disabled client is refused;\n``--force`` drains it anyway. ``max_entries_per_run`` caps the entries one\ndrain run claims (``--limit`` overrides it).",
+     "properties": {
+      "enabled": {
+       "default": true,
+       "title": "Enabled",
+       "type": "boolean"
+      },
+      "max_entries_per_run": {
+       "default": 20,
+       "maximum": 100,
+       "minimum": 1,
+       "title": "Max Entries Per Run",
+       "type": "integer"
+      }
+     },
+     "title": "OutboxConfig",
+     "type": "object"
+    },
     "ReapPolicy": {
      "description": "Policy controlling whether the reconciler destroys a stalled session.\n\nUnder ``SIGNAL_ONLY`` (default): route the owning task to BLOCKED_ON_USER,\nleave session/worktree/daemon surface intact.  Cleared by an explicit\noperator command (the orchestrator session counts, ADR-0020).\nUnder ``AUTO``: self-healing \u2014 stop daemon, revert task to PENDING for retry.\nNo reconcile act removes the worktree (ADR-0014).",
      "enum": [
@@ -3023,6 +3051,9 @@
     "bindings": {
      "$ref": "#/$defs/Bindings"
     },
+    "outbox": {
+     "$ref": "#/$defs/OutboxConfig"
+    },
     "mechanical_conflict_repair": {
      "anyOf": [
       {
@@ -3213,6 +3244,10 @@
       "review.verdict_comment_unverified",
       "review.verdict_comment_posted",
       "review.operator_context_undelivered",
+      "outbox.entry_delivered",
+      "outbox.entry_unverified",
+      "outbox.entry_skipped",
+      "outbox.entry_pending",
       "watched_pr.collision",
       "sentinel.race_miss",
       "worktree.fast_forwarded",
@@ -3222,7 +3257,7 @@
       "review.attestation_rejected",
       "session.result_emitted",
       "daemon.leaked_worker_stopped",
-     "session.stop_continued"
+      "session.stop_continued"
      ],
      "title": "OrchestratorEventType",
      "type": "string"
@@ -4211,6 +4246,9 @@
      "gate.disk_pressure_bypassed",
      "gate.ssh_key_bypassed",
      "operator.escalation",
+     "outbox.entry_pending",
+     "outbox.entry_skipped",
+     "outbox.entry_unverified",
      "pr.action_failed",
      "pr.action_taken",
      "pr.ci_failed",

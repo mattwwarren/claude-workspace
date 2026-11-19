@@ -64,6 +64,7 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 | `merge_gate_ignore_paths` | list[string] | `[]` | Per-client paths excluded from Stage 4a's merge-gate file-overlap check before it escalates to a `git merge-tree` conflict probe (#2431) — e.g. a checked-in `mypy-baseline.txt` or lock file nearly every PR touches. Exact repo-relative string match, no globs. Does not excuse a genuine textual conflict in a listed path. Delivered to headless workers via `.claude/cw-context.json` (schema v11), not read from `clients.yaml` directly by the worker. The clean-mode tip rule does not read this list (#2979): it tolerates only a merge git itself would write, so a conflict resolution in a listed path is reviewed like any other. |
 | `merge_gate_enabled` | bool | `true` | Per-client switch for the whole Stage 4a merge gate (#2851). `false` makes `auto-dev-finalize.md` skip the open-PR inventory, the overlap filter and the `git merge-tree` probe, so a ticket never parks as `merge_gate_blocked` / `prior_pipeline_pr_open`; the worker proceeds to Step 4b and records `merge gate disabled by client config` in `friction_highlights`. A strict bool: any other value (`"no"`, `0`) fails loud at config load. Delivered to headless workers via `.claude/cw-context.json` (schema v16); a context without the key behaves as `true`. Operator-only (ADR-0020): edit `clients.yaml` by hand. `cw lane set` / `cw config lane set` refuse it and a dispatch worker never writes it. `cw doctor` lists every client with it off (`merge-gate/<client>`). It does not turn off `merge_gate_ignore_paths` guidance: the "regenerate, don't hand-resolve" rule still applies after a rebase. **Risk:** with the gate off, a PR that conflicts with an open sibling PR is created anyway, and whichever merges second needs a manual rebase. There is no fleet-wide switch; set it on each client. |
 | `bindings` | Bindings | `{}` | Per-role tool bindings (RFC 0019 R1, #3702): which system plays each of `tickets`, `knowledge`, `code_host` and `chat`, and how each harness reaches it (an MCP realization per harness, or `cli: gh`). `bindings.tickets` replaces `tracker_mcp_gate`; its `preflight` is the pre-dispatch tracker-MCP gate. See [Role bindings](#role-bindings). Schema: `cw schema show bindings` |
+| `outbox` | OutboxConfig | `{enabled: true, max_entries_per_run: 20}` | The outbox drain (RFC 0019 O2, #3706): `enabled` (bool, default `true`) lets the dispatch tick launch a `cw outbox drain` for this client; `max_entries_per_run` (1 to 100, default 20) caps the entries one drain run claims. See [Outbox drain](#outbox-drain). |
 | `tracker_mcp_gate` | TrackerMcpGateConfig \| null | `null` | **Deprecated (RFC 0019 R1, #3702): use `bindings.tickets`.** Still accepted: on load it is validated as before, migrated into `bindings.tickets` (`plugin_id` to `mcp.claude-native.plugin_id`, `servers.<backend>` to `mcp.<backend>.server`, `enabled`/`settings_path` to `preflight`) with a once-per-client warning, and setting it beside `bindings.tickets` is an error. Per-client opt-in for the #2442 pre-dispatch tracker-MCP gate. `null` (the default) means the gate never runs for this client and never reads any branch's settings file; there is no fleet-wide `orchestrator.yaml` switch. Sub-fields: `enabled: bool = false` (must be `true` for the gate to run), `plugin_id: str \| null = null` (the exact `enabledPlugins` key your tracker's MCP plugin registers under, e.g. `"linear@acme-marketplace"`; matched verbatim, no `@`-suffix stripping, case-sensitive; applies to **claude-native** rows only since #3055), `settings_path: str = ".claude/settings.json"` (repo-relative file read from the ticket branch via `git show`; claude-native rows only), `servers: dict[str, str] \| null = null` (#3055; keys `codex` / `opencode`, value the MCP server name that backend's config declares for the tracker, e.g. `{opencode: linear}`; applies to that backend's rows only: opencode PLAN/IMPL rows and, since #3060, codex PLAN rows are gated; codex REVIEW is doctor-reported only. On a non-GitHub tracker a codex PLAN row with no usable `servers.codex` parks before spawn, and the PLAN run itself blocks `tracker_mcp_unavailable_pre_dispatch` when the gate is unset). At least one of `plugin_id` or a non-empty `servers` is required. For an opencode row on a non-GitHub tracker, dispatch reads the user-layer `~/.config/opencode/opencode.json` in process and parks the row when `mcp.<server>` is absent or `enabled: false`; a GitHub tracker is never read, an unset tracker fails open with one warning, and any project or system config layer, an `OPENCODE_CONFIG*` env var, a JSONC file or an unreadable file fails open (the reading is UNKNOWN). The check is declaration-only: `cw doctor` (`tracker-mcp/<client>/<lane>/<backend>`) says "declared in <path>; auth, env and headless load unverified". Before a PLAN/IMPL-stage claude-native ticket is claimed, a branch whose settings file parses but whose `enabledPlugins` (an object of `"<plugin>@<marketplace>": bool`, or a list of plugin ids) lacks `plugin_id` or sets it `false` is parked `BLOCKED_ON_USER` (disposition `tracker_mcp_gate`) instead of spawned. Fails open — spawn proceeds, reason logged once — when the branch does not exist yet, the file is missing, the JSON is malformed, or `enabledPlugins` is absent or an unrecognized shape. |
 | `mechanical_conflict_repair` | MechanicalConflictRepairConfig \| null | `null` | Per-client opt-in for the #2917 `repair_mechanical_conflict` review recipe: presence of the entry is the opt-in (with `review_recipes_enabled: true`), and a lane or ticket `review_recipes: {repair_mechanical_conflict: false}` vetoes it, while `true` without an entry never fires. When a shipped PR's conflicts all match `paths`, the recipe merges `origin/<default>` into the branch in a scratch tree, runs `repair_command`, checks nothing outside `paths` changed, runs `verify_command`, and force-pushes with a lease. Sub-fields: `paths: list[str]` (required, non-empty; anchored repo-relative globs, `**` crosses directories and `*` does not; no leading `/` or `./`, no trailing `/` (use `dir/**`), no `.`/`..` segment, no backslash), `repair_command: list[str]` and `verify_command: list[str]` (required argv lists, no shell; a relative `argv[0]` containing `/` is read from the currently checked-out working tree of the client's git directory (`repo_path`, or `workspace_path` for a legacy client), never the PR branch and never the default branch: cw fetches but does not update that checkout, so a missing or stale script shows up as `repair_failed` / `check_failed`; use an absolute path or a bare `PATH` name to avoid depending on it), `repair_timeout_seconds: int = 300` and `verify_timeout_seconds: int = 120` (each 1-600; the repair job runs inline in the dispatch tick's reconcile step, so the whole dispatch tick waits on it, and `cw watchdog tick` reports the loop as stalled when the newest `dispatch.tick` is older than `max(4 x tick_interval_seconds, 600 s)`: keep `repair_timeout_seconds + verify_timeout_seconds` plus about one tick interval under 600 s). Unknown sub-keys fail loud. Operator view: [`docs/dispatch-runbook.md`](../docs/dispatch-runbook.md#declared-path-conflict-repair-repair_mechanical_conflict-2917). |
 | `worker_effort` | string \| null | none (medium on claude-opus-5-5 pins) | Effort level for DAEMON-origin worker spawns, forwarded as `--effort <level>` to `claude --bg` from both initial spawn and DAEMON-origin resume (#2350). Closed set: `low`, `medium`, `high`, `xhigh`, `max`, or `inherit` (no flag; the operator's effort applies, also on an Opus 5.5 pin). An explicit level is always forwarded, on any model. Unset forwards `medium` only on a full `claude-opus-5-5*` id; unset on any other model, or with no `worker_model`, emits no flag. USER-origin sessions ignore it. No per-stage override: effort follows the effective model (`stage_config.model or worker_model`). |
@@ -327,6 +328,33 @@ after a change to the renderer:
 4. For codex and opencode, the in-prompt block is byte-identical to the context
    key. The prompt is not persisted unredacted, so the context key is the
    observable.
+
+### Outbox drain
+
+`outbox` (RFC 0019 O2, #3706) controls the drain that posts a client's outbox
+entries to its tickets tracker through `gh`:
+
+```yaml
+outbox:
+  enabled: true            # default
+  max_entries_per_run: 20  # default; 1 to 100
+```
+
+- `enabled: false` stops the dispatch tick from launching a drain for the
+  client and from emitting `outbox.*` events. It does not block `enqueue`: a
+  producer may still enqueue and the entry waits. A plain
+  `cw outbox drain -c <client>` on a disabled client is refused (exit 1);
+  `cw outbox drain -c <client> --force` drains it anyway. With `-c` omitted, a
+  disabled client is skipped with a note on stderr.
+- "Disabled" is not "binding absent". An enabled client whose
+  `bindings.tickets` is absent or has no `cli: gh` still gets a drain, which
+  returns its entries to `pending` with reason `binding_unreachable` and emits
+  `outbox.entry_pending` (once per entry per episode).
+- `max_entries_per_run` bounds the entries one run claims. `cw outbox drain
+  --limit N` overrides it for that run, with the same 1 to 100 bounds.
+
+The operator procedure (exit codes, held entries, markers, logs) is in
+[`docs/dispatch-runbook.md`](../docs/dispatch-runbook.md#outbox-drain).
 
 ## Session Purposes
 
@@ -2263,6 +2291,9 @@ operator_channel_forward:
     - review.verdict_comment_skipped  # GitHub #3055 — a codex verdict was not posted to a non-GitHub tracker
     - review.verdict_comment_unverified  # GitHub #3057 — a codex verdict post to a non-GitHub tracker could not be confirmed
     - review.operator_context_undelivered  # GitHub #3055 — a codex review ran without the operator's tracker comments
+    - outbox.entry_unverified   # GitHub #3706 — an outbox post may be public but is unconfirmed
+    - outbox.entry_skipped      # GitHub #3706 — an outbox entry's body was unreadable; it is not retried
+    - outbox.entry_pending      # GitHub #3706 — an outbox entry went back to pending (binding unreachable, or held)
   task_transition_statuses:
     - blocked_on_user
     - awaiting_operator_signoff

@@ -231,6 +231,23 @@ class TestIsolationPin:
             forbid=False,
         )
 
+    def test_resolving_outbox_loads_drain_command_but_not_the_engine(self) -> None:
+        """``outbox`` fans in ``cw.cli.outbox_drain`` via ``also_import`` (#3706).
+
+        The drain engine and the tracker post code load only when a drain runs.
+        """
+        _run_probe(
+            "import sys\n"
+            "import click\n"
+            "from cw.cli import main\n"
+            "group = main.get_command(click.Context(main), 'outbox')\n"
+            "assert 'drain' in group.commands\n"
+            "assert 'cw.cli.outbox_drain' in sys.modules\n"
+            "for name in ('cw.outbox_drain', 'cw.tracker_post', 'cw.tracker_io'):\n"
+            "    assert name not in sys.modules, name\n",
+            forbid=False,
+        )
+
     def test_negative_control_detector_fires_on_a_forbidden_import(self) -> None:
         """The forbidden-module check can fail: importing dev-queue trips it.
 

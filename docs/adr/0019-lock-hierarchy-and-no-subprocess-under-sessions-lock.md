@@ -128,6 +128,14 @@ keeps that order and extends it to every other state-file lock.
     across a spawn that takes `sessions_lock`, so conceptually it ranks below
     `SESSIONS`. Folding it into the table needs a rank below 0 and is a
     follow-up.
+  - `outbox._lease.drain_lease`: the per-client lease on
+    `outbox/<client>/drain.lock`, taken with a non-blocking
+    `try_flock_until` (`timeout_s=0`) so it fails fast with
+    `DrainLeaseHeldError`. It is a long-held lease (a drain's whole run,
+    across gh calls), so it is deliberately not the rank-LEAF `outbox`
+    lock, which guards only short record writes. No subprocess runs under
+    any lock: gh calls hold only this lease, never the `outbox` lock or
+    `sessions_lock`.
 
 ## Consequences
 
