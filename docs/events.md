@@ -1054,11 +1054,11 @@ open enum; consumers MUST tolerate unknown values. Known values:
 
 - `"binding_unreachable"`, `"binding_unbound"`, `"binding_tool_missing"` —
   the tick-side binding reachability preflight (#2442, #3055, RFC 0019 H2b
-  #3744) refused to claim a PENDING PLAN/IMPL/FINALIZE row whose harness
+  #3744) refused to claim a PENDING PLAN/IMPL row whose harness
   verifiably cannot reach the client's tickets binding for a stage that needs
   it (opt-in: `bindings.tickets.preflight.enabled`). `binding_unreachable`:
   the plugin or MCP server is absent or disabled; `binding_unbound`: a codex
-  PLAN or FINALIZE row on a non-GitHub tracker whose `servers.codex` is unset
+  PLAN row on a non-GitHub tracker whose `servers.codex` is unset
   or not a valid name; `binding_tool_missing`: the server is enabled but its
   codex `enabled_tools` allowlist excludes a declared
   `bindings.tickets.mcp.codex.tools` name. No session ran: `breadcrumbs` is
