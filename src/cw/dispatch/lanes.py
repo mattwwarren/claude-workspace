@@ -56,6 +56,7 @@ if TYPE_CHECKING:
         DevQueueStore,
         LaneConfig,
         OrchestratorConfig,
+        SessionStatus,
     )
     from cw.native_daemon import NativeDaemonClient
     from cw.orchestrate import TickSummary
@@ -644,6 +645,7 @@ def _dispatch_client_lanes(
     effective_lanes: list[LaneConfig],
     queue_snapshot: DevQueueStore,
     *,
+    session_statuses: Mapping[str, SessionStatus],
     running_count: int,
     client_ceiling: int,
     cap: int,
@@ -717,7 +719,9 @@ def _dispatch_client_lanes(
     # (#1243). Computed once here (all lanes), the same occupies_lane_slot()
     # join _lane_stats_for_client uses -- so blocked_in_lane/signoff_in_lane
     # below derive from it rather than re-scanning the queue.
-    occupants_by_lane = _lane_occupants_for_client(client, queue_snapshot)
+    occupants_by_lane = _lane_occupants_for_client(
+        client, queue_snapshot, session_statuses=session_statuses
+    )
     # Pre-claim screens (#1862 open-PR gate, #2077 worktree occupancy, #2442
     # tracker-MCP gate): resolved once here -- outside every lock and outside
     # the per-lane loop -- because each does I/O _claim_next_pending must

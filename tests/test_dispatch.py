@@ -9040,8 +9040,13 @@ class TestLaneOccupantsPayload:
         write_clients_yaml(client)
         run_task = TicketTask(ticket_id="OCC-A", client="test-client", lane="lane-a")
         run_task.status = QueueItemStatus.RUNNING
+        # The park names a session absent from state: unsettled, so it still
+        # holds its slot (GitHub #3774). A no-id park would now free it.
         blocked_task = TicketTask(
-            ticket_id="OCC-B", client="test-client", lane="lane-b"
+            ticket_id="OCC-B",
+            client="test-client",
+            lane="lane-b",
+            session_id="sess-occ-b-lost",
         )
         blocked_task.status = QueueItemStatus.BLOCKED_ON_USER
         with dev_queue_lock():

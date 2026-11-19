@@ -24,6 +24,7 @@ from cw.models import (
     QueueItemStatus,
     counts_toward_client_ceiling,
 )
+from cw.models.session import session_statuses_by_id
 from cw.reconcile import (
     reconcile,
 )
@@ -50,6 +51,9 @@ def _emit_usage_limit_skip_events(
     dispatched this tick; each gets a skip event with ``claimed=0`` and a
     per-lane breakdown.
     """
+    # GitHub #3774: the same {session_id: status} map the tick builds, derived
+    # from this function's own state so the skip event agrees with a claiming tick.
+    session_statuses = session_statuses_by_id(state.sessions)
     for client in clients.values():
         running_count = sum(
             1 for s in state.sessions if counts_toward_client_ceiling(s, client.name)
@@ -63,7 +67,9 @@ def _emit_usage_limit_skip_events(
             if t.client == client.name and t.status == QueueItemStatus.PENDING
         )
         # Per-lane breakdown for the event payload (claimed=0 for all).
-        backoff_lane_occupants = _lane_occupants_for_client(client, queue_snapshot)
+        backoff_lane_occupants = _lane_occupants_for_client(
+            client, queue_snapshot, session_statuses=session_statuses
+        )
         backoff_lane_stats = _lane_stats_for_client(
             client, queue_snapshot, occupants=backoff_lane_occupants
         )

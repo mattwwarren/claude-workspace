@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _GENERIC_RECIPE = (
-    "BLOCKED_ON_USER task with dead session holds lane slot. "
+    "BLOCKED_ON_USER task with dead session may hold a lane slot. "
     "Run: cw doctor --reap to revert task to PENDING."
 )
 
@@ -108,7 +108,34 @@ def test_tool_denied_row_with_live_session_is_not_a_finding(
 def test_tool_denied_row_still_excluded_when_operator_gated(
     tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Operator-gated disposition wins: class 5 excludes it, class 13 advises it."""
+    """Operator-gated disposition wins: class 5 excludes it, class 13 advises it.
+
+    GitHub #3774: the row binds an ACTIVE worker (the default ``sess-1``), so it
+    holds its lane slot and class 13 still advises it.
+    """
+    stub_daemon_roster(tmp_path, monkeypatch)
+    task = make_blocked(
+        disposition=FINALIZE_GATE_HELD_DISPOSITION,
+        blocked_reason=_TOOL_DENIED_BLOCKER_REASON,
+    )
+    seed_queue([task], [bound_session_for(task)])
+
+    assert _dead_findings() == []
+    advisory = _check_wedge_operator_gated_park(
+        load_state(), DevQueueStore(tasks=[task])
+    )
+    assert [f.wedge_class for f in advisory] == [_WEDGE_OPERATOR_GATED_PARK]
+
+
+def test_settled_tool_denied_gate_park_is_not_advised(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A settled park holds no slot, so neither class 5 nor class 13 reports it.
+
+    GitHub #3774. With ``session_id=None`` the row has no live worker and no
+    unsettled claim, so there is nothing for the advisory to explain. The row
+    stays visible in ``cw dev-queue status`` (the ``parked (slot free)`` line).
+    """
     stub_daemon_roster(tmp_path, monkeypatch)
     task = make_blocked(
         session_id=None,
@@ -121,7 +148,7 @@ def test_tool_denied_row_still_excluded_when_operator_gated(
     advisory = _check_wedge_operator_gated_park(
         load_state(), DevQueueStore(tasks=[task])
     )
-    assert [f.wedge_class for f in advisory] == [_WEDGE_OPERATOR_GATED_PARK]
+    assert advisory == []
 
 
 def test_reap_still_selects_the_same_row_set(

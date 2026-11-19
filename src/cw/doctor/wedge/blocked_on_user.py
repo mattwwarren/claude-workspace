@@ -37,6 +37,7 @@ from cw.doctor.wedge._constants import (
     _WEDGE_TERMINAL_SIBLING,
 )
 from cw.models import QueueItemStatus, ReapReason, occupies_lane_slot
+from cw.models.session import session_statuses_by_id
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile._shared import resolve_session_for_task
 from cw.stage_preflight import canonical_reason
@@ -128,8 +129,8 @@ def _tool_denied_recipe(task: TicketTask) -> str:
     """
     return (
         "BLOCKED_ON_USER task parked tool_denied (the auto-mode classifier denied "
-        f"a tool call; {task.attempts} attempt(s) so far) with a dead session holds "
-        "lane slot. Do not revert it blind: when the denial cites instruction "
+        f"a tool call; {task.attempts} attempt(s) so far) with a dead session may hold "
+        "a lane slot. Do not revert it blind: when the denial cites instruction "
         "poisoning, a re-dispatch hits the same denial. Check the ticket's comments "
         "for an unmarked one that says it was authored or relayed by an orchestrator "
         "session: the Comment provenance rule in .claude/commands/auto-dev.md treats "
@@ -152,7 +153,7 @@ def _dead_session_recipe(task: TicketTask) -> str:
     if _is_tool_denied_park(task):
         return _tool_denied_recipe(task)
     return (
-        "BLOCKED_ON_USER task with dead session holds lane slot. "
+        "BLOCKED_ON_USER task with dead session may hold a lane slot. "
         "Run: cw doctor --reap to revert task to PENDING."
     )
 
@@ -331,11 +332,12 @@ def _check_wedge_operator_gated_park(
     and ``_reap_wedge_findings`` feeds this class to no selector. Returns
     before touching config when no row qualifies.
     """
+    session_statuses = session_statuses_by_id(state.sessions)
     candidates = [
         t
         for t in queue.tasks
         if t.status == QueueItemStatus.BLOCKED_ON_USER
-        and occupies_lane_slot(t)
+        and occupies_lane_slot(t, session_statuses=session_statuses)
         and _is_operator_gated_park(t)
     ]
     if not candidates:

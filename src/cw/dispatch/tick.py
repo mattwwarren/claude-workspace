@@ -32,6 +32,7 @@ from cw.models import (
     counts_toward_client_ceiling,
     occupies_lane_slot,
 )
+from cw.models.session import session_statuses_by_id
 from cw.native_daemon import get_native_daemon_client
 from cw.worktree import active_tick_fetch
 
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
         DevQueueStore,
         LaneConfig,
         OrchestratorConfig,
+        SessionStatus,
     )
     from cw.native_daemon import NativeDaemonClient
     from cw.worktree import FetchWarningKey, UnresolvablePathWarningKey
@@ -308,6 +310,7 @@ def _dispatch_client_with_host_budget(
     effective_lanes: list[LaneConfig],
     queue_snapshot: DevQueueStore,
     *,
+    session_statuses: Mapping[str, SessionStatus],
     running_count: int,
     client_ceiling: int,
     cap: int,
@@ -335,6 +338,7 @@ def _dispatch_client_with_host_budget(
         client,
         effective_lanes,
         queue_snapshot,
+        session_statuses=session_statuses,
         running_count=running_count,
         client_ceiling=client_ceiling,
         cap=cap,
@@ -355,7 +359,11 @@ def _dispatch_client_with_host_budget(
 
 
 def _resolve_client_lane_context(
-    client: ClientConfig, queue_snapshot: DevQueueStore, client_ceiling: int
+    client: ClientConfig,
+    queue_snapshot: DevQueueStore,
+    client_ceiling: int,
+    *,
+    session_statuses: Mapping[str, SessionStatus],
 ) -> tuple[dict[str, int], list[LaneConfig]]:
     """Build a client's per-lane running count and effective lane list for this tick.
 
@@ -378,7 +386,7 @@ def _resolve_client_lane_context(
     for qt in queue_snapshot.tasks:
         if qt.client != client.name:
             continue
-        if not occupies_lane_slot(qt):
+        if not occupies_lane_slot(qt, session_statuses=session_statuses):
             continue
         lane_key = qt.lane
         running_by_lane[lane_key] = running_by_lane.get(lane_key, 0) + 1
@@ -411,6 +419,7 @@ def _run_preflight_gates(
     client: ClientConfig,
     queue_snapshot: DevQueueStore,
     *,
+    session_statuses: Mapping[str, SessionStatus],
     available: bool | None,
     ssh_key_available: bool | None,
     pending_count: int,
@@ -469,6 +478,7 @@ def _run_preflight_gates(
         _emit_availability_skip(
             client,
             queue_snapshot,
+            session_statuses=session_statuses,
             pending_count=pending_count,
             running_count=running_count,
             cap=cap,
@@ -478,6 +488,7 @@ def _run_preflight_gates(
     resolved_ssh_key_available, ssh_gated = _apply_ssh_key_gate(
         client,
         queue_snapshot,
+        session_statuses=session_statuses,
         ssh_key_available=ssh_key_available,
         pending_count=pending_count,
         running_count=running_count,
@@ -494,6 +505,7 @@ def _run_preflight_gates(
     if _apply_disk_pressure_gate(
         client,
         queue_snapshot,
+        session_statuses=session_statuses,
         pending_count=pending_count,
         running_count=running_count,
         cap=cap,
@@ -637,6 +649,9 @@ def dispatch_tick(
     _sweep_expired_diagnostics(config)
     clients, known_client_names = _tick_clients(client_filter)
     state = load_state()
+    # GitHub #3774: one {session_id: status} map per tick, shared by every
+    # occupancy consumer below so running_by_lane and occupants agree.
+    session_statuses = session_statuses_by_id(state.sessions)
     spawned = 0
 
     plan_order_by_client = _build_plan_order(use_plan=use_plan)
@@ -757,6 +772,7 @@ def dispatch_tick(
         available, ssh_key_available, gated = _run_preflight_gates(
             client,
             queue_snapshot,
+            session_statuses=session_statuses,
             available=available,
             ssh_key_available=ssh_key_available,
             pending_count=pending_count,
@@ -791,6 +807,7 @@ def dispatch_tick(
             _emit_stale_skip(
                 client,
                 queue_snapshot,
+                session_statuses=session_statuses,
                 pending_count=pending_count,
                 running_count=running_count,
                 cap=cap,
@@ -816,13 +833,17 @@ def dispatch_tick(
         cap_full = running_count >= client_ceiling
 
         running_by_lane, effective_lanes = _resolve_client_lane_context(
-            client, queue_snapshot, client_ceiling
+            client,
+            queue_snapshot,
+            client_ceiling,
+            session_statuses=session_statuses,
         )
 
         client_result, host_capacity = _dispatch_client_with_host_budget(
             client,
             effective_lanes,
             queue_snapshot,
+            session_statuses=session_statuses,
             running_count=running_count,
             client_ceiling=client_ceiling,
             cap=cap,

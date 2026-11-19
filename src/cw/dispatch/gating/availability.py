@@ -25,9 +25,12 @@ from cw.models import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from cw.models import (
         ClientConfig,
         DevQueueStore,
+        SessionStatus,
     )
 from cw.dispatch.claim import _lane_occupants_for_client, _lane_stats_for_client
 
@@ -171,6 +174,7 @@ def _emit_availability_skip(
     client: ClientConfig,
     queue_snapshot: DevQueueStore,
     *,
+    session_statuses: Mapping[str, SessionStatus],
     pending_count: int,
     running_count: int,
     cap: int,
@@ -183,7 +187,9 @@ def _emit_availability_skip(
     outage is not a per-ticket sync problem. ``skip_reason`` is
     ``AVAILABILITY_GATE``.
     """
-    lane_occupants = _lane_occupants_for_client(client, queue_snapshot)
+    lane_occupants = _lane_occupants_for_client(
+        client, queue_snapshot, session_statuses=session_statuses
+    )
     record_event(
         OrchestratorEventType.DISPATCH_TICK,
         {

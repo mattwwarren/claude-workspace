@@ -34,12 +34,13 @@ from cw.models import (
 from cw.worktree import resolve_fallback_worker_tmpdir, resolve_worktree_base
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
     from cw.models import (
         ClientConfig,
         DevQueueStore,
+        SessionStatus,
     )
 from cw.dispatch.claim import _lane_occupants_for_client, _lane_stats_for_client
 
@@ -282,6 +283,7 @@ def _emit_disk_pressure_skip(
     client: ClientConfig,
     queue_snapshot: DevQueueStore,
     *,
+    session_statuses: Mapping[str, SessionStatus],
     pending_count: int,
     running_count: int,
     cap: int,
@@ -307,7 +309,9 @@ def _emit_disk_pressure_skip(
         emit(_disk_pressure_warn_line(client, pressure, min_free_gb=min_free_gb))
         if warned_disk_pressure is not None:
             warned_disk_pressure.add(client.name)
-    lane_occupants = _lane_occupants_for_client(client, queue_snapshot)
+    lane_occupants = _lane_occupants_for_client(
+        client, queue_snapshot, session_statuses=session_statuses
+    )
     record_event(
         OrchestratorEventType.DISPATCH_TICK,
         {
@@ -437,6 +441,7 @@ def _apply_disk_pressure_gate(
     client: ClientConfig,
     queue_snapshot: DevQueueStore,
     *,
+    session_statuses: Mapping[str, SessionStatus],
     pending_count: int,
     running_count: int,
     cap: int,
@@ -473,6 +478,7 @@ def _apply_disk_pressure_gate(
     _emit_disk_pressure_skip(
         client,
         queue_snapshot,
+        session_statuses=session_statuses,
         pending_count=pending_count,
         running_count=running_count,
         cap=cap,
