@@ -1075,7 +1075,8 @@ class TestCrashConsistency:
         entry = enqueue().entry
         monkeypatch.setattr("cw.outbox_drain.release", _fail_with_record_error)
 
-        _drain(tmp_path, bindings=Bindings())
+        with pytest.raises(OutboxRecordError):
+            _drain(tmp_path, bindings=Bindings())
 
         assert marked_roles(CLIENT) == frozenset()
         assert read_marker(CLIENT, OutboxRole.TICKETS) is None
@@ -1093,7 +1094,8 @@ class TestCrashConsistency:
         gh.unreadable("T-1")
         monkeypatch.setattr("cw.outbox_drain.release", _fail_with_record_error)
 
-        _drain(tmp_path)
+        with pytest.raises(OutboxRecordError):
+            _drain(tmp_path)
 
         assert marked_roles(CLIENT) == frozenset()
         assert events == []
@@ -1108,7 +1110,8 @@ class TestCrashConsistency:
         _unverified(0, role=OutboxRole.KNOWLEDGE, marker="a")
         monkeypatch.setattr("cw.outbox_drain.settle", _fail_with_record_error)
 
-        _drain(tmp_path)
+        with pytest.raises(OutboxRecordError):
+            _drain(tmp_path)
 
         assert marked_roles(CLIENT) == frozenset()
         assert events == []
@@ -1190,20 +1193,21 @@ class TestCrashConsistency:
 
         monkeypatch.setattr("cw.outbox._layout.write_record", _write_then_raise)
 
-        with pytest.raises(OutboxRecordError):
-            _drain(tmp_path)
+        report = _drain(tmp_path)
 
         assert _state(skipped.id) == (
             OutboxState.FAILED,
             OutboxReason.BODY_UNREADABLE,
         )
         assert _state(delivered.id) == (OutboxState.DELIVERED, OutboxReason.POSTED)
+        assert report.skipped == 1
+        assert report.delivered == 1
         assert _types(events) == [
             OrchestratorEventType.OUTBOX_ENTRY_DELIVERED,
             OrchestratorEventType.OUTBOX_ENTRY_SKIPPED,
         ]
 
-    def test_marker_write_failure_holds_pending_and_fails_the_run(
+    def test_marker_write_failure_does_not_hold_pending_and_fails_the_run(
         self,
         tmp_path: Path,
         gh: GhThread,
@@ -1225,9 +1229,9 @@ class TestCrashConsistency:
             OutboxState.PENDING,
             OutboxReason.BINDING_UNREACHABLE,
         )
-        assert read_held(CLIENT) == frozenset({entry.id})
+        assert read_held(CLIENT) == frozenset()
         assert events[0][0] is OrchestratorEventType.OUTBOX_ENTRY_PENDING
-        assert events[0][1]["held"] is True
+        assert events[0][1]["held"] is False
 
     def test_held_list_write_failure_surfaces_committed_release(
         self,

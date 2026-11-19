@@ -182,7 +182,7 @@ class TestEnabled:
         assert record.state is OutboxState.PENDING
         assert record.reason is OutboxReason.BINDING_UNREACHABLE
 
-    def test_marker_write_failure_is_held_and_not_relaunched(
+    def test_marker_write_failure_is_not_held(
         self,
         tmp_path: Path,
         spawner: _Spawner,
@@ -203,8 +203,8 @@ class TestEnabled:
         tick_drain.launch_outbox_drains(clients)
         tick_drain.launch_outbox_drains(clients)
 
-        assert entry.id in tick_drain.read_held(CLIENT)
-        assert spawner.launched == []
+        assert entry.id not in tick_drain.read_held(CLIENT)
+        assert spawner.launched == [CLIENT]
 
 
 class TestSkip:

@@ -296,18 +296,16 @@ def _persist_marker(
     marker: UnreachableMarker,
     *,
     persist: bool,
-    is_pending: bool,
-) -> bool:
-    """Persist a marker, using the held list as a pending-entry fallback."""
+) -> None:
+    """Persist a marker, retaining the error if its sidecar cannot be written."""
     if not (persist or entry.role in run.marker_write_failures):
-        return False
+        return
     try:
         write_marker(run.client, marker)
     except OutboxError as exc:
         # The entry transition is already committed.  Retain the storage
-        # error and durably exclude a pending entry from the tick while the
-        # marker sidecar is unavailable.  If that fallback also fails,
-        # reconciliation accounts for the committed transition.
+        # error and let the run fail visibly; the entry is not a per-item
+        # failure and must not be added to the held list.
         run.storage_error = run.storage_error or exc
         run.marker_write_failures.add(entry.role)
         logger.warning(
@@ -315,16 +313,8 @@ def _persist_marker(
             entry.role.value,
             type(exc).__name__,
         )
-        if not is_pending:
-            return False
-        try:
-            append_held(run.client, entry.id)
-        except OutboxError as held_exc:
-            run.storage_error = run.storage_error or held_exc
-            raise
-        return True
+        return
     run.marker_write_failures.discard(entry.role)
-    return False
 
 
 def _announce(
@@ -348,15 +338,11 @@ def _announce(
         _resettle_unverified(run, entry)
         counted = entry.id in run.accounted
     run.broken[entry.role] = marker
-    held_fallback = _persist_marker(
-        run, entry, marker, persist=persist or first, is_pending=is_pending
-    )
+    _persist_marker(run, entry, marker, persist=persist or first)
     if is_pending:
         counted = _accounted(run, entry)
         if counted:
             run.released += 1
-            if held_fallback:
-                run.held += 1
     if not first or not counted:
         return
     if is_pending:
@@ -364,7 +350,7 @@ def _announce(
             OrchestratorEventType.OUTBOX_ENTRY_PENDING,
             entry,
             marker.reason,
-            held=held_fallback,
+            held=False,
         )
     else:
         _emit(
@@ -535,11 +521,14 @@ def _reconcile_store_failure(
         type(exc).__name__,
     )
     current = _entry_for_id(run.client, entry_id)
-    if (
-        current is None
-        or current.state is OutboxState.CLAIMED
-        or current.state is unchanged_state
-    ):
+    if current is None or current.state is OutboxState.CLAIMED:
+        # The write either did not commit or left the entry claimed.  Do not
+        # suppress the error: the entry is unresolved and needs the next run
+        # (or recovery) to make progress safely.
+        run.storage_error = run.storage_error or exc
+        return
+    if current.state is unchanged_state:
+        run.storage_error = run.storage_error or exc
         return
     if current.id in run.accounted:
         return
@@ -606,10 +595,8 @@ def _drain_state(run: _Run, state: OutboxState, cap: int) -> None:
             )
         except OutboxError as exc:
             # A claim write may have committed before reporting its error.
-            # Preserve the original failure even when the record is still
-            # claimed; the next run must recover it and the CLI must fail.
-            run.storage_error = run.storage_error or exc
             if candidate_id is None:
+                run.storage_error = run.storage_error or exc
                 return
             run.seen.add(candidate_id)
             current = _entry_for_id(run.client, candidate_id)
