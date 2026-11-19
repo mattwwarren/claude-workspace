@@ -28,8 +28,7 @@ from cw.models.bindings import Harness
 from cw.operator_identity import cached_gh_login
 from cw.plan_files import parse_plan_files_modified
 from cw.ticket_snapshot import (
-    Purpose,
-    bound_comments,
+    approved_plan_text,
     context_for_client,
     read_for_stage,
 )
@@ -69,11 +68,7 @@ class SnapshotPlanFetcher:
             return None  # bound to one task; another ticket's plan never binds
         snapshot = read_for_stage(self._task, "impl")
         login = cached_gh_login() if self._ctx.github else None
-        bound = bound_comments(
-            snapshot, self._ctx, Purpose.APPROVED_PLAN, gh_login=login
-        )
-        body = bound[-1]["body"] if bound else None
-        return body if isinstance(body, str) else None
+        return approved_plan_text(snapshot, self._ctx, gh_login=login)
 
 
 def _local_preflight(

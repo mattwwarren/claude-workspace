@@ -533,11 +533,14 @@ def _review_and_confirm(
     engine = engine_round_spec(client, task, worktree)
     if isinstance(engine, AutoDevResult):  # #3216: refused before any codex call
         return ReviewOutcome(engine, None, False, CODEX_REVIEWER_LABEL)
-    # #3712: one snapshot context for the whole run; each review pass refreshes
-    # the ticket snapshot through it. The login is resolved only when the loop
-    # runs (#2633: `gh api user` otherwise never needs to run).
+    # #3712: one snapshot context for the whole run; enabled review passes
+    # refresh the ticket snapshot through it. The login is resolved only when
+    # the loop runs (#2633: `gh api user` otherwise never needs to run).
+    # Snapshot persistence is gated by the existing per-client/lane fix-loop
+    # rollout. Clients outside that rollout keep the row-only resolver until
+    # snapshot retention is available; no new fleet-wide switch is introduced.
     snapshots = context_for_client(
-        client, worktree, resolve_login=fix_loop_enabled, refresh=True
+        client, worktree, resolve_login=fix_loop_enabled, refresh=fix_loop_enabled
     )
     resumed = resume_pending_confirm(
         task=task,

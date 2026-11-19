@@ -336,6 +336,7 @@ def test_record_stamps_row_and_records_event() -> None:
         "previous_digest",
         "refresh",
         "comments",
+        "author_conflicts",
         "row_updated",
     }
     assert event.correlation_id == ACME_TICKET

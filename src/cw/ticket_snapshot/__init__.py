@@ -27,6 +27,7 @@ from cw.ticket_snapshot._binding import (
     DEFAULT_SNAPSHOT_CONTEXT,
     Purpose,
     SnapshotContext,
+    approved_plan_text,
     bound_comments,
     context_for_client,
 )
@@ -94,6 +95,7 @@ __all__ = [
     "StdinComment",
     "StdinDocument",
     "TicketSnapshot",
+    "approved_plan_text",
     "bound_comments",
     "context_for_client",
     "digest_or_none",

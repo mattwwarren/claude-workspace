@@ -29,7 +29,7 @@ from cw.gh import _PLAN_MARKER
 from cw.models.repair_entry import is_adopted_repair_entry
 from cw.operator_identity import cached_gh_login
 from cw.outbox import OutboxRole, list_entries, read_parts
-from cw.ticket_snapshot._binding import Purpose, bound_comments
+from cw.ticket_snapshot._binding import SnapshotContext, approved_plan_text
 from cw.tracker_post import unwrap_part
 
 if TYPE_CHECKING:
@@ -37,7 +37,6 @@ if TYPE_CHECKING:
 
     from cw.models import ClientConfig, TicketTask
     from cw.outbox import OutboxEntry
-    from cw.ticket_snapshot._binding import SnapshotContext
     from cw.ticket_snapshot._models import TicketSnapshot
 
 _log = logging.getLogger("cw.ticket_snapshot")
@@ -85,9 +84,7 @@ def _from_outbox(task: TicketTask, client: ClientConfig) -> str | None:
 def _from_snapshot(snapshot: TicketSnapshot | None, ctx: SnapshotContext) -> str | None:
     """The last approved-plan comment the evaluator binds, or None."""
     login = cached_gh_login() if ctx.github else None
-    bound = bound_comments(snapshot, ctx, Purpose.APPROVED_PLAN, gh_login=login)
-    body = bound[-1]["body"] if bound else None
-    return body if isinstance(body, str) else None
+    return approved_plan_text(snapshot, ctx, gh_login=login)
 
 
 def _reviewed(text: str | None) -> bool:

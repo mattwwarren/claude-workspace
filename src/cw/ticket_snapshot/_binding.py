@@ -173,3 +173,20 @@ def bound_comments(
     else:
         kept = [c for c in snapshot.comments if _mcp_binds(c, purpose, ctx)]
     return [_legacy(comment) for comment in kept]
+
+
+def approved_plan_text(
+    snapshot: TicketSnapshot | None,
+    ctx: SnapshotContext,
+    *,
+    gh_login: str | None = None,
+) -> str | None:
+    """Return the last trusted approved-plan body, or ``None``.
+
+    This is the single body-selection seam for plan recovery and local plan
+    fetching. ``gh_login`` is supplied by callers that already have the
+    current GitHub identity; MCP binding never needs it.
+    """
+    comments = bound_comments(snapshot, ctx, Purpose.APPROVED_PLAN, gh_login=gh_login)
+    body = comments[-1]["body"] if comments else None
+    return body if isinstance(body, str) else None
