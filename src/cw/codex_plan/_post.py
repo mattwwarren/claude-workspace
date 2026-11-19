@@ -16,18 +16,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 from cw.auto_dev_result import SCOPE_TIER_LARGE
-from cw.codex_stage_post import GITHUB_POST_FAILED, post_stage_comment
+from cw.codex_stage_post import post_stage_comment
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult
-    from cw.codex_runner import CodexRunner
     from cw.models import ClientConfig, TicketTask
 
 __all__ = [
-    "GITHUB_POST_FAILED",
     "PARK_HEADER",
     "PLAN_COMMENT_KIND",
     "post_plan_comment",
@@ -146,20 +144,29 @@ def render_park_comment(
     return "\n\n".join(sections) + "\n"
 
 
+#: The marker prefix of a park comment; a plan of record uses ``plan``.
+PARK_MARKER_PREFIX: Final = "park"
+#: The marker prefix of a completing plan's comment.
+PLAN_MARKER_PREFIX: Final = "plan"
+#: The producer slug both the plan and park comments enqueue under (T2 reads it).
+PLAN_PRODUCER: Final = "codex-plan"
+
+
 def post_plan_comment(
     *,
     task: TicketTask,
     client: ClientConfig,
     worktree: Path,
     sid: str,
-    runner: CodexRunner,
     text: str,
     artifact_path: Path | None,
+    park: bool = False,
 ) -> None:
-    """Post *text* to the ticket, best-effort; never raises a stage fault.
+    """Enqueue *text* as the plan or park comment, best-effort; never raises.
 
     *artifact_path* is the durable copy the events name (``None`` when the
-    file is absent). A thin wrapper over
+    file is absent). ``park=True`` selects the ``park-`` marker prefix, so a
+    park comment and a plan of record never share a marker. A thin wrapper over
     :func:`cw.codex_stage_post.post_stage_comment` with ``kind="plan"``.
     """
     post_stage_comment(
@@ -167,8 +174,9 @@ def post_plan_comment(
         client=client,
         worktree=worktree,
         sid=sid,
-        runner=runner,
         text=text,
         artifact_path=artifact_path,
         kind=PLAN_COMMENT_KIND,
+        producer=PLAN_PRODUCER,
+        marker_prefix=PARK_MARKER_PREFIX if park else PLAN_MARKER_PREFIX,
     )

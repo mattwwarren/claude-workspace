@@ -1,32 +1,28 @@
-"""Loud-failure signals for a codex review on a non-GitHub tracker (#3055).
+"""Loud-failure signals for codex reviews and PLAN / PR-link comments (#3055, #3707).
 
-RFC 0018 S3. The daemon's only tracker client is GitHub-only (ADR-0013), so a
-codex review on any other tracker silently lost two things. This module turns
-each into a durable event, plus the pure source classifier the fix loop
-stamps on its terminal review:
+RFC 0018 S3 gave codex reviews two durable signals on a non-GitHub tracker;
+RFC 0019 O3 (#3707) narrowed them. This module now carries:
 
-* **Case A** -- :func:`emit_verdict_comment_skipped`: the verdict (or an
-  unparseable result) was not posted as a ticket comment. Emitted from
-  ``codex_review_persist._post_review_comment``'s skip branch, and (#3057)
-  when the tracker-IO turn refused to launch or the agent reported it could
-  not post, with that turn's closed ``reason``.
-* **Case A2** -- :func:`emit_verdict_comment_unverified` (#3057): the
-  tracker-IO turn may have posted (timeout, crash, unparseable result) or did
-  post but its self-attested report failed verification.
+* :func:`emit_verdict_comment_skipped`: ``review.verdict_comment_skipped``, the
+  only verdict-comment event still emitted. It fires when a producer enqueued
+  *nothing* for a codex comment (``outbox_enqueue_failed``, ``plan_refused``,
+  ``body_too_long``, ``free_text_ticket``, ``already_posted``). Delivery of an
+  enqueued entry is reported by the outbox's own ``outbox.entry_*`` events.
+* :func:`tracker_label`: the ``tracker`` string those events carry.
 * **Case B** -- :func:`undelivered_operator_context`: the review ran without
   the operator's tracker comments, voided findings and settle markers. Emitted
   once per session at run level (``codex_background``); the ``_context``
-  loaders stay pure. ``requeue.review_delivery_degraded`` covers re-entry;
-  this covers first entry.
+  loaders stay pure.
 * :func:`constraints_source`: where the fix loop's operator constraints came
   from (``Review.operator_constraints_source``).
 * :func:`emit_confirm_escalated` (#3216): ``review.confirm_escalated`` when a
   confirm round after a codex engine pass parks.
 
-**Best-effort (A15).** Case A (and A2) runs after the session completed and Case B
-before the review; an escaping exception would revert the row or abort the
-review. Both emitters catch ``OSError`` from ``record_event`` (the inbox write
-and lock path) only, log one warning, and return.
+``review.verdict_comment_posted`` and ``review.verdict_comment_unverified`` are
+no longer emitted (O3): the enum members stay for reading old logs.
+
+**Best-effort (A15).** Every emitter catches ``OSError`` and ``CwError`` from
+``record_event`` only, logs one warning, and returns.
 
 Leaf module: it must not import ``cw.codex_fix_loop`` or
 ``cw.codex_review_persist`` (``stage_verification.baseline`` imports
@@ -35,26 +31,21 @@ Leaf module: it must not import ``cw.codex_fix_loop`` or
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import subprocess
-from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
 from cw.auto_dev_result import OperatorConstraintsSource
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import CODEX_BACKEND, OrchestratorEventType
-from cw.tracker import TrackerClass, TrackerKind
-from cw.tracker_io._verify import PublicState
+from cw.tracker import TRACKER_GITHUB_ISSUES, TrackerClass, resolve_tracker
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
-    from cw.models import TicketTask
-    from cw.tracker_io import TrackerIoOutcome
+    from cw.models import ClientConfig, TicketTask
+    from cw.tracker import TrackerKind
 
 _log = logging.getLogger(__name__)
 
@@ -76,27 +67,6 @@ COMMON_TURN_FAULTS: tuple[type[Exception], ...] = (
 #: FINALIZE executor's PR-link comment (``pr_link``, #3062).
 VerdictCommentKind = Literal["verdict", "unparseable", "plan", "pr_link"]
 
-#: The log label each comment kind's skipped/unverified lines carry; a kind
-#: absent here logs as ``review``.
-_KIND_LOG_LABELS: dict[str, str] = {"plan": "plan", "pr_link": "pr_link"}
-
-
-@dataclass(frozen=True)
-class VerdictCommentIdentity:
-    """Identity fields shared by tracker-IO verdict and PLAN comments."""
-
-    client: str
-    session_id: str
-    kind: VerdictCommentKind
-    reviewed_sha: str | None
-    artifact_path: Path | None
-
-
-#: Case A's default ``reason``: a non-GitHub tracker with no tracker-IO turn.
-#: The turn's refusals carry its own closed ``cw.tracker_io.TrackerIoReason``
-#: values instead (passed as plain strings: this module stays a leaf).
-NON_GITHUB_TRACKER_REASON = "non_github_tracker"
-
 #: The ``tracker`` label Case B carries when no tracker is configured.
 UNSET_TRACKER_LABEL = "unset"
 
@@ -106,6 +76,14 @@ UNDELIVERED_OPERATOR_CONTEXT: tuple[str, ...] = (
     "voided_findings",
     "settle_markers",
 )
+
+
+def tracker_label(client: ClientConfig) -> str:
+    """The ``tracker`` string a skipped event carries: the system, or GitHub when unset.
+
+    Fail-open on an unresolvable tracker, the same polarity as the rest of cw.
+    """
+    return resolve_tracker(client.workspace_path) or TRACKER_GITHUB_ISSUES
 
 
 def constraints_source(
@@ -155,9 +133,14 @@ def verdict_comment_skipped_payload(
     artifact_path: Path | None,
     reviewed_sha: str | None,
     session_id: str,
-    reason: str = NON_GITHUB_TRACKER_REASON,
+    reason: str,
+    entry_id: str | None = None,
 ) -> dict[str, object]:
-    """The ``review.verdict_comment_skipped`` payload, in documented order."""
+    """The ``review.verdict_comment_skipped`` payload, in documented order.
+
+    ``entry_id`` is the existing outbox entry for an ``already_posted`` skip,
+    and ``None`` when no entry exists.
+    """
     return {
         "ticket_id": ticket_id,
         "client": client,
@@ -168,6 +151,7 @@ def verdict_comment_skipped_payload(
         "artifact_path": str(artifact_path) if artifact_path is not None else None,
         "reviewed_sha": reviewed_sha or None,
         "session_id": session_id,
+        "entry_id": entry_id,
     }
 
 
@@ -180,9 +164,13 @@ def emit_verdict_comment_skipped(
     artifact_path: Path | None,
     reviewed_sha: str | None,
     session_id: str,
-    reason: str = NON_GITHUB_TRACKER_REASON,
+    reason: str,
+    entry_id: str | None = None,
 ) -> None:
-    """Case A: record that a codex verdict comment was not posted (best-effort)."""
+    """Record that a codex comment was not enqueued (best-effort).
+
+    Emitted by a producer only when no outbox entry was created for the comment.
+    """
     payload = verdict_comment_skipped_payload(
         ticket_id=ticket_id,
         client=client,
@@ -192,218 +180,10 @@ def emit_verdict_comment_skipped(
         reviewed_sha=reviewed_sha,
         session_id=session_id,
         reason=reason,
+        entry_id=entry_id,
     )
     record_event_best_effort(
         OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED, payload, ticket_id
-    )
-
-
-def verdict_comment_unverified_payload(
-    *,
-    ticket_id: str,
-    client: str,
-    tracker: str,
-    kind: VerdictCommentKind,
-    reason: str,
-    artifact_path: Path | None,
-    reviewed_sha: str | None,
-    session_id: str,
-    public_state: str,
-    posted: Sequence[Mapping[str, object]],
-    marker_survived: bool | None,
-) -> dict[str, object]:
-    """The ``review.verdict_comment_unverified`` payload, in documented order.
-
-    The skipped payload's keys, then ``public_state``, ``posted`` (the
-    agent-reported ``{index, comment_id, url}`` per part, model-echoed) and
-    ``marker_survived``.
-    """
-    payload = verdict_comment_skipped_payload(
-        ticket_id=ticket_id,
-        client=client,
-        tracker=tracker,
-        kind=kind,
-        artifact_path=artifact_path,
-        reviewed_sha=reviewed_sha,
-        session_id=session_id,
-        reason=reason,
-    )
-    payload["public_state"] = public_state
-    payload["posted"] = [dict(entry) for entry in posted]
-    payload["marker_survived"] = marker_survived
-    return payload
-
-
-def emit_verdict_comment_unverified(
-    *,
-    ticket_id: str,
-    client: str,
-    tracker: str,
-    kind: VerdictCommentKind,
-    reason: str,
-    artifact_path: Path | None,
-    reviewed_sha: str | None,
-    session_id: str,
-    public_state: str,
-    posted: Sequence[Mapping[str, object]],
-    marker_survived: bool | None,
-) -> None:
-    """Case A2: a tracker-IO verdict post is unconfirmed (best-effort)."""
-    payload = verdict_comment_unverified_payload(
-        ticket_id=ticket_id,
-        client=client,
-        tracker=tracker,
-        kind=kind,
-        reason=reason,
-        artifact_path=artifact_path,
-        reviewed_sha=reviewed_sha,
-        session_id=session_id,
-        public_state=public_state,
-        posted=posted,
-        marker_survived=marker_survived,
-    )
-    record_event_best_effort(
-        OrchestratorEventType.REVIEW_VERDICT_COMMENT_UNVERIFIED, payload, ticket_id
-    )
-
-
-def posted_content_sha256(bodies: Sequence[str]) -> str:
-    """Audit hash of the bodies as posted: one body hashes to itself.
-
-    Several bodies are joined with a newline before hashing.
-    """
-    return hashlib.sha256("\n".join(bodies).encode("utf-8")).hexdigest()
-
-
-def verdict_comment_posted_payload(
-    *,
-    ticket_id: str,
-    client: str,
-    tracker: str,
-    kind: VerdictCommentKind,
-    artifact_path: Path | None,
-    reviewed_sha: str | None,
-    session_id: str,
-    posted: Sequence[Mapping[str, object]],
-    bodies: Sequence[str],
-) -> dict[str, object]:
-    """The append-only audit payload for a verified tracker comment post."""
-    return {
-        "ticket_id": ticket_id,
-        "client": client,
-        "tracker": tracker,
-        "backend": CODEX_BACKEND,
-        "kind": kind,
-        "posted": [dict(entry) for entry in posted],
-        "reviewed_sha": reviewed_sha or None,
-        "session_id": session_id,
-        "posted_at": datetime.now(UTC).isoformat(),
-        "content_sha256": posted_content_sha256(bodies),
-        "artifact_path": str(artifact_path) if artifact_path is not None else None,
-    }
-
-
-def emit_verdict_comment_posted(
-    *,
-    ticket_id: str,
-    client: str,
-    tracker: str,
-    kind: VerdictCommentKind,
-    artifact_path: Path | None,
-    reviewed_sha: str | None,
-    session_id: str,
-    posted: Sequence[Mapping[str, object]],
-    bodies: Sequence[str],
-) -> None:
-    """Record a verified tracker-IO post as an append-only audit event."""
-    payload = verdict_comment_posted_payload(
-        ticket_id=ticket_id,
-        client=client,
-        tracker=tracker,
-        kind=kind,
-        artifact_path=artifact_path,
-        reviewed_sha=reviewed_sha,
-        session_id=session_id,
-        posted=posted,
-        bodies=bodies,
-    )
-    record_event_best_effort(
-        OrchestratorEventType.REVIEW_VERDICT_COMMENT_POSTED, payload, ticket_id
-    )
-
-
-def surface_tracker_io_outcome(
-    ticket_id: str,
-    *,
-    tracker: str,
-    outcome: TrackerIoOutcome,
-    identity: VerdictCommentIdentity,
-) -> None:
-    """Classify one tracker-IO outcome and emit its verdict-comment event.
-
-    Review verdicts and PLAN comments use the same A2 outcome contract; the
-    identity carries the only stage-specific part, including ``kind``.
-    """
-    posted = [
-        {"index": part.index, "comment_id": part.comment_id, "url": part.url}
-        for part in outcome.posted
-    ]
-    if outcome.reason is None:
-        emit_verdict_comment_posted(
-            ticket_id=ticket_id,
-            client=identity.client,
-            tracker=tracker,
-            kind=identity.kind,
-            artifact_path=identity.artifact_path,
-            reviewed_sha=identity.reviewed_sha,
-            session_id=identity.session_id,
-            posted=posted,
-            bodies=outcome.emitted,
-        )
-        return
-    label = _KIND_LOG_LABELS.get(identity.kind, "review")
-    if outcome.public_state is PublicState.NONE:
-        _log.warning(
-            "%s_comment_skipped ticket=%s tracker=%s reason=%s: durable copy at %s",
-            label,
-            ticket_id,
-            tracker,
-            outcome.reason.value,
-            identity.artifact_path,
-        )
-        emit_verdict_comment_skipped(
-            ticket_id=ticket_id,
-            client=identity.client,
-            tracker=tracker,
-            kind=identity.kind,
-            artifact_path=identity.artifact_path,
-            reviewed_sha=identity.reviewed_sha,
-            session_id=identity.session_id,
-            reason=outcome.reason.value,
-        )
-        return
-    _log.warning(
-        "%s_comment_unverified ticket=%s tracker=%s reason=%s public_state=%s"
-        " ids=%s: check the ticket before any re-run",
-        label,
-        ticket_id,
-        tracker,
-        outcome.reason.value,
-        outcome.public_state.value,
-        ",".join(p.comment_id for p in outcome.posted),
-    )
-    emit_verdict_comment_unverified(
-        ticket_id=ticket_id,
-        client=identity.client,
-        tracker=tracker,
-        kind=identity.kind,
-        reason=outcome.reason.value,
-        artifact_path=identity.artifact_path,
-        reviewed_sha=identity.reviewed_sha,
-        session_id=identity.session_id,
-        public_state=outcome.public_state.value,
-        posted=posted,
-        marker_survived=outcome.marker_survived,
     )
 
 

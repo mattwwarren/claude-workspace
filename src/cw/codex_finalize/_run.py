@@ -688,7 +688,6 @@ def _execute(run: _Run) -> None:
             client=run.client,
             worktree=run.worktree,
             sid=run.sid,
-            runner=run.runner,
             pr_url=str(pr.get("url")),
             plan_source=str(payload.get("plan_source")),
         )

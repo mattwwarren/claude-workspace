@@ -634,9 +634,9 @@ def _execute(run: _Run) -> None:
             client=run.client,
             worktree=run.worktree,
             sid=run.sid,
-            runner=run.runner,
             text=exit_.post_text,
             artifact_path=exit_.artifact_path,
+            park=exit_.result.status in PARK_STATUSES,
         )
     flush_late_usage(run.sid, run.usage)
     record_event_best_effort(

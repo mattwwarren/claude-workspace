@@ -73,14 +73,11 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         # (see #1730 Decisions item 4) -- this event is self-contained, not a
         # correction to another forwarded signal.
         OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
-        # GitHub #3055 (RFC 0018 S3): a codex verdict that never reached the
-        # non-GitHub tracker exists only in the local artifact -- the operator
-        # must be told, same rationale as REQUEUE_REVIEW_DELIVERY_DEGRADED.
+        # GitHub #3055 (RFC 0018 S3), narrowed by RFC 0019 O3 (#3707): a codex
+        # comment that was not enqueued at all (the durable copy is the only
+        # record) -- the operator must be told. REVIEW_VERDICT_COMMENT_UNVERIFIED
+        # left this set at O3: no producer emits it any more.
         OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED,
-        # GitHub #3057 (RFC 0018 A2): a tracker-IO verdict post that may be
-        # public but is unconfirmed -- the operator checks the ticket before
-        # any re-run, since cw never retries a post.
-        OrchestratorEventType.REVIEW_VERDICT_COMMENT_UNVERIFIED,
         # GitHub #3055: the first-entry sibling of
         # REQUEUE_REVIEW_DELIVERY_DEGRADED -- a codex review ran without the
         # operator's tracker comments, voided findings and settle markers.

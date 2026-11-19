@@ -1,12 +1,12 @@
-"""Durable artifacts and the tracker post for one review verdict (#2807 split).
+"""Durable artifacts and the outbox enqueue for one review verdict (#2807 split).
 
 Moved verbatim out of :mod:`cw.codex_background` (which kept growing past the
 module-size ceiling) and still called only from its Step 4b: the worktree
 copies of a review verdict (``.claude/review-verdict.md``, the structured
 ``.claude/review-verdict.json`` and the zero-documents
-``.claude/review-verdict-unparseable.md``) plus the best-effort tracker comment
-that posts the rendered verdict. Every write here is best-effort and never
-raises; see :func:`_persist_worktree_artifact`.
+``.claude/review-verdict-unparseable.md``) plus the prose enqueue that carries
+the rendered verdict to the ticket (RFC 0019 O3, #3707). Every write here is
+best-effort and never raises; see :func:`_persist_worktree_artifact`.
 """
 
 from __future__ import annotations
@@ -18,32 +18,18 @@ from typing import TYPE_CHECKING
 from cw.atomic import atomic_write_text
 from cw.codex_review import CODEX_REVIEWER_LABEL
 from cw.codex_review_signals import (
-    COMMON_TURN_FAULTS,
-    VerdictCommentIdentity,
     emit_verdict_comment_skipped,
-    surface_tracker_io_outcome,
+    tracker_label,
 )
-from cw.codex_runner import relabeled
-from cw.gh import post_issue_comment
-from cw.models.usage import UsageStage
+from cw.outbox_producer import content_marker, enqueue_prose
 from cw.review_findings import (
     REVIEW_VERDICT_JSON_RELATIVE_PATH,
     render_review_verdict_envelope,
 )
-from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
-from cw.tracker_io import (
-    PublicState,
-    TrackerIoContext,
-    TrackerIoOutcome,
-    TrackerIoReason,
-    post_parts_via_turn,
-)
-from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
     from cw.auto_dev_result import Blocker
     from cw.codex_review_signals import VerdictCommentKind
-    from cw.codex_runner import CodexRunner
     from cw.models import ClientConfig
     from cw.review_findings import ReviewVerdict
 
@@ -136,10 +122,8 @@ def _persist_review_verdict(
 # COMMENT_RELATIVE_PATH's rendered ``.md`` (#2223/#1108). Where the ``.md``
 # gives a human the rendered comment text, this gives a consumer (e.g.
 # ``cw review check-voided``) the per-finding ``evidence``/``severity``/
-# ``file``/``summary`` fields as real fields rather than prose — closing the
-# gap where an operator adjudicating a ``codex_must_fix_findings`` park with
-# the fix loop disabled had no source for ``check-voided``'s evidence anchor.
-# Written through ``_persist_worktree_artifact`` directly, NOT through
+# ``file``/``summary`` fields as real fields rather than prose. Written
+# through ``_persist_worktree_artifact`` directly, NOT through
 # ``_persist_review_verdict`` (#2223 review round 2 correction of round 1):
 # that helper's Markdown ownership-comment prefix makes the file invalid
 # JSON. Ownership instead rides as native fields (``ticket_id`` on the
@@ -214,186 +198,55 @@ def _persist_unparseable_artifact(
     )
 
 
+#: The producer slug the codex verdict and unparseable comments enqueue under.
+VERDICT_PRODUCER = "codex-verdict"
+
+
 def _post_daemon_verdict_comment(
     ticket_id: str,
     review_text: str,
     *,
     client: ClientConfig,
-    runner: CodexRunner,
-    worktree: Path,
     session_id: str,
     kind: VerdictCommentKind,
     reviewed_sha: str | None,
     artifact_path: Path | None,
 ) -> None:
-    """The daemon's verdict-comment post, carrying its tracker-IO context (#3057).
+    """Enqueue the rendered verdict as a ticket comment (best-effort, logged).
 
-    Builds the :class:`TrackerIoContext` the daemon owns and resolves the
-    client's repo scope and tracker itself, so the review driver passes only
-    its runner and worktree. Behaviour is that of :func:`_post_review_comment`.
+    The marker is ``<kind>-<reviewed_sha[:12]>-<sha256(review_text)[:16]>``, so an
+    identical retry dedups and different text posts. The verdict is stored raw
+    (``redacted=False``): it carries "### Settle a finding" JSON payloads copied
+    verbatim, as the GitHub path always posted them. No tracker call happens
+    here; the drain delivers the entry (O2).
+
+    The event fires only when nothing was enqueued: a refused enqueue, an
+    oversize body, or a duplicate. The durable copy at *artifact_path* stays the
+    record in every case.
     """
-    _post_review_comment(
-        ticket_id,
-        review_text,
-        client=client.name,
-        session_id=session_id,
-        kind=kind,
-        reviewed_sha=reviewed_sha,
-        cwd=_git_dir(client),
-        tracker=resolve_tracker(client.workspace_path),
-        artifact_path=artifact_path,
-        tracker_io=TrackerIoContext(
-            runner=relabeled(runner, UsageStage.TRACKER_IO),
-            client=client,
-            worktree=worktree,
-        ),
+    sha_part = (reviewed_sha or "none")[:12]
+    marker = content_marker(f"{kind}-{sha_part}", review_text)
+    outcome = enqueue_prose(
+        client.name, ticket_id, VERDICT_PRODUCER, marker, (review_text,)
     )
-
-
-def _post_review_comment(
-    ticket_id: str,
-    review_text: str,
-    *,
-    client: str,
-    session_id: str,
-    kind: VerdictCommentKind,
-    reviewed_sha: str | None,
-    cwd: Path | None = None,
-    tracker: str | None = None,
-    artifact_path: Path | None = None,
-    tracker_io: TrackerIoContext | None = None,
-) -> None:
-    """Post codex review findings as a ticket comment (best-effort, logged).
-
-    Delegates to the shared ``cw.gh.post_issue_comment`` primitive. A failed
-    post is logged at warning (ticket_id, returncode, stderr) rather than
-    swallowed silently — for the CODEX_MUST_FIX_FINDINGS path this comment is
-    the only destination for the finding text (GitHub #1391).
-
-    *cwd* scopes the gh call to the client's repo (GitHub #1269/#1279).
-
-    *tracker* is the client's resolved ``tracking.primary.system`` (#2095).
-    ``gh issue comment`` is GitHub-only: against a Linear-tracked ticket id it
-    can only fail (``invalid issue format``), and every Linear ticket's review
-    verdict was being lost that way. When the tracker is positively known to
-    be non-GitHub the call is skipped and a WARNING names the tracker and the
-    durable *artifact_path* (see :func:`_persist_review_verdict`) that now
-    carries the verdict instead, so the omission is visible rather than a
-    swallowed subprocess failure. Fail-open on an unresolvable tracker, the
-    same polarity as every other tracker gate in cw.
-
-    The skip also records ``review.verdict_comment_skipped`` (#3055, RFC 0018
-    S3) naming *client* (the client name), *session_id*, *kind* and
-    *reviewed_sha*; best-effort, it never raises.
-
-    *tracker_io* (#3057, RFC 0018 A2): on a non-GitHub tracker, when the
-    caller supplies it, the comment is posted through the tracker-IO agent
-    turn (:func:`cw.tracker_io.post_parts_via_turn`) instead of skipped. A
-    verified post records ``review.verdict_comment_posted`` and logs at info;
-    a refusal records the skipped event with the turn's reason; an unconfirmed
-    post records
-    ``review.verdict_comment_unverified``. Without it the skip is unchanged.
-    The GitHub path never uses it.
-    """
-    if tracker is not None and tracker != TRACKER_GITHUB_ISSUES:
-        if tracker_io is not None:
-            _post_via_tracker_io(
-                ticket_id,
-                review_text,
-                tracker=tracker,
-                context=tracker_io,
-                identity=VerdictCommentIdentity(
-                    client=client,
-                    session_id=session_id,
-                    kind=kind,
-                    reviewed_sha=reviewed_sha,
-                    artifact_path=artifact_path,
-                ),
-            )
-            return
-        _log.warning(
-            "review_comment_skipped ticket=%s tracker=%s: the review verdict"
-            " cannot be posted from the daemon (gh is GitHub-only); durable"
-            " copy at %s",
-            ticket_id,
-            tracker,
-            artifact_path,
-        )
-        emit_verdict_comment_skipped(
-            ticket_id=ticket_id,
-            client=client,
-            tracker=tracker,
-            kind=kind,
-            artifact_path=artifact_path,
-            reviewed_sha=reviewed_sha,
-            session_id=session_id,
-        )
+    if outcome.skipped_reason is None:
         return
-    result = post_issue_comment(ticket_id, review_text, cwd=cwd)
-    if result is None:
-        _log.warning("review_comment_post_failed ticket=%s: gh call failed", ticket_id)
-        return
-    if result.returncode != 0:
-        _log.warning(
-            "review_comment_post_failed ticket=%s rc=%s: %s",
-            ticket_id,
-            result.returncode,
-            result.stderr.decode(errors="replace").strip(),
-        )
-
-
-# The fault classes the tracker-IO call is guarded against (#3057 R2). The
-# turn converts every operational failure into an outcome itself; this tuple
-# backstops the rest. ``ValueError`` covers ``pydantic.ValidationError``.
-_TURN_FAULTS = COMMON_TURN_FAULTS
-
-
-def _post_via_tracker_io(
-    ticket_id: str,
-    review_text: str,
-    *,
-    tracker: str,
-    context: TrackerIoContext,
-    identity: VerdictCommentIdentity,
-) -> None:
-    """Post through the tracker-IO turn and surface its outcome (best-effort).
-
-    Runs after Step 4 persisted the result, so nothing here may raise: an
-    escaping exception would reach ``_run_codex_review_and_complete``'s broad
-    ``except``, which reverts the claimed row and overwrites the persisted
-    result with ``UNEXPECTED_ERROR``. A mismatch is an operator alert, never
-    a row hold (RFC 0018 A2 D1).
-    """
-    try:
-        outcome = post_parts_via_turn(
-            ticket_id,
-            review_text,
-            tracker=tracker,
-            context=context,
-            session_id=identity.session_id,
-        )
-    except _TURN_FAULTS:
-        _log.warning(
-            "tracker_io_turn_failed ticket=%s tracker=%s: durable copy at %s",
-            ticket_id,
-            tracker,
-            identity.artifact_path,
-            exc_info=True,
-        )
-        outcome = TrackerIoOutcome(
-            public_state=PublicState.POSSIBLE,
-            reason=TrackerIoReason.TURN_EXCEPTION,
-            parts_total=0,
-        )
-    try:
-        surface_tracker_io_outcome(
-            ticket_id, tracker=tracker, outcome=outcome, identity=identity
-        )
-    except _TURN_FAULTS:
-        _log.warning(
-            "tracker_io_surface_failed ticket=%s tracker=%s: durable copy at %s",
-            ticket_id,
-            tracker,
-            identity.artifact_path,
-            exc_info=True,
-        )
+    tracker = tracker_label(client)
+    _log.warning(
+        "review_comment_skipped ticket=%s tracker=%s reason=%s: durable copy at %s",
+        ticket_id,
+        tracker,
+        outcome.skipped_reason,
+        artifact_path,
+    )
+    emit_verdict_comment_skipped(
+        ticket_id=ticket_id,
+        client=client.name,
+        tracker=tracker,
+        kind=kind,
+        artifact_path=artifact_path,
+        reviewed_sha=reviewed_sha,
+        session_id=session_id,
+        reason=outcome.skipped_reason,
+        entry_id=outcome.entry_id,
+    )
