@@ -836,6 +836,35 @@ def test_local_executor_context_operator_override_wins_over_cached_login(
     assert SnapshotPlanFetcher(impostor_task, ctx).fetch("896") is None
 
 
+def test_local_preflight_github_client_without_override_recovers_plan(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real executor call site resolves the login, so the plan still binds.
+
+    Drives ``_local_preflight`` (not ``context_for_client`` directly): a GitHub
+    client with no ``operator_github_login`` must reach the cached gh login and
+    recover the plan authored by it, instead of comparing against null.
+    """
+    monkeypatch.setattr("cw.operator_identity.cached_gh_login", lambda: _OPERATOR)
+    worktree = make_git_repo("wt-preflight-login")
+    task = seeded_row(_plan_snapshot(), ticket_id="896", client="test")
+    client = client_config(
+        tmp_path, bindings=bindings_github_cli(), tracker="github-issues"
+    )
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
+    )
+    with patch("cw.executor.local.aider_available", return_value=True):
+        result = _local_preflight(config, task, worktree, client, Stage.IMPL)
+    assert isinstance(result, _PreflightOK)
+    assert _PLAN_BODY in (worktree / TASK_CONTEXT_RELATIVE_PATH).read_text(
+        encoding="utf-8"
+    )
+
+
 def test_local_preflight_success_returns_preflight_ok(
     tmp_path: Path,
     make_git_repo: Callable[[str], Path],
