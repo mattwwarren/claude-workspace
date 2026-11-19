@@ -10,16 +10,18 @@ States, evaluated in order:
 
 1. the lane's resolved stages omit REVIEW: ``ok=True, warn=True`` (nothing
    writes a ledger, so a ticket reaching FINALIZE parks; doctor-warned only);
-2. :func:`cw.review_convergence.clean_mode_supported` (claude-native, codex,
-   opencode): ``ok=True``; an opencode lane with ``review.confirm_backend``
-   unset also carries the default-on Claude egress note (#2806);
-3. a backend the executor pre-flight guard covers
-   (:data:`cw.executor._clean_review.CLEAN_REVIEW_GUARDED_BACKENDS`, which is
-   ``local`` alone): ``ok=False``, and the detail says REVIEW-stage spawns are
-   blocked in pre-flight, before the review agent runs, while earlier stages
-   still run;
-4. any other (unrecognized) backend string: ``ok=False``, without claiming a
-   typed block, because ``resolve_executor`` rejects it before any pre-flight.
+2. the backend's capability declaration
+   (:func:`cw.executor._capabilities.declared_capabilities`) declares REVIEW
+   and ``clean_mode_review`` (claude-native, codex, opencode): ``ok=True``; an
+   opencode lane with ``review.confirm_backend`` unset also carries the
+   default-on Claude egress note (#2806);
+3. any other declared backend (``local``): ``ok=False``, and the detail names
+   the reason the stage pre-flight (:func:`cw.stage_preflight.first_unmet`)
+   parks a clean REVIEW spawn with, before the review agent runs. For
+   ``local`` that is ``stage_unsupported``: it declares IMPL only (#3219);
+4. a backend with no declaration (an unrecognized string): ``ok=False``,
+   without claiming a typed block, because ``resolve_executor`` rejects it
+   before any pre-flight.
 
 Config-only (``resolve_executor_config``, ``resolve_pipeline_stages``), never
 ``shutil.which``. Output carries only backend, lane and client names and config
@@ -33,16 +35,15 @@ from typing import TYPE_CHECKING
 
 from cw.doctor._shared import CheckResult
 from cw.executor import resolve_executor_config, resolve_pipeline_stages
-from cw.executor._clean_review import (
-    CLEAN_REVIEW_GUARDED_BACKENDS,
-    CLEAN_REVIEW_UNSUPPORTED_BACKEND,
-    remediation,
-)
+from cw.executor._capabilities import declared_capabilities
 from cw.models import OPENCODE_BACKEND, Stage, TicketTask
-from cw.review_convergence import clean_mode_supported, resolve_confirm_backend
+from cw.review_convergence import resolve_confirm_backend
+from cw.stage_preflight import PreflightReason, SpawnFacts, first_unmet
+from cw.stage_preflight.details import remediation
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig
+    from cw.models.capabilities import HarnessCapabilities
 
 _CHECK_NAME = "review-convergence"
 
@@ -66,16 +67,30 @@ _OPENCODE_EGRESS_NOTE = (
     " sends each confirm round's diff to Claude. confirm_backend: codex is not"
     " an opt-out (it sends to Codex); only review.confirm_backend: none avoids"
     " egress, and it forfeits the independent round. Tickets parked on"
-    f" {CLEAN_REVIEW_UNSUPPORTED_BACKEND} begin this egress on their next"
+    f" {PreflightReason.CLEAN_REVIEW_UNSUPPORTED_BACKEND.value} begin this"
+    " egress on their next"
     " requeue."
 )
 _CLIENT_REF = "client '{client}' in clients.yaml"
 _GUARDED = (
     "effective mode clean, but lane '{lane}' REVIEW executor is"
-    " backend={backend}, whose REVIEW lane writes no convergence ledger:"
-    " REVIEW-stage spawns on this lane are blocked in pre-flight, before the"
-    f" review agent runs, with reason {CLEAN_REVIEW_UNSUPPORTED_BACKEND};"
-    " earlier stages still run. To fix: {remediation}."
+    " backend={backend}, {why}: REVIEW-stage spawns on this lane are blocked"
+    " in pre-flight, before the review agent runs, with reason {reason}."
+    " To fix: {remediation}."
+)
+_WHY = {
+    PreflightReason.STAGE_UNSUPPORTED: "which does not declare the REVIEW stage",
+    PreflightReason.CLEAN_REVIEW_UNSUPPORTED_BACKEND: (
+        "whose REVIEW lane writes no convergence ledger"
+    ),
+}
+#: The clean REVIEW spawn the guarded state words (no engine, no feedback).
+_CLEAN_REVIEW_FACTS = SpawnFacts(
+    stage=Stage.REVIEW,
+    clean_review=True,
+    engine_refusal=None,
+    feedback=False,
+    adopted=False,
 )
 _UNRECOGNIZED = (
     "effective mode clean, but lane '{lane}' REVIEW executor is"
@@ -129,8 +144,25 @@ def _fix(name: str) -> str:
     return remediation(_CLIENT_REF.format(client=name))
 
 
-def _guarded_result(name: str, task: TicketTask, backend: str) -> CheckResult:
-    detail = _GUARDED.format(lane=task.lane, backend=backend, remediation=_fix(name))
+def _guarded_result(
+    name: str, task: TicketTask, backend: str, caps: HarnessCapabilities
+) -> CheckResult:
+    unmet = first_unmet(caps, _CLEAN_REVIEW_FACTS)
+    # A declared backend reaching this state lacks REVIEW or clean mode, so
+    # first_unmet parks with one of the two _WHY reasons; the None fallback
+    # only keeps the wording total.
+    reason = (
+        PreflightReason.CLEAN_REVIEW_UNSUPPORTED_BACKEND
+        if unmet is None
+        else unmet.reason
+    )
+    detail = _GUARDED.format(
+        lane=task.lane,
+        backend=backend,
+        why=_WHY[reason],
+        reason=reason.value,
+        remediation=_fix(name),
+    )
     return CheckResult(_result_name(name, task), ok=False, detail=detail)
 
 
@@ -146,11 +178,12 @@ def _lane_result(name: str, client: ClientConfig, task: TicketTask) -> CheckResu
     if Stage.REVIEW not in resolve_pipeline_stages(task, client):
         return _no_review_stage_result(name, task)
     backend = _lane_backend(task, client)
-    if clean_mode_supported(backend):
+    caps = declared_capabilities(backend)
+    if caps is None:
+        return _unrecognized_result(name, task, backend)
+    if Stage.REVIEW in caps.stages and caps.clean_mode_review:
         return _supported_result(name, task, client, backend)
-    if backend in CLEAN_REVIEW_GUARDED_BACKENDS:
-        return _guarded_result(name, task, backend)
-    return _unrecognized_result(name, task, backend)
+    return _guarded_result(name, task, backend, caps)
 
 
 def _check_review_convergence(clients: dict[str, ClientConfig]) -> list[CheckResult]:

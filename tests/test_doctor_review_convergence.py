@@ -4,25 +4,34 @@ from __future__ import annotations
 
 import pytest
 
-from cw.doctor.review_convergence import _check_review_convergence
-from cw.executor._clean_review import CLEAN_REVIEW_UNSUPPORTED_BACKEND
+from cw.doctor.review_convergence import _check_review_convergence, _guarded_result
+from cw.executor._capabilities import CODEX_CAPABILITIES
 from cw.models import (
     CLAUDE_NATIVE_BACKEND,
     CODEX_BACKEND,
     LOCAL_BACKEND,
     OPENCODE_BACKEND,
     Stage,
+    TicketTask,
 )
 from cw.models.client import ReviewConfig
+from cw.stage_preflight import PreflightReason
 from tests._doctor_helpers import make_client, make_lane
+from tests._shared.stage_preflight_builders import synthetic_capabilities
 
 _BLOCKED = "blocked in pre-flight, before the review agent runs"
 _EARLIER_STAGES = "earlier stages still run"
+_STAGE_REASON = PreflightReason.STAGE_UNSUPPORTED.value
+_CLEAN_REASON = PreflightReason.CLEAN_REVIEW_UNSUPPORTED_BACKEND.value
 _REMEDIATION = (
     "set review.convergence: blocking",
     "claude-native, codex or opencode REVIEW executor",
 )
 _EGRESS = "Default-on egress"
+
+
+def _lane_task() -> TicketTask:
+    return TicketTask(ticket_id="", client="client-a", stage=Stage.REVIEW)
 
 
 def _clean(confirm: str | None = None, max_cycles: int | None = None) -> ReviewConfig:
@@ -132,17 +141,35 @@ def test_only_an_opencode_lane_gets_the_egress_note(backend: str) -> None:
     assert _EGRESS not in result.detail
 
 
-def test_local_lane_fails_with_the_guard_reason() -> None:
+def test_local_lane_fails_with_the_stage_reason() -> None:
+    """#3219: local declares IMPL only, so the pre-flight parks on the stage."""
     client = make_client(backend=LOCAL_BACKEND, review=_clean())
     (result,) = _check_review_convergence({"client-a": client})
     assert result.ok is False
     assert "backend=local" in result.detail
+    assert "which does not declare the REVIEW stage" in result.detail
     assert _BLOCKED in result.detail
-    assert _EARLIER_STAGES in result.detail
-    assert CLEAN_REVIEW_UNSUPPORTED_BACKEND in result.detail
+    assert f"with reason {_STAGE_REASON}" in result.detail
+    assert _EARLIER_STAGES not in result.detail
+    assert _CLEAN_REASON not in result.detail
     assert "#2806" not in result.detail
     for fragment in _REMEDIATION:
         assert fragment in result.detail
+
+
+def test_a_review_harness_without_clean_mode_words_the_clean_reason() -> None:
+    """A future harness declaring REVIEW without clean mode gets the clean reason."""
+    caps = synthetic_capabilities(clean_mode_review=False)
+    result = _guarded_result("client-a", _lane_task(), "future", caps)
+    assert result.ok is False
+    assert "whose REVIEW lane writes no convergence ledger" in result.detail
+    assert f"with reason {_CLEAN_REASON}" in result.detail
+
+
+def test_a_fully_supporting_declaration_still_words_a_total_reason() -> None:
+    """The None fallback keeps the wording total (never reached by _lane_result)."""
+    result = _guarded_result("client-a", _lane_task(), "codex", CODEX_CAPABILITIES)
+    assert f"with reason {_CLEAN_REASON}" in result.detail
 
 
 def test_unrecognized_backend_fails_without_claiming_a_typed_block() -> None:
@@ -152,7 +179,7 @@ def test_unrecognized_backend_fails_without_claiming_a_typed_block() -> None:
     assert "backend=bogus" in result.detail
     assert "dispatch cannot resolve it" in result.detail
     assert "unknown executor backend" in result.detail
-    assert CLEAN_REVIEW_UNSUPPORTED_BACKEND not in result.detail
+    assert _CLEAN_REASON not in result.detail
     assert _BLOCKED not in result.detail
     assert _EARLIER_STAGES not in result.detail
     for fragment in _REMEDIATION:
@@ -201,3 +228,17 @@ def test_lanes_and_clients_listed_in_declared_order() -> None:
         ("review-convergence/client-a/b", False),
         ("review-convergence/client-a/c", True),
     ]
+
+
+def test_clean_mode_without_a_declared_review_stage_is_guarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Supported needs both REVIEW declared and clean mode, not clean mode alone."""
+    caps = synthetic_capabilities(stages=frozenset({Stage.IMPL}))
+    monkeypatch.setattr(
+        "cw.doctor.review_convergence.declared_capabilities", lambda _backend: caps
+    )
+    client = make_client(backend=CODEX_BACKEND, review=_clean())
+    (result,) = _check_review_convergence({"client-a": client})
+    assert result.ok is False
+    assert f"with reason {_STAGE_REASON}" in result.detail

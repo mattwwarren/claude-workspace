@@ -1,11 +1,12 @@
-"""Declared-only ``harness-capabilities`` doctor check (RFC 0019 H1, #3708).
+"""Static ``harness-capabilities`` doctor check (RFC 0019 H1, #3708).
 
 One result per (client, lane, backend): the stages the lane routes to that
-backend, next to what the backend declares. Declared, not enforced. The check
-never probes the host, never resolves an executor (which raises on an unknown
-backend), and is always ``ok=True, warn=False``. A stage routed to a backend
-that does not declare it gets a plain-text note, but no severity change, since
-H2 owns enforcement (#3219).
+backend, next to what the backend declares. The check reports a static
+declaration, which the executor stage pre-flight enforces (RFC 0019 H2,
+#3709). It never probes the host, never resolves an executor (which raises on
+an unknown backend), and is always ``ok=True, warn=False``. A stage routed to
+a backend that does not declare it gets a plain-text note, not a severity
+change.
 
 Leaf module: imports only ``cw.doctor._shared`` from the doctor package, and
 repeats the lane-to-backend walk of ``doctor/tracker_mcp.py`` without its
@@ -28,7 +29,7 @@ if TYPE_CHECKING:
 
     from cw.models import ClientConfig
 
-_CAVEAT = "declared, not enforced; auth, env and headless load unverified"
+_CAVEAT = "static declaration; auth, env and headless load unverified"
 _UNKNOWN_BACKEND = "unrecognized backend"
 
 
@@ -62,8 +63,9 @@ def _mismatch_note(routed: list[Stage], caps: HarnessCapabilities) -> str:
     names = ", ".join(s.value for s in undeclared)
     declared = _names(caps.stages) or "none"
     return (
-        f"; declared, not enforced (H2/#3219): routes {names} to "
-        f"{caps.harness.value}, which declares {declared}"
+        f"; routes {names} to {caps.harness.value}, which declares {declared};"
+        " the stage pre-flight parks such a spawn as stage_unsupported on"
+        " local, opencode and codex (#3219)"
     )
 
 

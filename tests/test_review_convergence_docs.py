@@ -831,7 +831,8 @@ def test_config_reference_documents_review_and_the_max_cycles_release() -> None:
     assert "`confirm_backend`" in row
     assert "the `local` (aider) REVIEW lane writes no convergence ledger" in row
     assert "the opencode and `local` REVIEW lanes write no" not in row
-    assert "blocked before any agent runs (`clean_review_unsupported_backend`" in row
+    assert "blocked before any agent runs (`stage_unsupported`" in row
+    assert "rows parked before H2 carry `clean_review_unsupported_backend`" in row
     assert "and to the opencode REVIEW lane (#2806" in row
     assert "ignores it" not in row
     assert "and to the codex REVIEW lane (#2791" in row
@@ -1051,6 +1052,7 @@ def test_clean_review_unsupported_backend_is_documented() -> None:
     assert "BLOCKED_ON_USER" in row
     assert "A bare `cw dev-queue requeue` does not clear it" in row
     assert "`local`" in row
+    assert "No live producer remains" in row
     assert "until #2806" not in row
 
     runbook = _read("docs/dispatch-runbook.md")
@@ -1061,6 +1063,7 @@ def test_clean_review_unsupported_backend_is_documented() -> None:
     assert runbook.count(heading) == 1
     section = " ".join(_after(runbook, heading, span=1000).split())
     assert "blocked before any agent runs" in section
+    assert "`stage_unsupported`" in section
     assert "`clean_review_unsupported_backend`" in section
     assert "A bare `cw dev-queue requeue` re-dispatches into the same block" in section
 

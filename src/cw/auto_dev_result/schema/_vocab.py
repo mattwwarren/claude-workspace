@@ -17,6 +17,7 @@ from enum import StrEnum
 from typing import Literal
 
 from cw.models import QueueItemStatus
+from cw.stage_preflight import PreflightReason, canonical_reason
 
 # Pinned logger name for every record the schema package emits. Deliberately a
 # literal, not ``__name__``: the pre-split ``schema.py`` logged under this fixed
@@ -259,9 +260,11 @@ REVIEW_ENGINE_MODIFIED_BLOCKER_REASON: Literal["review_engine_modified"] = (
 # no usable cw-engine.json (cause=no_codex_manifest, codex_not_declared or
 # manifest_invalid). Never retryable: the operator fixes the config or the
 # manifest, then requeues.
+# Compatibility export: the canonical value lives in the neutral stage
+# pre-flight vocabulary so producers and readers share one definition.
 REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON: Literal[
     "review_engine_unsupported_backend"
-] = "review_engine_unsupported_backend"
+] = PreflightReason.REVIEW_ENGINE_UNSUPPORTED_BACKEND.value
 # blocker.reason headless finalize Step 4c.6 emits when the executor's per-call
 # foreground timeout cut a reuse-path quality gate call off (#3372). The row
 # parks BLOCKED_ON_USER at FINALIZE for the orchestrator to run the gate by
@@ -340,7 +343,11 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
         {
             "automerge_not_armed",
             "clean_review_unsupported_backend",
-            "finalize_unsupported_backend",
+            # RFC 0019 H2 (#3709): the one stage pre-flight park. Its pre-H2
+            # names (finalize_unsupported_backend, codex_review_only,
+            # opencode_<stage>_not_implemented) are known through
+            # canonical_reason in is_known_blocker_reason.
+            PreflightReason.STAGE_UNSUPPORTED.value,
             "local_main_diverged_from_origin",
             "plan_ambiguous",
             "plan_missing",
@@ -476,9 +483,11 @@ def is_known_blocker_reason(reason: str) -> bool:
     carve-out cannot be honored at one site and missed at another.
 
     Never a gate — ``blocker.reason`` remains an open enum (§4.2). A False
-    answer means "surface it as unrecognized," never "reject it."
+    answer means "surface it as unrecognized," never "reject it." A pre-H2
+    stage reason is read through :func:`cw.stage_preflight.canonical_reason`,
+    so a row parked before RFC 0019 H2 (#3709) is still known.
     """
-    return reason in KNOWN_BLOCKER_REASONS or reason.startswith(
+    return canonical_reason(reason) in KNOWN_BLOCKER_REASONS or reason.startswith(
         FREEFORM_BLOCKER_REASON_PREFIX
     )
 

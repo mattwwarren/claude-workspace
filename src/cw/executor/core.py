@@ -193,7 +193,7 @@ class StageExecutor(Protocol):
         ...
 
     def capabilities(self) -> HarnessCapabilities:
-        """Return the static capability declaration (declared, not enforced)."""
+        """Return the static capability declaration (read by stage pre-flight)."""
         ...
 
 

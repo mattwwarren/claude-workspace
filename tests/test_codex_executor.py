@@ -32,7 +32,6 @@ from cw.config import load_state
 from cw.dev_queue import add_ticket, load_dev_queue
 from cw.executor import (
     CODEX_NOT_FOUND,
-    CODEX_REVIEW_ONLY,
     CODEX_VERSION_PROBE_TIMEOUT,
     CODEX_VERSION_UNKNOWN,
     CodexCapabilityDiagnosis,
@@ -65,6 +64,7 @@ from cw.models import (
 )
 from cw.models.client import ReviewConfig
 from cw.native_daemon import FakeNativeDaemonClient
+from cw.stage_preflight import PreflightReason
 from cw.worktree import resolve_worker_tmpdir
 from tests._codex_review_helpers import _mk_codex_proc
 from tests._shared.session_seeding import (
@@ -158,7 +158,7 @@ def test_codex_executor_wrong_stage_blocked(
     stage: Stage,
     expected_stage_reached: str,
 ) -> None:
-    """spawn() on an unsupported stage → blocked/codex_review_only, no launch.
+    """spawn() on an undeclared stage → blocked/stage_unsupported, no launch.
 
     The park carries that stage's entry marker, never the REVIEW default
     (#3060 R8): dispatch walks the row forward on a later-stage sentinel.
@@ -177,7 +177,9 @@ def test_codex_executor_wrong_stage_blocked(
     assert result.status == "blocked"
     assert result.stage_reached == expected_stage_reached
     assert result.blocker is not None
-    assert result.blocker.reason == CODEX_REVIEW_ONLY
+    assert result.blocker.reason == PreflightReason.STAGE_UNSUPPORTED.value
+    assert result.blocker.retry_eligible is None
+    assert "harness=codex" in result.blocker.details
     assert result.next_actions == _CODEX_FINALIZE_BLOCKED_NEXT_ACTIONS
 
 
@@ -186,7 +188,7 @@ def test_codex_executor_impl_preflight_ok_launches_cw_codex_run_stage_impl(
     make_git_repo: Callable[[str], Path],
     fake_runner: FakeFireAndForgetRunner,
 ) -> None:
-    """IMPL is supported (#3061): no CODEX_REVIEW_ONLY park, one impl launch."""
+    """IMPL is supported (#3061): no stage_unsupported park, one impl launch."""
     worktree = make_git_repo("wt-codex-impl-launch")
     executor = _codex_executor(runner=fake_runner)
     task = TicketTask(ticket_id="T-impl", client="test", stage=Stage.IMPL)
@@ -234,7 +236,7 @@ def test_codex_executor_finalize_is_supported_and_launches(
     make_git_repo: Callable[[str], Path],
     fake_runner: FakeFireAndForgetRunner,
 ) -> None:
-    """FINALIZE is supported (#3062): no CODEX_REVIEW_ONLY park, one launch."""
+    """FINALIZE is supported (#3062): no stage_unsupported park, one launch."""
     worktree = make_git_repo("wt-codex-finalize-launch")
     executor = _codex_executor(runner=fake_runner)
     task = TicketTask(ticket_id="T-1", client="test", stage=Stage.FINALIZE)
@@ -736,7 +738,7 @@ def test_preflight_failure_persist_error_completes_session_and_reraises(
         patch("cw.executor.core._complete_session_via_door", _door),
         pytest.raises(OSError, match="door boom"),
     ):
-        # Stage.HARDEN trips the CODEX_REVIEW_ONLY pre-flight guard.
+        # Stage.HARDEN trips the stage pre-flight (stage_unsupported).
         executor.spawn(
             stage=Stage.HARDEN, task=task, worktree=worktree, client=_client(worktree)
         )
