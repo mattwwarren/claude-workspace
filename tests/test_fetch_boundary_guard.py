@@ -63,12 +63,10 @@ _ALLOWLIST: Final[dict[str, str]] = {
     "cw/review_debt_filing/": "debt filing reads bodies to link and dedupe tickets",
     "cw/gh/": "the package defining the readers; its approved-plan reader calls the"
     " comment reader",
-    # With an expiry: listed only because it is still present today.
-    "cw/cli/dev_queue/approve.py": "expires with RFC 0019 O3b, which deletes this read",
 }
 
 #: Pinned maximum entry count. Lower it when an entry is deleted.
-_ALLOWLIST_CEILING: Final = 15
+_ALLOWLIST_CEILING: Final = 14
 
 #: Files that had a fetch call before T2 and must now read the snapshot instead.
 _MUST_BE_CLEAN: Final = (
