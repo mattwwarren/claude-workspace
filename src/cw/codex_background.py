@@ -125,11 +125,6 @@ __all__ = [
 
 _log = logging.getLogger(__name__)
 
-# RFC 0019 T2 snapshot refresh is staged behind an explicit client allowlist.
-# Keep this narrow until snapshot retention/purge and row-restore procedures
-# are shipped; expanding it is an operator rollout decision, not a default.
-_SNAPSHOT_REFRESH_CLIENT_ALLOWLIST = frozenset({"acme", "test"})
-
 # Shared budget for draining outstanding review threads on a graceful exit.
 #
 # Why 10s: long enough for a thread that has already finished its codex
@@ -548,7 +543,7 @@ def _review_and_confirm(
         client,
         worktree,
         resolve_login=fix_loop_enabled,
-        refresh=client.name in _SNAPSHOT_REFRESH_CLIENT_ALLOWLIST,
+        refresh=True,
     )
     resumed = resume_pending_confirm(
         task=task,
