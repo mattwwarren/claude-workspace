@@ -853,15 +853,15 @@ class TestSpawnCreateImplExtraArgsPermissionMode:
 
 
 class TestSpawnCreateImplPermissionModeFromModel:
-    """Non-auto-capable worker_model pins derive bypassPermissions (#1111)."""
+    """worker_model pins never derive bypassPermissions (#3626)."""
 
-    def test_non_auto_model_derives_bypass_permissions(
+    def test_non_auto_model_derives_default_auto(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """Haiku pin + no explicit permission_mode → bypassPermissions."""
+        """Haiku pin + no explicit permission_mode → None (spawn_bg applies auto)."""
         from cw.spawn import spawn_create_impl
 
         workspace = tmp_path / "workspace" / "haiku-derive"
@@ -883,7 +883,7 @@ class TestSpawnCreateImplPermissionModeFromModel:
             native_daemon=daemon,
         )
 
-        assert daemon.spawn_permission_modes[0] == "bypassPermissions"
+        assert daemon.spawn_permission_modes[0] is None
 
     def test_auto_capable_model_stays_none(
         self,

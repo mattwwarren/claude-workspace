@@ -13,14 +13,12 @@ import pytest
 
 from cw.exceptions import ClaudeBinaryNotFoundError, CwError
 from cw.native_daemon import (
-    SKIP_PERMISSIONS_MODE,
     FakeNativeDaemonClient,
     RealNativeDaemonClient,
     WorkerHome,
     _is_native_surface_ref,
     daemon_worker_tmpdir_env,
     get_native_daemon_client,
-    model_supports_auto,
     read_supervisor_resume_session_id,
     resolve_permission_mode,
     wait_for_roster_presence,
@@ -1726,180 +1724,52 @@ class TestWaitForRosterPresence:
         assert sleeps == [0.25]
 
 
-class TestModelSupportsAuto:
-    """model_supports_auto gates ``--permission-mode auto`` by worker_model (#1111)."""
-
-    def test_none_is_auto_capable(self) -> None:
-        """No pin (None) keeps today's behavior — treated as auto-capable."""
-        assert model_supports_auto(None) is True
-
-    def test_empty_string_is_auto_capable(self) -> None:
-        """Falsy value matches the ``if client.worker_model:`` truthiness convention."""
-        assert model_supports_auto("") is True
-
-    def test_bare_sonnet_alias_is_auto_capable(self) -> None:
-        assert model_supports_auto("claude-sonnet-5") is True
-
-    def test_dated_sonnet_id_is_auto_capable(self) -> None:
-        """Prefix match, not exact-set — dated/suffixed ids still resolve."""
-        assert model_supports_auto("claude-sonnet-4-6-20251015") is True
-
-    def test_opus_is_auto_capable(self) -> None:
-        assert model_supports_auto("claude-opus-4-8") is True
-
-    def test_known_haiku_is_not_auto_capable(self) -> None:
-        assert model_supports_auto("claude-haiku-4-5-20251001") is False
-
-    def test_haiku_5_5_is_auto_capable(self) -> None:
-        assert model_supports_auto("claude-haiku-5-5") is True
-        assert model_supports_auto("claude-haiku-5-5-20260101") is True
+class TestResolvePermissionModeDefault:
+    """Every worker_model defaults to auto; no per-model bypass fallback (#3626)."""
 
     @pytest.mark.parametrize(
         "model",
         [
+            None,
+            "",
             "claude-opus-5-5",
             "claude-opus-5-5-20260101",
-            "claude-opus-5",
             "claude-sonnet-5-6",
-            "claude-sonnet-5-20260101",
-            "claude-haiku-5",
-            "claude-opus-6",
-            "claude-opus-6-1-20270101",
-            "claude-opus-10",
             "claude-fable-5",
             "claude-mythos-5",
-            "claude-fable-5-2",
-        ],
-    )
-    def test_major_5_and_later_is_auto_capable(self, model: str) -> None:
-        """#3626 R1: every parseable Claude id at major >= 5 is auto-capable."""
-        assert model_supports_auto(model) is True
-
-    @pytest.mark.parametrize(
-        "model",
-        [
-            "us.anthropic.claude-opus-5-5",
-            "anthropic.claude-opus-5-5",
-            "claude-opus-",
-            "claude-opus-x",
-            "claude-5",
-            "gpt-5",
-            "opus",
-            "sonnet",
-            "haiku",
-            "claude-sonnet-20250101",
-            "claude-3-7-sonnet",
-        ],
-    )
-    def test_unparseable_ids_stay_fail_closed(self, model: str) -> None:
-        """#3626 R1: an id the parser cannot recognize is NOT auto-capable."""
-        assert model_supports_auto(model) is False
-
-    @pytest.mark.parametrize(
-        "model",
-        [
             "claude-haiku-4-5-20251001",
-            "claude-opus-4-5",
-            "claude-opus-4-1-20250805",
-            "claude-opus-4",
-            "claude-sonnet-4-5",
-        ],
-    )
-    def test_pre_5_ids_not_covered_by_a_prefix_are_not_auto_capable(
-        self, model: str
-    ) -> None:
-        assert model_supports_auto(model) is False
-
-    @pytest.mark.parametrize(
-        "model",
-        [
-            "claude-opus-4-6",
-            "claude-opus-4-7",
-            "claude-opus-4-8-20260101",
             "claude-sonnet-4-6-20251015",
+            "us.anthropic.claude-opus-5-5",
+            "opus",
+            "some-unseen-model-id",
         ],
     )
-    def test_explicit_pre_5_prefixes_stay_auto_capable(self, model: str) -> None:
-        assert model_supports_auto(model) is True
+    def test_every_model_resolves_to_default(self, model: str | None) -> None:
+        assert resolve_permission_mode(model) is None
 
-    def test_case_and_whitespace_insensitive(self) -> None:
-        assert model_supports_auto("  CLAUDE-SONNET-5-x  ") is True
+    def test_explicit_bypass_wins_over_default(self) -> None:
+        """A caller-supplied permission_mode is the per-call bypass path."""
+        assert (
+            resolve_permission_mode("claude-opus-5-5", explicit="bypassPermissions")
+            == "bypassPermissions"
+        )
 
-    def test_skip_permissions_mode_literal(self) -> None:
-        """Lock the fallback mode literal."""
-        assert SKIP_PERMISSIONS_MODE == "bypassPermissions"
-
-
-class TestResolvePermissionMode:
-    """resolve_permission_mode: shared derivation for both spawn chokepoints (#1111)."""
-
-    def test_explicit_wins_over_non_auto_model(self) -> None:
-        """A caller-supplied permission_mode always wins over the derivation."""
+    def test_explicit_wins_over_any_model(self) -> None:
         assert (
             resolve_permission_mode("claude-haiku-4-5-20251001", explicit="acceptEdits")
             == "acceptEdits"
         )
 
-    def test_explicit_wins_over_auto_capable_model(self) -> None:
-        assert (
-            resolve_permission_mode("claude-sonnet-5", explicit="acceptEdits")
-            == "acceptEdits"
-        )
-
-    def test_auto_capable_model_returns_none(self) -> None:
-        assert resolve_permission_mode("claude-sonnet-4-6-20251015") is None
-
-    def test_no_pin_returns_none(self) -> None:
-        assert resolve_permission_mode(None) is None
-
-    def test_non_auto_model_returns_skip_mode(self) -> None:
-        assert (
-            resolve_permission_mode("claude-haiku-4-5-20251001")
-            == SKIP_PERMISSIONS_MODE
-        )
-
-    def test_non_auto_model_logs_warning(
+    def test_no_warning_logged_for_any_model(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """The bypassPermissions fallback is audit-logged, not silent (#1111)."""
         import logging
 
         with caplog.at_level(logging.WARNING):
             resolve_permission_mode("claude-haiku-4-5-20251001")
-
-        assert any(
-            "claude-haiku-4-5-20251001" in rec.message
-            and "bypassPermissions" in rec.message
-            for rec in caplog.records
-        )
-
-    def test_auto_capable_model_does_not_log_warning(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        import logging
-
-        with caplog.at_level(logging.WARNING):
-            resolve_permission_mode("claude-sonnet-5")
+            resolve_permission_mode("some-unseen-model-id")
 
         assert caplog.records == []
-
-    def test_opus_5_5_returns_none_and_does_not_warn(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """#3626: Opus 5.5 is auto-capable under the major >= 5 rule."""
-        import logging
-
-        with caplog.at_level(logging.WARNING):
-            assert resolve_permission_mode("claude-opus-5-5") is None
-
-        assert caplog.records == []
-
-    def test_unparseable_id_returns_skip_mode(self) -> None:
-        """Fail-closed fallback end to end for an id the parser cannot read."""
-        assert (
-            resolve_permission_mode("us.anthropic.claude-opus-5-5")
-            == SKIP_PERMISSIONS_MODE
-        )
 
 
 class TestReadSupervisorResumeSessionId:

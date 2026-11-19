@@ -18,7 +18,6 @@ from __future__ import annotations
 import logging
 from typing import Final
 
-from cw.model_family import parse_model_id
 from cw.models.worker_effort import WorkerEffort
 
 # Verified against `claude --help` (claude 2.1.323): `--effort <level>`, with
@@ -26,23 +25,18 @@ from cw.models.worker_effort import WorkerEffort
 WORKER_EFFORT_FLAG: Final = "--effort"
 
 _DEFAULT_LEVEL: Final = WorkerEffort.MEDIUM
-# Full model ids only: the family and version must parse (so aliases such as
-# `opus` never match), and a dated suffix still matches. Deliberately narrower
-# than the auto-capability rule in cw.native_daemon (major >= 5): only Opus 5.5.
-_DEFAULT_FAMILY: Final = "opus"
-_DEFAULT_VERSION: Final = (5, 5)
+# Full model ids only (lower-cased, stripped, matched by prefix so dated
+# suffixes work). Aliases are deliberately absent: see CONFIG_REFERENCE.
+_DEFAULT_MODEL_PREFIXES: Final[tuple[str, ...]] = ("claude-opus-5-5",)
 
 _log = logging.getLogger(__name__)
 
 
 def _default_applies(worker_model: str | None) -> bool:
-    parsed = parse_model_id(worker_model)
-    if parsed is None:
+    if not worker_model:
         return False
-    return (
-        parsed.family == _DEFAULT_FAMILY
-        and (parsed.major, parsed.minor) == _DEFAULT_VERSION
-    )
+    normalized = worker_model.strip().lower()
+    return normalized.startswith(_DEFAULT_MODEL_PREFIXES)
 
 
 def resolve_worker_effort_args(
