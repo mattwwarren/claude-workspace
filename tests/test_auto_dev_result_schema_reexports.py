@@ -54,6 +54,9 @@ EXPECTED_EXPORTS = {
     # #2321: structured depends_on_pr (validator helper + NewType)
     "DependsOnPr",
     "parse_depends_on_pr",
+    # #3634: structured depends_on_pr_ref (validator helper + NewType)
+    "DependsOnPrRef",
+    "parse_depends_on_pr_ref",
     "PAUSED_FOR_USER_INPUT_STATUSES",
     "PLAN_SCOPE_DRIFT_BLOCKER_REASON",
     "REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON",

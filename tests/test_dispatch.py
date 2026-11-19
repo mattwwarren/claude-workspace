@@ -112,6 +112,7 @@ from cw.models import (
     StageExecutorConfig,
     TicketTask,
 )
+from cw.models.pr_ref import PrRef
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.worktree import (
     ReuseRefreshOptions,
@@ -160,6 +161,9 @@ if TYPE_CHECKING:
     from cw.native_daemon import NativeDaemonClient
     from cw.worktree import FetchWarningKey, UnresolvablePathWarningKey
     from tests._shared.daemon_fakes import CapturedEvent
+
+
+_DEP_REF_88 = PrRef(number=88)
 
 
 def _captured_windows(kwargs: dict[str, object]) -> Mapping[str, datetime]:
@@ -11312,7 +11316,7 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == "dependency_hold"
         assert task.blocked_reason == "dependency_unmerged"
-        assert task.blocked_on_pr == 88
+        assert task.blocked_on_pr == _DEP_REF_88
         assert occupies_lane_slot(task) is False
 
     @pytest.mark.parametrize("depends_on_pr", [True, "7", 0, -1, 7.5, None])
@@ -11524,7 +11528,7 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == "merge_gate_blocked"
         assert task.blocked_reason == "prior_pipeline_pr_open"
-        assert task.blocked_on_pr == 88
+        assert task.blocked_on_pr == _DEP_REF_88
 
     def test_prior_pipeline_pr_open_malformed_details_leaves_blocked_on_pr_none(
         self, tmp_path: Path
@@ -22649,7 +22653,7 @@ class TestStaleDispatchSentinelRouting:
 
         assert task.disposition == "stale_dispatch"
         assert task.blocked_reason == "pr_already_open"
-        assert task.blocked_on_pr == 1899
+        assert task.blocked_on_pr == PrRef(number=1899)
 
     def test_malformed_details_leaves_blocked_on_pr_none(self, tmp_path: Path) -> None:
         """Fail-closed: mirrors

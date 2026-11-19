@@ -38,7 +38,7 @@ from cw.models import (
     ReapReason,
     TicketTask,
 )
-from cw.models.pr_ref import PrRef, PrRefKey, pr_evidence_keys
+from cw.models.pr_ref import PrRefKey, pr_evidence_keys
 from cw.pr_hydrate import _parse_pr_url
 from cw.pr_hydrate.watched import retire_terminal_watched_prs
 from cw.queue_rows import (
@@ -251,18 +251,6 @@ def _closed_pr_numbers_by_client(store: DevQueueStore) -> dict[str, set[PrRefKey
     return _pr_numbers_by_client_in_state(store, _GH_PR_STATE_CLOSED)
 
 
-def _closed_evidence(pr: PrRef) -> dict[str, int | str]:
-    """``session.reap_proposed`` evidence for a closed-unmerged dependency PR.
-
-    ``blocked_on_pr`` stays the int number; ``blocked_on_repo`` is added only
-    for an explicit ref (#3634, R6).
-    """
-    evidence: dict[str, int | str] = {"blocked_on_pr": pr.number}
-    if pr.repo is not None:
-        evidence["blocked_on_repo"] = pr.repo
-    return evidence
-
-
 def _release_variant_a(task: TicketTask, policy: ReapPolicy) -> None:
     """Apply the SIGNAL_ONLY/AUTO release for a Variant A gate task."""
     if policy is ReapPolicy.AUTO:
@@ -338,6 +326,11 @@ def _scan_variant_b(
                 # per episode.
                 if task.stale_gate_detected_at is None:
                     task.stale_gate_detected_at = datetime.now(UTC)
+                    # blocked_on_pr stays the int; blocked_on_repo is added
+                    # only for an explicit ref (#3634, R6).
+                    evidence: dict[str, int | str] = {"blocked_on_pr": pr.number}
+                    if pr.repo is not None:
+                        evidence["blocked_on_repo"] = pr.repo
                     pending.append(
                         (
                             task.ticket_id,
@@ -345,7 +338,7 @@ def _scan_variant_b(
                             task.lane,
                             _PROPOSED_ACTION_DEPENDENCY_PR_CLOSED_UNMERGED,
                             orig_session_id,
-                            _closed_evidence(pr),
+                            evidence,
                         )
                     )
                     changed = True

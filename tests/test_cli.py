@@ -11341,6 +11341,44 @@ class TestDevQueueTasksPrState:
         assert cells["GEN-2321"] == "#88"
         assert cells["GEN-2322"] == "—"
 
+    def test_dev_queue_tasks_human_output_shows_cross_repo_blocked_on_ref(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """#3634: the widened BLOCKED_ON cell prints a cross-repo ref whole."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        def _held(ticket_id: str, ref: object) -> TicketTask:
+            return TicketTask.model_validate(
+                {
+                    "ticket_id": ticket_id,
+                    "client": "attn-client",
+                    "status": QueueItemStatus.BLOCKED_ON_USER,
+                    "disposition": "dependency_hold",
+                    "blocked_reason": "dependency_unmerged",
+                    "blocked_on_pr": ref,
+                }
+            )
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _held("GEN-3634", {"repo": "acme/widgets", "number": 2323}),
+                    _held("GEN-3635", 88),
+                ]
+            )
+        )
+        result = CliRunner().invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        output_lines = [line for line in result.output.splitlines() if line.strip()]
+        header_line, *data_lines = [
+            line for line in output_lines if not line.startswith("-")
+        ]
+        index = header_line.split().index("BLOCKED_ON")
+        cells = {line.split()[0]: line.split()[index] for line in data_lines}
+        assert cells["GEN-3634"] == "acme/widgets#2323"
+        assert cells["GEN-3635"] == "#88"
+
     def test_dev_queue_tasks_human_output_renders_pr_column_as_number(
         self, tmp_config_dir: Path
     ) -> None:
@@ -11649,6 +11687,44 @@ class TestDevQueueTasksPrState:
         missing = set(TicketTask.model_fields.keys()) - set(data[0].keys())
         assert not missing, f"tasks --json is missing fields: {sorted(missing)}"
 
+    def test_tasks_json_projects_blocked_on_pr_to_int_with_repo(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """#3634 R6: tasks --json keeps an int blocked_on_pr plus blocked_on_repo."""
+        import json as _json
+
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(ticket_id="GEN-1", client="c", blocked_on_pr=88),
+                    TicketTask.model_validate(
+                        {
+                            "ticket_id": "GEN-2",
+                            "client": "c",
+                            "blocked_on_pr": {"repo": "acme/widgets", "number": 2323},
+                        }
+                    ),
+                    TicketTask(ticket_id="GEN-3", client="c"),
+                ]
+            )
+        )
+        result = CliRunner().invoke(main, ["dev-queue", "tasks", "--json"])
+        assert result.exit_code == 0, result.output
+        rows = {row["ticket_id"]: row for row in _json.loads(result.output)}
+        assert rows["GEN-1"]["blocked_on_pr"] == 88
+        assert isinstance(rows["GEN-1"]["blocked_on_pr"], int)
+        assert rows["GEN-1"]["blocked_on_repo"] is None
+        assert rows["GEN-2"]["blocked_on_pr"] == 2323
+        assert isinstance(rows["GEN-2"]["blocked_on_pr"], int)
+        assert rows["GEN-2"]["blocked_on_repo"] == "acme/widgets"
+        assert rows["GEN-3"]["blocked_on_pr"] is None
+        assert rows["GEN-3"]["blocked_on_repo"] is None
+        expected_keys = set(TicketTask.model_fields) | {"blocked_on_repo"}
+        assert all(set(row) == expected_keys for row in rows.values())
+
     def test_tasks_human_table_operator_relevant_fields_present(
         self, tmp_config_dir: Path
     ) -> None:
@@ -11924,7 +12000,9 @@ class TestDevQueueTasksNextColumn:
         seed_queue([task])
         result = CliRunner().invoke(main, ["dev-queue", "tasks", "--json"])
         assert result.exit_code == 0, result.output
-        assert _json.loads(result.output) == [task.model_dump(mode="json")]
+        # #3634: the one additive key the tasks --json projection carries.
+        expected = {**task.model_dump(mode="json"), "blocked_on_repo": None}
+        assert _json.loads(result.output) == [expected]
 
 
 def _unproductive_cells(output: str) -> list[str]:
@@ -12006,7 +12084,9 @@ class TestDevQueueTasksUnproductiveColumn:
         seed_queue([task])
         result = CliRunner().invoke(main, ["dev-queue", "tasks", "--json"])
         assert result.exit_code == 0, result.output
-        assert _json.loads(result.output) == [task.model_dump(mode="json")]
+        # #3634: the one additive key the tasks --json projection carries.
+        expected = {**task.model_dump(mode="json"), "blocked_on_repo": None}
+        assert _json.loads(result.output) == [expected]
 
 
 class TestDevQueueWait:

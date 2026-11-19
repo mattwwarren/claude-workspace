@@ -6381,7 +6381,10 @@ class TestDevQueueTasks:
         tasks = json.loads(result.output)
         assert isinstance(tasks, list)
         assert len(tasks) == 3
-        assert set(tasks[0].keys()) == set(TicketTask.model_fields.keys())
+        # #3634: plus the additive blocked_on_repo projection key.
+        assert set(tasks[0].keys()) == set(TicketTask.model_fields) | {
+            "blocked_on_repo"
+        }
 
     def test_tasks_filter_by_client(self, tmp_config_dir: Path) -> None:
         save_dev_queue(DevQueueStore(tasks=self._three_tasks()))
@@ -17372,6 +17375,15 @@ class TestRegisterWatchedPr:
         assert len(store.watched_prs) == 2
         assert any(w.status == "active" for w in store.watched_prs)
 
+    def test_register_dedup_compares_repo_case_insensitively(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """#3634 R8: ``Foo/Bar`` #5 is the same PR as an active ``foo/bar`` #5."""
+        save_dev_queue(DevQueueStore(watched_prs=[self._watched()]))
+        mixed = self._watched().model_copy(update={"repo": "Foo/Bar"})
+        assert register_watched_pr(mixed) is False
+        assert len(load_dev_queue().watched_prs) == 1
+
 
 class TestRegisterOrAdoptWatchedPr:
     """register_or_adopt_watched_pr (GitHub #1927): the ``client``-aware
@@ -17411,6 +17423,26 @@ class TestRegisterOrAdoptWatchedPr:
         assert len(store.watched_prs) == 1
         assert store.watched_prs[0].client == "client-a"
         assert store.watched_prs[0].source == "stale_dispatch_park"
+
+    def test_repo_match_is_case_insensitive_across_clients(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """#3634: ``Foo/Bar`` and ``foo/bar`` are one PR, so they collide."""
+        save_dev_queue(DevQueueStore(watched_prs=[self._watched("client-a")]))
+        mixed = self._watched("client-b", repo="Foo/Bar")
+        assert register_or_adopt_watched_pr(mixed) == "collision"
+        assert len(load_dev_queue().watched_prs) == 1
+
+    def test_adoption_copies_cross_repo(self, tmp_config_dir: Path) -> None:
+        """#3634: adopting a client-less watch also sets ``cross_repo``."""
+        save_dev_queue(DevQueueStore(watched_prs=[self._watched(None, repo="o/r")]))
+        cross = self._watched("client-a", repo="o/r").model_copy(
+            update={"cross_repo": True}
+        )
+        assert register_or_adopt_watched_pr(cross) == "adopted"
+        [watch] = load_dev_queue().watched_prs
+        assert watch.client == "client-a"
+        assert watch.cross_repo is True
 
     def test_already_active_for_same_client_is_a_no_op(
         self, tmp_config_dir: Path

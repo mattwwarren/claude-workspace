@@ -27,6 +27,7 @@ from cw.models import (
     CwState,
     DevQueueStore,
     OrchestratorConfig,
+    OrchestratorEvent,
     OrchestratorEventType,
     PrState,
     QueueItemStatus,
@@ -36,6 +37,7 @@ from cw.models import (
     TicketTask,
     WatchedPr,
 )
+from cw.models.pr_ref import PrRef, PrRefKey, pr_evidence_keys
 from cw.pr_hydrate import hydrate_pr_states
 from cw.reconcile import (
     release_stale_gated_tasks,
@@ -361,7 +363,7 @@ def test_release_stale_gated_tasks_keeps_watch_for_signal_only_park(
     reloaded = load_dev_queue()
     row = reloaded.tasks[0]
     assert row.status == QueueItemStatus.BLOCKED_ON_USER
-    assert row.blocked_on_pr == 52
+    assert row.blocked_on_pr == PrRef(number=52)
     assert row.stale_gate_detected_at is not None
     assert reloaded.watched_prs[0].status == "active"
 
@@ -452,7 +454,7 @@ def test_release_after_dismissal_ignores_stale_evidence(
 
     reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-W4B")
     assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
-    assert reloaded.blocked_on_pr == 54
+    assert reloaded.blocked_on_pr == PrRef(number=54)
 
 
 def test_release_stale_gated_tasks_auto_policy_requeues_variant_b(
@@ -568,6 +570,7 @@ _STALE_DISPATCH_LAST_RESULT: dict[str, object] = {
     "review": {"must_fix_initial": 0, "should_fix": 0},
 }
 _STALE_DISPATCH_PR_NUMBER = 1899
+_STALE_DISPATCH_REF = PrRef(number=_STALE_DISPATCH_PR_NUMBER)
 _STALE_DISPATCH_SLUG = "foo/bar"
 
 
@@ -728,7 +731,7 @@ def test_release_stale_gated_tasks_stale_dispatch_open_pr_not_released_end_to_en
 
     reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-SD-OPEN")
     assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
-    assert reloaded.blocked_on_pr == _STALE_DISPATCH_PR_NUMBER
+    assert reloaded.blocked_on_pr == _STALE_DISPATCH_REF
     assert reloaded.stale_gate_detected_at is None
 
 
@@ -764,7 +767,7 @@ def test_release_stale_gated_tasks_stale_dispatch_still_open_pr_is_noop(
     assert released == []
     reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-SD2")
     assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
-    assert reloaded.blocked_on_pr == 71
+    assert reloaded.blocked_on_pr == PrRef(number=71)
 
 
 def test_release_stale_gated_tasks_stale_dispatch_signal_only_stamps(
@@ -787,7 +790,7 @@ def test_release_stale_gated_tasks_stale_dispatch_signal_only_stamps(
     reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-SD3")
     assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
     assert reloaded.stale_gate_detected_at is not None
-    assert reloaded.blocked_on_pr == _STALE_DISPATCH_PR_NUMBER
+    assert reloaded.blocked_on_pr == _STALE_DISPATCH_REF
 
 
 def test_release_stale_gated_tasks_stale_dispatch_signal_only_stamps_closed(
@@ -811,7 +814,7 @@ def test_release_stale_gated_tasks_stale_dispatch_signal_only_stamps_closed(
     reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-SD3C")
     assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
     assert reloaded.stale_gate_detected_at is not None
-    assert reloaded.blocked_on_pr == _STALE_DISPATCH_PR_NUMBER
+    assert reloaded.blocked_on_pr == _STALE_DISPATCH_REF
 
 
 # GitHub #2717: the blocking COMPLETED row's PR number, aligned with the
@@ -997,25 +1000,36 @@ def test_is_variant_b_gate_task_stale_dispatch_requires_matching_blocked_reason(
     assert released == []
     reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-SD4")
     assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
-    assert reloaded.blocked_on_pr == 73
+    assert reloaded.blocked_on_pr == PrRef(number=73)
 
 
 def _make_watched_pr(
     *,
     pr_number: int = 90,
     client: str | None = "client-a",
-    state: str = "MERGED",
+    state: str | None = "MERGED",
     status: Literal["active", "dismissed"] = "active",
+    repo: str = "foo/bar",
+    cross_repo: bool = False,
 ) -> WatchedPr:
     return WatchedPr(
-        pr_url=f"https://github.com/foo/bar/pull/{pr_number}",
-        repo="foo/bar",
+        pr_url=f"https://github.com/{repo}/pull/{pr_number}",
+        repo=repo,
         pr_number=pr_number,
         client=client,
         source="stale_dispatch_park",
         status=status,
-        pr_state=PrState(state=state),
+        cross_repo=cross_repo,
+        pr_state=None if state is None else PrState(state=state),
     )
+
+
+def _keys(*numbers: int, repo: str = "foo/bar") -> set[PrRefKey]:
+    """The evidence keys an own-repo observation of *numbers* emits (#3634)."""
+    keys: set[PrRefKey] = set()
+    for number in numbers:
+        keys |= pr_evidence_keys(repo, number, cross_repo=False)
+    return keys
 
 
 class TestMergedPrNumbersByClient:
@@ -1033,7 +1047,7 @@ class TestMergedPrNumbersByClient:
 
     def test_merged_client_tagged_watch_contributes(self) -> None:
         store = DevQueueStore(watched_prs=[_make_watched_pr()])
-        assert _merged_pr_numbers_by_client(store) == {"client-a": {90}}
+        assert _merged_pr_numbers_by_client(store) == {"client-a": _keys(90)}
 
     def test_unmerged_watch_excluded(self) -> None:
         store = DevQueueStore(watched_prs=[_make_watched_pr(state="OPEN")])
@@ -1054,7 +1068,7 @@ class TestMergedPrNumbersByClient:
         store = DevQueueStore(watched_prs=[_make_watched_pr(client="client-b")])
         merged = _merged_pr_numbers_by_client(store)
         assert merged.get("client-a", set()) == set()
-        assert merged == {"client-b": {90}}
+        assert merged == {"client-b": _keys(90)}
 
     def test_task_and_watch_sources_union_within_a_client(self) -> None:
         task = _make_ticket_task(
@@ -1064,7 +1078,7 @@ class TestMergedPrNumbersByClient:
             pr_state=PrState(state="MERGED"),
         )
         store = DevQueueStore(tasks=[task], watched_prs=[_make_watched_pr()])
-        assert _merged_pr_numbers_by_client(store) == {"client-a": {90, 91}}
+        assert _merged_pr_numbers_by_client(store) == {"client-a": _keys(90, 91)}
 
 
 class TestClosedPrNumbersByClient:
@@ -1075,7 +1089,7 @@ class TestClosedPrNumbersByClient:
 
     def test_closed_client_tagged_watch_contributes(self) -> None:
         store = DevQueueStore(watched_prs=[_make_watched_pr(state="CLOSED")])
-        assert _closed_pr_numbers_by_client(store) == {"client-a": {90}}
+        assert _closed_pr_numbers_by_client(store) == {"client-a": _keys(90)}
 
     def test_open_watch_excluded(self) -> None:
         store = DevQueueStore(watched_prs=[_make_watched_pr(state="OPEN")])
@@ -1100,7 +1114,7 @@ class TestClosedPrNumbersByClient:
         )
         closed = _closed_pr_numbers_by_client(store)
         assert closed.get("client-a", set()) == set()
-        assert closed == {"client-b": {90}}
+        assert closed == {"client-b": _keys(90)}
 
     def test_task_and_watch_sources_union_within_a_client(self) -> None:
         task = _make_ticket_task(
@@ -1112,7 +1126,7 @@ class TestClosedPrNumbersByClient:
         store = DevQueueStore(
             tasks=[task], watched_prs=[_make_watched_pr(state="CLOSED")]
         )
-        assert _closed_pr_numbers_by_client(store) == {"client-a": {90, 91}}
+        assert _closed_pr_numbers_by_client(store) == {"client-a": _keys(90, 91)}
 
     def test_merged_watch_does_not_leak_into_closed_index(self) -> None:
         """A MERGED-state watch must not appear in the CLOSED index, and a
@@ -1121,8 +1135,8 @@ class TestClosedPrNumbersByClient:
         merged_watch = _make_watched_pr(pr_number=90, state="MERGED")
         closed_watch = _make_watched_pr(pr_number=91, state="CLOSED")
         store = DevQueueStore(watched_prs=[merged_watch, closed_watch])
-        assert _merged_pr_numbers_by_client(store) == {"client-a": {90}}
-        assert _closed_pr_numbers_by_client(store) == {"client-a": {91}}
+        assert _merged_pr_numbers_by_client(store) == {"client-a": _keys(90)}
+        assert _closed_pr_numbers_by_client(store) == {"client-a": _keys(91)}
 
 
 def test_release_stale_gated_tasks_variant_b_signal_only_stamps(
@@ -1154,7 +1168,7 @@ def test_release_stale_gated_tasks_variant_b_signal_only_stamps(
     reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-B3")
     assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
     assert reloaded.stale_gate_detected_at is not None
-    assert reloaded.blocked_on_pr == 60
+    assert reloaded.blocked_on_pr == PrRef(number=60)
 
 
 def test_release_stale_gated_tasks_variant_b_signal_only_stamps_closed_unmerged(
@@ -1187,7 +1201,7 @@ def test_release_stale_gated_tasks_variant_b_signal_only_stamps_closed_unmerged(
     reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-B3C")
     assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
     assert reloaded.stale_gate_detected_at is not None
-    assert reloaded.blocked_on_pr == 151
+    assert reloaded.blocked_on_pr == PrRef(number=151)
 
 
 def test_release_stale_gated_tasks_variant_b_ignores_merged_task_without_pr_url(
@@ -1249,7 +1263,7 @@ def test_release_stale_gated_tasks_variant_b_no_cross_reference_is_noop(
     reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-B2")
     assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
     assert reloaded.stale_gate_detected_at is None
-    assert reloaded.blocked_on_pr == 999
+    assert reloaded.blocked_on_pr == PrRef(number=999)
 
 
 def test_release_stale_gated_tasks_idempotent_cursor(
@@ -1426,3 +1440,186 @@ def test_release_stale_gated_tasks_event_not_lost_when_save_dev_queue_raises(
     assert released == ["SG-A7"]
     reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-A7")
     assert reloaded.stale_gate_detected_at is not None
+
+
+# --- #3634: typed refs and the (client, repo-or-None, number) key ----------
+
+_OR_5 = PrRef(repo="o/r", number=5)
+
+
+def _dep_hold(
+    ref: object, *, session_id: str | None = None, ticket_id: str = "DH-1"
+) -> TicketTask:
+    return _make_ticket_task(
+        ticket_id=ticket_id,
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="dependency_hold",
+        blocked_reason="dependency_unmerged",
+        blocked_on_pr=ref,
+        session_id=session_id,
+    )
+
+
+def _release_with(
+    tasks: list[TicketTask], watches: list[WatchedPr]
+) -> tuple[list[str], TicketTask]:
+    save_dev_queue(DevQueueStore(tasks=tasks, watched_prs=watches))
+    save_state(CwState(sessions=[]))
+    released = release_stale_gated_tasks()
+    row = next(t for t in load_dev_queue().tasks if t.ticket_id == "DH-1")
+    return released, row
+
+
+def _reap_events() -> list[OrchestratorEvent]:
+    return [
+        e
+        for e in read_events()
+        if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+    ]
+
+
+def test_cross_repo_hold_releases_on_cross_repo_watch_merge(
+    tmp_config_dir: Path,
+) -> None:
+    released, row = _release_with(
+        [_dep_hold(_OR_5)],
+        [_make_watched_pr(pr_number=5, repo="o/r", cross_repo=True)],
+    )
+    assert released == ["DH-1"]
+    assert row.status == QueueItemStatus.PENDING
+
+
+def test_same_repo_hold_ignores_cross_repo_merge_of_same_number(
+    tmp_config_dir: Path,
+) -> None:
+    """The fail-open regression: a merged other/repo#5 is not our #5."""
+    released, row = _release_with(
+        [_dep_hold(5)],
+        [_make_watched_pr(pr_number=5, repo="other/repo", cross_repo=True)],
+    )
+    assert released == []
+    assert row.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+def test_cross_repo_hold_ignores_own_repo_merge_of_same_number(
+    tmp_config_dir: Path,
+) -> None:
+    released, row = _release_with(
+        [_dep_hold(_OR_5)], [_make_watched_pr(pr_number=5, repo="foo/bar")]
+    )
+    assert released == []
+    assert row.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+@pytest.mark.parametrize(
+    ("ref", "expected"),
+    [(_OR_5, ["DH-1"]), (PrRef(repo="x/y", number=5), []), (5, ["DH-1"])],
+)
+def test_task_row_merge_evidence_uses_the_exact_key(
+    tmp_config_dir: Path, ref: object, expected: list[str]
+) -> None:
+    """An explicit ref needs the exact repo; a same-repo ref keeps the D2
+    per-client bare-number semantics for task rows."""
+    dependency = _make_ticket_task(
+        ticket_id="DH-DEP",
+        client="client-a",
+        status=QueueItemStatus.COMPLETED,
+        pr_url="https://github.com/o/r/pull/5",
+        pr_state=PrState(state="MERGED"),
+    )
+    released, _ = _release_with([dependency, _dep_hold(ref)], [])
+    assert released == expected
+
+
+@pytest.mark.parametrize(
+    ("ref", "watch", "evidence"),
+    [
+        (
+            _OR_5,
+            _make_watched_pr(pr_number=5, repo="o/r", cross_repo=True, state="CLOSED"),
+            {"blocked_on_pr": 5, "blocked_on_repo": "o/r"},
+        ),
+        (5, _make_watched_pr(pr_number=5, state="CLOSED"), {"blocked_on_pr": 5}),
+    ],
+)
+def test_closed_dependency_pr_evidence(
+    tmp_config_dir: Path,
+    ref: object,
+    watch: WatchedPr,
+    evidence: dict[str, object],
+) -> None:
+    released, row = _release_with([_dep_hold(ref)], [watch])
+    assert released == []
+    assert row.status == QueueItemStatus.BLOCKED_ON_USER
+    [event] = _reap_events()
+    assert event.payload["proposed_action"] == "dependency_hold_pr_closed_unmerged"
+    assert event.payload["evidence"] == evidence
+
+
+@pytest.mark.parametrize("state", [None, "DRAFT"])
+def test_cross_repo_watch_without_terminal_state_fails_closed(
+    tmp_config_dir: Path, state: str | None
+) -> None:
+    released, row = _release_with(
+        [_dep_hold(_OR_5)],
+        [_make_watched_pr(pr_number=5, repo="o/r", cross_repo=True, state=state)],
+    )
+    assert released == []
+    assert row.stale_gate_detected_at is None
+    assert _reap_events() == []
+
+
+def test_cross_repo_key_is_case_insensitive(tmp_config_dir: Path) -> None:
+    released, _ = _release_with(
+        [_dep_hold(PrRef(repo="O/R", number=5))],
+        [_make_watched_pr(pr_number=5, repo="o/r", cross_repo=True)],
+    )
+    assert released == ["DH-1"]
+
+
+@pytest.mark.parametrize(
+    "watch",
+    [
+        _make_watched_pr(pr_number=5, repo="o/r", cross_repo=True, status="dismissed"),
+        _make_watched_pr(pr_number=5, repo="o/r", cross_repo=True, client=None),
+    ],
+)
+def test_dismissed_or_clientless_watch_is_not_evidence(
+    tmp_config_dir: Path, watch: WatchedPr
+) -> None:
+    released, _ = _release_with([_dep_hold(_OR_5)], [watch])
+    assert released == []
+
+
+def test_worker_park_with_explicit_ref_obeys_reap_policy(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    watch = _make_watched_pr(pr_number=5, repo="o/r", cross_repo=True)
+    released, row = _release_with([_dep_hold(_OR_5, session_id="sess-1")], [watch])
+    assert released == ["DH-1"]
+    assert row.status == QueueItemStatus.BLOCKED_ON_USER
+    assert row.stale_gate_detected_at is not None
+
+    monkeypatch.setattr(
+        "cw.reconcile.tasks.stale_gate.load_orchestrator_config",
+        lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
+    )
+    released, row = _release_with([_dep_hold(_OR_5, session_id="sess-1")], [watch])
+    assert released == ["DH-1"]
+    assert row.status == QueueItemStatus.PENDING
+
+
+def test_completed_dependency_without_merged_state_never_releases(
+    tmp_config_dir: Path,
+) -> None:
+    """R5: a COMPLETED dependency row is not merge evidence on its own."""
+    dependency = _make_ticket_task(
+        ticket_id="DH-DEP",
+        client="client-a",
+        status=QueueItemStatus.COMPLETED,
+        pr_url="https://github.com/o/r/pull/5",
+    )
+    released, row = _release_with([dependency, _dep_hold(_OR_5)], [])
+    assert released == []
+    assert row.status == QueueItemStatus.BLOCKED_ON_USER
