@@ -343,7 +343,8 @@ def test_gate_collapse_row_carries_the_signal_park_parenthetical() -> None:
         ),
         pytest.param(
             "auto-dev-finalize.md",
-            "**Post to Linear:** Comment on the issue with PR link",
+            "**Post to Linear:** Comment on the ticket (the `tickets` role's "
+            "create-comment operation) with the PR link",
             id="finalize-pr-link",
         ),
         pytest.param(

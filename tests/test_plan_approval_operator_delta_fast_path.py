@@ -320,7 +320,7 @@ def test_tracker_state_delta_reset_defines_body_sha_via_cw_body_sha() -> None:
     window = _delta_reset_window()
     assert "`cw body-sha <n> -c <client>`" in window
     assert "`cw body-sha --body-file .cw/ticket-body.txt`" in window
-    assert "`get_issue`" in window
+    assert "the get-issue operation" in window
     assert "with the Write tool" in window
     assert "`cw.plan_fingerprint.compute_body_sha`" in window
     assert "the same function `cw dev-queue approve` uses" in window

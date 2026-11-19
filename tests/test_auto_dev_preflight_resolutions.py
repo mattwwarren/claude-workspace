@@ -222,10 +222,12 @@ def test_intake_step3_fetch_includes_comments() -> None:
 
 
 def test_intake_table_row_includes_comments() -> None:
-    """The op-mapping 'Fetch ticket body' row (github-issues) also fetches comments."""
+    """The Step 3 github-issues fetch (cli: gh) also requests comments."""
     content = _cmd("auto-dev-intake.md")
-    row = next(ln for ln in content.splitlines() if "Fetch ticket body" in ln)
-    assert "title,body,state,url,comments" in row
+    row = next(
+        ln for ln in content.splitlines() if "title,body,state,url,comments" in ln
+    )
+    assert "cli: gh" in row
 
 
 def test_plan_live_fetch_every_invocation() -> None:
@@ -270,7 +272,7 @@ def test_intake_warn_documents_empty_undetectable() -> None:
 def test_intake_linear_list_comments_before_0d() -> None:
     """Linear mode mandates list_comments before Step 0d, not model initiative."""
     content = _cmd("auto-dev-intake.md")
-    assert "list_comments(<id>)" in content
+    assert "the list-comments operation" in content
     assert "mandatory op that MUST run before Step 0d" in content
 
 
@@ -302,7 +304,7 @@ def test_plan_body_fetch_op_named() -> None:
     fingerprint sourced from the body/comments fields already fetched here —
     so this reverts to the original two-field form.
     """
-    assert "`gh issue view <n> --json body,comments`" in _cmd("auto-dev-plan.md")
+    assert "get-issue and list-comments operations" in _cmd("auto-dev-plan.md")
 
 
 def test_step1b_greps_body_resolutions_section() -> None:

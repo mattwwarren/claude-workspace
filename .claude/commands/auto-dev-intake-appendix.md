@@ -259,9 +259,8 @@ stages is out of scope for this template.
 Batch mode is undefined in headless mode; this procedure runs only from an
 interactive `/auto-dev` invocation carrying filter flags.
 
-- Call the tracker's batch-select op with the provided filters (`list_issues`
-  for `linear`; `gh issue list --json number,title,labels,state [--label …]`
-  for `github-issues`). Omitted filters default: `state` → `"Todo"`,
+- Batch select is interactive only and is not a `tickets` role operation: use
+  the tracker's own listing with the provided filters. Omitted filters default: `state` → `"Todo"`,
   `assignee` → `"me"`.
 - For each issue, read the description to check for existing plan content and
   estimate a scope hint from its keywords.
