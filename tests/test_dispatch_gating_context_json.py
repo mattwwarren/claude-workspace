@@ -262,7 +262,7 @@ class TestSpawnRendersContextJsonFromSnapshot:
                 snapshot_digest="c" * 64,
             )
         )
-        monkeypatch.setattr(context_json, "_remove_stale_context", lambda *_a: False)
+        monkeypatch.setattr(context_json, "_unlink_stale_context", lambda *_a: False)
         monkeypatch.setattr(
             context_json, "_invalidate_stale_context_json", lambda *_a: True
         )
@@ -271,3 +271,50 @@ class TestSpawnRendersContextJsonFromSnapshot:
 
         assert result.spawned == 1
         assert context_file.exists()
+
+
+class TestUnlinkStaleContext:
+    """The one stale-context removal (RFC 0019 T1 review item 33)."""
+
+    def test_unlink_failure_returns_false_and_logs_ids_and_class_only(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from cw.dispatch.gating import context_json
+        from cw.models import TicketTask
+
+        stale = tmp_path / ".cw" / "context.json"
+        stale.parent.mkdir(parents=True)
+        stale.write_text('{"body": "secret ticket text"}')
+
+        denied = "denied"
+
+        def _refuse(self: Path, missing_ok: bool = False) -> None:
+            raise PermissionError(denied)
+
+        monkeypatch.setattr(Path, "unlink", _refuse)
+        task = TicketTask(ticket_id="GEN-UNLINK", client="acme")
+
+        with caplog.at_level("WARNING", logger="cw.dispatch"):
+            ok = context_json._unlink_stale_context(task, tmp_path)
+
+        assert ok is False
+        message = caplog.records[-1].getMessage()
+        assert "ticket_id=GEN-UNLINK" in message
+        assert "client=acme" in message
+        assert "error_class=PermissionError" in message
+        assert "secret ticket text" not in message
+
+    def test_unlink_success_removes_file_and_returns_true(self, tmp_path: Path) -> None:
+        from cw.dispatch.gating import context_json
+        from cw.models import TicketTask
+
+        stale = tmp_path / ".cw" / "context.json"
+        stale.parent.mkdir(parents=True)
+        stale.write_text("{}")
+        task = TicketTask(ticket_id="GEN-UNLINK", client="acme")
+
+        assert context_json._unlink_stale_context(task, tmp_path) is True
+        assert not stale.exists()
