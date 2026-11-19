@@ -52,6 +52,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Detached codex, opencode and aider workers no longer inherit the dispatcher's stdin (#3696).** `_launch_logged_subprocess` now passes `stdin=subprocess.DEVNULL`, which removes the inherited-stdin precondition for a child that blocks reading stdin. The operator-reported opencode hang was not reproduced in cw, so this fix does not confirm that hang's cause.
 
+### Fixed
+
+- **A REVIEW-regressed IMPL row now gets the REVIEW verdict's findings (#3694).** A row regressed from REVIEW or FINALIZE back to IMPL is no longer blocked as `existing_branch_work` when its worktree holds a blocking verdict. The verdict's MUST_FIX findings (severity, file, summary, evidence) reach the claude-native agent through `queue_metadata.regress_review_findings`, and the codex agent through a prompt section, as untrusted evidence keyed to `reviewed_sha`. Delivery does not depend on a PR, and holds on each IMPL retry until the next REVIEW pass rewrites the verdict. The `existing_branch_work` block names `regress_review_findings: withheld (<reason>)` when findings are withheld. A requeue into IMPL echoes whether they are delivered. opencode and local IMPL runs receive nothing (RFC 0018 D-4). Operator direction and claude-native REVIEW-park verdicts are not delivered; a fix outside the plan's files still needs `cw dev-queue approve --scope-drift`.
+- **Operator note: cw-context schema 21 to 22.** A worktree rendered before this upgrade reads as not clean-mode until its next spawn, because `queue_peek_convergence` compares the context schema version by equality.
+
 ## [1.103.1] - 2026-11-18
 
 ### Fixed

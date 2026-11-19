@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from cw.bindings_block import BINDINGS_BEGIN, bindings_block_for
 from cw.local_runner import TASK_CONTEXT_RELATIVE_PATH, build_task_message
-from cw.models import SessionOrigin
+from cw.models import SessionOrigin, TicketTask
 from cw.models.bindings import Harness
 from cw.opencode_runner import build_stage_prompt
 from cw.spawn import _write_hook_context
@@ -87,11 +87,11 @@ def test_codex_impl_and_finalize_prompts_carry_the_block(tmp_path: Path) -> None
 
     block = bindings_block_for(_client(tmp_path), Harness.CODEX, _TICKET)
     impl = render_impl_prompt(
-        ticket_id=_TICKET,
+        task=TicketTask(ticket_id=_TICKET, client="test"),
+        worktree=tmp_path,
         docs_root=_COMMANDS_ROOT,
         ticket=None,
         plan_text="PLAN",
-        feedback=None,
         allowed_files=None,
         merge_note=None,
         bindings_block=block,

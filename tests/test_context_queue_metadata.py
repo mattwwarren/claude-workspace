@@ -311,3 +311,22 @@ class TestOperatorResolutionsSource:
         assert operator_resolutions_source(
             [_resolution(2, "second"), _resolution(1, "first")]
         ) == ("row:2:" + _digest(b'["first","second"]'))
+
+
+class TestRegressReviewFindingsKey:
+    """The #3694 key is derived at spawn, so the pure serializer never emits it."""
+
+    def test_key_constant_is_pinned(self) -> None:
+        from cw.context_queue_metadata import REGRESS_REVIEW_FINDINGS_KEY
+
+        assert REGRESS_REVIEW_FINDINGS_KEY == "regress_review_findings"
+
+    def test_build_queue_metadata_does_not_emit_the_key(self) -> None:
+        from cw.context_queue_metadata import (
+            REGRESS_REVIEW_FINDINGS_KEY,
+            build_queue_metadata,
+        )
+        from cw.models import TicketTask
+
+        metadata = build_queue_metadata(TicketTask(ticket_id="T-1", client="c"))
+        assert REGRESS_REVIEW_FINDINGS_KEY not in metadata

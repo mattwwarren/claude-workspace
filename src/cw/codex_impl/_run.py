@@ -338,11 +338,11 @@ class _Run:
             )
         try:
             return render_impl_prompt(
-                ticket_id=self.task.ticket_id,
+                task=self.task,
+                worktree=self.worktree,
                 docs_root=docs_root,
                 ticket=ticket,
                 plan_text=plan_text,
-                feedback=self.task.review_feedback,
                 allowed_files=allowed_files,
                 merge_note=merge_note,
                 bindings_block=bindings_block_for(
@@ -426,7 +426,7 @@ def _guards(run: _Run) -> tuple[str | None, GitFacts] | ImplBlock:
     if block is not None:
         return block
     facts = git_facts(run.worktree, run.client.default_branch)
-    block = check_existing_branch_work(facts, run.task)
+    block = check_existing_branch_work(facts, run.task, run.worktree)
     return block if block is not None else (plan_text, facts)
 
 

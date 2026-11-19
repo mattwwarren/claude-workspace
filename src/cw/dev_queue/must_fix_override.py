@@ -53,7 +53,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, NoReturn, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Literal, NamedTuple, NoReturn, NotRequired, TypedDict
 
 from pydantic import ValidationError
 
@@ -412,41 +412,71 @@ def _verdict_path(task: TicketTask, client_name: str) -> Path:
     return _task_worktree(task, client_name) / REVIEW_VERDICT_JSON_RELATIVE_PATH
 
 
-def _load_owned_verdict(task: TicketTask, client_name: str) -> ReviewVerdict:
-    """Read the worktree's verdict; require it to be this ticket's and blocking."""
-    path = _verdict_path(task, client_name)
+#: Why :func:`read_owned_verdict` refused a verdict (#3694 closed vocabulary).
+VerdictRefusal = Literal["artifact_missing", "not_owned", "not_blocking"]
+
+
+class VerdictRead(NamedTuple):
+    """Outcome of :func:`read_owned_verdict`: a verdict, or a refusal with its detail.
+
+    *detail* is a sentence fragment naming the path and the cause; the override
+    gate and the regress-findings rule each frame it for their own audience.
+    """
+
+    verdict: ReviewVerdict | None
+    refusal: VerdictRefusal | None
+    detail: str
+
+
+def read_owned_verdict(path: Path, ticket_id: str) -> VerdictRead:
+    """Read *path* and require it to be *ticket_id*'s and blocking.
+
+    ``artifact_missing`` covers an absent, unreadable or invalid file (the
+    override gate's "could not read" and "not a valid review verdict" cases).
+    """
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        msg = (
-            f"Cannot override MUST_FIX for ticket '{task.ticket_id}': could not"
-            f" read {path} ({exc.__class__.__name__}: {exc}).{_review_rerun(task)}"
+        return VerdictRead(
+            None,
+            "artifact_missing",
+            f"could not read {path} ({exc.__class__.__name__}: {exc})",
         )
-        raise ApproveGateError(msg) from exc
     try:
         envelope = ReviewVerdictEnvelope.model_validate_json(text)
     except ValidationError as exc:
-        msg = (
-            f"Cannot override MUST_FIX for ticket '{task.ticket_id}': {path} is"
-            f" not a valid review verdict ({exc.error_count()} validation"
-            f" error(s)).{_review_rerun(task)}"
+        return VerdictRead(
+            None,
+            "artifact_missing",
+            f"{path} is not a valid review verdict"
+            f" ({exc.error_count()} validation error(s))",
         )
-        raise ApproveGateError(msg) from exc
-    if envelope.ticket_id != task.ticket_id:
-        msg = (
-            f"Cannot override MUST_FIX for ticket '{task.ticket_id}': {path}"
-            f" belongs to ticket {envelope.ticket_id!r}, so it is stale or"
-            f" foreign.{_review_rerun(task)}"
+    if envelope.ticket_id != ticket_id:
+        return VerdictRead(
+            None,
+            "not_owned",
+            f"{path} belongs to ticket {envelope.ticket_id!r}, so it is stale or"
+            " foreign",
         )
-        raise ApproveGateError(msg)
     if not envelope.verdict.blocking:
+        return VerdictRead(
+            None,
+            "not_blocking",
+            f"the verdict in {path} is not blocking -- there is nothing to override",
+        )
+    return VerdictRead(envelope.verdict, None, "")
+
+
+def _load_owned_verdict(task: TicketTask, client_name: str) -> ReviewVerdict:
+    """Read the worktree's verdict; require it to be this ticket's and blocking."""
+    read = read_owned_verdict(_verdict_path(task, client_name), task.ticket_id)
+    if read.verdict is None:
         msg = (
-            f"Cannot override MUST_FIX for ticket '{task.ticket_id}': the"
-            f" verdict in {path} is not blocking -- there is nothing to"
-            f" override.{_review_rerun(task)}"
+            f"Cannot override MUST_FIX for ticket '{task.ticket_id}': {read.detail}."
+            f"{_review_rerun(task)}"
         )
         raise ApproveGateError(msg)
-    return envelope.verdict
+    return read.verdict
 
 
 def _finding_ids(

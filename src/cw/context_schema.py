@@ -119,7 +119,12 @@ from __future__ import annotations
 #     for the harness that owns this worktree; the key is always present, and
 #     null when the writer had no block to stamp. A context below 21 reads as
 #     no bindings block.
-CW_CONTEXT_SCHEMA_VERSION = 21
+# v22: added `queue_metadata.regress_review_findings` (#3694) — the REVIEW
+#     verdict's MUST_FIX findings delivered to an IMPL run regressed from REVIEW
+#     or FINALIZE, as `{reviewed_sha, text}`, or null. Derived at spawn by
+#     cw.stage_verification.impl_regress_findings, never persisted on the row;
+#     the key is always present. A context below 22 reads as no findings.
+CW_CONTEXT_SCHEMA_VERSION = 22
 
 # Schema version for ``.cw/context.json`` (the ticket context file, not the
 # ``.claude/cw-context.json`` above). History:

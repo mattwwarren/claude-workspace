@@ -1527,6 +1527,10 @@ _C2_CODE_CELLS = {
         "src/cw/codex_impl/_prompt.py",
         "render_impl_prompt",
     ),
+    "impl.regress-review-findings": (
+        "src/cw/stage_verification/impl_regress_findings.py",
+        "regress_review_findings",
+    ),
     "impl.stage-2-completion": ("src/cw/codex_impl/_result.py", "stamp_impl_result"),
     "impl.marker-s2-completion": (
         "src/cw/codex_impl/_result.py",

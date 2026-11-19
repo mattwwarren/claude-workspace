@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 
 import click
 
+from cw.config import get_client
+from cw.dev_queue import _find_ticket, load_dev_queue
 from cw.dev_queue.adoption import (
     ADOPTED_ANCESTRY_RESULT_KEY,
     ANCESTRY_NOT_DESCENDANT,
@@ -19,7 +21,13 @@ from cw.dev_queue.adoption import (
     record_recheck_pin,
 )
 from cw.events import record_event
+from cw.exceptions import CwError
 from cw.models import OrchestratorEventType, Stage
+from cw.stage_verification.impl_regress_findings import (
+    REVIEW_FEEDBACK_PRESENT,
+    regress_review_findings,
+)
+from cw.worktree import resolve_task_worktree
 
 from ._settle import live_session_notes
 from .show import echo_resulting_row
@@ -64,6 +72,52 @@ def echo_pending_noop(
     for note in live_session_notes(ticket_id, client, daemon):
         click.echo(note, err=True)
     echo_resulting_row(ticket_id, client)
+
+
+#: Reading the row or its worktree fails soft: one stderr line, never a raise.
+_ECHO_READ_ERRORS = (OSError, ValueError, CwError)
+_FINDINGS_UNREADABLE = (
+    "regress_review_findings: could not be determined (the row or its worktree"
+    " could not be read); the IMPL run may not receive the REVIEW findings."
+)
+_FINDINGS_DELIVERED = (
+    "  regress_review_findings: delivered (reviewed_sha {sha}). The IMPL run"
+    " receives the REVIEW verdict's blocking findings from the worktree."
+    " opencode and local IMPL runs receive nothing."
+)
+_FINDINGS_WITHHELD = (
+    "  regress_review_findings: withheld ({reason}). The IMPL run receives no"
+    " REVIEW findings. opencode and local IMPL runs receive nothing."
+)
+
+
+def _echo_regress_findings(ticket_id: str, client: str) -> None:
+    """Say whether the REVIEW verdict's findings reach the IMPL run (#3694).
+
+    Silent when the rule does not apply, and when the row carries review
+    feedback (a CI-red recovery, not a REVIEW regress). A row or worktree that
+    cannot be read prints one stderr line; it raises nothing and records no event.
+    """
+    try:
+        task = _find_ticket(load_dev_queue(), ticket_id, client, warn=False)
+        worktree = (
+            resolve_task_worktree(task, get_client(client))
+            if task is not None
+            else None
+        )
+    except _ECHO_READ_ERRORS:
+        worktree = None
+        task = None
+    if task is None or worktree is None:
+        click.echo(_FINDINGS_UNREADABLE, err=True)
+        return
+    outcome = regress_review_findings(task, worktree)
+    if outcome is None or outcome.reason == REVIEW_FEEDBACK_PRESENT:
+        return
+    if outcome.findings is not None:
+        click.echo(_FINDINGS_DELIVERED.format(sha=outcome.findings.reviewed_sha))
+        return
+    click.echo(_FINDINGS_WITHHELD.format(reason=outcome.reason))
 
 
 def _requeue_reason(result: dict[str, str | bool | int]) -> str:
@@ -160,6 +214,8 @@ def echo_requeue_outcome(
         f" {result['from_stage']} -> {result['to_stage']} (PENDING)"
         f"{_reset_suffix(result)}"
     )
+    if result["regressed"] and result["to_stage"] == Stage.IMPL.value:
+        _echo_regress_findings(ticket_id, client)
     if result.get("adopted_repinned"):
         click.echo(
             f"  Re-pinned the adopted head {result['adopted_head_sha_old']}"

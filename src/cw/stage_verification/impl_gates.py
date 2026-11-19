@@ -46,6 +46,7 @@ from cw.stage_verification.impl_block import (
     PLAN_MISSING,
     ImplBlock,
 )
+from cw.stage_verification.impl_regress_findings import regress_review_findings
 from cw.stage_verification.posted_text import redact_and_cap
 from cw.worktree import _parse_numstat_totals
 
@@ -107,14 +108,23 @@ def check_plan_present(plan_text: str | None, task: TicketTask) -> ImplBlock | N
     )
 
 
-def check_existing_branch_work(facts: GitFacts, task: TicketTask) -> ImplBlock | None:
+def check_existing_branch_work(
+    facts: GitFacts, task: TicketTask, worktree: Path
+) -> ImplBlock | None:
     """A fresh row whose branch is already ahead of its fork point is not fresh.
 
     Repair rows (``review_feedback`` set) legitimately start on a branch with
-    commits, so they are never checked. An unresolvable fork point fails
-    closed: cw cannot tell whether the branch carries prior work.
+    commits, so they are never checked. A REVIEW-regressed row whose verdict
+    delivers its MUST_FIX findings (#3694) is exempt for the same reason: its
+    branch carries the work under review. An unresolvable fork point fails
+    closed: cw cannot tell whether the branch carries prior work. When a
+    REVIEW-regressed row is blocked, the block names why its findings were
+    withheld.
     """
     if task.review_feedback is not None:
+        return None
+    outcome = regress_review_findings(task, worktree)
+    if outcome is not None and outcome.findings is not None:
         return None
     if not facts["fork_point"]:
         return ImplBlock(
@@ -124,13 +134,14 @@ def check_existing_branch_work(facts: GitFacts, task: TicketTask) -> ImplBlock |
         )
     if facts["commits"]:
         count = len(facts["commits"])
+        withheld = f" {outcome.friction}." if outcome is not None else ""
         return ImplBlock(
             IMPL_FAILED,
             f"existing_branch_work: the branch already has {count} commit(s) "
             f"ahead of its fork point {facts['fork_point'][:_SHA_PREFIX_CHARS]}; a "
             "fresh IMPL row starts from a branch with none. Inspect the branch "
             "(a failed earlier push leaves a local commit), then push or reset "
-            "it before requeueing.",
+            "it before requeueing." + withheld,
         )
     return None
 

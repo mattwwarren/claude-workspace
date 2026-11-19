@@ -61,6 +61,7 @@ from tests._codex_review_helpers import (
 )
 from tests._shared.cli_preflight import _write_tracker_config
 from tests._shared.git_repos import commit_tracked_file, git_in, push_commit_to_origin
+from tests._shared.review_builders import _make_finding, write_review_verdict_envelope
 from tests._tool_fakes import (
     FakeGhCli,
     ScriptedCodexRunner,
@@ -1126,3 +1127,44 @@ def test_an_impl_turn_without_usage_is_unavailable_with_a_friction_token(
     assert session.cost_breakdown is None
     assert [m for m in caplog.messages if "role=impl " in m]
     assert any(f.startswith("usage_unavailable: ") for f in result.friction_highlights)
+
+
+def test_regressed_review_row_without_verdict_blocks_with_withheld_reason(
+    harness: Callable[..., Harness],
+) -> None:
+    """A REVIEW-regressed row with no verdict still blocks, and says why (#3694)."""
+    h = harness(task_updates={"stage_high_water": Stage.REVIEW})
+    commit_tracked_file(h.worktree, "prior.py")
+    result = h.run()
+    _assert_block(result, "impl_failed")
+    assert result.blocker is not None
+    assert result.blocker.details.startswith("existing_branch_work")
+    assert "regress_review_findings: withheld (artifact_missing)." in (
+        result.blocker.details
+    )
+    assert h.runner.calls == []
+
+
+def test_regressed_review_row_with_verdict_is_not_blocked_before_the_turn(
+    harness: Callable[..., Harness],
+) -> None:
+    """A delivered REVIEW-regress verdict exempts the row from existing_branch_work."""
+    h = harness(task_updates={"stage_high_water": Stage.REVIEW})
+    commit_tracked_file(h.worktree, "prior.py")
+    write_review_verdict_envelope(
+        h.worktree,
+        ticket_id=TICKET,
+        reviewed_sha="d" * 40,
+        must_fix=[_make_finding(summary="Regress finding XYZ")],
+    )
+
+    def _no_change(_argv: list[str], _stdin: str | None) -> CodexRunResult:
+        return impl_turn_result(impl_sentinel(ticket_id=TICKET))
+
+    h.runner.add(stdin_contains(IMPL_TURN), _no_change)
+    result = h.run()
+    assert result.blocker is None or not result.blocker.details.startswith(
+        "existing_branch_work"
+    )
+    assert len(h.impl_calls) == 1
+    assert "Regress finding XYZ" in str(h.impl_calls[0]["stdin"])
