@@ -512,16 +512,23 @@ class TestScoping:
         assert len(_warnings(caplog)) == 2
 
     def test_claude_row_under_servers_only_gate_is_skipped(
-        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
+        """No plugin_id bound: not applied, never read, and never warned."""
         repo = branch_with_settings(
             make_git_repo, {"enabledPlugins": {}}, branch=BRANCH, name="reach-repo"
         )
         calls = _count_git(monkeypatch)
         client = reach_client(repo, enabled_gate(None, servers=dict(OPENCODE_SERVERS)))
 
-        assert _resolve(client, snapshot()) == {}
+        with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
+            assert _resolve(client, snapshot()) == {}
+
         assert calls == []
+        assert _warnings(caplog) == []
 
     def test_claude_native_finalize_row_never_reads_the_branch(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
