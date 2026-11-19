@@ -840,9 +840,9 @@ directly (see §6 in [`session-disposition.md`](session-disposition.md)).
 | `shipped` | Done. PR is live with auto-merge enabled; CI wait is orchestrator concern. |
 | `stage_complete` | No action — ordinary staged advance (one of HARDEN/PLAN/IMPL/REVIEW finished cleanly); dispatch auto-advances the ticket to the next stage. Seeing it parked is abnormal — see §6/§7 recovery. |
 | `no_op` | Done. Ticket already satisfied; the orchestrator closes it as completed with a citation (`/cw-followup`). |
-| `ambiguities_pending_resolution` | The orchestrator resolves the ambiguities against the ticket's sources of truth (a genuine product/scope fork is batched into one question for the human), writes the answers to a decisions file, and runs `cw dev-queue resolve <T> -c <client> --file <decisions.md>` from the orchestrator session: it records them on the row as binding resolutions and requeues at the plan stage. Posting the printed relay block (or `--post`) is an optional mirror. Fallback: post a `Pre-flight Resolutions` comment on the issue, then `cw dev-queue requeue`. |
+| `ambiguities_pending_resolution` | The orchestrator resolves the ambiguities against the ticket's sources of truth (a genuine product/scope fork is batched into one question for the human), writes the answers to a decisions file, and runs `cw dev-queue resolve <T> -c <client> --file <decisions.md>` from the orchestrator session: it records them on the row as binding resolutions and requeues at the plan stage. Posting the printed relay block, or passing `--post` to queue it as a ticket comment through the outbox on any tracker, is an optional mirror. Fallback: post a `Pre-flight Resolutions` comment on the issue, then `cw dev-queue requeue`. |
 | `premises_pending_verification` | The orchestrator verifies the flagged premises and records the results with `cw dev-queue resolve <T> -c <client> --file <decisions.md>`, which requeues at the plan stage. Fallback: record the results on the issue, then re-dispatch. |
-| `plan_pending_approval` | Usually released automatically by the `auto_adopt_clean_plan` gate recipe (on by default) unless it touches a forbidden area or carries `scope_hint: large`. If it stays parked: only parks for **large** (or unresolved) scope tier — a small-tier plan advances unattended. For a forbidden-area or recipes-disabled park, the orchestrator reads the plan comment, verifies it is faithful to the ticket, then runs `cw dev-queue approve <T> -c <client>`. A `scope_hint: large` park is the operator's own opted-in human gate: the orchestrator notifies the human and does not approve it. The approval is recorded on the dev-queue row (`plan_approved_at`) and reaches the re-dispatched plan stage via `queue_metadata` on every tracker; on GitHub you may additionally pass `--post-marker` to post an audit-only `<!-- auto-dev-plan-approved: <sha> -->` comment binding the approval to the approved draft's fingerprint (the unbound `<!-- auto-dev-plan-approved -->` when no valid fingerprint is recorded). Approving a changed draft posts a fresh marker; re-approving the same draft does not duplicate it. Nothing reads the marker back as approval evidence — the evidence is the row's `plan_approved_at` and `plan_approved_fingerprint`. The flag is a no-op on Linear, where `gh` cannot reach the ticket. Advances to impl only once the plan is quality-reviewed (both signoff markers present); otherwise `approve` re-queues at plan stage to run Plan Quality Review first (#968). |
+| `plan_pending_approval` | Usually released automatically by the `auto_adopt_clean_plan` gate recipe (on by default) unless it touches a forbidden area or carries `scope_hint: large`. If it stays parked: only parks for **large** (or unresolved) scope tier — a small-tier plan advances unattended. For a forbidden-area or recipes-disabled park, the orchestrator reads the plan comment, verifies it is faithful to the ticket, then runs `cw dev-queue approve <T> -c <client>`. A `scope_hint: large` park is the operator's own opted-in human gate: the orchestrator notifies the human and does not approve it. The approval is recorded on the dev-queue row (`plan_approved_at`) and reaches the re-dispatched plan stage via `queue_metadata` on every tracker; on any tracker you may additionally pass `--post-marker` to queue an audit-only `<!-- auto-dev-plan-approved: <sha> -->` comment on the outbox, binding the approval to the approved draft's fingerprint (the unbound `<!-- auto-dev-plan-approved -->` when no valid fingerprint is recorded); the drain delivers it. Approving a changed draft queues a fresh marker; re-approving the same draft prints `already queued` and queues no duplicate. Nothing reads the marker back as approval evidence — the evidence is the row's `plan_approved_at` and `plan_approved_fingerprint`. Advances to impl only once the plan is quality-reviewed (both signoff markers present); otherwise `approve` re-queues at plan stage to run Plan Quality Review first (#968). |
 | `review_pending_approval` | Usually released automatically by the `auto_approve_clean_review` gate recipe (on by default) unless health is degraded, a forbidden area is touched, or it carries `scope_hint: large`. If it stays parked: only parks for large (or unresolved) tier, except the finalize park (`stage_reached: "stage4a_merge_gate"`, see "Which verb for which park" below), which parks at any tier because a finalize Step 4.0b stale-tip park carries the ticket's real tier (#2911). For a degraded-health, forbidden-area or recipes-disabled park, the orchestrator verifies the pushed branch diff and gates, then runs `cw dev-queue approve` to advance to FINALIZE (which creates the PR) — or ships it directly (PR + auto-merge, §9.4) and cancels the task. A `scope_hint: large` park is the operator's own opted-in human gate: the orchestrator notifies the human and neither approves nor ships it. With signoff configured, `approve` re-routes to `AWAITING_OPERATOR_SIGNOFF`; approve again (§2). |
 | `merge_pending` | PR created but CI/merge gate not yet cleared (#899). Not a failure — the task parks with `pr_url` preserved; monitor/merge the PR. Do **not** re-dispatch. |
 | `scope_exceeded` | Scope rejection; the orchestrator relaxes the constraint and re-dispatches, or closes the ticket only when its acceptance criteria are verified satisfied (cite the merged PR/commit in the close comment) or it is verified duplicate/obsolete (cite the superseding ticket). |
@@ -1600,9 +1600,10 @@ When a codex review round raises a finding you reject, and the *next* round
 re-derives the same finding and re-parks the ticket, run `cw review settle` for
 it. The decision is recorded on the ticket's cw dev-queue row, which every
 subsequent review pass reads first, on every tracker, mechanically (no LLM
-interprets it), so it survives regress, redispatch, and worktree teardown. On a
-GitHub-tracked ticket the marker it prints is also read back from the thread,
-so post it there too.
+interprets it), so it survives regress, redispatch, and worktree teardown. It
+then queues the disposition marker as its own ticket comment through the cw
+outbox, on any tracker, so there is nothing to post by hand; on a GitHub-tracked
+ticket the marker is also read back from the thread once the drain delivers it.
 
 **A prose adjudication comment does nothing on the codex lane.** There is no
 LLM on that path to correlate "these four are settled, don't reopen" to a
@@ -1658,11 +1659,12 @@ editing:
 uv run cw review settle settle.json \
   --reason "intentional tradeoff, see ADR-0012" \
   --ticket "$TICKET" -c <CLIENT> --out marker.md
-# That recorded the settle on the ticket's dev-queue row. Verify it:
+# That recorded the settle on the ticket's dev-queue row and queued the marker
+# as its own comment on the outbox (marker.md is a copy of what was queued).
+# Verify the row:
 uv run cw review dispositions "$TICKET" -c <CLIENT>
-# marker.md is the human-readable mirror: post it as its own comment
-# (GitHub shown; use your tracker's own tool elsewhere).
-gh issue comment "$TICKET" --repo "$REPO" --body-file marker.md
+# The drain (`cw outbox drain -c <CLIENT>`, or the next dispatch tick) delivers
+# the queued comment; nothing is posted by hand.
 ```
 
 **`--reason` is mandatory** and must be non-blank — a suppression with no
@@ -1684,7 +1686,7 @@ every session it spawns:
 Ahead of that cwd check, a `$TMPDIR` inside a headless worker's worktree
 refuses too: every cw executor points a worker's `TMPDIR` there, so a worker
 that changes directory is still recognized. A refusal exits non-zero and
-writes nothing — no row write, no marker, no `--out` file, no event. There is no bypass
+writes nothing — no row write, no queued marker, no `--out` file, no event. There is no bypass
 flag. A worker that has a payload hands it to the orchestrator, which runs
 the command.
 
@@ -1697,19 +1699,24 @@ already-decided work, or that does not reproduce against the code, with
 defect into the fix loop, and escalates to the human only a finding that raises a
 product question or would grow scope beyond the plan.
 
-**On a GitHub-tracked ticket, post the marker as its own comment, unedited.**
+**The marker is queued as its own comment, unedited.**
 The reader recognises a
 disposition record by *position* as well as shape: the block must open the
 comment body, directly under its `## Review Finding Dispositions` title, which
-is exactly what `--out` writes. A block pasted below a preamble, quoted in a
-reply, or embedded in other text is not a record and is silently not applied —
+is exactly what settle queues (and what `--out` writes). `cw review settle`
+queues the block as one outbox part and never splits it. If the rendered ledger
+is over the part cap it is not queued: settle prints the over-cap warning on
+stderr, the row is still recorded, and you settle fewer findings per call or
+post the `--out` file by hand as its own comment. A block pasted below a
+preamble, quoted in a reply, or embedded in other text is not a record and is
+silently not applied —
 you will see the finding re-appear, with nothing in the refused-records section
 (nothing tried to settle anything). This is what stops a reviewer's own finding
 text from minting a suppression: marker syntax inside a finding's summary,
 file, evidence or contest claim is escaped on render (you will see it as
 `REVIEW-FINDING\-DISPOSITIONS`), and would not parse at that position anyway.
-On any other tracker the row is the record: post the marker with that
-tracker's own tool for human readers, knowing no review pass reads it.
+On any other tracker the row is the record: the queued marker is for human
+readers, knowing no review pass reads it.
 
 Every record it writes carries provenance: your resolved `gh` login, a UTC
 timestamp stamped by the command (`recorded_at` is **rejected** as a payload
@@ -1740,14 +1747,15 @@ tracker (`tracking.primary.system` in its `.claude/project-config.yaml`):
 
 - **No dev-queue row for the ticket.** GitHub-tracked client: exit 0, the
   events are recorded, a stderr WARNING says the row was NOT recorded, and the
-  marker prints; `cw review dispositions` shows nothing until a review pass
-  reads the posted marker. Any other tracker, or an unresolvable one: exit 1
-  and nothing is recorded (no event, no marker, no `--out`); enqueue the ticket
-  and re-run.
+  marker is still queued on the outbox; `cw review dispositions` shows nothing
+  until a review pass reads the delivered marker. Any other tracker, or an
+  unresolvable one: exit 1 and nothing is recorded (no event, no queued marker,
+  no `--out`); enqueue the ticket and re-run.
 - **The row write fails** (bounded-lock timeout, `OSError`, a row that vanished
   since the pre-flight). GitHub-tracked client: exit 0, events recorded, the
-  same WARNING, marker printed. Any other tracker, or an unresolvable one: exit
-  1; the events are recorded, but no marker and no `--out` are written; re-run
+  same WARNING, marker still queued. Any other tracker, or an unresolvable one:
+  exit 1; the events are recorded, but no marker is queued and no `--out` is
+  written; re-run
   once the cause is fixed.
 - **It lands on a terminal row.** It records, on every tracker, with the stderr
   note below.
@@ -1840,8 +1848,8 @@ to *stick*.
 (#2701).** The codex path's comment fetch is still GitHub-only, so a marker
 posted on a Linear ticket is never read. `cw review settle --ticket <id> -c
 <client>` writes the ledger onto the dev-queue row directly, and the review pass
-reads the row first on every tracker. Post the marker with the tracker's own
-tool for human readers only. Follow-up F5 (reading markers off Linear) is no
+reads the row first on every tracker. The marker it queues on the outbox is for
+human readers only. Follow-up F5 (reading markers off Linear) is no
 longer needed for settles.
 
 #### The reworded re-raise, and the claim tier (#2210)
@@ -1943,22 +1951,23 @@ unparseable.
 
 This reads the **dev-queue row's** ledger: `cw review settle` writes it
 directly (#2701), so a settle recorded through the CLI shows up immediately,
-and a marker posted on a GitHub ticket appears once a review pass has read it.
+and a marker delivered to a GitHub ticket appears once a review pass has read it.
 It is not a live fetch of the ticket thread. Same snapshot convention as
 `cw dev-queue tasks`.
 
 **Undo one.** Rollback is `cw review settle` with a third outcome, not a new
 command. Paste the SAME `file` and `summary` the original settle used (read
 them off `cw review dispositions`, or the original marker) with `"outcome":
-"REVERSED"`, then post the marker it prints:
+"REVERSED"`. Settle queues the reversal marker on the outbox as it does any
+other settle:
 
 ```bash
 cw review settle --reason "the tradeoff no longer holds: X changed" \
   --ticket GEN-123 -c <CLIENT> --reviewed-sha "$(git rev-parse HEAD)" --out /tmp/reverse.md -
 # {"entries": [{"file": "src/cw/foo.py", "summary": "<verbatim>",
 #               "outcome": "REVERSED", "reviewed_sha": "<sha>"}]}
-# GitHub mirror only; the row already holds the withdrawal
-gh issue comment 123 --body-file /tmp/reverse.md
+# The row already holds the withdrawal; /tmp/reverse.md is a copy of the
+# marker that was queued on the outbox.
 ```
 
 The newest-`recorded_at`-wins merge is what makes it durable, so no second
@@ -5370,6 +5379,15 @@ Since RFC 0019 O3 (#3707) the codex verdict, PLAN and PR-link comments enqueue
 under `codex-verdict`, `codex-plan` (`plan-` and `park-` markers) and
 `codex-pr-link`. A non-GitHub entry drains only through a codex MCP realization;
 without one it stays `binding_unreachable`.
+Since RFC 0019 O3b (#3754) four more producers enqueue instead of posting:
+`cw dev-queue approve --post-marker` (`approve-post-marker`),
+`cw dev-queue resolve --post` (`resolve-post`), `cw review settle`
+(`review-settle`) and the gate-recipe comment (`gate-recipe`, written by the
+auto-approve and auto-adopt recipes). Each works on any tracker, makes no
+tracker call, and prints a `queued ... (outbox entry <id>)` line, or
+`already queued (entry <id>, state <state>)` on a duplicate; a failure to queue
+warns on stderr and never changes the exit code or the recorded row.
+`outbox.enabled: false` stops the drain, not the enqueue.
 
 **Tick launch.** Each dispatch tick launches at most one detached
 `python -m cw outbox drain --client <c>` per client, before the usage-limit
@@ -5456,6 +5474,32 @@ A drain killed mid-entry leaves that entry `claimed`; the next drain's claim
 recovers it once its owner is provably gone. The tick does not launch for a
 `claimed` entry alone, so run `cw outbox drain -c <client>` if one lingers
 (`cw outbox list --state claimed` shows the claimant verdict).
+
+### RFC 0019 O3b operator dogfood checklist
+
+Operator-run, after the O3b change (#3754) merges, on this repo against a real
+dogfood ticket. Nothing here has been run by the change's author: each step is
+unchecked until the operator runs it, and the outcome is recorded on the ticket
+or PR, not in this file.
+
+- [ ] 1. On a plan-parked ticket run
+  `cw dev-queue approve <T> -c <client> --post-marker`.
+  `cw outbox list -c <client>` shows an `approve-post-marker` entry.
+  `cw outbox drain -c <client>` (or wait one tick) posts a comment with
+  `<!-- auto-dev-plan-approved: <sha> -->` plus a `cw-outbox` line and no agent
+  marker. Re-run the command: the `already queued` echo appears and no second
+  entry is made.
+- [ ] 2. Run `cw dev-queue resolve <T> -c <client> --file f.md --post`. The
+  entry is `resolve-post` with a `resolve-r<N>-...` marker. After the drain the
+  delivered comment ends with the resolutions marker, then the `cw-outbox`
+  line, then the agent marker.
+- [ ] 3. Gate-recipe comment: with a recipe enabled, after a reconcile tick that
+  auto-approves a clean plan, `cw outbox list` shows a `gate-recipe` entry with
+  the marker `gate-auto-adopt-clean-plan-<sid>-<d8>`, and the comment lands
+  after the drain.
+- [ ] 4. Optional: run `cw review settle <file> --reason '<why>' --ticket <T>
+  -c <client>`. It queues a `review-settle` entry and prints the `settle:
+  queued the disposition marker ...` line instead of the block.
 
 ## Orchestrator permission allowlist
 
