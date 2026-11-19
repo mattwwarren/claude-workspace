@@ -5385,8 +5385,9 @@ returned to `pending` and `held` the subset added to the held list. `skipped`
 no usable `gh` tickets binding are listed on stderr as `unconfigured`; a
 configured one still runs, so its entries are released and announced. A client
 with no `bindings.tickets` block and an explicitly resolved GitHub tracker targets
-`gh` in its git dir and is not listed (RFC 0019 O3, R9); an unresolved or
-non-GitHub tracker with no block stays unreachable. `--json`
+`gh` in its git dir and is not listed (RFC 0019 O3, R9); an unresolved tracker
+also uses this fail-open fallback, while a non-GitHub tracker with no block
+stays unreachable. `--json`
 prints `{"schema_version": 1, "clients": [...], "unconfigured": [...]}`.
 Exit codes: `0` drained or nothing to do; `1` an internal error, an unknown
 `-c` client, or a plain drain of a client with `outbox.enabled: false`
