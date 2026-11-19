@@ -700,6 +700,17 @@ def _reset_legacy_tracker_gate_warnings(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.fixture(autouse=True)
+def _reset_reachability_warn_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each test an empty binding-reachability warn-once map (#3744).
+
+    The tick-side reachability check warns once per (client, key) per process
+    on a fail-open read; without a reset the first test to warn would silence
+    every later test's warning assertion.
+    """
+    monkeypatch.setattr("cw.dispatch.tracker_mcp_gate._WARNED_FAIL_OPEN", {})
+
+
+@pytest.fixture(autouse=True)
 def _lock_invariants(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[None]:
