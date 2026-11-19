@@ -884,3 +884,91 @@ def test_hold_refuses_a_lookalike_url_returned_by_gh(
     assert load_dev_queue().model_dump_json() == before
     assert _watches() == []
     assert events_of(OrchestratorEventType.TICKET_HELD) == []
+
+
+@pytest.mark.parametrize(
+    ("ref_arg", "view", "held_ref", "label", "where"),
+    [
+        ("o/r#9", gh_pr_view_json("o/r", 9), _OR_9, "o/r#9", "PR o/r#9"),
+        ("9", _OPEN_PR, _REF_9, "#9", "PR #9 in foo/bar"),
+    ],
+    ids=["explicit-ref", "same-repo-bare-ref"],
+)
+def test_post_hold_watch_collision_message_is_exact_and_row_stays_held(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    repo_slug: None,
+    ref_arg: str,
+    view: str,
+    held_ref: PrRef,
+    label: str,
+    where: str,
+) -> None:
+    """The narrow post-hold race: another client takes the watch after the pre-check."""
+    install_acme_client(tmp_path, monkeypatch)
+    seed_queue([make_task()])
+    FakeGhCli().install(monkeypatch).reply("pr", "view", stdout=view)
+    registered: list[WatchedPr] = []
+
+    def _collide(watched: WatchedPr) -> str:
+        registered.append(watched)
+        return "collision"
+
+    monkeypatch.setattr("cw.cli.dev_queue.hold.register_or_adopt_watched_pr", _collide)
+
+    result = invoke_dev_queue(*_hold_args("--until-pr-merged", ref_arg))
+
+    assert result.exit_code != 0
+    assert (
+        f"{ACME_TICKET} IS held on PR {label}, but its merge cannot be observed:"
+        f" another client already watches {where}."
+        f" Release it with `cw dev-queue requeue {ACME_TICKET} -c {ACME}`."
+    ) in _norm(result.output)
+    assert [w.cross_repo for w in registered] == [held_ref.repo is not None]
+    row = queue_row()
+    assert row.status == QueueItemStatus.BLOCKED_ON_USER
+    assert row.blocked_on_pr == held_ref
+    # The audit record is still written for the held row (``finally`` in the CLI).
+    [held] = events_of(OrchestratorEventType.TICKET_HELD)
+    assert held.payload["outcome"] == "held"
+
+
+def test_updated_hold_move_names_both_prs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo_slug: None
+) -> None:
+    install_acme_client(tmp_path, monkeypatch)
+    seed_queue([_held_on(_REF_9)])
+    FakeGhCli().install(monkeypatch).reply(
+        "pr", "view", stdout=gh_pr_view_json("o/r", 10)
+    )
+
+    result = invoke_dev_queue(*_hold_args("--until-pr-merged", "o/r#10"))
+
+    assert result.exit_code == 0, result.output
+    assert f"{ACME_TICKET}: updated, hold moved from PR #9 to PR o/r#10\n" in (
+        result.output
+    )
+    assert "via ticket" not in result.output
+    assert queue_row().blocked_on_pr == PrRef(repo="o/r", number=10)
+    [held] = events_of(OrchestratorEventType.TICKET_HELD)
+    assert held.payload["outcome"] == "updated"
+    assert held.payload["previous_pr_repo"] is None
+
+
+def test_updated_hold_move_through_a_ticket_carries_the_via_suffix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo_slug: None
+) -> None:
+    install_acme_client(tmp_path, monkeypatch)
+    seed_queue([_held_on(_REF_9), _dep_row()])
+    FakeGhCli().install(monkeypatch).reply(
+        "pr", "view", stdout=gh_pr_view_json("o/r", 9)
+    )
+
+    result = invoke_dev_queue(*_hold_args("--until-ticket-merged", "ACM-2"))
+
+    assert result.exit_code == 0, result.output
+    assert (
+        f"{ACME_TICKET}: updated, hold moved from PR #9 to PR o/r#9"
+        " (via ticket ACM-2)\n"
+    ) in result.output
+    assert queue_row().blocked_on_pr == _OR_9
