@@ -608,8 +608,10 @@ for which park" in §5).
 
 `--json` emits the `TicketView` model (`cw schema show ticket-view`):
 `schema_version`, `ticket_id`, `client`, `status`, `stage`, `disposition`,
-`blocked_reason`, `blocked_on_pr` (the PR a dependency hold waits on, null
-when none, #2321), `blocker_details`, `advisory_note`, `lane`, `priority`,
+`blocked_reason`, `blocked_on_pr` (the PR number a dependency hold waits on,
+null when none, #2321), `blocked_on_repo` (the `owner/repo` of a cross-repo
+`blocked_on_pr`, null for a same-repo one, #3634; `cw dev-queue tasks --json`
+carries the same int `blocked_on_pr` and `blocked_on_repo`), `blocker_details`, `advisory_note`, `lane`, `priority`,
 `scope_hint`, `attempts`, `unproductive_attempts`, `attempt_ceiling` (null =
 no ceiling), `session` (null, or `id`/`status`/`liveness_bucket`/
 `in_roster`/`attention_state`; `status` null = session no longer in state),
@@ -4320,7 +4322,8 @@ What does not charge the counter (#2695): `ambiguities_pending_resolution`,
 `impl_comments_unreadable_after_regress`; and a no-worker spawn failure that is
 a raw `OSError` or a missing `claude` binary (`ClaudeBinaryNotFoundError`,
 #2722). Since #2321 a worker `dependency_unmerged` park that carries a
-structured `blocker.depends_on_pr` is stamped disposition `dependency_hold`
+structured `blocker.depends_on_pr` (or, since #3634, an own-repo
+`blocker.depends_on_pr_ref`) is stamped disposition `dependency_hold`
 (still a non-charging park) rather than `awaiting_operator`. Residuals the ceiling still owns or no longer bounds:
 
 - `plan_pending_approval` still charges, deliberately: `auto_adopt_clean_plan`
@@ -4567,27 +4570,44 @@ reason. Wait for the annotation to clear; only a tick line still reading
 
 A row that cannot start until an upstream PR merges is parked as a
 `dependency_hold`: `BLOCKED_ON_USER`, `blocked_reason: dependency_unmerged`,
-`blocked_on_pr: <N>`. It frees its lane slot (see
+`blocked_on_pr: <N>` (or `<owner/repo#N>` for a cross-repo PR, #3634). It frees its lane slot (see
 `occupies_lane_slot`, `src/cw/models/tasks/store.py`), so a waiting row no
 longer starves its lane. The per-client ceiling is unchanged: it is session
 based, so a still-live old session of the row keeps counting toward it.
 
 Two ways in:
 
-- **Operator:** `cw dev-queue hold <ticket> --until-pr-merged <N> -c <client>`
-  replaces the old cancel, comment and requeue workaround. `<N>` is a positive
-  same-repo PR number only; cross-repo `owner/repo#N` and ticket-id references
-  are not supported (follow-up debt). The verb makes one `gh pr view` call
+- **Operator:** `cw dev-queue hold <ticket> --until-pr-merged <N | owner/repo#N> -c <client>`
+  or `cw dev-queue hold <ticket> --until-ticket-merged <T2> -c <client>` (give
+  exactly one) replaces the old cancel, comment and requeue workaround. `<N>`
+  is a same-repo PR number; `owner/repo#N` names a PR in any repo (one naming
+  the client's own repo is stored as a same-repo hold). `--until-ticket-merged`
+  resolves another ticket of the same client once, at hold time, to its
+  recorded `pr_url` (or `adopted_pr_url`); a ticket with no PR yet is refused
+  (hold on the number once it exists). The verb makes one `gh pr view` call
   outside any lock and refuses a PR that is MERGED (requeue instead), CLOSED,
-  not found or unverifiable, or that lives in another repo than the client's
-  origin.
+  not found or unverifiable, or whose returned url names another repo or
+  number than requested. An explicit or ticket-sourced ref needs the client's
+  origin slug, resolved locally before the gh call.
 - **Worker:** a `blocked` sentinel with `blocker.reason: "dependency_unmerged"`
-  and `blocker.depends_on_pr` set (positive same-repo integer) is routed to the
-  same `dependency_hold` disposition. Without the id the park stays
+  and `blocker.depends_on_pr` set (positive same-repo integer) or
+  `blocker.depends_on_pr_ref` (`owner/repo#N`) is routed to the same
+  `dependency_hold` disposition. A worker ref arms the auto-release only for
+  the holder's own repo: the stale-dispatch registrar normalises an own-repo
+  ref and refuses any other repo, restamping the row to a no-id
+  `awaiting_operator` park, logging one WARNING and paging one
+  `session.needs_attention` with `paused_status: dependency_ref_not_own_repo`.
+  Release it yourself with `cw dev-queue hold <T> --until-pr-merged owner/repo#N -c <C>`
+  (an operator hold accepts any repo). Without the id the park stays
   `awaiting_operator` and keeps its slot, because nothing would release it. A
   worker park with an id emits `session.needs_attention` (the existing
   worker-park emission is unchanged) and, because `dependency_hold` is not an
   attention-digest disposition, is not digest-buffered.
+
+**COMPLETED is not merged.** Only the PR's own recorded merged state releases a
+hold: a hydrated `pr_state` on a same-client row or an active client-tagged
+watch. A dependency ticket that is COMPLETED, `shipped`, `merge_pending` or
+`no_op` releases nothing on its own.
 
 **Refusals.** `hold` accepts PENDING and BLOCKED_ON_USER rows. It refuses
 RUNNING, COMPLETED, FAILED, AWAITING_OPERATOR_SIGNOFF and CANCELLED rows (the
@@ -4622,7 +4642,8 @@ hold.
   releases.
 - A PR closed unmerged never releases a hold. The tick emits one
   `session.reap_proposed` per episode with `proposed_action:
-  dependency_hold_pr_closed_unmerged` and `evidence {"blocked_on_pr": N}`; the
+  dependency_hold_pr_closed_unmerged` and `evidence {"blocked_on_pr": N}`
+  (plus `"blocked_on_repo": "owner/repo"` for a cross-repo hold, #3634); the
   row stays held until you requeue or re-hold it.
 - An unknown PR state releases nothing.
 
@@ -4633,7 +4654,8 @@ path instead of cancelling.
 **Watch retirement and hydration cap (#3654).** A `WatchedPr` is dismissed
 (`status: dismissed`, kept in the store, not deleted) once its PR is MERGED or
 CLOSED and no non-terminal row of its client still references it through
-`blocked_on_pr`. Retirement runs in the serve tick's release pass, and the
+`blocked_on_pr` (matched on the ref's repo too: a `cross_repo` watch is never
+kept alive by a same-repo hold on the same number, #3634). Retirement runs in the serve tick's release pass, and the
 hydrate pass sweeps it too. Hydration fetches at most 20 active watches per
 pass, oldest-hydrated first, and never fetches a dismissed or terminal watch.
 A dismissed watch neither collides with a new registration nor feeds the
@@ -4655,8 +4677,27 @@ Accepted limits, operator-visible:
   resolved has no `tasks` or board badge; the one `session.reap_proposed` event
   is the only signal. Follow-up debt.
 
+- **Two clients, one PR.** Two clients cannot actively watch the same
+  `owner/repo#N`; the second client's hold is refused with the collision
+  message (#3634 keeps this rule).
+- **Same-repo task-row evidence.** A same-repo hold on `#N` is satisfied by any
+  same-client row whose `pr_state` is MERGED on number N, without comparing
+  that row's `pr_url` repo with the client's slug (that needs git, which never
+  runs under the queue lock). An explicit `owner/repo#N` hold matches only that
+  exact repo.
+
 An older cw reading a `WatchedPr` with `source: dependency_hold` fails
 validation of that field.
+
+**Rolling back past #3634.** The dev-queue schema version does not change, so
+cross-repo data is recognised by content, not by `schema_version`. Before
+rolling back, requeue or cancel every hold whose `blocked_on_pr` is an object
+(`{"repo": ..., "number": ...}`; an older cw fails to load the whole store
+with one), AND dismiss or remove every `watched_prs` entry with
+`"cross_repo": true` (an older cw ignores the flag and would read it as an
+own-repo fact, which can falsely release a same-numbered own-repo hold). No
+CLI verb dismisses a watch: edit `dev_queue.json` with the dispatcher stopped.
+Same-repo-only stores are byte-identical and need nothing.
 
 ### Dispatch-loop staleness page (`dispatch_loop_stale`)
 

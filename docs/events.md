@@ -917,7 +917,7 @@ CLI commands emit thin audit events; payloads carry the obvious fields:
 | `ticket.approval_failed` | scope-drift approval compensation | `{ticket_id, client, approval_event, approval_payload, error, rolled_back, recovery_required}` |
 | `ticket.requeued` | `cw dev-queue requeue`, `cw dev-queue drain --held` (RFC 0011 A4, #1161), and dispatch's automatic FINALIZE→IMPL regress path (#770) | `{ticket_id, client, from_stage, to_stage, reason, regressed}`; `cw dev-queue requeue --reset-attempts` adds `attempts_reset: true` and `prior_unproductive_attempts` (the counter before it was zeroed, #2695), present only when the flag was passed. `cw dev-queue recover-red-pr` (#2945) records `reason: "cli_recover_red_pr"` with `regressed: true` plus `pr_url`, `head_sha`, `failing_checks`, `was_armed` and `disarmed` (true once the read-back verified auto-merge off) |
 | `ticket.unblocked` | `cw dev-queue unblock` | `{ticket_id, client}` |
-| `ticket.held` | `cw dev-queue hold` (`cw.dev_queue.hold.record_hold_event`, #2321), written after the queue write and before watch registration, for every mutating outcome (an `unchanged` repeat records none) | `{ticket_id, client, pr_number, repo, outcome: "held" \| "updated", previous_pr, previous_disposition, previous_blocked_reason, converted_from_worker_park, cleared_session_id}`. The durable audit record of a hold: a same-status (`BLOCKED_ON_USER` to `BLOCKED_ON_USER`) overwrite emits no `task.transition`, so `previous_disposition`/`previous_blocked_reason` (set only when the row was already `BLOCKED_ON_USER`) live only here. Unlike the older `ticket.*` family it carries `correlation_id=ticket_id`. Not in the default operator-forward set. |
+| `ticket.held` | `cw dev-queue hold` (`cw.dev_queue.hold.record_hold_event`, #2321), written after the queue write and before watch registration, for every mutating outcome (an `unchanged` repeat records none) | `{ticket_id, client, pr_number, repo, outcome: "held" \| "updated", previous_pr, previous_disposition, previous_blocked_reason, converted_from_worker_park, cleared_session_id, pr_repo, previous_pr_repo, via_ticket}`. Since #3634: `pr_repo` is `null` for a same-repo reference and the `owner/repo` slug (gh's canonical case) for a cross-repo one; `previous_pr_repo` applies the same rule to the prior hold and is `null` when there was none (then `previous_pr` is `null` too) or it was same-repo; `via_ticket` is `null` unless the hold was made with `--until-ticket-merged`, when it is the dependency ticket's id. `pr_number` and `previous_pr` stay ints. The durable audit record of a hold: a same-status (`BLOCKED_ON_USER` to `BLOCKED_ON_USER`) overwrite emits no `task.transition`, so `previous_disposition`/`previous_blocked_reason` (set only when the row was already `BLOCKED_ON_USER`) live only here. Unlike the older `ticket.*` family it carries `correlation_id=ticket_id`. Not in the default operator-forward set. |
 
 See the "Known legacy gap" note under `task.deleted`: the `ticket.*` family
 carries `correlation_id=None` — read `payload["ticket_id"]` to correlate.
@@ -1407,6 +1407,20 @@ open enum; consumers MUST tolerate unknown values. Known values:
   signals, and the serve-boot orphan pass skips sessions whose worktree
   `cw-context.json` says `headless: false`, which is what the codex pre-flight
   writes.
+- `"dependency_ref_not_own_repo"` — a worker `dependency_unmerged` park named
+  its upstream PR as `blocker.depends_on_pr_ref` in a repo other than the
+  holder's own client repo (#3634). Emitted once per refused row by
+  `register_stale_dispatch_watched_prs` (`cw.reconcile.stale_dispatch_watch`),
+  after it restamped the row to a no-id `awaiting_operator` park (it keeps its
+  lane slot and nothing releases it) and registered no watch. The canonical
+  nine fields come from the row: `session_id` is the worker park's bound
+  session, `session_name` is `""`, `claude_session_id` is `null`, `crashed` is
+  `false`, `lane` is the row's lane; `correlation_id` is the ticket id.
+  `breadcrumbs` reads `worker-supplied dependency ref <owner/repo#N> is not in
+  this client's repo <own slug>; a worker may arm an auto-release only for its
+  own repo. Hold it with: cw dev-queue hold <ticket> --until-pr-merged
+  <owner/repo#N> -c <client>`. That operator hold is the release: an operator
+  hold accepts any repo.
 - `"fix_dispatch_worker_unconfirmed"` — a fix-loop worker that launched but
   was never recorded (#2590) is not yet confirmed stopped, so its row is held:
   `breadcrumbs` names the one action that releases it,
@@ -2011,7 +2025,8 @@ preventing duplicate events across ticks for the same session.
 the serve tick's `release_stale_gated_tasks`, not by `_reconcile_locked`, when a
 `dependency_hold` row's blocking PR is observed CLOSED without merging. It is
 proposal-only: nothing releases the row. `evidence` is `{"blocked_on_pr": <int>}`
-instead of the timing keys above. It is emitted once per episode, latched by the
+instead of the timing keys above, plus `"blocked_on_repo": "<owner/repo>"` only
+for a cross-repo hold (#3634). It is emitted once per episode, latched by the
 row's `stale_gate_detected_at` (cleared by any transition or a `hold` update),
 and `session_id` is null for an operator hold. A MERGED PR emits the existing
 `release_stale_gate_variant_b` action instead.

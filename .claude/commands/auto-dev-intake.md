@@ -153,8 +153,9 @@ block); the parse rules below are tracker-aware.
    work cannot proceed until an upstream PR merges, EXIT before any stage
    starts, and before the `stage.entered` event for `s0_intake`, with the
    `blocked` / `dependency_unmerged` sentinel. The exact template and the rules
-   for the optional `depends_on_pr` field (a positive same-repo PR number,
-   omitted for ticket ids or other repos) live in
+   for the optional `depends_on_pr` field (a positive same-repo PR number) or
+   `depends_on_pr_ref` (`owner/repo#N`, armed only for this repo; never both,
+   omitted for ticket ids) live in
    `.claude/commands/auto-dev-intake-appendix.md`, section "Dependency-unmerged
    exit (#2260, #2321): sentinel and depends_on_pr". Read it now if this
    condition applies; do not improvise the sentinel or the field from memory.

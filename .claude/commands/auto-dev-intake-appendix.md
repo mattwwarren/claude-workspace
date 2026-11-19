@@ -240,8 +240,16 @@ starts, and before the `stage.entered` event for `s0_intake`, with:
 - Emit it only when the ticket body or comments name exactly one blocking open
   PR in this repo, and that PR is verified open with
   `gh pr view <N> --json state`.
-- If the dependency is a ticket id or lives in another repo, OMIT the field.
-  The park then stays an `awaiting_operator` hold that keeps its lane slot.
+- `blocker.depends_on_pr_ref` (#3634) is the same id as an `"owner/repo#N"`
+  string. Use it only for a PR in this repo (the holder's own repo) when you
+  have it in that form: only an own-repo ref arms the auto-release. A ref to
+  any other repo is not armed: cw parks the row `awaiting_operator` with no id
+  and pages the operator (`dependency_ref_not_own_repo`), who holds it with
+  `cw dev-queue hold --until-pr-merged owner/repo#N`. Never set both fields.
+- If the dependency is a ticket id, OMIT both fields (resolve it to its PR
+  first if you can, and emit that PR instead). A cross-repo dependency may be
+  cited in `details`, but it arms nothing. Without an armed id the park stays
+  an `awaiting_operator` hold that keeps its lane slot.
 - Do NOT put the id only in `details` prose: cw never parses `details` for it.
 
 **Why the field matters.** With `depends_on_pr`, cw parks the row as
