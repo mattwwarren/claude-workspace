@@ -5387,14 +5387,14 @@ timeout, no comment URL, a read-back that is missing or differs), with
 entry against one listing and posts only missing parts. An entry claimed from
 `unverified` never goes back to `pending`.
 
-**No-progress bound.** A drain that exits without changing the non-held
-pending set and without moving the client's progress counter (for example one
-that crashes at startup) is not relaunched until one of them changes (a new
-enqueue, or a run that made progress). The counter is the monotonic
-`outbox/<client>/drain.progress` file, a count of entries that left `pending`
-under a drain; it sees work done beyond the tick's bounded scan window. The tick logs
-one WARNING naming `cw outbox drain -c <client>`: run it to see the error. The
-bound lives in the loop's memory, so a restarted loop tries once more.
+**No persisted progress state.** The tick keeps no progress counter, launch
+baseline or warning registry (#3706 item 35). Every pending entry a drain cannot
+progress on ends held or under a binding marker, so the tick needs no more state
+to decide. A crash-looping drain (a bug) is visible only as an in-memory streak:
+each non-zero exit (other than the lease-held status 75) logs one WARNING with
+the client, the exit code and the streak count, naming `cw outbox drain -c
+<client>`. Nothing suppresses the relaunch, and the streak is never written to
+disk; a restarted loop starts the count again.
 
 **Claimant and orphan claims.** A drain claims entries as
 `current_launch_marker()`. Outside the initial pid namespace (a container) the

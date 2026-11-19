@@ -75,7 +75,7 @@ class _Spawner:
 def _fresh_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tick_drain, "_LAUNCHED", {})
     monkeypatch.setattr(tick_drain, "_WARNED_TRUNCATED", set())
-    monkeypatch.setattr(tick_drain, "_WARNED_STALLED", {})
+    monkeypatch.setattr(tick_drain, "_CRASH_STREAK", {})
 
 
 @pytest.fixture
@@ -96,25 +96,16 @@ def _disabled(tmp_path: Path) -> dict[str, ClientConfig]:
     return _clients(tmp_path, outbox=OutboxConfig(enabled=False))
 
 
-def _stall_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
-    return [
-        r
-        for r in caplog.records
-        if r.levelno == logging.WARNING and "cw outbox drain -c" in r.getMessage()
-    ]
-
-
 class TestLaunch:
     def test_launches_for_a_pending_entry(
         self, tmp_path: Path, spawner: _Spawner
     ) -> None:
-        entry = enqueue().entry
+        enqueue()
 
         tick_drain.launch_outbox_drains(_clients(tmp_path))
 
         assert spawner.launched == [CLIENT]
-        launch = tick_drain._LAUNCHED[CLIENT]
-        assert launch.pending_ids == frozenset({entry.id})
+        assert CLIENT in tick_drain._LAUNCHED
 
     def test_once_per_client_while_the_first_is_live(
         self, tmp_path: Path, spawner: _Spawner
@@ -267,12 +258,11 @@ class TestHeld:
     ) -> None:
         held = enqueue().entry
         append_held(CLIENT, held.id)
-        fresh = enqueue(marker="fresh").entry
+        enqueue(marker="fresh")
 
         tick_drain.launch_outbox_drains(_clients(tmp_path))
 
         assert spawner.launched == [CLIENT]
-        assert tick_drain._LAUNCHED[CLIENT].pending_ids == frozenset({fresh.id})
 
     def test_cleared_held_file_counts_again(
         self, tmp_path: Path, spawner: _Spawner
@@ -298,110 +288,80 @@ class TestHeld:
         assert spawner.launched == [CLIENT]
 
 
-class TestNoProgressBound:
-    @pytest.mark.parametrize("exit_code", [1, 0, 75])
-    def test_stalled_drain_is_not_relaunched_until_the_set_changes(
-        self,
-        tmp_path: Path,
-        spawner: _Spawner,
-        caplog: pytest.LogCaptureFixture,
-        exit_code: int,
+def _crash_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "non-zero exits" in r.getMessage()
+    ]
+
+
+class TestCrashStreak:
+    """Item 36: an in-memory crash streak warns; nothing suppresses a launch."""
+
+    def test_nonzero_exit_warns_and_still_relaunches(
+        self, tmp_path: Path, spawner: _Spawner, caplog: pytest.LogCaptureFixture
     ) -> None:
         enqueue()
-        clients = _clients(tmp_path)
-
-        tick_drain.launch_outbox_drains(clients)
-        spawner.procs[0].code = exit_code
-        with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
-            tick_drain.launch_outbox_drains(clients)
-            assert len(_stall_warnings(caplog)) == 1
-            tick_drain.launch_outbox_drains(clients)
-            assert len(_stall_warnings(caplog)) == 1
-        assert spawner.launched == [CLIENT]
-        assert f"cw outbox drain -c {CLIENT}" in _stall_warnings(caplog)[0].message
-
-        enqueue(marker="new")
-        tick_drain.launch_outbox_drains(clients)
-
-        assert spawner.launched == [CLIENT, CLIENT]
-
-    def test_progress_with_entries_remaining_relaunches(
-        self, tmp_path: Path, spawner: _Spawner, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        GhThread().install(monkeypatch)
-        monkeypatch.setattr("cw.tracker_post._READBACK_DELAY_SECONDS", 0.0)
-        enqueue(marker="a")
-        enqueue(marker="b")
-        clients = _clients(tmp_path)
-        tick_drain.launch_outbox_drains(clients)
-        run_drain(CLIENT, clients[CLIENT], limit=1, force=False)
-        spawner.procs[0].code = 0
-
-        tick_drain.launch_outbox_drains(clients)
-
-        assert spawner.launched == [CLIENT, CLIENT]
-
-    def test_progress_on_a_backlog_beyond_the_scan_bound_relaunches(
-        self, tmp_path: Path, spawner: _Spawner, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Progress outside the tick's bounded window must still earn a relaunch.
-
-        The tick parses only the newest records. A drain that delivers entries
-        outside that window leaves the visible pending id set unchanged when
-        the record mtimes do not move (a filesystem with coarse timestamps
-        pins them), so the id set alone cannot see the progress.
-        """
-        GhThread().install(monkeypatch)
-        monkeypatch.setattr("cw.tracker_post._READBACK_DELAY_SECONDS", 0.0)
-        monkeypatch.setattr(tick_drain, "TICK_SCAN_MAX_RECORDS", 2)
-        entries = [enqueue(marker=marker).entry for marker in "abcd"]
-
-        def _pin_mtimes() -> None:
-            for age, entry in enumerate(entries):
-                ns = (10 + age) * 10**9
-                os.utime(_layout.record_path(CLIENT, entry.id), ns=(ns, ns))
-
-        _pin_mtimes()
-        clients = _clients(tmp_path)
-        tick_drain.launch_outbox_drains(clients)
-        assert tick_drain._LAUNCHED[CLIENT].pending_ids == {
-            entries[2].id,
-            entries[3].id,
-        }
-
-        report = run_drain(CLIENT, clients[CLIENT], limit=1, force=False)
-        _pin_mtimes()
-        spawner.procs[0].code = 0
-        tick_drain.launch_outbox_drains(clients)
-
-        assert report.delivered == 1
-        assert spawner.launched == [CLIENT, CLIENT]
-
-    def test_stall_warning_registry_holds_one_state_per_client(
-        self, tmp_path: Path, spawner: _Spawner
-    ) -> None:
-        clients = _clients(tmp_path)
-        for marker in ("a", "b", "c"):
-            enqueue(marker=marker)
-            tick_drain.launch_outbox_drains(clients)
-            spawner.procs[-1].code = 1
-            tick_drain.launch_outbox_drains(clients)
-
-        assert list(tick_drain._WARNED_STALLED) == [CLIENT]
-
-    def test_a_run_that_made_no_progress_still_stalls_beyond_the_scan_bound(
-        self, tmp_path: Path, spawner: _Spawner, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(tick_drain, "TICK_SCAN_MAX_RECORDS", 2)
-        for marker in "abc":
-            enqueue(marker=marker)
         clients = _clients(tmp_path)
         tick_drain.launch_outbox_drains(clients)
         spawner.procs[0].code = 1
 
+        with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
+            tick_drain.launch_outbox_drains(clients)
+
+        assert spawner.launched == [CLIENT, CLIENT]
+        warnings = _crash_warnings(caplog)
+        assert len(warnings) == 1
+        assert "exited 1" in warnings[0].getMessage()
+        assert f"cw outbox drain -c {CLIENT}" in warnings[0].getMessage()
+
+    def test_identical_pending_set_after_a_clean_exit_still_relaunches(
+        self, tmp_path: Path, spawner: _Spawner, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        enqueue()
+        clients = _clients(tmp_path)
+        tick_drain.launch_outbox_drains(clients)
+        spawner.procs[0].code = 0
+
+        with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
+            tick_drain.launch_outbox_drains(clients)
+
+        assert spawner.launched == [CLIENT, CLIENT]
+        assert _crash_warnings(caplog) == []
+
+    def test_streak_counts_consecutive_crashes_and_a_clean_exit_resets_it(
+        self, tmp_path: Path, spawner: _Spawner, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        enqueue()
+        clients = _clients(tmp_path)
         tick_drain.launch_outbox_drains(clients)
 
-        assert spawner.launched == [CLIENT]
+        with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
+            for _ in range(3):
+                spawner.procs[-1].code = 1
+                tick_drain.launch_outbox_drains(clients)
+            assert tick_drain._CRASH_STREAK[CLIENT] == 3
+            spawner.procs[-1].code = 0
+            tick_drain.launch_outbox_drains(clients)
+
+        assert tick_drain._CRASH_STREAK.get(CLIENT) is None
+        assert len(_crash_warnings(caplog)) == 3
+        assert spawner.launched == [CLIENT] * 5
+
+    def test_lease_held_exit_is_not_a_crash(
+        self, tmp_path: Path, spawner: _Spawner, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        enqueue()
+        clients = _clients(tmp_path)
+        tick_drain.launch_outbox_drains(clients)
+        spawner.procs[0].code = os.EX_TEMPFAIL
+
+        with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
+            tick_drain.launch_outbox_drains(clients)
+
+        assert CLIENT not in tick_drain._CRASH_STREAK
+        assert _crash_warnings(caplog) == []
 
     def test_g2_becomes_held_so_no_crash_loop(
         self, tmp_path: Path, spawner: _Spawner, monkeypatch: pytest.MonkeyPatch

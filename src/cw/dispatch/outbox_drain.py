@@ -7,21 +7,18 @@
 2. A drain this process launched is still running: skip.
 3. Read the held list and peek the pending entries (held ids excluded, at most
    ``TICK_SCAN_MAX_RECORDS`` newest records). No non-held pending entry: skip.
-4. No-progress bound (P11): a previous launch has exited, the non-held
-   pending id set is the one recorded at that launch, and the client's
-   monotonic progress counter (``drain.progress``: entries that left
-   ``pending``) has not moved, so it made no progress whatever its exit code.
-   Skip, with one WARNING per client stalled state. A new enqueue, or a run that
-   drained something, earns one more launch. The counter, not the id set,
-   sees work done outside the tick's bounded scan window. The bound is in
-   memory: a restarted loop gets one more try.
-5. Every pending role has an unreachable marker: skip (a manual drain or
+4. Every pending role has an unreachable marker: skip (a manual drain or
    ``--force`` probes it).
-6. Another process holds the drain lease: skip.
-7. Launch and record the launch-time pending set.
+5. Another process holds the drain lease: skip.
+6. Launch.
 
-No timer, age or wall clock drives any of it (ADR-0014). A failure for one
-client is logged and never fails the tick or another client.
+No persisted progress counter, launch baseline or warning registry drives any
+of it (#3706 item 35): every pending entry a drain cannot make progress on
+already ends held or under a binding marker, so the tick needs no more state.
+A crash-looping drain (a bug) is surfaced by an in-memory streak of non-zero
+exits in this process: it logs one warning per exit and never suppresses a
+launch. No timer, age or wall clock drives any of it (ADR-0014). A failure for
+one client is logged and never fails the tick or another client.
 """
 
 from __future__ import annotations
@@ -40,7 +37,6 @@ from cw.outbox import (
     drain_lease_held,
     marked_roles,
     peek_pending,
-    progress_status,
     read_held,
 )
 from cw.outbox._layout import drain_log_path
@@ -56,21 +52,21 @@ _log = logging.getLogger("cw.dispatch")
 
 @dataclass(frozen=True)
 class _Launch:
-    """A drain this process launched and the non-held pending ids it saw."""
+    """A drain this process launched; its live ``Popen`` covers the lease gap."""
 
     proc: subprocess.Popen[bytes]
-    pending_ids: frozenset[str]
-    progress: int | None
 
 
-# Process-lifetime registry: the launch-to-acquire gap is covered by the live
-# ``Popen`` (the child may not hold the lease yet), and the recorded id set and
-# progress count bound relaunches of a drain that makes no progress (P11).
+# Process-lifetime state, in memory only. ``_LAUNCHED`` covers the
+# launch-to-acquire gap while the child is alive. ``_CRASH_STREAK`` counts
+# consecutive non-zero exits per client, for the warning alone.
 _LAUNCHED: dict[str, _Launch] = {}
+_CRASH_STREAK: dict[str, int] = {}
 _WARNED_TRUNCATED: set[str] = set()
-# One entry per client (its latest stalled state), so the registry is bounded by
-# the client count however many id sets a long-lived loop sees.
-_WARNED_STALLED: dict[str, tuple[frozenset[str], int | None]] = {}
+
+# Exit status of a drain that found another drain holding the lease
+# (``os.EX_TEMPFAIL``): a normal outcome, not a crash.
+_LEASE_HELD_EXIT = os.EX_TEMPFAIL
 
 
 def spawn_drain(client: str) -> subprocess.Popen[bytes]:
@@ -84,30 +80,23 @@ def spawn_drain(client: str) -> subprocess.Popen[bytes]:
     return _launch_logged_subprocess(log.parent, argv, dict(os.environ), Path(log.name))
 
 
-def _stalled(
-    client: str,
-    previous: _Launch | None,
-    pending: frozenset[str],
-    progress: int | None,
-) -> bool:
-    if (
-        previous is None
-        or previous.pending_ids != pending
-        or previous.progress != progress
-    ):
-        return False
-    state = (pending, progress)
-    if _WARNED_STALLED.get(client) != state:
-        _WARNED_STALLED[client] = state
-        _log.warning(
-            "outbox: the last drain of client %s made no progress on its %d"
-            " pending entries; not relaunching until the set changes. Run"
-            " 'cw outbox drain -c %s' to see the error",
-            client,
-            len(pending),
-            client,
-        )
-    return True
+def _note_exit(client: str, previous: _Launch) -> None:
+    """Count a finished drain's exit; warn on a crash streak. Never gates a launch."""
+    code = previous.proc.poll()
+    if code is None or code in (0, _LEASE_HELD_EXIT):
+        _CRASH_STREAK.pop(client, None)
+        return
+    streak = _CRASH_STREAK.get(client, 0) + 1
+    _CRASH_STREAK[client] = streak
+    _log.warning(
+        "outbox: a drain of client %s exited %d (%d consecutive non-zero exits in"
+        " this process); launching again. Run 'cw outbox drain -c %s' to see the"
+        " error",
+        client,
+        code,
+        streak,
+        client,
+    )
 
 
 def _warn_truncated(client: str) -> None:
@@ -128,20 +117,20 @@ def _maybe_launch(client: str, cfg: ClientConfig) -> None:
     if not cfg.outbox.enabled:
         return
     previous = _LAUNCHED.get(client)
-    if previous is not None and previous.proc.poll() is None:
-        return
-    held = read_held(client)
-    peek = peek_pending(client, scan_limit=TICK_SCAN_MAX_RECORDS, exclude_ids=held)
+    if previous is not None:
+        if previous.proc.poll() is None:
+            return
+        _note_exit(client, previous)
+    peek = peek_pending(
+        client, scan_limit=TICK_SCAN_MAX_RECORDS, exclude_ids=read_held(client)
+    )
     if peek.truncated:
         _warn_truncated(client)
-    progress = progress_status(client)
-    if not peek.entry_ids or _stalled(client, previous, peek.entry_ids, progress):
+    if not peek.entry_ids:
         return
     if peek.roles <= marked_roles(client) or drain_lease_held(client):
         return
-    # The counter is advisory.  A missing or corrupt counter is a persistent
-    # unknown baseline, not a reason to make launching fail.
-    _LAUNCHED[client] = _Launch(spawn_drain(client), peek.entry_ids, progress)
+    _LAUNCHED[client] = _Launch(spawn_drain(client))
 
 
 def launch_outbox_drains(clients: Mapping[str, ClientConfig]) -> None:

@@ -32,7 +32,6 @@ from cw.outbox import (
     marked_roles,
     read_held,
     read_marker,
-    read_progress,
     settle,
 )
 from cw.outbox_drain import DrainReport, part_marker_line, run_drain, select_target
@@ -1169,81 +1168,6 @@ class TestCrashConsistency:
         _drain(tmp_path)
 
         assert order == ["release", "append_held", "record_event"]
-
-
-class TestProgressCounter:
-    """The monotonic count of entries that left pending (item 32)."""
-
-    def test_delivered_pending_entries_count(
-        self, tmp_path: Path, gh: GhThread
-    ) -> None:
-        enqueue(marker="a")
-        enqueue(marker="b")
-
-        _drain(tmp_path)
-
-        assert read_progress(CLIENT) == len(("a", "b"))
-
-    def test_it_accumulates_across_runs(self, tmp_path: Path, gh: GhThread) -> None:
-        enqueue(marker="a")
-        _drain(tmp_path)
-        enqueue(marker="b")
-        _drain(tmp_path)
-
-        assert read_progress(CLIENT) == len(("a", "b"))
-
-    def test_a_pending_entry_settled_unverified_counts(
-        self, tmp_path: Path, gh: GhThread
-    ) -> None:
-        gh.script_comments("T-1", "timeout")
-        enqueue()
-
-        _drain(tmp_path)
-
-        assert read_progress(CLIENT) == 1
-
-    def test_an_unverified_entry_that_stays_unverified_does_not_count(
-        self, tmp_path: Path, gh: GhThread
-    ) -> None:
-        entry = _unverified()
-        gh.unreadable("T-1")
-
-        _drain(tmp_path)
-
-        assert _state(entry.id)[0] is OutboxState.UNVERIFIED
-        assert read_progress(CLIENT) == 0
-
-    def test_a_recheck_that_delivers_an_unverified_entry_does_not_count(
-        self, tmp_path: Path, gh: GhThread
-    ) -> None:
-        _unverified()
-
-        report = _drain(tmp_path)
-
-        assert report.delivered == 1
-        assert read_progress(CLIENT) == 0
-
-    def test_releases_and_holds_do_not_count(
-        self, tmp_path: Path, gh: GhThread, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        enqueue(marker="a")
-        _drain(tmp_path, bindings=Bindings())
-        monkeypatch.setattr("cw.outbox_drain.read_parts", _raise_record_error)
-        enqueue(marker="b")
-
-        _drain(tmp_path, force=True)
-
-        assert read_progress(CLIENT) == 0
-
-    def test_a_skipped_unreadable_entry_counts(
-        self, tmp_path: Path, gh: GhThread
-    ) -> None:
-        entry = enqueue().entry
-        _layout.body_path(CLIENT, entry.id).unlink()
-
-        _drain(tmp_path)
-
-        assert read_progress(CLIENT) == 1
 
 
 class TestEvents:

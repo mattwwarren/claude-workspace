@@ -27,7 +27,6 @@ from cw.launch_marker import (
     observed_launch_owner_state,
 )
 from cw.outbox import _layout as layout
-from cw.outbox._lease import add_progress
 from cw.outbox._lock import _outbox_lock
 from cw.outbox._models import (
     DEFAULT_CLAIM_LIMIT,
@@ -431,18 +430,6 @@ def _body_intact(client: str, entry: OutboxEntry) -> bool:
     )
 
 
-def _note_unreadable_progress(client: str) -> None:
-    """Best-effort progress marker after settling an unreadable body."""
-    try:
-        add_progress(client, 1)
-    except (OSError, OutboxRecordError) as exc:
-        logger.warning(
-            "outbox: progress persistence degraded for client %s (%s)",
-            client,
-            type(exc).__name__,
-        )
-
-
 def _claim_locked(
     client: str,
     *,
@@ -484,7 +471,6 @@ def _claim_locked(
                 layout.write_record(
                     client, _settled_unreadable(entry, claimant=claimant, now=now)
                 )
-                _note_unreadable_progress(client)
         except OutboxRecordError:
             if not claimed:
                 raise

@@ -16,10 +16,6 @@ decision.
 - ``drain.held`` (``HeldList``): entries held after a per-item failure. A
   missing, corrupt or unreadable file reads as empty; the next hold rewrites
   it.
-- ``drain.progress``: a monotonic count of entries that left ``pending`` under
-  a drain (settled, or skipped as unreadable). The tick compares it across
-  launches, because its bounded record scan cannot see progress made outside
-  its window. A missing, corrupt or unreadable file reads as 0.
 
 The drain is the only writer, under the lease; the tick reads lock-free.
 Imports ``_layout`` and ``_models``; no subprocess, no tracker code.
@@ -39,7 +35,6 @@ from cw.outbox._layout import (
     drain_lock_path,
     ensure_client_dir,
     held_path,
-    progress_path,
     unreachable_path,
 )
 from cw.outbox._models import (
@@ -194,45 +189,3 @@ def append_held(client: str, entry_id: str) -> None:
 
 def clear_held(client: str) -> None:
     _unlink(held_path(client))
-
-
-def read_progress(client: str) -> int:
-    """How many entries have left ``pending`` under a drain; 0 when unreadable."""
-    value = progress_status(client)
-    return 0 if value is None else value
-
-
-def progress_status(client: str) -> int | None:
-    """The progress counter, or ``None`` when it is missing or corrupt."""
-    path = progress_path(client)
-    try:
-        text = _read_text(path)
-        if text is None:
-            return None
-        return max(0, int(text.strip()))
-    except (OSError, ValueError):
-        logger.warning("outbox: unreadable drain progress %s reads as 0", path.name)
-        return None
-
-
-def ensure_progress(client: str) -> None:
-    """Create a valid zero counter when the tick needs a baseline."""
-    if progress_status(client) is None:
-        ensure_client_dir(client)
-        _write(progress_path(client), "0")
-
-
-def add_progress(client: str, count: int) -> None:
-    """Add *count* to the progress counter (the drain, under its lease, only)."""
-    if count <= 0:
-        return
-    ensure_client_dir(client)
-    path = progress_path(client)
-    try:
-        _write(path, str(read_progress(client) + count))
-    except (OSError, OutboxRecordError):
-        # Leave an explicit unreadable/missing indicator. The tick treats that
-        # as an uncertain generation and permits one recovery launch.
-        with contextlib.suppress(OSError):
-            path.unlink(missing_ok=True)
-        raise

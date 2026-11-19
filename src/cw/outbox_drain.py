@@ -46,7 +46,6 @@ from cw.outbox import (
     OutboxRole,
     OutboxState,
     UnreachableMarker,
-    add_progress,
     append_held,
     claim,
     clear_all_markers,
@@ -191,26 +190,6 @@ def _token(entry: OutboxEntry) -> str:
     return entry.claim_token or ""
 
 
-def _note_left_pending(run: _Run, entry: OutboxEntry) -> None:
-    """Best-effort count after the state change leaves ``pending``.
-
-    The dispatch tick's no-progress guard reads this monotonic counter: its
-    bounded record scan cannot see work done outside the scan window (item 32).
-    The record transition is authoritative; a counter write failure must not
-    undo it or abort the drain. An unreadable counter is retained as an
-    unknown generation, which permits at most one recovery launch.
-    """
-    if entry.claimed_from is OutboxState.PENDING:
-        try:
-            add_progress(run.client, 1)
-        except (OSError, CwError) as exc:
-            logger.warning(
-                "outbox: progress persistence degraded for client %s (%s)",
-                run.client,
-                type(exc).__name__,
-            )
-
-
 def _deliver(
     run: _Run,
     entry: OutboxEntry,
@@ -224,7 +203,6 @@ def _deliver(
         state=OutboxState.DELIVERED,
         reason=reason,
     )
-    _note_left_pending(run, entry)
     run.delivered += 1
     run.delivered_roles.add(entry.role)
     _emit(OrchestratorEventType.OUTBOX_ENTRY_DELIVERED, entry, reason, posted=posted)
@@ -243,7 +221,6 @@ def _resettle_unverified(
         state=OutboxState.UNVERIFIED,
         reason=reason,
     )
-    _note_left_pending(run, entry)
     run.unverified += 1
 
 

@@ -23,7 +23,6 @@ from cw.outbox import (
     OutboxRole,
     UnreachableMarker,
     _layout,
-    add_progress,
     append_held,
     clear_all_markers,
     clear_held,
@@ -33,7 +32,6 @@ from cw.outbox import (
     marked_roles,
     read_held,
     read_marker,
-    read_progress,
     write_marker,
 )
 from tests._shared.lock_helpers import _hold_flock
@@ -300,42 +298,3 @@ class TestHeldList:
         append_held(CLIENT, _ID_A)
 
         assert [e.id for e in _layout.scan_entries(CLIENT)] == [entry.id]
-
-
-class TestProgressCounter:
-    def test_missing_file_reads_zero_and_creates_nothing(self) -> None:
-        assert read_progress(CLIENT) == 0
-        assert not (state_dir() / "outbox").exists()
-
-    def test_add_accumulates(self) -> None:
-        add_progress(CLIENT, 1)
-        add_progress(CLIENT, 2)
-
-        assert read_progress(CLIENT) == 3
-        assert _layout.progress_path(CLIENT).read_text(encoding="utf-8") == "3"
-
-    @pytest.mark.parametrize("count", [0, -1])
-    def test_a_non_positive_add_writes_nothing(self, count: int) -> None:
-        add_progress(CLIENT, count)
-
-        assert not (state_dir() / "outbox").exists()
-
-    @pytest.mark.parametrize(
-        "raw", [b"not a number", b"", _INVALID_UTF8, b"-4", b"1.5"]
-    )
-    def test_corrupt_file_reads_zero_and_the_next_add_rewrites(
-        self, raw: bytes
-    ) -> None:
-        path = _layout.progress_path(CLIENT)
-        path.parent.mkdir(parents=True)
-        path.write_bytes(raw)
-
-        assert read_progress(CLIENT) == 0
-        add_progress(CLIENT, 2)
-        assert read_progress(CLIENT) == 2
-
-    def test_is_not_parsed_as_an_entry(self) -> None:
-        enqueue()
-        add_progress(CLIENT, 1)
-
-        assert len(_layout.scan_entries(CLIENT)) == 1
