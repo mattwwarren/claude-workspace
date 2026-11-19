@@ -6,6 +6,7 @@ Also covers the ``TicketView`` output model (``cw.models.ticket_view``) and the
 
 from __future__ import annotations
 
+import json
 import subprocess
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -124,6 +125,7 @@ _DOCUMENTED_FIELDS = {
     "disposition",
     "blocked_reason",
     "blocked_on_pr",
+    "blocked_on_repo",
     "blocker_details",
     "advisory_note",
     "lane",
@@ -882,6 +884,41 @@ class TestRenderer:
         view = _build()
         assert view.blocked_on_pr == 9
         assert _line(_text(view), "blocked_on_pr") == "blocked_on_pr: 9"
+
+    def test_cross_repo_blocked_on_pr_is_qualified(self) -> None:
+        """#3634: an explicit ref renders ``o/r#9``; --json keeps an int."""
+        seed_queue(
+            [
+                make_task(
+                    status=QueueItemStatus.BLOCKED_ON_USER,
+                    disposition="dependency_hold",
+                    blocked_reason="dependency_unmerged",
+                    blocked_on_pr={"repo": "o/r", "number": 9},
+                )
+            ]
+        )
+        view = _build()
+        assert view.blocked_on_pr == 9
+        assert view.blocked_on_repo == "o/r"
+        assert _line(_text(view), "blocked_on_pr") == "blocked_on_pr: o/r#9"
+        dumped = json.loads(view.model_dump_json())
+        assert dumped["blocked_on_pr"] == 9
+        assert dumped["blocked_on_repo"] == "o/r"
+
+    def test_same_repo_blocked_on_repo_is_null(self) -> None:
+        seed_queue(
+            [
+                make_task(
+                    status=QueueItemStatus.BLOCKED_ON_USER,
+                    disposition="dependency_hold",
+                    blocked_reason="dependency_unmerged",
+                    blocked_on_pr=9,
+                )
+            ]
+        )
+        view = _build()
+        assert view.blocked_on_repo is None
+        assert json.loads(view.model_dump_json())["blocked_on_pr"] == 9
 
     def test_blocked_on_pr_absent_renders_dash(self) -> None:
         seed_queue([make_task()])

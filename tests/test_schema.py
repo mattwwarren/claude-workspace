@@ -7,6 +7,7 @@ import json
 from click.testing import CliRunner
 
 from cw.cli import main
+from cw.models import TicketTask
 from cw.schema import REGISTRY
 from tests._shared.workflow_text import _norm
 
@@ -91,6 +92,38 @@ class TestSchemaShow:
         runner = CliRunner()
         result = runner.invoke(main, ["schema", "show", "ticket-task", "--format=tldr"])
         assert result.exit_code == 0
+
+    def test_json_ticket_task_blocked_on_pr_advertises_int_ref_or_null(self) -> None:
+        """#3634 R10: the persisted row accepts an int, a {repo, number} or null."""
+        expected_any_of = [
+            {"type": "integer", "minimum": 1},
+            {
+                "type": "object",
+                "properties": {
+                    "repo": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                        "default": None,
+                    },
+                    "number": {"type": "integer", "minimum": 1},
+                },
+                "required": ["number"],
+            },
+            {"type": "null"},
+        ]
+        runner = CliRunner()
+        result = runner.invoke(main, ["schema", "show", "ticket-task", "--format=json"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        field = parsed["properties"]["blocked_on_pr"]
+        assert field["anyOf"] == expected_any_of
+        assert field["default"] is None
+        assert "blocked_on_pr" not in parsed.get("required", [])
+        assert "PrRef" not in parsed.get("$defs", {})
+        serialization = TicketTask.model_json_schema(mode="serialization")
+        assert serialization["properties"]["blocked_on_pr"]["anyOf"] == expected_any_of
+        tldr = runner.invoke(main, ["schema", "show", "ticket-task", "--format=tldr"])
+        assert tldr.exit_code == 0
+        assert "  blocked_on_pr: integer | object | null" in tldr.output.splitlines()
 
     def test_tldr_session(self) -> None:
         runner = CliRunner()

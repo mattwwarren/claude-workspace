@@ -2193,14 +2193,37 @@
     "blocked_on_pr": {
      "anyOf": [
       {
+       "minimum": 1,
        "type": "integer"
+      },
+      {
+       "properties": {
+        "repo": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null
+        },
+        "number": {
+         "minimum": 1,
+         "type": "integer"
+        }
+       },
+       "required": [
+        "number"
+       ],
+       "type": "object"
       },
       {
        "type": "null"
       }
      ],
-     "default": null,
-     "title": "Blocked On Pr"
+     "default": null
     },
     "pending_fix_dispatch": {
      "anyOf": [
@@ -4374,14 +4397,37 @@
       "blocked_on_pr": {
        "anyOf": [
         {
+         "minimum": 1,
          "type": "integer"
+        },
+        {
+         "properties": {
+          "repo": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "number": {
+           "minimum": 1,
+           "type": "integer"
+          }
+         },
+         "required": [
+          "number"
+         ],
+         "type": "object"
         },
         {
          "type": "null"
         }
        ],
-       "default": null,
-       "title": "Blocked On Pr"
+       "default": null
       },
       "pending_fix_dispatch": {
        "anyOf": [
@@ -6650,14 +6696,37 @@
       "blocked_on_pr": {
        "anyOf": [
         {
+         "minimum": 1,
          "type": "integer"
+        },
+        {
+         "properties": {
+          "repo": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "number": {
+           "minimum": 1,
+           "type": "integer"
+          }
+         },
+         "required": [
+          "number"
+         ],
+         "type": "object"
         },
         {
          "type": "null"
         }
        ],
-       "default": null,
-       "title": "Blocked On Pr"
+       "default": null
       },
       "pending_fix_dispatch": {
        "anyOf": [
@@ -6787,7 +6856,7 @@
      "type": "object"
     },
     "WatchedPr": {
-     "description": "An externally-requested PR the operator is watching (GitHub #1154).\n\nRegistered when someone requests the operator's review on a PR the queue\ndoes not otherwise track \u2014 via ``cw review register <pr>`` (``source=\"cli\"``)\nor the ``review_requested`` webhook (``source=\"webhook\"``) \u2014 or, since\nGitHub #1927, when a ``stale_dispatch`` park needs an independent state\nsource for its OWN blocking PR (``source=\"stale_dispatch_park\"``, registered\nby ``cw.reconcile.stale_dispatch_watch``). Persisted as a top-level\n``DevQueueStore.watched_prs`` entry (RFC 0011 S2), deliberately NOT a\n``TicketTask``: it carries no ``lane`` and never occupies a dispatch lane\nslot; ``client`` is present only for producers that need cross-reference\nscoping (see the field comment below). ``pr_state`` is hydrated by the\nserve-tick pass (``cw.pr_hydrate._hydrate_watched_prs``) exactly like\n``TicketTask.pr_state``.\n\n``status`` gains a ``\"dismissed\"`` terminal (see #3654 below); the\n``(repo, pr_number)`` dedup guard is scoped to ``\"active\"`` so a dismissed\nentry can re-open registration (RFC 0011 S2, adopted #5).\n\nSince #2321 ``source=\"dependency_hold\"`` is registered by ``cw dev-queue hold``\nand by ``cw.reconcile.stale_dispatch_watch`` for dependency parks. An older\ncw reading the new value fails validation on ``source``; rolling back after\na hold has registered a watch needs that watch removed first.\n\nSince #3654 a watch is dismissed (``status=\"dismissed\"``) once its PR is\nMERGED or CLOSED and no non-terminal row of its client still references it\n(``blocked_on_pr``). Dismissed entries are kept, not deleted. The dedup\nguard is active-scoped, so a dismissed entry neither collides nor shadows a\nnew registration.",
+     "description": "An externally-requested PR the operator is watching (GitHub #1154).\n\nRegistered when someone requests the operator's review on a PR the queue\ndoes not otherwise track \u2014 via ``cw review register <pr>`` (``source=\"cli\"``)\nor the ``review_requested`` webhook (``source=\"webhook\"``) \u2014 or, since\nGitHub #1927, when a ``stale_dispatch`` park needs an independent state\nsource for its OWN blocking PR (``source=\"stale_dispatch_park\"``, registered\nby ``cw.reconcile.stale_dispatch_watch``). Persisted as a top-level\n``DevQueueStore.watched_prs`` entry (RFC 0011 S2), deliberately NOT a\n``TicketTask``: it carries no ``lane`` and never occupies a dispatch lane\nslot; ``client`` is present only for producers that need cross-reference\nscoping (see the field comment below). ``pr_state`` is hydrated by the\nserve-tick pass (``cw.pr_hydrate._hydrate_watched_prs``) exactly like\n``TicketTask.pr_state``.\n\n``status`` gains a ``\"dismissed\"`` terminal (see #3654 below); the\n``(repo, pr_number)`` dedup guard is scoped to ``\"active\"`` so a dismissed\nentry can re-open registration (RFC 0011 S2, adopted #5).\n\nSince #2321 ``source=\"dependency_hold\"`` is registered by ``cw dev-queue hold``\nand by ``cw.reconcile.stale_dispatch_watch`` for dependency parks. An older\ncw reading the new value fails validation on ``source``; rolling back after\na hold has registered a watch needs that watch removed first.\n\nSince #3654 a watch is dismissed (``status=\"dismissed\"``) once its PR is\nMERGED or CLOSED and no non-terminal row of its client still references it\n(``blocked_on_pr``). Dismissed entries are kept, not deleted. The dedup\nguard is active-scoped, so a dismissed entry neither collides nor shadows a\nnew registration.\n\nSince #3634 ``cross_repo=True`` marks a watch registered for an explicit\ncross-repo hold reference. An older cw ignores the flag and would read such\na watch as an own-repo ``(client, number)`` fact, so rolling back needs\nevery ``cross_repo: true`` watch dismissed or removed first.",
      "properties": {
       "pr_url": {
        "title": "Pr Url",
@@ -6848,6 +6917,11 @@
        ],
        "default": null,
        "title": "Client"
+      },
+      "cross_repo": {
+       "default": false,
+       "title": "Cross Repo",
+       "type": "boolean"
       },
       "pr_state": {
        "anyOf": [
@@ -9281,14 +9355,36 @@
     "blocked_on_pr": {
      "anyOf": [
       {
+       "minimum": 1,
        "type": "integer"
+      },
+      {
+       "properties": {
+        "repo": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null
+        },
+        "number": {
+         "minimum": 1,
+         "type": "integer"
+        }
+       },
+       "required": [
+        "number"
+       ],
+       "type": "object"
       },
       {
        "type": "null"
       }
-     ],
-     "default": null,
-     "title": "Blocked On Pr"
+     ]
     },
     "pending_fix_dispatch": {
      "anyOf": [
@@ -11462,14 +11558,36 @@
       "blocked_on_pr": {
        "anyOf": [
         {
+         "minimum": 1,
          "type": "integer"
+        },
+        {
+         "properties": {
+          "repo": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "number": {
+           "minimum": 1,
+           "type": "integer"
+          }
+         },
+         "required": [
+          "number"
+         ],
+         "type": "object"
         },
         {
          "type": "null"
         }
-       ],
-       "default": null,
-       "title": "Blocked On Pr"
+       ]
       },
       "pending_fix_dispatch": {
        "anyOf": [
@@ -11599,7 +11717,7 @@
      "type": "object"
     },
     "WatchedPr": {
-     "description": "An externally-requested PR the operator is watching (GitHub #1154).\n\nRegistered when someone requests the operator's review on a PR the queue\ndoes not otherwise track \u2014 via ``cw review register <pr>`` (``source=\"cli\"``)\nor the ``review_requested`` webhook (``source=\"webhook\"``) \u2014 or, since\nGitHub #1927, when a ``stale_dispatch`` park needs an independent state\nsource for its OWN blocking PR (``source=\"stale_dispatch_park\"``, registered\nby ``cw.reconcile.stale_dispatch_watch``). Persisted as a top-level\n``DevQueueStore.watched_prs`` entry (RFC 0011 S2), deliberately NOT a\n``TicketTask``: it carries no ``lane`` and never occupies a dispatch lane\nslot; ``client`` is present only for producers that need cross-reference\nscoping (see the field comment below). ``pr_state`` is hydrated by the\nserve-tick pass (``cw.pr_hydrate._hydrate_watched_prs``) exactly like\n``TicketTask.pr_state``.\n\n``status`` gains a ``\"dismissed\"`` terminal (see #3654 below); the\n``(repo, pr_number)`` dedup guard is scoped to ``\"active\"`` so a dismissed\nentry can re-open registration (RFC 0011 S2, adopted #5).\n\nSince #2321 ``source=\"dependency_hold\"`` is registered by ``cw dev-queue hold``\nand by ``cw.reconcile.stale_dispatch_watch`` for dependency parks. An older\ncw reading the new value fails validation on ``source``; rolling back after\na hold has registered a watch needs that watch removed first.\n\nSince #3654 a watch is dismissed (``status=\"dismissed\"``) once its PR is\nMERGED or CLOSED and no non-terminal row of its client still references it\n(``blocked_on_pr``). Dismissed entries are kept, not deleted. The dedup\nguard is active-scoped, so a dismissed entry neither collides nor shadows a\nnew registration.",
+     "description": "An externally-requested PR the operator is watching (GitHub #1154).\n\nRegistered when someone requests the operator's review on a PR the queue\ndoes not otherwise track \u2014 via ``cw review register <pr>`` (``source=\"cli\"``)\nor the ``review_requested`` webhook (``source=\"webhook\"``) \u2014 or, since\nGitHub #1927, when a ``stale_dispatch`` park needs an independent state\nsource for its OWN blocking PR (``source=\"stale_dispatch_park\"``, registered\nby ``cw.reconcile.stale_dispatch_watch``). Persisted as a top-level\n``DevQueueStore.watched_prs`` entry (RFC 0011 S2), deliberately NOT a\n``TicketTask``: it carries no ``lane`` and never occupies a dispatch lane\nslot; ``client`` is present only for producers that need cross-reference\nscoping (see the field comment below). ``pr_state`` is hydrated by the\nserve-tick pass (``cw.pr_hydrate._hydrate_watched_prs``) exactly like\n``TicketTask.pr_state``.\n\n``status`` gains a ``\"dismissed\"`` terminal (see #3654 below); the\n``(repo, pr_number)`` dedup guard is scoped to ``\"active\"`` so a dismissed\nentry can re-open registration (RFC 0011 S2, adopted #5).\n\nSince #2321 ``source=\"dependency_hold\"`` is registered by ``cw dev-queue hold``\nand by ``cw.reconcile.stale_dispatch_watch`` for dependency parks. An older\ncw reading the new value fails validation on ``source``; rolling back after\na hold has registered a watch needs that watch removed first.\n\nSince #3654 a watch is dismissed (``status=\"dismissed\"``) once its PR is\nMERGED or CLOSED and no non-terminal row of its client still references it\n(``blocked_on_pr``). Dismissed entries are kept, not deleted. The dedup\nguard is active-scoped, so a dismissed entry neither collides nor shadows a\nnew registration.\n\nSince #3634 ``cross_repo=True`` marks a watch registered for an explicit\ncross-repo hold reference. An older cw ignores the flag and would read such\na watch as an own-repo ``(client, number)`` fact, so rolling back needs\nevery ``cross_repo: true`` watch dismissed or removed first.",
      "properties": {
       "pr_url": {
        "title": "Pr Url",
@@ -11660,6 +11778,11 @@
        ],
        "default": null,
        "title": "Client"
+      },
+      "cross_repo": {
+       "default": false,
+       "title": "Cross Repo",
+       "type": "boolean"
       },
       "pr_state": {
        "anyOf": [
