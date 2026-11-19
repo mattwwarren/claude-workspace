@@ -264,3 +264,11 @@ class TestSharedHighWater:
         assert (
             pr_gate.REGRESSED_OWN_BRANCH_HIGH_WATER is REGRESSED_OWN_BRANCH_HIGH_WATER
         )
+
+
+class TestFriction:
+    def test_delivered_friction_line(self, tmp_path: Path) -> None:
+        _verdict(tmp_path)
+        outcome = regress_review_findings(_task(), tmp_path)
+        assert outcome is not None
+        assert outcome.friction == "regress_review_findings: delivered"
