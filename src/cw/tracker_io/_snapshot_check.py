@@ -9,6 +9,7 @@ is diagnosable from the event alone (R8, R24).
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -75,30 +76,81 @@ def _field_reason(before: IssueSnapshot, after: IssueSnapshot) -> str | None:
     return None
 
 
+def _duplicate_reason(snapshot: IssueSnapshot, label: str) -> str | None:
+    """A read may not repeat a comment id or a marker line: that is inconsistent."""
+    dup_ids = sorted(k for k, n in Counter(snapshot.comment_ids).items() if n > 1)
+    if dup_ids:
+        return f"{label} snapshot repeats comment ids: {dup_ids}"
+    dup_markers = sorted(k for k, n in Counter(snapshot.markers).items() if n > 1)
+    if dup_markers:
+        return f"{label} snapshot repeats marker lines: {dup_markers}"
+    return None
+
+
+def _multiset_removed(before: Counter[str], after: Counter[str]) -> list[str]:
+    """Items present before the turn and absent (by count) after it."""
+    return sorted((before - after).keys())
+
+
 def _delta_reason(
     before: IssueSnapshot, after: IssueSnapshot, expected_markers: Sequence[str]
 ) -> str | None:
-    """Only the expected markers, one new comment id each, may appear."""
-    before_ids, after_ids = set(before.comment_ids), set(after.comment_ids)
-    removed_ids = before_ids - after_ids
+    """Only the expected markers, one new comment id each, may appear.
+
+    Comparison is by multiset count, never by set: a set collapses repeats and
+    hides a removal or an extra copy. Duplicates within a single read are
+    rejected first, so the counts below are over distinct per-read values.
+    """
+    for snapshot, label in ((before, "before"), (after, "after")):
+        duplicate = _duplicate_reason(snapshot, label)
+        if duplicate is not None:
+            return duplicate
+    return (
+        _removed_reason(before, after)
+        or _marker_reason(before, after, expected_markers)
+        or _new_id_reason(before, after, expected_markers)
+    )
+
+
+def _removed_reason(before: IssueSnapshot, after: IssueSnapshot) -> str | None:
+    """No comment id or marker line the turn started with may disappear."""
+    removed_ids = _multiset_removed(
+        Counter(before.comment_ids), Counter(after.comment_ids)
+    )
     if removed_ids:
-        return f"comment ids removed: {sorted(removed_ids)}"
-    before_markers, after_markers = set(before.markers), set(after.markers)
-    removed_markers = before_markers - after_markers
+        return f"comment ids removed: {removed_ids}"
+    removed_markers = _multiset_removed(Counter(before.markers), Counter(after.markers))
     if removed_markers:
-        return f"marker lines removed: {sorted(removed_markers)}"
+        return f"marker lines removed: {removed_markers}"
+    return None
+
+
+def _marker_reason(
+    before: IssueSnapshot, after: IssueSnapshot, expected_markers: Sequence[str]
+) -> str | None:
+    """The new marker lines are exactly the expected set, each expected once."""
     expected = set(expected_markers)
-    new_markers = after_markers - before_markers
+    new_markers = set(after.markers) - set(before.markers)
     missing = expected - new_markers
     if missing:
         return f"expected marker lines missing after the turn: {sorted(missing)}"
     unexpected = new_markers - expected
     if unexpected:
         return f"unexpected marker lines appeared: {sorted(unexpected)}"
-    new_ids = after_ids - before_ids
-    if len(new_ids) != len(expected):
+    if len(expected_markers) != len(expected):
+        return "expected marker lines repeat: the turn expects each marker once"
+    return None
+
+
+def _new_id_reason(
+    before: IssueSnapshot, after: IssueSnapshot, expected_markers: Sequence[str]
+) -> str | None:
+    """Exactly one new comment id per expected marker line."""
+    new_ids = Counter(after.comment_ids) - Counter(before.comment_ids)
+    added = sum(new_ids.values())
+    if added != len(expected_markers):
         return (
-            f"{len(new_ids)} new comment ids for {len(expected)} expected marker lines"
+            f"{added} new comment ids for {len(expected_markers)} expected marker lines"
         )
     return None
 
