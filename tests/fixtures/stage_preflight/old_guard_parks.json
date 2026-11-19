@@ -1,0 +1,527 @@
+{
+  "codex/finalize/adopted": {
+    "blocker_stage": "stage4a_merge_gate",
+    "details": "",
+    "reason": "codex_not_found",
+    "retry_eligible": null,
+    "stage_reached": "stage4a_merge_gate"
+  },
+  "codex/finalize/blocking": {
+    "blocker_stage": "stage4a_merge_gate",
+    "details": "",
+    "reason": "codex_not_found",
+    "retry_eligible": null,
+    "stage_reached": "stage4a_merge_gate"
+  },
+  "codex/finalize/clean": {
+    "blocker_stage": "stage4a_merge_gate",
+    "details": "",
+    "reason": "codex_not_found",
+    "retry_eligible": null,
+    "stage_reached": "stage4a_merge_gate"
+  },
+  "codex/finalize/engine": {
+    "blocker_stage": "stage4a_merge_gate",
+    "details": "",
+    "reason": "codex_not_found",
+    "retry_eligible": null,
+    "stage_reached": "stage4a_merge_gate"
+  },
+  "codex/finalize/feedback": {
+    "blocker_stage": "stage4a_merge_gate",
+    "details": "",
+    "reason": "codex_not_found",
+    "retry_eligible": null,
+    "stage_reached": "stage4a_merge_gate"
+  },
+  "codex/harden/adopted": {
+    "blocker_stage": "stage4a_merge_gate",
+    "details": "",
+    "reason": "codex_review_only",
+    "retry_eligible": null,
+    "stage_reached": "stage4a_merge_gate"
+  },
+  "codex/harden/blocking": {
+    "blocker_stage": "stage4a_merge_gate",
+    "details": "",
+    "reason": "codex_review_only",
+    "retry_eligible": null,
+    "stage_reached": "stage4a_merge_gate"
+  },
+  "codex/harden/clean": {
+    "blocker_stage": "stage4a_merge_gate",
+    "details": "",
+    "reason": "codex_review_only",
+    "retry_eligible": null,
+    "stage_reached": "stage4a_merge_gate"
+  },
+  "codex/harden/engine": {
+    "blocker_stage": "stage4a_merge_gate",
+    "details": "",
+    "reason": "codex_review_only",
+    "retry_eligible": null,
+    "stage_reached": "stage4a_merge_gate"
+  },
+  "codex/harden/feedback": {
+    "blocker_stage": "stage4a_merge_gate",
+    "details": "",
+    "reason": "codex_review_only",
+    "retry_eligible": null,
+    "stage_reached": "stage4a_merge_gate"
+  },
+  "codex/impl/adopted": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "codex_not_found",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "codex/impl/blocking": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "codex_not_found",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "codex/impl/clean": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "codex_not_found",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "codex/impl/engine": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "codex_not_found",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "codex/impl/feedback": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "codex_not_found",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "codex/plan/adopted": {
+    "blocker_stage": "stage1_plan",
+    "details": "",
+    "reason": "codex_not_found",
+    "retry_eligible": null,
+    "stage_reached": "stage1_plan"
+  },
+  "codex/plan/blocking": {
+    "blocker_stage": "stage1_plan",
+    "details": "",
+    "reason": "codex_not_found",
+    "retry_eligible": null,
+    "stage_reached": "stage1_plan"
+  },
+  "codex/plan/clean": {
+    "blocker_stage": "stage1_plan",
+    "details": "",
+    "reason": "codex_not_found",
+    "retry_eligible": null,
+    "stage_reached": "stage1_plan"
+  },
+  "codex/plan/engine": {
+    "blocker_stage": "stage1_plan",
+    "details": "",
+    "reason": "codex_not_found",
+    "retry_eligible": null,
+    "stage_reached": "stage1_plan"
+  },
+  "codex/plan/feedback": {
+    "blocker_stage": "stage1_plan",
+    "details": "",
+    "reason": "codex_not_found",
+    "retry_eligible": null,
+    "stage_reached": "stage1_plan"
+  },
+  "codex/review/adopted": {
+    "blocker_stage": "stage3_review",
+    "details": "",
+    "reason": "codex_not_found",
+    "retry_eligible": null,
+    "stage_reached": "stage3_review"
+  },
+  "codex/review/blocking": {
+    "blocker_stage": "stage3_review",
+    "details": "",
+    "reason": "codex_not_found",
+    "retry_eligible": null,
+    "stage_reached": "stage3_review"
+  },
+  "codex/review/clean": {
+    "blocker_stage": "stage3_review",
+    "details": "",
+    "reason": "codex_not_found",
+    "retry_eligible": null,
+    "stage_reached": "stage3_review"
+  },
+  "codex/review/engine": {
+    "blocker_stage": "stage3_review",
+    "details": "",
+    "reason": "codex_not_found",
+    "retry_eligible": null,
+    "stage_reached": "stage3_review"
+  },
+  "codex/review/feedback": {
+    "blocker_stage": "stage3_review",
+    "details": "",
+    "reason": "codex_not_found",
+    "retry_eligible": null,
+    "stage_reached": "stage3_review"
+  },
+  "local/finalize/adopted": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/finalize/blocking": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/finalize/clean": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/finalize/engine": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/finalize/feedback": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/harden/adopted": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/harden/blocking": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/harden/clean": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/harden/engine": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/harden/feedback": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/impl/adopted": {
+    "blocker_stage": "stage2_impl",
+    "details": "This row is an IMPL spawn carrying repair feedback (queue_metadata.review_feedback), and backend=local does not read that feedback or apply the repair-only scope. Blocked before any agent runs. The repair entry is specified for the claude-native impl path; #2983 decided fail-closed for opencode and local adopted rows (RFC 0018 B1, #3059). To proceed: run this ticket on the claude-native executor, or re-add it without --review-feedback-file or with cw dev-queue add --adopt-pr.",
+    "reason": "repair_entry_unsupported_backend",
+    "retry_eligible": false,
+    "stage_reached": "stage2_impl"
+  },
+  "local/impl/blocking": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/impl/clean": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/impl/engine": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/impl/feedback": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/plan/adopted": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/plan/blocking": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/plan/clean": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/plan/engine": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/plan/feedback": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/review/adopted": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/review/blocking": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "local/review/clean": {
+    "blocker_stage": "stage3_review",
+    "details": "review.convergence: clean is set, but this lane's REVIEW executor is backend=local, whose REVIEW lane writes no convergence ledger, so finalize Step 4.0b would park the ticket. Blocked before any agent runs. To proceed: set review.convergence: blocking for this client, or give the lane a claude-native, codex or opencode REVIEW executor. A bare cw dev-queue requeue will not clear this; change the config first.",
+    "reason": "clean_review_unsupported_backend",
+    "retry_eligible": false,
+    "stage_reached": "stage3_review"
+  },
+  "local/review/engine": {
+    "blocker_stage": "stage3_review",
+    "details": "review.convergence: clean is set, but this lane's REVIEW executor is backend=local, whose REVIEW lane writes no convergence ledger, so finalize Step 4.0b would park the ticket. Blocked before any agent runs. To proceed: set review.convergence: blocking for this client, or give the lane a claude-native, codex or opencode REVIEW executor. A bare cw dev-queue requeue will not clear this; change the config first.",
+    "reason": "clean_review_unsupported_backend",
+    "retry_eligible": false,
+    "stage_reached": "stage3_review"
+  },
+  "local/review/feedback": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "endpoint_not_configured",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "opencode/finalize/adopted": {
+    "blocker_stage": "stage4a_merge_gate",
+    "details": "This FINALIZE spawn is routed to backend=opencode, whose hand-written FINALIZE prompt points at the claude-native auto-dev-finalize.md. That doc runs steps (the Skill tool for /prep-pr, Agent subagents, hooks) the backend cannot run, and no real run has verified it. Blocked before any agent runs (RFC 0018 B1, #3059). To proceed: run FINALIZE on the claude-native executor (change the lane's executors.finalize), then cw dev-queue requeue.",
+    "reason": "finalize_unsupported_backend",
+    "retry_eligible": false,
+    "stage_reached": "stage4a_merge_gate"
+  },
+  "opencode/finalize/blocking": {
+    "blocker_stage": "stage4a_merge_gate",
+    "details": "This FINALIZE spawn is routed to backend=opencode, whose hand-written FINALIZE prompt points at the claude-native auto-dev-finalize.md. That doc runs steps (the Skill tool for /prep-pr, Agent subagents, hooks) the backend cannot run, and no real run has verified it. Blocked before any agent runs (RFC 0018 B1, #3059). To proceed: run FINALIZE on the claude-native executor (change the lane's executors.finalize), then cw dev-queue requeue.",
+    "reason": "finalize_unsupported_backend",
+    "retry_eligible": false,
+    "stage_reached": "stage4a_merge_gate"
+  },
+  "opencode/finalize/clean": {
+    "blocker_stage": "stage4a_merge_gate",
+    "details": "This FINALIZE spawn is routed to backend=opencode, whose hand-written FINALIZE prompt points at the claude-native auto-dev-finalize.md. That doc runs steps (the Skill tool for /prep-pr, Agent subagents, hooks) the backend cannot run, and no real run has verified it. Blocked before any agent runs (RFC 0018 B1, #3059). To proceed: run FINALIZE on the claude-native executor (change the lane's executors.finalize), then cw dev-queue requeue.",
+    "reason": "finalize_unsupported_backend",
+    "retry_eligible": false,
+    "stage_reached": "stage4a_merge_gate"
+  },
+  "opencode/finalize/engine": {
+    "blocker_stage": "stage4a_merge_gate",
+    "details": "This FINALIZE spawn is routed to backend=opencode, whose hand-written FINALIZE prompt points at the claude-native auto-dev-finalize.md. That doc runs steps (the Skill tool for /prep-pr, Agent subagents, hooks) the backend cannot run, and no real run has verified it. Blocked before any agent runs (RFC 0018 B1, #3059). To proceed: run FINALIZE on the claude-native executor (change the lane's executors.finalize), then cw dev-queue requeue.",
+    "reason": "finalize_unsupported_backend",
+    "retry_eligible": false,
+    "stage_reached": "stage4a_merge_gate"
+  },
+  "opencode/finalize/feedback": {
+    "blocker_stage": "stage4a_merge_gate",
+    "details": "This FINALIZE spawn is routed to backend=opencode, whose hand-written FINALIZE prompt points at the claude-native auto-dev-finalize.md. That doc runs steps (the Skill tool for /prep-pr, Agent subagents, hooks) the backend cannot run, and no real run has verified it. Blocked before any agent runs (RFC 0018 B1, #3059). To proceed: run FINALIZE on the claude-native executor (change the lane's executors.finalize), then cw dev-queue requeue.",
+    "reason": "finalize_unsupported_backend",
+    "retry_eligible": false,
+    "stage_reached": "stage4a_merge_gate"
+  },
+  "opencode/harden/adopted": {
+    "blocker_stage": "stage4a_merge_gate",
+    "details": "",
+    "reason": "opencode_harden_not_implemented",
+    "retry_eligible": null,
+    "stage_reached": "stage4a_merge_gate"
+  },
+  "opencode/harden/blocking": {
+    "blocker_stage": "stage4a_merge_gate",
+    "details": "",
+    "reason": "opencode_harden_not_implemented",
+    "retry_eligible": null,
+    "stage_reached": "stage4a_merge_gate"
+  },
+  "opencode/harden/clean": {
+    "blocker_stage": "stage4a_merge_gate",
+    "details": "",
+    "reason": "opencode_harden_not_implemented",
+    "retry_eligible": null,
+    "stage_reached": "stage4a_merge_gate"
+  },
+  "opencode/harden/engine": {
+    "blocker_stage": "stage4a_merge_gate",
+    "details": "",
+    "reason": "opencode_harden_not_implemented",
+    "retry_eligible": null,
+    "stage_reached": "stage4a_merge_gate"
+  },
+  "opencode/harden/feedback": {
+    "blocker_stage": "stage4a_merge_gate",
+    "details": "",
+    "reason": "opencode_harden_not_implemented",
+    "retry_eligible": null,
+    "stage_reached": "stage4a_merge_gate"
+  },
+  "opencode/impl/adopted": {
+    "blocker_stage": "stage2_impl",
+    "details": "This row is an IMPL spawn carrying repair feedback (queue_metadata.review_feedback), and backend=opencode does not read that feedback or apply the repair-only scope. Blocked before any agent runs. The repair entry is specified for the claude-native impl path; #2983 decided fail-closed for opencode and local adopted rows (RFC 0018 B1, #3059). To proceed: run this ticket on the claude-native executor, or re-add it without --review-feedback-file or with cw dev-queue add --adopt-pr.",
+    "reason": "repair_entry_unsupported_backend",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "opencode/impl/blocking": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "opencode_not_found",
+    "retry_eligible": true,
+    "stage_reached": "stage2_impl"
+  },
+  "opencode/impl/clean": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "opencode_not_found",
+    "retry_eligible": true,
+    "stage_reached": "stage2_impl"
+  },
+  "opencode/impl/engine": {
+    "blocker_stage": "stage2_impl",
+    "details": "",
+    "reason": "opencode_not_found",
+    "retry_eligible": true,
+    "stage_reached": "stage2_impl"
+  },
+  "opencode/impl/feedback": {
+    "blocker_stage": "stage2_impl",
+    "details": "This row is an IMPL spawn carrying repair feedback (queue_metadata.review_feedback), and backend=opencode does not read that feedback or apply the repair-only scope. Blocked before any agent runs. The repair entry is specified for the claude-native impl path; #2983 decided fail-closed for opencode and local adopted rows (RFC 0018 B1, #3059). To proceed: run this ticket on the claude-native executor, or re-add it without --review-feedback-file or with cw dev-queue add --adopt-pr.",
+    "reason": "repair_entry_unsupported_backend",
+    "retry_eligible": null,
+    "stage_reached": "stage2_impl"
+  },
+  "opencode/plan/adopted": {
+    "blocker_stage": "stage1_plan",
+    "details": "",
+    "reason": "opencode_not_found",
+    "retry_eligible": true,
+    "stage_reached": "stage1_plan"
+  },
+  "opencode/plan/blocking": {
+    "blocker_stage": "stage1_plan",
+    "details": "",
+    "reason": "opencode_not_found",
+    "retry_eligible": true,
+    "stage_reached": "stage1_plan"
+  },
+  "opencode/plan/clean": {
+    "blocker_stage": "stage1_plan",
+    "details": "",
+    "reason": "opencode_not_found",
+    "retry_eligible": true,
+    "stage_reached": "stage1_plan"
+  },
+  "opencode/plan/engine": {
+    "blocker_stage": "stage1_plan",
+    "details": "",
+    "reason": "opencode_not_found",
+    "retry_eligible": true,
+    "stage_reached": "stage1_plan"
+  },
+  "opencode/plan/feedback": {
+    "blocker_stage": "stage1_plan",
+    "details": "",
+    "reason": "opencode_not_found",
+    "retry_eligible": true,
+    "stage_reached": "stage1_plan"
+  },
+  "opencode/review/adopted": {
+    "blocker_stage": "stage3_review",
+    "details": "",
+    "reason": "opencode_not_found",
+    "retry_eligible": true,
+    "stage_reached": "stage3_review"
+  },
+  "opencode/review/blocking": {
+    "blocker_stage": "stage3_review",
+    "details": "",
+    "reason": "opencode_not_found",
+    "retry_eligible": true,
+    "stage_reached": "stage3_review"
+  },
+  "opencode/review/clean": {
+    "blocker_stage": "stage3_review",
+    "details": "",
+    "reason": "opencode_not_found",
+    "retry_eligible": true,
+    "stage_reached": "stage3_review"
+  },
+  "opencode/review/engine": {
+    "blocker_stage": "stage3_review",
+    "details": "review engine refused on opencode lane: cause=backend_unsupported; skill=repo-review; run review on a claude-native or codex lane, or remove review.engine; then cw dev-queue requeue",
+    "reason": "review_engine_unsupported_backend",
+    "retry_eligible": false,
+    "stage_reached": "stage3_review"
+  },
+  "opencode/review/feedback": {
+    "blocker_stage": "stage3_review",
+    "details": "",
+    "reason": "opencode_not_found",
+    "retry_eligible": true,
+    "stage_reached": "stage3_review"
+  }
+}
