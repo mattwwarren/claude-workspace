@@ -52,7 +52,13 @@ _SITES: Final[dict[tuple[str, str], tuple[str, str]]] = {
     ("codex_fix_loop/commit.py", "_run_repair_turn"): (RECORDED, "FIX (same runner)"),
     # Tracker-IO: recorded through the late flush.
     ("tracker_io/_argv.py", "build_tracker_io_argv"): (RECORDED, "tracker-IO argv"),
-    ("tracker_io/_turn.py", "_launch"): (RECORDED, "TRACKER_IO via flush_late_usage"),
+    # One launch site serves the legacy turn and the O2b courier. Legacy turns are
+    # recorded through flush_late_usage; courier turns have no owning session and
+    # record nothing (ADR-0023, the known usage gap).
+    ("tracker_io/_turn.py", "launch_turn"): (
+        RECORDED,
+        "TRACKER_IO via flush_late_usage (courier turns unrecorded, ADR-0023)",
+    ),
     # Not a turn: the capability probe has no --json and is skipped.
     ("codex_review/_capability.py", "_build_probe_argv"): (
         UNREACHABLE,

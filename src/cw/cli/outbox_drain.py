@@ -36,7 +36,9 @@ if TYPE_CHECKING:
     from cw.outbox_drain import DrainReport
 
 GROUP_HELP = OUTBOX_GROUP_HELP
-DRAIN_HELP = "Drain pending outbox entries to the ticket tracker through gh."
+DRAIN_HELP = (
+    "Drain pending outbox entries to the ticket tracker through its tickets binding."
+)
 CLIENT_HELP = (
     "Drain one client (default: every configured client that has an outbox directory)."
 )
@@ -52,7 +54,7 @@ FORCE_HELP = (
 JSON_HELP = "Output the drain envelope as JSON."
 
 _NOTHING = "No outbox clients to drain."
-_UNCONFIGURED = "unconfigured (no usable gh tickets binding): {names}"
+_UNCONFIGURED = "unconfigured (no usable tickets binding): {names}"
 _SKIPPED_DISABLED = "skipped (outbox.enabled is false): {names}"
 _REFUSED = (
     "Client '{name}' has outbox.enabled set to false, so its outbox is not"

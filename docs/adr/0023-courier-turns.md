@@ -1,0 +1,115 @@
+# The outbox drain posts MCP tracker writes through courier turns
+
+**Status:** Accepted
+**Driven by:** #3740 (RFC 0019 O2b, D-B3, D-B5, D-B6, D-B8); #3695 (plugin-app argv); #3368 (project-layer MCP reader); #3383 (status vocabulary)
+
+## Decision
+
+An outbox entry whose tickets binding has a codex MCP realization is posted by
+one codex agent turn per drain step (`cw.tracker_io._drain`), not by `gh`. A
+declared server (an `mcp_servers` entry in the user or system layer) takes one
+post turn, checked by its read-back. A plugin app (no such entry) takes three
+turns: a before snapshot, the post, and an after snapshot, and the entry is
+delivered only when the before/after delta is exactly the expected marker
+comments (`cw.tracker_io._snapshot_check.compare_snapshots`). Nothing is
+retried. A timeout or unparseable result is `unverified`.
+
+## Invariants
+
+1. A `per_server` entry is never `delivered` unless the snapshot delta matches
+   exactly: one new comment per expected marker, no removed comment or marker,
+   and state, assignee and labels unchanged.
+2. The agent marker is appended to every courier part except when the entry's
+   own `operator_authored` flag is true. The flag is read from the entry and is
+   never inferred from the binding or the tracker (R21).
+3. A config layer that exists but cannot be read or parsed refuses every turn of
+   that entry before launch (`MCP_SERVER_UNNAMED`, binding-level UNREACHABLE).
+   A missing config is "nothing declared" and proceeds. On `per_server` every
+   turn counts as write-capable, because read-only cannot be enforced without a
+   per-tool allowlist (fail-narrower).
+4. One gate record per (client, binding) episode for every unreachable release.
+   The "already filed" bit is `gate_filed` on the existing unreachable marker, so
+   a tick never re-files while the marker is set. A failing filer is retried on
+   the next tick and never fails a drain.
+5. The `turns` payload key appears only on outbox events that followed a courier
+   turn. It never appears on `gh`-drain events, skipped events, or pre-launch
+   releases.
+
+## What this means for callers
+
+- `ToolNarrowing` (`per_tool`, `per_server`, `none`) from H1 is reused. The
+  declared/app split is a per-binding refinement of H1's codex `PER_TOOL`
+  declaration: a server declared in the user or system layer is `per_tool`, and
+  an undeclared server is a plugin app (`per_server`).
+- `post_parts_via_turn` keeps its name and signature. Its only behaviour change
+  is invariant 3: a launched write-capable turn refuses when a config layer is
+  unreadable. This reaches `codex_stage_post` and `codex_review_persist` through
+  the shared function. Both are named in the CHANGELOG.
+- `declared_server_names` is a thin wrapper over `scan_declared_servers` with its
+  old contract. Its three sibling callers (`codex_plan`, `codex_finalize`,
+  `codex_impl`) are unchanged; they keep the project-layer-blind, fail-open
+  posture. Filed as debt.
+
+## Unverified premises (operator checklist)
+
+Both are accepted premises (RFC 0019 row:2). They are **unverified until run on a
+plugin-app Linear host**. CI cannot check them.
+
+- **R23.** codex accepts `-c apps.<id>.default_tools_enabled=true` for a
+  plugin-app binding. The argv is built with that key only; no other key is
+  guessed. If the key is wrong, the app turn sees no tools and reports
+  `tool_unavailable`. The entry is released with the unreachable marker, one
+  pending event is emitted, and a gate record is filed. A post is never lost.
+- **R24.** Linear keeps an HTML-comment marker line in a posted comment and
+  returns it from the list tool. The fixture
+  `tests/fixtures/tracker_io/linear_marker_probe.json` is out of this change
+  because it needs a live host. If Linear strips the comment, dedup is blind and
+  an entry can re-post, and read-back settles `unverified/readback_mismatch`,
+  never `delivered`.
+
+## Blast radius of a `per_server` turn
+
+The agent holds the app's full tool surface during the turn. For Linear, the only
+app host in O2b, that includes other issues, issue creation and state changes.
+The delta compares only this ticket's comment ids, markers, state, assignee and
+labels. There is no pre-write restriction and no automatic undo. On a failed
+delta the entry settles `unverified/readback_mismatch`, and the event is
+forwarded to the operator. The operator inspects the ticket's activity and the
+tracker's audit log, then reverts by hand. A client opts out with
+`outbox.enabled: false`.
+
+Other apps are not enumerated, so disabling them is best effort. Adding an app
+enumeration later is a one-parameter change to the argv builder.
+
+## Consequences
+
+- Each entry on a plugin-app host costs three turns, up to 300 s each. A drain of
+  20 entries can run for hours. There is no wall-clock budget or timeout breaker
+  (debt).
+- The recheck verify turn on `per_server` runs before the before snapshot, so it
+  is not bracketed by the delta. Its read-only nature is prompt-level.
+- A hard kill after a successful post leaves a claimed entry that the next run
+  restores to pending and re-posts without a verify turn. This is O1/O2 store
+  behaviour, recorded as a known limit.
+- A mistyped binding `server` name, or a server declared only in a project
+  layer, is classed as an app. It then gets the app's full tool surface, guarded
+  only by the delta.
+- A cause change inside one gate episode does not file a second record. The
+  marker clears on the first delivered role or on `cw outbox drain --force`.
+- Courier turns have no owning session, so they record no usage. The launch
+  site is shared with the legacy turn (`launch_turn`, `cw.tracker_io._turn`),
+  which records through `flush_late_usage`; a courier turn's usage is lost
+  (known gap, debt).
+- `OutboxConfig.enabled` defaults to true, so every client with an MCP tickets
+  binding and a codex realization starts making agent turns on the next tick
+  after upgrade. Opt out per client with `outbox.enabled: false`.
+
+## Alternatives considered
+
+- A second narrowing enum. Rejected: it would duplicate H1's vocabulary.
+- An `apps.*` reader or guessed keys (`apps._default.*`). Rejected: no code path
+  can enumerate apps, and guessed keys would fail silently.
+
+## Referenced by
+
+- #3740, #3695, #3368, #3383, ADR-0013 (2026-11-10 update, superseded in part)

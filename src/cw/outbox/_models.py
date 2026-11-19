@@ -399,6 +399,9 @@ class UnreachableMarker(BaseModel):
     role: OutboxRole
     reason: OutboxReason
     announced: list[str] = Field(default_factory=list)
+    # ``gate_filed`` is whether this episode's gate record was filed (O2b,
+    # RFC 0019 D-B6). Defaulted, so a marker written without it still parses.
+    gate_filed: bool = False
 
     @model_validator(mode="after")
     def _release_reason(self) -> Self:

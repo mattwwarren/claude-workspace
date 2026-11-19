@@ -177,6 +177,7 @@ class TestUnreachableMarker:
 
         assert data == {
             "schema_version": 1,
+            "gate_filed": False,
             "role": "knowledge",
             "reason": "transient_failure",
             "announced": [_ID_A, _ID_B],

@@ -65,6 +65,7 @@ When an ADR is superseded, edit the old one's status line — don't delete it.
 | [0020](0020-the-operator-is-the-orchestrator-session.md) | The operator is the orchestrator session; a human is escalated to only for product or scope forks | Accepted |
 | [0021](0021-claude-confirm-spend-is-uncapped-by-decision.md) | The Claude confirm round's spend is uncapped by decision | Accepted |
 | [0022](0022-a-clean-default-branch-merge-never-causes-a-review.md) | A clean default-branch merge never causes a review; merge at most once, only on conflict | Accepted |
+| [0023](0023-courier-turns.md) | The outbox drain posts MCP tracker writes through courier turns | Accepted |
 
 ADR-0000 is the foundational record — the trajectory it captures is
 assumed as ground truth by every subsequent ADR.

@@ -87,7 +87,11 @@ _NO_REPORT = frozenset(
         TrackerIoReason.RESULT_UNPARSEABLE,
     }
 )
-_STATUS_REASON: dict[TurnStatus, TrackerIoReason] = {
+# Exhaustive over TurnStatus (O2b, #3383, R12): adding a status without a row
+# is a mypy error, not a silent fall-through to None.
+_STATUS_REASON: dict[TurnStatus, TrackerIoReason | None] = {
+    "ok": None,
+    "already_present": None,
     "tool_unavailable": TrackerIoReason.TOOL_UNAVAILABLE,
     "failed": TrackerIoReason.TURN_REPORTED_FAILURE,
 }
@@ -137,7 +141,7 @@ def public_state_for(
 
 
 def _check_status(_t: str, _e: Sequence[str], r: TurnResult) -> TrackerIoReason | None:
-    return _STATUS_REASON.get(r.status)
+    return _STATUS_REASON[r.status]
 
 
 def _check_ticket(t: str, _e: Sequence[str], r: TurnResult) -> TrackerIoReason | None:
