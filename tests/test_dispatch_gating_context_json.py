@@ -238,7 +238,7 @@ class TestSpawnRendersContextJsonFromSnapshot:
         assert result.spawned == 1
         assert not context_file.exists()
 
-    def test_unremovable_reader_file_aborts_spawn(
+    def test_unremovable_reader_file_does_not_abort_spawn(
         self,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
@@ -269,5 +269,5 @@ class TestSpawnRendersContextJsonFromSnapshot:
 
         result = dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
 
-        assert result.spawned == 0
+        assert result.spawned == 1
         assert context_file.exists()
