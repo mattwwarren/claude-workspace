@@ -14,24 +14,33 @@ retroactively, so every fixture below persists its park with no pre-existing
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import pytest
 
 from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.dev_queue.crud import register_or_adopt_watched_pr
 from cw.models import (
     ClientConfig,
     DevQueueStore,
+    OrchestratorEvent,
+    OrchestratorEventType,
     PrState,
     QueueItemStatus,
     TicketTask,
     WatchedPr,
 )
+from cw.models.pr_ref import PrRef
+from cw.models.tasks.store import occupies_lane_slot
 from cw.reconcile.stale_dispatch_watch import (
     _WATCHED_PR_SOURCE_STALE_DISPATCH_PARK,
     register_stale_dispatch_watched_prs,
 )
+from cw.reconcile.tasks.stale_gate import _is_variant_b_gate_task
+from tests._reconcile_helpers import park_via_routing
 from tests._shared.session_seeding import _make_ticket_task
+from tests._ticket_view_helpers import events_of
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -385,3 +394,245 @@ class TestRegisterStaleDispatchWatchedPrs:
         assert len(watched) == 1
         assert watched[0].pr_state is not None
         assert watched[0].pr_state.state == "MERGED"
+
+
+# --- #3634 D7: the own-repo bound on a worker-supplied explicit ref --------
+
+_OTHER_5 = PrRef(repo="other/repo", number=5)
+_LOGGER = "cw.reconcile.stale_dispatch_watch"
+
+
+def _dep_park(ref: object, *, session_id: str | None = "sess-dh") -> TicketTask:
+    return _park(
+        ticket_id="DH-1",
+        disposition="dependency_hold",
+        blocked_reason="dependency_unmerged",
+        blocked_on_pr=ref,
+        session_id=session_id,
+    )
+
+
+def _routed_park(workspace: Path, ref: str) -> TicketTask:
+    return park_via_routing(
+        "DH-1",
+        "client-a",
+        workspace,
+        "blocked",
+        {
+            "status": "blocked",
+            "blocker": {
+                "stage": "s4_finalize",
+                "reason": "dependency_unmerged",
+                "depends_on_pr_ref": ref,
+            },
+        },
+    )
+
+
+def _row() -> TicketTask:
+    return next(t for t in load_dev_queue().tasks if t.ticket_id == "DH-1")
+
+
+def _refusal_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        r for r in caplog.records if r.name == _LOGGER and r.levelno == logging.WARNING
+    ]
+
+
+def _refusal_pages() -> list[OrchestratorEvent]:
+    return [
+        e
+        for e in events_of(OrchestratorEventType.SESSION_NEEDS_ATTENTION)
+        if e.payload.get("paused_status") == "dependency_ref_not_own_repo"
+    ]
+
+
+class TestWorkerRefBound:
+    def test_own_repo_ref_is_normalised_and_watched(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _routed_park(tmp_path, "FOO/Bar#5")
+        _no_clients(monkeypatch)
+        calls = _stub_slug(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            assert register_stale_dispatch_watched_prs() == ["DH-1"]
+
+        assert _row().blocked_on_pr == PrRef(number=5)
+        [watch] = load_dev_queue().watched_prs
+        assert watch.repo == _SLUG
+        assert watch.cross_repo is False
+        assert len(calls) == 1
+        assert _refusal_warnings(caplog) == []
+        assert _refusal_pages() == []
+
+    def test_own_repo_watch_is_found_by_a_later_operator_hold(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_dev_queue(DevQueueStore(tasks=[_dep_park(PrRef(repo=_SLUG, number=5))]))
+        _no_clients(monkeypatch)
+        _stub_slug(monkeypatch)
+        register_stale_dispatch_watched_prs()
+
+        outcome = register_or_adopt_watched_pr(
+            WatchedPr(
+                pr_url="https://github.com/foo/bar/pull/5",
+                repo=_SLUG,
+                pr_number=5,
+                client="client-a",
+                source="dependency_hold",
+            )
+        )
+
+        assert outcome == "already_active"
+
+    def test_other_repo_ref_is_refused_once(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        routed = _routed_park(tmp_path, "other/repo#5")
+        _no_clients(monkeypatch)
+        calls = _stub_slug(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            assert register_stale_dispatch_watched_prs() == []
+            assert register_stale_dispatch_watched_prs() == []
+
+        row = _row()
+        assert row.blocked_on_pr is None
+        assert row.disposition == "awaiting_operator"
+        assert occupies_lane_slot(row) is True
+        assert _is_variant_b_gate_task(row) is False
+        assert load_dev_queue().watched_prs == []
+        assert len(calls) == 1
+        [warning] = _refusal_warnings(caplog)
+        assert warning.args == ("DH-1", "client-a", "other/repo#5")
+        [event] = _refusal_pages()
+        assert event.payload["paused_status"] == "dependency_ref_not_own_repo"
+        assert event.payload["client"] == "client-a"
+        assert event.payload["ticket_id"] == "DH-1"
+        assert event.payload["session_id"] == routed.session_id
+        assert event.payload["lane"] == row.lane
+        assert event.payload["crashed"] is False
+        assert event.payload["session_name"] == ""
+        assert event.payload["claude_session_id"] is None
+        assert event.payload["breadcrumbs"] == (
+            "worker-supplied dependency ref other/repo#5 is not in this client's"
+            " repo foo/bar; a worker may arm an auto-release only for its own"
+            " repo. Hold it with: cw dev-queue hold DH-1"
+            " --until-pr-merged other/repo#5 -c client-a"
+        )
+        assert event.correlation_id == "DH-1"
+
+    def test_unresolvable_own_slug_is_indeterminate(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        save_dev_queue(DevQueueStore(tasks=[_dep_park(_OTHER_5)]))
+        before = load_dev_queue().model_dump_json()
+        _no_clients(monkeypatch)
+        _stub_slug(monkeypatch, slug=None)
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            assert register_stale_dispatch_watched_prs() == []
+
+        assert load_dev_queue().model_dump_json() == before
+        assert _refusal_warnings(caplog) == []
+        assert _refusal_pages() == []
+
+        save_dev_queue(DevQueueStore(tasks=[_dep_park(PrRef(repo=_SLUG, number=5))]))
+        _stub_slug(monkeypatch)
+        assert register_stale_dispatch_watched_prs() == ["DH-1"]
+
+    def test_operator_hold_is_exempt(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[_dep_park(PrRef(repo="o/r", number=5), session_id=None)]
+            )
+        )
+        _no_clients(monkeypatch)
+        calls = _stub_slug(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            assert register_stale_dispatch_watched_prs() == ["DH-1"]
+
+        [watch] = load_dev_queue().watched_prs
+        assert watch.repo == "o/r"
+        assert watch.cross_repo is True
+        assert watch.pr_url == "https://github.com/o/r/pull/5"
+        assert calls == []
+        assert _row().blocked_on_pr == PrRef(repo="o/r", number=5)
+        assert _refusal_warnings(caplog) == []
+        assert _refusal_pages() == []
+
+    @pytest.mark.parametrize("ref", [PrRef(repo=_SLUG, number=5), _OTHER_5])
+    def test_lost_race_to_an_operator_hold_writes_nothing(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        ref: PrRef,
+    ) -> None:
+        save_dev_queue(DevQueueStore(tasks=[_dep_park(ref)]))
+        _no_clients(monkeypatch)
+
+        def _slug_then_operator_hold(git_dir: Path) -> str:
+            store = load_dev_queue()
+            store.tasks[0].session_id = None
+            save_dev_queue(store)
+            return _SLUG
+
+        monkeypatch.setattr(
+            "cw.reconcile.stale_dispatch_watch._resolve_repo_slug",
+            _slug_then_operator_hold,
+        )
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            assert register_stale_dispatch_watched_prs() == []
+
+        row = _row()
+        assert row.session_id is None
+        assert row.blocked_on_pr == ref
+        assert row.disposition == "dependency_hold"
+        assert load_dev_queue().watched_prs == []
+        assert _refusal_warnings(caplog) == []
+        assert _refusal_pages() == []
+
+        assert register_stale_dispatch_watched_prs() == ["DH-1"]
+        [watch] = load_dev_queue().watched_prs
+        assert watch.cross_repo is True
+
+    def test_candidate_key_is_the_ref_key(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        own_watch = WatchedPr(
+            pr_url="https://github.com/foo/bar/pull/70",
+            repo=_SLUG,
+            pr_number=70,
+            client="client-a",
+            source="dependency_hold",
+        )
+        hold = _dep_park(PrRef(repo="o/r", number=70), session_id=None)
+        save_dev_queue(DevQueueStore(tasks=[hold], watched_prs=[own_watch]))
+        _no_clients(monkeypatch)
+        _stub_slug(monkeypatch)
+
+        assert register_stale_dispatch_watched_prs() == ["DH-1"]
+        assert [(w.repo, w.cross_repo) for w in load_dev_queue().watched_prs] == [
+            (_SLUG, False),
+            ("o/r", True),
+        ]
