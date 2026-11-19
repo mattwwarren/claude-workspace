@@ -1163,11 +1163,11 @@ class TestCrashConsistency:
 
         monkeypatch.setattr("cw.outbox_drain.claim", _claim_then_raise)
 
-        report = _drain(tmp_path)
+        with pytest.raises(OutboxRecordError):
+            _drain(tmp_path)
 
         assert _entry(first.id).state is OutboxState.CLAIMED
         assert _state(second.id) == (OutboxState.DELIVERED, OutboxReason.POSTED)
-        assert report.delivered == 1
         assert len(gh.comment_records()) == 1
 
     def test_committed_unreadable_settlement_emits_skip_and_continues(
@@ -1190,19 +1190,70 @@ class TestCrashConsistency:
 
         monkeypatch.setattr("cw.outbox._layout.write_record", _write_then_raise)
 
-        report = _drain(tmp_path)
+        with pytest.raises(OutboxRecordError):
+            _drain(tmp_path)
 
         assert _state(skipped.id) == (
             OutboxState.FAILED,
             OutboxReason.BODY_UNREADABLE,
         )
         assert _state(delivered.id) == (OutboxState.DELIVERED, OutboxReason.POSTED)
-        assert report.skipped == 1
-        assert report.delivered == 1
         assert _types(events) == [
             OrchestratorEventType.OUTBOX_ENTRY_DELIVERED,
             OrchestratorEventType.OUTBOX_ENTRY_SKIPPED,
         ]
+
+    def test_marker_write_failure_holds_pending_and_fails_the_run(
+        self,
+        tmp_path: Path,
+        gh: GhThread,
+        events: list[CapturedEvent],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        entry = enqueue().entry
+
+        def _fail_marker(*_args: Any, **_kwargs: Any) -> None:
+            msg = "marker sidecar is unwritable"
+            raise OutboxRecordError(msg)
+
+        monkeypatch.setattr("cw.outbox_drain.write_marker", _fail_marker)
+
+        with pytest.raises(OutboxRecordError):
+            _drain(tmp_path, bindings=Bindings())
+
+        assert _state(entry.id) == (
+            OutboxState.PENDING,
+            OutboxReason.BINDING_UNREACHABLE,
+        )
+        assert read_held(CLIENT) == frozenset({entry.id})
+        assert events[0][0] is OrchestratorEventType.OUTBOX_ENTRY_PENDING
+        assert events[0][1]["held"] is True
+
+    def test_held_list_write_failure_surfaces_committed_release(
+        self,
+        tmp_path: Path,
+        gh: GhThread,
+        events: list[CapturedEvent],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        entry = enqueue().entry
+        monkeypatch.setattr("cw.outbox_drain.read_parts", _raise_record_error)
+
+        def _fail_held(*_args: Any, **_kwargs: Any) -> None:
+            msg = "held sidecar is unwritable"
+            raise OutboxRecordError(msg)
+
+        monkeypatch.setattr("cw.outbox_drain.append_held", _fail_held)
+
+        with pytest.raises(OutboxRecordError):
+            _drain(tmp_path)
+
+        assert _state(entry.id) == (
+            OutboxState.PENDING,
+            OutboxReason.TRANSIENT_FAILURE,
+        )
+        assert events[0][0] is OrchestratorEventType.OUTBOX_ENTRY_PENDING
+        assert events[0][1]["held"] is False
 
     @pytest.mark.parametrize("unverified", [False, True])
     def test_marker_is_written_after_the_entry_and_before_the_event(

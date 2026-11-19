@@ -262,8 +262,15 @@ def _hold(run: _Run, entry: OutboxEntry) -> None:
         claim_token=_token(entry),
         reason=OutboxReason.TRANSIENT_FAILURE,
     )
+    try:
+        append_held(run.client, entry.id)
+    except OutboxError as exc:
+        # The record transition committed, but the durable retry suppression
+        # did not.  Reconciliation accounts for the committed release while
+        # the retained error makes the run fail visibly.
+        run.storage_error = run.storage_error or exc
+        raise
     counted = _accounted(run, entry)
-    append_held(run.client, entry.id)
     if counted:
         run.released += 1
         run.held += 1
@@ -283,6 +290,43 @@ def _per_item_failure(run: _Run, entry: OutboxEntry) -> None:
         _to_unverified(run, entry)
 
 
+def _persist_marker(
+    run: _Run,
+    entry: OutboxEntry,
+    marker: UnreachableMarker,
+    *,
+    persist: bool,
+    is_pending: bool,
+) -> bool:
+    """Persist a marker, using the held list as a pending-entry fallback."""
+    if not (persist or entry.role in run.marker_write_failures):
+        return False
+    try:
+        write_marker(run.client, marker)
+    except OutboxError as exc:
+        # The entry transition is already committed.  Retain the storage
+        # error and durably exclude a pending entry from the tick while the
+        # marker sidecar is unavailable.  If that fallback also fails,
+        # reconciliation accounts for the committed transition.
+        run.storage_error = run.storage_error or exc
+        run.marker_write_failures.add(entry.role)
+        logger.warning(
+            "outbox: could not persist unreachable marker for %s (%s)",
+            entry.role.value,
+            type(exc).__name__,
+        )
+        if not is_pending:
+            return False
+        try:
+            append_held(run.client, entry.id)
+        except OutboxError as held_exc:
+            run.storage_error = run.storage_error or held_exc
+            raise
+        return True
+    run.marker_write_failures.discard(entry.role)
+    return False
+
+
 def _announce(
     run: _Run, entry: OutboxEntry, marker: UnreachableMarker, *, persist: bool = False
 ) -> None:
@@ -300,32 +344,28 @@ def _announce(
     is_pending = entry.claimed_from is OutboxState.PENDING
     if is_pending:
         release(run.client, entry.id, claim_token=_token(entry), reason=marker.reason)
-        counted = _accounted(run, entry)
-        if counted:
-            run.released += 1
     else:
         _resettle_unverified(run, entry)
         counted = entry.id in run.accounted
     run.broken[entry.role] = marker
-    if first or persist or entry.role in run.marker_write_failures:
-        try:
-            write_marker(run.client, marker)
-        except OutboxError as exc:
-            # The entry transition is already committed.  Keep the in-memory
-            # role break and account for this entry once; the tick's no-progress
-            # guard prevents a missing sidecar from causing a relaunch loop.
-            run.marker_write_failures.add(entry.role)
-            logger.warning(
-                "outbox: could not persist unreachable marker for %s (%s)",
-                entry.role.value,
-                type(exc).__name__,
-            )
-        else:
-            run.marker_write_failures.discard(entry.role)
+    held_fallback = _persist_marker(
+        run, entry, marker, persist=persist or first, is_pending=is_pending
+    )
+    if is_pending:
+        counted = _accounted(run, entry)
+        if counted:
+            run.released += 1
+            if held_fallback:
+                run.held += 1
     if not first or not counted:
         return
     if is_pending:
-        _emit(OrchestratorEventType.OUTBOX_ENTRY_PENDING, entry, marker.reason)
+        _emit(
+            OrchestratorEventType.OUTBOX_ENTRY_PENDING,
+            entry,
+            marker.reason,
+            held=held_fallback,
+        )
     else:
         _emit(
             OrchestratorEventType.OUTBOX_ENTRY_UNVERIFIED,
@@ -565,14 +605,15 @@ def _drain_state(run: _Run, state: OutboxState, cap: int) -> None:
                 run.client, state=state, limit=1, exclude_ids=frozenset(run.seen)
             )
         except OutboxError as exc:
+            # A claim write may have committed before reporting its error.
+            # Preserve the original failure even when the record is still
+            # claimed; the next run must recover it and the CLI must fail.
+            run.storage_error = run.storage_error or exc
             if candidate_id is None:
-                run.storage_error = run.storage_error or exc
                 return
             run.seen.add(candidate_id)
             current = _entry_for_id(run.client, candidate_id)
-            if current is None or current.state is state:
-                run.storage_error = run.storage_error or exc
-            elif current.state is OutboxState.CLAIMED:
+            if current is not None and current.state is OutboxState.CLAIMED:
                 run.claims += 1
             _reconcile_store_failure(run, candidate_id, exc, unchanged_state=state)
             continue

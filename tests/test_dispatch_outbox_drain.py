@@ -29,6 +29,7 @@ from cw.native_daemon import FakeNativeDaemonClient
 from cw.outbox import (
     TICK_SCAN_MAX_RECORDS,
     OutboxReason,
+    OutboxRecordError,
     OutboxRole,
     OutboxState,
     UnreachableMarker,
@@ -180,6 +181,30 @@ class TestEnabled:
         record = _layout.read_record(CLIENT, entry.id)
         assert record.state is OutboxState.PENDING
         assert record.reason is OutboxReason.BINDING_UNREACHABLE
+
+    def test_marker_write_failure_is_held_and_not_relaunched(
+        self,
+        tmp_path: Path,
+        spawner: _Spawner,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        entry = enqueue().entry
+        disabled_binding = client_config(tmp_path, bindings=Bindings())
+
+        def _fail_marker(*_args: object, **_kwargs: object) -> None:
+            msg = "marker sidecar is unwritable"
+            raise OutboxRecordError(msg)
+
+        monkeypatch.setattr("cw.outbox_drain.write_marker", _fail_marker)
+        with pytest.raises(OutboxRecordError):
+            run_drain(CLIENT, disabled_binding, limit=None, force=False)
+
+        clients = _clients(tmp_path)
+        tick_drain.launch_outbox_drains(clients)
+        tick_drain.launch_outbox_drains(clients)
+
+        assert entry.id in tick_drain.read_held(CLIENT)
+        assert spawner.launched == []
 
 
 class TestSkip:
