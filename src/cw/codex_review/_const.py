@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Protocol
 # The leaf module, not the ``cw.models`` package root: it imports only
 # ``enum``, so this runtime import (``_exec_policy_argv`` calls SandboxMode)
 # can never pull ``cw.codex_review`` back in.
-from cw.auto_dev_result.schema._vocab import CODEX_MUST_FIX_FINDINGS_BLOCKER_REASON
+from cw.auto_dev_result.schema._vocab import CODEX_MUST_FIX_FINDINGS
 from cw.models.enums import SandboxMode
 
 if TYPE_CHECKING:
@@ -183,7 +183,9 @@ def _is_spawn_error(result: _SpawnProbeResult) -> bool:
 CODEX_TIMEOUT = "codex_timeout"
 CODEX_ERROR = "codex_error"
 CODEX_REVIEW_UNPARSEABLE = "codex_review_unparseable"
-CODEX_MUST_FIX_FINDINGS = CODEX_MUST_FIX_FINDINGS_BLOCKER_REASON
+# CODEX_MUST_FIX_FINDINGS is imported above from the one definition in
+# cw.auto_dev_result.schema._vocab and re-exported by cw.codex_review.
+__all__ = ["CODEX_MUST_FIX_FINDINGS"]
 CODEX_BUDGET_EXHAUSTED = "budget_exhausted"
 # The provider reported its model momentarily out of capacity ("Selected model
 # is at capacity. Please try a different model.", codex exit 1 + a terminal

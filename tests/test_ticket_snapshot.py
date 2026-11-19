@@ -778,8 +778,29 @@ def test_dev_queue_does_not_load_codex_review() -> None:
     assert proc.stdout.strip() == "False"
 
 
-def test_codex_must_fix_reason_is_one_value() -> None:
-    from cw.auto_dev_result import CODEX_MUST_FIX_FINDINGS_BLOCKER_REASON
-    from cw.codex_review import CODEX_MUST_FIX_FINDINGS
+def test_codex_must_fix_reason_has_one_definition() -> None:
+    """The MUST_FIX blocker reason literal lives in one ``src/cw`` module (#3712)."""
+    import ast
+    from pathlib import Path
 
-    assert CODEX_MUST_FIX_FINDINGS == CODEX_MUST_FIX_FINDINGS_BLOCKER_REASON
+    import cw
+    from cw.auto_dev_result.schema import _vocab
+    from cw.codex_review import CODEX_MUST_FIX_FINDINGS
+    from cw.stage_verification import finalize_result
+
+    literal = "codex_must_fix_findings"
+    assert CODEX_MUST_FIX_FINDINGS is _vocab.CODEX_MUST_FIX_FINDINGS
+    assert finalize_result.CODEX_MUST_FIX_FINDINGS is _vocab.CODEX_MUST_FIX_FINDINGS
+    assert literal == _vocab.CODEX_MUST_FIX_FINDINGS
+
+    src_root = Path(cw.__file__).parent
+    defining = {
+        path.relative_to(src_root).as_posix()
+        for path in src_root.rglob("*.py")
+        if any(
+            isinstance(node, ast.Constant) and node.value == literal
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        )
+    }
+    assert "auto_dev_result/schema/_vocab.py" in defining  # scan is not vacuous
+    assert defining == {"auto_dev_result/schema/_vocab.py"}
