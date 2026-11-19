@@ -1185,8 +1185,10 @@ common wedge conditions:
   that holds a lane slot (`occupies_lane_slot`) while parked on a deliberate
   operator gate: disposition `finalize_gate_held`, `stale_dispatch_gate`,
   `attempt_cap_blocked`, the RFC 0016 adoption parks, `review_approval_gate`,
-  `review_engine_modified`, `tracker_mcp_gate` (#3055: fix the branch
-  settings file or the backend's MCP config, then `cw dev-queue requeue`) or
+  `review_engine_modified`, `binding_unreachable`, `binding_unbound` or
+  `binding_tool_missing` (RFC 0019 H2b #3744; the legacy `tracker_mcp_gate`
+  reads as `binding_unreachable`; #3055: fix the branch settings file or the
+  backend's MCP config, then `cw dev-queue requeue`) or
   `gate_timeout` (#3372: see **Park: `gate_timeout`** below),
   `awaiting_ci_evidence` (#3618: see **Park: `awaiting_ci_evidence`** below),
   `dependency_hold` (#2321: reported only when it has no `blocked_on_pr`, since
@@ -3917,7 +3919,8 @@ is posted through the tracker-IO turn below when the client names its codex
 MCP server, and the event then fires only when that turn refused to launch or
 the agent reported it could not post. Read the artifact, and record anything
 the loop must obey with `cw review constrain`. `cw doctor` reports such lanes
-as `tracker-mcp/<client>/<lane>/codex`.
+on their `harness-capabilities/<client>/<lane>/codex` row (the retired
+`tracker-mcp/<client>/<lane>/codex` row before RFC 0019 H2b, #3744).
 
 **Tracker-IO turn (#3057, RFC 0018 A2).** cw Python still never talks to a
 non-GitHub tracker API (ADR-0013). To post a codex verdict there, the daemon
@@ -4202,11 +4205,35 @@ the `codex` backend runs the whole ticket on codex. Setup, in order:
    `tracker_mcp_gate.servers.codex`. GitHub uses `gh` and needs nothing more.
    The daemon-only tracker writes go through the narrow turn in "Tracker-IO
    turn (#3057, RFC 0018 A2)" above.
-4. Run `cw doctor`. Read the `all-codex-lane/<client>/<lane>` line: `[OK]` in
-   blocking mode; `[WARN]` in clean mode with REVIEW present and
-   `confirm_backend` unset, naming the Claude dependency and the two opt-outs;
-   `[OK]` with a resolved confirm note otherwise. The `tracker-mcp/<client>/<lane>/codex`
-   line reports step 3.
+4. Run `cw doctor`. In clean mode with REVIEW present and `confirm_backend`
+   unset, the lane's `review-convergence/<client>/<lane>` line is `[WARN]`,
+   naming the Claude dependency and the two opt-outs (the retired
+   `all-codex-lane/<client>/<lane>` line before RFC 0019 H2b, #3744). The
+   lane's `harness-capabilities/<client>/<lane>/codex` line reports step 3 as
+   its tickets binding (the retired `tracker-mcp/<client>/<lane>/codex` line).
+
+**Capability dogfood checklist (RFC 0019 H2b, #3744).** Operator-run, after
+the tick-side reachability preflight merges. Record the outcome per harness
+and file a ticket for each deviation.
+
+1. Run `cw doctor`. Every lane has a
+   `harness-capabilities/<client>/<lane>/<backend>` row listing its declared
+   stages, its tickets binding state and, where tools are declared, the tool
+   check. No `tracker-mcp/` or `all-codex-lane/` rows remain.
+2. For each installed harness (claude-native, codex, opencode, local),
+   dispatch one ticket on a scratch client and record whether it reaches its
+   first stage or parks.
+3. For a park, check that the disposition names the capability
+   (`binding_unreachable`, `binding_unbound`, `binding_tool_missing`,
+   `codex_not_found`, `stage_unsupported`, and so on), that the
+   `session.needs_attention` event carries `need` and `paused_status`, and
+   that `tracker_mcp_unavailable_pre_dispatch` is the blocked reason of a
+   binding park.
+4. For one client with `bindings.tickets.preflight.enabled: true` and one
+   without, confirm the opted-out client gets no reachability park.
+5. Confirm a recovered codex binary clears the park streak: after a
+   `codex_not_found` park, restore the binary and confirm the next codex
+   claim spawns without engaging the lane breaker.
 
 A clean all-codex lane with `confirm_backend` unset and no `claude` binary on
 `PATH` parks the ticket `confirm_backend_unavailable` at the confirm round. The

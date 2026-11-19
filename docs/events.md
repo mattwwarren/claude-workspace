@@ -349,7 +349,7 @@ with `error_kind` the `blocker.reason` (an existing reason, for example
   "pending": 2,
   "running": 1,
   "cap": 3,
-  "skip_reason": "availability_gate | ssh_key_gate | disk_pressure_gate | freshness_gate | usage_limited | host_capacity_gated | cap_full | lane_cap_blocked | attempt_cap_blocked | stale_pr_blocked | worktree_occupied | ticket_closed | spawn_error | lane_circuit_paused | spawn_error_backoff | no_pending | none"
+  "skip_reason": "availability_gate | ssh_key_gate | disk_pressure_gate | freshness_gate | usage_limited | host_capacity_gated | cap_full | lane_cap_blocked | attempt_cap_blocked | stale_pr_blocked | binding_blocked | worktree_occupied | ticket_closed | spawn_error | lane_circuit_paused | spawn_error_backoff | no_pending | none"
 }
 ```
 **Semantics:** Emitted once per client per tick. `claimed` is the number of
@@ -387,7 +387,14 @@ ceiling parks a task, additionally carrying `attempt_ceiling` (int) — the
 lane may have overridden the global value. `stale_pr_blocked` (#1862) when
 the pre-dispatch open-PR gate parks a PLAN/IMPL-stage task whose branch
 already carries an open, unmerged PR — payload carries `ticket_id`, no
-`attempt_ceiling`. `worktree_occupied` (#2077) when a PENDING task's
+`attempt_ceiling`. `binding_blocked` (#2442, renamed from
+`tracker_mcp_gate_blocked` by RFC 0019 H2b #3744) when the tick-side binding
+reachability preflight parks a task whose harness verifiably cannot reach
+the client's tickets binding — payload carries `ticket_id`, no
+`attempt_ceiling`; events written before #3744 carry the legacy
+`tracker_mcp_gate_blocked`, which readers map to `binding_blocked` through
+`cw.stage_preflight.canonical_reason` until the alias-removal release.
+`worktree_occupied` (#2077) when a PENDING task's
 per-ticket worktree is currently held by a live session or daemon worker —
 caught either by the pre-claim occupancy screen (before the row is claimed)
 or by a genuinely-live `HookContextConflictError` during spawn (after a claim
@@ -407,8 +414,8 @@ Optional extra keys, grouped by which skip-reason path emits them: `lanes`
 (per-lane breakdown) is present on the main claim-loop tick and every
 per-client skip path (`availability_gate`, `ssh_key_gate`,
 `disk_pressure_gate`, `freshness_gate`, `usage_limited`), but absent on the
-four per-task ticks (`attempt_cap_blocked`, `stale_pr_blocked`,
-`worktree_occupied`, `ticket_closed`).
+five per-task ticks (`attempt_cap_blocked`, `stale_pr_blocked`,
+`binding_blocked`, `worktree_occupied`, `ticket_closed`).
 `lane_occupants` (`dict[str, list[{"ticket_id": str, "status": str}]]`, a
 top-level key — deliberately *not* nested inside `lanes`, since
 `orchestrate.py`'s `_extract_lanes` hard-filters `lanes` values to
@@ -1043,21 +1050,34 @@ orchestrator session, per ADR-0020 — a human only for a product/scope fork) �
 the dispatch loop cannot automatically retry or complete it. `paused_status` is an
 open enum; consumers MUST tolerate unknown values. Known values:
 
-- `"tracker_mcp_gate"` — the pre-dispatch tracker-MCP gate (#2442, #3055)
-  refused to claim a PENDING PLAN/IMPL row whose worker could not reach the
-  tracker MCP. No session ran: `breadcrumbs` is empty. Extra keys beside the
-  canonical nine, in this order: for a claude-native row `branch`,
-  `file_inspected` (the branch's settings path), `expected_plugin`, `backend`
-  (`"claude-native"`, added by #3055) and `details`
-  (`branch=<b>; file_inspected=<f>; expected_plugin=<p>`, unchanged); for an
-  opencode row (#3055, RFC 0018 S3) `branch`, `file_inspected` (the
-  user-layer `opencode.json` path), `backend` (`"opencode"`),
-  `expected_server` (the `tracker_mcp_gate.servers` name) and `details`
-  (`branch=<b>; file_inspected=<f>; backend=<backend>; expected_server=<s>`),
-  with no `expected_plugin`. All values are strings. The row is
-  BLOCKED_ON_USER with `blocked_reason: tracker_mcp_unavailable_pre_dispatch`;
-  `cw doctor --reap` never reverts it. Release: fix the config, then
+- `"binding_unreachable"`, `"binding_unbound"`, `"binding_tool_missing"` —
+  the tick-side binding reachability preflight (#2442, #3055, RFC 0019 H2b
+  #3744) refused to claim a PENDING PLAN/IMPL/FINALIZE row whose harness
+  verifiably cannot reach the client's tickets binding for a stage that needs
+  it (opt-in: `bindings.tickets.preflight.enabled`). `binding_unreachable`:
+  the plugin or MCP server is absent or disabled; `binding_unbound`: a codex
+  PLAN or FINALIZE row on a non-GitHub tracker whose `servers.codex` is unset
+  or not a valid name; `binding_tool_missing`: the server is enabled but its
+  codex `enabled_tools` allowlist excludes a declared
+  `bindings.tickets.mcp.codex.tools` name. No session ran: `breadcrumbs` is
+  empty. Extra keys beside the canonical nine, in this order: for a
+  claude-native row `branch`, `file_inspected` (the branch's settings path),
+  `expected_plugin`, `backend` (`"claude-native"`) and `details`
+  (`branch=<b>; file_inspected=<f>; expected_plugin=<p>`); for an opencode or
+  codex row `branch`, `file_inspected` (the user-layer config path, or
+  `clients.yaml tracker_mcp_gate.servers` for `binding_unbound`), `backend`,
+  `expected_server` and `details`
+  (`branch=<b>; file_inspected=<f>; backend=<backend>; expected_server=<s>`,
+  plus `; missing_tools=<a,b>` for `binding_tool_missing`), with no
+  `expected_plugin`; then, last, `need` (`"tickets"`, the role the stage
+  needs; additive, #3744). All values are strings. The row is BLOCKED_ON_USER
+  with `blocked_reason: tracker_mcp_unavailable_pre_dispatch`; `cw doctor
+  --reap` never reverts it. Release: fix the config, then
   `cw dev-queue requeue`.
+- `"tracker_mcp_gate"` — the legacy name of the park above, written before
+  #3744 (same extra keys, no `need`). No longer emitted; readers map it to
+  `binding_unreachable` through `cw.stage_preflight.canonical_reason` until
+  the alias-removal release.
 - `"review_approval_gate"` — dispatch refused to claim a PENDING FINALIZE row
   whose tier is `large` on the row because its review approval is missing,
   stale or unreadable for the branch head (#2773; the predicate finalize

@@ -9,10 +9,11 @@ from tests._shared.workflow_text import _norm
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_install_doc_lists_the_check_as_a_static_declaration() -> None:
+def test_install_doc_lists_the_check_as_a_declaration_only_row() -> None:
+    """Since RFC 0019 H2b (#3744) the row can FAIL; it stays declaration-only."""
     text = _norm((_REPO_ROOT / "docs" / "INSTALL.md").read_text(encoding="utf-8"))
-    assert "`[OK] harness-capabilities/<client>/<lane>/<backend>`" in text
-    assert "static declaration" in text
+    assert "`[OK/FAIL] harness-capabilities/<client>/<lane>/<backend>`" in text
+    assert "Declaration-only: auth, env and headless load unverified" in text
     assert "declared, not enforced" not in text
 
 
