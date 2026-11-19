@@ -294,6 +294,14 @@ AWAITING_CI_EVIDENCE_BLOCKER_REASON: Literal["awaiting_ci_evidence"] = (
 REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON: Literal["review_confirm_must_fix"] = (
     "review_confirm_must_fix"
 )
+# blocker.reason of a codex review that ended with MUST_FIX findings. The same
+# value as ``cw.codex_review.CODEX_MUST_FIX_FINDINGS``; declared here so
+# ``cw.dev_queue`` can read it without importing ``cw.codex_review`` (whose
+# review context imports ``cw.ticket_snapshot``, which imports ``cw.dev_queue``;
+# RFC 0019 T2, #3712). Pinned equal by tests/test_ticket_snapshot.py.
+CODEX_MUST_FIX_FINDINGS_BLOCKER_REASON: Literal["codex_must_fix_findings"] = (
+    "codex_must_fix_findings"
+)
 # Prefix reserving the explicit freeform half of the open enum (#2097). A
 # reason starting with it is *declared* experimental/producer-local, so it is
 # never warned about even though it is absent from KNOWN_BLOCKER_REASONS.

@@ -270,7 +270,7 @@ class TestTrackerIndependence:
         for target in (
             "cw.gh.fetch_issue_comments",
             "cw.gh.post_issue_comment",
-            "cw.codex_review._context.core.fetch_issue_comments",
+            "cw.ticket_snapshot._fetch.fetch_issue_snapshot",
         ):
             monkeypatch.setattr(target, _no_network)
         _seed()

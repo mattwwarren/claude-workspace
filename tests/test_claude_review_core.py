@@ -38,6 +38,7 @@ from tests._codex_review_helpers import (
     _doc_json,
     _finding_payload,
     _seed_default_branch_config,
+    _serve_comments,
     _task,
     _write,
 )
@@ -347,10 +348,6 @@ class TestConfirmPromptPayload:
                 }
             ),
         )
-        _write(
-            wt / ".claude" / "project-config.yaml",
-            "tracking:\n  primary:\n    system: github-issues\n",
-        )
         _write(wt / "CLAUDE.md", "## Quality Gates\nQUALITY-GATES-MARKER-7f3a\n")
         _write(
             wt / "pyproject.toml",
@@ -358,9 +355,9 @@ class TestConfirmPromptPayload:
         )
         for filename in _REVIEWER_ROLE_AGENT_FILES.values():
             _write(wt / ".claude" / "agents" / filename, f"AGENT-SPEC-{filename}\n")
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: [
+        served = _serve_comments(
+            monkeypatch,
+            [
                 {
                     "author": {"login": "operator"},
                     "body": "OPERATOR-COMMENT-MARKER-7f3a",
@@ -388,6 +385,7 @@ class TestConfirmPromptPayload:
             model=None,
             wall_clock_budget_seconds=None,
             session_id="confirm-T-1",
+            snapshots=served.ctx,
         )
         assert runner.prompts
         for role, prompt in zip(runner.roles, runner.prompts, strict=True):

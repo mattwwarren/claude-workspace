@@ -13,9 +13,9 @@ when that row cannot be recorded, which depends on the client's tracker (R1):
   marker. Nothing reads a marker there, so printing one would be the inert
   settle this ticket removes.
 
-The polarity is the strict one the codex review pass's comment fetch
-(``_context.core._fetch_ticket_comments``) uses: it reads a marker back only
-on exact equality. It is NOT the fail-open
+The polarity is the strict one the codex review pass's snapshot context
+(``ticket_snapshot._binding.context_for_client``) uses: it reads a marker back
+only on exact equality. It is NOT the fail-open
 ``lifecycle._tracker_allows_github_fetch``, whose unknown-means-GitHub answer
 would degrade exactly where no marker is ever read.
 

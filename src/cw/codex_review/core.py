@@ -19,6 +19,7 @@ from cw.codex_review._shard import plan_prompt_shards
 from cw.codex_review._shard_run import ShardedRun, run_sharded_roles
 from cw.codex_review._verdict import synthesize_codex_review_result
 from cw.models.enums import DEFAULT_REVIEWER_SANDBOX_MODE, SandboxMode
+from cw.ticket_snapshot import DEFAULT_SNAPSHOT_CONTEXT
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from cw.models import TicketTask
     from cw.review_convergence import ResolutionSpec
     from cw.review_findings import ReviewVerdict
+    from cw.ticket_snapshot import SnapshotContext
 
 
 def run_prepared_roles(
@@ -110,6 +112,7 @@ def run_review(
     max_prompt_chars: int | None = None,
     resolution: ResolutionSpec | None = None,
     reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
+    snapshots: SnapshotContext = DEFAULT_SNAPSHOT_CONTEXT,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the full per-role review pass; return ``(result, verdict)``.
 
@@ -171,6 +174,8 @@ def run_review(
     forwarded to the capability probe and every role. Callers with no
     resolved executor config (``cw review confirm``, ``converge
     delta-confirm``) keep the read-only default.
+
+    ``snapshots`` (#3712) is forwarded to :func:`_prepare_review_pass`.
     """
     prepared = _prepare_review_pass(
         task,
@@ -181,6 +186,7 @@ def run_review(
         session_id=session_id,
         resolution=resolution,
         reviewer_sandbox_mode=reviewer_sandbox_mode,
+        snapshots=snapshots,
     )
     run = run_prepared_roles(
         prepared,

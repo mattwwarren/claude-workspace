@@ -83,10 +83,12 @@ from tests._codex_review_helpers import (
     _measured_from_head,
     _observed_comments,
     _SequencedRunner,
+    _serve_comments,
     _stage_merge_from_other_branch,
     _write,
     assert_clean_after_refusal,
     exclude_cw_dir,
+    login_context,
 )
 from tests._review_convergence_helpers import codex_audit_fixture
 from tests._shared.git_repos import add_bare_origin, commit_tracked_file, git_in
@@ -106,6 +108,7 @@ if TYPE_CHECKING:
     from cw.auto_dev_result import AutoDevResult
     from cw.codex_runner import CodexRunner
     from cw.review_findings import ReviewerFindingsDocument
+    from tests._codex_review_helpers import ServedSnapshot
 
     _FixBehavior = CodexRunResult | Callable[[Path, list[str]], CodexRunResult] | None
 
@@ -295,7 +298,7 @@ def _run_loop(
     **guard_kwargs: object,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the loop; *guard_kwargs* (#2633: ``growth_budget_lines``,
-    ``growth_guard_enabled``, ``operator_login``) are forwarded only when given.
+    ``growth_guard_enabled``, ``snapshots``) are forwarded only when given.
     """
     extra: dict[str, object] = dict(guard_kwargs)
     if stall_cycles is not None:
@@ -1961,7 +1964,7 @@ class TestFixLoopDisabledGate:
             raise AssertionError
 
         monkeypatch.setattr(commit, "capture_cycle_baseline", _unreachable)
-        monkeypatch.setattr(_driver, "_fetch_ticket_comments", _unreachable)
+        monkeypatch.setattr(_driver, "read_for_stage", _unreachable)
         runner = _FixLoopRunner([_MF_DOC])
 
         out, _ = _run_loop(
@@ -3022,9 +3025,6 @@ class TestRereviewForwardsFindingDispositions:
 
         monkeypatch.setattr(review_pass, "_prepare_review_pass", _spy_prepare)
         monkeypatch.setattr(review_pass, "synthesize_codex_review_result", _spy_synth)
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments", lambda *_a, **_kw: []
-        )
 
         # The delta is `main..HEAD`, i.e. exactly the feature commit — so the
         # re-derived MUST_FIX's evidence is genuinely inside this pass's diff
@@ -3070,22 +3070,18 @@ class TestRereviewForwardsFindingDispositions:
         the ledger alone would leave every fix-loop cycle silent about it.
         """
         worktree = _worktree(make_git_repo, "wt-2210-rereview-refused")
-        # The comment thread is only read for a resolvable GitHub tracker.
-        _write(
-            worktree / ".claude" / "project-config.yaml",
-            "tracking:\n  primary:\n    system: github-issues\n",
-        )
         ledger = self._ledger(git_in(worktree, "rev-parse", "HEAD"))
         (key,) = ledger
         forged = {key: ledger[key].model_copy(update={"actor": ""})}
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: [
+        served = _serve_comments(
+            monkeypatch,
+            [
                 {
                     "author": {"login": "op"},
                     "body": render_finding_disposition_block(forged),
                 }
             ],
+            login="op",
         )
         monkeypatch.setattr(
             "cw.codex_background._sync_finding_dispositions_to_running_task",
@@ -3106,6 +3102,7 @@ class TestRereviewForwardsFindingDispositions:
             previous_reviewed_sha=base,
             prior_open_findings=[],
             cycle=1,
+            snapshots=served.ctx,
         )
 
         assert prepared.finding_dispositions == {}
@@ -3256,20 +3253,6 @@ def _foo_bar_comment() -> dict[str, object]:
     }
 
 
-def _serve_comments(
-    monkeypatch: pytest.MonkeyPatch, comments: list[dict[str, object]] | None
-) -> list[str]:
-    """Patch the driver's comments fetch; return the ticket ids it was asked for."""
-    asked: list[str] = []
-
-    def _fetch(_worktree: Path, ticket_id: str) -> list[dict[str, object]] | None:
-        asked.append(ticket_id)
-        return comments
-
-    monkeypatch.setattr(_driver, "_fetch_ticket_comments", _fetch)
-    return asked
-
-
 class TestGrowthBudgetThroughLoop:
     def test_lock_added_in_allowed_file_parks_before_commit(
         self, make_git_repo: Callable[..., Path]
@@ -3404,7 +3387,7 @@ class TestGuardSwitch:
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-switch-constraint")
-        _serve_comments(monkeypatch, [_foo_bar_comment()])
+        served = _serve_comments(monkeypatch, [_foo_bar_comment()])
         runner = _FixLoopRunner(
             [_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor("new.py", _FOO_BAR_CONTENT)]
         )
@@ -3414,7 +3397,7 @@ class TestGuardSwitch:
             worktree,
             session_id="s-switch-constraint",
             growth_guard_enabled=False,
-            operator_login=_LOGIN,
+            snapshots=served.ctx,
         )
 
         assert out.status == "stage_complete"
@@ -3453,12 +3436,12 @@ class TestConstraintsThroughLoop:
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-constraint-prompt")
-        asked = _serve_comments(monkeypatch, _observed_comments())
+        served = _serve_comments(monkeypatch, _observed_comments())
         runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC])
 
-        _run_loop(runner, worktree, session_id="s-c-prompt", operator_login=_LOGIN)
+        _run_loop(runner, worktree, session_id="s-c-prompt", snapshots=served.ctx)
 
-        assert asked == ["T-1"]
+        assert served.asked == ["T-1"]
         prompt = _fix_prompts(runner)[0]
         assert _CONSTRAINTS_HEADING in prompt
         assert "Do not attach up to 4,000 characters" in prompt
@@ -3472,10 +3455,10 @@ class TestConstraintsThroughLoop:
             for c in _observed_comments()
             if str(c["body"]).startswith("Round-2 plan approved")
         ]
-        _serve_comments(monkeypatch, unmarked)
+        served = _serve_comments(monkeypatch, unmarked)
         runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC])
 
-        _run_loop(runner, worktree, session_id="s-c-unmarked", operator_login=_LOGIN)
+        _run_loop(runner, worktree, session_id="s-c-unmarked", snapshots=served.ctx)
 
         assert _CONSTRAINTS_HEADING not in _fix_prompts(runner)[0]
 
@@ -3484,13 +3467,13 @@ class TestConstraintsThroughLoop:
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-constraint-park")
         head_before = git_in(worktree, "rev-parse", "HEAD")
-        _serve_comments(monkeypatch, [_foo_bar_comment()])
+        served = _serve_comments(monkeypatch, [_foo_bar_comment()])
         runner = _FixLoopRunner(
             [_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor("new.py", _FOO_BAR_CONTENT)]
         )
 
         out, _ = _run_loop(
-            runner, worktree, session_id="s-c-park", operator_login=_LOGIN
+            runner, worktree, session_id="s-c-park", snapshots=served.ctx
         )
 
         assert out.blocker is not None
@@ -3502,20 +3485,118 @@ class TestConstraintsThroughLoop:
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-constraint-nologin")
-        asked = _serve_comments(monkeypatch, [_foo_bar_comment()])
+        served = _serve_comments(monkeypatch, [_foo_bar_comment()], login=None)
         runner = _FixLoopRunner(
             [_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor("new.py", _FOO_BAR_CONTENT)]
         )
 
-        out, _ = _run_loop(runner, worktree, session_id="s-c-nologin")
+        out, _ = _run_loop(
+            runner, worktree, session_id="s-c-nologin", snapshots=served.ctx
+        )
 
-        assert asked == []
         assert out.status == "stage_complete"
         assert _CONSTRAINTS_HEADING not in _fix_prompts(runner)[0]
 
 
-def _load(worktree: Path, operator_login: str | None = _LOGIN) -> object:
-    return _driver._load_constraints(worktree, _task(), operator_login, None)
+def _marker_comment(token: str, created_at: str, comment_id: str) -> dict[str, object]:
+    comment = _foo_bar_comment()
+    comment["body"] = (
+        f"## Pre-flight Resolutions (operator)\n\nDo not add `{token}`.\n"
+        "<!-- auto-dev-preflight-resolutions -->"
+    )
+    comment["createdAt"] = created_at
+    comment["id"] = comment_id
+    return comment
+
+
+class TestConstraintsOffGitHubThroughLoop:
+    """#3712: off GitHub the evaluator binds by operator id, not by login."""
+
+    def test_an_operator_id_comment_binds_without_a_resolved_login(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-mcp-constraint")
+        served = _serve_comments(
+            monkeypatch,
+            [_foo_bar_comment()],
+            login=None,
+            github=False,
+            operator_ids=(_LOGIN,),
+        )
+        runner = _FixLoopRunner(
+            [_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor("new.py", _FOO_BAR_CONTENT)]
+        )
+
+        out, _ = _run_loop(
+            runner, worktree, session_id="s-mcp-constraint", snapshots=served.ctx
+        )
+
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_FIX_CONSTRAINT_VIOLATION
+        assert _CONSTRAINTS_HEADING in _fix_prompts(runner)[0]
+        assert _source_of(out) is OperatorConstraintsSource.COMMENT
+
+    def test_a_comment_by_a_non_operator_id_binds_nothing(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-mcp-constraint-other")
+        served = _serve_comments(
+            monkeypatch,
+            [_foo_bar_comment()],
+            login=None,
+            github=False,
+            operator_ids=("someone-else",),
+        )
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC])
+
+        out, _ = _run_loop(
+            runner, worktree, session_id="s-mcp-other", snapshots=served.ctx
+        )
+
+        assert out.status == "stage_complete"
+        assert _CONSTRAINTS_HEADING not in _fix_prompts(runner)[0]
+        assert _source_of(out) is OperatorConstraintsSource.NONE
+
+    def test_the_newest_comment_is_the_last_in_snapshot_order(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Never a string ``max`` over ``createdAt``: the later-in-order comment
+        wins even though its timestamp sorts lower."""
+        served = _serve_comments(
+            monkeypatch,
+            [
+                _marker_comment("older_tok", "2026-10-09T00:00:00Z", "c1"),
+                _marker_comment("newer_tok", "2026-10-01T00:00:00Z", "c2"),
+            ],
+            login=None,
+            github=False,
+            operator_ids=(_LOGIN,),
+        )
+
+        loaded = _load(served)
+
+        assert loaded is not None
+        assert loaded.forbidden_tokens == frozenset({"newer_tok"})
+
+    def test_github_still_takes_the_max_created_at(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        served = _serve_comments(
+            monkeypatch,
+            [
+                _marker_comment("older_tok", "2026-10-09T00:00:00Z", "c1"),
+                _marker_comment("newer_tok", "2026-10-01T00:00:00Z", "c2"),
+            ],
+        )
+
+        loaded = _load(served)
+
+        assert loaded is not None
+        assert loaded.forbidden_tokens == frozenset({"older_tok"})
+
+
+def _load(served: ServedSnapshot) -> object:
+    return _driver._load_constraints(served.snapshot, served.ctx, _task(), None)
 
 
 def _driver_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
@@ -3525,14 +3606,13 @@ def _driver_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]
 class TestLoadConstraintsObservability:
     def test_comments_fetch_none_logs_warning(
         self,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _serve_comments(monkeypatch, None)
+        served = _serve_comments(monkeypatch, None)
 
         with caplog.at_level(logging.INFO, logger=_DRIVER_LOGGER):
-            loaded = _load(tmp_path)
+            loaded = _load(served)
 
         (record,) = _driver_records(caplog)
         assert loaded is None
@@ -3545,18 +3625,16 @@ class TestLoadConstraintsObservability:
 
     def test_operator_login_none_logs_warning(
         self,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        asked = _serve_comments(monkeypatch, _observed_comments())
+        served = _serve_comments(monkeypatch, _observed_comments(), login=None)
 
         with caplog.at_level(logging.INFO, logger=_DRIVER_LOGGER):
-            loaded = _load(tmp_path, operator_login=None)
+            loaded = _load(served)
 
         (record,) = _driver_records(caplog)
         assert loaded is None
-        assert asked == []
         assert record.levelname == "WARNING"
         assert record.msg == (
             "codex fix loop: operator login unresolved (ticket=%s); marker "
@@ -3566,16 +3644,15 @@ class TestLoadConstraintsObservability:
 
     def test_marker_comment_with_zero_tokens_logs_warning(
         self,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         comment = _foo_bar_comment()
         comment["body"] = "Proceed.\n<!-- auto-dev-preflight-resolutions -->"
-        _serve_comments(monkeypatch, [comment])
+        served = _serve_comments(monkeypatch, [comment])
 
         with caplog.at_level(logging.INFO, logger=_DRIVER_LOGGER):
-            loaded = _load(tmp_path)
+            loaded = _load(served)
 
         (record,) = _driver_records(caplog)
         assert loaded is not None
@@ -3589,14 +3666,13 @@ class TestLoadConstraintsObservability:
 
     def test_active_constraints_log_info(
         self,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _serve_comments(monkeypatch, _observed_comments())
+        served = _serve_comments(monkeypatch, _observed_comments())
 
         with caplog.at_level(logging.INFO, logger=_DRIVER_LOGGER):
-            loaded = _load(tmp_path)
+            loaded = _load(served)
 
         (record,) = _driver_records(caplog)
         assert loaded is not None
@@ -3612,7 +3688,6 @@ class TestLoadConstraintsObservability:
 
     def test_no_marker_comment_logs_nothing(
         self,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -3621,10 +3696,10 @@ class TestLoadConstraintsObservability:
             for c in _observed_comments()
             if "auto-dev-preflight-resolutions" not in str(c["body"])
         ]
-        _serve_comments(monkeypatch, unmarked)
+        served = _serve_comments(monkeypatch, unmarked)
 
         with caplog.at_level(logging.INFO, logger=_DRIVER_LOGGER):
-            loaded = _load(tmp_path)
+            loaded = _load(served)
 
         assert loaded is None
         assert _driver_records(caplog) == []
@@ -3661,7 +3736,7 @@ def _no_comment_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
         msg = "a non-GitHub tracker must not fetch comments"
         raise AssertionError(msg)
 
-    monkeypatch.setattr("cw.codex_review._context.core.fetch_issue_comments", _boom)
+    monkeypatch.setattr("cw.ticket_snapshot._fetch.fetch_issue_snapshot", _boom)
 
 
 def _foo_bar_runner() -> _FixLoopRunner:
@@ -3686,7 +3761,7 @@ class TestRowConstraintsThroughLoop:
             worktree,
             session_id="s-row-linear",
             task=_row_task(_ROW_FOO_BAR),
-            operator_login=_LOGIN,
+            snapshots=login_context(github=False),
         )
 
         assert out.blocker is not None
@@ -3707,7 +3782,7 @@ class TestRowConstraintsThroughLoop:
         mirror = _foo_bar_comment()
         mirror["body"] = f"{mirror['body']}\n\n{AGENT_COMMENT_MARKER}"
         assert RESOLUTIONS_MARKER in str(mirror["body"])
-        _serve_comments(monkeypatch, [mirror])
+        served = _serve_comments(monkeypatch, [mirror])
         head_before = git_in(worktree, "rev-parse", "HEAD")
 
         out, _ = _run_loop(
@@ -3715,7 +3790,7 @@ class TestRowConstraintsThroughLoop:
             worktree,
             session_id="s-row-mirror",
             task=_row_task(_ROW_FOO_BAR),
-            operator_login=_LOGIN,
+            snapshots=served.ctx,
         )
 
         assert out.blocker is not None
@@ -3755,27 +3830,27 @@ class TestRowConstraintsThroughLoop:
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-row-nologin")
-        asked = _serve_comments(monkeypatch, [_foo_bar_comment()])
+        served = _serve_comments(monkeypatch, [_foo_bar_comment()], login=None)
 
         out, _ = _run_loop(
             _foo_bar_runner(),
             worktree,
             session_id="s-row-nologin",
             task=_row_task(_ROW_FOO_BAR),
+            snapshots=served.ctx,
         )
 
-        assert asked == []
         assert out.blocker is not None
         assert out.blocker.reason == CODEX_FIX_CONSTRAINT_VIOLATION
 
     def test_row_and_comment_constraints_are_additive(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _serve_comments(monkeypatch, [_foo_bar_comment()])
+        served = _serve_comments(monkeypatch, [_foo_bar_comment()])
         loaded = _driver._load_constraints(
-            make_git_repo("wt-row-additive"),
+            served.snapshot,
+            served.ctx,
             _row_task("Do not add `baz_qux`."),
-            _LOGIN,
             None,
         )
         assert loaded is not None
@@ -3792,7 +3867,7 @@ class TestRowConstraintsThroughLoop:
             baz,
             session_id="s-row-additive",
             task=_row_task("Do not add `baz_qux`."),
-            operator_login=_LOGIN,
+            snapshots=served.ctx,
         )
         assert out.blocker is not None
         assert out.blocker.reason == CODEX_FIX_CONSTRAINT_VIOLATION
@@ -3802,15 +3877,17 @@ class TestRowConstraintsThroughLoop:
 class TestRowConstraintsObservability:
     def test_active_row_constraints_log_info(
         self,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _serve_comments(monkeypatch, [])
+        served = _serve_comments(monkeypatch, [])
 
         with caplog.at_level(logging.INFO, logger=_DRIVER_LOGGER):
             loaded = _driver._load_constraints(
-                tmp_path, _row_task(_ROW_FOO_BAR, "Never add a lock."), _LOGIN, None
+                served.snapshot,
+                served.ctx,
+                _row_task(_ROW_FOO_BAR, "Never add a lock."),
+                None,
             )
 
         (record,) = _driver_records(caplog)
@@ -3825,15 +3902,17 @@ class TestRowConstraintsObservability:
 
     def test_row_constraints_with_nothing_to_enforce_log_warning(
         self,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _serve_comments(monkeypatch, [])
+        served = _serve_comments(monkeypatch, [])
 
         with caplog.at_level(logging.INFO, logger=_DRIVER_LOGGER):
             loaded = _driver._load_constraints(
-                tmp_path, _row_task("Prefer the existing helper."), _LOGIN, None
+                served.snapshot,
+                served.ctx,
+                _row_task("Prefer the existing helper."),
+                None,
             )
 
         (record,) = _driver_records(caplog)
@@ -3847,15 +3926,14 @@ class TestRowConstraintsObservability:
 
     def test_login_none_logs_the_comment_warning_then_the_row_line(
         self,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _serve_comments(monkeypatch, [])
+        served = _serve_comments(monkeypatch, [], login=None)
 
         with caplog.at_level(logging.INFO, logger=_DRIVER_LOGGER):
             loaded = _driver._load_constraints(
-                tmp_path, _row_task(_ROW_FOO_BAR), None, None
+                served.snapshot, served.ctx, _row_task(_ROW_FOO_BAR), None
             )
 
         warning, info = _driver_records(caplog)
@@ -3918,17 +3996,16 @@ class TestDecidedScopeThroughLoop:
 
     def test_load_constraints_on_a_plan_only_row_logs_no_warning(
         self,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        _serve_comments(monkeypatch, [])
+        served = _serve_comments(monkeypatch, [])
 
         with caplog.at_level(logging.INFO, logger=_DRIVER_LOGGER):
             loaded = _driver._load_constraints(
-                tmp_path,
+                served.snapshot,
+                served.ctx,
                 _decided_row_task(("non_goal", _DECIDED_NON_GOAL)),
-                _LOGIN,
                 None,
             )
 
@@ -4479,7 +4556,6 @@ class TestDriverSurfaceAfterReviewPassSplit:
 # #3055 (RFC 0018 S3): Review.operator_constraints_source on terminal reviews
 # ---------------------------------------------------------------------------
 
-_GITHUB_CONFIG = "tracking:\n  primary:\n    system: github-issues\n"
 _NEUTRAL_ROW = "Keep the public API stable."
 
 
@@ -4489,35 +4565,38 @@ def _source_of(out: AutoDevResult) -> OperatorConstraintsSource | None:
 
 class TestOperatorConstraintsSourceStamp:
     @pytest.mark.parametrize(
-        ("config", "comments", "rows", "expected"),
+        ("github", "comments", "rows", "expected"),
         [
-            (_GITHUB_CONFIG, [], (), OperatorConstraintsSource.NONE),
-            (_GITHUB_CONFIG, "observed", (), OperatorConstraintsSource.COMMENT),
+            (True, [], (), OperatorConstraintsSource.NONE),
+            (True, "observed", (), OperatorConstraintsSource.COMMENT),
             (
-                _GITHUB_CONFIG,
+                True,
                 "observed",
                 (_NEUTRAL_ROW,),
                 OperatorConstraintsSource.COMMENT_AND_ROW,
             ),
-            (_LINEAR_CONFIG, None, (_NEUTRAL_ROW,), OperatorConstraintsSource.ROW),
-            (_LINEAR_CONFIG, None, (), OperatorConstraintsSource.TRACKER_UNREADABLE),
-            (None, None, (), OperatorConstraintsSource.TRACKER_UNREADABLE),
+            (False, None, (_NEUTRAL_ROW,), OperatorConstraintsSource.ROW),
+            (False, None, (), OperatorConstraintsSource.TRACKER_UNREADABLE),
+            # No readable snapshot on GitHub: the absence proves nothing.
+            (True, None, (), OperatorConstraintsSource.TRACKER_UNREADABLE),
+            # A snapshot off GitHub with no operator_ids binds nothing.
+            (False, [], (), OperatorConstraintsSource.TRACKER_UNREADABLE),
         ],
     )
     def test_clean_exit_carries_the_source(
         self,
         make_git_repo: Callable[..., Path],
         monkeypatch: pytest.MonkeyPatch,
-        config: str | None,
+        github: bool,
         comments: str | list[dict[str, object]] | None,
         rows: tuple[str, ...],
         expected: OperatorConstraintsSource,
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-src-clean")
-        if config is not None:
-            commit_tracked_file(worktree, ".claude/project-config.yaml", config)
-        _serve_comments(
-            monkeypatch, _observed_comments() if comments == "observed" else comments
+        served = _serve_comments(
+            monkeypatch,
+            _observed_comments() if comments == "observed" else comments,
+            github=github,
         )
         runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC])
 
@@ -4526,7 +4605,7 @@ class TestOperatorConstraintsSourceStamp:
             worktree,
             session_id="s-src-clean",
             task=_row_task(*rows) if rows else None,
-            operator_login=_LOGIN,
+            snapshots=served.ctx,
         )
 
         assert out.status == "stage_complete"

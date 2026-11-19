@@ -436,7 +436,7 @@ class TestNoTrackerIO:
             raise AssertionError(msg)
 
         monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments", _no_tracker_io
+            "cw.ticket_snapshot._fetch.fetch_issue_snapshot", _no_tracker_io
         )
         task = find_ticket_row(_TICKET, _CLIENT)
         prepared = _prepare_review_pass(

@@ -70,7 +70,6 @@ from cw.codex_review_persist import (
     _persist_unparseable_artifact,
     _post_daemon_verdict_comment,
 )
-from cw.codex_review_signals import undelivered_operator_context
 from cw.codex_stage_completion import (
     clear_stage_blocked_marker,
     complete_session_through_door,
@@ -96,10 +95,9 @@ from cw.models.enums import (
     DEFAULT_REVIEWER_SANDBOX_MODE,
     SandboxMode,
 )
-from cw.operator_identity import resolve_operator_login
 from cw.review_finding_dispositions import merge_finding_dispositions
 from cw.stage_verification.push import push_and_verify_head, remote_branch_tip
-from cw.tracker import tracker_kind
+from cw.ticket_snapshot import DEFAULT_SNAPSHOT_CONTEXT, context_for_client
 from cw.worktree import _checked_out_branch
 
 if TYPE_CHECKING:
@@ -113,6 +111,7 @@ if TYPE_CHECKING:
     from cw.models import ClientConfig, TicketTask
     from cw.review_finding_dispositions import FindingDisposition
     from cw.review_findings import AcceptedFinding, ReviewVerdict
+    from cw.ticket_snapshot import SnapshotContext
 
 # Names re-exported for tests that import them from this module (#3054). The
 # lane resolvers and the stamp moved out; only names no code here uses are listed
@@ -340,6 +339,7 @@ class _ConfirmLoop:
     deadline: float | None
     fix_loop_enabled: bool
     loop: partial[tuple[AutoDevResult, ReviewVerdict | None]]
+    snapshots: SnapshotContext = DEFAULT_SNAPSHOT_CONTEXT
     tokens: list[str] = field(default_factory=list)
     consumed_round: int = 0
     run_growth: RunGrowth = field(default_factory=RunGrowth)
@@ -404,6 +404,7 @@ class _ConfirmLoop:
             deadline=self.deadline,
             result=result,
             verdict=verdict,
+            snapshots=self.snapshots,
         )
 
     def reentry(self, gated: CleanConfirmOutcome) -> ConfirmFeedback | None:
@@ -532,6 +533,12 @@ def _review_and_confirm(
     engine = engine_round_spec(client, task, worktree)
     if isinstance(engine, AutoDevResult):  # #3216: refused before any codex call
         return ReviewOutcome(engine, None, False, CODEX_REVIEWER_LABEL)
+    # #3712: one snapshot context for the whole run; each review pass refreshes
+    # the ticket snapshot through it. The login is resolved only when the loop
+    # runs (#2633: `gh api user` otherwise never needs to run).
+    snapshots = context_for_client(
+        client, worktree, resolve_login=fix_loop_enabled, refresh=True
+    )
     resumed = resume_pending_confirm(
         task=task,
         worktree=worktree,
@@ -539,6 +546,7 @@ def _review_and_confirm(
         sid=sid,
         runner=RealClaudeRunner(),
         deadline=deadline,
+        snapshots=snapshots,
     )
     if resumed is not None:
         result, verdict = resumed.result, resumed.verdict
@@ -576,9 +584,7 @@ def _review_and_confirm(
         growth_guard_enabled=_resolve_codex_fix_loop_growth_guard_enabled(
             client, task, config
         ),
-        # #2633: resolved only when the loop runs (gh api user otherwise
-        # never needs to run); outside every lock.
-        operator_login=resolve_operator_login(client) if fix_loop_enabled else None,
+        snapshots=snapshots,
         # #2867: cycle 0 shards a diff over the codex prompt limit, or parks
         # a diff that cannot be sharded as a non-retryable agent_block.
         max_prompt_chars=CODEX_MAX_PROMPT_CHARS,
@@ -593,6 +599,7 @@ def _review_and_confirm(
         deadline=deadline,
         fix_loop_enabled=fix_loop_enabled,
         loop=loop,
+        snapshots=snapshots,
     )
     gated = _loop_with_feedback(run, wall_clock_budget_seconds)
     return ReviewOutcome(
@@ -649,16 +656,6 @@ def _run_codex_review_and_complete(
         save_stage_blocked_marker(
             client_name=client.name, ticket_id=task.ticket_id, session_id=sid
         )
-        # #3055 (RFC 0018 S3, Case B): a non-GitHub (or unset) tracker means
-        # the review below runs without the operator's tracker context. Once
-        # per session, before Step 3; best-effort, never raises OSError.
-        undelivered_operator_context(
-            task=task,
-            client=client.name,
-            tracker=tracker_kind(client.workspace_path),
-            session_id=sid,
-        )
-
         # Step 3: per-role review pass + bounded fix loop (#1392), then the
         # clean-mode confirm gate (#2791).
         result, verdict, fix_loop_footer, reviewer_label = _review_and_confirm(

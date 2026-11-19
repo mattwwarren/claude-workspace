@@ -34,7 +34,8 @@ from cw.codex_review import (
 from cw.codex_runner import CodexRunResult
 from cw.stage_verification.fence import LEFT_STAGED_HINT
 from cw.stage_verification.growth import DEFAULT_GROWTH_BUDGET_LINES
-from tests._codex_review_helpers import _install_pre_commit_hook
+from cw.ticket_snapshot import DEFAULT_SNAPSHOT_CONTEXT
+from tests._codex_review_helpers import _install_pre_commit_hook, login_context
 from tests._shared.git_repos import commit_tracked_file, git_in
 from tests.test_codex_fix_loop import (
     _CLEAN_DOC,
@@ -273,7 +274,11 @@ class TestHookRepairTurn:
             session_id=f"s-{name}",
             growth_budget_lines=growth_budget_lines,
             task=task,
-            operator_login=_LOGIN if task is not None else None,
+            snapshots=(
+                login_context(_LOGIN, github=False)
+                if task is not None
+                else DEFAULT_SNAPSHOT_CONTEXT
+            ),
         )
         return out, worktree, runner
 

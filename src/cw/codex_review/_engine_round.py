@@ -69,6 +69,7 @@ from cw.review_engine.validate import (
     engine_precheck,
     validate_engine_summary,
 )
+from cw.ticket_snapshot import DEFAULT_SNAPSHOT_CONTEXT
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -81,6 +82,7 @@ if TYPE_CHECKING:
     from cw.review_engine.context import EngineContext
     from cw.review_engine_manifest_io import LoadedEngineManifest
     from cw.review_findings import Finding, ReviewVerdict
+    from cw.ticket_snapshot import SnapshotContext
 
 _log = logging.getLogger(__name__)
 
@@ -121,6 +123,7 @@ class EnginePassInputs:
     settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None
     max_prompt_chars: int | None
     reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE
+    snapshots: SnapshotContext = DEFAULT_SNAPSHOT_CONTEXT
 
 
 @dataclass(frozen=True)
@@ -420,6 +423,7 @@ def _prepare(inputs: EnginePassInputs, loaded: _Loaded) -> _ReviewPassInputs:
         prior_open_findings=inputs.prior_open_findings,
         reviewer_sandbox_mode=inputs.reviewer_sandbox_mode,
         engine_roster=_engine_roster(loaded.manifest),
+        snapshots=inputs.snapshots,
     )
 
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import subprocess
+import sys
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -714,3 +716,48 @@ def test_conflict_event_failure_does_not_break_record(
         )
     assert record.row_updated is True
     assert "author_conflict event not recorded" in caplog.text
+
+
+_COLD_IMPORT_ORDERS = (
+    ("cw.ticket_snapshot", "cw.dev_queue"),
+    ("cw.dev_queue", "cw.ticket_snapshot"),
+    ("cw.codex_review", "cw.ticket_snapshot"),
+)
+
+
+@pytest.mark.parametrize("order", _COLD_IMPORT_ORDERS)
+def test_package_imports_cold_in_either_order(order: tuple[str, str]) -> None:
+    """RFC 0019 T2: the review context imports this package, which imports
+    ``cw.dev_queue``; ``cw.dev_queue`` must therefore not import
+    ``cw.codex_review``, or one of these orders is a circular import."""
+    code = "; ".join(f"import {name}" for name in order)
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+
+
+def test_dev_queue_does_not_load_codex_review() -> None:
+    code = (
+        "import sys, cw.dev_queue; "
+        "print(any(m.startswith('cw.codex_review') for m in sys.modules))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+    assert proc.stdout.strip() == "False"
+
+
+def test_codex_must_fix_reason_is_one_value() -> None:
+    from cw.auto_dev_result import CODEX_MUST_FIX_FINDINGS_BLOCKER_REASON
+    from cw.codex_review import CODEX_MUST_FIX_FINDINGS
+
+    assert CODEX_MUST_FIX_FINDINGS == CODEX_MUST_FIX_FINDINGS_BLOCKER_REASON
