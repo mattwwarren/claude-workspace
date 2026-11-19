@@ -1075,8 +1075,7 @@ class TestCrashConsistency:
         entry = enqueue().entry
         monkeypatch.setattr("cw.outbox_drain.release", _fail_with_record_error)
 
-        with pytest.raises(OutboxRecordError):
-            _drain(tmp_path, bindings=Bindings())
+        _drain(tmp_path, bindings=Bindings())
 
         assert marked_roles(CLIENT) == frozenset()
         assert read_marker(CLIENT, OutboxRole.TICKETS) is None
@@ -1094,8 +1093,7 @@ class TestCrashConsistency:
         gh.unreadable("T-1")
         monkeypatch.setattr("cw.outbox_drain.release", _fail_with_record_error)
 
-        with pytest.raises(OutboxRecordError):
-            _drain(tmp_path)
+        _drain(tmp_path)
 
         assert marked_roles(CLIENT) == frozenset()
         assert events == []
@@ -1110,11 +1108,101 @@ class TestCrashConsistency:
         _unverified(0, role=OutboxRole.KNOWLEDGE, marker="a")
         monkeypatch.setattr("cw.outbox_drain.settle", _fail_with_record_error)
 
-        with pytest.raises(OutboxRecordError):
-            _drain(tmp_path)
+        _drain(tmp_path)
 
         assert marked_roles(CLIENT) == frozenset()
         assert events == []
+
+    def test_committed_settle_failure_continues_to_next_entry(
+        self,
+        tmp_path: Path,
+        gh: GhThread,
+        events: list[CapturedEvent],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        first = _at(0, marker="first")
+        second = _at(1, marker="second")
+        real_settle = outbox_drain.settle
+        raised = False
+
+        def _commit_then_raise(*args: Any, **kwargs: Any) -> Any:
+            nonlocal raised
+            result = real_settle(*args, **kwargs)
+            if not raised:
+                raised = True
+                msg = "reported after commit"
+                raise OutboxRecordError(msg)
+            return result
+
+        monkeypatch.setattr("cw.outbox_drain.settle", _commit_then_raise)
+
+        report = _drain(tmp_path)
+
+        assert _state(first.id) == (OutboxState.DELIVERED, OutboxReason.POSTED)
+        assert _state(second.id) == (OutboxState.DELIVERED, OutboxReason.POSTED)
+        assert report.delivered == 2
+        assert len(gh.comment_records()) == 2
+        assert len(events) == 2
+
+    def test_committed_claim_failure_continues_to_next_entry(
+        self, tmp_path: Path, gh: GhThread, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        first = _at(0, marker="first")
+        second = _at(1, marker="second")
+        real_claim = outbox_drain.claim
+        raised = False
+
+        def _claim_then_raise(*args: Any, **kwargs: Any) -> list[OutboxEntry]:
+            nonlocal raised
+            result = real_claim(*args, **kwargs)
+            if result and not raised:
+                raised = True
+                msg = "reported after claim commit"
+                raise OutboxRecordError(msg)
+            return result
+
+        monkeypatch.setattr("cw.outbox_drain.claim", _claim_then_raise)
+
+        report = _drain(tmp_path)
+
+        assert _entry(first.id).state is OutboxState.CLAIMED
+        assert _state(second.id) == (OutboxState.DELIVERED, OutboxReason.POSTED)
+        assert report.delivered == 1
+        assert len(gh.comment_records()) == 1
+
+    def test_committed_unreadable_settlement_emits_skip_and_continues(
+        self,
+        tmp_path: Path,
+        gh: GhThread,
+        events: list[CapturedEvent],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        skipped = _at(0, marker="skipped")
+        delivered = _at(1, marker="delivered")
+        _layout.body_path(CLIENT, skipped.id).unlink()
+        real_write = _layout.write_record
+
+        def _write_then_raise(client: str, entry: OutboxEntry) -> None:
+            real_write(client, entry)
+            if entry.state is OutboxState.FAILED:
+                msg = "reported after unreadable settlement commit"
+                raise OutboxRecordError(msg)
+
+        monkeypatch.setattr("cw.outbox._layout.write_record", _write_then_raise)
+
+        report = _drain(tmp_path)
+
+        assert _state(skipped.id) == (
+            OutboxState.FAILED,
+            OutboxReason.BODY_UNREADABLE,
+        )
+        assert _state(delivered.id) == (OutboxState.DELIVERED, OutboxReason.POSTED)
+        assert report.skipped == 1
+        assert report.delivered == 1
+        assert _types(events) == [
+            OrchestratorEventType.OUTBOX_ENTRY_DELIVERED,
+            OrchestratorEventType.OUTBOX_ENTRY_SKIPPED,
+        ]
 
     @pytest.mark.parametrize("unverified", [False, True])
     def test_marker_is_written_after_the_entry_and_before_the_event(

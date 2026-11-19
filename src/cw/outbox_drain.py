@@ -423,22 +423,127 @@ def _drain_entry(run: _Run, entry: OutboxEntry) -> None:
     _post_missing(run, entry, parts, present, target.cwd)
 
 
+def _entry_for_id(client: str, entry_id: str) -> OutboxEntry | None:
+    """Read the current record after a recoverable per-entry store failure."""
+    try:
+        return next(
+            (entry for entry in list_entries(client) if entry.id == entry_id), None
+        )
+    except OutboxRecordError as exc:
+        logger.warning(
+            "outbox: could not re-read entry %s after store failure (%s)",
+            entry_id,
+            type(exc).__name__,
+        )
+        return None
+
+
+def _reconcile_store_failure(
+    run: _Run,
+    entry_id: str,
+    exc: OutboxRecordError,
+    *,
+    unchanged_state: OutboxState | None = None,
+) -> None:
+    """Keep a committed per-entry write and isolate the failed entry.
+
+    Atomic record writes can commit before reporting an ``OutboxRecordError``.
+    Re-reading the record lets the drain account for that commit without
+    attempting the entry again in this run.  An unchanged claimed record is
+    intentionally left for the next run's recovery path.
+    """
+    logger.warning(
+        "outbox: store operation failed for entry %s; continuing (%s)",
+        entry_id,
+        type(exc).__name__,
+    )
+    current = _entry_for_id(run.client, entry_id)
+    if (
+        current is None
+        or current.state is OutboxState.CLAIMED
+        or current.state is unchanged_state
+    ):
+        return
+    if current.state is OutboxState.FAILED:
+        return
+    if current.state is OutboxState.DELIVERED:
+        run.delivered += 1
+        run.delivered_roles.add(current.role)
+        _emit(
+            OrchestratorEventType.OUTBOX_ENTRY_DELIVERED,
+            current,
+            current.reason or OutboxReason.POSTED,
+        )
+    elif current.state is OutboxState.UNVERIFIED:
+        run.unverified += 1
+        _emit(
+            OrchestratorEventType.OUTBOX_ENTRY_UNVERIFIED,
+            current,
+            current.reason or OutboxReason.READBACK_UNVERIFIED,
+        )
+    elif current.state is OutboxState.PENDING:
+        run.released += 1
+        held = current.id in read_held(run.client)
+        if held:
+            run.held += 1
+        _emit(
+            OrchestratorEventType.OUTBOX_ENTRY_PENDING,
+            current,
+            current.reason or OutboxReason.TRANSIENT_FAILURE,
+            held=held,
+        )
+
+
+def _next_candidate_id(client: str, state: OutboxState, seen: set[str]) -> str | None:
+    """Return the oldest unhandled candidate for claim-error isolation."""
+    try:
+        candidates = [
+            entry
+            for entry in list_entries(client)
+            if entry.state is state and entry.id not in seen
+        ]
+    except OutboxRecordError as exc:
+        logger.warning(
+            "outbox: could not identify claim candidate for %s (%s)",
+            client,
+            type(exc).__name__,
+        )
+        return None
+    if not candidates:
+        return None
+    return min(candidates, key=lambda entry: (entry.created_at, entry.id)).id
+
+
 def _drain_state(run: _Run, state: OutboxState, cap: int) -> None:
     """Claim *state* entries one at a time until none is left or *cap* is hit."""
     while run.claims < cap:
-        claimed = claim(
-            run.client, state=state, limit=1, exclude_ids=frozenset(run.seen)
-        )
+        candidate_id = _next_candidate_id(run.client, state, run.seen)
+        try:
+            claimed = claim(
+                run.client, state=state, limit=1, exclude_ids=frozenset(run.seen)
+            )
+        except OutboxRecordError as exc:
+            if candidate_id is None:
+                return
+            run.seen.add(candidate_id)
+            current = _entry_for_id(run.client, candidate_id)
+            if current is not None and current.state is OutboxState.CLAIMED:
+                run.claims += 1
+            _reconcile_store_failure(run, candidate_id, exc, unchanged_state=state)
+            continue
         if not claimed:
             return
         entry = claimed[0]
         run.seen.add(entry.id)
         run.claims += 1
-        marker = run.broken.get(entry.role)
-        if marker is not None:
-            _announce(run, entry, marker)
-        else:
-            _drain_entry(run, entry)
+        try:
+            marker = run.broken.get(entry.role)
+            if marker is not None:
+                _announce(run, entry, marker)
+            else:
+                _drain_entry(run, entry)
+        except OutboxRecordError as exc:
+            _reconcile_store_failure(run, entry.id, exc)
 
 
 def _non_terminal_ids(client: str) -> frozenset[str]:
