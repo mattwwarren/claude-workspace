@@ -372,9 +372,16 @@ def test_binding_preflight_reads_the_row_branch(
     recorder = _BranchRecorder()
 
     def _probe(
-        _backend: str, _client: ClientConfig, *, branch: str | None = None
+        _backend: str,
+        _client: ClientConfig,
+        *,
+        branch: str | None = None,
+        root: Path | None = None,
     ) -> BindingProbe:
         recorder.branches.append(str(branch))
+        # The tick reader's root is the client workspace; the claude-native probe
+        # must not fall back to the probe's own default root (MUST_FIX, #3744).
+        assert root == _client.workspace_path
         return BindingProbe(Reach.ENABLED, bound=True, reason="", source=None)
 
     monkeypatch.setattr("cw.dispatch.claim.preflight_reach.probe_binding", _probe)
