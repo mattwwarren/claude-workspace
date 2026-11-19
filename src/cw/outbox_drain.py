@@ -1,16 +1,19 @@
-"""The CLI-binding outbox drain (#3706, RFC 0019 O2).
+"""The outbox drain (#3706, RFC 0019 O2; MCP courier O2b, ADR-0023).
 
 ``run_drain`` posts a client's ``pending`` and ``unverified`` outbox entries to
-its ``bindings.tickets`` tracker when that binding has ``cli: gh``, through
+its ``bindings.tickets`` tracker. A ``cli: gh`` binding posts through
 :func:`cw.gh.post_issue_comment` (via :func:`cw.tracker_post.post_parts` for
-agent-authored entries) and :func:`cw.gh.fetch_issue_comments`. It dedups per
+agent-authored entries) and :func:`cw.gh.fetch_issue_comments`; it dedups per
 part on a ``<!-- cw-outbox:<marker>:<i>/<n> -->`` line found, as a whole line,
-in one comment listing taken at the start of each entry, so a re-run posts only
-the parts that are missing.
+in one comment listing taken at the start of each entry. A binding with a codex
+MCP realization posts through the courier (:mod:`cw.tracker_io._drain`), one
+agent turn per entry, verified by read-back or a before/after snapshot delta.
 
 A sibling of the :mod:`cw.outbox` package, not inside it: the package imports
-no subprocess and no tracker code (pinned by ``tests/test_outbox.py``). It
-never imports ``cw.tracker_io`` or ``cw.codex_review*``.
+no subprocess and no tracker code (pinned by ``tests/test_outbox.py``). This
+module imports only the courier entry point (``cw.tracker_io._drain``), the
+codex runner and the gate filer (``cw.outbox_needs_you``); it never imports
+``cw.codex_review*``.
 
 The run holds only the unguarded per-client drain lease across ``gh`` calls;
 store calls take the leaf ``outbox`` lock for each call only. The claimant is
@@ -34,10 +37,11 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from cw.codex_runner import RealCodexRunner
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_comments, post_issue_comment
-from cw.models import OrchestratorEventType
+from cw.models import CODEX_BACKEND, OrchestratorEventType
 from cw.outbox import (
     DrainLeaseHeldError,
     OutboxEntry,
@@ -62,7 +66,20 @@ from cw.outbox import (
     settle,
     write_marker,
 )
+from cw.outbox_needs_you import (
+    UnreachableCause,
+    build_gate_payload,
+    file_gate_record,
+)
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
+from cw.tracker_io._dedup import CourierPart
+from cw.tracker_io._drain import (
+    CourierContext,
+    CourierDisposition,
+    courier_cause,
+    courier_drain,
+    courier_mismatch,
+)
 from cw.tracker_post import (
     PostedPart,
     PostReason,
@@ -79,6 +96,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
+    from cw.codex_runner import CodexRunner
     from cw.models import ClientConfig
 
 logger = logging.getLogger(__name__)
@@ -137,21 +155,32 @@ def _fallback_target(cfg: ClientConfig) -> GhTarget | None:
     return None
 
 
-def select_target(cfg: ClientConfig) -> GhTarget | None:
-    """The ``gh`` target of *cfg*'s tickets binding, or ``None`` if unusable.
+@dataclass(frozen=True)
+class McpTarget:
+    """A tickets binding with a codex MCP realization: the courier posts (O2b)."""
+
+    server: str
+
+
+def select_target(cfg: ClientConfig) -> GhTarget | McpTarget | None:
+    """The target of *cfg*'s tickets binding, or ``None`` if unusable.
 
     An absent ``bindings.tickets`` block falls back to :func:`_fallback_target`
-    (an unresolved or explicitly resolved GitHub tracker gets ``gh``; other
-    trackers get ``None``). A present block is usable only with a ``cli``
-    realization (the binding model admits only ``gh`` there, on
-    ``github-issues``); an mcp-only block stays ``None``.
+    (R9: an unresolved or explicitly resolved GitHub tracker gets ``gh``; other
+    trackers get ``None``). A ``cli`` realization is ``gh`` (the binding model
+    admits only ``gh`` there, on ``github-issues``). Otherwise a codex MCP
+    realization is the courier's target (O2b). ``None`` when the binding has
+    neither (no codex realization, O2b G1).
     """
     tickets = cfg.bindings.tickets
     if tickets is None:
         return _fallback_target(cfg)
-    if tickets.cli is None:
+    if tickets.cli is not None:
+        return GhTarget(cwd=_git_dir(cfg))
+    server = tickets.mcp_server(CODEX_BACKEND)
+    if server is None:
         return None
-    return GhTarget(cwd=_git_dir(cfg))
+    return McpTarget(server=server)
 
 
 def part_marker_line(marker: str, index: int, total: int) -> str:
@@ -164,8 +193,10 @@ class _Run:
     """One client's drain run: counters, the seen set and the broken roles."""
 
     client: str
-    target: GhTarget | None
+    cfg: ClientConfig
+    target: GhTarget | McpTarget | None
     seen: set[str]
+    runner: CodexRunner
     broken: dict[OutboxRole, UnreachableMarker] = field(default_factory=dict)
     delivered_roles: set[OutboxRole] = field(default_factory=set)
     delivered: int = 0
@@ -193,8 +224,14 @@ def _emit(
     *,
     posted: Sequence[PostedPart] = (),
     held: bool = False,
+    turns: int = 0,
 ) -> None:
-    """Record one outbox event, best-effort: a failure is one WARNING."""
+    """Record one outbox event, best-effort: a failure is one WARNING.
+
+    *turns* is the courier turn count. The key is present only when a courier
+    turn ran (R20): never on a ``gh`` drain, a skipped event or a pre-launch
+    release.
+    """
     payload: dict[str, object] = {
         "client": entry.client,
         "ticket": entry.ticket,
@@ -206,6 +243,8 @@ def _emit(
         "posted": [{"index": p.index, "url": p.url} for p in posted],
         "held": held,
     }
+    if turns > 0:
+        payload["turns"] = turns
     try:
         record_event(event_type, payload, correlation_id=entry.ticket)
     except (OSError, CwError) as exc:
@@ -227,6 +266,8 @@ def _deliver(
     entry: OutboxEntry,
     reason: OutboxReason,
     posted: Sequence[PostedPart] = (),
+    *,
+    turns: int = 0,
 ) -> None:
     settle(
         run.client,
@@ -243,6 +284,7 @@ def _deliver(
             entry,
             reason,
             posted=posted,
+            turns=turns,
         )
 
 
@@ -269,12 +311,19 @@ def _to_unverified(
     reason: OutboxReason = OutboxReason.READBACK_UNVERIFIED,
     *,
     posted: Sequence[PostedPart] = (),
+    turns: int = 0,
 ) -> None:
     _resettle_unverified(run, entry, reason)
-    _emit(OrchestratorEventType.OUTBOX_ENTRY_UNVERIFIED, entry, reason, posted=posted)
+    _emit(
+        OrchestratorEventType.OUTBOX_ENTRY_UNVERIFIED,
+        entry,
+        reason,
+        posted=posted,
+        turns=turns,
+    )
 
 
-def _hold(run: _Run, entry: OutboxEntry) -> None:
+def _hold(run: _Run, entry: OutboxEntry, *, turns: int = 0) -> None:
     """Release a per-item failure ``transient_failure`` and hold it until --force."""
     release(
         run.client,
@@ -299,15 +348,16 @@ def _hold(run: _Run, entry: OutboxEntry) -> None:
             entry,
             OutboxReason.TRANSIENT_FAILURE,
             held=True,
+            turns=turns,
         )
 
 
-def _per_item_failure(run: _Run, entry: OutboxEntry) -> None:
+def _per_item_failure(run: _Run, entry: OutboxEntry, *, turns: int = 0) -> None:
     """Rows G2/P2/P4: hold a pending entry; an unverified one stays unverified."""
     if entry.claimed_from is OutboxState.PENDING:
-        _hold(run, entry)
+        _hold(run, entry, turns=turns)
     else:
-        _to_unverified(run, entry)
+        _to_unverified(run, entry, turns=turns)
 
 
 def _persist_marker(
@@ -338,7 +388,12 @@ def _persist_marker(
 
 
 def _announce(
-    run: _Run, entry: OutboxEntry, marker: UnreachableMarker, *, persist: bool = False
+    run: _Run,
+    entry: OutboxEntry,
+    marker: UnreachableMarker,
+    *,
+    persist: bool = False,
+    turns: int = 0,
 ) -> None:
     """Return *entry* to a legal state with no ``gh`` call, under *marker*.
 
@@ -371,21 +426,74 @@ def _announce(
             entry,
             marker.reason,
             held=False,
+            turns=turns,
         )
     else:
         _emit(
             OrchestratorEventType.OUTBOX_ENTRY_UNVERIFIED,
             entry,
             OutboxReason.READBACK_UNVERIFIED,
+            turns=turns,
         )
 
 
-def _binding_fault(run: _Run, entry: OutboxEntry, reason: OutboxReason) -> None:
-    """Rows G1/L1: set the role's marker (keeping its episode) and break the role."""
+def _binding_fault(
+    run: _Run,
+    entry: OutboxEntry,
+    reason: OutboxReason,
+    *,
+    turns: int = 0,
+    cause: UnreachableCause | None = None,
+    detail: str = "",
+) -> None:
+    """Rows G1/L1: set the role's marker (keeping its episode) and break the role.
+
+    A *cause* files the episode's gate record once (O2b, R25). The gh listing
+    fault passes none and never files.
+    """
     existing = read_marker(run.client, entry.role)
     announced = [] if existing is None else existing.announced
-    marker = UnreachableMarker(role=entry.role, reason=reason, announced=announced)
-    _announce(run, entry, marker, persist=True)
+    gate_filed = existing is not None and existing.gate_filed
+    marker = UnreachableMarker(
+        role=entry.role, reason=reason, announced=announced, gate_filed=gate_filed
+    )
+    _announce(run, entry, marker, persist=True, turns=turns)
+    if cause is not None:
+        _file_gate_once(run, entry, cause, detail)
+
+
+def _system_name(run: _Run, role: OutboxRole) -> str | None:
+    """The tickets system name for the gate text; ``None`` for other roles."""
+    tickets = run.cfg.bindings.tickets
+    if role is not OutboxRole.TICKETS or tickets is None or tickets.system is None:
+        return None
+    return str(tickets.system)
+
+
+def _file_gate_once(
+    run: _Run, entry: OutboxEntry, cause: UnreachableCause, detail: str
+) -> None:
+    """File the episode's gate record unless the marker's bit says it is filed.
+
+    The bit is set only when the filer returns ``True``, so a missing or failing
+    ``needs_you.py`` is retried on the next tick (R13). A marker that could not be
+    persisted does not file: the retry happens when the marker write succeeds.
+    """
+    marker = run.broken.get(entry.role)
+    if marker is None or marker.gate_filed or entry.role in run.marker_write_failures:
+        return
+    payload = build_gate_payload(
+        run.client,
+        entry.role.value,
+        cause,
+        system=_system_name(run, entry.role),
+        detail=detail,
+    )
+    if not file_gate_record(payload):
+        return
+    marker = marker.model_copy(update={"gate_filed": True})
+    run.broken[entry.role] = marker
+    _persist_marker(run, entry, marker, persist=True)
 
 
 def _post_operator_part(ticket: str, body: str, *, cwd: Path) -> PostResult:
@@ -480,13 +588,77 @@ def _drain_entry(run: _Run, entry: OutboxEntry) -> None:
     """Apply the P3 decision table to one claimed entry."""
     target = run.target
     if entry.role is not OutboxRole.TICKETS or target is None:
-        _binding_fault(run, entry, OutboxReason.BINDING_UNREACHABLE)
+        _binding_fault(
+            run,
+            entry,
+            OutboxReason.BINDING_UNREACHABLE,
+            cause=UnreachableCause.NO_REALIZATION,
+        )
         return
     try:
         parts = read_parts(entry)
     except OutboxRecordError:
         _per_item_failure(run, entry)
         return
+    if isinstance(target, McpTarget):
+        _drain_entry_mcp(run, entry, parts)
+        return
+    _drain_entry_gh(run, entry, parts, target)
+
+
+def _courier_parts(entry: OutboxEntry, parts: Sequence[str]) -> list[CourierPart]:
+    """Each part with its marker line, as the courier posts and reads it back."""
+    total = len(parts)
+    courier: list[CourierPart] = []
+    for index, part in enumerate(parts, start=1):
+        line = part_marker_line(entry.marker, index, total)
+        courier.append(CourierPart(body=f"{part}\n\n{line}", marker_line=line))
+    return courier
+
+
+def _drain_entry_mcp(run: _Run, entry: OutboxEntry, parts: Sequence[str]) -> None:
+    """Post one entry through the MCP courier and map its verdict (O2b)."""
+    cfg = run.cfg
+    result = courier_drain(
+        entry.ticket,
+        _courier_parts(entry, parts),
+        operator_authored=entry.operator_authored,
+        recheck=entry.claimed_from is OutboxState.UNVERIFIED,
+        context=CourierContext(runner=run.runner, client=cfg),
+    )
+    turns = result.turns
+    posted = [PostedPart(index=p.index, url=p.url) for p in result.posted]
+    if result.disposition is CourierDisposition.DELIVERED:
+        reason = (
+            OutboxReason.MARKER_ALREADY_PRESENT
+            if result.already_present
+            else OutboxReason.POSTED
+        )
+        _deliver(run, entry, reason, posted, turns=turns)
+    elif result.disposition is CourierDisposition.UNVERIFIED:
+        reason = (
+            OutboxReason.READBACK_MISMATCH
+            if courier_mismatch(result)
+            else OutboxReason.READBACK_UNVERIFIED
+        )
+        _to_unverified(run, entry, reason, posted=posted, turns=turns)
+    elif result.disposition is CourierDisposition.UNREACHABLE:
+        _binding_fault(
+            run,
+            entry,
+            OutboxReason.BINDING_UNREACHABLE,
+            turns=turns,
+            cause=courier_cause(result),
+            detail="; ".join(result.layers_unreadable),
+        )
+    else:
+        _per_item_failure(run, entry, turns=turns)
+
+
+def _drain_entry_gh(
+    run: _Run, entry: OutboxEntry, parts: Sequence[str], target: GhTarget
+) -> None:
+    """Post one entry through ``gh`` (the O2 path, unchanged)."""
     comments = fetch_issue_comments(
         entry.ticket, FETCH_COMMENTS_TIMEOUT, cwd=target.cwd
     )
@@ -662,12 +834,23 @@ def _unreachable(client: str) -> list[str]:
 
 
 def _run_leased(
-    client: str, cfg: ClientConfig, *, cap: int, force: bool
+    client: str,
+    cfg: ClientConfig,
+    *,
+    cap: int,
+    force: bool,
+    runner: CodexRunner,
 ) -> DrainReport:
     if force:
         clear_all_markers(client)
         clear_held(client)
-    run = _Run(client=client, target=select_target(cfg), seen=set(read_held(client)))
+    run = _Run(
+        client=client,
+        cfg=cfg,
+        target=select_target(cfg),
+        seen=set(read_held(client)),
+        runner=runner,
+    )
     before = _non_terminal_ids(client)
     _drain_state(run, OutboxState.UNVERIFIED, cap)
     _drain_state(run, OutboxState.PENDING, cap)
@@ -692,20 +875,27 @@ def _run_leased(
 
 
 def run_drain(
-    client: str, cfg: ClientConfig, *, limit: int | None = None, force: bool = False
+    client: str,
+    cfg: ClientConfig,
+    *,
+    limit: int | None = None,
+    force: bool = False,
+    runner: CodexRunner | None = None,
 ) -> DrainReport:
     """Drain *client*'s outbox once, holding its drain lease (plan P3, P12).
 
     *limit* overrides ``cfg.outbox.max_entries_per_run``. *force* first clears
     every unreachable marker and the held list, so those entries are retried.
-    When another drain holds the lease nothing is touched and the report has
-    ``lease_held=True``. An unexpected store error propagates; the entry it
-    left claimed is recovered by the next run's ``claim``.
+    *runner* drives the MCP courier (default: the real codex runner; tests pass a
+    scripted one). When another drain holds the lease nothing is touched and the
+    report has ``lease_held=True``. An unexpected store error propagates; the
+    entry it left claimed is recovered by the next run's ``claim``.
     """
     cap = cfg.outbox.max_entries_per_run if limit is None else limit
+    codex = RealCodexRunner() if runner is None else runner
     try:
         with drain_lease(client):
-            return _run_leased(client, cfg, cap=cap, force=force)
+            return _run_leased(client, cfg, cap=cap, force=force, runner=codex)
     except DrainLeaseHeldError:
         return DrainReport(
             client=client,

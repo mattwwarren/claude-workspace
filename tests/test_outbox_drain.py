@@ -34,7 +34,14 @@ from cw.outbox import (
     read_marker,
     settle,
 )
-from cw.outbox_drain import DrainReport, part_marker_line, run_drain, select_target
+from cw.outbox_drain import (
+    DrainReport,
+    GhTarget,
+    McpTarget,
+    part_marker_line,
+    run_drain,
+    select_target,
+)
 from cw.worktree import _git_dir
 from tests._reconcile_helpers import live_launch_marker
 from tests._shared.bindings_builders import bindings_linear_mcp
@@ -148,18 +155,18 @@ class TestArgvPin:
         assert all(snapshot == () for snapshot in gh.gh.lock_snapshots)
         assert _state(entry.id) == (OutboxState.DELIVERED, OutboxReason.POSTED)
 
-    def test_select_target_requires_a_gh_tickets_binding(self, tmp_path: Path) -> None:
+    def test_select_target_requires_a_usable_tickets_binding(
+        self, tmp_path: Path
+    ) -> None:
         target = select_target(client_config(tmp_path))
-        assert target is not None
+        assert isinstance(target, GhTarget)
         assert target.cwd == tmp_path
-        assert (
-            select_target(
-                client_config(tmp_path, bindings=Bindings(), tracker="linear")
-            )
-            is None
-        )
+        # O2b: a codex MCP realization is the courier's target, not unreachable.
         mcp = client_config(tmp_path, bindings=bindings_linear_mcp())
-        assert select_target(mcp) is None
+        assert select_target(mcp) == McpTarget(server="linear")
+        # No codex realization (opencode only) stays unusable: G1.
+        no_codex = bindings_linear_mcp(harnesses=("opencode",))
+        assert select_target(client_config(tmp_path, bindings=no_codex)) is None
 
 
 class TestSelectTargetFallback:
@@ -201,8 +208,11 @@ class TestSelectTargetFallback:
         )
 
     def test_bindings_without_cli_stays_none(self, tmp_path: Path) -> None:
+        # O2b: a codex MCP realization is a courier target; without one it stays None.
         cfg = client_config(
-            tmp_path, bindings=bindings_linear_mcp(), tracker="github-issues"
+            tmp_path,
+            bindings=bindings_linear_mcp(harnesses=("opencode",)),
+            tracker="github-issues",
         )
         assert select_target(cfg) is None
 
@@ -258,9 +268,9 @@ class TestDecisionTable:
         [
             (OutboxRole.KNOWLEDGE, None, None),
             (OutboxRole.TICKETS, Bindings(), "linear"),
-            (OutboxRole.TICKETS, bindings_linear_mcp(), None),
+            (OutboxRole.TICKETS, bindings_linear_mcp(harnesses=("opencode",)), None),
         ],
-        ids=["knowledge-role", "no-binding", "mcp-only"],
+        ids=["knowledge-role", "no-binding", "mcp-without-codex"],
     )
     def test_g1_pending_released_binding_unreachable(
         self,
@@ -1441,7 +1451,10 @@ class TestLayering:
         modules = _imported_modules(_ENGINE)
 
         assert "subprocess" not in modules
-        assert not any(m.startswith("cw.tracker_io") for m in modules)
+        # O2b: the courier boundary is the only tracker-IO surface the engine
+        # may import: its turn loop and the part dataclass (no turn code).
+        tracker_io = {m for m in modules if m.startswith("cw.tracker_io")}
+        assert tracker_io <= {"cw.tracker_io._drain", "cw.tracker_io._dedup"}
         assert not any(m.startswith("cw.codex_review") for m in modules)
 
 

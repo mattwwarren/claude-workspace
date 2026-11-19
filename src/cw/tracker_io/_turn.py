@@ -23,6 +23,9 @@ runner propagates to the caller; ``_post_via_tracker_io`` in
 ``cw.codex_review_persist`` is the guard that catches it. It never retries.
 Callers must establish authorization and target binding before invoking it;
 the prompt and model-echoed result are not authorization.
+
+The O2b courier (:mod:`cw.tracker_io._drain`) reuses this module's scratch,
+preflight and transport checks; it has its own entry point and turn loop.
 """
 
 from __future__ import annotations
@@ -32,19 +35,28 @@ import logging
 import os
 import shutil
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from cw.backend_mcp_config import McpState, declared_server_names, read_backend_mcp
+from cw.backend_mcp_config import (
+    McpState,
+    read_backend_mcp,
+    scan_declared_servers,
+)
 from cw.codex_review import _codex_scratch_dir
 from cw.codex_review._const import _is_spawn_error
+from cw.config import state_dir
 from cw.gh import agent_marked_body
 from cw.models import CODEX_BACKEND
+from cw.models.capabilities import ToolNarrowing
 from cw.redact_post_text import git_toplevel, redaction_anchors, resolve_home
 from cw.tracker_io._argv import (
     TrackerIoConfigError,
     build_tracker_io_argv,
     comment_tools_for,
+    get_tool_for,
+    narrowing_for,
     validate_server_name,
 )
 from cw.tracker_io._prompt import (
@@ -63,6 +75,7 @@ from cw.tracker_io._verify import (
 from cw.tracker_post import plan_parts
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from cw.codex_runner import CodexRunner, CodexRunResult
@@ -75,6 +88,20 @@ TURN_TIMEOUT_SECONDS = 300
 
 _SCHEMA_NAME = "schema.json"
 _RESULT_NAME = "result.json"
+
+
+class TrackerIoLayerError(TrackerIoConfigError):
+    """A codex config layer exists but cannot be read (O2b, R22).
+
+    Always carries ``MCP_SERVER_UNNAMED``. *paths* lists each unreadable layer
+    as ``"<path>: <reason>"``, so the courier's gate record can name the file
+    without parsing a message string.
+    """
+
+    def __init__(self, paths: tuple[str, ...]) -> None:
+        message = "codex config layer(s) exist but cannot be read: " + "; ".join(paths)
+        super().__init__(TrackerIoReason.MCP_SERVER_UNNAMED, message)
+        self.paths = paths
 
 
 @dataclass(frozen=True)
@@ -103,6 +130,21 @@ class TrackerIoOutcome:
     def verified(self) -> bool:
         """True when the agent's report passed every check."""
         return self.reason is None
+
+
+@dataclass(frozen=True)
+class CourierTarget:
+    """What the courier needs to address one tracker ticket (O2b, R3, R8).
+
+    *tools* is the (create, list) pair; *get_tool* reads one issue for the
+    snapshot. *narrowing* is ``PER_TOOL`` for a declared server and
+    ``PER_SERVER`` for a plugin app.
+    """
+
+    server: str
+    tools: tuple[str, str]
+    get_tool: str
+    narrowing: ToolNarrowing
 
 
 def _refused(reason: TrackerIoReason, parts_total: int = 0) -> TrackerIoOutcome:
@@ -136,10 +178,10 @@ def plan_turn_parts(
     return tuple(agent_marked_body(body) for body in plan.bodies)
 
 
-def _preflight(
+def _resolve(
     ticket_id: str, tracker: str, client: ClientConfig
 ) -> tuple[str, tuple[str, str]] | TrackerIoReason:
-    """The server name and tools, or why the turn must not launch."""
+    """The server name and comment tools, or why the turn must not launch."""
     try:
         tools = comment_tools_for(tracker, client.bindings.tickets, CODEX_BACKEND)
         # A missing servers.codex entry is "" here: MCP_SERVER_UNNAMED too.
@@ -147,6 +189,11 @@ def _preflight(
         validate_ticket_id(ticket_id)
     except TrackerIoConfigError as exc:
         return exc.reason
+    return server, tools
+
+
+def _check_declared(server: str, client: ClientConfig) -> TrackerIoReason | None:
+    """Refuse a declared-but-disabled or undeclared MCP server (legacy check)."""
     reading = read_backend_mcp(CODEX_BACKEND, server, client.workspace_path)
     if reading.state in (McpState.ABSENT, McpState.DISABLED):
         _log.warning(
@@ -156,21 +203,106 @@ def _preflight(
             reading.reason,
         )
         return TrackerIoReason.TRACKER_MCP_NOT_ENABLED
+    return None
+
+
+def _preflight(
+    ticket_id: str, tracker: str, client: ClientConfig
+) -> tuple[str, tuple[str, str]] | TrackerIoReason:
+    """The server name and tools, or why the turn must not launch (legacy)."""
+    resolved = _resolve(ticket_id, tracker, client)
+    if isinstance(resolved, TrackerIoReason):
+        return resolved
+    server, tools = resolved
+    refusal = _check_declared(server, client)
+    if refusal is not None:
+        return refusal
     return server, tools
 
 
-def _other_servers() -> tuple[str, ...]:
-    names = declared_server_names(CODEX_BACKEND)
-    if names is None:
-        _log.info("tracker_io_other_servers_unknown: none disabled")
-        return ()
-    return names
+def courier_preflight(
+    ticket_id: str, tracker: str, client: ClientConfig
+) -> CourierTarget | TrackerIoReason:
+    """The courier's preflight (O2b, R4).
+
+    Narrowing comes from the user and system layers only (R3). A ``PER_SERVER``
+    plugin app skips the declared-server check, so a clean app-only host with no
+    config proceeds (R4). A ``PER_TOOL`` server keeps the legacy check.
+    """
+    resolved = _resolve(ticket_id, tracker, client)
+    if isinstance(resolved, TrackerIoReason):
+        return resolved
+    server, tools = resolved
+    try:
+        get_tool = get_tool_for(tracker, client.bindings.tickets, CODEX_BACKEND)
+    except TrackerIoConfigError as exc:
+        return exc.reason
+    narrowing = narrowing_for(server, scan_declared_servers(CODEX_BACKEND).names)
+    if narrowing is ToolNarrowing.PER_TOOL:
+        refusal = _check_declared(server, client)
+        if refusal is not None:
+            return refusal
+    return CourierTarget(server, tools, get_tool, narrowing)
 
 
-def _classify(
-    run: CodexRunResult, ticket_id: str, parts: tuple[str, ...]
-) -> TrackerIoOutcome:
-    total = len(parts)
+def _scratch_layer_root() -> Path:
+    """The parent of every turn scratch directory (O2b, R11)."""
+    return state_dir() / "codex-review"
+
+
+def _scratch_unwritable() -> TrackerIoConfigError:
+    return TrackerIoConfigError(
+        TrackerIoReason.SCRATCH_UNWRITABLE,
+        "tracker-IO scratch directory is unwritable",
+    )
+
+
+@contextmanager
+def turn_scratch(schema: object) -> Iterator[Path]:
+    """A fresh scratch directory holding *schema*, removed on exit (O2b).
+
+    Raises ``TrackerIoConfigError(SCRATCH_UNWRITABLE)`` when it cannot be made.
+    The directory is removed on every exit, including a raise from the body.
+    """
+    try:
+        scratch = _codex_scratch_dir(uuid.uuid4().hex)
+    except OSError as exc:
+        _log.warning("tracker_io_scratch_unwritable", exc_info=True)
+        raise _scratch_unwritable() from exc
+    try:
+        try:
+            (scratch / _SCHEMA_NAME).write_text(json.dumps(schema), encoding="utf-8")
+        except OSError as exc:
+            _log.warning("tracker_io_scratch_unwritable", exc_info=True)
+            raise _scratch_unwritable() from exc
+        yield scratch
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def other_servers_for(scratch: Path, *, write_capable: bool) -> tuple[str, ...]:
+    """The other declared servers to disable for a turn run in *scratch* (O2b).
+
+    Walks the project chain from the scratch cwd (R11) as well as the user and
+    system layers. No layer at all returns ``()`` and the turn proceeds
+    (nothing to disable). A readable layer returns its names. A layer that
+    exists but cannot be read is refused for a *write_capable* turn (R22); a
+    read-only turn keeps the readable names (best effort).
+    """
+    scan = scan_declared_servers(CODEX_BACKEND, root=scratch)
+    for reason in scan.unreadable:
+        _log.warning("tracker_io_layer_unreadable: %s", reason)
+    if scan.unreadable and write_capable:
+        raise TrackerIoLayerError(scan.unreadable)
+    return scan.names
+
+
+def transport_refusal(run: CodexRunResult, total: int) -> TrackerIoOutcome | None:
+    """The outcome for a turn that never produced a result, else ``None``.
+
+    Shared by the legacy turn and the courier (timeout, spawn error, non-zero
+    exit). Every case is post-launch, so the caller decides the disposition.
+    """
     if run.timed_out:
         return _refused(TrackerIoReason.TURN_TIMEOUT, total)
     if _is_spawn_error(run):
@@ -178,6 +310,16 @@ def _classify(
     if run.returncode != 0:
         _log.warning("tracker_io_turn_exit rc=%s: %s", run.returncode, run.stderr)
         return _refused(TrackerIoReason.TURN_EXIT_NONZERO, total)
+    return None
+
+
+def _classify(
+    run: CodexRunResult, ticket_id: str, parts: tuple[str, ...]
+) -> TrackerIoOutcome:
+    total = len(parts)
+    refusal = transport_refusal(run, total)
+    if refusal is not None:
+        return refusal
     verified = verify_turn_result(
         ticket_id, parts, parse_turn_result(run.output_file_content)
     )
@@ -191,6 +333,72 @@ def _classify(
     )
 
 
+@dataclass(frozen=True)
+class TurnLaunch:
+    """One launched turn: the runner result, or the refusal that stopped it.
+
+    *layers_unreadable* lists the unreadable config layers behind a pre-launch
+    refusal (R22). A refusal before the runner is called costs no turn.
+    """
+
+    run: CodexRunResult | None
+    refusal: TrackerIoOutcome | None
+    layers_unreadable: tuple[str, ...] = ()
+
+    @property
+    def launched(self) -> int:
+        """1 when the runner ran (a counted turn), else 0."""
+        return 0 if self.run is None else 1
+
+
+def launch_turn(
+    runner: CodexRunner,
+    *,
+    schema: object,
+    prompt: str,
+    server: str,
+    allowlist: tuple[str, ...],
+    write_capable: bool,
+    parts_total: int,
+    narrowing: ToolNarrowing = ToolNarrowing.PER_TOOL,
+) -> TurnLaunch:
+    """Run one tracker-IO turn in a fresh scratch directory, always removed.
+
+    The one launch site for the legacy turn and the courier (O2b): argv, the
+    scratch-scoped ``other_servers`` disable list, the runner call and the
+    unavailable-codex mapping live here only.
+    """
+    try:
+        with turn_scratch(schema) as scratch:
+            try:
+                argv = build_tracker_io_argv(
+                    server=server,
+                    tools=allowlist,
+                    schema_path=scratch / _SCHEMA_NAME,
+                    output_path=scratch / _RESULT_NAME,
+                    other_servers=other_servers_for(
+                        scratch, write_capable=write_capable
+                    ),
+                    narrowing=narrowing,
+                )
+            except TrackerIoLayerError as exc:
+                _log.warning("tracker_io_layer_refused: %s", exc)
+                return TurnLaunch(None, _refused(exc.reason, parts_total), exc.paths)
+            except TrackerIoConfigError as exc:
+                _log.warning("tracker_io_config_refused: %s", exc)
+                return TurnLaunch(None, _refused(exc.reason, parts_total))
+            try:
+                run = runner.run(scratch, argv, TURN_TIMEOUT_SECONDS, stdin=prompt)
+            except OSError:
+                _log.warning("tracker_io_codex_unavailable", exc_info=True)
+                return TurnLaunch(
+                    None, _refused(TrackerIoReason.CODEX_UNAVAILABLE, parts_total)
+                )
+            return TurnLaunch(run, None)
+    except TrackerIoConfigError as exc:
+        return TurnLaunch(None, _refused(exc.reason, parts_total))
+
+
 def _launch(
     ticket_id: str,
     parts: tuple[str, ...],
@@ -199,39 +407,19 @@ def _launch(
     tools: tuple[str, str],
     context: TrackerIoContext,
 ) -> TrackerIoOutcome:
-    """Run the turn once in a fresh scratch directory, always removed."""
-    prompt = render_prompt(ticket_id, parts, server=server, tools=tools)
-    try:
-        scratch = _codex_scratch_dir(uuid.uuid4().hex)
-    except OSError:
-        _log.warning("tracker_io_scratch_unwritable", exc_info=True)
-        return _refused(TrackerIoReason.SCRATCH_UNWRITABLE, len(parts))
-    try:
-        schema = scratch / _SCHEMA_NAME
-        try:
-            schema.write_text(json.dumps(RESULT_SCHEMA), encoding="utf-8")
-        except OSError:
-            _log.warning("tracker_io_scratch_unwritable", exc_info=True)
-            return _refused(TrackerIoReason.SCRATCH_UNWRITABLE, len(parts))
-        try:
-            argv = build_tracker_io_argv(
-                server=server,
-                tools=tools,
-                schema_path=schema,
-                output_path=scratch / _RESULT_NAME,
-                other_servers=_other_servers(),
-            )
-        except TrackerIoConfigError as exc:
-            _log.warning("tracker_io_config_refused: %s", exc)
-            return _refused(exc.reason, len(parts))
-        try:
-            run = context.runner.run(scratch, argv, TURN_TIMEOUT_SECONDS, stdin=prompt)
-        except OSError:
-            _log.warning("tracker_io_codex_unavailable", exc_info=True)
-            return _refused(TrackerIoReason.CODEX_UNAVAILABLE, len(parts))
-        return _classify(run, ticket_id, parts)
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+    """Run the legacy turn once; the launch itself is :func:`launch_turn`."""
+    launch = launch_turn(
+        context.runner,
+        schema=RESULT_SCHEMA,
+        prompt=render_prompt(ticket_id, parts, server=server, tools=tools),
+        server=server,
+        allowlist=tools,
+        write_capable=True,
+        parts_total=len(parts),
+    )
+    if launch.run is None:
+        return launch.refusal or _refused(TrackerIoReason.CODEX_UNAVAILABLE, len(parts))
+    return _classify(launch.run, ticket_id, parts)
 
 
 def post_parts_via_turn(

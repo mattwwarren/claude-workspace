@@ -5353,10 +5353,14 @@ line.
 
 RFC 0019 O2 (#3706). The per-client outbox (`state_dir()/outbox/<client>/`)
 holds prose posts made with no agent present. `cw outbox drain` posts them to
-the client's `bindings.tickets` tracker when that binding has `cli: gh`.
+the client's `bindings.tickets` tracker when that binding has `cli: gh`, or
+through one codex courier turn per entry (1 to 3 turns, ADR-0023) when it has a
+codex MCP realization. A `--force` drain clears each unreachable marker and with
+it the episode's gate-record bit.
 Since RFC 0019 O3 (#3707) the codex verdict, PLAN and PR-link comments enqueue
 under `codex-verdict`, `codex-plan` (`plan-` and `park-` markers) and
-`codex-pr-link`; a Linear entry stays pending until the O2b courier merges.
+`codex-pr-link`. A non-GitHub entry drains only through a codex MCP realization;
+without one it stays `binding_unreachable`.
 
 **Tick launch.** Each dispatch tick launches at most one detached
 `python -m cw outbox drain --client <c>` per client, before the usage-limit

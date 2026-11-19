@@ -135,7 +135,8 @@ superseded by the rescope this ADR records.
   through its own MCP tools. cw Python still never talks to a non-GitHub
   tracker API; it builds the argv, hands over the parts and verifies the
   agent's self-attested report (`src/cw/tracker_io/`). Not a new allowlist
-  entry and not a new ADR.
+  entry and not a new ADR. Superseded by ADR-0023 for the outbox drain's MCP
+  courier turns (#3740, RFC 0019 O2b).
 - **Update (2026-11-18): #3706 (RFC 0019 O2) added the outbox drain.** Prose
   posts made with no agent present are enqueued to the per-client outbox
   (`src/cw/outbox/`) and drained by `cw outbox drain`

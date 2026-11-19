@@ -234,9 +234,7 @@ class TestAllClients:
             _line(drained=1, delivered=1),
             _line(_OTHER, drained=1, delivered=1),
         ]
-        assert (
-            "unconfigured (no usable gh tickets binding): orphan-dir" in result.stderr
-        )
+        assert "unconfigured (no usable tickets binding): orphan-dir" in result.stderr
 
     def test_precedence_error_over_tempfail_over_ok(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, gh: GhThread
@@ -434,7 +432,8 @@ class TestHelp:
         assert group is not None
         assert group.help == ("Inspect and drain the per-client outbox of prose posts.")
         assert command.help == (
-            "Drain pending outbox entries to the ticket tracker through gh."
+            "Drain pending outbox entries to the ticket tracker "
+            "through its tickets binding."
         )
         assert helps == {
             "client": (

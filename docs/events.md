@@ -3082,8 +3082,10 @@ does not retry it. Forwarded by default. `correlation_id` is the `ticket`.
 **Semantics:** GitHub #3706. Two causes, told apart by `held`:
 
 - **Binding-level marker release** (`held: false`). The client has no usable
-  tickets binding for the entry's role (absent, not `cli: gh`, or a role other
-  than `tickets`: `binding_unreachable`), or `gh` could not read the ticket's
+  tickets binding for the entry's role (absent, neither `cli: gh` nor a codex
+  MCP realization, or a role other than `tickets`: `binding_unreachable`; O2b
+  files one gate record per (client, binding) episode for every such cause,
+  tracked by `gate_filed` on the marker), or `gh` could not read the ticket's
   comment listing (`transient_failure`). The drain writes the per-role marker
   `outbox/<client>/drain.unreachable.<role>` and handles the rest of that role
   in the run without `gh`. The event is emitted once per entry per episode;

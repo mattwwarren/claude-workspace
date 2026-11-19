@@ -195,6 +195,13 @@ ignore = [
     # these types across module boundaries.
     "TC001",
 ]
+"src/cw/tracker_io/_snapshot_check.py" = [
+    # `IssueSnapshot.status: TurnStatus` is a pydantic field annotation, so the
+    # Literal must be importable at runtime for pydantic to resolve it at
+    # class-build time; a TYPE_CHECKING-only import raises
+    # PydanticUndefinedAnnotation. Same case as the models above (O2b).
+    "TC001",
+]
 "src/cw/review_findings/_models.py" = [
     # `ReviewVerdict.review: Review` is a pydantic field annotation, so
     # `cw.auto_dev_result.Review` must be importable at runtime for pydantic to
