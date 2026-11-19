@@ -5325,7 +5325,10 @@ line.
 
 RFC 0019 O2 (#3706). The per-client outbox (`state_dir()/outbox/<client>/`)
 holds prose posts made with no agent present. `cw outbox drain` posts them to
-the client's `bindings.tickets` tracker when that binding has `cli: gh`.
+the client's `bindings.tickets` tracker when that binding has `cli: gh`, or
+through one codex courier turn per entry (1 to 3 turns, ADR-0023) when it has a
+codex MCP realization. A `--force` drain clears each unreachable marker and with
+it the episode's gate-record bit.
 Nothing enqueues to the outbox until RFC 0019 O3 migrates the producers, so on
 a running cw this changes nothing yet.
 

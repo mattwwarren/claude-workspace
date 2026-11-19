@@ -331,8 +331,10 @@ after a change to the renderer:
 
 ### Outbox drain
 
-`outbox` (RFC 0019 O2, #3706) controls the drain that posts a client's outbox
-entries to its tickets tracker through `gh`:
+`outbox` (RFC 0019 O2, #3706; MCP courier O2b, ADR-0023) controls the drain that
+posts a client's outbox entries to its tickets tracker, through `gh` for a
+`cli: gh` binding or through one agent turn per entry (1 to 3 turns, up to 300 s
+each) for a codex MCP realization:
 
 ```yaml
 outbox:
@@ -347,7 +349,8 @@ outbox:
   `cw outbox drain -c <client> --force` drains it anyway. With `-c` omitted, a
   disabled client is skipped with a note on stderr.
 - "Disabled" is not "binding absent". An enabled client whose
-  `bindings.tickets` is absent or has no `cli: gh` still gets a drain, which
+  `bindings.tickets` is absent, or has neither `cli: gh` nor a codex MCP
+  realization, still gets a drain, which
   returns its entries to `pending` with reason `binding_unreachable` and emits
   `outbox.entry_pending` (once per entry per episode).
 - `max_entries_per_run` bounds the entries one run claims. `cw outbox drain
