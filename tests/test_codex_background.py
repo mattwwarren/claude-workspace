@@ -108,6 +108,7 @@ from cw.stage_verification.growth import (
     RunGrowth,
 )
 from cw.ticket_snapshot import _binding
+from cw.ticket_snapshot._refresh import read_for_stage
 from tests._claude_review_helpers import RoleAwareClaudeRunner, review_envelope
 from tests._codex_review_helpers import _doc_json, _finding_payload, _loop_verdict
 from tests._review_convergence_helpers import (
@@ -2108,7 +2109,9 @@ def test_disabled_fix_loop_does_not_resolve_operator_login(
         config=OrchestratorConfig(),
     )
 
-    assert fix_loop_mock.call_args.kwargs["snapshots"].operator_login is None
+    snapshots = fix_loop_mock.call_args.kwargs["snapshots"]
+    assert snapshots.operator_login is None
+    assert snapshots.resolve is not read_for_stage
     _login_mock().assert_not_called()
 
 

@@ -536,11 +536,11 @@ def _review_and_confirm(
     # #3712: one snapshot context for the whole run; enabled review passes
     # refresh the ticket snapshot through it. The login is resolved only when
     # the loop runs (#2633: `gh api user` otherwise never needs to run).
-    # Snapshot persistence is gated by the existing per-client/lane fix-loop
-    # rollout. Clients outside that rollout keep the row-only resolver until
-    # snapshot retention is available; no new fleet-wide switch is introduced.
+    # Snapshot refresh applies to every codex review pass. Only the operator
+    # login remains lazy behind the fix-loop setting; refresh rollout is
+    # independent so clean-mode reviews see the current ticket as well.
     snapshots = context_for_client(
-        client, worktree, resolve_login=fix_loop_enabled, refresh=fix_loop_enabled
+        client, worktree, resolve_login=fix_loop_enabled, refresh=True
     )
     resumed = resume_pending_confirm(
         task=task,
