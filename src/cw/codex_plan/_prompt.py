@@ -32,6 +32,7 @@ from cw.openai_strict_schema import to_openai_strict_schema
 
 if TYPE_CHECKING:
     from cw.codex_plan._result import ResumeDraft
+    from cw.ticket_snapshot import TicketSnapshot
 
 #: The docs the plan render reads; each must be present in a docs root.
 PLAN_DOCS: Final[tuple[str, ...]] = _STAGE_DOCS["plan"]
@@ -146,6 +147,20 @@ def render_ticket_text(
         room = max(cap - framing - len(_BODY_TRUNCATED_NOTE), 0)
         text = _assemble_ticket_text(head[:room] + _BODY_TRUNCATED_NOTE, [], dropped)
     return TicketText(text=text, comments_total=len(comments), comments_dropped=dropped)
+
+
+def ticket_text_from_snapshot(snapshot: TicketSnapshot) -> TicketText:
+    """Render a stored snapshot as the prompt's ticket text (RFC 0019 T2).
+
+    Every comment, oldest first, under its display ``author`` (never
+    ``author_id``); agent-authored ones are kept verbatim, as the live fetch
+    did. Same cap as :func:`render_ticket_text`.
+    """
+    comments: list[dict[str, Any]] = [
+        {"author": c.author, "created_at": c.created_at, "body": c.body}
+        for c in snapshot.comments
+    ]
+    return render_ticket_text(snapshot.body, comments)
 
 
 def prefetch_ticket(ticket_id: str, *, cwd: Path) -> TicketText | None:

@@ -78,10 +78,11 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         # record) -- the operator must be told. REVIEW_VERDICT_COMMENT_UNVERIFIED
         # left this set at O3: no producer emits it any more.
         OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED,
-        # GitHub #3055: the first-entry sibling of
-        # REQUEUE_REVIEW_DELIVERY_DEGRADED -- a codex review ran without the
-        # operator's tracker comments, voided findings and settle markers.
-        OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED,
+        # RFC 0019 T2 (#3712): a comment id reported with a contradicting
+        # author_id is untrusted from now on -- the operator must be told.
+        # REVIEW_OPERATOR_CONTEXT_UNDELIVERED left this set at T2 (no producer).
+        # TICKET_SNAPSHOT_DEGRADED is deliberately EXCLUDED: per-pass noise.
+        OrchestratorEventType.TICKET_SNAPSHOT_AUTHOR_CONFLICT,
         # GitHub #3706 (RFC 0019 O2): an outbox post that may be public but is
         # unconfirmed, one the store gave up on (unreadable body), and one
         # returned to pending (binding unreachable, or held after a per-entry
