@@ -23,7 +23,10 @@ from cw.dev_queue.adoption import (
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorEventType, Stage
-from cw.stage_verification.impl_regress_findings import regress_review_findings
+from cw.stage_verification.impl_regress_findings import (
+    REVIEW_FEEDBACK_PRESENT,
+    regress_review_findings,
+)
 from cw.worktree import resolve_task_worktree
 
 from ._settle import live_session_notes
@@ -109,7 +112,7 @@ def _echo_regress_findings(ticket_id: str, client: str) -> None:
         click.echo(_FINDINGS_UNREADABLE, err=True)
         return
     outcome = regress_review_findings(task, worktree)
-    if outcome is None or outcome.reason == "review_feedback_present":
+    if outcome is None or outcome.reason == REVIEW_FEEDBACK_PRESENT:
         return
     if outcome.findings is not None:
         click.echo(_FINDINGS_DELIVERED.format(sha=outcome.findings.reviewed_sha))

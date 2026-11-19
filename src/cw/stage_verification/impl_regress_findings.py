@@ -43,6 +43,12 @@ WithheldReason = Literal[
     "not_blocking",
 ]
 
+REVIEW_FEEDBACK_PRESENT: Final[WithheldReason] = "review_feedback_present"
+OVERRIDE_PRESENT: Final[WithheldReason] = "override_present"
+ARTIFACT_MISSING: Final[WithheldReason] = "artifact_missing"
+NOT_OWNED: Final[WithheldReason] = "not_owned"
+NOT_BLOCKING: Final[WithheldReason] = "not_blocking"
+
 _CAP_BYTES: Final = MAX_REVIEW_REPORT_BYTES
 _MARKER_BYTES: Final = len(TRUNCATION_MARKER.encode("utf-8"))
 
@@ -117,9 +123,9 @@ def regress_review_findings(task: TicketTask, worktree: Path) -> RegressOutcome 
     if not _applies(task):
         return None
     if task.review_feedback is not None:
-        return RegressOutcome(None, "review_feedback_present")
+        return RegressOutcome(None, REVIEW_FEEDBACK_PRESENT)
     if task.must_fix_override is not None:
-        return RegressOutcome(None, "override_present")
+        return RegressOutcome(None, OVERRIDE_PRESENT)
     read = read_owned_verdict(
         worktree / REVIEW_VERDICT_JSON_RELATIVE_PATH, task.ticket_id
     )
@@ -127,7 +133,7 @@ def regress_review_findings(task: TicketTask, worktree: Path) -> RegressOutcome 
         return RegressOutcome(None, _refusal_reason(read.refusal))
     verdict = read.verdict
     if not verdict.must_fix:
-        return RegressOutcome(None, "not_blocking")
+        return RegressOutcome(None, NOT_BLOCKING)
     findings = RegressFindings(
         reviewed_sha=verdict.reviewed_sha,
         text=_render(verdict.must_fix),
@@ -137,11 +143,11 @@ def regress_review_findings(task: TicketTask, worktree: Path) -> RegressOutcome 
 
 def _refusal_reason(refusal: str | None) -> WithheldReason:
     """Map a :func:`read_owned_verdict` refusal onto the closed vocabulary."""
-    if refusal == "not_owned":
-        return "not_owned"
-    if refusal == "not_blocking":
-        return "not_blocking"
-    return "artifact_missing"
+    if refusal == NOT_OWNED:
+        return NOT_OWNED
+    if refusal == NOT_BLOCKING:
+        return NOT_BLOCKING
+    return ARTIFACT_MISSING
 
 
 def with_regress_findings(
