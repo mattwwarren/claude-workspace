@@ -68,9 +68,8 @@ from cw.codex_review import (
     FIX_LOOP_DIVERGING,
 )
 from cw.codex_review._verdict._synthesis import _SCOPE_TIER_UNRESOLVABLE
-from cw.executor._clean_review import CLEAN_REVIEW_UNSUPPORTED_BACKEND
-from cw.executor._finalize_guard import FINALIZE_UNSUPPORTED_BACKEND
 from cw.models import QueueItemStatus
+from cw.stage_preflight import LEGACY_REASON_ALIASES, PreflightReason
 from cw.stage_verification.finalize_result import (
     MERGE_CONFLICT_POST_PUSH,
     PR_ALREADY_TERMINAL,
@@ -1023,13 +1022,15 @@ class TestKnownBlockerReasons:
             CODEX_FIX_SCOPE_VIOLATION,
         } <= KNOWN_BLOCKER_REASONS
 
-    def test_registry_covers_the_clean_review_guard_reason(self) -> None:
-        """#2797: the executor pre-flight guard's reason is a known reason."""
-        assert CLEAN_REVIEW_UNSUPPORTED_BACKEND in KNOWN_BLOCKER_REASONS
+    def test_registry_covers_every_stage_preflight_reason(self) -> None:
+        """RFC 0019 H2 (#3709): every stage pre-flight park reason is known."""
+        assert {r.value for r in PreflightReason} <= KNOWN_BLOCKER_REASONS
 
-    def test_registry_covers_the_finalize_guard_reason(self) -> None:
-        """RFC 0018 B1 (#3059): the opencode FINALIZE pre-flight reason is known."""
-        assert FINALIZE_UNSUPPORTED_BACKEND in KNOWN_BLOCKER_REASONS
+    def test_old_stage_reasons_are_known_through_their_alias(self) -> None:
+        """A row parked before H2 under an old stage reason is still known."""
+        assert "finalize_unsupported_backend" not in KNOWN_BLOCKER_REASONS
+        for old in LEGACY_REASON_ALIASES:
+            assert is_known_blocker_reason(old)
 
     def test_agent_block_reason_is_named_and_registered(self) -> None:
         """#3438: one named constant behind every codex ``agent_block``."""

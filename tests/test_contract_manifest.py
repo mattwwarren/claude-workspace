@@ -65,6 +65,7 @@ from cw.models.orchestrator_config.constants import (
 )
 from cw.opencode_clean_review import clean_review_body
 from cw.opencode_runner import build_stage_prompt
+from cw.stage_preflight import LEGACY_REASON_ALIASES, PreflightReason, canonical_reason
 from tests._shared.workflow_text import _REPO_ROOT, _appendix, _cmd, _section_between
 
 if TYPE_CHECKING:
@@ -1030,10 +1031,11 @@ _RFC_0017_FINALIZE_MEMBERS = (
     "finalize.gate-review-debt-re-file",
     "finalize.review-sign-off",
 )
-_ENGINE_GUARD_REF = CodeRef(
+#: The one stage pre-flight every former guard-module cell points at (#3709).
+_PREFLIGHT_REF = CodeRef(
     kind="code",
-    path="src/cw/executor/_engine_guard.py",
-    symbol="engine_block_details",
+    path="src/cw/stage_preflight/decision.py",
+    symbol="first_unmet",
 )
 _CODEX_DEBT_NOTE = "src/cw/codex_review_debt.py::file_codex_deferrals"
 #: RFC 0017 members whose codex cell is ``implemented`` (R17 exception route).
@@ -1085,11 +1087,6 @@ _S3_TICKET = 3055
 _A1_TICKET = 3056
 
 #: Seeded floor (R4, R5): (id, backend, disposition, ticket or None).
-_FINALIZE_GUARD_REF = CodeRef(
-    kind="code",
-    path="src/cw/executor/_finalize_guard.py",
-    symbol="finalize_block_details",
-)
 #: The 81 FINALIZE-stage opencode cells flip (RFC 0018 B1); a deletion must bite.
 _FINALIZE_GUARD_MIN_CELLS = 80
 
@@ -1101,9 +1098,9 @@ _NAMED_GAP_DISPOSITIONS = (
     ("impl.repair-entry-no-plan", "local", "fails-closed", None),
     ("impl.repair-entry-with-plan", "local", "fails-closed", None),
     ("impl.file-set-is-within-plan-s", "local", "implemented", None),
-    ("plan.ambiguity-verification", "local", "deferred", 3219),
-    ("review.fix-loop", "local", "deferred", 3219),
-    ("finalize.merge-gate-check", "local", "deferred", 3219),
+    ("plan.ambiguity-verification", "local", "fails-closed", None),
+    ("review.fix-loop", "local", "fails-closed", None),
+    ("finalize.merge-gate-check", "local", "fails-closed", None),
 )
 
 #: Every named RFC 0018 gap -> the element that carries it (test 9).
@@ -1317,7 +1314,7 @@ def test_rfc_0017_member_cells(tmp_path: Path) -> None:
         opencode = _real_cell(element_id, OPENCODE_BACKEND)
         assert isinstance(opencode, FailsClosedDisposition), element_id
         assert not opencode.guard_pending, element_id
-        assert opencode.ref == _ENGINE_GUARD_REF, element_id
+        assert opencode.ref == _PREFLIGHT_REF, element_id
     for element_id in _RFC_0017_FINALIZE_MEMBERS:
         codex = _real_cell(element_id, CODEX_BACKEND)
         assert isinstance(codex, DeferredDisposition), element_id
@@ -1345,7 +1342,7 @@ def test_engine_park_release_covers_the_unsupported_backend_reason(
     for backend in (OPENCODE_BACKEND, LOCAL_BACKEND):
         cell = _real_cell("review.engine-park-release", backend)
         assert isinstance(cell, FailsClosedDisposition), backend
-        assert cell.ref == _ENGINE_GUARD_REF, backend
+        assert cell.ref == _PREFLIGHT_REF, backend
     for element_id in _REVIEW_DEBT_MEMBERS:
         note = _real_cell(element_id, CODEX_BACKEND).note
         assert note is not None
@@ -1369,11 +1366,7 @@ def test_named_gap_dispositions(
     assert _ticket_of(cell) == ticket
     assert element_id in elements_with(backend, disposition)
     if (element_id, backend) == ("impl.review-feedback-guard", OPENCODE_BACKEND):
-        assert cell.ref == CodeRef(
-            kind="code",
-            path="src/cw/executor/_repair_entry.py",
-            symbol="repair_entry_block_details",
-        )
+        assert cell.ref == _PREFLIGHT_REF
 
 
 def test_local_ticket_citations_follow_the_stage_split() -> None:
@@ -1384,10 +1377,41 @@ def test_local_ticket_citations_follow_the_stage_split() -> None:
         ticket = _ticket_of(cell)
         if ticket == 3260:
             assert stage == "impl", element_id
-        if ticket == 3219:
-            assert stage in {"plan", "review", "finalize"}, element_id
+        assert ticket != _H2_STAGE_TICKET, element_id
         if isinstance(cell, NotApplicableDisposition):
             assert cell.reason == _AIDER_REASON, element_id
+
+
+#: #3219 (local stage routing) landed with RFC 0019 H2: no cell defers to it.
+_H2_STAGE_TICKET = 3219
+#: The local cells #3219 used to defer; each now fails closed on the pre-flight.
+_LOCAL_STAGE_PARK_CELLS = 165
+
+
+def test_local_non_impl_cells_fail_closed_on_the_stage_preflight() -> None:
+    """#3219: every former deferred local cell parks ``stage_unsupported``."""
+    flipped = 0
+    for element_id, element in _manifest().elements.items():
+        cell = element.cells[LOCAL_BACKEND]
+        assert not isinstance(cell, str), element_id
+        if not isinstance(cell, FailsClosedDisposition) or cell.note is None:
+            continue
+        if "parks stage_unsupported before spawn (#3219)" not in cell.note:
+            continue
+        assert cell.ref == _PREFLIGHT_REF, element_id
+        assert not cell.guard_pending, element_id
+        assert scope_stage(element_id, LOCAL_BACKEND) != "impl", element_id
+        flipped += 1
+    assert flipped == _LOCAL_STAGE_PARK_CELLS
+
+
+def test_old_stage_reasons_are_covered_through_their_canonical_name() -> None:
+    """Covers lists carry new names; each legacy alias resolves to a covered one."""
+    covered = {c for e in _manifest().elements.values() for c in e.covers}
+    assert PreflightReason.STAGE_UNSUPPORTED.value in covered
+    for old in LEGACY_REASON_ALIASES:
+        assert old not in covered, old
+        assert canonical_reason(old) in covered, old
 
 
 def _assert_codex_plan_cell(element_id: str, cell: object) -> int | None:
@@ -1859,11 +1883,7 @@ def test_opencode_clean_review_cells_track_clean_review_body() -> None:
         assert cell.note is not None
         assert token in cell.note, element_id
         assert token not in body, f"{element_id}: B1 landed {token!r}; flip it"
-    guard = CodeRef(
-        kind="code",
-        path="src/cw/executor/_clean_review.py",
-        symbol="clean_review_block_details",
-    )
+    guard = _PREFLIGHT_REF
     for element_id in (*_CLEAN_REVIEW_IMPLEMENTED, *_CLEAN_REVIEW_EXCEPTIONS):
         cell = _real_cell(element_id, LOCAL_BACKEND)
         assert isinstance(cell, FailsClosedDisposition), element_id
@@ -1968,7 +1988,7 @@ def test_opencode_finalize_stage_cells_fail_closed_on_the_guard() -> None:
         if isinstance(cell, NotApplicableDisposition):
             continue
         assert isinstance(cell, FailsClosedDisposition), element_id
-        assert cell.ref == _FINALIZE_GUARD_REF, element_id
+        assert cell.ref == _PREFLIGHT_REF, element_id
         assert not cell.guard_pending, element_id
         checked += 1
     assert checked >= _FINALIZE_GUARD_MIN_CELLS

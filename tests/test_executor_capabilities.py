@@ -1,8 +1,10 @@
 """Four-executor conformance matrix for harness capability declarations (#3708).
 
-Declared, not enforced: these tests pin each declaration to the existing
-predicates and to the executors' own ``capabilities()`` method, and check that
-no old predicate derives from the declaration yet.
+The stage pre-flight (``cw.stage_preflight``, RFC 0019 H2) reads these
+declarations. These tests pin each declaration to the existing predicates and
+to the executors' own ``capabilities()`` method, check that each executor's
+pre-flight reads its own declaration, and check that no old predicate derives
+from the declaration.
 """
 
 from __future__ import annotations
@@ -10,6 +12,7 @@ from __future__ import annotations
 import ast
 import inspect
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -25,7 +28,6 @@ from cw.executor._capabilities import (
     OPENCODE_CAPABILITIES,
     declared_capabilities,
 )
-from cw.executor._finalize_guard import finalize_block_details
 from cw.executor.codex import CODEX_SUPPORTED_STAGES, CodexExecutor
 from cw.executor.core import ClaudeNativeExecutor, StageExecutor
 from cw.executor.local import LocalExecutor
@@ -167,12 +169,9 @@ def test_codex_stages_equal_codex_supported_stages() -> None:
     assert CODEX_CAPABILITIES.stages == CODEX_SUPPORTED_STAGES
 
 
-def test_opencode_stages_equal_supported_stages_minus_finalize_guard() -> None:
-    expected = {
-        Stage(s)
-        for s in SUPPORTED_STAGES
-        if finalize_block_details(Stage(s), OPENCODE_BACKEND) is None
-    }
+def test_opencode_stages_equal_prompt_stages_minus_finalize() -> None:
+    """opencode has a FINALIZE prompt but no verified run (RFC 0018 B1, #3059)."""
+    expected = {Stage(s) for s in SUPPORTED_STAGES} - {Stage.FINALIZE}
     assert OPENCODE_CAPABILITIES.stages == expected
 
 
@@ -191,13 +190,26 @@ def test_clean_mode_and_engine_match_existing_predicates(backend: str) -> None:
     assert caps.review_engine == engine_supported(backend)
 
 
-def test_repair_entry_call_sites_match_declaration() -> None:
-    # Local calls the predicate with its default (adopted rows only); opencode
-    # passes block_any_feedback=True; claude-native and codex never call it.
-    assert "block_any_feedback" not in inspect.getsource(local_mod)
-    assert "block_any_feedback=True" in inspect.getsource(opencode_mod)
-    assert "repair_entry_block_details" not in inspect.getsource(core_mod)
-    assert "repair_entry_block_details" not in inspect.getsource(codex_mod)
+@pytest.mark.parametrize(
+    ("module", "constant"),
+    [
+        (local_mod, "LOCAL_CAPABILITIES"),
+        (opencode_mod, "OPENCODE_CAPABILITIES"),
+        (codex_mod, "CODEX_CAPABILITIES"),
+    ],
+    ids=["local", "opencode", "codex"],
+)
+def test_each_preflight_reads_its_own_declaration(
+    module: ModuleType, constant: str
+) -> None:
+    """The stage pre-flight parks from the executor's own declaration."""
+    source = inspect.getsource(module)
+    assert f"park_if_unmet(\n        {constant}," in source
+
+
+def test_claude_native_is_not_wired_to_the_preflight() -> None:
+    """A7: ClaudeNativeExecutor has no park position (#3744 owns the tick)."""
+    assert "park_if_unmet" not in inspect.getsource(core_mod)
 
 
 def test_codex_impl_consumes_review_feedback_directly() -> None:
@@ -211,10 +223,6 @@ def test_codex_impl_consumes_review_feedback_directly() -> None:
 @pytest.mark.parametrize(
     "module",
     [
-        "cw.executor._finalize_guard",
-        "cw.executor._repair_entry",
-        "cw.executor._clean_review",
-        "cw.executor._engine_guard",
         "cw.review_convergence._backend",
     ],
 )

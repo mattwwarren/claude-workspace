@@ -23,7 +23,6 @@ from cw.dev_queue.red_pr_recovery import (
 )
 from cw.dispatch.pr_gate import _is_review_feedback_pr
 from cw.exceptions import RequeueLiveSessionError, RequeueStateError
-from cw.executor._repair_entry import is_adopted_repair_entry
 from cw.models import (
     CLAUDE_NATIVE_BACKEND,
     CODEX_BACKEND,
@@ -32,6 +31,7 @@ from cw.models import (
     Stage,
     TicketTask,
 )
+from cw.models.repair_entry import is_adopted_repair_entry
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.review_convergence import ConvergenceLedger
 from cw.review_convergence._tip import evaluate_tip

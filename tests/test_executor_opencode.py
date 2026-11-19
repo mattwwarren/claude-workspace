@@ -42,6 +42,7 @@ from cw.opencode_runner import (
 from cw.worktree import resolve_worker_tmpdir
 from tests._shared.cli_preflight import _write_tracker_config
 from tests._shared.session_seeding import find_completed_session
+from tests._shared.stage_preflight_builders import engine_client, review_client
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -70,7 +71,7 @@ def test_opencode_executor_unsupported_stage_blocked(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """HARDEN stage → blocked/opencode_harden_not_implemented."""
+    """HARDEN → blocked/stage_unsupported (was opencode_harden_not_implemented)."""
     worktree = make_git_repo("wt-opencode-wrong-stage")
     fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
@@ -88,7 +89,10 @@ def test_opencode_executor_unsupported_stage_blocked(
     assert result.status == "blocked"
     assert result.stage_reached == STAGE4A_MERGE_GATE
     assert result.blocker is not None
-    assert result.blocker.reason == "opencode_harden_not_implemented"
+    assert result.blocker.reason == "stage_unsupported"
+    assert result.blocker.retry_eligible is None
+    assert "harness=opencode" in result.blocker.details
+    assert "harden" in result.blocker.details
 
 
 def test_opencode_executor_blocked_binary_missing(
@@ -457,11 +461,6 @@ def test_opencode_executor_stage_sentinel_schema(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _review_client(worktree: Path, convergence: str) -> ClientConfig:
-    review = ReviewConfig.model_validate({"convergence": convergence})
-    return ClientConfig(name="test", workspace_path=worktree, review=review)
-
-
 def _spawn_review_launched(worktree: Path, client: ClientConfig) -> tuple[str, str]:
     """Spawn REVIEW with opencode available; assert it launched, no blocked park.
 
@@ -495,7 +494,7 @@ def test_opencode_review_stage_clean_client_launches_with_clean_prompt(
 ) -> None:
     """#2806: a clean client's opencode REVIEW spawn runs the converge prompt."""
     worktree = make_git_repo("wt-opencode-clean-review")
-    _sid, prompt = _spawn_review_launched(worktree, _review_client(worktree, "clean"))
+    _sid, prompt = _spawn_review_launched(worktree, review_client(worktree, "clean"))
     assert "cw review converge init" in prompt
     assert "--loop-backend opencode" in prompt
     ctx = json.loads(
@@ -528,7 +527,7 @@ def test_opencode_clean_client_non_review_stages_unchanged(
     fake_runner = FakeFireAndForgetRunner()
     config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
     executor = OpencodeExecutor(config=config, runner=fake_runner)
-    client = _review_client(worktree, "clean")
+    client = review_client(worktree, "clean")
     task = TicketTask(ticket_id="T-1", client="test", stage=stage)
 
     with patch("cw.executor.opencode.opencode_available", return_value=False):
@@ -560,7 +559,7 @@ def test_opencode_clean_review_without_binary_blocks_opencode_not_found(
             stage=Stage.REVIEW,
             task=task,
             worktree=worktree,
-            client=_review_client(worktree, "clean"),
+            client=review_client(worktree, "clean"),
         )
 
     assert len(fake_runner.calls) == 0
@@ -576,13 +575,6 @@ def test_opencode_clean_review_without_binary_blocks_opencode_not_found(
 # ---------------------------------------------------------------------------
 # Repo review engine guard (#3216)
 # ---------------------------------------------------------------------------
-
-
-def _engine_client(worktree: Path) -> ClientConfig:
-    review = ReviewConfig.model_validate(
-        {"convergence": "clean", "engine": {"skill": "repo-review"}}
-    )
-    return ClientConfig(name="test", workspace_path=worktree, review=review)
 
 
 @pytest.mark.parametrize("binary_available", [True, False])
@@ -605,7 +597,7 @@ def test_opencode_engine_review_is_refused_before_the_binary_probe(
             stage=Stage.REVIEW,
             task=task,
             worktree=worktree,
-            client=_engine_client(worktree),
+            client=engine_client(worktree),
         )
 
     probe.assert_not_called()
@@ -632,7 +624,7 @@ def test_opencode_engine_guard_is_review_only(
     worktree = make_git_repo("wt-opencode-engine-impl")
     config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
     task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
-    client = _engine_client(worktree)
+    client = engine_client(worktree)
     sess = _sess()
 
     with patch("cw.executor.opencode.opencode_available", return_value=True):
@@ -655,7 +647,7 @@ def test_opencode_review_without_an_engine_is_not_refused_by_the_engine_guard(
             config,
             task,
             worktree,
-            _review_client(worktree, "clean"),
+            review_client(worktree, "clean"),
             Stage.REVIEW,
             _sess(),
         )

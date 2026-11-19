@@ -17,7 +17,7 @@ from cw.models import CODEX_BACKEND, LOCAL_BACKEND, OPENCODE_BACKEND, LaneConfig
 from cw.models.orchestrator_config.constants import CLAUDE_NATIVE_BACKEND
 from tests._doctor_helpers import make_client, make_lane
 
-_CAVEAT = "declared, not enforced; auth, env and headless load unverified"
+_CAVEAT = "static declaration; auth, env and headless load unverified"
 _PIPELINE = [Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
 
 
@@ -92,7 +92,8 @@ def test_mismatch_note_names_routed_stage_without_severity_change() -> None:
     )
     client = make_client(lane, name="client-a")
     (result,) = _check_harness_capabilities({"client-a": client})
-    assert "declared, not enforced (H2/#3219)" in result.detail
+    assert "declared, not enforced" not in result.detail
+    assert "parks such a spawn as stage_unsupported" in result.detail
     assert "routes plan to local" in result.detail
     assert result.ok is True
     assert result.warn is False

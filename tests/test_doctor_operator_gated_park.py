@@ -35,6 +35,7 @@ from cw.dev_queue.dispositions import (
     REVIEW_ENGINE_UNSUPPORTED_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
     TRACKER_MCP_GATE_DISPOSITION,
+    _hold_aware_disposition,
 )
 from cw.dev_queue.next_commands import (
     HUMAN_GATE_LABEL,
@@ -78,6 +79,7 @@ from cw.models import (
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile._shared import _REAP_ELIGIBLE_DISPOSITIONS_BASE
 from cw.reconcile.escalation import _is_escalation_eligible
+from cw.stage_preflight import LEGACY_REASON_ALIASES, PreflightReason
 from cw.ticket_view import ViewSources, next_command_facts
 from tests._doctor_helpers import stub_daemon_roster
 from tests._ticket_view_helpers import (
@@ -871,3 +873,23 @@ def test_doctor_help_lists_the_tracker_mcp_gate_park() -> None:
 
     assert result.exit_code == 0
     assert "tracker_mcp_gate" in result.output
+
+
+@pytest.mark.parametrize(
+    "reason",
+    sorted(
+        {PreflightReason.STAGE_UNSUPPORTED.value, *LEGACY_REASON_ALIASES},
+    ),
+)
+def test_a_stage_unsupported_park_is_not_operator_gated(reason: str) -> None:
+    """RFC 0019 H2 (#3709) adds no disposition: a stage park stays ``blocked``.
+
+    A deterministic ``stage_unsupported`` park (or a pre-H2 row under an old
+    alias) carries disposition ``blocked``, as ``finalize_unsupported_backend``
+    did, so it is not an operator-gated park. Registering a gated disposition
+    for it is a separate decision; this pin fails if that changes silently.
+    """
+    disposition = _hold_aware_disposition("blocked", reason)
+    assert disposition == "blocked"
+    assert disposition not in _OPERATOR_GATED_PARK_DISPOSITIONS
+    assert _is_operator_gated_park(_row(disposition, reason)) is False
