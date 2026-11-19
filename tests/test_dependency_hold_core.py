@@ -10,7 +10,11 @@ import pytest
 from pydantic import ValidationError
 
 import cw.dev_queue.hold as hold_module
-from cw.auto_dev_result import Blocker, parse_depends_on_pr
+from cw.auto_dev_result import (
+    Blocker,
+    parse_depends_on_pr,
+    parse_depends_on_pr_ref,
+)
 from cw.config import load_state, save_state
 from cw.dev_queue import (
     DEPENDENCY_HOLD_DISPOSITION,
@@ -18,7 +22,11 @@ from cw.dev_queue import (
     load_dev_queue,
     save_dev_queue,
 )
-from cw.dev_queue.hold import record_hold_event
+from cw.dev_queue.hold import (
+    is_operator_hold_on,
+    record_hold_event,
+    restamp_unvetted_hold_ref,
+)
 from cw.dispatch.routing.stage_failure import (
     _dependency_park_pr,
     _stamp_blocked_on_pr,
@@ -35,8 +43,11 @@ from cw.models import (
     TicketTask,
     WatchedPr,
 )
+from cw.models.pr_ref import PrRef
 from cw.models.tasks.store import occupies_lane_slot
 from cw.reconcile.tasks import release_stale_gated_tasks
+from cw.reconcile.tasks.stale_gate import _is_variant_b_gate_task
+from tests._reconcile_helpers import park_via_routing
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -49,8 +60,11 @@ from tests._ticket_view_helpers import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from pathlib import Path
 
 _HOLD = DEPENDENCY_HOLD_DISPOSITION
+_REF_11 = PrRef(number=11)
+_REF_88 = PrRef(number=88)
 
 
 def _hold(**overrides: object) -> TicketTask:
@@ -109,7 +123,9 @@ class TestDependsOnPrValidator:
 
 class TestRoutingStamp:
     def test_depends_on_pr_read_only_for_dependency_reason(self) -> None:
-        assert _dependency_park_pr("dependency_unmerged", {"depends_on_pr": 88}) == 88
+        assert (
+            _dependency_park_pr("dependency_unmerged", {"depends_on_pr": 88}) == _REF_88
+        )
 
     def test_depends_on_pr_ignored_for_other_reasons(self) -> None:
         assert _dependency_park_pr("agent_block", {"depends_on_pr": 88}) is None
@@ -121,8 +137,8 @@ class TestRoutingStamp:
 
     def test_stamp_sets_blocked_on_pr_from_dependency(self) -> None:
         task = make_task()
-        _stamp_blocked_on_pr(task, "dependency_unmerged", {}, 88)
-        assert task.blocked_on_pr == 88
+        _stamp_blocked_on_pr(task, "dependency_unmerged", {}, _REF_88)
+        assert task.blocked_on_pr == _REF_88
 
 
 def _watch(pr_number: int, state: str, client: str = "acme") -> WatchedPr:
@@ -229,21 +245,21 @@ class TestHoldTicketCore:
         monkeypatch.setattr(hold_module, "_lock", _revive_then_lock)
 
         with pytest.raises(CwError, match="close the session first"):
-            hold_ticket(ACME_TICKET, ACME, 9, repo="foo/bar")
+            hold_ticket(ACME_TICKET, ACME, PrRef(number=9), repo="foo/bar")
         assert queue_row().status == QueueItemStatus.PENDING
         assert events_of(OrchestratorEventType.TICKET_HELD) == []
 
     def test_unchanged_hold_records_no_audit_event(self) -> None:
         seed_queue([_hold(session_id=None, blocked_on_pr=9)])
 
-        result = hold_ticket(ACME_TICKET, ACME, 9, repo="foo/bar")
+        result = hold_ticket(ACME_TICKET, ACME, PrRef(number=9), repo="foo/bar")
 
         assert result.outcome == "unchanged"
         assert events_of(OrchestratorEventType.TICKET_HELD) == []
 
     def test_record_hold_event_skips_unchanged_outcome(self) -> None:
         seed_queue([_hold(session_id=None, blocked_on_pr=9)])
-        result = hold_ticket(ACME_TICKET, ACME, 9, repo="foo/bar")
+        result = hold_ticket(ACME_TICKET, ACME, PrRef(number=9), repo="foo/bar")
 
         record_hold_event(result, "foo/bar")
 
@@ -253,11 +269,11 @@ class TestHoldTicketCore:
     def test_moved_hold_records_audit_event_with_previous_pr(self) -> None:
         seed_queue([_hold(session_id=None, blocked_on_pr=9)])
 
-        result = hold_ticket(ACME_TICKET, ACME, 11, repo="foo/bar")
+        result = hold_ticket(ACME_TICKET, ACME, _REF_11, repo="foo/bar")
         record_hold_event(result, "foo/bar")
 
         assert result.outcome == "updated"
-        assert queue_row().blocked_on_pr == 11
+        assert queue_row().blocked_on_pr == _REF_11
         assert result.previous_disposition == _HOLD
         assert result.previous_blocked_reason == "dependency_unmerged"
         [held] = events_of(OrchestratorEventType.TICKET_HELD)
@@ -269,7 +285,7 @@ class TestHoldTicketCore:
     def test_worker_hold_conversion_records_previous_state(self) -> None:
         seed_queue([_hold(session_id="sess-1", blocked_on_pr=9)])
 
-        result = hold_ticket(ACME_TICKET, ACME, 11, repo="foo/bar")
+        result = hold_ticket(ACME_TICKET, ACME, _REF_11, repo="foo/bar")
         record_hold_event(result, "foo/bar")
 
         assert result.outcome == "updated"
@@ -287,7 +303,7 @@ class TestHoldTicketCore:
         # State first, then event: no compensation. A failed ticket.held write
         # leaves the saved row in place and the error propagates to the caller.
         seed_queue([make_task(status=QueueItemStatus.PENDING)])
-        result = hold_ticket(ACME_TICKET, ACME, 11, repo="foo/bar")
+        result = hold_ticket(ACME_TICKET, ACME, _REF_11, repo="foo/bar")
         error = "unexpected audit failure"
 
         def fail_unexpectedly(*args: object, **kwargs: object) -> None:
@@ -301,7 +317,7 @@ class TestHoldTicketCore:
         row = queue_row()
         assert row.status == QueueItemStatus.BLOCKED_ON_USER
         assert row.disposition == DEPENDENCY_HOLD_DISPOSITION
-        assert row.blocked_on_pr == 11
+        assert row.blocked_on_pr == _REF_11
 
 
 def _auto_policy(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -376,3 +392,264 @@ def test_disposition_is_one_object_across_its_three_homes() -> None:
     assert cw.dev_queue.DEPENDENCY_HOLD_DISPOSITION is (
         dispositions.DEPENDENCY_HOLD_DISPOSITION
     )
+
+
+_OR_9 = PrRef(repo="o/r", number=9)
+
+
+def _other_client_watch(repo: str, pr_number: int) -> WatchedPr:
+    return WatchedPr(
+        pr_url=f"https://github.com/{repo}/pull/{pr_number}",
+        repo=repo,
+        pr_number=pr_number,
+        client="other",
+        source="dependency_hold",
+    )
+
+
+class TestCrossRepoHold:
+    """#3634: an explicit ``owner/repo#N`` ref on the hold core."""
+
+    def test_explicit_ref_is_stored(self) -> None:
+        seed_queue([make_task(status=QueueItemStatus.PENDING)])
+
+        result = hold_ticket(ACME_TICKET, ACME, _OR_9, repo="o/r")
+
+        assert queue_row().blocked_on_pr == _OR_9
+        assert result.outcome == "held"
+        assert result.pr_number == 9
+        assert result.pr_repo == "o/r"
+        assert result.previous_pr is None
+        assert result.previous_pr_repo is None
+        assert result.via_ticket is None
+
+    def test_same_repo_hold_has_null_pr_repo(self) -> None:
+        seed_queue([make_task(status=QueueItemStatus.PENDING)])
+
+        result = hold_ticket(ACME_TICKET, ACME, PrRef(number=9), repo="foo/bar")
+        record_hold_event(result, "foo/bar")
+
+        [held] = events_of(OrchestratorEventType.TICKET_HELD)
+        assert held.payload["pr_repo"] is None
+        assert held.payload["previous_pr_repo"] is None
+        assert held.payload["via_ticket"] is None
+        assert held.payload["pr_number"] == 9
+
+    def test_move_same_repo_to_cross_repo_is_updated(self) -> None:
+        seed_queue([_hold(session_id=None, blocked_on_pr=9)])
+
+        result = hold_ticket(ACME_TICKET, ACME, _OR_9, repo="o/r")
+        record_hold_event(result, "o/r")
+
+        assert result.outcome == "updated"
+        [held] = events_of(OrchestratorEventType.TICKET_HELD)
+        assert held.payload["previous_pr"] == 9
+        assert held.payload["previous_pr_repo"] is None
+        assert held.payload["pr_repo"] == "o/r"
+        assert held.payload["repo"] == "o/r"
+        assert queue_row().blocked_on_pr == _OR_9
+
+    def test_move_cross_repo_to_same_repo_names_previous_repo(self) -> None:
+        seed_queue([_hold(session_id=None, blocked_on_pr=_OR_9)])
+
+        result = hold_ticket(
+            ACME_TICKET, ACME, PrRef(number=9), repo="foo/bar", via_ticket="ACM-2"
+        )
+
+        assert result.outcome == "updated"
+        assert result.previous_pr == 9
+        assert result.previous_pr_repo == "o/r"
+        assert result.pr_repo is None
+        assert result.via_ticket == "ACM-2"
+
+    def test_is_operator_hold_on_compares_keys(self) -> None:
+        task = _hold(session_id=None, blocked_on_pr=_OR_9)
+        assert is_operator_hold_on(task, PrRef(repo="O/R", number=9)) is True
+        assert is_operator_hold_on(task, PrRef(repo="x/y", number=9)) is False
+        assert is_operator_hold_on(task, PrRef(number=9)) is False
+
+    def test_collision_on_same_cross_repo_pr_is_refused(self) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[make_task(status=QueueItemStatus.PENDING)],
+                watched_prs=[_other_client_watch("o/r", 9)],
+            )
+        )
+
+        with pytest.raises(CwError) as excinfo:
+            hold_ticket(ACME_TICKET, ACME, _OR_9, repo="o/r")
+
+        assert str(excinfo.value) == (
+            "PR o/r#9 is already watched by client other; refusing to hold ACM-1"
+        )
+        assert queue_row().status == QueueItemStatus.PENDING
+
+    def test_same_number_in_another_repo_does_not_collide(self) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[make_task(status=QueueItemStatus.PENDING)],
+                watched_prs=[_other_client_watch("x/y", 9)],
+            )
+        )
+
+        assert hold_ticket(ACME_TICKET, ACME, _OR_9, repo="o/r").outcome == "held"
+
+    def test_same_repo_collision_text_is_unchanged(self) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[make_task(status=QueueItemStatus.PENDING)],
+                watched_prs=[_other_client_watch("foo/bar", 9)],
+            )
+        )
+
+        with pytest.raises(CwError) as excinfo:
+            hold_ticket(ACME_TICKET, ACME, PrRef(number=9), repo="foo/bar")
+
+        assert str(excinfo.value) == (
+            "PR #9 in foo/bar is already watched by client other;"
+            " refusing to hold ACM-1"
+        )
+
+
+class TestSentinelRef:
+    """#3634: ``blocker.depends_on_pr_ref``."""
+
+    def test_parse_accepts_explicit_ref(self) -> None:
+        assert parse_depends_on_pr_ref("o/r#5") == "o/r#5"
+
+    @pytest.mark.parametrize("value", [5, "5", "o/r", True])
+    def test_parse_rejects(self, value: object) -> None:
+        assert parse_depends_on_pr_ref(value) is None
+
+    def test_blocker_accepts_and_rejects(self) -> None:
+        blocker = Blocker(
+            stage="pre_flight", reason="dependency_unmerged", depends_on_pr_ref="o/r#5"
+        )
+        assert blocker.depends_on_pr_ref == "o/r#5"
+        with pytest.raises(ValidationError):
+            Blocker(
+                stage="pre_flight",
+                reason="dependency_unmerged",
+                depends_on_pr_ref="o/r",
+            )
+
+    def test_blocker_with_unknown_extra_key_still_parses(self) -> None:
+        blocker = Blocker.model_validate(
+            {
+                "stage": "pre_flight",
+                "reason": "dependency_unmerged",
+                "depends_on_something_new": "x",
+            }
+        )
+        assert blocker.depends_on_pr_ref is None
+
+    def test_both_ids_set_fails_closed(self) -> None:
+        payload = {"depends_on_pr": 5, "depends_on_pr_ref": "o/r#5"}
+        assert _dependency_park_pr("dependency_unmerged", payload) is None
+
+    def test_ref_is_read_for_dependency_reason_only(self) -> None:
+        payload = {"depends_on_pr_ref": "o/r#5"}
+        expected = PrRef(repo="o/r", number=5)
+        assert _dependency_park_pr("dependency_unmerged", payload) == expected
+        assert _dependency_park_pr("agent_block", payload) is None
+        bad = {"depends_on_pr_ref": "o/r"}
+        assert _dependency_park_pr("dependency_unmerged", bad) is None
+
+    def test_stamp_sets_explicit_ref(self) -> None:
+        task = make_task(status=QueueItemStatus.BLOCKED_ON_USER)
+        ref = PrRef(repo="o/r", number=5)
+        _stamp_blocked_on_pr(task, "dependency_unmerged", {}, ref)
+        assert task.blocked_on_pr == ref
+
+    def test_real_routing_stamps_explicit_ref(self, tmp_path: Path) -> None:
+        task = park_via_routing(
+            ACME_TICKET,
+            ACME,
+            tmp_path,
+            "blocked",
+            {
+                "status": "blocked",
+                "blocker": {
+                    "stage": "s4_finalize",
+                    "reason": "dependency_unmerged",
+                    "depends_on_pr_ref": "o/r#5",
+                },
+            },
+        )
+
+        assert task.disposition == DEPENDENCY_HOLD_DISPOSITION
+        assert task.blocked_on_pr == PrRef(repo="o/r", number=5)
+        assert task.session_id is not None
+
+
+_OR_5 = PrRef(repo="o/r", number=5)
+
+
+class TestRestampUnvettedHoldRef:
+    """#3634 D7: the compare-and-set the stale-dispatch registrar uses."""
+
+    def test_replaces_with_same_repo_ref(self) -> None:
+        seed_queue([_hold(session_id="sess-1", blocked_on_pr=_OR_5)])
+
+        assert restamp_unvetted_hold_ref(ACME_TICKET, ACME, _OR_5, PrRef(number=5))
+
+        row = queue_row()
+        assert row.blocked_on_pr == PrRef(number=5)
+        assert row.disposition == DEPENDENCY_HOLD_DISPOSITION
+
+    def test_none_replacement_parks_awaiting_operator(self) -> None:
+        seed_queue([_hold(session_id="sess-1", blocked_on_pr=_OR_5)])
+
+        assert restamp_unvetted_hold_ref(ACME_TICKET, ACME, _OR_5, None)
+
+        row = queue_row()
+        assert row.blocked_on_pr is None
+        assert row.disposition == "awaiting_operator"
+        assert occupies_lane_slot(row) is True
+        assert _is_variant_b_gate_task(row) is False
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"blocked_on_pr": PrRef(repo="o/r", number=6)},
+            {"disposition": "awaiting_operator"},
+            {"status": QueueItemStatus.PENDING},
+            {"session_id": None},
+        ],
+    )
+    def test_changed_row_is_not_written(self, overrides: dict[str, object]) -> None:
+        kwargs: dict[str, object] = {"session_id": "sess-1", "blocked_on_pr": _OR_5}
+        kwargs.update(overrides)
+        seed_queue([_hold(**kwargs)])
+        before = load_dev_queue().model_dump_json()
+
+        assert restamp_unvetted_hold_ref(ACME_TICKET, ACME, _OR_5, None) is False
+
+        assert load_dev_queue().model_dump_json() == before
+
+    def test_missing_row_returns_false(self) -> None:
+        seed_queue([])
+        assert restamp_unvetted_hold_ref(ACME_TICKET, ACME, _OR_5, None) is False
+
+    def test_takes_queue_lock_and_no_sessions_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seed_queue([_hold(session_id="sess-1", blocked_on_pr=_OR_5)])
+        real_lock = hold_module._lock
+        taken: list[str] = []
+
+        @contextlib.contextmanager
+        def _recording_lock(**kwargs: object) -> Iterator[None]:
+            taken.append("dev_queue_lock")
+            with real_lock():
+                yield
+
+        def _no_sessions_lock(**kwargs: object) -> None:
+            msg = "sessions_lock must not be taken"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(hold_module, "_lock", _recording_lock)
+        monkeypatch.setattr(hold_module, "sessions_lock", _no_sessions_lock)
+
+        assert restamp_unvetted_hold_ref(ACME_TICKET, ACME, _OR_5, None)
+        assert taken == ["dev_queue_lock"]
