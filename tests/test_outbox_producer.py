@@ -26,6 +26,8 @@ from cw.outbox_producer import (
     EnqueueOutcome,
     content_marker,
     enqueue_prose,
+    entry_state_label,
+    try_content_marker,
 )
 from tests._doctor_helpers import make_client
 from tests._shared.outbox_builders import CLIENT, entries_for
@@ -183,6 +185,83 @@ def test_content_marker_is_stable_and_patterned() -> None:
     assert _MARKER_PATTERN.match(marker)
     # The store's own marker check accepts it.
     assert _enqueue(marker=marker).created is True
+
+
+@pytest.mark.parametrize("chars", [8, 24])
+def test_content_marker_chars_sets_the_digest_length(chars: int) -> None:
+    text = "the plan"
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    marker = content_marker("plan", text, chars=chars)
+
+    assert marker == f"plan-{digest[:chars]}"
+    assert len(marker) == len("plan-") + chars
+    assert _MARKER_PATTERN.match(marker)
+
+
+def test_content_marker_default_matches_explicit_16() -> None:
+    assert content_marker("plan", "x") == content_marker("plan", "x", chars=16)
+    assert content_marker("plan", "x") != content_marker("plan", "x", chars=24)
+
+
+def test_try_content_marker_honours_chars() -> None:
+    assert try_content_marker("p", "x", chars=24) == content_marker("p", "x", chars=24)
+    assert try_content_marker("p", "x") == content_marker("p", "x")
+
+
+def test_try_content_marker_surrogate_is_none_for_every_width() -> None:
+    assert try_content_marker("p", "\ud800") is None
+    assert try_content_marker("p", "\ud800", chars=24) is None
+    assert try_content_marker("p", "\ud800", chars=8) is None
+
+
+def test_entry_state_label_reports_the_stored_state() -> None:
+    outcome = _enqueue()
+    assert outcome.entry_id is not None
+
+    assert entry_state_label(CLIENT, outcome.entry_id) == "pending"
+
+
+def test_entry_state_label_picks_the_matching_entry_among_many() -> None:
+    first = _enqueue(marker="m1")
+    second = _enqueue(marker="m2")
+    assert first.entry_id != second.entry_id
+    assert second.entry_id is not None
+
+    assert entry_state_label(CLIENT, second.entry_id) == "pending"
+
+
+def test_entry_state_label_missing_id_is_unknown() -> None:
+    _enqueue()
+
+    assert entry_state_label(CLIENT, "no-such-entry") == "unknown"
+
+
+def test_entry_state_label_store_oserror_is_unknown_and_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def boom(*_args: object, **_kwargs: object) -> list[object]:
+        msg = "disk gone"
+        raise OSError(msg)
+
+    monkeypatch.setattr("cw.outbox_producer.list_entries", boom)
+
+    with caplog.at_level("WARNING", logger="cw.outbox_producer"):
+        assert entry_state_label(CLIENT, "any") == "unknown"
+    assert "outbox_state_lookup_failed" in caplog.text
+    assert "disk gone" in caplog.text
+
+
+def test_entry_state_label_outbox_error_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*_args: object, **_kwargs: object) -> list[object]:
+        msg = "corrupt record"
+        raise OutboxRecordError(msg)
+
+    monkeypatch.setattr("cw.outbox_producer.list_entries", boom)
+
+    assert entry_state_label(CLIENT, "any") == "unknown"
 
 
 def test_no_lock_held_across_enqueue(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -30,9 +30,9 @@ _REFUSED_DISPOSITION_NOTE = (
     "is the only supported producer, because it is the only path that records "
     "provenance and refuses to run inside a dispatch worker. Re-settle each "
     "finding below with `cw review settle <file> --reason '<why>' --ticket "
-    "<ticket> -c <client> --out settle.md`: that records the decision on the "
-    "cw dev-queue row, and `settle.md` is the marker to post as its own "
-    "comment."
+    "<ticket> -c <client>`: that records the decision on the cw dev-queue row "
+    "and queues the disposition marker as the ticket's own comment through "
+    "the outbox."
 )
 # Bounded for the same reason the settle section is: the rest of the comment
 # needs the remaining budget, and GitHub caps a body at 65,536 characters. A

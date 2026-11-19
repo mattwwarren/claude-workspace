@@ -16,7 +16,7 @@ import click
 from cw.cli._base import handle_errors
 from cw.cli._worker_guard import refuse_inside_dispatch_worker
 from cw.cli.routed_orphan_close import close_routed_result_sessions_for_ticket
-from cw.config import get_client, load_orchestrator_config
+from cw.config import load_orchestrator_config
 from cw.dev_queue import (
     BODY_DRIFT_WARNING_KEY,
     approve_must_fix_override_ticket,
@@ -34,26 +34,25 @@ from cw.dev_queue.approval import (
 from cw.dev_queue.next_commands import human_gate_settled_notice, is_human_kept_gate
 from cw.events import record_event
 from cw.exceptions import ApproveGateError
-from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_comments, post_issue_comment
 from cw.models import (
     PLAN_APPROVED_FINGERPRINT_KEY,
     PLAN_PROMOTED_KEY,
     OrchestratorEventType,
+)
+from cw.outbox_producer import (
+    SKIP_ALREADY_POSTED,
+    enqueue_prose,
+    entry_state_label,
 )
 from cw.plan_fingerprint import is_plan_draft_fingerprint
 
 from ._group import dev_queue
 from ._loop_warning import warn_if_dispatch_loop_stale
 from ._plan_marker import (
-    _marker_present,
     _plan_approved_marker,
+    _plan_approved_outbox_marker,
 )
 from ._settle import SettleOutcome, settle_lagging_row
-from ._tracker_post import (
-    github_post_cwd,
-    report_post_outcome,
-    tracker_is_github_or_unknown,
-)
 from .show import echo_resulting_row
 
 if TYPE_CHECKING:
@@ -115,28 +114,18 @@ def _bound_fingerprint(result: dict[str, str | bool | None]) -> str | None:
 def _post_plan_approved_marker(
     ticket_id: str, resolved: str, result: dict[str, str | bool | None]
 ) -> bool:
-    """Post (or dedup-skip) the plan-approved marker for ``--post-marker``.
+    """Queue the plan-approved marker for ``--post-marker`` on the outbox.
 
     PLAN-stage only -- warns and returns False on any other stage. Returns
-    True iff the marker is recorded on the issue after this call (either
-    found already present, or just posted successfully); False on every
-    warn / fail-closed / gh-failure path. See GitHub #1419.
+    True iff an entry for the marker exists after this call (just queued, or
+    already queued); False on the warn and enqueue-failure paths. The marker
+    is queued, never posted here: the outbox drain delivers it on any tracker
+    (RFC 0019 O3b). See GitHub #1419.
 
-    GitHub-only by construction (``gh issue comment``): the tracker gate,
-    the ``gh`` working directory and the outcome echo live in
-    ``_tracker_post`` (#2732). On a positively non-GitHub tracker (e.g.
-    ``linear``) the ``gh`` calls are skipped and the operator is told the
-    approval already lives on the dev-queue row (``plan_approved_at``), which
-    the plan stage reads on re-dispatch. Fail-open on an unresolvable tracker.
-
-    The marker is bound to the approval's draft fingerprint
-    (``<!-- auto-dev-plan-approved: <sha> -->``) when the recorded
-    fingerprint is a 64-character lowercase hex digest, and is the bare
-    ``<!-- auto-dev-plan-approved -->`` otherwise (no fingerprint, or a
-    malformed one, which also warns). Dedup is exact-string on that marker,
-    so re-approving a changed draft posts a fresh marker and re-approving the
-    same draft does not (#2194). The marker is audit-only: nothing reads it
-    back as approval evidence.
+    The marker is bound to the approval's draft fingerprint when the recorded
+    fingerprint is well formed (#2194), and dedups on that entry marker: re-
+    approving a changed draft queues a second entry, the same draft does not.
+    The marker is audit-only: nothing reads it back as approval evidence.
     """
     if result["from_stage"] != "plan":
         click.echo(
@@ -146,61 +135,40 @@ def _post_plan_approved_marker(
         )
         return False
 
-    repo_cwd = github_post_cwd(
-        get_client(resolved),
-        flag="--post-marker",
-        noun="marker comment",
-        ticket_id=ticket_id,
-        client=resolved,
-        row_note=(
-            "The approval is recorded on the dev-queue row"
-            " (plan_approved_at) and the plan stage honors it on"
-            " re-dispatch."
-        ),
-    )
-    if repo_cwd is None:
-        return False
-    comments = fetch_issue_comments(
-        ticket_id, timeout=FETCH_COMMENTS_TIMEOUT, cwd=repo_cwd
-    )
-    if comments is None:
-        click.echo(
-            "--post-marker: could not verify existing comments — marker"
-            " not posted (dedup check failed)."
-        )
-        return False
-
     fingerprint = _bound_fingerprint(result)
-    marker = _plan_approved_marker(fingerprint)
     draft = f" for draft {fingerprint[:12]}" if fingerprint else ""
-
-    if _marker_present(comments, marker):
-        click.echo(
-            f"--post-marker: plan-approved marker already present on"
-            f" {ticket_id} ({resolved}){draft} — skipped (no duplicate"
-            " posted)."
-        )
-        return True
-
     # operator_authored=True (#2097): this marker records the operator's own
     # `cw dev-queue approve --post-marker` invocation, so it must NOT carry the
-    # agent-authored provenance marker every pipeline-written comment gets. It
-    # is the single operator-decision channel through this choke point.
-    post_result = post_issue_comment(
-        ticket_id, marker, cwd=repo_cwd, operator_authored=True
+    # agent-authored provenance marker every pipeline-written comment gets.
+    outcome = enqueue_prose(
+        resolved,
+        ticket_id,
+        "approve-post-marker",
+        _plan_approved_outbox_marker(fingerprint),
+        (_plan_approved_marker(fingerprint),),
+        operator_authored=True,
     )
-    return report_post_outcome(
-        post_result,
-        posted=(
-            f"--post-marker: posted the plan-approved marker comment"
-            f" to {ticket_id} ({resolved}){draft}."
-        ),
-        failed=(
-            f"--post-marker: failed to post the plan-approved marker"
-            f" comment to {ticket_id} ({resolved}) — see gh error"
-            " above."
-        ),
+    if outcome.created:
+        click.echo(
+            f"--post-marker: queued the plan-approved marker comment for"
+            f" {ticket_id} ({resolved}){draft} (outbox entry {outcome.entry_id})."
+        )
+        return True
+    if outcome.skipped_reason == SKIP_ALREADY_POSTED:
+        state = entry_state_label(resolved, outcome.entry_id or "")
+        click.echo(
+            f"--post-marker: the plan-approved marker comment for {ticket_id}"
+            f" ({resolved}){draft} is already queued (entry {outcome.entry_id},"
+            f" state {state}) — no duplicate queued."
+        )
+        return True
+    click.echo(
+        f"--post-marker: could not queue the plan-approved marker comment for"
+        f" {ticket_id} ({resolved}){draft} ({outcome.skipped_reason}); the"
+        " approval is recorded on the row regardless.",
+        err=True,
     )
+    return False
 
 
 def _close_orphans_after_approve(
@@ -380,8 +348,9 @@ def _raise_if_settled_into_human_gate(outcome: SettleOutcome) -> None:
     is_flag=True,
     default=False,
     help=(
-        "Post an audit-only plan-approved marker comment to the ticket,"
-        " binding it to the approved draft's fingerprint:"
+        "Queue an audit-only plan-approved marker comment on the ticket through"
+        " the outbox (any tracker; the drain posts it), binding it to the"
+        " approved draft's fingerprint:"
         " <!-- auto-dev-plan-approved: <sha> --> (the unbound"
         " <!-- auto-dev-plan-approved --> when no valid fingerprint is"
         " recorded). PLAN-stage only (warns and skips on other stages)."
@@ -390,7 +359,7 @@ def _raise_if_settled_into_human_gate(outcome: SettleOutcome) -> None:
         " as approval evidence. Distinct from `add --signoff`, which"
         " requires operator signoff before a ticket ships, and from this"
         " command's own REVIEW-stage operator-signoff gate (see docstring"
-        " above) — this flag only posts an audit-trail comment."
+        " above) — this flag only queues an audit-trail comment."
     ),
 )
 @click.option(
@@ -486,13 +455,13 @@ def dev_queue_approve(
     for its own run (#2776). `revoke-plan-approval` stays callable by the
     plan-stage worker.
 
-    Pass --post-marker to also post the plan-approved audit marker on a
-    PLAN-stage ticket (unrelated to the operator-signoff gate above or to
-    `add --signoff`). The marker embeds the approved draft's fingerprint
-    (<!-- auto-dev-plan-approved: <sha> -->) and is audit-only: nothing
-    reads it back as approval evidence, which lives on the dev-queue row.
-    Approving a changed draft posts a fresh marker; re-approving the same
-    draft does not.
+    Pass --post-marker to also queue the plan-approved audit marker on a
+    PLAN-stage ticket through the outbox, for any tracker (unrelated to the
+    operator-signoff gate above or to `add --signoff`). The marker embeds the
+    approved draft's fingerprint (<!-- auto-dev-plan-approved: <sha> -->) and
+    is audit-only: nothing reads it back as approval evidence, which lives on
+    the dev-queue row. Approving a changed draft queues a fresh marker;
+    re-approving the same draft does not.
 
     A PLAN-stage approve warns on stderr when the GitHub ticket body changed
     after the plan stage last evaluated it. The warning is advisory and never
@@ -568,9 +537,9 @@ def dev_queue_approve(
             "plan_requeued": result["plan_requeued"],
         },
     )
-    marker_already_recorded = False
+    marker_queued = False
     if post_marker:
-        marker_already_recorded = _post_plan_approved_marker(
+        marker_queued = _post_plan_approved_marker(
             ticket_id=ticket_id, resolved=resolved, result=result
         )
     if result["awaiting_signoff"]:
@@ -591,11 +560,9 @@ def dev_queue_approve(
             " A changed draft with a newer operator comment re-parks"
             " plan_pending_approval, quoting both fingerprints."
         )
-        if not marker_already_recorded and tracker_is_github_or_unknown(
-            get_client(resolved)
-        ):
+        if not marker_queued:
             click.echo(
-                "Pass --post-marker to also post the plan-approved audit"
+                "Pass --post-marker to also queue the plan-approved audit"
                 " marker comment on this ticket. The marker is audit-only;"
                 " nothing reads it back as approval evidence."
             )

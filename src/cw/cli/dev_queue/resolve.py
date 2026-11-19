@@ -8,8 +8,8 @@ the row is requeued by composing ``dev_queue_requeue`` through
 two steps take the non-reentrant dev-queue lock separately, so a refused
 requeue leaves the resolution recorded and says so.
 
-The relay block printed last is an optional mirror for the tracker; the row is
-what the plan stage reads.
+The relay block printed last is a mirror: ``--post`` queues it on the outbox for
+the ticket's tracker. The row is what the plan stage reads.
 """
 
 from __future__ import annotations
@@ -23,15 +23,22 @@ import click
 from cw.cli._base import handle_errors
 from cw.cli._worker_guard import refuse_inside_dispatch_worker
 from cw.codex_fix_loop.constraints import RESOLUTIONS_MARKER
-from cw.config import get_client, load_orchestrator_config
+from cw.config import load_orchestrator_config
 from cw.dev_queue import record_operator_resolution, resolve_client
 from cw.exceptions import CwError
-from cw.gh import AGENT_COMMENT_MARKER, post_issue_comment
+from cw.gh import AGENT_COMMENT_MARKER
+from cw.outbox_producer import (
+    SKIP_ALREADY_POSTED,
+    SKIP_ENQUEUE_FAILED,
+    EnqueueOutcome,
+    enqueue_prose,
+    entry_state_label,
+    try_content_marker,
+)
 
 from ._group import dev_queue
 from ._loop_warning import warn_if_dispatch_loop_stale
 from ._settle import settle_lagging_row
-from ._tracker_post import github_post_cwd, report_post_outcome
 from .approve import _raise_if_settled_into_human_gate
 from .crud import dev_queue_requeue
 
@@ -183,44 +190,38 @@ def _emit_relay_block(record: OperatorResolutionRecord, text: str) -> None:
 
 
 def _post_relay_block(record: OperatorResolutionRecord, text: str) -> None:
-    """``--post``: mirror the relay block to a GitHub ticket via gh.
+    """``--post``: queue the relay block on the outbox for the ticket's tracker.
 
-    Skipped for a pure duplicate (the retry after a refused requeue must not
-    post a second marker-bearing comment) and on a known non-GitHub tracker.
-    ``post_issue_comment`` appends the agent marker itself. A failed post
+    The drain delivers it on any tracker (RFC 0019 O3b). A failed enqueue
     prints to stderr and never changes the exit status: the row, not the
-    comment, is what the plan stage reads.
+    comment, is what the plan stage reads. The marker is the body's content
+    digest, so a rerun of the same resolutions echoes the existing entry.
     """
     ticket, client = record["ticket_id"], record["client"]
-    if record["duplicate"] and not record["approved"]:
+    body = _relay_body(record, text)
+    marker = try_content_marker(f"resolve-r{record['round']}", body)
+    if marker is None:
+        outcome = EnqueueOutcome(None, False, SKIP_ENQUEUE_FAILED)
+    else:
+        outcome = enqueue_prose(client, ticket, "resolve-post", marker, (body,))
+    if outcome.created:
         click.echo(
-            "Skipped --post: identical to the latest recorded entry (already"
-            " mirrored or not needed)."
+            f"--post: queued the relay block for {ticket} ({client})"
+            f" (outbox entry {outcome.entry_id})."
         )
-        return
-    repo_cwd = github_post_cwd(
-        get_client(client),
-        flag="--post",
-        noun="relay block",
-        ticket_id=ticket,
-        client=client,
-        row_note=(
-            "The resolutions are recorded on the dev-queue row, which the plan"
-            " stage reads."
-        ),
-    )
-    if repo_cwd is None:
-        return
-    result = post_issue_comment(ticket, _relay_body(record, text), cwd=repo_cwd)
-    report_post_outcome(
-        result,
-        posted=f"--post: posted the relay block to {ticket} ({client}).",
-        failed=(
-            f"--post: failed to post the relay block to {ticket} ({client}) — see"
-            " the gh error above. The resolution is recorded on the row"
-            " regardless."
-        ),
-    )
+    elif outcome.skipped_reason == SKIP_ALREADY_POSTED:
+        state = entry_state_label(client, outcome.entry_id or "")
+        click.echo(
+            f"--post: the relay block for {ticket} ({client}) is already queued"
+            f" (entry {outcome.entry_id}, state {state}) — no duplicate queued."
+        )
+    else:
+        click.echo(
+            f"--post: could not queue the relay block for {ticket} ({client})"
+            f" ({outcome.skipped_reason}); the resolution is recorded on the row"
+            " regardless.",
+            err=True,
+        )
 
 
 @dev_queue.command(name="resolve")
@@ -260,10 +261,9 @@ def _post_relay_block(record: OperatorResolutionRecord, text: str) -> None:
     is_flag=True,
     default=False,
     help=(
-        "Also post the relay block as a comment on the ticket via gh"
-        " (GitHub-tracked or unresolved-tracker clients only; a known"
-        " non-GitHub tracker prints a note and posts nothing, and a failed"
-        " post prints to stderr and exits 0). The post is an audit mirror:"
+        "Also queue the relay block as a comment on the ticket through the"
+        " outbox (any tracker; the drain posts it; a failure to queue prints"
+        " to stderr and exits 0). The post is an audit mirror:"
         " the ticket proceeds identically whether or not it is posted."
     ),
 )
@@ -287,7 +287,7 @@ def dev_queue_resolve(
     resolutions, with the same authority as a
     <!-- auto-dev-preflight-resolutions --> comment, and the row is requeued
     at the same stage with its lane and priority unchanged. The tracker is
-    neither read nor written unless --post is passed.
+    never read; --post queues the relay block on the outbox for it.
 
     Re-running with a file identical to the latest entry records nothing new
     (no duplicate entry, event or queue save) and goes on to the requeue.
@@ -300,8 +300,8 @@ def dev_queue_resolve(
 
     Prints the requeued row, then a ready-to-post relay block: the decisions,
     the <!-- auto-dev-preflight-resolutions --> marker and the
-    <!-- cw-agent-authored --> provenance marker, for the orchestrator to
-    post to its tracker with its own tool. Posting it is optional.
+    <!-- cw-agent-authored --> provenance marker. --post queues the same
+    block to the ticket's tracker through the outbox.
 
     --approve also stamps plan approval, but only through the gate
     `cw dev-queue approve` applies: the row must be at an approval gate, the

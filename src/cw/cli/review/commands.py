@@ -25,11 +25,12 @@ first production writer. #1838 shipped that ledger's renderer, parser and
 mechanical backstop but nothing that ever CALLED the renderer, so the runbook
 told operators to compute the key by hand from a ``python -c`` one-liner. This
 turns a payload — the one every blocking codex review comment now prints — into
-the postable ``REVIEW-FINDING-DISPOSITIONS`` marker. As of #2701 it also
-records the ledger on the ticket's cw dev-queue row, the ledger every review
-pass reads first on every tracker, so the marker is now the human-readable
-mirror of that record; the tracker-aware handling of a row it cannot record
-lives in :mod:`cw.cli.review._settle_store`.
+the ``REVIEW-FINDING-DISPOSITIONS`` marker and queues it on the outbox as the
+ticket's disposition comment (RFC 0019 O3b). As of #2701 it also records the
+ledger on the ticket's cw dev-queue row, the ledger every review pass reads
+first on every tracker, so the marker is the human-readable mirror of that
+record; the tracker-aware handling of a row it cannot record lives in
+:mod:`cw.cli.review._settle_store`.
 
 ``settle`` is the only command here that mints a durable, blocking
 SUPPRESSION rather than recording one pass's outcome, so it carries an audit
@@ -62,6 +63,7 @@ from cw.cli.review._group import (
 )
 from cw.cli.review._settle_store import (
     SettleRowOutcome,
+    enqueue_settle_marker,
     preflight_settle_row,
     record_settle_on_row,
     settle_stderr_lines,
@@ -614,8 +616,8 @@ def _emit_settle_events(
     default=None,
     type=click.Path(path_type=Path),
     help=(
-        "Also write the rendered marker to this path, ready to post with your "
-        "tracker's own tool (`gh issue comment --body-file` on GitHub)."
+        "Also write the rendered marker block to this path (a copy of what is "
+        "queued to the outbox)."
     ),
 )
 @handle_errors
@@ -690,19 +692,21 @@ def review_settle(
     written. If an event cannot be recorded the settle is refused outright —
     no row write, no marker, no --out file, non-zero exit — because a durable
     suppression with no audit record is invisible. The marker is the
-    human-readable mirror of the row: post it with your tracker's own tool.
+    human-readable mirror of the row: it is queued to the outbox as the
+    ticket's disposition comment, for any tracker.
 
     If the row cannot be recorded (no row for the ticket, lock timeout,
     unwritable store) the outcome depends on the client's tracker. On a
     `github-issues` client the settle degrades to mirror-only: the marker is
-    printed as usual with a WARNING on stderr, and the GitHub review pass
+    queued as usual with a WARNING on stderr, and the GitHub review pass
     reads it back. On every other tracker, or when the tracker cannot be
     resolved, it fails: non-zero exit and no marker, because a marker no
     review pass reads would be inert. A missing row is refused before any
     event is recorded.
 
-    On success: exits 0, prints the marker to stdout (warnings and notes go to
-    stderr).
+    On success: exits 0 and echoes the queued outbox entry to stdout (warnings
+    and notes go to stderr). A failure to queue the marker never changes the
+    exit status.
     On failure: exits 1, prints 'field.path: message' lines to stderr.
     """
     refuse_inside_dispatch_worker(_SETTLE_IN_WORKER_MSG)
@@ -759,7 +763,7 @@ def review_settle(
         atomic_write_text(out, rendered)
     for line in settle_stderr_lines(outcome, ticket, resolved_client):
         click.echo(line, err=True)
-    click.echo(rendered)
+    enqueue_settle_marker(rendered, ticket, resolved_client)
 
 
 class _VerifyFixesInput(BaseModel):

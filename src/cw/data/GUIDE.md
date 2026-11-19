@@ -126,7 +126,7 @@ a sentinel carries one — and they never share values, so always say which.
 - **Approve** (`cw dev-queue approve`) — records approval on the row
   (`plan_approved_at` + `plan_approved_fingerprint`, bound to the draft as it
   stands) and moves the row past a plan, review, signoff, or finalize-hold
-  gate. `--post-marker` posts an audit-only comment that nothing reads back.
+  gate. `--post-marker` queues an audit-only comment on the outbox; nothing reads it back.
   Opted-in human gates (`signoff: operator`, a finalize hold,
   `scope_hint: large`) are the operator's `approve`; an agent notifies the
   human. Every refusal names the legal next command (`Run: ...`).
@@ -151,7 +151,7 @@ a sentinel carries one — and they never share values, so always say which.
   operator's answers on the row's `operator_resolutions`, then requeues it at
   the same stage, lane and priority kept. The plan stage reads them from
   `cw-context.json` as binding resolutions; no tracker comment is needed (the
-  printed relay block, or `--post`, is an optional mirror). Interactive only:
+  printed relay block, or `--post`, which queues it, is an optional mirror). Interactive only:
   refused inside a dispatch worker. A re-enqueued row starts with an empty list.
   The list is append-only with a 256 KiB total cap (4 entries at the 64 KiB
   per-entry cap), enforced at record time; an over-cap `resolve` is refused with
@@ -369,7 +369,7 @@ cw dev-queue requeue <ticket> -c <client>        # BLOCKED_ON_USER → PENDING (
                                                  #   --reset-attempts for attempt_cap_blocked)
 cw dev-queue resolve <ticket> -c <client> --file <decisions.md>
                                                  # answer a plan park on the row, then requeue
-                                                 #   (--approve at an approval gate; --post mirrors)
+                                                 #   (--approve at an approval gate; --post queues the mirror)
 cw dev-queue unblock <ticket> -c <client>        # clear salvage-park markers and requeue
 cw dev-queue move <ticket> -c <client> --to|--lane <lane>   # re-lane
 cw dev-queue cancel|remove -c <client>           # queue hygiene, one ticket at a time
@@ -523,7 +523,7 @@ cw `session_id` → `sessions.json` `surface_ref` / `claude_session_id` →
   and the persisted `body_sha` still matches the live ticket body. Edit the body or post a
   new operator comment *after* approving and the re-dispatched plan stage re-parks
   `plan_pending_approval` quoting both fingerprints — a stale-approval re-ask, not operator
-  inaction. `--post-marker` posts an audit-only comment that nothing reads back. The comment
+  inaction. `--post-marker` queues an audit-only comment on the outbox; nothing reads it back. The comment
   path (`<!-- auto-dev-comment-approval -->` as its own reply) is the CLI-free alternative;
   Linear-tracked tickets have only the row path. `cw dev-queue resolve --approve` stamps
   through the same gate; an approval survives the plan stage's row-delivered revision

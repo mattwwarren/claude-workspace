@@ -18,6 +18,7 @@ from cw.dev_queue import load_dev_queue
 from cw.events import read_events
 from cw.models import OrchestratorEventType, QueueItemStatus, Stage
 from tests._cli_review_helpers import _enter_operator_machine, _write_session_context
+from tests._shared.outbox_builders import entries_for
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -49,8 +50,8 @@ def _operator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _enter_operator_machine(monkeypatch, tmp_path)
 
 
-def _no_gh(*_a: object, **_k: object) -> None:
-    msg = "gh must not be called from a refused approve"
+def _no_enqueue(*_a: object, **_k: object) -> None:
+    msg = "the outbox must not be written from a refused approve"
     raise AssertionError(msg)
 
 
@@ -69,9 +70,8 @@ def _approve(*extra: str) -> Result:
 
 class TestApproveWorkerRefusal:
     @pytest.fixture(autouse=True)
-    def _no_tracker_calls(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("cw.cli.dev_queue.approve.post_issue_comment", _no_gh)
-        monkeypatch.setattr("cw.cli.dev_queue.approve.fetch_issue_comments", _no_gh)
+    def _no_outbox_enqueue(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cw.cli.dev_queue.approve.enqueue_prose", _no_enqueue)
 
     def _assert_refused(self, result: Result, queue_before: bytes) -> None:
         assert result.exit_code != 0
@@ -80,6 +80,7 @@ class TestApproveWorkerRefusal:
         assert "cw dev-queue approve" in result.output
         assert dev_queue_file().read_bytes() == queue_before
         assert _approved_events() == []
+        assert entries_for(ACME) == []
 
     @pytest.mark.parametrize("mode", sorted(_APPROVE_MODES))
     @pytest.mark.parametrize(

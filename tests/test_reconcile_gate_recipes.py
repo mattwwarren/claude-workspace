@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -26,6 +27,7 @@ from cw.models import (
     Stage,
     TicketTask,
 )
+from cw.outbox_producer import SKIP_ENQUEUE_FAILED, EnqueueOutcome
 from cw.reconcile.deferred import DeferredReconcileJobs, run_post_lock_jobs
 from cw.reconcile.gate_plan_probes import PlanProbes
 from cw.reconcile.gate_predicates import _review_tier_verified
@@ -53,9 +55,10 @@ from tests._reconcile_helpers import (
     forbidden_plan_fetch,
     run_gate_recipes_prefetched,
 )
+from tests._shared.outbox_builders import ProducedEntry, entries_for
 from tests._shared.review_builders import plan_body, stub_fetch_plan
 from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
-from tests._tool_fakes import FakeGhComment
+from tests._tool_fakes import FakeGhCli
 from tests._worktree_helpers import patch_worktree
 
 _NOW = datetime(2026, 7, 8, 12, 0, 0, tzinfo=UTC)
@@ -175,26 +178,22 @@ def _seam1_clients() -> dict[str, ClientConfig]:
 _SEAM1_CLIENTS = _seam1_clients()
 
 
-@pytest.fixture
-def stub_gh_comment_bodies() -> list[str]:
-    """Bodies ``gh issue comment`` received on stdin, index-aligned with argv.
+_APPROVE_SLUG = "auto-approve-clean-review"
+_ADOPT_SLUG = "auto-adopt-clean-plan"
 
-    ``post_issue_comment`` sends the body as ``--body-file -`` bytes on stdin
-    (#2810), so it is not on argv; :func:`stub_gh_comment` fills this list.
+
+def _gate_entry(entry: ProducedEntry, *, slug: str, session_id: str = "sess-1") -> str:
+    """Assert *entry* is one gate-recipe outbox entry and return its single part.
+
+    The marker names the recipe slug and the session, then an 8-char digest of
+    the body; the producer enqueues for the audit mirror, not as the operator.
     """
-    return []
-
-
-@pytest.fixture(autouse=True)
-def stub_gh_comment(
-    monkeypatch: pytest.MonkeyPatch, stub_gh_comment_bodies: list[str]
-) -> list[list[str]]:
-    """Capture ``gh issue comment`` argv without spawning a subprocess.
-
-    Returns the list of captured argv lists; the stdin body of each call lands
-    in ``stub_gh_comment_bodies`` at the same index.
-    """
-    return FakeGhComment(bodies=stub_gh_comment_bodies).install(monkeypatch).calls
+    assert entry.entry.producer == "gate-recipe"
+    assert re.fullmatch(f"gate-{slug}-{session_id}-[0-9a-f]{{8}}", entry.entry.marker)
+    assert entry.entry.operator_authored is False
+    assert entry.entry.redacted is False
+    assert len(entry.parts) == 1
+    return entry.parts[0]
 
 
 class TestDetect:
@@ -962,12 +961,8 @@ class TestRunApprove:
         }
         assert events[0].correlation_id == "GEN-1"
 
-    def test_comment_written_on_success(
-        self,
-        tmp_config_dir: Path,
-        tmp_path: Path,
-        stub_gh_comment: list[list[str]],
-        stub_gh_comment_bodies: list[str],
+    def test_comment_enqueued_on_success(
+        self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         write_clients_yaml(
             ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
@@ -980,25 +975,21 @@ class TestRunApprove:
             run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
         )
 
-        assert len(stub_gh_comment) == 1
-        argv = stub_gh_comment[0]
-        assert argv[:4] == ["gh", "issue", "comment", "GEN-1"]
-        assert argv[-2:] == ["--body-file", "-"]
-        body = stub_gh_comment_bodies[0]
+        (produced,) = entries_for("acme")
+        assert produced.entry.ticket == "GEN-1"
+        body = _gate_entry(produced, slug=_APPROVE_SLUG)
         assert "auto_approve_clean_review" in body
         assert "must_fix_initial: 0" in body
         assert "recommendation: PROCEED" in body
         assert "forbidden_touched: False" in body
         assert "agents_run: 1" in body
 
-    def test_comment_is_queued_and_posted_only_when_the_sink_drains(
-        self,
-        tmp_config_dir: Path,
-        tmp_path: Path,
-        stub_gh_comment: list[list[str]],
+    def test_comment_is_queued_and_enqueued_only_when_the_sink_drains(
+        self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        """#1232: the approve lands under the lock but the gh comment is only
-        queued on the caller's post-lock sink; it posts when the sink drains."""
+        """#1232: the approve lands under the lock but the comment is only
+        queued on the caller's post-lock sink; it reaches the outbox when the
+        sink drains."""
         write_clients_yaml(
             ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
         )
@@ -1015,15 +1006,14 @@ class TestRunApprove:
         assert [job.label for job in deferred.post_lock] == [
             f"gate_comment:{RECIPE_AUTO_APPROVE_REVIEW}:acme:GEN-1"
         ]
-        assert stub_gh_comment == []
+        assert entries_for("acme") == []
 
         run_post_lock_jobs(deferred)
 
-        assert [argv[:4] for argv in stub_gh_comment] == [
-            ["gh", "issue", "comment", "GEN-1"]
-        ]
+        (produced,) = entries_for("acme", ticket="GEN-1", producer="gate-recipe")
+        _gate_entry(produced, slug=_APPROVE_SLUG)
 
-    def test_comment_failure_swallowed_and_logged(
+    def test_enqueue_failure_is_swallowed_and_logged(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
@@ -1036,35 +1026,57 @@ class TestRunApprove:
         task = _make_task()
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
-
-        boom_msg = "gh exploded"
-
-        def _boom(*_a: Any, **_k: Any) -> None:
-            raise OSError(boom_msg)
-
-        monkeypatch.setattr("cw.gh._sp.run", _boom)
+        monkeypatch.setattr(
+            "cw.reconcile.gate_recipe_comments.enqueue_prose",
+            lambda *_a, **_k: EnqueueOutcome(None, False, SKIP_ENQUEUE_FAILED),
+        )
 
         with caplog.at_level("WARNING"):
             recovered = call_and_drain(
                 run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
             )
 
-        # Approve still stands despite the comment write failing.
+        # Approve still stands despite the comment enqueue failing.
         assert recovered == ["GEN-1"]
         store = load_dev_queue()
         assert store.tasks[0].stage == Stage.FINALIZE
-        assert any("GEN-1" in rec.message for rec in caplog.records)
+        assert (
+            "gate_recipe_comment_enqueue_failed ticket=GEN-1 client=acme "
+            f"reason={SKIP_ENQUEUE_FAILED}"
+        ) in caplog.text
+        assert entries_for("acme") == []
 
-    def test_comment_scoped_to_client_cwd_with_two_clients(
+    def test_a_duplicate_enqueue_is_not_logged_as_a_failure(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """#1279: the audit comment's gh call is cwd-scoped to the task's
-        client (acme), not the ambient CWD or a second configured client."""
-        import subprocess
+        """A retry of the same session and body dedups on the marker, which is
+        the drain's idempotence working, not a failure to warn about."""
+        from cw.reconcile.gate_recipe_comments import post_auto_approve_comment
 
+        snapshot = _clean_review_snapshot(_clean_result())
+        assert snapshot is not None
+
+        with caplog.at_level("WARNING"):
+            for _ in range(2):
+                post_auto_approve_comment(
+                    "GEN-1",
+                    snapshot,
+                    client="acme",
+                    session_id="sess-1",
+                    recipe=RECIPE_AUTO_APPROVE_REVIEW,
+                )
+
+        assert len(entries_for("acme")) == 1
+        assert "gate_recipe_comment_enqueue_failed" not in caplog.text
+
+    def test_comment_enqueued_for_the_task_client_with_two_clients(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#1279: the audit comment is enqueued for the task's client (acme),
+        not for a second configured client."""
         acme_ws = tmp_path / "acme"
         beta_ws = tmp_path / "beta"
         acme_ws.mkdir()
@@ -1077,30 +1089,101 @@ class TestRunApprove:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
 
-        cwds: list[object] = []
-
-        def _fake_run(
-            argv: list[str], **kwargs: Any
-        ) -> subprocess.CompletedProcess[bytes]:
-            cwds.append(kwargs.get("cwd"))
-            return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
-
-        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
-
         approved = call_and_drain(
             run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
         )
 
         assert approved == ["GEN-1"]
-        # _git_dir(acme) == acme's workspace_path, not beta's.
-        assert cwds == [acme_ws]
+        assert len(entries_for("acme")) == 1
+        assert entries_for("beta") == []
+
+    def test_linear_client_enqueues_and_launches_no_gh(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RFC 0019 O3b: a Linear client's gate comment is queued like any
+        other, because the drain, not this call, picks the tracker. No gh
+        process is launched by the comment step."""
+        from tests._shared.cli_preflight import _write_project_config_yaml
+
+        _write_project_config_yaml(
+            tmp_path, "tracking:\n  primary:\n    system: linear\n"
+        )
+        write_clients_yaml(
+            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
+        )
+        task = _make_task()
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
+        gh = FakeGhCli().install(monkeypatch)
+
+        recovered = call_and_drain(
+            run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
+        )
+
+        assert recovered == ["GEN-1"]
+        (produced,) = entries_for("acme")
+        assert "auto_approve_clean_review" in _gate_entry(produced, slug=_APPROVE_SLUG)
+        assert gh.records == []
+
+    def test_two_auto_approves_of_one_ticket_with_equal_counts_make_two_entries(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Two releases of one ticket in different sessions carry the same
+        counts, hence the same body, so only the session id in the marker keeps
+        the second from deduping away."""
+        from cw.reconcile.gate_recipe_comments import post_auto_approve_comment
+
+        snapshot = _clean_review_snapshot(_clean_result())
+        assert snapshot is not None
+
+        for session_id in ("sess-1", "sess-2"):
+            post_auto_approve_comment(
+                "GEN-1",
+                snapshot,
+                client="acme",
+                session_id=session_id,
+                recipe=RECIPE_AUTO_APPROVE_REVIEW,
+            )
+
+        first, second = entries_for("acme", ticket="GEN-1")
+        body_one = _gate_entry(first, slug=_APPROVE_SLUG, session_id="sess-1")
+        body_two = _gate_entry(second, slug=_APPROVE_SLUG, session_id="sess-2")
+        assert body_one == body_two
+        assert first.entry.marker != second.entry.marker
+
+    def test_outbox_disabled_client_still_enqueues(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """``outbox.enabled: false`` stops the tick's drain, not the enqueue:
+        the comment waits in the outbox."""
+        write_clients_yaml(
+            ClientSpec(
+                "acme",
+                tmp_path,
+                default_branch="main",
+                lanes=_GATE_LANES,
+                extra={"outbox": {"enabled": False}},
+            )
+        )
+        save_dev_queue(DevQueueStore(tasks=[_make_task()]))
+        save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
+
+        recovered = call_and_drain(
+            run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
+        )
+
+        assert recovered == ["GEN-1"]
+        (produced,) = entries_for("acme")
+        _gate_entry(produced, slug=_APPROVE_SLUG)
 
     def test_comment_skipped_for_dangling_client(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
-        stub_gh_comment: list[list[str]],
     ) -> None:
         """#1279 R7: at the post-lock comment step, a client absent from the
         (populated) clients dict passed to the act phase → comment skipped
@@ -1148,7 +1231,7 @@ class TestRunApprove:
         # at defer time: nothing is queued for after the lock (#1232).
         assert approved == ["GEN-1"]
         assert deferred.post_lock == []
-        assert stub_gh_comment == []
+        assert entries_for("acme") == []
         assert any(
             "gate_recipe_comment_skipped" in rec.message for rec in caplog.records
         )
@@ -1161,7 +1244,6 @@ class TestActApproveFailure:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
-        stub_gh_comment: list[list[str]],
     ) -> None:
         """Proves the event-before-mutation ordering actually matters: even
         when the mutation itself raises, the already-recorded GATE_AUTO_APPROVED
@@ -1221,14 +1303,13 @@ class TestActApproveFailure:
         assert boom_msg in failed_payload["error"]
         assert failed_events[0].correlation_id == "GEN-1"
         assert approved_events[0].payload["ticket_id"] == "GEN-1"
-        assert stub_gh_comment == []
+        assert entries_for("acme") == []
         assert any("GEN-1" in rec.message for rec in caplog.records)
 
     def test_force_hold_armed_between_detect_and_act_emits_held_event(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        stub_gh_comment: list[list[str]],
     ) -> None:
         """RFC 0011 A3 (#1160): when the row carries an armed force hold, the
         reactor's automatic _approve_ticket_locked call declines to approve.
@@ -1280,7 +1361,7 @@ class TestActApproveFailure:
         assert held_payload["client"] == "acme"
         assert held_payload["recipe"] == RECIPE_AUTO_APPROVE_REVIEW
         assert held_events[0].correlation_id == "GEN-1"
-        assert stub_gh_comment == []
+        assert entries_for("acme") == []
 
     def test_latched_failure_does_not_refire_on_the_next_tick(
         self,
@@ -1736,37 +1817,43 @@ class TestActRecheckRace:
         )
 
 
-class TestCommentNonZeroReturn:
-    def test_nonzero_gh_return_is_logged(
+class TestCommentEnqueueRefused:
+    """A refused enqueue is logged with its reason; the approval stands.
+
+    Replaces the old gh non-zero-return test: no gh call is made any more, so
+    the failure a comment step can meet is a skipped reason from the producer.
+    """
+
+    @pytest.mark.parametrize("reason", ["body_too_long", SKIP_ENQUEUE_FAILED])
+    def test_refused_enqueue_is_logged_with_its_reason(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
+        reason: str,
     ) -> None:
-        import subprocess
-
         write_clients_yaml(
             ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
         )
         task = _make_task()
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
-
-        def _fail(argv: list[str], **_k: Any) -> subprocess.CompletedProcess[bytes]:
-            return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"nope")
-
-        monkeypatch.setattr("cw.gh._sp.run", _fail)
+        monkeypatch.setattr(
+            "cw.reconcile.gate_recipe_comments.enqueue_prose",
+            lambda *_a, **_k: EnqueueOutcome(None, False, reason),
+        )
 
         with caplog.at_level("WARNING"):
             recovered = call_and_drain(
                 run_gate_recipes, now=_NOW, config=_config(), plan_probes=PlanProbes()
             )
 
-        assert recovered == ["GEN-1"]  # approve stands despite comment rc!=0
-        assert any(
-            "rc=1" in rec.message and "GEN-1" in rec.message for rec in caplog.records
-        )
+        assert recovered == ["GEN-1"]  # approve stands despite the refused enqueue
+        assert (
+            "gate_recipe_comment_enqueue_failed ticket=GEN-1 client=acme "
+            f"reason={reason}"
+        ) in caplog.text
 
 
 def test_recipe_constants_are_distinct() -> None:
@@ -2261,13 +2348,8 @@ class TestRunAdoptPlan:
         assert payload["predicate_snapshot"] == _PLAN_SNAPSHOT
         assert events[0].correlation_id == "GEN-1"
 
-    def test_comment_written_best_effort(
-        self,
-        tmp_config_dir: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        stub_gh_comment: list[list[str]],
-        stub_gh_comment_bodies: list[str],
+    def test_comment_enqueued_best_effort(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         write_clients_yaml(
             ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
@@ -2279,11 +2361,9 @@ class TestRunAdoptPlan:
 
         run_gate_recipes_prefetched(now=_NOW, config=_config())
 
-        assert len(stub_gh_comment) == 1
-        argv = stub_gh_comment[0]
-        assert argv[:4] == ["gh", "issue", "comment", "GEN-1"]
-        assert argv[-2:] == ["--body-file", "-"]
-        body = stub_gh_comment_bodies[0]
+        (produced,) = entries_for("acme")
+        assert produced.entry.ticket == "GEN-1"
+        body = _gate_entry(produced, slug=_ADOPT_SLUG)
         assert "auto_adopt_clean_plan" in body
         assert "scope: large (3 files, ~726 lines)" in body
         assert "forbidden_touched: False" in body
@@ -2397,14 +2477,14 @@ class TestRunAdoptPlan:
         assert plan_row.status == QueueItemStatus.BLOCKED_ON_USER
         assert plan_row.stage == Stage.PLAN
 
-    def test_comment_failure_swallowed_and_logged(
+    def test_enqueue_failure_is_swallowed_and_logged(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """A comment-write OSError is logged best-effort; the approve stands."""
+        """A failed comment enqueue is logged best-effort; the approve stands."""
         write_clients_yaml(
             ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
         )
@@ -2412,13 +2492,10 @@ class TestRunAdoptPlan:
         task = _make_task(stage=Stage.PLAN)
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
-
-        boom_msg = "gh exploded"
-
-        def _boom(*_a: Any, **_k: Any) -> None:
-            raise OSError(boom_msg)
-
-        monkeypatch.setattr("cw.gh._sp.run", _boom)
+        monkeypatch.setattr(
+            "cw.reconcile.gate_recipe_comments.enqueue_prose",
+            lambda *_a, **_k: EnqueueOutcome(None, False, SKIP_ENQUEUE_FAILED),
+        )
 
         with caplog.at_level("WARNING"):
             recovered = run_gate_recipes_prefetched(now=_NOW, config=_config())
@@ -2426,38 +2503,38 @@ class TestRunAdoptPlan:
         assert recovered == ["GEN-1"]
         store = load_dev_queue()
         assert store.tasks[0].stage == Stage.IMPL
-        assert any("GEN-1" in rec.message for rec in caplog.records)
+        assert (
+            "gate_recipe_comment_enqueue_failed ticket=GEN-1 client=acme "
+            f"reason={SKIP_ENQUEUE_FAILED}"
+        ) in caplog.text
+        assert entries_for("acme") == []
 
-    def test_comment_nonzero_return_is_logged(
-        self,
-        tmp_config_dir: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
+    def test_unencodable_body_is_logged_not_raised(
+        self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """A nonzero gh return code is logged best-effort; the approve stands."""
-        import subprocess
+        """A lone surrogate in the snapshot cannot yield a marker (the digest
+        needs UTF-8); the comment step logs it and never raises."""
+        from cw.reconcile.gate_recipe_comments import post_auto_adopt_comment
 
-        write_clients_yaml(
-            ClientSpec("acme", tmp_path, default_branch="main", lanes=_GATE_LANES)
-        )
-        stub_fetch_plan(monkeypatch, plan_body())
-        task = _make_task(stage=Stage.PLAN)
-        save_dev_queue(DevQueueStore(tasks=[task]))
-        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
-
-        def _fail(argv: list[str], **_k: Any) -> subprocess.CompletedProcess[bytes]:
-            return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"nope")
-
-        monkeypatch.setattr("cw.gh._sp.run", _fail)
+        snapshot: dict[str, object] = {
+            **_PLAN_SNAPSHOT,
+            "plan_draft_fingerprint": "\ud800",
+        }
 
         with caplog.at_level("WARNING"):
-            recovered = run_gate_recipes_prefetched(now=_NOW, config=_config())
+            post_auto_adopt_comment(
+                "GEN-1",
+                snapshot,
+                client="acme",
+                session_id="sess-1",
+                recipe=RECIPE_AUTO_ADOPT_PLAN,
+            )
 
-        assert recovered == ["GEN-1"]
-        assert any(
-            "rc=1" in rec.message and "GEN-1" in rec.message for rec in caplog.records
-        )
+        assert entries_for("acme") == []
+        assert (
+            "gate_recipe_comment_enqueue_failed ticket=GEN-1 client=acme "
+            f"reason={SKIP_ENQUEUE_FAILED}"
+        ) in caplog.text
 
 
 class TestActAdoptPlanFailure:
@@ -2467,7 +2544,6 @@ class TestActAdoptPlanFailure:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
-        stub_gh_comment: list[list[str]],
     ) -> None:
         """Even when the mutation raises, the durable GATE_AUTO_APPROVED event
         is not rolled back, GATE_AUTO_APPROVE_FAILED is emitted as a correction,
@@ -2520,7 +2596,7 @@ class TestActAdoptPlanFailure:
         assert failed_payload["ticket_id"] == "GEN-1"
         assert failed_payload["recipe"] == RECIPE_AUTO_ADOPT_PLAN
         assert boom_msg in failed_payload["error"]
-        assert stub_gh_comment == []
+        assert entries_for("acme") == []
         assert any("GEN-1" in rec.message for rec in caplog.records)
 
     def test_latched_failure_does_not_refire(
@@ -2719,16 +2795,14 @@ class TestActAdoptRecheckRace:
         store = load_dev_queue()
         assert store.tasks[0].stage == Stage.IMPL
 
-    def test_comment_posted_after_lock_release(
+    def test_comment_enqueued_after_lock_release(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """R5's lock-scope guarantee: the gh issue comment subprocess call
-        must fire AFTER dev_queue_lock() releases, never while held. Prior
-        tests only proved *what* gets called (stub_gh_comment); this proves
-        *when* — a regression here would silently re-widen the lock hold
-        time to include a ~30s network call, defeating R5's whole point."""
-        import subprocess
-
+        """R5's lock-scope guarantee: the comment enqueue must fire AFTER
+        dev_queue_lock() releases, never while held. Prior tests only proved
+        *what* gets enqueued; this proves *when* — a regression here would
+        silently widen the lock hold to include an outbox store write."""
+        from cw import outbox_producer
         from cw.dev_queue import dev_queue_lock as real_lock
 
         write_clients_yaml(
@@ -2750,24 +2824,26 @@ class TestActAdoptRecheckRace:
 
         monkeypatch.setattr("cw.reconcile.gate_recipes.dev_queue_lock", _tracking_lock)
 
-        def _tracking_run(
-            argv: list[str], **_kwargs: Any
-        ) -> subprocess.CompletedProcess[bytes]:
-            events.append("comment_posted")
-            return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+        real_enqueue = outbox_producer.enqueue_prose
 
-        monkeypatch.setattr("cw.gh._sp.run", _tracking_run)
+        def _tracking_enqueue(*args: Any, **kwargs: Any) -> EnqueueOutcome:
+            events.append("comment_enqueued")
+            return real_enqueue(*args, **kwargs)
+
+        monkeypatch.setattr(
+            "cw.reconcile.gate_recipe_comments.enqueue_prose", _tracking_enqueue
+        )
 
         run_gate_recipes_prefetched(now=_NOW, config=_config())
 
-        assert events == ["locked", "unlocked", "comment_posted"]
+        assert events == ["locked", "unlocked", "comment_enqueued"]
+        assert len(entries_for("acme")) == 1
 
     def test_comment_skipped_for_dangling_client(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
-        stub_gh_comment: list[list[str]],
     ) -> None:
         """#1279 R7: adopt-plan audit comment is skipped (logged) for a client
         absent from the act phase's populated clients dict — never posted with
@@ -2798,7 +2874,7 @@ class TestActAdoptRecheckRace:
 
         assert approved == ["GEN-1"]
         assert deferred.post_lock == []
-        assert stub_gh_comment == []
+        assert entries_for("acme") == []
         assert any(
             "gate_recipe_comment_skipped" in rec.message for rec in caplog.records
         )

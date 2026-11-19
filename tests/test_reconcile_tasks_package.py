@@ -197,9 +197,7 @@ CONSUMER_IMPORTS: dict[str, frozenset[str]] = {
     "cw.reconcile.codex_boot": frozenset({"_resolve_task_policy"}),
     "cw.reconcile.unowned_running_acts": frozenset({"_resolve_task_policy"}),
     "cw.reconcile.shipped_release": frozenset({"_client_cwd"}),
-    "cw.reconcile.gate_recipe_comments": frozenset(
-        {"_client_cwd", "_is_dangling_client"}
-    ),
+    "cw.reconcile.gate_recipe_comments": frozenset({"_is_dangling_client"}),
     "cw.doctor.loop_health": frozenset({"_client_cwd"}),
     "cw.cw_pr_events_channel": frozenset({"_client_cwd", "_is_dangling_client"}),
 }
