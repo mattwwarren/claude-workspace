@@ -1,4 +1,4 @@
-"""Tests for cw.codex_stage_post: the shared codex stage comment post (#3062)."""
+"""Tests for cw.codex_stage_post: the shared codex stage comment enqueue (#3707)."""
 
 from __future__ import annotations
 
@@ -10,30 +10,17 @@ from unittest.mock import patch
 
 import pytest
 
-from cw.codex_runner import CodexRunResult
-from cw.codex_stage_post import (
-    GITHUB_POST_FAILED,
-    StagePost,
-    post_stage_comment,
-    tracker_label,
-)
-from cw.codex_usage import UsageAccumulator
+from cw.codex_stage_post import post_stage_comment
 from cw.events import read_events
-from cw.gh import agent_marked_body
+from cw.gh import AGENT_COMMENT_MARKER
 from cw.models import OrchestratorEventType
-from cw.models.usage import UsageStage
-from cw.tracker import TRACKER_GITHUB_ISSUES, TRACKER_LINEAR
-from cw.tracker_io import TrackerIoContext, plan_turn_parts
-from cw.tracker_post import PostedPart, PostReason, PostResult, PostStatus
-from tests._backend_mcp_helpers import codex_tracker_client, stage_mcp_config
-from tests._shared.cli_preflight import _write_tracker_config
+from cw.models.client import OutboxConfig
+from cw.outbox import MAX_PART_CHARS
+from cw.outbox_producer import content_marker
+from cw.tracker_post import PART_TEXT_CHARS, PartPlan
+from tests._backend_mcp_helpers import codex_tracker_client
+from tests._shared.outbox_builders import entries_for
 from tests._shared.session_seeding import _make_ticket_task
-from tests._tool_fakes import (
-    ScriptedCodexRunner,
-    any_call,
-    codex_usage_stdout,
-    tracker_io_turn_result,
-)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -44,7 +31,10 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.usefixtures("isolated_backend_layers")
 
 _TICKET = "GEN-7"
-_TEXT = "PR: https://github.com/o/r/pull/9\n"
+_PR_URL = "https://github.com/o/r/pull/9"
+_TEXT = f"PR: {_PR_URL}\n"
+_PLAN_PRODUCER = "codex-plan"
+_PR_LINK_PRODUCER = "codex-pr-link"
 _KINDS: list[VerdictCommentKind] = ["plan", "pr_link"]
 _EVENT_TYPES = [
     OrchestratorEventType.REVIEW_VERDICT_COMMENT_POSTED,
@@ -66,114 +56,188 @@ def _worktree(tmp_path: Path) -> Path:
     return worktree
 
 
+def _sha16(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
 def _post(
     client: ClientConfig,
     worktree: Path,
     kind: VerdictCommentKind,
     *,
-    runner: ScriptedCodexRunner | None = None,
+    text: str = _TEXT,
     artifact_path: Path | None = None,
+    marker_prefix: str | None = None,
+    marker_source: str | None = None,
 ) -> None:
+    producer = _PR_LINK_PRODUCER if kind == "pr_link" else _PLAN_PRODUCER
     post_stage_comment(
         task=_make_ticket_task(ticket_id=_TICKET, client=client.name),
         client=client,
         worktree=worktree,
         sid="sess-s",
-        runner=runner or ScriptedCodexRunner(),
-        text=_TEXT,
+        text=text,
         artifact_path=artifact_path,
         kind=kind,
+        producer=producer,
+        marker_prefix=marker_prefix or ("pr-link" if kind == "pr_link" else "plan"),
+        marker_source=marker_source,
     )
 
 
-def _result(status: PostStatus, parts: tuple[PostedPart, ...] = ()) -> PostResult:
-    return PostResult(status, PostReason.POST_FAILED, parts, 1)
+@pytest.fixture
+def no_gh(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Record any ``gh`` launch; the enqueue must make none."""
+    launches: list[list[str]] = []
+
+    def _run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        if argv[0] == "gh":
+            launches.append(argv)
+        return subprocess.CompletedProcess(argv, 128, b"", b"")
+
+    monkeypatch.setattr("cw.gh._sp.run", _run)
+    return launches
 
 
-_URL = "https://github.com/o/r/issues/7#issuecomment-41"
+class TestEnqueue:
+    def test_plan_enqueues(self, tmp_path: Path, no_gh: list[list[str]]) -> None:
+        client = codex_tracker_client(tmp_path)
+        _post(client, _worktree(tmp_path), "plan")
+        (produced,) = entries_for(client.name, ticket=_TICKET)
+        assert produced.entry.producer == _PLAN_PRODUCER
+        assert produced.entry.marker == f"plan-{_sha16(''.join(produced.parts))}"
+        assert produced.entry.redacted is False
+        assert produced.entry.operator_authored is False
+        assert produced.parts == [_TEXT]
+        assert no_gh == []
+        assert _events() == []
+
+    def test_redaction_follows_the_part_plan(self, tmp_path: Path) -> None:
+        client = codex_tracker_client(tmp_path)
+        worktree = _worktree(tmp_path)
+        _post(client, worktree, "plan", text=f"verdict: see {worktree}/private-note")
+        (produced,) = entries_for(client.name, ticket=_TICKET)
+        assert produced.entry.redacted is True
+        assert str(worktree) not in "".join(produced.parts)
+
+    def test_park_enqueues(self, tmp_path: Path) -> None:
+        client = codex_tracker_client(tmp_path)
+        worktree = _worktree(tmp_path)
+        _post(client, worktree, "plan")
+        _post(client, worktree, "plan", marker_prefix="park")
+        plan, park = entries_for(client.name, ticket=_TICKET)
+        assert plan.entry.producer == park.entry.producer == _PLAN_PRODUCER
+        assert plan.entry.marker.startswith("plan-")
+        assert park.entry.marker.startswith("park-")
+        assert park.entry.marker == content_marker("park", "".join(park.parts))
+        assert _events() == []
+
+    def test_pr_link_enqueues(self, tmp_path: Path, no_gh: list[list[str]]) -> None:
+        client = codex_tracker_client(tmp_path)
+        _post(client, _worktree(tmp_path), "pr_link", marker_source=_PR_URL)
+        (produced,) = entries_for(client.name, ticket=_TICKET)
+        assert produced.entry.producer == _PR_LINK_PRODUCER
+        assert produced.entry.marker == f"pr-link-{_sha16(_PR_URL)}"
+        assert produced.parts == [_TEXT]
+        assert no_gh == []
+        assert _events() == []
+
+    def test_long_plan_parts_are_verbatim_labelled(self, tmp_path: Path) -> None:
+        client = codex_tracker_client(tmp_path)
+        text = "## Summary\n\n" + "\n".join("x" * 90 for _ in range(1500))
+        assert len(text) > PART_TEXT_CHARS
+        _post(client, _worktree(tmp_path), "plan", text=text)
+        (produced,) = entries_for(client.name, ticket=_TICKET)
+        count = len(produced.parts)
+        assert count > 1
+        for index, part in enumerate(produced.parts, 1):
+            assert f"(part {index} of {count})" in part
+            assert AGENT_COMMENT_MARKER not in part
+        assert produced.entry.marker == f"plan-{_sha16(''.join(produced.parts))}"
+
+    def test_an_enabled_false_client_still_enqueues(self, tmp_path: Path) -> None:
+        client = codex_tracker_client(tmp_path).model_copy(
+            update={"outbox": OutboxConfig(enabled=False)}
+        )
+        _post(client, _worktree(tmp_path), "plan")
+        assert len(entries_for(client.name, ticket=_TICKET)) == 1
+        assert _events() == []
 
 
 @pytest.mark.parametrize("kind", _KINDS)
-class TestGitHub:
-    def test_success_is_posted(self, tmp_path: Path, kind: VerdictCommentKind) -> None:
-        client = codex_tracker_client(tmp_path)
-        ok = PostResult(PostStatus.POSTED, None, (PostedPart(index=1, url=_URL),), 1)
-        with patch("cw.codex_stage_post.post_parts", return_value=ok):
-            _post(client, _worktree(tmp_path), kind)
-        (event,) = _events()
-        assert event["type"] == "review.verdict_comment_posted"
-        assert event["kind"] == kind
-        assert event["reviewed_sha"] is None
-        assert event["artifact_path"] is None
-        assert event["posted"] == [{"index": 1, "comment_id": "41", "url": _URL}]
-
-    def test_success_hashes_the_marked_redacted_body(
+class TestSkipped:
+    def test_a_refused_plan_is_skipped(
         self, tmp_path: Path, kind: VerdictCommentKind
     ) -> None:
-        """#3353: the GitHub path hashes what post_issue_comment posts, not raw text."""
-        client = codex_tracker_client(tmp_path)
-        worktree = _worktree(tmp_path)
-        raw = f"verdict: see {worktree}/private-note"
-        ok = PostResult(PostStatus.POSTED, None, (PostedPart(index=1, url=_URL),), 1)
-        with patch("cw.codex_stage_post.post_parts", return_value=ok):
-            post_stage_comment(
-                task=_make_ticket_task(ticket_id=_TICKET, client=client.name),
-                client=client,
-                worktree=worktree,
-                sid="sess-s",
-                runner=ScriptedCodexRunner(),
-                text=raw,
-                artifact_path=None,
-                kind=kind,
-            )
-        (event,) = _events()
-        ctx = TrackerIoContext(
-            runner=ScriptedCodexRunner(), client=client, worktree=worktree
-        )
-        posted_body = agent_marked_body(plan_turn_parts(raw, ctx, marked=False)[0])
-        assert str(worktree) not in posted_body
-        expected = hashlib.sha256(posted_body.encode("utf-8")).hexdigest()
-        assert event["content_sha256"] == expected
-        assert event["content_sha256"] != hashlib.sha256(raw.encode()).hexdigest()
-
-    def test_refused_is_skipped(self, tmp_path: Path, kind: VerdictCommentKind) -> None:
         client = codex_tracker_client(tmp_path)
         with patch(
-            "cw.codex_stage_post.post_parts",
-            return_value=_result(PostStatus.REFUSED),
+            "cw.codex_stage_post.plan_prose_parts", side_effect=ValueError("no")
         ):
             _post(client, _worktree(tmp_path), kind)
         (event,) = _events()
         assert event["type"] == "review.verdict_comment_skipped"
-        assert event["reason"] == GITHUB_POST_FAILED
+        assert event["reason"] == "plan_refused"
         assert event["kind"] == kind
+        assert event["entry_id"] is None
+        assert entries_for(client.name) == []
 
-    def test_partial_is_unverified(
+    def test_empty_parts_are_a_refused_plan(
         self, tmp_path: Path, kind: VerdictCommentKind
     ) -> None:
         client = codex_tracker_client(tmp_path)
-        partial = _result(PostStatus.PARTIAL, (PostedPart(index=1, url=_URL),))
-        with patch("cw.codex_stage_post.post_parts", return_value=partial):
-            _post(client, _worktree(tmp_path), kind)
-        (event,) = _events()
-        assert event["type"] == "review.verdict_comment_unverified"
-        assert event["kind"] == kind
-        assert event["public_state"] == "possible"
-
-    def test_unplannable_text_is_skipped(
-        self, tmp_path: Path, kind: VerdictCommentKind
-    ) -> None:
-        client = codex_tracker_client(tmp_path)
-        with patch("cw.codex_stage_post.plan_turn_parts", side_effect=ValueError("no")):
+        with patch(
+            "cw.codex_stage_post.plan_prose_parts",
+            return_value=PartPlan(bodies=(), redacted=False),
+        ):
             _post(client, _worktree(tmp_path), kind)
         (event,) = _events()
         assert event["reason"] == "plan_refused"
+        assert entries_for(client.name) == []
+
+    def test_a_body_over_the_part_cap_is_skipped(
+        self, tmp_path: Path, kind: VerdictCommentKind
+    ) -> None:
+        client = codex_tracker_client(tmp_path)
+        huge = PartPlan(bodies=("x" * (MAX_PART_CHARS + 1),), redacted=False)
+        with patch("cw.codex_stage_post.plan_prose_parts", return_value=huge):
+            _post(client, _worktree(tmp_path), kind)
+        (event,) = _events()
+        assert event["reason"] == "body_too_long"
+        assert event["entry_id"] is None
+        assert entries_for(client.name) == []
+
+    def test_an_enqueue_failure_is_skipped_with_a_null_entry_id(
+        self, tmp_path: Path, kind: VerdictCommentKind
+    ) -> None:
+        client = codex_tracker_client(tmp_path)
+        with patch("cw.outbox_producer.enqueue", side_effect=OSError("disk")):
+            _post(client, _worktree(tmp_path), kind)
+        (event,) = _events()
+        assert event["type"] == "review.verdict_comment_skipped"
+        assert event["reason"] == "outbox_enqueue_failed"
+        assert event["kind"] == kind
+        assert event["entry_id"] is None
+        assert event["tracker"] == "github-issues"
+        assert event["session_id"] == "sess-s"
+        assert event["reviewed_sha"] is None
+
+    def test_a_duplicate_is_skipped_as_already_posted_with_the_entry_id(
+        self, tmp_path: Path, kind: VerdictCommentKind
+    ) -> None:
+        client = codex_tracker_client(tmp_path)
+        worktree = _worktree(tmp_path)
+        _post(client, worktree, kind)
+        _post(client, worktree, kind)
+        (produced,) = entries_for(client.name, ticket=_TICKET)
+        (event,) = _events()
+        assert event["reason"] == "already_posted"
+        assert event["entry_id"] == produced.entry.id
 
     def test_a_stage_fault_is_swallowed(
         self, tmp_path: Path, kind: VerdictCommentKind
     ) -> None:
         client = codex_tracker_client(tmp_path)
-        with patch("cw.codex_stage_post.post_parts", side_effect=OSError("disk")):
+        with patch("cw.codex_stage_post.enqueue_prose", side_effect=OSError("disk")):
             _post(client, _worktree(tmp_path), kind)
         assert _events() == []
 
@@ -185,10 +249,7 @@ class TestGitHub:
     ) -> None:
         client = codex_tracker_client(tmp_path)
         caplog.set_level(logging.WARNING, logger="cw.codex_stage_post")
-        with patch(
-            "cw.codex_stage_post.post_parts",
-            return_value=_result(PostStatus.REFUSED),
-        ):
+        with patch("cw.outbox_producer.enqueue", side_effect=OSError("disk")):
             _post(client, _worktree(tmp_path), kind)
         assert f"{kind}_comment_skipped" in caplog.text
 
@@ -199,135 +260,17 @@ class TestGitHub:
         worktree = _worktree(tmp_path)
         artifact = worktree / ".cw" / "a.md"
         artifact.write_text(_TEXT, encoding="utf-8")
-        with patch(
-            "cw.codex_stage_post.post_parts",
-            return_value=_result(PostStatus.REFUSED),
-        ):
+        with patch("cw.outbox_producer.enqueue", side_effect=OSError("disk")):
             _post(client, worktree, kind, artifact_path=artifact)
         (event,) = _events()
         assert event["artifact_path"] == str(artifact)
 
-
-def _linear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ClientConfig:
-    client = codex_tracker_client(tmp_path, {"codex": "linear"})
-    _write_tracker_config(client.workspace_path, TRACKER_LINEAR)
-    stage_mcp_config(monkeypatch, tmp_path, "codex", "enabled")
-    return client
-
-
-@pytest.mark.parametrize("kind", _KINDS)
-class TestOtherTracker:
-    def test_verified_turn_is_posted(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        kind: VerdictCommentKind,
+    def test_a_missing_artifact_is_null(
+        self, tmp_path: Path, kind: VerdictCommentKind
     ) -> None:
-        client = _linear(tmp_path, monkeypatch)
-        worktree = _worktree(tmp_path)
-        runner = ScriptedCodexRunner()
-        parts = plan_turn_parts(
-            _TEXT, TrackerIoContext(runner=runner, client=client, worktree=worktree)
-        )
-        runner.add(
-            any_call,
-            CodexRunResult(
-                returncode=0,
-                stdout="",
-                stderr="",
-                output_file_content=tracker_io_turn_result(_TICKET, parts),
-            ),
-        )
-        _post(client, worktree, kind, runner=runner)
-        (event,) = _events()
-        assert event["type"] == "review.verdict_comment_posted"
-        assert event["kind"] == kind
-        assert event["tracker"] == TRACKER_LINEAR
-
-    def test_the_post_relabels_the_runner_so_the_turn_records_as_tracker_io(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        kind: VerdictCommentKind,
-    ) -> None:
-        """#3063: the caller's recording runner is relabelled for the post."""
-        client = _linear(tmp_path, monkeypatch)
-        worktree = _worktree(tmp_path)
-        scripted = ScriptedCodexRunner()
-        parts = plan_turn_parts(
-            _TEXT, TrackerIoContext(runner=scripted, client=client, worktree=worktree)
-        )
-        scripted.add(
-            any_call,
-            CodexRunResult(
-                returncode=0,
-                stdout=codex_usage_stdout(input_tokens=200, output_tokens=20),
-                stderr="",
-                output_file_content=tracker_io_turn_result(_TICKET, parts),
-            ),
-        )
-        acc = UsageAccumulator("s-post", _TICKET, {})
-        runner = acc.recording_runner(UsageStage.PLAN, scripted)
-
-        _post(client, worktree, kind, runner=runner)
-
-        snapshot = acc.snapshot()
-        assert snapshot is not None
-        assert list(snapshot.usage.by_stage) == [UsageStage.TRACKER_IO]
-
-    def test_refused_turn_is_skipped_with_kind_label(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        kind: VerdictCommentKind,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        client = _linear(tmp_path, monkeypatch)
-        stage_mcp_config(monkeypatch, tmp_path, "codex", "disabled")
-        caplog.set_level(logging.WARNING)
-        _post(client, _worktree(tmp_path), kind)
-        (event,) = _events()
-        assert event["type"] == "review.verdict_comment_skipped"
-        assert event["kind"] == kind
-        assert f"{kind}_comment_skipped" in caplog.text
-
-
-class TestTrackerLabel:
-    def test_github_default(self, tmp_path: Path) -> None:
         client = codex_tracker_client(tmp_path)
-        assert tracker_label(client) == (TRACKER_GITHUB_ISSUES, True)
-
-    def test_other_tracker(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        client = _linear(tmp_path, monkeypatch)
-        assert tracker_label(client) == (TRACKER_LINEAR, False)
-
-
-def test_identity_carries_the_kind(tmp_path: Path) -> None:
-    client = codex_tracker_client(tmp_path)
-    post = StagePost(
-        task=_make_ticket_task(ticket_id=_TICKET, client=client.name),
-        client=client,
-        tracker=TRACKER_GITHUB_ISSUES,
-        artifact_path=None,
-        sid="s",
-        kind="pr_link",
-    )
-    assert post.identity.kind == "pr_link"
-    assert post.identity.reviewed_sha is None
-
-
-def test_no_gh_launch_for_a_refused_part(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The real poster is reached; a failing ``gh`` is a skipped event."""
-    client = codex_tracker_client(tmp_path)
-
-    def _run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(argv, 1, b"", b"nope")
-
-    monkeypatch.setattr("cw.gh._sp.run", _run)
-    _post(client, _worktree(tmp_path), "pr_link")
-    (event,) = _events()
-    assert event["reason"] == GITHUB_POST_FAILED
+        worktree = _worktree(tmp_path)
+        with patch("cw.outbox_producer.enqueue", side_effect=OSError("disk")):
+            _post(client, worktree, kind, artifact_path=worktree / ".cw" / "no.md")
+        (event,) = _events()
+        assert event["artifact_path"] is None

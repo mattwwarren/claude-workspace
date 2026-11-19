@@ -5,8 +5,9 @@ outstanding-thread registry, the bounded join the dispatch loop's shutdown path
 drains that registry with, the moved Step 3/4/4b/5 unit of work
 (``_run_codex_review_and_complete``) on both its success and exception branches,
 and the helper that unit of work is the sole consumer of —
-``_resolve_codex_fix_loop_enabled``. ``_post_review_comment`` and the verdict
-persist helpers moved to ``cw.codex_review_persist`` (#2807) and are tested in
+``_resolve_codex_fix_loop_enabled``. The verdict comment enqueue
+(``_post_daemon_verdict_comment``) and the verdict persist helpers moved to
+``cw.codex_review_persist`` (#2807) and are tested in
 ``tests/test_codex_review_persist.py``.
 """
 
@@ -373,11 +374,11 @@ def _run(
     )
 
 
-def _assert_tracker_io_context(kwargs: dict[str, object], worktree: Path) -> None:
-    """#3057: both post sites pass the daemon helper runner, client and worktree."""
-    assert isinstance(kwargs["runner"], _UnusedRunner)
+def _assert_enqueue_context(kwargs: dict[str, object], worktree: Path) -> None:
+    """#3707: both post sites pass the client and no runner or worktree (no turn)."""
     assert kwargs["client"] == _client(worktree)
-    assert kwargs["worktree"] == worktree
+    assert "runner" not in kwargs
+    assert "worktree" not in kwargs
 
 
 def test_run_codex_review_and_complete_success_path(
@@ -622,7 +623,7 @@ def test_run_codex_review_and_complete_posts_verdict_comment(
     # #2095: the tracker is resolved from the client's workspace (None here --
     # no project-config.yaml -- so the GitHub post still fires, fail-open) and
     # the durable copy is written before the post is attempted.
-    _assert_tracker_io_context(post_mock.call_args.kwargs, worktree)
+    _assert_enqueue_context(post_mock.call_args.kwargs, worktree)
     artifact = post_mock.call_args.kwargs["artifact_path"]
     assert artifact == worktree / ".claude" / "review-verdict.md"
     written = artifact.read_text(encoding="utf-8")
@@ -688,7 +689,7 @@ def test_run_codex_review_and_complete_posts_one_line_comment_when_verdict_is_no
         post_mock.call_args.args[1]
         == "editor (codex_timeout); reviewer (codex_timeout)"
     )
-    _assert_tracker_io_context(post_mock.call_args.kwargs, worktree)
+    _assert_enqueue_context(post_mock.call_args.kwargs, worktree)
     artifact = post_mock.call_args.kwargs["artifact_path"]
     assert artifact == worktree / ".claude" / "review-verdict-unparseable.md"
     written = artifact.read_text(encoding="utf-8")
@@ -1806,7 +1807,7 @@ def _run_guarded(
 ) -> tuple[AutoDevResult, MagicMock]:
     """Run the review unit with the fix loop mocked to return *returned*.
 
-    Returns the persisted result and the ``_post_review_comment`` mock.
+    Returns the persisted result and the ``_post_daemon_verdict_comment`` mock.
     """
     _seed_session(sid)
     task = TicketTask(
@@ -3259,11 +3260,11 @@ def _signal_events(event_type: OrchestratorEventType) -> list[OrchestratorEvent]
 
 
 def _verdict_run(
-    worktree: Path, sid: str, *, patch_post: bool = True
+    worktree: Path, sid: str, *, patch_post: bool = True, rendered: str = "r"
 ) -> tuple[MagicMock | None, list[int]]:
     """Run one verdict-present review; return the post mock (``None`` when the
-    real ``_post_review_comment`` ran) and the Case B event count seen when
-    Step 3 started."""
+    real ``_post_daemon_verdict_comment`` ran) and the Case B event count seen when
+    Step 3 started. *rendered* is the verdict text: an identical retry dedups."""
     _seed_session(sid)
     task = TicketTask(ticket_id="T-3055", client="test", stage=Stage.REVIEW)
     result = make_blocked(
@@ -3294,7 +3295,7 @@ def _verdict_run(
             patch("cw.codex_background.run_review_with_fix_loop", side_effect=_step3)
         )
         stack.enter_context(
-            patch("cw.codex_background.render_verdict_comment", return_value="r")
+            patch("cw.codex_background.render_verdict_comment", return_value=rendered)
         )
         post_mock = (
             stack.enter_context(
@@ -3429,7 +3430,8 @@ def test_signal_write_failure_never_changes_the_review(
             "cw.codex_background.revert_claimed_row_after_unexpected_error"
         ) as revert_mock,
     ):
-        _verdict_run(worktree, "bg-3055-fail", patch_post=patch_post)
+        # Different text: an identical retry would dedup into a skipped event.
+        _verdict_run(worktree, "bg-3055-fail", patch_post=patch_post, rendered="r2")
 
     persisted = load_state().sessions[0].last_result
     assert persisted is not None
@@ -3437,16 +3439,17 @@ def test_signal_write_failure_never_changes_the_review(
         k: v for k, v in expected.items() if k != "session_id"
     }
     revert_mock.assert_not_called()
-    assert signal_mock.call_count == (1 if patch_post else 2)
+    # After O3 a successful enqueue emits nothing, so only Case B fires.
+    assert signal_mock.call_count == 1
     assert len(_completed_events()) == 2
 
 
-def test_tracker_io_turn_fault_never_reverts_a_persisted_review(
+def test_enqueue_fault_never_reverts_a_persisted_review(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """#3057 R2: a raising tracker-IO turn on a non-GitHub tracker is swallowed
-    inside the real _post_review_comment, so it never reaches the run's broad
+    """#3707: a raising enqueue is swallowed inside the real
+    _post_daemon_verdict_comment, so it never reaches the run's broad
     ``except`` (which would revert the claimed row and overwrite the result)."""
     worktree = make_git_repo("wt-bg-turn-fault")
     _write_tracker_config(worktree, "linear")
@@ -3480,9 +3483,9 @@ def test_tracker_io_turn_fault_never_reverts_a_persisted_review(
         ),
         patch("cw.codex_background.render_verdict_comment", return_value="rendered"),
         patch(
-            "cw.codex_review_persist.post_parts_via_turn",
-            side_effect=RuntimeError("turn boom"),
-        ) as turn_mock,
+            "cw.outbox_producer.enqueue",
+            side_effect=OSError("outbox boom"),
+        ) as enqueue_mock,
         patch(
             "cw.codex_background._record_orchestrator_event",
             side_effect=lambda *args, **_kw: events.append(args[0]),
@@ -3496,7 +3499,9 @@ def test_tracker_io_turn_fault_never_reverts_a_persisted_review(
             sid="bg-turn-fault", task=task, worktree=worktree, client=_client(worktree)
         )
 
-    turn_mock.assert_called_once()
+    enqueue_mock.assert_called_once()
+    (skipped,) = _signal_events(OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED)
+    assert skipped.payload["reason"] == "outbox_enqueue_failed"
     err_mock.assert_not_called()
     revert_mock.assert_not_called()
     assert events == [OrchestratorEventType.SESSION_COMPLETED]

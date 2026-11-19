@@ -147,8 +147,9 @@ def test_a_stale_approval_reparks_quoting_both_fingerprints(
     run2 = h2.run()
     assert run2.status == "plan_pending_approval"
     assert run1.plan_draft_fingerprint != stale
-    (post,) = h2.posts()
-    comment = (post.stdin or b"").decode("utf-8")
+    *_, last = h2.entries()
+    assert last.entry.producer == "codex-plan"
+    comment = "".join(last.parts)
     assert "fingerprint mismatch" in comment
     assert stale in comment
     assert str(run2.plan_draft_fingerprint) in comment

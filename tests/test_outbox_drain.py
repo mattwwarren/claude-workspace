@@ -80,8 +80,9 @@ def _drain(
     bindings: Bindings | None = None,
     limit: int | None = None,
     force: bool = False,
+    tracker: str | None = None,
 ) -> DrainReport:
-    cfg = client_config(tmp_path, bindings=bindings)
+    cfg = client_config(tmp_path, bindings=bindings, tracker=tracker)
     return run_drain(CLIENT, cfg, limit=limit, force=force)
 
 
@@ -151,9 +152,64 @@ class TestArgvPin:
         target = select_target(client_config(tmp_path))
         assert target is not None
         assert target.cwd == tmp_path
-        assert select_target(client_config(tmp_path, bindings=Bindings())) is None
+        assert (
+            select_target(
+                client_config(tmp_path, bindings=Bindings(), tracker="linear")
+            )
+            is None
+        )
         mcp = client_config(tmp_path, bindings=bindings_linear_mcp())
         assert select_target(mcp) is None
+
+
+class TestSelectTargetFallback:
+    """RFC 0019 O3 R9: no ``bindings.tickets`` block, by tracker polarity."""
+
+    def test_no_bindings_github_tracker_targets_gh(self, tmp_path: Path) -> None:
+        cfg = client_config(tmp_path, bindings=Bindings(), tracker="github-issues")
+        target = select_target(cfg)
+        assert target is not None
+        assert target.cwd == _git_dir(cfg)
+
+    def test_no_bindings_unresolved_tracker_targets_gh(self, tmp_path: Path) -> None:
+        target = select_target(client_config(tmp_path, bindings=Bindings()))
+        assert target is not None
+        assert target.cwd == _git_dir(client_config(tmp_path))
+
+    def test_no_bindings_non_github_is_none(self, tmp_path: Path) -> None:
+        cfg = client_config(tmp_path, bindings=Bindings(), tracker="linear")
+        assert select_target(cfg) is None
+
+    def test_no_bindings_github_drain_delivers(
+        self, tmp_path: Path, gh: GhThread
+    ) -> None:
+        entry = enqueue(ticket="42", parts=("hello",)).entry
+        _drain(tmp_path, bindings=Bindings(), tracker="github-issues")
+        (call,) = gh.comment_records()
+        assert call.argv == ["gh", "issue", "comment", "42", "--body-file", "-"]
+        assert _state(entry.id) == (OutboxState.DELIVERED, OutboxReason.POSTED)
+
+    def test_no_bindings_non_github_drain_releases_binding_unreachable(
+        self, tmp_path: Path, gh: GhThread
+    ) -> None:
+        entry = enqueue(ticket="42", parts=("hello",)).entry
+        _drain(tmp_path, bindings=Bindings(), tracker="linear")
+        assert gh.records == []
+        assert _state(entry.id) == (
+            OutboxState.PENDING,
+            OutboxReason.BINDING_UNREACHABLE,
+        )
+
+    def test_bindings_without_cli_stays_none(self, tmp_path: Path) -> None:
+        cfg = client_config(
+            tmp_path, bindings=bindings_linear_mcp(), tracker="github-issues"
+        )
+        assert select_target(cfg) is None
+
+    def test_bindings_cli_unchanged(self, tmp_path: Path) -> None:
+        target = select_target(client_config(tmp_path))
+        assert target is not None
+        assert target.cwd == _git_dir(client_config(tmp_path))
 
 
 class TestPartMarkers:
@@ -198,11 +254,11 @@ class TestPartMarkers:
 
 class TestDecisionTable:
     @pytest.mark.parametrize(
-        ("role", "bindings"),
+        ("role", "bindings", "tracker"),
         [
-            (OutboxRole.KNOWLEDGE, None),
-            (OutboxRole.TICKETS, Bindings()),
-            (OutboxRole.TICKETS, bindings_linear_mcp()),
+            (OutboxRole.KNOWLEDGE, None, None),
+            (OutboxRole.TICKETS, Bindings(), "linear"),
+            (OutboxRole.TICKETS, bindings_linear_mcp(), None),
         ],
         ids=["knowledge-role", "no-binding", "mcp-only"],
     )
@@ -213,10 +269,11 @@ class TestDecisionTable:
         events: list[CapturedEvent],
         role: OutboxRole,
         bindings: Bindings | None,
+        tracker: str | None,
     ) -> None:
         entry = enqueue(role=role).entry
 
-        report = _drain(tmp_path, bindings=bindings)
+        report = _drain(tmp_path, bindings=bindings, tracker=tracker)
 
         assert _state(entry.id) == (
             OutboxState.PENDING,
@@ -234,7 +291,7 @@ class TestDecisionTable:
     ) -> None:
         entry = _unverified()
 
-        _drain(tmp_path, bindings=Bindings())
+        _drain(tmp_path, bindings=Bindings(), tracker="linear")
 
         assert _state(entry.id) == (
             OutboxState.UNVERIFIED,
@@ -814,7 +871,7 @@ class TestRunLoop:
         first = _at(0, marker="a")
         second = _at(1, marker="b")
 
-        report = _drain(tmp_path, bindings=Bindings())
+        report = _drain(tmp_path, bindings=Bindings(), tracker="linear")
 
         for entry in (first, second):
             assert _state(entry.id) == (
@@ -876,7 +933,7 @@ class TestRunLoop:
         _at(0, marker="a")
         second = _at(1, marker="b")
 
-        report = _drain(tmp_path, bindings=Bindings(), limit=1)
+        report = _drain(tmp_path, bindings=Bindings(), tracker="linear", limit=1)
 
         assert report.released == 1
         assert _entry(second.id).reason is None
@@ -885,20 +942,20 @@ class TestRunLoop:
         self, tmp_path: Path, gh: GhThread, events: list[CapturedEvent]
     ) -> None:
         enqueue()
-        _drain(tmp_path, bindings=Bindings())
+        _drain(tmp_path, bindings=Bindings(), tracker="linear")
         assert len(events) == 1
 
-        _drain(tmp_path, bindings=Bindings())
+        _drain(tmp_path, bindings=Bindings(), tracker="linear")
         assert len(events) == 1
 
-        _drain(tmp_path, bindings=Bindings(), force=True)
+        _drain(tmp_path, bindings=Bindings(), tracker="linear", force=True)
         assert len(events) == len(("first", "forced"))
 
     def test_successful_run_clears_its_role_marker(
         self, tmp_path: Path, gh: GhThread
     ) -> None:
         enqueue()
-        _drain(tmp_path, bindings=Bindings())
+        _drain(tmp_path, bindings=Bindings(), tracker="linear")
         assert marked_roles(CLIENT) == frozenset({OutboxRole.TICKETS})
 
         report = _drain(tmp_path)
@@ -1076,7 +1133,7 @@ class TestCrashConsistency:
         monkeypatch.setattr("cw.outbox_drain.release", _fail_with_record_error)
 
         with pytest.raises(OutboxRecordError):
-            _drain(tmp_path, bindings=Bindings())
+            _drain(tmp_path, bindings=Bindings(), tracker="linear")
 
         assert marked_roles(CLIENT) == frozenset()
         assert read_marker(CLIENT, OutboxRole.TICKETS) is None
@@ -1223,7 +1280,7 @@ class TestCrashConsistency:
         monkeypatch.setattr("cw.outbox_drain.write_marker", _fail_marker)
 
         with pytest.raises(OutboxRecordError):
-            _drain(tmp_path, bindings=Bindings())
+            _drain(tmp_path, bindings=Bindings(), tracker="linear")
 
         assert _state(entry.id) == (
             OutboxState.PENDING,
@@ -1283,7 +1340,7 @@ class TestCrashConsistency:
 
             monkeypatch.setattr(f"cw.outbox_drain.{name}", _spy)
 
-        _drain(tmp_path, bindings=None if unverified else Bindings())
+        _drain(tmp_path, bindings=None if unverified else Bindings(), tracker="linear")
 
         entry_write = "settle" if unverified else "release"
         assert order == [entry_write, "write_marker", "record_event"]

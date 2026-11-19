@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import subprocess
 from datetime import date
@@ -13,37 +12,23 @@ import pytest
 
 from cw.auto_dev_result.parse import extract_block
 from cw.codex_plan._post import (
-    GITHUB_POST_FAILED,
     PARK_HEADER,
     post_plan_comment,
     render_park_comment,
 )
 from cw.codex_plan._result import stamp_plan_result
 from cw.codex_plan._stations import stamp_markers
-from cw.codex_runner import CodexRunResult
 from cw.dev_queue.lifecycle import _plan_body_signoff_ok
 from cw.events import read_events
 from cw.gh import AGENT_COMMENT_MARKER
 from cw.models import OrchestratorEventType
-from cw.tracker import TRACKER_GITHUB_ISSUES, TRACKER_LINEAR
-from cw.tracker_io import TrackerIoContext, plan_turn_parts
-from cw.tracker_post import (
-    PART_TEXT_CHARS,
-    PostedPart,
-    PostReason,
-    PostResult,
-    PostStatus,
-)
-from tests._backend_mcp_helpers import codex_tracker_client, stage_mcp_config
-from tests._shared.cli_preflight import _write_tracker_config
+from cw.models.client import OutboxConfig
+from cw.outbox_producer import content_marker
+from cw.tracker_post import PART_TEXT_CHARS
+from tests._backend_mcp_helpers import codex_tracker_client
+from tests._shared.outbox_builders import entries_for
 from tests._shared.session_seeding import _make_ticket_task
-from tests._tool_fakes import (
-    FakeGhComment,
-    ScriptedCodexRunner,
-    any_call,
-    plan_sentinel,
-    tracker_io_turn_result,
-)
+from tests._tool_fakes import plan_sentinel
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -87,7 +72,7 @@ def _post(
     worktree: Path,
     text: str,
     *,
-    runner: ScriptedCodexRunner | None = None,
+    park: bool = False,
     artifact: str = "plan.md",
 ) -> None:
     artifact_path = worktree / ".cw" / artifact
@@ -97,276 +82,139 @@ def _post(
         client=client,
         worktree=worktree,
         sid="sess-p",
-        runner=runner or ScriptedCodexRunner(),
         text=text,
         artifact_path=artifact_path,
+        park=park,
     )
 
 
-def _gh_ok(url_id: int) -> subprocess.CompletedProcess[bytes]:
-    stdout = f"https://github.com/o/r/issues/7#issuecomment-{url_id}\n".encode()
-    return subprocess.CompletedProcess(["gh"], 0, stdout, b"")
+def _no_gh(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Make any ``gh`` launch fail the test; the enqueue never shells out."""
+    launches: list[list[str]] = []
+
+    def _run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        if argv[0] == "gh":
+            launches.append(argv)
+        return subprocess.CompletedProcess(argv, 128, b"", b"")
+
+    monkeypatch.setattr("cw.gh._sp.run", _run)
+    return launches
 
 
-def _skip_readback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub the shared poster's ``gh`` read-back (it has its own tests).
-
-    These tests pin what the plan post hands the poster; the read-back is a
-    separate verification that needs ``gh`` answers and real retry sleeps.
-    """
-    monkeypatch.setattr("cw.tracker_post._read_back", lambda *_a, **_k: None)
-
-
-class TestGitHub:
-    def test_stamped_plan_posts_with_one_marker(
+class TestEnqueue:
+    def test_stamped_plan_enqueues_with_the_plan_marker(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         client = codex_tracker_client(tmp_path)
-        _write_tracker_config(client.workspace_path, TRACKER_GITHUB_ISSUES)
         worktree = _worktree(tmp_path)
-        _skip_readback(monkeypatch)
-        bodies: list[str] = []
-
-        def _run(
-            argv: list[str], **kwargs: object
-        ) -> subprocess.CompletedProcess[bytes]:
-            if argv[0] != "gh":
-                return subprocess.CompletedProcess(argv, 128, b"", b"")
-            stdin = kwargs.get("input")
-            bodies.append(stdin.decode() if isinstance(stdin, bytes) else "")
-            return _gh_ok(len(bodies))
-
-        monkeypatch.setattr("cw.gh._sp.run", _run)
+        launches = _no_gh(monkeypatch)
         stamped = stamp_markers(_PLAN, today=_DAY)
         _post(client, worktree, stamped)
-        (body,) = bodies
-        assert body.count(AGENT_COMMENT_MARKER) == 1
+        (produced,) = entries_for(client.name, ticket=_TICKET)
+        assert produced.entry.producer == "codex-plan"
+        assert produced.entry.marker == content_marker("plan", "".join(produced.parts))
+        assert produced.entry.operator_authored is False
+        (body,) = produced.parts
         assert _plan_body_signoff_ok(body)
-        (event,) = _events()
-        assert event["type"] == "review.verdict_comment_posted"
-        assert event["kind"] == "plan"
-        assert event["reviewed_sha"] is None
-        assert event["tracker"] == TRACKER_GITHUB_ISSUES
+        assert AGENT_COMMENT_MARKER not in body
+        assert launches == []
+        assert _events() == []
 
-    def test_long_plan_splits_with_markers_in_part_one_only(
+    def test_park_enqueues_with_the_park_marker(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         client = codex_tracker_client(tmp_path)
         worktree = _worktree(tmp_path)
-        _skip_readback(monkeypatch)
-        calls: list[str] = []
+        launches = _no_gh(monkeypatch)
+        text = f"{PARK_HEADER}\n\nNo open ambiguities or premises.\n"
+        _post(client, worktree, text, park=True, artifact="plan-draft.md")
+        (produced,) = entries_for(client.name, ticket=_TICKET)
+        assert produced.entry.producer == "codex-plan"
+        assert produced.entry.marker == content_marker("park", "".join(produced.parts))
+        assert launches == []
 
-        def _run(
-            argv: list[str], **kwargs: object
-        ) -> subprocess.CompletedProcess[bytes]:
-            if argv[0] != "gh":
-                return subprocess.CompletedProcess(argv, 128, b"", b"")
-            stdin = kwargs.get("input")
-            calls.append(stdin.decode() if isinstance(stdin, bytes) else "")
-            return _gh_ok(len(calls))
+    def test_the_prefix_separates_a_plan_from_a_park_of_the_same_text(
+        self, tmp_path: Path
+    ) -> None:
+        client = codex_tracker_client(tmp_path)
+        worktree = _worktree(tmp_path)
+        _post(client, worktree, _PLAN)
+        _post(client, worktree, _PLAN, park=True)
+        plan, park = entries_for(client.name, ticket=_TICKET)
+        assert plan.entry.marker.startswith("plan-")
+        assert park.entry.marker.startswith("park-")
+        assert plan.entry.marker.split("-", 1)[1] == park.entry.marker.split("-", 1)[1]
+        assert _events() == []
 
-        monkeypatch.setattr("cw.gh._sp.run", _run)
+    def test_long_plan_splits_with_markers_in_part_one_only(
+        self, tmp_path: Path
+    ) -> None:
+        client = codex_tracker_client(tmp_path)
+        worktree = _worktree(tmp_path)
         long_plan = _PLAN + "\n".join(f"- line {i} " + "w" * 80 for i in range(1500))
         stamped = stamp_markers(long_plan, today=_DAY)
         assert len(stamped) > PART_TEXT_CHARS
         _post(client, worktree, stamped)
-        assert len(calls) > 1
-        assert _plan_body_signoff_ok(calls[0])
-        assert all("plan-spec-reviewed" not in body for body in calls[1:])
-        assert all(body.count(AGENT_COMMENT_MARKER) == 1 for body in calls)
-        (event,) = _events()
-        assert [p["index"] for p in event["posted"]] == list(range(1, len(calls) + 1))
-        assert event["posted"][0]["comment_id"] == "1"
+        (produced,) = entries_for(client.name, ticket=_TICKET)
+        parts = produced.parts
+        assert len(parts) > 1
+        assert "(part 1 of " in parts[0]
+        assert _plan_body_signoff_ok(parts[0])
+        assert all("plan-spec-reviewed" not in part for part in parts[1:])
+        assert all(AGENT_COMMENT_MARKER not in part for part in parts)
 
-    def test_gh_failure_skips_and_stops(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_unplannable_text_is_skipped(self, tmp_path: Path) -> None:
         client = codex_tracker_client(tmp_path)
         worktree = _worktree(tmp_path)
-        calls: list[list[str]] = []
-
-        def _run(
-            argv: list[str], **_kwargs: object
-        ) -> subprocess.CompletedProcess[bytes]:
-            if argv[0] == "gh":
-                calls.append(argv)
-            return subprocess.CompletedProcess(argv, 1, b"", b"nope")
-
-        monkeypatch.setattr("cw.gh._sp.run", _run)
-        long_plan = _PLAN + "\n".join("x" * 90 for _ in range(1500))
-        _post(client, worktree, long_plan)
-        assert len(calls) == 1
-        (event,) = _events()
-        assert event["type"] == "review.verdict_comment_skipped"
-        assert event["reason"] == GITHUB_POST_FAILED
-        assert event["kind"] == "plan"
-
-    def test_unplannable_text_is_skipped(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        client = codex_tracker_client(tmp_path)
-        worktree = _worktree(tmp_path)
-        FakeGhComment().install(monkeypatch)
         with patch(
-            "cw.codex_stage_post.plan_turn_parts", side_effect=ValueError("no plan")
+            "cw.codex_stage_post.plan_prose_parts", side_effect=ValueError("no plan")
         ):
             _post(client, worktree, _PLAN)
         (event,) = _events()
+        assert event["type"] == "review.verdict_comment_skipped"
         assert event["reason"] == "plan_refused"
+        assert event["kind"] == "plan"
+        assert entries_for(client.name) == []
 
-    def test_a_raised_fault_is_caught(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_a_raised_fault_is_caught(self, tmp_path: Path) -> None:
         client = codex_tracker_client(tmp_path)
         worktree = _worktree(tmp_path)
-        with patch("cw.codex_stage_post.post_parts", side_effect=OSError("disk")):
+        with patch("cw.codex_stage_post.enqueue_prose", side_effect=OSError("disk")):
             _post(client, worktree, _PLAN)
         assert _events() == []
 
-    def test_a_partially_public_post_is_unverified_not_skipped(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Part 1 is public, part 2 failed: the operator must check the ticket."""
-        client = codex_tracker_client(tmp_path)
-        worktree = _worktree(tmp_path)
-        partial = PostResult(
-            PostStatus.PARTIAL,
-            PostReason.POST_FAILED,
-            (
-                PostedPart(
-                    index=1, url="https://github.com/o/r/issues/7#issuecomment-41"
-                ),
-            ),
-            2,
-        )
-        with patch("cw.codex_stage_post.post_parts", return_value=partial):
-            _post(client, worktree, _PLAN)
-        (event,) = _events()
-        assert event["type"] == "review.verdict_comment_unverified"
-        assert event["kind"] == "plan"
-        assert event["reason"] == GITHUB_POST_FAILED
-        assert event["public_state"] == "possible"
-        assert event["posted"] == [
-            {
-                "index": 1,
-                "comment_id": "41",
-                "url": "https://github.com/o/r/issues/7#issuecomment-41",
-            }
-        ]
-
-    def test_a_first_part_unknown_post_is_unverified_without_public_parts(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    def test_an_enqueue_failure_is_skipped_with_a_null_entry_id(
+        self, tmp_path: Path
     ) -> None:
         client = codex_tracker_client(tmp_path)
         worktree = _worktree(tmp_path)
-        unknown = PostResult(PostStatus.PARTIAL, PostReason.POST_OUTCOME_UNKNOWN, (), 1)
-        with patch("cw.codex_stage_post.post_parts", return_value=unknown):
-            _post(client, worktree, _PLAN)
-        (event,) = _events()
-        assert event["type"] == "review.verdict_comment_unverified"
-        assert event["reason"] == GITHUB_POST_FAILED
-
-    def test_a_refused_first_part_is_skipped(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Nothing is public when the first part is refused: the post is skipped."""
-        client = codex_tracker_client(tmp_path)
-        worktree = _worktree(tmp_path)
-        refused = PostResult(PostStatus.REFUSED, PostReason.POST_FAILED, (), 1)
-        with patch("cw.codex_stage_post.post_parts", return_value=refused):
+        with patch("cw.outbox_producer.enqueue", side_effect=OSError("disk")):
             _post(client, worktree, _PLAN)
         (event,) = _events()
         assert event["type"] == "review.verdict_comment_skipped"
-        assert event["reason"] == GITHUB_POST_FAILED
-
-
-def _linear(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> tuple[ClientConfig, Path]:
-    client = codex_tracker_client(tmp_path, {"codex": "linear"})
-    _write_tracker_config(client.workspace_path, TRACKER_LINEAR)
-    stage_mcp_config(monkeypatch, tmp_path, "codex", "enabled")
-    return client, _worktree(tmp_path)
-
-
-def _turn_runner(
-    client: ClientConfig, worktree: Path, text: str, **kwargs: Any
-) -> ScriptedCodexRunner:
-    runner = ScriptedCodexRunner()
-    parts = plan_turn_parts(
-        text, TrackerIoContext(runner=runner, client=client, worktree=worktree)
-    )
-    result = CodexRunResult(
-        returncode=0,
-        stdout="",
-        stderr="",
-        output_file_content=tracker_io_turn_result(_TICKET, parts, **kwargs),
-    )
-    return runner.add(any_call, result)
-
-
-class TestNonGitHub:
-    def test_verified_post_emits_posted(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        client, worktree = _linear(tmp_path, monkeypatch)
-        _post(client, worktree, _PLAN, runner=_turn_runner(client, worktree, _PLAN))
-        (event,) = _events()
-        assert event["type"] == "review.verdict_comment_posted"
-        assert event["kind"] == "plan"
-        assert event["client"] == "acme"
-        assert event["tracker"] == TRACKER_LINEAR
+        assert event["reason"] == "outbox_enqueue_failed"
+        assert event["entry_id"] is None
+        assert event["tracker"] == "github-issues"
         assert event["session_id"] == "sess-p"
-        assert event["reviewed_sha"] is None
         assert event["artifact_path"] == str(worktree / ".cw" / "plan.md")
-        # #3353: the hash is of the marked, redacted body the turn was given.
-        ctx = TrackerIoContext(
-            runner=ScriptedCodexRunner(), client=client, worktree=worktree
-        )
-        expected = hashlib.sha256(
-            plan_turn_parts(_PLAN, ctx)[0].encode("utf-8")
-        ).hexdigest()
-        assert event["content_sha256"] == expected
 
-    def test_refusal_emits_skipped(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        client, worktree = _linear(tmp_path, monkeypatch)
-        stage_mcp_config(monkeypatch, tmp_path, "codex", "disabled")
+    def test_a_duplicate_is_skipped_as_already_posted(self, tmp_path: Path) -> None:
+        client = codex_tracker_client(tmp_path)
+        worktree = _worktree(tmp_path)
         _post(client, worktree, _PLAN)
+        _post(client, worktree, _PLAN)
+        (produced,) = entries_for(client.name, ticket=_TICKET)
         (event,) = _events()
-        assert event["type"] == "review.verdict_comment_skipped"
-        assert event["kind"] == "plan"
-        assert event["reason"] == "tracker_mcp_not_enabled"
+        assert event["reason"] == "already_posted"
+        assert event["entry_id"] == produced.entry.id
 
-    def test_unverified_outcome_emits_unverified(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        client, worktree = _linear(tmp_path, monkeypatch)
-
-        def _mutate(doc: dict[str, Any]) -> None:
-            doc["parts"][0]["readback_tail"] = "tampered"
-
-        runner = _turn_runner(client, worktree, _PLAN, mutate=_mutate)
-        _post(client, worktree, _PLAN, runner=runner)
-        (event,) = _events()
-        assert event["type"] == "review.verdict_comment_unverified"
-        assert event["kind"] == "plan"
-        assert event["public_state"] != "none"
-        assert event["posted"]
-        assert "marker_survived" in event
-
-    def test_nothing_is_retried(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        client, worktree = _linear(tmp_path, monkeypatch)
-        runner = ScriptedCodexRunner().add(
-            any_call, CodexRunResult(returncode=1, stdout="", stderr="down")
+    def test_an_enabled_false_client_still_enqueues(self, tmp_path: Path) -> None:
+        client = codex_tracker_client(tmp_path).model_copy(
+            update={"outbox": OutboxConfig(enabled=False)}
         )
-        _post(client, worktree, _PLAN, runner=runner)
-        assert len(runner.calls) == 1
-        (event,) = _events()
-        assert event["reason"] == "turn_exit_nonzero"
+        _post(client, _worktree(tmp_path), _PLAN)
+        assert len(entries_for(client.name, ticket=_TICKET)) == 1
+        assert _events() == []
 
 
 class TestParkComment:
@@ -445,27 +293,43 @@ class TestParkComment:
     ) -> None:
         client = codex_tracker_client(tmp_path)
         worktree = _worktree(tmp_path)
-        FakeGhComment().install(monkeypatch)
-        _post(
-            client, worktree, "## Pending Verification Scan\n", artifact="plan-draft.md"
-        )
+        with patch("cw.outbox_producer.enqueue", side_effect=OSError("disk")):
+            _post(
+                client,
+                worktree,
+                "## Pending Verification Scan\n",
+                park=True,
+                artifact="plan-draft.md",
+            )
         (event,) = _events()
         assert event["artifact_path"] == str(worktree / ".cw" / "plan-draft.md")
 
-    def test_absent_artifact_is_null(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_absent_artifact_is_null(self, tmp_path: Path) -> None:
         client = codex_tracker_client(tmp_path)
         worktree = _worktree(tmp_path)
-        FakeGhComment().install(monkeypatch)
-        post_plan_comment(
-            task=_make_ticket_task(ticket_id=_TICKET, client=client.name),
-            client=client,
-            worktree=worktree,
-            sid="sess-p",
-            runner=ScriptedCodexRunner(),
-            text=_PLAN,
-            artifact_path=worktree / ".cw" / "missing.md",
-        )
+        with patch("cw.outbox_producer.enqueue", side_effect=OSError("disk")):
+            post_plan_comment(
+                task=_make_ticket_task(ticket_id=_TICKET, client=client.name),
+                client=client,
+                worktree=worktree,
+                sid="sess-p",
+                text=_PLAN,
+                artifact_path=worktree / ".cw" / "missing.md",
+            )
+        (event,) = _events()
+        assert event["artifact_path"] is None
+
+    def test_free_standing_artifact_path_null(self, tmp_path: Path) -> None:
+        client = codex_tracker_client(tmp_path)
+        worktree = _worktree(tmp_path)
+        with patch("cw.outbox_producer.enqueue", side_effect=OSError("disk")):
+            post_plan_comment(
+                task=_make_ticket_task(ticket_id=_TICKET, client=client.name),
+                client=client,
+                worktree=worktree,
+                sid="sess-p",
+                text=_PLAN,
+                artifact_path=None,
+            )
         (event,) = _events()
         assert event["artifact_path"] is None
