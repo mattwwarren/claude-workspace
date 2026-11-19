@@ -595,9 +595,14 @@ Scope: forwarded as `--model <id>` to `claude --bg` from both
 `spawn_create_impl` (initial DAEMON spawn) and `resume_session` (DAEMON-origin
 resume of a dead surface). USER-origin sessions ignore this field.
 
-Permission mode: some models (pre-5.5 Haiku, e.g. Haiku 4.5) do not support
-`--permission-mode auto`, which would hang the `claude --bg` spawn
-indefinitely (#1111). When a DAEMON-origin worker is pinned to a
+Permission mode: every full model id that cw recognizes at major version 5 or
+later (for example `claude-opus-5-5`, `claude-sonnet-5-6`, `claude-fable-5`) is
+auto-capable and spawns with `--permission-mode auto` (#3626). Opus 4.6–4.8 and
+Sonnet 4.6 are also auto-capable. Some models (Haiku 4.5, and any other pre-5
+id not listed) do not support `--permission-mode auto`, which would hang the
+`claude --bg` spawn indefinitely (#1111). Aliases such as `opus` and
+provider-prefixed ids are not recognized, so they fall back as well: pin a full
+id. When a DAEMON-origin worker is pinned to a
 non-auto-capable model, cw spawns it with `--permission-mode bypassPermissions`
 instead — the same non-interactive posture already-supported Sonnet/Opus
 workers run under. This requires the bypass-permissions disclaimer to have
@@ -605,8 +610,9 @@ been accepted once (`claude --dangerously-skip-permissions` interactively —
 a physical-human step that needs a TTY, one of the only two exceptions in
 ADR-0020);
 an unaccepted disclaimer surfaces as a clear `DisclaimerNotAcceptedError`
-rather than a silent hang. Auto-capable pins (Sonnet 4.6+, Sonnet 5, Opus
-4.6+) and unpinned clients are unaffected and continue to use `auto`.
+rather than a silent hang. Unpinned clients are unaffected and continue to use
+`auto`. To move a client back to `bypassPermissions`, re-pin its `worker_model`
+to an id that is not auto-capable; there is no per-client permission override.
 
 ## Pipeline Configuration — Per-Stage Model Pinning
 
