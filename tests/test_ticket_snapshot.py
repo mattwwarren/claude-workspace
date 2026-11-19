@@ -28,6 +28,7 @@ from cw.ticket_snapshot import (
     write_snapshot,
 )
 from cw.ticket_snapshot._models import canonical_json, digest_of, digest_or_none
+from cw.ticket_snapshot._render import render_context
 from tests._shared.ticket_context import make_snapshot, observed_issue_envelope
 from tests._ticket_view_helpers import (
     ACME,
@@ -390,6 +391,14 @@ def test_fetched_at_keeps_microseconds_so_same_second_refresh_differs() -> None:
     )
     assert ".000001Z" in canonical_json(first)
     assert write_snapshot(first) != write_snapshot(second)
+
+
+def test_rendered_fetched_at_keeps_microseconds() -> None:
+    snapshot = make_snapshot(
+        fetched_at=make_snapshot().fetched_at.replace(microsecond=123456)
+    )
+    rendered = render_context(snapshot, "a" * 64, materialized_by_session=None)
+    assert rendered["snapshot_fetched_at"] == "2026-11-18T12:00:00.123456Z"
 
 
 def test_read_non_utf8_bytes_with_matching_hash_raises_invalid() -> None:

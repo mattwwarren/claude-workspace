@@ -23,8 +23,6 @@ if TYPE_CHECKING:
     from cw.models import TicketTask
     from cw.ticket_snapshot._models import TicketSnapshot
 
-_FETCHED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-
 
 def render_context(
     snapshot: TicketSnapshot,
@@ -45,6 +43,7 @@ def render_context(
         }
         for comment in snapshot.comments
     ]
+    serialized = snapshot.model_dump(mode="json")
     return {
         "schema_version": CW_TICKET_CONTEXT_SCHEMA_VERSION,
         "ticket_id": snapshot.ticket_id,
@@ -56,7 +55,7 @@ def render_context(
         "prior_decisions": [],
         "materialized_by_session": materialized_by_session,
         "snapshot_digest": digest,
-        "snapshot_fetched_at": snapshot.fetched_at.strftime(_FETCHED_AT_FORMAT),
+        "snapshot_fetched_at": serialized["fetched_at"],
     }
 
 
