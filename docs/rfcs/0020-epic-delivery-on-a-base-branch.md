@@ -36,8 +36,10 @@ Human-facing summary, not parsed; `## Tickets` is the parse source.
 - Wave 0, Sprint 1: S1 — row field, seam, ADR.
 - Wave 1, Sprint 2: S2 — sweep of worktree, spawn, dispatch and reconcile readers. A1 — context delivery, stage prose, contract manifest.
 - Wave 2, Sprint 3: S3 — sweep of review, convergence, codex and stage-verification readers, plus the static guard. B1 — enqueue on a base. B2 — adoption checks the base; landing row.
-- Wave 3, Sprint 4: B3 — orchestration skills. B4 — doctor advisories.
-- Wave 4, Sprint 5: D1 — dogfood an epic end to end.
+- Wave 3, Sprint 4: B3 — orchestration skills. B4 — doctor advisories. Both are built on `epic/3778` as the first real epic (D-13), with one further child on a codex lane.
+- Wave 4, Sprint 5: D1 — land that epic through adoption and record the run.
+
+Sprints 1 to 3 merge to the default branch as ordinary waves: a row with a base is not safe before S3, because until then review still diffs against the default branch and the trust-root guard does not exist.
 
 ## Resolved decisions
 
@@ -55,6 +57,8 @@ Firm leans, decided to unblock the breakout. Each is binding but reversible: rev
 - **D-10 — A child is done when it is on the default branch.** A per-ticket PR merged into an epic branch does not close its tracker ticket (GitHub's `Closes` only fires on the default branch, and nothing in cw compensates). The landing PR body cites every child, so the landing merge closes them. The dev-queue row still reaches `COMPLETED` when its own PR merges into the base. Reverses at B2 hardening for trackers where a body citation does not close a ticket.
 - **D-11 — This RFC adds no reviewer sharding.** A landing diff too large for the Claude review path fails loud as it does today (`ReviewInputTooLargeError`). The documented route for a large landing is a codex review lane, which shards. RFC 0015 B1 remains the claude-native fix and is a pull-in candidate, not a dependency. Reverses at D1.
 - **D-12 — Branch protection on epic branches is the operator's.** An epic branch must not require a human review for per-ticket PRs, or every child knocks. cw documents the prerequisite and reports it; it never changes repository settings and never approves (ADR-0012). Reverses never.
+
+- **D-13 — Sprint 4 is the first epic; D1 lands it.** (Operator decision, 2026-11-19, after buildout.) B3 and B4 are enqueued with `--base epic/3778` once S3, A1, B1 and B2 are on the default branch, together with one further child that runs on a codex lane, chosen by the orchestrator at sprint-4 dispatch from open tickets that touch neither B3's nor B4's files. The orchestrator opens and lands the epic by hand, following the procedure B3 is writing, and D1 is the landing plus its record. This replaces the throwaway dogfood epic. Reverses at sprint-4 dispatch if no suitable third child exists, in which case B4 runs on the codex lane and the run proceeds with two children, recorded as such.
 
 ## Tickets
 
@@ -155,7 +159,7 @@ Firm leans, decided to unblock the breakout. Each is binding but reversible: rev
 - **Sprint:** 4
 - **Depends on:** B1, B2
 - **Context:** The procedures that make rows-sharing-a-base into a delivery mode live at the skill layer by design. The orchestrator needs to know when to reach for an epic, how to open one and how to land one.
-- **Scope:** D-1, D-4, D-6, D-9, D-10, D-12
+- **Scope:** D-1, D-4, D-6, D-9, D-10, D-12, D-13
 - **Acceptance:**
   - `cw-orchestration` defines *epic* beside *fan-out* and *swing*: a feature that should reach the default branch once, whose children can each stand as a ticket; it states that a swing may be a row inside an epic.
   - `orchestrate-sprint` gains "open an epic": create `epic/<parent-id>` from the default branch, push it, verify the branch-protection prerequisite, and enqueue children with `--base`.
@@ -170,7 +174,7 @@ Firm leans, decided to unblock the breakout. Each is binding but reversible: rev
 - **Sprint:** 4
 - **Depends on:** B1
 - **Context:** With no tick gate, an operator needs to see an epic that is growing, aging or drifting from the default branch before the landing PR shows it.
-- **Scope:** D-5, D-8, D-12
+- **Scope:** D-5, D-8, D-12, D-13
 - **Acceptance:**
   - `cw doctor` reports one advisory `epic-base/<client>/<branch>` per distinct non-null base on a non-terminal row, with diff size against the default branch, age of the oldest unlanded commit and the merge-probe result against the default branch.
   - The check is capped per run, bounded in wall-clock time and fails open to "unknown" on a git error; it never fails `cw doctor` and never mutates anything (ADR-0014).
@@ -184,13 +188,14 @@ Firm leans, decided to unblock the breakout. Each is binding but reversible: rev
 - **Wave:** 4
 - **Sprint:** 5
 - **Depends on:** S3, A1, B3, B4
-- **Context:** The design claims the unchanged contract carries an epic on any backend. That is only shown by running one.
-- **Scope:** D-8, D-11
+- **Context:** The design claims the unchanged contract carries an epic on any backend. That is only shown by running one, and sprint 4 is run as that epic (D-13): this ticket is the landing of `epic/3778` and the record of the run. It is run by the orchestrator session, not dispatched to a worker.
+- **Scope:** D-8, D-11, D-13
 - **Acceptance:**
-  - A throwaway epic of at least three children, at least one on a codex lane, is built on a base and landed through adoption; the run is recorded in `docs/` with the commands used.
+  - The sprint-4 epic on `epic/3778` (B3, B4 and one further child, at least one of the three on a codex lane) is landed on the default branch through adoption under the Epic II parent ticket; the run is recorded in `docs/` with the commands used, including how the epic was opened.
   - The record states the size of the landing diff, whether the landing review needed a codex lane (D-11) and whether a landing conflict was repaired in one impl turn (D-8).
   - Every friction found is filed as a ticket; D-8 and D-11 are either confirmed in the record or amended in an Errata section of this RFC.
   - No child ticket was closed before the landing merge and every child was closed by it.
+  - Every place where the hand-run procedure differed from B3's written procedure is fixed in the skill prose before the landing PR merges.
 
 ## References
 
@@ -254,7 +259,7 @@ Recorded in `## References` above. The counts (94 `.default_branch` reads, about
 
 ### Orchestrator brief
 
-- **Drives:** `sprint-buildout` on this RFC, then dispatch by wave. S1, S2, S3, A1 and B2 define or change contracts (schema, context key, manifest elements, adoption precedence): harden them before dispatch.
+- **Drives:** `sprint-buildout` on this RFC, then dispatch by wave. S1, S2, S3, A1 and B2 define or change contracts (schema, context key, manifest elements, adoption precedence): harden them before dispatch. Sprints 1 to 3 merge to the default branch; sprint 4 is enqueued with `--base epic/3778` and landed by D1 (D-13).
 - **Gates:** `sprint-buildout`'s Approve/Abort; the trust-root allowlist in S3 is a human-read item at review; D1's record goes to the operator before the milestone closes.
 - **Terminal state:** D1's dogfood epic landed through adoption with every child closed by the landing merge, and D-8 and D-11 confirmed or amended.
 
