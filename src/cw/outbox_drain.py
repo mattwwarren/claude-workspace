@@ -41,6 +41,7 @@ from cw.models import OrchestratorEventType
 from cw.outbox import (
     DrainLeaseHeldError,
     OutboxEntry,
+    OutboxError,
     OutboxReason,
     OutboxRecordError,
     OutboxRole,
@@ -152,6 +153,17 @@ class _Run:
     released: int = 0
     held: int = 0
     claims: int = 0
+    accounted: set[str] = field(default_factory=set)
+    storage_error: OutboxError | None = None
+    marker_write_failures: set[OutboxRole] = field(default_factory=set)
+
+
+def _accounted(run: _Run, entry: OutboxEntry) -> bool:
+    """Mark a committed entry transition, returning whether it was new."""
+    if entry.id in run.accounted:
+        return False
+    run.accounted.add(entry.id)
+    return True
 
 
 def _emit(
@@ -203,9 +215,15 @@ def _deliver(
         state=OutboxState.DELIVERED,
         reason=reason,
     )
-    run.delivered += 1
-    run.delivered_roles.add(entry.role)
-    _emit(OrchestratorEventType.OUTBOX_ENTRY_DELIVERED, entry, reason, posted=posted)
+    if _accounted(run, entry):
+        run.delivered += 1
+        run.delivered_roles.add(entry.role)
+        _emit(
+            OrchestratorEventType.OUTBOX_ENTRY_DELIVERED,
+            entry,
+            reason,
+            posted=posted,
+        )
 
 
 def _resettle_unverified(
@@ -221,7 +239,8 @@ def _resettle_unverified(
         state=OutboxState.UNVERIFIED,
         reason=reason,
     )
-    run.unverified += 1
+    if _accounted(run, entry):
+        run.unverified += 1
 
 
 def _to_unverified(
@@ -243,15 +262,17 @@ def _hold(run: _Run, entry: OutboxEntry) -> None:
         claim_token=_token(entry),
         reason=OutboxReason.TRANSIENT_FAILURE,
     )
+    counted = _accounted(run, entry)
     append_held(run.client, entry.id)
-    run.released += 1
-    run.held += 1
-    _emit(
-        OrchestratorEventType.OUTBOX_ENTRY_PENDING,
-        entry,
-        OutboxReason.TRANSIENT_FAILURE,
-        held=True,
-    )
+    if counted:
+        run.released += 1
+        run.held += 1
+        _emit(
+            OrchestratorEventType.OUTBOX_ENTRY_PENDING,
+            entry,
+            OutboxReason.TRANSIENT_FAILURE,
+            held=True,
+        )
 
 
 def _per_item_failure(run: _Run, entry: OutboxEntry) -> None:
@@ -279,13 +300,29 @@ def _announce(
     is_pending = entry.claimed_from is OutboxState.PENDING
     if is_pending:
         release(run.client, entry.id, claim_token=_token(entry), reason=marker.reason)
-        run.released += 1
+        counted = _accounted(run, entry)
+        if counted:
+            run.released += 1
     else:
         _resettle_unverified(run, entry)
+        counted = entry.id in run.accounted
     run.broken[entry.role] = marker
-    if first or persist:
-        write_marker(run.client, marker)
-    if not first:
+    if first or persist or entry.role in run.marker_write_failures:
+        try:
+            write_marker(run.client, marker)
+        except OutboxError as exc:
+            # The entry transition is already committed.  Keep the in-memory
+            # role break and account for this entry once; the tick's no-progress
+            # guard prevents a missing sidecar from causing a relaunch loop.
+            run.marker_write_failures.add(entry.role)
+            logger.warning(
+                "outbox: could not persist unreachable marker for %s (%s)",
+                entry.role.value,
+                type(exc).__name__,
+            )
+        else:
+            run.marker_write_failures.discard(entry.role)
+    if not first or not counted:
         return
     if is_pending:
         _emit(OrchestratorEventType.OUTBOX_ENTRY_PENDING, entry, marker.reason)
@@ -429,7 +466,7 @@ def _entry_for_id(client: str, entry_id: str) -> OutboxEntry | None:
         return next(
             (entry for entry in list_entries(client) if entry.id == entry_id), None
         )
-    except OutboxRecordError as exc:
+    except OutboxError as exc:
         logger.warning(
             "outbox: could not re-read entry %s after store failure (%s)",
             entry_id,
@@ -441,7 +478,7 @@ def _entry_for_id(client: str, entry_id: str) -> OutboxEntry | None:
 def _reconcile_store_failure(
     run: _Run,
     entry_id: str,
-    exc: OutboxRecordError,
+    exc: OutboxError,
     *,
     unchanged_state: OutboxState | None = None,
 ) -> None:
@@ -464,9 +501,12 @@ def _reconcile_store_failure(
         or current.state is unchanged_state
     ):
         return
+    if current.id in run.accounted:
+        return
     if current.state is OutboxState.FAILED:
         return
     if current.state is OutboxState.DELIVERED:
+        run.accounted.add(current.id)
         run.delivered += 1
         run.delivered_roles.add(current.role)
         _emit(
@@ -475,6 +515,7 @@ def _reconcile_store_failure(
             current.reason or OutboxReason.POSTED,
         )
     elif current.state is OutboxState.UNVERIFIED:
+        run.accounted.add(current.id)
         run.unverified += 1
         _emit(
             OrchestratorEventType.OUTBOX_ENTRY_UNVERIFIED,
@@ -482,6 +523,7 @@ def _reconcile_store_failure(
             current.reason or OutboxReason.READBACK_UNVERIFIED,
         )
     elif current.state is OutboxState.PENDING:
+        run.accounted.add(current.id)
         run.released += 1
         held = current.id in read_held(run.client)
         if held:
@@ -502,7 +544,7 @@ def _next_candidate_id(client: str, state: OutboxState, seen: set[str]) -> str |
             for entry in list_entries(client)
             if entry.state is state and entry.id not in seen
         ]
-    except OutboxRecordError as exc:
+    except OutboxError as exc:
         logger.warning(
             "outbox: could not identify claim candidate for %s (%s)",
             client,
@@ -522,12 +564,15 @@ def _drain_state(run: _Run, state: OutboxState, cap: int) -> None:
             claimed = claim(
                 run.client, state=state, limit=1, exclude_ids=frozenset(run.seen)
             )
-        except OutboxRecordError as exc:
+        except OutboxError as exc:
             if candidate_id is None:
+                run.storage_error = run.storage_error or exc
                 return
             run.seen.add(candidate_id)
             current = _entry_for_id(run.client, candidate_id)
-            if current is not None and current.state is OutboxState.CLAIMED:
+            if current is None or current.state is state:
+                run.storage_error = run.storage_error or exc
+            elif current.state is OutboxState.CLAIMED:
                 run.claims += 1
             _reconcile_store_failure(run, candidate_id, exc, unchanged_state=state)
             continue
@@ -542,7 +587,7 @@ def _drain_state(run: _Run, state: OutboxState, cap: int) -> None:
                 _announce(run, entry, marker)
             else:
                 _drain_entry(run, entry)
-        except OutboxRecordError as exc:
+        except OutboxError as exc:
             _reconcile_store_failure(run, entry.id, exc)
 
 
@@ -582,7 +627,7 @@ def _run_leased(
     for role in run.delivered_roles - set(run.broken):
         clear_marker(client, role)
     drained = run.delivered + run.unverified + skipped
-    return DrainReport(
+    report = DrainReport(
         client=client,
         drained=drained,
         delivered=run.delivered,
@@ -593,6 +638,9 @@ def _run_leased(
         lease_held=False,
         unreachable_roles=_unreachable(client),
     )
+    if run.storage_error is not None:
+        raise run.storage_error
+    return report
 
 
 def run_drain(
