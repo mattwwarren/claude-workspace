@@ -2361,18 +2361,21 @@ agent's own loop round.
 
 #### Opencode fail-closed guards (#3059)
 
-Two opencode pre-flight refusals fire before any agent runs (RFC 0018 B1), and one prompt convention keeps the opencode PLAN and IMPL stages consistent:
+Two opencode pre-flight refusals fire before any agent runs (RFC 0018 B1; since RFC 0019 H2, #3709, both come from the one stage pre-flight that reads the opencode capability declaration), and one prompt convention keeps the opencode PLAN and IMPL stages consistent:
 
 - **Repair feedback.** An IMPL row carrying `review_feedback` is refused with
   `repair_entry_unsupported_backend`, because the opencode IMPL prompt does not
   read the feedback. Route the row to the claude-native executor, or re-add it
   without `--review-feedback-file` (or with `--adopt-pr` on the claude-native
   lane).
-- **FINALIZE.** A FINALIZE spawn on opencode is refused with
-  `finalize_unsupported_backend` (`retry_eligible: false`). A lane whose
-  `executors.finalize` is opencode parks every ticket at FINALIZE; no `cw doctor`
-  check warns beforehand. Fix: set `executors.finalize` to `claude-native`, then
-  `cw dev-queue requeue`.
+- **FINALIZE.** opencode does not declare FINALIZE, so a FINALIZE spawn on
+  opencode is refused with `stage_unsupported` (`retry_eligible: false`; before
+  H2 the reason was `finalize_unsupported_backend`, which readers still accept).
+  A HARDEN spawn parks the same way (formerly `opencode_harden_not_implemented`).
+  A lane whose `executors.finalize` is opencode parks every ticket at FINALIZE;
+  `cw doctor`'s `harness-capabilities` line notes the routed-but-undeclared
+  stage, without a warning. Fix: set `executors.finalize` to `claude-native`,
+  then `cw dev-queue requeue`.
 - **Plan marker (a convention, not a refusal).** The opencode PLAN writes a cw-owned `<!-- cw-opencode-plan:
   <ticket> -->` marker as the last line of its audit-copy comment; the opencode
   IMPL prompt reads it alongside the claude-native `<!-- plan-spec-reviewed`
@@ -2380,16 +2383,20 @@ Two opencode pre-flight refusals fire before any agent runs (RFC 0018 B1), and o
 
 #### Local REVIEW lanes under clean mode (#2797)
 
-The `local` (aider) REVIEW lane writes no convergence ledger. On a clean client
-a REVIEW-stage spawn on it is blocked before any agent runs, with
-`clean_review_unsupported_backend`.
-`cw doctor` reports such a lane ahead of time as
-`[FAIL] review-convergence/<client>/<lane>`.
+The `local` (aider) backend declares IMPL only (RFC 0019 H2, #3709, #3219). A
+spawn of any other stage routed to it (PLAN, REVIEW, FINALIZE, HARDEN), in
+blocking or clean mode, is blocked before any agent runs with
+`stage_unsupported`. On a clean client `cw doctor` reports a lane whose REVIEW
+executor is `local` ahead of time as `[FAIL] review-convergence/<client>/<lane>`.
+Rows parked before H2 on a clean local REVIEW lane carry
+`clean_review_unsupported_backend` and take the same procedure.
 
-- **Requeue procedure for `clean_review_unsupported_backend`.** A bare `cw
-  dev-queue requeue` re-dispatches into the same block. Change the config
-  first: set `review.convergence: blocking` for the client, or give the lane a
-  `claude-native`, `codex` or `opencode` REVIEW executor in `clients.yaml`. Confirm with
+- **Requeue procedure for `stage_unsupported` (and
+  `clean_review_unsupported_backend`).** A bare `cw dev-queue requeue`
+  re-dispatches into the same block. Change the config first: route the stage
+  to a harness that declares it (for REVIEW, a `claude-native`, `codex` or
+  `opencode` REVIEW executor in `clients.yaml`; under clean mode setting
+  `review.convergence: blocking` no longer helps on `local`). Confirm with
   `cw doctor` that the lane is no longer `[FAIL]`, then `cw dev-queue requeue
   <T> -c <C> --stage review`.
 
