@@ -38,10 +38,11 @@ from cw.executor_launch import _launch_logged_subprocess
 from cw.outbox import (
     TICK_SCAN_MAX_RECORDS,
     drain_lease_held,
+    ensure_progress,
     marked_roles,
     peek_pending,
+    progress_status,
     read_held,
-    read_progress,
 )
 from cw.outbox._layout import drain_log_path
 
@@ -60,7 +61,7 @@ class _Launch:
 
     proc: subprocess.Popen[bytes]
     pending_ids: frozenset[str]
-    progress: int
+    progress: int | None
 
 
 # Process-lifetime registry: the launch-to-acquire gap is covered by the live
@@ -70,7 +71,7 @@ _LAUNCHED: dict[str, _Launch] = {}
 _WARNED_TRUNCATED: set[str] = set()
 # One entry per client (its latest stalled state), so the registry is bounded by
 # the client count however many id sets a long-lived loop sees.
-_WARNED_STALLED: dict[str, tuple[frozenset[str], int]] = {}
+_WARNED_STALLED: dict[str, tuple[frozenset[str], int | None]] = {}
 
 
 def spawn_drain(client: str) -> subprocess.Popen[bytes]:
@@ -85,7 +86,10 @@ def spawn_drain(client: str) -> subprocess.Popen[bytes]:
 
 
 def _stalled(
-    client: str, previous: _Launch | None, pending: frozenset[str], progress: int
+    client: str,
+    previous: _Launch | None,
+    pending: frozenset[str],
+    progress: int | None,
 ) -> bool:
     if (
         previous is None
@@ -131,12 +135,15 @@ def _maybe_launch(client: str, cfg: ClientConfig) -> None:
     peek = peek_pending(client, scan_limit=TICK_SCAN_MAX_RECORDS, exclude_ids=held)
     if peek.truncated:
         _warn_truncated(client)
-    progress = read_progress(client)
+    progress = progress_status(client)
     if not peek.entry_ids or _stalled(client, previous, peek.entry_ids, progress):
         return
     if peek.roles <= marked_roles(client) or drain_lease_held(client):
         return
-    _LAUNCHED[client] = _Launch(spawn_drain(client), peek.entry_ids, progress)
+    ensure_progress(client)
+    _LAUNCHED[client] = _Launch(
+        spawn_drain(client), peek.entry_ids, progress_status(client)
+    )
 
 
 def launch_outbox_drains(clients: Mapping[str, ClientConfig]) -> None:

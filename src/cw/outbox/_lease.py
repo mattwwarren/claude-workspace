@@ -93,7 +93,7 @@ def drain_lease_held(client: str) -> bool:
     """
     path = drain_lock_path(client)
     try:
-        handle = path.open("r", encoding="utf-8")
+        handle = path.open("a+", encoding="utf-8")
     except FileNotFoundError:
         return False
     with handle:
@@ -198,13 +198,28 @@ def clear_held(client: str) -> None:
 
 def read_progress(client: str) -> int:
     """How many entries have left ``pending`` under a drain; 0 when unreadable."""
+    value = progress_status(client)
+    return 0 if value is None else value
+
+
+def progress_status(client: str) -> int | None:
+    """The progress counter, or ``None`` when it is missing or corrupt."""
     path = progress_path(client)
     try:
         text = _read_text(path)
-        return 0 if text is None else max(0, int(text.strip()))
+        if text is None:
+            return None
+        return max(0, int(text.strip()))
     except (OSError, ValueError):
         logger.warning("outbox: unreadable drain progress %s reads as 0", path.name)
-        return 0
+        return None
+
+
+def ensure_progress(client: str) -> None:
+    """Create a valid zero counter when the tick needs a baseline."""
+    if progress_status(client) is None:
+        ensure_client_dir(client)
+        _write(progress_path(client), "0")
 
 
 def add_progress(client: str, count: int) -> None:
@@ -212,4 +227,12 @@ def add_progress(client: str, count: int) -> None:
     if count <= 0:
         return
     ensure_client_dir(client)
-    _write(progress_path(client), str(read_progress(client) + count))
+    path = progress_path(client)
+    try:
+        _write(path, str(read_progress(client) + count))
+    except (OSError, OutboxRecordError):
+        # Leave an explicit unreadable/missing indicator. The tick treats that
+        # as an uncertain generation and permits one recovery launch.
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+        raise

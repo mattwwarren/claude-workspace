@@ -16,6 +16,7 @@ Imports ``_layout``, ``_lock`` and ``_models``.
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple
@@ -26,6 +27,7 @@ from cw.launch_marker import (
     observed_launch_owner_state,
 )
 from cw.outbox import _layout as layout
+from cw.outbox._lease import add_progress
 from cw.outbox._lock import _outbox_lock
 from cw.outbox._models import (
     DEFAULT_CLAIM_LIMIT,
@@ -65,6 +67,8 @@ if TYPE_CHECKING:
 
     from cw.models import LaunchMarker
     from cw.outbox._models import ClaimantVerdict, TransitionInitiator
+
+logger = logging.getLogger(__name__)
 
 
 class _Body(NamedTuple):
@@ -427,6 +431,18 @@ def _body_intact(client: str, entry: OutboxEntry) -> bool:
     )
 
 
+def _note_unreadable_progress(client: str) -> None:
+    """Best-effort progress marker before settling an unreadable body."""
+    try:
+        add_progress(client, 1)
+    except (OSError, OutboxRecordError) as exc:
+        logger.warning(
+            "outbox: progress persistence degraded for client %s (%s)",
+            client,
+            type(exc).__name__,
+        )
+
+
 def _claim_locked(
     client: str,
     *,
@@ -465,6 +481,7 @@ def _claim_locked(
                 layout.write_record(client, record)
                 claimed.append(record)
             else:
+                _note_unreadable_progress(client)
                 layout.write_record(
                     client, _settled_unreadable(entry, claimant=claimant, now=now)
                 )

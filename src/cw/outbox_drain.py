@@ -192,13 +192,22 @@ def _token(entry: OutboxEntry) -> str:
 
 
 def _note_left_pending(run: _Run, entry: OutboxEntry) -> None:
-    """Count one entry that left ``pending``, after its state change persisted.
+    """Best-effort count before the state change leaves ``pending``.
 
     The dispatch tick's no-progress guard reads this monotonic counter: its
     bounded record scan cannot see work done outside the scan window (item 32).
+    Writing first means a crash before the record commit only earns a safe
+    extra launch. A counter write failure must not abort the drain.
     """
     if entry.claimed_from is OutboxState.PENDING:
-        add_progress(run.client, 1)
+        try:
+            add_progress(run.client, 1)
+        except (OSError, CwError) as exc:
+            logger.warning(
+                "outbox: progress persistence degraded for client %s (%s)",
+                run.client,
+                type(exc).__name__,
+            )
 
 
 def _deliver(
@@ -207,6 +216,7 @@ def _deliver(
     reason: OutboxReason,
     posted: Sequence[PostedPart] = (),
 ) -> None:
+    _note_left_pending(run, entry)
     settle(
         run.client,
         entry.id,
@@ -214,7 +224,6 @@ def _deliver(
         state=OutboxState.DELIVERED,
         reason=reason,
     )
-    _note_left_pending(run, entry)
     run.delivered += 1
     run.delivered_roles.add(entry.role)
     _emit(OrchestratorEventType.OUTBOX_ENTRY_DELIVERED, entry, reason, posted=posted)
@@ -226,6 +235,7 @@ def _resettle_unverified(
     reason: OutboxReason = OutboxReason.READBACK_UNVERIFIED,
 ) -> None:
     """Settle *entry* ``unverified`` and count it; announcing is the caller's."""
+    _note_left_pending(run, entry)
     settle(
         run.client,
         entry.id,
@@ -233,7 +243,6 @@ def _resettle_unverified(
         state=OutboxState.UNVERIFIED,
         reason=reason,
     )
-    _note_left_pending(run, entry)
     run.unverified += 1
 
 
@@ -487,7 +496,6 @@ def _run_leased(
     _drain_state(run, OutboxState.UNVERIFIED, cap)
     _drain_state(run, OutboxState.PENDING, cap)
     skipped = _emit_skipped(client, before)
-    add_progress(client, skipped)
     for role in run.delivered_roles - set(run.broken):
         clear_marker(client, role)
     drained = run.delivered + run.unverified + skipped
