@@ -8663,18 +8663,31 @@ class TestApproveScopeDrift:
         assert t.scope_grants == []
 
     def test_unresolved_repo_records_an_unbound_grant_without_refusing(
-        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """#3772: no slug is a recorded, unbound grant (the carry fails closed)."""
         from cw.dev_queue import approve_scope_drift_ticket
 
         self._seed(tmp_config_dir, tmp_path, monkeypatch)
 
-        result = approve_scope_drift_ticket("GEN-500", "genhealth", ["src/a.py"])
+        with caplog.at_level(logging.WARNING, logger="cw.dev_queue.scope_drift"):
+            result = approve_scope_drift_ticket("GEN-500", "genhealth", ["src/a.py"])
 
         assert result["extra_files"] == ["src/a.py"]
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
         assert t.scope_grants[0].repo is None
+        warnings = [
+            r
+            for r in caplog.records
+            if r.name == "cw.dev_queue.scope_drift" and r.levelno == logging.WARNING
+        ]
+        assert len(warnings) == 1
+        assert "without a repository binding" in warnings[0].getMessage()
+        assert "genhealth" in warnings[0].getMessage()
 
     def test_non_exact_path_is_refused_and_row_untouched(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
