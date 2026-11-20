@@ -1,10 +1,11 @@
-"""The decided-constraint contest marker and its stamp (#2984).
+"""The held-for-operator markers (contest #2984, evidence gap #3793) and their stamp.
 
 1:1 with ``src/cw/review_findings/_decided.py``. A reviewer that believes a
 recorded decision is itself unsafe files the finding with
-``contests_decision`` set; :func:`stamp_held_findings` holds a MUST_FIX
-one for the operator (``operator_actionable``) and records a SHOULD_FIX one as
-a non-blocking note (``deferred``), so neither ever reaches the fix loop.
+``contests_decision`` set; one that rests on a check it could not run sets
+``evidence_gap`` (#3793). :func:`stamp_held_findings` holds a MUST_FIX one for
+the operator (``operator_actionable``) and records a SHOULD_FIX one as a
+non-blocking note (``deferred``), so neither ever reaches the fix loop.
 """
 
 from __future__ import annotations
@@ -19,9 +20,14 @@ from cw.review_findings import (
     has_held_findings,
     held_disposition,
     held_findings,
+    held_kind,
     stamp_held_findings,
 )
-from tests._shared.review_builders import _finding_kwargs, _make_finding
+from tests._shared.review_builders import (
+    _finding_kwargs,
+    _make_finding,
+    _make_gap_finding,
+)
 
 _QUOTE = "Non-Goal 2 'no retraction path' leaves a stale entry binding forever."
 _HELD = (
@@ -29,6 +35,13 @@ _HELD = (
     " dismisses it)"
 )
 _NOTE = "contests a decided constraint; recorded as a non-blocking note"
+_GAP_HELD = (
+    "evidence gap: the reviewer could not verify this; held for the operator"
+    " (`cw review settle` dismisses it)"
+)
+_GAP_NOTE = (
+    "evidence gap: the reviewer could not verify this; recorded as a non-blocking note"
+)
 
 
 def _accepted(finding: Finding, **overrides: object) -> AcceptedFinding:
@@ -63,15 +76,58 @@ def _marked(severity: str = "MUST_FIX", **overrides: object) -> Finding:
     return _make_finding(severity=severity, contests_decision=_QUOTE, **overrides)
 
 
+def _gapped(severity: str = "MUST_FIX", **overrides: object) -> Finding:
+    return _make_gap_finding(severity, **overrides)
+
+
 class TestField:
     def test_defaults_blank(self) -> None:
         assert _make_finding().contests_decision == ""
+        assert _make_finding().evidence_gap == ""
 
     def test_null_normalizes_to_blank(self) -> None:
         finding = Finding.model_validate(
             {**_finding_kwargs(), "contests_decision": None}
         )
         assert finding.contests_decision == ""
+
+    def test_null_evidence_gap_normalizes_to_blank(self) -> None:
+        finding = Finding.model_validate({**_finding_kwargs(), "evidence_gap": None})
+        assert finding.evidence_gap == ""
+
+
+class TestHeldKind:
+    def test_unmarked_finding_has_no_kind(self) -> None:
+        assert held_kind(_make_finding()) is None
+
+    @pytest.mark.parametrize("marker", ["", "   ", "\n\t"])
+    def test_blank_gap_is_no_kind(self, marker: str) -> None:
+        assert held_kind(_make_finding(evidence_gap=marker)) is None
+
+    def test_gap_only_is_an_evidence_gap(self) -> None:
+        assert held_kind(_gapped()) == "evidence_gap"
+
+    def test_contest_only_is_a_decision_contest(self) -> None:
+        assert held_kind(_marked()) == "decision_contest"
+
+    def test_a_contest_wins_when_both_markers_are_set(self) -> None:
+        assert held_kind(_gapped(contests_decision=_QUOTE)) == "decision_contest"
+
+
+class TestGapDisposition:
+    def test_must_fix_gap_is_held_for_the_operator(self) -> None:
+        assert held_disposition(_gapped()) == ("operator_actionable", _GAP_HELD)
+
+    def test_should_fix_gap_is_a_deferred_note(self) -> None:
+        assert held_disposition(_gapped("SHOULD_FIX")) == ("deferred", _GAP_NOTE)
+
+    @pytest.mark.parametrize("severity", ["NIT", "PRINCIPLE", "DEBT"])
+    def test_lower_severities_are_untouched(self, severity: str) -> None:
+        assert held_disposition(_gapped(severity)) is None
+
+    def test_both_markers_keep_the_contest_detail(self) -> None:
+        forced = held_disposition(_gapped(contests_decision=_QUOTE))
+        assert forced == ("operator_actionable", _HELD)
 
 
 class TestContestedDisposition:
@@ -140,6 +196,77 @@ class TestStamp:
     def test_no_contest_returns_the_verdict_unchanged(self) -> None:
         verdict = _verdict(_accepted(_make_finding()))
         assert stamp_held_findings(verdict) == verdict
+
+
+class TestGapStamp:
+    def test_must_fix_gap_is_stamped_and_leaves_must_fix_and_blocking(self) -> None:
+        verdict = stamp_held_findings(_verdict(_accepted(_gapped())))
+
+        (af,) = verdict.accepted
+        assert (af.disposition, af.disposition_detail) == (
+            "operator_actionable",
+            _GAP_HELD,
+        )
+        assert verdict.must_fix == []
+        assert verdict.blocking is False
+
+    def test_should_fix_gap_is_stamped_deferred(self) -> None:
+        (af,) = stamp_held_findings(_verdict(_accepted(_gapped("SHOULD_FIX")))).accepted
+
+        assert (af.disposition, af.disposition_detail) == ("deferred", _GAP_NOTE)
+
+    def test_a_settled_gap_is_not_re_stamped(self) -> None:
+        settled = _accepted(
+            _gapped(), disposition="rejected", disposition_detail="settled"
+        )
+
+        stamped = stamp_held_findings(_verdict(settled))
+
+        assert stamped.accepted == [settled]
+
+    def test_unmarked_must_fix_stays_blocking_beside_a_gap(self) -> None:
+        plain = _make_finding(summary="Real bug", file="src/cw/bar.py")
+
+        verdict = stamp_held_findings(_verdict(_accepted(_gapped()), _accepted(plain)))
+
+        assert verdict.must_fix == [plain]
+        assert verdict.blocking is True
+        assert [af.disposition for af in verdict.accepted] == [
+            "operator_actionable",
+            "fixed",
+        ]
+
+
+class TestHeldFindingsByKind:
+    def _both_kinds(self) -> ReviewVerdict:
+        return stamp_held_findings(
+            _verdict(
+                _accepted(_gapped(summary="gap", file="src/cw/a.py")),
+                _accepted(_marked(summary="contest", file="src/cw/b.py")),
+            )
+        )
+
+    def test_no_kind_covers_both(self) -> None:
+        verdict = self._both_kinds()
+
+        assert {af.finding.summary for af in held_findings(verdict)} == {
+            "gap",
+            "contest",
+        }
+        assert has_held_findings(verdict) is True
+
+    def test_kind_filters_to_that_kind(self) -> None:
+        verdict = self._both_kinds()
+
+        (gap,) = held_findings(verdict, "evidence_gap")
+        (contest,) = held_findings(verdict, "decision_contest")
+        assert (gap.finding.summary, contest.finding.summary) == ("gap", "contest")
+
+    def test_has_held_follows_the_kind(self) -> None:
+        gap_only = stamp_held_findings(_verdict(_accepted(_gapped())))
+
+        assert has_held_findings(gap_only, "evidence_gap") is True
+        assert has_held_findings(gap_only, "decision_contest") is False
 
 
 class TestContestedFindings:
