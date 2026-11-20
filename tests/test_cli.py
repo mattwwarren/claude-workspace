@@ -12685,6 +12685,13 @@ class TestDevQueueApproveCli:
         from cw.models import OrchestratorEventType, QueueItemStatus
 
         events = self._seed_scope_drift(tmp_config_dir, tmp_path, monkeypatch)
+        resolved_in: list[object] = []
+
+        def _slug(git_dir: object) -> str:
+            resolved_in.append(git_dir)
+            return "acme/widgets"
+
+        monkeypatch.setattr("cw.cli.dev_queue.approve._resolve_repo_slug", _slug)
         result = CliRunner().invoke(
             main,
             [
@@ -12715,14 +12722,43 @@ class TestDevQueueApproveCli:
             "scope_drift_approved_head": self._SCOPE_DRIFT_HEAD,
         }
         # #3772: the durable grant rides the same event; its exact-path list
-        # and head are the approval's, and no repo was bound on this CLI path.
+        # and head are the approval's, and the CLI binds it to the slug it
+        # resolved from the client's git dir.
         assert grant["paths"] == ["a.py", "b.py"]
         assert grant["head"] == self._SCOPE_DRIFT_HEAD
-        assert grant["repo"] is None
+        assert grant["repo"] == "acme/widgets"
+        assert len(resolved_in) == 1
+        assert load_dev_queue().tasks[0].scope_grants[0].repo == "acme/widgets"
         task = load_dev_queue().tasks[0]
         assert task.status == QueueItemStatus.PENDING
         assert task.scope_drift_approved_extra_files == ["a.py", "b.py"]
         assert task.scope_drift_approved_head == self._SCOPE_DRIFT_HEAD
+
+    def test_approve_scope_drift_records_an_unbound_grant_when_slug_unresolvable(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No origin slug: the approval lands as a grant the carry will not reuse."""
+        from cw.dev_queue import load_dev_queue
+
+        self._seed_scope_drift(tmp_config_dir, tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.approve._resolve_repo_slug", lambda _git_dir: None
+        )
+        result = CliRunner().invoke(
+            main,
+            [
+                "dev-queue",
+                "approve",
+                "ACME-1",
+                "--client",
+                "acme",
+                "--scope-drift",
+                "a.py",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert load_dev_queue().tasks[0].scope_grants[0].repo is None
 
     def test_approve_scope_drift_and_post_marker_mutually_exclusive(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
