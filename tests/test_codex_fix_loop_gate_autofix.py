@@ -20,6 +20,7 @@ from cw.codex_fix_loop import gate_autofix
 from cw.codex_fix_loop.gate_autofix import (
     changed_paths,
     declared_autofixes,
+    hook_rewrite_opt_outs,
     ignored_on_disk,
     revert_paths,
     revert_to_tree,
@@ -635,3 +636,82 @@ class TestRevertToTree:
         assert (repo / "node_modules" / "x").read_text(encoding="utf-8") == "dep\n"
         assert (repo / ".gitignore").read_text(encoding="utf-8") == _IGNORE_RULES
         assert _tree(repo) == before
+
+
+class TestHookRewriteOptOuts:
+    """``quality_gates.accept_hook_rewrite.<gate>: false`` opts a gate out (#3689)."""
+
+    def test_no_file_opts_nothing_out(self, repo: Path) -> None:
+        assert hook_rewrite_opt_outs(repo) == frozenset()
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "sprint_buildout:\n  a: b\n",
+            "quality_gates: nope\n",
+            "quality_gates:\n  autofix:\n    fmt: false\n",
+            "quality_gates:\n  accept_hook_rewrite: nope\n",
+            "quality_gates:\n  accept_hook_rewrite:\n    - fmt\n",
+            "quality_gates:\n  accept_hook_rewrite:\n",
+            "- just\n- a list\n",
+            "quality_gates: [unclosed\n",
+        ],
+    )
+    def test_absent_or_malformed_block_opts_nothing_out(
+        self, repo: Path, text: str
+    ) -> None:
+        _write_config(repo, text)
+        assert hook_rewrite_opt_outs(repo) == frozenset()
+
+    @pytest.mark.parametrize("value", ["false", "False"])
+    def test_only_a_yaml_false_opts_out(self, repo: Path, value: str) -> None:
+        _write_config(
+            repo, f"quality_gates:\n  accept_hook_rewrite:\n    fmt: {value}\n"
+        )
+        assert hook_rewrite_opt_outs(repo) == frozenset({"fmt"})
+
+    @pytest.mark.parametrize(
+        "value",
+        ["true", '"false"', '"no"', "0", "", "[false]", "{}"],
+    )
+    def test_any_other_value_keeps_the_default(self, repo: Path, value: str) -> None:
+        _write_config(
+            repo, f"quality_gates:\n  accept_hook_rewrite:\n    fmt: {value}\n"
+        )
+        assert hook_rewrite_opt_outs(repo) == frozenset()
+
+    def test_bad_names_are_dropped_and_names_match_exactly(self, repo: Path) -> None:
+        _write_config(
+            repo,
+            "quality_gates:\n  accept_hook_rewrite:\n"
+            "    7: false\n    '': false\n    fmt: false\n    lint: true\n",
+        )
+        result = hook_rewrite_opt_outs(repo)
+        assert result == frozenset({"fmt"})
+        assert "fmt-2" not in result
+
+    def test_non_utf8_file_opts_nothing_out(self, repo: Path) -> None:
+        config = repo / ".claude" / "project-config.yaml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_bytes(b"quality_gates:\n  accept_hook_rewrite:\n    \xff: false\n")
+        assert hook_rewrite_opt_outs(repo) == frozenset()
+
+    def test_oserror_opts_nothing_out(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        msg = "unreadable"
+
+        def _boom(_root: Path) -> None:
+            raise OSError(msg)
+
+        monkeypatch.setattr(gate_autofix, "load_project_config_dict", _boom)
+        assert hook_rewrite_opt_outs(repo) == frozenset()
+
+    def test_autofix_map_is_unchanged_beside_the_opt_out_map(self, repo: Path) -> None:
+        _write_config(
+            repo,
+            "quality_gates:\n  autofix:\n    fmt: ruff format .\n"
+            "  accept_hook_rewrite:\n    fmt: false\n",
+        )
+        assert declared_autofixes(repo) == {"fmt": "ruff format ."}
+        assert hook_rewrite_opt_outs(repo) == frozenset({"fmt"})

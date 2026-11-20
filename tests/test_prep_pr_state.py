@@ -1958,3 +1958,33 @@ class TestEcosystemGatesPackageJson:
         assert "lint" not in names
         assert "typecheck" not in names
         assert "test" not in names
+
+
+class TestHookRewriteOptOutSiblingMap:
+    """A ``accept_hook_rewrite:`` map beside ``timeouts:`` is inert (#3689)."""
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "quality_gates:\n  accept_hook_rewrite:\n    fmt: false\n  timeouts:\n"
+            "    pre-commit: 600\n",
+            "quality_gates:\n  timeouts:\n    pre-commit: 600\n  accept_hook_rewrite:\n"
+            "    fmt: false\n",
+        ],
+        ids=["map-before-timeouts", "map-after-timeouts"],
+    )
+    def test_sibling_map_does_not_change_the_pre_commit_ceiling(
+        self,
+        tmp_path: Path,
+        yaml_mode: str,
+        caplog: pytest.LogCaptureFixture,
+        content: str,
+    ) -> None:
+        out = _resolve(tmp_path, "pre-commit-run-2", content)
+        assert out["foreground_ceiling_s"] == _BASH_CAP_S
+        assert out["source"] == "project-config"
+        assert _warnings(caplog) == []
+
+    def test_config_reference_documents_the_opt_out_key(self) -> None:
+        text = _CONFIG_REFERENCE.read_text(encoding="utf-8")
+        assert "quality_gates.accept_hook_rewrite" in text

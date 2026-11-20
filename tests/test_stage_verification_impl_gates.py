@@ -67,7 +67,7 @@ from tests._codex_review_helpers import (
     install_home_prep_pr_state,
     install_home_scope_script,
 )
-from tests._shared.git_repos import git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
 from tests._shared.review_builders import _make_finding, write_review_verdict_envelope
 
 if TYPE_CHECKING:
@@ -744,6 +744,45 @@ class TestHookRewritePinned:
         assert block.reason == IMPL_FAILED
         assert "exit code 1" in block.details
         assert log.read_text(encoding="utf-8").splitlines() == ["ran"]
+
+    def test_an_opted_out_gate_parks_with_the_original_failure(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """``quality_gates.accept_hook_rewrite.<gate>: false`` parks at IMPL (#3689)."""
+        log = tmp_path / "ran.log"
+        hook = (
+            f"echo ran >> {log}; "
+            "grep -q '^x = 2$' src/a.py || { printf 'x = 2\\n' > src/a.py; exit 1; }"
+        )
+        install_home_prep_pr_state(tmp_path / "state", ("fmt", hook, 5.0))
+        commit_tracked_file(
+            repo,
+            ".claude/project-config.yaml",
+            "quality_gates:\n  accept_hook_rewrite:\n    fmt: false\n",
+        )
+        baseline = capture_cycle_baseline(repo)
+        assert isinstance(baseline, CycleBaseline)
+        plan = plan_cycle_gates(repo, _SCOPE)
+        _stage(repo)
+        tokens: list[str] = []
+        with patch.object(
+            _gates_module, "run_cycle_gates", wraps=_gates_module.run_cycle_gates
+        ) as spy:
+            block = run_quality_gates(
+                plan,
+                worktree=repo,
+                baseline=baseline,
+                scope=_SCOPE,
+                tokens=tokens,
+                touched=frozenset({"src/a.py"}),
+            )
+
+        assert block is not None
+        assert block.reason == IMPL_FAILED
+        assert "exit code 1" in block.details
+        assert spy.call_args.kwargs["hook_rewrite"] is HookRewritePolicy.RECHECK
+        assert log.read_text(encoding="utf-8").splitlines() == ["ran"]
+        assert tokens == []
 
 
 class TestRegressedReviewRowExemption:
