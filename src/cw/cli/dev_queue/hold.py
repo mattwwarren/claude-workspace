@@ -67,7 +67,7 @@ _EXACTLY_ONE_MSG: Final = (
 )
 
 
-class _PrRefParam(click.ParamType):
+class PrRefParam(click.ParamType):
     """``--until-pr-merged``: a same-repo number (``9``) or ``owner/repo#N``."""
 
     name = "pr_ref"
@@ -126,7 +126,7 @@ def _view_pr(view: dict[str, object]) -> tuple[str, int] | None:
     return parse_github_pull_url(url) if isinstance(url, str) else None
 
 
-def _verify_dependency_pr(
+def verify_dependency_pr(
     client_cfg: ClientConfig, ref: PrRef, git_dir: Path, slug: str | None
 ) -> tuple[str, PrRef]:
     """Verify *ref* is an OPEN PR; return ``(watch repo, persisted ref)`` (#2321).
@@ -137,6 +137,8 @@ def _verify_dependency_pr(
     to merge. *slug* is the client's already-resolved slug for an explicit or
     ticket-sourced ref and ``None`` for a bare number, which resolves it after
     the gh call (R9). An explicit ref is rebuilt with gh's canonical-case repo.
+    Also the declare-time verifier of ``cw dev-queue prerequisite`` (#3791),
+    which reuses its hold-worded refusals unchanged.
     """
     if ref.repo is not None:
         target = github_pr_url(ref.repo, ref.number)
@@ -266,7 +268,7 @@ def _register_hold_watch(result: HoldResult, repo: str) -> None:
 @click.option(
     "--until-pr-merged",
     "pr_ref",
-    type=_PrRefParam(),
+    type=PrRefParam(),
     default=None,
     help=(
         "PR this row waits on: a same-repo number (9) or owner/repo#N."
@@ -314,7 +316,7 @@ def dev_queue_hold(
         return
     client_cfg = get_client(task.client)
     git_dir = _git_dir(client_cfg)
-    repo, ref = _verify_dependency_pr(client_cfg, ref, git_dir, slug)
+    repo, ref = verify_dependency_pr(client_cfg, ref, git_dir, slug)
     # bounded=True (#2501): operator command; nothing precedes the lock but
     # read-only state, the local slug read and the one gh call above.
     result = hold_ticket(
