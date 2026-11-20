@@ -1307,7 +1307,8 @@ lanes:
   quality gates (#3686), a red gate that rewrote its own touched files (no
   autofix involved) is re-run once after the rewrite. Outcomes `rewrite_applied`,
   `rewrite_rejected_scope` and `rewrite_rejected_red` are logged; FINALIZE
-  still parks such a gate. A gate can opt out of the acceptance per gate
+  still parks such a gate, and adds a note naming the tracked files it
+  rewrote (#3769). A gate can opt out of the acceptance per gate
   (see [Quality Gate Hook Rewrite](#quality-gate-hook-rewrite-quality_gatesaccept_hook_rewrite-3689), #3689).
 - **Divergence report.** `fix_loop_diverging` now also lists findings the loop
   itself generated (a finding on lines added since the loop began, or a
