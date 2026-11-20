@@ -28,7 +28,10 @@ Three hard contracts:
   :data:`_SWEEP_BUDGET_SECONDS` wall-clock budget checked before each probe, so
   the worst case is the budget plus one probe (up to three git calls, each
   bounded by :data:`cw.merge_probe.PROBE_TIMEOUT_SECONDS`), not the budget
-  alone.
+  alone. Resolving a dispatch-driven row's worktree costs one local
+  ``git branch --show-current`` per candidate, before the cap: bounded by the
+  RUNNING REVIEW rows a pending event names, not by the cap. A worktree that
+  does not resolve or does not verify is a no-probe (fail open).
 * **Fail open, never raise.** Anything but a probe-reported ``conflict``
   (``up_to_date``, ``clean``, ``unavailable``, not probed, the cap reached, no
   verdict installed) does not park. A false positive parks a healthy ticket and
@@ -52,6 +55,7 @@ from typing import TYPE_CHECKING, Final
 
 from cw.merge_probe import probe_default_merge
 from cw.models import QueueItemStatus, Stage, resolve_base_branch
+from cw.worktree import resolve_task_worktree
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -76,15 +80,21 @@ _CONFLICTS: ContextVar[frozenset[BranchKey] | None] = ContextVar(
 )
 
 
-def _gate_worktree(task: TicketTask) -> Path | None:
-    """The worktree the gate probes: ``task.worktree_path`` exactly, as before.
+def _gate_worktree(task: TicketTask, client: ClientConfig | None) -> Path | None:
+    """The worktree the gate probes, via ``resolve_task_worktree`` (#2990).
 
-    It is ``None`` for every dispatch-driven row (dispatch stamps the path on
-    the Session, never the TicketTask; ``worktree.resolve_task_worktree``), so
-    the gate stays inert there. Widening it to ``resolve_task_worktree`` is a
-    deliberate, separate decision, tracked in #2990.
+    The stamped ``task.worktree_path`` wins (user-origin and test rows). For a
+    dispatch-driven row, which carries no stamped path, the branch-derived
+    worktree is used only once ``git branch --show-current`` there names the
+    row's branch; a stale or foreign checkout is skipped (fail open). The gate
+    probes every REVIEW row whose worktree resolves, not only stamped ones: RFC
+    0020 runs every epic child as a dispatch row, and D-8 relies on ADR-0022
+    applying to each ticket against its own base, so an inert gate for dispatch
+    rows would leave that unenforced. The ``.exists()`` check stays because the
+    stamped branch of ``resolve_task_worktree`` returns the stamped path without
+    checking it.
     """
-    path = task.worktree_path
+    path = resolve_task_worktree(task, client)
     if path is None or not path.exists():
         return None
     return path
@@ -117,7 +127,7 @@ def _candidates(
         if task.status != QueueItemStatus.RUNNING or task.stage != Stage.REVIEW:
             continue
         client = clients.get(task.client)
-        worktree = _gate_worktree(task)
+        worktree = _gate_worktree(task, client)
         if client is None or worktree is None:
             continue
         found.setdefault(
@@ -139,7 +149,8 @@ def resolve_conflicting_branches(
     Runs OUTSIDE ``dev_queue_lock``: *store* is a lock-free snapshot (a stale
     read is acceptable for this read-only caller, ADR-0005). Candidates are the
     RUNNING, REVIEW-stage rows whose ticket id a pending SESSION_COMPLETED
-    event names, whose client resolves and whose stamped worktree exists.
+    event names, whose client resolves and whose worktree resolves (stamped, or
+    derived and verified, ``resolve_task_worktree``) and exists.
     Probes past :data:`_MAX_PROBES_PER_TICK` or :data:`_SWEEP_BUDGET_SECONDS`
     are skipped (fail open: they do not park this tick) and one INFO line
     counts them. The budget is checked before each probe, not during one, so

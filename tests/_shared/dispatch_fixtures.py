@@ -386,17 +386,25 @@ def sweep_row(
     )
 
 
-def sweep_clients(tmp_path: Path) -> dict[str, ClientConfig]:
+def sweep_clients(
+    tmp_path: Path, *, worktree_base: Path | None = None
+) -> dict[str, ClientConfig]:
     """The sweep client on ``main``, rooted at *tmp_path*."""
     return {
         SWEEP_CLIENT: ClientConfig(
-            name=SWEEP_CLIENT, workspace_path=tmp_path, default_branch="main"
+            name=SWEEP_CLIENT,
+            workspace_path=tmp_path,
+            default_branch="main",
+            worktree_base=worktree_base,
         )
     }
 
 
 def sweep_resolve(
-    tmp_path: Path, *rows: TicketTask, events: list[OrchestratorEvent] | None = None
+    tmp_path: Path,
+    *rows: TicketTask,
+    events: list[OrchestratorEvent] | None = None,
+    worktree_base: Path | None = None,
 ) -> frozenset[tuple[str, str]]:
     """Run ``resolve_conflicting_branches`` over *rows* for the sweep client."""
     from cw.dispatch.branch_freshness import resolve_conflicting_branches
@@ -404,5 +412,5 @@ def sweep_resolve(
     return resolve_conflicting_branches(
         events if events is not None else [sweep_event()],
         DevQueueStore(tasks=list(rows)),
-        sweep_clients(tmp_path),
+        sweep_clients(tmp_path, worktree_base=worktree_base),
     )

@@ -1,7 +1,7 @@
 # A clean default-branch merge never causes a review; merge at most once, only on conflict
 
 **Status:** Accepted
-**Driven by:** #2979 (follow-ups #2980, #2991, #2996, and the narrowing of #1823, #2815, #2918); amended by #2980 (the conflict-resolution round) and #3190 (the release-cut CHANGELOG exception)
+**Driven by:** #2979 (follow-ups #2980, #2991, #2996, and the narrowing of #1823, #2815, #2918); amended by #2980 (the conflict-resolution round), #3190 (the release-cut CHANGELOG exception) and #2990 (the REVIEW gate probes dispatch-driven rows)
 
 ## Decision
 
@@ -67,7 +67,10 @@ How a ticket branch meets `origin/<default>` follows three rules:
    lock-free queue snapshot, bounded per tick (at most 20 probes and a 30 s
    budget checked before each probe, so the worst case is the budget plus one
    probe of up to three git calls at 10 s each), and reach the in-lock predicate through a scope that ends with the
-   locked section (the precompute-outside-the-lock pattern of
+   locked section. The sweep resolves a dispatch-driven row's worktree (#2990)
+   with one local `git branch --show-current` per candidate before the cap;
+   candidates are bounded by the RUNNING REVIEW rows a pending event names, and
+   a worktree that fails to resolve or to verify is skipped (fail open) (the precompute-outside-the-lock pattern of
    `dispatch/pr_gate.resolve_stale_pr_ticket_ids`; ADR-0019 bounds subprocesses
    under `sessions_lock` only, so keeping this gate's git off `dev_queue_lock` is
    this ADR's own rule). This does not cover the
@@ -140,11 +143,13 @@ How a ticket branch meets `origin/<default>` follows three rules:
 - **The codex lane's post-loop reconcile stays strict**: a clean merge landing
   between a codex loop's end and its confirm round reopens the ledger. A narrow
   window that slightly contradicts rule 3, fail-closed.
-- **The REVIEW gate runs only on the consume path** and only for rows with a
-  stamped `worktree_path`. Dispatch stamps the path on the Session, never the
-  `TicketTask`, so the gate is inert for dispatch-driven rows (#2990). The
-  single-event settles and reconcile's recovery install no verdict (fail
-  open), and finalize Step 4c.5 handles a conflict downstream.
+- **The REVIEW gate runs only on the consume path.** It probes every REVIEW row
+  whose worktree `resolve_task_worktree` resolves: the stamped `worktree_path`,
+  or for a dispatch-driven row (which carries none; dispatch stamps the path on
+  the Session) the branch-derived worktree whose checked-out branch matches the
+  row's branch (#2990). The single-event settles and reconcile's recovery
+  install no verdict (fail open), and finalize Step 4c.5 handles a conflict
+  downstream.
 - The review-staleness gate's in-lock tip check now runs one `merge-tree` per
   merge in the span, each git call under a 10 s timeout and the loop under a
   30 s budget checked before each merge (invariant 3).
@@ -158,6 +163,23 @@ How a ticket branch meets `origin/<default>` follows three rules:
   single-branch clone, whose configured refspec tracks only the ticket branch,
   still gets its tracking ref. A failed fetch keeps the stale verdict. `converge init` / `status` and the in-lock gate never
   fetch it, so they can still read such a merge as stale (fail closed).
+
+## Amendment: the REVIEW gate probes dispatch-driven rows (#2990)
+
+**Decision:** the `branch_behind_main` REVIEW gate widens from rows with a
+stamped `worktree_path` to every REVIEW row whose worktree
+`resolve_task_worktree` resolves (see Consequences). The gate stays
+narrowing-in-effect: it parks only on a probe-reported `conflict`.
+
+**Why:** RFC 0020 runs every epic child as a dispatch row, and its D-8 relies on
+ADR-0022 applying to each ticket against its own base. A gate inert for every
+dispatch row would leave that unenforced.
+
+**Bounds kept:** conflict-only (a merely-behind or textually clean branch never
+parks), fail open on every git error, skipped probe or unresolved worktree, no
+probe git under `dev_queue_lock` (invariant 3), and the per-tick cap and budget.
+The checkout check (`git branch --show-current` per candidate) runs before the
+cap and is bounded by the candidate count (invariant 3).
 
 ## Alternatives considered
 
@@ -174,4 +196,4 @@ How a ticket branch meets `origin/<default>` follows three rules:
 
 ## Referenced by
 
-- #2979, #2980, #2991, #2996, #1823, #2815, #2861, #2918
+- #2979, #2980, #2991, #2996, #1823, #2815, #2861, #2918, #2990
