@@ -14,12 +14,19 @@ most one ``review-engine/<client>/<lane>`` warning:
 
 The manifest is read once per client, and only when a codex lane needs it.
 Output carries names and loader reasons only: no skill or manifest text.
+
+A second, separate advisory (#3790) covers ``review.engine.requires_runtime_
+capabilities``: a review lane whose REVIEW runner lacks a required capability
+gets a ``review-capability/<client>/<lane>`` warning. It is advisory only,
+never a failure, and it reuses the claim gate's gap function so the two cannot
+drift. The ``review-engine/`` results are unchanged by it.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cw.dispatch.claim.review_capability import review_capability_gap
 from cw.doctor._shared import CheckResult
 from cw.executor import resolve_executor_config, resolve_pipeline_stages
 from cw.models import CODEX_BACKEND, Stage, TicketTask
@@ -46,6 +53,14 @@ _CODEX_REFUSED = (
     "(cause={cause}{detail}); its REVIEW rows park as "
     "review_engine_unsupported_backend. Check it with "
     "`cw review engine validate --kind manifest`."
+)
+_CAPABILITY_UNMET = (
+    "review.engine requires runtime capabilities {required}, but lane '{lane}' runs"
+    " REVIEW on backend={backend} declaring {declared} (missing {missing}); its REVIEW"
+    " rows park as review_capability_unmet before claim. Declare the missing"
+    " capabilities on this lane's pipeline.executors.review.runtime_capabilities in"
+    " clients.yaml, or re-lane with `cw dev-queue move`. Compatible lanes:"
+    " {compatible}."
 )
 _CODEX_UNVERIFIED = (
     "review.engine is set and lane '{lane}' runs REVIEW on codex, but the "
@@ -101,6 +116,24 @@ def _lane_detail(
     return None  # claude-native runs the engine skill itself
 
 
+def _capability_detail(name: str, client: ClientConfig, lane: str) -> str | None:
+    """The runtime-capability advisory for *lane*; ``None`` when satisfied (#3790)."""
+    # ticket_id="" is the documented "no associated ticket" sentinel.
+    task = TicketTask(ticket_id="", client=name, lane=lane, stage=Stage.REVIEW)
+    gap = review_capability_gap(task, client)
+    if gap is None:
+        return None
+    compatible = ", ".join(gap.compatible_lanes) or "none"
+    return _CAPABILITY_UNMET.format(
+        lane=lane,
+        backend=gap.backend,
+        declared=list(gap.declared),
+        required=list(gap.required),
+        missing=list(gap.missing),
+        compatible=compatible,
+    )
+
+
 def _check_review_engine(clients: dict[str, ClientConfig]) -> list[CheckResult]:
     """At most one warning per review lane of each client with an engine."""
     results: list[CheckResult] = []
@@ -114,14 +147,23 @@ def _check_review_engine(clients: dict[str, ClientConfig]) -> list[CheckResult]:
             if backend is None:
                 continue
             detail = _lane_detail(backend, lane.name, engine.skill, manifest)
-            if detail is None:
-                continue
-            results.append(
-                CheckResult(
-                    name=f"review-engine/{name}/{lane.name}",
-                    ok=True,
-                    warn=True,
-                    detail=detail,
+            if detail is not None:
+                results.append(
+                    CheckResult(
+                        name=f"review-engine/{name}/{lane.name}",
+                        ok=True,
+                        warn=True,
+                        detail=detail,
+                    )
                 )
-            )
+            capability = _capability_detail(name, client, lane.name)
+            if capability is not None:
+                results.append(
+                    CheckResult(
+                        name=f"review-capability/{name}/{lane.name}",
+                        ok=True,
+                        warn=True,
+                        detail=capability,
+                    )
+                )
     return results

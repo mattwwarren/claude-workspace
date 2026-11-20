@@ -21,6 +21,7 @@ from cw.dev_queue.dispositions import (
     GATE_TIMEOUT_DISPOSITION,
     LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
     REVIEW_APPROVAL_GATE_DISPOSITION,
+    REVIEW_CAPABILITY_UNMET_DISPOSITION,
     REVIEW_ENGINE_MODIFIED_DISPOSITION,
     REVIEW_ENGINE_UNSUPPORTED_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
@@ -112,6 +113,9 @@ _OPERATOR_GATED_PARK_DISPOSITIONS: frozenset[str] = frozenset(
         LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
         ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
         REVIEW_APPROVAL_GATE_DISPOSITION,
+        # #3790: the claim-time capability park. Clears only by fixing config
+        # and requeuing, so a reap revert would re-park it into the same refusal.
+        REVIEW_CAPABILITY_UNMET_DISPOSITION,
         REVIEW_ENGINE_MODIFIED_DISPOSITION,
         REVIEW_ENGINE_UNSUPPORTED_DISPOSITION,
         # RFC 0019 H2b (#3744): the binding reachability parks. The reader

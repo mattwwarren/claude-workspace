@@ -94,7 +94,8 @@ def _is_operator_gated_park(task: TicketTask) -> bool:
     Disposition in ``_OPERATOR_GATED_PARK_DISPOSITIONS`` (finalize_gate_held,
     stale_dispatch_gate, attempt_cap_blocked, and the RFC 0016 adoption parks
     adopted_head_drift, adopt_pr_state_unknown, the legacy adopt_pr_not_green,
-    the claim-time review_approval_gate, and the pre-dispatch tracker_mcp_gate),
+    the claim-time review_approval_gate, the claim-time review_capability_unmet
+    (#3790), and the pre-dispatch tracker_mcp_gate),
     OR a
     ``blocked_reason`` carrying the codex fix-loop prefix (those rows have
     disposition ``blocked``). Such a row always looks dead, but a reap revert

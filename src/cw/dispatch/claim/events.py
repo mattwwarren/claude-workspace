@@ -16,6 +16,7 @@ from cw.dev_queue import (
     REVIEW_APPROVAL_GATE_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
 )
+from cw.dev_queue.dispositions import REVIEW_CAPABILITY_UNMET_DISPOSITION
 from cw.dev_queue.next_commands import dev_queue_command
 from cw.events import record_event
 from cw.models import DispatchSkipReason, OrchestratorEventType
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
 
     from cw.dispatch.claim.outcome import _SpawnOutcome
     from cw.dispatch.claim.preflight_reach import BindingHit
+    from cw.dispatch.claim.review_capability import CapabilityGap
     from cw.models import TicketTask
 
 # Hard cap on the spawn-failure text carried on a dispatch.tick (#1679). Same
@@ -346,6 +348,51 @@ def _emit_review_approval_gate_attention_event(
                 " environment fault named in the detail first, then release with"
                 f" `{release}` to obtain a fresh review approval. A plain finalize"
                 " requeue re-parks."
+            ),
+        },
+    )
+
+
+def _emit_review_capability_attention_event(
+    task: TicketTask,
+    client_name: str,
+    lane: str,
+    gap: CapabilityGap,
+) -> None:
+    """Emit SESSION_NEEDS_ATTENTION for a claim-time review-capability park (#3790).
+
+    ``details`` names the missing capabilities, the lane, the compatible lanes
+    and the config fix. The release is ``requeue``; for re-laning, ``requeue``
+    first and then ``move --to`` (move needs PENDING). Nothing was dispatched
+    and nothing was attested.
+    """
+    requeue = dev_queue_command("requeue", task)
+    target = gap.compatible_lanes[0] if gap.compatible_lanes else "<lane>"
+    move = dev_queue_command("move", task, "--to", target)
+    compatible = ", ".join(gap.compatible_lanes) or "none"
+    _record_pre_dispatch_attention_event(
+        task,
+        client_name,
+        lane,
+        paused_status=REVIEW_CAPABILITY_UNMET_DISPOSITION,
+        extra={
+            "backend": gap.backend,
+            "required_capabilities": list(gap.required),
+            "declared_capabilities": list(gap.declared),
+            "missing_capabilities": list(gap.missing),
+            "compatible_lanes": list(gap.compatible_lanes),
+            "details": (
+                f"Lane '{gap.lane}' runs REVIEW on backend={gap.backend}, which"
+                f" declares {list(gap.declared)}; the client's review.engine requires"
+                f" {list(gap.required)} and lacks {list(gap.missing)}. The claim was"
+                " refused before any worker started: no repair was dispatched and"
+                " nothing was attested. Fix the config in clients.yaml: declare the"
+                " missing capabilities on this lane's pipeline.executors.review"
+                " .runtime_capabilities (a lane's executors replace the client's"
+                " wholesale), or remove them from review.engine"
+                " .requires_runtime_capabilities. Compatible lanes: "
+                f"{compatible}. Release with `{requeue}`. To re-lane instead, run"
+                f" `{requeue}` then `{move}`; move needs the row PENDING."
             ),
         },
     )

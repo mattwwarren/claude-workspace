@@ -30,6 +30,7 @@ from cw.models.orchestrator_config import (
     LaneConfig,
     StagePipelineConfig,
 )
+from cw.models.runtime_capabilities import normalize_runtime_capabilities
 from cw.models.tasks import DEFAULT_LANE
 from cw.models.worker_effort import WorkerEffort
 
@@ -280,12 +281,20 @@ class ReviewEngineConfig(BaseModel):
 
     The engine requires ``review.convergence: clean``; ``ReviewConfig``
     enforces that rule, since it spans both keys.
+
+    ``requires_runtime_capabilities`` lists runtime-capability slugs a review
+    runner must declare (#3790). It is operator-owned: read from ``clients.yaml``
+    only, never from ``cw-engine.json`` or the PR branch, and not stamped into
+    ``.claude/cw-context.json``. A lane whose REVIEW runner lacks one is parked
+    before claim (``review_capability_unmet``). Slugs are validated, sorted and
+    deduplicated; see ``cw.models.runtime_capabilities``.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     skill: str
     guarded_paths: list[str] = Field(default_factory=list)
+    requires_runtime_capabilities: list[str] = Field(default_factory=list)
 
     @field_validator("skill")
     @classmethod
@@ -311,6 +320,13 @@ class ReviewEngineConfig(BaseModel):
             )
             raise ValueError(msg)
         return [_validate_repo_glob(entry, field="guarded_paths") for entry in value]
+
+    @field_validator("requires_runtime_capabilities")
+    @classmethod
+    def _check_requires_runtime_capabilities(cls, value: list[str]) -> list[str]:
+        return normalize_runtime_capabilities(
+            value, field="review.engine.requires_runtime_capabilities"
+        )
 
 
 class RenumberPattern(BaseModel):
