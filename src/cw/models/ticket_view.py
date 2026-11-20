@@ -256,6 +256,15 @@ class TicketView(BaseModel):
         )
     )
     stage_base_ref: str | None
+    # #3779: additive, no TICKET_VIEW_SCHEMA_VERSION bump (same as the
+    # blocked_on_repo precedent).
+    base_branch: str | None = Field(
+        default=None,
+        description=(
+            "The row's stored merge target (TicketTask.base_branch); null = the "
+            "client's default branch. Not the resolved value."
+        ),
+    )
     dispatch: DispatchView | None = Field(
         description="Dispatch state; null unless the row is PENDING."
     )

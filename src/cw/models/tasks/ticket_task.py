@@ -51,8 +51,8 @@ from cw.models.tasks.records import (
 )
 from cw.models.tasks.schema import DEFAULT_LANE, DEFAULT_STAGE, ReviewApproverKind
 from cw.models.tasks.validators import (
-    _SAFE_TICKET_BRANCH,
     _SAFE_TICKET_ID,
+    _check_branch_charset,
     _validate_gate_recipe_keys,
     _validate_park_on_abandoned_exit_keys,
     _validate_review_recipe_keys,
@@ -79,6 +79,13 @@ class TicketTask(BaseModel):
     # cleared by transition_task_status, cancel or requeue. Written only by PR
     # adoption (#2943).
     branch: str | None = None
+    # v66 (GitHub #3779, RFC 0020 D-2): the branch this row merges into; None =
+    # client.default_branch. Read only through cw.models.resolve_base_branch.
+    # Stamped at enqueue; written only by cw.models.tasks.base_branch.
+    # set_base_branch, which refuses a change once ever_spawned. Identity, not
+    # episode state: never cleared by transition_task_status, cancel, requeue
+    # or move.
+    base_branch: str | None = None
     # v50 (GitHub #2943, RFC 0016): the adopted human PR's url and the head
     # SHA the row is pinned to (reviewed at). Identity, not episode state:
     # neither is ever cleared by transition_task_status, cancel or requeue.
@@ -841,13 +848,12 @@ class TicketTask(BaseModel):
     def _check_branch(cls, value: str | None) -> str | None:
         # None is "no explicit branch"; "" is rejected rather than read as None
         # so a writer cannot persist an ambiguous blank.
-        if value is not None and not _SAFE_TICKET_BRANCH.match(value):
-            msg = (
-                f"Invalid branch {value!r}: must start with alphanumeric"
-                " and contain only [a-zA-Z0-9/_.-], with no '..' sequence"
-            )
-            raise ValueError(msg)
-        return value
+        return _check_branch_charset("branch", value)
+
+    @field_validator("base_branch")
+    @classmethod
+    def _check_base_branch(cls, value: str | None) -> str | None:
+        return _check_branch_charset("base_branch", value)
 
     @field_validator("adopted_head_sha")
     @classmethod

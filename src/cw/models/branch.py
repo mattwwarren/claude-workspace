@@ -25,6 +25,10 @@ if TYPE_CHECKING:
 # The prefix used when the client is unknown, matching ClientConfig's default.
 _DEFAULT_FEATURE_BRANCH_PREFIX = "dev"
 
+# The merge target used when the client is unknown, matching ClientConfig's
+# default_branch; pinned by tests/test_models_branch.py.
+_DEFAULT_BASE_BRANCH = "main"
+
 
 def resolve_feature_branch(
     ticket_id: str,
@@ -46,3 +50,22 @@ def resolve_feature_branch(
         else _DEFAULT_FEATURE_BRANCH_PREFIX
     )
     return f"{prefix}/{ticket_id}"
+
+
+def resolve_base_branch(
+    client: ClientConfig | None,
+    task: TicketTask | None = None,
+) -> str:
+    """Return the branch *task* merges into (GitHub #3779, RFC 0020).
+
+    *task*'s recorded ``base_branch`` when a row is given and has one;
+    otherwise *client*'s ``default_branch``, or ``main`` when *client* is
+    ``None``. Pass the row whenever it is in scope: a caller that omits it
+    silently ignores a recorded base. Trust-root reads (the review engine
+    source, its guard set and manifest, attestation rules, review
+    configuration) stay on ``client.default_branch`` and never call this
+    (ADR 0024).
+    """
+    if task is not None and task.base_branch:
+        return task.base_branch
+    return client.default_branch if client is not None else _DEFAULT_BASE_BRANCH
