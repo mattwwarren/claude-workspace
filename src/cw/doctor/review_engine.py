@@ -135,7 +135,12 @@ def _capability_detail(name: str, client: ClientConfig, lane: str) -> str | None
 
 
 def _check_review_engine(clients: dict[str, ClientConfig]) -> list[CheckResult]:
-    """At most one warning per review lane of each client with an engine."""
+    """Advisory warnings for each review lane of each client with an engine.
+
+    Up to two per lane: ``review-engine/<client>/<lane>`` (the lane cannot run
+    the engine) and ``review-capability/<client>/<lane>`` (the lane's REVIEW
+    runner lacks a runtime capability the engine requires). Never a failure.
+    """
     results: list[CheckResult] = []
     for name, client in clients.items():
         engine = client.review.engine
