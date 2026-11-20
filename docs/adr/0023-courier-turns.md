@@ -1,7 +1,7 @@
 # The outbox drain posts MCP tracker writes through courier turns
 
 **Status:** Accepted
-**Driven by:** #3740 (RFC 0019 O2b, D-B3, D-B5, D-B6, D-B8); #3695 (plugin-app argv); #3368 (project-layer MCP reader); #3383 (status vocabulary)
+**Driven by:** #3740 (RFC 0019 O2b, D-B3, D-B5, D-B6, D-B8); #3695 (plugin-app argv); #3368 (project-layer MCP reader); #3383 (status vocabulary); #3760 (RFC 0019 T2b, D-D2, the refresh turn)
 
 ## Decision
 
@@ -81,6 +81,76 @@ tracker's audit log, then reverts by hand. A client opts out with
 Other apps are not enumerated, so disabling them is best effort. Adding an app
 enumeration later is a one-parameter change to the argv builder.
 
+## The refresh turn (#3760, RFC 0019 T2b, D-D2)
+
+- **Kind and allowlist.** `TurnKind.REFRESH` is one read-only courier turn. Its
+  allowlist is exactly the binding's `get` and `list_comments` tool names,
+  resolved through the binding with the `TRACKER_GET_TOOLS` and
+  `TRACKER_COMMENT_TOOLS` fallback.
+- **Result parsing.** The result is the bare T1 stdin document (`ticket_url`,
+  `title`, `body`, `comments[...]`), parsed by a strict no-defaults model and
+  then by the existing `snapshot_from_stdin`. cw computes `agent_authored`; the
+  model never supplies it or `author_conflict`. There is no model-reported
+  status, detail or ticket-id echo: a failure is a missing output file,
+  non-JSON or schema-invalid output, mapped to the closed refresh reasons.
+- **Independence and runner.** The turn is its own codex launch through the
+  codex runner the stage already holds, so a stage on a harness without the
+  tracker MCP still refreshes. Its usage is recorded through that stage's
+  runner; the CLI confirm seam uses an unrecorded `RealCodexRunner`, which is
+  the courier's existing usage gap.
+- **Failures and exception contract.** They degrade to
+  `ticket.snapshot_degraded` (`courier_unreachable`, `turn_failed`, `refused`,
+  `no_binding`), the stage runs on the last snapshot, and there is no park and
+  no gate record. `courier_snapshot` catches only a listed narrow set
+  (`CwError`, `OSError`, `ValueError`, `subprocess.SubprocessError`) and maps it
+  to `turn_failed`; any other exception propagates deliberately.
+- **Timeout.** The turn timeout (300 s) and the review deadline bound it; there
+  is no blind retry.
+- **Cadence and cost.** The turn runs once per review pass, including a claude
+  confirm round run from the codex stage (it shares the stage's context), plus
+  once at IMPL entry and once at FINALIZE entry. This is per pass, not per
+  recheck like the verify turn, so a fix loop with many passes runs many turns.
+- **Residual exposure: `per_server` blast radius.** A `per_tool` harness gets the
+  exact two-tool allowlist. On a `per_server` plugin app the whole app is enabled
+  for a prompt-only read-only turn that reads untrusted ticket text on every
+  pass. See "Blast radius of a `per_server` turn" above: that surface includes
+  other issues, issue creation and state changes, and the higher cadence widens
+  the window an injected comment has. A write by this turn is NOT detected: no
+  before/after snapshot check is run (it would triple the cost, accepted). There
+  is no per-client switch; see Reversal.
+- **Residual trust: model-reported fields.**
+  - `author_id` and `created_at` are model-reported by RFC design (D-D3) and feed
+    the comment-binding evaluator. An injected comment body could make the model
+    fabricate a new comment attributed to an operator id, and cw cannot detect a
+    new fabricated comment. The consequence is that the fabricated text can bind
+    as an operator comment (steering, the approved plan) in the next review pass,
+    IMPL plan of record, or FINALIZE. This is accepted.
+  - Comment order is prompt-level only, so a mis-ordered thread could change
+    which comment is "newest".
+  - A document describing the wrong ticket is also undetected, since there is no
+    echo.
+  - A model that cannot reach the tools may still emit a schema-valid document
+    with empty comments. It is recorded as the fresh snapshot, so operator
+    comments then bind nothing for that pass (fail-closed) until the next
+    refresh.
+- **Author conflicts.** The MCP refresh records with
+  `detect_author_conflicts=True`, the same trust class as
+  `cw ticket snapshot --from-json`; the GitHub refresh stays `False`. The flag is
+  sticky: a model-reported `author_id` flip for an existing comment id sets
+  `author_conflict` and permanently unbinds that comment, an unrecoverable loss
+  of steering for it (fail-closed). `ticket.snapshot_author_conflict` can now
+  fire on refresh. This is accepted. The snapshot the stage uses in memory is the
+  stored one (`SnapshotRecord.snapshot`), so a conflict flagged by this record
+  already applies to the same pass.
+- **Premises and reversal.** R23 (the `apps.<id>.default_tools_enabled=true` key)
+  also gates this turn. The reversal has no config switch and is code-level. For
+  REVIEW (`_review_and_confirm`), dropping `refresh=True` is the whole reversal,
+  T2's documented one-liner (the courier is consulted only inside the refresh).
+  IMPL and FINALIZE call `snapshot_for_stage(..., courier=...)` directly with no
+  `refresh=True`, and T2 keeps their stage-entry refresh, so the courier is
+  disabled there by dropping the `courier=` argument at that hook. For the CLI
+  confirm seam, the courier comes from `_courier_for` in `run_backend_round`.
+
 ## Consequences
 
 - Each entry on a plugin-app host costs three turns, up to 300 s each. A drain of
@@ -112,4 +182,4 @@ enumeration later is a one-parameter change to the argv builder.
 
 ## Referenced by
 
-- #3740, #3695, #3368, #3383, ADR-0013 (2026-11-10 update, superseded in part)
+- #3740, #3695, #3368, #3383, #3760, ADR-0013 (2026-11-10 update, superseded in part)
