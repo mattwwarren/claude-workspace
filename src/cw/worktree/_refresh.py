@@ -65,9 +65,10 @@ def _handle_branch_absent(
     the reader may be building on it thinking it is current.
     """
     base = resolve_base_branch(client, task)
-    # A null base keeps the client-only fetch (and its argv); only a row with
-    # its own base fetches origin/<base>. A failure here is NOT_REFRESHED, never
-    # a raise: the refresh path never raises for a git failure.
+    # stays on client.default_branch: null-base check; a null base keeps the
+    # client-only fetch (and its argv), only a row with its own base fetches
+    # origin/<base>. A failure here is NOT_REFRESHED, never a raise: the
+    # refresh path never raises for a git failure.
     base_fetch = (
         fetch_default_branch(client)
         if base == client.default_branch

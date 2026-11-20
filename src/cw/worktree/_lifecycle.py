@@ -155,6 +155,8 @@ def _fetch_base_for_new_branch(client: ClientConfig, task: TicketTask | None) ->
     is used, and :func:`_resolve_branch_start_point` raises if none exists.
     """
     base = resolve_base_branch(client, task)
+    # stays on client.default_branch: null-base check; the default was already
+    # fetched by dispatch's freshness gate, so its argv is untouched
     if base == client.default_branch:
         return
     fetch = fetch_base_branch(client, base)
