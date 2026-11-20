@@ -83,6 +83,7 @@ from cw._git import git_clean_env
 from cw.codex_fix_loop.gate_autofix import (
     HookRewritePolicy,
     declared_autofixes,
+    hook_rewrite_opt_outs,
     ignored_on_disk,
     revert_to_tree,
     vet_changes,
@@ -162,13 +163,15 @@ class PlannedGate:
     """One detected gate: name, shell command, signal ceiling (seconds), autofix.
 
     ``autofix`` is the declared command to run when the gate fails red (#3412),
-    or ``None`` when the gate declares none.
+    or ``None`` when the gate declares none. ``accept_hook_rewrite`` is False
+    when config opts the gate out of the hook-rewrite acceptance (#3689).
     """
 
     name: str
     command: str
     ceiling_s: float
     autofix: str | None = None
+    accept_hook_rewrite: bool = True
 
 
 @dataclass(frozen=True)
@@ -578,12 +581,14 @@ def plan_cycle_gates(worktree: Path, scope: GateScope) -> GatePlan:
             )
         )
         declared = declared_autofixes(worktree)
+        opted_out = hook_rewrite_opt_outs(worktree)
         planned = tuple(
             PlannedGate(
                 name,
                 command,
                 _gate_ceiling(script, name, worktree=worktree, scope=scope),
                 autofix or declared.get(name),
+                accept_hook_rewrite=name not in opted_out,
             )
             for name, command, autofix in detected
         )
@@ -825,9 +830,10 @@ def _run_gate_with_autofix(
     proved by a green re-check of the same gate, its changes are reverted and
     the ORIGINAL failure is returned.
 
-    Under ``HookRewritePolicy.RECHECK`` a red gate whose own run rewrote files
-    takes :func:`_recheck_after_rewrite` instead, and the declared autofix is
-    not run. Under ``PARK`` (the default) this function is unchanged.
+    Under ``HookRewritePolicy.RECHECK`` and when the gate accepts it, a red gate
+    whose own run rewrote files takes :func:`_recheck_after_rewrite` instead,
+    and the declared autofix is not run. Under ``PARK`` (the default), or for a
+    gate with ``accept_hook_rewrite`` False, it is the PARK path unchanged.
     """
     failure = _run_one_gate(
         gate,
@@ -838,7 +844,7 @@ def _run_gate_with_autofix(
     )
     if failure is None or failure.kind != "red":
         return failure, tree_before
-    if hook_rewrite is HookRewritePolicy.RECHECK:
+    if hook_rewrite is HookRewritePolicy.RECHECK and gate.accept_hook_rewrite:
         rewritten = staged_cycle_tree(worktree, review_artifacts)
         if rewritten != tree_before:
             return _recheck_after_rewrite(

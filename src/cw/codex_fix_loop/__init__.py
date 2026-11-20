@@ -46,7 +46,8 @@ must target the submodule that looks it up at call time
   each fix commit; a failure parks ``codex_fix_gate_failed`` (#3056). Never
   kills a gate: a slow one only emits ``codex_fix.gate_slow``.
 - ``gate_autofix`` — the helpers behind a declared gate autofix (#3412): the
-  exception-safe ``quality_gates.autofix`` config reader, the ignored-file
+  exception-safe ``quality_gates.autofix`` config reader, the
+  ``quality_gates.accept_hook_rewrite`` opt-out reader (#3689), the ignored-file
   snapshot taken before an autofix, the tree diff, and ``revert_to_tree``, the
   path-targeted revert with a ``read-tree`` fallback the gate runner uses to
   undo a rejected autofix (#3420, #3423).

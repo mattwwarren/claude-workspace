@@ -1293,9 +1293,9 @@ lanes:
   cycle). Gate output and per-gate summaries are logged at WARNING to
   `.cw/codex_driver.log` while the gate runs, because the detached job's root
   logger is WARNING. A gate (or detector) running past its ceiling only emits the
-  `codex_fix.gate_slow` event; it is never killed. There is no config switch: a
-  client whose resolver chain misses parks every committing cycle until
-  `prep_pr_state.py` is installed. A gate that fails red and declares an autofix
+  `codex_fix.gate_slow` event; it is never killed. There is no config switch for
+  running the gates: a client whose resolver chain misses parks every committing
+  cycle until `prep_pr_state.py` is installed. A gate that fails red and declares an autofix
   (the `detect-gates` `autofix` field, else `quality_gates.autofix.<gate-name>`;
   see [Quality Gate Autofix](#quality-gate-autofix-quality_gatesautofix-3412))
   has the autofix run and the same gate re-checked (#3412); the cycle parks
@@ -1307,7 +1307,8 @@ lanes:
   quality gates (#3686), a red gate that rewrote its own touched files (no
   autofix involved) is re-run once after the rewrite. Outcomes `rewrite_applied`,
   `rewrite_rejected_scope` and `rewrite_rejected_red` are logged; FINALIZE
-  still parks such a gate.
+  still parks such a gate. A gate can opt out of the acceptance per gate
+  (see [Quality Gate Hook Rewrite](#quality-gate-hook-rewrite-quality_gatesaccept_hook_rewrite-3689), #3689).
 - **Divergence report.** `fix_loop_diverging` now also lists findings the loop
   itself generated (a finding on lines added since the loop began, or a
   file-level finding on a file the loop created) so the operator can tell new
@@ -2932,8 +2933,9 @@ quality_gates:
   reads only the canonical block shape shown above (a column-0
   `quality_gates:`, a nested `timeouts:`, one `key: value` per line; comments
   allowed). Flow style such as `quality_gates: {timeouts: ...}` is reported
-  with a warning and ignored. A sibling `quality_gates.autofix:` map is ignored
-  by this scanner (it reads only `timeouts:`).
+  with a warning and ignored. The sibling `quality_gates.autofix:` and
+  `quality_gates.accept_hook_rewrite:` maps are ignored by this scanner (it
+  reads only `timeouts:`).
 - **Path.** The file is read relative to the current directory, like
   `.claude/prep-pr-state.json`, so run `/prep-pr` from the worktree root.
 
@@ -3090,7 +3092,10 @@ quality_gates:
   re-check must exit 0 and not dirty the tree. Anything else reverts the
   autofix and parks with the original output. On the codex fix loop and IMPL, a red gate
   that rewrote files with no autofix takes the re-run path instead (#3684); the
-  autofix is never run on that path.
+  autofix is never run on that path. A gate opted out via
+  `quality_gates.accept_hook_rewrite.<gate>: false` (see
+  [Quality Gate Hook Rewrite](#quality-gate-hook-rewrite-quality_gatesaccept_hook_rewrite-3689))
+  parks on that path instead, as before #3684.
 - **Revert.** A revert never deletes a file that was git-ignored on disk before
   the autofix ran, even when the autofix rewrote the ignore rules (#3420). It
   restores the changed paths first; if that fails or leaves the tree different,
@@ -3109,6 +3114,37 @@ quality_gates:
 This key is unrelated to the `quality_gates:` key removed by #1616 (that one was
 never read). `claude-workspace` declares `ruff-format` so a formatting-only
 cycle is fixed and committed instead of parked.
+
+## Quality Gate Hook Rewrite (`quality_gates.accept_hook_rewrite`, #3689)
+
+The codex fix loop and the codex IMPL quality gates accept a red gate that
+rewrote its own touched files (#3684, #3686). That acceptance is the default;
+this map opts individual gates out of it.
+
+```yaml
+quality_gates:
+  accept_hook_rewrite:
+    fmt: false   # fmt parks on a hook rewrite, as before #3684
+```
+
+- **Default is accept.** Only a YAML `false` opts a gate out. `true`, quoted
+  strings such as `"false"`, numbers, null, lists, non-mapping values and a
+  malformed file all mean the default. PyYAML also loads unquoted `no` and `off`
+  as `false`, so those opt out too.
+- **Exact name.** The key is the gate name as `detect-gates` prints it; no
+  prefix matching. A key naming no detected gate has no effect.
+- **Effect.** An opted-out gate that fails red with a rewrite is parked with
+  its original output: `codex_fix_gate_failed` on the fix loop, `impl_failed`
+  on IMPL. A declared autofix (`quality_gates.autofix`) still runs as before;
+  the opt-out disables only the rewrite re-run.
+- **Scope.** Applies to the fix loop and IMPL, which share the gate runner.
+  FINALIZE never accepts rewrites, so the config does not affect it.
+- **Cannot enable acceptance.** A caller that parks rewrites (FINALIZE) stays
+  parking whatever the config says.
+- **No log line.** An opt-out writes no `codex_fix_gate_autofix` outcome. The
+  park output is the signal.
+- **Read once per cycle** by `cw.codex_fix_loop.gate_autofix`. `/prep-pr` and
+  `prep_pr_state.py` do not read it; the no-PyYAML timeouts scanner ignores it.
 
 ## Test Prepare Step (`tests.prepare`, #2179)
 
