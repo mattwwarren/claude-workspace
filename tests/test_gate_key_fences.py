@@ -30,9 +30,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from tests._shared.git_repos import _clean_git_env
+from tests._shared.git_repos import _clean_git_env, git_in
 from tests._shared.guard_fences import load_guard_script_module
 from tests._shared.step25_gates import (
+    GATE_BASE,
     GATE_BRANCH,
     GATE_KEY_SCRIPT,
     GATE_STALE_SESSION,
@@ -655,6 +656,25 @@ _EARLIER_FENCES: dict[str, Callable[[], str]] = {
     "setup": lambda: fill_gate_fence(impl_gate_setup_fence()),
     "monolith_preamble": lambda: fill_gate_fence(_monolith_preamble()),
 }
+
+
+@pytest.mark.parametrize("name", sorted(_EARLIER_FENCES))
+def test_fence_computes_a_fork_point_from_the_filled_base(
+    name: str,
+    tmp_path: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+) -> None:
+    # An unfilled `<base>` parses as a bash redirect: stderr gets "No such file
+    # or directory" and FORK_POINT stays empty, yet nothing else in the fence
+    # fails. Pin the value so the merge-base call is really exercised.
+    bed = GateBed(tmp_path)
+    repo, _ = make_git_repo_with_origin("clone")
+    body = _EARLIER_FENCES[name]() + '\necho "FORK_POINT=$FORK_POINT"\n'
+    result = bed.run(body, repo)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "No such file or directory" not in result.stderr
+    expected = git_in(repo, "rev-parse", GATE_BASE)
+    assert f"FORK_POINT={expected}" in result.stdout.splitlines()
 
 
 def _shorten_lock_timeout(script: Path) -> None:

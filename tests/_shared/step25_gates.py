@@ -209,6 +209,7 @@ def monolith_gate_fence() -> str:
 # Shared by tests/test_gate_key_fences.py and tests/test_gate3_prepare_fence.py,
 # so the executed-fence runner is spelled once.
 
+GATE_BASE = "main"
 GATE_BRANCH = "feature"
 GATE_STALE_SESSION = "9141a90d"
 # The fences resolve gate_key.py through `cw resolve-installed`, which retries
@@ -304,7 +305,12 @@ class GateBed:
 
 
 def fill_gate_fence(fence: str, test_command: str = "true") -> str:
-    """Fill a gate fence's ``<branch-name>`` and ``<test_command>`` placeholders."""
+    """Fill a gate fence's ``<base>``, ``<branch-name>`` and ``<test_command>``."""
     return substitute_fence_placeholders(
-        fence, {"branch-name": GATE_BRANCH, "test_command": test_command}
+        fence,
+        {
+            "base": GATE_BASE,
+            "branch-name": GATE_BRANCH,
+            "test_command": test_command,
+        },
     )
