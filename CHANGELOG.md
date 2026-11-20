@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.104.0] - 2026-11-20
+
 ### Added
 
 - **Verified merge prerequisites (#3791).** `cw dev-queue prerequisite <T> -c <C> --pr <N> [--remove]` is an operator-only verb that records a same-repo PR the row must wait on before any stage dispatch, verified OPEN and in the client's repo with one gh call; nothing is derived from findings, comments or the ticket body. Unlike `hold` it accepts a row that already has a PR or a live session, and it changes no status: at the next claim the row is parked as `dependency_hold` / `dependency_unmerged` on that PR, uncharged (no attempt, unproductive or regress charge), with no lane slot held and nothing spawned, and `ticket.held` is recorded. The serve tick releases it on a verified merge and stamps the entry `satisfied_at`; a PR closed unmerged leaves it held. Declaring is refused under a stale or unverifiable dispatch loop. `--remove` makes no gh call and releases or moves a hold parked on the removed PR. The `hold.py` helpers `verify_dependency_pr` and `PrRefParam` were made public by rename only; `hold`'s behaviour and messages are unchanged. Caveats: the dev-queue schema is v65 (`TicketTask.merge_prerequisites`); an older cw that resaves `dev_queue.json` drops the list and the gate stops applying, so re-declare after a downgrade. The in-stage review fix-agent spawn is not gated.
