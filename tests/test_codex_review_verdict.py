@@ -4697,6 +4697,7 @@ class TestUntrustedFindingTextCannotForgeARecord:
             "suggested_fix",
             "contests_adjudication",
             "contests_decision",
+            "evidence_gap",
         ],
     )
     def test_every_untrusted_finding_field_is_neutralised(self, field: str) -> None:

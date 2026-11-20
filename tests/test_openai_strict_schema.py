@@ -223,6 +223,17 @@ class TestRoundTripValidation:
         doc = ReviewerFindingsDocument.model_validate(payload)
         assert doc.findings[0].contests_decision == ""
 
+    def test_round_trip_model_validate_null_evidence_gap(self) -> None:
+        # #3793 adds `evidence_gap: str = ""` to the same validator tuple.
+        payload = {
+            "reviewer_role": "R",
+            "status": "ok",
+            "detail": "",
+            "findings": [{**_VALID_FINDING, "evidence_gap": None}],
+        }
+        doc = ReviewerFindingsDocument.model_validate(payload)
+        assert doc.findings[0].evidence_gap == ""
+
     def test_every_nullable_wrapped_finding_field_tolerates_null(self) -> None:
         # Producer/consumer contract pin (#2070, same failure family as
         # #190/#191): the strict-mode transform tells codex that `null` is a
@@ -249,6 +260,7 @@ class TestRoundTripValidation:
             "release_critical_exception",
             "contests_adjudication",
             "contests_decision",
+            "evidence_gap",
         } <= set(nullable_fields)
         for name in nullable_fields:
             payload = {

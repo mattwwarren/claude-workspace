@@ -121,6 +121,18 @@ def test_output_contract_lists_contests_decision() -> None:
     assert "Leave it empty on every other finding" in contract
 
 
+def test_output_contract_lists_evidence_gap() -> None:
+    """#3793: the contract JSON and its explanation carry the new marker."""
+    content = _cmd("auto-dev-review.md")
+    start = content.index("**Output contract.**")
+    end = content.index("### Checkpoint 3a")
+    contract = content[start:end]
+    assert '"evidence_gap": ""' in contract
+    window = _after(contract, "**`evidence_gap` — a finding that rests on", span=1200)
+    assert "review_operator_actionable" in window
+    assert "Never set it for a defect you can see in the diff" in window
+
+
 # ---------------------------------------------------------------------------
 # 2. (4d) exists between (4b) and (4c), and states the 4a precedence once.
 # ---------------------------------------------------------------------------
@@ -203,6 +215,46 @@ def test_4e_states_4a_precedence_once() -> None:
     assert "Precedence with (4a), stated once" in window
     assert "NON_DEFERRABLE" in window
     assert "plan_deviation" in window
+
+
+# ---------------------------------------------------------------------------
+# 2c. (4f) Evidence-gap hold (#3793) sits after (4e) and routes an unrun-check
+#     finding to DEFER; the mechanical stamp holds it.
+# ---------------------------------------------------------------------------
+
+
+def test_4f_sits_after_4e() -> None:
+    section = _checkpoint3a_prepass_section()
+    e_idx = section.index("**(4e) Decided-constraint contest")
+    f_idx = section.index("**(4f) Evidence-gap hold")
+    assert e_idx < f_idx
+
+
+def test_4f_records_defer_and_forbids_operator_action() -> None:
+    section = _checkpoint3a_prepass_section()
+    window = _after(section, "**(4f) Evidence-gap hold", span=1600)
+    assert "evidence_gap" in window
+    assert '`outcome: "defer"`' in window
+    assert "operator_actionable" in window
+    assert 'Do NOT record `outcome: "operator_action"`' in window
+
+
+def test_4f_states_the_4a_and_4e_precedence_once() -> None:
+    section = _checkpoint3a_prepass_section()
+    window = _after(section, "**(4f) Evidence-gap hold", span=1600)
+    assert "Precedence with (4a) and (4e), stated once" in window
+    assert "bucketed by (4a) alone" in window
+    assert "NON_DEFERRABLE" in window
+    assert "plan_deviation" in window
+    assert "`contests_decision` wins and (4e) applies" in window
+
+
+def test_step3c_operator_action_override_has_evidence_gap_trigger() -> None:
+    content = _cmd("auto-dev-review.md")
+    window = _after(content, "**Third trigger (#3793): an evidence gap.**", span=1200)
+    assert "evidence_gap" in window
+    assert "operator_actionable" in window
+    assert "#1817 ordering" in window
 
 
 def test_step3c_operator_action_override_has_contest_trigger() -> None:
