@@ -241,14 +241,15 @@ starts, and before the `stage.entered` event for `s0_intake`, with:
   PR in this repo, and that PR is verified open with
   `gh pr view <N> --json state`.
 - If the dependency is a ticket id or lives in another repo, OMIT the field.
-  The park then stays an `awaiting_operator` hold that keeps its lane slot.
+  The park then stays an `awaiting_operator` hold with no automatic release;
+  it frees its lane slot once its worker is settled (#3774).
 - Do NOT put the id only in `details` prose: cw never parses `details` for it.
 
 **Why the field matters.** With `depends_on_pr`, cw parks the row as
 `dependency_hold`: it frees its lane slot and the serve tick releases it once
 that PR merges (a worker park follows the lane's `reap_policy`; the default
-`signal_only` only stamps `stale_gate_detected_at`). Without it the park holds
-its slot and nothing releases it. The field is additive and needs no
+`signal_only` only stamps `stale_gate_detected_at`). Without it nothing
+releases the park; it frees its slot once its worker is settled (#3774). The field is additive and needs no
 `schema_version` bump. A mid-run dependency discovery in the impl or finalize
 stages is out of scope for this template.
 

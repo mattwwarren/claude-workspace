@@ -293,9 +293,10 @@ If pending tickets sit unclaimed across ticks:
   the consecutive-error counter. The watch reports a pending ticket on a
   paused lane as a `STUCK` line after `--stuck-after-minutes` (default 15);
   with no watch armed, this check is on you.
-- BLOCKED_ON_USER rows **hold lane slots by design** — a parked ticket can
-  starve the lane. Requeue or remove it to convert a dead slot into a
-  working one.
+- BLOCKED_ON_USER rows **hold lane slots while their worker is live or their
+  claim unsettled** (#3774) — such a park can starve the lane. A settled park
+  frees its slot and shows as `parked=` in `cw dev-queue status`, but stays
+  parked: requeue or remove it to release the ticket.
 - `disposition=attempt_cap_blocked` after an environmental outage (quota
   window, hang loop): once the cause is fixed, run
   `cw dev-queue requeue <T> -c <CLIENT> --reset-attempts`. It zeroes the
