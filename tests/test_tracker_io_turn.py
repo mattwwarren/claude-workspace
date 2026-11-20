@@ -42,7 +42,9 @@ from tests._tool_fakes import codex_usage_stdout, tracker_io_turn_result
 if TYPE_CHECKING:
     from cw.codex_runner import CodexRunner
 
-pytestmark = pytest.mark.usefixtures("isolated_backend_layers")
+pytestmark = pytest.mark.usefixtures(
+    "isolated_backend_layers", "project_walk_stops_at_state_dir"
+)
 
 _TICKET = "GEN-7"
 _SECRET = "sk-proj-" + "a1B2c3D4" * 4
@@ -68,18 +70,6 @@ def _turn(
     return post_parts_via_turn(
         _TICKET, text, tracker=tracker, context=context, session_id="s-1"
     )
-
-
-@pytest.fixture(autouse=True)
-def _stop_project_walk_at_state_dir() -> None:
-    """Stop the project-layer walk at the test state dir (O2b hermeticity).
-
-    The turn's scratch cwd sits under ``state_dir()``, which is not under the
-    test HOME, so the walk would otherwise climb to the developer's real home
-    and read its ``~/.codex/config.toml``. A ``.git`` marker at ``state_dir()``
-    ends the walk there, the same guard the backend project-chain tests use.
-    """
-    (state_dir() / ".git").mkdir(parents=True, exist_ok=True)
 
 
 def _stage(

@@ -107,6 +107,8 @@ from cw.stage_verification.growth import (
     DEFAULT_GROWTH_BUDGET_LINES,
     RunGrowth,
 )
+from cw.ticket_snapshot import _binding
+from cw.ticket_snapshot._refresh import read_for_stage
 from tests._claude_review_helpers import RoleAwareClaudeRunner, review_envelope
 from tests._codex_review_helpers import _doc_json, _finding_payload, _loop_verdict
 from tests._review_convergence_helpers import (
@@ -131,11 +133,20 @@ if TYPE_CHECKING:
 def _no_real_gh_login(monkeypatch: pytest.MonkeyPatch) -> None:
     """No test in this module may run a real ``gh api user`` (#2633).
 
-    Patches the name ``codex_background`` imports and looks up at call time.
+    Patches the name ``ticket_snapshot._binding`` imports and looks up at call
+    time: the context ``codex_background`` builds resolves the login there.
     """
     monkeypatch.setattr(
-        "cw.codex_background.resolve_operator_login",
+        "cw.ticket_snapshot._binding.resolve_operator_login",
         MagicMock(return_value="operator-login"),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_snapshot_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test in this module may launch ``gh`` for a snapshot refresh (#3712)."""
+    monkeypatch.setattr(
+        "cw.ticket_snapshot._fetch.fetch_issue_snapshot", lambda *_a, **_kw: None
     )
 
 
@@ -2025,7 +2036,7 @@ def test_new_knob_defaults_match_fix_loop_constants() -> None:
 
 
 def _login_mock() -> MagicMock:
-    login = codex_background.resolve_operator_login
+    login = _binding.resolve_operator_login
     assert isinstance(login, MagicMock)
     return login
 
@@ -2055,8 +2066,32 @@ def test_fix_loop_receives_budget_switch_and_login(
     assert kwargs["growth_budget_lines"] == 25
     assert kwargs["cumulative_growth_budget_lines"] == 70
     assert kwargs["growth_guard_enabled"] is False
-    assert kwargs["operator_login"] == "operator-login"
+    assert kwargs["snapshots"].operator_login == "operator-login"
     assert _login_mock().call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("tracker", "github"), [("github-issues", True), ("linear", False), (None, False)]
+)
+def test_fix_loop_receives_a_context_for_the_clients_tracker(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    tracker: str | None,
+    github: bool,
+) -> None:
+    """#3712: one row-reading context per run; GitHub is the exact tracker test."""
+    worktree = make_git_repo("wt-bg-ctx")
+    if tracker is not None:
+        _write_tracker_config(worktree, tracker)
+
+    fix_loop_mock = _run_with_config(
+        worktree,
+        sid="bg-ctx",
+        lanes=[LaneConfig(name="trial", codex_fix_loop_enabled=True)],
+        config=OrchestratorConfig(),
+    )
+
+    assert fix_loop_mock.call_args.kwargs["snapshots"].github is github
 
 
 def test_disabled_fix_loop_does_not_resolve_operator_login(
@@ -2069,7 +2104,9 @@ def test_disabled_fix_loop_does_not_resolve_operator_login(
         config=OrchestratorConfig(),
     )
 
-    assert fix_loop_mock.call_args.kwargs["operator_login"] is None
+    snapshots = fix_loop_mock.call_args.kwargs["snapshots"]
+    assert snapshots.operator_login is None
+    assert snapshots.resolve is not read_for_stage
     _login_mock().assert_not_called()
 
 
@@ -3261,10 +3298,10 @@ def _signal_events(event_type: OrchestratorEventType) -> list[OrchestratorEvent]
 
 def _verdict_run(
     worktree: Path, sid: str, *, patch_post: bool = True, rendered: str = "r"
-) -> tuple[MagicMock | None, list[int]]:
+) -> MagicMock | None:
     """Run one verdict-present review; return the post mock (``None`` when the
-    real ``_post_daemon_verdict_comment`` ran) and the Case B event count seen when
-    Step 3 started. *rendered* is the verdict text: an identical retry dedups."""
+    real ``_post_daemon_verdict_comment`` ran). *rendered* is the verdict text: an
+    identical retry dedups."""
     _seed_session(sid)
     task = TicketTask(ticket_id="T-3055", client="test", stage=Stage.REVIEW)
     result = make_blocked(
@@ -3278,21 +3315,13 @@ def _verdict_run(
         _make_diff(),
         reviewed_sha="deadbeef",
     )
-    seen_at_step3: list[int] = []
-
-    def _step3(**_kwargs: object) -> tuple[object, object]:
-        seen_at_step3.append(
-            len(
-                _signal_events(
-                    OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED
-                )
-            )
-        )
-        return (result, verdict)
 
     with contextlib.ExitStack() as stack:
         stack.enter_context(
-            patch("cw.codex_background.run_review_with_fix_loop", side_effect=_step3)
+            patch(
+                "cw.codex_background.run_review_with_fix_loop",
+                return_value=(result, verdict),
+            )
         )
         stack.enter_context(
             patch("cw.codex_background.render_verdict_comment", return_value=rendered)
@@ -3305,7 +3334,7 @@ def _verdict_run(
             else None
         )
         _run(sid=sid, task=task, worktree=worktree, client=_client(worktree))
-    return post_mock, seen_at_step3
+    return post_mock
 
 
 def test_verdict_post_passes_the_signal_identity(
@@ -3313,7 +3342,7 @@ def test_verdict_post_passes_the_signal_identity(
 ) -> None:
     worktree = make_git_repo("wt-3055-verdict")
 
-    post_mock, _ = _verdict_run(worktree, "bg-3055-v")
+    post_mock = _verdict_run(worktree, "bg-3055-v")
 
     assert post_mock is not None
     kwargs = post_mock.call_args.kwargs
@@ -3357,91 +3386,21 @@ def test_unparseable_post_passes_the_hoisted_head_sha(
     assert f"reviewed_sha={head}" in stamp
 
 
-@pytest.mark.parametrize(("tracker", "expected"), [("linear", 1), (None, 1)])
-def test_case_b_fires_once_before_step3_on_non_github(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-    tracker: str | None,
-    expected: int,
+@pytest.mark.parametrize("tracker", ["linear", "github-issues", None])
+def test_a_review_never_emits_the_retired_undelivered_event(
+    tmp_config_dir: Path, make_git_repo: Callable[[str], Path], tracker: str | None
 ) -> None:
-    worktree = make_git_repo("wt-3055-caseb")
+    """#3712: a non-GitHub review reads the snapshot now, so the retired
+    ``review.operator_context_undelivered`` is recorded on no tracker."""
+    worktree = make_git_repo("wt-3712-retired")
     if tracker is not None:
         _write_tracker_config(worktree, tracker)
 
-    _, seen_at_step3 = _verdict_run(worktree, "bg-3055-b")
-
-    events = _signal_events(OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED)
-    assert len(events) == expected
-    assert seen_at_step3 == [expected]
-
-
-def test_case_b_does_not_fire_on_github(
-    tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
-) -> None:
-    worktree = make_git_repo("wt-3055-gh")
-    _write_tracker_config(worktree, "github-issues")
-
-    _verdict_run(worktree, "bg-3055-gh")
+    _verdict_run(worktree, "bg-3712-retired")
 
     assert (
         _signal_events(OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED) == []
     )
-
-
-def test_case_b_fires_once_per_session(
-    tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
-) -> None:
-    """The emit sits at run level, outside the fix loop (which reruns the
-    per-cycle review pass): one event per session, naming that session."""
-    worktree = make_git_repo("wt-3055-cycles")
-    _write_tracker_config(worktree, "linear")
-
-    _verdict_run(worktree, "bg-3055-c1")
-    _verdict_run(worktree, "bg-3055-c2")
-
-    events = _signal_events(OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED)
-    assert [e.payload["session_id"] for e in events] == ["bg-3055-c1", "bg-3055-c2"]
-
-
-def _completed_events() -> list[OrchestratorEvent]:
-    return _signal_events(OrchestratorEventType.SESSION_COMPLETED)
-
-
-@pytest.mark.parametrize("patch_post", [True, False])
-def test_signal_write_failure_never_changes_the_review(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-    patch_post: bool,
-) -> None:
-    """A15: a failing Case B (before Step 3) and Case A (after Step 4) emit
-    leaves the persisted result, the completion event and the row untouched."""
-    worktree = make_git_repo("wt-3055-signal-fail")
-    _write_tracker_config(worktree, "linear")
-    _verdict_run(worktree, "bg-3055-ok", patch_post=patch_post)
-    expected = load_state().sessions[0].last_result
-    assert expected is not None
-
-    with (
-        patch(
-            "cw.codex_review_signals.record_event",
-            side_effect=OSError("inbox locked"),
-        ) as signal_mock,
-        patch(
-            "cw.codex_background.revert_claimed_row_after_unexpected_error"
-        ) as revert_mock,
-    ):
-        # Different text: an identical retry would dedup into a skipped event.
-        _verdict_run(worktree, "bg-3055-fail", patch_post=patch_post, rendered="r2")
-
-    persisted = load_state().sessions[0].last_result
-    assert persisted is not None
-    assert {k: v for k, v in persisted.items() if k != "session_id"} == {
-        k: v for k, v in expected.items() if k != "session_id"
-    }
-    revert_mock.assert_not_called()
-    # After O3 a successful enqueue emits nothing, so only Case B fires.
-    assert signal_mock.call_count == 1
-    assert len(_completed_events()) == 2
 
 
 def test_enqueue_fault_never_reverts_a_persisted_review(
@@ -3639,3 +3598,97 @@ def test_gate_tokens_ride_the_final_result_exactly_once(
     friction = persisted["friction_highlights"]
     assert isinstance(friction, list)
     assert friction.count(_GATES_NONE_FRICTION) == 1
+
+
+# ---------------------------------------------------------------------------
+# #3760: the courier rides the one shared snapshot context
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("isolated_backend_layers", "project_walk_stops_at_state_dir")
+def test_the_review_stage_builds_one_refreshing_context_with_a_courier(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One context carries ``refresh=True`` and a courier over the stage's runner.
+
+    The same object reaches the codex loop and the pre-loop confirm resume, so
+    a claude confirm round run from the codex stage refreshes through the
+    codex runner once per pass (#3760).
+    """
+    from cw.codex_runner import CodexRunResult
+    from cw.tracker_io._prompt import REFRESH_TURN_MARKER
+    from tests._backend_mcp_helpers import stage_mcp_config
+    from tests._shared.bindings_builders import bindings_linear_mcp
+    from tests._shared.ticket_context import seeded_row
+    from tests._tool_fakes import (
+        ScriptedCodexRunner,
+        stdin_contains,
+        tracker_io_refresh_result,
+    )
+
+    stage_mcp_config(monkeypatch, tmp_path, "codex", "enabled")
+    worktree, _origin = make_git_repo_with_origin("wt-bg-3760-courier")
+    sid = "bg-3760"
+    _seed_session(sid)
+    returned = _clean_result(
+        worktree, "T-3760", sha=git_in(worktree, "rev-parse", "HEAD")
+    )
+    client = ClientConfig(
+        name="test",
+        workspace_path=worktree,
+        default_branch="main",
+        bindings=bindings_linear_mcp(operator_ids=["op-1"]),
+    )
+    runner = ScriptedCodexRunner().add(
+        stdin_contains(REFRESH_TURN_MARKER),
+        CodexRunResult(
+            0,
+            "",
+            "",
+            output_file_content=tracker_io_refresh_result(title="COURIER-TITLE-3760"),
+        ),
+    )
+    task = TicketTask(ticket_id="T-3760", client="test", stage=Stage.REVIEW)
+
+    with (
+        patch(
+            "cw.codex_background.context_for_client",
+            wraps=codex_background.context_for_client,
+        ) as ctx_spy,
+        patch(
+            "cw.codex_background.load_effective_config",
+            return_value=OrchestratorConfig(default_codex_fix_loop_enabled=True),
+        ),
+        patch(
+            "cw.codex_background.resume_pending_confirm", return_value=None
+        ) as resume_mock,
+        patch(
+            "cw.codex_background.run_review_with_fix_loop", return_value=returned
+        ) as loop_mock,
+        patch("cw.codex_background._post_daemon_verdict_comment"),
+    ):
+        _run_codex_review_and_complete(
+            runner=runner,
+            task=task,
+            worktree=worktree,
+            client=client,
+            wall_clock_budget_seconds=None,
+            sid=sid,
+            sess_name="test/auto-dev/T-3760",
+            config_model=None,
+            config_reasoning_effort=None,
+        )
+
+    (call,) = ctx_spy.call_args_list
+    assert call.kwargs["refresh"] is True
+    courier = call.kwargs["courier"]
+    assert courier is not None
+    shared = loop_mock.call_args.kwargs["snapshots"]
+    assert resume_mock.call_args.kwargs["snapshots"] is shared
+    # The captured courier runs a refresh turn through the stage's runner.
+    snapshot = courier(seeded_row(), client)
+    assert snapshot.title == "COURIER-TITLE-3760"
+    assert len(runner.review_calls) == 1

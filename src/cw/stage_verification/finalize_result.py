@@ -28,7 +28,10 @@ from cw.auto_dev_result.parse import (
     BLOCKER_REASON_NO_RESULT_EMITTED,
     BLOCKER_REASON_VALIDATION_FAILED,
 )
-from cw.auto_dev_result.schema._vocab import AGENT_BLOCK_BLOCKER_REASON
+from cw.auto_dev_result.schema._vocab import (
+    AGENT_BLOCK_BLOCKER_REASON,
+    CODEX_MUST_FIX_FINDINGS,
+)
 from cw.codex_review import (
     STAGE4A_MERGE_GATE,
     STAGE5_POST_CREATE,
@@ -43,6 +46,10 @@ if TYPE_CHECKING:
     from cw.auto_dev_result import PlanSource, ScopeTier, StageReached
     from cw.local_runner import GitFacts
 
+#: ``CODEX_MUST_FIX_FINDINGS`` is imported above from its one definition in
+#: ``cw.auto_dev_result.schema._vocab``; ``finalize_gates`` reads it from here.
+__all__ = ["CODEX_MUST_FIX_FINDINGS"]
+
 #: New reasons owned by the codex FINALIZE executor (registered in ``_vocab``).
 PR_ALREADY_TERMINAL: Final = "pr_already_terminal"
 MERGE_CONFLICT_POST_PUSH: Final = "merge_conflict_post_push"
@@ -55,7 +62,6 @@ OPERATOR_UNAVAILABLE: Final = "operator_unavailable"
 PRIOR_PIPELINE_PR_OPEN: Final = "prior_pipeline_pr_open"
 PUSH_AUTH_FAILED: Final = "push_auth_failed"
 IMPL_NOT_PUSHED: Final = "impl_not_pushed"
-CODEX_MUST_FIX_FINDINGS: Final = "codex_must_fix_findings"
 
 #: The park reason for a PR left unarmed while mapped CI checks are not green
 #: (#3618); restated as a literal in ``cw.auto_dev_result.schema._vocab`` and

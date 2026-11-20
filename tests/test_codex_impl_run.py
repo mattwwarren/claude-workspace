@@ -23,12 +23,13 @@ from freezegun import freeze_time
 
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_driver import run_codex_impl_stage
+from cw.codex_impl import _run as impl_run
 from cw.codex_impl._argv import ImplArgvPolicyError
 from cw.codex_plan._argv import PLAN_READ_ONLY_ARGV, build_plan_argv
 from cw.codex_review import _CODEX_IMPL_BLOCKED_NEXT_ACTIONS, _exec_policy_argv
 from cw.codex_review._roles import _build_generic_codex_argv
 from cw.codex_runner import CodexRunResult
-from cw.config import load_state, state_dir
+from cw.config import get_client, load_state, state_dir
 from cw.contract_manifest import RenderError
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.dispatch import apply_staged_decision
@@ -38,6 +39,7 @@ from cw.models import (
     ClientConfig,
     DevQueueStore,
     LaneConfig,
+    OrchestratorEventType,
     QueueItemStatus,
     SandboxMode,
     Stage,
@@ -46,11 +48,14 @@ from cw.models import (
 from cw.models.orchestrator_config.stage import ModelPrice
 from cw.models.review_feedback import ReviewFeedback
 from cw.models.usage import UsageStage, UsageState, UsageUnavailableReason
+from cw.scope_grants import review_policy_fingerprint
 from cw.stage_verification.impl_block import ImplBlock
 from cw.stage_verification.push import SYNTHETIC_MISMATCH_PREFIX
+from cw.ticket_snapshot import TicketSnapshot, normalize_ticket_id, write_snapshot
 from cw.tracker import TRACKER_LINEAR
 from cw.tracker_io._argv import build_tracker_io_argv, comment_tools_for
-from tests._backend_mcp_helpers import codex_tracker_client
+from cw.tracker_io._prompt import REFRESH_TURN_MARKER
+from tests._backend_mcp_helpers import codex_tracker_client, stage_mcp_config
 from tests._codex_review_helpers import (
     _install_pre_commit_hook,
     assert_clean_after_refusal,
@@ -59,9 +64,13 @@ from tests._codex_review_helpers import (
     install_home_scope_script,
     seed_codex_impl_run,
 )
+from tests._shared.bindings_builders import bindings_linear_mcp
 from tests._shared.cli_preflight import _write_tracker_config
 from tests._shared.git_repos import commit_tracked_file, git_in, push_commit_to_origin
 from tests._shared.review_builders import _make_finding, write_review_verdict_envelope
+from tests._shared.scope_grant_builders import GRANT_SLUG, make_grant
+from tests._shared.ticket_context import make_comment, make_snapshot, make_snapshot_from
+from tests._ticket_view_helpers import events_of
 from tests._tool_fakes import (
     FakeGhCli,
     ScriptedCodexRunner,
@@ -70,6 +79,7 @@ from tests._tool_fakes import (
     impl_sentinel,
     impl_turn_result,
     stdin_contains,
+    tracker_io_refresh_result,
 )
 from tests.test_codex_plan_run import (
     SID,
@@ -81,6 +91,8 @@ from tests.test_codex_plan_run import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+
+    from cw.models import TicketTask
 
 pytestmark = pytest.mark.usefixtures("isolated_backend_layers")
 
@@ -184,12 +196,20 @@ def harness(
         scope: tuple[int, str, str] | None = (0, SCOPE_PASS, ""),
         branch: str = BRANCH,
         gh_head: str | None = None,
+        snapshot: TicketSnapshot | None = None,
+        seed_snapshot: bool = True,
     ) -> Harness:
         if repair:
             worktree, origin = make_git_repo_with_origin("wt-impl", branch=branch)
         else:
             worktree, origin = fresh_impl_repo(make_git_repo, "wt-impl", branch)
         updates: dict[str, object] = {"plan_source": "generated"}
+        if seed_snapshot:
+            # IMPL runs on the stage-entry snapshot: seed one the row carries.
+            updates["snapshot_digest"] = write_snapshot(
+                snapshot
+                or make_snapshot(ticket_id=normalize_ticket_id(TICKET), client="test")
+            )
         if repair:
             updates["branch"] = branch
             updates["review_feedback"] = ReviewFeedback(
@@ -415,16 +435,232 @@ def test_a_sandbox_policy_violation_is_a_stage_fault(
 # --- pre-turn blocks ------------------------------------------------------------
 
 
-def test_non_github_tracker_parks_tracker_mcp_unavailable_pre_dispatch(
+def _tracked_client(tmp_path: Path, system: str, **update: object) -> ClientConfig:
+    """A client named like the seeded row, tracking on *system* in its workspace."""
+    client = codex_tracker_client(tmp_path, None)
+    _write_tracker_config(client.workspace_path, system)
+    return client.model_copy(update={"name": "test", **update})
+
+
+def test_linear_impl_completes_from_the_snapshot_with_no_mcp(
     harness: Callable[..., Harness], tmp_path: Path
 ) -> None:
     h = harness()
-    client = codex_tracker_client(tmp_path, None)
-    h.client = client.model_copy(update={"name": "test"})
-    _write_tracker_config(client.workspace_path, TRACKER_LINEAR)
+    h.turn()
+    h.client = _tracked_client(tmp_path, TRACKER_LINEAR)
     result = h.run()
-    _assert_block(result, "tracker_mcp_unavailable_pre_dispatch")
+    assert result.status == "stage_complete"
+    (call,) = h.impl_calls
+    assert "Authored test ticket body." in str(call["stdin"])
+    assert h.gh.calls == []
+    refresh_events = events_of(OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED)
+    assert [e.payload["reason"] for e in refresh_events] == ["no_binding"]
+
+
+def _courier_client(tmp_path: Path) -> ClientConfig:
+    """A Linear client with a codex MCP binding and one operator id (#3760)."""
+    client = _tracked_client(tmp_path, TRACKER_LINEAR)
+    return client.model_copy(
+        update={"bindings": bindings_linear_mcp(operator_ids=["operator-1"])}
+    )
+
+
+def _refresh_reply(**kwargs: Any) -> CodexRunResult:
+    return CodexRunResult(
+        0, "", "", output_file_content=tracker_io_refresh_result(**kwargs)
+    )
+
+
+def _argv_of(call: dict[str, object]) -> list[str]:
+    argv = call["argv"]
+    assert isinstance(argv, list)
+    return [str(a) for a in argv]
+
+
+def _refresh_calls(h: Harness) -> list[dict[str, object]]:
+    return [c for c in h.runner.calls if REFRESH_TURN_MARKER in str(c["stdin"])]
+
+
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
+def test_an_mcp_impl_refreshes_through_a_courier_turn_before_the_impl_turn(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage_mcp_config(monkeypatch, tmp_path, "codex", "enabled")
+    h = harness()
+    h.turn()
+    h.runner.add(
+        stdin_contains(REFRESH_TURN_MARKER),
+        _refresh_reply(body="COURIER-BODY-3760"),
+    )
+    h.client = _courier_client(tmp_path)
+
+    result = h.run()
+
+    assert result.status == "stage_complete"
+    (refresh,) = _refresh_calls(h)
+    (impl,) = h.impl_calls
+    assert h.runner.calls.index(refresh) < h.runner.calls.index(impl)
+    assert "COURIER-BODY-3760" in str(impl["stdin"])
+    assert events_of(OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED) == []
+
+
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
+def test_the_refresh_does_not_depend_on_the_impl_harness_having_the_tracker_mcp(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage_mcp_config(monkeypatch, tmp_path, "codex", "enabled")
+    h = harness()
+    h.turn()
+    h.runner.add(stdin_contains(REFRESH_TURN_MARKER), _refresh_reply())
+    h.client = _courier_client(tmp_path)
+
+    h.run()
+
+    (refresh,) = _refresh_calls(h)
+    (impl,) = h.impl_calls
+    refresh_argv = _argv_of(refresh)
+    impl_argv = _argv_of(impl)
+    assert (
+        'mcp_servers.linear.enabled_tools=["get_issue","list_comments"]' in refresh_argv
+    )
+    assert "mcp_servers.linear.enabled=false" in impl_argv
+
+
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
+def test_a_failed_courier_refresh_continues_on_the_last_snapshot(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage_mcp_config(monkeypatch, tmp_path, "codex", "enabled")
+    h = harness()
+    h.turn()
+    h.runner.add(
+        stdin_contains(REFRESH_TURN_MARKER),
+        CodexRunResult(0, "", "", output_file_content=None, timed_out=True),
+    )
+    h.client = _courier_client(tmp_path)
+
+    result = h.run()
+
+    assert result.status == "stage_complete"
+    (impl,) = h.impl_calls
+    assert "Authored test ticket body." in str(impl["stdin"])
+    (degraded,) = events_of(OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED)
+    assert degraded.payload["kind"] == "refresh_failed"
+    assert degraded.payload["reason"] == "turn_failed"
+    assert degraded.payload["stage"] == "impl"
+
+
+def test_the_snapshot_refresh_runs_before_the_guards(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    h.turn()
+    order: list[str] = []
+    real_snapshot, real_guards = impl_run.snapshot_for_stage, impl_run._guards
+
+    def _snapshot(*args: Any, **kwargs: Any) -> object:
+        order.append("snapshot")
+        return real_snapshot(*args, **kwargs)
+
+    def _guards(run: Any) -> object:
+        order.append("guards")
+        return real_guards(run)
+
+    with (
+        patch("cw.codex_impl._run.snapshot_for_stage", _snapshot),
+        patch("cw.codex_impl._run._guards", _guards),
+    ):
+        h.run()
+    assert order[:2] == ["snapshot", "guards"]
+
+
+def test_a_failed_refresh_continues_on_the_last_snapshot_with_one_degraded_event(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    h = harness()
+    h.turn()
+    h.client = _tracked_client(tmp_path, "github-issues")
+    result = h.run()
+    assert result.status == "stage_complete"
+    (call,) = h.impl_calls
+    assert "Authored test ticket body." in str(call["stdin"])
+    (degraded,) = events_of(OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED)
+    assert degraded.payload["kind"] == "refresh_failed"
+    assert degraded.payload["reason"] == "gh_failed"
+    assert degraded.payload["stage"] == "impl"
+
+
+def test_a_row_without_a_snapshot_digest_blocks_plan_missing_context(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness(seed_snapshot=False)
+    result = h.run()
+    _assert_block(result, "plan_missing_context")
+    assert result.blocker is not None
+    assert "no usable ticket snapshot" in result.blocker.details
+    assert "gh could not fetch" not in result.blocker.details
     assert h.runner.calls == []
+    assert h.impl_calls == []
+
+
+def test_a_snapshot_that_fails_the_trust_read_blocks_plan_missing_context(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness(task_updates={"snapshot_digest": "0" * 64})
+    result = h.run()
+    _assert_block(result, "plan_missing_context")
+    assert result.blocker is not None
+    assert "no usable ticket snapshot" in result.blocker.details
+    assert h.runner.calls == []
+    (degraded,) = events_of(OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED)
+    assert degraded.payload["kind"] == "read_untrusted"
+
+
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
+def test_an_absent_plan_is_recovered_from_the_snapshot_with_a_friction_token(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    approved = "<!-- plan-spec-reviewed: 2026-11-19 -->\n" + PLAN
+    snapshot = make_snapshot_from(
+        [make_comment("p1", body=approved, author_id="operator-1")],
+        ticket_id=normalize_ticket_id(TICKET),
+        client="test",
+    )
+    h = harness(plan=None, snapshot=snapshot)
+    h.turn()
+    # The courier refresh (#3760) returns the same operator comment.
+    h.runner.add(
+        stdin_contains(REFRESH_TURN_MARKER),
+        _refresh_reply(
+            comments=[{"id": "p1", "author_id": "operator-1", "body": approved}]
+        ),
+    )
+    client = _tracked_client(tmp_path, TRACKER_LINEAR)
+    h.client = client.model_copy(
+        update={"bindings": bindings_linear_mcp(operator_ids=["operator-1"])}
+    )
+    result = h.run()
+    assert result.status == "stage_complete"
+    assert "plan_recovered: snapshot" in result.friction_highlights
+    assert (h.worktree / ".cw" / "plan.md").read_text(encoding="utf-8") == approved
+
+
+def test_no_recovery_source_leaves_no_friction_token(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness(plan=None)
+    result = h.run()
+    _assert_block(result, "plan_missing")
+    assert result.blocker is not None
+    assert "redacted text" in result.blocker.details
+    assert "#3530" not in result.blocker.details
+    assert not [f for f in result.friction_highlights if "plan_recovered" in f]
 
 
 def test_plan_absent_non_repair_row_blocks_plan_missing(
@@ -446,16 +682,6 @@ def test_docs_root_missing_blocks_plan_missing_context(
         "cw.codex_plan._prompt._checkout_commands_dir", lambda *_a, **_k: None
     )
     h = harness()
-    result = h.run()
-    _assert_block(result, "plan_missing_context")
-    assert h.runner.calls == []
-
-
-def test_ticket_prefetch_failure_blocks_plan_missing_context(
-    harness: Callable[..., Harness],
-) -> None:
-    h = harness()
-    h.gh.reply("issue", "view", TICKET, "--json", "body", returncode=1)
     result = h.run()
     _assert_block(result, "plan_missing_context")
     assert h.runner.calls == []
@@ -718,6 +944,47 @@ def test_scope_conformance_drift_parks_plan_scope_drift(
     assert result.blocker is not None
     assert "z/extra.py" in result.blocker.details
     assert_clean_after_refusal(h.worktree, start)
+
+
+def test_a_stored_scope_ledger_is_carried_before_gate_2_reads_the_transport(
+    harness: Callable[..., Harness], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3772: the detached driver re-loads a row whose transport the spawn-success
+    stamp cleared, so ``_prepare`` re-derives it from the ledger before
+    ``approved_extra`` (and so gate 2) reads it."""
+    h = harness()
+    head = h.head()
+    store = load_dev_queue()
+    row = store.tasks[0]
+    assert row.scope_drift_approved_extra_files is None
+    row.scope_grants = [
+        make_grant(
+            client="test",
+            ticket_id=TICKET,
+            row_created_at=row.created_at,
+            head=head,
+            paths=["z/extra.py"],
+            policy=review_policy_fingerprint(get_client("test").review),
+        )
+    ]
+    save_dev_queue(store)
+    monkeypatch.setattr(impl_run, "_resolve_repo_slug", lambda _path: GRANT_SLUG)
+    seen: list[tuple[list[str] | None, str | None]] = []
+    real_approved_extra = impl_run.approved_extra
+
+    def _spy(worktree: Path, task: TicketTask) -> tuple[list[str], list[str]]:
+        seen.append(
+            (task.scope_drift_approved_extra_files, task.scope_drift_approved_head)
+        )
+        return real_approved_extra(worktree, task)
+
+    monkeypatch.setattr(impl_run, "approved_extra", _spy)
+    h.turn()
+
+    result = h.run()
+
+    assert result.status == "stage_complete"
+    assert seen == [(["z/extra.py"], head)]
 
 
 def test_quality_gate_failure_parks_impl_failed_with_gate_output(

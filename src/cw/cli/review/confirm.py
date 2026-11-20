@@ -62,6 +62,7 @@ from cw.review_convergence import (
     verify_diff_base,
     worktree_state,
 )
+from cw.ticket_snapshot import DEFAULT_SNAPSHOT_CONTEXT, context_for_client
 from cw.worktree import resolve_task_worktree
 
 from ._group import review
@@ -74,6 +75,8 @@ if TYPE_CHECKING:
     from cw.models import TicketTask
     from cw.review_convergence import ResolutionSpec
     from cw.review_findings import CapturedDiff, ReviewVerdict
+    from cw.ticket_snapshot import SnapshotContext
+    from cw.ticket_snapshot._refresh import CourierFetch
 
 #: Exit code of a confirm round whose backend is down (R19). A code of its own:
 #: exit 1 is shared with ``handle_errors`` and Python's uncaught-exception exit.
@@ -239,6 +242,7 @@ def _run_round(
     model: str | None,
     reasoning_effort: str | None,
     resolution: ResolutionSpec | None = None,
+    snapshots: SnapshotContext = DEFAULT_SNAPSHOT_CONTEXT,
 ) -> RoundOutcome:
     """One codex review pass, no fix loop and no cw-imposed deadline (R20).
 
@@ -282,6 +286,7 @@ def _run_round(
                 fix_loop_enabled=False,
                 max_prompt_chars=CODEX_MAX_PROMPT_CHARS,
                 resolution=resolution,
+                snapshots=snapshots,
             )
     except ReviewInputTooLargeError as exc:
         _round_failed(exc.cause, str(exc), _CODEX, extra=exc.payload())
@@ -298,6 +303,7 @@ def _run_claude_round(
     base_ref: str,
     model: str | None,
     resolution: ResolutionSpec | None = None,
+    snapshots: SnapshotContext = DEFAULT_SNAPSHOT_CONTEXT,
 ) -> RoundOutcome:
     """One Claude review pass (#2791), diffed from *base_ref*, no deadline.
 
@@ -328,6 +334,7 @@ def _run_claude_round(
             session_id=_session_id(task),
             resolution=resolution,
             max_prompt_chars=CODEX_MAX_PROMPT_CHARS if resolution is not None else None,
+            snapshots=snapshots,
         )
     except ReviewInputTooLargeError as exc:
         _round_failed(exc.cause, str(exc), _CLAUDE, extra=exc.payload())
@@ -471,6 +478,21 @@ def require_backend_binary(backend: str) -> None:
         )
 
 
+def _courier_for(backend: str) -> CourierFetch | None:
+    """The MCP refresh courier for a *backend* round (#3760).
+
+    A codex round refreshes an MCP-bound ticket through one read-only codex
+    turn. A claude round keeps ``no_binding`` on a non-GitHub tracker: it has
+    no codex runner to run the turn on. The turn's usage is unrecorded here.
+    """
+    if backend == _CLAUDE:
+        return None
+    from cw.codex_runner import RealCodexRunner
+    from cw.tracker_io import courier_refresher
+
+    return courier_refresher(RealCodexRunner())
+
+
 def run_backend_round(
     *,
     backend: str,
@@ -481,6 +503,7 @@ def run_backend_round(
     model: str | None,
     reasoning_effort: str | None,
     resolution: ResolutionSpec | None = None,
+    snapshots: SnapshotContext | None = None,
 ) -> RoundOutcome:
     """One review round on *backend*; exit 3/4 come from inside (#2980).
 
@@ -488,8 +511,19 @@ def run_backend_round(
     launch a round, so a new round kwarg, a third backend or the effort default
     is changed here once. *reasoning_effort* is codex only; ``None`` is the
     codex default. *resolution* makes it a conflict-resolution round over that
-    spec.
+    spec. *snapshots* (#3712) is how the pass obtains the ticket snapshot.
     """
+    # ``converge delta-confirm`` shares this helper and predates the snapshot
+    # context kwarg. Resolve its omitted context here so resolution rounds
+    # receive the same per-client refresh as regular confirm rounds.
+    if snapshots is None:
+        snapshots = context_for_client(
+            get_client(task.client),
+            worktree,
+            resolve_login=False,
+            refresh=True,
+            courier=_courier_for(backend),
+        )
     if backend == _CLAUDE:
         return _run_claude_round(
             task=task,
@@ -498,6 +532,7 @@ def run_backend_round(
             base_ref=base_ref,
             model=model,
             resolution=resolution,
+            snapshots=snapshots,
         )
     return _run_round(
         task=task,
@@ -511,6 +546,7 @@ def run_backend_round(
             else _default_reasoning_effort()
         ),
         resolution=resolution,
+        snapshots=snapshots,
     )
 
 

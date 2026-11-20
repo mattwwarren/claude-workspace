@@ -81,14 +81,22 @@ from cw.review_finding_dispositions import (
 from cw.review_findings import CapturedDiff
 from cw.review_markers import DISPOSITION_SENTINEL, SETTLE_SECTION_HEADING
 from cw.spawn import _write_hook_context
+from cw.ticket_snapshot import (
+    DEFAULT_SNAPSHOT_CONTEXT,
+    SnapshotContext,
+    render_context,
+    write_context_json,
+)
 from tests import _git_sandbox
 from tests._codex_review_helpers import (
     _doc_json,
     _finding_payload,
     _populate_global_agents_dir,
     _seed_default_branch_config,
+    _serve_comments,
     _task,
     _write,
+    thread_of,
 )
 from tests._shared.git_repos import commit_small_py_files, git_in
 from tests._shared.review_builders import (
@@ -98,6 +106,7 @@ from tests._shared.review_builders import (
     _make_reviewer_doc,
 )
 from tests._shared.session_seeding import _make_ticket_task
+from tests._shared.ticket_context import make_comment, make_snapshot_from
 from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:
@@ -105,6 +114,7 @@ if TYPE_CHECKING:
 
     from cw.codex_review import _ReviewPassInputs
     from cw.models import TicketTask
+    from cw.ticket_snapshot import TicketSnapshot
 
 
 def _write_real_hook_context(worktree: Path, *, pending: bool) -> None:
@@ -148,15 +158,6 @@ class TestCategorizeChangedFiles:
         """#2633: the extracted predicate is the one the categorizer uses."""
         assert is_test_path(path) is expected
         assert _categorize_changed_files([path]).tests is expected
-
-    def test_fetch_ticket_comments_is_reexported(self) -> None:
-        import cw.codex_review
-        import cw.codex_review._context
-        from cw.codex_review._context import core
-
-        assert cw.codex_review._fetch_ticket_comments is core._fetch_ticket_comments
-        assert "_fetch_ticket_comments" in cw.codex_review.__all__
-        assert "_fetch_ticket_comments" in cw.codex_review._context.__all__
 
     def test_plan_names_are_reexported_through_both_facades(self) -> None:
         """#3060: the codex PLAN executor imports both names via cw.codex_review."""
@@ -556,110 +557,68 @@ class TestLoadTicketContext:
 
 
 class TestLoadOperatorComments:
-    """#1730: live comment fetch for the codex review path."""
+    """#1730: the comment thread of the pass's snapshot for the codex review path."""
 
-    def _github_repo(self, tmp_path: Path) -> Path:
-        _write(
-            tmp_path / ".claude" / "project-config.yaml",
-            "tracking:\n  primary:\n    system: github-issues\n",
-        )
-        return tmp_path
+    def test_returns_none_without_a_snapshot(self) -> None:
+        """No readable snapshot (never fetched, or untrusted) binds nothing."""
+        assert _load_operator_comments(*thread_of(None)) is None
 
-    def test_returns_none_when_tracker_unresolvable(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """No project-config.yaml at all -- degrade, never guess a tracker."""
+    def test_returns_none_on_empty_thread(self) -> None:
+        assert _load_operator_comments(*thread_of([])) is None
 
-        def _fail_if_called(*_a: object, **_kw: object) -> None:
-            msg = "must not fetch when the tracker is unknown"
-            raise AssertionError(msg)
-
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments", _fail_if_called
-        )
-        assert _load_operator_comments(tmp_path, "T-1") is None
-
-    def test_returns_none_on_fetch_failure(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """gh failure surfaces as None from fetch_issue_comments -- degrade."""
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: None,
-        )
-        assert _load_operator_comments(self._github_repo(tmp_path), "T-1") is None
-
-    def test_returns_none_on_empty_thread(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments", lambda *_a, **_kw: []
-        )
-        assert _load_operator_comments(self._github_repo(tmp_path), "T-1") is None
-
-    def test_skips_bodiless_comments_and_renders_the_rest(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_skips_bodiless_comments_and_renders_the_rest(self) -> None:
         """A whitespace-only or body-less entry contributes nothing; a comment
         with no author/createdAt still renders under an 'unknown' header."""
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: [
+        snapshot, ctx = thread_of(
+            [
                 {"body": "   "},
                 {"author": {"login": "op"}, "createdAt": "2026-08-10T00:00:00Z"},
                 {"body": "REAL BODY"},
-            ],
+            ]
         )
-        rendered = _load_operator_comments(self._github_repo(tmp_path), "T-1")
-        assert rendered == "### unknown\nREAL BODY"
+        assert _load_operator_comments(snapshot, ctx) == "### unknown\nREAL BODY"
 
-    def test_returns_none_when_every_comment_is_bodiless(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_returns_none_when_every_comment_is_bodiless(self) -> None:
         """A thread of empty bodies is indistinguishable from no thread."""
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: [{"body": ""}],
-        )
-        assert _load_operator_comments(self._github_repo(tmp_path), "T-1") is None
+        assert _load_operator_comments(*thread_of([{"body": ""}])) is None
 
-    def test_joins_multiple_comments_with_blank_line(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_joins_multiple_comments_with_blank_line(self) -> None:
         """#1730: this ticket delivers the full operator thread, not just a
         single comment -- the multi-comment join path must be covered."""
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: [
-                {
-                    "author": {"login": "a"},
-                    "createdAt": "2026-08-10T00:00:00Z",
-                    "body": "BODY1",
-                },
-                {
-                    "author": {"login": "b"},
-                    "createdAt": "2026-08-10T01:00:00Z",
-                    "body": "BODY2",
-                },
-            ],
+        rendered = _load_operator_comments(
+            *thread_of(
+                [
+                    {
+                        "author": {"login": "a"},
+                        "createdAt": "2026-08-10T00:00:00Z",
+                        "body": "BODY1",
+                    },
+                    {
+                        "author": {"login": "b"},
+                        "createdAt": "2026-08-10T01:00:00Z",
+                        "body": "BODY2",
+                    },
+                ]
+            )
         )
-        rendered = _load_operator_comments(self._github_repo(tmp_path), "T-1")
         assert rendered == (
             "### a (2026-08-10T00:00:00Z)\nBODY1\n\n### b (2026-08-10T01:00:00Z)\nBODY2"
         )
 
+    def test_off_github_binds_only_operator_ids(self) -> None:
+        """#3712: off GitHub a comment renders only for an id in operator_ids."""
+        snapshot, _ = thread_of([{"author": {"login": "op"}, "body": "BOUND"}])
+        unbound = SnapshotContext(github=False)
+        bound = SnapshotContext(github=False, operator_ids=("OP",))
+        assert _load_operator_comments(snapshot, unbound) is None
+        assert _load_operator_comments(snapshot, bound) == "### op\nBOUND"
+
     # -- #2210/#2213: pipeline-authored comments never reach the reviewer -----
 
-    def _rendered(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *bodies: str
-    ) -> str | None:
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: [
-                {"author": {"login": "op"}, "body": body} for body in bodies
-            ],
+    def _rendered(self, *bodies: str) -> str | None:
+        return _load_operator_comments(
+            *thread_of([{"author": {"login": "op"}, "body": body} for body in bodies])
         )
-        return _load_operator_comments(self._github_repo(tmp_path), "T-1")
 
     def _pipeline_body(self, *, marker: bool = True) -> str:
         parts = [
@@ -686,58 +645,40 @@ class TestLoadOperatorComments:
         body = "\n".join(parts).rstrip() + "\n"
         return f"{body}\n{AGENT_COMMENT_MARKER}" if marker else body
 
-    def test_marker_bearing_comment_is_dropped_entirely(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_marker_bearing_comment_is_dropped_entirely(self) -> None:
         """#2213: a prior verdict's scope assessment, stale file list and
         MUST_FIX titles are exactly the content that produced byte-identical
         verdicts citing files absent from the diff. None of it may render —
         not just the settle payload #2210 elided."""
-        assert self._rendered(tmp_path, monkeypatch, self._pipeline_body()) is None
+        assert self._rendered(self._pipeline_body()) is None
 
-    def test_self_disclosed_relay_is_dropped_like_a_marked_mirror(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_self_disclosed_relay_is_dropped_like_a_marked_mirror(self) -> None:
         """#2617: an unmarked comment whose own text says it was relayed by an
         orchestrator is agent analysis, so it never renders as operator text."""
         relay = (
             "Posted under the operator's account but authored by an orchestrator "
             "session relaying the operator's words: drop the cache."
         )
-        rendered = self._rendered(
-            tmp_path, monkeypatch, "## Operator: round 1\n\nKeep the cache.", relay
-        )
+        rendered = self._rendered("## Operator: round 1\n\nKeep the cache.", relay)
         assert rendered is not None
         assert "Keep the cache." in rendered
         assert "drop the cache" not in rendered
 
-    def test_unmarked_comment_without_disclosure_still_renders(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_unmarked_comment_without_disclosure_still_renders(self) -> None:
         """#2617 control: an unmarked human comment with no self-disclosure stays."""
-        rendered = self._rendered(
-            tmp_path, monkeypatch, "Please keep the cache, it is on behalf of the user."
-        )
+        rendered = self._rendered("Please keep the cache, it is on behalf of the user.")
         assert rendered is not None
         assert "keep the cache" in rendered
 
-    def test_thread_of_only_pipeline_comments_reads_as_no_thread(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_thread_of_only_pipeline_comments_reads_as_no_thread(self) -> None:
         rendered = self._rendered(
-            tmp_path,
-            monkeypatch,
             self._pipeline_body(),
             f"## Plan posted by Stage 1\n\n{AGENT_COMMENT_MARKER}",
         )
         assert rendered is None
 
-    def test_mixed_thread_keeps_only_operator_comments(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_mixed_thread_keeps_only_operator_comments(self) -> None:
         rendered = self._rendered(
-            tmp_path,
-            monkeypatch,
             "## Operator: round 1\n\nFinding 2 is wrong, ship it.",
             self._pipeline_body(),
             "## Operator: round 2\n\nStill wrong.",
@@ -749,19 +690,15 @@ class TestLoadOperatorComments:
         assert "Codex Review Verdict" not in rendered
         assert AGENT_COMMENT_MARKER not in rendered
 
-    def test_unmarked_lookalike_comment_renders_verbatim(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_unmarked_lookalike_comment_renders_verbatim(self) -> None:
         # An operator may legitimately paste a verdict or a payload themselves;
         # exclusion is provenance-keyed, never content-keyed.
         body = self._pipeline_body(marker=False)
-        rendered = self._rendered(tmp_path, monkeypatch, body)
+        rendered = self._rendered(body)
         assert rendered == f"### op\n{body}"
         assert SETTLE_SECTION_HEADING in rendered
 
-    def test_rendered_blocking_comment_is_dropped_end_to_end(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_rendered_blocking_comment_is_dropped_end_to_end(self) -> None:
         """The real renderer's output, posted with the real marker, is what the
         next round must never see."""
         from cw.codex_review import render_verdict_comment
@@ -775,78 +712,50 @@ class TestLoadOperatorComments:
         assert verdict.blocking is True
         review_text = render_verdict_comment(verdict, fix_loop_enabled=False)
         body = f"{review_text}\n\n{AGENT_COMMENT_MARKER}"
-        assert self._rendered(tmp_path, monkeypatch, body) is None
+        assert self._rendered(body) is None
 
 
 class TestLoadVoidedFindings:
     """#1814: the voided-findings sentinel read, degrading to [] throughout.
 
-    Same tracker gate, same fetch op, and the same never-raise contract as
-    :class:`TestLoadOperatorComments` above — a Stage-3 pass that cannot reach
-    the tracker must still review, it just cannot honor a void it never saw.
+    Same snapshot source and the same never-raise contract as
+    :class:`TestLoadOperatorComments` above — a Stage-3 pass without a readable
+    snapshot must still review, it just cannot honor a void it never saw.
     """
 
-    def _github_repo(self, tmp_path: Path) -> Path:
-        _write(
-            tmp_path / ".claude" / "project-config.yaml",
-            "tracking:\n  primary:\n    system: github-issues\n",
-        )
-        return tmp_path
+    def test_returns_empty_without_a_snapshot(self) -> None:
+        assert _load_voided_findings(*thread_of(None)) == []
 
-    def test_returns_empty_when_tracker_unresolvable(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        def _fail_if_called(*_a: object, **_kw: object) -> None:
-            msg = "must not fetch when the tracker is unknown"
-            raise AssertionError(msg)
+    def test_returns_empty_on_empty_thread(self) -> None:
+        assert _load_voided_findings(*thread_of([])) == []
 
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments", _fail_if_called
-        )
-        assert _load_voided_findings(tmp_path, "T-1") == []
+    def test_returns_empty_when_no_comment_carries_a_sentinel(self) -> None:
+        snapshot, ctx = thread_of([{"author": {"login": "a"}, "body": "just prose"}])
+        assert _load_voided_findings(snapshot, ctx) == []
 
-    def test_returns_empty_on_fetch_failure(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: None,
-        )
-        assert _load_voided_findings(self._github_repo(tmp_path), "T-1") == []
-
-    def test_returns_empty_on_empty_thread(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments", lambda *_a, **_kw: []
-        )
-        assert _load_voided_findings(self._github_repo(tmp_path), "T-1") == []
-
-    def test_returns_empty_when_no_comment_carries_a_sentinel(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: [{"author": {"login": "a"}, "body": "just prose"}],
-        )
-        assert _load_voided_findings(self._github_repo(tmp_path), "T-1") == []
-
-    def test_parses_the_sentinel_out_of_the_comment_thread(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_parses_the_sentinel_out_of_the_comment_thread(self) -> None:
         entry = _make_voided_finding()
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: [
+        snapshot, ctx = thread_of(
+            [
                 {"author": {"login": "a"}, "body": "unrelated send-back"},
                 {"author": None, "body": None},
                 {
                     "author": {"login": "b"},
                     "body": render_voided_findings_block([entry]),
                 },
-            ],
+            ]
         )
-        assert _load_voided_findings(self._github_repo(tmp_path), "T-1") == [entry]
+        assert _load_voided_findings(snapshot, ctx) == [entry]
+
+    def test_off_github_reads_only_operator_id_comments(self) -> None:
+        """#3712: off GitHub the sentinel binds only from an operator id."""
+        entry = _make_voided_finding()
+        snapshot, _ = thread_of(
+            [{"author": {"login": "b"}, "body": render_voided_findings_block([entry])}]
+        )
+        assert _load_voided_findings(snapshot, SnapshotContext(github=False)) == []
+        bound = SnapshotContext(github=False, operator_ids=("b",))
+        assert _load_voided_findings(snapshot, bound) == [entry]
 
     def test_prepare_review_pass_carries_voided_findings(
         self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
@@ -2455,9 +2364,9 @@ class TestPrepareReviewPass:
         repo = self._repo_with_change(
             make_git_repo, "wt-1730-comments", "github-issues"
         )
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: [
+        served = _serve_comments(
+            monkeypatch,
+            [
                 {
                     "author": {"login": "mattwwarren"},
                     "createdAt": "2026-08-10T00:00:00Z",
@@ -2473,36 +2382,23 @@ class TestPrepareReviewPass:
             config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-1730-comments",
+            snapshots=served.ctx,
         )
 
         assert prepared.roles
         for role in prepared.roles:
             assert "SENDBACK-MARKER-1730" in prepared.prompts_by_role[role]
 
-    def test_prepare_review_pass_fetches_comments_only_once(
+    def test_prepare_review_pass_resolves_the_snapshot_only_once(
         self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """#1814 SHOULD_FIX regression guard: one gh call, not two.
-
-        Before the fix, `_load_operator_comments` and `_load_voided_findings`
-        each called `fetch_issue_comments` independently, so every Stage-3
-        pass shelled out to `gh issue view` twice for the identical comment
-        list. `_fetch_ticket_comments` now fetches once and both readers reuse
-        the result — this pins that call count so a future edit that drops
-        the `comments=` passthrough (reintroducing the double-fetch) fails
-        here instead of silently doubling the gh subprocess/API cost again.
-        """
+        """#1814 SHOULD_FIX regression guard: one resolve (one refresh), not one
+        per reader. Every reader of the pass binds against the same snapshot."""
         repo = self._repo_with_change(
             make_git_repo, "wt-1814-fetch-once", "github-issues"
         )
-        calls: list[str] = []
-
-        def _counting_fetch(ticket_id: str, **_kw: object) -> list[dict[str, object]]:
-            calls.append(ticket_id)
-            return [{"author": {"login": "a"}, "body": "some comment"}]
-
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments", _counting_fetch
+        served = _serve_comments(
+            monkeypatch, [{"author": {"login": "a"}, "body": "some comment"}]
         )
 
         _prepare_review_pass(
@@ -2512,23 +2408,21 @@ class TestPrepareReviewPass:
             config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-fetch-once",
+            snapshots=served.ctx,
         )
 
-        assert len(calls) == 1
+        assert served.resolved == ["T-1"]
 
-    def test_prepare_review_pass_omits_comments_when_tracker_not_github(
+    def test_prepare_review_pass_omits_comments_when_no_operator_ids(
         self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Regression guard: a non-github tracker has no fetch op here, so no
-        comment section is rendered and no gh call is attempted."""
+        """Regression guard: off GitHub a snapshot comment binds only for an id
+        in operator_ids, so with none no comment section is rendered."""
         repo = self._repo_with_change(make_git_repo, "wt-1730-linear", "linear")
-
-        def _fail_if_called(*_a: object, **_kw: object) -> None:
-            msg = "fetch_issue_comments must not run for a non-github tracker"
-            raise AssertionError(msg)
-
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments", _fail_if_called
+        served = _serve_comments(
+            monkeypatch,
+            [{"author": {"login": "op"}, "body": "SENDBACK-MARKER-1730"}],
+            github=False,
         )
 
         prepared = _prepare_review_pass(
@@ -2538,10 +2432,12 @@ class TestPrepareReviewPass:
             config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-1730-linear",
+            snapshots=served.ctx,
         )
 
         for role in prepared.roles:
             assert "## Ticket Comments" not in prepared.prompts_by_role[role]
+            assert "SENDBACK-MARKER-1730" not in prepared.prompts_by_role[role]
 
     def test_prepare_review_pass_renders_pending_operator_comment_banner(
         self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
@@ -2550,10 +2446,7 @@ class TestPrepareReviewPass:
         comments to a binding-adjudication banner."""
         repo = self._repo_with_change(make_git_repo, "wt-1730-banner", "github-issues")
         _write_real_hook_context(repo, pending=True)
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: [{"body": "SENDBACK-MARKER-1730"}],
-        )
+        served = _serve_comments(monkeypatch, [{"body": "SENDBACK-MARKER-1730"}])
 
         prepared = _prepare_review_pass(
             _task(),
@@ -2562,6 +2455,7 @@ class TestPrepareReviewPass:
             config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-1730-banner",
+            snapshots=served.ctx,
         )
 
         assert prepared.roles
@@ -2576,10 +2470,7 @@ class TestPrepareReviewPass:
             make_git_repo, "wt-1730-no-banner", "github-issues"
         )
         _write_real_hook_context(repo, pending=False)
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: [{"body": "SENDBACK-MARKER-1730"}],
-        )
+        served = _serve_comments(monkeypatch, [{"body": "SENDBACK-MARKER-1730"}])
 
         prepared = _prepare_review_pass(
             _task(),
@@ -2588,6 +2479,7 @@ class TestPrepareReviewPass:
             config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-1730-no-banner",
+            snapshots=served.ctx,
         )
 
         assert prepared.roles
@@ -2826,9 +2718,7 @@ class TestRowConstraintsInReviewPrompt:
             msg = "no tracker fetch on a non-GitHub tracker"
             raise AssertionError(msg)
 
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments", _no_fetch
-        )
+        monkeypatch.setattr("cw.ticket_snapshot._fetch.fetch_issue_snapshot", _no_fetch)
         prepared = _prepare_review_pass(
             _constrained_task(),
             repo,
@@ -2852,9 +2742,8 @@ class TestRowConstraintsInReviewPrompt:
             "### Binding operator constraint 1 (recorded via `cw review"
             f" constrain`)\n\n{_ROW_CONSTRAINT}\n\n{AGENT_COMMENT_MARKER}"
         )
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: [{"author": {"login": "op"}, "body": mirror}],
+        served = _serve_comments(
+            monkeypatch, [{"author": {"login": "op"}, "body": mirror}]
         )
         prepared = _prepare_review_pass(
             _constrained_task(),
@@ -2863,6 +2752,7 @@ class TestRowConstraintsInReviewPrompt:
             config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-2964-github",
+            snapshots=served.ctx,
         )
 
         for role in prepared.roles:
@@ -3370,87 +3260,53 @@ class TestLoadFindingDispositions:
     the last pass persisted one onto the queue row.
     """
 
-    def _github_repo(self, tmp_path: Path) -> Path:
-        _write(
-            tmp_path / ".claude" / "project-config.yaml",
-            "tracking:\n  primary:\n    system: github-issues\n",
-        )
-        return tmp_path
+    def test_returns_empty_without_a_snapshot(self) -> None:
+        assert _load_finding_dispositions(*thread_of(None)) == ({}, [])
 
-    def test_returns_empty_when_tracker_unresolvable(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        def _fail_if_called(*_a: object, **_kw: object) -> None:
-            msg = "must not fetch when the tracker is unknown"
-            raise AssertionError(msg)
+    def test_returns_empty_when_no_comment_carries_a_sentinel(self) -> None:
+        snapshot, ctx = thread_of([{"author": {"login": "a"}, "body": "just prose"}])
+        assert _load_finding_dispositions(snapshot, ctx) == ({}, [])
 
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments", _fail_if_called
-        )
-        assert _load_finding_dispositions(tmp_path, "T-1") == ({}, [])
-
-    def test_returns_empty_on_fetch_failure(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: None,
-        )
-        assert _load_finding_dispositions(self._github_repo(tmp_path), "T-1") == (
-            {},
-            [],
-        )
-
-    def test_returns_empty_when_no_comment_carries_a_sentinel(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: [{"author": {"login": "a"}, "body": "just prose"}],
-        )
-        assert _load_finding_dispositions(self._github_repo(tmp_path), "T-1") == (
-            {},
-            [],
-        )
-
-    def test_fetches_fresh_and_parses_the_sentinel_out_of_the_thread(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_parses_the_sentinel_out_of_the_thread(self) -> None:
         ledger = _disposition_ledger()
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: [
+        snapshot, ctx = thread_of(
+            [
                 {"author": {"login": "a"}, "body": "unrelated send-back"},
                 {"author": None, "body": None},
                 {
                     "author": {"login": "b"},
                     "body": render_finding_disposition_block(ledger),
                 },
-            ],
+            ]
         )
-        assert _load_finding_dispositions(self._github_repo(tmp_path), "T-1") == (
-            ledger,
-            [],
-        )
+        assert _load_finding_dispositions(snapshot, ctx) == (ledger, [])
 
-    def test_a_record_failing_provenance_is_reported_not_returned(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_a_record_failing_provenance_is_reported_not_returned(self) -> None:
         bad = _disposition_ledger(actor="")
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: [
-                {
-                    "author": {"login": "b"},
-                    "body": render_finding_disposition_block(bad),
-                }
-            ],
+        snapshot, ctx = thread_of(
+            [{"author": {"login": "b"}, "body": render_finding_disposition_block(bad)}]
         )
-        enforceable, refused = _load_finding_dispositions(
-            self._github_repo(tmp_path), "T-1"
-        )
+        enforceable, refused = _load_finding_dispositions(snapshot, ctx)
         assert enforceable == {}
         assert [(r.key, r.missing) for r in refused] == [(next(iter(bad)), ["actor"])]
+
+    def test_off_github_reads_only_operator_id_comments(self) -> None:
+        """#3712: off GitHub the marker binds only from an operator id."""
+        ledger = _disposition_ledger()
+        snapshot, _ = thread_of(
+            [
+                {
+                    "author": {"login": "b"},
+                    "body": render_finding_disposition_block(ledger),
+                }
+            ]
+        )
+        assert _load_finding_dispositions(snapshot, SnapshotContext(github=False)) == (
+            {},
+            [],
+        )
+        bound = SnapshotContext(github=False, operator_ids=("b",))
+        assert _load_finding_dispositions(snapshot, bound) == (ledger, [])
 
 
 class TestRenderAdjudicatedFindingsBlock:
@@ -3642,9 +3498,7 @@ class TestPrepareReviewPassFindingDispositions:
             msg = "no tracker fetch on a non-GitHub tracker"
             raise AssertionError(msg)
 
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments", _no_fetch
-        )
+        monkeypatch.setattr("cw.ticket_snapshot._fetch.fetch_issue_snapshot", _no_fetch)
         ledger = _disposition_ledger()
         prepared = _prepare_review_pass(
             _make_ticket_task(
@@ -3698,6 +3552,7 @@ class TestPrepareReviewPassFindingDispositions:
             config_branch="main",
             runner=FakeCodexRunner(),
             session_id=f"s-2701-newest-{winner}",
+            snapshots=self._ctx,
         )
 
         assert prepared.finding_dispositions == (thread if winner == "thread" else row)
@@ -3721,6 +3576,7 @@ class TestPrepareReviewPassFindingDispositions:
             config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-2701-marker-only",
+            snapshots=self._ctx,
         )
 
         assert prepared.finding_dispositions == fresh
@@ -3729,9 +3585,6 @@ class TestPrepareReviewPassFindingDispositions:
         self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         repo = self._repo(make_git_repo, "wt-1838-stored")
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments", lambda *_a, **_kw: []
-        )
         ledger = _disposition_ledger()
         prepared = _prepare_review_pass(
             _make_ticket_task(
@@ -3757,15 +3610,7 @@ class TestPrepareReviewPassFindingDispositions:
         repo = self._repo(make_git_repo, "wt-1838-merge")
         stored = _disposition_ledger(file="src/cw/stored.py", summary="Stored bug")
         fresh = _disposition_ledger(file="src/cw/fresh.py", summary="Fresh bug")
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: [
-                {
-                    "author": {"login": "op"},
-                    "body": render_finding_disposition_block(fresh),
-                }
-            ],
-        )
+        self._thread(monkeypatch, fresh)
         prepared = _prepare_review_pass(
             _make_ticket_task(
                 ticket_id="T-1", client="test", finding_dispositions=stored
@@ -3775,6 +3620,7 @@ class TestPrepareReviewPassFindingDispositions:
             config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-1838-merge",
+            snapshots=self._ctx,
         )
 
         assert prepared.finding_dispositions == {**stored, **fresh}
@@ -3783,9 +3629,6 @@ class TestPrepareReviewPassFindingDispositions:
         self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         repo = self._repo(make_git_repo, "wt-1838-absent")
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments", lambda *_a, **_kw: []
-        )
         prepared = _prepare_review_pass(
             _task(),
             repo,
@@ -3808,15 +3651,7 @@ class TestPrepareReviewPassFindingDispositions:
         """The merged ledger survives this session: R1's durability half."""
         repo = self._repo(make_git_repo, "wt-1838-persist")
         fresh = _disposition_ledger()
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: [
-                {
-                    "author": {"login": "op"},
-                    "body": render_finding_disposition_block(fresh),
-                }
-            ],
-        )
+        self._thread(monkeypatch, fresh)
         calls: list[dict[str, object]] = []
         monkeypatch.setattr(
             "cw.codex_background._sync_finding_dispositions_to_running_task",
@@ -3830,6 +3665,7 @@ class TestPrepareReviewPassFindingDispositions:
             config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-1838-persist",
+            snapshots=self._ctx,
         )
 
         assert calls == [
@@ -3844,16 +3680,17 @@ class TestPrepareReviewPassFindingDispositions:
     def _thread(
         self, monkeypatch: pytest.MonkeyPatch, *ledgers: dict[str, FindingDisposition]
     ) -> None:
-        monkeypatch.setattr(
-            "cw.codex_review._context.core.fetch_issue_comments",
-            lambda *_a, **_kw: [
+        """Serve one marker comment per ledger as every pass's snapshot."""
+        self._ctx = _serve_comments(
+            monkeypatch,
+            [
                 {
                     "author": {"login": "op"},
                     "body": render_finding_disposition_block(ledger),
                 }
                 for ledger in ledgers
             ],
-        )
+        ).ctx
 
     def _reverted_events(self) -> list[object]:
         return [
@@ -3896,6 +3733,7 @@ class TestPrepareReviewPassFindingDispositions:
             config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-2232-thread-revert",
+            snapshots=self._ctx,
         )
 
         assert self._reverted_events() == [
@@ -3920,6 +3758,7 @@ class TestPrepareReviewPassFindingDispositions:
             config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-2232-thread-settle",
+            snapshots=self._ctx,
         )
 
         assert self._reverted_events() == []
@@ -3947,6 +3786,7 @@ class TestPrepareReviewPassFindingDispositions:
             config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-2232-thread-idempotent",
+            snapshots=self._ctx,
         )
 
         assert self._reverted_events() == []
@@ -3988,6 +3828,7 @@ class TestPrepareReviewPassFindingDispositions:
                 config_branch="main",
                 runner=FakeCodexRunner(),
                 session_id="s-2232-thread-emit-fails",
+                snapshots=self._ctx,
             )
 
         assert prepared.finding_dispositions == withdrawal
@@ -4038,6 +3879,7 @@ class TestPrepareReviewPassFindingDispositions:
                 config_branch="main",
                 runner=FakeCodexRunner(),
                 session_id="s-1838-evict",
+                snapshots=self._ctx,
             )
 
         assert prepared.finding_dispositions == stored
@@ -4074,6 +3916,7 @@ class TestPrepareReviewPassFindingDispositions:
             config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-1838-mixed",
+            snapshots=self._ctx,
         )
 
         assert prepared.finding_dispositions == good
@@ -4100,7 +3943,113 @@ class TestPrepareReviewPassFindingDispositions:
             config_branch="main",
             runner=FakeCodexRunner(),
             session_id="s-1838-replace",
+            snapshots=self._ctx,
         )
 
         assert prepared.finding_dispositions == newer
         assert prepared.refused_dispositions == []
+
+
+class TestPerPassSnapshotRefresh:
+    """#3712: each pass resolves its snapshot first; nothing readable binds nothing."""
+
+    def _repo(self, make_git_repo: Callable[[str], Path], name: str) -> Path:
+        repo = make_git_repo(name)
+        git_in(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+        git_in(repo, "add", "mod.py")
+        git_in(repo, "commit", "-m", "add mod.py")
+        return repo
+
+    def _refreshing(
+        self, repo: Path, snapshots: list[TicketSnapshot]
+    ) -> SnapshotContext:
+        """A context whose ``resolve`` is a refresh: it pops the next snapshot and
+        re-renders ``.cw/context.json`` from it, as ``refresh_snapshot`` does."""
+
+        def _resolve(_task: TicketTask, _stage: str) -> TicketSnapshot:
+            snapshot = snapshots.pop(0)
+            rendered = render_context(snapshot, "d" * 64, materialized_by_session=None)
+            write_context_json(repo, rendered)
+            return snapshot
+
+        return SnapshotContext(github=True, resolve=_resolve)
+
+    def _prompts(self, prepared: Any) -> str:
+        return "\n".join(prepared.prompts_by_role.values())
+
+    def _pass(self, repo: Path, ctx: SnapshotContext, task: TicketTask) -> Any:
+        return _prepare_review_pass(
+            task,
+            repo,
+            "main",
+            config_branch="main",
+            runner=FakeCodexRunner(),
+            session_id="s-3712",
+            snapshots=ctx,
+        )
+
+    def test_a_mid_review_comment_and_retitled_ticket_reach_the_next_pass(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """Acceptance 3 and 13: a comment posted between two passes is in the
+        next pass's prompt, and so are the title and body the refresh
+        re-rendered into ``.cw/context.json`` BEFORE the pass read them."""
+        repo = self._repo(make_git_repo, "wt-3712-midreview")
+        first = make_snapshot_from([], title="OLD-TITLE-3712", body="OLD-BODY-3712")
+        second = make_snapshot_from(
+            [make_comment("c9", body="MID-REVIEW-STEER-3712", author_id="op")],
+            title="NEW-TITLE-3712",
+            body="NEW-BODY-3712",
+        )
+        ctx = self._refreshing(repo, [first, second])
+        task = _task()
+
+        before = self._prompts(self._pass(repo, ctx, task))
+        after = self._prompts(self._pass(repo, ctx, task))
+
+        assert "OLD-TITLE-3712" in before
+        assert "MID-REVIEW-STEER-3712" not in before
+        assert "NEW-TITLE-3712" in after
+        assert "NEW-BODY-3712" in after
+        assert "OLD-TITLE-3712" not in after
+        assert "MID-REVIEW-STEER-3712" in after
+
+    def test_row_constraints_recorded_between_passes_reach_the_next_pass(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """The row stays authoritative: an entry recorded on it between two passes
+        is in the next pass's prompt whatever the snapshot says."""
+        repo = self._repo(make_git_repo, "wt-3712-row")
+        ctx = self._refreshing(repo, [make_snapshot_from([]), make_snapshot_from([])])
+
+        before = self._prompts(self._pass(repo, ctx, _task()))
+        after = self._prompts(self._pass(repo, ctx, _constrained_task()))
+
+        assert _ROW_CONSTRAINT not in before
+        assert _ROW_CONSTRAINT in after
+
+    def test_no_readable_snapshot_binds_no_comments_but_the_row_still_applies(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """R6: a pass with no readable snapshot reviews with ``ticket=None``-like
+        context. No comment, void or marker binds, while the row's constraints
+        and its durable finding dispositions still reach the prompt."""
+        repo = self._repo(make_git_repo, "wt-3712-nosnap")
+        ledger = _disposition_ledger()
+        task = _make_ticket_task(
+            ticket_id="T-1",
+            client="test",
+            finding_dispositions=ledger,
+            operator_constraints=_constrained_task().operator_constraints,
+        )
+        # The default context resolves through the row, which has no digest.
+        prepared = self._pass(repo, DEFAULT_SNAPSHOT_CONTEXT, task)
+
+        prompts = self._prompts(prepared)
+        assert "## Ticket Comments" not in prompts
+        assert prepared.voided_findings == []
+        assert prepared.refused_dispositions == []
+        assert prepared.finding_dispositions == ledger
+        assert _ROW_CONSTRAINT in prompts
+        assert "## Previously Adjudicated Findings" in prompts

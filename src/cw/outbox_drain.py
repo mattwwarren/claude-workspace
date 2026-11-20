@@ -146,8 +146,8 @@ def _fallback_target(cfg: ClientConfig) -> GhTarget | None:
 
     An unresolved or explicitly resolved GitHub tracker gets ``gh`` in the
     client's git dir. Any other tracker system has no validated ``gh`` path and
-    stays unreachable (``None``). Compares the system string rather than
-    reading ``TrackerClass``, so the branch guard is not widened.
+    stays unreachable (``None``). Compares the ``resolve_tracker`` system string;
+    an allowlisted identity site in the tracker branch guard.
     """
     system = resolve_tracker(cfg.workspace_path)
     if not system or system == TRACKER_GITHUB_ISSUES:

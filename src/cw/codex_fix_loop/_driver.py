@@ -66,6 +66,7 @@ while the loop runs is not seen until the next run.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from typing import TYPE_CHECKING, NamedTuple
@@ -108,7 +109,6 @@ from cw.codex_review import (
     CODEX_MUST_FIX_FINDINGS,
     FIX_LOOP_DIVERGING,
     _capture_diff,
-    _fetch_ticket_comments,
     _load_ticket_context,
 )
 from cw.codex_review._const import FIX_CYCLE_FLOOR_SECONDS
@@ -130,7 +130,11 @@ from cw.stage_verification.growth import (
     DEFAULT_GROWTH_BUDGET_LINES,
     start_loop_budget,
 )
-from cw.tracker import tracker_kind
+from cw.ticket_snapshot import (
+    DEFAULT_SNAPSHOT_CONTEXT,
+    Purpose,
+    bound_comments,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -158,12 +162,33 @@ if TYPE_CHECKING:
         ReviewVerdict,
     )
     from cw.stage_verification.growth import RunGrowth
+    from cw.ticket_snapshot import SnapshotContext, TicketSnapshot
 
 # Maximum fix cycles attempted before parking a still-blocking review.
 _MAX_FIX_CYCLES = 5
 _MUST_FIX = "MUST_FIX"
 
 _log = logging.getLogger(__name__)
+
+
+def _record_cycle0_snapshot(
+    ctx: SnapshotContext, seen: list[TicketSnapshot | None]
+) -> SnapshotContext:
+    """Wrap *ctx*'s resolver so cycle 0's resolved snapshot is kept in *seen*.
+
+    Cycle 0's pass resolves the ticket snapshot once (one stage read, one
+    event); the loop's one-time constraint load reuses that value instead of
+    reading again (#3712). Only the first call is recorded.
+    """
+    inner = ctx.resolve
+
+    def resolve(task: TicketTask, stage: str) -> TicketSnapshot | None:
+        snapshot = inner(task, stage)
+        if not seen:
+            seen.append(snapshot)
+        return snapshot
+
+    return dataclasses.replace(ctx, resolve=resolve)
 
 
 def _remaining_budget(deadline: float | None) -> float | None:
@@ -359,13 +384,18 @@ def _loop_inputs(
     worktree: Path,
     task: TicketTask,
     default_branch: str,
-    operator_login: str | None,
+    snapshots: SnapshotContext,
+    snapshot: TicketSnapshot | None,
 ) -> _LoopInputs:
-    """Resolve the fix loop's per-run inputs once, before cycle 1."""
+    """Resolve the fix loop's per-run inputs once, before cycle 1.
+
+    *snapshot* is the one cycle 0's pass already resolved (#3712); it feeds the
+    one-time constraint load, so setup does no second read and emits no event.
+    """
     _, _, cycle0_changed = _capture_diff(worktree, default_branch)
     cycle0_files = frozenset(cycle0_changed)
     plan_text, ticket_text = _load_ticket_context(worktree)
-    constraints = _load_constraints(worktree, task, operator_login, ticket_text)
+    constraints = _load_constraints(snapshot, snapshots, task, ticket_text)
     return _LoopInputs(
         cycle0_files=cycle0_files,
         # #2767 non-ship-path: hint-only tier kept; ship gates use the new resolver
@@ -376,21 +406,20 @@ def _loop_inputs(
         # #2485: the file fence every fix cycle is held to — plan manifest plus
         # cycle-0 diff; None (no fence) when the plan has no manifest.
         allowed_files=fix_scope_allowlist(plan_text, cycle0_files),
-        # #3055 (A16): the fix loop's own worktree is the root the comment
-        # loader read. A row-only result has body == "", so body (not
+        # #3055 (A16): a row-only result has body == "", so body (not
         # comment_id, which may be None) tells a selected comment apart.
         constraints_source=constraints_source(
             has_comment=constraints is not None and bool(constraints.body),
             row_entries=len(task.operator_constraints),
-            tracker=tracker_kind(worktree),
+            comments_readable=snapshot is not None and snapshots.comments_readable,
         ),
     )
 
 
 def _load_constraints(
-    worktree: Path,
+    snapshot: TicketSnapshot | None,
+    ctx: SnapshotContext,
     task: TicketTask,
-    operator_login: str | None,
     ticket_text: str | None,
 ) -> OperatorConstraints | None:
     """Load the operator's binding constraints once per run (#2633, #2964).
@@ -402,7 +431,7 @@ def _load_constraints(
     where the command ran. *task* is the row snapshot the driver loaded at
     start, so an entry recorded mid-run is seen on the next run.
     """
-    comment = _load_comment_constraints(worktree, task, operator_login, ticket_text)
+    comment = _load_comment_constraints(snapshot, ctx, task, ticket_text)
     entries = task.operator_constraints
     if not entries:
         return comment
@@ -431,9 +460,9 @@ def _load_constraints(
 
 
 def _load_comment_constraints(
-    worktree: Path,
+    snapshot: TicketSnapshot | None,
+    ctx: SnapshotContext,
     task: TicketTask,
-    operator_login: str | None,
     ticket_text: str | None,
 ) -> OperatorConstraints | None:
     """Load the resolutions-comment constraints (#2633).
@@ -441,23 +470,27 @@ def _load_comment_constraints(
     Each fail-open path logs one WARNING so "no constraints" can be told apart
     from "constraints we could not load"; the normal no-marker case is silent.
     """
-    if operator_login is None:
+    if ctx.github and ctx.operator_login is None:
         _log.warning(
             "codex fix loop: operator login unresolved (ticket=%s); marker "
             "comments are ignored (fail closed)",
             task.ticket_id,
         )
         return None
-    comments = _fetch_ticket_comments(worktree, task.ticket_id)
-    if comments is None:
+    if snapshot is None:
         _log.warning(
             "codex fix loop: operator-constraint comments unavailable "
             "(ticket=%s); continuing without operator constraints",
             task.ticket_id,
         )
         return None
+    # Off GitHub the evaluator already kept only operator-id comments, so the
+    # selector skips its login compare there.
     comment = select_constraint_comment(
-        comments, operator_login=operator_login, ticket_text=ticket_text
+        bound_comments(snapshot, ctx, Purpose.CONSTRAINTS),
+        operator_login=ctx.operator_login,
+        ticket_text=ticket_text,
+        prefiltered=not ctx.github,
     )
     if comment is None:
         return None
@@ -500,7 +533,7 @@ def run_review_with_fix_loop(
     stall_cycles: int = _DIVERGENCE_STALL_CYCLES,
     growth_budget_lines: int = DEFAULT_GROWTH_BUDGET_LINES,
     growth_guard_enabled: bool = True,
-    operator_login: str | None = None,
+    snapshots: SnapshotContext = DEFAULT_SNAPSHOT_CONTEXT,
     cumulative_growth_budget_lines: int = DEFAULT_CUMULATIVE_GROWTH_BUDGET_LINES,
     seed_findings: Sequence[AcceptedFinding] = (),
     cycle_observer: CycleObserver | None = None,
@@ -528,11 +561,13 @@ def run_review_with_fix_loop(
     unchanged with zero fix cycles attempted. ``stall_cycles`` (#2633) is the
     lane-resolved divergence stall count (``codex_fix_loop_stall_cycles``);
     ``growth_budget_lines`` and ``growth_guard_enabled`` (#2633) set the
-    in-file growth budget and its lane-resolved switch, and ``operator_login``
-    is the identity whose marker-bearing comment carries binding constraints
-    (``None`` fails closed: no constraints). ``cumulative_growth_budget_lines``
-    (#2648) is the loop-wide net-line budget per originally-found finding,
-    measured from the loop's start commit under the same switch.
+    in-file growth budget and its lane-resolved switch, and ``snapshots``
+    (#3712) says how each review pass obtains the ticket snapshot and carries
+    the identity whose marker-bearing comment carries binding constraints (an
+    unresolved GitHub login fails closed: no constraints).
+    ``cumulative_growth_budget_lines`` (#2648) is the loop-wide net-line
+    budget per originally-found finding, measured from the loop's start
+    commit under the same switch.
 
     ``seed_findings`` (#2807) are accepted MUST_FIX findings from a dirty
     Claude confirm round. Cycle 0 still runs its full review; the seeds are
@@ -582,6 +617,7 @@ def run_review_with_fix_loop(
         else time.monotonic() + wall_clock_budget_seconds
     )
     suppression = None if cycle_observer is None else cycle_observer.suppress
+    cycle0_snapshot: list[TicketSnapshot | None] = []
     result, verdict = _review_cycle_zero(
         runner=runner,
         task=task,
@@ -598,6 +634,7 @@ def run_review_with_fix_loop(
         max_prompt_chars=max_prompt_chars,
         reviewer_sandbox_mode=reviewer_sandbox_mode,
         engine=engine,
+        snapshots=_record_cycle0_snapshot(snapshots, cycle0_snapshot),
     )
     if _should_seed(verdict, result, seed_findings, fix_loop_enabled):
         verdict = seed_verdict(verdict, seed_findings)
@@ -615,7 +652,13 @@ def run_review_with_fix_loop(
     cycle0_unread = unread_from_verdict(verdict)
     # #2877: and what a sharded re-review left unread of its own delta.
     delta_gap = NO_DELTA_GAP
-    inputs = _loop_inputs(worktree, task, default_branch, operator_login)
+    inputs = _loop_inputs(
+        worktree,
+        task,
+        default_branch,
+        snapshots,
+        cycle0_snapshot[0] if cycle0_snapshot else None,
+    )
     cycle0_review = cycle0_review.model_copy(
         update={"operator_constraints_source": inputs.constraints_source}
     )
@@ -742,6 +785,7 @@ def run_review_with_fix_loop(
             max_prompt_chars=max_prompt_chars,
             reviewer_sandbox_mode=reviewer_sandbox_mode,
             engine=engine,
+            snapshots=snapshots,
         )
         if verdict is None or prepared is None:
             # No cycle-N snapshot was persisted (the persist call below is

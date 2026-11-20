@@ -47,6 +47,7 @@ from cw.dispatch.claim.events import (
     emit_adoption_attention_event,
 )
 from cw.dispatch.claim.preflight_reach import BINDING_STAGES
+from cw.dispatch.claim.review_capability import park_review_capability_unmet
 from cw.dispatch.ticket_state_gate import TICKET_CLOSED_CANCEL_REASON
 from cw.dispatch_state_ticket_state import (
     mark_ticket_closed_cancelled,
@@ -377,6 +378,7 @@ def _hold_for_ticket_state(
 def _park_if_pre_dispatch_gated(
     task: TicketTask,
     *,
+    client: ClientConfig,
     client_name: str,
     lane: str,
     closed_ticket_hits: Mapping[str, ClosedTicketHit],
@@ -393,8 +395,9 @@ def _park_if_pre_dispatch_gated(
     write). Then the stale-PR gate (#1862), the tracker-MCP gate (#2442), the
     adopted-head drift gate (#2943), then the large-tier review-approval gate
     (#2773; a deferral hold returns True with no write, like the settle-flag
-    skip above, leaving the row PENDING). Grouped so :func:`_screen_and_claim`
-    stays inside its PLR0911 return budget.
+    skip above, leaving the row PENDING), then the review-capability preflight
+    (#3790), the last gate before claim so its park stays uncharged. Grouped so
+    :func:`_screen_and_claim` stays inside its PLR0911 return budget.
     """
     # The session-end settle may have been marked after the lock-free
     # precompute. Re-check the durable marker under the claim lock so a newly
@@ -427,7 +430,7 @@ def _park_if_pre_dispatch_gated(
         if not approval.defer:
             _park_review_approval_hold(task, client_name, lane, store, approval)
         return True
-    return False
+    return park_review_capability_unmet(task, client, client_name, lane, store)
 
 
 def resolve_occupied_ticket_ids(
@@ -544,6 +547,7 @@ def _screen_and_claim(
         return _CLAIM_SKIPPED
     if _park_if_pre_dispatch_gated(
         task,
+        client=client,
         client_name=client_name,
         lane=lane,
         closed_ticket_hits=closed_ticket_hits,

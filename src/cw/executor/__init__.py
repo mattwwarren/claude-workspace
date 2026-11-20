@@ -41,9 +41,8 @@ from cw.executor.core import (
     codex_capability_diagnosis,
     post_launch_recovery_guidance,
 )
-from cw.executor.local import LocalExecutor, _local_preflight
+from cw.executor.local import LocalExecutor, SnapshotPlanFetcher, _local_preflight
 from cw.executor.opencode import OpencodeExecutor, _opencode_preflight
-from cw.local_runner import GithubIssuePlanFetcher
 
 __all__ = [
     "CODEX_NOT_FOUND",
@@ -53,9 +52,9 @@ __all__ = [
     "ClaudeNativeExecutor",
     "CodexCapabilityDiagnosis",
     "CodexExecutor",
-    "GithubIssuePlanFetcher",
     "LocalExecutor",
     "OpencodeExecutor",
+    "SnapshotPlanFetcher",
     "StageExecutor",
     "_PreflightOK",
     "_codex_preflight",

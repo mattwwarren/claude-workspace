@@ -111,7 +111,6 @@ from cw.codex_review._context._sensitive_files import (
 )
 from cw.codex_review._context._util import _load_optional_text
 from cw.codex_review._context.core import (
-    _fetch_ticket_comments,
     _load_finding_dispositions,
     _load_operator_comments,
     _load_pending_operator_comment_marker,
@@ -144,7 +143,6 @@ __all__ = [
     "_SensitiveHit",
     "_build_reviewer_prompt",
     "_categorize_changed_files",
-    "_fetch_ticket_comments",
     "_hit_from_entry",
     "_load_agent_spec_fallback_gate",
     "_load_claude_md_quality_gates",

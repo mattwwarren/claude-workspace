@@ -103,8 +103,9 @@ def check_plan_present(plan_text: str | None, task: TicketTask) -> ImplBlock | N
     return ImplBlock(
         PLAN_MISSING,
         ".cw/plan.md is absent from the worktree and this row is not an adopted "
-        "repair entry; cw synthesizes no plan (tracker-aware plan recovery is "
-        "not available on the codex IMPL lane, #3530)",
+        "repair entry; cw synthesizes no plan, and plan recovery found no "
+        "approved plan (the outbox entry holds redacted text, so a plan whose "
+        "text was redacted there is not recovered)",
     )
 
 

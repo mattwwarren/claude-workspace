@@ -40,16 +40,20 @@ from cw.models import (
 from cw.models.orchestrator_config.stage import ModelPrice
 from cw.models.usage import UsageStage, UsageState, UsageUnavailableReason
 from cw.stage_verification.finalize_ci_evidence import CiContext
+from cw.ticket_snapshot import normalize_ticket_id, write_snapshot
 from cw.tracker import TRACKER_LINEAR
+from cw.tracker_io._prompt import REFRESH_TURN_MARKER
 from tests._backend_mcp_helpers import codex_tracker_client, stage_mcp_config
 from tests._codex_review_helpers import (
     fresh_finalize_repo,
     install_home_prep_pr_state,
     seed_codex_finalize_run,
 )
+from tests._shared.bindings_builders import bindings_linear_mcp
 from tests._shared.cli_preflight import _write_tracker_config
 from tests._shared.git_repos import git_in
 from tests._shared.outbox_builders import entries_for
+from tests._shared.ticket_context import make_snapshot
 from tests._tool_fakes import (
     FakeCwCli,
     FakeGhCli,
@@ -62,6 +66,7 @@ from tests._tool_fakes import (
     stdin_contains,
     stub_cw_cli,
     stub_prep_pr_finalize,
+    tracker_io_refresh_result,
 )
 from tests.test_codex_plan_run import SID, TICKET, persisted_result, script_gh
 
@@ -78,6 +83,7 @@ FINALIZE_TURN = "Codex FINALIZE addendum"
 PLAN = "## Summary\n\nAdd the widget.\n\n**Scope tier:** small\n"
 LARGE_PLAN = PLAN.replace("small", "large")
 TITLE = "Add the widget"
+_SNAPSHOT_BODY = "Authored test ticket body."
 BODY = "## Summary\n\nAdds the widget.\n"
 
 _BLOCKING = GhReply(0, json.dumps({"convergence": "blocking"}), "")
@@ -276,11 +282,17 @@ def harness(
         gates: tuple[tuple[str, str, float], ...] = (("lint", "true", 5.0),),
         unpushed: int = 0,
         branch: str = BRANCH,
+        seed_snapshot: bool = True,
     ) -> Harness:
         worktree, origin = fresh_finalize_repo(
             make_git_repo, "wt-finalize", branch, unpushed_commits=unpushed
         )
         updates: dict[str, object] = {"plan_source": "generated"}
+        if seed_snapshot:
+            # FINALIZE reads the stage-entry snapshot: seed one the row carries.
+            updates["snapshot_digest"] = write_snapshot(
+                make_snapshot(ticket_id=normalize_ticket_id(TICKET), client="test")
+            )
         if branch != BRANCH:
             updates["branch"] = branch
         updates.update(task_updates or {})
@@ -1547,35 +1559,150 @@ def test_a_non_github_tracker_enqueues_the_link_without_a_tracker_io_turn(
     assert result.status == "shipped"
     assert [r for r in h.gh.records if r.argv[1:3] == ["issue", "comment"]] == []
     assert h.gh_argvs("issue", "view") == []
+    assert _SNAPSHOT_BODY in str(h.turns[0]["stdin"])
     (produced,) = entries_for("test", ticket=TICKET, producer="codex-pr-link")
     assert PR_URL in "".join(produced.parts)
     assert len(h.runner.calls) == 1
     assert not [e for e in comment_events() if e[0] == "review.verdict_comment_posted"]
 
 
-def test_a_non_github_tracker_with_a_disabled_server_parks_pre_dispatch(
+def _ticket_kwarg(spy: Mock) -> object:
+    (call,) = spy.call_args_list
+    return call.kwargs["ticket"]
+
+
+@pytest.mark.parametrize("digest", [None, "0" * 64], ids=["no-digest", "untrusted"])
+def test_no_usable_snapshot_continues_with_no_ticket_text_and_never_blocks(
+    harness: Callable[..., Harness], digest: str | None
+) -> None:
+    h = harness(seed_snapshot=False, task_updates={"snapshot_digest": digest})
+    h.turn()
+    with patch(
+        "cw.codex_finalize._run.render_finalize_prompt",
+        wraps=_run.render_finalize_prompt,
+    ) as spy:
+        result = h.run()
+    assert result.status == "shipped"
+    assert _ticket_kwarg(spy) is None
+    assert _SNAPSHOT_BODY not in str(h.turns[0]["stdin"])
+    degraded = _events([OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED])
+    assert [e[1]["kind"] for e in degraded] == ["read_untrusted"]
+    assert degraded[0][1]["stage"] == "finalize"
+
+
+def test_a_failed_refresh_continues_on_the_last_snapshot_with_one_degraded_event(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    h = harness()
+    client = codex_tracker_client(tmp_path, None)
+    _write_tracker_config(client.workspace_path, "github-issues")
+    h.client = client.model_copy(update={"name": "test"})
+    h.turn()
+    result = h.run()
+    assert result.status == "shipped"
+    assert _SNAPSHOT_BODY in str(h.turns[0]["stdin"])
+    (degraded,) = _events([OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED])
+    assert degraded[1]["kind"] == "refresh_failed"
+    assert degraded[1]["reason"] == "gh_failed"
+
+
+def _courier_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str = "enabled"
+) -> ClientConfig:
+    """A Linear client with a codex MCP binding and one operator id (#3760)."""
+    client = codex_tracker_client(tmp_path, None)
+    _write_tracker_config(client.workspace_path, TRACKER_LINEAR)
+    stage_mcp_config(monkeypatch, tmp_path, "codex", state)
+    return client.model_copy(
+        update={
+            "name": "test",
+            "bindings": bindings_linear_mcp(operator_ids=["operator-1"]),
+        }
+    )
+
+
+def _refresh_reply(**kwargs: Any) -> CodexRunResult:
+    return CodexRunResult(
+        0, "", "", output_file_content=tracker_io_refresh_result(**kwargs)
+    )
+
+
+def _refresh_calls(h: Harness) -> list[dict[str, object]]:
+    return [c for c in h.runner.calls if REFRESH_TURN_MARKER in str(c["stdin"])]
+
+
+def _argv_of(call: dict[str, object]) -> list[str]:
+    argv = call["argv"]
+    assert isinstance(argv, list)
+    return [str(a) for a in argv]
+
+
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
+def test_an_mcp_finalize_refreshes_through_a_courier_turn_before_the_finalize_turn(
     harness: Callable[..., Harness],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     h = harness()
-    h.client = _linear_client(tmp_path, monkeypatch, h.worktree, "disabled")
+    h.client = _courier_client(tmp_path, monkeypatch)
+    h.turn()
+    h.runner.add(
+        stdin_contains(REFRESH_TURN_MARKER), _refresh_reply(body="COURIER-BODY-3760")
+    )
+
     result = h.run()
-    _assert_block(result, "tracker_mcp_unavailable_pre_dispatch")
-    assert h.gh.calls == []
-    assert h.runner.calls == []
+
+    assert result.status == "shipped"
+    (refresh,) = _refresh_calls(h)
+    (turn,) = h.turns
+    assert h.runner.calls.index(refresh) < h.runner.calls.index(turn)
+    assert "COURIER-BODY-3760" in str(turn["stdin"])
+    assert _events([OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED]) == []
 
 
-def test_a_non_github_tracker_with_no_server_parks_pre_dispatch(
-    harness: Callable[..., Harness], tmp_path: Path
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
+def test_the_finalize_refresh_does_not_depend_on_the_stage_having_the_tracker_mcp(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     h = harness()
-    client = codex_tracker_client(tmp_path, None)
-    h.client = client.model_copy(update={"name": "test"})
-    _write_tracker_config(client.workspace_path, TRACKER_LINEAR)
+    h.client = _courier_client(tmp_path, monkeypatch)
+    h.turn()
+    h.runner.add(stdin_contains(REFRESH_TURN_MARKER), _refresh_reply())
+
+    h.run()
+
+    (refresh,) = _refresh_calls(h)
+    (turn,) = h.turns
+    assert 'mcp_servers.linear.enabled_tools=["get_issue","list_comments"]' in _argv_of(
+        refresh
+    )
+    assert "mcp_servers.linear.enabled=false" in _argv_of(turn)
+
+
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
+def test_a_failed_courier_refresh_finalizes_on_the_last_snapshot(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h = harness()
+    h.client = _courier_client(tmp_path, monkeypatch)
+    h.turn()
+    h.runner.add(
+        stdin_contains(REFRESH_TURN_MARKER),
+        CodexRunResult(0, "", "", output_file_content=None, timed_out=True),
+    )
+
     result = h.run()
-    _assert_block(result, "tracker_mcp_unavailable_pre_dispatch")
-    assert h.runner.calls == []
+
+    assert result.status == "shipped"
+    assert _SNAPSHOT_BODY in str(h.turns[0]["stdin"])
+    (degraded,) = _events([OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED])
+    assert degraded[1]["kind"] == "refresh_failed"
+    assert degraded[1]["reason"] == "turn_failed"
+    assert degraded[1]["stage"] == "finalize"
 
 
 # --- the door and the guard -----------------------------------------------------

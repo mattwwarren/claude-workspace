@@ -40,7 +40,10 @@ from cw.models import (
 from cw.models.client import ClientConfig, TrackerMcpGateConfig
 from tests._backend_mcp_helpers import McpStage, stage_mcp_config
 from tests._doctor_helpers import make_stage_pipeline
-from tests._shared.cli_preflight import _write_tracker_config
+from tests._shared.cli_preflight import (
+    _write_project_config_yaml,
+    _write_tracker_config,
+)
 from tests._shared.git_repos import (
     branch_with_file,
     branch_with_settings,
@@ -197,9 +200,25 @@ def _observe(
     }
 
 
-_OLD: dict[str, dict[str, object]] = (
+_CAPTURED: dict[str, dict[str, object]] = (
     json.loads(_FIXTURE.read_text(encoding="utf-8")) if _FIXTURE.exists() else {}
 )
+#: codex FINALIZE reads the ticket snapshot (RFC 0019 T2): the tickets binding is
+#: not needed, so it is never read, parked or warned about. The one intended
+#: divergence from the old gate's capture.
+_NOT_NEEDED: dict[str, object] = {"hit": None, "reads": 0, "warnings": 0}
+
+
+def _is_codex_finalize(key: str) -> bool:
+    kind, *parts = key.split("/")
+    codex = parts[1] == "codex" if kind == "server" else kind == "unbound"
+    return codex and parts[-1] == "finalize"
+
+
+_OLD: dict[str, dict[str, object]] = {
+    key: {**old, **_NOT_NEEDED} if _is_codex_finalize(key) else old
+    for key, old in _CAPTURED.items()
+}
 
 
 @pytest.mark.usefixtures("isolated_backend_layers")
@@ -269,7 +288,7 @@ def test_the_capture_holds_every_unbound_and_claude_shape() -> None:
     assert unbound_hits == {
         f"unbound/linear/{servers}/{stage}"
         for servers in ("unset", "invalid")
-        for stage in ("plan", "finalize")
+        for stage in ("plan",)
     }
     claude_hits = {
         k.split("/")[1]
@@ -594,16 +613,14 @@ class TestScoping:
 
 @pytest.mark.usefixtures("isolated_backend_layers")
 class TestBackendServerGate:
-    @pytest.mark.parametrize("stage", [Stage.PLAN, Stage.FINALIZE])
     @pytest.mark.parametrize(
         "servers", [dict(OPENCODE_SERVERS), {CODEX_BACKEND: "a.b"}]
     )
-    def test_codex_plan_and_finalize_with_unusable_server_is_a_hit(
+    def test_codex_finalize_with_unusable_server_is_not_a_hit(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         servers: dict[str, str],
-        stage: Stage,
     ) -> None:
         (tmp_path / "ws" / ".git").mkdir(parents=True)
         client = reach_client(
@@ -613,7 +630,27 @@ class TestBackendServerGate:
             tracker="linear",
         )
         reads = _count_reads(monkeypatch)
-        (hit,) = _resolve(client, snapshot(stage=stage)).values()
+        assert _resolve(client, snapshot(stage=Stage.FINALIZE)) == {}
+        assert reads == []
+
+    @pytest.mark.parametrize(
+        "servers", [dict(OPENCODE_SERVERS), {CODEX_BACKEND: "a.b"}]
+    )
+    def test_codex_plan_with_unusable_server_is_a_hit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        servers: dict[str, str],
+    ) -> None:
+        (tmp_path / "ws" / ".git").mkdir(parents=True)
+        client = reach_client(
+            tmp_path / "ws",
+            enabled_gate(None, servers=servers),
+            executors=on(CODEX_BACKEND),
+            tracker="linear",
+        )
+        reads = _count_reads(monkeypatch)
+        (hit,) = _resolve(client, snapshot(stage=Stage.PLAN)).values()
         assert _hit_tuple(hit, tmp_path) == [
             BRANCH,
             "clients.yaml tracker_mcp_gate.servers",
@@ -622,13 +659,21 @@ class TestBackendServerGate:
         ]
         assert reads == []
 
+    @pytest.mark.parametrize(
+        "config",
+        [None, 'tracking:\n  primary:\n    system: ""\n'],
+        ids=["absent", "empty-string"],
+    )
     def test_unset_tracker_warns_once_and_never_reads(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
+        config: str | None,
     ) -> None:
         stage_mcp_config(monkeypatch, tmp_path, OPENCODE_BACKEND, "absent")
+        if config is not None:
+            _write_project_config_yaml(tmp_path, config)
         client = reach_client(
             tmp_path,
             enabled_gate(None, servers=dict(OPENCODE_SERVERS)),
@@ -645,6 +690,37 @@ class TestBackendServerGate:
         assert len(warnings) == 1
         assert "opencode:tracker" in warnings[0]
         assert "tracker unset" in warnings[0]
+
+    def test_the_tracker_is_read_once_per_reader(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The memo holds ``None`` too: an unset read must not re-read per call."""
+        from cw.dispatch.claim import preflight_reach
+        from cw.dispatch.claim.preflight_reach import ReachReader, assess_binding
+        from cw.tracker import resolve_tracker
+
+        reads: list[Path] = []
+
+        def _spy(root: Path) -> str | None:
+            reads.append(root)
+            return resolve_tracker(root)
+
+        monkeypatch.setattr(preflight_reach, "resolve_tracker", _spy)
+        client = reach_client(
+            tmp_path, enabled_gate(None, servers=dict(OPENCODE_SERVERS))
+        )
+        reader = ReachReader(client, tmp_path)
+        assess_binding(reader, OPENCODE_BACKEND, Stage.PLAN, "b")
+        assess_binding(reader, OPENCODE_BACKEND, Stage.PLAN, "b")
+        assert len(reads) == 1
+
+        _write_project_config_yaml(
+            tmp_path, "tracking:\n  primary:\n    system: github-issues\n"
+        )
+        github_reader = ReachReader(client, tmp_path)
+        assess_binding(github_reader, OPENCODE_BACKEND, Stage.PLAN, "b")
+        assess_binding(github_reader, OPENCODE_BACKEND, Stage.PLAN, "b")
+        assert len(reads) == 2
 
     def test_unknown_reading_warns_once_naming_the_path(
         self,
@@ -877,7 +953,7 @@ class TestToolNameCheck:
             workspace, {"get": "get_issue", "comment": "save_comment"}
         )
 
-        (hit,) = _resolve(client, snapshot(stage=Stage.FINALIZE)).values()
+        (hit,) = _resolve(client, snapshot(stage=Stage.PLAN)).values()
 
         assert hit.reason is PreflightReason.BINDING_TOOL_MISSING
         assert hit.missing_tools == ("save_comment",)
@@ -930,7 +1006,7 @@ class TestToolNameCheck:
 def test_the_binding_stages_derive_from_stage_needs() -> None:
     from cw.dispatch.claim.preflight_reach import BINDING_STAGES
 
-    assert {Stage.PLAN, Stage.IMPL, Stage.FINALIZE} == BINDING_STAGES
+    assert {Stage.PLAN, Stage.IMPL} == BINDING_STAGES
 
 
 @pytest.mark.parametrize(

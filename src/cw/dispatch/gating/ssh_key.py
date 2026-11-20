@@ -19,11 +19,12 @@ from cw.models import (
 from cw.ssh import check_ssh_key_available, push_remote_scheme, remote_needs_ssh_probe
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from cw.models import (
         ClientConfig,
         DevQueueStore,
+        SessionStatus,
     )
     from cw.ssh import RemoteScheme
 from cw.dispatch.claim import _lane_occupants_for_client, _lane_stats_for_client
@@ -55,6 +56,7 @@ def _emit_ssh_key_skip(
     client: ClientConfig,
     queue_snapshot: DevQueueStore,
     *,
+    session_statuses: Mapping[str, SessionStatus],
     pending_count: int,
     running_count: int,
     cap: int,
@@ -83,7 +85,9 @@ def _emit_ssh_key_skip(
         )
         if warned_ssh_key is not None:
             warned_ssh_key.add(_SSH_KEY_WARN_SENTINEL)
-    lane_occupants = _lane_occupants_for_client(client, queue_snapshot)
+    lane_occupants = _lane_occupants_for_client(
+        client, queue_snapshot, session_statuses=session_statuses
+    )
     record_event(
         OrchestratorEventType.DISPATCH_TICK,
         {
@@ -137,6 +141,7 @@ def _apply_ssh_key_gate(
     client: ClientConfig,
     queue_snapshot: DevQueueStore,
     *,
+    session_statuses: Mapping[str, SessionStatus],
     ssh_key_available: bool | None,
     pending_count: int,
     running_count: int,
@@ -187,6 +192,7 @@ def _apply_ssh_key_gate(
     _emit_ssh_key_skip(
         client,
         queue_snapshot,
+        session_statuses=session_statuses,
         pending_count=pending_count,
         running_count=running_count,
         cap=cap,

@@ -66,3 +66,11 @@ def test_unreadable_yaml_is_emit_only(tmp_path: Path) -> None:
 def test_both_gh_surfaces_satisfy_the_debt_tracker() -> None:
     trackers: list[DebtTracker] = [GhClient(), FakeGh()]
     assert len(trackers) == len({type(t) for t in trackers})
+
+
+def test_linear_constant_reexported_from_debt_filing() -> None:
+    from cw.review_debt_filing import TRACKER_LINEAR as DEBT_LINEAR
+    from cw.tracker import TRACKER_LINEAR
+
+    assert DEBT_LINEAR is TRACKER_LINEAR
+    assert TRACKER_LINEAR == "linear"

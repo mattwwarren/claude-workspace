@@ -12,8 +12,8 @@ import pytest
 from cw.dispatch.gating import context_json
 from cw.dispatch.gating.context_json import _render_context_json_from_snapshot
 from cw.models import OrchestratorEventType
-from cw.ticket_snapshot import snapshot_path, write_snapshot
-from tests._shared.ticket_context import make_snapshot
+from cw.ticket_snapshot import snapshot_path
+from tests._shared.ticket_context import make_snapshot, seeded_row
 from tests._ticket_view_helpers import ACME, ACME_TICKET, events_of, make_task
 
 if TYPE_CHECKING:
@@ -23,8 +23,7 @@ if TYPE_CHECKING:
 def _seeded_task(tmp_path: Path) -> tuple[TicketTask, Path]:
     worktree = tmp_path / "wt"
     worktree.mkdir()
-    digest = write_snapshot(make_snapshot(ticket_id=ACME_TICKET))
-    task = make_task(snapshot_digest=digest)
+    task = seeded_row(make_snapshot(ticket_id=ACME_TICKET), seed=False)
     return task, worktree
 
 

@@ -349,7 +349,9 @@ def _reap_wedge_findings(
         mutation path.
     Class-13 (operator-gated-park, #2739): advisory only. The finding names a
         BLOCKED_ON_USER row parked on a deliberate operator gate that holds a
-        lane slot; ``--reap`` leaves the queue row unchanged and writes no
+        lane slot (its worker is live or its claim unsettled, #3774); a
+        settled park holds none and is not reported. ``--reap`` leaves the
+        queue row unchanged and writes no
         audit row for it. (A session bound to the row is a separate surface,
         reaped only under class 6/8 on its own evidence.) It is listed in the
         running_ticket_ids exclusion set because that set is

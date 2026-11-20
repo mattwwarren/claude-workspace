@@ -13,11 +13,16 @@ from typing import TYPE_CHECKING
 from cw.models import QueueItemStatus, occupies_lane_slot
 
 if TYPE_CHECKING:
-    from cw.models import ClientConfig, DevQueueStore
+    from collections.abc import Mapping
+
+    from cw.models import ClientConfig, DevQueueStore, SessionStatus
 
 
 def _lane_occupants_for_client(
-    client: ClientConfig, queue_snapshot: DevQueueStore
+    client: ClientConfig,
+    queue_snapshot: DevQueueStore,
+    *,
+    session_statuses: Mapping[str, SessionStatus] | None = None,
 ) -> dict[str, list[dict[str, str]]]:
     """Per-lane occupant ``{ticket_id, status}`` list for dispatch.tick payloads.
 
@@ -25,6 +30,9 @@ def _lane_occupants_for_client(
     join over ``client``/``lane``, but returns identifying detail instead
     of counts, so a ``lane_cap_blocked`` reader can name the occupant
     instead of inferring a (possibly phantom) cross-client cap. See #1243.
+
+    *session_statuses* is the tick's ``{session_id: status}`` map (#3774); it
+    lets a settled parked row free its slot. ``None`` means no evidence.
 
     Deliberately a NEW top-level dispatch.tick payload key, never nested
     inside ``lanes`` -- orchestrate.py's ``_extract_lanes`` hard-filters
@@ -38,7 +46,7 @@ def _lane_occupants_for_client(
             for t in queue_snapshot.tasks
             if t.client == client.name
             and t.lane == lane_cfg.name
-            and occupies_lane_slot(t)
+            and occupies_lane_slot(t, session_statuses=session_statuses)
         ]
     return occupants
 
@@ -48,6 +56,7 @@ def _lane_stats_for_client(
     queue_snapshot: DevQueueStore,
     *,
     occupants: dict[str, list[dict[str, str]]] | None = None,
+    session_statuses: Mapping[str, SessionStatus] | None = None,
 ) -> dict[str, dict[str, int]]:
     """Per-lane ``{claimed, running, blocked, signoff, pending}`` counts for
     event payloads.
@@ -55,8 +64,9 @@ def _lane_stats_for_client(
     Why task-based running: RUNNING/BLOCKED_ON_USER tasks carry ``lane``;
     sessions carry ``lane`` as of #594, but occupancy counting stays task-join
     based per ADR-0006 / Phase 4a scope (stamped-but-not-read by the
-    scheduler). BLOCKED_ON_USER occupies its lane slot per ADR-0006, so
-    ``running + blocked + signoff`` is the total occupied count. ``blocked``
+    scheduler), plus a session-status read for parked rows (#3774). A
+    BLOCKED_ON_USER row occupies its lane slot only while its worker is live or
+    claimed, so ``running + blocked + signoff`` is the total occupied count. ``blocked``
     and ``signoff`` are split out so operators can see at a glance why
     claimed=0 when pending>0 (#588, #990). Derives running/blocked/signoff
     from :func:`_lane_occupants_for_client` -- see #1243.
@@ -66,7 +76,9 @@ def _lane_stats_for_client(
     payload) pass it in and avoid a second full scan of ``queue_snapshot.tasks``.
     """
     if occupants is None:
-        occupants = _lane_occupants_for_client(client, queue_snapshot)
+        occupants = _lane_occupants_for_client(
+            client, queue_snapshot, session_statuses=session_statuses
+        )
     stats: dict[str, dict[str, int]] = {}
     for lane_cfg in client.effective_lanes:
         lane_occupants = occupants.get(lane_cfg.name, [])

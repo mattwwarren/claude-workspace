@@ -8,14 +8,17 @@ import pytest
 
 from cw.codex_review import _exec_policy_argv
 from cw.models import SandboxMode
+from cw.models.capabilities import ToolNarrowing
 from cw.models.orchestrator_config.constants import CODEX_BACKEND
 from cw.tracker import TRACKER_LINEAR
 from cw.tracker_io import (
     TRACKER_COMMENT_TOOLS,
     TrackerIoConfigError,
     TrackerIoReason,
+    TurnKind,
     build_tracker_io_argv,
     comment_tools_for,
+    turn_tools,
 )
 from tests._shared.bindings_builders import LINEAR_RENAMED_TOOLS, bindings_linear_mcp
 
@@ -166,3 +169,51 @@ class TestResolvedTicketTools:
             "linear_save_comment",
             "linear_list_comments",
         )
+
+
+class TestRefreshTurnKind:
+    """The T2b read turn: allowlist is the get and list tools only (#3760)."""
+
+    _POST = ("create_comment", "list_comments")
+
+    def test_refresh_kind_value(self) -> None:
+        assert TurnKind.REFRESH == "refresh"
+
+    def test_refresh_allowlist_is_get_and_list(self) -> None:
+        tools = turn_tools(TurnKind.REFRESH, self._POST, get_tool="get_issue")
+        assert tools == ("get_issue", "list_comments")
+
+    def test_refresh_without_a_get_tool_raises(self) -> None:
+        with pytest.raises(ValueError, match="get tool"):
+            turn_tools(TurnKind.REFRESH, self._POST)
+
+    def test_post_and_verify_are_unchanged(self) -> None:
+        assert turn_tools(TurnKind.POST, self._POST) == self._POST
+        assert turn_tools(TurnKind.VERIFY, self._POST) == ("list_comments",)
+        assert turn_tools(TurnKind.POST, self._POST, get_tool="g") == self._POST
+        assert turn_tools(TurnKind.VERIFY, self._POST, get_tool="g") == (
+            "list_comments",
+        )
+
+    def test_per_tool_argv_carries_the_two_read_tools(self) -> None:
+        argv = build_tracker_io_argv(
+            server="linear",
+            tools=turn_tools(TurnKind.REFRESH, self._POST, get_tool="get_issue"),
+            schema_path=_SCHEMA,
+            output_path=_OUT,
+            other_servers=(),
+        )
+        assert 'mcp_servers.linear.enabled_tools=["get_issue","list_comments"]' in argv
+        assert "create_comment" not in " ".join(argv)
+
+    def test_per_server_argv_enables_the_app_and_ignores_tools(self) -> None:
+        argv = build_tracker_io_argv(
+            server="linear",
+            tools=turn_tools(TurnKind.REFRESH, self._POST, get_tool="get_issue"),
+            schema_path=_SCHEMA,
+            output_path=_OUT,
+            other_servers=(),
+            narrowing=ToolNarrowing.PER_SERVER,
+        )
+        assert "apps.linear.default_tools_enabled=true" in argv
+        assert "enabled_tools" not in " ".join(argv)

@@ -62,7 +62,9 @@ a sentinel carries one — and they never share values, so always say which.
 
 - `pending` — eligible for the next dispatch tick.
 - `running` — claimed; a session is, or should be, live. Holds a lane slot.
-- `blocked_on_user` — **parked**: waiting for the orchestrator to triage it. Holds a lane slot.
+- `blocked_on_user` — **parked**: waiting for the orchestrator to triage it. Holds a lane slot
+  only while its worker is live or its claim unsettled; a settled park frees it
+  and shows as `parked=` in `cw dev-queue status` (#3774).
   "Park" is the verb, `blocked_on_user` is the status, and `disposition`
   says why.
 - `awaiting_operator_signoff` — parked for a `--signoff operator` gate before
@@ -197,7 +199,8 @@ a sentinel carries one — and they never share values, so always say which.
   `blocker.depends_on_pr_ref`, an `owner/repo#N` ref that arms a release only
   for the client's own repo. With the id the row parks as `dependency_hold`,
   frees its lane slot, and the serve tick releases it when that PR merges.
-  Without it the park holds its slot and has no release trigger; hold it with
+  Without it the park has no release trigger and frees its slot once its
+  worker is settled (#3774); hold it with
   `cw dev-queue hold <T> --until-pr-merged <N | owner/repo#N>` or
   `--until-ticket-merged <T2>`.)
   `plan_pending_approval` still charges (`auto_adopt_clean_plan` can re-claim

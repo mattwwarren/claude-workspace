@@ -160,6 +160,22 @@ def isolated_backend_layers(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
+def project_walk_stops_at_state_dir() -> None:
+    """Stop the project-layer walk at the test state dir (O2b hermeticity).
+
+    A courier turn's scratch cwd sits under ``state_dir()``, which is not under
+    the test HOME, so the walk would otherwise climb to the developer's real
+    home and read its ``~/.codex/config.toml``. A ``.git`` marker at
+    ``state_dir()`` ends the walk there, the same guard the backend
+    project-chain tests use. Not autouse: a module opts in with
+    ``pytest.mark.usefixtures`` beside ``isolated_backend_layers``.
+    """
+    from cw.config import state_dir
+
+    (state_dir() / ".git").mkdir(parents=True, exist_ok=True)
+
+
+@pytest.fixture
 def tmp_dispatch_dirs(tmp_config_dir: Path) -> Path:
     """Return tmp_path; state isolation is handled by the autouse fixture."""
     return tmp_config_dir

@@ -113,7 +113,10 @@ def snapshot_cmd(
     context = _read_cw_context(str(cwd))
     client = _resolve_client(client_name, context)
     snapshot = _snapshot_for(ticket, client, from_json)
-    record = record_snapshot(snapshot, refresh=refresh)
+    # Only the model-reported stdin path can contradict itself (RFC 0019 R5).
+    record = record_snapshot(
+        snapshot, refresh=refresh, detect_author_conflicts=from_json is not None
+    )
     session = context.get(_CONTEXT_SESSION_KEY) if context is not None else None
     rendered = render_context(
         snapshot,

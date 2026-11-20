@@ -9,10 +9,6 @@ RFC 0019 O3 (#3707) narrowed them. This module now carries:
   ``body_too_long``, ``free_text_ticket``, ``already_posted``). Delivery of an
   enqueued entry is reported by the outbox's own ``outbox.entry_*`` events.
 * :func:`tracker_label`: the ``tracker`` string those events carry.
-* **Case B** -- :func:`undelivered_operator_context`: the review ran without
-  the operator's tracker comments, voided findings and settle markers. Emitted
-  once per session at run level (``codex_background``); the ``_context``
-  loaders stay pure.
 * :func:`constraints_source`: where the fix loop's operator constraints came
   from (``Review.operator_constraints_source``).
 * :func:`emit_confirm_escalated` (#3216): ``review.confirm_escalated`` when a
@@ -39,13 +35,12 @@ from cw.auto_dev_result import OperatorConstraintsSource
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import CODEX_BACKEND, OrchestratorEventType
-from cw.tracker import TRACKER_GITHUB_ISSUES, TrackerClass, resolve_tracker
+from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.models import ClientConfig, TicketTask
-    from cw.tracker import TrackerKind
+    from cw.models import ClientConfig
 
 _log = logging.getLogger(__name__)
 
@@ -67,16 +62,6 @@ COMMON_TURN_FAULTS: tuple[type[Exception], ...] = (
 #: FINALIZE executor's PR-link comment (``pr_link``, #3062).
 VerdictCommentKind = Literal["verdict", "unparseable", "plan", "pr_link"]
 
-#: The ``tracker`` label Case B carries when no tracker is configured.
-UNSET_TRACKER_LABEL = "unset"
-
-#: What a non-GitHub (or unset) tracker withholds from a codex review.
-UNDELIVERED_OPERATOR_CONTEXT: tuple[str, ...] = (
-    "operator_comments",
-    "voided_findings",
-    "settle_markers",
-)
-
 
 def tracker_label(client: ClientConfig) -> str:
     """The ``tracker`` string a skipped event carries: the system, or GitHub when unset.
@@ -87,15 +72,17 @@ def tracker_label(client: ClientConfig) -> str:
 
 
 def constraints_source(
-    *, has_comment: bool, row_entries: int, tracker: TrackerKind
+    *, has_comment: bool, row_entries: int, comments_readable: bool
 ) -> OperatorConstraintsSource:
     """Classify where the operator constraints reaching a codex review came from.
 
     A tracker comment and row entries give ``comment_and_row``; either alone
-    gives ``comment`` or ``row``. Neither gives ``none`` on GitHub (nothing
-    was set) and ``tracker_unreadable`` otherwise (comments could not be read,
-    so their absence proves nothing). *row_entries* counts every
-    ``task.operator_constraints`` entry, operator and plan-derived (A10).
+    gives ``comment`` or ``row``. Neither gives ``none`` when the comments were
+    readable (nothing was set) and ``tracker_unreadable`` otherwise (no
+    readable snapshot, or a non-GitHub tracker with no ``operator_ids``: the
+    comments could not be read, so their absence proves nothing; one WARNING
+    is logged). *row_entries* counts every ``task.operator_constraints`` entry,
+    operator and plan-derived (A10).
     """
     has_row = row_entries > 0
     if has_comment and has_row:
@@ -104,8 +91,12 @@ def constraints_source(
         return OperatorConstraintsSource.COMMENT
     if has_row:
         return OperatorConstraintsSource.ROW
-    if tracker.tracker_class is TrackerClass.GITHUB:
+    if comments_readable:
         return OperatorConstraintsSource.NONE
+    _log.warning(
+        "operator constraint comments unreadable: no readable ticket snapshot, "
+        "or a non-GitHub tracker with no operator_ids"
+    )
     return OperatorConstraintsSource.TRACKER_UNREADABLE
 
 
@@ -184,47 +175,6 @@ def emit_verdict_comment_skipped(
     )
     record_event_best_effort(
         OrchestratorEventType.REVIEW_VERDICT_COMMENT_SKIPPED, payload, ticket_id
-    )
-
-
-def operator_context_undelivered_payload(
-    *, task: TicketTask, client: str, tracker: TrackerKind, session_id: str
-) -> dict[str, object]:
-    """The ``review.operator_context_undelivered`` payload, in documented order."""
-    row_constraints = len(task.operator_constraints)
-    source = constraints_source(
-        has_comment=False, row_entries=row_constraints, tracker=tracker
-    )
-    return {
-        "ticket_id": task.ticket_id,
-        "client": client,
-        "tracker": tracker.system or UNSET_TRACKER_LABEL,
-        "backend": CODEX_BACKEND,
-        "undelivered": list(UNDELIVERED_OPERATOR_CONTEXT),
-        "operator_constraints_source": source.value,
-        "row_constraints": row_constraints,
-        "row_dispositions": len(task.finding_dispositions),
-        "session_id": session_id,
-    }
-
-
-def undelivered_operator_context(
-    *, task: TicketTask, client: str, tracker: TrackerKind, session_id: str
-) -> None:
-    """Case B: record that a codex review ran without tracker context.
-
-    A no-op on a GitHub tracker, where the context loaders read every
-    comment. Best-effort: never raises ``OSError``.
-    """
-    if tracker.tracker_class is TrackerClass.GITHUB:
-        return
-    payload = operator_context_undelivered_payload(
-        task=task, client=client, tracker=tracker, session_id=session_id
-    )
-    record_event_best_effort(
-        OrchestratorEventType.REVIEW_OPERATOR_CONTEXT_UNDELIVERED,
-        payload,
-        task.ticket_id,
     )
 
 

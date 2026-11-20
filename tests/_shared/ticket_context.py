@@ -14,9 +14,20 @@ import copy
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from cw.ticket_snapshot import SnapshotComment, TicketSnapshot, normalize_ticket_id
+from cw.ticket_snapshot import (
+    SnapshotComment,
+    TicketSnapshot,
+    normalize_ticket_id,
+    write_snapshot,
+)
+from tests._ticket_view_helpers import make_task, seed_queue
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from cw.models import TicketTask
 
 _FIXTURE = Path(__file__).parent.parent / "fixtures" / "gh_issue_comments_2633.json"
 _AUTHORED_TITLE = "Authored test ticket title"
@@ -73,3 +84,58 @@ def make_snapshot(**overrides: Any) -> TicketSnapshot:
     }
     fields.update(overrides)
     return TicketSnapshot(**fields)
+
+
+def make_comment(
+    comment_id: str = "c1",
+    *,
+    body: str = "operator comment",
+    author_id: str | None = "operator",
+    author: str | None = None,
+    created_at: str = "2026-11-18T12:00:00Z",
+    agent_authored: bool = False,
+    author_conflict: bool = False,
+    minimized: bool = False,
+) -> SnapshotComment:
+    """One snapshot comment; ``author`` defaults to ``author_id`` (RFC 0019 T2)."""
+    return SnapshotComment(
+        id=comment_id,
+        author_id=author_id,
+        author=author if author is not None else author_id,
+        created_at=created_at,
+        body=body,
+        agent_authored=agent_authored,
+        minimized=minimized,
+        author_conflict=author_conflict,
+    )
+
+
+def make_snapshot_from(
+    comments: Sequence[SnapshotComment], **overrides: Any
+) -> TicketSnapshot:
+    """:func:`make_snapshot` with exactly *comments* (oldest first)."""
+    return make_snapshot(comments=list(comments), **overrides)
+
+
+def seeded_row(
+    snapshot: TicketSnapshot | None = None,
+    *,
+    seed: bool = True,
+    **task_overrides: object,
+) -> TicketTask:
+    """A row on *snapshot*'s digest (default :func:`make_snapshot`), queued when *seed*.
+
+    The one hoisted "row on a digest" helper: it writes the snapshot to the
+    store, builds ``make_task(snapshot_digest=..., snapshot_fetched_at=...)``
+    and, when *seed* is true, persists it as the whole dev queue.
+    """
+    snap = snapshot if snapshot is not None else make_snapshot()
+    digest = write_snapshot(snap)
+    task = make_task(
+        snapshot_digest=digest,
+        snapshot_fetched_at=snap.fetched_at,
+        **task_overrides,
+    )
+    if seed:
+        seed_queue([task])
+    return task

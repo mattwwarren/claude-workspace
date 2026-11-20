@@ -54,11 +54,7 @@ from cw.codex_review._diff import (
     _capture_tree_diff,
     _measure_large_diff,
 )
-from cw.gh import (
-    FETCH_COMMENTS_TIMEOUT,
-    fetch_issue_comments,
-    is_agent_authored,
-)
+from cw.gh import is_agent_authored
 from cw.local_runner import TICKET_BODY_KEY, TICKET_TITLE_KEY, resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH, HOOK_CONTEXT_RELATIVE_PATH
 from cw.models.enums import DEFAULT_REVIEWER_SANDBOX_MODE, SandboxMode
@@ -76,7 +72,12 @@ from cw.review_finding_dispositions import (
     merge_finding_dispositions,
     parse_finding_disposition_block,
 )
-from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
+from cw.ticket_snapshot import (
+    DEFAULT_SNAPSHOT_CONTEXT,
+    Purpose,
+    SnapshotContext,
+    bound_comments,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -97,6 +98,7 @@ if TYPE_CHECKING:
         ReviewConfigStatus,
     )
     from cw.review_markers import RefusedDisposition
+    from cw.ticket_snapshot import TicketSnapshot
 
     #: ``render_prompts(diff, changed_files)``: every role's prompt (#2864).
     _PromptRenderer = Callable[[CapturedDiff, Sequence[str]], dict[str, str]]
@@ -132,80 +134,19 @@ def _load_ticket_context(worktree: Path) -> tuple[str | None, str | None]:
     return plan_text, ticket_text
 
 
-class _CommentsNotProvided:
-    """Sentinel default for a loader's ``comments`` param: fetch it fresh.
-
-    Distinct from ``None`` (which means "fetched, and there was nothing" —
-    unresolvable tracker or an empty/failed fetch) so a caller that already
-    fetched can hand that exact outcome, including ``None``, straight through
-    without triggering a second, redundant fetch (#1814 SHOULD_FIX).
-    """
-
-
-_COMMENTS_NOT_PROVIDED = _CommentsNotProvided()
-
-
-def _fetch_ticket_comments(
-    worktree: Path, ticket_id: str
-) -> list[dict[str, object]] | None:
-    """Fetch the ticket's raw comment list once, shared by both readers below.
-
-    :func:`_load_operator_comments` (#1730) and :func:`_load_voided_findings`
-    (#1814) each need the same live comment thread every review pass. Before
-    this helper existed they fetched it independently, so `_prepare_review_pass`
-    shelled out to ``gh issue view`` twice per pass for identical data. Extracted
-    so a caller that needs both can fetch once and pass the result to each.
-
-    Scoped to ``github-issues`` trackers because that is the only tracker with
-    a fetch op reachable from this process (``linear`` reads go through MCP
-    tools only a Claude session holds). Returns ``None`` on an unresolvable
-    tracker or a gh failure — never raises.
-
-    The loaders stay pure: the "comments were not read" signal for a
-    non-GitHub (or unset) tracker is emitted once per session at run level
-    (``review.operator_context_undelivered``, from
-    ``cw.codex_review_signals`` via ``cw.codex_background``, #3055). That event
-    covers first entry; ``requeue.review_delivery_degraded`` covers re-entry.
-    """
-    if resolve_tracker(worktree) != TRACKER_GITHUB_ISSUES:
-        return None
-    return fetch_issue_comments(ticket_id, timeout=FETCH_COMMENTS_TIMEOUT, cwd=worktree)
-
-
-# Built by concatenation rather than an f-string: the `{1,3}` quantifier would
-# need brace-doubling, which is exactly the kind of quiet breakage this regex
-# must not have. The span starts at the settle heading's own line and runs,
-# lazily, to whichever comes first: the next `#`-to-`###` heading (a `####`
-# line is NOT one), the provenance marker line, or the end of the body. So a
-# section followed by another heading loses only itself, a section that is last
-# stops before the marker line, and text after the section is never swallowed.
-# The payload's own lines cannot terminate the span early -- `json.dumps(...,
-# indent=2)` puts every string value on one line, so no payload line begins
-# with `#`, and the label lines begin with `**`.
-#
 def _load_operator_comments(
-    worktree: Path,
-    ticket_id: str,
-    *,
-    comments: list[dict[str, object]] | None | _CommentsNotProvided = (
-        _COMMENTS_NOT_PROVIDED
-    ),
+    snapshot: TicketSnapshot | None, ctx: SnapshotContext
 ) -> str | None:
-    """Render the ticket's comment thread as text, or None (#1730).
+    """Render the bound comment thread of *snapshot* as text, or None (#1730).
 
     The codex review backend previously saw only ``.cw/context.json``'s
     title/body, so an operator send-back comment posted after Stage 0 never
-    reached a codex reviewer at all. This mirrors the "Comments are live, not
-    cached" convention ``auto-dev-plan.md``/``auto-dev-impl.md`` already
-    establish for the Claude-native path: fetched fresh on every review pass,
-    never read from the cached ``comments`` array.
+    reached a codex reviewer at all. The thread is read from the pass's
+    snapshot (:func:`~cw.ticket_snapshot.bound_comments`, which applies the
+    per-tracker trust rule), refreshed at the start of every pass.
 
-    ``comments`` defaults to fetching fresh via :func:`_fetch_ticket_comments`;
-    pass an already-fetched list (or ``None``) to skip a redundant fetch when a
-    caller (``_prepare_review_pass``) already has it for another reader.
-
-    Degrades to ``None`` — never raises — on an unresolvable tracker, a gh
-    failure, or an empty thread: a review without comments is strictly better
+    Degrades to ``None`` — never raises — on no readable snapshot, nothing
+    bound, or an empty thread: a review without comments is strictly better
     than no review, and the requeue-side ``requeue.review_delivery_degraded``
     event (#1730) is what makes an undeliverable pairing operator-visible.
 
@@ -227,10 +168,7 @@ def _load_operator_comments(
     treated as operator-authored unless its own text self-discloses non-operator
     authorship (``is_agent_authored``, #2617).
     """
-    if isinstance(comments, _CommentsNotProvided):
-        comments = _fetch_ticket_comments(worktree, ticket_id)
-    if not comments:
-        return None
+    comments = bound_comments(snapshot, ctx, Purpose.OPERATOR_TEXT)
     rendered: list[str] = []
     for comment in comments:
         body = comment.get("body")
@@ -249,12 +187,7 @@ def _load_operator_comments(
 
 
 def _load_voided_findings(
-    worktree: Path,
-    ticket_id: str,
-    *,
-    comments: list[dict[str, object]] | None | _CommentsNotProvided = (
-        _COMMENTS_NOT_PROVIDED
-    ),
+    snapshot: TicketSnapshot | None, ctx: SnapshotContext
 ) -> list[VoidedFinding]:
     """Parse the operator-voided findings recorded on the ticket (#1814).
 
@@ -264,10 +197,8 @@ def _load_voided_findings(
     comment (``review_adjudication.parse_voided_findings_block``), which this
     reads back on every Stage-3 entry.
 
-    ``comments`` defaults to fetching fresh via :func:`_fetch_ticket_comments`;
-    pass an already-fetched list (or ``None``) to skip a redundant fetch when a
-    caller (``_prepare_review_pass``) already has it for another reader — same
-    shared-fetch shape as :func:`_load_operator_comments` above.
+    The bodies come from the pass's snapshot through
+    :func:`~cw.ticket_snapshot.bound_comments`.
 
     Same degrade-never-raise contract as :func:`_load_operator_comments`, plus
     one reason specific to this record: it lives on the tracker thread rather
@@ -276,10 +207,7 @@ def _load_voided_findings(
     survive. Degrading to ``[]`` means a void goes unhonored and the finding
     re-appears — visible and correctable, unlike a silent false suppression.
     """
-    if isinstance(comments, _CommentsNotProvided):
-        comments = _fetch_ticket_comments(worktree, ticket_id)
-    if not comments:
-        return []
+    comments = bound_comments(snapshot, ctx, Purpose.VOIDED_AND_SETTLE)
     bodies = [
         body for comment in comments if isinstance(body := comment.get("body"), str)
     ]
@@ -287,19 +215,14 @@ def _load_voided_findings(
 
 
 def _load_finding_dispositions(
-    worktree: Path,
-    ticket_id: str,
-    *,
-    comments: list[dict[str, object]] | None | _CommentsNotProvided = (
-        _COMMENTS_NOT_PROVIDED
-    ),
+    snapshot: TicketSnapshot | None, ctx: SnapshotContext
 ) -> tuple[dict[str, FindingDisposition], list[RefusedDisposition]]:
     """Parse the operator's cross-round finding adjudications off the ticket.
 
     Sibling of :func:`_load_voided_findings` in every respect that matters —
-    same tracker gate, same shared-fetch parameter, same degrade-to-empty-and-
-    never-raise contract — but reading the ``REVIEW-FINDING-DISPOSITIONS``
-    marker (#1838) rather than ``VOIDED-REVIEW-FINDINGS`` (#1814).
+    same snapshot source, same degrade-to-empty-and-never-raise contract — but
+    reading the ``REVIEW-FINDING-DISPOSITIONS`` marker (#1838) rather than
+    ``VOIDED-REVIEW-FINDINGS`` (#1814).
 
     Kept a separate loader rather than folded into the voided one because the
     two records are separate contracts with separate identities and lifetimes:
@@ -313,10 +236,7 @@ def _load_finding_dispositions(
     :func:`_prepare_review_pass` merges the two — so a degraded fetch costs the
     pass nothing it already knew.
     """
-    if isinstance(comments, _CommentsNotProvided):
-        comments = _fetch_ticket_comments(worktree, ticket_id)
-    if not comments:
-        return {}, []
+    comments = bound_comments(snapshot, ctx, Purpose.VOIDED_AND_SETTLE)
     bodies = [
         body for comment in comments if isinstance(body := comment.get("body"), str)
     ]
@@ -530,12 +450,7 @@ def _emit_thread_reversal_events(
 
 
 def _merge_and_persist_finding_dispositions(
-    task: TicketTask,
-    worktree: Path,
-    *,
-    comments: list[dict[str, object]] | None | _CommentsNotProvided = (
-        _COMMENTS_NOT_PROVIDED
-    ),
+    task: TicketTask, snapshot: TicketSnapshot | None, ctx: SnapshotContext
 ) -> tuple[dict[str, FindingDisposition], list[RefusedDisposition]]:
     """Fold this pass's marker entries into *task*'s ledger, and persist them.
 
@@ -562,9 +477,7 @@ def _merge_and_persist_finding_dispositions(
     settled finding. The caller carries the refusals to the verdict so the
     review output reports them too.
     """
-    parsed, refused = _load_finding_dispositions(
-        worktree, task.ticket_id, comments=comments
-    )
+    parsed, refused = _load_finding_dispositions(snapshot, ctx)
     log_refused_dispositions(refused, task.ticket_id)
     merged = merge_finding_dispositions(task.finding_dispositions, parsed)
     # Audit BEFORE the write, for the same reason the settle command does
@@ -602,6 +515,7 @@ def _prepare_review_pass(
     resolution: ResolutionSpec | None = None,
     reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
     engine_roster: EngineRoster | None = None,
+    snapshots: SnapshotContext = DEFAULT_SNAPSHOT_CONTEXT,
 ) -> _ReviewPassInputs:
     """Assemble one review pass's inputs: capture diff, select roles, build prompts.
 
@@ -670,6 +584,15 @@ def _prepare_review_pass(
     ``engine_roster`` (#3216) replaces role selection and agent-spec
     resolution with a repo review engine's manifest roster (see
     :func:`~cw.codex_review._context._roster.resolve_roster`).
+
+    ``snapshots`` (#3712) says how this pass obtains the ticket snapshot its
+    comment readers bind against; ``snapshots.resolve`` runs once, before the
+    ticket context is read, because a refreshing context re-renders
+    ``.cw/context.json``. The call also supplies the snapshot the comment,
+    voided-finding and disposition readers consume, so it is not the switch for
+    the per-pass refresh: that reversal is removing ``refresh=True`` from the
+    ``context_for_client(...)`` calls (the non-refreshing context then reads
+    the stored snapshot); the stage-entry refresh stays.
     """
     if resolution is not None and delta_from_sha is not None:
         msg = "resolution and delta_from_sha are mutually exclusive"
@@ -681,6 +604,8 @@ def _prepare_review_pass(
         capability = _probe_filesystem_capability(
             runner=runner, session_id=session_id, sandbox_mode=reviewer_sandbox_mode
         )
+    # Refresh first: it re-renders `.cw/context.json`, which the next read loads.
+    snapshot = snapshots.resolve(task, "review")
     delta_diff: CapturedDiff | None = None
     delta_changed_files: frozenset[str] | None = None
     branch_context = _NO_BRANCH_CONTEXT
@@ -705,13 +630,7 @@ def _prepare_review_pass(
     repo_policy = _load_review_policy(config_source, scope_tier)
     project_rubrics = config_source.read(REVIEW_EXTRAS_PATH)
     plan_text, ticket_text = _load_ticket_context(worktree)
-    # Fetched once and handed to both readers below (#1814 SHOULD_FIX) — each
-    # independently called fetch_issue_comments for the same ticket, doubling
-    # the gh subprocess/API cost of every review pass and fix-loop cycle.
-    fetched_comments = _fetch_ticket_comments(worktree, task.ticket_id)
-    operator_comments_text = _load_operator_comments(
-        worktree, task.ticket_id, comments=fetched_comments
-    )
+    operator_comments_text = _load_operator_comments(snapshot, snapshots)
     # #2964: the row's `cw review constrain` entries, read from the row
     # snapshot rather than the comment thread, so they reach every tracker.
     # #2984: plan-derived entries go to their own `## Decided Scope` section.
@@ -719,13 +638,9 @@ def _prepare_review_pass(
     operator_constraints_text = render_constraint_entries(operator_entries) or None
     decided_scope_text = render_decided_entries(plan_entries) or None
     pending_operator_comment = _load_pending_operator_comment_marker(worktree)
-    voided_findings = _load_voided_findings(
-        worktree, task.ticket_id, comments=fetched_comments
-    )
+    voided_findings = _load_voided_findings(snapshot, snapshots)
     finding_dispositions, refused_dispositions = (
-        _merge_and_persist_finding_dispositions(
-            task, worktree, comments=fetched_comments
-        )
+        _merge_and_persist_finding_dispositions(task, snapshot, snapshots)
     )
     ruff_lint_config = _load_ruff_lint_config(worktree)
     quality_gates_text = _load_claude_md_quality_gates(worktree)

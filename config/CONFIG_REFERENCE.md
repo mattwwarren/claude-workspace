@@ -110,6 +110,22 @@ review:
   `guarded_paths entry '<entry>' ...`. At most `MAX_ENGINE_GUARDED_PATHS = 32`
   entries; over the cap the error reads
   `guarded_paths has 33 entries; the cap is 32 (first excess entry: index 32, '<entry>')`.
+- **`requires_runtime_capabilities: list[str] = []` (#3790).** Runtime-capability
+  slugs this engine needs a REVIEW runner to declare. A slug is lowercase letters,
+  digits, `_`, `.` or `-`, starting with a letter or digit, at most 64 characters,
+  and no `..`. The list is sorted and de-duplicated, and capped at 16 raw entries.
+  The runner side is `pipeline.executors.review.runtime_capabilities` on the client
+  or on a lane. That list is REVIEW-only (any other stage is refused at load) and
+  replaces the client's list wholesale for a lane that declares its own REVIEW
+  executor. Both keys are operator-owned: read from `clients.yaml` only, never from
+  `cw-engine.json` or the PR branch, not writable by `cw lane set`, and not stamped
+  into `.claude/cw-context.json`. A row whose lane runner lacks a required slug is
+  parked `review_capability_unmet` before claim: no spawn, no attempt charged, and
+  the stage stays REVIEW. Release with `cw dev-queue requeue`. To re-lane instead,
+  pause the incompatible lane (`cw lane pause`), then `cw dev-queue requeue`, then
+  `cw dev-queue move --to <lane>` (`move` needs the row PENDING, and without the
+  pause a dispatch tick may re-park it first), then `cw lane resume`. `cw doctor` warns
+  `review-capability/<client>/<lane>` for such a lane; the warning is advisory.
 - **Unknown sub-keys fail loud** at config load.
 - **The engine requires `convergence: clean`, stated explicitly.** The rule
   checks the effective value, so the default `blocking` is rejected too, in
@@ -228,12 +244,17 @@ optional and takes:
     `system: github-issues`) and `code_host` (with `system: github`) only. Any
     other value, argv templates included, is rejected.
 - `tickets` only: `operator_ids` (the operator's tracker identities, kept as
-  written) and `preflight` (`enabled: false`, `settings_path:
+  written; empty by default). GitHub ignores them. On a non-GitHub tracker a
+  snapshot comment binds a stage (operator comments, steering, the approved
+  plan) only when its `author_id` equals one of them, compared casefolded, so
+  empty ids bind nothing; the claude-native bindings block lists them.
+  Snapshot comments are ordered oldest first and "newest" means the last
+  qualifying comment in that order. `preflight` (`enabled: false`, `settings_path:
   .claude/settings.json`), the opt-in for the tick-side binding reachability
   preflight (RFC 0019 H2b, #3744; formerly the tracker-MCP gate described
   under `tracker_mcp_gate` above). With `preflight.enabled`, a PENDING row
   whose stage needs the tickets binding (`STAGE_NEEDS`: claude-native and
-  opencode PLAN/IMPL, codex PLAN/FINALIZE) parks `BLOCKED_ON_USER` before
+  opencode PLAN/IMPL, codex PLAN; codex FINALIZE reads the snapshot) parks `BLOCKED_ON_USER` before
   claim when its harness verifiably cannot reach it: `binding_unreachable`
   (plugin or server absent or disabled), `binding_unbound` (codex on a
   non-GitHub tracker with no usable `mcp.codex.server`) or
@@ -626,6 +647,16 @@ clients:
 ```
 
 `backend` defaults to `claude-native` and can be omitted.
+
+- **`runtime_capabilities: list[str] = []` (#3790).** The runtime-capability slugs
+  this stage's runner declares. REVIEW-only: a non-empty list on any other stage is
+  refused at load. Slug grammar, the 64-character and 16-entry caps, and the
+  sort-and-de-duplicate normalization are the same as for
+  `review.engine.requires_runtime_capabilities`; see
+  [Review Engine](#review-engine) for them and for the park a shortfall causes. A
+  lane's `pipeline.executors` replace the client's wholesale, so a lane that
+  declares its own REVIEW executor must list every capability itself. Operator-only:
+  read from `clients.yaml`, never from the PR branch or `cw-engine.json`.
 
 ### Codex Reasoning Effort
 
@@ -2302,7 +2333,7 @@ operator_channel_forward:
     - gate.disk_pressure_bypassed  # GitHub #1887 — operator bypassed the disk-pressure gate probe
     - requeue.review_delivery_degraded  # GitHub #1730 — a review requeue ran without the operator's send-back
     - review.verdict_comment_skipped  # GitHub #3055, RFC 0019 O3 — a codex comment was not enqueued to the outbox (durable copy only)
-    - review.operator_context_undelivered  # GitHub #3055 — a codex review ran without the operator's tracker comments
+    - ticket.snapshot_author_conflict  # RFC 0019 T2 (#3712) — a snapshot comment id was reported with a contradicting author_id
     - outbox.entry_unverified   # GitHub #3706 — an outbox post may be public but is unconfirmed
     - outbox.entry_skipped      # GitHub #3706 — an outbox entry's body was unreadable; it is not retried
     - outbox.entry_pending      # GitHub #3706 — an outbox entry went back to pending (binding unreachable, or held)

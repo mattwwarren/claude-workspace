@@ -166,10 +166,28 @@ def wrap_part(
     ``(part i of n)`` appears only when *total* > 1. With no header,
     sub-heading or label the result is the bare (fenced) text.
     """
-    label = f"(part {index} of {total})" if total > 1 else None
+    label = part_label(index, total)
     lines = [line for line in (header, subheading, label) if line]
     content = _fenced(text) if fence else text
     return "\n\n".join([*lines, content])
+
+
+def part_label(index: int, total: int) -> str | None:
+    """The ``(part i of n)`` label of one part, or None for a single part."""
+    return f"(part {index} of {total})" if total > 1 else None
+
+
+def unwrap_part(body: str, index: int, total: int) -> str | None:
+    """Invert :func:`wrap_part` for a header-less, unfenced part (RFC 0019 T2).
+
+    A single part is returned verbatim. A split part must start with its own
+    label and a blank line, which is stripped; any other shape is None.
+    """
+    label = part_label(index, total)
+    if label is None:
+        return body
+    prefix = f"{label}\n\n"
+    return body.removeprefix(prefix) if body.startswith(prefix) else None
 
 
 def _chunk_line(line: str, limit: int) -> list[str]:

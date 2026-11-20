@@ -118,7 +118,7 @@ def test_orientation_writes_impl_comments_cache_under_guard_root() -> None:
     instead, and the paragraph must forbid improvising a fixed path.
     """
     content = _cmd("auto-dev-impl.md")
-    window = _after(content, "**Comments are live, not cached", span=3200)
+    window = _after(content, "**Comments are live, not cached", span=4000)
     assert window.count("$GUARD_ROOT/.cw/impl-comments.json") == 2, (
         "expected both the fresh-fetch write and the fetch-failure-fallback "
         "write to target the new worktree-scoped path"
@@ -176,8 +176,10 @@ def test_guard_greps_cw_script_version_marker_and_headless_blocks_on_stale() -> 
 
 def test_guard_rematerializes_context_json() -> None:
     content = _cmd("auto-dev-impl.md")
-    window = _after(content, "**Comments are live, not cached", span=1400)
-    assert "overwrite `.cw/context.json`" in window
+    window = _after(content, "**Comments are live, not cached", span=1800)
+    assert "`cw ticket snapshot <ticket> -c <client> --refresh`" in window
+    assert "`--from-json -`" in window
+    assert "oldest-first" in window
     assert "materialized_by_session" in window
 
 
@@ -188,7 +190,7 @@ def test_orientation_regressed_comments_fetch_failure_hard_blocks() -> None:
     a stale cached array would defeat it. The non-regress WARN branch must
     survive unchanged alongside the new hard-block branch."""
     content = _cmd("auto-dev-impl.md")
-    window = _after(content, "**Comments are live, not cached", span=3200)
+    window = _after(content, "**Comments are live, not cached", span=4000)
     assert (
         f'blocker.reason: "{IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON}"'
         in window
@@ -296,21 +298,21 @@ def test_carve_out_requires_all_four_conditions() -> None:
             "all four",
             "tracker identity finalize posts as",
             "ME=$(gh api user --jq .login)",
-            "`viewer`",
+            "`bindings.tickets.operator_ids`",
             "fail closed",
         ):
             assert phrase in clause, phrase
 
 
 def test_carve_out_names_the_compared_identity_field_on_each_side() -> None:
-    """F6: GitHub compares login to login; Linear has no comparable field."""
+    """F6: GitHub compares login to login; Linear compares `author_id` to the ids."""
     for line in _carve_out_lines():
         clause = _carve_out_clause(line)
         for phrase in (
             "names one field on each side",
             "the entry's author login against `ME=$(gh api user --jq .login)`",
-            "no entry field is comparable to any field of the MCP `viewer` identity",
-            "Linear delivery therefore fails closed with "
+            "the entry's `author_id` against `bindings.tickets.operator_ids`",
+            "empty `operator_ids` or a null `author_id` fails closed with "
             "`withheld (identity_unresolved)`",
             "the accepted behaviour",
         ):

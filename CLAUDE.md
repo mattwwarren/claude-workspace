@@ -619,7 +619,7 @@ only when it cannot resolve it itself — ADR-0020):
 ### Theorizing Before Grepping the Mechanism
 
 **Problem**: When a system behaves unexpectedly (a queue ticket won't dispatch despite seemingly-free slots, a log stops updating, a counter looks wrong), constructing hypotheses — phantoms, buffering, caches, stale state — and acting on them (restarts, reaps) before reading the code that implements the behavior.
-**Why it hurts**: Hypothesis-driven flailing burns time and can trigger destructive moves (an unnecessary restart, a reap) chasing a "bug" that is actually documented behavior. Real incident: ~12 tool calls plus an unneeded loop restart spent on a "lane-cap phantom" that one `grep` of the dispatch module (now `src/cw/dispatch/`) resolved instantly — `running_in_lane = RUNNING + BLOCKED_ON_USER`, i.e. blocked tasks hold lane slots **by design**.
+**Why it hurts**: Hypothesis-driven flailing burns time and can trigger destructive moves (an unnecessary restart, a reap) chasing a "bug" that is actually documented behavior. Real incident: ~12 tool calls plus an unneeded loop restart spent on a "lane-cap phantom" that one `grep` of the dispatch module (now `src/cw/dispatch/`) resolved instantly — `running_in_lane = RUNNING + BLOCKED_ON_USER`, i.e. blocked tasks hold lane slots **by design** (since #3774, only while a live worker or unsettled claim exists).
 **Solution**: Grep the actual mechanism FIRST — the cheap, definitive code-read comes before the theory. If you catch yourself theorizing about *why* a system does X across more than one step without having read the code path that produces X, that IS the cue — stop and grep it. Sibling of **No Unverified Claims**.
 
 ## Scope and Commit Flow

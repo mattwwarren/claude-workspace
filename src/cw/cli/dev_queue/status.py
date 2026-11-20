@@ -76,6 +76,7 @@ from cw.models import (
     TicketTask,
     occupies_lane_slot,
 )
+from cw.models.session import session_statuses_by_id
 from cw.orchestrate import client_tick_snapshots
 from cw.pending_skip_streak import pending_skip_streaks
 from cw.reconcile.routed_result_sessions import (
@@ -98,6 +99,7 @@ if TYPE_CHECKING:
         ConcurrencyOverrides,
         OrchestratorEvent,
         Session,
+        SessionStatus,
     )
     from cw.orchestrate import TickSummary
     from cw.pending_skip_streak import SkipStreak
@@ -142,11 +144,32 @@ def _lane_caps_for_client(
     return {lane.name: lane.max_parallel for lane in client.lanes}
 
 
+def _load_session_statuses() -> dict[str, SessionStatus] | None:
+    """The ``{session_id: status}`` map for lane occupancy, or ``None``.
+
+    GitHub #3774. Read-only and guarded like :func:`_unowned_ceiling_sessions`:
+    an unreadable state file yields ``None``, which makes every BLOCKED_ON_USER
+    row count as occupying. Status therefore never fails and never under-reports
+    occupancy.
+    """
+    try:
+        return session_statuses_by_id(load_state().sessions)
+    except (OSError, ValueError, CwError):
+        return None
+
+
+def _parked_reason(task: TicketTask) -> str:
+    """Reason for a freed parked row: blocked_reason, else disposition, else ``-``."""
+    return task.blocked_reason or task.disposition or "-"
+
+
 def _emit_dev_queue_lane_breakdown(
     tasks: list[TicketTask],
     client_name: str,
     config: OrchestratorConfig,
     clients: Mapping[str, ClientConfig],
+    *,
+    session_statuses: Mapping[str, SessionStatus] | None,
 ) -> None:
     """Print indented lane lines; occupant line(s) when a lane is noteworthy.
 
@@ -178,8 +201,19 @@ def _emit_dev_queue_lane_breakdown(
             for t in lane_tasks
             if t.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
         )
-        # The one occupancy rule (#2321): a freed dependency hold is no occupant.
-        occupants = [t for t in lane_tasks if occupies_lane_slot(t)]
+        # The one occupancy rule (#2321, #3774): a freed parked row is no occupant.
+        occupants = [
+            t
+            for t in lane_tasks
+            if occupies_lane_slot(t, session_statuses=session_statuses)
+        ]
+        # GitHub #3774 (R1): parked=N counts BLOCKED_ON_USER rows that free their slot.
+        parked = [
+            t
+            for t in lane_tasks
+            if t.status == QueueItemStatus.BLOCKED_ON_USER
+            and not occupies_lane_slot(t, session_statuses=session_statuses)
+        ]
         cap = lane_caps.get(lane_name, 1)
         at_cap = len(occupants) >= cap
         override = overrides.lanes.get(f"{lane_tasks[0].client}/{lane_name}")
@@ -193,11 +227,17 @@ def _emit_dev_queue_lane_breakdown(
         if single_default_lane and not noteworthy:
             continue
         marker = _PAUSED_LANE_MARKER if paused else ""
+        parked_token = f" parked={len(parked)}" if parked else ""
         click.echo(
             f"    lane {lane_name}:"
             f" pending={pending} running={running} blocked={blocked}"
-            f" signoff={signoff}{marker}"
+            f" signoff={signoff}{parked_token}{marker}"
         )
+        if parked:
+            parked_str = ", ".join(
+                f"{t.ticket_id} ({_parked_reason(t)})" for t in parked
+            )
+            click.echo(f"      parked (slot free): {parked_str}")
         if noteworthy and occupants:
             occupant_str = ", ".join(
                 f"{t.ticket_id} ({t.status.value})" for t in occupants
@@ -646,6 +686,7 @@ def _echo_tick_section(
     clients: Mapping[str, ClientConfig],
 ) -> None:
     """Print the "Last dispatch tick per client:" section."""
+    session_statuses = _load_session_statuses()
     markers = load_executor_blocked_markers()
     click.echo("")
     click.echo("Last dispatch tick per client:")
@@ -701,7 +742,11 @@ def _echo_tick_section(
                 is_blocked=freshness_blocked,
             )
         _emit_dev_queue_lane_breakdown(
-            by_client[client_name], client_name, effective, clients
+            by_client[client_name],
+            client_name,
+            effective,
+            clients,
+            session_statuses=session_statuses,
         )
 
 

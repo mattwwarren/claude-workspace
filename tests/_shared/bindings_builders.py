@@ -38,11 +38,13 @@ def bindings_linear_mcp(
     server: str = "linear",
     plugin_id: str | None = None,
     harnesses: Sequence[str] = ("codex", "opencode"),
+    operator_ids: Sequence[str] = (),
 ) -> Bindings:
     """Linear on MCP: one server realization per harness in *harnesses*.
 
     *tools* names the ticket operations' tools (``TicketOp`` values as keys).
-    *plugin_id* adds a claude-native plugin realization.
+    *plugin_id* adds a claude-native plugin realization. *operator_ids* sets
+    ``tickets.operator_ids`` (RFC 0019 T2).
     """
     mcp: dict[str, dict[str, object]] = {}
     for harness in harnesses:
@@ -52,4 +54,7 @@ def bindings_linear_mcp(
         mcp[harness] = entry
     if plugin_id is not None:
         mcp["claude-native"] = {"plugin_id": plugin_id}
-    return Bindings.model_validate({"tickets": {"system": "linear", "mcp": mcp}})
+    tickets: dict[str, object] = {"system": "linear", "mcp": mcp}
+    if operator_ids:
+        tickets["operator_ids"] = list(operator_ids)
+    return Bindings.model_validate({"tickets": tickets})

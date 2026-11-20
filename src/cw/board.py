@@ -39,6 +39,7 @@ from cw.models import (
     TicketTask,
     occupies_lane_slot,
 )
+from cw.models.session import session_statuses_by_id
 from cw.orchestrate import (
     SessionSummary,
     TicketSummary,
@@ -55,7 +56,7 @@ from cw.session_groups import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from rich.console import RenderableType
 
@@ -361,6 +362,7 @@ def _build_lane_panel(
     now: datetime,
     started_map: dict[str, datetime],
     badge_index: dict[str, str],
+    session_statuses: Mapping[str, SessionStatus],
     client_badge: str | None = None,
 ) -> Panel:
     """Build one Rich Panel for a single client/lane combination.
@@ -377,8 +379,12 @@ def _build_lane_panel(
     # clients get separate panels rather than a nested grouping. Revisit if
     # per-client collapsing becomes a UX requirement.
     # Why: mirrors dispatch._lane_stats_for_client without importing the
-    # private function.
-    running = sum(1 for t in tasks_in_lane if occupies_lane_slot(t))
+    # private function. The session map is the same one dispatch uses (#3774).
+    running = sum(
+        1
+        for t in tasks_in_lane
+        if occupies_lane_slot(t, session_statuses=session_statuses)
+    )
 
     pause_tag = " [PAUSED]" if paused else ""
     title = f"{client_name} / {lane_name}{pause_tag}  [{running}/{max_parallel}]"
@@ -491,6 +497,9 @@ def render_board(
         if client_filter is None or t.client == client_filter
     }
     started_map = _session_started_map(board_state.cw_state)
+    # GitHub #3774: the same {session_id: status} map dispatch builds, so a
+    # parked row whose worker has finished does not count toward its lane.
+    session_statuses = session_statuses_by_id(board_state.cw_state.sessions)
     # Why: self-scope events here (not just rely on _load_board_state's
     # read_events(client_names=...) filter) so render_board stays correct
     # under --client even when called directly with an un-prescoped
@@ -541,6 +550,7 @@ def render_board(
                 now=board_state.now,
                 started_map=started_map,
                 badge_index=badge_index,
+                session_statuses=session_statuses,
                 client_badge=client_badge_index.get(client_name),
             )
             panels.append(panel)

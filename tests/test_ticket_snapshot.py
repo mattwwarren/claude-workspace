@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import subprocess
+import sys
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -19,6 +22,8 @@ from cw.ticket_snapshot import (
     SnapshotUntrustedError,
     TicketSnapshot,
     _fetch,
+    _record,
+    flag_author_conflicts,
     normalize_ticket_id,
     read,
     record_snapshot,
@@ -27,9 +32,20 @@ from cw.ticket_snapshot import (
     snapshot_path,
     write_snapshot,
 )
-from cw.ticket_snapshot._models import canonical_json, digest_of, digest_or_none
+from cw.ticket_snapshot._models import (
+    SNAPSHOT_SCHEMA_VERSION,
+    canonical_json,
+    digest_of,
+    digest_or_none,
+)
 from cw.ticket_snapshot._render import render_context
-from tests._shared.ticket_context import make_snapshot, observed_issue_envelope
+from tests._shared.ticket_context import (
+    make_comment,
+    make_snapshot,
+    make_snapshot_from,
+    observed_issue_envelope,
+    seeded_row,
+)
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -41,13 +57,6 @@ from tests._ticket_view_helpers import (
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-def _seed(snapshot: TicketSnapshot) -> Any:
-    digest = write_snapshot(snapshot)
-    task = make_task(snapshot_digest=digest, snapshot_fetched_at=snapshot.fetched_at)
-    seed_queue([task])
-    return task
 
 
 def test_digest_is_sha256_of_exact_canonical_bytes() -> None:
@@ -124,12 +133,12 @@ def test_read_returns_none_when_row_digest_none() -> None:
 
 
 def test_read_returns_stored_snapshot() -> None:
-    task = _seed(make_snapshot())
+    task = seeded_row(make_snapshot())
     assert read(task) == make_snapshot()
 
 
 def test_read_store_tamper_raises_mismatch(tmp_path: Path) -> None:
-    task = _seed(make_snapshot())
+    task = seeded_row(make_snapshot())
     path = snapshot_path(ACME, task.snapshot_digest or "")
     path.write_text(
         path.read_text(encoding="ascii").replace("Authored", "Edited"), encoding="ascii"
@@ -499,3 +508,299 @@ def test_github_null_author_and_null_url_recorded_as_none(
     assert comment.author_id is None
     assert comment.author is None
     assert comment.minimized is False
+
+
+# --- RFC 0019 T2 (#3712): author-conflict flagging ---
+
+
+def _snap(*comments: SnapshotComment) -> TicketSnapshot:
+    return make_snapshot_from(comments, ticket_id=ACME_TICKET)
+
+
+def _flags(snapshot: TicketSnapshot) -> dict[str, bool]:
+    return {c.id: c.author_conflict for c in snapshot.comments}
+
+
+def test_schema_version_is_still_one() -> None:
+    assert SNAPSHOT_SCHEMA_VERSION == 1
+
+
+def test_old_schema_json_without_author_conflict_validates_with_digest_intact() -> None:
+    payload = make_snapshot().model_dump(mode="json")
+    for comment in payload["comments"]:
+        del comment["author_conflict"]
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("ascii")
+    digest = hashlib.sha256(raw).hexdigest()
+    path = snapshot_path(ACME, digest)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    snapshot = read(make_task(snapshot_digest=digest))
+    assert snapshot is not None
+    assert [c.author_conflict for c in snapshot.comments] == [False] * 4
+    assert path.read_bytes() == raw
+
+
+def test_flag_previous_different_author_id_sets_conflict() -> None:
+    previous = _snap(make_comment("c1", author_id="alice"))
+    current = _snap(make_comment("c1", author_id="mallory"))
+    flagged, newly = flag_author_conflicts(current, previous)
+    assert _flags(flagged) == {"c1": True}
+    assert newly == 1
+    assert _flags(current) == {"c1": False}
+
+
+def test_flag_casefold_equal_author_id_is_not_a_conflict() -> None:
+    previous = _snap(make_comment("c1", author_id="Alice"))
+    current = _snap(make_comment("c1", author_id="aLICE"))
+    flagged, newly = flag_author_conflicts(current, previous)
+    assert _flags(flagged) == {"c1": False}
+    assert newly == 0
+
+
+def test_flag_twice_in_one_document_flags_both_comments() -> None:
+    current = _snap(
+        make_comment("c1", author_id="alice"),
+        make_comment("c1", author_id="mallory"),
+        make_comment("c2", author_id="alice"),
+    )
+    flagged, newly = flag_author_conflicts(current, None)
+    assert [c.author_conflict for c in flagged.comments] == [True, True, False]
+    assert newly == 2
+
+
+def test_flag_previous_true_is_carried_forward_without_a_new_count() -> None:
+    previous = _snap(make_comment("c1", author_id="alice", author_conflict=True))
+    current = _snap(make_comment("c1", author_id="alice"))
+    flagged, newly = flag_author_conflicts(current, previous)
+    assert _flags(flagged) == {"c1": True}
+    assert newly == 0
+
+
+def test_flag_previous_true_with_a_fresh_contradiction_is_not_counted_again() -> None:
+    previous = _snap(make_comment("c1", author_id="alice", author_conflict=True))
+    current = _snap(make_comment("c1", author_id="mallory"))
+    flagged, newly = flag_author_conflicts(current, previous)
+    assert _flags(flagged) == {"c1": True}
+    assert newly == 0
+
+
+def test_flag_already_flagged_input_is_not_counted_again() -> None:
+    current = _snap(
+        make_comment("c1", author_id="alice", author_conflict=True),
+    )
+    flagged, newly = flag_author_conflicts(current, None)
+    assert _flags(flagged) == {"c1": True}
+    assert newly == 0
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [(None, "alice"), ("alice", None), (None, None)],
+)
+def test_flag_null_to_value_is_not_a_conflict(
+    before: str | None, after: str | None
+) -> None:
+    previous = _snap(make_comment("c1", author_id=before))
+    current = _snap(make_comment("c1", author_id=after))
+    flagged, newly = flag_author_conflicts(current, previous)
+    assert _flags(flagged) == {"c1": False}
+    assert newly == 0
+
+
+def test_flag_only_counts_comments_that_were_not_already_flagged() -> None:
+    previous = _snap(
+        make_comment("c1", author_id="alice", author_conflict=True),
+        make_comment("c2", author_id="bob"),
+    )
+    current = _snap(
+        make_comment("c1", author_id="alice"),
+        make_comment("c2", author_id="eve"),
+    )
+    flagged, newly = flag_author_conflicts(current, previous)
+    assert _flags(flagged) == {"c1": True, "c2": True}
+    assert newly == 1
+
+
+def test_record_without_detect_never_flags_even_on_a_contradiction() -> None:
+    seeded_row(_snap(make_comment("c1", author_id="alice")))
+    record_snapshot(_snap(make_comment("c1", author_id="mallory")))
+    row = queue_row()
+    stored = read(row)
+    assert stored is not None
+    assert _flags(stored) == {"c1": False}
+    assert events_of(OrchestratorEventType.TICKET_SNAPSHOT_AUTHOR_CONFLICT) == []
+
+
+def test_record_with_detect_flags_stores_and_emits_one_event() -> None:
+    seeded_row(_snap(make_comment("c1", author_id="alice")))
+    record = record_snapshot(
+        _snap(make_comment("c1", author_id="mallory")), detect_author_conflicts=True
+    )
+    stored = read(queue_row())
+    assert stored is not None
+    assert _flags(stored) == {"c1": True}
+    (event,) = events_of(OrchestratorEventType.TICKET_SNAPSHOT_AUTHOR_CONFLICT)
+    assert event.payload == {
+        "ticket_id": ACME_TICKET,
+        "client": ACME,
+        "snapshot_digest": record.snapshot_digest,
+        "comments": 1,
+    }
+    assert event.correlation_id == ACME_TICKET
+    assert "operator comment" not in repr(event.payload)
+
+
+def test_record_with_detect_and_no_conflict_emits_no_event() -> None:
+    seeded_row(_snap(make_comment("c1", author_id="alice")))
+    record_snapshot(
+        _snap(make_comment("c1", author_id="alice"), make_comment("c2")),
+        detect_author_conflicts=True,
+    )
+    assert events_of(OrchestratorEventType.TICKET_SNAPSHOT_AUTHOR_CONFLICT) == []
+
+
+def test_record_carried_flag_stays_set_and_emits_no_second_event() -> None:
+    seeded_row(_snap(make_comment("c1", author_id="alice")))
+    record_snapshot(
+        _snap(make_comment("c1", author_id="mallory")), detect_author_conflicts=True
+    )
+    record_snapshot(
+        _snap(make_comment("c1", author_id="mallory")), detect_author_conflicts=True
+    )
+    stored = read(queue_row())
+    assert stored is not None
+    assert _flags(stored) == {"c1": True}
+    assert len(events_of(OrchestratorEventType.TICKET_SNAPSHOT_AUTHOR_CONFLICT)) == 1
+
+
+def test_record_with_no_row_compares_nothing() -> None:
+    record_snapshot(
+        _snap(make_comment("c1", author_id="alice")), detect_author_conflicts=True
+    )
+    assert events_of(OrchestratorEventType.TICKET_SNAPSHOT_AUTHOR_CONFLICT) == []
+
+
+def test_record_with_untrusted_previous_compares_nothing_and_does_not_raise(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    seed_queue([make_task(snapshot_digest="c" * 64)])
+    with caplog.at_level(logging.WARNING, logger="cw.ticket_snapshot"):
+        record_snapshot(
+            _snap(make_comment("c1", author_id="alice")), detect_author_conflicts=True
+        )
+    assert "author conflicts not compared" in caplog.text
+    assert "reason=missing" in caplog.text
+    assert events_of(OrchestratorEventType.TICKET_SNAPSHOT_AUTHOR_CONFLICT) == []
+    stored = read(queue_row())
+    assert stored is not None
+    assert _flags(stored) == {"c1": False}
+
+
+def test_record_with_unreadable_previous_still_records_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    seeded_row(_snap(make_comment("c1", author_id="alice")))
+
+    def _unreadable(_task: object) -> TicketSnapshot:
+        msg = "permission denied"
+        raise PermissionError(msg)
+
+    monkeypatch.setattr(_record, "read", _unreadable)
+    with caplog.at_level(logging.WARNING, logger="cw.ticket_snapshot"):
+        record = record_snapshot(
+            _snap(make_comment("c1", author_id="mallory")),
+            detect_author_conflicts=True,
+        )
+
+    assert record.row_updated is True
+    assert "PermissionError" in caplog.text
+    assert "permission denied" not in caplog.text
+
+
+def test_conflict_event_failure_does_not_break_record(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    real = _record.record_event
+
+    def _flaky(event_type: OrchestratorEventType, *args: Any, **kwargs: Any) -> Any:
+        if event_type is OrchestratorEventType.TICKET_SNAPSHOT_AUTHOR_CONFLICT:
+            msg = "disk gone"
+            raise OSError(msg)
+        return real(event_type, *args, **kwargs)
+
+    monkeypatch.setattr(_record, "record_event", _flaky)
+    seeded_row(_snap(make_comment("c1", author_id="alice")))
+    with caplog.at_level(logging.WARNING, logger="cw.ticket_snapshot"):
+        record = record_snapshot(
+            _snap(make_comment("c1", author_id="mallory")),
+            detect_author_conflicts=True,
+        )
+    assert record.row_updated is True
+    assert "author_conflict event not recorded" in caplog.text
+
+
+_COLD_IMPORT_ORDERS = (
+    ("cw.ticket_snapshot", "cw.dev_queue"),
+    ("cw.dev_queue", "cw.ticket_snapshot"),
+    ("cw.codex_review", "cw.ticket_snapshot"),
+)
+
+
+@pytest.mark.parametrize("order", _COLD_IMPORT_ORDERS)
+def test_package_imports_cold_in_either_order(order: tuple[str, str]) -> None:
+    """RFC 0019 T2: the review context imports this package, which imports
+    ``cw.dev_queue``; ``cw.dev_queue`` must therefore not import
+    ``cw.codex_review``, or one of these orders is a circular import."""
+    code = "; ".join(f"import {name}" for name in order)
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+
+
+def test_dev_queue_does_not_load_codex_review() -> None:
+    code = (
+        "import sys, cw.dev_queue; "
+        "print(any(m.startswith('cw.codex_review') for m in sys.modules))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+    assert proc.stdout.strip() == "False"
+
+
+def test_codex_must_fix_reason_has_one_definition() -> None:
+    """The MUST_FIX blocker reason literal lives in one ``src/cw`` module (#3712)."""
+    import ast
+    from pathlib import Path
+
+    import cw
+    from cw.auto_dev_result.schema import _vocab
+    from cw.codex_review import CODEX_MUST_FIX_FINDINGS
+    from cw.stage_verification import finalize_result
+
+    literal = "codex_must_fix_findings"
+    assert CODEX_MUST_FIX_FINDINGS is _vocab.CODEX_MUST_FIX_FINDINGS
+    assert finalize_result.CODEX_MUST_FIX_FINDINGS is _vocab.CODEX_MUST_FIX_FINDINGS
+    assert literal == _vocab.CODEX_MUST_FIX_FINDINGS
+
+    src_root = Path(cw.__file__).parent
+    defining = {
+        path.relative_to(src_root).as_posix()
+        for path in src_root.rglob("*.py")
+        if any(
+            isinstance(node, ast.Constant) and node.value == literal
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        )
+    }
+    assert "auto_dev_result/schema/_vocab.py" in defining  # scan is not vacuous
+    assert defining == {"auto_dev_result/schema/_vocab.py"}

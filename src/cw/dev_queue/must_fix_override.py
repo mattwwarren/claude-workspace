@@ -58,7 +58,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple, NoReturn, NotRequired, Ty
 from pydantic import ValidationError
 
 from cw.auto_dev_result import REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON
-from cw.codex_review import CODEX_MUST_FIX_FINDINGS
+from cw.auto_dev_result.schema._vocab import CODEX_MUST_FIX_FINDINGS
 from cw.config import get_client
 from cw.dev_queue.crud import _find_ticket
 from cw.dev_queue.ledger_race import row_started_running
@@ -358,7 +358,10 @@ def _save_converged_ledger(
 
 #: The parks ``--override-must-fix`` releases: a codex background review's
 #: MUST_FIX, and the confirm round after a repo review engine pass (#3042).
-_OVERRIDABLE_PARKS = (CODEX_MUST_FIX_FINDINGS, REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON)
+_OVERRIDABLE_PARKS = (
+    CODEX_MUST_FIX_FINDINGS,
+    REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON,
+)
 
 
 def _is_confirm_park(task: TicketTask) -> bool:

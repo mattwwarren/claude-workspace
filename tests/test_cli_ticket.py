@@ -8,12 +8,15 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from click.testing import CliRunner
 
+from cw.cli import ticket as cli_ticket
 from cw.cli._base import main
-from cw.ticket_snapshot import _fetch
+from cw.models import OrchestratorEventType
+from cw.ticket_snapshot import SnapshotRecord, _fetch, read
 from tests._shared.cli_preflight import _write_tracker_config
 from tests._shared.ticket_context import observed_issue_envelope
 from tests._ticket_view_helpers import (
     ACME,
+    events_of,
     install_acme_client,
     make_task,
     queue_row,
@@ -55,7 +58,7 @@ def _invoke(*args: str, stdin: str | None = None) -> Any:
     return CliRunner().invoke(main, ["ticket", "snapshot", *args], input=stdin)
 
 
-def _stdin_doc() -> str:
+def _stdin_doc(author_id: str = "u1") -> str:
     return json.dumps(
         {
             "ticket_url": None,
@@ -64,7 +67,7 @@ def _stdin_doc() -> str:
             "comments": [
                 {
                     "id": "c1",
-                    "author_id": "u1",
+                    "author_id": author_id,
                     "author": "someone",
                     "created_at": "2026-01-01T00:00:00Z",
                     "body": "a comment",
@@ -209,3 +212,73 @@ def test_client_falls_back_to_cw_context(
     )
     result = _invoke(GH_TICKET, "--json")
     assert result.exit_code == 0, result.output
+
+
+# --- RFC 0019 T2 (#3712): author-conflict pass-through ---
+
+
+@pytest.fixture
+def record_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Spy on ``cw.cli.ticket.record_snapshot``; delegates to the real one."""
+    calls: list[dict[str, Any]] = []
+    real = cli_ticket.record_snapshot
+
+    def _spy(snapshot: Any, **kwargs: Any) -> SnapshotRecord:
+        calls.append(kwargs)
+        return real(snapshot, **kwargs)
+
+    monkeypatch.setattr(cli_ticket, "record_snapshot", _spy)
+    return calls
+
+
+def test_from_json_passes_detect_author_conflicts_and_flags_a_contradiction(
+    linear_client: Path, worktree: Path, record_calls: list[dict[str, Any]]
+) -> None:
+    seed_queue([make_task(ticket_id=GH_TICKET)])
+    first = _invoke(GH_TICKET, "-c", ACME, "--from-json", "-", stdin=_stdin_doc("u1"))
+    assert first.exit_code == 0, first.output
+    assert events_of(OrchestratorEventType.TICKET_SNAPSHOT_AUTHOR_CONFLICT) == []
+
+    second = _invoke(
+        GH_TICKET, "-c", ACME, "--from-json", "-", "--json", stdin=_stdin_doc("u2")
+    )
+
+    assert second.exit_code == 0, second.output
+    assert [call["detect_author_conflicts"] for call in record_calls] == [True, True]
+    stored = read(queue_row(GH_TICKET))
+    assert stored is not None
+    assert [c.author_conflict for c in stored.comments] == [True]
+    (event,) = events_of(OrchestratorEventType.TICKET_SNAPSHOT_AUTHOR_CONFLICT)
+    assert event.payload["comments"] == 1
+    assert (
+        event.payload["snapshot_digest"] == json.loads(second.output)["snapshot_digest"]
+    )
+    assert event.correlation_id == GH_TICKET
+
+
+def test_github_path_never_detects_or_flags(
+    github_client: Path,
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    record_calls: list[dict[str, Any]],
+) -> None:
+    seed_queue([make_task(ticket_id=GH_TICKET)])
+    logins = iter(["first-login", "second-login"])
+
+    def _envelope(*_a: object, **_k: object) -> dict[str, Any]:
+        envelope = observed_issue_envelope()
+        envelope["comments"][0]["author"] = {"login": next(logins)}
+        return envelope
+
+    monkeypatch.setattr(_fetch, "fetch_issue_snapshot", _envelope)
+    for _ in range(2):
+        result = _invoke(GH_TICKET, "-c", ACME, "--json")
+        assert result.exit_code == 0, result.output
+
+    assert [call["detect_author_conflicts"] for call in record_calls] == [False, False]
+    stored = read(queue_row(GH_TICKET))
+    assert stored is not None
+    assert [c.author_conflict for c in stored.comments] == [False] * len(
+        stored.comments
+    )
+    assert events_of(OrchestratorEventType.TICKET_SNAPSHOT_AUTHOR_CONFLICT) == []

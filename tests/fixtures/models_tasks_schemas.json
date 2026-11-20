@@ -1062,6 +1062,96 @@
      "title": "ReviewFeedback",
      "type": "object"
     },
+    "ScopeGrant": {
+     "description": "The binding and the exact paths of one scope-drift approval.\n\n``head`` is a plain ``str``: the writer validates the full 40-hex shape, and\nthe carry re-validates it, so a malformed value never becomes a pydantic\nerror on a seam that must not raise. ``repo``, ``pr_number`` and\n``plan_fingerprint`` are ``None`` when that dimension was unknown at grant\ntime; ``None`` on the repository binding fails the carry closed.",
+     "properties": {
+      "client": {
+       "title": "Client",
+       "type": "string"
+      },
+      "ticket_id": {
+       "title": "Ticket Id",
+       "type": "string"
+      },
+      "row_created_at": {
+       "format": "date-time",
+       "title": "Row Created At",
+       "type": "string"
+      },
+      "repo": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Repo"
+      },
+      "pr_number": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Pr Number"
+      },
+      "head": {
+       "title": "Head",
+       "type": "string"
+      },
+      "policy": {
+       "title": "Policy",
+       "type": "string"
+      },
+      "plan_fingerprint": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Plan Fingerprint"
+      },
+      "paths": {
+       "items": {
+        "type": "string"
+       },
+       "title": "Paths",
+       "type": "array"
+      },
+      "actor": {
+       "default": "",
+       "title": "Actor",
+       "type": "string"
+      },
+      "recorded_at": {
+       "format": "date-time",
+       "title": "Recorded At",
+       "type": "string"
+      }
+     },
+     "required": [
+      "client",
+      "ticket_id",
+      "row_created_at",
+      "head",
+      "policy",
+      "paths",
+      "recorded_at"
+     ],
+     "title": "ScopeGrant",
+     "type": "object"
+    },
     "ShippedRedEpisode": {
      "description": "Per-episode latch for a red shipped PR (``cw.shipped_pr_signal``, #2945).\n\nOne page is raised per latch lifetime (an *episode*: the row stays\n``COMPLETED``, the PR head SHA is unchanged and a required check is still\nfailing). ``alerted_at`` is set once a page was emitted; ``head_sha`` is\nthen the episode's head and the sweep compares it with the live head to\ndetect the episode end. ``hydrated_fingerprint`` is the hash of the\nhydrated ``failing_checks`` the row was last evaluated against;\n``fingerprint`` / ``required_checks`` are the required-failing set of the\nlast successful live read and are refreshed silently, never re-paged.\nAn unalerted latch (``alerted_at`` None) is a pacing stamp: ``evaluated_at``,\n``retry_not_before`` and ``failures`` only debounce read-only ``gh`` polls.\nCleared by ``transition_task_status`` when the row leaves ``COMPLETED``.",
      "properties": {
@@ -1473,6 +1563,13 @@
      ],
      "default": null,
      "title": "Scope Drift Approved Head"
+    },
+    "scope_grants": {
+     "items": {
+      "$ref": "#/$defs/ScopeGrant"
+     },
+     "title": "Scope Grants",
+     "type": "array"
     },
     "must_fix_override": {
      "anyOf": [
@@ -3340,6 +3437,96 @@
      "title": "ReviewFeedback",
      "type": "object"
     },
+    "ScopeGrant": {
+     "description": "The binding and the exact paths of one scope-drift approval.\n\n``head`` is a plain ``str``: the writer validates the full 40-hex shape, and\nthe carry re-validates it, so a malformed value never becomes a pydantic\nerror on a seam that must not raise. ``repo``, ``pr_number`` and\n``plan_fingerprint`` are ``None`` when that dimension was unknown at grant\ntime; ``None`` on the repository binding fails the carry closed.",
+     "properties": {
+      "client": {
+       "title": "Client",
+       "type": "string"
+      },
+      "ticket_id": {
+       "title": "Ticket Id",
+       "type": "string"
+      },
+      "row_created_at": {
+       "format": "date-time",
+       "title": "Row Created At",
+       "type": "string"
+      },
+      "repo": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Repo"
+      },
+      "pr_number": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Pr Number"
+      },
+      "head": {
+       "title": "Head",
+       "type": "string"
+      },
+      "policy": {
+       "title": "Policy",
+       "type": "string"
+      },
+      "plan_fingerprint": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Plan Fingerprint"
+      },
+      "paths": {
+       "items": {
+        "type": "string"
+       },
+       "title": "Paths",
+       "type": "array"
+      },
+      "actor": {
+       "default": "",
+       "title": "Actor",
+       "type": "string"
+      },
+      "recorded_at": {
+       "format": "date-time",
+       "title": "Recorded At",
+       "type": "string"
+      }
+     },
+     "required": [
+      "client",
+      "ticket_id",
+      "row_created_at",
+      "head",
+      "policy",
+      "paths",
+      "recorded_at"
+     ],
+     "title": "ScopeGrant",
+     "type": "object"
+    },
     "ShippedRedEpisode": {
      "description": "Per-episode latch for a red shipped PR (``cw.shipped_pr_signal``, #2945).\n\nOne page is raised per latch lifetime (an *episode*: the row stays\n``COMPLETED``, the PR head SHA is unchanged and a required check is still\nfailing). ``alerted_at`` is set once a page was emitted; ``head_sha`` is\nthen the episode's head and the sweep compares it with the live head to\ndetect the episode end. ``hydrated_fingerprint`` is the hash of the\nhydrated ``failing_checks`` the row was last evaluated against;\n``fingerprint`` / ``required_checks`` are the required-failing set of the\nlast successful live read and are refreshed silently, never re-paged.\nAn unalerted latch (``alerted_at`` None) is a pacing stamp: ``evaluated_at``,\n``retry_not_before`` and ``failures`` only debounce read-only ``gh`` polls.\nCleared by ``transition_task_status`` when the row leaves ``COMPLETED``.",
      "properties": {
@@ -3677,6 +3864,13 @@
        ],
        "default": null,
        "title": "Scope Drift Approved Head"
+      },
+      "scope_grants": {
+       "items": {
+        "$ref": "#/$defs/ScopeGrant"
+       },
+       "title": "Scope Grants",
+       "type": "array"
       },
       "must_fix_override": {
        "anyOf": [
@@ -5639,6 +5833,96 @@
      "title": "ReviewFeedback",
      "type": "object"
     },
+    "ScopeGrant": {
+     "description": "The binding and the exact paths of one scope-drift approval.\n\n``head`` is a plain ``str``: the writer validates the full 40-hex shape, and\nthe carry re-validates it, so a malformed value never becomes a pydantic\nerror on a seam that must not raise. ``repo``, ``pr_number`` and\n``plan_fingerprint`` are ``None`` when that dimension was unknown at grant\ntime; ``None`` on the repository binding fails the carry closed.",
+     "properties": {
+      "client": {
+       "title": "Client",
+       "type": "string"
+      },
+      "ticket_id": {
+       "title": "Ticket Id",
+       "type": "string"
+      },
+      "row_created_at": {
+       "format": "date-time",
+       "title": "Row Created At",
+       "type": "string"
+      },
+      "repo": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Repo"
+      },
+      "pr_number": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Pr Number"
+      },
+      "head": {
+       "title": "Head",
+       "type": "string"
+      },
+      "policy": {
+       "title": "Policy",
+       "type": "string"
+      },
+      "plan_fingerprint": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Plan Fingerprint"
+      },
+      "paths": {
+       "items": {
+        "type": "string"
+       },
+       "title": "Paths",
+       "type": "array"
+      },
+      "actor": {
+       "default": "",
+       "title": "Actor",
+       "type": "string"
+      },
+      "recorded_at": {
+       "format": "date-time",
+       "title": "Recorded At",
+       "type": "string"
+      }
+     },
+     "required": [
+      "client",
+      "ticket_id",
+      "row_created_at",
+      "head",
+      "policy",
+      "paths",
+      "recorded_at"
+     ],
+     "title": "ScopeGrant",
+     "type": "object"
+    },
     "ShippedRedEpisode": {
      "description": "Per-episode latch for a red shipped PR (``cw.shipped_pr_signal``, #2945).\n\nOne page is raised per latch lifetime (an *episode*: the row stays\n``COMPLETED``, the PR head SHA is unchanged and a required check is still\nfailing). ``alerted_at`` is set once a page was emitted; ``head_sha`` is\nthen the episode's head and the sweep compares it with the live head to\ndetect the episode end. ``hydrated_fingerprint`` is the hash of the\nhydrated ``failing_checks`` the row was last evaluated against;\n``fingerprint`` / ``required_checks`` are the required-failing set of the\nlast successful live read and are refreshed silently, never re-paged.\nAn unalerted latch (``alerted_at`` None) is a pacing stamp: ``evaluated_at``,\n``retry_not_before`` and ``failures`` only debounce read-only ``gh`` polls.\nCleared by ``transition_task_status`` when the row leaves ``COMPLETED``.",
      "properties": {
@@ -5976,6 +6260,13 @@
        ],
        "default": null,
        "title": "Scope Drift Approved Head"
+      },
+      "scope_grants": {
+       "items": {
+        "$ref": "#/$defs/ScopeGrant"
+       },
+       "title": "Scope Grants",
+       "type": "array"
       },
       "must_fix_override": {
        "anyOf": [
@@ -6948,7 +7239,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 63,
+     "default": 64,
      "title": "Schema Version",
      "type": "integer"
     },
@@ -8224,6 +8515,96 @@
      "title": "ReviewFeedback",
      "type": "object"
     },
+    "ScopeGrant": {
+     "description": "The binding and the exact paths of one scope-drift approval.\n\n``head`` is a plain ``str``: the writer validates the full 40-hex shape, and\nthe carry re-validates it, so a malformed value never becomes a pydantic\nerror on a seam that must not raise. ``repo``, ``pr_number`` and\n``plan_fingerprint`` are ``None`` when that dimension was unknown at grant\ntime; ``None`` on the repository binding fails the carry closed.",
+     "properties": {
+      "client": {
+       "title": "Client",
+       "type": "string"
+      },
+      "ticket_id": {
+       "title": "Ticket Id",
+       "type": "string"
+      },
+      "row_created_at": {
+       "format": "date-time",
+       "title": "Row Created At",
+       "type": "string"
+      },
+      "repo": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Repo"
+      },
+      "pr_number": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Pr Number"
+      },
+      "head": {
+       "title": "Head",
+       "type": "string"
+      },
+      "policy": {
+       "title": "Policy",
+       "type": "string"
+      },
+      "plan_fingerprint": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Plan Fingerprint"
+      },
+      "paths": {
+       "items": {
+        "type": "string"
+       },
+       "title": "Paths",
+       "type": "array"
+      },
+      "actor": {
+       "default": "",
+       "title": "Actor",
+       "type": "string"
+      },
+      "recorded_at": {
+       "format": "date-time",
+       "title": "Recorded At",
+       "type": "string"
+      }
+     },
+     "required": [
+      "client",
+      "ticket_id",
+      "row_created_at",
+      "head",
+      "policy",
+      "paths",
+      "recorded_at"
+     ],
+     "title": "ScopeGrant",
+     "type": "object"
+    },
     "ShippedRedEpisode": {
      "description": "Per-episode latch for a red shipped PR (``cw.shipped_pr_signal``, #2945).\n\nOne page is raised per latch lifetime (an *episode*: the row stays\n``COMPLETED``, the PR head SHA is unchanged and a required check is still\nfailing). ``alerted_at`` is set once a page was emitted; ``head_sha`` is\nthen the episode's head and the sweep compares it with the live head to\ndetect the episode end. ``hydrated_fingerprint`` is the hash of the\nhydrated ``failing_checks`` the row was last evaluated against;\n``fingerprint`` / ``required_checks`` are the required-failing set of the\nlast successful live read and are refreshed silently, never re-paged.\nAn unalerted latch (``alerted_at`` None) is a pacing stamp: ``evaluated_at``,\n``retry_not_before`` and ``failures`` only debounce read-only ``gh`` polls.\nCleared by ``transition_task_status`` when the row leaves ``COMPLETED``.",
      "properties": {
@@ -8635,6 +9016,13 @@
      ],
      "default": null,
      "title": "Scope Drift Approved Head"
+    },
+    "scope_grants": {
+     "items": {
+      "$ref": "#/$defs/ScopeGrant"
+     },
+     "title": "Scope Grants",
+     "type": "array"
     },
     "must_fix_override": {
      "anyOf": [
@@ -10501,6 +10889,96 @@
      "title": "ReviewFeedback",
      "type": "object"
     },
+    "ScopeGrant": {
+     "description": "The binding and the exact paths of one scope-drift approval.\n\n``head`` is a plain ``str``: the writer validates the full 40-hex shape, and\nthe carry re-validates it, so a malformed value never becomes a pydantic\nerror on a seam that must not raise. ``repo``, ``pr_number`` and\n``plan_fingerprint`` are ``None`` when that dimension was unknown at grant\ntime; ``None`` on the repository binding fails the carry closed.",
+     "properties": {
+      "client": {
+       "title": "Client",
+       "type": "string"
+      },
+      "ticket_id": {
+       "title": "Ticket Id",
+       "type": "string"
+      },
+      "row_created_at": {
+       "format": "date-time",
+       "title": "Row Created At",
+       "type": "string"
+      },
+      "repo": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Repo"
+      },
+      "pr_number": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Pr Number"
+      },
+      "head": {
+       "title": "Head",
+       "type": "string"
+      },
+      "policy": {
+       "title": "Policy",
+       "type": "string"
+      },
+      "plan_fingerprint": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Plan Fingerprint"
+      },
+      "paths": {
+       "items": {
+        "type": "string"
+       },
+       "title": "Paths",
+       "type": "array"
+      },
+      "actor": {
+       "default": "",
+       "title": "Actor",
+       "type": "string"
+      },
+      "recorded_at": {
+       "format": "date-time",
+       "title": "Recorded At",
+       "type": "string"
+      }
+     },
+     "required": [
+      "client",
+      "ticket_id",
+      "row_created_at",
+      "head",
+      "policy",
+      "paths",
+      "recorded_at"
+     ],
+     "title": "ScopeGrant",
+     "type": "object"
+    },
     "ShippedRedEpisode": {
      "description": "Per-episode latch for a red shipped PR (``cw.shipped_pr_signal``, #2945).\n\nOne page is raised per latch lifetime (an *episode*: the row stays\n``COMPLETED``, the PR head SHA is unchanged and a required check is still\nfailing). ``alerted_at`` is set once a page was emitted; ``head_sha`` is\nthen the episode's head and the sweep compares it with the live head to\ndetect the episode end. ``hydrated_fingerprint`` is the hash of the\nhydrated ``failing_checks`` the row was last evaluated against;\n``fingerprint`` / ``required_checks`` are the required-failing set of the\nlast successful live read and are refreshed silently, never re-paged.\nAn unalerted latch (``alerted_at`` None) is a pacing stamp: ``evaluated_at``,\n``retry_not_before`` and ``failures`` only debounce read-only ``gh`` polls.\nCleared by ``transition_task_status`` when the row leaves ``COMPLETED``.",
      "properties": {
@@ -10838,6 +11316,13 @@
        ],
        "default": null,
        "title": "Scope Drift Approved Head"
+      },
+      "scope_grants": {
+       "items": {
+        "$ref": "#/$defs/ScopeGrant"
+       },
+       "title": "Scope Grants",
+       "type": "array"
       },
       "must_fix_override": {
        "anyOf": [
@@ -11809,7 +12294,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 63,
+     "default": 64,
      "title": "Schema Version",
      "type": "integer"
     },

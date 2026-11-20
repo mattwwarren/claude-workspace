@@ -537,6 +537,17 @@ for scripting and field reads; it prints two distinct sections:
     it passes over one PENDING row for a ticket-specific reason; that event
     no longer replaces the client's line, so `pending=` and `skip=` stop
     flipping between two ticks.
+  - The indented `lane <name>: pending= running= blocked= signoff=` lines are
+    read from the live queue. `blocked=` is the raw `BLOCKED_ON_USER` count.
+    Since #3774 a parked row whose worker is settled (every session it names
+    is terminal, or it names none, and no fix worker or launch is in flight)
+    frees its lane slot, and the lane line gains `parked=N` plus a
+    `parked (slot free): <ticket> (<reason>)` line naming those rows. Both
+    appear only when N > 0. The reason is the row's `blocked_reason`, else its
+    disposition, else `-`. A park whose worker is live still occupies and is
+    listed under `lane occupants` / `lane full`. If the state file cannot be
+    read, every park counts as occupying. `--json` and the `dispatch.tick`
+    payload carry no `parked` key.
 - **"Pending tickets held by dispatch" block** (#2516) — printed after the
   footer, only when some PENDING row has per-ticket skips. One line per row,
   per client in table order, longest run first:
@@ -611,7 +622,10 @@ for which park" in §5).
 `blocked_reason`, `blocked_on_pr` (the PR number a dependency hold waits on,
 null when none, #2321), `blocked_on_repo` (the `owner/repo` of a cross-repo
 `blocked_on_pr`, null for a same-repo one, #3634; `cw dev-queue tasks --json`
-carries the same int `blocked_on_pr` and `blocked_on_repo`), `blocker_details`, `advisory_note`, `lane`, `priority`,
+carries the same int `blocked_on_pr` and `blocked_on_repo`), `scope_decision`
+(a `plan_scope_drift` park only: `owner`, `carried_paths`, `new_paths`,
+`next_action`; null otherwise, #3772), `blocker_details`, `advisory_note`,
+`lane`, `priority`,
 `scope_hint`, `attempts`, `unproductive_attempts`, `attempt_ceiling` (null =
 no ceiling), `session` (null, or `id`/`status`/`liveness_bucket`/
 `in_roster`/`attention_state`; `status` null = session no longer in state),
@@ -1017,6 +1031,10 @@ every refusal names the right one for the row (`Run: ...`), and
   to re-run impl without them. The grant drops stored review feedback whose
   `reviewed_sha` is no longer the branch head (#3637); the CLI names the dropped
   sha and the `requeue --stage impl --review-feedback-file` recovery command.
+  The grant is also recorded on the row (#3772): a later repair dispatch re-uses
+  it while it still verifies, and only new paths are presented. `show` names the
+  owner and the next action in `scope_decision`. A regress into PLAN drops the
+  grants; that is the operator's revocation lever (`requeue --stage plan`).
 - Codex MUST_FIX park (`codex_must_fix_findings`):
   `approve --override-must-fix --reason "<why>"`, then
   `requeue --stage finalize` (§7); if the ticket or lane has a finalize
@@ -1190,17 +1208,21 @@ common wedge conditions:
   reported here: a loop that stopped ticking is the loop-liveness check's
   case.
 - `wedge/operator-gated-park` (#2739) — advisory only. A `BLOCKED_ON_USER` row
-  that holds a lane slot (`occupies_lane_slot`) while parked on a deliberate
+  that holds a lane slot (`occupies_lane_slot`: since #3774, only while its
+  worker is live or its claim unsettled; a settled park holds none and is not
+  reported, but stays in `cw dev-queue status`) while parked on a deliberate
   operator gate: disposition `finalize_gate_held`, `stale_dispatch_gate`,
   `attempt_cap_blocked`, the RFC 0016 adoption parks, `review_approval_gate`,
+  `review_capability_unmet` (#3790),
   `review_engine_modified`, `binding_unreachable`, `binding_unbound` or
   `binding_tool_missing` (RFC 0019 H2b #3744; the legacy `tracker_mcp_gate`
   reads as `binding_unreachable`; #3055: fix the branch settings file or the
   backend's MCP config, then `cw dev-queue requeue`) or
   `gate_timeout` (#3372: see **Park: `gate_timeout`** below),
   `awaiting_ci_evidence` (#3618: see **Park: `awaiting_ci_evidence`** below),
-  `dependency_hold` (#2321: reported only when it has no `blocked_on_pr`, since
-  a hold with an id frees its slot; see **Dependency holds (#2321)**), or
+  `dependency_hold` (#2321: reported only when it has no `blocked_on_pr` and
+  still holds its slot, since a hold with an id frees its slot; see
+  **Dependency holds (#2321)**), or
   disposition `blocked` with a `codex_fix_*` `blocked_reason`. These rows look dead but wait on an operator, so
   `wedge/blocked-on-user-dead-session` skips them; this class is the visible
   counterpart, so a lane slot held by such a row is not left unexplained.
@@ -1267,6 +1289,20 @@ ticket's legitimate row):
 cw dev-queue remove <TICKET-ID> --client <client> \
   --status blocked_on_user --disposition terminal_sibling
 ```
+
+### Park: `review_capability_unmet` (#3790)
+
+A PENDING REVIEW row whose lane's runner lacks a capability the client's
+`review.engine.requires_runtime_capabilities` names is refused before claim. It
+is `BLOCKED_ON_USER` with `disposition: review_capability_unmet`, uncharged, and
+the stage stays REVIEW. Fix the config in `clients.yaml`: declare the missing
+slugs on the lane's `pipeline.executors.review.runtime_capabilities`, or remove
+them from the engine. Then `cw dev-queue requeue <T> -c <C>`. To re-lane instead,
+run `cw lane pause <lane> -c <C>` on the incompatible lane first, then
+`cw dev-queue requeue <T> -c <C>`, then `cw dev-queue move <T> -c <C> --to <lane>`,
+then `cw lane resume <lane> -c <C>`. `move` needs the row PENDING, and a requeued
+row is PENDING in the incompatible lane, so without the pause a dispatch tick may
+re-park it before `move` runs. `cw doctor --reap` never reverts this park.
 
 ### Bulk cleanup of stale terminal rows (`cw dev-queue prune`)
 
@@ -3064,8 +3100,12 @@ dispatch tick, with no lock held, `settle_adopted_pins` reads the origin head,
 fetches the branch and advances the pin only when the old pin is an ancestor;
 a non-descendant or a git error keeps the pin and the drift scan parks it. An
 unreadable origin head defers the settle (the flag stays set, the row is
-skipped by the drift scan, and a warning is logged each tick until gh reads
-again). The settle runs at most 8 rows per client per tick, each with a 60s
+skipped by the drift scan, and for a live (non-terminal) row a warning is
+logged each tick until gh reads again). The settle skips rows in a terminal
+status (completed, failed, cancelled): they have no next session, and their
+head branch is usually deleted after merge. Their flag is left set, so a
+requeued row is settled again. Skipped rows log nothing and do not count
+against the 8-row cap. The settle runs at most 8 rows per client per tick, each with a 60s
 fetch bound, and runs even when the client has no free slot; there is no
 per-client toggle yet (see the follow-up below). The repair recipe's lease
 push (`repair_git._push_with_lease`) advances the pin from the expected SHA to
@@ -3925,14 +3965,16 @@ hard-fail guard here would invert that codified asymmetry (see
 with `cw event tail` after any send-back requeue; if it fires, the reviewer
 ran without your comment and its verdict should be read accordingly.
 
-**Codex on a non-GitHub tracker (#3055, RFC 0018 S3).** Two more events,
-both forwarded by default, cover the cases the requeue event does not. Every
-codex review on a client whose tracker is not GitHub (or is unset) records
-`review.operator_context_undelivered` once at its start: the reviewer ran
-without your free-text comments, voided findings and settle markers (row
-constraints from `cw review constrain` and settled dispositions still reach
-it). That is the first-entry signal; `requeue.review_delivery_degraded` stays
-the re-entry signal, and a requeued review emits both. When the review ends,
+**Codex on a non-GitHub tracker (#3055, RFC 0018 S3).** Historical: until
+RFC 0019 T2 (#3712), every codex review on a client whose tracker is not GitHub
+(or is unset) recorded `review.operator_context_undelivered` once at its start
+(the reviewer ran without your free-text comments, voided findings and settle
+markers). A review no longer records it: comments now come from the ticket
+snapshot on every tracker, and a refresh or read problem is the not-forwarded
+`ticket.snapshot_degraded` event. On a non-GitHub tracker a comment binds only
+when its author id is in `bindings.tickets.operator_ids` (empty by default).
+`requeue.review_delivery_degraded` stays the re-entry signal. The other event,
+forwarded by default, covers the verdict. When the review ends,
 `review.verdict_comment_skipped` says the verdict was not enqueued to the
 outbox (RFC 0019 O3, #3707) and names the worktree artifact that holds it. The
 verdict is enqueued under the `codex-verdict` producer and the drain delivers
@@ -4102,10 +4144,12 @@ edits the worktree and returns `{sentinel}`; it never stages, commits or
 pushes. cw does everything else:
 
 - **Inputs.** The prompt is A3's impl render plus the IMPL codex addendum, then
-  the prefetched GitHub ticket, the approved plan (`.cw/plan.md`), on a repair
+  the ticket text from the refreshed snapshot (RFC 0019 T2, #3712), the
+  approved plan (`.cw/plan.md`), on a repair
   row the review report as an untrusted-data section, a default-branch merge
-  note when one applies, and the plan's "Files You May Change" fence. A
-  non-GitHub tracker blocks `tracker_mcp_unavailable_pre_dispatch` (#3530). A
+  note when one applies, and the plan's "Files You May Change" fence. No
+  usable snapshot blocks `plan_missing_context`; a non-GitHub tracker no longer
+  blocks `tracker_mcp_unavailable_pre_dispatch` on the pre-turn guard. A
   missing plan blocks `plan_missing` unless the row is an adopted repair entry
   (`review_feedback` and `branch` both set); a `recover-red-pr` row has no
   `branch`, so it needs its `.cw/plan.md`.
@@ -4434,14 +4478,20 @@ reason. Wait for the annotation to clear; only a tick line still reading
 - A tick line reading `skip=lane_circuit_paused [resumed since this tick]` is
   a stale snapshot: no lane of that client is paused any more, and the next
   tick will dispatch.
-- `BLOCKED_ON_USER` rows hold lane slots by design; a parked ticket can
-  starve its lane. Requeue or remove to free the slot. Two carve-outs, both in
+- `BLOCKED_ON_USER` rows hold lane slots only while a live worker or an
+  unsettled claim exists (#3774): a named session that is not terminal or is
+  missing from state, a launched fix worker, or an in-flight launch. A park
+  whose worker is settled frees its slot and shows as `parked=` in
+  `cw dev-queue status`; a park with a live worker can still starve its lane
+  until reconcile closes the session. Requeue or remove to release a park:
+  freeing the slot is not a release. Three carve-outs, all in
   `occupies_lane_slot` (`src/cw/models/tasks/store.py`): a `terminal_sibling`
-  row (#2100) and, since #2321, a `dependency_hold` row that carries a
-  `blocked_on_pr`. The second waits on a merge the serve tick observes, so it
-  does not starve the lane; see **Dependency holds (#2321)** below. A
-  dependency park with no id still holds its slot, because nothing would ever
-  release it.
+  row (#2100), since #2321 a `dependency_hold` row that carries a
+  `blocked_on_pr` (it waits on a merge the serve tick observes; see
+  **Dependency holds (#2321)** below), and since #3774 the settled-worker
+  park. A dependency park with no id now frees its slot once its worker is
+  settled. The client ceiling and host budget are session based and
+  unchanged.
 - A session wedged in `needs_salvage` with a park marker poisons every
   respawn of its ticket (claim → revert → attempts+1, plus per-tick
   `session.salvage_skipped` noise): `cw spawn close --confirmed-dead <sid>`
@@ -4599,7 +4649,8 @@ Two ways in:
   `session.needs_attention` with `paused_status: dependency_ref_not_own_repo`.
   Release it yourself with `cw dev-queue hold <T> --until-pr-merged owner/repo#N -c <C>`
   (an operator hold accepts any repo). Without the id the park stays
-  `awaiting_operator` and keeps its slot, because nothing would release it. A
+  `awaiting_operator`; since #3774 it frees its slot once its worker is
+  settled (nothing releases it but an operator requeue). A
   worker park with an id emits `session.needs_attention` (the existing
   worker-park emission is unchanged) and, because `dependency_hold` is not an
   attention-digest disposition, is not digest-buffered.
@@ -5541,6 +5592,38 @@ or PR, not in this file.
 - [ ] 4. Optional: run `cw review settle <file> --reason '<why>' --ticket <T>
   -c <client>`. It queues a `review-settle` entry and prints the `settle:
   queued the disposition marker ...` line instead of the block.
+
+### MCP snapshot refresh (RFC 0019 T2b, #3760)
+
+What runs: on a client whose `bindings.tickets` has a codex MCP realization, the
+snapshot refresh is one read-only `codex exec` turn (allowlist: the binding's
+`get` and `list_comments` tools only), not a `gh` call. Its result is the ticket
+snapshot document; cw computes `agent_authored` itself. See ADR-0023.
+
+When it runs: once per codex REVIEW pass, including a claude confirm round run
+from the codex stage (it shares the stage's context), and at codex IMPL and codex
+FINALIZE stage entry. Never on the dispatch tick or in `reconcile()`.
+
+How it fails: it degrades to one `ticket.snapshot_degraded` event with reason
+`courier_unreachable` (no codex realization, the server is declared but disabled,
+an unreadable config layer, codex unavailable), `turn_failed` (timeout, non-zero
+exit, no or invalid output), `refused` or `no_binding`. The stage runs on the
+last snapshot. It never parks and files no gate record. Nothing is retried.
+
+Paths that keep today's behavior (`no_binding` on a non-GitHub tracker): the CLI
+`cw review confirm` and `cw review converge delta-confirm` claude round, the
+local executor, claude IMPL and claude FINALIZE.
+
+Reversal: there is no config switch. For REVIEW, remove `refresh=True` from the
+`context_for_client(...)` call in `cw.codex_background`. For IMPL and FINALIZE,
+remove the `courier=` argument at the `snapshot_for_stage(...)` call. For the CLI
+confirm seam, make `_courier_for` return `None`.
+
+Operator checklist (unchecked; no result recorded here):
+
+- [ ] On a host where Linear comes from a codex plugin app, run one real refresh:
+  confirm the refreshed snapshot carries real comments and ids, and that a
+  comment posted mid-review reaches the next pass.
 
 ## Orchestrator permission allowlist
 

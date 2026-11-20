@@ -20,13 +20,16 @@ from cw.claude_review import FakeClaudeRunner
 from cw.cli import main
 from cw.codex_review import _prepare_review_pass
 from cw.codex_runner import FakeCodexRunner
+from cw.config import get_client
 from cw.dev_queue import add_ticket
 from cw.models import QueueItemStatus, Stage
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests._codex_review_helpers import _SequencedRunner
+from tests._codex_review_helpers import _SequencedRunner, exclude_cw_dir
 from tests._review_convergence_helpers import warm_codex_capability
+from tests._shared.cli_preflight import _write_tracker_config
 from tests._shared.git_repos import git_in
 from tests._shared.session_seeding import _make_ticket_task
+from tests._shared.ticket_context import observed_issue_envelope
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -196,3 +199,25 @@ def make_harness(
         client=client,
         argv=argv,
     )
+
+
+def github_tracked(harness: Harness) -> list[str]:
+    """Track the harness client on ``github-issues`` and stub the snapshot fetch.
+
+    The stub answers with the observed issue envelope, so a refresh never
+    launches ``gh``. Returns the ticket ids it was asked for, one per refresh.
+    A refresh rewrites ``.cw/context.json``, so the worktree git-excludes
+    ``.cw/`` as a real cw worktree does.
+    """
+    exclude_cw_dir(harness.repo)
+    _write_tracker_config(get_client(harness.client).workspace_path, "github-issues")
+    asked: list[str] = []
+
+    def _fetch(ticket_id: str, _timeout: int, **_kwargs: object) -> dict[str, object]:
+        asked.append(ticket_id)
+        return observed_issue_envelope()
+
+    harness.monkeypatch.setattr(
+        "cw.ticket_snapshot._fetch.fetch_issue_snapshot", _fetch
+    )
+    return asked

@@ -158,13 +158,19 @@ class TestBlockedOnField:
         assert again == task
         assert again.blocked_on_pr == ref
 
-    def test_v63_store_with_legacy_int_is_byte_identical(self) -> None:
+    def test_current_store_with_legacy_int_is_byte_identical(self) -> None:
+        # The typed PrRef adds no schema bump (#3634): a store at the current
+        # version with a bare-int blocked_on_pr loads and dumps unchanged,
+        # whatever later tickets move the version to.
         row = _task(blocked_on_pr=42).model_dump(mode="json")
         row["blocked_on_pr"] = 42
-        raw: dict[str, object] = {"schema_version": 63, "tasks": [row]}
+        raw: dict[str, object] = {
+            "schema_version": DEV_QUEUE_SCHEMA_VERSION,
+            "tasks": [row],
+        }
         store = DevQueueStore.model_validate(migrate_dev_queue(raw))
         assert store.tasks[0].blocked_on_pr == PrRef(number=42)
-        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION == 63
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION
         dumped = json.loads(store.model_dump_json())
         assert dumped["tasks"][0]["blocked_on_pr"] == 42
         again = DevQueueStore.model_validate(dumped)

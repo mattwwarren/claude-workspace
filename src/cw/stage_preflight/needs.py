@@ -67,8 +67,9 @@ STAGE_NEEDS: Mapping[tuple[Harness, Stage], StageNeeds] = MappingProxyType(
         (Harness.CODEX, Stage.REVIEW): _needs(
             Stage.REVIEW, tickets=False, skills=False
         ),
+        # FINALIZE reads the ticket snapshot (RFC 0019 T2), not the tickets MCP.
         (Harness.CODEX, Stage.FINALIZE): _needs(
-            Stage.FINALIZE, tickets=True, skills=False
+            Stage.FINALIZE, tickets=False, skills=False
         ),
         (Harness.OPENCODE, Stage.PLAN): _needs(Stage.PLAN, tickets=True, skills=False),
         (Harness.OPENCODE, Stage.IMPL): _needs(Stage.IMPL, tickets=True, skills=False),

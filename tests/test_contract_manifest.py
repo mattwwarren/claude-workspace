@@ -1074,9 +1074,10 @@ _C1_TICKET = 3060
 _CODEX_PLAN_FOLLOW_UPS = frozenset({3464, 3465})
 #: The C2 ticket (#3061, codex IMPL executor); no cell may defer to it once it
 #: lands. Its impl-stage cells are implemented, not-applicable,
-#: or deferred to one of its three follow-ups.
+#: or deferred to one of its follow-ups. #3530 (tracker-aware plan recovery) left
+#: the set: #3712 (RFC 0019 T2) implements it, so ``impl.orientation`` is a code ref.
 _C2_TICKET = 3061
-_CODEX_IMPL_FOLLOW_UPS = frozenset({3529, 3530, 3531})
+_CODEX_IMPL_FOLLOW_UPS = frozenset({3529, 3531})
 # #3055 closed with RFC 0018 S3: its codex review cells moved to #3057 (A2).
 _CODEX_REVIEW_TICKETS = frozenset({3318, 2464, 3057})
 #: The C4 ticket (#3063, usage accounting); no cell may defer to it once it lands.
@@ -1473,6 +1474,22 @@ def _assert_codex_finalize_cell(element_id: str, cell: object) -> int | None:
     assert isinstance(cell, DeferredDisposition), element_id
     assert cell.ref.number in _CODEX_FINALIZE_FOLLOW_UPS, element_id
     return cell.ref.number
+
+
+def test_codex_impl_orientation_and_comments_cells_run_on_the_snapshot() -> None:
+    """RFC 0019 T2: plan recovery and the refreshed snapshot back the two cells."""
+    elements = _manifest().elements
+    orientation = elements["impl.orientation"].cells[CODEX_BACKEND]
+    assert isinstance(orientation, ImplementedDisposition)
+    assert isinstance(orientation.ref, CodeRef)
+    assert orientation.ref.path == "src/cw/ticket_snapshot/_plan.py"
+    assert orientation.ref.symbol == "recover_plan"
+    comments = elements["impl.comments-are-live-not-cached"].cells[CODEX_BACKEND]
+    assert isinstance(comments, ImplementedDisposition)
+    assert isinstance(comments.ref, CodeRef)
+    assert comments.ref.symbol == "_Run.prompt"
+    assert comments.note is not None
+    assert "refreshed snapshot" in comments.note
 
 
 def test_codex_cells_follow_the_stage_ticket_map() -> None:

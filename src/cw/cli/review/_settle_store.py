@@ -18,9 +18,9 @@ queues the rendered block as the ticket's disposition comment through the
 outbox (RFC 0019 O3b). It is the last mirror step, never raises, and never
 changes the exit status.
 
-The polarity is the strict one the codex review pass's comment fetch
-(``_context.core._fetch_ticket_comments``) uses: it reads a marker back only
-on exact equality. It is NOT the fail-open
+The polarity is the strict one the codex review pass's snapshot context
+(``ticket_snapshot._binding.context_for_client``) uses: it reads a marker back
+only on exact equality. It is NOT the fail-open
 ``lifecycle._tracker_allows_github_fetch``, whose unknown-means-GitHub answer
 would degrade exactly where no marker is ever read.
 

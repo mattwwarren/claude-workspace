@@ -36,19 +36,13 @@ if TYPE_CHECKING:
 
     from cw.models import ClientConfig
 
-pytestmark = pytest.mark.usefixtures("isolated_backend_layers")
+pytestmark = pytest.mark.usefixtures(
+    "isolated_backend_layers", "project_walk_stops_at_state_dir"
+)
 
 _TICKET = "ENG-1"
 _SERVER = "linear"
 _LINE_1 = "<!-- cw-outbox:m1:1/1 -->"
-
-
-@pytest.fixture(autouse=True)
-def _stop_project_walk_at_state_dir() -> None:
-    """Hermetic project walk: a ``.git`` at the state dir ends it (as in P1.5)."""
-    from cw.config import state_dir
-
-    (state_dir() / ".git").mkdir(parents=True, exist_ok=True)
 
 
 def _parts(*texts: str) -> list[CourierPart]:

@@ -26,6 +26,9 @@ from elsewhere must target the submodule that looks it up at call time
 - ``screening`` — candidate screening and the atomic claim transaction. Its
   pure fix-dispatch-hold / backstop-exempt predicates moved to the
   ``cw.queue_rows`` leaf (#2613) and are re-exported here.
+- ``review_capability`` — the claim-time review-capability preflight (#3790):
+  the pure capability-gap function and the uncharged pre-claim park. Not
+  re-exported here; the screen imports it from the submodule.
 - ``spawn`` — worktree provisioning, the stale/occupied-worktree guards, the
   approved-plan bypass, and the executor spawn for one claimed task.
 """

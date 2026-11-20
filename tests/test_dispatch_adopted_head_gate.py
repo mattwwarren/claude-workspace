@@ -527,3 +527,136 @@ class TestSettle:
         settle_adopted_pins(client)
         assert _row().adopted_head_sha == pinned.pin
         assert any("git missing" in r.getMessage() for r in caplog.records)
+
+
+_TERMINAL = [
+    QueueItemStatus.COMPLETED,
+    QueueItemStatus.CANCELLED,
+    QueueItemStatus.FAILED,
+]
+_PARKED = [QueueItemStatus.BLOCKED_ON_USER, QueueItemStatus.AWAITING_OPERATOR_SIGNOFF]
+
+
+class TestSettleTerminalRows:
+    @pytest.mark.parametrize("status", _TERMINAL)
+    def test_terminal_flagged_row_with_unreadable_head_is_skipped_silently(
+        self,
+        pinned: PinnedOrigin,
+        client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        status: QueueItemStatus,
+    ) -> None:
+        stub = _stub_head(monkeypatch, pinned.origin, readable=False)
+        _seed(pinned, status=status, adopted_repin_due=True)
+        caplog.set_level(logging.WARNING, logger="cw.dispatch")
+
+        settle = settle_adopted_pins(client)
+
+        assert settle == SettleResult()
+        assert stub.calls == []
+        assert not any(
+            "adopted_pin_settle_deferred" in r.getMessage() for r in caplog.records
+        )
+        assert _row().adopted_repin_due is True
+        assert _row().adopted_head_sha == pinned.pin
+
+    def test_terminal_flagged_rows_do_not_consume_the_settle_cap(
+        self,
+        pinned: PinnedOrigin,
+        client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub = _stub_head(monkeypatch, pinned.origin)
+        rows = [
+            make_adopted_task(
+                ticket_id=f"T-t{i}",
+                branch=pinned.branch,
+                adopted_head_sha=pinned.pin,
+                adopted_pr_url=f"https://github.com/acme/widgets/pull/{i}",
+                status=QueueItemStatus.COMPLETED,
+                adopted_repin_due=True,
+            )
+            for i in range(ADOPT_SETTLE_MAX_PER_TICK)
+        ]
+        rows.append(
+            make_adopted_task(
+                ticket_id="T-live",
+                branch=pinned.branch,
+                adopted_head_sha=pinned.pin,
+                adopted_pr_url="https://github.com/acme/widgets/pull/99",
+                status=QueueItemStatus.PENDING,
+                adopted_repin_due=True,
+            )
+        )
+        save_dev_queue(DevQueueStore(tasks=rows))
+
+        settle = settle_adopted_pins(client)
+
+        assert settle.settled == {"T-live"}
+        assert stub.calls == [pinned.branch]
+        terminal = [t for t in load_dev_queue().tasks if t.ticket_id != "T-live"]
+        assert all(t.adopted_repin_due is True for t in terminal)
+
+    def test_snapshot_with_only_terminal_flagged_rows_skips_the_fresh_read(
+        self,
+        pinned: PinnedOrigin,
+        client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub = _stub_head(monkeypatch, pinned.origin)
+        _seed(pinned, status=QueueItemStatus.COMPLETED, adopted_repin_due=True)
+        snapshot = load_dev_queue()
+
+        def _no_fresh_read() -> DevQueueStore:
+            msg = "fresh queue read must not happen"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.dispatch.adopted_head_gate.load_dev_queue", _no_fresh_read
+        )
+
+        assert settle_adopted_pins(client, queue_snapshot=snapshot) == SettleResult()
+        assert stub.calls == []
+
+    def test_terminal_flagged_row_requeued_to_pending_is_settled(
+        self,
+        pinned: PinnedOrigin,
+        client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub = _stub_head(monkeypatch, pinned.origin)
+        _seed(pinned, status=QueueItemStatus.COMPLETED, adopted_repin_due=True)
+        observed = pinned.push_descendant("cw_push.py")
+
+        first = settle_adopted_pins(client)
+        assert first == SettleResult()
+        assert stub.calls == []
+
+        # Simulate a requeue: flag stays set, status returns to PENDING.
+        store = load_dev_queue()
+        store.tasks[0].status = QueueItemStatus.PENDING
+        save_dev_queue(store)
+
+        second = settle_adopted_pins(client)
+        assert second.settled == {"T-1"}
+        assert _row().adopted_head_sha == observed
+        assert _row().adopted_repin_due is False
+
+    @pytest.mark.parametrize("status", _PARKED)
+    def test_parked_flagged_row_is_still_settled(
+        self,
+        pinned: PinnedOrigin,
+        client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        status: QueueItemStatus,
+    ) -> None:
+        _stub_head(monkeypatch, pinned.origin)
+        _seed(pinned, status=status, adopted_repin_due=True)
+        observed = pinned.push_descendant("cw_push.py")
+
+        settle = settle_adopted_pins(client)
+
+        assert settle.settled == {"T-1"}
+        assert _row().adopted_head_sha == observed
+        assert _row().adopted_repin_due is False
