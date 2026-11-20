@@ -7,6 +7,7 @@ unmerged entries are the same afterwards as before.
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -44,6 +45,9 @@ _ARTIFACTS = (
     ".claude/review-verdict.json",
     ".claude/review-verdict-unparseable.md",
 )
+
+
+_KINDS = ("modified", "unstaged-new", "deleted")
 
 
 def _repo(make_git_repo: Callable[..., Path], name: str = "bl") -> Path:
@@ -527,21 +531,25 @@ class TestToleratedDirtyStart:
         commit_tracked_file(repo, relpath, "a = 1\n")
         (repo / relpath).write_text("a = 2\n")
 
-    @pytest.mark.parametrize("kind", ["modified", "unstaged-new", "deleted"])
-    def test_tolerated_dirty_path_is_a_clean_baseline(
-        self, make_git_repo: Callable[..., Path], kind: str
-    ) -> None:
-        repo = _repo(make_git_repo, f"tol-{kind}")
-        tolerated = frozenset({"t.py"})
+    @classmethod
+    def _dirty_as(cls, repo: Path, kind: str) -> None:
+        """Leave ``t.py`` as `` M`` (modified), ``??`` (unstaged-new) or `` D``."""
         if kind == "modified":
-            self._dirty_tracked(repo, "t.py")
+            cls._dirty_tracked(repo, "t.py")
         elif kind == "unstaged-new":
             (repo / "t.py").write_text("x = 1\n")
         else:
             commit_tracked_file(repo, "t.py", "a = 1\n")
             (repo / "t.py").unlink()
+
+    @pytest.mark.parametrize("kind", _KINDS)
+    def test_tolerated_dirty_path_is_a_clean_baseline(
+        self, make_git_repo: Callable[..., Path], kind: str
+    ) -> None:
+        repo = _repo(make_git_repo, f"tol-{kind}")
+        self._dirty_as(repo, kind)
         before = _index_state(repo)
-        got = capture_cycle_baseline(repo, tolerated=tolerated)
+        got = capture_cycle_baseline(repo, tolerated=frozenset({"t.py"}))
         assert isinstance(got, CycleBaseline)
         assert "t.py" in got.review_artifacts
         assert _index_state(repo) == before
@@ -576,16 +584,112 @@ class TestToleratedDirtyStart:
             capture_cycle_baseline(repo, tolerated=frozenset()), DirtyStart
         )
 
+    @pytest.mark.parametrize("kind", _KINDS)
     def test_staging_leaves_tolerated_path_out_of_cycle(
-        self, make_git_repo: Callable[..., Path]
+        self, make_git_repo: Callable[..., Path], kind: str
     ) -> None:
-        repo = _repo(make_git_repo, "tol-stage")
-        self._dirty_tracked(repo, "t.py")
+        repo = _repo(make_git_repo, f"tol-stage-{kind}")
+        self._dirty_as(repo, kind)
+        worktree_before = (
+            (repo / "t.py").read_text() if (repo / "t.py").exists() else None
+        )
         baseline = capture_cycle_baseline(repo, tolerated=frozenset({"t.py"}))
         assert isinstance(baseline, CycleBaseline)
         (repo / "fix.py").write_text("f = 1\n")
         stage_cycle(repo, baseline.review_artifacts)
         staged = git_in(repo, "diff", "--cached", "--name-only").splitlines()
-        assert "fix.py" in staged
-        assert "t.py" not in staged
-        assert (repo / "t.py").read_text() == "a = 2\n"
+        assert staged == ["fix.py"]
+        # The operator's edit is left alone in the worktree, never staged.
+        after = (repo / "t.py").read_text() if (repo / "t.py").exists() else None
+        assert after == worktree_before
+
+    @pytest.mark.parametrize("kind", _KINDS)
+    def test_cycle_touched_paths_omits_the_tolerated_path(
+        self, make_git_repo: Callable[..., Path], kind: str
+    ) -> None:
+        repo = _repo(make_git_repo, f"tol-touched-{kind}")
+        self._dirty_as(repo, kind)
+        baseline = capture_cycle_baseline(repo, tolerated=frozenset({"t.py"}))
+        assert isinstance(baseline, CycleBaseline)
+        (repo / "fix.py").write_text("f = 1\n")
+        assert cycle_touched_paths(repo, baseline) == {"fix.py"}
+
+    def test_an_unmerged_tolerated_path_still_refuses(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo, "tol-unmerged")
+        _seed_conflicting_cherry_pick(repo)
+        before = _index_state(repo)
+
+        got = capture_cycle_baseline(repo, tolerated=frozenset({"pyproject.toml"}))
+
+        assert isinstance(got, DirtyStart)
+        assert got.unmerged == ("pyproject.toml",)
+        assert got.markers == ("CHERRY_PICK_HEAD",)
+        assert _index_state(repo) == before
+
+    def test_unmerged_entries_alone_still_refuse_a_tolerated_path(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """No marker is set: the unmerged probe is what refuses."""
+        repo = _repo(make_git_repo, "tol-unmerged-bare")
+        _seed_conflicting_cherry_pick(repo)
+        git_in(repo, "cherry-pick", "--quit")
+
+        got = capture_cycle_baseline(repo, tolerated=frozenset({"pyproject.toml"}))
+
+        assert isinstance(got, DirtyStart)
+        assert got.markers == ()
+        assert got.unmerged == ("pyproject.toml",)
+
+    def test_an_operation_marker_still_refuses_with_a_tolerated_path(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo, "tol-marker")
+        _stage_merge_from_other_branch(repo, {"other.py": "o = 1\n"})
+
+        got = capture_cycle_baseline(repo, tolerated=frozenset({"other.py"}))
+
+        assert isinstance(got, DirtyStart)
+        assert got.markers == ("MERGE_HEAD",)
+
+    @pytest.mark.parametrize("artifact", _ARTIFACTS)
+    @pytest.mark.parametrize("state", ["untracked", "modified"])
+    def test_a_tolerated_path_that_is_also_a_review_artifact_is_one_entry(
+        self, make_git_repo: Callable[..., Path], artifact: str, state: str
+    ) -> None:
+        repo = _repo(make_git_repo, "tol-artifact")
+        if state == "untracked":
+            _write(repo / artifact, "verdict\n")
+        else:
+            commit_tracked_file(repo, artifact, "old\n")
+            _write(repo / artifact, "rewritten by review\n")
+        before = _index_state(repo)
+
+        got = capture_cycle_baseline(repo, tolerated=frozenset({artifact}))
+
+        assert isinstance(got, CycleBaseline)
+        assert got.review_artifacts == frozenset({artifact})
+        assert _index_state(repo) == before
+
+    def test_the_dirty_start_warning_is_logged_once_per_capture(
+        self, make_git_repo: Callable[..., Path], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        repo = _repo(make_git_repo, "tol-warn")
+        self._dirty_tracked(repo, "t.py")
+        tolerated = frozenset({"t.py"})
+        with caplog.at_level(logging.WARNING, logger="cw.tolerated_paths"):
+            capture_cycle_baseline(repo, tolerated=tolerated)
+            first = [r.args for r in caplog.records if r.name == "cw.tolerated_paths"]
+            capture_cycle_baseline(repo, tolerated=tolerated)
+        records = [r.args for r in caplog.records if r.name == "cw.tolerated_paths"]
+        assert first == [("t.py", "dirty_start")]
+        assert records == [("t.py", "dirty_start")] * 2
+
+    def test_no_warning_is_logged_when_nothing_tolerated_is_dirty(
+        self, make_git_repo: Callable[..., Path], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        repo = _repo(make_git_repo, "tol-quiet")
+        with caplog.at_level(logging.WARNING, logger="cw.tolerated_paths"):
+            capture_cycle_baseline(repo, tolerated=frozenset({"t.py"}))
+        assert [r for r in caplog.records if r.name == "cw.tolerated_paths"] == []
