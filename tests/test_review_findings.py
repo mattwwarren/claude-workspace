@@ -61,6 +61,7 @@ from cw.review_findings import (
     write_review_verdict,
 )
 from tests._shared.review_builders import (
+    _EVIDENCE_GAP,
     FindingKwargs,
     _doc_payload,
     _finding_kwargs,
@@ -68,6 +69,7 @@ from tests._shared.review_builders import (
     _make_diff,
     _make_escalation,
     _make_finding,
+    _make_gap_finding,
     _make_reviewer_doc,
     _without_evidence,
 )
@@ -4010,6 +4012,32 @@ class TestDedupeFindings:
         f_b = _make_finding(summary="from B", escalation=esc)
         merged = dedupe_findings([("Zeta", f_b), ("Alpha", f_a)])
         assert merged[0].finding.summary == "from A"
+
+    def test_an_unmarked_copy_wins_over_a_lower_sorting_evidence_gap_copy(
+        self,
+    ) -> None:
+        # #3793: a copy that reproduced the defect is never laundered into a hold.
+        gap = _make_gap_finding(summary="from gap")
+        plain = _make_finding(summary="from plain")
+
+        forward = dedupe_findings([("Alpha", gap), ("Zeta", plain)])
+        backward = dedupe_findings([("Zeta", plain), ("Alpha", gap)])
+
+        for merged in (forward, backward):
+            assert len(merged) == 1
+            assert merged[0].finding.summary == "from plain"
+            assert merged[0].finding.evidence_gap == ""
+            assert merged[0].reviewers == ["Alpha", "Zeta"]
+
+    def test_a_group_every_member_marks_keeps_the_gap(self) -> None:
+        f_a = _make_gap_finding(summary="from A")
+        f_b = _make_gap_finding(summary="from B")
+
+        merged = dedupe_findings([("Zeta", f_b), ("Alpha", f_a)])
+
+        assert len(merged) == 1
+        assert merged[0].finding.summary == "from A"
+        assert merged[0].finding.evidence_gap == _EVIDENCE_GAP
 
 
 class TestDeriveReviewCounts:

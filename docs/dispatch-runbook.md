@@ -3838,6 +3838,44 @@ there is no `operator-settle` payload.
 - Limit: an unmarked finding whose remedy conflicts with a decision is defended
   only by the prompts and the marker; nothing mechanical catches it.
 
+**Park: `review_operator_actionable` from an evidence gap (#3793).** Recognise it
+by the headline `OPERATOR EVIDENCE REQUIRED —` in the verdict comment. A gap hold
+parks only the unverifiable finding. Reproduced MUST_FIX findings in the same
+verdict are fixed first, and the park lands once the loop converges. The
+loop-exhausted park (`codex_must_fix_findings`) still lists the gap findings.
+Release is `cw review settle` on the finding, or providing the missing
+capability and requeueing. It is not a product defect, so no `--regress`.
+
+A finding with no diff anchor (`file: N/A`) has no fingerprint key, so the
+verdict comment prints no settle payload for it and `cw review settle` cannot
+dismiss it. Release it by supplying the missing capability and requeueing.
+Findings that came from the repo review engine (`coverage.*` rules) cannot
+carry the marker and are not covered by this hold (follow-up).
+
+`cw dev-queue approve --override-must-fix` does not release this park.
+For a pure-gap park (`review_operator_actionable`) it is refused at the
+`blocked_reason` gate: `src/cw/dev_queue/must_fix_override.py` accepts only
+`codex_must_fix_findings` and `review_confirm_must_fix`. For a loop-exhausted
+park (`codex_must_fix_findings` with a carried gap) it is accepted, but it binds
+only the findings in `verdict.must_fix` and the finalize check
+(`.claude/scripts/check_must_fix_override.py`) reads only that list. The held gap
+finding sits in `accepted` and is not covered, so overriding the mixed park does
+not settle it: it ships past the reproduced findings and leaves the gap
+unresolved. Settle it with `cw review settle` (anchored findings only).
+
+**Limit:** in the Claude confirm round and the Claude-native clean-mode
+`cw review converge record-round`, a mixed verdict (a gap finding beside a
+reproduced unmarked MUST_FIX) stops the convergence ledger with
+`operator_action` before the unmarked finding is repaired. The Claude-native
+clean-mode lane takes the `review_operator_actionable` exit
+(`stop_operator_action`). The codex Claude confirm round parks as
+`codex_must_fix_findings` with `convergence ledger stopped (operator_action)`
+appended to the details, because its verdict is blocking. Nothing is hidden or
+dropped. `cw review settle` on the gap finding plus a requeue releases it, and the
+unmarked finding is repaired on the requeue. The codex fix loop (blocking and
+clean mode), the Claude-native blocking-mode lane and a pure-gap verdict repair
+reproduced findings first.
+
 **Park: `review_engine_modified` (RFC 0017, #3039).** A client with
 `review.engine` set runs its own review skill as the Claude-native round
 engine. The review stage runs `cw review engine preflight` first; when the

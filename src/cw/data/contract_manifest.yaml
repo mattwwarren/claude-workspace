@@ -1124,6 +1124,12 @@ elements:
       codex: {disposition: deferred, ref: {kind: ticket, number: 2464}, note: "codex review has no built-in adjudication or reviewer roster"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
+  review.evidence-gap-finding-unrun-check:
+    cells:
+      claude-native: {disposition: implemented}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/review_findings/_decided.py, symbol: held_disposition}, note: "the codex verdict stamps an evidence_gap MUST_FIX operator_actionable and parks it; the settle renderer gives it a payload (#3793)"}
+      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
+      local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   review.no-diff-anchor-finding-with-no-diff:
     cells:
       claude-native: {disposition: implemented}
@@ -1191,6 +1197,12 @@ elements:
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   review.decided-constraint-contest:
+    cells:
+      claude-native: {disposition: implemented}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 2464}, note: "codex review has no built-in adjudication or reviewer roster"}
+      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
+      local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
+  review.evidence-gap-hold:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 2464}, note: "codex review has no built-in adjudication or reviewer roster"}
@@ -1314,6 +1326,12 @@ elements:
     cells:
       claude-native: {disposition: implemented}
       codex: {disposition: deferred, ref: {kind: ticket, number: 2464}, note: "codex review has no built-in adjudication or reviewer roster"}
+      opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
+      local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
+  review.third-trigger-evidence-gap-hold:
+    cells:
+      claude-native: {disposition: implemented}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_review/_verdict/_synthesis.py, symbol: _verdict_block_reason}, note: "codex synthesis parks a verdict whose only blocker is an evidence-gap hold as review_operator_actionable; the fix loop parks a converged loop that still holds one (#3793)"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   review.clean-mode-step-3c-additions:

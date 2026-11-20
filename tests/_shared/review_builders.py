@@ -139,6 +139,7 @@ class _RawFindingKwargs(TypedDict, total=False):
     release_critical_exception: object
     contests_adjudication: object
     contests_decision: object
+    evidence_gap: object
 
 
 def _finding_kwargs(**overrides: object) -> _RawFindingKwargs:
@@ -186,6 +187,14 @@ def _without_evidence(payload: dict[str, Any]) -> dict[str, Any]:
 def _make_finding(**overrides: object) -> Finding:
     """Minimal-but-valid Finding with keyword overrides (#1237)."""
     return Finding.model_validate(_finding_kwargs(**overrides))
+
+
+_EVIDENCE_GAP = "could not run the test suite: pytest is not installed in the sandbox"
+
+
+def _make_gap_finding(severity: str = "MUST_FIX", **overrides: object) -> Finding:
+    """A finding that rests on an unrun check (#3793)."""
+    return _make_finding(severity=severity, evidence_gap=_EVIDENCE_GAP, **overrides)
 
 
 _CONSTRAINT_RECORDED_AT = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)

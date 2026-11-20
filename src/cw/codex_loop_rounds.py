@@ -76,6 +76,7 @@ from cw.review_convergence import (
     verdict_ran_engine,
 )
 from cw.review_convergence._models import DECISION_CONTINUE
+from cw.review_findings import held_kind
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -113,6 +114,14 @@ def _round_findings(
     open_keys = set(cycle_round.open_findings) - excluded
     kept: list[AcceptedFinding] = []
     for item in cycle_round.verdict.accepted:
+        if (
+            item.finding.severity == _MUST_FIX
+            and item.disposition == "operator_actionable"
+            and held_kind(item.finding) == "evidence_gap"
+        ):
+            # #3793: an evidence-gap hold is the driver's to carry and park. As
+            # an operator action here it would stop the loop before any fix.
+            continue
         undecided = (
             item.finding.severity == _MUST_FIX
             and item.disposition in _UNDECIDED_MUST_FIX

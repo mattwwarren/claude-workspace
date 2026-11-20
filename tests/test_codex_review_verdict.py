@@ -85,10 +85,10 @@ from cw.review_findings import (
     ReviewerRunRecord,
     ReviewVerdict,
     consolidate_verdict,
-    contested_findings,
-    has_contested_decision,
+    has_held_findings,
+    held_findings,
     parse_reviewer_document,
-    stamp_decision_contests,
+    stamp_held_findings,
 )
 from cw.review_findings._consolidate import _count_rejected_by_severity
 from cw.review_markers import (
@@ -112,11 +112,13 @@ from tests._reconcile_helpers import (
 )
 from tests._shared.git_repos import commit_tracked_file, git_in
 from tests._shared.review_builders import (
+    _EVIDENCE_GAP,
     _doc_payload,
     _finding_kwargs,
     _make_debt_record,
     _make_diff,
     _make_finding,
+    _make_gap_finding,
     _make_reviewer_doc,
 )
 from tests.test_review_adjudication import _make_voided_finding
@@ -126,7 +128,7 @@ if TYPE_CHECKING:
 
     from cw.auto_dev_result import AutoDevResult
     from cw.models import TicketTask
-    from cw.review_findings import Finding, ReviewerFindingsDocument
+    from cw.review_findings import CapturedDiff, Finding, ReviewerFindingsDocument
 
 
 def _parameter_default_node(func: Callable[..., object], name: str) -> ast.expr:
@@ -4695,6 +4697,7 @@ class TestUntrustedFindingTextCannotForgeARecord:
             "suggested_fix",
             "contests_adjudication",
             "contests_decision",
+            "evidence_gap",
         ],
     )
     def test_every_untrusted_finding_field_is_neutralised(self, field: str) -> None:
@@ -4798,6 +4801,17 @@ def _unmarked_second(**overrides: object) -> Finding:
     )
 
 
+def _unmarked_third(**overrides: object) -> Finding:
+    """A third, distinct MUST_FIX with no marker, anchored on its own line."""
+    return _make_finding(
+        summary="Third bug",
+        line_start=12,
+        line_end=12,
+        evidence="def third():",
+        **overrides,
+    )
+
+
 class TestDecidedConstraintContest:
     """#2984: synthesis parks a contested MUST_FIX as operator-actionable."""
 
@@ -4827,7 +4841,7 @@ class TestDecidedConstraintContest:
         assert verdict is not None
         assert verdict.blocking is False
         assert verdict.must_fix == []
-        assert has_contested_decision(verdict)
+        assert has_held_findings(verdict)
 
     def test_details_open_with_the_contest_headline_and_carry_the_quote(
         self, make_git_repo: Callable[[str], Path]
@@ -4882,7 +4896,7 @@ class TestDecidedConstraintContest:
         assert verdict is not None
         assert verdict.blocking is False
         assert verdict.accepted[0].disposition == "deferred"
-        assert not has_contested_decision(verdict)
+        assert not has_held_findings(verdict)
         comment = render_verdict_comment(verdict, fix_loop_enabled=True)
         assert "contests decided constraint" in comment
         assert _CONTEST_QUOTE in comment
@@ -4900,7 +4914,7 @@ class TestDecidedConstraintContest:
         assert result.blocker.reason == "review_operator_actionable"
         assert verdict is not None
         assert verdict.blocking is True
-        assert has_contested_decision(verdict)
+        assert has_held_findings(verdict)
         assert [f.summary for f in verdict.must_fix] == ["Second bug"]
 
         lines = result.blocker.details.splitlines()
@@ -4919,7 +4933,7 @@ class TestRenderDecidedConstraintContest:
         verdict = consolidate_verdict(
             [_make_reviewer_doc(*findings)], _make_diff(), reviewed_sha="sha"
         )
-        return stamp_decision_contests(verdict)
+        return stamp_held_findings(verdict)
 
     def test_headline_sits_right_after_the_title(self) -> None:
         verdict = self._verdict(_marked())
@@ -4940,7 +4954,7 @@ class TestRenderDecidedConstraintContest:
         comment = render_verdict_comment(verdict, fix_loop_enabled=True)
 
         assert _CONTEST_HEADLINE.format(n=2) in comment
-        assert len(contested_findings(verdict)) == 2
+        assert len(held_findings(verdict)) == 2
 
     def test_contested_must_fix_annotation_wording(self) -> None:
         verdict = self._verdict(_marked())
@@ -4991,6 +5005,277 @@ class TestRenderDecidedConstraintContest:
         comment = render_verdict_comment(verdict, fix_loop_enabled=True)
 
         assert len(_extract_settle_payloads(comment)) == 1
+
+
+# ---------------------------------------------------------------------------
+# #3793: a finding that rests on an unrun check is held, never dropped
+# ---------------------------------------------------------------------------
+
+_GAP_HEADLINE = (
+    "**OPERATOR EVIDENCE REQUIRED — {n} finding(s) rest on a check the reviewer "
+    "could not run.** An implementation change cannot supply missing evidence, so "
+    "the fix loop does not act on them and nothing was dropped: each lists the "
+    "check. Settle a finding that has a payload below to dismiss it, or provide the "
+    "missing capability and re-run the review, then requeue."
+)
+_GAP_ANNOTATION_HELD = (
+    f" _(evidence gap — could not be verified, held for the operator, not "
+    f"dropped: {_EVIDENCE_GAP})_"
+)
+_GAP_ANNOTATION_NOTE = f" _(evidence gap — {_EVIDENCE_GAP})_"
+_REPAIR_SENTENCE = (
+    "{m} other MUST_FIX finding(s) are open and are the fix loop's to repair; "
+    "these held findings are yours and do not block that repair."
+)
+#: Added code lines, so a gap finding and reproduced ones can each anchor.
+_GAP_DIFF_LINES = ("def broken():", "return 1", "def third():")
+
+
+def _gap_diff() -> CapturedDiff:
+    return _make_diff(*_GAP_DIFF_LINES, files={"src/cw/foo.py": [10, 11, 12]})
+
+
+class TestEvidenceGapHold:
+    """#3793: synthesis parks only the unverifiable finding."""
+
+    def _synth(
+        self, worktree: Path, *findings: Finding
+    ) -> tuple[AutoDevResult, ReviewVerdict | None]:
+        return synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_make_reviewer_doc(*findings)],
+            failures=[],
+            diff=_gap_diff(),
+            reviewed_sha="sha",
+            session_id="s-evidence-gap",
+            default_branch="main",
+            fix_loop_enabled=True,
+        )
+
+    def test_pure_gap_parks_as_operator_actionable(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        result, verdict = self._synth(make_git_repo("wt-gap-park"), _make_gap_finding())
+
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert result.blocker.reason == "review_operator_actionable"
+        assert result.blocker.reason != CODEX_MUST_FIX_FINDINGS
+        assert verdict is not None
+        assert verdict.blocking is False
+        assert verdict.must_fix == []
+        assert has_held_findings(verdict, "evidence_gap")
+
+    def test_details_open_with_the_evidence_headline_and_name_the_check(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        result, _verdict = self._synth(
+            make_git_repo("wt-gap-details"), _make_gap_finding()
+        )
+
+        assert result.blocker is not None
+        lines = result.blocker.details.splitlines()
+        head = next(
+            i for i, line in enumerate(lines) if line.startswith("**OPERATOR EVIDENCE")
+        )
+        assert lines[head] == _GAP_HEADLINE.format(n=1)
+        assert head == 2
+        assert "**BLOCKING**" not in result.blocker.details
+        assert "Non-blocking" not in result.blocker.details
+        finding_lines = [line for line in lines if "Bug here" in line]
+        assert any(_GAP_ANNOTATION_HELD in line for line in finding_lines)
+        assert all("suppressed" not in line for line in finding_lines)
+
+    def test_gap_beside_an_unmarked_must_fix_routes_to_repair(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        result, verdict = self._synth(
+            make_git_repo("wt-gap-mixed"), _make_gap_finding(), _unmarked_second()
+        )
+
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_MUST_FIX_FINDINGS
+        assert verdict is not None
+        assert verdict.blocking is True
+        assert [f.summary for f in verdict.must_fix] == ["Second bug"]
+        assert has_held_findings(verdict, "evidence_gap")
+        assert not has_held_findings(verdict, "decision_contest")
+        assert "**BLOCKING**" in result.blocker.details
+        assert _GAP_HEADLINE.format(n=1) in result.blocker.details
+
+    def test_an_unmarked_must_fix_alone_is_unchanged(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        result, verdict = self._synth(make_git_repo("wt-gap-none"), _make_finding())
+
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_MUST_FIX_FINDINGS
+        assert verdict is not None
+        assert not has_held_findings(verdict)
+        assert "OPERATOR EVIDENCE REQUIRED" not in result.blocker.details
+
+    def test_contest_beside_a_gap_parks_the_whole_verdict_contest_first(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        result, verdict = self._synth(
+            make_git_repo("wt-gap-contest"),
+            _marked(),
+            _make_gap_finding(
+                summary="Second bug", line_start=11, line_end=11, evidence="return 1"
+            ),
+            _unmarked_third(),
+        )
+
+        assert result.blocker is not None
+        assert result.blocker.reason == "review_operator_actionable"
+        assert verdict is not None
+        assert verdict.blocking is True
+        details = result.blocker.details
+        assert "**BLOCKING**" not in details
+        assert details.index("OPERATOR DECISION REQUIRED") < details.index(
+            "OPERATOR EVIDENCE REQUIRED"
+        )
+
+    def test_should_fix_gap_alone_is_a_non_blocked_note(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        result, verdict = self._synth(
+            make_git_repo("wt-gap-should"), _make_gap_finding(severity="SHOULD_FIX")
+        )
+
+        assert result.status == "stage_complete"
+        assert result.blocker is None
+        assert verdict is not None
+        assert verdict.accepted[0].disposition == "deferred"
+        assert not has_held_findings(verdict)
+        comment = render_verdict_comment(verdict, fix_loop_enabled=True)
+        assert _GAP_ANNOTATION_NOTE in comment
+        assert "OPERATOR EVIDENCE REQUIRED" not in comment
+        assert "held for the operator" not in comment
+
+    def test_the_hold_outranks_a_mechanically_rejected_must_fix(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        unreadable = _make_finding(file="src/cw/not_in_diff_or_worktree.py")
+
+        result, verdict = self._synth(
+            make_git_repo("wt-gap-order"), _make_gap_finding(), unreadable
+        )
+
+        assert verdict is not None
+        assert verdict.rejected_must_fix
+        assert result.blocker is not None
+        assert result.blocker.reason == "review_operator_actionable"
+        assert "OPERATOR EVIDENCE REQUIRED" in result.blocker.details
+        assert "### MUST_FIX — mechanically rejected" in result.blocker.details
+
+    def test_settle_section_has_a_payload_for_the_gap_finding(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        result, _verdict = self._synth(
+            make_git_repo("wt-gap-settle"), _make_gap_finding()
+        )
+
+        assert result.blocker is not None
+        assert SETTLE_SECTION_HEADING in result.blocker.details
+        payloads = _extract_settle_payloads(result.blocker.details)
+        assert [p["entries"][0]["summary"] for p in payloads] == ["Bug here"]
+
+
+class TestRenderEvidenceGap:
+    """#3793: the verdict comment's evidence headline and annotations."""
+
+    def _verdict(self, *findings: Finding) -> ReviewVerdict:
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(*findings)], _gap_diff(), reviewed_sha="sha"
+        )
+        return stamp_held_findings(verdict)
+
+    def test_a_pure_gap_opens_with_the_evidence_headline_not_the_clean_one(
+        self,
+    ) -> None:
+        verdict = self._verdict(_make_gap_finding())
+
+        lines = render_verdict_comment(verdict, fix_loop_enabled=True).splitlines()
+
+        assert lines[0].startswith("## ")
+        assert lines[1] == ""
+        assert lines[2] == _GAP_HEADLINE.format(n=1)
+        text = "\n".join(lines)
+        assert "**BLOCKING**" not in text
+        assert "**Non-blocking**" not in text
+
+    def test_a_gap_beside_an_unmarked_must_fix_keeps_the_blocking_headline(
+        self,
+    ) -> None:
+        verdict = self._verdict(_make_gap_finding(), _unmarked_second())
+
+        comment = render_verdict_comment(verdict, fix_loop_enabled=True)
+
+        assert "**BLOCKING** — 1 MUST_FIX finding(s)" in comment
+        assert _GAP_HEADLINE.format(n=1) in comment
+        assert comment.index("**BLOCKING**") < comment.index("OPERATOR EVIDENCE")
+
+    def test_the_repair_sentence_follows_only_an_enabled_fix_loop(self) -> None:
+        verdict = self._verdict(_make_gap_finding(), _unmarked_second())
+
+        enabled = render_verdict_comment(verdict, fix_loop_enabled=True)
+        disabled = render_verdict_comment(verdict, fix_loop_enabled=False)
+
+        assert _REPAIR_SENTENCE.format(m=1) in enabled
+        assert _REPAIR_SENTENCE.format(m=1) not in disabled
+        assert _GAP_HEADLINE.format(n=1) in disabled
+
+    def test_a_contest_beside_a_gap_renders_both_headlines_contest_first(
+        self,
+    ) -> None:
+        verdict = self._verdict(
+            _marked(),
+            _make_gap_finding(
+                summary="Gap", line_start=11, line_end=11, evidence="return 1"
+            ),
+        )
+
+        lines = render_verdict_comment(verdict, fix_loop_enabled=True).splitlines()
+
+        assert lines[2] == _CONTEST_HEADLINE.format(n=1)
+        assert lines[3] == _GAP_HEADLINE.format(n=1)
+        assert "**BLOCKING**" not in "\n".join(lines)
+
+    def test_a_contest_gap_and_unmarked_finding_never_promise_a_repair(self) -> None:
+        verdict = self._verdict(
+            _marked(),
+            _make_gap_finding(
+                summary="Gap", line_start=11, line_end=11, evidence="return 1"
+            ),
+            _unmarked_third(),
+        )
+
+        comment = render_verdict_comment(verdict, fix_loop_enabled=True)
+
+        assert _OTHER_OPEN_LINE.format(m=1) in comment
+        assert "the fix loop's to repair" not in comment
+        assert _GAP_HEADLINE.format(n=1) in comment
+
+    def test_a_gap_hold_gets_a_settle_payload(self) -> None:
+        verdict = self._verdict(_make_gap_finding())
+
+        comment = render_verdict_comment(verdict, fix_loop_enabled=True)
+
+        assert SETTLE_SECTION_HEADING in comment
+        payloads = _extract_settle_payloads(comment)
+        assert [p["entries"][0]["summary"] for p in payloads] == ["Bug here"]
+
+    def test_a_should_fix_gap_is_annotated_but_not_held(self) -> None:
+        verdict = self._verdict(_make_gap_finding(severity="SHOULD_FIX"))
+
+        comment = render_verdict_comment(verdict, fix_loop_enabled=True)
+
+        assert _GAP_ANNOTATION_NOTE in comment
+        assert "held for the operator" not in comment
+        assert "OPERATOR EVIDENCE REQUIRED" not in comment
+        assert SETTLE_SECTION_HEADING not in comment
 
 
 # ---------------------------------------------------------------------------

@@ -34,13 +34,17 @@ def _dedup_key(finding: Finding) -> tuple[str, str, int, int, str]:
 def _pick_representative(members: list[tuple[str, Finding]]) -> Finding:
     """Choose the surviving Finding for a dedup group.
 
-    Prefer the source with a non-null escalation when exactly one side has it
-    set; otherwise tie-break deterministically by lowest-sorting reviewer_role.
+    A group that mixes marked and unmarked members (#3793) is represented by an
+    unmarked one: a copy that reproduced the defect is never laundered into an
+    evidence-gap hold by a reviewer that could not verify it. Then prefer the
+    source with a non-null escalation when exactly one side has it set;
+    otherwise tie-break deterministically by lowest-sorting reviewer_role.
     """
-    escalated = [(role, f) for role, f in members if f.escalation is not None]
+    pool = [(role, f) for role, f in members if not f.evidence_gap.strip()] or members
+    escalated = [(role, f) for role, f in pool if f.escalation is not None]
     if len(escalated) == 1:
         return escalated[0][1]
-    return min(members, key=lambda rf: rf[0])[1]
+    return min(pool, key=lambda rf: rf[0])[1]
 
 
 def dedupe_findings(candidates: list[tuple[str, Finding]]) -> list[AcceptedFinding]:

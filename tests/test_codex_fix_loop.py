@@ -71,7 +71,7 @@ from cw.review_findings import (
     AcceptedFinding,
     ReviewVerdict,
     consolidate_verdict,
-    has_contested_decision,
+    has_held_findings,
     write_review_verdict,
 )
 from cw.stage_verification.growth import LoopGrowthBudget, RunGrowth
@@ -93,6 +93,7 @@ from tests._codex_review_helpers import (
 from tests._review_convergence_helpers import codex_audit_fixture
 from tests._shared.git_repos import add_bare_origin, commit_tracked_file, git_in
 from tests._shared.review_builders import (
+    _EVIDENCE_GAP,
     _make_constraint,
     _make_diff,
     _make_finding,
@@ -3973,6 +3974,9 @@ _CONTEST_QUOTE = "Non-goal: keep the legacy retry path. It deadlocks on a full q
 _CONTEST_REASON = "review_operator_actionable"
 _MF_A_MARKED = {**_MF_A, "contests_decision": _CONTEST_QUOTE}
 _MF_B_MARKED = {**_MF_B, "contests_decision": _CONTEST_QUOTE}
+_MF_A_GAP = {**_MF_A, "evidence_gap": _EVIDENCE_GAP}
+_MF_B_GAP = {**_MF_B, "evidence_gap": _EVIDENCE_GAP}
+_GAP_HEADLINE = "OPERATOR EVIDENCE REQUIRED"
 
 
 def _decided_row_task(*entries: tuple[str, str]) -> TicketTask:
@@ -4071,7 +4075,7 @@ class TestContestedDecisionThroughLoop:
         assert "MFB" in out.blocker.details
         assert _CONTEST_QUOTE in out.blocker.details
         assert verdict is not None
-        assert has_contested_decision(verdict)
+        assert has_held_findings(verdict)
 
     def test_contest_first_seen_in_a_cycle_one_rereview_parks(
         self, make_git_repo: Callable[..., Path]
@@ -4100,7 +4104,7 @@ class TestContestedDecisionThroughLoop:
         assert verdict is not None
         by_summary = {af.finding.summary: af for af in verdict.accepted}
         assert by_summary["MFA"].disposition == "unresolved"
-        assert has_contested_decision(verdict)
+        assert has_held_findings(verdict)
 
     def test_stamped_contest_never_enters_the_open_findings_tracker(self) -> None:
         stamped = _accepted(_MF_A_MARKED).model_copy(
@@ -4111,6 +4115,117 @@ class TestContestedDecisionThroughLoop:
         updated = _track_cycle0({}, [stamped, still_open])
 
         assert list(updated) == [_open_finding_key(still_open.finding)]
+
+
+def _dispositions(verdict: ReviewVerdict | None) -> dict[str, str]:
+    assert verdict is not None
+    return {af.finding.summary: af.disposition for af in verdict.accepted}
+
+
+class TestEvidenceGapThroughLoop:
+    """#3793: a gap parks only the unverifiable finding, never a regress."""
+
+    def test_pure_gap_cycle_zero_parks_without_a_fix_cycle(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-3793-pure")
+        head_before = git_in(worktree, "rev-parse", "HEAD")
+        runner = _FixLoopRunner([_doc([_MF_A_GAP]), _CLEAN_DOC])
+
+        out, verdict = _run_loop(runner, worktree, session_id="s-3793-pure")
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == _CONTEST_REASON
+        assert out.blocker.reason != CODEX_MUST_FIX_FINDINGS
+        assert runner.fix_calls == 0
+        assert f"**{_GAP_HEADLINE}" in out.blocker.details
+        assert "MFA" in out.blocker.details
+        assert _EVIDENCE_GAP in out.blocker.details
+        assert _dispositions(verdict) == {"MFA": "operator_actionable"}
+        assert git_in(worktree, "rev-parse", "HEAD") == head_before
+
+    def test_gap_beside_an_unmarked_must_fix_repairs_then_parks_the_gap(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-3793-mixed")
+        head_before = git_in(worktree, "rev-parse", "HEAD")
+        # The re-review is clean: it does not re-raise the gap, so only the
+        # cycle-0 carry can put it back in front of the operator.
+        runner = _FixLoopRunner(
+            [_doc([_MF_A_GAP, _MF_B]), _CLEAN_DOC], fix_behaviors=[_editor()]
+        )
+
+        out, verdict = _run_loop(runner, worktree, session_id="s-3793-mixed")
+
+        assert runner.fix_calls == 1
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == _CONTEST_REASON
+        assert _GAP_HEADLINE in out.blocker.details
+        assert "MFA" in out.blocker.details
+        assert _dispositions(verdict)["MFA"] == "operator_actionable"
+        assert out.review.fix_cycles_used == 1
+        assert git_in(worktree, "rev-parse", "HEAD") != head_before
+
+    def test_gap_first_raised_in_a_cycle_one_rereview_parks_at_convergence(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-3793-c1")
+        # Cycle 0: one plain MUST_FIX (A). The re-review still holds A and adds a
+        # gap B; unlike a contest it does not park, so a second fix runs and the
+        # clean third review (which no longer raises B) converges.
+        runner = _FixLoopRunner(
+            [_MF_DOC, _doc([_MF_A, _MF_B_GAP]), _CLEAN_DOC],
+            fix_behaviors=[_editor(), _editor("fix2.py")],
+        )
+
+        out, verdict = _run_loop(runner, worktree, session_id="s-3793-c1")
+
+        assert runner.fix_calls == 2
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == _CONTEST_REASON
+        assert _GAP_HEADLINE in out.blocker.details
+        assert "MFB" in out.blocker.details
+        assert _dispositions(verdict)["MFB"] == "operator_actionable"
+
+    def test_exhausted_loop_still_lists_the_carried_gap(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-3793-cap")
+        runner = _FixLoopRunner([_doc([_MF_A, _MF_B_GAP])])
+
+        out, verdict = _run_loop(runner, worktree, session_id="s-3793-cap")
+
+        assert runner.fix_calls == _MAX_FIX_CYCLES
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_MUST_FIX_FINDINGS
+        assert "BLOCKING" in out.blocker.details
+        assert _GAP_HEADLINE in out.blocker.details
+        assert "MFB" in out.blocker.details
+        assert _dispositions(verdict)["MFB"] == "operator_actionable"
+
+    def test_contest_beside_a_gap_parks_the_whole_verdict(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-3793-contest")
+        runner = _FixLoopRunner(
+            [_doc([_MF_A_MARKED, _MF_B_GAP]), _CLEAN_DOC], fix_behaviors=[_editor()]
+        )
+
+        out, verdict = _run_loop(runner, worktree, session_id="s-3793-contest")
+
+        assert runner.fix_calls == 0
+        assert out.blocker is not None
+        assert out.blocker.reason == _CONTEST_REASON
+        assert "OPERATOR DECISION REQUIRED" in out.blocker.details
+        assert _GAP_HEADLINE in out.blocker.details
+        assert "MFA" in out.blocker.details
+        assert "MFB" in out.blocker.details
+        assert verdict is not None
+        assert has_held_findings(verdict, "decision_contest")
+        assert has_held_findings(verdict, "evidence_gap")
 
 
 def test_driver_threads_stall_and_budget_to_state(
@@ -4258,6 +4373,53 @@ class TestSeedFindings:
         assert out.status == "stage_complete"
         assert verdict is not None
         assert verdict.blocking is False
+
+    def test_a_gap_only_cycle0_with_a_seed_still_runs_the_fix_loop(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-seed-gap")
+        seen = self._spy_rereview(monkeypatch)
+        runner = _FixLoopRunner(
+            [_doc([_MF_A_GAP]), _CLEAN_DOC], fix_behaviors=[_editor()]
+        )
+
+        out, verdict = _run_loop(
+            runner,
+            worktree,
+            session_id="s-seed-gap",
+            seed_findings=[_accepted(_MF_B)],
+        )
+
+        assert runner.fix_calls >= 1
+        # The re-review is told about the seed only, never the held gap.
+        assert seen == [["MFB"]]
+        assert out.blocker is not None
+        assert out.blocker.reason == _CONTEST_REASON
+        assert _GAP_HEADLINE in out.blocker.details
+        assert "MFA" in out.blocker.details
+        assert _dispositions(verdict)["MFA"] == "operator_actionable"
+
+    def test_a_contest_cycle0_with_a_seed_merges_no_seed(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-seed-contest")
+        runner = _FixLoopRunner(
+            [_doc([_MF_A_MARKED]), _CLEAN_DOC], fix_behaviors=[_editor()]
+        )
+
+        out, verdict = _run_loop(
+            runner,
+            worktree,
+            session_id="s-seed-contest",
+            seed_findings=[_accepted(_MF_B)],
+        )
+
+        assert runner.fix_calls == 0
+        assert out.blocker is not None
+        assert out.blocker.reason == _CONTEST_REASON
+        assert "MFB" not in out.blocker.details
+        assert verdict is not None
+        assert "MFB" not in _dispositions(verdict)
 
     def test_a_disabled_loop_ignores_seeds(
         self, make_git_repo: Callable[..., Path]
