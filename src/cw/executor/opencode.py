@@ -9,7 +9,7 @@ from cw.bindings_block import bindings_block_for
 from cw.executor._capabilities import OPENCODE_CAPABILITIES
 from cw.executor._preflight import park_if_unmet
 from cw.executor.core import FireAndForgetRunner, _PreflightOK, _spawn_fire_and_forget
-from cw.models import SessionOrigin, SessionPurpose
+from cw.models import SessionOrigin, SessionPurpose, resolve_base_branch
 from cw.models.bindings import Harness
 from cw.native_daemon import get_native_daemon_client
 from cw.opencode_runner import (
@@ -98,6 +98,7 @@ def _opencode_preflight(
         headless=True,
         task=task,
         default_branch=client.default_branch,
+        base_branch=resolve_base_branch(client, task),
         workspace_path=client.workspace_path,
         lane=task.lane,
         merge_gate_ignore_paths=client.merge_gate_ignore_paths,

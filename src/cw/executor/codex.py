@@ -23,7 +23,7 @@ from cw.executor.core import (
     _spawn_fire_and_forget,
     purpose_for_stage,
 )
-from cw.models import SessionOrigin, Stage
+from cw.models import SessionOrigin, Stage, resolve_base_branch
 from cw.models.bindings import Harness
 from cw.native_daemon import get_native_daemon_client
 from cw.opencode_runner import stage_entry_marker
@@ -93,6 +93,7 @@ def _codex_preflight(
         task=task,
         wall_clock_budget_seconds=wall_clock_budget_seconds,
         default_branch=client.default_branch,
+        base_branch=resolve_base_branch(client, task),
         workspace_path=client.workspace_path,
         lane=task.lane,
         merge_gate_ignore_paths=client.merge_gate_ignore_paths,

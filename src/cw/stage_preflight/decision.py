@@ -10,7 +10,9 @@ meet, checked in this order:
 3. a REVIEW with ``review.engine`` runs where the harness runs an engine round
    (``review_engine_unsupported_backend``);
 4. an IMPL row carrying repair feedback runs where the harness reads it
-   (``repair_entry_unsupported_backend``).
+   (``repair_entry_unsupported_backend``);
+5. a row with a non-null base runs where the harness delivers the base
+   (``base_unsupported_backend``, RFC 0020 A1, #3781).
 
 Pure: no I/O, no logging. The executors call it at their existing park
 positions (``cw.executor._preflight``) and build the blocked result with their
@@ -28,9 +30,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from cw.models.bindings import Harness
 from cw.models.capabilities import RepairEntry
 from cw.models.enums import Stage
 from cw.stage_preflight.details import (
+    base_unsupported_details,
     clean_review_details,
     repair_entry_details,
     stage_unsupported_details,
@@ -40,6 +44,11 @@ from cw.stage_preflight.reasons import PreflightReason
 if TYPE_CHECKING:
     from cw.models.capabilities import HarnessCapabilities
 
+#: Harnesses that deliver a row's ``base_branch`` to the worker. Codex joins
+#: when #3782 wires its executors (RFC 0020 S3); until then a non-null base
+#: parks ``base_unsupported_backend`` before any agent runs.
+BASE_SUPPORTING_HARNESSES: frozenset[Harness] = frozenset({Harness.CLAUDE_NATIVE})
+
 
 @dataclass(frozen=True, slots=True)
 class SpawnFacts:
@@ -48,7 +57,8 @@ class SpawnFacts:
     ``engine_refusal`` is the pre-worded refusal text for the configured repo
     review engine, or ``None`` when the client configures no engine. ``feedback``
     is "the row carries repair feedback"; ``adopted`` is "the row is an
-    adoption row carrying it".
+    adoption row carrying it". ``has_base`` is "the row carries a non-null
+    ``base_branch``".
     """
 
     stage: Stage
@@ -56,6 +66,7 @@ class SpawnFacts:
     engine_refusal: str | None
     feedback: bool
     adopted: bool
+    has_base: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,5 +114,11 @@ def first_unmet(caps: HarnessCapabilities, facts: SpawnFacts) -> Unmet | None:
             reason=PreflightReason.REPAIR_ENTRY_UNSUPPORTED_BACKEND,
             details=repair_entry_details(harness),
             retry_eligible=None if any_feedback else False,
+        )
+    if facts.has_base and caps.harness not in BASE_SUPPORTING_HARNESSES:
+        return Unmet(
+            reason=PreflightReason.BASE_UNSUPPORTED_BACKEND,
+            details=base_unsupported_details(harness),
+            retry_eligible=False,
         )
     return None

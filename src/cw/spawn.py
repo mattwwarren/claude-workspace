@@ -21,7 +21,11 @@ from cw.config import (
     save_state,
     sessions_lock,
 )
-from cw.context_queue_metadata import build_queue_metadata
+from cw.context_queue_metadata import (
+    BASE_BRANCH_KEY,
+    build_queue_metadata,
+    context_base_branch,
+)
 from cw.context_schema import CW_CONTEXT_SCHEMA_VERSION
 from cw.events import record_event
 from cw.exceptions import (
@@ -44,6 +48,7 @@ from cw.models import (
     SessionOrigin,
     SessionPurpose,
     TicketTask,
+    resolve_base_branch,
 )
 from cw.models.bindings import Harness
 from cw.models.client import CLIENT_CONTEXT_KEY, ReviewConfig
@@ -563,6 +568,7 @@ def _write_hook_context(
     task: TicketTask | None = None,
     wall_clock_budget_seconds: int | None = None,
     default_branch: str = "main",
+    base_branch: str | None = None,
     workspace_path: Path | None = None,
     lane: str | None = None,
     merge_gate_ignore_paths: list[str] | None = None,
@@ -703,6 +709,8 @@ def _write_hook_context(
         # the guard's per-lane config override (LaneConfig.busy_wait_guard_*)
         # resolvable at all. Null for USER-origin sessions, which have no lane.
         "lane": lane,
+        # RFC 0020 A1 (#3781): always present, never under world_state_snapshot.
+        BASE_BRANCH_KEY: context_base_branch(base_branch, default_branch),
         "merge_gate_ignore_paths": merge_gate_ignore_paths or [],
         "merge_gate_enabled": merge_gate_enabled,
         "review": (review_config or ReviewConfig()).to_context(),
@@ -880,6 +888,7 @@ def spawn_create_impl(
         task=task,
         wall_clock_budget_seconds=wall_clock_budget_seconds,
         default_branch=client.default_branch,
+        base_branch=resolve_base_branch(client, task),
         workspace_path=client.workspace_path,
         lane=lane,
         merge_gate_ignore_paths=client.merge_gate_ignore_paths,

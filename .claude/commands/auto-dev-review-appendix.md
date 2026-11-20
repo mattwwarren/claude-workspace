@@ -10,6 +10,8 @@ budget).
 
 **Branch resolution.** `<branch-name>` is this ticket's own branch: run `jq -r '.queue_metadata.branch // empty' .claude/cw-context.json` from the cw session worktree root and use what it prints. When it prints nothing (the file or key is absent, or the value is null), use `<branch-prefix>/<ticket-id>`, where `<branch-prefix>` is the effective prefix (`--branch-prefix` if given, else the client's `feature_branch_prefix`, default `dev`). Do not take it from `git branch --show-current`: an isolation worktree may sit on an `agent-<hash>` branch.
 
+**Base resolution.** `<base>` is the branch this ticket merges into: run `jq -r '.base_branch // .world_state_snapshot.origin_main_branch // empty' .claude/cw-context.json` from the cw session worktree root and use what it prints. When it prints nothing (the file or both keys are absent), use the repository default branch: the name `git symbolic-ref --short refs/remotes/origin/HEAD` prints with its leading `origin/` removed. Every fetch, merge, diff range, `--base` argument and open-PR filter in this document that names the merge target means `<base>`; never type a branch name for it.
+
 ---
 
 ## Parent turns and subagent turns are not symmetric
@@ -247,16 +249,16 @@ fix would land on is exactly what could not be located (#2209).
 ```bash
 # From the main session's worktree
 git fetch origin <branch-name>
-git fetch origin main                                # the probe never fetches: a stale origin/main would read up_to_date or clean
-FETCH_RC=$?                                          # a failed fetch skips the probe below: a stale origin/main must never reach a merge decision
+git fetch origin <base>                              # the probe never fetches: a stale origin/<base> would read up_to_date or clean
+FETCH_RC=$?                                          # a failed fetch skips the probe below: a stale origin/<base> must never reach a merge decision
 git checkout -B <branch-name> origin/<branch-name>   # -B: idempotent — cw provisions this worktree on <branch-name> (#712), so plain -b would fail "already exists"
-# Probe: exit 0: no merge; exit 1 AND JSON state conflict (both) only: git merge origin/main --no-edit; exit 3 or any other combination, or PROBE_RC=skipped (the fetch failed): log merge_probe_unavailable, no merge
+# Probe: exit 0: no merge; exit 1 AND JSON state conflict (both) only: git merge origin/<base> --no-edit; exit 3 or any other combination, or PROBE_RC=skipped (the fetch failed): log merge_probe_unavailable, no merge
 if [ "$FETCH_RC" -eq 0 ]; then
-  PROBE_JSON="$(cw worktree merge-probe --base main)"; PROBE_RC=$?; PROBE_STATE="$(printf '%s' "$PROBE_JSON" | jq -r .state 2>/dev/null)"
+  PROBE_JSON="$(cw worktree merge-probe --base <base>)"; PROBE_RC=$?; PROBE_STATE="$(printf '%s' "$PROBE_JSON" | jq -r .state 2>/dev/null)"
   echo "PROBE_RC=$PROBE_RC PROBE_STATE=$PROBE_STATE"; printf '%s\n' "$PROBE_JSON"   # read the outcome from this printed line: shell variables do not survive between Bash calls
 else
   echo "PROBE_RC=skipped PROBE_STATE=skipped"
-  echo "git fetch origin main failed (exit $FETCH_RC): probe skipped, no merge"
+  echo "git fetch origin <base> failed (exit $FETCH_RC): probe skipped, no merge"
 fi
 # apply edits via Read/Edit/Write tools
 # run quality gates
@@ -267,7 +269,7 @@ test "$(git rev-parse origin/<branch-name>)" = "$(git rev-parse HEAD)"  # verify
 git checkout <original-branch>   # restore main session state
 ```
 
-The fetch comes first, in the same fence: the probe never fetches, and a stale `origin/main` makes it wrongly report `up_to_date` or `clean`. If the fetch fails, do NOT probe: the fence enforces this itself and prints `PROBE_RC=skipped PROBE_STATE=skipped`; log `merge_probe_unavailable` in friction and make no merge.
+The fetch comes first, in the same fence: the probe never fetches, and a stale `origin/<base>` makes it wrongly report `up_to_date` or `clean`. If the fetch fails, do NOT probe: the fence enforces this itself and prints `PROBE_RC=skipped PROBE_STATE=skipped`; log `merge_probe_unavailable` in friction and make no merge.
 
 The Pre-exit invariant in the core doc still applies after this path runs.
 

@@ -43,12 +43,25 @@ BRANCH_KEY = "branch"
 # the pure serializer never sets it; cw.stage_verification.impl_regress_findings
 # owns the value.
 REGRESS_REVIEW_FINDINGS_KEY = "regress_review_findings"
+# Top-level (not queue_metadata) key the worker reads for the branch its work
+# merges into (RFC 0020 A1, #3781). Always a non-empty string; see
+# context_base_branch. It stays out of build_queue_metadata for that reason.
+BASE_BRANCH_KEY = "base_branch"
 """The ``queue_metadata`` wire key carrying the row's recorded branch (#2948)."""
 
 _ROW_SOURCE_PREFIX = "row"
 _ROW_SOURCE_SEPARATOR = ":"
 _JSON_COMPACT_SEPARATORS = (",", ":")
 _DIGEST_ENCODING = "ascii"
+
+
+def context_base_branch(base_branch: str | None, default_branch: str) -> str:
+    """The top-level ``base_branch`` value a worker's context carries (#3781).
+
+    The row's recorded base when it has one, else the client's default branch,
+    so the stamped value is always a non-empty string.
+    """
+    return base_branch or default_branch
 
 
 def operator_resolutions_source(

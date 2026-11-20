@@ -4268,6 +4268,7 @@ pushes. cw does everything else:
   missing plan blocks `plan_missing` unless the row is an adopted repair entry
   (`review_feedback` and `branch` both set); a `recover-red-pr` row has no
   `branch`, so it needs its `.cw/plan.md`.
+- **Merge target (RFC 0020 A1, #3781).** The worker's context carries the row's base as top-level `base_branch` (the row's `base_branch`, else the client's `default_branch`), always a non-empty string. Only claude-native delivers it: opencode, local and codex refuse a row with a non-null base before any agent runs (`base_unsupported_backend`).
 - **Pre-turn guards.** The worktree must be on the row's branch
   (`queue_metadata.branch`, else `<prefix>/<ticket>`), and a fresh row's branch
   must carry no commits ahead of its fork point (`impl_failed`,

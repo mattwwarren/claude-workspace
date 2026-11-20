@@ -10,6 +10,8 @@ gate-collapse table.
 
 **Branch resolution.** `<branch-name>` is this ticket's own branch: run `jq -r '.queue_metadata.branch // empty' .claude/cw-context.json` from the cw session worktree root and use what it prints. When it prints nothing (the file or key is absent, or the value is null), use `<branch-prefix>/<ticket-id>`, where `<branch-prefix>` is the effective prefix (`--branch-prefix` if given, else the client's `feature_branch_prefix`, default `dev`). Do not take it from `git branch --show-current`: an isolation worktree may sit on an `agent-<hash>` branch.
 
+**Base resolution.** `<base>` is the branch this ticket merges into: run `jq -r '.base_branch // .world_state_snapshot.origin_main_branch // empty' .claude/cw-context.json` from the cw session worktree root and use what it prints. When it prints nothing (the file or both keys are absent), use the repository default branch: the name `git symbolic-ref --short refs/remotes/origin/HEAD` prints with its leading `origin/` removed. Every fetch, merge, diff range, `--base` argument and open-PR filter in this document that names the merge target means `<base>`; never type a branch name for it.
+
 ---
 
 ## Step 4a — interactive open-PR prompt
@@ -71,7 +73,7 @@ Create PR via /prep-pr + /ship-it?
 
 `/prep-pr` delegates to the per-project ship-it (a command or a skill — see Step 8's probe), which
 knows repo-specific PR conventions (template, labels, reviewers, base branch, CI
-bootstrap) the pipeline shouldn't hardcode. It keeps sync-with-main and
+bootstrap) the pipeline shouldn't hardcode. It keeps sync-with-base and
 quality-gate-rerun logic in one place instead of duplicating them across
 `/auto-dev` Stage 4b and `/prep-pr` Step 1/7, and it handles PR monitor
 registration in its Step 9.
@@ -166,7 +168,7 @@ Options:
 <!-- el: finalize.sentinel-merge-conflict-post-push -->
 ## Post-push merge conflict: the `merge_conflict_post_push` sentinel
 
-Reached from Step 4c.5 of the core doc, and only when its one merge of `origin/main` (the semantic auto-resolve attempt) failed or was refused. A cleanly-mergeable PR never reaches here.
+Reached from Step 4c.5 of the core doc, and only when its one merge of `origin/<base>` (the semantic auto-resolve attempt) failed or was refused. A cleanly-mergeable PR never reaches here.
 
 ```json
 {
@@ -188,7 +190,7 @@ Reached from Step 4c.5 of the core doc, and only when its one merge of `origin/m
     "number": <pr_number>,
     "url": "<pr_url>",
     "auto_merge": <bool>,
-    "base": "main"
+    "base": "<base>"
   },
   "review": null,
   "health": {
@@ -202,9 +204,9 @@ Reached from Step 4c.5 of the core doc, and only when its one merge of `origin/m
   "blocker": {
     "stage": "stage5_post_create",
     "reason": "merge_conflict_post_push",
-    "details": "PR #<N> opened with conflicts after sibling merges to origin/main between /prep-pr's sync-with-main and PR open. One merge of origin/main attempted and not resolved; conflicted files: <list>",
+    "details": "PR #<N> opened with conflicts after sibling merges to origin/<base> between /prep-pr's sync-with-base and PR open. One merge of origin/<base> attempted and not resolved; conflicted files: <list>",
     "exception_type": null,
-    "message": "PR is open but conflicts with main; merge of origin/main not resolved",
+    "message": "PR is open but conflicts with <base>; merge of origin/<base> not resolved",
     "recovery_hint": "Orchestrator: rebase in the impl worktree (resolve conflicts, push), OR close PR #<N> and re-dispatch the ticket",
     "retry_eligible": true,
     "retry_delay_seconds": null
@@ -391,7 +393,7 @@ when `prep_pr_finalize.py verify --require-automerge` reported the
     "number": <pr_number>,
     "url": "<pr_url>",
     "auto_merge": false,
-    "base": "main"
+    "base": "<base>"
   },
   "review": {"must_fix_initial": <count>, "should_fix": <count>, "fix_cycles_used": <count>, "deferred": <count>},
   "health": {

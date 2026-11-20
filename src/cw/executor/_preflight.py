@@ -65,6 +65,7 @@ def spawn_facts(
         engine_refusal=engine_refusal,
         feedback=task.review_feedback is not None,
         adopted=is_adopted_repair_entry(task),
+        has_base=task.base_branch is not None,
     )
 
 

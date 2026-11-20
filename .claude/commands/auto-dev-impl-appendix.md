@@ -336,7 +336,7 @@ sentinel's `blocker` field, per "Stage 2 Completion" in the core doc.
 <!-- el: impl.s2-completion-marker-why-trailer -->
 ## S2 completion marker: why the trailer survives squash-merge
 
-Squash-merge to main hides the trailer from main's history but it remains on the
+Squash-merge to the base hides the trailer from the base's history but it remains on the
 branch's commits, which is where the detector reads. On resume, a branch with
 this trailer and no PR resolves to `s3_review_pending`; a branch without it
 resolves to `s2_implementing` (resume in-flight).

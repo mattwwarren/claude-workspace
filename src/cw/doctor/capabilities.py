@@ -28,6 +28,7 @@ no cross-doctor imports).
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from cw.binding_tools import ToolState
@@ -40,9 +41,14 @@ from cw.dispatch.claim.preflight_reach import (
 from cw.doctor._shared import CheckResult
 from cw.executor import resolve_executor_config, resolve_pipeline_stages
 from cw.executor._capabilities import declared_capabilities
-from cw.models import Stage, TicketTask
+from cw.models import TERMINAL_QUEUE_STATUSES, Stage, TicketTask
 from cw.models.capabilities import HarnessCapabilities, in_enum_order
-from cw.stage_preflight import PreflightReason, SpawnFacts, first_unmet
+from cw.stage_preflight import (
+    BASE_SUPPORTING_HARNESSES,
+    PreflightReason,
+    SpawnFacts,
+    first_unmet,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -56,21 +62,35 @@ _CAVEAT = "static declaration; auth, env and headless load unverified"
 _UNKNOWN_BACKEND = "unrecognized backend"
 _UNVERIFIED = "auth, env and headless load unverified"
 _DECLARED_ONLY = "declaration-only check; " + _UNVERIFIED
+_BASE_BACKEND_DETAIL = (
+    "live row(s) {tickets} carry a base_branch, but this lane routes"
+    " {routes}; those backends do not deliver the base, so the stage"
+    " pre-flight refuses such a spawn before any agent runs"
+    " (base_unsupported_backend, or stage_unsupported first where the"
+    " backend does not declare the stage). To proceed: route those stages"
+    " to claude-native, or re-add the ticket without a base_branch"
+    " (RFC 0020 A1)."
+)
 _BRANCHLESS = (
     "claude-native reads enabledPlugins on the ticket branch, which doctor does"
     " not have"
 )
 
 
-def _lane_backends(client: ClientConfig, lane: str) -> dict[str, list[Stage]]:
-    """Map each backend the lane routes to, to its stages in pipeline order."""
-    # ticket_id="" is the documented "no associated ticket" sentinel.
-    task = TicketTask(ticket_id="", client=client.name, lane=lane, stage=Stage.PLAN)
+def _task_backends(task: TicketTask, client: ClientConfig) -> dict[str, list[Stage]]:
+    """Map each backend *task* routes to, to its stages in pipeline order."""
     grouped: dict[str, list[Stage]] = {}
     for stage in resolve_pipeline_stages(task, client):
         backend = resolve_executor_config(stage, task, client).backend
         grouped.setdefault(backend, []).append(stage)
     return grouped
+
+
+def _lane_backends(client: ClientConfig, lane: str) -> dict[str, list[Stage]]:
+    """Map each backend the lane routes to, to its stages in pipeline order."""
+    # ticket_id="" is the documented "no associated ticket" sentinel.
+    task = TicketTask(ticket_id="", client=client.name, lane=lane, stage=Stage.PLAN)
+    return _task_backends(task, client)
 
 
 def _names(members: Iterable[StrEnum]) -> str:
@@ -210,6 +230,70 @@ def _lane_result(
         detail += f"; the dispatch tick parks such a row as {hit.reason.value}"
     ok = not (_undeclared(routed, caps) or parks)
     return CheckResult(name=name, ok=ok, detail=detail, warn=False)
+
+
+def _base_offender(backend: str) -> bool:
+    """True when *backend* declares a harness that does not deliver a base.
+
+    A backend with no declaration is not an offender here; the
+    ``harness-capabilities`` check already fails it.
+    """
+    caps = declared_capabilities(backend)
+    return caps is not None and caps.harness not in BASE_SUPPORTING_HARNESSES
+
+
+def _check_base_backend(
+    clients: dict[str, ClientConfig], tasks: Iterable[TicketTask]
+) -> list[CheckResult]:
+    """``base-backend/<client>/<lane>``: live rows whose base the lane cannot deliver.
+
+    A live row (not terminal) with a non-null ``base_branch`` whose lane routes
+    a stage to a backend that does not deliver the base would park at spawn
+    (``base_unsupported_backend``). One FAIL per (client, lane) with at least
+    one such offender, the offending ticket ids merged across that lane's rows.
+    """
+    offenders: dict[tuple[str, str], _BaseOffence] = {}
+    for row in tasks:
+        client = clients.get(row.client)
+        if (
+            client is None
+            or row.base_branch is None
+            or row.status in TERMINAL_QUEUE_STATUSES
+        ):
+            continue
+        routes = {
+            backend: stages
+            for backend, stages in _task_backends(row, client).items()
+            if _base_offender(backend)
+        }
+        if not routes:
+            continue
+        offence = offenders.setdefault((client.name, row.lane), _BaseOffence())
+        offence.tickets.add(row.ticket_id)
+        offence.routes.update(routes)
+    return [
+        CheckResult(
+            f"base-backend/{client_name}/{lane}",
+            ok=False,
+            warn=False,
+            detail=_BASE_BACKEND_DETAIL.format(
+                tickets=", ".join(sorted(offence.tickets)),
+                routes="; ".join(
+                    f"{', '.join(s.value for s in stages)} to backend {backend}"
+                    for backend, stages in offence.routes.items()
+                ),
+            ),
+        )
+        for (client_name, lane), offence in offenders.items()
+    ]
+
+
+@dataclass
+class _BaseOffence:
+    """The live rows and offending routes of one (client, lane)."""
+
+    tickets: set[str] = field(default_factory=set)
+    routes: dict[str, list[Stage]] = field(default_factory=dict)
 
 
 def _check_harness_capabilities(clients: dict[str, ClientConfig]) -> list[CheckResult]:

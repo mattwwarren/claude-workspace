@@ -66,7 +66,7 @@ Check that we're ready to prepare a PR:
    If on `main` or `master`, abort with: "Cannot prep a PR from the main branch. Create a feature branch first."
 
 2. **Parse arguments:**
-   - `--base <branch>` → base branch for diff comparison (default: `main`)
+   - `--base <branch>` → base branch for diff comparison (default: the repository default branch, the name `git symbolic-ref --short refs/remotes/origin/HEAD` prints with its leading `origin/` removed; when that is empty too, BLOCK with "pass --base")
    - `--max-cycles N` → maximum review-fix cycles (default: 3). Clean-mode precedence (#2787): the explicit `--max-cycles` flag if given, otherwise `cw review converge config`'s clean-mode `max_cycles`, otherwise 3. Resolve it once here and pass the resolved value to `snapshot` in Step 3.
    - `--skip-review` → skip self-review, jump straight to quality gates
    - `--headless` → non-interactive mode. See **Headless Mode** below. Every

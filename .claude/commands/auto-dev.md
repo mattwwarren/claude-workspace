@@ -14,6 +14,8 @@ Scope determines which approvals are automatic vs manual.
 
 **Branch resolution.** `<branch-name>` is this ticket's own branch: run `jq -r '.queue_metadata.branch // empty' .claude/cw-context.json` from the cw session worktree root and use what it prints. When it prints nothing (the file or key is absent, or the value is null), use `<branch-prefix>/<ticket-id>`, where `<branch-prefix>` is the effective prefix (`--branch-prefix` if given, else the client's `feature_branch_prefix`, default `dev`). Do not take it from `git branch --show-current`: an isolation worktree may sit on an `agent-<hash>` branch.
 
+**Base resolution.** `<base>` is the branch this ticket merges into: run `jq -r '.base_branch // .world_state_snapshot.origin_main_branch // empty' .claude/cw-context.json` from the cw session worktree root and use what it prints. When it prints nothing (the file or both keys are absent), use the repository default branch: the name `git symbolic-ref --short refs/remotes/origin/HEAD` prints with its leading `origin/` removed. Every fetch, merge, diff range, `--base` argument and open-PR filter in this document that names the merge target means `<base>`; never type a branch name for it.
+
 ---
 
 ## Tracker Resolution
@@ -218,7 +220,7 @@ Combines with `--headless` for non-interactive resume (e.g. cron-driven retry of
 ### Detection algorithm (highest stage wins)
 
 1. **`gh pr view <branch>`** — if PR is MERGED → `merged`. If PR is OPEN, inspect checks: any failing → `s5_ci_failed`; all passing → `s5_ci_passed`; running → `s5_ci_pending`; none yet → `s4_pr_open`.
-2. **Branch exists, no PR** — parse commit trailers on branch (commits unique vs `origin/main`). If `Auto-Dev-Stage: impl-complete` trailer present:
+2. **Branch exists, no PR** — parse commit trailers on branch (commits unique vs `origin/<base>`). If `Auto-Dev-Stage: impl-complete` trailer present:
    - Any `Auto-Dev-Fix-Cycle: <N>` trailers on commits *newer than* impl-complete → `s3_fix_loop`, substage `cycle_max(N)`.
    - Otherwise → `s3_review_pending`.
    - No impl-complete trailer → `s2_implementing` (resume from current branch HEAD; do not reset).
@@ -867,7 +869,7 @@ PR #<B> (<title>): ❌ CI failing — <failed check>
 PR #<C> (<title>): 🔄 Changes requested by <reviewer>
   - <file>:<line> — "<comment>"
   - ...
-PR #<D> (<title>): ⚠️ Merge conflicts with main
+PR #<D> (<title>): ⚠️ Merge conflicts with <base>
 
 Options:
 1. Fix all — address CI failures, review feedback, and conflicts before starting next ticket
@@ -879,7 +881,7 @@ Options:
 - **Fix all / Fix critical / Cherry-pick** → For each PR being fixed:
   - **CI failure:** Spawn agent (`subagent_type: "general-purpose"`) in that PR's branch to investigate and fix. Push. Wait 10m for CI (per Stage 5 protocol).
   - **Changes requested:** Surface full feedback, apply fixes, push, reply to comments. Wait 10m for CI.
-  - **Merge conflicts:** Fetch main, merge, resolve conflicts, re-run quality gates, push. Wait 10m for CI.
+  - **Merge conflicts:** Fetch `<base>`, merge it, resolve conflicts, re-run quality gates, push. Wait 10m for CI.
   - After all fixes: re-scan to confirm health, then proceed to Stage 1.
 - **Skip** → Proceed to Stage 1 for the next ticket.
 
@@ -1138,11 +1140,11 @@ Run these checks from the main session against the pushed branch — not from th
 trap - EXIT INT TERM
 GATE_WT_CLEANED=1
 # 0. Verify the branch was pushed; abort immediately if not
-git fetch origin main <branch-name>
+git fetch origin <base> <branch-name>
 git rev-parse --verify origin/<branch-name> || { echo "IMPL_NOT_PUSHED"; exit 1; }
 
 # Set up one trap-cleaned temp worktree at origin/<branch-name>
-FORK_POINT=$(git merge-base origin/main origin/<branch-name>)
+FORK_POINT=$(git merge-base origin/<base> origin/<branch-name>)
 # Gate key: gate_key.py is the one place the gate paths are named. It keys them on
 # the clone's identity plus the branch, so two gates on one host never share a path.
 # Resolved repo-local first, then the installed copy; a miss stops the gate.
@@ -1442,7 +1444,7 @@ printf '%s' "$SENTINEL_JSON" | cw result emit -
     "number": 42,
     "url": "https://github.com/.../pull/42",
     "auto_merge": true,
-    "base": "main"
+    "base": "<base>"
   },
   "review": {"must_fix_initial": 0, "should_fix": 1, "fix_cycles_used": 0, "deferred": 0, "convergence_mode": null, "rounds_run": null, "converged": null, "final_round_clean_sha": null, "confirm_backend": null},
   "health": {
@@ -1554,7 +1556,7 @@ When `status: "blocked"`, the `blocker.reason` field carries one of:
 | `gate_timeout` | Headless finalize Step 4c.6 (open-PR reuse path): the executor cut a reuse-path quality gate call off at its foreground ceiling and the worktree stayed clean (#3372). The classification is defined once in `auto-dev-finalize.md` Step 4c.6 "Headless ceiling"; a gate that exits non-zero, including 124 or 137, is `agent_block` instead. No `gh pr merge` runs, so auto-merge is left as found. `pr: null` with `pr_info` set, `blocker.stage` is `"stage5_post_create"`, `retry_eligible: false`; not regress-eligible: the row parks BLOCKED_ON_USER at FINALIZE with no attempt charged, and is released by the orchestrator: confirm required CI is green at the head, run the gate by hand with no time limit, `prep_pr_state.py gate-pass record <gate>` on a clean tree, then `cw dev-queue requeue <T> -c <C>`. The create path's nested `/prep-pr` `gate_timeout` marker still collapses to `agent_block` |
 | `awaiting_ci_evidence` | **#3618** — headless finalize: the repo's `quality_gates.ci_evidence` maps one or more gates to CI checks that have not all finished green at the PR head, so the gates were not run locally and cw did not arm auto-merge. Fires from the Step 4c create-path check (a headless `/prep-pr` Step 7 deferred a gate and left a `ci-hold`) and from Step 4c.6 (`ci-reuse-plan` parked on a pending, missing or red mapped check, or the base branch declares `ci_evidence` but PyYAML is unavailable, or `ci-hold status` / `ci-hold release` failed). `pr: null` with `pr_info` set, `blocker.stage` is `"stage5_post_create"`, and `blocker.details` begins `ci_evidence_deferred:`, `ci_evidence_pending:`, `ci_evidence_red:` or `ci_evidence_hold_error:`. `retry_eligible: true` except `red`. Not regress-eligible: the row parks BLOCKED_ON_USER at FINALIZE with no attempt charged, and is released by `cw dev-queue requeue <T> -c <C>` once the mapped checks have finished; red is a CI failure, not a gate failure, and follows the `ci_failing` parked-row route. Open-enum addition, no version bump |
 | `destructive_directive_requires_operator` | A directive sourced from a tracker comment would delete a remote branch, force-push or rewrite history on a shared branch, discard uncommitted/committed work, or close/reopen a ticket — never actioned headlessly, whatever the comment's provenance (#2097). See the **Comment provenance rule** section. `blocker.details` quotes the directive verbatim and names the comment (author, created timestamp, marked/unmarked); `retry_eligible: false` — a re-dispatch would re-read the same comment and re-park |
-| `external_state_block` | The diagnosed root cause of a FINALIZE-stage gate failure is state on `origin/main` (or another external dependency) that predates this branch's own changes -- a corrupted released CHANGELOG section, a required external PR still unmerged, an infrastructure gate -- so nothing on this branch could have avoided or fixed it, and a fresh IMPL session has nothing to change (#2320). Distinct from `agent_block`: that reason stays eligible for dispatch's Sub-rule 5a self-heal regress to IMPL; this one is deliberately excluded from `FINALIZE_REGRESS_BLOCKER_REASONS` because regressing would waste a regress attempt on a ticket IMPL cannot fix. `retry_eligible` is normally `false` unless the external condition (the dependency, the infra gate) is itself expected to clear |
+| `external_state_block` | The diagnosed root cause of a FINALIZE-stage gate failure is state on `origin/<base>` (or another external dependency) that predates this branch's own changes -- a corrupted released CHANGELOG section, a required external PR still unmerged, an infrastructure gate -- so nothing on this branch could have avoided or fixed it, and a fresh IMPL session has nothing to change (#2320). Distinct from `agent_block`: that reason stays eligible for dispatch's Sub-rule 5a self-heal regress to IMPL; this one is deliberately excluded from `FINALIZE_REGRESS_BLOCKER_REASONS` because regressing would waste a regress attempt on a ticket IMPL cannot fix. `retry_eligible` is normally `false` unless the external condition (the dependency, the infra gate) is itself expected to clear |
 | `tool_denied` | The Claude Code auto-mode classifier denied a tool call mid-pipeline. Often classifier-flaky (see claude-workspace#183) so `retry_eligible: true` by default; the orchestrator may re-dispatch the ticket on a fresh session. Populate `blocker.tool_name` and `blocker.denial_reason` (verbatim classifier `Reason:` text). See Tool-Use Denial Exit section. A denied `prep_pr_finalize.py arm-automerge` on an open PR is `automerge_not_armed` instead (Exception (#2625)) |
 | `impl_comments_unreadable_after_regress` | Orientation's live tracker-comment fetch failed on an IMPL-stage entry reached via `_stage_regress` (`queue_metadata.regressed_into_stage` non-empty, `.claude/commands/auto-dev-impl.md` Orientation) — a regress exists specifically to act on newer comments, so continuing on a stale cached array would defeat it (#2415). Distinct from the non-regress case, which still WARNs and continues on `"impl_comments_fetch_failed"`. `blocker.stage` is `"stage2_impl"`; cw classifies this via `OPERATOR_UNAVAILABLE_BLOCKER_REASONS` and tags the park distinctly (RFC 0011 A1) rather than generic `blocked_on_user`. The pre-dispatch gate that catches the underlying condition before spawn shipped in #2442 — see the `tracker_mcp_unavailable` Status Enum row. |
 | `tracker_tool_unavailable` | An opencode PLAN/IMPL session (RFC 0018 S3, #3055) needed a tracker **write** on a non-GitHub tracker and no tool for that tracker was available in the session, or the call failed; or the tracker is unset (no `tracking.primary.system`). The opencode prompt forbids improvising or skipping the write. `retry_eligible: false`; `blocker.details` names the tracker, the operation and the error. A failed tracker **read** stays `plan_missing_context`. Not emitted by Claude-native stages. |

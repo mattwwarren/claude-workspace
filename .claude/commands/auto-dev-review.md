@@ -33,6 +33,9 @@ In standalone headless invocation: emit `AUTO_DEV_RESULT` after this stage compl
 
 **Branch resolution.** `<branch-name>` is this ticket's own branch: run `jq -r '.queue_metadata.branch // empty' .claude/cw-context.json` from the cw session worktree root and use what it prints. When it prints nothing (the file or key is absent, or the value is null), use `<branch-prefix>/<ticket-id>`, where `<branch-prefix>` is the effective prefix (`--branch-prefix` if given, else the client's `feature_branch_prefix`, default `dev`). Do not take it from `git branch --show-current`: an isolation worktree may sit on an `agent-<hash>` branch.
 
+<!-- el: review.base-branch-resolution -->
+**Base resolution.** `<base>` is the branch this ticket merges into: run `jq -r '.base_branch // .world_state_snapshot.origin_main_branch // empty' .claude/cw-context.json` from the cw session worktree root and use what it prints. When it prints nothing (the file or both keys are absent), use the repository default branch: the name `git symbolic-ref --short refs/remotes/origin/HEAD` prints with its leading `origin/` removed. Every fetch, merge, diff range, `--base` argument and open-PR filter in this document that names the merge target means `<base>`; never type a branch name for it.
+
 ---
 
 > **Model selection:** All reviewer and fix-agent spawns in this file use explicit `model: "sonnet"` pins. Do not change any pin to `model: inherit` — see CLAUDE.md §"Model Selection for Subagents" for the rationale and tier matrix.
@@ -149,7 +152,7 @@ Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for t
   DIFF_BASE="$(jq -r .diff_base .cw/diff-base.json)"
   git diff $DIFF_BASE...origin/<branch-name>
   ```
-  Use `origin/<branch-name>`, not the bare local ref — the branch was pushed from an isolation worktree and may not be visible locally until fetched. Blocking mode uses the Checkpoint-2 fork point SHA for a deterministic diff. In clean mode do NOT use `origin/main` directly; `$DIFF_BASE` is the merge-base with it, pinned in the ledger. Small scope: include the whole diff. Large scope: you may summarize non-critical files, but always inline the primary ones.
+  Use `origin/<branch-name>`, not the bare local ref — the branch was pushed from an isolation worktree and may not be visible locally until fetched. Blocking mode uses the Checkpoint-2 fork point SHA for a deterministic diff. In clean mode do NOT use `origin/<base>` directly; `$DIFF_BASE` is the merge-base with it, pinned in the ledger. Small scope: include the whole diff. Large scope: you may summarize non-critical files, but always inline the primary ones.
 - Changed file list
 <!-- el: review.planned-file-set-block -->
 - **`## Planned File Set` block (#2101)** — only when `.cw/plan.md` exists (skip the whole block for an adopted row with no plan, #2943) — inline the approved plan's declared file scope so reviewers can see it directly, rather than inferring it from the diff:

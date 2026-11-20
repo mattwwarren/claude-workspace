@@ -11,6 +11,7 @@ package import graph stays acyclic. The one-directional discipline holds:
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
 from typing import TYPE_CHECKING
 
@@ -28,7 +29,7 @@ from cw.doctor._shared import (
 )
 from cw.doctor.agent_spec_drift import _check_agent_spec_drift
 from cw.doctor.bindings import _check_bindings
-from cw.doctor.capabilities import _check_harness_capabilities
+from cw.doctor.capabilities import _check_base_backend, _check_harness_capabilities
 from cw.doctor.codex_fix_loop import _check_codex_fix_loop
 from cw.doctor.commit_hook import _check_commit_hook, _check_hook_install_python
 from cw.doctor.config_checks import (
@@ -392,6 +393,19 @@ def _client_config_checks(clients: dict[str, ClientConfig]) -> list[CheckResult]
     ]
 
 
+def _base_backend_checks(clients: dict[str, ClientConfig]) -> list[CheckResult]:
+    """RFC 0020 A1 (#3781): live rows whose base the lane cannot deliver.
+
+    A queue that will not load is already reported by ``_check_dev_queue``, so
+    it degrades to no rows here rather than failing the run.
+    """
+    try:
+        tasks = _deps.load_dev_queue().tasks
+    except (OSError, json.JSONDecodeError, ValidationError):
+        tasks = []
+    return _check_base_backend(clients, tasks)
+
+
 def run_doctor(
     *,
     reap: bool = False,
@@ -425,7 +439,13 @@ def run_doctor(
     report.checks.extend(_client_config_checks(_clients))
     state_check, link_state = _check_state_file()
     report.checks.append(state_check)
-    report.checks.extend([_check_dev_queue(), *_check_usage_limit_windows()])
+    report.checks.extend(
+        [
+            _check_dev_queue(),
+            *_check_usage_limit_windows(),
+            *_base_backend_checks(_clients),
+        ]
+    )
     # #1201 anomaly layer: review-recipe liveness + attention-state census.
     report.checks.extend(_check_review_recipe_liveness(_clients))
     report.checks.append(_check_attention_state_census())

@@ -371,6 +371,9 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             PLAN_MISSING_CONTEXT_BLOCKER_REASON,
             "prior_pipeline_pr_open",
             "repair_entry_unsupported_backend",
+            # RFC 0020 A1 (#3781): a row with a non-null base_branch on a
+            # harness that does not deliver it (stage pre-flight, before spawn).
+            "base_unsupported_backend",
             REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
             # #3055 (RFC 0018 S3): an opencode PLAN/IMPL tracker write that
             # had no tool or failed (retry_eligible: false); a failed read
