@@ -246,6 +246,15 @@ def _track_open_findings(
     return survivors
 
 
+def _is_gap_hold(af: AcceptedFinding) -> bool:
+    """Whether *af* is an evidence-gap MUST_FIX the stamp held for the operator."""
+    return (
+        af.finding.severity == _MUST_FIX
+        and af.disposition == "operator_actionable"
+        and held_kind(af.finding) == "evidence_gap"
+    )
+
+
 def _carry_held_findings(
     carried: dict[_OpenFindingKey, AcceptedFinding],
     verdict: ReviewVerdict,
@@ -255,18 +264,18 @@ def _carry_held_findings(
     A gap-held MUST_FIX is not in the open-findings tracker, and a delta
     re-review need not re-raise it, so without a carry a later park would lose
     the finding. *carried* maps each key to its held entry. A pass that raises
-    the key as ``operator_actionable`` refreshes it; a pass that shows it
-    settled (any other disposition, e.g. ``rejected``) drops it; a key the pass
-    did not raise stays carried. Carried entries the pass did not re-raise are
-    appended to ``accepted`` only, so ``must_fix`` and ``blocking`` are
-    untouched. Returns *verdict* itself when nothing is appended.
+    the key as an evidence-gap hold refreshes it. A pass that raises the key any
+    other way drops it: a rejected or deferred entry is settled, and an unmarked
+    or downgraded re-raise is a reproduced finding the loop repairs, so a stale
+    hold must not outlive it. A key the pass did not raise stays carried.
+    Carried entries the pass did not re-raise are appended to ``accepted`` only,
+    so ``must_fix`` and ``blocking`` are untouched. Returns *verdict* itself
+    when nothing is appended.
     """
     next_carried = dict(carried)
     for af in verdict.accepted:
-        if af.finding.severity != _MUST_FIX or held_kind(af.finding) != "evidence_gap":
-            continue
         key = _open_finding_key(af.finding)
-        if af.disposition == "operator_actionable":
+        if _is_gap_hold(af):
             next_carried[key] = af
         else:
             next_carried.pop(key, None)

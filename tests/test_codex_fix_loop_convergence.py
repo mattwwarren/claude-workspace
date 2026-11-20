@@ -19,6 +19,7 @@ from cw.auto_dev_result import Review
 from cw.codex_fix_loop import _MAX_FIX_CYCLES, _driver
 from cw.codex_fix_loop.convergence import (
     _admit_new_must_fix,
+    _carry_held_findings,
     _finding_in_delta,
     _open_finding_key,
     _survivors_only_verdict,
@@ -36,6 +37,8 @@ from cw.review_findings import (
     Finding,
     ReviewVerdict,
     _dedup_key,
+    consolidate_verdict,
+    stamp_held_findings,
 )
 from cw.stage_verification.growth import LoopGrowthBudget, RunGrowth
 from tests._codex_review_helpers import (
@@ -47,7 +50,12 @@ from tests._codex_review_helpers import (
     _task,
 )
 from tests._shared.git_repos import add_bare_origin, commit_tracked_file
-from tests._shared.review_builders import _make_finding
+from tests._shared.review_builders import (
+    _make_diff,
+    _make_finding,
+    _make_gap_finding,
+    _make_reviewer_doc,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -407,6 +415,106 @@ class TestSurvivorsOnlyVerdict:
         assert re.search(r"-\d", details) is None
         assert "1 originally-found" in details
         assert "2 still open" in details
+
+
+# ---------------------------------------------------------------------------
+# _carry_held_findings (#3793)
+# ---------------------------------------------------------------------------
+
+_CONTEST_QUOTE = "Non-goal: keep the legacy retry path."
+
+
+def _stamped(*findings: Finding) -> ReviewVerdict:
+    """Real consolidation plus the held stamp, as the codex synthesis builds it."""
+    diff = _make_diff("def broken():", "def other():", "def third():")
+    verdict = consolidate_verdict(
+        [_make_reviewer_doc(*findings)], diff, reviewed_sha="sha"
+    )
+    return stamp_held_findings(verdict)
+
+
+def _gap_entry(verdict: ReviewVerdict) -> AcceptedFinding:
+    (entry,) = (af for af in verdict.accepted if af.finding.evidence_gap)
+    return entry
+
+
+class TestCarryHeldFindings:
+    def test_a_gap_hold_the_pass_raised_is_carried(self) -> None:
+        verdict = _stamped(_make_gap_finding())
+
+        carried, out = _carry_held_findings({}, verdict)
+
+        assert list(carried) == [_open_finding_key(_make_gap_finding())]
+        assert out is verdict
+
+    def test_a_carried_gap_the_pass_did_not_raise_is_appended_to_accepted_only(
+        self,
+    ) -> None:
+        first = _stamped(_make_gap_finding())
+        carried, _ = _carry_held_findings({}, first)
+        second = _stamped(_make_finding(evidence="def other():", summary="other bug"))
+
+        _, out = _carry_held_findings(carried, second)
+
+        assert _gap_entry(out) == _gap_entry(first)
+        assert next(af.finding.summary for af in out.accepted) == "other bug"
+        assert out.must_fix == second.must_fix
+        assert out.blocking is second.blocking is True
+
+    def test_a_pass_that_shows_the_gap_settled_drops_it(self) -> None:
+        first = _stamped(_make_gap_finding())
+        carried, _ = _carry_held_findings({}, first)
+        settled = first.model_copy(
+            update={
+                "accepted": [
+                    _gap_entry(first).model_copy(update={"disposition": "rejected"})
+                ]
+            }
+        )
+
+        carried, out = _carry_held_findings(carried, settled)
+
+        assert carried == {}
+        assert out is settled
+
+    @pytest.mark.parametrize("raised_as", ["unmarked", "downgraded"])
+    def test_a_stale_hold_is_not_resurrected_after_the_fix_repaired_it(
+        self, raised_as: str
+    ) -> None:
+        # Cycle 0 holds the gap. Cycle 1 re-raises the same finding without the
+        # hold (reproduced, or downgraded), so it is the loop's to repair. Cycle 2
+        # no longer raises it: the carry must not put the old hold back.
+        cycle0 = _stamped(_make_gap_finding())
+        carried, _ = _carry_held_findings({}, cycle0)
+        reraised = (
+            _make_finding()
+            if raised_as == "unmarked"
+            else _make_gap_finding(severity="SHOULD_FIX")
+        )
+        cycle1 = _stamped(reraised)
+        cycle2 = _stamped(_make_finding(evidence="def other():", summary="other bug"))
+
+        carried, _ = _carry_held_findings(carried, cycle1)
+        carried, out = _carry_held_findings(carried, cycle2)
+
+        assert carried == {}
+        assert out is cycle2
+        assert not [af for af in out.accepted if af.finding.evidence_gap]
+
+    def test_contest_and_unmarked_findings_are_never_carried(self) -> None:
+        verdict = _stamped(
+            _make_finding(evidence="def broken():", summary="plain"),
+            _make_finding(
+                evidence="def other():",
+                summary="contest",
+                contests_decision=_CONTEST_QUOTE,
+            ),
+        )
+
+        carried, out = _carry_held_findings({}, verdict)
+
+        assert carried == {}
+        assert out is verdict
 
 
 # ---------------------------------------------------------------------------
