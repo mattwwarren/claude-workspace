@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.dev_queue import load_dev_queue, move_ticket, requeue_ticket, save_dev_queue
 from cw.dev_queue.dispositions import (
     _PRE_DISPATCH_REVIEW_CAPABILITY_REASON,
     HOLD_DISPOSITIONS,
@@ -375,3 +375,79 @@ def test_dispatch_tick_never_spawns_for_a_review_row_on_a_lacking_runner(
     assert mock_native_daemon.spawn_calls == []
     assert len(_park_events()) == 1
     assert _stored().status == QueueItemStatus.BLOCKED_ON_USER
+
+
+def test_requeue_after_a_config_fix_retries_on_the_same_branch(
+    tmp_path: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    mock_native_daemon: FakeNativeDaemonClient,
+) -> None:
+    repo, _origin = make_git_repo_with_origin("rc-retry", branch=_BRANCH)
+    git_in(repo, "checkout", "main")
+    branch_head = git_in(repo, "rev-parse", _BRANCH).strip()
+    _write_lanes(tmp_path, repo, {"alpha": []})
+    _seed(_task())
+    assert _tick(mock_native_daemon).spawned == 0
+    assert _stored().disposition == REVIEW_CAPABILITY_UNMET_DISPOSITION
+
+    # The operator declares the capability on the lane, then requeues.
+    _write_lanes(tmp_path, repo, {"alpha": ["jvm"]})
+    outcome = requeue_ticket(_TICKET, _CLIENT)
+
+    # Not regressed: same stage, same branch, no charge. A same-stage requeue
+    # clears the regress counter by contract (never raises it), as for any gate.
+    assert outcome["regressed"] is False
+    released = _stored()
+    assert released.status == QueueItemStatus.PENDING
+    assert released.stage == Stage.REVIEW
+    assert released.branch == _BRANCH
+    assert released.attempts == 3
+    assert released.unproductive_attempts == 2
+    assert released.regress_attempts == 0
+
+    result = _tick(mock_native_daemon)
+
+    assert result.spawned == 1
+    assert len(mock_native_daemon.spawn_calls) == 1
+    worktree = mock_native_daemon.spawn_calls[0][0]
+    assert git_in(worktree, "rev-parse", "--abbrev-ref", "HEAD").strip() == _BRANCH
+    assert git_in(worktree, "rev-parse", "HEAD").strip() == branch_head
+    running = _stored()
+    assert running.stage == Stage.REVIEW
+    assert running.branch == _BRANCH
+    assert len(_park_events()) == 1
+
+
+def test_relane_to_a_compatible_lane_spawns_there(
+    tmp_path: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    mock_native_daemon: FakeNativeDaemonClient,
+) -> None:
+    repo, _origin = make_git_repo_with_origin("rc-relane", branch=_BRANCH)
+    git_in(repo, "checkout", "main")
+    branch_head = git_in(repo, "rev-parse", _BRANCH).strip()
+    _write_lanes(tmp_path, repo, {"alpha": [], "beta": ["jvm"]})
+    _seed(_task())
+    assert _tick(mock_native_daemon).spawned == 0
+    assert _stored().disposition == REVIEW_CAPABILITY_UNMET_DISPOSITION
+
+    # move needs PENDING, so requeue comes first. The incompatible lane is
+    # paused in the operator recipe; here no tick runs between the two calls.
+    requeue_ticket(_TICKET, _CLIENT)
+    move_ticket(_TICKET, _CLIENT, to_lane="beta")
+
+    moved = _stored()
+    assert moved.status == QueueItemStatus.PENDING
+    assert moved.lane == "beta"
+    assert moved.stage == Stage.REVIEW
+    assert moved.attempts == 3
+    assert moved.unproductive_attempts == 2
+
+    result = _tick(mock_native_daemon)
+
+    assert result.spawned == 1
+    worktree = mock_native_daemon.spawn_calls[0][0]
+    assert git_in(worktree, "rev-parse", "--abbrev-ref", "HEAD").strip() == _BRANCH
+    assert git_in(worktree, "rev-parse", "HEAD").strip() == branch_head
+    assert _stored().lane == "beta"
+    assert len(_park_events()) == 1
