@@ -395,8 +395,11 @@ The default concurrency cap is `OrchestratorConfig.default_ceiling`
 clients are eligible per tick (default: no limit). The legacy
 `default_max_parallel` / `per_client_max_parallel` keys are deprecated
 aliases that still load with a one-time warning. `per_client_ceiling` is the
-worker ceiling: a registered orchestrator (#3789) uses no slot, so no extra
-headroom needs to be configured for it.
+worker ceiling: an orchestrator started by `cw orchestrator-start` after
+#3789 is registered and uses no slot. An orchestrator that predates it or was
+launched by hand still counts until it is restarted via
+`cw orchestrator-start`; until then, raising `per_client_ceiling` by one
+remains the workaround.
 
 `OrchestratorConfig.host_session_budget` (#1444, default: `null` = off) adds
 a further, fleet-wide ceiling: the total number of DAEMON sessions running
