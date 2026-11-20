@@ -10,6 +10,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Per-row merge target seam (#3779, RFC 0020).** `TicketTask.base_branch` records the branch a row merges into; null means the client's `default_branch`. `cw.models.resolve_base_branch(client, task)` is the read seam, and `cw.models.tasks.base_branch.set_base_branch` is the only writer. It refuses any change once the row has spawned (`ever_spawned`), including null to set. Dev-queue schema bumped to v66. Downgrade hazard: an older cw that resaves the queue drops the field and silently retargets an epic row to the default branch. `cw dev-queue show` and `tasks --json` print the stored value (`-` / `null` when unset). No read site routes through the seam yet; ADR 0024 records the trust-root split.
 
+### Changed
+
+- **FINALIZE says so when a red gate rewrote tracked files (#3769, follow-up to #3686).** After the original failure text, the `agent_block` details of a red FINALIZE quality gate (reuse and create paths) now carry a bounded, redacted note naming at most 5 tracked paths the gate rewrote ("and N more" beyond that) and the next step: commit the formatting on the branch, then requeue REVIEW (clean mode needs a re-review of the new tip). The note is built from a read-only `git diff --name-only --no-renames --diff-filter=M HEAD` and is best-effort: a failed diff leaves the original block unchanged. Untracked scratch, tolerated or review-artifact paths, and a gate that passed but dirtied the tree get no note. Still no commit, push, restore, friction token or state change, and the block reason is unchanged.
+
 ## [1.104.0] - 2026-11-20
 
 ### Added
