@@ -169,7 +169,7 @@ def _emit_dev_queue_lane_breakdown(
     config: OrchestratorConfig,
     clients: Mapping[str, ClientConfig],
     *,
-    session_statuses: Mapping[str, SessionStatus] | None = None,
+    session_statuses: Mapping[str, SessionStatus] | None,
 ) -> None:
     """Print indented lane lines; occupant line(s) when a lane is noteworthy.
 
