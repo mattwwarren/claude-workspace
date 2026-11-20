@@ -18,7 +18,10 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TypedDict
+
+import yaml
 
 from cw.atomic import atomic_write_text
 from cw.auto_dev_result import PLAN_SCOPE_DRIFT_BLOCKER_REASON
@@ -29,7 +32,7 @@ from cw.dev_queue.next_commands import SCOPE_DRIFT_PATHS_PLACEHOLDER, dev_queue_
 from cw.dev_queue.refusal import refusal_hint
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
-from cw.exceptions import ApproveGateError
+from cw.exceptions import ApproveGateError, CwError
 from cw.gh import branch_head_sha_on_origin
 from cw.models import (
     SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY,
@@ -39,10 +42,19 @@ from cw.models import (
     Stage,
     resolve_feature_branch,
 )
+from cw.models.scope_grant import ScopeGrant
+from cw.operator_identity import resolve_actor_or_empty
+from cw.scope_grants import (
+    GrantFacts,
+    append_scope_grant,
+    exact_paths_error,
+    pr_number_from_url,
+    review_policy_fingerprint,
+)
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
-    from cw.models import TicketTask
+    from cw.models import DevQueueStore, TicketTask
 
 
 _log = logging.getLogger(__name__)
@@ -116,12 +128,37 @@ def _emit_scope_drift_compensation(
         )
 
 
+def gather_grant_facts(client_name: str, repo: str | None) -> GrantFacts | None:
+    """The grant's pre-lock facts, or ``None`` when the client is unknown.
+
+    Never raises. The operator login is a ``gh`` read, so this runs before
+    the queue lock (ADR-0019). An unknown client returns ``None`` and the
+    locked body then raises exactly as it always has. ``repo`` is resolved by
+    the caller; ``None`` records a grant that the carry will not reuse.
+    """
+    try:
+        client_cfg = get_client(client_name)
+        actor = resolve_actor_or_empty(client_cfg, context="scope-drift approval")
+    except (CwError, OSError, ValueError, yaml.YAMLError):
+        return None
+    if repo is None:
+        _log.warning(
+            "scope grant recorded without a repository binding for %s", client_name
+        )
+    return GrantFacts(
+        repo=repo,
+        policy=review_policy_fingerprint(client_cfg.review),
+        actor=actor,
+    )
+
+
 def approve_scope_drift_ticket(
     ticket_id: str,
     client_name: str,
     extra_files: list[str],
     *,
     bounded: bool = False,
+    repo: str | None = None,
 ) -> ScopeDriftApproval:
     """Grant operator-directed scope growth to a ``plan_scope_drift`` park (#2337).
 
@@ -141,12 +178,64 @@ def approve_scope_drift_ticket(
             resolved on origin. Nothing is mutated on any of these paths.
         CwError: if no matching task is found.
     """
+    facts = gather_grant_facts(client_name, repo)
     with _lock(bounded=bounded):
         return _approve_scope_drift_locked(
             ticket_id,
             client_name,
             extra_files,
+            facts=facts,
         )
+
+
+def _roll_back_failed_approval(
+    original_store: DevQueueStore,
+    ticket_id: str,
+    client_name: str,
+    approval_payload: dict[str, object],
+    event_error: Exception,
+) -> None:
+    """Restore the pre-approval store after a failed ``TICKET_APPROVED`` record.
+
+    Returns once the rollback has succeeded and the compensation is emitted;
+    the caller then re-raises ``event_error``. When the rollback itself fails,
+    the recovery marker is written and the rollback error is raised, chained
+    on ``event_error`` (#2337).
+    """
+    try:
+        save_dev_queue(original_store)
+    except Exception as rollback_error:
+        recovery_payload = {
+            "ticket_id": ticket_id,
+            "client": client_name,
+            "approval_payload": approval_payload,
+            "event_error": str(event_error),
+            "rollback_error": str(rollback_error),
+            "recovery_required": True,
+        }
+        _write_scope_drift_recovery_marker(recovery_payload)
+        _emit_scope_drift_compensation(
+            ticket_id,
+            client_name,
+            approval_payload,
+            rollback_error,
+            rolled_back=False,
+        )
+        _log.critical(
+            "scope-drift approval rollback failed for %s/%s; operator recovery"
+            " is required",
+            client_name,
+            ticket_id,
+            exc_info=True,
+        )
+        raise rollback_error from event_error
+    _emit_scope_drift_compensation(
+        ticket_id,
+        client_name,
+        approval_payload,
+        event_error,
+        rolled_back=True,
+    )
 
 
 def _scope_drift_command(task: TicketTask, paths: str) -> str:
@@ -158,6 +247,8 @@ def _approve_scope_drift_locked(
     ticket_id: str,
     client_name: str,
     extra_files: list[str],
+    *,
+    facts: GrantFacts | None = None,
 ) -> ScopeDriftApproval:
     """Lock-free body of :func:`approve_scope_drift_ticket`.
 
@@ -200,7 +291,27 @@ def _approve_scope_drift_locked(
         )
         raise ApproveGateError(msg)
 
+    path_error = exact_paths_error(approved_files)
+    if path_error is not None:
+        msg = (
+            f"Cannot approve scope drift for ticket '{ticket_id}': {path_error}."
+            " Pass exact repo-relative paths, comma-separated: no globs (* or ?),"
+            " no directories or trailing /, no absolute paths, no '..' segments,"
+            " no control characters."
+            f" Retry: `{_scope_drift_command(task, SCOPE_DRIFT_PATHS_PLACEHOLDER)}`."
+        )
+        raise ApproveGateError(msg)
+
     client_cfg = get_client(client_name)
+    grant_facts = (
+        facts
+        if facts is not None
+        else GrantFacts(
+            repo=None,
+            policy=review_policy_fingerprint(client_cfg.review),
+            actor="",
+        )
+    )
     branch = resolve_feature_branch(ticket_id, client_cfg, task)
     head_sha, _gh_available = branch_head_sha_on_origin(
         branch, cwd=_git_dir(client_cfg)
@@ -219,6 +330,24 @@ def _approve_scope_drift_locked(
     from_stage = task.stage.value
     task.scope_drift_approved_extra_files = approved_files
     task.scope_drift_approved_head = head_sha
+    # The durable ledger (#3772): the transport above is cleared at spawn
+    # success, so the grant is also appended here and re-verified at each IMPL
+    # dispatch by cw.scope_grants.carry_scope_grants. Appended after the
+    # original_store snapshot, so a failed event rolls it back too.
+    grant = ScopeGrant(
+        client=task.client,
+        ticket_id=task.ticket_id,
+        row_created_at=task.created_at,
+        repo=grant_facts.repo,
+        pr_number=pr_number_from_url(task.pr_url),
+        head=head_sha.lower(),
+        policy=grant_facts.policy,
+        plan_fingerprint=task.plan_approved_fingerprint,
+        paths=approved_files,
+        actor=grant_facts.actor,
+        recorded_at=datetime.now(UTC),
+    )
+    task.scope_grants = append_scope_grant(task.scope_grants, grant)
     # Why: the drifting round moved the head past the feedback's pin, so the
     # Stage 2 review-feedback guard would refuse it and park impl_failed. Feedback
     # still naming the current head (codex parks before its commit) stays valid.
@@ -236,6 +365,7 @@ def _approve_scope_drift_locked(
         "to_stage": task.stage.value,
         SCOPE_DRIFT_APPROVED_EXTRA_FILES_KEY: approved_files,
         SCOPE_DRIFT_APPROVED_HEAD_KEY: head_sha,
+        "scope_grant": grant.model_dump(mode="json"),
     }
     if dropped_feedback_sha is not None:
         approval_payload["dropped_review_feedback_sha"] = dropped_feedback_sha
@@ -246,39 +376,8 @@ def _approve_scope_drift_locked(
             approval_payload,
         )
     except Exception as event_error:
-        try:
-            save_dev_queue(original_store)
-        except Exception as rollback_error:
-            recovery_payload = {
-                "ticket_id": ticket_id,
-                "client": client_name,
-                "approval_payload": approval_payload,
-                "event_error": str(event_error),
-                "rollback_error": str(rollback_error),
-                "recovery_required": True,
-            }
-            _write_scope_drift_recovery_marker(recovery_payload)
-            _emit_scope_drift_compensation(
-                ticket_id,
-                client_name,
-                approval_payload,
-                rollback_error,
-                rolled_back=False,
-            )
-            _log.critical(
-                "scope-drift approval rollback failed for %s/%s; operator recovery"
-                " is required",
-                client_name,
-                ticket_id,
-                exc_info=True,
-            )
-            raise rollback_error from event_error
-        _emit_scope_drift_compensation(
-            ticket_id,
-            client_name,
-            approval_payload,
-            event_error,
-            rolled_back=True,
+        _roll_back_failed_approval(
+            original_store, ticket_id, client_name, approval_payload, event_error
         )
         raise
     return {

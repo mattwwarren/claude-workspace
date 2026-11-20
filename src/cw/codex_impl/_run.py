@@ -84,6 +84,8 @@ from cw.models.bindings import Harness
 from cw.models.branch import resolve_feature_branch
 from cw.models.enums import StageIdentifier
 from cw.plan_files import resolve_review_scope_tier
+from cw.pr_hydrate import _resolve_repo_slug
+from cw.scope_grants import carry_scope_grants
 from cw.stage_verification.baseline import (
     CycleBaseline,
     DirtyStart,
@@ -436,6 +438,15 @@ def _prepare(run: _Run) -> _Pre | ImplBlock:
     )
     if probe.block is not None:
         return probe.block
+    # #3772: the detached driver re-loads the stored row, whose transport the
+    # spawn-success stamp cleared, so re-derive it from the verified ledger here
+    # (before the gate reads it). No-op outside IMPL or with an empty ledger.
+    carry_scope_grants(
+        run.task,
+        run.client,
+        run.worktree,
+        repo=_resolve_repo_slug(run.worktree) if run.task.scope_grants else None,
+    )
     approved, approval_friction = approved_extra(run.worktree, run.task)
     if plan_text is None:
         allowed = repair_allowed_files(

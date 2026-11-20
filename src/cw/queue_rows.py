@@ -398,11 +398,11 @@ def _apply_spawn_success_fields(stored_task: TicketTask, *, session_id: str) -> 
     # good -- evaluated and accepted, see the field's comment
     # in src/cw/models/tasks.py for the full reasoning.
     stored_task.regressed_into_stage = None
-    # #2337: the operator's plan_scope_drift grant is consumed the
-    # same way, and just as unconditionally -- it was written into
-    # this spawn's queue_metadata at spawn and is meant for exactly the
-    # IMPL session the approval requeued. Surviving past it would let
-    # the grant cover a later round's drift it was never given for.
+    # #2337: the per-spawn scope-drift transport is consumed the same
+    # way, and just as unconditionally. #3772: the durable authority is
+    # the scope_grants ledger, which is NOT cleared here; each IMPL
+    # dispatch re-derives this transport from it (cw.scope_grants), so
+    # a repair redispatch keeps the verified grant.
     stored_task.scope_drift_approved_extra_files = None
     stored_task.scope_drift_approved_head = None
     # #1730: stage-gated clear -- unlike regressed_into_stage

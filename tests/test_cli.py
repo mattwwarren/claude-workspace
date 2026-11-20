@@ -12705,6 +12705,7 @@ class TestDevQueueApproveCli:
         assert len(events) == 1
         event_type, payload = events[0]
         assert event_type == OrchestratorEventType.TICKET_APPROVED
+        grant = payload.pop("scope_grant")
         assert payload == {
             "ticket_id": "ACME-1",
             "client": "acme",
@@ -12713,6 +12714,11 @@ class TestDevQueueApproveCli:
             "scope_drift_approved_extra_files": ["a.py", "b.py"],
             "scope_drift_approved_head": self._SCOPE_DRIFT_HEAD,
         }
+        # #3772: the durable grant rides the same event; its exact-path list
+        # and head are the approval's, and no repo was bound on this CLI path.
+        assert grant["paths"] == ["a.py", "b.py"]
+        assert grant["head"] == self._SCOPE_DRIFT_HEAD
+        assert grant["repo"] is None
         task = load_dev_queue().tasks[0]
         assert task.status == QueueItemStatus.PENDING
         assert task.scope_drift_approved_extra_files == ["a.py", "b.py"]

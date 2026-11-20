@@ -184,7 +184,7 @@ def append_scope_grant(
     return kept[-MAX_SCOPE_GRANTS:]
 
 
-def _pr_number(pr_url: str | None) -> int | None:
+def pr_number_from_url(pr_url: str | None) -> int | None:
     if not pr_url:
         return None
     parsed = parse_pr_url(pr_url)
@@ -200,7 +200,7 @@ def context_for_task(
         ticket_id=task.ticket_id,
         row_created_at=task.created_at,
         repo=repo,
-        pr_number=_pr_number(task.pr_url),
+        pr_number=pr_number_from_url(task.pr_url),
         policy=policy,
         plan_fingerprint=task.plan_approved_fingerprint,
     )

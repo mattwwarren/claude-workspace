@@ -8598,6 +8598,92 @@ class TestApproveScopeDrift:
             "could not be persisted" in record.message for record in caplog.records
         )
 
+    def test_records_a_durable_grant_bound_to_row_repo_and_head(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3772: the approval appends a ScopeGrant from its named sources."""
+        from cw.config import get_client
+        from cw.dev_queue import approve_scope_drift_ticket
+        from cw.scope_grants import review_policy_fingerprint
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+
+        approve_scope_drift_ticket(
+            "GEN-500", "genhealth", ["src/b.py", "src/a.py"], repo="acme/widgets"
+        )
+
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert len(t.scope_grants) == 1
+        grant = t.scope_grants[0]
+        assert grant.client == "genhealth"
+        assert grant.ticket_id == "GEN-500"
+        assert grant.row_created_at == t.created_at
+        assert grant.repo == "acme/widgets"
+        assert grant.head == _APPROVED_HEAD
+        assert grant.paths == ["src/a.py", "src/b.py"]
+        assert grant.actor == "test-operator"
+        assert grant.plan_fingerprint == t.plan_approved_fingerprint
+        assert grant.pr_number is None
+        assert grant.policy == review_policy_fingerprint(get_client("genhealth").review)
+
+    def test_regress_into_plan_clears_the_grant_ledger(self) -> None:
+        """#3772: a re-plan is the plan-of-record change that drops the ledger."""
+        from cw.dev_queue.lifecycle import _stage_regress
+        from cw.models.scope_grant import ScopeGrant
+
+        t = _make_blocked_task(
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            stage=Stage.IMPL,
+            blocked_reason="plan_scope_drift",
+        )
+        t.scope_grants = [
+            ScopeGrant(
+                client=t.client,
+                ticket_id=t.ticket_id,
+                row_created_at=t.created_at,
+                head=_APPROVED_HEAD,
+                policy="p",
+                paths=["src/a.py"],
+                recorded_at=t.created_at,
+            )
+        ]
+
+        _stage_regress(t, Stage.PLAN)
+
+        assert t.scope_grants == []
+
+    def test_unresolved_repo_records_an_unbound_grant_without_refusing(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3772: no slug is a recorded, unbound grant (the carry fails closed)."""
+        from cw.dev_queue import approve_scope_drift_ticket
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+
+        result = approve_scope_drift_ticket("GEN-500", "genhealth", ["src/a.py"])
+
+        assert result["extra_files"] == ["src/a.py"]
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.scope_grants[0].repo is None
+
+    def test_non_exact_path_is_refused_and_row_untouched(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3772: a glob is refused before any gh lookup; nothing is mutated."""
+        from cw.dev_queue import approve_scope_drift_ticket
+        from cw.exceptions import ApproveGateError
+
+        calls = self._seed(tmp_config_dir, tmp_path, monkeypatch)
+
+        with pytest.raises(ApproveGateError, match="glob"):
+            approve_scope_drift_ticket("GEN-500", "genhealth", ["src/*.py"])
+
+        assert calls == []
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.scope_grants == []
+        assert t.scope_drift_approved_extra_files is None
+
 
 # ---------------------------------------------------------------------------
 # TestApproveMustFixOverride — approve_must_fix_override_ticket (#2205)
