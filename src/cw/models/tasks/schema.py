@@ -301,7 +301,14 @@ from cw.models.enums import Stage
 #      drops the list: the gate then stops applying (fail-open on downgrade
 #      only), and the operator re-declares. Take the next free number at merge
 #      if another PR takes v65 first.
-DEV_QUEUE_SCHEMA_VERSION = 65
+# v66: added TicketTask.base_branch (GitHub #3779, RFC 0020) — the branch a row
+#      merges into; None = client.default_branch. A `| None` field with a None
+#      default and no migration filler, so a pre-v66 row loads null and resolves
+#      to the client default. DOWNGRADE HAZARD: an older cw that re-saves the
+#      queue drops the unknown field, which silently retargets an epic row to
+#      the default branch (the dangerous direction, unlike v65's fail-open
+#      hold). Take the next free number at merge if another PR takes v66 first.
+DEV_QUEUE_SCHEMA_VERSION = 66
 # Provenance of a v48 review approval: the human `approve` or the gate recipe.
 ReviewApproverKind = Literal["operator", "recipe"]
 DEFAULT_LANE: str = "default"

@@ -50,7 +50,8 @@ each submodule only imports from those above it (no cycles):
   ``orchestrator_config.constants`` and ``cw.tracker``; imported by submodule
   path, not re-exported.
 - ``client`` — ``ClientConfig`` and ``DEFAULT_AUTO_PURPOSES``.
-- ``branch`` — ``resolve_feature_branch``, the one per-row branch seam (#2948).
+- ``branch`` — ``resolve_feature_branch`` and ``resolve_base_branch``, the per-row
+  branch seams (#2948, #3779).
   Imports ``client`` and ``tasks`` only under ``TYPE_CHECKING``.
 - ``state`` — ``CwState`` and ``CW_STATE_SCHEMA_VERSION`` (the DAG leaf).
 
@@ -62,7 +63,7 @@ every ``from cw.models import X`` import site keeps working unchanged.
 
 from __future__ import annotations
 
-from cw.models.branch import resolve_feature_branch
+from cw.models.branch import resolve_base_branch, resolve_feature_branch
 from cw.models.client import DEFAULT_AUTO_PURPOSES, ClientConfig
 from cw.models.codex_legacy_recovery import (
     CODEX_LEGACY_RECOVERY_SCHEMA_VERSION,
@@ -281,5 +282,6 @@ __all__ = [
     "new_session_id",
     "occupies_lane_slot",
     "read_park_comment_marker",
+    "resolve_base_branch",
     "resolve_feature_branch",
 ]

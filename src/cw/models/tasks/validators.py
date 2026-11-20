@@ -115,3 +115,23 @@ _SAFE_TICKET_ID = re.compile(r"^(?!.*\.\.)[a-zA-Z0-9][a-zA-Z0-9._#-]*$")
 # branch name before persisting it, or one bad row would brick
 # load_dev_queue() for every client (the #1129 failure mode above).
 _SAFE_TICKET_BRANCH = re.compile(r"^(?!.*\.\.)[a-zA-Z0-9][a-zA-Z0-9/_.-]*$")
+
+
+def _check_branch_charset(field: str, value: str | None) -> str | None:
+    """Shared charset check for branch-valued ``TicketTask`` fields (#3779).
+
+    ``branch`` (v49) and ``base_branch`` (v66) use one charset. None passes
+    (no explicit branch); any other value must match ``_SAFE_TICKET_BRANCH``.
+    Pydantic field validators call this through a thin per-field wrapper, and
+    ``cw.models.tasks.base_branch.set_base_branch`` calls it directly, because
+    ``TicketTask`` has no ``validate_assignment``. Every writer must validate
+    before persisting: one bad on-disk ``base_branch`` bricks
+    ``load_dev_queue()`` for every client (the #1129 mode).
+    """
+    if value is not None and not _SAFE_TICKET_BRANCH.match(value):
+        msg = (
+            f"Invalid {field} {value!r}: must start with alphanumeric"
+            " and contain only [a-zA-Z0-9/_.-], with no '..' sequence"
+        )
+        raise ValueError(msg)
+    return value

@@ -66,6 +66,7 @@ When an ADR is superseded, edit the old one's status line — don't delete it.
 | [0021](0021-claude-confirm-spend-is-uncapped-by-decision.md) | The Claude confirm round's spend is uncapped by decision | Accepted |
 | [0022](0022-a-clean-default-branch-merge-never-causes-a-review.md) | A clean default-branch merge never causes a review; merge at most once, only on conflict | Accepted |
 | [0023](0023-courier-turns.md) | The outbox drain posts MCP tracker writes through courier turns | Accepted |
+| [0024](0024-merge-target-and-trust-root-are-different-things.md) | The merge target (`TicketTask.base_branch`) is not the trust root (`client.default_branch`) | Accepted |
 
 ADR-0000 is the foundational record — the trajectory it captures is
 assumed as ground truth by every subsequent ADR.

@@ -14,6 +14,9 @@ each imports its siblings by full path, in this order (no cycles):
 - ``records`` — ``PendingFixDispatch``, ``LaunchedFixWorker``,
   ``LaunchMarker``, ``UsageLimitAct``, ``MustFixOverride`` and
   ``ReviewEngineAllow``. Pydantic only.
+- ``base_branch`` — ``set_base_branch`` and ``BaseBranchFrozenError``, the one
+  writer of ``TicketTask.base_branch`` (#3779). Imported by submodule path,
+  not re-exported.
 - ``ticket_task`` — ``TicketTask``, one class kept whole: a pydantic class
   cannot declare fields in another module, and its field order is the
   persisted ``dev_queue.json`` layout. New field *types* go in a sibling
