@@ -185,8 +185,8 @@ of host budget until an operator intervened.
 
 **Lane occupancy (`src/cw/dispatch/claim/lane_stats.py`).**
 `_lane_stats_for_client`'s docstring states the rule directly:
-"BLOCKED_ON_USER occupies its lane slot per ADR-0006, so
-`running + blocked + signoff` is the total occupied count." The rule has
+"A BLOCKED_ON_USER row occupies its lane slot only while its worker is live or
+claimed, so `running + blocked + signoff` is the total occupied count." The rule has
 exactly three carve-outs, all in `occupies_lane_slot`
 (`src/cw/models/tasks/store.py`) and nowhere else: (1) the `terminal_sibling`
 park (#2100), a duplicate row for a ticket whose real row already reached a
@@ -194,8 +194,9 @@ terminal status, which is never counted; (2) the id-bearing `dependency_hold`
 park (#2321), a `BLOCKED_ON_USER` row with disposition `dependency_hold` and
 `blocked_on_pr` not None, which waits on a merge the serve tick observes; (3)
 the settled-worker park (#3774, R4), a `BLOCKED_ON_USER` row whose named
-sessions are all terminal (or absent from state is unsettled, so it still
-holds), with no `fix_dispatch_launched_worker` and no `launch_marker`. Under
+sessions are all terminal (a named session absent from state is unsettled, so
+the row still holds), with no `fix_dispatch_launched_worker` and no
+`launch_marker`. Under
 (3) a `dependency_unmerged` park with no `blocked_on_pr` and no live claim frees
 its slot, reversing #2321's choice that such a park keeps its slot: under R4 it
 stays parked and visible in status, tasks and board, and release goes through
@@ -205,7 +206,8 @@ row is unchanged. This is not a general rule that parked rows are free:
 `AWAITING_OPERATOR_SIGNOFF` still occupies, and a dispatch admission check that
 only counts `RUNNING` tasks as occupying a lane will over-admit into a lane
 that is actually full of parked, awaiting-operator work. Occupancy counting is
-task-join based (not session-based) per ADR-0006 / RFC 0004 Phase 4a scope.
+task-join based per ADR-0006 / RFC 0004 Phase 4a scope, plus a session-status
+read for parked rows (#3774).
 Every reader that counts occupants goes through `occupies_lane_slot`: dispatch
 admission (`lane_stats.py`, `tick.py`), the board, `cw doctor`, and the
 `cw dev-queue status` lane breakdown (`src/cw/cli/dev_queue/status.py`), so a
