@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -180,6 +181,23 @@ class ApprovalView(BaseModel):
     review_attestation: AttestationView | None = None
 
 
+class ScopeDecisionView(BaseModel):
+    """Who decides a parked ``plan_scope_drift`` and what re-presenting costs (#3772).
+
+    ``carried_paths`` are the paths a verified-looking grant already covers
+    (display only: the view runs no git). ``new_paths`` are the park's paths,
+    read best-effort from its details; ``next_action`` is the command that
+    records the decision.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    owner: Literal["operator", "human"]
+    carried_paths: list[str]
+    new_paths: list[str]
+    next_action: str
+
+
 class TicketView(BaseModel):
     """One dev-queue row with the derived state an operator needs to act on it."""
 
@@ -195,6 +213,12 @@ class TicketView(BaseModel):
     # GitHub #2321: additive, no TICKET_VIEW_SCHEMA_VERSION bump.
     blocked_on_pr: int | None = Field(
         default=None, description="PR this held row waits on; null when none."
+    )
+    # #3772: additive, no TICKET_VIEW_SCHEMA_VERSION bump. Set only on a row
+    # parked plan_scope_drift at IMPL; null otherwise.
+    scope_decision: ScopeDecisionView | None = Field(
+        default=None,
+        description="Owner and next action for a plan_scope_drift park; else null.",
     )
     blocker_details: str | None = Field(
         description=(

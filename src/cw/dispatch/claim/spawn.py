@@ -48,10 +48,12 @@ from cw.models import (
     Stage,
     resolve_feature_branch,
 )
+from cw.pr_hydrate import _resolve_repo_slug
 from cw.queue_rows import (
     _park_running_task_blocked_on_user,
     _revert_claimed_task_to_pending,
 )
+from cw.scope_grants import carry_scope_grants
 from cw.spawn import emit_spawn_post_launch_attention
 from cw.worktree import (
     ReuseRefreshOptions,
@@ -729,6 +731,16 @@ def _spawn_claimed_task(
 
         if task.stage == Stage.PLAN:
             _apply_plan_bypass_if_available(task, client, worktree_path)
+        # #3772: re-derive the scope-drift transport from the verified ledger.
+        # IMPL only (a no-op otherwise); runs after the plan bypass has
+        # settled the in-memory stage. The slug is a git read, so it is taken
+        # only when there is a ledger to verify.
+        carry_scope_grants(
+            task,
+            client,
+            worktree_path,
+            repo=_resolve_repo_slug(worktree_path) if task.scope_grants else None,
+        )
 
         # Function-level import breaks the gating<->claim import cycle: the
         # cw.dispatch.gating package imports this module at top level, so

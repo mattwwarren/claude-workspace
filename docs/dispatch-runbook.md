@@ -620,7 +620,9 @@ for which park" in §5).
 `--json` emits the `TicketView` model (`cw schema show ticket-view`):
 `schema_version`, `ticket_id`, `client`, `status`, `stage`, `disposition`,
 `blocked_reason`, `blocked_on_pr` (the PR a dependency hold waits on, null
-when none, #2321), `blocker_details`, `advisory_note`, `lane`, `priority`,
+when none, #2321), `scope_decision` (a `plan_scope_drift` park only: `owner`,
+`carried_paths`, `new_paths`, `next_action`; null otherwise, #3772),
+`blocker_details`, `advisory_note`, `lane`, `priority`,
 `scope_hint`, `attempts`, `unproductive_attempts`, `attempt_ceiling` (null =
 no ceiling), `session` (null, or `id`/`status`/`liveness_bucket`/
 `in_roster`/`attention_state`; `status` null = session no longer in state),
@@ -1026,6 +1028,10 @@ every refusal names the right one for the row (`Run: ...`), and
   to re-run impl without them. The grant drops stored review feedback whose
   `reviewed_sha` is no longer the branch head (#3637); the CLI names the dropped
   sha and the `requeue --stage impl --review-feedback-file` recovery command.
+  The grant is also recorded on the row (#3772): a later repair dispatch re-uses
+  it while it still verifies, and only new paths are presented. `show` names the
+  owner and the next action in `scope_decision`. A regress into PLAN drops the
+  grants; that is the operator's revocation lever (`requeue --stage plan`).
 - Codex MUST_FIX park (`codex_must_fix_findings`):
   `approve --override-must-fix --reason "<why>"`, then
   `requeue --stage finalize` (§7); if the ticket or lane has a finalize
