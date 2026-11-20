@@ -117,21 +117,29 @@ def _row(
     )
 
 
-def _clients(tmp_path: Path) -> dict[str, ClientConfig]:
+def _clients(
+    tmp_path: Path, *, worktree_base: Path | None = None
+) -> dict[str, ClientConfig]:
     return {
         _CLIENT: ClientConfig(
-            name=_CLIENT, workspace_path=tmp_path, default_branch="main"
+            name=_CLIENT,
+            workspace_path=tmp_path,
+            default_branch="main",
+            worktree_base=worktree_base,
         )
     }
 
 
 def _sweep(
-    tmp_path: Path, *rows: TicketTask, events: list[OrchestratorEvent] | None = None
+    tmp_path: Path,
+    *rows: TicketTask,
+    events: list[OrchestratorEvent] | None = None,
+    worktree_base: Path | None = None,
 ) -> frozenset[tuple[str, str]]:
     return resolve_conflicting_branches(
         events if events is not None else [_event()],
         DevQueueStore(tasks=list(rows)),
-        _clients(tmp_path),
+        _clients(tmp_path, worktree_base=worktree_base),
     )
 
 
@@ -188,6 +196,124 @@ class TestResolveConflictingBranches:
         assert _sweep(tmp_path, _row(repo)) == frozenset()
 
 
+class TestDispatchDrivenRows:
+    """A ``None`` ``worktree_path`` resolves to the branch-derived worktree (#2990).
+
+    The derived path is ``worktree_base / slugify_branch("dev/1823")``, which is
+    ``tmp_path / "dev-1823"``; ``_conflicting(make_git_repo, "dev-1823")`` builds a
+    real repo there with ``dev/1823`` checked out, so the checkout verification
+    passes with no monkeypatching.
+    """
+
+    _DERIVED = "dev-1823"
+
+    def test_a_dispatch_row_with_a_probe_reported_conflict_is_reported(
+        self, make_git_repo: Callable[..., Path], tmp_path: Path
+    ) -> None:
+        _conflicting(make_git_repo, self._DERIVED)
+
+        found = _sweep(tmp_path, _row(None), worktree_base=tmp_path)
+
+        assert found == {(_CLIENT, _TICKET)}
+
+    def test_a_dispatch_row_that_is_merely_behind_is_not_reported(
+        self, make_git_repo: Callable[..., Path], tmp_path: Path
+    ) -> None:
+        _behind_repo(
+            make_git_repo,
+            self._DERIVED,
+            branch_file=_SHARED_FILE,
+            branch_body="ONE\ntwo\nthree\nfour\nfive\n",
+            main_body="one\ntwo\nthree\nfour\nFIVE\n",
+        )
+
+        found = _sweep(tmp_path, _row(None), worktree_base=tmp_path)
+
+        assert found == frozenset()
+
+    def test_a_dispatch_row_probe_error_fails_open(
+        self,
+        make_git_repo: Callable[..., Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _conflicting(make_git_repo, self._DERIVED)
+
+        def _raise(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+            msg = "git vanished"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.merge_probe.run_git", _raise)
+
+        found = _sweep(tmp_path, _row(None), worktree_base=tmp_path)
+
+        assert found == frozenset()
+
+    def test_a_derived_checkout_on_another_branch_is_not_probed(
+        self,
+        make_git_repo: Callable[..., Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repo = _conflicting(make_git_repo, self._DERIVED)
+        git_in(repo, "checkout", "main")
+        calls: list[object] = []
+        monkeypatch.setattr(
+            branch_freshness, "probe_default_merge", lambda *a: calls.append(a)
+        )
+
+        found = _sweep(tmp_path, _row(None), worktree_base=tmp_path)
+
+        assert found == frozenset()
+        assert calls == []
+
+    def test_a_dispatch_row_without_a_derived_worktree_is_skipped_without_a_git_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[object] = []
+        monkeypatch.setattr(
+            branch_freshness, "probe_default_merge", lambda *a: calls.append(a)
+        )
+
+        found = _sweep(tmp_path, _row(None), worktree_base=tmp_path)
+
+        assert found == frozenset()
+        assert calls == []
+
+    @pytest.mark.parametrize(
+        ("status", "stage", "ticket_id"),
+        [
+            pytest.param(QueueItemStatus.PENDING, Stage.REVIEW, _TICKET, id="pending"),
+            pytest.param(QueueItemStatus.RUNNING, Stage.IMPL, _TICKET, id="impl-stage"),
+            pytest.param(QueueItemStatus.RUNNING, Stage.REVIEW, "999", id="no-event"),
+        ],
+    )
+    def test_candidate_filters_run_before_the_checkout_probe(
+        self,
+        make_git_repo: Callable[..., Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        status: QueueItemStatus,
+        stage: Stage,
+        ticket_id: str,
+    ) -> None:
+        _conflicting(make_git_repo, self._DERIVED)
+
+        def _must_not_run(*_a: object, **_k: object) -> str | None:
+            msg = "checkout probed for a row the filters exclude"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.worktree._paths._checked_out_branch", _must_not_run)
+
+        found = _sweep(
+            tmp_path,
+            _row(None, ticket_id=ticket_id, status=status, stage=stage),
+            worktree_base=tmp_path,
+        )
+
+        assert found == frozenset()
+
+
 class TestFailOpen:
     @pytest.mark.parametrize("missing", ["none", "nonexistent"])
     def test_a_missing_worktree_is_skipped_without_a_git_call(
@@ -196,7 +322,11 @@ class TestFailOpen:
         monkeypatch: pytest.MonkeyPatch,
         missing: str,
     ) -> None:
-        """Pins Discovery 3: a ``None`` ``worktree_path`` (every dispatch row)."""
+        """No stamped path and no derived worktree (#2990): skipped, no git call.
+
+        ``None`` is a dispatch row whose derived worktree does not exist under
+        ``tmp_path``; ``nonexistent`` is a stamped path that is absent.
+        """
         calls: list[object] = []
         monkeypatch.setattr(
             branch_freshness, "probe_default_merge", lambda *a: calls.append(a)
