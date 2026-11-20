@@ -2498,10 +2498,10 @@ client queues the ticket.
 
 The text form prints a header (`state`, `mode`, `rounds`, `converged`,
 `final_clean_sha`, `stop`, `new_accepted_by_round`, `fix_cycles`,
-`confirm_backend`, `deferred`, `confirm_failures`, `sources`), one indented
-block per round (reviewers, reviewed sha, new findings with their
+`confirm_backend`, `deferred`, `confirm_failures`, `stage_time`, `sources`),
+one indented block per round (reviewers, reviewed sha, new findings with their
 MUST_FIX/SHOULD_FIX split, fixes dispatched, findings settled that round with
-their rationale, wall time), then `settled_other` (operator settles, and any
+their rationale, wall time, `stage_time`), then `settled_other` (operator settles, and any
 settled entry whose round has no block), `dispositions`, `voided`, `releases`
 and `notes`. Every key is printed, `-` when absent; nothing is truncated. The
 `deferred` header is the ledger's count, `N (text not recorded)` when only the
@@ -2516,6 +2516,56 @@ dispatched" is what the ledger records: a fix cycle was dispatched for those
 findings, not that each fix was verified. Wall time runs from the previous
 round's record to this one, so it includes the fix cycle in between; round 1
 runs from this row's own `s3_review_started` event, or is not recorded.
+
+Stage time (#3792): each round, and the summary, also splits where the time
+went into `stage_seconds` (`queued`, `reviewing`, `repairing`, `gate`), printed
+as `stage_time: queued 3m00s, reviewing 25m10s, repairing 12m00s, gate
+1h02m00s`, with `not recorded` for a null part. Nothing new is recorded; it is
+derived at report time from the row's `task.transition` events, its fix
+sessions and the ledger's `recorded_at`.
+
+- `queued` is the row PENDING at the review stage, waiting to be dispatched.
+- `reviewing` is the row RUNNING at the review stage with no fix session
+  running: the REVIEW session's boot, reviewers and adjudication, plus the
+  latency between a fix handoff and the fix session's start.
+- `repairing` is the time a fix session of this row was running, from the
+  session's `started_at` to its `completed_at`. It starts at the session's
+  `started_at`, not at the fix handoff, because the handoff's request time is
+  not durable. A still-live session is counted up to `summary.stage_seconds_as_of`.
+- `gate` is the row parked at the review stage waiting on someone outside the
+  pipeline: every BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF segment, whatever
+  the reason. It includes operator decisions, sign-offs and crash or reap parks,
+  so a crash park is not an approval gate; there is no split by reason yet, and
+  one can be added later as an additive sibling key.
+
+Time in two states at once counts once, as gate, then queued, then repairing,
+then reviewing. A round's window is its `wall_seconds` window, and when the
+status transitions cover it the four parts sum to `wall_seconds`; round 1 starts
+at its `s3_review_started` event, so the wait before the review claim is not in
+it. The summary covers every review-stage status segment from entry to exit,
+including the initial queue wait before round 1 and any gate after the last
+round (for example `review_pending_approval`). An open last segment (a row still
+waiting) and a live fix session are counted up to `summary.stage_seconds_as_of`,
+the instant the report read the clock.
+
+Degradation, never a guess: the event inbox is count and byte auto-pruned, so
+`queued`, `reviewing` and `gate` are null, with a `notes` entry, when the row's
+`task.transition` events do not cover a window (the summary's three are null
+when the events do not reach back to the start of the review stage). `repairing`
+survives pruning, because it comes from the sessions: it is null, with a note,
+when a fix was dispatched but no fix session of this row overlaps the window,
+and `0.0` when no fix was dispatched. A last transition that disagrees with the
+row's status is not counted, and a round whose window is unknown or not positive
+gets an all-null block. A sentinel-derived round (no ledger) has an all-null
+block; only the summary is computed.
+
+A `task.transition` event is used only when it names this client and ticket id
+and was created within this row's lifetime: not before the row was created, and
+not at or after the next re-enqueued row's creation. A session id is not a tie,
+because requeue transitions do not reliably carry one. Other events of the
+ticket id are counted in `notes` and never used. #3727's delta re-review lands on
+the same round entry (`kind` already names #2980's `delta` round) and these
+timings need no change for it.
 
 The Claude confirm round's spend cost is not recorded in the ledger or in this
 view, so the history cannot show it (#2812; see ADR-0021). The only trace is
@@ -2555,6 +2605,8 @@ stage), `rounds` (each with `round`, `kind` of `loop`/`confirm`/`initial`,
 `reviewed_sha`, `roster`, the ledger counts, `settled_total`,
 `new_by_severity` (null when no verdict file was recorded or it disagrees with
 the ledger), `fix_dispatched`, `clean`, `recorded_at`, `wall_seconds`,
+`stage_seconds` (`queued`, `reviewing`, `repairing`, `gate`: each a number of
+seconds or null; an all-null block means nothing was recorded),
 `settled`, and `override` (present only on a confirm round an operator MUST_FIX
 override marked clean, #2834: `at`, `actor`, `reason`, `prior_status`,
 `finding_count`)), `summary` (`convergence_mode`: `clean` with a usable ledger or a
@@ -2566,8 +2618,10 @@ that is blocking or omits the mode, `unknown` with neither; `rounds_run`,
 `deferred_count`: `len(deferred)` when a ledger was read, else the sentinel's
 `review.deferred`, null when neither was read,
 `releases` (`at`, `round` = rounds recorded at the release, `reason`, `cause`,
-`sha`), and `confirm_failures`: every confirm-backend outage the ledger ever
-recorded, null when no ledger was read), `settled`, `dispositions` (`key`,
+`sha`), `confirm_failures`: every confirm-backend outage the ledger ever
+recorded, null when no ledger was read, `stage_seconds` (the same four parts
+over the whole review stage), and `stage_seconds_as_of` (ISO time up to which
+an open wait was counted, null when none was)), `settled`, `dispositions` (`key`,
 `file`, verbatim `summary`, `outcome` of `ACCEPTED`/`REJECTED`/`REVERSED`,
 `rationale`, `actor`, `recorded_at`, `reviewed_sha`, `""` meaning not
 recorded), `voided` (`severity`, `file`, `summary`, `original_rationale`,
