@@ -54,8 +54,9 @@ def _gap_headline(
         f"**OPERATOR EVIDENCE REQUIRED — {count} finding(s) rest on a check the"
         " reviewer could not run.** An implementation change cannot supply missing"
         " evidence, so the fix loop does not act on them and nothing was dropped:"
-        " each lists the check. Settle a finding to dismiss it, or provide the"
-        " missing capability and re-run the review, then requeue."
+        " each lists the check. Settle a finding that has a payload below to"
+        " dismiss it, or provide the missing capability and re-run the review,"
+        " then requeue."
     ]
     if repair_follows and verdict.blocking:
         lines.append(
