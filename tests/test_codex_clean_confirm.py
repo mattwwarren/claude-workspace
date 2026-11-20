@@ -72,7 +72,7 @@ from cw.review_convergence import (
     tolerance_for_client,
 )
 from cw.review_engine.constants import ENGINE_ROLE
-from cw.review_findings import has_contested_decision
+from cw.review_findings import has_held_findings
 from cw.ticket_snapshot import DEFAULT_SNAPSHOT_CONTEXT, SnapshotContext
 from tests._claude_review_helpers import (
     RoleAwareClaudeRunner,
@@ -1358,7 +1358,7 @@ class TestContestedConfirmRound:
         assert _CONTEST_QUOTE in blocker.details
         assert outcome.reviewer_label == "Claude"
         assert outcome.verdict is not None
-        assert has_contested_decision(outcome.verdict)
+        assert has_held_findings(outcome.verdict)
 
     def test_no_ledger_round_is_recorded_and_the_confirm_stays_pending(
         self, wt: Path

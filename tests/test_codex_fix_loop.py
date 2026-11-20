@@ -71,7 +71,7 @@ from cw.review_findings import (
     AcceptedFinding,
     ReviewVerdict,
     consolidate_verdict,
-    has_contested_decision,
+    has_held_findings,
     write_review_verdict,
 )
 from cw.stage_verification.growth import LoopGrowthBudget, RunGrowth
@@ -4071,7 +4071,7 @@ class TestContestedDecisionThroughLoop:
         assert "MFB" in out.blocker.details
         assert _CONTEST_QUOTE in out.blocker.details
         assert verdict is not None
-        assert has_contested_decision(verdict)
+        assert has_held_findings(verdict)
 
     def test_contest_first_seen_in_a_cycle_one_rereview_parks(
         self, make_git_repo: Callable[..., Path]
@@ -4100,7 +4100,7 @@ class TestContestedDecisionThroughLoop:
         assert verdict is not None
         by_summary = {af.finding.summary: af for af in verdict.accepted}
         assert by_summary["MFA"].disposition == "unresolved"
-        assert has_contested_decision(verdict)
+        assert has_held_findings(verdict)
 
     def test_stamped_contest_never_enters_the_open_findings_tracker(self) -> None:
         stamped = _accepted(_MF_A_MARKED).model_copy(

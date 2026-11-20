@@ -36,7 +36,7 @@ from cw.review_adjudication import (
     verify_fixed_dispositions,
 )
 from cw.review_findings import AcceptedFinding, CapturedDiff, Finding, ReviewVerdict
-from tests._shared.review_builders import _make_diff, _make_finding
+from tests._shared.review_builders import _make_diff, _make_finding, _make_gap_finding
 
 _LOGGER = "cw.review_adjudication"
 _TICKET = "T-1814"
@@ -2402,3 +2402,34 @@ class TestEngineRouteRefusal:
         result = apply_adjudication(_verdict(_accepted(finding)), [stray])
 
         assert result.unmatched_adjudication_count == 1
+
+
+class TestEvidenceGapAdjudication:
+    """#3793: a gap-marked finding is held whatever the adjudication outcome."""
+
+    def test_marked_must_fix_is_held_with_gap_log(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        finding = _make_gap_finding()
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            verdict = apply_adjudication(
+                _verdict(_accepted(finding)), [_adjudication(finding, outcome="fix")]
+            )
+        assert verdict.accepted[0].disposition == "operator_actionable"
+        assert verdict.accepted[0].adjudicated_fix is False
+        assert verdict.blocking is False
+        assert "rests on an evidence gap" in caplog.text
+        assert "contests a decided constraint" not in caplog.text
+
+    def test_marked_must_fix_with_no_entry_stays_dropped(self) -> None:
+        finding = _make_gap_finding()
+        verdict = apply_adjudication(_verdict(_accepted(finding)), [])
+        assert verdict.accepted[0].disposition == "dropped"
+        assert verdict.blocking is True
+
+    def test_unmarked_fix_is_unchanged(self) -> None:
+        finding = _make_finding()
+        verdict = apply_adjudication(
+            _verdict(_accepted(finding)), [_adjudication(finding, outcome="fix")]
+        )
+        assert verdict.accepted[0].adjudicated_fix is True

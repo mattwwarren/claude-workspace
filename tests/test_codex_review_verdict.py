@@ -85,10 +85,10 @@ from cw.review_findings import (
     ReviewerRunRecord,
     ReviewVerdict,
     consolidate_verdict,
-    contested_findings,
-    has_contested_decision,
+    has_held_findings,
+    held_findings,
     parse_reviewer_document,
-    stamp_decision_contests,
+    stamp_held_findings,
 )
 from cw.review_findings._consolidate import _count_rejected_by_severity
 from cw.review_markers import (
@@ -4827,7 +4827,7 @@ class TestDecidedConstraintContest:
         assert verdict is not None
         assert verdict.blocking is False
         assert verdict.must_fix == []
-        assert has_contested_decision(verdict)
+        assert has_held_findings(verdict)
 
     def test_details_open_with_the_contest_headline_and_carry_the_quote(
         self, make_git_repo: Callable[[str], Path]
@@ -4882,7 +4882,7 @@ class TestDecidedConstraintContest:
         assert verdict is not None
         assert verdict.blocking is False
         assert verdict.accepted[0].disposition == "deferred"
-        assert not has_contested_decision(verdict)
+        assert not has_held_findings(verdict)
         comment = render_verdict_comment(verdict, fix_loop_enabled=True)
         assert "contests decided constraint" in comment
         assert _CONTEST_QUOTE in comment
@@ -4900,7 +4900,7 @@ class TestDecidedConstraintContest:
         assert result.blocker.reason == "review_operator_actionable"
         assert verdict is not None
         assert verdict.blocking is True
-        assert has_contested_decision(verdict)
+        assert has_held_findings(verdict)
         assert [f.summary for f in verdict.must_fix] == ["Second bug"]
 
         lines = result.blocker.details.splitlines()
@@ -4919,7 +4919,7 @@ class TestRenderDecidedConstraintContest:
         verdict = consolidate_verdict(
             [_make_reviewer_doc(*findings)], _make_diff(), reviewed_sha="sha"
         )
-        return stamp_decision_contests(verdict)
+        return stamp_held_findings(verdict)
 
     def test_headline_sits_right_after_the_title(self) -> None:
         verdict = self._verdict(_marked())
@@ -4940,7 +4940,7 @@ class TestRenderDecidedConstraintContest:
         comment = render_verdict_comment(verdict, fix_loop_enabled=True)
 
         assert _CONTEST_HEADLINE.format(n=2) in comment
-        assert len(contested_findings(verdict)) == 2
+        assert len(held_findings(verdict)) == 2
 
     def test_contested_must_fix_annotation_wording(self) -> None:
         verdict = self._verdict(_marked())

@@ -2,7 +2,7 @@
 
 1:1 with ``src/cw/review_findings/_decided.py``. A reviewer that believes a
 recorded decision is itself unsafe files the finding with
-``contests_decision`` set; :func:`stamp_decision_contests` holds a MUST_FIX
+``contests_decision`` set; :func:`stamp_held_findings` holds a MUST_FIX
 one for the operator (``operator_actionable``) and records a SHOULD_FIX one as
 a non-blocking note (``deferred``), so neither ever reaches the fix loop.
 """
@@ -16,10 +16,10 @@ from cw.review_findings import (
     AcceptedFinding,
     Finding,
     ReviewVerdict,
-    contested_disposition,
-    contested_findings,
-    has_contested_decision,
-    stamp_decision_contests,
+    has_held_findings,
+    held_disposition,
+    held_findings,
+    stamp_held_findings,
 )
 from tests._shared.review_builders import _finding_kwargs, _make_finding
 
@@ -76,23 +76,23 @@ class TestField:
 
 class TestContestedDisposition:
     def test_must_fix_is_held_for_the_operator(self) -> None:
-        assert contested_disposition(_marked()) == ("operator_actionable", _HELD)
+        assert held_disposition(_marked()) == ("operator_actionable", _HELD)
 
     def test_should_fix_is_a_deferred_note(self) -> None:
-        assert contested_disposition(_marked("SHOULD_FIX")) == ("deferred", _NOTE)
+        assert held_disposition(_marked("SHOULD_FIX")) == ("deferred", _NOTE)
 
     @pytest.mark.parametrize("severity", ["NIT", "PRINCIPLE", "DEBT"])
     def test_lower_severities_are_untouched(self, severity: str) -> None:
-        assert contested_disposition(_marked(severity)) is None
+        assert held_disposition(_marked(severity)) is None
 
     @pytest.mark.parametrize("marker", ["", "   ", "\n\t"])
     def test_blank_marker_is_no_contest(self, marker: str) -> None:
-        assert contested_disposition(_make_finding(contests_decision=marker)) is None
+        assert held_disposition(_make_finding(contests_decision=marker)) is None
 
 
 class TestStamp:
     def test_must_fix_is_stamped_and_leaves_must_fix_and_blocking(self) -> None:
-        verdict = stamp_decision_contests(_verdict(_accepted(_marked())))
+        verdict = stamp_held_findings(_verdict(_accepted(_marked())))
         (af,) = verdict.accepted
         assert af.disposition == "operator_actionable"
         assert af.disposition_detail == _HELD
@@ -100,19 +100,17 @@ class TestStamp:
         assert verdict.blocking is False
 
     def test_quote_is_not_copied_into_the_detail(self) -> None:
-        (af,) = stamp_decision_contests(_verdict(_accepted(_marked()))).accepted
+        (af,) = stamp_held_findings(_verdict(_accepted(_marked()))).accepted
         assert _QUOTE not in af.disposition_detail
 
     def test_should_fix_is_stamped_deferred(self) -> None:
-        (af,) = stamp_decision_contests(
-            _verdict(_accepted(_marked("SHOULD_FIX")))
-        ).accepted
+        (af,) = stamp_held_findings(_verdict(_accepted(_marked("SHOULD_FIX")))).accepted
         assert (af.disposition, af.disposition_detail) == ("deferred", _NOTE)
 
     @pytest.mark.parametrize("severity", ["NIT", "PRINCIPLE", "DEBT"])
     def test_lower_severities_keep_their_disposition(self, severity: str) -> None:
         verdict = _verdict(_accepted(_marked(severity)))
-        assert stamp_decision_contests(verdict) == verdict
+        assert stamp_held_findings(verdict) == verdict
 
     @pytest.mark.parametrize("disposition", ["rejected", "deferred", "dropped"])
     def test_already_decided_findings_are_not_re_stamped(
@@ -122,14 +120,12 @@ class TestStamp:
             _marked(), disposition=disposition, disposition_detail="settled"
         )
         verdict = _verdict(settled)
-        stamped = stamp_decision_contests(verdict)
+        stamped = stamp_held_findings(verdict)
         assert stamped.accepted == [settled]
 
     def test_unmarked_must_fix_stays_blocking_beside_a_contest(self) -> None:
         plain = _make_finding(summary="Real bug", file="src/cw/bar.py")
-        verdict = stamp_decision_contests(
-            _verdict(_accepted(_marked()), _accepted(plain))
-        )
+        verdict = stamp_held_findings(_verdict(_accepted(_marked()), _accepted(plain)))
         assert verdict.must_fix == [plain]
         assert verdict.blocking is True
         assert [af.disposition for af in verdict.accepted] == [
@@ -139,22 +135,22 @@ class TestStamp:
 
     def test_review_counts_are_untouched(self) -> None:
         verdict = _verdict(_accepted(_marked()))
-        assert stamp_decision_contests(verdict).review == verdict.review
+        assert stamp_held_findings(verdict).review == verdict.review
 
     def test_no_contest_returns_the_verdict_unchanged(self) -> None:
         verdict = _verdict(_accepted(_make_finding()))
-        assert stamp_decision_contests(verdict) == verdict
+        assert stamp_held_findings(verdict) == verdict
 
 
 class TestContestedFindings:
     def test_returns_exactly_the_stamped_must_fix_findings(self) -> None:
         plain = _accepted(_make_finding(summary="Real bug"))
         should = _accepted(_marked("SHOULD_FIX", summary="Should"))
-        verdict = stamp_decision_contests(_verdict(_accepted(_marked()), plain, should))
-        (contested,) = contested_findings(verdict)
+        verdict = stamp_held_findings(_verdict(_accepted(_marked()), plain, should))
+        (contested,) = held_findings(verdict)
         assert contested.finding.contests_decision == _QUOTE
         assert contested.disposition == "operator_actionable"
-        assert has_contested_decision(verdict) is True
+        assert has_held_findings(verdict) is True
 
     def test_needs_a_non_blank_marker(self) -> None:
         for marker in ("", "   "):
@@ -163,15 +159,15 @@ class TestContestedFindings:
                 disposition="operator_actionable",
             )
             verdict = _verdict(held)
-            assert contested_findings(verdict) == []
-            assert has_contested_decision(verdict) is False
+            assert held_findings(verdict) == []
+            assert has_held_findings(verdict) is False
 
     def test_needs_the_operator_actionable_disposition(self) -> None:
         verdict = _verdict(_accepted(_marked()))
-        assert has_contested_decision(verdict) is False
+        assert has_held_findings(verdict) is False
 
     def test_needs_must_fix_severity(self) -> None:
         verdict = _verdict(
             _accepted(_marked("SHOULD_FIX"), disposition="operator_actionable")
         )
-        assert has_contested_decision(verdict) is False
+        assert has_held_findings(verdict) is False
