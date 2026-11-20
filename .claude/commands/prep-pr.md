@@ -456,6 +456,7 @@ Only when `cw review converge config` reports `clean`; when it reports `blocking
   pass it through.
 
 Pass through relevant arguments when invoking the project-level ship-it:
+- `--base <base>` always, with the base resolved in Step 2 (never omitted: a non-default-base row would otherwise get its PR, title range and changelog range on the default branch)
 - `--draft` if the user's original arguments included it
 - `--title` if provided
 

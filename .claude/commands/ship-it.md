@@ -18,7 +18,7 @@ Quality gates (ruff/mypy/pytest) are handled by `/prep-pr` Step 7 — do not re-
 <!-- el: ship-it.parse-arguments -->
 ## Step 1: Parse arguments
 
-Set `BASE` from `--base <branch>` if provided in `$ARGUMENTS`. When `--base` is absent, use the repository default branch: the name `git symbolic-ref --short refs/remotes/origin/HEAD` prints with its leading `origin/` removed. When that is also empty, BLOCK with "pass --base": never assume a branch name. Shell variables do not survive between Bash calls, so set `BASE` again at the top of any later fence that uses `${BASE}`. Extract `--title <value>` into `EXPLICIT_TITLE` if provided:
+Set `BASE` from `--base <branch>` if provided in `$ARGUMENTS`. When `--base` is absent, use the repository default branch: the name `git symbolic-ref --short refs/remotes/origin/HEAD` prints with its leading `origin/` removed. When that is also empty, BLOCK with "pass --base": never assume a branch name. This fence also writes the resolved value to `.cw/ship-it-base`. Shell variables do not survive between Bash calls, so every later fence that uses `${BASE}` begins with the re-derivation block below (it reads that file and fails loudly if the value is missing, never running on an empty base). Extract `--title <value>` into `EXPLICIT_TITLE` if provided:
 
 ```bash
 BASE=$(printf '%s' "$ARGUMENTS" | sed -n 's/.*--base \([^ ]*\).*/\1/p')
@@ -27,6 +27,7 @@ if [ -z "$BASE" ]; then
   echo "BLOCK: no base branch: --base was not given and origin/HEAD is not set. Pass --base <branch>." >&2
   exit 1
 fi
+mkdir -p .cw && printf '%s\n' "$BASE" > .cw/ship-it-base
 EXPLICIT_TITLE=""
 if printf '%s' "$ARGUMENTS" | grep -qE '(^| )--title '; then
   EXPLICIT_TITLE=$(printf '%s' "$ARGUMENTS" | sed 's/.*--title //' | sed 's/ --.*//')
@@ -70,6 +71,7 @@ If push fails (e.g., diverged), BLOCK and park for the orchestrator — never fo
 Read the latest commit message and recent commits to draft a PR title + body.
 
 ```bash
+BASE=$(cat .cw/ship-it-base 2>/dev/null); : "${BASE:?BLOCK: no base branch recorded in .cw/ship-it-base; re-run Step 1 with --base <branch>}"
 RANGE_BODY=$(git log --format='- %s' "origin/${BASE}..HEAD")
 
 # Tier 1: Explicit --title override (passed from /prep-pr --title)
@@ -156,6 +158,7 @@ accepted false negative, and adding a changelog entry or label for those
 titles would be noise the gate was deliberately designed not to demand.
 
 ```bash
+BASE=$(cat .cw/ship-it-base 2>/dev/null); : "${BASE:?BLOCK: no base branch recorded in .cw/ship-it-base; re-run Step 1 with --base <branch>}"
 CHANGED_FILES=$(git diff --name-only "origin/${BASE}...HEAD")
 
 GATE_FIRES=false
@@ -191,6 +194,7 @@ EXTRA_LABEL_ARGS=""
      ```bash
      git add CHANGELOG.md
      git commit -m "docs(changelog): <one-line summary>"
+     BASE=$(cat .cw/ship-it-base 2>/dev/null); : "${BASE:?BLOCK: no base branch recorded in .cw/ship-it-base}"
      CHANGED_FILES=$(git diff --name-only "origin/${BASE}...HEAD")
      ```
   2. **Escape hatch: `no-changelog` label** — only when the change genuinely
@@ -227,6 +231,7 @@ ${LAST_RESORT_TITLE:+
 Then create the PR with `gh pr create`:
 
 ```bash
+BASE=$(cat .cw/ship-it-base 2>/dev/null); : "${BASE:?BLOCK: no base branch recorded in .cw/ship-it-base}"
 gh pr create \
   --base "$BASE" \
   --head "$BRANCH" \
