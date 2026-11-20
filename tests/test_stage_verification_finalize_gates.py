@@ -1077,7 +1077,7 @@ def _red_hook(tmp_path: Path, body: str) -> None:
 
 
 _DIFF_FAILURES = [
-    subprocess.CalledProcessError(128, ["git"]),
+    subprocess.CalledProcessError(128, "diff"),
     subprocess.TimeoutExpired("git", 30),
     OSError("boom"),
 ]
