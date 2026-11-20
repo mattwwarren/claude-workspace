@@ -93,7 +93,7 @@ or MERGED, and it fails closed on an absent, unreadable or foreign drain stamp. 
 occupying capacity — a stalled, signal-only session does not free its slot
 just because it stopped making progress. That sentence now governs the
 per-client (session) ceiling: `counts_toward_client_ceiling`
-(`src/cw/models/session.py`) stays session-status based, so a lane slot freed
+(`src/cw/models/session.py`) stays session-status based, except that a session registered as an orchestrator (`Session.is_orchestrator`, set only by `cw orchestrator-start`, #3789) is exempt; an unregistered DAEMON session still counts. So a lane slot freed
 under §4 (the `terminal_sibling`, id-bearing `dependency_hold` and
 settled-worker park carve-outs) never frees a ceiling slot, and a held row's still-live old Session keeps
 counting toward the ceiling.

@@ -1460,6 +1460,42 @@ class TestCountsTowardClientCeiling:
             session, "client-a"
         ) is _legacy_ceiling_predicate(session, "client-a")
 
+    @pytest.mark.parametrize(
+        ("status", "origin", "client"),
+        list(itertools.product(SessionStatus, SessionOrigin, ("client-a", "client-b"))),
+    )
+    def test_registered_orchestrator_never_counts(
+        self, status: SessionStatus, origin: SessionOrigin, client: str
+    ) -> None:
+        """#3789: a session registered by ``cw orchestrator-start`` uses no slot."""
+        session = _make_daemon_session(
+            is_orchestrator=True, status=status, origin=origin, client=client
+        )
+
+        assert counts_toward_client_ceiling(session, "client-a") is False
+
+    def test_unregistered_active_and_idle_daemon_still_counts(self) -> None:
+        """#3789: only the explicit flag exempts; a leaked worker still counts."""
+        for status in (SessionStatus.ACTIVE, SessionStatus.IDLE):
+            session = _make_daemon_session(status=status)
+
+            assert session.is_orchestrator is False
+            assert counts_toward_client_ceiling(session, "client-a") is True
+
+    def test_session_is_orchestrator_defaults_false(self) -> None:
+        assert _make_daemon_session().is_orchestrator is False
+
+    def test_is_orchestrator_round_trips_and_legacy_row_loads_false(self) -> None:
+        """#3789: a pre-upgrade row (no key) loads False; a True flag survives JSON."""
+        registered = _make_daemon_session(is_orchestrator=True)
+        dumped = registered.model_dump(mode="json")
+        assert dumped["is_orchestrator"] is True
+        assert Session.model_validate(dumped).is_orchestrator is True
+
+        legacy = dict(dumped)
+        del legacy["is_orchestrator"]
+        assert Session.model_validate(legacy).is_orchestrator is False
+
 
 class TestOrchestratorConfigLegacyDefault:
     """Migration of legacy ``per_client_max_parallel.default`` (issue #145)."""

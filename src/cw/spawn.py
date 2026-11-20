@@ -793,6 +793,7 @@ def spawn_create_impl(
     wall_clock_budget_seconds: int | None = None,
     lane: str | None = None,
     purpose: SessionPurpose = SessionPurpose.IMPL,
+    orchestrator: bool = False,
     session_id: str | None = None,
     _roster_poll_timeout: float = _ROSTER_POLL_TIMEOUT_SECS,
     _roster_poll_interval: float = _ROSTER_POLL_INTERVAL_SECS,
@@ -856,6 +857,7 @@ def spawn_create_impl(
         workspace_path=client.workspace_path,
         worktree_path=worktree,
         lane=lane,
+        is_orchestrator=orchestrator,
     )
     if session_id is not None:
         sess.id = session_id

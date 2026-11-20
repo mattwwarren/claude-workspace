@@ -16,7 +16,7 @@ import pytest
 from click.testing import CliRunner, Result
 
 from cw.cli import main
-from cw.config import state_dir
+from cw.config import load_state, state_dir
 from cw.exceptions import CwError, SpawnUnregisteredError, WorkerLaunchedError
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.orchestrator_session import orchestrator_mcp_config_path
@@ -540,3 +540,21 @@ def test_tty_attach_real_subprocess_one_launch(
 
     assert result.exit_code == 0, result.output
     assert shim.calls == [["attach", "00000001"]]
+
+
+def test_registers_session_as_orchestrator_with_impl_purpose(
+    daemon: FakeNativeDaemonClient, make_git_repo: Callable[..., Path]
+) -> None:
+    """#3789: the spawned session carries is_orchestrator; purpose stays IMPL."""
+    from cw.models import SessionPurpose
+
+    ws = make_git_repo("ws-registers")
+    write_clients_yaml(ClientSpec("reg-client", ws))
+
+    result = _invoke("--client", "reg-client")
+
+    assert result.exit_code == 0, result.output
+    sess = load_state().find_by_name_or_id(_spawned_id(result))
+    assert sess is not None
+    assert sess.is_orchestrator is True
+    assert sess.purpose is SessionPurpose.IMPL
