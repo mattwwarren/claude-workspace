@@ -77,6 +77,59 @@ class OverrideView(BaseModel):
     finding_count: int = Field(description="How many MUST_FIX findings it settled.")
 
 
+class StageSeconds(BaseModel):
+    __doc__ = (
+        "Seconds the review stage spent queued, reviewing, repairing and parked "
+        "at a gate (#3792)."
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+    queued: float | None = Field(
+        default=None,
+        description=(
+            "Seconds the row was PENDING at the review stage, waiting to be "
+            "dispatched. In a round, counted only inside that round's "
+            "`wall_seconds` window; in the summary, from entry to the review "
+            "stage, so it includes the initial wait before round 1. Null when "
+            "the recorded status transitions do not cover the window; 0.0 when "
+            "they do and the row never waited."
+        ),
+    )
+    reviewing: float | None = Field(
+        default=None,
+        description=(
+            "Seconds the row was RUNNING at the review stage with no fix "
+            "session running: the REVIEW session's boot, reviewers and "
+            "adjudication, plus the latency between a fix handoff and the fix "
+            "session's start. Null when the recorded status transitions do not "
+            "cover the window; 0.0 when they do and the row spent no such time."
+        ),
+    )
+    repairing: float | None = Field(
+        default=None,
+        description=(
+            "Seconds a fix session of this row was running, from the "
+            "session's `started_at` to its `completed_at` (a still-live "
+            "session is counted up to `summary.stage_seconds_as_of`). It "
+            "starts at the fix session's `started_at`, not at the fix "
+            "handoff. Null when a fix was dispatched but no fix session of "
+            "this row overlaps the window; 0.0 when no fix was dispatched."
+        ),
+    )
+    gate: float | None = Field(
+        default=None,
+        description=(
+            "Seconds the row spent parked at the review stage waiting on "
+            "someone outside the pipeline, including operator decisions, "
+            "sign-offs and crash or reap parks: every BLOCKED_ON_USER or "
+            "AWAITING_OPERATOR_SIGNOFF segment, whatever the reason. Null when "
+            "the recorded status transitions do not cover the window; 0.0 "
+            "when they do and the row was never parked."
+        ),
+    )
+
+
 class RoundView(BaseModel):
     """One review round, from the ledger or rebuilt from the sentinel."""
 
@@ -139,7 +192,23 @@ class RoundView(BaseModel):
         description=(
             "Seconds since the previous round's record (round 1: since this "
             "row's attributable `s3_review_started` event), so it includes "
-            "the fix cycle in between; null when either end is unknown."
+            "the fix cycle in between; null when either end is unknown. See "
+            "`stage_seconds` for the split; when all four of its parts are "
+            "recorded they sum to this value."
+        ),
+    )
+    stage_seconds: StageSeconds = Field(
+        default_factory=StageSeconds,
+        description=(
+            "Where this round's `wall_seconds` window went, in queued, "
+            "reviewing, repairing and gate seconds (round 1 starts at its "
+            "`s3_review_started` event, so the wait before the review claim "
+            "is not in it). Derived at report time from this row's "
+            "`task.transition` events and its fix sessions; a part is null "
+            "when that evidence is missing (see `notes`), and an all-null "
+            "block means nothing was recorded. Time in two states at once "
+            "counts once, as gate, then queued, then repairing, then "
+            "reviewing."
         ),
     )
     settled: list[SettledView] = Field(
@@ -252,6 +321,26 @@ class HistorySummary(BaseModel):
         description=(
             "Every confirm-backend outage the ledger recorded, over its whole "
             "life; null when no ledger was read."
+        ),
+    )
+    stage_seconds: StageSeconds = Field(
+        default_factory=StageSeconds,
+        description=(
+            "Where the whole review stage's time went, in queued, reviewing, "
+            "repairing and gate seconds: every review-stage status segment "
+            "from entry to exit, including the initial queue wait before "
+            "round 1 and any gate after the last round. Derived at report "
+            "time; an open wait is counted up to `stage_seconds_as_of`. A part "
+            "is null when its evidence is missing (see `notes`); an all-null "
+            "block means nothing was recorded."
+        ),
+    )
+    stage_seconds_as_of: str | None = Field(
+        default=None,
+        description=(
+            "ISO time up to which a still-open wait (the row's last status "
+            "segment, or a live fix session) was counted into "
+            "`stage_seconds`; null when nothing open was counted."
         ),
     )
 

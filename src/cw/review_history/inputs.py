@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from datetime import datetime
 
     from cw.models import OrchestratorEvent, TicketTask
     from cw.models.review_history import (
@@ -20,6 +21,15 @@ if TYPE_CHECKING:
     )
     from cw.review_convergence import ConvergenceLedger
     from cw.review_findings import ReviewVerdict
+
+
+class RepairSpan(NamedTuple):
+    """One FIX session of the row: a repair interval, still open when ``live``."""
+
+    session_id: str
+    started_at: datetime
+    ended_at: datetime | None
+    live: bool
 
 
 @dataclass(frozen=True)
@@ -35,6 +45,10 @@ class HistoryInputs:
     stage_events: tuple[OrchestratorEvent, ...] = ()
     voided_events: tuple[OrchestratorEvent, ...] = ()
     notes: tuple[str, ...] = ()
+    transition_events: tuple[OrchestratorEvent, ...] = ()
+    repair_spans: tuple[RepairSpan, ...] = ()
+    now: datetime | None = None
+    row_ends_at: datetime | None = None
 
 
 class _Part(NamedTuple):
