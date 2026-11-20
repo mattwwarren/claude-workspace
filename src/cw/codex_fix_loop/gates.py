@@ -588,7 +588,7 @@ def plan_cycle_gates(worktree: Path, scope: GateScope) -> GatePlan:
                 command,
                 _gate_ceiling(script, name, worktree=worktree, scope=scope),
                 autofix or declared.get(name),
-                name not in opted_out,
+                accept_hook_rewrite=name not in opted_out,
             )
             for name, command, autofix in detected
         )
@@ -830,9 +830,10 @@ def _run_gate_with_autofix(
     proved by a green re-check of the same gate, its changes are reverted and
     the ORIGINAL failure is returned.
 
-    Under ``HookRewritePolicy.RECHECK`` a red gate whose own run rewrote files
-    takes :func:`_recheck_after_rewrite` instead, and the declared autofix is
-    not run. Under ``PARK`` (the default) this function is unchanged.
+    Under ``HookRewritePolicy.RECHECK`` and when the gate accepts it, a red gate
+    whose own run rewrote files takes :func:`_recheck_after_rewrite` instead,
+    and the declared autofix is not run. Under ``PARK`` (the default), or for a
+    gate with ``accept_hook_rewrite`` False, it is the PARK path unchanged.
     """
     failure = _run_one_gate(
         gate,

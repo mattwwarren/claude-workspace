@@ -1293,9 +1293,9 @@ lanes:
   cycle). Gate output and per-gate summaries are logged at WARNING to
   `.cw/codex_driver.log` while the gate runs, because the detached job's root
   logger is WARNING. A gate (or detector) running past its ceiling only emits the
-  `codex_fix.gate_slow` event; it is never killed. There is no config switch: a
-  client whose resolver chain misses parks every committing cycle until
-  `prep_pr_state.py` is installed. A gate that fails red and declares an autofix
+  `codex_fix.gate_slow` event; it is never killed. There is no config switch for
+  running the gates: a client whose resolver chain misses parks every committing
+  cycle until `prep_pr_state.py` is installed. A gate that fails red and declares an autofix
   (the `detect-gates` `autofix` field, else `quality_gates.autofix.<gate-name>`;
   see [Quality Gate Autofix](#quality-gate-autofix-quality_gatesautofix-3412))
   has the autofix run and the same gate re-checked (#3412); the cycle parks
@@ -2933,9 +2933,9 @@ quality_gates:
   reads only the canonical block shape shown above (a column-0
   `quality_gates:`, a nested `timeouts:`, one `key: value` per line; comments
   allowed). Flow style such as `quality_gates: {timeouts: ...}` is reported
-  with a warning and ignored. A sibling `quality_gates.autofix:` map is ignored
-  by this scanner, nor is the sibling `quality_gates.accept_hook_rewrite:` map
-  (it reads only `timeouts:`).
+  with a warning and ignored. The sibling `quality_gates.autofix:` and
+  `quality_gates.accept_hook_rewrite:` maps are ignored by this scanner (it
+  reads only `timeouts:`).
 - **Path.** The file is read relative to the current directory, like
   `.claude/prep-pr-state.json`, so run `/prep-pr` from the worktree root.
 

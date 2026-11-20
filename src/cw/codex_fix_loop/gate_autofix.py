@@ -20,6 +20,9 @@ parks only if that still fails. This module holds the pure pieces:
   :func:`revert_paths` first, then a ``git read-tree --reset -u`` fallback that
   keeps review artifacts and preserved ignored files intact, and raises
   ``CalledProcessError`` only when neither restores the tree (#3423).
+- :func:`hook_rewrite_opt_outs` reads the per-gate
+  ``quality_gates.accept_hook_rewrite.<gate-name>: false`` opt-out (#3689). The
+  caller's :class:`HookRewritePolicy` is the ceiling; an opt-out only narrows it.
 
 **Path spelling.** ``cw.stage_verification.baseline.cycle_touched_paths`` reads
 ``git diff-tree --name-only`` without ``-z``, so a special or non-ASCII path
@@ -166,6 +169,7 @@ class HookRewritePolicy(StrEnum):
     ``PARK`` is the default: a red gate parks as before. ``RECHECK`` (#3684)
     re-runs the gate once after the rewrite and accepts the cycle when the
     rewrite is in scope and the re-run is green and leaves the tree alone.
+    The policy is the caller's ceiling: a per-gate opt-out can only narrow it.
     """
 
     PARK = "park"

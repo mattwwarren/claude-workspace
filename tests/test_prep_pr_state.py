@@ -1987,4 +1987,4 @@ class TestHookRewriteOptOutSiblingMap:
 
     def test_config_reference_documents_the_opt_out_key(self) -> None:
         text = _CONFIG_REFERENCE.read_text(encoding="utf-8")
-        assert "quality_gates.accept_hook_rewrite" in text
+        assert "## Quality Gate Hook Rewrite" in text
