@@ -423,7 +423,12 @@ numerics and would silently strip a nested ticket-id string, #1243) and
 `occupied` (int, total occupant count across lanes) are present on that
 same set of ticks. Since #2321, `blocked` and `lane_occupants` no longer list
 a `dependency_hold` row that carries a `blocked_on_pr`: `occupies_lane_slot`
-frees its lane slot, the same way it already excludes a `terminal_sibling` row. `host_running` (int) and `host_budget` (int | null) are
+frees its lane slot, the same way it already excludes a `terminal_sibling` row.
+Since #3774 they also omit a settled parked row (no live worker, no unsettled
+claim), so `lanes[...]["blocked"]` now counts slot-occupying parks only, not
+every `BLOCKED_ON_USER` row; `cw orchestrate` prints that smaller `blocked=`.
+No key was added or renamed. `cw dev-queue status` keeps the raw count in its
+own `blocked=` and adds `parked=` (text only). `host_running` (int) and `host_budget` (int | null) are
 present only on the main claim-loop tick — the one tick that can carry
 `host_capacity_gated`. `disk_free_gb` / `disk_min_free_gb` (float) and
 `disk_free_inodes` / `disk_min_free_inodes` (int | null — null when the
