@@ -10,7 +10,8 @@ doc's ``next_actions``.
 :func:`run_finalize_quality_gates` is stage-neutral: it serves the reuse path
 (the doc's Step 4c.6) and the create path, where it replaces ``/prep-pr``
 Step 7, and runs before any push or PR create. It never autofixes and never
-commits.
+commits; after a red gate it only reads ``git diff`` to say so when the gate
+rewrote tracked files (#3769).
 """
 
 from __future__ import annotations
@@ -84,6 +85,9 @@ _SCRIPT_TIMEOUT: Final = 120
 _EXIT_BLOCKED: Final = 1
 _EXIT_MISSING: Final = frozenset({127, 2})
 _TAIL: Final = 500
+#: Most tracked paths the red-gate rewrite note names; the rest are counted.
+REWRITE_NOTE_MAX_PATHS: Final = 5
+_DIFF_TIMEOUT: Final = 30
 _CYCLE: Final = 0
 _CONTINUE_TOKENS: Final = frozenset({APPROVAL_NOT_REQUIRED, APPROVAL_RECORDED})
 
@@ -100,6 +104,13 @@ _PARK_TEXT: Final = (
     "tier:** small|large` line in .cw/plan.md, or scope_hint). Do not re-run "
     "finalize to release this park: with no approval recorded this check "
     "parks it again"
+)
+
+_REWRITE_NOTE: Final = (
+    "The gate rewrote tracked files, which are left uncommitted in the "
+    "worktree: {paths}. Next step: commit the formatting on the branch, then "
+    "requeue REVIEW with `cw dev-queue requeue {ticket} -c {client} --stage "
+    "review` (clean mode needs a re-review of the new tip)."
 )
 
 
@@ -489,6 +500,49 @@ def _failure_block(path: str, failure: GateFailure) -> FinalizeBlock:
     return FinalizeBlock(AGENT_BLOCK, details)
 
 
+def _rewritten_tracked_paths(worktree: Path, ignored: frozenset[str]) -> list[str]:
+    """Tracked files modified in *worktree* against ``HEAD``, minus *ignored*.
+
+    Read-only (``git diff``, never an add). ``--diff-filter=M`` keeps untracked
+    scratch out: ``run_cycle_gates`` already staged every untracked file as
+    Added after the gate ran, so an unfiltered diff would list it. Best-effort:
+    a failed read yields ``[]``.
+    """
+    try:
+        out = git_output(
+            ["diff", "--name-only", "--no-renames", "--diff-filter=M", "HEAD"],
+            cwd=worktree,
+            timeout=_DIFF_TIMEOUT,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        # Best-effort: a failed read must never mask the gate's own failure.
+        return []
+    return sorted({line for line in out.splitlines() if line and line not in ignored})
+
+
+def _path_list(paths: list[str]) -> str:
+    """Backticked, redacted names of up to ``REWRITE_NOTE_MAX_PATHS`` paths."""
+    shown = paths[:REWRITE_NOTE_MAX_PATHS]
+    text = ", ".join(f"`{redact_and_cap(p)}`" for p in shown)
+    more = len(paths) - len(shown)
+    if more:
+        text += f" and {more} more"
+    return text
+
+
+def _with_rewrite_note(
+    block: FinalizeBlock, worktree: Path, scope: GateScope, ignored: frozenset[str]
+) -> FinalizeBlock:
+    """*block* with a note naming the tracked files the red gate rewrote."""
+    paths = _rewritten_tracked_paths(worktree, ignored)
+    if not paths:
+        return block
+    note = _REWRITE_NOTE.format(
+        paths=_path_list(paths), ticket=scope.ticket_id, client=scope.client
+    )
+    return replace(block, details=f"{block.details}\n\n{note}")
+
+
 def run_finalize_quality_gates(
     worktree: Path,
     *,
@@ -509,6 +563,9 @@ def run_finalize_quality_gates(
     already green at the PR head and parks, as the returned block, on a
     pending, missing or red mapped check. A consult that cannot answer runs
     every gate locally.
+
+    A red gate that left tracked files modified adds a bounded note naming them
+    to the block's details, read-only and best-effort (#3769).
     """
     label = f"{path}_path_gates: "
     baseline = capture_cycle_baseline(worktree, tolerated=tolerated)
@@ -538,7 +595,10 @@ def run_finalize_quality_gates(
         return FinalizeGateRun(
             None, [*ci_plan.friction, f"{label}passed"], ci_plan.deferred
         )
-    return FinalizeGateRun(_failure_block(path, failure), ci_plan.friction)
+    block = _failure_block(path, failure)
+    if failure.kind == "red":
+        block = _with_rewrite_note(block, worktree, scope, baseline.review_artifacts)
+    return FinalizeGateRun(block, ci_plan.friction)
 
 
 def gate_scope(ticket_id: str, client: str, session_id: str) -> GateScope:
