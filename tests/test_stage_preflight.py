@@ -725,9 +725,22 @@ def test_every_dispatchable_backend_is_declared(tmp_path: Path, backend: str) ->
 # ---------------------------------------------------------------------------
 
 
+_RENAME_RELEASE_HEADER = "## [1.104.0]"
+
+
 def _unreleased_changelog() -> str:
+    """The release notes that introduced the reason rename.
+
+    Before the release cut that is the ``[Unreleased]`` section; once it is cut
+    the notes live under the ``[1.104.0]`` header, so a release cut does not
+    break this pin. Anchored to that version, the window does not slide to the
+    next release.
+    """
     text = (_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    start = text.index("## [Unreleased]")
+    header = (
+        _RENAME_RELEASE_HEADER if _RENAME_RELEASE_HEADER in text else "## [Unreleased]"
+    )
+    start = text.index(header)
     end = text.index("\n## [", start + 1)
     return text[start:end]
 
