@@ -8,11 +8,12 @@ harness verifiably fail to reach the tickets binding for a stage that needs it?
 :func:`resolve_binding_hits` is the opt-in tick and owns the warn-once state
 and every log line. :func:`preflight_before_spawn` is the codex CLI park.
 
-The one allowed ``TrackerClass`` site until X1 (#3713): a GitHub tracker is
-never read, an unset one fails open with one warning, and codex PLAN
-on any other tracker with an unusable ``servers.codex`` parks ``binding_unbound``
-before any read (the only fail-closed case); a missing branch is debug only and
-any other unknown warns once. Every logger is ``cw.dispatch``, as before.
+The tracker policy (:func:`_tracker_gate`, one ``resolve_tracker`` read per
+reader): a GitHub tracker is never read, an unset one fails open with one
+warning, and codex PLAN on any other tracker with an unusable ``servers.codex``
+parks ``binding_unbound`` before any read (the only fail-closed case); a missing
+branch is debug only and any other unknown warns once. Every logger is
+``cw.dispatch``, as before.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ from cw.models import (
 )
 from cw.models.bindings import Harness, Role
 from cw.stage_preflight import STAGE_NEEDS, PreflightReason, needs_for
-from cw.tracker import TrackerClass, TrackerKind, tracker_kind
+from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.tracker_io._argv import is_valid_name
 
 if TYPE_CHECKING:
@@ -115,19 +116,22 @@ class Assessment:
 
 @dataclass
 class ReachReader:
-    """Per-call memo of the tracker and one read per backend, rooted at *root*
-    (``workspace_path`` on the tick, ``repo_path or workspace_path`` in doctor)."""
+    """Per-call memo of the tracker system and one read per backend, rooted at
+    *root* (``workspace_path`` on the tick, ``repo_path or workspace_path`` in
+    doctor). A flag, not a ``None`` sentinel: ``None`` is also a read result."""
 
     client: ClientConfig
     root: Path
-    _tracker: TrackerKind | None = None
+    _system_read: bool = False
+    _system: str | None = None
     _probes: dict[str, BindingProbe] = field(default_factory=dict)
     _tools: dict[str, ToolCheck] = field(default_factory=dict)
 
-    def tracker(self) -> TrackerKind:
-        if self._tracker is None:
-            self._tracker = tracker_kind(self.root)
-        return self._tracker
+    def system(self) -> str | None:
+        if not self._system_read:
+            self._system = resolve_tracker(self.root)
+            self._system_read = True
+        return self._system
 
     def server_probe(self, backend: str) -> BindingProbe:
         if backend not in self._probes:
@@ -213,10 +217,10 @@ def _assess_plugin(reader: ReachReader, branch: str | None) -> Assessment:
 
 def _tracker_gate(reader: ReachReader, backend: str) -> Assessment | None:
     """GitHub needs no MCP; an unset tracker fails open. ``None``: read on."""
-    tracker_class = reader.tracker().tracker_class
-    if tracker_class is TrackerClass.GITHUB:
+    system = reader.system()
+    if system == TRACKER_GITHUB_ISSUES:
         return Assessment(ReachState.GITHUB, detail="GitHub tracker, reached via gh")
-    if tracker_class is TrackerClass.UNSET:
+    if not system:
         return Assessment(
             ReachState.TRACKER_UNSET,
             warn=(f"{backend}:tracker", _TRACKER_UNSET),

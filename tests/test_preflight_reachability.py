@@ -40,7 +40,10 @@ from cw.models import (
 from cw.models.client import ClientConfig, TrackerMcpGateConfig
 from tests._backend_mcp_helpers import McpStage, stage_mcp_config
 from tests._doctor_helpers import make_stage_pipeline
-from tests._shared.cli_preflight import _write_tracker_config
+from tests._shared.cli_preflight import (
+    _write_project_config_yaml,
+    _write_tracker_config,
+)
 from tests._shared.git_repos import (
     branch_with_file,
     branch_with_settings,
@@ -656,13 +659,21 @@ class TestBackendServerGate:
         ]
         assert reads == []
 
+    @pytest.mark.parametrize(
+        "config",
+        [None, 'tracking:\n  primary:\n    system: ""\n'],
+        ids=["absent", "empty-string"],
+    )
     def test_unset_tracker_warns_once_and_never_reads(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
+        config: str | None,
     ) -> None:
         stage_mcp_config(monkeypatch, tmp_path, OPENCODE_BACKEND, "absent")
+        if config is not None:
+            _write_project_config_yaml(tmp_path, config)
         client = reach_client(
             tmp_path,
             enabled_gate(None, servers=dict(OPENCODE_SERVERS)),
@@ -679,6 +690,37 @@ class TestBackendServerGate:
         assert len(warnings) == 1
         assert "opencode:tracker" in warnings[0]
         assert "tracker unset" in warnings[0]
+
+    def test_the_tracker_is_read_once_per_reader(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The memo holds ``None`` too: an unset read must not re-read per call."""
+        from cw.dispatch.claim import preflight_reach
+        from cw.dispatch.claim.preflight_reach import ReachReader, assess_binding
+        from cw.tracker import resolve_tracker
+
+        reads: list[Path] = []
+
+        def _spy(root: Path) -> str | None:
+            reads.append(root)
+            return resolve_tracker(root)
+
+        monkeypatch.setattr(preflight_reach, "resolve_tracker", _spy)
+        client = reach_client(
+            tmp_path, enabled_gate(None, servers=dict(OPENCODE_SERVERS))
+        )
+        reader = ReachReader(client, tmp_path)
+        assess_binding(reader, OPENCODE_BACKEND, Stage.PLAN, "b")
+        assess_binding(reader, OPENCODE_BACKEND, Stage.PLAN, "b")
+        assert len(reads) == 1
+
+        _write_project_config_yaml(
+            tmp_path, "tracking:\n  primary:\n    system: github-issues\n"
+        )
+        github_reader = ReachReader(client, tmp_path)
+        assess_binding(github_reader, OPENCODE_BACKEND, Stage.PLAN, "b")
+        assess_binding(github_reader, OPENCODE_BACKEND, Stage.PLAN, "b")
+        assert len(reads) == 2
 
     def test_unknown_reading_warns_once_naming_the_path(
         self,

@@ -104,7 +104,7 @@ from cw.stage_verification.plan_gates import (
     has_approval_evidence,
 )
 from cw.ticket_snapshot import record_snapshot_from_github
-from cw.tracker import TRACKER_GITHUB_ISSUES, TrackerClass, tracker_kind
+from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.tracker_io import TrackerIoConfigError
 from cw.tracker_io._argv import validate_server_name
 
@@ -234,15 +234,15 @@ class _Run:
 
     def mcp_target(self) -> _McpTarget | _Exit:
         """The tracker read path, or the run-time tracker-MCP backstop's block."""
-        kind = tracker_kind(self.client.workspace_path)
+        system = resolve_tracker(self.client.workspace_path) or None
         tickets = self.client.bindings.tickets
-        effective_system = effective_tickets_system(tickets, kind.system)
+        effective_system = effective_tickets_system(tickets, system)
         if effective_system == TRACKER_GITHUB_ISSUES:
             return _McpTarget()
         if tickets is None:
-            if kind.tracker_class is not TrackerClass.OTHER or kind.system is None:
+            if not system:
                 return _McpTarget()
-            return self._mcp_blocked(f"tracker {kind.system!r}: tracker_mcp_gate unset")
+            return self._mcp_blocked(f"tracker {system!r}: tracker_mcp_gate unset")
         return self._binding_target(tickets, effective_system)
 
     def _binding_target(

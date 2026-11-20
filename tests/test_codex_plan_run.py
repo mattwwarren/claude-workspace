@@ -50,7 +50,10 @@ from tests._backend_mcp_helpers import (
 )
 from tests._codex_review_helpers import exclude_cw_dir, seed_codex_stage_run
 from tests._shared.bindings_builders import LINEAR_RENAMED_TOOLS, bindings_linear_mcp
-from tests._shared.cli_preflight import _write_tracker_config
+from tests._shared.cli_preflight import (
+    _write_project_config_yaml,
+    _write_tracker_config,
+)
 from tests._shared.outbox_builders import entries_for
 from tests._tool_fakes import (
     FakeGhCli,
@@ -1127,12 +1130,16 @@ def test_legacy_gate_on_linear_tracker_targets_codex_mcp(
     assert not [r for r in h.gh.records if r.argv[-1] == "body"]
 
 
-@pytest.mark.parametrize("tracker", [TRACKER_GITHUB_ISSUES, None])
+@pytest.mark.parametrize("tracker", [TRACKER_GITHUB_ISSUES, None, ""])
 def test_github_and_unset_launch_with_no_mcp_tool(
     harness: Callable[..., Harness], tracker: str | None
 ) -> None:
     h = harness()
-    if tracker is not None:
+    if tracker == "":
+        _write_project_config_yaml(
+            h.worktree, 'tracking:\n  primary:\n    system: ""\n'
+        )
+    elif tracker is not None:
         _write_tracker_config(h.worktree, tracker)
     add_stations(add_turn(h.runner))
     h.run()
