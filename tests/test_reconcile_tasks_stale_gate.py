@@ -37,6 +37,7 @@ from cw.models import (
     TicketTask,
     WatchedPr,
 )
+from cw.models.merge_prerequisite import MergePrerequisite
 from cw.models.pr_ref import PrRef, PrRefKey, pr_evidence_keys
 from cw.pr_hydrate import hydrate_pr_states
 from cw.reconcile import (
@@ -1687,3 +1688,69 @@ def test_dependency_hold_without_an_id_is_not_a_variant_b_gate_task() -> None:
     """#3634: a typed-ref gate needs an id; a no-id hold is not releasable."""
     assert _is_variant_b_gate_task(_dep_hold(None)) is False
     assert _is_variant_b_gate_task(_dep_hold(_OR_5)) is True
+
+
+# --- #3791: merge prerequisites are stamped on the dependency-hold release ---
+
+
+def _prereq(number: int) -> MergePrerequisite:
+    return MergePrerequisite(
+        pr=PrRef(number=number),
+        repo="foo/bar",
+        declared_at=datetime(2026, 11, 20, tzinfo=UTC),
+    )
+
+
+def test_merged_release_stamps_every_merged_prerequisite(
+    tmp_config_dir: Path,
+) -> None:
+    """A merged key stamps every merged entry, the non-current one included;
+    an unmerged entry stays unsatisfied."""
+    hold = _dep_hold(5)
+    hold.merge_prerequisites = [_prereq(5), _prereq(6), _prereq(7)]
+    released, row = _release_with(
+        [hold],
+        [_make_watched_pr(pr_number=5), _make_watched_pr(pr_number=6)],
+    )
+
+    assert released == ["DH-1"]
+    assert row.status == QueueItemStatus.PENDING
+    stamps = [e.satisfied_at is not None for e in row.merge_prerequisites]
+    assert stamps == [True, True, False]
+
+
+def test_merged_release_of_a_hold_without_prerequisites_is_unchanged(
+    tmp_config_dir: Path,
+) -> None:
+    released, row = _release_with([_dep_hold(5)], [_make_watched_pr(pr_number=5)])
+
+    assert released == ["DH-1"]
+    assert row.status == QueueItemStatus.PENDING
+    assert row.merge_prerequisites == []
+
+
+def test_stamp_survives_the_same_save_watch_retirement(
+    tmp_config_dir: Path,
+) -> None:
+    """The evidence is dismissed in the release save; the stamp is what remains."""
+    hold = _dep_hold(5)
+    hold.merge_prerequisites = [_prereq(5)]
+    _release_with([hold], [_make_watched_pr(pr_number=5)])
+
+    store = load_dev_queue()
+    assert [w.status for w in store.watched_prs] == ["dismissed"]
+    [entry] = store.tasks[0].merge_prerequisites
+    assert entry.satisfied_at is not None
+
+
+def test_closed_unmerged_hold_never_stamps_its_prerequisite(
+    tmp_config_dir: Path,
+) -> None:
+    hold = _dep_hold(5)
+    hold.merge_prerequisites = [_prereq(5)]
+    released, row = _release_with(
+        [hold], [_make_watched_pr(pr_number=5, state="CLOSED")]
+    )
+
+    assert released == []
+    assert row.merge_prerequisites[0].satisfied_at is None
