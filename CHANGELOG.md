@@ -12,6 +12,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`branch_behind_main` REVIEW gate now probes dispatch-driven rows (#2990, ADR-0022).** The gate probes the worktree `resolve_task_worktree` resolves, so a dispatch row with no stamped path is checked too. It parks only on a probe-reported conflict, fails open on every git error, a skipped probe or an unresolved worktree, and a branch merely behind main never parks.
 - **FINALIZE says so when a red gate rewrote tracked files (#3769, follow-up to #3686).** After the original failure text, the `agent_block` details of a red FINALIZE quality gate (reuse and create paths) now carry a bounded, redacted note naming at most 5 tracked paths the gate rewrote ("and N more" beyond that) and the next step: commit the formatting on the branch, then requeue REVIEW (clean mode needs a re-review of the new tip). The note is built from a read-only `git diff --name-only --no-renames --diff-filter=M HEAD` and is best-effort: a failed diff leaves the original block unchanged. Untracked scratch, tolerated or review-artifact paths, and a gate that passed but dirtied the tree get no note. Still no commit, push, restore, friction token or state change, and the block reason is unchanged.
 
 ## [1.104.0] - 2026-11-20
