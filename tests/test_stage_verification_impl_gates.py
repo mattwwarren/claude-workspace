@@ -23,6 +23,7 @@ from cw.auto_dev_result.schema._vocab import (
     PLAN_SCOPE_DRIFT_BLOCKER_REASON,
 )
 from cw.codex_fix_loop.commit import _git_commit
+from cw.codex_fix_loop.gate_autofix import HookRewritePolicy
 from cw.codex_fix_loop.gates import GateScope, plan_cycle_gates
 from cw.codex_fix_loop.hook_failure import as_hook_failure
 from cw.codex_review import (
@@ -683,14 +684,14 @@ class TestCommitFailure:
         assert "fatal: boom" in block.details
 
 
-# --- hook-rewrite pin (#3684): IMPL keeps the PARK default ---------------------
+# --- hook rewrite (#3684, #3686): IMPL opts in to the RECHECK policy -----------
 
 
 class TestHookRewritePinned:
-    def test_a_red_hook_rewrite_is_never_accepted(
+    def test_a_red_hook_rewrite_is_accepted_under_recheck(
         self, repo: Path, tmp_path: Path
     ) -> None:
-        """A rewrite inside ``touched`` is accepted only with the flag on."""
+        """A rewrite inside ``touched`` is accepted after one green re-run."""
         log = tmp_path / "ran.log"
         hook = (
             f"echo ran >> {log}; "
@@ -701,6 +702,7 @@ class TestHookRewritePinned:
         assert isinstance(baseline, CycleBaseline)
         plan = plan_cycle_gates(repo, _SCOPE)
         _stage(repo)
+        tokens: list[str] = []
         with patch.object(
             _gates_module, "run_cycle_gates", wraps=_gates_module.run_cycle_gates
         ) as spy:
@@ -709,15 +711,39 @@ class TestHookRewritePinned:
                 worktree=repo,
                 baseline=baseline,
                 scope=_SCOPE,
-                tokens=[],
+                tokens=tokens,
                 touched=frozenset({"src/a.py"}),
             )
+
+        assert block is None
+        assert spy.call_args.kwargs["hook_rewrite"] is HookRewritePolicy.RECHECK
+        assert log.read_text(encoding="utf-8").splitlines() == ["ran", "ran"]
+        assert tokens == ["codex_fix_gate_autofixed"]
+
+    def test_a_rewrite_outside_touched_is_still_rejected(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """A rewrite that creates a path outside ``touched`` parks, with no re-run."""
+        log = tmp_path / "ran.log"
+        hook = f"echo ran >> {log}; printf 'y = 1\\n' > src/other.py; exit 1"
+        install_home_prep_pr_state(tmp_path / "state", ("fmt", hook, 5.0))
+        baseline = capture_cycle_baseline(repo)
+        assert isinstance(baseline, CycleBaseline)
+        plan = plan_cycle_gates(repo, _SCOPE)
+        _stage(repo)
+        block = run_quality_gates(
+            plan,
+            worktree=repo,
+            baseline=baseline,
+            scope=_SCOPE,
+            tokens=[],
+            touched=frozenset({"src/a.py"}),
+        )
 
         assert block is not None
         assert block.reason == IMPL_FAILED
         assert "exit code 1" in block.details
         assert log.read_text(encoding="utf-8").splitlines() == ["ran"]
-        assert "hook_rewrite" not in spy.call_args.kwargs
 
 
 class TestRegressedReviewRowExemption:
