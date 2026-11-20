@@ -411,6 +411,22 @@ class TestWorktreeMutation:
         assert mutation is not None
         assert mutation.describe() == "git status changed: ?? stray.txt"
 
+    def test_the_tolerated_warning_fires_once_per_role_from_the_after_snapshot(
+        self, wt: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """#3693: the before-snapshot is silent; each role logs once, after it ran."""
+        commit_tracked_file(wt, "tol.py")
+        (wt / "tol.py").write_text("dirty before\n", encoding="utf-8")
+        runner = FakeClaudeRunner(stdout=review_envelope(_doc_json(role=_ROLE)))
+        with caplog.at_level(logging.WARNING, logger="cw.tolerated_paths"):
+            outcome = _run(
+                wt, runner, roles=(_ROLE, _SECOND), tolerated=frozenset({"tol.py"})
+            )
+        assert len(runner.calls) == 2
+        assert outcome.mutation is None
+        records = [r for r in caplog.records if r.name == "cw.tolerated_paths"]
+        assert [r.args for r in records] == [("tol.py", "post_review_mutation")] * 2
+
     def test_the_status_description_quotes_at_most_five_lines(self) -> None:
         mutation = WorktreeMutation(
             "r",
