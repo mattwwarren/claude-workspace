@@ -154,7 +154,15 @@ class TestSettledParkFreesTheSlot:
         assert payload["skip_reason"] != DispatchSkipReason.LANE_CAP_BLOCKED
         lanes = payload["lanes"]
         assert isinstance(lanes, dict)
-        assert lanes[_LANE]["running"] >= 0
+        # The settled park is not a blocked occupant; the lane holds only the
+        # already-RUNNING row, and this tick claims the one PENDING row.
+        assert lanes[_LANE] == {
+            "claimed": 1,
+            "running": 1,
+            "blocked": 0,
+            "signoff": 0,
+            "pending": 1,
+        }
         assert _PARK not in _occupant_ids(payload)
 
     def test_live_worker_park_keeps_the_lane_full(
