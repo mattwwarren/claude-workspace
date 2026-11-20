@@ -654,7 +654,8 @@ class ClientConfig(BaseModel):
     #      by #1616; it is live again as `quality_gates.timeouts` (#2758,
     #      per-gate /prep-pr ceilings, read by .claude/scripts/prep_pr_state.py)
     #      and `quality_gates.autofix` (#3412, per-gate codex fix-loop autofix,
-    #      read by cw.codex_fix_loop.gate_autofix).
+    #      read by cw.codex_fix_loop.gate_autofix), and
+    #      `quality_gates.accept_hook_rewrite` (#3689, per-gate hook-rewrite opt-out).
     #   2. clients.yaml `quality_gate_commands` (this field) — feeds the
     #      worker session prompt.
     #   3. CLAUDE.md "## Quality Gates" section — #1744, feeds codex-review

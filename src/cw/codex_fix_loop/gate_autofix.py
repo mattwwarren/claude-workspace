@@ -68,14 +68,12 @@ _INCOMPLETE_LOG = "codex_fix_gate_autofix_revert_incomplete %s worktree=%s"
 _ArtifactSnapshot = list[tuple[str, bytes, int]]
 
 
-def declared_autofixes(worktree: Path) -> dict[str, str]:
-    """Return ``{gate name: autofix command}`` from the project config.
+def _quality_gates_block(worktree: Path, key: str) -> dict[object, object]:
+    """Return the ``quality_gates.<key>`` mapping, or ``{}``; never raises.
 
-    Never raises for any file content or read failure: ``OSError`` and
-    ``ValueError`` (which covers ``UnicodeDecodeError`` from a non-UTF-8 file
-    the shared loader does not catch) both give ``{}``. ``quality_gates`` and
-    ``autofix`` must be mappings; keys must be ``str`` and values non-blank
-    ``str`` (stripped). Anything else is dropped.
+    ``OSError`` and ``ValueError`` (which covers ``UnicodeDecodeError`` from a
+    non-UTF-8 file the shared loader does not catch) give ``{}``, as does any
+    level that is missing or not a mapping.
     """
     try:
         raw = load_project_config_dict(worktree)
@@ -86,9 +84,39 @@ def declared_autofixes(worktree: Path) -> dict[str, str]:
     quality_gates = raw.get("quality_gates")
     if not isinstance(quality_gates, dict):
         return {}
-    block = quality_gates.get("autofix")
+    block = quality_gates.get(key)
     if not isinstance(block, dict):
         return {}
+    return block
+
+
+def hook_rewrite_opt_outs(worktree: Path) -> frozenset[str]:
+    """Return the gate names that opt out of the hook-rewrite acceptance (#3689).
+
+    Reads ``quality_gates.accept_hook_rewrite.<exact-gate-name>``. Only a real
+    YAML ``false`` opts a gate out; anything else, including ``"false"``, null,
+    ``true`` or a malformed block, leaves the default: the gate accepts a
+    hook rewrite. Never raises. The config can only narrow the caller's
+    ``HookRewritePolicy``, never enable acceptance where the caller parks.
+    """
+    block = _quality_gates_block(worktree, "accept_hook_rewrite")
+    return frozenset(
+        name
+        for name, value in block.items()
+        if isinstance(name, str) and name and value is False
+    )
+
+
+def declared_autofixes(worktree: Path) -> dict[str, str]:
+    """Return ``{gate name: autofix command}`` from the project config.
+
+    Never raises for any file content or read failure: ``OSError`` and
+    ``ValueError`` (which covers ``UnicodeDecodeError`` from a non-UTF-8 file
+    the shared loader does not catch) both give ``{}``. ``quality_gates`` and
+    ``autofix`` must be mappings; keys must be ``str`` and values non-blank
+    ``str`` (stripped). Anything else is dropped.
+    """
+    block = _quality_gates_block(worktree, "autofix")
     return {
         name: command.strip()
         for name, command in block.items()
