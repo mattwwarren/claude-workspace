@@ -2141,7 +2141,11 @@ def test_verified_verdict_returns_the_verdict_and_reason(harness: Harness) -> No
     before = worktree_state(harness.repo)
 
     got, reason = confirm_cli.verified_verdict(
-        backend="codex", worktree=harness.repo, before=before, outcome=outcome
+        backend="codex",
+        worktree=harness.repo,
+        before=before,
+        outcome=outcome,
+        tolerated=frozenset(),
     )
 
     assert got == verdict
@@ -2165,7 +2169,11 @@ def test_verified_verdict_exits_four_on_a_mutated_worktree(harness: Harness) -> 
 
     with pytest.raises(click.exceptions.Exit) as raised:
         confirm_cli.verified_verdict(
-            backend="codex", worktree=harness.repo, before=before, outcome=outcome
+            backend="codex",
+            worktree=harness.repo,
+            before=before,
+            outcome=outcome,
+            tolerated=frozenset(),
         )
 
     assert raised.value.exit_code == _ROUND_FAILED

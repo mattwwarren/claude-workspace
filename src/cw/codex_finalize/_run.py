@@ -129,6 +129,7 @@ from cw.stage_verification.finalize_result import (
 )
 from cw.stage_verification.posted_text import redact_and_cap
 from cw.ticket_snapshot import snapshot_for_stage
+from cw.tolerated_paths import tolerated_paths
 from cw.tracker_io import courier_refresher
 
 if TYPE_CHECKING:
@@ -439,6 +440,7 @@ def _gates(
         scope=gate_scope(run.task.ticket_id, run.client.name, run.sid),
         path=path,
         ci=_ci_context(run, state, pr),
+        tolerated=tolerated_paths(run.client),
     )
     state.friction.extend(gated.friction)
     state.deferred = gated.deferred

@@ -43,6 +43,7 @@ from cw.review_convergence._models import (
 from cw.review_convergence._policy import release_cause
 from cw.review_convergence._render import one_line
 from cw.review_convergence._tip import demote_for_rereview
+from cw.tolerated_paths import CHECK_POST_REVIEW_MUTATION, split_tolerated
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -92,13 +93,23 @@ def history_rewritten(
     raise CwError(msg)
 
 
-def worktree_state(worktree: Path) -> tuple[str, str]:
+def worktree_state(
+    worktree: Path,
+    *,
+    tolerated: frozenset[str] = frozenset(),
+    log_tolerated: bool = False,
+) -> tuple[str, str]:
     """``(HEAD sha, git status --porcelain)`` of *worktree*, or a ``CwError``.
 
     Compared before and after a confirm round (``cw review confirm``'s
     whole-call check, and the Claude role runner's per-role check, #2791 G4):
     a difference means something the reviewer launched wrote to the worktree.
     Gitignored paths are invisible to it by construction.
+
+    ``tolerated`` (#3693) removes status lines for the operator's exact paths
+    before the comparison; ``log_tolerated`` logs one WARNING per such path.
+    HEAD is never filtered, so a commit during review still counts. The default
+    empty set returns the status byte-identical.
     """
     try:
         head = git_output(["rev-parse", "HEAD"], cwd=worktree).strip()
@@ -106,7 +117,12 @@ def worktree_state(worktree: Path) -> tuple[str, str]:
     except (subprocess.CalledProcessError, OSError) as exc:
         msg = f"Cannot read the git state of worktree '{worktree}': {exc}"
         raise CwError(msg) from exc
-    return head, status
+    split = split_tolerated(
+        status,
+        tolerated,
+        check=CHECK_POST_REVIEW_MUTATION if log_tolerated else None,
+    )
+    return head, split.kept
 
 
 def _reset_reason(

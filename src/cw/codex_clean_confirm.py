@@ -107,6 +107,7 @@ from cw.review_convergence import (
     verify_diff_base,
 )
 from cw.ticket_snapshot import DEFAULT_SNAPSHOT_CONTEXT
+from cw.tolerated_paths import tolerated_paths
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -761,6 +762,7 @@ def _run_confirm(
             session_id=f"{CONFIRM_SESSION_ID_PREFIX}{gate.sid}",
             settled_suppression=_settled_against(ledger),
             snapshots=gate.snapshots,
+            tolerated=tolerated_paths(client),
         )
     except (OSError, CwError) as exc:
         return _unavailable_outcome(

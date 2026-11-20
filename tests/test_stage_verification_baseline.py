@@ -24,6 +24,7 @@ from cw.stage_verification.baseline import (
     cycle_diff,
     cycle_touched_paths,
     diff_since,
+    stage_cycle,
     staged_cycle_tree,
 )
 from tests._codex_review_helpers import (
@@ -516,3 +517,75 @@ class TestBestEffortDirtyPaths:
 
         monkeypatch.setattr(baseline, "git_output", _raise)
         assert best_effort_dirty_paths(repo) == ()
+
+
+class TestToleratedDirtyStart:
+    """#3693: an operator-tolerated exact path does not refuse the cycle start."""
+
+    @staticmethod
+    def _dirty_tracked(repo: Path, relpath: str) -> None:
+        commit_tracked_file(repo, relpath, "a = 1\n")
+        (repo / relpath).write_text("a = 2\n")
+
+    @pytest.mark.parametrize("kind", ["modified", "unstaged-new", "deleted"])
+    def test_tolerated_dirty_path_is_a_clean_baseline(
+        self, make_git_repo: Callable[..., Path], kind: str
+    ) -> None:
+        repo = _repo(make_git_repo, f"tol-{kind}")
+        tolerated = frozenset({"t.py"})
+        if kind == "modified":
+            self._dirty_tracked(repo, "t.py")
+        elif kind == "unstaged-new":
+            (repo / "t.py").write_text("x = 1\n")
+        else:
+            commit_tracked_file(repo, "t.py", "a = 1\n")
+            (repo / "t.py").unlink()
+        before = _index_state(repo)
+        got = capture_cycle_baseline(repo, tolerated=tolerated)
+        assert isinstance(got, CycleBaseline)
+        assert "t.py" in got.review_artifacts
+        assert _index_state(repo) == before
+
+    def test_unlisted_dirty_path_still_refuses(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo, "tol-unlisted")
+        self._dirty_tracked(repo, "t.py")
+        got = capture_cycle_baseline(repo, tolerated=frozenset({"other.py"}))
+        assert isinstance(got, DirtyStart)
+        assert any("t.py" in line for line in got.dirty)
+
+    def test_tolerated_plus_unlisted_refuses_without_tolerated_line(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo, "tol-mixed")
+        self._dirty_tracked(repo, "t.py")
+        self._dirty_tracked(repo, "junk.py")
+        got = capture_cycle_baseline(repo, tolerated=frozenset({"t.py"}))
+        assert isinstance(got, DirtyStart)
+        assert not any("t.py" in line for line in got.dirty)
+        assert any("junk.py" in line for line in got.dirty)
+
+    def test_empty_tolerated_is_the_default(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo, "tol-default")
+        self._dirty_tracked(repo, "t.py")
+        assert isinstance(capture_cycle_baseline(repo), DirtyStart)
+        assert isinstance(
+            capture_cycle_baseline(repo, tolerated=frozenset()), DirtyStart
+        )
+
+    def test_staging_leaves_tolerated_path_out_of_cycle(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo, "tol-stage")
+        self._dirty_tracked(repo, "t.py")
+        baseline = capture_cycle_baseline(repo, tolerated=frozenset({"t.py"}))
+        assert isinstance(baseline, CycleBaseline)
+        (repo / "fix.py").write_text("f = 1\n")
+        stage_cycle(repo, baseline.review_artifacts)
+        staged = git_in(repo, "diff", "--cached", "--name-only").splitlines()
+        assert "fix.py" in staged
+        assert "t.py" not in staged
+        assert (repo / "t.py").read_text() == "a = 2\n"

@@ -162,7 +162,9 @@ class TestBeginCycle:
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-begin-fail")
 
-        def _boom(_worktree: Path) -> CycleBaseline | DirtyStart:
+        def _boom(
+            _worktree: Path, *, tolerated: frozenset[str] = frozenset()
+        ) -> CycleBaseline | DirtyStart:
             raise subprocess.CalledProcessError(128, ["git", "rev-parse"])
 
         monkeypatch.setattr(commit, "capture_cycle_baseline", _boom)
@@ -182,8 +184,10 @@ class TestCleanStartInvariant:
         seen: list[CycleBaseline | DirtyStart] = []
         real = commit.capture_cycle_baseline
 
-        def _spy(path: Path) -> CycleBaseline | DirtyStart:
-            seen.append(real(path))
+        def _spy(
+            path: Path, *, tolerated: frozenset[str] = frozenset()
+        ) -> CycleBaseline | DirtyStart:
+            seen.append(real(path, tolerated=tolerated))
             return seen[-1]
 
         monkeypatch.setattr(commit, "capture_cycle_baseline", _spy)
@@ -560,11 +564,13 @@ class TestInvocationFailure:
         real = commit.capture_cycle_baseline
         calls: list[Path] = []
 
-        def _second_call_fails(path: Path) -> CycleBaseline | DirtyStart:
+        def _second_call_fails(
+            path: Path, *, tolerated: frozenset[str] = frozenset()
+        ) -> CycleBaseline | DirtyStart:
             calls.append(path)
             if len(calls) > 1:
                 raise subprocess.CalledProcessError(128, ["git", "status"])
-            return real(path)
+            return real(path, tolerated=tolerated)
 
         monkeypatch.setattr(commit, "capture_cycle_baseline", _second_call_fails)
         runner = _FixLoopRunner([_MF_DOC], fix_behaviors=[self._timeout_after(True)])

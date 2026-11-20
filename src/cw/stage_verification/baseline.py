@@ -37,6 +37,7 @@ from cw.codex_review_persist import (
     REVIEW_VERDICT_COMMENT_RELATIVE_PATH,
 )
 from cw.review_findings import REVIEW_VERDICT_JSON_RELATIVE_PATH
+from cw.tolerated_paths import CHECK_DIRTY_START, split_tolerated
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -69,7 +70,9 @@ class CycleBaseline(NamedTuple):
     """The commit and tree a clean fix cycle starts from (tree == HEAD's tree).
 
     ``review_artifacts`` holds the cw review artifacts present at cycle start,
-    untracked or tracked-modified; every cycle staging step unstages them.
+    untracked or tracked-modified, and the operator-tolerated paths (#3693) that
+    were dirty at start; every cycle staging step unstages them, so a tolerated
+    edit never reaches a cycle commit. The tree is still exactly HEAD's tree.
     """
 
     head_sha: str
@@ -161,7 +164,9 @@ def best_effort_dirty_paths(worktree: Path) -> tuple[str, ...]:
     return tuple(sorted(set(paths)))
 
 
-def capture_cycle_baseline(worktree: Path) -> CycleBaseline | DirtyStart:
+def capture_cycle_baseline(
+    worktree: Path, *, tolerated: frozenset[str] = frozenset()
+) -> CycleBaseline | DirtyStart:
     """Return the cycle's clean-start baseline, or what makes the tree dirty.
 
     Read-only and never stages. Probes, in order: the three
@@ -169,19 +174,24 @@ def capture_cycle_baseline(worktree: Path) -> CycleBaseline | DirtyStart:
     ``git status --porcelain --untracked-files=all`` (minus untracked and
     tracked-modified cw review artifacts). Any finding returns a
     :class:`DirtyStart`. Any git failure propagates as ``CalledProcessError``.
+
+    *tolerated* (#3693) is the operator's exact-path list. A tolerated path that
+    is dirty at start is not a finding; it joins ``review_artifacts`` so every
+    staging step leaves it unstaged. Markers and unmerged paths still refuse.
     """
     markers = tuple(m for m in _OPERATION_MARKERS if _marker_is_set(worktree, m))
     unmerged = _unmerged_paths(worktree)
     status = git_output(
         ["status", "--porcelain", "--untracked-files=all"], cwd=worktree
     )
-    status_lines = tuple(line for line in status.splitlines() if line)
+    split = split_tolerated(status, tolerated, check=CHECK_DIRTY_START)
+    status_lines = tuple(line for line in split.kept.splitlines() if line)
     dirty = tuple(line for line in status_lines if not _is_review_artifact(line))
     artifacts = frozenset(
         line[_PORCELAIN_PATH_OFFSET:]
         for line in status_lines
         if _is_review_artifact(line)
-    )
+    ) | frozenset(split.paths)
     if markers or unmerged or dirty:
         return DirtyStart(markers=markers, unmerged=unmerged, dirty=dirty)
     return CycleBaseline(
