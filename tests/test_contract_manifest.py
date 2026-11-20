@@ -1066,7 +1066,7 @@ _CODEX_STAGE_TICKETS: dict[str, int] = {}
 #: it lands. Its finalize-stage cells are implemented,
 #: not-applicable, or deferred to one of its three follow-ups.
 _C3_TICKET = 3062
-_CODEX_FINALIZE_FOLLOW_UPS = frozenset({3542, 3543, 3544})
+_CODEX_FINALIZE_FOLLOW_UPS = frozenset({3542, 3543, 3544, 3782})
 #: The C1 ticket (#3060, codex PLAN executor); no cell may defer to it once it
 #: lands. Its plan-stage cells are implemented, not-applicable,
 #: or deferred to one of its two follow-ups.
@@ -1077,9 +1077,9 @@ _CODEX_PLAN_FOLLOW_UPS = frozenset({3464, 3465})
 #: or deferred to one of its follow-ups. #3530 (tracker-aware plan recovery) left
 #: the set: #3712 (RFC 0019 T2) implements it, so ``impl.orientation`` is a code ref.
 _C2_TICKET = 3061
-_CODEX_IMPL_FOLLOW_UPS = frozenset({3529, 3531})
+_CODEX_IMPL_FOLLOW_UPS = frozenset({3529, 3531, 3782})
 # #3055 closed with RFC 0018 S3: its codex review cells moved to #3057 (A2).
-_CODEX_REVIEW_TICKETS = frozenset({3318, 2464, 3057})
+_CODEX_REVIEW_TICKETS = frozenset({3318, 2464, 3057, 3782})
 #: The C4 ticket (#3063, usage accounting); no cell may defer to it once it lands.
 _C4_TICKET = 3063
 #: The S3 ticket; no cell may defer to it once it lands (#3055).
@@ -1787,7 +1787,7 @@ def test_codex_finalize_code_cells_resolve_to_the_package(
     assert resolve(cell.ref) is None
 
 
-def test_codex_finalize_follow_up_cells_cover_the_three_tickets() -> None:
+def test_codex_finalize_follow_up_cells_cover_the_follow_up_tickets() -> None:
     by_ticket: dict[int, int] = {}
     for element_id, element in _manifest().elements.items():
         cell = element.cells[CODEX_BACKEND]
@@ -1796,7 +1796,7 @@ def test_codex_finalize_follow_up_cells_cover_the_three_tickets() -> None:
         if isinstance(cell, DeferredDisposition):
             by_ticket[cell.ref.number] = by_ticket.get(cell.ref.number, 0) + 1
     assert set(by_ticket) == _CODEX_FINALIZE_FOLLOW_UPS
-    assert sum(by_ticket.values()) == 24
+    assert sum(by_ticket.values()) == 26
 
 
 def test_codex_prep_pr_and_ship_it_cells_are_not_applicable() -> None:
@@ -1835,7 +1835,7 @@ def test_codex_finalize_cell_counts() -> None:
     assert counts == {
         "implemented": 31,
         "not-applicable": 33,
-        "deferred": 24,
+        "deferred": 26,
     }
 
 
@@ -2071,3 +2071,47 @@ def test_opencode_has_no_implemented_cell_without_a_prompt_or_code_ref(
             continue
         assert isinstance(cell.ref, (PromptRef, CodeRef)), element_id
         assert resolve(cell.ref) is None, element_id
+
+
+#: RFC 0020 A1 (#3781): the four base-resolution elements. claude-native
+#: delivers the base; codex is deferred to #3782; opencode and local fail closed
+#: on the stage pre-flight before any agent runs.
+_BASE_BRANCH_ELEMENTS = (
+    "impl.base-branch-resolution",
+    "finalize.base-branch-resolution",
+    "finalize.open-pr-base-filter",
+    "review.base-branch-resolution",
+)
+
+
+def test_base_branch_elements_dispositions() -> None:
+    elements = _manifest().elements
+    for element_id in _BASE_BRANCH_ELEMENTS:
+        cells = elements[element_id].cells
+        assert cells["claude-native"].disposition == "implemented", element_id
+        codex = cells["codex"]
+        assert codex.disposition == "deferred", element_id
+        assert codex.ref is not None
+        assert codex.ref.number == 3782, element_id
+        for backend in ("opencode", "local"):
+            cell = cells[backend]
+            assert cell.disposition == "fails-closed", (element_id, backend)
+            assert cell.ref == _PREFLIGHT_REF, (element_id, backend)
+            assert not cell.guard_pending, (element_id, backend)
+
+
+def test_finalize_base_resolution_sits_outside_every_range() -> None:
+    # Pins plan Assumption 6: the tagged paragraph sits after the verdict
+    # range's el-end, so the manifest drift test does not see range_nested.
+    doc = _REPO_ROOT / ".claude" / "commands" / "auto-dev-finalize.md"
+    open_range = False
+    seen = False
+    for line in doc.read_text(encoding="utf-8").splitlines():
+        if line.startswith("<!-- el-begin:"):
+            open_range = True
+        elif line.startswith("<!-- el-end:"):
+            open_range = False
+        elif line == "<!-- el: finalize.base-branch-resolution -->":
+            assert not open_range
+            seen = True
+    assert seen

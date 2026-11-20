@@ -5017,17 +5017,17 @@ class TestCwContextWorkspacePath:
         assert "workspace_path" in context
         assert context["workspace_path"] is None
 
-    def test_schema_version_is_22(
+    def test_schema_version_is_23(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """cw-context.json schema_version is current (22 after the
-        ``regress_review_findings`` addition, #3694)."""
+        """cw-context.json schema_version is current (23 after the top-level
+        ``base_branch`` addition, #3781)."""
         from cw.spawn import CW_CONTEXT_SCHEMA_VERSION, spawn_create_impl
 
-        assert CW_CONTEXT_SCHEMA_VERSION == 22
+        assert CW_CONTEXT_SCHEMA_VERSION == 23
 
         client = _make_client(tmp_path, name="schema-v2-client")
         daemon = FakeNativeDaemonClient()
@@ -5042,7 +5042,7 @@ class TestCwContextWorkspacePath:
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
-        assert context["schema_version"] == 22
+        assert context["schema_version"] == 23
         assert context["bindings_block"].count(BINDINGS_BEGIN) == 1
 
 
@@ -5349,6 +5349,145 @@ class TestCwContextLaneStamp:
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
         assert context["lane"] == "fast"
+
+
+class TestCwContextBaseBranch:
+    """The top-level ``base_branch`` key (#3781, schema v23): the resolved
+    branch a row merges into, always a non-empty string, beside ``lane`` and
+    outside ``world_state_snapshot``."""
+
+    def test_null_base_row_writes_client_default(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path, name="base-null-client")
+        worktree = make_git_repo("wt-3781-null")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-3781 --headless",
+            label="auto-dev/GEN-3781",
+            native_daemon=FakeNativeDaemonClient(),
+            ticket_id="GEN-3781",
+            headless=True,
+            task=_make_pending_task(ticket_id="GEN-3781", client=client.name),
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["base_branch"] == client.default_branch
+
+    def test_based_row_writes_its_base_and_keeps_snapshot_on_default(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        from cw.models import QueueItemStatus
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path, name="base-set-client")
+        worktree = make_git_repo("wt-3781-based")
+        task = _make_ticket_task(
+            ticket_id="GEN-3781",
+            client=client.name,
+            status=QueueItemStatus.PENDING,
+            base_branch="epic/x",
+        )
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-3781 --headless",
+            label="auto-dev/GEN-3781",
+            native_daemon=FakeNativeDaemonClient(),
+            ticket_id="GEN-3781",
+            headless=True,
+            task=task,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["base_branch"] == "epic/x"
+        assert context["world_state_snapshot"]["origin_main_branch"] == "main"
+
+    def test_task_less_spawn_writes_client_default_without_snapshot(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path, name="base-taskless-client")
+        worktree = make_git_repo("wt-3781-taskless")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-3781 --headless",
+            label="auto-dev/GEN-3781",
+            native_daemon=FakeNativeDaemonClient(),
+            task=None,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["base_branch"] == "main"
+        assert "world_state_snapshot" not in context
+
+    def test_trunk_client_null_base_row_writes_trunk(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        from cw.spawn import spawn_create_impl
+
+        workspace = tmp_path / "workspace" / "trunk-client"
+        workspace.mkdir(parents=True)
+        client = ClientConfig(
+            name="trunk-client", workspace_path=workspace, default_branch="trunk"
+        )
+        worktree = make_git_repo("wt-3781-trunk")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev GEN-3781 --headless",
+            label="auto-dev/GEN-3781",
+            native_daemon=FakeNativeDaemonClient(),
+            ticket_id="GEN-3781",
+            headless=True,
+            task=_make_pending_task(ticket_id="GEN-3781", client=client.name),
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["base_branch"] == "trunk"
+
+    def test_write_hook_context_none_base_falls_back_to_default_branch(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.spawn import _write_hook_context
+
+        worktree = tmp_path / "wt-3781-direct"
+        worktree.mkdir()
+        _write_hook_context(
+            worktree,
+            session_id="s1",
+            session_name="acme/impl",
+            client="acme",
+            purpose="impl",
+            ticket_id=None,
+            origin=SessionOrigin.USER,
+            default_branch="x",
+            base_branch=None,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["base_branch"] == "x"
 
 
 class TestAgentSpawnStampSeeding:

@@ -8,6 +8,7 @@ parity table cannot drift apart.
 
 - :func:`review_client` / :func:`engine_client`: ``ReviewConfig`` clients.
 - :func:`repair_row`: an IMPL row carrying repair feedback, adopted or not.
+- :func:`based_row`: a row at a stage carrying a non-null ``base_branch``.
 - :data:`CONFIGS`, :func:`client_for`, :func:`task_for`: the config matrix.
 - :func:`synthetic_capabilities`: a declaration with chosen fields overridden.
 """
@@ -34,6 +35,9 @@ TICKET_ID: Final = "T-1"
 
 #: The adoption branch :func:`repair_row` sets by default.
 ADOPTED_BRANCH: Final = "dev/2944"
+
+#: The ``base_branch`` :func:`based_row` sets by default.
+BASE_BRANCH: Final = "epic/1"
 
 #: The repo engine skill :func:`engine_client` configures.
 ENGINE_SKILL: Final = "repo-review"
@@ -77,6 +81,13 @@ def repair_row(
     if feedback:
         payload["review_feedback"] = make_repair_feedback()
     return TicketTask.model_validate(payload)
+
+
+def based_row(stage: Stage, *, base: str = BASE_BRANCH) -> TicketTask:
+    """A row at *stage* that merges into *base* instead of the client default."""
+    return TicketTask(
+        ticket_id=TICKET_ID, client=CLIENT_NAME, stage=stage, base_branch=base
+    )
 
 
 def client_for(config: str, worktree: Path) -> ClientConfig:

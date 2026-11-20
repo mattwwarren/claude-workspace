@@ -1,9 +1,10 @@
 """Shared builders and stubs for the doctor check tests.
 
 One home for the lane, client, review-pipeline and ``orchestrator.yaml``
-builders that ``test_doctor_codex_fix_loop.py`` (#2542) and
-``test_doctor_review_convergence.py`` (#2797) both need, plus the empty
-daemon-roster stub (:func:`stub_daemon_roster`) that
+builders that ``test_doctor_codex_fix_loop.py`` (#2542),
+``test_doctor_review_convergence.py`` (#2797),
+``test_doctor_base_backend.py`` and ``test_doctor_capabilities.py`` need, plus
+the empty daemon-roster stub (:func:`stub_daemon_roster`) that
 ``test_doctor_operator_gated_park.py`` and ``test_doctor_scoped_reap.py``
 (#2716) both need, so no test file grows its own copy.
 """
@@ -118,6 +119,23 @@ def make_lane(
             {**(executors or {}), Stage.REVIEW: backend}, stages
         )
     return LaneConfig(name=name, codex_fix_loop_enabled=flag, pipeline=pipeline)
+
+
+#: The four pipeline stages :func:`lane_on` routes to one backend.
+PIPELINE_STAGES = (Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE)
+
+
+def lane_on(backend: str) -> LaneConfig:
+    """A lane that routes every pipeline stage to *backend*.
+
+    The client's review backend still routes REVIEW to codex, so a lane can
+    yield more than one result; tests pick theirs by name with ``_result_for``.
+    """
+    return make_lane(
+        "default",
+        executors=dict.fromkeys(PIPELINE_STAGES, backend),
+        stages=PIPELINE_STAGES,
+    )
 
 
 def make_client(

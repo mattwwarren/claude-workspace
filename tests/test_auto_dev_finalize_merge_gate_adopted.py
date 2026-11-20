@@ -20,8 +20,10 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw.dispatch.routing.pr_refs import _extract_blocked_on_pr
+from tests._shared.git_repos import git_in
 from tests.test_auto_dev_finalize_merge_gate_content_aware import (
     _ABSENT_LOG,
+    _BASE,
     _BOTTOM,
     _CLEAR_MARKER,
     _DISABLED_MARKER,
@@ -106,7 +108,8 @@ def test_adopted_inventory_failures_do_not_append_to_the_conflict_list() -> None
     loop_start, _ = _loop_body(fence)
     inventory = fence[fence.index("# Adopted-PR inventory (#2949)") : loop_start]
     assert "MERGE_GATE_CONFLICTS+=(" not in inventory
-    assert inventory.count("exit 4") == 3
+    # cw failure, all-open list failure, all-open base filter, adopted join.
+    assert inventory.count("exit 4") == 4
 
 
 def test_adopted_inventory_failure_bullet_documents_both_messages() -> None:
@@ -182,7 +185,7 @@ def test_e2e_non_adopted_non_prefix_author_pr_is_still_ignored(
     """Regression: the adopted tag, not the author list, widens the filter."""
     gate.add_adopted(8, "feat/y", {"src/other.py": "y = 2\n"}, push=False)
     gate.add_pr(101, _THEIRS, head_ref="feature/x")
-    gate.all_open_prs.append("101 feature/x")
+    gate.all_open_prs.append("101 feature/x main")
     gate.checkout_ours(_OURS)
     result = gate.run(context_extra=_WITH_CLIENT)
     assert result.returncode == 0, result.stderr
@@ -320,3 +323,139 @@ def test_e2e_absent_script_blocks_adopted_pr_on_raw_intersection(
     assert _details(result) == (
         f"PR #7 ({_FOREIGN_REF}) is open and shares files with this branch: {_SHARED}"
     )
+
+
+# ---------------------------------------------------------------------------
+# <base>: only PRs that target the ticket's merge target take part (#3781)
+# ---------------------------------------------------------------------------
+
+_OTHER_BASE = "epic/x"
+_BASE_BLOCKED = (
+    f"{_BLOCKED_STEP}could not read the base branch "
+    "(no base_branch in cw-context.json and no origin/HEAD), failing closed"
+)
+
+
+def _no_pr_diff(gate: _GateRepo) -> bool:
+    return not any(call.startswith("pr diff") for call in gate.gh_calls())
+
+
+def test_the_open_pr_list_asks_for_base_ref_name(gate: _GateRepo) -> None:
+    _conflicting_pr(gate)
+    gate.run()
+    calls = _pr_lists(gate)
+    assert calls
+    assert all("baseRefName" in call for call in calls), calls
+
+
+def test_the_adopted_open_pr_list_asks_for_base_ref_name(gate: _GateRepo) -> None:
+    gate.add_adopted(7, _FOREIGN_REF, _THEIRS)
+    gate.checkout_ours(_OURS)
+    gate.run(context_extra=_WITH_CLIENT)
+    calls = _pr_lists(gate)
+    assert len(calls) == 2, calls
+    assert all("baseRefName" in call for call in calls), calls
+
+
+def test_e2e_pr_on_a_different_base_is_excluded_from_the_overlap_check(
+    gate: _GateRepo,
+) -> None:
+    gate.add_pr(101, _THEIRS, base=_OTHER_BASE)
+    gate.checkout_ours(_OURS)
+    result = gate.run()
+    assert result.returncode == 0, result.stderr
+    assert _CLEAR_MARKER in result.stdout
+    assert "PR #101" not in result.stdout
+    assert _no_pr_diff(gate)
+
+
+def test_e2e_pr_on_the_ticket_base_still_blocks_beside_one_on_another(
+    gate: _GateRepo,
+) -> None:
+    gate.add_pr(101, _THEIRS, base=_OTHER_BASE)
+    gate.add_pr(102, _THEIRS)
+    gate.checkout_ours(_OURS)
+    details = _details(gate.run())
+    assert details is not None
+    assert _PR_REF.findall(details) == ["102"]
+
+
+def test_e2e_adopted_pr_on_a_different_base_is_excluded_from_the_join(
+    gate: _GateRepo,
+) -> None:
+    gate.add_adopted(7, _FOREIGN_REF, _THEIRS, base=_OTHER_BASE)
+    gate.checkout_ours(_OURS)
+    result = gate.run(context_extra=_WITH_CLIENT)
+    assert result.returncode == 0, result.stderr
+    assert _CLEAR_MARKER in result.stdout
+    assert "PR #7" not in result.stdout
+    assert _no_pr_diff(gate)
+
+
+def test_e2e_epic_base_context_keeps_the_pr_on_that_base_and_drops_main(
+    gate: _GateRepo,
+) -> None:
+    gate.add_pr(101, _THEIRS, base=_OTHER_BASE)
+    gate.add_pr(102, _THEIRS)
+    gate.checkout_ours(_OURS)
+    details = _details(gate.run(context_extra={"base_branch": _OTHER_BASE}))
+    assert details is not None
+    assert _PR_REF.findall(details) == ["101"]
+
+
+def test_e2e_null_base_context_filters_to_the_snapshot_default(
+    gate: _GateRepo,
+) -> None:
+    gate.add_pr(101, _THEIRS, base="trunk")
+    gate.add_pr(102, _THEIRS)
+    gate.checkout_ours(_OURS)
+    result = gate.run(
+        context_extra={
+            "base_branch": None,
+            "world_state_snapshot": {"origin_main_branch": "trunk"},
+        }
+    )
+    details = _details(result)
+    assert details is not None, result.stdout
+    assert _PR_REF.findall(details) == ["101"]
+
+
+def test_e2e_no_base_in_context_falls_back_to_origin_head(gate: _GateRepo) -> None:
+    git_in(gate.repo, "remote", "set-head", "origin", _BASE)
+    gate.add_pr(101, _THEIRS, base=_OTHER_BASE)
+    gate.add_pr(102, _THEIRS)
+    gate.checkout_ours(_OURS)
+    details = _details(gate.run(context_extra={"base_branch": None}))
+    assert details is not None
+    assert _PR_REF.findall(details) == ["102"]
+
+
+def test_e2e_no_base_and_no_origin_head_fails_closed(gate: _GateRepo) -> None:
+    _conflicting_pr(gate)
+    result = gate.run(context_extra={"base_branch": None})
+    assert result.returncode == 4, result.stdout
+    assert result.stdout.strip() == _BASE_BLOCKED
+    assert _CLEAR_MARKER not in result.stdout
+    assert _pr_lists(gate) == []
+
+
+def test_e2e_pr_files_fallback_diffs_from_origin_base(gate: _GateRepo) -> None:
+    """When ``gh pr diff`` fails the fence diffs ``origin/<base>...origin/<head>``.
+
+    ``origin/main`` is deleted, so a fence that still typed it would get no file
+    list and fail closed with a usage error instead of reporting the overlap.
+    """
+    gate.add_pr(
+        101, {_SHARED: _shared_with(_BOTTOM, "strict = false")}, base=_OTHER_BASE
+    )
+    git_in(gate.repo, "push", "-q", "origin", "dev/101:refs/heads/dev/101")
+    git_in(gate.repo, "push", "-q", "origin", f"main:refs/heads/{_OTHER_BASE}")
+    git_in(gate.repo, "update-ref", "-d", "refs/remotes/origin/main")
+    del gate.pr_files[101]
+    gate.checkout_ours({_SHARED: _shared_with(_TOP, 'name = "renamed"')})
+    result = gate.run(context_extra={"base_branch": _OTHER_BASE})
+    assert any(call.startswith("pr diff 101") for call in gate.gh_calls())
+    assert _details(result) is None, result.stdout
+    assert result.returncode == 0, result.stderr
+    assert "merge-tree clean despite file overlap with PR #101" in result.stdout
+    assert _CLEAR_MARKER in result.stdout

@@ -298,7 +298,7 @@ class TestPrePrSyncFenceBehaviour:
 
     def test_a_failed_fetch_prints_the_skipped_marker(self) -> None:
         fence = substitute_fence_placeholders(
-            _pre_pr_sync_fence(), {"branch-name": "dev/2979"}
+            _pre_pr_sync_fence(), {"branch-name": "dev/2979", "base": "main"}
         )
         assert 'echo "PROBE_RC=skipped PROBE_STATE=skipped"' in fence
         assert "`PROBE_RC=skipped` means the fetch failed" in _cmd(
@@ -408,6 +408,7 @@ class TestStep4c5:
         section = _step_4c5()
         for retired in (
             "git rebase origin/main",
+            "git rebase origin/<base>",
             "--force-with-lease",
             "auto-rebase",
             "rebase-retry",
@@ -424,8 +425,8 @@ class TestStep4c5:
     def test_conflicting_runs_one_merge(self) -> None:
         section = _step_4c5()
         row = section[section.index("| `CONFLICTING` | `DIRTY` |") :].split("\n", 1)[0]
-        assert "One merge of `origin/main`" in row
-        assert section.count("git merge origin/main\n") == 1
+        assert "One merge of `origin/<base>`" in row
+        assert section.count("git merge origin/<base>\n") == 1
         assert "no loops" in section
         assert "plain push" in section
         assert "PRE_MERGE_SHA=$(git rev-parse HEAD)" in section
@@ -498,19 +499,19 @@ class TestProbeSites:
 
     def test_the_review_fallback_merges_only_on_a_proven_conflict(self) -> None:
         fence = _review_fallback_fence()
-        assert "git fetch origin main" in fence
+        assert "git fetch origin <base>" in fence
         assert (
             "exit 1 AND JSON state conflict (both) only: "
-            "git merge origin/main --no-edit" in fence
+            "git merge origin/<base> --no-edit" in fence
         )
         assert "merge_probe_unavailable" in fence
 
     def test_the_finalize_sync_merges_only_on_a_conflict(self) -> None:
         fence = _pre_pr_sync_fence()
         probe = fence.index(_PROBE)
-        merge = fence.index("git merge origin/main --no-edit")
+        merge = fence.index("git merge origin/<base> --no-edit")
         assert probe < merge
-        assert fence.count("git merge origin/main") == 1
+        assert fence.count("git merge origin/<base>") == 1
         # Exit 1 alone is not a conflict: a cw crash exits 1 too (#2979).
         guard = 'if [ "$PROBE_RC" -eq 1 ] && [ "$PROBE_STATE" = "conflict" ]; then'
         assert guard in fence[probe:merge]

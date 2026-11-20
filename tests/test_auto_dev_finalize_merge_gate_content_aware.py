@@ -57,6 +57,7 @@ _CLEAR_MARKER = "MERGE_GATE_CLEAR"
 _ABSENT_LOG = "check_merge_gate_overlap: script absent, skipped"
 
 _PLACEHOLDERS = {"fork_point_sha": "<fork>", "branch-prefix": "dev"}
+_BASE = "main"
 
 _PR_REF = re.compile(r"PR #(\d+)")
 
@@ -258,7 +259,7 @@ def _plant_gh_stub(tmp_path: Path) -> None:
     stub = bin_dir / "gh"
     stub.write_text(
         '#!/bin/sh\ncase "$1 $2" in\n'
-        '  "pr list") echo "42 dev/42" ;;\n'
+        '  "pr list") echo "42 dev/42 main" ;;\n'
         '  "pr diff") echo "src/a.py" ;;\n'
         "esac\n",
         encoding="utf-8",
@@ -270,6 +271,13 @@ def _run_marker_fence(
     tmp_path: Path, **placement: str | None
 ) -> subprocess.CompletedProcess[str]:
     _plant_gh_stub(tmp_path)
+    # Step 4a fails closed without a readable base; the runner's repo is
+    # <tmp_path>/repo, which it creates with exist_ok.
+    context = tmp_path / "repo" / ".claude"
+    context.mkdir(parents=True, exist_ok=True)
+    (context / "cw-context.json").write_text(
+        json.dumps({"base_branch": _BASE}), encoding="utf-8"
+    )
     return run_guard_fence(
         tmp_path,
         _gate_fence() + '\necho "${MERGE_GATE_OUTPUT-}"\n',
@@ -365,6 +373,7 @@ class _GateRepo:
         *,
         head_ref: str | None = None,
         push: bool = True,
+        base: str = _BASE,
     ) -> None:
         ref = head_ref or f"dev/{number}"
         git_in(self.repo, "checkout", "-q", "-b", ref, "main")
@@ -373,7 +382,7 @@ class _GateRepo:
         if push:
             git_in(self.repo, "push", "-q", "origin", f"{ref}:refs/pull/{number}/head")
         git_in(self.repo, "checkout", "-q", "main")
-        self.open_prs.append(f"{number} {ref}")
+        self.open_prs.append(f"{number} {ref} {base}")
         self.pr_files[number] = sorted(files)
 
     def add_adopted(
@@ -386,6 +395,7 @@ class _GateRepo:
         listed: bool = True,
         row: str | None = None,
         push: bool = True,
+        base: str = _BASE,
     ) -> None:
         """A PR carried by a live row: in cw's rows, and (unless ``listed`` is
         False, i.e. closed/merged) in the unfiltered open-PR list.
@@ -393,11 +403,11 @@ class _GateRepo:
         ``author_is_me`` also puts it in the ``--author @me`` list; ``row``
         overrides the cw line (e.g. ``"- feat/x"`` for an unparseable URL).
         """
-        self.add_pr(number, files, head_ref=ref, push=push)
+        self.add_pr(number, files, head_ref=ref, push=push, base=base)
         if not author_is_me:
-            self.open_prs.remove(f"{number} {ref}")
+            self.open_prs.remove(f"{number} {ref} {base}")
         if listed:
-            self.all_open_prs.append(f"{number} {ref}")
+            self.all_open_prs.append(f"{number} {ref} {base}")
         self.adopted_rows.append(row if row is not None else f"{number} {ref}")
 
     def gh_calls(self) -> list[str]:
@@ -429,6 +439,7 @@ class _GateRepo:
                 {
                     "worktree_path": str(self.repo),
                     "merge_gate_ignore_paths": ignore_paths or [],
+                    "base_branch": _BASE,
                     **(context_extra or {}),
                 }
             ),
@@ -726,7 +737,7 @@ def test_e2e_enabled_gate_still_fails_closed_on_tooling_errors(
 def test_e2e_skips_non_pipeline_and_current_branch_prs(gate: _GateRepo) -> None:
     gate.add_pr(101, {_SHARED: _shared_with(_TOP, 'name = "x"')}, head_ref="feature/x")
     gate.checkout_ours({_SHARED: _shared_with(_TOP, 'name = "ours"')})
-    gate.open_prs.append("100 dev/100")
+    gate.open_prs.append(f"100 dev/100 {_BASE}")
     gate.pr_files[100] = [_SHARED]
     result = gate.run()
     assert result.returncode == 0, result.stderr
@@ -764,7 +775,7 @@ def test_fence_resolves_current_branch_from_row_before_open_pr_inventory() -> No
 def _adopted_pr_on_shared_file(gate: _GateRepo) -> None:
     """Our repo sits on ``dev/100``; the row's PR is on another, unpushed ref."""
     gate.checkout_ours({_SHARED: _shared_with(_TOP, 'name = "ours"')})
-    gate.open_prs.append(f"{_ADOPTED_PR} {_ADOPTED_REF}")
+    gate.open_prs.append(f"{_ADOPTED_PR} {_ADOPTED_REF} {_BASE}")
     gate.pr_files[_ADOPTED_PR] = [_SHARED]
 
 

@@ -146,6 +146,27 @@ class TestSchemaShow:
         assert tldr.exit_code == 0
         assert "  blocked_on_pr: integer | object | null" in tldr.output.splitlines()
 
+    def test_json_ticket_task_base_branch_pins_the_resolved_value_description(
+        self,
+    ) -> None:
+        """#3781: the description says the stored value is not the resolved one."""
+        expected = (
+            "The branch this row merges into; null means the client's default"
+            " branch. This is the stored value, not the resolved one. Workers get"
+            " the resolved value (this field, else the client's default_branch) as"
+            " the top-level base_branch key of .claude/cw-context.json, always a"
+            " non-empty string."
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["schema", "show", "ticket-task", "--format=json"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        field = parsed["properties"]["base_branch"]
+        assert field["description"] == expected
+        assert field["default"] is None
+        assert field["anyOf"] == [{"type": "string"}, {"type": "null"}]
+        assert "base_branch" not in parsed.get("required", [])
+
     def test_tldr_session(self) -> None:
         runner = CliRunner()
         result = runner.invoke(main, ["schema", "show", "session", "--format=tldr"])

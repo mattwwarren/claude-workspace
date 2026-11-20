@@ -70,7 +70,12 @@ def _run_title_tiers(
         git_in(repo, "commit", "--allow-empty", "-m", subject)
 
     script = _title_tier_script() + '\nprintf "TITLE=%s\\n" "$TITLE"\n'
-    env = {**_clean_git_env(), "EXPLICIT_TITLE": explicit_title, "ARGUMENTS": ""}
+    env = {
+        **_clean_git_env(),
+        "EXPLICIT_TITLE": explicit_title,
+        "ARGUMENTS": "",
+        "BASE": "main",
+    }
     result = subprocess.run(
         ["/bin/bash", "-c", script],
         cwd=str(repo),

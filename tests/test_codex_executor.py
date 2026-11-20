@@ -913,6 +913,36 @@ def test_codex_executor_threads_review_config_into_write_hook_context(
     assert calls[0]["review_config"] == review
 
 
+@pytest.mark.parametrize(
+    ("row_base", "expected"),
+    [("epic/x", "epic/x"), (None, "trunk")],
+)
+def test_codex_executor_threads_resolved_base_into_write_hook_context(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    row_base: str | None,
+    expected: str,
+) -> None:
+    """#3781: the codex spawn path stamps the resolved base branch (the row's,
+    else the client default) into cw-context.json."""
+    worktree = make_git_repo("wt-codex-base-branch")
+    executor = _codex_executor()
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="trunk")
+    task = TicketTask(
+        ticket_id="T-base", client="test", stage=Stage.REVIEW, base_branch=row_base
+    )
+
+    calls: list[dict[str, object]] = []
+
+    def _capture(*_args: object, **kwargs: object) -> None:
+        calls.append(kwargs)
+
+    with patch("cw.executor.codex._write_hook_context", _capture):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    assert calls[0]["base_branch"] == expected
+
+
 def test_resolve_executor_threads_native_daemon_into_codex_executor(
     tmp_config_dir: Path, tmp_path: Path
 ) -> None:
