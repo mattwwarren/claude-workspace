@@ -129,7 +129,17 @@ class TestSchemaShow:
         assert field["anyOf"] == expected_any_of
         assert field["default"] is None
         assert "blocked_on_pr" not in parsed.get("required", [])
-        assert "PrRef" not in parsed.get("$defs", {})
+        # blocked_on_pr stays inline (never a $ref). Since #3791 a $defs/PrRef
+        # exists, but only MergePrerequisite.pr refers to it.
+        assert "$ref" not in json.dumps(field)
+        defs = parsed.get("$defs", {})
+        referrers = [
+            name
+            for name, schema in defs.items()
+            if "#/$defs/PrRef" in json.dumps(schema)
+        ]
+        assert referrers == ["MergePrerequisite"]
+        assert "#/$defs/PrRef" not in json.dumps(parsed["properties"])
         serialization = TicketTask.model_json_schema(mode="serialization")
         assert serialization["properties"]["blocked_on_pr"]["anyOf"] == expected_any_of
         tldr = runner.invoke(main, ["schema", "show", "ticket-task", "--format=tldr"])
