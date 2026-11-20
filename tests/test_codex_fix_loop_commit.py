@@ -163,8 +163,9 @@ class TestBeginCycle:
         worktree = _worktree(make_git_repo, "wt-begin-fail")
 
         def _boom(
-            _worktree: Path, *, tolerated: frozenset[str] = frozenset()
+            _worktree: Path, *, tolerated: frozenset[str]
         ) -> CycleBaseline | DirtyStart:
+            assert tolerated == frozenset()
             raise subprocess.CalledProcessError(128, ["git", "rev-parse"])
 
         monkeypatch.setattr(commit, "capture_cycle_baseline", _boom)
@@ -185,8 +186,9 @@ class TestCleanStartInvariant:
         real = commit.capture_cycle_baseline
 
         def _spy(
-            path: Path, *, tolerated: frozenset[str] = frozenset()
+            path: Path, *, tolerated: frozenset[str]
         ) -> CycleBaseline | DirtyStart:
+            assert tolerated == frozenset()
             seen.append(real(path, tolerated=tolerated))
             return seen[-1]
 
@@ -334,6 +336,146 @@ class TestTrackedReviewArtifacts:
         assert out.status != "blocked"
         assert runner.fix_calls == 2
         assert artifact in git_in(worktree, "diff", "--name-only").split()
+
+
+_TOLERATED_FILE = "tol.py"
+_TOLERATED = frozenset({_TOLERATED_FILE})
+
+
+class TestToleratedPaths:
+    """#3693: an operator-tolerated dirty path never reaches a cycle commit."""
+
+    @staticmethod
+    def _tolerated_worktree(make_git_repo: Callable[..., Path], name: str) -> Path:
+        """A pushed feature worktree whose tracked ``tol.py`` is dirty (`` M``)."""
+        worktree = _worktree(
+            make_git_repo,
+            name,
+            feature_files={"new.py": _CONTENT, _TOLERATED_FILE: "a = 1\n"},
+        )
+        _write(worktree / _TOLERATED_FILE, "a = 2\n")
+        return worktree
+
+    def test_the_cycle_commits_only_the_fix_and_leaves_the_tolerated_file_unstaged(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = self._tolerated_worktree(make_git_repo, "wt-tol-commit")
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()])
+
+        out, _ = _run_loop(
+            runner, worktree, session_id="s-tol-commit", tolerated=_TOLERATED
+        )
+
+        assert out.status != "blocked"
+        assert runner.fix_calls == 1
+        committed = git_in(worktree, "show", "--name-only", "--format=", "HEAD")
+        assert committed.split() == ["fix.py"]
+        assert git_in(worktree, "diff", "--cached", "--name-only") == ""
+        assert git_in(worktree, "diff", "--name-only").split() == [_TOLERATED_FILE]
+        assert (worktree / _TOLERATED_FILE).read_text() == "a = 2\n"
+
+    def test_a_no_op_cycle_commits_nothing_and_does_not_trip_the_staged_guard(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = self._tolerated_worktree(make_git_repo, "wt-tol-noop")
+        before = _heads(worktree)
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_writes_nothing])
+
+        out, _ = _run_loop(
+            runner, worktree, session_id="s-tol-noop", tolerated=_TOLERATED
+        )
+
+        assert out.status != "blocked"
+        assert runner.fix_calls == 1
+        assert _heads(worktree) == before
+        assert git_in(worktree, "diff", "--cached", "--name-only") == ""
+        assert git_in(worktree, "diff", "--name-only").split() == [_TOLERATED_FILE]
+
+    def test_the_same_dirty_path_unlisted_still_parks_dirty_start(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = self._tolerated_worktree(make_git_repo, "wt-tol-unlisted")
+        runner = _FixLoopRunner([_MF_DOC], fix_behaviors=[_editor()])
+
+        out, _ = _run_loop(runner, worktree, session_id="s-tol-unlisted")
+
+        assert _blocker_reason(out) == CODEX_FIX_DIRTY_START
+        assert runner.fix_calls == 0
+
+    def test_a_tolerated_path_plus_an_unlisted_one_still_parks_dirty_start(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = self._tolerated_worktree(make_git_repo, "wt-tol-mixed")
+        _write(worktree / "stray.py", "x = 1\n")
+        runner = _FixLoopRunner([_MF_DOC], fix_behaviors=[_editor()])
+
+        out, _ = _run_loop(
+            runner, worktree, session_id="s-tol-mixed", tolerated=_TOLERATED
+        )
+
+        assert _blocker_reason(out) == CODEX_FIX_DIRTY_START
+        assert out.blocker is not None
+        assert "stray.py" in out.blocker.details
+        assert _TOLERATED_FILE not in out.blocker.details
+        assert runner.fix_calls == 0
+
+    def test_begin_cycle_hands_the_context_set_to_the_baseline_probe(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = self._tolerated_worktree(make_git_repo, "wt-tol-begin")
+        seen: list[frozenset[str]] = []
+        real = commit.capture_cycle_baseline
+
+        def _spy(
+            path: Path, *, tolerated: frozenset[str]
+        ) -> CycleBaseline | DirtyStart:
+            seen.append(tolerated)
+            return real(path, tolerated=tolerated)
+
+        monkeypatch.setattr(commit, "capture_cycle_baseline", _spy)
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()])
+
+        _run_loop(runner, worktree, session_id="s-tol-begin", tolerated=_TOLERATED)
+
+        assert seen[0] == _TOLERATED
+
+    def test_left_edits_is_false_for_a_tolerated_only_tree(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = self._tolerated_worktree(make_git_repo, "wt-tol-left")
+
+        assert commit._left_edits(worktree, _TOLERATED) is False
+        assert commit._left_edits(worktree, frozenset()) is True
+
+    def test_left_edits_is_true_for_an_unlisted_path_beside_a_tolerated_one(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = self._tolerated_worktree(make_git_repo, "wt-tol-left-mixed")
+        _write(worktree / "stray.py", "x = 1\n")
+
+        assert commit._left_edits(worktree, _TOLERATED) is True
+
+    def test_a_failed_invocation_does_not_claim_left_edits_for_a_tolerated_path(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The park path reads ``ctx.tolerated``: only the tolerated file is dirty."""
+        worktree = self._tolerated_worktree(make_git_repo, "wt-tol-timeout")
+        monkeypatch.setattr(
+            "cw.codex_fix_loop.cycle_restore.git_output",
+            _git_output_failing_on("reset"),
+        )
+        runner = _FixLoopRunner(
+            [_MF_DOC],
+            fix_behaviors=[TestInvocationFailure._timeout_after(False)],
+        )
+
+        out, _ = _run_loop(
+            runner, worktree, session_id="s-tol-timeout", tolerated=_TOLERATED
+        )
+
+        assert _blocker_reason(out) == CODEX_TIMEOUT
+        assert out.blocker is not None
+        assert "left uncommitted edits" not in out.blocker.details
 
 
 class TestStagedSetGuard:
@@ -565,8 +707,9 @@ class TestInvocationFailure:
         calls: list[Path] = []
 
         def _second_call_fails(
-            path: Path, *, tolerated: frozenset[str] = frozenset()
+            path: Path, *, tolerated: frozenset[str]
         ) -> CycleBaseline | DirtyStart:
+            assert tolerated == frozenset()
             calls.append(path)
             if len(calls) > 1:
                 raise subprocess.CalledProcessError(128, ["git", "status"])

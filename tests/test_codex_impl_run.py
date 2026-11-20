@@ -45,6 +45,7 @@ from cw.models import (
     Stage,
     StageExecutorConfig,
 )
+from cw.models.client import ReviewConfig
 from cw.models.orchestrator_config.stage import ModelPrice
 from cw.models.review_feedback import ReviewFeedback
 from cw.models.usage import UsageStage, UsageState, UsageUnavailableReason
@@ -723,6 +724,47 @@ def test_dirty_start_blocks_with_impl_text_and_no_turn(
     assert "REVIEW" not in result.blocker.details
     assert h.runner.calls == []
     assert (h.worktree / "stray.txt").exists()
+
+
+def _tolerating_client(h: Harness, *paths: str) -> ClientConfig:
+    return ClientConfig(
+        name="test",
+        workspace_path=h.worktree,
+        default_branch="main",
+        review=ReviewConfig(tolerated_worktree_paths=list(paths)),
+    )
+
+
+def test_a_tolerated_dirty_path_at_start_proceeds_and_stays_out_of_the_commit(
+    harness: Callable[..., Harness],
+) -> None:
+    """#3693: the clean-start probe tolerates the operator's exact path."""
+    h = harness()
+    h.client = _tolerating_client(h, "tol.txt")
+    (h.worktree / "tol.txt").write_text("operator tool output\n", encoding="utf-8")
+    h.turn()
+    result = h.run()
+    assert result.status == "stage_complete"
+    assert h.commit_count() == 1
+    committed = git_in(h.worktree, "show", "--name-only", "--format=", "HEAD")
+    assert committed.split() == [WIDGET]
+    assert git_in(h.worktree, "diff", "--cached", "--name-only") == ""
+    assert git_in(h.worktree, "status", "--porcelain") == "?? tol.txt"
+
+
+def test_a_tolerated_path_does_not_excuse_an_unlisted_dirty_path_at_start(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    h.client = _tolerating_client(h, "tol.txt")
+    (h.worktree / "tol.txt").write_text("x", encoding="utf-8")
+    (h.worktree / "stray.txt").write_text("x", encoding="utf-8")
+    result = h.run()
+    _assert_block(result, "codex_fix_dirty_start")
+    assert result.blocker is not None
+    assert "stray.txt" in result.blocker.details
+    assert "tol.txt" not in result.blocker.details
+    assert h.runner.calls == []
 
 
 def test_existing_branch_work_blocks_before_the_turn(

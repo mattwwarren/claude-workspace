@@ -37,6 +37,7 @@ from cw.models import (
     QueueItemStatus,
     StageExecutorConfig,
 )
+from cw.models.client import ReviewConfig
 from cw.models.orchestrator_config.stage import ModelPrice
 from cw.models.usage import UsageStage, UsageState, UsageUnavailableReason
 from cw.stage_verification.finalize_ci_evidence import CiContext
@@ -2001,6 +2002,39 @@ def test_the_traced_gate_step_keeps_its_slot_and_receives_the_ci_context(
         "run_finalize_quality_gates",
         "probe_default",
     ]
+
+
+def test_the_gate_step_receives_the_clients_tolerated_paths(
+    harness: Callable[..., Harness],
+) -> None:
+    """#3693: a tolerated dirty path reaches the gates and does not block them."""
+    h = harness().trace()
+    h.turn()
+    h.client = ClientConfig(
+        name="test",
+        workspace_path=h.worktree,
+        default_branch="main",
+        review=ReviewConfig(tolerated_worktree_paths=["tol.txt"]),
+    )
+    (h.worktree / "tol.txt").write_text("operator tool output\n", encoding="utf-8")
+    spy = Mock(wraps=_run.run_finalize_quality_gates)
+    h.monkeypatch.setattr("cw.codex_finalize._run.run_finalize_quality_gates", spy)
+    result = h.run()
+    assert result.status == "shipped"
+    (call,) = spy.call_args_list
+    assert call.kwargs["tolerated"] == frozenset({"tol.txt"})
+
+
+def test_the_gate_step_receives_no_tolerated_paths_by_default(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness().trace()
+    h.turn()
+    spy = Mock(wraps=_run.run_finalize_quality_gates)
+    h.monkeypatch.setattr("cw.codex_finalize._run.run_finalize_quality_gates", spy)
+    assert h.run().status == "shipped"
+    (call,) = spy.call_args_list
+    assert call.kwargs["tolerated"] == frozenset()
 
 
 def test_a_reuse_pass_hands_the_bound_pr_to_the_consult(

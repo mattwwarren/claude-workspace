@@ -1411,6 +1411,7 @@ def _run_with_config(
     sid: str,
     lanes: list[LaneConfig],
     config: OrchestratorConfig,
+    review: ReviewConfig | None = None,
 ) -> MagicMock:
     """Run the review unit of work under *config*, returning the loop mock."""
     _seed_session(sid)
@@ -1428,6 +1429,7 @@ def _run_with_config(
         workspace_path=tmp_worktree,
         default_branch="main",
         lanes=list(lanes),
+        **({} if review is None else {"review": review}),
     )
     with (
         patch("cw.codex_background.load_effective_config", return_value=config),
@@ -2017,6 +2019,36 @@ def test_fix_loop_receives_configured_stall_cycles(
     )
 
     assert fix_loop_mock.call_args.kwargs["stall_cycles"] == 2
+
+
+def test_fix_loop_receives_the_clients_tolerated_worktree_paths(
+    tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+) -> None:
+    """#3693: the ``partial`` binding carries the client's list to the loop."""
+    fix_loop_mock = _run_with_config(
+        make_git_repo("wt-bg-tolerated"),
+        sid="bg-tolerated",
+        lanes=[],
+        config=OrchestratorConfig(),
+        review=ReviewConfig(tolerated_worktree_paths=[".codex/config.toml"]),
+    )
+
+    assert fix_loop_mock.call_args.kwargs["tolerated"] == frozenset(
+        {".codex/config.toml"}
+    )
+
+
+def test_fix_loop_receives_no_tolerated_paths_by_default(
+    tmp_config_dir: Path, make_git_repo: Callable[[str], Path]
+) -> None:
+    fix_loop_mock = _run_with_config(
+        make_git_repo("wt-bg-tolerated-none"),
+        sid="bg-tolerated-none",
+        lanes=[],
+        config=OrchestratorConfig(),
+    )
+
+    assert fix_loop_mock.call_args.kwargs["tolerated"] == frozenset()
 
 
 def test_new_knob_defaults_match_fix_loop_constants() -> None:
