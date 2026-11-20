@@ -256,6 +256,7 @@ class TestArgv:
         argv = _argv(runner)
         assert "apps.linear.default_tools_enabled=true" in argv
         assert "enabled_tools" not in " ".join(argv)
+        assert "through the `linear` app" in str(runner.calls[0]["stdin"])
 
     def test_renamed_tools_come_through_the_binding(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
