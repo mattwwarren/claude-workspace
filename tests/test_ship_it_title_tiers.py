@@ -229,6 +229,103 @@ def test_fence_fails_loud_without_recorded_base(
     assert "no base branch recorded in .cw/ship-it-base" in result.stderr
 
 
+def _parse_arguments_script() -> str:
+    """Extract the Step 1 argument-parse bash fence verbatim."""
+    content = _ship_it_text()
+    start = content.index(FENCE, content.index("## Step 1"))
+    end = content.index("```", start + len(FENCE))
+    return content[start + len(FENCE) : end]
+
+
+def _run_parse_arguments(
+    make_git_repo: Callable[..., Path],
+    arguments: str,
+    *,
+    origin_head: str | None = None,
+) -> tuple[str, str, str]:
+    """Run the Step 1 fence in a fresh bash with no inherited ``BASE``.
+
+    Returns ``(BASE, recorded .cw/ship-it-base, EXPLICIT_TITLE)``. *origin_head*
+    points ``refs/remotes/origin/HEAD`` at that branch so the no-``--base``
+    fallback has something to read.
+    """
+    repo = make_git_repo("parse-args")
+    if origin_head is not None:
+        git_in(repo, "remote", "add", "origin", str(repo))
+        git_in(repo, "fetch", "origin", origin_head)
+        git_in(
+            repo,
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            f"refs/remotes/origin/{origin_head}",
+        )
+    script = (
+        _parse_arguments_script()
+        + '\nprintf "BASE=%s\\n" "$BASE"\nprintf "TITLE=%s\\n" "$EXPLICIT_TITLE"\n'
+    )
+    result = subprocess.run(
+        ["/bin/bash", "-c", script],
+        cwd=str(repo),
+        env={**_clean_git_env(), "ARGUMENTS": arguments},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    recorded = (repo / ".cw" / "ship-it-base").read_text(encoding="utf-8").strip()
+    return fields["BASE"], recorded, fields["TITLE"]
+
+
+def test_step1_base_ignores_flag_text_inside_title(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    """A ``--title`` that mentions ``--base`` must not override the real base.
+
+    ``/prep-pr`` passes ``--base <base>``, then ``--draft``, then ``--title``
+    last, and ticket titles can quote the flag (this one does)."""
+    title = "fix(ship-it): honor --base across prep-pr"
+    base, recorded, explicit = _run_parse_arguments(
+        make_git_repo, f"--base release/x --draft --title {title}"
+    )
+    assert base == "release/x"
+    assert recorded == "release/x"
+    assert explicit == title
+
+
+def test_step1_base_with_plain_title(make_git_repo: Callable[..., Path]) -> None:
+    base, recorded, explicit = _run_parse_arguments(
+        make_git_repo, "--base epic/y --title feat: add the thing"
+    )
+    assert (base, recorded, explicit) == ("epic/y", "epic/y", "feat: add the thing")
+
+
+def test_step1_title_only_flag_text_falls_back_to_origin_head(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    """No real ``--base``: a ``--base`` quoted in the title is not one, so the
+    ``origin/HEAD`` default applies."""
+    base, recorded, explicit = _run_parse_arguments(
+        make_git_repo,
+        "--title fix: honor --base across prep-pr",
+        origin_head="main",
+    )
+    assert (base, recorded) == ("main", "main")
+    assert explicit == "fix: honor --base across prep-pr"
+
+
+def test_step1_no_arguments_uses_origin_head(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    base, recorded, explicit = _run_parse_arguments(
+        make_git_repo, "", origin_head="main"
+    )
+    assert (base, recorded, explicit) == ("main", "main", "")
+
+
 def _bash_fences(text: str) -> list[str]:
     return re.findall(r"```bash\n(.*?)\n\s*```", text, flags=re.DOTALL)
 

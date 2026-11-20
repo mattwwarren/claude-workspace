@@ -18,10 +18,10 @@ Quality gates (ruff/mypy/pytest) are handled by `/prep-pr` Step 7 — do not re-
 <!-- el: ship-it.parse-arguments -->
 ## Step 1: Parse arguments
 
-Set `BASE` from `--base <branch>` if provided in `$ARGUMENTS`. When `--base` is absent, use the repository default branch: the name `git symbolic-ref --short refs/remotes/origin/HEAD` prints with its leading `origin/` removed. When that is also empty, BLOCK with "pass --base": never assume a branch name. This fence also writes the resolved value to `.cw/ship-it-base`. Shell variables do not survive between Bash calls, so every later fence that uses `${BASE}` begins with the re-derivation block below (it reads that file and fails loudly if the value is missing, never running on an empty base). Extract `--title <value>` into `EXPLICIT_TITLE` if provided:
+Set `BASE` from `--base <branch>` if provided in `$ARGUMENTS`, reading only the text before `--title` (a title may quote `--base`; `/prep-pr` always passes `--title` last, so the title runs to the end of the string). When `--base` is absent, use the repository default branch: the name `git symbolic-ref --short refs/remotes/origin/HEAD` prints with its leading `origin/` removed. When that is also empty, BLOCK with "pass --base": never assume a branch name. This fence also writes the resolved value to `.cw/ship-it-base`. Shell variables do not survive between Bash calls, so every later fence that uses `${BASE}` begins with the re-derivation block below (it reads that file and fails loudly if the value is missing, never running on an empty base). Extract `--title <value>` into `EXPLICIT_TITLE` if provided:
 
 ```bash
-BASE=$(printf '%s' "$ARGUMENTS" | sed -n 's/.*--base \([^ ]*\).*/\1/p')
+BASE=$(printf '%s' "$ARGUMENTS" | sed -n -e 's/^--title .*//' -e 's/ --title .*//' -e 's/.*--base \([^ ]*\).*/\1/p')
 [ -n "$BASE" ] || BASE=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
 if [ -z "$BASE" ]; then
   echo "BLOCK: no base branch: --base was not given and origin/HEAD is not set. Pass --base <branch>." >&2
@@ -30,7 +30,7 @@ fi
 mkdir -p .cw && printf '%s\n' "$BASE" > .cw/ship-it-base
 EXPLICIT_TITLE=""
 if printf '%s' "$ARGUMENTS" | grep -qE '(^| )--title '; then
-  EXPLICIT_TITLE=$(printf '%s' "$ARGUMENTS" | sed 's/.*--title //' | sed 's/ --.*//')
+  EXPLICIT_TITLE=${ARGUMENTS#*--title }
 fi
 ```
 
