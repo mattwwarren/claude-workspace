@@ -1,9 +1,10 @@
 """Fetch and freshness checks against origin for :mod:`cw.worktree`.
 
-Answers "is this ref up to date with origin" for both a feature branch
-(:func:`fetch_feature_branch`) and the client's default branch
-(:func:`is_main_behind_origin`, :func:`check_main_ff_safety`,
-:func:`fast_forward_main`), including the per-failure fetch-warning dedup.
+Answers "is this ref up to date with origin" for a feature branch
+(:func:`fetch_feature_branch`), a row's merge base (:func:`fetch_base_branch`,
+#3780) and the client's default branch (:func:`is_main_behind_origin`,
+:func:`check_main_ff_safety`, :func:`fast_forward_main`), including the
+per-failure fetch-warning dedup.
 """
 
 from __future__ import annotations
@@ -262,7 +263,30 @@ def fetch_default_branch(client: ClientConfig) -> FetchResult:
     having "commits of its own" that are really just commits origin/<default>
     hasn't caught up to yet.
     """
+    # stays on client.default_branch: null-base wrapper; a row with a base
+    # goes through fetch_base_branch
     return _fetch_default_branch(client.name, client.default_branch, _git_dir(client))
+
+
+def fetch_base_branch(client: ClientConfig, base: str) -> FetchResult:
+    """Fetch origin/<base>, a row's merge target, into the client's git directory.
+
+    The base-row sibling of :func:`fetch_default_branch` (#3780): called only
+    when a row's ``resolve_base_branch(client, task)`` differs from
+    ``client.default_branch``, so a null-base path keeps its argv. It reuses
+    :func:`_fetch_default_branch` unchanged, so ADR-0022's bounded network
+    rule (the tick fetch gate's per-call timeout, budget and per-client
+    backoff, §7.16) applies as it does to the default. ``FAILED`` means
+    freshness unknown: the caller fails open to whatever ``origin/<base>`` ref
+    is already there.
+
+    Unlike :func:`fetch_feature_branch` it does not pass
+    ``quiet_missing_ref``: a missing base is not benign (a never-pushed
+    feature branch is expected, a missing merge target is not), so it WARNs
+    and is deduped in the gate's set, and the creation caller raises on
+    ``BRANCH_ABSENT``.
+    """
+    return _fetch_default_branch(client.name, base, _git_dir(client))
 
 
 def _get_behind_count(
@@ -316,6 +340,8 @@ def is_main_behind_origin(
     """
     _clear_main_freshness_failure_reason()
     git_dir = _git_dir(client)
+    # stays on client.default_branch: freshness of the client's primary
+    # checkout, not a row's merge target
     default_branch = client.default_branch
 
     fetch = _fetch_default_branch(
@@ -403,6 +429,7 @@ def check_main_ff_safety(
     defensive completeness but are not reachable from the stale=True path.
     """
     git_dir = _git_dir(client)
+    # stays on client.default_branch: ff safety of the client's primary checkout
     default_branch = client.default_branch
 
     # Detached HEAD check — symbolic-ref exits non-zero when detached.
@@ -472,6 +499,8 @@ def fast_forward_main(
     if not git_dir.exists():
         msg = f"workspace missing for {client.name} ({git_dir})"
         raise MissingWorkspaceError(msg)
+    # stays on client.default_branch: refreshes the client's primary
+    # checkout, which must sit on the default
     default_branch = client.default_branch
 
     # Guard 1: ensure the checkout is on the expected default branch.

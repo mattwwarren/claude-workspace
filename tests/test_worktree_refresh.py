@@ -847,7 +847,11 @@ class TestCreateWorktreeReuseRefresh:
             raise FileNotFoundError(msg)
 
         def clean(
-            client: ClientConfig, branch: str, *, wt_path: Path | None = None
+            client: ClientConfig,
+            branch: str,
+            *,
+            wt_path: Path | None = None,
+            **_kw: object,
         ) -> None:
             return None
 

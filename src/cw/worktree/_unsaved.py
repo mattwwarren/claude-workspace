@@ -11,6 +11,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from cw.exceptions import WorktreeError
+from cw.models import resolve_base_branch
 from cw.worktree._git import (
     _GIT_PORCELAIN_PATH_OFFSET,
     _checked_out_branch,
@@ -21,7 +22,7 @@ from cw.worktree._paths import worktree_path_for
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.models import ClientConfig
+    from cw.models import ClientConfig, TicketTask
 
 _log = logging.getLogger(__name__)
 
@@ -72,7 +73,11 @@ def _upstream_ref(wt_path: Path) -> str | None:
 
 
 def _unpushed_commits_detail(
-    client: ClientConfig, branch: str, wt_path: Path
+    client: ClientConfig,
+    branch: str,
+    wt_path: Path,
+    *,
+    task: TicketTask | None = None,
 ) -> str | None:
     """Describe *branch*'s unpushed commits, or return None when it is pushed.
 
@@ -86,8 +91,11 @@ def _unpushed_commits_detail(
        parked ``dirty_worktree`` forever.
     1. The worktree's own ``@{u}`` upstream (a branch pushed under another
        name, #2050/#2053).
-    2. ``origin/<default_branch>`` — no own remote ref, no upstream.
-    3. Local ``<default_branch>`` — offline / bare-clone fallback.
+    2. ``origin/<base>`` — no own remote ref, no upstream. ``<base>`` is the
+       row's merge target (``resolve_base_branch(client, task)``, #3780): a
+       branch cut from an epic base measured against the default would read
+       the whole epic as unpushed. A null base is ``client.default_branch``.
+    3. Local ``<base>`` — offline / bare-clone fallback.
 
     Levels 1-3 cannot distinguish "pushed under a name we cannot see" from
     "never pushed", so their message says which base was measured against;
@@ -100,10 +108,11 @@ def _unpushed_commits_detail(
             ahead = _commits_ahead(own, wt_path)
             if ahead is not None:
                 return None if ahead == 0 else f"{ahead} commit(s) not on {own}"
+        base_branch = resolve_base_branch(client, task)
         candidates = (
             _upstream_ref(wt_path),
-            f"origin/{client.default_branch}",
-            client.default_branch,
+            f"origin/{base_branch}",
+            base_branch,
         )
         for base in (b for b in candidates if b is not None):
             ahead = _commits_ahead(base, wt_path)
@@ -164,7 +173,11 @@ def _uncommitted_changes_detail(
 
 
 def unsaved_work_reason(
-    client: ClientConfig, branch: str, *, wt_path: Path | None = None
+    client: ClientConfig,
+    branch: str,
+    *,
+    wt_path: Path | None = None,
+    task: TicketTask | None = None,
 ) -> str | None:
     """Return why the worktree for *branch* has unsaved work, or None if clean.
 
@@ -185,6 +198,10 @@ def unsaved_work_reason(
     collision's holder path, which cw did not create and does not track
     (#2034).
 
+    *task* is the queue row, when the caller holds one: unpushed commits
+    with no own remote ref are measured against the row's base (#3780).
+    ``None`` measures against ``client.default_branch``, as before.
+
     Never raises — every git error is swallowed and logged at WARNING level
     so that a git failure cannot block a cleanup sweep; it is reported as a
     reason instead (fail-safe toward "has unsaved work").
@@ -196,14 +213,18 @@ def unsaved_work_reason(
     uncommitted = _uncommitted_changes_detail(client, branch, wt_path)
     if uncommitted is not None:
         return uncommitted
-    return _unpushed_commits_detail(client, branch, wt_path)
+    return _unpushed_commits_detail(client, branch, wt_path, task=task)
 
 
 def worktree_has_unsaved_work(
-    client: ClientConfig, branch: str, *, wt_path: Path | None = None
+    client: ClientConfig,
+    branch: str,
+    *,
+    wt_path: Path | None = None,
+    task: TicketTask | None = None,
 ) -> bool:
     """Return True if the worktree for *branch* has unsaved work.
 
     Boolean view of :func:`unsaved_work_reason`; see it for the contract.
     """
-    return unsaved_work_reason(client, branch, wt_path=wt_path) is not None
+    return unsaved_work_reason(client, branch, wt_path=wt_path, task=task) is not None

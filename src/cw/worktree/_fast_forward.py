@@ -21,7 +21,7 @@ from cw.worktree._refresh_types import _LOGGER_NAME, RefreshOutcome, RefreshResu
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.models import ClientConfig
+    from cw.models import ClientConfig, TicketTask
     from cw.native_daemon import NativeDaemonClient
     from cw.worktree._refresh_types import ReuseRefreshReport
 
@@ -90,6 +90,7 @@ def _sync_reused_submodules(
     report: ReuseRefreshReport,
     *,
     daemon: NativeDaemonClient,
+    task: TicketTask | None = None,
 ) -> RefreshResult | None:
     """Sync submodules after a fast-forward that may have moved ``.gitmodules`` (#2233).
 
@@ -140,6 +141,7 @@ def _sync_reused_submodules(
         ),
         raise_on_branch_mismatch=True,
         daemon=daemon,
+        task=task,
     )
     if verdict is not None:
         return verdict
@@ -173,6 +175,7 @@ def _ff_reused_worktree(
     *,
     ticket_id: str | None,
     daemon: NativeDaemonClient,
+    task: TicketTask | None = None,
 ) -> RefreshResult:
     """Fast-forward *wt_path* to *target* with ``merge --ff-only``.
 
@@ -222,6 +225,7 @@ def _ff_reused_worktree(
         ),
         raise_on_branch_mismatch=True,
         daemon=daemon,
+        task=task,
     )
     if verdict is not None:
         return verdict
@@ -263,7 +267,7 @@ def _ff_reused_worktree(
             new_sha=new_sha,
         )
         sync_stop = _sync_reused_submodules(
-            client, branch, wt_path, report, daemon=daemon
+            client, branch, wt_path, report, daemon=daemon, task=task
         )
         if sync_stop is not None:
             return sync_stop
