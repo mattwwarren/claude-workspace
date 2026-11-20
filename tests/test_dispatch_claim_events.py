@@ -194,6 +194,75 @@ class TestReviewApprovalGateAttention:
         ]
 
 
+class TestReviewCapabilityAttention:
+    _PREFIX = (
+        "Lane 'lane-a' runs REVIEW on backend=claude-native, which declares"
+        " ['docker']; the client's review.engine requires ['docker', 'jvm'] and"
+        " lacks ['jvm']. The claim was refused before any worker started: no"
+        " repair was dispatched and nothing was attested. Fix the config in"
+        " clients.yaml: declare the missing capabilities on this lane's"
+        " pipeline.executors.review.runtime_capabilities (a lane's executors"
+        " replace the client's wholesale), or remove them from"
+        " review.engine.requires_runtime_capabilities. Compatible lanes: "
+    )
+
+    @staticmethod
+    def _relane(move_target: str) -> str:
+        return (
+            "To re-lane instead, run `cw lane pause -c test-client lane-a` first,"
+            " then `cw dev-queue requeue T-1 -c test-client`, then"
+            f" `cw dev-queue move T-1 -c test-client --to {move_target}`, then"
+            " `cw lane resume -c test-client lane-a`; move needs the row PENDING,"
+            " and without the pause a dispatch tick may re-park it before move"
+            " runs."
+        )
+
+    @pytest.mark.parametrize(
+        ("compatible", "move_target", "compatible_text"),
+        [
+            (("beta", "gamma"), "beta", "beta, gamma"),
+            ((), "<lane>", "none"),
+        ],
+    )
+    def test_payload_pins_common_fields_then_capability_extras(
+        self,
+        compatible: tuple[str, ...],
+        move_target: str,
+        compatible_text: str,
+    ) -> None:
+        from cw.dispatch.claim.events import _emit_review_capability_attention_event
+        from cw.dispatch.claim.review_capability import CapabilityGap
+
+        gap = CapabilityGap(
+            lane=_LANE,
+            backend=CLAUDE_NATIVE_BACKEND,
+            required=("docker", "jvm"),
+            declared=("docker",),
+            missing=("jvm",),
+            compatible_lanes=compatible,
+        )
+        task = make_adopted_task(lane=_LANE)
+        _emit_review_capability_attention_event(task, _CLIENT, _LANE, gap)
+
+        ev = _only_event()
+        assert ev.type == OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        assert ev.correlation_id == "T-1"
+        assert list(ev.payload.items()) == [
+            *_common(session_id="", paused_status="review_capability_unmet"),
+            ("backend", CLAUDE_NATIVE_BACKEND),
+            ("required_capabilities", ["docker", "jvm"]),
+            ("declared_capabilities", ["docker"]),
+            ("missing_capabilities", ["jvm"]),
+            ("compatible_lanes", list(compatible)),
+            (
+                "details",
+                f"{self._PREFIX}{compatible_text}. Release with"
+                f" `cw dev-queue requeue T-1 -c test-client`. "
+                f"{self._relane(move_target)}",
+            ),
+        ]
+
+
 class TestAdoptionAttention:
     @pytest.mark.parametrize(
         ("paused_status", "observed_head_sha", "commit_range", "expected_observed"),

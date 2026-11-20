@@ -399,10 +399,11 @@ def _emit_review_capability_attention_event(
                 f" {list(gap.required)} and lacks {list(gap.missing)}. The claim was"
                 " refused before any worker started: no repair was dispatched and"
                 " nothing was attested. Fix the config in clients.yaml: declare the"
-                " missing capabilities on this lane's pipeline.executors.review"
-                " .runtime_capabilities (a lane's executors replace the client's"
-                " wholesale), or remove them from review.engine"
-                " .requires_runtime_capabilities. Compatible lanes: "
+                " missing capabilities on this lane's"
+                " pipeline.executors.review.runtime_capabilities (a lane's"
+                " executors replace the client's"
+                " wholesale), or remove them from"
+                " review.engine.requires_runtime_capabilities. Compatible lanes: "
                 f"{compatible}. Release with `{requeue}`. {relane}"
             ),
         },
