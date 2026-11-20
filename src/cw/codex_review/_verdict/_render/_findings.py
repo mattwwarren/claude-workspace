@@ -127,9 +127,8 @@ def _evidence_gap_annotation(accepted: AcceptedFinding) -> str:
     """
     if held_kind(accepted.finding) != "evidence_gap":
         return ""
+    # `held_kind` already guarantees a non-blank gap, so `_truncate` is non-blank.
     gap = _truncate(accepted.finding.evidence_gap, _CONTEST_CLAIM_MAX)
-    if not gap:
-        return ""
     template = _EVIDENCE_GAP_HELD if _is_held(accepted) else _EVIDENCE_GAP
     return template.format(gap=gap)
 

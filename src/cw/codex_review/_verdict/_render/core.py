@@ -39,8 +39,17 @@ if TYPE_CHECKING:
     from cw.review_findings import ReviewVerdict
 
 
-def _gap_headline(count: int, verdict: ReviewVerdict) -> list[str]:
-    """The evidence-gap block (#3793): held findings that rest on an unrun check."""
+def _gap_headline(
+    count: int, verdict: ReviewVerdict, *, repair_follows: bool
+) -> list[str]:
+    """The evidence-gap block (#3793): held findings that rest on an unrun check.
+
+    *repair_follows* is true only when the fix loop will actually repair the
+    other open MUST_FIX findings: no decision contest parks the whole verdict
+    and the fix loop is enabled. Only then does the block say so; otherwise the
+    claim would contradict the contest headline (everything is held) or promise
+    a repair no lane will run.
+    """
     lines = [
         f"**OPERATOR EVIDENCE REQUIRED — {count} finding(s) rest on a check the"
         " reviewer could not run.** An implementation change cannot supply missing"
@@ -48,7 +57,7 @@ def _gap_headline(count: int, verdict: ReviewVerdict) -> list[str]:
         " each lists the check. Settle a finding to dismiss it, or provide the"
         " missing capability and re-run the review, then requeue."
     ]
-    if verdict.blocking:
+    if repair_follows and verdict.blocking:
         lines.append(
             f"{len(verdict.must_fix)} other MUST_FIX finding(s) are open and are"
             " the fix loop's to repair; these held findings are yours and do not"
@@ -107,7 +116,7 @@ def render_verdict_comment(
         # without this branch it would open with the clean headline.
         lines.extend(_contest_headline(len(contested), verdict))
         if gapped:
-            lines.extend(_gap_headline(len(gapped), verdict))
+            lines.extend(_gap_headline(len(gapped), verdict, repair_follows=False))
     elif verdict.blocking:
         lines.append(
             f"**BLOCKING** — {len(verdict.must_fix)} MUST_FIX finding(s) must be "
@@ -117,11 +126,13 @@ def render_verdict_comment(
             _render_history_note(verdict.review, fix_loop_enabled=fix_loop_enabled)
         )
         if gapped:
-            lines.extend(_gap_headline(len(gapped), verdict))
+            lines.extend(
+                _gap_headline(len(gapped), verdict, repair_follows=fix_loop_enabled)
+            )
     elif gapped:
         # #3793: a pure evidence gap is not blocking either; without this
         # branch it would open with the clean headline.
-        lines.extend(_gap_headline(len(gapped), verdict))
+        lines.extend(_gap_headline(len(gapped), verdict, repair_follows=False))
     elif verdict.rejected_must_fix:
         # #1714: never render the clean headline here. Nothing survived to
         # block on, but a MUST_FIX was dropped unread -- "Non-blocking, no

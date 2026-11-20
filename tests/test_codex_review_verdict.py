@@ -5023,6 +5023,10 @@ _GAP_ANNOTATION_HELD = (
     f"dropped: {_EVIDENCE_GAP})_"
 )
 _GAP_ANNOTATION_NOTE = f" _(evidence gap — {_EVIDENCE_GAP})_"
+_REPAIR_SENTENCE = (
+    "{m} other MUST_FIX finding(s) are open and are the fix loop's to repair; "
+    "these held findings are yours and do not block that repair."
+)
 #: Added code lines, so a gap finding and reproduced ones can each anchor.
 _GAP_DIFF_LINES = ("def broken():", "return 1", "def third():")
 
@@ -5212,6 +5216,66 @@ class TestRenderEvidenceGap:
         assert "**BLOCKING** — 1 MUST_FIX finding(s)" in comment
         assert _GAP_HEADLINE.format(n=1) in comment
         assert comment.index("**BLOCKING**") < comment.index("OPERATOR EVIDENCE")
+
+    def test_the_repair_sentence_follows_only_an_enabled_fix_loop(self) -> None:
+        verdict = self._verdict(_make_gap_finding(), _unmarked_second())
+
+        enabled = render_verdict_comment(verdict, fix_loop_enabled=True)
+        disabled = render_verdict_comment(verdict, fix_loop_enabled=False)
+
+        assert _REPAIR_SENTENCE.format(m=1) in enabled
+        assert _REPAIR_SENTENCE.format(m=1) not in disabled
+        assert _GAP_HEADLINE.format(n=1) in disabled
+
+    def test_a_contest_beside_a_gap_renders_both_headlines_contest_first(
+        self,
+    ) -> None:
+        verdict = self._verdict(
+            _marked(),
+            _make_gap_finding(
+                summary="Gap", line_start=11, line_end=11, evidence="return 1"
+            ),
+        )
+
+        lines = render_verdict_comment(verdict, fix_loop_enabled=True).splitlines()
+
+        assert lines[2] == _CONTEST_HEADLINE.format(n=1)
+        assert lines[3] == _GAP_HEADLINE.format(n=1)
+        assert "**BLOCKING**" not in "\n".join(lines)
+
+    def test_a_contest_gap_and_unmarked_finding_never_promise_a_repair(self) -> None:
+        verdict = self._verdict(
+            _marked(),
+            _make_gap_finding(
+                summary="Gap", line_start=11, line_end=11, evidence="return 1"
+            ),
+            _unmarked_third(),
+        )
+
+        comment = render_verdict_comment(verdict, fix_loop_enabled=True)
+
+        assert _OTHER_OPEN_LINE.format(m=1) in comment
+        assert "the fix loop's to repair" not in comment
+        assert _GAP_HEADLINE.format(n=1) in comment
+
+    def test_a_gap_hold_gets_a_settle_payload(self) -> None:
+        verdict = self._verdict(_make_gap_finding())
+
+        comment = render_verdict_comment(verdict, fix_loop_enabled=True)
+
+        assert SETTLE_SECTION_HEADING in comment
+        payloads = _extract_settle_payloads(comment)
+        assert [p["entries"][0]["summary"] for p in payloads] == ["Bug here"]
+
+    def test_a_should_fix_gap_is_annotated_but_not_held(self) -> None:
+        verdict = self._verdict(_make_gap_finding(severity="SHOULD_FIX"))
+
+        comment = render_verdict_comment(verdict, fix_loop_enabled=True)
+
+        assert _GAP_ANNOTATION_NOTE in comment
+        assert "held for the operator" not in comment
+        assert "OPERATOR EVIDENCE REQUIRED" not in comment
+        assert SETTLE_SECTION_HEADING not in comment
 
 
 # ---------------------------------------------------------------------------
