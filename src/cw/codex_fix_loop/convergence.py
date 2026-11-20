@@ -33,7 +33,7 @@ from cw.review_debt import (
     promote_debt_finding,
     record_debt,
 )
-from cw.review_findings import _dedup_key
+from cw.review_findings import _dedup_key, held_kind
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -244,6 +244,39 @@ def _track_open_findings(
             ticket_id=ticket_id,
         )
     return survivors
+
+
+def _carry_held_findings(
+    carried: dict[_OpenFindingKey, AcceptedFinding],
+    verdict: ReviewVerdict,
+) -> tuple[dict[_OpenFindingKey, AcceptedFinding], ReviewVerdict]:
+    """Carry evidence-gap holds across a pass that may not re-raise them (#3793).
+
+    A gap-held MUST_FIX is not in the open-findings tracker, and a delta
+    re-review need not re-raise it, so without a carry a later park would lose
+    the finding. *carried* maps each key to its held entry. A pass that raises
+    the key as ``operator_actionable`` refreshes it; a pass that shows it
+    settled (any other disposition, e.g. ``rejected``) drops it; a key the pass
+    did not raise stays carried. Carried entries the pass did not re-raise are
+    appended to ``accepted`` only, so ``must_fix`` and ``blocking`` are
+    untouched. Returns *verdict* itself when nothing is appended.
+    """
+    next_carried = dict(carried)
+    for af in verdict.accepted:
+        if af.finding.severity != _MUST_FIX or held_kind(af.finding) != "evidence_gap":
+            continue
+        key = _open_finding_key(af.finding)
+        if af.disposition == "operator_actionable":
+            next_carried[key] = af
+        else:
+            next_carried.pop(key, None)
+    raised = {_open_finding_key(af.finding) for af in verdict.accepted}
+    appended = [af for key, af in next_carried.items() if key not in raised]
+    if not appended:
+        return next_carried, verdict
+    return next_carried, verdict.model_copy(
+        update={"accepted": [*verdict.accepted, *appended]}
+    )
 
 
 def _survivors_only_verdict(

@@ -299,6 +299,21 @@ class Finding(BaseModel):
     # the text quotes the decision and the concrete harm. `_decided` holds a
     # MUST_FIX one for the operator and defers a SHOULD_FIX one, never fixed.
     contests_decision: str = ""
+    # #3793: non-blank means "this finding exists because a check I needed could
+    # not be run or observed"; the text names the check. `_decided` holds a
+    # MUST_FIX one for the operator and defers a SHOULD_FIX one, never fixed,
+    # and nothing is dropped. A finding visible in the diff stays blank.
+    evidence_gap: str = Field(
+        default="",
+        description=(
+            "Default empty. Set only when this finding exists because a check you"
+            " needed could not be run or observed in this review (name the"
+            " command/tool and why it could not run: not installed, sandbox/network/"
+            " credential denied, runner capability missing). Never set it for a"
+            " defect you can see in the diff, or reproduced. Held for the operator;"
+            " nothing is dropped; findings you reproduced are unaffected."
+        ),
+    )
     # #3039 (RFC 0017 I1): an engine finding carries its stable identity and
     # rule; ``source`` tells a repo engine finding from a built-in reviewer one.
     # All three default to the builtin shape and are dropped from dumps, so a
@@ -318,6 +333,7 @@ class Finding(BaseModel):
         "release_critical_exception",
         "contests_adjudication",
         "contests_decision",
+        "evidence_gap",
         mode="before",
     )
     @classmethod

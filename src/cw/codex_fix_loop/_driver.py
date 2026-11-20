@@ -78,7 +78,11 @@ from cw.codex_fix_loop.constraints import (
     select_constraint_comment,
     with_row_constraints,
 )
-from cw.codex_fix_loop.convergence import _stamp_debt, _track_open_findings
+from cw.codex_fix_loop.convergence import (
+    _carry_held_findings,
+    _stamp_debt,
+    _track_open_findings,
+)
 from cw.codex_fix_loop.coverage import NO_DELTA_GAP
 from cw.codex_fix_loop.divergence import (
     _DIVERGENCE_STALL_CYCLES,
@@ -95,7 +99,7 @@ from cw.codex_fix_loop.divergence import (
 )
 from cw.codex_fix_loop.park import (
     _clean_exit,
-    _contested_exit,
+    _held_exit,
     _park_survivors,
     _refuse_unread_coverage,
 )
@@ -123,7 +127,7 @@ from cw.models.enums import (
 from cw.models.operator_constraint import split_constraints
 from cw.models.usage import UsageStage
 from cw.review_convergence import unread_from_verdict
-from cw.review_findings import has_contested_decision
+from cw.review_findings import has_held_findings
 from cw.stage_verification.fence import fix_scope_allowlist
 from cw.stage_verification.growth import (
     DEFAULT_CUMULATIVE_GROWTH_BUDGET_LINES,
@@ -231,9 +235,13 @@ def _cycle_exit(
     unread (*delta_gap*, #2877): this cycle's re-review covered only its own
     delta, so it cannot clear a failed role or an unreviewed shard from an
     earlier pass. A decided-constraint contest (#2984) parks before all else.
+    A converged loop that still holds an evidence gap (#3793) parks through
+    the same exit, before the clean exit, so the gap is never lost.
     """
-    if has_contested_decision(verdict):
-        return _contested_exit(
+    if has_held_findings(verdict, "decision_contest") or (
+        not open_findings and has_held_findings(verdict)
+    ):
+        return _held_exit(
             task=task,
             worktree=worktree,
             session_id=session_id,
@@ -643,7 +651,9 @@ def run_review_with_fix_loop(
         verdict is None
         or not verdict.blocking
         or not fix_loop_enabled
-        or has_contested_decision(verdict)  # #2984: the whole verdict parks
+        or has_held_findings(
+            verdict, "decision_contest"
+        )  # #2984: the whole verdict parks
     ):
         return result, verdict
 
@@ -680,6 +690,9 @@ def run_review_with_fix_loop(
         worktree=worktree,
         ticket_id=task.ticket_id,
     )
+    # #3793: an evidence-gap hold is carried across every later pass (cycle 0
+    # has no prior pass to inherit it from), so the converged park lists it.
+    held_carry, verdict = _carry_held_findings({}, verdict)
     verdict = _stamp_debt(verdict, debt_ledger)
     snapshot = _persist_cycle_snapshot(verdict, session_id=session_id, cycle=0)
     # #2816: cycle 0 is a ledger round too; a stop parks before any fix.
@@ -815,6 +828,7 @@ def run_review_with_fix_loop(
             worktree=worktree,
             ticket_id=task.ticket_id,
         )
+        held_carry, verdict = _carry_held_findings(held_carry, verdict)
         verdict = _stamp_debt(verdict, debt_ledger)
         snapshot = _persist_cycle_snapshot(verdict, session_id=session_id, cycle=cycle)
         divergence_state = record_divergence_cycle(

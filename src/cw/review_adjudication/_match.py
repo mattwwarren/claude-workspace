@@ -18,13 +18,27 @@ from typing import TYPE_CHECKING
 
 from cw.review_adjudication._models import _MUST_FIX, _OUTCOME_DISPOSITIONS
 from cw.review_engine.route import EngineRouteError, EngineRouteRefusal, engine_route
-from cw.review_findings import contested_disposition, derive_review_counts
+from cw.review_findings import derive_review_counts, held_disposition, held_kind
 
 if TYPE_CHECKING:
     from cw.review_adjudication._models import Adjudication
     from cw.review_findings import AcceptedFinding, Finding, ReviewVerdict
+    from cw.review_findings._decided import HeldKind
 
 _log = logging.getLogger(__name__)
+
+#: Warning text per hold kind when an adjudication outcome is overridden (#2984,
+#: #3793). The decision-contest text is unchanged, so its log assertions hold.
+_OVERRIDE_LOG: dict[HeldKind, str] = {
+    "decision_contest": (
+        "auto-dev: finding %s:%s contests a decided constraint; its"
+        " adjudication outcome %s is overridden to %s"
+    ),
+    "evidence_gap": (
+        "auto-dev: finding %s:%s rests on an evidence gap; its adjudication"
+        " outcome %s is overridden to %s"
+    ),
+}
 
 #: ``disposition_detail`` for a finding no adjudication entry covered.
 NO_ENTRY_DETAIL = "no adjudication entry recorded for this finding"
@@ -169,18 +183,19 @@ def _with_finding_rule_id(entry: Adjudication, finding: Finding) -> Adjudication
 
 
 def _overridden_by_contest(finding: Finding, entry: Adjudication) -> bool:
-    """Whether *finding*'s contest marker overrides *entry*'s outcome (#2984)."""
-    forced = contested_disposition(finding)
+    """Whether *finding*'s hold marker overrides *entry*'s outcome (#2984, #3793)."""
+    forced = held_disposition(finding)
     return forced is not None and forced[0] != _OUTCOME_DISPOSITIONS[entry.outcome]
 
 
 def _stamp(accepted: AcceptedFinding, entry: Adjudication | None) -> AcceptedFinding:
     """Return *accepted* carrying *entry*'s decision (or the no-decision state).
 
-    A finding carrying a ``contests_decision`` marker (#2984) is stamped from
-    the contest instead, whatever *entry*'s outcome: a MUST_FIX is held for
-    the operator (``operator_actionable``), a SHOULD_FIX becomes a deferred
-    note. A marked finding with no entry still stays ``dropped`` (blocking).
+    A finding carrying a hold marker (a ``contests_decision`` contest, #2984,
+    or an ``evidence_gap``, #3793) is stamped from the hold instead, whatever
+    *entry*'s outcome: a MUST_FIX is held for the operator
+    (``operator_actionable``), a SHOULD_FIX becomes a deferred note. A marked
+    finding with no entry still stays ``dropped`` (blocking).
     """
     if entry is None:
         return accepted.model_copy(
@@ -190,12 +205,12 @@ def _stamp(accepted: AcceptedFinding, entry: Adjudication | None) -> AcceptedFin
                 "adjudicated_fix": False,
             }
         )
-    forced = contested_disposition(accepted.finding)
+    forced = held_disposition(accepted.finding)
     if forced is not None:
-        if _overridden_by_contest(accepted.finding, entry):
+        kind = held_kind(accepted.finding)
+        if kind is not None and _overridden_by_contest(accepted.finding, entry):
             _log.warning(
-                "auto-dev: finding %s:%s contests a decided constraint; its"
-                " adjudication outcome %s is overridden to %s",
+                _OVERRIDE_LOG[kind],
                 accepted.finding.file,
                 accepted.finding.line_start,
                 entry.outcome,

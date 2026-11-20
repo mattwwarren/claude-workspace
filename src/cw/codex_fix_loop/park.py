@@ -50,7 +50,8 @@ _log = logging.getLogger(__name__)
 _ESCALATE_AT_CYCLE = 3
 
 # #2984: the decided-constraint contest park reuses the documented reason the
-# codex synthesis also parks a contested cycle 0 with.
+# codex synthesis also parks a contested cycle 0 with. #3793: a converged loop
+# still holding an evidence gap parks with it too (see `_held_exit`).
 _REVIEW_OPERATOR_ACTIONABLE = "review_operator_actionable"
 
 
@@ -262,7 +263,7 @@ def _park_survivors(
     return patched, survivors
 
 
-def _contested_exit(
+def _held_exit(
     *,
     task: TicketTask,
     worktree: Path,
@@ -274,7 +275,11 @@ def _contested_exit(
     snapshot: _PersistedSnapshot,
     had_real_commit: bool,
 ) -> tuple[AutoDevResult, ReviewVerdict]:
-    """Park a re-review that contests a decided constraint (#2984).
+    """Park a loop that holds a decided-constraint contest or an evidence gap.
+
+    Serves a contest (#2984, a whole-verdict park) and a converged loop that
+    still holds evidence-gap findings (#3793): the gap is carried, not fixed,
+    so the converged loop parks with the held findings rendered.
 
     A contest that first appears in a cycle-N re-review is held for the
     operator, never fixed, and must not be lost to a later delta re-review

@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Evidence-gap hold (#3793).** `Finding.evidence_gap` is a reviewer-set marker for a finding that rests on a check the reviewer could not run. It is held for the operator as `review_operator_actionable` and parks only that finding: reproduced MUST_FIX findings in the same verdict still go to repair, and the park lands once the loop converges. Nothing is dropped. No new blocker reason; the engine summary is not extended. The `contested_*` held-finding helpers are renamed `held_*`.
 - **Per-row merge target seam (#3779, RFC 0020).** `TicketTask.base_branch` records the branch a row merges into; null means the client's `default_branch`. `cw.models.resolve_base_branch(client, task)` is the read seam, and `cw.models.tasks.base_branch.set_base_branch` is the only writer. It refuses any change once the row has spawned (`ever_spawned`), including null to set. Dev-queue schema bumped to v66. Downgrade hazard: an older cw that resaves the queue drops the field and silently retargets an epic row to the default branch. `cw dev-queue show` and `tasks --json` print the stored value (`-` / `null` when unset). No read site routes through the seam yet; ADR 0024 records the trust-root split.
 
 ## [1.104.0] - 2026-11-20

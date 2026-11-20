@@ -60,8 +60,8 @@ from cw.review_adjudication import apply_voided_suppression
 from cw.review_finding_dispositions import suppress_adjudicated_findings
 from cw.review_findings import (
     consolidate_verdict,
-    has_contested_decision,
-    stamp_decision_contests,
+    has_held_findings,
+    stamp_held_findings,
 )
 from cw.worktree import compute_branch_diff_scope
 
@@ -218,11 +218,19 @@ def _verdict_block_reason(verdict: ReviewVerdict) -> str | None:
     ``blocking``: a verdict holding a contested MUST_FIX parks whole as
     ``review_operator_actionable`` even beside an unmarked MUST_FIX, so no fix
     cycle builds on a decision the operator has not yet seen contested.
+
+    An evidence-gap hold (#3793) parks only when nothing unmarked is still
+    blocking, so a reproduced MUST_FIX beside a gap keeps routing to repair
+    (``CODEX_MUST_FIX_FINDINGS``); a verdict whose only hold is a gap parks
+    here. The gap check sits before the mechanically-rejected and
+    discarded-findings reasons so the operator sees the hold.
     """
-    if has_contested_decision(verdict):
+    if has_held_findings(verdict, "decision_contest"):
         return _REVIEW_OPERATOR_ACTIONABLE
     if verdict.blocking:
         return CODEX_MUST_FIX_FINDINGS
+    if has_held_findings(verdict, "evidence_gap"):
+        return _REVIEW_OPERATOR_ACTIONABLE
     if verdict.rejected_must_fix:
         return CODEX_MUST_FIX_MECHANICALLY_REJECTED
     if verdict.run_failures_with_should_fix_discards:
@@ -622,9 +630,9 @@ def synthesize_codex_review_result(
     )
     if settled_suppression is not None:
         verdict = settled_suppression(verdict)
-    # #2984: after every suppression seam, so a finding the operator already
-    # settled (stamped `rejected` above) is never re-stamped as a contest.
-    verdict = stamp_decision_contests(verdict)
+    # #2984/#3793: after every suppression seam, so a finding the operator
+    # already settled (stamped `rejected` above) is never re-stamped as a hold.
+    verdict = stamp_held_findings(verdict)
     block_reason = _verdict_block_reason(verdict)
     if block_reason is not None:
         blocked = make_codex_blocked(
