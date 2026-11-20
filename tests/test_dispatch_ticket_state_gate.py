@@ -49,6 +49,7 @@ from cw.models import (
 )
 from cw.models.orchestrator_config.lane import LaneConfig
 from tests._review_debt_helpers import _register_debt_client
+from tests._shared.cli_preflight import _write_project_config_yaml
 from tests._shared.session_seeding import _make_ticket_task
 from tests._shared.sidecar_failures import fail_state_writes
 from tests._tool_fakes import FakeGhCli
@@ -207,11 +208,14 @@ def test_a_failed_read_after_an_expired_open_keeps_no_fresh_verdict(
     assert probe.attempted_at == _T0
 
 
-@pytest.mark.parametrize("tracker", ["linear", None])
+@pytest.mark.parametrize("tracker", ["linear", None, ""])
 def test_a_non_github_tracker_is_never_read(
     root: Path, cli: FakeGhCli, tracker: str | None
 ) -> None:
     _register_debt_client(root, name=_CLIENT, tracker=tracker)
+    if tracker == "":
+        # _register_debt_client writes `system: ` (YAML null); pin a real "".
+        _write_project_config_yaml(root, 'tracking:\n  primary:\n    system: ""\n')
     other = ClientConfig(name=_CLIENT, workspace_path=root, default_branch="main")
 
     assert _resolve(other, _row()) == {}
