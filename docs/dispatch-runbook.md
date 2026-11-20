@@ -326,7 +326,10 @@ always carries `disposition: null`; handle it as its own case ("cancelled, no
 disposition to report"), not an error.
 
 An orchestrator started with `cw orchestrator-start` gets this wiring per
-session: it writes a client-scoped `cw-operator` MCP config under the state
+session and registers as an orchestrator (`Session.is_orchestrator`, #3789),
+so it uses no per-client ceiling slot. Under `reap_policy: signal_only` a dead
+registered orchestrator leaves the ceiling count and the ORPHAN? annotation,
+and still counts against `host_session_budget`. It writes a client-scoped `cw-operator` MCP config under the state
 dir, launches with `--mcp-config <file>` and `server:cw-operator`, and leaves
 the repo's `.mcp.json` alone (`cw spawn close` removes the file). On a
 terminal it also opens in your terminal by default; `--detach` is the opt-out
@@ -391,7 +394,12 @@ The default concurrency cap is `OrchestratorConfig.default_ceiling`
 `orchestrator.yaml`; `max_parallel_clients` additionally limits how many
 clients are eligible per tick (default: no limit). The legacy
 `default_max_parallel` / `per_client_max_parallel` keys are deprecated
-aliases that still load with a one-time warning.
+aliases that still load with a one-time warning. `per_client_ceiling` is the
+worker ceiling: an orchestrator started by `cw orchestrator-start` after
+#3789 is registered and uses no slot. An orchestrator that predates it or was
+launched by hand still counts until it is restarted via
+`cw orchestrator-start`; until then, raising `per_client_ceiling` by one
+remains the workaround.
 
 `OrchestratorConfig.host_session_budget` (#1444, default: `null` = off) adds
 a further, fleet-wide ceiling: the total number of DAEMON sessions running
@@ -513,6 +521,7 @@ for scripting and field reads; it prints two distinct sections:
   - For current live session count, use the top table or `cw status` (which
     shows sessions as recorded: a dead worker stays counted until the next
     dispatch tick, `cw start` or `cw doctor --reap`).
+  - ORPHAN? never names a registered orchestrator (#3789).
   - `[ORPHAN? — N session(s) counted against the ceiling vs M RUNNING row(s)]`
     (#2142) appears when that tick counted more sessions than the top table has
     RUNNING rows for the client. The two numbers are independent metrics by

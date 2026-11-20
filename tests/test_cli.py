@@ -10802,11 +10802,13 @@ class TestDevQueueStatusRunningRowDivergence:
         ticket: str = "2524",
         client: str = "orphan-client",
         minutes_ago: int = 60,
+        is_orchestrator: bool = False,
     ) -> Session:
         return _make_daemon_session(
             id=sid,
             name=f"{client}/auto-dev/{ticket}",
             client=client,
+            is_orchestrator=is_orchestrator,
             started_at=datetime.now(UTC) - timedelta(minutes=minutes_ago),
         )
 
@@ -10881,6 +10883,46 @@ class TestDevQueueStatusRunningRowDivergence:
 
         assert "no occupied row owns: s2524 (2524)" in line
         assert "parked01" not in line
+
+    def test_status_no_orphan_annotation_when_registered_orchestrator_is_extra_session(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3789: a registered orchestrator uses no ceiling slot, so the tick
+        counts only the owner's session (running=1) against the one RUNNING row
+        and the divergence annotation stays off."""
+        self._seed_orphan_world(
+            monkeypatch,
+            [
+                self._orphan_session("owner001", ticket="2142"),
+                self._orphan_session("orch0001", ticket="3789", is_orchestrator=True),
+            ],
+            running=1,
+        )
+
+        line = self._status_line()
+
+        assert "[ORPHAN?" not in line
+
+    def test_status_orphan_annotation_names_leak_not_registered_orchestrator(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3789: the annotation names the unregistered leaked worker and never
+        the registered orchestrator, which is exempt from the ceiling count."""
+        self._seed_orphan_world(
+            monkeypatch,
+            [
+                self._orphan_session("owner001", ticket="2142"),
+                self._orphan_session("orch0001", ticket="3789", is_orchestrator=True),
+                self._orphan_session("leak0001", ticket="2524"),
+            ],
+            running=2,
+        )
+
+        line = self._status_line()
+
+        assert "no occupied row owns: leak0001 (2524)" in line
+        assert "orch0001" not in line
+        assert "owner001" not in line
 
     def test_status_orphan_annotation_excludes_other_clients_sessions(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch

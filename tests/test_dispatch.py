@@ -6466,6 +6466,66 @@ class TestDispatchTickEvents:
         assert p["running"] == 1
         assert p["cap"] == 1
 
+    def test_registered_orchestrator_does_not_cause_cap_full(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """#3789: a lone registered orchestrator at cap 1 does not fill the ceiling."""
+        write_clients_yaml(sample_client_config)
+        add_ticket(TicketTask(ticket_id="TICK-ORCH", client="test-client"))
+        orch = _make_daemon_session(
+            is_orchestrator=True,
+            id="running-sess",
+            name="test-client/orchestrator",
+            client="test-client",
+            workspace_path=sample_client_config.workspace_path,
+        )
+        save_state(CwState(sessions=[orch]))
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-tick-orch-cap",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        p = events[0].payload
+        assert p["skip_reason"] != DispatchSkipReason.CAP_FULL
+        # The lone pending ticket was claimed: the registered orchestrator held
+        # no ceiling slot. (``running`` is post-claim, so it is not asserted.)
+        assert p["claimed"] == 1
+        assert p["cap"] == 1
+
+    def test_unregistered_daemon_at_cap_still_cap_full(
+        self,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """#3789 twin: the same session without the flag still fills cap 1."""
+        write_clients_yaml(sample_client_config)
+        add_ticket(TicketTask(ticket_id="TICK-ORCH2", client="test-client"))
+        sess = _make_daemon_session(
+            id="running-sess",
+            name="test-client/orchestrator",
+            client="test-client",
+            workspace_path=sample_client_config.workspace_path,
+        )
+        save_state(CwState(sessions=[sess]))
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-tick-unreg-cap",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        p = events[0].payload
+        assert p["skip_reason"] == DispatchSkipReason.CAP_FULL
+        assert p["running"] == 1
+
     def test_skip_reason_freshness_gate_on_stale_main(
         self,
         sample_client_config: ClientConfig,
@@ -22743,6 +22803,54 @@ def test_usage_limit_skip_event_running_count_matches_legacy_ceiling_oracle() ->
     assert events[0].payload["running"] == _legacy_ceiling_count(
         sessions, "ceil-client"
     )
+
+
+def test_client_tick_snapshot_excludes_registered_orchestrator() -> None:
+    """#3789: a registered orchestrator adds nothing to the ceiling count."""
+    from cw.dispatch.tick import _client_tick_snapshot
+
+    sessions = _mixed_ceiling_sessions()
+    expected = _legacy_ceiling_count(sessions, "ceil-client")
+    sessions.append(
+        _make_daemon_session(
+            id="orch-reg",
+            name="ceil-client/orchestrator",
+            client="ceil-client",
+            is_orchestrator=True,
+        )
+    )
+    client = ClientConfig(name="ceil-client", workspace_path=Path("/tmp/ws"))
+
+    snapshot = _client_tick_snapshot(
+        client, state=CwState(sessions=sessions), config=OrchestratorConfig()
+    )
+
+    assert snapshot.running_count == expected
+
+
+def test_usage_limit_skip_event_excludes_registered_orchestrator() -> None:
+    """#3789: the usage-limit DISPATCH_TICK running count ignores the orchestrator."""
+    from cw.dispatch.gating.usage_limit import _emit_usage_limit_skip_events
+
+    sessions = _mixed_ceiling_sessions()
+    expected = _legacy_ceiling_count(sessions, "ceil-client")
+    sessions.append(
+        _make_daemon_session(
+            id="orch-reg",
+            name="ceil-client/orchestrator",
+            client="ceil-client",
+            is_orchestrator=True,
+        )
+    )
+    client = ClientConfig(name="ceil-client", workspace_path=Path("/tmp/ws"))
+
+    _emit_usage_limit_skip_events(
+        {"ceil-client": client}, OrchestratorConfig(), CwState(sessions=sessions)
+    )
+
+    events = read_events(event_types=[OrchestratorEventType.DISPATCH_TICK])
+    assert len(events) == 1
+    assert events[0].payload["running"] == expected
 
 
 class TestRunDispatchLoopReviewDebtEnqueueHook:

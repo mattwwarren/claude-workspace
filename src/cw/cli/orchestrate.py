@@ -772,6 +772,9 @@ def orchestrator_start(
     the attach and prints the ``claude attach`` command. A non-TTY caller never
     attaches. An attach failure never fails the spawn: the command prints the
     attach command to stderr and exits 0.
+
+    The session registers as an orchestrator (``Session.is_orchestrator``) so
+    it does not occupy a client-ceiling slot.
     """
     client_cfg = _resolve_client_or_infer(client)
     base_url = resolve_base_url()
@@ -789,6 +792,7 @@ def orchestrator_start(
             permission_mode="acceptEdits",
             native_daemon=native_daemon,
             session_id=sid,
+            orchestrator=True,
         )
     except (WorkerLaunchedError, SpawnUnregisteredError):
         # A worker exists (or may still register) with --mcp-config pointing

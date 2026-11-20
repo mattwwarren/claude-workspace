@@ -83,6 +83,11 @@ class Session(BaseModel):
     surface_ref: str | None = None
     claude_session_id: str | None = None
     auto_backgrounded: bool = False
+    # #3789: set only by ``cw orchestrator-start`` (never inferred from name,
+    # prompt or purpose). A registered orchestrator is exempt from
+    # counts_toward_client_ceiling. Defaulted, so old rows load False and no
+    # schema version bump is needed (precedent: #2437).
+    is_orchestrator: bool = False
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     idle_at: datetime | None = None
     # Consecutive idle-watchdog observations where this session failed liveness
@@ -223,7 +228,10 @@ def counts_toward_client_ceiling(session: Session, client_name: str) -> bool:
     session of that client that is ACTIVE or IDLE. Session-based by design --
     a pre-existing DAEMON session is real host load whether or not a queue row
     tracks it -- so ``cw dev-queue status`` can name the sessions no occupied
-    row owns. Shared by ``cw.dispatch.tick._client_tick_snapshot``,
+    row owns. A session registered as an orchestrator (#3789,
+    ``Session.is_orchestrator``) is idle host load by design and does not
+    count; an unregistered DAEMON session still counts, so a leaked worker
+    stays visible. Shared by ``cw.dispatch.tick._client_tick_snapshot``,
     ``cw.dispatch.gating.usage_limit._emit_usage_limit_skip_events`` and that status
     annotation, so the three counts cannot drift.
     """
@@ -231,4 +239,5 @@ def counts_toward_client_ceiling(session: Session, client_name: str) -> bool:
         session.client == client_name
         and session.origin == SessionOrigin.DAEMON
         and session.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
+        and not session.is_orchestrator
     )
