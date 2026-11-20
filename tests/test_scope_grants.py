@@ -357,3 +357,18 @@ class TestParseDriftExtraFiles:
         items = "\n".join(f"- f{i}.py" for i in range(MAX_GRANT_PATHS + 5))
         result = parse_drift_extra_files(f"extra_files:\n{items}")
         assert len(result) == MAX_GRANT_PATHS
+
+
+class TestPrNumberAndSlugFallbacks:
+    def test_pr_number_from_url(self) -> None:
+        from cw.scope_grants import pr_number_from_url
+
+        assert pr_number_from_url("https://github.com/acme/widgets/pull/42") == 42
+        assert pr_number_from_url("") is None
+        assert pr_number_from_url(None) is None
+        assert pr_number_from_url("https://example.com/not-a-pr") is None
+
+    def test_grant_repo_slug_is_none_for_an_unknown_client(self) -> None:
+        from cw.cli.dev_queue.approve import _grant_repo_slug
+
+        assert _grant_repo_slug("no-such-client-3772") is None
