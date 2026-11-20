@@ -221,6 +221,10 @@ def _head_reaches_entry(events: Sequence[_Event]) -> bool:
 def _fix_spans(inputs: HistoryInputs, notes: list[str]) -> _Fixes:
     """The row's FIX sessions as spans; a live one runs to ``now``."""
     row_start = _aware(inputs.task.created_at)
+    # Why: a re-enqueued sibling row shares this row's client and worktree, so its
+    # fix sessions tie to this row too; the events rule (``_usable_events``)
+    # already drops everything at or after ``row_ends_at`` and sessions follow it.
+    row_end = None if inputs.row_ends_at is None else _aware(inputs.row_ends_at)
     spans: list[_Span] = []
     pre_row = no_end = 0
     live_counted = open_skipped = False
@@ -228,6 +232,8 @@ def _fix_spans(inputs: HistoryInputs, notes: list[str]) -> _Fixes:
         started = _aware(span.started_at)
         if started < row_start:
             pre_row += 1
+            continue
+        if row_end is not None and started >= row_end:
             continue
         ended, live = _span_end(span, inputs.now)
         if ended is None:

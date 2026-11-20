@@ -414,6 +414,61 @@ def test_a_fix_session_that_predates_the_row_is_excluded(tmp_path: Path) -> None
     assert note_no_fix_span("2") in history.notes
 
 
+_ROW_ENDS_AT = datetime(2026, 10, 27, 14, 30, tzinfo=UTC)
+
+
+def test_fix_sessions_at_or_after_row_ends_at_are_a_sibling_rows(
+    tmp_path: Path,
+) -> None:
+    """A re-enqueued sibling shares the worktree; its fix sessions are not ours."""
+    task, sessions = seed_fix_cycle(tmp_path)
+    worktree = derived_worktree(tmp_path)
+    baseline = _history(tmp_path, task, sessions, row_ends_at=_ROW_ENDS_AT)
+    sibling = [
+        fix_session_for(
+            task,
+            "sess-at-end",
+            "2026-10-27T14:30:00+00:00",
+            "2026-10-27T14:45:00+00:00",
+            worktree=worktree,
+        ),
+        fix_session_for(
+            task, "sess-live-after", "2026-10-27T14:35:00+00:00", worktree=worktree
+        ),
+    ]
+
+    history = _history(tmp_path, task, [*sessions, *sibling], row_ends_at=_ROW_ENDS_AT)
+
+    assert baseline.summary.stage_seconds.repairing == 1200.0
+    assert _parts(history.summary.stage_seconds) == _parts(
+        baseline.summary.stage_seconds
+    )
+    assert _parts(history.rounds[1].stage_seconds) == _parts(
+        baseline.rounds[1].stage_seconds
+    )
+    assert history.rounds[1].stage_seconds.repairing == 1200.0
+    assert history.summary.stage_seconds_as_of is None
+    assert history.notes == baseline.notes
+
+
+def test_a_fix_session_just_before_row_ends_at_is_still_counted(
+    tmp_path: Path,
+) -> None:
+    task, sessions = seed_fix_cycle(tmp_path)
+    late = fix_session_for(
+        task,
+        "sess-late",
+        "2026-10-27T14:29:59+00:00",
+        "2026-10-27T14:29:59.500000+00:00",
+        worktree=derived_worktree(tmp_path),
+    )
+
+    history = _history(tmp_path, task, [*sessions, late], row_ends_at=_ROW_ENDS_AT)
+
+    assert history.summary.stage_seconds.repairing is not None
+    assert history.summary.stage_seconds.repairing > 1200.0
+
+
 def test_other_purposes_and_other_clients_are_not_repair_time(tmp_path: Path) -> None:
     task, sessions = seed_fix_cycle(tmp_path)
     worktree = derived_worktree(tmp_path)
