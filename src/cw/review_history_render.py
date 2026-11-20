@@ -6,6 +6,10 @@ key order, every key always printed (``-`` when absent), nothing truncated, and
 no tables. Finding text is folded onto one line. Then one indented block per
 round, then the ``settled_other``, ``dispositions``, ``voided``, ``releases``
 and ``notes`` blocks; ``notes`` is always printed.
+
+``stage_time`` (#3792) is one more key in the header, before ``sources``, and in
+each round block, after ``wall_time``: the four stage parts, ``not recorded``
+for a null one.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ if TYPE_CHECKING:
         ReviewHistory,
         RoundView,
         SettledView,
+        StageSeconds,
         VoidedView,
     )
 
@@ -62,6 +67,22 @@ def _duration(seconds: float | None) -> str:
     if hours:
         return f"{sign}{hours}h{minutes:02d}m{secs:02d}s"
     return f"{sign}{minutes}m{secs:02d}s"
+
+
+def _stage_time(stage: StageSeconds) -> str:
+    """The four stage parts, each through :func:`_duration` (#3792)."""
+    return (
+        f"queued {_duration(stage.queued)}, reviewing {_duration(stage.reviewing)}, "
+        f"repairing {_duration(stage.repairing)}, gate {_duration(stage.gate)}"
+    )
+
+
+def _summary_stage_time(history: ReviewHistory) -> str:
+    summary = history.summary
+    text = _stage_time(summary.stage_seconds)
+    if summary.stage_seconds_as_of:
+        text += f" (open wait counted to {summary.stage_seconds_as_of})"
+    return text
 
 
 def _block(name: str, lines: Sequence[str]) -> list[str]:
@@ -123,6 +144,7 @@ def _header(history: ReviewHistory) -> list[str]:
         _kv("confirm_backend", _or_absent(summary.confirm_backend)),
         _kv("deferred", _deferred(history)),
         _kv("confirm_failures", _count(summary.confirm_failures)),
+        _kv("stage_time", _summary_stage_time(history)),
         _kv("sources", ", ".join(history.sources) or _ABSENT),
     ]
 
@@ -179,6 +201,7 @@ def _round_block(view: RoundView) -> list[str]:
             )
         )
     lines.append(_kv("wall_time", _duration(view.wall_seconds), pad))
+    lines.append(_kv("stage_time", _stage_time(view.stage_seconds), pad))
     lines.append(_kv("recorded_at", _or_absent(view.recorded_at), pad))
     return lines
 

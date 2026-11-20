@@ -17,11 +17,14 @@ cross-client tests is recorded directly, through the real ``record_event``.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from datetime import datetime
+from typing import TYPE_CHECKING, NamedTuple
 
 from freezegun import freeze_time
 
+from cw.dev_queue import transition_task_status
 from cw.events import record_event
 from cw.models import (
     ClientConfig,
@@ -30,7 +33,7 @@ from cw.models import (
     QueueItemStatus,
     Stage,
 )
-from cw.models.enums import StageIdentifier
+from cw.models.enums import SessionPurpose, SessionStatus, StageIdentifier
 from cw.review_adjudication import VoidedFinding, apply_voided_suppression
 from cw.review_adjudication._voided import _voided_rationale
 from cw.review_convergence import (
@@ -325,12 +328,23 @@ def history_for(
     configured: bool = True,
     worktree: Path | None = None,
     client_cfg: ClientConfig | None = None,
+    now: str | None = None,
+    **extra: object,
 ) -> ReviewHistory:
-    """Collect and build *task*'s history, as ``cw review history`` does."""
+    """Collect and build *task*'s history, as ``cw review history`` does.
+
+    *now* freezes the clock around the collection, which is what stamps
+    ``HistoryInputs.now`` (#3792); *extra* goes to ``collect_history_inputs``.
+    """
     cfg = client_cfg or (client_config(tmp_path) if configured else None)
-    inputs = collect_history_inputs(
-        task, cfg, CwState(sessions=list(sessions)), worktree_override=worktree
-    )
+    with freeze_time(now) if now else nullcontext():
+        inputs = collect_history_inputs(
+            task,
+            cfg,
+            CwState(sessions=list(sessions)),
+            worktree_override=worktree,
+            **extra,
+        )
     return build_review_history(inputs)
 
 
@@ -620,3 +634,339 @@ def write_corrupt_ledger(worktree: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{not json", encoding="utf-8")
     return path
+
+
+# --- stage timing (#3792) ----------------------------------------------------------
+
+#: When the timing fixtures' dev-queue row was created (before every event).
+ROW_CREATED = "2026-10-27T11:00:00+00:00"
+
+#: The Public Strings of the plan, verbatim (field descriptions of the model).
+STAGE_SECONDS_DOC = (
+    "Seconds the review stage spent queued, reviewing, repairing and parked at "
+    "a gate (#3792)."
+)
+STAGE_SECONDS_QUEUED = (
+    "Seconds the row was PENDING at the review stage, waiting to be "
+    "dispatched. In a round, counted only inside that round's `wall_seconds` "
+    "window; in the summary, from entry to the review stage, so it includes "
+    "the initial wait before round 1. Null when the recorded status "
+    "transitions do not cover the window; 0.0 when they do and the row never "
+    "waited."
+)
+STAGE_SECONDS_REVIEWING = (
+    "Seconds the row was RUNNING at the review stage with no fix session "
+    "running: the REVIEW session's boot, reviewers and adjudication, plus the "
+    "latency between a fix handoff and the fix session's start. Null when the "
+    "recorded status transitions do not cover the window; 0.0 when they do "
+    "and the row spent no such time."
+)
+STAGE_SECONDS_REPAIRING = (
+    "Seconds a fix session of this row was running, from the session's "
+    "`started_at` to its `completed_at` (a still-live session is counted up "
+    "to `summary.stage_seconds_as_of`). It starts at the fix session's "
+    "`started_at`, not at the fix handoff. Null when a fix was dispatched but "
+    "no fix session of this row overlaps the window; 0.0 when no fix was "
+    "dispatched."
+)
+STAGE_SECONDS_GATE = (
+    "Seconds the row spent parked at the review stage waiting on someone "
+    "outside the pipeline, including operator decisions, sign-offs and crash "
+    "or reap parks: every BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF "
+    "segment, whatever the reason. Null when the recorded status transitions "
+    "do not cover the window; 0.0 when they do and the row was never parked."
+)
+WALL_SECONDS = (
+    "Seconds since the previous round's record (round 1: since this row's "
+    "attributable `s3_review_started` event), so it includes the fix cycle in "
+    "between; null when either end is unknown. See `stage_seconds` for the "
+    "split; when all four of its parts are recorded they sum to this value."
+)
+ROUND_STAGE_SECONDS = (
+    "Where this round's `wall_seconds` window went, in queued, reviewing, "
+    "repairing and gate seconds (round 1 starts at its `s3_review_started` "
+    "event, so the wait before the review claim is not in it). Derived at "
+    "report time from this row's `task.transition` events and its fix "
+    "sessions; a part is null when that evidence is missing (see `notes`), "
+    "and an all-null block means nothing was recorded. Time in two states at "
+    "once counts once, as gate, then queued, then repairing, then reviewing."
+)
+SUMMARY_STAGE_SECONDS = (
+    "Where the whole review stage's time went, in queued, reviewing, "
+    "repairing and gate seconds: every review-stage status segment from entry "
+    "to exit, including the initial queue wait before round 1 and any gate "
+    "after the last round. Derived at report time; an open wait is counted up "
+    "to `stage_seconds_as_of`. A part is null when its evidence is missing "
+    "(see `notes`); an all-null block means nothing was recorded."
+)
+SUMMARY_AS_OF = (
+    "ISO time up to which a still-open wait (the row's last status segment, "
+    "or a live fix session) was counted into `stage_seconds`; null when "
+    "nothing open was counted."
+)
+
+#: The sentence appended to the ``cw review history`` event-tie paragraph.
+STAGE_TIE_SENTENCE = (
+    "A `task.transition` event is used for stage time only when it names this "
+    "client and ticket id and was created within this row's lifetime (not "
+    "before the row was created, and not at or after the next re-enqueued "
+    "row's creation); a session id is not a tie."
+)
+#: The new paragraph of the ``cw review history`` docstring.
+STAGE_DOC_PARAGRAPH = (
+    "Stage time: each round, and the summary, also splits where the time went "
+    "into `stage_seconds`. `queued` is the row PENDING at the review stage. "
+    "`reviewing` is the row RUNNING with no fix session running, so it "
+    "includes the gap between a fix handoff and the fix session's start. "
+    "`repairing` runs from a fix session's `started_at` to its "
+    "`completed_at`. `gate` is the row parked at the review stage waiting on "
+    "someone outside the pipeline: operator decisions, sign-offs and crash or "
+    "reap parks. All of it is derived from the row's `task.transition` events "
+    "and its fix sessions; nothing new is recorded. A part is `not recorded` "
+    "(null in `--json`) when its evidence is missing, for example after the "
+    "event inbox was pruned, and `0.0` when the row spent no time there. A "
+    "still-open wait is counted up to `summary.stage_seconds_as_of`."
+)
+
+#: Note 1: no usable ``task.transition`` event.
+NOTE_NO_TRANSITIONS = (
+    "no task.transition event could be used for this row (the event inbox may "
+    "have been pruned); queued, reviewing and gate stage timings not recorded"
+)
+#: Note 5: an open segment with no current time.
+NOTE_OPEN_SEGMENT = (
+    "the row's last status segment or a live fix session is still open and no "
+    "current time was available; not counted in stage timings"
+)
+#: Note 11: the summary's head is not covered by the transition events.
+NOTE_HEAD_NOT_COVERED = (
+    "queued, reviewing and gate stage timings not recorded in the summary: "
+    "the row's task.transition events do not reach back to the start of its "
+    "review stage (the event inbox may have been partly pruned)"
+)
+
+
+def note_uncovered(rounds: str) -> str:
+    """Note 2: the rounds whose window the transition events do not cover."""
+    return (
+        f"queued, reviewing and gate stage timings not recorded for round(s) "
+        f"{rounds}: the row's task.transition events do not cover the round's "
+        "window"
+    )
+
+
+def note_unusable(rounds: str) -> str:
+    """Note 3: the rounds whose wall-time window is unknown or not positive."""
+    return (
+        f"stage timings not recorded for round(s) {rounds}: the round's "
+        "wall-time window is unknown or not positive"
+    )
+
+
+def note_no_fix_span(rounds: str) -> str:
+    """Note 4: the rounds whose fix was dispatched with no fix span."""
+    return (
+        f"repairing stage timing not recorded for round(s) {rounds}: a fix was "
+        "dispatched but no fix session of this row overlaps the round's window"
+    )
+
+
+def note_last_mismatch(event_status: str, row_status: str) -> str:
+    """Note 6: the last transition event disagrees with the row's status."""
+    return (
+        f"the last task.transition event for this row says '{event_status}' "
+        f"but the row is '{row_status}'; that segment is not counted in stage "
+        "timings"
+    )
+
+
+def note_foreign_transitions(count: int, ticket_id: str = ACME_TICKET) -> str:
+    """Note 7: transition events that could not be tied or are unusable."""
+    return (
+        f"{count} task.transition event(s) for ticket id '{ticket_id}' could "
+        "not be tied to this row or carry an unusable payload; not used"
+    )
+
+
+def note_pre_row_fix(count: int) -> str:
+    """Note 8: fix sessions that started before the row was created."""
+    return (
+        f"{count} fix session(s) of this client started before this row was "
+        "created; not counted in repairing stage timing"
+    )
+
+
+def note_fix_no_completed_at(count: int) -> str:
+    """Note 9: terminal fix sessions with no ``completed_at``."""
+    return (
+        f"{count} terminal fix session(s) of this row have no completed_at; "
+        "not counted in repairing stage timing"
+    )
+
+
+def note_unreadable_inbox(exc_name: str) -> str:
+    """Note 10: the event inbox could not be read."""
+    return (
+        f"event inbox unreadable ({exc_name}); round-1 wall time, voided "
+        "findings and queued, reviewing and gate stage timings not shown"
+    )
+
+
+class Step(NamedTuple):
+    """One ``task.transition`` of a timing fixture's row."""
+
+    at: str
+    status: QueueItemStatus
+    stage: Stage = Stage.REVIEW
+    blocked_reason: str | None = None
+
+
+def timing_task(**overrides: object) -> TicketTask:
+    """A COMPLETED review row created at :data:`ROW_CREATED`, bound to acme's session.
+
+    Events earlier than the row's ``created_at`` are never its own, so every
+    timing fixture pins it before its first transition.
+    """
+    kwargs: dict[str, object] = {
+        "created_at": datetime.fromisoformat(ROW_CREATED),
+        "session_id": ACME_SESSION,
+    }
+    kwargs.update(overrides)
+    return review_task(**kwargs)
+
+
+def transition_event(
+    task: TicketTask,
+    new_status: QueueItemStatus,
+    at: str,
+    *,
+    stage: Stage = Stage.REVIEW,
+    client: str | None = None,
+    blocked_reason: str | None = None,
+) -> None:
+    """Emit the real ``task.transition`` event of a move to *new_status* at *at*.
+
+    Mutates a throwaway copy of *task* (never *task* itself) and calls the real
+    ``transition_task_status`` under ``freeze_time(at)``, so the payload is the
+    producer's. The copy starts in a status that differs from *new_status*, so
+    the seam always emits.
+    """
+    old = (
+        QueueItemStatus.PENDING
+        if new_status is QueueItemStatus.RUNNING
+        else QueueItemStatus.RUNNING
+    )
+    row = task.model_copy(
+        deep=True,
+        update={"status": old, "stage": stage, "client": client or task.client},
+    )
+    with freeze_time(at):
+        transition_task_status(
+            row, new_status, blocked_reason=blocked_reason, unproductive=False
+        )
+
+
+def status_chain(task: TicketTask, *steps: Step) -> None:
+    """Emit one real ``task.transition`` event per step of *steps*, in order."""
+    for step in steps:
+        transition_event(
+            task,
+            step.status,
+            step.at,
+            stage=step.stage,
+            blocked_reason=step.blocked_reason,
+        )
+
+
+def fix_session_for(
+    task: TicketTask,
+    sid: str,
+    started: str,
+    completed: str | None = None,
+    *,
+    worktree: Path,
+    status: SessionStatus | None = None,
+    **overrides: object,
+) -> Session:
+    """A FIX session of *task*'s client, homed at *worktree*, started at *started*.
+
+    *status* defaults to COMPLETED with a *completed* time and ACTIVE without.
+    """
+    chosen = status or (SessionStatus.COMPLETED if completed else SessionStatus.ACTIVE)
+    return session_for(
+        task,
+        sid,
+        purpose=SessionPurpose.FIX,
+        worktree_path=worktree,
+        status=chosen,
+        started_at=datetime.fromisoformat(started),
+        completed_at=datetime.fromisoformat(completed) if completed else None,
+        **overrides,
+    )
+
+
+#: The fix cycle's timeline (all 2026-10-27), shared by the timing, render and CLI
+#: tests. Round 1 is recorded at 12:00:00 (window 11:50:00-12:00:00), its fix
+#: session runs 12:05:00-12:25:00, round 2 is recorded at 12:50:00.
+FIX_CYCLE_STAMPS = ("2026-10-27T12:00:00+00:00", "2026-10-27T12:50:00+00:00")
+FIX_SESSION_STARTED = "2026-10-27T12:05:00+00:00"
+FIX_SESSION_COMPLETED = "2026-10-27T12:25:00+00:00"
+#: PENDING (queued 30m), RUNNING, [fix], PENDING (4m30s), RUNNING, round 2, gate
+#: BLOCKED_ON_USER 1h02m, RUNNING, COMPLETED.
+FIX_CYCLE_STEPS = (
+    Step("2026-10-27T11:00:00+00:00", QueueItemStatus.PENDING),
+    Step("2026-10-27T11:30:00+00:00", QueueItemStatus.RUNNING),
+    Step("2026-10-27T12:25:30+00:00", QueueItemStatus.PENDING),
+    Step("2026-10-27T12:30:00+00:00", QueueItemStatus.RUNNING),
+    Step(
+        "2026-10-27T13:00:00+00:00",
+        QueueItemStatus.BLOCKED_ON_USER,
+        blocked_reason="review_pending_approval",
+    ),
+    Step("2026-10-27T14:02:00+00:00", QueueItemStatus.RUNNING),
+    Step("2026-10-27T14:10:00+00:00", QueueItemStatus.COMPLETED),
+)
+
+
+def fix_cycle_ledger() -> ConvergenceLedger:
+    """A dirty round (two fixes dispatched) then a clean one, through the engine."""
+    ledger = fresh_ledger(ticket_id=ACME_TICKET)
+    ledger, _ = record(
+        ledger,
+        round_finding(summary="a"),
+        round_finding(summary="b"),
+        sha="sha-0001",
+    )
+    ledger, _ = record(ledger, sha="sha-0002")
+    assert ledger.status == "converged"
+    assert ledger.rounds[0].new_fix == 2
+    return timed(ledger, *FIX_CYCLE_STAMPS)
+
+
+def seed_fix_cycle(
+    tmp_path: Path,
+    steps: Sequence[Step] = FIX_CYCLE_STEPS,
+    *,
+    ledger: ConvergenceLedger | None = None,
+    with_start: bool = True,
+) -> tuple[TicketTask, list[Session]]:
+    """Write the fix cycle's ledger, ``stage.entered`` start and transition chain.
+
+    Returns the row (created before the chain, COMPLETED) and its one FIX
+    session (home: the row's derived worktree). The review start is 11:50:00;
+    *with_start* ``False`` omits that event, *ledger* replaces the ledger.
+    """
+    worktree = derived_worktree(tmp_path)
+    write_ledger(worktree, ledger or fix_cycle_ledger())
+    task = timing_task()
+    if with_start:
+        stage_entered_event(ACME_TICKET, ACME_SESSION, "2026-10-27T11:50:00+00:00")
+    status_chain(task, *steps)
+    fix = fix_session_for(
+        task,
+        "sess-fix",
+        FIX_SESSION_STARTED,
+        FIX_SESSION_COMPLETED,
+        worktree=worktree,
+    )
+    return task, [fix]

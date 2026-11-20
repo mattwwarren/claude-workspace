@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from freezegun import freeze_time
 
 from cw.exceptions import CwError
-from cw.models import CwState
+from cw.models import CwState, QueueItemStatus
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
 )
@@ -23,16 +24,22 @@ from cw.review_history import (
 from tests._review_history_helpers import (
     ACME_SESSION,
     OTHER,
+    Step,
     clean_sentinel_session,
     client_config,
     derived_worktree,
+    fix_session_for,
     fixture_converged,
     fixture_in_progress,
     history_for,
+    note_unreadable_inbox,
     notes_with,
     review_task,
     sentinel_review,
     session_for,
+    status_chain,
+    timing_task,
+    transition_event,
 )
 
 if TYPE_CHECKING:
@@ -54,6 +61,95 @@ def test_unreadable_event_inbox_is_a_note(tmp_path: Path) -> None:
 
     assert notes_with(history, "event inbox unreadable")
     assert len(history.rounds) == 5
+
+
+def test_unreadable_inbox_note_names_the_stage_timings(tmp_path: Path) -> None:
+    def _boom(**_kwargs: object) -> list[OrchestratorEvent]:
+        msg = "inbox locked"
+        raise CwError(msg)
+
+    inputs = collect_history_inputs(
+        review_task(), client_config(tmp_path), CwState(), read_events_fn=_boom
+    )
+
+    assert note_unreadable_inbox("CwError") in build_review_history(inputs).notes
+    assert inputs.transition_events == ()
+
+
+def test_transition_events_are_prefiltered_by_ticket_id(tmp_path: Path) -> None:
+    task = timing_task()
+    status_chain(
+        task,
+        Step("2026-10-27T11:00:00+00:00", QueueItemStatus.PENDING),
+        Step("2026-10-27T11:30:00+00:00", QueueItemStatus.RUNNING),
+    )
+    transition_event(
+        timing_task(ticket_id="ACM-2"),
+        QueueItemStatus.RUNNING,
+        "2026-10-27T11:40:00+00:00",
+    )
+
+    inputs = collect_history_inputs(task, client_config(tmp_path), CwState())
+
+    assert [e.payload["ticket_id"] for e in inputs.transition_events] == [
+        "ACM-1",
+        "ACM-1",
+    ]
+    assert [e.payload["new_status"] for e in inputs.transition_events] == [
+        "pending",
+        "running",
+    ]
+
+
+def test_repair_spans_are_only_this_rows_fix_sessions(tmp_path: Path) -> None:
+    task = timing_task()
+    home = derived_worktree(tmp_path)
+    done = fix_session_for(
+        task,
+        "fix-done",
+        "2026-10-27T12:05:00+00:00",
+        "2026-10-27T12:25:00+00:00",
+        worktree=home,
+    )
+    live = fix_session_for(task, "fix-live", "2026-10-27T13:00:00+00:00", worktree=home)
+    sessions = [
+        done,
+        live,
+        fix_session_for(
+            task, "fix-other", "2026-10-27T12:05:00+00:00", worktree=home, client=OTHER
+        ),
+        fix_session_for(
+            task, "fix-away", "2026-10-27T12:05:00+00:00", worktree=tmp_path / "away"
+        ),
+        session_for(task, "impl", worktree_path=home),
+    ]
+
+    inputs = collect_history_inputs(
+        task, client_config(tmp_path), CwState(sessions=sessions)
+    )
+
+    spans = {span.session_id: span for span in inputs.repair_spans}
+    assert set(spans) == {"fix-done", "fix-live"}
+    assert spans["fix-done"].live is False
+    assert spans["fix-done"].started_at == datetime(2026, 10, 27, 12, 5, tzinfo=UTC)
+    assert spans["fix-done"].ended_at == datetime(2026, 10, 27, 12, 25, tzinfo=UTC)
+    assert spans["fix-live"].live is True
+    assert spans["fix-live"].ended_at is None
+
+
+def test_now_and_the_row_end_pass_through(tmp_path: Path) -> None:
+    ends = datetime(2026, 10, 27, 14, 30, tzinfo=UTC)
+    task = timing_task()
+
+    with freeze_time("2026-10-27T15:00:00+00:00"):
+        passed = collect_history_inputs(
+            task, client_config(tmp_path), CwState(), row_ends_at=ends
+        )
+        default = collect_history_inputs(task, client_config(tmp_path), CwState())
+
+    assert passed.row_ends_at == ends
+    assert passed.now == datetime(2026, 10, 27, 15, 0, tzinfo=UTC)
+    assert default.row_ends_at is None
 
 
 @pytest.mark.parametrize("content", [b"{not json", b"\xff\xfe\x00"])

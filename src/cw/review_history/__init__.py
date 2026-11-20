@@ -7,7 +7,7 @@ I/O at all. Rendering lives in :mod:`cw.review_history_render`; the command is
 
 Read-only by construction: no new store, no state lock, no subprocess, no
 event emitted. The reads are the converge ledger and its per-round verdict
-files, the session state the caller passes in, and two reads of the event
+files, the session state the caller passes in, and three reads of the event
 inbox (each under the inbox's own short leaf lock, as every ``read_events``
 caller). Every data problem becomes a ``notes`` entry; nothing here raises on
 bad data.
@@ -30,11 +30,16 @@ comment id and a space. A content match whose rationale is not the
 voided-suppression text (an ordinary rejection) corroborates nothing and is
 counted in ``notes`` as a content-only tie; a record naming another comment,
 or no record at all, is counted as one that could not be tied. Every event of
-the ticket id that is not shown is counted in ``notes`` and never rendered.
+the ticket id that is not shown is counted in ``notes`` and never rendered. A
+``task.transition`` event (stage time, #3792) must name this client and ticket id
+and have been created within the row's lifetime: not before the row was created,
+and not at or after the next re-enqueued row's creation. A session id is not a
+tie, because requeue transitions do not reliably carry one.
 
 Package layout (a dependency order with no cycles): ``inputs`` (data carriers)
 <- ``collect`` (the only I/O), ``ledger``, ``sentinel``, ``attribution`` <-
-``build`` (assembly) <- this ``__init__`` (re-exports).
+``timing`` (the stage-time split) <- ``build`` (assembly) <- this ``__init__``
+(re-exports).
 """
 
 from __future__ import annotations

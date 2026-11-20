@@ -26,11 +26,13 @@ from tests._review_history_helpers import (
     COMMENT_ID,
     CONFIRM_FAILURE_CAUSES,
     DEFER_RATIONALE,
+    FIX_CYCLE_STEPS,
     OPERATOR_REASON,
     ORIGINAL_RATIONALE,
     REJECT_RATIONALE,
     VOIDED_AT,
     VOIDED_SUMMARY,
+    Step,
     blocking_dispositions,
     clean_sentinel_session,
     client_config,
@@ -40,7 +42,9 @@ from tests._review_history_helpers import (
     fixture_confirm_failed,
     fixture_converged,
     fixture_stopped,
+    history_for,
     review_task,
+    seed_fix_cycle,
     sentinel_review,
     write_corrupt_ledger,
     write_voided_ledger,
@@ -48,10 +52,17 @@ from tests._review_history_helpers import (
 from tests._ticket_view_helpers import ACME_TICKET, bound_session_for
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from cw.models import Session, TicketTask
     from cw.models.review_history import ReviewHistory
+
+
+_NOT_RECORDED_ALL = (
+    "queued not recorded, reviewing not recorded, repairing not recorded, "
+    "gate not recorded"
+)
 
 
 def _render(
@@ -131,7 +142,7 @@ def test_converged_header_and_round_block_keys_in_fixed_order(tmp_path: Path) ->
     _, text = _render(tmp_path, review_task())
 
     lines = text.splitlines()
-    assert lines[:13] == [
+    assert lines[:14] == [
         "review_history: ACM-1 (client acme)",
         "state: row completed at review; ledger converged; finished",
         "mode: clean",
@@ -144,9 +155,10 @@ def test_converged_header_and_round_block_keys_in_fixed_order(tmp_path: Path) ->
         "confirm_backend: codex",
         "deferred: 0",
         "confirm_failures: 0",
+        f"stage_time: {_NOT_RECORDED_ALL}",
         "sources: ledger, verdict_files",
     ]
-    assert lines[13:23] == [
+    assert lines[14:25] == [
         "round 1 (loop):",
         "  source: ledger",
         "  backend: claude-native",
@@ -156,6 +168,7 @@ def test_converged_header_and_round_block_keys_in_fixed_order(tmp_path: Path) ->
         "  fix_dispatched: 5",
         "  settled: 0 new, 0 resurfaced",
         "  wall_time: not recorded",
+        f"  stage_time: {_NOT_RECORDED_ALL}",
         "  recorded_at: 2026-10-27T12:00:00+00:00",
     ]
     _assert_invariants(text)
@@ -416,3 +429,74 @@ def test_notes_block_is_always_printed(tmp_path: Path, notes_present: bool) -> N
         assert lines[-1].startswith("  - ")
     else:
         assert lines[-1] == "notes: -"
+
+
+_STAGE_NOW = "2026-10-27T15:00:00+00:00"
+
+
+def _fix_cycle_text(
+    tmp_path: Path,
+    steps: Sequence[Step] = FIX_CYCLE_STEPS,
+    status: QueueItemStatus = QueueItemStatus.COMPLETED,
+) -> list[str]:
+    task, sessions = seed_fix_cycle(tmp_path, steps)
+    task = task.model_copy(update={"status": status})
+    history = history_for(task, tmp_path, sessions=sessions, now=_STAGE_NOW)
+    return render_review_history(history).splitlines()
+
+
+def test_the_stage_time_lines_sit_in_their_fixed_places(tmp_path: Path) -> None:
+    lines = _fix_cycle_text(tmp_path)
+
+    confirm = lines.index("confirm_failures: 0")
+    assert lines[confirm + 1] == (
+        "stage_time: queued 34m30s, reviewing 1h13m30s, repairing 20m00s, gate 1h02m00s"
+    )
+    assert lines[confirm + 2].startswith("sources: ")
+    one = lines.index("  wall_time: 10m00s")
+    assert lines[one + 1] == (
+        "  stage_time: queued 0m00s, reviewing 10m00s, repairing 0m00s, gate 0m00s"
+    )
+    assert lines[one + 2].startswith("  recorded_at: ")
+    two = lines.index("  wall_time: 50m00s")
+    assert lines[two + 1] == (
+        "  stage_time: queued 4m30s, reviewing 25m30s, repairing 20m00s, gate 0m00s"
+    )
+    assert not any("open wait counted" in line for line in lines)
+
+
+def test_a_part_with_no_evidence_prints_not_recorded(tmp_path: Path) -> None:
+    lines = _fix_cycle_text(tmp_path, ())
+
+    assert (
+        "stage_time: queued not recorded, reviewing not recorded, repairing "
+        "20m00s, gate not recorded"
+    ) in lines
+    assert (
+        "  stage_time: queued not recorded, reviewing not recorded, repairing "
+        "0m00s, gate not recorded"
+    ) in lines
+
+
+def test_an_open_wait_names_the_instant_it_was_counted_to(tmp_path: Path) -> None:
+    lines = _fix_cycle_text(
+        tmp_path,
+        [*FIX_CYCLE_STEPS[:2], FIX_CYCLE_STEPS[4]],
+        QueueItemStatus.BLOCKED_ON_USER,
+    )
+
+    header = next(line for line in lines if line.startswith("stage_time: "))
+    assert header == (
+        "stage_time: queued 30m00s, reviewing 1h10m00s, repairing 20m00s, "
+        "gate 2h00m00s (open wait counted to 2026-10-27T15:00:00+00:00)"
+    )
+
+
+def test_a_default_block_prints_every_part_as_not_recorded(tmp_path: Path) -> None:
+    history, text = _blocking(tmp_path)
+
+    lines = text.splitlines()
+    assert history.rounds[0].stage_seconds.model_dump() == dict.fromkeys(
+        ("queued", "reviewing", "repairing", "gate")
+    )
+    assert f"  stage_time: {_NOT_RECORDED_ALL}" in lines

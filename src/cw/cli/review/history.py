@@ -2,7 +2,7 @@
 
 Read-only, like ``cw review dispositions`` and ``cw dev-queue show``: the
 unlocked ``load_dev_queue``/``load_state`` reads, the converge ledger and its
-per-round verdict files, and two event-inbox reads (each under the inbox's own
+per-round verdict files, and three event-inbox reads (each under the inbox's own
 short leaf lock). No state lock, no subprocess, no event recorded. The
 collection and the pure build live in :mod:`cw.review_history`, the text in
 :mod:`cw.review_history_render`.
@@ -26,7 +26,12 @@ from cw.dev_queue import _find_ticket, load_dev_queue
 from cw.exceptions import CwError
 from cw.review_history import build_review_history, collect_history_inputs
 from cw.review_history_render import render_review_history
-from cw.ticket_view import ViewSources, other_row_count, resolve_view_client
+from cw.ticket_view import (
+    ViewSources,
+    next_row_created_at,
+    other_row_count,
+    resolve_view_client,
+)
 
 from ._group import review
 
@@ -90,6 +95,19 @@ def review_history(
     the previous round's record to this one, so it includes the fix cycle in
     between.
 
+    Stage time: each round, and the summary, also splits where the time went
+    into `stage_seconds`. `queued` is the row PENDING at the review stage.
+    `reviewing` is the row RUNNING with no fix session running, so it includes
+    the gap between a fix handoff and the fix session's start. `repairing` runs
+    from a fix session's `started_at` to its `completed_at`. `gate` is the row
+    parked at the review stage waiting on someone outside the pipeline:
+    operator decisions, sign-offs and crash or reap parks. All of it is derived
+    from the row's `task.transition` events and its fix sessions; nothing new
+    is recorded. A part is `not recorded` (null in `--json`) when its evidence
+    is missing, for example after the event inbox was pruned, and `0.0` when
+    the row spent no time there. A still-open wait is counted up to
+    `summary.stage_seconds_as_of`.
+
     Rounds come from the converge ledger in the ticket's worktree, the file
     `cw review converge status` reads. When that is absent, unreadable or
     owned by another ticket, they come from the session's AUTO_DEV_RESULT
@@ -105,7 +123,10 @@ def review_history(
     records AND whose record's voided-suppression rationale names the event's
     operator comment. A match whose rationale names no comment is counted under
     `notes` as a content-only tie, the rest as not tied to the row; neither is
-    shown.
+    shown. A `task.transition` event is used for stage time only when it names
+    this client and ticket id and was created within this row's lifetime (not
+    before the row was created, and not at or after the next re-enqueued row's
+    creation); a session id is not a tie.
 
     A re-enqueued ticket has several rows for the same client: the one `cw
     dev-queue show` selects is replayed and the rest are counted under `notes`.
@@ -121,6 +142,7 @@ def review_history(
         _state_or_none(),
         worktree_override=worktree,
         other_rows=other_row_count(store, ticket_id, resolved),
+        row_ends_at=next_row_created_at(store, task),
     )
     history = build_review_history(inputs)
     if output_json:

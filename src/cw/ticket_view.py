@@ -155,6 +155,24 @@ def other_row_count(store: DevQueueStore, ticket_id: str, client: str) -> int:
     return max(rows - 1, 0)
 
 
+def next_row_created_at(store: DevQueueStore, task: TicketTask) -> datetime | None:
+    """When the next re-enqueued row of *task*'s ticket and client was created.
+
+    The smallest ``created_at`` strictly later than *task*'s among the rows for
+    the same ticket id and client, or ``None`` when *task* is the newest. It
+    bounds the events that can be *task*'s own (#3792): the selected row is not
+    always the newest, so its siblings' events begin where theirs do.
+    """
+    later = [
+        t.created_at
+        for t in store.tasks
+        if t.ticket_id == task.ticket_id
+        and t.client == task.client
+        and t.created_at > task.created_at
+    ]
+    return min(later, default=None)
+
+
 def resolve_view_client(
     store: DevQueueStore, ticket_id: str, client_override: str | None
 ) -> str:

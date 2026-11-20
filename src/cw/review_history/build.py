@@ -28,6 +28,7 @@ from cw.review_history.attribution import (
 from cw.review_history.inputs import HistoryInputs, _int, _Part, _review_block
 from cw.review_history.ledger import _ledger_part
 from cw.review_history.sentinel import _sentinel_part
+from cw.review_history.timing import apply_stage_timing
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -63,19 +64,25 @@ def build_review_history(inputs: HistoryInputs) -> ReviewHistory:
             "this row's sessions precedes it"
         )
     voided = _attribute_voided(inputs, notes)
+    timed = apply_stage_timing(
+        inputs, _with_wall_times(part.rounds, start), part.summary, start, notes
+    )
     return ReviewHistory(
         ticket_id=task.ticket_id,
         client=task.client,
         row_status=task.status.value,
         row_stage=task.stage.value,
         in_flight=_in_flight(inputs),
-        rounds=_with_wall_times(part.rounds, start),
-        summary=part.summary,
+        rounds=timed.rounds,
+        summary=timed.summary,
         settled=part.settled,
         dispositions=_disposition_views(task),
         voided=voided,
         sources=_sources(
-            inputs, part, review, events_used=start is not None or bool(voided)
+            inputs,
+            part,
+            review,
+            events_used=start is not None or bool(voided) or timed.events_used,
         ),
         notes=notes,
     )
