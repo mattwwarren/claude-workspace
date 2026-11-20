@@ -3082,8 +3082,12 @@ dispatch tick, with no lock held, `settle_adopted_pins` reads the origin head,
 fetches the branch and advances the pin only when the old pin is an ancestor;
 a non-descendant or a git error keeps the pin and the drift scan parks it. An
 unreadable origin head defers the settle (the flag stays set, the row is
-skipped by the drift scan, and a warning is logged each tick until gh reads
-again). The settle runs at most 8 rows per client per tick, each with a 60s
+skipped by the drift scan, and for a live (non-terminal) row a warning is
+logged each tick until gh reads again). The settle skips rows in a terminal
+status (completed, failed, cancelled): they have no next session, and their
+head branch is usually deleted after merge. Their flag is left set, so a
+requeued row is settled again. Skipped rows log nothing and do not count
+against the 8-row cap. The settle runs at most 8 rows per client per tick, each with a 60s
 fetch bound, and runs even when the client has no free slot; there is no
 per-client toggle yet (see the follow-up below). The repair recipe's lease
 push (`repair_git._push_with_lease`) advances the pin from the expected SHA to

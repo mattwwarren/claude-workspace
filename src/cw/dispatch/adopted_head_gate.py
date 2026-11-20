@@ -13,7 +13,9 @@ client per dispatch tick from :mod:`cw.dispatch.lanes`, in this order:
    compare-and-set under ``dev_queue_lock``. The pin advances only when the
    old pin is an ancestor of the observed head; a non-descendant head or a git
    error keeps the pin (and the scan below then parks). An unreadable origin
-   head defers: the flag stays set and the next tick retries.
+   head defers: the flag stays set and the next tick retries. Terminal rows
+   (completed, failed, cancelled) are not settled and keep their flag, so a
+   requeue to PENDING is settled then (#3721).
 2. :func:`resolve_adopted_head_drifts` -- the precompute the claim path turns
    into an ``adopted_head_drift`` park, on the
    ``pr_gate.resolve_stale_pr_ticket_ids`` pattern. It compares each PENDING
@@ -37,7 +39,7 @@ from cw._git import commit_range_summary, is_ancestor
 from cw.dev_queue import load_dev_queue
 from cw.dev_queue.adoption import apply_settled_pin
 from cw.gh import branch_head_sha_on_origin
-from cw.models import QueueItemStatus, resolve_feature_branch
+from cw.models import TERMINAL_QUEUE_STATUSES, QueueItemStatus, resolve_feature_branch
 from cw.worktree import (
     FetchOutcome,
     TickFetchGate,
@@ -123,13 +125,19 @@ def fetch_adopted_branch(client: ClientConfig, branch: str) -> None:
 def _flagged_rows(
     client: ClientConfig, store: DevQueueStore
 ) -> list[tuple[TicketTask, str]]:
-    """``(row, pin)`` for *client*'s flagged adopted rows in *store*."""
+    """``(row, pin)`` for *client*'s flagged, non-terminal adopted rows in *store*.
+
+    A terminal row has no next session whose review pin matters, and its head
+    branch is usually deleted on merge, so the origin read can never succeed
+    (#3721). Its flag stays set; a requeue to PENDING makes it settle again.
+    """
     return [
         (task, task.adopted_head_sha)
         for task in store.tasks
         if task.client == client.name
         and task.adopted_head_sha is not None
         and task.adopted_repin_due
+        and task.status not in TERMINAL_QUEUE_STATUSES
     ]
 
 
@@ -200,14 +208,14 @@ def settle_adopted_pins(
 ) -> SettleResult:
     """Run the session-end re-pin for *client*'s flagged adopted rows.
 
-    When the tick's *queue_snapshot* shows no flagged adopted row for
-    *client*, returns at once without a second queue read: a row flagged
+    When the tick's *queue_snapshot* shows no flagged non-terminal adopted row
+    for *client*, returns at once without a second queue read: a row flagged
     after the snapshot is safe until the next tick, because the claim ignores
     a drift hit on a flagged row under its lock. Otherwise it loads the queue
     lock-free (a fresh read), takes up to
-    :data:`ADOPT_SETTLE_MAX_PER_TICK` rows of any status with
-    ``adopted_repin_due`` set, and settles each one. Every gh and git call
-    happens with no lock held; the only write is
+    :data:`ADOPT_SETTLE_MAX_PER_TICK` flagged rows in a non-terminal status
+    (terminal rows are skipped and never consume the cap), and settles each
+    one. Every gh and git call happens with no lock held; the only write is
     :func:`~cw.dev_queue.adoption.apply_settled_pin`'s brief compare-and-set.
     Runs even when the client has no free slot, so a saturated client still
     settles.

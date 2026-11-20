@@ -84,6 +84,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Adopted-pin settle no longer retries terminal rows (#3721).** `settle_adopted_pins` now skips adopted rows in a terminal status (completed, failed, cancelled). A merged PR's deleted head branch made the origin read fail every tick, so the `adopted_pin_settle_deferred` warning repeated forever and the stale rows consumed the 8-row-per-tick settle cap. The `adopted_repin_due` flag is left set, so a requeued terminal row is still settled. No schema, event or config change.
 - **Detached codex, opencode and aider workers no longer inherit the dispatcher's stdin (#3696).** `_launch_logged_subprocess` now passes `stdin=subprocess.DEVNULL`, which removes the inherited-stdin precondition for a child that blocks reading stdin. The operator-reported opencode hang was not reproduced in cw, so this fix does not confirm that hang's cause.
 
 ### Fixed
