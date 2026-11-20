@@ -132,6 +132,17 @@ def write_project_layer(root: Path, backend: str) -> Path:
     return path
 
 
+def stop_project_walk_at(boundary: Path) -> None:
+    """Plant a ``.git`` marker so the MCP project-layer walk ends at *boundary*.
+
+    A walk from a directory with no ``.git`` climbs to ``/`` and reads real
+    ancestor layers; the per-test HOME sits below ``tmp_path``, so the home-stop
+    never fires there (#3817). A layer staged at or below *boundary* is still
+    seen, because the walk includes the marker directory itself.
+    """
+    (boundary / ".git").mkdir(parents=True, exist_ok=True)
+
+
 def write_system_layer(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
