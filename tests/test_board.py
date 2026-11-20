@@ -21,6 +21,7 @@ from cw.models import (
     QueueItemStatus,
     Session,
     SessionPurpose,
+    SessionStatus,
     Stage,
     StageExecutorConfig,
     StagePipelineConfig,
@@ -298,6 +299,46 @@ class TestRenderBoardLaneHeader:
         )
         output = _render(state)
         assert "[0/3]" in output
+
+    @staticmethod
+    def _parked_state(session_status: SessionStatus) -> BoardState:
+        """One parked row in a max_parallel=3 lane, its session at *session_status*."""
+        from cw.models import ClientConfig
+        from tests._shared.session_seeding import _make_daemon_session
+
+        lane = LaneConfig(name="default", max_parallel=3)
+        client_cfg = ClientConfig(
+            name="acme", workspace_path=Path("/tmp/acme"), lanes=[lane]
+        )
+        task = TicketTask(
+            ticket_id="MW-3774",
+            client="acme",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            blocked_reason="plan_scope_drift",
+            stage=Stage.IMPL,
+            lane="default",
+            session_id="sess-park",
+        )
+        session = _make_daemon_session(
+            id="sess-park", client="acme", status=session_status
+        )
+        return BoardState(
+            cw_state=CwState(sessions=[session]),
+            dev_queue=DevQueueStore(tasks=[task]),
+            clients={"acme": client_cfg},
+            config=OrchestratorConfig(),
+            now=NOW,
+        )
+
+    def test_lane_panel_occupancy_excludes_settled_park(self) -> None:
+        """A parked row whose worker finished frees its slot (GitHub #3774)."""
+        output = _render(self._parked_state(SessionStatus.COMPLETED))
+        assert "[0/3]" in output
+
+    def test_lane_panel_occupancy_counts_live_worker_park(self) -> None:
+        """A parked row whose worker is still live keeps its slot (GitHub #3774)."""
+        output = _render(self._parked_state(SessionStatus.ACTIVE))
+        assert "[1/3]" in output
 
 
 class TestRenderBoardFooter:

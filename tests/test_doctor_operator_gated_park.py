@@ -327,7 +327,9 @@ class TestDetection:
 
         monkeypatch.setattr("cw.ticket_view.get_effective_client", _fail)
 
-        assert _detect([_row("impl_failed", None), make_task()]) == []
+        # A held (slot-holding) row, so the gate filter, not the settled-park
+        # carve-out (#3774), is what keeps the candidate list empty.
+        assert _detect([_held_row("impl_failed", None), make_task()]) == []
         assert _detect([]) == []
 
 
@@ -361,7 +363,48 @@ class TestNotReported:
     def test_non_gated_rows_yield_nothing(
         self, tmp_config_dir: Path, disposition: str | None, reason: str | None
     ) -> None:
-        assert _detect([_row(disposition, reason)]) == []
+        # Held rows (#3774): a settled `_row` would yield nothing for the
+        # slot reason alone and hide a gate-filter regression.
+        assert _detect([_held_row(disposition, reason)]) == []
+
+
+class TestSettledParkNotAdvised:
+    """Class 13 advises only slot-holding parks (GitHub #3774, D2)."""
+
+    @pytest.mark.parametrize(("disposition", "reason"), _GATED)
+    def test_settled_gated_park_yields_nothing(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        disposition: str,
+        reason: str | None,
+    ) -> None:
+        """A no-session gated park is settled: it holds no slot to explain."""
+        monkeypatch.setattr(
+            "cw.doctor.wedge.blocked_on_user.get_native_daemon_client",
+            FakeNativeDaemonClient,
+        )
+        task = _row(disposition, reason)
+        queue = DevQueueStore(tasks=[task])
+
+        assert _is_operator_gated_park(task) is True
+        assert occupies_lane_slot(task, session_statuses={}) is False
+        assert _check_wedge_operator_gated_park(CwState(), queue) == []
+        # The operator-gate exclusion still keeps it out of class 5.
+        assert _check_wedge_dead_session_blocked_on_user(CwState(), queue) == []
+
+    def test_completed_worker_park_yields_nothing(self, tmp_config_dir: Path) -> None:
+        task = _held_row(STALE_DISPATCH_GATE_DISPOSITION, None)
+        session = bound_session_for(task, status=SessionStatus.COMPLETED)
+
+        assert _detect([task], [session]) == []
+
+    def test_live_worker_park_yields_one_finding(self, tmp_config_dir: Path) -> None:
+        task = _held_row(STALE_DISPATCH_GATE_DISPOSITION, None)
+        session = bound_session_for(task, status=SessionStatus.ACTIVE)
+
+        (finding,) = _detect([task], [session])
+        assert finding.wedge_class == _WEDGE_OPERATOR_GATED_PARK
 
 
 def _agreement_cases() -> list[tuple[str | None, str | None, bool]]:
