@@ -98,7 +98,12 @@ from tests._review_convergence_helpers import (
     write_ledger,
 )
 from tests._shared.git_repos import commit_tracked_file, git_in
-from tests._shared.review_builders import _make_diff, _make_finding, _make_reviewer_doc
+from tests._shared.review_builders import (
+    _EVIDENCE_GAP,
+    _make_diff,
+    _make_finding,
+    _make_reviewer_doc,
+)
 from tests.test_review_convergence import _sharded
 
 if TYPE_CHECKING:
@@ -1370,6 +1375,86 @@ class TestContestedConfirmRound:
         assert ledger.confirm_failures == []
         assert [r.kind for r in ledger.rounds] == ["loop"]
         assert ledger.settled == []
+
+
+# ---------------------------------------------------------------------------
+# #3793: a Claude confirm round whose finding rests on an unrun check
+# ---------------------------------------------------------------------------
+
+_REPRODUCED_SUMMARY = "feature constant overflows"
+
+
+def _gap_finding() -> dict[str, object]:
+    return {**_finding("MUST_FIX", _MUST_FIX_SUMMARY), "evidence_gap": _EVIDENCE_GAP}
+
+
+def _gap_role(role: str) -> ClaudeRunResult:
+    """Every role raises the same MUST_FIX, marked as resting on an unrun check."""
+    return ClaudeRunResult(
+        0, review_envelope(_doc_json(role=role, findings=[_gap_finding()])), ""
+    )
+
+
+def _gap_and_reproduced_role(role: str) -> ClaudeRunResult:
+    """The gap finding plus a reproduced, unmarked MUST_FIX on a distinct anchor."""
+    reproduced = _finding_payload(
+        severity="MUST_FIX",
+        file="feature.py",
+        line_start=None,
+        line_end=None,
+        summary=_REPRODUCED_SUMMARY,
+        evidence="x = 1",
+    )
+    findings = [_gap_finding(), reproduced]
+    return ClaudeRunResult(
+        0, review_envelope(_doc_json(role=role, findings=findings)), ""
+    )
+
+
+class TestEvidenceGapConfirmRound:
+    def test_a_pure_gap_round_parks_for_the_operator_without_a_ledger_round(
+        self, wt: Path
+    ) -> None:
+        outcome = _apply(wt, _client(wt), RoleAwareClaudeRunner(_gap_role))
+
+        blocker = outcome.result.blocker
+        assert outcome.result.status == "blocked"
+        assert blocker is not None
+        assert blocker.reason == "review_operator_actionable"
+        assert "OPERATOR EVIDENCE REQUIRED" in blocker.details
+        assert _EVIDENCE_GAP in blocker.details
+        assert outcome.reviewer_label == "Claude"
+        assert outcome.verdict is not None
+        assert has_held_findings(outcome.verdict, "evidence_gap")
+        ledger = _ledger(wt)
+        assert ledger.status == "awaiting_confirm"
+        assert [r.kind for r in ledger.rounds] == ["loop"]
+
+    def test_a_mixed_round_stops_the_ledger_for_the_operator(self, wt: Path) -> None:
+        """The accepted lane limit (#3793, operator R2-1): pinned, not fixed.
+
+        A gap beside a reproduced MUST_FIX reaches the ledger as an operator
+        action, so the confirm round parks (``codex_must_fix_findings``, the
+        verdict is blocking) before the reproduced finding is repaired; a
+        requeue after ``cw review settle`` releases it.
+        """
+        outcome = _apply(
+            wt, _client(wt), RoleAwareClaudeRunner(_gap_and_reproduced_role)
+        )
+
+        blocker = outcome.result.blocker
+        assert blocker is not None
+        assert blocker.reason == CODEX_MUST_FIX_FINDINGS
+        assert "convergence ledger stopped (operator_action)" in blocker.details
+        assert outcome.verdict is not None
+        assert has_held_findings(outcome.verdict, "evidence_gap")
+        assert [f.summary for f in outcome.verdict.must_fix] == [_REPRODUCED_SUMMARY]
+        ledger = _ledger(wt)
+        assert ledger.stop_reason == "operator_action"
+        assert ledger.status == "stopped"
+        confirm = ledger.rounds[-1]
+        assert confirm.kind == "confirm"
+        assert confirm.new_operator_action >= 1
 
 
 # ---------------------------------------------------------------------------
