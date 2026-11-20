@@ -476,6 +476,48 @@
      "title": "LaunchedFixWorker",
      "type": "object"
     },
+    "MergePrerequisite": {
+     "description": "A same-repo PR that must merge before the row is dispatched again.\n\n``repo`` is the slug gh verified at declaration (the audit ``repo`` of the\n``ticket.held`` event the claim gate records). ``satisfied_at`` is ``None``\nuntil a merge is observed.",
+     "properties": {
+      "pr": {
+       "$ref": "#/$defs/PrRef"
+      },
+      "repo": {
+       "title": "Repo",
+       "type": "string"
+      },
+      "actor": {
+       "default": "",
+       "title": "Actor",
+       "type": "string"
+      },
+      "declared_at": {
+       "format": "date-time",
+       "title": "Declared At",
+       "type": "string"
+      },
+      "satisfied_at": {
+       "anyOf": [
+        {
+         "format": "date-time",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Satisfied At"
+      }
+     },
+     "required": [
+      "pr",
+      "repo",
+      "declared_at"
+     ],
+     "title": "MergePrerequisite",
+     "type": "object"
+    },
     "MustFixOverride": {
      "description": "Operator override of a codex MUST_FIX park (GitHub #2205).\n\nBound to the verdict it was given for: ``reviewed_sha`` and the\n``cw.review_debt.fingerprint_v1`` identity of every MUST_FIX finding on it.\nFINALIZE's ``check_must_fix_override.py`` honors it only while the live\nverdict still carries that SHA and finding set and HEAD has not moved.",
      "properties": {
@@ -630,6 +672,32 @@
       "requested_at"
      ],
      "title": "PendingFixDispatch",
+     "type": "object"
+    },
+    "PrRef": {
+     "description": "One PR reference: a positive ``number`` and an optional ``owner/repo``.",
+     "properties": {
+      "number": {
+       "title": "Number",
+       "type": "integer"
+      },
+      "repo": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Repo"
+      }
+     },
+     "required": [
+      "number"
+     ],
+     "title": "PrRef",
      "type": "object"
     },
     "PrState": {
@@ -1569,6 +1637,13 @@
       "$ref": "#/$defs/ScopeGrant"
      },
      "title": "Scope Grants",
+     "type": "array"
+    },
+    "merge_prerequisites": {
+     "items": {
+      "$ref": "#/$defs/MergePrerequisite"
+     },
+     "title": "Merge Prerequisites",
      "type": "array"
     },
     "must_fix_override": {
@@ -2851,6 +2926,48 @@
      "title": "LaunchedFixWorker",
      "type": "object"
     },
+    "MergePrerequisite": {
+     "description": "A same-repo PR that must merge before the row is dispatched again.\n\n``repo`` is the slug gh verified at declaration (the audit ``repo`` of the\n``ticket.held`` event the claim gate records). ``satisfied_at`` is ``None``\nuntil a merge is observed.",
+     "properties": {
+      "pr": {
+       "$ref": "#/$defs/PrRef"
+      },
+      "repo": {
+       "title": "Repo",
+       "type": "string"
+      },
+      "actor": {
+       "default": "",
+       "title": "Actor",
+       "type": "string"
+      },
+      "declared_at": {
+       "format": "date-time",
+       "title": "Declared At",
+       "type": "string"
+      },
+      "satisfied_at": {
+       "anyOf": [
+        {
+         "format": "date-time",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Satisfied At"
+      }
+     },
+     "required": [
+      "pr",
+      "repo",
+      "declared_at"
+     ],
+     "title": "MergePrerequisite",
+     "type": "object"
+    },
     "MustFixOverride": {
      "description": "Operator override of a codex MUST_FIX park (GitHub #2205).\n\nBound to the verdict it was given for: ``reviewed_sha`` and the\n``cw.review_debt.fingerprint_v1`` identity of every MUST_FIX finding on it.\nFINALIZE's ``check_must_fix_override.py`` honors it only while the live\nverdict still carries that SHA and finding set and HEAD has not moved.",
      "properties": {
@@ -3005,6 +3122,32 @@
       "requested_at"
      ],
      "title": "PendingFixDispatch",
+     "type": "object"
+    },
+    "PrRef": {
+     "description": "One PR reference: a positive ``number`` and an optional ``owner/repo``.",
+     "properties": {
+      "number": {
+       "title": "Number",
+       "type": "integer"
+      },
+      "repo": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Repo"
+      }
+     },
+     "required": [
+      "number"
+     ],
+     "title": "PrRef",
      "type": "object"
     },
     "PrState": {
@@ -3870,6 +4013,13 @@
         "$ref": "#/$defs/ScopeGrant"
        },
        "title": "Scope Grants",
+       "type": "array"
+      },
+      "merge_prerequisites": {
+       "items": {
+        "$ref": "#/$defs/MergePrerequisite"
+       },
+       "title": "Merge Prerequisites",
        "type": "array"
       },
       "must_fix_override": {
@@ -5247,6 +5397,48 @@
      "title": "LaunchedFixWorker",
      "type": "object"
     },
+    "MergePrerequisite": {
+     "description": "A same-repo PR that must merge before the row is dispatched again.\n\n``repo`` is the slug gh verified at declaration (the audit ``repo`` of the\n``ticket.held`` event the claim gate records). ``satisfied_at`` is ``None``\nuntil a merge is observed.",
+     "properties": {
+      "pr": {
+       "$ref": "#/$defs/PrRef"
+      },
+      "repo": {
+       "title": "Repo",
+       "type": "string"
+      },
+      "actor": {
+       "default": "",
+       "title": "Actor",
+       "type": "string"
+      },
+      "declared_at": {
+       "format": "date-time",
+       "title": "Declared At",
+       "type": "string"
+      },
+      "satisfied_at": {
+       "anyOf": [
+        {
+         "format": "date-time",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Satisfied At"
+      }
+     },
+     "required": [
+      "pr",
+      "repo",
+      "declared_at"
+     ],
+     "title": "MergePrerequisite",
+     "type": "object"
+    },
     "MustFixOverride": {
      "description": "Operator override of a codex MUST_FIX park (GitHub #2205).\n\nBound to the verdict it was given for: ``reviewed_sha`` and the\n``cw.review_debt.fingerprint_v1`` identity of every MUST_FIX finding on it.\nFINALIZE's ``check_must_fix_override.py`` honors it only while the live\nverdict still carries that SHA and finding set and HEAD has not moved.",
      "properties": {
@@ -5401,6 +5593,32 @@
       "requested_at"
      ],
      "title": "PendingFixDispatch",
+     "type": "object"
+    },
+    "PrRef": {
+     "description": "One PR reference: a positive ``number`` and an optional ``owner/repo``.",
+     "properties": {
+      "number": {
+       "title": "Number",
+       "type": "integer"
+      },
+      "repo": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Repo"
+      }
+     },
+     "required": [
+      "number"
+     ],
+     "title": "PrRef",
      "type": "object"
     },
     "PrState": {
@@ -6266,6 +6484,13 @@
         "$ref": "#/$defs/ScopeGrant"
        },
        "title": "Scope Grants",
+       "type": "array"
+      },
+      "merge_prerequisites": {
+       "items": {
+        "$ref": "#/$defs/MergePrerequisite"
+       },
+       "title": "Merge Prerequisites",
        "type": "array"
       },
       "must_fix_override": {
@@ -7239,7 +7464,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 64,
+     "default": 65,
      "title": "Schema Version",
      "type": "integer"
     },
@@ -7929,6 +8154,48 @@
      "title": "LaunchedFixWorker",
      "type": "object"
     },
+    "MergePrerequisite": {
+     "description": "A same-repo PR that must merge before the row is dispatched again.\n\n``repo`` is the slug gh verified at declaration (the audit ``repo`` of the\n``ticket.held`` event the claim gate records). ``satisfied_at`` is ``None``\nuntil a merge is observed.",
+     "properties": {
+      "pr": {
+       "$ref": "#/$defs/PrRef"
+      },
+      "repo": {
+       "title": "Repo",
+       "type": "string"
+      },
+      "actor": {
+       "default": "",
+       "title": "Actor",
+       "type": "string"
+      },
+      "declared_at": {
+       "format": "date-time",
+       "title": "Declared At",
+       "type": "string"
+      },
+      "satisfied_at": {
+       "anyOf": [
+        {
+         "format": "date-time",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Satisfied At"
+      }
+     },
+     "required": [
+      "pr",
+      "repo",
+      "declared_at"
+     ],
+     "title": "MergePrerequisite",
+     "type": "object"
+    },
     "MustFixOverride": {
      "description": "Operator override of a codex MUST_FIX park (GitHub #2205).\n\nBound to the verdict it was given for: ``reviewed_sha`` and the\n``cw.review_debt.fingerprint_v1`` identity of every MUST_FIX finding on it.\nFINALIZE's ``check_must_fix_override.py`` honors it only while the live\nverdict still carries that SHA and finding set and HEAD has not moved.",
      "properties": {
@@ -8083,6 +8350,32 @@
       "requested_at"
      ],
      "title": "PendingFixDispatch",
+     "type": "object"
+    },
+    "PrRef": {
+     "description": "One PR reference: a positive ``number`` and an optional ``owner/repo``.",
+     "properties": {
+      "number": {
+       "title": "Number",
+       "type": "integer"
+      },
+      "repo": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Repo"
+      }
+     },
+     "required": [
+      "number"
+     ],
+     "title": "PrRef",
      "type": "object"
     },
     "PrState": {
@@ -9022,6 +9315,13 @@
       "$ref": "#/$defs/ScopeGrant"
      },
      "title": "Scope Grants",
+     "type": "array"
+    },
+    "merge_prerequisites": {
+     "items": {
+      "$ref": "#/$defs/MergePrerequisite"
+     },
+     "title": "Merge Prerequisites",
      "type": "array"
     },
     "must_fix_override": {
@@ -10303,6 +10603,48 @@
      "title": "LaunchedFixWorker",
      "type": "object"
     },
+    "MergePrerequisite": {
+     "description": "A same-repo PR that must merge before the row is dispatched again.\n\n``repo`` is the slug gh verified at declaration (the audit ``repo`` of the\n``ticket.held`` event the claim gate records). ``satisfied_at`` is ``None``\nuntil a merge is observed.",
+     "properties": {
+      "pr": {
+       "$ref": "#/$defs/PrRef"
+      },
+      "repo": {
+       "title": "Repo",
+       "type": "string"
+      },
+      "actor": {
+       "default": "",
+       "title": "Actor",
+       "type": "string"
+      },
+      "declared_at": {
+       "format": "date-time",
+       "title": "Declared At",
+       "type": "string"
+      },
+      "satisfied_at": {
+       "anyOf": [
+        {
+         "format": "date-time",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Satisfied At"
+      }
+     },
+     "required": [
+      "pr",
+      "repo",
+      "declared_at"
+     ],
+     "title": "MergePrerequisite",
+     "type": "object"
+    },
     "MustFixOverride": {
      "description": "Operator override of a codex MUST_FIX park (GitHub #2205).\n\nBound to the verdict it was given for: ``reviewed_sha`` and the\n``cw.review_debt.fingerprint_v1`` identity of every MUST_FIX finding on it.\nFINALIZE's ``check_must_fix_override.py`` honors it only while the live\nverdict still carries that SHA and finding set and HEAD has not moved.",
      "properties": {
@@ -10457,6 +10799,32 @@
       "requested_at"
      ],
      "title": "PendingFixDispatch",
+     "type": "object"
+    },
+    "PrRef": {
+     "description": "One PR reference: a positive ``number`` and an optional ``owner/repo``.",
+     "properties": {
+      "number": {
+       "title": "Number",
+       "type": "integer"
+      },
+      "repo": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Repo"
+      }
+     },
+     "required": [
+      "number"
+     ],
+     "title": "PrRef",
      "type": "object"
     },
     "PrState": {
@@ -11322,6 +11690,13 @@
         "$ref": "#/$defs/ScopeGrant"
        },
        "title": "Scope Grants",
+       "type": "array"
+      },
+      "merge_prerequisites": {
+       "items": {
+        "$ref": "#/$defs/MergePrerequisite"
+       },
+       "title": "Merge Prerequisites",
        "type": "array"
       },
       "must_fix_override": {
@@ -12294,7 +12669,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 64,
+     "default": 65,
      "title": "Schema Version",
      "type": "integer"
     },
