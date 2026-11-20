@@ -71,11 +71,17 @@ from cw.models import (
     ReapReason,
     Stage,
 )
-from cw.models.enums import PipelinePosition, stage_position
+from cw.models.enums import (
+    DEPENDENCY_HOLD_DISPOSITION,
+    PipelinePosition,
+    stage_position,
+)
+from cw.models.merge_prerequisite import MergePrerequisite
 from cw.models.ticket_view import NextCommand
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile._shared import resolve_session_for_task
 from cw.review_convergence._models import TipReason
+from tests._shared.merge_prerequisite_builders import prerequisite_entry
 from tests._shared.review_builders import plan_body, stub_fetch_plan
 from tests._shared.session_seeding import _make_ticket_task
 from tests._shipped_red_helpers import make_episode, make_red_row
@@ -2437,3 +2443,69 @@ def test_awaiting_ci_evidence_park_guidance_is_pinned() -> None:
         " arm-seam hold is released by the green requeue; to drop it by hand,"
         ' run `"$FINALIZE" ci-hold release --repo-path <worktree>` there.'
     )
+
+
+class TestMergePrerequisiteHold:
+    """#3791: a hold parked on a declared prerequisite offers requeue, then removal."""
+
+    _REMOVE = "cw dev-queue prerequisite ACM-1 -c acme --pr 9 --remove"
+
+    @staticmethod
+    def _hold(**overrides: object) -> TicketTask:
+        kwargs: dict[str, object] = {
+            "ticket_id": _T,
+            "client": _C,
+            "status": QueueItemStatus.BLOCKED_ON_USER,
+            "disposition": DEPENDENCY_HOLD_DISPOSITION,
+            "blocked_reason": "dependency_unmerged",
+            "blocked_on_pr": 9,
+        }
+        kwargs.update(overrides)
+        return _make_ticket_task(**kwargs)
+
+    def test_matching_entry_offers_requeue_then_remove(self) -> None:
+        task = self._hold(merge_prerequisites=[prerequisite_entry(9)])
+
+        commands = next_commands(task, session=None)
+
+        assert [c.command for c in commands] == [cmd("requeue"), self._REMOVE]
+        assert "re-parks" in commands[0].purpose
+
+    @pytest.mark.parametrize(
+        "entries",
+        [[], [prerequisite_entry(10)], [prerequisite_entry(9, satisfied=True)]],
+        ids=["none", "other-pr", "satisfied"],
+    )
+    def test_without_a_matching_entry_the_requeue_is_unchanged(
+        self, entries: list[MergePrerequisite]
+    ) -> None:
+        task = self._hold(merge_prerequisites=entries)
+
+        commands = next_commands(task, session=None)
+
+        assert [c.command for c in commands] == [cmd("requeue")]
+        assert commands[0].purpose == (
+            "release the dependency hold now (the PR merged, or you no longer"
+            " need it); the serve loop releases it on merge by itself"
+        )
+
+    def test_emitted_command_is_legal(self) -> None:
+        tokens = shlex.split(self._REMOVE)
+        leaf = _resolve_command(tokens[1:])
+        opts = {
+            opt
+            for param in leaf.params
+            if isinstance(param, click.Option)
+            for opt in (*param.opts, *param.secondary_opts)
+        }
+        assert {t for t in tokens if t.startswith("-")} <= opts
+
+    def test_park_guidance_names_the_verb(self) -> None:
+        from cw.dev_queue.park_guidance import PARK_GUIDANCE
+
+        text = PARK_GUIDANCE[DEPENDENCY_HOLD_DISPOSITION]
+        assert (
+            "A declared merge prerequisite re-parks the row on requeue until"
+            " that PR merges; remove it with `cw dev-queue prerequisite <ticket>"
+            " -c <client> --pr <N> --remove`."
+        ) in text

@@ -55,6 +55,7 @@ from cw.dev_queue.next_commands._common import (
 )
 from cw.models import DispatchSkipReason, QueueItemStatus, ReapReason, Stage
 from cw.models.enums import DEPENDENCY_HOLD_DISPOSITION
+from cw.models.merge_prerequisite import unsatisfied
 from cw.models.ticket_view import NextCommand
 from cw.review_convergence import TIP_CHECK_FETCH_FAILED
 
@@ -388,7 +389,37 @@ def _salvage_commands(task: TicketTask) -> list[NextCommand]:
     ]
 
 
+def _held_on_a_prerequisite(task: TicketTask) -> bool:
+    """True iff the hold's PR is one of the row's unsatisfied prerequisites."""
+    held = task.blocked_on_pr
+    return held is not None and any(
+        entry.pr.key() == held.key() for entry in unsatisfied(task.merge_prerequisites)
+    )
+
+
 def _dependency_hold_commands(task: TicketTask) -> list[NextCommand]:
+    held = task.blocked_on_pr
+    if held is not None and _held_on_a_prerequisite(task):
+        # #3791: a requeue alone re-parks on the prerequisite at the next claim.
+        # requeue leads: it is harmless (it re-parks while the PR is unmerged),
+        # whereas --remove drops the operator's gate, so it must not be the
+        # default first suggestion.
+        return [
+            _requeue(
+                task,
+                "release the hold now; it re-parks at the next claim while the"
+                " prerequisite PR is unmerged",
+            ),
+            NextCommand(
+                command=dev_queue_command(
+                    "prerequisite", task, "--pr", str(held.number), "--remove"
+                ),
+                purpose=(
+                    "drop the merge prerequisite this hold waits on and release"
+                    " the row; the serve loop releases it on merge by itself"
+                ),
+            ),
+        ]
     return [
         _requeue(
             task,

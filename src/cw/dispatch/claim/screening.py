@@ -46,6 +46,7 @@ from cw.dispatch.claim.events import (
     _emit_worktree_occupied_skip_event,
     emit_adoption_attention_event,
 )
+from cw.dispatch.claim.merge_prerequisite import park_unmet_merge_prerequisite
 from cw.dispatch.claim.preflight_reach import BINDING_STAGES
 from cw.dispatch.claim.review_capability import park_review_capability_unmet
 from cw.dispatch.ticket_state_gate import TICKET_CLOSED_CANCEL_REASON
@@ -392,10 +393,12 @@ def _park_if_pre_dispatch_gated(
 
     The closed-ticket guard (#1605) runs first, so a closed ticket is
     cancelled rather than parked on a stale PR (a deferral holds with no
-    write). Then the stale-PR gate (#1862), the tracker-MCP gate (#2442), the
-    adopted-head drift gate (#2943), then the large-tier review-approval gate
-    (#2773; a deferral hold returns True with no write, like the settle-flag
-    skip above, leaving the row PENDING), then the review-capability preflight
+    write). Then the merge-prerequisite gate (#3791; a row-only park folded
+    into the first ``or`` so it adds no return), the stale-PR gate (#1862),
+    the tracker-MCP gate (#2442), the adopted-head drift gate (#2943), then
+    the large-tier review-approval gate (#2773; a deferral hold returns True
+    with no write, like the settle-flag skip above, leaving the row PENDING),
+    then the review-capability preflight
     (#3790), the last gate before claim so its park stays uncharged. Grouped so
     :func:`_screen_and_claim` stays inside its PLR0911 return budget.
     """
@@ -403,12 +406,14 @@ def _park_if_pre_dispatch_gated(
     # precompute. Re-check the durable marker under the claim lock so a newly
     # flagged adopted row cannot slip through before the next tick settles it.
     if (
-        task.adopted_head_sha is not None and task.adopted_repin_due
-    ) or _hold_for_ticket_state(
-        task,
-        closed_ticket_hits,
-        client_name=client_name,
-        store=store,
+        (task.adopted_head_sha is not None and task.adopted_repin_due)
+        or _hold_for_ticket_state(
+            task,
+            closed_ticket_hits,
+            client_name=client_name,
+            store=store,
+        )
+        or park_unmet_merge_prerequisite(task, store, client_name=client_name)
     ):
         return True
     if _is_stale_pr_gated(task, stale_pr_ticket_ids):

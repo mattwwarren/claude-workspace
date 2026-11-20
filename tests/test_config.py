@@ -2466,6 +2466,12 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     # #2321: operator verb; only read-only state and one gh read precede the
     # lock, and it is not reachable from dispatch_tick.
     ("cw/cli/dev_queue/hold.py", "dev_queue_hold"): 1,
+    # `cw dev-queue prerequisite` (#3791): operator verb; only read-only state,
+    # the stale-loop guard (declare) and one gh read (declare) precede the
+    # lock, nothing irreversible happens before it, and dispatch_tick never
+    # reaches the verb. One bounded call per helper.
+    ("cw/cli/dev_queue/prerequisite.py", "_run_declare"): 1,
+    ("cw/cli/dev_queue/prerequisite.py", "_run_remove"): 1,
     ("cw/cli/dev_queue/crud.py", "dev_queue_clear"): 1,
     ("cw/cli/dev_queue/crud.py", "dev_queue_prune"): 1,
     ("cw/cli/dev_queue/approve.py", "revoke_plan_approval_command"): 1,
@@ -2554,6 +2560,9 @@ _BOUNDED_FORWARDERS_ALLOWLIST: dict[tuple[str, str], int] = {
     # and the inner dev-queue lock.
     ("cw/dev_queue/hold.py", "hold_ticket"): 1,
     ("cw/dev_queue/hold.py", "_hold_locked"): 2,
+    # #3791: the locked cores forward their caller's bounded choice to _lock.
+    ("cw/dev_queue/merge_prerequisites.py", "declare_prerequisite"): 1,
+    ("cw/dev_queue/merge_prerequisites.py", "remove_prerequisite"): 1,
     ("cw/dev_queue/crud.py", "clear_tickets"): 1,
     ("cw/dev_queue/crud.py", "prune_tickets"): 1,
     ("cw/dev_queue/approval.py", "approve_ticket"): 1,

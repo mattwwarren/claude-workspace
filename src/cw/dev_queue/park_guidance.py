@@ -41,7 +41,9 @@ PARK_GUIDANCE: dict[str, str] = {
         "This ticket is held until its blocking PR merges. The serve loop"
         " releases it on merge by itself. If the PR closes unmerged the row"
         " stays held and a session.reap_proposed event names it. Release it now"
-        " with `cw dev-queue requeue`."
+        " with `cw dev-queue requeue`. A declared merge prerequisite re-parks"
+        " the row on requeue until that PR merges; remove it with"
+        " `cw dev-queue prerequisite <ticket> -c <client> --pr <N> --remove`."
     ),
     AMBIGUITIES_PENDING_RESOLUTION_STATUS: (
         "The worker parked on open ambiguities. Answer them on the ticket, then"

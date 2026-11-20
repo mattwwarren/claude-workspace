@@ -21,6 +21,7 @@ from cw.models import (
 from cw.models.enums import DEPENDENCY_HOLD_DISPOSITION
 from cw.models.pr_ref import PrRef
 from cw.reconcile.tasks import release_stale_gated_tasks
+from tests._shared.merge_prerequisite_builders import patch_repo_slug
 from tests._ticket_view_helpers import (
     ACME,
     ACME_TICKET,
@@ -43,10 +44,7 @@ _REF_9 = PrRef(number=9)
 @pytest.fixture
 def repo_slug(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Run outside any dispatch worktree; origin resolves to ``foo/bar``."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        "cw.cli.dev_queue.hold._resolve_repo_slug", lambda _git_dir: "foo/bar"
-    )
+    patch_repo_slug(monkeypatch, tmp_path, "foo/bar")
 
 
 def _watches() -> list[WatchedPr]:

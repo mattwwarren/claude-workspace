@@ -73,5 +73,5 @@ class TestTicketTaskLedger:
             names.index("scope_grants") == names.index("scope_drift_approved_head") + 1
         )
 
-    def test_schema_version_is_64(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 64
+    def test_schema_version_is_65(self) -> None:
+        assert DEV_QUEUE_SCHEMA_VERSION == 65

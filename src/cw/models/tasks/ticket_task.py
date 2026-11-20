@@ -27,6 +27,7 @@ from cw._git import FULL_COMMIT_ID_RE
 from cw.models.enums import QueueItemStatus, Stage
 from cw.models.events import PrState, ShippedRedEpisode
 from cw.models.gate_block import GateBlockBackoff
+from cw.models.merge_prerequisite import MergePrerequisite
 from cw.models.operator_constraint import OperatorConstraint
 from cw.models.operator_resolution import OperatorResolution
 from cw.models.pr_ref import (
@@ -292,6 +293,15 @@ class TicketTask(BaseModel):
     # Each grant is re-verified at carry time (cw.scope_grants) before it
     # re-populates the transport above. Additive list: a pre-v64 row loads [].
     scope_grants: list[ScopeGrant] = Field(default_factory=list)
+    # Operator-declared merge prerequisites (v65, #3791). Appended and removed
+    # only by `cw dev-queue prerequisite` (cw.dev_queue.merge_prerequisites);
+    # each is a same-repo PR verified OPEN with one gh call at declaration. The
+    # claim gate (cw.dispatch.claim.merge_prerequisite) parks the row as a
+    # dependency_hold on the first unsatisfied entry; the stale-gate release
+    # stamps satisfied_at on merge. Not cleared by requeue or by a regress: it
+    # is an operator fact independent of the plan. Additive list: a pre-v65
+    # row loads [].
+    merge_prerequisites: list[MergePrerequisite] = Field(default_factory=list)
     # The operator's codex MUST_FIX override (v42, #2205), stamped by
     # dev_queue/must_fix_override.py on a row parked BLOCKED_ON_USER with
     # blocked_reason codex_must_fix_findings. Unlike blocked_reason, it survives

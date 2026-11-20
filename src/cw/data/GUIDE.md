@@ -202,7 +202,9 @@ a sentinel carries one — and they never share values, so always say which.
   Without it the park has no release trigger and frees its slot once its
   worker is settled (#3774); hold it with
   `cw dev-queue hold <T> --until-pr-merged <N | owner/repo#N>` or
-  `--until-ticket-merged <T2>`.)
+  `--until-ticket-merged <T2>`. A row that already has a PR takes a declared
+  merge prerequisite instead, `cw dev-queue prerequisite <T> -c <C> --pr <N>`
+  (#3791), which parks it the same way at its next claim, uncharged.)
   `plan_pending_approval` still charges (`auto_adopt_clean_plan` can re-claim
   it without a human), and SSH/adapter/CLI-flag failures that surface as a
   non-zero `claude --bg` exit still charge.
@@ -384,6 +386,12 @@ cw dev-queue hold <ticket> --until-pr-merged <N> -c <client>
                                                  #   frees the lane slot, released on merge.
                                                  #   Applies before a PR exists: refuses a row
                                                  #   with a PR or a live bound session
+cw dev-queue prerequisite <ticket> -c <client> --pr <N> [--remove]
+                                                 # no stage dispatches until same-repo PR N
+                                                 #   merges (#3791): verified OPEN with one
+                                                 #   gh call; the next claim parks the row as
+                                                 #   a dependency_hold, released on merge.
+                                                 #   Works on a row with a PR; operator only
 cw dev-queue prune --older-than <days> -c <c>    # bulk-retire stale terminal rows (dry-run
                                                  #   by default; needs --confirm to delete)
 cw dev-queue clear -c <client> [-s <status>]     # DESTRUCTIVE: previews by default; needs

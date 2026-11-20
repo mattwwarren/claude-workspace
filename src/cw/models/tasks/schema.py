@@ -294,7 +294,14 @@ from cw.models.enums import Stage
 #      row loads with [] and needs no migration filler. Older cw resaves drop it
 #      (the pre-change per-dispatch behaviour, the fail-closed direction).
 #      Take the next free number at merge if another PR takes v64 first.
-DEV_QUEUE_SCHEMA_VERSION = 64
+# v65: added TicketTask.merge_prerequisites (GitHub #3791) — operator-declared
+#      same-repo PRs that must merge before the row is dispatched again,
+#      written only by `cw dev-queue prerequisite`. A default_factory list with
+#      no migration filler, so a pre-v65 row loads with []. An older cw resave
+#      drops the list: the gate then stops applying (fail-open on downgrade
+#      only), and the operator re-declares. Take the next free number at merge
+#      if another PR takes v65 first.
+DEV_QUEUE_SCHEMA_VERSION = 65
 # Provenance of a v48 review approval: the human `approve` or the gate recipe.
 ReviewApproverKind = Literal["operator", "recipe"]
 DEFAULT_LANE: str = "default"

@@ -2,6 +2,11 @@
 
 Releases BLOCKED_ON_USER rows parked behind a gate whose PR has since merged
 or closed (Variant A and Variant B). See GitHub #1713, #1902, #1927.
+
+``blocked_on_pr`` is not the only satisfaction record: releasing a dependency
+hold on a merged PR also stamps ``satisfied_at`` on each matching entry of
+``TicketTask.merge_prerequisites`` (#3791), because the merged watch that was
+the evidence is retired in the same save.
 """
 
 from __future__ import annotations
@@ -38,6 +43,7 @@ from cw.models import (
     ReapReason,
     TicketTask,
 )
+from cw.models.merge_prerequisite import mark_merged
 from cw.models.pr_ref import PrRefKey, pr_evidence_keys
 from cw.pr_hydrate import _parse_pr_url
 from cw.pr_hydrate.watched import retire_terminal_watched_prs
@@ -363,6 +369,14 @@ def _scan_variant_b(
             # here means an operator hold. A worker park still carrying an
             # explicit ref never reaches here (skipped above, D7).
             operator_hold = task.session_id is None
+            # #3791: stamp every merged prerequisite before the release. The
+            # merged watch is retired in this same save, so without the stamp
+            # the next claim would re-park the row on the same PR forever.
+            mark_merged(
+                task.merge_prerequisites,
+                merged_by_client.get(task.client, set()),
+                datetime.now(UTC),
+            )
             _release_variant_b(task, policy, operator_hold=operator_hold)
         else:
             _release_variant_b(task, policy)

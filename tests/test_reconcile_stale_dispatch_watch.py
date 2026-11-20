@@ -21,6 +21,7 @@ import pytest
 
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.dev_queue.crud import register_or_adopt_watched_pr
+from cw.dispatch.claim.merge_prerequisite import park_unmet_merge_prerequisite
 from cw.models import (
     ClientConfig,
     DevQueueStore,
@@ -39,6 +40,12 @@ from cw.reconcile.stale_dispatch_watch import (
 )
 from cw.reconcile.tasks.stale_gate import _is_variant_b_gate_task
 from tests._reconcile_helpers import park_via_routing
+from tests._shared.merge_prerequisite_builders import (
+    MP_CLIENT,
+    MP_TICKET,
+    pending_row,
+    prerequisite_entry,
+)
 from tests._shared.session_seeding import _make_ticket_task
 from tests._ticket_view_helpers import events_of
 
@@ -706,3 +713,31 @@ class TestWorkerRefBound:
             (_SLUG, False),
             ("o/r", True),
         ]
+
+
+# --- #3791: the claim-gate park shape is registered like an operator hold ---
+
+
+def test_gate_parked_row_gets_one_same_repo_dependency_hold_watch(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A merge-prerequisite park (session-less, bare ref) is watched by the
+    existing registrar with no change: one ``dependency_hold`` watch,
+    ``cross_repo=False``."""
+    save_dev_queue(
+        DevQueueStore(tasks=[pending_row(merge_prerequisites=[prerequisite_entry(9)])])
+    )
+    store = load_dev_queue()
+    assert park_unmet_merge_prerequisite(store.tasks[0], store, client_name=MP_CLIENT)
+    _no_clients(monkeypatch)
+    _stub_slug(monkeypatch)
+
+    assert register_stale_dispatch_watched_prs() == [MP_TICKET]
+    assert register_stale_dispatch_watched_prs() == []
+
+    [watch] = load_dev_queue().watched_prs
+    assert watch.source == "dependency_hold"
+    assert watch.cross_repo is False
+    assert watch.pr_number == 9
+    assert watch.repo == _SLUG
+    assert watch.client == MP_CLIENT
