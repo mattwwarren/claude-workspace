@@ -648,6 +648,16 @@ clients:
 
 `backend` defaults to `claude-native` and can be omitted.
 
+- **`runtime_capabilities: list[str] = []` (#3790).** The runtime-capability slugs
+  this stage's runner declares. REVIEW-only: a non-empty list on any other stage is
+  refused at load. Slug grammar, the 64-character and 16-entry caps, and the
+  sort-and-de-duplicate normalization are the same as for
+  `review.engine.requires_runtime_capabilities`; see
+  [Review Engine](#review-engine) for them and for the park a shortfall causes. A
+  lane's `pipeline.executors` replace the client's wholesale, so a lane that
+  declares its own REVIEW executor must list every capability itself. Operator-only:
+  read from `clients.yaml`, never from the PR branch or `cw-engine.json`.
+
 ### Codex Reasoning Effort
 
 `reasoning_effort` pins codex's `model_reasoning_effort` on a `backend: codex`
