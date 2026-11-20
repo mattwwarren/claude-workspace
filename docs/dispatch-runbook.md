@@ -620,7 +620,9 @@ for which park" in §5).
 `--json` emits the `TicketView` model (`cw schema show ticket-view`):
 `schema_version`, `ticket_id`, `client`, `status`, `stage`, `disposition`,
 `blocked_reason`, `blocked_on_pr` (the PR a dependency hold waits on, null
-when none, #2321), `blocker_details`, `advisory_note`, `lane`, `priority`,
+when none, #2321), `scope_decision` (a `plan_scope_drift` park only: `owner`,
+`carried_paths`, `new_paths`, `next_action`; null otherwise, #3772),
+`blocker_details`, `advisory_note`, `lane`, `priority`,
 `scope_hint`, `attempts`, `unproductive_attempts`, `attempt_ceiling` (null =
 no ceiling), `session` (null, or `id`/`status`/`liveness_bucket`/
 `in_roster`/`attention_state`; `status` null = session no longer in state),
@@ -1026,6 +1028,10 @@ every refusal names the right one for the row (`Run: ...`), and
   to re-run impl without them. The grant drops stored review feedback whose
   `reviewed_sha` is no longer the branch head (#3637); the CLI names the dropped
   sha and the `requeue --stage impl --review-feedback-file` recovery command.
+  The grant is also recorded on the row (#3772): a later repair dispatch re-uses
+  it while it still verifies, and only new paths are presented. `show` names the
+  owner and the next action in `scope_decision`. A regress into PLAN drops the
+  grants; that is the operator's revocation lever (`requeue --stage plan`).
 - Codex MUST_FIX park (`codex_must_fix_findings`):
   `approve --override-must-fix --reason "<why>"`, then
   `requeue --stage finalize` (§7); if the ticket or lane has a finalize
@@ -3091,8 +3097,12 @@ dispatch tick, with no lock held, `settle_adopted_pins` reads the origin head,
 fetches the branch and advances the pin only when the old pin is an ancestor;
 a non-descendant or a git error keeps the pin and the drift scan parks it. An
 unreadable origin head defers the settle (the flag stays set, the row is
-skipped by the drift scan, and a warning is logged each tick until gh reads
-again). The settle runs at most 8 rows per client per tick, each with a 60s
+skipped by the drift scan, and for a live (non-terminal) row a warning is
+logged each tick until gh reads again). The settle skips rows in a terminal
+status (completed, failed, cancelled): they have no next session, and their
+head branch is usually deleted after merge. Their flag is left set, so a
+requeued row is settled again. Skipped rows log nothing and do not count
+against the 8-row cap. The settle runs at most 8 rows per client per tick, each with a 60s
 fetch bound, and runs even when the client has no free slot; there is no
 per-client toggle yet (see the follow-up below). The repair recipe's lease
 push (`repair_git._push_with_lease`) advances the pin from the expected SHA to

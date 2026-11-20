@@ -27,6 +27,7 @@ from cw.models.review_attestation import ReviewAttestation
 from cw.models.review_debt_record import ReviewDebtRecord
 from cw.models.review_engine_settlement import ReviewEngineSettlement
 from cw.models.review_feedback import ReviewFeedback
+from cw.models.scope_grant import ScopeGrant
 from cw.models.tasks.records import (
     LaunchedFixWorker,
     LaunchMarker,
@@ -260,18 +261,25 @@ class TicketTask(BaseModel):
     # cw-context.json queue_metadata at spawn (spawn.py), where Step 2.5 gate 2
     # passes it to check_plan_scope_conformance.py as an allowlist.
     #
-    # Unlike plan_approved_at above, a per-arrival marker, not a durable fact:
-    # cleared unconditionally by the next spawn (dispatch/claim.py's
-    # spawn-success block, beside regressed_into_stage), because the grant is
-    # for exactly the IMPL session the approval requeues and must never leak
-    # into a later stage entry or a later round's drift. None = no grant.
+    # Per-spawn transport only, not the durable authority (#3772): cleared
+    # unconditionally by the next spawn (dispatch/claim/spawn.py's
+    # spawn-success block, beside regressed_into_stage). Each IMPL dispatch
+    # re-derives it from scope_grants below via cw.scope_grants.carry, so a
+    # REVIEW-to-IMPL repair redispatch still carries the approved paths.
+    # None = no transport for this spawn.
     scope_drift_approved_extra_files: list[str] | None = None
     # The branch's origin HEAD SHA when the grant above was given — its binding,
     # in the role plan_approved_fingerprint plays for plan_approved_at. Gate 2
     # honors the grant only while this SHA is an ancestor of origin/<branch>
     # (more commits on top are fine; a force-push or rewrite voids it). Same
-    # stamp and clear seams as scope_drift_approved_extra_files, never its own.
+    # transport role and clear seam as scope_drift_approved_extra_files.
     scope_drift_approved_head: str | None = None
+    # The durable ledger of scope-drift approvals (v64, #3772). Appended by
+    # dev_queue/scope_drift.py on each approve; cleared only by _stage_regress
+    # into Stage.PLAN (the plan of record changed). Never cleared at spawn.
+    # Each grant is re-verified at carry time (cw.scope_grants) before it
+    # re-populates the transport above. Additive list: a pre-v64 row loads [].
+    scope_grants: list[ScopeGrant] = Field(default_factory=list)
     # The operator's codex MUST_FIX override (v42, #2205), stamped by
     # dev_queue/must_fix_override.py on a row parked BLOCKED_ON_USER with
     # blocked_reason codex_must_fix_findings. Unlike blocked_reason, it survives

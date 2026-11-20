@@ -16,7 +16,7 @@ import click
 from cw.cli._base import handle_errors
 from cw.cli._worker_guard import refuse_inside_dispatch_worker
 from cw.cli.routed_orphan_close import close_routed_result_sessions_for_ticket
-from cw.config import load_orchestrator_config
+from cw.config import get_client, load_orchestrator_config
 from cw.dev_queue import (
     BODY_DRIFT_WARNING_KEY,
     approve_must_fix_override_ticket,
@@ -33,7 +33,7 @@ from cw.dev_queue.approval import (
 )
 from cw.dev_queue.next_commands import human_gate_settled_notice, is_human_kept_gate
 from cw.events import record_event
-from cw.exceptions import ApproveGateError
+from cw.exceptions import ApproveGateError, CwError
 from cw.models import (
     PLAN_APPROVED_FINGERPRINT_KEY,
     PLAN_PROMOTED_KEY,
@@ -45,6 +45,8 @@ from cw.outbox_producer import (
     entry_state_label,
 )
 from cw.plan_fingerprint import is_plan_draft_fingerprint
+from cw.pr_hydrate import _resolve_repo_slug
+from cw.worktree import _git_dir
 
 from ._group import dev_queue
 from ._loop_warning import warn_if_dispatch_loop_stale
@@ -185,6 +187,20 @@ def _close_orphans_after_approve(
     )
 
 
+def _grant_repo_slug(client_name: str) -> str | None:
+    """The origin ``owner/repo`` a scope-drift grant binds to, resolved here.
+
+    Resolved in the CLI, before the queue lock: ``cw.dev_queue`` cannot import
+    ``cw.pr_hydrate`` (import cycle), and the slug is a git read (#3772). ``None``
+    when the client is unknown or the origin is not a GitHub remote; the
+    approval then records an unbound grant that the carry will not reuse.
+    """
+    try:
+        return _resolve_repo_slug(_git_dir(get_client(client_name)))
+    except (CwError, OSError, ValueError):
+        return None
+
+
 def _approve_scope_drift(
     ticket_id: str, resolved: str, scope_drift: str, config: OrchestratorConfig
 ) -> None:
@@ -200,6 +216,7 @@ def _approve_scope_drift(
         resolved,
         extra_files,
         bounded=True,
+        repo=_grant_repo_slug(resolved),
     )
     click.echo(
         f"Approved scope drift for {ticket_id} ({resolved}):"
@@ -368,11 +385,12 @@ def _raise_if_settled_into_human_gate(outcome: SettleOutcome) -> None:
     default=None,
     help=(
         "Approve plan_scope_drift for a ticket parked at IMPL: a"
-        " comma-separated list of repo-relative paths the operator allows"
-        " beyond the plan's Files Modified. Recorded on the row, bound to"
-        " the branch head, and added to the scope-conformance gate's"
-        " allowed set on the next dispatch. Mutually exclusive with"
-        " --post-marker."
+        " comma-separated list of exact repo-relative paths (no globs or"
+        " directories) the operator allows beyond the plan's Files Modified."
+        " Recorded on the row as a grant bound to the branch head, repository,"
+        " review policy and plan of record. A later repair dispatch re-uses"
+        " the grant while it still verifies, and only new paths are"
+        " re-presented. Mutually exclusive with --post-marker."
     ),
 )
 @click.option(
@@ -471,10 +489,12 @@ def dev_queue_approve(
     --scope-drift approves operator-directed scope growth that the IMPL-stage
     scope-conformance gate (check_plan_scope_conformance.py) would otherwise
     block as plan_scope_drift — typically files a review-round direction asked
-    for. The approval lists the extra paths, is bound to the branch head it
-    was given for, and applies only to a row parked with blocked_reason
-    plan_scope_drift. A head that moves before the next dispatch invalidates
-    it, and the gate blocks again rather than trusting a stale approval.
+    for. The approval records a grant of exact paths, bound to the branch head,
+    the repository, the review policy and the plan of record, and applies only
+    to a row parked with blocked_reason plan_scope_drift. A later IMPL dispatch
+    re-uses the grant only while it still verifies (the head is still an
+    ancestor of HEAD, and the binding has not changed); only paths the grant
+    does not cover are presented again. A regress into PLAN drops the grants.
 
     --override-must-fix records an operator decision to ship past a codex
     background review's MUST_FIX park (blocked_reason codex_must_fix_findings),

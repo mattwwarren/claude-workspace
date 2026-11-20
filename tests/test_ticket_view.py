@@ -111,6 +111,7 @@ _TEXT_KEYS = [
     "skip_reason",
     "approval",
     "attestation",
+    "scope_decision",
     "other_rows",
     "next",
 ]
@@ -144,6 +145,7 @@ _DOCUMENTED_FIELDS = {
     "created_at",
     "completed_at",
     "next",
+    "scope_decision",
 }
 
 

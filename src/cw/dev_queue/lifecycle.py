@@ -765,9 +765,12 @@ def _stage_regress(
     # Large-scope Checkpoint 1 (see GitHub #2102). Same-stage PLAN requeues
     # never pass through here and keep the approval on purpose -- an
     # approved draft re-parked for ambiguities still carries its approval.
+    # A re-plan also drops the scope-drift grant ledger (#3772): the plan of
+    # record changed, so no earlier grant binds the new plan.
     if target_stage == Stage.PLAN:
         task.plan_approved_at = None
         task.plan_approved_fingerprint = None
+        task.scope_grants = []
     # A regress INTO review means a re-review, which supersedes the verdict the
     # operator's MUST_FIX override was bound to (#2205).
     if target_stage == Stage.REVIEW:
