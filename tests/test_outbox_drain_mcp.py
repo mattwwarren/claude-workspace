@@ -28,17 +28,12 @@ from tests._tool_fakes import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-pytestmark = pytest.mark.usefixtures("isolated_backend_layers")
+pytestmark = pytest.mark.usefixtures(
+    "isolated_backend_layers", "project_walk_stops_at_state_dir"
+)
 
 _TICKET = "T-1"
 _LINE = "<!-- cw-outbox:m1:1/1 -->"
-
-
-@pytest.fixture(autouse=True)
-def _stop_project_walk_at_state_dir() -> None:
-    from cw.config import state_dir
-
-    (state_dir() / ".git").mkdir(parents=True, exist_ok=True)
 
 
 @pytest.fixture
