@@ -29,7 +29,7 @@ from cw.codex_plan._argv import PLAN_READ_ONLY_ARGV, build_plan_argv
 from cw.codex_review import _CODEX_IMPL_BLOCKED_NEXT_ACTIONS, _exec_policy_argv
 from cw.codex_review._roles import _build_generic_codex_argv
 from cw.codex_runner import CodexRunResult
-from cw.config import load_state, state_dir
+from cw.config import get_client, load_state, state_dir
 from cw.contract_manifest import RenderError
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.dispatch import apply_staged_decision
@@ -48,6 +48,7 @@ from cw.models import (
 from cw.models.orchestrator_config.stage import ModelPrice
 from cw.models.review_feedback import ReviewFeedback
 from cw.models.usage import UsageStage, UsageState, UsageUnavailableReason
+from cw.scope_grants import review_policy_fingerprint
 from cw.stage_verification.impl_block import ImplBlock
 from cw.stage_verification.push import SYNTHETIC_MISMATCH_PREFIX
 from cw.ticket_snapshot import TicketSnapshot, normalize_ticket_id, write_snapshot
@@ -66,6 +67,7 @@ from tests._shared.bindings_builders import bindings_linear_mcp
 from tests._shared.cli_preflight import _write_tracker_config
 from tests._shared.git_repos import commit_tracked_file, git_in, push_commit_to_origin
 from tests._shared.review_builders import _make_finding, write_review_verdict_envelope
+from tests._shared.scope_grant_builders import GRANT_SLUG, make_grant
 from tests._shared.ticket_context import make_comment, make_snapshot, make_snapshot_from
 from tests._ticket_view_helpers import events_of
 from tests._tool_fakes import (
@@ -87,6 +89,8 @@ from tests.test_codex_plan_run import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+
+    from cw.models import TicketTask
 
 pytestmark = pytest.mark.usefixtures("isolated_backend_layers")
 
@@ -831,6 +835,47 @@ def test_scope_conformance_drift_parks_plan_scope_drift(
     assert result.blocker is not None
     assert "z/extra.py" in result.blocker.details
     assert_clean_after_refusal(h.worktree, start)
+
+
+def test_a_stored_scope_ledger_is_carried_before_gate_2_reads_the_transport(
+    harness: Callable[..., Harness], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3772: the detached driver re-loads a row whose transport the spawn-success
+    stamp cleared, so ``_prepare`` re-derives it from the ledger before
+    ``approved_extra`` (and so gate 2) reads it."""
+    h = harness()
+    head = h.head()
+    store = load_dev_queue()
+    row = store.tasks[0]
+    assert row.scope_drift_approved_extra_files is None
+    row.scope_grants = [
+        make_grant(
+            client="test",
+            ticket_id=TICKET,
+            row_created_at=row.created_at,
+            head=head,
+            paths=["z/extra.py"],
+            policy=review_policy_fingerprint(get_client("test").review),
+        )
+    ]
+    save_dev_queue(store)
+    monkeypatch.setattr(impl_run, "_resolve_repo_slug", lambda _path: GRANT_SLUG)
+    seen: list[tuple[list[str] | None, str | None]] = []
+    real_approved_extra = impl_run.approved_extra
+
+    def _spy(worktree: Path, task: TicketTask) -> tuple[list[str], list[str]]:
+        seen.append(
+            (task.scope_drift_approved_extra_files, task.scope_drift_approved_head)
+        )
+        return real_approved_extra(worktree, task)
+
+    monkeypatch.setattr(impl_run, "approved_extra", _spy)
+    h.turn()
+
+    result = h.run()
+
+    assert result.status == "stage_complete"
+    assert seen == [(["z/extra.py"], head)]
 
 
 def test_quality_gate_failure_parks_impl_failed_with_gate_output(
