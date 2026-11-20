@@ -98,8 +98,8 @@ class TestTicketTaskField:
 
         assert names.index("merge_prerequisites") == names.index("scope_grants") + 1
 
-    def test_schema_version_is_65(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 65
+    def test_schema_version_is_66(self) -> None:
+        assert DEV_QUEUE_SCHEMA_VERSION == 66
 
 
 class TestUnsatisfied:

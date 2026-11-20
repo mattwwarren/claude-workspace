@@ -41,8 +41,8 @@ def test_pre_v63_blob_loads_with_snapshot_fields_unset() -> None:
     assert task.snapshot_digest is None
 
 
-def test_schema_version_is_65() -> None:
-    assert DEV_QUEUE_SCHEMA_VERSION == 65
+def test_schema_version_is_66() -> None:
+    assert DEV_QUEUE_SCHEMA_VERSION == 66
 
 
 def test_snapshot_fields_sit_after_review_engine_settlements() -> None:

@@ -14,7 +14,8 @@ from pathlib import Path
 import pytest
 
 import cw.models
-from cw.models import ClientConfig, resolve_feature_branch
+from cw.models import ClientConfig, resolve_base_branch, resolve_feature_branch
+from cw.models.branch import _DEFAULT_BASE_BRANCH
 from tests._shared.session_seeding import _make_ticket_task
 from tests._shared.workflow_text import _SRC_ROOT
 
@@ -22,11 +23,12 @@ _BRANCH_MODULE = _SRC_ROOT / "cw" / "models" / "branch.py"
 _SIBLING_MODULES = frozenset({"cw.models.client", "cw.models.tasks"})
 
 
-def _client(prefix: str = "dev") -> ClientConfig:
+def _client(prefix: str = "dev", default_branch: str = "main") -> ClientConfig:
     return ClientConfig(
         name="client-a",
         workspace_path=Path("/tmp/ws"),
         feature_branch_prefix=prefix,
+        default_branch=default_branch,
     )
 
 
@@ -109,3 +111,38 @@ def test_runtime_import_detector_flags_an_unguarded_import() -> None:
         "    from cw.models.tasks import TicketTask\n"
     )
     assert _runtime_sibling_imports(source) == ["cw.models.client", "cw.models.tasks"]
+
+
+# --- resolve_base_branch (GitHub #3779, RFC 0020 D-3) ---
+
+
+def test_null_row_base_returns_client_default_branch() -> None:
+    task = _make_ticket_task(ticket_id="T-1", base_branch=None)
+    assert resolve_base_branch(_client(default_branch="develop"), task) == "develop"
+
+
+def test_set_row_base_wins_over_the_client() -> None:
+    task = _make_ticket_task(ticket_id="T-1", base_branch="epic/3778")
+    assert resolve_base_branch(_client(default_branch="develop"), task) == "epic/3778"
+
+
+def test_no_client_no_task_returns_main() -> None:
+    assert resolve_base_branch(None, None) == "main"
+
+
+def test_null_client_with_set_row_returns_row_base() -> None:
+    task = _make_ticket_task(ticket_id="T-1", base_branch="epic/3778")
+    assert resolve_base_branch(None, task) == "epic/3778"
+
+
+def test_null_task_defaults_to_client_default() -> None:
+    assert resolve_base_branch(_client(default_branch="develop")) == "develop"
+
+
+def test_default_constant_matches_clientconfig_default() -> None:
+    assert ClientConfig.model_fields["default_branch"].default == _DEFAULT_BASE_BRANCH
+
+
+def test_base_resolver_is_exported_from_cw_models() -> None:
+    assert "resolve_base_branch" in cw.models.__all__
+    assert cw.models.resolve_base_branch is resolve_base_branch

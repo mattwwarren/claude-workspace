@@ -1411,6 +1411,18 @@
      "default": null,
      "title": "Branch"
     },
+    "base_branch": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Base Branch"
+    },
     "adopted_pr_url": {
      "anyOf": [
       {
@@ -3786,6 +3798,18 @@
        ],
        "default": null,
        "title": "Branch"
+      },
+      "base_branch": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Base Branch"
       },
       "adopted_pr_url": {
        "anyOf": [
@@ -6258,6 +6282,18 @@
        "default": null,
        "title": "Branch"
       },
+      "base_branch": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Base Branch"
+      },
       "adopted_pr_url": {
        "anyOf": [
         {
@@ -7464,7 +7500,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 65,
+     "default": 66,
      "title": "Schema Version",
      "type": "integer"
     },
@@ -9088,6 +9124,18 @@
      ],
      "default": null,
      "title": "Branch"
+    },
+    "base_branch": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Base Branch"
     },
     "adopted_pr_url": {
      "anyOf": [
@@ -11464,6 +11512,18 @@
        "default": null,
        "title": "Branch"
       },
+      "base_branch": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Base Branch"
+      },
       "adopted_pr_url": {
        "anyOf": [
         {
@@ -12669,7 +12729,7 @@
    "description": "Persisted dev-queue state holding TicketTasks.",
    "properties": {
     "schema_version": {
-     "default": 65,
+     "default": 66,
      "title": "Schema Version",
      "type": "integer"
     },
