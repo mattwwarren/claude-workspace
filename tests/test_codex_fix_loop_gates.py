@@ -1808,6 +1808,11 @@ def _drive(
     return result, fake
 
 
+# Rewrites the file ``_FakeRunner(edit=True)`` adds in cycle 1, then exits 1.
+_CYCLE_FILE_HOOK = rewrite_hook_body("fix_cycle_1.py", "cycle=1")
+_OPT_OUT_CONFIG = "quality_gates:\n  accept_hook_rewrite:\n    fmt: false\n"
+
+
 def _origin_tip(repo: Path) -> str:
     git_in(repo, "fetch", "origin")
     return git_in(repo, "rev-parse", "origin/main")
@@ -2081,6 +2086,48 @@ class TestWiring:
         assert git_in(loop_repo, "rev-parse", "HEAD") == start
         assert git_in(loop_repo, "status", "--porcelain") == ""
         assert tokens == [_AUTOFIXED_FRICTION]
+
+    def test_self_rewriting_gate_commits_the_rewrite_by_default(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        loop_repo: Path,
+        home_stub: PrepPrStateStub,
+        real_gates: None,
+    ) -> None:
+        """#3689: with no opt-out the real loop accepts a hook's rewrite."""
+        start = git_in(loop_repo, "rev-parse", "HEAD")
+        home_stub.gates(("fmt", _CYCLE_FILE_HOOK, 5))
+        tokens: list[str] = []
+
+        result, _fake = _drive(monkeypatch, loop_repo, gate_tokens=tokens)
+
+        assert result.blocker is None or result.blocker.reason != CODEX_FIX_GATE_FAILED
+        assert git_in(loop_repo, "rev-parse", "HEAD") != start
+        assert git_in(loop_repo, "show", "HEAD:fix_cycle_1.py") == "cycle=1"
+        assert tokens == [_AUTOFIXED_FRICTION]
+
+    def test_opted_out_self_rewriting_gate_parks_with_the_original_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        loop_repo: Path,
+        home_stub: PrepPrStateStub,
+        real_gates: None,
+    ) -> None:
+        """#3689: ``accept_hook_rewrite.fmt: false`` parks as before #3684."""
+        commit_tracked_file(loop_repo, ".claude/project-config.yaml", _OPT_OUT_CONFIG)
+        start = git_in(loop_repo, "rev-parse", "HEAD")
+        home_stub.gates(("fmt", _CYCLE_FILE_HOOK, 5))
+        tokens: list[str] = []
+
+        result, fake = _drive(monkeypatch, loop_repo, gate_tokens=tokens)
+
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_FIX_GATE_FAILED
+        assert "fmt" in result.blocker.details
+        assert "exit code 1" in result.blocker.details
+        assert_clean_after_refusal(loop_repo, start)
+        assert fake.calls == 0
+        assert tokens == []
 
     def test_git_error_in_the_post_gate_remeasure_parks_as_a_codex_error(
         self,
@@ -2460,9 +2507,6 @@ class TestHookRewriteDefaultOff:
 
         assert failure is not None
         assert failure.exit_code == 1
-
-
-_OPT_OUT_CONFIG = "quality_gates:\n  accept_hook_rewrite:\n    fmt: false\n"
 
 
 class TestPlannerHookRewriteOptOut:
