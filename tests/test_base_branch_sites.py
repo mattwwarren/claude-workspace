@@ -147,7 +147,7 @@ class TestFetchBaseBranch:
 
         result = fetch_base_branch(_client_at(tmp_path, tmp_path), _BASE)
 
-        assert argv == [["git", "fetch", "origin", _BASE, "--quiet"]]
+        assert [cmd[1:] for cmd in argv] == [["fetch", "origin", _BASE, "--quiet"]]
         assert result.outcome is FetchOutcome.FETCHED
 
     def test_fetch_base_branch_timeout_is_failed_with_pinned_reason(
@@ -262,7 +262,8 @@ def _spy_git_argv(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
 
 
 def _fetches(argv: list[list[str]]) -> list[list[str]]:
-    return [cmd for cmd in argv if cmd[1:2] == ["fetch"]]
+    """The fetches among *argv*, without the leading ``git``."""
+    return [cmd[1:] for cmd in argv if cmd[1:2] == ["fetch"]]
 
 
 def _worktree_add(argv: list[list[str]]) -> list[str]:
@@ -291,8 +292,8 @@ class TestWorktreeStartPoint:
         assert git_in(wt, "rev-parse", "HEAD") == base_tip
         assert _worktree_add(argv)[-4:] == ["-b", _BRANCH, str(wt), f"origin/{_BASE}"]
         assert _fetches(argv) == [
-            ["git", "fetch", "origin", _BRANCH, "--quiet"],
-            ["git", "fetch", "origin", _BASE, "--quiet"],
+            ["fetch", "origin", _BRANCH, "--quiet"],
+            ["fetch", "origin", _BASE, "--quiet"],
         ]
 
     @pytest.mark.parametrize("row", [None, _base_row(None)], ids=["no-row", "null"])
@@ -310,7 +311,7 @@ class TestWorktreeStartPoint:
         wt = create_worktree(_client_at(workspace, tmp_path), _BRANCH, task=row)
 
         assert _worktree_add(argv)[-1] == "origin/main"
-        assert _fetches(argv) == [["git", "fetch", "origin", _BRANCH, "--quiet"]]
+        assert _fetches(argv) == [["fetch", "origin", _BRANCH, "--quiet"]]
         assert git_in(wt, "rev-parse", "HEAD") == git_in(
             workspace, "rev-parse", "origin/main"
         )
