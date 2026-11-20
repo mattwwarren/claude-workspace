@@ -8,6 +8,17 @@ from click.testing import CliRunner
 
 from cw.cli import main
 from cw.schema import REGISTRY
+from tests._review_history_helpers import (
+    ROUND_STAGE_SECONDS,
+    STAGE_SECONDS_DOC,
+    STAGE_SECONDS_GATE,
+    STAGE_SECONDS_QUEUED,
+    STAGE_SECONDS_REPAIRING,
+    STAGE_SECONDS_REVIEWING,
+    SUMMARY_AS_OF,
+    SUMMARY_STAGE_SECONDS,
+    WALL_SECONDS,
+)
 from tests._shared.workflow_text import _norm
 
 
@@ -188,6 +199,46 @@ class TestSchemaShowReviewHistory:
             "`delta` (a cw-recorded round over only the conflict resolution of a "
             "default-branch merge)"
         ) in kind["description"]
+
+    def test_stage_seconds_block_carries_the_documented_strings(self) -> None:
+        """#3792: four nullable numbers, shared by every round and the summary."""
+        result = CliRunner().invoke(
+            main, ["schema", "show", "review-history", "--format=json"]
+        )
+        assert result.exit_code == 0
+        defs = json.loads(result.output)["$defs"]
+        block = defs["StageSeconds"]
+        assert block["description"] == STAGE_SECONDS_DOC
+        expected = {
+            "queued": STAGE_SECONDS_QUEUED,
+            "reviewing": STAGE_SECONDS_REVIEWING,
+            "repairing": STAGE_SECONDS_REPAIRING,
+            "gate": STAGE_SECONDS_GATE,
+        }
+        assert set(block["properties"]) == set(expected)
+        for name, description in expected.items():
+            prop = block["properties"][name]
+            assert prop["anyOf"] == [{"type": "number"}, {"type": "null"}], name
+            assert prop["description"] == description, name
+
+    def test_round_and_summary_reference_the_stage_seconds_block(self) -> None:
+        result = CliRunner().invoke(
+            main, ["schema", "show", "review-history", "--format=json"]
+        )
+        assert result.exit_code == 0
+        defs = json.loads(result.output)["$defs"]
+        round_props = defs["RoundView"]["properties"]
+        summary_props = defs["HistorySummary"]["properties"]
+        for prop, description in (
+            (round_props["stage_seconds"], ROUND_STAGE_SECONDS),
+            (summary_props["stage_seconds"], SUMMARY_STAGE_SECONDS),
+        ):
+            assert "#/$defs/StageSeconds" in json.dumps(prop)
+            assert prop["description"] == description
+        assert round_props["wall_seconds"]["description"] == WALL_SECONDS
+        as_of = summary_props["stage_seconds_as_of"]
+        assert as_of["anyOf"] == [{"type": "string"}, {"type": "null"}]
+        assert as_of["description"] == SUMMARY_AS_OF
 
     def test_tldr_renders(self) -> None:
         runner = CliRunner()

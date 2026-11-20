@@ -3,21 +3,28 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
 from click.testing import CliRunner, Result
+from freezegun import freeze_time
 
 from cw.cli import main
+from cw.cli.review.history import review_history as review_history_command
 from cw.config import clients_file, dev_queue_file, state_file
 from cw.events import inbox_path
 from cw.models import QueueItemStatus, Stage
 from cw.models.review_history import ReviewHistory
 from cw.review_convergence import LEDGER_RELATIVE_PATH, record_delta_round
 from tests._cli_review_helpers import _enter_operator_machine, _seed_review_row
+from tests._review_convergence_helpers import write_ledger
 from tests._review_history_helpers import (
     ACME_SESSION,
     DEFER_RATIONALE,
+    FIX_CYCLE_STEPS,
+    FIX_SESSION_COMPLETED,
+    FIX_SESSION_STARTED,
     OTHER,
     OTHER_COMMENT,
     OTHER_FILE,
@@ -26,17 +33,27 @@ from tests._review_history_helpers import (
     OTHER_SUMMARY,
     REJECT_RATIONALE,
     REVIEW_START,
+    ROW_CREATED,
+    STAGE_DOC_PARAGRAPH,
+    STAGE_TIE_SENTENCE,
     VOIDED_SUMMARY,
     LedgerFixture,
+    Step,
     blocking_dispositions,
     clean_sentinel_session,
+    fix_cycle_ledger,
+    fix_session_for,
     fixture_awaiting_confirm,
     fixture_blocking_sentinel,
     fixture_converged,
     fixture_stopped,
     foreign_voided_event,
+    note_foreign_transitions,
     sentinel_review,
     stage_entered_event,
+    status_chain,
+    timing_task,
+    transition_event,
     write_corrupt_ledger,
     write_voided_ledger,
 )
@@ -395,3 +412,177 @@ def test_sentinel_fallback_round_renders_the_unsplit_settled_total(
     assert "  sha: abc1234" in lines
     assert "  settled: 1 (new/resurfaced split not recorded)" in lines
     assert "  wall_time: not recorded" in lines
+
+
+_PRE_EXISTING_ROUND_KEYS = {
+    "round",
+    "kind",
+    "source",
+    "backend",
+    "reviewed_sha",
+    "roster",
+    "new_accepted",
+    "new_fix",
+    "new_operator_action",
+    "new_settled",
+    "resurfaced_settled",
+    "settled_total",
+    "new_by_severity",
+    "fix_dispatched",
+    "clean",
+    "recorded_at",
+    "wall_seconds",
+    "settled",
+}
+_PRE_EXISTING_SUMMARY_KEYS = {
+    "convergence_mode",
+    "rounds_run",
+    "converged",
+    "final_clean_sha",
+    "ledger_status",
+    "stop_reason",
+    "stop_identities",
+    "fix_cycles_used",
+    "max_cycles",
+    "confirm_backend",
+    "new_accepted_series",
+    "deferred",
+    "deferred_count",
+    "releases",
+    "confirm_failures",
+}
+_STAGE_KEYS = {"queued", "reviewing", "repairing", "gate"}
+
+
+def _seed_fix_cycle_row(tmp_path: Path) -> None:
+    """The fix cycle's ledger, transition chain and FIX session, behind a real row."""
+    worktree = tmp_path / "acme-wt"
+    write_ledger(worktree, fix_cycle_ledger())
+    stage_entered_event(ACME_TICKET, ACME_SESSION, "2026-10-27T11:50:00+00:00")
+    status_chain(timing_task(), *FIX_CYCLE_STEPS)
+    fix = fix_session_for(
+        timing_task(),
+        "sess-fix",
+        FIX_SESSION_STARTED,
+        FIX_SESSION_COMPLETED,
+        worktree=worktree,
+    )
+    with freeze_time(ROW_CREATED):
+        _seed_review_row(
+            ACME_TICKET,
+            ACME,
+            worktree_path=worktree,
+            status=QueueItemStatus.COMPLETED,
+            session_id=ACME_SESSION,
+            sessions=[fix],
+        )
+
+
+def test_stage_seconds_is_additive_in_json(tmp_path: Path) -> None:
+    _seed_with_ledger(tmp_path, fixture_converged)
+
+    result = _invoke(ACME_TICKET, "--json")
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert set(payload) == {
+        "schema_version",
+        "ticket_id",
+        "client",
+        "row_status",
+        "row_stage",
+        "in_flight",
+        "rounds",
+        "summary",
+        "settled",
+        "dispositions",
+        "voided",
+        "sources",
+        "notes",
+    }
+    assert payload["schema_version"] == 1
+    for view in payload["rounds"]:
+        assert set(view) - {"stage_seconds"} == _PRE_EXISTING_ROUND_KEYS
+        assert set(view["stage_seconds"]) == _STAGE_KEYS
+    summary = payload["summary"]
+    assert set(summary) - {"stage_seconds", "stage_seconds_as_of"} == (
+        _PRE_EXISTING_SUMMARY_KEYS
+    )
+    assert set(summary["stage_seconds"]) == _STAGE_KEYS
+    assert summary["stage_seconds_as_of"] is None
+
+
+def test_stage_time_is_in_the_text_output(tmp_path: Path) -> None:
+    _seed_with_ledger(tmp_path, fixture_converged)
+
+    result = _invoke(ACME_TICKET, "-c", ACME)
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert any(line.startswith("stage_time: ") for line in lines)
+    assert sum(line.startswith("  stage_time: ") for line in lines) == 5
+
+
+def test_the_stage_split_end_to_end_with_real_events_and_a_fix_session(
+    tmp_path: Path,
+) -> None:
+    _seed_fix_cycle_row(tmp_path)
+
+    as_json = _invoke(ACME_TICKET, "-c", ACME, "--json")
+    text = _invoke(ACME_TICKET, "-c", ACME)
+
+    assert as_json.exit_code == 0, as_json.output
+    history = ReviewHistory.model_validate_json(as_json.output)
+    assert history.rounds[1].stage_seconds.model_dump() == {
+        "queued": 270.0,
+        "reviewing": 1530.0,
+        "repairing": 1200.0,
+        "gate": 0.0,
+    }
+    assert history.summary.stage_seconds.model_dump() == {
+        "queued": 2070.0,
+        "reviewing": 4410.0,
+        "repairing": 1200.0,
+        "gate": 3720.0,
+    }
+    assert text.exit_code == 0, text.output
+    assert (
+        "stage_time: queued 34m30s, reviewing 1h13m30s, repairing 20m00s, gate 1h02m00s"
+    ) in text.output.splitlines()
+
+
+def test_a_newer_sibling_rows_events_are_not_this_rows(tmp_path: Path) -> None:
+    """The selected live row ends where the next re-enqueued row begins."""
+    selected = timing_task(
+        status=QueueItemStatus.RUNNING,
+        created_at=datetime(2026, 10, 27, 11, 0, tzinfo=UTC),
+    )
+    sibling = timing_task(
+        status=QueueItemStatus.COMPLETED,
+        created_at=datetime(2026, 10, 27, 14, 30, tzinfo=UTC),
+    )
+    seed_queue([selected, sibling])
+    status_chain(
+        selected,
+        Step("2026-10-27T11:00:00+00:00", QueueItemStatus.PENDING),
+        Step("2026-10-27T11:30:00+00:00", QueueItemStatus.RUNNING),
+    )
+    transition_event(sibling, QueueItemStatus.COMPLETED, "2026-10-27T14:40:00+00:00")
+
+    result = _invoke(ACME_TICKET, "-c", ACME, "--json")
+
+    assert result.exit_code == 0, result.output
+    history = ReviewHistory.model_validate_json(result.output)
+    assert history.row_status == "running"
+    assert note_foreign_transitions(1) in history.notes
+    assert not [n for n in history.notes if "the last task.transition event" in n]
+    assert history.summary.stage_seconds.queued == 1800.0
+    assert history.summary.stage_seconds.gate == 0.0
+    assert history.summary.stage_seconds_as_of is not None
+
+
+def test_the_help_documents_the_stage_time_and_the_tie() -> None:
+    help_text = " ".join((review_history_command.help or "").split())
+
+    assert " ".join(STAGE_DOC_PARAGRAPH.split()) in help_text
+    assert " ".join(STAGE_TIE_SENTENCE.split()) in help_text

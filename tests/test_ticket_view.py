@@ -738,6 +738,31 @@ class TestClientResolution:
         triple = DevQueueStore(tasks=[make_task() for _ in range(3)])
         assert other_row_count(triple, _T, _C) == 2
 
+    def test_next_row_created_at_is_the_next_sibling_row_of_the_same_client(
+        self,
+    ) -> None:
+        early = datetime(2026, 10, 27, 11, tzinfo=UTC)
+        mid = datetime(2026, 10, 27, 12, tzinfo=UTC)
+        late = datetime(2026, 10, 27, 13, tzinfo=UTC)
+        rows = [make_task(created_at=at) for at in (late, early, mid)]
+        stranger = make_task(client="beta", created_at=mid)
+        other_ticket = make_task(ticket_id="ACM-2", created_at=late)
+        store = DevQueueStore(tasks=[*rows, stranger, other_ticket])
+
+        assert cw.ticket_view.next_row_created_at(store, rows[1]) == mid
+        assert cw.ticket_view.next_row_created_at(store, rows[2]) == late
+        assert cw.ticket_view.next_row_created_at(store, rows[0]) is None
+        assert cw.ticket_view.next_row_created_at(store, stranger) is None
+
+    def test_next_row_created_at_skips_rows_created_at_the_same_instant(
+        self,
+    ) -> None:
+        at = datetime(2026, 10, 27, 11, tzinfo=UTC)
+        rows = [make_task(created_at=at), make_task(created_at=at)]
+        store = DevQueueStore(tasks=rows)
+
+        assert cw.ticket_view.next_row_created_at(store, rows[0]) is None
+
     def test_other_row_count_ignores_other_clients_and_missing_rows(self) -> None:
         store = self._store()
         assert other_row_count(store, "ACM-2", _C) == 0
