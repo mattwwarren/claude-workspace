@@ -10,6 +10,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Per-row merge target seam (#3779, RFC 0020).** `TicketTask.base_branch` records the branch a row merges into; null means the client's `default_branch`. `cw.models.resolve_base_branch(client, task)` is the read seam, and `cw.models.tasks.base_branch.set_base_branch` is the only writer. It refuses any change once the row has spawned (`ever_spawned`), including null to set. Dev-queue schema bumped to v66. Downgrade hazard: an older cw that resaves the queue drops the field and silently retargets an epic row to the default branch. `cw dev-queue show` and `tasks --json` print the stored value (`-` / `null` when unset). No read site routes through the seam yet; ADR 0024 records the trust-root split.
 
+### Changed
+
+- **A registered orchestrator session no longer counts toward the per-client ceiling (#3789).** `cw orchestrator-start` stamps the new `Session.is_orchestrator` field, and `counts_toward_client_ceiling` excludes it. An unregistered DAEMON session still counts, and `host_session_budget` is unchanged. Operator note: only sessions started by `cw orchestrator-start` after upgrade are exempt, so a running orchestrator needs a restart to pick this up. Under `reap_policy: signal_only` a dead registered orchestrator leaves the ceiling count and the ORPHAN? annotation, and still counts against `host_session_budget`.
+
 ## [1.104.0] - 2026-11-20
 
 ### Added
