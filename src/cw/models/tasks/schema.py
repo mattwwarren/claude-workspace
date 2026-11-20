@@ -288,7 +288,13 @@ from cw.models.enums import Stage
 #      Written only by cw.ticket_snapshot (the store, under dev_queue_lock).
 #      Both ``| None`` with a ``None`` default, so a pre-v63 row loads with
 #      them unset and needs no migration filler.
-DEV_QUEUE_SCHEMA_VERSION = 63
+# v64: added TicketTask.scope_grants (GitHub #3772) — the durable ledger of
+#      scope-drift approvals, appended by cw dev-queue approve --scope-drift and
+#      cleared only by a regress into PLAN. A default_factory list, so a pre-v64
+#      row loads with [] and needs no migration filler. Older cw resaves drop it
+#      (the pre-change per-dispatch behaviour, the fail-closed direction).
+#      Take the next free number at merge if another PR takes v64 first.
+DEV_QUEUE_SCHEMA_VERSION = 64
 # Provenance of a v48 review approval: the human `approve` or the gate recipe.
 ReviewApproverKind = Literal["operator", "recipe"]
 DEFAULT_LANE: str = "default"
