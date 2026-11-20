@@ -40,6 +40,12 @@ _SRC = Path(__file__).resolve().parent.parent / "src" / "cw"
 _GUARDED_DIRS = ("dispatch", "reconcile")
 _REFRESH_MODULE = "cw.ticket_snapshot._refresh"
 _REFRESH_NAMES = frozenset({"snapshot_for_stage", "refresh_snapshot"})
+#: The MCP courier refresh (#3760) lives in ``cw.tracker_io``; the tick never
+#: builds or runs it either. Kept apart from ``_REFRESH_NAMES``: those are
+#: patched onto ``_REFRESH_MODULE``, where these names do not exist.
+_COURIER_MODULE = "cw.tracker_io"
+_COURIER_NAMES = frozenset({"courier_refresher", "courier_snapshot"})
+_REFRESH_NAMES_SCANNED = _REFRESH_NAMES | _COURIER_NAMES
 
 
 class _RefreshOnTickError(AssertionError):
@@ -65,6 +71,9 @@ def _rig_refresh_to_raise(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         "cw.ticket_snapshot._binding.snapshot_for_stage",
         _forbidden("snapshot_for_stage"),
     )
+    for name in _COURIER_NAMES:
+        monkeypatch.setattr(f"{_COURIER_MODULE}._refresh.{name}", _forbidden(name))
+        monkeypatch.setattr(f"{_COURIER_MODULE}.{name}", _forbidden(name))
     return calls
 
 
@@ -162,11 +171,13 @@ def _offences(source: str) -> list[str]:
             if module == _REFRESH_MODULE:
                 found.append(module)
             found += [
-                f"{module}.{a.name}" for a in node.names if a.name in _REFRESH_NAMES
+                f"{module}.{a.name}"
+                for a in node.names
+                if a.name in _REFRESH_NAMES_SCANNED
             ]
-        elif isinstance(node, ast.Name) and node.id in _REFRESH_NAMES:
+        elif isinstance(node, ast.Name) and node.id in _REFRESH_NAMES_SCANNED:
             found.append(node.id)
-        elif isinstance(node, ast.Attribute) and node.attr in _REFRESH_NAMES:
+        elif isinstance(node, ast.Attribute) and node.attr in _REFRESH_NAMES_SCANNED:
             found.append(node.attr)
     return found
 
@@ -195,6 +206,9 @@ def test_no_dispatch_or_reconcile_module_imports_or_names_the_refresh() -> None:
         "from cw.ticket_snapshot import snapshot_for_stage",
         "x = snapshot_for_stage",
         "ticket_snapshot.refresh_snapshot(task)",
+        "from cw.tracker_io import courier_refresher",
+        "from cw.tracker_io._refresh import courier_snapshot",
+        "x = courier_snapshot",
     ],
 )
 def test_scanner_flags_each_offending_form(snippet: str) -> None:
@@ -207,6 +221,7 @@ def test_scanner_flags_each_offending_form(snippet: str) -> None:
         "from cw.ticket_snapshot import read_for_stage",
         "from cw.ticket_snapshot._store import read",
         "import cw.ticket_snapshot",
+        "from cw.tracker_io import TurnKind",
     ],
 )
 def test_scanner_passes_the_row_only_readers(snippet: str) -> None:

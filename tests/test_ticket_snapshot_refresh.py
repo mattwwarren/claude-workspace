@@ -32,7 +32,9 @@ from cw.ticket_snapshot._record import current_row
 from cw.ticket_snapshot._refresh import emit_degraded, is_github
 from tests._shared.outbox_builders import client_config
 from tests._shared.ticket_context import (
+    make_comment,
     make_snapshot,
+    make_snapshot_from,
     observed_issue_envelope,
     seeded_row,
 )
@@ -50,6 +52,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import ClientConfig, TicketTask
+    from cw.ticket_snapshot import SnapshotComment
 
 STAGE = "review"
 DEGRADED = OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED
@@ -631,3 +634,219 @@ def test_current_row_degrades_to_none_on_queue_read_error(
         assert current_row("896", "test") is None
     assert type(exc).__name__ in caplog.text
     assert str(exc) not in caplog.text
+
+
+# --- refresh_snapshot: the MCP courier branch (#3760) ---
+
+
+def _courier_returning(*comments: SnapshotComment, title: str = "Courier title") -> Any:
+    snapshot = make_snapshot_from(comments, title=title)
+
+    def _courier(_task: TicketTask, _client: ClientConfig) -> TicketSnapshot:
+        return snapshot
+
+    return _courier
+
+
+def _courier_failing(reason: RefreshReason) -> Any:
+    def _courier(_task: TicketTask, _client: ClientConfig) -> TicketSnapshot:
+        msg = f"courier failed ({reason})"
+        raise RefreshError(msg, reason=reason)
+
+    return _courier
+
+
+def test_refresh_non_github_with_a_courier_records_stamps_and_renders(
+    tmp_path: Path, worktree: Path
+) -> None:
+    task = seeded_row(_row_snapshot())
+    previous = task.snapshot_digest
+    courier = _courier_returning(make_comment("c1"))
+
+    snapshot = refresh_snapshot(
+        task,
+        _client(tmp_path, "linear"),
+        worktree,
+        stage=STAGE,
+        session_id="sess-9",
+        courier=courier,
+    )
+
+    assert snapshot.title == "Courier title"
+    row = queue_row()
+    assert row.snapshot_digest not in (None, previous)
+    assert read(row) == snapshot
+    context = json.loads((worktree / ".cw" / "context.json").read_text("utf-8"))
+    assert context["ticket_title"] == "Courier title"
+    assert context["materialized_by_session"] == "sess-9"
+    (event,) = events_of(RECORDED)
+    assert event.payload["refresh"] is True
+    assert event.payload["previous_digest"] == previous
+
+
+def test_a_github_client_never_calls_the_courier(
+    tmp_path: Path, worktree: Path, gh: FakeGhCli
+) -> None:
+    def _forbidden(_task: TicketTask, _client: ClientConfig) -> TicketSnapshot:
+        msg = "courier must not run for GitHub"
+        raise AssertionError(msg)
+
+    task = seeded_row(_row_snapshot())
+
+    snapshot = refresh_snapshot(
+        task, _client(tmp_path), worktree, stage=STAGE, courier=_forbidden
+    )
+
+    assert snapshot.title == "Refreshed title"
+    assert gh.records
+
+
+@pytest.mark.parametrize(
+    "reason", ["courier_unreachable", "turn_failed", "refused", "no_binding"]
+)
+def test_a_courier_refresh_error_propagates_unchanged(
+    reason: RefreshReason, tmp_path: Path, worktree: Path
+) -> None:
+    task = seeded_row(_row_snapshot())
+
+    with pytest.raises(RefreshError) as info:
+        refresh_snapshot(
+            task,
+            _client(tmp_path, "linear"),
+            worktree,
+            stage=STAGE,
+            courier=_courier_failing(reason),
+        )
+
+    assert info.value.reason == reason
+    assert events_of(RECORDED) == []
+    assert queue_row().snapshot_digest == task.snapshot_digest
+
+
+def test_snapshot_for_stage_with_a_failing_courier_degrades_once(
+    tmp_path: Path, worktree: Path
+) -> None:
+    stored = _row_snapshot()
+    task = seeded_row(stored)
+
+    result = snapshot_for_stage(
+        task,
+        _client(tmp_path, "linear"),
+        worktree,
+        stage=STAGE,
+        courier=_courier_failing("turn_failed"),
+    )
+
+    assert result == stored
+    (event,) = events_of(DEGRADED)
+    assert event.payload["kind"] == "refresh_failed"
+    assert event.payload["reason"] == "turn_failed"
+
+
+def test_snapshot_for_stage_success_with_a_courier_emits_no_degraded_event(
+    tmp_path: Path, worktree: Path
+) -> None:
+    task = seeded_row(_row_snapshot())
+
+    result = snapshot_for_stage(
+        task,
+        _client(tmp_path, "linear"),
+        worktree,
+        stage=STAGE,
+        courier=_courier_returning(make_comment("c1")),
+    )
+
+    assert result is not None
+    assert result.title == "Courier title"
+    assert _degraded() == []
+
+
+def test_a_courier_snapshot_over_the_comment_cap_is_cap(
+    tmp_path: Path, worktree: Path
+) -> None:
+    comments = [make_comment(f"c{i}") for i in range(10_000)]
+    task = seeded_row(_row_snapshot())
+
+    with pytest.raises(RefreshError) as info:
+        refresh_snapshot(
+            task,
+            _client(tmp_path, "linear"),
+            worktree,
+            stage=STAGE,
+            courier=_courier_returning(*comments),
+        )
+
+    assert info.value.reason == "cap"
+
+
+def test_a_courier_record_step_failure_is_refused(
+    tmp_path: Path, worktree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _boom(*_a: object, **_k: object) -> None:
+        msg = "disk gone"
+        raise OSError(msg)
+
+    monkeypatch.setattr(refresh_mod, "record_snapshot", _boom)
+    task = seeded_row(_row_snapshot())
+
+    with pytest.raises(RefreshError) as info:
+        refresh_snapshot(
+            task,
+            _client(tmp_path, "linear"),
+            worktree,
+            stage=STAGE,
+            courier=_courier_returning(make_comment("c1")),
+        )
+
+    assert info.value.reason == "refused"
+
+
+CONFLICT = OrchestratorEventType.TICKET_SNAPSHOT_AUTHOR_CONFLICT
+
+
+def test_mcp_refresh_flags_an_author_id_flip_and_emits_the_conflict_event(
+    tmp_path: Path, worktree: Path
+) -> None:
+    """R10: the MCP refresh records with author-conflict detection on."""
+    task = seeded_row(_row_snapshot())
+    client = _client(tmp_path, "linear")
+
+    refresh_snapshot(
+        task,
+        client,
+        worktree,
+        stage=STAGE,
+        courier=_courier_returning(make_comment("c1", author_id="op-1")),
+    )
+    assert events_of(CONFLICT) == []
+    second = refresh_snapshot(
+        task,
+        client,
+        worktree,
+        stage=STAGE,
+        courier=_courier_returning(make_comment("c1", author_id="op-2")),
+    )
+
+    assert [c.author_conflict for c in second.comments] == [True]
+    (event,) = events_of(CONFLICT)
+    assert event.payload["ticket_id"] == task.ticket_id
+
+
+def test_github_refresh_does_not_flag_an_author_flip(
+    tmp_path: Path, worktree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R10: the GitHub refresh keeps detection off."""
+    task = seeded_row(_row_snapshot())
+    client = _client(tmp_path)
+    flip = iter(["op-1", "op-2"])
+
+    def _fetch(*_a: object, **_k: object) -> TicketSnapshot:
+        return make_snapshot_from([make_comment("c1", author_id=next(flip))])
+
+    monkeypatch.setattr(refresh_mod, "snapshot_from_github", _fetch)
+
+    refresh_snapshot(task, client, worktree, stage=STAGE)
+    second = refresh_snapshot(task, client, worktree, stage=STAGE)
+
+    assert [c.author_conflict for c in second.comments] == [False]
+    assert events_of(CONFLICT) == []

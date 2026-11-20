@@ -456,7 +456,12 @@ def test_context_for_client_refresh_resolver_calls_snapshot_for_stage(
     sentinel = _snapshot(make_comment("c"))
 
     def _fake(
-        task: object, client_arg: object, worktree: object, *, stage: str
+        task: object,
+        client_arg: object,
+        worktree: object,
+        *,
+        stage: str,
+        courier: object = None,
     ) -> TicketSnapshot:
         seen.append((task, client_arg, worktree, stage))
         return sentinel
@@ -467,3 +472,50 @@ def test_context_for_client_refresh_resolver_calls_snapshot_for_stage(
     assert ctx.resolve is not read_for_stage
     assert ctx.resolve(task, "review") is sentinel
     assert seen == [(task, client, tmp_path, "review")]
+
+
+def test_refresh_context_forwards_the_courier_to_snapshot_for_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(tmp_path, bindings_linear_mcp(), "linear")
+    seen: list[object] = []
+    sentinel = _snapshot(make_comment("c"))
+
+    def _courier(_task: object, _client: object) -> TicketSnapshot:
+        return sentinel
+
+    def _fake(
+        task: object,
+        client_arg: object,
+        worktree: object,
+        *,
+        stage: str,
+        courier: object = None,
+    ) -> TicketSnapshot:
+        seen.append(courier)
+        return sentinel
+
+    monkeypatch.setattr("cw.ticket_snapshot._binding.snapshot_for_stage", _fake)
+    ctx = context_for_client(
+        client, tmp_path, resolve_login=False, refresh=True, courier=_courier
+    )
+
+    assert ctx.resolve(make_task(), "review") is sentinel
+    assert seen == [_courier]
+
+
+def test_a_non_refreshing_context_ignores_the_courier(tmp_path: Path) -> None:
+    client = _client(tmp_path, bindings_linear_mcp(), "linear")
+    calls: list[object] = []
+
+    def _courier(task: object, _client: object) -> TicketSnapshot:
+        calls.append(task)
+        return _snapshot(make_comment("c"))
+
+    ctx = context_for_client(
+        client, tmp_path, resolve_login=False, refresh=False, courier=_courier
+    )
+
+    assert ctx.resolve is read_for_stage
+    assert ctx.resolve(make_task(), "review") is None
+    assert calls == []
