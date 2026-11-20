@@ -4817,6 +4817,79 @@ own-repo fact, which can falsely release a same-numbered own-repo hold). No
 CLI verb dismisses a watch: edit `dev_queue.json` with the dispatcher stopped.
 Same-repo-only stores are byte-identical and need nothing.
 
+### Merge prerequisites (#3791)
+
+A merge prerequisite says: do not dispatch this row to any stage until a
+same-repo PR merges. Unlike `hold`, it applies to a row that already has a PR
+or a live session (the motivating case is a REVIEW row with an adopted PR whose
+review needs another PR merged first), and it does not park the row now.
+
+- **Declaration (operator only).**
+  `cw dev-queue prerequisite <ticket> -c <client> --pr <N>` appends an entry to
+  `TicketTask.merge_prerequisites`. The verb is refused inside a dispatch
+  worker, and nothing derives an entry from review findings, ticket comments
+  or the ticket body. Before any gh call it refuses a stale or unverifiable
+  dispatch loop (`require_dispatch_loop_safe`; restart `cw dev-queue serve`),
+  because a stale loop would drop the field on its next save and has no claim
+  gate. It refuses a terminal row (COMPLETED, FAILED, CANCELLED), `owner/repo#N`
+  (use `hold --until-pr-merged owner/repo#N` for a cross-repo wait), the row's
+  own `pr_url` / `adopted_pr_url`, a PR another client already watches, and a
+  ninth entry. A PR already listed is `unchanged` with no gh call. Otherwise one
+  `gh pr view` outside any lock requires the PR OPEN and in the client's repo.
+  The entry records the verified slug, the OS user as `actor` and
+  `declared_at`.
+- **Trust model.** The only input is the operator's `--pr`, verified once at
+  declaration. Merge is observed later only through the PR's own recorded
+  merged state (an active client watch or a same-client row), as for any hold.
+- **Gate.** At the claim (`_screen_and_claim`, the sole PENDING-to-RUNNING
+  transition), a row with an unsatisfied entry is parked as `dependency_hold` /
+  `dependency_unmerged` with `blocked_on_pr` set to the first unsatisfied
+  entry, `session_id` cleared and the stage unchanged. No attempt, unproductive
+  attempt or regress attempt is charged, no lane slot is held and nothing is
+  spawned. The park records `ticket.held` (the `hold` payload shape, with the
+  entry's verified slug as `repo`) and pages no one. The closed-ticket guard
+  runs first, so a closed ticket is still cancelled, not parked. Entries are
+  applied one at a time, in declared order.
+- **Release.** The park is a sessionless dependency hold, so the
+  stale-dispatch registrar watches the PR from the next tick and
+  `release_stale_gated_tasks` releases it to PENDING on a verified merge,
+  under any `reap_policy`. Just before that release, every entry whose PR is
+  in the client's merged evidence is stamped `satisfied_at`; the stamp is the
+  durable record, because the merged watch is retired in the same save. An
+  unknown or open state releases nothing. A PR closed unmerged leaves the row
+  held and emits the usual once-per-episode `dependency_hold_pr_closed_unmerged`
+  `session.reap_proposed`. A `requeue` while the PR is unmerged re-parks the
+  row at its next claim.
+- **`--remove`.** `cw dev-queue prerequisite <ticket> -c <client> --pr <N> --remove`
+  drops the entry with no gh call and no loop guard (removal is the fail-open
+  direction). If the row is a sessionless `dependency_hold` on that PR, removing
+  the last unsatisfied entry returns it to PENDING (`task.transition`), and
+  removing one of several moves `blocked_on_pr` to the next one. An operator
+  `hold` on the same PR is indistinguishable from a gate park and is released
+  the same way.
+- **Claim-only limit.** The gate applies at stage dispatch only. The in-stage
+  review fix-agent spawn of an already-claimed attempt
+  (`cw.reconcile.fix_dispatch`) is not gated, so a prerequisite declared
+  mid-review takes effect at the row's next claim.
+
+Operator notes:
+
+- **Downgrades.** The dev-queue schema is v65. An older cw that loads and
+  resaves `dev_queue.json` drops `merge_prerequisites`, and the gate stops
+  applying (fail-open on downgrade only). After any downgrade, re-declare the
+  prerequisites.
+- **A park that never releases by itself.** If the client's origin slug cannot
+  be resolved, the registrar never watches the PR and nothing releases the
+  row. `cw dev-queue show <T> -c <C>` lists
+  `cw dev-queue prerequisite <T> -c <C> --pr <N> --remove` and the requeue;
+  remove the entry to clear it (a requeue alone re-parks).
+- **Shared wording.** The verb reuses `hold`'s verifier, so its refusals may
+  mention "hold", "requeue instead" or `owner/repo#N`. This verb is same-repo
+  only; cross-repo prerequisites belong to `hold --until-pr-merged owner/repo#N`.
+- **Hand edits.** An entry edited to carry a `pr.repo` is ignored (never parks
+  a row and never matches evidence). A structurally invalid entry (for example
+  `pr.number` 0) fails the store load like any other typed row field.
+
 ### Dispatch-loop staleness page (`dispatch_loop_stale`)
 
 A `session.needs_attention` with `paused_status=dispatch_loop_stale` (#1875)
