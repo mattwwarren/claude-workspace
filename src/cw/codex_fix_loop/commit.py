@@ -414,8 +414,8 @@ class _CycleContext:
         ``codex_fix_gate_failed`` through :meth:`park_breach`, which pins and
         resets the cycle's edits; a git error parks ``codex_error``. A gate whose
         only failure was a hook rewriting the cycle's touched files is accepted
-        after one green re-run (#3684), and the #3424 re-measure then commits the
-        rewritten content.
+        after one green re-run (#3684; IMPL opts in too, #3686), and the #3424
+        re-measure then commits the rewritten content.
 
         ``measured`` is the cycle's path set re-measured AFTER the gates when
         they passed (#3424): an applied autofix may return a touched path to

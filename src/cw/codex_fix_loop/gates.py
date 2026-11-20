@@ -42,14 +42,14 @@ rename counts as a deletion, #3427). Format-only is therefore
 a property proved by a declaration plus a green re-check, never guessed from a
 gate's name or output.
 
-**A hook rewrite is accepted on the fix loop only (#3684).** Under
-``HookRewritePolicy.RECHECK`` (opted in by ``codex_fix_loop.commit``) a red gate
-whose own run rewrote files, with no autofix involved, is re-run once after the
-rewrite. An in-scope, non-deleting, non-renaming rewrite whose re-run is green
-and leaves the tree alone is accepted (``rewrite_applied``, the
+**A hook rewrite is accepted on the fix loop and IMPL (#3684, #3686).** Under
+``HookRewritePolicy.RECHECK`` (opted in by ``codex_fix_loop.commit`` and IMPL's
+``run_quality_gates``) a red gate whose own run rewrote files, with no autofix
+involved, is re-run once. An in-scope, non-deleting, non-renaming rewrite whose
+re-run is green and leaves the tree alone is accepted (``rewrite_applied``, the
 ``codex_fix_gate_autofixed`` token). Anything else parks with the original
 failure (``rewrite_rejected_scope`` or ``rewrite_rejected_red``). The default
-``PARK`` keeps the pre-#3684 behaviour for the IMPL and FINALIZE callers.
+``PARK`` keeps pre-#3684 behaviour for FINALIZE and every other caller.
 Feeding a failing gate's output to a later fix turn was
 considered and rejected here: a park ends the loop, so no such turn exists
 in-process, and a repair turn would cost a full ``codex exec`` and change how

@@ -1454,6 +1454,25 @@ def test_an_accepted_rewrite_that_empties_the_diff_parks_impl_failed(
     assert h.commit_count() == before
 
 
+def test_a_path_the_gates_add_beyond_the_pre_gate_set_trips_the_staged_breach(
+    harness: Callable[..., Harness],
+) -> None:
+    # The re-measure is bounded by the pre-gate touched set: a path that never
+    # passed the fence or growth guards cannot enter the committed set.
+    h = harness()
+    h.turn(files={WIDGET: _FORMATTED})
+    start = h.head()
+
+    def _gates_add_a_path(*_args: object, **_kwargs: object) -> None:
+        (h.worktree / "src/cw/extra.py").write_text("y = 1\n", encoding="utf-8")
+
+    with patch("cw.codex_impl._run.run_quality_gates", _gates_add_a_path):
+        result = h.run()
+    _assert_block(result, "codex_fix_scope_drift")
+    assert_clean_after_refusal(h.worktree, start)
+    assert h.commit_count() == 0
+
+
 def test_a_declared_autofix_is_not_run_on_the_rewrite_path(
     harness: Callable[..., Harness], caplog: pytest.LogCaptureFixture
 ) -> None:
