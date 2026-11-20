@@ -54,6 +54,7 @@ from cw.models.ticket_view import (
     LastResultView,
     MustFixOverrideView,
     PrView,
+    ScopeDecisionView,
     SessionView,
     TicketView,
 )
@@ -65,6 +66,7 @@ from cw.reconcile._shared import (
     resolve_session_for_task,
     session_daemon_liveness,
 )
+from cw.ticket_view_scope import build_scope_decision
 
 if TYPE_CHECKING:
     from cw.lane_pause import LanePauseView
@@ -252,6 +254,7 @@ def build_ticket_view(
     opt_in = resolve_human_opt_in(task, client_cfg, sources.orchestrator_config)
     position = pipeline_position(task, client_cfg)
     finalize = finalize_in_pipeline(task, client_cfg)
+    details = _blocker_details(session)
     return TicketView(
         ticket_id=task.ticket_id,
         client=task.client,
@@ -260,7 +263,8 @@ def build_ticket_view(
         disposition=task.disposition,
         blocked_reason=task.blocked_reason,
         blocked_on_pr=task.blocked_on_pr,
-        blocker_details=_blocker_details(session),
+        blocker_details=details,
+        scope_decision=build_scope_decision(task, human_owner=opt_in, details=details),
         advisory_note=task.advisory_note,
         lane=task.lane,
         priority=task.priority,
@@ -721,6 +725,18 @@ def _approval_text(approval: ApprovalView | None) -> str:
     return "; ".join(parts) if parts else _NO_APPROVAL
 
 
+def _scope_decision_text(decision: ScopeDecisionView | None) -> str:
+    """One line: owner, carried and new paths, and the next action (#3772)."""
+    if decision is None:
+        return _ABSENT
+    carried = ", ".join(decision.carried_paths) or _ABSENT
+    new = ", ".join(decision.new_paths) or _ABSENT
+    return (
+        f"owner={decision.owner}; carried={carried}; new={new};"
+        f" next={decision.next_action}"
+    )
+
+
 def _attestation_text(approval: ApprovalView | None) -> str:
     """``<head_sha[:12]> engine=<e|-> backend=<b>``, or ``-`` (#3040)."""
     att = approval.review_attestation if approval is not None else None
@@ -772,6 +788,7 @@ def render_ticket_view(view: TicketView, *, now: datetime | None = None) -> str:
         ("skip_reason", _skip_reason_text(view, at)),
         ("approval", _approval_text(view.approval)),
         ("attestation", _attestation_text(view.approval)),
+        ("scope_decision", _scope_decision_text(view.scope_decision)),
         ("other_rows", str(view.other_rows)),
     ]
     lines = [_kv(key, value) for key, value in pairs]
