@@ -76,6 +76,7 @@ if TYPE_CHECKING:
     from cw.review_convergence import ResolutionSpec
     from cw.review_findings import CapturedDiff, ReviewVerdict
     from cw.ticket_snapshot import SnapshotContext
+    from cw.ticket_snapshot._refresh import CourierFetch
 
 #: Exit code of a confirm round whose backend is down (R19). A code of its own:
 #: exit 1 is shared with ``handle_errors`` and Python's uncaught-exception exit.
@@ -477,6 +478,21 @@ def require_backend_binary(backend: str) -> None:
         )
 
 
+def _courier_for(backend: str) -> CourierFetch | None:
+    """The MCP refresh courier for a *backend* round (#3760).
+
+    A codex round refreshes an MCP-bound ticket through one read-only codex
+    turn. A claude round keeps ``no_binding`` on a non-GitHub tracker: it has
+    no codex runner to run the turn on. The turn's usage is unrecorded here.
+    """
+    if backend == _CLAUDE:
+        return None
+    from cw.codex_runner import RealCodexRunner
+    from cw.tracker_io import courier_refresher
+
+    return courier_refresher(RealCodexRunner())
+
+
 def run_backend_round(
     *,
     backend: str,
@@ -502,7 +518,11 @@ def run_backend_round(
     # receive the same per-client refresh as regular confirm rounds.
     if snapshots is None:
         snapshots = context_for_client(
-            get_client(task.client), worktree, resolve_login=False, refresh=True
+            get_client(task.client),
+            worktree,
+            resolve_login=False,
+            refresh=True,
+            courier=_courier_for(backend),
         )
     if backend == _CLAUDE:
         return _run_claude_round(
@@ -704,11 +724,6 @@ def review_confirm(
         base_ref=confirmation_base,
         model=model,
         reasoning_effort=reasoning_effort,
-        # GitHub parity with the codex lane: refresh the snapshot per pass. A
-        # non-GitHub tracker resolves to no_binding inside and reads the row.
-        snapshots=context_for_client(
-            get_client(client), worktree, resolve_login=False, refresh=True
-        ),
     )
     _finish_round(
         backend=backend,

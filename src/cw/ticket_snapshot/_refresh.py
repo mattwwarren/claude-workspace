@@ -8,10 +8,12 @@ never parks because a refresh failed. Exactly one ``ticket.snapshot_degraded``
 event is recorded per degraded call; it is deliberately not forwarded to the
 operator channel (per-pass noise).
 
-Only the GitHub (``cli: gh``) branch exists here. Every other tracker resolves
-to ``no_binding`` and runs on its last snapshot; the MCP courier refresh is
-#3760, which also owns the reserved ``turn_failed``, ``courier_unreachable``
-and courier ``refused`` reasons.
+Two refresh branches exist. GitHub (``cli: gh``) fetches through ``gh``. Any
+other tracker refreshes through an injected :data:`CourierFetch` (the MCP
+courier turn of #3760, built in ``cw.tracker_io``, which this package cannot
+import without a cycle); with no courier it resolves to ``no_binding`` and runs
+on its last snapshot. The courier raises :class:`RefreshError` for
+``turn_failed``, ``courier_unreachable``, ``refused`` and ``no_binding``.
 
 Never called from the dispatch tick or ``reconcile()`` (pinned by
 ``tests/test_refresh_never_on_tick.py``).
@@ -37,15 +39,20 @@ from cw.ticket_snapshot._store import read
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from cw.models import ClientConfig, TicketTask
     from cw.ticket_snapshot._models import TicketSnapshot
 
+    #: ``courier(task, client)``: one MCP refresh turn's snapshot, or RefreshError.
+    CourierFetch = Callable[[TicketTask, ClientConfig], TicketSnapshot]
+
 _log = logging.getLogger("cw.ticket_snapshot")
 
-#: The closed refresh-failure vocabulary (R6). The last three are reserved for
-#: the MCP courier refresh (#3760); this module raises only the first four.
+#: The closed refresh-failure vocabulary (R6). ``gh_failed`` is GitHub-only;
+#: ``turn_failed`` and ``courier_unreachable`` come only from the MCP courier
+#: (#3760), which shares ``no_binding``, ``refused`` and ``cap`` with the rest.
 RefreshReason = Literal[
     "gh_failed",
     "cap",
@@ -75,31 +82,34 @@ def is_github(client: ClientConfig) -> bool:
     return resolve_tracker(client.workspace_path) == TRACKER_GITHUB_ISSUES
 
 
-def refresh_snapshot(
-    task: TicketTask,
-    client: ClientConfig,
-    worktree: Path,
-    *,
-    stage: str,
-    session_id: str | None = None,
-) -> TicketSnapshot:
-    """Fetch, record and render a fresh snapshot of *task*'s ticket.
-
-    Returns the in-memory snapshot. Raises :class:`RefreshError`: ``gh_failed``
-    when the fetch fails, ``cap`` when the record step refuses it (size or
-    count cap), ``refused`` on an unexpected store error, ``no_binding`` on a
-    non-GitHub tracker. ``.cw/context.json`` in *worktree* is re-rendered.
-    """
-    if not is_github(client):
-        msg = f"no refresh binding for the {stage} stage on this tracker"
-        raise RefreshError(msg, reason="no_binding")
+def _fetch_github(task: TicketTask, worktree: Path) -> TicketSnapshot:
+    """Fetch *task*'s issue through ``gh``; a failure is ``gh_failed``."""
     try:
-        snapshot = snapshot_from_github(task.ticket_id, task.client, worktree)
+        return snapshot_from_github(task.ticket_id, task.client, worktree)
     except SnapshotRefusedError as exc:
         msg = "gh could not fetch the ticket for a snapshot refresh"
         raise RefreshError(msg, reason="gh_failed") from exc
+
+
+def _record_and_render(
+    snapshot: TicketSnapshot,
+    worktree: Path,
+    *,
+    session_id: str | None,
+    detect_author_conflicts: bool,
+) -> TicketSnapshot:
+    """Record *snapshot*, stamp the row and re-render ``.cw/context.json``.
+
+    ``cap`` when a size or count cap refuses it, ``refused`` on any other store
+    or render error. The one tail shared by the GitHub and courier branches.
+    """
     try:
-        record = record_snapshot(snapshot, refresh=True)
+        record = record_snapshot(
+            snapshot, refresh=True, detect_author_conflicts=detect_author_conflicts
+        )
+        # The stored snapshot, not the input: it carries any author-conflict
+        # flags the record computed, so this pass cannot bind a conflicted one.
+        snapshot = record.snapshot
         rendered = render_context(
             snapshot, record.snapshot_digest, materialized_by_session=session_id
         )
@@ -111,6 +121,42 @@ def refresh_snapshot(
         msg = f"snapshot record step failed ({type(exc).__name__})"
         raise RefreshError(msg, reason="refused") from exc
     return snapshot
+
+
+def refresh_snapshot(
+    task: TicketTask,
+    client: ClientConfig,
+    worktree: Path,
+    *,
+    stage: str,
+    session_id: str | None = None,
+    courier: CourierFetch | None = None,
+) -> TicketSnapshot:
+    """Fetch, record and render a fresh snapshot of *task*'s ticket.
+
+    Returns the in-memory snapshot. Raises :class:`RefreshError`: ``gh_failed``
+    when the GitHub fetch fails, ``cap`` when the record step refuses it (size
+    or count cap), ``refused`` on an unexpected store error, ``no_binding`` on a
+    non-GitHub tracker with no *courier*. A non-GitHub tracker with a *courier*
+    fetches through it (its own :class:`RefreshError` propagates) and records
+    with author-conflict detection on, the same trust class as
+    ``cw ticket snapshot --from-json`` (a model-reported ``author_id``); GitHub
+    records with it off. ``.cw/context.json`` in *worktree* is re-rendered.
+    """
+    github = is_github(client)
+    if github:
+        snapshot = _fetch_github(task, worktree)
+    elif courier is not None:
+        snapshot = courier(task, client)
+    else:
+        msg = f"no refresh binding for the {stage} stage on this tracker"
+        raise RefreshError(msg, reason="no_binding")
+    return _record_and_render(
+        snapshot,
+        worktree,
+        session_id=session_id,
+        detect_author_conflicts=not github,
+    )
 
 
 def _row_of(task: TicketTask) -> TicketTask | None:
@@ -195,6 +241,7 @@ def snapshot_for_stage(
     worktree: Path,
     *,
     stage: str,
+    courier: CourierFetch | None = None,
 ) -> TicketSnapshot | None:
     """Refresh, else fall back to the current row's snapshot. Never raises.
 
@@ -205,7 +252,7 @@ def snapshot_for_stage(
     What a stage does with None is the caller's decision.
     """
     try:
-        return refresh_snapshot(task, client, worktree, stage=stage)
+        return refresh_snapshot(task, client, worktree, stage=stage, courier=courier)
     except RefreshError as exc:
         reason: str = exc.reason
     _log.warning(

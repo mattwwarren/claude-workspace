@@ -45,8 +45,14 @@ _log = logging.getLogger("cw.ticket_snapshot")
 
 @dataclass(frozen=True)
 class SnapshotRecord:
-    """What a recorded snapshot did. ``row_updated`` is False when no row matched."""
+    """What a recorded snapshot did. ``row_updated`` is False when no row matched.
 
+    ``snapshot`` is the snapshot as stored: with ``detect_author_conflicts`` its
+    comments carry the ``author_conflict`` flags this record computed, which the
+    caller's in-memory input does not.
+    """
+
+    snapshot: TicketSnapshot
     ticket_id: str
     client: str
     snapshot_digest: str
@@ -217,6 +223,7 @@ def record_snapshot(
     if newly:
         _emit_author_conflict(snapshot, digest, newly)
     return SnapshotRecord(
+        snapshot=snapshot,
         ticket_id=snapshot.ticket_id,
         client=snapshot.client,
         snapshot_digest=digest,

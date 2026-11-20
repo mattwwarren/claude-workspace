@@ -14,11 +14,6 @@ import sys
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from cw.tracker_io._refresh import (
-    REFRESH_REASON_MAP,
-    courier_refresher,
-    courier_snapshot,
-)
 
 from cw.codex_runner import CodexRunResult
 from cw.exceptions import CwError
@@ -37,6 +32,11 @@ from cw.tracker_io._prompt import (
     REFRESH_TURN_MARKER,
     RefreshComment,
     RefreshDocument,
+)
+from cw.tracker_io._refresh import (
+    REFRESH_REASON_MAP,
+    courier_refresher,
+    courier_snapshot,
 )
 from tests._backend_mcp_helpers import stage_mcp_config
 from tests._shared.bindings_builders import LINEAR_RENAMED_TOOLS, bindings_linear_mcp
@@ -369,7 +369,7 @@ class TestCourierUnreachable:
 
     def test_spawn_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         stage_mcp_config(monkeypatch, tmp_path, "codex", "enabled")
-        runner = _runner(_run(returncode=127))
+        runner = _runner(CodexRunResult(127, "", "codex: command not found"))
 
         assert _failure(runner, seeded_row(), _client(tmp_path)).reason == (
             "courier_unreachable"

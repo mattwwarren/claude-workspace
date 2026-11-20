@@ -127,7 +127,7 @@ from cw.stage_verification.posted_text import redact_and_cap
 from cw.stage_verification.push import push_and_verify_head
 from cw.ticket_snapshot import context_for_client, snapshot_for_stage
 from cw.ticket_snapshot._plan import PLAN_RECOVERED_FRICTION, recover_plan
-from cw.tracker_io import TrackerIoConfigError
+from cw.tracker_io import TrackerIoConfigError, courier_refresher
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -422,7 +422,13 @@ def _guards(run: _Run) -> tuple[str | None, GitFacts] | ImplBlock:
 
 def _prepare(run: _Run) -> _Pre | ImplBlock:
     """Steps 1: refresh, recovery, the guards, the probe and the rendered prompt."""
-    snapshot = snapshot_for_stage(run.task, run.client, run.worktree, stage="impl")
+    snapshot = snapshot_for_stage(
+        run.task,
+        run.client,
+        run.worktree,
+        stage="impl",
+        courier=courier_refresher(run.runner),
+    )
     # recover_plan itself skips a present plan and an adopted repair entry.
     ctx = context_for_client(run.client, run.worktree, resolve_login=False)
     source = recover_plan(run.task, run.client, run.worktree, snapshot, ctx)

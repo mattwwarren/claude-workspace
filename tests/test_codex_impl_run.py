@@ -618,6 +618,7 @@ def test_a_snapshot_that_fails_the_trust_read_blocks_plan_missing_context(
     assert degraded.payload["kind"] == "read_untrusted"
 
 
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
 def test_an_absent_plan_is_recovered_from_the_snapshot_with_a_friction_token(
     harness: Callable[..., Harness], tmp_path: Path
 ) -> None:
@@ -629,6 +630,13 @@ def test_an_absent_plan_is_recovered_from_the_snapshot_with_a_friction_token(
     )
     h = harness(plan=None, snapshot=snapshot)
     h.turn()
+    # The courier refresh (#3760) returns the same operator comment.
+    h.runner.add(
+        stdin_contains(REFRESH_TURN_MARKER),
+        _refresh_reply(
+            comments=[{"id": "p1", "author_id": "operator-1", "body": approved}]
+        ),
+    )
     client = _tracked_client(tmp_path, TRACKER_LINEAR)
     h.client = client.model_copy(
         update={"bindings": bindings_linear_mcp(operator_ids=["operator-1"])}

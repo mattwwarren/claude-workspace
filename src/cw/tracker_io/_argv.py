@@ -9,7 +9,8 @@ it. Every other choice is fixed too:
 * ``--ephemeral``: no resumable session file under ``~/.codex/sessions``.
 * ``-c model_reasoning_effort=low``: posting text verbatim needs no depth.
 * ``-c mcp_servers.<server>.enabled_tools=[...]``: the tracker's comment
-  create and list tools only (:data:`TRACKER_COMMENT_TOOLS`).
+  create and list tools only (:data:`TRACKER_COMMENT_TOOLS`); a refresh turn
+  allows the ``get`` and ``list`` tools only (:func:`turn_tools`).
 * ``-c mcp_servers.<other>.enabled=false`` for every other server the
   user and system layers declare.
 
@@ -147,17 +148,30 @@ def _disable_others(
 class TurnKind(StrEnum):
     """Which courier turn an allowlist is for (O2b, R7).
 
-    REFRESH is built by the T1/T2 tickets, not here; the enum stays open for it.
+    REFRESH is the T2b read turn (#3760): one read-only turn that returns a
+    ticket snapshot. The enum stays open for further kinds.
     """
 
     POST = "post"
     VERIFY = "verify"
+    REFRESH = "refresh"
 
 
-def turn_tools(kind: TurnKind, post_tools: tuple[str, str]) -> tuple[str, ...]:
-    """The tool allowlist for *kind*: POST gets create and list, VERIFY list only."""
+def turn_tools(
+    kind: TurnKind, post_tools: tuple[str, str], get_tool: str | None = None
+) -> tuple[str, ...]:
+    """The tool allowlist for *kind*.
+
+    POST gets create and list, VERIFY list only, REFRESH the ``get`` and list
+    tools (*get_tool* is required for it).
+    """
     if kind is TurnKind.POST:
         return post_tools
+    if kind is TurnKind.REFRESH:
+        if get_tool is None:
+            msg = "a REFRESH turn needs a get tool"
+            raise ValueError(msg)
+        return (get_tool, post_tools[1])
     return (post_tools[1],)
 
 
