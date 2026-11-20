@@ -619,7 +619,9 @@ for which park" in §5).
 
 `--json` emits the `TicketView` model (`cw schema show ticket-view`):
 `schema_version`, `ticket_id`, `client`, `status`, `stage`, `disposition`,
-`blocked_reason`, `blocked_on_pr` (the PR number a dependency hold waits on,
+`blocked_reason`, `base_branch` (the row's stored merge target, null = the
+client's default branch, #3779; the raw value, never the resolved one),
+`blocked_on_pr` (the PR number a dependency hold waits on,
 null when none, #2321), `blocked_on_repo` (the `owner/repo` of a cross-repo
 `blocked_on_pr`, null for a same-repo one, #3634; `cw dev-queue tasks --json`
 carries the same int `blocked_on_pr` and `blocked_on_repo`), `scope_decision`
@@ -4874,10 +4876,13 @@ review needs another PR merged first), and it does not park the row now.
 
 Operator notes:
 
-- **Downgrades.** The dev-queue schema is v65. An older cw that loads and
-  resaves `dev_queue.json` drops `merge_prerequisites`, and the gate stops
-  applying (fail-open on downgrade only). After any downgrade, re-declare the
-  prerequisites.
+- **Downgrades.** The dev-queue schema is v66. The merge-prerequisite field
+  arrived at v65: an older cw that loads and resaves `dev_queue.json` drops
+  `merge_prerequisites`, and the gate stops applying (fail-open on downgrade
+  only). After any downgrade, re-declare the prerequisites. The v66
+  `base_branch` field (#3779) is the dangerous direction: an older cw that
+  resaves the queue drops it, which silently retargets an epic row to the
+  client's default branch. Do not downgrade cw while such a row is queued.
 - **A park that never releases by itself.** If the client's origin slug cannot
   be resolved, the registrar never watches the PR and nothing releases the
   row. `cw dev-queue show <T> -c <C>` lists

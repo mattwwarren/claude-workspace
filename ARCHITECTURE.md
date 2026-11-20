@@ -286,6 +286,14 @@ review-staleness gate (`review_artifacts_stale`) still runs a bounded tip check
 of git in-lock (ADR-0022 invariant 3).
 See `docs/adr/0022-a-clean-default-branch-merge-never-causes-a-review.md`.
 
+**ADR-0024 — the merge target is not the trust root.** `TicketTask.base_branch`
+(#3779) names the branch a row merges into; null means `client.default_branch`.
+Reads that ask what a branch merges into go through `resolve_base_branch(client,
+task)`. Reads that judge a branch (review engine source, guards, attestation,
+review configuration) stay on `client.default_branch` and never use the seam.
+The field is frozen once a row has spawned, and only `set_base_branch` writes
+it. See `docs/adr/0024-merge-target-and-trust-root-are-different-things.md`.
+
 **Module size.** Source modules follow the package-split convention described
 in `CLAUDE.md`'s "Module Size" section (`CLAUDE.md:80-101`): keep modules
 under ~1000 lines, treating that as a ceiling rather than a target, and split
@@ -517,3 +525,4 @@ new one.
 | [0015](docs/adr/0015-voided-finding-suppression-is-content-anchored.md) | Voided-finding suppression is content-anchored, never positional | Accepted |
 | [0016](docs/adr/0016-ledger-claim-matching-is-gated-and-measured.md) | Ledger claim matching ships gated and measured, never on by default | Accepted |
 | [0020](docs/adr/0020-the-operator-is-the-orchestrator-session.md) | The operator is the orchestrator session; a human is escalated to only for product or scope forks | Accepted |
+| [0024](docs/adr/0024-merge-target-and-trust-root-are-different-things.md) | The merge target (`TicketTask.base_branch`) is not the trust root (`client.default_branch`) | Accepted |

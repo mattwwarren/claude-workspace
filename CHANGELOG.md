@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Per-row merge target seam (#3779, RFC 0020).** `TicketTask.base_branch` records the branch a row merges into; null means the client's `default_branch`. `cw.models.resolve_base_branch(client, task)` is the read seam, and `cw.models.tasks.base_branch.set_base_branch` is the only writer. It refuses any change once the row has spawned (`ever_spawned`), including null to set. Dev-queue schema bumped to v66. Downgrade hazard: an older cw that resaves the queue drops the field and silently retargets an epic row to the default branch. `cw dev-queue show` and `tasks --json` print the stored value (`-` / `null` when unset). No read site routes through the seam yet; ADR 0024 records the trust-root split.
+
 ## [1.104.0] - 2026-11-20
 
 ### Added
