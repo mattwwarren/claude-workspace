@@ -2734,6 +2734,7 @@ class TestDispatchTickSpawnErrors:
 
         dispatch_tick(simple_config, native_daemon=daemon)
 
+        rows = [call.pop("task") for call in seen]
         assert seen == [
             {
                 "allow_dirty_reuse": True,
@@ -2742,6 +2743,7 @@ class TestDispatchTickSpawnErrors:
                 ),
             }
         ]
+        assert [getattr(row, "ticket_id", None) for row in rows] == ["GEN-2213"]
 
     def test_stale_worktree_error_force_removes_then_reverts(
         self,
@@ -2842,7 +2844,7 @@ class TestDispatchTickSpawnErrors:
         monkeypatch.setattr("cw.dispatch.claim.spawn.remove_worktree", _record_remove)
         monkeypatch.setattr(
             "cw.dispatch.claim.spawn.unsaved_work_reason",
-            lambda _c, _b: "1 uncommitted path(s)",
+            lambda _c, _b, **_kw: "1 uncommitted path(s)",
         )
 
         daemon = FakeNativeDaemonClient()
@@ -2882,7 +2884,7 @@ class TestDispatchTickSpawnErrors:
         monkeypatch.setattr("cw.dispatch.claim.spawn.create_worktree", _stale)
         monkeypatch.setattr(
             "cw.dispatch.claim.spawn.unsaved_work_reason",
-            lambda _c, _b: "1 uncommitted path(s)",
+            lambda _c, _b, **_kw: "1 uncommitted path(s)",
         )
 
         daemon = FakeNativeDaemonClient()
@@ -2928,7 +2930,7 @@ class TestDispatchTickSpawnErrors:
         monkeypatch.setattr("cw.dispatch.claim.spawn.create_worktree", _stale)
         monkeypatch.setattr("cw.dispatch.claim.spawn.remove_worktree", _record_remove)
         monkeypatch.setattr(
-            "cw.dispatch.claim.spawn.unsaved_work_reason", lambda _c, _b: None
+            "cw.dispatch.claim.spawn.unsaved_work_reason", lambda _c, _b, **_kw: None
         )
 
         daemon = FakeNativeDaemonClient()
@@ -4191,7 +4193,7 @@ class TestStaleWorktreeYieldsToLiveOccupant:
                 wt_path, daemon=daemon, warned_unresolvable=warned_unresolvable
             )
 
-        def _unsaved(_client: object, _branch: str) -> str | None:
+        def _unsaved(_client: object, _branch: str, **_kw: object) -> str | None:
             calls.append("unsaved")
             return unsaved
 
@@ -10350,7 +10352,7 @@ class TestParkPreSpawnDuplicateRunning:
         monkeypatch.setattr("cw.dispatch.claim.spawn.create_worktree", _stale)
         monkeypatch.setattr(
             "cw.dispatch.claim.spawn.unsaved_work_reason",
-            lambda _c, _b: "1 uncommitted path(s)",
+            lambda _c, _b, **_kw: "1 uncommitted path(s)",
         )
         task, _skipped = _claim_next_pending(
             "test-client",

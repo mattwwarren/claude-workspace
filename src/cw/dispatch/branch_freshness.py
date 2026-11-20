@@ -37,6 +37,9 @@ Three hard contracts:
 
 It reads the *already-fetched* local ``origin/<default_branch>`` ref and never
 fetches; detection latency is bounded by the per-tick fetch cadence, by design.
+Throughout, ``origin/<default_branch>`` means the row's merge target,
+``resolve_base_branch(client, task)`` (#3780); for a null base that is the
+client's default branch.
 """
 
 from __future__ import annotations
@@ -48,7 +51,7 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING, Final
 
 from cw.merge_probe import probe_default_merge
-from cw.models import QueueItemStatus, Stage
+from cw.models import QueueItemStatus, Stage, resolve_base_branch
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -101,7 +104,11 @@ def _candidates(
     store: DevQueueStore,
     clients: Mapping[str, ClientConfig],
 ) -> list[tuple[BranchKey, Path, str]]:
-    """``(key, worktree, default_branch)`` per RUNNING REVIEW row an event names."""
+    """``(key, worktree, base)`` per RUNNING REVIEW row an event names.
+
+    ``base`` is the row's merge target (``resolve_base_branch``, #3780),
+    resolved only after the client guard.
+    """
     pending = _completed_ticket_ids(events)
     found: dict[BranchKey, tuple[Path, str]] = {}
     for task in store.tasks:
@@ -114,7 +121,8 @@ def _candidates(
         if client is None or worktree is None:
             continue
         found.setdefault(
-            (task.client, task.ticket_id), (worktree, client.default_branch)
+            (task.client, task.ticket_id),
+            (worktree, resolve_base_branch(client, task)),
         )
     return [(key, path, base) for key, (path, base) in found.items()]
 

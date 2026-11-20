@@ -66,6 +66,7 @@ from cw.events import record_event
 from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
+    resolve_base_branch,
 )
 from cw.queue_rows import resolve_hold_finalize
 from cw.review_convergence import tolerates_review_move
@@ -535,12 +536,13 @@ def _should_gate_for_empty_diff(
 ) -> bool:
     """True iff *task*'s branch carries no commits at all (#1870).
 
-    The narrowest possible claim: ``origin/<default_branch>..HEAD`` measures
-    exactly zero. Not "small", not "suspicious" -- empty. A branch in that state
-    has nothing for a reviewer to have reviewed and nothing for a PR to carry,
-    so letting it reach the Stage 4 approval prompt asks an operator to approve
-    an empty diff dressed as an ordinary scope-tier decision, which is the
-    incident this gate closes.
+    The narrowest possible claim: ``origin/<base>..HEAD`` measures exactly
+    zero, where ``<base>`` is the row's merge target (``resolve_base_branch``,
+    #3780; ``default_branch`` for a null base). Not "small", not "suspicious"
+    -- empty. A branch in that state has nothing for a reviewer to have
+    reviewed and nothing for a PR to carry, so letting it reach the Stage 4
+    approval prompt asks an operator to approve an empty diff dressed as an
+    ordinary scope-tier decision, which is the incident this gate closes.
 
     Git-measured, deliberately independent of anything the producer self-reports
     -- the observed branch reached REVIEW *through* IMPL's own empty-diff gate
@@ -561,7 +563,8 @@ def _should_gate_for_empty_diff(
     client_cfg = clients.get(task.client)
     if client_cfg is None:
         return False
-    return commits_ahead_of_default(task.worktree_path, client_cfg.default_branch) == 0
+    base = resolve_base_branch(client_cfg, task)
+    return commits_ahead_of_default(task.worktree_path, base) == 0
 
 
 def _park_finalize_hold(task: TicketTask) -> None:
