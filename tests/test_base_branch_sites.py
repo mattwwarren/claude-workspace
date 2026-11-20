@@ -124,15 +124,6 @@ _MARKER = "# stays on client.default_branch:"
 # --- fetch_base_branch (R5) ------------------------------------------------
 
 
-def _client_at(workspace: Path, tmp_path: Path) -> ClientConfig:
-    return ClientConfig(
-        name="acme",
-        workspace_path=workspace,
-        worktree_base=tmp_path / "wt",
-        default_branch="main",
-    )
-
-
 class TestFetchBaseBranch:
     def test_fetch_base_branch_argv(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -145,7 +136,15 @@ class TestFetchBaseBranch:
 
         monkeypatch.setattr("cw.worktree._git.subprocess.run", _run)
 
-        result = fetch_base_branch(_client_at(tmp_path, tmp_path), _BASE)
+        result = fetch_base_branch(
+            ClientConfig(
+                name="acme",
+                workspace_path=tmp_path,
+                worktree_base=tmp_path / "wt",
+                default_branch="main",
+            ),
+            _BASE,
+        )
 
         assert [cmd[1:] for cmd in argv] == [["fetch", "origin", _BASE, "--quiet"]]
         assert result.outcome is FetchOutcome.FETCHED
@@ -159,7 +158,15 @@ class TestFetchBaseBranch:
         gate = TickFetchGate(warned=set(), clock=clock)
 
         with gate.tick():
-            result = fetch_base_branch(_client_at(tmp_path, tmp_path), _BASE)
+            result = fetch_base_branch(
+                ClientConfig(
+                    name="acme",
+                    workspace_path=tmp_path,
+                    worktree_base=tmp_path / "wt",
+                    default_branch="main",
+                ),
+                _BASE,
+            )
 
         assert result.outcome is FetchOutcome.FAILED
         assert result.reason == f"git fetch origin {_BASE} --quiet timed out"
@@ -175,7 +182,15 @@ class TestFetchBaseBranch:
         gate.budget_s = 0.0
 
         with gate.tick():
-            result = fetch_base_branch(_client_at(tmp_path, tmp_path), _BASE)
+            result = fetch_base_branch(
+                ClientConfig(
+                    name="acme",
+                    workspace_path=tmp_path,
+                    worktree_base=tmp_path / "wt",
+                    default_branch="main",
+                ),
+                _BASE,
+            )
 
         assert result.outcome is FetchOutcome.FAILED
         assert result.reason == BUDGET_SKIP_REASON
@@ -188,7 +203,12 @@ class TestFetchBaseBranch:
         run = hanging_run(clock)
         monkeypatch.setattr("cw.worktree._git.subprocess.run", run)
         gate = TickFetchGate(warned=set(), clock=clock)
-        client = _client_at(tmp_path, tmp_path)
+        client = ClientConfig(
+            name="acme",
+            workspace_path=tmp_path,
+            worktree_base=tmp_path / "wt",
+            default_branch="main",
+        )
 
         with gate.tick():
             fetch_base_branch(client, _BASE)
@@ -209,7 +229,12 @@ class TestFetchBaseBranch:
 
         monkeypatch.setattr("cw.worktree._git.subprocess.run", _rc128)
         gate = TickFetchGate(warned=set(), clock=FakeClock())
-        client = _client_at(tmp_path, tmp_path)
+        client = ClientConfig(
+            name="acme",
+            workspace_path=tmp_path,
+            worktree_base=tmp_path / "wt",
+            default_branch="main",
+        )
 
         with caplog.at_level(logging.WARNING), gate.tick():
             first = fetch_base_branch(client, _BASE)
@@ -232,7 +257,12 @@ class TestFetchBaseBranch:
 
         monkeypatch.setattr("cw.worktree._git.subprocess.run", _absent)
         gate = TickFetchGate(warned=set(), clock=FakeClock())
-        client = _client_at(tmp_path, tmp_path)
+        client = ClientConfig(
+            name="acme",
+            workspace_path=tmp_path,
+            worktree_base=tmp_path / "wt",
+            default_branch="main",
+        )
 
         with caplog.at_level(logging.WARNING), gate.tick():
             result = fetch_base_branch(client, _BASE)
@@ -287,7 +317,16 @@ class TestWorktreeStartPoint:
         base_tip = git_in(workspace, "rev-parse", f"origin/{_BASE}")
         argv = _spy_git_argv(monkeypatch)
 
-        wt = create_worktree(_client_at(workspace, tmp_path), _BRANCH, task=_base_row())
+        wt = create_worktree(
+            ClientConfig(
+                name="acme",
+                workspace_path=workspace,
+                worktree_base=tmp_path / "wt",
+                default_branch="main",
+            ),
+            _BRANCH,
+            task=_base_row(),
+        )
 
         assert git_in(wt, "rev-parse", "HEAD") == base_tip
         assert _worktree_add(argv)[-4:] == ["-b", _BRANCH, str(wt), f"origin/{_BASE}"]
@@ -308,7 +347,16 @@ class TestWorktreeStartPoint:
         add_diverged_base_origin(workspace, _BASE)
         argv = _spy_git_argv(monkeypatch)
 
-        wt = create_worktree(_client_at(workspace, tmp_path), _BRANCH, task=row)
+        wt = create_worktree(
+            ClientConfig(
+                name="acme",
+                workspace_path=workspace,
+                worktree_base=tmp_path / "wt",
+                default_branch="main",
+            ),
+            _BRANCH,
+            task=row,
+        )
 
         assert _worktree_add(argv)[-1] == "origin/main"
         assert _fetches(argv) == [["fetch", "origin", _BRANCH, "--quiet"]]
@@ -321,7 +369,12 @@ class TestWorktreeStartPoint:
     ) -> None:
         workspace = make_git_repo("ws")
         add_bare_origin(workspace)
-        client = _client_at(workspace, tmp_path)
+        client = ClientConfig(
+            name="acme",
+            workspace_path=workspace,
+            worktree_base=tmp_path / "wt",
+            default_branch="main",
+        )
 
         with pytest.raises(WorktreeError, match=r"base branch 'epic/x' does not exist"):
             create_worktree(client, _BRANCH, task=_base_row())
@@ -344,7 +397,16 @@ class TestWorktreeStartPoint:
             lambda *_a: FetchResult(FetchOutcome.FAILED, "rc=128: fatal: offline"),
         )
 
-        wt = create_worktree(_client_at(workspace, tmp_path), _BRANCH, task=_base_row())
+        wt = create_worktree(
+            ClientConfig(
+                name="acme",
+                workspace_path=workspace,
+                worktree_base=tmp_path / "wt",
+                default_branch="main",
+            ),
+            _BRANCH,
+            task=_base_row(),
+        )
 
         assert git_in(wt, "rev-parse", "HEAD") == stale_tip
 
@@ -363,7 +425,16 @@ class TestWorktreeStartPoint:
         )
 
         with pytest.raises(WorktreeError, match=r"neither 'origin/epic/x' nor"):
-            create_worktree(_client_at(workspace, tmp_path), _BRANCH, task=_base_row())
+            create_worktree(
+                ClientConfig(
+                    name="acme",
+                    workspace_path=workspace,
+                    worktree_base=tmp_path / "wt",
+                    default_branch="main",
+                ),
+                _BRANCH,
+                task=_base_row(),
+            )
 
     @pytest.mark.parametrize(
         ("row", "expected"),
@@ -389,7 +460,16 @@ class TestWorktreeStartPoint:
         )
         argv = _spy_git_argv(monkeypatch)
 
-        create_worktree(_client_at(workspace, tmp_path), _BRANCH, task=row)
+        create_worktree(
+            ClientConfig(
+                name="acme",
+                workspace_path=workspace,
+                worktree_base=tmp_path / "wt",
+                default_branch="main",
+            ),
+            _BRANCH,
+            task=row,
+        )
 
         assert _worktree_add(argv)[-1] == expected
 
@@ -409,7 +489,15 @@ class TestWorktreeStartPoint:
         )
         argv = _spy_git_argv(monkeypatch)
 
-        create_worktree(_client_at(workspace, tmp_path), _BRANCH)
+        create_worktree(
+            ClientConfig(
+                name="acme",
+                workspace_path=workspace,
+                worktree_base=tmp_path / "wt",
+                default_branch="main",
+            ),
+            _BRANCH,
+        )
 
         assert _worktree_add(argv)[-1] == "origin/main"
         assert base_fetches == []
@@ -557,7 +645,12 @@ class TestBranchAbsentRefresh:
     ) -> None:
         workspace = make_git_repo("ws")
         add_diverged_base_origin(workspace, _BASE)
-        client = _client_at(workspace, tmp_path)
+        client = ClientConfig(
+            name="acme",
+            workspace_path=workspace,
+            worktree_base=tmp_path / "wt",
+            default_branch="main",
+        )
         wt = create_worktree(client, _BRANCH, task=_base_row())
         git_in(wt, "branch", "--unset-upstream")
         daemon = FakeNativeDaemonClient()
@@ -578,7 +671,12 @@ def _base_cut_worktree(
 ) -> tuple[ClientConfig, Path, Path]:
     workspace = make_git_repo("ws")
     add_diverged_base_origin(workspace, _BASE)
-    client = _client_at(workspace, tmp_path)
+    client = ClientConfig(
+        name="acme",
+        workspace_path=workspace,
+        worktree_base=tmp_path / "wt",
+        default_branch="main",
+    )
     wt = create_worktree(client, _BRANCH, task=_base_row())
     git_in(wt, "branch", "--unset-upstream")
     return client, wt, workspace
@@ -660,7 +758,14 @@ class TestEmptyDiffGate:
         repo = make_git_repo("ws")
         add_diverged_base_origin(repo, _BASE)
         git_in(repo, "checkout", _BASE)
-        clients = {"acme": _client_at(repo, tmp_path)}
+        clients = {
+            "acme": ClientConfig(
+                name="acme",
+                workspace_path=repo,
+                worktree_base=tmp_path / "wt",
+                default_branch="main",
+            )
+        }
         base_row = _make_ticket_task(
             client="acme", base_branch=_BASE, worktree_path=repo
         )
@@ -1140,10 +1245,6 @@ class TestRepairEngine:
 # --- fix agent (R4) ----------------------------------------------------------
 
 
-def _fix_client(tmp_path: Path) -> ClientConfig:
-    return ClientConfig(name="acme", workspace_path=tmp_path, default_branch="main")
-
-
 class TestFixAgent:
     @pytest.mark.parametrize(
         ("row", "expected"),
@@ -1165,7 +1266,9 @@ class TestFixAgent:
             return MergeProbe(next(states), None, ("a.py",), "no merge-base")
 
         monkeypatch.setattr(fix_agent, "probe_default_merge", _probe)
-        client = _fix_client(tmp_path)
+        client = ClientConfig(
+            name="acme", workspace_path=tmp_path, default_branch="main"
+        )
 
         with pytest.raises(CwError, match=f"merging origin/{expected} into dev/1"):
             fix_agent._probe_default_merge(client, "dev/1", tmp_path, task=row)
@@ -1184,7 +1287,11 @@ class TestFixAgent:
             lambda *_a: MergeProbe("unavailable", None, (), "boom"),
         )
 
-        note = fix_agent._probe_default_merge(_fix_client(tmp_path), "dev/1", tmp_path)
+        note = fix_agent._probe_default_merge(
+            ClientConfig(name="acme", workspace_path=tmp_path, default_branch="main"),
+            "dev/1",
+            tmp_path,
+        )
 
         assert note == (
             "could not check whether origin/main conflicts with dev/1 (boom); "
@@ -1208,7 +1315,12 @@ class TestFixAgent:
         gate = TickFetchGate(warned=set(), clock=clock)
 
         with gate.tick():
-            note = fix_agent._fetch_origin_bounded(_fix_client(tmp_path), task=row)
+            note = fix_agent._fetch_origin_bounded(
+                ClientConfig(
+                    name="acme", workspace_path=tmp_path, default_branch="main"
+                ),
+                task=row,
+            )
 
         assert note is not None
         assert f"the conflict check against origin/{expected} used" in note
@@ -1228,7 +1340,9 @@ class TestFixAgent:
 
         with pytest.raises(WorktreeError, match="stop after recording"):
             fix_agent.dispatch_fix_agent(
-                client=_fix_client(tmp_path),
+                client=ClientConfig(
+                    name="acme", workspace_path=tmp_path, default_branch="main"
+                ),
                 branch="dev/1",
                 prompt="fix it",
                 label="fix-1",
