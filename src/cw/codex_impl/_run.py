@@ -629,12 +629,16 @@ def _commit(run: _Run, flow: _Flow, touched: set[str]) -> ImplBlock | None:
     artifacts = flow.baseline.review_artifacts
     stage_cycle(run.worktree, artifacts)
     staged = _staged_paths(run.worktree)
-    measured = frozenset(touched)
+    # An accepted gate rewrite can change the measured set (#3686); the
+    # pre-gate set only bounds it.
+    measured = frozenset(cycle_touched_paths(run.worktree, flow.baseline)) & touched
     if staged != measured:
         breach = staged_set_breach(
             measured, staged, _CYCLE, start_head=flow.baseline.head_sha
         )
         return fence_block(breach)
+    if not measured:
+        return ImplBlock(IMPL_FAILED, _NO_CHANGE_DETAILS)
     message = impl_commit_message(run.task, repair=run.repair)
     try:
         _git_commit(run.worktree, message)
