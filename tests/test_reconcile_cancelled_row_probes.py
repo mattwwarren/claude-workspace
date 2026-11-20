@@ -38,25 +38,14 @@ from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._reconcile_helpers import probe_sessions_lock_free
 from tests._shared.git_repos import commit_tracked_file, git_in
 from tests._shared.session_seeding import _make_ticket_task
+from tests._shared.session_seeding import make_cancelled_row as _cancelled
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from cw.models import TicketTask
 
 _NOW = datetime(2026, 11, 2, 12, 0, 0, tzinfo=UTC)
 _HAS_COMMITS = "cw.reconcile.cancelled_row_probes._has_commits_beyond_base"
-
-
-def _cancelled(
-    worktree: Path | None, *, ticket_id: str = "GEN-1", client: str = "acme"
-) -> TicketTask:
-    return _make_ticket_task(
-        ticket_id=ticket_id,
-        client=client,
-        status=QueueItemStatus.CANCELLED,
-        worktree_path=worktree,
-    )
 
 
 def _key(worktree: Path, *, ticket_id: str = "GEN-1") -> CancelledRowKey:
