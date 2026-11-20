@@ -194,7 +194,7 @@ def _rewrite(
     _scan_markers(scratch, unmerged)
     _commit_merge(
         scratch,
-        f"chore(merge): sync {prep.default_branch} and repair declared-path"
+        f"chore(merge): sync {prep.base_branch} and repair declared-path"
         f" conflicts (#{job.ticket_id})",
     )
     new_sha = _head_sha(scratch, stop=RepairDisposition.MERGE_FAILED)

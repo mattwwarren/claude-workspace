@@ -34,6 +34,7 @@ from cw.models import (
     TERMINAL_SESSION_STATUSES,
     OrchestratorEventType,
     SessionPurpose,
+    resolve_base_branch,
 )
 from cw.native_daemon import get_native_daemon_client
 from cw.session_retention import find_session_by_id
@@ -53,7 +54,7 @@ from cw.worktree import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.models import ClientConfig
+    from cw.models import ClientConfig, TicketTask
     from cw.native_daemon import NativeDaemonClient
 
 _log = logging.getLogger("cw.reconcile.review_recipes")
@@ -146,6 +147,7 @@ def dispatch_fix_agent(
     parent: str,
     remote_branch: str | None = None,
     native_daemon: NativeDaemonClient | None = None,
+    task: TicketTask | None = None,
 ) -> str:
     """Provision the ticket's worktree, refresh it against main, dispatch the fix agent.
 
@@ -230,9 +232,12 @@ def dispatch_fix_agent(
     (the fix agent never does) defers forever in the Stop hook since ADR-0014
     (``_handle_headless_no_sentinel``).
 
-    Passes NO ``task=`` kwarg (mirrors address_review's "Resolution 6: no
-    dev-queue correlation") -- ``task.attempts`` and lane occupancy are
-    untouched.
+    The spawn passes NO ``task=`` kwarg to ``spawn_create_impl`` (mirrors
+    address_review's "Resolution 6: no dev-queue correlation") --
+    ``task.attempts`` and lane occupancy are untouched. *task* here is the
+    queue row, read only for its merge base (``resolve_base_branch``, #3780):
+    the worktree is created, and the merge probe and its notes run, against
+    ``origin/<base>``. ``None`` or a null base is ``client.default_branch``.
 
     Unlike ``_dispatch_address_review``, does NOT catch ``CwError``: the caller
     (``cw.reconcile.fix_dispatch``) distinguishes a transient
@@ -286,6 +291,7 @@ def dispatch_fix_agent(
             refresh=ReuseRefreshOptions(
                 report=report, ticket_id=ticket_id, native_daemon=daemon
             ),
+            task=task,
         )
     except WorktreeOccupiedError as exc:
         # A live session or worker may be homed on this worktree. The steps
@@ -329,8 +335,8 @@ def dispatch_fix_agent(
         raise RemoteRefUnresolvedError(msg)
 
     notes = [
-        _fetch_origin_bounded(client),
-        _probe_default_merge(client, branch, worktree),
+        _fetch_origin_bounded(client, task=task),
+        _probe_default_merge(client, branch, worktree, task=task),
     ]
     present = [note for note in notes if note is not None]
     if present:
@@ -368,7 +374,9 @@ def dispatch_fix_agent(
     return session_id
 
 
-def _fetch_origin_bounded(client: ClientConfig) -> str | None:
+def _fetch_origin_bounded(
+    client: ClientConfig, *, task: TicketTask | None = None
+) -> str | None:
     """``git fetch origin`` under the tick's fetch gate; a friction note if it degraded.
 
     Inside a dispatch tick the fetch is bounded (#2910). An expiry or a gate
@@ -384,35 +392,43 @@ def _fetch_origin_bounded(client: ClientConfig) -> str | None:
         run_network_git(client.name, "fetch", "origin", cwd=git_dir)
     except GitTimeoutError as exc:
         reason = _warn_fetch_degraded_once(client.name, git_dir, exc)
+        base = resolve_base_branch(client, task)
         return (
             f"fetch of origin did not complete ({reason}); the conflict check "
-            f"against origin/{client.default_branch} used the possibly stale "
+            f"against origin/{base} used the possibly stale "
             "local tracking ref"
         )
     return None
 
 
 def _probe_default_merge(
-    client: ClientConfig, branch: str, worktree: Path
+    client: ClientConfig,
+    branch: str,
+    worktree: Path,
+    *,
+    task: TicketTask | None = None,
 ) -> str | None:
-    """Raise on a conflicting default-branch merge; a friction note if unknown (#2979).
+    """Raise on a conflicting base-branch merge; a friction note if unknown (#2979).
+
+    The base is the row's merge target (``resolve_base_branch``, #3780).
 
     Nothing is merged either way: ``up_to_date`` and ``clean`` return
     ``None``; ``conflict`` raises :exc:`CwError` naming the conflicted files;
     ``unavailable`` returns the note the caller prepends to the prompt.
     """
-    probe = probe_default_merge(worktree, client.default_branch)
+    base = resolve_base_branch(client, task)
+    probe = probe_default_merge(worktree, base)
     if probe.state == "conflict":
         files = "\n".join(probe.conflicted_files) or "(none reported)"
         msg = (
-            f"dispatch_fix_agent: merging origin/{client.default_branch} into "
+            f"dispatch_fix_agent: merging origin/{base} into "
             f"{branch} would conflict; nothing was merged and the worktree is "
             f"untouched. Conflicting files:\n{files}"
         )
         raise CwError(msg)
     if probe.state == "unavailable":
         return (
-            f"could not check whether origin/{client.default_branch} conflicts "
+            f"could not check whether origin/{base} conflicts "
             f"with {branch} ({probe.detail}); no merge was attempted and the "
             "branch was left as is"
         )

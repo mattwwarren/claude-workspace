@@ -101,7 +101,7 @@ class TestTargets:
 
         assert keys == [CancelledRowKey("acme", "GEN-1", tmp_path, "dev")]
         assert keys[0].worktree_path == tmp_path
-        assert keys[0].default_branch == "dev"
+        assert keys[0].base_branch == "dev"
 
     def test_a_guard_cancelled_row_is_never_a_target(self, tmp_path: Path) -> None:
         """#1605 R4: only an operator requeue reverses a closed-ticket cancel."""

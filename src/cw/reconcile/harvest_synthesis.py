@@ -109,7 +109,7 @@ class _CapturedFacts:
     """
 
     worktree: Path
-    default_branch: str
+    base_branch: str
     pid: int
     start_time_ns: int
     captured_at: datetime
@@ -121,7 +121,7 @@ class HarvestFacts:
 
     One pass captures (:meth:`capture`, runs git, lockless only), then the
     in-lock harvest looks up (:meth:`lookup`, never runs git). The identity a
-    lookup re-checks is the worktree, the default branch and the liveness
+    lookup re-checks is the worktree, the row's base branch (#3780) and the liveness
     handle's PID and start time, so a session re-spawned under the same id
     misses. With *budget_seconds* set, captures stop once that much monotonic
     time has passed since construction. Mirrors ``codex_boot.CleanProbes``.
@@ -139,7 +139,7 @@ class HarvestFacts:
         session_id: str,
         handle: LocalLivenessHandle,
         worktree: Path,
-        default_branch: str,
+        base_branch: str,
     ) -> None:
         """Collect *worktree*'s git facts live and keep them. Lockless only.
 
@@ -157,12 +157,12 @@ class HarvestFacts:
         captured_at = datetime.now(UTC)
         outcome: GitFacts | OSError | subprocess.CalledProcessError
         try:
-            outcome = git_facts(worktree, default_branch)
+            outcome = git_facts(worktree, base_branch)
         except GIT_SYNTHESIS_ERRORS as exc:
             outcome = exc
         self._captures[session_id] = _CapturedFacts(
             worktree=worktree,
-            default_branch=default_branch,
+            base_branch=base_branch,
             pid=handle.pid,
             start_time_ns=handle.start_time_ns,
             captured_at=captured_at,
@@ -174,11 +174,11 @@ class HarvestFacts:
         session_id: str,
         handle: LocalLivenessHandle,
         worktree: Path,
-        default_branch: str,
+        base_branch: str,
     ) -> GitFacts:
         """Return *session_id*'s captured facts if still usable. Never runs git.
 
-        Usable means captured for this same worktree, default branch, PID and
+        Usable means captured for this same worktree, base branch, PID and
         start time, and aged in ``[0, HARVEST_FACTS_MAX_AGE_SECONDS)``: a
         negative age (the clock went backwards) fails closed too. Otherwise
         raises ``HarvestFactsUnavailableError`` naming the reason (``never
@@ -189,10 +189,10 @@ class HarvestFacts:
         if entry is None:
             msg = f"harvest facts for session {session_id} were never captured"
             raise HarvestFactsUnavailableError(msg)
-        identity = (worktree, default_branch, handle.pid, handle.start_time_ns)
+        identity = (worktree, base_branch, handle.pid, handle.start_time_ns)
         captured = (
             entry.worktree,
-            entry.default_branch,
+            entry.base_branch,
             entry.pid,
             entry.start_time_ns,
         )
@@ -214,14 +214,14 @@ class HarvestFacts:
 def _harvest_via_git(
     task: TicketTask,
     worktree: Path,
-    default_branch: str,
+    base_branch: str,
     session_id: str,
     facts: Callable[[], GitFacts],
 ) -> AutoDevResult:
     return synthesize_git_result(
         task=task,
         worktree=worktree,
-        default_branch=default_branch,
+        default_branch=base_branch,
         plan_source="none",
         session_id=session_id,
         facts=facts(),
@@ -231,19 +231,19 @@ def _harvest_via_git(
 def _harvest_via_opencode_log(
     task: TicketTask,
     worktree: Path,
-    default_branch: str,
+    base_branch: str,
     session_id: str,
     facts: Callable[[], GitFacts],
 ) -> AutoDevResult:
     # The sentinel comes from the JSONL log, never from git facts.
-    del default_branch, facts
+    del base_branch, facts
     return synthesize_opencode_result(
         task=task, worktree=worktree, session_id=session_id
     )
 
 
 # Harvest-time result synthesizer per LocalLivenessHandle.backend (#2369).
-# Each entry is normalized to (task, worktree, default_branch, session_id,
+# Each entry is normalized to (task, worktree, base_branch, session_id,
 # facts), where *facts* returns the pre-captured git facts (#2565).
 _HARVEST_SYNTHESIZERS: dict[
     LocalLivenessBackend,
@@ -354,7 +354,7 @@ _UNPROVEN_BACKEND_DETAILS = (
 def _synthesize_harvest_sentinel(
     worktree: Path,
     task: TicketTask,
-    default_branch: str,
+    base_branch: str,
     session_id: str,
     backend: LocalLivenessBackend | None,
     *,
@@ -390,7 +390,7 @@ def _synthesize_harvest_sentinel(
         )
     synthesize = _HARVEST_SYNTHESIZERS.get(backend, _harvest_via_git)
     try:
-        return synthesize(task, worktree, default_branch, session_id, facts)
+        return synthesize(task, worktree, base_branch, session_id, facts)
     except GIT_SYNTHESIS_ERRORS:
         _log.warning(
             "harvest_synthesis_failed: session=%s ticket=%s backend=%s;"

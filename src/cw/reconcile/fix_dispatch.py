@@ -328,6 +328,7 @@ class _DispatchJob(NamedTuple):
     # be the templated ``branch`` above. Defaulted so the existing constructors
     # — and any row whose sessions carry no sentinel branch — stay valid.
     remote_branch: str | None = None
+    task: TicketTask | None = None  # the row, read for its merge base (#3780)
 
 
 def _emit_fix_dispatch_operator_signal(
@@ -669,6 +670,7 @@ def _build_dispatch_jobs(
                     lane=task.lane,
                     stage=task.stage,
                     remote_branch=_reported_branch(state, task.client, task.ticket_id),
+                    task=task,
                 )
             )
     return jobs, stale
@@ -845,6 +847,7 @@ def _act_on_pending_fix_dispatches(
                 lane=job.lane,
                 parent=job.pending.requested_by_session_id,
                 remote_branch=job.remote_branch,
+                task=job.task,
             )
         except HookContextConflictError as exc:
             age_seconds = (datetime.now(UTC) - job.pending.requested_at).total_seconds()

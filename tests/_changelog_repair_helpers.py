@@ -49,6 +49,7 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     TicketTask,
+    resolve_base_branch,
     resolve_feature_branch,
 )
 from cw.reconcile.review_recipes import _shared, repair_engine
@@ -519,6 +520,7 @@ def make_repair_job(
         client=row.client,
         ticket_id=row.ticket_id,
         branch=resolve_feature_branch(row.ticket_id, client_cfg, row),
+        base_branch=resolve_base_branch(client_cfg, row),
         lane=row.lane,
         pr_url=row.pr_url,
         session_id=row.session_id,
@@ -543,7 +545,7 @@ def make_prepared(
         branch=branch,
         repo=Path(client.workspace_path),
         pr_number=int(PR_NUMBER),
-        default_branch=base_branch,
+        base_branch=base_branch,
         default_ref=default_ref if default_ref is not None else f"origin/{base_branch}",
         expected_sha=EXPECTED_SHA,
         merge_base="c" * 40,

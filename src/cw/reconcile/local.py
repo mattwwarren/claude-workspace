@@ -82,6 +82,7 @@ from cw.models import (
     SessionStatus,
     Stage,
     TicketTask,
+    resolve_base_branch,
 )
 from cw.queue_rows import (
     _park_running_task_blocked_on_user,
@@ -670,11 +671,6 @@ def _harvest_task_for(
     )
 
 
-def _harvest_default_branch(client_cfg: ClientConfig | None) -> str:
-    """The branch a harvest's fork point is measured against."""
-    return client_cfg.default_branch if client_cfg is not None else "main"
-
-
 def _git_harvest_targets(
     state: CwState, tasks: Sequence[TicketTask]
 ) -> list[tuple[Session, LocalLivenessHandle, Path, TicketTask]]:
@@ -724,10 +720,11 @@ def capture_local_harvest_facts(
         return
     clients = _deps.load_effective_clients()
     for index, (session, handle, worktree, task) in enumerate(targets):
-        default_branch = _harvest_default_branch(clients.get(session.client))
+        # The fork point is measured against the row's base (#3780).
+        base_branch = resolve_base_branch(clients.get(session.client), task)
         started = monotonic()
         try:
-            facts.capture(session.id, handle, worktree, default_branch)
+            facts.capture(session.id, handle, worktree, base_branch)
         except HarvestFactsUnavailableError:
             _log.warning(
                 "reconcile: harvest-facts budget (%.0fs) spent;"
@@ -752,7 +749,7 @@ def _harvest_sentinel_or_defer(
     worktree: Path,
     task: TicketTask,
     *,
-    default_branch: str,
+    base_branch: str,
     backend: LocalLivenessBackend | None,
     harvest_facts: HarvestFacts | None,
 ) -> AutoDevResult | None:
@@ -770,10 +767,10 @@ def _harvest_sentinel_or_defer(
         return _synthesize_harvest_sentinel(
             worktree,
             task,
-            default_branch,
+            base_branch,
             session.id,
             backend,
-            facts=partial(store.lookup, session.id, handle, worktree, default_branch),
+            facts=partial(store.lookup, session.id, handle, worktree, base_branch),
         )
     except HarvestFactsUnavailableError as exc:
         _log.warning(
@@ -871,8 +868,8 @@ def _act_on_local_harvest_candidates(
             # liveness handle; the guard narrows both for the calls below.
             continue
         client_cfg = clients.get(session.client)
-        default_branch = _harvest_default_branch(client_cfg)
         task = _harvest_task_for(candidate, session, _task_by_ticket)
+        base_branch = resolve_base_branch(client_cfg, task)
         if session.local_liveness.backend == CODEX_BACKEND:
             # Never the synthetic `task` above: only a real row can be gated.
             # The outcome is discarded: every non-final one (AUDIT_FAILED,
@@ -922,7 +919,7 @@ def _act_on_local_harvest_candidates(
             session.local_liveness,
             candidate.worktree_path,
             task,
-            default_branch=default_branch,
+            base_branch=base_branch,
             backend=backend,
             harvest_facts=harvest_facts,
         )
