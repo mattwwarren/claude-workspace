@@ -360,6 +360,43 @@ REVIEW_APPROVAL_GATE_DISPOSITION: Final = "review_approval_gate"
 # agent reports on its own sentinel.
 _PRE_DISPATCH_REVIEW_APPROVAL_REASON: Final = "review_approval_missing_pre_dispatch"
 
+# Disposition stamped when the claim screen refuses a PENDING REVIEW row whose
+# lane's REVIEW runner does not declare every runtime capability the client's
+# ``review.engine.requires_runtime_capabilities`` names (#3790). No agent ran:
+# no spawn, no attestation, no ledger, and the stage stays REVIEW. The park is
+# uncharged (the row is PENDING, so no attempt or unproductive attempt is
+# spent). Operator-gated: released by fixing the config (or re-laning with
+# ``cw dev-queue move``) and then ``cw dev-queue requeue``.
+#
+# Deliberately NOT a HOLD_DISPOSITIONS or DRAIN member, on the review-approval
+# precedent: membership would make it eligible for concierge's false-park
+# auto-requeue, which would re-park it into the same refusal. Not exported from
+# ``cw.dev_queue.__all__``; consumers import it from this module.
+REVIEW_CAPABILITY_UNMET_DISPOSITION: Final = "review_capability_unmet"
+
+# ``TicketTask.blocked_reason`` stamped alongside REVIEW_CAPABILITY_UNMET_DISPOSITION,
+# on the ``_PRE_DISPATCH_*`` convention. Not a sentinel ``blocker.reason``.
+_PRE_DISPATCH_REVIEW_CAPABILITY_REASON: Final = "review_capability_unmet_pre_dispatch"
+
+# The re-lane steps for REVIEW_CAPABILITY_UNMET_DISPOSITION, written once. The
+# park is BLOCKED_ON_USER and ``move`` needs PENDING, so ``requeue`` comes first;
+# a requeued row is PENDING in the incompatible lane, so pause that lane first or
+# a dispatch tick re-parks it before ``move`` runs. Fields: ``pause``, ``requeue``,
+# ``move``, ``resume`` (command strings).
+REVIEW_CAPABILITY_RELANE_STEPS: Final = (
+    "To re-lane instead, run `{pause}` first, then `{requeue}`, then `{move}`,"
+    " then `{resume}`; move needs the row PENDING, and without the pause a"
+    " dispatch tick may re-park it before move runs."
+)
+
+# REVIEW_CAPABILITY_RELANE_STEPS with placeholders, for text with no row at hand.
+REVIEW_CAPABILITY_RELANE_GENERIC: Final = REVIEW_CAPABILITY_RELANE_STEPS.format(
+    pause="cw lane pause <lane> -c <C>",
+    requeue="cw dev-queue requeue <T> -c <C>",
+    move="cw dev-queue move <T> -c <C> --to <lane>",
+    resume="cw lane resume <lane> -c <C>",
+)
+
 # Textually identical to cw.reconcile._shared._NEEDS_SALVAGE_REASON
 # ("needs_salvage") but a SEPARATE constant, not an import of it: _shared
 # imports FROM cw.dev_queue (dev_queue -> reconcile is the only cycle-safe

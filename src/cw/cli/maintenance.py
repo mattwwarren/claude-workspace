@@ -359,7 +359,8 @@ def doctor(
       BLOCKED_ON_USER queue row parked on a deliberate operator gate
       (finalize_gate_held, stale_dispatch_gate, attempt_cap_blocked,
       adopted_head_drift, adopt_pr_state_unknown, the legacy
-      adopt_pr_not_green, review_approval_gate, binding_unbound,
+      adopt_pr_not_green, review_approval_gate, review_capability_unmet,
+      binding_unbound,
       binding_unreachable, binding_tool_missing, the legacy tracker_mcp_gate,
       gate_timeout, or a codex_fix_* blocked reason) that holds a
       lane slot: waiting on an operator, not wedged. Reported by every cw

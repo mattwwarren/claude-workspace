@@ -17,6 +17,7 @@ from cw.models.enums import (
     Stage,
 )
 from cw.models.orchestrator_config.constants import CLAUDE_NATIVE_BACKEND, CODEX_BACKEND
+from cw.models.runtime_capabilities import normalize_runtime_capabilities
 
 
 class ModelPrice(BaseModel):
@@ -69,6 +70,19 @@ class StageExecutorConfig(BaseModel):
     # gets these defaults, not the client's values.
     reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE
     fix_sandbox_mode: SandboxMode = DEFAULT_FIX_SANDBOX_MODE
+    # Runtime-capability slugs this runner declares (#3790). REVIEW-only, and
+    # operator-owned: read from clients.yaml, never from the PR branch. A row
+    # whose REVIEW runner lacks a capability its engine requires is parked
+    # before claim. Resolved like `model`: a lane's stage config replaces the
+    # client's wholesale, so a lane without this key declares none.
+    runtime_capabilities: list[str] = Field(default_factory=list)
+
+    @field_validator("runtime_capabilities")
+    @classmethod
+    def _check_runtime_capabilities(cls, value: list[str]) -> list[str]:
+        return normalize_runtime_capabilities(
+            value, field="pipeline.executors.review.runtime_capabilities"
+        )
 
     @field_validator("model_prices")
     @classmethod
@@ -152,4 +166,19 @@ class StagePipelineConfig(BaseModel):
         if len(self.stages) != len(set(self.stages)):
             msg = "pipeline stages must be unique"
             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _runtime_capabilities_review_only(self) -> StagePipelineConfig:
+        # Loud rather than silently ignored: only the REVIEW claim gate reads
+        # runtime_capabilities, so a value on any other stage would look
+        # declared while changing nothing. StageExecutorConfig cannot see its
+        # own stage, so the check lives here.
+        for stage, executor in self.executors.items():
+            if stage is not Stage.REVIEW and executor.runtime_capabilities:
+                msg = (
+                    "runtime_capabilities is only honored on the review stage "
+                    f"(got stage={stage.value!r})"
+                )
+                raise ValueError(msg)
         return self

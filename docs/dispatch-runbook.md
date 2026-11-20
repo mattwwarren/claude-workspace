@@ -1210,6 +1210,7 @@ common wedge conditions:
   reported, but stays in `cw dev-queue status`) while parked on a deliberate
   operator gate: disposition `finalize_gate_held`, `stale_dispatch_gate`,
   `attempt_cap_blocked`, the RFC 0016 adoption parks, `review_approval_gate`,
+  `review_capability_unmet` (#3790),
   `review_engine_modified`, `binding_unreachable`, `binding_unbound` or
   `binding_tool_missing` (RFC 0019 H2b #3744; the legacy `tracker_mcp_gate`
   reads as `binding_unreachable`; #3055: fix the branch settings file or the
@@ -1285,6 +1286,20 @@ ticket's legitimate row):
 cw dev-queue remove <TICKET-ID> --client <client> \
   --status blocked_on_user --disposition terminal_sibling
 ```
+
+### Park: `review_capability_unmet` (#3790)
+
+A PENDING REVIEW row whose lane's runner lacks a capability the client's
+`review.engine.requires_runtime_capabilities` names is refused before claim. It
+is `BLOCKED_ON_USER` with `disposition: review_capability_unmet`, uncharged, and
+the stage stays REVIEW. Fix the config in `clients.yaml`: declare the missing
+slugs on the lane's `pipeline.executors.review.runtime_capabilities`, or remove
+them from the engine. Then `cw dev-queue requeue <T> -c <C>`. To re-lane instead,
+run `cw lane pause <lane> -c <C>` on the incompatible lane first, then
+`cw dev-queue requeue <T> -c <C>`, then `cw dev-queue move <T> -c <C> --to <lane>`,
+then `cw lane resume <lane> -c <C>`. `move` needs the row PENDING, and a requeued
+row is PENDING in the incompatible lane, so without the pause a dispatch tick may
+re-park it before `move` runs. `cw doctor --reap` never reverts this park.
 
 ### Bulk cleanup of stale terminal rows (`cw dev-queue prune`)
 

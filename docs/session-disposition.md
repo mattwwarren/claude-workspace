@@ -188,6 +188,13 @@ invalidates no review. See
 [`docs/headless-contract.md`](headless-contract.md)'s "The Adoption
 Dispositions" section and the runbook's "Adopt an open human PR" pattern.
 
+`review_capability_unmet` (#3790) is not a sentinel status either: dispatch
+refused to claim a PENDING REVIEW row whose lane runner lacks a runtime
+capability the client's `review.engine` requires. The park is pre-claim and
+uncharged (no attempt or unproductive attempt is spent; the stage stays
+REVIEW), and no session ran, so there is no sentinel and no bound session.
+Its `blocked_reason` is `review_capability_unmet_pre_dispatch`.
+
 `review_approval_gate` is not a sentinel status either: dispatch refused to
 claim a PENDING FINALIZE row whose tier is `large` on the row because the
 review approval recorded on it is missing, stale or unreadable for the branch
