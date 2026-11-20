@@ -22,12 +22,16 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, Literal
 
 from cw.dev_queue.crud import _find_ticket
-from cw.dev_queue.hold import _watch_collision, parse_github_pull_url
+from cw.dev_queue.hold import (
+    _watch_collision,
+    is_operator_hold_on,
+    parse_github_pull_url,
+)
 from cw.dev_queue.lifecycle import transition_task_status
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.exceptions import CwError
 from cw.models import QueueItemStatus
-from cw.models.enums import DEPENDENCY_HOLD_DISPOSITION, TERMINAL_QUEUE_STATUSES
+from cw.models.enums import TERMINAL_QUEUE_STATUSES
 from cw.models.merge_prerequisite import MergePrerequisite, unsatisfied
 
 if TYPE_CHECKING:
@@ -174,17 +178,6 @@ def declare_prerequisite(
         return _declare_in_row(store, task, ref, repo, actor)
 
 
-def _parked_on(task: TicketTask, ref: PrRef) -> bool:
-    """True iff *task* is a sessionless dependency hold on *ref*."""
-    return (
-        task.status == QueueItemStatus.BLOCKED_ON_USER
-        and task.disposition == DEPENDENCY_HOLD_DISPOSITION
-        and task.session_id is None
-        and task.blocked_on_pr is not None
-        and task.blocked_on_pr.key() == ref.key()
-    )
-
-
 def _release_or_restamp(task: TicketTask, ref: PrRef) -> PrerequisiteResult:
     """Release the park, or move it to the next unsatisfied entry (lock held)."""
     remaining = unsatisfied(task.merge_prerequisites)
@@ -212,7 +205,7 @@ def _remove_in_row(
         raise CwError(msg)
     task.merge_prerequisites.remove(entry)
     result = _result(task, ref, "removed")
-    if entry.satisfied_at is None and _parked_on(task, ref):
+    if entry.satisfied_at is None and is_operator_hold_on(task, ref):
         result = _release_or_restamp(task, ref)
     save_dev_queue(store)
     _log.info(
