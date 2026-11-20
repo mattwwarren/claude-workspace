@@ -8074,6 +8074,8 @@ class TestApproveScopeDrift:
         stage: Stage = Stage.IMPL,
         blocked_reason: str = "plan_scope_drift",
         review_feedback: ReviewFeedback | None = None,
+        pr_url: str | None = None,
+        plan_approved_fingerprint: str | None = None,
     ) -> list[tuple[str, Path | None]]:
         """Persist one parked row and stub the gh HEAD lookup; return its calls."""
         _write_client_yaml(tmp_config_dir, tmp_path)
@@ -8082,6 +8084,8 @@ class TestApproveScopeDrift:
         )
         task.stage_base_ref = "base0000"
         task.review_feedback = review_feedback
+        task.pr_url = pr_url
+        task.plan_approved_fingerprint = plan_approved_fingerprint
         save_dev_queue(DevQueueStore(tasks=[task]))
         calls: list[tuple[str, Path | None]] = []
 
@@ -8608,7 +8612,14 @@ class TestApproveScopeDrift:
         from cw.dev_queue import approve_scope_drift_ticket
         from cw.scope_grants import review_policy_fingerprint
 
-        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        fingerprint = "f" * 64
+        self._seed(
+            tmp_config_dir,
+            tmp_path,
+            monkeypatch,
+            pr_url="https://github.com/acme/widgets/pull/42",
+            plan_approved_fingerprint=fingerprint,
+        )
 
         approve_scope_drift_ticket(
             "GEN-500", "genhealth", ["src/b.py", "src/a.py"], repo="acme/widgets"
@@ -8624,8 +8635,8 @@ class TestApproveScopeDrift:
         assert grant.head == _APPROVED_HEAD
         assert grant.paths == ["src/a.py", "src/b.py"]
         assert grant.actor == "test-operator"
-        assert grant.plan_fingerprint == t.plan_approved_fingerprint
-        assert grant.pr_number is None
+        assert grant.plan_fingerprint == fingerprint
+        assert grant.pr_number == 42
         assert grant.policy == review_policy_fingerprint(get_client("genhealth").review)
 
     def test_regress_into_plan_clears_the_grant_ledger(self) -> None:
@@ -8708,9 +8719,10 @@ class TestApproveScopeDrift:
 
         assert gather_grant_facts("no-such-client-3772", "acme/widgets") is None
 
-    def test_unknown_client_still_raises_from_the_locked_body(
+    def test_unknown_client_still_raises(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """An unknown client is refused (at row resolution), never half-approved."""
         from cw.dev_queue import approve_scope_drift_ticket
         from cw.exceptions import CwError
 
@@ -8718,6 +8730,40 @@ class TestApproveScopeDrift:
 
         with pytest.raises(CwError):
             approve_scope_drift_ticket("GEN-500", "no-such-client-3772", ["a.py"])
+
+    def test_unresolvable_grant_facts_fall_back_to_an_unbound_grant(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``gather_grant_facts`` returning ``None`` still approves, unbound.
+
+        The locked body rebuilds the facts: no repo, an empty actor, and the
+        policy fingerprint of the (valid) client's review config.
+        """
+        from cw.config import get_client
+        from cw.dev_queue import approve_scope_drift_ticket
+        from cw.scope_grants import review_policy_fingerprint
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+
+        def _login_lookup_fails(*_args: object, **_kwargs: object) -> str:
+            error = "gh login lookup unavailable"
+            raise OSError(error)
+
+        monkeypatch.setattr(
+            "cw.dev_queue.scope_drift.resolve_actor_or_empty", _login_lookup_fails
+        )
+
+        result = approve_scope_drift_ticket(
+            "GEN-500", "genhealth", ["src/a.py"], repo="acme/widgets"
+        )
+
+        assert result["extra_files"] == ["src/a.py"]
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+        grant = t.scope_grants[0]
+        assert grant.actor == ""
+        assert grant.repo is None
+        assert grant.policy == review_policy_fingerprint(get_client("genhealth").review)
 
     @pytest.mark.parametrize(
         ("kwargs", "match"),
