@@ -688,6 +688,7 @@ class TestClientConfig:
             "engine": None,
             "attestation": None,
             "debt_autoenqueue": None,
+            "tolerated_worktree_paths": [],
         }
 
     def test_confirm_reentry_defaults_true(self) -> None:
@@ -4902,3 +4903,76 @@ class TestWorkerTmpFallbackRetentionConfig:
         assert again.worker_tmp_fallback_retention_days == 1
         assert again.worker_tmp_fallback_retention_interval_minutes == 1
         assert again.worker_tmp_fallback_retention_enabled is False
+
+
+class TestToleratedWorktreePaths:
+    """#3693: ``review.tolerated_worktree_paths`` exact-path validation."""
+
+    @staticmethod
+    def _client(paths: list[str]) -> ClientConfig:
+        return ClientConfig(
+            name="test",
+            workspace_path=Path("/dev/null"),
+            review={"tolerated_worktree_paths": paths},
+        )
+
+    def test_default_is_empty(self) -> None:
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        assert c.review.tolerated_worktree_paths == []
+
+    def test_valid_list_round_trips(self) -> None:
+        c = self._client([".codex/config.toml", "docs/a-b_c.md"])
+        again = ClientConfig.model_validate(c.model_dump(mode="json"))
+        assert again.review.tolerated_worktree_paths == [
+            ".codex/config.toml",
+            "docs/a-b_c.md",
+        ]
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "a*.toml",
+            "a?.toml",
+            "a[1].toml",
+            "a]b",
+            "/abs/path",
+            "a/../b",
+            "a\\b",
+            "a\x00b",
+            "",
+            "dir/",
+            "has space.toml",
+            "café.toml",
+            'quo"te',
+            "x" * 201,
+        ],
+    )
+    def test_rejects_non_exact_paths(self, path: str) -> None:
+        with pytest.raises(ValidationError):
+            self._client([path])
+
+    def test_rejects_too_many_entries(self) -> None:
+        with pytest.raises(ValidationError):
+            self._client([f"f{i}.txt" for i in range(17)])
+
+    def test_accepts_sixteen_entries(self) -> None:
+        assert (
+            len(
+                self._client(
+                    [f"f{i}.txt" for i in range(16)]
+                ).review.tolerated_worktree_paths
+            )
+            == 16
+        )
+
+    def test_unknown_review_key_still_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ClientConfig(
+                name="test",
+                workspace_path=Path("/dev/null"),
+                review={"tolerated_worktree_paths": [], "bogus": 1},
+            )
+
+    def test_not_stamped_into_context(self) -> None:
+        c = self._client([".codex/config.toml"])
+        assert "tolerated_worktree_paths" not in c.review.to_context()

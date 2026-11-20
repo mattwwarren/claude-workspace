@@ -490,7 +490,12 @@ def _failure_block(path: str, failure: GateFailure) -> FinalizeBlock:
 
 
 def run_finalize_quality_gates(
-    worktree: Path, *, scope: GateScope, path: str, ci: CiContext
+    worktree: Path,
+    *,
+    scope: GateScope,
+    path: str,
+    ci: CiContext,
+    tolerated: frozenset[str] = frozenset(),
 ) -> FinalizeGateRun:
     """Run the repo's quality gates on the branch tip; never fix, never commit.
 
@@ -506,7 +511,7 @@ def run_finalize_quality_gates(
     every gate locally.
     """
     label = f"{path}_path_gates: "
-    baseline = capture_cycle_baseline(worktree)
+    baseline = capture_cycle_baseline(worktree, tolerated=tolerated)
     if isinstance(baseline, DirtyStart):
         return FinalizeGateRun(
             FinalizeBlock(

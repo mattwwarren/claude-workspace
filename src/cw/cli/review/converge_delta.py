@@ -75,6 +75,7 @@ from cw.review_convergence import (
     tolerance_for_client,
     worktree_state,
 )
+from cw.tolerated_paths import tolerated_paths
 
 if TYPE_CHECKING:
     from cw.cli.review.confirm import RoundOutcome
@@ -135,17 +136,23 @@ def _validated(
     backend: str,
     before: tuple[str, str],
     outcome: RoundOutcome,
+    tolerated: frozenset[str],
 ) -> ReviewVerdict:
     """The verdict to record, after the G4 and sha checks (exit 1/3/4 otherwise).
 
     HEAD moving during the review is a ``CwError`` checked first, so it is
     never reported as a content failure; any other worktree change is exit 4.
+    *tolerated* (#3693) must match the one the *before* snapshot used.
     """
     if rev_parse_or_none(worktree, "HEAD") != head:
         moved = f"HEAD moved during the review (was {head}); nothing recorded"
         raise DeltaRefusedError(moved)
     verdict, _reason = verified_verdict(
-        backend=backend, worktree=worktree, before=before, outcome=outcome
+        backend=backend,
+        worktree=worktree,
+        before=before,
+        outcome=outcome,
+        tolerated=tolerated,
     )
     if verdict.reviewed_sha != head:
         other = (
@@ -289,7 +296,8 @@ def converge_delta_confirm(
     )
     backend = ledger.confirm_backend
     require_backend_binary(backend)
-    before = worktree_state(worktree)
+    tolerated = tolerated_paths(get_client(client))
+    before = worktree_state(worktree, tolerated=tolerated)
     managed = validate_managed_round(worktree, head=head, backend=backend)
     outcome = run_backend_round(
         backend=backend,
@@ -300,9 +308,15 @@ def converge_delta_confirm(
         model=model,
         reasoning_effort=reasoning_effort,
         resolution=plan.spec,
+        tolerated=tolerated,
     )
     verdict = _validated(
-        worktree=worktree, head=head, backend=backend, before=before, outcome=outcome
+        worktree=worktree,
+        head=head,
+        backend=backend,
+        before=before,
+        outcome=outcome,
+        tolerated=tolerated,
     )
     if managed is not None:
         managed.pin.check(worktree)

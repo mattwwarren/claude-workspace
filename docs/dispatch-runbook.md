@@ -1210,6 +1210,7 @@ common wedge conditions:
   reported, but stays in `cw dev-queue status`) while parked on a deliberate
   operator gate: disposition `finalize_gate_held`, `stale_dispatch_gate`,
   `attempt_cap_blocked`, the RFC 0016 adoption parks, `review_approval_gate`,
+  `review_capability_unmet` (#3790),
   `review_engine_modified`, `binding_unreachable`, `binding_unbound` or
   `binding_tool_missing` (RFC 0019 H2b #3744; the legacy `tracker_mcp_gate`
   reads as `binding_unreachable`; #3055: fix the branch settings file or the
@@ -1285,6 +1286,20 @@ ticket's legitimate row):
 cw dev-queue remove <TICKET-ID> --client <client> \
   --status blocked_on_user --disposition terminal_sibling
 ```
+
+### Park: `review_capability_unmet` (#3790)
+
+A PENDING REVIEW row whose lane's runner lacks a capability the client's
+`review.engine.requires_runtime_capabilities` names is refused before claim. It
+is `BLOCKED_ON_USER` with `disposition: review_capability_unmet`, uncharged, and
+the stage stays REVIEW. Fix the config in `clients.yaml`: declare the missing
+slugs on the lane's `pipeline.executors.review.runtime_capabilities`, or remove
+them from the engine. Then `cw dev-queue requeue <T> -c <C>`. To re-lane instead,
+run `cw lane pause <lane> -c <C>` on the incompatible lane first, then
+`cw dev-queue requeue <T> -c <C>`, then `cw dev-queue move <T> -c <C> --to <lane>`,
+then `cw lane resume <lane> -c <C>`. `move` needs the row PENDING, and a requeued
+row is PENDING in the incompatible lane, so without the pause a dispatch tick may
+re-park it before `move` runs. `cw doctor --reap` never reverts this park.
 
 ### Bulk cleanup of stale terminal rows (`cw dev-queue prune`)
 
@@ -2292,6 +2307,15 @@ lane is blocked (both below).
   the agent parks `agent_block`): inspect `git status` and
   `git log`, revert anything the reviewer process wrote, then `cw dev-queue
   requeue <T> -c <C> --stage review`.
+- **Tolerated worktree paths (`review.tolerated_worktree_paths`, #3693).** An
+  operator may list exact repo-relative paths that a tool writes into the
+  worktree, so the dirty-start check and the post-review mutation check skip
+  them. The key clears only those two checks. A listed path that is dirty
+  or changed logs a WARNING with the path and the check name. The finalize
+  `DIRTY_TREE` gate is a project-owned script that does not read the key, so
+  a finalize park on a dirty tracked file still needs the workaround: restore
+  the file to its committed content, then requeue finalize. The root cause,
+  which process writes `.codex/config.toml`, stays open on #2907 and #3693.
 - **`codex_convergence_ledger_error`.** A ledger, git or file step failed after
   the codex review completed. The codex verdict is still posted. A failed save
   is transient; a foreign or corrupt ledger, or a verdict that is not at HEAD,

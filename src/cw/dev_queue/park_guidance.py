@@ -13,6 +13,8 @@ from cw.dev_queue.dispositions import (
     AWAITING_OPERATOR_DISPOSITION,
     BRANCH_STALENESS_GATE_DISPOSITION,
     GATE_TIMEOUT_DISPOSITION,
+    REVIEW_CAPABILITY_RELANE_GENERIC,
+    REVIEW_CAPABILITY_UNMET_DISPOSITION,
     REVIEW_ENGINE_MODIFIED_DISPOSITION,
     REVIEW_ENGINE_UNSUPPORTED_DISPOSITION,
     REVIEW_HEALTH_GATE_DISPOSITION,
@@ -66,6 +68,13 @@ PARK_GUIDANCE: dict[str, str] = {
         " config (claude-native or codex), or add or repair cw-engine.json"
         " (`cw review engine validate --kind manifest`), then"
         " `cw dev-queue requeue`."
+    ),
+    REVIEW_CAPABILITY_UNMET_DISPOSITION: (
+        "The REVIEW lane's runner does not declare every runtime capability the"
+        " client's review.engine requires, so the row was refused before any"
+        " worker started. Declare the missing capabilities on this lane's"
+        " pipeline.executors.review.runtime_capabilities in clients.yaml, then"
+        " `cw dev-queue requeue` releases it. " + REVIEW_CAPABILITY_RELANE_GENERIC
     ),
     GATE_TIMEOUT_DISPOSITION: (
         "The reuse-path quality gate was cut off by the foreground timeout, not"

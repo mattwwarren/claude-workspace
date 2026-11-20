@@ -30,6 +30,7 @@ from cw.models.orchestrator_config import (
     LaneConfig,
     StagePipelineConfig,
 )
+from cw.models.runtime_capabilities import normalize_runtime_capabilities
 from cw.models.tasks import DEFAULT_LANE
 from cw.models.worker_effort import WorkerEffort
 
@@ -125,6 +126,33 @@ def _validate_repo_glob(pattern: str, *, field: str = "paths") -> str:
         msg = f"{field} entry {pattern!r} {problem}; use a repo-relative glob"
         raise ValueError(msg)
     return pattern
+
+
+# #3693: bounds for ``review.tolerated_worktree_paths``.
+MAX_TOLERATED_WORKTREE_PATHS = 16
+MAX_TOLERATED_WORKTREE_PATH_LENGTH = 200
+_EXACT_PATH_FORBIDDEN_CHARS = frozenset('*?[]"')
+
+
+def _validate_exact_repo_path(path: str, *, field: str) -> str:
+    """One exact repo-relative file path: a glob-safe, printable-ASCII path.
+
+    Reuses ``_validate_repo_glob`` for the shared rules, then rejects what a
+    literal path must never contain: glob metacharacters, a quote, anything
+    outside printable ASCII (NUL, control, space, non-ASCII), and over-length.
+    """
+    _validate_repo_glob(path, field=field)
+    problem = None
+    if len(path) > MAX_TOLERATED_WORKTREE_PATH_LENGTH:
+        problem = f"is longer than {MAX_TOLERATED_WORKTREE_PATH_LENGTH} characters"
+    elif not all("\x21" <= char <= "\x7e" for char in path):
+        problem = "contains whitespace, control or non-ASCII characters"
+    elif _EXACT_PATH_FORBIDDEN_CHARS.intersection(path):
+        problem = "contains a glob or quote character; list an exact path"
+    if problem is not None:
+        msg = f"{field} entry {path!r} {problem}"
+        raise ValueError(msg)
+    return path
 
 
 def _validate_argv(argv: list[str]) -> list[str]:
@@ -280,12 +308,20 @@ class ReviewEngineConfig(BaseModel):
 
     The engine requires ``review.convergence: clean``; ``ReviewConfig``
     enforces that rule, since it spans both keys.
+
+    ``requires_runtime_capabilities`` lists runtime-capability slugs a review
+    runner must declare (#3790). It is operator-owned: read from ``clients.yaml``
+    only, never from ``cw-engine.json`` or the PR branch, and not stamped into
+    ``.claude/cw-context.json``. A lane whose REVIEW runner lacks one is parked
+    before claim (``review_capability_unmet``). Slugs are validated, sorted and
+    deduplicated; see ``cw.models.runtime_capabilities``.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     skill: str
     guarded_paths: list[str] = Field(default_factory=list)
+    requires_runtime_capabilities: list[str] = Field(default_factory=list)
 
     @field_validator("skill")
     @classmethod
@@ -311,6 +347,13 @@ class ReviewEngineConfig(BaseModel):
             )
             raise ValueError(msg)
         return [_validate_repo_glob(entry, field="guarded_paths") for entry in value]
+
+    @field_validator("requires_runtime_capabilities")
+    @classmethod
+    def _check_requires_runtime_capabilities(cls, value: list[str]) -> list[str]:
+        return normalize_runtime_capabilities(
+            value, field="review.engine.requires_runtime_capabilities"
+        )
 
 
 class RenumberPattern(BaseModel):
@@ -444,6 +487,12 @@ class ReviewConfig(BaseModel):
     ``attestation`` (#3040) holds the sign-off attestation verifier's settings;
     see ``ReviewAttestationConfig``. It is read from the live config by
     ``cw review attestation check`` and is not stamped into the context.
+    ``tolerated_worktree_paths`` (#3693) is an opt-in list of exact
+    repo-relative paths (no globs, at most 16 entries of at most 200
+    characters). The dirty-start check and the post-review mutation check
+    tolerate any status for those exact paths, logging one WARNING per check
+    evaluation. It is read from the live config, is not stamped into the
+    context, and does not reach project-owned gates.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -458,8 +507,26 @@ class ReviewConfig(BaseModel):
     # #3045: presence is the toggle; the lane is validated by ClientConfig.
     # Not stamped into the context (to_context() does not read it).
     debt_autoenqueue: ReviewDebtAutoEnqueueConfig | None = None
+    # #3693: opt-in exact repo-relative paths that the dirty-start check and the
+    # post-review mutation check tolerate. Empty (the default) is byte-identical
+    # behaviour. Read from the live config, never stamped into the context.
+    tolerated_worktree_paths: list[str] = Field(default_factory=list)
 
     _RETIRED_KEYS: ClassVar[frozenset[str]] = frozenset({_RETIRED_DELTA_CONFIRM_KEY})
+
+    @field_validator("tolerated_worktree_paths")
+    @classmethod
+    def _validate_tolerated_worktree_paths(cls, value: list[str]) -> list[str]:
+        if len(value) > MAX_TOLERATED_WORKTREE_PATHS:
+            msg = (
+                f"review.tolerated_worktree_paths has {len(value)} entries; "
+                f"the maximum is {MAX_TOLERATED_WORKTREE_PATHS}"
+            )
+            raise ValueError(msg)
+        return [
+            _validate_exact_repo_path(entry, field="review.tolerated_worktree_paths")
+            for entry in value
+        ]
 
     @model_validator(mode="before")
     @classmethod

@@ -63,6 +63,7 @@ from cw.review_convergence import (
     worktree_state,
 )
 from cw.ticket_snapshot import DEFAULT_SNAPSHOT_CONTEXT, context_for_client
+from cw.tolerated_paths import tolerated_paths
 from cw.worktree import resolve_task_worktree
 
 from ._group import review
@@ -304,8 +305,11 @@ def _run_claude_round(
     model: str | None,
     resolution: ResolutionSpec | None = None,
     snapshots: SnapshotContext = DEFAULT_SNAPSHOT_CONTEXT,
+    tolerated: frozenset[str] = frozenset(),
 ) -> RoundOutcome:
     """One Claude review pass (#2791), diffed from *base_ref*, no deadline.
+
+    *tolerated* (#3693) reaches the per-role mutation check; empty changes nothing.
 
     Deferred imports for the same reason as :func:`_run_round`, and the same
     narrow ``try``: only ``run_claude_review`` itself can be a ``crash``.
@@ -335,6 +339,7 @@ def _run_claude_round(
             resolution=resolution,
             max_prompt_chars=CODEX_MAX_PROMPT_CHARS if resolution is not None else None,
             snapshots=snapshots,
+            tolerated=tolerated,
         )
     except ReviewInputTooLargeError as exc:
         _round_failed(exc.cause, str(exc), _CLAUDE, extra=exc.payload())
@@ -504,8 +509,12 @@ def run_backend_round(
     reasoning_effort: str | None,
     resolution: ResolutionSpec | None = None,
     snapshots: SnapshotContext | None = None,
+    tolerated: frozenset[str] = frozenset(),
 ) -> RoundOutcome:
     """One review round on *backend*; exit 3/4 come from inside (#2980).
+
+    *tolerated* (#3693) reaches the Claude per-role check only; the codex round
+    has no per-role check, and the whole-call check covers both backends.
 
     The one place ``cw review confirm`` and ``cw review converge delta-confirm``
     launch a round, so a new round kwarg, a third backend or the effort default
@@ -533,6 +542,7 @@ def run_backend_round(
             model=model,
             resolution=resolution,
             snapshots=snapshots,
+            tolerated=tolerated,
         )
     return _run_round(
         task=task,
@@ -556,6 +566,7 @@ def verified_verdict(
     worktree: Path,
     before: tuple[str, str],
     outcome: RoundOutcome,
+    tolerated: frozenset[str],
 ) -> tuple[ReviewVerdict, str | None]:
     """The round's verdict and blocker reason, or exit 4 / exit 3 (#2980).
 
@@ -569,7 +580,8 @@ def verified_verdict(
     """
     from cw.codex_review import CODEX_REVIEW_WORKTREE_MUTATED
 
-    if worktree_state(worktree) != before:
+    after = worktree_state(worktree, tolerated=tolerated, log_tolerated=True)
+    if after != before:
         _round_failed("worktree_mutated", _CALL_MUTATED_DETAIL, backend)
     blocker = outcome.result.blocker
     reason = blocker.reason if blocker is not None else None
@@ -592,10 +604,15 @@ def _finish_round(
     before: tuple[str, str],
     outcome: RoundOutcome,
     managed: ConfirmationRun | None,
+    tolerated: frozenset[str],
 ) -> None:
     """Map a completed round onto exit 4, exit 3, or the exit-0 verdict print."""
     verdict, reason = verified_verdict(
-        backend=backend, worktree=worktree, before=before, outcome=outcome
+        backend=backend,
+        worktree=worktree,
+        before=before,
+        outcome=outcome,
+        tolerated=tolerated,
     )
     if managed is not None:
         managed.pin.check(worktree)
@@ -712,7 +729,8 @@ def review_confirm(
         ticket_id=ticket_id,
         default_branch=configured_base,
     )
-    before = worktree_state(worktree)
+    tolerated = tolerated_paths(get_client(task.client))
+    before = worktree_state(worktree, tolerated=tolerated)
     managed = validate_managed_round(
         worktree, head=before[0], backend=backend, diff_base=confirmation_base
     )
@@ -724,6 +742,7 @@ def review_confirm(
         base_ref=confirmation_base,
         model=model,
         reasoning_effort=reasoning_effort,
+        tolerated=tolerated,
     )
     _finish_round(
         backend=backend,
@@ -731,4 +750,5 @@ def review_confirm(
         before=before,
         outcome=outcome,
         managed=managed,
+        tolerated=tolerated,
     )

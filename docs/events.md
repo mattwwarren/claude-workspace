@@ -1085,6 +1085,15 @@ open enum; consumers MUST tolerate unknown values. Known values:
   #3744 (same extra keys, no `need`). No longer emitted; readers map it to
   `binding_unreachable` through `cw.stage_preflight.canonical_reason` until
   the alias-removal release.
+- "review_capability_unmet" — dispatch refused to claim a PENDING REVIEW row
+  whose lane runner does not declare every runtime capability the client
+  `review.engine.requires_runtime_capabilities` names (#3790). No session ran:
+  `breadcrumbs` is empty. Extra keys beside the canonical nine: `backend`,
+  `required_capabilities`, `declared_capabilities`, `missing_capabilities`,
+  `compatible_lanes` and `details`, which names the missing slugs, the lane, the
+  config fix, and the release `cw dev-queue requeue`; to re-lane it names pausing the
+  incompatible lane, `requeue`, `move --to`, then resuming the lane (`move` needs
+  PENDING, and a tick may re-park an unpaused lane's row).
 - `"review_approval_gate"` — dispatch refused to claim a PENDING FINALIZE row
   whose tier is `large` on the row because its review approval is missing,
   stale or unreadable for the branch head (#2773; the predicate finalize
