@@ -53,7 +53,7 @@ from cw.dispatch_state_ticket_state import (
 )
 from cw.gh import fetch_issue_state
 from cw.models import DispatchSkipReason, QueueItemStatus, Stage
-from cw.tracker import TrackerClass, tracker_kind
+from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
@@ -238,9 +238,9 @@ def resolve_closed_ticket_hits(
     Runs lock-free (see the module docstring). *now*, *clock* and
     *budget_seconds* are injectable for tests; production callers omit them.
     """
-    # ADR-0013 / R2: only a GitHub tracker is read. OTHER (Linear, ...) and
-    # UNSET do nothing; there is no way to read their state without guessing.
-    if tracker_kind(client.workspace_path).tracker_class is not TrackerClass.GITHUB:
+    # ADR-0013 / R2: only a GitHub tracker is read; any other system or unset is
+    # never read, since there is no way to read their state without guessing.
+    if resolve_tracker(client.workspace_path) != TRACKER_GITHUB_ISSUES:
         return {}
     resolved_now = now if now is not None else datetime.now(UTC)
     cache = load_ticket_state_probes()

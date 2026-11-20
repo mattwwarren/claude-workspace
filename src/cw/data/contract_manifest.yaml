@@ -344,7 +344,7 @@ elements:
   intake.tracker-resolution:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: not-applicable, reason: "cw resolves the tracker itself (cw.tracker.tracker_kind) before the codex PLAN turn"}
+      codex: {disposition: not-applicable, reason: "cw resolves the tracker itself (cw.tracker.resolve_tracker) before the codex PLAN turn"}
       opencode: {disposition: implemented, ref: {kind: prompt, stage: plan, needle: tracker_tool_unavailable}, note: "cw resolves the tracker and threads it into the prompt (S3)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   intake.sentinel-emission-discipline:

@@ -70,6 +70,7 @@ from cw.config import clients_file, load_clients
 from cw.exceptions import CwError
 from cw.gh import run_issue_view, run_pr_list
 from cw.pr_hydrate import _resolve_repo_slug as _cw_resolve_repo_slug
+from cw.tracker import TRACKER_GITHUB_ISSUES, TRACKER_LINEAR
 from cw.tracker import resolve_tracker as _cw_resolve_tracker
 from cw.worktree import _git_dir
 
@@ -118,9 +119,7 @@ _BACKEND_CORE_CHECKS = frozenset(
 )
 
 # Tracker resolution: honor .claude/project-config.yaml rather than assuming gh.
-_RECOGNIZED_TRACKERS = ("github-issues", "linear")
-_DEFAULT_TRACKER = "linear"  # legacy default per auto-dev-intake.md
-_GITHUB_TRACKER = "github-issues"
+_DEFAULT_TRACKER = TRACKER_LINEAR  # legacy default per auto-dev-intake.md
 _AUTO_DEV_BRANCH_PREFIX = "auto-dev/"
 
 _BACKEND_CHECK = "cw_backend_healthy"
@@ -158,7 +157,11 @@ def _resolve_tracker(repo_root: Path) -> str:
     when the file is absent or the value is missing/unrecognized.
     """
     system = _cw_resolve_tracker(repo_root)
-    return system if system in _RECOGNIZED_TRACKERS else _DEFAULT_TRACKER
+    return (
+        system
+        if system in (TRACKER_GITHUB_ISSUES, TRACKER_LINEAR)
+        else _DEFAULT_TRACKER
+    )
 
 
 def _resolve_repo_root() -> Path:
@@ -328,7 +331,7 @@ def _check_cw_doctor() -> tuple[PreflightCheck, PreflightCheck]:
 
 
 def _check_ticket_open(ticket: str, repo: str, tracker: str) -> PreflightCheck:
-    if tracker != _GITHUB_TRACKER:
+    if tracker != TRACKER_GITHUB_ISSUES:
         # The gh-issue existence probe assumes a GitHub issue number; a Linear
         # id (GEN-403) would make `gh issue view` fail. Ticket existence on a
         # non-github tracker needs that tracker's MCP, unreachable from here —
@@ -390,7 +393,7 @@ def _open_pr_query(ticket: str, tracker: str) -> _OpenPrQuery:
     ``--state open`` (``--head`` alone would list closed and merged PRs too).
     The tracker decision lives here once; callers forward all three values.
     """
-    if tracker == _GITHUB_TRACKER:
+    if tracker == TRACKER_GITHUB_ISSUES:
         return _OpenPrQuery(
             search=f"#{ticket} in:title,body is:pr is:open", head=None, state=None
         )
@@ -426,7 +429,7 @@ def _check_no_open_pr(ticket: str, repo: str, tracker: str) -> PreflightCheck:
         return _check(
             _PR_CHECK, passed=False, detail=f"gh output not valid JSON: {exc}"
         )
-    if tracker == _GITHUB_TRACKER:
+    if tracker == TRACKER_GITHUB_ISSUES:
         # gh's free-text search is fuzzy — filter to PRs whose title actually
         # references the ticket (avoids false-positives from unrelated PRs that
         # mention the number in passing).
