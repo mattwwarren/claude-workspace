@@ -300,7 +300,8 @@ def register_watched_pr(watched: WatchedPr) -> bool:
     """Insert a WatchedPr into the store's watched_prs list, atomically.
 
     Returns True if inserted, False if an ``active`` watched PR with the same
-    ``(repo, pr_number)`` already exists (idempotency dedup, RFC 0011 S2 R7 —
+    ``(repo, pr_number)`` already exists (idempotency dedup, RFC 0011 S2 R7;
+    the slug compares case-insensitively since #3634 —
     mirrors ``add_ticket``'s ``with _lock(): load -> scan -> append/return
     False -> save`` shape). The guard is scoped to ``status == "active"`` so a
     future ``dismissed`` transition can re-open registration (adopted #5).
@@ -309,7 +310,7 @@ def register_watched_pr(watched: WatchedPr) -> bool:
         store = load_dev_queue()
         for existing in store.watched_prs:
             if (
-                existing.repo == watched.repo
+                existing.repo.lower() == watched.repo.lower()
                 and existing.pr_number == watched.pr_number
                 and existing.status == "active"
             ):
@@ -359,7 +360,7 @@ def register_or_adopt_watched_pr(
         store = load_dev_queue()
         for existing in store.watched_prs:
             if not (
-                existing.repo == watched.repo
+                existing.repo.lower() == watched.repo.lower()
                 and existing.pr_number == watched.pr_number
                 and existing.status == "active"
             ):
@@ -386,6 +387,7 @@ def register_or_adopt_watched_pr(
                 return "collision"
             if existing.client is None:
                 existing.client = watched.client
+                existing.cross_repo = watched.cross_repo
                 save_dev_queue(store)
                 return "adopted"
             return "already_active"

@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
-from cw._predicates import is_positive_real_int
 from cw.models.enums import (
     DEPENDENCY_HOLD_DISPOSITION,
     OCCUPIED_LANE_STATUSES,
@@ -82,9 +81,13 @@ def occupies_lane_slot(
     if task.status == QueueItemStatus.BLOCKED_ON_USER:
         if task.disposition == ReapReason.TERMINAL_SIBLING.value:
             return False
-        # GitHub #2321 — a dependency hold with a PR id frees its slot.
-        if task.disposition == DEPENDENCY_HOLD_DISPOSITION and is_positive_real_int(
-            task.blocked_on_pr
+        # GitHub #2321 — a dependency hold with a PR id frees its slot: it
+        # waits on a merge the serve tick observes. A hold with no id keeps
+        # its slot, because no release trigger would ever free it. The id is a
+        # typed PrRef (GitHub #3634), validated positive at construction.
+        if (
+            task.disposition == DEPENDENCY_HOLD_DISPOSITION
+            and task.blocked_on_pr is not None
         ):
             return False
         return not _parked_worker_settled(task, session_statuses)

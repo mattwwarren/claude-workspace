@@ -195,10 +195,14 @@ a sentinel carries one — and they never share values, so always say which.
   `impl_comments_unreadable_after_regress`), and no-worker spawn failures that
   are a raw `OSError` or a missing `claude` binary (`ClaudeBinaryNotFoundError`).
   (#2321: a `blocked` result with that dependency reason may carry
-  `blocker.depends_on_pr`, a positive same-repo PR number. With the id the row
-  parks as `dependency_hold`, frees its lane slot, and the serve tick releases
-  it when that PR merges. Without it the park has no release trigger and
-  frees its slot once its worker is settled, #3774.)
+  `blocker.depends_on_pr`, a positive same-repo PR number, or since #3634
+  `blocker.depends_on_pr_ref`, an `owner/repo#N` ref that arms a release only
+  for the client's own repo. With the id the row parks as `dependency_hold`,
+  frees its lane slot, and the serve tick releases it when that PR merges.
+  Without it the park has no release trigger and frees its slot once its
+  worker is settled (#3774); hold it with
+  `cw dev-queue hold <T> --until-pr-merged <N | owner/repo#N>` or
+  `--until-ticket-merged <T2>`.)
   `plan_pending_approval` still charges (`auto_adopt_clean_plan` can re-claim
   it without a human), and SSH/adapter/CLI-flag failures that surface as a
   non-zero `claude --bg` exit still charge.

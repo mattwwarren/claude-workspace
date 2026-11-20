@@ -16,6 +16,7 @@ operator-resolution ledgers the resolve and metadata tests share (#2727).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -289,6 +290,13 @@ def invoke_dev_queue(*args: str) -> Result:
 def stdout_lines(result: Result) -> list[str]:
     """*result*'s stdout, split into lines."""
     return result.stdout.splitlines()
+
+
+def gh_pr_view_json(repo: str, number: int, state: str = "OPEN") -> str:
+    """The ``gh pr view --json state,url`` reply the hold verb requests (#3634)."""
+    return json.dumps(
+        {"state": state, "url": f"https://github.com/{repo}/pull/{number}"}
+    )
 
 
 def queue_row(ticket_id: str = ACME_TICKET) -> TicketTask:

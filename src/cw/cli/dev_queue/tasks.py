@@ -37,8 +37,17 @@ from ._group import dev_queue
 
 
 def _task_to_dict(task: TicketTask) -> dict[str, object]:
-    """Full TicketTask field set for `tasks --json` (GitHub #1618)."""
-    return task.model_dump(mode="json")
+    """Full TicketTask field set for `tasks --json` (GitHub #1618).
+
+    ``blocked_on_pr`` is the int PR number and ``blocked_on_repo`` the
+    ``owner/repo`` slug of a cross-repo ref (null for same-repo), mirroring
+    ``TicketView`` (#3634).
+    """
+    data = task.model_dump(mode="json")
+    ref = task.blocked_on_pr
+    data["blocked_on_pr"] = None if ref is None else ref.number
+    data["blocked_on_repo"] = None if ref is None else ref.repo
+    return data
 
 
 def _count_needs_attn(tasks: list[TicketTask]) -> int:
@@ -178,7 +187,7 @@ def _print_tasks_human(
         "STALE_GATE",
         "NEXT",
     ]
-    col_widths = [12, 16, 16, 12, 8, 12, 12, 12, 20, 10, 20, 20, 10, 18, 10, 10, 44]
+    col_widths = [12, 16, 16, 12, 8, 12, 12, 12, 20, 10, 20, 20, 10, 18, 24, 10, 44]
     rows: list[list[str]] = []
     for t in tasks:
         attention = _attention_cell(t, sessions_by_id)
@@ -198,7 +207,7 @@ def _print_tasks_human(
             _pr_cell(t.pr_url)[:10],
             attention[:18],
             # GitHub #2321: the PR a dependency hold waits on.
-            ("—" if t.blocked_on_pr is None else f"#{t.blocked_on_pr}")[:10],
+            ("—" if t.blocked_on_pr is None else t.blocked_on_pr.label())[:24],
             ("yes" if t.stale_gate_detected_at else "—")[:10],
             # Never truncated: the column fits the longest first command.
             _next_cell(t, sessions_by_id, sources),

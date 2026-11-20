@@ -43,6 +43,7 @@ from cw.models import (
     Stage,
     TicketTask,
 )
+from cw.models.pr_ref import PrRef
 from cw.opencode_runner import (
     OPENCODE_LOG_RELATIVE_PATH,
     OPENCODE_NO_OUTPUT,
@@ -88,6 +89,8 @@ from tests._shared.session_seeding import (
     _fail_audit_append,
     _make_daemon_session,
 )
+
+_PARK_REF_2468 = PrRef(number=2468)
 
 
 def test_local_harvest_dead_process_completes_and_advances(
@@ -1664,7 +1667,7 @@ def test_local_harvest_opencode_finalize_keeps_final_blocked_sentinel(
     task = next(t for t in load_dev_queue().tasks if t.ticket_id == "T-OC-F")
     assert task.status == QueueItemStatus.BLOCKED_ON_USER
     assert task.disposition == "merge_gate_blocked"
-    assert task.blocked_on_pr == 2468
+    assert task.blocked_on_pr == _PARK_REF_2468
     session = next(s for s in load_state().sessions if s.id == "T-OC-F")
     assert session.status == SessionStatus.COMPLETED
     assert session.last_result is not None
@@ -2347,7 +2350,7 @@ def test_legacy_handle_only_opencode_log_harvests_via_opencode_not_git(
     row = _row("T-LEG-OC")
     assert row.status == QueueItemStatus.BLOCKED_ON_USER
     assert row.disposition == "merge_gate_blocked"
-    assert row.blocked_on_pr == 2468
+    assert row.blocked_on_pr == _PARK_REF_2468
     assert _session("T-LEG-OC").status == SessionStatus.COMPLETED
     assert _stage_mismatch_events("T-LEG-OC") == []
     pages = _attention_events("test-leg-oc", "T-LEG-OC")

@@ -9,6 +9,7 @@ import pytest
 
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.models import DevQueueStore, PrState, QueueItemStatus, TicketTask, WatchedPr
+from cw.models.pr_ref import PrRef
 from cw.pr_hydrate.transitions import _is_watched_candidate
 from cw.pr_hydrate.watched import (
     WATCHED_HYDRATION_CAP_PER_PASS,
@@ -28,29 +29,35 @@ def _watch(
     status: Literal["active", "dismissed"] = "active",
     state: str | None = None,
     hydrated_at: datetime | None = None,
+    repo: str = "acme/widgets",
+    cross_repo: bool = False,
 ) -> WatchedPr:
     pr_state = None
     if state is not None:
         pr_state = PrState(state=state, hydrated_at=hydrated_at or _T0)
     return WatchedPr(
-        pr_url=f"https://github.com/acme/widgets/pull/{pr_number}",
-        repo="acme/widgets",
+        pr_url=f"https://github.com/{repo}/pull/{pr_number}",
+        repo=repo,
         pr_number=pr_number,
         client=client,
         source="stale_dispatch_park",
         status=status,
+        cross_repo=cross_repo,
         pr_state=pr_state,
     )
 
 
-def _referencing_row(pr_number: int = 42, *, client: str = "client-a") -> TicketTask:
+def _referencing_row(
+    pr_number: int | PrRef = 42, *, client: str = "client-a"
+) -> TicketTask:
+    ref = PrRef(number=pr_number) if isinstance(pr_number, int) else pr_number
     return _make_ticket_task(
-        ticket_id=f"REF-{pr_number}-{client}",
+        ticket_id=f"REF-{ref.number}-{client}",
         client=client,
         status=QueueItemStatus.BLOCKED_ON_USER,
         disposition="merge_gate_blocked",
         blocked_reason="prior_pipeline_pr_open",
-        blocked_on_pr=pr_number,
+        blocked_on_pr=ref,
         session_id=None,
     )
 
@@ -184,6 +191,52 @@ class TestRetireTerminalWatchedPrs:
         assert first == [watch]
         assert second == []
         assert watch.status == "dismissed"
+
+
+class TestRetireCrossRepoRefs:
+    """#3634: references are matched on the typed ref's evidence key."""
+
+    def test_watch_referenced_by_explicit_ref_is_kept(self) -> None:
+        watch = _watch(42, state="MERGED", repo="o/r", cross_repo=True)
+        ref = PrRef(repo="O/R", number=42)
+        store = DevQueueStore(tasks=[_referencing_row(ref)], watched_prs=[watch])
+
+        assert retire_terminal_watched_prs(store) == []
+        assert watch.status == "active"
+
+    def test_cross_repo_watch_is_not_referenced_by_same_repo_ref(self) -> None:
+        watch = _watch(42, state="MERGED", repo="o/r", cross_repo=True)
+        store = DevQueueStore(tasks=[_referencing_row(42)], watched_prs=[watch])
+
+        assert retire_terminal_watched_prs(store) == [watch]
+
+    def test_own_repo_watch_is_not_referenced_by_other_repo_ref(self) -> None:
+        watch = _watch(42, state="MERGED")
+        ref = PrRef(repo="o/r", number=42)
+        store = DevQueueStore(tasks=[_referencing_row(ref)], watched_prs=[watch])
+
+        assert retire_terminal_watched_prs(store) == [watch]
+
+    def test_same_number_in_another_repo_does_not_keep_a_watch(self) -> None:
+        watch = _watch(42, state="MERGED", repo="x/y", cross_repo=True)
+        ref = PrRef(repo="o/r", number=42)
+        store = DevQueueStore(tasks=[_referencing_row(ref)], watched_prs=[watch])
+
+        assert retire_terminal_watched_prs(store) == [watch]
+
+    def test_dismissed_cross_repo_watch_does_not_collide(self) -> None:
+        from cw.dev_queue.crud import register_or_adopt_watched_pr
+
+        dismissed = _watch(
+            42, state="MERGED", status="dismissed", repo="o/r", cross_repo=True
+        )
+        save_dev_queue(DevQueueStore(watched_prs=[dismissed]))
+
+        outcome = register_or_adopt_watched_pr(
+            _watch(42, client="client-b", repo="o/r", cross_repo=True)
+        )
+
+        assert outcome == "inserted"
 
 
 class TestSweepTerminalWatchedPrs:

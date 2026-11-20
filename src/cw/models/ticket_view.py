@@ -214,6 +214,14 @@ class TicketView(BaseModel):
     blocked_on_pr: int | None = Field(
         default=None, description="PR this held row waits on; null when none."
     )
+    # GitHub #3634: additive, no TICKET_VIEW_SCHEMA_VERSION bump.
+    blocked_on_repo: str | None = Field(
+        default=None,
+        description=(
+            "owner/repo of a cross-repo blocked_on_pr; null for a same-repo"
+            " reference or when none."
+        ),
+    )
     # #3772: additive, no TICKET_VIEW_SCHEMA_VERSION bump. Set only on a row
     # parked plan_scope_drift at IMPL; null otherwise.
     scope_decision: ScopeDecisionView | None = Field(
