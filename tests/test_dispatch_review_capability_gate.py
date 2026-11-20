@@ -9,8 +9,7 @@ the stage stays REVIEW, nothing is claimed. Releasing it is a config fix plus
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.dev_queue.dispositions import (
@@ -38,6 +37,14 @@ from cw.models import (
 )
 from cw.models.client import ReviewConfig, ReviewEngineConfig
 from cw.models.orchestrator_config.lane import LaneConfig
+from tests._clients_yaml import write_clients_yaml
+from tests._shared.git_repos import git_in
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+
+    from cw.native_daemon import FakeNativeDaemonClient
 
 _CLIENT = "rc-client"
 _TICKET = "RC-1"
@@ -49,6 +56,7 @@ def _client(
     required: list[str],
     lanes: dict[str, list[str] | None],
     client_review: list[str] | None = None,
+    workspace: Path | None = None,
 ) -> ClientConfig:
     """A client whose lanes each declare (or omit) REVIEW runtime capabilities.
 
@@ -70,7 +78,7 @@ def _client(
     )
     return ClientConfig(
         name=_CLIENT,
-        workspace_path=tmp_path,
+        workspace_path=workspace or tmp_path,
         default_branch="main",
         worktree_base=tmp_path / "worktrees",
         review=ReviewConfig(
@@ -293,3 +301,77 @@ def test_disposition_is_not_exported_from_the_package() -> None:
     from cw import dev_queue
 
     assert "REVIEW_CAPABILITY_UNMET_DISPOSITION" not in dev_queue.__all__
+
+
+# -- dispatch_tick acceptance ----------------------------------------------
+
+_BRANCH = "dev/rc-1"
+_REVIEW_CAPS = ["jvm"]
+
+
+def _tick_config() -> OrchestratorConfig:
+    return OrchestratorConfig(
+        tick_interval_seconds=30, per_client_max_parallel={_CLIENT: 4}
+    )
+
+
+def _write_lanes(
+    tmp_path: Path, workspace: Path, lanes: dict[str, list[str] | None]
+) -> None:
+    """Write ``clients.yaml`` for a client whose engine requires ``jvm``."""
+    write_clients_yaml(
+        _client(tmp_path, required=_REVIEW_CAPS, lanes=lanes, workspace=workspace)
+    )
+
+
+def _tick(daemon: FakeNativeDaemonClient) -> Any:
+    from cw.dispatch import dispatch_tick
+
+    return dispatch_tick(config=_tick_config(), native_daemon=daemon)
+
+
+def _park_events() -> list[Any]:
+    events = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+    return [
+        e
+        for e in events
+        if e.payload.get("paused_status") == REVIEW_CAPABILITY_UNMET_DISPOSITION
+    ]
+
+
+def test_dispatch_tick_never_spawns_for_a_review_row_on_a_lacking_runner(
+    tmp_path: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    mock_native_daemon: FakeNativeDaemonClient,
+) -> None:
+    repo, _origin = make_git_repo_with_origin("rc-park", branch=_BRANCH)
+    git_in(repo, "checkout", "main")
+    _write_lanes(tmp_path, repo, {"alpha": []})
+    _seed(_task())
+    before = _stored()
+
+    result = _tick(mock_native_daemon)
+
+    assert result.spawned == 0
+    assert mock_native_daemon.spawn_calls == []
+    parked = _stored()
+    assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+    assert parked.disposition == REVIEW_CAPABILITY_UNMET_DISPOSITION
+    assert parked.stage == Stage.REVIEW
+    assert parked.attempts == before.attempts
+    assert parked.unproductive_attempts == before.unproductive_attempts
+    assert parked.regress_attempts == before.regress_attempts
+    assert parked.review_attestation is None
+    # Nothing was claimed: no worktree, no ledger, no other-stage row.
+    assert not (tmp_path / "worktrees").exists()
+    assert not (repo / ".cw" / "review-convergence.json").exists()
+    assert [t.stage for t in load_dev_queue().tasks] == [Stage.REVIEW]
+    assert len(_park_events()) == 1
+
+    # A second tick neither re-parks nor spawns.
+    again = _tick(mock_native_daemon)
+
+    assert again.spawned == 0
+    assert mock_native_daemon.spawn_calls == []
+    assert len(_park_events()) == 1
+    assert _stored().status == QueueItemStatus.BLOCKED_ON_USER
