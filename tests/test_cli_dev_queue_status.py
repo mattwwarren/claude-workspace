@@ -35,6 +35,7 @@ from cw.config import (
     _save_concurrency_overrides,
     clients_file,
     orchestrator_config_file,
+    state_file,
 )
 from cw.dev_queue import add_ticket, list_tickets, save_dev_queue
 from cw.models import (
@@ -44,6 +45,7 @@ from cw.models import (
     LaneConcurrencyOverride,
     LaneConfig,
     QueueItemStatus,
+    SessionStatus,
     TicketTask,
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
@@ -54,6 +56,7 @@ from tests._dispatch_tick_helpers import (
     skip_tick_events,
 )
 from tests._shared.session_seeding import _make_ticket_task, _patch_ticks
+from tests._ticket_view_helpers import bound_session_for, seed_queue
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1225,3 +1228,87 @@ class TestUsageLimitWindows:
 
         assert "Dev queue is empty." in output
         assert "Usage-limit windows:" in output
+
+
+def _drift_park(ticket_id: str, session_id: str | None) -> TicketTask:
+    """A BLOCKED_ON_USER ``plan_scope_drift`` row in acme's ``fast`` lane."""
+    return _make_ticket_task(
+        ticket_id=ticket_id,
+        client="acme",
+        lane="fast",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        blocked_reason="plan_scope_drift",
+        session_id=session_id,
+    )
+
+
+class TestParkedLaneSlot:
+    """Lane breakdown ``parked=`` token and line (GitHub #3774, R1)."""
+
+    def test_settled_park_prints_parked_token_and_line(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        park = _drift_park("ACM-1", "sess-done")
+        seed_queue([park], [bound_session_for(park, status=SessionStatus.COMPLETED)])
+        _patch_ticks(monkeypatch, {"acme": {"tick_at": _NOW}})
+
+        lines = _status().output.splitlines()
+
+        assert (
+            "    lane fast: pending=0 running=0 blocked=1 signoff=0 parked=1" in lines
+        )
+        assert "      parked (slot free): ACM-1 (plan_scope_drift)" in lines
+        assert not any("lane occupants" in ln or "lane full" in ln for ln in lines)
+
+    def test_live_worker_park_is_an_occupant_not_parked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        park = _drift_park("ACM-1", "sess-live")
+        seed_queue([park], [bound_session_for(park)])
+        _patch_ticks(monkeypatch, {"acme": {"tick_at": _NOW}})
+
+        out = _status().output
+
+        assert "    lane fast: pending=0 running=0 blocked=1 signoff=0\n" in out
+        assert "parked" not in out
+        assert "lane occupants: ACM-1 (blocked_on_user)" in out
+
+    def test_parked_reason_falls_back_to_disposition_then_dash(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        by_disposition = _make_ticket_task(
+            ticket_id="ACM-1",
+            client="acme",
+            lane="fast",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            disposition="attempt_cap_blocked",
+        )
+        bare = _make_ticket_task(
+            ticket_id="ACM-2",
+            client="acme",
+            lane="fast",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+        )
+        seed_queue([by_disposition, bare])
+        _patch_ticks(monkeypatch, {"acme": {"tick_at": _NOW}})
+
+        lines = _status().output.splitlines()
+
+        assert any(ln.endswith(" blocked=2 signoff=0 parked=2") for ln in lines)
+        assert (
+            "      parked (slot free): ACM-1 (attempt_cap_blocked), ACM-2 (-)" in lines
+        )
+
+    def test_unreadable_state_falls_back_to_parks_counting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No session evidence: every park holds its slot and status still runs."""
+        seed_queue([_drift_park("ACM-1", None)])
+        state_file().write_text("{not json")
+        _patch_ticks(monkeypatch, {"acme": {"tick_at": _NOW}})
+
+        out = _status().output
+
+        assert "    lane fast: pending=0 running=0 blocked=1 signoff=0\n" in out
+        assert "parked" not in out
+        assert "lane occupants: ACM-1 (blocked_on_user)" in out

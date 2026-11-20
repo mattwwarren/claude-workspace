@@ -2530,6 +2530,170 @@ class TestOccupiesLaneSlot:
         assert occupies_lane_slot(task) is False
 
 
+def _parked(**overrides: object) -> TicketTask:
+    """A BLOCKED_ON_USER ``plan_scope_drift`` row bound to ``sess-1``."""
+    fields: dict[str, object] = {
+        "ticket_id": "GEN-1",
+        "client": "acme",
+        "status": QueueItemStatus.BLOCKED_ON_USER,
+        "blocked_reason": "plan_scope_drift",
+        "session_id": "sess-1",
+    }
+    fields.update(overrides)
+    return TicketTask.model_validate(fields)
+
+
+class TestSettledParkedWorker:
+    """The settled-worker carve-out of occupies_lane_slot (GitHub #3774, R4).
+
+    A BLOCKED_ON_USER row frees its slot only when every session it names is
+    terminal (or it names none) and it carries no unsettled claim.
+    """
+
+    @pytest.mark.parametrize(
+        "status", [SessionStatus.COMPLETED, SessionStatus.TIMED_OUT]
+    )
+    def test_terminal_session_frees_the_slot(self, status: SessionStatus) -> None:
+        from cw.models import occupies_lane_slot
+
+        task = _parked()
+        assert occupies_lane_slot(task, session_statuses={"sess-1": status}) is False
+
+    @pytest.mark.parametrize(
+        "status",
+        [SessionStatus.ACTIVE, SessionStatus.IDLE, SessionStatus.BACKGROUNDED],
+    )
+    def test_live_session_holds_the_slot(self, status: SessionStatus) -> None:
+        from cw.models import occupies_lane_slot
+
+        task = _parked()
+        assert occupies_lane_slot(task, session_statuses={"sess-1": status}) is True
+
+    def test_session_absent_from_state_holds_the_slot(self) -> None:
+        """A lost record cannot prove the worker is settled (fail closed)."""
+        from cw.models import occupies_lane_slot
+
+        task = _parked()
+        assert occupies_lane_slot(task, session_statuses={}) is True
+
+    def test_no_session_and_no_claim_frees_the_slot(self) -> None:
+        from cw.models import occupies_lane_slot
+
+        task = _parked(session_id=None)
+        assert occupies_lane_slot(task, session_statuses={}) is False
+
+    def test_none_map_holds_the_slot(self) -> None:
+        """``None`` is no evidence: the legacy fail-closed behaviour."""
+        from cw.models import occupies_lane_slot
+
+        task = _parked(session_id=None)
+        assert occupies_lane_slot(task, session_statuses=None) is True
+        assert occupies_lane_slot(task) is True
+
+    def test_live_codex_orphan_session_holds_the_slot(self) -> None:
+        from cw.models import occupies_lane_slot
+
+        task = _parked(session_id=None, codex_orphan_session_id="orphan-1")
+        statuses = {"orphan-1": SessionStatus.ACTIVE}
+        assert occupies_lane_slot(task, session_statuses=statuses) is True
+
+    def test_terminal_codex_orphan_session_frees_the_slot(self) -> None:
+        from cw.models import occupies_lane_slot
+
+        task = _parked(codex_orphan_session_id="orphan-1")
+        statuses = {
+            "sess-1": SessionStatus.COMPLETED,
+            "orphan-1": SessionStatus.COMPLETED,
+        }
+        assert occupies_lane_slot(task, session_statuses=statuses) is False
+
+    def test_live_fix_dispatch_session_holds_the_slot(self) -> None:
+        from cw.models import occupies_lane_slot
+
+        task = _parked(fix_dispatch_session_id="fix-1")
+        statuses = {
+            "sess-1": SessionStatus.COMPLETED,
+            "fix-1": SessionStatus.ACTIVE,
+        }
+        assert occupies_lane_slot(task, session_statuses=statuses) is True
+
+    def test_fix_dispatch_launched_worker_holds_the_slot(self) -> None:
+        """An unsettled claim holds even when every named session is terminal."""
+        from cw.models import occupies_lane_slot
+
+        task = _parked(
+            fix_dispatch_launched_worker=LaunchedFixWorker(
+                surface_ref="fix-ref", launched_at=datetime(2026, 11, 19, tzinfo=UTC)
+            )
+        )
+        statuses = {"sess-1": SessionStatus.COMPLETED}
+        assert occupies_lane_slot(task, session_statuses=statuses) is True
+
+    def test_launch_marker_holds_the_slot(self) -> None:
+        from cw.models import LaunchMarker, occupies_lane_slot
+
+        task = _parked(launch_marker=LaunchMarker(pid=4242, start_time_ns=1))
+        statuses = {"sess-1": SessionStatus.COMPLETED}
+        assert occupies_lane_slot(task, session_statuses=statuses) is True
+
+    def test_hook_context_conflict_session_is_not_a_claim(self) -> None:
+        """D4 pin: the conflict pointer names ANOTHER session, not this row's worker."""
+        from cw.models import occupies_lane_slot
+
+        task = _parked(hook_context_conflict_session_id="other-1")
+        statuses = {
+            "sess-1": SessionStatus.COMPLETED,
+            "other-1": SessionStatus.ACTIVE,
+        }
+        assert occupies_lane_slot(task, session_statuses=statuses) is False
+
+    def test_terminal_sibling_freed_regardless_of_the_map(self) -> None:
+        from cw.models import occupies_lane_slot
+
+        task = _parked(disposition=ReapReason.TERMINAL_SIBLING.value)
+        statuses = {"sess-1": SessionStatus.ACTIVE}
+        assert occupies_lane_slot(task, session_statuses=statuses) is False
+
+    def test_id_bearing_dependency_hold_freed_regardless_of_the_map(self) -> None:
+        from cw.models import occupies_lane_slot
+        from cw.models.enums import DEPENDENCY_HOLD_DISPOSITION
+
+        task = _parked(disposition=DEPENDENCY_HOLD_DISPOSITION, blocked_on_pr=42)
+        statuses = {"sess-1": SessionStatus.ACTIVE}
+        assert occupies_lane_slot(task, session_statuses=statuses) is False
+
+    @pytest.mark.parametrize(
+        "status",
+        [QueueItemStatus.RUNNING, QueueItemStatus.AWAITING_OPERATOR_SIGNOFF],
+    )
+    def test_non_parked_occupied_status_holds_with_terminal_session(
+        self, status: QueueItemStatus
+    ) -> None:
+        from cw.models import occupies_lane_slot
+
+        task = _parked(status=status)
+        statuses = {"sess-1": SessionStatus.COMPLETED}
+        assert occupies_lane_slot(task, session_statuses=statuses) is True
+
+    def test_session_statuses_by_id_maps_id_to_status(self) -> None:
+        from cw.models.session import session_statuses_by_id
+
+        sessions = [
+            _make_daemon_session(id="a", status=SessionStatus.ACTIVE),
+            _make_daemon_session(id="b", status=SessionStatus.COMPLETED),
+        ]
+        assert session_statuses_by_id(sessions) == {
+            "a": SessionStatus.ACTIVE,
+            "b": SessionStatus.COMPLETED,
+        }
+        assert session_statuses_by_id([]) == {}
+
+    def test_session_statuses_by_id_is_not_re_exported(self) -> None:
+        import cw.models
+
+        assert "session_statuses_by_id" not in cw.models.__all__
+
+
 class TestCodexFixLoopEnabledGate:
     """Lane-scoped codex_fix_loop_enabled with client/global fallback (#1553)."""
 

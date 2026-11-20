@@ -56,6 +56,7 @@ if TYPE_CHECKING:
         DevQueueStore,
         LaneConfig,
         OrchestratorConfig,
+        SessionStatus,
     )
     from cw.native_daemon import NativeDaemonClient
     from cw.orchestrate import TickSummary
@@ -350,8 +351,8 @@ class _LaneSlotBreakdown(NamedTuple):
     """Per-lane occupancy split feeding the grant math and the tick payload.
 
     ``blocked``/``signoff`` are the BLOCKED_ON_USER and AWAITING_OPERATOR_SIGNOFF
-    subsets of the lane's occupants (both occupy slots per ADR-0006, but must be
-    reported separately so an operator can see *why* claimed=0 when pending>0 --
+    subsets of the lane's occupants (slot-occupying per occupies_lane_slot, but
+    reported apart so an operator can see *why* claimed=0 when pending>0 --
     #588, #990); ``pending`` is the claimable backlog.
     """
 
@@ -644,6 +645,7 @@ def _dispatch_client_lanes(
     effective_lanes: list[LaneConfig],
     queue_snapshot: DevQueueStore,
     *,
+    session_statuses: Mapping[str, SessionStatus],
     running_count: int,
     client_ceiling: int,
     cap: int,
@@ -692,7 +694,7 @@ def _dispatch_client_lanes(
     # function already at the PLR0912/PLR0915 ceiling.
     limit_outcome: _SpawnOutcome | None = None
     # True when any lane has pending>0 but grant<=0 due to occupied slots
-    # (RUNNING + BLOCKED_ON_USER >= max_parallel). Distinguishes the
+    # (occupying RUNNING + BLOCKED_ON_USER >= max_parallel). Distinguishes the
     # previously misleading skip_reason=no_pending case (#588).
     lane_cap_blocked = False
     # True when at least one PENDING task was skipped due to active
@@ -717,7 +719,9 @@ def _dispatch_client_lanes(
     # (#1243). Computed once here (all lanes), the same occupies_lane_slot()
     # join _lane_stats_for_client uses -- so blocked_in_lane/signoff_in_lane
     # below derive from it rather than re-scanning the queue.
-    occupants_by_lane = _lane_occupants_for_client(client, queue_snapshot)
+    occupants_by_lane = _lane_occupants_for_client(
+        client, queue_snapshot, session_statuses=session_statuses
+    )
     # Pre-claim screens (#1862 open-PR gate, #2077 worktree occupancy, #2442
     # tracker-MCP gate): resolved once here -- outside every lock and outside
     # the per-lane loop -- because each does I/O _claim_next_pending must
@@ -756,8 +760,8 @@ def _dispatch_client_lanes(
                 or lane_circuit_paused
             )
             continue
-        # running_in_lane = RUNNING + BLOCKED_ON_USER + AWAITING_OPERATOR_SIGNOFF
-        # (total occupied slots, occupies_lane_slot(), #990/#2100).
+        # running_in_lane = occupying RUNNING + BLOCKED_ON_USER + SIGNOFF rows
+        # (occupies_lane_slot() with the tick's session map, #990/#2100/#3774).
         running_in_lane = running_by_lane.get(lane_cfg.name, 0)
         breakdown = _lane_slot_breakdown(
             occupants_by_lane.get(lane_cfg.name, []),
@@ -771,7 +775,7 @@ def _dispatch_client_lanes(
             available_client_slots,
         )
         # Detect: pending work exists but the lane cap is full of occupied
-        # slots (RUNNING + BLOCKED_ON_USER >= max_parallel). Raises the
+        # slots (occupying rows >= max_parallel). Raises the
         # skip_reason to LANE_CAP_BLOCKED instead of the misleading NO_PENDING.
         if grant <= 0 and breakdown.pending > 0:
             lane_cap_blocked = True
@@ -924,7 +928,7 @@ def _resolve_dispatch_skip_reason(
        whole host is out of budget" from "this client's own cap is full"
     4. cap_full — running_count >= cap before loop entered
     5. lane_cap_blocked — pending>0 but every lane slot is occupied by
-       RUNNING or BLOCKED_ON_USER tasks; grant<=0 for all lanes
+       occupying (occupies_lane_slot) tasks; grant<=0 for all lanes
     6. spawn_error — exception broke the loop (regardless of client_spawned)
     7. lane_circuit_paused — a lane's circuit breaker has tripped and pending
        work is stranded behind it (see _resolve_low_precedence_skip_reason)

@@ -8,12 +8,16 @@ under ``from __future__ import annotations``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import TYPE_CHECKING
+
 from pydantic import BaseModel, Field
 
 from cw._predicates import is_positive_real_int
 from cw.models.enums import (
     DEPENDENCY_HOLD_DISPOSITION,
     OCCUPIED_LANE_STATUSES,
+    TERMINAL_SESSION_STATUSES,
     QueueItemStatus,
     ReapReason,
 )
@@ -21,38 +25,69 @@ from cw.models.events import WatchedPr
 from cw.models.tasks.schema import DEV_QUEUE_SCHEMA_VERSION
 from cw.models.tasks.ticket_task import TicketTask
 
+if TYPE_CHECKING:
+    from cw.models.enums import SessionStatus
 
-def occupies_lane_slot(task: TicketTask) -> bool:
+
+def _parked_worker_settled(
+    task: TicketTask, session_statuses: Mapping[str, SessionStatus] | None
+) -> bool:
+    """True iff a BLOCKED_ON_USER *task* has no live worker and no unsettled claim.
+
+    GitHub #3774 (R4). ``None`` is no session evidence, so the park counts.
+    An absent session id is unsettled (fail closed): a lost record cannot
+    prove the worker is gone. ``hook_context_conflict_session_id`` is not
+    consulted: it names another session's context, not this row's worker (D4).
+    """
+    if session_statuses is None:
+        return False
+    if task.fix_dispatch_launched_worker is not None or task.launch_marker is not None:
+        return False
+    for sid in (
+        task.session_id,
+        task.codex_orphan_session_id,
+        task.fix_dispatch_session_id,
+    ):
+        if sid is None:
+            continue
+        status = session_statuses.get(sid)
+        if status is None or status not in TERMINAL_SESSION_STATUSES:
+            return False
+    return True
+
+
+def occupies_lane_slot(
+    task: TicketTask,
+    *,
+    session_statuses: Mapping[str, SessionStatus] | None = None,
+) -> bool:
     """True iff *task* counts toward its lane's ``OCCUPIED_LANE_STATUSES`` cap.
 
-    GitHub #2100. Mirrors ``OCCUPIED_LANE_STATUSES`` membership with exactly
-    one carve-out: a BLOCKED_ON_USER row parked with
-    ``disposition == ReapReason.TERMINAL_SIBLING`` (stamped by
-    ``cw.reconcile.tasks.park_terminal_sibling_tasks``) is a duplicate row a
-    lock-contention race minted for a ticket whose real row already reached a
-    terminal status — not live or operator-parked work. Counting it toward
-    lane occupancy holds that lane slot forever behind a ticket that already
-    shipped, and ``cw doctor --reap`` cannot free it (there is nothing to
-    revert it *to* — see the dedicated wedge class in ``cw.doctor.wedge``).
+    Three carve-outs free a BLOCKED_ON_USER slot, and nowhere else:
 
-    Every dispatch consumer that gates on ``OCCUPIED_LANE_STATUSES`` for lane
-    capacity (``dispatch.tick``/``dispatch.claim``/``board``) must call this
-    instead of testing membership directly, so a terminal_sibling row is
-    excluded everywhere occupancy is computed, not just where it happens to
-    be visible first.
+    - ``terminal_sibling`` (GitHub #2100): a duplicate row whose ticket already
+      reached a terminal status.
+    - id-bearing ``dependency_hold`` (GitHub #2321): waits on a merge the serve
+      tick observes.
+    - settled-worker park (GitHub #3774, R4): the row has no live worker and no
+      unsettled claim. Settled means every named session is terminal, and
+      ``fix_dispatch_launched_worker`` and ``launch_marker`` are unset.
+
+    ``session_statuses`` maps session id to status for the consumer's scope.
+    Every production consumer must pass the tick's map. ``None`` means no
+    evidence: the park counts (fail closed, the legacy behaviour).
     """
     if task.status not in OCCUPIED_LANE_STATUSES:
         return False
     if task.status == QueueItemStatus.BLOCKED_ON_USER:
         if task.disposition == ReapReason.TERMINAL_SIBLING.value:
             return False
-        # GitHub #2321 — a dependency hold with a PR id frees its slot: it
-        # waits on a merge the serve tick observes. A hold with no id keeps
-        # its slot, because no release trigger would ever free it.
+        # GitHub #2321 — a dependency hold with a PR id frees its slot.
         if task.disposition == DEPENDENCY_HOLD_DISPOSITION and is_positive_real_int(
             task.blocked_on_pr
         ):
             return False
+        return not _parked_worker_settled(task, session_statuses)
     return True
 
 

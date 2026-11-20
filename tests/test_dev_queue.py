@@ -1143,22 +1143,21 @@ class TestDevQueueLaneBreakdownOccupants:
                 ],
             )
         )
-        add_ticket(
-            TicketTask(
-                ticket_id="FAST-1",
-                client="genhealth",
-                lane="fast",
-                status=QueueItemStatus.RUNNING,
-            )
+        # IMPL-1 binds a live (ACTIVE) worker, so it keeps its slot (#3774).
+        impl_park = TicketTask(
+            ticket_id="IMPL-1",
+            client="genhealth",
+            lane="impl",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            session_id="sess-impl-live",
         )
-        add_ticket(
-            TicketTask(
-                ticket_id="IMPL-1",
-                client="genhealth",
-                lane="impl",
-                status=QueueItemStatus.BLOCKED_ON_USER,
-            )
+        fast_run = TicketTask(
+            ticket_id="FAST-1",
+            client="genhealth",
+            lane="fast",
+            status=QueueItemStatus.RUNNING,
         )
+        seed_queue([fast_run, impl_park], [bound_session_for(impl_park)])
         _patch_tick_for(monkeypatch, "genhealth")
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "status"])
@@ -1180,14 +1179,15 @@ class TestDevQueueLaneBreakdownOccupants:
         write_clients_yaml(
             ClientSpec("genhealth", ws, lanes=[{"name": "impl", "max_parallel": 3}])
         )
-        add_ticket(
-            TicketTask(
-                ticket_id="IMPL-1",
-                client="genhealth",
-                lane="impl",
-                status=QueueItemStatus.BLOCKED_ON_USER,
-            )
+        # IMPL-1 binds a live (ACTIVE) worker, so it keeps its slot (#3774).
+        impl_park = TicketTask(
+            ticket_id="IMPL-1",
+            client="genhealth",
+            lane="impl",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            session_id="sess-impl-live",
         )
+        seed_queue([impl_park], [bound_session_for(impl_park)])
         _patch_tick_for(monkeypatch, "genhealth")
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "status"])

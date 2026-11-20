@@ -537,6 +537,17 @@ for scripting and field reads; it prints two distinct sections:
     it passes over one PENDING row for a ticket-specific reason; that event
     no longer replaces the client's line, so `pending=` and `skip=` stop
     flipping between two ticks.
+  - The indented `lane <name>: pending= running= blocked= signoff=` lines are
+    read from the live queue. `blocked=` is the raw `BLOCKED_ON_USER` count.
+    Since #3774 a parked row whose worker is settled (every session it names
+    is terminal, or it names none, and no fix worker or launch is in flight)
+    frees its lane slot, and the lane line gains `parked=N` plus a
+    `parked (slot free): <ticket> (<reason>)` line naming those rows. Both
+    appear only when N > 0. The reason is the row's `blocked_reason`, else its
+    disposition, else `-`. A park whose worker is live still occupies and is
+    listed under `lane occupants` / `lane full`. If the state file cannot be
+    read, every park counts as occupying. `--json` and the `dispatch.tick`
+    payload carry no `parked` key.
 - **"Pending tickets held by dispatch" block** (#2516) — printed after the
   footer, only when some PENDING row has per-ticket skips. One line per row,
   per client in table order, longest run first:
@@ -1188,7 +1199,9 @@ common wedge conditions:
   reported here: a loop that stopped ticking is the loop-liveness check's
   case.
 - `wedge/operator-gated-park` (#2739) — advisory only. A `BLOCKED_ON_USER` row
-  that holds a lane slot (`occupies_lane_slot`) while parked on a deliberate
+  that holds a lane slot (`occupies_lane_slot`: since #3774, only while its
+  worker is live or its claim unsettled; a settled park holds none and is not
+  reported, but stays in `cw dev-queue status`) while parked on a deliberate
   operator gate: disposition `finalize_gate_held`, `stale_dispatch_gate`,
   `attempt_cap_blocked`, the RFC 0016 adoption parks, `review_approval_gate`,
   `review_engine_modified`, `binding_unreachable`, `binding_unbound` or
@@ -1197,8 +1210,9 @@ common wedge conditions:
   backend's MCP config, then `cw dev-queue requeue`) or
   `gate_timeout` (#3372: see **Park: `gate_timeout`** below),
   `awaiting_ci_evidence` (#3618: see **Park: `awaiting_ci_evidence`** below),
-  `dependency_hold` (#2321: reported only when it has no `blocked_on_pr`, since
-  a hold with an id frees its slot; see **Dependency holds (#2321)**), or
+  `dependency_hold` (#2321: reported only when it has no `blocked_on_pr` and
+  still holds its slot, since a hold with an id frees its slot; see
+  **Dependency holds (#2321)**), or
   disposition `blocked` with a `codex_fix_*` `blocked_reason`. These rows look dead but wait on an operator, so
   `wedge/blocked-on-user-dead-session` skips them; this class is the visible
   counterpart, so a lane slot held by such a row is not left unexplained.
@@ -4435,14 +4449,20 @@ reason. Wait for the annotation to clear; only a tick line still reading
 - A tick line reading `skip=lane_circuit_paused [resumed since this tick]` is
   a stale snapshot: no lane of that client is paused any more, and the next
   tick will dispatch.
-- `BLOCKED_ON_USER` rows hold lane slots by design; a parked ticket can
-  starve its lane. Requeue or remove to free the slot. Two carve-outs, both in
+- `BLOCKED_ON_USER` rows hold lane slots only while a live worker or an
+  unsettled claim exists (#3774): a named session that is not terminal or is
+  missing from state, a launched fix worker, or an in-flight launch. A park
+  whose worker is settled frees its slot and shows as `parked=` in
+  `cw dev-queue status`; a park with a live worker can still starve its lane
+  until reconcile closes the session. Requeue or remove to release a park:
+  freeing the slot is not a release. Three carve-outs, all in
   `occupies_lane_slot` (`src/cw/models/tasks/store.py`): a `terminal_sibling`
-  row (#2100) and, since #2321, a `dependency_hold` row that carries a
-  `blocked_on_pr`. The second waits on a merge the serve tick observes, so it
-  does not starve the lane; see **Dependency holds (#2321)** below. A
-  dependency park with no id still holds its slot, because nothing would ever
-  release it.
+  row (#2100), since #2321 a `dependency_hold` row that carries a
+  `blocked_on_pr` (it waits on a merge the serve tick observes; see
+  **Dependency holds (#2321)** below), and since #3774 the settled-worker
+  park. A dependency park with no id now frees its slot once its worker is
+  settled. The client ceiling and host budget are session based and
+  unchanged.
 - A session wedged in `needs_salvage` with a park marker poisons every
   respawn of its ticket (claim → revert → attempts+1, plus per-tick
   `session.salvage_skipped` noise): `cw spawn close --confirmed-dead <sid>`
@@ -4588,7 +4608,8 @@ Two ways in:
 - **Worker:** a `blocked` sentinel with `blocker.reason: "dependency_unmerged"`
   and `blocker.depends_on_pr` set (positive same-repo integer) is routed to the
   same `dependency_hold` disposition. Without the id the park stays
-  `awaiting_operator` and keeps its slot, because nothing would release it. A
+  `awaiting_operator`; since #3774 it frees its slot once its worker is
+  settled (nothing releases it but an operator requeue). A
   worker park with an id emits `session.needs_attention` (the existing
   worker-park emission is unchanged) and, because `dependency_hold` is not an
   attention-digest disposition, is not digest-buffered.

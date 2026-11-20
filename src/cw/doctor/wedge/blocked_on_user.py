@@ -37,6 +37,7 @@ from cw.doctor.wedge._constants import (
     _WEDGE_TERMINAL_SIBLING,
 )
 from cw.models import QueueItemStatus, ReapReason, occupies_lane_slot
+from cw.models.session import session_statuses_by_id
 from cw.native_daemon import get_native_daemon_client
 from cw.reconcile._shared import resolve_session_for_task
 from cw.stage_preflight import canonical_reason
@@ -128,8 +129,8 @@ def _tool_denied_recipe(task: TicketTask) -> str:
     """
     return (
         "BLOCKED_ON_USER task parked tool_denied (the auto-mode classifier denied "
-        f"a tool call; {task.attempts} attempt(s) so far) with a dead session holds "
-        "lane slot. Do not revert it blind: when the denial cites instruction "
+        f"a tool call; {task.attempts} attempt(s) so far) with a dead session may hold "
+        "a lane slot. Do not revert it blind: when the denial cites instruction "
         "poisoning, a re-dispatch hits the same denial. Check the ticket's comments "
         "for an unmarked one that says it was authored or relayed by an orchestrator "
         "session: the Comment provenance rule in .claude/commands/auto-dev.md treats "
@@ -146,13 +147,15 @@ def _tool_denied_recipe(task: TicketTask) -> str:
 def _dead_session_recipe(task: TicketTask) -> str:
     """Recipe for a dead-session class-5 finding (#2617).
 
-    Every row except a ``tool_denied`` park keeps the generic reap hint, byte for
-    byte.
+    Every row except a ``tool_denied`` park gets the generic reap hint. It says
+    "may hold" (#3774): a dead-by-roster row whose session record is already
+    terminal, or that names none, is a settled park and holds no lane slot;
+    one whose record is still ACTIVE (the crash path) does.
     """
     if _is_tool_denied_park(task):
         return _tool_denied_recipe(task)
     return (
-        "BLOCKED_ON_USER task with dead session holds lane slot. "
+        "BLOCKED_ON_USER task with dead session may hold a lane slot. "
         "Run: cw doctor --reap to revert task to PENDING."
     )
 
@@ -319,23 +322,26 @@ def _check_wedge_operator_gated_park(
     class 5 skips an operator-gated park because it only looks dead, so
     without this class a lane slot held by such a row is named by no finding.
     Reports a row iff it is BLOCKED_ON_USER (class 5's candidate status),
-    ``occupies_lane_slot`` (the authority dispatch, the board and
-    ``lane_stats`` count with; it also drops a terminal_sibling park, class
-    7's) and ``_is_operator_gated_park`` (class 5's own exclusion predicate, so
+    ``occupies_lane_slot`` with the state's session statuses (the authority
+    dispatch, the board and ``lane_stats`` count with; it drops a
+    terminal_sibling park, class 7's, and a settled park whose worker is
+    finished and whose claim is settled, #3774) and ``_is_operator_gated_park``
+    (class 5's own exclusion predicate, so
     "class 5 skipped it because of the gate" and "this class reports it" are
-    the same row set). No daemon lookup: class 5 excludes gated rows whatever
-    their session's liveness, so this class reports them whatever it is, and
-    no lane-cap comparison (that would need ``clients.yaml``).
+    the same row set, minus settled parks). No daemon lookup: liveness here is
+    the state file's session status only, as dispatch reads it, and no
+    lane-cap comparison (that would need ``clients.yaml``).
 
     Read-only and unaudited: nothing here mutates, logs or records an event,
     and ``_reap_wedge_findings`` feeds this class to no selector. Returns
     before touching config when no row qualifies.
     """
+    session_statuses = session_statuses_by_id(state.sessions)
     candidates = [
         t
         for t in queue.tasks
         if t.status == QueueItemStatus.BLOCKED_ON_USER
-        and occupies_lane_slot(t)
+        and occupies_lane_slot(t, session_statuses=session_statuses)
         and _is_operator_gated_park(t)
     ]
     if not candidates:

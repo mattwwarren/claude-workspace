@@ -76,6 +76,7 @@ from cw.models import (
     Stage,
     occupies_lane_slot,
 )
+from cw.models.session import session_statuses_by_id
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile._shared import _REAP_ELIGIBLE_DISPOSITIONS_BASE
 from cw.reconcile.escalation import _is_escalation_eligible
@@ -151,6 +152,20 @@ def _row(
     return make_blocked(disposition=disposition, blocked_reason=reason, **kwargs)
 
 
+def _held_row(
+    disposition: str | None, reason: str | None, **overrides: object
+) -> TicketTask:
+    """A gated park that names ``sess-1``, a session absent from state.
+
+    GitHub #3774: an absent session id counts as unsettled (fail closed), so the
+    park holds its lane slot and class 13 reports it. The settled counterpart is
+    the ``_row`` default (``session_id=None``).
+    """
+    kwargs: dict[str, object] = {"session_id": _SESSION_ID}
+    kwargs.update(overrides)
+    return _row(disposition, reason, **kwargs)
+
+
 def _advisory(findings: list[WedgeFinding]) -> list[WedgeFinding]:
     return [f for f in findings if f.wedge_class == _WEDGE_OPERATOR_GATED_PARK]
 
@@ -206,14 +221,14 @@ class TestDetection:
         reason: str | None,
     ) -> None:
         stub_daemon_roster(tmp_path, monkeypatch)
-        task = _row(disposition, reason)
+        task = _held_row(disposition, reason)
         seed_queue([task])
 
         report = run_doctor()
 
         (finding,) = _advisory(report.wedge_findings)
         assert finding.ticket_id == ACME_TICKET
-        assert finding.session_id is None
+        assert finding.session_id == _SESSION_ID
         assert finding.state_file == str(state_file())
         assert disposition in finding.recipe
         assert "holds a lane slot (lane default)" in finding.recipe
@@ -239,7 +254,7 @@ class TestDetection:
     def test_human_kept_gate_recipe_carries_the_operator_only_label(
         self, tmp_config_dir: Path
     ) -> None:
-        task = _row(FINALIZE_GATE_HELD_DISPOSITION, None)
+        task = _held_row(FINALIZE_GATE_HELD_DISPOSITION, None)
         assert is_human_gate_command(task, _expected_first(task))
 
         (finding,) = _detect([task])
@@ -248,7 +263,7 @@ class TestDetection:
         assert "Run:" not in finding.recipe
 
     def test_attempt_cap_recipe_is_a_plain_command(self, tmp_config_dir: Path) -> None:
-        task = _row(_ATTEMPT_CAP_BLOCKED, None)
+        task = _held_row(_ATTEMPT_CAP_BLOCKED, None)
         assert not is_human_gate_command(task, _expected_first(task))
 
         (finding,) = _detect([task])
@@ -280,8 +295,8 @@ class TestDetection:
 
     def test_two_rows_yield_two_findings(self, tmp_config_dir: Path) -> None:
         rows = [
-            _row(STALE_DISPATCH_GATE_DISPOSITION, None, ticket_id="ACM-2"),
-            _row(_ATTEMPT_CAP_BLOCKED, None, ticket_id="ACM-3"),
+            _held_row(STALE_DISPATCH_GATE_DISPOSITION, None, ticket_id="ACM-2"),
+            _held_row(_ATTEMPT_CAP_BLOCKED, None, ticket_id="ACM-3"),
         ]
 
         findings = _detect(rows)
@@ -296,7 +311,7 @@ class TestDetection:
             raise CwError(msg)
 
         monkeypatch.setattr("cw.ticket_view.get_effective_client", _boom)
-        task = _row(STALE_DISPATCH_GATE_DISPOSITION, None)
+        task = _held_row(STALE_DISPATCH_GATE_DISPOSITION, None)
 
         (finding,) = _detect([task])
 
@@ -312,7 +327,9 @@ class TestDetection:
 
         monkeypatch.setattr("cw.ticket_view.get_effective_client", _fail)
 
-        assert _detect([_row("impl_failed", None), make_task()]) == []
+        # A held (slot-holding) row, so the gate filter, not the settled-park
+        # carve-out (#3774), is what keeps the candidate list empty.
+        assert _detect([_held_row("impl_failed", None), make_task()]) == []
         assert _detect([]) == []
 
 
@@ -346,7 +363,48 @@ class TestNotReported:
     def test_non_gated_rows_yield_nothing(
         self, tmp_config_dir: Path, disposition: str | None, reason: str | None
     ) -> None:
-        assert _detect([_row(disposition, reason)]) == []
+        # Held rows (#3774): a settled `_row` would yield nothing for the
+        # slot reason alone and hide a gate-filter regression.
+        assert _detect([_held_row(disposition, reason)]) == []
+
+
+class TestSettledParkNotAdvised:
+    """Class 13 advises only slot-holding parks (GitHub #3774, D2)."""
+
+    @pytest.mark.parametrize(("disposition", "reason"), _GATED)
+    def test_settled_gated_park_yields_nothing(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        disposition: str,
+        reason: str | None,
+    ) -> None:
+        """A no-session gated park is settled: it holds no slot to explain."""
+        monkeypatch.setattr(
+            "cw.doctor.wedge.blocked_on_user.get_native_daemon_client",
+            FakeNativeDaemonClient,
+        )
+        task = _row(disposition, reason)
+        queue = DevQueueStore(tasks=[task])
+
+        assert _is_operator_gated_park(task) is True
+        assert occupies_lane_slot(task, session_statuses={}) is False
+        assert _check_wedge_operator_gated_park(CwState(), queue) == []
+        # The operator-gate exclusion still keeps it out of class 5.
+        assert _check_wedge_dead_session_blocked_on_user(CwState(), queue) == []
+
+    def test_completed_worker_park_yields_nothing(self, tmp_config_dir: Path) -> None:
+        task = _held_row(STALE_DISPATCH_GATE_DISPOSITION, None)
+        session = bound_session_for(task, status=SessionStatus.COMPLETED)
+
+        assert _detect([task], [session]) == []
+
+    def test_live_worker_park_yields_one_finding(self, tmp_config_dir: Path) -> None:
+        task = _held_row(STALE_DISPATCH_GATE_DISPOSITION, None)
+        session = bound_session_for(task, status=SessionStatus.ACTIVE)
+
+        (finding,) = _detect([task], [session])
+        assert finding.wedge_class == _WEDGE_OPERATOR_GATED_PARK
 
 
 def _agreement_cases() -> list[tuple[str | None, str | None, bool]]:
@@ -385,7 +443,7 @@ class TestClassFiveAgreement:
             "cw.doctor.wedge.blocked_on_user.get_native_daemon_client",
             FakeNativeDaemonClient,
         )
-        task = _row(disposition, reason)
+        task = _held_row(disposition, reason)
         state = CwState()
         queue = DevQueueStore(tasks=[task])
 
@@ -394,7 +452,12 @@ class TestClassFiveAgreement:
 
         assert _is_operator_gated_park(task) is expect_gated
         assert not (dead and advisory)
-        assert bool(advisory) is (expect_gated and occupies_lane_slot(task))
+        assert bool(advisory) is (
+            expect_gated
+            and occupies_lane_slot(
+                task, session_statuses=session_statuses_by_id(state.sessions)
+            )
+        )
         if expect_gated:
             assert dead == []
             assert len(advisory) == 1
@@ -406,7 +469,7 @@ class TestClassFiveAgreement:
         self, tmp_config_dir: Path
     ) -> None:
         for disposition in sorted(_OPERATOR_GATED_PARK_DISPOSITIONS):
-            assert len(_detect([_row(disposition, None)])) == 1, disposition
+            assert len(_detect([_held_row(disposition, None)])) == 1, disposition
 
     def test_overlap_row_is_the_advisorys_and_not_class_fives(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
@@ -416,7 +479,7 @@ class TestClassFiveAgreement:
             FakeNativeDaemonClient,
         )
         human = sorted(_HUMAN_GATED_PARK_DISPOSITIONS)[0]
-        task = _row(human, codex_const.CODEX_FIX_SCOPE_DRIFT)
+        task = _held_row(human, codex_const.CODEX_FIX_SCOPE_DRIFT)
         state = CwState()
         queue = DevQueueStore(tasks=[task])
 
@@ -534,7 +597,7 @@ class TestReapNeverActs:
     ) -> None:
         # A RUNNING sibling of the same ticket id would be reverted if the
         # class leaked into running_ticket_ids (the set is default-inclusive).
-        gated = _row(disposition, reason)
+        gated = _held_row(disposition, reason)
         sibling = make_task(status=QueueItemStatus.RUNNING, session_id="sess-9")
         seed_queue([gated, sibling])
         (finding,) = _detect([gated])
@@ -643,10 +706,13 @@ class TestReapNeverActs:
 
         assert _row_state() == before
         assert _WEDGE_OPERATOR_GATED_PARK in reap.output
+        # GitHub #3774: the reap closed the row's ACTIVE worker session, so the
+        # park is settled and holds no lane slot. Class 13 advises only slot-
+        # holding parks, so the post-reap report no longer names it.
         payload = json.loads(as_json.stdout)
         assert [f["wedge_class"] for f in payload["wedge_findings"]].count(
             _WEDGE_OPERATOR_GATED_PARK
-        ) == 1
+        ) == 0
 
     # --- #2740: a gate park that recorded its open PR is still never reaped.
 
@@ -738,7 +804,7 @@ class TestPrUrlRecorded:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         stub_daemon_roster(tmp_path, monkeypatch)
-        task = _row(STALE_DISPATCH_GATE_DISPOSITION, None, pr_url=_GATE_PR_URL)
+        task = _held_row(STALE_DISPATCH_GATE_DISPOSITION, None, pr_url=_GATE_PR_URL)
         seed_queue([task])
 
         report = run_doctor()
@@ -755,7 +821,7 @@ class TestPrUrlRecorded:
             "cw.doctor.wedge.blocked_on_user.get_native_daemon_client",
             FakeNativeDaemonClient,
         )
-        task = _row(STALE_DISPATCH_GATE_DISPOSITION, None, pr_url=_GATE_PR_URL)
+        task = _held_row(STALE_DISPATCH_GATE_DISPOSITION, None, pr_url=_GATE_PR_URL)
         queue = DevQueueStore(tasks=[task])
 
         assert _check_wedge_dead_session_blocked_on_user(CwState(), queue) == []
@@ -766,7 +832,7 @@ class TestWiring:
     def test_collect_wedge_findings_includes_the_class(
         self, tmp_config_dir: Path
     ) -> None:
-        task = _row(_ATTEMPT_CAP_BLOCKED, None)
+        task = _held_row(_ATTEMPT_CAP_BLOCKED, None)
 
         findings = _collect_wedge_findings(CwState(), DevQueueStore(tasks=[task]))
 
@@ -791,8 +857,8 @@ def test_review_engine_modified_is_an_operator_gated_park(
     assert REVIEW_ENGINE_MODIFIED_DISPOSITION == "review_engine_modified"
     assert REVIEW_ENGINE_MODIFIED_DISPOSITION in _OPERATOR_GATED_PARK_DISPOSITIONS
     assert REVIEW_ENGINE_MODIFIED_DISPOSITION not in _HUMAN_GATED_PARK_DISPOSITIONS
-    assert _is_operator_gated_park(_row(REVIEW_ENGINE_MODIFIED_DISPOSITION, None))
-    assert len(_detect([_row(REVIEW_ENGINE_MODIFIED_DISPOSITION, None)])) == 1
+    assert _is_operator_gated_park(_held_row(REVIEW_ENGINE_MODIFIED_DISPOSITION, None))
+    assert len(_detect([_held_row(REVIEW_ENGINE_MODIFIED_DISPOSITION, None)])) == 1
 
 
 def test_review_engine_unsupported_is_an_operator_gated_park(
@@ -802,8 +868,10 @@ def test_review_engine_unsupported_is_an_operator_gated_park(
     assert REVIEW_ENGINE_UNSUPPORTED_DISPOSITION == "review_engine_unsupported_backend"
     assert REVIEW_ENGINE_UNSUPPORTED_DISPOSITION in _OPERATOR_GATED_PARK_DISPOSITIONS
     assert REVIEW_ENGINE_UNSUPPORTED_DISPOSITION not in _HUMAN_GATED_PARK_DISPOSITIONS
-    assert _is_operator_gated_park(_row(REVIEW_ENGINE_UNSUPPORTED_DISPOSITION, None))
-    assert len(_detect([_row(REVIEW_ENGINE_UNSUPPORTED_DISPOSITION, None)])) == 1
+    assert _is_operator_gated_park(
+        _held_row(REVIEW_ENGINE_UNSUPPORTED_DISPOSITION, None)
+    )
+    assert len(_detect([_held_row(REVIEW_ENGINE_UNSUPPORTED_DISPOSITION, None)])) == 1
 
 
 def test_gate_timeout_is_an_operator_gated_park(tmp_config_dir: Path) -> None:
@@ -811,8 +879,8 @@ def test_gate_timeout_is_an_operator_gated_park(tmp_config_dir: Path) -> None:
     assert GATE_TIMEOUT_DISPOSITION == "gate_timeout"
     assert GATE_TIMEOUT_DISPOSITION in _OPERATOR_GATED_PARK_DISPOSITIONS
     assert GATE_TIMEOUT_DISPOSITION not in _HUMAN_GATED_PARK_DISPOSITIONS
-    assert _is_operator_gated_park(_row(GATE_TIMEOUT_DISPOSITION, None))
-    assert len(_detect([_row(GATE_TIMEOUT_DISPOSITION, None)])) == 1
+    assert _is_operator_gated_park(_held_row(GATE_TIMEOUT_DISPOSITION, None))
+    assert len(_detect([_held_row(GATE_TIMEOUT_DISPOSITION, None)])) == 1
     assert GATE_TIMEOUT_DISPOSITION not in HOLD_DISPOSITIONS
     assert GATE_TIMEOUT_DISPOSITION not in DRAIN_DISPOSITIONS
     assert GATE_TIMEOUT_DISPOSITION not in _REAP_ELIGIBLE_DISPOSITIONS_BASE
@@ -832,8 +900,8 @@ def test_awaiting_ci_evidence_is_an_operator_gated_park(
     assert disposition == "awaiting_ci_evidence"
     assert disposition in _OPERATOR_GATED_PARK_DISPOSITIONS
     assert disposition not in _HUMAN_GATED_PARK_DISPOSITIONS
-    assert _is_operator_gated_park(_row(disposition, None))
-    assert len(_detect([_row(disposition, None)])) == 1
+    assert _is_operator_gated_park(_held_row(disposition, None))
+    assert len(_detect([_held_row(disposition, None)])) == 1
     assert disposition not in HOLD_DISPOSITIONS
     assert disposition not in DRAIN_DISPOSITIONS
     assert disposition not in _REAP_ELIGIBLE_DISPOSITIONS_BASE
@@ -859,7 +927,7 @@ def test_tracker_mcp_gate_is_an_operator_gated_park(
     """
     assert TRACKER_MCP_GATE_DISPOSITION not in _OPERATOR_GATED_PARK_DISPOSITIONS
     assert TRACKER_MCP_GATE_DISPOSITION not in _HUMAN_GATED_PARK_DISPOSITIONS
-    task = _row(TRACKER_MCP_GATE_DISPOSITION, _PRE_DISPATCH_TRACKER_MCP_REASON)
+    task = _held_row(TRACKER_MCP_GATE_DISPOSITION, _PRE_DISPATCH_TRACKER_MCP_REASON)
     assert _is_operator_gated_park(task)
     assert len(_detect([task])) == 1
     stub_daemon_roster(tmp_path, monkeypatch)

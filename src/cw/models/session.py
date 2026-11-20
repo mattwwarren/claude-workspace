@@ -6,6 +6,7 @@ Depends only on ``cw.models.enums`` and ``cw.models.usage``. See
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -202,6 +203,17 @@ class Session(BaseModel):
     # session that never recorded usage (every claude-native session, and any
     # session older than schema v20). Never a stand-in for cost_usd.
     usage: SessionUsage | None = None
+
+
+def session_statuses_by_id(sessions: Iterable[Session]) -> dict[str, SessionStatus]:
+    """Map each session id to its status: the evidence for lane-slot occupancy.
+
+    GitHub #3774. ``occupies_lane_slot`` takes this map so a parked row whose
+    worker has finished frees its slot. Build it once per consumer scope and
+    pass it to every occupancy call in that scope. Not re-exported from
+    ``cw.models``.
+    """
+    return {s.id: s.status for s in sessions}
 
 
 def counts_toward_client_ceiling(session: Session, client_name: str) -> bool:

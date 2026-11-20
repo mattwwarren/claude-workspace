@@ -10156,6 +10156,9 @@ class TestDevQueueStatusWithTick:
         assert result.exit_code == 0, result.output
         assert "    lane fast:" in result.output
         assert "blocked=1" in result.output
+        # The row names no session, so its worker is settled and it frees its
+        # slot: status counts it as parked (GitHub #3774).
+        assert "parked=1" in result.output
 
     def test_dev_queue_status_blocked_column_in_main_table(
         self, tmp_config_dir: Path

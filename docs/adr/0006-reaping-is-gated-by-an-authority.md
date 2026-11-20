@@ -286,6 +286,26 @@ these acts run on every lane.
   `terminal_sibling` park (#2100) and, since #2321, a `dependency_hold` park
   that carries `blocked_on_pr`. The ceiling slot is still session-status based
   and is unchanged.
+  *Amendment note (2026-11-19, #3774):* `occupies_lane_slot` gains a third
+  carve-out, the settled-worker park. A BLOCKED_ON_USER row occupies its lane
+  slot only while it has a live worker or an unsettled execution claim: a
+  named session (`session_id`, `codex_orphan_session_id`,
+  `fix_dispatch_session_id`) that is not terminal or is missing from state,
+  `fix_dispatch_launched_worker`, or `launch_marker`. A row that fails none of
+  those frees its slot, stays parked and visible, and is released only through
+  ordinary dispatch admission (`requeue`, `approve`, `resolve`, the
+  scope-drift grant). The predicate takes the consumer's per-tick
+  `{session_id: status}` map; with no map it fails closed and the park counts.
+  Authority: the operator's R4 decision, verbatim: "Rule, not mechanism: a
+  parked row counts toward a lane's cap only while it has a live worker or an
+  unsettled execution claim; otherwise it stays parked and visible and frees
+  the slot, and release goes through normal dispatch admission. Add no new
+  persisted field or state for this." This reverses #2321's choice that a
+  `dependency_unmerged` park with no id keeps its slot (its premise was "no
+  release trigger"): under R4 such a park frees its slot once its worker is
+  settled, and stays visible in `cw dev-queue status` (`parked=`), `tasks`
+  and the board. The ceiling slot and the host budget are unchanged, and
+  there is no per-lane opt-out.
 - **Park scope, in words.** The park covers only a bound row whose Session
   record is missing. A roster-absent live session stays with the phantom
   sweep (after its 30 s grace); a terminal session stays with the backstops
