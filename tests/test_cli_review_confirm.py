@@ -2300,6 +2300,33 @@ def test_a_tolerated_path_rewritten_across_a_codex_call_is_not_worktree_mutated(
     assert result.exit_code == 0, result.output
 
 
+def test_a_claude_role_rewriting_a_tolerated_path_is_not_worktree_mutated(
+    harness: Harness,
+) -> None:
+    """End to end: the per-role check inside the round also gets the list."""
+    commit_tracked_file(harness.repo, _TOLERATED)
+    tolerate_paths(harness, _TOLERATED)
+    runner = harness.patch_claude(_claude_results(harness, rest=_claude_ok()))
+    runner.side_effect = _rewrite_tolerated
+
+    result = harness.cli.invoke(main, harness.args("--backend", "claude"))
+
+    assert result.exit_code == 0, result.output
+    assert _payload(result)["available"] is True
+
+
+def test_a_claude_role_rewriting_an_unlisted_path_is_worktree_mutated(
+    harness: Harness,
+) -> None:
+    commit_tracked_file(harness.repo, _TOLERATED)
+    runner = harness.patch_claude(_claude_results(harness, rest=_claude_ok()))
+    runner.side_effect = _rewrite_tolerated
+
+    result = harness.cli.invoke(main, harness.args("--backend", "claude"))
+
+    _assert_round_failed(result, "worktree_mutated", backend="claude")
+
+
 def test_run_claude_round_forwards_tolerated_to_run_claude_review(
     harness: Harness,
 ) -> None:

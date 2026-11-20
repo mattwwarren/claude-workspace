@@ -476,6 +476,52 @@ class TestCodexRound:
         assert result.exit_code == _ROUND_FAILED, result.output
         assert _out(result)["cause"] == "worktree_mutated"
 
+    def test_a_claude_confirm_role_rewriting_a_tolerated_path_is_not_exit_four(
+        self,
+        tmp_path: Path,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The Claude per-role check inside the round also gets the list (#3693)."""
+        harness = _harness(
+            tmp_path,
+            make_git_repo_with_origin,
+            monkeypatch,
+            {**_ON, "tolerated_worktree_paths": ["tol.txt"]},
+        )
+        _resolved(harness, tmp_path, **_CLAUDE_CONFIRM)
+        runner = harness.patch_claude([_claude_ok()] * len(harness.roles))
+
+        def _touch(worktree: Path) -> None:
+            (worktree / "tol.txt").write_text("x\n", encoding="utf-8")
+
+        runner.side_effect = _touch
+
+        result = harness.cli.invoke(main, harness.args())
+
+        assert result.exit_code == 0, result.output
+
+    @needs_codex
+    def test_a_tolerated_path_dirty_before_the_call_is_not_a_false_mutation(
+        self,
+        tmp_path: Path,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Both snapshots filter alike: dirty at entry is not a change (#3693)."""
+        harness = _harness(
+            tmp_path,
+            make_git_repo_with_origin,
+            monkeypatch,
+            {**_ON, "tolerated_worktree_paths": ["tol.txt"]},
+        )
+        _resolved(harness, tmp_path)
+        (harness.repo / "tol.txt").write_text("dirty before\n", encoding="utf-8")
+
+        result, _ = harness.invoke(harness.all_roles(_ok_result()))
+
+        assert result.exit_code == 0, result.output
+
     def test_no_fetch_is_issued(
         self, harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
