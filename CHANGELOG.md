@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.105.0] - 2026-11-20
+
 ### Added
 
 - **Evidence-gap hold (#3793).** `Finding.evidence_gap` is a reviewer-set marker for a finding that rests on a check the reviewer could not run. It is held for the operator as `review_operator_actionable` and parks only that finding: reproduced MUST_FIX findings in the same verdict still go to repair, and the park lands once the loop converges. Nothing is dropped. No new blocker reason; the engine summary is not extended. The `contested_*` held-finding helpers are renamed `held_*`. Engine-sourced `coverage.*` findings cannot carry the marker and are not covered (follow-up). In the Claude confirm round and the Claude-native clean-mode `record-round`, a mixed verdict (a gap beside a reproduced MUST_FIX) parks for the operator before the reproduced finding is repaired; every other lane repairs it first.
