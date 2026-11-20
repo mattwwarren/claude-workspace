@@ -664,7 +664,9 @@ class TestRunbook:
         assert "review-monitor's `merge_blocked` attention state" in bullet
         assert "does not trigger `escalate_merge_block`" in bullet
         assert "failing CI and change requests retain their" in bullet
-        assert "#2990 tracks making it probe them" in runbook
+        assert "tracks making it probe them" not in runbook
+        assert "dispatch-driven rows too (#2990)" in runbook
+        assert "It probes the worktree `resolve_task_worktree` resolves" in runbook
 
     def test_review_monitor_preserves_ci_and_review_signals_while_behind(self) -> None:
         runbook = _read("docs/dispatch-runbook.md")
@@ -793,10 +795,12 @@ class TestAdr:
         assert "PR attention also treats BEHIND as no-action" in adr
         assert "BEHIND alone does not escalate" in adr
         assert "CI failures or review requests retain their own attention states" in adr
-        assert "the gate is inert for dispatch-driven rows (#2990)" in adr
-        assert "tracked in #2990" in " ".join(
-            _read("src/cw/dispatch/branch_freshness.py").split()
-        )
+        assert "probes dispatch-driven rows (#2990)" in adr
+        assert "inert for dispatch-driven rows" not in adr
+        assert "every epic child" in adr
+        source = " ".join(_read("src/cw/dispatch/branch_freshness.py").split())
+        assert "tracked in #2990" not in source
+        assert "resolve_task_worktree" in source
         assert "`verify-tip` and `finalize` refresh the default branch once." in adr
         assert (
             "`non_merge_commit`, `second_parent_not_on_default` or `no_default_ref`"
@@ -997,8 +1001,8 @@ _ADR_INVARIANT_1 = (
     " left alone as well."
 )
 _ADR_HEADER = (
-    "amended by #2980 (the conflict-resolution round) and #3190 (the release-cut"
-    " CHANGELOG exception)"
+    "amended by #2980 (the conflict-resolution round), #3190 (the release-cut"
+    " CHANGELOG exception) and #2990 (the REVIEW gate probes dispatch-driven rows)"
 )
 _ARCH_EXCEPTION = (
     "One exception (#3190): `cw worktree changelog-sync` merges `origin/<default>`"
