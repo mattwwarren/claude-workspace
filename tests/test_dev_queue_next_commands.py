@@ -2446,7 +2446,7 @@ def test_awaiting_ci_evidence_park_guidance_is_pinned() -> None:
 
 
 class TestMergePrerequisiteHold:
-    """#3791: a hold parked on a declared prerequisite offers its removal first."""
+    """#3791: a hold parked on a declared prerequisite offers requeue, then removal."""
 
     _REMOVE = "cw dev-queue prerequisite ACM-1 -c acme --pr 9 --remove"
 
@@ -2463,13 +2463,13 @@ class TestMergePrerequisiteHold:
         kwargs.update(overrides)
         return _make_ticket_task(**kwargs)
 
-    def test_matching_entry_offers_remove_then_requeue(self) -> None:
+    def test_matching_entry_offers_requeue_then_remove(self) -> None:
         task = self._hold(merge_prerequisites=[prerequisite_entry(9)])
 
         commands = next_commands(task, session=None)
 
-        assert [c.command for c in commands] == [self._REMOVE, cmd("requeue")]
-        assert "re-parks" in commands[1].purpose
+        assert [c.command for c in commands] == [cmd("requeue"), self._REMOVE]
+        assert "re-parks" in commands[0].purpose
 
     @pytest.mark.parametrize(
         "entries",

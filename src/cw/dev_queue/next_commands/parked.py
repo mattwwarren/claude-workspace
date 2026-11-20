@@ -401,7 +401,15 @@ def _dependency_hold_commands(task: TicketTask) -> list[NextCommand]:
     held = task.blocked_on_pr
     if held is not None and _held_on_a_prerequisite(task):
         # #3791: a requeue alone re-parks on the prerequisite at the next claim.
+        # requeue leads: it is harmless (it re-parks while the PR is unmerged),
+        # whereas --remove drops the operator's gate, so it must not be the
+        # default first suggestion.
         return [
+            _requeue(
+                task,
+                "release the hold now; it re-parks at the next claim while the"
+                " prerequisite PR is unmerged",
+            ),
             NextCommand(
                 command=dev_queue_command(
                     "prerequisite", task, "--pr", str(held.number), "--remove"
@@ -410,11 +418,6 @@ def _dependency_hold_commands(task: TicketTask) -> list[NextCommand]:
                     "drop the merge prerequisite this hold waits on and release"
                     " the row; the serve loop releases it on merge by itself"
                 ),
-            ),
-            _requeue(
-                task,
-                "release the hold now; it re-parks at the next claim while the"
-                " prerequisite PR is unmerged",
             ),
         ]
     return [

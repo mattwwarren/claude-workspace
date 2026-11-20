@@ -4881,8 +4881,8 @@ Operator notes:
 - **A park that never releases by itself.** If the client's origin slug cannot
   be resolved, the registrar never watches the PR and nothing releases the
   row. `cw dev-queue show <T> -c <C>` lists
-  `cw dev-queue prerequisite <T> -c <C> --pr <N> --remove` and the requeue;
-  remove the entry to clear it (a requeue alone re-parks).
+  the requeue and `cw dev-queue prerequisite <T> -c <C> --pr <N> --remove`, in
+  that order; remove the entry to clear it (a requeue alone re-parks).
 - **Shared wording.** The verb reuses `hold`'s verifier, so its refusals may
   mention "hold", "requeue instead" or `owner/repo#N`. This verb is same-repo
   only; cross-repo prerequisites belong to `hold --until-pr-merged owner/repo#N`.
