@@ -297,7 +297,7 @@ def _approve_scope_drift_locked(
             f"Cannot approve scope drift for ticket '{ticket_id}': {path_error}."
             " Pass exact repo-relative paths, comma-separated: no globs (* or ?),"
             " no directories or trailing /, no absolute paths, no '..' segments,"
-            " no control characters."
+            " no control characters or surrounding whitespace."
             f" Retry: `{_scope_drift_command(task, SCOPE_DRIFT_PATHS_PLACEHOLDER)}`."
         )
         raise ApproveGateError(msg)

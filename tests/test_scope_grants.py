@@ -6,29 +6,47 @@ acceptance fixture lives in ``tests/test_scope_grants_git.py``.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import TYPE_CHECKING
 
-from cw.models.client import ReviewConfig, ReviewEngineConfig
-from cw.models.scope_grant import ScopeGrant
+import pytest
+
+from cw import _git
+from cw.models.client import ClientConfig, ReviewConfig, ReviewEngineConfig
 from cw.scope_grants import (
     MAX_GRANT_PATH_LEN,
     MAX_GRANT_PATHS,
     MAX_SCOPE_GRANTS,
     GrantContext,
     append_scope_grant,
+    carry_scope_grants,
     exact_paths_error,
     parse_drift_extra_files,
     review_policy_fingerprint,
     verify_scope_grants,
 )
+from tests._shared.scope_grant_builders import (
+    GRANT_CLIENT,
+    GRANT_POLICY,
+    GRANT_ROW_CREATED,
+    GRANT_SLUG,
+    GRANT_TICKET,
+    grant_task,
+    make_grant,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from cw.models.scope_grant import ScopeGrant
 
 _T0 = datetime(2026, 11, 1, tzinfo=UTC)
-_ROW_CREATED = datetime(2026, 11, 2, tzinfo=UTC)
+_ROW_CREATED = GRANT_ROW_CREATED
 _H1 = "1" * 40
 _H2 = "2" * 40
 _H3 = "3" * 40
-_POLICY = "policy-a"
+_POLICY = GRANT_POLICY
 
 
 def _grant(
@@ -36,36 +54,33 @@ def _grant(
     paths: tuple[str, ...] = ("src/a.py", "src/b.py"),
     *,
     minutes: int = 0,
-    repo: str | None = "acme/widgets",
+    repo: str | None = GRANT_SLUG,
     pr_number: int | None = None,
     policy: str = _POLICY,
     plan: str | None = "plan-x",
+    recorded_at: datetime | None = None,
 ) -> ScopeGrant:
-    return ScopeGrant(
-        client="acme",
-        ticket_id="T-1",
-        row_created_at=_ROW_CREATED,
+    return make_grant(
+        head=head,
+        paths=list(paths),
         repo=repo,
         pr_number=pr_number,
-        head=head,
         policy=policy,
         plan_fingerprint=plan,
-        paths=list(paths),
-        actor="op",
-        recorded_at=_T0 + timedelta(minutes=minutes),
+        recorded_at=recorded_at or _T0 + timedelta(minutes=minutes),
     )
 
 
 def _ctx(
     *,
-    repo: str | None = "acme/widgets",
+    repo: str | None = GRANT_SLUG,
     pr_number: int | None = None,
     policy: str = _POLICY,
     plan: str | None = "plan-x",
 ) -> GrantContext:
     return GrantContext(
-        client="acme",
-        ticket_id="T-1",
+        client=GRANT_CLIENT,
+        ticket_id=GRANT_TICKET,
         row_created_at=_ROW_CREATED,
         repo=repo,
         pr_number=pr_number,
@@ -95,24 +110,43 @@ class TestExactPaths:
     def test_empty_list_is_refused(self) -> None:
         assert exact_paths_error([]) == "no paths given"
 
-    def test_each_rule_refuses_with_its_reason(self) -> None:
-        cases = {
-            "": "empty path",
-            "x" * (MAX_GRANT_PATH_LEN + 1): "over-long path",
-            "a\x00b": "control character in path",
-            "a\nb": "control character in path",
-            "a\x7fb": "control character in path",
-            "a\\b": "backslash in path",
-            "/etc/passwd": "absolute path",
-            "src/*.py": "glob character in path",
-            "src/?.py": "glob character in path",
-            "src/dir/": "trailing slash in path",
-            "src//a.py": "empty segment in path",
-            "src/../a.py": "dot segment in path",
-            "./a.py": "dot segment in path",
-        }
-        for path, reason in cases.items():
-            assert exact_paths_error([path]) == reason, path
+    @pytest.mark.parametrize(
+        ("path", "reason"),
+        [
+            ("", "empty path"),
+            ("x" * (MAX_GRANT_PATH_LEN + 1), "over-long path"),
+            ("a\x00b", "control character in path"),
+            ("a\nb", "control character in path"),
+            ("a\rb", "control character in path"),
+            ("a\x7fb", "control character in path"),
+            ("a\x85b", "control character in path"),
+            ("a\u2028b", "control character in path"),
+            ("a\u2029b", "control character in path"),
+            ("a\u200bb", "control character in path"),
+            (" a.py", "surrounding whitespace in path"),
+            ("a.py ", "surrounding whitespace in path"),
+            ("a\\b", "backslash in path"),
+            ("/etc/passwd", "absolute path"),
+            ("src/*.py", "glob character in path"),
+            ("src/?.py", "glob character in path"),
+            ("src/dir/", "trailing slash in path"),
+            ("src//a.py", "empty segment in path"),
+            ("src/../a.py", "dot segment in path"),
+            ("./a.py", "dot segment in path"),
+        ],
+    )
+    def test_each_rule_refuses_with_its_reason(self, path: str, reason: str) -> None:
+        assert exact_paths_error([path]) == reason
+
+    @pytest.mark.parametrize(
+        "path",
+        ["a\nb", "a\u2028b", "a\u2029b", "a\x85b", " a.py", "a.py "],
+    )
+    def test_gate_line_splitting_and_trimming_cannot_authorize_other_paths(
+        self, path: str
+    ) -> None:
+        """The gate joins with newlines and reads back with splitlines + strip."""
+        assert exact_paths_error([path]) is not None
 
     def test_count_cap(self) -> None:
         many = [f"f{i}.py" for i in range(MAX_GRANT_PATHS + 1)]
@@ -336,6 +370,64 @@ class TestVerifyScopeGrants:
         assert carried.head == _H1
         assert carried.paths == ["src/a.py"]
         assert carried.rejected == ["head is not an ancestor of HEAD"]
+
+
+class TestVerifyScopeGrantsCap:
+    def test_only_the_newest_max_grants_are_considered(self) -> None:
+        """The oldest grant is valid but falls past ``MAX_SCOPE_GRANTS``."""
+        oldest = _grant(_H1, ("old.py",), minutes=0)
+        newer = [
+            _grant(_H2, (f"n{i}.py",), minutes=i + 1, repo="acme/other")
+            for i in range(MAX_SCOPE_GRANTS)
+        ]
+        carried = verify_scope_grants(
+            [oldest, *newer], _ctx(), is_ancestor=_ancestry({(_H1, "HEAD"): True})
+        )
+        assert carried.head is None
+        assert carried.paths == []
+        assert carried.rejected == ["repository differs"] * MAX_SCOPE_GRANTS
+
+
+class TestMixedNaiveAndAwareRecordedAt:
+    """A hand-edited ledger mixing naive and aware stamps must never raise."""
+
+    @staticmethod
+    def _mixed() -> list[ScopeGrant]:
+        naive_stamp = (_T0 + timedelta(minutes=1)).replace(tzinfo=None)
+        naive = _grant(_H1, ("src/a.py",), recorded_at=naive_stamp)
+        aware = _grant(_H2, ("src/c.py",), minutes=2)
+        return [naive, aware]
+
+    def test_verify_orders_by_utc_and_does_not_raise(self) -> None:
+        ancestry = _ancestry(
+            {(_H2, "HEAD"): True, (_H1, "HEAD"): True, (_H1, _H2): True}
+        )
+        carried = verify_scope_grants(self._mixed(), _ctx(), is_ancestor=ancestry)
+        assert carried.head == _H2
+        assert carried.paths == ["src/a.py", "src/c.py"]
+
+    def test_append_does_not_raise_and_keeps_utc_order(self) -> None:
+        first, second = self._mixed()
+        newest = _grant(_H3, ("src/z.py",), minutes=3)
+        kept = append_scope_grant([second, first], newest)
+        assert [g.head for g in kept] == [_H1, _H2, _H3]
+
+    def test_carry_does_not_raise_and_stays_consistent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = ClientConfig(name=GRANT_CLIENT, workspace_path=tmp_path)
+        policy = review_policy_fingerprint(client.review)
+        grants = [
+            g.model_copy(update={"policy": policy, "plan_fingerprint": None})
+            for g in self._mixed()
+        ]
+        task = grant_task(grants)
+        monkeypatch.setattr(_git, "is_ancestor", lambda *_a, **_k: True)
+
+        carry_scope_grants(task, client, tmp_path, repo=GRANT_SLUG)
+
+        assert task.scope_drift_approved_head == _H2
+        assert task.scope_drift_approved_extra_files == ["src/a.py", "src/c.py"]
 
 
 # --- parse_drift_extra_files -----------------------------------------------

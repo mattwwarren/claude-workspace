@@ -20,7 +20,9 @@ import hashlib
 import json
 import logging
 import subprocess
+import unicodedata
 from dataclasses import dataclass, field
+from datetime import UTC
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -46,8 +48,12 @@ MAX_SCOPE_GRANTS = 8
 MAX_GRANT_PATHS = 64
 MAX_GRANT_PATH_LEN = 512
 
-_CONTROL_LIMIT = 0x20
-_DELETE_CHAR = 0x7F
+# Unicode general categories no exact path may contain: control (``Cc``, which
+# covers NUL, newline and U+0080-U+009F), format (``Cf``) and the line and
+# paragraph separators (``Zl``, ``Zp``). The approved-paths file is joined with
+# newlines and read back with ``str.splitlines()`` plus ``.strip()``, so a
+# character that splits or trims a line would authorize other paths.
+_FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
 _GLOB_CHARS = ("*", "?")
 
 
@@ -93,7 +99,7 @@ class CarriedGrants:
 
 
 def _has_control_char(path: str) -> bool:
-    return any(ord(ch) < _CONTROL_LIMIT or ord(ch) == _DELETE_CHAR for ch in path)
+    return any(unicodedata.category(ch) in _FORBIDDEN_CATEGORIES for ch in path)
 
 
 def _path_error(path: str) -> str | None:
@@ -102,8 +108,10 @@ def _path_error(path: str) -> str | None:
         return "empty path"
     if len(path) > MAX_GRANT_PATH_LEN:
         return "over-long path"
-    if _has_control_char(path):
+    if _has_control_char(path) or len(path.splitlines()) != 1:
         return "control character in path"
+    if path != path.strip():
+        return "surrounding whitespace in path"
     return _shape_error(path)
 
 
@@ -134,8 +142,10 @@ def exact_paths_error(paths: Sequence[str]) -> str | None:
     """The first reason ``paths`` is not an exact path list, or ``None``.
 
     Exact means literal repo-relative paths: no globs, no directories, no
-    absolute paths, and no control characters (a newline would inject entries
-    into the newline-delimited approved-paths file). Brackets and braces are
+    absolute paths, no control, format or line-separator characters (a newline
+    would inject entries into the newline-delimited approved-paths file, and
+    the gate reads it back with ``splitlines()``), and no leading or trailing
+    whitespace (the gate strips each line). Brackets and braces are
     allowed, so ``app/[id]/page.tsx`` stays legal.
     """
     if not paths:
@@ -166,6 +176,17 @@ def review_policy_fingerprint(review: ReviewConfig) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _recorded_key(grant: ScopeGrant) -> datetime:
+    """``recorded_at`` as an aware datetime; a naive stamp is read as UTC.
+
+    A hand-edited or partially migrated ledger can mix naive and aware stamps,
+    and comparing those raises ``TypeError`` -- which the never-raises seams
+    (the carry and the approve append) must not let escape.
+    """
+    stamp = grant.recorded_at
+    return stamp if stamp.utcoffset() is not None else stamp.replace(tzinfo=UTC)
+
+
 def append_scope_grant(
     grants: Sequence[ScopeGrant], grant: ScopeGrant
 ) -> list[ScopeGrant]:
@@ -180,7 +201,7 @@ def append_scope_grant(
         if not (g.head == grant.head and sorted(g.paths) == sorted(grant.paths))
     ]
     kept.append(grant)
-    kept.sort(key=lambda g: g.recorded_at)
+    kept.sort(key=_recorded_key)
     return kept[-MAX_SCOPE_GRANTS:]
 
 
@@ -278,7 +299,7 @@ def verify_scope_grants(
     rejected: list[str] = []
     anchor_head: str | None = None
     paths: set[str] = set()
-    newest_first = sorted(grants, key=lambda g: g.recorded_at, reverse=True)
+    newest_first = sorted(grants, key=_recorded_key, reverse=True)
     for grant in newest_first[:MAX_SCOPE_GRANTS]:
         reason = _identity_rejection(grant, ctx) or _context_rejection(grant, ctx)
         if reason is None:
