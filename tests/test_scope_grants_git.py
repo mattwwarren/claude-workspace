@@ -25,6 +25,7 @@ from cw.scope_grants import (
     parse_drift_extra_files,
     review_policy_fingerprint,
 )
+from cw.stage_verification import fence
 from cw.stage_verification.impl_gates import run_scope_conformance
 from tests._shared.git_repos import git_in
 from tests._shared.scope_grant_builders import (
@@ -48,6 +49,12 @@ _PLAN = "## Files Modified\n\n- src/plan.py\n"
 _TOUCHED = ["src/plan.py", "src/a.py", "src/b.py", "src/c.py"]
 _TRANSPORT_FIELDS = {"scope_drift_approved_extra_files", "scope_drift_approved_head"}
 _LOGGER = "cw.scope_grants"
+_SENSITIVE_MANIFEST = (
+    "sensitive_files:\n"
+    "  - path: pyproject.toml\n"
+    "    category: dependency\n"
+    "    reason: dependency changes need review\n"
+)
 
 
 def _client(repo: Path, tmp_path: Path) -> ClientConfig:
@@ -154,6 +161,44 @@ class TestVerifiedDescendantCarry:
         ):
             if untouched in before:
                 assert after[untouched] == before[untouched], untouched
+
+    def test_carry_leaves_the_sensitive_path_fence_unchanged(
+        self, grant_repo: GrantRepo, tmp_path: Path
+    ) -> None:
+        """The carry never feeds the fence: a non-granted sensitive path still hits.
+
+        ``fence.scope_violations`` takes the touched paths and the cycle-0
+        reviewed file set, never the task's transport, so the carry can add
+        duration but not breadth. A granted path is in scope exactly as for a
+        fresh ``--scope-drift`` approval; this pins only that the answer for a
+        touched sensitive path outside the grant is identical before and after.
+        """
+        repo = grant_repo.worktree
+        manifest = repo / ".claude" / "sensitive-files.yml"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(_SENSITIVE_MANIFEST, encoding="utf-8")
+        git_in(repo, "add", ".claude/sensitive-files.yml")
+        git_in(repo, "commit", "-q", "-m", "add manifest")
+        client = _client(repo, tmp_path)
+        task = grant_task([_grant(client, grant_repo.h1)])
+        touched = ["src/a.py", "src/b.py", "pyproject.toml"]
+        cycle0 = frozenset({"src/plan.py"})
+
+        def hits() -> list[tuple[str, str, str]]:
+            return [
+                (hit.path, hit.category, hit.reason)
+                for hit in fence.scope_violations(
+                    repo, touched, cycle0, "small", "main"
+                )
+            ]
+
+        before = hits()
+        carry_scope_grants(task, client, repo, repo=GRANT_SLUG)
+        after = hits()
+
+        assert task.scope_drift_approved_extra_files == ["src/a.py", "src/b.py"]
+        assert [path for path, _, _ in before] == ["pyproject.toml"]
+        assert after == before
 
 
 class TestNegativesFailClosed:
