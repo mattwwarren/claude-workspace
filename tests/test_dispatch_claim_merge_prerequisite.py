@@ -151,6 +151,18 @@ def test_park_keeps_the_adopted_pr_and_frees_the_lane_slot(tmp_path: Path) -> No
     assert occupies_lane_slot(parked) is False
 
 
+def test_park_keeps_a_non_adopted_pr_url(tmp_path: Path) -> None:
+    """BLOCKED_ON_USER assigns pr_url unconditionally; the park carries it."""
+    own = "https://github.com/foo/bar/pull/55"
+    seed_rows(pending_row(pr_url=own, merge_prerequisites=[prerequisite_entry(9)]))
+
+    claim_next(claim_client(tmp_path))
+
+    parked = stored_row()
+    assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+    assert parked.pr_url == own
+
+
 def test_park_records_one_ticket_held_event(tmp_path: Path) -> None:
     seed_rows(
         pending_row(
