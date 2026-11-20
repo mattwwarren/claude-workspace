@@ -70,6 +70,7 @@ from cw.models.repair_entry import is_adopted_repair_entry
 from cw.opencode_runner import stage_entry_marker
 from cw.review_engine.constants import engine_refusal_details
 from cw.stage_preflight import (
+    BASE_SUPPORTING_HARNESSES,
     LEGACY_REASON_ALIASES,
     STAGE_NEEDS,
     PreflightReason,
@@ -81,6 +82,7 @@ from cw.stage_preflight import (
     needs_for,
 )
 from cw.stage_preflight.details import (
+    base_unsupported_details,
     clean_review_details,
     remediation,
     repair_entry_details,
@@ -88,6 +90,7 @@ from cw.stage_preflight.details import (
 )
 from tests._opencode_helpers import blocked_result
 from tests._shared.stage_preflight_builders import (
+    based_row,
     client_for,
     engine_client,
     repair_row,
@@ -136,6 +139,7 @@ def _facts(
     engine: str | None = None,
     feedback: bool = False,
     adopted: bool = False,
+    base: bool = False,
 ) -> SpawnFacts:
     return SpawnFacts(
         stage=stage,
@@ -143,6 +147,7 @@ def _facts(
         engine_refusal=engine,
         feedback=feedback,
         adopted=adopted,
+        has_base=base,
     )
 
 
@@ -346,6 +351,46 @@ def test_a_supported_repair_entry_never_parks() -> None:
     assert first_unmet(CLAUDE_NATIVE_CAPABILITIES, facts) is None
 
 
+@pytest.mark.parametrize(
+    "caps",
+    [CODEX_CAPABILITIES, OPENCODE_CAPABILITIES, LOCAL_CAPABILITIES],
+    ids=lambda c: c.harness.value,
+)
+def test_a_based_row_is_refused_where_the_harness_does_not_deliver_the_base(
+    caps: HarnessCapabilities,
+) -> None:
+    unmet = first_unmet(caps, _facts(Stage.IMPL, base=True))
+    assert unmet == Unmet(
+        reason=PreflightReason.BASE_UNSUPPORTED_BACKEND,
+        details=base_unsupported_details(caps.harness.value),
+        retry_eligible=False,
+    )
+    assert first_unmet(caps, _facts(Stage.IMPL)) is None
+
+
+def test_a_based_row_passes_on_claude_native() -> None:
+    assert (
+        first_unmet(CLAUDE_NATIVE_CAPABILITIES, _facts(Stage.IMPL, base=True)) is None
+    )
+
+
+def test_only_claude_native_delivers_a_base() -> None:
+    assert frozenset({Harness.CLAUDE_NATIVE}) == BASE_SUPPORTING_HARNESSES
+
+
+def test_the_repair_refusal_wins_over_the_base_refusal() -> None:
+    facts = _facts(Stage.IMPL, feedback=True, adopted=True, base=True)
+    unmet = first_unmet(OPENCODE_CAPABILITIES, facts)
+    assert unmet is not None
+    assert unmet.reason is PreflightReason.REPAIR_ENTRY_UNSUPPORTED_BACKEND
+
+
+def test_the_stage_refusal_wins_over_the_base_refusal() -> None:
+    unmet = first_unmet(LOCAL_CAPABILITIES, _facts(Stage.PLAN, base=True))
+    assert unmet is not None
+    assert unmet.reason is PreflightReason.STAGE_UNSUPPORTED
+
+
 def test_an_empty_declaration_names_none() -> None:
     details = stage_unsupported_details("x", Stage.PLAN, frozenset())
     assert "(declared: none)" in details
@@ -517,6 +562,13 @@ def test_remediation_takes_only_the_client_reference() -> None:
     assert "wait" not in text
 
 
+def test_base_details_name_the_backend_and_the_way_out() -> None:
+    details = base_unsupported_details("opencode")
+    assert "backend=opencode" in details
+    assert "Blocked before any agent runs." in details
+    assert "re-add it without a base_branch" in details
+
+
 @pytest.mark.parametrize("backend", [LOCAL_BACKEND, OPENCODE_BACKEND])
 def test_repair_details_name_the_backend_and_the_decision(backend: str) -> None:
     details = repair_entry_details(backend)
@@ -553,6 +605,22 @@ def test_spawn_facts_without_an_engine_carry_no_refusal(tmp_path: Path) -> None:
         feedback=True,
         adopted=True,
     )
+
+
+@pytest.mark.parametrize(("row_base", "expected"), [("epic/1", True), (None, False)])
+def test_spawn_facts_carry_has_base_from_the_row(
+    tmp_path: Path, row_base: str | None, expected: bool
+) -> None:
+    task = TicketTask(
+        ticket_id="T-1", client="test", stage=Stage.IMPL, base_branch=row_base
+    )
+    facts = spawn_facts(
+        LOCAL_CAPABILITIES,
+        task=task,
+        client=review_client(tmp_path, "blocking"),
+        stage=Stage.IMPL,
+    )
+    assert facts.has_base is expected
 
 
 # ---------------------------------------------------------------------------
@@ -673,6 +741,40 @@ def test_local_parks_before_the_endpoint_aider_and_plan_checks(
     assert result.blocker.reason == reason
     assert result.blocker.retry_eligible is False
     assert result.stage_reached == stage_entry_marker(stage.value)
+
+
+@pytest.mark.parametrize("harness", ["opencode", "local", "codex"])
+def test_a_based_row_parks_before_any_probe_or_launch(
+    harness: str,
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#3781: no availability probe is patched, so the pre-flight decides first."""
+    worktree = make_git_repo(f"wt-base-preflight-{harness}")
+    runner = FakeFireAndForgetRunner()
+    task = based_row(Stage.IMPL)
+    client = ClientConfig(name="test", workspace_path=worktree)
+    if harness == "opencode":
+        OpencodeExecutor(
+            config=StageExecutorConfig(backend=OPENCODE_BACKEND, model="m"),
+            runner=runner,
+        ).spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+    elif harness == "local":
+        LocalExecutor(
+            config=StageExecutorConfig(backend=LOCAL_BACKEND, model="m"),
+            runner=runner,
+        ).spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+    else:
+        CodexExecutor(
+            config=StageExecutorConfig(backend=CODEX_BACKEND), runner=runner
+        ).spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+    result = blocked_result()
+    assert runner.calls == []
+    assert result.blocker is not None
+    assert result.blocker.reason == PreflightReason.BASE_UNSUPPORTED_BACKEND
+    assert result.blocker.retry_eligible is False
+    assert result.stage_reached == "stage2_impl"
+    assert f"backend={harness}" in result.blocker.details
 
 
 def test_codex_harden_parks_before_the_binary_probe(

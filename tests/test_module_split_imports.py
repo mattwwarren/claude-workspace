@@ -22,7 +22,8 @@ passed before any source moved:
    ``tests/fixtures/models_tasks_schemas.json``, captured from the unsplit
    module and regenerated (``json.dumps(..., indent=1)`` plus a newline) only
    by a deliberate schema change, such as v57's ``TicketTask.review_debt``
-   (#3041). Serialization field order drives the ``dev_queue.json`` layout.
+   (#3041) and v66's ``TicketTask.base_branch`` description (#3781).
+   Serialization field order drives the ``dev_queue.json`` layout.
 6. Each old path imports cleanly in a cold interpreter.
 7. Logger names are unchanged.
 """

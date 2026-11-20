@@ -98,7 +98,7 @@ from __future__ import annotations
 from cw.doctor._shared import CheckResult, DoctorReport, ReapScope, WedgeFinding
 from cw.doctor.agent_spec_drift import _check_agent_spec_drift
 from cw.doctor.bindings import _check_bindings
-from cw.doctor.capabilities import _check_harness_capabilities
+from cw.doctor.capabilities import _check_base_backend, _check_harness_capabilities
 from cw.doctor.codex_fix_loop import _check_codex_fix_loop
 from cw.doctor.commit_hook import _check_commit_hook, _check_hook_install_python
 from cw.doctor.config_checks import (
@@ -175,6 +175,7 @@ __all__ = [
     "WedgeFinding",
     "_check_agent_spec_drift",
     "_check_attention_state_census",
+    "_check_base_backend",
     "_check_bindings",
     "_check_claude_version",
     "_check_codex_capability",

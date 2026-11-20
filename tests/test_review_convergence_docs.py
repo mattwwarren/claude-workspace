@@ -793,7 +793,7 @@ def test_finalize_clean_mode_reaches_the_delegated_child_and_rechecks() -> None:
     sensitive = _after(content, "Because this decision is HEAD-sensitive", span=900)
     assert "Step 4.0 and then Step 4.0b" in sensitive
     assert '"the exact fence"' in sensitive
-    assert "  git merge origin/main --no-edit\n" in content
+    assert "  git merge origin/<base> --no-edit\n" in content
 
 
 # --- contract docs ------------------------------------------------------------

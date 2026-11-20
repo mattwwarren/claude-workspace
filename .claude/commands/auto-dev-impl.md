@@ -20,6 +20,9 @@ In standalone headless invocation: emit `AUTO_DEV_RESULT` after this stage compl
 
 **Branch resolution.** `<branch-name>` is this ticket's own branch: run `jq -r '.queue_metadata.branch // empty' .claude/cw-context.json` from the cw session worktree root and use what it prints. When it prints nothing (the file or key is absent, or the value is null), use `<branch-prefix>/<ticket-id>`, where `<branch-prefix>` is the effective prefix (`--branch-prefix` if given, else the client's `feature_branch_prefix`, default `dev`). Do not take it from `git branch --show-current`: an isolation worktree may sit on an `agent-<hash>` branch.
 
+<!-- el: impl.base-branch-resolution -->
+**Base resolution.** `<base>` is the branch this ticket merges into: run `jq -r '.base_branch // .world_state_snapshot.origin_main_branch // empty' .claude/cw-context.json` from the cw session worktree root and use what it prints. When it prints nothing (the file or both keys are absent), use the repository default branch: the name `git symbolic-ref --short refs/remotes/origin/HEAD` prints with its leading `origin/` removed. Every fetch, merge, diff range, `--base` argument and open-PR filter in this document that names the merge target means `<base>`; never type a branch name for it.
+
 ---
 
 > **Model selection (size-based, v4):** resolve `$IMPL_MODEL` from the plan's size advisory via
@@ -419,31 +422,31 @@ Stage 2 agent spawn:
 - The approved plan (full text); for a repair entry with no plan, the feedback payload and live PR context instead (see "Repair entry: no plan" above)
 - Branch: `<branch-name>` (see **Branch resolution** above; with no recorded row branch this is `<branch-prefix>/<ticket-id>`, default prefix `dev`)
 <!-- el: impl.branch-freshness -->
-- **Branch freshness:** Before starting work, fetch main and ask whether merging it would conflict. Merge only on a conflict (the default-branch merge policy, `docs/dispatch-runbook.md` "Default-branch merge policy (#2979)"): a branch merely behind main, or whose merge would be clean, is left as is.
+- **Branch freshness:** Before starting work, fetch `<base>` and ask whether merging it would conflict. Merge only on a conflict (the default-branch merge policy, `docs/dispatch-runbook.md` "Default-branch merge policy (#2979)"): a branch merely behind `<base>`, or whose merge would be clean, is left as is.
   ```bash
-  git fetch origin main
-  # Remember whether the fetch worked: the probe reads origin/main and never
+  git fetch origin <base>
+  # Remember whether the fetch worked: the probe reads origin/<base> and never
   # fetches, so a stale one must never reach a merge decision.
   FETCH_RC=$?
   if [ "$FETCH_RC" -eq 0 ]; then
-    PROBE_JSON="$(cw worktree merge-probe --base main)"
+    PROBE_JSON="$(cw worktree merge-probe --base <base>)"
     PROBE_RC=$?
     PROBE_STATE="$(printf '%s' "$PROBE_JSON" | jq -r .state 2>/dev/null)"
     echo "PROBE_RC=$PROBE_RC PROBE_STATE=$PROBE_STATE"
     printf '%s\n' "$PROBE_JSON"
   else
     echo "PROBE_RC=skipped PROBE_STATE=skipped"
-    echo "git fetch origin main failed (exit $FETCH_RC): probe skipped, no merge"
+    echo "git fetch origin <base> failed (exit $FETCH_RC): probe skipped, no merge"
   fi
   ```
-  The fetch comes first, in the same fence: the probe never fetches, and a stale `origin/main` makes it wrongly report `up_to_date` or `clean`. If the fetch fails, do NOT probe: the fence enforces this itself and prints `PROBE_RC=skipped PROBE_STATE=skipped`; log `merge_probe_unavailable` in friction and start work with no merge. Shell variables do not survive between Bash calls: read `PROBE_RC` / `PROBE_STATE` from the printed `PROBE_RC=… PROBE_STATE=…` line of that tool result. Exit 0 (`up_to_date` or `clean`): no merge. Exit 3 (`unavailable`), or any other combination (exit 1 without a `conflict` state, exit 2, an empty or unparseable state; a `cw` crash also exits 1): log `merge_probe_unavailable` and start work with no merge. `PROBE_RC` 1 AND `PROBE_STATE` `conflict` (both, never the exit code alone) only:
+  The fetch comes first, in the same fence: the probe never fetches, and a stale `origin/<base>` makes it wrongly report `up_to_date` or `clean`. If the fetch fails, do NOT probe: the fence enforces this itself and prints `PROBE_RC=skipped PROBE_STATE=skipped`; log `merge_probe_unavailable` in friction and start work with no merge. Shell variables do not survive between Bash calls: read `PROBE_RC` / `PROBE_STATE` from the printed `PROBE_RC=… PROBE_STATE=…` line of that tool result. Exit 0 (`up_to_date` or `clean`): no merge. Exit 3 (`unavailable`), or any other combination (exit 1 without a `conflict` state, exit 2, an empty or unparseable state; a `cw` crash also exits 1): log `merge_probe_unavailable` and start work with no merge. `PROBE_RC` 1 AND `PROBE_STATE` `conflict` (both, never the exit code alone) only:
   ```bash
-  git merge origin/main
+  git merge origin/<base>
   ```
   A merge conflict here is a BLOCK in friction — the worktree starts from a conflicted state and cannot proceed. Exception: on a regress into IMPL (`REGRESSED_INTO_STAGE` is `impl`, see the appendix's Pre-Stage Detector Guard) that arrives with `MERGE_HEAD` already set — an unconcluded merge left by FINALIZE's pre-push refresh — resolving that merge is the point of the session, not a reason to block: conclude it per the **Pre-completion merge guard (#2421)** bullet below.
-- **Record the fork point** immediately after merging main — the exact commit the feature branch diverged from, used for all deterministic diffs downstream:
+- **Record the fork point** immediately after merging `<base>` — the exact commit the feature branch diverged from, used for all deterministic diffs downstream:
   ```bash
-  FORK_POINT=$(git merge-base origin/main HEAD)
+  FORK_POINT=$(git merge-base origin/<base> HEAD)
   ```
   Include `FORK_POINT` in the friction report. The value is immutable and must be used for every subsequent diff operation in the pipeline.
 - Phase 1: write tests, run in isolation, confirm they FAIL
@@ -554,11 +557,11 @@ After the implementation agent returns (or times out — see Mitigation 4), befo
 **Pre-gate: verify branch was pushed**
 
 ```bash
-git fetch origin main <branch-name>
+git fetch origin <base> <branch-name>
 git rev-parse --verify origin/<branch-name> || { echo "IMPL_NOT_PUSHED"; exit 1; }
 ```
 
-Fetching `main` alongside `<branch-name>` ensures `origin/main` is current before the `merge-base` call below. If the impl branch ref is absent → EXIT `blocked` with `blocker.reason: "impl_not_pushed"`. The agent claimed done but nothing was pushed; the empty-diff vacuous pass would fire on every subsequent gate.
+Fetching `<base>` alongside `<branch-name>` ensures `origin/<base>` is current before the `merge-base` call below. If the impl branch ref is absent → EXIT `blocked` with `blocker.reason: "impl_not_pushed"`. The agent claimed done but nothing was pushed; the empty-diff vacuous pass would fire on every subsequent gate.
 
 **Gate setup: create one trap-cleaned temp worktree at `origin/<branch-name>`**
 
@@ -568,7 +571,7 @@ Fetching `main` alongside `<branch-name>` ensures `origin/main` is current befor
 # live path is not.
 trap - EXIT INT TERM
 GATE_WT_CLEANED=1
-FORK_POINT=$(git merge-base origin/main origin/<branch-name>)
+FORK_POINT=$(git merge-base origin/<base> origin/<branch-name>)
 # Gate key: gate_key.py is the one place the gate paths are named. It keys them on
 # the clone's identity plus the branch, so two gates on one host never share a path.
 # Resolved repo-local first, then the installed copy; a miss stops the gate.
@@ -691,7 +694,7 @@ All gates below run their diff/test/lint data operations inside `$TMPWT`. Do NOT
      echo "IMPL_FAILED: Step 2.5 gate 2: gate worktree $TMPWT missing (run Gate setup first)"
      exit 3
    fi
-   FORK_POINT=$(git -C "$TMPWT" merge-base origin/main origin/<branch-name>) || {
+   FORK_POINT=$(git -C "$TMPWT" merge-base origin/<base> origin/<branch-name>) || {
      echo "IMPL_FAILED: Step 2.5 gate 2: merge-base failed"; exit 3; }
    MIN_VERSION=3  # per the script version table in auto-dev-impl.md
    TOUCHED=$(git -C "$TMPWT" diff --name-only "$FORK_POINT") || {
@@ -839,7 +842,7 @@ This step replaces "trust the agent's `Could work be incomplete?: NO`" with "ver
 <!-- el: impl.checkpoint-2 -->
 ### Checkpoint 2 (Implementation Approval)
 
-**Small scope → AUTO-ACCEPT.** Log to user: worktree path and branch name; **fork point SHA** (the merge-base recorded after syncing with main — required for all subsequent diffs); **pushed commit SHA** (verify the agent actually pushed to origin — if not, escalate as BLOCK; the fix loop and PR creation both depend on it); files changed with line counts; test results; lint + type check results; friction report (highlight WARN/BLOCK — BLOCK still stops regardless of scope).
+**Small scope → AUTO-ACCEPT.** Log to user: worktree path and branch name; **fork point SHA** (the merge-base recorded after syncing with `<base>` — required for all subsequent diffs); **pushed commit SHA** (verify the agent actually pushed to origin — if not, escalate as BLOCK; the fix loop and PR creation both depend on it); files changed with line counts; test results; lint + type check results; friction report (highlight WARN/BLOCK — BLOCK still stops regardless of scope).
 
 **Large scope → AskUserQuestion:** present the same information, then "Implementation complete for <ticket-id>. Approve for review, adjust, or abort?"
 

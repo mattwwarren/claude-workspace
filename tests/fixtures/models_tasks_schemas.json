@@ -1421,6 +1421,7 @@
       }
      ],
      "default": null,
+     "description": "The branch this row merges into; null means the client's default branch. This is the stored value, not the resolved one. Workers get the resolved value (this field, else the client's default_branch) as the top-level base_branch key of .claude/cw-context.json, always a non-empty string.",
      "title": "Base Branch"
     },
     "adopted_pr_url": {
@@ -3809,6 +3810,7 @@
         }
        ],
        "default": null,
+       "description": "The branch this row merges into; null means the client's default branch. This is the stored value, not the resolved one. Workers get the resolved value (this field, else the client's default_branch) as the top-level base_branch key of .claude/cw-context.json, always a non-empty string.",
        "title": "Base Branch"
       },
       "adopted_pr_url": {
@@ -6292,6 +6294,7 @@
         }
        ],
        "default": null,
+       "description": "The branch this row merges into; null means the client's default branch. This is the stored value, not the resolved one. Workers get the resolved value (this field, else the client's default_branch) as the top-level base_branch key of .claude/cw-context.json, always a non-empty string.",
        "title": "Base Branch"
       },
       "adopted_pr_url": {
@@ -9135,6 +9138,7 @@
       }
      ],
      "default": null,
+     "description": "The branch this row merges into; null means the client's default branch. This is the stored value, not the resolved one. Workers get the resolved value (this field, else the client's default_branch) as the top-level base_branch key of .claude/cw-context.json, always a non-empty string.",
      "title": "Base Branch"
     },
     "adopted_pr_url": {
@@ -11522,6 +11526,7 @@
         }
        ],
        "default": null,
+       "description": "The branch this row merges into; null means the client's default branch. This is the stored value, not the resolved one. Workers get the resolved value (this field, else the client's default_branch) as the top-level base_branch key of .claude/cw-context.json, always a non-empty string.",
        "title": "Base Branch"
       },
       "adopted_pr_url": {

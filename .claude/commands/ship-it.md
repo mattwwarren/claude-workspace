@@ -18,12 +18,19 @@ Quality gates (ruff/mypy/pytest) are handled by `/prep-pr` Step 7 — do not re-
 <!-- el: ship-it.parse-arguments -->
 ## Step 1: Parse arguments
 
-Default base to `main`. Override with `--base <branch>` if provided in `$ARGUMENTS`. Extract `--title <value>` into `EXPLICIT_TITLE` if provided:
+Set `BASE` from `--base <branch>` if provided in `$ARGUMENTS`, reading only the text before `--title` (a title may quote `--base`; `/prep-pr` always passes `--title` last, so the title runs to the end of the string). When `--base` is absent, use the repository default branch: the name `git symbolic-ref --short refs/remotes/origin/HEAD` prints with its leading `origin/` removed. When that is also empty, BLOCK with "pass --base": never assume a branch name. This fence also writes the resolved value to `.cw/ship-it-base`. Shell variables do not survive between Bash calls, so every later fence that uses `${BASE}` begins with the re-derivation block below (it reads that file and fails loudly if the value is missing, never running on an empty base). Extract `--title <value>` into `EXPLICIT_TITLE` if provided:
 
 ```bash
+BASE=$(printf '%s' "$ARGUMENTS" | sed -n -e 's/^--title .*//' -e 's/ --title .*//' -e 's/.*--base \([^ ]*\).*/\1/p')
+[ -n "$BASE" ] || BASE=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+if [ -z "$BASE" ]; then
+  echo "BLOCK: no base branch: --base was not given and origin/HEAD is not set. Pass --base <branch>." >&2
+  exit 1
+fi
+mkdir -p .cw && printf '%s\n' "$BASE" > .cw/ship-it-base
 EXPLICIT_TITLE=""
 if printf '%s' "$ARGUMENTS" | grep -qE '(^| )--title '; then
-  EXPLICIT_TITLE=$(printf '%s' "$ARGUMENTS" | sed 's/.*--title //' | sed 's/ --.*//')
+  EXPLICIT_TITLE=${ARGUMENTS#*--title }
 fi
 ```
 
@@ -64,7 +71,8 @@ If push fails (e.g., diverged), BLOCK and park for the orchestrator — never fo
 Read the latest commit message and recent commits to draft a PR title + body.
 
 ```bash
-RANGE_BODY=$(git log --format='- %s' "origin/main..HEAD")
+BASE=$(cat .cw/ship-it-base 2>/dev/null); : "${BASE:?BLOCK: no base branch recorded in .cw/ship-it-base; re-run Step 1 with --base <branch>}"
+RANGE_BODY=$(git log --format='- %s' "origin/${BASE}..HEAD")
 
 # Tier 1: Explicit --title override (passed from /prep-pr --title)
 LAST_RESORT_TITLE=""
@@ -74,20 +82,20 @@ else
   # Tier 2: chore(release) commit always wins outright — a release branch's
   # docs(...)/other fixup commits must never out-rank the version-bump
   # commit itself, regardless of commit order (#1531)
-  TITLE=$(git log --reverse --format='%s' origin/main..HEAD \
+  TITLE=$(git log --reverse --format='%s' "origin/${BASE}..HEAD" \
     | grep -E '^chore\(release\):' \
     | head -1)
 
   if [ -z "$TITLE" ]; then
     # Tier 3: First substantive conventional-commit (excludes chore/style/revert/test/docs)
-    TITLE=$(git log --reverse --format='%s' origin/main..HEAD \
+    TITLE=$(git log --reverse --format='%s' "origin/${BASE}..HEAD" \
       | grep -E '^(feat|fix|refactor|build|perf|ci)(\(.*\))?:' \
       | head -1)
   fi
 
   if [ -z "$TITLE" ]; then
     # Tier 4: First test/docs conventional-commit (test/docs-only branches)
-    TITLE=$(git log --reverse --format='%s' origin/main..HEAD \
+    TITLE=$(git log --reverse --format='%s' "origin/${BASE}..HEAD" \
       | grep -E '^(test|docs)(\(.*\))?:' \
       | head -1)
   fi
@@ -150,7 +158,8 @@ accepted false negative, and adding a changelog entry or label for those
 titles would be noise the gate was deliberately designed not to demand.
 
 ```bash
-CHANGED_FILES=$(git diff --name-only origin/main...HEAD)
+BASE=$(cat .cw/ship-it-base 2>/dev/null); : "${BASE:?BLOCK: no base branch recorded in .cw/ship-it-base; re-run Step 1 with --base <branch>}"
+CHANGED_FILES=$(git diff --name-only "origin/${BASE}...HEAD")
 
 GATE_FIRES=false
 if printf '%s' "$TITLE" | grep -qE '^(feat|fix)\('; then
@@ -185,7 +194,8 @@ EXTRA_LABEL_ARGS=""
      ```bash
      git add CHANGELOG.md
      git commit -m "docs(changelog): <one-line summary>"
-     CHANGED_FILES=$(git diff --name-only origin/main...HEAD)
+     BASE=$(cat .cw/ship-it-base 2>/dev/null); : "${BASE:?BLOCK: no base branch recorded in .cw/ship-it-base}"
+     CHANGED_FILES=$(git diff --name-only "origin/${BASE}...HEAD")
      ```
   2. **Escape hatch: `no-changelog` label** — only when the change genuinely
      has nothing user-visible to document (an internal guard, a test-only
@@ -221,8 +231,9 @@ ${LAST_RESORT_TITLE:+
 Then create the PR with `gh pr create`:
 
 ```bash
+BASE=$(cat .cw/ship-it-base 2>/dev/null); : "${BASE:?BLOCK: no base branch recorded in .cw/ship-it-base}"
 gh pr create \
-  --base "${BASE:-main}" \
+  --base "$BASE" \
   --head "$BRANCH" \
   --title "$TITLE" \
   ${EXTRA_LABEL_ARGS} \
@@ -324,7 +335,7 @@ If the script exits non-zero, BLOCK with the JSON. Do not paper over failures.
 <!-- el: ship-it.failure-modes -->
 ## Failure modes
 
-- **Push fails (diverged):** BLOCK for the orchestrator to rebase or merge main first.
+- **Push fails (diverged):** BLOCK for the orchestrator to rebase or merge `<base>` first.
 - **PR creation fails:** BLOCK with the `gh` error verbatim.
 - **Auto-merge enable fails:** BLOCK — the PR exists but auto-merge isn't on; don't silently leave it unset.
 - **Finalize verification fails:** BLOCK with the JSON; do not paper over.

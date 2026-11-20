@@ -176,7 +176,7 @@ def test_stale_guard_fence_skips_when_absent_from_both_locations(
 def test_semantic_resolve_section_inserted_before_blocker_template() -> None:
     content = _finalize()
     rebase_idx = content.index(
-        "**One merge of `origin/main` (no loops, never a rebase or force-push):**"
+        "**One merge of `origin/<base>` (no loops, never a rebase or force-push):**"
     )
     section_idx = content.index(_SECTION_HEADING)
     template_idx = content.index(_TEMPLATE_HEADING)
@@ -194,7 +194,7 @@ def test_the_conflicting_row_enters_semantic_resolve_directly() -> None:
 def test_blocker_template_json_shape_unchanged() -> None:
     """#1879 relocated the template's JSON body to
     ``auto-dev-finalize-appendix.md`` — it is reached only when Step 4c.5's
-    one merge of ``origin/main`` (the semantic auto-resolve) failed or was
+    one merge of ``origin/<base>`` (the semantic auto-resolve) failed or was
     refused, so it is rare-path. The ``_TEMPLATE_HEADING`` marker stays in
     the core doc (it is also the end anchor of the indivisible #1850
     semantic-resolve section, which did not move), and the JSON shape is
@@ -207,8 +207,8 @@ def test_blocker_template_json_shape_unchanged() -> None:
         '"reason": "merge_conflict_post_push"',
         '"exception_type": null',
         (
-            '"message": "PR is open but conflicts with main; merge of'
-            ' origin/main not resolved"'
+            '"message": "PR is open but conflicts with <base>; merge of'
+            ' origin/<base> not resolved"'
         ),
         '"retry_eligible": true',
         '"retry_delay_seconds": null',
@@ -217,8 +217,8 @@ def test_blocker_template_json_shape_unchanged() -> None:
         assert field in template
     assert (
         '"details": "PR #<N> opened with conflicts after sibling merges to'
-        " origin/main between /prep-pr's sync-with-main and PR open. One"
-        " merge of origin/main attempted and not resolved; conflicted files:"
+        " origin/<base> between /prep-pr's sync-with-base and PR open. One"
+        " merge of origin/<base> attempted and not resolved; conflicted files:"
         ' <list>"' in template
     )
 

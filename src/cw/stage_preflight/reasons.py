@@ -23,8 +23,9 @@ if TYPE_CHECKING:
 class PreflightReason(StrEnum):
     """Why the stage pre-flight refused a spawn before any agent ran.
 
-    ``STAGE_UNSUPPORTED`` replaces the per-backend stage reasons. The three
-    capability reasons keep their pre-H2 names. The three ``BINDING_*`` values
+    ``STAGE_UNSUPPORTED`` replaces the per-backend stage reasons. The four
+    capability reasons keep their names (``BASE_UNSUPPORTED_BACKEND`` is the
+    RFC 0020 A1 addition, #3781). The three ``BINDING_*`` values
     are the tick-side reachability dispositions (RFC 0019 H2b, #3744), which
     replace the tracker-MCP gate's ``tracker_mcp_gate``.
     """
@@ -33,6 +34,7 @@ class PreflightReason(StrEnum):
     CLEAN_REVIEW_UNSUPPORTED_BACKEND = "clean_review_unsupported_backend"
     REVIEW_ENGINE_UNSUPPORTED_BACKEND = "review_engine_unsupported_backend"
     REPAIR_ENTRY_UNSUPPORTED_BACKEND = "repair_entry_unsupported_backend"
+    BASE_UNSUPPORTED_BACKEND = "base_unsupported_backend"
     BINDING_UNBOUND = "binding_unbound"
     BINDING_UNREACHABLE = "binding_unreachable"
     BINDING_TOOL_MISSING = "binding_tool_missing"

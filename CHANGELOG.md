@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Base branch delivered to workers (#3781, RFC 0020 A1).** `.claude/cw-context.json` carries a top-level `base_branch`, always a non-empty string: the row's `base_branch`, else the client's `default_branch`. Context schema bumped to v23; a v22 context reads as the client default, and an in-flight v22 worktree reads as not clean mode until its next spawn rewrites the file. The stage and ship prose now name `<base>` as the merge target instead of a literal `main`, and Step 4a's open-PR overlap check filters on `baseRefName`. Only claude-native delivers a non-null base. opencode, local and codex refuse such a row with `base_unsupported_backend` before any agent runs (codex follows in #3782). `cw doctor` adds `base-backend/<client>/<lane>` FAILs for live rows that cannot be delivered.
+
 ### Changed
 
 - **Worktree, gate, sweep, repair and harvest reads use the row's merge base (#3780, RFC 0020 S2).** Worktree creation (a new branch is cut from `origin/<base>`, fetched first through the same bounded tick fetch; a base missing on origin raises), the reuse refresh of a never-pushed branch, the unpushed-work check, the empty-diff gate, the `branch_behind_main` probe, conflict repair (the PR must sit on the row's base), the fix agent's merge probe, the cancelled-row probe and the harvest fork point now read `resolve_base_branch(client, task)`. A null base is unchanged. The review-staleness gate, approval gate, repair fence and scope guard stay on the default branch until S3, and no row can carry a base before B1.

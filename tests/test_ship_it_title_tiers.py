@@ -17,6 +17,7 @@ out of real branch history, which is the entire bug.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -48,6 +49,7 @@ def _run_title_tiers(
     commits: list[str],
     *,
     explicit_title: str = "",
+    base: str = "main",
 ) -> str:
     """Run the extracted tier ladder over a synthetic branch history.
 
@@ -65,12 +67,23 @@ def _run_title_tiers(
     """
     repo = make_git_repo("title-tiers")
     git_in(repo, "remote", "add", "origin", str(repo))
-    git_in(repo, "fetch", "origin", "main")
+    if base != "main":
+        git_in(repo, "branch", base)
+    git_in(repo, "fetch", "origin", base)
     for subject in commits:
         git_in(repo, "commit", "--allow-empty", "-m", subject)
 
+    # Workers never inherit BASE: Step 1 records it in .cw/ship-it-base and
+    # each later fence re-derives it from that file, so the test does the same.
+    (repo / ".cw").mkdir(exist_ok=True)
+    (repo / ".cw" / "ship-it-base").write_text(f"{base}\n", encoding="utf-8")
+
     script = _title_tier_script() + '\nprintf "TITLE=%s\\n" "$TITLE"\n'
-    env = {**_clean_git_env(), "EXPLICIT_TITLE": explicit_title, "ARGUMENTS": ""}
+    env = {
+        **_clean_git_env(),
+        "EXPLICIT_TITLE": explicit_title,
+        "ARGUMENTS": "",
+    }
     result = subprocess.run(
         ["/bin/bash", "-c", script],
         cwd=str(repo),
@@ -179,3 +192,152 @@ def test_explicit_title_wins_over_first_commit_helper(
         explicit_title="feat(codex): make the codex fix loop push its commits (#2354)",
     )
     assert title == "feat(codex): make the codex fix loop push its commits (#2354)"
+
+
+def test_title_ladder_follows_recorded_base_row(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    """A non-default-base row (#3781): the ladder ranges over ``origin/<base>``,
+    read from ``.cw/ship-it-base``, never from an inherited ``BASE`` variable."""
+    title = _run_title_tiers(
+        make_git_repo,
+        ["chore(release): bump version to 1.24.1", "docs: fix typo"],
+        base="epic/x",
+    )
+    assert title == "chore(release): bump version to 1.24.1"
+
+
+def test_fence_fails_loud_without_recorded_base(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    """With no ``.cw/ship-it-base`` the re-derivation fence must stop rather
+    than range over an empty base (``origin/..HEAD``)."""
+    repo = make_git_repo("no-base")
+    git_in(repo, "remote", "add", "origin", str(repo))
+    git_in(repo, "fetch", "origin", "main")
+    script = _title_tier_script() + '\nprintf "TITLE=%s\\n" "$TITLE"\n'
+    result = subprocess.run(
+        ["/bin/bash", "-c", script],
+        cwd=str(repo),
+        env={**_clean_git_env(), "EXPLICIT_TITLE": "", "ARGUMENTS": ""},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "no base branch recorded in .cw/ship-it-base" in result.stderr
+
+
+def _parse_arguments_script() -> str:
+    """Extract the Step 1 argument-parse bash fence verbatim."""
+    content = _ship_it_text()
+    start = content.index(FENCE, content.index("## Step 1"))
+    end = content.index("```", start + len(FENCE))
+    return content[start + len(FENCE) : end]
+
+
+def _run_parse_arguments(
+    make_git_repo: Callable[..., Path],
+    arguments: str,
+    *,
+    origin_head: str | None = None,
+) -> tuple[str, str, str]:
+    """Run the Step 1 fence in a fresh bash with no inherited ``BASE``.
+
+    Returns ``(BASE, recorded .cw/ship-it-base, EXPLICIT_TITLE)``. *origin_head*
+    points ``refs/remotes/origin/HEAD`` at that branch so the no-``--base``
+    fallback has something to read.
+    """
+    repo = make_git_repo("parse-args")
+    if origin_head is not None:
+        git_in(repo, "remote", "add", "origin", str(repo))
+        git_in(repo, "fetch", "origin", origin_head)
+        git_in(
+            repo,
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            f"refs/remotes/origin/{origin_head}",
+        )
+    script = (
+        _parse_arguments_script()
+        + '\nprintf "BASE=%s\\n" "$BASE"\nprintf "TITLE=%s\\n" "$EXPLICIT_TITLE"\n'
+    )
+    result = subprocess.run(
+        ["/bin/bash", "-c", script],
+        cwd=str(repo),
+        env={**_clean_git_env(), "ARGUMENTS": arguments},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    recorded = (repo / ".cw" / "ship-it-base").read_text(encoding="utf-8").strip()
+    return fields["BASE"], recorded, fields["TITLE"]
+
+
+def test_step1_base_ignores_flag_text_inside_title(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    """A ``--title`` that mentions ``--base`` must not override the real base.
+
+    ``/prep-pr`` passes ``--base <base>``, then ``--draft``, then ``--title``
+    last, and ticket titles can quote the flag (this one does)."""
+    title = "fix(ship-it): honor --base across prep-pr"
+    base, recorded, explicit = _run_parse_arguments(
+        make_git_repo, f"--base release/x --draft --title {title}"
+    )
+    assert base == "release/x"
+    assert recorded == "release/x"
+    assert explicit == title
+
+
+def test_step1_base_with_plain_title(make_git_repo: Callable[..., Path]) -> None:
+    base, recorded, explicit = _run_parse_arguments(
+        make_git_repo, "--base epic/y --title feat: add the thing"
+    )
+    assert (base, recorded, explicit) == ("epic/y", "epic/y", "feat: add the thing")
+
+
+def test_step1_title_only_flag_text_falls_back_to_origin_head(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    """No real ``--base``: a ``--base`` quoted in the title is not one, so the
+    ``origin/HEAD`` default applies."""
+    base, recorded, explicit = _run_parse_arguments(
+        make_git_repo,
+        "--title fix: honor --base across prep-pr",
+        origin_head="main",
+    )
+    assert (base, recorded) == ("main", "main")
+    assert explicit == "fix: honor --base across prep-pr"
+
+
+def test_step1_no_arguments_uses_origin_head(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    base, recorded, explicit = _run_parse_arguments(
+        make_git_repo, "", origin_head="main"
+    )
+    assert (base, recorded, explicit) == ("main", "main", "")
+
+
+def _bash_fences(text: str) -> list[str]:
+    return re.findall(r"```bash\n(.*?)\n\s*```", text, flags=re.DOTALL)
+
+
+def test_every_base_reading_fence_assigns_base() -> None:
+    """Shell state does not persist between Bash calls: any ``bash`` fence in
+    ship-it.md that reads ``$BASE`` must assign it itself (the Step 1 fence is
+    the only one that sets it from ``--base``; the rest re-derive it)."""
+    offenders = []
+    for block in _bash_fences(_ship_it_text()):
+        reads = re.search(r"\$\{?BASE\b", block)
+        assigns = re.search(r"^\s*BASE=", block, flags=re.MULTILINE)
+        if reads and not assigns:
+            offenders.append(block.splitlines()[0])
+    assert offenders == []

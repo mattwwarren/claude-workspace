@@ -33,16 +33,16 @@ def test_title_composition_instructions_present() -> None:
 
 def test_prep_pr_invocations_include_composed_title() -> None:
     section = _step4c2_section()
-    assert "/prep-pr --skip-review --base main --title" in section
-    assert "/prep-pr --skip-review --base main --headless --title" in section
-    assert "/prep-pr --skip-review --base main --headless --draft --title" in section
+    assert "/prep-pr --skip-review --base <base> --title" in section
+    assert "/prep-pr --skip-review --base <base> --headless --title" in section
+    assert "/prep-pr --skip-review --base <base> --headless --draft --title" in section
 
 
 def test_old_bare_invocations_no_longer_present() -> None:
     section = _step4c2_section()
-    assert "/prep-pr --skip-review --base main`" not in section
-    assert "/prep-pr --skip-review --base main --headless`" not in section
-    assert "/prep-pr --skip-review --base main --headless --draft`" not in section
+    assert "/prep-pr --skip-review --base <base>`" not in section
+    assert "/prep-pr --skip-review --base <base> --headless`" not in section
+    assert "/prep-pr --skip-review --base <base> --headless --draft`" not in section
 
 
 def test_numeric_ticket_guard_present_for_title_suffix() -> None:

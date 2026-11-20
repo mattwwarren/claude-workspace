@@ -82,7 +82,7 @@ def test_step4c2_pushes_before_prep_pr_invocation() -> None:
     guard_idx = section.index(
         'if [ "$PROBE_RC" -eq 1 ] && [ "$PROBE_STATE" = "conflict" ]; then'
     )
-    merge_idx = section.index("git merge origin/main --no-edit", guard_idx)
+    merge_idx = section.index("git merge origin/<base> --no-edit", guard_idx)
     clause_idx = section.index("- Only after a merge (`PROBE_RC` 1", merge_idx)
     # Searched from the clause onward: #2354 added a pre-reset push of
     # unpushed local commits earlier in the same section, and a push above

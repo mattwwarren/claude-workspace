@@ -11,7 +11,12 @@ cycle (``tests/test_stage_preflight_imports.py`` pins that).
 - ``decision`` — :class:`SpawnFacts`, :class:`Unmet` and :func:`first_unmet`.
 """
 
-from cw.stage_preflight.decision import SpawnFacts, Unmet, first_unmet
+from cw.stage_preflight.decision import (
+    BASE_SUPPORTING_HARNESSES,
+    SpawnFacts,
+    Unmet,
+    first_unmet,
+)
 from cw.stage_preflight.needs import STAGE_NEEDS, StageNeeds, needs_for
 from cw.stage_preflight.reasons import (
     LEGACY_REASON_ALIASES,
@@ -20,6 +25,7 @@ from cw.stage_preflight.reasons import (
 )
 
 __all__ = [
+    "BASE_SUPPORTING_HARNESSES",
     "LEGACY_REASON_ALIASES",
     "STAGE_NEEDS",
     "PreflightReason",

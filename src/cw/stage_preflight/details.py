@@ -38,6 +38,14 @@ _REPAIR_ENTRY_DETAILS = (
     " proceed: run this ticket on the claude-native executor, or re-add it without"
     " --review-feedback-file or with cw dev-queue add --adopt-pr."
 )
+_BASE_UNSUPPORTED_DETAILS = (
+    "This row carries a non-default base_branch (the branch it merges into),"
+    " and backend={backend} does not deliver it to the worker, so the worker"
+    " would merge the client's default branch instead. Blocked before any"
+    " agent runs. Only the claude-native executor delivers a base today (RFC"
+    " 0020 A1; codex follows in #3782). To proceed: run this ticket on the"
+    " claude-native executor, or re-add it without a base_branch."
+)
 _STAGE_UNSUPPORTED_DETAILS = (
     "This {stage_upper} spawn is routed to harness={harness}, which does not"
     " declare the {stage} stage (declared: {declared}). Blocked before any agent"
@@ -67,6 +75,11 @@ def clean_review_details(harness: str) -> str:
 def repair_entry_details(harness: str) -> str:
     """Details of a ``repair_entry_unsupported_backend`` park on *harness*."""
     return _REPAIR_ENTRY_DETAILS.format(backend=harness)
+
+
+def base_unsupported_details(harness: str) -> str:
+    """Details of a ``base_unsupported_backend`` park on *harness*."""
+    return _BASE_UNSUPPORTED_DETAILS.format(backend=harness)
 
 
 def stage_unsupported_details(

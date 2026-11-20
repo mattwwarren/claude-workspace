@@ -85,7 +85,16 @@ class TicketTask(BaseModel):
     # set_base_branch, which refuses a change once ever_spawned. Identity, not
     # episode state: never cleared by transition_task_status, cancel, requeue
     # or move.
-    base_branch: str | None = None
+    base_branch: str | None = Field(
+        default=None,
+        description=(
+            "The branch this row merges into; null means the client's default "
+            "branch. This is the stored value, not the resolved one. Workers get "
+            "the resolved value (this field, else the client's default_branch) as "
+            "the top-level base_branch key of .claude/cw-context.json, always a "
+            "non-empty string."
+        ),
+    )
     # v50 (GitHub #2943, RFC 0016): the adopted human PR's url and the head
     # SHA the row is pinned to (reviewed at). Identity, not episode state:
     # neither is ever cleared by transition_task_status, cancel or requeue.

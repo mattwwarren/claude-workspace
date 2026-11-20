@@ -23,6 +23,9 @@ In standalone headless invocation: emit `AUTO_DEV_RESULT` after this stage compl
 > **Model selection:** All agent spawns in this file use explicit `model:` pins (Sonnet or Haiku). Do not change any pin to `model: inherit` — see CLAUDE.md §"Model Selection for Subagents" for the rationale and tier matrix.
 
 <!-- el-end: finalize.claude-review-verdict-md-if-present-is-this -->
+<!-- el: finalize.base-branch-resolution -->
+**Base resolution.** `<base>` is the branch this ticket merges into: run `jq -r '.base_branch // .world_state_snapshot.origin_main_branch // empty' .claude/cw-context.json` from the cw session worktree root and use what it prints. When it prints nothing (the file or both keys are absent), use the repository default branch: the name `git symbolic-ref --short refs/remotes/origin/HEAD` prints with its leading `origin/` removed. Every fetch, merge, diff range, `--base` argument and open-PR filter in this document that names the merge target means `<base>`; never type a branch name for it.
+
 <!-- el-begin: finalize.resolve-carried-through-context-before-emitting -->
 <!-- el: finalize.resolve-carried-through-context-before-emitting -->
 ## Resolve carried-through context before emitting the sentinel
@@ -222,10 +225,13 @@ Without `delta_confirm_eligible: true` no resolution round runs and the step par
 Before creating any PR, check for open PRs from this pipeline:
 
 ```bash
-gh pr list --author @me --state open --json number,title,headRefName,mergeable,mergeStateStatus
+gh pr list --author @me --state open --json number,title,headRefName,baseRefName,mergeable,mergeStateStatus
 ```
 
 Filter results for branches matching the pipeline's naming pattern (`<branch-prefix>/*`). The filter also admits PRs carried by a live dev-queue row (`adopted_pr_url` or the row's resolved branch, via `cw dev-queue adopted-prs -c <client>`, #2949), so an adopted PR on a non-prefix branch or authored by someone else still takes part in the overlap check; this ticket's own branch is `<branch-name>`.
+
+<!-- el: finalize.open-pr-base-filter -->
+**Open-PR base filter.** Only a PR that targets `<base>` takes part in this overlap check: a PR aimed at another branch cannot collide with this branch's merge into `<base>`. Add `baseRefName` to the `--json` list of every `gh pr list` in this step (the command above and both inventories in the fence below) and keep a PR only when its `baseRefName` equals `<base>`. The fence reads `<base>` from the context file with the same `jq` chain, takes the branch-file range from `origin/<base>`, and when it cannot read `<base>` exits 4 after `STEP4A_BLOCKED:` with `blocker.reason: "agent_block"` rather than listing every open PR.
 
 **If open PR found from this pipeline:**
 
@@ -242,7 +248,7 @@ section "Step 4a — interactive open-PR prompt". Read it now if that applies; d
 not improvise the prompt from memory.
 
 <!-- el: finalize.fix-prior-pr -->
-- **Fix** → Enter fix mode for the prior PR: if CI is failing, spawn agent (`model: "sonnet"`) in that branch's worktree to fix and push — pass `subagent_type: "general-purpose"` (#2211); if merge conflicts, fetch main, merge, resolve, push; if changes requested, enter Step 5b feedback handling for that PR. Then re-check status and re-present options.
+- **Fix** → Enter fix mode for the prior PR: if CI is failing, spawn agent (`model: "sonnet"`) in that branch's worktree to fix and push — pass `subagent_type: "general-purpose"` (#2211); if merge conflicts, fetch `<base>`, merge it, resolve, push; if changes requested, enter Step 5b feedback handling for that PR. Then re-check status and re-present options.
 
 **If no open PR from this pipeline:** Proceed immediately.
 
@@ -324,8 +330,19 @@ CURRENT_BRANCH=$(jq -r '.queue_metadata.branch // empty' \
   "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
 [ -n "$CURRENT_BRANCH" ] || CURRENT_BRANCH=$(git branch --show-current)
 CLIENT=$(jq -r '.client // empty' "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
-gh pr list --author @me --state open --json number,headRefName \
-  --jq '.[] | "\(.number) \(.headRefName)"' > "$MG_DIR/open-prs" 2>"$MG_DIR/open-prs-stderr"
+# <base>: the merge target, read with the same chain as the Base resolution
+# paragraph. Failing closed when it cannot be read: an empty base would list
+# every open PR as a sibling.
+BASE_BRANCH=$(jq -r '.base_branch // .world_state_snapshot.origin_main_branch // empty' \
+  "$GUARD_ROOT/.claude/cw-context.json" 2>/dev/null)
+[ -n "$BASE_BRANCH" ] || BASE_BRANCH=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+if [ -z "$BASE_BRANCH" ]; then
+  rm -rf "$MG_DIR"
+  echo "STEP4A_BLOCKED: blocker.reason: \"agent_block\" — Step 4a could not read the base branch (no base_branch in cw-context.json and no origin/HEAD), failing closed"
+  exit 4
+fi
+gh pr list --author @me --state open --json number,headRefName,baseRefName \
+  --jq '.[] | "\(.number) \(.headRefName) \(.baseRefName)"' > "$MG_DIR/open-prs" 2>"$MG_DIR/open-prs-stderr"
 PR_LIST_EXIT=$?
 if [ "$PR_LIST_EXIT" -ne 0 ]; then
   MG_ERR=$(head -c 300 "$MG_DIR/open-prs-stderr")
@@ -333,6 +350,15 @@ if [ "$PR_LIST_EXIT" -ne 0 ]; then
   echo "STEP4A_BLOCKED: blocker.reason: \"agent_block\" — Step 4a open-PR inventory failed (gh pr list exited $PR_LIST_EXIT), tooling error, failing closed: $MG_ERR"
   exit 4
 fi
+# Keep only PRs that target <base>, leaving two-column "number head" lines.
+awk -v base="$BASE_BRANCH" '$3==base{print $1,$2}' "$MG_DIR/open-prs" > "$MG_DIR/open-prs-on-base"
+BASE_FILTER_EXIT=$?
+if [ "$BASE_FILTER_EXIT" -ne 0 ]; then
+  rm -rf "$MG_DIR"
+  echo "STEP4A_BLOCKED: blocker.reason: \"agent_block\" — Step 4a open-PR base filter failed (awk exited $BASE_FILTER_EXIT), tooling error, failing closed"
+  exit 4
+fi
+mv "$MG_DIR/open-prs-on-base" "$MG_DIR/open-prs"
 # Adopted-PR inventory (#2949): PRs carried by a live dev-queue row, tagged
 # "adopted" so the loop's prefix filter admits them. Skipped without a client.
 ADOPTED_TAG=adopted
@@ -350,8 +376,8 @@ if [ -n "$CLIENT" ]; then
     exit 4
   fi
   if [ -s "$MG_DIR/adopted-rows" ]; then
-    gh pr list --state open --limit 1000 --json number,headRefName \
-      --jq '.[] | "\(.number) \(.headRefName)"' > "$MG_DIR/all-open-prs" 2>"$MG_DIR/all-open-prs-stderr"
+    gh pr list --state open --limit 1000 --json number,headRefName,baseRefName \
+      --jq '.[] | "\(.number) \(.headRefName) \(.baseRefName)"' > "$MG_DIR/all-open-prs" 2>"$MG_DIR/all-open-prs-stderr"
     ALL_OPEN_EXIT=$?
     if [ "$ALL_OPEN_EXIT" -ne 0 ]; then
       MG_ERR=$(head -c 300 "$MG_DIR/all-open-prs-stderr")
@@ -359,6 +385,14 @@ if [ -n "$CLIENT" ]; then
       echo "STEP4A_BLOCKED: blocker.reason: \"agent_block\" — Step 4a open-PR inventory for adopted rows failed (gh pr list exited $ALL_OPEN_EXIT), tooling error, failing closed: $MG_ERR"
       exit 4
     fi
+    awk -v base="$BASE_BRANCH" '$3==base{print $1,$2}' "$MG_DIR/all-open-prs" > "$MG_DIR/all-open-prs-on-base"
+    ALL_FILTER_EXIT=$?
+    if [ "$ALL_FILTER_EXIT" -ne 0 ]; then
+      rm -rf "$MG_DIR"
+      echo "STEP4A_BLOCKED: blocker.reason: \"agent_block\" — Step 4a adopted-PR base filter failed (awk exited $ALL_FILTER_EXIT), tooling error, failing closed"
+      exit 4
+    fi
+    mv "$MG_DIR/all-open-prs-on-base" "$MG_DIR/all-open-prs"
     awk -v tag="$ADOPTED_TAG" 'NR==FNR{num[$1]=1; ref[$2]=1; next} ($1 in num)||($2 in ref){print $1,$2,tag}' \
       "$MG_DIR/adopted-rows" "$MG_DIR/all-open-prs" >> "$MG_DIR/open-prs"
     AWK_EXIT=$?
@@ -382,7 +416,7 @@ while read -r PR_NUMBER HEAD_REF PR_TAG <&3; do
   SEEN_PRS="$SEEN_PRS $PR_NUMBER"
   PR_FILES="$MG_DIR/pr-$PR_NUMBER-files"
   gh pr diff "$PR_NUMBER" --name-only > "$PR_FILES" 2>/dev/null \
-    || git diff --name-only "origin/main...origin/$HEAD_REF" > "$PR_FILES" 2>/dev/null
+    || git diff --name-only "origin/$BASE_BRANCH...origin/$HEAD_REF" > "$PR_FILES" 2>/dev/null
   if [ -z "$RESOLVED" ]; then
     # Script absent: the pre-#2431 raw intersection — no ignore list, no probe.
     OVERLAP=$(comm -12 <(sort -u "$MG_DIR/branch-files") <(sort -u "$PR_FILES") \
@@ -454,6 +488,7 @@ fi
 
 - **Branch file inventory fails** (the initial `git diff --name-only` exits nonzero) → the fence exits 4 after `STEP4A_BLOCKED:` with `blocker.reason: "agent_block"` and tooling-failure details naming the exit status and captured stderr. Do not treat an empty branch-file list as evidence of no overlap.
 - **Open-PR inventory fails** (`gh pr list` exits nonzero) → the fence exits 4 after `STEP4A_BLOCKED:` with `blocker.reason: "agent_block"` and tooling-failure details naming the exit status and captured stderr. Do not proceed with an empty PR list.
+- **Base unreadable** (`.base_branch` and `.world_state_snapshot.origin_main_branch` are absent from the context file and `origin/HEAD` does not resolve) → the fence exits 4 after `STEP4A_BLOCKED:` with `blocker.reason: "agent_block"`. Do not list every open PR as a sibling.
 <!-- el: finalize.adopted-pr-inventory-fails -->
 - **Adopted-PR inventory fails** (#2949) → `cw dev-queue adopted-prs -c <client>` exits nonzero, or the second open-PR `gh pr list` / the join fails → the fence exits 4 after `STEP4A_BLOCKED:` with `blocker.reason: "agent_block"`. Exit 127 (cw not on PATH) or 2 (usage error: subcommand missing, cw older than this doc) reads `cw is missing or older than this command; upgrade cw`; any other exit names the status and captured stderr. Fails closed: there is no prefix-only fallback, because the gate's value is not silently missing sibling PRs.
 - **Filter output validation fails** (the filter exits 0/1 but its JSON is malformed, its `blocking` value disagrees with the exit status, or `overlap_after_ignore` is not a non-empty/empty string array matching that status) → record that PR as a tooling failure and continue evaluating the remaining PRs. The `jq -e` status is checked before any merge-tree result is trusted.
@@ -480,7 +515,7 @@ fi
 <!-- el-end: finalize.merge-gate-disabled-merge-gate-disabled-by-client-config -->
 <!-- el-begin: finalize.ignored-paths-are-unverified-regenerate -->
 <!-- el: finalize.ignored-paths-are-unverified-regenerate -->
-**Ignored paths are unverified — regenerate, don't hand-resolve.** This reminder applies whether or not the gate ran (#2851): a disabled gate verifies no path at all, so after a base merge the same regenerate rule holds for every path in `merge_gate_ignore_paths`. When a path was excluded from the overlap computation by `merge_gate_ignore_paths`, the merge gate has **not** verified that path. If this branch and a sibling PR both changed it, whichever merges second will diverge on it: after merging base (Step 4c.5's merge, or `/prep-pr`'s sync with main), regenerate that file with its own tool (`uv lock`, the baseline generator, the codegen step) and commit the regenerated output, rather than resolving the divergence by hand.
+**Ignored paths are unverified — regenerate, don't hand-resolve.** This reminder applies whether or not the gate ran (#2851): a disabled gate verifies no path at all, so after a base merge the same regenerate rule holds for every path in `merge_gate_ignore_paths`. When a path was excluded from the overlap computation by `merge_gate_ignore_paths`, the merge gate has **not** verified that path. If this branch and a sibling PR both changed it, whichever merges second will diverge on it: after merging base (Step 4c.5's merge, or `/prep-pr`'s sync with `<base>`), regenerate that file with its own tool (`uv lock`, the baseline generator, the codegen step) and commit the regenerated output, rather than resolving the divergence by hand.
 
 ### Step 4b: Pipeline-Level PR Approval
 
@@ -501,7 +536,7 @@ the Step 4c.1 gate has run.** This step delegates PR creation to a `/prep-pr` ag
 the spawn is **gated**: your **first action is the mandatory isolation check in Step 4c.1**,
 whose result sets the spawn's `isolation` flag. Spawning here — before running 4c.1 — is the
 exact mistake that causes the guaranteed hang documented in 4c.1 (#1097, #1123). The
-`/prep-pr` agent spawned in 4c.2 handles sync-with-main (+ conflict handling), quality-gate
+`/prep-pr` agent spawned in 4c.2 handles sync-with-base (+ conflict handling), quality-gate
 detection + re-run, and ship-it delegation.
 
 **Proceed to Step 4c.1 now — do not skip ahead to 4c.2.**
@@ -549,7 +584,7 @@ result per the two cases below:
   `isolation: "worktree"` entirely.** Spawn scoped to the session cwd (`worktree_path` in
   `.claude/cw-context.json` is the authoritative anchor) — no nested worktree, so no branch
   collision and no primary-checkout path to `cd` into. **Keep the git-refresh sequence below
-  unconditionally** (fetch + `checkout -B` + the merge probe, merging `origin/main` only on a
+  unconditionally** (fetch + `checkout -B` + the merge probe, merging `origin/<base>` only on a
   conflict); it runs against the session cwd instead of a spawned worktree.
 - **`IN_DISPATCH_WORKTREE=false` (interactive hand-run only): spawn WITH `isolation:
   "worktree"`** and have the agent re-checkout the feature branch from origin (the same
@@ -571,10 +606,10 @@ result per the two cases below:
 
 **Agent prompt must include:**
 - Branch name, fork point SHA (from Checkpoint 2), and ticket ID
-- Instruction to re-checkout the branch from origin AND merge main only if it conflicts:
+- Instruction to re-checkout the branch from origin AND merge `<base>` only if it conflicts:
   ```bash
   git fetch origin
-  # Remember whether the fetch worked: the probe below reads origin/main and a
+  # Remember whether the fetch worked: the probe below reads origin/<base> and a
   # stale one must never drive a merge.
   FETCH_RC=$?
   # Push any local commits origin lacks BEFORE the reset below (#2354): a
@@ -597,20 +632,20 @@ result per the two cases below:
   # pulls fix-loop pushes made from another worktree (#1047).
   git checkout -B <branch-name> origin/<branch-name>
 
-  # Would merging latest main conflict? Catches upstream commits landed
-  # between the last fix push and now. A branch merely behind main, or whose
+  # Would merging latest <base> conflict? Catches upstream commits landed
+  # between the last fix push and now. A branch merely behind <base>, or whose
   # merge would be clean, is NOT merged (#2979): GitHub merges a clean branch
   # and a clean merge never causes a review. The probe never fetches: the
-  # `git fetch origin` at the top of this fence is what makes origin/main
+  # `git fetch origin` at the top of this fence is what makes origin/<base>
   # current, so a failed fetch skips the probe and the merge entirely.
   if [ "$FETCH_RC" -eq 0 ]; then
-    PROBE_JSON="$(cw worktree merge-probe --base main)"
+    PROBE_JSON="$(cw worktree merge-probe --base <base>)"
     PROBE_RC=$?
     PROBE_STATE="$(printf '%s' "$PROBE_JSON" | jq -r .state 2>/dev/null)"
     echo "PROBE_RC=$PROBE_RC PROBE_STATE=$PROBE_STATE"
     printf '%s\n' "$PROBE_JSON"
     if [ "$PROBE_RC" -eq 1 ] && [ "$PROBE_STATE" = "conflict" ]; then
-      git merge origin/main --no-edit
+      git merge origin/<base> --no-edit
     fi
   else
     echo "PROBE_RC=skipped PROBE_STATE=skipped"
@@ -628,15 +663,15 @@ result per the two cases below:
   ```
   If the push fails, or the verify comparison mismatches → do NOT invoke `/prep-pr`. STOP and return a BLOCK whose text includes the verbatim push failure output (or the mismatch detail) — the Unavailability classifier below inspects that text and, on a signature match, emits the `push_auth_failed` sentinel via the existing template (`stage_reached: "stage4b_pr_create"`); otherwise it falls through to a generic `agent_block` per the "Any other agent BLOCK" gate-collapse row.
   This `git push` has no `timeout` wrapper — no push site in this file family does (#1414 R9: accepted residual risk, consistent with `ship-it.md`'s push and `prep-pr.md`'s own Step 1 push).
-- The concrete, shell-quoted `PR_TITLE` literal composed above, and an instruction to invoke `/prep-pr --skip-review --base main --title "<the exact rendered PR_TITLE literal>"` via the Skill tool. Replace the angle-bracket notation with that literal before sending the prompt — never send an unresolved title variable. **If the user chose Force at Step 4a (stacking onto an open pipeline PR), append `--draft`** so `/prep-pr` passes it through to the project's `/ship-it` (its Step 8 supports `--draft` pass-through). The PR must stay a draft until the parent merges. `--skip-review` is required: Stage 3 already ran the full scope-aware review set, and `/prep-pr`'s thinner pass would double up.
+- The concrete, shell-quoted `PR_TITLE` literal composed above, and an instruction to invoke `/prep-pr --skip-review --base <base> --title "<the exact rendered PR_TITLE literal>"` via the Skill tool. Replace the angle-bracket notation with that literal before sending the prompt — never send an unresolved title variable. **If the user chose Force at Step 4a (stacking onto an open pipeline PR), append `--draft`** so `/prep-pr` passes it through to the project's `/ship-it` (its Step 8 supports `--draft` pass-through). The PR must stay a draft until the parent merges. `--skip-review` is required: Stage 3 already ran the full scope-aware review set, and `/prep-pr`'s thinner pass would double up.
 
   **Headless delegated fence (mandatory):** after the delegated chain's final branch mutation, the child MUST execute the exact Step 4.0 fence above immediately before its project `/ship-it` auto-merge arm. Only `REVIEW_APPROVAL_NOT_REQUIRED` or `REVIEW_APPROVAL_RECORDED` permits that arm; on any other output, it MUST NOT invoke `arm-automerge` or `gh pr merge --auto`, and must return a `review_pending_approval`/`HEADLESS BLOCK` to finalize. In clean mode (`cw review converge config` reports `clean`), the child also runs Step 4.0b `verify-tip` right after the 4.0 fence and before its own `/ship-it` auto-merge arm, and returns a `review_pending_approval`/`HEADLESS BLOCK` on a non-zero exit exactly as for a failing 4.0; a child running without the ledger (an isolated worktree) gets exit 1, which fails closed. The parent re-verification after the child returns is additional defense, not a substitute for this pre-arm fence.
 
   **Project ship-it gates are not waived (mandatory):** `--skip-review` skips only `/prep-pr`'s own self-review loop. It does not reach the project `/ship-it`, and it waives none of that ship-it's own pre-PR gates (for example a required reviewer run at the current HEAD before `gh pr create`). Put this sentence in the child prompt verbatim: "Run every pre-PR gate the project ship-it defines exactly as it defines it; `--skip-review` waives none of them." Stage 3's review, a recorded cw review approval, and the 4.0 / 4.0b fences do NOT satisfy a project ship-it gate unless that ship-it itself says they do. If a gate cannot pass, the child returns a `HEADLESS BLOCK` (`gate: "Step 8 ship-it: <gate name>"`, `details:` the gate's failure) and does not create the PR. It never fills in a value the ship-it copies from a gate's output (for example a risk label taken from the reviewer's overall risk) when that gate did not run: a value the gate did not produce does not exist.
 
   **Headless:** when finalize itself runs headless (`--headless` in "$ARGUMENTS"), the `/prep-pr` invocation MUST include `--headless` so the flag propagates down the `prep-pr` → `ship-it` chain and every interactive gate collapses per the gate-collapse table:
-  - Plain case: `/prep-pr --skip-review --base main --headless --title "<the exact rendered PR_TITLE literal>"`
-  - Force + `--draft` case (stacking onto an open pipeline PR): `/prep-pr --skip-review --base main --headless --draft --title "<the exact rendered PR_TITLE literal>"`
+  - Plain case: `/prep-pr --skip-review --base <base> --headless --title "<the exact rendered PR_TITLE literal>"`
+  - Force + `--draft` case (stacking onto an open pipeline PR): `/prep-pr --skip-review --base <base> --headless --draft --title "<the exact rendered PR_TITLE literal>"`
 
   Instruct the subagent explicitly: any interactive prompt in the delegated chain that cannot be auto-resolved (`/prep-pr`'s Step-7 "Ship anyway" gate, a project `ship-it.md`'s tag confirmation) MUST surface as `agent_block` per the gate-collapse table (`docs/headless-contract.md` §2, "Any other agent BLOCK") — NEVER silently skipped.
 - **Required deliverable:** the JSON output of `~/.claude/scripts/prep_pr_finalize.py verify --require-automerge --json`, run from the worktree after `/prep-pr` returns. The friction report MUST paste this JSON verbatim — never summarized. Also paste the `arm-automerge` JSON (`/ship-it` Step 4 prints it) when it ran.
@@ -654,7 +689,7 @@ result per the two cases below:
 
 <!-- el-begin: finalize.base-branch-state-classifier -->
 <!-- el: finalize.base-branch-state-classifier -->
-**Base-branch-state classifier (#2320):** Before collapsing a `/prep-pr` `HEADLESS BLOCK` (or any other-agent BLOCK reached via this step) to the generic `agent_block` per the gate-collapse table, inspect its `gate:` and `details:` text for evidence that the failure's diagnosed root cause is state external to this branch — most commonly a CI-mirrored quality gate (e.g. `check_changelog_frozen.py`) failing because `origin/main` already carries the offending state (a corrupted released CHANGELOG section, per the #2304 incident) rather than because of anything this branch's own diff introduced. The mechanical test: would resetting this branch to reproduce the failure on a clean `origin/main` still fail? If yes, it is base-branch state, not this branch's diff. On a match, emit `blocker.reason: "external_state_block"` instead of `agent_block`, with `blocker.details` naming the specific gate, quoting the verbatim failure text, and stating what would need to change on `origin/main` (or the external dependency) to clear it. This does NOT apply to a gate failure caused by this branch's own diff (a test this branch broke, a lint violation this branch introduced, a merge conflict between this branch and main) — those stay `agent_block` exactly as today, remaining eligible for Sub-rule 5a's self-heal regress to IMPL. Do not apply this classifier speculatively: absent clear evidence the cause is external to the branch, default to `agent_block` as today. A returned text that matches the classifier-denial phrase or the `arm-automerge blocked by the auto-mode permission classifier` marker is taken first by the denied-arm check (#2625) in Step 4c below, after the verify gate supplies `pr_number`; only when that check's gate does not hold does this classifier apply.
+**Base-branch-state classifier (#2320):** Before collapsing a `/prep-pr` `HEADLESS BLOCK` (or any other-agent BLOCK reached via this step) to the generic `agent_block` per the gate-collapse table, inspect its `gate:` and `details:` text for evidence that the failure's diagnosed root cause is state external to this branch — most commonly a CI-mirrored quality gate (e.g. `check_changelog_frozen.py`) failing because `origin/<base>` already carries the offending state (a corrupted released CHANGELOG section, per the #2304 incident) rather than because of anything this branch's own diff introduced. The mechanical test: would resetting this branch to reproduce the failure on a clean `origin/<base>` still fail? If yes, it is base-branch state, not this branch's diff. On a match, emit `blocker.reason: "external_state_block"` instead of `agent_block`, with `blocker.details` naming the specific gate, quoting the verbatim failure text, and stating what would need to change on `origin/<base>` (or the external dependency) to clear it. This does NOT apply to a gate failure caused by this branch's own diff (a test this branch broke, a lint violation this branch introduced, a merge conflict between this branch and `<base>`) — those stay `agent_block` exactly as today, remaining eligible for Sub-rule 5a's self-heal regress to IMPL. Do not apply this classifier speculatively: absent clear evidence the cause is external to the branch, default to `agent_block` as today. A returned text that matches the classifier-denial phrase or the `arm-automerge blocked by the auto-mode permission classifier` marker is taken first by the denied-arm check (#2625) in Step 4c below, after the verify gate supplies `pr_number`; only when that check's gate does not hold does this classifier apply.
 
 <!-- el-end: finalize.base-branch-state-classifier -->
 <!-- el-begin: finalize.finalize-review-findings-comment -->
@@ -760,7 +795,7 @@ A failing verify is rare — the exact sentinel template, and why the reason mus
 <!-- el-end: finalize.post-push-mergeability-verification -->
 <!-- el-begin: finalize.why-this-exists-mergeability -->
 <!-- el: finalize.why-this-exists-mergeability -->
-**Why this exists:** `/prep-pr` checks main *before* creating the PR, so sibling pushes to `origin/main` can flip a freshly-opened PR to CONFLICTING before the worker exits, leaving it orphaned until something kicks `/review-monitor` (claude-workspace #305/#309). This step closes that window for a real conflict, and only for that: a PR that is merely `BEHIND` is not a reason to act (#2979, `docs/dispatch-runbook.md` "Default-branch merge policy (#2979)"). GitHub merges a clean branch itself, and a clean merge never causes a review.
+**Why this exists:** `/prep-pr` checks `<base>` *before* creating the PR, so sibling pushes to `origin/<base>` can flip a freshly-opened PR to CONFLICTING before the worker exits, leaving it orphaned until something kicks `/review-monitor` (claude-workspace #305/#309). This step closes that window for a real conflict, and only for that: a PR that is merely `BEHIND` is not a reason to act (#2979, `docs/dispatch-runbook.md` "Default-branch merge policy (#2979)"). GitHub merges a clean branch itself, and a clean merge never causes a review.
 
 **Sequence (headless and interactive alike):**
 
@@ -775,11 +810,11 @@ Parse the response. Then:
 | `mergeable` | `mergeStateStatus` | Action |
 |---|---|---|
 | `MERGEABLE` | `CLEAN` / `UNSTABLE` / `HAS_HOOKS` / `UNKNOWN` | **Proceed to Step 4d.** Mergeable wins regardless of secondary status. |
-| `CONFLICTING` | `DIRTY` | **One merge of `origin/main`.** See below. |
+| `CONFLICTING` | `DIRTY` | **One merge of `origin/<base>`.** See below. |
 | `MERGEABLE` | `BEHIND` | **No action.** Append `behind_default_no_action` to `friction_highlights` and proceed to Step 4d. Never merge, rebase or force-push a branch that is only behind. |
 | anything else | `BLOCKED` | **Proceed to Step 4d.** BLOCKED means required reviews / branch protection — not a code-fixable conflict; the `/review-monitor` cycle handles it from here. |
 
-**One merge of `origin/main` (no loops, never a rebase or force-push):** a `CONFLICTING` / `DIRTY` PR goes straight to the **semantic auto-resolve attempt** below. Its step 2 is the one merge; its gates (step 5), plain push (step 6) and re-verify (step 7) apply. If that local merge reports no conflicts (for example GitHub showed `CONFLICTING` for a case the `CHANGELOG.md merge=union` driver resolves), push plainly and re-verify. If the resolver refuses, or resolves but a gate fails, or the PR is still not `MERGEABLE` after the re-verify, emit the structured `blocked` sentinel (template below). Do **not** force, do **not** attempt a second merge, do **not** fall through silently.
+**One merge of `origin/<base>` (no loops, never a rebase or force-push):** a `CONFLICTING` / `DIRTY` PR goes straight to the **semantic auto-resolve attempt** below. Its step 2 is the one merge; its gates (step 5), plain push (step 6) and re-verify (step 7) apply. If that local merge reports no conflicts (for example GitHub showed `CONFLICTING` for a case the `CHANGELOG.md merge=union` driver resolves), push plainly and re-verify. If the resolver refuses, or resolves but a gate fails, or the PR is still not `MERGEABLE` after the re-verify, emit the structured `blocked` sentinel (template below). Do **not** force, do **not** attempt a second merge, do **not** fall through silently.
 
 A merge that carries a conflict resolution is a change after the last clean round: in clean mode the Step 4.0b re-check before the Step 4d arm sees `delta_confirm_eligible: true` and runs `cw review converge confirm-job delta` over the resolution alone (#2980); if that round is refused, fails or finds something, it parks as `review_tip_check: stale` and the requeue runs a normal full review round.
 
@@ -804,8 +839,8 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
 2. **The one merge** (a genuine merge commit, not a history rewrite — matching `prep-pr.md` Step 1's own recipe):
 
    ```bash
-   git fetch origin main
-   git merge origin/main
+   git fetch origin <base>
+   git merge origin/<base>
    ```
 
    - **No conflicts** → push plainly (step 6), re-verify mergeability (step 7), proceed to Step 4d.
@@ -866,7 +901,7 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
      git add $RESOLVED_FILES
      test -z "$(git diff --name-only --diff-filter=U)"   # defense in depth
      CATEGORIES=$(echo "$RESOLVE_OUTPUT" | jq -r '.categories | to_entries | map("\(.key)=\(.value)") | join(", ")')
-     git commit -m "Merge origin/main (semantic auto-resolve: $CATEGORIES)" \
+     git commit -m "Merge origin/<base> (semantic auto-resolve: $CATEGORIES)" \
        --trailer "Auto-Resolved-By: classify_merge_conflict.py (#1850)"
      ```
 
@@ -919,7 +954,7 @@ The resolution this step applies obeys one CHANGELOG rule. When resolving a CHAN
    gh pr view <pr_number> --repo <owner>/<repo> --json mergeable,mergeStateStatus
    ```
 
-   - **MERGEABLE** → log to the cycle summary: `semantic auto-resolve succeeded, PR <N> now mergeable (categories: <list>)` (or `merge of origin/main succeeded, PR <N> now mergeable` when the merge had no conflicts), append `"semantic_merge_conflict_auto_resolved"` to `friction_highlights` when the resolver ran, and proceed to Step 4d.
+   - **MERGEABLE** → log to the cycle summary: `semantic auto-resolve succeeded, PR <N> now mergeable (categories: <list>)` (or `merge of origin/<base> succeeded, PR <N> now mergeable` when the merge had no conflicts), append `"semantic_merge_conflict_auto_resolved"` to `friction_highlights` when the resolver ran, and proceed to Step 4d.
    - **Anything else** (defensive) → fall through to the unchanged sentinel below.
 
 **Contract notes:** this step introduces no new `blocker.reason`, no new `status`, and no schema change — a failed or refused attempt parks under the pre-existing `merge_conflict_post_push` reason with only an appended `blocker.details` clause, and `friction_highlights` is already a free-form `list[str]`. Do **not** add `merge_conflict_post_push` to `FINALIZE_REGRESS_BLOCKER_REASONS` (`src/cw/auto_dev_result/schema.py`): a conflict the resolver refused is not fixed by regressing to IMPL.
@@ -1319,7 +1354,7 @@ printf '%s' "$SENTINEL_JSON" | cw result emit -
     "number": 0,
     "url": "<pr url>",
     "auto_merge": true,
-    "base": "main"
+    "base": "<base>"
   },
   "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
   "health": {

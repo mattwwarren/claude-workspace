@@ -1266,7 +1266,11 @@ def _run_gate2_fence(
     body = (
         substitute_fence_placeholders(
             gate2_fence(),
-            {"branch-name": _GATE2_BRANCH, "ticket-id": _GATE2_TICKET},
+            {
+                "branch-name": _GATE2_BRANCH,
+                "ticket-id": _GATE2_TICKET,
+                "base": "main",
+            },
         )
         + '\necho "${SCOPE_CONFORMANCE_OUTPUT-}"'
         + f'\ncat "{session_wt_path}/.cw/touched-files.txt" 2>/dev/null'

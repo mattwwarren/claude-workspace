@@ -30,6 +30,7 @@ from cw.models import (
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
+    resolve_base_branch,
 )
 from cw.models.bindings import Harness
 from cw.native_daemon import (
@@ -233,6 +234,7 @@ def start_session(
         purpose=purpose,
         ticket_id=None,
         origin=SessionOrigin.USER,
+        base_branch=resolve_base_branch(client),
         workspace_path=_git_dir(client) if is_worktree_homed else None,
         merge_gate_ignore_paths=client.merge_gate_ignore_paths,
         merge_gate_enabled=client.merge_gate_enabled,

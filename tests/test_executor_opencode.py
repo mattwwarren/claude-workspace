@@ -181,6 +181,42 @@ def test_opencode_executor_threads_review_config_into_write_hook_context(
     assert calls[0]["review_config"] == review
 
 
+@pytest.mark.parametrize(
+    ("row_base", "expected"),
+    [("epic/x", "epic/x"), (None, "trunk")],
+)
+def test_opencode_executor_threads_resolved_base_into_write_hook_context(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    row_base: str | None,
+    expected: str,
+) -> None:
+    """#3781: the opencode spawn path stamps the resolved base branch (the
+    row's, else the client default) into cw-context.json."""
+    worktree = make_git_repo("wt-opencode-base-branch")
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
+    executor = OpencodeExecutor(config=config, runner=FakeFireAndForgetRunner())
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="trunk")
+    task = TicketTask(
+        ticket_id="T-1", client="test", stage=Stage.FINALIZE, base_branch=row_base
+    )
+
+    calls: list[dict[str, object]] = []
+
+    def _capture(*_args: object, **kwargs: object) -> None:
+        calls.append(kwargs)
+
+    with (
+        patch("cw.executor.opencode._write_hook_context", _capture),
+        patch("cw.executor.opencode.opencode_available", return_value=False),
+    ):
+        executor.spawn(
+            stage=Stage.FINALIZE, task=task, worktree=worktree, client=client
+        )
+
+    assert calls[0]["base_branch"] == expected
+
+
 def test_opencode_executor_spawn_impl_stage(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],

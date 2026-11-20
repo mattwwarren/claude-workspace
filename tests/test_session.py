@@ -205,6 +205,7 @@ class TestStartSession:
         assert hook_calls[0]["purpose"] == "impl"
         assert hook_calls[0]["origin"] == SessionOrigin.USER
         assert hook_calls[0]["merge_gate_ignore_paths"] == []
+        assert hook_calls[0]["base_branch"] == sample_client.default_branch
 
     def test_new_session_forwards_merge_gate_ignore_paths(
         self,
