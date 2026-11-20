@@ -357,6 +357,11 @@ _SHIP_CAVEAT = (
     " scope_hint: large, this step is the human's."
 )
 _GUIDED = {
+    "review_capability_unmet": (
+        "The REVIEW lane's runner does not declare every runtime capability the"
+        " client's review.engine requires, so the row was refused before any"
+        " worker started."
+    ),
     "ambiguities_pending_resolution": "The worker parked on open ambiguities.",
     "premises_pending_verification": "The worker parked on unverified premises.",
     "review_health_gate": "Review health is degraded.",

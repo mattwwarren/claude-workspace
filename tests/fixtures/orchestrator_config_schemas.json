@@ -463,6 +463,13 @@
     "fix_sandbox_mode": {
      "$ref": "#/$defs/SandboxMode",
      "default": "workspace-write"
+    },
+    "runtime_capabilities": {
+     "items": {
+      "type": "string"
+     },
+     "title": "Runtime Capabilities",
+     "type": "array"
     }
    },
    "title": "StageExecutorConfig",
@@ -592,6 +599,13 @@
       "fix_sandbox_mode": {
        "$ref": "#/$defs/SandboxMode",
        "default": "workspace-write"
+      },
+      "runtime_capabilities": {
+       "items": {
+        "type": "string"
+       },
+       "title": "Runtime Capabilities",
+       "type": "array"
       }
      },
      "title": "StageExecutorConfig",
@@ -755,6 +769,13 @@
       "fix_sandbox_mode": {
        "$ref": "#/$defs/SandboxMode",
        "default": "workspace-write"
+      },
+      "runtime_capabilities": {
+       "items": {
+        "type": "string"
+       },
+       "title": "Runtime Capabilities",
+       "type": "array"
       }
      },
      "title": "StageExecutorConfig",
@@ -2602,7 +2623,7 @@
     },
     "ReviewEngineConfig": {
      "additionalProperties": false,
-     "description": "Per-client opt-in for a repo review engine (#3036, RFC 0017 S1).\n\nPresence of the block is the opt-in; there is no ``enabled`` flag and no\nschema-version pin. ``skill`` names the repo's own review skill, which\nbecomes the round engine. The repo provides the skill files and cw probes\nfor nothing: a misnamed skill surfaces when a round runs, not at load.\n\nThere is no load-time lane cross-check. Lanes that do not run the\nClaude-native review ignore the engine. The ``cw doctor`` warning names\nsuch a lane (I1, #3039), and the engine reaches ``.claude/cw-context.json``\nonly for the Claude-native review stage.\n\n``guarded_paths`` are repo-relative globs for files outside the skill\ndirectory that the engine depends on, such as validator scripts; I1's\nD-13 check treats a diff touching them like a diff touching the skill.\nEach entry follows the ``MechanicalConflictRepairConfig.paths`` rules, and\nat most ``MAX_ENGINE_GUARDED_PATHS`` entries are allowed.\n\nThe engine requires ``review.convergence: clean``; ``ReviewConfig``\nenforces that rule, since it spans both keys.",
+     "description": "Per-client opt-in for a repo review engine (#3036, RFC 0017 S1).\n\nPresence of the block is the opt-in; there is no ``enabled`` flag and no\nschema-version pin. ``skill`` names the repo's own review skill, which\nbecomes the round engine. The repo provides the skill files and cw probes\nfor nothing: a misnamed skill surfaces when a round runs, not at load.\n\nThere is no load-time lane cross-check. Lanes that do not run the\nClaude-native review ignore the engine. The ``cw doctor`` warning names\nsuch a lane (I1, #3039), and the engine reaches ``.claude/cw-context.json``\nonly for the Claude-native review stage.\n\n``guarded_paths`` are repo-relative globs for files outside the skill\ndirectory that the engine depends on, such as validator scripts; I1's\nD-13 check treats a diff touching them like a diff touching the skill.\nEach entry follows the ``MechanicalConflictRepairConfig.paths`` rules, and\nat most ``MAX_ENGINE_GUARDED_PATHS`` entries are allowed.\n\nThe engine requires ``review.convergence: clean``; ``ReviewConfig``\nenforces that rule, since it spans both keys.\n\n``requires_runtime_capabilities`` lists runtime-capability slugs a review\nrunner must declare (#3790). It is operator-owned: read from ``clients.yaml``\nonly, never from ``cw-engine.json`` or the PR branch, and not stamped into\n``.claude/cw-context.json``. A lane whose REVIEW runner lacks one is parked\nbefore claim (``review_capability_unmet``). Slugs are validated, sorted and\ndeduplicated; see ``cw.models.runtime_capabilities``.",
      "properties": {
       "skill": {
        "title": "Skill",
@@ -2613,6 +2634,13 @@
         "type": "string"
        },
        "title": "Guarded Paths",
+       "type": "array"
+      },
+      "requires_runtime_capabilities": {
+       "items": {
+        "type": "string"
+       },
+       "title": "Requires Runtime Capabilities",
        "type": "array"
       }
      },
@@ -2766,6 +2794,13 @@
       "fix_sandbox_mode": {
        "$ref": "#/$defs/SandboxMode",
        "default": "workspace-write"
+      },
+      "runtime_capabilities": {
+       "items": {
+        "type": "string"
+       },
+       "title": "Runtime Capabilities",
+       "type": "array"
       }
      },
      "title": "StageExecutorConfig",
@@ -3879,6 +3914,13 @@
       "fix_sandbox_mode": {
        "$ref": "#/$defs/SandboxMode",
        "default": "workspace-write"
+      },
+      "runtime_capabilities": {
+       "items": {
+        "type": "string"
+       },
+       "title": "Runtime Capabilities",
+       "type": "array"
       }
      },
      "title": "StageExecutorConfig",

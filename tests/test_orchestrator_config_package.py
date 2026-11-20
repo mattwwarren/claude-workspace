@@ -16,6 +16,11 @@ this file pins the things that suite cannot see:
    lists that enumerate the event types (the ``OperatorChannelForward`` and
    ``OrchestratorConfig`` schemas and the ``OrchestratorConfig`` default dump),
    when the four ``outbox.*`` events were added.
+   #3790 re-captured five entries: the ``StageExecutorConfig`` and
+   ``StagePipelineConfig`` validation schemas (``runtime_capabilities``), the
+   ``LaneConfig`` validation and serialization schemas (its ``pipeline``), and
+   the ``ClientConfig`` validation entry (which embeds both, and the
+   ``ReviewEngineConfig`` docstring with ``requires_runtime_capabilities``).
 2. The import surface is frozen. ``EXPECTED_EXPORTS`` is hard-coded, not
    re-derived from the package, so a dropped re-export fails loudly, and every
    ``cw.models`` re-export is the same object as the package's.

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from cw.doctor._shared import CheckResult
 from cw.doctor.core import _client_config_checks
 from cw.doctor.review_engine import _check_review_engine
 from cw.models import (
@@ -415,3 +416,87 @@ def test_registered_in_client_config_checks() -> None:
     names = [check.name for check in _client_config_checks({"acme": client})]
 
     assert "review-engine/acme/default" in names
+
+
+# -- review-capability advisory (#3790) -----------------------------------
+
+
+def _capability_client(
+    tmp_path: Path,
+    *,
+    required: list[str],
+    lanes: dict[str, list[str] | None],
+) -> ClientConfig:
+    """Claude-native lanes only, so the manifest is never read (no git)."""
+    lane_cfgs = []
+    for name, caps in lanes.items():
+        pipeline = None
+        if caps is not None:
+            pipeline = StagePipelineConfig(
+                executors={Stage.REVIEW: StageExecutorConfig(runtime_capabilities=caps)}
+            )
+        lane_cfgs.append(LaneConfig(name=name, pipeline=pipeline))
+    return ClientConfig(
+        name="cap-client",
+        workspace_path=tmp_path,
+        default_branch="main",
+        worktree_base=tmp_path / "worktrees",
+        review=ReviewConfig(
+            convergence="clean",
+            engine=ReviewEngineConfig(
+                skill=_SKILL, requires_runtime_capabilities=required
+            ),
+        ),
+        lanes=lane_cfgs,
+    )
+
+
+def _capability_results(client: ClientConfig) -> list[CheckResult]:
+    return [
+        r
+        for r in _check_review_engine({"cap-client": client})
+        if r.name.startswith("review-capability/")
+    ]
+
+
+def test_capability_warns_when_the_lane_runner_lacks_a_requirement(
+    tmp_path: Path,
+) -> None:
+    client = _capability_client(
+        tmp_path, required=["jvm"], lanes={"alpha": [], "beta": ["jvm"]}
+    )
+    results = _check_review_engine({"cap-client": client})
+    by_name = {r.name: r for r in results}
+
+    result = by_name["review-capability/cap-client/alpha"]
+    assert result.ok is True
+    assert result.warn is True
+    assert "missing ['jvm']" in result.detail
+    assert "beta" in result.detail
+    assert "runtime_capabilities" in result.detail
+    assert "review-capability/cap-client/beta" not in by_name
+
+
+def test_capability_is_silent_when_satisfied(tmp_path: Path) -> None:
+    client = _capability_client(tmp_path, required=["jvm"], lanes={"alpha": ["jvm"]})
+    assert _capability_results(client) == []
+
+
+def test_capability_is_silent_without_an_engine(tmp_path: Path) -> None:
+    client = ClientConfig(
+        name="cap-client", workspace_path=tmp_path, default_branch="main"
+    )
+    assert _check_review_engine({"cap-client": client}) == []
+
+
+def test_capability_is_silent_when_nothing_is_required(tmp_path: Path) -> None:
+    client = _capability_client(tmp_path, required=[], lanes={"alpha": []})
+    assert _capability_results(client) == []
+
+
+def test_capability_is_silent_for_a_lane_without_review(tmp_path: Path) -> None:
+    client = _capability_client(tmp_path, required=["jvm"], lanes={"alpha": []})
+    client.lanes[0].pipeline = StagePipelineConfig(
+        stages=[Stage.PLAN, Stage.IMPL, Stage.FINALIZE]
+    )
+    assert _capability_results(client) == []

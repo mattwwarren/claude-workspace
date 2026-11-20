@@ -31,6 +31,7 @@ from cw.dev_queue.dispositions import (
     HOLD_DISPOSITIONS,
     LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION,
     REVIEW_APPROVAL_GATE_DISPOSITION,
+    REVIEW_CAPABILITY_UNMET_DISPOSITION,
     REVIEW_ENGINE_MODIFIED_DISPOSITION,
     REVIEW_ENGINE_UNSUPPORTED_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
@@ -122,6 +123,8 @@ _GATED: list[tuple[str, str | None]] = [
     (LEGACY_ADOPT_PR_NOT_GREEN_DISPOSITION, None),
     (ADOPT_PR_STATE_UNKNOWN_DISPOSITION, None),
     (REVIEW_APPROVAL_GATE_DISPOSITION, None),
+    # #3790: a runner missing a required runtime capability waits on a config fix.
+    (REVIEW_CAPABILITY_UNMET_DISPOSITION, None),
     # RFC 0017 I1 (#3039): an engine-path edit waits on `cw review engine allow`.
     (REVIEW_ENGINE_MODIFIED_DISPOSITION, None),
     # #3216: an unsupported review backend waits on a config or manifest fix.
