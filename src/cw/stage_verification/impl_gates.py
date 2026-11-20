@@ -11,7 +11,8 @@ Gate order, as :mod:`cw.codex_impl._run` calls them: the pre-turn guards
 (:func:`check_plan_present`, :func:`check_on_branch`,
 :func:`check_existing_branch_work`), then after the turn gate 1
 (:func:`check_empty_diff`), the fence, gate 2 (:func:`run_scope_conformance`)
-and the repo's quality gates (:func:`run_quality_gates`).
+and the repo's quality gates (:func:`run_quality_gates`, which accepts a red
+gate's rewrite of its own touched files after one green re-run, #3686).
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from cw.auto_dev_result.schema._vocab import (
     EMPTY_DIFF_STATUS,
     PLAN_SCOPE_DRIFT_BLOCKER_REASON,
 )
+from cw.codex_fix_loop.gate_autofix import HookRewritePolicy
 from cw.codex_fix_loop.gates import run_cycle_gates
 from cw.codex_fix_loop.guard_script import find_guard_script, script_marker_ok
 from cw.codex_fix_loop.hook_failure import CommitHookFailedError, hook_failure_breach
@@ -414,6 +416,13 @@ def run_quality_gates(
     The failure's ``output`` is already redacted and capped by the gate
     runner and is carried verbatim. Never ``codex_fix_gate_failed``: that is
     the REVIEW fix cycle's reason.
+
+    A red gate that rewrote only paths in *touched* (a formatter hook) is
+    re-run once and accepted when the re-run is green and clean (#3684,
+    #3686); the commit then carries the formatted content. A rejection returns
+    the original failure, so the ``exit code N`` wording is unchanged. The
+    re-run is bounded at one per gate. Gate 2 and the growth guard are not
+    re-run after an accepted rewrite.
     """
     failure = run_cycle_gates(
         plan,
@@ -422,6 +431,7 @@ def run_quality_gates(
         scope=scope,
         tokens=tokens,
         touched=frozenset(touched),
+        hook_rewrite=HookRewritePolicy.RECHECK,
     )
     if failure is None:
         return None

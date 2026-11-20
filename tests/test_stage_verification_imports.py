@@ -4,7 +4,8 @@ The stage-verification package is harness-neutral: no module in it may import a
 codex runner, driver, lane config, usage, argv/prompt builder or profile module.
 That is enforced here as a DIRECT-import scan at any nesting depth (module
 scope, function scope and ``TYPE_CHECKING`` bodies), with a shrink-only
-allowlist for the codex coupling that remains.
+allowlist (one-name growth for #3686, removed with #3718) for the codex coupling
+that remains.
 
 Caveat: the rule is direct, not transitive. ``cw.codex_review.__init__`` pulls
 ``_roles`` and ``core`` (which reach ``codex_runner`` and ``_profile``), and
@@ -102,7 +103,8 @@ _FORBIDDEN_EXACT = frozenset(
 )
 
 #: Remaining ``cw.codex_*`` coupling, keyed ``(module, imported target)``. Shrink
-#: only: a stale entry fails the ratchet. Module-level keys (a symbol imported
+#: only, apart from the one #3686 name: a stale entry fails the ratchet.
+#: Module-level keys (a symbol imported
 #: from ``cw.codex_review`` is keyed to ``cw.codex_review``, not the symbol).
 _ALLOWED: Counter[tuple[str, str]] = Counter(
     {
@@ -117,6 +119,9 @@ _ALLOWED: Counter[tuple[str, str]] = Counter(
         ("growth", "cw.codex_review"): 4,
         ("growth", "cw.codex_review._const"): 1,
         ("growth", "cw.codex_fix_loop.convergence"): 1,
+        # #3686: run_quality_gates opts in to HookRewritePolicy.RECHECK; removed
+        # with the decoupling follow-up #3718.
+        ("impl_gates", "cw.codex_fix_loop.gate_autofix"): 1,
         ("impl_gates", "cw.codex_fix_loop.gates"): 3,
         ("impl_gates", "cw.codex_fix_loop.guard_script"): 2,
         ("impl_gates", "cw.codex_fix_loop.hook_failure"): 2,
@@ -197,7 +202,7 @@ def test_no_forbidden_codex_import(path: Path) -> None:
 
 
 def test_codex_coupling_matches_allowlist() -> None:
-    """Shrink-only ratchet: the scan equals the pinned allowlist exactly."""
+    """Shrink-only ratchet (bar #3686's one name): the scan equals the allowlist."""
     observed: Counter[tuple[str, str]] = Counter()
     for path in _package_modules():
         module = _module_of(path)

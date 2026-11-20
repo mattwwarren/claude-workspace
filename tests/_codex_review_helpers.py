@@ -10,6 +10,7 @@ modules that use each helper.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -51,6 +52,26 @@ if TYPE_CHECKING:
 _OBSERVED_COMMENTS_FIXTURE = (
     Path(__file__).parent / "fixtures" / "gh_issue_comments_2633.json"
 )
+
+
+def _autofix_outcomes(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """The ``outcome=`` words of every ``codex_fix_gate_autofix`` log line."""
+    return [
+        m.group(1)
+        for r in caplog.records
+        if (m := re.search(r"codex_fix_gate_autofix .*outcome=(\w+)", r.getMessage()))
+    ]
+
+
+def rewrite_hook_body(relpath: str, line: str) -> str:
+    """A gate body that rewrites *relpath* to *line* and fails, then passes (#3684).
+
+    Idempotent: the first run rewrites the file and exits 1 (a formatter hook
+    that changed something); once the file already holds *line* it exits 0.
+    """
+    return (
+        f"grep -q '^{line}$' {relpath} || {{ printf '{line}\\n' > {relpath}; exit 1; }}"
+    )
 
 
 def _is_fix_argv(argv: list[str]) -> bool:

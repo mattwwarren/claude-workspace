@@ -50,9 +50,11 @@ from cw.stage_verification.fence import LEFT_STAGED_HINT
 from tests._codex_review_helpers import (
     FAKE_REREVIEW_REASON,
     PrepPrStateStub,
+    _autofix_outcomes,
     _drive_loop,
     _FakeRunner,
     assert_clean_after_refusal,
+    rewrite_hook_body,
 )
 from tests._hold_clock import Hold, HoldClock, install_hold_clock, wait_for_path
 from tests._shared.git_repos import (
@@ -1253,14 +1255,6 @@ class TestOutputStreaming:
 # ---------------------------------------------------------------------------
 
 
-def _autofix_outcomes(caplog: pytest.LogCaptureFixture) -> list[str]:
-    return [
-        m.group(1)
-        for r in caplog.records
-        if (m := re.search(r"codex_fix_gate_autofix .*outcome=(\w+)", r.getMessage()))
-    ]
-
-
 def _watched_oserror_for(monkeypatch: pytest.MonkeyPatch, label: str) -> list[str]:
     """Make ``_run_watched`` fail to start for *label* only; return the labels run."""
     real = gates._run_watched
@@ -2196,9 +2190,7 @@ class TestCycleStartPin:
 _RECHECK = gate_autofix.HookRewritePolicy.RECHECK
 _PARK = gate_autofix.HookRewritePolicy.PARK
 # Fails on the first run after rewriting tracked.py; passes on the second.
-_HOOK_BODY = (
-    "grep -q '^x = 1$' tracked.py || { printf 'x = 1\\n' > tracked.py; exit 1; }"
-)
+_HOOK_BODY = rewrite_hook_body("tracked.py", "x = 1")
 _CAFE_HOOK = f"grep -q '^z = 1$' {_CAFE} || {{ printf 'z = 1\\n' > {_CAFE}; exit 1; }}"
 
 

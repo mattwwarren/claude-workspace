@@ -23,6 +23,7 @@ from freezegun import freeze_time
 
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_driver import run_codex_impl_stage
+from cw.codex_fix_loop.cycle_restore import REF_ROOT
 from cw.codex_impl import _run as impl_run
 from cw.codex_impl._argv import ImplArgvPolicyError
 from cw.codex_plan._argv import PLAN_READ_ONLY_ARGV, build_plan_argv
@@ -58,11 +59,13 @@ from cw.tracker_io._argv import build_tracker_io_argv, comment_tools_for
 from cw.tracker_io._prompt import REFRESH_TURN_MARKER
 from tests._backend_mcp_helpers import codex_tracker_client, stage_mcp_config
 from tests._codex_review_helpers import (
+    _autofix_outcomes,
     _install_pre_commit_hook,
     assert_clean_after_refusal,
     fresh_impl_repo,
     install_home_prep_pr_state,
     install_home_scope_script,
+    rewrite_hook_body,
     seed_codex_impl_run,
 )
 from tests._shared.bindings_builders import bindings_linear_mcp
@@ -106,6 +109,10 @@ PLAN = (
     "## Summary\n\nAdd the widget.\n\n**Scope tier:** small\n\n"
     f"## Files Modified\n\n- {WIDGET}\n\n"
     "## Adopted Assumptions\n\n1. **Widgets are blue.** Adopted.\n"
+)
+#: ``PLAN`` with ``feature.py`` allowed too, for repair rows whose turn edits it.
+PLAN_WIDGET_AND_FEATURE = PLAN.replace(
+    f"- {WIDGET}\n", f"- {WIDGET}\n- feature.py\n", 1
 )
 SCOPE_PASS = json.dumps({"triggered": False, "extra_files": []})
 SCOPE_DRIFT = json.dumps(
@@ -1282,6 +1289,207 @@ def test_repair_conflict_with_a_planned_file_edit_still_trips_gate2(
     assert result.blocker is not None
     assert WIDGET in result.blocker.details
     assert "clash.py" not in result.blocker.details
+
+
+# --- hook rewrite acceptance (#3686) -------------------------------------------
+
+_AUTOFIX_LOGGER = "cw.codex_fix_loop.gates"
+_UNFORMATTED = "WIDGET=1\n"
+_FORMATTED = "WIDGET = 1\n"
+
+
+def _hook_gates(body: str) -> tuple[tuple[str, str, float], ...]:
+    """The harness's one ``lint`` gate, running *body*."""
+    return (("lint", body, 5.0),)
+
+
+def _once(marker: Path, first: str, then: str = "exit 0") -> str:
+    """Gate body running *first* on its first run, *then* on every later one.
+
+    The marker lives outside the worktree so it never enters the cycle's tree.
+    """
+    return f"if [ ! -f '{marker}' ]; then touch '{marker}'; {first}; fi; {then}"
+
+
+def _rewrite_widget(line: str = "WIDGET = 1") -> str:
+    return f"printf '{line}\\n' > {WIDGET}; exit 1"
+
+
+def _assert_rewrite_rejected(
+    h: Harness,
+    result: AutoDevResult,
+    caplog: pytest.LogCaptureFixture,
+    start: str,
+    outcome: str,
+) -> None:
+    """The park a rejected rewrite leaves: the original first-run failure."""
+    _assert_block(result, "impl_failed")
+    assert result.blocker is not None
+    assert "exit code 1" in result.blocker.details
+    assert _autofix_outcomes(caplog) == [outcome]
+    assert_clean_after_refusal(h.worktree, start)
+    # The repair row's seeded ``feature.py`` commit is the only one on the branch.
+    assert h.commit_count() == (1 if h.repair else 0)
+
+
+def test_a_hook_rewrite_of_touched_files_is_accepted_and_committed(
+    harness: Callable[..., Harness], caplog: pytest.LogCaptureFixture
+) -> None:
+    h = harness(gates=_hook_gates(rewrite_hook_body(WIDGET, "WIDGET = 1")))
+    h.turn(files={WIDGET: _UNFORMATTED})
+    with caplog.at_level("WARNING", logger=_AUTOFIX_LOGGER):
+        result = h.run()
+    assert result.status == "stage_complete"
+    assert git_in(h.worktree, "show", f"HEAD:{WIDGET}") + "\n" == _FORMATTED
+    assert "codex_fix_gate_autofixed" in result.friction_highlights
+    assert _autofix_outcomes(caplog) == ["rewrite_applied"]
+    assert git_in(h.worktree, "status", "--porcelain") == ""
+    assert h.origin_tip() == h.head()
+    assert h.commit_count() == 1
+
+
+def test_a_rewrite_outside_the_touched_set_parks_with_the_original_failure(
+    harness: Callable[..., Harness], caplog: pytest.LogCaptureFixture
+) -> None:
+    h = harness(gates=_hook_gates("printf 'y = 1\\n' > src/cw/other.py; exit 1"))
+    h.turn(files={WIDGET: _UNFORMATTED})
+    start = h.head()
+    with caplog.at_level("WARNING", logger=_AUTOFIX_LOGGER):
+        result = h.run()
+    _assert_rewrite_rejected(h, result, caplog, start, "rewrite_rejected_scope")
+
+
+def test_a_rewrite_that_deletes_a_touched_path_parks(
+    harness: Callable[..., Harness], caplog: pytest.LogCaptureFixture
+) -> None:
+    # A repair row: feature.py's edit stays in the tree, so a ref is pinned.
+    h = harness(
+        repair=True,
+        plan=PLAN_WIDGET_AND_FEATURE,
+        gates=_hook_gates(f"rm -f {WIDGET}; exit 1"),
+    )
+    h.turn(files={WIDGET: _FORMATTED, "feature.py": "x = 2\n"})
+    start = h.head()
+    with caplog.at_level("WARNING", logger=_AUTOFIX_LOGGER):
+        result = h.run()
+    _assert_rewrite_rejected(h, result, caplog, start, "rewrite_rejected_scope")
+
+
+def test_a_rewrite_that_renames_a_touched_path_parks(
+    harness: Callable[..., Harness], caplog: pytest.LogCaptureFixture
+) -> None:
+    h = harness(gates=_hook_gates(f"mv {WIDGET} src/cw/renamed.py; exit 1"))
+    h.turn(files={WIDGET: _UNFORMATTED})
+    start = h.head()
+    with caplog.at_level("WARNING", logger=_AUTOFIX_LOGGER):
+        result = h.run()
+    _assert_rewrite_rejected(h, result, caplog, start, "rewrite_rejected_scope")
+
+
+def test_a_rewrite_whose_recheck_is_still_red_parks_with_the_first_failure(
+    harness: Callable[..., Harness],
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    body = _once(tmp_path / "ran-once", _rewrite_widget(), then="exit 3")
+    h = harness(gates=_hook_gates(body))
+    h.turn(files={WIDGET: _UNFORMATTED})
+    start = h.head()
+    with caplog.at_level("WARNING", logger=_AUTOFIX_LOGGER):
+        result = h.run()
+    _assert_rewrite_rejected(h, result, caplog, start, "rewrite_rejected_red")
+    assert result.blocker is not None
+    assert "exit code 3" not in result.blocker.details
+
+
+def test_a_rewrite_whose_green_recheck_dirties_the_tree_parks(
+    harness: Callable[..., Harness],
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    body = _once(
+        tmp_path / "ran-once", _rewrite_widget(), then=f"echo '# x' >> {WIDGET}"
+    )
+    h = harness(gates=_hook_gates(body))
+    h.turn(files={WIDGET: _UNFORMATTED})
+    start = h.head()
+    with caplog.at_level("WARNING", logger=_AUTOFIX_LOGGER):
+        result = h.run()
+    _assert_rewrite_rejected(h, result, caplog, start, "rewrite_rejected_red")
+
+
+def test_an_accepted_rewrite_that_shrinks_the_diff_commits_what_remains(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    # The hook restores feature.py to baseline: the committed set shrinks to
+    # the widget instead of tripping the staged-set breach.
+    body = _once(tmp_path / "ran-once", "git show HEAD:feature.py > feature.py; exit 1")
+    h = harness(repair=True, plan=PLAN_WIDGET_AND_FEATURE, gates=_hook_gates(body))
+    h.turn(files={WIDGET: _FORMATTED, "feature.py": "x = 2\n"})
+    result = h.run()
+    assert result.status == "stage_complete"
+    assert git_in(h.worktree, "show", "--name-only", "--format=", "HEAD") == WIDGET
+    assert h.commit_count() == 2
+    assert h.origin_tip() == h.head()
+
+
+def test_an_accepted_rewrite_that_empties_the_diff_parks_impl_failed(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    body = _once(tmp_path / "ran-once", "git show HEAD:feature.py > feature.py; exit 1")
+    h = harness(repair=True, plan=None, gates=_hook_gates(body))
+    h.turn(files={"feature.py": "x = 2\n"})
+    start = h.head()
+    before = h.commit_count()
+    result = h.run()
+    _assert_block(result, "impl_failed")
+    assert result.blocker is not None
+    assert result.blocker.details.startswith("repair_turn_made_no_change")
+    # The rewrite returned the tree to baseline: nothing to preserve, no ref.
+    assert git_in(h.worktree, "status", "--porcelain") == ""
+    assert h.head() == start
+    assert (
+        git_in(h.worktree, "for-each-ref", "--format=%(refname)", f"{REF_ROOT}/") == ""
+    )
+    assert h.commit_count() == before
+
+
+def test_a_path_the_gates_add_beyond_the_pre_gate_set_trips_the_staged_breach(
+    harness: Callable[..., Harness],
+) -> None:
+    # The re-measure is bounded by the pre-gate touched set: a path that never
+    # passed the fence or growth guards cannot enter the committed set.
+    h = harness()
+    h.turn(files={WIDGET: _FORMATTED})
+    start = h.head()
+
+    def _gates_add_a_path(*_args: object, **_kwargs: object) -> None:
+        (h.worktree / "src/cw/extra.py").write_text("y = 1\n", encoding="utf-8")
+
+    with patch("cw.codex_impl._run.run_quality_gates", _gates_add_a_path):
+        result = h.run()
+    _assert_block(result, "codex_fix_scope_drift")
+    assert_clean_after_refusal(h.worktree, start)
+    assert h.commit_count() == 0
+
+
+def test_a_declared_autofix_is_not_run_on_the_rewrite_path(
+    harness: Callable[..., Harness], caplog: pytest.LogCaptureFixture
+) -> None:
+    h = harness(repair=True, gates=_hook_gates(rewrite_hook_body(WIDGET, "WIDGET = 1")))
+    commit_tracked_file(
+        h.worktree,
+        ".claude/project-config.yaml",
+        'quality_gates:\n  autofix:\n    lint: "touch autofix-ran"\n',
+    )
+    git_in(h.worktree, "push", "origin", BRANCH)
+    _repin(h)
+    h.turn(files={WIDGET: _UNFORMATTED})
+    with caplog.at_level("WARNING", logger=_AUTOFIX_LOGGER):
+        result = h.run()
+    assert result.status == "stage_complete"
+    assert not (h.worktree / "autofix-ran").exists()
+    assert _autofix_outcomes(caplog) == ["rewrite_applied"]
 
 
 # --- events and bookkeeping -----------------------------------------------------
