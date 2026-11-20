@@ -9,6 +9,7 @@ from the historical flat ``cw.dispatch.claim`` module by the package split
 
 from __future__ import annotations
 
+import shlex
 from typing import TYPE_CHECKING
 
 from cw._text import redact
@@ -16,7 +17,10 @@ from cw.dev_queue import (
     REVIEW_APPROVAL_GATE_DISPOSITION,
     STALE_DISPATCH_GATE_DISPOSITION,
 )
-from cw.dev_queue.dispositions import REVIEW_CAPABILITY_UNMET_DISPOSITION
+from cw.dev_queue.dispositions import (
+    REVIEW_CAPABILITY_RELANE_STEPS,
+    REVIEW_CAPABILITY_UNMET_DISPOSITION,
+)
 from cw.dev_queue.next_commands import dev_queue_command
 from cw.events import record_event
 from cw.models import DispatchSkipReason, OrchestratorEventType
@@ -362,13 +366,21 @@ def _emit_review_capability_attention_event(
     """Emit SESSION_NEEDS_ATTENTION for a claim-time review-capability park (#3790).
 
     ``details`` names the missing capabilities, the lane, the compatible lanes
-    and the config fix. The release is ``requeue``; for re-laning, ``requeue``
-    first and then ``move --to`` (move needs PENDING). Nothing was dispatched
-    and nothing was attested.
+    and the config fix. The release is ``requeue``; re-laning is the shared
+    ``REVIEW_CAPABILITY_RELANE_STEPS`` (pause the incompatible lane, requeue,
+    move, resume: move needs PENDING and a tick would re-park a requeued row).
+    Nothing was dispatched and nothing was attested.
     """
     requeue = dev_queue_command("requeue", task)
     target = gap.compatible_lanes[0] if gap.compatible_lanes else "<lane>"
     move = dev_queue_command("move", task, "--to", target)
+    lane_cmd = f"-c {shlex.quote(task.client)} {shlex.quote(task.lane)}"
+    relane = REVIEW_CAPABILITY_RELANE_STEPS.format(
+        pause=f"cw lane pause {lane_cmd}",
+        requeue=requeue,
+        move=move,
+        resume=f"cw lane resume {lane_cmd}",
+    )
     compatible = ", ".join(gap.compatible_lanes) or "none"
     _record_pre_dispatch_attention_event(
         task,
@@ -391,8 +403,7 @@ def _emit_review_capability_attention_event(
                 " .runtime_capabilities (a lane's executors replace the client's"
                 " wholesale), or remove them from review.engine"
                 " .requires_runtime_capabilities. Compatible lanes: "
-                f"{compatible}. Release with `{requeue}`. To re-lane instead, run"
-                f" `{requeue}` then `{move}`; move needs the row PENDING."
+                f"{compatible}. Release with `{requeue}`. {relane}"
             ),
         },
     )

@@ -121,8 +121,10 @@ review:
   `cw-engine.json` or the PR branch, not writable by `cw lane set`, and not stamped
   into `.claude/cw-context.json`. A row whose lane runner lacks a required slug is
   parked `review_capability_unmet` before claim: no spawn, no attempt charged, and
-  the stage stays REVIEW. Release with `cw dev-queue requeue`, or re-lane with
-  `cw dev-queue move --to <lane>` after requeue. `cw doctor` warns
+  the stage stays REVIEW. Release with `cw dev-queue requeue`. To re-lane instead,
+  pause the incompatible lane (`cw lane pause`), then `cw dev-queue requeue`, then
+  `cw dev-queue move --to <lane>` (`move` needs the row PENDING, and without the
+  pause a dispatch tick may re-park it first), then `cw lane resume`. `cw doctor` warns
   `review-capability/<client>/<lane>` for such a lane; the warning is advisory.
 - **Unknown sub-keys fail loud** at config load.
 - **The engine requires `convergence: clean`, stated explicitly.** The rule

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cw.dev_queue.dispositions import REVIEW_CAPABILITY_RELANE_GENERIC
 from cw.dispatch.claim.review_capability import review_capability_gap
 from cw.doctor._shared import CheckResult
 from cw.executor import resolve_executor_config, resolve_pipeline_stages
@@ -59,8 +60,8 @@ _CAPABILITY_UNMET = (
     " REVIEW on backend={backend} declaring {declared} (missing {missing}); its REVIEW"
     " rows park as review_capability_unmet before claim. Declare the missing"
     " capabilities on this lane's pipeline.executors.review.runtime_capabilities in"
-    " clients.yaml, or re-lane with `cw dev-queue move`. Compatible lanes:"
-    " {compatible}."
+    " clients.yaml, then `cw dev-queue requeue <T> -c <C>`. Compatible lanes:"
+    " {compatible}. " + REVIEW_CAPABILITY_RELANE_GENERIC
 )
 _CODEX_UNVERIFIED = (
     "review.engine is set and lane '{lane}' runs REVIEW on codex, but the "

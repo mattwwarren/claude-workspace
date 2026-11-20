@@ -9,8 +9,8 @@ assigned runner falls short, the claim screen parks the PENDING row with
 The park is uncharged by construction: the row never leaves PENDING, so no
 ``attempts``, ``unproductive_attempts`` or ``regress_attempts`` is spent, the
 stage stays REVIEW, and no spawn, attestation or ledger write happens. There is
-no automatic lane reassignment; the operator fixes config or re-lanes with
-``cw dev-queue move`` and then ``requeue``.
+no automatic lane reassignment; the operator fixes config and ``requeue``s, or
+re-lanes (pause the lane, ``requeue``, ``cw dev-queue move``, resume the lane).
 
 Pure config, no I/O, so it is safe under the dev-queue claim lock. The doctor
 advisory reuses :func:`review_capability_gap` so the gate and the advisory

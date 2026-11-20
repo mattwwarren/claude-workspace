@@ -4,7 +4,7 @@ A PENDING REVIEW row whose lane's runner lacks a capability the client's
 ``review.engine`` requires is parked ``BLOCKED_ON_USER`` before any claim. The
 park is uncharged: attempts, unproductive and regress counters are untouched,
 the stage stays REVIEW, nothing is claimed. Releasing it is a config fix plus
-``requeue`` (or a re-lane with ``move``).
+``requeue`` (or a re-lane: pause the lane, ``requeue``, ``move``, resume).
 """
 
 from __future__ import annotations
@@ -218,6 +218,17 @@ def test_park_emits_the_attention_event(tmp_path: Path) -> None:
     assert "cw dev-queue requeue" in details
     assert "cw dev-queue move" in details
     assert "--to beta" in details
+    assert "cw lane pause -c rc-client alpha" in details
+    assert "cw lane resume -c rc-client alpha" in details
+    relane = details[details.index("To re-lane instead") :]
+    assert (
+        relane.index("cw lane pause")
+        < relane.index("cw dev-queue requeue")
+        < relane.index("cw dev-queue move")
+        < relane.index("cw lane resume")
+    )
+    assert "move needs the row PENDING" in details
+    assert "re-park" in details
 
 
 def test_park_is_not_repeated_on_a_second_claim(tmp_path: Path) -> None:

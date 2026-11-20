@@ -1289,8 +1289,11 @@ is `BLOCKED_ON_USER` with `disposition: review_capability_unmet`, uncharged, and
 the stage stays REVIEW. Fix the config in `clients.yaml`: declare the missing
 slugs on the lane's `pipeline.executors.review.runtime_capabilities`, or remove
 them from the engine. Then `cw dev-queue requeue <T> -c <C>`. To re-lane instead,
-requeue first and then `cw dev-queue move <T> -c <C> --to <lane>`, since move needs
-PENDING. `cw doctor --reap` never reverts this park.
+run `cw lane pause <lane> -c <C>` on the incompatible lane first, then
+`cw dev-queue requeue <T> -c <C>`, then `cw dev-queue move <T> -c <C> --to <lane>`,
+then `cw lane resume <lane> -c <C>`. `move` needs the row PENDING, and a requeued
+row is PENDING in the incompatible lane, so without the pause a dispatch tick may
+re-park it before `move` runs. `cw doctor --reap` never reverts this park.
 
 ### Bulk cleanup of stale terminal rows (`cw dev-queue prune`)
 
