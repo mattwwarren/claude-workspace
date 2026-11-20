@@ -182,7 +182,8 @@ def test_compatible_lanes_exclude_self_and_lanes_without_review(
 
 def test_claim_screen_parks_the_row_uncharged(tmp_path: Path) -> None:
     client = _client(tmp_path, required=["jvm"], lanes={"alpha": []})
-    _seed(_task())
+    pr_url = "https://example.test/pr/1"
+    _seed(_task(pr_url=pr_url))
 
     assert _claim(client) is None
 
@@ -190,6 +191,7 @@ def test_claim_screen_parks_the_row_uncharged(tmp_path: Path) -> None:
     assert parked.status == QueueItemStatus.BLOCKED_ON_USER
     assert parked.disposition == REVIEW_CAPABILITY_UNMET_DISPOSITION
     assert parked.blocked_reason == _PRE_DISPATCH_REVIEW_CAPABILITY_REASON
+    assert parked.pr_url == pr_url
     assert parked.stage == Stage.REVIEW
     assert parked.session_id is None
     assert parked.attempts == 3

@@ -126,6 +126,8 @@ def park_review_capability_unmet(
         QueueItemStatus.BLOCKED_ON_USER,
         disposition=REVIEW_CAPABILITY_UNMET_DISPOSITION,
         blocked_reason=_PRE_DISPATCH_REVIEW_CAPABILITY_REASON,
+        # BLOCKED_ON_USER assigns pr_url unconditionally; carry the row's link.
+        pr_url=task.pr_url,
         unproductive=False,
     )
     save_dev_queue(store)
