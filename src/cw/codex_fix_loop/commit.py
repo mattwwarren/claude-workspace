@@ -381,6 +381,8 @@ class _CycleContext:
     had_real_commit: bool
     reasoning_effort: str | None
     fix_sandbox_mode: SandboxMode = DEFAULT_FIX_SANDBOX_MODE
+    # #3693: operator-tolerated exact paths for the clean-start probe.
+    tolerated: frozenset[str] = frozenset()
 
     # Set once the clean-start baseline exists (#2967). While it is ``None``
     # (the dirty-start refusal, the baseline probe's git error) no restore is
@@ -493,7 +495,7 @@ class _CycleContext:
         retry-eligible again.
         """
         restore = self._restore(_CATEGORY_TO_REASON[category])
-        left_edits = check_left_edits and _left_edits(self.worktree)
+        left_edits = check_left_edits and _left_edits(self.worktree, self.tolerated)
         return _park_fix_failure(
             task=self.task,
             worktree=self.worktree,
@@ -529,7 +531,7 @@ def _begin_cycle(ctx: _CycleContext) -> CycleBaseline | _Park:
     while probing parks ``codex_error`` (fail closed).
     """
     try:
-        start = capture_cycle_baseline(ctx.worktree)
+        start = capture_cycle_baseline(ctx.worktree, tolerated=ctx.tolerated)
     except subprocess.CalledProcessError as exc:
         return ctx.park_git_error(exc)
     if isinstance(start, DirtyStart):
@@ -537,14 +539,16 @@ def _begin_cycle(ctx: _CycleContext) -> CycleBaseline | _Park:
     return start
 
 
-def _left_edits(worktree: Path) -> bool:
+def _left_edits(worktree: Path, tolerated: frozenset[str]) -> bool:
     """Whether a failed invocation left the tree dirty (unmeasurable → False).
 
     Uses the clean-start check itself, so "dirty" means exactly what would
     refuse the next cycle. A git failure here keeps the pre-#2633 park.
     """
     try:
-        return isinstance(capture_cycle_baseline(worktree), DirtyStart)
+        return isinstance(
+            capture_cycle_baseline(worktree, tolerated=tolerated), DirtyStart
+        )
     except subprocess.CalledProcessError:
         return False
 
@@ -830,6 +834,7 @@ def _run_fix_and_commit(
     loop_growth_budget: LoopGrowthBudget | None = None,
     fix_sandbox_mode: SandboxMode = DEFAULT_FIX_SANDBOX_MODE,
     gate_tokens: list[str] | None = None,
+    tolerated: frozenset[str] = frozenset(),
 ) -> tuple[_Park | None, str | None]:
     """Run one cycle's fix invocation and commit; return ``(park, commit_sha)``.
 
@@ -864,6 +869,7 @@ def _run_fix_and_commit(
         reasoning_effort=reasoning_effort,
         fix_sandbox_mode=fix_sandbox_mode,
         gate_tokens=[] if gate_tokens is None else gate_tokens,
+        tolerated=tolerated,
     )
     baseline = _begin_cycle(ctx)
     if not isinstance(baseline, CycleBaseline):

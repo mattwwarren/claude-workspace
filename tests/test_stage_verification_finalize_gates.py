@@ -54,7 +54,7 @@ from cw.stage_verification.finalize_result import (
     FinalizeFacts,
 )
 from tests._codex_review_helpers import fresh_impl_repo, install_home_prep_pr_state
-from tests._shared.git_repos import git_in
+from tests._shared.git_repos import dirty_tracked_file, git_in
 from tests._tool_fakes import FakeCwCli, GhReply, stub_cw_cli
 
 if TYPE_CHECKING:
@@ -653,12 +653,18 @@ def _ci(path: str) -> CiContext:
     return CiContext(base="main", pr_number=7, pr_url=_PR_URL, head=_HEAD)
 
 
-def _gate_run(repo: Path, path: str) -> FinalizeGateRun:
-    return run_finalize_quality_gates(repo, scope=_SCOPE, path=path, ci=_ci(path))
+def _gate_run(
+    repo: Path, path: str, *, tolerated: frozenset[str] = frozenset()
+) -> FinalizeGateRun:
+    return run_finalize_quality_gates(
+        repo, scope=_SCOPE, path=path, ci=_ci(path), tolerated=tolerated
+    )
 
 
-def _gates_run(repo: Path, path: str) -> tuple[FinalizeBlock | None, list[str]]:
-    run = _gate_run(repo, path)
+def _gates_run(
+    repo: Path, path: str, *, tolerated: frozenset[str] = frozenset()
+) -> tuple[FinalizeBlock | None, list[str]]:
+    run = _gate_run(repo, path, tolerated=tolerated)
     return run.block, run.friction
 
 
@@ -729,6 +735,30 @@ class TestQualityGates:
         assert friction == []
         assert block.reason == CODEX_FIX_DIRTY_START
         assert "nothing was pushed or created" in block.details
+        assert stub.calls() == []
+
+    def test_a_tolerated_dirty_path_does_not_block_the_gates(
+        self, gated: Path, tmp_path: Path, path: str
+    ) -> None:
+        """#3693: the operator's exact path is not a dirty start."""
+        stub = install_home_prep_pr_state(tmp_path / "state", ("lint", "true", 5.0))
+        dirty_tracked_file(gated, "tol.py")
+        block, friction = _gates_run(gated, path, tolerated=frozenset({"tol.py"}))
+        assert block is None
+        assert friction == [f"{path}_path_gates: passed"]
+        assert stub.calls() != []
+        assert (gated / "tol.py").read_text(encoding="utf-8") == "a = 2\n"
+
+    def test_a_tolerated_path_does_not_excuse_an_unlisted_dirty_path(
+        self, gated: Path, tmp_path: Path, path: str
+    ) -> None:
+        stub = install_home_prep_pr_state(tmp_path / "state", ("lint", "true", 5.0))
+        dirty_tracked_file(gated, "tol.py")
+        (gated / "junk.txt").write_text("x", encoding="utf-8")
+        block, _ = _gates_run(gated, path, tolerated=frozenset({"tol.py"}))
+        assert block is not None
+        assert block.reason == CODEX_FIX_DIRTY_START
+        assert "tol.py" not in block.details
         assert stub.calls() == []
 
     def test_autofix_is_forced_off_and_nothing_is_committed(

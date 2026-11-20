@@ -255,6 +255,7 @@ def _run_claude_role(
     argv: list[str],
     timeout_seconds: int | None,
     session_id: str,
+    tolerated: frozenset[str],
 ) -> tuple[
     ReviewerFindingsDocument | None,
     ReviewerRunFailure | None,
@@ -266,13 +267,14 @@ def _run_claude_role(
 
     The fifth element is set only when the worktree changed across the call
     (G4); the failure then carries ``CODEX_REVIEW_WORKTREE_MUTATED`` and no
-    document is returned even if the envelope held one.
+    document is returned even if the envelope held one. ``tolerated`` (#3693)
+    filters both snapshots alike; only the after-snapshot logs the WARNING.
     """
-    before = worktree_state(worktree)
+    before = worktree_state(worktree, tolerated=tolerated)
     start = time.monotonic()
     result = runner.run(worktree, argv, timeout_seconds, stdin=prompt)
     duration = time.monotonic() - start
-    after = worktree_state(worktree)
+    after = worktree_state(worktree, tolerated=tolerated, log_tolerated=True)
     # Read before the mutation check, so a mutated role keeps the tokens it spent.
     process_category = _process_category(result)
     envelope = (
@@ -335,6 +337,7 @@ def run_claude_roles(
     model: str | None,
     wall_clock_budget_seconds: int | None,
     session_id: str,
+    tolerated: frozenset[str] = frozenset(),
 ) -> ClaudeRolesOutcome:
     """Run every role under one shared wall-clock deadline.
 
@@ -373,6 +376,7 @@ def run_claude_roles(
             argv=argv,
             timeout_seconds=budget.timeout_seconds,
             session_id=session_id,
+            tolerated=tolerated,
         )
         metrics_by_role[role] = metrics
         pre_validation_rejected.extend(rejected)

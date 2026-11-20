@@ -137,6 +137,7 @@ def _client(
     confirm: ConfirmBackend | None = None,
     max_cycles: int | None = None,
     default_branch: str = "main",
+    tolerated: tuple[str, ...] = (),
 ) -> ClientConfig:
     return ClientConfig(
         name="test",
@@ -147,6 +148,7 @@ def _client(
                 "convergence": convergence,
                 "confirm_backend": confirm,
                 "max_cycles": max_cycles,
+                "tolerated_worktree_paths": list(tolerated),
             }
         ),
     )
@@ -1600,6 +1602,42 @@ class TestSnapshotContextReachesTheConfirmPass:
         assert outcome is not None
         assert seen == [self._CTX]
         assert seen[0] is self._CTX
+
+
+class TestToleratedPaths:
+    """The confirm round hands the client's tolerated paths to the reviewer (#3693)."""
+
+    @staticmethod
+    def _spy_tolerated(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+        real = codex_clean_confirm.run_claude_review
+        seen: list[object] = []
+
+        def _spy(**kwargs: object) -> object:
+            seen.append(kwargs["tolerated"])
+            return real(**kwargs)
+
+        monkeypatch.setattr("cw.codex_clean_confirm.run_claude_review", _spy)
+        return seen
+
+    def test_the_confirm_round_passes_the_client_tolerated_paths(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = _client(wt, tolerated=(".codex/config.toml",))
+        seen = self._spy_tolerated(monkeypatch)
+
+        _apply(wt, client, RoleAwareClaudeRunner(_clean_role))
+
+        assert seen == [frozenset(client.review.tolerated_worktree_paths)]
+        assert seen == [frozenset({".codex/config.toml"})]
+
+    def test_an_unconfigured_client_passes_an_empty_set(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen = self._spy_tolerated(monkeypatch)
+
+        _apply(wt, _client(wt), RoleAwareClaudeRunner(_clean_role))
+
+        assert seen == [frozenset()]
 
 
 class TestDiffBasePin:

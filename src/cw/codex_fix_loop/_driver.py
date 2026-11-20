@@ -543,6 +543,7 @@ def run_review_with_fix_loop(
     fix_sandbox_mode: SandboxMode = DEFAULT_FIX_SANDBOX_MODE,
     gate_tokens: list[str] | None = None,
     engine: EngineRoundSpec | None = None,
+    tolerated: frozenset[str] = frozenset(),
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the initial review pass plus a bounded MUST_FIX fix loop.
 
@@ -761,6 +762,7 @@ def run_review_with_fix_loop(
                 loop_growth_budget=loop_growth_budget,
                 fix_sandbox_mode=fix_sandbox_mode,
                 gate_tokens=gate_tokens,
+                tolerated=tolerated,
             )
         if park is not None:
             cycle_parked_result, cycle_parked_verdict = park

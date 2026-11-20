@@ -136,8 +136,12 @@ def run_claude_review(
     resolution: ResolutionSpec | None = None,
     max_prompt_chars: int | None = None,
     snapshots: SnapshotContext = DEFAULT_SNAPSHOT_CONTEXT,
+    tolerated: frozenset[str] = frozenset(),
 ) -> ClaudeReviewRound:
     """Run one full Claude review pass (no fix loop) and synthesize the result.
+
+    *tolerated* (#3693) is forwarded to the per-role mutation check; an empty
+    set changes nothing.
 
     *settled_suppression* is forwarded to
     :func:`synthesize_codex_review_result`: the codex-lane gate passes the
@@ -179,6 +183,7 @@ def run_claude_review(
         model=model,
         wall_clock_budget_seconds=wall_clock_budget_seconds,
         session_id=session_id,
+        tolerated=tolerated,
     )
     if outcome.mutation is not None:
         blocked = make_codex_blocked(

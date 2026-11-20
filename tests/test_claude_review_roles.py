@@ -65,6 +65,7 @@ def _run(
     *,
     roles: tuple[str, ...] = (_ROLE,),
     budget: int | None = None,
+    tolerated: frozenset[str] = frozenset(),
 ) -> ClaudeRolesOutcome:
     return run_claude_roles(
         runner=runner,
@@ -74,6 +75,7 @@ def _run(
         model=None,
         wall_clock_budget_seconds=budget,
         session_id=_SESSION,
+        tolerated=tolerated,
     )
 
 
@@ -370,6 +372,60 @@ class TestWorktreeMutation:
         outcome = _run(wt, runner)
         assert outcome.mutation is None
         assert len(outcome.documents) == 1
+
+    def test_a_tolerated_dirty_path_before_the_role_is_not_a_mutation(
+        self, wt: Path
+    ) -> None:
+        commit_tracked_file(wt, "tol.py")
+        (wt / "tol.py").write_text("dirty before\n", encoding="utf-8")
+        runner = FakeClaudeRunner(stdout=review_envelope(_doc_json(role=_ROLE)))
+        outcome = _run(wt, runner, tolerated=frozenset({"tol.py"}))
+        assert outcome.mutation is None
+        assert len(outcome.documents) == 1
+
+    def test_a_role_rewriting_a_tolerated_path_is_not_a_mutation(
+        self, wt: Path
+    ) -> None:
+        commit_tracked_file(wt, "tol.py")
+
+        def _rewrite(worktree: Path) -> None:
+            (worktree / "tol.py").write_text("rewritten\n", encoding="utf-8")
+
+        runner = FakeClaudeRunner(
+            stdout=review_envelope(_doc_json(role=_ROLE)), side_effect=_rewrite
+        )
+        outcome = _run(wt, runner, tolerated=frozenset({"tol.py"}))
+        assert outcome.mutation is None
+
+    def test_a_tolerated_rewrite_plus_stray_file_reports_only_the_stray(
+        self, wt: Path
+    ) -> None:
+        commit_tracked_file(wt, "tol.py")
+
+        def _both(worktree: Path) -> None:
+            (worktree / "tol.py").write_text("rewritten\n", encoding="utf-8")
+            (worktree / "stray.txt").write_text("x\n", encoding="utf-8")
+
+        runner = FakeClaudeRunner(stdout=review_envelope(), side_effect=_both)
+        mutation = _run(wt, runner, tolerated=frozenset({"tol.py"})).mutation
+        assert mutation is not None
+        assert mutation.describe() == "git status changed: ?? stray.txt"
+
+    def test_the_tolerated_warning_fires_once_per_role_from_the_after_snapshot(
+        self, wt: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """#3693: the before-snapshot is silent; each role logs once, after it ran."""
+        commit_tracked_file(wt, "tol.py")
+        (wt / "tol.py").write_text("dirty before\n", encoding="utf-8")
+        runner = FakeClaudeRunner(stdout=review_envelope(_doc_json(role=_ROLE)))
+        with caplog.at_level(logging.WARNING, logger="cw.tolerated_paths"):
+            outcome = _run(
+                wt, runner, roles=(_ROLE, _SECOND), tolerated=frozenset({"tol.py"})
+            )
+        assert len(runner.calls) == 2
+        assert outcome.mutation is None
+        records = [r for r in caplog.records if r.name == "cw.tolerated_paths"]
+        assert [r.args for r in records] == [("tol.py", "post_review_mutation")] * 2
 
     def test_the_status_description_quotes_at_most_five_lines(self) -> None:
         mutation = WorktreeMutation(

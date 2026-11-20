@@ -4152,6 +4152,47 @@ def test_driver_threads_stall_and_budget_to_state(
     )
 
 
+def test_driver_threads_tolerated_to_the_cycle(
+    make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3693: the driver hands the operator's tolerated paths to every cycle."""
+    worktree = _worktree(make_git_repo, "wt-thread-tolerated")
+    seen: dict[str, object] = {}
+    real_cycle = _driver._run_fix_and_commit
+
+    def _spy_cycle(**kwargs: object) -> object:
+        seen.update(kwargs)
+        return real_cycle(**kwargs)
+
+    monkeypatch.setattr(_driver, "_run_fix_and_commit", _spy_cycle)
+
+    _run_loop(
+        _FixLoopRunner([_MF_DOC, _CLEAN_DOC]),
+        worktree,
+        tolerated=frozenset({"tol.py"}),
+    )
+
+    assert seen["tolerated"] == frozenset({"tol.py"})
+
+
+def test_driver_defaults_tolerated_to_the_empty_set(
+    make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree = _worktree(make_git_repo, "wt-thread-tolerated-none")
+    seen: dict[str, object] = {}
+    real_cycle = _driver._run_fix_and_commit
+
+    def _spy_cycle(**kwargs: object) -> object:
+        seen.update(kwargs)
+        return real_cycle(**kwargs)
+
+    monkeypatch.setattr(_driver, "_run_fix_and_commit", _spy_cycle)
+
+    _run_loop(_FixLoopRunner([_MF_DOC, _CLEAN_DOC]), worktree)
+
+    assert seen["tolerated"] == frozenset()
+
+
 # ---------------------------------------------------------------------------
 # #2807: Claude confirm findings seeded into cycle 0
 # ---------------------------------------------------------------------------

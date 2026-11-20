@@ -129,6 +129,7 @@ from cw.stage_verification.posted_text import redact_and_cap
 from cw.stage_verification.push import push_and_verify_head
 from cw.ticket_snapshot import context_for_client, snapshot_for_stage
 from cw.ticket_snapshot._plan import PLAN_RECOVERED_FRICTION, recover_plan
+from cw.tolerated_paths import tolerated_paths
 from cw.tracker_io import TrackerIoConfigError, courier_refresher
 
 if TYPE_CHECKING:
@@ -488,7 +489,9 @@ def _prepare(run: _Run) -> _Pre | ImplBlock:
 
 def _start(run: _Run, pre: _Pre) -> _Flow | ImplBlock:
     """Step 2: the clean-start baseline, the conflict merge and the pinned gates."""
-    baseline = capture_cycle_baseline(run.worktree)
+    baseline = capture_cycle_baseline(
+        run.worktree, tolerated=tolerated_paths(run.client)
+    )
     if isinstance(baseline, DirtyStart):
         return dirty_start_block(baseline)
     merge = None

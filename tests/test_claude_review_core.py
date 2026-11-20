@@ -15,6 +15,7 @@ import pytest
 from cw.claude_review import (
     CLAUDE_BACKEND_DETAILS_PREFIX,
     ClaudeRunResult,
+    core,
     run_claude_review,
 )
 from cw.codex_review import (
@@ -115,6 +116,7 @@ def _review(
     *,
     base_ref: str | None = None,
     budget: int | None = None,
+    tolerated: frozenset[str] = frozenset(),
 ) -> ClaudeReviewRound:
     return run_claude_review(
         runner=runner,
@@ -125,6 +127,7 @@ def _review(
         model=None,
         wall_clock_budget_seconds=budget,
         session_id="confirm-T-1",
+        tolerated=tolerated,
     )
 
 
@@ -288,6 +291,44 @@ class TestRunClaudeReview:
         )
         # Left as found for the operator to inspect.
         assert (wt / "hook.txt").exists()
+
+
+class TestToleratedPaths:
+    """#3693: ``tolerated`` reaches the per-role mutation check."""
+
+    @staticmethod
+    def _rewrite_tolerated(worktree: Path) -> None:
+        (worktree / "mod.py").write_text("def changed():\n    pass\n", encoding="utf-8")
+
+    def test_a_role_rewriting_a_tolerated_path_is_a_normal_round(
+        self, wt: Path
+    ) -> None:
+        runner = _RoleAwareRunner(_clean, side_effect=self._rewrite_tolerated)
+        round_ = _review(wt, runner, tolerated=frozenset({"mod.py"}))
+        assert round_.result.blocker is None
+        assert round_.verdict is not None
+
+    def test_the_same_rewrite_unlisted_parks_as_worktree_mutated(
+        self, wt: Path
+    ) -> None:
+        runner = _RoleAwareRunner(_clean, side_effect=self._rewrite_tolerated)
+        round_ = _review(wt, runner)
+        assert round_.result.blocker is not None
+        assert round_.result.blocker.reason == CODEX_REVIEW_WORKTREE_MUTATED
+
+    def test_run_claude_review_forwards_tolerated_to_run_claude_roles(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real = core.run_claude_roles
+        seen: list[object] = []
+
+        def _spy(**kwargs: object) -> object:
+            seen.append(kwargs["tolerated"])
+            return real(**kwargs)
+
+        monkeypatch.setattr(core, "run_claude_roles", _spy)
+        _review(wt, _RoleAwareRunner(_clean), tolerated=frozenset({"mod.py"}))
+        assert seen == [frozenset({"mod.py"})]
 
 
 #: The ``CONFIRM_PROMPT_PAYLOAD`` items (the operator-facing egress disclosure),

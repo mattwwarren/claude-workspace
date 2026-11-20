@@ -2307,6 +2307,15 @@ lane is blocked (both below).
   the agent parks `agent_block`): inspect `git status` and
   `git log`, revert anything the reviewer process wrote, then `cw dev-queue
   requeue <T> -c <C> --stage review`.
+- **Tolerated worktree paths (`review.tolerated_worktree_paths`, #3693).** An
+  operator may list exact repo-relative paths that a tool writes into the
+  worktree, so the dirty-start check and the post-review mutation check skip
+  them. The key clears only those two checks. A listed path that is dirty
+  or changed logs a WARNING with the path and the check name. The finalize
+  `DIRTY_TREE` gate is a project-owned script that does not read the key, so
+  a finalize park on a dirty tracked file still needs the workaround: restore
+  the file to its committed content, then requeue finalize. The root cause,
+  which process writes `.codex/config.toml`, stays open on #2907 and #3693.
 - **`codex_convergence_ledger_error`.** A ledger, git or file step failed after
   the codex review completed. The codex verdict is still posted. A failed save
   is transient; a foreign or corrupt ledger, or a verdict that is not at HEAD,

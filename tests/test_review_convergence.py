@@ -2749,6 +2749,54 @@ class TestWorktreeState:
         with pytest.raises(CwError, match="Cannot read the git state"):
             worktree_state(not_a_repo)
 
+    def test_tolerated_dirty_path_is_absent_from_status(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("state-tol")
+        (repo / "tol.txt").write_text("x\n", encoding="utf-8")
+        before = worktree_state(repo, tolerated=frozenset({"tol.txt"}))
+        (repo / "tol.txt").write_text("y\n", encoding="utf-8")
+        after = worktree_state(repo, tolerated=frozenset({"tol.txt"}))
+        assert after == before
+        assert "tol.txt" not in after[1]
+
+    def test_different_dirty_path_stays_with_tolerance(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("state-tol-other")
+        (repo / "other.txt").write_text("x\n", encoding="utf-8")
+        status = worktree_state(repo, tolerated=frozenset({"tol.txt"}))[1]
+        assert "?? other.txt" in status
+
+    def test_head_move_is_still_reported_with_tolerance(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("state-tol-head")
+        before = worktree_state(repo, tolerated=frozenset({"tol.txt"}))
+        commit_tracked_file(repo, "a.py")
+        after = worktree_state(repo, tolerated=frozenset({"tol.txt"}))
+        assert after[0] != before[0]
+
+    def test_log_tolerated_warns_once_per_tolerated_path(
+        self, make_git_repo: Callable[..., Path], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        repo = make_git_repo("state-tol-log")
+        (repo / "tol.txt").write_text("x\n", encoding="utf-8")
+        with caplog.at_level("WARNING", logger="cw.tolerated_paths"):
+            worktree_state(repo, tolerated=frozenset({"tol.txt"}), log_tolerated=True)
+        warnings = [r for r in caplog.records if r.name == "cw.tolerated_paths"]
+        assert len(warnings) == 1
+        assert warnings[0].args == ("tol.txt", "post_review_mutation")
+
+    def test_default_call_does_not_log_tolerated(
+        self, make_git_repo: Callable[..., Path], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        repo = make_git_repo("state-tol-nolog")
+        (repo / "tol.txt").write_text("x\n", encoding="utf-8")
+        with caplog.at_level("WARNING", logger="cw.tolerated_paths"):
+            worktree_state(repo, tolerated=frozenset({"tol.txt"}))
+        assert [r for r in caplog.records if r.name == "cw.tolerated_paths"] == []
+
 
 class TestNextActionAndStatus:
     def test_fresh_ledger_starts_a_loop_round(self) -> None:

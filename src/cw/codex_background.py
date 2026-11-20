@@ -98,6 +98,7 @@ from cw.models.enums import (
 from cw.review_finding_dispositions import merge_finding_dispositions
 from cw.stage_verification.push import push_and_verify_head, remote_branch_tip
 from cw.ticket_snapshot import DEFAULT_SNAPSHOT_CONTEXT, context_for_client
+from cw.tolerated_paths import tolerated_paths
 from cw.tracker_io import courier_refresher
 from cw.worktree import _checked_out_branch
 
@@ -596,6 +597,7 @@ def _review_and_confirm(
             client, task, config
         ),
         snapshots=snapshots,
+        tolerated=tolerated_paths(client),
         # #2867: cycle 0 shards a diff over the codex prompt limit, or parks
         # a diff that cannot be sharded as a non-retryable agent_block.
         max_prompt_chars=CODEX_MAX_PROMPT_CHARS,
