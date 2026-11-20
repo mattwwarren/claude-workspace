@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cw.codex_review._verdict._render._common import _safe, _truncate
+from cw.review_findings import held_kind
 
 if TYPE_CHECKING:
     from cw.review_findings import (
@@ -86,12 +87,22 @@ _DECISION_CONTEST_HELD = (
 _DECISION_CONTEST = " _(contests decided constraint — {quote})_"
 
 
-def _is_held_contest(accepted: AcceptedFinding) -> bool:
-    """Whether *accepted* is a MUST_FIX held for the operator by a contest."""
+# #3793: the reviewer set `evidence_gap`, i.e. the finding rests on a check it
+# could not run. A gap-held MUST_FIX is held for the operator (not fixed, not
+# dropped); any other gap-marked finding is a non-blocking note.
+_EVIDENCE_GAP_HELD = (
+    " _(evidence gap — could not be verified, held for the operator, not"
+    " dropped: {gap})_"
+)
+_EVIDENCE_GAP = " _(evidence gap — {gap})_"
+
+
+def _is_held(accepted: AcceptedFinding) -> bool:
+    """Whether *accepted* is a MUST_FIX held for the operator (#2984, #3793)."""
     return (
         accepted.finding.severity == "MUST_FIX"
         and accepted.disposition == "operator_actionable"
-        and bool(accepted.finding.contests_decision.strip())
+        and held_kind(accepted.finding) is not None
     )
 
 
@@ -104,10 +115,22 @@ def _decision_contest_annotation(accepted: AcceptedFinding) -> str:
     quote = _truncate(accepted.finding.contests_decision, _CONTEST_CLAIM_MAX)
     if not quote:
         return ""
-    template = (
-        _DECISION_CONTEST_HELD if _is_held_contest(accepted) else _DECISION_CONTEST
-    )
+    template = _DECISION_CONTEST_HELD if _is_held(accepted) else _DECISION_CONTEST
     return template.format(quote=quote)
+
+
+def _evidence_gap_annotation(accepted: AcceptedFinding) -> str:
+    """Annotate a finding that rests on an unrun check (#3793).
+
+    ``""`` unless the finding's hold kind is ``evidence_gap``: a finding that
+    carries both markers renders the contest annotation only.
+    """
+    if held_kind(accepted.finding) != "evidence_gap":
+        return ""
+    # `held_kind` already guarantees a non-blank gap, so `_truncate` is non-blank.
+    gap = _truncate(accepted.finding.evidence_gap, _CONTEST_CLAIM_MAX)
+    template = _EVIDENCE_GAP_HELD if _is_held(accepted) else _EVIDENCE_GAP
+    return template.format(gap=gap)
 
 
 def _disposition_annotation(accepted: AcceptedFinding) -> str:
@@ -182,8 +205,12 @@ def _render_findings(
             if finding.confidence == "HIGH"
             else _CONFIDENCE_ANNOTATION.format(confidence=finding.confidence)
         )
-        suppression = "" if _is_held_contest(af) else _disposition_annotation(af)
-        contest = _contest_annotation(finding) + _decision_contest_annotation(af)
+        suppression = "" if _is_held(af) else _disposition_annotation(af)
+        contest = (
+            _contest_annotation(finding)
+            + _decision_contest_annotation(af)
+            + _evidence_gap_annotation(af)
+        )
         degraded = _degraded_annotation(finding)
         out_of_scope = (
             _OUT_OF_PLAN_SCOPE_ANNOTATION if af.in_plan_scope is False else ""

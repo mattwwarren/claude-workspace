@@ -1387,7 +1387,7 @@ def test_local_ticket_citations_follow_the_stage_split() -> None:
 #: #3219 (local stage routing) landed with RFC 0019 H2: no cell defers to it.
 _H2_STAGE_TICKET = 3219
 #: The local cells #3219 used to defer; each now fails closed on the pre-flight.
-_LOCAL_STAGE_PARK_CELLS = 165
+_LOCAL_STAGE_PARK_CELLS = 168
 
 
 def test_local_non_impl_cells_fail_closed_on_the_stage_preflight() -> None:

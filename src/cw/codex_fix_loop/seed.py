@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cw.codex_fix_loop.convergence import _open_finding_key
+from cw.review_findings import has_held_findings
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -77,6 +78,13 @@ def seed_verdict(
     )
 
 
+def _parked_only_on_gap_hold(verdict: ReviewVerdict) -> bool:
+    """Whether *verdict*'s only hold is an evidence gap (#3793), no contest."""
+    return has_held_findings(verdict, "evidence_gap") and not has_held_findings(
+        verdict, "decision_contest"
+    )
+
+
 def _should_seed(
     verdict: ReviewVerdict | None,
     result: AutoDevResult,
@@ -86,12 +94,19 @@ def _should_seed(
     """Whether *seed_findings* are merged into cycle 0's *verdict* (#2807).
 
     Seed only when cycle 0 produced fixable work or parked on nothing: the
-    verdict blocks, or the result carries no blocker. A cycle 0 parked on
-    something other than its own findings keeps its park.
+    verdict blocks, or the result carries no blocker. A cycle 0 whose only
+    hold is an evidence gap (#3793) also seeds: the gap stays held and the
+    cycle-0 carry parks it at convergence, while the Claude round's reproduced
+    defects still get repaired. A cycle 0 parked on something else, or on a
+    decision contest, keeps its park.
     """
     return bool(
         seed_findings
         and fix_loop_enabled
         and verdict is not None
-        and (verdict.blocking or result.blocker is None)
+        and (
+            verdict.blocking
+            or result.blocker is None
+            or _parked_only_on_gap_hold(verdict)
+        )
     )

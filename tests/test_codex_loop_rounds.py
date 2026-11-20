@@ -51,7 +51,7 @@ from tests._review_convergence_helpers import (
 )
 from tests._review_engine_helpers import engine_loop_verdict
 from tests._shared.git_repos import commit_tracked_file, git_in
-from tests._shared.review_builders import _make_finding
+from tests._shared.review_builders import _make_finding, _make_gap_finding
 from tests.test_codex_background import _clean_result
 from tests.test_codex_fix_loop import (
     _MF_DOC,
@@ -589,6 +589,62 @@ class TestSeeds:
         assert ledger.fixed[1].identity == finding_identity(
             "MUST_FIX", _PRODUCER, "Claude finding"
         )
+
+
+# ---------------------------------------------------------------------------
+# Evidence-gap holds (#3793)
+# ---------------------------------------------------------------------------
+
+
+def _held_af(summary: str, *, gap: bool) -> AcceptedFinding:
+    """A MUST_FIX the stamp held for the operator: an evidence gap or a contest."""
+    finding = (
+        _make_gap_finding(file=_PRODUCER, summary=summary)
+        if gap
+        else _make_finding(
+            file=_PRODUCER, summary=summary, contests_decision="keep the legacy path"
+        )
+    )
+    return AcceptedFinding(
+        finding=finding,
+        reviewers=["Code Quality Reviewer"],
+        disposition="operator_actionable",
+    )
+
+
+class TestGapHolds:
+    def test_a_gap_hold_beside_an_open_must_fix_records_only_the_fix(
+        self, wt: Path
+    ) -> None:
+        bug, gap = _af("Bug A"), _held_af("Unrun check", gap=True)
+
+        stop = _recorder(wt).record(_cycle(0, _head(wt), bug, gap))
+
+        assert stop is None
+        (round_,) = _ledger(wt).rounds
+        assert (round_.new_accepted, round_.new_fix) == (1, 1)
+        assert round_.new_operator_action == 0
+        assert _ledger(wt).stop_reason is None
+        assert [e.identity.summary_normalized for e in _ledger(wt).fixed] == ["Bug A"]
+
+    def test_a_gap_only_round_is_not_recorded_as_an_operator_action(
+        self, wt: Path
+    ) -> None:
+        gap = _held_af("Unrun check", gap=True)
+
+        stop = _recorder(wt).record(_cycle(0, _head(wt), gap))
+
+        assert stop is None
+        assert not (wt / LEDGER_RELATIVE_PATH).exists()
+
+    def test_a_contest_hold_still_records_an_operator_action(self, wt: Path) -> None:
+        contest = _held_af("Contests the plan", gap=False)
+
+        stop = _recorder(wt).record(_cycle(0, _head(wt), _af("Bug A"), contest))
+
+        assert stop is not None
+        assert _ledger(wt).stop_reason == "operator_action"
+        assert _ledger(wt).rounds[0].new_operator_action == 1
 
 
 # ---------------------------------------------------------------------------
