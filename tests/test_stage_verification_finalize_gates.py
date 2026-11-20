@@ -34,6 +34,7 @@ from cw.stage_verification.finalize_gates import (
     OVERRIDE_ABSENT_FRICTION,
     OVERRIDE_FRICTION,
     OVERRIDE_SCRIPT_NAME,
+    REWRITE_NOTE_MAX_PATHS,
     TIP_CHECK_PREFIX,
     FinalizeGateRun,
     check_branch,
@@ -54,7 +55,7 @@ from cw.stage_verification.finalize_result import (
     FinalizeFacts,
 )
 from tests._codex_review_helpers import fresh_impl_repo, install_home_prep_pr_state
-from tests._shared.git_repos import dirty_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, dirty_tracked_file, git_in
 from tests._tool_fakes import FakeCwCli, GhReply, stub_cw_cli
 
 if TYPE_CHECKING:
@@ -1065,3 +1066,213 @@ class TestHookRewritePinned:
         assert _ran(log) == ["ran"]
         assert "hook_rewrite" not in spy.call_args.kwargs
         assert not [r for r in caplog.records if "outcome=rewrite_" in r.getMessage()]
+
+
+# --- red-gate rewrite note (#3769) ---------------------------------------------
+
+
+def _red_hook(tmp_path: Path, body: str) -> None:
+    """Install one ``fmt`` gate whose shell command is *body*."""
+    install_home_prep_pr_state(tmp_path / "state", ("fmt", body, 5.0))
+
+
+_DIFF_FAILURES = [
+    subprocess.CalledProcessError(128, ["git"]),
+    subprocess.TimeoutExpired("git", 30),
+    OSError("boom"),
+]
+
+
+@pytest.mark.parametrize("path", ["reuse", "create"])
+class TestRedGateRewriteNote:
+    def test_a_rewriting_red_gate_gets_the_note_after_the_original_text(
+        self, gated: Path, tmp_path: Path, path: str
+    ) -> None:
+        _red_hook(
+            tmp_path,
+            "echo boom-output-xyz; printf 'leak-canary-123\\n' > src/a.py; exit 1",
+        )
+        head = git_in(gated, "rev-parse", "HEAD")
+        commits = git_in(gated, "rev-list", "--count", "HEAD")
+        run = _gate_run(gated, path)
+
+        block = run.block
+        assert block is not None
+        assert block.reason == AGENT_BLOCK
+        assert block.retry_eligible is False
+        assert block.stage == FinalizeBlock(AGENT_BLOCK, "").stage
+        details = block.details
+        assert details.startswith(
+            f"the branch tip failed the FINALIZE {path}-path quality gate `fmt`: "
+            "it failed with exit code 1. Nothing was pushed, created or armed."
+        )
+        assert (
+            details.index("Last lines of gate output:")
+            < details.index("boom-output-xyz")
+            < details.index("rewrote tracked files")
+        )
+        for needle in (
+            "`src/a.py`",
+            "uncommitted",
+            "commit the formatting",
+            "requeue REVIEW",
+            "re-review of the new tip",
+            f"cw dev-queue requeue {_TICKET} -c {_CLIENT} --stage review",
+        ):
+            assert needle in details
+        assert "leak-canary-123" not in details
+        assert run.friction == []
+        assert git_in(gated, "rev-parse", "HEAD") == head
+        assert git_in(gated, "rev-list", "--count", "HEAD") == commits
+        assert git_in(gated, "stash", "list") == ""
+        assert (gated / "src/a.py").read_text(encoding="utf-8") == "leak-canary-123\n"
+        assert git_in(gated, "diff", "--name-only", "HEAD") == "src/a.py"
+
+    def test_a_red_gate_that_rewrote_nothing_gets_no_note(
+        self, gated: Path, tmp_path: Path, path: str
+    ) -> None:
+        _red_hook(tmp_path, "echo boom-output-xyz; exit 3")
+        run = _gate_run(gated, path)
+        assert run.block is not None
+        assert "rewrote" not in run.block.details
+        assert "tracked files" not in run.block.details
+        assert run.block.details.endswith("boom-output-xyz")
+
+    def test_untracked_scratch_alone_gets_no_note(
+        self, gated: Path, tmp_path: Path, path: str
+    ) -> None:
+        # run_cycle_gates already staged this untracked file as Added, so only
+        # --diff-filter=M keeps it out of the note (the naive argv lists it).
+        _red_hook(tmp_path, "printf '<c/>\\n' > coverage.xml; exit 1")
+        run = _gate_run(gated, path)
+        assert run.block is not None
+        assert run.block.reason == AGENT_BLOCK
+        assert "tracked files" not in run.block.details
+        assert "coverage.xml" not in run.block.details
+
+    def test_untracked_scratch_is_not_named_beside_a_real_rewrite(
+        self, gated: Path, tmp_path: Path, path: str
+    ) -> None:
+        _red_hook(
+            tmp_path,
+            "printf '<c/>\\n' > coverage.xml; printf 'x = 2\\n' > src/a.py; exit 1",
+        )
+        run = _gate_run(gated, path)
+        assert run.block is not None
+        assert "`src/a.py`" in run.block.details
+        assert "coverage.xml" not in run.block.details
+
+    def test_the_note_caps_the_named_paths_and_counts_the_rest(
+        self, gated: Path, tmp_path: Path, path: str
+    ) -> None:
+        total = REWRITE_NOTE_MAX_PATHS + 2
+        for i in range(total):
+            commit_tracked_file(gated, f"m{i}.py")
+        _red_hook(tmp_path, 'for f in m*.py; do echo y > "$f"; done; exit 1')
+        run = _gate_run(gated, path)
+        assert run.block is not None
+        details = run.block.details
+        for i in range(REWRITE_NOTE_MAX_PATHS):
+            assert f"`m{i}.py`" in details
+        for i in range(REWRITE_NOTE_MAX_PATHS, total):
+            assert f"m{i}.py" not in details
+        assert "and 2 more" in details
+
+    def test_exactly_the_cap_names_every_path_without_a_more_suffix(
+        self, gated: Path, tmp_path: Path, path: str
+    ) -> None:
+        for i in range(REWRITE_NOTE_MAX_PATHS):
+            commit_tracked_file(gated, f"m{i}.py")
+        _red_hook(tmp_path, 'for f in m*.py; do echo y > "$f"; done; exit 1')
+        run = _gate_run(gated, path)
+        assert run.block is not None
+        details = run.block.details
+        for i in range(REWRITE_NOTE_MAX_PATHS):
+            assert f"`m{i}.py`" in details
+        assert " more" not in details
+
+    def test_a_tolerated_dirty_path_alone_is_not_claimed_as_a_rewrite(
+        self, gated: Path, tmp_path: Path, path: str
+    ) -> None:
+        dirty_tracked_file(gated, "tol.py")
+        _red_hook(tmp_path, "exit 1")
+        run = _gate_run(gated, path, tolerated=frozenset({"tol.py"}))
+        assert run.block is not None
+        assert run.block.reason == AGENT_BLOCK
+        assert "tracked files" not in run.block.details
+        assert "tol.py" not in run.block.details
+
+    def test_a_tolerated_dirty_path_is_left_out_beside_a_real_rewrite(
+        self, gated: Path, tmp_path: Path, path: str
+    ) -> None:
+        dirty_tracked_file(gated, "tol.py")
+        _red_hook(tmp_path, "printf 'x = 2\\n' > src/a.py; exit 1")
+        run = _gate_run(gated, path, tolerated=frozenset({"tol.py"}))
+        assert run.block is not None
+        assert "`src/a.py`" in run.block.details
+        assert "tol.py" not in run.block.details
+
+    @pytest.mark.parametrize(
+        "failure", _DIFF_FAILURES, ids=["called", "timeout", "oserror"]
+    )
+    def test_a_failing_diff_leaves_the_original_block_untouched(
+        self, gated: Path, tmp_path: Path, path: str, failure: Exception
+    ) -> None:
+        _red_hook(
+            tmp_path, "echo boom-output-xyz; printf 'x = 2\\n' > src/a.py; exit 1"
+        )
+        real = _gates.git_output
+
+        diffs: list[list[str]] = []
+
+        def flaky(argv: list[str], **kwargs: Any) -> str:
+            if argv[0] == "diff":
+                diffs.append(list(argv))
+                raise failure
+            return real(argv, **kwargs)
+
+        with patch.object(_gates, "git_output", side_effect=flaky):
+            run = _gate_run(gated, path)
+
+        assert diffs == [
+            ["diff", "--name-only", "--no-renames", "--diff-filter=M", "HEAD"]
+        ]
+        assert run.block is not None
+        assert run.block.reason == AGENT_BLOCK
+        assert run.block.retry_eligible is False
+        assert "exit code 1" in run.block.details
+        assert "boom-output-xyz" in run.block.details
+        assert "tracked files" not in run.block.details
+
+    def test_a_dirtied_gate_gets_no_note(
+        self, gated: Path, tmp_path: Path, path: str
+    ) -> None:
+        _red_hook(tmp_path, "printf 'x = 2\\n' > src/a.py")
+        run = _gate_run(gated, path)
+        assert run.block is not None
+        assert "dirtied the worktree" in run.block.details
+        assert "rewrote tracked files" not in run.block.details
+
+    def test_a_secret_shaped_tracked_path_is_redacted_in_the_note(
+        self, gated: Path, tmp_path: Path, path: str
+    ) -> None:
+        token = "a" * 36
+        name = f"src/ghp_{token}.py"
+        commit_tracked_file(gated, name)
+        _red_hook(tmp_path, f"echo y > {name}; exit 1")
+        run = _gate_run(gated, path)
+        assert run.block is not None
+        assert token not in run.block.details
+        assert "<redacted>" in run.block.details
+
+    def test_a_very_long_path_is_capped(
+        self, gated: Path, tmp_path: Path, path: str
+    ) -> None:
+        stem = "d" * 130
+        name = f"src/{stem}.py"
+        commit_tracked_file(gated, name)
+        _red_hook(tmp_path, f"echo y > {name}; exit 1")
+        run = _gate_run(gated, path)
+        assert run.block is not None
+        assert "...[truncated]" in run.block.details
+        assert stem not in run.block.details
