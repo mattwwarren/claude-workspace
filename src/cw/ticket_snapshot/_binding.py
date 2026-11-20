@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 
     from cw.models import ClientConfig, TicketTask
     from cw.ticket_snapshot._models import SnapshotComment, TicketSnapshot
+    from cw.ticket_snapshot._refresh import CourierFetch
 
     #: ``resolve(task, stage)``: the snapshot a stage binds against, or None.
     SnapshotResolver = Callable[[TicketTask, str], TicketSnapshot | None]
@@ -85,8 +86,12 @@ def context_for_client(
     *,
     resolve_login: bool,
     refresh: bool = False,
+    courier: CourierFetch | None = None,
 ) -> SnapshotContext:
     """Build *client*'s context; ``refresh`` makes ``resolve`` refresh per call.
+
+    *courier* (#3760) is the MCP refresh turn a non-GitHub refresh uses; it is
+    consulted only inside the refresh, so ``refresh=False`` ignores it.
 
     ``operator_login`` is resolved only when asked (``gh api user`` stays
     lazy). The GitHub test is the exact ``resolve_tracker`` equality.
@@ -97,7 +102,9 @@ def context_for_client(
     if refresh:
 
         def resolve(task: TicketTask, stage: str) -> TicketSnapshot | None:
-            return snapshot_for_stage(task, client, worktree, stage=stage)
+            return snapshot_for_stage(
+                task, client, worktree, stage=stage, courier=courier
+            )
 
     return SnapshotContext(
         operator_ids=ids,

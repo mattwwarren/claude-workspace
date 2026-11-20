@@ -131,6 +131,7 @@ __all__ = [
     "stub_gh_issue_list",
     "stub_gh_recording",
     "stub_prep_pr_finalize",
+    "tracker_io_refresh_result",
     "tracker_io_turn_result",
     "write_bin_stub",
 ]
@@ -1354,6 +1355,42 @@ class ScriptedCodexRunner:
 def marked_parts(*bodies: str) -> tuple[str, ...]:
     """The tracker-IO turn's emitted parts: each body plus the agent marker."""
     return tuple(agent_marked_body(body) for body in bodies)
+
+
+def tracker_io_refresh_result(
+    *,
+    title: str = "Refreshed title",
+    body: str = "Refreshed body",
+    ticket_url: str | None = None,
+    comments: Sequence[Mapping[str, Any]] = (),
+    mutate: Callable[[dict[str, Any]], None] | None = None,
+) -> str:
+    """A strict-schema refresh turn result: the BARE ticket snapshot document.
+
+    Top-level keys are exactly ``ticket_url``, ``title``, ``body`` and
+    ``comments``; no envelope, status or ticket-id echo. Each comment dict gets
+    a default for every one of the six keys the caller omits except ``id``.
+    *mutate* edits the document before it is serialised, to build a failing case.
+    """
+    doc: dict[str, Any] = {
+        "ticket_url": ticket_url,
+        "title": title,
+        "body": body,
+        "comments": [
+            {
+                "author_id": "op-1",
+                "author": "Operator",
+                "created_at": "2026-11-01T00:00:00Z",
+                "body": "a comment",
+                "minimized": False,
+                **comment,
+            }
+            for comment in comments
+        ],
+    }
+    if mutate is not None:
+        mutate(doc)
+    return json.dumps(doc)
 
 
 def tracker_io_turn_result(

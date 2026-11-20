@@ -23,7 +23,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import click
 import pytest
@@ -57,7 +57,7 @@ from cw.review_convergence import (
     worktree_state,
 )
 from cw.review_findings import ReviewVerdict
-from cw.ticket_snapshot import read_for_stage
+from cw.ticket_snapshot import SnapshotContext, read_for_stage
 from tests._claude_review_helpers import (
     error_envelope,
     review_envelope,
@@ -1979,6 +1979,71 @@ def test_delta_round_default_builds_a_refreshing_snapshot_context(
     [seen] = calls["codex"]
     snapshots = seen["snapshots"]
     assert snapshots.resolve is not read_for_stage
+
+
+def _record_context_builds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict[str, object]]:
+    """Wrap ``confirm_cli.context_for_client`` with a recorder of its kwargs."""
+    real = confirm_cli.context_for_client
+    seen: list[dict[str, object]] = []
+
+    def _wrapped(*args: Any, **kwargs: Any) -> object:
+        seen.append(dict(kwargs))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(confirm_cli, "context_for_client", _wrapped)
+    return seen
+
+
+def test_a_codex_round_builds_its_default_context_with_a_courier(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3760: the codex round refreshes an MCP-bound ticket through a courier."""
+    _stub_rounds(monkeypatch)
+    seen = _record_context_builds(monkeypatch)
+
+    _backend_round("codex", harness)
+
+    [kwargs] = seen
+    assert kwargs["refresh"] is True
+    assert callable(kwargs["courier"])
+
+
+def test_a_claude_round_builds_its_default_context_without_a_courier(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3760: the CLI claude round keeps ``no_binding`` on a non-GitHub tracker."""
+    _stub_rounds(monkeypatch)
+    seen = _record_context_builds(monkeypatch)
+
+    _backend_round("claude", harness)
+
+    [kwargs] = seen
+    assert kwargs["refresh"] is True
+    assert kwargs["courier"] is None
+
+
+def test_an_explicit_snapshot_context_is_not_rebuilt(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_rounds(monkeypatch)
+    seen = _record_context_builds(monkeypatch)
+    explicit = SnapshotContext()
+
+    confirm_cli.run_backend_round(
+        backend="codex",
+        task=harness.task,
+        worktree=harness.repo,
+        default_branch="main",
+        base_ref="base",
+        model="m",
+        reasoning_effort=None,
+        snapshots=explicit,
+    )
+
+    assert seen == []
+    assert calls["codex"][0]["snapshots"] is explicit
 
 
 def test_run_backend_round_launches_a_codex_round_with_the_effort_default(

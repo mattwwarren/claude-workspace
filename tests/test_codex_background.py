@@ -3598,3 +3598,97 @@ def test_gate_tokens_ride_the_final_result_exactly_once(
     friction = persisted["friction_highlights"]
     assert isinstance(friction, list)
     assert friction.count(_GATES_NONE_FRICTION) == 1
+
+
+# ---------------------------------------------------------------------------
+# #3760: the courier rides the one shared snapshot context
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("isolated_backend_layers", "project_walk_stops_at_state_dir")
+def test_the_review_stage_builds_one_refreshing_context_with_a_courier(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One context carries ``refresh=True`` and a courier over the stage's runner.
+
+    The same object reaches the codex loop and the pre-loop confirm resume, so
+    a claude confirm round run from the codex stage refreshes through the
+    codex runner once per pass (#3760).
+    """
+    from cw.codex_runner import CodexRunResult
+    from cw.tracker_io._prompt import REFRESH_TURN_MARKER
+    from tests._backend_mcp_helpers import stage_mcp_config
+    from tests._shared.bindings_builders import bindings_linear_mcp
+    from tests._shared.ticket_context import seeded_row
+    from tests._tool_fakes import (
+        ScriptedCodexRunner,
+        stdin_contains,
+        tracker_io_refresh_result,
+    )
+
+    stage_mcp_config(monkeypatch, tmp_path, "codex", "enabled")
+    worktree, _origin = make_git_repo_with_origin("wt-bg-3760-courier")
+    sid = "bg-3760"
+    _seed_session(sid)
+    returned = _clean_result(
+        worktree, "T-3760", sha=git_in(worktree, "rev-parse", "HEAD")
+    )
+    client = ClientConfig(
+        name="test",
+        workspace_path=worktree,
+        default_branch="main",
+        bindings=bindings_linear_mcp(operator_ids=["op-1"]),
+    )
+    runner = ScriptedCodexRunner().add(
+        stdin_contains(REFRESH_TURN_MARKER),
+        CodexRunResult(
+            0,
+            "",
+            "",
+            output_file_content=tracker_io_refresh_result(title="COURIER-TITLE-3760"),
+        ),
+    )
+    task = TicketTask(ticket_id="T-3760", client="test", stage=Stage.REVIEW)
+
+    with (
+        patch(
+            "cw.codex_background.context_for_client",
+            wraps=codex_background.context_for_client,
+        ) as ctx_spy,
+        patch(
+            "cw.codex_background.load_effective_config",
+            return_value=OrchestratorConfig(default_codex_fix_loop_enabled=True),
+        ),
+        patch(
+            "cw.codex_background.resume_pending_confirm", return_value=None
+        ) as resume_mock,
+        patch(
+            "cw.codex_background.run_review_with_fix_loop", return_value=returned
+        ) as loop_mock,
+        patch("cw.codex_background._post_daemon_verdict_comment"),
+    ):
+        _run_codex_review_and_complete(
+            runner=runner,
+            task=task,
+            worktree=worktree,
+            client=client,
+            wall_clock_budget_seconds=None,
+            sid=sid,
+            sess_name="test/auto-dev/T-3760",
+            config_model=None,
+            config_reasoning_effort=None,
+        )
+
+    (call,) = ctx_spy.call_args_list
+    assert call.kwargs["refresh"] is True
+    courier = call.kwargs["courier"]
+    assert courier is not None
+    shared = loop_mock.call_args.kwargs["snapshots"]
+    assert resume_mock.call_args.kwargs["snapshots"] is shared
+    # The captured courier runs a refresh turn through the stage's runner.
+    snapshot = courier(seeded_row(), client)
+    assert snapshot.title == "COURIER-TITLE-3760"
+    assert len(runner.review_calls) == 1

@@ -98,6 +98,7 @@ from cw.models.enums import (
 from cw.review_finding_dispositions import merge_finding_dispositions
 from cw.stage_verification.push import push_and_verify_head, remote_branch_tip
 from cw.ticket_snapshot import DEFAULT_SNAPSHOT_CONTEXT, context_for_client
+from cw.tracker_io import courier_refresher
 from cw.worktree import _checked_out_branch
 
 if TYPE_CHECKING:
@@ -535,14 +536,19 @@ def _review_and_confirm(
         return ReviewOutcome(engine, None, False, CODEX_REVIEWER_LABEL)
     # #3712: one snapshot context for the whole run; every review pass
     # refreshes the ticket snapshot through it (R10: no per-client toggle, the
-    # one-line reversal is dropping ``refresh=True`` here). The login is
-    # resolved only when the loop runs (#2633: `gh api user` otherwise never
-    # needs to run).
+    # one-line reversal is dropping ``refresh=True`` here, which also drops the
+    # courier). #3760: a non-GitHub tracker refreshes through one read-only
+    # codex turn on this stage's runner. The one context deliberately reaches
+    # the codex loop, the pre-loop confirm resume and the claude confirm round
+    # (via ``_ConfirmLoop``), so that round refreshes through the codex runner
+    # once per pass. The login is resolved only when the loop runs (#2633:
+    # `gh api user` otherwise never needs to run).
     snapshots = context_for_client(
         client,
         worktree,
         resolve_login=fix_loop_enabled,
         refresh=True,
+        courier=courier_refresher(runner),
     )
     resumed = resume_pending_confirm(
         task=task,

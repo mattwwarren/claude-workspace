@@ -129,6 +129,7 @@ from cw.stage_verification.finalize_result import (
 )
 from cw.stage_verification.posted_text import redact_and_cap
 from cw.ticket_snapshot import snapshot_for_stage
+from cw.tracker_io import courier_refresher
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -294,7 +295,13 @@ def _document(
         )
     # FINALIZE reads the snapshot: a refresh failure keeps the last one, and no
     # usable snapshot means no ticket text, never a block (RFC 0019 T2).
-    snapshot = snapshot_for_stage(run.task, run.client, run.worktree, stage="finalize")
+    snapshot = snapshot_for_stage(
+        run.task,
+        run.client,
+        run.worktree,
+        stage="finalize",
+        courier=courier_refresher(run.runner),
+    )
     ticket = ticket_text_from_snapshot(snapshot) if snapshot is not None else None
     try:
         prompt = render_finalize_prompt(

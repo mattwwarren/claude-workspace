@@ -53,7 +53,8 @@ from cw.stage_verification.push import SYNTHETIC_MISMATCH_PREFIX
 from cw.ticket_snapshot import TicketSnapshot, normalize_ticket_id, write_snapshot
 from cw.tracker import TRACKER_LINEAR
 from cw.tracker_io._argv import build_tracker_io_argv, comment_tools_for
-from tests._backend_mcp_helpers import codex_tracker_client
+from cw.tracker_io._prompt import REFRESH_TURN_MARKER
+from tests._backend_mcp_helpers import codex_tracker_client, stage_mcp_config
 from tests._codex_review_helpers import (
     _install_pre_commit_hook,
     assert_clean_after_refusal,
@@ -76,6 +77,7 @@ from tests._tool_fakes import (
     impl_sentinel,
     impl_turn_result,
     stdin_contains,
+    tracker_io_refresh_result,
 )
 from tests.test_codex_plan_run import (
     SID,
@@ -451,6 +453,105 @@ def test_linear_impl_completes_from_the_snapshot_with_no_mcp(
     assert [e.payload["reason"] for e in refresh_events] == ["no_binding"]
 
 
+def _courier_client(tmp_path: Path) -> ClientConfig:
+    """A Linear client with a codex MCP binding and one operator id (#3760)."""
+    client = _tracked_client(tmp_path, TRACKER_LINEAR)
+    return client.model_copy(
+        update={"bindings": bindings_linear_mcp(operator_ids=["operator-1"])}
+    )
+
+
+def _refresh_reply(**kwargs: Any) -> CodexRunResult:
+    return CodexRunResult(
+        0, "", "", output_file_content=tracker_io_refresh_result(**kwargs)
+    )
+
+
+def _argv_of(call: dict[str, object]) -> list[str]:
+    argv = call["argv"]
+    assert isinstance(argv, list)
+    return [str(a) for a in argv]
+
+
+def _refresh_calls(h: Harness) -> list[dict[str, object]]:
+    return [c for c in h.runner.calls if REFRESH_TURN_MARKER in str(c["stdin"])]
+
+
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
+def test_an_mcp_impl_refreshes_through_a_courier_turn_before_the_impl_turn(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage_mcp_config(monkeypatch, tmp_path, "codex", "enabled")
+    h = harness()
+    h.turn()
+    h.runner.add(
+        stdin_contains(REFRESH_TURN_MARKER),
+        _refresh_reply(body="COURIER-BODY-3760"),
+    )
+    h.client = _courier_client(tmp_path)
+
+    result = h.run()
+
+    assert result.status == "stage_complete"
+    (refresh,) = _refresh_calls(h)
+    (impl,) = h.impl_calls
+    assert h.runner.calls.index(refresh) < h.runner.calls.index(impl)
+    assert "COURIER-BODY-3760" in str(impl["stdin"])
+    assert events_of(OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED) == []
+
+
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
+def test_the_refresh_does_not_depend_on_the_impl_harness_having_the_tracker_mcp(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage_mcp_config(monkeypatch, tmp_path, "codex", "enabled")
+    h = harness()
+    h.turn()
+    h.runner.add(stdin_contains(REFRESH_TURN_MARKER), _refresh_reply())
+    h.client = _courier_client(tmp_path)
+
+    h.run()
+
+    (refresh,) = _refresh_calls(h)
+    (impl,) = h.impl_calls
+    refresh_argv = _argv_of(refresh)
+    impl_argv = _argv_of(impl)
+    assert (
+        'mcp_servers.linear.enabled_tools=["get_issue","list_comments"]' in refresh_argv
+    )
+    assert "mcp_servers.linear.enabled=false" in impl_argv
+
+
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
+def test_a_failed_courier_refresh_continues_on_the_last_snapshot(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage_mcp_config(monkeypatch, tmp_path, "codex", "enabled")
+    h = harness()
+    h.turn()
+    h.runner.add(
+        stdin_contains(REFRESH_TURN_MARKER),
+        CodexRunResult(0, "", "", output_file_content=None, timed_out=True),
+    )
+    h.client = _courier_client(tmp_path)
+
+    result = h.run()
+
+    assert result.status == "stage_complete"
+    (impl,) = h.impl_calls
+    assert "Authored test ticket body." in str(impl["stdin"])
+    (degraded,) = events_of(OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED)
+    assert degraded.payload["kind"] == "refresh_failed"
+    assert degraded.payload["reason"] == "turn_failed"
+    assert degraded.payload["stage"] == "impl"
+
+
 def test_the_snapshot_refresh_runs_before_the_guards(
     harness: Callable[..., Harness],
 ) -> None:
@@ -517,6 +618,7 @@ def test_a_snapshot_that_fails_the_trust_read_blocks_plan_missing_context(
     assert degraded.payload["kind"] == "read_untrusted"
 
 
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
 def test_an_absent_plan_is_recovered_from_the_snapshot_with_a_friction_token(
     harness: Callable[..., Harness], tmp_path: Path
 ) -> None:
@@ -528,6 +630,13 @@ def test_an_absent_plan_is_recovered_from_the_snapshot_with_a_friction_token(
     )
     h = harness(plan=None, snapshot=snapshot)
     h.turn()
+    # The courier refresh (#3760) returns the same operator comment.
+    h.runner.add(
+        stdin_contains(REFRESH_TURN_MARKER),
+        _refresh_reply(
+            comments=[{"id": "p1", "author_id": "operator-1", "body": approved}]
+        ),
+    )
     client = _tracked_client(tmp_path, TRACKER_LINEAR)
     h.client = client.model_copy(
         update={"bindings": bindings_linear_mcp(operator_ids=["operator-1"])}

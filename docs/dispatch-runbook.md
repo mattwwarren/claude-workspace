@@ -5526,6 +5526,38 @@ or PR, not in this file.
   -c <client>`. It queues a `review-settle` entry and prints the `settle:
   queued the disposition marker ...` line instead of the block.
 
+### MCP snapshot refresh (RFC 0019 T2b, #3760)
+
+What runs: on a client whose `bindings.tickets` has a codex MCP realization, the
+snapshot refresh is one read-only `codex exec` turn (allowlist: the binding's
+`get` and `list_comments` tools only), not a `gh` call. Its result is the ticket
+snapshot document; cw computes `agent_authored` itself. See ADR-0023.
+
+When it runs: once per codex REVIEW pass, including a claude confirm round run
+from the codex stage (it shares the stage's context), and at codex IMPL and codex
+FINALIZE stage entry. Never on the dispatch tick or in `reconcile()`.
+
+How it fails: it degrades to one `ticket.snapshot_degraded` event with reason
+`courier_unreachable` (no codex realization, the server is declared but disabled,
+an unreadable config layer, codex unavailable), `turn_failed` (timeout, non-zero
+exit, no or invalid output), `refused` or `no_binding`. The stage runs on the
+last snapshot. It never parks and files no gate record. Nothing is retried.
+
+Paths that keep today's behavior (`no_binding` on a non-GitHub tracker): the CLI
+`cw review confirm` and `cw review converge delta-confirm` claude round, the
+local executor, claude IMPL and claude FINALIZE.
+
+Reversal: there is no config switch. For REVIEW, remove `refresh=True` from the
+`context_for_client(...)` call in `cw.codex_background`. For IMPL and FINALIZE,
+remove the `courier=` argument at the `snapshot_for_stage(...)` call. For the CLI
+confirm seam, make `_courier_for` return `None`.
+
+Operator checklist (unchecked; no result recorded here):
+
+- [ ] On a host where Linear comes from a codex plugin app, run one real refresh:
+  confirm the refreshed snapshot carries real comments and ids, and that a
+  comment posted mid-review reaches the next pass.
+
 ## Orchestrator permission allowlist
 
 Docs only: cw does not write your permission settings beyond what `cw init`

@@ -42,12 +42,14 @@ from cw.models.usage import UsageStage, UsageState, UsageUnavailableReason
 from cw.stage_verification.finalize_ci_evidence import CiContext
 from cw.ticket_snapshot import normalize_ticket_id, write_snapshot
 from cw.tracker import TRACKER_LINEAR
+from cw.tracker_io._prompt import REFRESH_TURN_MARKER
 from tests._backend_mcp_helpers import codex_tracker_client, stage_mcp_config
 from tests._codex_review_helpers import (
     fresh_finalize_repo,
     install_home_prep_pr_state,
     seed_codex_finalize_run,
 )
+from tests._shared.bindings_builders import bindings_linear_mcp
 from tests._shared.cli_preflight import _write_tracker_config
 from tests._shared.git_repos import git_in
 from tests._shared.outbox_builders import entries_for
@@ -64,6 +66,7 @@ from tests._tool_fakes import (
     stdin_contains,
     stub_cw_cli,
     stub_prep_pr_finalize,
+    tracker_io_refresh_result,
 )
 from tests.test_codex_plan_run import SID, TICKET, persisted_result, script_gh
 
@@ -1601,6 +1604,105 @@ def test_a_failed_refresh_continues_on_the_last_snapshot_with_one_degraded_event
     (degraded,) = _events([OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED])
     assert degraded[1]["kind"] == "refresh_failed"
     assert degraded[1]["reason"] == "gh_failed"
+
+
+def _courier_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str = "enabled"
+) -> ClientConfig:
+    """A Linear client with a codex MCP binding and one operator id (#3760)."""
+    client = codex_tracker_client(tmp_path, None)
+    _write_tracker_config(client.workspace_path, TRACKER_LINEAR)
+    stage_mcp_config(monkeypatch, tmp_path, "codex", state)
+    return client.model_copy(
+        update={
+            "name": "test",
+            "bindings": bindings_linear_mcp(operator_ids=["operator-1"]),
+        }
+    )
+
+
+def _refresh_reply(**kwargs: Any) -> CodexRunResult:
+    return CodexRunResult(
+        0, "", "", output_file_content=tracker_io_refresh_result(**kwargs)
+    )
+
+
+def _refresh_calls(h: Harness) -> list[dict[str, object]]:
+    return [c for c in h.runner.calls if REFRESH_TURN_MARKER in str(c["stdin"])]
+
+
+def _argv_of(call: dict[str, object]) -> list[str]:
+    argv = call["argv"]
+    assert isinstance(argv, list)
+    return [str(a) for a in argv]
+
+
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
+def test_an_mcp_finalize_refreshes_through_a_courier_turn_before_the_finalize_turn(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h = harness()
+    h.client = _courier_client(tmp_path, monkeypatch)
+    h.turn()
+    h.runner.add(
+        stdin_contains(REFRESH_TURN_MARKER), _refresh_reply(body="COURIER-BODY-3760")
+    )
+
+    result = h.run()
+
+    assert result.status == "shipped"
+    (refresh,) = _refresh_calls(h)
+    (turn,) = h.turns
+    assert h.runner.calls.index(refresh) < h.runner.calls.index(turn)
+    assert "COURIER-BODY-3760" in str(turn["stdin"])
+    assert _events([OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED]) == []
+
+
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
+def test_the_finalize_refresh_does_not_depend_on_the_stage_having_the_tracker_mcp(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h = harness()
+    h.client = _courier_client(tmp_path, monkeypatch)
+    h.turn()
+    h.runner.add(stdin_contains(REFRESH_TURN_MARKER), _refresh_reply())
+
+    h.run()
+
+    (refresh,) = _refresh_calls(h)
+    (turn,) = h.turns
+    assert 'mcp_servers.linear.enabled_tools=["get_issue","list_comments"]' in _argv_of(
+        refresh
+    )
+    assert "mcp_servers.linear.enabled=false" in _argv_of(turn)
+
+
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
+def test_a_failed_courier_refresh_finalizes_on_the_last_snapshot(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h = harness()
+    h.client = _courier_client(tmp_path, monkeypatch)
+    h.turn()
+    h.runner.add(
+        stdin_contains(REFRESH_TURN_MARKER),
+        CodexRunResult(0, "", "", output_file_content=None, timed_out=True),
+    )
+
+    result = h.run()
+
+    assert result.status == "shipped"
+    assert _SNAPSHOT_BODY in str(h.turns[0]["stdin"])
+    (degraded,) = _events([OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED])
+    assert degraded[1]["kind"] == "refresh_failed"
+    assert degraded[1]["reason"] == "turn_failed"
+    assert degraded[1]["stage"] == "finalize"
 
 
 # --- the door and the guard -----------------------------------------------------
