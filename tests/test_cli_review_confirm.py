@@ -21,6 +21,7 @@ fixture hides it, ``@needs_codex`` makes it appear present for a deterministic
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -74,7 +75,12 @@ from tests._codex_review_helpers import (
     _shard_limit_inputs,
     _stem_content,
 )
-from tests._review_confirm_harness import Harness, github_tracked, make_harness
+from tests._review_confirm_harness import (
+    Harness,
+    github_tracked,
+    make_harness,
+    tolerate_paths,
+)
 from tests._review_convergence_helpers import (
     MergedMainBranch,
     branch_that_merged_main,
@@ -89,7 +95,7 @@ from tests._review_convergence_helpers import (
     structurally_invalid_doc_json,
     write_ledger,
 )
-from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.git_repos import commit_tracked_file, dirty_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -2216,3 +2222,132 @@ def test_non_github_confirm_does_not_refresh(harness: Harness) -> None:
     # The row has no snapshot: one degraded read, and the pass still ran.
     (event,) = read_events(event_types=[OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED])
     assert event.payload["kind"] == "read_untrusted"
+
+
+# ---------------------------------------------------------------------------
+# review.tolerated_worktree_paths (#3693): the call-level mutation check
+# ---------------------------------------------------------------------------
+
+_TOLERATED = "tol.py"
+
+
+def _rewrite_tolerated(repo: Path) -> None:
+    (repo / _TOLERATED).write_text("a reviewer rewrote this\n", encoding="utf-8")
+
+
+def _rewrite_tolerated_and_stray(repo: Path) -> None:
+    _rewrite_tolerated(repo)
+    _dirty_untracked(repo)
+
+
+def test_a_tolerated_path_rewritten_across_the_call_is_not_worktree_mutated(
+    harness: Harness,
+) -> None:
+    commit_tracked_file(harness.repo, _TOLERATED)
+    tolerate_paths(harness, _TOLERATED)
+    harness.spy_claude_review(after=_rewrite_tolerated)
+
+    result, _runner = harness.invoke_claude(_claude_results(harness, rest=_claude_ok()))
+
+    assert result.exit_code == 0, result.output
+    assert _payload(result)["available"] is True
+
+
+def test_the_same_path_unlisted_is_worktree_mutated(harness: Harness) -> None:
+    commit_tracked_file(harness.repo, _TOLERATED)
+    harness.spy_claude_review(after=_rewrite_tolerated)
+
+    result, _runner = harness.invoke_claude(_claude_results(harness, rest=_claude_ok()))
+
+    _assert_round_failed(result, "worktree_mutated", backend="claude")
+
+
+def test_a_tolerated_rewrite_plus_a_stray_file_is_worktree_mutated(
+    harness: Harness,
+) -> None:
+    commit_tracked_file(harness.repo, _TOLERATED)
+    tolerate_paths(harness, _TOLERATED)
+    harness.spy_claude_review(after=_rewrite_tolerated_and_stray)
+
+    result, _runner = harness.invoke_claude(_claude_results(harness, rest=_claude_ok()))
+
+    _assert_round_failed(result, "worktree_mutated", backend="claude")
+
+
+def test_a_tolerated_path_dirty_before_the_call_is_not_a_false_mutation(
+    harness: Harness,
+) -> None:
+    """Both snapshots filter alike: a path dirty at entry must not read as a change."""
+    dirty_tracked_file(harness.repo, _TOLERATED)
+    tolerate_paths(harness, _TOLERATED)
+
+    result, _runner = harness.invoke_claude(_claude_results(harness, rest=_claude_ok()))
+
+    assert result.exit_code == 0, result.output
+    assert _payload(result)["available"] is True
+
+
+@needs_codex
+def test_a_tolerated_path_rewritten_across_a_codex_call_is_not_worktree_mutated(
+    harness: Harness,
+) -> None:
+    commit_tracked_file(harness.repo, _TOLERATED)
+    tolerate_paths(harness, _TOLERATED)
+    harness.spy_run_review(after=_rewrite_tolerated)
+
+    result, _runner = harness.invoke(harness.all_roles(_ok_result()))
+
+    assert result.exit_code == 0, result.output
+
+
+def test_run_claude_round_forwards_tolerated_to_run_claude_review(
+    harness: Harness,
+) -> None:
+    seen: list[dict[str, object]] = []
+
+    def _stub(**kwargs: object) -> object:
+        seen.append(dict(kwargs))
+        raise OSError(_STOP)
+
+    harness.patch_claude([])
+    harness.monkeypatch.setattr("cw.claude_review.run_claude_review", _stub)
+    with pytest.raises(click.exceptions.Exit):
+        confirm_cli._run_claude_round(
+            task=harness.task,
+            worktree=harness.repo,
+            default_branch="main",
+            base_ref="main",
+            model=None,
+            tolerated=frozenset({_TOLERATED}),
+        )
+
+    assert seen[0]["tolerated"] == frozenset({_TOLERATED})
+
+
+def test_run_backend_round_threads_tolerated_to_the_claude_round_only(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_rounds(monkeypatch)
+
+    confirm_cli.run_backend_round(
+        backend="claude",
+        task=harness.task,
+        worktree=harness.repo,
+        default_branch="main",
+        base_ref="base",
+        model="m",
+        reasoning_effort=None,
+        tolerated=frozenset({_TOLERATED}),
+    )
+    _backend_round("codex", harness)
+
+    [claude_call] = calls["claude"]
+    assert claude_call["tolerated"] == frozenset({_TOLERATED})
+    [codex_call] = calls["codex"]
+    assert "tolerated" not in codex_call
+
+
+def test_verified_verdict_requires_tolerated_explicitly() -> None:
+    """No default: a caller that forgets it fails loudly, not silently unfiltered."""
+    parameter = inspect.signature(confirm_cli.verified_verdict).parameters["tolerated"]
+    assert parameter.default is inspect.Parameter.empty

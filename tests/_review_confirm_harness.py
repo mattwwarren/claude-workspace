@@ -201,6 +201,20 @@ def make_harness(
     )
 
 
+def tolerate_paths(harness: Harness, *paths: str) -> None:
+    """Rewrite the harness client's entry with ``review.tolerated_worktree_paths``.
+
+    The client's other explicitly-set fields (including any ``review`` keys the
+    harness was built with) are kept; only the tolerated list is replaced (#3693).
+    """
+    client = get_client(harness.client)
+    write_clients_yaml(
+        ClientSpec.from_config(
+            client, extra={"review": {"tolerated_worktree_paths": list(paths)}}
+        )
+    )
+
+
 def github_tracked(harness: Harness) -> list[str]:
     """Track the harness client on ``github-issues`` and stub the snapshot fetch.
 

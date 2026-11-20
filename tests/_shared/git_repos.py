@@ -163,6 +163,22 @@ def commit_tracked_file(worktree: Path, relpath: str, content: str = "x = 1\n") 
     _git_sandbox.run("commit", "-m", f"add {relpath}", cwd=worktree)
 
 
+def dirty_tracked_file(
+    worktree: Path,
+    relpath: str,
+    *,
+    committed: str = "a = 1\n",
+    dirty: str = "a = 2\n",
+) -> None:
+    """Commit *relpath* with *committed*, then rewrite it to *dirty* uncommitted.
+
+    Leaves a tracked-modified (`` M``) path in *worktree*: the shape a tolerated
+    worktree path (#3693) takes when an operator's tool rewrites a tracked file.
+    """
+    commit_tracked_file(worktree, relpath, committed)
+    (worktree / relpath).write_text(dirty, encoding="utf-8")
+
+
 def branch_with_file(
     make_git_repo: Callable[..., Path],
     relpath: str,

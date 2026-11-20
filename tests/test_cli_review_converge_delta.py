@@ -425,6 +425,57 @@ class TestCodexRound:
         assert _out(result)["cause"] == "worktree_mutated"
         assert _ledger_bytes(harness) == before
 
+    @needs_codex
+    def test_a_tolerated_path_changed_during_the_call_is_not_exit_four(
+        self,
+        tmp_path: Path,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#3693: the operator's exact path is filtered from both snapshots."""
+        harness = _harness(
+            tmp_path,
+            make_git_repo_with_origin,
+            monkeypatch,
+            {**_ON, "tolerated_worktree_paths": ["tol.txt"]},
+        )
+        _resolved(harness, tmp_path)
+
+        def _touch(repo: Path) -> None:
+            (repo / "tol.txt").write_text("x\n", encoding="utf-8")
+
+        harness.spy_run_review(after=_touch)
+
+        result, _ = harness.invoke(harness.all_roles(_ok_result()))
+
+        assert result.exit_code == 0, result.output
+
+    @needs_codex
+    def test_an_unlisted_path_changed_during_the_call_is_still_exit_four(
+        self,
+        tmp_path: Path,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        harness = _harness(
+            tmp_path,
+            make_git_repo_with_origin,
+            monkeypatch,
+            {**_ON, "tolerated_worktree_paths": ["tol.txt"]},
+        )
+        _resolved(harness, tmp_path)
+
+        def _touch(repo: Path) -> None:
+            (repo / "tol.txt").write_text("x\n", encoding="utf-8")
+            (repo / "stray.txt").write_text("x\n", encoding="utf-8")
+
+        harness.spy_run_review(after=_touch)
+
+        result, _ = harness.invoke(harness.all_roles(_ok_result()))
+
+        assert result.exit_code == _ROUND_FAILED, result.output
+        assert _out(result)["cause"] == "worktree_mutated"
+
     def test_no_fetch_is_issued(
         self, harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
