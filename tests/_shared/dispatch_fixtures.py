@@ -144,19 +144,24 @@ _BACKEND_CONFIG_ENV_VARS = (
 
 
 @pytest.fixture
-def isolated_backend_layers(monkeypatch: pytest.MonkeyPatch) -> None:
+def isolated_backend_layers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Hide every backend MCP config layer the per-test HOME does not own.
 
     Clears the codex/opencode config env vars and empties
     ``cw.backend_mcp_config._SYSTEM_LAYERS`` so a developer's real
     ``/etc/opencode`` or ``/etc/codex`` never reaches a test. HOME is already
-    isolated by the autouse ``_isolate_home`` fixture (#3055).
+    isolated by the autouse ``_isolate_home`` fixture (#3055). The per-test
+    HOME sits below ``tmp_path``, so the walk's home-stop never fires; a
+    ``.git`` marker at ``tmp_path`` ends the project-layer walk there instead
+    (#3817).
     """
     import cw.backend_mcp_config
+    from tests._backend_mcp_helpers import stop_project_walk_at
 
     for name in _BACKEND_CONFIG_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(cw.backend_mcp_config, "_SYSTEM_LAYERS", {})
+    stop_project_walk_at(tmp_path)
 
 
 @pytest.fixture
@@ -171,8 +176,9 @@ def project_walk_stops_at_state_dir() -> None:
     ``pytest.mark.usefixtures`` beside ``isolated_backend_layers``.
     """
     from cw.config import state_dir
+    from tests._backend_mcp_helpers import stop_project_walk_at
 
-    (state_dir() / ".git").mkdir(parents=True, exist_ok=True)
+    stop_project_walk_at(state_dir())
 
 
 @pytest.fixture

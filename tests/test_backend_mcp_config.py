@@ -21,6 +21,7 @@ from tests._backend_mcp_helpers import (
     McpStage,
     opencode_user_path,
     stage_mcp_config,
+    stop_project_walk_at,
     write_project_layer,
     write_system_layer,
 )
@@ -239,6 +240,39 @@ class TestLayerProbe:
         reading = read_backend_mcp(backend, "linear", repo)
 
         assert reading.state is McpState.ABSENT
+
+    def test_isolated_layers_bound_the_walk_at_tmp_path(self, tmp_path: Path) -> None:
+        """The fixture's marker at tmp_path ends any walk there (#3817)."""
+        assert bmc._project_dirs(tmp_path / "client") == [
+            tmp_path / "client",
+            tmp_path,
+        ]
+
+    @pytest.mark.parametrize("backend", _BACKENDS)
+    def test_stop_project_walk_at_hides_an_ancestor_layer(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, backend: str
+    ) -> None:
+        stage_mcp_config(monkeypatch, tmp_path, backend, "disabled")
+        outer = tmp_path / "outer"
+        boundary = outer / "boundary"
+        root = boundary / "client"
+        root.mkdir(parents=True)
+        ancestor = write_project_layer(outer, backend)
+
+        # Positive control: without a boundary the ancestor layer leaks (#3817).
+        leaked = read_backend_mcp(backend, "linear", root)
+        assert leaked.state is McpState.UNKNOWN
+        assert str(ancestor) in leaked.reason
+
+        stop_project_walk_at(boundary)
+        hidden = read_backend_mcp(backend, "linear", root)
+        assert hidden.state is McpState.DISABLED
+
+        # A layer staged at or below the boundary is still seen.
+        layer = write_project_layer(root, backend)
+        seen = read_backend_mcp(backend, "linear", root)
+        assert seen.state is McpState.UNKNOWN
+        assert str(layer) in seen.reason
 
     def test_no_git_walk_stops_at_home(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

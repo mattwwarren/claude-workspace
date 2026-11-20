@@ -752,7 +752,7 @@ class TestBackendServerGate:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         stage_mcp_config(monkeypatch, tmp_path, OPENCODE_BACKEND, "absent")
-        (tmp_path / ".git").mkdir()
+        (tmp_path / ".git").mkdir(exist_ok=True)
         (tmp_path / "opencode.json").write_text("{}", encoding="utf-8")
         client = reach_client(
             tmp_path,
