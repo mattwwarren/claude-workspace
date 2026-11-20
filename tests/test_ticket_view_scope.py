@@ -9,6 +9,7 @@ import pytest
 
 from cw.auto_dev_result import PLAN_SCOPE_DRIFT_BLOCKER_REASON
 from cw.models.enums import QueueItemStatus, Stage
+from cw.stage_verification.impl_gates import _drift_block
 from cw.ticket_view import (
     ViewSources,
     _scope_decision_text,
@@ -105,9 +106,21 @@ class TestBuildScopeDecision:
         assert decision is not None
         assert decision.carried_paths == ["src/a.py", "src/b.py"]
 
+    def test_real_codex_park_text_names_the_new_paths(self) -> None:
+        details = _drift_block(
+            {"triggered": True, "extra_files": ["src/c.py", "src/d.py"]}, ""
+        ).details
+
+        decision = build_scope_decision(_parked(), human_owner=False, details=details)
+
+        assert decision is not None
+        assert decision.new_paths == ["src/c.py", "src/d.py"]
+        assert decision.next_action.endswith("--scope-drift src/c.py,src/d.py")
+        assert "<paths>" not in decision.next_action
+
     def test_unparseable_details_leave_new_paths_empty_with_placeholder(self) -> None:
         decision = build_scope_decision(
-            _parked(), human_owner=False, details="no list here"
+            _parked(), human_owner=False, details="plan drift, see logs"
         )
 
         assert decision is not None

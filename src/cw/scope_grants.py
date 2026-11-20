@@ -55,6 +55,7 @@ MAX_GRANT_PATH_LEN = 512
 # character that splits or trims a line would authorize other paths.
 _FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
 _GLOB_CHARS = ("*", "?")
+_EXTRA_MARKER = "Extra:"
 
 
 @dataclass(frozen=True)
@@ -365,18 +366,31 @@ def carry_scope_grants(
 
 
 def parse_drift_extra_files(details: str) -> list[str]:
-    """The ``extra_files:`` list from a ``plan_scope_drift`` park's details.
+    """The extra paths from a ``plan_scope_drift`` park's details.
 
-    Best-effort: reads the ``- <path>`` lines that follow an ``extra_files:``
-    line and stops at the first other line. Returns ``[]`` when absent, and
-    caps the result at :data:`MAX_GRANT_PATHS`.
+    Best-effort and never raises; caps the result at :data:`MAX_GRANT_PATHS`
+    and returns ``[]`` for text neither producer could have written. Two real
+    producers, tried in order:
+
+    * The codex gate (``impl_gates._drift_block``): a line ENDING with
+      ``extra_files:`` (the marker closes a prose sentence, ``... (allowed
+      extra: N). extra_files:``) followed by ``- <path>`` lines, read until
+      the first non-bullet line.
+    * The Claude worker's park text (``auto-dev-impl-appendix`` Step 2.5 gate
+      2): one line, ``... Extra: <comma-joined paths>``; the text after the
+      last ``Extra:`` on that line is split on commas.
     """
+    lines = [raw.strip() for raw in details.splitlines()]
+    return _bullet_block_paths(lines) or _extra_line_paths(lines)
+
+
+def _bullet_block_paths(lines: list[str]) -> list[str]:
+    """Paths from the ``- <path>`` lines after a line ending ``extra_files:``."""
     found: list[str] = []
     in_block = False
-    for raw in details.splitlines():
-        line = raw.strip()
+    for line in lines:
         if not in_block:
-            in_block = line == "extra_files:"
+            in_block = line.endswith("extra_files:")
             continue
         if not line.startswith("- "):
             break
@@ -384,6 +398,16 @@ def parse_drift_extra_files(details: str) -> list[str]:
         if len(found) >= MAX_GRANT_PATHS:
             break
     return found
+
+
+def _extra_line_paths(lines: list[str]) -> list[str]:
+    """Comma-joined paths after the last ``Extra:`` of the first line holding one."""
+    for line in lines:
+        if _EXTRA_MARKER in line:
+            tail = line.rsplit(_EXTRA_MARKER, 1)[1]
+            items = [item.strip() for item in tail.split(",")]
+            return [item for item in items if item][:MAX_GRANT_PATHS]
+    return []
 
 
 __all__ = [

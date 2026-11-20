@@ -26,6 +26,7 @@ from cw.scope_grants import (
     review_policy_fingerprint,
     verify_scope_grants,
 )
+from cw.stage_verification.impl_gates import _drift_block
 from tests._shared.scope_grant_builders import (
     GRANT_CLIENT,
     GRANT_POLICY,
@@ -440,6 +441,50 @@ class TestParseDriftExtraFiles:
 
     def test_garbage_yields_empty(self) -> None:
         assert parse_drift_extra_files("nothing here") == []
+        assert parse_drift_extra_files("plan drift, see logs") == []
+
+    def test_reads_the_real_codex_park_text(self) -> None:
+        """``_drift_block`` ends a prose line with the marker; no bare line."""
+        verdict = {
+            "triggered": True,
+            "extra_files": ["src/c.py", "src/d.py", "docs/e.md"],
+            "allowed_extra": 1,
+        }
+
+        details = _drift_block(verdict, "").details
+
+        assert "(allowed extra: 1). extra_files:\n" in details
+        assert parse_drift_extra_files(details) == [
+            "src/c.py",
+            "src/d.py",
+            "docs/e.md",
+        ]
+
+    def test_reads_the_claude_worker_park_text(self) -> None:
+        """Verbatim ``auto-dev-impl-appendix`` Step 2.5 gate 2 template."""
+        details = (
+            "Step 2.5 gate 2: 3 files outside the plan's enumeration (allowed 1). "
+            "Extra: src/c.py, src/d.py, docs/e.md"
+        )
+        assert parse_drift_extra_files(details) == [
+            "src/c.py",
+            "src/d.py",
+            "docs/e.md",
+        ]
+
+    def test_claude_form_takes_the_last_marker_and_drops_empties(self) -> None:
+        details = "Extra: noise. Extra: src/c.py, ,src/d.py,"
+        assert parse_drift_extra_files(details) == ["src/c.py", "src/d.py"]
+
+    def test_claude_form_is_capped(self) -> None:
+        items = ", ".join(f"f{i}.py" for i in range(MAX_GRANT_PATHS + 5))
+        result = parse_drift_extra_files(f"Extra: {items}")
+        assert len(result) == MAX_GRANT_PATHS
+        assert result[0] == "f0.py"
+
+    def test_bullet_block_wins_over_an_extra_marker(self) -> None:
+        details = "Extra: x.py\nnote (allowed extra: 1). extra_files:\n- src/c.py\n"
+        assert parse_drift_extra_files(details) == ["src/c.py"]
 
     def test_stops_at_first_non_item_line(self) -> None:
         details = "extra_files:\n- src/c.py\nother: x\n- src/d.py\n"

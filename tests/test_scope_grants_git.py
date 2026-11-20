@@ -20,7 +20,11 @@ from cw import _git as cw_git
 from cw.auto_dev_result import PLAN_SCOPE_DRIFT_BLOCKER_REASON
 from cw.models.client import ClientConfig
 from cw.models.enums import Stage
-from cw.scope_grants import carry_scope_grants, review_policy_fingerprint
+from cw.scope_grants import (
+    carry_scope_grants,
+    parse_drift_extra_files,
+    review_policy_fingerprint,
+)
 from cw.stage_verification.impl_gates import run_scope_conformance
 from tests._shared.git_repos import git_in
 from tests._shared.scope_grant_builders import (
@@ -110,6 +114,8 @@ class TestVerifiedDescendantCarry:
         assert "- src/c.py" in details
         assert "- src/a.py" not in details
         assert "- src/b.py" not in details
+        # The real producer's text must parse back to exactly the new path.
+        assert parse_drift_extra_files(details) == ["src/c.py"]
 
     def test_without_carry_the_gate_lists_every_extra_path(
         self, grant_repo: GrantRepo, tmp_path: Path
@@ -121,6 +127,7 @@ class TestVerifiedDescendantCarry:
 
         for path in ("src/a.py", "src/b.py", "src/c.py"):
             assert f"- {path}" in details
+        assert parse_drift_extra_files(details) == ["src/a.py", "src/b.py", "src/c.py"]
 
     def test_carry_authorizes_paths_only(
         self, grant_repo: GrantRepo, tmp_path: Path
