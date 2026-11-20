@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Worktree, gate, sweep, repair and harvest reads use the row's merge base (#3780, RFC 0020 S2).** Worktree creation (a new branch is cut from `origin/<base>`, fetched first through the same bounded tick fetch; a base missing on origin raises), the reuse refresh of a never-pushed branch, the unpushed-work check, the empty-diff gate, the `branch_behind_main` probe, conflict repair (the PR must sit on the row's base), the fix agent's merge probe, the cancelled-row probe and the harvest fork point now read `resolve_base_branch(client, task)`. A null base is unchanged. The review-staleness gate, approval gate, repair fence and scope guard stay on the default branch until S3, and no row can carry a base before B1.
+
 ## [1.105.0] - 2026-11-20
 
 ### Added

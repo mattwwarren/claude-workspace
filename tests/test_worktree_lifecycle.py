@@ -1296,6 +1296,7 @@ class TestCreateWorktreeRefreshSignature:
             "force",
             "allow_dirty_reuse",
             "refresh",
+            "task",
         ]
         refresh = params["refresh"]
         assert refresh.kind is inspect.Parameter.KEYWORD_ONLY

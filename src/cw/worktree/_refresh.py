@@ -15,10 +15,12 @@ import logging
 from typing import TYPE_CHECKING, assert_never
 
 from cw.exceptions import WorktreeOccupiedError
+from cw.models import resolve_base_branch
 from cw.worktree._fast_forward import _ff_reused_worktree
 from cw.worktree._freshness import (
     FetchOutcome,
     _ff_relation,
+    fetch_base_branch,
     fetch_default_branch,
     fetch_feature_branch,
 )
@@ -30,7 +32,7 @@ from cw.worktree._scope import _has_commits_beyond_base
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.models import ClientConfig
+    from cw.models import ClientConfig, TicketTask
     from cw.native_daemon import NativeDaemonClient
     from cw.worktree._refresh_types import ReuseRefreshReport
 
@@ -47,34 +49,45 @@ def _handle_branch_absent(
     *,
     ticket_id: str | None,
     daemon: NativeDaemonClient,
+    task: TicketTask | None = None,
 ) -> RefreshResult:
     """Decide what to do with a branch absent from origin (#2328).
 
     ``origin/<branch>`` not existing is not, on its own, a reason to leave the
     worktree alone: a never-pushed branch with no commits beyond
-    ``origin/<default_branch>`` is exactly as stale as a pushed one that fell
-    behind, and gets the same fast-forward treatment (through the generalized
-    :func:`_refresh_from_tracking_ref`, reusing its occupancy re-check and
-    ``--ff-only`` safety verbatim). A branch WITH commits of its own is left
-    untouched -- that base is the caller's own work, not something to rebase
-    silently -- but is noted, since the reader may be building on it thinking
-    it is current.
+    ``origin/<base>`` (the row's merge target, ``resolve_base_branch(client,
+    task)``, #3780; ``client.default_branch`` for a null base) is exactly as
+    stale as a pushed one that fell behind, and gets the same fast-forward
+    treatment (through the generalized :func:`_refresh_from_tracking_ref`,
+    reusing its occupancy re-check and ``--ff-only`` safety verbatim). A
+    branch WITH commits of its own is left untouched -- that base is the
+    caller's own work, not something to rebase silently -- but is noted, since
+    the reader may be building on it thinking it is current.
     """
-    default_fetch = fetch_default_branch(client)
-    if default_fetch.outcome is not FetchOutcome.FETCHED:
-        reason = default_fetch.reason or "no reason reported"
+    base = resolve_base_branch(client, task)
+    # stays on client.default_branch: null-base check; a null base keeps the
+    # client-only fetch (and its argv), only a row with its own base fetches
+    # origin/<base>. A failure here is NOT_REFRESHED, never a raise: the
+    # refresh path never raises for a git failure.
+    base_fetch = (
+        fetch_default_branch(client)
+        if base == client.default_branch
+        else fetch_base_branch(client, base)
+    )
+    if base_fetch.outcome is not FetchOutcome.FETCHED:
+        reason = base_fetch.reason or "no reason reported"
         report.notes.append(
             f"origin/{branch} does not exist and fetching "
-            f"origin/{client.default_branch} to check reused worktree {wt_path} "
+            f"origin/{base} to check reused worktree {wt_path} "
             f"for a stale base failed ({reason})"
         )
         return RefreshResult(
             RefreshOutcome.NOT_REFRESHED, f"origin/{branch} does not exist yet"
         )
-    if _has_commits_beyond_base(wt_path, client.default_branch):
+    if _has_commits_beyond_base(wt_path, base):
         report.notes.append(
             f"origin/{branch} does not exist and reused worktree {wt_path} has "
-            f"commits of its own beyond origin/{client.default_branch}; it was "
+            f"commits of its own beyond origin/{base}; it was "
             "left untouched and may be building on a stale base"
         )
         return RefreshResult(
@@ -85,10 +98,11 @@ def _handle_branch_absent(
         branch,
         wt_path,
         report,
-        target=f"refs/remotes/origin/{client.default_branch}",
-        target_label=f"origin/{client.default_branch}",
+        target=f"refs/remotes/origin/{base}",
+        target_label=f"origin/{base}",
         ticket_id=ticket_id,
         daemon=daemon,
+        task=task,
     )
 
 
@@ -100,6 +114,7 @@ def _fetch_gate(
     *,
     ticket_id: str | None,
     daemon: NativeDaemonClient,
+    task: TicketTask | None = None,
 ) -> RefreshResult | None:
     """Fetch ``origin/<branch>``; return a stopping result, or ``None`` if it landed.
 
@@ -120,7 +135,13 @@ def _fetch_gate(
             return None
         case FetchOutcome.BRANCH_ABSENT:
             return _handle_branch_absent(
-                client, branch, wt_path, report, ticket_id=ticket_id, daemon=daemon
+                client,
+                branch,
+                wt_path,
+                report,
+                ticket_id=ticket_id,
+                daemon=daemon,
+                task=task,
             )
         case FetchOutcome.FAILED:
             reason = fetch.reason or "no reason reported"
@@ -155,6 +176,7 @@ def _refresh_from_tracking_ref(
     target_label: str,
     ticket_id: str | None,
     daemon: NativeDaemonClient,
+    task: TicketTask | None = None,
 ) -> RefreshResult:
     """Classify HEAD against the freshly fetched *target* and act on it.
 
@@ -209,6 +231,7 @@ def _refresh_from_tracking_ref(
                 report,
                 ticket_id=ticket_id,
                 daemon=daemon,
+                task=task,
             )
         case _:
             assert_never(relation)
@@ -222,6 +245,7 @@ def _refresh_reused_worktree_steps(
     *,
     ticket_id: str | None,
     daemon: NativeDaemonClient,
+    task: TicketTask | None = None,
 ) -> RefreshResult:
     """The ordered steps of :func:`_refresh_reused_worktree`, which see OSError."""
     verdict = _occupancy_verdict(
@@ -230,11 +254,12 @@ def _refresh_reused_worktree_steps(
         wt_path,
         action="not refreshing reused worktree",
         daemon=daemon,
+        task=task,
     )
     if verdict is not None:
         return verdict
     stopped = _fetch_gate(
-        client, branch, wt_path, report, ticket_id=ticket_id, daemon=daemon
+        client, branch, wt_path, report, ticket_id=ticket_id, daemon=daemon, task=task
     )
     if stopped is not None:
         return stopped
@@ -247,6 +272,7 @@ def _refresh_reused_worktree_steps(
         target_label=f"origin/{branch}",
         ticket_id=ticket_id,
         daemon=daemon,
+        task=task,
     )
 
 
@@ -258,6 +284,7 @@ def _refresh_reused_worktree(
     *,
     ticket_id: str | None,
     daemon: NativeDaemonClient,
+    task: TicketTask | None = None,
 ) -> RefreshResult:
     """Best-effort fetch, then fast-forward a *behind, unoccupied* reused worktree.
 
@@ -330,7 +357,13 @@ def _refresh_reused_worktree(
     """
     try:
         result = _refresh_reused_worktree_steps(
-            client, branch, wt_path, report, ticket_id=ticket_id, daemon=daemon
+            client,
+            branch,
+            wt_path,
+            report,
+            ticket_id=ticket_id,
+            daemon=daemon,
+            task=task,
         )
     except OSError as exc:
         reason = _first_line(str(exc)) or type(exc).__name__

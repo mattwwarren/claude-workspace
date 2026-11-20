@@ -146,6 +146,8 @@ def _resolve_freshness(
         # and log a confusing message. Bail early with a distinct detail key so
         # the operator WARN can surface the specific remedy.
         head_branch = get_head_branch(client)
+        # stays on client.default_branch: the primary checkout's HEAD must be on
+        # the default
         if head_branch is not None and head_branch != client.default_branch:
             return (True, FRESHNESS_NON_MAIN_HEAD)
 
@@ -352,6 +354,8 @@ def _freshness_warning_line(
     prefix = f"WARN {client.name}/{ticket_id}:"
     if detail == FRESHNESS_NON_MAIN_HEAD:
         branch = non_main_branch or "(detached)"
+        # stays on client.default_branch: operator remedy names the primary
+        # checkout's expected branch
         warning = (
             f"{prefix} repo HEAD is on '{branch}', expected '{client.default_branch}'"
             f" — run: git -C {client.workspace_path} checkout {client.default_branch}"
@@ -362,6 +366,8 @@ def _freshness_warning_line(
             f" — commit or stash changes in {client.workspace_path}"
         )
     elif detail == FRESHNESS_MAIN_DETACHED:
+        # stays on client.default_branch: operator remedy names the primary
+        # checkout's expected branch
         warning = (
             f"{prefix} main checkout has a detached HEAD, ticket skipped"
             f" — run: git -C {client.workspace_path} checkout {client.default_branch}"
@@ -388,6 +394,8 @@ def _diverged_freshness_warning(
 ) -> str:
     """Keep the inspect-first instruction on both legacy and structured details."""
     suffix = f" (auto-ff failed: {message})" if message else ""
+    # stays on client.default_branch: inspects the primary checkout's own
+    # commits ahead of its default
     return (
         f"{prefix} main has diverged from origin, ticket skipped"
         " — inspect before touching it: git -C"

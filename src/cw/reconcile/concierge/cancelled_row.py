@@ -82,7 +82,9 @@ def _detect_cancelled_row_candidates(
                     recipe=RECIPE_CANCELLED_ROW_RESTORE,
                     evidence={
                         "worktree_path": str(key.worktree_path),
-                        "default_branch": key.default_branch,
+                        # Key name kept: a documented audit payload
+                        # (docs/events.md); the value is the row's base (#3780).
+                        "default_branch": key.base_branch,
                         _ROW_KEY_EVIDENCE: ticket_state_key(
                             task.client, task.ticket_id, task.created_at
                         ),

@@ -25,15 +25,19 @@ from cw.dispatch.branch_freshness import (
 )
 from cw.merge_probe import MergeProbe
 from cw.models import (
-    ClientConfig,
     DevQueueStore,
     OrchestratorEvent,
     OrchestratorEventType,
     QueueItemStatus,
     Stage,
 )
+from tests._shared.dispatch_fixtures import SWEEP_CLIENT as _CLIENT
+from tests._shared.dispatch_fixtures import SWEEP_TICKET as _TICKET
+from tests._shared.dispatch_fixtures import sweep_clients as _clients
+from tests._shared.dispatch_fixtures import sweep_event as _event
+from tests._shared.dispatch_fixtures import sweep_resolve as _sweep
+from tests._shared.dispatch_fixtures import sweep_row as _row
 from tests._shared.git_repos import git_in
-from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -44,8 +48,6 @@ if TYPE_CHECKING:
 _BRANCH = "dev/1823"
 _SHARED_FILE = "shared.txt"
 _BRANCH_ONLY_FILE = "branch_only.txt"
-_CLIENT = "acme"
-_TICKET = "1823"
 
 
 def _write_commit(repo: Path, name: str, body: str, message: str) -> None:
@@ -91,55 +93,6 @@ def _conflicting(make_git_repo: Callable[..., Path], name: str = "bf") -> Path:
         branch_file=_SHARED_FILE,
         branch_body="BRANCH\ntwo\nthree\nfour\nfive\n",
         main_body="MAIN\ntwo\nthree\nfour\nfive\n",
-    )
-
-
-def _event(ticket_id: str = _TICKET) -> OrchestratorEvent:
-    return OrchestratorEvent(
-        type=OrchestratorEventType.SESSION_COMPLETED,
-        payload={"ticket_id": ticket_id},
-    )
-
-
-def _row(
-    worktree: Path | None,
-    *,
-    ticket_id: str = _TICKET,
-    status: QueueItemStatus = QueueItemStatus.RUNNING,
-    stage: Stage = Stage.REVIEW,
-) -> TicketTask:
-    return _make_ticket_task(
-        ticket_id=ticket_id,
-        client=_CLIENT,
-        status=status,
-        stage=stage,
-        worktree_path=worktree,
-    )
-
-
-def _clients(
-    tmp_path: Path, *, worktree_base: Path | None = None
-) -> dict[str, ClientConfig]:
-    return {
-        _CLIENT: ClientConfig(
-            name=_CLIENT,
-            workspace_path=tmp_path,
-            default_branch="main",
-            worktree_base=worktree_base,
-        )
-    }
-
-
-def _sweep(
-    tmp_path: Path,
-    *rows: TicketTask,
-    events: list[OrchestratorEvent] | None = None,
-    worktree_base: Path | None = None,
-) -> frozenset[tuple[str, str]]:
-    return resolve_conflicting_branches(
-        events if events is not None else [_event()],
-        DevQueueStore(tasks=list(rows)),
-        _clients(tmp_path, worktree_base=worktree_base),
     )
 
 

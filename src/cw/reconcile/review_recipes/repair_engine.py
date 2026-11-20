@@ -43,7 +43,12 @@ from cw.dev_queue.adoption import advance_pin_after_repair
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.gh import _GH_PR_STATE_OPEN
-from cw.models import OrchestratorEventType, QueueItemStatus, resolve_feature_branch
+from cw.models import (
+    OrchestratorEventType,
+    QueueItemStatus,
+    resolve_base_branch,
+    resolve_feature_branch,
+)
 from cw.pr_hydrate import _parse_pr_url
 from cw.pr_unarm import UnarmOutcome, ensure_pr_unarmed
 from cw.reconcile._shared import _PAUSED_STATUS_KEY
@@ -175,7 +180,7 @@ class Prepared(NamedTuple):
     branch: str
     repo: Path
     pr_number: int
-    default_branch: str
+    base_branch: str
     default_ref: str
     expected_sha: str
     merge_base: str
@@ -226,6 +231,9 @@ class RepairJob(NamedTuple):
     # The row's resolved branch (#2948), fixed when the job is built under the
     # lock so every later step fetches, checks and pushes the same ref.
     branch: str
+    # The row's merge target (#3780), fixed under the lock the same way: the
+    # PR must sit on it, and the repair fetches, diffs and merges against it.
+    base_branch: str
     lane: str
     pr_url: str
     session_id: str | None
@@ -319,6 +327,7 @@ def prepare_repair_job(
         client=task.client,
         ticket_id=task.ticket_id,
         branch=resolve_feature_branch(task.ticket_id, client_cfg, task),
+        base_branch=resolve_base_branch(client_cfg, task),
         lane=task.lane,
         pr_url=task.pr_url,
         session_id=candidate.session_id,
@@ -410,21 +419,23 @@ def _armed_note(outcome: UnarmOutcome) -> str:
 
 
 def _read_head(job: RepairJob, branch: str, expected_sha: str, repo: Path) -> gh.PrHead:
-    """The PR head, required OPEN on the default branch, at *branch*@*expected_sha*.
+    """The PR head, required OPEN on the row's base, at *branch*@*expected_sha*.
 
-    A PR stacked on another base is conflicting against that base, not main,
-    and a closed or merged PR is a human decision: the repair rewrites neither.
+    The row's base is ``job.base_branch`` (#3780; the client's default branch
+    for a null base). A PR stacked on another base is conflicting against that
+    base, not the row's, and a closed or merged PR is a human decision: the
+    repair rewrites neither.
     """
     mismatch = RepairDisposition.PR_HEAD_MISMATCH
     head = gh.fetch_pr_head(job.pr_url, cwd=repo, timeout=_T_GH)
     if head is None:
         raise RepairStopError(mismatch, "could not read the PR head")
-    default_branch = job.client_cfg.default_branch
-    if head.state != _GH_PR_STATE_OPEN or head.base_ref_name != default_branch:
+    base_branch = job.base_branch
+    if head.state != _GH_PR_STATE_OPEN or head.base_ref_name != base_branch:
         raise RepairStopError(
             mismatch,
             f"PR is state={head.state} base={head.base_ref_name}, expected"
-            f" state={_GH_PR_STATE_OPEN} base={default_branch}",
+            f" state={_GH_PR_STATE_OPEN} base={base_branch} (the row's base)",
         )
     if head.ref_name != branch or head.oid != expected_sha:
         raise RepairStopError(
@@ -451,9 +462,9 @@ def prepare_repair(job: RepairJob, state: RepairState) -> Prepared:
             RepairDisposition.PR_HEAD_MISMATCH,
             f"pr_url {job.pr_url!r} is not a GitHub PR url",
         )
-    default_branch = client_cfg.default_branch
-    default_ref = f"refs/remotes/origin/{default_branch}"
-    expected_sha = _fetch_and_resolve(repo, default_branch, branch)
+    base_branch = job.base_branch
+    default_ref = f"refs/remotes/origin/{base_branch}"
+    expected_sha = _fetch_and_resolve(repo, base_branch, branch)
     state.evidence[_EVIDENCE_EXPECTED_SHA] = expected_sha
     head = _read_head(job, branch, expected_sha, repo)
     state.evidence[_EVIDENCE_WAS_ARMED] = head.auto_merge_armed
@@ -470,7 +481,7 @@ def prepare_repair(job: RepairJob, state: RepairState) -> Prepared:
         branch=branch,
         repo=repo,
         pr_number=parsed[1],
-        default_branch=default_branch,
+        base_branch=base_branch,
         default_ref=default_ref,
         expected_sha=expected_sha,
         merge_base=merge_base,

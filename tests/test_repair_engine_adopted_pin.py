@@ -30,8 +30,8 @@ from cw.repair_disposition import RepairDisposition
 from tests._changelog_repair_helpers import (
     EXPECTED_SHA,
     NEW_SHA,
-    PR_NUMBER,
     make_client,
+    make_prepared,
     make_repair_job,
     repair_task,
 )
@@ -72,16 +72,7 @@ def _job(client: ClientConfig, row: TicketTask) -> RepairJob:
 
 
 def _prep(client: ClientConfig) -> Prepared:
-    return Prepared(
-        branch=_ADOPTED_BRANCH,
-        repo=Path(client.workspace_path),
-        pr_number=int(PR_NUMBER),
-        default_branch="main",
-        default_ref="origin/main",
-        expected_sha=EXPECTED_SHA,
-        merge_base="c" * 40,
-        conflicts=frozenset(),
-    )
+    return make_prepared(client, branch=_ADOPTED_BRANCH)
 
 
 @pytest.fixture

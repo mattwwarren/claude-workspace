@@ -49,13 +49,18 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     TicketTask,
+    resolve_base_branch,
     resolve_feature_branch,
 )
 from cw.reconcile.review_recipes import _shared, repair_engine
 from cw.reconcile.review_recipes import repair_git as git_mod
 from cw.reconcile.review_recipes.auto_fix_ci import _auto_fix_ci_guard_target
 from cw.reconcile.review_recipes.changelog_repair import CHANGELOG_SPEC
-from cw.reconcile.review_recipes.repair_engine import RepairJob, repair_payload_base
+from cw.reconcile.review_recipes.repair_engine import (
+    Prepared,
+    RepairJob,
+    repair_payload_base,
+)
 from cw.reconcile.review_recipes.repair_fence import build_fence_snapshot
 from tests import _git_sandbox
 from tests._changelog_cut_helpers import (
@@ -515,6 +520,7 @@ def make_repair_job(
         client=row.client,
         ticket_id=row.ticket_id,
         branch=resolve_feature_branch(row.ticket_id, client_cfg, row),
+        base_branch=resolve_base_branch(client_cfg, row),
         lane=row.lane,
         pr_url=row.pr_url,
         session_id=row.session_id,
@@ -524,6 +530,26 @@ def make_repair_job(
         config=config,
         repeat_fire_counts=None if config is None else {},
         latch_key=(row.client, row.ticket_id, row.pr_url),
+    )
+
+
+def make_prepared(
+    client: ClientConfig,
+    *,
+    branch: str,
+    base_branch: str = "main",
+    default_ref: str | None = None,
+) -> Prepared:
+    """A ``Prepared`` repair on *base_branch*, as ``prepare_repair`` builds one."""
+    return Prepared(
+        branch=branch,
+        repo=Path(client.workspace_path),
+        pr_number=int(PR_NUMBER),
+        base_branch=base_branch,
+        default_ref=default_ref if default_ref is not None else f"origin/{base_branch}",
+        expected_sha=EXPECTED_SHA,
+        merge_base="c" * 40,
+        conflicts=frozenset(),
     )
 
 

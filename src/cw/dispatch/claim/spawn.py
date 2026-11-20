@@ -647,6 +647,7 @@ def _spawn_claimed_task(
                     ticket_id=task.ticket_id,
                     native_daemon=resolved_native_daemon,
                 ),
+                task=task,
             )
         except StaleWorktreeError:
             # A stale worktree (wrong branch / not a worktree) refused
@@ -696,7 +697,7 @@ def _spawn_claimed_task(
                 daemon=resolved_native_daemon,
                 warned_unresolvable=warned_unresolvable,
             )
-            unsaved = unsaved_work_reason(client, branch)
+            unsaved = unsaved_work_reason(client, branch, task=task)
             if unsaved is not None:
                 _log.warning(
                     "dispatch: stale worktree %s/%s has unsaved work (%s)"

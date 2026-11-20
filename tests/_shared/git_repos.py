@@ -364,6 +364,27 @@ def add_bare_origin(repo: Path) -> Path:
     return origin
 
 
+def add_diverged_base_origin(repo: Path, base: str) -> Path:
+    """Attach a bare ``origin`` whose ``main`` and *base* have diverged (#3780).
+
+    *base* (an epic branch a row merges into) carries one commit ``main`` does
+    not, and ``main`` one commit *base* does not, so a ref measured against the
+    wrong one of them shows. *repo* ends on ``main`` with both
+    ``origin/main`` and ``origin/<base>`` fetched, and keeps a local *base*.
+    Returns the bare origin's path.
+    """
+    origin = init_bare_origin(repo)
+    git_in(repo, "push", "origin", "main")
+    git_in(repo, "checkout", "-b", base)
+    commit_tracked_file(repo, "base_work.py")
+    git_in(repo, "push", "origin", base)
+    git_in(repo, "checkout", "main")
+    commit_tracked_file(repo, "main_work.py")
+    git_in(repo, "push", "origin", "main")
+    git_in(repo, "fetch", "origin")
+    return origin
+
+
 @pytest.fixture
 def make_git_repo_with_origin(
     make_git_repo: Callable[..., Path],

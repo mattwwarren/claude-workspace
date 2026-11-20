@@ -12,8 +12,13 @@ import pytest
 
 from cw.models import (
     ClientConfig,
+    DevQueueStore,
     OrchestratorConfig,
+    OrchestratorEvent,
     OrchestratorEventType,
+    QueueItemStatus,
+    Stage,
+    TicketTask,
 )
 
 if TYPE_CHECKING:
@@ -345,4 +350,67 @@ def write_client_with_operator(
             extra={"operator_github_login": login},
         ),
         ensure_workspaces=True,
+    )
+
+
+SWEEP_CLIENT = "acme"
+SWEEP_TICKET = "1823"
+
+
+def sweep_event(ticket_id: str = SWEEP_TICKET) -> OrchestratorEvent:
+    """A SESSION_COMPLETED event for the ``branch_behind_main`` sweep."""
+    return OrchestratorEvent(
+        type=OrchestratorEventType.SESSION_COMPLETED,
+        payload={"ticket_id": ticket_id},
+    )
+
+
+def sweep_row(
+    worktree: Path | None,
+    *,
+    ticket_id: str = SWEEP_TICKET,
+    status: QueueItemStatus = QueueItemStatus.RUNNING,
+    stage: Stage = Stage.REVIEW,
+    **overrides: object,
+) -> TicketTask:
+    """One REVIEW row for the sweep client, carrying *worktree*."""
+    from tests._shared.session_seeding import _make_ticket_task
+
+    return _make_ticket_task(
+        ticket_id=ticket_id,
+        client=SWEEP_CLIENT,
+        status=status,
+        stage=stage,
+        worktree_path=worktree,
+        **overrides,
+    )
+
+
+def sweep_clients(
+    tmp_path: Path, *, worktree_base: Path | None = None
+) -> dict[str, ClientConfig]:
+    """The sweep client on ``main``, rooted at *tmp_path*."""
+    return {
+        SWEEP_CLIENT: ClientConfig(
+            name=SWEEP_CLIENT,
+            workspace_path=tmp_path,
+            default_branch="main",
+            worktree_base=worktree_base,
+        )
+    }
+
+
+def sweep_resolve(
+    tmp_path: Path,
+    *rows: TicketTask,
+    events: list[OrchestratorEvent] | None = None,
+    worktree_base: Path | None = None,
+) -> frozenset[tuple[str, str]]:
+    """Run ``resolve_conflicting_branches`` over *rows* for the sweep client."""
+    from cw.dispatch.branch_freshness import resolve_conflicting_branches
+
+    return resolve_conflicting_branches(
+        events if events is not None else [sweep_event()],
+        DevQueueStore(tasks=list(rows)),
+        sweep_clients(tmp_path, worktree_base=worktree_base),
     )

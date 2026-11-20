@@ -80,7 +80,8 @@ deferred-review-findings block):
   clients later in the iteration order for that tick, and their freshness
   reads unknown. A skipped claim-path fetch degrades like a failed one: a
   reused worktree is not refreshed, and a missing local branch is created from
-  the default start point instead of resuming pushed history.
+  the default start point (from `origin/<base>` for a row with a base, fetched
+  through the same bounded fetch) instead of resuming pushed history.
   A fetch granted less than the 15 s per-call timeout because the tick budget
   is nearly spent can time out against a healthy remote. That timeout is
   charged to the budget and starts the client's 120 s backoff (4 default
@@ -2136,7 +2137,9 @@ Three rules govern how a ticket branch meets `origin/<default-branch>` (ADR-0022
 
 **Diagnosing a tip that reads stale despite a clean merge.** Run `cw review converge verify-tip` in the worktree and read `detail`: `verify-tip: not a clean merge of origin/<default-branch>: <reason>` names the first offending commit. `not_textually_clean <sha7>` means git does not reproduce that merge (a conflict resolution, a hand edit, or one of the false conflicts below); `non_merge_commit <sha7>` is a commit of the branch's own; `second_parent_not_on_default <sha7>` merged something other than the default branch; `not_two_parent <sha7>` is an octopus; `merge_tree_unavailable <sha7>` means git could not answer (a timeout, git older than 2.38); `no_default_ref`, `clean_not_ancestor`, `no_merge` and `git_unreadable` are state problems. A `not_textually_clean <sha7>` that `cw review converge delta-confirm` could review alone also carries `delta_confirm_eligible: true` and `resolution_files` (#2980); the `detail` is the same either way.
 
-**The `branch_behind_main` REVIEW gate (#1823).** It parks a REVIEW ticket only when the merge probe reports a conflict; a branch that is merely behind, or whose merge would be textually clean, advances. The probes run in `consume_completed_sessions` before `dev_queue_lock` is taken (the precompute-outside-the-lock pattern of `dispatch/pr_gate`, ADR-0022 invariant 3), at most 20 per tick, under a 30 s budget checked before each probe (so the worst case is the budget plus one probe, up to three git calls of 10 s each), and every git error, a skipped probe and an unprobed row fail open (no park). It applies to dispatch-driven rows too (#2990): the checkout check is one local `git branch --show-current` per candidate, before the cap.
+**The `branch_behind_main` REVIEW gate (#1823).** It parks a REVIEW ticket only when the merge probe reports a conflict; a branch that is merely behind, or whose merge would be textually clean, advances. The probes run in `consume_completed_sessions` before `dev_queue_lock` is taken (the precompute-outside-the-lock pattern of `dispatch/pr_gate`, ADR-0022 invariant 3), at most 20 per tick, under a 30 s budget checked before each probe (so the worst case is the budget plus one probe, up to three git calls of 10 s each), and every git error, a skipped probe and an unprobed row fail open (no park). The probe merges the row's own base (`resolve_base_branch`, #3780), which for a null base is `origin/<default-branch>`.
+
+It applies to dispatch-driven rows too (#2990): the checkout check is one local `git branch --show-current` per candidate, before the cap.
 
 **The retired delta confirm round (#2918).** Its only eligible shape, a textually clean merge that overlaps the branch's files, is now always tolerated, so `next_action: delta_confirm`, `overlapping_files` and `delta_confirm_pending` are gone. A `clients.yaml` that still sets `review.default_merge_delta_confirm` keeps loading: the key is stripped with a one-time warning; delete it.
 

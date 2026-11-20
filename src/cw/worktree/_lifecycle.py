@@ -16,8 +16,13 @@ from cw.exceptions import (
     StaleWorktreeError,
     WorktreeError,
 )
+from cw.models import resolve_base_branch
 from cw.native_daemon import get_native_daemon_client
-from cw.worktree._freshness import fetch_feature_branch
+from cw.worktree._freshness import (
+    FetchOutcome,
+    fetch_base_branch,
+    fetch_feature_branch,
+)
 from cw.worktree._git import (
     _checked_out_branch,
     _git_dir,
@@ -31,7 +36,7 @@ from cw.worktree._refresh_types import ReuseRefreshOptions, ReuseRefreshReport
 from cw.worktree._unsaved import worktree_has_unsaved_work
 
 if TYPE_CHECKING:
-    from cw.models import ClientConfig
+    from cw.models import ClientConfig, TicketTask
 
 _log = logging.getLogger(__name__)
 
@@ -98,26 +103,34 @@ def _register_cw_exclude(git_cwd: Path) -> None:
         _log.warning("_register_cw_exclude: failed for %s: %s", git_cwd, exc)
 
 
-def _resolve_branch_start_point(client: ClientConfig, git_cwd: Path) -> str:
+def _resolve_branch_start_point(
+    client: ClientConfig, git_cwd: Path, *, task: TicketTask | None = None
+) -> str:
     """Resolve the start-point for a new branch in *client*'s repository.
+
+    ``<base>`` is the row's merge target, ``resolve_base_branch(client, task)``
+    (#3780); a null base (or no row) is ``client.default_branch``.
 
     Three-level fallback matching the convention in ``_unpushed_commits_detail``:
 
-    1. ``origin/<default_branch>`` — authoritative remote ref; independent of
-       the operator's current checkout.
-    2. ``<default_branch>`` — local fallback for offline / bare-clone scenarios.
+    1. ``origin/<base>`` — authoritative remote ref; independent of the
+       operator's current checkout.
+    2. ``<base>`` — local fallback for offline / bare-clone scenarios.
     3. Raise :exc:`WorktreeError` — never fall back to HEAD, which is exactly
        the bug this prevents (#710).
     """
-    origin_ref = f"origin/{client.default_branch}"
+    base = resolve_base_branch(client, task)
+    origin_ref = f"origin/{base}"
     result = _run_git("rev-parse", "--verify", origin_ref, cwd=git_cwd, check=False)
     if result.returncode == 0:
-        # Why: origin/<default_branch> is already current because dispatch's freshness
-        # gate fetched it earlier this tick; interactive cw start accepts a
-        # possibly-one-fetch-stale origin ref — better than HEAD-based base.
+        # Why: for a null base, origin/<default_branch> is already current
+        # because dispatch's freshness gate fetched it earlier this tick; a row
+        # with its own base had origin/<base> fetched by
+        # _fetch_base_for_new_branch just before this. Interactive cw start
+        # accepts a possibly-one-fetch-stale origin ref — better than HEAD.
         return origin_ref
 
-    local_ref = client.default_branch
+    local_ref = base
     result = _run_git("rev-parse", "--verify", local_ref, cwd=git_cwd, check=False)
     if result.returncode == 0:
         return local_ref
@@ -128,6 +141,31 @@ def _resolve_branch_start_point(client: ClientConfig, git_cwd: Path) -> str:
         f"Ensure the repository has a remote or local {local_ref!r} branch."
     )
     raise WorktreeError(msg)
+
+
+def _fetch_base_for_new_branch(client: ClientConfig, task: TicketTask | None) -> None:
+    """Fetch ``origin/<base>`` before a new branch is cut from it (#3780).
+
+    A null base returns at once, so the default-branch path keeps its argv
+    (dispatch's freshness gate already fetched the default). A row with its
+    own base fetches it through :func:`fetch_base_branch`, under the tick
+    fetch gate's bounds. ``BRANCH_ABSENT`` raises :exc:`WorktreeError`: a
+    branch must never be cut from a merge target origin does not have.
+    ``FAILED`` falls open (the fetch already warned): a stale ``origin/<base>``
+    is used, and :func:`_resolve_branch_start_point` raises if none exists.
+    """
+    base = resolve_base_branch(client, task)
+    # stays on client.default_branch: null-base check; the default was already
+    # fetched by dispatch's freshness gate, so its argv is untouched
+    if base == client.default_branch:
+        return
+    fetch = fetch_base_branch(client, base)
+    if fetch.outcome is FetchOutcome.BRANCH_ABSENT:
+        msg = (
+            f"Cannot create worktree for {client.name}: base branch {base!r} "
+            f"does not exist on origin ({fetch.reason})"
+        )
+        raise WorktreeError(msg)
 
 
 def _parse_worktree_holder_path(message: str) -> Path | None:
@@ -142,7 +180,11 @@ def _parse_worktree_holder_path(message: str) -> Path | None:
 
 
 def _branch_held_error(
-    client: ClientConfig, branch: str, holder: Path
+    client: ClientConfig,
+    branch: str,
+    holder: Path,
+    *,
+    task: TicketTask | None = None,
 ) -> BranchHeldByWorktreeError:
     """Build the diagnostic for a foreign worktree already holding *branch* (#2034).
 
@@ -150,7 +192,7 @@ def _branch_held_error(
     :func:`worktree_has_unsaved_work`'s ``wt_path`` override), and gives the
     exact removal command either way — never removes the holder itself.
     """
-    if worktree_has_unsaved_work(client, branch, wt_path=holder):
+    if worktree_has_unsaved_work(client, branch, wt_path=holder, task=task):
         state_msg = (
             "has uncommitted or unpushed changes; verify before removing "
             f"with `git worktree remove {holder}`"
@@ -176,6 +218,7 @@ def create_worktree(
     force: bool = False,
     allow_dirty_reuse: bool = False,
     refresh: ReuseRefreshOptions | None = None,
+    task: TicketTask | None = None,
 ) -> Path:
     """Create a git worktree for the given branch.
 
@@ -262,8 +305,15 @@ def create_worktree(
     absent, ``origin/<branch>`` is fetched and checked next so a branch whose
     local ref was deleted (e.g. a fix-loop's ``git branch -D`` reset) resumes
     its real pushed history instead of silently starting over; only when
-    neither exists is a brand-new branch created from the client's default
-    branch.
+    neither exists is a brand-new branch created from the row's base
+    (``origin/<base>``, fetched first through the same bounded fetch when the
+    base is not the client's default, #3780).
+
+    *task* is the queue row, when the caller holds one (dispatch claim, the
+    fix agent). It selects the merge base through
+    :func:`~cw.models.resolve_base_branch` for the new-branch start point, the
+    unsaved-work check and the reuse refresh. ``None`` (interactive
+    ``cw start``) and a null base use ``client.default_branch``, as before.
 
     *allow_dirty_reuse* relaxes the unsaved-work refusal **only** (the
     branch-identity check still fires). The staged pipeline reuses one
@@ -295,7 +345,9 @@ def create_worktree(
                 f"`git worktree remove --force {wt_path}`, then re-dispatch."
             )
             raise StaleWorktreeError(msg)
-        if not allow_dirty_reuse and worktree_has_unsaved_work(client, branch):
+        if not allow_dirty_reuse and worktree_has_unsaved_work(
+            client, branch, task=task
+        ):
             msg = (
                 f"Refusing to reuse worktree at {wt_path} for branch {branch!r}: "
                 f"it has unsaved work (uncommitted changes or unpushed commits). "
@@ -314,6 +366,7 @@ def create_worktree(
                 report,
                 ticket_id=refresh.ticket_id,
                 daemon=daemon,
+                task=task,
             )
             # Occupied means another worker may be using the tree: no path
             # is handed back. Every other outcome is the caller's to use.
@@ -342,8 +395,9 @@ def create_worktree(
             args = ["worktree", "add", "-b", branch, str(wt_path), f"origin/{branch}"]
         else:
             # Branch doesn't exist locally or on the remote — create new
-            # branch from the client's default branch.
-            start_point = _resolve_branch_start_point(client, git_cwd)
+            # branch from the row's base (the client's default when null).
+            _fetch_base_for_new_branch(client, task)
+            start_point = _resolve_branch_start_point(client, git_cwd, task=task)
             args = ["worktree", "add", "-b", branch, str(wt_path), start_point]
 
     if force:
@@ -355,7 +409,7 @@ def create_worktree(
         holder = _parse_worktree_holder_path(str(exc))
         if holder is None:
             raise
-        raise _branch_held_error(client, branch, holder) from exc
+        raise _branch_held_error(client, branch, holder, task=task) from exc
     _register_cw_exclude(git_cwd)
 
     # Initialize submodules if the repo uses them

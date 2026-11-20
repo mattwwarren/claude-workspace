@@ -18,6 +18,7 @@ from cw.config import load_state, save_state
 from cw.models import (
     CwState,
     OrchestratorEventType,
+    QueueItemStatus,
     Session,
     SessionOrigin,
     SessionPurpose,
@@ -312,6 +313,23 @@ def _make_ticket_task(**overrides: object) -> TicketTask:
     }
     kwargs.update(overrides)
     return TicketTask.model_validate(kwargs)
+
+
+def make_cancelled_row(
+    worktree: Path | None,
+    *,
+    ticket_id: str = "GEN-1",
+    client: str = "acme",
+    **overrides: object,
+) -> TicketTask:
+    """One CANCELLED row carrying *worktree*, for the cancelled-row probe."""
+    return _make_ticket_task(
+        ticket_id=ticket_id,
+        client=client,
+        status=QueueItemStatus.CANCELLED,
+        worktree_path=worktree,
+        **overrides,
+    )
 
 
 def _make_tick_summary(**overrides: object) -> TickSummary:

@@ -248,7 +248,7 @@ def _rewrite_changelog(
         prep.expected_sha,
     )
     rebased = _head_sha(scratch) if _remap_eligible(job) else None
-    _commit_rebuilt(scratch, staged.data.rebuilt, job.ticket_id, prep.default_branch)
+    _commit_rebuilt(scratch, staged.data.rebuilt, job.ticket_id, prep.base_branch)
     new_sha = _head_sha(scratch)
     state.evidence[_EVIDENCE_NEW_SHA] = new_sha
     _verify_non_changelog_identical(

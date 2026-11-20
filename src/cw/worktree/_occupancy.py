@@ -19,7 +19,7 @@ from cw.worktree._unsaved import unsaved_work_reason
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.models import ClientConfig
+    from cw.models import ClientConfig, TicketTask
     from cw.native_daemon import NativeDaemonClient
 
 # Pinned to the pre-split module name so operator log filters on
@@ -61,7 +61,12 @@ class _Occupancy(NamedTuple):
 
 
 def _reuse_occupancy(
-    client: ClientConfig, branch: str, wt_path: Path, *, daemon: NativeDaemonClient
+    client: ClientConfig,
+    branch: str,
+    wt_path: Path,
+    *,
+    daemon: NativeDaemonClient,
+    task: TicketTask | None = None,
 ) -> _Occupancy:
     """Return whether *wt_path* is occupied (must not be moved), and why.
 
@@ -90,7 +95,7 @@ def _reuse_occupancy(
         found = current or "(none / detached HEAD / not a worktree)"
         branch_mismatch = f"expected branch {branch!r} but found {found}"
     else:
-        unsaved = unsaved_work_reason(client, branch, wt_path=wt_path)
+        unsaved = unsaved_work_reason(client, branch, wt_path=wt_path, task=task)
         if unsaved is not None:
             local = f"unsaved work ({unsaved})"
     return _Occupancy(
@@ -108,6 +113,7 @@ def _occupancy_verdict(
     action: str,
     raise_on_branch_mismatch: bool = False,
     daemon: NativeDaemonClient,
+    task: TicketTask | None = None,
 ) -> RefreshResult | None:
     """Return the stopping result when the refresh must not go on, else ``None``.
 
@@ -130,7 +136,7 @@ def _occupancy_verdict(
     ``occupancy.live``), since only :exc:`WorktreeOccupiedError` may report an
     occupant.
     """
-    occupancy = _reuse_occupancy(client, branch, wt_path, daemon=daemon)
+    occupancy = _reuse_occupancy(client, branch, wt_path, daemon=daemon, task=task)
     reason = occupancy.reason
     if reason is None:
         return None

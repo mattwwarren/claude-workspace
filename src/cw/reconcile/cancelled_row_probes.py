@@ -1,7 +1,9 @@
 """Lockless capture of concierge recipe 3's git read (#2546).
 
 Recipe 3 (cancelled-row restore) asks git whether a CANCELLED row's worktree
-has commits ahead of its base branch. That ``git log`` must not run under
+has commits ahead of its base branch (the row's merge target,
+``resolve_base_branch(client, task)``, #3780; the client's default branch for a
+null base). That ``git log`` must not run under
 ``sessions_lock``, so ``reconcile()`` captures it here before the lock and the
 in-lock detect (``concierge.cancelled_row._detect_cancelled_row_candidates``)
 only looks the answer up. Capture and detect share
@@ -23,7 +25,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from cw.config import get_client
 from cw.dispatch_state_ticket_state import guard_cancelled_row_keys, ticket_state_key
 from cw.exceptions import CwError
-from cw.models import QueueItemStatus
+from cw.models import QueueItemStatus, resolve_base_branch
 from cw.reconcile.probe_store import BoundedProbeStore, ProbeStoreUnavailableError
 from cw.worktree import _has_commits_beyond_base
 
@@ -49,7 +51,7 @@ class CancelledRowKey(NamedTuple):
     client: str
     ticket_id: str
     worktree_path: Path
-    default_branch: str
+    base_branch: str
 
 
 type CancelledRowProbes = BoundedProbeStore[CancelledRowKey, bool]
@@ -95,14 +97,14 @@ def cancelled_row_targets(tasks: list[TicketTask]) -> list[CancelledRowKey]:
                 client=task.client,
                 ticket_id=task.ticket_id,
                 worktree_path=task.worktree_path,
-                default_branch=client_cfg.default_branch,
+                base_branch=resolve_base_branch(client_cfg, task),
             )
         )
     return keys
 
 
 def _read_commits_ahead(key: CancelledRowKey, _captured_at: datetime) -> bool:
-    return _has_commits_beyond_base(key.worktree_path, key.default_branch)
+    return _has_commits_beyond_base(key.worktree_path, key.base_branch)
 
 
 def capture_cancelled_row_probes(
