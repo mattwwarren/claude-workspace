@@ -2528,20 +2528,29 @@ class TestPlannerHookRewriteOptOut:
         assert [gate.accept_hook_rewrite for gate in plan.gates] == [False, True]
 
     @pytest.mark.parametrize(
-        "text",
+        "content",
         [
-            'quality_gates:\n  accept_hook_rewrite:\n    fmt: "false"\n',
-            "quality_gates:\n  accept_hook_rewrite: nope\n",
+            b'quality_gates:\n  accept_hook_rewrite:\n    fmt: "false"\n',
+            b"quality_gates:\n  accept_hook_rewrite: nope\n",
+            b"quality_gates:\n  accept_hook_rewrite:\n    \xff: false\n",
         ],
     )
     def test_malformed_block_keeps_default_and_available_plan(
-        self, repo: Path, home_stub: PrepPrStateStub, text: str
+        self,
+        repo: Path,
+        home_stub: PrepPrStateStub,
+        caplog: pytest.LogCaptureFixture,
+        content: bytes,
     ) -> None:
-        _write_project_config(repo, text)
+        config = repo / ".claude" / "project-config.yaml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_bytes(content)
         home_stub.gates(("fmt", "true", 5))
-        plan = plan_cycle_gates(repo, _SCOPE)
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            plan = plan_cycle_gates(repo, _SCOPE)
         assert plan.why_unavailable is None
         assert [gate.accept_hook_rewrite for gate in plan.gates] == [True]
+        assert not [r for r in caplog.records if "gates_unavailable" in r.getMessage()]
 
     def test_opted_out_gate_keeps_its_declared_autofix(
         self, repo: Path, home_stub: PrepPrStateStub
@@ -2641,12 +2650,14 @@ class TestHookRewriteOptOut:
             opted.output,
             opted.gate,
             opted.command,
+            opted.why,
         ) == (
             parked.kind,
             parked.exit_code,
             parked.output,
             parked.gate,
             parked.command,
+            parked.why,
         )
 
     def test_opted_out_self_rewriting_gate_skips_its_declared_autofix(
@@ -2696,24 +2707,52 @@ class TestHookRewriteOptOut:
         assert _autofix_outcomes(caplog) == ["applied"]
         assert found == [_AUTOFIXED_FRICTION]
 
-    def test_opted_out_red_gate_does_not_hide_an_accepting_gate_behind_it(
+    def test_accepting_gate_before_an_opted_out_red_gate_still_applies_its_rewrite(
+        self, repo: Path, state: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        commit_tracked_file(repo, "other.py", "y = 1\n")
+        _cycle_edit(repo)
+        (repo / "other.py").write_text("y   =   1\n", encoding="utf-8")
+        log = state / "ran.log"
+        accepting = PlannedGate("A", _log_cmd(log, "a", _HOOK_BODY), _CEILING)
+        opted_out = PlannedGate(
+            "B",
+            _log_cmd(log, "b", rewrite_hook_body("other.py", "y = 1")),
+            _CEILING,
+            None,
+            False,
+        )
+
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            failure = _run(
+                _plan_of(accepting, opted_out),
+                repo,
+                [],
+                touched=_TRACKED_TOUCHED | {"other.py"},
+                hook_rewrite=_RECHECK,
+            )
+
+        assert failure is not None
+        assert failure.gate == "B"
+        assert _autofix_outcomes(caplog) == ["rewrite_applied"]
+
+    def test_opted_out_green_gate_does_not_stop_a_later_accepting_gate(
         self, repo: Path, state: Path
     ) -> None:
         _cycle_edit(repo)
         log = state / "ran.log"
-        first = PlannedGate(
-            "fmt", _log_cmd(log, "a", _HOOK_BODY), _CEILING, None, False
-        )
-        second = PlannedGate("lint", _log_cmd(log, "b", _HOOK_BODY), _CEILING)
+        opted_out = PlannedGate("A", _log_cmd(log, "a"), _CEILING, None, False)
+        accepting = PlannedGate("B", _log_cmd(log, "b", _HOOK_BODY), _CEILING)
+
         failure = _run(
-            _plan_of(first, second),
+            _plan_of(opted_out, accepting),
             repo,
             [],
             touched=_TRACKED_TOUCHED,
             hook_rewrite=_RECHECK,
         )
-        assert failure is not None
-        assert failure.gate == "fmt"
+
+        assert failure is None
 
     def test_config_cannot_enable_acceptance_under_park(
         self, repo: Path, state: Path
