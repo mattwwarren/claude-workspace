@@ -99,6 +99,7 @@ from tests._shared.daemon_fakes import (
 )
 from tests._shared.lock_helpers import _seed_lock_holds
 from tests._shared.review_builders import plan_body, stub_fetch_plan
+from tests._shared.scope_grant_builders import make_grant
 from tests._shared.session_seeding import (
     _make_daemon_session,
     _make_ticket_task,
@@ -123,6 +124,7 @@ if TYPE_CHECKING:
 
     from cw.models import ReapReason, Session
     from cw.models.review_feedback import ReviewFeedback
+    from cw.models.scope_grant import ScopeGrant
     from cw.native_daemon import FakeNativeDaemonClient
     from cw.review_convergence import ConvergenceLedger
     from cw.review_findings import ReviewVerdict
@@ -8629,7 +8631,6 @@ class TestApproveScopeDrift:
     def test_regress_into_plan_clears_the_grant_ledger(self) -> None:
         """#3772: a re-plan is the plan-of-record change that drops the ledger."""
         from cw.dev_queue.lifecycle import _stage_regress
-        from cw.models.scope_grant import ScopeGrant
 
         t = _make_blocked_task(
             status=QueueItemStatus.BLOCKED_ON_USER,
@@ -8637,14 +8638,12 @@ class TestApproveScopeDrift:
             blocked_reason="plan_scope_drift",
         )
         t.scope_grants = [
-            ScopeGrant(
+            make_grant(
                 client=t.client,
                 ticket_id=t.ticket_id,
                 row_created_at=t.created_at,
                 head=_APPROVED_HEAD,
-                policy="p",
                 paths=["src/a.py"],
-                recorded_at=t.created_at,
             )
         ]
 
@@ -8683,6 +8682,123 @@ class TestApproveScopeDrift:
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
         assert t.scope_grants == []
         assert t.scope_drift_approved_extra_files is None
+
+    def test_grant_facts_are_gathered_while_no_queue_lock_is_held(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3772 / ADR-0019: the operator-login ``gh`` read runs before the lock."""
+        from cw._lock_guard import held_locks
+        from cw.dev_queue import approve_scope_drift_ticket
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        held_at_gather: list[tuple[str, ...]] = []
+
+        def _login() -> str:
+            held_at_gather.append(tuple(lock.name for lock in held_locks()))
+            return "test-operator"
+
+        monkeypatch.setattr("cw.operator_identity.cached_gh_login", _login)
+
+        approve_scope_drift_ticket("GEN-500", "genhealth", ["src/a.py"])
+
+        assert held_at_gather == [()]
+
+    def test_gather_never_raises_for_an_unknown_client(self) -> None:
+        from cw.dev_queue.scope_drift import gather_grant_facts
+
+        assert gather_grant_facts("no-such-client-3772", "acme/widgets") is None
+
+    def test_unknown_client_still_raises_from_the_locked_body(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_scope_drift_ticket
+        from cw.exceptions import CwError
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+
+        with pytest.raises(CwError):
+            approve_scope_drift_ticket("GEN-500", "no-such-client-3772", ["a.py"])
+
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            ({"stage": Stage.REVIEW}, "stage is"),
+            ({"blocked_reason": "tool_denied"}, "blocked_reason is"),
+            ({"status": QueueItemStatus.PENDING}, "status is"),
+        ],
+        ids=["wrong_stage", "wrong_reason", "wrong_status"],
+    )
+    def test_row_state_refusal_wins_over_the_exact_path_refusal(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        kwargs: dict[str, object],
+        match: str,
+    ) -> None:
+        """Precedence (#3772): status, stage, reason, empty list, then exact paths."""
+        from cw.dev_queue import approve_scope_drift_ticket
+        from cw.exceptions import ApproveGateError
+
+        calls = self._seed(tmp_config_dir, tmp_path, monkeypatch, **kwargs)
+        before = load_dev_queue().model_dump()
+
+        with pytest.raises(ApproveGateError, match=match):
+            approve_scope_drift_ticket("GEN-500", "genhealth", ["src/*.py"])
+
+        assert calls == []
+        assert load_dev_queue().model_dump() == before
+
+    def test_empty_list_wins_over_the_exact_path_refusal(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import approve_scope_drift_ticket
+        from cw.exceptions import ApproveGateError
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+
+        with pytest.raises(ApproveGateError, match="no extra files"):
+            approve_scope_drift_ticket("GEN-500", "genhealth", [])
+
+    def test_invalid_path_is_refused_before_the_gh_head_lookup(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unresolvable head must not mask the path refusal: no gh call at all."""
+        from cw.dev_queue import approve_scope_drift_ticket
+        from cw.exceptions import ApproveGateError
+
+        calls = self._seed(tmp_config_dir, tmp_path, monkeypatch, head=(None, False))
+        before = load_dev_queue().model_dump()
+
+        with pytest.raises(ApproveGateError, match="glob"):
+            approve_scope_drift_ticket("GEN-500", "genhealth", ["src/*.py"])
+
+        assert calls == []
+        assert load_dev_queue().model_dump() == before
+
+    def test_event_failure_rolls_back_the_grant_ledger(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3772: the ledger append sits after the snapshot, so rollback covers it."""
+        from cw.dev_queue import approve_scope_drift_ticket
+
+        self._seed(tmp_config_dir, tmp_path, monkeypatch)
+        before = load_dev_queue().model_dump()
+
+        def _raise_event(*_args: object, **_kwargs: object) -> None:
+            msg = "event inbox unavailable"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.dev_queue.scope_drift.record_event", _raise_event)
+
+        with pytest.raises(OSError, match="event inbox unavailable"):
+            approve_scope_drift_ticket(
+                "GEN-500", "genhealth", ["a.py"], repo="acme/widgets"
+            )
+
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-500")
+        assert t.scope_grants == []
+        assert load_dev_queue().model_dump() == before
 
 
 # ---------------------------------------------------------------------------
@@ -16994,6 +17110,17 @@ def _make_stage_task(
     )
 
 
+def _ledger_grant(task: TicketTask) -> ScopeGrant:
+    """A grant that binds to *task*'s identity."""
+    return make_grant(
+        client=task.client,
+        ticket_id=task.ticket_id,
+        row_created_at=task.created_at,
+        head=_APPROVED_HEAD,
+        paths=["src/a.py"],
+    )
+
+
 class TestStageRegress:
     """Unit tests for _stage_regress (GitHub #770)."""
 
@@ -17041,6 +17168,30 @@ class TestStageRegress:
         _stage_regress(task, Stage.PLAN)
         assert task.plan_approved_at is None
         assert task.plan_approved_fingerprint is None
+
+    def test_regress_into_plan_clears_the_scope_grant_ledger(self) -> None:
+        """#3772: a re-plan changes the plan of record, so no grant binds it."""
+        from cw.dev_queue import _stage_regress
+
+        task = _make_stage_task(stage=Stage.IMPL)
+        task.scope_grants = [_ledger_grant(task)]
+        _stage_regress(task, Stage.PLAN)
+        assert task.scope_grants == []
+
+    @pytest.mark.parametrize(
+        "target", [Stage.IMPL, Stage.REVIEW], ids=["impl", "review"]
+    )
+    def test_regress_into_a_later_stage_keeps_the_scope_grant_ledger(
+        self, target: Stage
+    ) -> None:
+        """#3772: a REVIEW-to-IMPL repair (and a re-review) must keep the grants."""
+        from cw.dev_queue import _stage_regress
+
+        task = _make_stage_task(stage=Stage.FINALIZE)
+        grants = [_ledger_grant(task)]
+        task.scope_grants = list(grants)
+        _stage_regress(task, target)
+        assert task.scope_grants == grants
 
     def test_regress_into_non_plan_stage_keeps_plan_approved_at(self) -> None:
         """Rule 5a's FINALIZE->IMPL self-heal does not touch the plan and
