@@ -35,6 +35,7 @@ from cw.codex_review._const import (
 from cw.codex_review._context import _prepare_review_pass
 from cw.codex_review._shard import ReviewInputTooLargeError
 from cw.codex_review._verdict import make_codex_blocked, synthesize_codex_review_result
+from cw.ticket_snapshot import DEFAULT_SNAPSHOT_CONTEXT
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
         ReviewerRunFailure,
         ReviewVerdict,
     )
+    from cw.ticket_snapshot import SnapshotContext
 
 #: The Step 4b comment title and artifact-header label for a Claude round.
 CLAUDE_REVIEWER_LABEL = "Claude"
@@ -133,6 +135,7 @@ def run_claude_review(
     settled_suppression: Callable[[ReviewVerdict], ReviewVerdict] | None = None,
     resolution: ResolutionSpec | None = None,
     max_prompt_chars: int | None = None,
+    snapshots: SnapshotContext = DEFAULT_SNAPSHOT_CONTEXT,
 ) -> ClaudeReviewRound:
     """Run one full Claude review pass (no fix loop) and synthesize the result.
 
@@ -152,6 +155,8 @@ def run_claude_review(
     backend call: over it raises
     :class:`~cw.codex_review.ReviewInputTooLargeError`, which the caller maps to
     a content failure with nothing recorded. ``None`` applies no limit.
+
+    *snapshots* (#3712) is forwarded to :func:`_prepare_review_pass`.
     """
     prepared = _prepare_review_pass(
         task,
@@ -163,6 +168,7 @@ def run_claude_review(
         capability=_CLAUDE_CAPABILITY,
         backend="claude",
         resolution=resolution,
+        snapshots=snapshots,
     )
     _fail_if_prompt_too_large(prepared.prompts_by_role, max_prompt_chars)
     outcome = run_claude_roles(

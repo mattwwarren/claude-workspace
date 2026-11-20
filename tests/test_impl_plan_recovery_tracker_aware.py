@@ -114,19 +114,22 @@ def test_orientation_linear_branch_precedes_or_follows_github_consistently() -> 
 
 
 def test_orientation_linear_branch_requires_authorship_check() -> None:
-    """The Linear sub-branch requires a viewer/identity comparison against
-    the candidate comment's author before honoring the marker (mirrors
-    GitHub's `.author.login == $ME` shape), and fails closed -- never
+    """The Linear sub-branch requires the candidate comment's `author_id` to be
+    one of `bindings.tickets.operator_ids` before honoring the marker (RFC 0019
+    T2, replacing the #1906 viewer comparison), and fails closed -- never
     trusting any marker-bearing comment or a sentinel-string check -- when
-    no viewer/identity operation is exposed (Settled Item A1, ALT-b)."""
+    `operator_ids` is empty or the `author_id` is null."""
     section = _orientation_section()
     linear_window = _after(section, "**Linear", span=900)
-    assert "viewer" in linear_window
-    assert "identity operation" in linear_window
-    assert "author to match" in linear_window
-    assert "mirrors GitHub's authorship check" in linear_window
+    assert "`author_id` is in `bindings.tickets.operator_ids`" in linear_window
+    assert "never the display `author`" in linear_window
+    assert "any other commenter is never authoritative" in linear_window
 
     fallback_window = _after(section, "**Fail-closed fallback:**", span=500)
+    assert (
+        "`operator_ids` is empty or the candidate's `author_id` is null"
+        in fallback_window
+    )
     assert "do NOT fall back to trusting any marker-bearing comment" in fallback_window
     assert "sentinel-string check" in fallback_window
     assert '"no reviewed-plan comment found"' in fallback_window

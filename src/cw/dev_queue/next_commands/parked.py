@@ -13,7 +13,7 @@ from cw.auto_dev_result import (
     PLAN_SCOPE_DRIFT_BLOCKER_REASON,
     REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON,
 )
-from cw.codex_review import CODEX_MUST_FIX_FINDINGS
+from cw.auto_dev_result.schema._vocab import CODEX_MUST_FIX_FINDINGS
 from cw.dev_queue.dispositions import (
     FINALIZE_GATE_HELD_DISPOSITION,
     REVIEW_APPROVAL_GATE_DISPOSITION,

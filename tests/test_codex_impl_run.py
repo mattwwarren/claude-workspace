@@ -23,6 +23,7 @@ from freezegun import freeze_time
 
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_driver import run_codex_impl_stage
+from cw.codex_impl import _run as impl_run
 from cw.codex_impl._argv import ImplArgvPolicyError
 from cw.codex_plan._argv import PLAN_READ_ONLY_ARGV, build_plan_argv
 from cw.codex_review import _CODEX_IMPL_BLOCKED_NEXT_ACTIONS, _exec_policy_argv
@@ -38,6 +39,7 @@ from cw.models import (
     ClientConfig,
     DevQueueStore,
     LaneConfig,
+    OrchestratorEventType,
     QueueItemStatus,
     SandboxMode,
     Stage,
@@ -48,6 +50,7 @@ from cw.models.review_feedback import ReviewFeedback
 from cw.models.usage import UsageStage, UsageState, UsageUnavailableReason
 from cw.stage_verification.impl_block import ImplBlock
 from cw.stage_verification.push import SYNTHETIC_MISMATCH_PREFIX
+from cw.ticket_snapshot import TicketSnapshot, normalize_ticket_id, write_snapshot
 from cw.tracker import TRACKER_LINEAR
 from cw.tracker_io._argv import build_tracker_io_argv, comment_tools_for
 from tests._backend_mcp_helpers import codex_tracker_client
@@ -59,9 +62,12 @@ from tests._codex_review_helpers import (
     install_home_scope_script,
     seed_codex_impl_run,
 )
+from tests._shared.bindings_builders import bindings_linear_mcp
 from tests._shared.cli_preflight import _write_tracker_config
 from tests._shared.git_repos import commit_tracked_file, git_in, push_commit_to_origin
 from tests._shared.review_builders import _make_finding, write_review_verdict_envelope
+from tests._shared.ticket_context import make_comment, make_snapshot, make_snapshot_from
+from tests._ticket_view_helpers import events_of
 from tests._tool_fakes import (
     FakeGhCli,
     ScriptedCodexRunner,
@@ -184,12 +190,20 @@ def harness(
         scope: tuple[int, str, str] | None = (0, SCOPE_PASS, ""),
         branch: str = BRANCH,
         gh_head: str | None = None,
+        snapshot: TicketSnapshot | None = None,
+        seed_snapshot: bool = True,
     ) -> Harness:
         if repair:
             worktree, origin = make_git_repo_with_origin("wt-impl", branch=branch)
         else:
             worktree, origin = fresh_impl_repo(make_git_repo, "wt-impl", branch)
         updates: dict[str, object] = {"plan_source": "generated"}
+        if seed_snapshot:
+            # IMPL runs on the stage-entry snapshot: seed one the row carries.
+            updates["snapshot_digest"] = write_snapshot(
+                snapshot
+                or make_snapshot(ticket_id=normalize_ticket_id(TICKET), client="test")
+            )
         if repair:
             updates["branch"] = branch
             updates["review_feedback"] = ReviewFeedback(
@@ -415,16 +429,125 @@ def test_a_sandbox_policy_violation_is_a_stage_fault(
 # --- pre-turn blocks ------------------------------------------------------------
 
 
-def test_non_github_tracker_parks_tracker_mcp_unavailable_pre_dispatch(
+def _tracked_client(tmp_path: Path, system: str, **update: object) -> ClientConfig:
+    """A client named like the seeded row, tracking on *system* in its workspace."""
+    client = codex_tracker_client(tmp_path, None)
+    _write_tracker_config(client.workspace_path, system)
+    return client.model_copy(update={"name": "test", **update})
+
+
+def test_linear_impl_completes_from_the_snapshot_with_no_mcp(
     harness: Callable[..., Harness], tmp_path: Path
 ) -> None:
     h = harness()
-    client = codex_tracker_client(tmp_path, None)
-    h.client = client.model_copy(update={"name": "test"})
-    _write_tracker_config(client.workspace_path, TRACKER_LINEAR)
+    h.turn()
+    h.client = _tracked_client(tmp_path, TRACKER_LINEAR)
     result = h.run()
-    _assert_block(result, "tracker_mcp_unavailable_pre_dispatch")
+    assert result.status == "stage_complete"
+    (call,) = h.impl_calls
+    assert "Authored test ticket body." in str(call["stdin"])
+    assert h.gh.calls == []
+    refresh_events = events_of(OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED)
+    assert [e.payload["reason"] for e in refresh_events] == ["no_binding"]
+
+
+def test_the_snapshot_refresh_runs_before_the_guards(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    h.turn()
+    order: list[str] = []
+    real_snapshot, real_guards = impl_run.snapshot_for_stage, impl_run._guards
+
+    def _snapshot(*args: Any, **kwargs: Any) -> object:
+        order.append("snapshot")
+        return real_snapshot(*args, **kwargs)
+
+    def _guards(run: Any) -> object:
+        order.append("guards")
+        return real_guards(run)
+
+    with (
+        patch("cw.codex_impl._run.snapshot_for_stage", _snapshot),
+        patch("cw.codex_impl._run._guards", _guards),
+    ):
+        h.run()
+    assert order[:2] == ["snapshot", "guards"]
+
+
+def test_a_failed_refresh_continues_on_the_last_snapshot_with_one_degraded_event(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    h = harness()
+    h.turn()
+    h.client = _tracked_client(tmp_path, "github-issues")
+    result = h.run()
+    assert result.status == "stage_complete"
+    (call,) = h.impl_calls
+    assert "Authored test ticket body." in str(call["stdin"])
+    (degraded,) = events_of(OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED)
+    assert degraded.payload["kind"] == "refresh_failed"
+    assert degraded.payload["reason"] == "gh_failed"
+    assert degraded.payload["stage"] == "impl"
+
+
+def test_a_row_without_a_snapshot_digest_blocks_plan_missing_context(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness(seed_snapshot=False)
+    result = h.run()
+    _assert_block(result, "plan_missing_context")
+    assert result.blocker is not None
+    assert "no usable ticket snapshot" in result.blocker.details
+    assert "gh could not fetch" not in result.blocker.details
     assert h.runner.calls == []
+    assert h.impl_calls == []
+
+
+def test_a_snapshot_that_fails_the_trust_read_blocks_plan_missing_context(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness(task_updates={"snapshot_digest": "0" * 64})
+    result = h.run()
+    _assert_block(result, "plan_missing_context")
+    assert result.blocker is not None
+    assert "no usable ticket snapshot" in result.blocker.details
+    assert h.runner.calls == []
+    (degraded,) = events_of(OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED)
+    assert degraded.payload["kind"] == "read_untrusted"
+
+
+def test_an_absent_plan_is_recovered_from_the_snapshot_with_a_friction_token(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    approved = "<!-- plan-spec-reviewed: 2026-11-19 -->\n" + PLAN
+    snapshot = make_snapshot_from(
+        [make_comment("p1", body=approved, author_id="operator-1")],
+        ticket_id=normalize_ticket_id(TICKET),
+        client="test",
+    )
+    h = harness(plan=None, snapshot=snapshot)
+    h.turn()
+    client = _tracked_client(tmp_path, TRACKER_LINEAR)
+    h.client = client.model_copy(
+        update={"bindings": bindings_linear_mcp(operator_ids=["operator-1"])}
+    )
+    result = h.run()
+    assert result.status == "stage_complete"
+    assert "plan_recovered: snapshot" in result.friction_highlights
+    assert (h.worktree / ".cw" / "plan.md").read_text(encoding="utf-8") == approved
+
+
+def test_no_recovery_source_leaves_no_friction_token(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness(plan=None)
+    result = h.run()
+    _assert_block(result, "plan_missing")
+    assert result.blocker is not None
+    assert "redacted text" in result.blocker.details
+    assert "#3530" not in result.blocker.details
+    assert not [f for f in result.friction_highlights if "plan_recovered" in f]
 
 
 def test_plan_absent_non_repair_row_blocks_plan_missing(
@@ -446,16 +569,6 @@ def test_docs_root_missing_blocks_plan_missing_context(
         "cw.codex_plan._prompt._checkout_commands_dir", lambda *_a, **_k: None
     )
     h = harness()
-    result = h.run()
-    _assert_block(result, "plan_missing_context")
-    assert h.runner.calls == []
-
-
-def test_ticket_prefetch_failure_blocks_plan_missing_context(
-    harness: Callable[..., Harness],
-) -> None:
-    h = harness()
-    h.gh.reply("issue", "view", TICKET, "--json", "body", returncode=1)
     result = h.run()
     _assert_block(result, "plan_missing_context")
     assert h.runner.calls == []

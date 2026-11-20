@@ -48,6 +48,7 @@ from cw.codex_runner import CodexRunResult, FakeCodexRunner
 from cw.dev_queue import load_dev_queue
 from cw.events import read_events
 from cw.exceptions import CwError
+from cw.models.enums import OrchestratorEventType
 from cw.models.orchestrator_config.stage import StageExecutorConfig
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
@@ -56,6 +57,7 @@ from cw.review_convergence import (
     worktree_state,
 )
 from cw.review_findings import ReviewVerdict
+from cw.ticket_snapshot import read_for_stage
 from tests._claude_review_helpers import (
     error_envelope,
     review_envelope,
@@ -72,7 +74,7 @@ from tests._codex_review_helpers import (
     _shard_limit_inputs,
     _stem_content,
 )
-from tests._review_confirm_harness import Harness, make_harness
+from tests._review_confirm_harness import Harness, github_tracked, make_harness
 from tests._review_convergence_helpers import (
     MergedMainBranch,
     branch_that_merged_main,
@@ -1212,6 +1214,19 @@ def _row_snapshot() -> dict[str, object]:
     }
 
 
+def _non_snapshot_events() -> list[object]:
+    """Every event but the pass's own ``ticket.snapshot_degraded`` (#3712).
+
+    The pass reads a snapshot, and a row without one records that as
+    observability. It is not a session event, a post or a row change.
+    """
+    return [
+        event
+        for event in read_events()
+        if event.type is not OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED
+    ]
+
+
 @needs_codex
 def test_confirm_leaves_the_row_alone_and_posts_nothing(harness: Harness) -> None:
     def _no_comment(*_args: object, **_kwargs: object) -> None:
@@ -1225,7 +1240,7 @@ def test_confirm_leaves_the_row_alone_and_posts_nothing(harness: Harness) -> Non
 
     assert result.exit_code == 0, result.output
     assert _row_snapshot() == before
-    assert read_events() == []
+    assert _non_snapshot_events() == []
 
 
 # ---------------------------------------------------------------------------
@@ -1490,7 +1505,7 @@ def test_claude_leaves_the_row_alone_and_posts_nothing(harness: Harness) -> None
 
     assert result.exit_code == 0, result.output
     assert _row_snapshot() == before
-    assert read_events() == []
+    assert _non_snapshot_events() == []
 
 
 @needs_codex
@@ -1953,6 +1968,19 @@ def test_run_backend_round_launches_a_claude_round_with_the_resolution(
     assert "reasoning_effort" not in seen
 
 
+def test_delta_round_default_builds_a_refreshing_snapshot_context(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The delta-confirm caller omits the kwarg but must not fail closed."""
+    calls = _stub_rounds(monkeypatch)
+
+    _backend_round("codex", harness, delta=_DELTA)
+
+    [seen] = calls["codex"]
+    snapshots = seen["snapshots"]
+    assert snapshots.resolve is not read_for_stage
+
+
 def test_run_backend_round_launches_a_codex_round_with_the_effort_default(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2076,3 +2104,42 @@ def test_verified_verdict_exits_four_on_a_mutated_worktree(harness: Harness) -> 
         )
 
     assert raised.value.exit_code == _ROUND_FAILED
+
+
+@needs_codex
+def test_github_tracked_confirm_refreshes_once_and_binds_the_refreshed_comment(
+    harness: Harness,
+) -> None:
+    """#3712: GitHub parity. The pass refreshes the snapshot, one fetch for the
+    one pass, and its prompt carries a comment only the refresh brought in."""
+    asked = github_tracked(harness)
+    calls = harness.spy_run_review()
+
+    # The refresh renders the ticket context, which adds a reviewer role.
+    result, runner = harness.invoke([_ok_result()] * (len(harness.roles) + 2))
+
+    assert result.exit_code == 0, result.output
+    assert asked == [_TICKET]
+    assert calls[0]["snapshots"].github is True
+    prompts = [str(call["stdin"]) for call in runner.calls]
+    assert any("Round-2 plan approved by the orchestrator" in p for p in prompts)
+
+
+@needs_codex
+def test_non_github_confirm_does_not_refresh(harness: Harness) -> None:
+    """#3712: an unset tracker never fetches; the pass reads the row's snapshot."""
+    fetches: list[str] = []
+    harness.monkeypatch.setattr(
+        "cw.ticket_snapshot._fetch.fetch_issue_snapshot",
+        lambda ticket_id, *_a, **_k: fetches.append(ticket_id),
+    )
+    calls = harness.spy_run_review()
+
+    result, _runner = harness.invoke(harness.all_roles(_ok_result()))
+
+    assert result.exit_code == 0, result.output
+    assert fetches == []
+    assert calls[0]["snapshots"].github is False
+    # The row has no snapshot: one degraded read, and the pass still ran.
+    (event,) = read_events(event_types=[OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED])
+    assert event.payload["kind"] == "read_untrusted"

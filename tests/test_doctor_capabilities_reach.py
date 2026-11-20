@@ -141,7 +141,6 @@ class TestServerRead:
         ("backend", "executors"),
         [
             (CODEX_BACKEND, _CODEX_PLAN),
-            (CODEX_BACKEND, _CODEX_FINALIZE),
             (OPENCODE_BACKEND, _OPENCODE_PLAN_IMPL),
         ],
     )
@@ -177,11 +176,12 @@ class TestServerRead:
         assert "unreachable" in result.detail
         assert "parks such a row" not in result.detail
 
-    def test_a_later_stage_that_needs_the_binding_is_reported(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    @pytest.mark.parametrize("state", ["absent", "enabled"])
+    def test_codex_impl_and_finalize_do_not_need_the_binding(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: McpStage
     ) -> None:
-        """codex IMPL needs no binding, its FINALIZE does: FINALIZE is reported."""
-        path = stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, "enabled")
+        """RFC 0019 T2 (#3712): codex IMPL and FINALIZE read the ticket snapshot."""
+        stage_mcp_config(monkeypatch, tmp_path, CODEX_BACKEND, state)
         client = _client(
             tmp_path,
             executors={Stage.IMPL: CODEX_BACKEND, Stage.FINALIZE: CODEX_BACKEND},
@@ -190,8 +190,10 @@ class TestServerRead:
 
         result = _row(client, CODEX_BACKEND)
 
-        assert result.ok is True
-        assert f"reachable (declared in {path}" in result.detail
+        assert (result.ok, result.warn) == (True, False)
+        assert "not needed (no routed stage needs the tickets binding)" in (
+            result.detail
+        )
 
     def test_a_review_only_codex_lane_does_not_need_the_binding(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -257,17 +259,25 @@ class TestUnbound:
         assert (result.ok, result.warn) == (True, False)
         assert "unbound (no bindings.tickets.mcp.opencode.server" in result.detail
 
-    @pytest.mark.parametrize("executors", [_CODEX_PLAN, _CODEX_FINALIZE])
-    def test_codex_without_a_server_fails_unbound(
-        self, tmp_path: Path, executors: dict[Stage, str]
-    ) -> None:
-        client = _client(tmp_path, executors=executors, gate=_gate(server=None))
+    def test_codex_without_a_server_fails_unbound(self, tmp_path: Path) -> None:
+        client = _client(tmp_path, executors=_CODEX_PLAN, gate=_gate(server=None))
 
         result = _row(client, CODEX_BACKEND)
 
         assert (result.ok, result.warn) == (False, False)
         assert "unbound (no bindings.tickets.mcp.codex.server" in result.detail
         assert "parks such a row as binding_unbound" in result.detail
+
+    def test_codex_finalize_without_a_server_is_not_needed(
+        self, tmp_path: Path
+    ) -> None:
+        """RFC 0019 T2 (#3712): a FINALIZE-only codex lane never parks unbound."""
+        client = _client(tmp_path, executors=_CODEX_FINALIZE, gate=_gate(server=None))
+
+        result = _row(client, CODEX_BACKEND)
+
+        assert (result.ok, result.warn) == (True, False)
+        assert "tickets binding not needed" in result.detail
 
     def test_codex_with_an_invalid_server_name_fails_unbound(
         self, tmp_path: Path

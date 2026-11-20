@@ -20,6 +20,7 @@ from cw.codex_plan._prompt import (
     prefetch_ticket,
     render_plan_prompt,
     render_ticket_text,
+    ticket_text_from_snapshot,
 )
 from cw.codex_plan._result import ResumeDraft
 from cw.contract_manifest import CLAUDE_ONLY_DENYLIST, RenderError, render_stage_prompt
@@ -28,6 +29,7 @@ from cw.gh import AGENT_COMMENT_MARKER
 from cw.models import CODEX_BACKEND
 from cw.models.bindings import Harness
 from tests._shared.bindings_builders import bindings_github_cli
+from tests._shared.ticket_context import make_comment, make_snapshot_from
 from tests._tool_fakes import FakeGhCli
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -296,6 +298,58 @@ class TestTicketText:
         rendered = render_ticket_text("body", comments)
         assert rendered.comments_dropped >= 1
         assert len(rendered.text) <= TICKET_TEXT_MAX_CHARS
+
+
+class TestTicketTextFromSnapshot:
+    """RFC 0019 T2: the snapshot-fed ticket text for IMPL and FINALIZE."""
+
+    def test_renders_the_display_author_never_the_author_id(self) -> None:
+        comment = make_comment(
+            "c1", body="STEERING", author_id="uid-1234", author="Dana Display"
+        )
+        snapshot = make_snapshot_from([comment], body="THE BODY")
+        text = ticket_text_from_snapshot(snapshot).text
+        assert "THE BODY" in text
+        assert "### Comment by Dana Display at 2026-11-18T12:00:00Z" in text
+        assert "uid-1234" not in text
+
+    def test_keeps_every_comment_agent_authored_ones_included(self) -> None:
+        comments = [
+            make_comment("c1", body="OPERATOR NOTE", author_id="op"),
+            make_comment("c2", body="AGENT NOTE", author_id="bot", agent_authored=True),
+            make_comment("c3", body="CONFLICTED", author_id="x", author_conflict=True),
+        ]
+        rendered = ticket_text_from_snapshot(make_snapshot_from(comments))
+        assert rendered.comments_total == 3
+        assert rendered.comments_dropped == 0
+        for body in ("OPERATOR NOTE", "AGENT NOTE", "CONFLICTED"):
+            assert body in rendered.text
+        order = [rendered.text.index(b) for b in ("OPERATOR NOTE", "AGENT NOTE")]
+        assert order == sorted(order)
+
+    def test_a_missing_display_author_renders_unknown(self) -> None:
+        comment = make_comment("c1", body="X", author_id=None).model_copy(
+            update={"author": None}
+        )
+        text = ticket_text_from_snapshot(make_snapshot_from([comment])).text
+        assert "### Comment by unknown at" in text
+
+    def test_shares_the_cap_with_render_ticket_text(self) -> None:
+        big = "z" * (TICKET_TEXT_MAX_CHARS // 2)
+        comments = [make_comment(f"c{n}", body=big) for n in range(3)]
+        snapshot = make_snapshot_from(comments, body="body")
+        rendered = ticket_text_from_snapshot(snapshot)
+        assert rendered.comments_dropped >= 1
+        assert rendered.comments_total == 3
+        assert len(rendered.text) <= TICKET_TEXT_MAX_CHARS
+        live = render_ticket_text(
+            "body",
+            [
+                {"author": c.author, "created_at": c.created_at, "body": c.body}
+                for c in comments
+            ],
+        )
+        assert rendered == live
 
 
 class TestPrefetch:

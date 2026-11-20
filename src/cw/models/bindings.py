@@ -212,8 +212,11 @@ class TicketsBinding(RoleBinding):
     """The ``tickets`` role: a tracker system, plus operator ids and preflight.
 
     ``operator_ids`` are the operator's identities on the tracker, kept
-    exactly as written (no normalisation, no dedupe); no consumer reads them
-    yet. ``preflight`` is always present and off by default.
+    exactly as written (no normalisation, no dedupe). The trust evaluator
+    (``cw.ticket_snapshot._binding``) reads them on non-GitHub trackers only,
+    casefolded at evaluation: a comment binds when its ``author_id`` is one of
+    them. GitHub ignores them. Empty (the default) binds nothing, so an
+    operator opts in. ``preflight`` is always present and off by default.
     """
 
     system: TicketsSystem | None = None

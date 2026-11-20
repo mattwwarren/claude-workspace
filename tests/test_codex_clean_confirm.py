@@ -28,6 +28,7 @@ from cw.claude_review import (
     ClaudeReviewRound,
     ClaudeRunResult,
 )
+from cw.claude_review import core as claude_review_core
 from cw.codex_clean_confirm import (
     CONFIRM_DEFER_RATIONALE,
     LOOP_DEFER_RATIONALE,
@@ -72,6 +73,7 @@ from cw.review_convergence import (
 )
 from cw.review_engine.constants import ENGINE_ROLE
 from cw.review_findings import has_contested_decision
+from cw.ticket_snapshot import DEFAULT_SNAPSHOT_CONTEXT, SnapshotContext
 from tests._claude_review_helpers import (
     RoleAwareClaudeRunner,
     error_envelope,
@@ -243,6 +245,7 @@ def _apply(
     *,
     codex: tuple[AutoDevResult, ReviewVerdict | None] | None = None,
     deadline: float | None = None,
+    snapshots: SnapshotContext = DEFAULT_SNAPSHOT_CONTEXT,
 ) -> CleanConfirmOutcome:
     result, verdict = codex if codex is not None else _codex(wt)
     return apply_clean_confirm(
@@ -254,11 +257,15 @@ def _apply(
         deadline=deadline,
         result=result,
         verdict=verdict,
+        snapshots=snapshots,
     )
 
 
 def _resume(
-    wt: Path, client: ClientConfig, runner: RoleAwareClaudeRunner
+    wt: Path,
+    client: ClientConfig,
+    runner: RoleAwareClaudeRunner,
+    snapshots: SnapshotContext = DEFAULT_SNAPSHOT_CONTEXT,
 ) -> CleanConfirmOutcome | None:
     return resume_pending_confirm(
         task=_task(),
@@ -267,6 +274,7 @@ def _resume(
         sid="sid-1",
         runner=runner,
         deadline=None,
+        snapshots=snapshots,
     )
 
 
@@ -1550,6 +1558,48 @@ class TestBookkeeping:
         )
         _assert_ledger_error(outcome, codex)
         assert not (wt / LEDGER_RELATIVE_PATH).exists()
+
+
+class TestSnapshotContextReachesTheConfirmPass:
+    """#3712: the context the caller passes is the one the confirm pass resolves."""
+
+    _CTX = SnapshotContext(operator_ids=("op",), operator_login="op", github=False)
+
+    @staticmethod
+    def _spy_prepare(monkeypatch: pytest.MonkeyPatch) -> list[SnapshotContext]:
+        real = claude_review_core._prepare_review_pass
+        seen: list[SnapshotContext] = []
+
+        def _spy(*args: object, **kwargs: Any) -> object:
+            seen.append(kwargs["snapshots"])
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr("cw.claude_review.core._prepare_review_pass", _spy)
+        return seen
+
+    def test_apply_clean_confirm_passes_the_context_through(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen = self._spy_prepare(monkeypatch)
+
+        _apply(wt, _client(wt), RoleAwareClaudeRunner(_clean_role), snapshots=self._CTX)
+
+        assert seen == [self._CTX]
+        assert seen[0] is self._CTX
+
+    def test_resume_pending_confirm_passes_the_context_through(
+        self, wt: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_ledger(wt, _awaiting_at(wt, _head(wt)))
+        seen = self._spy_prepare(monkeypatch)
+
+        outcome = _resume(
+            wt, _client(wt), RoleAwareClaudeRunner(_clean_role), self._CTX
+        )
+
+        assert outcome is not None
+        assert seen == [self._CTX]
+        assert seen[0] is self._CTX
 
 
 class TestDiffBasePin:

@@ -368,6 +368,12 @@ class OrchestratorEventType(StrEnum):
     # from the snapshot store. Deliberately NOT in _DEFAULT_OPERATOR_EVENT_TYPES:
     # the spawn proceeds without the file and the row is not parked.
     TICKET_SNAPSHOT_RENDER_FAILED = "ticket.snapshot_render_failed"
+    # RFC 0019 T2 (#3712) -- a recorded snapshot newly flagged a comment whose
+    # author_id contradicts an earlier report of the same id. Forwarded.
+    TICKET_SNAPSHOT_AUTHOR_CONFLICT = "ticket.snapshot_author_conflict"
+    # RFC 0019 T2 (#3712) -- a stage ran on the last snapshot (or none) after a
+    # refresh or read failure. NOT forwarded: per-pass noise, never parks.
+    TICKET_SNAPSHOT_DEGRADED = "ticket.snapshot_degraded"
     PLAN_APPROVAL_REVOKED = "plan.approval_revoked"
     # #2311 -- advisory audit trail: `cw dev-queue approve` found the ticket
     # body changed since the plan stage last evaluated it. Never blocks.
@@ -712,6 +718,8 @@ class OrchestratorEventType(StrEnum):
     # RFC 0019 O3 (#3707); the outbox's `outbox.entry_delivered` event is the
     # audit record now. Kept for reading old logs.
     REVIEW_VERDICT_COMMENT_POSTED = "review.verdict_comment_posted"
+    # Historical since RFC 0019 T2 (#3712): no producer emits it; reviews read
+    # the ticket snapshot on every tracker. Kept for reading old logs.
     # GitHub #3055 (RFC 0018 S3, Case B) -- a codex review started on a
     # non-GitHub (or unset) tracker, so the operator's free-text comments,
     # voided findings and settle markers were not read into the review

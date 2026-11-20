@@ -228,12 +228,17 @@ optional and takes:
     `system: github-issues`) and `code_host` (with `system: github`) only. Any
     other value, argv templates included, is rejected.
 - `tickets` only: `operator_ids` (the operator's tracker identities, kept as
-  written) and `preflight` (`enabled: false`, `settings_path:
+  written; empty by default). GitHub ignores them. On a non-GitHub tracker a
+  snapshot comment binds a stage (operator comments, steering, the approved
+  plan) only when its `author_id` equals one of them, compared casefolded, so
+  empty ids bind nothing; the claude-native bindings block lists them.
+  Snapshot comments are ordered oldest first and "newest" means the last
+  qualifying comment in that order. `preflight` (`enabled: false`, `settings_path:
   .claude/settings.json`), the opt-in for the tick-side binding reachability
   preflight (RFC 0019 H2b, #3744; formerly the tracker-MCP gate described
   under `tracker_mcp_gate` above). With `preflight.enabled`, a PENDING row
   whose stage needs the tickets binding (`STAGE_NEEDS`: claude-native and
-  opencode PLAN/IMPL, codex PLAN/FINALIZE) parks `BLOCKED_ON_USER` before
+  opencode PLAN/IMPL, codex PLAN; codex FINALIZE reads the snapshot) parks `BLOCKED_ON_USER` before
   claim when its harness verifiably cannot reach it: `binding_unreachable`
   (plugin or server absent or disabled), `binding_unbound` (codex on a
   non-GitHub tracker with no usable `mcp.codex.server`) or
@@ -2302,7 +2307,7 @@ operator_channel_forward:
     - gate.disk_pressure_bypassed  # GitHub #1887 — operator bypassed the disk-pressure gate probe
     - requeue.review_delivery_degraded  # GitHub #1730 — a review requeue ran without the operator's send-back
     - review.verdict_comment_skipped  # GitHub #3055, RFC 0019 O3 — a codex comment was not enqueued to the outbox (durable copy only)
-    - review.operator_context_undelivered  # GitHub #3055 — a codex review ran without the operator's tracker comments
+    - ticket.snapshot_author_conflict  # RFC 0019 T2 (#3712) — a snapshot comment id was reported with a contradicting author_id
     - outbox.entry_unverified   # GitHub #3706 — an outbox post may be public but is unconfirmed
     - outbox.entry_skipped      # GitHub #3706 — an outbox entry's body was unreadable; it is not retried
     - outbox.entry_pending      # GitHub #3706 — an outbox entry went back to pending (binding unreachable, or held)

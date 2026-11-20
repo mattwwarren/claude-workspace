@@ -610,13 +610,6 @@ class TestEngineRereviewPromptTooLarge:
     built-in path, before any codex call.
     """
 
-    @pytest.fixture(autouse=True)
-    def _no_ticket_comments(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(
-            "cw.codex_review._context.core._fetch_ticket_comments",
-            lambda _worktree, _ticket_id: None,
-        )
-
     @pytest.fixture
     def repo(self, make_git_repo: Callable[..., Path]) -> EngineRepo:
         return make_engine_repo(make_git_repo, engine_files=_ENGINE_STUB)

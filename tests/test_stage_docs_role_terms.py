@@ -84,12 +84,6 @@ ROLE_ALLOW: dict[str, list[tuple[str, str]]] = {
             "the convergence-history comment",
         ),
     ],
-    "auto-dev-impl-appendix.md": [
-        (
-            "Linear: `list_comments` returns no GitHub-style",
-            "D-D3 fail-closed rule (identity_unresolved), Epic IV (R6): not rewritten",
-        ),
-    ],
 }
 
 

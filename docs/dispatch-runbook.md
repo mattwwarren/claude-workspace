@@ -3923,14 +3923,16 @@ hard-fail guard here would invert that codified asymmetry (see
 with `cw event tail` after any send-back requeue; if it fires, the reviewer
 ran without your comment and its verdict should be read accordingly.
 
-**Codex on a non-GitHub tracker (#3055, RFC 0018 S3).** Two more events,
-both forwarded by default, cover the cases the requeue event does not. Every
-codex review on a client whose tracker is not GitHub (or is unset) records
-`review.operator_context_undelivered` once at its start: the reviewer ran
-without your free-text comments, voided findings and settle markers (row
-constraints from `cw review constrain` and settled dispositions still reach
-it). That is the first-entry signal; `requeue.review_delivery_degraded` stays
-the re-entry signal, and a requeued review emits both. When the review ends,
+**Codex on a non-GitHub tracker (#3055, RFC 0018 S3).** Historical: until
+RFC 0019 T2 (#3712), every codex review on a client whose tracker is not GitHub
+(or is unset) recorded `review.operator_context_undelivered` once at its start
+(the reviewer ran without your free-text comments, voided findings and settle
+markers). A review no longer records it: comments now come from the ticket
+snapshot on every tracker, and a refresh or read problem is the not-forwarded
+`ticket.snapshot_degraded` event. On a non-GitHub tracker a comment binds only
+when its author id is in `bindings.tickets.operator_ids` (empty by default).
+`requeue.review_delivery_degraded` stays the re-entry signal. The other event,
+forwarded by default, covers the verdict. When the review ends,
 `review.verdict_comment_skipped` says the verdict was not enqueued to the
 outbox (RFC 0019 O3, #3707) and names the worktree artifact that holds it. The
 verdict is enqueued under the `codex-verdict` producer and the drain delivers
@@ -4100,10 +4102,12 @@ edits the worktree and returns `{sentinel}`; it never stages, commits or
 pushes. cw does everything else:
 
 - **Inputs.** The prompt is A3's impl render plus the IMPL codex addendum, then
-  the prefetched GitHub ticket, the approved plan (`.cw/plan.md`), on a repair
+  the ticket text from the refreshed snapshot (RFC 0019 T2, #3712), the
+  approved plan (`.cw/plan.md`), on a repair
   row the review report as an untrusted-data section, a default-branch merge
-  note when one applies, and the plan's "Files You May Change" fence. A
-  non-GitHub tracker blocks `tracker_mcp_unavailable_pre_dispatch` (#3530). A
+  note when one applies, and the plan's "Files You May Change" fence. No
+  usable snapshot blocks `plan_missing_context`; a non-GitHub tracker no longer
+  blocks `tracker_mcp_unavailable_pre_dispatch` on the pre-turn guard. A
   missing plan blocks `plan_missing` unless the row is an adopted repair entry
   (`review_feedback` and `branch` both set); a `recover-red-pr` row has no
   `branch`, so it needs its `.cw/plan.md`.

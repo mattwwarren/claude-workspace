@@ -912,6 +912,8 @@ CLI commands emit thin audit events; payloads carry the obvious fields:
 | `ticket.constraint_recorded` | `cw review constrain` (#2964; recorded before the row is saved; not recorded for a pure duplicate) and `cw dev-queue record-plan-decisions` (#2984; run by the plan stage, actor is the fixed label `plan` with `actor_resolved` true) | `{ticket_id, client, round, actor, actor_resolved, kind, text_sha256, text_bytes, total_bytes, row_status}` with `correlation_id=ticket_id`; `kind` is `operator` (from `cw review constrain`), `adopted_assumption`, `non_goal` or `plan_decision`; the constraint text itself is never in the payload |
 | `ticket.snapshot_recorded` | `cw ticket snapshot` (RFC 0019 T1, #3711) and the codex PLAN driver's GitHub snapshot write; recorded after the store write and before the row is saved, under `dev_queue_lock` | `{ticket_id, client, snapshot_digest, previous_digest, refresh, comments, row_updated}` with `correlation_id=ticket_id`; `previous_digest` is null on a first write or with no row, `row_updated` is false when no row matches; the ticket text is never in the payload |
 | `ticket.snapshot_render_failed` | dispatch spawn, when `.cw/context.json` cannot be rendered from the snapshot store (RFC 0019 T1, #3711) | `{ticket_id, client, snapshot_digest, cause}` with `correlation_id=ticket_id`; `cause` is one of `missing`, `mismatch`, `invalid`, `too_new`, `render_error`; never ticket text. Not in the default operator forward-set: the spawn proceeds without the file and the row is not parked |
+| `ticket.snapshot_author_conflict` | `cw ticket snapshot --from-json -` (RFC 0019 T2, #3712), when recording a snapshot newly flags a comment as `author_conflict`: the same comment id reported with a contradicting `author_id` (against the row's previous snapshot or elsewhere in the same document); recorded after the store write, once the lock is released, best-effort | `{ticket_id, client, snapshot_digest, comments}` with `correlation_id=ticket_id`; `comments` is the count of newly flagged comments, never a comment id or text. Emitted only from the stdin (non-GitHub) path, never on carry-forward of an earlier flag. A flagged comment binds nothing in the trust evaluator. In the default operator forward-set |
+| `ticket.snapshot_degraded` | a codex stage entry or review pass (RFC 0019 T2, #3712), when the snapshot refresh failed or the stored snapshot could not be read; exactly one event per degraded stage call | `{ticket_id, client, kind, reason, snapshot_digest, stage}` with `correlation_id=ticket_id`; `kind` is `refresh_failed` or `read_untrusted`; `reason` for `refresh_failed` is one of `gh_failed`, `cap`, `no_binding`, `refused`, `turn_failed`, `courier_unreachable` (`turn_failed`, `courier_unreachable` and a courier `refused` are reserved for #3760; today `refused` is an unexpected store error at the record step and `no_binding` is a non-GitHub tracker, which has no refresh path yet); for `read_untrusted` it is one of `missing`, `mismatch`, `invalid`, `too_new` (`missing` with `snapshot_digest: null` means the row has no digest); `snapshot_digest` is the digest of the snapshot the stage ran on, or null; never ticket text. A read failure after a failed refresh is reported as `read_untrusted`. The stage continues on the last snapshot and is not parked, except codex IMPL with no usable snapshot, which blocks `plan_missing_context`. Not in the default operator forward-set (per-pass noise) |
 | `plan.approval_revoked` | `cw dev-queue revoke-plan-approval` | `{ticket_id, client, previous_fingerprint, revoked_at, initiating_service, resolutions_source, reason}` |
 | `plan.approval_body_drift_warned` | `cw dev-queue approve` (advisory-only; never blocks or mutates the approval) | `{ticket_id, client, persisted_body_sha, live_body_sha, plan_approved_fingerprint, actor}`. Both shas come from `cw.plan_fingerprint.compute_body_sha`, which strips trailing whitespace before hashing, so a trailing-newline difference never warns (#2761). |
 | `ticket.approval_failed` | scope-drift approval compensation | `{ticket_id, client, approval_event, approval_payload, error, rolled_back, recovery_required}` |
@@ -1052,11 +1054,11 @@ open enum; consumers MUST tolerate unknown values. Known values:
 
 - `"binding_unreachable"`, `"binding_unbound"`, `"binding_tool_missing"` —
   the tick-side binding reachability preflight (#2442, #3055, RFC 0019 H2b
-  #3744) refused to claim a PENDING PLAN/IMPL/FINALIZE row whose harness
+  #3744) refused to claim a PENDING PLAN/IMPL row whose harness
   verifiably cannot reach the client's tickets binding for a stage that needs
   it (opt-in: `bindings.tickets.preflight.enabled`). `binding_unreachable`:
   the plugin or MCP server is absent or disabled; `binding_unbound`: a codex
-  PLAN or FINALIZE row on a non-GitHub tracker whose `servers.codex` is unset
+  PLAN row on a non-GitHub tracker whose `servers.codex` is unset
   or not a valid name; `binding_tool_missing`: the server is enabled but its
   codex `enabled_tools` allowlist excludes a declared
   `bindings.tickets.mcp.codex.tools` name. No session ran: `breadcrumbs` is
@@ -2916,11 +2918,13 @@ carry the old definition with no discriminator. The event records cw's
 verification result; it is not independent proof of
 delivery. It is not forwarded by default. `correlation_id` is the `ticket_id`.
 
-### `review.operator_context_undelivered`
+### `review.operator_context_undelivered` — historical (RFC 0019 T2, #3712)
 
-**Emitter:** `undelivered_operator_context` in `cw.codex_review_signals`,
-called once from `_run_codex_review_and_complete` in `cw.codex_background`,
-right after the executor-blocked marker is saved and before Step 3
+**Emitter:** none since T2 (`undelivered_operator_context` was removed: a
+review now binds comments from the ticket snapshot on every tracker, and a
+snapshot problem is `ticket.snapshot_degraded`). The payload below is kept for
+reading old logs. It was emitted by `_run_codex_review_and_complete` in
+`cw.codex_background`, right after the executor-blocked marker is saved and before Step 3.
 **Payload:**
 ```json
 {
@@ -2946,8 +2950,8 @@ on the row (operator and plan-derived) and `row_dispositions` the row's
 is `row` when the row carries constraint entries and `tracker_unreadable`
 otherwise (the five values are those of `Review.operator_constraints_source`).
 Best-effort: a failed write logs one warning and never aborts the review.
-`correlation_id` is the `ticket_id`. In `_DEFAULT_OPERATOR_EVENT_TYPES`.
-Relation to `requeue.review_delivery_degraded`: that event covers a REVIEW
+`correlation_id` is the `ticket_id`. It left `_DEFAULT_OPERATOR_EVENT_TYPES`
+at T2. Relation to `requeue.review_delivery_degraded`: that event covers a REVIEW
 **re-entry** by requeue (the send-back comment never reaches the reviewer);
 this one covers the **first entry** of every codex review on such a tracker.
 A requeued codex review on a Linear client emits both.

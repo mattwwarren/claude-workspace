@@ -106,6 +106,7 @@ from cw.review_convergence import (
     verdict_ran_engine,
     verify_diff_base,
 )
+from cw.ticket_snapshot import DEFAULT_SNAPSHOT_CONTEXT
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -115,6 +116,7 @@ if TYPE_CHECKING:
     from cw.models import ClientConfig, TicketTask
     from cw.review_convergence import ConvergenceLedger, ResolvedBackend, RoundReport
     from cw.review_findings import ReviewVerdict
+    from cw.ticket_snapshot import SnapshotContext
 
 _log = logging.getLogger(__name__)
 
@@ -181,6 +183,8 @@ class _Gate:
     sid: str
     runner: ClaudeRunner
     deadline: float | None
+    #: How the confirm round obtains the ticket snapshot (#3712).
+    snapshots: SnapshotContext = DEFAULT_SNAPSHOT_CONTEXT
     ledger: ConvergenceLedger | None = None
     tokens: list[str] = field(default_factory=list)
     #: The reconcile changed the ledger's confirm choice to the client's
@@ -756,6 +760,7 @@ def _run_confirm(
             wall_clock_budget_seconds=_remaining_budget(gate),
             session_id=f"{CONFIRM_SESSION_ID_PREFIX}{gate.sid}",
             settled_suppression=_settled_against(ledger),
+            snapshots=gate.snapshots,
         )
     except (OSError, CwError) as exc:
         return _unavailable_outcome(
@@ -824,13 +829,15 @@ def apply_clean_confirm(
     deadline: float | None,
     result: AutoDevResult,
     verdict: ReviewVerdict | None,
+    snapshots: SnapshotContext = DEFAULT_SNAPSHOT_CONTEXT,
 ) -> CleanConfirmOutcome:
     """Record the codex loop round and run the confirm (clean-mode clients only).
 
     Returns *result* and *verdict* unchanged, labeled Codex, for a
     blocking-mode client, a blocked *result* or a missing *verdict*: no ledger
     is read or written on those paths. *deadline* is the review thread's
-    ``time.monotonic()`` deadline (``None``: no wall-clock budget).
+    ``time.monotonic()`` deadline (``None``: no wall-clock budget). *snapshots*
+    reaches the confirm round's review pass unchanged.
     """
     base = CleanConfirmOutcome(
         result=result,
@@ -847,6 +854,7 @@ def apply_clean_confirm(
         sid=sid,
         runner=runner,
         deadline=deadline,
+        snapshots=snapshots,
     )
     try:
         return _gate_after_loop(gate, base, verdict)
@@ -875,6 +883,7 @@ def resume_pending_confirm(
     sid: str,
     runner: ClaudeRunner,
     deadline: float | None,
+    snapshots: SnapshotContext = DEFAULT_SNAPSHOT_CONTEXT,
 ) -> CleanConfirmOutcome | None:
     """Run only the confirm when the ledger already awaits one at HEAD.
 
@@ -892,6 +901,7 @@ def resume_pending_confirm(
         sid=sid,
         runner=runner,
         deadline=deadline,
+        snapshots=snapshots,
     )
     try:
         head = capture_head_sha(worktree)

@@ -6,7 +6,7 @@ finalize`` runs. Everything happens inside
 completes the session as ``unexpected_error`` at ``stage4a_merge_gate`` and
 returns the claimed row to PENDING. The ordered flow:
 
-1. The tracker-MCP backstop, the scope tier and the plan source.
+1. The scope tier and the plan source.
 2. The must-fix override check, the checked-out-branch guard and the
    Pre-Stage Detector Guard (a MERGED PR ships without gates; CLOSED blocks
    ``pr_already_terminal``), with the live-identity bind on a found PR.
@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from cw._git import git_output
 from cw.auto_dev_result.schema._vocab import PLAN_MISSING_CONTEXT_BLOCKER_REASON
-from cw.backend_mcp_config import McpState, declared_server_names, read_backend_mcp
+from cw.backend_mcp_config import declared_server_names
 from cw.bindings_block import bindings_block_for
 from cw.codex_finalize._argv import (
     build_finalize_argv,
@@ -51,7 +51,7 @@ from cw.codex_finalize._prompt import (
     read_artifact,
     render_finalize_prompt,
 )
-from cw.codex_plan._prompt import command_docs_root, prefetch_ticket
+from cw.codex_plan._prompt import command_docs_root, ticket_text_from_snapshot
 from cw.codex_review import (
     CODEX_ERROR,
     CODEX_MODEL_CAPACITY,
@@ -72,7 +72,6 @@ from cw.codex_stage_completion import (
 from cw.codex_stage_facts import resolve_plan_source
 from cw.codex_usage import NO_USAGE, UsageAccumulator
 from cw.contract_manifest import RenderError
-from cw.dev_queue import _PRE_DISPATCH_TRACKER_MCP_REASON
 from cw.gh import edit_pr_body, fetch_pr_view
 from cw.local_runner import git_facts
 from cw.models import (
@@ -129,9 +128,7 @@ from cw.stage_verification.finalize_result import (
     parse_finalize_turn,
 )
 from cw.stage_verification.posted_text import redact_and_cap
-from cw.tracker import TrackerClass, tracker_kind
-from cw.tracker_io import TrackerIoConfigError
-from cw.tracker_io._argv import validate_server_name
+from cw.ticket_snapshot import snapshot_for_stage
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -230,29 +227,6 @@ class _Run:
         )
         return payload
 
-    def tracker_block(self) -> FinalizeBlock | None:
-        """A non-GitHub tracker needs a usable ``servers.codex`` for the A2 post."""
-        kind = tracker_kind(self.client.workspace_path)
-        if kind.tracker_class is not TrackerClass.OTHER or kind.system is None:
-            return None
-        server = self.client.tracker_mcp_server(CODEX_BACKEND) or ""
-        why = None
-        try:
-            validate_server_name(server)
-        except TrackerIoConfigError as exc:
-            why = str(exc)
-        if why is None:
-            reading = read_backend_mcp(
-                CODEX_BACKEND, server, self.client.workspace_path
-            )
-            if reading.state in (McpState.ABSENT, McpState.DISABLED):
-                why = f"codex MCP server {server!r} is {reading.state.value}"
-        if why is None:
-            return None
-        return FinalizeBlock(
-            _PRE_DISPATCH_TRACKER_MCP_REASON, f"tracker {kind.system!r}: {why}"
-        )
-
     def turn(self, prompt: str, scratch: Path) -> CodexRunResult:
         """Launch the one read-only FINALIZE turn, with no timeout (ADR-0014)."""
         schema = scratch / _SCHEMA_NAME
@@ -318,14 +292,10 @@ def _document(
             "cw's command-doc tree (packaged cw/data/commands or the cw source "
             "checkout's .claude/commands) is not available",
         )
-    github = (
-        tracker_kind(run.client.workspace_path).tracker_class is not TrackerClass.OTHER
-    )
-    ticket = (
-        prefetch_ticket(run.task.ticket_id, cwd=run.client.workspace_path)
-        if github
-        else None
-    )
+    # FINALIZE reads the snapshot: a refresh failure keeps the last one, and no
+    # usable snapshot means no ticket text, never a block (RFC 0019 T2).
+    snapshot = snapshot_for_stage(run.task, run.client, run.worktree, stage="finalize")
+    ticket = ticket_text_from_snapshot(snapshot) if snapshot is not None else None
     try:
         prompt = render_finalize_prompt(
             ticket_id=run.task.ticket_id,
@@ -615,10 +585,7 @@ def _found(run: _Run, state: _State, found: DetectedPr, scratch: Path) -> Payloa
 
 
 def _prepare(run: _Run) -> _State | Payload:
-    """Tracker backstop, tier, plan source, override and the branch guard."""
-    block = run.tracker_block()
-    if block is not None:
-        return run.blocked(block, None)
+    """Tier, plan source, override and the branch guard."""
     git = git_facts(run.worktree, run.client.default_branch)
     tier = resolve_tier(run.task, read_artifact(run.worktree, PLAN_RELATIVE), git)
     if isinstance(tier, FinalizeBlock):

@@ -24,14 +24,17 @@ from cw.codex_review._shard import plan_prompt_shards, split_diff_by_file
 from cw.codex_runner import CodexRunResult, FakeCodexRunner
 from cw.config import save_state
 from cw.dev_queue import save_dev_queue
+from cw.gh import is_agent_authored
 from cw.local_runner import make_blocked
 from cw.models import CwState, DevQueueStore, QueueItemStatus, Stage, TicketTask
 from cw.review_findings import AcceptedFinding, CapturedDiff, ReviewVerdict
 from cw.stage_verification.baseline import CycleBaseline, cycle_touched_paths
+from cw.ticket_snapshot import SnapshotContext
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._shared.git_repos import add_bare_origin, commit_tracked_file, git_in
 from tests._shared.review_builders import _make_diff
 from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
+from tests._shared.ticket_context import make_comment, make_snapshot_from
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -42,6 +45,7 @@ if TYPE_CHECKING:
     from cw.review_findings import Finding
     from cw.stage_verification.fence import FenceBreach
     from cw.stage_verification.growth import LoopGrowthBudget
+    from cw.ticket_snapshot import SnapshotComment, TicketSnapshot
 
 # The redacted observed `gh issue view 2633 --json comments` payload (#2633).
 _OBSERVED_COMMENTS_FIXTURE = (
@@ -510,6 +514,88 @@ def _observed_comments() -> list[dict[str, object]]:
     payload = json.loads(_OBSERVED_COMMENTS_FIXTURE.read_text(encoding="utf-8"))
     comments: list[dict[str, object]] = payload["comments"]
     return comments
+
+
+#: The operator login the served comments are authored by, and the context's.
+SERVED_LOGIN = "operator-login"
+
+
+class ServedSnapshot(NamedTuple):
+    """What :func:`_serve_comments` built, and what it was asked for.
+
+    ``resolved`` is the ticket ids a review pass resolved through
+    ``ctx.resolve``; the fix loop's constraint load reuses cycle 0's value and
+    never resolves (#3712).
+    """
+
+    ctx: SnapshotContext
+    snapshot: TicketSnapshot | None
+    resolved: list[str]
+
+
+def _snapshot_comment(index: int, comment: dict[str, object]) -> SnapshotComment:
+    author = comment.get("author")
+    login = author.get("login") if isinstance(author, dict) else None
+    body = str(comment.get("body") or "")
+    return make_comment(
+        str(comment.get("id") or f"c{index}"),
+        body=body,
+        author_id=login if isinstance(login, str) else None,
+        created_at=str(comment.get("createdAt") or ""),
+        agent_authored=is_agent_authored(body),
+    ).model_copy(update={"author": login if isinstance(login, str) else None})
+
+
+def snapshot_of(comments: list[dict[str, object]]) -> TicketSnapshot:
+    """A snapshot whose comments are *comments* (legacy dicts), oldest first."""
+    return make_snapshot_from(
+        [_snapshot_comment(n, comment) for n, comment in enumerate(comments)]
+    )
+
+
+def thread_of(
+    comments: list[dict[str, object]] | None, *, github: bool = True
+) -> tuple[TicketSnapshot | None, SnapshotContext]:
+    """``(snapshot, ctx)`` for a loader call; ``None`` comments is no snapshot."""
+    snapshot = None if comments is None else snapshot_of(comments)
+    return snapshot, SnapshotContext(github=github)
+
+
+def login_context(
+    login: str | None = SERVED_LOGIN, *, github: bool = True
+) -> SnapshotContext:
+    """A context carrying only an operator login: no served comments, no refresh."""
+    return SnapshotContext(operator_login=login, github=github)
+
+
+def _serve_comments(
+    monkeypatch: pytest.MonkeyPatch,
+    comments: list[dict[str, object]] | None,
+    *,
+    login: str | None = SERVED_LOGIN,
+    github: bool = True,
+    operator_ids: tuple[str, ...] = (),
+) -> ServedSnapshot:
+    """Serve *comments* as the ticket snapshot of every review pass and the loop.
+
+    *comments* are legacy GitHub comment dicts, authored by their own login;
+    ``None`` means no readable snapshot. The returned context resolves to the
+    built snapshot; the fix loop takes its constraints from cycle 0's value.
+    """
+    snapshot = None if comments is None else snapshot_of(comments)
+    resolved: list[str] = []
+
+    def _resolve(task: TicketTask, _stage: str) -> TicketSnapshot | None:
+        resolved.append(task.ticket_id)
+        return snapshot
+
+    ctx = SnapshotContext(
+        operator_ids=operator_ids,
+        operator_login=login,
+        github=github,
+        resolve=_resolve,
+    )
+    return ServedSnapshot(ctx, snapshot, resolved)
 
 
 # ---------------------------------------------------------------------------

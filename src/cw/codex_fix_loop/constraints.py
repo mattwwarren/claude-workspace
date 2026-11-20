@@ -166,14 +166,16 @@ def _author_login(comment: dict[str, object]) -> str | None:
     return login if isinstance(login, str) else None
 
 
-def _is_constraint_comment(comment: dict[str, object], operator_login: str) -> bool:
+def _is_constraint_comment(
+    comment: dict[str, object], operator_login: str | None, *, prefiltered: bool
+) -> bool:
     body = comment.get("body")
     return (
         isinstance(body, str)
         and RESOLUTIONS_MARKER in body
         and not is_agent_authored(body)
         and not body.lstrip().startswith(_FIXED_HEADERS)
-        and _author_login(comment) == operator_login
+        and (prefiltered or _author_login(comment) == operator_login)
     )
 
 
@@ -187,21 +189,31 @@ def select_constraint_comment(
     *,
     operator_login: str | None,
     ticket_text: str | None,
+    prefiltered: bool = False,
 ) -> dict[str, object] | None:
     """Return the operator's newest marker-bearing comment, or ``None``.
 
     ``None`` when the login is unresolved (fail closed) or the ticket body
     already carries the marker (the prompt inlines the body as
     ``## Ticket Context``, which is authoritative).
+
+    ``prefiltered`` (#3712) says *comments* already passed the trust evaluator
+    (operator ids, oldest first): the login is then neither required nor
+    compared, and the newest comment is the last qualifying one in that order
+    rather than a string ``max`` over ``createdAt``.
     """
-    if operator_login is None:
+    if operator_login is None and not prefiltered:
         return None
     if ticket_text and RESOLUTIONS_MARKER in ticket_text:
         return None
-    candidates = [c for c in comments if _is_constraint_comment(c, operator_login)]
+    candidates = [
+        c
+        for c in comments
+        if _is_constraint_comment(c, operator_login, prefiltered=prefiltered)
+    ]
     if not candidates:
         return None
-    return max(candidates, key=_created_at)
+    return candidates[-1] if prefiltered else max(candidates, key=_created_at)
 
 
 def _clean_token(span: str) -> str | None:

@@ -73,6 +73,9 @@ class SnapshotComment(BaseModel):
     body: str
     agent_authored: bool
     minimized: bool
+    # RFC 0019 T2 (#3712): set by cw at the recording step when this comment
+    # id was reported with a contradicting author_id; never accepted as input.
+    author_conflict: bool = False
 
 
 class TicketSnapshot(BaseModel):

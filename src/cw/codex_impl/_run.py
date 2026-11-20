@@ -5,9 +5,9 @@ Everything happens inside :func:`cw.codex_stage_completion.run_guarded_stage`,
 so a stage fault completes the session as ``unexpected_error`` at
 ``stage2_impl`` and returns the claimed row to PENDING. The ordered flow:
 
-1. Pre-turn: the tracker (GitHub only), the plan, the rendered prompt, the
-   live-PR bind of any review feedback, the branch guards and the read-only
-   default-branch probe. Any failure is a block before a turn runs.
+1. Pre-turn: the snapshot refresh, the plan (recovered when absent), the
+   rendered prompt, the live-PR bind of any review feedback, the branch guards
+   and the read-only default-branch probe. Any failure blocks before a turn.
 2. The clean-start baseline, the conflict merge (repair rows only), and the
    pinned quality gates.
 3. One write-capable ``codex exec`` turn with no timeout (ADR-0014). The turn
@@ -58,7 +58,7 @@ from cw.codex_impl._result import (
     stamp_impl_result,
 )
 from cw.codex_lane_config import _resolve_codex_fix_loop_growth_guard_enabled
-from cw.codex_plan._prompt import command_docs_root, prefetch_ticket
+from cw.codex_plan._prompt import command_docs_root, ticket_text_from_snapshot
 from cw.codex_review import (
     CODEX_ERROR,
     CODEX_MODEL_CAPACITY,
@@ -125,7 +125,8 @@ from cw.stage_verification.impl_gates import (
 )
 from cw.stage_verification.posted_text import redact_and_cap
 from cw.stage_verification.push import push_and_verify_head
-from cw.tracker import TrackerClass, tracker_kind
+from cw.ticket_snapshot import context_for_client, snapshot_for_stage
+from cw.ticket_snapshot._plan import PLAN_RECOVERED_FRICTION, recover_plan
 from cw.tracker_io import TrackerIoConfigError
 
 if TYPE_CHECKING:
@@ -135,6 +136,7 @@ if TYPE_CHECKING:
     from cw.codex_fix_loop.gates import GatePlan
     from cw.codex_runner import CodexRunner, CodexRunResult
     from cw.models import ClientConfig, SandboxMode, TicketTask
+    from cw.ticket_snapshot import TicketSnapshot
 
 _log = logging.getLogger(__name__)
 
@@ -302,26 +304,16 @@ class _Run:
 
     # -- steps --------------------------------------------------------------
 
-    def tracker_block(self) -> ImplBlock | None:
-        """A non-GitHub tracker parks: the MCP ticket read is not built (#3530)."""
-        kind = tracker_kind(self.client.workspace_path)
-        if kind.tracker_class is TrackerClass.OTHER and kind.system is not None:
-            return ImplBlock(
-                _PRE_DISPATCH_TRACKER_MCP_REASON,
-                f"tracker {kind.system!r}: the codex IMPL lane reads GitHub "
-                "tickets only; tracker-aware ticket reads are #3530",
-            )
-        return None
-
     def prompt(
         self,
+        snapshot: TicketSnapshot | None,
         plan_text: str | None,
         allowed_files: frozenset[str] | None,
         merge_note: str | None,
     ) -> str | ImplBlock:
         """The rendered prompt, or a ``plan_missing_context`` block.
 
-        The ticket body and comments are fetched live on every run.
+        The ticket text is the stage-entry snapshot's; none is a block.
         """
         docs_root = command_docs_root(IMPL_DOCS)
         if docs_root is None:
@@ -330,12 +322,13 @@ class _Run:
                 "cw's command-doc tree (packaged cw/data/commands or the cw "
                 "source checkout's .claude/commands) is not available",
             )
-        ticket = prefetch_ticket(self.task.ticket_id, cwd=self.client.workspace_path)
-        if ticket is None:
+        if snapshot is None:
             return ImplBlock(
                 PLAN_MISSING_CONTEXT_BLOCKER_REASON,
-                f"gh could not fetch ticket {self.task.ticket_id} body/comments",
+                f"no usable ticket snapshot for {self.task.ticket_id}: the row has "
+                "no digest or its stored snapshot failed the trust read",
             )
+        ticket = ticket_text_from_snapshot(snapshot)
         try:
             return render_impl_prompt(
                 task=self.task,
@@ -411,9 +404,6 @@ def _merge_note(files: tuple[str, ...]) -> str | None:
 
 def _guards(run: _Run) -> tuple[str | None, GitFacts] | ImplBlock:
     """The plan and branch guards: ``(plan text, git facts)`` or the block."""
-    block = run.tracker_block()
-    if block is not None:
-        return block
     plan_text = _read_plan(run.worktree)
     block = check_plan_present(plan_text, run.task)
     if block is None:
@@ -431,7 +421,12 @@ def _guards(run: _Run) -> tuple[str | None, GitFacts] | ImplBlock:
 
 
 def _prepare(run: _Run) -> _Pre | ImplBlock:
-    """Steps 1: the guards, the read-only probe and the rendered prompt."""
+    """Steps 1: refresh, recovery, the guards, the probe and the rendered prompt."""
+    snapshot = snapshot_for_stage(run.task, run.client, run.worktree, stage="impl")
+    # recover_plan itself skips a present plan and an adopted repair entry.
+    ctx = context_for_client(run.client, run.worktree, resolve_login=False)
+    source = recover_plan(run.task, run.client, run.worktree, snapshot, ctx)
+    recovered = [f"{PLAN_RECOVERED_FRICTION}: {source}"] if source else []
     guarded = _guards(run)
     if isinstance(guarded, ImplBlock):
         return guarded
@@ -457,10 +452,12 @@ def _prepare(run: _Run) -> _Pre | ImplBlock:
             )
     else:
         allowed = fix_scope_allowlist(plan_text, approved)
-    prompt = run.prompt(plan_text, allowed, _merge_note(probe.conflicted_files))
+    prompt = run.prompt(
+        snapshot, plan_text, allowed, _merge_note(probe.conflicted_files)
+    )
     if isinstance(prompt, ImplBlock):
         return prompt
-    friction = [*probe.friction, *approval_friction]
+    friction = [*recovered, *probe.friction, *approval_friction]
     return _Pre(
         plan_text,
         facts,

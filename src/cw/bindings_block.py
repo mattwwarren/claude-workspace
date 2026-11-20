@@ -202,7 +202,23 @@ def _bound_mcp_lines(
     if realization is None:
         return [_not_reachable_text(label, harness), _FAILURE_PARAGRAPH]
     text = _mcp_text(label, _decor(realization), _op_phrases(tickets, harness))
-    return [text, _FAILURE_PARAGRAPH]
+    return [text, *_operator_ids_lines(tickets, tracker_system), _FAILURE_PARAGRAPH]
+
+
+def _operator_ids_lines(
+    tickets: TicketsBinding, tracker_system: str | None
+) -> list[str]:
+    """The operator-ids line for a non-GitHub tracker; none when no ids are set.
+
+    A comment binds the stage only when its author id is listed here (casefolded
+    compare), so the model needs the list. GitHub ignores ``operator_ids``.
+    """
+    if not tickets.operator_ids:
+        return []
+    if effective_tickets_system(tickets, tracker_system) == TRACKER_GITHUB_ISSUES:
+        return []
+    ids = ", ".join(f"`{_quote(operator_id)}`" for operator_id in tickets.operator_ids)
+    return [f"Operator ids (a comment binds only when its author id is listed): {ids}."]
 
 
 def _role_line(role: Role, binding: RoleBinding | None, harness: Harness) -> str | None:

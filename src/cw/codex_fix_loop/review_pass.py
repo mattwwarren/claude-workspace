@@ -33,6 +33,7 @@ from cw.codex_review._engine_round import (
     run_engine_pass,
 )
 from cw.models.enums import DEFAULT_REVIEWER_SANDBOX_MODE, SandboxMode
+from cw.ticket_snapshot import DEFAULT_SNAPSHOT_CONTEXT
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
     from cw.codex_runner import CodexRunner
     from cw.models import TicketTask
     from cw.review_findings import Finding, ReviewVerdict
+    from cw.ticket_snapshot import SnapshotContext
 
 _log = logging.getLogger(__name__)
 
@@ -71,6 +73,7 @@ def _rereview(
     max_prompt_chars: int | None = None,
     reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
     engine: EngineRoundSpec | None = None,
+    snapshots: SnapshotContext = DEFAULT_SNAPSHOT_CONTEXT,
 ) -> tuple[AutoDevResult, ReviewVerdict | None, _ReviewPassInputs | None]:
     """Run a per-role review pass over the delta since the last cycle (#1837).
 
@@ -123,6 +126,7 @@ def _rereview(
                 settled_suppression=settled_suppression,
                 max_prompt_chars=max_prompt_chars,
                 reviewer_sandbox_mode=reviewer_sandbox_mode,
+                snapshots=snapshots,
             ),
             cycle=cycle,
         )
@@ -136,6 +140,7 @@ def _rereview(
         delta_from_sha=previous_reviewed_sha,
         prior_open_findings=prior_open_findings,
         reviewer_sandbox_mode=reviewer_sandbox_mode,
+        snapshots=snapshots,
     )
     try:
         run = run_prepared_roles(
@@ -284,6 +289,7 @@ def _review_cycle_zero(
     max_prompt_chars: int | None,
     reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
     engine: EngineRoundSpec | None = None,
+    snapshots: SnapshotContext = DEFAULT_SNAPSHOT_CONTEXT,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Cycle 0's ``run_review`` under the lane's prompt limit (#2867).
 
@@ -312,6 +318,7 @@ def _review_cycle_zero(
                 settled_suppression=settled_suppression,
                 max_prompt_chars=max_prompt_chars,
                 reviewer_sandbox_mode=reviewer_sandbox_mode,
+                snapshots=snapshots,
             ),
             cycle=0,
         )
@@ -332,6 +339,7 @@ def _review_cycle_zero(
             settled_suppression=settled_suppression,
             max_prompt_chars=max_prompt_chars,
             reviewer_sandbox_mode=reviewer_sandbox_mode,
+            snapshots=snapshots,
         )
     except ReviewInputTooLargeError as exc:
         _log_input_too_large(task, exc, cycle=0)

@@ -197,9 +197,25 @@ def _observe(
     }
 
 
-_OLD: dict[str, dict[str, object]] = (
+_CAPTURED: dict[str, dict[str, object]] = (
     json.loads(_FIXTURE.read_text(encoding="utf-8")) if _FIXTURE.exists() else {}
 )
+#: codex FINALIZE reads the ticket snapshot (RFC 0019 T2): the tickets binding is
+#: not needed, so it is never read, parked or warned about. The one intended
+#: divergence from the old gate's capture.
+_NOT_NEEDED: dict[str, object] = {"hit": None, "reads": 0, "warnings": 0}
+
+
+def _is_codex_finalize(key: str) -> bool:
+    kind, *parts = key.split("/")
+    codex = parts[1] == "codex" if kind == "server" else kind == "unbound"
+    return codex and parts[-1] == "finalize"
+
+
+_OLD: dict[str, dict[str, object]] = {
+    key: {**old, **_NOT_NEEDED} if _is_codex_finalize(key) else old
+    for key, old in _CAPTURED.items()
+}
 
 
 @pytest.mark.usefixtures("isolated_backend_layers")
@@ -269,7 +285,7 @@ def test_the_capture_holds_every_unbound_and_claude_shape() -> None:
     assert unbound_hits == {
         f"unbound/linear/{servers}/{stage}"
         for servers in ("unset", "invalid")
-        for stage in ("plan", "finalize")
+        for stage in ("plan",)
     }
     claude_hits = {
         k.split("/")[1]
@@ -594,16 +610,14 @@ class TestScoping:
 
 @pytest.mark.usefixtures("isolated_backend_layers")
 class TestBackendServerGate:
-    @pytest.mark.parametrize("stage", [Stage.PLAN, Stage.FINALIZE])
     @pytest.mark.parametrize(
         "servers", [dict(OPENCODE_SERVERS), {CODEX_BACKEND: "a.b"}]
     )
-    def test_codex_plan_and_finalize_with_unusable_server_is_a_hit(
+    def test_codex_finalize_with_unusable_server_is_not_a_hit(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         servers: dict[str, str],
-        stage: Stage,
     ) -> None:
         (tmp_path / "ws" / ".git").mkdir(parents=True)
         client = reach_client(
@@ -613,7 +627,27 @@ class TestBackendServerGate:
             tracker="linear",
         )
         reads = _count_reads(monkeypatch)
-        (hit,) = _resolve(client, snapshot(stage=stage)).values()
+        assert _resolve(client, snapshot(stage=Stage.FINALIZE)) == {}
+        assert reads == []
+
+    @pytest.mark.parametrize(
+        "servers", [dict(OPENCODE_SERVERS), {CODEX_BACKEND: "a.b"}]
+    )
+    def test_codex_plan_with_unusable_server_is_a_hit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        servers: dict[str, str],
+    ) -> None:
+        (tmp_path / "ws" / ".git").mkdir(parents=True)
+        client = reach_client(
+            tmp_path / "ws",
+            enabled_gate(None, servers=servers),
+            executors=on(CODEX_BACKEND),
+            tracker="linear",
+        )
+        reads = _count_reads(monkeypatch)
+        (hit,) = _resolve(client, snapshot(stage=Stage.PLAN)).values()
         assert _hit_tuple(hit, tmp_path) == [
             BRANCH,
             "clients.yaml tracker_mcp_gate.servers",
@@ -877,7 +911,7 @@ class TestToolNameCheck:
             workspace, {"get": "get_issue", "comment": "save_comment"}
         )
 
-        (hit,) = _resolve(client, snapshot(stage=Stage.FINALIZE)).values()
+        (hit,) = _resolve(client, snapshot(stage=Stage.PLAN)).values()
 
         assert hit.reason is PreflightReason.BINDING_TOOL_MISSING
         assert hit.missing_tools == ("save_comment",)
@@ -930,7 +964,7 @@ class TestToolNameCheck:
 def test_the_binding_stages_derive_from_stage_needs() -> None:
     from cw.dispatch.claim.preflight_reach import BINDING_STAGES
 
-    assert {Stage.PLAN, Stage.IMPL, Stage.FINALIZE} == BINDING_STAGES
+    assert {Stage.PLAN, Stage.IMPL} == BINDING_STAGES
 
 
 @pytest.mark.parametrize(
