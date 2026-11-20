@@ -103,7 +103,9 @@ _OPERATOR_GATED_PARK_DISPOSITIONS: frozenset[str] = frozenset(
         STALE_DISPATCH_GATE_DISPOSITION,
         # #2321: the dependency hold waits on its PR merging; a reap revert would
         # re-park it. With an id it holds no lane slot, so class 13 never reports
-        # it; without an id it holds one and class 13 reports it.
+        # it. Without an id it is a settled park and holds none either, unless a
+        # live worker or unsettled claim keeps it occupying (#3774); only then
+        # does class 13 report it.
         DEPENDENCY_HOLD_DISPOSITION,
         DispatchSkipReason.ATTEMPT_CAP_BLOCKED.value,
         ADOPTED_HEAD_DRIFT_DISPOSITION,
@@ -176,7 +178,8 @@ _WEDGE_ACTIVE_NULL_LIVENESS_ORPHAN = "wedge/active-null-liveness-orphan"
 _WEDGE_LEAKED_DAEMON_WORKER = "wedge/leaked-daemon-worker"
 
 # Wedge class (13) for BLOCKED_ON_USER rows parked on a deliberate operator gate
-# (``_is_operator_gated_park``) that still hold a lane slot (#2739). The visible
+# (``_is_operator_gated_park``) that still hold a lane slot (#2739), that is,
+# whose worker is live or whose claim is unsettled (#3774). The visible
 # counterpart of the class-5 exclusion above: class 5 skips these rows because
 # they only look dead, so without this class an operator sees a lane slot held
 # by a row no doctor finding names. Advisory only: it must stay out of every

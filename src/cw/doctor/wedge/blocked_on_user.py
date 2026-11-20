@@ -147,8 +147,10 @@ def _tool_denied_recipe(task: TicketTask) -> str:
 def _dead_session_recipe(task: TicketTask) -> str:
     """Recipe for a dead-session class-5 finding (#2617).
 
-    Every row except a ``tool_denied`` park keeps the generic reap hint, byte for
-    byte.
+    Every row except a ``tool_denied`` park gets the generic reap hint. It says
+    "may hold" (#3774): a dead-by-roster row whose session record is already
+    terminal, or that names none, is a settled park and holds no lane slot;
+    one whose record is still ACTIVE (the crash path) does.
     """
     if _is_tool_denied_park(task):
         return _tool_denied_recipe(task)
@@ -320,13 +322,15 @@ def _check_wedge_operator_gated_park(
     class 5 skips an operator-gated park because it only looks dead, so
     without this class a lane slot held by such a row is named by no finding.
     Reports a row iff it is BLOCKED_ON_USER (class 5's candidate status),
-    ``occupies_lane_slot`` (the authority dispatch, the board and
-    ``lane_stats`` count with; it also drops a terminal_sibling park, class
-    7's) and ``_is_operator_gated_park`` (class 5's own exclusion predicate, so
+    ``occupies_lane_slot`` with the state's session statuses (the authority
+    dispatch, the board and ``lane_stats`` count with; it drops a
+    terminal_sibling park, class 7's, and a settled park whose worker is
+    finished and whose claim is settled, #3774) and ``_is_operator_gated_park``
+    (class 5's own exclusion predicate, so
     "class 5 skipped it because of the gate" and "this class reports it" are
-    the same row set). No daemon lookup: class 5 excludes gated rows whatever
-    their session's liveness, so this class reports them whatever it is, and
-    no lane-cap comparison (that would need ``clients.yaml``).
+    the same row set, minus settled parks). No daemon lookup: liveness here is
+    the state file's session status only, as dispatch reads it, and no
+    lane-cap comparison (that would need ``clients.yaml``).
 
     Read-only and unaudited: nothing here mutates, logs or records an event,
     and ``_reap_wedge_findings`` feeds this class to no selector. Returns
