@@ -6935,3 +6935,54 @@ def _callee_name(call: ast.Call) -> str | None:
     if isinstance(func, ast.Attribute):
         return func.attr
     return None
+
+
+def test_spawn_create_impl_orchestrator_flag_stamps_is_orchestrator(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#3789: orchestrator=True stamps is_orchestrator; purpose stays IMPL."""
+    from cw.spawn import spawn_create_impl
+
+    client = _make_client(tmp_path)
+    daemon = FakeNativeDaemonClient()
+    worktree = make_git_repo("worktree-orchestrator-flag")
+
+    session_id = spawn_create_impl(
+        client=client,
+        worktree=worktree,
+        prompt="You are the orchestrator session.",
+        label="orchestrator",
+        native_daemon=daemon,
+        orchestrator=True,
+    )
+
+    sess = load_state().find_by_name_or_id(session_id)
+    assert sess is not None
+    assert sess.is_orchestrator is True
+    assert sess.purpose is SessionPurpose.IMPL
+
+
+def test_spawn_create_impl_default_leaves_is_orchestrator_false(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    from cw.spawn import spawn_create_impl
+
+    client = _make_client(tmp_path)
+    daemon = FakeNativeDaemonClient()
+    worktree = make_git_repo("worktree-default-flag")
+
+    session_id = spawn_create_impl(
+        client=client,
+        worktree=worktree,
+        prompt="You are an impl session.",
+        label="impl/default",
+        native_daemon=daemon,
+    )
+
+    sess = load_state().find_by_name_or_id(session_id)
+    assert sess is not None
+    assert sess.is_orchestrator is False

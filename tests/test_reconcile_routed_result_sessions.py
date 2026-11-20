@@ -59,6 +59,7 @@ from tests._reconcile_helpers import (
     _state_queue_snapshot,
     _write_agent_spawn_stamp,
 )
+from tests._shared.session_seeding import _make_daemon_session
 
 _LIVE = {"fake-short-id"}
 _SID = "2524"
@@ -997,3 +998,51 @@ class TestSweepRoutedResultSessions:
 
         assert names & forbidden == set()
         assert stop_calls == []
+
+
+# #3789: a registered orchestrator uses no client-ceiling slot, so the
+# unowned-ceiling list (feeds the ORPHAN? annotation) never names it.
+
+
+def test_registered_orchestrator_is_not_unowned_ceiling_session() -> None:
+    orch = _make_daemon_session(
+        id="orch", name="client-a/orchestrator", client="client-a", is_orchestrator=True
+    )
+
+    assert routed_result_sessions.unowned_ceiling_sessions([orch], (), "client-a") == ()
+
+
+def test_unregistered_active_and_idle_daemon_is_unowned_ceiling_session() -> None:
+    active = _make_daemon_session(
+        id="leak-a", client="client-a", status=SessionStatus.ACTIVE
+    )
+    idle = _make_daemon_session(
+        id="leak-i", client="client-a", status=SessionStatus.IDLE
+    )
+
+    got = routed_result_sessions.unowned_ceiling_sessions(
+        [active, idle], (), "client-a"
+    )
+
+    assert {s.id for s in got} == {"leak-a", "leak-i"}
+
+
+def test_mixed_unowned_ceiling_list_is_oldest_first() -> None:
+    new = _make_daemon_session(
+        id="new", client="client-a", started_at=datetime(2026, 1, 2, tzinfo=UTC)
+    )
+    orch = _make_daemon_session(
+        id="orch",
+        client="client-a",
+        is_orchestrator=True,
+        started_at=datetime(2026, 1, 1, 12, tzinfo=UTC),
+    )
+    old = _make_daemon_session(
+        id="old", client="client-a", started_at=datetime(2026, 1, 1, tzinfo=UTC)
+    )
+
+    got = routed_result_sessions.unowned_ceiling_sessions(
+        [new, orch, old], (), "client-a"
+    )
+
+    assert [s.id for s in got] == ["old", "new"]

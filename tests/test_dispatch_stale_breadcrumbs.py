@@ -62,6 +62,60 @@ def test_names_skip_occupancy_and_running_from_the_tick(
     )
 
 
+def test_registered_orchestrator_is_not_named_as_orphan(tmp_config_dir: Path) -> None:
+    """#3789: a registered orchestrator uses no ceiling slot, so nothing to name."""
+    save_state(
+        CwState(
+            sessions=[
+                _make_daemon_session(
+                    id="orch",
+                    name=f"{_CLIENT}/orchestrator",
+                    client=_CLIENT,
+                    is_orchestrator=True,
+                    started_at=_NOW - timedelta(hours=10),
+                )
+            ]
+        )
+    )
+    text = build_stale_breadcrumbs(
+        _CLIENT,
+        _make_tick_summary(pending=2, tick_at=_NOW - timedelta(seconds=200)),
+        _NOW,
+    )
+    assert text.endswith("orphan_sessions=none")
+
+
+def test_unregistered_orphan_still_named_beside_orchestrator(
+    tmp_config_dir: Path,
+) -> None:
+    """#3789: the leak stays visible when a registered orchestrator is present."""
+    save_state(
+        CwState(
+            sessions=[
+                _make_daemon_session(
+                    id="orch",
+                    name=f"{_CLIENT}/orchestrator",
+                    client=_CLIENT,
+                    is_orchestrator=True,
+                    started_at=_NOW - timedelta(hours=9),
+                ),
+                _make_daemon_session(
+                    id="s-0",
+                    name=f"{_CLIENT}/auto-dev/T-0",
+                    client=_CLIENT,
+                    started_at=_NOW - timedelta(hours=10),
+                ),
+            ]
+        )
+    )
+    text = build_stale_breadcrumbs(
+        _CLIENT,
+        _make_tick_summary(pending=2, tick_at=_NOW - timedelta(seconds=200)),
+        _NOW,
+    )
+    assert text.endswith("orphan_sessions=s-0 (T-0)")
+
+
 def test_names_orphan_sessions_with_their_ticket(tmp_config_dir: Path) -> None:
     _seed_sessions(2)
     text = build_stale_breadcrumbs(

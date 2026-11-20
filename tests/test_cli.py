@@ -10802,11 +10802,13 @@ class TestDevQueueStatusRunningRowDivergence:
         ticket: str = "2524",
         client: str = "orphan-client",
         minutes_ago: int = 60,
+        is_orchestrator: bool = False,
     ) -> Session:
         return _make_daemon_session(
             id=sid,
             name=f"{client}/auto-dev/{ticket}",
             client=client,
+            is_orchestrator=is_orchestrator,
             started_at=datetime.now(UTC) - timedelta(minutes=minutes_ago),
         )
 
