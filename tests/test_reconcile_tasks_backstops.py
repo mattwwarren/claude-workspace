@@ -18,7 +18,7 @@ from cw.config import (
     sessions_lock,
 )
 from cw.dev_queue import load_dev_queue, save_dev_queue
-from cw.events import read_events
+from cw.events import advance_cursor, read_events, record_event
 from cw.models import (
     ClientConfig,
     CompletionReason,
@@ -42,6 +42,7 @@ from cw.reconcile import (
     revert_completed_silent_tasks,
     revert_timed_out_tasks,
 )
+from cw.reconcile.tasks import backstop_targets
 from cw.worktree import OnBranch
 from tests._dirty_check_helpers import (
     revert_completed_silent_prefetched,
@@ -53,6 +54,7 @@ from tests._reconcile_helpers import (
     _mk_daemon_session_with_worktree,
     _mk_session,
     _mk_timed_out_daemon_session,
+    stub_worktree_probe,
 )
 
 # ---------------------------------------------------------------------------
@@ -1264,3 +1266,158 @@ def test_revert_timed_out_tasks_completes_while_holding_sessions_lock(
     reloaded = load_state()
     stamped = next(s for s in reloaded.sessions if s.id == "lockheld-to-1")
     assert stamped.reap_reason == ReapReason.COMPLETED_BACKSTOP
+
+
+# ---------------------------------------------------------------------------
+# A deferred completion event is invisible to the completed-silent backstop (#2994)
+# ---------------------------------------------------------------------------
+
+_PAST_GRACE = datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC)
+
+
+def _seed_completed_review_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sid: str
+) -> None:
+    """A RUNNING REVIEW row whose DAEMON session completed well past the grace."""
+    sess = _mk_daemon_session_with_worktree(
+        sid, SessionStatus.COMPLETED, tmp_path / f"wt-{sid}"
+    ).model_copy(update={"completed_at": _PAST_GRACE})
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=sid,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    stage=Stage.REVIEW,
+                    session_id=sid,
+                )
+            ]
+        )
+    )
+    stub_worktree_probe(monkeypatch, branch=f"auto-dev/{sid}", reason=None)
+
+
+def test_a_pending_completion_event_keeps_the_row_running_past_the_grace(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The REVIEW tip sweep holds an event behind the cursor for several ticks.
+
+    The session is COMPLETED more than 60 s ago, but its event is not consumed:
+    the backstop must leave the row RUNNING and bound, or the recorded result
+    is dropped when the deferred event finally finds no RUNNING row.
+    """
+    _seed_completed_review_row(tmp_path, monkeypatch, "held-sess")
+    record_event(
+        OrchestratorEventType.SESSION_COMPLETED,
+        {"ticket_id": "held-sess", "session_id": "held-sess"},
+    )
+
+    with freezegun.freeze_time(_PAST_GRACE + timedelta(seconds=600)):
+        reverted = revert_completed_silent_prefetched()
+
+    task = load_dev_queue().tasks[0]
+    assert reverted == []
+    assert task.status == QueueItemStatus.RUNNING
+    assert task.session_id == "held-sess"
+
+
+def test_a_pending_completion_event_removes_the_session_from_the_capture_targets(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lockless dirty-check capture selects the same sessions as the revert."""
+    _seed_completed_review_row(tmp_path, monkeypatch, "held-capture")
+    record_event(
+        OrchestratorEventType.SESSION_COMPLETED,
+        {"ticket_id": "held-capture", "session_id": "held-capture"},
+    )
+    state = load_state()
+    tasks = load_dev_queue().tasks
+    now = _PAST_GRACE + timedelta(seconds=600)
+
+    targets, running_ids = backstop_targets(
+        state, tasks, SessionStatus.COMPLETED, now=now
+    )
+
+    assert targets == []
+    assert running_ids == set()
+
+
+def test_without_a_pending_completion_event_the_backstop_still_reverts(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exemption must not neuter the backstop: no pending event, still reverted."""
+    _seed_completed_review_row(tmp_path, monkeypatch, "silent-sess")
+
+    with freezegun.freeze_time(_PAST_GRACE + timedelta(seconds=600)):
+        reverted = revert_completed_silent_prefetched()
+
+    task = load_dev_queue().tasks[0]
+    assert reverted == ["silent-sess"]
+    assert task.status == QueueItemStatus.PENDING
+    assert task.session_id is None
+
+
+def test_a_consumed_completion_event_no_longer_shields_the_row(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once the dispatch cursor passes the event it is not pending any more."""
+    _seed_completed_review_row(tmp_path, monkeypatch, "consumed-sess")
+    event = record_event(
+        OrchestratorEventType.SESSION_COMPLETED,
+        {"ticket_id": "consumed-sess", "session_id": "consumed-sess"},
+    )
+    advance_cursor("dispatch", event.id)
+
+    with freezegun.freeze_time(_PAST_GRACE + timedelta(seconds=600)):
+        reverted = revert_completed_silent_prefetched()
+
+    assert reverted == ["consumed-sess"]
+
+
+def test_the_mirrored_dispatch_consumer_name_matches_the_dispatch_constant() -> None:
+    from cw.dispatch import _DISPATCH_CONSUMER
+    from cw.reconcile.tasks import backstops
+
+    assert backstops._DISPATCH_CONSUMER == _DISPATCH_CONSUMER
+
+
+def test_a_pending_event_never_shields_a_timed_out_session(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the COMPLETED backstop honours a pending completion event."""
+    sess = _mk_timed_out_daemon_session("to-sess", "TKT-TO", _PAST_GRACE)
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="TKT-TO",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="to-sess",
+                )
+            ]
+        )
+    )
+    stub_worktree_probe(monkeypatch, branch="auto-dev/to-sess", reason=None)
+    record_event(
+        OrchestratorEventType.SESSION_COMPLETED,
+        {"ticket_id": "TKT-TO", "session_id": "to-sess"},
+    )
+
+    with freezegun.freeze_time(_PAST_GRACE + timedelta(seconds=600)):
+        reverted = revert_timed_out_prefetched()
+
+    assert reverted == ["TKT-TO"]

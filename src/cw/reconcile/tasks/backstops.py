@@ -16,7 +16,7 @@ from cw.dev_queue import (
     save_dev_queue,
     transition_task_status,
 )
-from cw.events import record_event
+from cw.events import read_events, record_event
 from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
@@ -51,23 +51,60 @@ if TYPE_CHECKING:
 # field, mirroring _LIVE_WRITER_RESCAN_BACKOFF_SECONDS immediately above.
 _COMPLETION_ROUTING_GRACE_SECONDS = 60
 
+# Mirrors ``cw.dispatch.loop._DISPATCH_CONSUMER`` (#2994): the consumer whose
+# cursor marks a completion event as consumed. Pinned equal by a test.
+_DISPATCH_CONSUMER = "dispatch"
+
+
+def _pending_completion_session_ids() -> frozenset[str]:
+    """Session ids whose SESSION_COMPLETED event the dispatch consumer has not consumed.
+
+    The REVIEW tip sweep (#2994) can hold a completion event behind its cursor
+    for several ticks while its row stays RUNNING; the recorded result is only
+    applied when that event is consumed. A backstop revert before then would
+    clear the row's ``session_id`` and drop the result, so a session with a
+    pending event is treated as still inside its routing grace.
+
+    Reads through ``cw.events`` with the dispatch cursor name rather than
+    importing ``cw.dispatch.loop.read_pending_completions``: ``cw.dispatch``
+    imports ``cw.reconcile``, so a module-scope import would be a cycle.
+    ``tests/test_reconcile_tasks_backstops.py`` pins the mirrored name to the
+    dispatch constant. Read-only: no lock, no cursor move.
+    """
+    return frozenset(
+        sid
+        for event in read_events(
+            consumer=_DISPATCH_CONSUMER,
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        if isinstance(sid := event.payload.get("session_id"), str)
+    )
+
 
 def _sessions_past_completion_grace(
-    sessions: list[Session], now: datetime | None = None
+    sessions: list[Session],
+    now: datetime | None = None,
+    *,
+    pending_session_ids: frozenset[str] = frozenset(),
 ) -> list[Session]:
     """Filter out sessions still inside their post-completion routing grace.
 
     A None completed_at gets no grace (fail-safe: never suppress
     indefinitely, mirrors _collect_timed_out_merged_candidates's guard).
     *now* defaults to the current time (the dirty-check pre-pass passes a
-    lookahead, #2548).
+    lookahead, #2548). A session in *pending_session_ids* (its completion event
+    is not yet consumed, #2994) is never past grace, however old.
     """
     now = now or datetime.now(UTC)
     return [
         s
         for s in sessions
-        if s.completed_at is None
-        or (now - s.completed_at).total_seconds() >= _COMPLETION_ROUTING_GRACE_SECONDS
+        if s.id not in pending_session_ids
+        and (
+            s.completed_at is None
+            or (now - s.completed_at).total_seconds()
+            >= _COMPLETION_ROUTING_GRACE_SECONDS
+        )
     ]
 
 
@@ -184,8 +221,16 @@ def backstop_targets(
     them own a RUNNING, non-backstop-exempt row (the ones the backstop acts on).
 
     Shared by the in-lock revert and the lockless dirty-check capture (#2548),
-    so the two select the same sessions.
+    so the two select the same sessions. A COMPLETED session whose completion
+    event the dispatch consumer has not consumed yet is never a target (#2994):
+    the REVIEW tip sweep may hold that event for several ticks, and reverting
+    its row meanwhile would drop the recorded result.
     """
+    pending = (
+        _pending_completion_session_ids()
+        if status is SessionStatus.COMPLETED
+        else frozenset[str]()
+    )
     targets = _sessions_past_completion_grace(
         [
             s
@@ -193,6 +238,7 @@ def backstop_targets(
             if s.status == status and s.origin is SessionOrigin.DAEMON
         ],
         now,
+        pending_session_ids=pending,
     )
     target_ids = {s.id for s in targets}
     running_ids = {
