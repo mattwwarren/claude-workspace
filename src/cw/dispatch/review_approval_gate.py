@@ -43,7 +43,12 @@ from typing import TYPE_CHECKING, Final
 from cw.auto_dev_result import SCOPE_TIER_LARGE
 from cw.executor import resolve_pipeline_stages
 from cw.merge_probe import PROBE_TIMEOUT_SECONDS
-from cw.models import QueueItemStatus, Stage, resolve_feature_branch
+from cw.models import (
+    QueueItemStatus,
+    Stage,
+    resolve_base_branch,
+    resolve_feature_branch,
+)
 from cw.review_approval import (
     APPROVAL_UNREADABLE,
     ApprovalInputs,
@@ -192,7 +197,7 @@ def _evaluate(
         tier=SCOPE_TIER_LARGE,
         approver_kind=None if kind is None else str(kind),
         approved_sha=task.review_approved_sha,
-        default_branch=client.default_branch,
+        base_branch=resolve_base_branch(client, task),
     )
     verdict = evaluate_review_approval(
         inputs, repo=repo, head_sha=head_sha, timeout=PROBE_TIMEOUT_SECONDS

@@ -56,7 +56,7 @@ def repo(make_git_repo_with_origin: Callable[..., tuple[Path, Path]]) -> Approva
 
 def _inputs(**fields: object) -> ApprovalInputs:
     base = ApprovalInputs(
-        tier="large", approver_kind="operator", approved_sha=None, default_branch="main"
+        tier="large", approver_kind="operator", approved_sha=None, base_branch="main"
     )
     return base._replace(**fields)
 
@@ -263,9 +263,7 @@ def test_reviewed_head_ahead_of_head_is_stale(repo: ApprovalRepo) -> None:
 
 
 def test_missing_default_branch_ref_is_unreadable(repo: ApprovalRepo) -> None:
-    verdict = _evaluate(
-        repo, _inputs(approved_sha=repo.approved, default_branch="nope")
-    )
+    verdict = _evaluate(repo, _inputs(approved_sha=repo.approved, base_branch="nope"))
 
     assert verdict.token == APPROVAL_UNREADABLE
     assert verdict.transient is False
@@ -295,7 +293,7 @@ def test_default_branch_none_is_unreadable(
     repo: ApprovalRepo, default_branch: str | None
 ) -> None:
     verdict = _evaluate(
-        repo, _inputs(approved_sha=repo.approved, default_branch=default_branch)
+        repo, _inputs(approved_sha=repo.approved, base_branch=default_branch)
     )
 
     assert verdict.token == APPROVAL_UNREADABLE
@@ -306,7 +304,7 @@ def test_default_branch_none_is_unreadable(
 def test_check_order_is_tier_kind_head_sha_default_branch(
     repo: ApprovalRepo,
 ) -> None:
-    broken = _inputs(approver_kind=None, approved_sha="zz", default_branch=None)
+    broken = _inputs(approver_kind=None, approved_sha="zz", base_branch=None)
 
     # kind precedes head: a missing approval is `missing` even with no HEAD.
     assert _evaluate(repo, broken, head_sha=None).token == APPROVAL_MISSING

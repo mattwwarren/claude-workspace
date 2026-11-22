@@ -295,7 +295,7 @@ def classify_default_merge(
     """:func:`classify_merge` for *merge_sha* against ``origin/<default>`` (#3040).
 
     The attestation verifier's per-merge predicate: resolves the local
-    ``refs/remotes/origin/<tolerance.default_branch>`` (``no_default_ref`` when
+    ``refs/remotes/origin/<tolerance.base_branch>`` (``no_default_ref`` when
     it does not resolve; it never fetches), reads the merge's parents and
     defers to :func:`classify_merge`. Takes a :class:`MergeTolerance`, never a
     bare branch name, so a strict (``None``) decision cannot reach it.

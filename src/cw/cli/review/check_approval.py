@@ -11,8 +11,9 @@ classification of a missing or outdated ``cw``.
 The adapter reproduces the old fence's behaviour: the guard root is the git
 toplevel of ``--worktree`` (or that directory when it is not in a repository),
 overridden by the context's own ``worktree_path``; a context older than schema
-14 is ``channel_absent``; the default branch is the context's
-``world_state_snapshot.origin_main_branch`` and must be a valid ref name.
+14 is ``channel_absent``; the base branch is the context's merge base, read by
+``base_branch_from_context`` (``base_branch``, else
+``world_state_snapshot.origin_main_branch``), and must be a valid ref name.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from cw.auto_dev_result import SCOPE_TIER_LARGE
 from cw.cli._base import handle_errors
 from cw.cli.review._group import review
 from cw.cli.review.converge import read_context
+from cw.context_queue_metadata import base_branch_from_context
 from cw.review_approval import (
     APPROVAL_CHANNEL_ABSENT,
     APPROVAL_UNREADABLE,
@@ -131,9 +133,7 @@ def _large_verdict(worktree: Path, context_path: Path | None) -> ApprovalVerdict
         tier=SCOPE_TIER_LARGE,
         approver_kind=_string_field(context, *approval, "approver_kind"),
         approved_sha=_string_field(context, *approval, "reviewed_sha"),
-        default_branch=_valid_branch(
-            root, _string_field(context, "world_state_snapshot", "origin_main_branch")
-        ),
+        base_branch=_valid_branch(root, base_branch_from_context(context)),
     )
     return evaluate_review_approval(
         inputs, repo=root, head_sha=resolve_commit(root, "HEAD").sha

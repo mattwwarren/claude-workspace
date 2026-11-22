@@ -60,7 +60,7 @@ def _snapshot(ledger_path: Path | None, **fields: object) -> FenceSnapshot:
         review_approved_sha=None,
         clean_mode=True,
         ledger_path=ledger_path,
-        default_branch="main",
+        base_branch="main",
     )
     return base._replace(**fields)
 

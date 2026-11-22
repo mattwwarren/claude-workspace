@@ -18,7 +18,7 @@ and every merge after it must have its non-first parents on
 any new work, a rewritten history, or a merge of any other ref.
 
 Check order is the bash fence's, so a caller that supplies ``None`` for
-``head_sha`` or ``default_branch`` gets the same token the fence printed:
+``head_sha`` or ``base_branch`` gets the same token the fence printed:
 tier, approver kind, head, reviewed-sha format, default branch, then git.
 
 It also holds the review sign-off attestation verdict (#3040, RFC 0017 II1),
@@ -94,7 +94,7 @@ class ApprovalInputs(NamedTuple):
     tier: str | None
     approver_kind: str | None
     approved_sha: str | None
-    default_branch: str | None
+    base_branch: str | None
 
 
 class ApprovalVerdict(NamedTuple):
@@ -147,7 +147,7 @@ def resolve_row_scope_tier(task: TicketTask) -> str | None:
 
 
 def approval_inputs_from_task(
-    task: TicketTask, default_branch: str | None
+    task: TicketTask, base_branch: str | None
 ) -> ApprovalInputs:
     """The predicate inputs read straight off *task* (a plain row read)."""
     kind = task.review_approver_kind
@@ -155,7 +155,7 @@ def approval_inputs_from_task(
         tier=resolve_row_scope_tier(task),
         approver_kind=None if kind is None else str(kind),
         approved_sha=task.review_approved_sha,
-        default_branch=default_branch,
+        base_branch=base_branch,
     )
 
 
@@ -219,7 +219,7 @@ def _format_step(inputs: ApprovalInputs, head_sha: str) -> _Step | None:
             APPROVAL_STALE,
             f"the recorded approval carries no usable reviewed head (head {head_sha})",
         )
-    if not inputs.default_branch:
+    if not inputs.base_branch:
         return _Step(
             APPROVAL_UNREADABLE,
             "origin_main_branch is missing or invalid (no default branch name)",
@@ -297,7 +297,7 @@ def _resolve_refs(
     inputs: ApprovalInputs, repo: Path, head_sha: str, timeout: float
 ) -> _Resolved:
     """Resolve ``origin/<default>`` and the reviewed sha; ``stop`` if either fails."""
-    default = inputs.default_branch or ""
+    default = inputs.base_branch or ""
     sha = inputs.approved_sha or ""
     main = resolve_commit(repo, f"refs/remotes/origin/{default}", timeout=timeout)
     if main.sha is None:
@@ -339,7 +339,7 @@ def _ancestry_step(
     problem = _new_non_merge_work(repo, timeout, full_sha, head_sha, main_sha)
     if problem is None:
         problem = _merge_parents_on_default(
-            repo, timeout, full_sha, head_sha, main_sha, inputs.default_branch or ""
+            repo, timeout, full_sha, head_sha, main_sha, inputs.base_branch or ""
         )
     if problem is not None:
         return problem
@@ -358,7 +358,7 @@ def evaluate_review_approval(
     """Step 4.0 for *head_sha*: the verdict for *inputs*, judged in *repo*.
 
     *head_sha* None means HEAD could not be read (``unreadable``, not
-    transient); ``inputs.default_branch`` None or empty is ``unreadable`` too.
+    transient); ``inputs.base_branch`` None or empty is ``unreadable`` too.
     *timeout* bounds every git call. Never raises.
     """
     early = _tier_kind_step(inputs)
