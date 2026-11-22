@@ -116,6 +116,7 @@ _REJECTED_SIZES = {"actual_chars": 1379349, "max_chars": 1048576}
 _UNAVAILABLE = 3
 _ROUND_FAILED = 4
 _STOP = "stop here"
+_ROW_BASE = "epic/x"  # distinct from the client default ("main")
 
 #: Makes ``codex`` look present on PATH (a deterministic ``/usr/bin/codex``).
 needs_codex = pytest.mark.binary_on_path("codex")
@@ -1858,7 +1859,7 @@ def test_run_round_threads_a_resolution_and_skips_the_diff_base_adapter(
             task=harness.task,
             worktree=harness.repo,
             config_branch="main",
-            base_branch="main",
+            base_branch=_ROW_BASE,
             base_ref="main",
             model=None,
             reasoning_effort=None,
@@ -1892,7 +1893,7 @@ def test_run_round_without_a_resolution_installs_and_restores_the_adapter(
             task=harness.task,
             worktree=harness.repo,
             config_branch="main",
-            base_branch="main",
+            base_branch=_ROW_BASE,
             base_ref="main",
             model=None,
             reasoning_effort=None,
@@ -1918,7 +1919,7 @@ def test_run_claude_round_threads_a_resolution(harness: Harness) -> None:
             task=harness.task,
             worktree=harness.repo,
             config_branch="main",
-            base_branch="main",
+            base_branch=_ROW_BASE,
             base_ref="main",
             model=None,
             resolution=_DELTA,
@@ -1926,6 +1927,58 @@ def test_run_claude_round_threads_a_resolution(harness: Harness) -> None:
 
     assert raised.value.exit_code == _UNAVAILABLE
     assert seen[0]["resolution"] == _DELTA
+
+
+def test_run_round_forwards_the_trust_root_and_the_base_to_run_review(
+    harness: Harness,
+) -> None:
+    seen: list[dict[str, object]] = []
+
+    def _stub(**kwargs: object) -> object:
+        seen.append(dict(kwargs))
+        raise OSError(_STOP)
+
+    harness.monkeypatch.setattr("cw.codex_review.run_review", _stub)
+
+    with pytest.raises(click.exceptions.Exit):
+        confirm_cli._run_round(
+            task=harness.task,
+            worktree=harness.repo,
+            config_branch="main",
+            base_branch=_ROW_BASE,
+            base_ref="main",
+            model=None,
+            reasoning_effort=None,
+        )
+
+    assert seen[0]["default_branch"] == "main"
+    assert seen[0]["base_branch"] == _ROW_BASE
+
+
+def test_run_claude_round_forwards_the_trust_root_and_the_base_to_run_claude_review(
+    harness: Harness,
+) -> None:
+    seen: list[dict[str, object]] = []
+
+    def _stub(**kwargs: object) -> object:
+        seen.append(dict(kwargs))
+        raise OSError(_STOP)
+
+    harness.patch_claude([])
+    harness.monkeypatch.setattr("cw.claude_review.run_claude_review", _stub)
+
+    with pytest.raises(click.exceptions.Exit):
+        confirm_cli._run_claude_round(
+            task=harness.task,
+            worktree=harness.repo,
+            config_branch="main",
+            base_branch=_ROW_BASE,
+            base_ref="main",
+            model=None,
+        )
+
+    assert seen[0]["default_branch"] == "main"
+    assert seen[0]["base_branch"] == _ROW_BASE
 
 
 def _stub_rounds(
@@ -1957,7 +2010,7 @@ def _backend_round(
         backend=backend,
         task=harness.task,
         worktree=harness.repo,
-        base_branch="main",
+        base_branch=_ROW_BASE,
         base_ref="base",
         model="m",
         reasoning_effort=reasoning_effort,
@@ -1978,6 +2031,19 @@ def test_run_backend_round_launches_a_claude_round_with_the_resolution(
     assert seen["base_ref"] == "base"
     assert seen["resolution"] == _DELTA
     assert "reasoning_effort" not in seen
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_run_backend_round_splits_the_base_from_the_trust_root(
+    backend: str, harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_rounds(monkeypatch)
+
+    _backend_round(backend, harness)
+
+    [seen] = calls[backend]
+    assert seen["base_branch"] == _ROW_BASE
+    assert seen["config_branch"] == "main"
 
 
 def test_delta_round_default_builds_a_refreshing_snapshot_context(
@@ -2047,7 +2113,7 @@ def test_an_explicit_snapshot_context_is_not_rebuilt(
         backend="codex",
         task=harness.task,
         worktree=harness.repo,
-        base_branch="main",
+        base_branch=_ROW_BASE,
         base_ref="base",
         model="m",
         reasoning_effort=None,
@@ -2086,7 +2152,7 @@ def _claude_round_with_stub(
             task=harness.task,
             worktree=harness.repo,
             config_branch="main",
-            base_branch="main",
+            base_branch=_ROW_BASE,
             base_ref="main",
             model=None,
             resolution=delta,
@@ -2350,7 +2416,7 @@ def test_run_claude_round_forwards_tolerated_to_run_claude_review(
             task=harness.task,
             worktree=harness.repo,
             config_branch="main",
-            base_branch="main",
+            base_branch=_ROW_BASE,
             base_ref="main",
             model=None,
             tolerated=frozenset({_TOLERATED}),
@@ -2368,7 +2434,7 @@ def test_run_backend_round_threads_tolerated_to_the_claude_round_only(
         backend="claude",
         task=harness.task,
         worktree=harness.repo,
-        base_branch="main",
+        base_branch=_ROW_BASE,
         base_ref="base",
         model="m",
         reasoning_effort=None,
