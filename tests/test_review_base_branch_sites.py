@@ -7,7 +7,7 @@ resolves to it, and a null-base row is unchanged (the client default).
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from pydantic import ValidationError
@@ -16,19 +16,33 @@ import cw.cli.review.confirm as confirm_cli
 from cw.cli.review.converge import _default_branch
 from cw.confirmation_jobs import ConfirmationPin
 from cw.dev_queue import add_ticket
+from cw.dispatch import review_gates
+from cw.dispatch import review_tip_sweep as sweep_mod
+from cw.dispatch.review_tip_verdicts import TipCheck, TipKey
 from cw.models import TicketTask
 from cw.review_convergence import (
     MergeTolerance,
+    review_move_tolerance,
     tolerance_for_client,
     tolerance_from_context,
+    tolerates_review_move,
 )
 from cw.ticket_snapshot import DEFAULT_SNAPSHOT_CONTEXT
 from tests._clients_yaml import ClientSpec, write_clients_yaml
-from tests._review_convergence_helpers import make_review_client
+from tests._review_convergence_helpers import (
+    confirmed_ledger,
+    make_review_client,
+    merge_origin_commit,
+    write_ledger,
+)
+from tests._shared.git_repos import git_in
 from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
+
+    from cw.models import ClientConfig
 
 ROW_BASE = "epic/x"
 CLIENT_DEFAULT = "trunk"
@@ -212,3 +226,162 @@ def test_resolve_round_inputs_flag_overrides_a_base_row(tmp_path: Path) -> None:
     _task, base = _round_inputs(worktree, "develop")
 
     assert base == "develop"
+
+
+# --- the review-move chain on a real repo (S3a) ----------------------------
+
+
+@pytest.fixture
+def epic_merge(
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]], tmp_path: Path
+) -> tuple[Path, str, str]:
+    """``(worktree, clean, head)``: feature merged ``origin/epic/x``, not main.
+
+    ``origin/epic/x`` starts at ``main`` and advances out of band; the feature
+    branch (one commit past main) merges it, so ``head`` is a clean merge whose
+    second parent is on the epic branch only.
+    """
+    wt = make_git_repo_with_origin("wt")[0]
+    git_in(wt, "push", "origin", "main:refs/heads/epic/x")
+    clean = git_in(wt, "rev-parse", "HEAD")
+    merge_origin_commit(wt, tmp_path / "scratch", ROW_BASE, "epic_only.py")
+    write_ledger(wt, confirmed_ledger(sha=clean))
+    return wt, clean, git_in(wt, "rev-parse", "HEAD")
+
+
+def test_tolerates_review_move_accepts_a_merge_of_the_row_base(
+    epic_merge: tuple[Path, str, str],
+) -> None:
+    wt, clean, head = epic_merge
+    client = make_review_client(wt)
+
+    tolerated = tolerates_review_move(
+        client, wt, reviewed_sha=clean, head_sha=head, task=_row(ROW_BASE)
+    )
+
+    assert tolerated is True
+
+
+def test_tolerates_review_move_refuses_that_merge_for_a_null_row(
+    epic_merge: tuple[Path, str, str],
+) -> None:
+    wt, clean, head = epic_merge
+    client = make_review_client(wt)
+
+    assert not tolerates_review_move(
+        client, wt, reviewed_sha=clean, head_sha=head, task=_row(None)
+    )
+    assert not tolerates_review_move(client, wt, reviewed_sha=clean, head_sha=head)
+
+
+def test_review_move_tolerance_names_the_row_base_not_the_client_default(
+    epic_merge: tuple[Path, str, str],
+) -> None:
+    wt, clean, _head = epic_merge
+    client = make_review_client(wt, default_branch=CLIENT_DEFAULT)
+
+    with_base = review_move_tolerance(
+        client, wt, reviewed_sha=clean, task=_row(ROW_BASE)
+    )
+    null_row = review_move_tolerance(client, wt, reviewed_sha=clean, task=_row(None))
+
+    assert with_base == MergeTolerance(ROW_BASE)
+    assert null_row == MergeTolerance(CLIENT_DEFAULT)
+
+
+# --- dispatch threads the row to the tip check (S3a) -----------------------
+
+
+def _tip_check(task: TicketTask, client: ClientConfig, worktree: Path) -> TipCheck:
+    return TipCheck(
+        key=TipKey(task.client, task.ticket_id, "r" * 40, "h" * 40),
+        client=client,
+        worktree=worktree,
+        task=task,
+    )
+
+
+def test_plan_review_staleness_carries_the_row_into_the_tip_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = make_review_client(tmp_path)
+    row = _row(ROW_BASE)
+    seen: list[TicketTask | None] = []
+
+    def _tolerance(
+        _client: object, _wt: Path, *, reviewed_sha: str, task: TicketTask | None = None
+    ) -> MergeTolerance:
+        seen.append(task)
+        return MergeTolerance(ROW_BASE)
+
+    monkeypatch.setattr(review_gates, "_reports_review_content", lambda _r: True)
+    monkeypatch.setattr(
+        review_gates,
+        "_measure_review",
+        lambda *_a: ("r" * 40, "h" * 40, client, tmp_path),
+    )
+    monkeypatch.setattr(review_gates, "review_move_tolerance", _tolerance)
+
+    plan = review_gates.plan_review_staleness(row, {}, {})
+
+    assert isinstance(plan, TipCheck)
+    assert plan.task is row
+    assert seen == [row]
+
+
+def test_the_tip_sweep_checks_each_tip_against_its_rows_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = make_review_client(tmp_path)
+    row = _row(ROW_BASE)
+    seen: list[TicketTask | None] = []
+
+    def _tolerates(
+        _client: object,
+        _wt: Path,
+        *,
+        reviewed_sha: str,
+        head_sha: str,
+        task: TicketTask | None = None,
+    ) -> bool:
+        seen.append(task)
+        return True
+
+    plan = _tip_check(row, client, tmp_path)
+    monkeypatch.setattr(sweep_mod, "_plan_for_event", lambda *_a: plan)
+    monkeypatch.setattr(sweep_mod, "tolerates_review_move", _tolerates)
+
+    verdicts = sweep_mod.resolve_review_tip_sweep(
+        [cast("Any", object())], cast("Any", None), cast("Any", None), {}
+    ).verdicts
+
+    assert verdicts == {plan.key: True}
+    assert seen == [row]
+
+
+def test_the_in_lock_gate_checks_an_unswept_tip_against_the_rows_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = make_review_client(tmp_path)
+    row = _row(ROW_BASE)
+    seen: list[TicketTask | None] = []
+
+    def _tolerates(
+        _client: object,
+        _wt: Path,
+        *,
+        reviewed_sha: str,
+        head_sha: str,
+        task: TicketTask | None = None,
+    ) -> bool:
+        seen.append(task)
+        return True
+
+    plan = _tip_check(row, client, tmp_path)
+    monkeypatch.setattr(review_gates, "plan_review_staleness", lambda *_a: plan)
+    monkeypatch.setattr(review_gates, "tolerates_review_move", _tolerates)
+
+    gated = review_gates._should_gate_for_review_staleness(row, {}, {})
+
+    assert gated is False
+    assert seen == [row]
