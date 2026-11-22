@@ -443,6 +443,22 @@ class OutboxConfig(BaseModel):
     )
 
 
+class EpicConfig(BaseModel):
+    """Per-client epic size ceiling (#3783, RFC 0020 B1, D-5).
+
+    ``max_diff_lines`` caps the changed-line count of an epic base measured
+    against the client's default branch (``merge_gate_ignore_paths`` excluded).
+    It is optional and enqueue-only: ``cw dev-queue add --base`` is the one
+    reader, and the dispatch tick never reads it. Unset means no refusal. An
+    older cw with ``extra="forbid"`` rejects the ``epic:`` key outright, so
+    downgrade the client config before pinning an older cw.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_diff_lines: int | None = Field(default=None, ge=1)
+
+
 class ReviewConfig(BaseModel):
     """Per-client Stage 3 review settings (#2787 converge-to-clean mode).
 
@@ -722,6 +738,7 @@ class ClientConfig(BaseModel):
     bindings: Bindings = Field(default_factory=Bindings)
     # RFC 0019 O2 (#3706): the outbox drain switch and per-run cap.
     outbox: OutboxConfig = Field(default_factory=OutboxConfig)
+    epic: EpicConfig = Field(default_factory=EpicConfig)
     # Per-client opt-in for the #2917 repair_mechanical_conflict recipe. None
     # (the default) means the recipe never fires for this client; the entry
     # also carries the globs and commands. See MechanicalConflictRepairConfig.

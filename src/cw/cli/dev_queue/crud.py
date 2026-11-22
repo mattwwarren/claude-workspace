@@ -41,6 +41,7 @@ from cw.native_daemon import get_native_daemon_client
 from cw.ticket_view import ViewSources
 
 from ._adopt import adopt_requeue_recheck, run_adopt
+from ._epic_base import EnqueueBase, validate_base_option
 from ._group import dev_queue
 from ._requeue_echo import echo_pending_noop, echo_requeue_outcome
 from ._settle import (
@@ -177,6 +178,19 @@ def _report_partial_progress(
         " number and current head SHA."
     ),
 )
+@click.option(
+    "--base",
+    "base",
+    default=None,
+    callback=validate_base_option,
+    help=(
+        "Merge target for this row (default: the client's default branch)."
+        " The branch must already exist on origin; cw does not create it."
+        " Refused when it equals the client's default branch, or when it is"
+        " over the client's epic.max_diff_lines ceiling (RFC 0020)."
+        " Rows do not inherit a base from sibling rows."
+    ),
+)
 @handle_errors
 def dev_queue_add(
     tickets: tuple[str, ...],
@@ -189,6 +203,7 @@ def dev_queue_add(
     stage_override: str | None,
     adopt_pr: int | None,
     review_feedback_file: Path | None,
+    base: str | None,
 ) -> None:
     """Enqueue one or more tickets for dispatch."""
     review_feedback: ReviewFeedback | None = None
@@ -213,11 +228,14 @@ def dev_queue_add(
         Stage(stage_override) if stage_override is not None else DEFAULT_STAGE
     )
     sources = ViewSources()
+    gate = EnqueueBase(base)
     if adopt_pr is not None:
+        adopt_client = resolve_client(tickets[0], config, client)
+        gate.refuse_redundant(adopt_client)
         run_adopt(
             tickets,
             stage_override,
-            resolve_client(tickets[0], config, client),
+            adopt_client,
             adopt_pr,
             priority=priority,
             scope_hint=scope_hint,
@@ -226,10 +244,12 @@ def dev_queue_add(
             lane=lane_name,
             sources=sources,
             review_feedback=review_feedback,
+            base=base,
         )
         return
     for index, ticket_id in enumerate(tickets):
         resolved = resolve_client(ticket_id, config, client)
+        gate.verify(resolved)
         try:
             task = build_queued_task(
                 ticket_id,
@@ -241,6 +261,7 @@ def dev_queue_add(
                 signoff=signoff,
                 hold_finalize=hold_finalize_value,
                 review_feedback=review_feedback,
+                base_branch=base,
             )
         except ValidationError as exc:
             msg = f"Invalid ticket '{ticket_id}': {exc.errors()[0]['msg']}"
@@ -267,13 +288,14 @@ def dev_queue_add(
                 " (pending, running, completed, or cancelled) or parked"
                 " awaiting the operator — a parked row is released with"
                 " `cw dev-queue requeue` or `cw dev-queue approve`, never"
-                " by re-adding (#1653).",
+                " by re-adding (#1653)." + gate.skipped_suffix(),
                 err=True,
             )
             echo_resulting_row(ticket_id, resolved, sources=sources)
             continue
         emit_ticket_enqueued(task)
         click.echo(f"Enqueued {ticket_id} -> {resolved} (priority={priority})")
+        gate.note_siblings(ticket_id, resolved)
         echo_resulting_row(ticket_id, resolved, sources=sources)
 
 
