@@ -1100,7 +1100,9 @@ def test_ledger_diff_base_is_diff_base_not_scope_branch(
     result, _runner = harness.invoke([], "--default-branch", "develop")
 
     assert result.exit_code == _UNAVAILABLE, result.output
-    assert seen[0]["default_branch"] == "develop"
+    # The flag overrides the merge base only; review config stays on the trust root.
+    assert seen[0]["base_branch"] == "develop"
+    assert seen[0]["default_branch"] == "main"
     assert bases == [develop_base]
 
 
@@ -1163,7 +1165,8 @@ def test_explicit_options_are_passed_through(harness: Harness) -> None:
 
     assert result.exit_code == _UNAVAILABLE
     [kwargs] = seen
-    assert kwargs["default_branch"] == "develop"
+    assert kwargs["base_branch"] == "develop"
+    assert kwargs["default_branch"] == "main"
     assert kwargs["model"] == "gpt-test"
     assert kwargs["reasoning_effort"] == "low"
 
@@ -1854,7 +1857,8 @@ def test_run_round_threads_a_resolution_and_skips_the_diff_base_adapter(
         confirm_cli._run_round(
             task=harness.task,
             worktree=harness.repo,
-            default_branch="main",
+            config_branch="main",
+            base_branch="main",
             base_ref="main",
             model=None,
             reasoning_effort=None,
@@ -1887,7 +1891,8 @@ def test_run_round_without_a_resolution_installs_and_restores_the_adapter(
         confirm_cli._run_round(
             task=harness.task,
             worktree=harness.repo,
-            default_branch="main",
+            config_branch="main",
+            base_branch="main",
             base_ref="main",
             model=None,
             reasoning_effort=None,
@@ -1912,7 +1917,8 @@ def test_run_claude_round_threads_a_resolution(harness: Harness) -> None:
         confirm_cli._run_claude_round(
             task=harness.task,
             worktree=harness.repo,
-            default_branch="main",
+            config_branch="main",
+            base_branch="main",
             base_ref="main",
             model=None,
             resolution=_DELTA,
@@ -1951,7 +1957,7 @@ def _backend_round(
         backend=backend,
         task=harness.task,
         worktree=harness.repo,
-        default_branch="main",
+        base_branch="main",
         base_ref="base",
         model="m",
         reasoning_effort=reasoning_effort,
@@ -2041,7 +2047,7 @@ def test_an_explicit_snapshot_context_is_not_rebuilt(
         backend="codex",
         task=harness.task,
         worktree=harness.repo,
-        default_branch="main",
+        base_branch="main",
         base_ref="base",
         model="m",
         reasoning_effort=None,
@@ -2079,7 +2085,8 @@ def _claude_round_with_stub(
         confirm_cli._run_claude_round(
             task=harness.task,
             worktree=harness.repo,
-            default_branch="main",
+            config_branch="main",
+            base_branch="main",
             base_ref="main",
             model=None,
             resolution=delta,
@@ -2342,7 +2349,8 @@ def test_run_claude_round_forwards_tolerated_to_run_claude_review(
         confirm_cli._run_claude_round(
             task=harness.task,
             worktree=harness.repo,
-            default_branch="main",
+            config_branch="main",
+            base_branch="main",
             base_ref="main",
             model=None,
             tolerated=frozenset({_TOLERATED}),
@@ -2360,7 +2368,7 @@ def test_run_backend_round_threads_tolerated_to_the_claude_round_only(
         backend="claude",
         task=harness.task,
         worktree=harness.repo,
-        default_branch="main",
+        base_branch="main",
         base_ref="base",
         model="m",
         reasoning_effort=None,

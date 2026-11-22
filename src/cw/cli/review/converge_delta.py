@@ -293,7 +293,7 @@ def converge_delta_confirm(
 
     2: a usage error.
     """
-    task, default_branch = resolve_round_inputs(
+    task, base_branch = resolve_round_inputs(
         ticket_id=ticket_id, client=client, worktree=worktree, default_branch=None
     )
     ledger_path = worktree / ledger_rel
@@ -313,8 +313,8 @@ def converge_delta_confirm(
         backend=backend,
         task=task,
         worktree=worktree,
-        default_branch=default_branch,
-        base_ref=default_branch,
+        base_branch=base_branch,
+        base_ref=base_branch,
         model=model,
         reasoning_effort=reasoning_effort,
         resolution=plan.spec,

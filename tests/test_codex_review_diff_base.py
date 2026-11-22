@@ -163,7 +163,7 @@ class TestFenceBase:
     def _breach(self, repo: Path) -> tuple[str, tuple[str, ...], str]:
         breach = check_fix_fence(
             repo,
-            default_branch="main",
+            base_branch="main",
             allowed_files=None,
             finding_files=frozenset(),
             cycle=2,

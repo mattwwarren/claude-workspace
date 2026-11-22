@@ -583,7 +583,7 @@ def _fence_blocks(run: _Run, flow: _Flow, touched: set[str]) -> ImplBlock | None
         allowed = flow.pre.allowed | _merge_files(flow)
     breach = check_fix_fence(
         run.worktree,
-        default_branch=run.client.default_branch,
+        base_branch=run.client.default_branch,
         allowed_files=allowed,
         finding_files=frozenset(),
         cycle=_CYCLE,

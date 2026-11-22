@@ -503,7 +503,7 @@ def _merge_and_persist_finding_dispositions(
 def _prepare_review_pass(
     task: TicketTask,
     worktree: Path,
-    default_branch: str,
+    base_branch: str,
     *,
     config_branch: str,
     runner: CodexRunner | None,
@@ -573,8 +573,9 @@ def _prepare_review_pass(
     review configuration (``review-extras.md``, ``review-policy.md``, the
     sensitive-files manifests) is read from, as ``origin/<config_branch>`` else
     the local ``<config_branch>``; the worktree copy is never read. It is
-    separate from ``default_branch`` because the Claude confirm round hands
-    ``default_branch`` a pinned diff-base sha, which is not a branch name.
+    separate from ``base_branch`` (the diff base, RFC 0020 S3a) because the
+    Claude confirm round hands ``base_branch`` a pinned diff-base sha, which is
+    not a branch name.
     Required, so no call site can inherit a default that reads the wrong ref.
 
     ``reviewer_sandbox_mode`` (#1767) is the mode the capability probe runs
@@ -621,7 +622,7 @@ def _prepare_review_pass(
         changed_files = delta_changed_list
         diff = delta_diff
     else:
-        diff, reviewed_sha, changed_files = _capture_diff(worktree, default_branch)
+        diff, reviewed_sha, changed_files = _capture_diff(worktree, base_branch)
     # #2767 non-ship-path: hint-only tier kept; ship gates use the new resolver
     scope_tier = resolve_tier(task.scope_hint)
     categories = _categorize_changed_files(changed_files)
@@ -660,8 +661,7 @@ def _prepare_review_pass(
         has_ticket_context=ticket_text is not None,
         # #2086: whole-branch size on every pass, so the roster is stable
         # across fix-loop rounds; an engine roster ignores it, so skip it.
-        large_diff=engine_roster is None
-        and _measure_large_diff(worktree, default_branch),
+        large_diff=engine_roster is None and _measure_large_diff(worktree, base_branch),
     )
     render_prompts: _PromptRenderer = functools.partial(
         _render_role_prompts,

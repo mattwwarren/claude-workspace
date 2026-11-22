@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 import click
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cw.atomic import atomic_write_text
 from cw.cli import main
@@ -61,17 +61,32 @@ class ConfirmationPin(BaseModel):
     client: str
     ticket_id: str
     backend: Literal["codex", "claude"]
-    default_branch: str
+    base_branch: str
     head: str
     diff_base: str
     ledger: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _read_legacy_default_branch(cls, data: object) -> object:
+        """Read a pre-S3a pin: its ``default_branch`` key is the merge base.
+
+        A job file written before the rename carries ``default_branch``. The
+        new ``base_branch`` wins when both keys are present; the old key is
+        dropped either way, so ``extra="forbid"`` still rejects unknown keys.
+        """
+        if not isinstance(data, dict) or "default_branch" not in data:
+            return data
+        legacy = {key: value for key, value in data.items() if key != "default_branch"}
+        legacy.setdefault("base_branch", data["default_branch"])
+        return legacy
 
     def check(self, worktree: Path, *, ledger: str | None = None) -> None:
         """Reject a result if its git inputs or ledger generation moved."""
         if rev_parse_or_none(worktree, "HEAD") != self.head:
             msg = "independent confirmation is stale: HEAD changed"
             raise CwError(msg)
-        verify_diff_base(worktree, self.diff_base, self.default_branch)
+        verify_diff_base(worktree, self.diff_base, self.base_branch)
         current = require_job_ledger(worktree)
         if ledger_digest(current) != (ledger if ledger is not None else self.ledger):
             msg = "independent confirmation is stale: the convergence ledger changed"
@@ -137,7 +152,7 @@ def pin_confirmation(
         client=client,
         ticket_id=ticket_id,
         backend=backend,
-        default_branch=branch,
+        base_branch=branch,
         head=head,
         diff_base=diff_base,
         ledger=ledger_digest(ledger),

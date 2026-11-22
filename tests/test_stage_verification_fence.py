@@ -91,7 +91,7 @@ def _check(
 ) -> FenceBreach | None:
     return check_fix_fence(
         repo,
-        default_branch="main",
+        base_branch="main",
         allowed_files=allowed,
         finding_files=finding_files,
         cycle=2,
@@ -126,7 +126,7 @@ class TestRevertGuard:
 
         breach = check_fix_fence(
             repo,
-            default_branch="main",
+            base_branch="main",
             allowed_files=None,
             # Even when every restored file is named, emptying the branch parks.
             finding_files=frozenset(_BASE3),
@@ -166,7 +166,7 @@ class TestRevertGuard:
 
         breach = check_fix_fence(
             repo,
-            default_branch="main",
+            base_branch="main",
             allowed_files=None,
             finding_files=frozenset({"c.py"}),
             cycle=2,
@@ -262,7 +262,7 @@ class TestCheckFixFence:
 
         breach = check_fix_fence(
             repo,
-            default_branch="main",
+            base_branch="main",
             allowed_files=frozenset(_BASE3),
             finding_files=frozenset(),
             cycle=2,

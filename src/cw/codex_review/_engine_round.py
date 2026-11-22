@@ -111,7 +111,10 @@ class EnginePassInputs:
     runner: CodexRunner
     task: TicketTask
     worktree: Path
-    default_branch: str
+    # The merge target the diff and scope measurement use (RFC 0020 S3a).
+    base_branch: str
+    # The trust root: review configuration is read from it (S3b, #3840).
+    config_branch: str
     model: str | None
     reasoning_effort: str | None
     wall_clock_budget_seconds: int | None
@@ -244,7 +247,7 @@ def _preflight(
     """The D-13 guard: a branch touching the engine's own paths parks (R19)."""
     context = spec.context
     try:
-        diff_base = resolve_loop_diff_base(inputs.worktree, context.default_branch)
+        diff_base = resolve_loop_diff_base(inputs.worktree, inputs.base_branch)
         verdict = run_preflight(inputs.worktree, diff_base=diff_base, context=context)
     except SkillResolutionError as exc:
         return _unresolvable(inputs, cycle, context.skill, exc.cause)
@@ -390,7 +393,7 @@ def _synthesize(
         diff=prepared.diff,
         reviewed_sha=prepared.reviewed_sha,
         session_id=inputs.session_id,
-        default_branch=inputs.default_branch,
+        default_branch=inputs.base_branch,
         fix_loop_enabled=inputs.fix_loop_enabled,
         metrics_by_role=run.metrics_by_role,
         capability=prepared.capability,
@@ -415,8 +418,8 @@ def _prepare(inputs: EnginePassInputs, loaded: _Loaded) -> _ReviewPassInputs:
     return _prepare_review_pass(
         inputs.task,
         inputs.worktree,
-        inputs.default_branch,
-        config_branch=inputs.default_branch,
+        inputs.base_branch,
+        config_branch=inputs.config_branch,
         runner=inputs.runner,
         session_id=inputs.session_id,
         delta_from_sha=None,
