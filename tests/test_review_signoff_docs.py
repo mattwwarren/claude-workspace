@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 
 from cw.review_signoff import _TOKEN_RE, END_MARKER, START_MARKER
+from tests._shared.workflow_text import changelog_text
 
 ROOT = Path(__file__).resolve().parents[1]
 FINALIZE = ROOT / ".claude" / "commands" / "auto-dev-finalize.md"
@@ -165,7 +166,6 @@ def test_config_reference_documents_pr_section_in_both_places() -> None:
 
 def test_changelog_carries_the_entry() -> None:
     # Why: the whole file, not just [Unreleased]; the entry moves at release.
-    text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    unreleased = text
-    assert "### Added" in unreleased
-    assert re.search(r"#3043", unreleased)
+    changelog = changelog_text()
+    assert "### Added" in changelog
+    assert re.search(r"#3043", changelog)

@@ -182,6 +182,37 @@ def _section_between(content: str, start: str, end: str | None = None) -> str:
     return content[begin:] if nxt == -1 else content[begin:nxt]
 
 
+CHANGELOG_PATH = _REPO_ROOT / "CHANGELOG.md"
+
+
+def changelog_text() -> str:
+    """Return the whole ``CHANGELOG.md``, every section, read fresh on each call.
+
+    Pins that need a changelog entry use this instead of slicing
+    ``## [Unreleased]``: the entry moves into a version section at release,
+    and a slice keyed on the heading then goes vacuous or fails (#3157).
+    ``CHANGELOG_PATH`` is the monkeypatch seam; the read is never cached so a
+    scratch file set on it is honored.
+    """
+    return CHANGELOG_PATH.read_text(encoding="utf-8")
+
+
+def changelog_entry(needle: str) -> str:
+    """Return the one changelog line that contains *needle* (#3157).
+
+    Strict: zero matches and more than one match both raise
+    ``AssertionError``, so a non-unique needle fails loudly rather than
+    picking the wrong bullet.
+    """
+    matches = [line for line in changelog_text().splitlines() if needle in line]
+    if len(matches) != 1:
+        msg = (
+            f"changelog_entry({needle!r}) matched {len(matches)} lines, want exactly 1"
+        )
+        raise AssertionError(msg)
+    return matches[0]
+
+
 def _norm(text: str) -> str:
     """Collapse *text* to single-spaced words (#2438).
 
