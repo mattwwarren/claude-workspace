@@ -368,7 +368,7 @@ present) and prints one JSON object; it exits 1 when a hard check failed. `-c` i
 **Dispatch:**
 ```bash
 cw dev-queue add <ticket…> -c <client> -s large|small \
-    [--lane <lane>] [--signoff operator]        # enqueue (large = more auto-approval)
+    [--lane <lane>] [--signoff operator] [--base <branch>]  # enqueue (large = more auto-approval; --base merges into an epic branch, RFC 0020)
 cw dev-queue run --once                          # one dispatch tick (drop --once to loop)
 cw dev-queue serve                               # dispatch loop with auto-restart on crash
 cw dev-queue approve <ticket> -c <client>        # clear a plan/review/signoff gate
@@ -475,7 +475,7 @@ cw `session_id` → `sessions.json` `surface_ref` / `claude_session_id` →
 3. **Harden** each sub-ticket → post Pre-flight Resolutions. Escalate only genuine product/
    architecture forks (one batched question, with a recommendation); resolve technical things.
 4. **Dispatch**: `cw dev-queue add <id> -c <client> -s large` → `cw dev-queue run --once`
-   (or `serve` for a self-healing loop). The `cw-fanout` skill does steps 4–6 for a whole
+   (or `serve` for a self-healing loop). `--base <epic-branch>` merges the row into an epic base instead of the default branch (RFC 0020). The `cw-fanout` skill does steps 4–6 for a whole
    batch in one motion.
 5. **Watch**: `cw dev-queue wait <id>` / `cw watch` / `cw queue peek` (status + >25-min
    transcript silence). Gates park as BLOCKED_ON_USER — adjudicate them and clear with

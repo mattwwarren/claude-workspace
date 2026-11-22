@@ -99,7 +99,7 @@ deferred-review-findings block):
 cw dev-queue add <TICKET-ID> [<TICKET-ID> ...] --client <client> \
   [--scope small|large] [--priority <n>] \
   [--lane <lane>] [--signoff operator] [--hold-finalize] \
-  [--stage plan|impl|review|finalize]
+  [--stage plan|impl|review|finalize] [--base <branch>]
 ```
 
 - `-s/--scope` sets `TicketTask.scope_hint` (default `None`). One effect:
@@ -126,6 +126,9 @@ cw dev-queue add <TICKET-ID> [<TICKET-ID> ...] --client <client> \
 - `--signoff operator` — require an explicit operator signoff before this
   ticket ships (see below). This is a gate the human opts into, so it stays a
   human's to clear (ADR-0020).
+- `--base <branch>` — the merge target for this row instead of the client's
+  default branch. The branch must already exist on origin. See
+  [Enqueue on an epic base](#enqueue-on-an-epic-base---base-rfc-0020-b1-3783).
 - `--hold-finalize` — stop this ticket before an unattended finalize (see
   below). A boolean switch, not a value option.
 - `--stage plan|impl|review|finalize` — enqueue the ticket directly at a
@@ -3007,6 +3010,47 @@ finalize will not reset over local commits origin lacks.
 
 A red shipped PR is different and goes to `recover-red-pr` (see "Red shipped
 PR"). BEHIND alone needs no action (ADR-0022).
+
+### Enqueue on an epic base (`--base`, RFC 0020 B1, #3783)
+
+`cw dev-queue add <T> --base <epic-branch> -c <client>` stamps the row's
+`base_branch`, so the row's branch is cut from, and its PR opens against,
+`<epic-branch>` rather than the client's default. The branch is created by the
+orchestration skill, never by cw (RFC 0020 D-6). Before the row is written, the
+add refuses, once per client and outside every lock:
+
+- **Redundant base.** `--base` equal to the client's `default_branch` is
+  refused; a row without `--base` already merges there.
+- **Absent on origin.** One bounded `git ls-remote --exit-code --heads origin
+  <base>` (30 s) must find exactly `refs/heads/<base>`. Exit 2 or no exact match
+  names the fix (push the branch to origin first). A timeout or other failure
+  says "could not verify … retry" and writes no row (fail closed).
+- **Over the size ceiling.** When the client sets `epic.max_diff_lines`, the
+  three-dot numstat of `origin/<base>` against `origin/<default>`
+  (`merge_gate_ignore_paths` excluded, additions plus deletions) must not
+  exceed it. A base that cannot be measured is refused too. Remedy: land the
+  epic now (open its PR to the default branch and adopt it with
+  `cw dev-queue add <parent> --adopt-pr <N>`), or open a second epic branch
+  from the default for this ticket. See
+  [CONFIG_REFERENCE: Epic size ceiling](../config/CONFIG_REFERENCE.md#epic-size-ceiling).
+
+The ceiling's two measurement fetches run unbounded outside a dispatch tick, so
+a hung remote can stall `cw dev-queue add --base` until interrupted. Only the
+`ls-remote` origin check is bounded, and it runs first, so an unreachable
+remote is normally refused there before any unbounded fetch.
+
+Rows never inherit a base from sibling rows. When another row for the same
+ticket exists on a different base, `add` prints a stderr note and carries on.
+An existing live row is skipped as before, and the Skipped echo gains
+`--base not applied`: the existing row keeps its own base, since there is no
+retarget verb. `--adopt-pr` hands the base to B2's PR-base check
+(`baseRefName` must equal it) and adds only the local redundant-base refusal.
+`--lane`, `--stage` and `--priority` are unaffected.
+
+`cw dev-queue tasks --base <branch>` lists rows whose stored base equals
+`<branch>` (exact match, a read-only filter). A null-base row is never listed,
+so `--base <default-branch>` prints `No tasks found.`; use `tasks` without the
+flag to see those rows.
 
 ### Adopt an open human PR (`--adopt-pr`, RFC 0016, #2943)
 
