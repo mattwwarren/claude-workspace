@@ -25,7 +25,7 @@ from cw.dev_queue.epic_base import (
 from cw.exceptions import GitTimeoutError
 from cw.models import ClientConfig
 from cw.worktree import FetchOutcome, FetchResult
-from tests._shared.base_branch_builders import epic_repo_with_origin
+from tests._shared.base_branch_builders import client_for_repo, epic_repo_with_origin
 from tests._shared.git_repos import git_in, init_bare_origin
 
 if TYPE_CHECKING:
@@ -35,18 +35,6 @@ if TYPE_CHECKING:
 BASE = "epic/x"
 FILES = (("big.py", 50), ("uv.lock", 40))
 FULL = 1 + sum(n for _, n in FILES)  # base_work.py plus the sized files
-
-
-def _client(repo: Path, **extra: object) -> ClientConfig:
-    return ClientConfig.model_validate(
-        {
-            "name": "acme",
-            "repo_path": str(repo),
-            "branch": "main",
-            "default_branch": "main",
-            **extra,
-        }
-    )
 
 
 @pytest.fixture
@@ -59,7 +47,7 @@ def epic_repo(make_git_repo: Callable[..., Path]) -> tuple[Path, Path]:
 
 def test_origin_present_passes(epic_repo: tuple[Path, Path]) -> None:
     repo, _ = epic_repo
-    verify_base_on_origin(_client(repo), BASE)
+    verify_base_on_origin(client_for_repo(repo), BASE)
 
 
 def test_base_absent_on_origin_is_refused(
@@ -69,7 +57,7 @@ def test_base_absent_on_origin_is_refused(
     init_bare_origin(repo)
     git_in(repo, "push", "origin", "main")
     with pytest.raises(EpicBaseRefusedError) as info:
-        verify_base_on_origin(_client(repo), "epic/missing")
+        verify_base_on_origin(client_for_repo(repo), "epic/missing")
     assert str(info.value) == (
         "Refusing --base 'epic/missing': no such branch on origin for client"
         " 'acme'; push `epic/missing` to origin first; the orchestration skill"
@@ -84,7 +72,7 @@ def test_tail_match_is_not_a_match(make_git_repo: Callable[..., Path]) -> None:
     git_in(repo, "checkout", "-b", "x/epic/x")
     git_in(repo, "push", "origin", "x/epic/x")
     with pytest.raises(EpicBaseRefusedError, match="no such branch on origin"):
-        verify_base_on_origin(_client(repo), "epic/x")
+        verify_base_on_origin(client_for_repo(repo), "epic/x")
 
 
 def test_ls_remote_broken_remote_is_could_not_verify(
@@ -93,7 +81,7 @@ def test_ls_remote_broken_remote_is_could_not_verify(
     repo = make_git_repo("acme")
     git_in(repo, "remote", "add", "origin", str(repo / "does-not-exist"))
     with pytest.raises(EpicBaseRefusedError) as info:
-        verify_base_on_origin(_client(repo), "epic/x")
+        verify_base_on_origin(client_for_repo(repo), "epic/x")
     assert str(info.value).startswith(
         "Refusing --base 'epic/x': could not verify `epic/x` on origin; retry."
         " (git ls-remote exited "
@@ -114,7 +102,7 @@ def test_ls_remote_timeout_is_could_not_verify(
 
     monkeypatch.setattr(epic_base, "_run_git", _timeout)
     with pytest.raises(EpicBaseRefusedError) as info:
-        verify_base_on_origin(_client(repo), BASE)
+        verify_base_on_origin(client_for_repo(repo), BASE)
     assert str(info.value) == (
         "Refusing --base 'epic/x': could not verify `epic/x` on origin; retry."
         f" (git ls-remote timed out after {ENQUEUE_NET_TIMEOUT_S:g}s)"
@@ -136,7 +124,7 @@ def test_os_error_is_could_not_verify(
     with pytest.raises(
         EpicBaseRefusedError, match=r"could not verify .*workspace gone"
     ):
-        verify_base_on_origin(_client(repo), BASE)
+        verify_base_on_origin(client_for_repo(repo), BASE)
 
 
 def test_ls_remote_stdout_without_exact_ref_is_absent(
@@ -148,7 +136,7 @@ def test_ls_remote_stdout_without_exact_ref_is_absent(
     )
     monkeypatch.setattr(epic_base, "_run_git", lambda *_a, **_kw: fake)
     with pytest.raises(EpicBaseRefusedError, match="no such branch on origin"):
-        verify_base_on_origin(_client(repo), BASE)
+        verify_base_on_origin(client_for_repo(repo), BASE)
 
 
 # -- redundant base ---------------------------------------------------------
@@ -188,18 +176,20 @@ def test_ceiling_unset_makes_no_git_call(
     monkeypatch.setattr(epic_base, "fetch_default_branch", _forbidden)
     monkeypatch.setattr(epic_base, "fetch_base_branch", _forbidden)
     monkeypatch.setattr(epic_base, "_run_git", _forbidden)
-    check_epic_size_ceiling(_client(repo), BASE)
+    check_epic_size_ceiling(client_for_repo(repo), BASE)
 
 
 def test_under_ceiling_passes(epic_repo: tuple[Path, Path]) -> None:
     repo, _ = epic_repo
-    check_epic_size_ceiling(_client(repo, epic={"max_diff_lines": FULL + 10}), BASE)
+    check_epic_size_ceiling(
+        client_for_repo(repo, epic={"max_diff_lines": FULL + 10}), BASE
+    )
 
 
 def test_equal_to_ceiling_passes(epic_repo: tuple[Path, Path]) -> None:
     """The ceiling is strict ``>``: a base exactly at it is allowed."""
     repo, _ = epic_repo
-    check_epic_size_ceiling(_client(repo, epic={"max_diff_lines": FULL}), BASE)
+    check_epic_size_ceiling(client_for_repo(repo, epic={"max_diff_lines": FULL}), BASE)
 
 
 def test_ceiling_counts_deleted_lines(make_git_repo: Callable[..., Path]) -> None:
@@ -211,14 +201,18 @@ def test_ceiling_counts_deleted_lines(make_git_repo: Callable[..., Path]) -> Non
     # Between the additions-only total (FULL) and additions plus deletions.
     ceiling = FULL + deleted - 1
     with pytest.raises(EpicBaseRefusedError) as info:
-        check_epic_size_ceiling(_client(repo, epic={"max_diff_lines": ceiling}), BASE)
+        check_epic_size_ceiling(
+            client_for_repo(repo, epic={"max_diff_lines": ceiling}), BASE
+        )
     assert f"{FULL + deleted} changed lines" in str(info.value)
 
 
 def test_over_ceiling_is_refused_with_full_text(epic_repo: tuple[Path, Path]) -> None:
     repo, _ = epic_repo
     with pytest.raises(EpicBaseRefusedError) as info:
-        check_epic_size_ceiling(_client(repo, epic={"max_diff_lines": 10}), BASE)
+        check_epic_size_ceiling(
+            client_for_repo(repo, epic={"max_diff_lines": 10}), BASE
+        )
     assert str(info.value) == (
         f"Refusing to enqueue on base 'epic/x': {FULL} changed lines (merge-base"
         " diff against 'main', additions plus deletions, merge_gate_ignore_paths"
@@ -232,20 +226,20 @@ def test_over_ceiling_is_refused_with_full_text(epic_repo: tuple[Path, Path]) ->
 def test_three_dot_diff_ignores_main_divergence(epic_repo: tuple[Path, Path]) -> None:
     """A two-dot diff would also count ``main_work.py``; three-dot does not."""
     repo, _ = epic_repo
-    check_epic_size_ceiling(_client(repo, epic={"max_diff_lines": FULL}), BASE)
+    check_epic_size_ceiling(client_for_repo(repo, epic={"max_diff_lines": FULL}), BASE)
 
 
 def test_ignored_path_is_excluded_from_the_measure(
     epic_repo: tuple[Path, Path],
 ) -> None:
     repo, _ = epic_repo
-    ignored = _client(
+    ignored = client_for_repo(
         repo,
         epic={"max_diff_lines": 60},
         merge_gate_ignore_paths=["uv.lock"],
     )
     check_epic_size_ceiling(ignored, BASE)
-    unignored = _client(repo, epic={"max_diff_lines": 60})
+    unignored = client_for_repo(repo, epic={"max_diff_lines": 60})
     with pytest.raises(EpicBaseRefusedError, match="exceed this client"):
         check_epic_size_ceiling(unignored, BASE)
 
@@ -272,7 +266,7 @@ def test_default_fetch_not_fetched_is_cannot_measure(
     monkeypatch.setattr(
         epic_base, "fetch_default_branch", lambda _c: FetchResult(outcome, reason)
     )
-    client = _client(repo, epic={"max_diff_lines": 10})
+    client = client_for_repo(repo, epic={"max_diff_lines": 10})
     with pytest.raises(EpicBaseRefusedError) as info:
         check_epic_size_ceiling(client, BASE)
     assert str(info.value) == (
@@ -294,7 +288,9 @@ def test_base_fetch_failed_is_cannot_measure(
     with pytest.raises(
         EpicBaseRefusedError, match=r"fetch of origin/epic/x failed: rc=128: y"
     ):
-        check_epic_size_ceiling(_client(repo, epic={"max_diff_lines": 10}), BASE)
+        check_epic_size_ceiling(
+            client_for_repo(repo, epic={"max_diff_lines": 10}), BASE
+        )
 
 
 def test_base_branch_absent_after_fetch_is_cannot_measure(
@@ -309,7 +305,9 @@ def test_base_branch_absent_after_fetch_is_cannot_measure(
     with pytest.raises(
         EpicBaseRefusedError, match="origin/epic/x is absent after fetch"
     ):
-        check_epic_size_ceiling(_client(repo, epic={"max_diff_lines": 10}), BASE)
+        check_epic_size_ceiling(
+            client_for_repo(repo, epic={"max_diff_lines": 10}), BASE
+        )
 
 
 def test_diff_failure_is_cannot_measure(
@@ -325,7 +323,9 @@ def test_diff_failure_is_cannot_measure(
     )
     git_in(repo, "update-ref", "-d", "refs/remotes/origin/epic/x")
     with pytest.raises(EpicBaseRefusedError, match=r"git diff exited \d+"):
-        check_epic_size_ceiling(_client(repo, epic={"max_diff_lines": 10}), BASE)
+        check_epic_size_ceiling(
+            client_for_repo(repo, epic={"max_diff_lines": 10}), BASE
+        )
 
 
 def test_measurement_runs_outside_every_lock(
@@ -355,7 +355,7 @@ def test_measurement_runs_outside_every_lock(
     monkeypatch.setattr(epic_base, "_run_git", _spy_run)
     monkeypatch.setattr(epic_base, "fetch_default_branch", _spy_default)
     monkeypatch.setattr(epic_base, "fetch_base_branch", _spy_base)
-    client = _client(repo, epic={"max_diff_lines": FULL})
+    client = client_for_repo(repo, epic={"max_diff_lines": FULL})
     verify_base_on_origin(client, BASE)
     check_epic_size_ceiling(client, BASE)
     assert {name for name, _ in observed} == {"run_git", "fetch_default", "fetch_base"}

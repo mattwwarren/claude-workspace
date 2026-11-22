@@ -12,6 +12,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
+from cw.models import ClientConfig
 from tests._review_convergence_helpers import merge_origin_commit
 from tests._shared.git_repos import (
     add_diverged_base_origin,
@@ -47,6 +48,19 @@ def base_row(
 ) -> TicketTask:
     """One ticket row carrying *base* as its ``base_branch`` (``None`` = null row)."""
     return _make_ticket_task(ticket_id=ticket_id, client=client, base_branch=base)
+
+
+def client_for_repo(repo: Path, **extra: object) -> ClientConfig:
+    """A client whose ``repo_path`` is *repo*, on ``main``; *extra* overrides fields."""
+    return ClientConfig.model_validate(
+        {
+            "name": "acme",
+            "repo_path": str(repo),
+            "branch": "main",
+            "default_branch": "main",
+            **extra,
+        }
+    )
 
 
 def diverged_base_worktree(
