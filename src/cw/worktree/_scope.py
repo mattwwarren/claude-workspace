@@ -35,6 +35,8 @@ _NUMSTAT_MIN_COLS = 3
 # fabricated-scope class and gets logged. 2.0 is deliberately loose: the
 # observed failure was ~6x on files and ~10x on lines.
 _SCOPE_MISMATCH_RATIO_THRESHOLD = 2.0
+# Characters git forbids in a ref name (space included); see git-check-ref-format.
+_GIT_REF_FORBIDDEN_CHARS = frozenset(" ~^:?*[\\")
 
 
 def _has_commits_beyond_base(wt_path: Path, default_branch: str) -> bool:
@@ -104,7 +106,7 @@ def _resolve_merge_base(worktree_path: Path, default_branch: str) -> str | None:
             cwd=worktree_path,
             check=False,
         )
-    except OSError:
+    except (OSError, ValueError):  # ValueError: subprocess rejects a NUL in argv
         return None
     if base.returncode != 0:
         return None
@@ -139,7 +141,7 @@ def compute_branch_diff_scope(
             cwd=worktree_path,
             check=False,
         )
-    except OSError:
+    except (OSError, ValueError):
         return None
     if numstat.returncode != 0:
         return None
@@ -299,13 +301,30 @@ def apply_measured_scope(
     return result.model_copy(update={"scope": result.scope.model_copy(update=updates)})
 
 
+def _is_plausible_branch(base: str) -> bool:
+    """True when *base* could be a git ref name argument (never an option).
+
+    The context is worker-writable, so a base read from it is untrusted input to
+    a git argv: a NUL makes ``subprocess`` raise, a leading ``-`` would parse as
+    an option. Rejects control characters, whitespace, a leading ``-``, ``..``
+    and the characters git forbids in a ref name.
+    """
+    return (
+        base.isprintable()
+        and not base.startswith("-")
+        and ".." not in base
+        and _GIT_REF_FORBIDDEN_CHARS.isdisjoint(base)
+    )
+
+
 def _context_base_branch(worktree_path: Path | None) -> str | None:
     """The merge base the worktree's cw-context names, or ``None`` (RFC 0020 S3a).
 
     A local read: this module must not import the CLI context reader. Any read
-    or parse failure is ``None``, so the guard falls through to the client
-    default and never raises. The worker can edit this file, as it can already
-    shrink its own reported scope (the PR records the judgment call).
+    or parse failure, and any base that cannot be a git ref name argument, is
+    ``None``, so the guard falls through to the client default and never
+    raises. The worker can edit this file, as it can already shrink its own
+    reported scope (the PR records the judgment call).
     """
     if worktree_path is None:
         return None
@@ -313,7 +332,10 @@ def _context_base_branch(worktree_path: Path | None) -> str | None:
         data = json.loads((worktree_path / HOOK_CONTEXT_RELATIVE_PATH).read_text())
     except (OSError, ValueError, RecursionError):
         return None
-    return base_branch_from_context(data if isinstance(data, dict) else None)
+    base = base_branch_from_context(data if isinstance(data, dict) else None)
+    if base is None or not _is_plausible_branch(base):
+        return None
+    return base
 
 
 def resolve_scope_guard_default_branch(

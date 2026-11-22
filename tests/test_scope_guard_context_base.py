@@ -24,11 +24,15 @@ from cw.reconcile._shared._scope_probes import (
     capture_scope_probe,
     new_scope_probes,
 )
-from cw.worktree._scope import resolve_scope_guard_default_branch
+from cw.worktree._scope import (
+    compute_branch_diff_scope,
+    resolve_scope_guard_default_branch,
+)
 from tests._reconcile_helpers import _inflate_scope, _stage_complete_payload
 from tests._shared.session_seeding import _make_daemon_session
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import datetime
     from pathlib import Path
 
@@ -165,6 +169,73 @@ def test_missing_client_key_falls_back_to_main(
     with caplog.at_level(logging.WARNING, logger="cw.worktree"):
         assert _resolve(tmp_path) == "main"
     assert "client=client-a" in caplog.text
+
+
+@pytest.mark.parametrize("base", ["epic/x", "release/1.2", "feature/a-b_c"])
+def test_well_formed_context_base_resolves_from_the_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, base: str
+) -> None:
+    _patch_clients(monkeypatch, {CLIENT: _client(tmp_path)})
+    _write_context(tmp_path, json.dumps({"base_branch": base}))
+
+    assert _resolve(tmp_path) == base
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        "a\u0000b",
+        "a\nb",
+        "a b",
+        "a\tb",
+        "a\u00a0b",
+        "\x7fmain",
+        "-main",
+        "--output=x",
+        "a..b",
+        "a~1",
+        "a^",
+        "a:b",
+        "a?b",
+        "a*b",
+        "a[b",
+        "a\\b",
+    ],
+)
+def test_hostile_context_base_falls_back_to_the_client_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, base: str
+) -> None:
+    # The context is worker-writable: a base that cannot be a git ref name
+    # argument must never reach git, so the guard uses the client default.
+    _patch_clients(monkeypatch, {CLIENT: _client(tmp_path)})
+    _write_context(tmp_path, json.dumps({"base_branch": base}))
+
+    assert _resolve(tmp_path) == CLIENT_DEFAULT
+
+
+def test_compute_branch_diff_scope_never_raises_on_a_nul_base(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    repo = make_git_repo("ws")
+
+    assert compute_branch_diff_scope(repo, "a\x00b") is None
+
+
+def test_verify_headless_scope_survives_a_nul_context_base(
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repo = make_git_repo("ws")
+    _patch_clients(monkeypatch, {CLIENT: _client(repo)})
+    _write_context(repo, json.dumps({"base_branch": "a\x00b"}))
+    result = _inflated()
+
+    with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+        corrected = sentinel._verify_headless_scope(result, _session(repo))
+
+    assert corrected == result
+    assert f"origin/{CLIENT_DEFAULT}" in caplog.text
 
 
 # --- caller wiring: the worktree reaches the resolver (S3a) -----------------
