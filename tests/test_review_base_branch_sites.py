@@ -7,6 +7,7 @@ resolves to it, and a null-base row is unchanged (the client default).
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -14,19 +15,26 @@ from pydantic import ValidationError
 
 import cw.cli.review.confirm as confirm_cli
 from cw.cli.review.converge import _default_branch
+from cw.codex_review._engine_round import EngineRoundSpec
+from cw.codex_review._engine_start import engine_round_spec
 from cw.confirmation_jobs import ConfirmationPin
 from cw.dev_queue import add_ticket
 from cw.dispatch import review_gates
 from cw.dispatch import review_tip_sweep as sweep_mod
 from cw.dispatch.review_tip_verdicts import TipCheck, TipKey
-from cw.models import TicketTask
+from cw.models import ClientConfig, TicketTask
+from cw.models.client import ReviewConfig, ReviewEngineConfig
 from cw.review_convergence import (
     MergeTolerance,
+    resolve_loop_diff_base,
     review_move_tolerance,
     tolerance_for_client,
     tolerance_from_context,
     tolerates_review_move,
 )
+from cw.review_engine.context import EngineContext, read_engine_context
+from cw.review_engine.materialize import materialize_skill
+from cw.review_engine.preflight import run_preflight
 from cw.ticket_snapshot import DEFAULT_SNAPSHOT_CONTEXT
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._review_convergence_helpers import (
@@ -35,14 +43,18 @@ from tests._review_convergence_helpers import (
     merge_origin_commit,
     write_ledger,
 )
-from tests._shared.git_repos import git_in
+from tests._review_engine_helpers import (
+    EngineRepo,
+    engine_context_payload,
+    make_engine_repo,
+    write_engine_context,
+)
+from tests._shared.git_repos import commit_tracked_file, git_in
 from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
-    from cw.models import ClientConfig
 
 ROW_BASE = "epic/x"
 CLIENT_DEFAULT = "trunk"
@@ -385,3 +397,130 @@ def test_the_in_lock_gate_checks_an_unswept_tip_against_the_rows_base(
 
     assert gated is False
     assert seen == [row]
+
+
+# --- the engine stays on the trust root (S3a, R5) --------------------------
+
+_STUB = Path(__file__).parent / "fixtures" / "review_engine_stub"
+_SKILL = "repo-review"
+_SKILL_DIR = f".claude/skills/{_SKILL}"
+_SKILL_MD = f"{_SKILL_DIR}/SKILL.md"
+_EPIC_SKILL_TEXT = "# repo-review\n\nEdited on the epic branch.\n"
+
+
+@pytest.fixture
+def engine_repo(make_git_repo: Callable[..., Path]) -> EngineRepo:
+    return make_engine_repo(make_git_repo, engine_files=_STUB)
+
+
+def _push_epic_branch(repo: EngineRepo, *, edit_engine: bool) -> None:
+    """``origin/epic/x``: main, plus an edited skill and no manifest if asked."""
+    wt = repo.worktree
+    git_in(wt, "checkout", "-b", ROW_BASE, "main")
+    if edit_engine:
+        commit_tracked_file(wt, _SKILL_MD, _EPIC_SKILL_TEXT)
+        git_in(wt, "rm", "-q", f"{_SKILL_DIR}/cw-engine.json")
+        git_in(wt, "commit", "-q", "-m", "drop the manifest on the epic branch")
+    git_in(wt, "push", "-q", "origin", ROW_BASE)
+    git_in(wt, "checkout", "dev/1")
+
+
+def _engine_context(repo: EngineRepo) -> EngineContext:
+    return EngineContext(
+        skill=_SKILL,
+        guarded_paths=(),
+        ticket_id=repo.ticket,
+        client=repo.client,
+        default_branch="main",
+    )
+
+
+def test_engine_context_default_branch_ignores_the_context_base(
+    tmp_path: Path,
+) -> None:
+    payload = engine_context_payload(skill=_SKILL, default_branch="main")
+    payload["base_branch"] = ROW_BASE
+    path = write_engine_context(tmp_path, payload)
+
+    context = read_engine_context(path)
+
+    assert context.default_branch == "main"
+
+
+def test_materialize_skill_copies_the_default_branch_skill_not_the_bases(
+    engine_repo: EngineRepo,
+) -> None:
+    _push_epic_branch(engine_repo, edit_engine=True)
+    wt = engine_repo.worktree
+    main_text = git_in(wt, "show", f"origin/main:{_SKILL_MD}")
+    assert git_in(wt, "show", f"origin/{ROW_BASE}:{_SKILL_MD}") != main_text
+
+    materialized = materialize_skill(
+        wt,
+        round_id="r1",
+        expect_head=engine_repo.head,
+        context=_engine_context(engine_repo),
+    )
+
+    assert Path(materialized.skill_md).read_text().strip() == main_text.strip()
+
+
+def test_engine_round_spec_reads_the_default_branch_manifest_for_a_base_row(
+    engine_repo: EngineRepo,
+) -> None:
+    # The epic branch deleted the manifest: a read of the row's base would refuse.
+    _push_epic_branch(engine_repo, edit_engine=True)
+    client = ClientConfig(
+        name=engine_repo.client,
+        workspace_path=engine_repo.worktree,
+        default_branch="main",
+        review=ReviewConfig(
+            convergence="clean",
+            engine=ReviewEngineConfig(skill=_SKILL, guarded_paths=[]),
+        ),
+    )
+    task = _make_ticket_task(
+        ticket_id=engine_repo.ticket, client=engine_repo.client, base_branch=ROW_BASE
+    )
+
+    spec = engine_round_spec(client, task, engine_repo.worktree)
+
+    assert isinstance(spec, EngineRoundSpec)
+    assert spec.context.default_branch == "main"
+
+
+def _preflight_against(repo: EngineRepo, base: str) -> tuple[str, list[str]]:
+    diff_base = resolve_loop_diff_base(repo.worktree, base)
+    verdict = run_preflight(
+        repo.worktree, diff_base=diff_base, context=_engine_context(repo)
+    )
+    return verdict.decision, verdict.touched
+
+
+def test_a_base_row_whose_branch_touches_the_engine_parks_like_a_default_row(
+    engine_repo: EngineRepo,
+) -> None:
+    _push_epic_branch(engine_repo, edit_engine=False)
+    touched = f"{_SKILL_DIR}/notes.md"
+    commit_tracked_file(engine_repo.worktree, touched, "edited\n")
+
+    on_base = _preflight_against(engine_repo, ROW_BASE)
+    on_default = _preflight_against(engine_repo, "main")
+
+    assert on_base == ("park", [touched])
+    assert on_base == on_default
+
+
+def test_a_base_that_carries_the_engine_edit_does_not_park_its_branch(
+    engine_repo: EngineRepo,
+) -> None:
+    _push_epic_branch(engine_repo, edit_engine=True)
+    wt = engine_repo.worktree
+    git_in(wt, "checkout", "-q", "-B", "dev/1", f"origin/{ROW_BASE}")
+    commit_tracked_file(wt, "src/b.py", "y = 2\n")
+
+    on_base = _preflight_against(engine_repo, ROW_BASE)
+    on_default = _preflight_against(engine_repo, "main")
+
+    assert on_base == ("run", [])
+    assert on_default[0] == "park"
