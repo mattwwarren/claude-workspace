@@ -150,9 +150,18 @@ def check_existing_branch_work(
 
 
 def check_on_branch(
-    worktree: Path, expected: str, *, default_branch: str | None = None
+    worktree: Path,
+    expected: str,
+    *,
+    default_branch: str | None = None,
+    base_branch: str | None = None,
 ) -> ImplBlock | None:
-    """Block on a detached, mismatched, or configured default branch."""
+    """Block on a detached, mismatched, default, or row-base branch.
+
+    ``default_branch`` is the trust root; ``base_branch`` is the row's merge
+    target (RFC 0020 S3b). A null row has both equal, and the default message
+    wins, so its refusal text is unchanged.
+    """
     current = git_output(["branch", "--show-current"], cwd=worktree).strip()
     if not current:
         return ImplBlock(
@@ -164,6 +173,11 @@ def check_on_branch(
             IMPL_FAILED,
             "the IMPL turn cannot run on the configured default branch "
             f"{default_branch!r}",
+        )
+    if base_branch is not None and base_branch in {current, expected}:
+        return ImplBlock(
+            IMPL_FAILED,
+            f"the IMPL turn cannot run on this row's base branch {base_branch!r}",
         )
     if current != expected:
         return ImplBlock(

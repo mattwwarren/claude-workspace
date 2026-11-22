@@ -80,7 +80,7 @@ from cw.models import (
     OrchestratorEventType,
 )
 from cw.models.bindings import Harness
-from cw.models.branch import resolve_feature_branch
+from cw.models.branch import resolve_base_branch, resolve_feature_branch
 from cw.models.enums import StageIdentifier
 from cw.stage_verification.finalize_arm import (
     arm,
@@ -185,6 +185,11 @@ class _Run:
     model: str | None
     reasoning_effort: str | None
     usage: UsageAccumulator = NO_USAGE
+
+    @property
+    def base_branch(self) -> str:
+        """The row's merge target: its base, else the client default (S3b)."""
+        return resolve_base_branch(self.client, self.task)
 
     def emit(
         self,
@@ -402,7 +407,7 @@ def _shipped(run: _Run, state: _State, bound: BoundPr, *, auto_merge: bool) -> P
         pr_number=bound.number,
         pr_url=bound.url,
         auto_merge=auto_merge,
-        base=run.client.default_branch,
+        base=run.base_branch,
     )
 
 
@@ -425,7 +430,7 @@ def _bind(
 def _ci_context(run: _Run, state: _State, pr: BoundPr | None = None) -> CiContext:
     """What the CI-evidence consult needs: the base, the head and any bound PR."""
     return CiContext(
-        base=run.client.default_branch,
+        base=run.base_branch,
         pr_number=pr.number if pr is not None else None,
         pr_url=pr.url if pr is not None else None,
         head=state.head,
@@ -470,6 +475,7 @@ def _create_prelude(run: _Run, state: _State) -> Payload | None:
         branch_prefix=_client_branch_prefix(run),
         fork_point=state.facts.git["fork_point"] or state.head,
         client_name=run.client.name,
+        base_branch=run.base_branch,
     )
     state.friction.extend(gate.friction)
     if gate.block is not None:
@@ -487,7 +493,7 @@ def _create_prelude(run: _Run, state: _State) -> Payload | None:
     block = _gates(run, state, "create")
     if block is None:
         block, friction = probe_default(
-            run.worktree, default_branch=run.client.default_branch, pr_exists=False
+            run.worktree, base_branch=run.base_branch, pr_exists=False
         )
         state.friction.extend(friction)
     if block is None:
@@ -507,7 +513,7 @@ def _create(run: _Run, state: _State, scratch: Path) -> Payload:
     body_file.write_text(_pr_body(doc, state), encoding="utf-8")
     created = create_pr_for(
         run.worktree,
-        base=run.client.default_branch,
+        base=run.base_branch,
         branch=state.branch,
         title=compose_pr_title(doc.pr_title, run.task.ticket_id),
         body_file=body_file,
@@ -561,7 +567,7 @@ def _reuse(run: _Run, state: _State, bound: BoundPr, scratch: Path) -> Payload:
     block = _gates(run, state, "reuse", pr=bound)
     if block is None:
         block, friction = probe_default(
-            run.worktree, default_branch=run.client.default_branch, pr_exists=True
+            run.worktree, base_branch=run.base_branch, pr_exists=True
         )
         state.friction.extend(friction)
     if block is None and state.override_json is not None:
@@ -595,7 +601,7 @@ def _found(run: _Run, state: _State, found: DetectedPr, scratch: Path) -> Payloa
 
 def _prepare(run: _Run) -> _State | Payload:
     """Tier, plan source, override and the branch guard."""
-    git = git_facts(run.worktree, run.client.default_branch)
+    git = git_facts(run.worktree, run.base_branch)
     tier = resolve_tier(run.task, read_artifact(run.worktree, PLAN_RELATIVE), git)
     if isinstance(tier, FinalizeBlock):
         return run.blocked(tier, None)

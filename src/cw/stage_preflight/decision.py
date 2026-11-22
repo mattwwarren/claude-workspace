@@ -44,10 +44,12 @@ from cw.stage_preflight.reasons import PreflightReason
 if TYPE_CHECKING:
     from cw.models.capabilities import HarnessCapabilities
 
-#: Harnesses that deliver a row's ``base_branch`` to the worker. Codex joins
-#: when #3782 wires its executors (RFC 0020 S3); until then a non-null base
-#: parks ``base_unsupported_backend`` before any agent runs.
-BASE_SUPPORTING_HARNESSES: frozenset[Harness] = frozenset({Harness.CLAUDE_NATIVE})
+#: Harnesses that deliver a row's ``base_branch`` to the worker. Codex joined
+#: with RFC 0020 S3b (#3840); opencode and local still park
+#: ``base_unsupported_backend`` before any agent runs.
+BASE_SUPPORTING_HARNESSES: frozenset[Harness] = frozenset(
+    {Harness.CLAUDE_NATIVE, Harness.CODEX}
+)
 
 
 @dataclass(frozen=True, slots=True)

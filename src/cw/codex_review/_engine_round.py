@@ -113,7 +113,9 @@ class EnginePassInputs:
     worktree: Path
     # The merge target the diff and scope measurement use (RFC 0020 S3a).
     base_branch: str
-    # The trust root: review configuration is read from it (S3b, #3840).
+    # The trust root: review configuration is read from it (S3b, #3840). The
+    # engine spec and manifest stay on it too, so a based row runs the default
+    # branch's engine.
     config_branch: str
     model: str | None
     reasoning_effort: str | None

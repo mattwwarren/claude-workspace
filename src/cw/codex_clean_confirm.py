@@ -71,7 +71,7 @@ from cw.codex_review import (
 from cw.codex_review_debt import file_codex_deferrals
 from cw.dispatch_state import ExecutorBlockedMarker, save_executor_blocked_marker
 from cw.exceptions import CwError
-from cw.models import CODEX_BACKEND
+from cw.models import CODEX_BACKEND, resolve_base_branch
 from cw.review_convergence import (
     CONFIRM_CAUSE_BACKEND_ERROR,
     CONFIRM_CAUSE_BINARY_MISSING,
@@ -212,7 +212,7 @@ def _fork_point(gate: _Gate) -> str:
     On this lane the live merge-base is both the ledger's identity key and its
     diff base (#2800), so the pin :func:`_pinned` records equals it.
     """
-    return resolve_diff_base(gate.worktree, gate.client.default_branch)
+    return resolve_diff_base(gate.worktree, resolve_base_branch(gate.client, gate.task))
 
 
 def _pinned(gate: _Gate, ledger: ConvergenceLedger) -> ConvergenceLedger:
@@ -722,7 +722,9 @@ def _run_confirm(
     bookkeeping handler and parks as ``codex_convergence_ledger_error``.
     """
     client = gate.client
-    diff_base = verify_diff_base(gate.worktree, ledger.diff_base, client.default_branch)
+    diff_base = verify_diff_base(
+        gate.worktree, ledger.diff_base, resolve_base_branch(client, gate.task)
+    )
     _log.info(
         "clean-mode confirm starting ticket=%s client=%s session=%s "
         "confirm_backend=%s sha=%s",
@@ -755,7 +757,9 @@ def _run_confirm(
             runner=gate.runner,
             task=gate.task,
             worktree=gate.worktree,
+            # stays on client.default_branch: review config is the trust root.
             default_branch=client.default_branch,
+            base_branch=resolve_base_branch(client, gate.task),
             base_ref=diff_base,
             model=client.worker_model,
             wall_clock_budget_seconds=_remaining_budget(gate),

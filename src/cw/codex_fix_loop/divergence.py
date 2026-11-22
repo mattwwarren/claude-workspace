@@ -184,14 +184,14 @@ def net_lines_for_commit(worktree: Path, commit_sha: str | None) -> int:
     return lines
 
 
-def pre_loop_diff_lines(worktree: Path, default_branch: str) -> int:
+def pre_loop_diff_lines(worktree: Path, base_branch: str) -> int:
     """Return the branch's churn (added + removed lines) before the fix loop.
 
     Measured from :func:`~cw.review_convergence.resolve_loop_diff_base`, the
     same base the loop's review diff uses (#2823), so a stale local default
     branch cannot inflate the baseline the divergence threshold scales with.
     """
-    return _branch_diff_totals(worktree, default_branch)[1]
+    return _branch_diff_totals(worktree, base_branch)[1]
 
 
 def record_divergence_cycle(

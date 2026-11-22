@@ -391,7 +391,7 @@ class _LoopInputs(NamedTuple):
 def _loop_inputs(
     worktree: Path,
     task: TicketTask,
-    default_branch: str,
+    base_branch: str,
     snapshots: SnapshotContext,
     snapshot: TicketSnapshot | None,
 ) -> _LoopInputs:
@@ -400,7 +400,7 @@ def _loop_inputs(
     *snapshot* is the one cycle 0's pass already resolved (#3712); it feeds the
     one-time constraint load, so setup does no second read and emits no event.
     """
-    _, _, cycle0_changed = _capture_diff(worktree, default_branch)
+    _, _, cycle0_changed = _capture_diff(worktree, base_branch)
     cycle0_files = frozenset(cycle0_changed)
     plan_text, ticket_text = _load_ticket_context(worktree)
     constraints = _load_constraints(snapshot, snapshots, task, ticket_text)
@@ -531,6 +531,7 @@ def run_review_with_fix_loop(
     task: TicketTask,
     worktree: Path,
     default_branch: str,
+    base_branch: str,
     model: str | None,
     reasoning_effort: str | None,
     wall_clock_budget_seconds: int | None,
@@ -632,6 +633,7 @@ def run_review_with_fix_loop(
         task=task,
         worktree=worktree,
         default_branch=default_branch,
+        base_branch=base_branch,
         model=model,
         reasoning_effort=reasoning_effort,
         wall_clock_budget_seconds=wall_clock_budget_seconds,
@@ -666,7 +668,7 @@ def run_review_with_fix_loop(
     inputs = _loop_inputs(
         worktree,
         task,
-        default_branch,
+        base_branch,
         snapshots,
         cycle0_snapshot[0] if cycle0_snapshot else None,
     )
@@ -709,7 +711,7 @@ def run_review_with_fix_loop(
     if cycle0_park is not None:
         parked_result, parked_verdict = cycle0_park
         return parked_result, parked_verdict
-    baseline_lines = pre_loop_diff_lines(worktree, default_branch)
+    baseline_lines = pre_loop_diff_lines(worktree, base_branch)
     divergence_state = initial_divergence_state(
         original_keys=frozenset(open_findings),
         pre_loop_diff_lines=baseline_lines,
@@ -768,6 +770,7 @@ def run_review_with_fix_loop(
                 snapshot=snapshot,
                 had_real_commit_so_far=had_real_commit,
                 default_branch=default_branch,
+                base_branch=base_branch,
                 allowed_files=inputs.allowed_files,
                 growth_budget_lines=growth_budget_lines,
                 growth_guard_enabled=growth_guard_enabled,
@@ -787,6 +790,7 @@ def run_review_with_fix_loop(
             task=task,
             worktree=worktree,
             default_branch=default_branch,
+            base_branch=base_branch,
             model=model,
             reasoning_effort=reasoning_effort,
             remaining=_remaining_budget(deadline),

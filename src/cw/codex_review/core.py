@@ -113,7 +113,7 @@ def run_review(
     resolution: ResolutionSpec | None = None,
     reviewer_sandbox_mode: SandboxMode = DEFAULT_REVIEWER_SANDBOX_MODE,
     snapshots: SnapshotContext = DEFAULT_SNAPSHOT_CONTEXT,
-    base_branch: str | None = None,
+    base_branch: str,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the full per-role review pass; return ``(result, verdict)``.
 
@@ -178,15 +178,14 @@ def run_review(
 
     ``snapshots`` (#3712) is forwarded to :func:`_prepare_review_pass`.
 
-    ``base_branch`` (RFC 0020 S3a) is the merge target the diff and synthesis
-    use; ``None`` means ``default_branch``. ``default_branch`` stays the trust
-    root the review configuration is read from. S3b (#3840) removes the default.
+    ``base_branch`` is the merge target the diff and synthesis use (the row's
+    base, RFC 0020 S3b). ``default_branch`` stays the trust root the review
+    configuration is read from.
     """
-    merge_base = base_branch or default_branch
     prepared = _prepare_review_pass(
         task,
         worktree,
-        merge_base,
+        base_branch,
         config_branch=default_branch,
         runner=runner,
         session_id=session_id,
@@ -213,7 +212,7 @@ def run_review(
         diff=prepared.diff,
         reviewed_sha=prepared.reviewed_sha,
         session_id=session_id,
-        default_branch=merge_base,
+        default_branch=base_branch,
         fix_loop_enabled=fix_loop_enabled,
         metrics_by_role=run.metrics_by_role,
         capability=prepared.capability,

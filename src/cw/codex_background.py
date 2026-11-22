@@ -89,7 +89,7 @@ from cw.codex_usage import NO_USAGE, UsageAccumulator
 from cw.config import load_effective_config
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event as _record_orchestrator_event
-from cw.models import OrchestratorEventType
+from cw.models import OrchestratorEventType, resolve_base_branch
 from cw.models.enums import (
     DEFAULT_FIX_SANDBOX_MODE,
     DEFAULT_REVIEWER_SANDBOX_MODE,
@@ -579,7 +579,9 @@ def _review_and_confirm(
         runner=runner,
         task=task,
         worktree=worktree,
+        # stays on client.default_branch: the review configuration is the trust root.
         default_branch=client.default_branch,
+        base_branch=resolve_base_branch(client, task),
         model=config_model,
         reasoning_effort=config_reasoning_effort,
         reviewer_sandbox_mode=config_reviewer_sandbox_mode,
@@ -691,7 +693,7 @@ def _run_codex_review_and_complete(
             result,
             task=task,
             worktree=worktree,
-            default_branch=client.default_branch,
+            base_branch=resolve_base_branch(client, task),
             session_id=sid,
         )
 
