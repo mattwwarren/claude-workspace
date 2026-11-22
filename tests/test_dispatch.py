@@ -11212,10 +11212,10 @@ class TestApplyStagedDecision:
         assert task.disposition is None
         assert task.blocked_reason is None
         assert task.completed_at is None
-        parked = read_events(
-            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
+        assert (
+            read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+            == []
         )
-        assert {e.correlation_id for e in parked} == {"T-0", "T-1"}
 
     # -- #2693: `wait`'s hand-off predicate agrees with real routing --------
 
