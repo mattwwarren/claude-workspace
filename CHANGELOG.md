@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.106.0] - 2026-11-22
+
 ### Added
 
 - **`cw dev-queue add --base` enqueues onto an epic base (#3783, RFC 0020 B1).** `--base <branch>` stamps the row's `base_branch` after a redundant-base refusal, a bounded origin check (`ls-remote`, fail closed) and an optional size ceiling (`epic.max_diff_lines`, three-dot numstat against the default, `merge_gate_ignore_paths` excluded). Rows do not inherit a base from siblings: a stderr note reports a differing sibling row, and an existing live row keeps its base with a `--base not applied` suffix. `--adopt-pr` hands the base to B2's PR-base check. `cw dev-queue tasks --base` is a read-only filter. The dispatch tick never reads the ceiling.
