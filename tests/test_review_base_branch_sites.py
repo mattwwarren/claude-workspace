@@ -20,12 +20,13 @@ from cw.claude_review import core as claude_core
 from cw.cli import main
 from cw.cli.review import attestation as attestation_cli
 from cw.cli.review import converge_delta, converge_tip
+from cw.cli.review.confirm_job import _matches
 from cw.cli.review.converge import _default_branch
 from cw.codex_review import _engine_round
 from cw.codex_review import core as codex_core
 from cw.codex_review._engine_round import EnginePassInputs, EngineRoundSpec
 from cw.codex_review._engine_start import engine_round_spec
-from cw.confirmation_jobs import ConfirmationPin
+from cw.confirmation_jobs import ConfirmationJob, ConfirmationPin
 from cw.dev_queue import add_ticket
 from cw.dispatch import review_gates
 from cw.dispatch import review_tip_sweep as sweep_mod
@@ -213,6 +214,45 @@ def test_pin_with_both_keys_keeps_the_base() -> None:
 def test_pin_still_rejects_unknown_keys() -> None:
     with pytest.raises(ValidationError):
         ConfirmationPin.model_validate(_pin_fields(base_branch=ROW_BASE, bogus=1))
+
+
+def _job(base: str) -> ConfirmationJob:
+    pin = ConfirmationPin.model_validate(_pin_fields(base_branch=base))
+    return ConfirmationJob(id="a" * 32, pin=pin, session_id=None)
+
+
+def _match(job: ConfirmationJob, **overrides: Any) -> bool:
+    asked: dict[str, Any] = {
+        "client": "test-client",
+        "ticket_id": "T-1",
+        "kind": "full",
+        "branch": ROW_BASE,
+    }
+    return _matches(job, **{**asked, **overrides})
+
+
+def test_a_job_matches_the_base_its_pin_carries() -> None:
+    job = _job(ROW_BASE)
+
+    assert _match(job, branch=ROW_BASE) is True
+    assert _match(job, branch=CLIENT_DEFAULT) is False
+
+
+def test_a_job_pinned_to_the_client_default_does_not_match_the_row_base() -> None:
+    job = _job(CLIENT_DEFAULT)
+
+    assert _match(job, branch=ROW_BASE) is False
+    assert _match(job, branch=CLIENT_DEFAULT) is True
+
+
+@pytest.mark.parametrize(
+    "override",
+    [{"client": "other"}, {"ticket_id": "T-2"}, {"kind": "delta"}],
+)
+def test_a_job_with_a_matching_base_still_needs_the_other_fields(
+    override: dict[str, Any],
+) -> None:
+    assert _match(_job(ROW_BASE), **override) is False
 
 
 # --- confirm.resolve_round_inputs (S3a, R6) --------------------------------
