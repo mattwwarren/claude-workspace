@@ -8,11 +8,14 @@ and corrects a self-reported :class:`~cw.auto_dev_result.AutoDevResult`
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 from typing import TYPE_CHECKING, TypedDict
 
 from cw.auto_dev_result import _PRE_IMPL_STAGES
 from cw.config import load_effective_clients
+from cw.context_queue_metadata import base_branch_from_context
+from cw.models import HOOK_CONTEXT_RELATIVE_PATH, resolve_base_branch
 from cw.worktree._git import _checked_out_branch, _run_git
 
 if TYPE_CHECKING:
@@ -296,23 +299,50 @@ def apply_measured_scope(
     return result.model_copy(update={"scope": result.scope.model_copy(update=updates)})
 
 
-def resolve_scope_guard_default_branch(client_name: str, *, log_context: str) -> str:
-    """Resolve *client_name*'s ``default_branch`` for scope verification (#1487).
+def _context_base_branch(worktree_path: Path | None) -> str | None:
+    """The merge base the worktree's cw-context names, or ``None`` (RFC 0020 S3a).
 
-    Falls back to ``"main"`` on any resolution failure — the client key is
-    absent from an otherwise-valid ``clients.yaml`` (a silent ``dict.get()``
-    miss) and a config-load failure (malformed YAML, unreadable file, etc. —
-    any exception from :func:`cw.config.load_effective_clients`) are both
-    logged identically here, so every scope-guard caller gets the same
-    diagnostic breadcrumb regardless of which failure occurred. This guard
-    must never cost a caller its sentinel over a client-config problem.
+    A local read: this module must not import the CLI context reader. Any read
+    or parse failure is ``None``, so the guard falls through to the client
+    default and never raises. The worker can edit this file, as it can already
+    shrink its own reported scope (the PR records the judgment call).
     """
+    if worktree_path is None:
+        return None
+    try:
+        data = json.loads((worktree_path / HOOK_CONTEXT_RELATIVE_PATH).read_text())
+    except (OSError, ValueError):
+        return None
+    return base_branch_from_context(data if isinstance(data, dict) else None)
+
+
+def resolve_scope_guard_default_branch(
+    client_name: str,
+    *,
+    log_context: str,
+    worktree_path: Path | None = None,
+) -> str:
+    """Resolve the merge base *client_name*'s scope is measured against (#1487).
+
+    The worktree's cw-context base (RFC 0020 S3a) when it names one, else the
+    client's merge base with no row (its ``default_branch``). Falls back to
+    ``"main"`` on any resolution failure — the client key is absent from an
+    otherwise-valid ``clients.yaml`` (a silent ``dict.get()`` miss) and a
+    config-load failure (malformed YAML, unreadable file, etc. — any exception
+    from :func:`cw.config.load_effective_clients`) are both logged identically
+    here, so every scope-guard caller gets the same diagnostic breadcrumb
+    regardless of which failure occurred. This guard must never cost a caller
+    its sentinel over a client-config problem.
+    """
+    ctx_base = _context_base_branch(worktree_path)
+    if ctx_base is not None:
+        return ctx_base
     try:
         client_cfg = load_effective_clients().get(client_name)
     except Exception:  # noqa: BLE001 — fail-safe: any config-load error falls back to "main"
         client_cfg = None
     if client_cfg is not None:
-        return client_cfg.default_branch
+        return resolve_base_branch(client_cfg)
     _log.warning(
         "scope_verification_client_unresolved: %s client=%s; measuring against 'main'",
         log_context,

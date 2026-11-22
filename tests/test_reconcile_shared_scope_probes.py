@@ -104,7 +104,7 @@ class TestCapture:
         stored = probes.lookup(key)
         assert stored.result == result
         assert stored.result.scope.files == 18
-        assert stored.default_branch == "main"
+        assert stored.base_branch == "main"
         assert stored.measured is not None
         assert stored.measured["branch"] == SCOPE_GUARD_BRANCH
         assert stored.measured["files"] == SCOPE_GUARD_FILES
@@ -124,7 +124,7 @@ class TestCapture:
         capture_scope_probe(probes, _session(worktree), _inflated())
 
         stored = probes.lookup(ScopeKey("sess-scope", worktree))
-        assert stored.default_branch == "trunk"
+        assert stored.base_branch == "trunk"
         assert stored.measured is not None
         assert stored.measured["files"] == SCOPE_GUARD_FILES
 
@@ -148,7 +148,7 @@ class TestCapture:
             capture_scope_probe(probes, _session(repo), _inflated())
 
         stored = probes.lookup(ScopeKey("sess-scope", repo))
-        assert stored.default_branch == "main"
+        assert stored.base_branch == "main"
         assert stored.measured is not None
         assert stored.measured["files"] == SCOPE_GUARD_FILES
         assert "scope_verification_client_unresolved" in caplog.text
@@ -167,7 +167,7 @@ class TestCapture:
             capture_scope_probe(probes, _session(repo), _inflated())
 
         stored = probes.lookup(ScopeKey("sess-scope", repo))
-        assert stored.default_branch == "main"
+        assert stored.base_branch == "main"
         assert stored.measured is not None
         assert "scope_verification_client_unresolved" in caplog.text
         assert "client=client-a" in caplog.text
@@ -460,7 +460,7 @@ class TestApply:
             ScopeKey("sess-scope", tmp_path),
             read=lambda _at: CapturedScope(
                 result=result,
-                default_branch="main",
+                base_branch="main",
                 measured={
                     "branch": "b",
                     "merge_base": "m",
