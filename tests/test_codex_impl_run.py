@@ -9,6 +9,7 @@ and the plan scope script are stubs under the per-test HOME.
 
 from __future__ import annotations
 
+import importlib
 import json
 import subprocess
 import uuid
@@ -68,6 +69,7 @@ from tests._codex_review_helpers import (
     rewrite_hook_body,
     seed_codex_impl_run,
 )
+from tests._shared.base_branch_builders import ROW_BASE, push_epic_base
 from tests._shared.bindings_builders import bindings_linear_mcp
 from tests._shared.cli_preflight import _write_tracker_config
 from tests._shared.git_repos import commit_tracked_file, git_in, push_commit_to_origin
@@ -1685,3 +1687,101 @@ def test_regressed_review_row_with_verdict_is_not_blocked_before_the_turn(
     )
     assert len(h.impl_calls) == 1
     assert "Regress finding XYZ" in str(h.impl_calls[0]["stdin"])
+
+
+# --- the row's base: RFC 0020 S3b (#3840) ---------------------------------------
+
+
+def test_a_based_row_measures_the_branch_and_fence_from_its_base(
+    harness: Callable[..., Harness],
+) -> None:
+    """The branch sits on ``origin/epic/x``: facts, fence and fork point use it.
+
+    A null row on the same topology would see ``epic.py`` as prior branch work
+    against ``origin/main``; here it is the base, so the run ships one commit.
+    """
+    h = harness(task_updates={"base_branch": ROW_BASE})
+    commit_tracked_file(h.worktree, "epic.py")
+    git_in(h.worktree, "push", "origin", f"HEAD:refs/heads/{ROW_BASE}")
+    git_in(h.worktree, "fetch", "origin")
+    epic_tip = git_in(h.worktree, "rev-parse", f"origin/{ROW_BASE}")
+    assert epic_tip != git_in(h.worktree, "rev-parse", "origin/main")
+    h.turn()
+    result = h.run()
+    assert result.status == "stage_complete"
+    assert result.fork_point_sha == epic_tip
+    assert result.commits == [h.head()]
+
+
+def _spy(monkeypatch: pytest.MonkeyPatch, target: str, name: str) -> list[Any]:
+    """Wrap ``target.name`` and return the list its calls are recorded into."""
+    calls: list[Any] = []
+    real = getattr(importlib.import_module(target), name)
+
+    def _wrapper(*args: Any, **kwargs: Any) -> Any:
+        calls.append((args, kwargs))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(f"{target}.{name}", _wrapper)
+    return calls
+
+
+def test_merge_target_reads_take_the_base_and_trust_roots_keep_the_default(
+    harness: Callable[..., Harness], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = harness(
+        repair=True,
+        plan=None,
+        scope=(1, SCOPE_DRIFT, ""),
+        task_updates={"base_branch": ROW_BASE},
+    )
+    push_epic_base(h.worktree)
+    on_branch = _spy(monkeypatch, "cw.codex_impl._run", "check_on_branch")
+    facts = _spy(monkeypatch, "cw.codex_impl._run", "git_facts")
+    probe = _spy(monkeypatch, "cw.codex_impl._run", "probe_default_branch")
+    fence = _spy(monkeypatch, "cw.codex_impl._run", "check_fix_fence")
+    sensitive = _spy(monkeypatch, "cw.codex_impl._run", "no_plan_sensitive_block")
+    violations = _spy(
+        monkeypatch, "cw.stage_verification.impl_gates", "scope_violations"
+    )
+    h.turn(files={"feature.py": "x = 2\n"})
+    assert h.run().status == "stage_complete"
+    # Merge-target reads: the row's base.
+    assert on_branch[0][1]["base_branch"] == ROW_BASE
+    assert on_branch[0][1]["default_branch"] == "main"
+    assert [args[1] for args, _kw in facts] == [ROW_BASE, ROW_BASE]
+    assert probe[0][1]["base_branch"] == ROW_BASE
+    assert fence[0][1]["base_branch"] == ROW_BASE
+    # Trust roots: the client default.
+    assert sensitive[0][1]["default_branch"] == "main"
+    assert violations[0][0][4] == "main"
+
+
+@pytest.mark.parametrize(
+    ("row_base", "target", "note"),
+    [
+        (None, "main", "origin's default branch conflicts with this branch in:"),
+        (ROW_BASE, ROW_BASE, f"origin/{ROW_BASE} conflicts with this branch in:"),
+    ],
+)
+def test_a_repair_conflict_merges_the_rows_base_and_names_it_in_the_prompt(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    row_base: str | None,
+    target: str,
+    note: str,
+) -> None:
+    h = harness(repair=True, task_updates={"base_branch": row_base})
+    commit_tracked_file(h.worktree, "clash.py", "mine\n")
+    git_in(h.worktree, "push", "origin", BRANCH)
+    if row_base is not None:
+        push_epic_base(h.worktree)
+    push_commit_to_origin(h.origin, target, tmp_path / "side", "clash.py", "theirs\n")
+    _repin(h)
+    h.turn(files={"clash.py": "resolved\n"})
+    result = h.run()
+    assert result.status == "stage_complete"
+    merged = git_in(h.worktree, "rev-list", "--parents", "-n", "1", "HEAD").split()
+    assert merged[2] == git_in(h.worktree, "rev-parse", f"origin/{target}")
+    (call,) = h.impl_calls
+    assert note in str(call["stdin"])

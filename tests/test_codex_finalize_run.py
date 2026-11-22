@@ -50,6 +50,7 @@ from tests._codex_review_helpers import (
     install_home_prep_pr_state,
     seed_codex_finalize_run,
 )
+from tests._shared.base_branch_builders import ROW_BASE, push_epic_base
 from tests._shared.bindings_builders import bindings_linear_mcp
 from tests._shared.cli_preflight import _write_tracker_config
 from tests._shared.git_repos import git_in
@@ -2136,3 +2137,141 @@ def test_a_pending_park_never_calls_the_hold_release(
     h.gates.reuse_plan(park=_park_plan("pending", "queued"))
     h.run()
     assert "ci-hold" not in _arm_names(h)
+
+
+# --- the row's base: RFC 0020 S3b (#3840) ---------------------------------------
+
+
+def _based(
+    harness: Callable[..., Harness], row_base: str | None, **kwargs: Any
+) -> tuple[Harness, str]:
+    """A FINALIZE run whose row carries *row_base*; also the base it must target."""
+    h = harness(task_updates={"base_branch": row_base}, **kwargs)
+    if row_base is not None:
+        push_epic_base(h.worktree)
+        h.gh.reply(
+            "pr",
+            "view",
+            PR_URL,
+            "--json",
+            "headRefName,headRefOid,baseRefName,state,autoMergeRequest",
+            stdout=json.dumps(
+                {
+                    "headRefName": BRANCH,
+                    "headRefOid": h.head,
+                    "baseRefName": row_base,
+                    "state": "OPEN",
+                    "autoMergeRequest": {"mergeMethod": "SQUASH"},
+                }
+            ),
+        )
+    return h, row_base or "main"
+
+
+def _spy(h: Harness, name: str) -> Mock:
+    spy = Mock(wraps=getattr(_run, name))
+    h.monkeypatch.setattr(f"cw.codex_finalize._run.{name}", spy)
+    return spy
+
+
+@pytest.mark.parametrize("row_base", [None, ROW_BASE])
+def test_the_create_path_targets_the_rows_base_throughout(
+    harness: Callable[..., Harness], row_base: str | None
+) -> None:
+    h, base = _based(harness, row_base)
+    h.turn(finalize_document(pr_title=TITLE, pr_body=BODY))
+    facts, gate, probe, gates = (
+        _spy(h, "git_facts"),
+        _spy(h, "run_merge_gate"),
+        _spy(h, "probe_default"),
+        _spy(h, "run_finalize_quality_gates"),
+    )
+    result = h.run()
+    assert result.status == "shipped"
+    assert result.pr is not None
+    assert result.pr.base == base
+    (call,) = h.created()
+    assert call.argv[2:6] == ["create", "--base", base, "--head"]
+    assert facts.call_args.args[1] == base
+    assert gate.call_args.kwargs["base_branch"] == base
+    assert probe.call_args.kwargs["base_branch"] == base
+    assert gates.call_args.kwargs["ci"].base == base
+
+
+@pytest.mark.parametrize("row_base", [None, ROW_BASE])
+def test_the_reuse_path_targets_the_rows_base_throughout(
+    harness: Callable[..., Harness], row_base: str | None
+) -> None:
+    h, base = _based(harness, row_base)
+    h.gh.reply("pr", "list", "--head", BRANCH, stdout=_pr_list("OPEN"))
+    probe, gates = _spy(h, "probe_default"), _spy(h, "run_finalize_quality_gates")
+    result = h.run()
+    assert result.status == "shipped"
+    assert result.pr is not None
+    assert result.pr.base == base
+    assert probe.call_args.kwargs["base_branch"] == base
+    assert gates.call_args.kwargs["ci"].base == base
+    assert f"ci-reuse-plan --pr 7 --base {base}" in h.gates.calls()
+
+
+@pytest.mark.parametrize(
+    ("row_base", "pr_base", "blocks"),
+    [
+        (ROW_BASE, ROW_BASE, True),
+        (ROW_BASE, "main", False),
+        (None, ROW_BASE, False),
+    ],
+)
+def test_the_merge_gate_only_counts_prs_aimed_at_the_rows_base(
+    harness: Callable[..., Harness],
+    row_base: str | None,
+    pr_base: str,
+    blocks: bool,
+) -> None:
+    """A conflicting sibling blocks only when aimed at the row's resolved base.
+
+    The null row's own PR-aimed-at-default case is
+    ``test_a_conflicting_sibling_pr_parks_merge_gate_blocked`` above.
+    """
+    h, _base = _based(harness, row_base, unpushed=1)
+    h.turn()
+    h.gh.reply(
+        "pr",
+        "list",
+        "--state",
+        "open",
+        "--author",
+        "@me",
+        stdout=json.dumps(
+            [{"number": 9, "headRefName": "dev/other", "baseRefName": pr_base}]
+        ),
+    )
+    h.gh.reply("pr", "diff", "9", stdout="feature.py\n")
+    with patch(
+        "cw.stage_verification.finalize_merge_gate._merge_tree", return_value="1"
+    ):
+        result = h.run()
+    assert (result.status == "merge_gate_blocked") is blocks
+    if not blocks:
+        assert result.status == "shipped"
+
+
+@pytest.mark.parametrize("row_base", [None, ROW_BASE])
+def test_an_inventory_without_base_ref_name_fails_closed(
+    harness: Callable[..., Harness], row_base: str | None
+) -> None:
+    h, _base = _based(harness, row_base)
+    h.gh.reply(
+        "pr",
+        "list",
+        "--state",
+        "open",
+        "--author",
+        "@me",
+        stdout=json.dumps([{"number": 9, "headRefName": "dev/other"}]),
+    )
+    result = h.run()
+    _assert_block(result, "agent_block")
+    assert result.blocker is not None
+    assert "open-PR inventory failed" in result.blocker.details
+    assert h.created() == []

@@ -186,6 +186,7 @@ class _Run:
     reasoning_effort: str | None
     usage: UsageAccumulator = NO_USAGE
 
+    # Both codex executors carry this; their _Run classes differ only in harness.
     @property
     def base_branch(self) -> str:
         """The row's merge target: its base, else the client default (S3b)."""

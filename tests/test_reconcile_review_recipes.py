@@ -5020,6 +5020,84 @@ def test_dispatch_fix_agent_no_task_kwarg(
     assert "task" not in stub_spawn.calls[0]
 
 
+@pytest.mark.parametrize(
+    ("row_base", "expected"),
+    [("epic/x", "epic/x"), (None, "main")],
+    ids=["based-row", "null-row-client-default"],
+)
+def test_dispatch_fix_agent_spawns_with_the_rows_base(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    stub_spawn: _SpawnRecorder,
+    row_base: str | None,
+    expected: str,
+) -> None:
+    """RFC 0020 S3b: the fix session's context base is the row's, else default."""
+    from cw.reconcile.review_recipes.fix_agent import dispatch_fix_agent
+
+    client = _make_fix_client(make_git_repo, tmp_path)
+    branch = "dev/2017"
+    _seed_origin(client, branch)
+    git_in(client.workspace_path, "push", "origin", "main:refs/heads/epic/x")
+    git_in(client.workspace_path, "fetch", "origin")
+    _seed_fix_parent_session(client, "parent-session")
+
+    dispatch_fix_agent(
+        client=client,
+        branch=branch,
+        prompt=_FIX_PROMPT_TEXT,
+        label="fix-2017",
+        ticket_id="2017",
+        lane="default",
+        parent="parent-session",
+        task=_make_task(ticket_id="2017", client="acme", base_branch=row_base),
+    )
+
+    (call,) = stub_spawn.calls
+    assert call["base_branch"] == expected
+    assert "task" not in call
+
+
+@pytest.mark.parametrize(
+    ("row_base", "expected"),
+    [("epic/x", "epic/x"), (None, "main")],
+    ids=["based-row", "null-row-client-default"],
+)
+def test_address_review_dispatch_spawns_with_the_rows_base(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+    row_base: str | None,
+    expected: str,
+) -> None:
+    """RFC 0020 S3b: the address-review job carries the row's base to the spawn."""
+    write_clients_yaml(ClientSpec("acme", tmp_config_dir, default_branch="main"))
+    worktree = make_git_repo(f"address-base-{expected.replace('/', '-')}")
+    task = _cr_task(
+        worktree_path=worktree,
+        base_branch=row_base,
+        pr_state=_pr_state(
+            state="OPEN",
+            attention_state="changes_requested",
+            review_decision="CHANGES_REQUESTED",
+        ),
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidates = [_candidate_for(task)]
+    clients = load_effective_clients()
+    jobs = _act_address_review(
+        candidates,
+        clients=clients,
+        repo_slugs=capture_repo_slugs(candidates, clients=clients),
+    )
+    assert [job.base_branch for job in jobs] == [expected]
+    _dispatch_address_review_jobs(jobs)
+
+    (call,) = stub_spawn.calls
+    assert call["base_branch"] == expected
+
+
 def test_dispatch_fix_agent_resumes_pushed_branch(
     make_git_repo: Callable[..., Path],
     tmp_path: Path,

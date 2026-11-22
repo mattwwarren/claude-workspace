@@ -25,8 +25,10 @@ from tests._shared.workflow_text import _SRC_ROOT, _iter_src_files
 _MARKER = "stays on client.default_branch:"
 _SEAM_FILES = frozenset({"cw/models/branch.py", "cw/models/client.py"})
 _MAX_ALLOWLIST_ENTRIES = 12
-_MIN_READS = 34  # non-vacuity; S3b (#3840) flipped codex merge-target reads off
-# .default_branch, so the count fell 40 -> 35. Flagged in the PR, not silent.
+# Non-vacuity floor: the guard must see MORE than _MIN_READS reads. S3b (#3840)
+# moved the codex merge-target reads off .default_branch, so the read count
+# fell; the floor is one below the 35 reads measured after S3b.
+_MIN_READS = 34
 
 
 class Read(NamedTuple):

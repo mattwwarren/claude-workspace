@@ -140,7 +140,7 @@ class ProbeOutcome:
 class MergeOutcome:
     """A started conflict merge: the merge-side files and the conflicted tree.
 
-    ``merge_files`` are the paths the default branch changed since the merge
+    ``merge_files`` are the paths the row's base changed since the merge
     base (cw's merge brought them in, so the turn did not edit them);
     ``growth_tree`` is the conflicted merge-tree oid the growth guard measures
     the turn against.
@@ -151,7 +151,7 @@ class MergeOutcome:
 
 
 def _fetch_default(worktree: Path, base_branch: str) -> str | None:
-    """``None`` when ``origin/<default>`` was fetched, else why not."""
+    """``None`` when ``origin/<base_branch>`` was fetched, else why not."""
     try:
         fetched = run_git(
             ["fetch", "origin", base_branch],
@@ -170,7 +170,7 @@ def _fetch_default(worktree: Path, base_branch: str) -> str | None:
 def probe_default_branch(
     worktree: Path, *, base_branch: str, repair: bool
 ) -> ProbeOutcome:
-    """Would merging ``origin/<default>`` conflict? Read-only; fetches first.
+    """Would merging ``origin/<base_branch>`` conflict? Read-only; fetches first.
 
     A failed fetch or an unavailable probe is friction
     (``merge_probe_unavailable: ...``) and no merge. A conflict on a fresh row
@@ -203,11 +203,11 @@ def probe_default_branch(
 def merge_default_on_conflict(
     worktree: Path, *, base_branch: str
 ) -> MergeOutcome | ImplBlock:
-    """Start ``git merge --no-commit --no-ff origin/<default>`` leaving conflicts.
+    """Start ``git merge --no-commit --no-ff origin/<base_branch>`` leaving conflicts.
 
     Call only after the clean-start baseline is captured and only when
     :func:`probe_default_branch` set ``needs_merge``. Returns the merge-side
-    file set (``git diff --name-only HEAD...origin/<default>``) and the
+    file set (``git diff --name-only HEAD...origin/<base_branch>``) and the
     conflicted merge-tree oid, or an ``impl_failed`` block when git cannot
     start the merge.
     """

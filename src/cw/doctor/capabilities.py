@@ -68,8 +68,8 @@ _BASE_BACKEND_DETAIL = (
     " pre-flight refuses such a spawn before any agent runs"
     " (base_unsupported_backend, or stage_unsupported first where the"
     " backend does not declare the stage). To proceed: route those stages"
-    " to claude-native, or re-add the ticket without a base_branch"
-    " (RFC 0020 A1)."
+    " to claude-native or codex, or re-add the ticket without a base_branch"
+    " (RFC 0020 A1, S3b)."
 )
 _BRANCHLESS = (
     "claude-native reads enabledPlugins on the ticket branch, which doctor does"

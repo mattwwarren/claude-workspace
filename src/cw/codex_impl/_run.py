@@ -205,6 +205,7 @@ class _Run:
         """Whether the row carries review feedback (a repair entry)."""
         return self.task.review_feedback is not None
 
+    # Both codex executors carry this; their _Run classes differ only in harness.
     @property
     def base_branch(self) -> str:
         """The row's merge target: its base, else the client default (S3b)."""

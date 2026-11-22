@@ -573,6 +573,7 @@ def test_base_details_name_the_backend_and_the_way_out() -> None:
     assert "backend=opencode" in details
     assert "Blocked before any agent runs." in details
     assert "re-add it without a base_branch" in details
+    assert "Only the claude-native and codex executors deliver a base today" in details
 
 
 @pytest.mark.parametrize("backend", [LOCAL_BACKEND, OPENCODE_BACKEND])
@@ -779,26 +780,29 @@ def test_a_based_row_parks_before_any_probe_or_launch(
     assert f"backend={harness}" in result.blocker.details
 
 
-def test_a_based_row_is_not_refused_on_codex(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-) -> None:
-    """S3b: codex delivers the base, so pre-flight passes it through.
+def test_a_based_row_is_not_refused_on_codex(tmp_path: Path) -> None:
+    """S3b: codex delivers the base, so the pre-flight decision passes it through.
 
-    The binary is absent in this harness, so the run stops later with
-    ``codex_not_found``; the assertion is only that the base refusal is gone.
+    Drives the real fact builder and decision (no full run), so the assertion
+    is exact: the based row yields ``has_base`` facts and no unmet need, and
+    ``park_if_unmet`` returns ``None`` instead of a blocked result.
     """
-    worktree = make_git_repo("wt-base-preflight-codex-ok")
-    runner = FakeFireAndForgetRunner()
     task = based_row(Stage.IMPL)
-    client = ClientConfig(name="test", workspace_path=worktree)
-    with patch("cw.executor.codex.shutil.which", return_value=None):
-        CodexExecutor(
-            config=StageExecutorConfig(backend=CODEX_BACKEND), runner=runner
-        ).spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
-    result = blocked_result()
-    assert result.blocker is not None
-    assert result.blocker.reason != PreflightReason.BASE_UNSUPPORTED_BACKEND
+    client = ClientConfig(name="test", workspace_path=tmp_path)
+    facts = spawn_facts(CODEX_CAPABILITIES, task=task, client=client, stage=Stage.IMPL)
+    assert facts.has_base is True
+    assert first_unmet(CODEX_CAPABILITIES, facts) is None
+    assert (
+        park_if_unmet(
+            CODEX_CAPABILITIES,
+            task=task,
+            client=client,
+            stage=Stage.IMPL,
+            worktree=tmp_path,
+            blocked=make_blocked,
+        )
+        is None
+    )
 
 
 def test_codex_harden_parks_before_the_binary_probe(

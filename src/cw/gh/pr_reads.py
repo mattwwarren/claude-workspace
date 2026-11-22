@@ -471,7 +471,7 @@ _OPEN_PR_HEADS_LIMIT = 1000
 
 
 class OpenPrHead(NamedTuple):
-    """One open PR's number and head branch, as ``gh pr list`` reports it."""
+    """One open PR's number, head and base branch, as ``gh pr list`` reports it."""
 
     number: int
     head_ref_name: str

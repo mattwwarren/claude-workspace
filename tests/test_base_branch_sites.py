@@ -12,6 +12,7 @@ packages is annotated as retained or is in the S3-deferred allowlist.
 from __future__ import annotations
 
 import ast
+import functools
 import io
 import logging
 import subprocess
@@ -87,6 +88,8 @@ from tests._reconcile_helpers import (
     install_stub_dispatch,
     make_fix_loop_client,
 )
+from tests._shared.base_branch_builders import ROW_BASE as _BASE
+from tests._shared.base_branch_builders import base_row
 from tests._shared.dispatch_fixtures import (
     SWEEP_CLIENT,
     SWEEP_TICKET,
@@ -116,7 +119,6 @@ if TYPE_CHECKING:
     from cw.models import OrchestratorConfig
     from tests._changelog_repair_helpers import FakeGhHead
 
-_BASE = "epic/x"
 _BRANCH = "dev/3780"
 _MARKER = "# stays on client.default_branch:"
 
@@ -301,8 +303,7 @@ def _worktree_add(argv: list[list[str]]) -> list[str]:
     return cmd
 
 
-def _base_row(base: str | None = _BASE) -> TicketTask:
-    return _make_ticket_task(ticket_id="3780", client="acme", base_branch=base)
+_base_row = functools.partial(base_row, ticket_id="3780", client="acme")
 
 
 class TestWorktreeStartPoint:
