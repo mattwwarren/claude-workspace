@@ -5,8 +5,8 @@ diff base), the pinned-base verification and the confirm review's merge target
 all come from ``resolve_base_branch(client, task)``. ``default_branch`` passed
 to the confirm review stays the client default: it is the trust root the
 review configuration is read from. A null-base row resolves to the client
-default, so its behavior is unchanged. The repo has ``origin/epic`` and
-``origin/main`` diverged, with the feature branch cut from ``epic``, so the
+default, so its behavior is unchanged. The repo has ``origin/epic/x`` and
+``origin/main`` diverged, with the feature branch cut from ``epic/x``, so the
 two merge-bases are different commits.
 """
 
@@ -24,17 +24,19 @@ from cw.codex_review import synthesize_codex_review_result
 from cw.models import ClientConfig
 from cw.models.client import ReviewConfig
 from tests._claude_review_helpers import RoleAwareClaudeRunner, review_envelope
-from tests._codex_review_helpers import _doc_json, _task
+from tests._codex_review_helpers import _doc_json
 from tests._review_convergence_helpers import (
     consolidated_verdict,
     dirty_confirm_ledger,
     live_merge_base,
 )
-from tests._shared.git_repos import (
-    add_diverged_base_origin,
-    commit_tracked_file,
-    git_in,
+from tests._shared.base_branch_builders import (
+    ROW_BASE,
+    TRUST_ROOT,
+    base_row,
+    diverged_base_worktree,
 )
+from tests._shared.git_repos import commit_tracked_file, git_in
 from tests._shared.review_builders import _make_diff, _make_reviewer_doc
 
 if TYPE_CHECKING:
@@ -42,9 +44,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import TicketTask
-
-_BASE = "epic"
-_TRUST = "main"
 
 
 @pytest.fixture(autouse=True)
@@ -54,10 +53,8 @@ def _claude_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def wt(make_git_repo: Callable[[str], Path]) -> Path:
-    """A feature branch cut from ``origin/epic``, which has diverged from main."""
-    repo = make_git_repo("clean-confirm-based")
-    add_diverged_base_origin(repo, _BASE)
-    git_in(repo, "checkout", "-b", "feature", _BASE)
+    """A feature branch cut from ``origin/<ROW_BASE>``, diverged from main."""
+    repo = diverged_base_worktree(make_git_repo, "clean-confirm-based")
     commit_tracked_file(repo, "feature.py")
     git_in(repo, "push", "origin", "feature")
     return repo
@@ -67,7 +64,7 @@ def _client(wt: Path) -> ClientConfig:
     return ClientConfig(
         name="test",
         workspace_path=wt,
-        default_branch=_TRUST,
+        default_branch=TRUST_ROOT,
         review=ReviewConfig.model_validate(
             {"convergence": "clean", "confirm_backend": None}
         ),
@@ -75,7 +72,7 @@ def _client(wt: Path) -> ClientConfig:
 
 
 def _row(base_branch: str | None) -> TicketTask:
-    return _task().model_copy(update={"base_branch": base_branch})
+    return base_row(base_branch, ticket_id="T-1", client="test")
 
 
 def _clean_role(role: str) -> ClaudeRunResult:
@@ -134,7 +131,7 @@ def _clean_codex_round(wt: Path, task: TicketTask, base_branch: str) -> tuple[An
 class TestConfirmGate:
     @pytest.mark.parametrize(
         ("row_base", "expected"),
-        [(_BASE, _BASE), (None, _TRUST)],
+        [(ROW_BASE, ROW_BASE), (None, TRUST_ROOT)],
         ids=["base-row", "null-row"],
     )
     def test_fork_point_pin_and_confirm_review_follow_the_row_base(
@@ -145,7 +142,7 @@ class TestConfirmGate:
         expected: str,
     ) -> None:
         # Precondition: the two merge-bases are different commits.
-        assert live_merge_base(wt, _BASE) != live_merge_base(wt, _TRUST)
+        assert live_merge_base(wt, ROW_BASE) != live_merge_base(wt, TRUST_ROOT)
         task = _row(row_base)
         seen = _Seen(monkeypatch)
         result, verdict = _clean_codex_round(wt, task, expected)
@@ -171,7 +168,7 @@ class TestConfirmGate:
         # configuration stays on the client default.
         (call,) = seen.review
         assert call["base_branch"] == expected
-        assert call["default_branch"] == _TRUST
+        assert call["default_branch"] == TRUST_ROOT
         assert call["base_ref"] == merge_base
 
 
@@ -195,10 +192,10 @@ class TestConfirmFeedbackFork:
         self, wt: Path
     ) -> None:
         dirty_confirm_ledger(
-            wt, _claude_must_fix(wt), fork_point=live_merge_base(wt, _BASE)
+            wt, _claude_must_fix(wt), fork_point=live_merge_base(wt, ROW_BASE)
         )
 
-        assert self._load(wt, _BASE) is not None
+        assert self._load(wt, ROW_BASE) is not None
         # A null row resolves to main: a different fork point, so no feedback.
         assert self._load(wt, None) is None
 
@@ -206,8 +203,8 @@ class TestConfirmFeedbackFork:
         self, wt: Path
     ) -> None:
         dirty_confirm_ledger(
-            wt, _claude_must_fix(wt), fork_point=live_merge_base(wt, _TRUST)
+            wt, _claude_must_fix(wt), fork_point=live_merge_base(wt, TRUST_ROOT)
         )
 
         assert self._load(wt, None) is not None
-        assert self._load(wt, _BASE) is None
+        assert self._load(wt, ROW_BASE) is None

@@ -14,9 +14,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from cw.codex_background import _run_codex_review_and_complete
+from cw.codex_runner import FakeCodexRunner
 from cw.config import save_state
 from cw.local_runner import make_blocked
 from cw.models import ClientConfig, CwState, Stage, TicketTask
+from tests._shared.base_branch_builders import ROW_BASE, TRUST_ROOT
 from tests._shared.session_seeding import _make_daemon_session
 
 if TYPE_CHECKING:
@@ -24,21 +26,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult
-    from cw.codex_runner import CodexRunResult
-
-
-class _UnusedRunner:
-    """CodexRunner stand-in: the fix loop is patched out, so run is never reached."""
-
-    def run(
-        self,
-        worktree: Path,
-        argv: list[str],
-        timeout_seconds: int | None,
-        *,
-        stdin: str | None = None,
-    ) -> CodexRunResult:
-        raise AssertionError(self.run.__doc__)
 
 
 @pytest.fixture(autouse=True)
@@ -55,7 +42,7 @@ def _hermetic_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.parametrize(
     ("row_base", "expected_base"),
-    [("epic/x", "epic/x"), (None, "main")],
+    [(ROW_BASE, ROW_BASE), (None, TRUST_ROOT)],
     ids=["based-row", "null-row"],
 )
 def test_review_thread_stamps_stage_facts_against_the_rows_base(
@@ -93,7 +80,7 @@ def test_review_thread_stamps_stage_facts_against_the_rows_base(
         patch("cw.codex_background._post_daemon_verdict_comment"),
     ):
         _run_codex_review_and_complete(
-            runner=_UnusedRunner(),
+            runner=FakeCodexRunner(),
             task=task,
             worktree=worktree,
             client=client,

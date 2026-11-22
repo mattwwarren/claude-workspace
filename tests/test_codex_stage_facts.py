@@ -23,12 +23,12 @@ from cw.codex_review import FIX_CYCLE_COMMIT_PREFIX, make_codex_blocked
 from cw.codex_stage_facts import fix_loop_facts, resolve_plan_source, stamp_stage_facts
 from cw.dispatch.routing import scope_tier
 from tests._codex_review_helpers import _task
-from tests._shared.git_repos import (
-    add_bare_origin,
-    add_diverged_base_origin,
-    commit_tracked_file,
-    git_in,
+from tests._shared.base_branch_builders import (
+    ROW_BASE,
+    TRUST_ROOT,
+    diverged_base_worktree,
 )
+from tests._shared.git_repos import add_bare_origin, commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -201,15 +201,10 @@ class TestStamp:
         assert stamped.commits == []
 
 
-_BASE = "epic"
-
-
 @pytest.fixture
 def based_repo(make_git_repo: Callable[..., Path]) -> Path:
-    """A feature branch cut from ``origin/epic``, which has diverged from main."""
-    path = make_git_repo("facts-based-wt")
-    add_diverged_base_origin(path, _BASE)
-    git_in(path, "checkout", "-b", "feature", _BASE)
+    """A feature branch cut from ``origin/<ROW_BASE>``, diverged from main."""
+    path = diverged_base_worktree(make_git_repo, "facts-based-wt")
     commit_tracked_file(path, "feature.py")
     return path
 
@@ -220,10 +215,10 @@ class TestBaseRow:
     def test_fix_loop_facts_fork_point_follows_the_base(self, based_repo: Path) -> None:
         fix = _commit(based_repo, "fix.py", _fix_subject(1))
 
-        on_base, base_commits = fix_loop_facts(based_repo, _BASE)
-        on_main, main_commits = fix_loop_facts(based_repo, "main")
+        on_base, base_commits = fix_loop_facts(based_repo, ROW_BASE)
+        on_main, main_commits = fix_loop_facts(based_repo, TRUST_ROOT)
 
-        assert on_base == git_in(based_repo, "rev-parse", f"origin/{_BASE}")
+        assert on_base == git_in(based_repo, "rev-parse", f"origin/{ROW_BASE}")
         assert on_main == git_in(based_repo, "merge-base", "origin/main", "HEAD")
         assert on_base != on_main
         assert base_commits == [fix]
@@ -233,14 +228,17 @@ class TestBaseRow:
         self, based_repo: Path
     ) -> None:
         on_base = stamp_stage_facts(
-            _result(based_repo), task=_task(), worktree=based_repo, base_branch=_BASE
+            _result(based_repo), task=_task(), worktree=based_repo, base_branch=ROW_BASE
         )
         on_null = stamp_stage_facts(
-            _result(based_repo), task=_task(), worktree=based_repo, base_branch="main"
+            _result(based_repo),
+            task=_task(),
+            worktree=based_repo,
+            base_branch=TRUST_ROOT,
         )
 
         assert on_base.fork_point_sha == git_in(
-            based_repo, "rev-parse", f"origin/{_BASE}"
+            based_repo, "rev-parse", f"origin/{ROW_BASE}"
         )
         assert on_null.fork_point_sha == git_in(
             based_repo, "merge-base", "origin/main", "HEAD"

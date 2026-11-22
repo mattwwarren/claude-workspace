@@ -5,7 +5,7 @@ default, the trust root) and ``base_branch`` (the row's merge target). Every
 merge-target carrier in the loop gets the base; ``scope_violations`` keeps the
 trust root because the sensitive-file registry is read from it. A null-base row
 resolves to the client default, so both names carry ``main`` and nothing
-changes. The loop runs for real over a git repo whose ``origin/epic`` and
+changes. The loop runs for real over a git repo whose ``origin/epic/x`` and
 ``origin/main`` have diverged; the spies record each call and run the real
 function.
 """
@@ -29,18 +29,17 @@ from tests._codex_review_helpers import (
     _task,
     exclude_cw_dir,
 )
-from tests._shared.git_repos import (
-    add_diverged_base_origin,
-    commit_tracked_file,
-    git_in,
+from tests._shared.base_branch_builders import (
+    ROW_BASE,
+    TRUST_ROOT,
+    diverged_base_worktree,
 )
+from tests._shared.git_repos import commit_tracked_file
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-_BASE = "epic"
-_TRUST = "main"
 _CYCLE0_FILE = "pkg_a/a1.py"
 _FIX_FILE = "pkg_a/fixed.py"
 
@@ -113,10 +112,8 @@ class _Spies:
 
 
 def _based_repo(make_git_repo: Callable[[str], Path], name: str) -> Path:
-    """A feature branch cut from ``origin/epic``, which has diverged from main."""
-    repo = make_git_repo(name)
-    add_diverged_base_origin(repo, _BASE)
-    git_in(repo, "checkout", "-b", "feature", _BASE)
+    """A feature branch cut from ``origin/<ROW_BASE>``, diverged from main."""
+    repo = diverged_base_worktree(make_git_repo, name)
     for relpath in (_CYCLE0_FILE, "pkg_a/a2.py"):
         commit_tracked_file(repo, relpath, _stem_content(relpath))
     exclude_cw_dir(repo)
@@ -132,7 +129,7 @@ def _drive(repo: Path, *, base_branch: str) -> None:
         _task(),
         repo,
         base_branch,
-        config_branch=_TRUST,
+        config_branch=TRUST_ROOT,
         runner=FakeCodexRunner(),
         session_id="s-base-warm",
     )
@@ -145,7 +142,7 @@ def _drive(repo: Path, *, base_branch: str) -> None:
         runner=runner,
         task=_task(),
         worktree=repo,
-        default_branch=_TRUST,
+        default_branch=TRUST_ROOT,
         base_branch=base_branch,
         model=None,
         reasoning_effort=None,
@@ -157,7 +154,7 @@ def _drive(repo: Path, *, base_branch: str) -> None:
 
 class TestLoopCarriers:
     @pytest.mark.parametrize(
-        "base_branch", [_BASE, _TRUST], ids=["base-row", "null-row"]
+        "base_branch", [ROW_BASE, TRUST_ROOT], ids=["base-row", "null-row"]
     )
     def test_merge_target_carriers_get_the_base_and_trust_roots_the_default(
         self,
@@ -178,13 +175,13 @@ class TestLoopCarriers:
         assert set(spies.fence) == {base_branch}
         # The sensitive-file registry stays on the trust root.
         assert spies.scope
-        assert set(spies.scope) == {_TRUST}
+        assert set(spies.scope) == {TRUST_ROOT}
         # The re-review diff base is the row's base; review configuration is
         # still read from the trust root, and synthesis measures the base.
         rereview = [call for call in spies.prepare if call[2]]
         assert rereview, "the loop never reached a re-review"
         assert {base for base, _config, _delta in rereview} == {base_branch}
-        assert {config for _base, config, _delta in rereview} == {_TRUST}
+        assert {config for _base, config, _delta in rereview} == {TRUST_ROOT}
         assert spies.synthesize
         assert set(spies.synthesize) == {base_branch}
 
@@ -196,7 +193,7 @@ def _engine_spec() -> EngineRoundSpec:
             guarded_paths=(),
             ticket_id="T-1",
             client="test",
-            default_branch=_TRUST,
+            default_branch=TRUST_ROOT,
         )
     )
 
@@ -225,8 +222,8 @@ class TestEnginePath:
             runner=FakeCodexRunner(),
             task=_task(),
             worktree=tmp_path,
-            default_branch=_TRUST,
-            base_branch=_BASE,
+            default_branch=TRUST_ROOT,
+            base_branch=ROW_BASE,
             model=None,
             reasoning_effort=None,
             wall_clock_budget_seconds=None,
@@ -239,10 +236,10 @@ class TestEnginePath:
             engine=_engine_spec(),
         )
 
-        assert seen == [(_BASE, _TRUST, 0)]
+        assert seen == [(ROW_BASE, TRUST_ROOT, 0)]
 
     @pytest.mark.parametrize(
-        "base_branch", [_BASE, _TRUST], ids=["base-row", "null-row"]
+        "base_branch", [ROW_BASE, TRUST_ROOT], ids=["base-row", "null-row"]
     )
     def test_rereview_engine_pass_gets_base_and_config_apart(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, base_branch: str
@@ -253,7 +250,7 @@ class TestEnginePath:
             runner=FakeCodexRunner(),
             task=_task(),
             worktree=tmp_path,
-            default_branch=_TRUST,
+            default_branch=TRUST_ROOT,
             base_branch=base_branch,
             model=None,
             reasoning_effort=None,
@@ -265,4 +262,4 @@ class TestEnginePath:
             engine=_engine_spec(),
         )
 
-        assert seen == [(base_branch, _TRUST, 1)]
+        assert seen == [(base_branch, TRUST_ROOT, 1)]

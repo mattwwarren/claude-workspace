@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 from tests._review_convergence_helpers import merge_origin_commit
-from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.git_repos import (
+    add_diverged_base_origin,
+    commit_tracked_file,
+    git_in,
+)
 from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
@@ -23,6 +27,9 @@ if TYPE_CHECKING:
 
 ROW_BASE = "epic/x"
 CLIENT_DEFAULT = "trunk"
+# The trust root for the codex base-row tests: the repo's own ``main``, which is
+# what ``add_diverged_base_origin`` diverges ``ROW_BASE`` from.
+TRUST_ROOT = "main"
 
 ENGINE_STUB = Path(__file__).resolve().parent.parent / "fixtures" / "review_engine_stub"
 ENGINE_SKILL = "repo-review"
@@ -39,6 +46,21 @@ def base_row(
 ) -> TicketTask:
     """One ticket row carrying *base* as its ``base_branch`` (``None`` = null row)."""
     return _make_ticket_task(ticket_id=ticket_id, client=client, base_branch=base)
+
+
+def diverged_base_worktree(
+    make_git_repo: Callable[..., Path], name: str, base: str = ROW_BASE
+) -> Path:
+    """A worktree on ``feature``, cut from ``origin/<base>``, diverged from main.
+
+    ``origin/main`` and ``origin/<base>`` each carry a commit the other lacks, so
+    a ref measured against the wrong one of them shows. The caller adds whatever
+    feature-branch commits its test needs.
+    """
+    repo = make_git_repo(name)
+    add_diverged_base_origin(repo, base)
+    git_in(repo, "checkout", "-b", "feature", base)
+    return repo
 
 
 def push_epic_base(worktree: Path, base: str = ROW_BASE) -> str:
