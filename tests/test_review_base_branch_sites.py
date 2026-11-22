@@ -18,6 +18,8 @@ from pydantic import ValidationError
 import cw.cli.review.confirm as confirm_cli
 from cw.claude_review import core as claude_core
 from cw.cli import main
+from cw.cli.review import attestation as attestation_cli
+from cw.cli.review import converge_delta, converge_tip
 from cw.cli.review.converge import _default_branch
 from cw.codex_review import _engine_round
 from cw.codex_review import core as codex_core
@@ -35,6 +37,7 @@ from cw.reconcile.review_recipes.repair_fence import (
     build_fence_snapshot,
     evaluate_repair_fence,
 )
+from cw.review_approval import AttestationVerdict
 from cw.review_convergence import (
     MergeTolerance,
     resolve_loop_diff_base,
@@ -46,6 +49,7 @@ from cw.review_convergence import (
 from cw.review_engine.context import EngineContext, read_engine_context
 from cw.review_engine.materialize import materialize_skill
 from cw.review_engine.preflight import run_preflight
+from cw.stage_verification.fence import check_fix_fence, scope_violations
 from cw.ticket_snapshot import DEFAULT_SNAPSHOT_CONTEXT
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._review_approval_helpers import (
@@ -850,3 +854,212 @@ def test_the_three_approval_producers_agree_on_a_merge_of_the_row_base(
     )
 
     assert tokens == (expected, expected, expected)
+
+
+# --- converge verify-tip: the base names the merge target (S3a) ------------
+
+
+def test_verify_tip_refreshes_the_base_ref_not_the_client_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    argvs: list[list[str]] = []
+    rejections = iter(["non_merge_commit abc1234", None])
+
+    def _run_git(argv: list[str], **_kw: object) -> SimpleNamespace:
+        argvs.append(argv)
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(converge_tip, "run_git", _run_git)
+    monkeypatch.setattr(
+        converge_tip, "default_merge_rejection", lambda *_a: next(rejections)
+    )
+
+    rejection = converge_tip._rejection_after_refresh(
+        tmp_path, "c" * 40, "d" * 40, MergeTolerance(ROW_BASE)
+    )
+
+    assert rejection is None
+    assert argvs == [
+        ["fetch", "origin", f"+refs/heads/{ROW_BASE}:refs/remotes/origin/{ROW_BASE}"]
+    ]
+
+
+def test_verify_tip_rejection_names_the_base(tmp_path: Path) -> None:
+    check = converge_tip._rejected(
+        tmp_path,
+        cast("Any", None),
+        "d" * 40,
+        cast("Any", None),
+        "non_merge_commit abc1234",
+        tolerance=MergeTolerance(ROW_BASE),
+        assess_resolution=False,
+    )
+
+    assert f"not a clean merge of origin/{ROW_BASE}:" in check.detail
+    assert CLIENT_DEFAULT not in check.detail
+
+
+# --- converge delta-confirm takes the row (S3a) ----------------------------
+
+
+@pytest.mark.parametrize(
+    ("base", "expected"), [(ROW_BASE, ROW_BASE), (None, CLIENT_DEFAULT)]
+)
+def test_delta_plan_judges_the_merge_against_the_rows_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, base: str | None, expected: str
+) -> None:
+    client = make_review_client(tmp_path, default_branch=CLIENT_DEFAULT)
+    seen: list[MergeTolerance | None] = []
+
+    def _assess(*_a: object, tolerance: MergeTolerance | None, **_k: object) -> object:
+        seen.append(tolerance)
+        return SimpleNamespace(plan=None, refusal="ineligible")
+
+    monkeypatch.setattr(converge_delta, "get_client", lambda _name: client)
+    monkeypatch.setattr(converge_delta, "rev_parse_or_none", lambda *_a: "h" * 40)
+    monkeypatch.setattr(
+        converge_delta, "require_ledger", lambda _p: SimpleNamespace(ticket_id="T-1")
+    )
+    monkeypatch.setattr(converge_delta, "assess_resolution_round", _assess)
+
+    with pytest.raises(converge_delta.DeltaRefusedError):
+        converge_delta._resolve_plan(
+            client="test-client",
+            ticket_id="T-1",
+            worktree=tmp_path,
+            ledger_path=tmp_path / "ledger.json",
+            task=_row(base),
+        )
+
+    assert seen == [MergeTolerance(expected)]
+
+
+# --- attestation CLI: no row, so the context's base replaces the default ----
+
+
+def _attestation_tolerance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    context: dict[str, object],
+    client_tolerance: MergeTolerance | None,
+) -> MergeTolerance | None:
+    write_context(tmp_path, {"schema_version": 23, **context})
+    captured: dict[str, Any] = {}
+
+    def _evaluate_attestation(_raw: object, **kwargs: Any) -> AttestationVerdict:
+        captured.update(kwargs)
+        return AttestationVerdict("valid", "")
+
+    client = make_review_client(tmp_path)
+    monkeypatch.setattr(attestation_cli, "live_client", lambda _name: client)
+    monkeypatch.setattr(
+        attestation_cli, "review_move_tolerance", lambda *_a, **_k: client_tolerance
+    )
+    monkeypatch.setattr(
+        attestation_cli, "evaluate_review_attestation", _evaluate_attestation
+    )
+
+    attestation_cli.attestation_verdict(tmp_path, None, "T-1", "test-client")
+
+    return captured["merge_tolerance_for"]("c" * 40)
+
+
+def test_attestation_applies_the_context_base_to_the_client_tolerance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tolerance = _attestation_tolerance(
+        tmp_path,
+        monkeypatch,
+        context={"base_branch": ROW_BASE},
+        client_tolerance=MergeTolerance(CLIENT_DEFAULT),
+    )
+
+    assert tolerance == MergeTolerance(ROW_BASE)
+
+
+def test_attestation_without_a_context_base_keeps_the_client_tolerance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tolerance = _attestation_tolerance(
+        tmp_path,
+        monkeypatch,
+        context={},
+        client_tolerance=MergeTolerance(CLIENT_DEFAULT),
+    )
+
+    assert tolerance == MergeTolerance(CLIENT_DEFAULT)
+
+
+def test_attestation_strict_client_stays_strict_despite_a_context_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tolerance = _attestation_tolerance(
+        tmp_path,
+        monkeypatch,
+        context={"base_branch": ROW_BASE},
+        client_tolerance=None,
+    )
+
+    assert tolerance is None
+
+
+# --- the fix fence: diff base is the row's, the registry is the trust root --
+
+
+@pytest.fixture
+def epic_feature(
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]], tmp_path: Path
+) -> Path:
+    """feature = feature.py + a merge of ``origin/epic/x`` (which adds epic_only.py)."""
+    wt, origin = make_git_repo_with_origin("wt-fence")
+    git_in(wt, "push", "-q", "origin", f"main:refs/heads/{ROW_BASE}")
+    push_commit_to_origin(origin, ROW_BASE, tmp_path / "side", "epic_only.py")
+    git_in(wt, "fetch", "-q", "origin")
+    git_in(wt, "merge", "--no-ff", "--no-edit", f"origin/{ROW_BASE}")
+    git_in(wt, "rm", "-q", "feature.py")
+    return wt
+
+
+def _fence_paths(wt: Path, base: str) -> tuple[str, ...] | None:
+    breach = check_fix_fence(
+        wt,
+        base_branch=base,
+        allowed_files=None,
+        finding_files=frozenset(),
+        cycle=2,
+        touched={"feature.py"},
+    )
+    return None if breach is None else breach.paths
+
+
+def test_the_fix_fence_measures_the_branch_diff_from_the_rows_base(
+    epic_feature: Path,
+) -> None:
+    on_base = _fence_paths(epic_feature, ROW_BASE)
+    on_default = _fence_paths(epic_feature, "main")
+
+    assert on_base == ("feature.py",)
+    assert on_default != on_base
+
+
+_REGISTRY = (
+    "sensitive_files:\n  - path: pyproject.toml\n    category: dependency\n"
+    "    reason: dependency changes need review\n"
+)
+
+
+def test_a_base_that_empties_the_registry_does_not_wave_an_edit_through(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    wt = make_git_repo("wt-registry")
+    commit_tracked_file(wt, ".claude/sensitive-files.yml", _REGISTRY)
+    git_in(wt, "checkout", "-q", "-b", ROW_BASE)
+    commit_tracked_file(wt, ".claude/sensitive-files.yml", "sensitive_files: []\n")
+    git_in(wt, "checkout", "-q", "-b", "dev/1")
+
+    on_default = scope_violations(wt, ["pyproject.toml"], frozenset(), "small", "main")
+    on_base = scope_violations(wt, ["pyproject.toml"], frozenset(), "small", ROW_BASE)
+
+    assert [hit.path for hit in on_default] == ["pyproject.toml"]
+    assert on_base == []  # the base's own registry would wave it through
