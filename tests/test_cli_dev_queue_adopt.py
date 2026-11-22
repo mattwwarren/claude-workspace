@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.cli.dev_queue._adopt import _commit_is_local
+from cw.cli.dev_queue._adopt import _commit_is_local, run_adopt
+from cw.config import get_client
 from cw.dev_queue import (
     ADOPT_PR_STATE_UNKNOWN_DISPOSITION,
     ADOPTED_HEAD_DRIFT_DISPOSITION,
@@ -22,12 +23,15 @@ from cw.dev_queue import (
 )
 from cw.events import read_events
 from cw.models import (
+    DEFAULT_LANE,
     ClientConfig,
     DevQueueStore,
     OrchestratorEventType,
     QueueItemStatus,
     Stage,
+    resolve_base_branch,
 )
+from cw.ticket_view import ViewSources
 from tests._adopt_pr_helpers import (
     FIXTURE_CONFLICTING,
     FIXTURE_FAILING_CLOSED,
@@ -247,6 +251,71 @@ class TestAdd:
         assert result.exit_code == 1
         assert "fork PRs" in result.output
         assert load_dev_queue().tasks == []
+
+    def test_pr_base_mismatch_refused_with_no_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # mutated from capture: baseRefName, mergeable
+        stub_pr_view(
+            monkeypatch,
+            load_adopt_fixture(
+                FIXTURE_GREEN_UNKNOWN, baseRefName="epic/3778", mergeable="MERGEABLE"
+            ),
+        )
+        result = _adopt()
+        assert result.exit_code == 1
+        assert "PR base 'epic/3778' differs from the row's base 'main'" in (
+            result.output
+        )
+        assert load_dev_queue().tasks == []
+
+    def test_epic_landing_pr_adopts_under_the_parent_ticket_with_null_base(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # mutated from capture: headRefName, mergeable
+        stub_pr_view(
+            monkeypatch,
+            load_adopt_fixture(
+                FIXTURE_GREEN_UNKNOWN, headRefName="epic/3778", mergeable="MERGEABLE"
+            ),
+        )
+        result = invoke_dev_queue("add", "3778", "--adopt-pr", _PR, "-c", _CLIENT)
+        assert result.exit_code == 0, result.output
+        assert "existence not verified" in result.stderr
+        (task,) = load_dev_queue().tasks
+        assert task.ticket_id == "3778"
+        assert task.branch == "epic/3778"
+        assert task.base_branch is None
+        assert task.stage == Stage.REVIEW
+        assert resolve_base_branch(get_client(_CLIENT), task) == "main"
+
+    def test_run_adopt_with_a_base_stamps_the_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # B1 wires --base; B2 exposes it only through run_adopt.
+        # mutated from capture: baseRefName, mergeable
+        stub_pr_view(
+            monkeypatch,
+            load_adopt_fixture(
+                FIXTURE_GREEN_UNKNOWN, baseRefName="epic/3778", mergeable="MERGEABLE"
+            ),
+        )
+        run_adopt(
+            (_PR,),
+            None,
+            _CLIENT,
+            int(_PR),
+            priority=0,
+            scope_hint=None,
+            signoff=None,
+            hold_finalize=None,
+            lane=DEFAULT_LANE,
+            sources=ViewSources(),
+            base="epic/3778",
+        )
+        (task,) = load_dev_queue().tasks
+        assert task.base_branch == "epic/3778"
+        assert task.stage == Stage.REVIEW
 
     def test_closed_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stub_pr_view(monkeypatch, load_adopt_fixture(FIXTURE_FAILING_CLOSED))

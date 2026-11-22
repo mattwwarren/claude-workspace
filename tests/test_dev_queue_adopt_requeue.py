@@ -31,7 +31,7 @@ from cw.dev_queue import (
 from cw.dev_queue.adoption import AdoptedPrSnapshot
 from cw.dev_queue.requeue import precheck_requeue, requeue_ticket
 from cw.events import read_events
-from cw.exceptions import RequeueStateError
+from cw.exceptions import AdoptionRefusedError, RequeueStateError
 from cw.models import (
     DevQueueStore,
     MustFixOverride,
@@ -648,7 +648,9 @@ class TestAdoptParkInvariant:
     ) -> None:
         stub_pr_view(monkeypatch, load_adopt_fixture(FIXTURE_GREEN_UNKNOWN))
         client = adopt_client(pinned.repo)
-        intake = read_adopted_pr(client, 2933, sleep=lambda _s: None)
+        intake = read_adopted_pr(
+            client, 2933, expected_base="main", sleep=lambda _s: None
+        )
         task = build_adopted_task("2933", client, intake, lane="default")
 
         assert task.disposition == ADOPT_PR_STATE_UNKNOWN_DISPOSITION
@@ -705,10 +707,19 @@ class TestRepairRowRecovery:
         assert after.branch == pinned.branch
         assert after.review_feedback == feedback
 
-    def test_recheck_reads_without_synthesis(
-        self, pinned: PinnedOrigin, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        ("row_base", "expected_base"),
+        [(None, "main"), ("epic/3778", "epic/3778")],
+        ids=["null-row-base", "set-row-base"],
+    )
+    def test_recheck_reads_without_synthesis_at_the_row_base(
+        self,
+        pinned: PinnedOrigin,
+        monkeypatch: pytest.MonkeyPatch,
+        row_base: str | None,
+        expected_base: str,
     ) -> None:
-        _seed_park(pinned, ADOPT_PR_STATE_UNKNOWN_DISPOSITION)
+        _seed_park(pinned, ADOPT_PR_STATE_UNKNOWN_DISPOSITION, base_branch=row_base)
         seen: list[dict[str, object]] = []
 
         def _read(_client: object, _pr: int, **kw: object) -> object:
@@ -719,7 +730,52 @@ class TestRepairRowRecovery:
         monkeypatch.setattr("cw.cli.dev_queue._adopt.read_adopted_pr", _read)
         with pytest.raises(RuntimeError, match="stop after the read"):
             adopt_requeue_recheck(load_dev_queue().tasks[0], repin_adopted_head=False)
-        assert seen == [{"synthesize": False}]
+        assert seen == [{"synthesize": False, "expected_base": expected_base}]
+
+
+class TestRecheckBase:
+    """RFC 0020 B2: the requeue re-check refuses a PR retargeted off the row base."""
+
+    @staticmethod
+    def _stub_green_pr(monkeypatch: pytest.MonkeyPatch, base: str) -> None:
+        # mutated from capture: mergeable, url, baseRefName
+        stub_pr_view(
+            monkeypatch,
+            load_adopt_fixture(
+                FIXTURE_GREEN_UNKNOWN,
+                mergeable="MERGEABLE",
+                url=ADOPT_PR_URL,
+                baseRefName=base,
+            ),
+        )
+        monkeypatch.setattr("cw.adopt_pr.repo_slug_mismatch", lambda *_a: None)
+
+    def test_recheck_refuses_a_retargeted_pr(
+        self, pinned: PinnedOrigin, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_park(pinned, ADOPT_PR_STATE_UNKNOWN_DISPOSITION)
+        self._stub_green_pr(monkeypatch, "epic/3778")
+        with pytest.raises(
+            AdoptionRefusedError, match="differs from the row's base 'main'"
+        ):
+            adopt_requeue_recheck(load_dev_queue().tasks[0], repin_adopted_head=False)
+        assert load_dev_queue().tasks[0].disposition == (
+            ADOPT_PR_STATE_UNKNOWN_DISPOSITION
+        )
+
+    def test_recheck_passes_when_the_row_base_matches(
+        self, pinned: PinnedOrigin, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_park(pinned, ADOPT_PR_STATE_UNKNOWN_DISPOSITION, base_branch="epic/3778")
+        self._stub_green_pr(monkeypatch, "epic/3778")
+        monkeypatch.setattr(
+            "cw.cli.dev_queue._adopt.fetch_adopted_branch", lambda *_a: None
+        )
+        snap = adopt_requeue_recheck(
+            load_dev_queue().tasks[0], repin_adopted_head=False
+        )
+        assert snap is not None
+        assert snap.pr_url == ADOPT_PR_URL
 
 
 class TestPrecheck:

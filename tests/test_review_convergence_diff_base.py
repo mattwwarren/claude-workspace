@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw.exceptions import CwError
+from cw.models import resolve_base_branch
 from cw.review_convergence import (
     ConvergenceLedger,
     DefaultBranchRef,
@@ -29,6 +30,7 @@ from cw.review_convergence import (
     save_ledger,
     verify_diff_base,
 )
+from tests._adopt_pr_helpers import adopt_client, make_adopted_task
 from tests._review_convergence_helpers import (
     MergedMainBranch,
     branch_that_merged_main,
@@ -37,7 +39,7 @@ from tests._review_convergence_helpers import (
     rewind_origin_main,
     side_branch_commit,
 )
-from tests._shared.git_repos import git_in
+from tests._shared.git_repos import commit_tracked_file, git_in
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -449,3 +451,37 @@ class TestLedgerField:
         assert isinstance(ledger, ConvergenceLedger)
         assert ledger.diff_base == "abc123"
         assert ledger.fork_point != ledger.diff_base
+
+
+class TestLandingRowDiffBase:
+    """RFC 0020 B2 AC5: a null-base landing row reviews the whole epic.
+
+    For the landing row (``epic/<n>`` -> default, ``base_branch`` null) the
+    resolved base is the client default, and the review diff base is
+    ``git merge-base origin/<default> HEAD``, so ``<base>...HEAD`` spans every
+    child merged into the epic branch. The seams that feed the default branch
+    to :func:`resolve_diff_base` are ``converge._default_branch``
+    (``src/cw/cli/review/converge.py``, the context's ``origin_main_branch``),
+    ``confirm.resolve_round_inputs`` (``src/cw/cli/review/confirm.py``,
+    ``default_branch or client_config.default_branch``) and
+    ``run_claude_review``'s ``base_ref or default_branch``
+    (``src/cw/claude_review/core.py``). They are cited, not tested here; S3
+    owns those readers and any engine-materialize test.
+    """
+
+    def test_the_review_diff_spans_the_whole_epic_against_the_default(
+        self, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
+    ) -> None:
+        repo, _origin = make_git_repo_with_origin("landing", branch="epic/3778")
+        # Stand-ins for child PRs merged into the epic branch.
+        commit_tracked_file(repo, "child_a.py")
+        commit_tracked_file(repo, "child_b.py")
+
+        base = resolve_diff_base(repo, "main")
+
+        assert base == git_in(repo, "rev-parse", "origin/main")
+        changed = git_in(repo, "diff", "--name-only", f"{base}...HEAD").splitlines()
+        assert sorted(changed) == ["child_a.py", "child_b.py", "feature.py"]
+        task = make_adopted_task(branch="epic/3778")
+        assert task.base_branch is None
+        assert resolve_base_branch(adopt_client(repo), task) == "main"

@@ -26,7 +26,7 @@ from cw.gh_check_vocabulary import (
     CheckRunStatus,
     StatusContextState,
 )
-from cw.models import QueueItemStatus, Stage
+from cw.models import QueueItemStatus, Stage, resolve_base_branch
 from cw.pr_feedback import FeedbackSynthesisError
 from tests._adopt_pr_helpers import (
     FIXTURE_CONFLICTING,
@@ -50,6 +50,8 @@ _CAPTURED_HEAD = "bb649bbc53cd4972d5c8d4c50b11030ae3ab57aa"
 _CAPTURED_BRANCH = "feat/review-feedback-context"
 _CAPTURED_URL = "https://github.com/mattwwarren/claude-workspace/pull/2933"
 _CAPTURED_REPO = "mattwwarren/claude-workspace"
+_BASE = "main"
+_EPIC = "epic/3778"
 
 
 @pytest.fixture
@@ -99,10 +101,12 @@ def _read(
     *,
     synthesize: bool = True,
     operator_feedback: ReviewFeedback | None = None,
+    expected_base: str = _BASE,
 ) -> AdoptIntake:
     return read_adopted_pr(
         client,
         _PR,
+        expected_base=expected_base,
         sleep=sleep or _Sleeps(),
         synthesize=synthesize,
         operator_feedback=operator_feedback,
@@ -224,6 +228,75 @@ class TestRefusalPrecedence:
         with pytest.raises(AdoptionRefusedError, match="acme/other-repo"):
             _read(client)
 
+    def test_base_mismatch_with_a_null_row_base_refused(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # mutated from capture: mergeable, baseRefName
+        _stub(
+            monkeypatch,
+            load_adopt_fixture(
+                FIXTURE_GREEN_UNKNOWN, mergeable="MERGEABLE", baseRefName=_EPIC
+            ),
+        )
+        # "main" is what a null-base row resolves to for this client.
+        assert resolve_base_branch(client) == _BASE
+        with pytest.raises(
+            AdoptionRefusedError,
+            match="PR base 'epic/3778' differs from the row's base 'main'",
+        ):
+            _read(client)
+
+    def test_base_mismatch_with_a_set_row_base_refused(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub(monkeypatch, _green())
+        with pytest.raises(
+            AdoptionRefusedError,
+            match="PR base 'main' differs from the row's base 'epic/3778'",
+        ):
+            _read(client, expected_base=_EPIC)
+
+    def test_matching_base_is_accepted(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # mutated from capture: mergeable, baseRefName
+        _stub(
+            monkeypatch,
+            load_adopt_fixture(
+                FIXTURE_GREEN_UNKNOWN, mergeable="MERGEABLE", baseRefName=_EPIC
+            ),
+        )
+        intake = _read(client, expected_base=_EPIC)
+        assert intake.disposition is None
+        assert intake.snapshot.head_sha == _CAPTURED_HEAD
+
+    def test_base_mismatch_is_checked_after_the_slug(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # mutated from capture: mergeable, baseRefName
+        _stub(
+            monkeypatch,
+            load_adopt_fixture(
+                FIXTURE_GREEN_UNKNOWN, mergeable="MERGEABLE", baseRefName=_EPIC
+            ),
+        )
+        monkeypatch.setattr(
+            "cw.adopt_pr.repo_slug_mismatch", lambda *_a: "acme/other-repo"
+        )
+        with pytest.raises(AdoptionRefusedError, match="acme/other-repo"):
+            _read(client)
+
+    def test_base_mismatch_is_checked_after_the_state(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # mutated from capture: baseRefName (on the CLOSED #2777 capture)
+        _stub(
+            monkeypatch,
+            load_adopt_fixture(FIXTURE_FAILING_CLOSED, baseRefName=_EPIC),
+        )
+        with pytest.raises(AdoptionRefusedError, match="not OPEN"):
+            _read(client)
+
     def test_reads_with_the_adopt_field_list_in_the_client_repo(
         self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -269,6 +342,22 @@ class TestUnknownRepoll:
         # mutated from capture: statusCheckRollup (the #2777 capture's checks)
         _stub(monkeypatch, load_adopt_fixture(statusCheckRollup=failing))
         assert _read(client).disposition == ADOPT_PR_STATE_UNKNOWN_DISPOSITION
+
+    def test_base_change_after_the_first_read_refuses_on_the_next(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # mutated from capture: baseRefName (second read only; the first stays
+        # mergeable: UNKNOWN so the intake re-polls)
+        reads = _stub(
+            monkeypatch,
+            load_adopt_fixture(FIXTURE_GREEN_UNKNOWN),
+            load_adopt_fixture(FIXTURE_GREEN_UNKNOWN, baseRefName=_EPIC),
+        )
+        sleeps = _Sleeps()
+        with pytest.raises(AdoptionRefusedError, match="differs from the row's base"):
+            _read(client, sleeps)
+        assert len(reads.calls) == 2
+        assert sleeps.calls == [ADOPT_UNKNOWN_POLL_INTERVAL_SECONDS]
 
     def test_refusal_on_a_repoll_still_refuses(
         self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
@@ -369,7 +458,7 @@ class TestNotGreen:
                 pr_number=2777, reviewed_sha="fa098ced97925fdea4c0a31ac75247b8cec08d22"
             ),
         )
-        intake = read_adopted_pr(client, 2777, sleep=_Sleeps())
+        intake = read_adopted_pr(client, 2777, expected_base=_BASE, sleep=_Sleeps())
         assert intake.disposition is None
         assert intake.repair is True
         assert intake.reasons == ("failing CI: test (macos-latest, 3.13)",)
@@ -657,6 +746,39 @@ class TestBuildAdoptedTask:
         assert task.blocked_reason == "adopt_pr_state_unknown_at_intake"
         assert task.review_feedback is None
 
+    def test_base_is_stamped_through_the_seam(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # mutated from capture: mergeable, baseRefName
+        payload = load_adopt_fixture(
+            FIXTURE_GREEN_UNKNOWN, mergeable="MERGEABLE", baseRefName=_EPIC
+        )
+        _stub(monkeypatch, payload)
+        intake = _read(client, expected_base=_EPIC)
+        task = build_adopted_task("42", client, intake, lane="default", base=_EPIC)
+        assert task.base_branch == _EPIC
+        assert task.ever_spawned is False
+        assert task.stage == Stage.REVIEW
+
+    def test_null_base_stamps_nothing(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        intake = self._intake(client, monkeypatch, _green())
+        stamps: list[object] = []
+        monkeypatch.setattr("cw.adopt_pr.set_base_branch", lambda *a: stamps.append(a))
+        task = build_adopted_task("42", client, intake, lane="default", base=None)
+        # A null base never reaches the seam (ADR 0024 invariant 3).
+        assert stamps == []
+        assert task.base_branch is None
+        assert resolve_base_branch(client, task) == _BASE
+
+    def test_unsafe_base_refused(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        intake = self._intake(client, monkeypatch, _green())
+        with pytest.raises(AdoptionRefusedError, match="Invalid base_branch"):
+            build_adopted_task("42", client, intake, lane="default", base="a b")
+
     @pytest.mark.parametrize("ticket_id", ["../2933", "-x", "a b"])
     def test_unsafe_ticket_id_refused(
         self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch, ticket_id: str
@@ -664,6 +786,78 @@ class TestBuildAdoptedTask:
         intake = self._intake(client, monkeypatch, _green())
         with pytest.raises(AdoptionRefusedError, match="Invalid ticket_id"):
             build_adopted_task(ticket_id, client, intake, lane="default")
+
+
+class TestLandingRow:
+    """RFC 0020 B2 AC2: an epic-to-default PR adopts as an ordinary PR.
+
+    The landing PR is one PR from ``epic/<n>`` to the default branch, adopted
+    under the parent ticket with a null row base. It goes through the same
+    ``_read`` / ``build_adopted_task`` path as any other adoption; nothing
+    beyond the base check differs.
+    """
+
+    def test_green_landing_pr_enters_review_with_a_null_base(
+        self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # mutated from capture: headRefName, mergeable
+        _stub(
+            monkeypatch,
+            load_adopt_fixture(
+                FIXTURE_GREEN_UNKNOWN, headRefName=_EPIC, mergeable="MERGEABLE"
+            ),
+        )
+        task = build_adopted_task("3778", client, _read(client), lane="default")
+        assert task.stage == Stage.REVIEW
+        assert task.status == QueueItemStatus.PENDING
+        assert task.branch == _EPIC
+        assert task.base_branch is None
+        assert resolve_base_branch(client, task) == _BASE
+        assert task.review_feedback is None
+
+    @pytest.mark.parametrize(
+        ("fixture", "pr_number", "reviewed_sha", "mutations"),
+        [
+            pytest.param(
+                FIXTURE_CONFLICTING,
+                _PR,
+                _CAPTURED_HEAD,
+                {},
+                id="conflicted",
+            ),
+            pytest.param(
+                FIXTURE_FAILING_CLOSED,
+                2777,
+                "fa098ced97925fdea4c0a31ac75247b8cec08d22",
+                {"state": "OPEN"},
+                id="red",
+            ),
+        ],
+    )
+    def test_not_green_landing_pr_enters_impl_with_synthesized_feedback(
+        self,
+        client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        fixture: str,
+        pr_number: int,
+        reviewed_sha: str,
+        mutations: dict[str, object],
+    ) -> None:
+        # mutated from capture: headRefName (and state on the CLOSED #2777)
+        _stub(monkeypatch, load_adopt_fixture(fixture, headRefName=_EPIC, **mutations))
+        _stub_synth(
+            monkeypatch,
+            _captured_feedback(pr_number=pr_number, reviewed_sha=reviewed_sha),
+        )
+        intake = read_adopted_pr(
+            client, pr_number, expected_base=_BASE, sleep=_Sleeps()
+        )
+        task = build_adopted_task("3778", client, intake, lane="default")
+        assert task.stage == Stage.IMPL
+        assert task.status == QueueItemStatus.PENDING
+        assert task.review_feedback is not None
+        assert task.branch == _EPIC
+        assert task.base_branch is None
 
 
 class TestOperatorFeedback:

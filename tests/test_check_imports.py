@@ -68,6 +68,10 @@ def test_gate_key_in_groups() -> None:
     assert "gate_key" in _scripts_group()
 
 
+def test_landing_citations_in_groups() -> None:
+    assert "landing_citations" in _scripts_group()
+
+
 def test_every_review_monitor_lib_module_is_smoke_imported() -> None:
     """Each ``review_monitor_lib`` submodule is its own dotted GROUPS entry (#2499).
 
