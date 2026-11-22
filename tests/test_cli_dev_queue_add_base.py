@@ -226,10 +226,20 @@ def test_sibling_note_on_a_different_base(epic_client: Callable[..., Path]) -> N
 
 def test_no_sibling_note_when_bases_match(epic_client: Callable[..., Path]) -> None:
     epic_client()
-    seed_queue([make_task(ticket_id="ACM-41", base_branch=BASE)])
+    seed_queue(
+        [
+            make_task(
+                ticket_id="ACM-41",
+                base_branch=BASE,
+                status=QueueItemStatus.COMPLETED,
+                stage=Stage.PLAN,
+            )
+        ]
+    )
     result = invoke_dev_queue(
         "add", "ACM-41", "--stage", "impl", "--base", BASE, "-c", ACME
     )
+    assert "Enqueued ACM-41" in result.stdout
     assert "Note:" not in result.stderr
 
 
