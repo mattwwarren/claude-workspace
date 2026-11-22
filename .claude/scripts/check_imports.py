@@ -20,6 +20,7 @@ GROUPS: list[tuple[str, list[str]]] = [
             "check_ticket_quotes",
             "classify_merge_conflict",
             "gate_key",
+            "landing_citations",
             "post_review",
             "prep_pr_finalize",
             "prep_pr_state",
