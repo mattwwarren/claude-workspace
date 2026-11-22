@@ -282,8 +282,9 @@ reports `delta_confirm_eligible` (#2980), and every other move gets a normal
 full review round. The
 `branch_behind_main` gate parks only on a probe-reported conflict, with its
 probes precomputed outside `dev_queue_lock` and failing open. The separate
-review-staleness gate (`review_artifacts_stale`) still runs a bounded tip check
-of git in-lock (ADR-0022 invariant 3).
+review-staleness gate (`review_artifacts_stale`) runs a bounded tip check of git
+before `dev_queue_lock`, at most 10 rows and 30 s per tick, deferring the rest
+(ADR-0022 invariant 3).
 See `docs/adr/0022-a-clean-default-branch-merge-never-causes-a-review.md`.
 
 **ADR-0024 — the merge target is not the trust root.** `TicketTask.base_branch`

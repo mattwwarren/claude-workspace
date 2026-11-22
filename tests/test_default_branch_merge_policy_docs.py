@@ -775,7 +775,8 @@ class TestAdr:
                 "docs/adr/0022-a-clean-default-branch-merge-never-causes-a-review.md"
             ).split()
         )
-        assert "This does not cover the REVIEW staleness gate" in adr
+        assert "REVIEW staleness gate (`review_gates` gate 3)" in adr
+        assert "`dispatch/review_tip_sweep`" in adr
         assert "Every one of those calls has a 10 s timeout" in adr
         assert "`PROBE_TIMEOUT_SECONDS`" in adr
         assert (
@@ -783,7 +784,7 @@ class TestAdr:
             "each merge" in adr
         )
         assert "a timeout or a spent budget reads as stale (fail closed)" in adr
-        assert "There is no per-tick cap." in adr
+        assert "at most 10 checks under a 30 s budget" in adr
 
     def test_the_consequences_state_pr_attention_policy_and_ref_refresh(
         self,
@@ -857,7 +858,7 @@ class TestAdr:
         )
         runbook = _after(
             " ".join(_read("docs/dispatch-runbook.md").split()),
-            "The gate's tip check runs git under `dev_queue_lock`",
+            "The gate's tip check runs git before `dev_queue_lock`",
             span=700,
         )
         source = " ".join(
@@ -969,7 +970,10 @@ class TestFailedFetchDocsMatchTheCode:
         assert behind < review
         # The in-lock tip check belongs to the review gate, not branch_behind_main.
         assert "its tip check" not in paragraph
-        assert "still runs a bounded tip check of git in-lock" in paragraph[review:]
+        assert (
+            "runs a bounded tip check of git before `dev_queue_lock`"
+            in paragraph[review:]
+        )
         assert "in-lock" not in paragraph[behind:review]
 
 

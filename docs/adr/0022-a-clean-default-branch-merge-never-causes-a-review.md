@@ -73,15 +73,23 @@ How a ticket branch meets `origin/<default>` follows three rules:
    a worktree that fails to resolve or to verify is skipped (fail open) (the precompute-outside-the-lock pattern of
    `dispatch/pr_gate.resolve_stale_pr_ticket_ids`; ADR-0019 bounds subprocesses
    under `sessions_lock` only, so keeping this gate's git off `dev_queue_lock` is
-   this ADR's own rule). This does not cover the
-   REVIEW staleness gate (`review_gates` gate 3): its tip check runs git
-   in-lock (rev-parse, merge-base, rev-list and one `git merge-tree
-   --write-tree` per merge in the span). Every one of those calls has a 10 s
-   timeout (`PROBE_TIMEOUT_SECONDS`), and the per-merge loop runs under a 30 s
+   this ADR's own rule). The REVIEW staleness gate (`review_gates` gate 3)
+   follows the same rule for its tip check (#2994): `consume_completed_sessions`
+   runs it before the lock, in `dispatch/review_tip_sweep`, on a lock-free queue
+   and state snapshot, and the locked gate reads the verdict. The check is
+   rev-parse, merge-base, rev-list and one `git merge-tree --write-tree` per
+   merge in the span. Every one of those calls has a 10 s timeout
+   (`PROBE_TIMEOUT_SECONDS`), and the per-merge loop runs under a 30 s
    wall-clock budget (`TIP_CHECK_BUDGET_SECONDS`) checked before each merge, so
    the worst case is the four git calls before the loop plus the budget plus
    one merge (up to three git calls of 10 s each); a timeout or a spent budget
-   reads as stale (fail closed). There is no per-tick cap.
+   reads as stale (fail closed). That bound is per row. Per tick the sweep runs
+   at most 10 checks under a 30 s budget checked before each check (so a tick's
+   worst case is that budget plus one check), and always runs at least one, so
+   the queue shrinks. A row beyond the bound is deferred, not decided: its event
+   stays pending and its row stays RUNNING until a later tick. A single-row
+   caller (CLI settle, `cw spawn complete`, reconcile, Stop-hook) checks inline
+   as before.
 4. **The REVIEW gate fails open.** Anything but a probe-reported `conflict`
    (an error, a timeout, a skipped probe, no verdict) does not park.
 5. **The tip rule fails closed.** A conflict resolution, a hand edit, an
@@ -150,7 +158,7 @@ How a ticket branch meets `origin/<default>` follows three rules:
   row's branch (#2990). The single-event settles and reconcile's recovery
   install no verdict (fail open), and finalize Step 4c.5 handles a conflict
   downstream.
-- The review-staleness gate's in-lock tip check now runs one `merge-tree` per
+- The review-staleness gate's tip check (run pre-lock since #2994) now runs one `merge-tree` per
   merge in the span, each git call under a 10 s timeout and the loop under a
   30 s budget checked before each merge (invariant 3).
 - **`verify-tip` and `finalize` refresh the default branch once.** They fetch
