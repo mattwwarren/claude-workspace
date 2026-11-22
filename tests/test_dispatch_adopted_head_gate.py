@@ -660,3 +660,52 @@ class TestSettleTerminalRows:
         assert settle.settled == {"T-1"}
         assert _row().adopted_head_sha == observed
         assert _row().adopted_repin_due is False
+
+
+class TestLandingRowEpicMoves:
+    """RFC 0020 B2 AC3: a child merge into the epic branch parks the landing row.
+
+    Covered window (R5): a PENDING landing row (``epic/<n>`` -> default, null
+    base) that has not run and is not flagged ``adopted_repin_due``. When a
+    child PR merges into the epic branch, the origin head gains a descendant
+    commit and the existing pinned-head rule parks the row
+    ``adopted_head_drift``. Not covered, by design and with no new mechanism:
+    a descendant absorbed by ``settle_adopted_pins`` after a session exit, and
+    a COMPLETED row with armed auto-merge (backstops: finalize
+    ``pr-sha-matches`` and ``arm-automerge --match-head-commit``, arm-time
+    only). The runbook drift paragraph records that residual.
+    """
+
+    def test_child_merge_into_the_epic_branch_parks_the_pending_row(
+        self,
+        tmp_path: Path,
+        make_git_repo_with_origin: Callable[..., tuple[Path, Path]],
+        config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        landing = make_pinned_origin(
+            tmp_path, make_git_repo_with_origin, branch="epic/3778"
+        )
+        client = adopt_client(landing.repo)
+        _stub_head(monkeypatch, landing.origin)
+        _seed(landing, ticket_id="3778")
+        observed = landing.push_descendant("child_pr_merge.py")
+
+        drifts = _scan(client)
+
+        assert set(drifts) == {"3778"}
+        assert drifts["3778"].observed == observed
+        assert drifts["3778"].pinned == landing.pin
+        claimed, _ = _claim_next_pending(
+            ADOPT_CLIENT,
+            lane="default",
+            client=client,
+            config=config,
+            adopted_head_drifts=drifts,
+        )
+        assert claimed is None
+        task = _row()
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == ADOPTED_HEAD_DRIFT_DISPOSITION
+        assert task.adopted_head_sha == landing.pin
+        assert task.base_branch is None

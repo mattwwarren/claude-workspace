@@ -764,7 +764,11 @@ class TestBuildAdoptedTask:
         self, client: ClientConfig, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         intake = self._intake(client, monkeypatch, _green())
+        stamps: list[object] = []
+        monkeypatch.setattr("cw.adopt_pr.set_base_branch", lambda *a: stamps.append(a))
         task = build_adopted_task("42", client, intake, lane="default", base=None)
+        # A null base never reaches the seam (ADR 0024 invariant 3).
+        assert stamps == []
         assert task.base_branch is None
         assert resolve_base_branch(client, task) == _BASE
 
