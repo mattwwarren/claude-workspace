@@ -290,6 +290,8 @@ _COLD_IMPORT_FIRST = (
     "cw.models.tasks.validators",
     "cw.dispatch.session_completions",
     "cw.dispatch.usage_limit_windows",
+    "cw.dispatch.review_tip_verdicts",
+    "cw.dispatch.review_tip_sweep",
     "cw.pr_hydrate.attention",
     "cw.pr_hydrate.push_overlay",
     "cw.pr_hydrate.repo_slug",
@@ -441,6 +443,17 @@ class TestSchemaGolden:
         assert json.dumps(schema) == json.dumps(_golden()["serialization"][name])
 
 
+class TestLoopModuleSize:
+    """#2999 split ``loop.py`` to stay under CLAUDE.md's ~1000-line ceiling."""
+
+    def test_loop_stays_under_the_module_ceiling(self) -> None:
+        # Mirrors ``_MODULE_LINE_LIMIT`` in tests/test_shared_layer.py. #2994
+        # added the REVIEW tip sweep without growing this module (the sweep
+        # lives in ``review_tip_sweep``); a flat composition would cross it.
+        loop_lines = (_SRC / "cw/dispatch/loop.py").read_text(encoding="utf-8")
+        assert len(loop_lines.splitlines()) < 1000
+
+
 class TestLoggerNames:
     """Operators filter on these logger names; the split must not rename them."""
 
@@ -453,7 +466,13 @@ class TestLoggerNames:
 
     @pytest.mark.parametrize(
         "module",
-        [_LOOP, "cw.dispatch.session_completions", "cw.dispatch.usage_limit_windows"],
+        [
+            _LOOP,
+            "cw.dispatch.session_completions",
+            "cw.dispatch.usage_limit_windows",
+            "cw.dispatch.review_tip_verdicts",
+            "cw.dispatch.review_tip_sweep",
+        ],
     )
     def test_dispatch_logger_name(self, module: str) -> None:
         log = importlib.import_module(module)._log
