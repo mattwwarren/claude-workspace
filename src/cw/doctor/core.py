@@ -104,7 +104,7 @@ from cw.exceptions import CwError
 from cw.reconcile import ticket_id_for_session
 
 if TYPE_CHECKING:
-    from cw.models import ClientConfig, CwState, DevQueueStore
+    from cw.models import ClientConfig, CwState, DevQueueStore, TicketTask
 
 # The two session-reap marker names, written once: `_SCOPED_RAN_CHECKS` and
 # `_SCOPED_SESSION_REAP_CHECKS` both derive from these (#2716).
@@ -393,17 +393,21 @@ def _client_config_checks(clients: dict[str, ClientConfig]) -> list[CheckResult]
     ]
 
 
-def _base_backend_checks(clients: dict[str, ClientConfig]) -> list[CheckResult]:
-    """RFC 0020 A1 (#3781): live rows whose base the lane cannot deliver.
+def _queue_tasks() -> list[TicketTask]:
+    """The dev-queue rows the queue-reading checks share.
 
     A queue that will not load is already reported by ``_check_dev_queue``, so
     it degrades to no rows here rather than failing the run.
     """
     try:
-        tasks = _deps.load_dev_queue().tasks
+        return _deps.load_dev_queue().tasks
     except (OSError, json.JSONDecodeError, ValidationError):
-        tasks = []
-    return _check_base_backend(clients, tasks)
+        return []
+
+
+def _base_backend_checks(clients: dict[str, ClientConfig]) -> list[CheckResult]:
+    """RFC 0020 A1 (#3781): live rows whose base the lane cannot deliver."""
+    return _check_base_backend(clients, _queue_tasks())
 
 
 def run_doctor(
