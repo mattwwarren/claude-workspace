@@ -50,6 +50,7 @@ from cw.confirmation_jobs import validate_managed_round
 from cw.dev_queue import load_dev_queue
 from cw.dev_queue.crud import _find_ticket
 from cw.exceptions import CwError
+from cw.models import resolve_base_branch
 from cw.models.orchestrator_config.stage import StageExecutorConfig
 from cw.review_convergence import (
     CONFIRM_CAUSE_BACKEND_ERROR,
@@ -155,7 +156,7 @@ def _round_failed(
     _exit_with(payload, CONFIRM_ROUND_FAILED_EXIT_CODE)
 
 
-def _confirmation_base(*, worktree: Path, ticket_id: str, default_branch: str) -> str:
+def _confirmation_base(*, worktree: Path, ticket_id: str, base_branch: str) -> str:
     """The convergence ledger's pinned diff base, verified (#2800).
 
     The independent round must review the same change set as the loop, so it
@@ -180,7 +181,7 @@ def _confirmation_base(*, worktree: Path, ticket_id: str, default_branch: str) -
         msg = f"cannot read the convergence ledger at {path}: {exc}"
         raise CwError(msg) from exc
     if ledger is None:
-        return default_branch
+        return base_branch
     if ledger.ticket_id != ticket_id:
         msg = (
             f"convergence ledger at {path} belongs to ticket "
@@ -188,8 +189,8 @@ def _confirmation_base(*, worktree: Path, ticket_id: str, default_branch: str) -
         )
         raise CwError(msg)
     if ledger.diff_base is not None:
-        return verify_diff_base(worktree, ledger.diff_base, default_branch)
-    diff_base = refresh_diff_base(worktree, default_branch)
+        return verify_diff_base(worktree, ledger.diff_base, base_branch)
+    diff_base = refresh_diff_base(worktree, base_branch)
     try:
         save_ledger(path, ledger.model_copy(update={"diff_base": diff_base}))
     except OSError as exc:
@@ -238,7 +239,8 @@ def _run_round(
     *,
     task: TicketTask,
     worktree: Path,
-    default_branch: str,
+    config_branch: str,
+    base_branch: str,
     base_ref: str,
     model: str | None,
     reasoning_effort: str | None,
@@ -279,7 +281,8 @@ def _run_round(
                 runner=runner,
                 task=task,
                 worktree=worktree,
-                default_branch=default_branch,
+                default_branch=config_branch,
+                base_branch=base_branch,
                 model=model,
                 reasoning_effort=reasoning_effort,
                 wall_clock_budget_seconds=None,
@@ -300,7 +303,8 @@ def _run_claude_round(
     *,
     task: TicketTask,
     worktree: Path,
-    default_branch: str,
+    config_branch: str,
+    base_branch: str,
     base_ref: str,
     model: str | None,
     resolution: ResolutionSpec | None = None,
@@ -331,7 +335,8 @@ def _run_claude_round(
             runner=runner,
             task=task,
             worktree=worktree,
-            default_branch=default_branch,
+            default_branch=config_branch,
+            base_branch=base_branch,
             base_ref=base_ref,
             model=model,
             wall_clock_budget_seconds=None,
@@ -462,7 +467,8 @@ def resolve_round_inputs(
             f"expected '{expected_worktree}'"
         )
         raise CwError(msg)
-    return task, default_branch or client_config.default_branch
+    # The flag is an explicit diff-base override; review config stays on the trust root.
+    return task, default_branch or resolve_base_branch(client_config, task)
 
 
 def _binary_present(backend: str) -> bool:
@@ -503,7 +509,7 @@ def run_backend_round(
     backend: str,
     task: TicketTask,
     worktree: Path,
-    default_branch: str,
+    base_branch: str,
     base_ref: str,
     model: str | None,
     reasoning_effort: str | None,
@@ -533,11 +539,14 @@ def run_backend_round(
             refresh=True,
             courier=_courier_for(backend),
         )
+    # stays on client.default_branch: review config is read from the trust root
+    config_branch = get_client(task.client).default_branch
     if backend == _CLAUDE:
         return _run_claude_round(
             task=task,
             worktree=worktree,
-            default_branch=default_branch,
+            config_branch=config_branch,
+            base_branch=base_branch,
             base_ref=base_ref,
             model=model,
             resolution=resolution,
@@ -547,7 +556,8 @@ def run_backend_round(
     return _run_round(
         task=task,
         worktree=worktree,
-        default_branch=default_branch,
+        config_branch=config_branch,
+        base_branch=base_branch,
         base_ref=base_ref,
         model=model,
         reasoning_effort=(
@@ -727,7 +737,7 @@ def review_confirm(
     confirmation_base = _confirmation_base(
         worktree=worktree,
         ticket_id=ticket_id,
-        default_branch=configured_base,
+        base_branch=configured_base,
     )
     tolerated = tolerated_paths(get_client(task.client))
     before = worktree_state(worktree, tolerated=tolerated)
@@ -738,7 +748,7 @@ def review_confirm(
         backend=backend,
         task=task,
         worktree=worktree,
-        default_branch=configured_base,
+        base_branch=configured_base,
         base_ref=confirmation_base,
         model=model,
         reasoning_effort=reasoning_effort,

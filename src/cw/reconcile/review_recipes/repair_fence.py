@@ -42,6 +42,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple
 
+from cw.models import resolve_base_branch
 from cw.review_approval import (
     ApprovalInputs,
     evaluate_review_approval,
@@ -80,7 +81,7 @@ class FenceSnapshot(NamedTuple):
     review_approved_sha: str | None
     clean_mode: bool
     ledger_path: Path | None
-    default_branch: str
+    base_branch: str
     default_merge_tolerance: bool = True
 
 
@@ -126,7 +127,7 @@ def build_fence_snapshot(task: TicketTask, client_cfg: ClientConfig) -> FenceSna
             if task.worktree_path is None
             else task.worktree_path / LEDGER_RELATIVE_PATH
         ),
-        default_branch=client_cfg.default_branch,
+        base_branch=resolve_base_branch(client_cfg, task),
         default_merge_tolerance=client_cfg.review.default_merge_tolerance,
     )
 
@@ -222,7 +223,7 @@ def evaluate_repair_fence(
             snapshot.tier,
             snapshot.review_approver_kind,
             snapshot.review_approved_sha,
-            snapshot.default_branch,
+            snapshot.base_branch,
         ),
         repo=repo,
         head_sha=new_sha,

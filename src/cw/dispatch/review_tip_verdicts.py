@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
     from pathlib import Path
 
-    from cw.models import ClientConfig
+    from cw.models import ClientConfig, TicketTask
 
 _log = logging.getLogger("cw.dispatch")
 
@@ -38,13 +38,16 @@ class TipKey(NamedTuple):
 class TipCheck:
     """A row whose only undecided question is ``tolerates_review_move``.
 
-    ``key`` names the verdict the gate will look for; ``client`` and ``worktree``
-    are what the git check needs.
+    ``key`` names the verdict the gate will look for; ``client``, ``worktree``
+    and ``task`` (the row, whose base the merge is judged against, RFC 0020
+    S3a) are what the git check needs. ``task`` is required, never defaulted,
+    so a check cannot silently fall back to the client default branch.
     """
 
     key: TipKey
     client: ClientConfig
     worktree: Path
+    task: TicketTask
 
 
 _VERDICTS: ContextVar[Mapping[TipKey, bool] | None] = ContextVar(

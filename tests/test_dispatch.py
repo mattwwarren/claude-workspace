@@ -1783,6 +1783,7 @@ class TestConsumeReviewTipSweep:
             *,
             reviewed_sha: str,
             head_sha: str,
+            task: object,
         ) -> bool:
             assert self.inline_allowed or not self.locked, (
                 f"tip check under dev_queue_lock: {worktree}"

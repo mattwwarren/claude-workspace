@@ -221,7 +221,7 @@ def _scope_breach(
 def check_fix_fence(
     worktree: Path,
     *,
-    default_branch: str,
+    base_branch: str,
     allowed_files: frozenset[str] | None,
     finding_files: frozenset[str],
     cycle: int,
@@ -241,7 +241,7 @@ def check_fix_fence(
     if not touched:
         return None
     base = git_output(
-        ["merge-base", resolve_loop_diff_base(worktree, default_branch), "HEAD"],
+        ["merge-base", resolve_loop_diff_base(worktree, base_branch), "HEAD"],
         cwd=worktree,
     ).strip()
     before = _name_only(worktree, [base, "HEAD"])

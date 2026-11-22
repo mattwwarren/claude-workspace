@@ -31,6 +31,12 @@ How a ticket branch meets `origin/<default>` follows three rules:
    (`git merge-tree --write-tree` of its parents reproduces its tree), whatever
    files it touches and on every loop backend.
 
+Where this ADR names `origin/<default>`, a row with a `base_branch` reads that
+base instead (ADR-0024, RFC 0020 S3a): the merge-target reads in review
+convergence, approval, the repair fence and the scope guard. The review engine,
+its guard set and manifest, the attestation rules and the review configuration
+stay on `client.default_branch`.
+
 ## Invariant
 
 1. **One probe, one spawner.** `cw.merge_probe.merge_tree` is the only

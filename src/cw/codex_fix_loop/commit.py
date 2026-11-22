@@ -640,7 +640,7 @@ def _cycle_breach(
         return scope_violation_breach(violations, ctx.cycle), frozenset(touched)
     breach = check_fix_fence(
         ctx.worktree,
-        default_branch=default_branch,
+        base_branch=default_branch,
         allowed_files=allowed_files,
         finding_files=frozenset(f.file for f in findings),
         cycle=ctx.cycle,

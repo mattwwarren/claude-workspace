@@ -14,9 +14,11 @@ from __future__ import annotations
 import dataclasses
 import json
 import subprocess
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from click.testing import CliRunner
 
 from cw import _git
 from cw.claude_review import ClaudeRunResult
@@ -60,6 +62,7 @@ from tests._review_convergence_helpers import (
     write_ledger,
 )
 from tests._shared.git_repos import commit_tracked_file, git_in
+from tests.test_review_base_branch_sites import CLIENT_DEFAULT, ROW_BASE, _queued_row
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -840,3 +843,47 @@ class TestDecisionSet:
         )
 
         assert report.decision == "stop_operator_action"
+
+
+class _RoundStartedError(Exception):
+    """Raised by the capturing stub so the command stops at the review round."""
+
+
+@pytest.mark.parametrize(
+    ("base", "expected"), [(ROW_BASE, ROW_BASE), (None, CLIENT_DEFAULT)]
+)
+def test_the_delta_round_diffs_the_rows_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, base: str | None, expected: str
+) -> None:
+    """The round's diff base is the row's base, or the client default for a null row."""
+    worktree = _queued_row(tmp_path, base)
+    seen: dict[str, Any] = {}
+
+    def _capture(**kwargs: Any) -> None:
+        seen.update(kwargs)
+        raise _RoundStartedError
+
+    plan = SimpleNamespace(spec=SimpleNamespace(paths=()))
+    resolved = (SimpleNamespace(confirm_backend="codex"), "h" * 40, plan)
+    monkeypatch.setattr(
+        "cw.cli.review.converge_delta._resolve_plan", lambda **_kwargs: resolved
+    )
+    monkeypatch.setattr(
+        "cw.cli.review.converge_delta.require_backend_binary", lambda _backend: None
+    )
+    monkeypatch.setattr(
+        "cw.cli.review.converge_delta.worktree_state", lambda *_a, **_k: ("", "")
+    )
+    monkeypatch.setattr(
+        "cw.cli.review.converge_delta.validate_managed_round", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr("cw.cli.review.converge_delta.run_backend_round", _capture)
+
+    result = CliRunner().invoke(
+        main,
+        [*_ARGV, "--ticket-id", "T-1", "-c", "acme", "--worktree", str(worktree)],
+    )
+
+    assert isinstance(result.exception, _RoundStartedError), result.output
+    assert seen["base_branch"] == expected
+    assert seen["base_ref"] == expected

@@ -74,7 +74,7 @@ class CapturedScope:
     """
 
     result: AutoDevResult
-    default_branch: str
+    base_branch: str
     measured: _BranchDiffScope | None
 
 
@@ -125,13 +125,15 @@ def _read_scope(
     worktree_path: Path,
     _captured_at: datetime,
 ) -> CapturedScope:
-    default_branch = resolve_scope_guard_default_branch(
-        session.client, log_context=f"session={session.id}"
+    base_branch = resolve_scope_guard_default_branch(
+        session.client,
+        log_context=f"session={session.id}",
+        worktree_path=worktree_path,
     )
     return CapturedScope(
         result=result,
-        default_branch=default_branch,
-        measured=compute_branch_diff_scope(worktree_path, default_branch),
+        base_branch=base_branch,
+        measured=compute_branch_diff_scope(worktree_path, base_branch),
     )
 
 
@@ -197,5 +199,5 @@ def apply_prefetched_scope(
         result,
         captured.measured,
         worktree_path=worktree_path,
-        default_branch=captured.default_branch,
+        default_branch=captured.base_branch,
     )

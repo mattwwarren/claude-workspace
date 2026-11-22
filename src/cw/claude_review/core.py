@@ -137,8 +137,14 @@ def run_claude_review(
     max_prompt_chars: int | None = None,
     snapshots: SnapshotContext = DEFAULT_SNAPSHOT_CONTEXT,
     tolerated: frozenset[str] = frozenset(),
+    base_branch: str | None = None,
 ) -> ClaudeReviewRound:
     """Run one full Claude review pass (no fix loop) and synthesize the result.
+
+    *default_branch* is the trust root: the review configuration is read from
+    it (``config_branch``). *base_branch* (RFC 0020 S3a) is the merge target the
+    diff and scope measurement use; ``None`` means *default_branch*. S3b (#3840)
+    makes it required and removes that default.
 
     *tolerated* (#3693) is forwarded to the per-role mutation check; an empty
     set changes nothing.
@@ -162,10 +168,11 @@ def run_claude_review(
 
     *snapshots* (#3712) is forwarded to :func:`_prepare_review_pass`.
     """
+    merge_base = base_branch or default_branch
     prepared = _prepare_review_pass(
         task,
         worktree,
-        base_ref or default_branch,
+        base_ref or merge_base,
         config_branch=default_branch,
         runner=None,
         session_id=session_id,
@@ -206,7 +213,7 @@ def run_claude_review(
         diff=prepared.diff,
         reviewed_sha=prepared.reviewed_sha,
         session_id=session_id,
-        default_branch=default_branch,
+        default_branch=merge_base,
         fix_loop_enabled=False,
         metrics_by_role=outcome.metrics_by_role,
         capability=prepared.capability,

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from cw.models import (
@@ -62,6 +63,33 @@ def context_base_branch(base_branch: str | None, default_branch: str) -> str:
     so the stamped value is always a non-empty string.
     """
     return base_branch or default_branch
+
+
+_WORLD_STATE_KEY = "world_state_snapshot"
+_ORIGIN_MAIN_KEY = "origin_main_branch"
+
+
+def _non_empty_str(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def base_branch_from_context(context: Mapping[str, object] | None) -> str | None:
+    """The branch a worker's context says its work merges into (RFC 0020 S3a).
+
+    Reads the top-level ``base_branch`` (v23, #3781). A v22 context lacks it, so
+    the read falls back to ``world_state_snapshot.origin_main_branch``, which
+    the same spawn wrote from the client's default branch. ``None`` when neither
+    names a non-empty string. The one reader of this key outside the spawn writer.
+    """
+    if context is None:
+        return None
+    base = _non_empty_str(context.get(BASE_BRANCH_KEY))
+    if base is not None:
+        return base
+    snapshot = context.get(_WORLD_STATE_KEY)
+    if not isinstance(snapshot, Mapping):
+        return None
+    return _non_empty_str(snapshot.get(_ORIGIN_MAIN_KEY))
 
 
 def operator_resolutions_source(

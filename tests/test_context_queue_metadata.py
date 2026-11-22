@@ -15,6 +15,7 @@ from cw.context_queue_metadata import (
     BRANCH_KEY,
     OPERATOR_RESOLUTIONS_SOURCE_KEY,
     REVIEW_APPROVAL_KEY,
+    base_branch_from_context,
     build_queue_metadata,
     operator_resolutions_source,
 )
@@ -330,3 +331,49 @@ class TestRegressReviewFindingsKey:
 
         metadata = build_queue_metadata(TicketTask(ticket_id="T-1", client="c"))
         assert REGRESS_REVIEW_FINDINGS_KEY not in metadata
+
+
+class TestBaseBranchFromContext:
+    """``base_branch_from_context``: v23 top-level key, v22 fallback (RFC 0020 S3a)."""
+
+    def test_top_level_base_wins(self) -> None:
+        context = {
+            "base_branch": "epic/x",
+            "world_state_snapshot": {"origin_main_branch": "main"},
+        }
+        assert base_branch_from_context(context) == "epic/x"
+
+    def test_v22_context_falls_back_to_origin_main(self) -> None:
+        context = {"world_state_snapshot": {"origin_main_branch": "main"}}
+        assert base_branch_from_context(context) == "main"
+
+    def test_none_context_returns_none(self) -> None:
+        assert base_branch_from_context(None) is None
+
+    def test_empty_top_level_falls_back(self) -> None:
+        context = {
+            "base_branch": "",
+            "world_state_snapshot": {"origin_main_branch": "main"},
+        }
+        assert base_branch_from_context(context) == "main"
+
+    def test_non_string_top_level_falls_back(self) -> None:
+        context = {
+            "base_branch": 7,
+            "world_state_snapshot": {"origin_main_branch": "main"},
+        }
+        assert base_branch_from_context(context) == "main"
+
+    def test_snapshot_not_mapping_returns_none(self) -> None:
+        assert base_branch_from_context({"world_state_snapshot": "oops"}) is None
+
+    def test_empty_origin_main_returns_none(self) -> None:
+        assert (
+            base_branch_from_context(
+                {"world_state_snapshot": {"origin_main_branch": ""}}
+            )
+            is None
+        )
+
+    def test_missing_everything_returns_none(self) -> None:
+        assert base_branch_from_context({}) is None

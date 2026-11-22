@@ -358,6 +358,7 @@ def _should_gate_for_review_staleness(
             plan.worktree,
             reviewed_sha=plan.key.reviewed_sha,
             head_sha=plan.key.head_sha,
+            task=task,
         )
     return not tolerated
 
@@ -409,13 +410,17 @@ def plan_review_staleness(
     if reviewed_sha == head_sha:
         return False
     if client is None or (
-        review_move_tolerance(client, worktree_path, reviewed_sha=reviewed_sha) is None
+        review_move_tolerance(
+            client, worktree_path, reviewed_sha=reviewed_sha, task=task
+        )
+        is None
     ):
         return True
     return TipCheck(
         key=TipKey(task.client, task.ticket_id, reviewed_sha, head_sha),
         client=client,
         worktree=worktree_path,
+        task=task,
     )
 
 

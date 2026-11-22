@@ -46,7 +46,7 @@ def _snapshot(**fields: object) -> FenceSnapshot:
         review_approved_sha=None,
         clean_mode=False,
         ledger_path=None,
-        default_branch="main",
+        base_branch="main",
     )
     return base._replace(**fields)
 
@@ -73,7 +73,7 @@ def test_build_fence_snapshot_reads_the_row(tmp_path: Path) -> None:
     assert snapshot.review_approved_sha == "abc1234"
     assert snapshot.clean_mode is False
     assert snapshot.ledger_path == tmp_path / ".cw" / "review-convergence.json"
-    assert snapshot.default_branch == "main"
+    assert snapshot.base_branch == "main"
 
 
 @pytest.mark.parametrize(

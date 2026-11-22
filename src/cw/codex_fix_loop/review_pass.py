@@ -114,7 +114,10 @@ def _rereview(
                 runner=runner,
                 task=task,
                 worktree=worktree,
-                default_branch=default_branch,
+                # S3a: the codex lane has no row base yet; base == config here.
+                # S3b (#3840) delivers the row's base to this loop.
+                base_branch=default_branch,
+                config_branch=default_branch,
                 model=model,
                 reasoning_effort=reasoning_effort,
                 wall_clock_budget_seconds=_budget_seconds(remaining),
@@ -306,7 +309,10 @@ def _review_cycle_zero(
                 runner=runner,
                 task=task,
                 worktree=worktree,
-                default_branch=default_branch,
+                # S3a: the codex lane has no row base yet; base == config here.
+                # S3b (#3840) delivers the row's base to this loop.
+                base_branch=default_branch,
+                config_branch=default_branch,
                 model=model,
                 reasoning_effort=reasoning_effort,
                 wall_clock_budget_seconds=wall_clock_budget_seconds,

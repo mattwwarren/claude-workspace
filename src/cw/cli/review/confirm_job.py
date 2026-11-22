@@ -46,7 +46,7 @@ def _matches(
         job.pin.client,
         job.pin.ticket_id,
         job.pin.kind,
-        job.pin.default_branch,
+        job.pin.base_branch,
     ) == (
         client,
         ticket_id,

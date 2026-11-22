@@ -173,6 +173,7 @@ def resolve_review_tip_sweep(
             plan.worktree,
             reviewed_sha=plan.key.reviewed_sha,
             head_sha=plan.key.head_sha,
+            task=plan.task,
         )
     return TipSweep(verdicts, list(events), 0)
 

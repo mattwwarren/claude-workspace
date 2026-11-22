@@ -20,7 +20,9 @@ _KEY = TipKey("c", "T-1", "reviewed", "head")
 
 
 def _plan() -> TipCheck:
-    return TipCheck(key=_KEY, client=cast("Any", None), worktree=Path("/wt"))
+    return TipCheck(
+        key=_KEY, client=cast("Any", None), worktree=Path("/wt"), task=cast("Any", None)
+    )
 
 
 @pytest.fixture
@@ -28,7 +30,9 @@ def gate(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Pin the planner to a TipCheck and record every inline tip check."""
     seen: dict[str, Any] = {"inline": []}
 
-    def fake_tolerates(_c: Any, _w: Path, *, reviewed_sha: str, head_sha: str) -> bool:
+    def fake_tolerates(
+        _c: Any, _w: Path, *, reviewed_sha: str, head_sha: str, task: Any
+    ) -> bool:
         seen["inline"].append((reviewed_sha, head_sha))
         return False
 

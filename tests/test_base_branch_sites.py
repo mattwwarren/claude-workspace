@@ -1452,15 +1452,9 @@ def test_compute_branch_diff_scope_uses_origin_ref_of_given_branch(
 
 _S2_SCOPE = ("cw/worktree/", "cw/dispatch/", "cw/reconcile/")
 _S2_FILES = frozenset({"cw/branch_ahead.py", "cw/merge_probe.py"})
-# S3-deferred readers (R2). Shrink-only: a file leaves when S3 flips it.
-_S3_DEFERRED = frozenset(
-    {
-        "cw/dispatch/review_approval_gate.py",
-        "cw/reconcile/review_recipes/repair_fence.py",
-        "cw/reconcile/_shared/_scope_probes.py",
-        "cw/worktree/_scope.py",
-    }
-)
+# S3-deferred readers (R2). Shrink-only: a file leaves when S3 flips it. S3a
+# (RFC 0020) flipped the four it held; no S2-scope file is deferred now.
+_S3_DEFERRED: frozenset[str] = frozenset()
 
 
 def _unannotated_default_branch_reads(source: str) -> list[int]:
@@ -1551,5 +1545,3 @@ def test_collector_flags_unannotated_read() -> None:
     assert _unannotated_default_branch_reads(annotated) == []
     assert _unannotated_default_branch_reads(in_statement) == []
     assert _unannotated_default_branch_reads(stored) == []
-    assert _S3_DEFERRED
-    assert all((_SRC_ROOT / relpath).is_file() for relpath in _S3_DEFERRED)

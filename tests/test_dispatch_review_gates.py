@@ -431,7 +431,12 @@ class TestReviewStalenessInstalledVerdict:
         calls: list[tuple[str, str]] = []
 
         def fake(
-            _client: object, _worktree: object, *, reviewed_sha: str, head_sha: str
+            _client: object,
+            _worktree: object,
+            *,
+            reviewed_sha: str,
+            head_sha: str,
+            task: object,
         ) -> bool:
             calls.append((reviewed_sha, head_sha))
             return answer

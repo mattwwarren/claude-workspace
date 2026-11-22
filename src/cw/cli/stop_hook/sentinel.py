@@ -154,13 +154,15 @@ def _verify_headless_scope(result: AutoDevResult, session: Session) -> AutoDevRe
     raise, and losing the sentinel would cost far more than measuring against
     the wrong base.
     """
-    default_branch = resolve_scope_guard_default_branch(
-        session.client, log_context=f"session={session.id}"
+    base_branch = resolve_scope_guard_default_branch(
+        session.client,
+        log_context=f"session={session.id}",
+        worktree_path=session.worktree_path,
     )
     return reconcile_result_scope(
         result,
         worktree_path=session.worktree_path,
-        default_branch=default_branch,
+        default_branch=base_branch,
     )
 
 

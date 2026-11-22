@@ -52,7 +52,9 @@ def _event(event_id: int) -> Any:
 
 def _check(event_id: int, *, sha: str | None = None) -> TipCheck:
     key = TipKey("c", f"T-{event_id}", f"r{sha or event_id}", f"h{event_id}")
-    return TipCheck(key=key, client=cast("Any", None), worktree=Path("/wt"))
+    return TipCheck(
+        key=key, client=cast("Any", None), worktree=Path("/wt"), task=cast("Any", None)
+    )
 
 
 @pytest.fixture
@@ -64,7 +66,7 @@ def scripted(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         return state["plans"].get(event.id)
 
     def fake_tolerates(
-        _client: Any, _wt: Path, *, reviewed_sha: str, head_sha: str
+        _client: Any, _wt: Path, *, reviewed_sha: str, head_sha: str, task: Any
     ) -> bool:
         state["calls"].append((reviewed_sha, head_sha))
         state["clock"].advance(state["cost"])
@@ -334,7 +336,13 @@ class _Checker:
         self.calls: list[Path] = []
 
     def __call__(
-        self, _client: object, worktree: Path, *, reviewed_sha: str, head_sha: str
+        self,
+        _client: object,
+        worktree: Path,
+        *,
+        reviewed_sha: str,
+        head_sha: str,
+        task: object,
     ) -> bool:
         self.calls.append(worktree)
         self.clock.advance(self.cost)
