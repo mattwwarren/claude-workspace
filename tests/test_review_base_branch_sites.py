@@ -14,7 +14,9 @@ import pytest
 from pydantic import ValidationError
 
 import cw.cli.review.confirm as confirm_cli
+from cw.claude_review import core as claude_core
 from cw.cli.review.converge import _default_branch
+from cw.codex_review import core as codex_core
 from cw.codex_review._engine_round import EngineRoundSpec
 from cw.codex_review._engine_start import engine_round_spec
 from cw.confirmation_jobs import ConfirmationPin
@@ -524,3 +526,121 @@ def test_a_base_that_carries_the_engine_edit_does_not_park_its_branch(
 
     assert on_base == ("run", [])
     assert on_default[0] == "park"
+
+
+# --- run_review / run_claude_review split the base from the trust root -----
+
+
+class _StoppedError(Exception):
+    """Raised by the spy so a review pass stops right after its inputs."""
+
+
+def _spy_prepare(monkeypatch: pytest.MonkeyPatch, module: object) -> dict[str, object]:
+    seen: dict[str, object] = {}
+
+    def _stop(
+        _task: object, _worktree: object, base_branch: str, **kwargs: object
+    ) -> None:
+        seen.update(kwargs, diff_base=base_branch)
+        raise _StoppedError
+
+    monkeypatch.setattr(module, "_prepare_review_pass", _stop)
+    return seen
+
+
+def _codex_round(tmp_path: Path, **extra: object) -> None:
+    codex_core.run_review(
+        runner=cast("Any", None),
+        task=_row(None),
+        worktree=tmp_path,
+        default_branch="main",
+        model=None,
+        reasoning_effort=None,
+        wall_clock_budget_seconds=None,
+        session_id="s",
+        fix_loop_enabled=False,
+        **cast("Any", extra),
+    )
+
+
+def _claude_round(tmp_path: Path, **extra: object) -> None:
+    claude_core.run_claude_review(
+        runner=cast("Any", None),
+        task=_row(None),
+        worktree=tmp_path,
+        default_branch="main",
+        base_ref=None,
+        model=None,
+        wall_clock_budget_seconds=None,
+        session_id="s",
+        **cast("Any", extra),
+    )
+
+
+def test_run_review_diffs_the_base_and_reads_config_from_the_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _spy_prepare(monkeypatch, codex_core)
+
+    with pytest.raises(_StoppedError):
+        _codex_round(tmp_path, base_branch=ROW_BASE)
+
+    assert seen["diff_base"] == ROW_BASE
+    assert seen["config_branch"] == "main"
+
+
+def test_run_review_without_a_base_equals_the_default_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _spy_prepare(monkeypatch, codex_core)
+
+    with pytest.raises(_StoppedError):
+        _codex_round(tmp_path)
+
+    assert seen["diff_base"] == "main"
+    assert seen["config_branch"] == "main"
+
+
+def test_run_claude_review_diffs_the_base_and_reads_config_from_the_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _spy_prepare(monkeypatch, claude_core)
+
+    with pytest.raises(_StoppedError):
+        _claude_round(tmp_path, base_branch=ROW_BASE)
+
+    assert seen["diff_base"] == ROW_BASE
+    assert seen["config_branch"] == "main"
+
+
+def test_run_claude_review_base_ref_still_wins_over_the_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _spy_prepare(monkeypatch, claude_core)
+
+    with pytest.raises(_StoppedError):
+        claude_core.run_claude_review(
+            runner=cast("Any", None),
+            task=_row(None),
+            worktree=tmp_path,
+            default_branch="main",
+            base_ref="pinned-sha",
+            base_branch=ROW_BASE,
+            model=None,
+            wall_clock_budget_seconds=None,
+            session_id="s",
+        )
+
+    assert seen["diff_base"] == "pinned-sha"
+
+
+def test_run_claude_review_without_a_base_equals_the_default_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _spy_prepare(monkeypatch, claude_core)
+
+    with pytest.raises(_StoppedError):
+        _claude_round(tmp_path)
+
+    assert seen["diff_base"] == "main"
+    assert seen["config_branch"] == "main"
