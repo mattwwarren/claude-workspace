@@ -357,12 +357,28 @@ SWEEP_CLIENT = "acme"
 SWEEP_TICKET = "1823"
 
 
-def sweep_event(ticket_id: str = SWEEP_TICKET) -> OrchestratorEvent:
-    """A SESSION_COMPLETED event for the ``branch_behind_main`` sweep."""
+def sweep_event(
+    ticket_id: str = SWEEP_TICKET, *, session_id: str | None = None
+) -> OrchestratorEvent:
+    """A SESSION_COMPLETED event for the pre-lock REVIEW sweeps.
+
+    *session_id* is added to the payload only when given, so the default stays
+    the legacy ``{"ticket_id": ...}`` event the ``branch_behind_main`` sweep
+    tests use; the tip sweep needs it to match a row by session.
+    """
+    payload: dict[str, object] = {"ticket_id": ticket_id}
+    if session_id is not None:
+        payload["session_id"] = session_id
     return OrchestratorEvent(
-        type=OrchestratorEventType.SESSION_COMPLETED,
-        payload={"ticket_id": ticket_id},
+        type=OrchestratorEventType.SESSION_COMPLETED, payload=payload
     )
+
+
+def stub_head(monkeypatch: pytest.MonkeyPatch, sha: str | None) -> None:
+    """Stub the HEAD probe where the REVIEW gate reads it (``review_gates``)."""
+    from cw.dispatch import review_gates
+
+    monkeypatch.setattr(review_gates, "current_head_sha", lambda _path: sha)
 
 
 def sweep_row(

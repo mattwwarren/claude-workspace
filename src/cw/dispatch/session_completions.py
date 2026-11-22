@@ -7,12 +7,17 @@ and the ``load_dev_queue`` / ``load_effective_clients`` callers stay in
 ``loop`` so those patches keep reaching them. Logs as ``cw.dispatch``, the
 pre-split logger name. Never imports ``cw.dispatch.loop`` or the
 ``cw.dispatch`` package ``__init__``.
+
+The event-to-row lookup (:func:`_running_row_for_event`) and the session
+sentinel read (:func:`_session_last_result`) are shared with the pre-lock
+REVIEW tip sweep (``review_tip_sweep``, #2994), so both see the same row for
+the same event.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from cw.config import load_state
 from cw.dev_queue import save_dev_queue
@@ -24,9 +29,22 @@ from cw.reconcile import _USAGE_LIMITED_MID_TURN_REASON, ticket_id_for_session
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from cw.models import ClientConfig, DevQueueStore, OrchestratorEvent
+    from cw.models import (
+        ClientConfig,
+        CwState,
+        DevQueueStore,
+        OrchestratorEvent,
+        TicketTask,
+    )
 
 _log = logging.getLogger("cw.dispatch")
+
+
+class _EventRow(NamedTuple):
+    """The RUNNING row a completion event names, and the session that owns it."""
+
+    task: TicketTask
+    session_id: str
 
 
 def _reconcile_owns_completion(payload: Mapping[str, object]) -> bool:
@@ -48,6 +66,93 @@ def _reconcile_owns_completion(payload: Mapping[str, object]) -> bool:
     return bool(payload.get("crashed")) or (
         payload.get("reason") == _USAGE_LIMITED_MID_TURN_REASON
     )
+
+
+def _event_ticket_id(event: OrchestratorEvent) -> str | None:
+    """The event's ``ticket_id``, recovered from ``session_name`` when absent.
+
+    The fallback drains historical RUNNING tasks whose completion events
+    predate the producer-side fix.
+    """
+    ticket_id = event.payload.get("ticket_id")
+    if not ticket_id:
+        session_name = event.payload.get("session_name")
+        if isinstance(session_name, str):
+            ticket_id = ticket_id_for_session(session_name)
+    return ticket_id if isinstance(ticket_id, str) and ticket_id else None
+
+
+def _event_session_id(ticket_id: str, event: OrchestratorEvent) -> str | None:
+    """The event's ``session_id`` if it can identify a row; ``None`` otherwise.
+
+    A *present but malformed* ``session_id`` and a legacy event with none are
+    both skipped and logged, never matched on a bare ``(ticket_id, RUNNING)``
+    (#2219).
+    """
+    event_session_id = event.payload.get("session_id")
+    if event_session_id is None:
+        _log.debug(
+            "legacy_session_completed_event_skipped: ticket=%s "
+            "reason=no session_id in payload -- cannot disambiguate a "
+            "duplicate RUNNING row, so this event is dropped rather "
+            "than applied via a bare (ticket_id, RUNNING) match (#2219)",
+            ticket_id,
+        )
+        return None
+    if not isinstance(event_session_id, str) or not event_session_id:
+        _log.debug(
+            "malformed_session_completed_event_skipped: ticket=%s "
+            "event_session_type=%s reason=session_id must be a "
+            "non-empty str or None",
+            ticket_id,
+            type(event_session_id).__name__,
+        )
+        return None
+    return event_session_id
+
+
+def _running_row_for_event(
+    store: DevQueueStore, event: OrchestratorEvent
+) -> _EventRow | None:
+    """The RUNNING row *event* completes, or ``None`` if it completes none.
+
+    Pure (no I/O beyond the debug log): the caller holds the lock for the
+    apply path, and the pre-lock sweep calls it on a lock-free snapshot.
+    """
+    if _reconcile_owns_completion(event.payload):
+        return None
+    ticket_id = _event_ticket_id(event)
+    if ticket_id is None:
+        return None
+    event_session_id = _event_session_id(ticket_id, event)
+    if event_session_id is None:
+        return None
+    # The payload doesn't reliably carry the owning client (several
+    # producers omit it), so the candidate clients are read off the
+    # RUNNING rows for this ticket_id and each is tried in turn --
+    # event_session_id is globally unique (TicketTask.session_id ==
+    # Session.id), so at most one candidate can ever match.
+    candidate_clients = {
+        stored_task.client
+        for stored_task in store.tasks
+        if stored_task.ticket_id == ticket_id
+        and stored_task.status == QueueItemStatus.RUNNING
+    }
+    for client_name in candidate_clients:
+        task = _find_running_row(
+            store, ticket_id, client_name, session_id=event_session_id
+        )
+        if task is not None:
+            return _EventRow(task, event_session_id)
+    return None
+
+
+def _session_last_result(state: CwState, session_id: str) -> dict[str, Any] | None:
+    """The owning session's sentinel dict, or ``None`` when it has none."""
+    session = next((s for s in state.sessions if s.id == session_id), None)
+    if session is None or not isinstance(session.last_result, dict):
+        return None
+    return session.last_result
 
 
 def _apply_events_to_store(
@@ -79,78 +184,19 @@ def _apply_events_to_store(
     """
     completed = 0
     for event in events:
-        if _reconcile_owns_completion(event.payload):
-            continue
-        ticket_id = event.payload.get("ticket_id")
-        if not ticket_id:
-            # Fallback: recover ticket_id from the session_name for events
-            # produced before the reconciler emitted ticket_id explicitly.
-            # Drains historical RUNNING tasks whose completion events
-            # predate the producer-side fix.
-            session_name = event.payload.get("session_name")
-            if isinstance(session_name, str):
-                ticket_id = ticket_id_for_session(session_name)
-        if not ticket_id:
-            continue
-        event_session_id = event.payload.get("session_id")
-        if event_session_id is not None and (
-            not isinstance(event_session_id, str) or not event_session_id
-        ):
-            _log.debug(
-                "malformed_session_completed_event_skipped: ticket=%s "
-                "event_session_type=%s reason=session_id must be a "
-                "non-empty str or None",
-                ticket_id,
-                type(event_session_id).__name__,
-            )
-            continue
-        if event_session_id is None:
-            _log.debug(
-                "legacy_session_completed_event_skipped: ticket=%s "
-                "reason=no session_id in payload -- cannot disambiguate a "
-                "duplicate RUNNING row, so this event is dropped rather "
-                "than applied via a bare (ticket_id, RUNNING) match (#2219)",
-                ticket_id,
-            )
-            continue
-        # The payload doesn't reliably carry the owning client (several
-        # producers omit it), so the candidate clients are read off the
-        # RUNNING rows for this ticket_id and each is tried in turn --
-        # event_session_id is globally unique (TicketTask.session_id ==
-        # Session.id), so at most one candidate can ever match.
-        candidate_clients = {
-            stored_task.client
-            for stored_task in store.tasks
-            if stored_task.ticket_id == ticket_id
-            and stored_task.status == QueueItemStatus.RUNNING
-        }
-        task = None
-        for client_name in candidate_clients:
-            task = _find_running_row(
-                store, ticket_id, client_name, session_id=event_session_id
-            )
-            if task is not None:
-                break
-        if task is None:
+        row = _running_row_for_event(store, event)
+        if row is None:
             continue
         state = load_state()
-        session = next(
-            (s for s in state.sessions if s.id == event_session_id),
-            None,
-        )
-        last_result = (
-            session.last_result
-            if session is not None and isinstance(session.last_result, dict)
-            else None
-        )
+        last_result = _session_last_result(state, row.session_id)
         status = last_result.get("status") if last_result is not None else None
 
         # #1019: a stage-mismatch refusal is a true no-op (Pre-flight
         # Resolution #4) -- skip cost accumulation and the completed
         # count so a refused/stale sentinel doesn't mutate task state
         # or trigger save_dev_queue below.
-        if apply_staged_decision(task, status, last_result, clients):
-            _accumulate_task_cost(task, event_session_id)
+        if apply_staged_decision(row.task, status, last_result, clients):
+            _accumulate_task_cost(row.task, row.session_id)
             completed += 1
     if completed:
         save_dev_queue(store)

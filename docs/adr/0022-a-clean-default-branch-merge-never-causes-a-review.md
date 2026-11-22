@@ -1,7 +1,7 @@
 # A clean default-branch merge never causes a review; merge at most once, only on conflict
 
 **Status:** Accepted
-**Driven by:** #2979 (follow-ups #2980, #2991, #2996, and the narrowing of #1823, #2815, #2918); amended by #2980 (the conflict-resolution round), #3190 (the release-cut CHANGELOG exception) and #2990 (the REVIEW gate probes dispatch-driven rows)
+**Driven by:** #2979 (follow-ups #2980, #2991, #2996, and the narrowing of #1823, #2815, #2918); amended by #2980 (the conflict-resolution round), #3190 (the release-cut CHANGELOG exception), #2990 (the REVIEW gate probes dispatch-driven rows) and #2994 (the REVIEW staleness tip check runs before `dev_queue_lock`, bounded per tick)
 
 ## Decision
 
@@ -79,15 +79,34 @@ stay on `client.default_branch`.
    a worktree that fails to resolve or to verify is skipped (fail open) (the precompute-outside-the-lock pattern of
    `dispatch/pr_gate.resolve_stale_pr_ticket_ids`; ADR-0019 bounds subprocesses
    under `sessions_lock` only, so keeping this gate's git off `dev_queue_lock` is
-   this ADR's own rule). This does not cover the
-   REVIEW staleness gate (`review_gates` gate 3): its tip check runs git
-   in-lock (rev-parse, merge-base, rev-list and one `git merge-tree
-   --write-tree` per merge in the span). Every one of those calls has a 10 s
-   timeout (`PROBE_TIMEOUT_SECONDS`), and the per-merge loop runs under a 30 s
+   this ADR's own rule). The REVIEW staleness gate (`review_gates` gate 3)
+   follows the same rule for its tip check (#2994): `consume_completed_sessions`
+   runs it before the lock, in `dispatch/review_tip_sweep`, on a lock-free queue
+   and state snapshot, and the locked gate reads the verdict. The check is
+   rev-parse, merge-base, rev-list and one `git merge-tree --write-tree` per
+   merge in the span. Every one of those calls has a 10 s timeout
+   (`PROBE_TIMEOUT_SECONDS`), and the per-merge loop runs under a 30 s
    wall-clock budget (`TIP_CHECK_BUDGET_SECONDS`) checked before each merge, so
    the worst case is the four git calls before the loop plus the budget plus
    one merge (up to three git calls of 10 s each); a timeout or a spent budget
-   reads as stale (fail closed). There is no per-tick cap.
+   reads as stale (fail closed). That bound is per row. Per tick the sweep runs
+   at most 10 checks under a 30 s budget checked before each check (so the tip
+   checks' worst case is that budget plus one check), and always runs at least
+   one, so the queue shrinks. The bound covers the tip checks only: planning a
+   row (`plan_review_staleness`: one local `git rev-parse HEAD`, one
+   `git branch --show-current` for a dispatch-driven row, a ledger read) runs
+   for each pending event up to the cut before the cap is consulted, and the
+   locked gate plans again. A row beyond the bound is deferred, not decided: its
+   event stays pending and its row stays RUNNING until a later tick. The locked
+   gate applies a verdict only on an exact `(client, ticket, reviewed_sha, HEAD)`
+   match; on a miss, or when no sweep ran (an unreadable queue, state or client
+   config), it runs the tip check inline and uncapped, and a miss logs a
+   WARNING. That fallback is the accepted exception to the bounded-prefetch
+   rule (ARCHITECTURE section 7 item 16): the router mutates the row before it
+   reaches the gate, so it cannot defer there, and an inline answer is correct
+   for current inputs; the normal path has no misses and a test pins that. A
+   single-row caller (CLI settle, `cw spawn complete`, reconcile, Stop-hook)
+   checks inline as before.
 4. **The REVIEW gate fails open.** Anything but a probe-reported `conflict`
    (an error, a timeout, a skipped probe, no verdict) does not park.
 5. **The tip rule fails closed.** A conflict resolution, a hand edit, an
@@ -156,7 +175,12 @@ stay on `client.default_branch`.
   row's branch (#2990). The single-event settles and reconcile's recovery
   install no verdict (fail open), and finalize Step 4c.5 handles a conflict
   downstream.
-- The review-staleness gate's in-lock tip check now runs one `merge-tree` per
+- **A REVIEW completion can wait a tick or more.** Behind a backlog of more
+  than 10 checkable rows (or slow checks spending the 30 s budget), the sweep
+  holds the later events behind the dispatch cursor (INFO `review_tip: N
+  completion event(s) held for a later tick`). Their rows stay RUNNING and
+  unchanged; nothing is decided from the skip (#2994).
+- The review-staleness gate's tip check (run pre-lock since #2994) now runs one `merge-tree` per
   merge in the span, each git call under a 10 s timeout and the loop under a
   30 s budget checked before each merge (invariant 3).
 - **`verify-tip` and `finalize` refresh the default branch once.** They fetch
@@ -187,6 +211,52 @@ probe git under `dev_queue_lock` (invariant 3), and the per-tick cap and budget.
 The checkout check (`git branch --show-current` per candidate) runs before the
 cap and is bounded by the candidate count (invariant 3).
 
+## Amendment: the REVIEW staleness tip check runs before the lock, bounded per tick (#2994)
+
+**Decision:** the REVIEW staleness gate's tip check (`tolerates_review_move`, git)
+moves out of `dev_queue_lock` into a pre-lock sweep
+(`dispatch/review_tip_sweep`), at most 10 checks and a 30 s budget checked
+before each check per tick. The locked gate reads the verdict and applies it
+only on an exact key match (invariant 3).
+
+**Why:** the gate ran up to a per-row worst case of the four prelude calls, the
+30 s merge budget and one merge, inside `dev_queue_lock`, for every pending
+completion, with no per-tick cap. A slow default-branch fetch state could stall
+every queue writer for minutes.
+
+**Bounds kept:**
+
+- **Deferral, never a decision.** The sweep returns a strict prefix of the
+  pending events. The first row it cannot afford, and every event behind it,
+  stays pending behind the dispatch cursor; the row stays RUNNING and untouched
+  and a later tick checks it. A row is never read as stale or fresh because of a
+  skip. At least one check runs per tick, so the queue shrinks.
+- **The completed-silent backstop leaves a held row alone.** A held event leaves
+  its row RUNNING while its DAEMON session is already COMPLETED. The backstop
+  (`reconcile/tasks/backstops.py`) would revert that row to PENDING and clear
+  its `session_id` once the 60 s completion grace passed, and the deferred
+  event would then match no RUNNING row, dropping the recorded result. So
+  `backstop_targets` treats a COMPLETED session whose SESSION_COMPLETED event is
+  still pending for the dispatch consumer as inside its grace, in both the
+  lockless dirty-check capture and the in-lock revert. The exemption ends when
+  the consumer consumes the event; a TIMED_OUT session is unaffected, and so is a
+  session reconcile already dispositioned (`recovery_disposition` set, for
+  example a codex-harvest orphan park), which only the backstop can honour. If the
+  dispatch loop is not running, such a row waits for the consumer rather than
+  being reverted.
+- **Inline fallback.** A verdict-key miss under an active scope, or no sweep (an
+  unreadable queue, state or client config), makes the locked gate run the tip
+  check inline, uncapped, with a WARNING for a miss. Deferring from inside the
+  router is unsafe because mutations precede the gate. The normal path has no
+  misses, and a test pins that.
+- **What the bound covers.** The cap and the budget meter the tip checks. The
+  per-event planning reads (`git rev-parse HEAD`, `git branch --show-current`
+  for a dispatch-driven row, a ledger read) run for each candidate event up to
+  the cut and again in the locked gate; they are local and bounded by the
+  pending events, and not metered.
+- **`cw spawn complete`** advances the dispatch cursor only when its own event is
+  the first pending one, so it never skips an event the sweep held back.
+
 ## Alternatives considered
 
 - **Review only the conflict resolution.** Deferred from #2979 and adopted in
@@ -202,4 +272,4 @@ cap and is bounded by the candidate count (invariant 3).
 
 ## Referenced by
 
-- #2979, #2980, #2991, #2996, #1823, #2815, #2861, #2918, #2990
+- #2979, #2980, #2991, #2996, #1823, #2815, #2861, #2918, #2990, #2994

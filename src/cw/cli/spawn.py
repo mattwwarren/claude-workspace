@@ -28,6 +28,7 @@ from cw.dev_queue import (
     running_task_for_session,
 )
 from cw.dispatch import _DISPATCH_CONSUMER, _apply_events_to_store
+from cw.dispatch.loop import read_pending_completions
 from cw.events import advance_cursor, record_event
 from cw.exceptions import CwError, RequeueStateError
 from cw.history import record_event as record_history_event
@@ -575,9 +576,14 @@ def _spawn_complete_impl(
                     sess.completed_reason = CompletionReason.USER
                 save_state(state)
 
-    # Advance cursor after the lock (advance_cursor takes the leaf inbox lock)
+    # Advance cursor after the lock (advance_cursor takes the leaf inbox lock).
+    # Only when this event is the first pending one: an earlier event the
+    # pre-lock sweep held back (#2994) must not be skipped by the cursor. An
+    # empty pending list means a consume tick already moved past this event.
     if event is not None:
-        advance_cursor(_DISPATCH_CONSUMER, event.id)
+        pending = read_pending_completions()
+        if pending and pending[0].id == event.id:
+            advance_cursor(_DISPATCH_CONSUMER, event.id)
 
     # daemon.stop outside lock — best-effort, slow (up to 10s timeout)
     if sess.surface_ref is not None and sess.origin is SessionOrigin.DAEMON:

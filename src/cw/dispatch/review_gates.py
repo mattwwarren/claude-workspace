@@ -62,6 +62,11 @@ from cw.dev_queue import (
     transition_task_status,
 )
 from cw.dispatch.branch_freshness import has_conflicting_branch
+from cw.dispatch.review_tip_verdicts import (
+    TipCheck,
+    TipKey,
+    installed_tip_verdict,
+)
 from cw.events import record_event
 from cw.models import (
     OrchestratorEventType,
@@ -69,10 +74,12 @@ from cw.models import (
     resolve_base_branch,
 )
 from cw.queue_rows import resolve_hold_finalize
-from cw.review_convergence import tolerates_review_move
+from cw.review_convergence import review_move_tolerance, tolerates_review_move
 from cw.worktree import resolve_task_worktree
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from cw.models import (
         ClientConfig,
         OrchestratorConfig,
@@ -315,41 +322,104 @@ def _should_gate_for_review_staleness(
     are worker-reachable: they are the same evidence ``verify-tip`` already
     trusts, so this is not tamper-proof, and it is not a regression.
 
-    The pass adds ZERO log or audit emissions. The gate is a pure predicate
-    that routing evaluates per consumed completion event for a REVIEW row (via
-    ``apply_staged_decision`` in ``dispatch/loop.py``, under
-    ``dev_queue_lock``, a state lock rather than ``sessions_lock``, so ADR-0019
-    is not engaged) and at the scope-gated router sites in ``routing``; a
-    tolerated pass changes no disposition, so it is as silent as the existing
-    ``reviewed_sha == HEAD`` pass. The decision is reproducible from the
-    ledger plus git, and the ``default_merge_tolerated`` key on the ``converge
-    init`` / ``status`` / ``verify-tip`` / ``finalize`` JSON is the only
-    signal. The gate does not fetch ``origin/<default>``: a stale local
-    tracking ref makes the predicate refuse and the gate park (strict), where
-    the fetching ``verify-tip`` may accept; that is the fail-closed direction.
-    The predicate's git calls run only when ``reviewed_sha`` is not HEAD and
-    the client and ledger already qualify, under ``dev_queue_lock`` exactly as
-    the ``current_head_sha`` call and the branch-staleness gate already do.
+    The pass adds ZERO log or audit emission for a pass or a gate decision. The
+    sweep's deferral line and the verdict-miss warning are not gate pass/fail.
+    The gate is a pure predicate that routing evaluates per consumed completion
+    event for a REVIEW row (via ``apply_staged_decision`` in
+    ``dispatch/loop.py``, under ``dev_queue_lock``, a state lock rather than
+    ``sessions_lock``, so ADR-0019 is not engaged) and at the scope-gated router
+    sites in ``routing``; a tolerated pass changes no disposition, so it is as
+    silent as the existing ``reviewed_sha == HEAD`` pass. The decision is
+    reproducible from the ledger plus git, and the ``default_merge_tolerated``
+    key on the ``converge init`` / ``status`` / ``verify-tip`` / ``finalize``
+    JSON is the only signal. The gate does not fetch ``origin/<default>``: a
+    stale local tracking ref makes the predicate refuse and the gate park
+    (strict), where the fetching ``verify-tip`` may accept; that is the
+    fail-closed direction.
+
+    The predicate's tip git runs before ``dev_queue_lock``, in
+    ``review_tip_sweep`` (#2994, ADR-0022 invariant 3), for a row whose
+    ``reviewed_sha`` is not HEAD and whose client and ledger already qualify.
+    That sweep bounds the tip checks per tick, not the gate's other reads: the
+    locked gate still plans every row it evaluates (a local ``git rev-parse
+    HEAD``, a ``git branch --show-current`` for an unstamped row, a ledger
+    read). It applies a verdict only on an exact key match; on a miss under an
+    active scope, or with no scope installed (a single-row caller, or an
+    unreadable sweep), it runs the tip check inline and uncapped, and a miss
+    under a scope logs a WARNING (the normal path has none).
     """
-    if not _reports_review_content(last_result):
-        return False
+    plan = plan_review_staleness(task, last_result, clients)
+    if isinstance(plan, bool):
+        return plan
+    tolerated = installed_tip_verdict(plan.key)
+    if tolerated is None:
+        tolerated = tolerates_review_move(
+            plan.client,
+            plan.worktree,
+            reviewed_sha=plan.key.reviewed_sha,
+            head_sha=plan.key.head_sha,
+            task=task,
+        )
+    return not tolerated
+
+
+def _measure_review(
+    task: TicketTask,
+    last_result: dict[str, object] | None,
+    clients: dict[str, ClientConfig],
+) -> tuple[str, str, ClientConfig | None, Path] | None:
+    """``(reviewed_sha, head_sha, client, worktree)``, or ``None`` if unmeasurable.
+
+    ``None`` is the gate's fail-closed case: a missing ``reviewed_sha``, an
+    unresolvable worktree, or an unmeasurable HEAD (#2123).
+    """
     reviewed_sha = _resolve_review_reviewed_sha(last_result)
     if reviewed_sha is None:
-        return True
+        return None
     client = clients.get(task.client)
     worktree_path = resolve_task_worktree(task, client)
     if worktree_path is None:
-        return True
+        return None
     head_sha = current_head_sha(worktree_path)
     if head_sha is None:
+        return None
+    return reviewed_sha, head_sha, client, worktree_path
+
+
+def plan_review_staleness(
+    task: TicketTask,
+    last_result: dict[str, object] | None,
+    clients: dict[str, ClientConfig],
+) -> bool | TipCheck:
+    """Plan the REVIEW staleness decision, without the tip git (#2994).
+
+    Returns the final gate answer (``True`` gates) when no git check is needed,
+    or a :class:`TipCheck` when the only open question is
+    :func:`~cw.review_convergence.tolerates_review_move`. The pre-lock sweep
+    (``review_tip_sweep``) runs that check for a :class:`TipCheck`; the in-lock
+    gate then reads the verdict. ``review_move_tolerance`` is the git-free
+    precheck, and it is ``None`` exactly when ``tolerates_review_move`` must
+    answer False (no client, blocking mode, opt-out, or unconverged ledger).
+    """
+    if not _reports_review_content(last_result):
+        return False
+    measured = _measure_review(task, last_result, clients)
+    if measured is None:
         return True
+    reviewed_sha, head_sha, client, worktree_path = measured
     if reviewed_sha == head_sha:
         return False
-    return not tolerates_review_move(
-        client,
-        worktree_path,
-        reviewed_sha=reviewed_sha,
-        head_sha=head_sha,
+    if client is None or (
+        review_move_tolerance(
+            client, worktree_path, reviewed_sha=reviewed_sha, task=task
+        )
+        is None
+    ):
+        return True
+    return TipCheck(
+        key=TipKey(task.client, task.ticket_id, reviewed_sha, head_sha),
+        client=client,
+        worktree=worktree_path,
         task=task,
     )
 

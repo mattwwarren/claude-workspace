@@ -282,8 +282,10 @@ reports `delta_confirm_eligible` (#2980), and every other move gets a normal
 full review round. The
 `branch_behind_main` gate parks only on a probe-reported conflict, with its
 probes precomputed outside `dev_queue_lock` and failing open. The separate
-review-staleness gate (`review_artifacts_stale`) still runs a bounded tip check
-of git in-lock (ADR-0022 invariant 3).
+review-staleness gate (`review_artifacts_stale`) runs a bounded tip check of git
+before `dev_queue_lock`, at most 10 checks and 30 s per tick, deferring the rest;
+a verdict miss falls back to an inline check, an accepted exception to §7 item 16
+(ADR-0022 invariant 3).
 See `docs/adr/0022-a-clean-default-branch-merge-never-causes-a-review.md`.
 
 **ADR-0024 — the merge target is not the trust root.** `TicketTask.base_branch`
@@ -415,6 +417,12 @@ cites one of these.
     (`PLAN_PREFETCH_MAX_PER_TICK`, `PLAN_PREFETCH_BUDGET_SECONDS`, #2545),
     `src/cw/reconcile/dirty_checks.py` (`DIRTY_CHECK_MAX_PER_TICK`, #2548),
     `src/cw/reconcile/probe_store.py` (`BoundedProbeStore`); GitHub #1232
+    Accepted exception (#2994): the REVIEW staleness tip sweep
+    (`src/cw/dispatch/review_tip_sweep.py`) is capped and budgeted, but its
+    locked consumer falls back to the tip check inline, uncapped, on a
+    verdict-key miss or an unreadable sweep, because the router cannot defer
+    from inside the gate. The fallback is observable by a WARNING and pinned at
+    zero misses on the normal path.
 
 ## §8 Anti-patterns
 

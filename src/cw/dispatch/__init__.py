@@ -18,6 +18,11 @@ narrowed from "behind with overlap" by #2979).
 #2421 added ``impl_gates``, the IMPL-scoped sibling to ``review_gates`` (the
 unconcluded FINALIZE-regress merge gate), re-exported the same way.
 
+#2994 added two leaves that are deliberately NOT re-exported (``branch_freshness``
+names are not either): ``review_tip_verdicts`` (the verdict scope the REVIEW
+staleness gate reads) and ``review_tip_sweep`` (the pre-lock, per-tick-bounded
+tip check that fills it).
+
 #1728 finished the job: ``routing`` is itself a package now, with five
 concern submodules -- ``scope_tier`` (effective scope-tier resolution and
 carried-context persistence), ``stage_walk`` (``stage_reached`` classification
