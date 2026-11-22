@@ -244,7 +244,7 @@ def _rejection_after_refresh(
     rejection = default_merge_rejection(worktree, clean, head, tolerance)
     if rejection is None or not is_stale_default_ref_symptom(rejection):
         return rejection
-    if not _refresh_default_ref(worktree, tolerance.default_branch):
+    if not _refresh_default_ref(worktree, tolerance.base_branch):
         return rejection
     return default_merge_rejection(worktree, clean, head, tolerance)
 
@@ -266,8 +266,7 @@ def _rejected(
     no extra git call. The ``detail`` is the same either way.
     """
     detail = (
-        f"verify-tip: not a clean merge of origin/{tolerance.default_branch}: "
-        f"{rejection}"
+        f"verify-tip: not a clean merge of origin/{tolerance.base_branch}: {rejection}"
     )
     if not assess_resolution or not rejection.startswith(REJECT_NOT_TEXTUALLY_CLEAN):
         return _TipCheck(ledger, verdict, detail)

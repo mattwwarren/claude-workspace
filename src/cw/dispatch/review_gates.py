@@ -346,7 +346,11 @@ def _should_gate_for_review_staleness(
     if reviewed_sha == head_sha:
         return False
     return not tolerates_review_move(
-        client, worktree_path, reviewed_sha=reviewed_sha, head_sha=head_sha
+        client,
+        worktree_path,
+        reviewed_sha=reviewed_sha,
+        head_sha=head_sha,
+        task=task,
     )
 
 

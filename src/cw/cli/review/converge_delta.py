@@ -80,6 +80,7 @@ from cw.tolerated_paths import tolerated_paths
 if TYPE_CHECKING:
     from cw.cli.review.confirm import RoundOutcome
     from cw.confirmation_jobs import ConfirmationRun
+    from cw.models import TicketTask
     from cw.review_convergence import (
         ConvergenceLedger,
         ResolutionPlan,
@@ -107,10 +108,15 @@ class DeltaRefusedError(CwError):
 
 
 def _resolve_plan(
-    *, client: str, ticket_id: str, worktree: Path, ledger_path: Path
+    *,
+    client: str,
+    ticket_id: str,
+    worktree: Path,
+    ledger_path: Path,
+    task: TicketTask,
 ) -> tuple[ConvergenceLedger, str, ResolutionPlan]:
     """The ledger, HEAD and the resolution plan, or a one-line refusal ``CwError``."""
-    tolerance = tolerance_for_client(get_client(client))
+    tolerance = tolerance_for_client(get_client(client), task)
     head = rev_parse_or_none(worktree, "HEAD")
     if head is None:
         raise DeltaRefusedError(REJECT_GIT_UNREADABLE)
@@ -292,7 +298,11 @@ def converge_delta_confirm(
     )
     ledger_path = worktree / ledger_rel
     ledger, head, plan = _resolve_plan(
-        client=client, ticket_id=ticket_id, worktree=worktree, ledger_path=ledger_path
+        client=client,
+        ticket_id=ticket_id,
+        worktree=worktree,
+        ledger_path=ledger_path,
+        task=task,
     )
     backend = ledger.confirm_backend
     require_backend_binary(backend)

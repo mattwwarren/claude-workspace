@@ -45,7 +45,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, NamedTuple
 
 from cw._git import run_git
+from cw.context_queue_metadata import base_branch_from_context
 from cw.merge_probe import PROBE_TIMEOUT_SECONDS, MergeTreeStatus, merge_tree
+from cw.models import resolve_base_branch
 from cw.review_convergence._store import LEDGER_RELATIVE_PATH, load_ledger
 from cw.review_convergence._tip import finalize_ready
 
@@ -53,7 +55,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from pathlib import Path
 
-    from cw.models import ClientConfig
+    from cw.models import ClientConfig, TicketTask
     from cw.review_convergence._models import ConvergenceLedger
 
 #: Wall-clock budget, in seconds, for the merge loop of one
@@ -109,9 +111,12 @@ def is_stale_default_ref_symptom(rejection: str) -> bool:
 
 @dataclass(frozen=True)
 class MergeTolerance:
-    """The default branch a tolerated merge comes from."""
+    """The merge-target branch a tolerated merge comes from (RFC 0020 S3a).
 
-    default_branch: str
+    The row's base when the row records one, else the client's default branch.
+    """
+
+    base_branch: str
 
 
 def tolerance_from_context(
@@ -123,33 +128,35 @@ def tolerance_from_context(
     ``review`` object (``None`` when unreadable or below schema 15). ``None``
     for either of them, a ``review.default_merge_tolerance`` that is present
     and not exactly ``True`` (``False`` is the opt-out; any other value is
-    malformed and never widens the tolerance), or a missing or empty
-    ``world_state_snapshot.origin_main_branch``. An absent tolerance key is the
-    documented default, tolerant.
+    malformed and never widens the tolerance), or no non-empty base branch
+    (:func:`~cw.context_queue_metadata.base_branch_from_context`). An absent
+    tolerance key is the documented default, tolerant.
     """
     if context is None or review_obj is None:
         return None
     if review_obj.get("default_merge_tolerance", True) is not True:
         return None
-    snapshot = context.get("world_state_snapshot")
-    branch = snapshot.get("origin_main_branch") if isinstance(snapshot, dict) else None
-    if not isinstance(branch, str) or not branch:
+    branch = base_branch_from_context(context)
+    if branch is None:
         return None
     return MergeTolerance(branch)
 
 
-def tolerance_for_client(client: ClientConfig) -> MergeTolerance | None:
+def tolerance_for_client(
+    client: ClientConfig, task: TicketTask | None = None
+) -> MergeTolerance | None:
     """The tolerance the live client config names, or ``None`` (strict).
 
-    The same fields the cw-context producer writes (``default_branch`` and
+    The same fields the cw-context producer writes (the merge base and
     ``review.default_merge_tolerance``), read from the cw-owned config rather
-    than the worker-writable context file. ``None`` unless the client is in
-    clean mode with the tolerance on.
+    than the worker-writable context file. The base is the row's recorded base
+    when *task* is given and has one (:func:`~cw.models.resolve_base_branch`).
+    ``None`` unless the client is in clean mode with the tolerance on.
     """
     review = client.review
     if not review.is_clean or review.default_merge_tolerance is not True:
         return None
-    return MergeTolerance(client.default_branch)
+    return MergeTolerance(resolve_base_branch(client, task))
 
 
 def git_stdout_or_none(worktree: Path, argv: list[str]) -> str | None:
@@ -293,7 +300,7 @@ def classify_default_merge(
     defers to :func:`classify_merge`. Takes a :class:`MergeTolerance`, never a
     bare branch name, so a strict (``None``) decision cannot reach it.
     """
-    ref = f"refs/remotes/origin/{tolerance.default_branch}^{{commit}}"
+    ref = f"refs/remotes/origin/{tolerance.base_branch}^{{commit}}"
     default_sha = rev_parse_or_none(worktree, ref)
     if default_sha is None:
         return REJECT_NO_DEFAULT_REF
@@ -412,7 +419,7 @@ def default_merge_rejection(
     """
     if tolerance is None:
         return REJECT_TOLERANCE_OFF
-    found = checked_span(worktree, clean_sha, head_sha, tolerance.default_branch)
+    found = checked_span(worktree, clean_sha, head_sha, tolerance.base_branch)
     if isinstance(found, str):
         return found
     for outcome in merge_outcomes(worktree, found, clock=clock):
@@ -468,7 +475,11 @@ class _ReviewMoveBasis(NamedTuple):
 
 
 def _review_move_basis(
-    client: ClientConfig | None, worktree: Path, *, reviewed_sha: str
+    client: ClientConfig | None,
+    worktree: Path,
+    *,
+    reviewed_sha: str,
+    task: TicketTask | None = None,
 ) -> _ReviewMoveBasis | None:
     """The ledger and tolerance a review move is judged on, or ``None`` (strict).
 
@@ -487,7 +498,7 @@ def _review_move_basis(
         return None
     if ledger is None or ledger.last_clean_sha != reviewed_sha:
         return None
-    return _ReviewMoveBasis(ledger, tolerance_for_client(client))
+    return _ReviewMoveBasis(ledger, tolerance_for_client(client, task))
 
 
 def tolerates_review_move(
@@ -496,6 +507,7 @@ def tolerates_review_move(
     *,
     reviewed_sha: str,
     head_sha: str,
+    task: TicketTask | None = None,
 ) -> bool:
     """True when the move from *reviewed_sha* to *head_sha* is a tolerated merge.
 
@@ -506,7 +518,7 @@ def tolerates_review_move(
     or missing ledger, a ledger whose ``last_clean_sha`` is not *reviewed_sha*,
     or anything :func:`converged_across_tolerated_merge` refuses.
     """
-    basis = _review_move_basis(client, worktree, reviewed_sha=reviewed_sha)
+    basis = _review_move_basis(client, worktree, reviewed_sha=reviewed_sha, task=task)
     return basis is not None and converged_across_tolerated_merge(
         basis.ledger,
         worktree=worktree,
@@ -516,7 +528,11 @@ def tolerates_review_move(
 
 
 def review_move_tolerance(
-    client: ClientConfig | None, worktree: Path, *, reviewed_sha: str
+    client: ClientConfig | None,
+    worktree: Path,
+    *,
+    reviewed_sha: str,
+    task: TicketTask | None = None,
 ) -> MergeTolerance | None:
     """The merge tolerance for a move past *reviewed_sha*, or ``None`` (strict).
 
@@ -527,7 +543,7 @@ def review_move_tolerance(
     blocking-mode client, ``default_merge_tolerance: false``, no client, or a
     ledger that does not name *reviewed_sha* as its converged clean sha.
     """
-    basis = _review_move_basis(client, worktree, reviewed_sha=reviewed_sha)
+    basis = _review_move_basis(client, worktree, reviewed_sha=reviewed_sha, task=task)
     if basis is None or not finalize_ready(basis.ledger):
         return None
     return basis.tolerance

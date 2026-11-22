@@ -46,6 +46,7 @@ from cw.cli.review.converge_confirm import (
     round_ran_engine,
 )
 from cw.cli.review.converge_engine_defers import record_engine_defers
+from cw.context_queue_metadata import base_branch_from_context
 from cw.exceptions import CwError
 from cw.models import CLAUDE_NATIVE_BACKEND, HOOK_CONTEXT_RELATIVE_PATH
 from cw.models.client import DEFAULT_BLOCKING_MAX_CYCLES, DEFAULT_CLEAN_MAX_CYCLES
@@ -810,20 +811,18 @@ def converge_status(worktree: Path, ledger_rel: Path) -> None:
 
 
 def _default_branch(context_path: Path, option: str | None) -> str:
-    """``--default-branch``, else the context's ``origin_main_branch``, else main.
+    """``--default-branch``, else the context's merge base, else main.
 
-    The context's ``world_state_snapshot.origin_main_branch`` is the client's
-    default branch as ``cw`` stamped it at spawn; any other shape (no context,
-    no snapshot, a non-string or empty branch) falls back to ``main``.
+    The merge base is :func:`~cw.context_queue_metadata.base_branch_from_context`:
+    the row's base (v23 ``base_branch``) or, on a v22 context, the client's
+    ``origin_main_branch`` as ``cw`` stamped it at spawn. Any other shape (no
+    context, no usable key, a non-string or empty value) falls back to ``main``.
     """
     if option:
         return option
-    context = read_context(context_path)
-    snapshot = None if context is None else context.get("world_state_snapshot")
-    branch = snapshot.get("origin_main_branch") if isinstance(snapshot, dict) else None
-    if isinstance(branch, str) and branch:
-        return branch
-    return _FALLBACK_DEFAULT_BRANCH
+    return (
+        base_branch_from_context(read_context(context_path)) or _FALLBACK_DEFAULT_BRANCH
+    )
 
 
 @converge.command(name="diff-base")
@@ -831,8 +830,8 @@ def _default_branch(context_path: Path, option: str | None) -> str:
     "--default-branch",
     default=None,
     help=(
-        "The branch to diff against. Default: origin_main_branch from the "
-        "context file, else main."
+        "The branch to diff against. Default: the context file's base_branch "
+        "(else origin_main_branch), else main."
     ),
 )
 @click.option(

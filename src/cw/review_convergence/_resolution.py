@@ -233,7 +233,7 @@ def assess_resolution_round(
     if isinstance(gate, str):
         return _refused(gate)
     open_tolerance, clean = gate
-    span = checked_span(worktree, clean, head_sha, open_tolerance.default_branch)
+    span = checked_span(worktree, clean, head_sha, open_tolerance.base_branch)
     if isinstance(span, str):
         return _refused(span)
     found = _one_resolution(worktree, span, clock)

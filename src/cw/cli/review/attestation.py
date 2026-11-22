@@ -10,6 +10,7 @@ contract is ``docs/headless-contract.md`` section 13. Lockless; it may run git.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,6 +23,7 @@ from cw.cli.review._group import review
 from cw.cli.review.check_approval import _guard_root, _string_field
 from cw.cli.review.converge import read_context
 from cw.config import get_client
+from cw.context_queue_metadata import base_branch_from_context
 from cw.exceptions import CwError
 from cw.models.client import CLIENT_CONTEXT_KEY
 from cw.models.review_attestation import REVIEW_ATTESTATION_KEY
@@ -139,8 +141,16 @@ def attestation_verdict(
     expected_client = client_name or _string_field(context, CLIENT_CONTEXT_KEY)
     live = live_client(expected_client)
 
+    ctx_base = base_branch_from_context(context)
+
     def merge_tolerance_for(sha: str) -> MergeTolerance | None:
-        return review_move_tolerance(live, root, reviewed_sha=sha)
+        # No row here: the context's base (the row's, when it has one) names the
+        # merge target (RFC 0020 S3a). Schema and sign-off rules stay on the
+        # client default.
+        tol = review_move_tolerance(live, root, reviewed_sha=sha)
+        if tol is None or ctx_base is None:
+            return tol
+        return dataclasses.replace(tol, base_branch=ctx_base)
 
     return evaluate_review_attestation(
         raw,
