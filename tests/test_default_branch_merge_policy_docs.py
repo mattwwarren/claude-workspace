@@ -785,6 +785,44 @@ class TestAdr:
         )
         assert "a timeout or a spent budget reads as stale (fail closed)" in adr
         assert "at most 10 checks under a 30 s budget" in adr
+        assert "The bound covers the tip checks only" in adr
+        assert "the accepted exception to the bounded-prefetch rule" in adr
+
+    def test_the_per_tick_sweep_budget_is_documented_as_checked_before_each_check(
+        self,
+    ) -> None:
+        """The sweep's 30 s is checked before each check, not a bound (#2994).
+
+        The cap and the budget meter the tip checks only: a tick's worst case for
+        them is the budget plus one check, and the per-event planning reads and
+        the inline fallback are outside it. Every surface that states the figure
+        says so, and the amendment records the backstop exemption.
+        """
+        adr = " ".join(_read(_ADR_0022).split())
+        runbook = _after(
+            " ".join(_read("docs/dispatch-runbook.md").split()),
+            "The gate's tip check runs git before `dev_queue_lock`",
+            span=1800,
+        )
+        source = " ".join(_read("src/cw/dispatch/review_tip_sweep.py").split())
+        for name, text in (("adr", adr), ("runbook", runbook), ("source", source)):
+            assert "budget checked before each check" in text, name
+            assert "covers the" in text, name
+            assert "only" in text, name
+        assert "worst case is that budget plus one check" in adr
+        assert "worst case is the budget plus one check" in source
+        assert "not metered" in runbook
+        assert "not metered" in source
+        # The amendment: the held row is exempt from the completed-silent backstop.
+        assert (
+            "## Amendment: the REVIEW staleness tip check runs before the lock, "
+            "bounded per tick (#2994)" in adr
+        )
+        assert (
+            "treats a COMPLETED session whose SESSION_COMPLETED event is still pending"
+            in adr
+        )
+        assert "#2994" in adr[: adr.index("## Decision")]
 
     def test_the_consequences_state_pr_attention_policy_and_ref_refresh(
         self,
@@ -1007,7 +1045,9 @@ _ADR_INVARIANT_1 = (
 )
 _ADR_HEADER = (
     "amended by #2980 (the conflict-resolution round), #3190 (the release-cut"
-    " CHANGELOG exception) and #2990 (the REVIEW gate probes dispatch-driven rows)"
+    " CHANGELOG exception), #2990 (the REVIEW gate probes dispatch-driven rows) and"
+    " #2994 (the REVIEW staleness tip check runs before `dev_queue_lock`, bounded"
+    " per tick)"
 )
 _ARCH_EXCEPTION = (
     "One exception (#3190): `cw worktree changelog-sync` merges `origin/<default>`"

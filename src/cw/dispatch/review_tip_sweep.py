@@ -9,20 +9,32 @@ read (:mod:`cw.dispatch.review_tip_verdicts`).
 
 Three hard contracts:
 
-* **Bounded per tick.** At most :data:`_MAX_TIP_CHECKS_PER_TICK` checks, and a
-  :data:`_TIP_SWEEP_BUDGET_SECONDS` wall-clock budget checked before each
-  check, so the worst case is the budget plus one check (one check is four
-  prelude git calls, the ``TIP_CHECK_BUDGET_SECONDS`` merge budget, and up to
-  three merges, each bounded by ``PROBE_TIMEOUT_SECONDS``). At least one check
-  runs per tick, so the queue always shrinks.
+* **Bounded per tick, for the tip checks.** At most :data:`_MAX_TIP_CHECKS_PER_TICK`
+  tip checks (``tolerates_review_move``), and a :data:`_TIP_SWEEP_BUDGET_SECONDS`
+  wall-clock budget checked before each check, so the tip checks' worst case is
+  the budget plus one check (one check is four prelude git calls, the
+  ``TIP_CHECK_BUDGET_SECONDS`` merge budget, and up to three merges, each bounded
+  by ``PROBE_TIMEOUT_SECONDS``). At least one check runs per tick, so the queue
+  always shrinks. The bound covers the checks only, not every read: planning a
+  row (``plan_review_staleness``: one local ``git rev-parse HEAD``, one
+  ``git branch --show-current`` for an unstamped row, a ledger read) runs for each
+  pending event up to the cut before the cap is consulted, and the locked gate
+  plans each row again. Those reads are local and bounded by the pending events,
+  as ``branch_freshness``'s checkout check is; they are not metered.
 * **Defer, never decide from a skip.** The sweep walks events in order and
   returns a strict prefix. At the first row it cannot afford, it stops; the
   rest stay pending and their rows stay RUNNING for a later tick. A deferred
-  row is neither stale nor fresh: nothing is decided for it this tick.
-* **Fail open to inline, never raise past the lock.** An unreadable queue,
+  row is neither stale nor fresh: nothing is decided for it this tick. While
+  its event is pending, the completed-silent backstop leaves its row alone
+  (``reconcile.tasks.backstops``), so the recorded result is not dropped.
+* **Fall back to inline, never raise past the lock.** An unreadable queue,
   state or client config yields no sweep: every event applies inline, as
   before, and the locked apply surfaces the error on its own read. A verdict
-  key miss under the scope falls back to the inline check and logs a WARNING.
+  key miss under the scope also runs the tip check inline, and logs a WARNING.
+  Both fallbacks are uncapped by design (a skip inside the router would decide
+  from it, because mutations precede the gate); they are the accepted exception
+  to ARCHITECTURE section 7 item 16, observable through the WARNING and pinned
+  at zero misses on the normal path.
 
 Candidates over-approximate the router's (any non-FINALIZE row whose status is
 a scope-gated approval or stage-success status). Over-approximating only costs

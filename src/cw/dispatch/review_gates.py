@@ -324,22 +324,29 @@ def _should_gate_for_review_staleness(
 
     The pass adds ZERO log or audit emission for a pass or a gate decision. The
     sweep's deferral line and the verdict-miss warning are not gate pass/fail.
-    The gate is a pure predicate
-    that routing evaluates per consumed completion event for a REVIEW row (via
-    ``apply_staged_decision`` in ``dispatch/loop.py``, under
-    ``dev_queue_lock``, a state lock rather than ``sessions_lock``, so ADR-0019
-    is not engaged) and at the scope-gated router sites in ``routing``; a
-    tolerated pass changes no disposition, so it is as silent as the existing
-    ``reviewed_sha == HEAD`` pass. The decision is reproducible from the
-    ledger plus git, and the ``default_merge_tolerated`` key on the ``converge
-    init`` / ``status`` / ``verify-tip`` / ``finalize`` JSON is the only
-    signal. The gate does not fetch ``origin/<default>``: a stale local
-    tracking ref makes the predicate refuse and the gate park (strict), where
-    the fetching ``verify-tip`` may accept; that is the fail-closed direction.
+    The gate is a pure predicate that routing evaluates per consumed completion
+    event for a REVIEW row (via ``apply_staged_decision`` in
+    ``dispatch/loop.py``, under ``dev_queue_lock``, a state lock rather than
+    ``sessions_lock``, so ADR-0019 is not engaged) and at the scope-gated router
+    sites in ``routing``; a tolerated pass changes no disposition, so it is as
+    silent as the existing ``reviewed_sha == HEAD`` pass. The decision is
+    reproducible from the ledger plus git, and the ``default_merge_tolerated``
+    key on the ``converge init`` / ``status`` / ``verify-tip`` / ``finalize``
+    JSON is the only signal. The gate does not fetch ``origin/<default>``: a
+    stale local tracking ref makes the predicate refuse and the gate park
+    (strict), where the fetching ``verify-tip`` may accept; that is the
+    fail-closed direction.
+
     The predicate's tip git runs before ``dev_queue_lock``, in
     ``review_tip_sweep`` (#2994, ADR-0022 invariant 3), for a row whose
     ``reviewed_sha`` is not HEAD and whose client and ledger already qualify.
-    The in-lock gate reads that verdict and runs git inline only on a key miss.
+    That sweep bounds the tip checks per tick, not the gate's other reads: the
+    locked gate still plans every row it evaluates (a local ``git rev-parse
+    HEAD``, a ``git branch --show-current`` for an unstamped row, a ledger
+    read). It applies a verdict only on an exact key match; on a miss under an
+    active scope, or with no scope installed (a single-row caller, or an
+    unreadable sweep), it runs the tip check inline and uncapped, and a miss
+    under a scope logs a WARNING (the normal path has none).
     """
     plan = plan_review_staleness(task, last_result, clients)
     if isinstance(plan, bool):
