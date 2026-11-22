@@ -3460,6 +3460,86 @@ class TestSpawnComplete:
         assert closed.status == SessionStatus.COMPLETED
         assert closed.completed_reason == CompletionReason.USER
 
+    def test_spawn_complete_does_not_advance_the_cursor_past_earlier_pending_events(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """An earlier event the REVIEW tip sweep holds back stays pending (#2994)."""
+        from cw.cli.spawn import _spawn_complete_impl
+        from cw.dispatch.loop import read_pending_completions
+        from cw.events import load_cursor, record_event
+        from cw.models import OrchestratorEventType
+
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir)
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
+        earlier = record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {"ticket_id": "GEN-OTHER", "session_id": "someone-else"},
+        )
+
+        _spawn_complete_impl(
+            session_id=sess.id,
+            status="shipped",
+            ticket_id=None,
+            force=False,
+            native_daemon=FakeNativeDaemonClient(),
+        )
+
+        assert load_cursor("dispatch") is None
+        pending = read_pending_completions()
+        assert pending[0].id == earlier.id
+        assert len(pending) == 2
+
+    def test_spawn_complete_advances_the_cursor_when_its_event_is_first_pending(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.cli.spawn import _spawn_complete_impl
+        from cw.dispatch.loop import read_pending_completions
+        from cw.events import load_cursor
+
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir)
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
+
+        _spawn_complete_impl(
+            session_id=sess.id,
+            status="shipped",
+            ticket_id=None,
+            force=False,
+            native_daemon=FakeNativeDaemonClient(),
+        )
+
+        assert load_cursor("dispatch") is not None
+        assert read_pending_completions() == []
+
+    def test_spawn_complete_with_an_empty_pending_list_leaves_the_cursor(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A consume tick moved the cursor past the event between record and guard."""
+        from cw.cli import spawn as spawn_mod
+        from cw.cli.spawn import _spawn_complete_impl
+        from cw.events import load_cursor
+
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir)
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
+        advanced: list[object] = []
+        monkeypatch.setattr(spawn_mod, "read_pending_completions", list)
+        monkeypatch.setattr(
+            spawn_mod, "advance_cursor", lambda *a, **_k: advanced.append(a)
+        )
+
+        _spawn_complete_impl(
+            session_id=sess.id,
+            status="shipped",
+            ticket_id=None,
+            force=False,
+            native_daemon=FakeNativeDaemonClient(),
+        )
+
+        assert advanced == []
+        assert load_cursor("dispatch") is None
+
 
 # ---------------------------------------------------------------------------
 # CLI integration tests via Click CliRunner
