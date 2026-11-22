@@ -6,6 +6,7 @@ resolves to it, and a null-base row is unchanged (the client default).
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -612,12 +613,13 @@ def _spy_prepare(monkeypatch: pytest.MonkeyPatch, module: object) -> dict[str, o
     return seen
 
 
-def _codex_round(tmp_path: Path, **extra: object) -> None:
+def _codex_round(tmp_path: Path, *, base_branch: str = "main", **extra: object) -> None:
     codex_core.run_review(
         runner=cast("Any", None),
         task=_row(None),
         worktree=tmp_path,
         default_branch="main",
+        base_branch=base_branch,
         model=None,
         reasoning_effort=None,
         wall_clock_budget_seconds=None,
@@ -627,12 +629,15 @@ def _codex_round(tmp_path: Path, **extra: object) -> None:
     )
 
 
-def _claude_round(tmp_path: Path, **extra: object) -> None:
+def _claude_round(
+    tmp_path: Path, *, base_branch: str = "main", **extra: object
+) -> None:
     claude_core.run_claude_review(
         runner=cast("Any", None),
         task=_row(None),
         worktree=tmp_path,
         default_branch="main",
+        base_branch=base_branch,
         base_ref=None,
         model=None,
         wall_clock_budget_seconds=None,
@@ -653,16 +658,12 @@ def test_run_review_diffs_the_base_and_reads_config_from_the_default(
     assert seen["config_branch"] == "main"
 
 
-def test_run_review_without_a_base_equals_the_default_branch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    seen = _spy_prepare(monkeypatch, codex_core)
-
-    with pytest.raises(_StoppedError):
-        _codex_round(tmp_path)
-
-    assert seen["diff_base"] == "main"
-    assert seen["config_branch"] == "main"
+def test_run_review_requires_a_base_branch() -> None:
+    """S3b (#3840): base_branch is a required keyword with no default."""
+    params = inspect.signature(codex_core.run_review).parameters
+    param = params["base_branch"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is inspect.Parameter.empty
 
 
 def test_run_claude_review_diffs_the_base_and_reads_config_from_the_default(
@@ -698,16 +699,12 @@ def test_run_claude_review_base_ref_still_wins_over_the_base(
     assert seen["diff_base"] == "pinned-sha"
 
 
-def test_run_claude_review_without_a_base_equals_the_default_branch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    seen = _spy_prepare(monkeypatch, claude_core)
-
-    with pytest.raises(_StoppedError):
-        _claude_round(tmp_path)
-
-    assert seen["diff_base"] == "main"
-    assert seen["config_branch"] == "main"
+def test_run_claude_review_requires_a_base_branch() -> None:
+    """S3b (#3840): base_branch is a required keyword with no default."""
+    params = inspect.signature(claude_core.run_claude_review).parameters
+    param = params["base_branch"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is inspect.Parameter.empty
 
 
 # --- synthesis gets the base, not the trust root (S3a, R2) -----------------
@@ -766,7 +763,8 @@ def test_run_review_hands_synthesis_the_base(
         task=_row(base),
         worktree=tmp_path,
         default_branch=CLIENT_DEFAULT,
-        base_branch=base,
+        # A null row's base is the client default (resolve_base_branch).
+        base_branch=base or CLIENT_DEFAULT,
         model=None,
         reasoning_effort=None,
         wall_clock_budget_seconds=None,
@@ -802,7 +800,7 @@ def test_run_claude_review_hands_synthesis_the_base_not_the_diff_ref(
         worktree=tmp_path,
         default_branch=CLIENT_DEFAULT,
         base_ref=base_ref,
-        base_branch=base,
+        base_branch=base or CLIENT_DEFAULT,
         model=None,
         wall_clock_budget_seconds=None,
         session_id="s",

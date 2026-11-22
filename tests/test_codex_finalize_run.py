@@ -1132,7 +1132,9 @@ def test_a_conflicting_sibling_pr_parks_merge_gate_blocked(
         "open",
         "--author",
         "@me",
-        stdout=json.dumps([{"number": 9, "headRefName": "dev/other"}]),
+        stdout=json.dumps(
+            [{"number": 9, "headRefName": "dev/other", "baseRefName": "main"}]
+        ),
     )
     h.gh.reply("pr", "diff", "9", stdout="feature.py\n")
     with patch(

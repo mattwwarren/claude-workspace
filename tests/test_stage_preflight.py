@@ -353,7 +353,7 @@ def test_a_supported_repair_entry_never_parks() -> None:
 
 @pytest.mark.parametrize(
     "caps",
-    [CODEX_CAPABILITIES, OPENCODE_CAPABILITIES, LOCAL_CAPABILITIES],
+    [OPENCODE_CAPABILITIES, LOCAL_CAPABILITIES],
     ids=lambda c: c.harness.value,
 )
 def test_a_based_row_is_refused_where_the_harness_does_not_deliver_the_base(
@@ -374,8 +374,14 @@ def test_a_based_row_passes_on_claude_native() -> None:
     )
 
 
-def test_only_claude_native_delivers_a_base() -> None:
-    assert frozenset({Harness.CLAUDE_NATIVE}) == BASE_SUPPORTING_HARNESSES
+def test_claude_native_and_codex_deliver_a_base() -> None:
+    assert (
+        frozenset({Harness.CLAUDE_NATIVE, Harness.CODEX}) == BASE_SUPPORTING_HARNESSES
+    )
+
+
+def test_a_based_row_passes_on_codex() -> None:
+    assert first_unmet(CODEX_CAPABILITIES, _facts(Stage.IMPL, base=True)) is None
 
 
 def test_the_repair_refusal_wins_over_the_base_refusal() -> None:
@@ -743,7 +749,7 @@ def test_local_parks_before_the_endpoint_aider_and_plan_checks(
     assert result.stage_reached == stage_entry_marker(stage.value)
 
 
-@pytest.mark.parametrize("harness", ["opencode", "local", "codex"])
+@pytest.mark.parametrize("harness", ["opencode", "local"])
 def test_a_based_row_parks_before_any_probe_or_launch(
     harness: str,
     tmp_config_dir: Path,
@@ -764,10 +770,6 @@ def test_a_based_row_parks_before_any_probe_or_launch(
             config=StageExecutorConfig(backend=LOCAL_BACKEND, model="m"),
             runner=runner,
         ).spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
-    else:
-        CodexExecutor(
-            config=StageExecutorConfig(backend=CODEX_BACKEND), runner=runner
-        ).spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
     result = blocked_result()
     assert runner.calls == []
     assert result.blocker is not None
@@ -775,6 +777,28 @@ def test_a_based_row_parks_before_any_probe_or_launch(
     assert result.blocker.retry_eligible is False
     assert result.stage_reached == "stage2_impl"
     assert f"backend={harness}" in result.blocker.details
+
+
+def test_a_based_row_is_not_refused_on_codex(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """S3b: codex delivers the base, so pre-flight passes it through.
+
+    The binary is absent in this harness, so the run stops later with
+    ``codex_not_found``; the assertion is only that the base refusal is gone.
+    """
+    worktree = make_git_repo("wt-base-preflight-codex-ok")
+    runner = FakeFireAndForgetRunner()
+    task = based_row(Stage.IMPL)
+    client = ClientConfig(name="test", workspace_path=worktree)
+    with patch("cw.executor.codex.shutil.which", return_value=None):
+        CodexExecutor(
+            config=StageExecutorConfig(backend=CODEX_BACKEND), runner=runner
+        ).spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+    result = blocked_result()
+    assert result.blocker is not None
+    assert result.blocker.reason != PreflightReason.BASE_UNSUPPORTED_BACKEND
 
 
 def test_codex_harden_parks_before_the_binary_probe(

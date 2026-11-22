@@ -73,6 +73,7 @@ def _run_lane(
         task=_task(),
         worktree=repo,
         default_branch="main",
+        base_branch="main",
         model=None,
         reasoning_effort=None,
         wall_clock_budget_seconds=budget,

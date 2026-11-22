@@ -239,6 +239,33 @@ class TestPreTurnGuards:
         assert _BRANCH in block.details
         assert "dev/other" in block.details
 
+    def test_a_worktree_on_the_row_base_is_refused(self, repo: Path) -> None:
+        """S3b (#3840): the row's base is refused with its own message."""
+        block = check_on_branch(
+            repo, "dev/other", default_branch="main", base_branch=_BRANCH
+        )
+        assert block is not None
+        assert block.reason == IMPL_FAILED
+        assert "this row's base branch" in block.details
+        assert _BRANCH in block.details
+
+    def test_a_null_row_keeps_the_default_branch_message(self, repo: Path) -> None:
+        """Null row: base equals the client default, so the default message wins."""
+        block = check_on_branch(
+            repo, "dev/other", default_branch=_BRANCH, base_branch=_BRANCH
+        )
+        assert block is not None
+        assert "configured default branch" in block.details
+        assert "this row's base" not in block.details
+
+    def test_a_distinct_row_base_does_not_block_the_expected_branch(
+        self, repo: Path
+    ) -> None:
+        assert (
+            check_on_branch(repo, _BRANCH, default_branch="main", base_branch="epic/x")
+            is None
+        )
+
     def test_push_detached_head_fails_closed_via_synthetic_marker(
         self, repo: Path
     ) -> None:

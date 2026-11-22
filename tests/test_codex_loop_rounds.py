@@ -1071,6 +1071,7 @@ def test_reviewed_shas_are_the_pre_fix_and_post_fix_heads(
         task=_task(),
         worktree=worktree,
         default_branch="main",
+        base_branch="main",
         model=None,
         reasoning_effort=None,
         wall_clock_budget_seconds=None,

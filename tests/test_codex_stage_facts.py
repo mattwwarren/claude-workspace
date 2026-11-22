@@ -156,7 +156,7 @@ class TestStamp:
         fix = _commit(repo, "fix.py", _fix_subject(1))
 
         stamped = stamp_stage_facts(
-            _result(repo), task=task, worktree=repo, default_branch="main"
+            _result(repo), task=task, worktree=repo, base_branch="main"
         )
 
         assert stamped.plan_source == "generated"
@@ -166,7 +166,7 @@ class TestStamp:
 
     def test_a_missing_plan_adds_the_friction_token(self, repo: Path) -> None:
         stamped = stamp_stage_facts(
-            _result(repo), task=_task(), worktree=repo, default_branch="main"
+            _result(repo), task=_task(), worktree=repo, base_branch="main"
         )
 
         assert stamped.plan_source == "none"
@@ -178,7 +178,7 @@ class TestStamp:
         result = _result(repo).model_copy(update={"status": EMPTY_DIFF_STATUS})
 
         stamped = stamp_stage_facts(
-            result, task=_task(), worktree=repo, default_branch="main"
+            result, task=_task(), worktree=repo, base_branch="main"
         )
 
         assert stamped is result
@@ -189,7 +189,7 @@ class TestStamp:
         bare = make_git_repo("stamp-no-origin")
 
         stamped = stamp_stage_facts(
-            _result(bare), task=_task(), worktree=bare, default_branch="main"
+            _result(bare), task=_task(), worktree=bare, base_branch="main"
         )
 
         assert stamped.fork_point_sha is None
@@ -203,7 +203,7 @@ class TestFinalizeAcceptance:
         _plan(repo)
         task = _task().model_copy(update={"plan_source": "generated"})
         stamped = stamp_stage_facts(
-            _result(repo), task=task, worktree=repo, default_branch="main"
+            _result(repo), task=task, worktree=repo, base_branch="main"
         )
         payload = stamped.model_dump(mode="json")
 

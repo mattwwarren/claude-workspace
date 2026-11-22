@@ -1066,7 +1066,7 @@ _CODEX_STAGE_TICKETS: dict[str, int] = {}
 #: it lands. Its finalize-stage cells are implemented,
 #: not-applicable, or deferred to one of its three follow-ups.
 _C3_TICKET = 3062
-_CODEX_FINALIZE_FOLLOW_UPS = frozenset({3542, 3543, 3544, 3840})
+_CODEX_FINALIZE_FOLLOW_UPS = frozenset({3542, 3543, 3544})
 #: The C1 ticket (#3060, codex PLAN executor); no cell may defer to it once it
 #: lands. Its plan-stage cells are implemented, not-applicable,
 #: or deferred to one of its two follow-ups.
@@ -1077,9 +1077,9 @@ _CODEX_PLAN_FOLLOW_UPS = frozenset({3464, 3465})
 #: or deferred to one of its follow-ups. #3530 (tracker-aware plan recovery) left
 #: the set: #3712 (RFC 0019 T2) implements it, so ``impl.orientation`` is a code ref.
 _C2_TICKET = 3061
-_CODEX_IMPL_FOLLOW_UPS = frozenset({3529, 3531, 3840})
+_CODEX_IMPL_FOLLOW_UPS = frozenset({3529, 3531})
 # #3055 closed with RFC 0018 S3: its codex review cells moved to #3057 (A2).
-_CODEX_REVIEW_TICKETS = frozenset({3318, 2464, 3057, 3840})
+_CODEX_REVIEW_TICKETS = frozenset({3318, 2464, 3057})
 #: The C4 ticket (#3063, usage accounting); no cell may defer to it once it lands.
 _C4_TICKET = 3063
 #: The S3 ticket; no cell may defer to it once it lands (#3055).
@@ -1666,6 +1666,14 @@ _C3_CODE_CELLS = {
         "src/cw/stage_verification/finalize_gates.py",
         "run_approval_fence",
     ),
+    "finalize.base-branch-resolution": (
+        "src/cw/stage_verification/finalize_pr.py",
+        "probe_default",
+    ),
+    "finalize.open-pr-base-filter": (
+        "src/cw/stage_verification/finalize_merge_gate.py",
+        "run_merge_gate",
+    ),
     "finalize.merge-gate-disabled-merge-gate-disabled-by-client-config": (
         "src/cw/stage_verification/finalize_merge_gate.py",
         "run_merge_gate",
@@ -1770,9 +1778,9 @@ def test_codex_finalize_code_cell_table_is_exactly_the_code_cells() -> None:
         )
     }
     assert code_cells == set(_C3_CODE_CELLS)
-    assert len(_C3_CODE_CELLS) == 31
+    assert len(_C3_CODE_CELLS) == 33
     implemented = set(elements_with(CODEX_BACKEND, "implemented"))
-    assert len(implemented & set(_C3_CODE_CELLS)) == 31
+    assert len(implemented & set(_C3_CODE_CELLS)) == 33
 
 
 @pytest.mark.parametrize("element_id", sorted(_C3_CODE_CELLS))
@@ -1796,7 +1804,7 @@ def test_codex_finalize_follow_up_cells_cover_the_follow_up_tickets() -> None:
         if isinstance(cell, DeferredDisposition):
             by_ticket[cell.ref.number] = by_ticket.get(cell.ref.number, 0) + 1
     assert set(by_ticket) == _CODEX_FINALIZE_FOLLOW_UPS
-    assert sum(by_ticket.values()) == 26
+    assert sum(by_ticket.values()) == 24
 
 
 def test_codex_prep_pr_and_ship_it_cells_are_not_applicable() -> None:
@@ -1833,9 +1841,9 @@ def test_codex_finalize_cell_counts() -> None:
             cell = element.cells[CODEX_BACKEND]
             counts[cell.disposition] = counts.get(cell.disposition, 0) + 1
     assert counts == {
-        "implemented": 31,
+        "implemented": 33,
         "not-applicable": 33,
-        "deferred": 26,
+        "deferred": 24,
     }
 
 
@@ -2073,9 +2081,9 @@ def test_opencode_has_no_implemented_cell_without_a_prompt_or_code_ref(
         assert resolve(cell.ref) is None, element_id
 
 
-#: RFC 0020 A1 (#3781): the four base-resolution elements. claude-native
-#: delivers the base; codex is deferred to #3782; opencode and local fail closed
-#: on the stage pre-flight before any agent runs.
+#: RFC 0020 A1 (#3781) and S3b (#3840): the four base-resolution elements.
+#: claude-native and codex deliver the base; opencode and local fail closed on
+#: the stage pre-flight before any agent runs.
 _BASE_BRANCH_ELEMENTS = (
     "impl.base-branch-resolution",
     "finalize.base-branch-resolution",
@@ -2090,9 +2098,8 @@ def test_base_branch_elements_dispositions() -> None:
         cells = elements[element_id].cells
         assert cells["claude-native"].disposition == "implemented", element_id
         codex = cells["codex"]
-        assert codex.disposition == "deferred", element_id
-        assert codex.ref is not None
-        assert codex.ref.number == 3840, element_id
+        assert codex.disposition == "implemented", element_id
+        assert isinstance(codex.ref, CodeRef), element_id
         for backend in ("opencode", "local"):
             cell = cells[backend]
             assert cell.disposition == "fails-closed", (element_id, backend)

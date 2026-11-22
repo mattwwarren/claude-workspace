@@ -279,7 +279,7 @@ class TestProbeDefault:
     def test_a_clean_probe_continues(self, worktree: Path) -> None:
         clean = MergeProbe("clean", "a" * 40, (), "")
         with patch(_PROBE, return_value=clean):
-            assert probe_default(worktree, default_branch="main", pr_exists=False) == (
+            assert probe_default(worktree, base_branch="main", pr_exists=False) == (
                 None,
                 (),
             )
@@ -287,7 +287,7 @@ class TestProbeDefault:
     def test_an_up_to_date_branch_continues_on_a_real_repo(
         self, worktree: Path
     ) -> None:
-        assert probe_default(worktree, default_branch="main", pr_exists=False) == (
+        assert probe_default(worktree, base_branch="main", pr_exists=False) == (
             None,
             (),
         )
@@ -299,7 +299,7 @@ class TestProbeDefault:
         conflict = MergeProbe("conflict", "a" * 40, ("clash.py", "z.py"), "")
         with patch(_PROBE, return_value=conflict):
             block, friction = probe_default(
-                worktree, default_branch="main", pr_exists=pr_exists
+                worktree, base_branch="main", pr_exists=pr_exists
             )
         assert block is not None
         assert block.reason == MERGE_CONFLICT_POST_PUSH
@@ -313,7 +313,7 @@ class TestProbeDefault:
         head = git_in(worktree, "rev-parse", "HEAD")
         conflict = MergeProbe("conflict", "a" * 40, ("clash.py",), "")
         with patch(_PROBE, return_value=conflict):
-            probe_default(worktree, default_branch="main", pr_exists=False)
+            probe_default(worktree, base_branch="main", pr_exists=False)
         assert git_in(worktree, "rev-parse", "HEAD") == head
         assert git_in(worktree, "status", "--porcelain") == ""
 
@@ -323,7 +323,7 @@ class TestProbeDefault:
         unavailable = MergeProbe("unavailable", None, (), "merge-tree broke")
         with patch(_PROBE, return_value=unavailable):
             block, friction = probe_default(
-                worktree, default_branch="main", pr_exists=False
+                worktree, base_branch="main", pr_exists=False
             )
         assert block is None
         assert len(friction) == 1
@@ -334,9 +334,7 @@ class TestProbeDefault:
         self, tmp_path: Path, make_git_repo: Callable[..., Path]
     ) -> None:
         no_origin = make_git_repo("no-origin")
-        block, friction = probe_default(
-            no_origin, default_branch="main", pr_exists=False
-        )
+        block, friction = probe_default(no_origin, base_branch="main", pr_exists=False)
         assert block is None
         assert friction
         assert friction[0].startswith(PROBE_UNAVAILABLE)

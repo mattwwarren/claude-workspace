@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 _BRANCH = "dev/42"
 _PREFIX = "dev"
 _CLIENT = "acme"
+_DEFAULT = "main"  # the client default; a PR aimed here is the null-row base
 _ADOPTED = ["dev-queue", "adopted-prs", "-c", _CLIENT]
 _REAL_SCRIPT = (
     Path(__file__).resolve().parents[1] / ".claude" / "scripts" / OVERLAP_SCRIPT_NAME
@@ -42,8 +43,13 @@ _REAL_SCRIPT = (
 _MERGE_TREE = "cw.stage_verification.finalize_merge_gate._merge_tree"
 
 
-def _heads(*items: tuple[int, str]) -> str:
-    return json.dumps([{"number": n, "headRefName": ref} for n, ref in items])
+def _heads(*items: tuple[int, str] | tuple[int, str, str]) -> str:
+    """``gh pr list`` JSON; an item is ``(n, ref)`` or ``(n, ref, base)``."""
+    rows = []
+    for item in items:
+        base = item[2] if len(item) == 3 else _DEFAULT
+        rows.append({"number": item[0], "headRefName": item[1], "baseRefName": base})
+    return json.dumps(rows)
 
 
 class Harness:
@@ -64,13 +70,13 @@ class Harness:
         self.cw = stub_cw_cli(self.monkeypatch, {"dev-queue adopted-prs": reply})
         return self
 
-    def mine(self, *items: tuple[int, str]) -> Harness:
+    def mine(self, *items: tuple[int, str] | tuple[int, str, str]) -> Harness:
         self.gh.reply(
             "pr", "list", "--state", "open", "--author", "@me", stdout=_heads(*items)
         )
         return self
 
-    def everyone(self, *items: tuple[int, str]) -> Harness:
+    def everyone(self, *items: tuple[int, str] | tuple[int, str, str]) -> Harness:
         self.gh.reply("pr", "list", "--state", "open", "--json", stdout=_heads(*items))
         return self
 
@@ -84,6 +90,7 @@ class Harness:
         enabled: bool = True,
         ignore: tuple[str, ...] = (),
         branch: str = _BRANCH,
+        base_branch: str = _DEFAULT,
     ) -> MergeGateResult:
         return run_merge_gate(
             self.worktree,
@@ -93,6 +100,7 @@ class Harness:
             branch_prefix=_PREFIX,
             fork_point=self.fork,
             client_name=_CLIENT,
+            base_branch=base_branch,
         )
 
 
@@ -481,3 +489,66 @@ class TestRealMergeTree:
         assert "merge-tree probe failed" in clause
         assert "unavailable: git too old" in clause
         assert "failing closed" in clause
+
+
+class TestBaseFilter:
+    """RFC 0020 S3b (R1): the gate keeps only PRs aimed at the row's base.
+
+    A null row's base is the client default, so it filters on ``main``; a PR
+    aimed at another base is outside the gate, as it already is on claude-native.
+    """
+
+    def test_a_conflict_aimed_at_the_row_base_blocks(
+        self, h: Harness, real_script: Path
+    ) -> None:
+        h.mine((9, "dev/other", "epic/x")).diff(9, "src/a.py")
+        with patch(_MERGE_TREE, return_value="1"):
+            (clause,) = h.run(base_branch="epic/x").conflicts
+        assert "src/a.py" in clause
+
+    def test_a_conflict_aimed_at_main_does_not_block_a_based_row(
+        self, h: Harness, real_script: Path
+    ) -> None:
+        h.mine((9, "dev/other", "main")).diff(9, "src/a.py")
+        with patch(_MERGE_TREE, return_value="1"):
+            assert h.run(base_branch="epic/x").conflicts == []
+
+    def test_a_conflict_aimed_at_another_base_does_not_block_a_null_row(
+        self, h: Harness, real_script: Path
+    ) -> None:
+        h.mine((9, "dev/other", "epic/x")).diff(9, "src/a.py")
+        with patch(_MERGE_TREE, return_value="1"):
+            assert h.run(base_branch=_DEFAULT).conflicts == []
+
+    def test_a_conflict_aimed_at_the_default_blocks_a_null_row(
+        self, h: Harness, real_script: Path
+    ) -> None:
+        h.mine((9, "dev/other", _DEFAULT)).diff(9, "src/a.py")
+        with patch(_MERGE_TREE, return_value="1"):
+            (clause,) = h.run(base_branch=_DEFAULT).conflicts
+        assert "src/a.py" in clause
+
+    def test_the_base_filter_applies_to_the_adopted_list(
+        self, h: Harness, real_script: Path
+    ) -> None:
+        h.adopted(GhReply(0, "9 dev/other\n", "")).everyone((9, "dev/other", "epic/x"))
+        h.diff(9, "src/a.py")
+        with patch(_MERGE_TREE, return_value="1"):
+            assert h.run(base_branch=_DEFAULT).conflicts == []
+
+    def test_a_payload_without_base_ref_name_fails_closed(
+        self, h: Harness, real_script: Path
+    ) -> None:
+        h.gh.reply(
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--author",
+            "@me",
+            stdout=json.dumps([{"number": 9, "headRefName": "dev/other"}]),
+        )
+        result = h.run(base_branch=_DEFAULT)
+        assert result.block is not None
+        assert result.block.reason == "agent_block"
+        assert "open-PR inventory failed" in result.block.details
