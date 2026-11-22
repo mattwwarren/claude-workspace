@@ -7,9 +7,11 @@ which is why it is not part of the dev-queue package.
 
 Refusals (:class:`~cw.exceptions.AdoptionRefusedError`, no row written), in
 precedence order (R7): gh unreadable; a fork PR (``isCrossRepository``); a PR
-that is not OPEN; a ``headRefName`` failing the row's branch charset; then a
-malformed ``headRefOid`` or a PR from another repository. The carried-by-a-
-live-row check runs later, inside ``add_ticket``'s lock.
+that is not OPEN; a ``headRefName`` failing the row's branch charset; a
+malformed ``headRefOid``; an unparseable url, a url naming another PR, or a PR
+from another repository; then a PR whose ``baseRefName`` differs from the
+row's resolved base (RFC 0020 B2). The carried-by-a-live-row check runs later,
+inside ``add_ticket``'s lock.
 
 Routing (#2944, RFC 0016 B1): a green PR enters at review. A ``CONFLICTING``
 PR and/or one with failing CI enters at impl carrying repair feedback that
@@ -46,6 +48,7 @@ from cw.gh_check_vocabulary import (
     CheckRunStatus,
 )
 from cw.models import QueueItemStatus, Stage, TicketTask
+from cw.models.tasks.base_branch import set_base_branch
 from cw.pr_feedback import FeedbackSynthesisError, synthesize_pr_feedback
 from cw.pr_feedback_text import payload_string
 from cw.pr_hydrate import _parse_pr_url, repo_slug_mismatch, summarize_status_checks
@@ -116,7 +119,10 @@ def _malformed_classification(pr_number: int, detail: str) -> AdoptionRefusedErr
 
 
 def _check_refusals(
-    payload: dict[str, object], pr_number: int, client: ClientConfig
+    payload: dict[str, object],
+    pr_number: int,
+    client: ClientConfig,
+    expected_base: str,
 ) -> AdoptedPrSnapshot:
     """Raise on every intake refusal; return the snapshot when none applies."""
     if payload.get("isCrossRepository") is not False:
@@ -158,6 +164,14 @@ def _check_refusals(
         msg = (
             f"Refusing to adopt PR #{pr_number}: it belongs to {parsed[0]}, but"
             f" client '{client.name}' is {mismatch}."
+        )
+        raise _refuse(msg)
+    # RFC 0020 B2: last, so a mismatch only counts for the right PR in the
+    # right repo. A plain string compare; no charset check on the base.
+    if ident.base_ref != expected_base:
+        msg = (
+            f"Refusing to adopt PR #{pr_number}: PR base {ident.base_ref!r}"
+            f" differs from the row's base {expected_base!r}."
         )
         raise _refuse(msg)
     return AdoptedPrSnapshot(
@@ -310,14 +324,18 @@ def _synthesize(
 
 
 def _poll(
-    client: ClientConfig, pr_number: int, sleep: Callable[[float], None]
+    client: ClientConfig,
+    pr_number: int,
+    sleep: Callable[[float], None],
+    *,
+    expected_base: str,
 ) -> tuple[dict[str, object], AdoptedPrSnapshot, int]:
     """Read until GitHub reports a mergeable state or the polls run out."""
     polls = 0
     while True:
         polls += 1
         payload = _read(pr_number, client)
-        snapshot = _check_refusals(payload, pr_number, client)
+        snapshot = _check_refusals(payload, pr_number, client, expected_base)
         _validate_classification_payload(payload, pr_number)
         unknown = payload_string(payload, "mergeable") == _MERGEABLE_UNKNOWN
         if not unknown or polls >= ADOPT_UNKNOWN_MAX_POLLS:
@@ -355,6 +373,7 @@ def read_adopted_pr(
     client: ClientConfig,
     pr_number: int,
     *,
+    expected_base: str,
     sleep: Callable[[float], None] = time.sleep,
     synthesize: bool = True,
     operator_feedback: ReviewFeedback | None = None,
@@ -366,13 +385,19 @@ def read_adopted_pr(
     times in total, sleeping :data:`ADOPT_UNKNOWN_POLL_INTERVAL_SECONDS`
     between reads; every read re-runs the refusals.
 
+    *expected_base* is the branch the row merges into, from
+    :func:`cw.models.resolve_base_branch`; a PR whose ``baseRefName`` differs
+    is refused (RFC 0020 B2).
+
     A non-green PR gets synthesized repair feedback unless *synthesize* is
     False (the requeue re-check reads only). *operator_feedback* (the
     ``--review-feedback-file`` payload) replaces the synthesis, for a green
     or non-green PR, once its repo, PR number and ``reviewed_sha`` match this
     read; it is bound even when the PR stays ``mergeable: UNKNOWN``.
     """
-    payload, snapshot, polls = _poll(client, pr_number, sleep)
+    payload, snapshot, polls = _poll(
+        client, pr_number, sleep, expected_base=expected_base
+    )
     return _classify_intake(
         client,
         pr_number,
@@ -414,8 +439,24 @@ def verify_ticket_exists(
     return None
 
 
+def _stamp_base(task: TicketTask, base: str | None) -> None:
+    """Stamp a non-null *base* through the seam; refuse an unsafe one."""
+    if base is None:
+        return
+    try:
+        set_base_branch(task, base)
+    except ValueError as exc:
+        msg = f"Refusing to adopt {task.adopted_pr_url}: {exc}"
+        raise _refuse(msg) from exc
+
+
 def build_adopted_task(
-    ticket_id: str, client: ClientConfig, intake: AdoptIntake, *, lane: str
+    ticket_id: str,
+    client: ClientConfig,
+    intake: AdoptIntake,
+    *,
+    lane: str,
+    base: str | None = None,
 ) -> TicketTask:
     """The adopted row for *intake*: review entry, or impl entry with feedback.
 
@@ -425,7 +466,8 @@ def build_adopted_task(
     the pin at ``headRefOid``, and ``pr_url`` equal to ``adopted_pr_url``. The
     state-unknown park is applied with :func:`transition_task_status` after
     construction (never a constructor ``status=``), so the row is PENDING or
-    BLOCKED_ON_USER, never COMPLETED.
+    BLOCKED_ON_USER, never COMPLETED. A non-null *base* is stamped through
+    :func:`set_base_branch`; a null base leaves the row on the client default.
     """
     snapshot = intake.snapshot
     feedback = intake.review_feedback
@@ -445,6 +487,7 @@ def build_adopted_task(
     except ValidationError as exc:
         msg = f"Refusing to adopt {snapshot.pr_url} as ticket {ticket_id!r}: {exc}"
         raise _refuse(msg) from exc
+    _stamp_base(task, base)
     # #2155: the entry stage and its stamp are set together, through the seam.
     enter_stage(task, entry_stage)
     if intake.disposition is not None:

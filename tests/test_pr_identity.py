@@ -282,11 +282,15 @@ class TestEachCallerKeepsItsOwnText:
         payload = load_adopt_fixture(FIXTURE_CONFLICTING, **mutations)
         stub_pr_view(monkeypatch, payload)
         stub_pr_view(monkeypatch, payload, target="cw.pr_feedback")
+        # These rows pin identity precedence, so the row base is the PR's own
+        # base and the RFC 0020 B2 base check never fires.
+        expected_base = str(payload["baseRefName"])
 
         if adopt_message is None:
             read_adopted_pr(
                 client,
                 PR_NUMBER,
+                expected_base=expected_base,
                 sleep=_noop_sleep,
                 synthesize=False,
                 operator_feedback=None,
@@ -296,6 +300,7 @@ class TestEachCallerKeepsItsOwnText:
                 read_adopted_pr(
                     client,
                     PR_NUMBER,
+                    expected_base=expected_base,
                     sleep=_noop_sleep,
                     synthesize=False,
                     operator_feedback=None,

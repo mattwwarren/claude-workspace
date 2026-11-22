@@ -24,7 +24,12 @@ from cw.dispatch.adopted_head_gate import fetch_adopted_branch
 from cw.dispatch.claim.events import emit_adoption_attention_event
 from cw.events import record_event
 from cw.exceptions import AdoptionRefusedError
-from cw.models import OrchestratorEventType, Stage, resolve_feature_branch
+from cw.models import (
+    OrchestratorEventType,
+    Stage,
+    resolve_base_branch,
+    resolve_feature_branch,
+)
 from cw.pr_hydrate import _parse_pr_url
 from cw.worktree import _git_dir
 
@@ -123,12 +128,16 @@ def run_adopt(
     lane: str,
     sources: ViewSources,
     review_feedback: ReviewFeedback | None = None,
+    base: str | None = None,
 ) -> None:
     """Adopt PR *pr_number* as the one ticket for *client_name*; echo the row.
 
     A green PR enters at review and a non-green one at impl with repair
     feedback (*review_feedback* when given, else synthesized). An explicit
     ``--stage review`` reads without synthesis and refuses a non-green PR.
+    A PR whose base differs from *base* (else the client default) is refused;
+    a non-null *base* is stamped on the row. B1 wires ``--base``; until then
+    it is ``None``.
     """
     _check_adopt_options(tickets, stage_override, review_feedback is not None)
     ticket_id = tickets[0]
@@ -137,6 +146,7 @@ def run_adopt(
     intake = read_adopted_pr(
         client_cfg,
         pr_number,
+        expected_base=base or resolve_base_branch(client_cfg),
         synthesize=not review_only,
         operator_feedback=review_feedback,
     )
@@ -150,7 +160,7 @@ def run_adopt(
     note = verify_ticket_exists(client_cfg, ticket_id, pr_number)
     if note is not None:
         click.echo(note, err=True)
-    task = build_adopted_task(ticket_id, client_cfg, intake, lane=lane)
+    task = build_adopted_task(ticket_id, client_cfg, intake, lane=lane, base=base)
     task.priority = priority
     task.scope_hint = scope_hint
     task.signoff = signoff
@@ -235,7 +245,12 @@ def adopt_requeue_recheck(
     if parsed is None:
         msg = f"Cannot re-check {row.adopted_pr_url}: unparseable PR url."
         raise AdoptionRefusedError(msg)
-    intake = read_adopted_pr(client_cfg, parsed[1], synthesize=False)
+    intake = read_adopted_pr(
+        client_cfg,
+        parsed[1],
+        expected_base=resolve_base_branch(client_cfg, row),
+        synthesize=False,
+    )
     if intake.disposition is not None:
         msg = (
             f"Ticket '{row.ticket_id}' stays parked: {row.adopted_pr_url} is still"
