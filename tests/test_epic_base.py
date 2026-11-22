@@ -202,6 +202,19 @@ def test_equal_to_ceiling_passes(epic_repo: tuple[Path, Path]) -> None:
     check_epic_size_ceiling(_client(repo, epic={"max_diff_lines": FULL}), BASE)
 
 
+def test_ceiling_counts_deleted_lines(make_git_repo: Callable[..., Path]) -> None:
+    """The count is additions plus deletions: a file the epic removes is counted."""
+    deleted = 30
+    repo, _ = epic_repo_with_origin(
+        make_git_repo, BASE, files=FILES, deleting=(("old.py", deleted),)
+    )
+    # Between the additions-only total (FULL) and additions plus deletions.
+    ceiling = FULL + deleted - 1
+    with pytest.raises(EpicBaseRefusedError) as info:
+        check_epic_size_ceiling(_client(repo, epic={"max_diff_lines": ceiling}), BASE)
+    assert f"{FULL + deleted} changed lines" in str(info.value)
+
+
 def test_over_ceiling_is_refused_with_full_text(epic_repo: tuple[Path, Path]) -> None:
     repo, _ = epic_repo
     with pytest.raises(EpicBaseRefusedError) as info:

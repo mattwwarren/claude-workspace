@@ -112,17 +112,25 @@ def epic_repo_with_origin(
     base: str = "epic/x",
     *,
     files: Sequence[tuple[str, int]] = (("big.py", 50), ("uv.lock", 40)),
+    deleting: Sequence[tuple[str, int]] = (),
 ) -> tuple[Path, Path]:
     """A repo whose *base* carries sized files beyond the diverged ``main`` (#3783).
 
     Layers on :func:`add_diverged_base_origin`: the diverged ``main`` is kept on
     purpose, so a two-dot diff would count ``main_work.py`` and a three-dot diff
     would not. Each ``(relpath, n)`` in *files* adds an ``n``-line file to *base*.
-    Returns ``(repo, origin)`` with *repo* back on ``main``.
+    Each ``(relpath, n)`` in *deleting* is an ``n``-line file committed on ``main``
+    before the branches diverge (so it is on the merge-base) and ``git rm``-ed on
+    *base*. Returns ``(repo, origin)`` with *repo* back on ``main``.
     """
     repo = make_git_repo("acme")
+    for relpath, line_count in deleting:
+        commit_tracked_file(repo, relpath, "x = 1\n" * line_count)
     origin = add_diverged_base_origin(repo, base)
     git_in(repo, "checkout", base)
+    for relpath, _ in deleting:
+        git_in(repo, "rm", "-q", relpath)
+        git_in(repo, "commit", "-q", "-m", f"delete {relpath} on the epic")
     for relpath, line_count in files:
         commit_tracked_file(repo, relpath, "x = 1\n" * line_count)
     git_in(repo, "push", "origin", base)
