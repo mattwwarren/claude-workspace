@@ -2472,8 +2472,8 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     # reaches the verb. One bounded call per helper.
     ("cw/cli/dev_queue/prerequisite.py", "_run_declare"): 1,
     ("cw/cli/dev_queue/prerequisite.py", "_run_remove"): 1,
-    ("cw/cli/dev_queue/crud.py", "dev_queue_clear"): 1,
-    ("cw/cli/dev_queue/crud.py", "dev_queue_prune"): 1,
+    ("cw/cli/dev_queue/prune.py", "dev_queue_clear"): 1,
+    ("cw/cli/dev_queue/prune.py", "dev_queue_prune"): 1,
     ("cw/cli/dev_queue/approve.py", "revoke_plan_approval_command"): 1,
     ("cw/cli/dev_queue/approve.py", "_approve_scope_drift"): 1,
     ("cw/cli/dev_queue/approve.py", "_approve_must_fix_override"): 1,

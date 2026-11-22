@@ -3386,7 +3386,7 @@ class TestCLIDevQueueClear:
             msg = "select_clearable_tickets must not run on the --confirm path"
             raise AssertionError(msg)
 
-        monkeypatch.setattr("cw.cli.dev_queue.crud.select_clearable_tickets", _boom)
+        monkeypatch.setattr("cw.cli.dev_queue.prune.select_clearable_tickets", _boom)
         save_dev_queue(
             DevQueueStore(tasks=[TicketTask(ticket_id="CLI-ONE", client="genhealth")])
         )
@@ -3631,8 +3631,8 @@ class TestCLIDevQueuePrune:
             msg = "library must not be reached"
             raise AssertionError(msg)
 
-        monkeypatch.setattr("cw.cli.dev_queue.crud.select_prunable_tickets", _boom)
-        monkeypatch.setattr("cw.cli.dev_queue.crud.prune_tickets", _boom)
+        monkeypatch.setattr("cw.cli.dev_queue.prune.select_prunable_tickets", _boom)
+        monkeypatch.setattr("cw.cli.dev_queue.prune.prune_tickets", _boom)
         save_dev_queue(DevQueueStore(tasks=[]))
         runner = CliRunner()
 
@@ -3727,7 +3727,7 @@ class TestCLIDevQueuePrune:
             msg = "select_prunable_tickets must not run on the --confirm path"
             raise AssertionError(msg)
 
-        monkeypatch.setattr("cw.cli.dev_queue.crud.select_prunable_tickets", _boom)
+        monkeypatch.setattr("cw.cli.dev_queue.prune.select_prunable_tickets", _boom)
         save_dev_queue(DevQueueStore(tasks=[_aged_task(100, ticket_id="CLI-ONE")]))
         runner = CliRunner()
 
