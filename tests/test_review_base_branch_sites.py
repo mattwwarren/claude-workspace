@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -16,8 +17,9 @@ from pydantic import ValidationError
 import cw.cli.review.confirm as confirm_cli
 from cw.claude_review import core as claude_core
 from cw.cli.review.converge import _default_branch
+from cw.codex_review import _engine_round
 from cw.codex_review import core as codex_core
-from cw.codex_review._engine_round import EngineRoundSpec
+from cw.codex_review._engine_round import EnginePassInputs, EngineRoundSpec
 from cw.codex_review._engine_start import engine_round_spec
 from cw.confirmation_jobs import ConfirmationPin
 from cw.dev_queue import add_ticket
@@ -644,3 +646,101 @@ def test_run_claude_review_without_a_base_equals_the_default_branch(
 
     assert seen["diff_base"] == "main"
     assert seen["config_branch"] == "main"
+
+
+# --- EnginePassInputs: base for the diff, config for the trust root --------
+
+
+def _pass_inputs(
+    repo: EngineRepo, *, base_branch: str, config_branch: str = "main"
+) -> EnginePassInputs:
+    return EnginePassInputs(
+        runner=cast("Any", None),
+        task=_make_ticket_task(ticket_id=repo.ticket, client=repo.client),
+        worktree=repo.worktree,
+        base_branch=base_branch,
+        config_branch=config_branch,
+        model=None,
+        reasoning_effort=None,
+        wall_clock_budget_seconds=None,
+        session_id="s-engine",
+        fix_loop_enabled=True,
+        prior_open_findings=None,
+        claim_tier_enabled=False,
+        disposition_drift_check_enabled=True,
+        settled_suppression=None,
+        max_prompt_chars=None,
+    )
+
+
+def test_engine_preflight_diffs_the_base_not_the_trust_root(
+    engine_repo: EngineRepo,
+) -> None:
+    # The base carries the engine edit; the branch above it does not touch it.
+    _push_epic_branch(engine_repo, edit_engine=True)
+    wt = engine_repo.worktree
+    git_in(wt, "checkout", "-q", "-B", "dev/1", f"origin/{ROW_BASE}")
+    commit_tracked_file(wt, "src/b.py", "y = 2\n")
+    spec = EngineRoundSpec(context=_engine_context(engine_repo))
+
+    on_base = _engine_round._preflight(
+        spec, _pass_inputs(engine_repo, base_branch=ROW_BASE), 0
+    )
+    on_default = _engine_round._preflight(
+        spec, _pass_inputs(engine_repo, base_branch="main"), 0
+    )
+
+    assert on_base is None
+    assert on_default is not None
+
+
+def test_engine_prepare_reads_config_from_the_trust_root_and_diffs_the_base(
+    engine_repo: EngineRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    def _stop(
+        _task: object, _worktree: object, base_branch: str, **kwargs: object
+    ) -> None:
+        seen.update(kwargs, diff_base=base_branch)
+        raise _StoppedError
+
+    monkeypatch.setattr(_engine_round, "_prepare_review_pass", _stop)
+    monkeypatch.setattr(_engine_round, "_engine_roster", lambda _manifest: None)
+    inputs = _pass_inputs(engine_repo, base_branch=ROW_BASE, config_branch="main")
+
+    with pytest.raises(_StoppedError):
+        _engine_round._prepare(inputs, cast("Any", SimpleNamespace(manifest=None)))
+
+    assert seen["diff_base"] == ROW_BASE
+    assert seen["config_branch"] == "main"
+
+
+def test_engine_synthesis_measures_scope_against_the_base(
+    engine_repo: EngineRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    def _synthesize(**kwargs: object) -> tuple[None, None]:
+        seen.update(kwargs)
+        return None, None
+
+    monkeypatch.setattr(_engine_round, "synthesize_codex_review_result", _synthesize)
+    prepared = SimpleNamespace(
+        diff="",
+        reviewed_sha="r",
+        capability=None,
+        agent_spec_status=None,
+        review_config=None,
+    )
+    run = SimpleNamespace(metrics_by_role={}, pre_validation_rejected=[], coverage=[])
+    inputs = _pass_inputs(engine_repo, base_branch=ROW_BASE, config_branch="main")
+
+    _engine_round._synthesize(
+        inputs,
+        cast("Any", prepared),
+        cast("Any", SimpleNamespace(document=None)),
+        cast("Any", run),
+    )
+
+    assert seen["default_branch"] == ROW_BASE
