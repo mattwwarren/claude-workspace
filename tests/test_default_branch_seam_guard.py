@@ -34,7 +34,11 @@ class Read(NamedTuple):
     qualname: str
     receiver: str
     lineno: int
-    annotated: bool
+    reason: str | None  # the ``# stays on client.default_branch:`` reason, if any
+
+    @property
+    def annotated(self) -> bool:
+        return self.reason is not None
 
 
 class _Entry(NamedTuple):
@@ -300,9 +304,9 @@ def default_branch_reads(source: str, relpath: str) -> list[Read]:
             receiver = ast.unparse(node.args[0])
         else:
             continue
-        annotated = _annotation_reason(source, tree, node) is not None
+        reason = _annotation_reason(source, tree, node)
         reads.append(
-            Read(relpath, _qualname(tree, node), receiver, node.lineno, annotated)
+            Read(relpath, _qualname(tree, node), receiver, node.lineno, reason)
         )
     return reads
 
@@ -319,20 +323,62 @@ def _entry_keys() -> set[tuple[str, str, str]]:
     return {(e.relpath, e.qualname, e.receiver) for e in _ALLOWLIST}
 
 
-def test_every_read_is_seam_annotated_or_allowlisted() -> None:
-    keys = _entry_keys()
-    unclassified = [
-        f"{r.relpath}:{r.lineno} {r.qualname} ({r.receiver})"
-        for r in _all_reads()
-        if r.relpath not in _SEAM_FILES
+def unclassified(
+    reads: list[Read],
+    keys: set[tuple[str, str, str]],
+    seam_files: frozenset[str],
+) -> list[Read]:
+    """Reads that are not in a seam file, not annotated and not allowlisted."""
+    return [
+        r
+        for r in reads
+        if r.relpath not in seam_files
         and not r.annotated
         and (r.relpath, r.qualname, r.receiver) not in keys
     ]
-    assert unclassified == [], (
+
+
+def test_every_read_is_seam_annotated_or_allowlisted() -> None:
+    found = [
+        f"{r.relpath}:{r.lineno} {r.qualname} ({r.receiver})"
+        for r in unclassified(_all_reads(), _entry_keys(), _SEAM_FILES)
+    ]
+    assert found == [], (
         "unclassified .default_branch read: route it through resolve_base_branch, "
         "annotate it '# stays on client.default_branch: <reason>', or add an "
-        f"allowlist entry with a reason: {unclassified}"
+        f"allowlist entry with a reason: {found}"
     )
+
+
+_BARE = Read("cw/x.py", "f", "client", 3, None)
+
+
+def test_unclassified_reports_a_bare_read() -> None:
+    assert unclassified([_BARE], set(), _SEAM_FILES) == [_BARE]
+
+
+def test_unclassified_passes_an_annotated_read() -> None:
+    annotated = _BARE._replace(reason="primary checkout")
+
+    assert unclassified([annotated], set(), _SEAM_FILES) == []
+
+
+def test_unclassified_passes_an_allowlisted_read() -> None:
+    keys = {("cw/x.py", "f", "client")}
+
+    assert unclassified([_BARE], keys, _SEAM_FILES) == []
+
+
+def test_unclassified_reports_a_read_whose_receiver_differs_from_the_entry() -> None:
+    keys = {("cw/x.py", "f", "other")}
+
+    assert unclassified([_BARE], keys, _SEAM_FILES) == [_BARE]
+
+
+def test_unclassified_passes_a_seam_file_read() -> None:
+    seam_read = _BARE._replace(relpath="cw/models/branch.py")
+
+    assert unclassified([seam_read], set(), _SEAM_FILES) == []
 
 
 def test_every_allowlist_entry_matches_a_read() -> None:
@@ -402,16 +448,55 @@ def test_collector_ignores_stores_and_flags_getattr() -> None:
     assert [(r.receiver, r.lineno) for r in reads] == [("client", 3)]
 
 
-def render_classification_table() -> str:
-    """The PR-description listing: one plain bullet per allowlist entry."""
-    return "\n".join(
-        f"- {e.relpath} `{e.qualname}` ({e.receiver}): "
-        f"{'deferred S3b' if e.deferred else 'trust root'}; {e.reason}"
-        for e in _ALLOWLIST
+def test_collector_honours_annotation_above_an_assignment_with_a_conditional() -> None:
+    source = (
+        "def f(client, flag):\n"
+        "    # stays on client.default_branch: the primary checkout\n"
+        "    base = client.default_branch if flag else 'main'\n"
+        "    return base\n"
     )
 
+    [read] = default_branch_reads(source, "x.py")
 
-def test_listing_has_a_bullet_per_allowlist_entry() -> None:
-    listing = render_classification_table()
-    assert listing.count("\n") == len(_ALLOWLIST) - 1
-    assert all(line.startswith("- ") for line in listing.splitlines())
+    assert read.reason == "the primary checkout"
+
+
+def test_collector_ignores_a_class_body_annotation() -> None:
+    source = "class Config:\n    default_branch: str\n    other: str = 'x'\n"
+
+    assert default_branch_reads(source, "x.py") == []
+
+
+def test_collector_reports_the_enclosing_class_and_function() -> None:
+    source = (
+        "class C:\n    def m(self, client):\n        return client.default_branch\n"
+    )
+
+    [read] = default_branch_reads(source, "x.py")
+
+    assert read.qualname == "C.m"
+
+
+def render_classification_table() -> str:
+    """The PR-description listing: one plain bullet per annotated read and entry."""
+    rows = [
+        f"- {r.relpath}:{r.lineno} `{r.qualname}` ({r.receiver}): "
+        f"trust root, annotated; S3a; {r.reason}"
+        for r in _all_reads()
+        if r.annotated
+    ]
+    rows.extend(
+        f"- {e.relpath} `{e.qualname}` ({e.receiver}): "
+        f"{'deferred; S3b' if e.deferred else 'trust root; S3a'}; {e.reason}"
+        for e in _ALLOWLIST
+    )
+    return "\n".join(rows)
+
+
+def test_table_has_a_row_per_annotation_and_entry() -> None:
+    annotated = sum(r.annotated for r in _all_reads())
+    lines = render_classification_table().splitlines()
+
+    assert annotated > 0
+    assert len(lines) == annotated + len(_ALLOWLIST)
+    assert all(line.startswith("- ") for line in lines)
