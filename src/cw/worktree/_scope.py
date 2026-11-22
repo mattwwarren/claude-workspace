@@ -311,7 +311,7 @@ def _context_base_branch(worktree_path: Path | None) -> str | None:
         return None
     try:
         data = json.loads((worktree_path / HOOK_CONTEXT_RELATIVE_PATH).read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     return base_branch_from_context(data if isinstance(data, dict) else None)
 

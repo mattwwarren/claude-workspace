@@ -91,6 +91,17 @@ def test_unusable_context_falls_back_to_client_default(
     assert _resolve(tmp_path) == CLIENT_DEFAULT
 
 
+def test_deeply_nested_context_falls_back_to_client_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # json.loads raises RecursionError (not ValueError) on pathological nesting;
+    # the Stop hook must still get a base rather than lose its sentinel.
+    _patch_clients(monkeypatch, {CLIENT: _client(tmp_path)})
+    _write_context(tmp_path, "[" * 200_000)
+
+    assert _resolve(tmp_path) == CLIENT_DEFAULT
+
+
 def test_unreadable_context_falls_back_to_client_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
