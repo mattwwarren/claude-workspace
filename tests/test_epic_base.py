@@ -360,3 +360,52 @@ def test_measurement_runs_outside_every_lock(
     check_epic_size_ceiling(client, BASE)
     assert {name for name, _ in observed} == {"run_git", "fetch_default", "fetch_base"}
     assert all(locks == () for _, locks in observed)
+
+
+# -- shared measure accessors (RFC 0020 B4) ---------------------------------
+
+
+class TestMeasureAccessors:
+    """``epic_numstat_args`` and ``epic_ceiling``: the one measure the doctor shares."""
+
+    def test_numstat_args_are_the_three_dot_measure_with_ignores(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        client = client_for_repo(
+            make_git_repo("acme"), merge_gate_ignore_paths=["uv.lock"]
+        )
+
+        assert epic_base.epic_numstat_args(client, "epic/x") == [
+            "diff",
+            "--numstat",
+            "--no-renames",
+            "origin/main...origin/epic/x",
+            "--",
+            ".",
+            ":(top,literal,exclude)uv.lock",
+        ]
+
+    def test_numstat_args_without_ignores(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        client = client_for_repo(make_git_repo("acme"))
+
+        assert epic_base.epic_numstat_args(client, "epic/x") == [
+            "diff",
+            "--numstat",
+            "--no-renames",
+            "origin/main...origin/epic/x",
+            "--",
+            ".",
+        ]
+
+    def test_epic_ceiling_is_none_when_unset_and_the_int_when_set(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = make_git_repo("acme")
+
+        assert epic_base.epic_ceiling(client_for_repo(repo)) is None
+        assert (
+            epic_base.epic_ceiling(client_for_repo(repo, epic={"max_diff_lines": 40}))
+            == 40
+        )
