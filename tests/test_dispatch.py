@@ -10,14 +10,17 @@ import subprocess
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 import pytest
 import yaml
 
 from cw import dispatch_loop_identity as dli
 from cw._lock_guard import LockRank, is_rank_held
-from cw.auto_dev_result import IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON
+from cw.auto_dev_result import (
+    IMPL_COMMENTS_UNREADABLE_AFTER_REGRESS_BLOCKER_REASON,
+    Status,
+)
 from cw.codex_background import _default_background, join_outstanding_codex_threads
 from cw.config import (
     _load_concurrency_overrides,
@@ -1746,6 +1749,319 @@ class TestConsumeBranchConflictPrecompute:
                 baseline.disposition,
             )
             assert gated.disposition != BRANCH_STALENESS_GATE_DISPOSITION
+
+
+class TestConsumeReviewTipSweep:
+    """#2994: the REVIEW staleness tip check runs before the lock, bounded per tick.
+
+    ``consume_completed_sessions`` runs the git tip check outside
+    ``dev_queue_lock`` for at most ``_MAX_TIP_CHECKS_PER_TICK`` rows, and holds
+    the rest behind the dispatch cursor: their rows stay RUNNING and a later
+    tick checks them. Rows, sessions, ledgers and events are real; the planner
+    is real; only the git predicate (``tolerates_review_move``) is faked.
+    """
+
+    CLEAN = "c" * 40
+    HEAD = "d" * 40
+    CAP = 2
+
+    class Rig:
+        """The seeded rows and the fake predicate every test shares."""
+
+        def __init__(self) -> None:
+            self.events: list[OrchestratorEvent] = []
+            self.tips: list[str] = []
+            self.order: list[str] = []
+            self.locked = False
+            self.inline_allowed = False
+            self.verdicts: dict[str, bool] = {}
+
+        def checker(
+            self,
+            _client: object,
+            worktree: Path,
+            *,
+            reviewed_sha: str,
+            head_sha: str,
+        ) -> bool:
+            assert self.inline_allowed or not self.locked, (
+                f"tip check under dev_queue_lock: {worktree}"
+            )
+            self.order.append("tip")
+            self.tips.append(worktree.name)
+            return self.verdicts.get(worktree.name, True)
+
+    @pytest.fixture
+    def rig(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Rig:
+        import cw.dispatch.loop as loop_mod
+        from cw.dispatch import review_gates
+        from cw.dispatch import review_tip_sweep as sweep_mod
+        from tests._review_convergence_helpers import make_review_client
+        from tests._shared.dispatch_fixtures import SWEEP_CLIENT, stub_head
+
+        rig = self.Rig()
+        clients = {SWEEP_CLIENT: make_review_client(tmp_path, name=SWEEP_CLIENT)}
+        for module in (loop_mod, sweep_mod):
+            monkeypatch.setattr(module, "load_effective_clients", lambda: clients)
+        monkeypatch.setattr(sweep_mod, "_MAX_TIP_CHECKS_PER_TICK", self.CAP)
+        monkeypatch.setattr(sweep_mod, "tolerates_review_move", rig.checker)
+        monkeypatch.setattr(review_gates, "tolerates_review_move", _must_not_run)
+        stub_head(monkeypatch, self.HEAD)
+
+        real_lock = loop_mod.dev_queue_lock
+
+        @contextlib.contextmanager
+        def _recording_lock() -> Iterator[None]:
+            with real_lock():
+                rig.order.append("lock")
+                rig.locked = True
+                try:
+                    yield
+                finally:
+                    rig.locked = False
+
+        monkeypatch.setattr(loop_mod, "dev_queue_lock", _recording_lock)
+        return rig
+
+    def _seed(self, tmp_path: Path, rig: Rig, count: int) -> None:
+        """*count* RUNNING REVIEW rows, each with a COMPLETED session and an event."""
+        from tests._review_convergence_helpers import confirmed_ledger, write_ledger
+        from tests._shared.dispatch_fixtures import SWEEP_CLIENT, sweep_row
+        from tests._shared.session_seeding import _seed_sessions
+
+        tasks: list[TicketTask] = []
+        sessions: list[Session] = []
+        for index in range(count):
+            worktree = tmp_path / f"wt{index}"
+            worktree.mkdir()
+            write_ledger(worktree, confirmed_ledger(sha=self.CLEAN))
+            ticket = f"T-{index}"
+            tasks.append(sweep_row(worktree, ticket_id=ticket, session_id=f"s{index}"))
+            sessions.append(
+                _make_daemon_session(
+                    id=f"s{index}",
+                    name=f"{SWEEP_CLIENT}/auto-dev/{ticket}",
+                    client=SWEEP_CLIENT,
+                    status=SessionStatus.COMPLETED,
+                    last_result={
+                        "status": "review_pending_approval",
+                        "review": {"agents_run": 3, "reviewed_sha": self.CLEAN},
+                    },
+                )
+            )
+        save_dev_queue(DevQueueStore(tasks=tasks))
+        _seed_sessions(*sessions)
+        rig.events = [
+            record_event(
+                OrchestratorEventType.SESSION_COMPLETED,
+                {"ticket_id": f"T-{i}", "session_id": f"s{i}", "client": "acme"},
+            )
+            for i in range(count)
+        ]
+
+    @staticmethod
+    def _row(ticket: str) -> TicketTask:
+        return next(t for t in load_dev_queue().tasks if t.ticket_id == ticket)
+
+    def test_the_tip_check_runs_before_the_lock_and_never_under_it(
+        self, tmp_path: Path, rig: Rig
+    ) -> None:
+        self._seed(tmp_path, rig, 2)
+
+        assert consume_completed_sessions() == 2
+
+        assert rig.tips == ["wt0", "wt1"]
+        assert rig.order.index("lock") > max(
+            i for i, o in enumerate(rig.order) if o == "tip"
+        )
+
+    def test_over_budget_rows_stay_running_unchanged_with_the_cursor_behind_them(
+        self, tmp_path: Path, rig: Rig
+    ) -> None:
+        self._seed(tmp_path, rig, 4)
+        held = ["T-2", "T-3"]
+        before = {ticket: self._row(ticket).model_dump_json() for ticket in held}
+
+        consume_completed_sessions()
+
+        assert rig.tips == ["wt0", "wt1"]
+        for ticket in held:
+            row = self._row(ticket)
+            assert row.model_dump_json() == before[ticket]
+            assert row.status == QueueItemStatus.RUNNING
+        parked = read_events(
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
+        )
+        assert {e.correlation_id for e in parked} == {"T-0", "T-1"}
+        assert load_cursor("dispatch") == rig.events[1].id
+        assert [e.id for e in read_pending_completions()] == [
+            rig.events[2].id,
+            rig.events[3].id,
+        ]
+
+    @pytest.mark.parametrize("tolerated", [True, False], ids=["fresh", "stale"])
+    def test_a_skipped_row_is_neither_stale_nor_fresh(
+        self, tmp_path: Path, rig: Rig, monkeypatch: pytest.MonkeyPatch, tolerated: bool
+    ) -> None:
+        from cw.dev_queue import REVIEW_STALENESS_GATE_DISPOSITION
+
+        self._seed(tmp_path, rig, 3)
+        rig.verdicts["wt2"] = tolerated
+
+        consume_completed_sessions()
+        undecided = self._row("T-2")
+        assert undecided.status == QueueItemStatus.RUNNING
+        assert undecided.disposition is None
+
+        consume_completed_sessions()
+        decided = self._row("T-2")
+        assert decided.status != QueueItemStatus.RUNNING
+        if tolerated:
+            assert decided.disposition != REVIEW_STALENESS_GATE_DISPOSITION
+        else:
+            assert decided.status == QueueItemStatus.BLOCKED_ON_USER
+            assert decided.disposition == REVIEW_STALENESS_GATE_DISPOSITION
+
+    def test_successive_consumes_drain_everything_exactly_once(
+        self, tmp_path: Path, rig: Rig
+    ) -> None:
+        self._seed(tmp_path, rig, 5)
+
+        routed = [consume_completed_sessions() for _ in range(3)]
+
+        assert routed == [2, 2, 1]
+        assert rig.tips == [f"wt{i}" for i in range(5)]
+        assert read_pending_completions() == []
+        assert consume_completed_sessions() == 0
+        assert rig.tips == [f"wt{i}" for i in range(5)]
+
+    def test_an_unreadable_queue_yields_no_sweep_and_all_events_apply_inline(
+        self,
+        tmp_path: Path,
+        rig: Rig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from cw.dispatch import review_gates
+        from cw.dispatch import review_tip_sweep as sweep_mod
+
+        self._seed(tmp_path, rig, 4)
+
+        def _corrupt() -> DevQueueStore:
+            msg = "corrupt queue"
+            raise ValueError(msg)
+
+        monkeypatch.setattr(sweep_mod, "load_dev_queue", _corrupt)
+        monkeypatch.setattr(review_gates, "tolerates_review_move", rig.checker)
+        rig.inline_allowed = True  # no sweep: the locked gate checks inline
+        with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
+            assert consume_completed_sessions() == 4
+
+        assert load_cursor("dispatch") == rig.events[-1].id
+        assert caplog.text.count("could not read the queue, state or clients") == 1
+
+    def test_a_normal_consume_logs_no_verdict_miss(
+        self, tmp_path: Path, rig: Rig, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self._seed(tmp_path, rig, self.CAP)
+
+        with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
+            assert consume_completed_sessions() == self.CAP
+
+        assert "no precomputed verdict" not in caplog.text
+
+    def test_no_events_means_no_tip_sweep(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dispatch import review_tip_sweep as sweep_mod
+
+        def _boom(*_a: object, **_kw: object) -> None:
+            msg = "swept with no events"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(sweep_mod, "review_tip_sweep_lock_free", _boom)
+        assert consume_completed_sessions() == 0
+
+    def test_cli_settle_routes_a_deferred_event_inline_without_moving_the_cursor(
+        self, tmp_path: Path, rig: Rig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dispatch import review_gates
+        from cw.dispatch.loop import apply_pending_completion
+
+        self._seed(tmp_path, rig, 3)
+        consume_completed_sessions()
+        assert load_cursor("dispatch") == rig.events[1].id
+        deferred = read_pending_completions()
+        assert [e.id for e in deferred] == [rig.events[2].id]
+        monkeypatch.setattr(review_gates, "tolerates_review_move", rig.checker)
+
+        with dev_queue_lock():
+            assert apply_pending_completion(deferred[0]) == 1
+
+        assert rig.tips[-1] == "wt2"
+        assert self._row("T-2").status != QueueItemStatus.RUNNING
+        assert load_cursor("dispatch") == rig.events[1].id
+        # The consumer re-sees it later and skips a row that is no longer RUNNING.
+        assert consume_completed_sessions() == 0
+        assert read_pending_completions() == []
+
+    @pytest.mark.parametrize("stage", list(Stage))
+    @pytest.mark.parametrize("status", get_args(Status))
+    def test_drift_guard_inline_check_implies_the_sweep_considers_it(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        status: str,
+        stage: Stage,
+    ) -> None:
+        """Whenever routing runs the tip check, the sweep's candidate set covers it.
+
+        The router walks ``task.stage`` forward to the sentinel's stage before
+        the REVIEW gate, so the sweep deliberately admits every non-FINALIZE
+        stage; it must never admit fewer than the gate can reach.
+        """
+        from cw.dispatch import apply_staged_decision, review_gates
+        from cw.dispatch import review_tip_sweep as sweep_mod
+        from tests._review_convergence_helpers import (
+            confirmed_ledger,
+            make_review_client,
+            write_ledger,
+        )
+        from tests._shared.dispatch_fixtures import (
+            SWEEP_CLIENT,
+            stub_head,
+            sweep_row,
+        )
+
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        write_ledger(worktree, confirmed_ledger(sha=self.CLEAN))
+        stub_head(monkeypatch, self.HEAD)
+        fired: list[bool] = []
+
+        def _spy(*_a: object, **_kw: object) -> bool:
+            fired.append(True)
+            return True
+
+        monkeypatch.setattr(review_gates, "tolerates_review_move", _spy)
+        task = sweep_row(worktree, session_id="s-drift", stage=stage)
+        last_result: dict[str, object] = {
+            "status": status,
+            "review": {"agents_run": 3, "reviewed_sha": self.CLEAN},
+        }
+        clients = {SWEEP_CLIENT: make_review_client(tmp_path, name=SWEEP_CLIENT)}
+
+        apply_staged_decision(task, status, last_result, clients)
+
+        if fired:
+            assert stage is not Stage.FINALIZE
+            assert status in sweep_mod._CANDIDATE_STATUSES
+        if status == "review_pending_approval" and stage is Stage.REVIEW:
+            assert fired, "the guard must exercise the gate at least here"
+
+
+def _must_not_run(*_args: object, **_kwargs: object) -> bool:
+    pytest.fail("the locked gate ran the tip check inline")
 
 
 class TestDispatchTickReturnsCount:
@@ -10896,10 +11212,10 @@ class TestApplyStagedDecision:
         assert task.disposition is None
         assert task.blocked_reason is None
         assert task.completed_at is None
-        assert (
-            read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
-            == []
+        parked = read_events(
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
         )
+        assert {e.correlation_id for e in parked} == {"T-0", "T-1"}
 
     # -- #2693: `wait`'s hand-off predicate agrees with real routing --------
 
