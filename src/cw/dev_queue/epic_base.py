@@ -23,6 +23,7 @@ from cw.exceptions import CwError, GitTimeoutError
 from cw.worktree import (
     FetchOutcome,
     FetchResult,
+    _first_line,
     _git_dir,
     _parse_numstat_totals,
     _run_git,
@@ -48,13 +49,6 @@ class EpicBaseRefusedError(CwError):
     """
 
     __slots__ = ()
-
-
-def _first_stderr_line(stderr: str | None) -> str:
-    for line in (stderr or "").splitlines():
-        if line.strip():
-            return line.strip()
-    return "no output"
 
 
 def refuse_redundant_base(client: ClientConfig, base: str) -> None:
@@ -97,10 +91,8 @@ def verify_base_on_origin(client: ClientConfig, base: str) -> None:
     if result.returncode == _LS_REMOTE_NO_MATCH:
         raise _absent(client, base)
     if result.returncode != 0:
-        reason = (
-            f"git ls-remote exited {result.returncode}:"
-            f" {_first_stderr_line(result.stderr)}"
-        )
+        stderr_line = _first_line(result.stderr or "") or "no output"
+        reason = f"git ls-remote exited {result.returncode}: {stderr_line}"
         raise _could_not_verify(base, reason)
     wanted = f"refs/heads/{base}"
     heads = [
@@ -174,9 +166,8 @@ def check_epic_size_ceiling(client: ClientConfig, base: str) -> None:
         check=False,
     )
     if result.returncode != 0:
-        detail = (
-            f"git diff exited {result.returncode}: {_first_stderr_line(result.stderr)}"
-        )
+        stderr_line = _first_line(result.stderr or "") or "no output"
+        detail = f"git diff exited {result.returncode}: {stderr_line}"
         raise _cannot_measure(base, default, detail)
     _files, lines = _parse_numstat_totals(result.stdout)
     if lines > ceiling:
