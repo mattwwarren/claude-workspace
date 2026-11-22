@@ -257,6 +257,25 @@ def _qualname(tree: ast.Module, target: ast.AST) -> str:
     return ".".join(found) or "<module>"
 
 
+def _full_reason(source_lines: list[str], comments: dict[int, str], start: int) -> str:
+    """The marker comment's reason joined with its standalone continuation lines.
+
+    A reason may wrap onto the comment lines directly below the marker line; they
+    are joined with single spaces so the one-line table row carries all of it.
+    A trailing comment on a code line is not a continuation.
+    """
+    parts = [comments[start].split(_MARKER, 1)[1].strip()]
+    number = start + 1
+    while (
+        number in comments
+        and source_lines[number - 1].lstrip().startswith("#")
+        and _MARKER not in comments[number]
+    ):
+        parts.append(comments[number].lstrip("#").strip())
+        number += 1
+    return " ".join(part for part in parts if part)
+
+
 def _annotation_reason(source: str, tree: ast.Module, node: ast.AST) -> str | None:
     """The reason on the marker comment for *node*'s statement, or ``None``."""
     comments = {
@@ -277,10 +296,8 @@ def _annotation_reason(source: str, tree: ast.Module, node: ast.AST) -> str | No
         above -= 1
     for number in lines:
         text = comments.get(number, "")
-        if _MARKER in text:
-            reason = text.split(_MARKER, 1)[1].strip()
-            if reason:
-                return reason
+        if _MARKER in text and text.split(_MARKER, 1)[1].strip():
+            return _full_reason(source.splitlines(), comments, number)
     return None
 
 
@@ -461,6 +478,37 @@ def test_collector_honours_annotation_above_an_assignment_with_a_conditional() -
     assert read.reason == "the primary checkout"
 
 
+def test_collector_joins_a_multi_line_annotation_into_one_reason() -> None:
+    source = (
+        "def f(client):\n"
+        "    # stays on client.default_branch: the primary checkout's HEAD must\n"
+        "    # be on the default branch, so the\n"
+        "    # operator remedy names it\n"
+        "    return client.default_branch\n"
+    )
+
+    [read] = default_branch_reads(source, "x.py")
+
+    assert read.reason == (
+        "the primary checkout's HEAD must be on the default branch, so the "
+        "operator remedy names it"
+    )
+
+
+def test_collector_does_not_swallow_a_trailing_code_comment_as_continuation() -> None:
+    source = (
+        "def f(client):\n"
+        "    # stays on client.default_branch: the primary checkout\n"
+        "    base = client.default_branch\n"
+        "    other = 1  # unrelated\n"
+        "    return base, other\n"
+    )
+
+    [read] = default_branch_reads(source, "x.py")
+
+    assert read.reason == "the primary checkout"
+
+
 def test_collector_ignores_a_class_body_annotation() -> None:
     source = "class Config:\n    default_branch: str\n    other: str = 'x'\n"
 
@@ -477,26 +525,89 @@ def test_collector_reports_the_enclosing_class_and_function() -> None:
     assert read.qualname == "C.m"
 
 
+_SEAM_WHY = {
+    "cw/models/branch.py": "the single reader (`resolve_base_branch`)",
+    "cw/models/client.py": "the field definition",
+}
+
+
+def _allowlist_row(entry: _Entry) -> str:
+    """One bullet for an allowlist entry: the category label, then the reason once."""
+    label = "deferred; S3b (#3840), codex lane" if entry.deferred else "trust root; S3a"
+    body = entry.reason.removeprefix(_DEFER if entry.deferred else _TRUST)
+    return f"- {entry.relpath} `{entry.qualname}` ({entry.receiver}): {label}; {body}"
+
+
+def _read_row(read: Read) -> str:
+    where = f"- {read.relpath}:{read.lineno} `{read.qualname}` ({read.receiver}): "
+    if read.relpath in _SEAM_FILES:
+        return f"{where}seam; S3a; {_SEAM_WHY[read.relpath]}"
+    return f"{where}classified in place; S3a; {read.reason}"
+
+
 def render_classification_table() -> str:
-    """The PR-description listing: one plain bullet per annotated read and entry."""
+    """The PR-description listing: one plain bullet per seam read, annotated read
+    and allowlist entry, so every remaining ``.default_branch`` read appears once.
+    """
     rows = [
-        f"- {r.relpath}:{r.lineno} `{r.qualname}` ({r.receiver}): "
-        f"trust root, annotated; S3a; {r.reason}"
-        for r in _all_reads()
-        if r.annotated
+        _read_row(r) for r in _all_reads() if r.relpath in _SEAM_FILES or r.annotated
     ]
-    rows.extend(
-        f"- {e.relpath} `{e.qualname}` ({e.receiver}): "
-        f"{'deferred; S3b' if e.deferred else 'trust root; S3a'}; {e.reason}"
-        for e in _ALLOWLIST
-    )
+    rows.extend(_allowlist_row(e) for e in _ALLOWLIST)
     return "\n".join(rows)
 
 
-def test_table_has_a_row_per_annotation_and_entry() -> None:
-    annotated = sum(r.annotated for r in _all_reads())
-    lines = render_classification_table().splitlines()
+def _table_lines() -> list[str]:
+    return render_classification_table().splitlines()
+
+
+def test_table_has_a_row_per_annotation_entry_and_seam_read() -> None:
+    reads = _all_reads()
+    seam = sum(r.relpath in _SEAM_FILES for r in reads)
+    annotated = sum(r.annotated and r.relpath not in _SEAM_FILES for r in reads)
+    lines = _table_lines()
 
     assert annotated > 0
-    assert len(lines) == annotated + len(_ALLOWLIST)
+    assert seam > 0
+    assert len(lines) == annotated + seam + len(_ALLOWLIST)
     assert all(line.startswith("- ") for line in lines)
+
+
+def test_table_carries_a_multi_line_reason_in_full_on_one_row() -> None:
+    lines = _table_lines()
+    # Every annotated read's whole reason is on its row, never a cut-off first line.
+    for read in _all_reads():
+        if read.annotated and read.relpath not in _SEAM_FILES:
+            assert any(f"; {read.reason}" in line for line in lines)
+    assert any("the primary checkout's HEAD must be on " in line for line in lines)
+
+
+def test_table_rows_do_not_repeat_the_category_prefix() -> None:
+    lines = _table_lines()
+
+    assert not any("trust root; S3a; trust root" in line for line in lines)
+    assert not any("deferred to S3b (#3840), codex lane: " in line for line in lines)
+
+
+def test_table_lists_the_seam_reader() -> None:
+    lines = _table_lines()
+
+    assert any(
+        line.startswith("- cw/models/branch.py:")
+        and "`resolve_base_branch`" in line
+        and ": seam; S3a; " in line
+        for line in lines
+    )
+
+
+def test_table_does_not_label_an_annotated_read_a_trust_root() -> None:
+    annotated = [r for r in _all_reads() if r.annotated]
+    lines = _table_lines()
+
+    for read in annotated:
+        [row] = [
+            line
+            for line in lines
+            if line.startswith(f"- {read.relpath}:{read.lineno} ")
+        ]
+        assert "): classified in place; S3a; " in row
+        assert "): trust root" not in row
