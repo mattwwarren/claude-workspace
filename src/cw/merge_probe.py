@@ -170,10 +170,15 @@ def resolve_base(worktree: Path, base: str, timeout: float) -> str:
     return sha
 
 
-def already_merged(worktree: Path, base_sha: str, timeout: float) -> bool:
-    """Whether *base_sha* is an ancestor of HEAD; raise on a git error."""
+def already_merged(
+    worktree: Path, base_sha: str, timeout: float, *, head: str = "HEAD"
+) -> bool:
+    """Whether *base_sha* is an ancestor of *head* (HEAD by default).
+
+    Raises on a git error.
+    """
     result = git_bounded(
-        worktree, ["merge-base", "--is-ancestor", base_sha, "HEAD"], timeout
+        worktree, ["merge-base", "--is-ancestor", base_sha, head], timeout
     )
     if result.returncode == _IS_ANCESTOR_RC:
         return True
@@ -187,8 +192,9 @@ def probe_default_merge(
     base: str,
     *,
     timeout: float = PROBE_TIMEOUT_SECONDS,
+    head: str = "HEAD",
 ) -> MergeProbe:
-    """Whether merging ``origin/<base>`` into *worktree*'s HEAD would conflict.
+    """Whether merging ``origin/<base>`` into *head* (default HEAD) would conflict.
 
     At most three git calls (``rev-parse``, ``merge-base --is-ancestor``,
     ``merge-tree``), each bounded by *timeout*. Never raises: every git
@@ -199,12 +205,12 @@ def probe_default_merge(
     except GitFailedError as exc:
         return MergeProbe("unavailable", None, (), str(exc))
     try:
-        merged = already_merged(worktree, base_sha, timeout)
+        merged = already_merged(worktree, base_sha, timeout, head=head)
     except GitFailedError as exc:
         return MergeProbe("unavailable", base_sha, (), str(exc))
     if merged:
         return MergeProbe("up_to_date", base_sha, (), "")
-    found = merge_tree(worktree, "HEAD", base_sha, timeout=timeout)
+    found = merge_tree(worktree, head, base_sha, timeout=timeout)
     if found.status == "unavailable":
         return MergeProbe("unavailable", base_sha, (), found.detail)
     return MergeProbe(found.status, base_sha, found.conflicted_files, "")
