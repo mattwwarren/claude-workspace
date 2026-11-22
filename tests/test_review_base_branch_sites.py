@@ -12,10 +12,12 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from click.testing import CliRunner
 from pydantic import ValidationError
 
 import cw.cli.review.confirm as confirm_cli
 from cw.claude_review import core as claude_core
+from cw.cli import main
 from cw.cli.review.converge import _default_branch
 from cw.codex_review import _engine_round
 from cw.codex_review import core as codex_core
@@ -25,9 +27,14 @@ from cw.confirmation_jobs import ConfirmationPin
 from cw.dev_queue import add_ticket
 from cw.dispatch import review_gates
 from cw.dispatch import review_tip_sweep as sweep_mod
+from cw.dispatch.review_approval_gate import _evaluate
 from cw.dispatch.review_tip_verdicts import TipCheck, TipKey
 from cw.models import ClientConfig, TicketTask
 from cw.models.client import ReviewConfig, ReviewEngineConfig
+from cw.reconcile.review_recipes.repair_fence import (
+    build_fence_snapshot,
+    evaluate_repair_fence,
+)
 from cw.review_convergence import (
     MergeTolerance,
     resolve_loop_diff_base,
@@ -41,6 +48,13 @@ from cw.review_engine.materialize import materialize_skill
 from cw.review_engine.preflight import run_preflight
 from cw.ticket_snapshot import DEFAULT_SNAPSHOT_CONTEXT
 from tests._clients_yaml import ClientSpec, write_clients_yaml
+from tests._review_approval_helpers import (
+    ApprovalRepo,
+    approval_task,
+    cw_context,
+    make_approval_repo,
+    write_context,
+)
 from tests._review_convergence_helpers import (
     confirmed_ledger,
     make_review_client,
@@ -53,7 +67,11 @@ from tests._review_engine_helpers import (
     make_engine_repo,
     write_engine_context,
 )
-from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.git_repos import (
+    commit_tracked_file,
+    git_in,
+    push_commit_to_origin,
+)
 from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
@@ -744,3 +762,91 @@ def test_engine_synthesis_measures_scope_against_the_base(
     )
 
     assert seen["default_branch"] == ROW_BASE
+
+
+# --- approval-chain parity: gate, fence and CLI agree (S3a, R3) ------------
+
+
+@pytest.fixture
+def epic_approval(
+    make_git_repo_with_origin: Callable[..., tuple[Path, Path]], tmp_path: Path
+) -> ApprovalRepo:
+    """Approved at the feature tip, then a clean merge of ``origin/epic/x``.
+
+    The merged commit is on the epic branch only, so it counts as landed work
+    against ``origin/main`` and as a clean merge against ``origin/epic/x``.
+    """
+    made = make_approval_repo(make_git_repo_with_origin, "wt-approval-epic")
+    wt = made.worktree
+    git_in(wt, "push", "-q", "origin", f"main:refs/heads/{ROW_BASE}")
+    push_commit_to_origin(made.origin, ROW_BASE, tmp_path / "side", "epic_only.py")
+    git_in(wt, "fetch", "-q", "origin")
+    git_in(wt, "merge", "--no-ff", "--no-edit", f"origin/{ROW_BASE}")
+    return made
+
+
+def _approved_row(repo: ApprovalRepo, base: str | None) -> TicketTask:
+    row = approval_task(repo.approved)
+    return row.model_copy(update={"base_branch": base, "scope_hint": "large"})
+
+
+def _gate_token(repo: ApprovalRepo, row: TicketTask) -> str:
+    client = make_review_client(repo.worktree, convergence="blocking")
+
+    verdict, _head = _evaluate(client, row, "feature")
+
+    return verdict.token
+
+
+def _fence_token(repo: ApprovalRepo, row: TicketTask) -> str:
+    client = make_review_client(repo.worktree, convergence="blocking")
+    snapshot = build_fence_snapshot(row, client)
+
+    verdict = evaluate_repair_fence(
+        snapshot,
+        repo=repo.worktree,
+        new_sha=git_in(repo.worktree, "rev-parse", "HEAD"),
+        origin_tip=None,
+    )
+
+    return verdict.approval_token
+
+
+def _cli_token(repo: ApprovalRepo, row: TicketTask) -> str:
+    extra = {} if row.base_branch is None else {"base_branch": row.base_branch}
+    write_context(repo.worktree, cw_context(repo.worktree, row, **extra))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "review",
+            "check-approval",
+            "--tier",
+            "large",
+            "--worktree",
+            str(repo.worktree),
+        ],
+    )
+
+    line = result.output.strip()
+    assert result.exit_code == 0, line
+    if line == "REVIEW_APPROVAL_RECORDED":
+        return "recorded"
+    return line.removeprefix("REVIEW_APPROVAL_PARK: ").split(" — ")[0]
+
+
+@pytest.mark.parametrize(
+    ("base", "expected"), [(ROW_BASE, "recorded"), (None, "stale")]
+)
+def test_the_three_approval_producers_agree_on_a_merge_of_the_row_base(
+    epic_approval: ApprovalRepo, base: str | None, expected: str
+) -> None:
+    row = _approved_row(epic_approval, base)
+
+    tokens = (
+        _gate_token(epic_approval, row),
+        _fence_token(epic_approval, row),
+        _cli_token(epic_approval, row),
+    )
+
+    assert tokens == (expected, expected, expected)
