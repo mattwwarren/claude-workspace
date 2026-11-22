@@ -15,6 +15,7 @@ from pydantic import ValidationError
 import cw.cli.review.confirm as confirm_cli
 from cw.cli.review.converge import _default_branch
 from cw.confirmation_jobs import ConfirmationPin
+from cw.dev_queue import add_ticket
 from cw.models import TicketTask
 from cw.review_convergence import (
     MergeTolerance,
@@ -22,7 +23,9 @@ from cw.review_convergence import (
     tolerance_from_context,
 )
 from cw.ticket_snapshot import DEFAULT_SNAPSHOT_CONTEXT
+from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._review_convergence_helpers import make_review_client
+from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -158,3 +161,54 @@ def test_pin_with_both_keys_keeps_the_base() -> None:
 def test_pin_still_rejects_unknown_keys() -> None:
     with pytest.raises(ValidationError):
         ConfirmationPin.model_validate(_pin_fields(base_branch=ROW_BASE, bogus=1))
+
+
+# --- confirm.resolve_round_inputs (S3a, R6) --------------------------------
+
+
+def _queued_row(tmp_path: Path, base: str | None) -> Path:
+    """A client whose default is ``trunk`` and a dev-queue row carrying *base*."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    write_clients_yaml(
+        ClientSpec("acme", workspace_path=workspace, default_branch=CLIENT_DEFAULT)
+    )
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    add_ticket(
+        _make_ticket_task(
+            ticket_id="T-1", client="acme", worktree_path=worktree, base_branch=base
+        )
+    )
+    return worktree
+
+
+def _round_inputs(worktree: Path, flag: str | None) -> tuple[TicketTask, str]:
+    return confirm_cli.resolve_round_inputs(
+        ticket_id="T-1", client="acme", worktree=worktree, default_branch=flag
+    )
+
+
+def test_resolve_round_inputs_returns_the_row_base(tmp_path: Path) -> None:
+    worktree = _queued_row(tmp_path, ROW_BASE)
+
+    task, base = _round_inputs(worktree, None)
+
+    assert task.base_branch == ROW_BASE
+    assert base == ROW_BASE
+
+
+def test_resolve_round_inputs_null_row_is_the_client_default(tmp_path: Path) -> None:
+    worktree = _queued_row(tmp_path, None)
+
+    _task, base = _round_inputs(worktree, None)
+
+    assert base == CLIENT_DEFAULT
+
+
+def test_resolve_round_inputs_flag_overrides_a_base_row(tmp_path: Path) -> None:
+    worktree = _queued_row(tmp_path, ROW_BASE)
+
+    _task, base = _round_inputs(worktree, "develop")
+
+    assert base == "develop"
