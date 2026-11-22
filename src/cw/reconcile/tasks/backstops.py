@@ -93,13 +93,16 @@ def _sessions_past_completion_grace(
     indefinitely, mirrors _collect_timed_out_merged_candidates's guard).
     *now* defaults to the current time (the dirty-check pre-pass passes a
     lookahead, #2548). A session in *pending_session_ids* (its completion event
-    is not yet consumed, #2994) is never past grace, however old.
+    is not yet consumed, #2994) is never past grace, however old, unless reconcile
+    has already dispositioned it (``recovery_disposition`` set, for example a
+    codex-harvest orphan park): only this backstop honours that intent, and the
+    consumer would route the row without it.
     """
     now = now or datetime.now(UTC)
     return [
         s
         for s in sessions
-        if s.id not in pending_session_ids
+        if (s.id not in pending_session_ids or s.recovery_disposition is not None)
         and (
             s.completed_at is None
             or (now - s.completed_at).total_seconds()

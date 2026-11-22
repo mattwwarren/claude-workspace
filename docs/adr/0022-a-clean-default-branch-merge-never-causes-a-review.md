@@ -233,7 +233,9 @@ every queue writer for minutes.
   `backstop_targets` treats a COMPLETED session whose SESSION_COMPLETED event is
   still pending for the dispatch consumer as inside its grace, in both the
   lockless dirty-check capture and the in-lock revert. The exemption ends when
-  the consumer consumes the event; a TIMED_OUT session is unaffected. If the
+  the consumer consumes the event; a TIMED_OUT session is unaffected, and so is a
+  session reconcile already dispositioned (`recovery_disposition` set, for
+  example a codex-harvest orphan park), which only the backstop can honour. If the
   dispatch loop is not running, such a row waits for the consumer rather than
   being reverted.
 - **Inline fallback.** A verdict-key miss under an active scope, or no sweep (an

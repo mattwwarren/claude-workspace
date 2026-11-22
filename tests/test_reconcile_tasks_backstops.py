@@ -1421,3 +1421,30 @@ def test_a_pending_event_never_shields_a_timed_out_session(
         reverted = revert_timed_out_prefetched()
 
     assert reverted == ["TKT-TO"]
+
+
+def test_a_pending_event_does_not_shield_a_session_reconcile_already_dispositioned(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``recovery_disposition`` is reconcile's own park intent (codex harvest).
+
+    The dispatch consumer would route the row without it, so the backstop must
+    still act on it even while a completion event is pending.
+    """
+    _seed_completed_review_row(tmp_path, monkeypatch, "dispositioned-sess")
+    state = load_state()
+    state.sessions[0].recovery_disposition = "codex_harvest_orphaned"
+    save_state(state)
+    record_event(
+        OrchestratorEventType.SESSION_COMPLETED,
+        {"ticket_id": "dispositioned-sess", "session_id": "dispositioned-sess"},
+    )
+
+    with freezegun.freeze_time(_PAST_GRACE + timedelta(seconds=600)):
+        revert_completed_silent_prefetched()
+
+    task = load_dev_queue().tasks[0]
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER
+    assert task.disposition == "codex_harvest_orphaned"
