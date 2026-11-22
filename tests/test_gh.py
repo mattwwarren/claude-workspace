@@ -2367,7 +2367,10 @@ class TestFetchOpenPrHeads:
     def test_author_and_parse(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured: list[list[str]] = []
         payload = json.dumps(
-            [{"number": 4, "headRefName": "dev/4"}, {"number": 5, "headRefName": "x"}]
+            [
+                {"number": 4, "headRefName": "dev/4", "baseRefName": "main"},
+                {"number": 5, "headRefName": "x", "baseRefName": "epic/x"},
+            ]
         )
 
         def _fake_run(args: list[str], **_kwargs: object) -> Any:
@@ -2376,7 +2379,9 @@ class TestFetchOpenPrHeads:
 
         monkeypatch.setattr("cw.gh._sp.run", _fake_run)
         heads = fetch_open_pr_heads("@me")
-        assert heads == [(4, "dev/4"), (5, "x")]
+        assert heads == [(4, "dev/4", "main"), (5, "x", "epic/x")]
+        json_arg = captured[0][captured[0].index("--json") + 1]
+        assert json_arg == "number,headRefName,baseRefName"
         assert captured[0][:7] == [
             "gh",
             "pr",
@@ -2387,6 +2392,25 @@ class TestFetchOpenPrHeads:
             "@me",
         ]
         assert "--limit" in captured[0]
+
+    @pytest.mark.parametrize(
+        "item",
+        [
+            {"number": 4, "headRefName": "dev/4"},
+            {"number": 4, "headRefName": "dev/4", "baseRefName": None},
+            {"number": 4, "headRefName": "dev/4", "baseRefName": 7},
+        ],
+        ids=["missing", "null", "non-string"],
+    )
+    def test_a_missing_base_ref_name_fails_closed(
+        self, monkeypatch: pytest.MonkeyPatch, item: dict[str, object]
+    ) -> None:
+        """No baseRefName means the base filter cannot run: None, never a guess."""
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda _args, **_kw: _make_run_result(0, json.dumps([item])),
+        )
+        assert fetch_open_pr_heads("@me") is None
 
     def test_no_author_lists_every_pr(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured: list[list[str]] = []

@@ -6,8 +6,7 @@ A read is classified one of three ways:
 - annotated in place: a ``# stays on client.default_branch: <reason>`` comment on
   the read's statement or the comment block directly above it;
 - allowlisted by ``(relpath, qualname, receiver)`` with a reason. A trust-root
-  entry keeps the client default on purpose; a deferred entry is a merge-target
-  read in the codex lane that S3b (#3840) moves onto the row's base.
+  entry keeps the client default on purpose (a trust root).
 
 The guard cannot see kwargs or parameters; the per-crossing tests in
 ``tests/test_review_base_branch_sites.py`` cover those. The allowlist is
@@ -25,8 +24,11 @@ from tests._shared.workflow_text import _SRC_ROOT, _iter_src_files
 
 _MARKER = "stays on client.default_branch:"
 _SEAM_FILES = frozenset({"cw/models/branch.py", "cw/models/client.py"})
-_MAX_ALLOWLIST_ENTRIES = 28
-_MIN_READS = 40  # non-vacuity: the scan must see the real codebase
+_MAX_ALLOWLIST_ENTRIES = 12
+# Non-vacuity floor: the guard must see MORE than _MIN_READS reads. S3b (#3840)
+# moved the codex merge-target reads off .default_branch, so the read count
+# fell; the floor is one below the 35 reads measured after S3b.
+_MIN_READS = 34
 
 
 class Read(NamedTuple):
@@ -46,11 +48,9 @@ class _Entry(NamedTuple):
     qualname: str
     receiver: str
     reason: str
-    deferred: bool = False
 
 
 _TRUST = "trust root: "
-_DEFER = "deferred to S3b (#3840), codex lane: "
 
 _ALLOWLIST: tuple[_Entry, ...] = (
     _Entry(
@@ -121,118 +121,6 @@ _ALLOWLIST: tuple[_Entry, ...] = (
         "_opencode_preflight",
         "client",
         _TRUST + "context writer",
-    ),
-    _Entry(
-        "cw/codex_background.py",
-        "_review_and_confirm",
-        "client",
-        _DEFER + "merge target",
-        deferred=True,
-    ),
-    _Entry(
-        "cw/codex_background.py",
-        "_run_codex_review_and_complete",
-        "client",
-        _DEFER + "merge target",
-        deferred=True,
-    ),
-    _Entry(
-        "cw/codex_clean_confirm.py",
-        "_fork_point",
-        "gate.client",
-        _DEFER + "merge target",
-        deferred=True,
-    ),
-    _Entry(
-        "cw/codex_clean_confirm.py",
-        "_run_confirm",
-        "client",
-        _DEFER + "merge target",
-        deferred=True,
-    ),
-    _Entry(
-        "cw/codex_confirm_feedback.py",
-        "_read_feedback",
-        "client",
-        _DEFER + "merge target",
-        deferred=True,
-    ),
-    _Entry(
-        "cw/codex_finalize/_run.py",
-        "_ci_context",
-        "run.client",
-        _DEFER + "merge target",
-        deferred=True,
-    ),
-    _Entry(
-        "cw/codex_finalize/_run.py",
-        "_create_prelude",
-        "run.client",
-        _DEFER + "merge target",
-        deferred=True,
-    ),
-    _Entry(
-        "cw/codex_finalize/_run.py",
-        "_create",
-        "run.client",
-        _DEFER + "merge target",
-        deferred=True,
-    ),
-    _Entry(
-        "cw/codex_finalize/_run.py",
-        "_prepare",
-        "run.client",
-        _DEFER + "merge target",
-        deferred=True,
-    ),
-    _Entry(
-        "cw/codex_finalize/_run.py",
-        "_reuse",
-        "run.client",
-        _DEFER + "merge target",
-        deferred=True,
-    ),
-    _Entry(
-        "cw/codex_finalize/_run.py",
-        "_shipped",
-        "run.client",
-        _DEFER + "merge target",
-        deferred=True,
-    ),
-    _Entry(
-        "cw/codex_impl/_run.py",
-        "_fence_blocks",
-        "run.client",
-        _DEFER + "merge target",
-        deferred=True,
-    ),
-    _Entry(
-        "cw/codex_impl/_run.py",
-        "_guards",
-        "run.client",
-        _DEFER + "merge target",
-        deferred=True,
-    ),
-    _Entry(
-        "cw/codex_impl/_run.py",
-        "_prepare",
-        "run.client",
-        _DEFER + "merge target",
-        deferred=True,
-    ),
-    _Entry(
-        "cw/codex_impl/_run.py",
-        "_stamp_final",
-        "run.client",
-        _DEFER + "merge target",
-        deferred=True,
-    ),
-    _Entry(
-        "cw/codex_impl/_run.py",
-        "_start",
-        "run.client",
-        _DEFER + "merge target",
-        deferred=True,
     ),
 )
 
@@ -408,11 +296,10 @@ def test_allowlist_reasons_are_non_empty() -> None:
     assert all(entry.reason.strip() for entry in _ALLOWLIST)
 
 
-def test_deferred_entries_name_s3b() -> None:
-    deferred = [e for e in _ALLOWLIST if e.deferred]
-    assert deferred, "the codex-lane deferrals must be recorded"
-    assert all("deferred to S3b" in e.reason for e in deferred)
-    assert all(not e.deferred for e in _ALLOWLIST if e.reason.startswith(_TRUST))
+def test_every_entry_is_a_trust_root_and_none_names_s3b() -> None:
+    """S3b (#3840) emptied the deferred codex entries; only trust roots remain."""
+    assert all(e.reason.startswith(_TRUST) for e in _ALLOWLIST)
+    assert not any("S3b" in e.reason for e in _ALLOWLIST)
 
 
 def test_allowlist_count_is_pinned_shrink_only() -> None:
@@ -423,7 +310,7 @@ def test_guard_is_not_vacuous() -> None:
     reads = _all_reads()
     assert len(reads) > _MIN_READS
     assert any(r.relpath in _SEAM_FILES for r in reads)
-    assert sum(r.annotated for r in reads) >= 11  # S2 (#2994 family) + confirm.py
+    assert sum(r.annotated for r in reads) >= 14  # S2 (#2994 family) + confirm.py
 
 
 def test_collector_flags_bare_read() -> None:
@@ -533,8 +420,8 @@ _SEAM_WHY = {
 
 def _allowlist_row(entry: _Entry) -> str:
     """One bullet for an allowlist entry: the category label, then the reason once."""
-    label = "deferred; S3b (#3840), codex lane" if entry.deferred else "trust root; S3a"
-    body = entry.reason.removeprefix(_DEFER if entry.deferred else _TRUST)
+    label = "trust root; S3a"
+    body = entry.reason.removeprefix(_TRUST)
     return f"- {entry.relpath} `{entry.qualname}` ({entry.receiver}): {label}; {body}"
 
 
@@ -585,7 +472,6 @@ def test_table_rows_do_not_repeat_the_category_prefix() -> None:
     lines = _table_lines()
 
     assert not any("trust root; S3a; trust root" in line for line in lines)
-    assert not any("deferred to S3b (#3840), codex lane: " in line for line in lines)
 
 
 def test_table_lists_the_seam_reader() -> None:

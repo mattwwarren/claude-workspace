@@ -497,6 +497,45 @@ class TestSpawnCreate:
         assert sess is not None
         assert sess.lane == "test-lane"
 
+    def test_spawn_create_impl_base_branch_precedence(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """RFC 0020 S3b: explicit base_branch, else the task's base, else default."""
+        import json
+
+        from cw.spawn import spawn_create_impl
+        from tests._shared.session_seeding import _make_ticket_task
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        row = _make_ticket_task(ticket_id="GEN-42", client="test", base_branch="epic/y")
+
+        def _context_base(
+            name: str, *, task: TicketTask | None, base_branch: str | None
+        ) -> str:
+            worktree = make_git_repo(name)
+            spawn_create_impl(
+                client=client,
+                worktree=worktree,
+                prompt="/auto-dev GEN-42 --headless",
+                label=f"auto-dev-{name}",
+                native_daemon=daemon,
+                task=task,
+                base_branch=base_branch,
+            )
+            ctx = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+            return str(ctx["base_branch"])
+
+        assert _context_base("wt-base-explicit", task=row, base_branch="epic/x") == (
+            "epic/x"
+        )
+        assert _context_base("wt-base-task", task=row, base_branch=None) == "epic/y"
+        assert _context_base("wt-base-none", task=None, base_branch=None) == (
+            client.default_branch
+        )
+
     def test_spawn_create_impl_default_lane_none(
         self,
         tmp_config_dir: Path,

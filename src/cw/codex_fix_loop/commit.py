@@ -624,6 +624,7 @@ def _cycle_breach(
     cycle0_files: frozenset[str],
     scope_tier: ScopeTier,
     default_branch: str,
+    base_branch: str,
     allowed_files: frozenset[str] | None,
     guards: _GrowthGuards,
 ) -> tuple[FenceBreach | None, frozenset[str]]:
@@ -640,7 +641,7 @@ def _cycle_breach(
         return scope_violation_breach(violations, ctx.cycle), frozenset(touched)
     breach = check_fix_fence(
         ctx.worktree,
-        base_branch=default_branch,
+        base_branch=base_branch,
         allowed_files=allowed_files,
         finding_files=frozenset(f.file for f in findings),
         cycle=ctx.cycle,
@@ -827,6 +828,7 @@ def _run_fix_and_commit(
     snapshot: _PersistedSnapshot,
     had_real_commit_so_far: bool,
     default_branch: str,
+    base_branch: str,
     allowed_files: frozenset[str] | None,
     growth_budget_lines: int = DEFAULT_GROWTH_BUDGET_LINES,
     growth_guard_enabled: bool = True,
@@ -902,6 +904,7 @@ def _run_fix_and_commit(
         cycle0_files=cycle0_files,
         scope_tier=scope_tier,
         default_branch=default_branch,
+        base_branch=base_branch,
         allowed_files=allowed_files,
         guards=_GrowthGuards(
             growth_guard_enabled, growth_budget_lines, constraints, loop_growth_budget

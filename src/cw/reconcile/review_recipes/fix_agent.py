@@ -356,6 +356,7 @@ def dispatch_fix_agent(
         lane=lane,
         parent=effective_parent,
         purpose=SessionPurpose.FIX,
+        base_branch=resolve_base_branch(client, task),
     )
     # R24 MUST_FIX: mirrors dispatch/claim.py's own post-spawn emission, so a
     # fix session is as auditable as any other dispatched session. "client" is

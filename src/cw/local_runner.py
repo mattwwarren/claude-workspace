@@ -530,7 +530,7 @@ class GitFacts(TypedDict):
 
 def git_facts(
     worktree: Path,
-    default_branch: str,
+    base_branch: str,
     *,
     timeout: float = GIT_FACTS_TIMEOUT_SECONDS,
 ) -> GitFacts:
@@ -556,7 +556,7 @@ def git_facts(
 
     fork_point = ""
     with contextlib.suppress(subprocess.CalledProcessError):
-        fork_point = _git("merge-base", "HEAD", f"origin/{default_branch}")
+        fork_point = _git("merge-base", "HEAD", f"origin/{base_branch}")
 
     commits: list[str] = []
     files = 0

@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.exceptions import CwError, WorkerLaunchedError
+from cw.models import resolve_base_branch
 from cw.pr_hydrate import _parse_pr_url
 from cw.reconcile.review_recipes._shared import (
     _ATTENTION_CHANGES_REQUESTED,
@@ -85,6 +86,7 @@ class _DispatchJob(NamedTuple):
     payload_base: dict[str, object]
     client: str
     fired_at: datetime
+    base_branch: str
 
 
 def _detect_address_review(
@@ -232,6 +234,7 @@ def _prepare_dispatch_job(
         payload_base=payload_base,
         client=task.client,
         fired_at=now,
+        base_branch=resolve_base_branch(client_cfg, task),
     )
 
 
@@ -288,6 +291,7 @@ def _dispatch_address_review(job: _DispatchJob) -> str | None:
             headless=False,
             ticket_id=job.ticket_id,
             lane=job.lane,
+            base_branch=job.base_branch,
         )
     except WorkerLaunchedError as exc:
         # Must precede ``except CwError`` (#2502): the worker is live and

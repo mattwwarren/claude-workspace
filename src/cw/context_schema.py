@@ -128,11 +128,12 @@ from __future__ import annotations
 #     ticket merges into, always a non-empty string: the row's recorded base,
 #     else the client's default_branch (also for a null-base row or a
 #     task-less context). The stage prose reads it as
-#     `.base_branch // .world_state_snapshot.origin_main_branch`. Only
-#     claude-native delivers it today; the other harnesses refuse a non-null
-#     base before any agent runs. origin_main_branch and
-#     origin_main_sha_at_spawn stay on client.default_branch (ADR-0024). A
-#     context below 23 reads as the client default.
+#     `.base_branch // .world_state_snapshot.origin_main_branch`. The
+#     claude-native and codex harnesses deliver it (codex joined in S3b, #3840);
+#     opencode and local refuse a non-null base before any agent runs.
+#     origin_main_branch and origin_main_sha_at_spawn stay on
+#     client.default_branch (ADR-0024). A context below 23 reads as the client
+#     default.
 CW_CONTEXT_SCHEMA_VERSION = 23
 
 # Schema version for ``.cw/context.json`` (the ticket context file, not the

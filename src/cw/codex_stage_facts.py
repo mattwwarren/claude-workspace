@@ -72,7 +72,7 @@ def resolve_plan_source(
 
 def fix_loop_facts(
     worktree: Path,
-    default_branch: str,
+    base_branch: str,
     *,
     ticket_id: str = "",
     session_id: str = "",
@@ -83,7 +83,7 @@ def fix_loop_facts(
     WARNING when the log cannot be read.
     """
     try:
-        fork = resolve_diff_base(worktree, default_branch)
+        fork = resolve_diff_base(worktree, base_branch)
     except (CwError, OSError):
         return None, []
     try:
@@ -115,7 +115,7 @@ def stamp_stage_facts(
     *,
     task: TicketTask,
     worktree: Path,
-    default_branch: str,
+    base_branch: str,
     session_id: str = "",
 ) -> AutoDevResult:
     """Return *result* with ``plan_source``, ``fork_point_sha`` and ``commits`` set.
@@ -127,7 +127,7 @@ def stamp_stage_facts(
         return result
     plan_source, note = resolve_plan_source(task, worktree)
     fork, commits = fix_loop_facts(
-        worktree, default_branch, ticket_id=task.ticket_id, session_id=session_id
+        worktree, base_branch, ticket_id=task.ticket_id, session_id=session_id
     )
     friction = list(result.friction_highlights)
     if note is not None:

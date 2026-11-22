@@ -48,6 +48,12 @@ def test_a_null_base_row_yields_nothing() -> None:
     assert _check_base_backend({_CLIENT: client}, [_row(base=None)]) == []
 
 
+def test_a_based_row_on_a_codex_lane_yields_nothing() -> None:
+    # S3b (#3840): codex delivers the row's base, so the lane is not an offender.
+    client = make_client(lane_on(CODEX_BACKEND), backend=CODEX_BACKEND, name=_CLIENT)
+    assert _check_base_backend({_CLIENT: client}, [_row()]) == []
+
+
 def test_a_based_row_on_a_claude_native_lane_yields_nothing() -> None:
     # The lane's REVIEW override is dropped by make_lane, so the client-level
     # REVIEW backend (codex by default) must be claude-native too.
@@ -57,7 +63,7 @@ def test_a_based_row_on_a_claude_native_lane_yields_nothing() -> None:
     assert _check_base_backend({_CLIENT: client}, [_row()]) == []
 
 
-@pytest.mark.parametrize("backend", [OPENCODE_BACKEND, LOCAL_BACKEND, CODEX_BACKEND])
+@pytest.mark.parametrize("backend", [OPENCODE_BACKEND, LOCAL_BACKEND])
 def test_a_based_row_on_a_non_delivering_lane_fails(backend: str) -> None:
     client = make_client(lane_on(backend), name=_CLIENT)
 
@@ -100,15 +106,17 @@ def test_a_backend_without_a_declaration_is_not_an_offender_here() -> None:
 
 
 def test_each_lane_with_an_offender_gets_its_own_result() -> None:
-    client = make_client(lane_on(OPENCODE_BACKEND), name=_CLIENT)
+    client = make_client(
+        lane_on(OPENCODE_BACKEND), backend=OPENCODE_BACKEND, name=_CLIENT
+    )
     other = _make_ticket_task(
         ticket_id="T-9",
         client=_CLIENT,
         base_branch="epic/x",
         lane="other",
     )
-    # The unknown lane falls back to the client pipeline (codex review), which
-    # does not deliver a base either.
+    # The unknown lane falls back to the client pipeline, which is opencode here
+    # (codex delivers a base since S3b, so it cannot be the offender).
     results = _check_base_backend({_CLIENT: client}, [_row(), other])
     assert sorted(r.name for r in results) == [
         _NAME,

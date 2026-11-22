@@ -540,6 +540,7 @@ def test_discarded_findings_round_is_exit_four_never_zero_or_three(
         task=harness.task,
         worktree=harness.repo,
         default_branch="main",
+        base_branch="main",
         model=None,
         reasoning_effort=None,
         wall_clock_budget_seconds=None,

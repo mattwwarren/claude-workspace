@@ -798,6 +798,7 @@ def spawn_create_impl(
     extra_args: list[str] | None = None,
     permission_mode: str | None = None,
     task: TicketTask | None = None,
+    base_branch: str | None = None,
     wall_clock_budget_seconds: int | None = None,
     lane: str | None = None,
     purpose: SessionPurpose = SessionPurpose.IMPL,
@@ -888,7 +889,11 @@ def spawn_create_impl(
         task=task,
         wall_clock_budget_seconds=wall_clock_budget_seconds,
         default_branch=client.default_branch,
-        base_branch=resolve_base_branch(client, task),
+        base_branch=(
+            base_branch
+            if base_branch is not None
+            else resolve_base_branch(client, task)
+        ),
         workspace_path=client.workspace_path,
         lane=lane,
         merge_gate_ignore_paths=client.merge_gate_ignore_paths,

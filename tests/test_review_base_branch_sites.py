@@ -6,6 +6,7 @@ resolves to it, and a null-base row is unchanged (the client default).
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -63,7 +64,6 @@ from tests._review_approval_helpers import (
 from tests._review_convergence_helpers import (
     confirmed_ledger,
     make_review_client,
-    merge_origin_commit,
     write_ledger,
 )
 from tests._review_engine_helpers import (
@@ -71,6 +71,29 @@ from tests._review_engine_helpers import (
     engine_context_payload,
     make_engine_repo,
     write_engine_context,
+)
+from tests._shared.base_branch_builders import (
+    CLIENT_DEFAULT,
+    ROW_BASE,
+    epic_merged_worktree,
+)
+from tests._shared.base_branch_builders import (
+    ENGINE_SKILL as _SKILL,
+)
+from tests._shared.base_branch_builders import (
+    ENGINE_SKILL_DIR as _SKILL_DIR,
+)
+from tests._shared.base_branch_builders import (
+    ENGINE_SKILL_MD as _SKILL_MD,
+)
+from tests._shared.base_branch_builders import (
+    ENGINE_STUB as _STUB,
+)
+from tests._shared.base_branch_builders import (
+    base_row as _row,
+)
+from tests._shared.base_branch_builders import (
+    push_epic_branch as _push_epic_branch,
 )
 from tests._shared.git_repos import (
     commit_tracked_file,
@@ -81,14 +104,6 @@ from tests._shared.session_seeding import _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-
-ROW_BASE = "epic/x"
-CLIENT_DEFAULT = "trunk"
-
-
-def _row(base: str | None) -> TicketTask:
-    return TicketTask(ticket_id="T-1", client="test-client", base_branch=base)
 
 
 # --- merge tolerance (review-move chain, S3a) -----------------------------
@@ -319,12 +334,11 @@ def epic_merge(
     branch (one commit past main) merges it, so ``head`` is a clean merge whose
     second parent is on the epic branch only.
     """
-    wt = make_git_repo_with_origin("wt")[0]
-    git_in(wt, "push", "origin", "main:refs/heads/epic/x")
-    clean = git_in(wt, "rev-parse", "HEAD")
-    merge_origin_commit(wt, tmp_path / "scratch", ROW_BASE, "epic_only.py")
+    wt, clean, head = epic_merged_worktree(
+        make_git_repo_with_origin, tmp_path / "scratch"
+    )
     write_ledger(wt, confirmed_ledger(sha=clean))
-    return wt, clean, git_in(wt, "rev-parse", "HEAD")
+    return wt, clean, head
 
 
 def test_tolerates_review_move_accepts_a_merge_of_the_row_base(
@@ -467,28 +481,10 @@ def test_the_in_lock_gate_checks_an_unswept_tip_against_the_rows_base(
 
 # --- the engine stays on the trust root (S3a, R5) --------------------------
 
-_STUB = Path(__file__).parent / "fixtures" / "review_engine_stub"
-_SKILL = "repo-review"
-_SKILL_DIR = f".claude/skills/{_SKILL}"
-_SKILL_MD = f"{_SKILL_DIR}/SKILL.md"
-_EPIC_SKILL_TEXT = "# repo-review\n\nEdited on the epic branch.\n"
-
 
 @pytest.fixture
 def engine_repo(make_git_repo: Callable[..., Path]) -> EngineRepo:
     return make_engine_repo(make_git_repo, engine_files=_STUB)
-
-
-def _push_epic_branch(repo: EngineRepo, *, edit_engine: bool) -> None:
-    """``origin/epic/x``: main, plus an edited skill and no manifest if asked."""
-    wt = repo.worktree
-    git_in(wt, "checkout", "-b", ROW_BASE, "main")
-    if edit_engine:
-        commit_tracked_file(wt, _SKILL_MD, _EPIC_SKILL_TEXT)
-        git_in(wt, "rm", "-q", f"{_SKILL_DIR}/cw-engine.json")
-        git_in(wt, "commit", "-q", "-m", "drop the manifest on the epic branch")
-    git_in(wt, "push", "-q", "origin", ROW_BASE)
-    git_in(wt, "checkout", "dev/1")
 
 
 def _engine_context(repo: EngineRepo) -> EngineContext:
@@ -612,12 +608,13 @@ def _spy_prepare(monkeypatch: pytest.MonkeyPatch, module: object) -> dict[str, o
     return seen
 
 
-def _codex_round(tmp_path: Path, **extra: object) -> None:
+def _codex_round(tmp_path: Path, *, base_branch: str = "main", **extra: object) -> None:
     codex_core.run_review(
         runner=cast("Any", None),
         task=_row(None),
         worktree=tmp_path,
         default_branch="main",
+        base_branch=base_branch,
         model=None,
         reasoning_effort=None,
         wall_clock_budget_seconds=None,
@@ -627,12 +624,15 @@ def _codex_round(tmp_path: Path, **extra: object) -> None:
     )
 
 
-def _claude_round(tmp_path: Path, **extra: object) -> None:
+def _claude_round(
+    tmp_path: Path, *, base_branch: str = "main", **extra: object
+) -> None:
     claude_core.run_claude_review(
         runner=cast("Any", None),
         task=_row(None),
         worktree=tmp_path,
         default_branch="main",
+        base_branch=base_branch,
         base_ref=None,
         model=None,
         wall_clock_budget_seconds=None,
@@ -653,16 +653,12 @@ def test_run_review_diffs_the_base_and_reads_config_from_the_default(
     assert seen["config_branch"] == "main"
 
 
-def test_run_review_without_a_base_equals_the_default_branch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    seen = _spy_prepare(monkeypatch, codex_core)
-
-    with pytest.raises(_StoppedError):
-        _codex_round(tmp_path)
-
-    assert seen["diff_base"] == "main"
-    assert seen["config_branch"] == "main"
+def test_run_review_requires_a_base_branch() -> None:
+    """S3b (#3840): base_branch is a required keyword with no default."""
+    params = inspect.signature(codex_core.run_review).parameters
+    param = params["base_branch"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is inspect.Parameter.empty
 
 
 def test_run_claude_review_diffs_the_base_and_reads_config_from_the_default(
@@ -698,16 +694,12 @@ def test_run_claude_review_base_ref_still_wins_over_the_base(
     assert seen["diff_base"] == "pinned-sha"
 
 
-def test_run_claude_review_without_a_base_equals_the_default_branch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    seen = _spy_prepare(monkeypatch, claude_core)
-
-    with pytest.raises(_StoppedError):
-        _claude_round(tmp_path)
-
-    assert seen["diff_base"] == "main"
-    assert seen["config_branch"] == "main"
+def test_run_claude_review_requires_a_base_branch() -> None:
+    """S3b (#3840): base_branch is a required keyword with no default."""
+    params = inspect.signature(claude_core.run_claude_review).parameters
+    param = params["base_branch"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is inspect.Parameter.empty
 
 
 # --- synthesis gets the base, not the trust root (S3a, R2) -----------------
@@ -766,7 +758,8 @@ def test_run_review_hands_synthesis_the_base(
         task=_row(base),
         worktree=tmp_path,
         default_branch=CLIENT_DEFAULT,
-        base_branch=base,
+        # A null row's base is the client default (resolve_base_branch).
+        base_branch=base or CLIENT_DEFAULT,
         model=None,
         reasoning_effort=None,
         wall_clock_budget_seconds=None,
@@ -802,7 +795,7 @@ def test_run_claude_review_hands_synthesis_the_base_not_the_diff_ref(
         worktree=tmp_path,
         default_branch=CLIENT_DEFAULT,
         base_ref=base_ref,
-        base_branch=base,
+        base_branch=base or CLIENT_DEFAULT,
         model=None,
         wall_clock_budget_seconds=None,
         session_id="s",

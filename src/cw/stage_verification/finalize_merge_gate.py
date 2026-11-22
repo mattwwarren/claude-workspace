@@ -69,6 +69,7 @@ class _Gate:
     script: Path | None
     ignore_paths: tuple[str, ...]
     branch_files: tuple[str, ...]
+    base_branch: str
 
 
 def _inventory_block(what: str, detail: str) -> FinalizeBlock:
@@ -109,11 +110,18 @@ def _adopted_heads(
 def _candidates(
     gate: _Gate, mine: Sequence[OpenPrHead], adopted: Sequence[OpenPrHead]
 ) -> list[OpenPrHead]:
-    """The fence's loop filter: prefix or adopted, never this branch, deduped."""
+    """The fence's loop filter: the row's base, prefix or adopted, deduped.
+
+    A PR aimed at another base never enters the gate (``finalize.open-pr-base-filter``,
+    RFC 0020 S3b). The filter applies to every row; a null row's base is the
+    client default.
+    """
     adopted_numbers = {pr.number for pr in adopted}
     seen: set[int] = set()
     picked: list[OpenPrHead] = []
     for pr in [*mine, *adopted]:
+        if pr.base_ref_name != gate.base_branch:
+            continue
         prefixed = pr.head_ref_name.startswith(f"{gate.branch_prefix}/")
         if not (prefixed or pr.number in adopted_numbers):
             continue
@@ -272,6 +280,7 @@ def run_merge_gate(
     branch_prefix: str,
     fork_point: str,
     client_name: str,
+    base_branch: str,
 ) -> MergeGateResult:
     """Run Step 4a; see the module docstring for the outcomes."""
     if not enabled:
@@ -290,7 +299,13 @@ def run_merge_gate(
     if isinstance(adopted, FinalizeBlock):
         return MergeGateResult(block=adopted)
     gate = _Gate(
-        worktree, branch, branch_prefix, script, tuple(ignore_paths), branch_files
+        worktree,
+        branch,
+        branch_prefix,
+        script,
+        tuple(ignore_paths),
+        branch_files,
+        base_branch,
     )
     with tempfile.TemporaryDirectory(prefix="cw-mergegate-") as tmp:
         conflicts = [

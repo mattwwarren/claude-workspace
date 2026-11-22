@@ -176,21 +176,21 @@ def bind_live_pr(
 
 
 def probe_default(
-    worktree: Path, *, default_branch: str, pr_exists: bool
+    worktree: Path, *, base_branch: str, pr_exists: bool
 ) -> tuple[FinalizeBlock | None, tuple[str, ...]]:
     """Would merging ``origin/<default>`` conflict? ``(block, friction)``.
 
     Runs before the ahead-push, so a conflicting branch is never pushed. An
     unavailable fetch or probe is friction and the stage continues.
     """
-    probe = probe_default_branch(worktree, default_branch=default_branch, repair=True)
+    probe = probe_default_branch(worktree, base_branch=base_branch, repair=True)
     if not probe.needs_merge:
         return None, probe.friction
     files = redact_and_cap(", ".join(probe.conflicted_files))
     where = "the open PR" if pr_exists else "this branch (no PR exists yet)"
     return FinalizeBlock(
         MERGE_CONFLICT_POST_PUSH,
-        f"merging origin/{default_branch} into {where} conflicts in {files}; "
+        f"merging origin/{base_branch} into {where} conflicts in {files}; "
         "the codex FINALIZE lane does not resolve conflicts (#3542). Merge or "
         "rebase the branch, push, then requeue finalize.",
         retry_eligible=pr_exists,

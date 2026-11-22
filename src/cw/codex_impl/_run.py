@@ -81,7 +81,7 @@ from cw.dev_queue import _PRE_DISPATCH_TRACKER_MCP_REASON
 from cw.local_runner import GitFacts, git_facts
 from cw.models import CODEX_BACKEND, OrchestratorEventType
 from cw.models.bindings import Harness
-from cw.models.branch import resolve_feature_branch
+from cw.models.branch import resolve_base_branch, resolve_feature_branch
 from cw.models.enums import StageIdentifier
 from cw.plan_files import resolve_review_scope_tier
 from cw.pr_hydrate import _resolve_repo_slug
@@ -204,6 +204,12 @@ class _Run:
     def repair(self) -> bool:
         """Whether the row carries review feedback (a repair entry)."""
         return self.task.review_feedback is not None
+
+    # Both codex executors carry this; their _Run classes differ only in harness.
+    @property
+    def base_branch(self) -> str:
+        """The row's merge target: its base, else the client default (S3b)."""
+        return resolve_base_branch(self.client, self.task)
 
     # -- events -------------------------------------------------------------
 
@@ -393,12 +399,14 @@ def _read_plan(worktree: Path) -> str | None:
         return None
 
 
-def _merge_note(files: tuple[str, ...]) -> str | None:
+def _merge_note(files: tuple[str, ...], row_base: str | None) -> str | None:
+    """The merge-conflict note; names ``origin/<base>`` only for a based row."""
     if not files:
         return None
     listing = "\n".join(f"- {path}" for path in files)
+    target = f"origin/{row_base}" if row_base is not None else "origin's default branch"
     return (
-        "origin's default branch conflicts with this branch in:\n"
+        f"{target} conflicts with this branch in:\n"
         f"{listing}\n"
         "cw has started the merge and left the conflicts in the worktree. "
         "Resolve them (edit the files; do not commit, stage or abort)."
@@ -411,14 +419,18 @@ def _guards(run: _Run) -> tuple[str | None, GitFacts] | ImplBlock:
     block = check_plan_present(plan_text, run.task)
     if block is None:
         expected = resolve_feature_branch(run.task.ticket_id, run.client, run.task)
+        # stays on client.default_branch: the default-branch refusal is the trust root.
         block = check_on_branch(
-            run.worktree, expected, default_branch=run.client.default_branch
+            run.worktree,
+            expected,
+            default_branch=run.client.default_branch,
+            base_branch=run.base_branch,
         )
     if block is None:
         block = verify_review_feedback(run.task, run.worktree)
     if block is not None:
         return block
-    facts = git_facts(run.worktree, run.client.default_branch)
+    facts = git_facts(run.worktree, run.base_branch)
     block = check_existing_branch_work(facts, run.task, run.worktree)
     return block if block is not None else (plan_text, facts)
 
@@ -441,7 +453,7 @@ def _prepare(run: _Run) -> _Pre | ImplBlock:
         return guarded
     plan_text, facts = guarded
     probe = probe_default_branch(
-        run.worktree, default_branch=run.client.default_branch, repair=run.repair
+        run.worktree, base_branch=run.base_branch, repair=run.repair
     )
     if probe.block is not None:
         return probe.block
@@ -471,7 +483,10 @@ def _prepare(run: _Run) -> _Pre | ImplBlock:
     else:
         allowed = fix_scope_allowlist(plan_text, approved)
     prompt = run.prompt(
-        snapshot, plan_text, allowed, _merge_note(probe.conflicted_files)
+        snapshot,
+        plan_text,
+        allowed,
+        _merge_note(probe.conflicted_files, run.task.base_branch),
     )
     if isinstance(prompt, ImplBlock):
         return prompt
@@ -496,9 +511,7 @@ def _start(run: _Run, pre: _Pre) -> _Flow | ImplBlock:
         return dirty_start_block(baseline)
     merge = None
     if pre.needs_merge:
-        started = merge_default_on_conflict(
-            run.worktree, default_branch=run.client.default_branch
-        )
+        started = merge_default_on_conflict(run.worktree, base_branch=run.base_branch)
         if isinstance(started, ImplBlock):
             return started
         merge = started
@@ -567,6 +580,7 @@ def _fence_blocks(run: _Run, flow: _Flow, touched: set[str]) -> ImplBlock | None
                 "no-plan repair entry has no resolvable scope tier for its "
                 "sensitive-path check",
             )
+        # stays on client.default_branch: the sensitive-files registry is the root.
         block = no_plan_sensitive_block(
             run.worktree,
             touched=touched,
@@ -583,7 +597,7 @@ def _fence_blocks(run: _Run, flow: _Flow, touched: set[str]) -> ImplBlock | None
         allowed = flow.pre.allowed | _merge_files(flow)
     breach = check_fix_fence(
         run.worktree,
-        base_branch=run.client.default_branch,
+        base_branch=run.base_branch,
         allowed_files=allowed,
         finding_files=frozenset(),
         cycle=_CYCLE,
@@ -672,7 +686,7 @@ def _push(run: _Run) -> ImplBlock | None:
 
 def _stamp_final(run: _Run, flow: _Flow, payload: dict[str, Any]) -> AutoDevResult:
     """The final stamp with the real post-push git facts, then the complete event."""
-    facts = git_facts(run.worktree, run.client.default_branch)
+    facts = git_facts(run.worktree, run.base_branch)
     plan_source, note = resolve_plan_source(run.task, run.worktree)
     friction = [*flow.pre.friction, *flow.tokens, *([note] if note else [])]
     result = stamp_impl_result(

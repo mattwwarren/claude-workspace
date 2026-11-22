@@ -195,7 +195,7 @@ class TestProbeDefaultBranch:
         self, repo: Path, tmp_path: Path
     ) -> None:
         git_in(repo, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
-        outcome = probe_default_branch(repo, default_branch="main", repair=True)
+        outcome = probe_default_branch(repo, base_branch="main", repair=True)
         assert outcome.block is None
         assert outcome.needs_merge is False
         assert len(outcome.friction) == 1
@@ -204,14 +204,14 @@ class TestProbeDefaultBranch:
     def test_a_fetch_that_cannot_run_is_friction_and_no_merge(self, repo: Path) -> None:
         timeout = subprocess.TimeoutExpired(cmd="fetch", timeout=1)
         with patch("cw.stage_verification.impl_feedback.run_git", side_effect=timeout):
-            outcome = probe_default_branch(repo, default_branch="main", repair=True)
+            outcome = probe_default_branch(repo, base_branch="main", repair=True)
         assert outcome.needs_merge is False
         assert outcome.friction[0].startswith("merge_probe_unavailable")
         assert "did not run" in outcome.friction[0]
 
     @pytest.mark.parametrize("repair", [False, True])
     def test_up_to_date_does_not_merge(self, repo: Path, repair: bool) -> None:
-        outcome = probe_default_branch(repo, default_branch="main", repair=repair)
+        outcome = probe_default_branch(repo, base_branch="main", repair=repair)
         assert (outcome.block, outcome.friction, outcome.needs_merge) == (
             None,
             (),
@@ -225,7 +225,7 @@ class TestProbeDefaultBranch:
         commit_tracked_file(repo, "mine.py", "mine\n")
         git_in(repo, "push", "origin", _BRANCH)
         _origin_default_moves(repo, tmp_path, "theirs.py")
-        outcome = probe_default_branch(repo, default_branch="main", repair=repair)
+        outcome = probe_default_branch(repo, base_branch="main", repair=repair)
         assert (outcome.block, outcome.friction, outcome.needs_merge) == (
             None,
             (),
@@ -238,7 +238,7 @@ class TestProbeDefaultBranch:
 
     def test_conflict_on_fresh_row_blocks(self, repo: Path, tmp_path: Path) -> None:
         self._conflict(repo, tmp_path)
-        outcome = probe_default_branch(repo, default_branch="main", repair=False)
+        outcome = probe_default_branch(repo, base_branch="main", repair=False)
         assert outcome.block is not None
         assert outcome.block.reason == IMPL_FAILED
         assert outcome.block.details.startswith("merge_conflict_with_default_branch")
@@ -249,13 +249,13 @@ class TestProbeDefaultBranch:
         self, repo: Path, tmp_path: Path
     ) -> None:
         self._conflict(repo, tmp_path)
-        outcome = probe_default_branch(repo, default_branch="main", repair=True)
+        outcome = probe_default_branch(repo, base_branch="main", repair=True)
         assert outcome.block is None
         assert outcome.needs_merge is True
 
     def test_probe_is_read_only(self, repo: Path, tmp_path: Path) -> None:
         self._conflict(repo, tmp_path)
-        probe_default_branch(repo, default_branch="main", repair=True)
+        probe_default_branch(repo, base_branch="main", repair=True)
         assert git_in(repo, "status", "--porcelain") == ""
 
     def test_probe_unavailable_after_a_good_fetch_is_friction_and_continues(
@@ -266,7 +266,7 @@ class TestProbeDefaultBranch:
             "cw.stage_verification.impl_feedback.probe_default_merge",
             return_value=unavailable,
         ):
-            outcome = probe_default_branch(repo, default_branch="main", repair=True)
+            outcome = probe_default_branch(repo, base_branch="main", repair=True)
         assert outcome.block is None
         assert outcome.needs_merge is False
         assert outcome.friction == ("merge_probe_unavailable: merge-tree too old",)
@@ -276,7 +276,7 @@ class TestProbeDefaultBranch:
     ) -> None:
         git_in(repo, "update-ref", "-d", "refs/remotes/origin/main")
         git_in(repo, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
-        outcome = probe_default_branch(repo, default_branch="main", repair=True)
+        outcome = probe_default_branch(repo, base_branch="main", repair=True)
         assert outcome.block is None
         assert outcome.needs_merge is False
         assert outcome.friction
@@ -290,9 +290,9 @@ class TestMergeDefaultOnConflict:
         commit_tracked_file(repo, "clash.py", "mine\n")
         _origin_default_moves(repo, tmp_path, "clash.py", "theirs\n")
         _origin_default_moves(repo, tmp_path, "other.py", "other\n")
-        probe = probe_default_branch(repo, default_branch="main", repair=True)
+        probe = probe_default_branch(repo, base_branch="main", repair=True)
         assert probe.needs_merge
-        outcome = merge_default_on_conflict(repo, default_branch="main")
+        outcome = merge_default_on_conflict(repo, base_branch="main")
         assert not isinstance(outcome, ImplBlock)
         assert outcome.merge_files == frozenset({"clash.py", "other.py"})
         assert (repo / ".git" / "MERGE_HEAD").is_file()
@@ -306,7 +306,7 @@ class TestMergeDefaultOnConflict:
         with patch(
             "cw.stage_verification.impl_feedback.merge_tree", return_value=unavailable
         ):
-            outcome = merge_default_on_conflict(repo, default_branch="main")
+            outcome = merge_default_on_conflict(repo, base_branch="main")
         assert isinstance(outcome, ImplBlock)
         assert "too old" in outcome.details
         assert not (repo / ".git" / "MERGE_HEAD").exists()
@@ -317,11 +317,11 @@ class TestMergeDefaultOnConflict:
         _origin_default_moves(repo, tmp_path, "clash.py", "theirs\n")
         git_in(repo, "fetch", "origin", "main")
         (repo / "clash.py").write_text("untracked local\n", encoding="utf-8")
-        outcome = merge_default_on_conflict(repo, default_branch="main")
+        outcome = merge_default_on_conflict(repo, base_branch="main")
         assert isinstance(outcome, ImplBlock)
         assert outcome.details.startswith("git merge origin/main failed")
 
     def test_a_failed_merge_is_an_impl_block(self, repo: Path) -> None:
-        outcome = merge_default_on_conflict(repo, default_branch="no-such-branch")
+        outcome = merge_default_on_conflict(repo, base_branch="no-such-branch")
         assert isinstance(outcome, ImplBlock)
         assert outcome.reason == IMPL_FAILED

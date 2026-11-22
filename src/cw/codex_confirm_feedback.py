@@ -35,7 +35,7 @@ from cw.codex_review import (
     CODEX_MUST_FIX_FINDINGS,
 )
 from cw.codex_review._const import FIX_CYCLE_FLOOR_SECONDS
-from cw.models import CODEX_BACKEND
+from cw.models import CODEX_BACKEND, resolve_base_branch
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
     load_ledger,
@@ -140,7 +140,7 @@ def _read_feedback(
         ledger,
         task=task,
         head=capture_head_sha(worktree),
-        fork_point=resolve_diff_base(worktree, client.default_branch),
+        fork_point=resolve_diff_base(worktree, resolve_base_branch(client, task)),
         after_round=after_round,
     )
     if round_number is None:

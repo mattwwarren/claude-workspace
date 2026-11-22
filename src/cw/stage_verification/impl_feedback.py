@@ -140,7 +140,7 @@ class ProbeOutcome:
 class MergeOutcome:
     """A started conflict merge: the merge-side files and the conflicted tree.
 
-    ``merge_files`` are the paths the default branch changed since the merge
+    ``merge_files`` are the paths the row's base changed since the merge
     base (cw's merge brought them in, so the turn did not edit them);
     ``growth_tree`` is the conflicted merge-tree oid the growth guard measures
     the turn against.
@@ -150,39 +150,37 @@ class MergeOutcome:
     growth_tree: str
 
 
-def _fetch_default(worktree: Path, default_branch: str) -> str | None:
-    """``None`` when ``origin/<default>`` was fetched, else why not."""
+def _fetch_default(worktree: Path, base_branch: str) -> str | None:
+    """``None`` when ``origin/<base_branch>`` was fetched, else why not."""
     try:
         fetched = run_git(
-            ["fetch", "origin", default_branch],
+            ["fetch", "origin", base_branch],
             cwd=worktree,
             capture_output=True,
             timeout=LOCAL_GIT_TIMEOUT_SECONDS,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
-        return (
-            f"git fetch origin {default_branch} did not run: {redact_and_cap(str(exc))}"
-        )
+        return f"git fetch origin {base_branch} did not run: {redact_and_cap(str(exc))}"
     if fetched.returncode != 0:
         tail = redact_and_cap((fetched.stderr or "").strip()[-_ERROR_TAIL_CHARS:])
-        return f"git fetch origin {default_branch} failed: {tail}"
+        return f"git fetch origin {base_branch} failed: {tail}"
     return None
 
 
 def probe_default_branch(
-    worktree: Path, *, default_branch: str, repair: bool
+    worktree: Path, *, base_branch: str, repair: bool
 ) -> ProbeOutcome:
-    """Would merging ``origin/<default>`` conflict? Read-only; fetches first.
+    """Would merging ``origin/<base_branch>`` conflict? Read-only; fetches first.
 
     A failed fetch or an unavailable probe is friction
     (``merge_probe_unavailable: ...``) and no merge. A conflict on a fresh row
     blocks ``impl_failed`` (``merge_conflict_with_default_branch``); on a repair
     row it sets ``needs_merge``. It never mutates the tree.
     """
-    failed = _fetch_default(worktree, default_branch)
+    failed = _fetch_default(worktree, base_branch)
     if failed is not None:
         return ProbeOutcome(friction=(f"{PROBE_UNAVAILABLE}: {failed}",))
-    probe = probe_default_merge(worktree, default_branch)
+    probe = probe_default_merge(worktree, base_branch)
     if probe.state == "unavailable":
         return ProbeOutcome(
             friction=(f"{PROBE_UNAVAILABLE}: {redact_and_cap(probe.detail)}",)
@@ -195,7 +193,7 @@ def probe_default_branch(
     return ProbeOutcome(
         block=ImplBlock(
             IMPL_FAILED,
-            f"{CONFLICT_PREFIX}: merging origin/{default_branch} into this branch "
+            f"{CONFLICT_PREFIX}: merging origin/{base_branch} into this branch "
             f"conflicts in {files}; a fresh IMPL row does not resolve default-"
             "branch conflicts. Rebase or merge the branch, then requeue.",
         )
@@ -203,17 +201,17 @@ def probe_default_branch(
 
 
 def merge_default_on_conflict(
-    worktree: Path, *, default_branch: str
+    worktree: Path, *, base_branch: str
 ) -> MergeOutcome | ImplBlock:
-    """Start ``git merge --no-commit --no-ff origin/<default>`` leaving conflicts.
+    """Start ``git merge --no-commit --no-ff origin/<base_branch>`` leaving conflicts.
 
     Call only after the clean-start baseline is captured and only when
     :func:`probe_default_branch` set ``needs_merge``. Returns the merge-side
-    file set (``git diff --name-only HEAD...origin/<default>``) and the
+    file set (``git diff --name-only HEAD...origin/<base_branch>``) and the
     conflicted merge-tree oid, or an ``impl_failed`` block when git cannot
     start the merge.
     """
-    ref = f"origin/{default_branch}"
+    ref = f"origin/{base_branch}"
     tree = merge_tree(worktree, "HEAD", ref)
     if tree.tree is None:
         return ImplBlock(

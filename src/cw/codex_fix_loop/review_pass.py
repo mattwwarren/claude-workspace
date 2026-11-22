@@ -60,6 +60,7 @@ def _rereview(
     task: TicketTask,
     worktree: Path,
     default_branch: str,
+    base_branch: str,
     model: str | None,
     reasoning_effort: str | None,
     remaining: float | None,
@@ -114,9 +115,9 @@ def _rereview(
                 runner=runner,
                 task=task,
                 worktree=worktree,
-                # S3a: the codex lane has no row base yet; base == config here.
-                # S3b (#3840) delivers the row's base to this loop.
-                base_branch=default_branch,
+                # The row's base is the merge target; the client default is the
+                # trust root the review configuration reads from (S3b, #3840).
+                base_branch=base_branch,
                 config_branch=default_branch,
                 model=model,
                 reasoning_effort=reasoning_effort,
@@ -136,7 +137,7 @@ def _rereview(
     prepared = _prepare_review_pass(
         task,
         worktree,
-        default_branch,
+        base_branch,
         config_branch=default_branch,
         runner=runner,
         session_id=session_id,
@@ -168,7 +169,9 @@ def _rereview(
         diff=prepared.delta_diff if prepared.delta_diff is not None else prepared.diff,
         reviewed_sha=prepared.reviewed_sha,
         session_id=session_id,
-        default_branch=default_branch,
+        # A merge-target carrier under a legacy kwarg name: _synthesis.py feeds
+        # it to compute_branch_diff_scope, so it gets the row's base (S3b).
+        default_branch=base_branch,
         # Literal True: _rereview is only ever called from inside the
         # already-entered fix loop (run_review_with_fix_loop's for-loop).
         fix_loop_enabled=True,
@@ -281,6 +284,7 @@ def _review_cycle_zero(
     task: TicketTask,
     worktree: Path,
     default_branch: str,
+    base_branch: str,
     model: str | None,
     reasoning_effort: str | None,
     wall_clock_budget_seconds: int | None,
@@ -309,9 +313,9 @@ def _review_cycle_zero(
                 runner=runner,
                 task=task,
                 worktree=worktree,
-                # S3a: the codex lane has no row base yet; base == config here.
-                # S3b (#3840) delivers the row's base to this loop.
-                base_branch=default_branch,
+                # The row's base is the merge target; the client default is the
+                # trust root the review configuration reads from (S3b, #3840).
+                base_branch=base_branch,
                 config_branch=default_branch,
                 model=model,
                 reasoning_effort=reasoning_effort,
@@ -335,6 +339,7 @@ def _review_cycle_zero(
             task=task,
             worktree=worktree,
             default_branch=default_branch,
+            base_branch=base_branch,
             model=model,
             reasoning_effort=reasoning_effort,
             wall_clock_budget_seconds=wall_clock_budget_seconds,
