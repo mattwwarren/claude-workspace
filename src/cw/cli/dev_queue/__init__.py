@@ -22,7 +22,9 @@ below is what registers those commands. Submodules:
   clearing, ``--post-marker``, ``--scope-drift``), split out of ``crud``
   (#2337).
 - ``crud`` — queue mutation commands (add, move, requeue, unblock, remove,
-  cancel, clear, prune).
+  cancel).
+- ``prune`` — the retention commands (clear, prune), split out of ``crud`` to
+  keep it under the module-size ceiling.
 - ``fix_handoff`` — ``record-fix-handoff``, run by the review stage's fix loop
   to record the fix-agent handoff on the row from ``cw-context.json`` (#2651).
 - ``plan_decisions`` — ``record-plan-decisions``, run by the plan stage to
@@ -57,6 +59,7 @@ from cw.cli.dev_queue import (  # noqa: F401  (command registration side effects
     hold,
     plan_decisions,
     prerequisite,
+    prune,
     recover,
     resolve,
     run,

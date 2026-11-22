@@ -3,7 +3,6 @@ clear, prune. See ``approve.py`` for the ``approve`` command."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -14,22 +13,16 @@ from cw.cli._base import handle_errors
 from cw.cli.routed_orphan_close import close_routed_result_sessions_for_ticket
 from cw.config import load_orchestrator_config, load_state
 from cw.dev_queue import (
-    DEFAULT_PRUNE_OLDER_THAN_DAYS,
-    _prune_age_basis,
     add_ticket,
     cancel_ticket,
     classify_requeue_live_session_error,
-    clear_tickets,
     drain_held_tickets,
     is_pending_requeue_noop,
     move_ticket,
     precheck_requeue,
-    prune_tickets,
     remove_ticket,
     requeue_ticket,
     resolve_client,
-    select_clearable_tickets,
-    select_prunable_tickets,
     unblock_ticket,
 )
 from cw.dev_queue.crud import build_queued_task, emit_ticket_enqueued
@@ -42,13 +35,13 @@ from cw.models import (
     QueueItemStatus,
     SessionOrigin,
     Stage,
-    TicketTask,
 )
 from cw.models.review_feedback import ReviewFeedback
 from cw.native_daemon import get_native_daemon_client
 from cw.ticket_view import ViewSources
 
 from ._adopt import adopt_requeue_recheck, run_adopt
+from ._epic_base import EnqueueBase, validate_base_option
 from ._group import dev_queue
 from ._requeue_echo import echo_pending_noop, echo_requeue_outcome
 from ._settle import (
@@ -185,6 +178,19 @@ def _report_partial_progress(
         " number and current head SHA."
     ),
 )
+@click.option(
+    "--base",
+    "base",
+    default=None,
+    callback=validate_base_option,
+    help=(
+        "Merge target for this row (default: the client's default branch)."
+        " The branch must already exist on origin; cw does not create it."
+        " Refused when it equals the client's default branch, or when it is"
+        " over the client's epic.max_diff_lines ceiling (RFC 0020)."
+        " Rows do not inherit a base from sibling rows."
+    ),
+)
 @handle_errors
 def dev_queue_add(
     tickets: tuple[str, ...],
@@ -197,6 +203,7 @@ def dev_queue_add(
     stage_override: str | None,
     adopt_pr: int | None,
     review_feedback_file: Path | None,
+    base: str | None,
 ) -> None:
     """Enqueue one or more tickets for dispatch."""
     review_feedback: ReviewFeedback | None = None
@@ -221,6 +228,7 @@ def dev_queue_add(
         Stage(stage_override) if stage_override is not None else DEFAULT_STAGE
     )
     sources = ViewSources()
+    gate = EnqueueBase(base)
     if adopt_pr is not None:
         run_adopt(
             tickets,
@@ -234,10 +242,12 @@ def dev_queue_add(
             lane=lane_name,
             sources=sources,
             review_feedback=review_feedback,
+            base=base,
         )
         return
     for index, ticket_id in enumerate(tickets):
         resolved = resolve_client(ticket_id, config, client)
+        gate.verify(resolved)
         try:
             task = build_queued_task(
                 ticket_id,
@@ -249,6 +259,7 @@ def dev_queue_add(
                 signoff=signoff,
                 hold_finalize=hold_finalize_value,
                 review_feedback=review_feedback,
+                base_branch=base,
             )
         except ValidationError as exc:
             msg = f"Invalid ticket '{ticket_id}': {exc.errors()[0]['msg']}"
@@ -275,13 +286,14 @@ def dev_queue_add(
                 " (pending, running, completed, or cancelled) or parked"
                 " awaiting the operator — a parked row is released with"
                 " `cw dev-queue requeue` or `cw dev-queue approve`, never"
-                " by re-adding (#1653).",
+                " by re-adding (#1653)." + gate.skipped_suffix(),
                 err=True,
             )
             echo_resulting_row(ticket_id, resolved, sources=sources)
             continue
         emit_ticket_enqueued(task)
         click.echo(f"Enqueued {ticket_id} -> {resolved} (priority={priority})")
+        gate.note_siblings(ticket_id, resolved)
         echo_resulting_row(ticket_id, resolved, sources=sources)
 
 
@@ -788,268 +800,3 @@ def dev_queue_cancel(tickets: tuple[str, ...], client: str) -> None:
                     daemon.stop(sess.surface_ref)
         click.echo(f"Cancelled {ticket} in {client} dev-queue.")
         echo_resulting_row(ticket, client, sources=sources)
-
-
-@dev_queue.command(name="clear")
-@click.option("--client", "-c", "client", required=True, help="Client name")
-@click.option(
-    "--status",
-    "-s",
-    "status_filter",
-    type=click.Choice([e.value for e in QueueItemStatus]),
-    default=None,
-    help=(
-        "Optional status filter. Without it, RUNNING, BLOCKED_ON_USER, and"
-        " AWAITING_OPERATOR_SIGNOFF rows are excluded from the sweep -- name"
-        " one of them here explicitly to delete it."
-    ),
-)
-@click.option(
-    "--dry-run",
-    "dry_run",
-    is_flag=True,
-    default=False,
-    help="Report what would be cleared without deleting anything. Never mutates state.",
-)
-@click.option(
-    "--confirm",
-    "confirm",
-    is_flag=True,
-    default=False,
-    help=(
-        "Actually delete the matched rows. Without --confirm (and without"
-        " --dry-run) the command only previews; --dry-run always wins if"
-        " both are given."
-    ),
-)
-@handle_errors
-def dev_queue_clear(
-    client: str,
-    status_filter: str | None,
-    dry_run: bool,
-    confirm: bool,
-) -> None:
-    """Delete dev-queue tasks for a client -- destructive; previews by default.
-
-    Pass --confirm to actually remove the matched rows; --dry-run always
-    previews and wins if both are given. With no --status, RUNNING,
-    BLOCKED_ON_USER, and AWAITING_OPERATOR_SIGNOFF rows are excluded from
-    the sweep -- naming one of them explicitly via --status targets it for
-    deletion instead of skipping it. Takes the same dev-queue file lock the
-    dispatch loop takes and computes the deleted set exactly once per
-    invocation, so a --confirm run can never silently grow past what it
-    reports (#2003).
-    """
-    status_enum = QueueItemStatus(status_filter) if status_filter else None
-
-    if dry_run or not confirm:
-        candidates = select_clearable_tickets(client, status=status_enum)
-        _print_task_summary(candidates)
-        if not candidates:
-            click.echo("Nothing to clear.")
-        elif dry_run:
-            click.echo(
-                f"{len(candidates)} task(s) would be cleared"
-                " (dry-run; nothing was deleted)."
-            )
-        else:
-            click.echo(
-                f"{len(candidates)} task(s) would be cleared."
-                " Pass --confirm to actually delete them."
-            )
-        return
-
-    # Why clear_tickets alone, with no preceding select_clearable_tickets
-    # call: the library derives the candidate set exactly once under the
-    # dev-queue lock and deletes precisely that set, so rendering its return
-    # value reports exactly what was removed. Previewing first would
-    # re-derive under a second, later lock -- a TOCTOU window in which a
-    # concurrent dispatch tick could grow the deleted set past what was
-    # shown. Mirrors dev_queue_prune's identical precedent.
-    # bounded=True (#2501): operator --confirm path; nothing precedes the lock.
-    removed = clear_tickets(client, status=status_enum, bounded=True)
-    _print_task_summary(removed)
-    click.echo(f"Cleared {len(removed)} dev-queue task(s) for {client}.")
-
-
-def _print_task_summary(tasks: list[TicketTask]) -> None:
-    """Render TICKET_ID/CLIENT/STATUS/AGE_DAYS columns for *tasks*.
-
-    Shared by `prune` (#382) and `clear` (#2003). Mirrors ``tasks.py``'s
-    ``_print_tasks_human`` column-table convention; module-private to this
-    file since that helper is itself module-private. AGE_DAYS uses
-    ``_prune_age_basis`` -- the same age basis ``_select_prune_candidates``
-    filters on -- so a row's displayed age cannot disagree with the reason
-    it was selected for `prune`; for `clear` the column is informational
-    only (clear does not filter on age).
-    """
-    if not tasks:
-        return
-    headers = ["TICKET_ID", "CLIENT", "STATUS", "AGE_DAYS"]
-    col_widths = [12, 16, 26, 8]
-    header = "  ".join(f"{h:<{w}}" for h, w in zip(headers, col_widths, strict=True))
-    click.echo(header)
-    click.echo("-" * len(header))
-    now = datetime.now(UTC)
-    for t in tasks:
-        age_days = (now - _prune_age_basis(t)).days
-        row = [
-            t.ticket_id[:12],
-            t.client[:16],
-            t.status.value[:26],
-            str(age_days)[:8],
-        ]
-        click.echo("  ".join(f"{v:<{w}}" for v, w in zip(row, col_widths, strict=True)))
-
-
-def _parse_prune_statuses(status_filter: str) -> frozenset[QueueItemStatus]:
-    """Parse ``--status`` as a comma-separated status list (#382).
-
-    Mirrors ``session_wait``'s ``--until`` precedent: a plain ``str`` option
-    parsed into enum members, with ``ValueError`` converted to
-    ``click.BadParameter`` -- not a ``click.Choice``, which cannot express a
-    comma-separated multi-value.
-    """
-    try:
-        statuses = frozenset(
-            QueueItemStatus(s.strip()) for s in status_filter.split(",") if s.strip()
-        )
-    except ValueError as exc:
-        raise click.BadParameter(str(exc), param_hint="--status") from exc
-    if not statuses:
-        msg = "must name at least one status"
-        raise click.BadParameter(msg, param_hint="--status")
-    return statuses
-
-
-@dev_queue.command(name="prune")
-@click.option(
-    "--client",
-    "-c",
-    "client",
-    default=None,
-    help=(
-        "Client to prune. Required unless --all-clients is given -- prune"
-        " never scopes across every client by omission alone."
-    ),
-)
-@click.option(
-    "--all-clients",
-    "all_clients",
-    is_flag=True,
-    default=False,
-    help=(
-        "Prune matching rows across every configured client in one"
-        " invocation. The only sanctioned way to cross the tenant boundary"
-        " with this command; incompatible with --status pending."
-    ),
-)
-@click.option(
-    "--older-than",
-    "older_than_days",
-    type=int,
-    default=DEFAULT_PRUNE_OLDER_THAN_DAYS,
-    show_default=True,
-    help=(
-        "Only prune rows whose completed_at (or created_at, for rows with"
-        " no completed_at -- e.g. CANCELLED) is strictly older than this"
-        " many days."
-    ),
-)
-@click.option(
-    "--status",
-    "-s",
-    "status_filter",
-    default="completed",
-    show_default=True,
-    help=(
-        "Comma-separated status(es) to prune: completed, failed, cancelled,"
-        " or pending. `pending` is only ever prunable when named here"
-        " explicitly together with a single --client -- never by default,"
-        " never via --all-clients. running, blocked_on_user, and"
-        " awaiting_operator_signoff are never eligible at any age."
-    ),
-)
-@click.option(
-    "--dry-run",
-    "dry_run",
-    is_flag=True,
-    default=False,
-    help="Report what would be pruned without deleting anything. Never mutates state.",
-)
-@click.option(
-    "--confirm",
-    "confirm",
-    is_flag=True,
-    default=False,
-    help=(
-        "Actually delete the matched rows. Without --confirm (and without"
-        " --dry-run) the command only previews; --dry-run always wins if"
-        " both are given."
-    ),
-)
-@handle_errors
-def dev_queue_prune(
-    client: str | None,
-    all_clients: bool,
-    older_than_days: int,
-    status_filter: str,
-    dry_run: bool,
-    confirm: bool,
-) -> None:
-    """Delete stale terminal dev-queue rows past --older-than days.
-
-    Defaults to COMPLETED rows only, 90 days old, and previews without
-    deleting anything -- pass --confirm to actually remove the matched
-    rows. RUNNING and BLOCKED_ON_USER rows are never touched at any age
-    (live or operator-parked work); PENDING rows are prunable only when
-    --status pending is named explicitly together with a single --client.
-    Takes the same dev-queue file lock the dispatch loop takes and computes
-    the deleted set exactly once per invocation, so a --confirm run can
-    never silently grow past what it reports (#382).
-    """
-    # Why not click's own `required=True` (the `clear`/`drain` precedent):
-    # --client and --all-clients are alternatives, so requiring the option
-    # outright would forbid the escape hatch. This reproduces the same
-    # guarantee -- you cannot silently omit the tenant boundary -- as a
-    # UsageError raised before any library call runs.
-    if client is None and not all_clients:
-        msg = "Must pass either --client or --all-clients."
-        raise click.UsageError(msg)
-    if client is not None and all_clients:
-        msg = "--client and --all-clients are mutually exclusive."
-        raise click.UsageError(msg)
-
-    statuses = _parse_prune_statuses(status_filter)
-
-    if dry_run or not confirm:
-        candidates = select_prunable_tickets(
-            statuses, older_than_days, client, all_clients=all_clients
-        )
-        _print_task_summary(candidates)
-        if not candidates:
-            click.echo("Nothing to prune.")
-        elif dry_run:
-            click.echo(
-                f"{len(candidates)} task(s) would be pruned"
-                " (dry-run; nothing was deleted)."
-            )
-        else:
-            click.echo(
-                f"{len(candidates)} task(s) would be pruned."
-                " Pass --confirm to actually delete them."
-            )
-        return
-
-    # Why prune_tickets alone, with no preceding select_prunable_tickets call:
-    # the library derives the candidate set exactly once under the dev-queue
-    # lock and deletes precisely that set, so rendering its return value
-    # reports exactly what was removed. Previewing first would re-derive under
-    # a second, later lock -- a TOCTOU window in which a concurrent dispatch
-    # tick could grow the deleted set past what was shown.
-    # bounded=True (#2501): operator --confirm path; nothing precedes the lock.
-    removed = prune_tickets(
-        statuses, older_than_days, client, all_clients=all_clients, bounded=True
-    )
-    _print_task_summary(removed)
-    click.echo(f"Pruned {len(removed)} dev-queue task(s).")

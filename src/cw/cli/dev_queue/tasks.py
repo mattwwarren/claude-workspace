@@ -233,6 +233,15 @@ def _print_tasks_human(
 )
 @click.option("--client", "-c", default=None, help="Filter by client name.")
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON array.")
+@click.option(
+    "--base",
+    "base",
+    default=None,
+    help=(
+        "Filter by stored base_branch (exact match). A null-base row is never"
+        " listed, so --base <default-branch> prints 'No tasks found.'"
+    ),
+)
 @handle_errors
 def dev_queue_tasks(
     ticket_arg: str | None,
@@ -240,6 +249,7 @@ def dev_queue_tasks(
     status: str | None,
     client: str | None,
     output_json: bool,
+    base: str | None,
 ) -> None:
     """List dev-queue tasks with typed field output.
 
@@ -283,6 +293,9 @@ def dev_queue_tasks(
 
     if client is not None:
         tasks = [t for t in tasks if t.client == client]
+
+    if base is not None:
+        tasks = [t for t in tasks if t.base_branch == base]
 
     if output_json:
         click.echo(json.dumps([_task_to_dict(t) for t in tasks]))

@@ -2023,6 +2023,27 @@
      "title": "Bindings",
      "type": "object"
     },
+    "EpicConfig": {
+     "additionalProperties": false,
+     "description": "Per-client epic size ceiling (#3783, RFC 0020 B1, D-5).\n\n``max_diff_lines`` caps the changed-line count of an epic base measured\nagainst the client's default branch (``merge_gate_ignore_paths`` excluded).\nIt is optional and enqueue-only: ``cw dev-queue add --base`` is the one\nreader, and the dispatch tick never reads it. Unset means no refusal. An\nolder cw with ``extra=\"forbid\"`` rejects the ``epic:`` key outright, so\ndowngrade the client config before pinning an older cw.",
+     "properties": {
+      "max_diff_lines": {
+       "anyOf": [
+        {
+         "minimum": 1,
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Max Diff Lines"
+      }
+     },
+     "title": "EpicConfig",
+     "type": "object"
+    },
     "Harness": {
      "description": "The harnesses an ``mcp`` map is keyed by (the backend constants).",
      "enum": [
@@ -2602,11 +2623,11 @@
        "default": null
       },
       "tolerated_worktree_paths": {
-        "items": {
-          "type": "string"
-        },
-        "title": "Tolerated Worktree Paths",
-        "type": "array"
+       "items": {
+        "type": "string"
+       },
+       "title": "Tolerated Worktree Paths",
+       "type": "array"
       }
      },
      "title": "ReviewConfig",
@@ -3099,6 +3120,9 @@
     },
     "outbox": {
      "$ref": "#/$defs/OutboxConfig"
+    },
+    "epic": {
+     "$ref": "#/$defs/EpicConfig"
     },
     "mechanical_conflict_repair": {
      "anyOf": [

@@ -43,6 +43,8 @@ module is now a package of focused submodules:
 * ``plan_promotion`` — promote an approved ``.cw/plan-draft.md`` to
   ``.cw/plan.md`` on the approve gate's plan->impl advance.
 * ``requeue`` — re-run a stage, regress, or clear a salvage park.
+* ``epic_base`` — the ``cw dev-queue add --base`` origin check and epic size
+  ceiling (RFC 0020 B1, #3783). Not re-exported.
 * ``drain`` — batch-resume every Rule-5 availability park (RFC 0011 A4).
 * ``gates`` — the leaf approval-gate predicate, ``DRAIN_DISPOSITIONS`` and
   the single ``APPROVAL_GATE_REASON`` definition (#2692), shared by

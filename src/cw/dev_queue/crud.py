@@ -271,6 +271,7 @@ def build_queued_task(
     signoff: Literal["operator"] | None = None,
     hold_finalize: Literal["manual"] | None = None,
     review_feedback: ReviewFeedback | None = None,
+    base_branch: str | None = None,
 ) -> TicketTask:
     """Build a freshly enqueued ``TicketTask`` (shared by the CLI and #3045 consumer).
 
@@ -285,6 +286,7 @@ def build_queued_task(
         signoff=signoff,
         hold_finalize=hold_finalize,
         review_feedback=review_feedback,
+        base_branch=base_branch,
         # #1631: the model default is True (fail-open, for rows whose
         # spawn history cannot be reconstructed). A ticket being enqueued right
         # now has demonstrably never spawned, so it overrides. Everything

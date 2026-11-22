@@ -478,6 +478,23 @@ def _timeout_call_sites(tree: ast.AST) -> list[tuple[str, str]]:
     return sites
 
 
+#: Operator checkpoints that bound a read-only network verb themselves, keyed
+#: ``<path under src/cw>:<enclosing function>``. ``verify_base_on_origin`` is
+#: ``cw dev-queue add --base``'s origin check (#3783): an operator command, a
+#: read-only ``ls-remote`` (``_run_git`` still refuses any other verb), run
+#: before ``add_ticket`` takes a lock, so never under a lock.
+_OPERATOR_BOUNDED_CALLERS = frozenset({"dev_queue/epic_base.py:verify_base_on_origin"})
+
+
+def _live_run_git_timeout_callers() -> set[str]:
+    return {
+        f"{path.relative_to(_SRC).as_posix()}:{func}"
+        for path in sorted(_SRC.rglob("*.py"))
+        for func, callee in _timeout_call_sites(ast.parse(path.read_text()))
+        if callee == "_run_git"
+    }
+
+
 class TestNoMutatingCommandIsBounded:
     def test_only_run_network_git_passes_a_timeout_to_run_git(self) -> None:
         """A ``_run_git(..., timeout=...)`` anywhere else fails this pin."""
@@ -487,9 +504,15 @@ class TestNoMutatingCommandIsBounded:
             for func, callee in _timeout_call_sites(ast.parse(path.read_text()))
             if callee == "_run_git"
             and not (path.name == "_tick_fetch.py" and func == "run_network_git")
+            and f"{path.relative_to(_SRC).as_posix()}:{func}"
+            not in _OPERATOR_BOUNDED_CALLERS
         ]
 
         assert offenders == []
+
+    def test_the_operator_allowlist_entries_still_pass_a_timeout(self) -> None:
+        """A stale ``_OPERATOR_BOUNDED_CALLERS`` entry fails: the list only shrinks."""
+        assert _live_run_git_timeout_callers() >= _OPERATOR_BOUNDED_CALLERS
 
     def test_every_timeout_in_the_worktree_package_goes_through_the_seam(
         self,
