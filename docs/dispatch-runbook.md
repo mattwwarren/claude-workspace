@@ -3027,15 +3027,23 @@ happens before the dev-queue lock.
 
 **Refusals** (exit 1, no row written), in precedence order: gh cannot read the
 PR; a fork PR (`isCrossRepository`); a PR that is not OPEN; a head branch that
-fails the row branch charset (the message names it); a malformed head SHA or a
-PR from another repository; then, inside `add_ticket`'s lock, the PR or its
+fails the row branch charset (the message names it); a malformed head SHA; an
+unparseable url, a url naming another PR, or a PR from another repository; a
+PR whose `baseRefName` differs from the row's resolved base (the row's
+`base_branch`, else the client default), naming both bases, for example `PR
+base 'epic/3778' differs from the row's base 'main'` (RFC 0020 B2); then,
+inside `add_ticket`'s lock, the PR or its
 resolved branch already carried by a live row (PENDING, RUNNING,
 BLOCKED_ON_USER, AWAITING_OPERATOR_SIGNOFF, or COMPLETED with its PR still
 OPEN or not yet hydrated), or any existing row for `(client, ticket)` (a
 distinct message, not "already queued"). For a `github-issues` tracker the
 ticket's issue must be readable; other trackers are not verified and the CLI
 prints a note. A PR adopted as its own ticket (`<TICKET>` = `<N>`) needs no
-issue read.
+issue read. The base check is a plain string compare with no charset check.
+It runs on every read inside one intake (so a base change between
+`mergeable: UNKNOWN` re-polls refuses) and at the parked-row requeue re-check
+(against the parked row's base); no read happens after intake otherwise. A
+base mismatch is an intake refusal, never a park.
 
 **What the row carries.** `stage=review` (green) or `stage=impl` with
 `review_feedback` (non-green), `branch=<headRefName>`, `adopted_pr_url` (also
@@ -3193,6 +3201,53 @@ or in the one-tick gap before the next settle, and that descends from the pin
 is absorbed by the settle (when its objects can be fetched). Those commits were
 not reviewed by cw; finalize's local-HEAD versus PR-head check stays the
 backstop. A non-descendant parks. A push after the settle parks.
+
+For a landing row (below), a push to the epic branch, for example a child PR
+merging into it, parks the row `adopted_head_drift` only while the row is
+PENDING, has not run, and is not flagged `adopted_repin_due`. A descendant
+head is absorbed by `settle_adopted_pins` after a session exit. A COMPLETED
+row with armed auto-merge is not re-checked; the only backstops are
+finalize's `pr-sha-matches` and `arm-automerge --match-head-commit`, both at
+arm time only. Base drift has the same residual: a PR retargeted after intake
+keeps its head SHA, so the pinned-head park never fires, and nothing re-reads
+`baseRefName` at arm-automerge or finalize time (`--match-head-commit` pins
+the head only). Accepted in RFC 0020 B2 with no mechanism added; an arm-time
+base check is left to S3/D1.
+
+**Landing PR (RFC 0020 D-4, D-8, D-10).** An epic lands as one PR from the
+epic branch to the default branch, adopted under the epic's parent ticket with
+no `--base`:
+
+```bash
+cw dev-queue add <PARENT> --adopt-pr <N> -c <C>
+```
+
+It merges by the pipeline's existing method; a replayed stack of per-ticket
+PRs is rejected, a merge-commit option is deferred, and this RFC has no
+reverts. Routing is unchanged: green enters at review, conflicted or red at
+impl with synthesized feedback; nothing is added beyond the base check (the
+row's base is null, so the PR's base must be the client default).
+
+- **The epic's parent ticket must have no row at all, including a COMPLETED
+  one.** Otherwise `refuse_if_adoption_conflicts`
+  (`src/cw/dev_queue/adoption.py`) refuses the landing adoption. A live row
+  on the same branch is refused too. `epic/3778` passes the row branch
+  charset.
+- D-8: there is no scheduled sync of the default branch into the epic branch.
+  Divergence surfaces at landing, where the non-green path (RFC 0016 Epic II)
+  routes a conflicted PR to impl.
+- D-10: a child's dev-queue row still reaches `COMPLETED` when its own PR
+  merges into the epic base, but GitHub's `Closes` fires only on the default
+  branch, so the child ticket is closed by the landing merge. The landing PR
+  body therefore cites every child, rendered by
+  `.claude/scripts/landing_citations.py` (child ids in, one `Closes #<n>` line
+  per child out; an uncitable id such as a Linear id is reported on stderr as
+  `uncitable: <id>` for `friction_highlights`).
+- **Known gap (unverified).** `src/cw/gh/merged.py` `pr_is_merged_for_ticket`
+  goes through `closedByPullRequestsReferences`. If GitHub does not link a
+  non-default-base PR to its issue, a child merged into an epic base can read
+  as "not merged" on the merged-completion, prepass and doctor loop-health
+  paths. D1 verifies this with the dogfood epic; nothing changes in B2.
 
 **Drafts.** An adopted draft PR is adopted as-is. Finalize marks it ready
 (`prep_pr_finalize.py ready`) immediately before arming auto-merge, because
