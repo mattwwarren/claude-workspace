@@ -230,12 +230,10 @@ def dev_queue_add(
     sources = ViewSources()
     gate = EnqueueBase(base)
     if adopt_pr is not None:
-        adopt_client = resolve_client(tickets[0], config, client)
-        gate.refuse_redundant(adopt_client)
         run_adopt(
             tickets,
             stage_override,
-            adopt_client,
+            resolve_client(tickets[0], config, client),
             adopt_pr,
             priority=priority,
             scope_hint=scope_hint,

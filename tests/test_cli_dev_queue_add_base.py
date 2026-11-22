@@ -285,19 +285,22 @@ def test_adopt_path_without_base_passes_none(
     assert captured["base"] is None
 
 
-def test_adopt_path_refuses_redundant_base_before_run_adopt(
+def test_adopt_path_passes_a_default_equal_base_through(
     epic_client: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """R6: the adopt path adds no refusal; B2 owns the PR-base check."""
     epic_client()
-    called: list[bool] = []
-    monkeypatch.setattr(
-        "cw.cli.dev_queue.crud.run_adopt", lambda *_a, **_kw: called.append(True)
-    )
+    captured: dict[str, object] = {}
+
+    def _capture(*_a: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr("cw.cli.dev_queue.crud.run_adopt", _capture)
     result = invoke_dev_queue(
         "add", "ACM-52", "--adopt-pr", "7", "--base", "main", "-c", ACME
     )
-    assert result.exit_code == 1
-    assert called == []
+    assert result.exit_code == 0, result.output
+    assert captured["base"] == "main"
 
 
 def test_help_names_the_base_option(epic_client: Callable[..., Path]) -> None:

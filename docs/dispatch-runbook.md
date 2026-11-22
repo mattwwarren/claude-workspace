@@ -3044,7 +3044,9 @@ ticket exists on a different base, `add` prints a stderr note and carries on.
 An existing live row is skipped as before, and the Skipped echo gains
 `--base not applied`: the existing row keeps its own base, since there is no
 retarget verb. `--adopt-pr` hands the base to B2's PR-base check
-(`baseRefName` must equal it) and adds only the local redundant-base refusal.
+(`baseRefName` must equal it) and adds no refusal of its own: only the charset
+check runs, at parse time, and a base equal to the client default is passed
+through.
 `--lane`, `--stage` and `--priority` are unaffected.
 
 `cw dev-queue tasks --base <branch>` lists rows whose stored base equals

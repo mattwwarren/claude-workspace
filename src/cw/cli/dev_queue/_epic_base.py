@@ -71,12 +71,6 @@ class EnqueueBase:
         check_epic_size_ceiling(client, self.base)
         self._verified.add(client_name)
 
-    def refuse_redundant(self, client_name: str) -> None:
-        """The adopt-path subset: only the local redundant-base refusal."""
-        if self.base is None:
-            return
-        refuse_redundant_base(get_client(client_name), self.base)
-
     def note_siblings(self, ticket_id: str, client_name: str) -> None:
         """Print one stderr note per same-ticket row on a different base.
 
