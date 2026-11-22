@@ -710,6 +710,107 @@ def test_run_claude_review_without_a_base_equals_the_default_branch(
     assert seen["config_branch"] == "main"
 
 
+# --- synthesis gets the base, not the trust root (S3a, R2) -----------------
+
+
+def _stub_to_synthesis(
+    monkeypatch: pytest.MonkeyPatch, module: object, roles_attr: str
+) -> dict[str, Any]:
+    """Let a review entry point run past its prepare step to the synthesis call.
+
+    The prepared pass, the role runner and synthesis are replaced by minimal
+    stand-ins, so the returned dict holds exactly what synthesis was handed.
+    """
+    seen: dict[str, Any] = {}
+    prepared = SimpleNamespace(
+        diff="d",
+        reviewed_sha="s" * 40,
+        capability=None,
+        agent_spec_status=None,
+        review_config=None,
+        voided_findings=[],
+        finding_dispositions=[],
+        refused_dispositions=[],
+        prompts_by_role={},
+        roles=[],
+    )
+    ran = SimpleNamespace(
+        documents=[],
+        failures=[],
+        metrics_by_role={},
+        pre_validation_rejected=[],
+        coverage=[],
+        mutation=None,
+    )
+
+    def _synthesize(**kwargs: Any) -> tuple[object, None]:
+        seen.update(kwargs)
+        return SimpleNamespace(blocker=None), None
+
+    monkeypatch.setattr(module, "_prepare_review_pass", lambda *_a, **_k: prepared)
+    monkeypatch.setattr(module, roles_attr, lambda *_a, **_k: ran)
+    monkeypatch.setattr(module, "synthesize_codex_review_result", _synthesize)
+    return seen
+
+
+@pytest.mark.parametrize(
+    ("base", "expected"), [(ROW_BASE, ROW_BASE), (None, CLIENT_DEFAULT)]
+)
+def test_run_review_hands_synthesis_the_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, base: str | None, expected: str
+) -> None:
+    seen = _stub_to_synthesis(monkeypatch, codex_core, "run_prepared_roles")
+
+    codex_core.run_review(
+        runner=cast("Any", None),
+        task=_row(base),
+        worktree=tmp_path,
+        default_branch=CLIENT_DEFAULT,
+        base_branch=base,
+        model=None,
+        reasoning_effort=None,
+        wall_clock_budget_seconds=None,
+        session_id="s",
+        fix_loop_enabled=False,
+    )
+
+    assert seen["default_branch"] == expected
+
+
+@pytest.mark.parametrize(
+    ("base", "base_ref", "expected"),
+    [
+        (ROW_BASE, None, ROW_BASE),
+        (None, None, CLIENT_DEFAULT),
+        (ROW_BASE, "pinned-sha", ROW_BASE),
+        (None, "pinned-sha", CLIENT_DEFAULT),
+    ],
+)
+def test_run_claude_review_hands_synthesis_the_base_not_the_diff_ref(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    base: str | None,
+    base_ref: str | None,
+    expected: str,
+) -> None:
+    seen = _stub_to_synthesis(monkeypatch, claude_core, "run_claude_roles")
+    monkeypatch.setattr(claude_core, "_fail_if_prompt_too_large", lambda *_a: None)
+
+    claude_core.run_claude_review(
+        runner=cast("Any", None),
+        task=_row(base),
+        worktree=tmp_path,
+        default_branch=CLIENT_DEFAULT,
+        base_ref=base_ref,
+        base_branch=base,
+        model=None,
+        wall_clock_budget_seconds=None,
+        session_id="s",
+    )
+
+    assert seen["default_branch"] == expected
+
+
 # --- EnginePassInputs: base for the diff, config for the trust root --------
 
 
