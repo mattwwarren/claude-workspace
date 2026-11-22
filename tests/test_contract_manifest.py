@@ -1066,7 +1066,7 @@ _CODEX_STAGE_TICKETS: dict[str, int] = {}
 #: it lands. Its finalize-stage cells are implemented,
 #: not-applicable, or deferred to one of its three follow-ups.
 _C3_TICKET = 3062
-_CODEX_FINALIZE_FOLLOW_UPS = frozenset({3542, 3543, 3544, 3782})
+_CODEX_FINALIZE_FOLLOW_UPS = frozenset({3542, 3543, 3544, 3840})
 #: The C1 ticket (#3060, codex PLAN executor); no cell may defer to it once it
 #: lands. Its plan-stage cells are implemented, not-applicable,
 #: or deferred to one of its two follow-ups.
@@ -1077,9 +1077,9 @@ _CODEX_PLAN_FOLLOW_UPS = frozenset({3464, 3465})
 #: or deferred to one of its follow-ups. #3530 (tracker-aware plan recovery) left
 #: the set: #3712 (RFC 0019 T2) implements it, so ``impl.orientation`` is a code ref.
 _C2_TICKET = 3061
-_CODEX_IMPL_FOLLOW_UPS = frozenset({3529, 3531, 3782})
+_CODEX_IMPL_FOLLOW_UPS = frozenset({3529, 3531, 3840})
 # #3055 closed with RFC 0018 S3: its codex review cells moved to #3057 (A2).
-_CODEX_REVIEW_TICKETS = frozenset({3318, 2464, 3057, 3782})
+_CODEX_REVIEW_TICKETS = frozenset({3318, 2464, 3057, 3840})
 #: The C4 ticket (#3063, usage accounting); no cell may defer to it once it lands.
 _C4_TICKET = 3063
 #: The S3 ticket; no cell may defer to it once it lands (#3055).
@@ -2092,7 +2092,7 @@ def test_base_branch_elements_dispositions() -> None:
         codex = cells["codex"]
         assert codex.disposition == "deferred", element_id
         assert codex.ref is not None
-        assert codex.ref.number == 3782, element_id
+        assert codex.ref.number == 3840, element_id
         for backend in ("opencode", "local"):
             cell = cells[backend]
             assert cell.disposition == "fails-closed", (element_id, backend)

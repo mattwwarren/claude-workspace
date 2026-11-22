@@ -293,6 +293,9 @@ task)`. Reads that judge a branch (review engine source, guards, attestation,
 review configuration) stay on `client.default_branch` and never use the seam.
 The field is frozen once a row has spawned, and only `set_base_branch` writes
 it. See `docs/adr/0024-merge-target-and-trust-root-are-different-things.md`.
+The review, convergence, approval and scope-guard merge-target reads take the
+row's base (RFC 0020 S3a). `tests/test_default_branch_seam_guard.py` classifies
+every remaining `.default_branch` read in `src/`, so an unclassified one fails CI.
 
 **Module size.** Source modules follow the package-split convention described
 in `CLAUDE.md`'s "Module Size" section (`CLAUDE.md:80-101`): keep modules

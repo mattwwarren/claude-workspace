@@ -821,7 +821,7 @@ elements:
   impl.base-branch-resolution:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3782}, note: "codex executors still merge client.default_branch; delivering the row's base to them is #3782 (RFC 0020 S3)"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3840}, note: "codex executors still merge client.default_branch; delivering the row's base to them is #3840 (RFC 0020 S3b)"}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "a row with a non-null base_branch parks base_unsupported_backend before any agent runs; opencode does not deliver the base"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "a row with a non-null base_branch parks base_unsupported_backend before any agent runs; local does not deliver the base"}
   impl.branch-freshness:
@@ -1019,7 +1019,7 @@ elements:
   review.base-branch-resolution:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3782}, note: "codex executors still merge client.default_branch; delivering the row's base to them is #3782 (RFC 0020 S3)"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3840}, note: "codex executors still merge client.default_branch; delivering the row's base to them is #3840 (RFC 0020 S3b)"}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "a row with a non-null base_branch parks base_unsupported_backend before any agent runs; opencode does not deliver the base"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219); a row with a base_branch is also covered by base_unsupported_backend (#3781)"}
   review.no-plan:
@@ -1539,7 +1539,7 @@ elements:
   finalize.base-branch-resolution:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3782}, note: "codex executors still merge client.default_branch; delivering the row's base to them is #3782 (RFC 0020 S3)"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3840}, note: "codex executors still merge client.default_branch; delivering the row's base to them is #3840 (RFC 0020 S3b)"}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "a row with a non-null base_branch parks base_unsupported_backend before any agent runs; opencode does not deliver the base"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219); a row with a base_branch is also covered by base_unsupported_backend (#3781)"}
   finalize.resolve-carried-through-context-before-emitting:
@@ -1607,7 +1607,7 @@ elements:
   finalize.open-pr-base-filter:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3782}, note: "codex executors still merge client.default_branch; delivering the row's base to them is #3782 (RFC 0020 S3)"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3840}, note: "codex executors still merge client.default_branch; delivering the row's base to them is #3840 (RFC 0020 S3b)"}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "a row with a non-null base_branch parks base_unsupported_backend before any agent runs; opencode does not deliver the base"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219); a row with a base_branch is also covered by base_unsupported_backend (#3781)"}
   finalize.fix-prior-pr:
