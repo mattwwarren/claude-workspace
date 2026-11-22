@@ -39,7 +39,12 @@ PACKAGE = "cw.reconcile.tasks"
 # New stale-gate implementation details stay in their owner module rather
 # than becoming package attributes (#2321).
 _UNEXPORTED_PRIVATE_NAMES = frozenset(
-    {"_PROPOSED_ACTION_DEPENDENCY_PR_CLOSED_UNMERGED", "_scan_variant_b"}
+    {
+        "_DISPATCH_CONSUMER",
+        "_PROPOSED_ACTION_DEPENDENCY_PR_CLOSED_UNMERGED",
+        "_pending_completion_session_ids",
+        "_scan_variant_b",
+    }
 )
 
 # The full public-and-private surface of the flat module: 8 constants and 26

@@ -77,6 +77,7 @@ from cw.dispatch.branch_freshness import (
     resolve_conflicting_branches,
 )
 from cw.dispatch.lanes import _notify_stale_clients_with_pending
+from cw.dispatch.review_tip_sweep import tip_sweep_scope
 
 # Moved to flat siblings (#2999) and imported back: ``loop``'s own callers use
 # them, the suite still imports them from this path, and none of them reads a
@@ -126,11 +127,9 @@ def consume_completed_sessions() -> int:
     read half and the apply half (#2692), which the CLI's row-lag settle
     also uses under its own bounded lock.
 
-    Before the lock, the REVIEW ``branch_behind_main`` gate's merge probes run
-    (#2979, :func:`~cw.dispatch.branch_freshness.resolve_conflicting_branches`)
-    against a lock-free queue snapshot, and their verdicts are installed only
-    for the locked section: no git call runs under ``dev_queue_lock`` for that gate
-    (the pr_gate precompute pattern; ADR-0022 invariant 3); no verdict outlives it.
+    Before the lock, the REVIEW git gates run lock-free (ADR-0022 invariant 3):
+    the ``branch_behind_main`` probes (#2979) and the staleness tip check (#2994,
+    ``review_tip_sweep``, which holds over-bound events back for a later tick).
 
     Returns:
         Number of TicketTasks transitioned to COMPLETED.
@@ -138,9 +137,10 @@ def consume_completed_sessions() -> int:
     events = read_pending_completions()
     if not events:
         return 0
-    conflicts = _conflicting_branches_lock_free(events)
-    with dev_queue_lock(), precomputed_branch_conflicts(conflicts):
-        return apply_pending_completions(events)
+    with tip_sweep_scope(events) as batch:
+        conflicts = _conflicting_branches_lock_free(batch)
+        with dev_queue_lock(), precomputed_branch_conflicts(conflicts):
+            return apply_pending_completions(batch)
 
 
 def _conflicting_branches_lock_free(
