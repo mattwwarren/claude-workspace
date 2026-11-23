@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, NoReturn, Protocol
 
 import click
 
-from cw.dispatch_loop_identity import LoopStatus, assess_dispatch_loop
+from cw.dispatch_loop_identity import LoopStatus, assess_dispatch_loop, label_of
 from cw.dispatch_reexec import (
     REEXEC_EXIT_CODE,
     SUPERVISOR_PID_ENV,
@@ -198,10 +198,6 @@ def probe_install(timeout: float) -> tuple[bool, str]:
 def _spawn_child(argv: list[str], env: dict[str, str]) -> _Child:
     """Start the child in the supervisor's process group (Ctrl-C reaches it)."""
     return subprocess.Popen(argv, env=env)
-
-
-def _label(identity: CodeIdentity | None) -> str:
-    return identity.label() if identity is not None else "unknown"
 
 
 def _signal_name(number: int) -> str:
@@ -409,7 +405,7 @@ class _Supervisor:
                 self._memo_noted = True
                 click.echo(
                     _SAME_CHECKOUT_LINE.format(
-                        label=_label(target), supervisor_pid=os.getpid()
+                        label=label_of(target), supervisor_pid=os.getpid()
                     ),
                     err=True,
                 )
@@ -429,7 +425,7 @@ class _Supervisor:
             delay = self._probe_delay
             click.echo(
                 _PROBE_FAILED_LINE.format(
-                    label=_label(target),
+                    label=label_of(target),
                     detail=detail,
                     pid=self._child.pid,
                     delay=delay,
@@ -444,7 +440,7 @@ class _Supervisor:
         self._probe_next_at = now
         self._memo = target
         self._memo_noted = False
-        self._forward_label = _label(target)
+        self._forward_label = label_of(target)
         self._child.send_signal(signal.SIGHUP)
         self._forwarded_at = now
         self._stall_reported = False

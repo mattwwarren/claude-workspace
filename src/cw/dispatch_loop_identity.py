@@ -106,7 +106,8 @@ class CodeIdentity:
         return " @ ".join(parts) if parts else "unknown"
 
 
-def _label(identity: CodeIdentity | None) -> str:
+def label_of(identity: CodeIdentity | None) -> str:
+    """The identity's label, or ``unknown`` when there is none."""
     return identity.label() if identity is not None else "unknown"
 
 
@@ -128,12 +129,12 @@ class LoopAssessment:
         if self.status is LoopStatus.NO_LOOP:
             return "no dispatch loop lock holder recorded"
         if self.status is LoopStatus.MATCH:
-            return f"{loop} matches the checkout ({_label(self.current)})"
+            return f"{loop} matches the checkout ({label_of(self.current)})"
         if self.status is LoopStatus.STALE:
             action = _SUPERVISED_RESTART if self.supervised else _RESTART
             return (
-                f"{loop} started on {_label(self.recorded)} but the checkout"
-                f" is at {_label(self.current)}; {action}"
+                f"{loop} started on {label_of(self.recorded)} but the checkout"
+                f" is at {label_of(self.current)}; {action}"
             )
         if self.recorded is None:
             return (
@@ -143,7 +144,7 @@ class LoopAssessment:
             )
         return (
             f"{loop} code identity cannot be compared with the checkout"
-            f" (loop: {_label(self.recorded)}; checkout: {_label(self.current)});"
+            f" (loop: {label_of(self.recorded)}; checkout: {label_of(self.current)});"
             " identity unknown"
         )
 
