@@ -21,7 +21,14 @@ from cw.stage_verification.impl_regress_findings import (
     with_regress_findings,
 )
 from cw.stage_verification.posted_text import TRUNCATION_MARKER
-from tests._shared.review_builders import _make_finding, write_review_verdict_envelope
+from tests._review_history_helpers import write_held_ledger, write_round_verdict
+from tests._shared.review_builders import (
+    _make_finding,
+    _make_gap_finding,
+    build_held_verdict,
+    regressed_review_row,
+    write_review_verdict_envelope,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -32,14 +39,7 @@ _SHA = "a" * 40
 
 def _task(**updates: Any) -> TicketTask:
     """An IMPL row regressed from REVIEW unless *updates* say otherwise."""
-    fields: dict[str, Any] = {
-        "ticket_id": _TICKET,
-        "client": "test",
-        "stage": Stage.IMPL,
-        "stage_high_water": Stage.REVIEW,
-    }
-    fields.update(updates)
-    return TicketTask(**fields)
+    return regressed_review_row(_TICKET, **updates)
 
 
 def _feedback() -> ReviewFeedback:
@@ -272,3 +272,232 @@ class TestFriction:
         outcome = regress_review_findings(_task(), tmp_path)
         assert outcome is not None
         assert outcome.friction == "regress_review_findings: delivered"
+
+
+def _gap(summary: str = "gap") -> Any:
+    return _make_gap_finding(summary=summary)
+
+
+class TestHeldEvidenceGap:
+    """The codex lane: a held evidence-gap finding in the saved envelope (#3862)."""
+
+    def test_pre_pr_gap_hold_delivers(self, tmp_path: Path) -> None:
+        write_review_verdict_envelope(
+            tmp_path, ticket_id=_TICKET, reviewed_sha=_SHA, held=[_gap("B")]
+        )
+        outcome = regress_review_findings(
+            _task(pr_url=None, blocked_reason="review_operator_actionable"), tmp_path
+        )
+        assert outcome is not None
+        assert outcome.findings is not None
+        assert outcome.findings.reviewed_sha == _SHA
+        assert "[MUST_FIX]" in outcome.findings.text
+        assert "summary: B" in outcome.findings.text
+        assert "evidence gap (not verified by the reviewer):" in outcome.findings.text
+
+    def test_pre_pr_gap_hold_wire_shape(self, tmp_path: Path) -> None:
+        write_review_verdict_envelope(
+            tmp_path, ticket_id=_TICKET, reviewed_sha=_SHA, held=[_gap("B")]
+        )
+        out = with_regress_findings({}, _task(), tmp_path)
+        value = out["regress_review_findings"]
+        assert isinstance(value, dict)
+        assert set(value) == {"reviewed_sha", "text"}
+        assert value["reviewed_sha"] == _SHA
+
+    def test_blocking_verdict_delivers_must_fix_and_carried_gap_once(
+        self, tmp_path: Path
+    ) -> None:
+        write_review_verdict_envelope(
+            tmp_path,
+            ticket_id=_TICKET,
+            reviewed_sha=_SHA,
+            must_fix=[_make_finding(summary="A", severity="MUST_FIX")],
+            held=[_gap("B")],
+        )
+        outcome = regress_review_findings(_task(), tmp_path)
+        assert outcome is not None
+        assert outcome.findings is not None
+        text = outcome.findings.text
+        assert text.count("summary: A") == 1
+        assert text.count("summary: B") == 1
+        assert text.index("summary: A") < text.index("summary: B")
+
+    def test_decision_contest_hold_stays_withheld(self, tmp_path: Path) -> None:
+        contest = _make_gap_finding(summary="C", contests_decision="we decided X")
+        write_review_verdict_envelope(
+            tmp_path, ticket_id=_TICKET, reviewed_sha=_SHA, held=[contest]
+        )
+        outcome = regress_review_findings(_task(), tmp_path)
+        assert outcome == RegressOutcome(None, "not_blocking")
+
+    def test_contest_beside_gap_withholds_the_gap(self, tmp_path: Path) -> None:
+        contest = _make_gap_finding(summary="C", contests_decision="we decided X")
+        write_review_verdict_envelope(
+            tmp_path, ticket_id=_TICKET, reviewed_sha=_SHA, held=[contest, _gap("B")]
+        )
+        outcome = regress_review_findings(_task(), tmp_path)
+        assert outcome == RegressOutcome(None, "not_blocking")
+
+    def test_contest_beside_survivors_delivers_survivors_only(
+        self, tmp_path: Path
+    ) -> None:
+        contest = _make_gap_finding(summary="C", contests_decision="we decided X")
+        write_review_verdict_envelope(
+            tmp_path,
+            ticket_id=_TICKET,
+            reviewed_sha=_SHA,
+            must_fix=[_make_finding(summary="S", severity="MUST_FIX")],
+            held=[contest, _gap("B")],
+        )
+        outcome = regress_review_findings(_task(), tmp_path)
+        assert outcome is not None
+        assert outcome.findings is not None
+        assert "summary: S" in outcome.findings.text
+        assert "summary: B" not in outcome.findings.text
+
+    def test_held_non_must_fix_not_delivered(self, tmp_path: Path) -> None:
+        note = _make_gap_finding(severity="SHOULD_FIX", summary="note")
+        write_review_verdict_envelope(
+            tmp_path, ticket_id=_TICKET, reviewed_sha=_SHA, held=[note]
+        )
+        assert regress_review_findings(_task(), tmp_path) == RegressOutcome(
+            None, "not_blocking"
+        )
+
+    def test_gap_finding_text_is_capped(self, tmp_path: Path) -> None:
+        big = "x" * (MAX_REVIEW_REPORT_BYTES + 100)
+        write_review_verdict_envelope(
+            tmp_path,
+            ticket_id=_TICKET,
+            reviewed_sha=_SHA,
+            held=[_make_finding(severity="MUST_FIX", summary="B", evidence_gap=big)],
+        )
+        outcome = regress_review_findings(_task(), tmp_path)
+        assert outcome is not None
+        assert outcome.findings is not None
+        assert outcome.findings.text.endswith(TRUNCATION_MARKER)
+
+    def test_review_feedback_present_still_wins_over_gap_hold(
+        self, tmp_path: Path
+    ) -> None:
+        write_review_verdict_envelope(
+            tmp_path, ticket_id=_TICKET, reviewed_sha=_SHA, held=[_gap("B")]
+        )
+        outcome = regress_review_findings(
+            _task(pr_url="https://example/pr/1", review_feedback=_feedback()),
+            tmp_path,
+        )
+        assert outcome == RegressOutcome(None, "review_feedback_present")
+
+    def test_non_blocking_without_held_findings_still_not_blocking(
+        self, tmp_path: Path
+    ) -> None:
+        write_review_verdict_envelope(
+            tmp_path,
+            ticket_id=_TICKET,
+            reviewed_sha=_SHA,
+            must_fix=[_make_finding(summary="A", severity="MUST_FIX")],
+            blocking=False,
+        )
+        assert regress_review_findings(_task(), tmp_path) == RegressOutcome(
+            None, "not_blocking"
+        )
+
+
+class TestLedgerLane:
+    """The Claude-native clean-mode lane: the saved round verdict (#3862)."""
+
+    def test_pre_pr_clean_mode_gap_hold_delivers(self, tmp_path: Path) -> None:
+        write_held_ledger(tmp_path, [[_gap("A")]], ticket_id=_TICKET)
+        outcome = regress_review_findings(_task(), tmp_path)
+        assert outcome is not None
+        assert outcome.findings is not None
+        assert "summary: A" in outcome.findings.text
+
+    def test_held_in_round_one_rounds_two_to_four_clean_is_delivered(
+        self, tmp_path: Path
+    ) -> None:
+        write_held_ledger(tmp_path, [[_gap("A")], [], [], []], ticket_id=_TICKET)
+        out = with_regress_findings({}, _task(), tmp_path)
+        value = out["regress_review_findings"]
+        assert isinstance(value, dict)
+        assert value["reviewed_sha"] == "sha-0001"
+
+    def test_contest_in_selected_round_withholds_gap(self, tmp_path: Path) -> None:
+        contest = _make_gap_finding(summary="C", contests_decision="we decided X")
+        write_held_ledger(tmp_path, [[contest, _gap("B")]], ticket_id=_TICKET)
+        assert regress_review_findings(_task(), tmp_path) == RegressOutcome(
+            None, "not_blocking"
+        )
+
+    def test_ledger_no_round_holds_finding_reports_not_blocking(
+        self, tmp_path: Path
+    ) -> None:
+        write_held_ledger(tmp_path, [[], []], ticket_id=_TICKET)
+        assert regress_review_findings(_task(), tmp_path) == RegressOutcome(
+            None, "not_blocking"
+        )
+
+    def test_ledger_head_mismatch_reports_not_owned(self, tmp_path: Path) -> None:
+        write_held_ledger(tmp_path, [[_gap("A")]], ticket_id=_TICKET)
+        write_round_verdict(
+            tmp_path,
+            1,
+            build_held_verdict([_gap("A")], reviewed_sha="sha-other"),
+        )
+        assert regress_review_findings(_task(), tmp_path) == RegressOutcome(
+            None, "not_owned"
+        )
+
+    def test_ledger_foreign_ticket_reports_not_owned(self, tmp_path: Path) -> None:
+        write_held_ledger(tmp_path, [[_gap("A")]], ticket_id="OTHER-1")
+        assert regress_review_findings(_task(), tmp_path) == RegressOutcome(
+            None, "not_owned"
+        )
+
+    def test_ledger_lane_does_not_deliver_ledger_must_fix(self, tmp_path: Path) -> None:
+        write_held_ledger(tmp_path, [[]], ticket_id=_TICKET)
+        write_round_verdict(
+            tmp_path,
+            1,
+            build_held_verdict(
+                [], reviewed_sha="sha-0001", must_fix=[_make_finding(summary="A")]
+            ),
+        )
+        assert regress_review_findings(_task(), tmp_path) == RegressOutcome(
+            None, "not_blocking"
+        )
+
+    def test_envelope_present_wins_over_ledger(self, tmp_path: Path) -> None:
+        write_review_verdict_envelope(
+            tmp_path,
+            ticket_id=_TICKET,
+            reviewed_sha=_SHA,
+            must_fix=[_make_finding(summary="E", severity="MUST_FIX")],
+        )
+        write_held_ledger(tmp_path, [[_gap("L")]], ticket_id=_TICKET)
+        outcome = regress_review_findings(_task(), tmp_path)
+        assert outcome is not None
+        assert outcome.findings is not None
+        assert "summary: E" in outcome.findings.text
+        assert "summary: L" not in outcome.findings.text
+
+    def test_foreign_envelope_does_not_fall_back_to_ledger(
+        self, tmp_path: Path
+    ) -> None:
+        write_review_verdict_envelope(
+            tmp_path,
+            ticket_id="OTHER-1",
+            reviewed_sha=_SHA,
+            held=[_gap("B")],
+        )
+        write_held_ledger(tmp_path, [[_gap("L")]], ticket_id=_TICKET)
+        assert regress_review_findings(_task(), tmp_path) == RegressOutcome(
+            None, "not_owned"
+        )
+
+    def test_blocking_mode_claude_native_still_withheld(self, tmp_path: Path) -> None:
+        assert regress_review_findings(_task(), tmp_path) == RegressOutcome(
+            None, "artifact_missing"
+        )

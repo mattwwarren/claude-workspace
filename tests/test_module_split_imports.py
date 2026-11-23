@@ -251,6 +251,7 @@ _EXPECTED_RULES = (
     ("_confirm_must_fix", "_confirm_must_fix_commands"),
     ("_must_fix_overridden", "_must_fix_overridden_commands"),
     ("_must_fix", "_must_fix_commands"),
+    ("_review_held", "_review_held_commands"),
     ("_attempt_capped", "_attempt_capped_commands"),
     ("_salvage_parked", "_salvage_commands"),
     ("_drain_held", "_drain_commands"),

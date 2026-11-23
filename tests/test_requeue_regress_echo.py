@@ -16,7 +16,13 @@ from cw.cli.dev_queue import _requeue_echo
 from cw.exceptions import CwError
 from cw.models import Stage, TicketTask
 from cw.models.review_feedback import ReviewFeedback
-from tests._shared.review_builders import _make_finding, write_review_verdict_envelope
+from tests._review_history_helpers import write_held_ledger
+from tests._shared.review_builders import (
+    _make_finding,
+    _make_gap_finding,
+    regressed_review_row,
+    write_review_verdict_envelope,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -26,14 +32,7 @@ _SHA = "c" * 40
 
 
 def _task(**updates: Any) -> TicketTask:
-    fields: dict[str, Any] = {
-        "ticket_id": _TICKET,
-        "client": "test",
-        "stage": Stage.IMPL,
-        "stage_high_water": Stage.REVIEW,
-    }
-    fields.update(updates)
-    return TicketTask(**fields)
+    return regressed_review_row(_TICKET, **updates)
 
 
 def _patch_row(
@@ -123,3 +122,26 @@ def test_read_error_prints_stderr_and_does_not_raise(
     monkeypatch.setattr(_requeue_echo, "_find_ticket", _boom)
     _requeue_echo._echo_regress_findings(_TICKET, "test")
     assert "could not be determined" in capsys.readouterr().err
+
+
+def test_gap_hold_prints_delivered_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_review_verdict_envelope(
+        tmp_path, ticket_id=_TICKET, reviewed_sha=_SHA, held=[_make_gap_finding()]
+    )
+    _patch_row(monkeypatch, task=_task(), worktree=tmp_path)
+    _requeue_echo._echo_regress_findings(_TICKET, "test")
+    out = capsys.readouterr()
+    assert f"delivered (reviewed_sha {_SHA})" in out.out
+    assert "held evidence-gap findings" in out.out
+
+
+def test_ledger_gap_hold_prints_delivered_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_held_ledger(tmp_path, [[_make_gap_finding()], [], []], ticket_id=_TICKET)
+    _patch_row(monkeypatch, task=_task(), worktree=tmp_path)
+    _requeue_echo._echo_regress_findings(_TICKET, "test")
+    out = capsys.readouterr()
+    assert "delivered (reviewed_sha sha-0001)" in out.out

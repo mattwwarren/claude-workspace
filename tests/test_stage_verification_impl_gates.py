@@ -67,8 +67,14 @@ from tests._codex_review_helpers import (
     install_home_prep_pr_state,
     install_home_scope_script,
 )
+from tests._review_history_helpers import write_held_ledger
 from tests._shared.git_repos import commit_tracked_file, git_in
-from tests._shared.review_builders import _make_finding, write_review_verdict_envelope
+from tests._shared.review_builders import (
+    _make_finding,
+    _make_gap_finding,
+    regressed_review_row,
+    write_review_verdict_envelope,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -834,6 +840,29 @@ class TestRegressedReviewRowExemption:
         assert block is not None
         assert block.details.startswith("existing_branch_work")
         assert "regress_review_findings: withheld (artifact_missing)." in block.details
+
+    def test_pre_pr_gap_hold_row_is_exempt_from_existing_branch_work(
+        self, repo: Path
+    ) -> None:
+        _stage(repo)
+        git_in(repo, "commit", "-m", "prior work")
+        write_review_verdict_envelope(
+            repo,
+            ticket_id="T-1",
+            reviewed_sha="a" * 40,
+            held=[_make_gap_finding(summary="B")],
+        )
+        task = regressed_review_row("T-1", blocked_reason="review_operator_actionable")
+        assert check_existing_branch_work(git_facts(repo, "main"), task, repo) is None
+
+    def test_pre_pr_clean_mode_gap_hold_row_is_exempt(self, repo: Path) -> None:
+        _stage(repo)
+        git_in(repo, "commit", "-m", "prior work")
+        write_held_ledger(
+            repo, [[_make_gap_finding(summary="B")], [], []], ticket_id="T-1"
+        )
+        task = regressed_review_row("T-1", blocked_reason="review_operator_actionable")
+        assert check_existing_branch_work(git_facts(repo, "main"), task, repo) is None
 
     def test_plain_block_has_no_regress_suffix(self, repo: Path) -> None:
         _stage(repo)

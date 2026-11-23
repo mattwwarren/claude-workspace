@@ -30,7 +30,11 @@ from cw.models import CODEX_BACKEND, Stage, TicketTask
 from cw.models.bindings import Harness
 from cw.models.review_feedback import ReviewFeedback
 from tests._shared.bindings_builders import bindings_github_cli
-from tests._shared.review_builders import _make_finding, write_review_verdict_envelope
+from tests._shared.review_builders import (
+    _make_finding,
+    _make_gap_finding,
+    write_review_verdict_envelope,
+)
 
 _COMMANDS_ROOT = Path(__file__).resolve().parents[1] / ".claude" / "commands"
 _TICKET = "4242"
@@ -213,6 +217,20 @@ class TestRegressFindingsSection:
         assert "verify each one against the current" in text
         assert "Fix me" in text
         assert "bound it to the live PR" not in text
+
+    def test_gap_hold_section_is_rendered_with_gap_text(self, tmp_path: Path) -> None:
+        """A held evidence-gap finding reaches the prompt with its gap line (#3862)."""
+        write_review_verdict_envelope(
+            tmp_path,
+            ticket_id=_TICKET,
+            reviewed_sha="b" * 40,
+            held=[_make_gap_finding(summary="Gap check")],
+        )
+        text = self._render_regress(tmp_path)
+        assert REGRESS_FINDINGS_SECTION in text
+        assert f"reviewed_sha: {'b' * 40}" in text
+        assert "Gap check" in text
+        assert "evidence gap (not verified by the reviewer):" in text
 
     def test_forged_end_fence_in_evidence_is_escaped(self, tmp_path: Path) -> None:
         write_review_verdict_envelope(

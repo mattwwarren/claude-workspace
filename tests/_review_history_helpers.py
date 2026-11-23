@@ -53,23 +53,26 @@ from tests._review_convergence_helpers import (
     LOOP_BACKEND,
     NOW,
     ROSTER,
+    TICKET_ID,
     consolidated_verdict,
     fresh_ledger,
+    ledger_with_rounds,
     operator_finding,
     record,
     round_finding,
     write_ledger,
 )
+from tests._shared.review_builders import build_held_verdict
 from tests._ticket_view_helpers import ACME, ACME_TICKET, bound_session_for, make_task
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Collection, Mapping, Sequence
     from pathlib import Path
 
     from cw.models import OrchestratorEvent, Session, TicketTask
     from cw.models.review_history import ReviewHistory
-    from cw.review_convergence import RoundKind
-    from cw.review_findings import ReviewVerdict, Severity
+    from cw.review_convergence import ConvergenceLedger, RoundKind
+    from cw.review_findings import Finding, ReviewVerdict, Severity
 
 #: Round ``recorded_at`` stamps the fixtures apply through :func:`timed`.
 STAMPS = (
@@ -165,6 +168,52 @@ def record_verdict_round(
 def write_round_verdict(worktree: Path, n: int, verdict: ReviewVerdict) -> Path:
     """Persist *verdict* as round *n*'s verdict file beside the default ledger."""
     return save_round_verdict(worktree / LEDGER_RELATIVE_PATH, n, verdict)
+
+
+def write_held_ledger(
+    worktree: Path,
+    held_by_round: Sequence[Sequence[Finding]],
+    *,
+    ticket_id: str = TICKET_ID,
+    settle: Sequence[Finding] = (),
+    skip_verdict: Collection[int] = (),
+) -> ConvergenceLedger:
+    """A clean-mode ledger plus per-round held-verdict files (#3862).
+
+    ``held_by_round[i]`` holds round ``i + 1``'s held findings (empty is a clean
+    round). Round ``n`` is recorded at ``sha-000<n>``. Each held finding is a
+    ``fix`` finding in its round, so ``operator_settle`` can resolve it. A round
+    in *skip_verdict* gets no verdict file (the findings-form round).
+    """
+    rounds = [
+        [
+            round_finding(summary=f"fix cycle {n} work"),
+            *(round_finding(f.severity, f.summary, file=f.file) for f in held),
+        ]
+        for n, held in enumerate(held_by_round, start=1)
+    ]
+    ledger = ledger_with_rounds(*rounds, ticket_id=ticket_id)
+    if settle:
+        ledger, report = operator_settle(
+            ledger,
+            [
+                SettleTarget(severity=f.severity, file=f.file, summary=f.summary)
+                for f in settle
+            ],
+            actor="mattwwarren",
+            reason=OPERATOR_REASON,
+            now=NOW,
+        )
+        assert not report.unmatched, (
+            "write_held_ledger: settle target not in the ledger"
+        )
+    write_ledger(worktree, ledger)
+    for n, held in enumerate(held_by_round, start=1):
+        if n in skip_verdict:
+            continue
+        verdict = build_held_verdict(held, reviewed_sha=f"sha-000{n}")
+        write_round_verdict(worktree, n, verdict)
+    return ledger
 
 
 def sentinel_review(
