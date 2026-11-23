@@ -9,7 +9,8 @@ the ~1000-line ceiling (pinned by ``tests/test_shared_layer.py``).
 Concern -> module:
 
 - repo paths, ``src/`` walk, workflow/command prose and fence readers
-  (``_REPO_ROOT``, ``_cmd``, ``_bash_fences``): ``workflow_text``
+  (``_REPO_ROOT``, ``_cmd``, ``_bash_fences``), and the whole-CHANGELOG reader
+  (``changelog_text``, ``changelog_entry``): ``workflow_text``
 - guard-script fences and ``cw-script-version`` marker cases
   (``run_guard_fence``, ``GUARD_MARKER_*``): ``guard_fences``
 - fake ``~/.claude`` skill/command/context files (``write_skill``):

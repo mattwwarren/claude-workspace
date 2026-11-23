@@ -34,7 +34,7 @@ from cw.review_engine.constants import (
     EngineRoundFailure,
 )
 from cw.review_engine_manifest_io import EngineManifestRejection
-from tests._shared.workflow_text import _appendix, _cmd
+from tests._shared.workflow_text import _appendix, _cmd, changelog_entry
 from tests.test_agent_comment_provenance import _blocker_reason_table, _table_reasons
 from tests.test_auto_dev_preflight_resolutions import _after
 
@@ -385,10 +385,7 @@ def test_config_reference_documents_the_engine_context_and_doctor_warning() -> N
 def test_changelog_carries_the_engine_bullet_with_operator_note() -> None:
     # Why: search the whole file, not just [Unreleased]. The bullet moves to a
     # version section at release, and a section-bounded slice fails every cut.
-    changelog = _read("CHANGELOG.md")
-    bullet = next(
-        line for line in changelog.splitlines() if "(RFC 0017, #3039)" in line
-    )
+    bullet = changelog_entry("(RFC 0017, #3039)")
     assert bullet.startswith("- **")
     assert "**Operator note:**" in bullet
     for needle in (
@@ -495,10 +492,7 @@ def test_events_doc_names_the_codex_confirm_emitter() -> None:
 
 
 def test_changelog_carries_the_codex_engine_migration_line() -> None:
-    changelog = _read("CHANGELOG.md")
-    bullet = next(
-        line for line in changelog.splitlines() if "(RFC 0018 A4, #3216)" in line
-    )
+    bullet = changelog_entry("(RFC 0018 A4, #3216)")
     assert "**Operator note:**" in bullet
     assert "cause=no_codex_manifest" in bullet
     assert _UNSUPPORTED in bullet

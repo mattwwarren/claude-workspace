@@ -35,7 +35,7 @@ from cw.dev_queue.gates import (
     STALE_TIP_FRICTION_PREFIX,
 )
 from cw.review_convergence import CONFIRM_FAILURE_CAUSES
-from tests._shared.workflow_text import _cmd
+from tests._shared.workflow_text import _cmd, changelog_entry, changelog_text
 from tests.test_auto_dev_preflight_resolutions import _after
 
 if TYPE_CHECKING:
@@ -862,7 +862,7 @@ def test_config_reference_states_the_codex_lane_default_on_egress() -> None:
 
 def test_codex_lane_confirm_prompt_payload_is_stated_identically() -> None:
     """#2791: all three egress statements name the full confirm prompt payload."""
-    changelog = _read("CHANGELOG.md")
+    changelog = changelog_text()
     entry = _after(changelog, "**Codex-lane clean clients now send", span=1600)
     config = _read("config/CONFIG_REFERENCE.md")
     row = config[config.index("| `review` | ReviewConfig |") :].split("\n", 1)[0]
@@ -1009,9 +1009,7 @@ def test_per_cycle_loop_rounds_are_documented() -> None:
 
 
 def test_per_cycle_loop_rounds_changelog_entry() -> None:
-    changelog = _read("CHANGELOG.md")
-    unreleased = changelog[: changelog.index("\n## [1.82.0]")]
-    entry = _after(unreleased, "**Every codex fix-loop cycle is now a", span=3000)
+    entry = _after(changelog_text(), "**Every codex fix-loop cycle is now a", span=3000)
     entry = " ".join(entry.split("\n- **", 1)[0].split())
     assert "(#2816)" in entry
     assert "`review_not_converging`" in entry
@@ -1031,9 +1029,9 @@ def test_confirm_reentry_key_is_documented_in_config_reference() -> None:
 
 
 def test_confirm_feedback_changelog_entry_names_the_opt_out() -> None:
-    changelog = _read("CHANGELOG.md")
-    unreleased = changelog[: changelog.index("\n## [1.80.1]")]
-    entry = _after(unreleased, "**Claude confirm findings now feed back", span=2000)
+    entry = _after(
+        changelog_text(), "**Claude confirm findings now feed back", span=2000
+    )
     entry = entry.split("\n- **", 1)[0]
     assert "(#2807)" in entry
     assert "`review.confirm_reentry`" in entry
@@ -1067,7 +1065,7 @@ def test_clean_review_unsupported_backend_is_documented() -> None:
     assert "`clean_review_unsupported_backend`" in section
     assert "A bare `cw dev-queue requeue` re-dispatches into the same block" in section
 
-    changelog = _read("CHANGELOG.md")
+    changelog = changelog_text()
     entry = _after(changelog, "**Claude-side confirm round for codex-lane", span=4000)
     entry = entry.split("\n- **", 1)[0]
     assert "still ignores clean mode" not in entry
@@ -1173,13 +1171,12 @@ def test_runbook_states_the_fix_resume_residual_risk() -> None:
 
 
 def test_opencode_lane_changelog_entry() -> None:
-    changelog = _read("CHANGELOG.md")
-    unreleased = changelog[: changelog.index("\n## [1.83.0]")]
-    assert "(#2806)" in unreleased
-    added = _after(unreleased, "**Opencode REVIEW lanes now run", span=2400)
+    changelog = changelog_text()
+    assert "(#2806)" in changelog
+    added = _after(changelog, "**Opencode REVIEW lanes now run", span=2400)
     assert "`cw review converge record-round --defer-should-fix`" in added
     assert "byte-identical" in added
-    changed = _after(unreleased, "**Opencode-lane clean clients now send", span=1600)
+    changed = _after(changelog, "**Opencode-lane clean clients now send", span=1600)
     changed = changed.split("\n- **", 1)[0]
     assert "`confirm_backend: codex` is not an opt-out" in changed
     assert "only `confirm_backend: none` avoids egress" in changed
@@ -1348,13 +1345,7 @@ _ENFORCEMENT_CLAIMS = ("cw enforces", "is enforced by cw")
 
 
 def _changelog_3038_bullet() -> str:
-    lines = [
-        line
-        for line in _read("CHANGELOG.md").splitlines()
-        if "(#3038, RFC 0017 I2)" in line
-    ]
-    assert len(lines) == 1
-    return lines[0]
+    return changelog_entry("(#3038, RFC 0017 I2)")
 
 
 def _runbook_3038_subsection() -> str:

@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._shared.workflow_text import changelog_text
+
 ROOT = Path(__file__).resolve().parents[1]
 CLAUSE = "the base branch declares `ci_evidence` but PyYAML is unavailable"
 
@@ -66,7 +68,7 @@ def test_changelog_fixed_entry_under_fixed_heading() -> None:
     # The entry sits under [Unreleased] until a release cut moves it into its
     # version section, so find it wherever it lives and check that its nearest
     # heading is "### Fixed".
-    lines = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8").splitlines()
+    lines = changelog_text().splitlines()
     entry_index = next(
         i for i, line in enumerate(lines) if "no longer silently ignores" in line
     )
