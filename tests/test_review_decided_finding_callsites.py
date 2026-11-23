@@ -65,7 +65,11 @@ from tests._review_convergence_helpers import (
     engine_pass_ledger,
     record,
 )
-from tests._shared.review_builders import _make_finding, _make_gap_finding
+from tests._shared.review_builders import (
+    _EVIDENCE_GAP,
+    _make_finding,
+    _make_gap_finding,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -536,7 +540,9 @@ class TestGapHoldCarveOut:
 
         assert finding.severity == "MUST_FIX"
         assert finding.outcome == "operator_action"
-        assert finding.rationale == _GAP_DETAIL
+        # #3823: the unrun check is the rationale, and the finding is marked held.
+        assert finding.rationale == _EVIDENCE_GAP
+        assert finding.held == "evidence_gap"
         assert finding.rule_id == rule
         assert finding.fingerprint == "fp-0"
 
