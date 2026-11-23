@@ -14,7 +14,7 @@ import pytest
 import yaml
 
 from cw.auto_dev_result.schema._vocab import KNOWN_BLOCKER_REASONS
-from tests._shared.workflow_text import _norm, _section_between
+from tests._shared.workflow_text import _norm, _section_between, changelog_text
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -167,23 +167,18 @@ def test_config_reference_documents_the_close_switch() -> None:
 
 
 def test_changelog_announces_the_close_sweep() -> None:
-    text = _read("CHANGELOG.md")
-    # Why: the whole file, not just [Unreleased]; the entry moves at release.
-    unreleased = text
+    changelog = changelog_text()
     for needle in (
         "#3044",
         "review.debt_closed",
         "review.debt_close_failed",
         "review_debt_close_enabled: false",
     ):
-        assert needle in unreleased
+        assert needle in changelog
 
 
 def test_changelog_announces_the_group() -> None:
-    text = _read("CHANGELOG.md")
-    # Why: the whole file, not just [Unreleased]; the entry moves at release.
-    unreleased = text
-    assert "cw review debt" in unreleased
+    assert "cw review debt" in changelog_text()
 
 
 def test_audit_warning_token_is_declared_and_emitted_verbatim() -> None:
@@ -244,11 +239,9 @@ def test_runbook_documents_debt_autoenqueue() -> None:
 
 
 def test_changelog_announces_debt_autoenqueue() -> None:
-    text = _read("CHANGELOG.md")
-    # Why: the whole file, not just [Unreleased]; the entry moves at release.
-    unreleased = text
+    changelog = changelog_text()
     for needle in ("#3045", "review.debt_enqueued", "review.debt_enqueue_skipped"):
-        assert needle in unreleased
+        assert needle in changelog
 
 
 def _finalize_2a() -> str:
@@ -291,11 +284,9 @@ def test_review_skill_names_the_new_friction_tokens() -> None:
 
 
 def test_changelog_announces_the_session_gate() -> None:
-    text = _read("CHANGELOG.md")
-    # Why: the whole file, not just [Unreleased]; the entry moves at release.
-    unreleased = text
-    assert "skipped_no_session" in unreleased
-    assert "cw review adjudicate" in unreleased
+    changelog = changelog_text()
+    assert "skipped_no_session" in changelog
+    assert "cw review adjudicate" in changelog
 
 
 def test_claude_md_documents_the_real_cw_guard() -> None:

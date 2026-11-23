@@ -98,6 +98,7 @@ from tests._shared.stage_preflight_builders import (
     synthetic_capabilities,
     task_for,
 )
+from tests._shared.workflow_text import _section_between, changelog_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -855,26 +856,6 @@ def test_every_dispatchable_backend_is_declared(tmp_path: Path, backend: str) ->
 # ---------------------------------------------------------------------------
 
 
-_RENAME_RELEASE_HEADER = "## [1.104.0]"
-
-
-def _unreleased_changelog() -> str:
-    """The release notes that introduced the reason rename.
-
-    Before the release cut that is the ``[Unreleased]`` section; once it is cut
-    the notes live under the ``[1.104.0]`` header, so a release cut does not
-    break this pin. Anchored to that version, the window does not slide to the
-    next release.
-    """
-    text = (_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    header = (
-        _RENAME_RELEASE_HEADER if _RENAME_RELEASE_HEADER in text else "## [Unreleased]"
-    )
-    start = text.index(header)
-    end = text.index("\n## [", start + 1)
-    return text[start:end]
-
-
 def test_the_headless_contract_documents_the_new_reason_and_the_aliases() -> None:
     contract = (_ROOT / "docs" / "headless-contract.md").read_text(encoding="utf-8")
     assert "| `stage_unsupported` |" in contract
@@ -888,7 +869,9 @@ def test_the_headless_contract_documents_the_new_reason_and_the_aliases() -> Non
 
 
 def test_the_changelog_names_every_renamed_reason() -> None:
-    unreleased = _unreleased_changelog()
-    assert "`stage_unsupported`" in unreleased
+    entry = _section_between(
+        changelog_text(), "- **One generic stage pre-flight replaces", "\n- **"
+    )
+    assert "`stage_unsupported`" in entry
     for old in _LEGACY:
-        assert f"`{old}`" in unreleased
+        assert f"`{old}`" in entry

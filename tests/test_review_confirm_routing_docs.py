@@ -30,7 +30,7 @@ from tests._review_convergence_helpers import (
     record,
     round_finding,
 )
-from tests._shared.workflow_text import _appendix, _cmd
+from tests._shared.workflow_text import _appendix, _cmd, changelog_text
 from tests.test_agent_comment_provenance import _blocker_reason_table, _table_reasons
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -230,4 +230,4 @@ def test_the_events_doc_key_set_matches_the_payload_builder() -> None:
 
 
 def test_the_changelog_has_the_bullet() -> None:
-    assert "(#3042, RFC 0017 I3" in _read("CHANGELOG.md")
+    assert "(#3042, RFC 0017 I3" in changelog_text()

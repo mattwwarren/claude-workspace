@@ -13,6 +13,7 @@ from cw.merge_probe import (
     merge_tree,
     probe_default_merge,
 )
+from tests._shared.base_branch_builders import patch_git_bounded
 from tests._shared.git_repos import git_in
 
 if TYPE_CHECKING:
@@ -442,3 +443,135 @@ class TestPublicHelpers:
     def test_the_old_private_names_are_gone(self) -> None:
         for name in ("_GitFailedError", "_resolve_base", "_git"):
             assert not hasattr(merge_probe, name), name
+
+
+class TestHeadKeyword:
+    """The ``head=`` keyword: merge ``origin/<base>`` into an arbitrary ref."""
+
+    def test_already_merged_tests_ancestry_of_the_given_head(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _diverged(
+            make_git_repo,
+            base={"a.txt": "a\n"},
+            branch={"b.txt": "b\n"},
+            main={"c.txt": "c\n"},
+        )
+        main_sha = git_in(repo, "rev-parse", "origin/main")
+        git_in(repo, "branch", "epic", "origin/main")
+
+        assert merge_probe.already_merged(repo, main_sha, 5.0, head="epic") is True
+        assert merge_probe.already_merged(repo, main_sha, 5.0, head="feature") is False
+
+    def test_probe_up_to_date_when_head_already_has_main(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _diverged(
+            make_git_repo,
+            base={"a.txt": "a\n"},
+            branch={"b.txt": "b\n"},
+            main={"c.txt": "c\n"},
+        )
+        git_in(repo, "merge", "--no-edit", "origin/main")
+        # HEAD is the pre-merge tip, which lacks main; "feature" has main merged.
+        git_in(repo, "checkout", "-q", "-b", "third", "HEAD~1")
+
+        probe = probe_default_merge(repo, "main", head="feature")
+
+        assert probe.state == "up_to_date"
+
+    def test_probe_conflict_against_a_named_head(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _diverged(
+            make_git_repo,
+            base={"shared.txt": "base\n"},
+            branch={"shared.txt": "feature\n"},
+            main={"shared.txt": "main\n"},
+        )
+        fork = git_in(repo, "merge-base", "feature", "origin/main")
+        git_in(repo, "checkout", "-q", "-b", "disjoint", fork)
+        _commit(repo, {"d.txt": "d\n"}, "disjoint change")
+        # HEAD (disjoint) merges cleanly with main; the named head "feature" conflicts.
+
+        conflict = probe_default_merge(repo, "main", head="feature")
+
+        assert conflict.state == "conflict"
+        assert conflict.conflicted_files == ("shared.txt",)
+
+    def test_probe_clean_against_a_named_head(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _diverged(
+            make_git_repo,
+            base={"shared.txt": "base\n"},
+            branch={"shared.txt": "feature\n"},
+            main={"shared.txt": "main\n"},
+        )
+        git_in(repo, "checkout", "-q", "-b", "third")
+
+        fork = git_in(repo, "merge-base", "feature", "origin/main")
+        git_in(repo, "checkout", "-q", "-b", "disjoint", fork)
+        disjoint_sha = _commit(repo, {"d.txt": "d\n"}, "disjoint change")
+        git_in(repo, "checkout", "-q", "third")
+        # HEAD (third = feature tip) conflicts with main; the named head is clean.
+        clean = probe_default_merge(repo, "main", head=disjoint_sha)
+        assert clean.state == "clean"
+
+    def test_unresolvable_head_is_unavailable(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _diverged(
+            make_git_repo,
+            base={"a.txt": "a\n"},
+            branch={"b.txt": "b\n"},
+            main={"c.txt": "c\n"},
+        )
+
+        probe = probe_default_merge(repo, "main", head="no-such-ref")
+
+        assert probe.state == "unavailable"
+
+    def test_default_call_argv_is_unchanged(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = _diverged(
+            make_git_repo,
+            base={"a.txt": "a\n"},
+            branch={"b.txt": "b\n"},
+            main={"c.txt": "c\n"},
+        )
+        main_sha = git_in(repo, "rev-parse", "origin/main")
+        calls = patch_git_bounded(monkeypatch, merge_probe)
+
+        probe_default_merge(repo, "main")
+
+        argvs = [argv for argv, _ in calls]
+        assert ["merge-base", "--is-ancestor", main_sha, "HEAD"] in argvs
+        assert [
+            "merge-tree",
+            "--write-tree",
+            "--no-messages",
+            "--name-only",
+            "-z",
+            "HEAD",
+            main_sha,
+        ] in argvs
+
+    def test_head_call_leaves_the_worktree_and_index_untouched(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _diverged(
+            make_git_repo,
+            base={"shared.txt": "base\n"},
+            branch={"shared.txt": "feature\n"},
+            main={"shared.txt": "main\n"},
+        )
+        git_in(repo, "checkout", "-q", "-b", "third")
+        before = _snapshot(repo)
+        head_before = git_in(repo, "rev-parse", "HEAD")
+
+        probe_default_merge(repo, "main", head="feature")
+
+        assert _snapshot(repo) == before
+        assert git_in(repo, "rev-parse", "HEAD") == head_before

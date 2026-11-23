@@ -3327,6 +3327,113 @@ never regresses (see **Park: `gate_timeout`**).
   (`cw dev-queue requeue <TICKET> -c <CLIENT>`; add `--repin-adopted-head`
   when the pin has drifted).
 
+### Open and land an epic (RFC 0020 B3, #3785)
+
+An epic is a set of rows sharing one base branch. The `--base` enqueue refusals
+are in [Enqueue on an epic base](#enqueue-on-an-epic-base---base-rfc-0020-b1-3783);
+the landing PR's adoption and its recovery are in
+[Adopt an open human PR](#adopt-an-open-human-pr---adopt-pr-rfc-0016-2943). This
+section is the operator procedure around them. The orchestration skill
+(`/orchestrate-sprint`, "Epics: open one, land one") carries the same steps for
+the orchestrator. cw creates and deletes no epic branch (RFC 0020 D-6), and there
+is no epic command group.
+
+**Open.**
+
+1. Confirm the branch is absent, then cut it from the default branch on origin,
+   with no checkout. First run
+   `git ls-remote --exit-code --heads origin refs/heads/epic/<parent-id>`: exit 2
+   means the branch is absent, so continue; exit 0 means it already exists, so stop
+   and read it, and never force-push it. A non-force push onto an existing ancestor
+   branch would fast-forward it silently, so the push alone does not catch it. Name
+   the full ref: the bare pattern `epic/<parent-id>` also matches a nested branch
+   such as `foo/epic/<parent-id>`. Then run `git fetch origin` and
+   `git push origin origin/<default-branch>:refs/heads/epic/<parent-id>`. The
+   default branch is the name `git symbolic-ref --short refs/remotes/origin/HEAD`
+   prints with its leading `origin/` removed. A refused push means the branch
+   appeared in the meantime: read the refusal and never force-push it.
+2. Verify it exists: `git ls-remote --exit-code --heads origin refs/heads/epic/<parent-id>`.
+3. Check the branch-protection prerequisite (RFC 0020 D-12). Two read-only GETs,
+   classic protection first, then rulesets:
+   `gh api repos/{owner}/{repo}/branches/epic/<parent-id>/protection` and
+   `gh api repos/{owner}/{repo}/rules/branches/epic/<parent-id>`. Classic protection
+   can be read from the first call, and rulesets from the second. What each outcome means:
+   - Verified: no required approving review from either call. A 404 "Branch not
+     protected" from the first call means no classic rule; a 200 from the first call
+     with `required_pull_request_reviews.required_approving_review_count` at 0 or the
+     key absent also counts. An empty array from the second call means no ruleset
+     rule. Required status checks are fine.
+   - Fail: a required approving review on the epic branch blocks the children's
+     merges into it. That is a 200 from the first call with
+     `required_pull_request_reviews.required_approving_review_count` above 0, or a
+     `pull_request` rule from the second call whose
+     `parameters.required_approving_review_count` is above 0. Do not enqueue children
+     until the repo admin removes that requirement, then re-run both reads.
+   - Unverified: a 403, a non-admin response or any other unreadable answer. Unreadable
+     means unverified, not passed. Ask the operator to confirm before enqueueing.
+
+   cw documents this prerequisite and reports it; it never changes repository
+   settings and never approves. After children are enqueued, `cw doctor` reports
+   `epic-base/<client>/<branch>` and warns when a child PR on the base awaits a
+   required review, a likely branch-protection requirement. The doctor reads recorded
+   row state and local refs only, so the `gh api` reads above stay the check to run
+   before enqueueing.
+4. Enqueue each child with `--base epic/<parent-id>`, per the enqueue section linked
+   above.
+
+**Land.** Short checklist; the orchestration skill has the full steps.
+
+- Every row of the base is terminal: completed, failed or cancelled.
+  `blocked_on_user` is not terminal. Decide each failed or cancelled row.
+- `gh pr list --base epic/<parent-id> --state open` prints nothing. A COMPLETED
+  row can still have its PR open under armed auto-merge.
+- The landing PR body cites every completed child. It comes from
+  `landing_citations.py`, which the installer links into `~/.claude/scripts/`.
+  Re-run `scripts/install-skills.sh` on this host so that path exists, or run
+  `python3 .claude/scripts/landing_citations.py --children '<ids>'` from the cw
+  repo or worktree root.
+- Adopt the landing PR under the parent ticket, per the adoption section linked
+  above. The parent must have no row at all, including a COMPLETED one.
+- Registering the landing PR as author makes `/review-monitor` eligible to dispatch
+  its auto-fix agent onto the shared `epic/<parent-id>` head on a red CI, a
+  conflicting merge state or a change request (2 attempts per PR per day), and to
+  channel-bump and DM about it. The adopted row also repairs a red or conflicted PR
+  at impl (D-8), so two autonomous actors can push to one branch. Leave a red or
+  conflicted landing PR to the adopted row's recovery; name any `/review-monitor`
+  auto-fix push in the CKPT line.
+
+**Deleting the epic branch (operator action, D-6).**
+
+- Delete only after the landing PR is MERGED (`gh pr view <N> --json state,baseRefName,headRefName`,
+  with `baseRefName` the default branch and `headRefName` `epic/<parent-id>`), no open
+  PR targets the epic branch, and every row of the base is terminal.
+- Record the tip first: `git ls-remote --heads origin refs/heads/epic/<parent-id>` prints its SHA.
+  Keep it in the landing record, so the branch can be recreated at that commit.
+- Run `git push origin --delete epic/<parent-id>`, then `git fetch --prune origin`.
+- The repo may auto-delete head branches. If
+  `git ls-remote --exit-code --heads origin refs/heads/epic/<parent-id>` exits 2, the branch
+  is already gone and there is nothing to do.
+- Never delete while a PR targets it: GitHub closes PRs whose base is deleted.
+- Keep the branch if the landing PR was closed unmerged.
+- cw creates and deletes no branch, and there is no epic command group.
+
+**Failure modes.**
+
+- Push refused because the branch appeared after the absence check (the check
+  itself covers a branch that already existed): read the refusal; never force-push.
+- `add --base` refused (absent on origin, equal to the default branch, or over
+  `epic.max_diff_lines`): see the enqueue section linked above.
+- Protection requires review: children cannot land into the epic branch. Clear
+  the rule first (step 3 above).
+- Adoption refused: the parent already has a row, or the PR base is not the client
+  default. See the adoption section linked above.
+- Head drift: while the landing row is still PENDING and has not run, a child PR
+  merging into the epic branch parks the adopted row `adopted_head_drift`; release
+  it per the adoption section linked above. Once the row has run, a descendant head
+  is absorbed after a session exit, and a COMPLETED row with armed auto-merge is
+  not re-checked. See the "For a landing row" paragraph in the adoption section
+  linked above.
+
 ### Review-recipe dispatch and the one-shot latch (#2507)
 
 The `address_review` and `auto_fix_ci` recipes decide under the dev-queue lock
