@@ -148,20 +148,23 @@ def _reset_reason(
 
 def _held_after_release(
     ledger: ConvergenceLedger, *, new_epoch: bool
-) -> list[HeldEntry]:
-    """The held memory that survives a release (#3823, operator item 6).
+) -> tuple[list[HeldEntry], list[HeldEntry]]:
+    """The held memory a release keeps and the memory it clears (#3823, item 6).
 
     A new epoch clears all of it (a fresh full re-review of the new tip re-raises
     any gap still real). Releasing an ``operator_action`` stop clears exactly the
     entries that stop named. Any other release keeps it all, so a gap the stop
-    never named can still park and never converges unverified.
+    never named can still park and never converges unverified. The cleared list
+    is what the audit entry records (operator item 14).
     """
     if new_epoch:
-        return []
+        return [], list(ledger.held)
     if ledger.stop_reason != STOP_OPERATOR_ACTION:
-        return list(ledger.held)
+        return list(ledger.held), []
     named = set(ledger.stop_identities)
-    return [entry for entry in ledger.held if entry.identity not in named]
+    kept = [entry for entry in ledger.held if entry.identity not in named]
+    cleared = [entry for entry in ledger.held if entry.identity in named]
+    return kept, cleared
 
 
 def _released(
@@ -179,18 +182,20 @@ def _released(
     and ``fix_cycles_used`` (so a raised cap buys exactly the extra cycles it
     names) and starts a fresh no-progress window instead.
     """
+    kept_held, cleared_held = _held_after_release(ledger, new_epoch=new_epoch)
     release = StopRelease(
         at=now,
         round=len(ledger.rounds),
         reason=ledger.stop_reason or _UNKNOWN_STOP,
         cause=cause,
         sha=head_sha,
+        cleared_held=cleared_held,
     )
     update: dict[str, object] = {
         "status": LEDGER_STATUS_IN_PROGRESS,
         "stop_reason": None,
         "stop_identities": [],
-        "held": _held_after_release(ledger, new_epoch=new_epoch),
+        "held": kept_held,
         "releases": [*ledger.releases, release],
     }
     if new_epoch:

@@ -230,7 +230,13 @@ class FixedEntry(BaseModel):
 
 
 class StopRelease(BaseModel):
-    """One audited release of a stop (or reopening of a stopped ledger)."""
+    """One audited release of a stop (or reopening of a stopped ledger).
+
+    ``cleared_held`` (#3823) is the held evidence-gap memory this release
+    dropped, with each gap's unrun-check rationale, so an operator can see which
+    unverified gap a release cleared. Dropped from dumps while empty, so a
+    release that cleared nothing, and every older ledger, dumps byte-identically.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -239,6 +245,9 @@ class StopRelease(BaseModel):
     reason: str
     cause: ReleaseCause
     sha: str
+    cleared_held: list[HeldEntry] = Field(
+        default_factory=list, exclude_if=lambda v: not v
+    )
 
 
 class CleanShaRemap(BaseModel):

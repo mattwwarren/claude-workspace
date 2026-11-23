@@ -359,6 +359,12 @@ class TestHeldRelease:
         assert released.released is not None
         assert released.released.cause == "operator_action_done"
         assert released.ledger.held == [other]
+        assert released.released.cleared_held == [
+            HeldEntry(identity=gap_identity(), rationale=GAP_RATIONALE)
+        ]
+        assert released.ledger.releases[-1].cleared_held == (
+            released.released.cleared_held
+        )
 
     def test_max_cycles_raised_release_keeps_the_held_memory(self) -> None:
         ledger = fresh_ledger(max_cycles=1)
@@ -370,6 +376,8 @@ class TestHeldRelease:
         released = reconcile_ledger(ledger, head="sha-2", max_cycles=4)
         assert released.released is not None
         assert released.released.cause == "max_cycles_raised"
+        assert released.released.cleared_held == []
+        assert "cleared_held" not in released.released.model_dump(mode="json")
         assert [entry.identity for entry in released.ledger.held] == [gap_identity()]
         reopened, follow = record(released.ledger, sha="sha-2")
         assert follow.decision == "stop_operator_action"
@@ -398,11 +406,19 @@ class TestHeldRelease:
         ledger, report = record(ledger, operator_finding("Contested"), sha="sha-2")
         assert report.decision == "stop_operator_action"
         assert gap_identity() not in ledger.stop_identities
-        assert [entry.identity for entry in ledger.held] == [gap_identity()]
+        other = HeldEntry(
+            identity=finding_identity("MUST_FIX", "N/A", "Another gap"),
+            rationale="run the linter",
+        )
+        ledger = ledger.model_copy(update={"held": [*ledger.held, other]})
         released = reconcile_ledger(ledger, head="sha-3")
         assert released.released is not None
         assert released.released.cause == "new_commits"
         assert released.ledger.held == []
+        assert released.released.cleared_held == [
+            HeldEntry(identity=gap_identity(), rationale=GAP_RATIONALE),
+            other,
+        ]
 
     def test_in_progress_held_ledger_resumes_with_held_intact(self) -> None:
         ledger, _ = record(fresh_ledger(), held_gap(), real_fix(), sha="sha-1")
