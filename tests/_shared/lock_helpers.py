@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import fcntl
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -195,6 +196,26 @@ def lock_hold_clock(monkeypatch: pytest.MonkeyPatch) -> _FakeClock:
     monkeypatch.setattr("cw.config.time", clock)
     monkeypatch.setattr("cw._lock_hold.time", clock)
     return clock
+
+
+@pytest.fixture
+def stalled_host_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Model a loaded runner: every real ``time.monotonic`` read costs 0.3s.
+
+    Patches the global ``time`` module, not the seam's own binding, on purpose:
+    once the autouse freeze replaces ``cw.config.time`` with a private
+    ``_FakeClock``, a patch to the real module cannot reach the seam, so a test
+    that uses this fixture proves the default recording path is hermetic. It
+    deliberately leaves ``cw._flock.time`` alone.
+    """
+    now = 0.0
+
+    def _stepping_monotonic() -> float:
+        nonlocal now
+        now += 0.3
+        return now
+
+    monkeypatch.setattr(time, "monotonic", _stepping_monotonic)
 
 
 class _RecordingLockPath:
