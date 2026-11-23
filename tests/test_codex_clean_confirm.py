@@ -1430,13 +1430,12 @@ class TestEvidenceGapConfirmRound:
         assert ledger.status == "awaiting_confirm"
         assert [r.kind for r in ledger.rounds] == ["loop"]
 
-    def test_a_mixed_round_stops_the_ledger_for_the_operator(self, wt: Path) -> None:
-        """The accepted lane limit (#3793, operator R2-1): pinned, not fixed.
+    def test_a_mixed_round_repairs_the_reproduced_finding_first(self, wt: Path) -> None:
+        """A gap beside a reproduced MUST_FIX repairs first (#3823).
 
-        A gap beside a reproduced MUST_FIX reaches the ledger as an operator
-        action, so the confirm round parks (``codex_must_fix_findings``, the
-        verdict is blocking) before the reproduced finding is repaired; a
-        requeue after ``cw review settle`` releases it.
+        The reproduced finding is fixed before the gap is judged, so the confirm
+        round records a fix and the gap is carried as ledger memory instead of
+        stopping the ledger. The codex park still blocks on the verdict.
         """
         outcome = _apply(
             wt, _client(wt), RoleAwareClaudeRunner(_gap_and_reproduced_role)
@@ -1445,16 +1444,18 @@ class TestEvidenceGapConfirmRound:
         blocker = outcome.result.blocker
         assert blocker is not None
         assert blocker.reason == CODEX_MUST_FIX_FINDINGS
-        assert "convergence ledger stopped (operator_action)" in blocker.details
+        assert "convergence ledger stopped" not in blocker.details
         assert outcome.verdict is not None
         assert has_held_findings(outcome.verdict, "evidence_gap")
         assert [f.summary for f in outcome.verdict.must_fix] == [_REPRODUCED_SUMMARY]
         ledger = _ledger(wt)
-        assert ledger.stop_reason == "operator_action"
-        assert ledger.status == "stopped"
+        assert ledger.status == "in_progress"
+        assert [entry.rationale for entry in ledger.held] == [_EVIDENCE_GAP]
         confirm = ledger.rounds[-1]
         assert confirm.kind == "confirm"
-        assert confirm.new_operator_action >= 1
+        assert confirm.new_fix >= 1
+        assert confirm.new_operator_action == 0
+        assert confirm.new_held == 1
 
 
 # ---------------------------------------------------------------------------

@@ -161,6 +161,26 @@ class RoundFinding(BaseModel):
     # are dropped from dumps, so a builtin RoundFinding is byte-identical.
     fingerprint: str | None = Field(default=None, exclude_if=lambda v: v is None)
     rule_id: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    # #3823: an evidence-gap hold (``operator_action`` + ``evidence_gap``). It is
+    # held for the operator, not fixed, and the ledger carries it across a round.
+    # Dropped when None, so every other finding dumps byte-identically.
+    held: Literal["evidence_gap"] | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
+
+
+class HeldEntry(BaseModel):
+    """An evidence-gap hold carried on the ledger until released (#3823).
+
+    ``rationale`` is the unrun check the reviewer named, which the operator needs
+    to run it. The entry leaves the ledger when the finding settles or the stop
+    is released.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    identity: FindingIdentity
+    rationale: str
 
 
 class SettledEntry(BaseModel):
@@ -358,6 +378,9 @@ class RoundRecord(BaseModel):
     shard_count: int = 1
     shards_reviewed: int = 1
     engine: bool = Field(default=False, exclude_if=lambda v: not v)
+    # #3823: evidence-gap holds this round raised. Not counted in new_accepted;
+    # dropped while 0, so a held-free round dumps byte-identically.
+    new_held: int = Field(default=0, exclude_if=lambda v: v == 0)
 
 
 class FrozenCounts(BaseModel):
@@ -428,6 +451,9 @@ class ConvergenceLedger(BaseModel):
     confirm_overrides: list[ConfirmOverride] = Field(
         default_factory=list, exclude_if=lambda v: not v
     )
+    # #3823: evidence-gap holds carried across rounds until a release or settle.
+    # Dropped while empty, so a held-free ledger dumps byte-identically.
+    held: list[HeldEntry] = Field(default_factory=list, exclude_if=lambda v: not v)
     epoch_start_round: int = 0
     window_start_round: int = 0
     fix_cycles_used: int = 0

@@ -4088,18 +4088,16 @@ finding sits in `accepted` and is not covered, so overriding the mixed park does
 not settle it: it ships past the reproduced findings and leaves the gap
 unresolved. Settle it with `cw review settle` (anchored findings only).
 
-**Limit:** in the Claude confirm round and the Claude-native clean-mode
-`cw review converge record-round`, a mixed verdict (a gap finding beside a
-reproduced unmarked MUST_FIX) stops the convergence ledger with
-`operator_action` before the unmarked finding is repaired. The Claude-native
-clean-mode lane takes the `review_operator_actionable` exit
-(`stop_operator_action`). The codex Claude confirm round parks as
-`codex_must_fix_findings` with `convergence ledger stopped (operator_action)`
-appended to the details, because its verdict is blocking. Nothing is hidden or
-dropped. `cw review settle` on the gap finding plus a requeue releases it, and the
-unmarked finding is repaired on the requeue. The codex fix loop (blocking and
-clean mode), the Claude-native blocking-mode lane and a pure-gap verdict repair
-reproduced findings first.
+**Carry across the repair cycle (#3823).** In clean mode, a mixed verdict (a gap
+finding beside a reproduced unmarked MUST_FIX) repairs the reproduced finding
+first. The gap is carried on the convergence ledger as `held` memory, with its
+unrun check in `held[].rationale`. While the gap is outstanding, the next clean
+round stops the ledger with `operator_action` and names it: `stop.settle_payload`
+lists the identity, and the unrun check is read from the ledger JSON. Release is
+`cw review settle` on the gap, or a same-tip requeue, which clears the carried
+memory; a full re-review re-raises the gap if it is still real. The Claude confirm
+round parks `review_operator_actionable` with the unrun check in its details, and
+does not stop with `review_not_converging`.
 
 **Park: `review_engine_modified` (RFC 0017, #3039).** A client with
 `review.engine` set runs its own review skill as the Claude-native round

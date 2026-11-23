@@ -58,6 +58,7 @@ from cw.claude_review import (
     _which_claude,
     run_claude_review,
 )
+from cw.codex_clean_held import held_stop_blocker
 from cw.codex_engine_confirm import engine_confirm_park, pending_lines
 from cw.codex_engine_defers import engine_defer_findings, record_codex_engine_defers
 from cw.codex_review import (
@@ -78,6 +79,7 @@ from cw.review_convergence import (
     CONFIRM_CAUSE_CRASH,
     DECISION_CLEAN,
     DECISION_STOP_CONFIRM_ESCALATED,
+    DECISION_STOP_OPERATOR_ACTION,
     LEDGER_RELATIVE_PATH,
     LEDGER_STATUS_AWAITING_CONFIRM,
     LEDGER_STATUS_CONVERGED,
@@ -91,6 +93,7 @@ from cw.review_convergence import (
     frozen_counts_from_verdict,
     load_ledger,
     one_line,
+    outstanding_held,
     reconcile_for_init,
     record_confirm_failure,
     record_round,
@@ -822,7 +825,21 @@ def _gate_after_loop(
         ledger, report = _record_loop_round(gate, ledger, verdict)
         if report.decision == DECISION_CLEAN:
             return _converged_outcome(gate, base)
+        if _is_held_stop(ledger, report.decision):
+            return _parked(gate, base, held_stop_blocker(ledger))
     return _run_confirm(gate, ledger, base)
+
+
+def _is_held_stop(ledger: ConvergenceLedger, decision: str) -> bool:
+    """Whether a stop names only carried evidence gaps (#3823), not a contest.
+
+    A contest or #1817 stop that happens to coexist with held memory keeps its
+    own ``_run_confirm`` disposition: every stop identity must be a held gap.
+    """
+    if decision != DECISION_STOP_OPERATOR_ACTION:
+        return False
+    held = {entry.identity for entry in outstanding_held(ledger)}
+    return bool(held) and all(identity in held for identity in ledger.stop_identities)
 
 
 def apply_clean_confirm(

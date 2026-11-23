@@ -48,6 +48,7 @@ from cw.review_convergence._confirm_route import (
     route_engine_confirm,
 )
 from cw.review_convergence._findings import (
+    carried_held,
     classify_findings,
     mark_reseen,
     settled_debt_key,
@@ -224,30 +225,59 @@ def _clean_decision(ledger: ConvergenceLedger, kind: RoundKind) -> Decision:
     return DECISION_CONFIRM_REQUIRED if needs_confirm else DECISION_CLEAN
 
 
+def _operator_identities(findings: Sequence[RoundFinding]) -> list[FindingIdentity]:
+    """The distinct identities of *findings*, in first-seen order."""
+    identities: list[FindingIdentity] = []
+    for finding in findings:
+        identity = finding_identity(
+            finding.severity,
+            finding.file,
+            finding.summary,
+            fingerprint=finding.fingerprint,
+        )
+        if identity not in identities:
+            identities.append(identity)
+    return identities
+
+
+def _operator_stop(
+    classified: Classified, held: Sequence[FindingIdentity]
+) -> _Outcome | None:
+    """The operator-action stop of a round, or ``None`` (#3823 adds the held case).
+
+    A contest (``new_operator``) names its findings. A held gap with no new fix
+    names the carried gaps; with a new fix the fix goes first.
+    """
+    if classified.new_operator:
+        identities = _operator_identities(classified.new_operator)
+        return _Outcome(DECISION_STOP_OPERATOR_ACTION, STOP_OPERATOR_ACTION, identities)
+    if held and not classified.new_fix:
+        return _Outcome(DECISION_STOP_OPERATOR_ACTION, STOP_OPERATOR_ACTION, list(held))
+    return None
+
+
 def _decide(
     ledger: ConvergenceLedger,
     classified: Classified,
     record: RoundRecord,
     rounds: Sequence[RoundRecord],
+    held: Sequence[FindingIdentity],
 ) -> _Outcome:
+    """Decide the round. *held* is the carried evidence-gap memory (#3823).
+
+    A held gap with no new fix stops the ledger for the operator and names the
+    gap. With a new fix in the same round the fix goes first, and the held memory
+    stays on the ledger until the release.
+    """
     if record.clean:
         return _Outcome(_clean_decision(ledger, record.kind))
     accepted = [*classified.new_fix, *classified.new_operator]
     recurring = detect_oscillation(ledger, accepted, record.reviewed_sha)
     if recurring:
         return _Outcome(DECISION_STOP_NOT_CONVERGING, STOP_OSCILLATION, recurring)
-    if classified.new_operator:
-        identities: list[FindingIdentity] = []
-        for finding in classified.new_operator:
-            identity = finding_identity(
-                finding.severity,
-                finding.file,
-                finding.summary,
-                fingerprint=finding.fingerprint,
-            )
-            if identity not in identities:
-                identities.append(identity)
-        return _Outcome(DECISION_STOP_OPERATOR_ACTION, STOP_OPERATOR_ACTION, identities)
+    operator_stop = _operator_stop(classified, held)
+    if operator_stop is not None:
+        return operator_stop
     start = max(ledger.epoch_start_round, ledger.window_start_round)
     if detect_no_progress(rounds, window=ledger.stall_window, start=start):
         return _Outcome(DECISION_STOP_NOT_CONVERGING, STOP_NO_PROGRESS)
@@ -411,7 +441,17 @@ def _apply_round(
         if route is not None
         else classify_findings(ledger, findings, round_number)
     )
-    if classified.new_accepted == 0:
+    settled_after = [
+        *mark_reseen(ledger.settled, classified.reseen, round_number),
+        *classified.newly_settled,
+    ]
+    # #3823 (R4/R5): the held memory after this round. A round is clean only when
+    # it adds no accepted finding and no outstanding evidence gap remains.
+    held_after = carried_held(
+        ledger.held, classified, {entry.identity: entry for entry in settled_after}
+    )
+    clean = classified.new_accepted == 0 and not held_after
+    if clean:
         _guard_unread(unread)
     record = RoundRecord(
         round=round_number,
@@ -423,7 +463,8 @@ def _apply_round(
         new_operator_action=len(classified.new_operator),
         new_settled=len(classified.newly_settled),
         resurfaced_settled=classified.resurfaced,
-        clean=classified.new_accepted == 0,
+        clean=clean,
+        new_held=len(classified.held),
         roster=list(roster),
         recorded_at=now,
         shard_count=shard_count,
@@ -431,17 +472,16 @@ def _apply_round(
         engine=engine,
     )
     rounds = [*ledger.rounds, record]
+    held_ids = [entry.identity for entry in held_after]
     outcome = (
         _park_outcome(route)
         if route is not None and route.parks
-        else _decide(ledger, classified, record, rounds)
+        else _decide(ledger, classified, record, rounds, held_ids)
     )
     update: dict[str, object] = {
         "rounds": rounds,
-        "settled": [
-            *mark_reseen(ledger.settled, classified.reseen, round_number),
-            *classified.newly_settled,
-        ],
+        "settled": settled_after,
+        "held": held_after,
         "awaiting_confirm_sha": None,
     }
     if ledger.frozen is None and frozen is not None:
@@ -591,6 +631,7 @@ def _recorded_identities(
         ledger.stop_identities,
         [entry.identity for entry in ledger.fixed],
         [entry.identity for entry in ledger.settled],
+        [entry.identity for entry in ledger.held],
     )
     for identities in sources:
         for identity in identities:

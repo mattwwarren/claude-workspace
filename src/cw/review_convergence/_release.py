@@ -167,6 +167,8 @@ def _released(
         "status": LEDGER_STATUS_IN_PROGRESS,
         "stop_reason": None,
         "stop_identities": [],
+        # #3823 (R6): a release clears the carried evidence-gap memory.
+        "held": [],
         "releases": [*ledger.releases, release],
     }
     if new_epoch:
