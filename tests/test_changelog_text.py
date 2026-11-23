@@ -48,12 +48,18 @@ def _pool(text: str) -> str:
 
 
 def _cut(text: str, version: str = _SCRATCH_VERSION, date: str = _SCRATCH_DATE) -> str:
-    """Insert a version heading under ``[Unreleased]``, as a release cut does."""
+    """Move the Unreleased body under a new version heading, as a cut does."""
     if text.count(_UNRELEASED) != 1:
         msg = f"expected exactly one {_UNRELEASED!r} in the changelog"
         raise AssertionError(msg)
     heading = f"## [{version}] - {date}\n"
-    return text.replace(_UNRELEASED, f"{_UNRELEASED}\n{heading}")
+    start = text.index(_UNRELEASED)
+    body_start = start + len(_UNRELEASED)
+    next_heading = _RELEASED_HEADING.search(text, body_start)
+    body_end = next_heading.start() if next_heading else len(text)
+    body = text[body_start:body_end]
+    replacement = f"{_UNRELEASED}\n{heading}{body}"
+    return text[:start] + replacement + text[body_end:]
 
 
 _TWO_SECTIONS = (

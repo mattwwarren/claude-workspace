@@ -43,7 +43,9 @@ _ALLOWLIST: dict[str, str] = {
     "tests/test_merge_probe.py": "synthetic changelog bytes for merge probe",
     "tests/test_review_convergence_merge_tolerance.py": "synthetic merge bytes",
     "tests/test_reconcile_changelog_repair.py": "changelog-repair recipe tests",
-    "tests/test_release_tag_workflow.py": "quotes release-tag.yml's warning text",
+    "tests/test_release_tag_workflow.py": (
+        "quotes release-tag.yml's heading warning text"
+    ),
     "tests/test_changelog_slice_guard.py": "self-test snippets for this guard",
     "tests/test_changelog_text.py": "release-cut simulation builder",
 }
