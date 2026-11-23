@@ -122,9 +122,10 @@ def _refusal(gh_stderr: str, tail: str, pr_info: dict[str, object]) -> FinalizeB
     if gh_stderr.startswith(PR_CONFLICTING_PREFIX):
         details += (
             "\nGitHub reports the PR conflicting: resolve the conflict named above"
-            " (a CHANGELOG-only conflict into a non-default base is `cw worktree"
-            " changelog-sync --base <base> --union-conflict`), push plainly, then"
-            " requeue finalize."
+            " (a CHANGELOG-only conflict into a non-default base: run `git fetch"
+            " origin <base>`, then `cw worktree changelog-sync --base <base>"
+            " --union-conflict`, which never fetches), push plainly, then requeue"
+            " finalize."
         )
     return FinalizeBlock(
         AUTOMERGE_NOT_ARMED, details, retry_eligible=True, pr_info=pr_info

@@ -416,6 +416,8 @@ class TestPrConflictingHint:
         assert block.details.startswith(f"arm-automerge failed; gh_stderr: {gh}")
         assert "GitHub reports the PR conflicting" in block.details
         assert "--union-conflict" in block.details
+        fetch = block.details.index("`git fetch origin <base>`")
+        assert fetch < block.details.index("`cw worktree changelog-sync --base <base>")
         assert "because of the conflict" not in block.details
         assert block.retry_eligible is True
 
