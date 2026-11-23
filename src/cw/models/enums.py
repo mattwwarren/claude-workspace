@@ -304,6 +304,12 @@ class OrchestratorEventType(StrEnum):
     PR_MERGED = "pr.merged"
     DISPATCH_TICK = "dispatch.tick"
     DISPATCH_LOOP_EXITED = "dispatch.loop_exited"
+    # #3726 -- a `cw dev-queue serve --supervised` child has not exited ten
+    # minutes after its supervisor forwarded the restart SIGHUP. Signal only:
+    # the supervisor never signals again, terminates or kills the child.
+    # Emitted at most once per forwarded SIGHUP. Payload: child_pid,
+    # stalled_seconds, checkout. Fleet-level, not a page.
+    DISPATCH_RESTART_STALLED = "dispatch.restart_stalled"
     # #2965 -- audit record emitted by the dispatch loop's automatic session
     # prune once per run that archived or deleted at least one session. Payload:
     # archived_count, deleted_count, kept_count, cutoff (ISO-8601), age_days,
