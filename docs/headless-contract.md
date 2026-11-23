@@ -1402,8 +1402,11 @@ ordinary path), has no `--json`, emits no event and writes nothing.
 **Note (#3822): deploy ordering for version 2.** Version 2 is a hard bump with no
 look-ahead. Restart `cw dev-queue serve` immediately after merge, before further
 engine rounds run. A v1 summary is rejected as `unsupported_schema_version`. An
-old on-disk round summary is skipped by `find_round_summary_for_head`, so that
-round re-runs rather than being read. Repo engine skills must echo the
+old on-disk round summary is skipped by `find_round_summary_for_head`, and the
+review attestation then records a ledger-only attestation with no engine
+evidence. Nothing re-runs the round by itself: an operator who needs an
+engine-backed attestation for a round written at version 1 requeues the review
+stage after the restart. Repo engine skills must echo the
 `schema_version` from the args line, which cw reads from the constant, and must
 not hard-code it.
 
