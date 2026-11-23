@@ -3352,12 +3352,17 @@ is no epic command group.
    `gh api repos/{owner}/{repo}/branches/epic/<parent-id>/protection` and
    `gh api repos/{owner}/{repo}/rules/branches/epic/<parent-id>`. Classic protection
    can be read from the first call, and rulesets from the second. What each outcome means:
-   - Verified: a 404 "Branch not protected" from the first call and no
-     `pull_request` rule with `required_approving_review_count` above 0 from the
-     second. Required status checks are fine.
+   - Verified: no required approving review from either call. A 404 "Branch not
+     protected" from the first call means no classic rule; a 200 from the first call
+     with `required_pull_request_reviews.required_approving_review_count` at 0 or the
+     key absent also counts. An empty array from the second call means no ruleset
+     rule. Required status checks are fine.
    - Fail: a required approving review on the epic branch blocks the children's
-     merges into it. Do not enqueue children until the repo admin removes that
-     requirement, then re-run both reads.
+     merges into it. That is a 200 from the first call with
+     `required_pull_request_reviews.required_approving_review_count` above 0, or a
+     `pull_request` rule from the second call whose
+     `parameters.required_approving_review_count` is above 0. Do not enqueue children
+     until the repo admin removes that requirement, then re-run both reads.
    - Unverified: a 403, a non-admin response or any other unreadable answer. Unreadable
      means unverified, not passed. Ask the operator to confirm before enqueueing.
 

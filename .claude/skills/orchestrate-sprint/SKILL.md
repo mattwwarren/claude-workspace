@@ -585,9 +585,13 @@ are in `docs/dispatch-runbook.md`, "Open and land an epic".
 
    - Pass: neither classic protection nor a ruleset requires an approving review on
      the epic branch. Required status checks are fine. A 404 "Branch not protected"
-     from the first call means no classic rule.
-   - Fail: a `pull_request` rule from the second call with
-     `required_approving_review_count` above 0 is the same problem.
+     from the first call means no classic rule. A 200 from the first call is read at
+     `required_pull_request_reviews.required_approving_review_count`: 0 or the key
+     absent is Pass. An empty array from the second call means no ruleset rule.
+   - Fail: a 200 from the first call with
+     `required_pull_request_reviews.required_approving_review_count` above 0, or a
+     `pull_request` rule from the second call whose
+     `parameters.required_approving_review_count` is above 0.
    - Unverified: a 403 or any other unreadable response. Unreadable means not verified.
    - On fail or unverified, say so in one line and knock once for the operator. Do
      not enqueue children until the operator confirms. cw documents and reports
