@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `cw doctor` reports each live epic base as `epic-base/<client>/<branch>` (RFC 0020 B4, #3786): diff size against `epic.max_diff_lines`, the age of the oldest unlanded commit, and a merge probe of the default branch into the epic. Read-only and fail-open; warns on an over-ceiling base, a probe conflict, or a child PR awaiting a required review on the base (likely branch protection).
+
 ## [1.106.0] - 2026-11-22
 
 ### Added
