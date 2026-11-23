@@ -36,6 +36,7 @@ from cw.review_convergence._models import (
     LEDGER_STATUS_CONVERGED,
     LEDGER_STATUS_IN_PROGRESS,
     LEDGER_STATUS_STOPPED,
+    STOP_OPERATOR_ACTION,
     LedgerReset,
     Reconciled,
     StopRelease,
@@ -50,7 +51,11 @@ if TYPE_CHECKING:
 
     from cw.review_convergence._backend import ResolvedBackend
     from cw.review_convergence._merge_tolerance import MergeTolerance
-    from cw.review_convergence._models import ConvergenceLedger, ReleaseCause
+    from cw.review_convergence._models import (
+        ConvergenceLedger,
+        HeldEntry,
+        ReleaseCause,
+    )
 
 _UNKNOWN_STOP = "unknown"
 #: ``git merge-base --is-ancestor`` exit for the confirmed "not an ancestor".
@@ -141,6 +146,24 @@ def _reset_reason(
     return None
 
 
+def _held_after_release(
+    ledger: ConvergenceLedger, *, new_epoch: bool
+) -> list[HeldEntry]:
+    """The held memory that survives a release (#3823, operator item 6).
+
+    A new epoch clears all of it (a fresh full re-review of the new tip re-raises
+    any gap still real). Releasing an ``operator_action`` stop clears exactly the
+    entries that stop named. Any other release keeps it all, so a gap the stop
+    never named can still park and never converges unverified.
+    """
+    if new_epoch:
+        return []
+    if ledger.stop_reason != STOP_OPERATOR_ACTION:
+        return list(ledger.held)
+    named = set(ledger.stop_identities)
+    return [entry for entry in ledger.held if entry.identity not in named]
+
+
 def _released(
     ledger: ConvergenceLedger,
     cause: ReleaseCause,
@@ -167,8 +190,7 @@ def _released(
         "status": LEDGER_STATUS_IN_PROGRESS,
         "stop_reason": None,
         "stop_identities": [],
-        # #3823 (R6): a release clears the carried evidence-gap memory.
-        "held": [],
+        "held": _held_after_release(ledger, new_epoch=new_epoch),
         "releases": [*ledger.releases, release],
     }
     if new_epoch:
