@@ -87,6 +87,7 @@ from cw.stage_verification.finalize_arm import (
     check_automerge_allowed,
     verify_pr_state,
 )
+from cw.stage_verification.finalize_changelog_repair import check_mergeability_repairing
 from cw.stage_verification.finalize_ci_evidence import (
     CiContext,
     DeferredGate,
@@ -109,7 +110,6 @@ from cw.stage_verification.finalize_pr import (
     DetectedPr,
     apply_override_section,
     bind_live_pr,
-    check_mergeability,
     create_pr_for,
     detect_branch_pr,
     probe_default,
@@ -362,10 +362,20 @@ def _fence(run: _Run, state: _State) -> Payload | None:
 
 def _arm_and_ship(run: _Run, state: _State, bound: BoundPr) -> Payload:
     """Mergeability, the re-fence, the arm and the verification, then ship."""
-    blocked, friction = check_mergeability(run.worktree, bound.url)
-    if blocked is not None:
-        return run.blocked(blocked, state, STAGE5_POST_CREATE)
-    state.friction.extend(friction)
+    # stays on client.default_branch: the non-default-base gate asks whether the row's
+    # base is the repo default itself (the trust root), not where the row merges.
+    outcome = check_mergeability_repairing(
+        run.worktree,
+        bound.url,
+        base_branch=run.base_branch,
+        default_branch=run.client.default_branch,
+        branch=state.branch,
+    )
+    if outcome.head is not None:
+        state.head = outcome.head
+    state.friction.extend(outcome.friction)
+    if outcome.block is not None:
+        return run.blocked(outcome.block, state, STAGE5_POST_CREATE)
     park = _fence(run, state)
     if park is not None:
         return park

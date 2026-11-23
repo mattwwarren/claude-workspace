@@ -150,7 +150,7 @@ class MergeOutcome:
     growth_tree: str
 
 
-def _fetch_default(worktree: Path, base_branch: str) -> str | None:
+def fetch_default_branch(worktree: Path, base_branch: str) -> str | None:
     """``None`` when ``origin/<base_branch>`` was fetched, else why not."""
     try:
         fetched = run_git(
@@ -177,7 +177,7 @@ def probe_default_branch(
     blocks ``impl_failed`` (``merge_conflict_with_default_branch``); on a repair
     row it sets ``needs_merge``. It never mutates the tree.
     """
-    failed = _fetch_default(worktree, base_branch)
+    failed = fetch_default_branch(worktree, base_branch)
     if failed is not None:
         return ProbeOutcome(friction=(f"{PROBE_UNAVAILABLE}: {failed}",))
     probe = probe_default_merge(worktree, base_branch)
