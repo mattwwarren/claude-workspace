@@ -48,6 +48,7 @@ from tests._review_convergence_helpers import (
 
 if TYPE_CHECKING:
     from cw.review_convergence import (
+        FindingIdentity,
         RecordableRoundKind,
         RoundFinding,
         RoundReport,
@@ -55,6 +56,19 @@ if TYPE_CHECKING:
 
 _SHA = "sha-0"
 _KINDS = ["loop", "confirm"]
+_COVERAGE_RULE = "coverage.unrun-check"
+_FINGERPRINT = "fp-coverage-gap"
+
+
+def _coverage_gap() -> RoundFinding:
+    """A fingerprinted ``coverage.*`` evidence gap: never deferrable (R13)."""
+    return held_gap().model_copy(
+        update={"fingerprint": _FINGERPRINT, "rule_id": _COVERAGE_RULE}
+    )
+
+
+def _coverage_gap_identity() -> FindingIdentity:
+    return finding_identity("MUST_FIX", "N/A", GAP_SUMMARY, fingerprint=_FINGERPRINT)
 
 
 def _open_ledger(kind: RecordableRoundKind) -> ConvergenceLedger:
@@ -111,7 +125,7 @@ class TestClassifyHeld:
         classified = classify_findings(fresh_ledger(), [fix], 2)
         assert carried_held(prior, classified, {}) == []
 
-    def test_settled_identity_prunes_prior_memory(self) -> None:
+    def test_applying_settle_prunes_prior_memory(self) -> None:
         prior = [HeldEntry(identity=gap_identity(), rationale=GAP_RATIONALE)]
         classified = classify_findings(fresh_ledger(), [], 2)
         ledger = fresh_ledger().model_copy(update={"held": prior})
@@ -124,7 +138,44 @@ class TestClassifyHeld:
             round=1,
             origin="operator",
         )
-        assert carried_held(prior, classified, {gap_identity(): settled_entry}) == []
+        settled = {gap_identity(): settled_entry}
+        assert carried_held(prior, classified, settled) == []
+        settled_ledger = ledger.model_copy(update={"settled": [settled_entry]})
+        assert outstanding_held(settled_ledger) == []
+
+    def test_non_applying_settle_leaves_a_coverage_gap_outstanding(self) -> None:
+        identity = _coverage_gap_identity()
+        prior = [
+            HeldEntry(
+                identity=identity, rationale=GAP_RATIONALE, rule_id=_COVERAGE_RULE
+            )
+        ]
+        classified = classify_findings(fresh_ledger(), [], 2)
+        deferred = SettledEntry(
+            identity=identity,
+            outcome="defer",
+            rationale="operator deferred",
+            round=1,
+            origin="operator",
+        )
+        assert carried_held(prior, classified, {identity: deferred}) == prior
+        ledger = fresh_ledger().model_copy(
+            update={"held": prior, "settled": [deferred]}
+        )
+        assert outstanding_held(ledger) == prior
+
+    def test_applying_defer_discharges_a_non_coverage_engine_gap(self) -> None:
+        identity = _coverage_gap_identity()
+        prior = [HeldEntry(identity=identity, rationale=GAP_RATIONALE, rule_id="x.y")]
+        classified = classify_findings(fresh_ledger(), [], 2)
+        deferred = SettledEntry(
+            identity=identity,
+            outcome="defer",
+            rationale="operator deferred",
+            round=1,
+            origin="operator",
+        )
+        assert carried_held(prior, classified, {identity: deferred}) == []
 
 
 @pytest.mark.parametrize("kind", _KINDS)
@@ -199,6 +250,62 @@ class TestHeldCarriedAcrossRounds:
         )
         assert report.decision == "stop_operator_action"
         assert ledger.rounds[-1].clean is False
+
+
+class TestDeferOfANonDeferrableGap:
+    """Operator item 4: a defer that does not apply cannot discharge a gap."""
+
+    def test_defer_of_a_fingerprinted_coverage_gap_is_inert(self) -> None:
+        ledger, report = record(fresh_ledger(), _coverage_gap(), real_fix(), sha="s-1")
+        assert report.decision == "continue"
+        ledger, settle = operator_settle(
+            ledger,
+            [
+                SettleTarget(
+                    severity="MUST_FIX",
+                    file="N/A",
+                    summary=GAP_SUMMARY,
+                    fingerprint=_FINGERPRINT,
+                )
+            ],
+            actor="operator",
+            reason="accept it",
+            now=NOW,
+            outcome="defer",
+        )
+        assert [entry.identity for entry in settle.settled] == [
+            _coverage_gap_identity()
+        ]
+        assert [entry.identity for entry in outstanding_held(ledger)] == [
+            _coverage_gap_identity()
+        ]
+        ledger, follow = record(ledger, _coverage_gap(), sha="s-2")
+        assert follow.decision == "stop_operator_action"
+        assert ledger.status == "stopped"
+        assert ledger.rounds[-1].clean is False
+        assert ledger.last_clean_sha is None
+
+    def test_a_quiet_round_after_the_inert_defer_still_stops(self) -> None:
+        ledger, _ = record(fresh_ledger(), _coverage_gap(), real_fix(), sha="s-1")
+        ledger, _ = operator_settle(
+            ledger,
+            [
+                SettleTarget(
+                    severity="MUST_FIX",
+                    file="N/A",
+                    summary=GAP_SUMMARY,
+                    fingerprint=_FINGERPRINT,
+                )
+            ],
+            actor="operator",
+            reason="accept it",
+            now=NOW,
+            outcome="defer",
+        )
+        ledger, follow = record(ledger, sha="s-2")
+        assert follow.decision == "stop_operator_action"
+        assert ledger.rounds[-1].clean is False
+        assert ledger.last_clean_sha is None
 
 
 class TestHeldBesideOtherRoundTypes:

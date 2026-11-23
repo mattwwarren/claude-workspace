@@ -173,14 +173,19 @@ class HeldEntry(BaseModel):
     """An evidence-gap hold carried on the ledger until released (#3823).
 
     ``rationale`` is the unrun check the reviewer named, which the operator needs
-    to run it. The entry leaves the ledger when the finding settles or the stop
-    is released.
+    to run it. ``rule_id`` is the engine rule the gap was raised under, kept so a
+    settle is judged by the same rule as a re-raise (a ``coverage.*`` or
+    ``acceptance.*`` gap is never deferrable); it is dropped from dumps while
+    empty, so a builtin entry and an old ledger are byte-identical. The entry
+    leaves the ledger on a settle that applies, on a release of an
+    ``operator_action`` stop that named it, or on a new epoch.
     """
 
     model_config = ConfigDict(frozen=True)
 
     identity: FindingIdentity
     rationale: str
+    rule_id: str | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class SettledEntry(BaseModel):

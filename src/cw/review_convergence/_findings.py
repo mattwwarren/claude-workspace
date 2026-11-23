@@ -242,7 +242,7 @@ def settled_index(ledger: ConvergenceLedger) -> dict[FindingIdentity, SettledEnt
 
 def settled_applies(
     entry: SettledEntry,
-    severity: GatingSeverity,
+    severity: Severity,
     fingerprint: str | None,
     rule_id: str | None,
 ) -> bool:
@@ -377,7 +377,24 @@ def held_entry(finding: RoundFinding) -> HeldEntry:
         finding.summary,
         fingerprint=finding.fingerprint,
     )
-    return HeldEntry(identity=identity, rationale=finding.rationale)
+    return HeldEntry(
+        identity=identity, rationale=finding.rationale, rule_id=finding.rule_id
+    )
+
+
+def _discharged(
+    entry: HeldEntry, settled: Mapping[FindingIdentity, SettledEntry]
+) -> bool:
+    """Whether a settled entry applies to the held *entry* (#3823, R13).
+
+    The same :func:`settled_applies` predicate :func:`classify_findings` uses, so
+    a ``defer`` of a fingerprinted ``coverage.*`` gap discharges nothing.
+    """
+    identity = entry.identity
+    settled_entry = settled.get(identity)
+    return settled_entry is not None and settled_applies(
+        settled_entry, identity.severity, identity.fingerprint, entry.rule_id
+    )
 
 
 def carried_held(
@@ -389,8 +406,10 @@ def carried_held(
 
     *prior* memory is merged with this round's holds. A prior entry is dropped
     when a later round re-raises its identity as ``fix`` or ``operator_action``
-    (a contest), or when the identity is now settled (``settled`` is the index
-    after this round). The round's own holds always win over a prior entry.
+    (a contest), or when a settle that applies now covers it (``settled`` is the
+    index after this round). The round's own holds always win over a prior
+    entry and are not filtered here: :func:`classify_findings` already ran the
+    settled check on them.
     """
     reraised = {
         finding_identity(
@@ -402,18 +421,20 @@ def carried_held(
         for finding in [*classified.new_fix, *classified.new_operator]
     }
     merged: dict[FindingIdentity, HeldEntry] = {
-        entry.identity: entry for entry in prior if entry.identity not in reraised
+        entry.identity: entry
+        for entry in prior
+        if entry.identity not in reraised and not _discharged(entry, settled)
     }
     for finding in classified.held:
         entry = held_entry(finding)
         merged[entry.identity] = entry
-    return [entry for entry in merged.values() if entry.identity not in settled]
+    return list(merged.values())
 
 
 def outstanding_held(ledger: ConvergenceLedger) -> list[HeldEntry]:
-    """The ledger's held entries not yet settled by the operator (#3823)."""
+    """The ledger's held entries no applying settle has discharged (#3823)."""
     settled = settled_index(ledger)
-    return [entry for entry in ledger.held if entry.identity not in settled]
+    return [entry for entry in ledger.held if not _discharged(entry, settled)]
 
 
 def mark_reseen(
