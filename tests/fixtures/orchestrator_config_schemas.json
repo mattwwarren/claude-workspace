@@ -2025,7 +2025,7 @@
     },
     "EpicConfig": {
      "additionalProperties": false,
-     "description": "Per-client epic size ceiling (#3783, RFC 0020 B1, D-5).\n\n``max_diff_lines`` caps the changed-line count of an epic base measured\nagainst the client's default branch (``merge_gate_ignore_paths`` excluded).\nIt is optional: the dispatch tick never reads it; enqueue refuses over it\n(``cw dev-queue add --base``) and ``cw doctor`` reports it as advisory only.\nUnset means no refusal and no doctor warning. An\nolder cw with ``extra=\"forbid\"`` rejects the ``epic:`` key outright, so\ndowngrade the client config before pinning an older cw.",
+     "description": "Per-client epic size ceiling (#3783, RFC 0020 B1, D-5).\n\n``max_diff_lines`` caps the changed-line count of an epic base measured\nagainst the client's default branch (``merge_gate_ignore_paths`` excluded).\nIt is optional: the dispatch tick never reads it; enqueue refuses over it\n(``cw dev-queue add --base``) and ``cw doctor`` reports it as advisory only.\nUnset means no refusal and no over-ceiling warning; a merge-probe conflict\nor a suspected branch-protection misconfiguration still warns. An older cw\nwith ``extra=\"forbid\"`` rejects the ``epic:`` key outright, so downgrade the\nclient config before pinning an older cw.",
      "properties": {
       "max_diff_lines": {
        "anyOf": [
