@@ -123,7 +123,7 @@ Parse selection into a list of IDs.
 
 ## Step 5b: Swing check
 
-If the selected tickets are children of one epic, or otherwise one design that must ship together (shared files, a merge order, a system that cannot be reviewed piecemeal), do not enqueue them as N rows. Say so, and offer the swing: one parent ticket with every child inlined under `## Children` (shape and command in `/graduate-plan`, swing track), enqueued as a single row. Enqueue N rows only when each ticket stands alone. A swing is `Large` by size; since v4 that only selects the Opus impl model and the full reviewer set, never a gate.
+If the selected tickets are children of one parent ticket, or otherwise one design that must ship together (shared files, a merge order, a system that cannot be reviewed piecemeal), do not enqueue them as N rows. Say so, and offer the swing: one parent ticket with every child inlined under `## Children` (shape and command in `/graduate-plan`, swing track), enqueued as a single row. Enqueue N rows only when each ticket stands alone. A swing is `Large` by size; since v4 that only selects the Opus impl model and the full reviewer set, never a gate.
 
 If the selected tickets are children of one feature that should reach the default branch once, and each stands as its own ticket, offer an epic instead and point to `/orchestrate-sprint`, section "Open an epic". `queue-issues` does not create the branch; the orchestrator does (RFC 0020).
 
