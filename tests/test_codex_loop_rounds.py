@@ -44,7 +44,10 @@ from tests._review_convergence_helpers import (
     consolidated_verdict,
     dirty_confirm_ledger,
     fresh_ledger,
+    gap_identity,
+    held_gap,
     live_merge_base,
+    real_fix,
     record,
     round_finding,
     write_ledger,
@@ -636,6 +639,42 @@ class TestGapHolds:
 
         assert stop is None
         assert not (wt / LEDGER_RELATIVE_PATH).exists()
+
+    def _carrying_a_gap(self, wt: Path) -> ConvergenceLedger:
+        """A codex-lane ledger whose earlier mixed round carried the gap (#3823)."""
+        carried, report = record(
+            _codex_ledger(wt),
+            held_gap(),
+            real_fix(),
+            sha=git_in(wt, "rev-parse", "HEAD~1"),
+            backend="codex",
+        )
+        assert report.decision == "continue"
+        write_ledger(wt, carried)
+        return carried
+
+    def test_a_dirty_fix_pass_over_a_carried_gap_continues_and_keeps_it(
+        self, wt: Path
+    ) -> None:
+        self._carrying_a_gap(wt)
+
+        stop = _recorder(wt).record(_cycle(0, _head(wt), _af("Bug A")))
+
+        assert stop is None
+        ledger = _ledger(wt)
+        assert ledger.status == "in_progress"
+        assert ledger.rounds[-1].new_fix == 1
+        assert [entry.identity for entry in ledger.held] == [gap_identity()]
+
+    def test_a_gap_only_pass_over_a_carried_gap_records_nothing(self, wt: Path) -> None:
+        carried = self._carrying_a_gap(wt)
+
+        stop = _recorder(wt).record(
+            _cycle(0, _head(wt), _held_af("Unrun check", gap=True))
+        )
+
+        assert stop is None
+        assert _ledger(wt) == carried
 
     def test_a_contest_hold_still_records_an_operator_action(self, wt: Path) -> None:
         contest = _held_af("Contests the plan", gap=False)

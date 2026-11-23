@@ -4,26 +4,18 @@ from __future__ import annotations
 
 from cw.codex_clean_held import HELD_BLOCKER_REASON, HELD_HEADLINE, held_stop_blocker
 from cw.codex_review import STAGE3_REVIEW
-from cw.review_convergence import ConvergenceLedger, RoundFinding
-from tests._review_convergence_helpers import fresh_ledger, record
-
-GAP_RATIONALE = "run pytest in the sandbox to confirm the regression"
-GAP_SUMMARY = "Could not run the test suite"
-
-
-def _held_gap() -> RoundFinding:
-    return RoundFinding(
-        severity="MUST_FIX",
-        file="N/A",
-        summary=GAP_SUMMARY,
-        outcome="operator_action",
-        rationale=GAP_RATIONALE,
-        held="evidence_gap",
-    )
+from cw.review_convergence import ConvergenceLedger, SettledEntry
+from tests._review_convergence_helpers import (
+    GAP_RATIONALE,
+    fresh_ledger,
+    gap_identity,
+    held_gap,
+    record,
+)
 
 
 def _stopped_held_ledger() -> ConvergenceLedger:
-    ledger, _ = record(fresh_ledger(), _held_gap(), sha="sha-1")
+    ledger, _ = record(fresh_ledger(), held_gap(), sha="sha-1")
     return ledger
 
 
@@ -44,9 +36,18 @@ class TestHeldStopBlocker:
 
     def test_settled_gap_is_not_named(self) -> None:
         ledger = _stopped_held_ledger()
-        blocker = held_stop_blocker(ledger.model_copy(update={"held": []}))
+        settled = SettledEntry(
+            identity=gap_identity(),
+            outcome="reject",
+            rationale="ran the check by hand",
+            round=1,
+            origin="operator",
+        )
+        blocker = held_stop_blocker(ledger.model_copy(update={"settled": [settled]}))
+        assert ledger.held
         assert GAP_RATIONALE not in blocker.details
         assert blocker.details.splitlines()[0] == HELD_HEADLINE
+        assert not any(line.startswith("- ") for line in blocker.details.splitlines())
 
     def test_empty_held_still_yields_a_valid_blocker(self) -> None:
         blocker = held_stop_blocker(fresh_ledger())

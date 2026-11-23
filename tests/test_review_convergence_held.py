@@ -3,46 +3,93 @@
 A held gap is an ``operator_action`` finding stamped ``held="evidence_gap"``.
 It is not new-accepted: a held-only round stops the ledger for the operator and
 names the gap, a mixed round repairs the fix first, and the gap stays carried
-until a release or a settle. Driven through the real engine, no mocks.
+until a release that named it or a settle. Driven through the real engine, no
+mocks.
 """
 
 from __future__ import annotations
 
+import json
+from typing import TYPE_CHECKING
+
+import pytest
+
 from cw.review_convergence import (
+    ConvergenceError,
     ConvergenceLedger,
     HeldEntry,
-    RoundFinding,
     SettledEntry,
+    SettleTarget,
     UnreadFindings,
+    operator_settle,
     outstanding_held,
+    override_confirm_round,
+    record_delta_round,
 )
 from cw.review_convergence._findings import carried_held, classify_findings
-from cw.review_convergence._identity import FindingIdentity, finding_identity
-from tests._review_convergence_helpers import fresh_ledger, record, round_finding
-from tests.test_review_convergence import _reconcile
+from cw.review_convergence._identity import finding_identity
+from tests._review_convergence_helpers import (
+    GAP_RATIONALE,
+    GAP_SUMMARY,
+    NOW,
+    ROSTER,
+    confirmed_ledger,
+    engine_pass_ledger,
+    fresh_ledger,
+    gap_identity,
+    held_gap,
+    old_ledger_json,
+    operator_finding,
+    real_fix,
+    reconcile_ledger,
+    record,
+    round_finding,
+)
 
-GAP_RATIONALE = "run pytest in the sandbox to confirm the regression"
-GAP_SUMMARY = "Could not run the test suite"
-
-
-def held_gap() -> RoundFinding:
-    """A MUST_FIX evidence-gap hold, as ``from_verdict`` produces it."""
-    return RoundFinding(
-        severity="MUST_FIX",
-        file="N/A",
-        summary=GAP_SUMMARY,
-        outcome="operator_action",
-        rationale=GAP_RATIONALE,
-        held="evidence_gap",
+if TYPE_CHECKING:
+    from cw.review_convergence import (
+        RecordableRoundKind,
+        RoundFinding,
+        RoundReport,
     )
 
+_SHA = "sha-0"
+_KINDS = ["loop", "confirm"]
 
-def gap_identity() -> FindingIdentity:
-    return finding_identity("MUST_FIX", "N/A", GAP_SUMMARY)
+
+def _open_ledger(kind: RecordableRoundKind) -> ConvergenceLedger:
+    """A ledger whose next round is of *kind*: a fresh one, or one awaiting confirm."""
+    if kind == "loop":
+        return fresh_ledger()
+    ledger = fresh_ledger(confirm="claude", loop_backend="codex")
+    ledger, report = record(ledger, sha=_SHA, backend="codex")
+    assert report.decision == "confirm_required"
+    return ledger
 
 
-def real_fix() -> RoundFinding:
-    return round_finding("MUST_FIX", "Real bug", file="src/cw/foo.py")
+def _round(
+    ledger: ConvergenceLedger,
+    kind: RecordableRoundKind,
+    *findings: RoundFinding,
+    sha: str,
+    unread: UnreadFindings | None = None,
+) -> tuple[ConvergenceLedger, RoundReport]:
+    backend = ledger.confirm_backend if kind == "confirm" else ledger.loop_backend
+    return record(ledger, *findings, sha=sha, kind=kind, backend=backend, unread=unread)
+
+
+def _settle_gap(ledger: ConvergenceLedger) -> ConvergenceLedger:
+    """*ledger* with the held gap settled, as ``cw review settle`` does."""
+    identity = gap_identity()
+    settled, report = operator_settle(
+        ledger,
+        [SettleTarget(severity="MUST_FIX", file=identity.file, summary=GAP_SUMMARY)],
+        actor="operator",
+        reason="ran the check by hand",
+        now=NOW,
+    )
+    assert [entry.identity for entry in report.settled] == [identity]
+    return settled
 
 
 class TestClassifyHeld:
@@ -80,59 +127,214 @@ class TestClassifyHeld:
         assert carried_held(prior, classified, {gap_identity(): settled_entry}) == []
 
 
+@pytest.mark.parametrize("kind", _KINDS)
 class TestHeldCarriedAcrossRounds:
-    def test_held_only_round_stops_for_the_operator(self) -> None:
-        ledger, report = record(fresh_ledger(), held_gap(), sha="sha-1")
+    def test_held_only_round_stops_for_the_operator(
+        self, kind: RecordableRoundKind
+    ) -> None:
+        ledger, report = _round(_open_ledger(kind), kind, held_gap(), sha=_SHA)
         assert report.decision == "stop_operator_action"
         assert ledger.status == "stopped"
+        assert ledger.stop_reason == "operator_action"
         assert ledger.stop_identities == [gap_identity()]
         assert ledger.held == [
             HeldEntry(identity=gap_identity(), rationale=GAP_RATIONALE)
         ]
         row = ledger.rounds[-1]
+        assert row.kind == kind
         assert row.clean is False
         assert row.new_accepted == 0
         assert row.new_held == 1
         assert ledger.last_clean_sha is None
 
-    def test_mixed_round_repairs_first_and_keeps_the_gap(self) -> None:
-        ledger, report = record(fresh_ledger(), held_gap(), real_fix(), sha="sha-1")
+    def test_mixed_round_repairs_first_and_keeps_the_gap(
+        self, kind: RecordableRoundKind
+    ) -> None:
+        ledger, report = _round(
+            _open_ledger(kind), kind, held_gap(), real_fix(), sha=_SHA
+        )
         assert report.decision == "continue"
         assert ledger.status == "in_progress"
         assert ledger.fix_cycles_used == 1
         assert len(ledger.fixed) == 1
         assert [entry.identity for entry in ledger.held] == [gap_identity()]
 
-    def test_empty_following_round_still_stops(self) -> None:
-        ledger, _ = record(fresh_ledger(), held_gap(), real_fix(), sha="sha-1")
-        ledger, report = record(ledger, sha="sha-2")
+    def test_empty_following_round_still_stops(self, kind: RecordableRoundKind) -> None:
+        ledger, _ = _round(_open_ledger(kind), kind, held_gap(), real_fix(), sha=_SHA)
+        ledger, report = _round(ledger, "loop", sha="sha-1")
         assert report.decision == "stop_operator_action"
         assert ledger.status == "stopped"
         assert ledger.last_clean_sha is None
         assert ledger.awaiting_confirm_sha is None
+        assert ledger.stop_identities == [gap_identity()]
 
-    def test_failed_role_on_held_only_round_does_not_raise(self) -> None:
+    def test_settled_gap_lets_the_next_empty_round_converge(
+        self, kind: RecordableRoundKind
+    ) -> None:
+        ledger, _ = _round(_open_ledger(kind), kind, held_gap(), real_fix(), sha=_SHA)
+        ledger = _settle_gap(ledger)
+        assert outstanding_held(ledger) == []
+        ledger, report = _round(ledger, "loop", sha="sha-1")
+        if kind == "loop":
+            assert report.decision == "clean"
+        else:
+            assert report.decision == "confirm_required"
+            assert ledger.status == "awaiting_confirm"
+            ledger, report = _round(ledger, "confirm", sha="sha-1")
+            assert report.decision == "clean"
+        assert ledger.status == "converged"
+        assert ledger.last_clean_sha == "sha-1"
+        assert ledger.rounds[-1].clean is True
+
+    def test_failed_role_on_held_only_round_does_not_raise(
+        self, kind: RecordableRoundKind
+    ) -> None:
         unread = UnreadFindings(
             rejected_must_fix=0,
             discarded_run_failures=0,
             failed_roles=("Data Safety Reviewer",),
         )
-        ledger, report = record(fresh_ledger(), held_gap(), sha="sha-1", unread=unread)
+        ledger, report = _round(
+            _open_ledger(kind), kind, held_gap(), sha=_SHA, unread=unread
+        )
         assert report.decision == "stop_operator_action"
         assert ledger.rounds[-1].clean is False
 
 
+class TestHeldBesideOtherRoundTypes:
+    def test_contest_plus_held_stops_on_the_contest_identities_only(self) -> None:
+        contest = operator_finding("Contested")
+        ledger, report = record(fresh_ledger(), contest, held_gap(), sha=_SHA)
+        assert report.decision == "stop_operator_action"
+        contest_identity = finding_identity("MUST_FIX", "N/A", "Contested")
+        assert ledger.stop_identities == [contest_identity]
+        assert [entry.identity for entry in ledger.held] == [gap_identity()]
+
+    def test_park_route_confirm_round_keeps_the_held_memory(self) -> None:
+        carried = [HeldEntry(identity=gap_identity(), rationale=GAP_RATIONALE)]
+        ledger = engine_pass_ledger().model_copy(update={"held": carried})
+        parked, report = record(
+            ledger, round_finding("MUST_FIX"), sha="sha-0001", kind="confirm"
+        )
+        assert report.decision == "stop_confirm_must_fix"
+        assert parked.held == carried
+
+    def test_delta_round_over_a_converged_ledger_stops_on_a_held_gap(self) -> None:
+        converged = confirmed_ledger(sha="S", confirm="codex")
+        ledger, report = record_delta_round(
+            converged,
+            backend="codex",
+            reviewed_sha="merge-1",
+            findings=[held_gap()],
+            roster=ROSTER,
+            now=NOW,
+        )
+        assert report.decision == "stop_operator_action"
+        assert ledger.status == "stopped"
+        assert ledger.stop_identities == [gap_identity()]
+        row = ledger.rounds[-1]
+        assert (row.kind, row.clean, row.new_held) == ("delta", False, 1)
+        assert ledger.last_clean_sha == "S"
+
+
 class TestHeldRelease:
-    def test_same_tip_release_clears_the_held_memory(self) -> None:
+    """Operator item 6: a release clears only what the stop named."""
+
+    def test_operator_action_release_clears_exactly_the_named_gaps(self) -> None:
         ledger, _ = record(fresh_ledger(), held_gap(), sha="sha-1")
-        released = _reconcile(ledger, head="sha-1")
+        other = HeldEntry(
+            identity=finding_identity("MUST_FIX", "N/A", "Another gap"),
+            rationale="run the linter",
+        )
+        ledger = ledger.model_copy(update={"held": [*ledger.held, other]})
+        released = reconcile_ledger(ledger, head="sha-1")
         assert released.ledger.status == "in_progress"
+        assert released.released is not None
+        assert released.released.cause == "operator_action_done"
+        assert released.ledger.held == [other]
+
+    def test_max_cycles_raised_release_keeps_the_held_memory(self) -> None:
+        ledger = fresh_ledger(max_cycles=1)
+        ledger, _ = record(ledger, held_gap(), real_fix(), sha="sha-1")
+        ledger, report = record(
+            ledger, round_finding("MUST_FIX", "Second bug"), sha="sha-2"
+        )
+        assert report.decision == "stop_max_cycles"
+        released = reconcile_ledger(ledger, head="sha-2", max_cycles=4)
+        assert released.released is not None
+        assert released.released.cause == "max_cycles_raised"
+        assert [entry.identity for entry in released.ledger.held] == [gap_identity()]
+        reopened, follow = record(released.ledger, sha="sha-2")
+        assert follow.decision == "stop_operator_action"
+        assert reopened.stop_identities == [gap_identity()]
+        assert reopened.last_clean_sha is None
+
+    def test_contest_only_stop_release_keeps_an_unnamed_gap(self) -> None:
+        ledger, _ = record(fresh_ledger(), held_gap(), real_fix(), sha="sha-1")
+        ledger, report = record(ledger, operator_finding("Contested"), sha="sha-2")
+        assert report.decision == "stop_operator_action"
+        assert gap_identity() not in ledger.stop_identities
+        released = reconcile_ledger(ledger, head="sha-2")
+        assert released.ledger.status == "in_progress"
+        assert [entry.identity for entry in released.ledger.held] == [gap_identity()]
+        _, follow = record(released.ledger, sha="sha-2")
+        assert follow.decision == "stop_operator_action"
+
+    def test_new_commits_clear_all_held_memory(self) -> None:
+        ledger, _ = record(fresh_ledger(), held_gap(), sha="sha-1")
+        released = reconcile_ledger(ledger, head="sha-2")
+        assert released.released is not None
+        assert released.released.cause == "new_commits"
         assert released.ledger.held == []
 
     def test_in_progress_held_ledger_resumes_with_held_intact(self) -> None:
         ledger, _ = record(fresh_ledger(), held_gap(), real_fix(), sha="sha-1")
-        resumed = _reconcile(ledger, head="sha-1")
+        resumed = reconcile_ledger(ledger, head="sha-1")
         assert [entry.identity for entry in resumed.ledger.held] == [gap_identity()]
+
+
+class TestOverrideOverHeld:
+    """Operator item 6b: an override cannot converge past an outstanding gap."""
+
+    @staticmethod
+    def _dirty_confirm() -> ConvergenceLedger:
+        ledger, report = _round(
+            _open_ledger("confirm"), "confirm", held_gap(), real_fix(), sha=_SHA
+        )
+        assert report.decision == "continue"
+        return ledger
+
+    @staticmethod
+    def _override(ledger: ConvergenceLedger) -> ConvergenceLedger:
+        fix = (finding_identity("MUST_FIX", "src/cw/foo.py", "Real bug"),)
+        updated, _ = override_confirm_round(
+            ledger,
+            fix,
+            reviewed_sha=_SHA,
+            round_identities=fix,
+            actor="operator",
+            reason="accepted",
+            now=NOW,
+        )
+        return updated
+
+    def test_refuses_naming_the_gap_and_both_routes(self) -> None:
+        ledger = self._dirty_confirm()
+        with pytest.raises(ConvergenceError) as raised:
+            self._override(ledger)
+        message = str(raised.value)
+        assert "N/A" in message
+        assert GAP_SUMMARY in message
+        assert "cw review settle" in message
+        assert "requeue" in message
+        assert [entry.identity for entry in ledger.held] == [gap_identity()]
+        assert ledger.status == "in_progress"
+
+    def test_a_settled_gap_no_longer_blocks_the_override(self) -> None:
+        ledger = _settle_gap(self._dirty_confirm())
+        converged = self._override(ledger)
+        assert converged.status == "converged"
+        assert converged.last_clean_sha == _SHA
 
 
 class TestLegacyAdditivity:
@@ -146,3 +348,11 @@ class TestLegacyAdditivity:
         ledger, _ = record(fresh_ledger(), held_gap(), sha="sha-1")
         restored = ConvergenceLedger.model_validate(ledger.model_dump(mode="json"))
         assert restored == ledger
+
+    def test_a_pre_change_ledger_loads_with_no_held_and_dumps_without_it(self) -> None:
+        ledger = ConvergenceLedger.model_validate_json(old_ledger_json())
+        assert ledger.held == []
+        assert ledger.schema_version == 1
+        dumped = json.loads(ledger.model_dump_json())
+        assert "held" not in dumped
+        assert all("new_held" not in row for row in dumped["rounds"])

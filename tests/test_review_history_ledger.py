@@ -18,6 +18,7 @@ from cw.review_convergence import (
     demote_for_rereview,
     operator_settle,
 )
+from cw.review_findings import stamp_held_findings
 from tests._review_convergence_helpers import (
     FORK_POINT,
     LOOP_BACKEND,
@@ -49,6 +50,7 @@ from tests._review_history_helpers import (
     running_task,
     write_round_verdict,
 )
+from tests._shared.review_builders import _EVIDENCE_GAP
 from tests._ticket_view_helpers import ACME_TICKET
 
 if TYPE_CHECKING:
@@ -241,6 +243,41 @@ def test_fix_dispatched_excludes_operator_action_findings(tmp_path: Path) -> Non
     assert round_one.new_operator_action == 1
     assert round_one.fix_dispatched == ledger.rounds[0].new_fix == 2
     assert round_one.fix_dispatched != round_one.new_accepted
+
+
+def test_a_held_gap_round_counts_only_the_fix_and_builds_no_note(
+    tmp_path: Path,
+) -> None:
+    """A gap beside a fix is carried, not new: the split counts the fix only (#3823)."""
+    plain = consolidated_verdict(
+        accepted=[("MUST_FIX", "real bug"), ("MUST_FIX", "unrun check")]
+    )
+    accepted = [
+        af.model_copy(
+            update={
+                "finding": af.finding.model_copy(update={"evidence_gap": _EVIDENCE_GAP})
+            }
+        )
+        if af.finding.summary == "unrun check"
+        else af
+        for af in plain.accepted
+    ]
+    verdict = stamp_held_findings(plain.model_copy(update={"accepted": accepted}))
+    ledger, _ = record_verdict_round(
+        fresh_ledger(ticket_id=ACME_TICKET), verdict, "sha-1"
+    )
+    worktree = derived_worktree(tmp_path)
+    write_ledger(worktree, ledger)
+    write_round_verdict(worktree, 1, verdict)
+
+    history = history_for(review_task(), tmp_path)
+
+    (round_one,) = history.rounds
+    assert ledger.rounds[0].new_held == 1
+    assert round_one.new_accepted == 1
+    assert round_one.new_by_severity is not None
+    assert round_one.new_by_severity.model_dump() == {"must_fix": 1, "should_fix": 0}
+    assert notes_with(history, "verdict file has") == []
 
 
 def test_confirm_failures_count_the_whole_life_of_the_ledger(tmp_path: Path) -> None:
