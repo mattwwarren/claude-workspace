@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple
 
+from tests import _git_sandbox
 from tests._shared.git_repos import git_in, init_bare_origin
 
 if TYPE_CHECKING:
@@ -243,3 +244,100 @@ def release_cut_pr_repo(
         "chore(release): 1.1.0",
     )
     return ReleaseMovedRepo(clone, origin, base_sha, base_sha, branch_sha)
+
+
+#: The sibling epic child's bullet (#3861): same ``### Fixed`` hunk as GAMMA.
+DELTA = "- Delta fix (#4)."
+
+
+def _with_bullet_after_beta(bullet: str) -> str:
+    return CL_BASE.replace("- Beta fix (#2).\n\n", f"- Beta fix (#2).\n\n{bullet}\n\n")
+
+
+def epic_sibling_repo(
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+) -> Path:
+    """An epic-child clone (#3861): ``origin/epic/1`` carries a sibling bullet.
+
+    ``main`` holds CL_BASE with ``CHANGELOG.md merge=union``. ``origin/epic/1``
+    adds ``DELTA`` to the ``### Fixed`` hunk. The clone sits on ``dev/GEN-1``,
+    branched from the base, adding ``GAMMA`` to the same hunk and changing
+    ``src/app.py``. Both sides add a bullet at the same spot, so a plain
+    textual merge conflicts while git's union driver merges cleanly.
+    ``origin/HEAD`` names ``main``.
+    """
+    clone = make_git_repo("epic-client")
+    base_sha = commit_files(
+        clone,
+        {
+            "CHANGELOG.md": CL_BASE,
+            ".gitattributes": "CHANGELOG.md merge=union\n",
+            "src/app.py": "def app():\n    return 1\n",
+        },
+        "base",
+    )
+    init_bare_origin(clone)
+    git_in(clone, "push", "origin", "main")
+    git_in(clone, "checkout", "-b", "epic/1")
+    commit_files(
+        clone, {"CHANGELOG.md": _with_bullet_after_beta(DELTA)}, "feat: delta (#4)"
+    )
+    git_in(clone, "push", "origin", "epic/1")
+    git_in(clone, "checkout", "-b", BRANCH, base_sha)
+    commit_files(
+        clone,
+        {
+            "CHANGELOG.md": _with_bullet_after_beta(GAMMA),
+            "src/app.py": "def app():\n    return 2\n",
+        },
+        "feat: gamma (#3)",
+    )
+    git_in(clone, "remote", "set-head", "origin", "main")
+    return clone
+
+
+def push_base_moved_without_changelog(clone: Path, base: str) -> None:
+    """Push *base* to origin: ``origin/main`` plus a commit that skips CHANGELOG.
+
+    The base has moved ahead of the clone's branch (so it is not an ancestor of
+    HEAD), yet its ``CHANGELOG.md`` still equals the merge-base's. The clone is
+    returned to the branch it was on.
+    """
+    current = git_in(clone, "rev-parse", "--abbrev-ref", "HEAD")
+    git_in(clone, "checkout", "-q", "-b", base, "origin/main")
+    commit_files(clone, {"src/other.py": "OTHER = 1\n"}, "feat: base moves on")
+    git_in(clone, "push", "origin", base)
+    git_in(clone, "checkout", "-q", current)
+
+
+def github_would_conflict(clone: Path, head_ref: str, base_ref: str) -> bool:
+    """Whether GitHub's conflict check would report ``CHANGELOG.md`` conflicting.
+
+    GitHub ignores the ``merge=union`` driver, so the model is a plain
+    ``git merge-file`` (no ``--union``) of the three CHANGELOG blobs.
+    Non-zero from ``merge-file`` is a conflict.
+    """
+    base = git_in(clone, "merge-base", head_ref, base_ref)
+    scratch = clone.parent / "merge-file"
+    scratch.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+    for name, rev in (("ours", head_ref), ("base", base), ("theirs", base_ref)):
+        text = _git_sandbox.run(
+            "show", f"{rev}:CHANGELOG.md", cwd=clone, check=True, text=True
+        ).stdout
+        path = scratch / f"{name}.md"
+        path.write_text(text, encoding="utf-8")
+        paths.append(path)
+    ours, base_file, theirs = paths
+    merged = _git_sandbox.run(
+        "merge-file",
+        "-p",
+        str(ours),
+        str(base_file),
+        str(theirs),
+        cwd=clone,
+        check=False,
+        text=True,
+    )
+    return merged.returncode != 0

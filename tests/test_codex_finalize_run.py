@@ -40,6 +40,7 @@ from cw.models import (
 from cw.models.client import ReviewConfig
 from cw.models.orchestrator_config.stage import ModelPrice
 from cw.models.usage import UsageStage, UsageState, UsageUnavailableReason
+from cw.stage_verification.finalize_changelog_repair import MergeabilityOutcome
 from cw.stage_verification.finalize_ci_evidence import CiContext
 from cw.ticket_snapshot import normalize_ticket_id, write_snapshot
 from cw.tracker import TRACKER_LINEAR
@@ -1217,6 +1218,41 @@ def test_a_behind_pr_ships_with_the_behind_friction(
     result = h.run()
     assert result.status == "shipped"
     assert "behind_default_no_action" in result.friction_highlights
+
+
+def test_an_epic_child_repair_hands_the_repaired_head_to_arm(
+    harness: Callable[..., Harness],
+) -> None:
+    """The #3861 repair's new head reaches the arm; its friction reaches the result."""
+    h, base = _based(harness, ROW_BASE)
+    h.turn(finalize_document(pr_title=TITLE, pr_body=BODY))
+    repaired_head = "c" * 40
+    seen: dict[str, object] = {}
+
+    def _repair(
+        worktree: object,
+        pr_url: str,
+        *,
+        base_branch: str,
+        default_branch: str,
+        branch: str,
+    ) -> MergeabilityOutcome:
+        seen.update(
+            base_branch=base_branch, default_branch=default_branch, branch=branch
+        )
+        return MergeabilityOutcome(
+            None, ["changelog_union_merged_after_sibling"], repaired_head
+        )
+
+    h.monkeypatch.setattr(
+        "cw.codex_finalize._run.check_mergeability_repairing", _repair
+    )
+    result = h.run()
+
+    assert seen == {"base_branch": base, "default_branch": "main", "branch": BRANCH}
+    assert "changelog_union_merged_after_sibling" in result.friction_highlights
+    arm_argv = h.arm.calls()[1]
+    assert arm_argv[arm_argv.index("--head-sha") + 1] == repaired_head
 
 
 # --- the turn -------------------------------------------------------------------

@@ -1128,3 +1128,19 @@ class TestStationFindingsDoc:
         )
 
         assert self._severities(reply) == ["MUST_FIX", "SHOULD_FIX", "NIT"]
+
+
+class TestSharedGhFixture:
+    """The suite-wide ``gh`` fixture (#3861) installs a ``FakeGhCli``."""
+
+    def test_shared_gh_installs_a_fake_gh_cli(self, gh: FakeGhCli) -> None:
+        assert isinstance(gh, FakeGhCli)
+        assert subprocess.run is gh
+
+    class TestLocalOverride:
+        @pytest.fixture
+        def gh(self) -> str:
+            return "local"
+
+        def test_a_module_level_gh_fixture_wins(self, gh: str) -> None:
+            assert gh == "local"

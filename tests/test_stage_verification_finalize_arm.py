@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import patch
 
 import pytest
@@ -21,7 +21,9 @@ from cw.stage_verification.finalize_arm import (
     _VERIFIED_STATES,
     FAILING_CHECKS_PREFIX,
     FREEZE_PREFIX,
+    PR_CONFLICTING_PREFIX,
     ArmResult,
+    _refusal,
     arm,
     check_automerge_allowed,
     verify_pr_state,
@@ -396,3 +398,36 @@ class TestVerifyPrState:
         _verify(repo)
         assert all(_URL in argv for argv in gh.argvs())
         assert gh.records[0].cwd == repo
+
+
+class TestPrConflictingHint:
+    """``_refusal`` adds the conflict recovery hint for ``pr_conflicting:`` (#3861)."""
+
+    _INFO: ClassVar[dict[str, object]] = {"number": 9}
+
+    def test_pr_conflicting_text_is_carried_verbatim_with_a_hedged_hint(self) -> None:
+        gh = (
+            f"{PR_CONFLICTING_PREFIX} GitHub reports this PR as conflicting with"
+            " origin/epic/1 (mergeable=CONFLICTING, mergeStateStatus=DIRTY); the"
+            " conflict, not branch protection, is the likely cause of the refusal."
+            " gh said: boom"
+        )
+        block = _refusal(gh, "", self._INFO)
+        assert block.details.startswith(f"arm-automerge failed; gh_stderr: {gh}")
+        assert "GitHub reports the PR conflicting" in block.details
+        assert "--union-conflict" in block.details
+        fetch = block.details.index("`git fetch origin <base>`")
+        assert fetch < block.details.index("`cw worktree changelog-sync --base <base>")
+        assert "because of the conflict" not in block.details
+        assert block.retry_eligible is True
+
+    def test_freeze_refusal_gets_no_conflict_hint(self) -> None:
+        block = _refusal("changelog_merge_freeze: frozen", "", self._INFO)
+        assert "GitHub reports the PR conflicting" not in block.details
+        assert "CHANGELOG merge freeze" in block.details
+
+    def test_plain_refusal_gets_no_hint(self) -> None:
+        block = _refusal("GraphQL: not mergeable", "", self._INFO)
+        assert (
+            block.details == "arm-automerge failed; gh_stderr: GraphQL: not mergeable"
+        )

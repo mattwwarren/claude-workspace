@@ -296,10 +296,25 @@ _SYNC_EXIT: dict[SyncState, int] = {
 @click.option(
     "--base",
     required=True,
-    help="Default branch; origin/<base> is merged (never fetched).",
+    help=(
+        "Base branch; origin/<base> is merged (never fetched). Without"
+        " --union-conflict this is the default branch (release cut); with it, a"
+        " non-default base only."
+    ),
+)
+@click.option(
+    "--union-conflict",
+    is_flag=True,
+    default=False,
+    help=(
+        "Opt in: also make one plain `git merge --no-ff` of origin/<base> when"
+        " both sides added CHANGELOG.md bullets (GitHub reports DIRTY, the local"
+        " probe is clean). Only for a base other than the default branch; refused"
+        " for the default branch; never fetches."
+    ),
 )
 @handle_errors
-def worktree_changelog_sync(worktree: Path, base: str) -> None:
+def worktree_changelog_sync(worktree: Path, base: str, union_conflict: bool) -> None:
     """Re-home a CHANGELOG hunk that a release cut left in a released section.
 
     A PR that was green before a release cut can merge cleanly onto the new
@@ -321,8 +336,20 @@ def worktree_changelog_sync(worktree: Path, base: str) -> None:
     either way, and only `state` tells them apart. Exit 3: unavailable (an
     unresolvable ref, a git error, git older than 2.38); the worktree is left
     as it was.
+
+    With --union-conflict (opt-in; non-default base only) the same command also
+    makes one plain `git merge --no-ff` of `origin/<base>` when this branch and
+    the base both added CHANGELOG.md bullets: GitHub reports such a PR DIRTY
+    because its conflict check ignores the CHANGELOG.md union merge driver,
+    although the local merge is clean. The merge keeps what git itself writes
+    (no rebuild; a released section that would change still takes the rebuild
+    above), then you push plainly. It never fetches, so run
+    `git fetch origin <base>` first. It is refused when <base> is the default
+    branch: state refused, disposition default_branch_base, exit 1. The JSON keys
+    are unchanged and the exit mapping is unchanged; `disposition` may be
+    `default_branch_base`.
     """
-    synced = sync_changelog(worktree, base)
+    synced = sync_changelog(worktree, base, union_conflict=union_conflict)
     payload = {
         "base": base,
         "base_sha": synced.base_sha,

@@ -111,6 +111,7 @@ __all__ = [
     "fake_uv_cli",
     "finalize_document",
     "finalize_turn_result",
+    "gh",
     "gh_calls",
     "impl_sentinel",
     "impl_turn_result",
@@ -1196,6 +1197,15 @@ def restore_real_run(monkeypatch: pytest.MonkeyPatch) -> None:
     ``Popen`` (and so the guard) rather than be answered by a default fake.
     """
     monkeypatch.setattr(subprocess, "run", _REAL_RUN)
+
+
+# --- gh --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def gh(monkeypatch: pytest.MonkeyPatch) -> FakeGhCli:
+    """A fresh ``FakeGhCli`` installed on ``subprocess.run`` for this test."""
+    return FakeGhCli().install(monkeypatch)
 
 
 # --- codex ---------------------------------------------------------------------
