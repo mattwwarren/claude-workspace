@@ -634,8 +634,10 @@ are in `docs/dispatch-runbook.md`, "Open and land an epic".
    with no `--base`. It is refused when the parent already has any row (including a
    COMPLETED one), or when the PR base is not the client default. Green enters at
    review; conflicted or red enters at impl with synthesized feedback (D-8). A child
-   PR merging into the epic branch mid-landing parks the row `adopted_head_drift`;
-   release it per the runbook.
+   PR merging into the epic branch parks the row `adopted_head_drift` only while the
+   row is still PENDING and has not run (release it per the runbook); after that a
+   COMPLETED row with armed auto-merge is not re-checked, so land the children first
+   and open the landing PR last.
 6. Hand the human approval to `/review-monitor` as a knock. Run `/review-monitor` so
    the landing PR is registered, and post one CKPT line to the operator: PR URL,
    parent id, child count, what to check. Its `ready_to_approve` channel bump or DM

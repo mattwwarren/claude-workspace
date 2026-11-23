@@ -3403,8 +3403,12 @@ is no epic command group.
   the rule first (step 3 above).
 - Adoption refused: the parent already has a row, or the PR base is not the client
   default. See the adoption section linked above.
-- Head drift: a child PR merging into the epic branch mid-landing parks the
-  adopted row `adopted_head_drift`. Release it per the adoption section linked above.
+- Head drift: while the landing row is still PENDING and has not run, a child PR
+  merging into the epic branch parks the adopted row `adopted_head_drift`; release
+  it per the adoption section linked above. Once the row has run, a descendant head
+  is absorbed after a session exit, and a COMPLETED row with armed auto-merge is
+  not re-checked. See the "For a landing row" paragraph in the adoption section
+  linked above.
 
 ### Review-recipe dispatch and the one-shot latch (#2507)
 
