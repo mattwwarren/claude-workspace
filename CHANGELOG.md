@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **An engine `coverage.*` or `acceptance.*` finding can carry the evidence-gap marker (#3822).** The review engine summary gains an optional `evidence_gap` field on each finding, and its schema version goes 1 to 2. A MUST_FIX with a non-blank marker may `defer` through `engine_route` and is held `operator_actionable` by the existing stamp, so it never regresses to a repair fix. A SHOULD_FIX on these rules keeps today's route. `decided_finding` passes a stamped gap hold through unchanged, across all seven call sites. The predicates `is_gap_hold` and `is_non_deferrable_rule` are relocated to shared modules, not newly written. Deploy note: restart `cw dev-queue serve` after merge, because a v1 summary is rejected and an old on-disk round summary is skipped (`docs/headless-contract.md` section 12.9).
+
 ### Fixed
 
 - **`/review-monitor` no longer assumes a PR's base is `main` (#3839, RFC 0020).** Three sites are fixed: the Step 0.6 orphan fast-path jq drops its `baseRefName == "main"` filter (it keeps the `auto-dev/` and `dev/` head-prefix scope, so `epic/*` landing PRs stay out of the fast path); the Step 4b auto-fix merges and checks "already in base" against the PR's own `baseRefName` (`origin/<base>`, taken from the `check` output's `base_ref_name`) instead of `origin/main`; and the Step 4e draft promotion treats an `epic/*` base as persistent (not stacked, never retargeted). The Step 0.6 prose and handoff table name `origin/<base>` too. Kept on purpose: the `main`/`master` default-branch test in Step 4e, the head-prefix filter, and the "draft stacked on '<base>'" label, which is label-only (every draft is skipped on every base). No dispatch-pipeline behavior changed, and the review-monitor script behavior is unchanged.

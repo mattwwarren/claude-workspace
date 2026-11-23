@@ -1224,7 +1224,7 @@ a manifest.
 
 Every object rejects unknown keys and is strict: `true` or `"1"` is not an
 integer. A key marked "nullable" must be present, with `null` for no value;
-only `consequence` and `suggested_fix` may be omitted.
+only `consequence`, `suggested_fix` and `evidence_gap` may be omitted.
 
 ### 12.1 Fields
 
@@ -1254,6 +1254,7 @@ A finding:
 | `evidence` | string | Non-blank, at most `MAX_ENGINE_EVIDENCE_LENGTH` characters. |
 | `consequence` | string, optional | Non-blank when present, at most `MAX_ENGINE_CONSEQUENCE_LENGTH` characters. |
 | `suggested_fix` | string, optional | Non-blank when present, at most `MAX_ENGINE_SUGGESTED_FIX_LENGTH` characters. |
+| `evidence_gap` | string, optional | Non-blank when present, at most `MAX_ENGINE_EVIDENCE_GAP_LENGTH` characters. Names a check the engine could not run. Held for the operator (MUST_FIX); ignored for DEBT, NIT, PRINCIPLE and for a SHOULD_FIX `coverage.*` or `acceptance.*` finding (#3822). |
 
 There is no confidence field: the engine's judgment is final.
 
@@ -1268,7 +1269,7 @@ most `MAX_ENGINE_GATE_DETAIL_LENGTH` characters).
 
 | Constant | Value | Rejection reason |
 |---|---|---|
-| `REVIEW_ENGINE_SUMMARY_SCHEMA_VERSION` | `1` | `unsupported_schema_version` |
+| `REVIEW_ENGINE_SUMMARY_SCHEMA_VERSION` | `2` | `unsupported_schema_version` |
 | `MAX_ENGINE_SUMMARY_BYTES` | `1048576` | `oversized` (raw bytes, before decoding) |
 | `MAX_ENGINE_FINDINGS` | `500` | `schema_invalid` |
 | `MAX_ENGINE_ACCEPTANCE_ROWS` | `200` | `schema_invalid` |
@@ -1279,6 +1280,7 @@ most `MAX_ENGINE_GATE_DETAIL_LENGTH` characters).
 | `MAX_ENGINE_EVIDENCE_LENGTH` | `8000` | `schema_invalid` |
 | `MAX_ENGINE_CONSEQUENCE_LENGTH` | `2000` | `schema_invalid` |
 | `MAX_ENGINE_SUGGESTED_FIX_LENGTH` | `4000` | `schema_invalid` |
+| `MAX_ENGINE_EVIDENCE_GAP_LENGTH` | `2000` | `schema_invalid` |
 | `MAX_ENGINE_ACCEPTANCE_ID_LENGTH` | `64` | `schema_invalid` |
 | `MAX_ENGINE_ACCEPTANCE_EVIDENCE_LENGTH` | `2000` | `schema_invalid` |
 | `MAX_ENGINE_GATE_NAME_LENGTH` | `64` | `schema_invalid` |
@@ -1303,6 +1305,15 @@ cannot be deferred (D-6): `engine_route` refuses a `defer` for them with
 `engine_non_deferrable`, and an operator `operator-settle --outcome defer` of
 one is inert, so the finding re-opens each round until it is fixed (bounded by
 `max_cycles` and oscillation detection).
+
+**Evidence-gap hold (#3822).** A MUST_FIX `coverage.*` or `acceptance.*` finding
+carrying a non-blank `evidence_gap` is held `operator_actionable`, not deferred:
+`engine_route` lets its `defer` row through, and the stamp holds it. It never
+regresses to a fix. A SHOULD_FIX on these rules still re-opens. A held
+non-deferrable gap is released by fixing the environment or capability the check
+needs and requeueing the review stage, or with
+`cw dev-queue requeue --stage impl --regress`. `cw review settle --outcome defer`
+stays inert for it; no new verb exists for this.
 
 ### 12.4 Closed Vocabularies
 
@@ -1375,7 +1386,7 @@ Validates one summary file through the loader. It reads no stdin (`-` is an
 ordinary path), has no `--json`, emits no event and writes nothing.
 
 - **Exit 0**: valid. One stdout line:
-  `review engine summary valid: schema_version=1 verdict=PASS coverage=COMPLETE`.
+  `review engine summary valid: schema_version=2 verdict=PASS coverage=COMPLETE`.
 - **Exit 1**: rejected. One stderr line per issue,
   `<reason>: <field.path>: <message>`, with `-` when there is no field path.
   At most `MAX_VALIDATE_ERROR_LINES` lines, then `... N more line(s) omitted`.
@@ -1386,6 +1397,15 @@ ordinary path), has no `--json`, emits no event and writes nothing.
 | Version | Changes |
 |---|---|
 | 1 | Initial schema. Tracked in #3036. |
+| 2 | Adds optional finding field `evidence_gap` (#3822). |
+
+**Note (#3822): deploy ordering for version 2.** Version 2 is a hard bump with no
+look-ahead. Restart `cw dev-queue serve` immediately after merge, before further
+engine rounds run. A v1 summary is rejected as `unsupported_schema_version`. An
+old on-disk round summary is skipped by `find_round_summary_for_head`, so that
+round re-runs rather than being read. Repo engine skills must echo the
+`schema_version` from the args line, which cw reads from the constant, and must
+not hard-code it.
 
 The engine manifest (section 12.14) is versioned separately by its own
 `manifest_version`, checked exactly:
@@ -1436,8 +1456,10 @@ and `args_line`.
   `read-only`: an engine whose validators need to write requires the operator
   to widen `reviewer_sandbox_mode`.
 - **Adjudication.** An engine finding is never `reject`ed. A MUST_FIX engine
-  finding may be deferred only after an operator deferred its fingerprint. A
-  refusal prints `engine_route: <code>: <file>: <fingerprint>` per row, exits 1
+  finding may be deferred only after an operator deferred its fingerprint, with
+  one exception: a MUST_FIX carrying a non-blank `evidence_gap` may `defer`
+  without that defer, because the stamp holds it `operator_actionable` (#3822).
+  A refusal prints `engine_route: <code>: <file>: <fingerprint>` per row, exits 1
   and stamps nothing.
 
 ### 12.11 Exit Codes of the `cw review engine` Commands (#3039)
