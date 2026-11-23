@@ -615,6 +615,8 @@ class TestGateTimeoutCollapseRows:
             "no time limit",
             "gate-pass record",
             "cw dev-queue requeue <T> -c <C>",
+            "environment-mutating",
+            "uv run",
         ):
             assert token in park, token
 
