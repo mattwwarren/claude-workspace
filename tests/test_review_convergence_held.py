@@ -93,7 +93,7 @@ def _round(
 
 
 def _settle_gap(ledger: ConvergenceLedger) -> ConvergenceLedger:
-    """*ledger* with the held gap settled, as ``cw review settle`` does."""
+    """*ledger* with the held gap settled, as ``converge operator-settle`` does."""
     identity = gap_identity()
     settled, report = operator_settle(
         ledger,
@@ -458,7 +458,8 @@ class TestOverrideOverHeld:
         message = str(raised.value)
         assert "N/A" in message
         assert GAP_SUMMARY in message
-        assert "cw review settle" in message
+        assert "cw review converge operator-settle" in message
+        assert "cw review settle" not in message
         assert "requeue" in message
         assert [entry.identity for entry in ledger.held] == [gap_identity()]
         assert ledger.status == "in_progress"

@@ -4201,17 +4201,18 @@ a Claude-native `record-round` that adds no new fix. `stop.settle_payload` lists
 the identity; the unrun check is read from the ledger JSON.
 
 Release follows what the stop named. A same-tip requeue of an `operator_action`
-stop clears exactly the gaps that stop named, so supply the capability (or
-`cw review settle` the gap) and requeue. Any other same-tip release, such as
+stop clears exactly the gaps that stop named, so supply the capability and
+requeue, or run `cw review converge operator-settle` for the gap. Any other same-tip release, such as
 `max_cycles_raised` or a contest-only stop that did not name the gap, keeps the
 held memory, so the next empty round still stops on it and never converges on an
 unverified gap. New commits clear all held memory, because the new tip gets a full
 re-review that re-raises the gap if it is still real.
 
 `cw dev-queue approve --override-must-fix` refuses a ledger with an outstanding
-gap. The error names the gap and the two routes: `cw review settle` for that gap,
-or restore the missing capability and requeue. The override never clears held
-memory itself.
+gap. The error names the gap and the two routes: `cw review converge
+operator-settle` for that gap (the only command that clears ledger held memory;
+`cw review settle` writes only the dev-queue row marker), or restore the missing
+capability and requeue. The override never clears held memory itself.
 
 **Park: `review_engine_modified` (RFC 0017, #3039).** A client with
 `review.engine` set runs its own review skill as the Claude-native round

@@ -779,7 +779,10 @@ def _refuse_override_over_held(ledger: ConvergenceLedger) -> None:
     """Raise :class:`ConvergenceError` when *ledger* carries an outstanding gap (#3823).
 
     An evidence gap was never verified, so no operator override may converge past
-    it. The message names each gap and the two routes; held memory is not touched.
+    it. The message names each gap and the two routes: ``cw review converge
+    operator-settle`` (the only command that clears ledger held memory; ``cw
+    review settle`` writes only the dev-queue row marker) or a requeue. Held
+    memory is not touched.
     """
     outstanding = outstanding_held(ledger)
     if not outstanding:
@@ -790,8 +793,9 @@ def _refuse_override_over_held(ledger: ConvergenceLedger) -> None:
     )
     msg = (
         "an operator override cannot converge a ledger carrying an unverified "
-        f"evidence gap ({gaps}). Settle it with `cw review settle` for that "
-        "gap, or restore the missing capability and requeue so a review runs it."
+        f"evidence gap ({gaps}). Settle it with `cw review converge "
+        "operator-settle` for that gap, or restore the missing capability and "
+        "requeue so a review runs it."
     )
     raise ConvergenceError(msg)
 
