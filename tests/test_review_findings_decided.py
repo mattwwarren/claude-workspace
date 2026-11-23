@@ -38,8 +38,7 @@ _HELD = (
 _NOTE = "contests a decided constraint; recorded as a non-blocking note"
 _GAP_HELD = (
     "evidence gap: the reviewer could not verify this; held for the operator"
-    " (supply the missing check and requeue the review; `cw review settle`"
-    " dismisses only a deferrable finding)"
+    " (supply the missing check and requeue the review)"
 )
 _GAP_NOTE = (
     "evidence gap: the reviewer could not verify this; recorded as a non-blocking note"

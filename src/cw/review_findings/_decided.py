@@ -63,8 +63,7 @@ _NOTE: tuple[Disposition, str] = (
 _GAP_HELD: tuple[Disposition, str] = (
     "operator_actionable",
     "evidence gap: the reviewer could not verify this; held for the operator"
-    " (supply the missing check and requeue the review; `cw review settle`"
-    " dismisses only a deferrable finding)",
+    " (supply the missing check and requeue the review)",
 )
 _GAP_NOTE: tuple[Disposition, str] = (
     "deferred",
