@@ -51,6 +51,7 @@ from cw.review_convergence._findings import (
     carried_held,
     classify_findings,
     mark_reseen,
+    outstanding_held,
     settled_debt_key,
 )
 from cw.review_convergence._identity import FindingIdentity, finding_identity
@@ -774,6 +775,27 @@ def _merge_settled(
     return merged
 
 
+def _refuse_override_over_held(ledger: ConvergenceLedger) -> None:
+    """Raise :class:`ConvergenceError` when *ledger* carries an outstanding gap (#3823).
+
+    An evidence gap was never verified, so no operator override may converge past
+    it. The message names each gap and the two routes; held memory is not touched.
+    """
+    outstanding = outstanding_held(ledger)
+    if not outstanding:
+        return
+    gaps = "; ".join(
+        f"{entry.identity.file}: {entry.identity.summary_normalized}"
+        for entry in outstanding
+    )
+    msg = (
+        "an operator override cannot converge a ledger carrying an unverified "
+        f"evidence gap ({gaps}). Settle it with `cw review settle` for that "
+        "gap, or restore the missing capability and requeue so a review runs it."
+    )
+    raise ConvergenceError(msg)
+
+
 def override_confirm_round(
     ledger: ConvergenceLedger,
     identities: Sequence[FindingIdentity],
@@ -804,6 +826,7 @@ def override_confirm_round(
             "every overridden finding"
         )
         raise ConvergenceError(msg)
+    _refuse_override_over_held(ledger)
     last = ledger.rounds[-1]
     distinct = list(dict.fromkeys(identities))
     override = ConfirmOverride(
