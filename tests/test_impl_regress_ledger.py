@@ -202,3 +202,30 @@ def test_no_git_and_no_head_read(tmp_path: Path) -> None:
     """``tmp_path`` is not a git repo, and delivery still happens."""
     write_held_ledger(tmp_path, [[_gap("A")]])
     assert read_held_round_verdict(tmp_path, _T).verdict is not None
+
+
+def test_review_feedback_present_beats_ledger(tmp_path: Path) -> None:
+    """A PR row with review_feedback is refused before any ledger read."""
+    from datetime import UTC, datetime
+
+    from cw.models.review_feedback import ReviewFeedback
+    from cw.stage_verification.impl_regress_findings import regress_review_findings
+    from tests._shared.review_builders import regressed_review_row
+
+    write_held_ledger(tmp_path, [[_gap("A")]], ticket_id=_T)
+    feedback = ReviewFeedback(
+        repo="o/r",
+        pr_number=1,
+        reviewed_sha="a" * 40,
+        captured_at=datetime(2026, 11, 1, tzinfo=UTC),
+        report="red",
+    )
+    row = regressed_review_row(
+        _T,
+        pr_url="https://example/pr/1",
+        review_feedback=feedback,
+        blocked_reason="review_operator_actionable",
+    )
+    outcome = regress_review_findings(row, tmp_path)
+    assert outcome is not None
+    assert outcome.reason == "review_feedback_present"

@@ -501,3 +501,30 @@ class TestLedgerLane:
         assert regress_review_findings(_task(), tmp_path) == RegressOutcome(
             None, "artifact_missing"
         )
+
+
+class TestReadOwnedVerdictBlockingFlag:
+    """With require_blocking off, the caller owns the blocking decision (#3862)."""
+
+    def test_default_still_refuses_non_blocking(self, tmp_path: Path) -> None:
+        from cw.dev_queue.must_fix_override import read_owned_verdict
+
+        path = write_review_verdict_envelope(
+            tmp_path, ticket_id=_TICKET, reviewed_sha=_SHA, blocking=False
+        )
+        read = read_owned_verdict(path, _TICKET)
+        assert read.verdict is None
+        assert read.refusal == "not_blocking"
+
+    def test_non_blocking_returned_when_caller_owns_the_decision(
+        self, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue.must_fix_override import read_owned_verdict
+
+        path = write_review_verdict_envelope(
+            tmp_path, ticket_id=_TICKET, reviewed_sha=_SHA, blocking=False
+        )
+        read = read_owned_verdict(path, _TICKET, require_blocking=False)
+        assert read.refusal is None
+        assert read.verdict is not None
+        assert read.verdict.blocking is False
