@@ -383,6 +383,10 @@ def test_match_status_sends_no_signal(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_sighup_deferred_until_child_registered_in_lock_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The automatic path waits for registration; an unregistered child reads
+    NO_LOOP. ``test_operator_sighup_waits_for_child_registration`` pins the
+    ``assessment.pid == child.pid`` guard itself, since the operator path
+    forwards whatever the status."""
     harness = _Harness(
         monkeypatch, [_stale_child(register_after=125), _Script(exit_after=5)]
     )
