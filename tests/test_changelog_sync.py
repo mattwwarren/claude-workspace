@@ -687,10 +687,7 @@ class TestUnionConflict:
             changelog_sync.UNION_COMMIT_MESSAGE
         )
         assert _git_sandbox.git(clone, "status", "--porcelain") == ""
-        marker = _git_sandbox.run(
-            "rev-parse", "--verify", "-q", "MERGE_HEAD", cwd=clone, check=False
-        )
-        assert marker.returncode != 0
+        assert not _merge_head(clone)
         assert not _changelog_cut_helpers.github_would_conflict(
             clone, "HEAD", "origin/epic/1"
         )
@@ -800,19 +797,15 @@ class TestUnionConflict:
     ) -> None:
         clone = _changelog_cut_helpers.epic_sibling_repo(tmp_path, make_git_repo)
         _changelog_cut_helpers.push_base_moved_without_changelog(clone, "epic/2")
-        head_before = _git_sandbox.git(clone, "rev-parse", "HEAD")
+        before = _state(clone)
 
         result = sync_changelog(
             clone, "epic/2", union_conflict=True, default_branch="main"
         )
 
         assert result.state == "clean"
-        assert _git_sandbox.git(clone, "rev-parse", "HEAD") == head_before
-        assert _git_sandbox.git(clone, "status", "--porcelain") == ""
-        marker = _git_sandbox.run(
-            "rev-parse", "--verify", "-q", "MERGE_HEAD", cwd=clone, check=False
-        )
-        assert marker.returncode != 0
+        assert _state(clone) == before
+        assert not _merge_head(clone)
 
     def test_dirty_tree_is_refused(
         self, tmp_path: Path, make_git_repo: Callable[..., Path]
