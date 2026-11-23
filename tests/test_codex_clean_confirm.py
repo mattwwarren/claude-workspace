@@ -105,6 +105,7 @@ from tests._shared.review_builders import (
     _make_reviewer_doc,
 )
 from tests.test_review_convergence import _sharded
+from tests.test_review_convergence_held import GAP_RATIONALE, GAP_SUMMARY, held_gap
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1456,6 +1457,39 @@ class TestEvidenceGapConfirmRound:
         assert confirm.new_fix >= 1
         assert confirm.new_operator_action == 0
         assert confirm.new_held == 1
+
+    def test_a_clean_loop_over_a_carried_gap_parks_operator_actionable(
+        self, wt: Path
+    ) -> None:
+        """A clean codex loop round over a carried gap parks it (#3823, R7).
+
+        An earlier mixed round repaired the reproduced finding and carried the
+        gap as ledger memory. The next loop round is clean, so the ledger would
+        stop on the gap. The park names the unrun check and never runs the
+        confirm, a repair worker, or the generic ``review_not_converging`` stop.
+        """
+        fix = round_finding("MUST_FIX", _REPRODUCED_SUMMARY, file="feature.py")
+        write_ledger(wt, _codex_ledger(wt, (_head(wt), [fix, held_gap()])))
+
+        def _must_not_run(role: str) -> ClaudeRunResult:
+            message = f"confirm must not run; {role} was called"
+            raise AssertionError(message)
+
+        outcome = _apply(wt, _client(wt), RoleAwareClaudeRunner(_must_not_run))
+
+        blocker = outcome.result.blocker
+        assert outcome.result.status == "blocked"
+        assert blocker is not None
+        assert blocker.reason == "review_operator_actionable"
+        assert blocker.retry_eligible is False
+        assert "OPERATOR EVIDENCE REQUIRED" in blocker.details
+        assert GAP_SUMMARY in blocker.details
+        assert GAP_RATIONALE in blocker.details
+        assert outcome.result.review.converged is False
+        ledger = _ledger(wt)
+        assert ledger.status == "stopped"
+        assert ledger.stop_reason == "operator_action"
+        assert [entry.rationale for entry in ledger.held] == [GAP_RATIONALE]
 
 
 # ---------------------------------------------------------------------------
