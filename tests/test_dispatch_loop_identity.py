@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from cw.dispatch_reexec import SUPERVISOR_PID_ENV
 
 import cw
 from cw import dispatch_loop_identity as dli
@@ -33,6 +32,7 @@ from cw.dispatch_loop_identity import (
     loop_record_fields,
     process_code_identity,
 )
+from cw.dispatch_reexec import SUPERVISOR_PID_ENV
 from cw.exceptions import DispatchLoopLockedError
 from cw.local_runner import read_process_start_time_ns
 from tests._loop_identity_helpers import (

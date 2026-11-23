@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 from click.testing import CliRunner
-from cw.dispatch_reexec import SUPERVISOR_PID_ENV
 
 from cw.cli import main
 from cw.cli.dev_queue._loop_warning import (
@@ -21,6 +20,7 @@ from cw.cli.dev_queue._loop_warning import (
     warn_if_dispatch_loop_stale,
 )
 from cw.dispatch_loop_identity import assess_dispatch_loop
+from cw.dispatch_reexec import SUPERVISOR_PID_ENV
 from cw.exceptions import CwError
 from cw.models import Stage
 from tests._cli_review_helpers import _enter_operator_machine

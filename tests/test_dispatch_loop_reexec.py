@@ -14,17 +14,17 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
+
+import cw.dispatch.loop as loop_mod
+from cw.config import load_effective_config
+from cw.dev_queue import add_ticket, load_dev_queue
+from cw.dispatch import DispatchTickResult, run_dispatch_loop
 from cw.dispatch.loop_lifecycle import (
     drain_codex_threads,
     idle_wait,
     loop_exit_payload,
 )
 from cw.dispatch_reexec import SUPERVISOR_PID_ENV, ReexecControl, sighup_reexec
-
-import cw.dispatch.loop as loop_mod
-from cw.config import load_effective_config
-from cw.dev_queue import add_ticket, load_dev_queue
-from cw.dispatch import DispatchTickResult, run_dispatch_loop
 from cw.exceptions import VersionDriftError
 from cw.models import OrchestratorEventType, QueueItemStatus, TicketTask
 from cw.native_daemon import FakeNativeDaemonClient

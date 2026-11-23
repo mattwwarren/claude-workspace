@@ -12,6 +12,7 @@ import signal
 import threading
 
 import pytest
+
 from cw.dispatch_reexec import (
     REEXEC_EXIT_CODE,
     SUPERVISOR_PID_ENV,
@@ -22,7 +23,6 @@ from cw.dispatch_reexec import (
     supervised_by_parent,
     supervisor_pid,
 )
-
 from tests._loop_identity_helpers import sighup_disposition
 
 pytestmark = pytest.mark.platform_sensitive

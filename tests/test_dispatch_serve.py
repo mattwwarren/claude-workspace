@@ -8,9 +8,9 @@ import signal
 from unittest.mock import patch
 
 import pytest
-from cw.dispatch_reexec import REEXEC_EXIT_CODE, SUPERVISOR_PID_ENV, ReexecControl
 
 from cw.config import dispatch_loop_lock
+from cw.dispatch_reexec import REEXEC_EXIT_CODE, SUPERVISOR_PID_ENV, ReexecControl
 from cw.dispatch_serve import (
     _SERVE_BACKOFF_CAP_SECONDS,
     _SERVE_CRASH_WINDOW_SECONDS,
