@@ -169,13 +169,17 @@ def patch_git_bounded(
     clock: FakeClock | None = None,
     step: float = 0.0,
     fail_verbs: Sequence[str] = (),
+    observe: Callable[[], object] | None = None,
 ) -> list[tuple[list[str], float]]:
     """Record every ``git_bounded`` call in *modules* and run the real git.
 
     Returns the live list of ``(argv, timeout)`` pairs. Each call advances
     *clock* (when given) by *step*, and a call whose ``argv[0]`` is in
-    *fail_verbs* raises ``GitFailedError`` instead of running git. The real
-    function is captured before patching, so only the recording is new.
+    *fail_verbs* raises ``GitFailedError`` instead of running git. *observe*,
+    when given, is called with no arguments at the start of every recorded call,
+    so a test can sample process state (held locks) from inside each git call;
+    the caller's callable keeps the samples. The real function is captured
+    before patching, so only the recording is new.
     """
     from cw.merge_probe import GitFailedError, git_bounded
 
@@ -185,6 +189,8 @@ def patch_git_bounded(
         worktree: Path, argv: list[str], timeout: float
     ) -> subprocess.CompletedProcess[str]:
         calls.append((list(argv), timeout))
+        if observe is not None:
+            observe()
         if clock is not None:
             clock.advance(step)
         if argv and argv[0] in fail_verbs:

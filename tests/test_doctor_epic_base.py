@@ -18,6 +18,7 @@ from pydantic import ValidationError
 import cw.doctor as doctor_pkg
 import cw.doctor.epic_base as doctor_epic_base
 from cw import merge_probe
+from cw._lock_guard import held_locks
 from cw.doctor import _deps
 from cw.doctor.core import _epic_base_checks
 from cw.doctor.epic_base import _check_epic_base
@@ -544,6 +545,25 @@ class TestWiring:
         assert seen_at_load == [0]
         assert [r.name for r in results] == ["epic-base/acme/epic/x"]
         assert calls
+
+    def test_no_state_lock_is_held_while_git_runs(
+        self, epic: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        held_during_git: list[tuple[object, ...]] = []
+        calls = patch_git_bounded(
+            monkeypatch,
+            doctor_epic_base,
+            merge_probe,
+            observe=lambda: held_during_git.append(held_locks()),
+        )
+        monkeypatch.setattr(
+            _deps, "load_dev_queue", lambda: DevQueueStore(tasks=[_row()])
+        )
+
+        _epic_base_checks(_clients(epic))
+
+        assert len(held_during_git) == len(calls) > 0
+        assert all(locks == () for locks in held_during_git)
 
     def test_run_doctor_reports_the_epic_base_advisory(
         self, epic: Path, monkeypatch: pytest.MonkeyPatch
