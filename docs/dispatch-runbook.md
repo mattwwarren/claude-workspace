@@ -4205,8 +4205,16 @@ stop clears exactly the gaps that stop named, so supply the capability and
 requeue, or run `cw review converge operator-settle` for the gap. Any other same-tip release, such as
 `max_cycles_raised` or a contest-only stop that did not name the gap, keeps the
 held memory, so the next empty round still stops on it and never converges on an
-unverified gap. New commits clear all held memory, because the new tip gets a full
-re-review that re-raises the gap if it is still real.
+unverified gap. New commits clear all held memory when a STOPPED ledger is
+released on a new tip, because the new tip gets a full re-review that re-raises
+the gap if it is still real.
+
+That release path does not run while the mixed round is parked. A mixed round
+leaves the ledger `in_progress`, not stopped, so neither the repair commit nor a
+requeue while the row is parked on `codex_must_fix_findings` clears the gap.
+Expect one further `review_operator_actionable` park on the carried gap. Release
+it with a same-tip requeue (which clears the gap the stop named) or with
+`cw review converge operator-settle`.
 
 `cw dev-queue approve --override-must-fix` refuses a ledger with an outstanding
 gap. The error names the gap and the two routes: `cw review converge
