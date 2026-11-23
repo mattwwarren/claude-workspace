@@ -151,7 +151,7 @@ Pure reads safe for external pollers (`cw list`, `cw status`, `cw session show|l
 |---------|-------------|
 | `cw dev-queue add <ticket> -c <client> [--stage <s>]` | Enqueue one or more tickets for dispatch (optionally at a given stage) |
 | `cw dev-queue run [--once]` | Dispatch pending tasks (up to concurrency cap) |
-| `cw dev-queue serve` | Run the dispatch loop with automatic restart on crash |
+| `cw dev-queue serve [--supervised]` | Run the dispatch loop with automatic restart on crash; `--supervised` also restarts it onto newly installed code when the checkout moves |
 | `cw dev-queue status` | Show queue state and last tick summary |
 | `cw dev-queue usage-limit clear -c <client> [--dry-run] [--force]` | Lift a client's usage-limit back-off window early after a manual account reset (probes the account first unless `--force`) |
 | `cw dev-queue tasks` | List dev-queue tasks with typed field output |

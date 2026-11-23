@@ -5153,3 +5153,24 @@ class TestAutoPruneFollowerComposition:
         # already consumed (cursor 2 survives, so the cursor-found path ran).
         assert len(prune_calls) == 1
         assert prune_calls[0].archived_count == 2
+
+
+def test_dispatch_restart_stalled_event_round_trips_and_is_cli_recordable(
+    tmp_events_dir: Path,
+) -> None:
+    """#3726: the supervised-restart stall signal is a non-paging member."""
+    from cw.cli.queues import _VALID_EVENT_TYPES
+    from cw.models.orchestrator_config.operator_forward import (
+        _DEFAULT_OPERATOR_EVENT_TYPES,
+    )
+
+    etype = OrchestratorEventType.DISPATCH_RESTART_STALLED
+    assert etype.value == "dispatch.restart_stalled"
+    ev = events_record_event(
+        etype, {"child_pid": 42, "stalled_seconds": 600.0, "checkout": "1.0.0"}
+    )
+    restored = OrchestratorEvent.model_validate_json(ev.model_dump_json())
+    assert restored.type is etype
+    assert restored.payload["child_pid"] == 42
+    assert "dispatch.restart_stalled" in _VALID_EVENT_TYPES
+    assert etype not in _DEFAULT_OPERATOR_EVENT_TYPES

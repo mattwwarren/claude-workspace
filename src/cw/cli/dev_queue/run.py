@@ -10,6 +10,7 @@ from cw.cli._base import _complete_client, handle_errors
 from cw.config import get_client
 from cw.dispatch import run_dispatch_loop
 from cw.dispatch_serve import run_dispatch_serve
+from cw.dispatch_supervisor import run_supervised_serve
 from cw.plan import run_planner
 
 from ._group import dev_queue
@@ -156,6 +157,17 @@ def dev_queue_run(
         " use only to override a wedged/foreign holder."
     ),
 )
+@click.option(
+    "--supervised",
+    is_flag=True,
+    default=False,
+    help=(
+        "Run the dispatch loop as a child of a small supervisor that restarts"
+        " it from the currently installed code at an idle point when the"
+        " checkout moves, or on SIGHUP (the tick in progress finishes first)."
+        " Cannot be combined with --force."
+    ),
+)
 @handle_errors
 def dev_queue_serve(
     max_parallel: int | None,
@@ -166,6 +178,7 @@ def dev_queue_serve(
     client: str | None,
     max_restarts: int,
     force: bool,
+    supervised: bool,
 ) -> None:
     """Run the dispatch loop with automatic restart on crash.
 
@@ -173,9 +186,31 @@ def dev_queue_serve(
     exponential backoff. It exits cleanly on Ctrl-C or a normal (non-crash)
     return from the loop. Use this command in place of ``run`` when you want
     a self-healing long-running dispatch process.
+
+    With ``--supervised`` the loop runs as a child process that its
+    supervisor restarts onto newly installed code when the checkout moves
+    (#3726); see the dispatch runbook.
     """
+    if supervised and force:
+        msg = (
+            "--supervised cannot be combined with --force: the supervised loop"
+            " must hold the dispatch-loop lock so the code-identity guard can"
+            " see it."
+        )
+        raise click.UsageError(msg)
     if client is not None:
         get_client(client)
+    if supervised:
+        run_supervised_serve(
+            max_parallel=max_parallel,
+            use_plan=use_plan,
+            parent=parent,
+            quiet=quiet,
+            auto_ff=auto_ff,
+            client=client,
+            max_restarts=max_restarts,
+        )
+        return
     run_dispatch_serve(
         max_parallel=max_parallel,
         use_plan=use_plan,

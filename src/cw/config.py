@@ -499,6 +499,8 @@ def _current_command_str() -> str:
     holder's self-reported identity (#1362).
     """
     argv0 = Path(sys.argv[0]).name if sys.argv else "cw"
+    # A `python -m cw` child of `serve --supervised` (#3726) reports as `cw`.
+    argv0 = "cw" if argv0 == "__main__.py" else argv0
     return shlex.join([argv0, *sys.argv[1:]])
 
 

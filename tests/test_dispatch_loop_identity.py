@@ -22,6 +22,7 @@ from cw.config import dispatch_loop_lock, dispatch_loop_lock_file
 from cw.dispatch_loop_identity import (
     COMMIT_KEY,
     PROC_START_KEY,
+    SUPERVISOR_PID_KEY,
     VERSION_KEY,
     CodeIdentity,
     LoopAssessment,
@@ -31,6 +32,7 @@ from cw.dispatch_loop_identity import (
     loop_record_fields,
     process_code_identity,
 )
+from cw.dispatch_reexec import SUPERVISOR_PID_ENV
 from cw.exceptions import DispatchLoopLockedError
 from cw.local_runner import read_process_start_time_ns
 from tests._loop_identity_helpers import (
@@ -447,3 +449,101 @@ class TestNoLockTaken:
             assert assessment.status is LoopStatus.MATCH
             with pytest.raises(DispatchLoopLockedError), dispatch_loop_lock():
                 pass
+
+
+class TestSupervisedLoop:
+    """The ``supervisor_pid`` record key and the supervised wording (#3726)."""
+
+    @pytest.fixture(autouse=True)
+    def _unsupervised(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(SUPERVISOR_PID_ENV, raising=False)
+
+    def test_supervised_stale_message_is_the_conditional_wording(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_loop_record(commit=COMMIT_A, supervisor_pid=os.getpid())
+        patch_checkout_identity(monkeypatch, commit=COMMIT_B)
+        assessment = assess_dispatch_loop()
+        assert assessment.status is LoopStatus.STALE
+        assert assessment.supervised is True
+        assert assessment.message == (
+            f"dispatch loop (pid {os.getpid()}) started on {VERSION} @"
+            f" {COMMIT_A[:12]} but the checkout is at {VERSION} @ {COMMIT_B[:12]};"
+            " its supervisor restarts it at the next idle tick once the new code"
+            " passes its import check; if it has not, check the supervisor's"
+            " stderr"
+        )
+
+    def test_dead_supervisor_pid_is_unsupervised_and_uses_restart_wording(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_loop_record(commit=COMMIT_A, supervisor_pid=999_999_999)
+        patch_checkout_identity(monkeypatch, commit=COMMIT_B)
+        assessment = assess_dispatch_loop()
+        assert assessment.status is LoopStatus.STALE
+        assert assessment.supervised is False
+        assert assessment.message.endswith(f"; {_RESTART}")
+
+    def test_supervised_match_is_not_marked_supervised(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_loop_record(commit=COMMIT_A, supervisor_pid=os.getpid())
+        patch_checkout_identity(monkeypatch, commit=COMMIT_A)
+        assessment = assess_dispatch_loop()
+        assert assessment.status is LoopStatus.MATCH
+        assert assessment.supervised is False
+
+    def test_unsupervised_stale_loop_message_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_loop_record(commit=COMMIT_A)
+        patch_checkout_identity(monkeypatch, commit=COMMIT_B)
+        assessment = assess_dispatch_loop()
+        assert assessment.supervised is False
+        assert assessment.message == (
+            f"dispatch loop (pid {os.getpid()}) started on {VERSION} @"
+            f" {COMMIT_A[:12]} but the checkout is at {VERSION} @ {COMMIT_B[:12]};"
+            " restart `cw dev-queue serve`"
+        )
+
+    def test_loop_record_fields_omits_supervisor_pid_when_unsupervised(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(dli, "_source_root", lambda: None)
+        assert SUPERVISOR_PID_KEY not in loop_record_fields()
+        monkeypatch.setenv(SUPERVISOR_PID_ENV, "999999999")
+        assert SUPERVISOR_PID_KEY not in loop_record_fields()
+
+    def test_loop_record_fields_adds_supervisor_pid_when_supervised(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(dli, "_source_root", lambda: None)
+        monkeypatch.setenv(SUPERVISOR_PID_ENV, str(os.getppid()))
+        fields = loop_record_fields()
+        assert fields[SUPERVISOR_PID_KEY] == os.getppid()
+        assert set(fields) == {
+            PROC_START_KEY,
+            VERSION_KEY,
+            COMMIT_KEY,
+            SUPERVISOR_PID_KEY,
+        }
+
+    def test_old_record_without_key_still_parses(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_loop_record(commit=COMMIT_A)
+        patch_checkout_identity(monkeypatch, commit=COMMIT_A)
+        assert assess_dispatch_loop().status is LoopStatus.MATCH
+
+    def test_malformed_supervisor_pid_is_ignored(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        write_loop_record(commit=COMMIT_A)
+        path = dispatch_loop_lock_file()
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record[SUPERVISOR_PID_KEY] = "not-a-pid"
+        path.write_text(json.dumps(record), encoding="utf-8")
+        patch_checkout_identity(monkeypatch, commit=COMMIT_B)
+        assessment = assess_dispatch_loop()
+        assert assessment.status is LoopStatus.STALE
+        assert assessment.supervised is False

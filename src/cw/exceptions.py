@@ -834,7 +834,7 @@ class VersionDriftError(DispatchServeError):
 
     Caught by :func:`run_dispatch_serve` to trigger a clean restart without
     counting toward the crash cap — a version reload is intentional, not a
-    crash.
+    crash. A supervised child (#3726) converts it to exit 75.
     """
 
     __slots__ = ()

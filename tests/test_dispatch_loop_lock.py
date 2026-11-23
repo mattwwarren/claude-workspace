@@ -194,3 +194,17 @@ def test_losing_contender_names_holder_from_an_identity_record(
         pass
     message = str(exc_info.value)
     assert f"pid {os.getpid()}: cw dev-queue serve --quiet" in message
+
+
+def test_current_command_str_normalizes_dunder_main_to_cw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3726: a ``python -m cw`` child records ``cw ...``, not ``__main__.py``."""
+    from cw.config import _current_command_str
+
+    monkeypatch.setattr(
+        sys, "argv", ["/venv/lib/cw/__main__.py", "dev-queue", "serve", "--quiet"]
+    )
+    assert _current_command_str() == "cw dev-queue serve --quiet"
+    monkeypatch.setattr(sys, "argv", ["/venv/bin/cw", "dev-queue", "serve"])
+    assert _current_command_str() == "cw dev-queue serve"

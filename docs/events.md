@@ -538,17 +538,47 @@ attention-worthy.
 ```json
 {
   "normal": true,
-  "exception_type": "<str | null>"
+  "exception_type": "<str | null>",
+  "codex_threads_still_running": 0
 }
 ```
 **Semantics:** Fires whenever the dispatch loop exits, cleanly or not —
 `normal` is `true` for a clean exit or Ctrl-C, `false` with
-`exception_type` set otherwise. When the loop exits because the installed
-cw package version drifted from the loaded one, the payload also carries
-`reason: "version_drift"` plus `loaded_version`/`installed_version`.
+`exception_type` set otherwise. `codex_threads_still_running` counts the codex
+review threads still alive after the loop's bounded drain (#1727). When the
+loop exits because the installed cw package version drifted from the loaded
+one, the payload also carries `reason: "version_drift"` plus
+`loaded_version`/`installed_version` (`installed_version` is omitted when the
+lookup itself fails).
 Operator-relevant: if you see this without the orchestrator having stopped the
 loop, dispatch is down and pending tickets will not be claimed until the
 orchestrator restarts it.
+
+Two more `reason` values come from `cw dev-queue serve --supervised` (#3726):
+
+- `reason: "reexec"`, from the child loop when SIGHUP asked it to restart onto
+  new code and it returned at its idle point. The supervisor starts a fresh
+  child, so dispatch is not down:
+  `{"normal": true, "exception_type": null, "codex_threads_still_running": <int>, "reason": "reexec"}`.
+- `reason: "supervisor_gave_up"`, from the supervisor when the child was
+  killed by a signal, exited non-zero where no restart applies, or failed to
+  start three times in a row after a re-exec. Dispatch is down:
+  `{"normal": false, "exception_type": null, "codex_threads_still_running": 0, "reason": "supervisor_gave_up", "child_returncode": <int | null>, "failed_starts": <int>}`.
+  The supervisor has no codex threads; the child's own event carries its
+  drain count.
+
+### `dispatch.restart_stalled`
+
+**Emitter:** `cw.dispatch_supervisor` (the `cw dev-queue serve --supervised` parent)
+**Payload:** `{"child_pid": <int>, "stalled_seconds": <float>, "checkout": "<str>"}`
+**Semantics:** Emitted at most once per forwarded restart SIGHUP when the child
+loop has not exited 600 s after it. `checkout` is the label of the code the
+restart targets. A tick is probably stuck on an external call. It is a signal
+only: the supervisor never signals again, terminates or kills the child because
+of it, since that could interrupt a tick. The supervisor also prints a stderr
+line naming the pid. Inspect the child (it writes to the supervisor's
+terminal) or stop it yourself with SIGINT. Fleet-level, not in the
+operator-forward defaults.
 
 ### `codex_fix.cycle_preserved`
 
