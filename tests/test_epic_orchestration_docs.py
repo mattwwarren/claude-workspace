@@ -22,6 +22,8 @@ from tests.test_orchestration_state_map import (
 
 ROOT = Path(__file__).resolve().parents[1]
 _SPAN_RE = re.compile(r"`([^`\n]+)`")
+_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+SPRINT_MIN_CW_SPANS = 5
 
 CW_ORCH = "cw-orchestration/SKILL.md"
 SPRINT = "orchestrate-sprint/SKILL.md"
@@ -267,22 +269,38 @@ def test_runbook_epic_section_does_not_restate_b2_refusal() -> None:
 # 10. Command resolution ----------------------------------------------------
 
 
+def _spans(text: str) -> list[str]:
+    """Single-backtick spans, with fenced blocks removed first.
+
+    The slices are whitespace-collapsed, so a triple-backtick fence would
+    otherwise flip the single-backtick pairing and hide every later span.
+    """
+    return _SPAN_RE.findall(_FENCE_RE.sub(" ", text))
+
+
+def _cw_spans(text: str) -> list[str]:
+    return [span for span in _spans(text) if span.startswith("cw ")]
+
+
 @pytest.mark.parametrize(
     "name", ["sprint-epics", "followup-base-row", "queue-step-5c", "runbook-epic"]
 )
 def test_new_prose_cw_spans_resolve(name: str) -> None:
     paths = _click_paths()
-    text = _new_prose_slices()[name]
+    cw_spans = _cw_spans(_new_prose_slices()[name])
+    if name == "sprint-epics":
+        assert len(cw_spans) >= SPRINT_MIN_CW_SPANS
+        assert any("--adopt-pr" in span for span in cw_spans)
+        assert any("--base" in span for span in cw_spans)
     problems: list[str] = []
-    for span in _SPAN_RE.findall(text):
-        if span.startswith("cw "):
-            problems.extend(_resolve(span, paths))
+    for span in cw_spans:
+        problems.extend(_resolve(span, paths))
     assert problems == []
 
 
 def test_no_cw_epic_span_in_new_prose_or_semantics() -> None:
     texts = [*_new_prose_slices().values(), _semantics()]
     for text in texts:
-        for span in _SPAN_RE.findall(text):
+        for span in _spans(text):
             assert span != "cw epic"
             assert not span.startswith("cw epic ")
