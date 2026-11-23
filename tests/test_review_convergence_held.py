@@ -281,8 +281,18 @@ class TestHeldRelease:
         assert follow.decision == "stop_operator_action"
 
     def test_new_commits_clear_all_held_memory(self) -> None:
-        ledger, _ = record(fresh_ledger(), held_gap(), sha="sha-1")
-        released = reconcile_ledger(ledger, head="sha-2")
+        """Operator item 6(c): the epoch, not the stop, clears an unnamed gap.
+
+        The stop names only the contest, so the ``operator_action`` arm would
+        keep the gap; only the new-epoch arm can clear it. The same-head half
+        (the gap survives) is ``test_contest_only_stop_release_keeps_an_unnamed_gap``.
+        """
+        ledger, _ = record(fresh_ledger(), held_gap(), real_fix(), sha="sha-1")
+        ledger, report = record(ledger, operator_finding("Contested"), sha="sha-2")
+        assert report.decision == "stop_operator_action"
+        assert gap_identity() not in ledger.stop_identities
+        assert [entry.identity for entry in ledger.held] == [gap_identity()]
+        released = reconcile_ledger(ledger, head="sha-3")
         assert released.released is not None
         assert released.released.cause == "new_commits"
         assert released.ledger.held == []
