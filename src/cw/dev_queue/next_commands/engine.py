@@ -28,7 +28,7 @@ from cw.dev_queue.next_commands.table import (
     _RULES,
     _Rule,
 )
-from cw.dev_queue.park_guidance import PARK_GUIDANCE
+from cw.dev_queue.park_guidance import guidance_for
 from cw.models import QueueItemStatus
 from cw.models.enums import PipelinePosition
 from cw.models.ticket_view import NextCommand
@@ -214,7 +214,7 @@ def refusal_suffix(
             NextCommand(command=dev_queue_command("show", task), purpose=_SHOW_PURPOSE)
         ]
     parts = [head]
-    guidance = PARK_GUIDANCE.get(task.disposition or "")
+    guidance = guidance_for(task)
     if guidance is not None:
         parts.append(guidance)
     first, *rest = commands

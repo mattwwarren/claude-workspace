@@ -118,8 +118,9 @@ def check_existing_branch_work(
 
     Repair rows (``review_feedback`` set) legitimately start on a branch with
     commits, so they are never checked. A REVIEW-regressed row whose verdict
-    delivers its MUST_FIX findings (#3694) is exempt for the same reason: its
-    branch carries the work under review. An unresolvable fork point fails
+    delivers its findings (#3694: MUST_FIX, and held evidence-gap findings
+    #3862) is exempt for the same reason: its branch carries the work under
+    review. An unresolvable fork point fails
     closed: cw cannot tell whether the branch carries prior work. When a
     REVIEW-regressed row is blocked, the block names why its findings were
     withheld.

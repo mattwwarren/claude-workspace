@@ -295,6 +295,12 @@ AWAITING_CI_EVIDENCE_BLOCKER_REASON: Literal["awaiting_ci_evidence"] = (
 REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON: Literal["review_confirm_must_fix"] = (
     "review_confirm_must_fix"
 )
+# blocker.reason of a REVIEW park that holds a finding for the operator: a
+# decision contest, an operator-action checklist or an evidence gap (#3862).
+# The one definition; the codex park and synthesis import it from here.
+REVIEW_OPERATOR_ACTIONABLE_BLOCKER_REASON: Literal["review_operator_actionable"] = (
+    "review_operator_actionable"
+)
 # blocker.reason of a codex review that ended with MUST_FIX findings. The ONE
 # definition of this literal: it lives in this low-level vocabulary so queue
 # readers do not import ``cw.codex_review`` (whose review context imports
@@ -324,7 +330,7 @@ KNOWN_BLOCKER_REASONS: frozenset[str] = (
             "review_blocked",
             REVIEW_NOT_CONVERGING_BLOCKER_REASON,
             "plan_deviation",
-            "review_operator_actionable",
+            REVIEW_OPERATOR_ACTIONABLE_BLOCKER_REASON,
             PLAN_SCOPE_DRIFT_BLOCKER_REASON,
             REVIEW_ENGINE_MODIFIED_BLOCKER_REASON,
             REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON,
