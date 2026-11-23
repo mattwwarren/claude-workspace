@@ -677,6 +677,12 @@ class TestUnionConflict:
         changelog = _git_sandbox.git(clone, "show", "HEAD:CHANGELOG.md")
         assert _changelog_cut_helpers.GAMMA in changelog
         assert _changelog_cut_helpers.DELTA in changelog
+        epic_changelog = _git_sandbox.git(clone, "show", "origin/epic/1:CHANGELOG.md")
+        released = "## [1.0.0]"
+        assert (
+            changelog[changelog.index(released) :]
+            == (epic_changelog[epic_changelog.index(released) :])
+        )
         assert _git_sandbox.git(clone, "log", "-1", "--format=%s") == (
             changelog_sync.UNION_COMMIT_MESSAGE
         )
@@ -688,6 +694,26 @@ class TestUnionConflict:
         assert not _changelog_cut_helpers.github_would_conflict(
             clone, "HEAD", "origin/epic/1"
         )
+
+    def test_release_cut_with_flag_still_takes_the_rebuild_path(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        scenario = cut_straddle_repo(tmp_path, make_git_repo)
+        clone = scenario.clone
+
+        result = sync_changelog(
+            clone, "main", union_conflict=True, default_branch="trunk"
+        )
+
+        assert result.state == "moved"
+        assert result.inserted == (GAMMA,)
+        assert _git_sandbox.git(clone, "log", "-1", "--format=%B").strip() == (
+            changelog_sync.COMMIT_MESSAGE.strip()
+        )
+        text = _committed_changelog(clone).decode("utf-8")
+        assert text == CL_EXPECTED
+        origin_text = _git_sandbox.git(clone, "show", "origin/main:CHANGELOG.md")
+        assert _released_part(text).rstrip() == _released_part(origin_text).rstrip()
 
     def test_second_run_after_moved_is_clean(
         self, tmp_path: Path, make_git_repo: Callable[..., Path]
