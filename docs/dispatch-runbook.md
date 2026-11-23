@@ -234,8 +234,17 @@ a review MUST_FIX) therefore starts with no feedback. The one exception is a
 REVIEW regress into IMPL (#3694): the blocking REVIEW verdict's MUST_FIX findings
 are delivered from the worktree's `.claude/review-verdict.json`, with or without a
 PR, for claude-native and codex IMPL runs only; opencode and local receive nothing
-(RFC 0018 D-4). Operator direction and a claude-native REVIEW park's verdict are
-not delivered. A fix outside the plan's files still needs
+(RFC 0018 D-4). Held evidence-gap findings (#3862) are delivered too. On the
+claude-native clean-mode lane the findings come from the newest ledger round
+(`.cw/review-convergence/round-<n>-verdict.json`) whose verdict holds a held
+finding, not the last round, because the loop does not carry a held finding into
+later rounds. That delivered `reviewed_sha` is pinned to the head that round
+reviewed, so it can be older than the worktree's HEAD by design: the worker
+verifies against current HEAD. An unsettled decision contest held in ANY listed
+ledger round withholds a later round's gap finding (`withheld (not_blocking)`)
+until `cw review settle`, matching the codex-lane contest rule. Decision contests
+and operator checklists are not delivered. A claude-native blocking-mode park saves
+no verdict and is withheld (a follow-up ticket persists it). A fix outside the plan's files still needs
 `cw dev-queue approve <T> -c <C> --scope-drift <paths>`. To repair the PR then,
 attach a fresh head-pinned file with `requeue --stage impl
 --review-feedback-file`. That applies to adopted rows too: they have no plan,
@@ -4069,7 +4078,15 @@ parks only the unverifiable finding. Reproduced MUST_FIX findings in the same
 verdict are fixed first, and the park lands once the loop converges. The
 loop-exhausted park (`codex_must_fix_findings`) still lists the gap findings.
 Release is `cw review settle` on the finding, or providing the missing
-capability and requeueing. It is not a product defect, so no `--regress`.
+capability and requeueing. An evidence-gap hold whose review verdict is still saved
+is also delivered by `requeue --stage impl --regress` (#3862): the codex lane's
+`.claude/review-verdict.json`, or a clean-mode ledger round verdict. The requeue echo
+then reports `delivered` or `withheld (<reason>)`. The `next:` list keeps the plain
+requeue first and the regress second, because the row carries only `blocked_reason`
+and cannot tell a decision contest, an operator checklist and an evidence gap apart.
+A decision contest or checklist is released by `cw review settle` (or the checklist),
+never by `--regress`. A Claude-native blocking-mode park saves no verdict and is
+withheld, so settle the finding or provide the capability.
 
 A finding with no diff anchor (`file: N/A`) has no fingerprint key, so the
 verdict comment prints no settle payload for it and `cw review settle` cannot
