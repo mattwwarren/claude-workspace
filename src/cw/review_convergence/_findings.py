@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, overload
 
+from cw.models.review_engine_summary import is_non_deferrable_rule
 from cw.review_adjudication import Adjudication, AdjudicationOutcome
 from cw.review_convergence._identity import FindingIdentity, finding_identity
 from cw.review_convergence._models import (
@@ -25,9 +26,8 @@ from cw.review_convergence._models import (
     SettledEntry,
     UnreadFindings,
 )
-from cw.review_engine.route import is_non_deferrable_rule
 from cw.review_finding_dispositions import debt_key
-from cw.review_findings import ReviewVerdict
+from cw.review_findings import ReviewVerdict, is_gap_hold
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -156,7 +156,13 @@ def decided_finding(item: AcceptedFinding, rationale: str) -> AcceptedFinding:
     (``coverage.*`` / ``acceptance.*``, RFC 0017 D-6) and that is not rejected
     is a ``fix`` whatever its severity (#3216, R20). The source gate leaves a
     built-in finding with a look-alike rule on the SHOULD_FIX default.
+
+    The one exception is an evidence-gap MUST_FIX the stamp already holds
+    ``operator_actionable`` (:func:`is_gap_hold`, #3822): it passes through
+    unchanged, so no call site re-decides it ``fixed`` and resumes repair.
     """
+    if is_gap_hold(item):
+        return item
     severity = item.finding.severity
     if (
         item.finding.source == "engine"

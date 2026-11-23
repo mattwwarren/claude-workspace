@@ -11,7 +11,7 @@ JSON schema, and ``docs/headless-contract.md`` section 12 is the prose contract.
 
 Compatibility: ``REVIEW_ENGINE_SUMMARY_SCHEMA_VERSION`` is checked exactly, with
 no look-ahead. Any field change bumps it and adds a row to section 12's version
-history.
+history (version 2 added the optional ``evidence_gap``, #3822).
 
 Fingerprints are opaque and engine-owned: cw requires them unique within one
 summary but never computes or verifies them, and their stability across rounds
@@ -40,7 +40,7 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
-REVIEW_ENGINE_SUMMARY_SCHEMA_VERSION = 1
+REVIEW_ENGINE_SUMMARY_SCHEMA_VERSION = 2
 
 #: Raw-byte cap, checked before decoding (reason ``oversized``).
 MAX_ENGINE_SUMMARY_BYTES = 1_048_576
@@ -57,6 +57,7 @@ MAX_ENGINE_FINDING_SUMMARY_LENGTH = 2_000
 MAX_ENGINE_EVIDENCE_LENGTH = 8_000
 MAX_ENGINE_CONSEQUENCE_LENGTH = 2_000
 MAX_ENGINE_SUGGESTED_FIX_LENGTH = 4_000
+MAX_ENGINE_EVIDENCE_GAP_LENGTH = 2_000
 MAX_ENGINE_ACCEPTANCE_ID_LENGTH = 64
 MAX_ENGINE_ACCEPTANCE_EVIDENCE_LENGTH = 2_000
 MAX_ENGINE_GATE_NAME_LENGTH = 64
@@ -71,10 +72,17 @@ ENGINE_RULE_ID_RE = r"^[a-z0-9_]+(\.[a-z0-9_-]+)*$"
 #: The ``ReviewFeedback.reviewed_sha`` rule (a drift test pins the equality).
 ENGINE_HEAD_SHA_RE = r"^[0-9a-f]{40}$"
 
-#: Reserved rule-id prefixes. Exported for I1's non-deferrable rule (D-6); no
-#: cw code consumes them in S1.
+#: Rule-id prefixes whose findings can never be deferred (I1's non-deferrable rule,
+#: D-6). Consumed by the route, the convergence stamps and the held-finding gate.
 COVERAGE_RULE_PREFIX = "coverage."
 ACCEPTANCE_RULE_PREFIX = "acceptance."
+_NON_DEFERRABLE_PREFIXES: Final = (COVERAGE_RULE_PREFIX, ACCEPTANCE_RULE_PREFIX)
+
+
+def is_non_deferrable_rule(rule_id: str | None) -> bool:
+    """Whether *rule_id* names a ``coverage.*`` or ``acceptance.*`` rule."""
+    return (rule_id or "").startswith(_NON_DEFERRABLE_PREFIXES)
+
 
 #: The cross-field rules, keyed by error type. ``str.format`` templates: they
 #: are rendered before the error is built, because pydantic-core substitutes
@@ -206,6 +214,19 @@ class EngineFinding(BaseModel):
         max_length=MAX_ENGINE_SUGGESTED_FIX_LENGTH,
         description="How the engine suggests fixing it, if stated.",
     )
+    evidence_gap: str | None = Field(
+        default=None,
+        max_length=MAX_ENGINE_EVIDENCE_GAP_LENGTH,
+        description=(
+            "Set only when this finding exists because a check you needed could not "
+            "be run or observed: name the command or tool and why it could not run. "
+            "Never set it for a defect visible in the diff or reproduced. Use null, "
+            "never an empty string, for none. A MUST_FIX with a marker is held for "
+            "the operator and not repaired. The marker is ignored for DEBT, NIT and "
+            "PRINCIPLE findings, and for a SHOULD_FIX coverage.* or acceptance.* "
+            "finding."
+        ),
+    )
 
     @field_validator("file")
     @classmethod
@@ -221,7 +242,9 @@ class EngineFinding(BaseModel):
             raise ValueError(msg)
         return value
 
-    @field_validator("summary", "evidence", "consequence", "suggested_fix")
+    @field_validator(
+        "summary", "evidence", "consequence", "suggested_fix", "evidence_gap"
+    )
     @classmethod
     def _check_text(cls, value: str | None) -> str | None:
         return _non_blank(value)

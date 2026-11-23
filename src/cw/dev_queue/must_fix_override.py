@@ -69,6 +69,7 @@ from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
 from cw.exceptions import ApproveGateError, CwError
 from cw.models import MustFixOverride, OrchestratorEventType, QueueItemStatus, Stage
+from cw.models.review_engine_summary import is_non_deferrable_rule
 from cw.operator_identity import resolve_actor_or_empty
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
@@ -82,7 +83,6 @@ from cw.review_convergence import (
     save_ledger,
 )
 from cw.review_debt import fingerprint_v1, normalize_summary
-from cw.review_engine.route import is_non_deferrable_rule
 from cw.review_findings import REVIEW_VERDICT_JSON_RELATIVE_PATH, ReviewVerdictEnvelope
 from cw.worktree import resolve_task_worktree
 

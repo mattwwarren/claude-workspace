@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 SKILL_FILE = ".claude/skills/repo-review/SKILL.md"
 ROUND = "r1"
 ARGS_LINE = re.compile(
-    r"^cw-engine: schema_version=1 head_sha=[0-9a-f]{40} "
+    r"^cw-engine: schema_version=2 head_sha=[0-9a-f]{40} "
     r"summary_path=/\S+/summary\.json base_dir=/\S+/skill$"
 )
 

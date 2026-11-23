@@ -2433,3 +2433,59 @@ class TestEvidenceGapAdjudication:
             _verdict(_accepted(finding)), [_adjudication(finding, outcome="fix")]
         )
         assert verdict.accepted[0].adjudicated_fix is True
+
+
+class TestEvidenceGapEngineDefer:
+    """#3822: a marked engine MUST_FIX ``coverage.*`` may defer; the stamp holds it."""
+
+    def test_marked_coverage_must_fix_defer_is_held_not_refused(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        finding = _make_gap_finding(
+            "MUST_FIX",
+            rule_id="coverage.missing_tests",
+            source="engine",
+            fingerprint=_ENGINE_FP,
+        )
+        entry = _adjudication(
+            finding, fingerprint=_ENGINE_FP, outcome="defer", rationale="later"
+        )
+
+        with caplog.at_level(logging.WARNING):
+            result = apply_adjudication(_verdict(_accepted(finding)), [entry])
+
+        assert result.accepted[0].disposition == "operator_actionable"
+        assert result.must_fix == []
+        assert result.blocking is False
+        assert any("evidence" in rec.getMessage() for rec in caplog.records)
+
+    def test_unmarked_coverage_must_fix_defer_still_refused(self) -> None:
+        from cw.review_engine import EngineRouteError
+
+        finding = _engine_finding(severity="MUST_FIX", rule_id="coverage.missing_tests")
+        entry = _adjudication(
+            finding, fingerprint=_ENGINE_FP, outcome="defer", rationale="later"
+        )
+
+        with pytest.raises(EngineRouteError) as excinfo:
+            apply_adjudication(_verdict(_accepted(finding)), [entry])
+
+        assert [r.code for r in excinfo.value.refusals] == ["engine_non_deferrable"]
+
+    def test_marked_coverage_should_fix_defer_still_refused(self) -> None:
+        from cw.review_engine import EngineRouteError
+
+        finding = _make_gap_finding(
+            "SHOULD_FIX",
+            rule_id="coverage.missing_tests",
+            source="engine",
+            fingerprint=_ENGINE_FP,
+        )
+        entry = _adjudication(
+            finding, fingerprint=_ENGINE_FP, outcome="defer", rationale="later"
+        )
+
+        with pytest.raises(EngineRouteError) as excinfo:
+            apply_adjudication(_verdict(_accepted(finding)), [entry])
+
+        assert [r.code for r in excinfo.value.refusals] == ["engine_non_deferrable"]

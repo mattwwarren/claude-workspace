@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Final
 from cw.dev_queue.review_engine_reconcile import GATING_SEVERITIES, SHOULD_FIX
 from cw.dev_queue.review_engine_settlements import record_engine_settlement
 from cw.exceptions import CwError
-from cw.review_engine.route import is_non_deferrable_rule
+from cw.models.review_engine_summary import is_non_deferrable_rule
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

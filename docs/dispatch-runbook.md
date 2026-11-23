@@ -4074,8 +4074,14 @@ capability and requeueing. It is not a product defect, so no `--regress`.
 A finding with no diff anchor (`file: N/A`) has no fingerprint key, so the
 verdict comment prints no settle payload for it and `cw review settle` cannot
 dismiss it. Release it by supplying the missing capability and requeueing.
-Findings that came from the repo review engine (`coverage.*` rules) cannot
-carry the marker and are not covered by this hold (follow-up).
+A repo-engine `coverage.*` or `acceptance.*` finding can carry the marker
+(#3822). It is held, not deferred, and `cw review converge operator-settle
+--outcome defer` is inert for it.
+A gap held in a loop round is released by supplying the missing capability and
+requeueing the review stage. A gap raised by the confirm round after an engine
+pass parks as `review_confirm_must_fix`, which a plain requeue does not release
+at the same tip; release it with `cw dev-queue requeue --stage impl --regress`.
+See `docs/headless-contract.md` section 12.3.
 
 `cw dev-queue approve --override-must-fix` does not release this park.
 For a pure-gap park (`review_operator_actionable`) it is refused at the

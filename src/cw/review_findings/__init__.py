@@ -43,8 +43,9 @@ here via re-exports. Submodules:
   ``ReviewVerdict`` artifact writer.
 - ``_decided`` — the held-for-operator stamp (#2984 decided-constraint
   contests, #3793 evidence gaps): ``stamp_held_findings`` and its readers,
-  keyed by ``held_kind``. Only a contest parks the whole verdict. Imports
-  ``_models`` only.
+  keyed by ``held_kind``, plus ``is_gap_hold`` (#3822), the one predicate the
+  convergence paths share. Only a contest parks the whole verdict. Imports
+  ``_models`` and the pure ``cw.models.review_engine_summary`` predicate only.
 
 #2000 added three counters to ``ReviewVerdict`` — ``rejected_count``,
 ``rejected_count_by_severity`` (both stamped by ``consolidate_verdict``, and
@@ -128,6 +129,7 @@ from cw.review_findings._decided import (
     held_disposition,
     held_findings,
     held_kind,
+    is_gap_hold,
     stamp_held_findings,
 )
 from cw.review_findings._dedup import (
@@ -248,6 +250,7 @@ __all__ = [
     "held_disposition",
     "held_findings",
     "held_kind",
+    "is_gap_hold",
     "parse_reviewer_document",
     "render_review_verdict_envelope",
     "stamp_held_findings",
