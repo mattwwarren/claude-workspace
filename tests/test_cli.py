@@ -9464,6 +9464,94 @@ class TestDevQueueServe:
         assert result.exit_code != 0
         assert "no such option" in result.output.lower()
 
+    def _route_supervised(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        """Patch both serve paths; return (supervised calls, in-process calls)."""
+        from cw.cli.dev_queue import run as cli_module
+
+        supervised, fake_supervised = self._fake_serve()
+        direct, fake_direct = self._fake_serve()
+        monkeypatch.setattr(cli_module, "run_supervised_serve", fake_supervised)
+        monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_direct)
+        return supervised, direct
+
+    def test_serve_supervised_routes_to_supervisor_with_options(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3726: --supervised hands the raw options (incl. quiet) to the parent."""
+        supervised, direct = self._route_supervised(monkeypatch)
+        result = CliRunner().invoke(
+            main,
+            [
+                "dev-queue",
+                "serve",
+                "--supervised",
+                "--quiet",
+                "-p",
+                "3",
+                "--use-plan",
+                "--parent",
+                "sess-1",
+                "--no-auto-ff",
+                "--max-restarts",
+                "2",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert direct == []
+        assert supervised == [
+            {
+                "max_parallel": 3,
+                "use_plan": True,
+                "parent": "sess-1",
+                "quiet": True,
+                "auto_ff": False,
+                "client": None,
+                "max_restarts": 2,
+            }
+        ]
+
+    def test_serve_supervised_force_is_usage_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        supervised, direct = self._route_supervised(monkeypatch)
+        result = CliRunner().invoke(
+            main, ["dev-queue", "serve", "--supervised", "--force"]
+        )
+        assert result.exit_code == 2
+        assert (
+            "--supervised cannot be combined with --force: the supervised loop"
+            " must hold the dispatch-loop lock so the code-identity guard can see"
+            " it."
+        ) in " ".join(result.output.split())
+        assert supervised == []
+        assert direct == []
+
+    def test_serve_supervised_validates_client(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        write_clients_yaml(ClientSpec("my-client", str(tmp_path)))
+        supervised, _direct = self._route_supervised(monkeypatch)
+        result = CliRunner().invoke(
+            main, ["dev-queue", "serve", "--supervised", "-c", "unknown-client"]
+        )
+        assert result.exit_code != 0
+        assert supervised == []
+
+    def test_serve_supervised_help_text(self) -> None:
+        result = CliRunner().invoke(main, ["dev-queue", "serve", "--help"])
+        assert result.exit_code == 0, result.output
+        assert (
+            "Run the dispatch loop as a child of a small supervisor that restarts"
+            " it from the currently installed code at an idle point when the"
+            " checkout moves, or on SIGHUP (the tick in progress finishes first)."
+            " Cannot be combined with --force."
+        ) in " ".join(result.output.split())
+
 
 # ---------------------------------------------------------------------------
 # Tests: dev-queue run/serve singleton lock (#1362)

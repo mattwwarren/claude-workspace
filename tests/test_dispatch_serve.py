@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import os
+import signal
 from unittest.mock import patch
 
 import pytest
+from cw.dispatch_reexec import REEXEC_EXIT_CODE, SUPERVISOR_PID_ENV, ReexecControl
 
 from cw.config import dispatch_loop_lock
 from cw.dispatch_serve import (
@@ -623,4 +626,119 @@ class TestRunDispatchServeSingletonLock:
         ):
             run_dispatch_serve()
 
+        assert call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# TestSupervisedReexec — the child side of `serve --supervised` (#3726)
+# ---------------------------------------------------------------------------
+
+
+class TestSupervisedReexec:
+    """A supervised child exits 75 at an idle point; unsupervised is unchanged."""
+
+    @pytest.fixture
+    def supervised(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(SUPERVISOR_PID_ENV, str(os.getppid()))
+
+    @pytest.fixture(autouse=True)
+    def _unsupervised_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(SUPERVISOR_PID_ENV, raising=False)
+
+    @pytest.mark.usefixtures("supervised")
+    def test_supervised_loop_return_after_sighup_exits_ex_tempfail(self) -> None:
+        def _fake_loop(**kwargs: object) -> None:
+            control = kwargs["reexec"]
+            assert isinstance(control, ReexecControl)
+            control.request(signal.SIGHUP, None)
+
+        with (
+            patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
+            pytest.raises(SystemExit) as info,
+        ):
+            run_dispatch_serve()
+        assert info.value.code == REEXEC_EXIT_CODE
+
+    @pytest.mark.usefixtures("supervised")
+    def test_supervised_version_drift_exits_ex_tempfail_without_sleep(self) -> None:
+        def _fake_loop(**_kwargs: object) -> None:
+            msg = "version drift"
+            raise VersionDriftError(msg)
+
+        with (
+            patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
+            patch("cw.dispatch_serve.time.sleep") as sleep,
+            pytest.raises(SystemExit) as info,
+        ):
+            run_dispatch_serve()
+        assert info.value.code == REEXEC_EXIT_CODE
+        sleep.assert_not_called()
+
+    def test_unsupervised_version_drift_unchanged_sleeps_and_returns(self) -> None:
+        def _fake_loop(**_kwargs: object) -> None:
+            msg = "version drift"
+            raise VersionDriftError(msg)
+
+        with (
+            patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
+            patch("cw.dispatch_serve.time.sleep") as sleep,
+        ):
+            run_dispatch_serve()
+        sleep.assert_called_once_with(_SERVE_INITIAL_BACKOFF_SECONDS)
+
+    @pytest.mark.usefixtures("supervised")
+    def test_sighup_during_crash_backoff_exits_without_reentering_loop(self) -> None:
+        controls: list[ReexecControl] = []
+
+        def _fake_loop(**kwargs: object) -> None:
+            control = kwargs["reexec"]
+            assert isinstance(control, ReexecControl)
+            controls.append(control)
+            msg = "crash"
+            raise RuntimeError(msg)
+
+        def _sleep(_seconds: float) -> None:
+            controls[-1].request(signal.SIGHUP, None)
+
+        with (
+            patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
+            patch("cw.dispatch_serve.time.sleep", side_effect=_sleep),
+            pytest.raises(SystemExit) as info,
+        ):
+            run_dispatch_serve()
+        assert info.value.code == REEXEC_EXIT_CODE
+        assert len(controls) == 1
+
+    def test_reexec_kwarg_passed_only_when_supervised(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[dict[str, object]] = []
+
+        def _fake_loop(**kwargs: object) -> None:
+            captured.append(dict(kwargs))
+
+        with patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop):
+            run_dispatch_serve()
+            monkeypatch.setenv(SUPERVISOR_PID_ENV, str(os.getppid()))
+            run_dispatch_serve()
+        assert "reexec" not in captured[0]
+        assert isinstance(captured[1]["reexec"], ReexecControl)
+        assert {k: v for k, v in captured[1].items() if k != "reexec"} == captured[0]
+
+    @pytest.mark.usefixtures("supervised")
+    def test_supervised_crash_budget_still_enforced_in_child(self) -> None:
+        call_count = 0
+
+        def _fake_loop(**_kwargs: object) -> None:
+            nonlocal call_count
+            call_count += 1
+            msg = "crash"
+            raise RuntimeError(msg)
+
+        with (
+            patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
+            patch("cw.dispatch_serve.time.sleep"),
+            pytest.raises(DispatchServeError),
+        ):
+            run_dispatch_serve(max_restarts=1)
         assert call_count == 2
