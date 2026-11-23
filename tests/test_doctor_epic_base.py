@@ -385,6 +385,67 @@ class TestCapAndBudget:
             assert timeout <= PROBE_TIMEOUT_SECONDS
             assert timeout <= 15.0
 
+    def test_cap_skipped_base_still_reports_a_misconfiguration(
+        self, epic: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        patch_git_bounded(monkeypatch, doctor_epic_base, merge_probe)
+        tasks = [
+            _row("epic/a"),
+            _row("epic/b", ticket_id="T-8", status=QueueItemStatus.RUNNING),
+            _row(
+                "epic/b",
+                ticket_id="T-9",
+                status=QueueItemStatus.COMPLETED,
+                pr_state=REQUIRED,
+            ),
+        ]
+
+        results = _check(_clients(epic), tasks, max_bases=1)
+
+        capped = results[1]
+        assert capped.name == "epic-base/acme/epic/b"
+        assert "not measured (per-run cap of 1 bases)" in capped.detail
+        assert "1 child PR(s) (T-9)" in capped.detail
+        assert "branch protection on epic/b likely requires a human review" in (
+            capped.detail
+        )
+        assert capped.warn is True
+        assert capped.ok is True
+
+    def test_budget_skipped_base_still_reports_a_misconfiguration(
+        self, epic: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = FakeClock()
+        patch_git_bounded(
+            monkeypatch,
+            doctor_epic_base,
+            merge_probe,
+            clock=clock,
+            step=20.0,
+        )
+        tasks = [
+            _row(BASE),
+            _row("epic/y", ticket_id="T-8", status=QueueItemStatus.RUNNING),
+            _row(
+                "epic/y",
+                ticket_id="T-9",
+                status=QueueItemStatus.COMPLETED,
+                pr_state=REQUIRED,
+            ),
+        ]
+
+        results = _check(_clients(epic), tasks, clock=clock, budget_s=15.0)
+
+        skipped = results[1]
+        assert skipped.name == "epic-base/acme/epic/y"
+        assert "not measured (time budget exhausted)" in skipped.detail
+        assert "1 child PR(s) (T-9)" in skipped.detail
+        assert "branch protection on epic/y likely requires a human review" in (
+            skipped.detail
+        )
+        assert skipped.warn is True
+        assert skipped.ok is True
+
     def test_each_call_is_clamped_to_the_remaining_budget(
         self, epic: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
