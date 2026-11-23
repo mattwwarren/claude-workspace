@@ -612,7 +612,9 @@ are in `docs/dispatch-runbook.md`, "Open and land an epic".
    why. Then confirm `gh pr list --base epic/<parent-id> --state open` prints
    nothing. A COMPLETED row can still have its PR open under armed auto-merge.
 2. Collect the ids of the completed rows with
-   `cw dev-queue tasks -c <C> --base epic/<parent-id> --json`.
+   `cw dev-queue tasks -c <C> --base epic/<parent-id> --status completed --json`.
+   Children dropped as failed or cancelled in step 1 are left out of the citation
+   ids, so the landing merge never closes an unbuilt ticket.
 3. Write the body with the Write tool to `.cw/landing-pr-body.md`
    (via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule). It
    holds a short design summary the orchestrator writes from the parent ticket body

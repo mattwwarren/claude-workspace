@@ -148,6 +148,7 @@ def test_open_section_carries_literal(literal: str) -> None:
     "literal",
     [
         "cw dev-queue tasks -c <C> --base epic/<parent-id>",
+        "--status completed",
         "completed, failed and cancelled",
         "`blocked_on_user` is not terminal",
         "gh pr list --base epic/<parent-id> --state open",
