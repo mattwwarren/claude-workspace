@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from cw.codex_clean_held import HELD_BLOCKER_REASON, HELD_HEADLINE, held_stop_blocker
 from cw.codex_review import STAGE3_REVIEW
-from cw.review_convergence import ConvergenceLedger, SettledEntry
+from cw.review_convergence import ConvergenceLedger, SettledEntry, stop_summary
 from tests._review_convergence_helpers import (
     GAP_RATIONALE,
     fresh_ledger,
@@ -27,12 +27,15 @@ class TestHeldStopBlocker:
         assert blocker.retry_eligible is False
 
     def test_details_name_each_gap_and_its_unrun_check(self) -> None:
-        blocker = held_stop_blocker(_stopped_held_ledger())
+        ledger = _stopped_held_ledger()
+        blocker = held_stop_blocker(ledger)
         lines = blocker.details.splitlines()
         assert lines[0] == HELD_HEADLINE
         assert lines[1].startswith("- MUST_FIX N/A: ")
         assert f"(unrun check: {GAP_RATIONALE})" in lines[1]
-        assert lines[-1].startswith("release: ")
+        hint = (stop_summary(ledger) or {})["release_hint"]
+        assert hint
+        assert lines[-1] == f"release: {hint}"
 
     def test_settled_gap_is_not_named(self) -> None:
         ledger = _stopped_held_ledger()
