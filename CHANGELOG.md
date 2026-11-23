@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- An epic-child PR that GitHub reports `DIRTY` only because two sibling children added CHANGELOG bullets to the same hunk now gets one plain union merge (`cw worktree changelog-sync --base <base> --union-conflict`) instead of parking; the default branch is refused (#3861).
+
 ## [1.107.0] - 2026-11-23
 
 ### Added

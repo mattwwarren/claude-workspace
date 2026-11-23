@@ -167,6 +167,11 @@ _FULL_SHA_RE = re.compile(r"[0-9a-fA-F]{40}")
 # refusal prefix every caller keys on, and the bound on its fetch and script.
 MERGE_FREEZE_PREFIX = "changelog_merge_freeze"
 MERGE_FREEZE_TIMEOUT_SECONDS = 30.0
+# arm-automerge conflict diagnosis (#3861): after a failed arm, a PR GitHub
+# reports CONFLICTING or DIRTY gets this prefix. The text claims only what
+# `gh pr view` showed and calls the conflict the likely cause, never certain.
+PR_CONFLICTING_PREFIX = "pr_conflicting"
+_CONFLICT_STATES: frozenset[str] = frozenset({"CONFLICTING", "DIRTY"})
 MERGE_FREEZE_SCRIPT = Path(".claude") / "scripts" / "check_changelog_frozen.py"
 MERGE_FREEZE_CHANGELOG = "CHANGELOG.md"
 _FREEZE_VIOLATION_RC = 1
@@ -1374,6 +1379,84 @@ def _refusal_text(stdout: str, base: str) -> str | None:
     return prefix + details[:available] + suffix
 
 
+def _read_mergeability(pr_number: int, repo_path: Path) -> tuple[str, str, str] | None:
+    """Return ``(mergeable, mergeStateStatus, baseRefName)`` from ``gh pr view``.
+
+    None on any failure. Fails open on purpose: the diagnosis is best-effort
+    text, so an unreadable view leaves gh's own refusal text untouched.
+    """
+    try:
+        view = _bounded(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(pr_number),
+                "--json",
+                "mergeable,mergeStateStatus,baseRefName",
+            ],
+            cwd=repo_path,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if view.returncode != 0:
+        return None
+    try:
+        data = json.loads(view.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    mergeable = data.get("mergeable")
+    state = data.get("mergeStateStatus")
+    base = data.get("baseRefName")
+    if not all(isinstance(v, str) for v in (mergeable, state, base)):
+        return None
+    return str(mergeable), str(state), str(base)
+
+
+def _conflict_refusal_text(
+    mergeable: str, state: str, base: str, gh_stderr: str
+) -> str:
+    """The hedged ``pr_conflicting:`` text, gh's own stderr kept, capped."""
+    prefix = (
+        f"{PR_CONFLICTING_PREFIX}: GitHub reports this PR as conflicting with"
+        f" origin/{base} (mergeable={mergeable}, mergeStateStatus={state}); the"
+        " conflict, not branch protection, is the likely cause of the refusal."
+        " gh said: "
+    )
+    room = max(0, GH_STDERR_LIMIT - len(prefix))
+    return prefix + gh_stderr[:room]
+
+
+def _conflict_diagnosis(
+    result: ArmResult, pr_number: int, repo_path: Path
+) -> ArmResult:
+    """Rewrite a failed arm's text when GitHub reports the PR conflicting (#3861).
+
+    Text only: status, exit code, attempts and retry behaviour are unchanged.
+    Runs only after gh actually refused (attempts made, non-zero exit) and
+    never over a freeze refusal. A PR that is not CONFLICTING or DIRTY keeps
+    gh's original text.
+    """
+    if result.status != ARM_STATUS_FAILED or result.attempts <= 0:
+        return result
+    if result.gh_exit_code in (None, 0):
+        return result
+    if result.gh_stderr.startswith(f"{MERGE_FREEZE_PREFIX}:"):
+        return result
+    read = _read_mergeability(pr_number, repo_path)
+    if read is None:
+        return result
+    mergeable, state, base = read
+    if mergeable not in _CONFLICT_STATES and state not in _CONFLICT_STATES:
+        return result
+    text = _conflict_refusal_text(mergeable, state, base, result.gh_stderr)
+    result.gh_stderr = text
+    result.detail = text
+    return result
+
+
 def _run_freeze_script(
     script: Path, repo_path: Path, base: str, head_sha: str
 ) -> MergeFreezeCheck:
@@ -1645,7 +1728,9 @@ def cmd_ci_hold_release(args: argparse.Namespace) -> int:
 
 def _report_arm_failure(result: ArmResult) -> None:
     """Write the stderr line for a failed arm: a freeze refusal or gh's failure."""
-    if result.gh_stderr.startswith(f"{MERGE_FREEZE_PREFIX}:"):
+    if result.gh_stderr.startswith(
+        (f"{MERGE_FREEZE_PREFIX}:", f"{PR_CONFLICTING_PREFIX}:")
+    ):
         sys.stderr.write(f"ERROR: {result.gh_stderr}\n")
         return
     sys.stderr.write(
@@ -1680,7 +1765,9 @@ def cmd_arm_automerge(args: argparse.Namespace) -> int:
     neither armed nor MERGED (#3329): a definite violation also exits 1, with
     `status: failed`, `attempts: 0` and a `gh_stderr` beginning
     `changelog_merge_freeze:`; a guard that cannot evaluate warns on stderr
-    and arms.
+    and arms. After a persistent gh refusal, a PR whose read-back shows
+    CONFLICTING or DIRTY gets a hedged `pr_conflicting:` gh_stderr (#3861);
+    status, exit code and attempts are unchanged, and no pre-arm refusal is made.
     An existing config whose pr.auto_merge cannot be determined also makes
     zero gh calls and exits 2 with no JSON (fail closed, #2581). A CI-evidence
     hold enforced for --head-sha (#3618) likewise makes zero gh calls and
@@ -1726,6 +1813,7 @@ def cmd_arm_automerge(args: argparse.Namespace) -> int:
         cwd=repo_path,
         before_arm=lambda: _merge_freeze_refusal(args, repo_path),
     )
+    result = _conflict_diagnosis(result, args.pr_number, repo_path)
     print(json.dumps(result.to_dict(), indent=2))
     if result.status == ARM_STATUS_FAILED:
         _report_arm_failure(result)

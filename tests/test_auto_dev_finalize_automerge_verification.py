@@ -658,3 +658,38 @@ def test_prep_pr_step9_documents_monitor_downgrade() -> None:
     # the optional marker.
     assert "pr.auto_merge: false" in lead_in
     assert "shows as optional" not in lead_in
+
+
+class TestConflictingPrRefusal3861:
+    """Sibling pins for the #3861 ``pr_conflicting:`` refusal (siblings of #3190)."""
+
+    def test_step4c_self_heal_routes_non_default_pr_conflicting_to_4d(self) -> None:
+        content = _cmd("auto-dev-finalize.md")
+        assert "begins with `pr_conflicting:`" in content
+        assert "Conflicting-PR refusal (#3861)." in content
+        assert "a default base keeps the generic sentinel" in content
+
+    def test_step4d_conflicting_pr_refusal_paragraph_clauses(self) -> None:
+        content = _cmd("auto-dev-finalize.md")
+        start = content.index("**Conflicting-PR refusal (#3861).**")
+        end = content.index("**Classifier-denied arm (#2625).**", start)
+        section = content[start:end]
+        assert "`pr_conflicting:`" in section
+        assert "git fetch origin <base>" in section
+        assert "cw worktree changelog-sync --base <base> --union-conflict" in section
+        assert "`changelog_union_merged_after_sibling`" in section
+        assert (
+            "pr_conflicting: changelog-sync <state> (<disposition>): <detail>"
+            in section
+        )
+        assert "A second `pr_conflicting` refusal takes the generic branch" in section
+        assert "never a rebase or force-push" in section
+        assert "never run a bare `git merge`" in section
+        assert "default branch" in section
+
+    def test_step4d_conflicting_pr_refusal_sits_after_merge_freeze(self) -> None:
+        content = _cmd("auto-dev-finalize.md")
+        freeze = content.index("**Merge-freeze refusal (#3190).**")
+        conflict = content.index("**Conflicting-PR refusal (#3861).**", freeze)
+        classifier = content.index("**Classifier-denied arm (#2625).**", freeze)
+        assert freeze < conflict < classifier

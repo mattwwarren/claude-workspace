@@ -3780,3 +3780,206 @@ def test_hold_state_other_branch_is_stale_even_when_ancestry_holds(
     state = _mod._hold_state(hold_wt, _head(hold_wt))
 
     assert (state.state, state.evaluated) == ("stale", True)
+
+
+# --- arm-automerge conflict diagnosis (#3861) ----------------------------
+
+_CONFLICT_VIEW = (
+    '{"state":"OPEN","autoMergeRequest":null,"baseRefName":"epic/1",'
+    '"mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}'
+)
+_CLEAN_VIEW = (
+    '{"state":"OPEN","autoMergeRequest":null,"baseRefName":"epic/1",'
+    '"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}'
+)
+_PR_CONFLICTING_LITERAL = (
+    "pr_conflicting: GitHub reports this PR as conflicting with origin/epic/1"
+    " (mergeable=CONFLICTING, mergeStateStatus=DIRTY); the conflict, not branch"
+    " protection, is the likely cause of the refusal. gh said: boom"
+)
+
+
+class _FakeDone:
+    def __init__(self, returncode: int, stdout: str) -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = ""
+
+
+class TestReadMergeability:
+    """``_read_mergeability`` fails open: any unreadable view yields None."""
+
+    def test_success_returns_the_three_fields(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            _mod, "_bounded", lambda *_a, **_k: _FakeDone(0, _CONFLICT_VIEW)
+        )
+        assert _mod._read_mergeability(7, tmp_path) == (
+            "CONFLICTING",
+            "DIRTY",
+            "epic/1",
+        )
+
+    @pytest.mark.parametrize(
+        "done",
+        [
+            _FakeDone(1, _CONFLICT_VIEW),
+            _FakeDone(0, "not json"),
+            _FakeDone(0, "[1, 2]"),
+            _FakeDone(0, '{"mergeable": "CONFLICTING"}'),
+        ],
+    )
+    def test_unreadable_view_is_none(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        done: _FakeDone,
+    ) -> None:
+        monkeypatch.setattr(_mod, "_bounded", lambda *_a, **_k: done)
+        assert _mod._read_mergeability(7, tmp_path) is None
+
+    @pytest.mark.parametrize(
+        "error",
+        [subprocess.TimeoutExpired(cmd="gh", timeout=1), OSError("no gh")],
+    )
+    def test_timeout_or_oserror_is_none(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        error: Exception,
+    ) -> None:
+        def _raise(*_a: object, **_k: object) -> None:
+            raise error
+
+        monkeypatch.setattr(_mod, "_bounded", _raise)
+        assert _mod._read_mergeability(7, tmp_path) is None
+
+
+class TestConflictDiagnosis:
+    """``_conflict_diagnosis`` rewrites text only, and only when gh really refused."""
+
+    def test_refusal_text_is_the_hedged_literal(self) -> None:
+        text = _mod._conflict_refusal_text("CONFLICTING", "DIRTY", "epic/1", "boom")
+        assert text == _PR_CONFLICTING_LITERAL
+        assert "because of the conflict" not in text
+        assert "not because of branch protection" not in text
+
+    def test_refusal_text_is_capped_and_keeps_gh_stderr_tail(self) -> None:
+        long_stderr = "x" * (_mod.GH_STDERR_LIMIT * 2)
+        text = _mod._conflict_refusal_text(
+            "CONFLICTING", "DIRTY", "epic/1", long_stderr
+        )
+        assert len(text) == _mod.GH_STDERR_LIMIT
+        assert text.startswith(f"{_mod.PR_CONFLICTING_PREFIX}: ")
+
+    def test_persistent_conflict_refusal_is_rewritten_status_unchanged(
+        self, tmp_path: Path, arm_repo: Path
+    ) -> None:
+        fake_bin = stub_gh_arm(
+            tmp_path, [(1, "boom", None)], initial_view=_CONFLICT_VIEW
+        )
+
+        result = _run_arm(arm_repo, fake_bin)
+
+        assert result.returncode == 1
+        out = json.loads(result.stdout)
+        assert out["status"] == "failed"
+        assert out["attempts"] == out["max_attempts"] == _mod.ARM_MAX_ATTEMPTS
+        assert out["gh_exit_code"] == 1
+        assert out["gh_stderr"].startswith(f"{_mod.PR_CONFLICTING_PREFIX}:")
+        assert "epic/1" in out["gh_stderr"]
+        assert "likely cause of the refusal" in out["gh_stderr"]
+        assert out["gh_stderr"].endswith("gh said: boom")
+        assert result.stderr.startswith(f"ERROR: {_mod.PR_CONFLICTING_PREFIX}:")
+        assert _merge_count(fake_bin) == _mod.ARM_MAX_ATTEMPTS
+
+    def test_mergeable_pr_keeps_gh_text(self, tmp_path: Path, arm_repo: Path) -> None:
+        fake_bin = stub_gh_arm(
+            tmp_path, [(1, _GRAPHQL_ERROR, None)], initial_view=_CLEAN_VIEW
+        )
+
+        result = _run_arm(arm_repo, fake_bin)
+
+        out = json.loads(result.stdout)
+        assert out["gh_stderr"] == _GRAPHQL_ERROR
+
+    def test_freeze_refusal_and_zero_attempts_make_no_view_call(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        def _no_view(*_a: object, **_k: object) -> None:
+            msg = "pr view must not run"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(_mod, "_bounded", _no_view)
+        freeze = _mod.ArmResult(
+            pr_number=7,
+            max_attempts=4,
+            status=_mod.ARM_STATUS_FAILED,
+            attempts=0,
+            gh_stderr=f"{_mod.MERGE_FREEZE_PREFIX}: frozen",
+        )
+        zero = _mod.ArmResult(
+            pr_number=7, max_attempts=4, status=_mod.ARM_STATUS_FAILED, gh_exit_code=1
+        )
+        assert _mod._conflict_diagnosis(freeze, 7, tmp_path).gh_stderr.startswith(
+            _mod.MERGE_FREEZE_PREFIX
+        )
+        assert _mod._conflict_diagnosis(zero, 7, tmp_path).gh_stderr == ""
+
+    def test_armed_or_merged_or_exit_zero_makes_no_view_call(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        def _no_view(*_a: object, **_k: object) -> None:
+            msg = "pr view must not run"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(_mod, "_bounded", _no_view)
+        armed = _mod.ArmResult(
+            pr_number=7, max_attempts=4, status="armed", attempts=1, gh_exit_code=1
+        )
+        exit_zero = _mod.ArmResult(
+            pr_number=7,
+            max_attempts=4,
+            status=_mod.ARM_STATUS_FAILED,
+            attempts=1,
+            gh_exit_code=0,
+        )
+        assert _mod._conflict_diagnosis(armed, 7, tmp_path).status == "armed"
+        assert _mod._conflict_diagnosis(exit_zero, 7, tmp_path).gh_stderr == ""
+
+
+class TestConflictDiagnosisRewrite:
+    """In-process pins for the rewrite and freeze-return branches (#3861)."""
+
+    def _failed(self, gh_stderr: str) -> object:
+        return _mod.ArmResult(
+            pr_number=7,
+            max_attempts=4,
+            status=_mod.ARM_STATUS_FAILED,
+            attempts=4,
+            gh_exit_code=1,
+            gh_stderr=gh_stderr,
+        )
+
+    def test_conflicting_view_rewrites_text_and_detail(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            _mod, "_bounded", lambda *_a, **_k: _FakeDone(0, _CONFLICT_VIEW)
+        )
+        result = _mod._conflict_diagnosis(self._failed("boom"), 7, tmp_path)
+        assert result.gh_stderr == _PR_CONFLICTING_LITERAL
+        assert result.detail == _PR_CONFLICTING_LITERAL
+        assert result.status == _mod.ARM_STATUS_FAILED
+        assert result.attempts == 4
+
+    def test_freeze_prefixed_text_is_never_rewritten(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            _mod, "_bounded", lambda *_a, **_k: _FakeDone(0, _CONFLICT_VIEW)
+        )
+        freeze = f"{_mod.MERGE_FREEZE_PREFIX}: frozen"
+        result = _mod._conflict_diagnosis(self._failed(freeze), 7, tmp_path)
+        assert result.gh_stderr == freeze

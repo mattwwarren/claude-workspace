@@ -236,6 +236,7 @@ The `/sprint-buildout` skill wraps this pair end-to-end — presenting the one a
 | `cw worktree gc` | Prune worktrees for squash-merged or closed branches (checks PR state) |
 | `cw worktree merge-probe --base <b>` | Would merging `origin/<b>` into HEAD conflict? JSON plus exit 0 (no merge needed) / 1 (conflict) / 3 (unknown); read-only, never fetches |
 | `cw worktree changelog-sync --base <b>` | After a release cut, merge `origin/<b>` into HEAD and re-home the branch's CHANGELOG bullets under `[Unreleased]`; JSON plus exit 0 (clean or moved) / 1 (conflict, or refused for a rebuild refusal, a branch that already contains `origin/<b>`, an in-progress merge or a dirty tree: read `state`) / 3 (unavailable); never fetches |
+| `cw worktree changelog-sync --base <b> --union-conflict` | Opt-in, non-default base only: when GitHub reports an epic-child PR `DIRTY` because both sides added CHANGELOG bullets while the local probe is clean, make one plain `git merge --no-ff` of `origin/<b>`; same JSON keys and exit codes as above, and `disposition` is `default_branch_base` when refused because `<b>` is the default branch; never fetches |
 
 ### Other
 
