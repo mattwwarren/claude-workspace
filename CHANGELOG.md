@@ -6,12 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
-
-- **`/review-monitor` no longer assumes a PR's base is `main` (#3839, RFC 0020).** Three sites are fixed: the Step 0.6 orphan fast-path jq drops its `baseRefName == "main"` filter (it keeps the `auto-dev/` and `dev/` head-prefix scope, so `epic/*` landing PRs stay out of the fast path); the Step 4b auto-fix merges and checks "already in base" against the PR's own `baseRefName` (`origin/<base>`, taken from the `check` output's `base_ref_name`) instead of `origin/main`; and the Step 4e draft promotion treats an `epic/*` base as persistent (not stacked, never retargeted). The Step 0.6 prose and handoff table name `origin/<base>` too. Kept on purpose: the `main`/`master` default-branch test in Step 4e, the head-prefix filter, and the "draft stacked on '<base>'" label, which is label-only (every draft is skipped on every base). No dispatch-pipeline behavior changed, and the review-monitor script behavior is unchanged.
 ### Added
 
 - **`cw dev-queue serve --supervised` restarts the dispatch loop onto new code (#3726).** A small supervisor runs `serve` as a child, polls the loop's code identity, and when the checkout moves it pre-flights the new install with an import probe, sends the child SIGHUP and starts a fresh child once the child exits 75 at its next idle point. The tick in progress always finishes. Restarts are bounded: at least 60s apart, one automatic restart per checkout (SIGHUP to the supervisor forces one), a 30s-to-600s re-probe backoff while the import probe fails, and three fast failed starts stop the supervisor loudly. A child that has not exited ten minutes after the SIGHUP raises the new non-paging `dispatch.restart_stalled` event and a stderr line; the exit is never forced. `resolve`, `approve`, `constrain`, `record-plan-decisions` and `prerequisite` wait up to 90s for a supervised stale loop to restart. An unsupervised loop gets no SIGHUP handler and is still refused when stale. See ADR-0025 and the dispatch runbook.
+
+### Fixed
+
+- **`/review-monitor` no longer assumes a PR's base is `main` (#3839, RFC 0020).** Three sites are fixed: the Step 0.6 orphan fast-path jq drops its `baseRefName == "main"` filter (it keeps the `auto-dev/` and `dev/` head-prefix scope, so `epic/*` landing PRs stay out of the fast path); the Step 4b auto-fix merges and checks "already in base" against the PR's own `baseRefName` (`origin/<base>`, taken from the `check` output's `base_ref_name`) instead of `origin/main`; and the Step 4e draft promotion treats an `epic/*` base as persistent (not stacked, never retargeted). The Step 0.6 prose and handoff table name `origin/<base>` too. Kept on purpose: the `main`/`master` default-branch test in Step 4e, the head-prefix filter, and the "draft stacked on '<base>'" label, which is label-only (every draft is skipped on every base). No dispatch-pipeline behavior changed, and the review-monitor script behavior is unchanged.
 
 ## [1.107.0] - 2026-11-23
 
