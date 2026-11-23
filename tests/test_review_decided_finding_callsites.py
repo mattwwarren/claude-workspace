@@ -549,6 +549,34 @@ class TestGapHoldCarveOut:
     @pytest.mark.parametrize(
         "item",
         [
+            _gap_item(_COVERAGE, gapped=False),
+            AcceptedFinding(
+                finding=_make_gap_finding(
+                    "MUST_FIX",
+                    rule_id=_COVERAGE,
+                    source="engine",
+                    fingerprint="fp-0",
+                    contests_decision="the decided constraint is unsafe",
+                ),
+                reviewers=["Test Reviewer"],
+                disposition="operator_actionable",
+                disposition_detail=_GAP_DETAIL,
+            ),
+            _gap_item(_COVERAGE, disposition="fixed"),
+            _gap_item(_COVERAGE, disposition="rejected"),
+        ],
+        ids=["no-gap", "gap-and-contest", "fixed-gap", "rejected-gap"],
+    )
+    def test_from_verdict_does_not_mark_a_non_gap_as_held(
+        self, item: AcceptedFinding
+    ) -> None:
+        (finding,), _unread = from_verdict(_held_verdict(item))
+
+        assert finding.held is None
+
+    @pytest.mark.parametrize(
+        "item",
+        [
             _gap_item(_COVERAGE, disposition="fixed"),
             _gap_item(_COVERAGE, disposition="rejected"),
             _gap_item(_COVERAGE, disposition="dropped"),
