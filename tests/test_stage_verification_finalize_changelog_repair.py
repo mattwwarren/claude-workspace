@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
 from cw.changelog_sync import ChangelogSync, SyncState
 from cw.merge_probe import probe_default_merge
 from cw.stage_verification import finalize_changelog_repair as repair
@@ -29,8 +31,6 @@ from tests._shared.git_repos import git_in
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
-
-    import pytest
 
     from tests._tool_fakes import FakeGhCli
 
@@ -220,22 +220,49 @@ class TestRepairPassthrough:
         assert "repair not attempted" in outcome.block.details
         assert outcome.head is None
 
-    def test_push_block_is_surfaced(
+    @pytest.mark.parametrize(
+        "pushed_block",
+        [
+            FinalizeBlock(IMPL_NOT_PUSHED, "push refused"),
+            FinalizeBlock(OPERATOR_UNAVAILABLE, "ssh dropped", retry_eligible=True),
+        ],
+        ids=["impl_not_pushed", "unavailability_signature"],
+    )
+    def test_push_block_after_merge_is_surfaced_not_retry_eligible(
         self,
         tmp_path: Path,
         make_git_repo: Callable[..., Path],
         gh: FakeGhCli,
         monkeypatch: pytest.MonkeyPatch,
+        pushed_block: FinalizeBlock,
     ) -> None:
         clone = _epic_repo(tmp_path, make_git_repo)
         gh.reply("pr", "view", _URL, stdout=_DIRTY)
-        pushed_block = FinalizeBlock(IMPL_NOT_PUSHED, "push refused")
         monkeypatch.setattr(repair, "push_ahead", lambda *_a, **_k: pushed_block)
 
         outcome = _check(clone)
 
-        assert outcome.block is pushed_block
+        block = outcome.block
+        assert block is not None
+        assert block.reason == pushed_block.reason
+        assert block.retry_eligible is False
+        assert block.details.startswith(f"{pushed_block.details}; ")
+        merge_sha = git_in(clone, "rev-parse", "HEAD")
+        assert merge_sha in block.details
+        assert "exists only in the local worktree" in block.details
+        assert f'"git push origin HEAD:refs/heads/{_BRANCH}"' in block.details
         assert outcome.head is None
+        # No reset: the unpushed merge is still local HEAD, ahead of origin.
+        assert git_in(clone, "rev-parse", f"origin/{_BRANCH}") != merge_sha
+        ahead = git_run(
+            "merge-base",
+            "--is-ancestor",
+            f"origin/{_BRANCH}",
+            "HEAD",
+            cwd=clone,
+            check=False,
+        )
+        assert ahead.returncode == 0
 
     def test_mergeable_behind_and_unreadable_view_pass_through_without_fetch(
         self,

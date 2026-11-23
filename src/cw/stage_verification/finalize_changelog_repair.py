@@ -42,6 +42,8 @@ __all__ = [
 CHANGELOG_UNION_FRICTION: Final = "changelog_union_merged_after_sibling"
 
 _DETAIL_CAP: Final = 300
+#: The local-only-merge note is one line; the default per-line cap would cut it.
+_NOTE_LINE_CAP: Final = 600
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,26 @@ def _changelog_note(state: str, disposition: str | None, detail: str) -> str:
     return f"changelog-sync {state} ({disposition or '-'}): {shown}"
 
 
+def _local_only_merge(
+    block: FinalizeBlock, branch: str, head_sha: str
+) -> FinalizeBlock:
+    """The push block, made truthful: the union merge now exists only locally.
+
+    A requeue reuses the open PR, and that path binds the PR head to local
+    HEAD without pushing, so it can never clear this block. It is therefore not
+    retry-eligible until the operator pushes the merge by hand. No reset: the
+    merge commit stays in the worktree.
+    """
+    note = redact_and_cap(
+        f"the CHANGELOG union merge commit {head_sha} exists only in the local"
+        f' worktree; push it with a plain "git push origin'
+        f' HEAD:refs/heads/{branch}" and requeue, because a reused PR must'
+        " match local HEAD",
+        max_line_chars=_NOTE_LINE_CAP,
+    )
+    return replace(block, details=f"{block.details}; {note}", retry_eligible=False)
+
+
 def _after_move(
     worktree: Path,
     pr_url: str,
@@ -89,7 +111,9 @@ def _after_move(
     """Push the union merge plainly, then re-check the PR once."""
     pushed = push_ahead(worktree, branch=branch, head_sha=head_sha)
     if pushed is not None:
-        return MergeabilityOutcome(pushed, friction)
+        return MergeabilityOutcome(
+            _local_only_merge(pushed, branch, head_sha), friction
+        )
     recheck, again = check_mergeability(worktree, pr_url)
     if recheck is None:
         return MergeabilityOutcome(
