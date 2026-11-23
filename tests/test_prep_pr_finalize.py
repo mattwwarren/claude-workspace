@@ -3904,6 +3904,36 @@ class TestConflictDiagnosis:
         out = json.loads(result.stdout)
         assert out["gh_stderr"] == _GRAPHQL_ERROR
 
+    def test_default_branch_dirty_view_changes_text_only(
+        self, tmp_path: Path, arm_repo: Path
+    ) -> None:
+        """A default-branch base keeps status, exit and attempts: text only."""
+        dirty_view = _CONFLICT_VIEW.replace("epic/1", "main")
+        clean_view = _CLEAN_VIEW.replace("epic/1", "main")
+        (tmp_path / "dirty").mkdir()
+        (tmp_path / "clean").mkdir()
+        dirty_bin = stub_gh_arm(
+            tmp_path / "dirty", [(1, "boom", None)], initial_view=dirty_view
+        )
+        clean_bin = stub_gh_arm(
+            tmp_path / "clean", [(1, "boom", None)], initial_view=clean_view
+        )
+
+        dirty = _run_arm(arm_repo, dirty_bin)
+        clean = _run_arm(arm_repo, clean_bin)
+
+        dirty_out = json.loads(dirty.stdout)
+        clean_out = json.loads(clean.stdout)
+        assert clean_out["gh_stderr"] == "boom"
+        assert dirty_out["gh_stderr"].startswith(f"{_mod.PR_CONFLICTING_PREFIX}:")
+        assert "origin/main" in dirty_out["gh_stderr"]
+        assert dirty_out["gh_stderr"].endswith("gh said: boom")
+        assert dirty_out["detail"] == dirty_out["gh_stderr"]
+        for key in ("status", "attempts", "max_attempts", "gh_exit_code"):
+            assert dirty_out[key] == clean_out[key], key
+        assert dirty.returncode == clean.returncode == 1
+        assert _merge_count(dirty_bin) == _merge_count(clean_bin)
+
     def test_freeze_refusal_and_zero_attempts_make_no_view_call(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -3973,6 +4003,16 @@ class TestConflictDiagnosisRewrite:
         assert result.detail == _PR_CONFLICTING_LITERAL
         assert result.status == _mod.ARM_STATUS_FAILED
         assert result.attempts == 4
+
+    def test_non_conflicting_view_keeps_gh_text(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            _mod, "_bounded", lambda *_a, **_k: _FakeDone(0, _CLEAN_VIEW)
+        )
+        result = _mod._conflict_diagnosis(self._failed("boom"), 7, tmp_path)
+        assert result.gh_stderr == "boom"
+        assert result.detail == ""
 
     def test_freeze_prefixed_text_is_never_rewritten(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
