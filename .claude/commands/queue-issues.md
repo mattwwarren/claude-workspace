@@ -143,7 +143,7 @@ For each selected ticket, run `cw dev-queue tasks <ID> --json -c "$CLIENT"` and 
    - Client: `<client>`
    - Tickets: `<count>` — list the IDs
    - Priority: `<N>` if set, else "(default)"
-   - Base: `<branch>` or the client default. For a base, also run `git ls-remote --exit-code --heads origin <base>` and stop if it exits non-zero: an epic base must exist on origin before its children are enqueued. This skill has no `--base` argument (a plan non-goal). The orchestrator supplies the base: the epic branch it opened (`/orchestrate-sprint`, "Open an epic"), handed over with the ticket list. If none was handed over, ask the operator; never guess one.
+   - Base: `<branch>` or the client default. For a base, also run `git ls-remote --exit-code --heads origin refs/heads/<base>` and stop if it exits non-zero: an epic base must exist on origin before its children are enqueued. This skill has no `--base` argument (a plan non-goal). The orchestrator supplies the base: the epic branch it opened (`/orchestrate-sprint`, "Open an epic"), handed over with the ticket list. If none was handed over, ask the operator; never guess one.
    - Concurrency cap: `yq -r '.per_client_max_parallel.<client> // .per_client_max_parallel.default' ~/.claude-workspace/orchestrator.yaml`
    - Daemon running? `pgrep -f "cw daemon" >/dev/null && echo "yes" || echo "NO — start it (\`cw daemon\` or \`systemctl --user start cw-daemon\`) so items actually dispatch"`
 

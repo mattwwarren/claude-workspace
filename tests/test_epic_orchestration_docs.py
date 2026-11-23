@@ -131,7 +131,7 @@ def test_phase_one_reads_swing_epic_or_fanout() -> None:
     [
         "epic/<parent-id>",
         "git push origin origin/<default-branch>:refs/heads/epic/<parent-id>",
-        "git ls-remote --exit-code --heads origin epic/<parent-id>",
+        "git ls-remote --exit-code --heads origin refs/heads/epic/<parent-id>",
         "gh api repos/{owner}/{repo}/branches/epic/<parent-id>/protection",
         "gh api repos/{owner}/{repo}/rules/branches/epic/<parent-id>",
         "--base epic/<parent-id>",

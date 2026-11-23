@@ -568,10 +568,11 @@ are in `docs/dispatch-runbook.md`, "Open and land an epic".
    prints with its leading `origin/` removed.
 
    ```bash
-   git ls-remote --exit-code --heads origin epic/<parent-id>
+   git ls-remote --exit-code --heads origin refs/heads/epic/<parent-id>
    ```
 
-   Exit 2 means absent: continue. Exit 0 means it already exists. A non-force push
+   Name the full ref: the bare pattern `epic/<parent-id>` also matches a nested
+   branch such as `foo/epic/<parent-id>`. Exit 2 means absent: continue. Exit 0 means it already exists. A non-force push
    onto an existing ancestor branch would fast-forward it silently, so stop and
    read it; never force-push.
 
@@ -583,7 +584,7 @@ are in `docs/dispatch-runbook.md`, "Open and land an epic".
 
    A refused push means the branch appeared in the meantime. Stop and read it;
    never force-push.
-3. Verify it exists: `git ls-remote --exit-code --heads origin epic/<parent-id>`.
+3. Verify it exists: `git ls-remote --exit-code --heads origin refs/heads/epic/<parent-id>`.
 4. Verify the branch-protection prerequisite (D-12). Read-only, two calls:
 
    ```bash
@@ -680,7 +681,7 @@ are in `docs/dispatch-runbook.md`, "Open and land an epic".
    - `gh pr list --base epic/<parent-id> --state open` prints nothing;
    - every row of the base is terminal (Land step 1).
 
-   Record the tip with `git ls-remote --heads origin epic/<parent-id>` and put its
+   Record the tip with `git ls-remote --heads origin refs/heads/epic/<parent-id>` and put its
    SHA in the CKPT line. Never delete before the PR is MERGED.
 
 ## Anti-patterns

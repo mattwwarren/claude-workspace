@@ -3346,7 +3346,7 @@ is no epic command group.
    default branch is the name `git symbolic-ref --short refs/remotes/origin/HEAD`
    prints with its leading `origin/` removed. A refused push means the branch
    already exists: read the refusal and never force-push it.
-2. Verify it exists: `git ls-remote --exit-code --heads origin epic/<parent-id>`.
+2. Verify it exists: `git ls-remote --exit-code --heads origin refs/heads/epic/<parent-id>`.
 3. Check the branch-protection prerequisite (RFC 0020 D-12). Two read-only GETs,
    classic protection first, then rulesets:
    `gh api repos/{owner}/{repo}/branches/epic/<parent-id>/protection` and
@@ -3392,11 +3392,11 @@ is no epic command group.
 - Delete only after the landing PR is MERGED (`gh pr view <N> --json state,baseRefName,headRefName`,
   with `baseRefName` the default branch and `headRefName` `epic/<parent-id>`), no open
   PR targets the epic branch, and every row of the base is terminal.
-- Record the tip first: `git ls-remote --heads origin epic/<parent-id>` prints its SHA.
+- Record the tip first: `git ls-remote --heads origin refs/heads/epic/<parent-id>` prints its SHA.
   Keep it in the landing record, so the branch can be recreated at that commit.
 - Run `git push origin --delete epic/<parent-id>`, then `git fetch --prune origin`.
 - The repo may auto-delete head branches. If
-  `git ls-remote --exit-code --heads origin epic/<parent-id>` exits 2, the branch
+  `git ls-remote --exit-code --heads origin refs/heads/epic/<parent-id>` exits 2, the branch
   is already gone and there is nothing to do.
 - Never delete while a PR targets it: GitHub closes PRs whose base is deleted.
 - Keep the branch if the landing PR was closed unmerged.
