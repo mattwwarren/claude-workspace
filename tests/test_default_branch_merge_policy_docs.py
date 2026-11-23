@@ -1230,6 +1230,18 @@ class TestUnionConflictDocs3861:
         assert "`cw worktree changelog-sync --base <base> --union-conflict`" in runbook
         assert "(disposition `default_branch_base`)" in runbook
 
+    def test_runbook_failure_mode_says_when_the_union_merge_was_tried(self) -> None:
+        runbook = " ".join(_read("docs/dispatch-runbook.md").split())
+        assert "does not by itself mean the union merge ran" in runbook
+        assert "details beginning `pr_conflicting: changelog-sync <state>`" in runbook
+        assert "A bare `pr_conflicting:` from the arm" in runbook
+        assert "means it was NOT tried" in runbook
+        assert (
+            "run `git fetch origin <base>`, then `cw worktree changelog-sync"
+            " --base <base> --union-conflict` once"
+        ) in runbook
+        assert "has already been tried once" not in runbook
+
     def test_readme_sibling_row_follows_the_pinned_row(self) -> None:
         readme = _read("README.md")
         pinned = "| `cw worktree changelog-sync --base <b>` | After a release cut"
