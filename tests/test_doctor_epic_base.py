@@ -9,6 +9,7 @@ appears here.
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING
 
 import pytest
@@ -300,6 +301,47 @@ class TestFailOpen:
 
         assert "oldest unlanded commit unknown (git log timed out" in result.detail
         assert f"diff {FULL} lines" in result.detail
+
+    def test_a_git_failure_on_diff_renders_only_that_field_unknown(
+        self, epic: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        patch_git_bounded(monkeypatch, doctor_epic_base, fail_verbs=("diff",))
+
+        result = _only(_check(_clients(epic), [_row()]))
+
+        assert "diff unknown (git diff timed out" in result.detail
+        assert re.search(r"oldest unlanded commit \d+ hours?", result.detail)
+        assert result.ok is True
+        assert result.warn is False
+
+    def test_absent_default_ref_renders_unknown_and_does_not_raise(
+        self, epic: Path
+    ) -> None:
+        git_in(epic, "update-ref", "-d", "refs/remotes/origin/main")
+
+        result = _only(_check(_clients(epic), [_row()]))
+
+        assert result.ok is True
+        assert result.warn is False
+        assert "diff unknown (" in result.detail
+        assert "oldest unlanded commit unknown (" in result.detail
+        assert "merge probe (main into epic/x): unknown (" in result.detail
+
+    def test_a_base_with_no_unlanded_commits_says_none_unlanded(
+        self, epic: Path
+    ) -> None:
+        git_in(
+            epic,
+            "update-ref",
+            "refs/remotes/origin/epic/same",
+            "refs/remotes/origin/main",
+        )
+
+        result = _only(_check(_clients(epic), [_row("epic/same")]))
+
+        assert "oldest unlanded commit none unlanded" in result.detail
+        assert "diff 0 lines" in result.detail
+        assert result.warn is False
 
 
 # -- cap and budget ---------------------------------------------------------
