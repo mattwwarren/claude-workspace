@@ -378,6 +378,37 @@ def test_check_draft_demotes_and_silences_attention(
     )
 
 
+def test_check_non_draft_epic_base_is_monitored_like_default(
+    review_monitor_state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake(
+        monkeypatch,
+        _pr_view(baseRefName="epic/3778", mergeStateStatus="DIRTY"),
+    )
+    helpers.seed_prs(helpers.make_pr(status="ready_to_approve"))
+
+    result = helpers.get("cmd_check")(42, helpers.REPO)
+
+    assert result["base_ref_name"] == "epic/3778"
+    assert result["is_draft"] is False
+    assert (result["auto_fix_ok"], result["auto_fix_blocked_reason"]) == (True, None)
+    assert result["attention_state"] == "merge_blocked"
+
+
+def test_check_draft_on_epic_base_is_still_held(
+    review_monitor_state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake(monkeypatch, _pr_view(isDraft=True, baseRefName="epic/3778"))
+    helpers.seed_prs(helpers.make_pr(status="ready_to_approve"))
+
+    result = helpers.get("cmd_check")(42, helpers.REPO)
+
+    assert (result["auto_fix_ok"], result["auto_fix_blocked_reason"]) == (
+        False,
+        "draft stacked on 'epic/3778'",
+    )
+
+
 def test_check_unparseable_view_keeps_last_seen_sha(
     review_monitor_state_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
