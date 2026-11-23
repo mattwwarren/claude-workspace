@@ -4,12 +4,15 @@ The dispatch loop records its code identity in the singleton lock file
 (``cw.config.dispatch_loop_lock_file()``, redirected per test by the autouse
 ``tmp_config_dir`` fixture). These helpers write that record directly so a test
 can stage NO_LOOP / MATCH / STALE / IDENTITY_UNKNOWN without running a loop.
+:func:`sighup_disposition` pins SIGHUP for the supervised re-exec tests (#3726).
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import signal
 from typing import TYPE_CHECKING
 
 from cw.config import dispatch_loop_lock_file
@@ -17,6 +20,9 @@ from cw.dispatch_loop_identity import CodeIdentity
 from cw.local_runner import read_process_start_time_ns
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+    from types import FrameType
+
     import pytest
 
 COMMIT_A = "a" * 40
@@ -33,6 +39,7 @@ def write_loop_record(
     with_identity: bool = True,
     proc_start_ns: int | None = None,
     null_proc_start: bool = False,
+    supervisor_pid: int | None = None,
 ) -> None:
     """Write a fake lock-file record for a loop with this identity.
 
@@ -41,6 +48,7 @@ def write_loop_record(
     False writes the pre-#2729 ``{"pid", "cmd"}`` shape. *null_proc_start*
     writes a literal ``null`` start time beside the identity (psutil failed at
     loop start); ``proc_start_ns=None`` alone means "use the real start".
+    *supervisor_pid* writes the ``supervisor_pid`` key (#3726) only when given.
     """
     holder = os.getpid() if pid is None else pid
     record: dict[str, object] = {"pid": holder, "cmd": FAKE_CMD}
@@ -53,6 +61,8 @@ def write_loop_record(
             else read_process_start_time_ns(holder)
         )
         record.update({"proc_start_ns": start, "version": version, "commit": commit})
+    if supervisor_pid is not None:
+        record["supervisor_pid"] = supervisor_pid
     path = dispatch_loop_lock_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record), encoding="utf-8")
@@ -77,3 +87,20 @@ def patch_checkout_identity(
 
     monkeypatch.setattr("cw.dispatch_loop_identity.checkout_code_identity", _fake)
     return calls
+
+
+@contextlib.contextmanager
+def sighup_disposition(
+    handler: Callable[[int, FrameType | None], object] | int,
+) -> Iterator[None]:
+    """Set SIGHUP to *handler* for the block, then restore the previous one.
+
+    A runner launched under ``nohup`` inherits SIGHUP as ignored, which would
+    silently skip the supervised handlers under test; every real-signal test
+    pins the disposition it needs through this helper.
+    """
+    previous = signal.signal(signal.SIGHUP, handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGHUP, previous)

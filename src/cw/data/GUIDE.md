@@ -164,7 +164,8 @@ a sentinel carries one — and they never share values, so always say which.
   add also resets the row's attempt count, cost totals and session binding, not
   only the ledger), wait for the plan stage to re-park, and `cw dev-queue resolve <T> -c <C> --file <merged.md>`.
   `cancel` does not work: re-adding a cancelled row at the same stage is a no-op.
-  Restart `cw dev-queue serve` before using it: a dispatch loop older than the
+  Restart `cw dev-queue serve` before using it (a loop run by `serve --supervised`
+  restarts itself on a checkout change): a dispatch loop older than the
   release that ships `resolve` rewrites the queue without the ledger and erases
   recorded resolutions. A stale loop is flagged by a `warning:` line on stderr
   from `resolve` and `approve` and by `cw doctor` check `dispatch-loop-code`.
@@ -371,6 +372,7 @@ cw dev-queue add <ticket…> -c <client> -s large|small \
     [--lane <lane>] [--signoff operator] [--base <branch>]  # enqueue (large = more auto-approval; --base merges into an epic branch, RFC 0020)
 cw dev-queue run --once                          # one dispatch tick (drop --once to loop)
 cw dev-queue serve                               # dispatch loop with auto-restart on crash
+cw dev-queue serve --supervised                  # ...and re-exec onto new code when the checkout moves
 cw dev-queue approve <ticket> -c <client>        # clear a plan/review/signoff gate
 cw dev-queue requeue <ticket> -c <client>        # BLOCKED_ON_USER → PENDING (--stage/--regress;
                                                  #   --from-cancelled / --from-failed to recover;

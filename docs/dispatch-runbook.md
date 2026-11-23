@@ -478,6 +478,100 @@ Restart behaviour:
   per-process state divergence (in-memory dedup sets, usage-limit windows)
   the lock exists to prevent, so use it deliberately and sparingly.
 
+#### Supervised re-exec (`serve --supervised`, #3726)
+
+A plain `serve` loop keeps the code it imported. When the checkout moves on,
+`cw doctor` (`dispatch-loop-code`) and the row-writing commands report it
+STALE until someone restarts it. `--supervised` hands that restart to a small
+parent process:
+
+```bash
+# Run under tmux or nohup (see "Terminals" below)
+cw dev-queue serve --supervised --quiet
+```
+
+The parent runs `python -m cw dev-queue serve <same options>` as its child,
+with `CW_DISPATCH_SUPERVISOR_PID` set. The child records `supervisor_pid` in
+the lock record. The parent never takes the dispatch-loop lock: it waits for
+each child to exit before it starts the next. `--supervised --force` is a
+usage error.
+
+Restart matrix:
+
+- **Checkout moved (STALE):** every 10s the parent assesses the loop. Once the
+  child has registered and has run at least 60s, the parent imports the new
+  code in a probe interpreter (`import cw.cli.dev_queue.run, cw.dispatch_serve`,
+  120s timeout). If the probe passes, it sends the child SIGHUP. The child
+  finishes the tick in progress, returns at its next idle point (at most 1s
+  into the tick sleep), and exits 75. The parent starts a fresh child from the
+  code installed now.
+- **Version drift** (dist-info version changed) in a supervised child exits
+  75 at once, with the same restart.
+- **`kill -HUP <supervisor pid>`:** forces a restart now (probe, then forward),
+  overriding the 60s interval and the one-restart-per-checkout rule. A failing
+  probe still refuses it, loudly.
+- **`kill -HUP <child pid>`:** the child exits 75 at its idle point and the
+  parent restarts it.
+- **Child crash:** owned by the child's in-process backoff (`--max-restarts`,
+  5 crashes in 300s), unchanged. When the child gives up and exits non-zero,
+  the parent stops too; it does not stack a second supervisor on top.
+- **SIGTERM to the supervisor:** the child gets SIGINT, then SIGKILL after a
+  120s grace. This is an explicit operator stop, the one path that can end a
+  tick early (ADR-0025).
+- **SIGINT / Ctrl-C:** reaches the child through the terminal's process group;
+  the parent only stops restarting and exits when the child does.
+
+Bounds and failure policy:
+
+- At least 60s between automatic restarts.
+- One automatic restart per checkout identity. If the loop is still STALE
+  against the same checkout afterwards, the parent prints once
+  `supervisor: the dispatch loop is still stale against <checkout> after an
+  automatic restart; ...` and waits for SIGHUP.
+- A failing import probe (for example `git pull` done, `uv sync` not yet)
+  keeps the old child running, prints `supervisor: not restarting the dispatch
+  loop onto ...`, and re-probes after 30s, 60s, 120s, 240s, 480s, then every
+  600s. A new checkout is probed at once.
+- A child started after a re-exec that exits non-zero (or exits 75 without the
+  supervisor having forwarded a SIGHUP to it) within 60s is a failed start,
+  retried after 5s and 10s. A 75 that follows a SIGHUP the supervisor forwarded,
+  including an operator `kill -HUP <supervisor pid>`, is a requested restart: it
+  is respawned at once and does not count. The third consecutive failure
+  stops the supervisor with `supervisor: giving up after 3 consecutive failed
+  starts ...`, exit 1 and a `dispatch.loop_exited` event with
+  `reason: "supervisor_gave_up"`. A child killed by a signal, or a first child
+  that exits non-zero (for example the lock is held), stops it at once.
+- **Stall signal:** a child that has not exited 10 minutes after the forwarded
+  SIGHUP gets one `dispatch.restart_stalled` event and a stderr line. A tick is
+  probably stuck on an external call. The supervisor never forces that exit;
+  inspect the child. Stopping it (SIGINT) ends the supervisor too: a child
+  that exits 0 is a clean stop, so re-run `cw dev-queue serve --supervised`
+  afterwards. To bounce a healthy loop without ending the supervisor, send
+  `kill -HUP <supervisor pid>`.
+
+The guard commands (`constrain`, `record-plan-decisions`, `prerequisite`,
+`resolve`, `approve`) wait up to 90s for a supervised STALE loop to restart
+before they refuse (or, for `resolve`/`approve`, warn). A STALE loop with no
+live supervisor is refused at once, as before.
+
+Terminals: run the supervisor under tmux or `nohup`. Under `nohup` SIGHUP is
+ignored, so the supervisor installs no SIGHUP handler and `kill -HUP` cannot
+force a restart; it starts each child through a tiny trampoline that resets
+SIGHUP to default, so automatic restarts still work. From a plain terminal
+with neither, closing the window delivers SIGHUP: the parent takes one restart
+cycle and then stops through the failure policy once the tty is gone. A
+supervisor started from an orchestrator session dies with that session.
+
+Not covered:
+
+- An unsupervised loop (`serve` or `run` without `--supervised`) gets no
+  SIGHUP handler; SIGHUP behaves as before (it kills the process).
+- The supervisor's own code is not re-executed. After an upgrade that changes
+  `cw.dispatch_supervisor` or the lock-record format, stop and restart the
+  `--supervised` command by hand.
+- A child whose supervisor was killed keeps its SIGHUP handler: SIGHUP then
+  makes it exit 75 and nothing restarts it. Start `serve --supervised` again.
+
 ### Lane serialization — cli.py and other shared files
 
 Tickets that touch the same file conflict at merge. `cli.py` is the
@@ -4074,8 +4168,14 @@ capability and requeueing. It is not a product defect, so no `--regress`.
 A finding with no diff anchor (`file: N/A`) has no fingerprint key, so the
 verdict comment prints no settle payload for it and `cw review settle` cannot
 dismiss it. Release it by supplying the missing capability and requeueing.
-Findings that came from the repo review engine (`coverage.*` rules) cannot
-carry the marker and are not covered by this hold (follow-up).
+A repo-engine `coverage.*` or `acceptance.*` finding can carry the marker
+(#3822). It is held, not deferred, and `cw review converge operator-settle
+--outcome defer` is inert for it.
+A gap held in a loop round is released by supplying the missing capability and
+requeueing the review stage. A gap raised by the confirm round after an engine
+pass parks as `review_confirm_must_fix`, which a plain requeue does not release
+at the same tip; release it with `cw dev-queue requeue --stage impl --regress`.
+See `docs/headless-contract.md` section 12.3.
 
 `cw dev-queue approve --override-must-fix` does not release this park.
 For a pure-gap park (`review_operator_actionable`) it is refused at the

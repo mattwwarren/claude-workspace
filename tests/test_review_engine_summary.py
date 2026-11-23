@@ -20,6 +20,7 @@ from cw.models.review_engine_summary import (
     MAX_ENGINE_ACCEPTANCE_ID_LENGTH,
     MAX_ENGINE_ACCEPTANCE_ROWS,
     MAX_ENGINE_CONSEQUENCE_LENGTH,
+    MAX_ENGINE_EVIDENCE_GAP_LENGTH,
     MAX_ENGINE_EVIDENCE_LENGTH,
     MAX_ENGINE_FILE_LENGTH,
     MAX_ENGINE_FINDING_SUMMARY_LENGTH,
@@ -48,7 +49,12 @@ from cw.models.review_engine_summary import (
 )
 from cw.models.review_feedback import ReviewFeedback
 from cw.review_findings._models import Severity
-from tests._review_engine_helpers import SHA, make_finding, make_summary
+from tests._review_engine_helpers import (
+    SHA,
+    engine_finding,
+    make_finding,
+    make_summary,
+)
 from tests._shared.workflow_text import _norm, _section_between
 
 if TYPE_CHECKING:
@@ -759,16 +765,73 @@ class TestMessageTemplates:
 
 
 class TestSchemaVersionDirect:
-    def test_version_two_rejected(self) -> None:
-        error = _only_error(make_summary(schema_version=2))
+    def test_version_three_rejected(self) -> None:
+        error = _only_error(
+            make_summary(schema_version=REVIEW_ENGINE_SUMMARY_SCHEMA_VERSION + 1)
+        )
 
         assert error["loc"] == ("schema_version",)
         assert error["type"] not in INCONSISTENT_ERROR_TYPES
 
-    def test_version_one_accepted(self) -> None:
-        summary = _validate(make_summary(schema_version=1))
+    def test_version_one_rejected(self) -> None:
+        error = _only_error(make_summary(schema_version=1))
 
-        assert summary.schema_version == REVIEW_ENGINE_SUMMARY_SCHEMA_VERSION == 1
+        assert error["loc"] == ("schema_version",)
+        assert error["type"] not in INCONSISTENT_ERROR_TYPES
+
+    def test_current_version_accepted(self) -> None:
+        summary = _validate(make_summary(schema_version=2))
+
+        assert summary.schema_version == REVIEW_ENGINE_SUMMARY_SCHEMA_VERSION == 2
+
+
+class TestEvidenceGapField:
+    def test_accepted_with_text(self) -> None:
+        summary = _validate(
+            make_summary([engine_finding("MUST_FIX", evidence_gap="ran nothing")])
+        )
+
+        assert summary.findings[0].evidence_gap == "ran nothing"
+
+    def test_accepted_as_null_and_when_omitted(self) -> None:
+        explicit = _validate(
+            make_summary([engine_finding("MUST_FIX", evidence_gap=None)])
+        )
+        omitted = _validate(make_summary([engine_finding("MUST_FIX")]))
+
+        assert explicit.findings[0].evidence_gap is None
+        assert omitted.findings[0].evidence_gap is None
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_blank_is_schema_invalid(self, blank: str) -> None:
+        error = _only_error(
+            make_summary([engine_finding("MUST_FIX", evidence_gap=blank)])
+        )
+
+        assert error["loc"] == ("findings", 0, "evidence_gap")
+        assert error["type"] not in INCONSISTENT_ERROR_TYPES
+
+    def test_over_length_rejected(self) -> None:
+        too_long = "x" * (MAX_ENGINE_EVIDENCE_GAP_LENGTH + 1)
+        error = _only_error(
+            make_summary([engine_finding("MUST_FIX", evidence_gap=too_long)])
+        )
+
+        assert error["loc"] == ("findings", 0, "evidence_gap")
+
+    @pytest.mark.parametrize("severity", ["DEBT", "NIT", "PRINCIPLE"])
+    def test_marker_accepted_on_non_gating_severity(self, severity: str) -> None:
+        summary = _validate(
+            make_summary([engine_finding(severity, evidence_gap="ran nothing")])
+        )
+
+        assert summary.findings[0].evidence_gap == "ran nothing"
+
+    def test_field_description_present(self) -> None:
+        schema = ReviewEngineSummary.model_json_schema()
+        prop = schema["$defs"]["EngineFinding"]["properties"]["evidence_gap"]
+
+        assert prop.get("description")
 
 
 class TestJsonSchema:
@@ -852,6 +915,15 @@ class TestHeadlessContractDocs:
 
         assert rows
         assert "#3036" in rows[0]
+
+    def test_version_history_second_row(self) -> None:
+        rows = [
+            line for line in _engine_section().splitlines() if line.startswith("| 2 |")
+        ]
+
+        assert rows
+        assert "#3822" in rows[0]
+        assert "evidence_gap" in rows[0]
 
     def test_section_names_prefixes_command_and_exits(self) -> None:
         section = _norm(_engine_section())

@@ -27,6 +27,7 @@ from tests._review_engine_helpers import (
     write_engine_context,
 )
 from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.review_builders import _EVIDENCE_GAP
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -598,6 +599,35 @@ def test_coverage_finding_cannot_be_deferred(flow: Flow) -> None:
 
     assert result.exit_code == 1
     assert "engine_non_deferrable" in result.output
+
+
+def test_gap_marked_coverage_must_fix_is_held_not_regressed_to_fix(
+    flow: Flow,
+) -> None:
+    """#3822: a marked engine ``coverage.*`` MUST_FIX defers into a hold, not a fix."""
+    summary = make_summary(
+        [
+            engine_finding(
+                "MUST_FIX",
+                rule_id="coverage.tests",
+                fingerprint="fp-cov-00002",
+                evidence_gap=_EVIDENCE_GAP,
+            )
+        ]
+    )
+    verdict = flow.round_to_verdict(summary)
+    suppressed = flow.suppress(verdict)
+    finding = verdict["accepted"][0]["finding"]
+
+    result = flow.adjudicate(suppressed["verdict"], [adjudication(finding, "defer")])
+
+    assert result.exit_code == 0, result.output
+    adjudicated = json.loads(result.stdout)
+    assert adjudicated["accepted"][0]["disposition"] == "operator_actionable"
+    assert adjudicated["must_fix"] == []
+    assert adjudicated["blocking"] is False
+    report = flow.record_round(adjudicated)
+    assert report["decision"] != "fix"
 
 
 # ---------------------------------------------------------------------------

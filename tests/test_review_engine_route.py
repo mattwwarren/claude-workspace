@@ -8,6 +8,7 @@ import sys
 
 import pytest
 
+from cw.models.review_engine_summary import is_non_deferrable_rule
 from cw.review_adjudication import Adjudication
 from cw.review_engine import (
     EngineRouteError,
@@ -16,8 +17,8 @@ from cw.review_engine import (
     RoutedOutcome,
     engine_route,
 )
-from cw.review_engine.route import is_non_deferrable_rule
 from cw.review_findings import Finding
+from tests._shared.review_builders import _make_gap_finding
 
 SEVERITIES = ("MUST_FIX", "SHOULD_FIX", "DEBT", "NIT", "PRINCIPLE")
 RULES = ("style.naming", "coverage.tests", "acceptance.criteria")
@@ -268,3 +269,85 @@ def test_package_import_does_not_pull_workspace_or_convergence() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize("rule_id", ["coverage.tests", "acceptance.criteria"])
+@pytest.mark.parametrize("defers", [frozenset(), frozenset({FP})])
+def test_gap_marked_must_fix_non_deferrable_defer_routes(
+    rule_id: str, defers: frozenset[str]
+) -> None:
+    finding = _make_gap_finding(
+        "MUST_FIX", rule_id=rule_id, fingerprint=FP, source="engine"
+    )
+
+    routed = _route(finding, _adjudication("defer", "MUST_FIX"), defers)
+
+    assert routed == RoutedOutcome(outcome="defer")
+
+
+def test_gap_marked_must_fix_deferrable_defer_routes_without_operator_defer() -> None:
+    finding = _make_gap_finding(
+        "MUST_FIX", rule_id="style.naming", fingerprint=FP, source="engine"
+    )
+
+    routed = _route(finding, _adjudication("defer", "MUST_FIX"))
+
+    assert routed == RoutedOutcome(outcome="defer")
+
+
+def test_gap_marked_must_fix_reject_stays_forbidden() -> None:
+    finding = _make_gap_finding(
+        "MUST_FIX", rule_id="coverage.tests", fingerprint=FP, source="engine"
+    )
+
+    routed = _route(finding, _adjudication("reject", "MUST_FIX"))
+
+    assert isinstance(routed, EngineRouteRefusal)
+    assert routed.code is EngineRouteRefusalCode.ENGINE_REJECT_FORBIDDEN
+
+
+@pytest.mark.parametrize("outcome", ["fix", "operator_action"])
+def test_gap_marked_must_fix_fix_and_operator_action_route_as_today(
+    outcome: str,
+) -> None:
+    finding = _make_gap_finding(
+        "MUST_FIX", rule_id="coverage.tests", fingerprint=FP, source="engine"
+    )
+
+    routed = _route(finding, _adjudication(outcome, "MUST_FIX"))
+
+    assert routed == RoutedOutcome(outcome=outcome)
+
+
+def test_unmarked_coverage_must_fix_defer_still_refused_without_operator_defer() -> (
+    None
+):
+    routed = _route(
+        _finding("MUST_FIX", "coverage.tests"), _adjudication("defer", "MUST_FIX")
+    )
+
+    assert isinstance(routed, EngineRouteRefusal)
+    assert routed.code is EngineRouteRefusalCode.ENGINE_NON_DEFERRABLE
+
+
+@pytest.mark.parametrize("rule_id", ["coverage.tests", "acceptance.criteria"])
+def test_gap_marked_should_fix_non_deferrable_defer_still_refused(rule_id: str) -> None:
+    finding = _make_gap_finding(
+        "SHOULD_FIX", rule_id=rule_id, fingerprint=FP, source="engine"
+    )
+
+    routed = _route(finding, _adjudication("defer", "SHOULD_FIX"), frozenset({FP}))
+
+    assert isinstance(routed, EngineRouteRefusal)
+    assert routed.code is EngineRouteRefusalCode.ENGINE_NON_DEFERRABLE
+
+
+def test_blank_marker_is_not_a_marker() -> None:
+    finding = _make_gap_finding(
+        "MUST_FIX", rule_id="coverage.tests", fingerprint=FP, source="engine"
+    ).model_copy(update={"evidence_gap": "   "})
+
+    routed = _route(finding, _adjudication("defer", "MUST_FIX"))
+
+    assert isinstance(routed, EngineRouteRefusal)
+    assert routed.code is EngineRouteRefusalCode.ENGINE_NON_DEFERRABLE

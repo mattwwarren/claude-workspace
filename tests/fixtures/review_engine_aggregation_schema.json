@@ -136,6 +136,19 @@
           ],
           "description": "How the engine suggests fixing it, if stated.",
           "title": "Suggested Fix"
+        },
+        "evidence_gap": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Set only when this finding exists because a check you needed could not be run or observed: name the command or tool and why it could not run. Never set it for a defect visible in the diff or reproduced. Use null, never an empty string, for none. A MUST_FIX with a marker is held for the operator and not repaired. The marker is ignored for DEBT, NIT and PRINCIPLE findings, and for a SHOULD_FIX coverage.* or acceptance.* finding.",
+          "title": "Evidence Gap"
         }
       },
       "required": [
@@ -147,7 +160,8 @@
         "summary",
         "evidence",
         "consequence",
-        "suggested_fix"
+        "suggested_fix",
+        "evidence_gap"
       ],
       "title": "EngineFinding",
       "type": "object"

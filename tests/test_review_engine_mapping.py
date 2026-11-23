@@ -13,7 +13,7 @@ from cw.review_engine.constants import (
     ENGINE_ROLE,
 )
 from cw.review_engine.mapping import engine_document, engine_finding_to_finding
-from cw.review_findings import Finding, ReviewerFindingsDocument
+from cw.review_findings import Finding, ReviewerFindingsDocument, held_kind
 from tests._review_engine_helpers import engine_finding, make_finding, make_summary
 
 
@@ -124,3 +124,18 @@ def test_roundtrip_through_reviewer_findings_document() -> None:
     assert "repo-review" in reloaded.detail
     assert "verdict=FAIL" in reloaded.detail
     assert "findings=2" in reloaded.detail
+
+
+def test_evidence_gap_none_maps_to_empty_string() -> None:
+    finding = _mapped(evidence_gap=None)
+
+    assert finding.evidence_gap == ""
+    assert held_kind(finding) is None
+
+
+def test_evidence_gap_text_preserved_verbatim() -> None:
+    text = "could not run pytest: not installed"
+    finding = _mapped(evidence_gap=text)
+
+    assert finding.evidence_gap == text
+    assert held_kind(finding) == "evidence_gap"

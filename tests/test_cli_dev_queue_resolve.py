@@ -799,6 +799,8 @@ class TestStaleLoopWarning:
         assert result.exit_code == 0, result.output
         text = " ".join(result.stdout.split())
         assert "print a `warning:` line on stderr" in text
-        assert "never block the write" in text
+        assert "never refuse the write" in text
+        assert "supervised" in text
+        assert "90s" in text
         assert "dispatch-loop-code" in text
         assert "#2729" not in text
