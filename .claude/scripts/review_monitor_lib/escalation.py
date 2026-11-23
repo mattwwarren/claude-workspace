@@ -95,10 +95,12 @@ def _compute_auto_fix_ok(
        ``state_entered_at``, so we already dispatched an agent for this exact
        attention_state instance. Wait for the reviewer to respond; the state
        transition will reset ``state_entered_at`` and re-enable auto-fix.
-    3. Stacked draft (isDraft=True AND base != main/master) — base-PR churn
-       would force a wrong rebase target. Caller must skip.
+    3. Draft on a non-default base (isDraft=True AND base != main/master) —
+       the base only picks the label; the draft is still skipped. Label only,
+       no behavior change: an epic base (``epic/*``) is held the same way.
     4. Plain draft (isDraft=True, base == main) — drafts are WIP by definition;
-       skip unless the user re-registers explicitly.
+       skip unless the user re-registers explicitly. Every draft is skipped
+       whatever its base.
     """
     if _auto_fix_attempts_today(pr) >= AUTO_FIX_DAILY_CAP:
         return False, "daily cap reached"

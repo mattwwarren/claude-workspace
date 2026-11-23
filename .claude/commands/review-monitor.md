@@ -123,7 +123,7 @@ Both are idempotent. `discover` returns `{"registered": [...], "skipped": [...],
 
 **Why this exists:** when an `/auto-dev` worker hits the `merge_conflict_post_push` blocker (or, worse, times out without emitting any sentinel — see global-claude issue #13), the open PR is left in a `CONFLICTING` / `DIRTY` state with no further worker activity. Until this monitor's next cycle picks it up via the normal flow, the PR sits orphaned. This fast-path identifies and prioritizes those PRs so the cycle that *does* notice them addresses them first, shrinking the orphan-window even on slow cron cadences.
 
-This step is the consumer side of auto-dev's Step 4c.5 (`merge_conflict_post_push` blocker emission). The contract: auto-dev attempts one merge of `origin/main` (resolving the conflict) before giving up; this monitor takes over from there. A PR that is merely `BEHIND` is not a reason to act (the default-branch merge policy, #2979): GitHub merges a clean branch, and a clean merge never causes a review.
+This step is the consumer side of auto-dev's Step 4c.5 (`merge_conflict_post_push` blocker emission). The contract: auto-dev attempts one merge of `origin/<base>` (resolving the conflict) before giving up, where `<base>` is the PR's own `baseRefName` (the merge target: a per-ticket PR into an RFC 0020 epic base merges that base, not `main`); this monitor takes over from there. A PR that is merely `BEHIND` is not a reason to act (the default-branch merge policy, #2979): GitHub merges a clean branch, and a clean merge never causes a review.
 
 **Sequence:**
 
@@ -137,13 +137,12 @@ gh pr list --repo <entry.repo> --author @me --state open \
   --jq '
     .[] |
     select(.mergeable == "CONFLICTING" or .mergeStateStatus == "DIRTY") |
-    select(.baseRefName == "main") |
     select(.headRefName | test("^(auto-dev|dev)/")) |
     {number, headRefName, mergeable, mergeStateStatus, updatedAt}
   '
 ```
 
-The branch-prefix filter (`auto-dev/*` or `dev/*`) targets pipeline-authored PRs specifically — manual feature-branch PRs are excluded so this fast-path doesn't trample on human-driven work.
+The branch-prefix filter (`auto-dev/*` or `dev/*`) targets pipeline-authored PRs specifically — manual feature-branch PRs are excluded so this fast-path doesn't trample on human-driven work. The filter is on head prefix regardless of base: `epic/*` landing PRs are not in this fast path, because they are human-approved adopted PRs (RFC 0020 D-4, D-12), their conflicts route to impl through adoption (D-8), and a push to the epic branch parks the adopted row (B2). That is not a guarantee: `discover` registers every open `@me` PR, so Step 4b can still act on a registered, non-draft, DIRTY `epic/*` landing PR; that pre-existing gap is out of scope for this step and is follow-up debt.
 
 For each match, register it (idempotent) so the rest of the cycle treats it as a monitored PR:
 
@@ -161,7 +160,7 @@ Then add it to a `priority_set` — these PRs get processed FIRST in Step 4b's a
 
 | Producer (auto-dev) | Consumer (this monitor) |
 |---|---|
-| Step 4c.5 emits `blocker.reason: "merge_conflict_post_push"` with `retry_eligible: true` after one merge of `origin/main` it could not resolve | Step 0.6 picks up the orphan CONFLICTING PR on the next cycle and registers it; Step 4b auto-fix dispatches a merge-fix agent |
+| Step 4c.5 emits `blocker.reason: "merge_conflict_post_push"` with `retry_eligible: true` after one merge of `origin/<base>` it could not resolve | Step 0.6 picks up the orphan CONFLICTING PR on the next cycle and registers it; Step 4b auto-fix dispatches a merge-fix agent |
 | Worker exits to sentinel; PR sits CONFLICTING | Fast-path priority + standard Step 4b machinery merge-once/resolve/plain push → PR returns to MERGEABLE → orchestrator can re-dispatch the ticket if needed |
 
 ### Step 1: Load Monitored PRs
@@ -197,8 +196,8 @@ This returns a JSON array of monitored PRs. Each entry includes:
 | `needs_local_ping` | `true` when the attention state has changed since the last local ping fired |
 | `needs_escalation` | `true` when a `dm_escalation` action should be enqueued for the Desktop schedule this cycle (immediate for ci/merge, 15-min grace for ready_to_approve) |
 | `slack_channel` / `slack_ts` / `slack_last_seen_ts` | Optional — present when the PR was announced to Slack via a ship-it file-drop |
-| `is_draft` / `base_ref_name` | Populated by `check`. Used by `auto_fix_ok` gating — drafts (especially stacked ones) are skipped automatically. |
-| `auto_fix_blocked_reason` | When `auto_fix_ok == false`, a short human-readable reason: `"daily cap reached"`, `"draft"`, or `"draft stacked on '<base>'"`. |
+| `is_draft` / `base_ref_name` | Populated by `check`. Used by `auto_fix_ok` gating — drafts (especially stacked ones) are skipped automatically (label only; every draft is skipped). |
+| `auto_fix_blocked_reason` | When `auto_fix_ok == false`, a short human-readable reason: `"daily cap reached"`, `"draft"`, or `"draft stacked on '<base>'"` (label only; every draft is skipped). |
 
 **If the array is empty:** Print "No PRs currently monitored." and stop.
 
@@ -578,10 +577,10 @@ A login is a bot if it ends with `[bot]`, `-ai`, or `-bot`, or matches a known l
 
 Dispatch one agent per PR (parallel-safe — each operates in its own worktree). Use the Agent tool with `subagent_type: "general-purpose"`, `model: "sonnet"` (spawns are async unconditionally — `run_in_background` is no longer a parameter; see #1944).
 
-**Prompt template** (substitute placeholders per PR):
+**Prompt template** (substitute placeholders per PR; `<base>` is the PR's `base_ref_name` from the `check` output, or `gh pr view <N> --repo <repo> --json baseRefName --jq .baseRefName` when that is empty, never a literal branch):
 
 ```
-Fix PR #<N> in <repo>. Branch: <branch>. URL: <url>
+Fix PR #<N> in <repo>. Branch: <branch>. Base: <base>. URL: <url>
 
 State: merge_state_status=<DIRTY|BEHIND|UNKNOWN>, ci_ok=<true|false>.
 Failing checks (if any):
@@ -622,9 +621,9 @@ WORKTREE SETUP (always — required for parallel safety):
 4. Symlink CLAUDE.local.md and .claude/settings.local.json from <repo_path> if present (skip if missing). Symlink .env if present.
 
 WORK:
-- Only when merge_state_status is DIRTY: merge main ONCE and resolve: `git fetch origin && git merge origin/main`. Never rebase and never force-push. For ci_failing or changes_requested on a PR that is not DIRTY, do not merge or rebase main at all.
+- Only when merge_state_status is DIRTY: merge `<base>` ONCE and resolve: `git fetch origin && git merge origin/<base>`. Never rebase and never force-push. For ci_failing or changes_requested on a PR that is not DIRTY, do not merge or rebase main at all.
 - Resolve conflicts. If domain knowledge is required, STOP and report — do NOT guess.
-- **If you discover the branch's commits are already in main (squash-merged):** STOP and report — do NOT skip commits or force a no-op merge. The orchestrator closes the PR (it verifies the signs, then runs `gh pr close` with a citation). Signs: every conflicted file's HEAD-side already contains your branch's intended change; commits in your branch reference work already shipped.
+- **If you discover the branch's commits are already in `<base>` (squash-merged):** STOP and report — do NOT skip commits or force a no-op merge. The orchestrator closes the PR (it verifies the signs, then runs `gh pr close` with a citation). Signs: every conflicted file's HEAD-side already contains your branch's intended change; commits in your branch reference work already shipped.
 - For ci_failing: read failure log via `gh run view <run_id> --log-failed`, fix root cause. Do NOT skip tests, do NOT add # noqa or # type: ignore without reason.
 - For changes_requested human threads: apply suggested fixes when correct. If a suggestion is unclear or wrong, post a substantive technical reply explaining why via `gh review reply <thread_id>` (this is NOT a nudge — it's clarifying disagreement on a real finding).
 - Push: `git push origin <branch>` (a plain push: a merge rewrites no history, so no force is ever needed)
@@ -782,7 +781,7 @@ Cooldown: each PR is eligible for re-bumping after 24h (handled by `pending-chan
 
 **Step 4e: Promote drafts whose dependency has landed.**
 
-Author drafts in this repo are not WIP — they're either standalone (based on `main`) or stacked on another open branch. Each cycle, promote any author draft whose base is ready.
+Author drafts in this repo are not WIP — they're either standalone (based on the default branch or an epic base) or stacked on another open branch. Each cycle, promote any author draft whose base is ready.
 
 For each monitored PR where `role == "author"`:
 
@@ -798,13 +797,13 @@ For each monitored PR where `role == "author"`:
 2a. **Author-review-required check** — if `headRefName` starts with `docs/`, leave as draft. These are auto-drafted by the `doc-debt-branches` weekend pass (`branch_prefix: "docs"`) and are proposals that need the author's eyes before reviewers see them. The author opens them deliberately when ready by running `gh pr ready` (or merging directly). Add a row to the Step 5 summary: `Held as draft (docs/ branch — author-review required)`.
 
 3. **Dependency check** — determine if the PR is stacked:
-   - If `baseRefName` is `main` or `master`: **not stacked**. Proceed to promotion.
+   - If `baseRefName` is `main`, `master` or begins with `epic/`: **not stacked**. Proceed to promotion. `main` and `master` mean the default branch and stay literal rather than a `gh repo view` lookup; `epic/<parent-id>` is RFC 0020 B3's persistent epic branch, so a draft on it is not stacked on a PR even while the landing PR is open. An operator `--base` name outside `epic/*` still fails safe by holding.
    - Otherwise: find a PR whose head matches `baseRefName`:
      ```bash
      gh pr list --repo <repo> --state open --head <baseRefName> --json number,isDraft,state --jq '.[0]'
      ```
      - If that PR is still open: **dependency unmet**. Add a row to the Step 5 summary: `Held as draft (waiting on parent PR #<n>)`.
-     - If no such PR is found (parent merged/closed and branch deleted): **dependency met**. Proceed to promotion. Note: the child's base may need to be retargeted to `main` if the parent's branch was deleted — GitHub usually does this automatically but check with `gh pr view`.
+     - If no such PR is found (parent merged/closed and branch deleted): **dependency met**. Proceed to promotion. Note: GitHub usually retargets the child to the merged parent's own base, which is not necessarily `main` — verify with `gh pr view`. Never retarget an epic base.
 
 4. **Promote, request review, AND dispatch a same-cycle merge-fix only if DIRTY:**
    ```bash
@@ -826,7 +825,7 @@ For each monitored PR where `role == "author"`:
    ~/.claude/scripts/review_monitor.py record-auto-fix <pr_number> --repo <repo>
    ```
 
-   Rationale: a promoted draft whose parent just merged is often DIRTY against `main`. Waiting for the next cron tick to discover DIRTY and dispatch the merge-fix adds an hour of lag for no benefit. A draft that is not DIRTY is left alone: a clean merge is GitHub's job and never causes a review.
+   Rationale: a promoted draft whose parent just merged is often DIRTY against its base. Waiting for the next cron tick to discover DIRTY and dispatch the merge-fix adds an hour of lag for no benefit. A draft that is not DIRTY is left alone: a clean merge is GitHub's job and never causes a review.
 
    Add a row to the Step 5 summary: `Promoted draft → ready, requested <default_reviewer or "(no reviewer — default_reviewer unset)">, dispatched merge-fix` (or `no action` when it was not DIRTY).
 
