@@ -20,6 +20,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import pytest
+
+from cw import dispatch_supervisor as sup
+from cw.config import dispatch_loop_lock, dispatch_loop_lock_file
+from cw.dispatch_loop_identity import CodeIdentity, LoopAssessment, LoopStatus
 from cw.dispatch_reexec import REEXEC_EXIT_CODE, SUPERVISOR_PID_ENV
 from cw.dispatch_supervisor import (
     _SIGHUP_DEFAULT_TRAMPOLINE,
@@ -28,10 +32,6 @@ from cw.dispatch_supervisor import (
     probe_install,
     run_supervised_serve,
 )
-
-from cw import dispatch_supervisor as sup
-from cw.config import dispatch_loop_lock, dispatch_loop_lock_file
-from cw.dispatch_loop_identity import CodeIdentity, LoopAssessment, LoopStatus
 from cw.exceptions import DispatchServeError
 from cw.models import OrchestratorEventType
 from tests._loop_identity_helpers import (
@@ -130,9 +130,12 @@ class _FakeChild:
             signal.SIGHUP: self.script.on_sighup,
             signal.SIGINT: self.script.on_sigint,
         }.get(signal.Signals(sig))
-        if exit_code is not None and self.exit_at is None:
-            delay = self.script.hup_delay if sig == signal.SIGHUP else 0.0
-            self.exit_at = self.clock.now + delay
+        if exit_code is None:
+            return
+        delay = self.script.hup_delay if sig == signal.SIGHUP else 0.0
+        at = self.clock.now + delay
+        if self.exit_at is None or at < self.exit_at:
+            self.exit_at = at
             self.exit_code = exit_code
 
     def kill(self) -> None:
