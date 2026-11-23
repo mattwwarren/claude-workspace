@@ -541,7 +541,10 @@ Bounds and failure policy:
 - **Stall signal:** a child that has not exited 10 minutes after the forwarded
   SIGHUP gets one `dispatch.restart_stalled` event and a stderr line. A tick is
   probably stuck on an external call. The supervisor never forces that exit;
-  inspect the child, or stop it with SIGINT, and the supervisor restarts it.
+  inspect the child. Stopping it (SIGINT) ends the supervisor too: a child
+  that exits 0 is a clean stop, so re-run `cw dev-queue serve --supervised`
+  afterwards. To bounce a healthy loop without ending the supervisor, send
+  `kill -HUP <supervisor pid>`.
 
 The guard commands (`constrain`, `record-plan-decisions`, `prerequisite`,
 `resolve`, `approve`) wait up to 90s for a supervised STALE loop to restart
