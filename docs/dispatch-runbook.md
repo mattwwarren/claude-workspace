@@ -4059,7 +4059,8 @@ A finding with no diff anchor (`file: N/A`) has no fingerprint key, so the
 verdict comment prints no settle payload for it and `cw review settle` cannot
 dismiss it. Release it by supplying the missing capability and requeueing.
 A repo-engine `coverage.*` or `acceptance.*` finding can carry the marker
-(#3822). It is held, not deferred, and `cw review settle` cannot dismiss it.
+(#3822). It is held, not deferred, and `cw review converge operator-settle
+--outcome defer` is inert for it.
 Release it by supplying the missing capability and requeueing, or with
 `cw dev-queue requeue --stage impl --regress`. See
 `docs/headless-contract.md` section 12.3.
