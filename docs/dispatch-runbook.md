@@ -3396,7 +3396,20 @@ is no epic command group.
   repo or worktree root.
 - Adopt the landing PR under the parent ticket, per the adoption section linked
   above. The parent must have no row at all, including a COMPLETED one.
-- Registering the landing PR as author makes `/review-monitor` eligible to dispatch
+- The `/review-monitor` knock applies only where the default branch requires
+  approvals. Read it with the two calls Open step 3 makes on the epic branch, aimed
+  at the default branch: `gh api repos/{owner}/{repo}/branches/<default-branch>/protection`
+  and `gh api repos/{owner}/{repo}/rules/branches/<default-branch>`. A
+  `required_approving_review_count` above 0 from either call means a human approval
+  is needed, so register the landing PR with `/review-monitor` and post the CKPT
+  line. With 0 required approvals, the adopted row's own review and auto-merge land
+  the PR: do not register it, and say in the CKPT line that it lands without a human
+  approval. That needs both calls to show nothing required: the protection call
+  returns a 404 "Branch not protected", or a count of 0 or the key absent, and the
+  rules call returns no `pull_request` rule above 0. An unreadable answer such as a 403 is unverified,
+  not zero: keep the knock and say in the CKPT line that the approvals requirement
+  was not verified.
+- Where the knock applies, registering the landing PR as author makes `/review-monitor` eligible to dispatch
   its auto-fix agent onto the shared `epic/<parent-id>` head on a red CI, a
   conflicting merge state or a change request (2 attempts per PR per day), and to
   channel-bump and DM about it. The adopted row also repairs a red or conflicted PR

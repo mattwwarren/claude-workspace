@@ -129,8 +129,20 @@ def test_auto_fix_already_addressed_state(
             "main",
             (True, None),
         ),
+        ({}, False, "epic/3778", (True, None)),
+        ({}, True, "epic/3778", (False, "draft stacked on 'epic/3778'")),
+        ({}, False, "feature/base", (True, None)),
     ],
-    ids=["cap", "already-addressed", "stacked-draft", "draft", "allowed"],
+    ids=[
+        "cap",
+        "already-addressed",
+        "stacked-draft",
+        "draft",
+        "allowed",
+        "epic-base-allowed",
+        "epic-base-draft-label",
+        "non-default-base-allowed",
+    ],
 )
 def test_compute_auto_fix_ok(
     fields: dict[str, object],

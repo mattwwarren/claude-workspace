@@ -25,6 +25,7 @@ from cw.opencode_runner import _supports_v1_flags
 from tests import _git_ceiling, _git_sandbox, _host_probe_guard, _tool_fakes
 from tests import _lock_invariants as lock_invariants
 from tests import _real_cw_guard as real_cw_guard
+from tests._shared.lock_helpers import _FakeClock
 from tests._shared.workflow_text import _REPO_ROOT
 
 if TYPE_CHECKING:
@@ -64,9 +65,16 @@ def _lock_hold_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
     first record. ``RECORD_ENABLED`` is read once at import from
     ``CW_LOCK_HOLD_RECORD``; pinning it keeps a developer's shell setting out of
     the suite.
+
+    The seam's clock (``cw.config.time``) is frozen to a fresh ``_FakeClock``,
+    so holds read as zero seconds and recording is a pure function of the test,
+    not of runner load (#3833). A test that needs real or scripted timing opts
+    in with ``lock_hold_clock`` (which re-patches this and wins) or
+    ``RECORD_MIN_S=0.0``.
     """
     monkeypatch.setattr("cw._lock_hold._STATE", lock_hold_module._ThreadState())
     monkeypatch.setattr("cw._lock_hold.RECORD_ENABLED", True)
+    monkeypatch.setattr("cw.config.time", _FakeClock())
 
 
 @pytest.fixture(autouse=True)

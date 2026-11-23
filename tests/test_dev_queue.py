@@ -930,6 +930,24 @@ class TestCLIDevQueueStatus:
         assert result.exit_code == 0, result.output
         assert "Longest completed lock hold" not in result.output
 
+    def test_status_footer_absent_when_host_clock_stalls(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        stalled_host_clock: None,
+    ) -> None:
+        """A slow host must not write its own lock holds into the footer (#3833)."""
+        from cw._lock_hold import read_window
+        from cw.config import state_dir
+
+        add_ticket(TicketTask(ticket_id="GEN-304", client="genhealth"))
+
+        result = CliRunner().invoke(main, ["dev-queue", "status"])
+
+        assert result.exit_code == 0, result.output
+        assert "Longest completed lock hold" not in result.output
+        assert read_window(state_dir(), now=datetime.now(UTC)).records == []
+
     def test_status_json_unchanged_by_lock_holds(
         self,
         tmp_dev_queue: Path,

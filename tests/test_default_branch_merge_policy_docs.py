@@ -11,6 +11,7 @@ rule, ``review-monitor``, the runbook and ADR-0022.
 from __future__ import annotations
 
 import ast
+import json
 import os
 import shutil
 import stat
@@ -745,6 +746,65 @@ class TestReviewMonitor:
         assert 'Skip merge-main work unless `merge_state_status == "DIRTY"`' in para
         template = _between(monitor, "**Prompt template**", "**Re-arm auto-merge")
         assert "State: merge_state_status=<DIRTY|BEHIND|UNKNOWN>," in template
+
+    def test_orphan_fast_path_does_not_filter_on_main_base(self) -> None:
+        step = _between(_cmd("review-monitor.md"), "### Step 0.6", "### Step 1")
+        assert '.baseRefName == "main"' not in step
+        assert 'test("^(auto-dev|dev)/")' in step
+        assert "origin/main" not in step
+        assert "origin/<base>" in step
+        assert "`epic/*` landing PRs are not in this fast path" in step
+
+    def test_auto_fix_merge_target_is_the_prs_own_base(self) -> None:
+        template = _between(
+            _cmd("review-monitor.md"), "**Prompt template**", "**Re-arm auto-merge"
+        )
+        assert "git fetch origin && git merge origin/<base>" in template
+        assert "origin/main" not in template
+        assert "already in main" not in template
+        assert "base_ref_name" in template
+
+    def test_stacked_draft_check_treats_an_epic_base_as_persistent(self) -> None:
+        step = _between(
+            _cmd("review-monitor.md"), "**Step 4e: Promote drafts", "### Step 5"
+        )
+        assert "epic/" in step
+        assert "retargeted to `main`" not in step
+        assert "DIRTY against `main`" not in step
+
+    @requires_jq
+    def test_orphan_fast_path_jq_selects_pipeline_pr_on_epic_base(self) -> None:
+        step = _between(_cmd("review-monitor.md"), "### Step 0.6", "### Step 1")
+        fence = _between(step, "gh pr list --repo <entry.repo> --author @me", "```")
+        program = fence.split("--jq '", 1)[1].rsplit("'", 1)[0]
+        prs = [
+            {
+                "number": 1,
+                "headRefName": "auto-dev/x",
+                "mergeable": "CONFLICTING",
+                "mergeStateStatus": "DIRTY",
+                "updatedAt": "2026-11-23T10:00:00Z",
+                "baseRefName": "epic/3778",
+            },
+            {
+                "number": 2,
+                "headRefName": "epic/3778",
+                "mergeable": "CONFLICTING",
+                "mergeStateStatus": "DIRTY",
+                "updatedAt": "2026-11-23T10:00:00Z",
+                "baseRefName": "main",
+            },
+        ]
+        out = subprocess.run(
+            ["jq", "-c", program],
+            input=json.dumps(prs),
+            capture_output=True,
+            text=True,
+            check=True,
+            env=_clean_git_env(),
+        )
+        selected = [json.loads(line)["number"] for line in out.stdout.splitlines()]
+        assert selected == [1]
 
 
 class TestAdr:
