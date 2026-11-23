@@ -3340,12 +3340,18 @@ is no epic command group.
 
 **Open.**
 
-1. Cut the branch from the default branch on origin, with no checkout:
-   `git fetch origin`, then
+1. Confirm the branch is absent, then cut it from the default branch on origin,
+   with no checkout. First run
+   `git ls-remote --exit-code --heads origin refs/heads/epic/<parent-id>`: exit 2
+   means the branch is absent, so continue; exit 0 means it already exists, so stop
+   and read it, and never force-push it. A non-force push onto an existing ancestor
+   branch would fast-forward it silently, so the push alone does not catch it. Name
+   the full ref: the bare pattern `epic/<parent-id>` also matches a nested branch
+   such as `foo/epic/<parent-id>`. Then run `git fetch origin` and
    `git push origin origin/<default-branch>:refs/heads/epic/<parent-id>`. The
    default branch is the name `git symbolic-ref --short refs/remotes/origin/HEAD`
    prints with its leading `origin/` removed. A refused push means the branch
-   already exists: read the refusal and never force-push it.
+   appeared in the meantime: read the refusal and never force-push it.
 2. Verify it exists: `git ls-remote --exit-code --heads origin refs/heads/epic/<parent-id>`.
 3. Check the branch-protection prerequisite (RFC 0020 D-12). Two read-only GETs,
    classic protection first, then rulesets:
@@ -3411,7 +3417,8 @@ is no epic command group.
 
 **Failure modes.**
 
-- Push refused because the branch exists: read the refusal; never force-push.
+- Push refused because the branch appeared after the absence check (the check
+  itself covers a branch that already existed): read the refusal; never force-push.
 - `add --base` refused (absent on origin, equal to the default branch, or over
   `epic.max_diff_lines`): see the enqueue section linked above.
 - Protection requires review: children cannot land into the epic branch. Clear

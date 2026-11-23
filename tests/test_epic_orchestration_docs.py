@@ -254,6 +254,7 @@ def test_queue_issues_base_fence_present() -> None:
         "git push origin --delete epic/<parent-id>",
         "operator action",
         "only after the landing PR is MERGED",
+        "exit 2 means the branch is absent",
         NO_EPIC_GROUP,
         B1_ANCHOR,
         B2_ANCHOR,
