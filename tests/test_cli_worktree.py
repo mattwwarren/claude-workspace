@@ -17,6 +17,7 @@ from tests._changelog_cut_helpers import (
     GAMMA,
     commit_files,
     cut_straddle_repo,
+    epic_sibling_repo,
     pyproject,
 )
 from tests._clients_yaml import ClientSpec, write_clients_yaml
@@ -523,3 +524,83 @@ class TestWorktreeChangelogSync:
 
         assert result.exit_code == 2
         assert "--base" in result.output
+
+
+class TestWorktreeChangelogSyncUnionConflict:
+    """``--union-conflict`` (#3861): opt-in CLI surface and its pinned help text."""
+
+    def _invoke(self, repo: Path, *extra: str) -> tuple[int, dict[str, object]]:
+        result = CliRunner().invoke(
+            main,
+            ["worktree", "changelog-sync", "--worktree", str(repo), *extra],
+        )
+        return result.exit_code, json.loads(result.output)
+
+    def test_flag_absent_leaves_sibling_scenario_clean(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        clone = epic_sibling_repo(tmp_path, make_git_repo)
+        code, payload = self._invoke(clone, "--base", "epic/1")
+        assert code == 0
+        assert payload["state"] == "clean"
+
+    def test_flag_on_sibling_scenario_moves_and_exits_zero(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        clone = epic_sibling_repo(tmp_path, make_git_repo)
+        code, payload = self._invoke(clone, "--base", "epic/1", "--union-conflict")
+        assert code == 0
+        assert payload["state"] == "moved"
+        assert payload["head_sha"] == git_in(clone, "rev-parse", "HEAD")
+
+    def test_flag_on_default_base_is_refused_with_exit_one(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        clone = epic_sibling_repo(tmp_path, make_git_repo)
+        code, payload = self._invoke(clone, "--base", "main", "--union-conflict")
+        assert code == 1
+        assert payload["state"] == "refused"
+        assert payload["disposition"] == "default_branch_base"
+
+    def test_origin_head_unset_exits_three(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        clone = epic_sibling_repo(tmp_path, make_git_repo)
+        git_in(clone, "remote", "set-head", "origin", "-d")
+        code, payload = self._invoke(clone, "--base", "epic/1", "--union-conflict")
+        assert code == 3
+        assert payload["state"] == "unavailable"
+
+    def test_help_pins_the_union_flag_and_base_wording(self) -> None:
+        result = CliRunner().invoke(
+            main,
+            ["worktree", "changelog-sync", "--help"],
+            terminal_width=80,
+        )
+        text = " ".join(result.output.split())
+
+        assert result.exit_code == 0
+        assert (
+            "Opt in: also make one plain `git merge --no-ff` of origin/<base> when"
+            " both sides added CHANGELOG.md bullets" in text
+        )
+        assert "Only for a base other than the default branch" in text
+        assert (
+            "Base branch; origin/<base> is merged (never fetched). Without"
+            " --union-conflict this is the default branch (release cut)" in text
+        )
+        assert "with it, a non-default base only." in text
+
+    def test_help_pins_the_union_docstring_paragraph(self) -> None:
+        result = CliRunner().invoke(
+            main,
+            ["worktree", "changelog-sync", "--help"],
+            terminal_width=80,
+        )
+        text = " ".join(result.output.split())
+
+        assert "(opt-in; non-default base only)" in text
+        assert "one plain `git merge --no-ff` of `origin/<base>`" in text
+        assert "It never fetches" in text
+        assert "The JSON keys are unchanged and the exit mapping is unchanged" in text
+        assert "`disposition` may be `default_branch_base`" in text

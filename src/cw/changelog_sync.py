@@ -14,6 +14,12 @@ text plus the branch's own ``[Unreleased]`` bullets. It has to be a merge,
 not a plain commit on the old merge-base: the merge makes main an ancestor,
 so the squash diff is just the bullets under ``[Unreleased]``.
 
+With ``union_conflict`` (#3861) a second trigger applies to a non-default
+base: when HEAD and ``origin/<base>`` both added ``CHANGELOG.md`` bullets, GitHub
+reports the epic-child PR ``DIRTY`` while the local probe is clean. The call
+then makes one plain ``git merge --no-ff`` of ``origin/<base>`` (no rebuild;
+git's own union output), and refuses the default branch outright.
+
 It never fetches, never rebases and never pushes. Anything it cannot do
 safely (a rebuild refusal, a conflict, a dirty tree, an in-progress merge, a git
 failure) writes nothing; a merge it started and could not finish is aborted.
@@ -59,7 +65,9 @@ if TYPE_CHECKING:
 __all__ = [
     "COMMIT_MESSAGE",
     "COMMIT_TIMEOUT_SECONDS",
+    "DISPOSITION_DEFAULT_BASE",
     "DISPOSITION_DIRTY_WORKTREE",
+    "UNION_COMMIT_MESSAGE",
     "ChangelogSync",
     "SyncState",
     "sync_changelog",
@@ -79,10 +87,19 @@ class SyncState(StrEnum):
 #: The command-local disposition for a move refused over uncommitted changes.
 DISPOSITION_DIRTY_WORKTREE: Final = "dirty_worktree"
 
-#: The merge commit's message.
+#: The command-local disposition for ``--union-conflict`` on the default branch.
+DISPOSITION_DEFAULT_BASE: Final = "default_branch_base"
+
+#: The release-cut merge commit's message.
 COMMIT_MESSAGE: Final = (
     "chore(changelog): merge the default branch and re-home CHANGELOG entries"
     " after a release cut (#3190)"
+)
+
+#: The sibling-bullet union merge's message (#3861).
+UNION_COMMIT_MESSAGE: Final = (
+    "chore(changelog): merge the epic base to clear a CHANGELOG union conflict"
+    " GitHub reports (#3861)"
 )
 
 #: Bound on the merge and the commit: the commit runs the repo's own
@@ -91,6 +108,7 @@ COMMIT_TIMEOUT_SECONDS: Final = 120.0
 
 _CHANGELOG: Final = "CHANGELOG.md"
 _DETAIL_LIMIT: Final = 300
+_ORIGIN_PREFIX: Final = "origin/"
 
 
 @dataclass(frozen=True)
@@ -100,8 +118,9 @@ class ChangelogSync:
     ``head_sha`` is HEAD after the call (the new merge commit when ``state``
     is ``moved``, else HEAD as it was), ``None`` if unreadable.
     ``disposition`` is ``None``, a ``RepairDisposition`` value from the
-    rebuild, or :data:`DISPOSITION_DIRTY_WORKTREE`. ``inserted`` holds the
-    verbatim bullets placed under ``[Unreleased]`` (``moved`` only).
+    rebuild, or :data:`DISPOSITION_DIRTY_WORKTREE` /
+    :data:`DISPOSITION_DEFAULT_BASE`. ``inserted`` holds the verbatim bullets
+    placed under ``[Unreleased]`` (``moved`` on the rebuild path only).
     """
 
     state: SyncState
@@ -115,12 +134,17 @@ class ChangelogSync:
 
 @dataclass(frozen=True)
 class _Move:
-    """A move :func:`_apply` makes: merge *base_sha*, write *text*, commit."""
+    """A move :func:`_apply` makes: merge *base_sha* and, when *text* is set,
+    write it to ``CHANGELOG.md`` first; then commit with *message*.
+
+    ``text is None`` is the plain union merge: git's own merge output is kept.
+    """
 
     base_sha: str
     head_sha: str
-    text: str
+    text: str | None
     inserted: tuple[str, ...]
+    message: str = COMMIT_MESSAGE
 
 
 def _answer(
@@ -214,8 +238,43 @@ def _show_changelog(worktree: Path, rev: str, timeout: float) -> str | None:
         ) from exc
 
 
+def _plan_union(
+    worktree: Path,
+    base_sha: str,
+    head: str,
+    main: str | None,
+    timeout: float,
+) -> ChangelogSync | _Move:
+    """The #3861 trigger: both sides added CHANGELOG bullets, so take a plain merge.
+
+    Clean (no move) unless HEAD and the base each changed ``CHANGELOG.md``
+    since the merge-base, and the base is not already an ancestor of HEAD.
+    """
+    if main is None or already_merged(worktree, base_sha, timeout):
+        return _answer(SyncState.CLEAN, base_sha, head)
+    merge_base = _checked(worktree, ["merge-base", "HEAD", base_sha], timeout)
+    base_text = _show_changelog(worktree, merge_base.stdout.strip(), timeout)
+    branch_text = _show_changelog(worktree, "HEAD", timeout)
+    if base_text not in (branch_text, main):
+        return _Move(
+            base_sha,
+            head,
+            None,
+            (),
+            message=UNION_COMMIT_MESSAGE,
+        )
+    return _answer(SyncState.CLEAN, base_sha, head)
+
+
 def _plan_move(
-    worktree: Path, base: str, base_sha: str, head: str, tree: str, timeout: float
+    worktree: Path,
+    base: str,
+    base_sha: str,
+    head: str,
+    tree: str,
+    timeout: float,
+    *,
+    union_conflict: bool,
 ) -> ChangelogSync | _Move:
     """Steps 3-5: compare, check ancestry, rebuild. May raise for the caller."""
     main = _show_changelog(worktree, base_sha, timeout)
@@ -226,6 +285,8 @@ def _plan_move(
         else ()
     )
     if main is None or not changed:
+        if union_conflict:
+            return _plan_union(worktree, base_sha, head, main, timeout)
         return _answer(SyncState.CLEAN, base_sha, head)
     if already_merged(worktree, base_sha, timeout):
         return _answer(
@@ -249,7 +310,13 @@ def _plan_move(
 
 
 def _settle(
-    worktree: Path, base: str, base_sha: str, head: str, timeout: float
+    worktree: Path,
+    base: str,
+    base_sha: str,
+    head: str,
+    timeout: float,
+    *,
+    union_conflict: bool,
 ) -> ChangelogSync | _Move:
     """Steps 2-5 once ``origin/<base>`` and HEAD resolved."""
     found = merge_tree(worktree, "HEAD", base_sha, timeout=timeout)
@@ -267,7 +334,15 @@ def _settle(
             ),
         )
     try:
-        return _plan_move(worktree, base, base_sha, head, found.tree, timeout)
+        return _plan_move(
+            worktree,
+            base,
+            base_sha,
+            head,
+            found.tree,
+            timeout,
+            union_conflict=union_conflict,
+        )
     except GitFailedError as exc:
         return _answer(SyncState.UNAVAILABLE, base_sha, head, detail=str(exc))
     except ChangelogRebuildError as exc:
@@ -280,10 +355,69 @@ def _settle(
         )
 
 
+def _resolve_default(worktree: Path, default_branch: str | None, timeout: float) -> str:
+    """The default branch: the caller's name, else ``origin/HEAD``'s target.
+
+    Raises :class:`GitFailedError` when ``origin/HEAD`` is unset, so the caller
+    reports ``unavailable`` instead of guessing a default.
+    """
+    if default_branch is not None:
+        return default_branch
+    result = git_bounded(
+        worktree,
+        ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+        timeout,
+    )
+    name = result.stdout.strip().removeprefix(_ORIGIN_PREFIX)
+    if result.returncode != 0 or not name:
+        msg = (
+            "origin/HEAD is unset or names no branch; cannot tell the default"
+            " branch (pass the default branch explicitly)"
+        )
+        raise GitFailedError(msg)
+    return name
+
+
+def _default_base_refusal(
+    worktree: Path,
+    base: str,
+    head: str | None,
+    default_branch: str | None,
+    timeout: float,
+) -> ChangelogSync | None:
+    """``--union-conflict`` is for a non-default base only; a refusal or ``None``."""
+    try:
+        default = _resolve_default(worktree, default_branch, timeout)
+    except GitFailedError as exc:
+        return _answer(SyncState.UNAVAILABLE, None, head, detail=str(exc))
+    if base != default:
+        return None
+    return _answer(
+        SyncState.REFUSED,
+        None,
+        head,
+        disposition=DISPOSITION_DEFAULT_BASE,
+        detail=(
+            f"{base} is the default branch; --union-conflict is for a non-default"
+            " base only (the release-cut path covers the default branch)"
+        ),
+    )
+
+
 def _analyse(
-    worktree: Path, base: str, head: str | None, timeout: float
+    worktree: Path,
+    base: str,
+    head: str | None,
+    timeout: float,
+    *,
+    union_conflict: bool,
+    default_branch: str | None,
 ) -> ChangelogSync | _Move:
     """Steps 1-5: a finished answer, or the :class:`_Move` to make."""
+    if union_conflict:
+        refusal = _default_base_refusal(worktree, base, head, default_branch, timeout)
+        if refusal is not None:
+            return refusal
     try:
         base_sha = resolve_base(worktree, base, timeout)
     except GitFailedError as exc:
@@ -292,7 +426,9 @@ def _analyse(
         return _answer(
             SyncState.UNAVAILABLE, base_sha, None, detail="HEAD does not resolve"
         )
-    return _settle(worktree, base, base_sha, head, timeout)
+    return _settle(
+        worktree, base, base_sha, head, timeout, union_conflict=union_conflict
+    )
 
 
 def _merge_in_progress(worktree: Path, timeout: float) -> bool:
@@ -330,6 +466,25 @@ def _abort(worktree: Path, move: _Move, detail: str, timeout: float) -> Changelo
     return _answer(SyncState.UNAVAILABLE, move.base_sha, move.head_sha, detail=detail)
 
 
+def _merge_and_commit(worktree: Path, move: _Move, timeout: float) -> None:
+    """The plain union merge, or the rebuild's merge, write and commit."""
+    if move.text is None:
+        _checked(
+            worktree,
+            ["merge", "--no-ff", "-m", move.message, move.base_sha],
+            COMMIT_TIMEOUT_SECONDS,
+        )
+        return
+    _checked(
+        worktree,
+        ["merge", "--no-ff", "--no-commit", move.base_sha],
+        COMMIT_TIMEOUT_SECONDS,
+    )
+    (worktree / _CHANGELOG).write_bytes(move.text.encode("utf-8"))
+    _checked(worktree, ["add", "--", _CHANGELOG], timeout)
+    _checked(worktree, ["commit", "-m", move.message], COMMIT_TIMEOUT_SECONDS)
+
+
 def _apply(worktree: Path, move: _Move, timeout: float) -> ChangelogSync:
     """Steps 6-7: dirty check, merge, write, commit; abort on any failure."""
     try:
@@ -364,14 +519,7 @@ def _apply(worktree: Path, move: _Move, timeout: float) -> ChangelogSync:
             detail="tracked files have uncommitted changes; commit or stash them first",
         )
     try:
-        _checked(
-            worktree,
-            ["merge", "--no-ff", "--no-commit", move.base_sha],
-            COMMIT_TIMEOUT_SECONDS,
-        )
-        (worktree / _CHANGELOG).write_bytes(move.text.encode("utf-8"))
-        _checked(worktree, ["add", "--", _CHANGELOG], timeout)
-        _checked(worktree, ["commit", "-m", COMMIT_MESSAGE], COMMIT_TIMEOUT_SECONDS)
+        _merge_and_commit(worktree, move, timeout)
     except (GitFailedError, OSError) as exc:
         return _abort(worktree, move, str(exc), timeout)
     return _answer(
@@ -387,6 +535,8 @@ def sync_changelog(
     base: str,
     *,
     timeout: float = PROBE_TIMEOUT_SECONDS,
+    union_conflict: bool = False,
+    default_branch: str | None = None,
 ) -> ChangelogSync:
     """Merge ``origin/<base>`` with a rebuilt CHANGELOG when a cut misfiled it.
 
@@ -394,15 +544,30 @@ def sync_changelog(
     ``origin/<base>`` has it (or either side lacks a ``CHANGELOG.md``);
     ``moved`` after one merge commit; ``conflict`` when ``origin/<base>``
     does not merge cleanly; ``refused`` for a rebuild refusal, a branch that
-    already contains ``origin/<base>``, an in-progress merge, or uncommitted
-    tracked changes (the ancestor refusal carries disposition
-    ``changelog_released_section_touched``; the in-progress one carries none);
-    ``unavailable`` for a git failure. Never raises and never fetches; every
-    git call is bounded by *timeout* (the merge and commit by
-    :data:`COMMIT_TIMEOUT_SECONDS`).
+    already contains ``origin/<base>``, an in-progress merge, uncommitted
+    tracked changes, or ``union_conflict`` on the default branch (the ancestor
+    refusal carries disposition ``changelog_released_section_touched``; the
+    in-progress one carries none; the default-branch one carries
+    ``default_branch_base``); ``unavailable`` for a git failure.
+
+    ``union_conflict`` (#3861) opts into the sibling-bullet union merge: when
+    HEAD and ``origin/<base>`` both changed ``CHANGELOG.md`` since the
+    merge-base, make one plain ``git merge --no-ff`` (never a rebuild) and
+    report ``moved``. ``default_branch`` names the repo default for that refusal;
+    omitted, it is read from ``origin/HEAD``.
+
+    Never raises and never fetches; every git call is bounded by *timeout*
+    (the merge and commit by :data:`COMMIT_TIMEOUT_SECONDS`).
     """
     head = _head_sha(worktree, timeout)
-    analysed = _analyse(worktree, base, head, timeout)
+    analysed = _analyse(
+        worktree,
+        base,
+        head,
+        timeout,
+        union_conflict=union_conflict,
+        default_branch=default_branch,
+    )
     if isinstance(analysed, ChangelogSync):
         return analysed
     return _apply(worktree, analysed, timeout)
