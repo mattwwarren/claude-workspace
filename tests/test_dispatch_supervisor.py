@@ -533,6 +533,22 @@ def test_operator_sighup_overrides_identity_memo_and_min_interval(
 
 
 @pytest.mark.platform_sensitive
+def test_operator_sighup_during_forwarded_restart_does_not_restart_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A SIGHUP that lands while the restart is in flight is spent with it."""
+    harness = _Harness(
+        monkeypatch, [_stale_child(hup_delay=30), _Script(exit_after=300)]
+    )
+    harness.hooks.append(_once_at(70, _raise(signal.SIGHUP)))
+    harness.run()
+    assert harness.children[0].signal_times == [60.0]
+    assert len(harness.children) == 2
+    assert harness.children[1].signals == []
+    assert harness.probes == [60.0]
+
+
+@pytest.mark.platform_sensitive
 def test_operator_sighup_with_failing_probe_still_refuses_loudly(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -293,6 +293,9 @@ class _Supervisor:
     def _on_child_exit(self, returncode: int) -> bool:
         """Handle a child exit; True when a new child was started."""
         self._forwarded_at = None
+        # An operator SIGHUP asked about the child that just exited; it must not
+        # carry over and restart the replacement.
+        self.operator_hup = False
         if self.stopping or returncode == 0:
             return False
         if returncode < 0:
