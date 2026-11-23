@@ -50,9 +50,15 @@ def base_row(
     *,
     ticket_id: str = "T-1",
     client: str = "test-client",
+    **overrides: object,
 ) -> TicketTask:
-    """One ticket row carrying *base* as its ``base_branch`` (``None`` = null row)."""
-    return _make_ticket_task(ticket_id=ticket_id, client=client, base_branch=base)
+    """One ticket row carrying *base* as its ``base_branch`` (``None`` = null row).
+
+    *overrides* are forwarded to the row model (``status=``, ``pr_state=``, ...).
+    """
+    return _make_ticket_task(
+        ticket_id=ticket_id, client=client, base_branch=base, **overrides
+    )
 
 
 def client_for_repo(repo: Path, **extra: object) -> ClientConfig:

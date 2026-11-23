@@ -45,6 +45,7 @@ from cw.doctor.config_checks import (
     _check_state_file,
     _check_worker_tmp_pressure,
 )
+from cw.doctor.epic_base import _check_epic_base
 from cw.doctor.linkage import (
     _check_cross_repo_rows,
     _check_dispatch_repo_head,
@@ -410,6 +411,11 @@ def _base_backend_checks(clients: dict[str, ClientConfig]) -> list[CheckResult]:
     return _check_base_backend(clients, _queue_tasks())
 
 
+def _epic_base_checks(clients: dict[str, ClientConfig]) -> list[CheckResult]:
+    """RFC 0020 B4 (#3786): one advisory per live epic base."""
+    return _check_epic_base(clients, _queue_tasks())
+
+
 def run_doctor(
     *,
     reap: bool = False,
@@ -448,6 +454,7 @@ def run_doctor(
             _check_dev_queue(),
             *_check_usage_limit_windows(),
             *_base_backend_checks(_clients),
+            *_epic_base_checks(_clients),
         ]
     )
     # #1201 anomaly layer: review-recipe liveness + attention-state census.
