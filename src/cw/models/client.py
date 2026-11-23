@@ -448,10 +448,12 @@ class EpicConfig(BaseModel):
 
     ``max_diff_lines`` caps the changed-line count of an epic base measured
     against the client's default branch (``merge_gate_ignore_paths`` excluded).
-    It is optional and enqueue-only: ``cw dev-queue add --base`` is the one
-    reader, and the dispatch tick never reads it. Unset means no refusal. An
-    older cw with ``extra="forbid"`` rejects the ``epic:`` key outright, so
-    downgrade the client config before pinning an older cw.
+    It is optional: the dispatch tick never reads it; enqueue refuses over it
+    (``cw dev-queue add --base``) and ``cw doctor`` reports it as advisory only.
+    Unset means no refusal and no over-ceiling warning; a merge-probe conflict
+    or a suspected branch-protection misconfiguration still warns. An older cw
+    with ``extra="forbid"`` rejects the ``epic:`` key outright, so downgrade the
+    client config before pinning an older cw.
     """
 
     model_config = ConfigDict(extra="forbid")
