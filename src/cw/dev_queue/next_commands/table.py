@@ -49,6 +49,8 @@ from cw.dev_queue.next_commands.parked import (
     _must_fix_overridden_commands,
     _must_fix_overridden_held_commands,
     _review_approval_gate_parked,
+    _review_held,
+    _review_held_commands,
     _salvage_commands,
     _salvage_parked,
     _scope_drift,
@@ -186,6 +188,12 @@ _RULES: tuple[_Rule, ...] = (
         _must_fix_held_commands,
         no_finalize_commands=_must_fix_no_finalize_commands,
     ),  # 6
+    # 6d (#3862): the review_operator_actionable park. It keys on blocked_reason
+    # alone, and its disposition is the generic ``blocked``, so it cannot be a
+    # disposition rule. It lists the plain requeue first and the conditional
+    # regress second, because the row cannot tell a contest, a checklist and an
+    # evidence gap apart.
+    _Rule(_review_held, _review_held_commands),  # 6d
     _Rule(_attempt_capped, _attempt_capped_commands),  # 6b
     _Rule(_salvage_parked, _salvage_commands),  # 7
     _Rule(_drain_held, _drain_commands),  # 8

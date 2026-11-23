@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from cw._git import git_output, run_git
 from cw.auto_dev_result import (
     EMPTY_DIFF_BLOCKER_REASON,
+    REVIEW_OPERATOR_ACTIONABLE_BLOCKER_REASON,
     SCOPE_TIER_LARGE,
     AutoDevResult,
     Blocker,
@@ -97,7 +98,7 @@ _SCOPE_TIER_UNRESOLVABLE = "scope_tier_unresolvable"
 # #2984: a decided-constraint contest parks with the existing documented
 # reason (KNOWN_BLOCKER_REASONS), the one the Claude-native lane's Step 3c
 # operator-action override already uses; no new blocker vocabulary.
-_REVIEW_OPERATOR_ACTIONABLE = "review_operator_actionable"
+_REVIEW_OPERATOR_ACTIONABLE = REVIEW_OPERATOR_ACTIONABLE_BLOCKER_REASON
 
 
 def _with_capability(

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from cw.auto_dev_result import (
     PLAN_SCOPE_DRIFT_BLOCKER_REASON,
     REVIEW_CONFIRM_MUST_FIX_BLOCKER_REASON,
+    REVIEW_OPERATOR_ACTIONABLE_BLOCKER_REASON,
 )
 from cw.auto_dev_result.schema._vocab import CODEX_MUST_FIX_FINDINGS
 from cw.dev_queue.dispositions import (
@@ -311,6 +312,42 @@ def _must_fix_held_commands(task: TicketTask) -> list[NextCommand]:
             task,
             f"record an operator override of the MUST_FIX park; {_SHIP_STEP_IS_HUMANS}",
         )
+    ]
+
+
+def _review_held(task: TicketTask, _session: Session | None) -> bool:
+    """A REVIEW park holding a finding for the operator (#3862)."""
+    return (
+        _is_blocked(task)
+        and task.blocked_reason == REVIEW_OPERATOR_ACTIONABLE_BLOCKER_REASON
+        and task.stage == Stage.REVIEW
+    )
+
+
+def _review_held_commands(task: TicketTask) -> list[NextCommand]:
+    """Plain requeue first (unchanged for contest and checklist rows), then regress.
+
+    The row carries only ``blocked_reason``, so it cannot tell a decision contest,
+    an operator checklist and an evidence gap apart. The regress step is therefore
+    conditional in its purpose, and the builders never read the verdict.
+    """
+    return [
+        _requeue(
+            task,
+            "re-run the review stage once the hold is released: a decision contest"
+            " or an operator checklist is released with `cw review settle` (or the"
+            " checklist) first; an evidence gap by settling the finding or providing"
+            " the missing capability",
+        ),
+        _requeue(
+            task,
+            "only for an evidence-gap hold whose review verdict is still saved: send"
+            " the held findings to impl (the requeue echo reports delivered or"
+            " withheld); a decision contest or an operator checklist is not delivered",
+            "--stage",
+            Stage.IMPL.value,
+            "--regress",
+        ),
     ]
 
 

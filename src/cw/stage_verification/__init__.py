@@ -16,6 +16,8 @@ Submodules:
 - ``impl_block``, ``impl_feedback``, ``impl_gates``: the IMPL park, feedback and gates.
 - ``impl_regress_findings``: the REVIEW-regress findings rule (#3694), shared by
   every consumer.
+- ``impl_regress_ledger``: the clean-mode ledger verdict reader the regress rule
+  falls back to (#3862).
 - ``plan_gates``: PLAN gate set B and the PLAN status vocabulary.
 - ``posted_text``: redaction and capping of text posted to the tracker.
 - ``push``: push-and-verify-head.

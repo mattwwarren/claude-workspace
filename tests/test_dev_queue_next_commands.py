@@ -220,6 +220,7 @@ def _parse(command: str) -> _Parsed:
 
 _STATE_CASES = (
     "rule0_signoff",
+    "rule6d_review_operator_actionable",
     "rule0_finalize_gate_held",
     "rule2_pending",
     "rule4_completed",
@@ -2509,3 +2510,97 @@ class TestMergePrerequisiteHold:
             " that PR merges; remove it with `cw dev-queue prerequisite <ticket>"
             " -c <client> --pr <N> --remove`."
         ) in text
+
+
+class TestReviewHeldRule:
+    """Rule 6d: the review_operator_actionable park (#3862)."""
+
+    def test_ignores_non_review_stage(self) -> None:
+        from tests._ticket_view_helpers import make_blocked
+
+        task = make_blocked(
+            stage=Stage.IMPL, blocked_reason="review_operator_actionable"
+        )
+        assert _REGRESS_CMD_HELD not in [
+            c.command for c in next_commands(task, session=None)
+        ]
+
+    def test_human_gate_still_outranks_it(self) -> None:
+        from tests._ticket_view_helpers import make_blocked
+
+        task = make_blocked(
+            stage=Stage.REVIEW,
+            blocked_reason="review_operator_actionable",
+            disposition=FINALIZE_GATE_HELD_DISPOSITION,
+        )
+        assert next_commands(task, session=None)[0].operator_only
+
+    def test_other_must_fix_parks_unaffected(self) -> None:
+        from tests._ticket_view_helpers import make_blocked
+
+        task = make_blocked(
+            stage=Stage.REVIEW, blocked_reason="review_confirm_must_fix"
+        )
+        assert _REGRESS_CMD_HELD in [
+            c.command for c in next_commands(task, session=None)
+        ]
+
+    def test_contest_checklist_and_gap_rows_get_identical_conditional_next(
+        self,
+    ) -> None:
+        from tests._ticket_view_helpers import make_blocked
+
+        rows = [
+            make_blocked(
+                stage=Stage.REVIEW,
+                blocked_reason="review_operator_actionable",
+                blocked_details_headline=headline,
+            )
+            for headline in (
+                "OPERATOR DECISION REQUIRED",
+                "OPERATOR CHECKLIST",
+                "OPERATOR EVIDENCE REQUIRED",
+            )
+        ]
+        commands = [next_commands(r, session=None) for r in rows]
+        assert commands[0] == commands[1] == commands[2]
+        assert commands[0][0].command.endswith("requeue ACM-1 -c acme")
+        assert "only for an evidence-gap hold" in commands[0][1].purpose
+        assert "is not delivered" in commands[0][1].purpose
+        suffixes = [refusal_suffix(r, session=None) for r in rows]
+        assert suffixes[0] == suffixes[1] == suffixes[2]
+
+    def test_blocker_guidance_is_conditional(self) -> None:
+        from tests._ticket_view_helpers import make_blocked
+
+        task = make_blocked(
+            stage=Stage.REVIEW, blocked_reason="review_operator_actionable"
+        )
+        text = refusal_suffix(task, session=None)
+        assert "evidence-gap hold whose review verdict is still saved" in text
+        assert "Claude-native blocking-mode park saves no verdict" in text
+        assert "Run: `cw dev-queue requeue ACM-1 -c acme`" in text
+
+    def test_guidance_for_prefers_disposition_then_blocker(self) -> None:
+        from cw.dev_queue.park_guidance import (
+            BLOCKER_GUIDANCE,
+            PARK_GUIDANCE,
+            guidance_for,
+        )
+        from tests._ticket_view_helpers import make_blocked
+
+        none = make_blocked(stage=Stage.REVIEW, blocked_reason="no_such_reason")
+        assert guidance_for(none) is None
+        blocker = make_blocked(
+            stage=Stage.REVIEW, blocked_reason="review_operator_actionable"
+        )
+        assert guidance_for(blocker) == BLOCKER_GUIDANCE["review_operator_actionable"]
+        dispo = make_blocked(
+            stage=Stage.REVIEW,
+            blocked_reason="review_operator_actionable",
+            disposition=DEPENDENCY_HOLD_DISPOSITION,
+        )
+        assert guidance_for(dispo) == PARK_GUIDANCE[DEPENDENCY_HOLD_DISPOSITION]
+
+
+_REGRESS_CMD_HELD = "cw dev-queue requeue ACM-1 -c acme --stage impl --regress"

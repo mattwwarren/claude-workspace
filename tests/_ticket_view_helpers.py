@@ -341,6 +341,12 @@ _SHIP_CMD = cmd("requeue", "--stage finalize")
 #: Rule 6c's last step (#3042): a real defect goes back to impl.
 _REGRESS_CMD = cmd("requeue", "--stage impl --regress")
 _CONFIRM_MUST_FIX = "review_confirm_must_fix"
+_REVIEW_HELD = "review_operator_actionable"
+
+
+def _review_held(**overrides: object) -> TicketTask:
+    """A REVIEW-stage ``review_operator_actionable`` park (#3862)."""
+    return make_blocked(stage=Stage.REVIEW, blocked_reason=_REVIEW_HELD, **overrides)
 
 
 def _confirm_must_fix(**overrides: object) -> TicketTask:
@@ -425,6 +431,11 @@ CASES: dict[str, Case] = {
         make_blocked(stage=Stage.REVIEW, blocked_reason=CODEX_MUST_FIX_FINDINGS),
         with_session=False,
         expected=[_OVERRIDE_CMD, _SHIP_CMD],
+    ),
+    "rule6d_review_operator_actionable": Case(
+        _review_held(),
+        with_session=False,
+        expected=[cmd("requeue"), _REGRESS_CMD],
     ),
     "rule6a_scope_hint_large_ship_dropped": Case(
         _must_fix(must_fix_override=make_override(), scope_hint="large"),

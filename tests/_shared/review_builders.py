@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import pytest
 
+from cw.models import Stage, TicketTask
 from cw.models.operator_constraint import OperatorConstraint
 from cw.review_findings import (
     CapturedDiff,
@@ -19,6 +20,7 @@ from cw.review_findings import (
     EscalationMetadata,
     Finding,
     ReviewerFindingsDocument,
+    ReviewVerdict,
     Severity,
 )
 
@@ -324,6 +326,72 @@ def _make_diff(*added_lines: str, **overrides: object) -> CapturedDiff:
     )
 
 
+def build_held_verdict(
+    held: Sequence[Finding],
+    *,
+    reviewed_sha: str,
+    must_fix: Sequence[Finding] = (),
+) -> ReviewVerdict:
+    """A verdict whose ``held`` findings all survive consolidation (#3862).
+
+    Each held finding is re-anchored on its own diff line with its own evidence
+    text, because dedup groups on (severity, file, line, evidence) and not on
+    summary: unanchored findings would collapse into one. The helper asserts that
+    no held finding was dropped. *must_fix* is applied the way
+    :func:`write_review_verdict_envelope` applies it (after consolidation).
+    """
+    from cw.review_findings import (
+        consolidate_verdict,
+        held_findings,
+        stamp_held_findings,
+    )
+
+    anchored = [
+        f.model_copy(
+            update={
+                "line_start": 11 + i,
+                "line_end": 11 + i,
+                "evidence": f"def held_{i}():",
+            }
+        )
+        for i, f in enumerate(held)
+    ]
+    diff = _make_diff(
+        "def broken():",
+        *(f"def held_{i}():" for i in range(len(held))),
+        files={"src/cw/foo.py": [10, *range(11, 11 + len(held))]},
+    )
+    verdict = stamp_held_findings(
+        consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(severity="NIT"), *anchored)],
+            diff,
+            reviewed_sha=reviewed_sha,
+        )
+    )
+    expected = sum(1 for f in held if f.severity == "MUST_FIX")
+    assert len(held_findings(verdict)) == expected, (
+        "build_held_verdict dropped a held finding"
+    )
+    assert len(verdict.accepted) == len(held) + 1, (
+        "build_held_verdict dropped a finding"
+    )
+    return verdict.model_copy(
+        update={"must_fix": list(must_fix), "blocking": bool(must_fix)}
+    )
+
+
+def regressed_review_row(ticket_id: str = "T-1", **overrides: Any) -> TicketTask:
+    """The pre-PR REVIEW-regressed IMPL row (#3862); callers override fields."""
+    fields: dict[str, Any] = {
+        "ticket_id": ticket_id,
+        "client": "test",
+        "stage": Stage.IMPL,
+        "stage_high_water": Stage.REVIEW,
+    }
+    fields.update(overrides)
+    return TicketTask(**fields)
+
+
 def write_review_verdict_envelope(
     worktree: Path,
     *,
@@ -331,6 +399,7 @@ def write_review_verdict_envelope(
     reviewed_sha: str,
     must_fix: Sequence[Finding] = (),
     blocking: bool | None = None,
+    held: Sequence[Finding] = (),
 ) -> Path:
     """Write a real ``ReviewVerdictEnvelope`` to the worktree's verdict JSON (#2205).
 
@@ -344,10 +413,14 @@ def write_review_verdict_envelope(
         render_review_verdict_envelope,
     )
 
-    base = consolidate_verdict(
-        [_make_reviewer_doc(_make_finding(severity="NIT"))],
-        _make_diff(),
-        reviewed_sha=reviewed_sha,
+    base = (
+        build_held_verdict(held, reviewed_sha=reviewed_sha)
+        if held
+        else consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(severity="NIT"))],
+            _make_diff(),
+            reviewed_sha=reviewed_sha,
+        )
     )
     verdict = base.model_copy(
         update={
