@@ -970,6 +970,8 @@ _REAL_CHILD = """
 import json, os, signal, sys, time
 from cw.local_runner import read_process_start_time_ns
 lock_path, flag_path, version, commit = sys.argv[1:5]
+with open(flag_path + ".starts", "a") as starts:
+    starts.write("start\\n")
 if os.path.exists(flag_path):
     sys.exit(0)
 open(flag_path, "w").close()
@@ -1029,3 +1031,7 @@ def test_real_subprocess_sighup_roundtrip(
             max_restarts=-1,
         )
     assert flag.exists()
+    # The flag exists once the first child starts, before any SIGHUP: only a
+    # second start proves the supervisor respawned after the child's exit 75.
+    starts = (tmp_path / "first-child-ran.starts").read_text().splitlines()
+    assert starts == ["start", "start"]
