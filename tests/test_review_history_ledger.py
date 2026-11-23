@@ -18,7 +18,6 @@ from cw.review_convergence import (
     demote_for_rereview,
     operator_settle,
 )
-from cw.review_findings import stamp_held_findings
 from tests._review_convergence_helpers import (
     FORK_POINT,
     LOOP_BACKEND,
@@ -28,6 +27,7 @@ from tests._review_convergence_helpers import (
     fresh_ledger,
     overridden_confirm_ledger,
     stamp_dispositions,
+    with_evidence_gap,
     write_ledger,
 )
 from tests._review_history_helpers import (
@@ -50,7 +50,6 @@ from tests._review_history_helpers import (
     running_task,
     write_round_verdict,
 )
-from tests._shared.review_builders import _EVIDENCE_GAP
 from tests._ticket_view_helpers import ACME_TICKET
 
 if TYPE_CHECKING:
@@ -252,17 +251,7 @@ def test_a_held_gap_round_counts_only_the_fix_and_builds_no_note(
     plain = consolidated_verdict(
         accepted=[("MUST_FIX", "real bug"), ("MUST_FIX", "unrun check")]
     )
-    accepted = [
-        af.model_copy(
-            update={
-                "finding": af.finding.model_copy(update={"evidence_gap": _EVIDENCE_GAP})
-            }
-        )
-        if af.finding.summary == "unrun check"
-        else af
-        for af in plain.accepted
-    ]
-    verdict = stamp_held_findings(plain.model_copy(update={"accepted": accepted}))
+    verdict = with_evidence_gap(plain, "unrun check")
     ledger, _ = record_verdict_round(
         fresh_ledger(ticket_id=ACME_TICKET), verdict, "sha-1"
     )

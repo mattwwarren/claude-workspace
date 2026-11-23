@@ -40,7 +40,7 @@ from cw.review_convergence import (
     round_verdict_path,
     save_round_verdict,
 )
-from cw.review_findings import Disposition, stamp_held_findings
+from cw.review_findings import Disposition
 from tests._review_convergence_helpers import (
     NOW,
     consolidated_verdict,
@@ -50,6 +50,7 @@ from tests._review_convergence_helpers import (
     record,
     round_finding,
     stamp_dispositions,
+    with_evidence_gap,
     write_ledger,
 )
 from tests._shared.git_repos import commit_tracked_file, git_in
@@ -364,17 +365,7 @@ def test_a_mixed_confirm_seeds_only_the_reproduced_finding(worktree: Path) -> No
     verdict = _claude_verdict(
         worktree, ("MUST_FIX", "reproduced finding"), ("MUST_FIX", "gap finding")
     )
-    accepted = [
-        af.model_copy(
-            update={
-                "finding": af.finding.model_copy(update={"evidence_gap": _EVIDENCE_GAP})
-            }
-        )
-        if af.finding.summary == "gap finding"
-        else af
-        for af in verdict.accepted
-    ]
-    stamped = stamp_held_findings(verdict.model_copy(update={"accepted": accepted}))
+    stamped = with_evidence_gap(verdict, "gap finding")
     ledger = dirty_confirm_ledger(worktree, stamped)
     assert ledger.status == "in_progress"
     assert [entry.rationale for entry in ledger.held] == [_EVIDENCE_GAP]
