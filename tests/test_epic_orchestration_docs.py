@@ -268,6 +268,14 @@ def test_runbook_epic_section_does_not_restate_b2_refusal() -> None:
     assert "refuse_if_adoption_conflicts" not in _runbook_section()
 
 
+@pytest.mark.parametrize("stale", ["planned", "not in place yet", "the only check"])
+def test_runbook_epic_section_says_b4_doctor_check_ships(stale: str) -> None:
+    section = _runbook_section()
+
+    assert stale not in section
+    assert "epic-base/<client>/<branch>" in section
+
+
 # 10. Command resolution ----------------------------------------------------
 
 

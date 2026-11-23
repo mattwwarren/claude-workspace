@@ -3373,9 +3373,11 @@ is no epic command group.
      means unverified, not passed. Ask the operator to confirm before enqueueing.
 
    cw documents this prerequisite and reports it; it never changes repository
-   settings and never approves. RFC 0020 B4 (#3786) is planned to report likely
-   misconfiguration from recorded row state. It is not in place yet, so this read is
-   the only check.
+   settings and never approves. After children are enqueued, `cw doctor` reports
+   `epic-base/<client>/<branch>` and warns when a child PR on the base awaits a
+   required review, a likely branch-protection requirement. The doctor reads recorded
+   row state and local refs only, so the `gh api` reads above stay the check to run
+   before enqueueing.
 4. Enqueue each child with `--base epic/<parent-id>`, per the enqueue section linked
    above.
 
