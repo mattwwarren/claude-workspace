@@ -11,7 +11,7 @@ A headless `/auto-dev` run ends in one of several sentinel shapes. Each shape ne
 
 | Sentinel shape | What this skill does |
 |---|---|
-| Any sentinel on a base row | Read *A base row: merged is not shipped* (below) first; a base row does not follow the default-branch wording of the rows here. |
+| Any sentinel on a base row, or on an epic's landing row | Read *A base row: merged is not shipped* (below) first; a base row does not follow the default-branch wording of the rows here. |
 | `shipped` | Print PR URL, confirm auto-merge state. |
 | `no_op` | Close the ticket with a comment citing the satisfying PR. |
 | `merge_gate_blocked` | Rebase the feature branch onto current `origin/main`, force-push, open PR. |
@@ -69,7 +69,7 @@ The branch table below uses `effective_status`.
 
 #### A base row: merged is not shipped
 
-Detect a base row from the `base_branch:` line of `cw dev-queue show <TICKET> -c <CLIENT>`. `-` means null, a plain row. A row built on an epic base (RFC 0020) merges into that base, not into the default branch, so the default-branch wording in the branches below changes for it:
+Detect a base row from the `base_branch:` line of `cw dev-queue show <TICKET> -c <CLIENT>`. `-` means null, a plain row. The exception is an epic's landing row (the epic's parent ticket, with the landing PR adopted): its `base_branch:` is `-` by design, so recognize it by its adopted PR, whose head branch is `epic/<parent-id>`; read that from the PR number passed to `--adopt-pr`, for example with `gh pr view <N> --json headRefName,baseRefName`. A row built on an epic base (RFC 0020) merges into that base, not into the default branch, so the default-branch wording in the branches below changes for it:
 
 - `shipped`: add `baseRefName` to the `gh pr view --json` field list. A MERGED PR merged into the base is built, not shipped: report "built on `<base>`; closes at the landing". Do not close the ticket.
 - `no_op`: close only when the satisfying PR is merged into the default branch. A PR merged into the epic branch does not satisfy it.
