@@ -21,7 +21,7 @@ from cw import merge_probe
 from cw._lock_guard import held_locks
 from cw.doctor import _deps
 from cw.doctor.core import _epic_base_checks
-from cw.doctor.epic_base import _check_epic_base
+from cw.doctor.epic_base import _age_words, _check_epic_base
 from cw.merge_probe import PROBE_TIMEOUT_SECONDS
 from cw.models import DevQueueStore, QueueItemStatus
 from cw.models.events import PrState
@@ -199,6 +199,23 @@ class TestMeasurements:
         detail = _only(_check(_clients(repo), [_row()], now=float(now))).detail
 
         assert "oldest unlanded commit 3 days 5 hours" in detail
+
+    @pytest.mark.parametrize(
+        ("seconds", "expected"),
+        [
+            pytest.param(0, "0 hours", id="zero"),
+            pytest.param(HOUR, "1 hour", id="one-hour"),
+            pytest.param(2 * HOUR, "2 hours", id="two-hours"),
+            pytest.param(DAY, "1 day", id="one-day-no-hours"),
+            pytest.param(2 * DAY, "2 days", id="two-days-no-hours"),
+            pytest.param(DAY + HOUR, "1 day 1 hour", id="one-day-one-hour"),
+            pytest.param(3 * DAY + 5 * HOUR, "3 days 5 hours", id="days-and-hours"),
+        ],
+    )
+    def test_age_words_renders_singular_plural_and_omits_zero_hours_after_days(
+        self, seconds: int, expected: str
+    ) -> None:
+        assert _age_words(seconds) == expected
 
     def test_clean_probe_for_a_disjoint_change(self, epic: Path) -> None:
         result = _only(_check(_clients(epic), [_row()]))
