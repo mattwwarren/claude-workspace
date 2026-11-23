@@ -21,7 +21,7 @@ from cw.doctor import _deps
 from cw.doctor.core import _epic_base_checks
 from cw.doctor.epic_base import _check_epic_base
 from cw.merge_probe import PROBE_TIMEOUT_SECONDS
-from cw.models import QueueItemStatus
+from cw.models import DevQueueStore, QueueItemStatus
 from cw.models.events import PrState
 from tests._shared.base_branch_builders import (
     base_row,
@@ -128,6 +128,43 @@ class TestGrouping:
             "epic-base/acme/mm",
             "epic-base/acme/zz",
         ]
+
+    def test_two_clients_on_one_base_group_separately(self, epic: Path) -> None:
+        clients = {
+            "acme": client_for_repo(epic),
+            "beta": client_for_repo(epic, name="beta"),
+        }
+        tasks = [base_row(BASE, client="beta", ticket_id="B-1"), _row(ticket_id="A-1")]
+
+        names = [r.name for r in _check(clients, tasks)]
+
+        assert names == ["epic-base/acme/epic/x", "epic-base/beta/epic/x"]
+
+    def test_a_required_review_on_one_client_does_not_flag_the_other(
+        self, epic: Path
+    ) -> None:
+        clients = {
+            "acme": client_for_repo(epic),
+            "beta": client_for_repo(epic, name="beta"),
+        }
+        tasks = [
+            _row(ticket_id="A-1"),
+            base_row(BASE, client="beta", ticket_id="B-1"),
+            base_row(
+                BASE,
+                client="beta",
+                ticket_id="B-2",
+                status=QueueItemStatus.COMPLETED,
+                pr_state=REQUIRED,
+            ),
+        ]
+
+        acme, beta = _check(clients, tasks)
+
+        assert acme.warn is False
+        assert "branch protection" not in acme.detail
+        assert beta.warn is True
+        assert "1 child PR(s) (B-2)" in beta.detail
 
 
 # -- measurements -----------------------------------------------------------
@@ -277,6 +314,8 @@ class TestCapAndBudget:
 
         results = _check(_clients(epic), tasks, max_bases=2)
 
+        assert "not measured" not in results[0].detail
+        assert "not measured" not in results[1].detail
         capped = results[2]
         assert capped.name == "epic-base/acme/epic/c"
         assert "not measured (per-run cap of 2 bases)" in capped.detail
@@ -303,6 +342,39 @@ class TestCapAndBudget:
             assert timeout <= PROBE_TIMEOUT_SECONDS
             assert timeout <= 15.0
 
+    def test_each_call_is_clamped_to_the_remaining_budget(
+        self, epic: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = FakeClock()
+        calls = patch_git_bounded(
+            monkeypatch, doctor_epic_base, merge_probe, clock=clock, step=1.0
+        )
+
+        _check(_clients(epic), [_row()], clock=clock, budget_s=4.0)
+
+        timeouts = [timeout for _, timeout in calls]
+        # rev-parse, diff, log each take the remaining budget (4, 3, 2 s); the
+        # clamp is what bounds them, PROBE_TIMEOUT_SECONDS (10 s) never applies.
+        assert timeouts[:3] == [4.0, 3.0, 2.0]
+        # The probe's three calls split the 1 s left, one third each.
+        probe_timeouts = timeouts[3:]
+        assert probe_timeouts
+        assert all(t == pytest.approx(1 / 3) for t in probe_timeouts)
+
+    def test_probe_reports_the_budget_exhausted_once_it_is_spent(
+        self, epic: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = FakeClock()
+        patch_git_bounded(
+            monkeypatch, doctor_epic_base, merge_probe, clock=clock, step=1.0
+        )
+
+        result = _only(_check(_clients(epic), [_row()], clock=clock, budget_s=3.0))
+
+        assert "merge probe (main into epic/x): unknown (time budget exhausted)" in (
+            result.detail
+        )
+
 
 # -- no mutation, no fetch --------------------------------------------------
 
@@ -326,6 +398,7 @@ class TestNoMutation:
 
         assert _snapshot() == before
         verbs = {argv[0] for argv, _ in calls}
+        assert verbs
         assert verbs <= {"rev-parse", "diff", "log", "merge-base", "merge-tree"}
 
 
@@ -411,6 +484,39 @@ class TestWiring:
         monkeypatch.setattr(_deps, "load_dev_queue", _raise)
 
         assert _epic_base_checks(_clients(epic)) == []
+
+    def test_the_queue_is_read_before_any_git_call(
+        self, epic: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = patch_git_bounded(monkeypatch, doctor_epic_base, merge_probe)
+        seen_at_load: list[int] = []
+
+        def _load() -> DevQueueStore:
+            seen_at_load.append(len(calls))
+            return DevQueueStore(tasks=[_row()])
+
+        monkeypatch.setattr(_deps, "load_dev_queue", _load)
+
+        results = _epic_base_checks(_clients(epic))
+
+        assert seen_at_load == [0]
+        assert [r.name for r in results] == ["epic-base/acme/epic/x"]
+        assert calls
+
+    def test_run_doctor_reports_the_epic_base_advisory(
+        self, epic: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = client_for_repo(epic)
+        monkeypatch.setattr(_deps, "load_clients", lambda: {"acme": client})
+        monkeypatch.setattr(
+            _deps, "load_dev_queue", lambda: DevQueueStore(tasks=[_row()])
+        )
+
+        report = doctor_pkg.run_doctor()
+
+        (result,) = [c for c in report.checks if c.name == "epic-base/acme/epic/x"]
+        assert result.ok is True
+        assert "diff" in result.detail
 
     def test_the_package_re_exports_the_check(self) -> None:
         assert doctor_pkg._check_epic_base is _check_epic_base
