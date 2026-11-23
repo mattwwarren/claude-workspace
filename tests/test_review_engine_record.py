@@ -203,7 +203,7 @@ def test_engine_summary_invalid_for_every_loader_rejection(
         EngineSummaryRejection.NOT_JSON: b"{nope",
         EngineSummaryRejection.NOT_OBJECT: b"[1]",
         EngineSummaryRejection.UNSUPPORTED_SCHEMA_VERSION: summary_bytes(
-            make_summary(schema_version=2)
+            make_summary(schema_version=3)
         ),
         EngineSummaryRejection.SCHEMA_INVALID: summary_bytes(
             make_summary([make_finding(evidence=evidence, file="N/A")])

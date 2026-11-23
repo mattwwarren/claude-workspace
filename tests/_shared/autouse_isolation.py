@@ -437,6 +437,7 @@ _mock_codex_capability_probe = _tool_fakes._mock_codex_capability_probe
 
 
 fake_codex_job_runner = _tool_fakes.fake_codex_job_runner
+gh = _tool_fakes.gh
 
 
 @pytest.fixture(autouse=True)

@@ -21,6 +21,7 @@ from cw.review_findings import (
     held_disposition,
     held_findings,
     held_kind,
+    is_gap_hold,
     stamp_held_findings,
 )
 from tests._shared.review_builders import (
@@ -37,7 +38,7 @@ _HELD = (
 _NOTE = "contests a decided constraint; recorded as a non-blocking note"
 _GAP_HELD = (
     "evidence gap: the reviewer could not verify this; held for the operator"
-    " (`cw review settle` dismisses it)"
+    " (supply the missing check and requeue the review)"
 )
 _GAP_NOTE = (
     "evidence gap: the reviewer could not verify this; recorded as a non-blocking note"
@@ -128,6 +129,25 @@ class TestGapDisposition:
     def test_both_markers_keep_the_contest_detail(self) -> None:
         forced = held_disposition(_gapped(contests_decision=_QUOTE))
         assert forced == ("operator_actionable", _HELD)
+
+    @pytest.mark.parametrize("rule_id", ["coverage.tests", "acceptance.criteria"])
+    def test_must_fix_non_deferrable_gap_is_held_for_the_operator(
+        self, rule_id: str
+    ) -> None:
+        assert held_disposition(_gapped(rule_id=rule_id)) == (
+            "operator_actionable",
+            _GAP_HELD,
+        )
+
+    @pytest.mark.parametrize("rule_id", ["coverage.tests", "acceptance.criteria"])
+    def test_should_fix_non_deferrable_gap_is_not_held(self, rule_id: str) -> None:
+        assert held_disposition(_gapped("SHOULD_FIX", rule_id=rule_id)) is None
+
+    def test_should_fix_non_deferrable_contest_is_unchanged(self) -> None:
+        forced = held_disposition(
+            _gapped("SHOULD_FIX", rule_id="coverage.tests", contests_decision=_QUOTE)
+        )
+        assert forced == ("deferred", _NOTE)
 
 
 class TestContestedDisposition:
@@ -224,6 +244,26 @@ class TestGapStamp:
 
         assert stamped.accepted == [settled]
 
+    def test_must_fix_non_deferrable_gap_is_stamped_and_not_blocking(self) -> None:
+        verdict = stamp_held_findings(
+            _verdict(_accepted(_gapped(rule_id="coverage.tests")))
+        )
+
+        (af,) = verdict.accepted
+        assert (af.disposition, af.disposition_detail) == (
+            "operator_actionable",
+            _GAP_HELD,
+        )
+        assert verdict.must_fix == []
+        assert verdict.blocking is False
+
+    def test_should_fix_non_deferrable_gap_stays_fixed(self) -> None:
+        (af,) = stamp_held_findings(
+            _verdict(_accepted(_gapped("SHOULD_FIX", rule_id="coverage.tests")))
+        ).accepted
+
+        assert af.disposition == "fixed"
+
     def test_unmarked_must_fix_stays_blocking_beside_a_gap(self) -> None:
         plain = _make_finding(summary="Real bug", file="src/cw/bar.py")
 
@@ -298,3 +338,29 @@ class TestContestedFindings:
             _accepted(_marked("SHOULD_FIX"), disposition="operator_actionable")
         )
         assert has_held_findings(verdict) is False
+
+
+class TestIsGapHold:
+    @pytest.mark.parametrize(
+        ("severity", "disposition", "marker", "expected"),
+        [
+            ("MUST_FIX", "operator_actionable", "gap", True),
+            ("MUST_FIX", "fixed", "gap", False),
+            ("MUST_FIX", "operator_actionable", "", False),
+            ("MUST_FIX", "operator_actionable", "contest", False),
+            ("SHOULD_FIX", "operator_actionable", "gap", False),
+            ("SHOULD_FIX", "deferred", "gap", False),
+        ],
+    )
+    def test_truth_table(
+        self, severity: str, disposition: str, marker: str, expected: bool
+    ) -> None:
+        if marker == "gap":
+            finding = _gapped(severity)
+        elif marker == "contest":
+            finding = _marked(severity)
+        else:
+            finding = _make_finding(severity=severity)
+        af = _accepted(finding, disposition=disposition)
+
+        assert is_gap_hold(af) is expected

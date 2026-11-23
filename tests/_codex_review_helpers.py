@@ -1058,6 +1058,11 @@ def install_home_scope_script(
     return path
 
 
+def merge_view(mergeable: str, state: str) -> str:
+    """A ``gh pr view`` JSON body carrying the mergeability fields."""
+    return json.dumps({"mergeable": mergeable, "mergeStateStatus": state})
+
+
 def fresh_impl_repo(
     make_git_repo: Callable[..., Path], name: str, branch: str
 ) -> tuple[Path, Path]:

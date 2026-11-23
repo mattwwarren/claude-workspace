@@ -22,6 +22,8 @@ Submodules:
 - ``cw.stage_verification.finalize_pr`` — the Detector Guard, the live bind, push,
   create, mergeability.
 - ``cw.stage_verification.finalize_arm`` — the seam check, the arm and the verification.
+- ``cw.stage_verification.finalize_changelog_repair`` — the one-shot CHANGELOG-union
+  repair around the mergeability check (#3861).
 - ``_post`` — the PR-link comment.
 - ``_run`` — the ordered flow.
 """

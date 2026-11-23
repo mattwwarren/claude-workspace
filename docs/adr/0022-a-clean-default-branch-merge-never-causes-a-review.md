@@ -1,7 +1,7 @@
 # A clean default-branch merge never causes a review; merge at most once, only on conflict
 
 **Status:** Accepted
-**Driven by:** #2979 (follow-ups #2980, #2991, #2996, and the narrowing of #1823, #2815, #2918); amended by #2980 (the conflict-resolution round), #3190 (the release-cut CHANGELOG exception), #2990 (the REVIEW gate probes dispatch-driven rows) and #2994 (the REVIEW staleness tip check runs before `dev_queue_lock`, bounded per tick)
+**Driven by:** #2979 (follow-ups #2980, #2991, #2996, and the narrowing of #1823, #2815, #2918); amended by #2980 (the conflict-resolution round), #3190 (the release-cut CHANGELOG exception), #2990 (the REVIEW gate probes dispatch-driven rows) and #2994 (the REVIEW staleness tip check runs before `dev_queue_lock`, bounded per tick); amended again by #3861 (a second trigger for the one merge: GitHub DIRTY while the local probe is clean, non-default base only)
 
 ## Decision
 
@@ -256,6 +256,10 @@ every queue writer for minutes.
   pending events, and not metered.
 - **`cw spawn complete`** advances the dispatch cursor only when its own event is
   the first pending one, so it never skips an event the sweep held back.
+
+## Amendment: a DIRTY epic-child PR whose local probe is clean (#3861)
+
+GitHub's conflict check ignores the `CHANGELOG.md merge=union` driver, so two sibling epic children that each append a bullet to the same `### Fixed` hunk show `DIRTY` on GitHub while `cw worktree merge-probe` is `clean`. `cw worktree changelog-sync --union-conflict` is a second trigger for the same one merge: it fires only when HEAD and `origin/<base>` both changed `CHANGELOG.md` since the merge-base, only for a non-default base, and makes one plain `git merge --no-ff` (git's union output; a released section that would change still takes the rebuild path). There is still at most one merge, merges only (no rebase, no force-push), and the tip rule tolerates the plain merge. The recipe route (`repair_changelog_conflict`) is not used: it requires a completed row and a force-push, and this row is parked at finalize.
 
 ## Alternatives considered
 

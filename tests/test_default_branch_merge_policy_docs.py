@@ -1265,3 +1265,72 @@ class TestReleaseCutException:
             " tests, diff coverage, and on PRs a merge-time CHANGELOG freeze"
             " re-check against the latest base (#3190)"
         ) in workflows
+
+
+_ARCH_UNION_TRIGGER = (
+    "A second trigger for that one merge (#3861): GitHub reports an epic-child PR"
+    " `DIRTY` while the local probe is clean"
+)
+_ADR_UNION_HEADER_SUFFIX = (
+    "amended again by #3861 (a second trigger for the one merge: GitHub DIRTY"
+    " while the local probe is clean, non-default base only)"
+)
+
+
+class TestUnionConflictDocs3861:
+    """Sibling pins for the #3861 ``--union-conflict`` docs.
+
+    The pinned #3190 text stays untouched.
+    """
+
+    def test_runbook_carries_the_sibling_paragraph(self) -> None:
+        runbook = " ".join(_read("docs/dispatch-runbook.md").split())
+        assert "**Sibling CHANGELOG bullets on an epic base (#3861).**" in runbook
+        assert "`pr_conflicting:`" in runbook
+        assert "`cw worktree changelog-sync --base <base> --union-conflict`" in runbook
+        assert "(disposition `default_branch_base`)" in runbook
+
+    def test_runbook_failure_mode_says_when_the_union_merge_was_tried(self) -> None:
+        runbook = " ".join(_read("docs/dispatch-runbook.md").split())
+        assert "does not by itself mean the union merge ran" in runbook
+        assert "details beginning `pr_conflicting: changelog-sync <state>`" in runbook
+        assert "A bare `pr_conflicting:` from the arm" in runbook
+        assert "means it was NOT tried" in runbook
+        assert (
+            "run `git fetch origin <base>`, then `cw worktree changelog-sync"
+            " --base <base> --union-conflict` once"
+        ) in runbook
+        assert "has already been tried once" not in runbook
+
+    def test_readme_sibling_row_follows_the_pinned_row(self) -> None:
+        readme = _read("README.md")
+        pinned = "| `cw worktree changelog-sync --base <b>` | After a release cut"
+        sibling = (
+            "| `cw worktree changelog-sync --base <b> --union-conflict` | Opt-in,"
+            " non-default base only"
+        )
+        assert pinned in readme
+        assert sibling in readme
+        assert readme.index(pinned) < readme.index(sibling)
+        assert "`disposition` is `default_branch_base`" in readme
+
+    def test_adr_header_and_amendment_section(self) -> None:
+        adr = _read(_ADR_0022)
+        assert _ADR_UNION_HEADER_SUFFIX in adr
+        assert (
+            "## Amendment: a DIRTY epic-child PR whose local probe is clean (#3861)"
+            in adr
+        )
+        assert adr.index("## Amendment: a DIRTY epic-child PR") < adr.index(
+            "## Alternatives considered"
+        )
+
+    def test_architecture_union_sentence_sits_between_pinned_sentences(self) -> None:
+        architecture = " ".join(_read("ARCHITECTURE.md").split())
+        exception = " ".join(_ARCH_EXCEPTION.split())
+        spawners = " ".join(_ARCH_SPAWNERS.split())
+        trigger = " ".join(_ARCH_UNION_TRIGGER.split())
+        assert exception in architecture
+        assert trigger in architecture
+        assert architecture.index(exception) < architecture.index(trigger)
+        assert architecture.index(trigger) < architecture.index(spawners)

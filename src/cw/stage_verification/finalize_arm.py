@@ -40,6 +40,8 @@ ALLOWED: Final = 0
 DISALLOWED: Final = 1
 EXIT_ARM_DISALLOWED: Final = 3
 FREEZE_PREFIX: Final = "changelog_merge_freeze:"
+#: The #3861 conflict refusal: GitHub reports the PR conflicting (hedged text).
+PR_CONFLICTING_PREFIX: Final = "pr_conflicting:"
 FAILING_CHECKS_PREFIX: Final = "required_checks_failing_at_emission: "
 
 _CHECK_TIMEOUT: Final = 60
@@ -116,6 +118,14 @@ def _refusal(gh_stderr: str, tail: str, pr_info: dict[str, object]) -> FinalizeB
         details += (
             "\nThe CHANGELOG merge freeze refused the arm: run `cw worktree "
             "changelog-sync` on the branch, push, then requeue finalize."
+        )
+    if gh_stderr.startswith(PR_CONFLICTING_PREFIX):
+        details += (
+            "\nGitHub reports the PR conflicting: resolve the conflict named above"
+            " (a CHANGELOG-only conflict into a non-default base: run `git fetch"
+            " origin <base>`, then `cw worktree changelog-sync --base <base>"
+            " --union-conflict`, which never fetches), push plainly, then requeue"
+            " finalize."
         )
     return FinalizeBlock(
         AUTOMERGE_NOT_ARMED, details, retry_eligible=True, pr_info=pr_info

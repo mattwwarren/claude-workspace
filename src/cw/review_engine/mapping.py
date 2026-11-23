@@ -26,7 +26,9 @@ def engine_finding_to_finding(finding: EngineFinding) -> Finding:
 
     Confidence is always HIGH: the engine's own gate decides, and cw does not
     re-score it. A missing file becomes ``N/A`` with ``no_diff_anchor`` set.
-    A line becomes both ``line_start`` and ``line_end``.
+    A line becomes both ``line_start`` and ``line_end``. An absent
+    ``evidence_gap`` maps to ``""``: both None and empty collapse in
+    ``held_kind``'s ``.strip()``, so only a non-blank marker holds the finding.
     """
     has_file = finding.file is not None
     return Finding(
@@ -43,6 +45,7 @@ def engine_finding_to_finding(finding: EngineFinding) -> Finding:
         fingerprint=finding.fingerprint,
         rule_id=finding.rule_id,
         source="engine",
+        evidence_gap=finding.evidence_gap or "",
     )
 
 

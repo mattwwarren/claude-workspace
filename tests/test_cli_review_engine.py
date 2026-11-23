@@ -74,7 +74,7 @@ def test_valid_summary(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     assert result.stdout.splitlines() == [
-        "review engine summary valid: schema_version=1 verdict=PASS coverage=COMPLETE"
+        "review engine summary valid: schema_version=2 verdict=PASS coverage=COMPLETE"
     ]
     assert result.stderr == ""
 
@@ -95,7 +95,7 @@ def test_valid_summary(tmp_path: Path) -> None:
         (lambda tmp: write_summary(tmp, b"{nope"), "not_json: -: "),
         (lambda tmp: write_summary(tmp, b"[1, 2]"), "not_object: -: "),
         (
-            lambda tmp: write_summary(tmp, make_summary(schema_version=2)),
+            lambda tmp: write_summary(tmp, make_summary(schema_version=3)),
             "unsupported_schema_version: schema_version: ",
         ),
         (

@@ -33,7 +33,7 @@ from cw.review_debt import (
     promote_debt_finding,
     record_debt,
 )
-from cw.review_findings import _dedup_key, held_kind
+from cw.review_findings import _dedup_key, is_gap_hold
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -246,15 +246,6 @@ def _track_open_findings(
     return survivors
 
 
-def _is_gap_hold(af: AcceptedFinding) -> bool:
-    """Whether *af* is an evidence-gap MUST_FIX the stamp held for the operator."""
-    return (
-        af.finding.severity == _MUST_FIX
-        and af.disposition == "operator_actionable"
-        and held_kind(af.finding) == "evidence_gap"
-    )
-
-
 def _carry_held_findings(
     carried: dict[_OpenFindingKey, AcceptedFinding],
     verdict: ReviewVerdict,
@@ -275,7 +266,7 @@ def _carry_held_findings(
     next_carried = dict(carried)
     for af in verdict.accepted:
         key = _open_finding_key(af.finding)
-        if _is_gap_hold(af):
+        if is_gap_hold(af):
             next_carried[key] = af
         else:
             next_carried.pop(key, None)

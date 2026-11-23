@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from cw.models.review_engine_summary import REVIEW_ENGINE_SUMMARY_SCHEMA_VERSION
 from cw.review_engine.aggregate import (
     EngineAggregationOutput,
     assemble_summary,
@@ -109,7 +110,7 @@ class TestAssembleSummary:
             }
         )
         summary = assemble_summary(output, _HEAD)
-        assert summary["schema_version"] == 1
+        assert summary["schema_version"] == REVIEW_ENGINE_SUMMARY_SCHEMA_VERSION
         assert summary["head_sha"] == _HEAD
         assert summary["counts"] == {
             "must_fix": 0,

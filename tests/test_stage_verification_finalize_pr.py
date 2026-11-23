@@ -43,7 +43,7 @@ from cw.stage_verification.finalize_result import (
 from cw.stage_verification.impl_feedback import (
     PROBE_UNAVAILABLE as C2_PROBE_UNAVAILABLE,
 )
-from tests._codex_review_helpers import fresh_impl_repo
+from tests._codex_review_helpers import fresh_impl_repo, merge_view
 from tests._shared.git_repos import git_in
 from tests._tool_fakes import FakeGhCli
 
@@ -56,11 +56,6 @@ _NUMBER = 7
 _URL = f"https://github.com/{_REPO}/pull/{_NUMBER}"
 _HEAD = "a" * 40
 _PROBE = "cw.stage_verification.impl_feedback.probe_default_merge"
-
-
-@pytest.fixture
-def gh(monkeypatch: pytest.MonkeyPatch) -> FakeGhCli:
-    return FakeGhCli().install(monkeypatch)
 
 
 @pytest.fixture
@@ -498,10 +493,6 @@ class TestCreatePr:
 # --- mergeability -------------------------------------------------------------
 
 
-def _merge_view(mergeable: str, state: str) -> str:
-    return json.dumps({"mergeable": mergeable, "mergeStateStatus": state})
-
-
 class TestCheckMergeability:
     @pytest.mark.parametrize(
         ("mergeable", "state"),
@@ -514,7 +505,7 @@ class TestCheckMergeability:
     def test_conflicting_or_dirty_blocks(
         self, gh: FakeGhCli, worktree: Path, mergeable: str, state: str
     ) -> None:
-        gh.reply("pr", "view", _URL, stdout=_merge_view(mergeable, state))
+        gh.reply("pr", "view", _URL, stdout=merge_view(mergeable, state))
         block, friction = check_mergeability(worktree, _URL)
         assert block is not None
         assert block.reason == MERGE_CONFLICT_POST_PUSH
@@ -538,7 +529,7 @@ class TestCheckMergeability:
         state: str,
         friction: list[str],
     ) -> None:
-        gh.reply("pr", "view", _URL, stdout=_merge_view(mergeable, state))
+        gh.reply("pr", "view", _URL, stdout=merge_view(mergeable, state))
         assert check_mergeability(worktree, _URL) == (None, friction)
         assert BEHIND_FRICTION == "behind_default_no_action"
 
@@ -553,7 +544,7 @@ class TestCheckMergeability:
         assert friction == []
 
     def test_it_reads_by_the_bound_url(self, gh: FakeGhCli, worktree: Path) -> None:
-        gh.reply("pr", "view", _URL, stdout=_merge_view("MERGEABLE", "CLEAN"))
+        gh.reply("pr", "view", _URL, stdout=merge_view("MERGEABLE", "CLEAN"))
         check_mergeability(worktree, _URL)
         assert gh.argvs()[0][:4] == ["gh", "pr", "view", _URL]
 

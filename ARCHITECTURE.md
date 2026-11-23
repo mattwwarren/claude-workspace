@@ -270,7 +270,7 @@ the only spawner for the probe, the tip rule and the REVIEW gate) reports a
 conflict. One exception (#3190): `cw worktree changelog-sync` merges
 `origin/<default>` into a clean PR solely to re-home a CHANGELOG hunk that a
 release cut misplaced; the tip rule reads that merge as a hand edit of a clean
-merge and offers it to `delta-confirm`. `repair_git._conflict_set`,
+merge and offers it to `delta-confirm`. A second trigger for that one merge (#3861): GitHub reports an epic-child PR `DIRTY` while the local probe is clean (its squash ignores the `CHANGELOG.md merge=union` driver), and `cw worktree changelog-sync --union-conflict` then makes one plain `git merge --no-ff` of `origin/<base>`, for a non-default base only. `repair_git._conflict_set`,
 `cw.pr_feedback`'s conflict listing and
 `.claude/scripts/check_changelog_frozen.py` (a stdlib-only script that cannot
 import `cw`; its `--merge-into` mode runs its own `git merge-tree
