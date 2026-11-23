@@ -146,6 +146,28 @@ def init_repo_with_remote(path: Path, remote_url: str | None) -> Path:
     return path
 
 
+def commit_tracked_file_at(
+    worktree: Path, relpath: str, committer_epoch: int, content: str = "x = 1\n"
+) -> None:
+    """Commit *relpath* with a fixed author and committer time (RFC 0020 B4).
+
+    For tests that need a known commit age: the epoch is set through
+    ``GIT_AUTHOR_DATE`` and ``GIT_COMMITTER_DATE``, the sandbox's ``extra_env``.
+    """
+    path = worktree / relpath
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    stamp = f"{committer_epoch} +0000"
+    _git_sandbox.run("add", relpath, cwd=worktree)
+    _git_sandbox.run(
+        "commit",
+        "-m",
+        f"add {relpath}",
+        cwd=worktree,
+        extra_env={"GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp},
+    )
+
+
 def commit_tracked_file(worktree: Path, relpath: str, content: str = "x = 1\n") -> None:
     """Write *relpath* under *worktree* and commit it as a real tracked file.
 

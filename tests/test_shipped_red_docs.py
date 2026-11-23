@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests._shared.workflow_text import _norm, _section_between
+from tests._shared.workflow_text import _norm, _section_between, changelog_text
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -204,10 +204,9 @@ def test_config_reference_documents_the_off_switch() -> None:
 
 
 def test_changelog_entry_exists() -> None:
-    text = _read("CHANGELOG.md")
-    unreleased = text[text.index("## [Unreleased]") :]
-    assert "recover-red-pr" in unreleased
-    assert "Closes #2905" in unreleased
+    changelog = changelog_text()
+    assert "recover-red-pr" in changelog
+    assert "Closes #2905" in changelog
 
 
 def test_readme_table_has_the_command_row() -> None:

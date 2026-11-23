@@ -128,6 +128,34 @@ def _cannot_measure(base: str, default: str, detail: str) -> EpicBaseRefusedErro
     return EpicBaseRefusedError(msg)
 
 
+def epic_ceiling(client: ClientConfig) -> int | None:
+    """``epic.max_diff_lines``, or None when the client sets no ceiling."""
+    return client.epic.max_diff_lines
+
+
+def epic_numstat_args(client: ClientConfig, base: str) -> list[str]:
+    """The argv of the three-dot numstat measure of *base* against the default.
+
+    Changes on *base* since its merge-base with the default (a commit that
+    landed only on the default is not counted), with ``merge_gate_ignore_paths``
+    excluded. Shared by enqueue (this module) and the doctor's advisory, so the
+    two report the same number.
+    """
+    # stays on client.default_branch: the epic is measured against the client's
+    # landing branch, the default.
+    default = client.default_branch
+    excludes = [f":(top,literal,exclude){p}" for p in client.merge_gate_ignore_paths]
+    return [
+        "diff",
+        "--numstat",
+        "--no-renames",
+        f"origin/{default}...origin/{base}",
+        "--",
+        ".",
+        *excludes,
+    ]
+
+
 def check_epic_size_ceiling(client: ClientConfig, base: str) -> None:
     """Refuse when ``base`` is over ``epic.max_diff_lines`` against the default.
 
@@ -137,7 +165,7 @@ def check_epic_size_ceiling(client: ClientConfig, base: str) -> None:
     with ``merge_gate_ignore_paths`` excluded. Any measurement failure refuses:
     the operator opted into a ceiling, so an unmeasured base is not enqueued.
     """
-    ceiling = client.epic.max_diff_lines
+    ceiling = epic_ceiling(client)
     if ceiling is None:
         return
     # stays on client.default_branch: the epic is measured against the client's
@@ -153,15 +181,8 @@ def check_epic_size_ceiling(client: ClientConfig, base: str) -> None:
     if base_fetch.outcome is not FetchOutcome.FETCHED:
         detail = f"fetch of origin/{base} failed: {_fetch_reason(base_fetch)}"
         raise _cannot_measure(base, default, detail)
-    excludes = [f":(top,literal,exclude){p}" for p in client.merge_gate_ignore_paths]
     result = _run_git(
-        "diff",
-        "--numstat",
-        "--no-renames",
-        f"origin/{default}...origin/{base}",
-        "--",
-        ".",
-        *excludes,
+        *epic_numstat_args(client, base),
         cwd=_git_dir(client),
         check=False,
     )

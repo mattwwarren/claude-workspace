@@ -45,6 +45,7 @@ from cw.doctor.config_checks import (
     _check_state_file,
     _check_worker_tmp_pressure,
 )
+from cw.doctor.epic_base import _check_epic_base
 from cw.doctor.linkage import (
     _check_cross_repo_rows,
     _check_dispatch_repo_head,
@@ -104,7 +105,7 @@ from cw.exceptions import CwError
 from cw.reconcile import ticket_id_for_session
 
 if TYPE_CHECKING:
-    from cw.models import ClientConfig, CwState, DevQueueStore
+    from cw.models import ClientConfig, CwState, DevQueueStore, TicketTask
 
 # The two session-reap marker names, written once: `_SCOPED_RAN_CHECKS` and
 # `_SCOPED_SESSION_REAP_CHECKS` both derive from these (#2716).
@@ -393,17 +394,26 @@ def _client_config_checks(clients: dict[str, ClientConfig]) -> list[CheckResult]
     ]
 
 
-def _base_backend_checks(clients: dict[str, ClientConfig]) -> list[CheckResult]:
-    """RFC 0020 A1 (#3781): live rows whose base the lane cannot deliver.
+def _queue_tasks() -> list[TicketTask]:
+    """The dev-queue rows the queue-reading checks share.
 
     A queue that will not load is already reported by ``_check_dev_queue``, so
     it degrades to no rows here rather than failing the run.
     """
     try:
-        tasks = _deps.load_dev_queue().tasks
+        return _deps.load_dev_queue().tasks
     except (OSError, json.JSONDecodeError, ValidationError):
-        tasks = []
-    return _check_base_backend(clients, tasks)
+        return []
+
+
+def _base_backend_checks(clients: dict[str, ClientConfig]) -> list[CheckResult]:
+    """RFC 0020 A1 (#3781): live rows whose base the lane cannot deliver."""
+    return _check_base_backend(clients, _queue_tasks())
+
+
+def _epic_base_checks(clients: dict[str, ClientConfig]) -> list[CheckResult]:
+    """RFC 0020 B4 (#3786): one advisory per live epic base."""
+    return _check_epic_base(clients, _queue_tasks())
 
 
 def run_doctor(
@@ -444,6 +454,7 @@ def run_doctor(
             _check_dev_queue(),
             *_check_usage_limit_windows(),
             *_base_backend_checks(_clients),
+            *_epic_base_checks(_clients),
         ]
     )
     # #1201 anomaly layer: review-recipe liveness + attention-state census.

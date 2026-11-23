@@ -9,6 +9,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **Orchestration skills document open and land for an epic (#3785, RFC 0020 B3).** `/orchestrate-sprint` gains "Epics: open one, land one": the epic branch open steps with its read-only branch-protection check, and the land checklist ending in one adoption of the landing PR. `/cw-orchestration` defines an epic next to fan-out and swing. `/cw-followup` treats a base row's merge as built, not shipped. `/queue-issues` gains a base check and the `--base` enqueue variant. The dispatch runbook carries the operator procedure and the branch-deletion step. cw creates and deletes no epic branch, and there is no epic command group.
+- `cw doctor` reports each live epic base as `epic-base/<client>/<branch>` (RFC 0020 B4, #3786): diff size against `epic.max_diff_lines`, the age of the oldest unlanded commit, and a merge probe of the default branch into the epic. Read-only and fail-open; warns on an over-ceiling base, a probe conflict, or a child PR awaiting a required review on the base (likely branch protection).
 
 ## [1.106.0] - 2026-11-22
 

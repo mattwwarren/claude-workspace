@@ -8,10 +8,15 @@ no fake classes (those live in ``tests/_tool_fakes.py``).
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from types import ModuleType
 from typing import TYPE_CHECKING, NamedTuple
 
+import pytest
+
+from cw.models import ClientConfig
 from tests._review_convergence_helpers import merge_origin_commit
 from tests._shared.git_repos import (
     add_diverged_base_origin,
@@ -25,6 +30,7 @@ if TYPE_CHECKING:
 
     from cw.models import TicketTask
     from tests._review_engine_helpers import EngineRepo
+    from tests._worktree_helpers import FakeClock
 
 ROW_BASE = "epic/x"
 CLIENT_DEFAULT = "trunk"
@@ -44,9 +50,28 @@ def base_row(
     *,
     ticket_id: str = "T-1",
     client: str = "test-client",
+    **overrides: object,
 ) -> TicketTask:
-    """One ticket row carrying *base* as its ``base_branch`` (``None`` = null row)."""
-    return _make_ticket_task(ticket_id=ticket_id, client=client, base_branch=base)
+    """One ticket row carrying *base* as its ``base_branch`` (``None`` = null row).
+
+    *overrides* are forwarded to the row model (``status=``, ``pr_state=``, ...).
+    """
+    return _make_ticket_task(
+        ticket_id=ticket_id, client=client, base_branch=base, **overrides
+    )
+
+
+def client_for_repo(repo: Path, **extra: object) -> ClientConfig:
+    """A client whose ``repo_path`` is *repo*, on ``main``; *extra* overrides fields."""
+    return ClientConfig.model_validate(
+        {
+            "name": "acme",
+            "repo_path": str(repo),
+            "branch": "main",
+            "default_branch": "main",
+            **extra,
+        }
+    )
 
 
 def diverged_base_worktree(
@@ -136,3 +161,43 @@ def epic_repo_with_origin(
     git_in(repo, "push", "origin", base)
     git_in(repo, "checkout", "main")
     return repo, origin
+
+
+def patch_git_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    *modules: ModuleType,
+    clock: FakeClock | None = None,
+    step: float = 0.0,
+    fail_verbs: Sequence[str] = (),
+    observe: Callable[[], object] | None = None,
+) -> list[tuple[list[str], float]]:
+    """Record every ``git_bounded`` call in *modules* and run the real git.
+
+    Returns the live list of ``(argv, timeout)`` pairs. Each call advances
+    *clock* (when given) by *step*, and a call whose ``argv[0]`` is in
+    *fail_verbs* raises ``GitFailedError`` instead of running git. *observe*,
+    when given, is called with no arguments at the start of every recorded call,
+    so a test can sample process state (held locks) from inside each git call;
+    the caller's callable keeps the samples. The real function is captured
+    before patching, so only the recording is new.
+    """
+    from cw.merge_probe import GitFailedError, git_bounded
+
+    calls: list[tuple[list[str], float]] = []
+
+    def _recording(
+        worktree: Path, argv: list[str], timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((list(argv), timeout))
+        if observe is not None:
+            observe()
+        if clock is not None:
+            clock.advance(step)
+        if argv and argv[0] in fail_verbs:
+            msg = f"git {argv[0]} timed out after {timeout:g}s"
+            raise GitFailedError(msg)
+        return git_bounded(worktree, argv, timeout)
+
+    for module in modules:
+        monkeypatch.setattr(module, "git_bounded", _recording)
+    return calls

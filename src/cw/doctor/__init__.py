@@ -115,6 +115,7 @@ from cw.doctor.config_checks import (
     _tracker_system,
 )
 from cw.doctor.core import run_doctor
+from cw.doctor.epic_base import _check_epic_base
 from cw.doctor.linkage import (
     _check_cross_repo_rows,
     _check_dispatch_repo_head,
@@ -188,6 +189,7 @@ __all__ = [
     "_check_cw_version",
     "_check_dev_queue",
     "_check_dispatch_repo_head",
+    "_check_epic_base",
     "_check_harness_capabilities",
     "_check_hook_install_python",
     "_check_inbox_size",

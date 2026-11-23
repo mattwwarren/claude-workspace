@@ -24,6 +24,8 @@ from tests._shared.workflow_text import (
     _norm,
     _section_between,
     _skill,
+    changelog_entry,
+    changelog_text,
 )
 from tests.test_auto_dev_finalize_reuse_path_gates import (
     _APPENDIX_HEADING,
@@ -42,7 +44,6 @@ _HEADLESS_CONTRACT = (_ROOT / "docs" / "headless-contract.md").read_text(
 _CONFIG_REFERENCE = (_ROOT / "config" / "CONFIG_REFERENCE.md").read_text(
     encoding="utf-8"
 )
-_CHANGELOG = (_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 _FINALIZE_RAW = _cmd("auto-dev-finalize.md", raw=True)
 _FINALIZE = _cmd("auto-dev-finalize.md")
 _APPENDIX = _appendix("finalize")
@@ -552,10 +553,11 @@ class TestOperatorDocs:
         # The entry sits under [Unreleased] until a release cut moves it into
         # its version section, so find it wherever it lives and check that its
         # nearest heading is "### Added".
-        entry_start = _CHANGELOG.index("- **Headless finalize defers")
-        heading_start = _CHANGELOG.rindex("\n### ", 0, entry_start) + 1
-        assert _CHANGELOG[heading_start:].startswith("### Added")
-        entry = _CHANGELOG[entry_start:].split("\n", 1)[0]
+        changelog = changelog_text()
+        entry_start = changelog.index("- **Headless finalize defers")
+        heading_start = changelog.rindex("\n### ", 0, entry_start) + 1
+        assert changelog[heading_start:].startswith("### Added")
+        entry = changelog_entry("- **Headless finalize defers")
         assert "#3618" in entry
         for token in (_REASON, "quality_gates.ci_evidence", "cw dev-queue requeue"):
             assert token in entry, token

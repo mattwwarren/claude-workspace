@@ -14,7 +14,7 @@ from pathlib import Path
 
 from cw.claude_review import build_claude_review_argv
 from cw.models.client import ReviewConfig
-from tests._shared.workflow_text import _norm
+from tests._shared.workflow_text import _norm, changelog_text
 from tests.test_auto_dev_preflight_resolutions import _after
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,7 +23,6 @@ ADR_NAME = "0021-claude-confirm-spend-is-uncapped-by-decision.md"
 ADR_PATH = f"docs/adr/{ADR_NAME}"
 RUNBOOK = "docs/dispatch-runbook.md"
 CONFIG_REFERENCE = "config/CONFIG_REFERENCE.md"
-CHANGELOG = "CHANGELOG.md"
 
 CODEX_LANE_HEADING = "#### Codex-lane clean mode (#2791)"
 HISTORY_HEADING = "### Reading a review's history (cw review history, #2790)"
@@ -110,11 +109,10 @@ def test_runbook_history_section_says_cost_is_not_recorded() -> None:
     assert "cost is not recorded" in window
 
 
-def test_changelog_entry_sits_under_unreleased() -> None:
-    changelog = _read(CHANGELOG)
-    unreleased = changelog[: changelog.index("\n## [1.82.0]")]
-    assert CHANGELOG_ANCHOR in unreleased
-    entry = _norm(_after(unreleased, CHANGELOG_ANCHOR, span=1500))
+def test_changelog_carries_the_spend_decision_entry() -> None:
+    changelog = changelog_text()
+    assert CHANGELOG_ANCHOR in changelog
+    entry = _norm(_after(changelog, CHANGELOG_ANCHOR, span=1500))
     for needle in (
         "ADR-0021",
         "no new config key",
