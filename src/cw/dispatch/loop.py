@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 
 import yaml
 
-from cw.codex_background import join_outstanding_codex_threads
 from cw.config import (
     dispatch_loop_lock,
     load_clients,
@@ -64,6 +63,7 @@ from cw.worktree import TickFetchGate, _git_dir
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
+    from cw.dispatch_reexec import ReexecControl
     from cw.models import (
         ClientConfig,
         OrchestratorConfig,
@@ -77,6 +77,7 @@ from cw.dispatch.branch_freshness import (
     resolve_conflicting_branches,
 )
 from cw.dispatch.lanes import _notify_stale_clients_with_pending
+from cw.dispatch.loop_lifecycle import drain_codex_threads, idle_wait, loop_exit_payload
 from cw.dispatch.review_tip_sweep import tip_sweep_scope
 
 # Moved to flat siblings (#2999) and imported back: ``loop``'s own callers use
@@ -401,6 +402,7 @@ def run_dispatch_loop(
     auto_ff: bool = True,
     client: str | None = None,
     force: bool = False,
+    reexec: ReexecControl | None = None,
 ) -> None:
     """Run the dispatch loop, optionally overriding per-client concurrency caps.
 
@@ -430,6 +432,8 @@ def run_dispatch_loop(
             via ``contextlib.nullcontext()`` and log a WARNING on every entry.
             Escape hatch for a wedged/foreign holder; otherwise a second loop
             launch fails fast with ``DispatchLoopLockedError``.
+        reexec: The supervised child's SIGHUP flag (#3726); when set, the loop
+            returns at its next idle point. ``None`` (unsupervised) never does.
     """
     if force:
         _log.warning(
@@ -450,6 +454,7 @@ def run_dispatch_loop(
             emit=emit,
             auto_ff=auto_ff,
             client=client,
+            reexec=reexec,
         )
 
 
@@ -833,13 +838,15 @@ def _run_dispatch_loop_body(
     emit: Callable[[str], None] | None,
     auto_ff: bool,
     client: str | None,
+    reexec: ReexecControl | None,
 ) -> None:
     """The dispatch loop proper, run inside the singleton lock (#1362).
 
     Extracted from :func:`run_dispatch_loop` so the lock-acquisition wrapper
     stays small and the loop body is not re-indented under a ``with``. The
     caller owns lock acquisition/release; this function assumes it holds (or
-    has deliberately bypassed) the lock.
+    has deliberately bypassed) the lock. Its idle point is the end of one
+    iteration, where ``idle_wait`` reads the *reexec* flag (#3726).
     """
     config = load_effective_config()
     _run_boot_passes(client)
@@ -960,39 +967,20 @@ def _run_dispatch_loop_body(
             if once:
                 return
 
-            time.sleep(config.tick_interval_seconds)
+            if idle_wait(config.tick_interval_seconds, reexec, sleep=time.sleep):
+                return
     finally:
-        # Bounded drain of in-flight codex review threads (#1727). Deliberately
-        # unconditional rather than gated on a clean exit: every path that
-        # reaches this block at all is, by definition, not a SIGKILL, so Python
-        # is still alive to give an almost-done review a few seconds to land —
-        # and an exception unwinding the loop is exactly as likely to strand a
-        # half-committed worktree as a clean shutdown is.
-        #
-        # Suppressed for the same reason the event write below is: shutdown
-        # bookkeeping must never replace the exception that is already unwinding
-        # this frame. A failed drain leaves the count at its 0 default rather
-        # than swallowing the real cause of the exit.
-        _codex_threads_still_running = 0
+        # Drain codex threads, then record the exit; both are shutdown
+        # bookkeeping that must never replace an unwinding exception.
+        threads_running = drain_codex_threads()
         with contextlib.suppress(Exception):
-            _codex_threads_still_running = join_outstanding_codex_threads()
-        _exc = sys.exc_info()[1]
-        _normal = _exc is None or isinstance(_exc, KeyboardInterrupt)
-        _payload: dict[str, object] = {
-            "normal": _normal,
-            "exception_type": None if _normal else type(_exc).__name__,
-            # Free observability for #1742: distinguishes "the loop exited" from
-            # "the loop exited while N reviews were still running".
-            "codex_threads_still_running": _codex_threads_still_running,
-        }
-        with contextlib.suppress(Exception):
-            if isinstance(_exc, VersionDriftError):
-                _payload["reason"] = "version_drift"
-                _payload["loaded_version"] = _LOADED_VERSION
-                _payload["installed_version"] = importlib.metadata.version(
-                    _CW_PACKAGE_NAME
-                )
             record_event(
                 OrchestratorEventType.DISPATCH_LOOP_EXITED,
-                payload=_payload,
+                payload=loop_exit_payload(
+                    sys.exc_info()[1],
+                    codex_threads_still_running=threads_running,
+                    loaded_version=_LOADED_VERSION,
+                    package_name=_CW_PACKAGE_NAME,
+                    reexec=reexec,
+                ),
             )
