@@ -1000,15 +1000,18 @@ def _default_branch_claude_md() -> str | None:
 # _run_git default for `git status`: a failed status reads as dirty (fail closed).
 _GIT_STATUS_FAILED = "git-status-failed"
 
-# Dependency-sync gates change the environment as they run, so a prior pass is
-# not sufficient evidence that re-running them is redundant. ``uv run`` also
-# performs implicit synchronization; treat every ``uv run`` gate as
-# environment-mutating because the command does not prove synchronization is a
-# no-op.
+# Install and sync gates change the environment itself, so skipping one would
+# leave the venv unsynced. ``uv run`` gates are not in this set: each performs
+# its own sync as it runs, and the environment-sync gate (``uv sync``, never
+# stampable) re-runs first on every pass, so skipping a stamped ``uv run`` gate
+# never skips the sync. A ``uv run`` does not upgrade an already-installed stale
+# extra (CLAUDE.md Gate 2, #2188); that is why a by-hand run follows a ``uv
+# sync``. An implicit relock dirties ``uv.lock``, and the clean-tree requirement
+# on record and check already refuses that.
 ENVIRONMENT_MUTATING_REASON = "environment-mutating"
 _ENVIRONMENT_MUTATING_GATE_RE = re.compile(
     r"(?<![\w-])(?:"
-    r"uv\s+(?:run|sync)|uv\s+pip\s+install|"
+    r"uv\s+sync|uv\s+pip\s+install|"
     r"(?:python(?:\d+(?:\.\d+)?)?\s+-m\s+)?pip\s+install|"
     r"(?:npm|yarn|pnpm)\s+(?:install|ci)|poetry\s+install|cargo\s+fetch"
     r")(?![\w-])"
