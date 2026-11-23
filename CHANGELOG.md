@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.107.0] - 2026-11-23
+
 ### Added
 
 - **Orchestration skills document open and land for an epic (#3785, RFC 0020 B3).** `/orchestrate-sprint` gains "Epics: open one, land one": the epic branch open steps with its read-only branch-protection check, and the land checklist ending in one adoption of the landing PR. `/cw-orchestration` defines an epic next to fan-out and swing. `/cw-followup` treats a base row's merge as built, not shipped. `/queue-issues` gains a base check and the `--base` enqueue variant. The dispatch runbook carries the operator procedure and the branch-deletion step. cw creates and deletes no epic branch, and there is no epic command group.
