@@ -1312,8 +1312,8 @@ carrying a non-blank `evidence_gap` is held `operator_actionable`, not deferred:
 regresses to a fix. A SHOULD_FIX on these rules still re-opens. A held
 non-deferrable gap is released by fixing the environment or capability the check
 needs and requeueing the review stage, or with
-`cw dev-queue requeue --stage impl --regress`. `cw review settle --outcome defer`
-stays inert for it; no new verb exists for this.
+`cw dev-queue requeue --stage impl --regress`. `cw review converge operator-settle --outcome defer`
+stays inert for it (a non-deferrable rule); no new verb exists for this.
 
 ### 12.4 Closed Vocabularies
 
