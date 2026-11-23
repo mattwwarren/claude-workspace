@@ -649,11 +649,10 @@ class TestUnionConflict:
         self, tmp_path: Path, make_git_repo: Callable[..., Path]
     ) -> None:
         clone = _changelog_cut_helpers.epic_sibling_repo(tmp_path, make_git_repo)
-        head_before = _git_sandbox.git(clone, "rev-parse", "HEAD")
+        before = _state(clone)
         result = sync_changelog(clone, "epic/1", default_branch="main")
         assert result.state == "clean"
-        assert _git_sandbox.git(clone, "rev-parse", "HEAD") == head_before
-        assert _git_sandbox.git(clone, "status", "--porcelain") == ""
+        assert _state(clone) == before
 
     def test_union_merge_is_plain_and_clears_github_dirty(
         self, tmp_path: Path, make_git_repo: Callable[..., Path]
@@ -729,14 +728,13 @@ class TestUnionConflict:
         self, tmp_path: Path, make_git_repo: Callable[..., Path]
     ) -> None:
         clone = _changelog_cut_helpers.epic_sibling_repo(tmp_path, make_git_repo)
-        head_before = _git_sandbox.git(clone, "rev-parse", "HEAD")
+        before = _state(clone)
         result = sync_changelog(
             clone, "main", union_conflict=True, default_branch="main"
         )
         assert result.state == "refused"
         assert result.disposition == changelog_sync.DISPOSITION_DEFAULT_BASE
-        assert _git_sandbox.git(clone, "rev-parse", "HEAD") == head_before
-        assert _git_sandbox.git(clone, "status", "--porcelain") == ""
+        assert _state(clone) == before
 
     def test_default_read_from_origin_head_when_not_passed(
         self, tmp_path: Path, make_git_repo: Callable[..., Path]
@@ -775,15 +773,16 @@ class TestUnionConflict:
         )
         _git_sandbox.git(clone, "push", "origin", "epic/1")
         _git_sandbox.git(clone, "checkout", "dev/GEN-1")
-        head_before = _git_sandbox.git(clone, "rev-parse", "HEAD")
+        before = _state(clone)
         result = sync_changelog(
             clone, "epic/1", union_conflict=True, default_branch="main"
         )
         assert result.state == "conflict"
         assert "src/app.py" in result.conflicted_files
-        assert _git_sandbox.git(clone, "rev-parse", "HEAD") == head_before
+        assert _state(clone) == before
+        assert not _merge_head(clone)
 
-    def test_only_branch_changed_changelog_is_clean(
+    def test_base_already_an_ancestor_of_head_is_clean(
         self, tmp_path: Path, make_git_repo: Callable[..., Path]
     ) -> None:
         clone = _changelog_cut_helpers.epic_sibling_repo(tmp_path, make_git_repo)
@@ -791,6 +790,30 @@ class TestUnionConflict:
             clone, "main", union_conflict=True, default_branch="trunk"
         )
         assert result.state == "clean"
+
+    def test_branch_without_changelog_change_is_clean_and_writes_nothing(
+        self, tmp_path: Path, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """Epic child that skipped CHANGELOG.md while a sibling edited it.
+
+        The base is not an ancestor of HEAD, and the base's CHANGELOG differs
+        from the merge-base's, but the branch's equals it: nothing to union, so
+        no needless merge commit.
+        """
+        clone = _changelog_cut_helpers.epic_sibling_repo(tmp_path, make_git_repo)
+        _git_sandbox.git(clone, "checkout", "-q", "-b", "dev/GEN-2", "main")
+        commit_files(
+            clone, {"src/app.py": "def app():\n    return 4\n"}, "feat: no changelog"
+        )
+        before = _state(clone)
+
+        result = sync_changelog(
+            clone, "epic/1", union_conflict=True, default_branch="main"
+        )
+
+        assert result.state == "clean"
+        assert _state(clone) == before
+        assert not _merge_head(clone)
 
     def test_base_moved_without_changelog_change_is_clean_and_writes_nothing(
         self, tmp_path: Path, make_git_repo: Callable[..., Path]
@@ -846,10 +869,11 @@ class TestUnionConflict:
             return real(worktree, argv, timeout)
 
         monkeypatch.setattr(changelog_sync, "_checked", _fail_union_merge)
-        head_before = _git_sandbox.git(clone, "rev-parse", "HEAD")
+        before = _state(clone)
         result = sync_changelog(
             clone, "epic/1", union_conflict=True, default_branch="main"
         )
         assert result.state == "unavailable"
         assert "simulated merge failure" in result.detail
-        assert _git_sandbox.git(clone, "rev-parse", "HEAD") == head_before
+        assert _state(clone) == before
+        assert not _merge_head(clone)
