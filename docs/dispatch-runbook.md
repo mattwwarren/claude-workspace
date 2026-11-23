@@ -4181,23 +4181,37 @@ See `docs/headless-contract.md` section 12.3.
 For a pure-gap park (`review_operator_actionable`) it is refused at the
 `blocked_reason` gate: `src/cw/dev_queue/must_fix_override.py` accepts only
 `codex_must_fix_findings` and `review_confirm_must_fix`. For a loop-exhausted
-park (`codex_must_fix_findings` with a carried gap) it is accepted, but it binds
-only the findings in `verdict.must_fix` and the finalize check
+park (`codex_must_fix_findings` with a carried gap) it binds only the findings in
+`verdict.must_fix`, and the finalize check
 (`.claude/scripts/check_must_fix_override.py`) reads only that list. The held gap
-finding sits in `accepted` and is not covered, so overriding the mixed park does
-not settle it: it ships past the reproduced findings and leaves the gap
-unresolved. Settle it with `cw review settle` (anchored findings only).
+finding sits in `accepted` and is not covered. On a clean-mode client the ledger
+guard closes that: the override is refused while the ledger carries an
+outstanding gap (see the next paragraph).
 
 **Carry across the repair cycle (#3823).** In clean mode, a mixed verdict (a gap
 finding beside a reproduced unmarked MUST_FIX) repairs the reproduced finding
 first. The gap is carried on the convergence ledger as `held` memory, with its
-unrun check in `held[].rationale`. While the gap is outstanding, the next clean
-round stops the ledger with `operator_action` and names it: `stop.settle_payload`
-lists the identity, and the unrun check is read from the ledger JSON. Release is
-`cw review settle` on the gap, or a same-tip requeue, which clears the carried
-memory; a full re-review re-raises the gap if it is still real. The Claude confirm
-round parks `review_operator_actionable` with the unrun check in its details, and
-does not stop with `review_not_converging`.
+unrun check in `held[].rationale`, and no round records clean while it is
+outstanding. The mixed confirm round itself still parks `codex_must_fix_findings`
+on the reproduced finding, because its verdict is blocking; the gap rides on the
+ledger and is not seeded as repair work. The park becomes
+`review_operator_actionable` when a later round stops the ledger `operator_action`
+on the carried gap: a clean codex loop round (the `_gate_after_loop` re-entry), or
+a Claude-native `record-round` that adds no new fix. `stop.settle_payload` lists
+the identity; the unrun check is read from the ledger JSON.
+
+Release follows what the stop named. A same-tip requeue of an `operator_action`
+stop clears exactly the gaps that stop named, so supply the capability (or
+`cw review settle` the gap) and requeue. Any other same-tip release, such as
+`max_cycles_raised` or a contest-only stop that did not name the gap, keeps the
+held memory, so the next empty round still stops on it and never converges on an
+unverified gap. New commits clear all held memory, because the new tip gets a full
+re-review that re-raises the gap if it is still real.
+
+`cw dev-queue approve --override-must-fix` refuses a ledger with an outstanding
+gap. The error names the gap and the two routes: `cw review settle` for that gap,
+or restore the missing capability and requeue. The override never clears held
+memory itself.
 
 **Park: `review_engine_modified` (RFC 0017, #3039).** A client with
 `review.engine` set runs its own review skill as the Claude-native round
