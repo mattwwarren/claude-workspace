@@ -532,8 +532,11 @@ Bounds and failure policy:
   keeps the old child running, prints `supervisor: not restarting the dispatch
   loop onto ...`, and re-probes after 30s, 60s, 120s, 240s, 480s, then every
   600s. A new checkout is probed at once.
-- A child started after a re-exec that exits non-zero (or 75 again) within 60s
-  is a failed start, retried after 5s and 10s. The third consecutive failure
+- A child started after a re-exec that exits non-zero (or exits 75 without the
+  supervisor having forwarded a SIGHUP to it) within 60s is a failed start,
+  retried after 5s and 10s. A 75 that follows a SIGHUP the supervisor forwarded,
+  including an operator `kill -HUP <supervisor pid>`, is a requested restart: it
+  is respawned at once and does not count. The third consecutive failure
   stops the supervisor with `supervisor: giving up after 3 consecutive failed
   starts ...`, exit 1 and a `dispatch.loop_exited` event with
   `reason: "supervisor_gave_up"`. A child killed by a signal, or a first child

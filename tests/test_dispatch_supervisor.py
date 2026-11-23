@@ -530,6 +530,28 @@ def test_operator_sighup_overrides_identity_memo_and_min_interval(
     assert second.signals == [signal.SIGHUP]
     assert second.signal_times[0] - second.spawned_at < 60
     assert len(harness.children) == 3
+    # The operator's restart is a requested re-exec, not a failed start: the
+    # replacement is spawned at once, with no back-off and no give-up event.
+    assert harness.other_sleeps() == []
+    assert harness.events == []
+
+
+@pytest.mark.platform_sensitive
+def test_repeated_operator_restarts_within_60s_never_give_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three operator SIGHUPs, each within 60s of the last re-exec, are no storm."""
+    harness = _Harness(
+        monkeypatch,
+        [*(_stale_child() for _ in range(4)), _Script(exit_after=5)],
+    )
+    for when in (66, 75, 85):
+        harness.hooks.append(_once_at(when, _raise(signal.SIGHUP)))
+    harness.run()
+    assert len(harness.children) == 5
+    assert [c.signals for c in harness.children[1:4]] == [[signal.SIGHUP]] * 3
+    assert harness.other_sleeps() == []
+    assert harness.events == []
 
 
 @pytest.mark.platform_sensitive

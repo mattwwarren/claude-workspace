@@ -288,6 +288,9 @@ class _Supervisor:
 
     def _on_child_exit(self, returncode: int) -> bool:
         """Handle a child exit; True when a new child was started."""
+        # An exit 75 that follows a SIGHUP this supervisor forwarded (automatic
+        # or operator-requested) is a requested re-exec, never a failed start.
+        forwarded = self._forwarded_at is not None
         self._forwarded_at = None
         # An operator SIGHUP asked about the child that just exited; it must not
         # carry over and restart the replacement.
@@ -304,7 +307,8 @@ class _Supervisor:
         healthy = time.monotonic() - self._started_at >= _SERVE_HEALTHY_RUN_SECONDS
         if healthy:
             self._failures = 0
-        if returncode == REEXEC_EXIT_CODE and (healthy or not self._after_reexec):
+        requested = healthy or forwarded or not self._after_reexec
+        if returncode == REEXEC_EXIT_CODE and requested:
             self._start_child(after_reexec=True)
             return True
         if healthy or not self._after_reexec:
