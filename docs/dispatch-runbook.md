@@ -3400,10 +3400,11 @@ is no epic command group.
   and `gh api repos/{owner}/{repo}/rules/branches/<default-branch>`. A
   `required_approving_review_count` above 0 from either call means a human approval
   is needed, so register the landing PR with `/review-monitor` and post the CKPT
-  line. With 0 required approvals (a 404 "Branch not protected", a count of 0 or the
-  key absent, or no `pull_request` rule above 0), the adopted row's own review and
-  auto-merge land the PR: do not register it, and say in the CKPT line that it
-  lands without a human approval. An unreadable answer such as a 403 is unverified,
+  line. With 0 required approvals, the adopted row's own review and auto-merge land
+  the PR: do not register it, and say in the CKPT line that it lands without a human
+  approval. That needs both calls to show nothing required: the protection call
+  returns a 404 "Branch not protected", or a count of 0 or the key absent, and the
+  rules call returns no `pull_request` rule above 0. An unreadable answer such as a 403 is unverified,
   not zero: keep the knock and say in the CKPT line that the approvals requirement
   was not verified.
 - Where the knock applies, registering the landing PR as author makes `/review-monitor` eligible to dispatch

@@ -206,6 +206,11 @@ def test_landing_knock_condition_and_author_note(name: str, literal: str) -> Non
     assert literal in prose[name]
 
 
+def test_runbook_zero_approvals_needs_both_reads() -> None:
+    runbook = " ".join(_runbook_section().split())
+    assert "That needs both calls to show nothing required" in runbook
+
+
 def test_landing_condition_precedes_author_registration() -> None:
     skill = _land_section()
     assert skill.index(APPROVALS_COND) < skill.index("review_monitor.py register")
