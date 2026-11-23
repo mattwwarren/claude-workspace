@@ -273,6 +273,10 @@ class _Supervisor:
             time.sleep(_POLL_SECONDS)
 
     def _start_child(self, *, after_reexec: bool) -> None:
+        # Every spawn begins with no pending operator request: a SIGHUP that
+        # landed while no child ran (the failed-start back-off) asked about a
+        # child that is gone.
+        self.operator_hup = False
         self._child = _spawn_child(self._argv, self._env)
         self._started_at = time.monotonic()
         self._after_reexec = after_reexec

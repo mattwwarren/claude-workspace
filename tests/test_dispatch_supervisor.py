@@ -719,6 +719,23 @@ def test_stop_during_failed_start_backoff_spawns_no_new_child(
     assert harness.events == []
 
 
+@pytest.mark.platform_sensitive
+def test_operator_sighup_during_failed_start_backoff_does_not_restart_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A SIGHUP that lands while no child runs must not hit the replacement."""
+    harness = _Harness(
+        monkeypatch,
+        [_stale_child(), _Script(exit_after=2, code=1), _Script(exit_after=200)],
+    )
+    harness.hooks.append(_once_at(64, _raise(signal.SIGHUP)))
+    harness.run()
+    assert len(harness.children) == 3
+    assert harness.other_sleeps() == [5.0]
+    assert harness.children[2].signals == []
+    assert harness.probes == [60.0]
+
+
 def test_child_nonzero_after_healthy_run_is_not_restarted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
