@@ -3386,6 +3386,13 @@ is no epic command group.
   repo or worktree root.
 - Adopt the landing PR under the parent ticket, per the adoption section linked
   above. The parent must have no row at all, including a COMPLETED one.
+- Registering the landing PR as author makes `/review-monitor` eligible to dispatch
+  its auto-fix agent onto the shared `epic/<parent-id>` head on a red CI, a
+  conflicting merge state or a change request (2 attempts per PR per day), and to
+  channel-bump and DM about it. The adopted row also repairs a red or conflicted PR
+  at impl (D-8), so two autonomous actors can push to one branch. Leave a red or
+  conflicted landing PR to the adopted row's recovery; name any `/review-monitor`
+  auto-fix push in the CKPT line.
 
 **Deleting the epic branch (operator action, D-6).**
 

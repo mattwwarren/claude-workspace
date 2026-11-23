@@ -666,6 +666,14 @@ are in `docs/dispatch-runbook.md`, "Open and land an epic".
    ```
 
    The author role keeps the PR off `/review-monitor`'s reviewer-role approve path.
+   It has a side effect: registering as author makes `/review-monitor` eligible to
+   dispatch its auto-fix agent onto the landing PR's head, which is the shared
+   `epic/<parent-id>` branch, on a red CI, a conflicting merge state or a change
+   request (capped at 2 attempts per PR per day), and to channel-bump and DM about
+   it. The adopted landing row also repairs a red or conflicted PR at impl (D-8),
+   so two autonomous actors can push to the same branch. Leave a red or conflicted
+   landing PR to the adopted row's own recovery; if `/review-monitor` pushes an
+   auto-fix anyway, name that push in the CKPT line.
    Then run `/review-monitor` and post one CKPT line to the operator: PR URL, parent
    id, child count, what to check. The `ready_to_approve` channel bump or DM is the
    knock only when `status` lists the PR as monitored; if it does not, the CKPT line
