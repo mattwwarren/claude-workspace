@@ -1309,11 +1309,16 @@ one is inert, so the finding re-opens each round until it is fixed (bounded by
 **Evidence-gap hold (#3822).** A MUST_FIX `coverage.*` or `acceptance.*` finding
 carrying a non-blank `evidence_gap` is held `operator_actionable`, not deferred:
 `engine_route` lets its `defer` row through, and the stamp holds it. It never
-regresses to a fix. A SHOULD_FIX on these rules still re-opens. A held
-non-deferrable gap is released by fixing the environment or capability the check
-needs and requeueing the review stage, or with
-`cw dev-queue requeue --stage impl --regress`. `cw review converge operator-settle --outcome defer`
-stays inert for it (a non-deferrable rule); no new verb exists for this.
+regresses to a fix. A SHOULD_FIX on these rules still re-opens. The release
+path depends on the round that raised the gap. A gap held in a loop round
+parks as an `operator_action` stop, which is released at the same tip by
+supplying the missing environment or capability the check needs and requeueing
+the review stage. A gap raised by the confirm round after an engine pass parks
+as `review_confirm_must_fix` (a MUST_FIX in the confirm round is park class);
+requeueing the review stage does not release that park at the same tip, and it
+is released with `cw dev-queue requeue --stage impl --regress`.
+`cw review converge operator-settle --outcome defer` stays inert for it (a
+non-deferrable rule); no new verb exists for this.
 
 ### 12.4 Closed Vocabularies
 

@@ -4061,9 +4061,11 @@ dismiss it. Release it by supplying the missing capability and requeueing.
 A repo-engine `coverage.*` or `acceptance.*` finding can carry the marker
 (#3822). It is held, not deferred, and `cw review converge operator-settle
 --outcome defer` is inert for it.
-Release it by supplying the missing capability and requeueing, or with
-`cw dev-queue requeue --stage impl --regress`. See
-`docs/headless-contract.md` section 12.3.
+A gap held in a loop round is released by supplying the missing capability and
+requeueing the review stage. A gap raised by the confirm round after an engine
+pass parks as `review_confirm_must_fix`, which a plain requeue does not release
+at the same tip; release it with `cw dev-queue requeue --stage impl --regress`.
+See `docs/headless-contract.md` section 12.3.
 
 `cw dev-queue approve --override-must-fix` does not release this park.
 For a pure-gap park (`review_operator_actionable`) it is refused at the
