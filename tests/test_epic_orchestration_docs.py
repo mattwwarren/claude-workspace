@@ -193,6 +193,7 @@ APPROVALS_LITERALS = [
     "rules/branches/<default-branch>",
     "own review and auto-merge land the PR",
     "keep the knock",
+    "not verified",
     AUTHOR_NOTE,
     "lands without a human approval",
 ]

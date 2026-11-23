@@ -3404,7 +3404,8 @@ is no epic command group.
   key absent, or no `pull_request` rule above 0), the adopted row's own review and
   auto-merge land the PR: do not register it, and say in the CKPT line that it
   lands without a human approval. An unreadable answer such as a 403 is unverified,
-  not zero: keep the knock.
+  not zero: keep the knock and say in the CKPT line that the approvals requirement
+  was not verified.
 - Where the knock applies, registering the landing PR as author makes `/review-monitor` eligible to dispatch
   its auto-fix agent onto the shared `epic/<parent-id>` head on a red CI, a
   conflicting merge state or a change request (2 attempts per PR per day), and to
