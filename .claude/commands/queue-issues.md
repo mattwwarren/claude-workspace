@@ -132,7 +132,8 @@ If instead the selected tickets are children of one parent ticket that should re
 For each selected ticket, run `cw dev-queue tasks <ID> --json -c "$CLIENT"` and read its `base_branch`. Pass the bare id: `tasks` matches the stored ticket id exactly, so a github-issues id printed as `#<number>` in Step 4 matches nothing. Drop the leading `#` for this lookup.
 
 - A COMPLETED row whose `base_branch` is non-null is built on that base but not shipped. Skip it and report "built on `<base>`; closes at the landing". Do not re-enqueue it and do not call it shipped.
-- A FAILED or CANCELLED row whose `base_branch` is non-null is not re-added by a plain `cw dev-queue add`: that makes a null-base row, which lands on the default branch. Skip it and report it. Retry it on its own base with `cw dev-queue requeue <ID> -c "$CLIENT" --from-failed` (or `--from-cancelled`), or re-enqueue it with the same `--base` in Step 7.
+- A FAILED row whose `base_branch` is non-null: a plain `cw dev-queue add` does not dedupe a FAILED row, so it mints a second, null-base row that lands on the default branch. Skip it and report it. Retry it on its own base with `cw dev-queue requeue <ID> -c "$CLIENT" --from-failed`.
+- A CANCELLED row whose `base_branch` is non-null: a plain `cw dev-queue add` (with or without `--base`) is skipped as already queued at the same stage, so it re-enqueues nothing. Skip it and report it. Retry it on its own base with `cw dev-queue requeue <ID> -c "$CLIENT" --from-cancelled`.
 - A live row of any base is skipped as today.
 - Why this matters: D-10 keeps the child issue open until the landing merge, so the Step 4 `gh issue list` keeps listing it as ready work.
 
