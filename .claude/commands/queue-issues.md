@@ -125,6 +125,16 @@ Parse selection into a list of IDs.
 
 If the selected tickets are children of one epic, or otherwise one design that must ship together (shared files, a merge order, a system that cannot be reviewed piecemeal), do not enqueue them as N rows. Say so, and offer the swing: one parent ticket with every child inlined under `## Children` (shape and command in `/graduate-plan`, swing track), enqueued as a single row. Enqueue N rows only when each ticket stands alone. A swing is `Large` by size; since v4 that only selects the Opus impl model and the full reviewer set, never a gate.
 
+If the selected tickets are children of one feature that should reach the default branch once, and each stands as its own ticket, offer an epic instead and point to `/orchestrate-sprint`, section "Open an epic". `queue-issues` does not create the branch; the orchestrator does (RFC 0020).
+
+## Step 5c: Base check
+
+For each selected ticket, run `cw dev-queue tasks <ID> --json -c "$CLIENT"` and read its `base_branch`.
+
+- A COMPLETED row whose `base_branch` is non-null is built on that base but not shipped. Skip it and report "built on `<base>`; closes at the landing". Do not re-enqueue it and do not call it shipped.
+- A live row of any base is skipped as today.
+- Why this matters: D-10 keeps the child issue open until the landing merge, so the Step 4 `gh issue list` keeps listing it as ready work.
+
 ## Step 6: Pre-flight
 
 1. **Confirm target:**
@@ -132,6 +142,7 @@ If the selected tickets are children of one epic, or otherwise one design that m
    - Client: `<client>`
    - Tickets: `<count>` — list the IDs
    - Priority: `<N>` if set, else "(default)"
+   - Base: `<branch>` or the client default. For a base, also run `git ls-remote --exit-code --heads origin <base>` and stop if it exits non-zero: an epic base must exist on origin before its children are enqueued.
    - Concurrency cap: `yq -r '.per_client_max_parallel.<client> // .per_client_max_parallel.default' ~/.claude-workspace/orchestrator.yaml`
    - Daemon running? `pgrep -f "cw daemon" >/dev/null && echo "yes" || echo "NO — start it (\`cw daemon\` or \`systemctl --user start cw-daemon\`) so items actually dispatch"`
 
@@ -141,6 +152,12 @@ If the selected tickets are children of one epic, or otherwise one design that m
 
 ```bash
 cw dev-queue add --client "$CLIENT" ${PRIORITY:+--priority "$PRIORITY"} $IDS
+```
+
+For an epic's children, use the `--base` variant with the base confirmed in Step 6. Every child needs it, because rows do not inherit a base:
+
+```bash
+cw dev-queue add --client "$CLIENT" --base <epic-branch> $IDS
 ```
 
 `$IDS` is the space-separated list of ticket identifiers. `cw dev-queue add`
