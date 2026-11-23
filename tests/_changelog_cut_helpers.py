@@ -297,6 +297,20 @@ def epic_sibling_repo(
     return clone
 
 
+def push_base_moved_without_changelog(clone: Path, base: str) -> None:
+    """Push *base* to origin: ``origin/main`` plus a commit that skips CHANGELOG.
+
+    The base has moved ahead of the clone's branch (so it is not an ancestor of
+    HEAD), yet its ``CHANGELOG.md`` still equals the merge-base's. The clone is
+    returned to the branch it was on.
+    """
+    current = git_in(clone, "rev-parse", "--abbrev-ref", "HEAD")
+    git_in(clone, "checkout", "-q", "-b", base, "origin/main")
+    commit_files(clone, {"src/other.py": "OTHER = 1\n"}, "feat: base moves on")
+    git_in(clone, "push", "origin", base)
+    git_in(clone, "checkout", "-q", current)
+
+
 def github_would_conflict(clone: Path, head_ref: str, base_ref: str) -> bool:
     """Whether GitHub's conflict check would report ``CHANGELOG.md`` conflicting.
 
