@@ -11,6 +11,12 @@ oscillation, then an ``operator_action`` finding, then no-progress, then the
 no-progress because its stop is operator-releasable while no-progress is
 terminal, so a mixed round reports the stop the operator can act on.
 
+A carried evidence gap (#3823) is an ``operator_action`` stop too: a round that
+leaves held memory outstanding and adds no new fix decides
+``stop_operator_action`` naming the held identities, and is never clean. A mixed
+round (a new fix beside the gap) decides ``continue`` so the fix is repaired
+first; the gap stays on the ledger.
+
 A ``confirm`` round recorded right after an engine pass (#3042, RFC 0017 I3;
 :func:`~cw.review_convergence._confirm_route.engine_pass_precedes`) is routed
 by :func:`~cw.review_convergence._confirm_route.route_engine_confirm` instead:
@@ -371,6 +377,11 @@ def record_round(
     (``failed_role:``). A dirty round with unread findings proceeds, because the
     next full round re-reviews the diff. The guard raises rather than returning
     a decision, so no literal exists that a caller could ignore.
+
+    A held-only round (an evidence gap carried on the ledger, no new fix) decides
+    ``stop_operator_action`` naming the held gaps and is never recorded clean; a
+    mixed round (a new fix beside the gap) decides ``continue`` and keeps the gap
+    as held memory (#3823).
 
     *frozen* is stored the first time it is given (the cycle-0 baseline).
 
@@ -819,7 +830,9 @@ def override_confirm_round(
     kept, the ledger converges at *reviewed_sha* with the stop fields cleared,
     and a :class:`ConfirmOverride` records what was overridden. ``fixed``,
     ``fix_cycles_used``, the releases and the epoch are unchanged. Raises
-    :class:`ConvergenceError` unless :func:`confirm_override_applies`.
+    :class:`ConvergenceError` unless :func:`confirm_override_applies`, and when
+    the ledger carries an outstanding evidence gap (#3823): an unverified gap
+    cannot be overridden past, so the refusal names the gap and its two routes.
     """
     if not confirm_override_applies(
         ledger, identities, reviewed_sha=reviewed_sha, round_identities=round_identities
