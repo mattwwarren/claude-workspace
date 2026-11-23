@@ -23,9 +23,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
-from cw.models.review_engine_summary import EngineCounts, ReviewEngineSummary
+from cw.models.review_engine_summary import (
+    EngineCounts,
+    ReviewEngineSummary,
+    is_non_deferrable_rule,
+)
 from cw.review_convergence import settled_applies
-from cw.review_engine.route import is_non_deferrable_rule
 
 if TYPE_CHECKING:
     from collections.abc import Collection

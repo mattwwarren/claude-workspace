@@ -197,13 +197,13 @@ class TestNotObject:
 
 class TestSchemaVersion:
     def test_future_version_rejected_before_fields(self) -> None:
-        raw = json.dumps({"schema_version": 2, "findings": "garbage"}).encode()
+        raw = json.dumps({"schema_version": 3, "findings": "garbage"}).encode()
 
         error = _reject_bytes(raw)
 
         assert error.reason is EngineSummaryRejection.UNSUPPORTED_SCHEMA_VERSION
         assert error.field_path == "schema_version"
-        assert "2" in str(error)
+        assert "3" in str(error)
 
     @pytest.mark.parametrize(
         ("value", "echo"),

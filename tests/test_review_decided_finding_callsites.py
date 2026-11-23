@@ -23,6 +23,11 @@ Call-site classes (post-change set, MUST_FIX 4):
   post-loop clean pass): an engine ``coverage.*`` / ``acceptance.*`` SHOULD_FIX
   stays a ``fix``, so nothing is deferred or recorded; a plain engine SHOULD_FIX
   defers and is recorded (#3636).
+
+Plus :class:`TestGapHoldCarveOut` (#3822): an evidence-gap MUST_FIX on a
+never-deferrable rule that the stamp already holds ``operator_actionable``
+passes through :func:`decided_finding` unchanged, so every call-site class
+above keeps it held rather than re-deciding it ``fixed``.
 """
 
 from __future__ import annotations
@@ -60,7 +65,7 @@ from tests._review_convergence_helpers import (
     engine_pass_ledger,
     record,
 )
-from tests._shared.review_builders import _make_finding
+from tests._shared.review_builders import _make_finding, _make_gap_finding
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -432,3 +437,132 @@ class TestCallSiteDriftGuard:
             text = (_SRC / relative).read_text(encoding="utf-8")
             assert any(name in text for name in _TRACKED), relative
             assert _called_tracked_names(_SRC / relative) == frozenset(), relative
+
+
+_GAP_DETAIL = "evidence gap: the reviewer could not verify this; held for the operator"
+
+
+def _gap_item(
+    rule_id: str | None,
+    *,
+    severity: Severity = "MUST_FIX",
+    disposition: str = "operator_actionable",
+    gapped: bool = True,
+) -> AcceptedFinding:
+    finding = (
+        _make_gap_finding(
+            severity, rule_id=rule_id, source="engine", fingerprint="fp-0"
+        )
+        if gapped
+        else _make_finding(
+            severity=severity, rule_id=rule_id, source="engine", fingerprint="fp-0"
+        )
+    )
+    return AcceptedFinding(
+        finding=finding,
+        reviewers=["Test Reviewer"],
+        disposition=disposition,
+        disposition_detail=_GAP_DETAIL,
+    )
+
+
+def _held_verdict(item: AcceptedFinding) -> ReviewVerdict:
+    base = _engine_only(_verdict("engine"))
+    return base.model_copy(
+        update={"accepted": [item], "must_fix": [], "blocking": False}
+    )
+
+
+class TestGapHoldCarveOut:
+    """#3822: a stamped gap hold survives every ``decided_finding`` call class."""
+
+    @pytest.mark.parametrize("rule", _NEVER_DEFERRABLE)
+    def test_decided_finding_passes_a_gap_hold_through(self, rule: str) -> None:
+        item = _gap_item(rule)
+
+        assert decided_finding(item, LOOP_DEFER_RATIONALE) == item
+
+    def test_decide_verdict_keeps_the_gap_hold(self) -> None:
+        item = _gap_item(_COVERAGE)
+
+        (decided,) = decide_verdict(_held_verdict(item), LOOP_DEFER_RATIONALE).accepted
+
+        assert decided.disposition == "operator_actionable"
+
+    @pytest.mark.parametrize("rule", _NEVER_DEFERRABLE)
+    def test_confirm_lane_keeps_the_gap_hold(self, rule: str) -> None:
+        verdict = _held_verdict(_gap_item(rule))
+
+        decided = decide_confirm_verdict(
+            verdict, engine_pass_ledger(), CONFIRM_DEFER_RATIONALE
+        )
+
+        assert [af.disposition for af in decided.accepted] == ["operator_actionable"]
+
+    @pytest.mark.parametrize("rule", _NEVER_DEFERRABLE)
+    def test_loop_round_does_not_record_a_gap_hold_as_a_fix(self, rule: str) -> None:
+        cycle = CycleRound(0, _held_verdict(_gap_item(rule)), {})
+
+        recorded = _round_findings(cycle, frozenset())
+
+        assert all(finding.outcome != "fix" for finding in recorded)
+
+    @pytest.mark.parametrize("rule", _NEVER_DEFERRABLE)
+    def test_defer_should_fix_flag_keeps_the_gap_hold(self, rule: str) -> None:
+        payload = RoundInput.model_validate(
+            {
+                **engine_confirm_payload(_held_verdict(_gap_item(rule))),
+                "kind": "loop",
+            }
+        )
+
+        decided = _apply_defer_should_fix(payload).verdict
+        assert decided is not None
+        assert [af.disposition for af in decided.accepted] == ["operator_actionable"]
+
+    @pytest.mark.parametrize("rule", _NEVER_DEFERRABLE)
+    def test_engine_seam_b_records_nothing_for_a_gap_hold(self, rule: str) -> None:
+        verdict = _held_verdict(_gap_item(rule))
+
+        assert engine_defer_findings(verdict, LOOP_DEFER_RATIONALE) == []
+
+    @pytest.mark.parametrize("rule", _NEVER_DEFERRABLE)
+    def test_from_verdict_records_a_carried_gap_hold_as_operator_action(
+        self, rule: str
+    ) -> None:
+        item = _gap_item(rule)
+
+        (finding,), _unread = from_verdict(_held_verdict(item))
+
+        assert finding.severity == "MUST_FIX"
+        assert finding.outcome == "operator_action"
+        assert finding.rationale == _GAP_DETAIL
+        assert finding.rule_id == rule
+        assert finding.fingerprint == "fp-0"
+
+    @pytest.mark.parametrize(
+        "item",
+        [
+            _gap_item(_COVERAGE, disposition="fixed"),
+            _gap_item(_COVERAGE, disposition="rejected"),
+            _gap_item(_COVERAGE, disposition="dropped"),
+            _gap_item(_COVERAGE, severity="SHOULD_FIX"),
+            _gap_item(_COVERAGE, gapped=False),
+        ],
+        ids=[
+            "must-fix-fixed",
+            "must-fix-rejected",
+            "must-fix-dropped",
+            "should-fix-gap",
+            "unmarked-must-fix",
+        ],
+    )
+    def test_non_hold_items_are_still_decided_fixed(
+        self, item: AcceptedFinding
+    ) -> None:
+        decided = decided_finding(item, LOOP_DEFER_RATIONALE)
+
+        if item.disposition == "rejected":
+            assert decided.disposition == "rejected"
+        else:
+            assert decided.disposition == "fixed"

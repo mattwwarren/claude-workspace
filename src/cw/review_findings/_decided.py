@@ -20,15 +20,23 @@ In both kinds:
   ``must_fix``/``blocking``;
 - a SHOULD_FIX is stamped ``deferred``: a non-blocking note.
 
+An evidence gap is effective for a MUST_FIX on any rule, and for a SHOULD_FIX
+only when its rule is deferrable. A SHOULD_FIX on ``coverage.*`` or
+``acceptance.*`` keeps today's route and is never turned into a non-blocking
+note, or the verdict would pass (#3822).
+
 Only a finding still at the optimistic ``fixed`` default is stamped, so an
 operator's settle (``rejected``) or an earlier deferral is never overridden.
 Nothing is dropped: the renderer reads the marker fields directly, so the
-quote and the gap text exist once. Imports ``_models`` only.
+quote and the gap text exist once. Imports ``_models`` and the pure
+``cw.models.review_engine_summary`` predicate only.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
+
+from cw.models.review_engine_summary import is_non_deferrable_rule
 
 if TYPE_CHECKING:
     from cw.review_findings._models import (
@@ -55,7 +63,8 @@ _NOTE: tuple[Disposition, str] = (
 _GAP_HELD: tuple[Disposition, str] = (
     "operator_actionable",
     "evidence gap: the reviewer could not verify this; held for the operator"
-    " (`cw review settle` dismisses it)",
+    " (supply the missing check and requeue the review; `cw review settle`"
+    " dismisses only a deferrable finding)",
 )
 _GAP_NOTE: tuple[Disposition, str] = (
     "deferred",
@@ -80,7 +89,11 @@ def held_disposition(finding: Finding) -> tuple[Disposition, str] | None:
     if finding.severity == _MUST_FIX:
         return _HELD if kind == "decision_contest" else _GAP_HELD
     if finding.severity == _SHOULD_FIX:
-        return _NOTE if kind == "decision_contest" else _GAP_NOTE
+        if kind == "decision_contest":
+            return _NOTE
+        if is_non_deferrable_rule(finding.rule_id):
+            return None
+        return _GAP_NOTE
     return None
 
 
@@ -135,3 +148,12 @@ def held_findings(
 def has_held_findings(verdict: ReviewVerdict, kind: HeldKind | None = None) -> bool:
     """Whether *verdict* holds any MUST_FIX finding for the operator, by *kind*."""
     return bool(held_findings(verdict, kind))
+
+
+def is_gap_hold(af: AcceptedFinding) -> bool:
+    """Whether *af* is an evidence-gap MUST_FIX the stamp held for the operator."""
+    return (
+        af.finding.severity == _MUST_FIX
+        and af.disposition == "operator_actionable"
+        and held_kind(af.finding) == "evidence_gap"
+    )

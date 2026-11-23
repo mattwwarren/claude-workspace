@@ -34,6 +34,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final, NamedTuple
 
+from cw.models.review_engine_summary import is_non_deferrable_rule
 from cw.review_convergence._findings import (
     Classified,
     decide_verdict,
@@ -48,7 +49,6 @@ from cw.review_convergence._models import (
     SettledEntry,
 )
 from cw.review_engine.constants import ENGINE_ROLE
-from cw.review_engine.route import is_non_deferrable_rule
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

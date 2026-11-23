@@ -57,6 +57,7 @@ EXPECTED_EXPORTS = {
     "dedupe_findings",
     "derive_review_counts",
     "has_held_findings",
+    "is_gap_hold",
     "HeldKind",
     "held_kind",
     "parse_reviewer_document",
