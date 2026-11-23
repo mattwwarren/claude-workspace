@@ -366,6 +366,32 @@ class TestHeldRelease:
             released.released.cleared_held
         )
 
+    def test_named_gap_release_lets_the_next_empty_round_converge(self) -> None:
+        """R13(e): the release itself discharges the gap the stop named."""
+        ledger, _ = record(fresh_ledger(), held_gap(), sha="sha-1")
+        released = reconcile_ledger(ledger, head="sha-1")
+        assert released.ledger.held == []
+        assert released.ledger.settled == []
+        follow_ledger, follow = record(released.ledger, sha="sha-1")
+        assert follow.decision == "clean"
+        assert follow_ledger.rounds[-1].clean is True
+        assert follow_ledger.status == "converged"
+        assert follow_ledger.last_clean_sha == "sha-1"
+
+    def test_release_with_an_additional_unnamed_gap_still_stops(self) -> None:
+        ledger, _ = record(fresh_ledger(), held_gap(), sha="sha-1")
+        other = HeldEntry(
+            identity=finding_identity("MUST_FIX", "N/A", "Another gap"),
+            rationale="run the linter",
+        )
+        ledger = ledger.model_copy(update={"held": [*ledger.held, other]})
+        released = reconcile_ledger(ledger, head="sha-1")
+        assert released.ledger.held == [other]
+        follow_ledger, follow = record(released.ledger, sha="sha-1")
+        assert follow.decision == "stop_operator_action"
+        assert follow_ledger.rounds[-1].clean is False
+        assert follow_ledger.last_clean_sha is None
+
     def test_max_cycles_raised_release_keeps_the_held_memory(self) -> None:
         ledger = fresh_ledger(max_cycles=1)
         ledger, _ = record(ledger, held_gap(), real_fix(), sha="sha-1")
