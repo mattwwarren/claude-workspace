@@ -185,6 +185,8 @@ gates listed under *The human decides* stay excluded.
 
 **The human decides (product/scope forks and opted-in gates only):**
 
+- The landing approval on an epic's PR, and the branch-protection rule on the
+  epic branch (see *Epics: open one, land one*).
 - Genuine product/scope forks where either answer is defensible
   (`/harden-ticket`'s escalation criteria), including a plan or review
   finding that would grow scope beyond the ticket or needs behavior the
@@ -232,15 +234,21 @@ Don't enqueue everything reflexively — a ticket that's obviously human-gated
 (no spec, open design question, missing dependency) should be hardened or parked
 *before* it ever takes a lane slot.
 
-**Swing or fan-out?** Decide the shape before the slots. A *fan-out* is N
-independent tickets in N worktrees (`/cw-fanout`). A *swing* is one epic whose
-children share a design or a merge order, dispatched as ONE parent ticket with
+**Swing, epic or fan-out?** Decide the shape before the slots. A *fan-out* is N
+independent tickets in N worktrees (`/cw-fanout`). A *swing* is one parent ticket
+whose children share a design or a merge order, dispatched as ONE parent ticket with
 the children inlined under `## Children` (`/graduate-plan` swing track): one
 plan, one worktree, one PR. Children that would each re-derive the same design,
 or whose fifth PR cannot be reviewed because the first four already merged, are
 a swing. Expect a swing's plan stage to park on consolidated scans more than
 once; answer from the ticket's sources of truth and approve on the row only when
 the park is approval-only.
+
+Choose an *epic* when a half-built feature must not sit on the default branch and
+each child can stand as its own ticket, plan and PR. Choose a swing when the
+children share one design in one worktree. A swing may be one row inside an epic.
+The call is per RFC and yours (D-9); the procedures are in *Epics: open one, land
+one* below.
 
 ### Phase 2 — Harden before dispatch (targeted, #1655)
 
@@ -263,7 +271,10 @@ the whole sweep.
 
 Use `/cw-fanout` to enqueue the hardened batch, start the dispatch loop, and
 begin the wave watch. A swing is one row in that batch (`cw dev-queue add
-<parent> -c <C> --lane <lane>`); never enqueue its children alongside it. Respect lane caps — a lane at its cap with one healthy
+<parent> -c <C> --lane <lane>`); never enqueue its children alongside it. Children
+of an open epic are enqueued with `--base <epic-branch>`; the epic's parent ticket
+is never enqueued as a row except as the landing adoption (see *Epics: open one,
+land one*). Respect lane caps — a lane at its cap with one healthy
 ticket running is *correct*, not a wedge. Don't over-dispatch to "go faster";
 you'll just starve yourself of attention bandwidth.
 
@@ -488,7 +499,9 @@ when the open decisions outnumber what you can hold, run `/handoff` — capture
 the live ticket list, the gate each parked ticket sits at, the armed watch
 (its scope line), and the next action per in-flight ticket. Carry state, not
 recipes: the next session reads each ticket with `cw dev-queue show <T> -c <C>`
-and re-arms `cw orchestrate watch -c <C>` per Phase 4. Leave out hand-edits
+and re-arms `cw orchestrate watch -c <C>` per Phase 4. Each open epic's branch and
+parent id go in the handoff too, so the next session lists its rows with
+`cw dev-queue tasks -c <C> --base <branch>`. Leave out hand-edits
 of the queue store, fixed `wait` timeouts and workarounds for a cw bug; file
 the bug instead. A clean handoff is what makes
 the *next* orchestrator session as good as this one. Running yourself into a
@@ -536,8 +549,155 @@ auto-merge is a deliberate choice rather than a surprise. If you cannot, create
 the PR directly with `gh pr create` from the correct branch and skip the
 delegation.
 
+## Epics: open one, land one
+
+Rows sharing a base branch are an epic (RFC 0020, D-1). cw creates and deletes no
+epic branch (D-6), so these steps are the orchestrator's. There is no epic command
+group. The operator-side procedure, the branch-deletion step and the failure modes
+are in `docs/dispatch-runbook.md`, "Open and land an epic".
+
+### Open an epic
+
+1. Name the branch `epic/<parent-id>`: the parent ticket's id without `#` (a Linear
+   id becomes `epic/GEN-12`). It must match cw's branch charset,
+   `[a-zA-Z0-9/_.-]`, and start alphanumeric.
+2. Confirm the branch is absent, then cut it from the default branch on origin and
+   push it, with no checkout: the orchestrator stands on a session branch, so a
+   checkout is the wrong place to work from. Resolve `<default-branch>` the way the
+   stage prose does: the name `git symbolic-ref --short refs/remotes/origin/HEAD`
+   prints with its leading `origin/` removed.
+
+   ```bash
+   git ls-remote --exit-code --heads origin refs/heads/epic/<parent-id>
+   ```
+
+   Name the full ref: the bare pattern `epic/<parent-id>` also matches a nested
+   branch such as `foo/epic/<parent-id>`. Exit 2 means absent: continue. Exit 0 means it already exists. A non-force push
+   onto an existing ancestor branch would fast-forward it silently, so stop and
+   read it; never force-push.
+
+   ```bash
+   git fetch origin
+   git symbolic-ref --short refs/remotes/origin/HEAD
+   git push origin origin/<default-branch>:refs/heads/epic/<parent-id>
+   ```
+
+   A refused push means the branch appeared in the meantime. Stop and read it;
+   never force-push.
+3. Verify it exists: `git ls-remote --exit-code --heads origin refs/heads/epic/<parent-id>`.
+4. Verify the branch-protection prerequisite (D-12). Read-only, two calls:
+
+   ```bash
+   gh api repos/{owner}/{repo}/branches/epic/<parent-id>/protection
+   gh api repos/{owner}/{repo}/rules/branches/epic/<parent-id>
+   ```
+
+   - Pass: neither classic protection nor a ruleset requires an approving review on
+     the epic branch. Required status checks are fine. A 404 "Branch not protected"
+     from the first call means no classic rule. A 200 from the first call is read at
+     `required_pull_request_reviews.required_approving_review_count`: 0 or the key
+     absent is Pass. An empty array from the second call means no ruleset rule.
+   - Fail: a 200 from the first call with
+     `required_pull_request_reviews.required_approving_review_count` above 0, or a
+     `pull_request` rule from the second call whose
+     `parameters.required_approving_review_count` is above 0.
+   - Unverified: a 403 or any other unreadable response. Unreadable means not verified.
+   - On fail or unverified, say so in one line and knock once for the operator. Do
+     not enqueue children until the operator confirms. cw documents and reports
+     this; it never changes repository settings and never approves (ADR-0012).
+5. Enqueue each child: `cw dev-queue add <child> -c <C> --lane <lane> --base epic/<parent-id>`.
+   cw refuses a base that is absent on origin, equal to the default branch, or over
+   `epic.max_diff_lines`. Rows do not inherit a base, so every child needs `--base`.
+   There is no retarget verb.
+6. List the epic's rows: `cw dev-queue tasks -c <C> --base epic/<parent-id>`.
+
+### Land an epic
+
+1. Confirm every row of the base is terminal with
+   `cw dev-queue tasks -c <C> --base epic/<parent-id>`. Terminal means completed,
+   failed and cancelled. `blocked_on_user` is not terminal, and neither are
+   `awaiting_operator_signoff`, pending or running; wait or release them first.
+   Decide each failed or cancelled row explicitly: requeue it, or drop it and note
+   why. Then confirm `gh pr list --base epic/<parent-id> --state open` prints
+   nothing. A COMPLETED row can still have its PR open under armed auto-merge.
+2. Collect the ids of the completed rows with
+   `cw dev-queue tasks -c <C> --base epic/<parent-id> --status completed --json`.
+   Children dropped as failed or cancelled in step 1 are left out of the citation
+   ids, so the landing merge never closes an unbuilt ticket.
+3. Write the body with the Write tool to `.cw/landing-pr-body.md`
+   (via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule). It
+   holds a short design summary the orchestrator writes from the parent ticket body
+   and the RFC summary: what the feature is, what the children delivered, and what
+   a reviewer should check. Then paste the citation lines from
+   `python3 ~/.claude/scripts/landing_citations.py --children '<ids>'`, verbatim.
+   That prints one `Closes #<n>` per GitHub issue. Each `uncitable: <id>` on stderr
+   is an operator note: that child is closed by hand after the merge (D-10).
+   Install clause: `~/.claude/scripts/landing_citations.py` exists only after
+   `scripts/install-skills.sh` has been re-run on this host, because the installer
+   links each cw script individually. If it is missing, run
+   `python3 .claude/scripts/landing_citations.py --children '<ids>'` from the cw
+   repo or worktree root instead.
+4. Open the PR:
+
+   ```bash
+   gh pr create --base <default-branch> --head epic/<parent-id> --title "<title>" --body-file .cw/landing-pr-body.md
+   ```
+
+   This is the one PR the orchestrator opens itself. No row exists to ship it, and
+   a replayed stack is rejected (D-4).
+5. Adopt it under the parent ticket: `cw dev-queue add <parent-id> -c <C> --lane <lane> --adopt-pr <N>`,
+   with no `--base`. It is refused when the parent already has any row (including a
+   COMPLETED one), or when the PR base is not the client default. Green enters at
+   review; conflicted or red enters at impl with synthesized feedback (D-8). A child
+   PR merging into the epic branch parks the row `adopted_head_drift` only while the
+   row is still PENDING and has not run (release it per the runbook); after that a
+   COMPLETED row with armed auto-merge is not re-checked, so land the children first
+   and open the landing PR last.
+6. Hand the human approval to `/review-monitor` as a knock. First register the
+   landing PR as an author-role monitored PR. `/review-monitor` picks up a PR only
+   from its inbox, its config-gated `discover` list, or its orphan fast-path, and
+   the fast-path covers only `dev/` and `auto-dev/` heads, so an `epic/` landing PR
+   is not picked up on its own. Get the head SHA with
+   `gh pr view <N> --json headRefOid`, then run:
+
+   ```bash
+   ~/.claude/scripts/review_monitor.py register <N> --role author --repo <owner/repo> --repo-path <client-checkout> --sha <head-sha>
+   ~/.claude/scripts/review_monitor.py status
+   ```
+
+   The author role keeps the PR off `/review-monitor`'s reviewer-role approve path.
+   It has a side effect: registering as author makes `/review-monitor` eligible to
+   dispatch its auto-fix agent onto the landing PR's head, which is the shared
+   `epic/<parent-id>` branch, on a red CI, a conflicting merge state or a change
+   request (capped at 2 attempts per PR per day), and to channel-bump and DM about
+   it. The adopted landing row also repairs a red or conflicted PR at impl (D-8),
+   so two autonomous actors can push to the same branch. Leave a red or conflicted
+   landing PR to the adopted row's own recovery; if `/review-monitor` pushes an
+   auto-fix anyway, name that push in the CKPT line.
+   Then run `/review-monitor` and post one CKPT line to the operator: PR URL, parent
+   id, child count, what to check. The `ready_to_approve` channel bump or DM is the
+   knock only when `status` lists the PR as monitored; if it does not, the CKPT line
+   is the knock. The approval is the human's; never approve (ADR-0012, D-12). This
+   is the one deliberate exception to Phase 4's "Leave PR review and CI watching
+   alone", because the landing approval is a human gate.
+7. After the merge, the landing closes the children. Verify one with
+   `gh issue view <child> --json state`; a child still open is friction. The operator
+   deletes the epic branch (runbook). Before that, confirm every guard holds and
+   record the tip so the delete can be undone:
+   - the landing PR is MERGED, with `baseRefName` the default branch and
+     `headRefName` `epic/<parent-id>` (`gh pr view <N> --json state,baseRefName,headRefName`);
+   - `gh pr list --base epic/<parent-id> --state open` prints nothing;
+   - every row of the base is terminal (Land step 1).
+
+   Record the tip with `git ls-remote --heads origin refs/heads/epic/<parent-id>` and put its
+   SHA in the CKPT line. Never delete before the PR is MERGED.
+
 ## Anti-patterns
 
+- **Enqueueing a child of an open epic without `--base`.** It lands on the default
+  branch and skips the epic.
+- **Approving or running `--approve` on a landing PR.** The approval is the human's
+  (ADR-0012).
 - **Re-sweeping a ticket that already has plan comments.** The sweep is in the
   thread; read it.
 - **Re-dispatching a gated ticket without a tracker-state delta.** It will wedge again. Park it, supply the delta, then release it.
@@ -581,6 +741,7 @@ delegation.
 ## Related skills
 
 - `/cw-orchestration` — state-to-command map and cw vocabulary (load first)
+- `/review-monitor` — registers a landing PR and carries the human approval knock
 - `/queue-issues` — select + enqueue ready tickets (Phase 1)
 - `/harden-ticket` — pre-flight one ticket to plan first-try (Phase 2)
 - `/cw-fanout` — dispatch N + watch the wave (Phase 3/4)
