@@ -165,6 +165,20 @@ class TestRecordingRule:
 # ---------------------------------------------------------------------------
 
 
+class TestHermeticDefault:
+    """With a slow host clock, the default recorder writes nothing (#3833)."""
+
+    @pytest.mark.usefixtures("stalled_host_clock")
+    def test_slow_host_clock_records_nothing_by_default(self) -> None:
+        with sessions_lock():
+            pass
+        with dev_queue_storage.dev_queue_lock():
+            pass
+        _flush()
+        assert _recorded() == []
+        assert not _today_path().exists()
+
+
 class TestFlush:
     def test_one_line_per_note_with_all_fields(self) -> None:
         state_file().write_text('{"sessions": []}')
