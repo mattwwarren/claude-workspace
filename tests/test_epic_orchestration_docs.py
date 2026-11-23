@@ -182,6 +182,36 @@ def test_land_ordering_terminal_then_pr_then_adopt_then_monitor() -> None:
     assert terminal < pr_create < adopt < monitor
 
 
+# 5b. Knock applies only where approvals are required (#3863) --------------
+
+APPROVALS_COND = "applies only where the default branch requires approvals"
+AUTHOR_NOTE = "eligible to dispatch its auto-fix agent"
+APPROVALS_LITERALS = [
+    APPROVALS_COND,
+    "0 required approvals",
+    "branches/<default-branch>/protection",
+    "rules/branches/<default-branch>",
+    "own review and auto-merge land the PR",
+    "keep the knock",
+    AUTHOR_NOTE,
+    "lands without a human approval",
+]
+
+
+@pytest.mark.parametrize("literal", APPROVALS_LITERALS)
+@pytest.mark.parametrize("name", ["skill-land", "runbook-epic"])
+def test_landing_knock_condition_and_author_note(name: str, literal: str) -> None:
+    prose = {"skill-land": _land_section(), "runbook-epic": _runbook_section()}
+    assert literal in prose[name]
+
+
+def test_landing_condition_precedes_author_registration() -> None:
+    skill = _land_section()
+    assert skill.index(APPROVALS_COND) < skill.index("review_monitor.py register")
+    runbook = _runbook_section()
+    assert runbook.index(APPROVALS_COND) < runbook.index(AUTHOR_NOTE)
+
+
 # 6. D-12 and D-6 negatives -------------------------------------------------
 
 

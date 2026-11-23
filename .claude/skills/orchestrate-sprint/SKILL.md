@@ -653,8 +653,32 @@ are in `docs/dispatch-runbook.md`, "Open and land an epic".
    row is still PENDING and has not run (release it per the runbook); after that a
    COMPLETED row with armed auto-merge is not re-checked, so land the children first
    and open the landing PR last.
-6. Hand the human approval to `/review-monitor` as a knock. First register the
-   landing PR as an author-role monitored PR. `/review-monitor` picks up a PR only
+6. Decide whether the knock applies, then hand the human approval to
+   `/review-monitor` as a knock. The knock applies only where the default branch
+   requires approvals. Read the default branch with the two calls Open step 4 makes
+   on the epic branch:
+
+   ```bash
+   gh api repos/{owner}/{repo}/branches/<default-branch>/protection
+   gh api repos/{owner}/{repo}/rules/branches/<default-branch>
+   ```
+
+   - Required: a 200 from the first call with
+     `required_pull_request_reviews.required_approving_review_count` above 0, or a
+     `pull_request` rule from the second call whose
+     `parameters.required_approving_review_count` is above 0. Continue below.
+   - 0 required approvals: a 404 "Branch not protected" from the first call or a
+     count of 0 or the key absent, and an empty array or a `pull_request` rule at 0
+     from the second call. The adopted row's own review and auto-merge land the PR,
+     so there is no approval to wait for. Do not register it with `/review-monitor`.
+     Post one CKPT line (PR URL, parent id, child count) saying it lands without a
+     human approval, then go to step 7.
+   - Unverified: a 403 or any other unreadable response. Unreadable means unverified,
+     not zero: keep the knock, continue below, and say in the CKPT line that the
+     approvals requirement was not verified.
+
+   Where the knock applies, first register the landing PR as an author-role
+   monitored PR. `/review-monitor` picks up a PR only
    from its inbox, its config-gated `discover` list, or its orphan fast-path, and
    the fast-path covers only `dev/` and `auto-dev/` heads, so an `epic/` landing PR
    is not picked up on its own. Get the head SHA with
@@ -666,7 +690,7 @@ are in `docs/dispatch-runbook.md`, "Open and land an epic".
    ```
 
    The author role keeps the PR off `/review-monitor`'s reviewer-role approve path.
-   It has a side effect: registering as author makes `/review-monitor` eligible to
+   Registering as author has a side effect: it makes `/review-monitor` eligible to
    dispatch its auto-fix agent onto the landing PR's head, which is the shared
    `epic/<parent-id>` branch, on a red CI, a conflicting merge state or a change
    request (capped at 2 attempts per PR per day), and to channel-bump and DM about
@@ -674,10 +698,10 @@ are in `docs/dispatch-runbook.md`, "Open and land an epic".
    so two autonomous actors can push to the same branch. Leave a red or conflicted
    landing PR to the adopted row's own recovery; if `/review-monitor` pushes an
    auto-fix anyway, name that push in the CKPT line.
-   Then run `/review-monitor` and post one CKPT line to the operator: PR URL, parent
-   id, child count, what to check. The `ready_to_approve` channel bump or DM is the
+   Where the knock applies, then run `/review-monitor` and post one CKPT line to the
+   operator: PR URL, parent id, child count, what to check. The `ready_to_approve` channel bump or DM is the
    knock only when `status` lists the PR as monitored; if it does not, the CKPT line
-   is the knock. The approval is the human's; never approve (ADR-0012, D-12). This
+   is the knock. The approval is the human's; never approve (ADR-0012, D-12). When the knock applies, this
    is the one deliberate exception to Phase 4's "Leave PR review and CI watching
    alone", because the landing approval is a human gate.
 7. After the merge, the landing closes the children. Verify one with
