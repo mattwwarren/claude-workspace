@@ -69,7 +69,7 @@ The branch table below uses `effective_status`.
 
 #### A base row: merged is not shipped
 
-Detect a base row from the `base_branch:` line of `cw dev-queue show <TICKET> -c <CLIENT>`. `-` means null, a plain row. The exception is an epic's landing row (the epic's parent ticket, with the landing PR adopted): its `base_branch:` is `-` by design, so recognize it by its adopted PR, whose head branch is `epic/<parent-id>`; read that from the PR number passed to `--adopt-pr`, for example with `gh pr view <N> --json headRefName,baseRefName`. A row built on an epic base (RFC 0020) merges into that base, not into the default branch, so the default-branch wording in the branches below changes for it:
+Detect a base row from the `base_branch:` line of `cw dev-queue show <TICKET> -c <CLIENT>`. `-` means null, a plain row. The exception is an epic's landing row (the epic's parent ticket, with the landing PR adopted): its `base_branch:` is `-` by design. A cold follow-up session never sees the `--adopt-pr` number, so read the PR from the `pr:` line of `cw dev-queue show <TICKET> -c <CLIENT>` (or `result.pr.url` in the sentinel), then run `gh pr view <PR> --json headRefName,baseRefName`. A head of `epic/<ticket-id>` with a default-branch base marks the landing row. A row built on an epic base (RFC 0020) merges into that base, not into the default branch, so the default-branch wording in the branches below changes for it:
 
 - `shipped`: add `baseRefName` to the `gh pr view --json` field list. A MERGED PR merged into the base is built, not shipped: report "built on `<base>`; closes at the landing". Do not close the ticket.
 - `no_op`: close only when the satisfying PR is merged into the default branch. A PR merged into the epic branch does not satisfy it.

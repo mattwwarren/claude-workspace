@@ -3389,8 +3389,11 @@ is no epic command group.
 
 **Deleting the epic branch (operator action, D-6).**
 
-- Delete only after the landing PR is MERGED (`gh pr view <N> --json state`) and
-  every row of the base is terminal.
+- Delete only after the landing PR is MERGED (`gh pr view <N> --json state,baseRefName,headRefName`,
+  with `baseRefName` the default branch and `headRefName` `epic/<parent-id>`), no open
+  PR targets the epic branch, and every row of the base is terminal.
+- Record the tip first: `git ls-remote --heads origin epic/<parent-id>` prints its SHA.
+  Keep it in the landing record, so the branch can be recreated at that commit.
 - Run `git push origin --delete epic/<parent-id>`, then `git fetch --prune origin`.
 - The repo may auto-delete head branches. If
   `git ls-remote --exit-code --heads origin epic/<parent-id>` exits 2, the branch

@@ -561,11 +561,19 @@ are in `docs/dispatch-runbook.md`, "Open and land an epic".
 1. Name the branch `epic/<parent-id>`: the parent ticket's id without `#` (a Linear
    id becomes `epic/GEN-12`). It must match cw's branch charset,
    `[a-zA-Z0-9/_.-]`, and start alphanumeric.
-2. Cut it from the default branch on origin and push it, with no checkout: the
-   orchestrator stands on a session branch, so a checkout is the wrong place to
-   work from. Resolve `<default-branch>` the way the stage prose does: the name
-   `git symbolic-ref --short refs/remotes/origin/HEAD` prints with its leading
-   `origin/` removed.
+2. Confirm the branch is absent, then cut it from the default branch on origin and
+   push it, with no checkout: the orchestrator stands on a session branch, so a
+   checkout is the wrong place to work from. Resolve `<default-branch>` the way the
+   stage prose does: the name `git symbolic-ref --short refs/remotes/origin/HEAD`
+   prints with its leading `origin/` removed.
+
+   ```bash
+   git ls-remote --exit-code --heads origin epic/<parent-id>
+   ```
+
+   Exit 2 means absent: continue. Exit 0 means it already exists. A non-force push
+   onto an existing ancestor branch would fast-forward it silently, so stop and
+   read it; never force-push.
 
    ```bash
    git fetch origin
@@ -573,8 +581,8 @@ are in `docs/dispatch-runbook.md`, "Open and land an epic".
    git push origin origin/<default-branch>:refs/heads/epic/<parent-id>
    ```
 
-   A refused push means the branch already exists. Stop and read it; never
-   force-push.
+   A refused push means the branch appeared in the meantime. Stop and read it;
+   never force-push.
 3. Verify it exists: `git ls-remote --exit-code --heads origin epic/<parent-id>`.
 4. Verify the branch-protection prerequisite (D-12). Read-only, two calls:
 
@@ -644,16 +652,36 @@ are in `docs/dispatch-runbook.md`, "Open and land an epic".
    row is still PENDING and has not run (release it per the runbook); after that a
    COMPLETED row with armed auto-merge is not re-checked, so land the children first
    and open the landing PR last.
-6. Hand the human approval to `/review-monitor` as a knock. Run `/review-monitor` so
-   the landing PR is registered, and post one CKPT line to the operator: PR URL,
-   parent id, child count, what to check. Its `ready_to_approve` channel bump or DM
-   escalation is the knock. The approval is the human's; never approve (ADR-0012,
-   D-12). This is the one deliberate exception to Phase 4's "Leave PR review and CI
-   watching alone", because the landing approval is a human gate.
+6. Hand the human approval to `/review-monitor` as a knock. First register the
+   landing PR as an author-role monitored PR. `/review-monitor` picks up a PR only
+   from its inbox, its config-gated `discover` list, or its orphan fast-path, and
+   the fast-path covers only `dev/` and `auto-dev/` heads, so an `epic/` landing PR
+   is not picked up on its own. Get the head SHA with
+   `gh pr view <N> --json headRefOid`, then run:
+
+   ```bash
+   ~/.claude/scripts/review_monitor.py register <N> --role author --repo <owner/repo> --repo-path <client-checkout> --sha <head-sha>
+   ~/.claude/scripts/review_monitor.py status
+   ```
+
+   The author role keeps the PR off `/review-monitor`'s reviewer-role approve path.
+   Then run `/review-monitor` and post one CKPT line to the operator: PR URL, parent
+   id, child count, what to check. The `ready_to_approve` channel bump or DM is the
+   knock only when `status` lists the PR as monitored; if it does not, the CKPT line
+   is the knock. The approval is the human's; never approve (ADR-0012, D-12). This
+   is the one deliberate exception to Phase 4's "Leave PR review and CI watching
+   alone", because the landing approval is a human gate.
 7. After the merge, the landing closes the children. Verify one with
-   `gh issue view <child> --json state`; a child still open is friction. Then delete
-   the epic branch as the operator action in the runbook, never before the PR is
-   MERGED.
+   `gh issue view <child> --json state`; a child still open is friction. The operator
+   deletes the epic branch (runbook). Before that, confirm every guard holds and
+   record the tip so the delete can be undone:
+   - the landing PR is MERGED, with `baseRefName` the default branch and
+     `headRefName` `epic/<parent-id>` (`gh pr view <N> --json state,baseRefName,headRefName`);
+   - `gh pr list --base epic/<parent-id> --state open` prints nothing;
+   - every row of the base is terminal (Land step 1).
+
+   Record the tip with `git ls-remote --heads origin epic/<parent-id>` and put its
+   SHA in the CKPT line. Never delete before the PR is MERGED.
 
 ## Anti-patterns
 
