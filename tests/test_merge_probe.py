@@ -473,13 +473,33 @@ class TestHeadKeyword:
             main={"c.txt": "c\n"},
         )
         git_in(repo, "merge", "--no-edit", "origin/main")
-        git_in(repo, "checkout", "-q", "-b", "third")
+        # HEAD is the pre-merge tip, which lacks main; "feature" has main merged.
+        git_in(repo, "checkout", "-q", "-b", "third", "HEAD~1")
 
         probe = probe_default_merge(repo, "main", head="feature")
 
         assert probe.state == "up_to_date"
 
-    def test_probe_clean_and_conflict_against_a_named_head(
+    def test_probe_conflict_against_a_named_head(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _diverged(
+            make_git_repo,
+            base={"shared.txt": "base\n"},
+            branch={"shared.txt": "feature\n"},
+            main={"shared.txt": "main\n"},
+        )
+        fork = git_in(repo, "merge-base", "feature", "origin/main")
+        git_in(repo, "checkout", "-q", "-b", "disjoint", fork)
+        _commit(repo, {"d.txt": "d\n"}, "disjoint change")
+        # HEAD (disjoint) merges cleanly with main; the named head "feature" conflicts.
+
+        conflict = probe_default_merge(repo, "main", head="feature")
+
+        assert conflict.state == "conflict"
+        assert conflict.conflicted_files == ("shared.txt",)
+
+    def test_probe_clean_against_a_named_head(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         repo = _diverged(
@@ -490,14 +510,11 @@ class TestHeadKeyword:
         )
         git_in(repo, "checkout", "-q", "-b", "third")
 
-        conflict = probe_default_merge(repo, "main", head="feature")
-        assert conflict.state == "conflict"
-        assert conflict.conflicted_files == ("shared.txt",)
-
         fork = git_in(repo, "merge-base", "feature", "origin/main")
         git_in(repo, "checkout", "-q", "-b", "disjoint", fork)
         disjoint_sha = _commit(repo, {"d.txt": "d\n"}, "disjoint change")
         git_in(repo, "checkout", "-q", "third")
+        # HEAD (third = feature tip) conflicts with main; the named head is clean.
         clean = probe_default_merge(repo, "main", head=disjoint_sha)
         assert clean.state == "clean"
 
