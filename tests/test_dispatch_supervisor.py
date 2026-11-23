@@ -680,6 +680,23 @@ def test_first_child_fast_failure_stops_immediately_without_retry(
     assert harness.events[0][1] == _gave_up_payload(1, 0)
 
 
+@pytest.mark.platform_sensitive
+@pytest.mark.parametrize("stop_signal", [signal.SIGINT, signal.SIGTERM])
+def test_stop_during_failed_start_backoff_spawns_no_new_child(
+    monkeypatch: pytest.MonkeyPatch, stop_signal: signal.Signals
+) -> None:
+    """A stop requested while backing off from a failed start is honoured."""
+    harness = _Harness(
+        monkeypatch,
+        [_stale_child(), _Script(exit_after=2, code=1), _Script(exit_after=5)],
+    )
+    harness.hooks.append(_once_at(64, _raise(stop_signal)))
+    harness.run()
+    assert len(harness.children) == 2
+    assert harness.other_sleeps() == [5.0]
+    assert harness.events == []
+
+
 def test_child_nonzero_after_healthy_run_is_not_restarted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

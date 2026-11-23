@@ -316,11 +316,14 @@ class _Supervisor:
                 _CHILD_FAILED_LINE.format(pid=self._child.pid, status=returncode),
                 returncode,
             )
-        self._record_start_failure(returncode)
-        return True
+        return self._record_start_failure(returncode)
 
-    def _record_start_failure(self, returncode: int) -> None:
-        """A child started after a re-exec failed fast: back off or give up."""
+    def _record_start_failure(self, returncode: int) -> bool:
+        """A child started after a re-exec failed fast: back off or give up.
+
+        True when a new child was started; False when a stop was requested
+        during the back-off (nothing is spawned).
+        """
         self._failures += 1
         if self._failures >= _START_FAILURE_LIMIT:
             self._stop_loudly(
@@ -333,7 +336,10 @@ class _Supervisor:
                 _SERVE_BACKOFF_CAP_SECONDS,
             )
         )
+        if self.stopping:
+            return False
         self._start_child(after_reexec=True)
+        return True
 
     def _stop_loudly(self, line: str, returncode: int) -> NoReturn:
         click.echo(line, err=True)
