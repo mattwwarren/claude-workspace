@@ -10,9 +10,12 @@ one comparison ``cw doctor`` (check ``dispatch-loop-code``) and
 The identity is the package version plus the commit of the source checkout,
 written with the loop's pid and start time into the singleton lock file
 (``cw.config.dispatch_loop_lock``), the one file only the holder writes. It is
-recorded once per process and never refreshed: nothing polls the checkout, and
-the loop never exits over a moved checkout (``_check_version_drift`` is the
-only self-exit, and it compares dist-info versions only).
+recorded once per process and never refreshed: nothing in the loop polls the
+checkout, and an unsupervised loop never exits over a moved checkout
+(``_check_version_drift`` is the only self-exit, and it compares dist-info
+versions only). A loop run by ``cw dev-queue serve --supervised`` (#3726)
+records its supervisor's pid as well; that supervisor polls this assessment
+and restarts the loop at an idle point when it goes STALE.
 
 Known limits:
 
@@ -31,9 +34,10 @@ Known limits:
   ``uv run cw ...`` from a feature worktree compares that worktree's HEAD
   against the loop's recorded tree and can report a spurious STALE.
 
-Leaf module: depends on ``cw.config``, ``cw._git`` and ``cw.local_runner``;
-none of them imports it. No logging and no events: a git failure degrades to
-an unknown commit, which the doctor check and the CLI line already surface.
+Leaf module: depends on ``cw.config``, ``cw._git``, ``cw.local_runner`` and
+``cw.dispatch_reexec``; none of them imports it. No logging and no events: a
+git failure degrades to an unknown commit, which the doctor check and the CLI
+line already surface.
 """
 
 from __future__ import annotations
@@ -51,6 +55,7 @@ import cw
 from cw._git import capture_head_sha
 from cw._predicates import is_positive_real_int
 from cw.config import PID_KEY, dispatch_loop_lock_file
+from cw.dispatch_reexec import supervised_by_parent
 from cw.local_runner import read_process_start_time_ns
 
 _CW_PACKAGE_NAME = "claude-workspace"
@@ -61,12 +66,18 @@ _COMMIT_LABEL_LEN = 12
 # second on some kernels; a recycled pid is off by far more than this.
 START_TIME_TOLERANCE_NS = 2_000_000_000
 _RESTART = "restart `cw dev-queue serve`"
+_SUPERVISED_RESTART = (
+    "its supervisor restarts it at the next idle tick once the new code passes"
+    " its import check; if it has not, check the supervisor's stderr"
+)
 # Keys of the loop's lock-file record the identity adds, written by
 # :func:`loop_record_fields`; ``cw.config.PID_KEY`` (imported above) is written
 # and read by ``cw.config.dispatch_loop_lock`` itself.
 PROC_START_KEY = "proc_start_ns"
 VERSION_KEY = "version"
 COMMIT_KEY = "commit"
+# Written only by a supervised loop (#3726); absent from every other record.
+SUPERVISOR_PID_KEY = "supervisor_pid"
 
 
 class LoopStatus(StrEnum):
@@ -107,6 +118,8 @@ class LoopAssessment:
     pid: int | None
     recorded: CodeIdentity | None
     current: CodeIdentity | None
+    # True only for a STALE loop whose recorded supervisor is alive (#3726).
+    supervised: bool = False
 
     @property
     def message(self) -> str:
@@ -117,9 +130,10 @@ class LoopAssessment:
         if self.status is LoopStatus.MATCH:
             return f"{loop} matches the checkout ({_label(self.current)})"
         if self.status is LoopStatus.STALE:
+            action = _SUPERVISED_RESTART if self.supervised else _RESTART
             return (
                 f"{loop} started on {_label(self.recorded)} but the checkout"
-                f" is at {_label(self.current)}; {_RESTART}"
+                f" is at {_label(self.current)}; {action}"
             )
         if self.recorded is None:
             return (
@@ -187,11 +201,14 @@ def process_code_identity() -> CodeIdentity:
 def loop_record_fields() -> dict[str, object]:
     """The identity keys the dispatch loop adds to its lock-file record."""
     identity = process_code_identity()
-    return {
+    fields: dict[str, object] = {
         PROC_START_KEY: read_process_start_time_ns(os.getpid()),
         VERSION_KEY: identity.version,
         COMMIT_KEY: identity.commit,
     }
+    if supervised_by_parent():
+        fields[SUPERVISOR_PID_KEY] = os.getppid()
+    return fields
 
 
 @dataclass(frozen=True)
@@ -200,6 +217,8 @@ class _LoopRecord:
     proc_start_ns: int | None
     # None for a record without the version key (a pre-#2729 loop).
     identity: CodeIdentity | None
+    # None for an unsupervised loop or a record older than #3726.
+    supervisor_pid: int | None = None
 
 
 def _str_or_none(value: object) -> str | None:
@@ -231,8 +250,12 @@ def _read_record() -> _LoopRecord | None:
         else None
     )
     proc_start = data.get(PROC_START_KEY)
+    supervisor = data.get(SUPERVISOR_PID_KEY)
     return _LoopRecord(
-        pid, proc_start if is_positive_real_int(proc_start) else None, identity
+        pid,
+        proc_start if is_positive_real_int(proc_start) else None,
+        identity,
+        supervisor if is_positive_real_int(supervisor) else None,
     )
 
 
@@ -272,6 +295,14 @@ def _judge(recorded: CodeIdentity, current: CodeIdentity) -> LoopStatus:
     return LoopStatus.MATCH if same else LoopStatus.STALE
 
 
+def _supervisor_alive(record: _LoopRecord) -> bool:
+    """The record names a supervisor pid that is a live process."""
+    return (
+        record.supervisor_pid is not None
+        and read_process_start_time_ns(record.supervisor_pid) is not None
+    )
+
+
 def assess_dispatch_loop() -> LoopAssessment:
     """Compare the live dispatch loop's recorded identity with the checkout."""
     record = _read_record()
@@ -286,6 +317,11 @@ def assess_dispatch_loop() -> LoopAssessment:
         return LoopAssessment(
             LoopStatus.IDENTITY_UNKNOWN, record.pid, record.identity, current
         )
+    status = _judge(record.identity, current)
     return LoopAssessment(
-        _judge(record.identity, current), record.pid, record.identity, current
+        status,
+        record.pid,
+        record.identity,
+        current,
+        supervised=status is LoopStatus.STALE and _supervisor_alive(record),
     )
