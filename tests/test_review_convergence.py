@@ -831,6 +831,7 @@ class TestOperatorAction:
         ledger, report = record(fresh_ledger(), finding, sha="s1")
         assert report.decision == "stop_operator_action"
         assert report.reason == "operator_action"
+        assert ledger.held == []
         assert ledger.stop_identities == [
             finding_identity("MUST_FIX", "N/A", "Rotate the key")
         ]
@@ -914,6 +915,7 @@ class TestSettledMemory:
         finding = operator_finding("Rotate the key")
         stopped, report = record(fresh_ledger(), finding, sha="s1")
         assert report.decision == "stop_operator_action"
+        assert stopped.held == []
         identity = stopped.stop_identities[0]
 
         settled, settle_report = operator_settle(
@@ -3928,6 +3930,7 @@ class TestEngineFingerprintThreading:
         )
 
         assert report.decision == "stop_operator_action"
+        assert ledger.held == []
         assert ledger.stop_identities[0].fingerprint == _FP
 
     def test_fixed_memory_keys_engine_finding_by_fingerprint(self) -> None:

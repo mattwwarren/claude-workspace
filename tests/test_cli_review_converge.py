@@ -67,6 +67,8 @@ from tests._cli_review_helpers import (
 )
 from tests._review_convergence_helpers import (
     FORK_POINT,
+    GAP_RATIONALE,
+    GAP_SUMMARY,
     LOOP_BACKEND,
     ROSTER,
     TICKET_ID,
@@ -75,6 +77,7 @@ from tests._review_convergence_helpers import (
     consolidated_verdict,
     fail_when,
     fresh_ledger,
+    held_gap,
     ledger_with_rounds,
     live_merge_base,
     make_review_client,
@@ -83,6 +86,7 @@ from tests._review_convergence_helpers import (
     overridden_confirm_ledger,
     patch_run_git,
     publish_develop,
+    real_fix,
     record,
     rewind_origin_main,
     round_finding,
@@ -828,6 +832,7 @@ class TestStopRelease:
         _init(runner, wt, ctx)
         stop = _round(runner, wt, "loop", LOOP_BACKEND, _head(wt), operator_finding())
         assert _out(stop)["decision"] == "stop_operator_action"
+        assert _stored(wt).held == []
         released = _out(_init(runner, wt, ctx))
         assert released["released"]["cause"] == "operator_action_done"
         status = _out(_converge(runner, wt, "status"))
@@ -4262,6 +4267,7 @@ class TestOperatorSettle:
         _init(runner, wt, ctx)
         stop = _round(runner, wt, "loop", LOOP_BACKEND, head, finding)
         assert _out(stop)["decision"] == "stop_operator_action"
+        assert _stored(wt).held == []
         status = _out(_converge(runner, wt, "status"))
         assert status["stop"]["identities"][0]["file"] == "N/A"
         payload = status["stop"]["settle_payload"]
@@ -4352,6 +4358,64 @@ class TestOperatorSettle:
         assert len(_out(result)["settled"]) == 1
         assert len([e for e in _stored(wt).settled if e.origin == "operator"]) == 1
         assert len(_settle_events()) == 1
+
+
+class TestHeldGapRounds:
+    """#3823: a Claude-native clean-mode ``record-round`` carrying an evidence gap."""
+
+    def test_a_held_only_round_stops_and_the_status_lists_the_gap(
+        self, runner: CliRunner, wt: Path, ctx: Path
+    ) -> None:
+        _init(runner, wt, ctx)
+        stop = _round(runner, wt, "loop", LOOP_BACKEND, _head(wt), held_gap())
+        assert stop.exit_code == 0, stop.stderr
+        assert _out(stop)["decision"] == "stop_operator_action"
+        stored = _stored(wt)
+        assert stored.rounds[-1].clean is False
+        assert stored.last_clean_sha is None
+        status = _out(_converge(runner, wt, "status"))
+        assert status["stop"]["reason"] == "operator_action"
+        (entry,) = status["stop"]["settle_payload"]["entries"]
+        assert entry["file"] == "N/A"
+        assert entry["summary"] == GAP_SUMMARY
+
+    def test_a_mixed_round_continues_then_an_empty_round_stops_on_the_gap(
+        self, runner: CliRunner, wt: Path, ctx: Path
+    ) -> None:
+        _init(runner, wt, ctx)
+        mixed = _round(
+            runner, wt, "loop", LOOP_BACKEND, _head(wt), held_gap(), real_fix()
+        )
+        assert _out(mixed)["decision"] == "continue"
+        assert [e.rationale for e in _stored(wt).held] == [GAP_RATIONALE]
+        empty = _round(runner, wt, "loop", LOOP_BACKEND, _head(wt))
+        assert _out(empty)["decision"] == "stop_operator_action"
+        assert _stored(wt).last_clean_sha is None
+        status = _out(_converge(runner, wt, "status"))
+        (entry,) = status["stop"]["settle_payload"]["entries"]
+        assert entry["summary"] == GAP_SUMMARY
+
+    def test_operator_settle_then_requeue_then_an_empty_round_is_clean(
+        self, runner: CliRunner, wt: Path, ctx: Path
+    ) -> None:
+        head = _head(wt)
+        _park(wt)
+        _init(runner, wt, ctx)
+        stop = _round(runner, wt, "loop", LOOP_BACKEND, head, held_gap())
+        assert _out(stop)["decision"] == "stop_operator_action"
+        payload = _out(_converge(runner, wt, "status"))["stop"]["settle_payload"]
+
+        settled = _operator_settle(runner, payload)
+        assert settled.exit_code == 0, settled.stdout + settled.stderr
+        assert len(_out(settled)["settled"]) == 1
+        assert _out(settled)["releasable"] is True
+
+        released = _out(_init(runner, wt, ctx))
+        assert released["released"]["cause"] == "operator_action_done"
+        assert _stored(wt).held == []
+        after = _round(runner, wt, "loop", LOOP_BACKEND, head)
+        assert _out(after)["decision"] == "confirm_required"
+        assert _stored(wt).rounds[-1].clean is True
 
 
 class TestOperatorSettleRefusals:
@@ -4965,6 +5029,7 @@ def _stage_engine_operator_action(
         fresh_ledger(ticket_id=ticket_id), _engine_na_finding(), sha=_head(wt)
     )
     assert report.decision == "stop_operator_action"
+    assert ledger.held == []
     write_ledger(wt, ledger)
     return _ledger_path(wt).read_bytes()
 
