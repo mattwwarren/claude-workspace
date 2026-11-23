@@ -314,9 +314,11 @@ def dev_queue_resolve(
     Restart `cw dev-queue serve` before using this command: a dispatch loop
     older than the release that ships `resolve` rewrites the queue without
     the ledger and erases recorded resolutions. `cw dev-queue resolve` and
-    `approve` print a `warning:` line on stderr, and never block the write,
+    `approve` print a `warning:` line on stderr, and never refuse the write,
     when the running dispatch loop's code identity differs from the checkout;
-    a loop that recorded no identity prints a `note:` line instead.
+    a loop that recorded no identity prints a `note:` line instead. For a
+    loop run by `cw dev-queue serve --supervised` they first wait up to 90s
+    for its supervisor to restart it onto the checkout.
     `cw doctor` reports the same check as `dispatch-loop-code`.
     """
     refuse_inside_dispatch_worker(_RESOLVE_IN_WORKER_MSG)
