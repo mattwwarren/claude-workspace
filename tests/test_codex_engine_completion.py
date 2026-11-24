@@ -9,6 +9,7 @@ an event. Shared helpers and the ``engine_repo``, ``checker_tmpdir`` and
 
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 from pathlib import Path
@@ -19,6 +20,8 @@ from pydantic import ValidationError
 
 from cw.codex_review import _engine_completion
 from cw.codex_review._engine_completion import (
+    MAX_COMPLETION_DETAIL_CHARS,
+    MAX_COMPLETION_RESULT_BYTES,
     CompletionResult,
     _checker_env,
     _checker_in_tree,
@@ -88,6 +91,19 @@ with open(os.path.join(EV, "result.json"), "w") as fh:
     json.dump({{"schema": 1, "head_sha": {head}, "round_id": {rid},
                "status": {status!r}, "roles_covered": {roles},
                "detail": "x"}}, fh)
+"""
+    )
+
+
+def _result_with(overrides: dict[str, object]) -> str:
+    """A checker whose otherwise-valid result carries *overrides* (a bad field)."""
+    return _checker(
+        f"""
+data = {{"schema": 1, "head_sha": HEAD, "round_id": RID, "status": "complete",
+        "roles_covered": ROLES, "detail": "x"}}
+data.update({overrides!r})
+with open(os.path.join(EV, "result.json"), "w") as fh:
+    json.dump(data, fh)
 """
     )
 
@@ -285,8 +301,27 @@ def test_status_failed_blocks_non_retryable(
             _checker("os.symlink('/etc/hostname', os.path.join(EV, 'result.json'))\n"),
             "result_invalid",
         ),
+        (
+            _checker("open(os.path.join(EV, 'result.json'), 'w').write('not json')\n"),
+            "result_invalid",
+        ),
+        (_result_with({"roles_covered": "security,quality"}), "result_invalid"),
+        (_result_with({"status": "done"}), "result_invalid"),
+        (
+            _result_with({"detail": "d" * (MAX_COMPLETION_DETAIL_CHARS + 1)}),
+            "result_invalid",
+        ),
     ],
-    ids=["exit-nonzero", "result-missing", "result-invalid", "result-symlink"],
+    ids=[
+        "exit-nonzero",
+        "result-missing",
+        "result-invalid",
+        "result-symlink",
+        "result-unparseable",
+        "result-wrong-type",
+        "result-unknown-status",
+        "result-detail-too-long",
+    ],
 )
 def test_checker_failure_rows_block_non_retryable(
     make_git_repo: Callable[..., Path], tmp_path: Path, body: str, reason: str
@@ -532,6 +567,49 @@ def test_completion_result_schema_must_be_one() -> None:
         CompletionResult.model_validate_json(raw)
 
 
+def _valid_result(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "schema": 1,
+        "head_sha": "a",
+        "round_id": "r",
+        "status": "complete",
+        "roles_covered": ["security"],
+        "detail": "d",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_completion_result_accepts_a_valid_payload_at_the_detail_cap() -> None:
+    detail = "d" * MAX_COMPLETION_DETAIL_CHARS
+    raw = json.dumps(_valid_result(detail=detail)).encode()
+    result = CompletionResult.model_validate_json(raw)
+    assert result.detail == detail
+    assert result.status == "complete"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _valid_result(detail="d" * (MAX_COMPLETION_DETAIL_CHARS + 1)),
+        {k: v for k, v in _valid_result().items() if k != "roles_covered"},
+        _valid_result(status="done"),
+        _valid_result(roles_covered="security"),
+        _valid_result(schema="1"),
+    ],
+    ids=[
+        "detail-too-long",
+        "missing-roles-covered",
+        "unknown-status",
+        "roles-covered-string",
+        "schema-string",
+    ],
+)
+def test_completion_result_rejects_invalid_payload(payload: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        CompletionResult.model_validate_json(json.dumps(payload).encode())
+
+
 def test_unknown_completion_reason_is_rejected() -> None:
     message = "unknown completion failure reason"
     with pytest.raises(ValueError, match=message):
@@ -540,6 +618,24 @@ def test_unknown_completion_reason_is_rejected() -> None:
 
 def test_read_result_refuses_oversized(tmp_path: Path) -> None:
     (tmp_path / "result.json").write_bytes(b" " * 70_000)
+    failure = _read_result(tmp_path)
+    assert not isinstance(failure, CompletionResult)
+    assert failure.detail == "engine_completion_check_failed: result_invalid"
+
+
+def _padded_result(tmp_path: Path, size: int) -> None:
+    body = json.dumps(_valid_result()).encode()
+    assert len(body) <= size
+    (tmp_path / "result.json").write_bytes(body + b" " * (size - len(body)))
+
+
+def test_read_result_accepts_exactly_the_byte_cap(tmp_path: Path) -> None:
+    _padded_result(tmp_path, MAX_COMPLETION_RESULT_BYTES)
+    assert isinstance(_read_result(tmp_path), CompletionResult)
+
+
+def test_read_result_refuses_one_byte_over_the_cap(tmp_path: Path) -> None:
+    _padded_result(tmp_path, MAX_COMPLETION_RESULT_BYTES + 1)
     failure = _read_result(tmp_path)
     assert not isinstance(failure, CompletionResult)
     assert failure.detail == "engine_completion_check_failed: result_invalid"
