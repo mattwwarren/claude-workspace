@@ -2,7 +2,9 @@
 
 One home for the factories ``test_review_convergence.py``,
 ``test_cli_review_converge.py``, ``test_cli_review_confirm.py`` and
-``test_queue_peek_convergence.py`` all need, in the style of
+``test_queue_peek_convergence.py`` and the clean-sha remap tests
+(``test_review_convergence_remap.py``, ``test_repair_fence.py``,
+``test_changelog_repair_ledger_remap.py``) all need, in the style of
 ``tests/_cli_review_helpers.py``, so no test file grows its own copy.
 
 Every ledger here is built THROUGH the real engine (``record_round``), never a
@@ -27,6 +29,7 @@ from cw.models import ClientConfig
 from cw.models.client import ReviewConfig
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
+    CleanShaRemap,
     ConvergenceLedger,
     RoundFinding,
     RoundInput,
@@ -443,6 +446,28 @@ def write_ledger(worktree: Path, ledger: ConvergenceLedger) -> Path:
     path = worktree / LEDGER_RELATIVE_PATH
     save_ledger(path, ledger)
     return path
+
+
+REMAP_OLD_SHA = "old-head-sha"
+REMAP_NEW_SHA = "new-head-sha"
+REMAP_AT = "2026-11-07T12:00:00Z"
+
+
+def clean_sha_remap(**fields: object) -> CleanShaRemap:
+    """A clean-sha remap from ``REMAP_OLD_SHA`` to ``REMAP_NEW_SHA``.
+
+    *fields* override any default.
+    """
+    base: dict[str, object] = {
+        "at": REMAP_AT,
+        "recipe": "repair_changelog_conflict",
+        "from_sha": REMAP_OLD_SHA,
+        "rebased_sha": "rebased-sha",
+        "to_sha": REMAP_NEW_SHA,
+        "commits": 2,
+    }
+    base.update(fields)
+    return CleanShaRemap.model_validate(base)
 
 
 #: The file ``branch_that_merged_main`` lands on ``origin/main`` only, so a diff

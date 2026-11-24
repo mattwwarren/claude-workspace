@@ -12,63 +12,52 @@ import json
 import pytest
 
 from cw.review_convergence import (
-    CleanShaRemap,
     ConvergenceLedger,
     evaluate_tip,
     remap_clean_sha,
 )
-from tests._review_convergence_helpers import confirmed_ledger
-
-OLD = "old-head-sha"
-REBASED = "rebased-sha"
-NEW = "new-head-sha"
-AT = "2026-11-07T12:00:00Z"
-RECIPE = "repair_changelog_conflict"
-
-
-def _remap(**fields: object) -> CleanShaRemap:
-    base: dict[str, object] = {
-        "at": AT,
-        "recipe": RECIPE,
-        "from_sha": OLD,
-        "rebased_sha": REBASED,
-        "to_sha": NEW,
-        "commits": 2,
-    }
-    base.update(fields)
-    return CleanShaRemap.model_validate(base)
+from tests._review_convergence_helpers import (
+    REMAP_NEW_SHA,
+    REMAP_OLD_SHA,
+    clean_sha_remap,
+    confirmed_ledger,
+)
 
 
 def _converged() -> ConvergenceLedger:
-    ledger = confirmed_ledger(sha=OLD)
-    assert ledger.last_clean_sha == OLD
+    ledger = confirmed_ledger(sha=REMAP_OLD_SHA)
+    assert ledger.last_clean_sha == REMAP_OLD_SHA
     return ledger
 
 
 def test_happy_path_moves_only_the_clean_sha_and_audits_it() -> None:
     ledger = _converged()
-    remap = _remap()
+    remap = clean_sha_remap()
 
     result = remap_clean_sha(ledger, remap)
 
     assert isinstance(result, ConvergenceLedger)
-    assert result.last_clean_sha == NEW
+    assert result.last_clean_sha == REMAP_NEW_SHA
     assert result.clean_sha_remaps == [remap]
     assert result.rounds == ledger.rounds
     assert result.status == ledger.status
     assert result.checkpoint_3a_sha == ledger.checkpoint_3a_sha
     assert result.fork_point == ledger.fork_point
-    assert ledger.last_clean_sha == OLD
+    assert ledger.last_clean_sha == REMAP_OLD_SHA
     assert ledger.clean_sha_remaps == []
 
 
 def test_remapped_ledger_is_accepted_by_the_unchanged_strict_tip_rule() -> None:
     ledger = _converged()
-    remapped = remap_clean_sha(ledger, _remap())
+    remapped = remap_clean_sha(ledger, clean_sha_remap())
     assert isinstance(remapped, ConvergenceLedger)
 
-    accepted = evaluate_tip(remapped, head_sha=NEW, origin_tip_sha=NEW)
-    baseline = evaluate_tip(ledger, head_sha=NEW, origin_tip_sha=NEW)
+    accepted = evaluate_tip(
+        remapped, head_sha=REMAP_NEW_SHA, origin_tip_sha=REMAP_NEW_SHA
+    )
+    baseline = evaluate_tip(
+        ledger, head_sha=REMAP_NEW_SHA, origin_tip_sha=REMAP_NEW_SHA
+    )
 
     assert accepted.decision == "accepted"
     assert baseline.decision == "rereview_required"
@@ -77,12 +66,12 @@ def test_remapped_ledger_is_accepted_by_the_unchanged_strict_tip_rule() -> None:
 
 def test_no_rebuilt_changelog_commit_remaps_to_the_rebased_head() -> None:
     ledger = _converged()
-    remap = _remap(rebased_sha=NEW)
+    remap = clean_sha_remap(rebased_sha=REMAP_NEW_SHA)
 
     result = remap_clean_sha(ledger, remap)
 
     assert isinstance(result, ConvergenceLedger)
-    assert result.last_clean_sha == NEW
+    assert result.last_clean_sha == REMAP_NEW_SHA
 
 
 @pytest.mark.parametrize(
@@ -93,7 +82,7 @@ def test_no_rebuilt_changelog_commit_remaps_to_the_rebased_head() -> None:
         ({"awaiting_confirm_sha": "pending"}, {}, "awaiting_confirm_sha"),
         ({"last_clean_sha": None}, {}, "no last_clean_sha"),
         ({"last_clean_sha": "tolerated-past"}, {}, "not the remap source"),
-        ({}, {"to_sha": OLD}, "same sha"),
+        ({}, {"to_sha": REMAP_OLD_SHA}, "same sha"),
     ],
 )
 def test_refusals_return_a_reason_and_leave_the_input_alone(
@@ -104,7 +93,7 @@ def test_refusals_return_a_reason_and_leave_the_input_alone(
     ledger = _converged().model_copy(update=update)
     before = ledger.model_dump()
 
-    result = remap_clean_sha(ledger, _remap(**remap_fields))
+    result = remap_clean_sha(ledger, clean_sha_remap(**remap_fields))
 
     assert isinstance(result, str)
     assert reason_fragment in result
@@ -121,9 +110,9 @@ def test_ledger_without_the_audit_field_loads_with_an_empty_list() -> None:
 
 
 def test_audit_entries_round_trip_through_json() -> None:
-    remapped = remap_clean_sha(_converged(), _remap())
+    remapped = remap_clean_sha(_converged(), clean_sha_remap())
     assert isinstance(remapped, ConvergenceLedger)
 
     reloaded = ConvergenceLedger.model_validate_json(remapped.model_dump_json())
 
-    assert reloaded.clean_sha_remaps == [_remap()]
+    assert reloaded.clean_sha_remaps == [clean_sha_remap()]

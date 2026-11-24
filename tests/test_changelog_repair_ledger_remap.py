@@ -4,12 +4,13 @@ Hermetic: ``ScriptedGit`` stands in for ``run_git``, ``FakeGhHead`` for the gh
 head read and disarm, ``FakeArmScript`` for the arm subprocess, and the ledger is
 a real file under a tmp worktree. Tests assert outcomes (ledger bytes, arm
 called, events), not git wording. Real-git proof coverage lives in
-``tests/test_repair_remap.py`` and ``tests/test_changelog_repair_real_git.py``.
+``tests/test_repair_proof.py`` and ``tests/test_changelog_repair_real_git.py``.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -19,6 +20,7 @@ from cw.models import ClientConfig
 from cw.reconcile.review_recipes import RECIPE_REPAIR_CHANGELOG_CONFLICT, repair_ledger
 from cw.reconcile.review_recipes import repair_engine as engine
 from cw.reconcile.review_recipes.repair_engine import dispatch_repair
+from cw.reconcile.review_recipes.repair_fence import FenceVerdict
 from cw.repair_disposition import RepairDisposition as D
 from cw.review_convergence import (
     LEDGER_RELATIVE_PATH,
@@ -53,7 +55,14 @@ from tests._changelog_repair_helpers import EXPECTED_SHA as OLD_SHA
 from tests._changelog_repair_helpers import attention as _attention
 from tests._changelog_repair_helpers import failed as _failed
 from tests._changelog_repair_helpers import taken as _taken
-from tests._review_convergence_helpers import confirmed_ledger, write_ledger
+from tests._review_convergence_helpers import (
+    REMAP_NEW_SHA,
+    REMAP_OLD_SHA,
+    TICKET_ID,
+    clean_sha_remap,
+    confirmed_ledger,
+    write_ledger,
+)
 
 pytestmark = pytest.mark.usefixtures("repair_events")
 
@@ -661,3 +670,130 @@ def test_merge_base_that_cannot_be_derived_stops_before_any_rewrite(
     (failed,) = _failed()
     assert failed["disposition"] == D.CONFLICT_UNEXPLAINED.value
     assert "rebase" not in [argv[0] for argv in proven.stripped()]
+
+
+# --- persist_remap -----------------------------------------------------------
+
+
+def test_persist_writes_the_remap_when_the_pre_image_matches(tmp_path: Path) -> None:
+    before = confirmed_ledger(sha=REMAP_OLD_SHA)
+    path = write_ledger(tmp_path, before)
+    after = before.model_copy(update={"last_clean_sha": REMAP_NEW_SHA})
+
+    assert repair_ledger.persist_remap(path, before, after) is None
+
+    assert load_ledger(path) == after
+
+
+def test_persist_refuses_a_ledger_changed_since_the_fence(tmp_path: Path) -> None:
+    before = confirmed_ledger(sha=REMAP_OLD_SHA)
+    path = write_ledger(tmp_path, confirmed_ledger(sha="someone-else"))
+
+    reason = repair_ledger.persist_remap(
+        path, before, before.model_copy(update={"last_clean_sha": REMAP_NEW_SHA})
+    )
+
+    assert reason is not None
+    assert "changed since the fence read it" in reason
+
+
+def test_persist_refuses_a_vanished_ledger(tmp_path: Path) -> None:
+    before = confirmed_ledger(sha=REMAP_OLD_SHA)
+
+    reason = repair_ledger.persist_remap(
+        tmp_path / LEDGER_RELATIVE_PATH, before, before
+    )
+
+    assert reason is not None
+    assert "vanished" in reason
+
+
+def test_persist_refuses_an_unreadable_ledger(tmp_path: Path) -> None:
+    path = tmp_path / LEDGER_RELATIVE_PATH
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json", encoding="utf-8")
+
+    reason = repair_ledger.persist_remap(
+        path, confirmed_ledger(sha=REMAP_OLD_SHA), confirmed_ledger(sha=REMAP_NEW_SHA)
+    )
+
+    assert reason is not None
+    assert "unreadable before the remap write" in reason
+
+
+def test_persist_reports_a_failed_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = confirmed_ledger(sha=REMAP_OLD_SHA)
+    path = write_ledger(tmp_path, before)
+
+    def boom(_path: Path, _ledger: ConvergenceLedger) -> None:
+        disk_full = "disk full"
+        raise OSError(disk_full)
+
+    monkeypatch.setattr(repair_ledger, "save_ledger", boom)
+
+    reason = repair_ledger.persist_remap(
+        path, before, before.model_copy(update={"last_clean_sha": REMAP_NEW_SHA})
+    )
+
+    assert reason is not None
+    assert "write failed (OSError: disk full)" in reason
+
+
+# --- engine: apply the persist -----------------------------------------------
+
+
+def _job_and_state(ledger_path: Path, remap: CleanShaRemap) -> tuple[Any, Any, Any]:
+    job = SimpleNamespace(
+        client="client",
+        ticket_id=TICKET_ID,
+        fence=SimpleNamespace(ledger_path=ledger_path),
+    )
+    prep = SimpleNamespace(pr_number=7)
+    state = SimpleNamespace(clean_remap=remap)
+    return job, prep, state
+
+
+def test_apply_remap_persists_and_keeps_the_passing_verdict(tmp_path: Path) -> None:
+    before = confirmed_ledger(sha=REMAP_OLD_SHA)
+    path = write_ledger(tmp_path, before)
+    remap = clean_sha_remap()
+    remapped = before.model_copy(update={"last_clean_sha": REMAP_NEW_SHA})
+    verdict = FenceVerdict(True, "not_required", None, "ok", remapped, before)
+    job, prep, state = _job_and_state(path, remap)
+
+    result = engine._apply_remap(job, prep, verdict, state)
+
+    assert result.passed is True
+    assert load_ledger(path) == remapped
+
+
+def test_apply_remap_fails_the_fence_when_the_write_is_refused(tmp_path: Path) -> None:
+    before = confirmed_ledger(sha=REMAP_OLD_SHA)
+    path = write_ledger(tmp_path, confirmed_ledger(sha="moved-on"))
+    remap = clean_sha_remap()
+    verdict = FenceVerdict(
+        True,
+        "not_required",
+        None,
+        "ok",
+        before.model_copy(update={"last_clean_sha": REMAP_NEW_SHA}),
+        before,
+    )
+    job, prep, state = _job_and_state(path, remap)
+
+    result = engine._apply_remap(job, prep, verdict, state)
+
+    assert result.passed is False
+    assert result.tip_reason == "commits_after_clean_round"
+    assert "ledger remap not written" in result.detail
+
+
+def test_apply_remap_passes_a_verdict_without_a_remap_through(tmp_path: Path) -> None:
+    verdict = FenceVerdict(True, "not_required", None, "ok")
+    job, prep, state = _job_and_state(
+        tmp_path / LEDGER_RELATIVE_PATH, clean_sha_remap()
+    )
+
+    assert engine._apply_remap(job, prep, verdict, state) is verdict
