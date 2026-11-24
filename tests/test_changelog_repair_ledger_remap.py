@@ -64,7 +64,10 @@ from tests._review_convergence_helpers import (
     write_ledger,
 )
 
-pytestmark = pytest.mark.usefixtures("repair_events")
+pytestmark = [
+    pytest.mark.usefixtures("repair_events"),
+    pytest.mark.release_cut,
+]
 
 FROZEN_STAMP = "2026-11-07T12:00:00Z"
 COMMITS_CARRIED = 1

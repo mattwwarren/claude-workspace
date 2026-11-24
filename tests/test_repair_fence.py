@@ -43,6 +43,8 @@ from tests._review_convergence_helpers import (
 from tests._shared.git_repos import git_in
 from tests.test_reconcile_gate_recipes import _client_with_lanes, _make_task
 
+pytestmark = pytest.mark.release_cut
+
 
 def _snapshot(**fields: object) -> FenceSnapshot:
     base = FenceSnapshot(

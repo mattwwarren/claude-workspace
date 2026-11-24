@@ -29,6 +29,8 @@ import pytest
 
 from tests._shared.workflow_text import _REPO_ROOT
 
+pytestmark = pytest.mark.release_cut
+
 # A release-boundary anchor: an ``[Unreleased]`` heading, a version heading
 # (``## [1.82.0]``), or the bare next-heading boundary ``"\n## ["``.
 _ANCHOR = re.compile(r"## \[(?:Unreleased|\d|$)")

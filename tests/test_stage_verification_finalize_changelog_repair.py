@@ -28,6 +28,8 @@ from tests._codex_review_helpers import merge_view
 from tests._git_sandbox import run as git_run
 from tests._shared.git_repos import git_in
 
+pytestmark = pytest.mark.release_cut
+
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path

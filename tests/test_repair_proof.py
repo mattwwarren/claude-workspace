@@ -77,6 +77,8 @@ from tests._changelog_repair_helpers import (
 )
 from tests._shared.git_repos import git_in
 
+pytestmark = pytest.mark.release_cut
+
 FROZEN = "2026-11-07T12:00:00Z"
 UNION_ATTRIBUTE = "CHANGELOG.md merge=union\n"
 SCRATCH = Path("scratch")
