@@ -8,6 +8,9 @@ without an entry fall through to the rule commands alone.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+from cw.auto_dev_result import REVIEW_OPERATOR_ACTIONABLE_BLOCKER_REASON
 from cw.dev_queue.dispositions import (
     AWAITING_CI_EVIDENCE_DISPOSITION,
     AWAITING_OPERATOR_DISPOSITION,
@@ -27,6 +30,9 @@ from cw.dev_queue.gates import (
     PREMISES_PENDING_VERIFICATION_STATUS,
 )
 from cw.models.enums import DEPENDENCY_HOLD_DISPOSITION
+
+if TYPE_CHECKING:
+    from cw.models import TicketTask
 
 RESOLVE_COMMAND = "cw dev-queue resolve --file <decisions.md>"
 
@@ -132,3 +138,32 @@ PARK_GUIDANCE: dict[str, str] = {
         " draining held tickets, releases it."
     ),
 }
+
+
+# Why a parked row with this blocked_reason sits where it does (#3862). Keyed by
+# blocker, because the review_operator_actionable park carries one blocked_reason
+# for three producers (a decision contest, an operator checklist, an evidence
+# gap). The text is honest-conditional: it never claims delivery for every park.
+BLOCKER_GUIDANCE: dict[str, str] = {
+    REVIEW_OPERATOR_ACTIONABLE_BLOCKER_REASON: (
+        "A review_operator_actionable park holds a finding for the operator. A"
+        " decision contest or an operator-action checklist is released by"
+        " `cw review settle` (or doing the checklist), then a plain"
+        " `cw dev-queue requeue`; `--stage impl --regress` delivers nothing for"
+        " those, and on a clean-mode ledger an unsettled contest in any round also"
+        " withholds a later evidence-gap finding until it is settled. Only an"
+        " evidence-gap hold whose review verdict is still saved is delivered by"
+        " `requeue --stage impl --regress` (the codex lane's"
+        " `.claude/review-verdict.json`, or a clean-mode ledger round verdict); the"
+        " requeue echo says `delivered` or `withheld (<reason>)`. A Claude-native"
+        " blocking-mode park saves no verdict and is withheld: settle the finding"
+        " or provide the missing capability, then requeue."
+    ),
+}
+
+
+def guidance_for(task: TicketTask) -> str | None:
+    """The guidance a refusal prepends: the disposition's entry, else the blocker's."""
+    return PARK_GUIDANCE.get(task.disposition or "") or BLOCKER_GUIDANCE.get(
+        task.blocked_reason or ""
+    )

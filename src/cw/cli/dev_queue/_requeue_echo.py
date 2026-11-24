@@ -82,7 +82,8 @@ _FINDINGS_UNREADABLE = (
 )
 _FINDINGS_DELIVERED = (
     "  regress_review_findings: delivered (reviewed_sha {sha}). The IMPL run"
-    " receives the REVIEW verdict's blocking findings from the worktree."
+    " receives the REVIEW verdict's blocking findings and any held evidence-gap"
+    " findings from the worktree."
     " opencode and local IMPL runs receive nothing."
 )
 _FINDINGS_WITHHELD = (

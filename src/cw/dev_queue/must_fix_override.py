@@ -431,11 +431,16 @@ class VerdictRead(NamedTuple):
     detail: str
 
 
-def read_owned_verdict(path: Path, ticket_id: str) -> VerdictRead:
-    """Read *path* and require it to be *ticket_id*'s and blocking.
+def read_owned_verdict(
+    path: Path, ticket_id: str, *, require_blocking: bool = True
+) -> VerdictRead:
+    """Read *path* and require it to be *ticket_id*'s (and blocking, by default).
 
     ``artifact_missing`` covers an absent, unreadable or invalid file (the
     override gate's "could not read" and "not a valid review verdict" cases).
+    With ``require_blocking=False`` the caller owns the blocking decision: a
+    non-blocking verdict is returned as-is (the regress rule's held evidence-gap
+    holds live in non-blocking verdicts). The override gate keeps the default.
     """
     try:
         text = path.read_text(encoding="utf-8")
@@ -461,7 +466,7 @@ def read_owned_verdict(path: Path, ticket_id: str) -> VerdictRead:
             f"{path} belongs to ticket {envelope.ticket_id!r}, so it is stale or"
             " foreign",
         )
-    if not envelope.verdict.blocking:
+    if require_blocking and not envelope.verdict.blocking:
         return VerdictRead(
             None,
             "not_blocking",

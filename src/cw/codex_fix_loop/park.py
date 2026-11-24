@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from cw.auto_dev_result import REVIEW_OPERATOR_ACTIONABLE_BLOCKER_REASON
 from cw.codex_fix_loop.convergence import _survivors_only_verdict
 from cw.codex_fix_loop.coverage import NO_DELTA_GAP
 from cw.codex_fix_loop.snapshot import _finalize_snapshot, _with_snapshot_pointer
@@ -52,7 +53,7 @@ _ESCALATE_AT_CYCLE = 3
 # #2984: the decided-constraint contest park reuses the documented reason the
 # codex synthesis also parks a contested cycle 0 with. #3793: a converged loop
 # still holding an evidence gap parks with it too (see `_held_exit`).
-_REVIEW_OPERATOR_ACTIONABLE = "review_operator_actionable"
+_REVIEW_OPERATOR_ACTIONABLE = REVIEW_OPERATOR_ACTIONABLE_BLOCKER_REASON
 
 
 def _finalize_review(

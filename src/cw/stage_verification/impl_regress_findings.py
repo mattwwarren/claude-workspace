@@ -16,25 +16,34 @@ on every IMPL retry until the next REVIEW pass rewrites the verdict.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, NamedTuple
 
 from cw.context_queue_metadata import REGRESS_REVIEW_FINDINGS_KEY
 from cw.dev_queue.must_fix_override import read_owned_verdict
 from cw.models import Stage
 from cw.models.review_feedback import MAX_REVIEW_REPORT_BYTES
 from cw.models.tasks.schema import REGRESSED_OWN_BRANCH_HIGH_WATER
-from cw.review_findings import REVIEW_VERDICT_JSON_RELATIVE_PATH
+from cw.review_findings import (
+    REVIEW_VERDICT_JSON_RELATIVE_PATH,
+    has_held_findings,
+    held_findings,
+)
+from cw.stage_verification.impl_regress_ledger import read_held_round_verdict
 from cw.stage_verification.posted_text import TRUNCATION_MARKER, redact_and_cap
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import TicketTask
-    from cw.review_findings import Finding
+    from cw.review_findings import Finding, ReviewVerdict
 
 #: Why the rule withheld delivery. ``artifact_missing`` covers an absent,
-#: unreadable or invalid verdict; ``not_blocking`` covers a non-blocking verdict
-#: and a blocking one with nothing in ``must_fix``.
+#: unreadable or invalid verdict; ``not_owned`` covers a foreign verdict and a
+#: ledger round recorded for another head; ``not_blocking`` covers a verdict
+#: with no deliverable finding: no blocking ``must_fix`` and no held
+#: evidence-gap finding, a clean-mode ledger none of whose listed rounds holds a
+#: held finding, or one whose listed round holds an unsettled decision contest
+#: (the contest withholds every gap finding until ``cw review settle``).
 WithheldReason = Literal[
     "review_feedback_present",
     "override_present",
@@ -90,6 +99,11 @@ def _render(must_fix: list[Finding]) -> str:
         f"{index}. [{finding.severity}] {finding.file}\n"
         f"   summary: {finding.summary}\n"
         f"   evidence: {finding.evidence}"
+        + (
+            f"\n   evidence gap (not verified by the reviewer): {finding.evidence_gap}"
+            if finding.evidence_gap and finding.evidence_gap.strip()
+            else ""
+        )
         for index, finding in enumerate(must_fix, start=1)
     ]
     capped = redact_and_cap(
@@ -114,8 +128,46 @@ def _applies(task: TicketTask) -> bool:
     )
 
 
+class _Loaded(NamedTuple):
+    """The verdict the rule reads, its refusal when absent, and its source."""
+
+    verdict: ReviewVerdict | None
+    reason: WithheldReason | None
+    from_ledger: bool
+
+
+def _load_verdict(task: TicketTask, worktree: Path) -> _Loaded:
+    """Read the codex envelope; fall back to the clean-mode ledger when it is absent."""
+    read = read_owned_verdict(
+        worktree / REVIEW_VERDICT_JSON_RELATIVE_PATH,
+        task.ticket_id,
+        require_blocking=False,
+    )
+    if read.verdict is not None:
+        return _Loaded(read.verdict, None, from_ledger=False)
+    if read.refusal != ARTIFACT_MISSING:
+        return _Loaded(None, _refusal_reason(read.refusal), from_ledger=False)
+    ledger = read_held_round_verdict(worktree, task.ticket_id)
+    if ledger.verdict is not None:
+        return _Loaded(ledger.verdict, None, from_ledger=True)
+    return _Loaded(None, _refusal_reason(ledger.refusal), from_ledger=True)
+
+
+def _deliverable(verdict: ReviewVerdict, *, with_must_fix: bool) -> list[Finding]:
+    """The findings the rule may deliver from one verdict, in delivery order.
+
+    A decision contest anywhere in the verdict withholds the evidence-gap holds
+    beside it (R5); ``must_fix`` survivors still deliver. Duplicates cannot
+    occur: held findings sit in ``accepted`` and are excluded from ``must_fix``.
+    """
+    must_fix = list(verdict.must_fix) if with_must_fix and verdict.blocking else []
+    if has_held_findings(verdict, "decision_contest"):
+        return must_fix
+    return [*must_fix, *(af.finding for af in held_findings(verdict, "evidence_gap"))]
+
+
 def regress_review_findings(task: TicketTask, worktree: Path) -> RegressOutcome | None:
-    """Decide whether the REVIEW verdict's MUST_FIX findings reach this IMPL run.
+    """Decide whether the REVIEW verdict's findings reach this IMPL run.
 
     ``None`` means the rule does not apply (not an IMPL row, or the high water
     is not REVIEW or FINALIZE): nothing is read, printed or recorded.
@@ -126,17 +178,15 @@ def regress_review_findings(task: TicketTask, worktree: Path) -> RegressOutcome 
         return RegressOutcome(None, REVIEW_FEEDBACK_PRESENT)
     if task.must_fix_override is not None:
         return RegressOutcome(None, OVERRIDE_PRESENT)
-    read = read_owned_verdict(
-        worktree / REVIEW_VERDICT_JSON_RELATIVE_PATH, task.ticket_id
-    )
-    if read.verdict is None:
-        return RegressOutcome(None, _refusal_reason(read.refusal))
-    verdict = read.verdict
-    if not verdict.must_fix:
+    loaded = _load_verdict(task, worktree)
+    if loaded.verdict is None:
+        return RegressOutcome(None, loaded.reason)
+    deliverable = _deliverable(loaded.verdict, with_must_fix=not loaded.from_ledger)
+    if not deliverable:
         return RegressOutcome(None, NOT_BLOCKING)
     findings = RegressFindings(
-        reviewed_sha=verdict.reviewed_sha,
-        text=_render(verdict.must_fix),
+        reviewed_sha=loaded.verdict.reviewed_sha,
+        text=_render(deliverable),
     )
     return RegressOutcome(findings, None)
 

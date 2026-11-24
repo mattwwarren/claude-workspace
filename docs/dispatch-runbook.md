@@ -234,8 +234,17 @@ a review MUST_FIX) therefore starts with no feedback. The one exception is a
 REVIEW regress into IMPL (#3694): the blocking REVIEW verdict's MUST_FIX findings
 are delivered from the worktree's `.claude/review-verdict.json`, with or without a
 PR, for claude-native and codex IMPL runs only; opencode and local receive nothing
-(RFC 0018 D-4). Operator direction and a claude-native REVIEW park's verdict are
-not delivered. A fix outside the plan's files still needs
+(RFC 0018 D-4). Held evidence-gap findings (#3862) are delivered too. On the
+claude-native clean-mode lane the findings come from the newest ledger round
+(`.cw/review-convergence/round-<n>-verdict.json`) whose verdict holds a held
+finding, not the last round, because the loop does not carry a held finding into
+later rounds. That delivered `reviewed_sha` is pinned to the head that round
+reviewed, so it can be older than the worktree's HEAD by design: the worker
+verifies against current HEAD. An unsettled decision contest held in ANY listed
+ledger round withholds a later round's gap finding (`withheld (not_blocking)`)
+until `cw review settle`, matching the codex-lane contest rule. Decision contests
+and operator checklists are not delivered. A claude-native blocking-mode park saves
+no verdict and is withheld (a follow-up ticket persists it). A fix outside the plan's files still needs
 `cw dev-queue approve <T> -c <C> --scope-drift <paths>`. To repair the PR then,
 attach a fresh head-pinned file with `requeue --stage impl
 --review-feedback-file`. That applies to adopted rows too: they have no plan,
@@ -4163,7 +4172,15 @@ parks only the unverifiable finding. Reproduced MUST_FIX findings in the same
 verdict are fixed first, and the park lands once the loop converges. The
 loop-exhausted park (`codex_must_fix_findings`) still lists the gap findings.
 Release is `cw review settle` on the finding, or providing the missing
-capability and requeueing. It is not a product defect, so no `--regress`.
+capability and requeueing. An evidence-gap hold whose review verdict is still saved
+is also delivered by `requeue --stage impl --regress` (#3862): the codex lane's
+`.claude/review-verdict.json`, or a clean-mode ledger round verdict. The requeue echo
+then reports `delivered` or `withheld (<reason>)`. The `next:` list keeps the plain
+requeue first and the regress second, because the row carries only `blocked_reason`
+and cannot tell a decision contest, an operator checklist and an evidence gap apart.
+A decision contest or checklist is released by `cw review settle` (or the checklist),
+never by `--regress`. A Claude-native blocking-mode park saves no verdict and is
+withheld, so settle the finding or provide the capability.
 
 A finding with no diff anchor (`file: N/A`) has no fingerprint key, so the
 verdict comment prints no settle payload for it and `cw review settle` cannot
@@ -4327,14 +4344,28 @@ merges on its own cw releases the row. Release it (Who: orchestrator):
 
 1. Confirm required CI is green at the PR head.
 2. In the row's worktree (`worktree_path` in the sentinel), at that head, run
-   the timed-out gate by hand with no time limit.
-3. If it passes on a clean tree, run `prep_pr_state.py gate-pass record <gate>`
-   there (the gate name exactly as `blocker.details` gives it), then
-   `cw dev-queue requeue <T> -c <C>`. Finalize skips a gate whose gitignored
-   stamp (`.claude/prep-pr-state.json`) matches the same head on a clean tree.
-   The requeue keeps the worktree; worktree GC keeps an open PR's worktree. If
-   the head moved or the worktree was removed, finalize re-runs the gate and
-   may park again; re-record the pass.
+   the repo's sync gate first (for example `uv sync --locked ...`), because a
+   `uv run` does not upgrade an already-installed stale extra and the stamp
+   should reflect a synced environment. Then run the timed-out gate by hand
+   with no time limit, using the command exactly as `detect-gates` prints it,
+   `&&` parts included (the stamp binds to that command string).
+3. Stampable gates are any gate whose command does not install or sync: `uv
+   run ...` test and lint gates, and `uv lock --check`. If the gate passes on a
+   clean tree, run `prep_pr_state.py gate-pass record <gate>` there (the gate
+   name exactly as `blocker.details` gives it) and check the JSON for
+   `recorded: true`; `recorded: false` with `dirty-worktree` or
+   `head-unresolved` means finalize re-runs the gate. Then run
+   `cw dev-queue requeue <T> -c <C>`. Finalize skips a stamped gate whose gitignored stamp
+   (`.claude/prep-pr-state.json`) matches the same head on a clean tree. Install
+   and sync gates (`uv sync`, `uv pip install`, `pip install`, `npm|yarn|pnpm
+   install|ci`, `poetry install`, `cargo fetch`) report `recorded: false, reason:
+   environment-mutating` and cannot be stamped; finalize re-runs them every pass.
+   If one timed out, requeue (it re-runs); if it keeps timing out, raise
+   `quality_gates.timeouts.<gate>` in the repo's `.claude/project-config.yaml`
+   (clamped to the 600 s cap) or fix the host. The requeue keeps the worktree;
+   worktree GC keeps an open PR's worktree. If the head moved or the worktree
+   was removed, finalize re-runs the gate and may park again; re-record the
+   pass.
 
 **Park: `awaiting_ci_evidence` (#3618).** The repo opted in with
 `quality_gates.ci_evidence` (a gate name mapped to the CI check(s) that prove
