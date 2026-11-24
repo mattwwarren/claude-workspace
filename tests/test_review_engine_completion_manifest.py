@@ -137,6 +137,20 @@ def test_checker_symlink_escape_is_path_invalid(tmp_path: Path) -> None:
     assert field == "completion_check.path"
 
 
+def test_checker_symlink_inside_the_skill_dir_is_path_invalid(tmp_path: Path) -> None:
+    # The target is a real executable file inside the skill directory, so the
+    # path resolves; the runner refuses a final-component symlink, so the loader
+    # must too.
+    engine = _engine_dir(tmp_path)
+    (engine / "bin" / "check-link").symlink_to(engine / "bin" / "check-completion")
+    path = _write_manifest(engine, {"path": "bin/check-link"})
+    with pytest.raises(EngineManifestError) as info:
+        load_engine_manifest(path)
+    assert info.value.reason is EngineManifestRejection.PATH_INVALID
+    assert info.value.field_path == "completion_check.path"
+    assert "symlink" in str(info.value)
+
+
 # ---- CLI line ------------------------------------------------------------
 
 

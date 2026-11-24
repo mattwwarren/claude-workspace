@@ -1573,8 +1573,8 @@ The model is `cw.models.review_engine_manifest.EngineManifest`, and
   rejection is `manifest_invalid`; a missing manifest is `no_codex_manifest`.
 - **`completion_check` (#3885).** An optional object
   `{path, timeout_seconds}`. `path` names the checker inside the skill
-  directory (relative, no `..`, a regular file cw resolves; it is never read as
-  text). `timeout_seconds` is an integer from 1 to 900, default 300. Keys are
+  directory (relative, no `..`, a regular file and not a symlink; it is never
+  read as text). `timeout_seconds` is an integer from 1 to 900, default 300. Keys are
   strict. The checker runs after the role turns and before the aggregation
   turn, with the arguments `--head-sha`, `--round-id`, `--worktree`,
   `--evidence-dir` and `--roles` (comma-separated), no shell, a cwd of the fresh

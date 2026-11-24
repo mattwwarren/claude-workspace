@@ -343,10 +343,13 @@ def _load_ref(base: Path, ref: str, field_path: str) -> str | EngineManifestIssu
 def _completion_issue(
     manifest: EngineManifest, base: Path
 ) -> EngineManifestIssue | None:
-    """Refuse a ``completion_check.path`` that does not resolve inside *base*.
+    """Refuse a ``completion_check.path`` that is not a regular file inside *base*.
 
     The checker is never read as text (it may be any bytes), so this only
-    resolves the path; its execute bit is checked at run time (#3885).
+    resolves the path; its execute bit is checked at run time (#3885). A path
+    whose final component is a symlink is refused here because the runner
+    refuses it too, so a manifest that loads is a manifest whose checker can be
+    found.
     """
     check = manifest.completion_check
     if check is None:
@@ -354,6 +357,12 @@ def _completion_issue(
     located = _resolve_ref(base, check.path)
     if isinstance(located, str):
         return _issue(EngineManifestRejection.PATH_INVALID, located, _COMPLETION_FIELD)
+    if (base / check.path).is_symlink():
+        return _issue(
+            EngineManifestRejection.PATH_INVALID,
+            "checker path is a symlink",
+            _COMPLETION_FIELD,
+        )
     return None
 
 
