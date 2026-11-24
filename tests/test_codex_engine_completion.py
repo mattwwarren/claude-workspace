@@ -412,6 +412,19 @@ def test_output_is_never_echoed(
 
 
 def test_role_dirtied_tree_blocks_before_checker(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    record_event_spy: MagicMock,
+) -> None:
+    repo = make_checker_repo(make_git_repo, tmp_path)
+    tamper_roles(monkeypatch, repo.worktree, _dirty)
+    details = run_blocked(repo, record_event_spy, retry=_NO_RETRY)
+    assert details.startswith("engine_worktree_mutated")
+    assert not observed_exists(repo)
+
+
+def test_role_dirtied_tree_blocks_at_aggregation_precheck_without_a_completion_check(
     engine_repo: EngineRepo,
     monkeypatch: pytest.MonkeyPatch,
     record_event_spy: MagicMock,
