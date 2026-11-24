@@ -1232,7 +1232,9 @@ class TestRepairEngine:
         monkeypatch.setattr(changelog_repair, "_remap_eligible", lambda _job: False)
         monkeypatch.setattr(changelog_repair, "_commit_rebuilt", _commit)
         staged = Staged(
-            tmp_path / "arm", "", SimpleNamespace(main_text="", rebuilt="x")
+            tmp_path / "arm",
+            "",
+            SimpleNamespace(main_text="", rebuilt="x", default_sha="e" * 40),
         )
 
         with pytest.raises(RepairStopError):

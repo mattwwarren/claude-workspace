@@ -236,16 +236,40 @@ The file itself is rebuilt structurally (`cw.changelog_rebuild`), never merged.
 - the one non-failure: `unarmed_review_fence`, carried on the
   `session.needs_attention` page (`paused_status: changelog_repair_unarmed`).
 
-**Clean-mode carry (#2921).** A clean-mode PR's ledger pins `last_clean_sha`
+**Clean-mode carry (#2921, #3375).** A clean-mode PR's ledger pins `last_clean_sha`
 to the reviewed head, which a rebase always moves, so the strict tip rule can
 never accept the rebased head on its own. The recipe proves the rewrite is
-content-equal instead: a per-commit `git range-diff --no-patch` must pair every
-branch commit as `=`, and the only delta may be the rebuilt CHANGELOG commit.
-It then remaps `last_clean_sha` to the new head with an audit entry in
-`clean_sha_remaps`. The lesson: the proof, not the tip rule, carries review
-credit across a rewrite, and the proof fails closed on any `!`, `<`, `>` pair,
-unreadable output or ledger that is not exactly at the old head. Remaps are
+content-equal instead, then remaps `last_clean_sha` to the new head with an
+audit entry in `clean_sha_remaps`. The lesson: the proof, not the tip rule,
+carries review credit across a rewrite, and the proof fails closed on any
+unproven delta or a ledger that is not exactly at the old head. Remaps are
 applied in memory by the fence and persisted compare-and-set only after it passes.
+
+The proof is a tree proof (#3375), not a per-commit one. The first version
+(#2921) required every branch commit to pair `=` under `git range-diff`, which
+held only when git's union merge happened to reproduce identical context lines.
+A typical feat/fix commit carries its own `[Unreleased]` bullet, and a sibling
+bullet at the same spot (or main's text written over a CHANGELOG-only stop)
+made the pair read `!`, `<` or `>`, so the carry was refused and a full review
+reran. Reviews cover the cumulative diff, so tree equality is the right bar:
+the non-CHANGELOG tree of the new head must equal the tree `git merge-tree`
+writes for the pinned default commit and the reviewed head (ADR-0022 rule 3's
+standard, applied to a rebase). The CHANGELOG is the one exempt path, so it
+gets its own bar: released sections byte-identical, nothing deleted, every
+added line inside main's `[Unreleased]` span (position) and one the reviewed
+head itself added (provenance), because a brand-new released heading placed at
+the span's tail passes position alone. Blank lines are exempt from provenance,
+and so is a `### <Name>` heading the reviewed head carried: after a release cut
+main's `[Unreleased]` is empty and the rebuild re-creates `### Fixed`, a heading
+the branch never added relative to its merge-base. What is lost is detection of
+a changed commit shape (squash, reorder, message edit) with the same net tree,
+which no review read. Pin the default branch once: the read, the rebase and the
+proof must see one commit. The carry moves only `last_clean_sha`;
+`review_attestation.head_sha` is not re-pinned, so after a repair the
+attestation reads `invalid:not_ancestor` and the PR-body Review sign-off is
+stripped for clients with `review.attestation.pr_section` on, which is cosmetic
+and neither parks finalize nor forces a review round. Rejected: accepting the
+re-review, and merging instead of rebuilding (still a delta-confirm round).
 
 **Freeze gate.** The CHANGELOG freeze gate (`gate_failed`) runs only when
 `.claude/scripts/check_changelog_frozen.py` is present in the client repo (an

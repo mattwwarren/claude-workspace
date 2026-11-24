@@ -254,6 +254,54 @@ def _with_bullet_after_beta(bullet: str) -> str:
     return CL_BASE.replace("- Beta fix (#2).\n\n", f"- Beta fix (#2).\n\n{bullet}\n\n")
 
 
+#: The ``[Unreleased]`` heading text the derived constants below are built from.
+UNRELEASED_HEADING = "## [Unreleased]\n\n"
+#: A brand-new released heading no reviewed head ever carried (#3375).
+RELEASED_9_9_9 = "## [9.9.9] - 2026-03-01\n\n"
+_BETA_BLOCK = "- Beta fix (#2).\n\n"
+_DELTA_BLOCK = "- Delta fix (#4).\n\n"
+_GAMMA_BLOCK = "- Gamma fix (#3).\n\n"
+
+#: Main after a sibling PR landed its bullet first: no release cut (#3375).
+CL_MAIN_SIBLING = CL_BASE.replace(_BETA_BLOCK, _BETA_BLOCK + _DELTA_BLOCK)
+#: The union rebuild of the raced pair: the branch bullet filed after the sibling's.
+CL_REBUILT_SIBLING = CL_MAIN_SIBLING.replace(_DELTA_BLOCK, _DELTA_BLOCK + _GAMMA_BLOCK)
+#: A released heading placed at the tail of the ``[Unreleased]`` span.
+CL_NEW_RELEASED_HEADING_AT_TAIL = CL_REBUILT_SIBLING.replace(
+    RELEASED_1_0_0, RELEASED_9_9_9 + RELEASED_1_0_0
+)
+#: A released section whose bullet was edited.
+CL_NEW_RELEASED_SECTION_CHANGED = CL_REBUILT_SIBLING.replace(
+    "- Initial (#0).", "- Initial (#0), edited."
+)
+#: One text line added in the preamble, above ``[Unreleased]``.
+CL_NEW_PREAMBLE_ADDITION = CL_REBUILT_SIBLING.replace(
+    "# Changelog\n", "# Changelog\nIntro text.\n", 1
+)
+#: One text line added directly above the ``[Unreleased]`` heading.
+CL_NEW_BEFORE_UNRELEASED = CL_REBUILT_SIBLING.replace(
+    UNRELEASED_HEADING, "Intro text.\n" + UNRELEASED_HEADING, 1
+)
+#: One extra blank line added in the preamble.
+CL_NEW_BLANK_OUTSIDE_SPAN = CL_REBUILT_SIBLING.replace(
+    "# Changelog\n\n", "# Changelog\n\n\n", 1
+)
+#: One bullet added inside the released ``1.0.0`` section.
+CL_NEW_OUT_OF_SPAN = CL_REBUILT_SIBLING.replace(
+    "- Initial (#0).\n", "- Initial (#0).\n- Extra (#8).\n"
+)
+#: A bullet inside the span that the reviewed head never added.
+CL_NEW_UNATTESTED_BULLET = CL_REBUILT_SIBLING.replace(
+    _GAMMA_BLOCK, _GAMMA_BLOCK + "- Foreign fix (#9).\n\n"
+)
+#: A ``### Removed`` heading inside the span, absent from the reviewed head.
+CL_NEW_FOREIGN_HEADING = CL_REBUILT_SIBLING.replace(
+    _GAMMA_BLOCK, _GAMMA_BLOCK + "### Removed\n\n"
+)
+#: Main's Delta bullet removed by the rebuild.
+CL_NEW_MAIN_LINE_DELETED = CL_REBUILT_SIBLING.replace(_DELTA_BLOCK, "")
+
+
 def epic_sibling_repo(
     tmp_path: Path,
     make_git_repo: Callable[..., Path],
@@ -341,3 +389,22 @@ def github_would_conflict(clone: Path, head_ref: str, base_ref: str) -> bool:
         text=True,
     )
     return merged.returncode != 0
+
+
+def _crlf(text: str) -> str:
+    return text.replace("\n", "\r\n")
+
+
+#: ``CL_BASE`` with CRLF line endings (a CRLF changelog, #3375).
+CL_BASE_CRLF = _crlf(CL_BASE)
+#: ``CL_BRANCH`` with CRLF line endings.
+CL_BRANCH_CRLF = _crlf(CL_BRANCH)
+#: ``CL_MAIN`` (a release cut emptied ``[Unreleased]``) with CRLF line endings.
+CL_MAIN_CRLF = _crlf(CL_MAIN)
+#: ``CL_EXPECTED`` (the rebuild re-creating ``### Fixed``) with CRLF line endings.
+CL_EXPECTED_CRLF = _crlf(CL_EXPECTED)
+_BARE_CR_TAIL = "\r- Extra fix (#9).\n"
+#: The branch's Gamma bullet carries a bare CR and a second bullet after it.
+CL_BRANCH_BARE_CR = CL_BRANCH.replace(GAMMA + "\n", GAMMA + _BARE_CR_TAIL)
+#: The raced-pair rebuild of ``CL_BRANCH_BARE_CR``: the same bare-CR line added.
+CL_REBUILT_BARE_CR = CL_REBUILT_SIBLING.replace(GAMMA + "\n", GAMMA + _BARE_CR_TAIL)

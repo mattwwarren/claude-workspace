@@ -57,6 +57,7 @@ from cw.review_convergence import LEDGER_RELATIVE_PATH
 from tests._changelog_cut_helpers import BRANCH, CL_BASE, CL_MAIN, TICKET
 from tests._changelog_repair_helpers import (
     DEFAULT_REF,
+    DEFAULT_SHA,
     DISARM_NONE,
     DISARM_NONZERO_STILL_ARMED,
     DISARM_NONZERO_UNARMED,
@@ -617,7 +618,7 @@ def test_scratch_worktree_failure_is_transient_and_cleaned(
 
 @pytest.mark.usefixtures("head", "arm")
 def test_rebase_failure_aborts(git: ScriptedGit, client: ClientConfig) -> None:
-    git.set(("rebase", DEFAULT_REF), GitResult(1, "", "conflict"))
+    git.set(("rebase", DEFAULT_SHA), GitResult(1, "", "conflict"))
     git.set(("diff", "--name-only", "-z", "--diff-filter=U"), GitResult())
 
     _dispatch(client)
@@ -629,7 +630,7 @@ def test_rebase_failure_aborts(git: ScriptedGit, client: ClientConfig) -> None:
 
 @pytest.mark.usefixtures("head", "arm")
 def test_rebase_timeout_aborts(git: ScriptedGit, client: ClientConfig) -> None:
-    git.set(("rebase", DEFAULT_REF), TIMEOUT)
+    git.set(("rebase", DEFAULT_SHA), TIMEOUT)
 
     _dispatch(client)
 
@@ -641,7 +642,7 @@ def test_rebase_timeout_aborts(git: ScriptedGit, client: ClientConfig) -> None:
 def test_rebase_stopping_on_another_file_is_non_changelog(
     git: ScriptedGit, client: ClientConfig
 ) -> None:
-    git.set(("rebase", DEFAULT_REF), GitResult(1))
+    git.set(("rebase", DEFAULT_SHA), GitResult(1))
     git.set(
         ("diff", "--name-only", "-z", "--diff-filter=U"), GitResult(stdout="src/a.py\0")
     )
@@ -656,7 +657,7 @@ def test_rebase_stopping_on_another_file_is_non_changelog(
 def test_rebase_stopping_on_changelog_takes_mains_text_and_continues(
     git: ScriptedGit, client: ClientConfig
 ) -> None:
-    git.set(("rebase", DEFAULT_REF), GitResult(1))
+    git.set(("rebase", DEFAULT_SHA), GitResult(1))
     git.set(
         ("diff", "--name-only", "-z", "--diff-filter=U"),
         GitResult(stdout="CHANGELOG.md\0"),
@@ -1446,7 +1447,7 @@ def test_scratch_remove_failure_is_logged(
 @pytest.mark.usefixtures("head", "arm")
 def test_failed_abort_still_parks(git: ScriptedGit, client: ClientConfig) -> None:
     git.set(("rebase", "--abort"), TIMEOUT)
-    git.set(("rebase", DEFAULT_REF), GitResult(1))
+    git.set(("rebase", DEFAULT_SHA), GitResult(1))
 
     _dispatch(client)
 
@@ -1603,7 +1604,7 @@ def test_skipped_branch_bullets_are_logged_and_counted(
         "- Beta fix (#2).\n\n", "- Beta fix (#2).\n\n- Gamma fix (#3).\n\n", 1
     )
     git.set(
-        ("show", f"{DEFAULT_REF}:CHANGELOG.md"), GitResult(stdout=released_with_gamma)
+        ("show", f"{DEFAULT_SHA}:CHANGELOG.md"), GitResult(stdout=released_with_gamma)
     )
 
     assert _dispatch(client) == TICKET
@@ -1676,7 +1677,7 @@ def test_failed_git_add_is_reported_as_the_cause(
 def test_failed_git_add_during_a_rebase_stop_aborts_the_rebase(
     git: ScriptedGit, client: ClientConfig
 ) -> None:
-    git.set(("rebase", DEFAULT_REF), GitResult(1))
+    git.set(("rebase", DEFAULT_SHA), GitResult(1))
     git.set(
         ("diff", "--name-only", "-z", "--diff-filter=U"),
         GitResult(stdout="CHANGELOG.md\0"),
@@ -1696,7 +1697,7 @@ def test_crlf_blobs_reach_the_rebuild_unchanged(
 ) -> None:
     """``git show`` is read without newline translation, so mixed endings park."""
     git.set(
-        ("show", f"{DEFAULT_REF}:CHANGELOG.md"),
+        ("show", f"{DEFAULT_SHA}:CHANGELOG.md"),
         GitResult(stdout=CL_MAIN.replace("\n", "\r\n", 3)),
     )
 

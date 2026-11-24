@@ -254,11 +254,11 @@ class CleanShaRemap(BaseModel):
     """One audited move of ``last_clean_sha`` across a proven content-equal rebase.
 
     Written only by the ``repair_changelog_conflict`` recipe (#2921) after its
-    per-commit ``git range-diff`` proof and the post-push fence both pass. It
-    records that *to_sha* carries the same branch content the review reviewed
-    at *from_sha*, plus only the rebuilt CHANGELOG commit. ``rebased_sha`` is
-    the head before that commit (equal to ``to_sha`` when none was made), and
-    ``commits`` is the number of branch commits the proof matched.
+    tree-equality proof (#3375) and the post-push fence both pass. It records
+    that *to_sha* carries the same branch content the review reviewed at
+    *from_sha*, plus only the rebuilt CHANGELOG commit. ``rebased_sha`` is the
+    head before that commit (equal to ``to_sha`` when none was made), and
+    ``commits`` is the number of branch commits carried.
     """
 
     model_config = ConfigDict(frozen=True)

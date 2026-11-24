@@ -46,7 +46,9 @@ stay on `client.default_branch`.
    `repair_git._conflict_set` in `cw.reconcile.review_recipes` (which files a
    repair must touch) and the conflict listing in `cw.pr_feedback` (which
    files an adopted PR conflicts on). They answer different questions and are
-   deliberately left alone. `.claude/scripts/check_changelog_frozen.py
+   deliberately left alone. `repair_proof.prove_tree_unchanged` in
+   `cw.reconcile.review_recipes` (the clean-sha carry proof, #3375) is a
+   further caller of `merge_tree`. `.claude/scripts/check_changelog_frozen.py
    --merge-into` (#3190) is a third, outside `src/`: it is stdlib-only, cannot
    import `cw`, and is deliberately left alone as well. `cw worktree merge-probe` exits 0 (`up_to_date` or
    `clean`: no merge), 1 (`conflict`: merge once and resolve) or 3

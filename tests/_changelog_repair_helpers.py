@@ -28,6 +28,7 @@ of git calls, gh calls and recorded events against each other
 
 from __future__ import annotations
 
+import difflib
 import json
 import shutil
 import stat
@@ -37,6 +38,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from cw import gh
+from cw import merge_probe as probe_mod
 from cw import review_approval as approval_mod
 from cw.config import sessions_lock
 from cw.dev_queue import load_dev_queue
@@ -54,6 +56,7 @@ from cw.models import (
 )
 from cw.reconcile.review_recipes import _shared, repair_engine
 from cw.reconcile.review_recipes import repair_git as git_mod
+from cw.reconcile.review_recipes import repair_proof as proof_git_mod
 from cw.reconcile.review_recipes.auto_fix_ci import _auto_fix_ci_guard_target
 from cw.reconcile.review_recipes.changelog_repair import CHANGELOG_SPEC
 from cw.reconcile.review_recipes.repair_engine import (
@@ -68,6 +71,8 @@ from tests._changelog_cut_helpers import (
     CL_BASE,
     CL_BRANCH,
     CL_MAIN,
+    CL_MAIN_SIBLING,
+    CL_REBUILT_SIBLING,
     TICKET,
     ReleaseMovedRepo,
 )
@@ -89,6 +94,8 @@ PR_NUMBER = "42"
 EXPECTED_SHA = "a" * 40
 NEW_SHA = "b" * 40
 MB_SHA = "c" * 40
+DEFAULT_SHA = "e" * 40
+TREE_SHA = "f" * 40
 DEFAULT_REF = "refs/remotes/origin/main"
 
 LogEntry = tuple[str, ...]
@@ -139,14 +146,19 @@ def happy_rules(
     """Responses for a repair that succeeds up to and including the push."""
     return [
         (("fetch", "origin"), GitResult()),
+        (
+            ("rev-parse", "--verify", "--quiet", f"{DEFAULT_REF}^{{commit}}"),
+            GitResult(stdout=f"{DEFAULT_SHA}\n"),
+        ),
         (("rev-parse", "--verify", "--quiet"), GitResult(stdout=f"{EXPECTED_SHA}\n")),
+        (("merge-base", DEFAULT_SHA), GitResult(stdout=f"{MB_SHA}\n")),
         (("merge-base", DEFAULT_REF), GitResult(stdout=f"{MB_SHA}\n")),
         (("merge-tree",), GitResult(stdout="tree0\0")),
         (("diff", "--name-only", "-z", "--diff-filter=U"), GitResult()),
         (("diff", "--name-only"), GitResult(stdout="CHANGELOG.md\n")),
         (("show", f"{MB_SHA}:CHANGELOG.md"), GitResult(stdout=base)),
         (("show", f"{EXPECTED_SHA}:CHANGELOG.md"), GitResult(stdout=branch)),
-        (("show", f"{DEFAULT_REF}:CHANGELOG.md"), GitResult(stdout=main)),
+        (("show", f"{DEFAULT_SHA}:CHANGELOG.md"), GitResult(stdout=main)),
         (("rev-list", "--count"), GitResult(stdout="1\n")),
         (("worktree", "add"), mkdir_scratch),
         (("worktree", "remove"), rm_scratch),
@@ -223,7 +235,9 @@ class ScriptedGit:
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> ScriptedGit:
         monkeypatch.setattr(git_mod, "run_git", self)
+        monkeypatch.setattr(proof_git_mod, "run_git", self)
         monkeypatch.setattr(approval_mod, "run_git", self)
+        monkeypatch.setattr(probe_mod, "run_git", self)
         return self
 
 
@@ -231,31 +245,6 @@ class ScriptedGit:
 
 REBASED_SHA = "d" * 40
 CHANGELOG_PATH = "CHANGELOG.md"
-_RANGE_DIFF_ABSENT = "-------"
-_RANGE_DIFF_OLD_ABBREV = "1111111"
-_RANGE_DIFF_NEW_ABBREV = "2222222"
-
-
-def range_diff_output(*marks: str) -> str:
-    """``git range-diff --no-patch`` pair lines, one per *mark* (``=!<>``)."""
-    lines: list[str] = []
-    for number, mark in enumerate(marks, start=1):
-        old = f"{number}:  {_RANGE_DIFF_OLD_ABBREV}"
-        new = f"{number}:  {_RANGE_DIFF_NEW_ABBREV}"
-        if mark == "<":
-            new = f"-:  {_RANGE_DIFF_ABSENT}"
-        elif mark == ">":
-            old = f"-:  {_RANGE_DIFF_ABSENT}"
-        lines.append(f"{old} {mark} {new} commit {number}\n")
-    return "".join(lines)
-
-
-def range_diff_equal(pairs: int) -> GitResult:
-    """A range-diff answer with *pairs* equal (``=``) commit pairs."""
-    return GitResult(stdout=range_diff_output(*"=" * pairs))
-
-
-RANGE_DIFF_NOT_EQUAL = GitResult(stdout=range_diff_output("=", "!"))
 
 
 def sequenced(*shas: str) -> Callable[[tuple[str, ...]], GitResult]:
@@ -269,26 +258,63 @@ def sequenced(*shas: str) -> Callable[[tuple[str, ...]], GitResult]:
     return respond
 
 
+def unified0(old: str, new: str) -> str:
+    """``git diff -U0`` of *old* to *new*, file headers dropped (``-a,0`` inserts)."""
+    diff = difflib.unified_diff(old.split("\n"), new.split("\n"), n=0, lineterm="")
+    return "".join(f"{line}\n" for line in diff if not line.startswith(("---", "+++")))
+
+
 def stub_remap_proof(
     git: ScriptedGit,
     *,
-    range_diff: Response | None = None,
+    tree: str = TREE_SHA,
+    tree_diff: str = f"{CHANGELOG_PATH}\0",
+    default_text: str = CL_MAIN_SIBLING,
+    attested_text: str = CL_BRANCH,
+    new_text: str = CL_REBUILT_SIBLING,
     parent: str = REBASED_SHA,
     changed: str = f"{CHANGELOG_PATH}\0",
     heads: tuple[str, ...] = (REBASED_SHA, NEW_SHA),
 ) -> None:
     """Script the git answers a provable clean-mode rebase needs on top of
-    :func:`happy_rules`: rebased then new head, equal range-diff pairs, a
-    CHANGELOG-only rebuild commit whose parent is the rebased head.
+    :func:`happy_rules`: the proof's merge-tree, a tree diff naming only
+    CHANGELOG.md, the three CHANGELOG blobs and their ``-U0`` diffs (rendered by
+    :func:`unified0`), a CHANGELOG-only rebuild commit on the rebased head, and
+    one surviving branch commit. The defaults are the raced-pair history.
     """
     git.set(("rev-parse", "HEAD"), sequenced(*heads))
     git.set(
-        ("range-diff",), range_diff if range_diff is not None else range_diff_equal(2)
+        ("merge-tree", "--write-tree", "--no-messages"), GitResult(stdout=f"{tree}\0")
+    )
+    git.set(("diff", "--no-renames", "--name-only", "-z"), GitResult(stdout=tree_diff))
+    git.set(("show", f"{DEFAULT_SHA}:CHANGELOG.md"), GitResult(stdout=default_text))
+    git.set(("show", f"{NEW_SHA}:CHANGELOG.md"), GitResult(stdout=new_text))
+    git.set(("show", f"{EXPECTED_SHA}:CHANGELOG.md"), GitResult(stdout=attested_text))
+    git.set(
+        ("diff", "-U0", "--no-renames", DEFAULT_SHA, NEW_SHA),
+        GitResult(stdout=unified0(default_text, new_text)),
+    )
+    git.set(
+        ("diff", "-U0", "--no-renames", MB_SHA, EXPECTED_SHA),
+        GitResult(stdout=unified0(CL_BASE, attested_text)),
+    )
+    git.set(
+        ("rev-list", "--count", f"{DEFAULT_SHA}..{REBASED_SHA}"),
+        GitResult(stdout="1\n"),
     )
     git.set(("rev-parse", f"{NEW_SHA}^"), GitResult(stdout=f"{parent}\n"))
     git.set(
         ("diff", "--name-only", "-z", REBASED_SHA, NEW_SHA), GitResult(stdout=changed)
     )
+
+
+def proof_tree_calls(git: ScriptedGit) -> list[tuple[str, ...]]:
+    """Every recorded proof ``git merge-tree`` argv (not ``_conflict_set``'s)."""
+    return [
+        argv
+        for argv in git.stripped()
+        if argv[0] == "merge-tree" and argv[2] == "--no-messages"
+    ]
 
 
 def clean_client(repo: Path, *, strict: bool = False, **fields: Any) -> ClientConfig:
@@ -297,11 +323,6 @@ def clean_client(repo: Path, *, strict: bool = False, **fields: Any) -> ClientCo
     if strict:
         review["default_merge_tolerance"] = False
     return make_client(repo, review=review, **fields)
-
-
-def range_diff_calls(git: ScriptedGit) -> list[tuple[str, ...]]:
-    """Every recorded ``git range-diff`` argv."""
-    return [argv for argv in git.stripped() if argv[0] == "range-diff"]
 
 
 # --- FakeGhHead -------------------------------------------------------------

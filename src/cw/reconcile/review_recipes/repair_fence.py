@@ -27,8 +27,8 @@ This module re-evaluates the same decisions in Python against the new head:
   ``default_merge_only=False``. The #2979 clean-default-merge rule (a clean
   merge of the default branch never stales the tip) is deliberately not
   extended here. A clean-mode head is accepted only when the ledger already
-  accepts it, or when the ``repair_changelog_conflict`` recipe has proven
-  every branch commit unchanged and passes its clean-sha remap (#2921), which
+  accepts it, or when the ``repair_changelog_conflict`` recipe has proven the
+  rebuilt tree unchanged (#3375) and passes its clean-sha remap (#2921), which
   this module applies in memory and never writes.
 
 Lockless; git runs only inside
@@ -151,11 +151,15 @@ def _load_own_ledger(
 
 
 def _remap_for_tip(
-    ledger: ConvergenceLedger, remap: CleanShaRemap | None
+    ledger: ConvergenceLedger, remap: CleanShaRemap | None, refusal: str | None
 ) -> tuple[ConvergenceLedger | None, str]:
-    """The remapped ledger when *remap* applies, else None, with a detail note."""
+    """The remapped ledger when *remap* applies, else None, with a detail note.
+
+    *refusal* is the carry proof's refusal reason (#3375), named in the note
+    when there is no remap, so the unarmed page says why the carry was skipped.
+    """
     if remap is None:
-        return None, ""
+        return None, "" if refusal is None else f"; ledger remap skipped: {refusal}"
     result = remap_clean_sha(ledger, remap)
     if isinstance(result, str):
         return None, f"; ledger remap refused: {result}"
@@ -168,6 +172,7 @@ def _check_tip(
     new_sha: str,
     origin_tip: str | None,
     remap: CleanShaRemap | None = None,
+    remap_refusal: str | None = None,
 ) -> _TipCheck:
     """Step 4.0b for *new_sha*, with the clean-sha remap applied in memory if given."""
     ledger, why = _load_own_ledger(snapshot)
@@ -185,7 +190,7 @@ def _check_tip(
             "origin's branch tip could not be read "
             "(ls-remote failed, timed out or returned no ref)",
         )
-    remapped, note = _remap_for_tip(ledger, remap)
+    remapped, note = _remap_for_tip(ledger, remap, remap_refusal)
     effective = ledger if remapped is None else remapped
     verdict = evaluate_tip(effective, head_sha=new_sha, origin_tip_sha=origin_tip)
     if verdict.decision == _TIP_ACCEPTED:
@@ -207,6 +212,7 @@ def evaluate_repair_fence(
     new_sha: str,
     origin_tip: str | None,
     remap: CleanShaRemap | None = None,
+    remap_refusal: str | None = None,
 ) -> FenceVerdict:
     """Apply finalize's Step 4.0 (+ Step 4.0b in clean mode) to *new_sha*.
 
@@ -216,7 +222,8 @@ def evaluate_repair_fence(
     token is ``not_required`` or ``recorded`` and, in clean mode, the ledger
     accepts the tip. *remap* (#2921) is applied to the ledger in clean mode
     only; a remap that makes the tip accept is returned on the verdict, never
-    written here. Never raises.
+    written here. *remap_refusal* (#3375) is why no remap was proven, shown in
+    the detail. Never raises.
     """
     approval = evaluate_review_approval(
         ApprovalInputs(
@@ -233,7 +240,13 @@ def evaluate_repair_fence(
     remapped: ConvergenceLedger | None = None
     pre_image: ConvergenceLedger | None = None
     if snapshot.clean_mode:
-        tip = _check_tip(snapshot, new_sha=new_sha, origin_tip=origin_tip, remap=remap)
+        tip = _check_tip(
+            snapshot,
+            new_sha=new_sha,
+            origin_tip=origin_tip,
+            remap=remap,
+            remap_refusal=remap_refusal,
+        )
         tip_reason, detail = tip.reason, f"{detail}; {tip.detail}"
         remapped, pre_image = tip.remapped, tip.pre_image
     passed = approval.passed and tip_reason is None

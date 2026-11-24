@@ -3,8 +3,9 @@
 A ``repair_changelog_conflict`` repair rebases every branch commit onto an
 advanced main, so the ledger's ``last_clean_sha`` (the reviewed head) is never
 the new head and the strict tip rule reports ``commits_after_clean_round``.
-The recipe proves each branch commit unchanged (``git range-diff``) and that
-the only delta is the rebuilt CHANGELOG commit, then calls
+The recipe proves the rebuilt tree unchanged (merge-tree equality plus a
+confined CHANGELOG delta, #3375) and that the only delta is the rebuilt
+CHANGELOG commit, then calls
 :func:`remap_clean_sha` to move the pointer to the new head with an audit
 entry. The tip rule itself is untouched: after the move ``evaluate_tip``
 accepts the new head by its ordinary strict equality.
