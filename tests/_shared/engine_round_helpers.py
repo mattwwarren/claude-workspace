@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from cw.codex_fix_loop import run_review_with_fix_loop
 from cw.codex_review import _engine_round
 from cw.codex_review._engine_round import (
     EnginePassInputs,
@@ -42,8 +43,10 @@ from tests._tool_fakes import CodexReply, ScriptedCodexRunner, stdin_contains
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from cw.auto_dev_result import AutoDevResult
     from cw.codex_runner import CodexRunResult
     from cw.models import TicketTask
+    from cw.review_findings import ReviewVerdict
 
 ENGINE_ROUND_STUB = Path(__file__).parent.parent / "fixtures" / "review_engine_stub"
 ENGINE_ROUND_CHECKER = (
@@ -130,6 +133,29 @@ def run_pass(
         inputs_for(repo, runner),
         cycle=0,
         round_id=ROUND_ID,
+    )
+
+
+def run_fix_loop(
+    repo: EngineRepo, runner: ScriptedCodexRunner
+) -> tuple[AutoDevResult, ReviewVerdict | None]:
+    """Cycle 0 of the real codex fix-loop driver over an engine round.
+
+    A verdict-less blocked outcome returns here before any ledger round is
+    recorded, which is the state the attestation tests need to inspect.
+    """
+    return run_review_with_fix_loop(
+        runner=runner,
+        task=task_for(repo),
+        worktree=repo.worktree,
+        default_branch="main",
+        base_branch="main",
+        model=None,
+        reasoning_effort=None,
+        wall_clock_budget_seconds=None,
+        session_id="s-engine",
+        fix_loop_enabled=True,
+        engine=spec_for(repo),
     )
 
 

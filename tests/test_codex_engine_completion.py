@@ -25,17 +25,10 @@ from cw.codex_review._engine_completion import (
     _read_result,
     checker_problem,
 )
-from cw.dev_queue.review_attestation import attest_review_exit
 from cw.review_convergence import resolve_default_branch_ref
 from cw.review_engine.materialize import MaterializeError
 from cw.review_engine.skill import resolve_skill
 from tests import _git_sandbox
-from tests._review_attestation_helpers import (
-    clean_sentinel,
-    engine_client,
-    install_no_git_guard,
-    review_row,
-)
 from tests._shared.engine_round_helpers import (
     ROUND_ID,
     SKILL,
@@ -555,30 +548,6 @@ def test_checker_problem_reports_missing_file(engine_repo: EngineRepo) -> None:
         checker_problem(engine_repo.worktree, ref.commit, resolved, "bin/none")
         == "checker_missing"
     )
-
-
-def test_failed_check_head_is_not_attested(
-    make_git_repo: Callable[..., Path],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Case A (#3885): a round blocked by a failing checker leaves no clean ledger.
-
-    The round runs first (it needs git). The attestation builder then runs under
-    the no-git guard, proving ADR-0019's git-free contract, and finds nothing to
-    attest for the head.
-    """
-    repo = make_checker_repo(make_git_repo, tmp_path, "import sys\nsys.exit(3)\n")
-    outcome = run_pass(repo, engine_runner())
-    blocked_details(outcome, retry=_NO_RETRY)
-    assert outcome.verdict is None
-    install_no_git_guard(monkeypatch)
-    attestation = attest_review_exit(
-        review_row(repo.worktree),
-        last_result=clean_sentinel(repo.head),
-        client=engine_client(tmp_path),
-    )
-    assert attestation is None
 
 
 @pytest.mark.parametrize("kind", ["populated-dir", "symlink"])

@@ -1608,8 +1608,14 @@ compares SHAs itself. The PR-body section that carries the verdict is section
 ### 13.1 When an attestation is written
 
 A head whose completion check failed cannot reach the ledger-only attestation,
-because a blocked completion round never records a clean sha (#3885; pinned by
-`TestCompletionCheckedHead`).
+because a blocked completion round never records a clean sha (#3885). This is
+held by a regression test and this sentence, not by a guard in the builder:
+`tests/test_dev_queue_review_attestation_engine.py::TestCompletionCheckedHead::test_failed_check_head_is_not_attested`
+runs a real blocked round and shows the ledger has no clean round for the head,
+and its sibling `test_passing_check_head_with_a_clean_ledger_is_attested` shows
+the same flow attests once the ledger is clean. An earlier round whose passing
+summary is bound to the same head remains legitimate evidence and is attested
+from that summary (`test_earlier_passing_summary_at_same_head_stays_legitimate`).
 
 The builder is `cw.dev_queue.review_attestation.record_review_attestation`. It
 runs no git, no `gh` and no subprocess, and takes no lock (ADR-0019: both call
