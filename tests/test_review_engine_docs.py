@@ -503,3 +503,80 @@ def test_command_doc_carries_only_the_park_release_tag() -> None:
     lines = doc.splitlines()
     index = lines.index("<!-- el: review.engine-park-release -->")
     assert lines[index + 1].startswith("**Releasing a `review_engine_modified` park.**")
+
+
+# --- #3885: the codex completion check's operator-ruled prose ------------------
+
+_RULING = "authorized by operator ruling on #3885"
+_ADR_0014 = "docs/adr/0014-timers-never-destroy-work.md"
+_ADR_CLARIFICATION = (
+    "## Clarification (#3885): the review-engine completion check's "
+    "bounded process group"
+)
+
+
+def _adr_clarification() -> str:
+    adr = _read(_ADR_0014)
+    start = adr.index(_ADR_CLARIFICATION)
+    return adr[start : adr.index("\n## ", start + 1)]
+
+
+def test_adr_0014_records_the_completion_check_clarification() -> None:
+    assert _read(_ADR_0014).count(_ADR_CLARIFICATION) == 1
+    section = _flat(_adr_clarification())
+    assert _RULING in section
+    assert "does not claim the ADR text above" in section
+    for label in ("(a)", "(b)", "(c)", "(d)"):
+        assert f"**{label}**" in section, label
+
+
+def test_round_failures_section_cites_the_ruling_and_the_adr() -> None:
+    section = _flat(_contract_section("### 12.12 Engine Round Failures", "### 12.13"))
+    assert _RULING in section
+    assert "released by an operator requeue and is not auto-retried" in section, (
+        "a host-load checker timeout must be an operator requeue, not a retry"
+    )
+    assert "ADR-0014" in section
+    assert "Clarification (#3885)" in section
+
+
+def test_trust_boundary_paragraph_states_no_sandbox_and_the_residual_risk() -> None:
+    section = _flat(_contract_section("### 12.13 Known Limitation", "### 12.14"))
+    assert "**Completion checker trust boundary (#3885).**" in section
+    assert "There is no OS sandbox" in section
+    assert "engine_precheck" in section
+    assert "file-borne credentials and network access are reachable" in section
+    assert (
+        "a transitive import outside the skill directory and `guarded_paths` "
+        "is not covered by the engine-change guard"
+    ) in section
+
+
+def test_manifest_section_documents_the_completion_check_key() -> None:
+    section = _flat(_contract_section("### 12.14 Codex Engine Manifest", "\n## 13."))
+    assert "**`completion_check` (#3885).**" in section
+    for needle in (
+        "`{path, timeout_seconds}`",
+        "an integer from 1 to 900, default 300",
+        "a regular file and not a symlink",
+        "after the role turns and before the aggregation turn",
+        "no shell",
+        "the fresh directory the skill was extracted into",
+        "distinct from `TMPDIR` itself",
+        "the worktree is never the cwd",
+        "an environment of `PATH` and `LANG` (each only when set) plus `TMPDIR`",
+        "A background helper must redirect its output, otherwise the run is "
+        "reported as `checker_timeout`",
+        "rejected as `schema_invalid` by a cw that predates #3885 (fail-closed)",
+    ):
+        assert needle in section, needle
+
+
+def test_runbook_documents_the_completion_check_failure() -> None:
+    runbook = _flat(_read("docs/dispatch-runbook.md"))
+    start = runbook.index("**Codex completion check: `engine_completion_check_failed`")
+    paragraph = runbook[start : runbook.index("**Park:", start)]
+    assert "engine_completion_check_failed: <reason>" in paragraph
+    assert "`agent_block`" in paragraph
+    assert "not retry-eligible" in paragraph
+    assert "released by an operator requeue, not auto-retried" in paragraph

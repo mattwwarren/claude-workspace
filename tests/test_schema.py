@@ -373,6 +373,26 @@ class TestSchemaShowReviewEngineManifest:
         assert parsed["additionalProperties"] is False
         assert parsed["properties"]["backends"]["items"]["enum"] == ["codex"]
 
+    def test_json_format_carries_the_completion_check_bounds(self) -> None:
+        # #3885: the optional key is exported with its timeout bounds and default.
+        result = CliRunner().invoke(
+            main, ["schema", "show", "review-engine-manifest", "--format=json"]
+        )
+        assert result.exit_code == 0, result.output
+        parsed = json.loads(result.output)
+        refs = [
+            option.get("$ref")
+            for option in parsed["properties"]["completion_check"]["anyOf"]
+        ]
+        assert "#/$defs/EngineCompletionCheck" in refs
+        assert "completion_check" not in parsed["required"]
+        check = parsed["$defs"]["EngineCompletionCheck"]
+        assert check["additionalProperties"] is False
+        assert check["required"] == ["path"]
+        timeout = check["properties"]["timeout_seconds"]
+        assert (timeout["minimum"], timeout["maximum"]) == (1, 900)
+        assert timeout["default"] == 300
+
     def test_tldr_format(self) -> None:
         result = CliRunner().invoke(
             main, ["schema", "show", "review-engine-manifest", "--format=tldr"]
