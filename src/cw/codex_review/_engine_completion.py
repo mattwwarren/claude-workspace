@@ -111,14 +111,14 @@ def _fresh_evidence_dir(worktree: Path, round_dir: Path) -> Path | SummaryFailur
         expected = worktree.resolve() / ENGINE_STATE_RELATIVE_DIR / round_dir.name
         if round_dir.resolve() != expected:
             return _completion_failure(COMPLETION_REASON_CHECK_UNVERIFIABLE)
+        evidence = round_dir / COMPLETION_DIR_NAME
+        if evidence.is_symlink() or evidence.is_file():
+            evidence.unlink()
+        elif evidence.exists():
+            shutil.rmtree(evidence)
+        evidence.mkdir()
     except OSError:
         return _completion_failure(COMPLETION_REASON_CHECK_UNVERIFIABLE)
-    evidence = round_dir / COMPLETION_DIR_NAME
-    if evidence.is_symlink() or evidence.is_file():
-        evidence.unlink()
-    elif evidence.exists():
-        shutil.rmtree(evidence)
-    evidence.mkdir()
     return evidence
 
 
@@ -343,7 +343,10 @@ def run_completion_check(
     pre = _tree_check(worktree, head)
     if pre is not None:
         return pre
-    scratch = Path(tempfile.mkdtemp(prefix=_DIR_PREFIX))
+    try:
+        scratch = Path(tempfile.mkdtemp(prefix=_DIR_PREFIX))
+    except OSError:
+        return _completion_failure(COMPLETION_REASON_CHECK_UNVERIFIABLE)
     try:
         return _run_in_scratch(
             worktree,
@@ -368,7 +371,10 @@ def checker_problem(
 
     Shares :func:`_extract_checker` with the runner so the two cannot disagree.
     """
-    scratch = Path(tempfile.mkdtemp(prefix=_DIR_PREFIX))
+    try:
+        scratch = Path(tempfile.mkdtemp(prefix=_DIR_PREFIX))
+    except OSError:
+        return COMPLETION_REASON_CHECK_UNVERIFIABLE
     try:
         extracted = _extract_checker(
             repo, commit, resolved, checker_path, scratch / _SKILL_DIR_NAME

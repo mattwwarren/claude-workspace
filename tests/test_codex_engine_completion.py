@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -46,7 +47,6 @@ from tests._shared.engine_round_helpers import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from tests._review_engine_helpers import EngineRepo
 
@@ -547,6 +547,100 @@ def test_checker_problem_reports_missing_file(engine_repo: EngineRepo) -> None:
     assert (
         checker_problem(engine_repo.worktree, ref.commit, resolved, "bin/none")
         == "checker_missing"
+    )
+
+
+# ---- operating-system failures fail closed ------------------------------
+
+_UNVERIFIABLE = "engine_completion_check_failed: check_unverifiable"
+
+
+def _deny_scratch_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make creating the checker's scratch directory fail, leaving other temp use."""
+    real = tempfile.mkdtemp
+
+    def deny(*args: Any, **kwargs: Any) -> str:
+        if kwargs.get("prefix") == "cw-engine-check-":
+            msg = "no space left on device"
+            raise OSError(msg)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(tempfile, "mkdtemp", deny)
+
+
+def test_scratch_dir_oserror_blocks(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = make_checker_repo(make_git_repo, tmp_path)
+    _deny_scratch_dir(monkeypatch)
+    details = blocked_details(run_pass(repo, engine_runner()), retry=_NO_RETRY)
+    assert details == _UNVERIFIABLE
+    assert not observed_exists(repo)
+
+
+def test_evidence_dir_mkdir_oserror_blocks_and_removes_scratch(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    checker_tmpdir: tuple[Path, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker, recorded = checker_tmpdir
+    repo = make_checker_repo(make_git_repo, tmp_path)
+    real = Path.mkdir
+
+    def deny(self: Path, *args: Any, **kwargs: Any) -> None:
+        if self.name == "completion":
+            msg = "read-only file system"
+            raise OSError(msg)
+        real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", deny)
+    details = blocked_details(run_pass(repo, engine_runner()), retry=_NO_RETRY)
+    assert details == _UNVERIFIABLE
+    assert not observed_exists(repo)
+    assert recorded, "the scratch dir was never created"
+    assert not any(worker.iterdir()), "checker scratch dir not cleaned up"
+
+
+def test_undeletable_planted_evidence_blocks(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = make_checker_repo(make_git_repo, tmp_path)
+
+    def plant(_wt: Path) -> None:
+        evidence = round_dir(repo) / "completion"
+        evidence.mkdir()
+        (evidence / "planted.json").write_text("{}", encoding="utf-8")
+
+    tamper_roles(monkeypatch, repo.worktree, plant)
+    real = _engine_completion.shutil.rmtree
+
+    def deny(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path).name == "completion":
+            msg = "operation not permitted"
+            raise OSError(msg)
+        real(path, *args, **kwargs)
+
+    monkeypatch.setattr(_engine_completion.shutil, "rmtree", deny)
+    details = blocked_details(run_pass(repo, engine_runner()), retry=_NO_RETRY)
+    assert details == _UNVERIFIABLE
+    assert not observed_exists(repo)
+
+
+def test_checker_problem_scratch_dir_oserror_is_unverifiable(
+    engine_repo: EngineRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ref = resolve_default_branch_ref(engine_repo.worktree, "main")
+    assert ref is not None
+    resolved = resolve_skill(engine_repo.worktree, ref.commit, SKILL)
+    _deny_scratch_dir(monkeypatch)
+    assert (
+        checker_problem(engine_repo.worktree, ref.commit, resolved, "bin/none")
+        == "check_unverifiable"
     )
 
 
