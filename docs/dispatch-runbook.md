@@ -4323,14 +4323,28 @@ merges on its own cw releases the row. Release it (Who: orchestrator):
 
 1. Confirm required CI is green at the PR head.
 2. In the row's worktree (`worktree_path` in the sentinel), at that head, run
-   the timed-out gate by hand with no time limit.
-3. If it passes on a clean tree, run `prep_pr_state.py gate-pass record <gate>`
-   there (the gate name exactly as `blocker.details` gives it), then
-   `cw dev-queue requeue <T> -c <C>`. Finalize skips a gate whose gitignored
-   stamp (`.claude/prep-pr-state.json`) matches the same head on a clean tree.
-   The requeue keeps the worktree; worktree GC keeps an open PR's worktree. If
-   the head moved or the worktree was removed, finalize re-runs the gate and
-   may park again; re-record the pass.
+   the repo's sync gate first (for example `uv sync --locked ...`), because a
+   `uv run` does not upgrade an already-installed stale extra and the stamp
+   should reflect a synced environment. Then run the timed-out gate by hand
+   with no time limit, using the command exactly as `detect-gates` prints it,
+   `&&` parts included (the stamp binds to that command string).
+3. Stampable gates are any gate whose command does not install or sync: `uv
+   run ...` test and lint gates, and `uv lock --check`. If the gate passes on a
+   clean tree, run `prep_pr_state.py gate-pass record <gate>` there (the gate
+   name exactly as `blocker.details` gives it) and check the JSON for
+   `recorded: true`; `recorded: false` with `dirty-worktree` or
+   `head-unresolved` means finalize re-runs the gate. Then run
+   `cw dev-queue requeue <T> -c <C>`. Finalize skips a stamped gate whose gitignored stamp
+   (`.claude/prep-pr-state.json`) matches the same head on a clean tree. Install
+   and sync gates (`uv sync`, `uv pip install`, `pip install`, `npm|yarn|pnpm
+   install|ci`, `poetry install`, `cargo fetch`) report `recorded: false, reason:
+   environment-mutating` and cannot be stamped; finalize re-runs them every pass.
+   If one timed out, requeue (it re-runs); if it keeps timing out, raise
+   `quality_gates.timeouts.<gate>` in the repo's `.claude/project-config.yaml`
+   (clamped to the 600 s cap) or fix the host. The requeue keeps the worktree;
+   worktree GC keeps an open PR's worktree. If the head moved or the worktree
+   was removed, finalize re-runs the gate and may park again; re-record the
+   pass.
 
 **Park: `awaiting_ci_evidence` (#3618).** The repo opted in with
 `quality_gates.ci_evidence` (a gate name mapped to the CI check(s) that prove

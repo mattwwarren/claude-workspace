@@ -1356,8 +1356,42 @@ def gate_repo(
     return repo
 
 
+_UV_PYTEST_GATE = (
+    "uv run --extra mcp pytest tests/ -n auto -m 'not integration' --cov=cw "
+    "&& uv run coverage report --fail-under=88"
+)
+_UV_GATE_REPO_CLAUDE_MD = _gates_section(
+    _bash_block(
+        "uv lock --check",
+        "uv sync --locked --dev --extra mcp",
+        "uv run mypy --strict src/",
+        _UV_PYTEST_GATE,
+    )
+)
+
+
+@pytest.fixture
+def uv_gate_repo(gate_repo: Path) -> Path:
+    """``gate_repo`` recommitted with a ``uv`` gate set (#3874).
+
+    Layered on ``gate_repo``: the overwriting commit replaces its CLAUDE.md.
+    ``make_git_repo`` has no ``origin``, so ``detect_gates()`` reads this
+    worktree copy, which matches the committed one.
+    """
+    commit_tracked_file(gate_repo, "CLAUDE.md", _UV_GATE_REPO_CLAUDE_MD)
+    return gate_repo
+
+
 def _gate_names() -> list[str]:
     return [g["name"] for g in _mod.detect_gates()["gates"]]
+
+
+def _uv_gate(command_part: str) -> str:
+    for gate in _mod.detect_gates()["gates"]:
+        if command_part in gate["command"]:
+            return cast("str", gate["name"])
+    missing = f"no detected gate contains {command_part!r}"
+    raise AssertionError(missing)
 
 
 def _gate_pass(
@@ -1458,7 +1492,9 @@ class TestGatePass:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         name = _gate_names()[0]
-        monkeypatch.setattr(_mod, "_gate_command", lambda _name: "uv run mypy .")
+        monkeypatch.setattr(
+            _mod, "_gate_command", lambda _name: "uv sync --locked --dev --extra mcp"
+        )
         assert _gate_pass(capsys, "record", name) == {
             "gate": name,
             "recorded": False,
@@ -1673,6 +1709,148 @@ class TestGatePassPersistence:
         _gate_pass(capsys, "record", _gate_names()[0])
         assert _mod.clean_state() is True
         assert not (gate_repo / _STATE_REL).exists()
+
+
+@pytest.mark.parametrize(
+    ("command", "mutating"),
+    [
+        ("uv lock --check", False),
+        ("uv run ruff check src/ tests/", False),
+        (
+            "uv run --extra mcp pytest tests/ -n auto -m 'not integration' "
+            "--cov=cw --cov=.claude/scripts --cov-report=xml && "
+            "uv run coverage report --include='src/cw/*' --fail-under=88",
+            False,
+        ),
+        ("uv run python .claude/scripts/check_imports.py", False),
+        ("uv run pre-commit run --all-files", False),
+        ("uv run --no-sync pytest", False),
+        ("uv run --frozen mypy src/", False),
+        ("uv run pip-audit", False),
+        ("uv sync --locked --dev --extra mcp", True),
+        ("uv sync", True),
+        ("uv pip install -e .", True),
+        ("pip install x", True),
+        ("python -m pip install x", True),
+        ("python3.12 -m pip install x", True),
+        ("npm ci", True),
+        ("yarn install", True),
+        ("pnpm install", True),
+        ("poetry install", True),
+        ("cargo fetch", True),
+        ("uv run pip install x", True),
+        ("uv run uv sync", True),
+        ("uv lock --check && uv sync --locked", True),
+    ],
+)
+def test_is_environment_mutating_gate_table(command: str, mutating: bool) -> None:
+    assert _mod._is_environment_mutating_gate(command) is mutating
+
+
+class TestGatePassUvRun:
+    """#3874: a ``uv run`` gate stamps like any other; install/sync gates never do."""
+
+    @pytest.mark.parametrize(
+        "command_part", ["uv run mypy --strict src/", "uv run --extra mcp pytest"]
+    )
+    def test_uv_run_gate_record_then_check_skips_at_same_head(
+        self,
+        uv_gate_repo: Path,
+        capsys: pytest.CaptureFixture[str],
+        command_part: str,
+    ) -> None:
+        name = _uv_gate(command_part)
+        head = git_in(uv_gate_repo, "rev-parse", "HEAD")
+        assert _gate_pass(capsys, "record", name) == {
+            "gate": name,
+            "recorded": True,
+            "sha": head,
+        }
+        checked = _gate_pass(capsys, "check", name)
+        assert checked["skip"] is True
+        assert checked["reason"] == "matched"
+        assert head in checked["message"]
+        assert name in checked["message"]
+
+    def test_uv_lock_check_gate_still_stampable(
+        self, uv_gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name = _uv_gate("uv lock --check")
+        recorded = _gate_pass(capsys, "record", name)
+        assert recorded["recorded"] is True
+        assert _gate_pass(capsys, "check", name)["skip"] is True
+
+    def test_uv_sync_gate_still_environment_mutating(
+        self, uv_gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name = _uv_gate("uv sync --locked")
+        assert _gate_pass(capsys, "record", name) == {
+            "gate": name,
+            "recorded": False,
+            "reason": _mod.ENVIRONMENT_MUTATING_REASON,
+        }
+        assert not (uv_gate_repo / _STATE_REL).exists()
+        checked = _gate_pass(capsys, "check", name)
+        assert checked["skip"] is False
+        assert checked["reason"] == _mod.ENVIRONMENT_MUTATING_REASON
+        assert not (uv_gate_repo / _STATE_REL).exists()
+
+    def test_uv_run_stamp_not_honored_after_head_moves(
+        self, uv_gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name = _uv_gate("uv run mypy --strict src/")
+        _gate_pass(capsys, "record", name)
+        commit_tracked_file(uv_gate_repo, "src/new.py")
+        checked = _gate_pass(capsys, "check", name)
+        assert checked["skip"] is False
+        assert checked["reason"] == "sha-changed"
+
+    def test_uv_run_stamp_not_honored_on_dirty_tree(
+        self, uv_gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name = _uv_gate("uv run mypy --strict src/")
+        _gate_pass(capsys, "record", name)
+        (uv_gate_repo / "CLAUDE.md").write_text(_UV_GATE_REPO_CLAUDE_MD + "\nedit\n")
+        assert _gate_pass(capsys, "check", name)["reason"] == "dirty-worktree"
+
+    def test_uv_run_record_refused_on_dirty_tree(
+        self, uv_gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Models a `uv run` that relocked uv.lock and dirtied the tree.
+        (uv_gate_repo / "uv.lock").write_text("relocked\n")
+        name = _uv_gate("uv run mypy --strict src/")
+        assert _gate_pass(capsys, "record", name) == {
+            "gate": name,
+            "recorded": False,
+            "reason": "dirty-worktree",
+        }
+        assert not (uv_gate_repo / _STATE_REL).exists()
+
+    def test_uv_run_stamp_command_changed(
+        self, uv_gate_repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        name = _uv_gate("uv run mypy --strict src/")
+        _gate_pass(capsys, "record", name)
+        state = _state_json(uv_gate_repo)
+        state["gate_passes"][0]["command"] = "uv run mypy ."
+        (uv_gate_repo / _STATE_REL).write_text(json.dumps(state))
+        assert _gate_pass(capsys, "check", name)["reason"] == "command-changed"
+
+    def test_main_dispatch_uv_run_record_then_check(
+        self,
+        uv_gate_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        name = _uv_gate("uv run mypy --strict src/")
+        for action in ("record", "check"):
+            monkeypatch.setattr(
+                sys, "argv", ["prep_pr_state.py", "gate-pass", action, name]
+            )
+            _mod.main()
+            out = json.loads(capsys.readouterr().out)
+        assert out["skip"] is True
+        assert out["reason"] == "matched"
 
 
 class TestGatePassMainDispatch:
