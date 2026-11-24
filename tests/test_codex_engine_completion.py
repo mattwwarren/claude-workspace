@@ -226,14 +226,17 @@ def test_canary_environment_is_not_inherited(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("CW_CANARY_SECRET", "x")
+    # Pin LANG so the observed set is host-independent: with LANG unset the
+    # checker's own python3 applies PEP 538 locale coercion and adds LC_CTYPE.
+    monkeypatch.setenv("LANG", "C.UTF-8")
     repo = make_checker_repo(make_git_repo, tmp_path)
     run_pass(repo, engine_runner())
     keys = read_observed(repo)["env_keys"]
     assert isinstance(keys, list)
     # The test sandbox (tests/_git_sandbox) injects GIT_CEILING_DIRECTORIES into
     # every child under pytest; production's explicit env never carries it.
+    # The subset check also proves CW_CANARY_SECRET was not inherited.
     assert set(keys) - {"GIT_CEILING_DIRECTORIES"} <= {"PATH", "TMPDIR", "LANG"}
-    assert "CW_CANARY_SECRET" not in keys
 
 
 # ---- result contract ----------------------------------------------------
