@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from cw import review_engine_manifest_io as io_mod
 from cw.cli.review.engine import _validate_manifest
 from cw.models.review_engine_manifest import (
     DEFAULT_COMPLETION_TIMEOUT_SECONDS,
@@ -149,6 +150,35 @@ def test_checker_symlink_inside_the_skill_dir_is_path_invalid(tmp_path: Path) ->
     assert info.value.reason is EngineManifestRejection.PATH_INVALID
     assert info.value.field_path == "completion_check.path"
     assert "symlink" in str(info.value)
+
+
+def test_bad_checker_path_is_reported_together_with_another_bad_ref(
+    tmp_path: Path,
+) -> None:
+    engine = _engine_dir(tmp_path)
+    (engine / "agents" / "quality.md").unlink()
+    path = _write_manifest(engine, {"path": "bin/missing"})
+    with pytest.raises(EngineManifestError) as info:
+        load_engine_manifest(path)
+    assert [(i.reason, i.field_path) for i in info.value.issues] == [
+        (EngineManifestRejection.PATH_INVALID, "roles.1.agent_spec"),
+        (EngineManifestRejection.PATH_INVALID, "completion_check.path"),
+    ]
+
+
+def test_schema_invalid_still_sorts_before_a_bad_checker_path() -> None:
+    issues = [
+        io_mod._issue(
+            EngineManifestRejection.PATH_INVALID, "gone", "completion_check.path"
+        ),
+        io_mod._issue(EngineManifestRejection.SCHEMA_INVALID, "bad", "backends.0"),
+    ]
+    error = io_mod._reject_all(issues)
+    assert [i.field_path for i in error.issues] == [
+        "backends.0",
+        "completion_check.path",
+    ]
+    assert error.reason is EngineManifestRejection.SCHEMA_INVALID
 
 
 # ---- CLI line ------------------------------------------------------------

@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
 STUB_DIR = Path(__file__).parent / "fixtures" / "review_engine_stub"
+CHECKER_DIR = Path(__file__).parent / "fixtures" / "review_engine_checker"
 _SKILL = "repo-review"
 _MANIFEST_REL = f".claude/skills/{_SKILL}/cw-engine.json"
 
@@ -62,6 +63,21 @@ def test_manifest_present_is_loaded(make_git_repo: Callable[..., Path]) -> None:
     assert list(result.loaded.agent_specs) == ["security", "quality"]
     assert "Security role" in result.loaded.agent_specs["security"]
     assert result.loaded.aggregation_prompt.strip()
+
+
+def test_manifest_with_a_completion_check_is_loaded_with_its_path(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    """#3885: the checker fixture (mode kept) loads from the default branch."""
+    repo = make_engine_repo(make_git_repo, engine_files=CHECKER_DIR)
+
+    result = _read(repo)
+
+    assert result.status == "loaded"
+    assert result.loaded is not None
+    check = result.loaded.manifest.completion_check
+    assert check is not None
+    assert check.path == "bin/check-completion"
 
 
 def test_manifest_through_a_symlinked_skills_dir_is_loaded(

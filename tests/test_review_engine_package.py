@@ -8,6 +8,7 @@ import sys
 import cw.review_engine as package
 from cw.review_engine.constants import (
     AGGREGATION_FAILED_REASONS,
+    COMPLETION_FAILED_REASONS,
     ENGINE_ARGS_PREFIX,
     ENGINE_MANIFEST_FILENAME,
     ENGINE_PREAMBLE,
@@ -169,6 +170,29 @@ def test_codex_failure_reason_vocabularies_are_pinned() -> None:
     aggregation = FRICTION[EngineRoundFailure.ENGINE_AGGREGATION_FAILED]
     assert aggregation.format(reason="invalid_json") == (
         "engine_aggregation_failed: invalid_json"
+    )
+
+
+def test_completion_failure_reason_vocabulary_is_pinned() -> None:
+    """#3885: the ``{reason}`` values of ``engine_completion_check_failed``."""
+    assert {
+        "checker_missing",
+        "checker_not_executable",
+        "checker_launch_failed",
+        "checker_exit_nonzero",
+        "checker_timeout",
+        "extract_failed",
+        "result_missing",
+        "result_invalid",
+        "status_failed",
+        "worktree_mutated",
+        "head_moved",
+        "check_unverifiable",
+    } == COMPLETION_FAILED_REASONS
+    completion = FRICTION[EngineRoundFailure.ENGINE_COMPLETION_CHECK_FAILED]
+    assert completion == "engine_completion_check_failed: {reason}"
+    assert completion.format(reason="checker_timeout") == (
+        "engine_completion_check_failed: checker_timeout"
     )
 
 

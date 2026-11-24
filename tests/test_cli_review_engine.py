@@ -79,6 +79,21 @@ def test_valid_summary(tmp_path: Path) -> None:
     assert result.stderr == ""
 
 
+def test_kind_manifest_bad_checker_path_names_the_field(tmp_path: Path) -> None:
+    """#3885: a ``completion_check.path`` that does not exist is a path_invalid line."""
+    engine = copy_engine_fixture(
+        tmp_path, _CHECKER_ENGINE, completion_check={"path": "bin/missing"}
+    )
+
+    result = _invoke("--kind", "manifest", str(engine / "cw-engine.json"))
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    lines = _stderr_lines(result)
+    assert len(lines) == 1
+    assert lines[0].startswith("path_invalid: completion_check.path: ")
+
+
 @pytest.mark.parametrize(
     ("build", "line_prefix"),
     [
@@ -594,6 +609,7 @@ def test_every_client_option_also_accepts_short_c() -> None:
 # ---------------------------------------------------------------------------
 
 _STUB_ENGINE = Path(__file__).parent / "fixtures" / "review_engine_stub"
+_CHECKER_ENGINE = Path(__file__).parent / "fixtures" / "review_engine_checker"
 _MANIFEST_OK = "review engine manifest valid: manifest_version=1 backends=codex roles=2"
 
 
