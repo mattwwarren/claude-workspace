@@ -9,6 +9,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **A Codex IMPL turn is no longer discarded over one mistyped result field.** The turn returns its result as free-form JSON inside a string, so its inner fields are unconstrained. A non-integer `scope.lines_estimate`, a missing `scope.forbidden_touched` or a prose string inside `ambiguities` used to fail validation, park the row `validation_failed` and throw away the turn's finished edits. cw now sets the estimate to the measured lines, sets a missing `forbidden_touched` to false and moves prose ambiguities into `friction_highlights`, with one friction line per repair. A `forbidden_touched` value the schema cannot read, a scope that is not an object and a non-list `ambiguities` still fail.
+- **A create-path quality gate cut off by the foreground timeout now parks `gate_timeout` instead of regressing to impl (#3380).** Headless finalize's new create-path gate-timeout classifier promotes `/prep-pr` Step 7's nested headless `gate_timeout` marker to the top-level `gate_timeout` park the reuse path already uses (#3372) when the worktree is clean, with `pr: null`, no `pr_info` and `blocker.stage: "stage4b_pr_create"`; the row charges no attempt, has no `pr_url` and is released only by the operator's hand-run gate, `gate-pass record` and `cw dev-queue requeue`, while a dirty worktree still falls back to `agent_block`.
 
 ## [1.108.0] - 2026-11-24
 
