@@ -225,20 +225,47 @@ class TestStamp:
             f"{bad!r}, set to the measured 31"
         )
 
-    @pytest.mark.parametrize("bad", [None, "no", 0])
-    def test_a_non_boolean_forbidden_touched_is_set_to_false(
-        self, tmp_path: Path, bad: object
+    @pytest.mark.parametrize("absent", ["null", "missing"])
+    def test_a_missing_forbidden_touched_is_set_to_false(
+        self, tmp_path: Path, absent: str
     ) -> None:
         payload = _payload()
-        payload["scope"]["forbidden_touched"] = bad
+        if absent == "null":
+            payload["scope"]["forbidden_touched"] = None
+        else:
+            del payload["scope"]["forbidden_touched"]
 
         result = _stamp(tmp_path, payload)
 
         assert result.scope.forbidden_touched is False
-        assert (
-            "scope.forbidden_touched was " + repr(bad)
-            in (result.friction_highlights[-1])
+        assert result.friction_highlights[-1] == (
+            "cw repaired the IMPL result: scope.forbidden_touched was absent, "
+            "set to false"
         )
+
+    @pytest.mark.parametrize(
+        ("claim", "meaning"),
+        [("true", True), ("yes", True), (1, True), ("no", False), (0, False)],
+    )
+    def test_a_forbidden_touched_claim_in_another_type_keeps_its_meaning(
+        self, tmp_path: Path, claim: object, meaning: bool
+    ) -> None:
+        payload = _payload()
+        payload["scope"]["forbidden_touched"] = claim
+
+        result = _stamp(tmp_path, payload)
+
+        assert result.scope.forbidden_touched is meaning
+        assert not any("repaired" in line for line in result.friction_highlights)
+
+    def test_an_unreadable_forbidden_touched_still_fails(self, tmp_path: Path) -> None:
+        payload = _payload()
+        payload["scope"]["forbidden_touched"] = "maybe"
+        with pytest.raises(ValidationError) as caught:
+            _stamp(tmp_path, payload)
+        assert [error["loc"] for error in caught.value.errors()] == [
+            ("scope", "forbidden_touched")
+        ]
 
     def test_a_well_typed_scope_adds_no_repair_line(self, tmp_path: Path) -> None:
         payload = _payload()
@@ -266,6 +293,59 @@ class TestStamp:
             "The ticket body differs from the PR."
         )
 
+    def test_repairs_are_recorded_when_the_model_sent_no_friction_list(
+        self, tmp_path: Path
+    ) -> None:
+        payload = _payload()
+        del payload["friction_highlights"]
+        payload["scope"]["lines_estimate"] = None
+        payload["ambiguities"] = ["The ticket body differs from the PR."]
+
+        result = _stamp(tmp_path, payload, extra_friction=("gate note",))
+
+        assert result.friction_highlights == [
+            "gate note",
+            "cw repaired the IMPL result: scope.lines_estimate was None, "
+            "set to the measured 31",
+            "cw repaired the IMPL result: ambiguities held prose, kept here: "
+            "The ticket body differs from the PR.",
+        ]
+
+    def test_every_repair_gets_its_own_line_after_the_other_friction(
+        self, tmp_path: Path
+    ) -> None:
+        payload = _payload()
+        payload["friction_highlights"] = ["model note"]
+        payload["scope"]["lines_estimate"] = None
+        payload["scope"]["forbidden_touched"] = None
+        payload["ambiguities"] = ["first note", "second note"]
+
+        result = _stamp(tmp_path, payload, extra_friction=("gate note",))
+
+        assert result.ambiguities == []
+        assert result.friction_highlights == [
+            "model note",
+            "gate note",
+            "cw repaired the IMPL result: scope.lines_estimate was None, "
+            "set to the measured 31",
+            "cw repaired the IMPL result: scope.forbidden_touched was absent, "
+            "set to false",
+            "cw repaired the IMPL result: ambiguities held prose, kept here: "
+            "first note",
+            "cw repaired the IMPL result: ambiguities held prose, kept here: "
+            "second note",
+        ]
+
+    def test_a_payload_without_ambiguities_gets_none_added(
+        self, tmp_path: Path
+    ) -> None:
+        payload = _payload()
+        del payload["ambiguities"]
+
+        result = _stamp(tmp_path, payload)
+
+        assert result.ambiguities == []
+
     def test_a_long_prose_ambiguity_is_capped(self, tmp_path: Path) -> None:
         payload = _payload()
         payload["ambiguities"] = ["x" * 900]
@@ -280,8 +360,9 @@ class TestStamp:
     ) -> None:
         payload = _payload()
         payload["ambiguities"] = "none"
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as caught:
             _stamp(tmp_path, payload)
+        assert [error["loc"] for error in caught.value.errors()] == [("ambiguities",)]
 
     def test_does_not_use_the_review_fix_cycle_commit_filter(
         self, tmp_path: Path
