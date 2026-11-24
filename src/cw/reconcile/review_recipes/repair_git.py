@@ -36,7 +36,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -45,6 +44,7 @@ from typing import TYPE_CHECKING, NamedTuple, cast
 
 from cw._git import LOCAL_GIT_TIMEOUT_SECONDS, git_clean_env, run_git
 from cw.exceptions import CwError
+from cw.merge_probe import GitFailedError, resolve_base
 from cw.repair_disposition import RepairDisposition
 
 if TYPE_CHECKING:
@@ -316,13 +316,44 @@ def _show_blob(repo: Path, rev: str) -> str:
 
 
 def _read_three_blobs(
-    repo: Path, merge_base: str, expected_sha: str, default_ref: str
+    repo: Path, merge_base: str, expected_sha: str, default_rev: str
 ) -> tuple[str, str, str]:
-    """CHANGELOG.md at the merge-base, the PR tip and main."""
+    """CHANGELOG.md at the merge-base, the PR tip and the default branch."""
     base = _show_blob(repo, merge_base)
     tip = _show_blob(repo, expected_sha)
-    main = _show_blob(repo, default_ref)
+    main = _show_blob(repo, default_rev)
     return base, tip, main
+
+
+def _pin_default_sha(
+    repo: Path, base_branch: str, expected_sha: str, merge_base: str
+) -> str:
+    """Resolve ``origin/<base_branch>`` to one commit sha for the whole repair (#3375).
+
+    The three-blob read, the rebase, the non-CHANGELOG verify and the carry
+    proof all take this sha, so a concurrent fetch cannot make them disagree.
+    The merge-base is re-derived against the pinned sha and compared with the
+    one ``prepare_repair`` computed from the ref name; a mismatch means the
+    default branch moved in between, and nothing has been written yet.
+    """
+    try:
+        sha = resolve_base(repo, base_branch, _T_LOCAL)
+    except GitFailedError as exc:
+        raise RepairStopError(RepairDisposition.FETCH_FAILED, str(exc)) from exc
+    unexplained = RepairDisposition.CONFLICT_UNEXPLAINED
+    based = _git(
+        repo, "merge-base", sha, expected_sha, timeout=_T_LOCAL, stop=unexplained
+    )
+    derived = based.stdout.strip()
+    if based.returncode != 0 or not derived:
+        raise RepairStopError(unexplained, _failed(based, "git merge-base"))
+    if derived != merge_base:
+        raise RepairStopError(
+            unexplained,
+            f"origin/{base_branch} moved during the repair: merge-base {derived}"
+            f" against {sha}, expected {merge_base}",
+        )
+    return sha
 
 
 def _probe_arm_script(repo: Path) -> Path:
@@ -650,59 +681,6 @@ def _verify_non_changelog_identical(
     )
 
 
-# ``git range-diff --no-patch --no-color`` pair line (#2921): ``N:  abbrev <mark>
-# M:  abbrev subject``, with ``-`` and ``-------`` standing in for an absent side.
-# Anchored at both ends. Marks: ``=`` equal, ``!`` changed, ``<`` dropped,
-# ``>`` added.
-_RANGE_DIFF_PAIR_RE = re.compile(
-    r"^(?:\d+|-):[ \t]+\S+[ \t]+([=!<>])[ \t]+(?:\d+|-):[ \t]+\S+(?:[ \t].*)?$"
-)
-_RANGE_DIFF_EQUAL = "="
-
-
-def _range_diff_marks(scratch: Path, old_range: str, new_range: str) -> list[str]:
-    """The pair marks of ``git range-diff --no-patch`` for two ranges (#2921).
-
-    Strict: a non-zero exit, a non-blank line that is not a pair line, or no
-    pair at all raises ``VERIFY_FAILED``. The caller treats that as unprovable.
-    """
-    ranged = _git(
-        scratch,
-        "range-diff",
-        "--no-color",
-        "--no-patch",
-        old_range,
-        new_range,
-        timeout=_T_LOCAL,
-        stop=RepairDisposition.VERIFY_FAILED,
-    )
-    if ranged.returncode != 0:
-        raise RepairStopError(
-            RepairDisposition.VERIFY_FAILED, _failed(ranged, "git range-diff")
-        )
-    marks: list[str] = []
-    for line in ranged.stdout.splitlines():
-        if not line.strip():
-            continue
-        match = _RANGE_DIFF_PAIR_RE.match(line)
-        if match is None:
-            raise RepairStopError(
-                RepairDisposition.VERIFY_FAILED,
-                f"unparseable range-diff line: {_tail(line)}",
-            )
-        marks.append(match.group(1))
-    if not marks:
-        raise RepairStopError(
-            RepairDisposition.VERIFY_FAILED, "git range-diff printed no commit pairs"
-        )
-    return marks
-
-
-def _all_pairs_equal(marks: list[str]) -> bool:
-    """True when every range-diff pair is ``=`` (the per-commit equality proof)."""
-    return all(mark == _RANGE_DIFF_EQUAL for mark in marks)
-
-
 def _changelog_only_delta(scratch: Path, rebased: str, new_sha: str) -> None:
     """The head is *rebased* or one commit on it that touches only CHANGELOG.md.
 
@@ -743,33 +721,6 @@ def _changelog_only_delta(scratch: Path, rebased: str, new_sha: str) -> None:
             RepairDisposition.VERIFY_FAILED,
             f"the CHANGELOG rebuild also touched: {sorted(stray)}",
         )
-
-
-def _prove_series_unchanged(
-    scratch: Path,
-    merge_base: str,
-    expected_sha: str,
-    default_ref: str,
-    rebased: str,
-    new_sha: str,
-) -> int:
-    """Prove every branch commit is unchanged by the rebase; the commit count (#2921).
-
-    Requires each old-series commit to pair with a new-series commit as ``=``
-    (no dropped, added or changed commit), and the new head to differ from the
-    rebased series only by a CHANGELOG-only commit. Writes nothing.
-    """
-    marks = _range_diff_marks(
-        scratch, f"{merge_base}..{expected_sha}", f"{default_ref}..{rebased}"
-    )
-    if not _all_pairs_equal(marks):
-        raise RepairStopError(
-            RepairDisposition.VERIFY_FAILED,
-            f"range-diff marks {''.join(marks)}: a branch commit changed"
-            " across the rebase",
-        )
-    _changelog_only_delta(scratch, rebased, new_sha)
-    return len(marks)
 
 
 def _run_changelog_gate(repo: Path, scratch: Path) -> None:

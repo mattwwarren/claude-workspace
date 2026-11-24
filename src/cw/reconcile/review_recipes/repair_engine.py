@@ -409,6 +409,8 @@ class RepairState:
         self.pushed = False
         # Set by a spec's ``rewrite`` when a clean-mode rebase is proven (#2921).
         self.clean_remap: CleanShaRemap | None = None
+        # Why the carry was refused (#3375); named on the unarmed page.
+        self.remap_refusal: str | None = None
 
 
 def _armed_note(outcome: UnarmOutcome) -> str:
@@ -783,6 +785,7 @@ def _finish_steps(
         new_sha=new_sha,
         origin_tip=origin_tip,
         remap=state.clean_remap,
+        remap_refusal=state.remap_refusal,
     )
     verdict = _apply_remap(job, prep, verdict, state)
     if verdict.passed:

@@ -16,12 +16,18 @@ This recipe repairs such a PR when its ONLY conflict is CHANGELOG.md:
 - **Act** (under ``dev_queue_lock``, no subprocess): the shared
   :func:`~cw.reconcile.review_recipes.repair_engine.act_repairs` with
   :data:`CHANGELOG_SPEC`; the only state is the in-process :data:`_LATCH`.
-- **Clean-mode carry (#2921)**: a clean-mode row whose ledger is converged at
-  the old head gets its ``last_clean_sha`` remapped to the new head when
-  :func:`_prove_remap` proves every branch commit unchanged
-  (``git range-diff``) and the only delta is the rebuilt CHANGELOG commit. The
-  proof writes nothing; the engine persists the remap after the fence passes.
-  An unprovable rebase is logged and the PR ends unarmed, as before.
+- **Clean-mode carry (#2921, #3375)**: a clean-mode row whose ledger is
+  converged at the old head gets its ``last_clean_sha`` remapped to the new
+  head when :func:`_prove_remap` proves the rebuilt tree unchanged
+  (:mod:`~cw.reconcile.review_recipes.repair_proof`: merge-tree equality for
+  every non-CHANGELOG path plus a CHANGELOG delta confined to additions the
+  reviewed head itself made inside main's ``[Unreleased]`` span). It is no
+  longer a per-commit ``git range-diff``, which a CHANGELOG-touching branch
+  commit never passed. The default branch is pinned to one commit sha for the
+  whole repair. The proof writes nothing; the engine persists the remap after
+  the fence passes. An unprovable rebase is logged, the refusal reason is named
+  on the unarmed page, and the PR ends unarmed, as before. The disposition of a
+  refusal is not load-bearing: only its detail is surfaced.
 - **Dispatch** (post-lock,
   :func:`~cw.reconcile.review_recipes.repair_engine.dispatch_repair`): the
   engine fetches and derives the conflict set; this module's strategy
@@ -38,8 +44,8 @@ changed. Not in ``RECIPE_ATTENTION_STATES`` / ``RECIPE_FIRED_AT_GETTERS``: it
 has no persisted ``*_fired_at`` latch for the doctor liveness check to read.
 No LLM session is spawned, so usage limits do not apply.
 
-Leaf module: depends only on ``_shared``, ``repair_engine``, ``repair_git``
-and ``cw.changelog_rebuild`` (plus ``cw`` infrastructure). Module-level
+Leaf module: depends only on ``_shared``, ``repair_engine``, ``repair_git``,
+``repair_proof`` and ``cw.changelog_rebuild`` (plus ``cw`` infrastructure). Module-level
 imports only.
 """
 
@@ -50,6 +56,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from cw.changelog_rebuild import ChangelogRebuildError, rebuild_changelog
 from cw.lane_pause import iso_z, utc_now_seconds
+from cw.reconcile.review_recipes import repair_proof
 from cw.reconcile.review_recipes._shared import (
     _ATTENTION_MERGE_BLOCKED,
     RECIPE_REPAIR_CHANGELOG_CONFLICT,
@@ -68,8 +75,8 @@ from cw.reconcile.review_recipes.repair_git import (
     RepairStopError,
     _commit_rebuilt,
     _head_sha,
+    _pin_default_sha,
     _probe_arm_script,
-    _prove_series_unchanged,
     _read_three_blobs,
     _rebase_onto,
     _run_changelog_gate,
@@ -119,10 +126,11 @@ def _detect_repair_changelog_conflict(
 
 
 class _ChangelogStaged(NamedTuple):
-    """The rebuilt CHANGELOG.md and main's, for the rebase and the commit."""
+    """The rebuilt CHANGELOG.md, main's, and the pinned default commit (#3375)."""
 
     rebuilt: str
     main_text: str
+    default_sha: str
 
 
 def _check_changelog_only(conflicts: frozenset[str], _cfg: ClientConfig) -> None:
@@ -145,8 +153,11 @@ def _stage_rewrite(job: RepairJob, prep: Prepared) -> Staged[_ChangelogStaged]:
     A branch bullet already present anywhere in main is not re-added (the
     idempotence rule); each one is logged here so a dropped bullet is visible.
     """
+    default_sha = _pin_default_sha(
+        prep.repo, prep.base_branch, prep.expected_sha, prep.merge_base
+    )
     base, branch_text, main_text = _read_three_blobs(
-        prep.repo, prep.merge_base, prep.expected_sha, prep.default_ref
+        prep.repo, prep.merge_base, prep.expected_sha, default_sha
     )
     try:
         result = rebuild_changelog(base=base, branch=branch_text, main=main_text)
@@ -167,7 +178,9 @@ def _stage_rewrite(job: RepairJob, prep: Prepared) -> Staged[_ChangelogStaged]:
             f"bullets_inserted={len(result.inserted)}"
             f" bullets_skipped={len(result.skipped_present)}"
         ),
-        data=_ChangelogStaged(rebuilt=result.text, main_text=main_text),
+        data=_ChangelogStaged(
+            rebuilt=result.text, main_text=main_text, default_sha=default_sha
+        ),
     )
 
 
@@ -191,20 +204,23 @@ def _prove_remap(
     scratch: Path,
     rebased: str,
     new_sha: str,
-) -> CleanShaRemap | None:
-    """The clean-sha remap for this rebase, or None with the reason logged (#2921).
+    default_sha: str,
+) -> CleanShaRemap | str:
+    """The clean-sha remap for this rebase, or the refusal detail (#2921, #3375).
 
     Never parks: an unprovable rebase is the fail-closed path, so the PR goes
-    out unarmed exactly as it did before the carry existed. Writes nothing.
+    out unarmed exactly as it did before the carry existed. Any
+    ``RepairStopError`` is a refusal whatever its disposition; it is logged and
+    its detail returned. Writes nothing.
     """
     try:
-        commits = _prove_series_unchanged(
+        commits = repair_proof.prove_tree_unchanged(
             scratch,
-            prep.merge_base,
             prep.expected_sha,
-            prep.default_ref,
+            default_sha,
             rebased,
             new_sha,
+            prep.merge_base,
         )
     except RepairStopError as stop:
         _logger.info(
@@ -217,7 +233,7 @@ def _prove_remap(
             new_sha,
             stop.detail,
         )
-        return None
+        return stop.detail
     return CleanShaRemap(
         at=iso_z(utc_now_seconds()),
         recipe=job.spec.recipe,
@@ -238,11 +254,13 @@ def _rewrite_changelog(
     """Steps 9-12 in the scratch tree: rebase, commit, verify, gate; the new head.
 
     In clean mode the pre-CHANGELOG head is captured so :func:`_prove_remap`
-    can compare the branch series against it; the proof is stored on *state*.
+    can prove the rebuilt tree unchanged; the proof, or its refusal detail, is
+    stored on *state*. Every step takes the one pinned default commit.
     """
+    default_sha = staged.data.default_sha
     _rebase_onto(
         scratch,
-        prep.default_ref,
+        default_sha,
         staged.data.main_text,
         prep.merge_base,
         prep.expected_sha,
@@ -252,11 +270,15 @@ def _rewrite_changelog(
     new_sha = _head_sha(scratch)
     state.evidence[_EVIDENCE_NEW_SHA] = new_sha
     _verify_non_changelog_identical(
-        scratch, prep.merge_base, prep.expected_sha, prep.default_ref, new_sha
+        scratch, prep.merge_base, prep.expected_sha, default_sha, new_sha
     )
     _run_changelog_gate(prep.repo, scratch)
     if rebased is not None:
-        state.clean_remap = _prove_remap(job, prep, scratch, rebased, new_sha)
+        proof = _prove_remap(job, prep, scratch, rebased, new_sha, default_sha)
+        if isinstance(proof, str):
+            state.remap_refusal = proof
+        else:
+            state.clean_remap = proof
     return new_sha
 
 
