@@ -528,6 +528,53 @@ def test_codex_lane_with_a_non_executable_checker_warns(
     assert "engine_completion_check_failed" in results[0].detail
 
 
+@pytest.mark.parametrize(
+    ("mode", "warns"), [(0o755, False), (0o644, True)], ids=["executable", "plain"]
+)
+def test_checker_probe_resolves_the_branch_get_read_the_manifest_from(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    read_counter: list[tuple[Path, str, str]],
+    mode: int,
+    warns: bool,
+) -> None:
+    """R15: the probe sees the client's non-``main`` default branch from ``get()``."""
+    import cw.doctor.review_engine as doctor_review
+
+    resolved: list[tuple[Path, str]] = []
+    real_resolve = doctor_review.resolve_default_branch_ref
+
+    def _spy(repo: Path, branch: str) -> object:
+        resolved.append((repo, branch))
+        return real_resolve(repo, branch)
+
+    monkeypatch.setattr(doctor_review, "resolve_default_branch_ref", _spy)
+    engine = copy_engine_fixture(tmp_path, CHECKER_DIR)
+    (engine / "bin" / "check-completion").chmod(mode)
+    repo = make_engine_repo(
+        make_git_repo,
+        engine_files=engine,
+        default_branch="develop",
+        name="checker-develop",
+    )
+    client = _codex_client(repo.worktree).model_copy(
+        update={"default_branch": "develop"}
+    )
+
+    results = _check_review_engine({"acme": client})
+
+    assert read_counter == [(repo.worktree, "develop", _SKILL)]
+    assert resolved == [(repo.worktree, "develop")]
+    if not warns:
+        assert results == []
+        return
+    (result,) = results
+    assert (result.ok, result.warn) == (True, True)
+    assert "checker_not_executable" in result.detail
+    assert "cause=" not in result.detail
+
+
 def test_completion_probe_is_cached_and_quiet_without_a_loaded_manifest(
     make_git_repo: Callable[..., Path],
 ) -> None:
