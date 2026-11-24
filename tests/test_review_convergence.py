@@ -94,6 +94,7 @@ from tests._codex_review_helpers import _task
 from tests._review_convergence_helpers import (
     DEFAULT_SHA,
     FORK_POINT,
+    LATER,
     LOOP_BACKEND,
     MAIN_ONLY_FILE,
     NOW,
@@ -111,6 +112,7 @@ from tests._review_convergence_helpers import (
     non_merge_commit_script,
     old_ledger_json,
     operator_finding,
+    reconcile_ledger,
     record,
     resolution_ledger,
     resolution_merge_script,
@@ -138,7 +140,6 @@ if TYPE_CHECKING:
     )
     from cw.review_findings import AcceptedFinding, Disposition, Severity
 
-LATER = "2026-10-27T13:00:00+00:00"
 _CLEAN = "c" * 40
 _MOVED_HEAD = "d" * 40
 _DEFAULT_TIP = "e" * 40
@@ -180,28 +181,6 @@ def _awaiting(sha: str = DEFAULT_SHA) -> ConvergenceLedger:
     ledger, report = record(fresh_ledger(confirm="codex"), sha=sha)
     assert report.decision == "confirm_required"
     return ledger
-
-
-def _reconcile(
-    existing: ConvergenceLedger | None,
-    *,
-    head: str,
-    max_cycles: int = 8,
-    history_rewritten: bool = False,
-    ticket_id: str = TICKET_ID,
-    fork_point: str = FORK_POINT,
-    confirm: ConfirmBackend | None = "none",
-) -> Reconciled:
-    return reconcile_ledger_for_init(
-        existing,
-        fresh=fresh_ledger(ticket_id=ticket_id, fork_point=fork_point, confirm=confirm),
-        ticket_id=ticket_id,
-        fork_point=fork_point,
-        history_rewritten=history_rewritten,
-        head_sha=head,
-        max_cycles=max_cycles,
-        now=LATER,
-    )
 
 
 def _targets(*identities: FindingIdentity) -> list[SettleTarget]:
@@ -852,6 +831,7 @@ class TestOperatorAction:
         ledger, report = record(fresh_ledger(), finding, sha="s1")
         assert report.decision == "stop_operator_action"
         assert report.reason == "operator_action"
+        assert ledger.held == []
         assert ledger.stop_identities == [
             finding_identity("MUST_FIX", "N/A", "Rotate the key")
         ]
@@ -935,6 +915,7 @@ class TestSettledMemory:
         finding = operator_finding("Rotate the key")
         stopped, report = record(fresh_ledger(), finding, sha="s1")
         assert report.decision == "stop_operator_action"
+        assert stopped.held == []
         identity = stopped.stop_identities[0]
 
         settled, settle_report = operator_settle(
@@ -944,7 +925,7 @@ class TestSettledMemory:
         assert settle_report.releasable is True
         assert [e.origin for e in settled.settled] == ["operator"]
 
-        released = _reconcile(settled, head="s1")
+        released = reconcile_ledger(settled, head="s1")
         assert released.released is not None
         assert released.released.cause == "operator_action_done"
         assert [e.origin for e in released.ledger.settled] == ["operator"]
@@ -955,7 +936,7 @@ class TestSettledMemory:
             assert again.new_accepted == 0
 
         # Control: without the settle, the same re-raise stops again.
-        control = _reconcile(stopped, head="s1")
+        control = reconcile_ledger(stopped, head="s1")
         _, restop = record(control.ledger, finding, sha="s1")
         assert restop.decision == "stop_operator_action"
 
@@ -1827,7 +1808,7 @@ class TestLedgerStore:
 
 class TestReconcileForInit:
     def test_no_ledger_starts_fresh(self) -> None:
-        result = _reconcile(None, head="s1")
+        result = reconcile_ledger(None, head="s1")
         assert result.ledger == fresh_ledger()
         assert (result.reset_reason, result.released) == (None, None)
 
@@ -1843,7 +1824,7 @@ class TestReconcileForInit:
         self, ticket_id: str, fork_point: str, rewritten: bool, reason: str
     ) -> None:
         existing = ledger_with_rounds(_distinct(0, 1), shas=["s1"])
-        result = _reconcile(
+        result = reconcile_ledger(
             existing,
             head="s1",
             ticket_id=ticket_id,
@@ -1856,21 +1837,21 @@ class TestReconcileForInit:
 
     def test_stale_reset_keeps_a_recoverable_snapshot(self) -> None:
         existing = ledger_with_rounds(_distinct(0, 1), shas=["s1"])
-        result = _reconcile(existing, ticket_id="T-2", head="s1")
+        result = reconcile_ledger(existing, ticket_id="T-2", head="s1")
         (reset,) = result.ledger.reset_history
         assert reset.reason == "ticket_mismatch"
         assert reset.previous_ledger == existing.model_dump(mode="json")
 
     def test_matching_in_progress_ledger_is_resumed(self) -> None:
         existing = ledger_with_rounds(_distinct(0, 1), shas=["s1"])
-        result = _reconcile(existing, head="s1")
+        result = reconcile_ledger(existing, head="s1")
         assert result.ledger == existing
         assert (result.reset_reason, result.released) == (None, None)
 
     def test_in_progress_ledger_is_resumed_when_head_moved(self) -> None:
         """#2807: a seeded fix commit moves HEAD; the ledger is not reset."""
         existing = ledger_with_rounds(_distinct(0, 1), shas=["s1"])
-        result = _reconcile(existing, head="s-moved")
+        result = reconcile_ledger(existing, head="s-moved")
         assert result.ledger == existing
         assert result.ledger.status == "in_progress"
         assert (result.reset_reason, result.released) == (None, None)
@@ -1891,13 +1872,15 @@ class TestReconcileForInit:
         for existing, head in cases:
             for cap in (1, 20):
                 assert (
-                    _reconcile(existing, head=head, max_cycles=cap).ledger.max_cycles
+                    reconcile_ledger(
+                        existing, head=head, max_cycles=cap
+                    ).ledger.max_cycles
                     == cap
                 )
 
     def test_stopped_ledger_on_a_new_tip_is_reopened_as_a_new_epoch(self) -> None:
         stopped = stopped_ledger("oscillation", sha="osc", stop_identities=("A",))
-        result = _reconcile(stopped, head="newtip")
+        result = reconcile_ledger(stopped, head="newtip")
         ledger = result.ledger
         assert ledger.status == "in_progress"
         assert ledger.epoch_start_round == len(stopped.rounds)
@@ -1920,7 +1903,7 @@ class TestReconcileForInit:
     def test_max_cycles_stop_same_tip_needs_a_raised_cap(self) -> None:
         stopped = stopped_ledger("max_cycles", sha="stop", max_cycles=2)
         for cap in (2, 1):
-            result = _reconcile(stopped, head="stop", max_cycles=cap)
+            result = reconcile_ledger(stopped, head="stop", max_cycles=cap)
             assert result.ledger.status == "stopped"
             assert result.released is None
             assert result.ledger.stop_reason == "max_cycles"
@@ -1929,7 +1912,7 @@ class TestReconcileForInit:
         self,
     ) -> None:
         stopped = stopped_ledger("max_cycles", sha="stop", max_cycles=2)
-        result = _reconcile(stopped, head="stop", max_cycles=3)
+        result = reconcile_ledger(stopped, head="stop", max_cycles=3)
         ledger = result.ledger
         assert ledger.status == "in_progress"
         assert ledger.stop_reason is None
@@ -1948,7 +1931,7 @@ class TestReconcileForInit:
 
     def test_operator_action_stop_is_released_on_a_same_tip_requeue(self) -> None:
         stopped = stopped_ledger("operator_action", sha="s1")
-        result = _reconcile(stopped, head="s1")
+        result = reconcile_ledger(stopped, head="s1")
         assert result.released is not None
         assert result.released.cause == "operator_action_done"
         ledger = result.ledger
@@ -1961,34 +1944,34 @@ class TestReconcileForInit:
     def test_oscillation_stop_is_terminal_until_every_identity_is_settled(self) -> None:
         stopped = stopped_ledger("oscillation", sha="osc", stop_identities=("A", "B"))
         a, b = stopped.stop_identities
-        assert _reconcile(stopped, head="osc").released is None
+        assert reconcile_ledger(stopped, head="osc").released is None
         partial, _ = operator_settle(
             stopped, _targets(a), actor="ops", reason="fp", now=NOW
         )
-        terminal = _reconcile(partial, head="osc")
+        terminal = reconcile_ledger(partial, head="osc")
         assert terminal.released is None
         assert terminal.ledger.status == "stopped"
         full, _ = operator_settle(
             partial, _targets(b), actor="ops", reason="fp", now=NOW
         )
-        result = _reconcile(full, head="osc")
+        result = reconcile_ledger(full, head="osc")
         assert result.released is not None
         assert result.released.cause == "identities_settled"
         assert result.ledger.status == "in_progress"
 
     def test_no_progress_and_unknown_stops_are_always_terminal(self) -> None:
         no_progress = stopped_ledger("no_progress", sha="np")
-        result = _reconcile(no_progress, head="np", max_cycles=99)
+        result = reconcile_ledger(no_progress, head="np", max_cycles=99)
         assert result.released is None
         assert result.ledger == no_progress.model_copy(update={"max_cycles": 99})
         unknown = no_progress.model_copy(update={"stop_reason": "mystery"})
-        assert _reconcile(unknown, head="np").released is None
+        assert reconcile_ledger(unknown, head="np").released is None
         assert release_cause(unknown) is None
 
     def test_an_open_ledger_follows_the_current_confirm_choice(self) -> None:
         awaiting = _awaiting()
         assert awaiting.confirm_backend == "codex"
-        result = _reconcile(awaiting, head=DEFAULT_SHA, confirm="none")
+        result = reconcile_ledger(awaiting, head=DEFAULT_SHA, confirm="none")
         assert result.ledger.confirm_backend == "none"
         assert result.ledger.status == "awaiting_confirm"
         assert result.ledger.awaiting_confirm_sha == awaiting.awaiting_confirm_sha
@@ -1996,27 +1979,27 @@ class TestReconcileForInit:
     def test_the_not_independent_flag_is_refreshed_with_the_backend(self) -> None:
         existing = ledger_with_rounds(_distinct(0, 1), shas=["s1"])
         assert existing.confirm_not_independent is False
-        refreshed = _reconcile(existing, head="s1", confirm="claude").ledger
+        refreshed = reconcile_ledger(existing, head="s1", confirm="claude").ledger
         assert refreshed.confirm_backend == "claude"
         # The helper loop backend is claude-native, so claude is not independent.
         assert refreshed.confirm_not_independent is True
 
     def test_a_converged_ledger_clean_at_head_keeps_its_stamped_choice(self) -> None:
         converged = confirmed_ledger(sha="S", confirm="codex")
-        result = _reconcile(converged, head="S", confirm="none")
+        result = reconcile_ledger(converged, head="S", confirm="none")
         assert result.ledger.confirm_backend == "codex"
         assert result.ledger.status == "converged"
 
     def test_a_demoted_converged_ledger_follows_the_current_choice(self) -> None:
         converged = confirmed_ledger(sha="S", confirm="codex")
-        result = _reconcile(converged, head="S+1", confirm="none")
+        result = reconcile_ledger(converged, head="S+1", confirm="none")
         assert result.ledger.status == "in_progress"
         assert result.ledger.confirm_backend == "none"
 
     def test_fixture_d_converged_ledger_on_a_moved_tip_is_reopened(self) -> None:
         converged = confirmed_ledger(sha="S")
         settled, _ = record(fresh_ledger(), round_finding(summary="Keep me"), sha="a")
-        result = _reconcile(converged, head="S+1")
+        result = reconcile_ledger(converged, head="S+1")
         reopened = result.ledger
         assert reopened.status == "in_progress"
         assert result.released is None
@@ -2027,7 +2010,7 @@ class TestReconcileForInit:
         assert reopened.epoch_start_round == converged.epoch_start_round
         assert reopened.fix_cycles_used == converged.fix_cycles_used
         assert next_action(reopened, head_sha="S+1") == "loop_round"
-        same = _reconcile(converged, head="S").ledger
+        same = reconcile_ledger(converged, head="S").ledger
         assert same.status == "converged"
         assert next_action(same, head_sha="S") == "done"
         assert settled.fixed  # the helper really recorded fixed memory
@@ -2037,14 +2020,16 @@ class TestReconcileForInit:
             _awaiting("s1"), cause="crash", detail="x", now=NOW
         )
         failures = awaiting.confirm_failures
-        assert _reconcile(awaiting, head="s1").ledger.confirm_failures == failures
+        assert reconcile_ledger(awaiting, head="s1").ledger.confirm_failures == failures
         stopped = stopped_ledger("operator_action", sha="s1").model_copy(
             update={"confirm_failures": failures}
         )
-        assert _reconcile(stopped, head="s1").ledger.confirm_failures == failures
-        assert _reconcile(stopped, head="new").ledger.confirm_failures == failures
+        assert reconcile_ledger(stopped, head="s1").ledger.confirm_failures == failures
+        assert reconcile_ledger(stopped, head="new").ledger.confirm_failures == failures
         assert (
-            _reconcile(awaiting, head="s1", ticket_id="T-9").ledger.confirm_failures
+            reconcile_ledger(
+                awaiting, head="s1", ticket_id="T-9"
+            ).ledger.confirm_failures
             == []
         )
 
@@ -2923,7 +2908,7 @@ class TestRenderers:
             reason="reviewer <!-- x --> wrong",
             now=LATER,
         )
-        released = _reconcile(settled, head="abcdef123456").ledger
+        released = reconcile_ledger(settled, head="abcdef123456").ledger
         # Render the stop with the release audit trail the requeue left behind.
         with_failure = settled.model_copy(
             update={
@@ -3945,6 +3930,7 @@ class TestEngineFingerprintThreading:
         )
 
         assert report.decision == "stop_operator_action"
+        assert ledger.held == []
         assert ledger.stop_identities[0].fingerprint == _FP
 
     def test_fixed_memory_keys_engine_finding_by_fingerprint(self) -> None:

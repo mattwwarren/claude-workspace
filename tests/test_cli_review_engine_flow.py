@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from cw.review_convergence import LEDGER_RELATIVE_PATH, load_ledger
 from cw.review_engine.constants import ENGINE_ROLE
 from tests._review_engine_helpers import (
     EngineRepo,
@@ -488,6 +489,9 @@ def test_escalation_to_must_fix_is_new_and_cannot_be_deferred(flow: Flow) -> Non
     assert accepted.exit_code == 0, accepted.output
     report = flow.record_round(json.loads(accepted.stdout))
     assert report["decision"] == "stop_operator_action"
+    stopped = load_ledger(flow.repo.worktree / LEDGER_RELATIVE_PATH)
+    assert stopped is not None
+    assert stopped.held == []
     status = flow.ok("review", "converge", "status")
     assert status["next_action"] == "stopped"
     assert status["stop"]["reason"] == "operator_action"

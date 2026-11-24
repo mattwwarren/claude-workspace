@@ -11,6 +11,9 @@ from __future__ import annotations
 import cw.review_convergence as rc
 
 EXPECTED_EXPORTS = {
+    "DECISION_STOP_OPERATOR_ACTION",
+    "HeldEntry",
+    "outstanding_held",
     # Constants
     "CONFIRM_CAUSE_BACKEND_ERROR",
     "CONFIRM_CAUSE_BINARY_MISSING",

@@ -50,9 +50,11 @@ from tests._review_convergence_helpers import (
     record,
     round_finding,
     stamp_dispositions,
+    with_evidence_gap,
     write_ledger,
 )
 from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.review_builders import _EVIDENCE_GAP
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -356,6 +358,18 @@ def test_an_operator_actionable_must_fix_is_not_seeded(worktree: Path) -> None:
         worktree / LEDGER_RELATIVE_PATH, ledger.rounds[-1].round, persisted
     )
     assert _summaries(_load(worktree)) == ["loop work"]
+
+
+def test_a_mixed_confirm_seeds_only_the_reproduced_finding(worktree: Path) -> None:
+    """A gap beside a reproduced MUST_FIX stays on the ledger, unseeded (#3823)."""
+    verdict = _claude_verdict(
+        worktree, ("MUST_FIX", "reproduced finding"), ("MUST_FIX", "gap finding")
+    )
+    stamped = with_evidence_gap(verdict, "gap finding")
+    ledger = dirty_confirm_ledger(worktree, stamped)
+    assert ledger.status == "in_progress"
+    assert [entry.rationale for entry in ledger.held] == [_EVIDENCE_GAP]
+    assert _summaries(_load(worktree)) == ["reproduced finding"]
 
 
 def test_a_confirm_round_with_nothing_left_to_seed_yields_nothing(

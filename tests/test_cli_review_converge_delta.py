@@ -62,6 +62,7 @@ from tests._review_convergence_helpers import (
     write_ledger,
 )
 from tests._shared.git_repos import commit_tracked_file, git_in
+from tests._shared.review_builders import _EVIDENCE_GAP
 from tests.test_review_base_branch_sites import CLIENT_DEFAULT, ROW_BASE, _queued_row
 
 if TYPE_CHECKING:
@@ -164,6 +165,13 @@ def _claude_ok() -> ClaudeRunResult:
 
 def _claude_finding(severity: str) -> ClaudeRunResult:
     document = _doc_json(findings=[_resolution_finding(severity)])
+    return ClaudeRunResult(returncode=0, stdout=review_envelope(document), stderr="")
+
+
+def _claude_gap_finding() -> ClaudeRunResult:
+    """A MUST_FIX that rests on a check the reviewer could not run (#3793)."""
+    finding = {**_resolution_finding("MUST_FIX"), "evidence_gap": _EVIDENCE_GAP}
+    document = _doc_json(findings=[finding])
     return ClaudeRunResult(returncode=0, stdout=review_envelope(document), stderr="")
 
 
@@ -593,6 +601,24 @@ class TestClaudeRound:
         assert ledger.status == "in_progress"
         assert ledger.last_clean_sha == found.clean
 
+    def test_a_held_gap_round_stops_for_the_operator_and_is_not_clean(
+        self, harness: Harness, tmp_path: Path
+    ) -> None:
+        found = _resolved(harness, tmp_path, **_CLAUDE_CONFIRM)
+        results = [_claude_gap_finding()] + [_claude_ok() for _ in harness.roles[1:]]
+
+        result = _invoke_claude(harness, results)
+
+        assert result.exit_code == 0, result.output
+        assert _out(result)["decision"] == "stop_operator_action"
+        ledger = _stored(harness)
+        assert ledger.status == "stopped"
+        assert ledger.rounds[-1].kind == "delta"
+        assert ledger.rounds[-1].clean is False
+        assert ledger.rounds[-1].new_held == 1
+        assert [e.rationale for e in ledger.held] == [_EVIDENCE_GAP]
+        assert ledger.last_clean_sha == found.clean
+
     def test_an_oversized_prompt_is_exit_four_with_nothing_recorded(
         self, harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -833,7 +859,7 @@ class TestDecisionSet:
         assert report.decision != "confirm_required"
 
     def test_an_operator_finding_stops_for_the_operator(self) -> None:
-        _, report = record_delta_round(
+        ledger, report = record_delta_round(
             resolution_ledger(clean="S"),
             backend="codex",
             reviewed_sha="S+1",
@@ -843,6 +869,7 @@ class TestDecisionSet:
         )
 
         assert report.decision == "stop_operator_action"
+        assert ledger.held == []
 
 
 class _RoundStartedError(Exception):

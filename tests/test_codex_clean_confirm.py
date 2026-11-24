@@ -67,6 +67,7 @@ from cw.review_convergence import (
     load_round_verdict,
     one_line,
     operator_settle,
+    outstanding_held,
     round_verdict_path,
     stop_summary,
     tolerance_for_client,
@@ -82,11 +83,15 @@ from tests._claude_review_helpers import (
 from tests._cli_review_helpers import _seed_review_row
 from tests._codex_review_helpers import _doc_json, _finding_payload, _task
 from tests._review_convergence_helpers import (
+    GAP_RATIONALE,
+    GAP_SUMMARY,
     MAIN_ONLY_FILE,
     NOW,
     branch_that_merged_main,
     consolidated_verdict,
     fresh_ledger,
+    gap_identity,
+    held_gap,
     live_merge_base,
     merge_origin_commit,
     operator_finding,
@@ -1430,13 +1435,12 @@ class TestEvidenceGapConfirmRound:
         assert ledger.status == "awaiting_confirm"
         assert [r.kind for r in ledger.rounds] == ["loop"]
 
-    def test_a_mixed_round_stops_the_ledger_for_the_operator(self, wt: Path) -> None:
-        """The accepted lane limit (#3793, operator R2-1): pinned, not fixed.
+    def test_a_mixed_round_repairs_the_reproduced_finding_first(self, wt: Path) -> None:
+        """A gap beside a reproduced MUST_FIX repairs first (#3823).
 
-        A gap beside a reproduced MUST_FIX reaches the ledger as an operator
-        action, so the confirm round parks (``codex_must_fix_findings``, the
-        verdict is blocking) before the reproduced finding is repaired; a
-        requeue after ``cw review settle`` releases it.
+        The reproduced finding is fixed before the gap is judged, so the confirm
+        round records a fix and the gap is carried as ledger memory instead of
+        stopping the ledger. The codex park still blocks on the verdict.
         """
         outcome = _apply(
             wt, _client(wt), RoleAwareClaudeRunner(_gap_and_reproduced_role)
@@ -1445,16 +1449,107 @@ class TestEvidenceGapConfirmRound:
         blocker = outcome.result.blocker
         assert blocker is not None
         assert blocker.reason == CODEX_MUST_FIX_FINDINGS
-        assert "convergence ledger stopped (operator_action)" in blocker.details
+        assert "convergence ledger stopped" not in blocker.details
         assert outcome.verdict is not None
         assert has_held_findings(outcome.verdict, "evidence_gap")
         assert [f.summary for f in outcome.verdict.must_fix] == [_REPRODUCED_SUMMARY]
         ledger = _ledger(wt)
-        assert ledger.stop_reason == "operator_action"
-        assert ledger.status == "stopped"
+        assert ledger.status == "in_progress"
+        assert [entry.rationale for entry in ledger.held] == [_EVIDENCE_GAP]
         confirm = ledger.rounds[-1]
         assert confirm.kind == "confirm"
-        assert confirm.new_operator_action >= 1
+        assert confirm.new_fix >= 1
+        assert confirm.new_operator_action == 0
+        assert confirm.new_held == 1
+
+    def test_a_clean_loop_over_a_carried_gap_parks_operator_actionable(
+        self, wt: Path
+    ) -> None:
+        """A clean codex loop round over a carried gap parks it (#3823, R7).
+
+        An earlier mixed round repaired the reproduced finding and carried the
+        gap as ledger memory. The next loop round is clean, so the ledger would
+        stop on the gap. The park names the unrun check and never runs the
+        confirm, a repair worker, or the generic ``review_not_converging`` stop.
+        """
+        fix = round_finding("MUST_FIX", _REPRODUCED_SUMMARY, file="feature.py")
+        write_ledger(wt, _codex_ledger(wt, (_head(wt), [fix, held_gap()])))
+
+        def _must_not_run(role: str) -> ClaudeRunResult:
+            message = f"confirm must not run; {role} was called"
+            raise AssertionError(message)
+
+        outcome = _apply(wt, _client(wt), RoleAwareClaudeRunner(_must_not_run))
+
+        blocker = outcome.result.blocker
+        assert outcome.result.status == "blocked"
+        assert blocker is not None
+        assert blocker.reason == "review_operator_actionable"
+        assert blocker.retry_eligible is False
+        assert "OPERATOR EVIDENCE REQUIRED" in blocker.details
+        assert GAP_SUMMARY in blocker.details
+        assert GAP_RATIONALE in blocker.details
+        assert outcome.result.review.converged is False
+        ledger = _ledger(wt)
+        assert ledger.status == "stopped"
+        assert ledger.stop_reason == "operator_action"
+        assert [entry.rationale for entry in ledger.held] == [GAP_RATIONALE]
+
+    def test_a_released_contest_stop_still_parks_on_the_unnamed_gap(
+        self, wt: Path
+    ) -> None:
+        """A contest stop that never named the gap keeps it across the release.
+
+        The mixed round carried the gap, then a contest stopped the ledger on its
+        own identity. The same-tip requeue releases that stop (#3823, item 6:
+        the gap was not named, so it stays held), and the next clean loop round
+        parks on the gap instead of converging unverified.
+        """
+        fix = round_finding("MUST_FIX", _REPRODUCED_SUMMARY, file="feature.py")
+        head = _head(wt)
+        stopped = _codex_ledger(
+            wt, (head, [fix, held_gap()]), (head, [operator_finding()])
+        )
+        assert stopped.status == "stopped"
+        write_ledger(wt, stopped)
+
+        def _must_not_run(role: str) -> ClaudeRunResult:
+            message = f"confirm must not run; {role} was called"
+            raise AssertionError(message)
+
+        outcome = _apply(wt, _client(wt), RoleAwareClaudeRunner(_must_not_run))
+
+        blocker = outcome.result.blocker
+        assert blocker is not None
+        assert blocker.reason == "review_operator_actionable"
+        assert "OPERATOR EVIDENCE REQUIRED" in blocker.details
+        assert GAP_SUMMARY in blocker.details
+        ledger = _ledger(wt)
+        assert ledger.releases[-1].cause == "operator_action_done"
+        assert ledger.stop_identities == [gap_identity()]
+        assert ledger.last_clean_sha is None
+
+    def test_a_contest_beside_a_held_gap_is_not_a_held_stop(self) -> None:
+        """``_is_held_stop`` needs every stop identity held; contests differ."""
+        contest_and_gap, report = record(
+            fresh_ledger(loop_backend="codex"),
+            operator_finding("Contested"),
+            held_gap(),
+            sha="sha-1",
+            backend="codex",
+        )
+        assert report.decision == "stop_operator_action"
+        assert outstanding_held(contest_and_gap)
+        assert (
+            codex_clean_confirm._is_held_stop(contest_and_gap, report.decision) is False
+        )
+        held_only, held_report = record(
+            fresh_ledger(loop_backend="codex"), held_gap(), sha="sha-1", backend="codex"
+        )
+        assert (
+            codex_clean_confirm._is_held_stop(held_only, held_report.decision) is True
+        )
+        assert codex_clean_confirm._is_held_stop(held_only, "continue") is False
 
 
 # ---------------------------------------------------------------------------

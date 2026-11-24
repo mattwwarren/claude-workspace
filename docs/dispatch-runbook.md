@@ -4198,25 +4198,46 @@ See `docs/headless-contract.md` section 12.3.
 For a pure-gap park (`review_operator_actionable`) it is refused at the
 `blocked_reason` gate: `src/cw/dev_queue/must_fix_override.py` accepts only
 `codex_must_fix_findings` and `review_confirm_must_fix`. For a loop-exhausted
-park (`codex_must_fix_findings` with a carried gap) it is accepted, but it binds
-only the findings in `verdict.must_fix` and the finalize check
+park (`codex_must_fix_findings` with a carried gap) it binds only the findings in
+`verdict.must_fix`, and the finalize check
 (`.claude/scripts/check_must_fix_override.py`) reads only that list. The held gap
-finding sits in `accepted` and is not covered, so overriding the mixed park does
-not settle it: it ships past the reproduced findings and leaves the gap
-unresolved. Settle it with `cw review settle` (anchored findings only).
+finding sits in `accepted` and is not covered. On a clean-mode client the ledger
+guard closes that: the override is refused while the ledger carries an
+outstanding gap (see the next paragraph).
 
-**Limit:** in the Claude confirm round and the Claude-native clean-mode
-`cw review converge record-round`, a mixed verdict (a gap finding beside a
-reproduced unmarked MUST_FIX) stops the convergence ledger with
-`operator_action` before the unmarked finding is repaired. The Claude-native
-clean-mode lane takes the `review_operator_actionable` exit
-(`stop_operator_action`). The codex Claude confirm round parks as
-`codex_must_fix_findings` with `convergence ledger stopped (operator_action)`
-appended to the details, because its verdict is blocking. Nothing is hidden or
-dropped. `cw review settle` on the gap finding plus a requeue releases it, and the
-unmarked finding is repaired on the requeue. The codex fix loop (blocking and
-clean mode), the Claude-native blocking-mode lane and a pure-gap verdict repair
-reproduced findings first.
+**Carry across the repair cycle (#3823).** In clean mode, a mixed verdict (a gap
+finding beside a reproduced unmarked MUST_FIX) repairs the reproduced finding
+first. The gap is carried on the convergence ledger as `held` memory, with its
+unrun check in `held[].rationale`, and no round records clean while it is
+outstanding. The mixed confirm round itself still parks `codex_must_fix_findings`
+on the reproduced finding, because its verdict is blocking; the gap rides on the
+ledger and is not seeded as repair work. The park becomes
+`review_operator_actionable` when a later round stops the ledger `operator_action`
+on the carried gap: a clean codex loop round (the `_gate_after_loop` re-entry), or
+a Claude-native `record-round` that adds no new fix. `stop.settle_payload` lists
+the identity; the unrun check is read from the ledger JSON.
+
+Release follows what the stop named. A same-tip requeue of an `operator_action`
+stop clears exactly the gaps that stop named, so supply the capability and
+requeue, or run `cw review converge operator-settle` for the gap. Any other same-tip release, such as
+`max_cycles_raised` or a contest-only stop that did not name the gap, keeps the
+held memory, so the next empty round still stops on it and never converges on an
+unverified gap. New commits clear all held memory when a STOPPED ledger is
+released on a new tip, because the new tip gets a full re-review that re-raises
+the gap if it is still real.
+
+That release path does not run while the mixed round is parked. A mixed round
+leaves the ledger `in_progress`, not stopped, so neither the repair commit nor a
+requeue while the row is parked on `codex_must_fix_findings` clears the gap.
+Expect one further `review_operator_actionable` park on the carried gap. Release
+it with a same-tip requeue (which clears the gap the stop named) or with
+`cw review converge operator-settle`.
+
+`cw dev-queue approve --override-must-fix` refuses a ledger with an outstanding
+gap. The error names the gap and the two routes: `cw review converge
+operator-settle` for that gap (the only command that clears ledger held memory;
+`cw review settle` writes only the dev-queue row marker), or restore the missing
+capability and requeue. The override never clears held memory itself.
 
 **Park: `review_engine_modified` (RFC 0017, #3039).** A client with
 `review.engine` set runs its own review skill as the Claude-native round

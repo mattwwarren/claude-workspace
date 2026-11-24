@@ -21,16 +21,17 @@ from cw.review_convergence._models import (
     ConvergenceError,
     FrozenCounts,
     GatingSeverity,
+    HeldEntry,
     RoundFinding,
     RoundInput,
     SettledEntry,
     UnreadFindings,
 )
 from cw.review_finding_dispositions import debt_key
-from cw.review_findings import ReviewVerdict, is_gap_hold
+from cw.review_findings import ReviewVerdict, held_kind, is_gap_hold
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from cw.review_convergence._models import ConvergenceLedger
     from cw.review_findings import AcceptedFinding, Disposition, Severity
@@ -91,15 +92,27 @@ def from_verdict(verdict: ReviewVerdict) -> tuple[list[RoundFinding], UnreadFind
                 "recording the round"
             )
             raise ConvergenceError(msg)
+        # #3823: an evidence gap is held for the operator, and its rationale is
+        # the unrun check the reviewer named (the operator needs it to run it).
+        held: Literal["evidence_gap"] | None = (
+            "evidence_gap"
+            if accepted.disposition == "operator_actionable"
+            and held_kind(finding) == "evidence_gap"
+            else None
+        )
+        rationale = (
+            finding.evidence_gap.strip() if held else accepted.disposition_detail
+        )
         findings.append(
             RoundFinding(
                 severity=severity,
                 file=finding.file,
                 summary=finding.summary,
                 outcome=outcome,
-                rationale=accepted.disposition_detail,
+                rationale=rationale,
                 fingerprint=finding.fingerprint,
                 rule_id=finding.rule_id,
+                held=held,
             )
         )
     return findings, unread_from_verdict(verdict)
@@ -229,7 +242,7 @@ def settled_index(ledger: ConvergenceLedger) -> dict[FindingIdentity, SettledEnt
 
 def settled_applies(
     entry: SettledEntry,
-    severity: GatingSeverity,
+    severity: Severity,
     fingerprint: str | None,
     rule_id: str | None,
 ) -> bool:
@@ -276,6 +289,9 @@ class Classified:
     resurfaced: int
     #: Identities of the settled entries this round re-raised, in first-seen order.
     reseen: list[FindingIdentity] = field(default_factory=list)
+    #: Evidence-gap holds (#3823). They are not new-accepted: they stop the
+    #: ledger for the operator and are carried as memory, not repaired.
+    held: list[RoundFinding] = field(default_factory=list)
 
     @property
     def new_accepted(self) -> int:
@@ -312,6 +328,7 @@ def classify_findings(
     new_operator: list[RoundFinding] = []
     newly_settled: dict[FindingIdentity, SettledEntry] = {}
     reseen: dict[FindingIdentity, None] = {}
+    held: list[RoundFinding] = []
     resurfaced = 0
     for finding in findings:
         identity = finding_identity(
@@ -329,7 +346,7 @@ def classify_findings(
         elif finding.outcome == "fix":
             new_fix.append(finding)
         elif finding.outcome == "operator_action":
-            new_operator.append(finding)
+            (held if finding.held else new_operator).append(finding)
         elif identity not in newly_settled:
             outcome_value: Literal["reject", "defer"] = (
                 "reject" if finding.outcome == "reject" else "defer"
@@ -348,7 +365,76 @@ def classify_findings(
         list(newly_settled.values()),
         resurfaced,
         list(reseen),
+        held=held,
     )
+
+
+def held_entry(finding: RoundFinding) -> HeldEntry:
+    """The ledger memory entry of an evidence-gap *finding* (#3823)."""
+    identity = finding_identity(
+        finding.severity,
+        finding.file,
+        finding.summary,
+        fingerprint=finding.fingerprint,
+    )
+    return HeldEntry(
+        identity=identity, rationale=finding.rationale, rule_id=finding.rule_id
+    )
+
+
+def _discharged(
+    entry: HeldEntry, settled: Mapping[FindingIdentity, SettledEntry]
+) -> bool:
+    """Whether a settled entry applies to the held *entry* (#3823, R13).
+
+    The same :func:`settled_applies` predicate :func:`classify_findings` uses, so
+    a ``defer`` of a fingerprinted ``coverage.*`` gap discharges nothing.
+    """
+    identity = entry.identity
+    settled_entry = settled.get(identity)
+    return settled_entry is not None and settled_applies(
+        settled_entry, identity.severity, identity.fingerprint, entry.rule_id
+    )
+
+
+def carried_held(
+    prior: Sequence[HeldEntry],
+    classified: Classified,
+    settled: Mapping[FindingIdentity, SettledEntry],
+) -> list[HeldEntry]:
+    """The held memory after this round (#3823, R4).
+
+    *prior* memory is merged with this round's holds. A prior entry is dropped
+    when a later round re-raises its identity as ``fix`` or ``operator_action``
+    (a contest), or when a settle that applies now covers it (``settled`` is the
+    index after this round). The round's own holds always win over a prior
+    entry and are not filtered here: :func:`classify_findings` already ran the
+    settled check on them.
+    """
+    reraised = {
+        finding_identity(
+            finding.severity,
+            finding.file,
+            finding.summary,
+            fingerprint=finding.fingerprint,
+        )
+        for finding in [*classified.new_fix, *classified.new_operator]
+    }
+    merged: dict[FindingIdentity, HeldEntry] = {
+        entry.identity: entry
+        for entry in prior
+        if entry.identity not in reraised and not _discharged(entry, settled)
+    }
+    for finding in classified.held:
+        entry = held_entry(finding)
+        merged[entry.identity] = entry
+    return list(merged.values())
+
+
+def outstanding_held(ledger: ConvergenceLedger) -> list[HeldEntry]:
+    """The ledger's held entries no applying settle has discharged (#3823)."""
+    settled = settled_index(ledger)
+    return [entry for entry in ledger.held if not _discharged(entry, settled)]
 
 
 def mark_reseen(

@@ -65,7 +65,11 @@ from tests._review_convergence_helpers import (
     engine_pass_ledger,
     record,
 )
-from tests._shared.review_builders import _make_finding, _make_gap_finding
+from tests._shared.review_builders import (
+    _EVIDENCE_GAP,
+    _make_finding,
+    _make_gap_finding,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -536,9 +540,39 @@ class TestGapHoldCarveOut:
 
         assert finding.severity == "MUST_FIX"
         assert finding.outcome == "operator_action"
-        assert finding.rationale == _GAP_DETAIL
+        # #3823: the unrun check is the rationale, and the finding is marked held.
+        assert finding.rationale == _EVIDENCE_GAP
+        assert finding.held == "evidence_gap"
         assert finding.rule_id == rule
         assert finding.fingerprint == "fp-0"
+
+    @pytest.mark.parametrize(
+        "item",
+        [
+            _gap_item(_COVERAGE, gapped=False),
+            AcceptedFinding(
+                finding=_make_gap_finding(
+                    "MUST_FIX",
+                    rule_id=_COVERAGE,
+                    source="engine",
+                    fingerprint="fp-0",
+                    contests_decision="the decided constraint is unsafe",
+                ),
+                reviewers=["Test Reviewer"],
+                disposition="operator_actionable",
+                disposition_detail=_GAP_DETAIL,
+            ),
+            _gap_item(_COVERAGE, disposition="fixed"),
+            _gap_item(_COVERAGE, disposition="rejected"),
+        ],
+        ids=["no-gap", "gap-and-contest", "fixed-gap", "rejected-gap"],
+    )
+    def test_from_verdict_does_not_mark_a_non_gap_as_held(
+        self, item: AcceptedFinding
+    ) -> None:
+        (finding,), _unread = from_verdict(_held_verdict(item))
+
+        assert finding.held is None
 
     @pytest.mark.parametrize(
         "item",

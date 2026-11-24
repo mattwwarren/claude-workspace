@@ -37,6 +37,7 @@ from cw.review_convergence import (
     from_verdict,
     new_ledger,
     override_confirm_round,
+    reconcile_ledger_for_init,
     record_round,
     resolve_confirm_backend,
     save_ledger,
@@ -47,10 +48,16 @@ from cw.review_findings import (
     ReviewerRunFailure,
     ReviewVerdict,
     consolidate_verdict,
+    stamp_held_findings,
 )
 from tests._codex_review_helpers import _finding_payload
 from tests._shared.git_repos import commit_tracked_file, git_in, push_commit_to_origin
-from tests._shared.review_builders import _make_diff, _make_finding, _make_reviewer_doc
+from tests._shared.review_builders import (
+    _EVIDENCE_GAP,
+    _make_diff,
+    _make_finding,
+    _make_reviewer_doc,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -62,7 +69,9 @@ if TYPE_CHECKING:
     from cw.review_adjudication import AdjudicationOutcome
     from cw.review_convergence import (
         ConfirmBackend,
+        FindingIdentity,
         GatingSeverity,
+        Reconciled,
         RecordableRoundKind,
         RoundKind,
         RoundReport,
@@ -71,6 +80,7 @@ if TYPE_CHECKING:
 
 DEFAULT_SHA = "sha-0001"
 NOW = "2026-10-27T12:00:00+00:00"
+LATER = "2026-10-27T13:00:00+00:00"
 LOOP_BACKEND = "claude-native"
 ROSTER = ["Code Quality Reviewer", "Test Reviewer"]
 TICKET_ID = "T-1"
@@ -96,6 +106,74 @@ def round_finding(
         outcome=outcome,
         rationale=rationale,
     )
+
+
+def reconcile_ledger(
+    existing: ConvergenceLedger | None,
+    *,
+    head: str,
+    max_cycles: int = 8,
+    history_rewritten: bool = False,
+    ticket_id: str = TICKET_ID,
+    fork_point: str = FORK_POINT,
+    confirm: ConfirmBackend | None = "none",
+) -> Reconciled:
+    """``reconcile_ledger_for_init`` against a fresh ledger built as ``init`` would."""
+    return reconcile_ledger_for_init(
+        existing,
+        fresh=fresh_ledger(ticket_id=ticket_id, fork_point=fork_point, confirm=confirm),
+        ticket_id=ticket_id,
+        fork_point=fork_point,
+        history_rewritten=history_rewritten,
+        head_sha=head,
+        max_cycles=max_cycles,
+        now=LATER,
+    )
+
+
+GAP_RATIONALE = "run pytest in the sandbox to confirm the regression"
+GAP_SUMMARY = "Could not run the test suite"
+
+
+def held_gap() -> RoundFinding:
+    """A MUST_FIX evidence-gap hold, as ``from_verdict`` produces it (#3823)."""
+    return RoundFinding(
+        severity="MUST_FIX",
+        file="N/A",
+        summary=GAP_SUMMARY,
+        outcome="operator_action",
+        rationale=GAP_RATIONALE,
+        held="evidence_gap",
+    )
+
+
+def gap_identity() -> FindingIdentity:
+    """The identity :func:`held_gap` carries on the ledger."""
+    return finding_identity("MUST_FIX", "N/A", GAP_SUMMARY)
+
+
+def real_fix() -> RoundFinding:
+    """A reproduced MUST_FIX that the loop dispatches a fix for."""
+    return round_finding("MUST_FIX", "Real bug", file="src/cw/foo.py")
+
+
+def with_evidence_gap(verdict: ReviewVerdict, summary: str) -> ReviewVerdict:
+    """*verdict* with the accepted finding *summary* resting on an unrun check.
+
+    The marker is stamped (:func:`stamp_held_findings`), so the finding is held
+    for the operator exactly as the consolidation path leaves it (#3823).
+    """
+    accepted = [
+        af.model_copy(
+            update={
+                "finding": af.finding.model_copy(update={"evidence_gap": _EVIDENCE_GAP})
+            }
+        )
+        if af.finding.summary == summary
+        else af
+        for af in verdict.accepted
+    ]
+    return stamp_held_findings(verdict.model_copy(update={"accepted": accepted}))
 
 
 def operator_finding(summary: str = "Operator must do X") -> RoundFinding:

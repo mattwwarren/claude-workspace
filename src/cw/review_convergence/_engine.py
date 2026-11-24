@@ -11,6 +11,12 @@ oscillation, then an ``operator_action`` finding, then no-progress, then the
 no-progress because its stop is operator-releasable while no-progress is
 terminal, so a mixed round reports the stop the operator can act on.
 
+A carried evidence gap (#3823) is an ``operator_action`` stop too: a round that
+leaves held memory outstanding and adds no new fix decides
+``stop_operator_action`` naming the held identities, and is never clean. A mixed
+round (a new fix beside the gap) decides ``continue`` so the fix is repaired
+first; the gap stays on the ledger.
+
 A ``confirm`` round recorded right after an engine pass (#3042, RFC 0017 I3;
 :func:`~cw.review_convergence._confirm_route.engine_pass_precedes`) is routed
 by :func:`~cw.review_convergence._confirm_route.route_engine_confirm` instead:
@@ -48,8 +54,10 @@ from cw.review_convergence._confirm_route import (
     route_engine_confirm,
 )
 from cw.review_convergence._findings import (
+    carried_held,
     classify_findings,
     mark_reseen,
+    outstanding_held,
     settled_debt_key,
 )
 from cw.review_convergence._identity import FindingIdentity, finding_identity
@@ -224,30 +232,59 @@ def _clean_decision(ledger: ConvergenceLedger, kind: RoundKind) -> Decision:
     return DECISION_CONFIRM_REQUIRED if needs_confirm else DECISION_CLEAN
 
 
+def _operator_identities(findings: Sequence[RoundFinding]) -> list[FindingIdentity]:
+    """The distinct identities of *findings*, in first-seen order."""
+    identities: list[FindingIdentity] = []
+    for finding in findings:
+        identity = finding_identity(
+            finding.severity,
+            finding.file,
+            finding.summary,
+            fingerprint=finding.fingerprint,
+        )
+        if identity not in identities:
+            identities.append(identity)
+    return identities
+
+
+def _operator_stop(
+    classified: Classified, held: Sequence[FindingIdentity]
+) -> _Outcome | None:
+    """The operator-action stop of a round, or ``None`` (#3823 adds the held case).
+
+    A contest (``new_operator``) names its findings. A held gap with no new fix
+    names the carried gaps; with a new fix the fix goes first.
+    """
+    if classified.new_operator:
+        identities = _operator_identities(classified.new_operator)
+        return _Outcome(DECISION_STOP_OPERATOR_ACTION, STOP_OPERATOR_ACTION, identities)
+    if held and not classified.new_fix:
+        return _Outcome(DECISION_STOP_OPERATOR_ACTION, STOP_OPERATOR_ACTION, list(held))
+    return None
+
+
 def _decide(
     ledger: ConvergenceLedger,
     classified: Classified,
     record: RoundRecord,
     rounds: Sequence[RoundRecord],
+    held: Sequence[FindingIdentity],
 ) -> _Outcome:
+    """Decide the round. *held* is the carried evidence-gap memory (#3823).
+
+    A held gap with no new fix stops the ledger for the operator and names the
+    gap. With a new fix in the same round the fix goes first, and the held memory
+    stays on the ledger until the release.
+    """
     if record.clean:
         return _Outcome(_clean_decision(ledger, record.kind))
     accepted = [*classified.new_fix, *classified.new_operator]
     recurring = detect_oscillation(ledger, accepted, record.reviewed_sha)
     if recurring:
         return _Outcome(DECISION_STOP_NOT_CONVERGING, STOP_OSCILLATION, recurring)
-    if classified.new_operator:
-        identities: list[FindingIdentity] = []
-        for finding in classified.new_operator:
-            identity = finding_identity(
-                finding.severity,
-                finding.file,
-                finding.summary,
-                fingerprint=finding.fingerprint,
-            )
-            if identity not in identities:
-                identities.append(identity)
-        return _Outcome(DECISION_STOP_OPERATOR_ACTION, STOP_OPERATOR_ACTION, identities)
+    operator_stop = _operator_stop(classified, held)
+    if operator_stop is not None:
+        return operator_stop
     start = max(ledger.epoch_start_round, ledger.window_start_round)
     if detect_no_progress(rounds, window=ledger.stall_window, start=start):
         return _Outcome(DECISION_STOP_NOT_CONVERGING, STOP_NO_PROGRESS)
@@ -341,6 +378,11 @@ def record_round(
     next full round re-reviews the diff. The guard raises rather than returning
     a decision, so no literal exists that a caller could ignore.
 
+    A held-only round (an evidence gap carried on the ledger, no new fix) decides
+    ``stop_operator_action`` naming the held gaps and is never recorded clean; a
+    mixed round (a new fix beside the gap) decides ``continue`` and keeps the gap
+    as held memory (#3823).
+
     *frozen* is stored the first time it is given (the cycle-0 baseline).
 
     *shard_count*/*shards_reviewed* (#2864) are stored on the round as given
@@ -411,7 +453,17 @@ def _apply_round(
         if route is not None
         else classify_findings(ledger, findings, round_number)
     )
-    if classified.new_accepted == 0:
+    settled_after = [
+        *mark_reseen(ledger.settled, classified.reseen, round_number),
+        *classified.newly_settled,
+    ]
+    # #3823 (R4/R5): the held memory after this round. A round is clean only when
+    # it adds no accepted finding and no outstanding evidence gap remains.
+    held_after = carried_held(
+        ledger.held, classified, {entry.identity: entry for entry in settled_after}
+    )
+    clean = classified.new_accepted == 0 and not held_after
+    if clean:
         _guard_unread(unread)
     record = RoundRecord(
         round=round_number,
@@ -423,7 +475,8 @@ def _apply_round(
         new_operator_action=len(classified.new_operator),
         new_settled=len(classified.newly_settled),
         resurfaced_settled=classified.resurfaced,
-        clean=classified.new_accepted == 0,
+        clean=clean,
+        new_held=len(classified.held),
         roster=list(roster),
         recorded_at=now,
         shard_count=shard_count,
@@ -431,17 +484,16 @@ def _apply_round(
         engine=engine,
     )
     rounds = [*ledger.rounds, record]
+    held_ids = [entry.identity for entry in held_after]
     outcome = (
         _park_outcome(route)
         if route is not None and route.parks
-        else _decide(ledger, classified, record, rounds)
+        else _decide(ledger, classified, record, rounds, held_ids)
     )
     update: dict[str, object] = {
         "rounds": rounds,
-        "settled": [
-            *mark_reseen(ledger.settled, classified.reseen, round_number),
-            *classified.newly_settled,
-        ],
+        "settled": settled_after,
+        "held": held_after,
         "awaiting_confirm_sha": None,
     }
     if ledger.frozen is None and frozen is not None:
@@ -591,6 +643,7 @@ def _recorded_identities(
         ledger.stop_identities,
         [entry.identity for entry in ledger.fixed],
         [entry.identity for entry in ledger.settled],
+        [entry.identity for entry in ledger.held],
     )
     for identities in sources:
         for identity in identities:
@@ -733,6 +786,31 @@ def _merge_settled(
     return merged
 
 
+def _refuse_override_over_held(ledger: ConvergenceLedger) -> None:
+    """Raise :class:`ConvergenceError` when *ledger* carries an outstanding gap (#3823).
+
+    An evidence gap was never verified, so no operator override may converge past
+    it. The message names each gap and the two routes: ``cw review converge
+    operator-settle`` (the only command that clears ledger held memory; ``cw
+    review settle`` writes only the dev-queue row marker) or a requeue. Held
+    memory is not touched.
+    """
+    outstanding = outstanding_held(ledger)
+    if not outstanding:
+        return
+    gaps = "; ".join(
+        f"{entry.identity.file}: {entry.identity.summary_normalized}"
+        for entry in outstanding
+    )
+    msg = (
+        "an operator override cannot converge a ledger carrying an unverified "
+        f"evidence gap ({gaps}). Settle it with `cw review converge "
+        "operator-settle` for that gap, or restore the missing capability and "
+        "requeue so a review runs it."
+    )
+    raise ConvergenceError(msg)
+
+
 def override_confirm_round(
     ledger: ConvergenceLedger,
     identities: Sequence[FindingIdentity],
@@ -752,7 +830,9 @@ def override_confirm_round(
     kept, the ledger converges at *reviewed_sha* with the stop fields cleared,
     and a :class:`ConfirmOverride` records what was overridden. ``fixed``,
     ``fix_cycles_used``, the releases and the epoch are unchanged. Raises
-    :class:`ConvergenceError` unless :func:`confirm_override_applies`.
+    :class:`ConvergenceError` unless :func:`confirm_override_applies`, and when
+    the ledger carries an outstanding evidence gap (#3823): an unverified gap
+    cannot be overridden past, so the refusal names the gap and its two routes.
     """
     if not confirm_override_applies(
         ledger, identities, reviewed_sha=reviewed_sha, round_identities=round_identities
@@ -763,6 +843,7 @@ def override_confirm_round(
             "every overridden finding"
         )
         raise ConvergenceError(msg)
+    _refuse_override_over_held(ledger)
     last = ledger.rounds[-1]
     distinct = list(dict.fromkeys(identities))
     override = ConfirmOverride(
