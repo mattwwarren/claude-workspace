@@ -250,8 +250,16 @@ def test_canary_environment_is_not_inherited(
     assert isinstance(keys, list)
     # The test sandbox (tests/_git_sandbox) injects GIT_CEILING_DIRECTORIES into
     # every child under pytest; production's explicit env never carries it.
-    # The subset check also proves CW_CANARY_SECRET was not inherited.
-    assert set(keys) - {"GIT_CEILING_DIRECTORIES"} <= {"PATH", "TMPDIR", "LANG"}
+    # macOS CoreFoundation adds __CF_USER_TEXT_ENCODING to the checker's own
+    # interpreter on first use (CI macos-latest, #3885). cw's explicit env never
+    # carries it, so tolerating it proves nothing about inheritance. The subset
+    # check still proves CW_CANARY_SECRET was not inherited.
+    interpreter_added = {"__CF_USER_TEXT_ENCODING"}
+    assert set(keys) - {"GIT_CEILING_DIRECTORIES"} - interpreter_added <= {
+        "PATH",
+        "TMPDIR",
+        "LANG",
+    }
 
 
 # ---- engine-change guard is unchanged ------------------------------------
