@@ -10,9 +10,10 @@ Trust and isolation, stated plainly:
 - The checker is extracted from the default-branch git bytes at the commit the
   manifest was read from. It is never run from the worktree or from the
   materialized copy under ``.cw/review-engine``.
-- Its cwd is a fresh directory cw creates under the worker ``TMPDIR`` and
-  removes afterwards; the extraction directory is a subdirectory of it. The
-  worktree is passed only as a data argument.
+- Its cwd is the fresh directory the skill was extracted into. That directory
+  is a subdirectory cw creates inside the worker ``TMPDIR`` (so it is distinct
+  from ``TMPDIR`` itself) and removes afterwards. The worktree is never the
+  cwd; it is passed only as a data argument.
 - The environment is ``PATH`` and ``LANG`` (each only when set) plus
   ``TMPDIR``. Nothing else is inherited.
 - There is no OS sandbox. Read-only is enforced the way the engine already
@@ -71,7 +72,6 @@ MAX_COMPLETION_DETAIL_CHARS: Final = 200
 #: Environment names the checker inherits when set; ``TMPDIR`` is always added.
 _ENV_KEYS: Final = ("PATH", "LANG")
 _DIR_PREFIX: Final = "cw-engine-check-"
-_RUN_DIR_NAME: Final = "run"
 _SKILL_DIR_NAME: Final = "skill"
 _COVERAGE_PARTIAL: Final = "PARTIAL"
 _STALE_ROUND: Final = "stale-round"
@@ -247,10 +247,10 @@ def _run_outcome(
     round_id: str,
     evidence: Path,
     roles: list[str],
-    run_dir: Path,
+    cwd: Path,
     timeout: int,
 ) -> SummaryFailure | None:
-    """Run the checker; a failed run returns its reason, a clean run returns None."""
+    """Run the checker in *cwd*; a failed run returns its reason, else None."""
     argv = [
         str(checker),
         "--head-sha",
@@ -266,7 +266,7 @@ def _run_outcome(
     ]
     try:
         outcome = run_declared_command(
-            argv, cwd=run_dir, env=_checker_env(), timeout=timeout
+            argv, cwd=cwd, env=_checker_env(), timeout=timeout
         )
     except OSError:
         return _completion_failure(COMPLETION_REASON_CHECKER_LAUNCH_FAILED)
@@ -291,12 +291,9 @@ def _run_in_scratch(
     checker_path: str,
     roles: list[str],
 ) -> SummaryFailure | None:
-    """Steps 3 to 8 of the check, run inside the scratch directory."""
-    run_dir = scratch / _RUN_DIR_NAME
-    run_dir.mkdir()
-    extracted = _extract_checker(
-        worktree, commit, resolved, checker_path, scratch / _SKILL_DIR_NAME
-    )
+    """Extract, run and judge the checker inside the scratch directory."""
+    skill_dir = scratch / _SKILL_DIR_NAME
+    extracted = _extract_checker(worktree, commit, resolved, checker_path, skill_dir)
     if isinstance(extracted, str):
         return _completion_failure(extracted)
     evidence = _fresh_evidence_dir(worktree, round_dir)
@@ -309,7 +306,7 @@ def _run_in_scratch(
         round_id=round_id,
         evidence=evidence,
         roles=roles,
-        run_dir=run_dir,
+        cwd=skill_dir,
         timeout=timeout,
     )
     if ran is not None:

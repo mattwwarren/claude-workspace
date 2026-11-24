@@ -145,11 +145,11 @@ def test_observed_argument_order_cwd_and_tmpdir(
         str(round_dir(repo) / "completion"),
     ]
     assert argv[8:] == ["--roles", "security,quality"]
-    cwd = str(observed["cwd"])
-    assert cwd not in (str(repo.worktree), str(round_dir(repo) / SKILL))
-    assert cwd.startswith(str(worker))
-    assert observed["tmpdir"] == tempfile.gettempdir()
     assert recorded, "checker scratch dir was never created"
+    (scratch,) = recorded
+    assert Path(str(observed["cwd"])).resolve() == (Path(scratch) / "skill").resolve()
+    assert Path(str(observed["cwd"])).resolve() != worker.resolve()
+    assert observed["tmpdir"] == tempfile.gettempdir()
     assert not any(worker.iterdir()), "checker scratch dir not cleaned up"
 
 

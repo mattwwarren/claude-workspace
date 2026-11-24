@@ -1577,9 +1577,11 @@ The model is `cw.models.review_engine_manifest.EngineManifest`, and
   text). `timeout_seconds` is an integer from 1 to 900, default 300. Keys are
   strict. The checker runs after the role turns and before the aggregation
   turn, with the arguments `--head-sha`, `--round-id`, `--worktree`,
-  `--evidence-dir` and `--roles` (comma-separated), no shell, a cwd of a fresh
-  directory under the worker `TMPDIR`, and an environment of `PATH` and `LANG`
-  (each only when set) plus `TMPDIR`. It writes
+  `--evidence-dir` and `--roles` (comma-separated), no shell, a cwd of the fresh
+  directory the skill was extracted into (a subdirectory cw creates inside the
+  worker `TMPDIR`, distinct from `TMPDIR` itself; the worktree is never the
+  cwd), and an environment of `PATH` and `LANG` (each only when set) plus
+  `TMPDIR`. It writes
   `<round dir>/completion/result.json` (at most 64 KiB): `schema` 1,
   `head_sha`, `round_id`, `status` (`complete`, `incomplete` or `failed`),
   `roles_covered` (a superset of the manifest roles is accepted) and a `detail`
