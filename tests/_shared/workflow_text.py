@@ -6,6 +6,7 @@ Moved from ``tests/conftest.py`` (#2668).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -180,6 +181,51 @@ def _section_between(content: str, start: str, end: str | None = None) -> str:
         return content[begin : content.index(end, begin)]
     nxt = content.find("\n## ", begin + len(start))
     return content[begin:] if nxt == -1 else content[begin:nxt]
+
+
+_JSON_FENCE_OPEN = "```json\n"
+
+
+def _template_for(
+    section: str,
+    *,
+    fence: int = 0,
+    tier: str = "small",
+    plan_source: str = "none",
+    forbidden_touched: bool = False,
+) -> str:
+    """Return the *fence*-th (0-based) ```json fence in *section*, filled.
+
+    Hoisted from ``test_auto_dev_finalize_reuse_path_gates.py`` (#3380) so the
+    reuse-path, CI-deferral and create-path gate-timeout pins share one filler
+    for the finalize appendix's sentinel templates.
+    """
+    start = -1
+    for _ in range(fence + 1):
+        start = section.index(_JSON_FENCE_OPEN, start + 1)
+    start += len(_JSON_FENCE_OPEN)
+    raw = section[start : section.index("\n```", start)]
+    return (
+        raw.replace("<count>", "0")
+        .replace("<pr_number>", "7")
+        .replace("<ticket-id>", "2974")
+        .replace("<branch-name>", "dev/2974")
+        .replace("<pr_url>", "https://github.com/acme/widgets/pull/7")
+        .replace("<base_ref>", "dev")
+        .replace(
+            "<resolved scope.tier — see 'Resolve carried-through context' above>",
+            tier,
+        )
+        .replace(
+            "<resolved plan_source — see 'Resolve carried-through context' above>",
+            plan_source,
+        )
+        .replace(
+            "<resolved forbidden_touched — see "
+            "'Resolve carried-through context' above>",
+            json.dumps(forbidden_touched),
+        )
+    )
 
 
 CHANGELOG_PATH = _REPO_ROOT / "CHANGELOG.md"

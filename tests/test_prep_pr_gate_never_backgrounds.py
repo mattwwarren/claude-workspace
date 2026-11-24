@@ -156,6 +156,16 @@ def test_prep_pr_step7_gate_timeout_paragraph_explains_clamp() -> None:
     assert "quality_gates.timeouts" in paragraph
 
 
+def test_prep_pr_step7_gate_timeout_bullet_names_the_finalize_promotion() -> None:
+    """#3380: the `exceeded: true` bullet says finalize promotes the marker to
+    the top-level reason, outside the #2251 headless override window."""
+    bullet = _between(_step7_section(), "**If `exceeded: true`", "<<<PREP_PR_BLOCK")
+    assert "create-path gate-timeout classifier (#3380)" in bullet
+    assert "promotes the marker" in bullet
+    assert 'top-level `blocker.reason: "gate_timeout"`' in bullet
+    assert "#3380" not in _headless_override_window()
+
+
 def test_prep_pr_step10_reads_gate_skips_before_clean() -> None:
     content = _cmd("prep-pr.md")
     step10 = _between(content, "## Step 10: Clean Up", "\n## ")

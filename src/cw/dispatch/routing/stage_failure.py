@@ -526,6 +526,8 @@ def _route_stage_failure(
     # #3372: a reuse-path gate_timeout park carries its PR the same way and
     # leaves auto-merge as found, so the stamp lets cw observe the PR merging
     # on its own and release the row (Variant A, reconcile/tasks/stale_gate.py).
+    # The #3380 create-path gate_timeout park has no PR and carries no
+    # `pr_info`, so this returns None and the row keeps no pr_url.
     #
     # #3618: an awaiting_ci_evidence park carries its unarmed PR the same way.
     gate_pr_url = (
@@ -558,7 +560,8 @@ def _route_stage_failure(
     #
     # #3372: a gate_timeout park is the executor's per-call foreground timeout
     # cutting the gate call off -- harness-side, like #2280 above, not
-    # evidence the ticket produced no progress.
+    # evidence the ticket produced no progress. The same holds for the #3380
+    # create-path park (no PR, no `pr_info`, so pr_url stays None).
     #
     # #3618: an awaiting_ci_evidence park waits on CI by design (the gates
     # were deferred or the mapped checks are not yet green), not a crashloop.

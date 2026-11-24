@@ -384,7 +384,7 @@ _GUIDED = {
         "The client sets review.engine, but this REVIEW lane cannot run it"
     ),
     GATE_TIMEOUT_DISPOSITION: (
-        "The reuse-path quality gate was cut off by the foreground timeout"
+        "The quality gate was cut off by the foreground timeout"
     ),
     AWAITING_CI_EVIDENCE_DISPOSITION: (
         "The finalize stage is waiting on CI, not failed."
@@ -714,6 +714,10 @@ class TestRefusalSuffix:
         assert "gate-pass record" in suffix
         assert "no time limit" in suffix
         assert "then requeue the row with `cw dev-queue requeue`" in suffix
+        # #3380: the same guidance covers the create path, which has no PR.
+        assert "create path" in suffix
+        assert "no PR" in suffix
+        assert "If the row has a PR, confirm required CI" in suffix
 
     @pytest.mark.parametrize(
         "disposition",

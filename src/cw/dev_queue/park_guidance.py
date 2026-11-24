@@ -85,11 +85,13 @@ PARK_GUIDANCE: dict[str, str] = {
         " `cw dev-queue requeue` releases it. " + REVIEW_CAPABILITY_RELANE_GENERIC
     ),
     GATE_TIMEOUT_DISPOSITION: (
-        "The reuse-path quality gate was cut off by the foreground timeout, not"
-        " failed; the PR's auto-merge was left as found and nothing was regressed"
-        " to impl. Confirm required CI is green at the PR head. In the row's"
-        " worktree (the sentinel's `worktree_path`), at that head, run the"
-        " timed-out gate by hand with no time limit. If it passes on a clean"
+        "The quality gate was cut off by the foreground timeout, not failed;"
+        " nothing was regressed to impl. On the reuse path the PR's auto-merge"
+        " was left as found; on the create path no PR exists yet, so there is"
+        " nothing to merge or to check. If the row has a PR, confirm required CI"
+        " is green at the PR head. In the row's worktree (the sentinel's"
+        " `worktree_path`), at the head named in the sentinel's `details`, run"
+        " the timed-out gate by hand with no time limit. If it passes on a clean"
         " tree, run `prep_pr_state.py gate-pass record <gate>` there, then"
         " requeue the row with `cw dev-queue requeue`."
     ),

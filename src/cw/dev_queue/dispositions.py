@@ -70,7 +70,8 @@ REVIEW_ENGINE_UNSUPPORTED_DISPOSITION: Final = (
     REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON
 )
 # #3372: a FINALIZE row parked because the executor's foreground timeout cut a
-# reuse-path quality gate off. An operator-gated park: not a HOLD, not a
+# quality gate off, on the reuse path or (#3380) on the create path, where no
+# PR exists and the row carries no `pr_url`. An operator-gated park: not a HOLD, not a
 # DRAIN, not escalation-eligible and not reap-eligible. The orchestrator
 # releases it by running the gate by hand, `prep_pr_state.py gate-pass record`
 # and `cw dev-queue requeue`.
@@ -465,8 +466,8 @@ def _hold_aware_disposition(
     contract consumers match on to find every hold-class park at once.
 
     Two reasons get their own operator-gated (not hold) disposition:
-    ``review_engine_modified`` (#3039) and the reuse-path ``gate_timeout``
-    (#3372).
+    ``review_engine_modified`` (#3039) and ``gate_timeout`` (#3372 reuse
+    path, #3380 create path).
     """
     if blocker_reason in OPERATOR_UNAVAILABLE_BLOCKER_REASONS:
         return AWAITING_OPERATOR_DISPOSITION

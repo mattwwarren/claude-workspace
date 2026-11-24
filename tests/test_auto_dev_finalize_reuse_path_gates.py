@@ -25,17 +25,15 @@ from cw.auto_dev_result import (
 )
 from cw.auto_dev_result.schema._vocab import FINALIZE_REGRESS_BLOCKER_REASONS
 from cw.claim_evidence import extract_claim_evidence, is_unproductive
-from cw.dev_queue import GATE_TIMEOUT_DISPOSITION, save_dev_queue
-from cw.dispatch import apply_staged_decision
-from cw.models import (
-    ClientConfig,
-    DevQueueStore,
-    QueueItemStatus,
-    Stage,
-    TicketTask,
+from cw.dev_queue import GATE_TIMEOUT_DISPOSITION
+from cw.models import QueueItemStatus, Stage, TicketTask
+from tests._shared.session_seeding import _make_ticket_task, _route_blocked
+from tests._shared.workflow_text import (
+    _appendix,
+    _cmd,
+    _section_between,
+    _template_for,
 )
-from tests._shared.session_seeding import _make_ticket_task
-from tests._shared.workflow_text import _appendix, _cmd, _section_between
 from tests.test_stage import _guard_bullet
 
 ROOT = Path(__file__).parent.parent
@@ -84,39 +82,6 @@ def _template(
         tier=tier,
         plan_source=plan_source,
         forbidden_touched=forbidden_touched,
-    )
-
-
-def _template_for(
-    section: str,
-    *,
-    tier: str = "small",
-    plan_source: str = "none",
-    forbidden_touched: bool = False,
-) -> str:
-    """Return the first ```json fence in *section*, placeholders filled."""
-    start = section.index("```json\n") + len("```json\n")
-    raw = section[start : section.index("\n```", start)]
-    return (
-        raw.replace("<count>", "0")
-        .replace("<pr_number>", "7")
-        .replace("<ticket-id>", "2974")
-        .replace("<branch-name>", "dev/2974")
-        .replace("<pr_url>", "https://github.com/acme/widgets/pull/7")
-        .replace("<base_ref>", "dev")
-        .replace(
-            "<resolved scope.tier — see 'Resolve carried-through context' above>",
-            tier,
-        )
-        .replace(
-            "<resolved plan_source — see 'Resolve carried-through context' above>",
-            plan_source,
-        )
-        .replace(
-            "<resolved forbidden_touched — see "
-            "'Resolve carried-through context' above>",
-            json.dumps(forbidden_touched),
-        )
     )
 
 
@@ -308,15 +273,7 @@ class TestRoutingNeverShips:
             regress_attempts=attempts,
             **(extra if adopted else {}),
         )
-        clients = {
-            "test-client": ClientConfig(
-                name="test-client", workspace_path=Path("/nonexistent/repo")
-            )
-        }
-        save_dev_queue(DevQueueStore(tasks=[task]))
-        last = json.loads(_template())
-        apply_staged_decision(task, "blocked", last, clients)
-        return task
+        return _route_blocked(task, json.loads(_template()))
 
     def test_plain_row_regresses_to_impl(self) -> None:
         task = self._route(adopted=False, attempts=0)
@@ -452,16 +409,14 @@ class TestStep4c6GateTimeout:
             " prompt"
         ) in _appendix_section()
 
-    def test_create_path_still_collapses_to_agent_block(self) -> None:
-        prep_pr = _cmd("prep-pr.md")
-        assert "reason: gate_timeout" in prep_pr
-        assert (
-            "on the create path (the reuse-path timeout in `auto-dev-finalize.md`"
-            " Step 4c.6 is the one top-level `gate_timeout`, #3372)"
-        ) in prep_pr
+    def test_create_path_promotes_via_the_classifier(self) -> None:
         for doc in (_HEADLESS_CONTRACT, _AUTO_DEV):
             assert "| Any other agent BLOCK (Plan / prep-pr / etc.) |" in doc
-        assert "still collapses to `agent_block`" in _timeout_classification_tail()
+        tail = _timeout_classification_tail()
+        assert "still collapses to `agent_block`" not in tail
+        assert "Create-path gate-timeout classifier (#3380)" in tail
+        assert "promoted to the same top-level `gate_timeout` park" in tail
+        assert "falls back to `agent_block`" in tail
 
 
 def _timeout_classification_tail() -> str:
@@ -580,6 +535,16 @@ class TestGateTimeoutCollapseRows:
         )
         assert "not regress-eligible" in row
         assert "gate-pass record" in row
+        assert "stage4b_pr_create" in row
+        assert "no `pr_info`" in row
+        create_row = next(
+            line
+            for line in _HEADLESS_CONTRACT.splitlines()
+            if line.startswith("| S4c create-path quality gate timeout")
+        )
+        assert 'blocker.reason: "gate_timeout"' in create_row
+        assert "#3380" in create_row
+        assert "S4c.6" not in create_row
         heading = "## The `gate_timeout` Disposition (#3372)"
         section = _section_between(_HEADLESS_CONTRACT, heading)
         for token in (
@@ -633,16 +598,6 @@ class TestGateTimeoutRouting:
             **(extra if adopted else {}),
         )
 
-    def _route(self, task: TicketTask, last: dict[str, object]) -> TicketTask:
-        clients = {
-            "test-client": ClientConfig(
-                name="test-client", workspace_path=Path("/nonexistent/repo")
-            )
-        }
-        save_dev_queue(DevQueueStore(tasks=[task]))
-        apply_staged_decision(task, "blocked", last, clients)
-        return task
-
     @pytest.mark.parametrize("adopted", [False, True], ids=["plain", "adopted"])
     @pytest.mark.parametrize(
         "attempts", [0, FINALIZE_REGRESS_CAP - 1, FINALIZE_REGRESS_CAP]
@@ -655,7 +610,7 @@ class TestGateTimeoutRouting:
         task = self._task(adopted=adopted, attempts=attempts)
         unproductive_before = task.unproductive_attempts
 
-        self._route(task, last)
+        _route_blocked(task, last)
 
         assert task.stage == Stage.FINALIZE
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
@@ -670,7 +625,7 @@ class TestGateTimeoutRouting:
         task = self._task(adopted=False, attempts=FINALIZE_REGRESS_CAP)
         unproductive_before = task.unproductive_attempts
 
-        self._route(task, last)
+        _route_blocked(task, last)
 
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.pr_url is None
@@ -679,7 +634,7 @@ class TestGateTimeoutRouting:
     def test_gate_timeout_without_pr_info_leaves_pr_url_none(self) -> None:
         last = json.loads(_template_for(_timeout_section()))
         del last["pr_info"]
-        task = self._route(self._task(adopted=False, attempts=0), last)
+        task = _route_blocked(self._task(adopted=False, attempts=0), last)
         assert task.disposition == GATE_TIMEOUT_DISPOSITION
         assert task.pr_url is None
 
@@ -688,6 +643,6 @@ class TestGateTimeoutRouting:
         blocker = last["blocker"]
         assert isinstance(blocker, dict)
         blocker["reason"] = EXTERNAL_STATE_BLOCKER_REASON
-        task = self._route(self._task(adopted=False, attempts=0), last)
+        task = _route_blocked(self._task(adopted=False, attempts=0), last)
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.pr_url is None

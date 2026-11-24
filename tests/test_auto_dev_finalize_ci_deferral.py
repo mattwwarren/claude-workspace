@@ -24,6 +24,7 @@ from tests._shared.workflow_text import (
     _norm,
     _section_between,
     _skill,
+    _template_for,
     changelog_entry,
     changelog_text,
 )
@@ -32,7 +33,6 @@ from tests.test_auto_dev_finalize_reuse_path_gates import (
     _TIMEOUT_HEADING,
     _paragraph,
     _step_4c6,
-    _template_for,
 )
 
 _REASON = "awaiting_ci_evidence"

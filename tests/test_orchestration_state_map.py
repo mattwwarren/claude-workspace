@@ -593,6 +593,10 @@ def test_gate_timeout_entry_runs_gate_records_pass_then_requeues() -> None:
     assert f"`{REQUEUE_COMMAND}`" in entry.text
     assert entry.text.index("gate-pass record") < entry.text.index(REQUEUE_COMMAND)
     assert all(_ALTERNATION not in command for command in entry.commands)
+    # #3380: the entry covers the create path, which has no PR.
+    assert "create path" in entry.text
+    assert "no PR" in entry.text
+    assert "If the row has a PR, confirm required CI" in entry.text
 
 
 def test_awaiting_ci_evidence_entry_routes_each_flavor_and_both_escapes() -> None:
