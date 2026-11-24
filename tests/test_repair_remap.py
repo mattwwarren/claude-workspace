@@ -40,6 +40,7 @@ from tests._changelog_cut_helpers import (
     CL_BASE,
     CL_BRANCH,
     CL_MAIN_SIBLING,
+    CL_NEW_BEFORE_UNRELEASED,
     CL_NEW_MAIN_LINE_DELETED,
     CL_NEW_PREAMBLE_ADDITION,
     CL_NEW_RELEASED_SECTION_CHANGED,
@@ -268,6 +269,7 @@ def test_zero_surviving_branch_commits_is_not_proven(
         ),
         pytest.param(CL_NEW_MAIN_LINE_DELETED, "deleted or modified", id="deleted"),
         pytest.param(CL_NEW_PREAMBLE_ADDITION, "outside", id="preamble"),
+        pytest.param(CL_NEW_BEFORE_UNRELEASED, "outside", id="above-heading"),
         pytest.param(CHANGELOG_BYTES, "released section", id="gutted"),
     ],
 )

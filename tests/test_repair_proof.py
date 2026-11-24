@@ -33,6 +33,7 @@ from tests._changelog_cut_helpers import (
     CL_EXPECTED,
     CL_MAIN,
     CL_MAIN_SIBLING,
+    CL_NEW_BEFORE_UNRELEASED,
     CL_NEW_BLANK_OUTSIDE_SPAN,
     CL_NEW_FOREIGN_HEADING,
     CL_NEW_MAIN_LINE_DELETED,
@@ -323,6 +324,14 @@ def test_brand_new_released_heading_on_the_merged_side_is_not_provable(
 
 def test_changelog_preamble_addition_is_not_provable(git: ScriptedGit) -> None:
     stub_remap_proof(git, new_text=CL_NEW_PREAMBLE_ADDITION)
+
+    assert "outside the default branch's [Unreleased] span" in _refusal(_prove())
+
+
+def test_changelog_line_directly_above_the_unreleased_heading_is_not_provable(
+    git: ScriptedGit,
+) -> None:
+    stub_remap_proof(git, new_text=CL_NEW_BEFORE_UNRELEASED)
 
     assert "outside the default branch's [Unreleased] span" in _refusal(_prove())
 

@@ -19,6 +19,8 @@ module is now a package of focused modules:
 * ``repair_engine`` (+ ``repair_git`` / ``repair_fence``) — the shared
   conflict-repair engine the repair recipes plug into: prepare, scratch tree,
   disarm, lease push, then re-arm behind the fence or page unarmed.
+* ``repair_proof`` — the tree-level proof behind the changelog recipe's clean-sha
+  carry (#3375): merge-tree equality plus a confined CHANGELOG delta.
 * ``core`` — the ``run_review_recipes`` per-tick detect->act entry point, the
   ``DeferredReviewDispatch`` / ``dispatch_deferred_review_jobs`` post-lock
   dispatch pair (#1229), plus the stateless ``_detect_repeat_fire_counts`` burst

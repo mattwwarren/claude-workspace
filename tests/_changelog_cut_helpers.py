@@ -278,6 +278,10 @@ CL_NEW_RELEASED_SECTION_CHANGED = CL_REBUILT_SIBLING.replace(
 CL_NEW_PREAMBLE_ADDITION = CL_REBUILT_SIBLING.replace(
     "# Changelog\n", "# Changelog\nIntro text.\n", 1
 )
+#: One text line added directly above the ``[Unreleased]`` heading.
+CL_NEW_BEFORE_UNRELEASED = CL_REBUILT_SIBLING.replace(
+    UNRELEASED_HEADING, "Intro text.\n" + UNRELEASED_HEADING, 1
+)
 #: One extra blank line added in the preamble.
 CL_NEW_BLANK_OUTSIDE_SPAN = CL_REBUILT_SIBLING.replace(
     "# Changelog\n\n", "# Changelog\n\n\n", 1
