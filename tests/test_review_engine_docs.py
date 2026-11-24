@@ -588,3 +588,7 @@ def test_runbook_documents_the_completion_check_failure() -> None:
     assert "retry-eligible `engine_head_mismatch` and `engine_coverage_incomplete`" in (
         paragraph
     )
+    # Every reason is non-retryable; the retry-eligible cases are other members.
+    # The old wording inverted this ("Only these ... reasons are not
+    # retry-eligible" followed by the retry-eligible cases).
+    assert "Only these `engine_completion_check_failed` reasons" not in paragraph

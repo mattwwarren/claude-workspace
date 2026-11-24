@@ -4241,12 +4241,15 @@ capability and requeue. The override never clears held memory itself.
 
 **Codex completion check: `engine_completion_check_failed` (#3885).** A codex
 engine that declares `completion_check` in its manifest fails the round as
-`agent_block` with `engine_completion_check_failed: <reason>`. Only these
-`engine_completion_check_failed` reasons are not retry-eligible: a stale head or
-round id and an incomplete or partial result surface as the existing
-retry-eligible `engine_head_mismatch` and `engine_coverage_incomplete` members.
-A checker timeout is released by an operator requeue, not
-auto-retried.
+`agent_block` with `engine_completion_check_failed: <reason>`. Every
+`engine_completion_check_failed` reason is not retry-eligible: checker missing
+or not executable, launch failure, non-zero exit, timeout, extract failure,
+missing or invalid result, status failed, worktree mutated, head moved, and
+unverifiable. A stale head or round id and an incomplete or partial result are
+not reported under this reason: they surface as the existing
+retry-eligible `engine_head_mismatch` and `engine_coverage_incomplete` members
+instead. A checker timeout is
+released by an operator requeue, not auto-retried.
 
 **Park: `review_engine_modified` (RFC 0017, #3039).** A client with
 `review.engine` set runs its own review skill as the Claude-native round
