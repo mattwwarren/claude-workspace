@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from pydantic import ValidationError
 
+from cw.auto_dev_result import REVIEW_ENGINE_MODIFIED_BLOCKER_REASON
 from cw.codex_review import _engine_completion
 from cw.codex_review._engine_completion import (
     MAX_COMPLETION_DETAIL_CHARS,
@@ -49,6 +50,7 @@ from tests._shared.engine_round_helpers import (
     run_pass,
     tamper_roles,
 )
+from tests._shared.git_repos import commit_tracked_file
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -250,6 +252,31 @@ def test_canary_environment_is_not_inherited(
     # every child under pytest; production's explicit env never carries it.
     # The subset check also proves CW_CANARY_SECRET was not inherited.
     assert set(keys) - {"GIT_CEILING_DIRECTORIES"} <= {"PATH", "TMPDIR", "LANG"}
+
+
+# ---- engine-change guard is unchanged ------------------------------------
+
+
+def test_a_branch_editing_the_checker_parks_before_any_checker_runs(
+    make_git_repo: Callable[..., Path], tmp_path: Path
+) -> None:
+    """The head's own checker bytes are never run: the D-13 preflight parks first."""
+    repo = make_checker_repo(make_git_repo, tmp_path)
+    checker = f".claude/skills/{SKILL}/bin/check-completion"
+    commit_tracked_file(repo.worktree, checker, "#!/bin/sh\nexit 0\n")
+    runner = engine_runner()
+
+    outcome = run_pass(repo, runner)
+
+    assert outcome.result.status == "blocked"
+    blocker = outcome.result.blocker
+    assert blocker is not None
+    assert blocker.reason == REVIEW_ENGINE_MODIFIED_BLOCKER_REASON
+    assert blocker.retry_eligible is False
+    assert checker in blocker.details
+    assert outcome.verdict is None
+    assert runner.calls == []
+    assert not observed_exists(repo)
 
 
 # ---- result contract ----------------------------------------------------
