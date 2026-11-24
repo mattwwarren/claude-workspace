@@ -644,3 +644,20 @@ def test_merge_base_that_drifts_after_prepare_stops_before_any_rewrite(
     verbs = [argv[0] for argv in proven.stripped()]
     assert "push" not in verbs
     assert "rebase" not in verbs
+
+
+def test_merge_base_that_cannot_be_derived_stops_before_any_rewrite(
+    proven: ScriptedGit,
+    head: FakeGhHead,
+    client: ClientConfig,
+    arm: FakeArmScript,
+    worktree: Path,
+    ledger_path: Path,
+) -> None:
+    proven.set(("merge-base", DEFAULT_SHA), GitResult(1, "", "fatal"))
+
+    assert _dispatch(client, worktree) is None
+
+    (failed,) = _failed()
+    assert failed["disposition"] == D.CONFLICT_UNEXPLAINED.value
+    assert "rebase" not in [argv[0] for argv in proven.stripped()]
