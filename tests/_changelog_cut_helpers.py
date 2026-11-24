@@ -389,3 +389,22 @@ def github_would_conflict(clone: Path, head_ref: str, base_ref: str) -> bool:
         text=True,
     )
     return merged.returncode != 0
+
+
+def _crlf(text: str) -> str:
+    return text.replace("\n", "\r\n")
+
+
+#: ``CL_BASE`` with CRLF line endings (a CRLF changelog, #3375).
+CL_BASE_CRLF = _crlf(CL_BASE)
+#: ``CL_BRANCH`` with CRLF line endings.
+CL_BRANCH_CRLF = _crlf(CL_BRANCH)
+#: ``CL_MAIN`` (a release cut emptied ``[Unreleased]``) with CRLF line endings.
+CL_MAIN_CRLF = _crlf(CL_MAIN)
+#: ``CL_EXPECTED`` (the rebuild re-creating ``### Fixed``) with CRLF line endings.
+CL_EXPECTED_CRLF = _crlf(CL_EXPECTED)
+_BARE_CR_TAIL = "\r- Extra fix (#9).\n"
+#: The branch's Gamma bullet carries a bare CR and a second bullet after it.
+CL_BRANCH_BARE_CR = CL_BRANCH.replace(GAMMA + "\n", GAMMA + _BARE_CR_TAIL)
+#: The raced-pair rebuild of ``CL_BRANCH_BARE_CR``: the same bare-CR line added.
+CL_REBUILT_BARE_CR = CL_REBUILT_SIBLING.replace(GAMMA + "\n", GAMMA + _BARE_CR_TAIL)

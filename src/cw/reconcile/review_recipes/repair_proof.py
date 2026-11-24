@@ -29,9 +29,11 @@ contract. Writes nothing; runs post-lock in the scratch tree.
 from __future__ import annotations
 
 import re
+import subprocess
 from collections import Counter
-from typing import TYPE_CHECKING, NamedTuple, NoReturn
+from typing import TYPE_CHECKING, NamedTuple, NoReturn, cast
 
+from cw._git import run_git
 from cw.changelog_rebuild import parse_headings, released_sections_changed
 from cw.merge_probe import merge_tree
 from cw.reconcile.review_recipes.repair_git import (
@@ -88,28 +90,55 @@ def stray_paths(scratch: Path, tree: str, new_sha: str) -> list[str]:
     return sorted(path for path in _split_z(diffed.stdout) if path != CHANGELOG)
 
 
+def _diff_text(scratch: Path, since: str, until: str) -> str:
+    """``git diff -U0`` of CHANGELOG.md between two commits, byte-exact.
+
+    ``run_git(text=True)`` would turn CRLF into LF and split a bare CR into two
+    lines before the proof could compare them with the byte-exact blobs
+    :func:`~cw.reconcile.review_recipes.repair_git._show_blob` reads, so the
+    output is read as bytes and decoded the way that helper decodes (UTF-8).
+    Every failure refuses with the ``_git`` wording.
+    """
+    argv = ("diff", "-U0", "--no-renames", since, until, "--", CHANGELOG)
+    try:
+        # ``run_git`` is annotated for the text default; ``text=False`` yields bytes.
+        diffed = cast(
+            "subprocess.CompletedProcess[bytes]",
+            run_git(
+                argv,
+                cwd=scratch,
+                check=False,
+                capture_output=True,
+                text=False,
+                timeout=_T_LOCAL,
+            ),
+        )
+    except subprocess.TimeoutExpired as exc:
+        detail = f"git {' '.join(argv)} timed out after {_T_LOCAL:g}s"
+        raise RepairStopError(_VERIFY, detail) from exc
+    except OSError as exc:
+        detail = f"git {' '.join(argv)} could not run: {exc}"
+        raise RepairStopError(_VERIFY, detail) from exc
+    if diffed.returncode != 0:
+        failure = (diffed.stderr or diffed.stdout).decode("utf-8", errors="replace")
+        _refuse(f"git diff -U0 exit {diffed.returncode}: {_tail(failure)}")
+    try:
+        return diffed.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        _refuse(f"git diff -U0 output is not UTF-8: {exc}")
+
+
 def _zero_context_hunks(scratch: Path, since: str, until: str) -> list[_Hunk]:
     """The ``git diff -U0`` hunks of CHANGELOG.md between two commits.
 
-    Lines are kept verbatim (a trailing ``\\r`` included). Output that carries
-    no ``@@`` header (a binary or unreadable diff) refuses.
+    The diff is read byte-exactly and split on ``\\n`` only, so a line keeps a
+    trailing ``\\r`` (CRLF) and an embedded bare ``\\r`` verbatim, the way the
+    blobs it is compared with are split. Output that carries no ``@@`` header (a
+    binary or unreadable diff) refuses.
     """
-    diffed = _git(
-        scratch,
-        "diff",
-        "-U0",
-        "--no-renames",
-        since,
-        until,
-        "--",
-        CHANGELOG,
-        timeout=_T_LOCAL,
-        stop=_VERIFY,
-    )
-    if diffed.returncode != 0:
-        _refuse(_failed(diffed, "git diff -U0"))
+    text = _diff_text(scratch, since, until)
     hunks: list[_Hunk] = []
-    for line in diffed.stdout.split("\n"):
+    for line in text.split("\n"):
         header = _HUNK_RE.match(line)
         if header is not None:
             count = header["count"]
@@ -118,12 +147,8 @@ def _zero_context_hunks(scratch: Path, since: str, until: str) -> list[_Hunk]:
             )
         elif hunks and line.startswith("+"):
             hunks[-1].added.append(line[1:])
-        elif hunks and line.startswith("-"):
-            # Why: a deleted line always has old_count > 0, which refuses; this
-            # keeps the hunk's added list honest for that refusal's detail.
-            continue
-    if not hunks and diffed.stdout.strip():
-        _refuse(f"unreadable CHANGELOG diff: {_tail(diffed.stdout)}")
+    if not hunks and text.strip():
+        _refuse(f"unreadable CHANGELOG diff: {_tail(text)}")
     return hunks
 
 

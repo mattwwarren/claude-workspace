@@ -38,12 +38,18 @@ from cw.review_convergence import (
 )
 from tests._changelog_cut_helpers import (
     CL_BASE,
+    CL_BASE_CRLF,
     CL_BRANCH,
+    CL_BRANCH_BARE_CR,
+    CL_BRANCH_CRLF,
+    CL_EXPECTED_CRLF,
+    CL_MAIN_CRLF,
     CL_MAIN_SIBLING,
     CL_NEW_BEFORE_UNRELEASED,
     CL_NEW_MAIN_LINE_DELETED,
     CL_NEW_PREAMBLE_ADDITION,
     CL_NEW_RELEASED_SECTION_CHANGED,
+    CL_REBUILT_BARE_CR,
     CL_REBUILT_SIBLING,
     commit_files,
 )
@@ -101,13 +107,14 @@ class _Series:
         *,
         main_changelog: str = CL_MAIN_SIBLING,
         branch_changelog: str | None = CL_BRANCH,
+        base_changelog: str = CL_BASE,
     ) -> None:
         self.path = make_git_repo("remap-repo")
         self.base = commit_files(
             self.path,
             {
                 "base.py": "x = 1\n",
-                "CHANGELOG.md": CL_BASE,
+                "CHANGELOG.md": base_changelog,
                 ".gitattributes": UNION_ATTRIBUTE,
             },
             "base",
@@ -174,6 +181,43 @@ def test_unchanged_series_without_changelog_commit_is_proven(
     plain = _Series(make_git_repo, branch_changelog=None)
 
     assert plain.prove(plain.rebased, plain.rebased) == 2
+
+
+def test_crlf_release_cut_rebuild_is_proven(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    """Real git: the re-created ``### Fixed`` keeps its CR, so the exemption fires.
+
+    With ``text=True`` the diff arrived without the CR while the attested blob
+    kept it, so the carried-heading exemption never matched and a CRLF changelog
+    was refused after every release cut.
+    """
+    cut = _Series(
+        make_git_repo,
+        main_changelog=CL_MAIN_CRLF,
+        branch_changelog=CL_BRANCH_CRLF,
+        base_changelog=CL_BASE_CRLF,
+    )
+
+    assert cut.prove(cut.rebased, cut.changelog_commit(CL_EXPECTED_CRLF)) == 2
+
+
+def test_bare_cr_line_the_reviewed_head_added_is_proven(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    cr = _Series(make_git_repo, branch_changelog=CL_BRANCH_BARE_CR)
+
+    assert cr.prove(cr.rebased, cr.changelog_commit(CL_REBUILT_BARE_CR)) == 2
+
+
+def test_bare_cr_tail_the_reviewed_head_never_added_is_not_proven(
+    series: _Series,
+) -> None:
+    """The text after a bare CR is part of the line, not a dropped diff fragment."""
+    detail = series.refusal(series.rebased, series.changelog_commit(CL_REBUILT_BARE_CR))
+
+    assert "Extra fix (#9)" in detail
+    assert "never added by the reviewed head" in detail
 
 
 def test_squashed_series_with_the_same_tree_is_proven(series: _Series) -> None:

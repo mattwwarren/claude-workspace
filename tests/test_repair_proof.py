@@ -29,9 +29,14 @@ from cw.reconcile.review_recipes import (
 )
 from cw.review_convergence import CleanShaRemap
 from tests._changelog_cut_helpers import (
+    CL_BASE_CRLF,
     CL_BRANCH,
+    CL_BRANCH_BARE_CR,
+    CL_BRANCH_CRLF,
     CL_EXPECTED,
+    CL_EXPECTED_CRLF,
     CL_MAIN,
+    CL_MAIN_CRLF,
     CL_MAIN_SIBLING,
     CL_NEW_BEFORE_UNRELEASED,
     CL_NEW_BLANK_OUTSIDE_SPAN,
@@ -42,6 +47,7 @@ from tests._changelog_cut_helpers import (
     CL_NEW_RELEASED_HEADING_AT_TAIL,
     CL_NEW_RELEASED_SECTION_CHANGED,
     CL_NEW_UNATTESTED_BULLET,
+    CL_REBUILT_BARE_CR,
     CL_REBUILT_SIBLING,
     PREAMBLE,
     TICKET,
@@ -203,6 +209,36 @@ def test_recreated_subsection_heading_is_provable(git: ScriptedGit) -> None:
     assert isinstance(_prove(), CleanShaRemap)
 
 
+def test_crlf_release_cut_rebuild_is_provable(git: ScriptedGit) -> None:
+    """Lines compare verbatim, ``\\r`` included: the CR-bearing heading is carried."""
+    stub_remap_proof(
+        git,
+        default_text=CL_MAIN_CRLF,
+        attested_text=CL_BRANCH_CRLF,
+        new_text=CL_EXPECTED_CRLF,
+    )
+    git.set(MB_TO_EXPECTED, GitResult(stdout=unified0(CL_BASE_CRLF, CL_BRANCH_CRLF)))
+
+    assert isinstance(_prove(), CleanShaRemap)
+
+
+def test_bare_cr_line_the_attested_head_added_is_provable(git: ScriptedGit) -> None:
+    stub_remap_proof(git, attested_text=CL_BRANCH_BARE_CR, new_text=CL_REBUILT_BARE_CR)
+
+    assert isinstance(_prove(), CleanShaRemap)
+
+
+def test_bare_cr_line_the_attested_head_never_added_is_refused(
+    git: ScriptedGit,
+) -> None:
+    stub_remap_proof(git, new_text=CL_REBUILT_BARE_CR)
+
+    detail = _refusal(_prove())
+
+    assert "Extra fix (#9)" in detail
+    assert "never added by the reviewed head" in detail
+
+
 # --- every refusal fails closed ---------------------------------------------------
 
 
@@ -269,6 +305,15 @@ REFUSALS = [
         _answer(DEFAULT_TO_NEW, GitResult(2, "", "bad")),
         "git diff -U0",
         id="diff-fails",
+    ),
+    pytest.param(
+        _answer(DEFAULT_TO_NEW, TIMEOUT), "timed out after", id="diff-timeout"
+    ),
+    pytest.param(_answer(DEFAULT_TO_NEW, OSERROR), "could not run", id="diff-oserror"),
+    pytest.param(
+        _answer(DEFAULT_TO_NEW, GitResult(stdout=b"+\xff\n")),
+        "not UTF-8",
+        id="diff-not-utf8",
     ),
     pytest.param(_stub(parent="f" * 40), "not one commit", id="parent-mismatch"),
     pytest.param(

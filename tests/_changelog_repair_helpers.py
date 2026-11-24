@@ -56,6 +56,7 @@ from cw.models import (
 )
 from cw.reconcile.review_recipes import _shared, repair_engine
 from cw.reconcile.review_recipes import repair_git as git_mod
+from cw.reconcile.review_recipes import repair_proof as proof_git_mod
 from cw.reconcile.review_recipes.auto_fix_ci import _auto_fix_ci_guard_target
 from cw.reconcile.review_recipes.changelog_repair import CHANGELOG_SPEC
 from cw.reconcile.review_recipes.repair_engine import (
@@ -234,6 +235,7 @@ class ScriptedGit:
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> ScriptedGit:
         monkeypatch.setattr(git_mod, "run_git", self)
+        monkeypatch.setattr(proof_git_mod, "run_git", self)
         monkeypatch.setattr(approval_mod, "run_git", self)
         monkeypatch.setattr(probe_mod, "run_git", self)
         return self
