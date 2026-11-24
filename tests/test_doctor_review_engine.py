@@ -17,6 +17,7 @@ import pytest
 from cw.doctor._shared import CheckResult
 from cw.doctor.core import _client_config_checks
 from cw.doctor.review_engine import _check_review_engine
+from cw.exceptions import CwError
 from cw.models import (
     ClientConfig,
     LaneConfig,
@@ -500,3 +501,158 @@ def test_capability_is_silent_for_a_lane_without_review(tmp_path: Path) -> None:
         stages=[Stage.PLAN, Stage.IMPL, Stage.FINALIZE]
     )
     assert _capability_results(client) == []
+
+
+CHECKER_DIR = Path(__file__).parent / "fixtures" / "review_engine_checker"
+
+
+def test_codex_lane_with_an_executable_checker_emits_nothing(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    repo = make_engine_repo(make_git_repo, engine_files=CHECKER_DIR)
+    assert _check_review_engine({"acme": _codex_client(repo.worktree)}) == []
+
+
+def test_codex_lane_with_a_non_executable_checker_warns(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+) -> None:
+    from tests._shared.engine_round_helpers import make_checker_repo
+
+    repo = make_checker_repo(make_git_repo, tmp_path, "x\n", mode=0o644)
+    results = _check_review_engine({"acme": _codex_client(repo.worktree)})
+    assert len(results) == 1
+    assert results[0].name.startswith("review-engine/acme/")
+    assert results[0].warn is True
+    assert "checker_not_executable" in results[0].detail
+    assert "engine_completion_check_failed" in results[0].detail
+
+
+@pytest.mark.parametrize(
+    ("mode", "warns"), [(0o755, False), (0o644, True)], ids=["executable", "plain"]
+)
+def test_checker_probe_resolves_the_branch_get_read_the_manifest_from(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    read_counter: list[tuple[Path, str, str]],
+    mode: int,
+    warns: bool,
+) -> None:
+    """R15: the probe sees the client's non-``main`` default branch from ``get()``."""
+    import cw.doctor.review_engine as doctor_review
+
+    resolved: list[tuple[Path, str]] = []
+    real_resolve = doctor_review.resolve_default_branch_ref
+
+    def _spy(repo: Path, branch: str) -> object:
+        resolved.append((repo, branch))
+        return real_resolve(repo, branch)
+
+    monkeypatch.setattr(doctor_review, "resolve_default_branch_ref", _spy)
+    engine = copy_engine_fixture(tmp_path, CHECKER_DIR)
+    (engine / "bin" / "check-completion").chmod(mode)
+    repo = make_engine_repo(
+        make_git_repo,
+        engine_files=engine,
+        default_branch="develop",
+        name="checker-develop",
+    )
+    client = _codex_client(repo.worktree).model_copy(
+        update={"default_branch": "develop"}
+    )
+
+    results = _check_review_engine({"acme": client})
+
+    assert read_counter == [(repo.worktree, "develop", _SKILL)]
+    assert resolved == [(repo.worktree, "develop")]
+    if not warns:
+        assert results == []
+        return
+    (result,) = results
+    assert (result.ok, result.warn) == (True, True)
+    assert "checker_not_executable" in result.detail
+    assert "cause=" not in result.detail
+
+
+def test_completion_probe_is_cached_and_quiet_without_a_loaded_manifest(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    from cw.doctor.review_engine import _ClientManifest
+
+    repo = make_engine_repo(make_git_repo)
+    manifest = _ClientManifest(_codex_client(repo.worktree), _SKILL)
+    assert manifest.completion_problem() is None
+    assert manifest.completion_problem() is None
+
+
+def test_unresolved_default_branch_is_reported_as_unverifiable(
+    make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import cw.doctor.review_engine as doctor_review
+
+    repo = make_engine_repo(make_git_repo, engine_files=CHECKER_DIR)
+    monkeypatch.setattr(doctor_review, "resolve_default_branch_ref", lambda *_a: None)
+    manifest = doctor_review._ClientManifest(_codex_client(repo.worktree), _SKILL)
+    assert manifest.completion_problem() == "checker_unverifiable"
+
+
+def test_unreadable_skill_is_reported_as_unverifiable(
+    make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import cw.doctor.review_engine as doctor_review
+    from cw.review_engine.skill import SkillResolutionError
+
+    repo = make_engine_repo(make_git_repo, engine_files=CHECKER_DIR)
+
+    def unreadable(*_args: object) -> object:
+        error = SkillResolutionError("skill_unreadable", "boom")
+        raise error
+
+    monkeypatch.setattr(doctor_review, "resolve_skill", unreadable)
+    manifest = doctor_review._ClientManifest(_codex_client(repo.worktree), _SKILL)
+    assert manifest.completion_problem() == "checker_unverifiable"
+
+
+@pytest.mark.parametrize(
+    ("target", "error"),
+    [
+        ("resolve_default_branch_ref", CwError("git cannot run")),
+        ("resolve_default_branch_ref", OSError("no git")),
+        ("resolve_skill", CwError("cannot read skill")),
+        ("resolve_skill", OSError("no skill")),
+        ("checker_problem", OSError("disk")),
+        ("checker_problem", UnicodeError("bad bytes")),
+    ],
+    ids=[
+        "branch-cwerror",
+        "branch-oserror",
+        "skill-cwerror",
+        "skill-oserror",
+        "checker-oserror",
+        "checker-unicode",
+    ],
+)
+def test_a_failing_second_resolve_warns_instead_of_raising(
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    error: Exception,
+) -> None:
+    import cw.doctor.review_engine as doctor_review
+
+    repo = make_engine_repo(make_git_repo, engine_files=CHECKER_DIR)
+    client = _codex_client(repo.worktree)
+
+    def second_call_fails(*_args: object) -> object:
+        raise error
+
+    # The manifest read happens through manifest_source's own bindings, so it
+    # succeeds; only the doctor's second resolve inside the probe fails.
+    monkeypatch.setattr(doctor_review, target, second_call_fails)
+    manifest = doctor_review._ClientManifest(client, _SKILL)
+    assert manifest.completion_problem() == "checker_unverifiable"
+    results = _check_review_engine({"acme": client})
+    assert len(results) == 1
+    assert results[0].warn is True
+    assert "checker_unverifiable" in results[0].detail

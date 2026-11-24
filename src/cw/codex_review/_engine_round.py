@@ -33,6 +33,7 @@ from cw.codex_review._const import _TRANSIENT_FAILURE_REASONS
 from cw.codex_review._context import EngineRoster, _prepare_review_pass
 from cw.codex_review._diff import _capture_head_sha
 from cw.codex_review._engine_aggregate import run_codex_aggregator
+from cw.codex_review._engine_completion import run_completion_check
 from cw.codex_review._verdict import (
     make_codex_blocked,
     synthesize_codex_review_result,
@@ -59,10 +60,11 @@ from cw.review_engine.manifest_source import ManifestRead, read_manifest_file
 from cw.review_engine.materialize import (
     EnginePreconditionError,
     MaterializeError,
+    engine_paths,
     materialize_skill,
 )
 from cw.review_engine.preflight import run_preflight
-from cw.review_engine.skill import SkillResolutionError
+from cw.review_engine.skill import ResolvedSkill, SkillResolutionError
 from cw.review_engine.validate import (
     SummaryFailure,
     ValidatedSummary,
@@ -143,6 +145,9 @@ class _Loaded(NamedTuple):
     round_id: str
     summary_path: Path
     manifest: LoadedEngineManifest
+    #: The default-branch commit and skill the manifest was read from (#3885).
+    commit: str
+    skill: ResolvedSkill
 
 
 def engine_unresolvable_blocked(
@@ -291,7 +296,41 @@ def _materialize_roster(
         return _blocked(
             inputs, cycle, result, REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON
         )
-    return _Loaded(head, round_id, materialized.summary_path, read.loaded)
+    return _Loaded(
+        head,
+        round_id,
+        materialized.summary_path,
+        read.loaded,
+        materialized.commit,
+        materialized.skill,
+    )
+
+
+def _run_completion(
+    inputs: EnginePassInputs, cycle: int, loaded: _Loaded
+) -> _Failure | None:
+    """Run the manifest's completion check; None when none is declared or it passes.
+
+    A key-less engine returns before anything runs, so it stays byte-identical
+    to the pre-#3885 pass (R2).
+    """
+    check = loaded.manifest.manifest.completion_check
+    if check is None:
+        return None
+    failure = run_completion_check(
+        inputs.worktree,
+        commit=loaded.commit,
+        resolved=loaded.skill,
+        head=loaded.head,
+        round_id=loaded.round_id,
+        round_dir=engine_paths(inputs.worktree, loaded.round_id).round_dir,
+        timeout=check.timeout_seconds,
+        checker_path=check.path,
+        roles=[role.id for role in loaded.manifest.manifest.roles],
+    )
+    if failure is None:
+        return None
+    return _agent_block(inputs, cycle, failure.reason, failure.detail)
 
 
 def _engine_roster(loaded: LoadedEngineManifest) -> EngineRoster:
@@ -462,6 +501,9 @@ def run_engine_pass(
     ran = _run_roles(inputs, cycle, prepared)
     if isinstance(ran, _Failure):
         return EnginePassOutcome(ran.result, None, prepared)
+    completion_blocked = _run_completion(inputs, cycle, loaded)
+    if completion_blocked is not None:
+        return EnginePassOutcome(completion_blocked.result, None, prepared)
     validated = _run_aggregation(spec, inputs, cycle, loaded, ran)
     if isinstance(validated, _Failure):
         return EnginePassOutcome(validated.result, None, prepared)

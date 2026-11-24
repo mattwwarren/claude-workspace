@@ -10,8 +10,9 @@ stays click's usage error.
 ``validate --kind manifest FILE`` (#3216) runs a ``cw-engine.json`` through
 ``cw.review_engine_manifest_io`` instead, resolving the files it names relative
 to FILE's directory. Exit 0 prints ``review engine manifest valid:
-manifest_version=1 backends=codex roles=<n>``; a rejection renders the same
-stderr lines under the same cap. ``--kind summary`` is the default.
+manifest_version=1 backends=codex roles=<n>``, plus `` completion_check=<path>``
+when the manifest sets that optional key; a rejection renders the same stderr
+lines under the same cap. ``--kind summary`` is the default.
 
 ``preflight``, ``materialize``, ``record`` and ``allow`` (#3039) are the
 commands the Claude-native review stage sequences. Each prints one JSON object
@@ -110,11 +111,14 @@ def _validate_manifest(file_path: Path) -> str:
     """The success line for the manifest at *file_path*; raises on a rejection."""
     loaded = load_engine_manifest(file_path)
     manifest = loaded.manifest
-    return (
+    line = (
         "review engine manifest valid: "
         f"manifest_version={manifest.manifest_version} "
         f"backends={','.join(manifest.backends)} roles={len(manifest.roles)}"
     )
+    if manifest.completion_check is not None:
+        line += f" completion_check={manifest.completion_check.path}"
+    return line
 
 
 @engine.command(name="validate", help=_VALIDATE_HELP)

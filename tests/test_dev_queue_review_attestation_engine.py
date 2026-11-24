@@ -12,9 +12,11 @@ import logging
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
+from cw.codex_clean_confirm import apply_clean_confirm
 from cw.dev_queue.review_attestation import (
     attest_review_exit,
     record_review_attestation,
@@ -22,7 +24,12 @@ from cw.dev_queue.review_attestation import (
 from cw.models.review_attestation import FoundDuringReview
 from cw.models.review_engine_settlement import ReviewEngineSettlement
 from cw.models.review_engine_summary import MAX_ENGINE_SUMMARY_BYTES
-from cw.review_convergence import SettledEntry, finding_identity
+from cw.review_convergence import (
+    SettledEntry,
+    finalize_ready,
+    finding_identity,
+    load_ledger,
+)
 from cw.review_engine.constants import ENGINE_STATE_RELATIVE_DIR
 from tests._review_attestation_helpers import (
     LOGGER,
@@ -40,10 +47,16 @@ from tests._review_attestation_helpers import (
 )
 from tests._review_convergence_helpers import (
     confirmed_ledger,
+    fresh_ledger,
     make_review_client,
     write_ledger,
 )
 from tests._review_engine_helpers import SHA, make_finding, make_summary, write_summary
+from tests._shared.engine_round_helpers import (
+    engine_runner,
+    make_checker_repo,
+    run_fix_loop,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -674,3 +687,128 @@ class TestSameRoundDeferral:
         assert att is not None
         assert att.counts.should_fix == 0
         assert att.counts.debt == 2
+
+
+class TestCompletionCheckedHead:
+    """A head whose completion check failed, and the cases that look like it (#3885).
+
+    Case A drives the real codex fix-loop driver and the real post-loop clean
+    gate, so it needs git before the round. The module's no-git guard is
+    therefore replaced here and each test installs it once the round is over,
+    which keeps the attestation builder itself git-free.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_git(self) -> None:
+        """Override the module guard: a real round shells out to git first."""
+
+    def test_failed_check_head_is_not_attested(
+        self,
+        make_git_repo: Callable[..., Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Case A: a round blocked by a failing checker leaves no clean ledger, so the
+        # ledger-only attestation cannot be written for that head. The ledger holds
+        # this ticket's id and is unconverged, so the skip is attributable to the
+        # missing clean round and to nothing else.
+        repo = make_checker_repo(
+            make_git_repo, tmp_path, "#!/usr/bin/env python3\nimport sys\nsys.exit(3)\n"
+        )
+        client = engine_client(tmp_path)
+        task = review_row(repo.worktree)
+        ledger_path = write_ledger(
+            repo.worktree, fresh_ledger(ticket_id=task.ticket_id)
+        )
+        seeded = ledger_path.read_bytes()
+        result, verdict = run_fix_loop(repo, engine_runner())
+        assert verdict is None
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert result.blocker.details == (
+            "engine_completion_check_failed: checker_exit_nonzero"
+        )
+        gated = apply_clean_confirm(
+            task=task,
+            worktree=repo.worktree,
+            client=client,
+            sid="s-engine",
+            runner=MagicMock(),
+            deadline=None,
+            result=result,
+            verdict=verdict,
+        )
+        assert gated.result is result
+        assert gated.verdict is None
+        assert ledger_path.read_bytes() == seeded
+        ledger = load_ledger(ledger_path)
+        assert ledger is not None
+        assert ledger.last_clean_sha != repo.head
+        assert not finalize_ready(ledger)
+        install_no_git_guard(monkeypatch)
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            att = attest_review_exit(
+                task, last_result=clean_sentinel(repo.head), client=client
+            )
+        assert att is None
+        assert task.review_attestation is None
+        assert any("reason=ledger_disagrees" in line for line in _records(caplog))
+
+    def test_passing_check_head_with_a_clean_ledger_is_attested(
+        self,
+        make_git_repo: Callable[..., Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Positive control for Case A: the same flow with a passing checker and a
+        # ledger clean at the same head writes the attestation. Without this, the
+        # None above could be a harness that never attests anything.
+        repo = make_checker_repo(make_git_repo, tmp_path)
+        client = engine_client(tmp_path)
+        task = review_row(repo.worktree)
+        result, verdict = run_fix_loop(repo, engine_runner())
+        assert result.blocker is None
+        assert verdict is not None
+        converged_worktree_ledger(repo.worktree, repo.head, task.ticket_id)
+        install_no_git_guard(monkeypatch)
+        att = attest_review_exit(
+            task, last_result=clean_sentinel(repo.head), client=client
+        )
+        assert att is not None
+        assert task.review_attestation == att
+
+    def test_earlier_passing_summary_at_same_head_stays_legitimate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Case B (regression pin): a passing round at H, then a later round at H
+        # that fails the check. A blocked round writes no summary.json, so the
+        # later round leaves only its evidence directory, and the earlier
+        # COMPLETE/PASS summary is still the one bound to H. It was valid under the
+        # manifest in force when it ran, so the clean attestation built from it is
+        # existing behaviour and is not changed by #3885.
+        install_no_git_guard(monkeypatch)
+        worktree = _worktree(tmp_path)
+        _round(worktree, "round-earlier", make_summary(risk="MEDIUM"), 10)
+        failed = worktree / ENGINE_DIR / "round-later" / "completion"
+        failed.mkdir(parents=True)
+        (failed / "result.json").write_text(
+            json.dumps({"status": "failed"}), encoding="utf-8"
+        )
+        task, att = _exit(worktree, engine_client(tmp_path))
+        assert not (worktree / ENGINE_DIR / "round-later" / "summary.json").exists()
+        assert att is not None
+        assert task.review_attestation == att
+        assert att.engine == "code-review"
+        assert att.risk == "MEDIUM"
+        assert (att.counts.must_fix, att.counts.should_fix) == (0, 0)
+
+    def test_ledger_clean_at_head_without_a_summary_is_attested(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Case C (existing behaviour, independent of #3885): a ledger clean at H
+        # with no engine summary at H attests from the ledger alone.
+        install_no_git_guard(monkeypatch)
+        worktree = _worktree(tmp_path)
+        _task, att = _exit(worktree, engine_client(tmp_path))
+        assert att is not None

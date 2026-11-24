@@ -231,6 +231,7 @@ def _copy_engine_files(repo: Path, skill_dir: str, source: Path) -> list[str]:
         target = repo / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(file.read_bytes())
+        target.chmod(file.stat().st_mode)
         written.append(rel)
     return written
 

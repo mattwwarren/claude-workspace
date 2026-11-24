@@ -37,4 +37,5 @@ pytest_plugins = [
     "tests._shared.daemon_fakes",
     "tests._shared.dispatch_fixtures",
     "tests._shared.step25_gates",
+    "tests._shared.engine_round_helpers",
 ]

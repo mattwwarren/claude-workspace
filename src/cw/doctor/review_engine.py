@@ -24,19 +24,23 @@ drift. The ``review-engine/`` results are unchanged by it.
 
 from __future__ import annotations
 
+import subprocess
 from typing import TYPE_CHECKING
 
+from cw.codex_review._engine_completion import checker_problem
 from cw.dev_queue.dispositions import REVIEW_CAPABILITY_RELANE_GENERIC
 from cw.dispatch.claim.review_capability import review_capability_gap
 from cw.doctor._shared import CheckResult
+from cw.exceptions import CwError
 from cw.executor import resolve_executor_config, resolve_pipeline_stages
 from cw.models import CODEX_BACKEND, Stage, TicketTask
-from cw.review_convergence import engine_supported
+from cw.review_convergence import engine_supported, resolve_default_branch_ref
 from cw.review_engine.manifest_source import (
     ManifestRead,
     ManifestStatus,
     read_default_branch_manifest,
 )
+from cw.review_engine.skill import resolve_skill
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
@@ -63,6 +67,16 @@ _CAPABILITY_UNMET = (
     " clients.yaml, then `cw dev-queue requeue <T> -c <C>`. Compatible lanes:"
     " {compatible}. " + REVIEW_CAPABILITY_RELANE_GENERIC
 )
+_CODEX_CHECKER_UNUSABLE = (
+    "review.engine is set and lane '{lane}' runs REVIEW on codex, and the "
+    "default-branch skill '{skill}' declares completion_check, but its checker "
+    "is unusable (reason={reason}); a codex round would park as "
+    "engine_completion_check_failed. Commit an executable checker inside the "
+    "skill directory."
+)
+_CHECKER_UNRESOLVED_REASON = "checker_unverifiable"
+#: Errors reading the default branch or the skill; the same set the manifest read maps.
+_PROBE_ERRORS = (CwError, subprocess.SubprocessError, OSError, UnicodeError)
 _CODEX_UNVERIFIED = (
     "review.engine is set and lane '{lane}' runs REVIEW on codex, but the "
     "engine manifest of skill '{skill}' cannot be verified (cause={cause}); "
@@ -92,19 +106,59 @@ def _codex_detail(read: ManifestRead, lane: str, skill: str) -> str | None:
 
 
 class _ClientManifest:
-    """The client's default-branch manifest, read on first use."""
+    """The client's default-branch manifest, read on first use (#3885).
+
+    ``get`` is the one read of ``client.default_branch``; it keeps the branch it
+    resolved so the completion probe never reads the client attribute again.
+    """
 
     def __init__(self, client: ClientConfig, skill: str) -> None:
         self._client = client
         self._skill = skill
         self._read: ManifestRead | None = None
+        self._branch: str | None = None
+        self._completion: str | None = None
+        self._completion_probed = False
 
     def get(self) -> ManifestRead:
         if self._read is None:
+            branch = self._client.default_branch
+            self._branch = branch
             self._read = read_default_branch_manifest(
-                _git_dir(self._client), self._client.default_branch, self._skill
+                _git_dir(self._client), branch, self._skill
             )
         return self._read
+
+    def completion_problem(self) -> str | None:
+        """Why the declared checker is unusable at the default branch (#3885)."""
+        if self._completion_probed:
+            return self._completion
+        self._completion_probed = True
+        read = self.get()
+        if read.status is not ManifestStatus.LOADED or read.loaded is None:
+            return None
+        check = read.loaded.manifest.completion_check
+        if check is None or self._branch is None:
+            return None
+        self._completion = self._probe_checker(check.path, self._branch)
+        return self._completion
+
+    def _probe_checker(self, checker_path: str, branch: str) -> str | None:
+        """The checker's problem at *branch*, or the unresolved reason if git fails.
+
+        Mirrors the errors ``read_default_branch_manifest`` maps to an
+        unresolvable read, so one repo problem warns instead of aborting the
+        whole doctor run.
+        """
+        try:
+            repo = _git_dir(self._client)
+            ref = resolve_default_branch_ref(repo, branch)
+            if ref is None:
+                return _CHECKER_UNRESOLVED_REASON
+            resolved = resolve_skill(repo, ref.commit, self._skill)
+            return checker_problem(repo, ref.commit, resolved, checker_path)
+        except _PROBE_ERRORS:
+            return _CHECKER_UNRESOLVED_REASON
 
 
 def _lane_detail(
@@ -113,7 +167,13 @@ def _lane_detail(
     if not engine_supported(backend):
         return _UNSUPPORTED.format(lane=lane, backend=backend)
     if backend == CODEX_BACKEND:
-        return _codex_detail(manifest.get(), lane, skill)
+        detail = _codex_detail(manifest.get(), lane, skill)
+        if detail is not None:
+            return detail
+        problem = manifest.completion_problem()
+        if problem is None:
+            return None
+        return _CODEX_CHECKER_UNUSABLE.format(lane=lane, skill=skill, reason=problem)
     return None  # claude-native runs the engine skill itself
 
 

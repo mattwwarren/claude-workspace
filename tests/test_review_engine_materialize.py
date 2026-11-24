@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import cw.review_engine.materialize as materialize_module
+from cw.review_convergence import resolve_default_branch_ref
 from cw.review_engine.constants import ENGINE_ROLE
 from cw.review_engine.context import read_engine_context
 from cw.review_engine.materialize import (
@@ -111,6 +112,23 @@ def test_materializes_default_branch_copy_not_branch_copy(repo: EngineRepo) -> N
 
     assert materialized.skill_md.read_text() == ENGINE_SKILL_TEXT
     assert (repo.worktree / SKILL_FILE).read_text() == "branch edit\n"
+
+
+def test_materialize_returns_the_default_branch_commit_and_resolved_skill(
+    repo: EngineRepo,
+) -> None:
+    """#3885: the checker is extracted from the commit and skill the copy used."""
+    commit_tracked_file(repo.worktree, SKILL_FILE, "branch edit\n")
+    head = git_in(repo.worktree, "rev-parse", "HEAD")
+
+    materialized = _library(repo, head=head)
+
+    ref = resolve_default_branch_ref(repo.worktree, "main")
+    assert ref is not None
+    assert materialized.commit == ref.commit
+    assert materialized.commit != head
+    assert materialized.skill.real_path == ".claude/skills/repo-review"
+    assert materialized.skill.is_file is False
 
 
 def test_command_layout_normalised_to_skill_md(

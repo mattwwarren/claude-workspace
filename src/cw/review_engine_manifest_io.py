@@ -47,6 +47,7 @@ MAX_ISSUE_TEXT_CHARS = 200
 _VERSION_KEY: Final = "manifest_version"
 _BACKENDS_FIELD: Final = "backends"
 _AGGREGATION_FIELD: Final = "aggregation_prompt"
+_COMPLETION_FIELD: Final = "completion_check.path"
 _JSON_TYPE_NAMES: Final[dict[type, str]] = {
     list: "array",
     str: "string",
@@ -339,6 +340,32 @@ def _load_ref(base: Path, ref: str, field_path: str) -> str | EngineManifestIssu
     return _issue(reason, message, field_path)
 
 
+def _completion_issue(
+    manifest: EngineManifest, base: Path
+) -> EngineManifestIssue | None:
+    """Refuse a ``completion_check.path`` that is not a regular file inside *base*.
+
+    The checker is never read as text (it may be any bytes), so this only
+    resolves the path; its execute bit is checked at run time (#3885). A path
+    whose final component is a symlink is refused here because the runner
+    refuses it too, so a manifest that loads is a manifest whose checker can be
+    found.
+    """
+    check = manifest.completion_check
+    if check is None:
+        return None
+    located = _resolve_ref(base, check.path)
+    if isinstance(located, str):
+        return _issue(EngineManifestRejection.PATH_INVALID, located, _COMPLETION_FIELD)
+    if (base / check.path).is_symlink():
+        return _issue(
+            EngineManifestRejection.PATH_INVALID,
+            "checker path is a symlink",
+            _COMPLETION_FIELD,
+        )
+    return None
+
+
 def _load_files(manifest: EngineManifest, base: Path) -> LoadedEngineManifest:
     """Read every referenced file; report every failure at once."""
     refs = [
@@ -354,6 +381,9 @@ def _load_files(manifest: EngineManifest, base: Path) -> LoadedEngineManifest:
             issues.append(loaded)
         else:
             texts[key] = loaded
+    completion_issue = _completion_issue(manifest, base)
+    if completion_issue is not None:
+        issues.append(completion_issue)
     if issues:
         raise _reject_all(issues)
     prompt = texts.pop("")

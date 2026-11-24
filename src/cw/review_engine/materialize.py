@@ -76,6 +76,10 @@ class MaterializedSkill:
     skill_md: Path
     summary_path: Path
     args_line: str
+    #: The default-branch commit the skill was read from (#3885).
+    commit: str
+    #: The resolved skill in that commit; the completion checker is extracted from it.
+    skill: ResolvedSkill
 
 
 def check_round_id(round_id: str) -> None:
@@ -196,4 +200,6 @@ def materialize_skill(
         skill_md=skill_md,
         summary_path=summary,
         args_line=args_line,
+        commit=ref.commit,
+        skill=skill,
     )
