@@ -1385,7 +1385,9 @@ duplicate prints as `duplicate fingerprint 'fp-000001'`, and counts as
 `--kind manifest` FILE is a `cw-engine.json` (section 12.14); its file
 references resolve relative to the manifest's directory, success prints
 `review engine manifest valid: manifest_version=1 backends=codex roles=<n>`,
-and rejections use the same line format and cap as below.
+followed by ` completion_check=<path>` only when the manifest sets the optional
+`completion_check` key, and rejections use the same line format and cap as
+below.
 
 Validates one summary file through the loader. It reads no stdin (`-` is an
 ordinary path), has no `--json`, emits no event and writes nothing.
@@ -1421,6 +1423,11 @@ The engine manifest (section 12.14) is versioned separately by its own
 | `manifest_version` | Changes |
 |---|---|
 | 1 | Initial manifest. Tracked in #3216. |
+
+The optional `completion_check` key (#3885, section 12.14) needs no
+`manifest_version` bump: the version stays `1`, and the engine summary schema is
+not bumped either. A cw that predates #3885 rejects a manifest carrying the key
+(fail-closed, accepted).
 
 ### 12.10 Engine-Skill Contract (#3039)
 
