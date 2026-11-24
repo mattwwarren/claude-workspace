@@ -1247,6 +1247,24 @@ def test_gate_timeout_sentinel_element() -> None:
     assert isinstance(sibling.cells[CODEX_BACKEND], ImplementedDisposition)
 
 
+def test_create_path_gate_timeout_classifier_element() -> None:
+    """#3380: the create-path gate-timeout classifier is an unranged prose rule
+    with the opencode and local cells of ``finalize.unavailability-classifier``;
+    codex has no foreground tool ceiling and no nested /prep-pr block, so its
+    cell is not-applicable (ADR-0014). It covers no reason of its own: the
+    sentinel element already covers ``gate_timeout``."""
+    elements = _manifest().elements
+    element = elements["finalize.create-path-gate-timeout-classifier"]
+    sibling = elements["finalize.unavailability-classifier"]
+    assert list(element.covers) == []
+    assert isinstance(element.cells[CLAUDE_NATIVE_BACKEND], ImplementedDisposition)
+    codex = element.cells[CODEX_BACKEND]
+    assert isinstance(codex, NotApplicableDisposition)
+    assert "ADR-0014" in codex.reason
+    for backend in (OPENCODE_BACKEND, LOCAL_BACKEND):
+        assert element.cells[backend] == sibling.cells[backend], backend
+
+
 def test_awaiting_ci_evidence_sentinel_element() -> None:
     """#3618: the CI-evidence park sentinel carries the claude-native, opencode
     and local cells of its finalize sibling
@@ -1387,7 +1405,7 @@ def test_local_ticket_citations_follow_the_stage_split() -> None:
 #: #3219 (local stage routing) landed with RFC 0019 H2: no cell defers to it.
 _H2_STAGE_TICKET = 3219
 #: The local cells #3219 used to defer; each now fails closed on the pre-flight.
-_LOCAL_STAGE_PARK_CELLS = 171
+_LOCAL_STAGE_PARK_CELLS = 172
 
 
 def test_local_non_impl_cells_fail_closed_on_the_stage_preflight() -> None:
@@ -1842,7 +1860,7 @@ def test_codex_finalize_cell_counts() -> None:
             counts[cell.disposition] = counts.get(cell.disposition, 0) + 1
     assert counts == {
         "implemented": 33,
-        "not-applicable": 33,
+        "not-applicable": 34,
         "deferred": 24,
     }
 

@@ -5072,8 +5072,9 @@ class TestAutomergeNotArmedBlockerReason:
 
 
 class TestGateTimeoutBlockerReason:
-    """#1432 / #3372 -- `gate_timeout` as a top-level blocker.reason, and the
-    create path's nested marker that still collapses to `agent_block`.
+    """#1432 / #3372 / #3380 -- `gate_timeout` as a top-level blocker.reason
+    on both finalize paths, and the create path's dirty-tree fallback that
+    stays `agent_block`.
 
     Reuse path (#3372): headless finalize Step 4c.6 emits a top-level
     `blocker.reason: "gate_timeout"` when the executor's per-call foreground
@@ -5082,13 +5083,15 @@ class TestGateTimeoutBlockerReason:
     FINALIZE_REGRESS_BLOCKER_REASONS and OPERATOR_UNAVAILABLE_BLOCKER_REASONS
     (same precedent as automerge_not_armed, not push_auth_failed).
 
-    Create path: /prep-pr Step 7's PREP_PR_BLOCK for a lost/stalled gate
-    still collapses through the "Any other agent BLOCK" gate-collapse row
-    (docs/headless-contract.md Sec 2), so the sentinel's top-level
-    blocker.reason stays "agent_block" with the block's own
+    Create path (#3380): finalize's create-path gate-timeout classifier
+    promotes /prep-pr Step 7's headless PREP_PR_BLOCK `reason: gate_timeout`
+    marker to the same top-level reason on a clean worktree, at
+    `stage4b_pr_create` with `pr: null` and no `pr_info` (no PR exists yet).
+    On a dirty worktree the marker still falls through the "Any other agent
+    BLOCK" gate-collapse row (docs/headless-contract.md Sec 2), so the
+    top-level blocker.reason is "agent_block" with the block's own
     `reason: gate_timeout` / `gate: <name>` fields preserved verbatim inside
-    blocker.details. No PR exists on that path, so there is nothing to leave
-    armed; it is a separate follow-up.
+    blocker.details.
     """
 
     def test_constant_value_and_registration(self) -> None:
@@ -5119,15 +5122,36 @@ class TestGateTimeoutBlockerReason:
         assert result.blocker is not None
         assert result.blocker.reason == GATE_TIMEOUT_BLOCKER_REASON
 
-    def test_real_collapse_path_stays_agent_block_and_regress_eligible(
+    def test_create_path_gate_timeout_with_no_pr_info_round_trips(self) -> None:
+        """The create-path promotion (#3380) parses at `stage4b_pr_create`
+        with `pr: null` and no `pr_info` key at all.
+        """
+        p = _blocked_payload()
+        p["stage_reached"] = "stage4b_pr_create"
+        p["blocker"]["stage"] = "stage4b_pr_create"
+        p["blocker"]["reason"] = GATE_TIMEOUT_BLOCKER_REASON
+        p["blocker"]["details"] = (
+            "Step 4c create path: /prep-pr Step 7 quality gate timeout: gate "
+            "mypy was cut off by the executor's foreground timeout"
+        )
+        assert "pr_info" not in p
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.pr is None
+        assert result.stage_reached == "stage4b_pr_create"
+        assert result.blocker is not None
+        assert result.blocker.stage == "stage4b_pr_create"
+        assert result.blocker.reason == GATE_TIMEOUT_BLOCKER_REASON
+
+    def test_create_path_dirty_tree_fallback_stays_agent_block_and_regress_eligible(
         self,
     ) -> None:
-        """Create path only: a /prep-pr Step 7 gate_timeout PREP_PR_BLOCK
-        collapses through the generic "Any other agent BLOCK" row, so
-        blocker.reason is the literal "agent_block" -- a member of
-        FINALIZE_REGRESS_BLOCKER_REASONS and therefore regress-eligible. The
-        reuse-path headless timeout emits a top-level `gate_timeout` instead
-        (#3372).
+        """Create path, dirty worktree: the create-path gate-timeout
+        classifier (#3380) does not promote, so the /prep-pr Step 7
+        gate_timeout PREP_PR_BLOCK collapses through the generic "Any other
+        agent BLOCK" row and blocker.reason is the literal "agent_block" -- a
+        member of FINALIZE_REGRESS_BLOCKER_REASONS and therefore
+        regress-eligible.
         """
         p = _blocked_payload()
         p["blocker"]["reason"] = "agent_block"

@@ -409,16 +409,14 @@ class TestStep4c6GateTimeout:
             " prompt"
         ) in _appendix_section()
 
-    def test_create_path_still_collapses_to_agent_block(self) -> None:
-        prep_pr = _cmd("prep-pr.md")
-        assert "reason: gate_timeout" in prep_pr
-        assert (
-            "on the create path (the reuse-path timeout in `auto-dev-finalize.md`"
-            " Step 4c.6 is the one top-level `gate_timeout`, #3372)"
-        ) in prep_pr
+    def test_create_path_promotes_via_the_classifier(self) -> None:
         for doc in (_HEADLESS_CONTRACT, _AUTO_DEV):
             assert "| Any other agent BLOCK (Plan / prep-pr / etc.) |" in doc
-        assert "still collapses to `agent_block`" in _timeout_classification_tail()
+        tail = _timeout_classification_tail()
+        assert "still collapses to `agent_block`" not in tail
+        assert "Create-path gate-timeout classifier (#3380)" in tail
+        assert "promoted to the same top-level `gate_timeout` park" in tail
+        assert "falls back to `agent_block`" in tail
 
 
 def _timeout_classification_tail() -> str:
@@ -537,6 +535,16 @@ class TestGateTimeoutCollapseRows:
         )
         assert "not regress-eligible" in row
         assert "gate-pass record" in row
+        assert "stage4b_pr_create" in row
+        assert "no `pr_info`" in row
+        create_row = next(
+            line
+            for line in _HEADLESS_CONTRACT.splitlines()
+            if line.startswith("| S4c create-path quality gate timeout")
+        )
+        assert 'blocker.reason: "gate_timeout"' in create_row
+        assert "#3380" in create_row
+        assert "S4c.6" not in create_row
         heading = "## The `gate_timeout` Disposition (#3372)"
         section = _section_between(_HEADLESS_CONTRACT, heading)
         for token in (

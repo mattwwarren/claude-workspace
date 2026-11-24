@@ -244,6 +244,43 @@ def test_is_variant_a_gate_task_accepts_gate_timeout_pair() -> None:
     assert _is_variant_a_gate_task(_gate_timeout_parked_task("SG-GT3", 64)) is True
 
 
+def _create_path_gate_timeout_task(ticket_id: str) -> TicketTask:
+    """A #3380 create-path gate-timeout park: no PR exists, so no pr_url."""
+    return _gate_timeout_parked_task(ticket_id, 0).model_copy(update={"pr_url": None})
+
+
+def test_is_variant_a_gate_task_keys_on_the_pair_even_without_pr_url() -> None:
+    """#3380: the predicate keys on (disposition, reason) only, so a no-PR
+    create-path park is a Variant A candidate; it stays operator-gated because
+    no PR_MERGED event is ever produced for a row without a pr_url."""
+    task = _create_path_gate_timeout_task("SG-GT4")
+    assert task.pr_url is None
+    assert _is_variant_a_gate_task(task) is True
+
+
+def test_release_stale_gated_tasks_create_path_gate_timeout_never_released(
+    tmp_config_dir: Path,
+) -> None:
+    """#3380: a create-path gate_timeout park (no pr_url) is not released or
+    stamped by an unrelated PR_MERGED event, and the release does not crash."""
+    task = _create_path_gate_timeout_task("SG-GT5")
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    save_state(CwState(sessions=[]))
+    _emit_pr_merged(
+        client="client-a", ticket_id="SG-OTHER", repo="foo/bar", pr_number=65
+    )
+
+    released = release_stale_gated_tasks()
+
+    assert released == []
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-GT5")
+    assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
+    assert reloaded.disposition == GATE_TIMEOUT_DISPOSITION
+    assert reloaded.stale_gate_detected_at is None
+    assert reloaded.pr_url is None
+    assert _closed_pr_numbers_by_client(load_dev_queue()) == {}
+
+
 def test_release_stale_gated_tasks_auto_policy_completes_variant_a(
     tmp_config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 import pytest
 from click.testing import CliRunner
 
+from cw.auto_dev_result import GATE_TIMEOUT_BLOCKER_REASON
 from cw.cli import main
 from cw.codex_review import _const as codex_const
 from cw.config import load_state, state_file
@@ -933,6 +934,26 @@ def test_tracker_mcp_gate_is_an_operator_gated_park(
     task = _held_row(TRACKER_MCP_GATE_DISPOSITION, _PRE_DISPATCH_TRACKER_MCP_REASON)
     assert _is_operator_gated_park(task)
     assert len(_detect([task])) == 1
+    stub_daemon_roster(tmp_path, monkeypatch)
+    seed_queue([task])
+    before = _row_state()
+
+    report = run_doctor(reap=True)
+
+    assert _row_state() == before
+    assert len(_advisory(report.wedge_findings)) == 1
+
+
+def test_gate_timeout_park_without_pr_survives_reap(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3380: a create-path `gate_timeout` park has no PR and no `pr_url`.
+
+    It is still an operator-gated park: reported once, never reverted by --reap.
+    """
+    task = _held_row(GATE_TIMEOUT_DISPOSITION, GATE_TIMEOUT_BLOCKER_REASON, pr_url=None)
+    assert task.pr_url is None
+    assert _is_operator_gated_park(task)
     stub_daemon_roster(tmp_path, monkeypatch)
     seed_queue([task])
     before = _row_state()
