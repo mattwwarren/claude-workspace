@@ -536,6 +536,11 @@ def test_round_failures_section_cites_the_ruling_and_the_adr() -> None:
     assert "released by an operator requeue and is not auto-retried" in section, (
         "a host-load checker timeout must be an operator requeue, not a retry"
     )
+    assert "summary=stale-round" in section, "round-id mismatch token undocumented"
+    assert (
+        "is reported as `engine_head_mismatch`, and one whose status is `incomplete`"
+        " or that omits a manifest role as `engine_coverage_incomplete`"
+    ) in section, "completion-check head/coverage members undocumented"
     assert "ADR-0014" in section
     assert "Clarification (#3885)" in section
 
@@ -580,3 +585,6 @@ def test_runbook_documents_the_completion_check_failure() -> None:
     assert "`agent_block`" in paragraph
     assert "not retry-eligible" in paragraph
     assert "released by an operator requeue, not auto-retried" in paragraph
+    assert "retry-eligible `engine_head_mismatch` and `engine_coverage_incomplete`" in (
+        paragraph
+    )

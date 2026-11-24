@@ -4241,8 +4241,11 @@ capability and requeue. The override never clears held memory itself.
 
 **Codex completion check: `engine_completion_check_failed` (#3885).** A codex
 engine that declares `completion_check` in its manifest fails the round as
-`agent_block` with `engine_completion_check_failed: <reason>`. It is not
-retry-eligible. A checker timeout is released by an operator requeue, not
+`agent_block` with `engine_completion_check_failed: <reason>`. Only these
+`engine_completion_check_failed` reasons are not retry-eligible: a stale head or
+round id and an incomplete or partial result surface as the existing
+retry-eligible `engine_head_mismatch` and `engine_coverage_incomplete` members.
+A checker timeout is released by an operator requeue, not
 auto-retried.
 
 **Park: `review_engine_modified` (RFC 0017, #3039).** A client with

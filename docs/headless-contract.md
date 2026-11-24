@@ -1505,8 +1505,8 @@ the strings echoes finding text.
 | `EngineRoundFailure` | Raised by | Friction string |
 |---|---|---|
 | `engine_summary_invalid` | `record` | `engine_summary_invalid: <reason> at <field_path>` |
-| `engine_coverage_incomplete` | `record` | `engine_coverage_incomplete: coverage=<PARTIAL or FAILED>` |
-| `engine_head_mismatch` | `record` | `engine_head_mismatch: summary=<sha> expected=<sha> head=<sha>` |
+| `engine_coverage_incomplete` | `record`, and on the codex lane the completion check (#3885) | `engine_coverage_incomplete: coverage=<PARTIAL or FAILED>` |
+| `engine_head_mismatch` | `record`, and on the codex lane the completion check (#3885) | `engine_head_mismatch: summary=<sha> expected=<sha> head=<sha>`, with `summary=stale-round` (the token, not a sha) for a round-id mismatch from the completion check |
 | `engine_no_summary` | `record` | `engine_no_summary: <path>` |
 | `engine_worktree_mutated` | `record` | `engine_worktree_mutated: git status or git diff HEAD --stat non-empty after the engine run` |
 | `engine_unresolvable` | `materialize`, and `converge config` through `engine_error` | `engine_unresolvable: <skill> (<cause>)`, cause one of `skill_not_found`, `skill_unreadable`, `materialize_failed`, `default_branch_unresolved` |
@@ -1527,6 +1527,11 @@ failure outside the transient policy, so a plain requeue would hit the same
 path), for `engine_worktree_mutated` (also when a role dirtied the tree before a
 declared completion check ran), for `engine_completion_check_failed`, and for
 non-transient role or aggregation failures.
+
+A completion check whose result carries a stale head or round id is reported as
+`engine_head_mismatch`, and one whose status is `incomplete` or that omits a
+manifest role as `engine_coverage_incomplete`; both are retry-eligible as listed
+above, and only the `engine_completion_check_failed` reasons are not.
 
 A checker timeout is `engine_completion_check_failed` with reason
 `checker_timeout` and is not retry-eligible, so a timeout caused by host load is
