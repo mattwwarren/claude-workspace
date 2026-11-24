@@ -122,17 +122,66 @@ def parse_impl_turn(content: str | None) -> dict[str, Any] | ImplTurnFailure:
     return payload
 
 
+_REPAIR: Final = "cw repaired the IMPL result: "
+_NOTE_CAP: Final = 300
+
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _stamped_scope(
     payload: dict[str, Any], facts: GitFacts, scope_tier: ScopeTier | None
-) -> dict[str, Any]:
-    scope = payload.get("scope")
-    kept = scope if isinstance(scope, dict) else {}
-    return {
-        **kept,
+) -> tuple[dict[str, Any], list[str]]:
+    """The stamped ``scope`` and one friction line per model field cw repaired.
+
+    The turn's sentinel is free-form JSON inside the ``-o`` string, so nothing
+    constrains its inner fields. A scope object with a non-integer
+    ``lines_estimate``, or with no ``forbidden_touched``, used to fail the
+    strict validation, and the turn's finished edits were discarded with it.
+    cw measures the diff itself, so the estimate is set to the measured lines.
+    A missing or null ``forbidden_touched`` asserts nothing and becomes false.
+    Any other value there is left to the schema, which reads "true" or 1 as
+    touched and refuses what it cannot read: a claim is never overwritten. A
+    scope that is not an object is left for validation too.
+    """
+    measured = {
         "files": facts["files"],
         "lines_actual": facts["lines_actual"],
         "tier": scope_tier,
     }
+    scope = payload.get("scope")
+    if not isinstance(scope, dict):
+        return measured, []
+    kept, repairs = dict(scope), []
+    if not _is_int(kept.get("lines_estimate")):
+        repairs.append(
+            f"{_REPAIR}scope.lines_estimate was {kept.get('lines_estimate')!r}"
+            f", set to the measured {facts['lines_actual']}"
+        )
+        kept["lines_estimate"] = facts["lines_actual"]
+    if kept.get("forbidden_touched") is None:
+        repairs.append(f"{_REPAIR}scope.forbidden_touched was absent, set to false")
+        kept["forbidden_touched"] = False
+    return {**kept, **measured}, repairs
+
+
+def _object_ambiguities(payload: dict[str, Any]) -> tuple[object, list[str]]:
+    """``ambiguities`` without its prose entries, and those entries as friction.
+
+    IMPL statuses never park on ambiguities, so a string in that list is a note
+    the model filed in the wrong field. It is kept, as a friction line, and no
+    longer fails the result. A value that is not a list is left for validation.
+    """
+    ambiguities = payload.get("ambiguities")
+    if not isinstance(ambiguities, list):
+        return ambiguities, []
+    notes = [item for item in ambiguities if isinstance(item, str)]
+    kept = [item for item in ambiguities if not isinstance(item, str)]
+    return kept, [
+        f"{_REPAIR}ambiguities held prose, kept here: {note[:_NOTE_CAP]}"
+        for note in notes
+    ]
 
 
 def stamp_impl_result(
@@ -153,11 +202,22 @@ def stamp_impl_result(
     ``review``, ``scope.files``, ``scope.lines_actual``, ``scope.tier``,
     ``plan_source`` and ``resolution_consumed``. Model-supplied and kept:
     ``status``, ``scope.forbidden_touched`` and ``scope.lines_estimate``,
-    ``health``, ``next_actions`` and ``friction_highlights`` (to which
+    ``health``, ``ambiguities``, ``next_actions`` and ``friction_highlights``
+    (to which
     *extra_friction* is appended). A model-reported ``blocked`` result gets the
-    IMPL label and its blocker moved to ``stage2_impl``. Raises
+    IMPL label and its blocker moved to ``stage2_impl``.
+
+    Three model slips are repaired instead of failing the result, each with a
+    ``friction_highlights`` line: a non-integer ``scope.lines_estimate`` is set
+    to the measured lines, a missing or null ``scope.forbidden_touched`` is set
+    to false, and string entries in ``ambiguities`` are moved into
+    ``friction_highlights`` (capped). A scope that is not an object, a
+    ``forbidden_touched`` the schema cannot read as a boolean and a non-list
+    ``ambiguities`` still fail. Raises
     ``pydantic.ValidationError`` on a schema or invariant violation.
     """
+    scope, scope_repairs = _stamped_scope(payload, facts, scope_tier)
+    ambiguities, note_repairs = _object_ambiguities(payload)
     stamped: dict[str, Any] = {
         **payload,
         "schema_version": _SCHEMA_VERSION,
@@ -171,13 +231,20 @@ def stamp_impl_result(
         "pr_created": None,
         "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
         "plan_source": plan_source,
-        "scope": _stamped_scope(payload, facts, scope_tier),
+        "scope": scope,
         "resolution_consumed": False,
         "resolution_evidence": None,
     }
-    friction = stamped.get("friction_highlights")
+    if "ambiguities" in payload:
+        stamped["ambiguities"] = ambiguities
+    friction = stamped.get("friction_highlights", [])
     if isinstance(friction, list):
-        stamped["friction_highlights"] = [*friction, *extra_friction]
+        stamped["friction_highlights"] = [
+            *friction,
+            *extra_friction,
+            *scope_repairs,
+            *note_repairs,
+        ]
     if stamped.get("status") == IMPL_BLOCKED:
         stamped["next_actions"] = list(_CODEX_IMPL_BLOCKED_NEXT_ACTIONS)
         blocker = stamped.get("blocker")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -283,5 +284,5 @@ class TestSameFilesystem:
             return real_stat(path, **kwargs)
 
         monkeypatch.setattr(os, "stat", failing_stat)
-        with pytest.raises(OSError, match="tmp"):
+        with pytest.raises(OSError, match=re.escape(str(tmp_path))):
             same_filesystem(tmp_path, tmp_path)
