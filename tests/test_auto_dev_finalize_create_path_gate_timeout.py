@@ -164,9 +164,9 @@ class TestDirtyTreeProbe:
     """The doc's probe agrees with `prep_pr_state._worktree_state`."""
 
     def _probe(self, repo: Path) -> str:
-        argv = _dirty_probe_argv()
-        assert argv[:3] == ["git", "status", "--porcelain"]
-        return _git_sandbox.run(*argv[1:], cwd=repo).stdout
+        # The regex in _dirty_probe_argv already anchors the leading
+        # `git status --porcelain`; drop the `git` word for the sandbox runner.
+        return _git_sandbox.run(*_dirty_probe_argv()[1:], cwd=repo).stdout
 
     def test_lone_state_file_is_clean(self, make_git_repo: Callable[..., Path]) -> None:
         repo = make_git_repo("probe-state")
