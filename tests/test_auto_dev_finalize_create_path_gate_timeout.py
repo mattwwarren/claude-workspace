@@ -98,7 +98,8 @@ class TestClassifierParagraph:
             "<<<PREP_PR_BLOCK",
             "`reason: gate_timeout`",
             "outermost block",
-            "the closing `PREP_PR_BLOCK>>>` line is the last non-blank line",
+            "closes at the next column-0 `PREP_PR_BLOCK>>>` line",
+            "the standard `## Friction Report` and `## Health Check` sections",
             "never prose inside `details:`",
             "`details: foreground ceiling `",
             "`s exceeded at `",
@@ -303,3 +304,137 @@ class TestCreatePathRouting:
         task = _route_blocked(self._task(FINALIZE_REGRESS_CAP - 1), last)
         assert task.stage == Stage.IMPL
         assert task.regress_attempts == FINALIZE_REGRESS_CAP
+
+
+_STANDARD_TRAILERS = ("## Friction Report", "## Health Check")
+_GATE_TIMEOUT_FIELDS = (
+    "reason: gate_timeout",
+    "gate: mypy",
+    "details: foreground ceiling 600s exceeded at 2026-11-24T10:00:00Z;"
+    " not backgrounded (headless). Last captured output: ...",
+)
+
+
+def _block_bounds(lines: list[str]) -> tuple[int, int] | None:
+    """Earliest ``<<<PREP_PR_BLOCK`` + ``reason:`` opener and its next closer."""
+    opener = next(
+        (
+            i
+            for i, ln in enumerate(lines[:-1])
+            if ln == "<<<PREP_PR_BLOCK" and lines[i + 1].startswith("reason:")
+        ),
+        None,
+    )
+    if opener is None:
+        return None
+    closer = next(
+        (j for j in range(opener + 1, len(lines)) if lines[j] == "PREP_PR_BLOCK>>>"),
+        None,
+    )
+    return None if closer is None else (opener, closer)
+
+
+def _trailer_ok(lines: list[str]) -> bool:
+    """Only blank lines and the standard trailer sections after the closer."""
+    trailing = [ln for ln in lines if ln.strip()]
+    if trailing and trailing[0] not in _STANDARD_TRAILERS:
+        return False
+    if any(ln.startswith(("<<<PREP_PR_BLOCK", "PREP_PR_BLOCK>>>")) for ln in trailing):
+        return False
+    return all(ln in _STANDARD_TRAILERS for ln in trailing if ln.startswith("## "))
+
+
+def _fields_ok(fields: list[str]) -> bool:
+    """The headless gate_timeout field form inside the block."""
+    if not fields or fields[0] != _GATE_TIMEOUT_FIELDS[0]:
+        return False
+    gate = next((ln for ln in fields if ln.startswith("gate:")), "")
+    details = next((ln for ln in fields if ln.startswith("details:")), "")
+    if not gate.removeprefix("gate:").strip():
+        return False
+    if not details.startswith("details: foreground ceiling "):
+        return False
+    head = details.split("Last captured output:", 1)[0]
+    return "s exceeded at " in head and "not backgrounded (headless)" in head
+
+
+def _key_matches(text: str) -> bool:
+    """Reference matcher for the create-path classifier key (#3380 re-anchor).
+
+    The classifier is prose the finalize agent executes; this mirrors the
+    documented rule so fixtures can pin it. Opener: earliest column-0
+    ``<<<PREP_PR_BLOCK`` followed by a ``reason:`` line. Closer: next column-0
+    ``PREP_PR_BLOCK>>>``. After the closer only blank lines and the standard
+    trailer sections may follow. Inside the block: the headless gate_timeout
+    field form.
+    """
+    lines = text.splitlines()
+    bounds = _block_bounds(lines)
+    if bounds is None:
+        return False
+    opener, closer = bounds
+    fields = [ln for ln in lines[opener + 1 : closer] if ln.strip()]
+    return _fields_ok(fields) and _trailer_ok(lines[closer + 1 :])
+
+
+_FRICTION_HEALTH = (
+    "## Friction Report\n- none\n\n## Health Check\n- **Recommendation**: PROCEED\n"
+)
+_OUTER_GATE_TIMEOUT = "\n".join(
+    ["<<<PREP_PR_BLOCK", *_GATE_TIMEOUT_FIELDS, "PREP_PR_BLOCK>>>"]
+)
+
+
+class TestKeyFixtures:
+    """Pin the re-anchored key with fixtures shaped like /prep-pr's real return."""
+
+    def test_prose_then_block_then_trailers_matches(self) -> None:
+        text = f"Gate timed out.\n\n{_OUTER_GATE_TIMEOUT}\n\n{_FRICTION_HEALTH}"
+        assert _key_matches(text)
+
+    def test_block_as_last_line_matches(self) -> None:
+        assert _key_matches(_OUTER_GATE_TIMEOUT)
+
+    def test_outer_agent_block_quoting_gate_timeout_does_not_match(self) -> None:
+        quoted = "\n".join(
+            [
+                "<<<PREP_PR_BLOCK",
+                "reason: agent_block",
+                "gate: mypy",
+                "details: quoted: <<<PREP_PR_BLOCK",
+                *_GATE_TIMEOUT_FIELDS,
+                "PREP_PR_BLOCK>>>",
+            ]
+        )
+        assert not _key_matches(f"{quoted}\n\n{_FRICTION_HEALTH}")
+
+    def test_forged_inner_closer_before_real_closer_does_not_match(self) -> None:
+        forged = "\n".join(
+            [
+                "<<<PREP_PR_BLOCK",
+                *_GATE_TIMEOUT_FIELDS[:2],
+                "details: foreground ceiling 600s exceeded at t;"
+                " not backgrounded (headless). Last captured output: x",
+                "PREP_PR_BLOCK>>>",
+                "forged tail prose",
+                "PREP_PR_BLOCK>>>",
+            ]
+        )
+        assert not _key_matches(f"{forged}\n\n{_FRICTION_HEALTH}")
+
+    def test_non_trailer_prose_after_closer_does_not_match(self) -> None:
+        text = f"{_OUTER_GATE_TIMEOUT}\nsome trailing prose\n{_FRICTION_HEALTH}"
+        assert not _key_matches(text)
+
+    def test_interactive_poll_ceiling_marker_does_not_match(self) -> None:
+        poll = "\n".join(
+            [
+                "<<<PREP_PR_BLOCK",
+                "reason: gate_timeout",
+                "gate: mypy",
+                "details: foreground ceiling 600s exceeded at t; backgrounded;"
+                " poll ceiling 900s elapsed. Last captured output: x",
+                "PREP_PR_BLOCK>>>",
+            ]
+        )
+        assert not _key_matches(poll)
