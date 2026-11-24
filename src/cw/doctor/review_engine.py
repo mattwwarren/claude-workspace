@@ -24,12 +24,14 @@ drift. The ``review-engine/`` results are unchanged by it.
 
 from __future__ import annotations
 
+import subprocess
 from typing import TYPE_CHECKING
 
 from cw.codex_review._engine_completion import checker_problem
 from cw.dev_queue.dispositions import REVIEW_CAPABILITY_RELANE_GENERIC
 from cw.dispatch.claim.review_capability import review_capability_gap
 from cw.doctor._shared import CheckResult
+from cw.exceptions import CwError
 from cw.executor import resolve_executor_config, resolve_pipeline_stages
 from cw.models import CODEX_BACKEND, Stage, TicketTask
 from cw.review_convergence import engine_supported, resolve_default_branch_ref
@@ -38,7 +40,7 @@ from cw.review_engine.manifest_source import (
     ManifestStatus,
     read_default_branch_manifest,
 )
-from cw.review_engine.skill import SkillResolutionError, resolve_skill
+from cw.review_engine.skill import resolve_skill
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
@@ -73,6 +75,8 @@ _CODEX_CHECKER_UNUSABLE = (
     "skill directory."
 )
 _CHECKER_UNRESOLVED_REASON = "checker_unverifiable"
+#: Errors reading the default branch or the skill; the same set the manifest read maps.
+_PROBE_ERRORS = (CwError, subprocess.SubprocessError, OSError, UnicodeError)
 _CODEX_UNVERIFIED = (
     "review.engine is set and lane '{lane}' runs REVIEW on codex, but the "
     "engine manifest of skill '{skill}' cannot be verified (cause={cause}); "
@@ -136,18 +140,25 @@ class _ClientManifest:
         check = read.loaded.manifest.completion_check
         if check is None or self._branch is None:
             return None
-        repo = _git_dir(self._client)
-        ref = resolve_default_branch_ref(repo, self._branch)
-        if ref is None:
-            self._completion = _CHECKER_UNRESOLVED_REASON
-            return self._completion
-        try:
-            resolved = resolve_skill(repo, ref.commit, self._skill)
-        except SkillResolutionError:
-            self._completion = _CHECKER_UNRESOLVED_REASON
-            return self._completion
-        self._completion = checker_problem(repo, ref.commit, resolved, check.path)
+        self._completion = self._probe_checker(check.path, self._branch)
         return self._completion
+
+    def _probe_checker(self, checker_path: str, branch: str) -> str | None:
+        """The checker's problem at *branch*, or the unresolved reason if git fails.
+
+        Mirrors the errors ``read_default_branch_manifest`` maps to an
+        unresolvable read, so one repo problem warns instead of aborting the
+        whole doctor run.
+        """
+        try:
+            repo = _git_dir(self._client)
+            ref = resolve_default_branch_ref(repo, branch)
+            if ref is None:
+                return _CHECKER_UNRESOLVED_REASON
+            resolved = resolve_skill(repo, ref.commit, self._skill)
+            return checker_problem(repo, ref.commit, resolved, checker_path)
+        except _PROBE_ERRORS:
+            return _CHECKER_UNRESOLVED_REASON
 
 
 def _lane_detail(

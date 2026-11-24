@@ -17,6 +17,7 @@ import pytest
 from cw.doctor._shared import CheckResult
 from cw.doctor.core import _client_config_checks
 from cw.doctor.review_engine import _check_review_engine
+from cw.exceptions import CwError
 from cw.models import (
     ClientConfig,
     LaneConfig,
@@ -564,3 +565,47 @@ def test_unreadable_skill_is_reported_as_unverifiable(
     monkeypatch.setattr(doctor_review, "resolve_skill", unreadable)
     manifest = doctor_review._ClientManifest(_codex_client(repo.worktree), _SKILL)
     assert manifest.completion_problem() == "checker_unverifiable"
+
+
+@pytest.mark.parametrize(
+    ("target", "error"),
+    [
+        ("resolve_default_branch_ref", CwError("git cannot run")),
+        ("resolve_default_branch_ref", OSError("no git")),
+        ("resolve_skill", CwError("cannot read skill")),
+        ("resolve_skill", OSError("no skill")),
+        ("checker_problem", OSError("disk")),
+        ("checker_problem", UnicodeError("bad bytes")),
+    ],
+    ids=[
+        "branch-cwerror",
+        "branch-oserror",
+        "skill-cwerror",
+        "skill-oserror",
+        "checker-oserror",
+        "checker-unicode",
+    ],
+)
+def test_a_failing_second_resolve_warns_instead_of_raising(
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    error: Exception,
+) -> None:
+    import cw.doctor.review_engine as doctor_review
+
+    repo = make_engine_repo(make_git_repo, engine_files=CHECKER_DIR)
+    client = _codex_client(repo.worktree)
+
+    def second_call_fails(*_args: object) -> object:
+        raise error
+
+    # The manifest read happens through manifest_source's own bindings, so it
+    # succeeds; only the doctor's second resolve inside the probe fails.
+    monkeypatch.setattr(doctor_review, target, second_call_fails)
+    manifest = doctor_review._ClientManifest(client, _SKILL)
+    assert manifest.completion_problem() == "checker_unverifiable"
+    results = _check_review_engine({"acme": client})
+    assert len(results) == 1
+    assert results[0].warn is True
+    assert "checker_unverifiable" in results[0].detail
