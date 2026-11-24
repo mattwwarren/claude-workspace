@@ -272,8 +272,10 @@ REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON: Literal[
 # hand. Deliberately absent from FINALIZE_REGRESS_BLOCKER_REASONS (a fresh
 # IMPL session cannot make a slow gate faster) and from
 # OPERATOR_UNAVAILABLE_BLOCKER_REASONS (the gate did not finish; nothing is
-# merely unreachable). The create path's nested `/prep-pr` Step 7
-# `gate_timeout` marker still collapses to `agent_block`.
+# merely unreachable). Finalize's create-path gate-timeout classifier (#3380)
+# also emits it, at `stage4b_pr_create` with no `pr_info`, when `/prep-pr`
+# Step 7 returns its nested headless `gate_timeout` marker on a clean worktree;
+# a dirty worktree still collapses that marker to `agent_block`.
 GATE_TIMEOUT_BLOCKER_REASON: Literal["gate_timeout"] = "gate_timeout"
 # blocker.reason headless finalize emits when the base branch's
 # `quality_gates.ci_evidence` maps a gate to CI checks that have not all

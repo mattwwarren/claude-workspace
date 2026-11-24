@@ -76,7 +76,10 @@ _STALE_GATE_CONSUMER = "dev_queue_stale_gate"
 # pr_info fallback threaded in dispatch/routing.py). #3372 adds a third pair,
 # GATE_TIMEOUT_DISPOSITION/GATE_TIMEOUT_BLOCKER_REASON: a reuse-path gate the
 # foreground timeout cut off parks with auto-merge left as found and pr_url
-# stamped from pr_info, so a PR that merges on its own releases the row.
+# stamped from pr_info, so a PR that merges on its own releases the row. A
+# #3380 create-path gate_timeout row has no PR and no pr_url, so no merge
+# event ever matches it and it is never Variant A released: only the
+# operator's requeue releases it.
 #
 # The "automerge_not_armed" / "prior_pipeline_pr_open" reason literals
 # themselves are NOT re-declared here -- _is_variant_a_gate_task and

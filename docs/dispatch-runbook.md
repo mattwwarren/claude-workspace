@@ -4340,9 +4340,17 @@ later gate (`blocker.details` names the timed-out gate, the head, the ceiling
 and the gates not run). The row parks `BLOCKED_ON_USER` at finalize with
 `blocker.reason: "gate_timeout"` and disposition `gate_timeout`; it is never
 regressed to impl and charges no attempt. `pr_url` is stamped, so if the PR
-merges on its own cw releases the row. Release it (Who: orchestrator):
+merges on its own cw releases the row. On the create path (#3380), a headless
+`/prep-pr` Step 7 gate the executor cut off returns its nested `gate_timeout`
+marker before Step 8 creates a PR; finalize's Create-path gate-timeout
+classifier promotes it to the same park when the worktree is clean. That
+sentinel carries `pr: null`, no `pr_info` and `blocker.stage:
+"stage4b_pr_create"`, so the row has no PR and no `pr_url`: no Variant A
+auto-release applies, and only the requeue below releases it. Release it (Who:
+orchestrator):
 
-1. Confirm required CI is green at the PR head.
+1. If the row has a PR, confirm required CI is green at the PR head. A
+   create-path row has no PR, so there is no CI to confirm: skip this step.
 2. In the row's worktree (`worktree_path` in the sentinel), at that head, run
    the repo's sync gate first (for example `uv sync --locked ...`), because a
    `uv run` does not upgrade an already-installed stale extra and the stamp
@@ -4365,7 +4373,15 @@ merges on its own cw releases the row. Release it (Who: orchestrator):
    (clamped to the 600 s cap) or fix the host. The requeue keeps the worktree;
    worktree GC keeps an open PR's worktree. If the head moved or the worktree
    was removed, finalize re-runs the gate and may park again; re-record the
-   pass.
+   pass. A create-path row has no PR, and worktree GC keeps a worktree with no
+   PR too.
+
+The create-path classifier promotes only on a clean tree, checked with the
+same filtered `git status --porcelain` that `gate-pass record` uses. An
+untracked `.claude/` file the client repo does not ignore (a scratch file, say)
+dirties that tree, so the classifier silently falls back to `agent_block` (the
+row regresses to impl as before), and `gate-pass record` would report
+`dirty-worktree` there too. Ignore or remove such a file in the client repo.
 
 **Park: `awaiting_ci_evidence` (#3618).** The repo opted in with
 `quality_gates.ci_evidence` (a gate name mapped to the CI check(s) that prove

@@ -522,7 +522,10 @@ quality gate call off at its foreground ceiling and the worktree is still
 clean. What counts as a timeout is defined once, under "Headless ceiling" in
 Step 4c.6 of the core doc; this section only builds the sentinel. A gate that
 failed or dirtied the worktree is the previous section's `agent_block`
-sentinel.
+sentinel. The create path reaches this section too, from the Create-path
+gate-timeout classifier (#3380) in Step 4c of the core doc, when `/prep-pr`
+Step 7 returned its headless `gate_timeout` marker on a clean worktree: its
+template is the "Create path variant (#3380)" subsection below.
 
 **Sentinel template — `gate_timeout` blocker (reuse path):**
 
@@ -582,11 +585,76 @@ Completion section, as above.
 
 **Why not `agent_block`.** A gate the executor cut off did not fail: a fresh
 IMPL session cannot make it faster, and on an adopted PR a regress strands the
-row at `plan_missing`. `gate_timeout` routes to the generic park: the row parks
-`BLOCKED_ON_USER` at FINALIZE, is never regressed to IMPL, charges no attempt,
-and gets `pr_url` stamped from `pr_info`, so cw releases the row if the PR
-merges on its own (auto-merge was left as found). `retry_eligible: false`: a
-bare retry would time the same gate out again.
+row at `plan_missing`. This holds on both paths. `gate_timeout` routes to the
+generic park: the row parks `BLOCKED_ON_USER` at FINALIZE, is never regressed
+to IMPL and charges no attempt. On the reuse path it also gets `pr_url` stamped
+from `pr_info`, so cw releases the row if the PR merges on its own (auto-merge
+was left as found); the create path has no PR (see below). `retry_eligible:
+false`: a bare retry would time the same gate out again.
+
+### Create path variant (#3380)
+
+Emitted by the Create-path gate-timeout classifier in Step 4c of the core doc,
+after `/prep-pr` returned its Step 7 headless `gate_timeout` marker as the
+outermost block and the filtered `git status --porcelain` was empty. `/prep-pr`
+halted at the block, before its Step 8, so no PR exists: `pr` is `null` and the
+template carries no `pr_info` key at all (not `pr_info: null`). Both
+`stage_reached` and `blocker.stage` are `stage4b_pr_create`, as in the
+`push_auth_failed` template.
+
+```json
+{
+  "schema_version": 4,
+  "ticket_id": "<ticket-id>",
+  "status": "blocked",
+  "stage_reached": "stage4b_pr_create",
+  "scope": {
+    "tier": "<resolved scope.tier — see 'Resolve carried-through context' above>",
+    "files": <count>,
+    "lines_estimate": <count>,
+    "lines_actual": <count>,
+    "forbidden_touched": <resolved forbidden_touched — see 'Resolve carried-through context' above>
+  },
+  "plan_source": "<resolved plan_source — see 'Resolve carried-through context' above>",
+  "branch": "<branch-name>",
+  "worktree_path": "<session worktree path>",
+  "pr": null,
+  "review": {"must_fix_initial": <count>, "should_fix": <count>, "fix_cycles_used": <count>, "deferred": <count>},
+  "health": {
+    "lowest_agent_confidence": "HIGH",
+    "any_incomplete_risk": false,
+    "shortcuts": [],
+    "recommendation": "PROCEED",
+    "downgrade_applied": false,
+    "fix_loop_escalated": false
+  },
+  "blocker": {
+    "stage": "stage4b_pr_create",
+    "reason": "gate_timeout",
+    "details": "Step 4c create path: /prep-pr Step 7 quality gate timeout: gate <gate name exactly as detect-gates printed it> was cut off by the executor's foreground timeout at head <head_sha>; not backgrounded (headless); not a gate failure; no PR exists (Step 8 never ran). /prep-pr details: <verbatim details from the PREP_PR_BLOCK marker>",
+    "exception_type": null,
+    "message": "create-path quality gate was cut off by the foreground timeout; not a gate failure; no PR exists",
+    "recovery_hint": "Orchestrator: no PR exists yet (the gate timed out before /prep-pr Step 8 created one), so there is no CI to confirm; in the row's worktree (worktree_path), at the head named in details, run the timed-out gate by hand with no time limit; if it passes on a clean tree, run `prep_pr_state.py gate-pass record <gate>` there; then `cw dev-queue requeue <ticket> -c <client>`. The requeue keeps the row's worktree and its gitignored gate-pass stamp (.claude/prep-pr-state.json), and /prep-pr Step 7 skips a gate whose stamp matches the same head on a clean tree. The stamp holds only while the head is unchanged and the worktree is not removed (worktree GC keeps a worktree that has no PR); otherwise the gate re-runs and may park again, and the orchestrator re-records the pass. cw never releases this row on its own: with no PR there is no merge event, so only the requeue releases it. If the gate keeps timing out, raise `quality_gates.timeouts.<gate>` in `.claude/project-config.yaml` (clamped to 600 s).",
+    "retry_eligible": false,
+    "retry_delay_seconds": null
+  },
+  "next_actions": []
+}
+```
+
+**Field sources (create path):** `scope`, `plan_source`, `branch` and
+`worktree_path` come from "Resolve carried-through context"; `<head_sha>` is
+the main session's `git rev-parse HEAD`, captured by the classifier; the gate
+name is the marker's `gate:` line, copied exactly as `detect-gates` printed it;
+the `/prep-pr` details are the marker's `details:` line, verbatim. Emit and
+frame it as above.
+
+**Why no `pr_url`: never released by cw, operator-gated.** With no `pr_info`
+the row gets no `pr_url` stamp, so PR hydration never picks it up and no merge
+event ever arrives for it: cw never releases the row on its own. Only the
+operator's `cw dev-queue requeue` releases it, after the hand run and
+`gate-pass record`. That is not a timer (ADR-0014), and the doctor's
+`--reap` leaves this operator-gated park alone.
 
 **Do not add `gate_timeout` to `FINALIZE_REGRESS_BLOCKER_REASONS`**
 (`src/cw/auto_dev_result/schema/_vocab.py`, which stays `{"agent_block"}`).

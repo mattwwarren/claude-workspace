@@ -1682,6 +1682,12 @@ elements:
       codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/finalize_result.py, symbol: classify_unavailability}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
+  finalize.create-path-gate-timeout-classifier:
+    cells:
+      claude-native: {disposition: implemented}
+      codex: {disposition: not-applicable, reason: "cw runs every step in Python with no foreground tool ceiling and no nested /prep-pr block (ADR-0014)"}
+      opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}}
+      local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   finalize.main-session-re-verification:
     cells:
       claude-native: {disposition: implemented}
