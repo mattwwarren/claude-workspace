@@ -45,12 +45,14 @@ from tests._shared.engine_round_helpers import (
     read_observed,
     read_result,
     round_dir,
+    run_blocked,
     run_pass,
     tamper_roles,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from unittest.mock import MagicMock
 
     from tests._review_engine_helpers import EngineRepo
 
@@ -246,10 +248,14 @@ def test_canary_environment_is_not_inherited(
     ids=["status-incomplete", "missing-role"],
 )
 def test_incomplete_coverage_blocks_retryable(
-    make_git_repo: Callable[..., Path], tmp_path: Path, body: str, detail: str
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    body: str,
+    detail: str,
+    record_event_spy: MagicMock,
 ) -> None:
     repo = make_checker_repo(make_git_repo, tmp_path, body)
-    text = blocked_details(run_pass(repo, engine_runner()), retry=_RETRY)
+    text = run_blocked(repo, record_event_spy, retry=_RETRY)
     assert "engine_coverage_incomplete" in text
     assert detail in text
 
@@ -271,20 +277,25 @@ def test_extra_roles_are_accepted(
     ids=["stale-head", "stale-round"],
 )
 def test_stale_binding_blocks_retryable(
-    make_git_repo: Callable[..., Path], tmp_path: Path, body: str, text: str
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    body: str,
+    text: str,
+    record_event_spy: MagicMock,
 ) -> None:
     repo = make_checker_repo(make_git_repo, tmp_path, body)
-    details = blocked_details(run_pass(repo, engine_runner()), retry=_RETRY)
+    details = run_blocked(repo, record_event_spy, retry=_RETRY)
     assert text in details
 
 
 def test_status_failed_blocks_non_retryable(
     make_git_repo: Callable[..., Path],
     tmp_path: Path,
+    record_event_spy: MagicMock,
 ) -> None:
     body = _result_script(status="failed")
     repo = make_checker_repo(make_git_repo, tmp_path, body)
-    details = blocked_details(run_pass(repo, engine_runner()), retry=_NO_RETRY)
+    details = run_blocked(repo, record_event_spy, retry=_NO_RETRY)
     assert details == "engine_completion_check_failed: status_failed"
 
 
@@ -324,10 +335,14 @@ def test_status_failed_blocks_non_retryable(
     ],
 )
 def test_checker_failure_rows_block_non_retryable(
-    make_git_repo: Callable[..., Path], tmp_path: Path, body: str, reason: str
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    body: str,
+    reason: str,
+    record_event_spy: MagicMock,
 ) -> None:
     repo = make_checker_repo(make_git_repo, tmp_path, body)
-    details = blocked_details(run_pass(repo, engine_runner()), retry=_NO_RETRY)
+    details = run_blocked(repo, record_event_spy, retry=_NO_RETRY)
     assert details == f"engine_completion_check_failed: {reason}"
 
 
@@ -335,6 +350,7 @@ def test_timeout_kills_group_and_blocks(
     make_git_repo: Callable[..., Path],
     tmp_path: Path,
     tmp_path_factory: pytest.TempPathFactory,
+    record_event_spy: MagicMock,
 ) -> None:
     base = tmp_path_factory.mktemp("timeout")
     pid_file = base / "child.pid"
@@ -348,7 +364,7 @@ time.sleep(60)
 """
     )
     repo = make_checker_repo(make_git_repo, base, body, timeout_seconds=1)
-    details = blocked_details(run_pass(repo, engine_runner()), retry=_NO_RETRY)
+    details = run_blocked(repo, record_event_spy, retry=_NO_RETRY)
     assert details == "engine_completion_check_failed: checker_timeout"
     assert_group_dead(pid_file)
 
@@ -374,18 +390,21 @@ def test_redirected_background_child_is_killed_on_clean_exit(
 def test_checker_not_executable_blocks(
     make_git_repo: Callable[..., Path],
     tmp_path: Path,
+    record_event_spy: MagicMock,
 ) -> None:
     repo = make_checker_repo(make_git_repo, tmp_path, _result_script(), mode=0o644)
-    details = blocked_details(run_pass(repo, engine_runner()), retry=_NO_RETRY)
+    details = run_blocked(repo, record_event_spy, retry=_NO_RETRY)
     assert details == "engine_completion_check_failed: checker_not_executable"
 
 
 def test_output_is_never_echoed(
-    make_git_repo: Callable[..., Path], tmp_path: Path
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    record_event_spy: MagicMock,
 ) -> None:
     body = _checker("print('SECRET-OUTPUT-xyz')\nsys.exit(4)\n")
     repo = make_checker_repo(make_git_repo, tmp_path, body)
-    details = blocked_details(run_pass(repo, engine_runner()), retry=_NO_RETRY)
+    details = run_blocked(repo, record_event_spy, retry=_NO_RETRY)
     assert "SECRET-OUTPUT" not in details
 
 
@@ -393,24 +412,35 @@ def test_output_is_never_echoed(
 
 
 def test_role_dirtied_tree_blocks_before_checker(
-    engine_repo: EngineRepo, monkeypatch: pytest.MonkeyPatch
+    engine_repo: EngineRepo,
+    monkeypatch: pytest.MonkeyPatch,
+    record_event_spy: MagicMock,
 ) -> None:
     tamper_roles(
         monkeypatch,
         engine_repo.worktree,
         _dirty,
     )
-    details = blocked_details(run_pass(engine_repo, engine_runner()), retry=_NO_RETRY)
+    # The stub engine declares no completion check, so this block comes from the
+    # aggregation precheck: the aggregator turn runs once, and nothing is recorded.
+    runner = engine_runner()
+    outcome = run_pass(engine_repo, runner)
+    details = blocked_details(outcome, retry=_NO_RETRY)
+    assert len(aggregator_stdins(runner)) == 1
+    record_event_spy.assert_not_called()
     assert details.startswith("engine_worktree_mutated")
     assert not observed_exists(engine_repo)
 
 
 def test_role_moved_head_blocks_retryable_before_checker(
-    make_git_repo: Callable[..., Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    record_event_spy: MagicMock,
 ) -> None:
     repo = make_checker_repo(make_git_repo, tmp_path)
     tamper_roles(monkeypatch, repo.worktree, lambda wt: _commit_in(wt, "moved.txt"))
-    details = blocked_details(run_pass(repo, engine_runner()), retry=_RETRY)
+    details = run_blocked(repo, record_event_spy, retry=_RETRY)
     assert details.startswith("engine_head_mismatch")
     assert not observed_exists(repo)
 
@@ -418,18 +448,20 @@ def test_role_moved_head_blocks_retryable_before_checker(
 def test_checker_dirtying_tree_is_attributed_to_checker(
     make_git_repo: Callable[..., Path],
     tmp_path: Path,
+    record_event_spy: MagicMock,
 ) -> None:
     body = _result_script(
         extra="open(os.path.join(WT, 'checker-wrote.txt'), 'w').write('x')\n"
     )
     repo = make_checker_repo(make_git_repo, tmp_path, body)
-    details = blocked_details(run_pass(repo, engine_runner()), retry=_NO_RETRY)
+    details = run_blocked(repo, record_event_spy, retry=_NO_RETRY)
     assert details == "engine_completion_check_failed: worktree_mutated"
 
 
 def test_checker_moving_head_is_attributed_to_checker(
     make_git_repo: Callable[..., Path],
     tmp_path: Path,
+    record_event_spy: MagicMock,
 ) -> None:
     extra = (
         "subprocess.run(['git', '-C', WT, '-c', 'user.email=a@b', '-c',"
@@ -437,7 +469,7 @@ def test_checker_moving_head_is_attributed_to_checker(
         " capture_output=True)\n"
     )
     repo = make_checker_repo(make_git_repo, tmp_path, _result_script(extra=extra))
-    details = blocked_details(run_pass(repo, engine_runner()), retry=_NO_RETRY)
+    details = run_blocked(repo, record_event_spy, retry=_NO_RETRY)
     assert details == "engine_completion_check_failed: head_moved"
 
 
@@ -447,6 +479,7 @@ def test_precheck_git_error_is_unverifiable(
     tmp_path: Path,
     call: int,
     monkeypatch: pytest.MonkeyPatch,
+    record_event_spy: MagicMock,
 ) -> None:
     repo = make_checker_repo(make_git_repo, tmp_path)
     real = _engine_completion.engine_precheck
@@ -459,7 +492,7 @@ def test_precheck_git_error_is_unverifiable(
         return real(worktree, head)
 
     monkeypatch.setattr(_engine_completion, "engine_precheck", flaky)
-    details = blocked_details(run_pass(repo, engine_runner()), retry=_NO_RETRY)
+    details = run_blocked(repo, record_event_spy, retry=_NO_RETRY)
     assert details == "engine_completion_check_failed: check_unverifiable"
     if call == 0:
         assert not observed_exists(repo)
@@ -470,6 +503,7 @@ def test_planted_ancestor_symlink_is_refused(
     tmp_path: Path,
     tmp_path_factory: pytest.TempPathFactory,
     monkeypatch: pytest.MonkeyPatch,
+    record_event_spy: MagicMock,
 ) -> None:
     base = tmp_path_factory.mktemp("symlink")
     repo = make_checker_repo(make_git_repo, base)
@@ -484,14 +518,17 @@ def test_planted_ancestor_symlink_is_refused(
         rd.symlink_to(outside)
 
     tamper_roles(monkeypatch, repo.worktree, swap)
-    details = blocked_details(run_pass(repo, engine_runner()), retry=_NO_RETRY)
+    details = run_blocked(repo, record_event_spy, retry=_NO_RETRY)
     assert details == "engine_completion_check_failed: check_unverifiable"
     assert sentinel.read_text(encoding="utf-8") == "keep"
     assert not observed_exists(repo)
 
 
 def test_overwritten_materialized_copy_is_not_run(
-    make_git_repo: Callable[..., Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    record_event_spy: MagicMock,
 ) -> None:
     repo = make_checker_repo(make_git_repo, tmp_path, _result_script(status="failed"))
 
@@ -500,7 +537,7 @@ def test_overwritten_materialized_copy_is_not_run(
         copy.write_text(_result_script(), encoding="utf-8")
 
     tamper_roles(monkeypatch, repo.worktree, replace_copy)
-    details = blocked_details(run_pass(repo, engine_runner()), retry=_NO_RETRY)
+    details = run_blocked(repo, record_event_spy, retry=_NO_RETRY)
     assert details == "engine_completion_check_failed: status_failed"
 
 
@@ -508,7 +545,10 @@ def test_overwritten_materialized_copy_is_not_run(
 
 
 def test_launch_oserror_blocks(
-    make_git_repo: Callable[..., Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    record_event_spy: MagicMock,
 ) -> None:
     repo = make_checker_repo(make_git_repo, tmp_path)
 
@@ -517,12 +557,15 @@ def test_launch_oserror_blocks(
         raise OSError(msg)
 
     monkeypatch.setattr(_engine_completion, "run_declared_command", boom)
-    details = blocked_details(run_pass(repo, engine_runner()), retry=_NO_RETRY)
+    details = run_blocked(repo, record_event_spy, retry=_NO_RETRY)
     assert details == "engine_completion_check_failed: checker_launch_failed"
 
 
 def test_extraction_failure_blocks(
-    make_git_repo: Callable[..., Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    record_event_spy: MagicMock,
 ) -> None:
     repo = make_checker_repo(make_git_repo, tmp_path)
 
@@ -531,7 +574,7 @@ def test_extraction_failure_blocks(
         raise error
 
     monkeypatch.setattr(_engine_completion, "_extract_archive", fail)
-    details = blocked_details(run_pass(repo, engine_runner()), retry=_NO_RETRY)
+    details = run_blocked(repo, record_event_spy, retry=_NO_RETRY)
     assert details == "engine_completion_check_failed: extract_failed"
 
 
@@ -673,10 +716,11 @@ def test_scratch_dir_oserror_blocks(
     make_git_repo: Callable[..., Path],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    record_event_spy: MagicMock,
 ) -> None:
     repo = make_checker_repo(make_git_repo, tmp_path)
     _deny_scratch_dir(monkeypatch)
-    details = blocked_details(run_pass(repo, engine_runner()), retry=_NO_RETRY)
+    details = run_blocked(repo, record_event_spy, retry=_NO_RETRY)
     assert details == _UNVERIFIABLE
     assert not observed_exists(repo)
 
@@ -686,6 +730,7 @@ def test_evidence_dir_mkdir_oserror_blocks_and_removes_scratch(
     tmp_path: Path,
     checker_tmpdir: tuple[Path, list[str]],
     monkeypatch: pytest.MonkeyPatch,
+    record_event_spy: MagicMock,
 ) -> None:
     worker, recorded = checker_tmpdir
     repo = make_checker_repo(make_git_repo, tmp_path)
@@ -698,7 +743,7 @@ def test_evidence_dir_mkdir_oserror_blocks_and_removes_scratch(
         real(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "mkdir", deny)
-    details = blocked_details(run_pass(repo, engine_runner()), retry=_NO_RETRY)
+    details = run_blocked(repo, record_event_spy, retry=_NO_RETRY)
     assert details == _UNVERIFIABLE
     assert not observed_exists(repo)
     assert recorded, "the scratch dir was never created"
@@ -709,6 +754,7 @@ def test_undeletable_planted_evidence_blocks(
     make_git_repo: Callable[..., Path],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    record_event_spy: MagicMock,
 ) -> None:
     repo = make_checker_repo(make_git_repo, tmp_path)
 
@@ -727,7 +773,7 @@ def test_undeletable_planted_evidence_blocks(
         real(path, *args, **kwargs)
 
     monkeypatch.setattr(_engine_completion.shutil, "rmtree", deny)
-    details = blocked_details(run_pass(repo, engine_runner()), retry=_NO_RETRY)
+    details = run_blocked(repo, record_event_spy, retry=_NO_RETRY)
     assert details == _UNVERIFIABLE
     assert not observed_exists(repo)
 

@@ -175,6 +175,32 @@ def blocked_details(outcome: EnginePassOutcome, *, retry: bool) -> str:
     return blocker.details
 
 
+def assert_blocked_before_aggregation(
+    runner: ScriptedCodexRunner, repo: EngineRepo, record_event_spy: MagicMock
+) -> None:
+    """A blocked round ran the role turns, then stopped: no aggregator turn, no
+    ``summary.json`` in the round dir, and no event recorded."""
+    role_stdins = [str(call["stdin"]) for call in runner.review_calls]
+    assert any(SECURITY_MARK in s for s in role_stdins), "security role never ran"
+    assert any(QUALITY_MARK in s for s in role_stdins), "quality role never ran"
+    assert aggregator_stdins(runner) == []
+    assert not engine_paths(repo.worktree, ROUND_ID).summary_path.exists()
+    record_event_spy.assert_not_called()
+
+
+def run_blocked(repo: EngineRepo, record_event_spy: MagicMock, *, retry: bool) -> str:
+    """Run an engine pass that must block; return the blocker details.
+
+    Asserts the verdict-less ``agent_block`` (``blocked_details``) and that the
+    round stopped before aggregation and recorded nothing.
+    """
+    runner = engine_runner()
+    outcome = run_pass(repo, runner)
+    details = blocked_details(outcome, retry=retry)
+    assert_blocked_before_aggregation(runner, repo, record_event_spy)
+    return details
+
+
 def make_checker_repo(
     make_git_repo: Callable[..., Path],
     tmp_path: Path,
