@@ -210,6 +210,79 @@ class TestStamp:
         with pytest.raises(ValidationError):
             _stamp(tmp_path, payload)
 
+    @pytest.mark.parametrize("bad", [None, "about forty", 12.5, True])
+    def test_a_non_integer_lines_estimate_is_set_to_the_measured_lines(
+        self, tmp_path: Path, bad: object
+    ) -> None:
+        payload = _payload()
+        payload["scope"]["lines_estimate"] = bad
+
+        result = _stamp(tmp_path, payload)
+
+        assert result.scope.lines_estimate == 31
+        assert result.friction_highlights[-1] == (
+            "cw repaired the IMPL result: scope.lines_estimate was "
+            f"{bad!r}, set to the measured 31"
+        )
+
+    @pytest.mark.parametrize("bad", [None, "no", 0])
+    def test_a_non_boolean_forbidden_touched_is_set_to_false(
+        self, tmp_path: Path, bad: object
+    ) -> None:
+        payload = _payload()
+        payload["scope"]["forbidden_touched"] = bad
+
+        result = _stamp(tmp_path, payload)
+
+        assert result.scope.forbidden_touched is False
+        assert (
+            "scope.forbidden_touched was " + repr(bad)
+            in (result.friction_highlights[-1])
+        )
+
+    def test_a_well_typed_scope_adds_no_repair_line(self, tmp_path: Path) -> None:
+        payload = _payload()
+        payload["scope"]["lines_estimate"] = 20
+        payload["scope"]["forbidden_touched"] = True
+
+        result = _stamp(tmp_path, payload, extra_friction=("gate note",))
+
+        assert result.scope.lines_estimate == 20
+        assert result.scope.forbidden_touched is True
+        assert result.friction_highlights[-1] == "gate note"
+
+    def test_prose_in_ambiguities_becomes_friction_and_objects_stay(
+        self, tmp_path: Path
+    ) -> None:
+        payload = _payload()
+        question = {"question": "Which fixture owns the org id?"}
+        payload["ambiguities"] = ["The ticket body differs from the PR.", question]
+
+        result = _stamp(tmp_path, payload)
+
+        assert result.ambiguities == [question]
+        assert result.friction_highlights[-1] == (
+            "cw repaired the IMPL result: ambiguities held prose, kept here: "
+            "The ticket body differs from the PR."
+        )
+
+    def test_a_long_prose_ambiguity_is_capped(self, tmp_path: Path) -> None:
+        payload = _payload()
+        payload["ambiguities"] = ["x" * 900]
+
+        result = _stamp(tmp_path, payload)
+
+        assert result.ambiguities == []
+        assert result.friction_highlights[-1].endswith(": " + "x" * 300)
+
+    def test_ambiguities_that_are_not_a_list_are_left_for_validation(
+        self, tmp_path: Path
+    ) -> None:
+        payload = _payload()
+        payload["ambiguities"] = "none"
+        with pytest.raises(ValidationError):
+            _stamp(tmp_path, payload)
+
     def test_does_not_use_the_review_fix_cycle_commit_filter(
         self, tmp_path: Path
     ) -> None:
