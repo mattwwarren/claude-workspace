@@ -40,6 +40,7 @@ from tests._shared.engine_round_helpers import (
     make_checker_repo,
     observed_exists,
     read_observed,
+    read_result,
     round_dir,
     run_pass,
     tamper_roles,
@@ -119,7 +120,11 @@ def test_happy_path_passes_and_retains_result(
     assert outcome.result.status != "blocked"
     assert outcome.verdict is not None
     assert len(aggregator_stdins(runner)) == 1
-    assert (round_dir(repo) / "completion" / "result.json").exists()
+    result = read_result(repo)
+    assert result["head_sha"] == repo.head
+    assert result["round_id"] == ROUND_ID
+    assert result["status"] == "complete"
+    assert result["roles_covered"] == ["security", "quality"]
 
 
 def test_observed_argument_order_cwd_and_tmpdir(

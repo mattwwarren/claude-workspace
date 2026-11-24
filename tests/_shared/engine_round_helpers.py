@@ -216,6 +216,14 @@ def read_observed(repo: EngineRepo) -> dict[str, object]:
     return loaded
 
 
+def read_result(repo: EngineRepo) -> dict[str, object]:
+    """The retained ``completion/result.json`` the checker wrote for the round."""
+    path = round_dir(repo) / "completion" / "result.json"
+    assert path.exists(), "checker wrote no result.json"
+    loaded: dict[str, object] = json.loads(path.read_text(encoding="utf-8"))
+    return loaded
+
+
 def tamper_roles(
     monkeypatch: pytest.MonkeyPatch,
     worktree: Path,
