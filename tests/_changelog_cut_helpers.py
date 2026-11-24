@@ -254,6 +254,50 @@ def _with_bullet_after_beta(bullet: str) -> str:
     return CL_BASE.replace("- Beta fix (#2).\n\n", f"- Beta fix (#2).\n\n{bullet}\n\n")
 
 
+#: The ``[Unreleased]`` heading text the derived constants below are built from.
+UNRELEASED_HEADING = "## [Unreleased]\n\n"
+#: A brand-new released heading no reviewed head ever carried (#3375).
+RELEASED_9_9_9 = "## [9.9.9] - 2026-03-01\n\n"
+_BETA_BLOCK = "- Beta fix (#2).\n\n"
+_DELTA_BLOCK = "- Delta fix (#4).\n\n"
+_GAMMA_BLOCK = "- Gamma fix (#3).\n\n"
+
+#: Main after a sibling PR landed its bullet first: no release cut (#3375).
+CL_MAIN_SIBLING = CL_BASE.replace(_BETA_BLOCK, _BETA_BLOCK + _DELTA_BLOCK)
+#: The union rebuild of the raced pair: the branch bullet filed after the sibling's.
+CL_REBUILT_SIBLING = CL_MAIN_SIBLING.replace(_DELTA_BLOCK, _DELTA_BLOCK + _GAMMA_BLOCK)
+#: A released heading placed at the tail of the ``[Unreleased]`` span.
+CL_NEW_RELEASED_HEADING_AT_TAIL = CL_REBUILT_SIBLING.replace(
+    RELEASED_1_0_0, RELEASED_9_9_9 + RELEASED_1_0_0
+)
+#: A released section whose bullet was edited.
+CL_NEW_RELEASED_SECTION_CHANGED = CL_REBUILT_SIBLING.replace(
+    "- Initial (#0).", "- Initial (#0), edited."
+)
+#: One text line added in the preamble, above ``[Unreleased]``.
+CL_NEW_PREAMBLE_ADDITION = CL_REBUILT_SIBLING.replace(
+    "# Changelog\n", "# Changelog\nIntro text.\n", 1
+)
+#: One extra blank line added in the preamble.
+CL_NEW_BLANK_OUTSIDE_SPAN = CL_REBUILT_SIBLING.replace(
+    "# Changelog\n\n", "# Changelog\n\n\n", 1
+)
+#: One bullet added inside the released ``1.0.0`` section.
+CL_NEW_OUT_OF_SPAN = CL_REBUILT_SIBLING.replace(
+    "- Initial (#0).\n", "- Initial (#0).\n- Extra (#8).\n"
+)
+#: A bullet inside the span that the reviewed head never added.
+CL_NEW_UNATTESTED_BULLET = CL_REBUILT_SIBLING.replace(
+    _GAMMA_BLOCK, _GAMMA_BLOCK + "- Foreign fix (#9).\n\n"
+)
+#: A ``### Removed`` heading inside the span, absent from the reviewed head.
+CL_NEW_FOREIGN_HEADING = CL_REBUILT_SIBLING.replace(
+    _GAMMA_BLOCK, _GAMMA_BLOCK + "### Removed\n\n"
+)
+#: Main's Delta bullet removed by the rebuild.
+CL_NEW_MAIN_LINE_DELETED = CL_REBUILT_SIBLING.replace(_DELTA_BLOCK, "")
+
+
 def epic_sibling_repo(
     tmp_path: Path,
     make_git_repo: Callable[..., Path],

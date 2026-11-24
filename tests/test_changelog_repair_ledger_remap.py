@@ -27,13 +27,13 @@ from cw.review_convergence import (
     evaluate_tip,
     load_ledger,
 )
-from tests._changelog_cut_helpers import TICKET
-from tests._changelog_repair_helpers import EXPECTED_SHA as OLD_SHA
+from tests._changelog_cut_helpers import CL_NEW_MAIN_LINE_DELETED, TICKET
 from tests._changelog_repair_helpers import (
+    DEFAULT_REF,
+    DEFAULT_SHA,
     NEW_SHA,
     OSERROR,
     PR_NUMBER,
-    RANGE_DIFF_NOT_EQUAL,
     REBASED_SHA,
     TIMEOUT,
     FakeArmScript,
@@ -44,12 +44,12 @@ from tests._changelog_repair_helpers import (
     clean_client,
     make_client,
     make_repair_job,
-    range_diff_calls,
-    range_diff_output,
+    proof_tree_calls,
     repair_task,
     scratch_path,
     stub_remap_proof,
 )
+from tests._changelog_repair_helpers import EXPECTED_SHA as OLD_SHA
 from tests._changelog_repair_helpers import attention as _attention
 from tests._changelog_repair_helpers import failed as _failed
 from tests._changelog_repair_helpers import taken as _taken
@@ -58,7 +58,8 @@ from tests._review_convergence_helpers import confirmed_ledger, write_ledger
 pytestmark = pytest.mark.usefixtures("repair_events")
 
 FROZEN_STAMP = "2026-11-07T12:00:00Z"
-PAIR_COUNT = 2
+COMMITS_CARRIED = 1
+PROOF_MERGE_TREE = ("merge-tree", "--write-tree", "--no-messages")
 OTHER_TICKET = "OTHER-9"
 
 
@@ -88,7 +89,7 @@ def ledger_path(worktree: Path) -> Path:
 
 @pytest.fixture
 def proven(git: ScriptedGit) -> ScriptedGit:
-    """*git* answering a provable rebase: equal pairs plus a CHANGELOG-only commit."""
+    """*git* answering a provable rebase: tree-equal plus a CHANGELOG-only commit."""
     stub_remap_proof(git)
     return git
 
@@ -154,7 +155,7 @@ def test_proven_rebase_remaps_the_ledger_and_arms_the_new_head(
             from_sha=OLD_SHA,
             rebased_sha=REBASED_SHA,
             to_sha=NEW_SHA,
-            commits=PAIR_COUNT,
+            commits=COMMITS_CARRIED,
         )
     ]
 
@@ -194,7 +195,7 @@ def test_push_precedes_the_ledger_save_which_precedes_the_arm(
 # --- the proof fails: the PR is pushed and left unarmed -----------------------
 
 
-def test_non_equal_commit_leaves_the_pr_unarmed(
+def test_stray_tree_difference_leaves_the_pr_unarmed(
     git: ScriptedGit,
     head: FakeGhHead,
     client: ClientConfig,
@@ -202,7 +203,7 @@ def test_non_equal_commit_leaves_the_pr_unarmed(
     worktree: Path,
     ledger_path: Path,
 ) -> None:
-    stub_remap_proof(git, range_diff=RANGE_DIFF_NOT_EQUAL)
+    stub_remap_proof(git, tree_diff="src/x.py\0CHANGELOG.md\0")
     before = ledger_path.read_bytes()
 
     assert _dispatch(client, worktree) == TICKET
@@ -210,37 +211,49 @@ def test_non_equal_commit_leaves_the_pr_unarmed(
     _assert_unarmed_and_untouched(git, head, arm, ledger_path, before)
 
 
-@pytest.mark.parametrize(
-    "marks", [("=", "<"), ("=", ">"), ("<", ">")], ids=["dropped", "added", "swapped"]
-)
-def test_dropped_or_added_commit_leaves_unarmed(
+def test_unconfined_changelog_leaves_the_pr_unarmed(
     git: ScriptedGit,
     head: FakeGhHead,
     client: ClientConfig,
     arm: FakeArmScript,
     worktree: Path,
     ledger_path: Path,
-    marks: tuple[str, ...],
 ) -> None:
-    stub_remap_proof(git, range_diff=GitResult(stdout=range_diff_output(*marks)))
+    stub_remap_proof(git, new_text=CL_NEW_MAIN_LINE_DELETED)
     before = ledger_path.read_bytes()
 
     assert _dispatch(client, worktree) == TICKET
 
     _assert_unarmed_and_untouched(git, head, arm, ledger_path, before)
+
+
+def test_unarmed_page_names_why_the_remap_was_skipped(
+    git: ScriptedGit,
+    head: FakeGhHead,
+    client: ClientConfig,
+    arm: FakeArmScript,
+    worktree: Path,
+    ledger_path: Path,
+) -> None:
+    stub_remap_proof(git, tree_diff="src/x.py\0")
+
+    assert _dispatch(client, worktree) == TICKET
+
+    (page,) = _attention()
+    assert "ledger remap skipped:" in str(page)
+    assert "src/x.py" in str(page)
 
 
 @pytest.mark.parametrize(
     "answer",
     [
-        pytest.param(GitResult(), id="empty-output"),
-        pytest.param(GitResult(stdout="garbage line\n"), id="garbage-line"),
         pytest.param(GitResult(returncode=128, stderr="fatal"), id="nonzero-exit"),
+        pytest.param(GitResult(stdout="garbage"), id="unreadable"),
         pytest.param(TIMEOUT, id="timeout"),
         pytest.param(OSERROR, id="oserror"),
     ],
 )
-def test_unreadable_range_diff_leaves_unarmed(
+def test_unavailable_merge_tree_leaves_unarmed(
     git: ScriptedGit,
     head: FakeGhHead,
     client: ClientConfig,
@@ -249,7 +262,8 @@ def test_unreadable_range_diff_leaves_unarmed(
     ledger_path: Path,
     answer: Any,
 ) -> None:
-    stub_remap_proof(git, range_diff=answer)
+    stub_remap_proof(git)
+    git.set(PROOF_MERGE_TREE, answer)
     before = ledger_path.read_bytes()
 
     assert _dispatch(client, worktree) == TICKET
@@ -307,7 +321,7 @@ def test_row_without_a_worktree_stays_stale_with_no_proof(
     assert _dispatch(client, None) == TICKET
 
     _assert_unarmed_page(git, head, arm)
-    assert range_diff_calls(git) == []
+    assert proof_tree_calls(git) == []
 
 
 def test_foreign_ticket_ledger_stays_stale(
@@ -521,7 +535,7 @@ def test_rearm_failure_after_the_persist_keeps_the_remap(
 # --- rows that must stay byte-identical ----------------------------------------
 
 
-def test_non_clean_client_runs_no_range_diff(
+def test_non_clean_client_runs_no_proof(
     git: ScriptedGit,
     head: FakeGhHead,
     arm: FakeArmScript,
@@ -534,13 +548,13 @@ def test_non_clean_client_runs_no_range_diff(
 
     assert _dispatch(client, worktree) == TICKET
 
-    assert range_diff_calls(git) == []
+    assert proof_tree_calls(git) == []
     assert len(arm.calls()) == 1
     assert _attention() == []
     assert ledger_path.read_bytes() == before
 
 
-def test_strict_opt_out_runs_no_range_diff_and_stays_unarmed(
+def test_strict_opt_out_runs_no_proof_and_stays_unarmed(
     git: ScriptedGit,
     head: FakeGhHead,
     arm: FakeArmScript,
@@ -554,4 +568,79 @@ def test_strict_opt_out_runs_no_range_diff_and_stays_unarmed(
     assert _dispatch(client, worktree) == TICKET
 
     _assert_unarmed_and_untouched(git, head, arm, ledger_path, before)
-    assert range_diff_calls(git) == []
+    assert proof_tree_calls(git) == []
+
+
+# --- the one pinned default sha (#3375) ----------------------------------------
+
+
+def test_rebase_blobs_and_proof_use_the_one_pinned_sha(
+    proven: ScriptedGit,
+    head: FakeGhHead,
+    client: ClientConfig,
+    arm: FakeArmScript,
+    worktree: Path,
+    ledger_path: Path,
+) -> None:
+    assert _dispatch(client, worktree) == TICKET
+
+    calls = proven.stripped()
+    (rebase,) = [
+        argv for argv in calls if argv[0] == "rebase" and "--continue" not in argv
+    ]
+    assert rebase[1] == DEFAULT_SHA
+    shows = [argv[1] for argv in calls if argv[0] == "show"]
+    assert f"{DEFAULT_SHA}:CHANGELOG.md" in shows
+    assert f"{DEFAULT_REF}:CHANGELOG.md" not in shows
+    (proof_tree,) = proof_tree_calls(proven)
+    assert proof_tree[-2] == DEFAULT_SHA
+    counted = [argv for argv in calls if argv[:2] == ("rev-list", "--count")]
+    assert f"{DEFAULT_SHA}..{REBASED_SHA}" in [argv[2] for argv in counted]
+    named = [argv for argv in calls if DEFAULT_REF in " ".join(argv)]
+    assert {argv[0] for argv in named} <= {
+        "diff",
+        "merge-base",
+        "merge-tree",
+        "rev-parse",
+    }  # the pin and _conflict_set only
+
+
+def test_default_ref_that_does_not_resolve_stops_before_any_rewrite(
+    proven: ScriptedGit,
+    head: FakeGhHead,
+    client: ClientConfig,
+    arm: FakeArmScript,
+    worktree: Path,
+    ledger_path: Path,
+) -> None:
+    proven.set(
+        ("rev-parse", "--verify", "--quiet", f"{DEFAULT_REF}^{{commit}}"), GitResult(1)
+    )
+
+    assert _dispatch(client, worktree) is None
+
+    (failed,) = _failed()
+    assert failed["disposition"] == D.FETCH_FAILED.value
+    verbs = [argv[0] for argv in proven.stripped()]
+    assert "push" not in verbs
+    assert "rebase" not in verbs
+    assert arm.calls() == []
+
+
+def test_merge_base_that_drifts_after_prepare_stops_before_any_rewrite(
+    proven: ScriptedGit,
+    head: FakeGhHead,
+    client: ClientConfig,
+    arm: FakeArmScript,
+    worktree: Path,
+    ledger_path: Path,
+) -> None:
+    proven.set(("merge-base", DEFAULT_SHA), GitResult(stdout=f"{'9' * 40}\n"))
+
+    assert _dispatch(client, worktree) is None
+
+    (failed,) = _failed()
+    assert failed["disposition"] == D.CONFLICT_UNEXPLAINED.value
+    verbs = [argv[0] for argv in proven.stripped()]
+    assert "push" not in verbs
+    assert "rebase" not in verbs

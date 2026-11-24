@@ -293,3 +293,43 @@ def test_history_rewrite_fails_clean_mode_tip(
 
     assert verdict.passed is False
     assert verdict.tip_reason == "commits_after_clean_round"
+
+
+# --- the carry's refusal reason (#3375) ---------------------------------------
+
+
+def test_clean_mode_remap_refusal_is_named_in_the_detail(
+    repo: ApprovalRepo, tmp_path: Path
+) -> None:
+    path = write_ledger(tmp_path, confirmed_ledger(sha="old-head"))
+
+    verdict = evaluate_repair_fence(
+        _snapshot(tier="small", clean_mode=True, ledger_path=path),
+        repo=repo.worktree,
+        new_sha=head(repo.worktree),
+        origin_tip=head(repo.worktree),
+        remap=None,
+        remap_refusal="the new head differs from the merge on: ['x.py']",
+    )
+
+    assert verdict.passed is False
+    assert (
+        "; ledger remap skipped: the new head differs from the merge on: ['x.py']"
+        in verdict.detail
+    )
+
+
+def test_no_refusal_keeps_the_detail_unchanged(
+    repo: ApprovalRepo, tmp_path: Path
+) -> None:
+    path = write_ledger(tmp_path, confirmed_ledger(sha="old-head"))
+
+    verdict = evaluate_repair_fence(
+        _snapshot(tier="small", clean_mode=True, ledger_path=path),
+        repo=repo.worktree,
+        new_sha=head(repo.worktree),
+        origin_tip=head(repo.worktree),
+    )
+
+    assert verdict.passed is False
+    assert "remap skipped" not in verdict.detail

@@ -26,13 +26,14 @@ from cw.reconcile.review_recipes import repair_git as git_mod
 from cw.reconcile.review_recipes.repair_engine import dispatch_repair
 from cw.reconcile.review_recipes.repair_git import _conflict_set
 from cw.repair_disposition import RepairDisposition as D
-from cw.review_convergence import LEDGER_RELATIVE_PATH, load_ledger
+from cw.review_convergence import LEDGER_RELATIVE_PATH, evaluate_tip, load_ledger
 from tests import _git_sandbox
 from tests._changelog_cut_helpers import (
     BRANCH,
     CL_BASE,
     CL_EXPECTED,
     CL_MAIN,
+    CL_MAIN_SIBLING,
     TICKET,
     ReleaseMovedRepo,
     build_release_moved_repo,
@@ -189,6 +190,44 @@ def test_real_clean_mode_repair_remaps_the_ledger_and_arms(
     assert argv[-2:] == ["--head-sha", new_tip]
     assert payloads(OrchestratorEventType.SESSION_NEEDS_ATTENTION) == []
     assert payloads(OrchestratorEventType.PR_ACTION_FAILED) == []
+
+
+@pytest.mark.parametrize("union", [True, False], ids=["union", "no_union"])
+def test_real_clean_mode_repair_carries_review_for_a_changelog_touching_commit(
+    tmp_path: Path,
+    make_git_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    union: bool,
+) -> None:
+    """#3375: a sibling's bullet at the same spot makes range-diff read ``!``/``<``."""
+    scenario = build_release_moved_repo(
+        tmp_path, make_git_repo, main_changelog=CL_MAIN_SIBLING, union=union
+    )
+    FakeGhHead([], oid=scenario.branch_sha).install(monkeypatch)
+    arm = FakeArmScript(scenario.clone)
+    worktree = tmp_path / "ticket-wt"
+    task = _clean_task(scenario, worktree, scenario.branch_sha)
+    client = make_client(scenario.clone, review=ReviewConfig(convergence="clean"))
+
+    assert dispatch_repair(make_repair_job(client, task=task)) == TICKET
+
+    new_tip = origin_tip(scenario)
+    ledger = load_ledger(worktree / LEDGER_RELATIVE_PATH)
+    assert ledger is not None
+    assert ledger.last_clean_sha == new_tip
+    (remap,) = ledger.clean_sha_remaps
+    assert remap.from_sha == scenario.branch_sha
+    assert remap.to_sha == new_tip
+    assert remap.commits == 1
+    (argv,) = arm.calls()
+    assert argv[-2:] == ["--head-sha", new_tip]
+    assert payloads(OrchestratorEventType.SESSION_NEEDS_ATTENTION) == []
+    assert payloads(OrchestratorEventType.PR_ACTION_FAILED) == []
+    verdict = evaluate_tip(ledger, head_sha=new_tip, origin_tip_sha=new_tip)
+    assert verdict.decision == "accepted"
+    changelog = origin_file(scenario, "CHANGELOG.md")
+    assert "- Delta fix (#4)." in changelog
+    assert "- Gamma fix (#3)." in changelog
 
 
 def test_real_clean_mode_repair_not_at_the_old_head_stays_unarmed(
