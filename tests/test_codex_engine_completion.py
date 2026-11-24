@@ -97,6 +97,19 @@ with open(os.path.join(EV, "result.json"), "w") as fh:
     )
 
 
+def _result_then_exit(code: int) -> str:
+    """A checker that writes a complete, correctly bound result, then exits *code*."""
+    return _checker(
+        f"""
+with open(os.path.join(EV, "result.json"), "w") as fh:
+    json.dump({{"schema": 1, "head_sha": HEAD, "round_id": RID,
+               "status": "complete", "roles_covered": ROLES,
+               "detail": "x"}}, fh)
+sys.exit({code})
+"""
+    )
+
+
 def _result_with(overrides: dict[str, object]) -> str:
     """A checker whose otherwise-valid result carries *overrides* (a bad field)."""
     return _checker(
@@ -306,6 +319,8 @@ def test_status_failed_blocks_non_retryable(
     ("body", "reason"),
     [
         (_checker("sys.exit(3)\n"), "checker_exit_nonzero"),
+        # A complete, correctly bound result must not rescue a failing exit.
+        (_result_then_exit(3), "checker_exit_nonzero"),
         (_checker("sys.exit(0)\n"), "result_missing"),
         (
             _checker("open(os.path.join(EV, 'result.json'), 'w').write('{}')\n"),
@@ -328,6 +343,7 @@ def test_status_failed_blocks_non_retryable(
     ],
     ids=[
         "exit-nonzero",
+        "exit-nonzero-with-complete-result",
         "result-missing",
         "result-invalid",
         "result-symlink",
