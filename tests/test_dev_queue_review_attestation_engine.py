@@ -674,3 +674,19 @@ class TestSameRoundDeferral:
         assert att is not None
         assert att.counts.should_fix == 0
         assert att.counts.debt == 2
+
+
+class TestCompletionCheckedHead:
+    """Regression pins for a head whose completion check failed (#3885)."""
+
+    def test_earlier_passing_summary_at_same_head_stays_legitimate(
+        self, tmp_path: Path
+    ) -> None:
+        # Regression pin (parked item 2): a passing round at H, then a later round at
+        # H that fails the check. The earlier COMPLETE/PASS summary is bound to H and
+        # was valid under the manifest in force when it ran, so the clean attestation
+        # built from it is existing behaviour and is not changed by #3885.
+        worktree = _worktree(tmp_path)
+        _round(worktree, "round-earlier", make_summary(), 10)
+        _task, att = _exit(worktree, engine_client(tmp_path))
+        assert att is not None

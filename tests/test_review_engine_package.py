@@ -115,6 +115,7 @@ def test_failure_and_refusal_vocabularies_are_pinned() -> None:
         "engine_unresolvable",
         "engine_role_failed",
         "engine_aggregation_failed",
+        "engine_completion_check_failed",
     }
     assert {r.value for r in EngineRouteRefusalCode} == {
         "engine_reject_forbidden",

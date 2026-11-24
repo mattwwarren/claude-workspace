@@ -96,6 +96,8 @@ class EngineRoundFailure(StrEnum):
     ENGINE_ROLE_FAILED = "engine_role_failed"
     #: Codex lane only (#3216): the aggregation turn produced no valid output.
     ENGINE_AGGREGATION_FAILED = "engine_aggregation_failed"
+    #: Codex lane only (#3885): the completion checker failed or was unusable.
+    ENGINE_COMPLETION_CHECK_FAILED = "engine_completion_check_failed"
 
 
 class EngineRouteRefusalCode(StrEnum):
@@ -127,7 +129,40 @@ FRICTION: Final[dict[EngineRoundFailure, str]] = {
     EngineRoundFailure.ENGINE_AGGREGATION_FAILED: (
         "engine_aggregation_failed: {reason}"
     ),
+    EngineRoundFailure.ENGINE_COMPLETION_CHECK_FAILED: (
+        "engine_completion_check_failed: {reason}"
+    ),
 }
+
+#: ``{reason}`` values ``engine_completion_check_failed`` carries (#3885).
+COMPLETION_REASON_CHECKER_MISSING: Final = "checker_missing"
+COMPLETION_REASON_CHECKER_NOT_EXECUTABLE: Final = "checker_not_executable"
+COMPLETION_REASON_CHECKER_LAUNCH_FAILED: Final = "checker_launch_failed"
+COMPLETION_REASON_CHECKER_EXIT_NONZERO: Final = "checker_exit_nonzero"
+COMPLETION_REASON_CHECKER_TIMEOUT: Final = "checker_timeout"
+COMPLETION_REASON_EXTRACT_FAILED: Final = "extract_failed"
+COMPLETION_REASON_RESULT_MISSING: Final = "result_missing"
+COMPLETION_REASON_RESULT_INVALID: Final = "result_invalid"
+COMPLETION_REASON_STATUS_FAILED: Final = "status_failed"
+COMPLETION_REASON_WORKTREE_MUTATED: Final = "worktree_mutated"
+COMPLETION_REASON_HEAD_MOVED: Final = "head_moved"
+COMPLETION_REASON_CHECK_UNVERIFIABLE: Final = "check_unverifiable"
+COMPLETION_FAILED_REASONS: Final = frozenset(
+    {
+        COMPLETION_REASON_CHECKER_MISSING,
+        COMPLETION_REASON_CHECKER_NOT_EXECUTABLE,
+        COMPLETION_REASON_CHECKER_LAUNCH_FAILED,
+        COMPLETION_REASON_CHECKER_EXIT_NONZERO,
+        COMPLETION_REASON_CHECKER_TIMEOUT,
+        COMPLETION_REASON_EXTRACT_FAILED,
+        COMPLETION_REASON_RESULT_MISSING,
+        COMPLETION_REASON_RESULT_INVALID,
+        COMPLETION_REASON_STATUS_FAILED,
+        COMPLETION_REASON_WORKTREE_MUTATED,
+        COMPLETION_REASON_HEAD_MOVED,
+        COMPLETION_REASON_CHECK_UNVERIFIABLE,
+    }
+)
 
 #: ``{reason}`` values ``engine_role_failed`` carries: a ``ReviewerRunFailure``
 #: reason, or the two engine-round-only causes.

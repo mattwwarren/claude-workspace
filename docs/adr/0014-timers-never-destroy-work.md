@@ -169,6 +169,29 @@ claim invariant 1 already permits it, and it is not a general license.
   any other mutation) on age under this section. Any other age-gated
   destructive act still needs a new ADR (invariant 3).
 
+## Clarification (#3885): the review-engine completion check's bounded process group
+
+The review-engine `completion_check` (codex lane, manifest key) runs a
+repository-declared checker between the role turns and the aggregation turn. It
+is bounded by `completion_check.timeout_seconds` (default 300, at most 900).
+That bound is authorized by operator ruling on #3885. Like the #2910
+Clarification, this section records that authorization; it does not claim the
+ADR text above, read literally against ARCHITECTURE §8 #13, already permits it.
+
+A bound on a child process cw itself launches does not destroy work, and it is
+not the quiet-for-N-minutes disposition ARCHITECTURE §8 #13 forbids, for four
+reasons:
+
+- **(a)** The bounded process is a cw-launched subprocess, not a session, a
+  row or a worktree.
+- **(b)** Nothing is reverted, stamped `TIMED_OUT` or removed on expiry. The
+  only effect is a blocked round that surfaces as `agent_block` and parks the
+  row; an operator requeue releases it and re-runs the round.
+- **(c)** The checker's result is a pure function of the reviewed head, so a
+  killed run loses no operator evidence and no worker work.
+- **(d)** The bound is declared in the manifest, capped at 900 seconds, and
+  kills only that process group.
+
 ## Alternatives considered
 
 - **Keep timers but route everything through `signal_only`.** Rejected: the

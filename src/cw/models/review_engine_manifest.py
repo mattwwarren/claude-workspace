@@ -39,6 +39,11 @@ MAX_ENGINE_SPEC_BYTES = 65_536
 
 ENGINE_ROLE_ID_RE = r"^[a-z0-9][a-z0-9-]*$"
 
+#: Seconds a ``completion_check`` may run before cw kills its process group (#3885).
+DEFAULT_COMPLETION_TIMEOUT_SECONDS = 300
+MIN_COMPLETION_TIMEOUT_SECONDS = 1
+MAX_COMPLETION_TIMEOUT_SECONDS = 900
+
 # Kept as a private compatibility alias for the model tests; the backend
 # identifier itself is owned by the dependency-free configuration constants.
 _CODEX: Final = CODEX_BACKEND
@@ -76,6 +81,26 @@ class EngineRole(BaseModel):
     )
 
 
+class EngineCompletionCheck(BaseModel):
+    """An opt-in checker cw runs between the role turns and aggregation (#3885)."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    path: str = Field(
+        min_length=1,
+        description=(
+            "Path to the checker inside the skill directory, relative to it; "
+            "cw runs it from the default-branch git bytes."
+        ),
+    )
+    timeout_seconds: int = Field(
+        default=DEFAULT_COMPLETION_TIMEOUT_SECONDS,
+        ge=MIN_COMPLETION_TIMEOUT_SECONDS,
+        le=MAX_COMPLETION_TIMEOUT_SECONDS,
+        description="Seconds before cw kills the checker's process group.",
+    )
+
+
 class EngineManifest(BaseModel):
     """The ``cw-engine.json`` a codex-capable review engine commits."""
 
@@ -99,6 +124,13 @@ class EngineManifest(BaseModel):
         description=(
             "Path to the aggregation-turn prompt file, relative to the "
             "manifest's directory."
+        ),
+    )
+    completion_check: EngineCompletionCheck | None = Field(
+        default=None,
+        description=(
+            "Optional checker run after the role turns and before aggregation; "
+            "its path is checked by cw.review_engine_manifest_io."
         ),
     )
 

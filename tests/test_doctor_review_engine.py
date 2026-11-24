@@ -500,3 +500,67 @@ def test_capability_is_silent_for_a_lane_without_review(tmp_path: Path) -> None:
         stages=[Stage.PLAN, Stage.IMPL, Stage.FINALIZE]
     )
     assert _capability_results(client) == []
+
+
+CHECKER_DIR = Path(__file__).parent / "fixtures" / "review_engine_checker"
+
+
+def test_codex_lane_with_an_executable_checker_emits_nothing(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    repo = make_engine_repo(make_git_repo, engine_files=CHECKER_DIR)
+    assert _check_review_engine({"acme": _codex_client(repo.worktree)}) == []
+
+
+def test_codex_lane_with_a_non_executable_checker_warns(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+) -> None:
+    from tests._shared.engine_round_helpers import make_checker_repo
+
+    repo = make_checker_repo(make_git_repo, tmp_path, "x\n", mode=0o644)
+    results = _check_review_engine({"acme": _codex_client(repo.worktree)})
+    assert len(results) == 1
+    assert results[0].name.startswith("review-engine/acme/")
+    assert results[0].warn is True
+    assert "checker_not_executable" in results[0].detail
+    assert "engine_completion_check_failed" in results[0].detail
+
+
+def test_completion_probe_is_cached_and_quiet_without_a_loaded_manifest(
+    make_git_repo: Callable[..., Path],
+) -> None:
+    from cw.doctor.review_engine import _ClientManifest
+
+    repo = make_engine_repo(make_git_repo)
+    manifest = _ClientManifest(_codex_client(repo.worktree), _SKILL)
+    assert manifest.completion_problem() is None
+    assert manifest.completion_problem() is None
+
+
+def test_unresolved_default_branch_is_reported_as_unverifiable(
+    make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import cw.doctor.review_engine as doctor_review
+
+    repo = make_engine_repo(make_git_repo, engine_files=CHECKER_DIR)
+    monkeypatch.setattr(doctor_review, "resolve_default_branch_ref", lambda *_a: None)
+    manifest = doctor_review._ClientManifest(_codex_client(repo.worktree), _SKILL)
+    assert manifest.completion_problem() == "checker_unverifiable"
+
+
+def test_unreadable_skill_is_reported_as_unverifiable(
+    make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import cw.doctor.review_engine as doctor_review
+    from cw.review_engine.skill import SkillResolutionError
+
+    repo = make_engine_repo(make_git_repo, engine_files=CHECKER_DIR)
+
+    def unreadable(*_args: object) -> object:
+        error = SkillResolutionError("skill_unreadable", "boom")
+        raise error
+
+    monkeypatch.setattr(doctor_review, "resolve_skill", unreadable)
+    manifest = doctor_review._ClientManifest(_codex_client(repo.worktree), _SKILL)
+    assert manifest.completion_problem() == "checker_unverifiable"

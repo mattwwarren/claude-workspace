@@ -4239,6 +4239,12 @@ operator-settle` for that gap (the only command that clears ledger held memory;
 `cw review settle` writes only the dev-queue row marker), or restore the missing
 capability and requeue. The override never clears held memory itself.
 
+**Codex completion check: `engine_completion_check_failed` (#3885).** A codex
+engine that declares `completion_check` in its manifest fails the round as
+`agent_block` with `engine_completion_check_failed: <reason>`. It is not
+retry-eligible. A checker timeout is released by an operator requeue, not
+auto-retried.
+
 **Park: `review_engine_modified` (RFC 0017, #3039).** A client with
 `review.engine` set runs its own review skill as the Claude-native round
 engine. The review stage runs `cw review engine preflight` first; when the

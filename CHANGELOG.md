@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Codex review engines can declare an opt-in completion check (#3885).** A `completion_check` key in `cw-engine.json` names a checker inside the skill directory. cw runs it from default-branch git bytes after the role turns and before aggregation, and blocks the round as `engine_completion_check_failed` unless its `result.json` binds the head and round. Engines without the key are unchanged.
+
 ### Fixed
 
 - **A Codex IMPL turn is no longer discarded over one mistyped result field.** The turn returns its result as free-form JSON inside a string, so its inner fields are unconstrained. A non-integer `scope.lines_estimate`, a missing `scope.forbidden_touched` or a prose string inside `ambiguities` used to fail validation, park the row `validation_failed` and throw away the turn's finished edits. cw now sets the estimate to the measured lines, sets a missing `forbidden_touched` to false and moves prose ambiguities into `friction_highlights`, with one friction line per repair. A `forbidden_touched` value the schema cannot read, a scope that is not an object and a non-list `ambiguities` still fail.

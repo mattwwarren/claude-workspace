@@ -1505,6 +1505,7 @@ the strings echoes finding text.
 | `engine_unresolvable` | `materialize`, and `converge config` through `engine_error` | `engine_unresolvable: <skill> (<cause>)`, cause one of `skill_not_found`, `skill_unreadable`, `materialize_failed`, `default_branch_unresolved` |
 | `engine_role_failed` | codex lane only (#3216): a role turn failed, so the aggregation turn is skipped | `engine_role_failed: <role> (<reason>)`, reason one of `codex_timeout`, `codex_error`, `codex_review_unparseable`, `budget_exhausted`, `failed_document`, `unreviewed_shard` |
 | `engine_aggregation_failed` | codex lane only (#3216): the aggregation turn produced no valid output | `engine_aggregation_failed: <reason>`, reason one of `codex_timeout`, `codex_error`, `codex_model_capacity`, `codex_input_too_large`, `missing_output`, `empty_output`, `invalid_json`, `schema_mismatch` |
+| `engine_completion_check_failed` | codex lane only (#3885): the manifest's `completion_check` failed, timed out, or produced no valid result, after the role turns and before the aggregation turn | `engine_completion_check_failed: <reason>`, reason one of `checker_missing`, `checker_not_executable`, `checker_launch_failed`, `checker_exit_nonzero`, `checker_timeout`, `extract_failed`, `result_missing`, `result_invalid`, `status_failed`, `worktree_mutated`, `head_moved`, `check_unverifiable` |
 
 On the codex lane every failure above is `blocker.reason: "agent_block"` and
 the friction string goes in `blocker.details` (the lane records no workspace
@@ -1516,8 +1517,16 @@ and transient role or aggregation failures (`codex_timeout`,
 could not create the aggregation scratch dir or write its schema file (#3436);
 the friction string names the summary path either way. It is an environment
 failure outside the transient policy, so a plain requeue would hit the same
-path), for `engine_worktree_mutated`, and for non-transient role or aggregation
-failures.
+path), for `engine_worktree_mutated` (also when a role dirtied the tree before a
+declared completion check ran), for `engine_completion_check_failed`, and for
+non-transient role or aggregation failures.
+
+A checker timeout is `engine_completion_check_failed` with reason
+`checker_timeout` and is not retry-eligible, so a timeout caused by host load is
+released by an operator requeue and is not auto-retried. The timeout bounds only
+the cw-launched checker process group, authorized by operator ruling on #3885;
+ADR-0014 (`docs/adr/0014-timers-never-destroy-work.md`, Clarification (#3885))
+records why that bound does not destroy work.
 
 The adjudication refusal codes are `engine_reject_forbidden`,
 `engine_non_deferrable` and `engine_must_fix_defer_requires_operator`.
@@ -1529,6 +1538,15 @@ the skill's `guarded_paths`. Files the engine reads or runs that sit outside
 both are not guarded: a branch can change them without the park, and the
 engine will then run against the changed file. List every file the engine
 invokes in `guarded_paths`. cw does not discover them.
+
+**Completion checker trust boundary (#3885).** A declared `completion_check`
+runs from git bytes of the default branch, never the worktree or the
+materialized copy. Its imports and data files must live under the skill
+directory or `guarded_paths`. There is no OS sandbox: read-only is enforced the
+way the engine already enforces it, by `engine_precheck`, run once before the
+checker and once after it. Residual risk: file-borne credentials and network
+access are reachable by the checker, and a transitive import outside the skill
+directory and `guarded_paths` is not covered by the engine-change guard.
 
 ### 12.14 Codex Engine Manifest `cw-engine.json` (#3216)
 
@@ -1553,6 +1571,24 @@ The model is `cw.models.review_engine_manifest.EngineManifest`, and
   `field_path` like the summary loader's. A rejection whose `field_path`
   starts with `backends` is the refusal cause `codex_not_declared`; every other
   rejection is `manifest_invalid`; a missing manifest is `no_codex_manifest`.
+- **`completion_check` (#3885).** An optional object
+  `{path, timeout_seconds}`. `path` names the checker inside the skill
+  directory (relative, no `..`, a regular file cw resolves; it is never read as
+  text). `timeout_seconds` is an integer from 1 to 900, default 300. Keys are
+  strict. The checker runs after the role turns and before the aggregation
+  turn, with the arguments `--head-sha`, `--round-id`, `--worktree`,
+  `--evidence-dir` and `--roles` (comma-separated), no shell, a cwd of a fresh
+  directory under the worker `TMPDIR`, and an environment of `PATH` and `LANG`
+  (each only when set) plus `TMPDIR`. It writes
+  `<round dir>/completion/result.json` (at most 64 KiB): `schema` 1,
+  `head_sha`, `round_id`, `status` (`complete`, `incomplete` or `failed`),
+  `roles_covered` (a superset of the manifest roles is accepted) and a `detail`
+  of at most 200 characters. The result must bind the pinned head and round id.
+  Output is never echoed into friction. A background helper must redirect its
+  output, otherwise the run is reported as `checker_timeout`. The checker file
+  must be inside the skill directory. A manifest with the key is rejected as
+  `schema_invalid` by a cw that predates #3885 (fail-closed); the manifest
+  version stays `1`.
 - **The round.** Every codex engine round reviews the full diff at the tip,
   on cycle 0 and on every re-review, and runs the section 12.11 `preflight`
   check first. Roles run sequentially under the lane's shared
@@ -1570,6 +1606,10 @@ compares SHAs itself. The PR-body section that carries the verdict is section
 13.7.
 
 ### 13.1 When an attestation is written
+
+A head whose completion check failed cannot reach the ledger-only attestation,
+because a blocked completion round never records a clean sha (#3885; pinned by
+`TestCompletionCheckedHead`).
 
 The builder is `cw.dev_queue.review_attestation.record_review_attestation`. It
 runs no git, no `gh` and no subprocess, and takes no lock (ADR-0019: both call
