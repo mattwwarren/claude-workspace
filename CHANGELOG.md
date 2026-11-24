@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.109.0] - 2026-11-24
+
 ### Added
 
 - **Codex review engines can declare an opt-in completion check (#3885).** A `completion_check` key in `cw-engine.json` names a checker inside the skill directory. cw runs it from default-branch git bytes after the role turns and before aggregation, and blocks the round unless its `result.json` binds the head and round and reports `complete` coverage of every role: a stale or incomplete result surfaces as `engine_head_mismatch` or `engine_coverage_incomplete`, any other failure as `engine_completion_check_failed`. Engines without the key are unchanged.
