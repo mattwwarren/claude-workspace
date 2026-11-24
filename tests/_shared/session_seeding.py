@@ -15,8 +15,12 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from cw.config import load_state, save_state
+from cw.dev_queue import save_dev_queue
+from cw.dispatch import apply_staged_decision
 from cw.models import (
+    ClientConfig,
     CwState,
+    DevQueueStore,
     OrchestratorEventType,
     QueueItemStatus,
     Session,
@@ -313,6 +317,23 @@ def _make_ticket_task(**overrides: object) -> TicketTask:
     }
     kwargs.update(overrides)
     return TicketTask.model_validate(kwargs)
+
+
+def _route_blocked(task: TicketTask, last: dict[str, object]) -> TicketTask:
+    """Route *task* through ``apply_staged_decision`` with a ``blocked`` *last*.
+
+    Saves *task* as the sole dev-queue row first, against a ``test-client``
+    whose workspace does not exist. Hoisted from the reuse-path gate-timeout
+    routing tests (#3380); returns *task*, mutated in place.
+    """
+    clients = {
+        "test-client": ClientConfig(
+            name="test-client", workspace_path=Path("/nonexistent/repo")
+        )
+    }
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    apply_staged_decision(task, "blocked", last, clients)
+    return task
 
 
 def make_cancelled_row(
