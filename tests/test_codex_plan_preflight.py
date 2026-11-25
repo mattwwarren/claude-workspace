@@ -24,6 +24,7 @@ from cw.codex_plan._preflight import (
     origin_sync_block,
     read_origin_sync,
 )
+from cw.dispatch import TICK_STALE_SECONDS
 from cw.worktree import FetchOutcome, FetchResult, active_tick_fetch
 from tests._doctor_helpers import make_client
 from tests._shared.git_repos import add_bare_origin, commit_tracked_file, git_in
@@ -254,15 +255,15 @@ class TestFetchBound:
         assert any("origin sync skipped for main" in m for m in warnings), warnings
 
     def test_the_wait_constants_match_the_tick_stale_window(self) -> None:
-        assert WAIT_ATTEMPTS * WAIT_INTERVAL_SECONDS == 90
+        assert WAIT_ATTEMPTS * WAIT_INTERVAL_SECONDS == TICK_STALE_SECONDS
 
 
 class TestRealGit:
     def test_read_origin_sync_counts_local_commits_against_origin(
-        self, make_git_repo: Callable[..., Path]
+        self, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
     ) -> None:
-        repo = make_git_repo("preflight-real")
-        add_bare_origin(repo)
+        repo, _origin = make_git_repo_with_origin("preflight-real")
+        git_in(repo, "checkout", "main")
         branch = "main"
         in_sync = read_origin_sync(repo, branch)
         assert in_sync is not None
@@ -310,6 +311,11 @@ class TestRunWiring:
         self, harness: Callable[..., Harness]
     ) -> None:
         h = harness()
+        # The harness seeds clients.yaml with workspace_path = the worktree, so
+        # fetch_default_branch (which runs in the client's git dir) and
+        # read_origin_sync (which runs in the worktree) reach the same repo
+        # here; the origin remote is added to it by hand. In production the
+        # two are different directories.
         add_bare_origin(h.worktree)
         commit_tracked_file(h.worktree, "local.py")
         result = h.run()
