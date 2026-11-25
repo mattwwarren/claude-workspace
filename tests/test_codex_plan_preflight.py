@@ -169,6 +169,13 @@ class TestDecisions:
         assert result.blocker.retry_eligible is True
         assert result.blocker.retry_delay_seconds is None
         assert result.next_actions == ["sync_local_main"]
+        assert result.blocker.message == (
+            "Local main is not in sync with origin/main; pipeline aborted before impl"
+        )
+        assert result.blocker.recovery_hint == (
+            "Orchestrator: push or rebase local main "
+            "(git push origin main / git pull --ff-only), then re-dispatch"
+        )
 
     def test_a_non_default_branch_is_the_one_compared(self, tmp_path: Path) -> None:
         seen: list[str] = []

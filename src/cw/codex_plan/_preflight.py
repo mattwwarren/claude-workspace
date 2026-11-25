@@ -42,6 +42,15 @@ WAIT_INTERVAL_SECONDS: Final = 30
 DIVERGED_REASON: Final = "local_main_diverged_from_origin"
 _STAGE_REACHED: Final = "stage1_pre_flight"
 _NEXT_ACTIONS: Final = ["sync_local_main"]
+#: The Step P3 sentinel's ``message`` and ``recovery_hint``, verbatim
+#: (``auto-dev-intake-appendix.md``).
+_MESSAGE: Final = (
+    "Local main is not in sync with origin/main; pipeline aborted before impl"
+)
+_RECOVERY_HINT: Final = (
+    "Orchestrator: push or rebase local main "
+    "(git push origin main / git pull --ff-only), then re-dispatch"
+)
 
 
 @dataclass(frozen=True)
@@ -109,13 +118,7 @@ def _block(
         f"local_main={sync.local_sha}, origin_main={sync.origin_sha}, "
         f"ahead={sync.ahead}, behind={sync.behind}"
     )
-    result = _pre_flight_block(ticket_id, worktree, details)
-    _log.info("codex plan: %s not in sync with origin (%s)", branch, details)
-    return result
-
-
-def _pre_flight_block(ticket_id: str, worktree: Path, details: str) -> AutoDevResult:
-    return make_blocked(
+    result = make_blocked(
         ticket_id=ticket_id,
         worktree=worktree,
         reason=DIVERGED_REASON,
@@ -125,6 +128,17 @@ def _pre_flight_block(ticket_id: str, worktree: Path, details: str) -> AutoDevRe
         stage_reached=_STAGE_REACHED,
         next_actions=list(_NEXT_ACTIONS),
     )
+    blocker = result.blocker
+    if blocker is not None:
+        result = result.model_copy(
+            update={
+                "blocker": blocker.model_copy(
+                    update={"message": _MESSAGE, "recovery_hint": _RECOVERY_HINT}
+                )
+            }
+        )
+    _log.info("codex plan: %s not in sync with origin (%s)", branch, details)
+    return result
 
 
 def origin_sync_block(
