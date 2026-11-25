@@ -3665,6 +3665,61 @@ ref) is reported as
 `review_tip_check: stale`. Only a small tier outside clean mode re-arms, plus one clean-mode exception (#2921, #3375): the recipe re-arms a clean-mode PR whose ledger is converged at the old head when the rebuilt tree is proven unchanged. The proof is an aggregate tree proof, not a per-commit one (#3375): the new head's non-CHANGELOG tree must equal exactly the tree `git merge-tree --write-tree` writes for the pinned default-branch commit and the reviewed head, the CHANGELOG delta must be confined (the default branch's released sections byte-identical, no line deleted, every added line inside the default branch's `[Unreleased]` span and one the reviewed head itself added, with blank lines and a `### <Name>` heading the reviewed head carried exempt from the provenance check), and the recipe may have added at most one CHANGELOG-only commit with at least one branch commit surviving. The recipe then remaps `last_clean_sha` to the new head and appends an audit entry to `clean_sha_remaps` (`commits` is the number of branch commits carried), and the strict tip rule accepts that head unchanged. The decision is to carry the review forward, extending the #2921 carry: the earlier per-commit `git range-diff` proof read `=` only when git's union merge happened to reproduce identical context lines, so almost every PR whose branch commit carries its own `[Unreleased]` bullet (rewritten by the union rebase or by main's text written over a CHANGELOG-only stop) read `!`, `<` or `>` and re-ran a full review. Reviews cover the cumulative diff, never the commit shape, and the proof applies ADR-0022 rule 3's standard (accept a head exactly when git itself would write it) to a rebase. What is lost: detection of a changed commit shape (a squash, reorder or message edit with the same net tree), which nothing reviewed. Rejected alternatives: accepting the re-review (leaves the common raced-pair case parked), having the recipe merge instead of rebuild (the rebuilt CHANGELOG in the merge commit is not what git would write, so `verify-tip` still needs a delta-confirm round, and the push flow differs), and carrying `review_attestation` / `review_approved_sha` (not done). The default branch is pinned to one commit sha for the whole repair (the three-blob read, the rebase, the non-CHANGELOG verify and the proof), and a merge-base that moves between prepare and the pin stops the repair before any write. Any other case stays unarmed with `commits_after_clean_round`, and the page's detail says why where a remap note applies. `; ledger remap skipped: <reason>` names only a refusal of the tree proof: a stray non-CHANGELOG path, a CHANGELOG deletion or released-section change, a CHANGELOG line outside `[Unreleased]` or one the reviewed head never added, a conflict on a non-CHANGELOG file, an unavailable merge-tree, or zero surviving commits. A proven carry that the ledger itself refuses reads `; ledger remap refused: <reason>`: an unconverged ledger or one with an unconfirmed round open, no `last_clean_sha`, or a `last_clean_sha` that is not the old head (including a ledger tolerated past a default merge). A refused or failed ledger write reads `; ledger remap not written: <reason>`. These cases add no remap note and name their own cause instead, still unarmed: a missing, unreadable or foreign ledger (`no convergence ledger at ...`, `ledger ... belongs to ...`) and a row with no worktree return before any remap note is built, and an unreadable origin tip reports that the tip could not be read. A strict `review.default_merge_tolerance: false` client runs no proof and adds no note at all. The large-tier approval fence is unchanged. The carry moves only the ledger's `last_clean_sha`; `review_attestation.head_sha` is not re-pinned, so after a repair the attestation reads `invalid:not_ancestor` and the PR-body Review sign-off is stripped for clients with `review.attestation.pr_section` on, which is cosmetic and neither parks finalize nor forces a review round. The tip rule itself is unchanged and no exempt-path list is added to it; the repair recipe is the only writer of a remapped clean sha (a narrow, proof-carrying exception to ADR-0022's "no exempt-path list"). A PR that was armed before the repair can
 therefore end unarmed; the event's `auto_merge_was_armed` says so.
 
+**Attestation is not carried (#3893).** Decision: the carry stays
+ledger-only. A carried repair does not re-pin `review_attestation.head_sha`
+and writes no new attestation. The cost is accepted: after the repair the
+attestation reads `invalid:not_ancestor`, and a client with
+`review.attestation.pr_section` on loses its PR-body "Review sign-off" section
+when finalize next renders (`cw review signoff render` strips it with
+`friction: review_signoff: stripped_invalid:not_ancestor`). The recipe never
+edits the PR body, so a PR that merges without another finalize pass keeps the
+pre-repair section naming the old head. Finalize is not parked and no review
+round is forced.
+
+- **Reasons.** (1) The attestation is a clean review exit pinned to one
+  commit: `head_sha` names a commit a review exited clean at, and `counts`,
+  `findings`, `acceptance` and the engine summary are bound to it.
+  Re-pinning would make `head_sha` mean "reviewed or carried", and every
+  reader (`cw review attestation check`, `counts` consumers, the 13.7 section,
+  ship gates) would have to tell the two apart. That is a new field and a
+  public contract change (`headless-contract.md` section 13 and
+  `ReviewAttestation`), out of proportion to a cosmetic loss. (2) The carry
+  already has an audit trail, `ConvergenceLedger.clean_sha_remaps`
+  (`CleanShaRemap`: `from_sha`, `rebased_sha`, `to_sha`, `commits`), written by
+  `repair_ledger.persist_remap`; a second record on the attestation would
+  duplicate it. (3) The cost is cosmetic inside cw: the attestation is not a
+  fence input (`repair_fence.py`), and no cw consumer (finalize, dispatch,
+  dev-queue) gates on its verdict, so it never parks finalize or forces a cw
+  review round. Outside cw, a project ship gate that follows the 13.6 consumer
+  rule (run `cw review attestation check`, skip its own reviewer only when
+  `valid`) re-runs its own reviewer after a repair: extra cost, not a block.
+  (4) Precedent: a `delta-confirm` that moves the ledger's clean sha also
+  leaves the attestation behind (13.5(a)), and a fresh review exit writes a new
+  one.
+- **Rejected:** (a) rewrite the attestation: set `head_sha` to the rebuilt head
+  and record a carry. It needs the new field above, changes what an attestation
+  vouches for, and breaks the `head_sha == review_approved_sha` coupling
+  `_refresh_overrides` relies on, because the carry moves neither. (b)
+  verifier-side: have `cw review attestation check` accept `not_ancestor` when
+  the ledger's `clean_sha_remaps` chains the attested head to an ancestor of
+  HEAD. It widens the verifier from "git judges the head" to "git plus a ledger
+  chain walk" for every client, and the ledger is worker-reachable (13.6 trust
+  model). Unlike class (a), where git itself confirms the merge, nothing
+  git-checkable backs a remap chain, so a forged chain could turn
+  `not_ancestor` into `valid`.
+- **Reopen when** any of these holds, by superseding this decision rather than
+  silently contradicting it: a project ship gate, merge gate or branch
+  protection starts requiring `valid` from `cw review attestation check`, so
+  `not_ancestor` after a repair blocks a merge or forces a gate's own review
+  re-run instead of only dropping a section; operators report repaired PRs
+  losing a sign-off section they rely on (repeated `stripped_invalid:not_ancestor`
+  friction on PRs that went through `repair_changelog_conflict`); a second
+  recipe or tool also rewrites a reviewed head, so the verifier needs a general
+  "carried head" concept anyway.
+- **If reopened,** specify the new field in 13.2 and the model together, and add
+  the tests the ticket names: a CHANGELOG-only rebuild keeps a valid attestation
+  with the carry recorded, and any other file difference still invalidates it.
+
 **Release an unarmed repair.** The row is `COMPLETED` at FINALIZE, so
 `--stage review` is refused (a regress of a non-parked row, `requeue.py`; and
 `--from-completed --stage review` fails the same check). Use:
