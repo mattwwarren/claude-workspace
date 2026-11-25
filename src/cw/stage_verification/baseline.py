@@ -212,7 +212,9 @@ def _lines_within_merge(
     non-ASCII merge path still matches.
     """
     z_out = git_output(
-        ["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd=worktree
+        ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        cwd=worktree,
+        errors="surrogateescape",
     )
     lines = [line for line in status.splitlines() if line]
     entries = _status_z_entries(z_out)
@@ -233,6 +235,7 @@ def best_effort_dirty_paths(worktree: Path) -> tuple[str, ...]:
         out = git_output(
             ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
             cwd=worktree,
+            errors="surrogateescape",
         )
     except (subprocess.CalledProcessError, OSError):
         return ()

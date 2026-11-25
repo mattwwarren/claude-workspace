@@ -418,6 +418,9 @@ class TestAdoptedMergeRenamesAndQuotedPaths:
 
 _ACCENTED = "café.txt"
 _ACCENTED_QUOTED = '"caf\\303\\251.txt"'
+# A name that is not valid UTF-8 (the lone byte 0xE9), as a surrogate-escaped str.
+_NON_UTF8 = "caf\udce9.txt"
+_NON_UTF8_QUOTED = '"caf\\351.txt"'
 
 
 class TestAdoptedMergeNonAsciiPaths:
@@ -452,6 +455,28 @@ class TestAdoptedMergeNonAsciiPaths:
         spelled = (merge_files - {_ACCENTED_QUOTED}) | {_ACCENTED}
         baseline = capture_cycle_baseline(repo, merge_files=spelled)
         assert isinstance(baseline, CycleBaseline)
+
+    def test_a_non_utf8_merge_path_is_tolerated(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        merge_files = _unconcluded_rename_merge(repo, added=_NON_UTF8)
+        assert f"A  {_NON_UTF8_QUOTED}" in git_in(repo, "status", "--porcelain")
+        assert _NON_UTF8_QUOTED in merge_files
+        assert _c_quote(_NON_UTF8) == _NON_UTF8_QUOTED
+        baseline = capture_cycle_baseline(repo, merge_files=merge_files)
+        assert isinstance(baseline, CycleBaseline)
+
+    def test_a_non_utf8_path_outside_the_merge_still_refuses_with_its_raw_line(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        merge_files = _unconcluded_rename_merge(repo, added=_NON_UTF8)
+        start = capture_cycle_baseline(
+            repo, merge_files=merge_files - {_NON_UTF8_QUOTED}
+        )
+        assert isinstance(start, DirtyStart)
+        assert start.dirty == (f"A  {_NON_UTF8_QUOTED}",)
 
     @pytest.mark.parametrize(
         ("path", "quoted"),
@@ -702,6 +727,14 @@ class TestBestEffortDirtyPaths:
         git_in(repo, "mv", "a.py", "b.py")
 
         assert best_effort_dirty_paths(repo) == ("a.py", "b.py")
+
+    def test_non_utf8_dirty_path_is_returned_not_raised(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo, "bdp-non-utf8")
+        (repo / _NON_UTF8).write_text("n = 1\n", encoding="utf-8")
+
+        assert best_effort_dirty_paths(repo) == (_NON_UTF8,)
 
     def test_clean_tree_returns_empty(self, make_git_repo: Callable[..., Path]) -> None:
         repo = _repo(make_git_repo, "bdp-clean")
