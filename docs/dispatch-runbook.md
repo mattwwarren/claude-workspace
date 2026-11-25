@@ -4762,10 +4762,9 @@ sandbox, does everything else:
   `kind: plan`, never a row hold. Delivery lags by up to one dispatch tick. On a non-GitHub
   tracker `.cw/plan.md` in the reused worktree is the only durable copy; a
   rebuilt worktree loses it (codex IMPL retrieval is C2).
-- **Deferred.** Comment-path approval and the operator-authority delta
-  (#3465), and the operator-answer fold and the ticket-quote pre-pass
-  (#3909), are not on the codex PLAN lane yet: only `cw dev-queue approve`
-  approves a large plan, and the fast path is fingerprint equality only.
+- **Approval evidence (#3465).** A large codex PLAN is approved by `cw dev-queue approve` (a row approval), by the operator-authority alternate, or by an operator comment token. The alternate holds while no operator comment is newer than the row approval (a `cw dev-queue approve --post-marker` audit comment counts, so it ends the alternate; exact fingerprint equality still works) and the persisted `body_sha` equals the live body's. The token approves only from an identity in `bindings.tickets.operator_ids`, directly after a park, bound to the parked draft: an answer or a revision that changes the plan consumes it. Empty `operator_ids` on GitHub means row evidence only. The `body_sha` anchor rolls each round, so the alternate detects only an edit between consecutive rounds.
+- **Origin sync (#3465).** Before a codex PLAN turn, cw fetches the default branch once (60-second bound, fails open with a WARNING). A local default branch that is ahead of or diverged from origin blocks `local_main_diverged_from_origin` at `stage1_pre_flight`; behind-only is re-read three times at 30-second intervals before it blocks.
+- **Deferred.** The operator-answer fold and the ticket-quote pre-pass (#3909), and the Stage-0 dependency check before a codex PLAN turn (#3912).
 
 **Codex IMPL (#3061, RFC 0018 C2).** A lane whose IMPL stage resolves to
 `codex` runs `cw codex run --stage impl`: one `codex exec` turn under the

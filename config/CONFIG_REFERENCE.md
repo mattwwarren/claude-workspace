@@ -245,7 +245,7 @@ optional and takes:
     `system: github-issues`) and `code_host` (with `system: github`) only. Any
     other value, argv templates included, is rejected.
 - `tickets` only: `operator_ids` (the operator's tracker identities, kept as
-  written; empty by default). GitHub ignores them. On a non-GitHub tracker a
+  written; empty by default). GitHub reads them only to authorize a plan-approval comment token. On a non-GitHub tracker a
   snapshot comment binds a stage (operator comments, steering, the approved
   plan) only when its `author_id` equals one of them, compared casefolded, so
   empty ids bind nothing; the claude-native bindings block lists them.
