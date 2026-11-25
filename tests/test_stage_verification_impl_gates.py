@@ -807,3 +807,34 @@ class TestResolveGuardScript:
         resolved = resolve_guard_script(repo, "check_x.py", 2)
         assert resolved.path == script
         assert resolved.marker_ok is True
+
+
+class TestPlanIdentityNote:
+    """The ``identity_unresolved:`` marker rides on a ``plan_missing`` block only."""
+
+    def test_unresolved_identity_is_named_on_a_plan_missing_block(self) -> None:
+        from cw.stage_verification.impl_gates import (
+            PLAN_IDENTITY_NOTE,
+            note_plan_identity,
+        )
+
+        original = check_plan_present(None, _task())
+        assert original is not None
+        noted = note_plan_identity(original, unresolved=True)
+        assert noted.reason == PLAN_MISSING
+        assert noted.details.startswith(original.details)
+        assert PLAN_IDENTITY_NOTE in noted.details
+        assert "identity_unresolved:" in noted.details
+
+    def test_resolved_identity_leaves_the_block_unchanged(self) -> None:
+        from cw.stage_verification.impl_gates import note_plan_identity
+
+        original = check_plan_present(None, _task())
+        assert original is not None
+        assert note_plan_identity(original, unresolved=False) is original
+
+    def test_the_identity_note_skips_other_blocks(self) -> None:
+        from cw.stage_verification.impl_gates import note_plan_identity
+
+        other = ImplBlock(IMPL_FAILED, "boom")
+        assert note_plan_identity(other, unresolved=True) is other

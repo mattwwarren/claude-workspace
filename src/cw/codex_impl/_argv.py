@@ -15,8 +15,9 @@ Fixed choices:
 * ``--output-schema`` / ``-o``: the strict ``{sentinel}`` document, in a uuid
   scratch directory the driver owns.
 * No ``--skip-git-repo-check``: the turn runs in the ticket worktree.
-* MCP: GitHub tickets are prefetched by cw, so no MCP server is enabled;
-  every declared server is disabled.
+* MCP: ticket text comes from the stage-entry snapshot on every tracker (the
+  courier refresh is a separate turn in ``cw.tracker_io``), so no MCP server
+  is enabled and every declared server is disabled.
 """
 
 from __future__ import annotations

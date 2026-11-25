@@ -52,6 +52,7 @@ from cw.models.client import ReviewConfig
 from cw.models.orchestrator_config.stage import ModelPrice
 from cw.models.review_feedback import ReviewFeedback
 from cw.models.usage import UsageStage, UsageState, UsageUnavailableReason
+from cw.outbox import OutboxRole
 from cw.scope_grants import review_policy_fingerprint
 from cw.stage_verification.impl_block import ImplBlock
 from cw.stage_verification.push import SYNTHETIC_MISMATCH_PREFIX
@@ -84,6 +85,7 @@ from tests._shared.operator_direction_builders import (
     make_operator_constraint,
     make_resolution,
 )
+from tests._shared.outbox_builders import enqueue
 from tests._shared.review_builders import _make_finding, write_review_verdict_envelope
 from tests._shared.scope_grant_builders import GRANT_SLUG, make_grant
 from tests._shared.ticket_context import make_comment, make_snapshot, make_snapshot_from
@@ -1849,3 +1851,112 @@ def test_a_repair_conflict_merges_the_rows_base_and_names_it_in_the_prompt(
     assert merged[2] == git_in(h.worktree, "rev-parse", f"origin/{target}")
     (call,) = h.impl_calls
     assert note in str(call["stdin"])
+
+
+# --- plan recovery and the identity diagnostic on Linear (#3530) ----------------
+
+_APPROVED_LINEAR_PLAN = "<!-- plan-spec-reviewed: 2026-11-19 -->\n" + PLAN
+
+
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
+@pytest.mark.parametrize("mode", ["disabled", "unbound"])
+def test_an_unreachable_courier_server_degrades_and_runs_on_the_last_snapshot(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    h = harness()
+    h.turn()
+    if mode == "disabled":
+        stage_mcp_config(monkeypatch, tmp_path, "codex", "disabled")
+        h.client = _courier_client(tmp_path)
+    else:
+        h.client = _tracked_client(tmp_path, TRACKER_LINEAR).model_copy(
+            update={
+                "bindings": bindings_linear_mcp(
+                    harnesses=("opencode",), operator_ids=["operator-1"]
+                )
+            }
+        )
+
+    result = h.run()
+
+    assert result.status == "stage_complete"
+    assert _refresh_calls(h) == []
+    (impl,) = h.impl_calls
+    assert "Authored test ticket body." in str(impl["stdin"])
+    (degraded,) = events_of(OrchestratorEventType.TICKET_SNAPSHOT_DEGRADED)
+    assert degraded.payload["kind"] == "refresh_failed"
+    assert degraded.payload["reason"] == "courier_unreachable"
+    assert degraded.payload["stage"] == "impl"
+
+
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
+def test_a_pending_plan_post_is_recovered_from_the_outbox_on_linear(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    h = harness(plan=None)
+    h.turn()
+    enqueue(
+        client="test",
+        ticket=normalize_ticket_id(TICKET),
+        marker="plan-s1",
+        producer="codex-plan",
+        role=OutboxRole.TICKETS,
+        parts=[_APPROVED_LINEAR_PLAN],
+    )
+    h.client = _tracked_client(tmp_path, TRACKER_LINEAR)
+
+    result = h.run()
+
+    assert result.status == "stage_complete"
+    assert "plan_recovered: outbox" in result.friction_highlights
+    plan_file = h.worktree / ".cw" / "plan.md"
+    assert plan_file.read_text(encoding="utf-8") == _APPROVED_LINEAR_PLAN
+
+
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
+def test_an_unbound_plan_comment_is_not_recovered_on_linear(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage_mcp_config(monkeypatch, tmp_path, "codex", "enabled")
+    h = harness(plan=None)
+    h.runner.add(
+        stdin_contains(REFRESH_TURN_MARKER),
+        _refresh_reply(
+            comments=[
+                {
+                    "id": "p1",
+                    "author_id": "stranger",
+                    "body": _APPROVED_LINEAR_PLAN,
+                }
+            ]
+        ),
+    )
+    h.client = _courier_client(tmp_path)
+
+    result = h.run()
+
+    _assert_block(result, "plan_missing")
+    assert h.impl_calls == []
+    assert not (h.worktree / ".cw" / "plan.md").exists()
+    assert result.blocker is not None
+    assert "identity_unresolved" not in result.blocker.details
+
+
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
+def test_plan_missing_names_identity_unresolved_with_no_operator_ids(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    h = harness(plan=None)
+    h.client = _tracked_client(tmp_path, TRACKER_LINEAR)
+
+    result = h.run()
+
+    _assert_block(result, "plan_missing")
+    assert result.blocker is not None
+    assert result.blocker.details.startswith(".cw/plan.md is absent")
+    assert "identity_unresolved:" in result.blocker.details
