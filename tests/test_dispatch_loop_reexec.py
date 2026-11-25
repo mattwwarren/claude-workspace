@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import signal
+import time
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
@@ -32,6 +33,7 @@ from tests._clients_yaml import write_clients_yaml
 from tests._loop_identity_helpers import sighup_disposition
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from cw.models import ClientConfig
@@ -95,12 +97,50 @@ def _count_ticks(monkeypatch: pytest.MonkeyPatch, *, real: bool) -> MagicMock:
     return counter
 
 
-def _forbid_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+def _forbid_sleep(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """Fail if the loop's own idle point sleeps; return each idle_wait result.
+
+    Scoped to ``loop_mod.idle_wait``. Patching ``cw.dispatch.loop.time.sleep``
+    would replace the process-wide ``time.sleep``, which stdlib ``subprocess``
+    also polls with while a real ``git fetch`` child runs, so a slow CI worker
+    tripped the guard far from the loop (#3882).
+    """
+    outcomes: list[bool] = []
+
     def _no_sleep(_seconds: float) -> None:
         msg = "the loop slept after a re-exec request"
         raise AssertionError(msg)
 
-    monkeypatch.setattr("cw.dispatch.loop.time.sleep", _no_sleep)
+    def _spy(
+        seconds: float,
+        control: ReexecControl | None,
+        *,
+        sleep: Callable[[float], None],
+    ) -> bool:
+        outcomes.append(idle_wait(seconds, control, sleep=_no_sleep))
+        return outcomes[-1]
+
+    monkeypatch.setattr("cw.dispatch.loop.idle_wait", _spy)
+    return outcomes
+
+
+def test_forbid_sleep_leaves_global_time_sleep_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = time.sleep
+    _forbid_sleep(monkeypatch)
+    assert time.sleep is original
+
+
+def test_forbid_sleep_guard_still_bites_on_an_unrequested_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ticks = _count_ticks(monkeypatch, real=False)
+    # Bound the loop: a neutered guard must fail the assertion, not hang.
+    ticks.side_effect = [DispatchTickResult(spawned=0), KeyboardInterrupt()]
+    _forbid_sleep(monkeypatch)
+    with pytest.raises(AssertionError, match="slept after a re-exec request"):
+        run_dispatch_loop(reexec=ReexecControl())
 
 
 def test_sighup_mid_tick_never_interrupts_tick_and_claim_is_committed(
@@ -115,7 +155,7 @@ def test_sighup_mid_tick_never_interrupts_tick_and_claim_is_committed(
     )
     monkeypatch.setattr("cw.dispatch.gating.usage_limit.reconcile", lambda **_kw: None)
     ticks = _count_ticks(monkeypatch, real=True)
-    _forbid_sleep(monkeypatch)
+    outcomes = _forbid_sleep(monkeypatch)
     payloads = _capture_exit_events(monkeypatch)
     daemon = _SignallingDaemon()
     control = ReexecControl()
@@ -126,6 +166,7 @@ def test_sighup_mid_tick_never_interrupts_tick_and_claim_is_committed(
     assert control.requested is True
     assert len(daemon.spawn_calls) == 1
     assert ticks.call_count == 1
+    assert outcomes == [True]
     rows = load_dev_queue().running()
     assert [row.ticket_id for row in rows] == ["CW-3726"]
     assert rows[0].status == QueueItemStatus.RUNNING
@@ -164,7 +205,7 @@ def test_flag_set_before_first_tick_still_finishes_one_tick_then_exits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ticks = _count_ticks(monkeypatch, real=False)
-    _forbid_sleep(monkeypatch)
+    outcomes = _forbid_sleep(monkeypatch)
     payloads = _capture_exit_events(monkeypatch)
     control = ReexecControl()
     control.requested = True
@@ -172,6 +213,7 @@ def test_flag_set_before_first_tick_still_finishes_one_tick_then_exits(
     run_dispatch_loop(reexec=control)
 
     assert ticks.call_count == 1
+    assert outcomes == [True]
     assert payloads[0] == {
         "normal": True,
         "exception_type": None,
