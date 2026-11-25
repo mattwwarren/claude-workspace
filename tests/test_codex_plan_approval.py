@@ -35,7 +35,7 @@ from cw.codex_plan._resume import (
     OPERATOR_APPROVAL_NO_DELTA,
     fast_path_reason,
 )
-from cw.codex_plan._tracker import observe_tracker
+from cw.codex_plan._tracker import TrackerObservation, observe_tracker
 from cw.gh import BLOCKING_FINDINGS_HEADER
 from cw.plan_fingerprint import compute_body_sha, compute_plan_draft_fingerprint
 from cw.stage_verification.plan_gates import CommentApproval, check_large_tier_approval
@@ -158,7 +158,12 @@ class TestIdentity:
 
 class TestOrdering:
     def test_token_before_the_park_does_not_approve(self) -> None:
-        assert _approving(token_comment(created_at=_OLD), park_comment("p2")) is None
+        early_token = token_comment(created_at=_OLD)
+        later_park = park_comment("p2", created_at=_NEW)
+        assert _approving(early_token, later_park) is None
+        stream = _observe(early_token, later_park).authority_stream
+        assert [e.id for e in stream] == ["c9", "p2"]
+        assert is_stale(stream, "c9") is True
 
     def test_nearest_header_must_be_a_park(self) -> None:
         blocking = make_comment(
@@ -169,6 +174,32 @@ class TestOrdering:
             agent_authored=True,
         )
         assert _approving(park_comment(), blocking, token_comment()) is None
+
+    def test_a_token_alone_in_the_stream_has_no_park_to_follow(self) -> None:
+        """Not stale, so ``follows_park`` is what refuses it."""
+        stream = _observe(token_comment()).authority_stream
+        assert [e.id for e in stream] == ["c9"]
+        assert is_stale(stream, "c9") is False
+        assert follows_park(stream, "c9") is False
+        assert _approving(token_comment()) is None
+
+    def test_a_non_park_header_ahead_of_the_token_is_not_a_park(self) -> None:
+        blocking = make_comment(
+            "b1",
+            body=f"{BLOCKING_FINDINGS_HEADER}\n\nfix it",
+            author_id="cw-bot",
+            created_at=_OLD,
+            agent_authored=True,
+        )
+        stream = _observe(blocking, token_comment()).authority_stream
+        assert [e.id for e in stream] == ["b1", "c9"]
+        assert is_stale(stream, "c9") is False
+        assert follows_park(stream, "c9") is False
+        assert _approving(blocking, token_comment()) is None
+
+    def test_follows_park_of_an_unknown_comment_is_false(self) -> None:
+        stream = _observe(park_comment(), token_comment()).authority_stream
+        assert follows_park(stream, "missing") is False
 
     def test_later_operator_comment_makes_the_token_stale(self) -> None:
         later = make_comment("c10", body="also", author_id=OPERATOR, created_at=_NEW)
@@ -292,6 +323,41 @@ class TestAlternate:
             alternate_holds(no_row, _observe(park_comment()), self._last_evaluated())
             is False
         )
+
+    @pytest.mark.parametrize(
+        ("created", "holds"),
+        [
+            ("2026-11-09T23:59:59Z", True),
+            ("2026-11-10T00:00:00Z", True),
+            ("2026-11-10T00:00:01Z", False),
+        ],
+        ids=["older", "equal-is-not-newer", "after"],
+    )
+    def test_only_a_strictly_newer_operator_comment_ends_the_delta(
+        self, created: str, holds: bool
+    ) -> None:
+        comment = make_comment("c10", body="hi", author_id=OPERATOR, created_at=created)
+        assert no_authority_delta(_APPROVED_AT, _observe(comment)) is holds
+
+    @pytest.mark.parametrize(
+        ("created", "holds"),
+        [("2026-11-09T12:00:00Z", True), ("2026-11-10T12:00:00Z", False)],
+    )
+    def test_a_naive_approval_time_is_compared_as_utc_with_a_real_comment(
+        self, created: str, holds: bool
+    ) -> None:
+        naive = datetime(2026, 11, 10, 6, 0, tzinfo=UTC).replace(tzinfo=None)
+        comment = make_comment("c10", body="hi", author_id=OPERATOR, created_at=created)
+        assert no_authority_delta(naive, _observe(comment)) is holds
+
+    def test_a_non_string_comment_time_fails_closed(self) -> None:
+        observation = TrackerObservation(
+            observed=True, comments=({"id": "c10", "createdAt": 1_700_000_000},)
+        )
+        assert no_authority_delta(_APPROVED_AT, observation) is False
+
+    def test_a_missing_approval_time_fails_closed(self) -> None:
+        assert no_authority_delta(None, _observe(park_comment())) is False
 
     def test_unparsable_comment_time_counts_as_newer(self) -> None:
         bad = make_comment(
