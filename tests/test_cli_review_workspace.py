@@ -4,12 +4,17 @@ the one-shot frame-missing re-prompt (#3096), and the documented clean frame."""
 from __future__ import annotations
 
 import json
+import logging
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from cw.codex_review._context._agent_spec import _REVIEWER_ROLE_AGENT_FILES
 from cw.review_engine.constants import ENGINE_ROLE
+from cw.review_park_findings import (
+    REVIEW_PARK_FINDINGS_RELATIVE_PATH,
+    write_park_findings,
+)
 from tests._review_engine_helpers import invoke
 from tests._shared.review_builders import _doc_payload, _finding_kwargs
 
@@ -17,26 +22,39 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
+    from click.testing import Result
+
 BUILTIN_ROLE = "Code Quality Reviewer"
 
 
-def _init_round(path: Path, roles: Sequence[str]) -> Path:
-    path.mkdir()
+def _invoke_init(
+    path: Path,
+    roles: Sequence[str],
+    *,
+    ticket: str = "T-1",
+    round_id: str = "r1",
+) -> Result:
+    """Run ``workspace init`` without asserting on the exit code."""
     args: list[str] = []
     for role in roles:
         args.extend(["--role", role])
-    result = invoke(
+    return invoke(
         "review",
         "workspace",
         "init",
         "--ticket",
-        "T-1",
+        ticket,
         "--round-id",
-        "r1",
+        round_id,
         *args,
         "--worktree",
         str(path),
     )
+
+
+def _init_round(path: Path, roles: Sequence[str]) -> Path:
+    path.mkdir()
+    result = _invoke_init(path, roles)
     assert result.exit_code == 0, result.output
     return path
 
@@ -203,3 +221,71 @@ def test_every_reviewer_role_records_clean_frame_and_finishes(tmp_path: Path) ->
         str(worktree),
     )
     assert finish.exit_code == 0, finish.output
+
+
+def _seed_park(worktree: Path) -> Path:
+    assert write_park_findings(
+        worktree, ticket_id="T-1", reviewed_sha="c" * 40, text="parked finding"
+    )
+    return worktree / REVIEW_PARK_FINDINGS_RELATIVE_PATH
+
+
+class TestInitClearsParkFindings:
+    """Every successful ``workspace init`` drops the saved park findings (#3762)."""
+
+    def test_started_init_clears_the_artifact(self, tmp_path: Path) -> None:
+        path = tmp_path / "wt"
+        path.mkdir()
+        artifact = _seed_park(path)
+        result = _invoke_init(path, [BUILTIN_ROLE])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["action"] == "started"
+        assert not artifact.exists()
+
+    def test_resumed_init_clears_the_artifact(self, worktree: Path) -> None:
+        artifact = _seed_park(worktree)
+        result = _invoke_init(worktree, [BUILTIN_ROLE, ENGINE_ROLE])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["action"] == "resumed"
+        assert not artifact.exists()
+
+    def test_recovered_result_clears_the_artifact(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.cli.review.workspace.initialize_workspace", lambda *_a, **_k: None
+        )
+        path = tmp_path / "wt"
+        path.mkdir()
+        artifact = _seed_park(path)
+        result = _invoke_init(path, [BUILTIN_ROLE])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == {"recovered": True}
+        assert not artifact.exists()
+
+    def test_a_missing_artifact_is_fine(self, tmp_path: Path) -> None:
+        path = tmp_path / "wt"
+        path.mkdir()
+        result = _invoke_init(path, [BUILTIN_ROLE])
+        assert result.exit_code == 0, result.output
+        assert not (path / REVIEW_PARK_FINDINGS_RELATIVE_PATH).exists()
+
+    def test_a_failed_clear_does_not_fail_the_command(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        path = tmp_path / "wt"
+        (path / REVIEW_PARK_FINDINGS_RELATIVE_PATH).mkdir(parents=True)
+        with caplog.at_level(logging.WARNING, logger="cw.review_park_findings"):
+            result = _invoke_init(path, [BUILTIN_ROLE])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["action"] == "started"
+        assert [r.getMessage().split()[0] for r in caplog.records] == [
+            "review_park_findings_clear_failed"
+        ]
+
+    def test_no_clear_when_initialize_workspace_raises(self, worktree: Path) -> None:
+        artifact = _seed_park(worktree)
+        result = _invoke_init(worktree, [BUILTIN_ROLE], ticket="T-2", round_id="r2")
+        assert result.exit_code != 0
+        assert "belongs to ticket 'T-1'" in result.output
+        assert artifact.exists()

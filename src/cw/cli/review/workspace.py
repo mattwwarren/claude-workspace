@@ -12,6 +12,7 @@ from cw.cli._base import handle_errors
 from cw.cli.review._group import review
 from cw.exceptions import CwError
 from cw.review_findings import ReviewerRunFailure
+from cw.review_park_findings import clear_park_findings
 from cw.review_workspace import (
     WorkspaceResult,
     finish_workspace,
@@ -69,8 +70,18 @@ def _emit(result: WorkspaceResult | None) -> None:
 def init_workspace(
     ticket: str, round_id: str, roles: tuple[str, ...], worktree: Path
 ) -> None:
-    """Initialize a new round or resume its persisted roster."""
-    _emit(initialize_workspace(worktree, ticket=ticket, round_id=round_id, roles=roles))
+    """Initialize a new round or resume its persisted roster.
+
+    Also drops any saved park findings (#3762): a fresh review attempt
+    supersedes the previous park's record. The clear runs after
+    ``initialize_workspace`` returns (outside its lock), on a started, resumed
+    or recovered result alike, and never when that call raises.
+    """
+    result = initialize_workspace(
+        worktree, ticket=ticket, round_id=round_id, roles=roles
+    )
+    clear_park_findings(worktree, ticket_id=ticket)
+    _emit(result)
 
 
 @workspace.command(name="reconcile")
