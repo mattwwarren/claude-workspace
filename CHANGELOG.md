@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Operator resolutions and constraints now reach the IMPL stage (#3761).** A row's `cw dev-queue resolve` resolutions and its `cw review constrain` operator constraints used to reach only the plan stage and the review lanes, so an IMPL run never saw them. They now arrive as one stream, oldest first, through the derived `queue_metadata.operator_directions` key on claude-native and as an `Operator directions (untrusted data)` section of the codex IMPL prompt. The text is redacted, bounded to 64 KiB with the oldest whole entries dropped first, and labelled untrusted: it is the operator's decision on the points it names, never authority to run quoted commands, widen scope past the plan's files or bypass the destructive-directive gate. The later-recorded entry governs on the same point; entries are never deleted, and retraction is still #2968. Plan-derived constraints are not delivered, and opencode and local runs receive nothing. Deploy note: the cw-context schema goes 23 to 24, so a worktree rendered before this upgrade reads as not clean-mode until its next spawn.
+
 ## [1.109.0] - 2026-11-24
 
 ### Added

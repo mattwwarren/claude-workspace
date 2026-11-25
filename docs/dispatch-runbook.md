@@ -4166,6 +4166,12 @@ queue without the list and erases recorded constraints (`constrain` prints a
 `warning:` line when the loop is stale). A review or fix loop already running
 loaded its row snapshot at start and sees a new constraint on its next run.
 
+The `impl` stage also receives the row's resolutions and operator constraints
+(#3761): on claude-native as `queue_metadata.operator_directions`, on codex as
+a prompt section. They arrive as one oldest-first stream under a rule that the
+later-recorded entry governs on the same point; the 64 KiB bound drops the
+oldest whole entries first. opencode and local runs receive nothing.
+
 **Plan decisions for the review lane (#2984).** The plan stage records the
 approved plan's own choices on the same `operator_constraints` list: its
 `## Adopted Assumptions`, `## Non-Goals` and `## Decisions`, each entry carrying

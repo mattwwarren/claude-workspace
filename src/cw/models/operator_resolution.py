@@ -5,7 +5,11 @@ set of answers the operator gives to a plan-stage park. The list lives on
 :attr:`cw.models.TicketTask.operator_resolutions` and is threaded into the
 next worker's ``.claude/cw-context.json`` as
 ``queue_metadata.operator_resolutions``, where the plan stage reads it as
-binding resolutions.
+binding resolutions. The IMPL stage receives them through the derived
+``queue_metadata.operator_directions`` key (a rendering built at spawn, not a
+stored key) and the codex IMPL prompt section (#3761), merged with the row's
+operator constraints oldest first: the later-recorded entry governs on the same
+point, and entries are never deleted (retraction is #2968).
 
 Its own small module (the ``park_comment_marker`` precedent) so
 ``models/tasks.py`` gains only the field. Not re-exported from ``cw.models``:
