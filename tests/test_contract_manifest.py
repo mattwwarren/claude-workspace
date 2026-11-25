@@ -1566,6 +1566,10 @@ _C2_CODE_CELLS = {
         "src/cw/stage_verification/impl_regress_findings.py",
         "regress_review_findings",
     ),
+    "impl.operator-directions": (
+        "src/cw/stage_verification/impl_operator_directions.py",
+        "operator_directions",
+    ),
     "impl.stage-2-completion": ("src/cw/codex_impl/_result.py", "stamp_impl_result"),
     "impl.marker-s2-completion": (
         "src/cw/codex_impl/_result.py",

@@ -134,7 +134,13 @@ from __future__ import annotations
 #     origin_main_branch and origin_main_sha_at_spawn stay on
 #     client.default_branch (ADR-0024). A context below 23 reads as the client
 #     default.
-CW_CONTEXT_SCHEMA_VERSION = 23
+# v24: added `queue_metadata.operator_directions` (#3761) — the row's operator
+#     resolutions and operator-kind constraints delivered to an IMPL run as one
+#     bounded oldest-first stream, `{text, resolutions, constraints, omitted}`,
+#     or null. Derived at spawn by cw.stage_verification.impl_operator_directions,
+#     never persisted on the row; the key is always present. A context below 24
+#     reads as no directions.
+CW_CONTEXT_SCHEMA_VERSION = 24
 
 # Schema version for ``.cw/context.json`` (the ticket context file, not the
 # ``.claude/cw-context.json`` above). History:

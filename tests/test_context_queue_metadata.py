@@ -35,6 +35,11 @@ from cw.models.review_attestation import (
     ReviewAttestation,
 )
 from cw.models.review_feedback import REVIEW_FEEDBACK_KEY, ReviewFeedback
+from tests._shared.operator_direction_builders import (
+    make_impl_row,
+    make_operator_constraint,
+    make_resolution,
+)
 from tests._shared.session_seeding import _make_ticket_task
 from tests._ticket_view_helpers import make_resolutions
 
@@ -331,6 +336,32 @@ class TestRegressReviewFindingsKey:
 
         metadata = build_queue_metadata(TicketTask(ticket_id="T-1", client="c"))
         assert REGRESS_REVIEW_FINDINGS_KEY not in metadata
+
+
+class TestOperatorDirectionsKey:
+    """The #3761 key is derived at spawn, so the pure serializer never emits it."""
+
+    def test_key_constant_is_pinned(self) -> None:
+        from cw.context_queue_metadata import OPERATOR_DIRECTIONS_KEY
+
+        assert OPERATOR_DIRECTIONS_KEY == "operator_directions"
+
+    def test_build_queue_metadata_does_not_emit_the_key(self) -> None:
+        from cw.context_queue_metadata import OPERATOR_DIRECTIONS_KEY
+        from cw.models import TicketTask
+
+        metadata = build_queue_metadata(TicketTask(ticket_id="T-1", client="c"))
+        assert OPERATOR_DIRECTIONS_KEY not in metadata
+
+    def test_entry_holding_row_does_not_emit_the_key(self) -> None:
+        from cw.context_queue_metadata import OPERATOR_DIRECTIONS_KEY
+
+        row = make_impl_row(
+            resolutions=[make_resolution()],
+            constraints=[make_operator_constraint()],
+        )
+
+        assert OPERATOR_DIRECTIONS_KEY not in build_queue_metadata(row)
 
 
 class TestBaseBranchFromContext:

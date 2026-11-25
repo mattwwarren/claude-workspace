@@ -60,6 +60,7 @@ from cw.native_daemon import (
 )
 from cw.reconcile import _csid_from_transcript, ticket_id_for_session
 from cw.session_retention import find_session_by_id
+from cw.stage_verification.impl_operator_directions import with_operator_directions
 from cw.stage_verification.impl_regress_findings import with_regress_findings
 from cw.worker_effort import resolve_worker_effort_args
 from cw.worktree import is_genuinely_live_home_reason, live_home_reason
@@ -768,8 +769,9 @@ def _write_hook_context(
                     "model": "AutoDevResult",
                     "version": AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION,
                 },
-                "queue_metadata": with_regress_findings(
-                    build_queue_metadata(task), task, worktree
+                "queue_metadata": with_operator_directions(
+                    with_regress_findings(build_queue_metadata(task), task, worktree),
+                    task,
                 ),
                 "world_state_snapshot": {
                     "origin_main_sha_at_spawn": origin_sha,

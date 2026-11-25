@@ -17,8 +17,15 @@ Plan-derived entries inform prompts only, as decided scope: they never become
 a guard rule, because they have no retraction path yet.
 
 Append-only: no edit, supersede or revoke path exists here (retraction is
-tracked in #2968). Nothing is delivered through ``queue_metadata``, so there is
-no wire key.
+tracked in #2968). Operator-kind entries, together with the row's operator
+resolutions, are rendered to the IMPL stage through the derived
+``queue_metadata.operator_directions`` key and the codex IMPL prompt section
+(#3761); that is a rendering built at spawn, not a stored key. It merges both
+lists oldest first, and the later-recorded entry governs on the same point.
+That rule is rendering guidance only: the codex fix loop's prohibition guard
+still treats every operator-kind constraint as binding, so a later resolution
+can countermand an earlier constraint in the rendered IMPL text while the guard
+keeps enforcing that constraint, until retraction (#2968) exists.
 
 Its own small module (the ``operator_resolution`` precedent) so
 ``models/tasks.py`` gains only the field. It also holds the pure renderers,
