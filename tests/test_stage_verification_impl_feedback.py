@@ -243,6 +243,7 @@ class TestProbeDefaultBranch:
         assert outcome.block.reason == IMPL_FAILED
         assert outcome.block.details.startswith("merge_conflict_with_default_branch")
         assert "clash.py" in outcome.block.details
+        assert "a non-repair IMPL row does not resolve" in outcome.block.details
         assert outcome.needs_merge is False
 
     def test_conflict_on_repair_row_asks_for_the_merge(
@@ -295,9 +296,22 @@ class TestMergeDefaultOnConflict:
         outcome = merge_default_on_conflict(repo, base_branch="main")
         assert not isinstance(outcome, ImplBlock)
         assert outcome.merge_files == frozenset({"clash.py", "other.py"})
+        assert outcome.conflicted == frozenset({"clash.py"})
         assert (repo / ".git" / "MERGE_HEAD").is_file()
         assert git_in(repo, "ls-files", "-u")
         assert git_in(repo, "cat-file", "-t", outcome.growth_tree) == "tree"
+
+    def test_a_non_ascii_merge_path_keeps_gits_quoted_spelling(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """``merge_files`` is spelled as ``cycle_touched_paths`` spells paths."""
+        commit_tracked_file(repo, "clash.py", "mine\n")
+        _origin_default_moves(repo, tmp_path, "clash.py", "theirs\n")
+        _origin_default_moves(repo, tmp_path, "café.txt", "accent\n")
+        assert probe_default_branch(repo, base_branch="main", repair=True).needs_merge
+        outcome = merge_default_on_conflict(repo, base_branch="main")
+        assert not isinstance(outcome, ImplBlock)
+        assert outcome.merge_files == frozenset({"clash.py", '"caf\\303\\251.txt"'})
 
     def test_an_unmeasurable_merge_is_an_impl_block_and_does_not_merge(
         self, repo: Path

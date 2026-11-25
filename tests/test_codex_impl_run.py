@@ -35,6 +35,7 @@ from cw.config import get_client, load_state, state_dir
 from cw.contract_manifest import RenderError
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.dispatch import apply_staged_decision
+from cw.exceptions import CwError
 from cw.local_runner import UNEXPECTED_ERROR
 from cw.merge_probe import MergeProbe
 from cw.models import (
@@ -72,7 +73,12 @@ from tests._codex_review_helpers import (
 from tests._shared.base_branch_builders import ROW_BASE, push_epic_base
 from tests._shared.bindings_builders import bindings_linear_mcp
 from tests._shared.cli_preflight import _write_tracker_config
-from tests._shared.git_repos import commit_tracked_file, git_in, push_commit_to_origin
+from tests._shared.git_repos import (
+    commit_tracked_file,
+    diverge_origin_default,
+    git_in,
+    push_commit_to_origin,
+)
 from tests._shared.operator_direction_builders import (
     at,
     make_operator_constraint,
@@ -804,18 +810,6 @@ def test_a_tolerated_path_does_not_excuse_an_unlisted_dirty_path_at_start(
     assert h.runner.calls == []
 
 
-def test_existing_branch_work_blocks_before_the_turn(
-    harness: Callable[..., Harness],
-) -> None:
-    h = harness()
-    commit_tracked_file(h.worktree, "prior.py")
-    result = h.run()
-    _assert_block(result, "impl_failed")
-    assert result.blocker is not None
-    assert result.blocker.details.startswith("existing_branch_work")
-    assert h.runner.calls == []
-
-
 def test_merge_conflict_with_default_branch_on_fresh_row_blocks(
     harness: Callable[..., Harness],
 ) -> None:
@@ -1179,6 +1173,50 @@ def test_repair_row_no_plan_adopted_skips_gate2_with_friction_and_plan_source_no
     assert "=== BEGIN CW-INJECTED: Approved plan ===" not in str(call["stdin"])
 
 
+def test_a_no_plan_repair_with_no_validated_files_blocks_before_the_turn(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness(repair=True, plan=None)
+    with patch("cw.codex_impl._run.repair_allowed_files", return_value=None):
+        result = h.run()
+    _assert_block(result, "impl_failed")
+    assert result.blocker is not None
+    assert "no validated files" in result.blocker.details
+    assert h.runner.calls == []
+
+
+def test_a_post_push_stamping_fault_is_a_durable_terminal_block(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    h.turn()
+    with patch("cw.codex_impl._post._stamp_final", side_effect=CwError("stamp")):
+        result = h.run()
+    _assert_block(result, "impl_failed")
+    assert result.blocker is not None
+    assert "was pushed, but cw could not complete the post-push result" in (
+        result.blocker.details
+    )
+    assert h.head()[:12] in result.blocker.details
+    assert h.origin_tip() == h.head()
+
+
+def test_a_post_push_stamping_fault_with_an_unreadable_head_names_unknown(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    h.turn()
+    unreadable = subprocess.CalledProcessError(128, "rev-parse")
+    with (
+        patch("cw.codex_impl._post._stamp_final", side_effect=CwError("stamp")),
+        patch("cw.codex_impl._post.git_output", side_effect=unreadable),
+    ):
+        result = h.run()
+    _assert_block(result, "impl_failed")
+    assert result.blocker is not None
+    assert "IMPL commit unknown was pushed" in result.blocker.details
+
+
 def test_review_feedback_is_injected_as_untrusted_data_between_fences(
     harness: Callable[..., Harness],
 ) -> None:
@@ -1251,9 +1289,7 @@ def test_growth_guard_never_applies_to_a_fresh_row(
 
 def _conflicting_repair(h: Harness, tmp_path: Path) -> None:
     """A repair row whose branch and origin/main both add ``clash.py``."""
-    commit_tracked_file(h.worktree, "clash.py", "mine\n")
-    git_in(h.worktree, "push", "origin", BRANCH)
-    push_commit_to_origin(h.origin, "main", tmp_path / "side", "clash.py", "theirs\n")
+    diverge_origin_default(h.worktree, h.origin, BRANCH, tmp_path / "side")
     _repin(h)
 
 
@@ -1676,26 +1712,25 @@ def test_an_impl_turn_without_usage_is_unavailable_with_a_friction_token(
     assert any(f.startswith("usage_unavailable: ") for f in result.friction_highlights)
 
 
-def test_regressed_review_row_without_verdict_blocks_with_withheld_reason(
+def test_regressed_review_row_without_verdict_resumes_and_says_why_withheld(
     harness: Callable[..., Harness],
 ) -> None:
-    """A REVIEW-regressed row with no verdict still blocks, and says why (#3694)."""
+    """A REVIEW-regressed row with no verdict resumes, and records why (#3694)."""
     h = harness(task_updates={"stage_high_water": Stage.REVIEW})
     commit_tracked_file(h.worktree, "prior.py")
+    h.turn()
     result = h.run()
-    _assert_block(result, "impl_failed")
-    assert result.blocker is not None
-    assert result.blocker.details.startswith("existing_branch_work")
-    assert "regress_review_findings: withheld (artifact_missing)." in (
-        result.blocker.details
+    assert result.status == "stage_complete"
+    assert len(h.impl_calls) == 1
+    assert "regress_review_findings: withheld (artifact_missing)" in (
+        result.friction_highlights
     )
-    assert h.runner.calls == []
 
 
 def test_regressed_review_row_with_verdict_is_not_blocked_before_the_turn(
     harness: Callable[..., Harness],
 ) -> None:
-    """A delivered REVIEW-regress verdict exempts the row from existing_branch_work."""
+    """A delivered REVIEW-regress verdict exempts the row from re-entry planning."""
     h = harness(task_updates={"stage_high_water": Stage.REVIEW})
     commit_tracked_file(h.worktree, "prior.py")
     write_review_verdict_envelope(
@@ -1766,6 +1801,7 @@ def test_merge_target_reads_take_the_base_and_trust_roots_keep_the_default(
     push_epic_base(h.worktree)
     on_branch = _spy(monkeypatch, "cw.codex_impl._run", "check_on_branch")
     facts = _spy(monkeypatch, "cw.codex_impl._run", "git_facts")
+    post_facts = _spy(monkeypatch, "cw.codex_impl._post", "git_facts")
     probe = _spy(monkeypatch, "cw.codex_impl._run", "probe_default_branch")
     fence = _spy(monkeypatch, "cw.codex_impl._run", "check_fix_fence")
     sensitive = _spy(monkeypatch, "cw.codex_impl._run", "no_plan_sensitive_block")
@@ -1777,7 +1813,7 @@ def test_merge_target_reads_take_the_base_and_trust_roots_keep_the_default(
     # Merge-target reads: the row's base.
     assert on_branch[0][1]["base_branch"] == ROW_BASE
     assert on_branch[0][1]["default_branch"] == "main"
-    assert [args[1] for args, _kw in facts] == [ROW_BASE, ROW_BASE]
+    assert [args[1] for args, _kw in [*facts, *post_facts]] == [ROW_BASE, ROW_BASE]
     assert probe[0][1]["base_branch"] == ROW_BASE
     assert fence[0][1]["base_branch"] == ROW_BASE
     # Trust roots: the client default.

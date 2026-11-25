@@ -110,13 +110,24 @@ def grant_task(grants: Sequence[ScopeGrant], **overrides: object) -> TicketTask:
     return _make_ticket_task(**kwargs)
 
 
+def install_real_guard_script(
+    name: str = "check_plan_scope_conformance.py", *, into: Path | None = None
+) -> Path:
+    """Copy a real ``.claude/scripts/<name>`` guard script under *into*.
+
+    *into* defaults to the per-test ``~/.claude/scripts``.
+    """
+    source = _REAL_SCRIPT.with_name(name)
+    target_dir = into if into is not None else Path.home() / ".claude" / "scripts"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / name
+    target.write_bytes(source.read_bytes())
+    return target
+
+
 def install_real_scope_script() -> Path:
     """Copy the repo's real scope script under the per-test ``~/.claude/scripts``."""
-    target_dir = Path.home() / ".claude" / "scripts"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / _REAL_SCRIPT.name
-    target.write_bytes(_REAL_SCRIPT.read_bytes())
-    return target
+    return install_real_guard_script()
 
 
 def drift_details(paths: Sequence[str]) -> str:

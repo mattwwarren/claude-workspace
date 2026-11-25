@@ -429,6 +429,12 @@ def test_impl_addendum_overrides_the_remaining_claude_machinery() -> None:
     assert "Auto-Dev-Stage: impl-complete" in addendum
     assert "{trailer}" not in addendum
     assert "is deferred" in addendum or "are deferred" in addendum
+    # #3529: the re-entry machinery is cw-run; only #3531's gates stay deferred.
+    assert "branch freshness and the merge-conclusion guard are run by cw" in addendum
+    assert "The claimed-test re-run and the mypy-baseline comparison are deferred" in (
+        addendum
+    )
+    assert "resume note for a branch that already carries work" in addendum
 
 
 def test_impl_golden_drops_the_cw_run_blocks() -> None:

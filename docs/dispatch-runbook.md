@@ -4788,11 +4788,38 @@ pushes. cw does everything else:
   `branch`, so it needs its `.cw/plan.md`.
 - **Merge target (RFC 0020 A1, #3781).** The worker's context carries the row's base as top-level `base_branch` (the row's `base_branch`, else the client's `default_branch`), always a non-empty string. claude-native and codex deliver it (codex from RFC 0020 S3b, #3840); opencode and local refuse a row with a non-null base before any agent runs (`base_unsupported_backend`).
 - **Pre-turn guards.** The worktree must be on the row's branch
-  (`queue_metadata.branch`, else `<prefix>/<ticket>`), and a fresh row's branch
-  must carry no commits ahead of its fork point (`impl_failed`,
-  `existing_branch_work`). A failed push leaves a local commit, so a retried
-  fresh row blocks there until you push or reset it. A dirty start parks
+  (`queue_metadata.branch`, else `<prefix>/<ticket>`). A dirty start parks
   `codex_fix_dirty_start` with no turn.
+- **Re-entry on a branch that already carries work (#3529).** cw classifies the
+  entry: `fresh` (no commits ahead of the fork point), `s2_implementing`
+  (commits ahead, HEAD lacks the `Auto-Dev-Stage: impl-complete` trailer) or
+  `past_s2` (HEAD itself carries it). It runs `check_impl_guard_staleness.py`
+  (marker, else a regress into IMPL, else an operator comment newer than HEAD
+  makes the branch stale; an absent script is friction, a stale marker parks
+  `impl_failed` `Pre-Stage Detector Guard: HEADLESS BLOCK`). `s2_implementing`
+  resumes: the turn runs on top of the existing commits (`impl_resumed_from`
+  friction, a `Resume (existing branch work)` prompt section, operator
+  comments newer than HEAD delivered verbatim, gate 2 also scope-checking the
+  earlier commits). `past_s2` and not stale advances with no turn: cw pushes
+  HEAD, verifies origin's tip and stamps `stage_complete` from git facts
+  (`impl_advanced_past_s2` friction, pessimistic health); stale resumes. A
+  resumed turn that changes nothing parks `impl_failed`
+  (`resume_turn_made_no_change`). Repair rows and REVIEW-regressed rows whose
+  findings are delivered keep their own work order. A failed push leaves a
+  local commit that the next arrival advances or resumes.
+- **Unconcluded merge (#3529).** A regress into IMPL that arrives with
+  `MERGE_HEAD` set (FINALIZE's refresh left a conflicted merge of
+  `origin/<base>`) is adopted: the turn resolves the conflicts and cw's one
+  commit concludes the merge (`impl_unconcluded_merge_adopted` friction). Before
+  anything is staged, cw refuses a conflicted file that still holds conflict
+  markers and a conflicted path that is still unmerged with unchanged content;
+  after the commit it checks `MERGE_HEAD` is gone. All three park `impl_failed`
+  with a `merge_in_progress:` prefix. A merge with no regress signal parks
+  `merge_in_progress` too. The dispatch backstop
+  (`unconcluded_finalize_regress_merge`) is lane-agnostic and also covers the
+  codex lane. A repair row's own default-branch merge also gets the two
+  pre-staging guards (conflict markers, an untouched unmerged path), because
+  its merge outcome now records the conflicted paths.
 - **Gates, in order.** Gate 1 parks `empty_diff_blocked`
   (`empty_diff_no_commits`) on an empty net diff against the fork point; the
   plan fence parks `codex_fix_scope_drift`; on repair rows the growth guard
@@ -4826,9 +4853,8 @@ pushes. cw does everything else:
   `scope.tier`, `plan_source` and `review` over the model's sentinel, emits
   `s2_impl_started` / `s2_impl_complete`, completes through the door and
   posts nothing to the tracker.
-- **Deferred.** Tracker-aware plan recovery (#3530); the pre-stage detector
-  guard, resume dispositions, branch freshness and merge-conclusion backstops
-  (#3529); the claimed-test and mypy-baseline gates (#3531).
+- **Deferred.** Tracker-aware plan recovery (#3530); the claimed-test and
+  mypy-baseline gates (#3531).
 
 Two UNVERIFIED items: whether MCP tool calls run under
 `approval_policy=never` (the tracker-IO probe above is the evidence path),

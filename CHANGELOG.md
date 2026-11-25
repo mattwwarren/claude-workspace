@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Codex IMPL re-enters a branch that already carries work instead of refusing it (#3529).** The `existing_branch_work` block is retired. cw classifies the entry (`fresh`, `s2_implementing`, or `past_s2` when HEAD itself carries the `Auto-Dev-Stage: impl-complete` trailer), runs `check_impl_guard_staleness.py` itself, and picks a disposition: resume the turn on top of the existing commits (delivering operator comments newer than HEAD), or advance a not-stale `past_s2` branch with no turn (cw pushes HEAD and stamps `stage_complete` from git facts). A regress into IMPL that arrives with an unconcluded `MERGE_HEAD` is adopted: the turn resolves the conflicts and cw's one commit concludes the merge, refusing leftover conflict markers, an untouched unmerged path and a `MERGE_HEAD` that outlives the commit. New `impl_failed` `details` markers are `merge_in_progress` and `resume_turn_made_no_change`. The eight codex IMPL cells that deferred to #3529 are now implemented. Repair rows and REVIEW-regressed rows whose findings are delivered keep their own work order, but a repair row's own default-branch merge now also gets the pre-staging merge guards (conflict markers, an untouched unmerged path), because its merge outcome now records the conflicted paths.
+
 ## [1.111.0] - 2026-11-25
 
 ### Added

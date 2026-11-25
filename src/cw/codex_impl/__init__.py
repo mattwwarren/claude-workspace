@@ -9,7 +9,10 @@ the cw-stamped sentinel, the stage events and the completion door.
 
 Modules: :mod:`._argv` (the launch site), :mod:`._prompt` (the rendered prompt
 and its injected sections), :mod:`._result` (the turn document, the stamper,
-blocked results and the commit message), :mod:`cw.stage_verification.impl_gates` (the
+blocked results and the commit message), :mod:`._resume` (the resume prompt note
+and the advance sentinel), :mod:`._post` (the early and final result stamping),
+:mod:`cw.stage_verification.impl_resume` (the re-entry classification, staleness
+check and merge adoption, #3529), :mod:`cw.stage_verification.impl_gates` (the
 guards, gates and
 breach mappers), :mod:`cw.stage_verification.impl_feedback` (the live-PR bind and the
 default-branch

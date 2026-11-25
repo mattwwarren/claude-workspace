@@ -20,6 +20,7 @@ from cw.stage_verification.baseline import (
     _CW_REVIEW_ARTIFACTS,
     CycleBaseline,
     DirtyStart,
+    _c_quote,
     best_effort_dirty_paths,
     capture_cycle_baseline,
     cycle_diff,
@@ -27,7 +28,9 @@ from cw.stage_verification.baseline import (
     diff_since,
     stage_cycle,
     staged_cycle_tree,
+    unmerged_paths,
 )
+from tests import _git_sandbox
 from tests._codex_review_helpers import (
     _head_baseline,
     _seed_conflicting_cherry_pick,
@@ -266,6 +269,232 @@ class TestCaptureCycleBaseline:
             capture_cycle_baseline(not_a_repo)
 
 
+class TestAdoptedMergeBaseline:
+    """``merge_files`` adopts one unconcluded merge and nothing else (#3529)."""
+
+    def _merge(self, repo: Path) -> None:
+        _stage_merge_from_other_branch(repo, {"other.py": "o = 1\n"}, squash=False)
+
+    def test_merge_head_is_tolerated_only_when_merge_files_is_given(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        self._merge(repo)
+        refused = capture_cycle_baseline(repo)
+        assert isinstance(refused, DirtyStart)
+        assert refused.markers == ("MERGE_HEAD",)
+        baseline = capture_cycle_baseline(repo, merge_files=frozenset({"other.py"}))
+        assert isinstance(baseline, CycleBaseline)
+        assert baseline.tree_sha == git_in(repo, "rev-parse", "HEAD^{tree}")
+
+    def test_dirty_paths_outside_merge_files_still_refuse(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        self._merge(repo)
+        _write(repo / "stray.py", "s = 1\n")
+        start = capture_cycle_baseline(repo, merge_files=frozenset({"other.py"}))
+        assert isinstance(start, DirtyStart)
+        assert start.markers == ()
+        assert start.dirty == ("?? stray.py",)
+
+    def test_unmerged_paths_outside_merge_files_still_refuse(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        _seed_conflicting_cherry_pick(repo)
+        start = capture_cycle_baseline(repo, merge_files=frozenset())
+        assert isinstance(start, DirtyStart)
+        assert start.unmerged == ("pyproject.toml",)
+
+    def test_unmerged_paths_inside_merge_files_are_tolerated(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        git_in(repo, "checkout", "-b", "side", "main")
+        _write(repo / "a.py", "a = 'theirs'\n")
+        git_in(repo, "commit", "-am", "theirs")
+        git_in(repo, "checkout", "feature")
+        _write(repo / "a.py", "a = 'mine'\n")
+        git_in(repo, "commit", "-am", "mine")
+        merged = _git_sandbox.run(
+            "merge", "--no-commit", "--no-ff", "side", cwd=repo, check=False
+        )
+        assert merged.returncode == 1
+        assert unmerged_paths(repo) == ("a.py",)
+        baseline = capture_cycle_baseline(repo, merge_files=frozenset({"a.py"}))
+        assert isinstance(baseline, CycleBaseline)
+
+    def test_the_other_operation_markers_still_refuse(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        _seed_conflicting_cherry_pick(repo)
+        start = capture_cycle_baseline(repo, merge_files=frozenset({"pyproject.toml"}))
+        assert isinstance(start, DirtyStart)
+        assert start.markers == ("CHERRY_PICK_HEAD",)
+
+    def test_unmerged_paths_is_public_and_sorted(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        assert unmerged_paths(repo) == ()
+        _seed_conflicting_cherry_pick(repo)
+        assert unmerged_paths(repo) == ("pyproject.toml",)
+
+
+def _unconcluded_rename_merge(
+    repo: Path, *, added: str | None = None
+) -> frozenset[str]:
+    """Leave *repo* mid-merge: base side renames ``old.txt``, ``conf.txt`` conflicts.
+
+    *added* is an extra file the base side adds cleanly. Returns the merge's file
+    names, read with the diff ``adopt_unconcluded_merge`` uses.
+    """
+    _write(repo / "old.txt", "old\n")
+    _write(repo / "conf.txt", "base\n")
+    git_in(repo, "add", "old.txt", "conf.txt")
+    git_in(repo, "commit", "-m", "seed")
+    git_in(repo, "checkout", "-b", "side")
+    git_in(repo, "mv", "old.txt", "new.txt")
+    _write(repo / "conf.txt", "theirs\n")
+    if added is not None:
+        _write(repo / added, "added\n")
+    git_in(repo, "add", "-A")
+    git_in(repo, "commit", "-m", "theirs")
+    git_in(repo, "checkout", "feature")
+    _write(repo / "conf.txt", "mine\n")
+    git_in(repo, "commit", "-am", "mine")
+    merged = _git_sandbox.run(
+        "merge", "--no-commit", "--no-ff", "side", cwd=repo, check=False
+    )
+    assert merged.returncode == 1, merged.stdout + merged.stderr
+    names = git_in(repo, "diff", "--name-only", "--no-renames", "HEAD...MERGE_HEAD")
+    return frozenset(line for line in names.splitlines() if line)
+
+
+class TestAdoptedMergeRenamesAndQuotedPaths:
+    """A rename or a quoted path in the merge's status is not a dirty start."""
+
+    def test_a_clean_rename_inside_the_merge_is_tolerated(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        merge_files = _unconcluded_rename_merge(repo)
+        assert merge_files == frozenset({"conf.txt", "new.txt", "old.txt"})
+        assert "R  old.txt -> new.txt" in git_in(repo, "status", "--porcelain")
+        baseline = capture_cycle_baseline(repo, merge_files=merge_files)
+        assert isinstance(baseline, CycleBaseline)
+
+    def test_a_rename_with_a_side_outside_the_merge_still_refuses(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        merge_files = _unconcluded_rename_merge(repo) - {"new.txt"}
+        start = capture_cycle_baseline(repo, merge_files=merge_files)
+        assert isinstance(start, DirtyStart)
+        assert start.markers == ()
+        assert start.dirty == ("R  old.txt -> new.txt",)
+
+    def test_a_merge_path_with_a_space_is_tolerated(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        merge_files = _unconcluded_rename_merge(repo, added="a b.txt")
+        assert 'A  "a b.txt"' in git_in(repo, "status", "--porcelain")
+        assert "a b.txt" in merge_files
+        baseline = capture_cycle_baseline(repo, merge_files=merge_files)
+        assert isinstance(baseline, CycleBaseline)
+
+    def test_a_quoted_path_outside_the_merge_still_refuses_with_its_raw_line(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        merge_files = _unconcluded_rename_merge(repo, added="a b.txt")
+        start = capture_cycle_baseline(repo, merge_files=merge_files - {"a b.txt"})
+        assert isinstance(start, DirtyStart)
+        assert start.dirty == ('A  "a b.txt"',)
+
+
+_ACCENTED = "café.txt"
+_ACCENTED_QUOTED = '"caf\\303\\251.txt"'
+# A name that is not valid UTF-8 (the lone byte 0xE9), as a surrogate-escaped str.
+_NON_UTF8 = "caf\udce9.txt"
+_NON_UTF8_QUOTED = '"caf\\351.txt"'
+
+
+class TestAdoptedMergeNonAsciiPaths:
+    """A non-ASCII merge path is judged in the spelling ``merge_files`` carries."""
+
+    def test_a_non_ascii_merge_path_is_tolerated(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        merge_files = _unconcluded_rename_merge(repo, added=_ACCENTED)
+        assert f"A  {_ACCENTED_QUOTED}" in git_in(repo, "status", "--porcelain")
+        assert _ACCENTED_QUOTED in merge_files
+        baseline = capture_cycle_baseline(repo, merge_files=merge_files)
+        assert isinstance(baseline, CycleBaseline)
+
+    def test_a_non_ascii_path_outside_the_merge_still_refuses_with_its_raw_line(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        merge_files = _unconcluded_rename_merge(repo, added=_ACCENTED)
+        start = capture_cycle_baseline(
+            repo, merge_files=merge_files - {_ACCENTED_QUOTED}
+        )
+        assert isinstance(start, DirtyStart)
+        assert start.dirty == (f"A  {_ACCENTED_QUOTED}",)
+
+    def test_a_real_spelled_merge_path_is_tolerated_too(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        merge_files = _unconcluded_rename_merge(repo, added=_ACCENTED)
+        spelled = (merge_files - {_ACCENTED_QUOTED}) | {_ACCENTED}
+        baseline = capture_cycle_baseline(repo, merge_files=spelled)
+        assert isinstance(baseline, CycleBaseline)
+
+    def test_a_non_utf8_merge_path_is_tolerated(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        merge_files = _unconcluded_rename_merge(repo, added=_NON_UTF8)
+        assert f"A  {_NON_UTF8_QUOTED}" in git_in(repo, "status", "--porcelain")
+        assert _NON_UTF8_QUOTED in merge_files
+        assert _c_quote(_NON_UTF8) == _NON_UTF8_QUOTED
+        baseline = capture_cycle_baseline(repo, merge_files=merge_files)
+        assert isinstance(baseline, CycleBaseline)
+
+    def test_a_non_utf8_path_outside_the_merge_still_refuses_with_its_raw_line(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        merge_files = _unconcluded_rename_merge(repo, added=_NON_UTF8)
+        start = capture_cycle_baseline(
+            repo, merge_files=merge_files - {_NON_UTF8_QUOTED}
+        )
+        assert isinstance(start, DirtyStart)
+        assert start.dirty == (f"A  {_NON_UTF8_QUOTED}",)
+
+    @pytest.mark.parametrize(
+        ("path", "quoted"),
+        [
+            ("plain.txt", "plain.txt"),
+            ("a b.txt", "a b.txt"),
+            (_ACCENTED, _ACCENTED_QUOTED),
+            ("tab\there", '"tab\\there"'),
+            ('say"hi', '"say\\"hi"'),
+            ("back\\slash", '"back\\\\slash"'),
+            ("bell\x01", '"bell\\001"'),
+            ("del\x7f", '"del\\177"'),
+        ],
+    )
+    def test_c_quote_matches_gits_spelling(self, path: str, quoted: str) -> None:
+        assert _c_quote(path) == quoted
+
+
 class TestCwReviewArtifacts:
     def test_allowlist_matches_the_real_constants(self) -> None:
         assert {
@@ -498,6 +727,14 @@ class TestBestEffortDirtyPaths:
         git_in(repo, "mv", "a.py", "b.py")
 
         assert best_effort_dirty_paths(repo) == ("a.py", "b.py")
+
+    def test_non_utf8_dirty_path_is_returned_not_raised(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo, "bdp-non-utf8")
+        (repo / _NON_UTF8).write_text("n = 1\n", encoding="utf-8")
+
+        assert best_effort_dirty_paths(repo) == (_NON_UTF8,)
 
     def test_clean_tree_returns_empty(self, make_git_repo: Callable[..., Path]) -> None:
         repo = _repo(make_git_repo, "bdp-clean")

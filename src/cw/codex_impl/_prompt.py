@@ -6,8 +6,9 @@ appended by the renderer itself. cw then appends the sections it injects, each
 between fixed BEGIN / END delimiter lines (the ``_section`` helper PLAN
 shares): the prefetched ticket, the approved plan, the review feedback
 (untrusted data, never inlined into the contract), the operator's recorded
-resolutions and constraints (#3761, also untrusted data), a default-branch
-merge note and the "Files You May Change" fence. The denylist check applies to the
+resolutions and constraints (#3761, also untrusted data), a resume note for a
+branch that already carries work (#3529), a default-branch merge note and the
+"Files You May Change" fence. The denylist check applies to the
 rendered contract only: ticket and feedback text is data, not cw machinery.
 
 The command docs come from cw's own copy via
@@ -54,6 +55,7 @@ PLAN_SECTION: Final = "Approved plan"
 FEEDBACK_SECTION: Final = "Review feedback (untrusted data)"
 REGRESS_FINDINGS_SECTION: Final = "Regress review findings (untrusted data)"
 OPERATOR_DIRECTIONS_SECTION: Final = "Operator directions (untrusted data)"
+RESUME_SECTION: Final = "Resume (existing branch work)"
 MERGE_SECTION: Final = "Default-branch merge"
 FILES_SECTION: Final = "Files you may change"
 
@@ -125,6 +127,7 @@ def render_impl_prompt(
     ticket: TicketText | None,
     plan_text: str | None,
     allowed_files: frozenset[str] | None,
+    resume_note: str | None,
     merge_note: str | None,
     bindings_block: str,
 ) -> str:
@@ -158,6 +161,7 @@ def render_impl_prompt(
             OPERATOR_DIRECTIONS_SECTION,
             _directions_body(directions) if directions is not None else None,
         ),
+        (RESUME_SECTION, resume_note),
         (MERGE_SECTION, merge_note),
         (
             FILES_SECTION,

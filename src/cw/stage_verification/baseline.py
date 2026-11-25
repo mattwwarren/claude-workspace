@@ -28,6 +28,7 @@ inside the codex executor's review step, outside every lock.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -43,7 +44,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 # Unfinished-operation pseudo-refs whose presence refuses a cycle start.
-_OPERATION_MARKERS = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD")
+_MERGE_MARKER = "MERGE_HEAD"
+_OPERATION_MARKERS = (_MERGE_MARKER, "CHERRY_PICK_HEAD", "REVERT_HEAD")
 # `git rev-parse -q --verify` exit codes: 0 resolves, 1 does not; anything
 # else is a git failure (fail closed: raise, the caller parks codex_error).
 _REF_SET = 0
@@ -64,6 +66,22 @@ _PORCELAIN_PATH_OFFSET = 3
 _STATUS_CODE_WIDTH = 2
 # Tracked-modified porcelain codes: worktree-modified, staged, or both.
 _MODIFIED_TRACKED_CODES = frozenset({" M", "M ", "MM"})
+# git's C-style path quoting (``quote_c_style``, ``core.quotePath`` on): a byte
+# with a letter escape gets it, any other control byte, DEL or non-ASCII byte
+# gets a three-digit octal escape.
+_C_QUOTE_LETTER_ESCAPES = {
+    7: "a",
+    8: "b",
+    9: "t",
+    10: "n",
+    11: "v",
+    12: "f",
+    13: "r",
+    34: '"',
+    92: "\\",
+}
+_FIRST_PRINTABLE_BYTE = 0x20
+_DEL_BYTE = 0x7F
 
 
 class CycleBaseline(NamedTuple):
@@ -106,7 +124,7 @@ def _marker_is_set(worktree: Path, marker: str) -> bool:
     )
 
 
-def _unmerged_paths(worktree: Path) -> tuple[str, ...]:
+def unmerged_paths(worktree: Path) -> tuple[str, ...]:
     """Return the sorted unique paths ``git ls-files -u`` lists."""
     out = git_output(["ls-files", "-u"], cwd=worktree)
     return tuple(sorted({line.split("\t", 1)[1] for line in out.splitlines() if line}))
@@ -134,6 +152,79 @@ def unstage_review_artifacts(worktree: Path, artifacts: frozenset[str]) -> None:
         git_output(["restore", "--staged", "--", *staged_artifacts], cwd=worktree)
 
 
+def _status_z_entries(out: str) -> list[tuple[str, tuple[str, ...]]]:
+    """Parse ``git status --porcelain=v1 -z`` output into ``(code, paths)`` entries.
+
+    Paths are unquoted. A rename or copy entry carries both its new and old
+    path, so each entry names every path it touches.
+    """
+    entries: list[tuple[str, tuple[str, ...]]] = []
+    records = [entry for entry in out.split("\0") if entry]
+    index = 0
+    while index < len(records):
+        record = records[index]
+        status = record[:_STATUS_CODE_WIDTH]
+        paths = [record[_PORCELAIN_PATH_OFFSET:]]
+        if status[0] in "RC" or status[1] in "RC":
+            index += 1
+            if index < len(records):
+                paths.append(records[index])
+        entries.append((status, tuple(path for path in paths if path)))
+        index += 1
+    return entries
+
+
+def _c_quote(path: str) -> str:
+    """Spell *path* the way git's non-``-z`` output does (C-quoted when odd).
+
+    ``merge_files`` and ``cycle_touched_paths`` both carry this spelling (they
+    read names without ``-z``), while the ``-z`` status read yields the real
+    path, so a merge-side path is matched in either spelling.
+    """
+    pieces: list[str] = []
+    quoted = False
+    for byte in os.fsencode(path):
+        if byte in _C_QUOTE_LETTER_ESCAPES:
+            pieces.append("\\" + _C_QUOTE_LETTER_ESCAPES[byte])
+            quoted = True
+        elif byte < _FIRST_PRINTABLE_BYTE or byte >= _DEL_BYTE:
+            pieces.append(f"\\{byte:03o}")
+            quoted = True
+        else:
+            pieces.append(chr(byte))
+    return '"' + "".join(pieces) + '"' if quoted else path
+
+
+def _in_merge(path: str, merge_files: frozenset[str]) -> bool:
+    """Whether the real *path* is a merge file, in either name spelling."""
+    return path in merge_files or _c_quote(path) in merge_files
+
+
+def _lines_within_merge(
+    worktree: Path, status: str, merge_files: frozenset[str]
+) -> frozenset[str]:
+    """Return the porcelain lines of *status* whose every path is in *merge_files*.
+
+    The line-based ``--porcelain`` view quotes odd paths and joins a rename as
+    ``old -> new``, so each line is matched to its ``-z`` entry (same order, same
+    count) and judged by the entry's unquoted paths, both sides of a rename.
+    ``merge_files`` is in the C-quoted spelling (see :func:`_c_quote`), so a
+    non-ASCII merge path still matches.
+    """
+    z_out = git_output(
+        ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        cwd=worktree,
+        errors="surrogateescape",
+    )
+    lines = [line for line in status.splitlines() if line]
+    entries = _status_z_entries(z_out)
+    return frozenset(
+        line
+        for line, (_, paths) in zip(lines, entries, strict=True)
+        if all(_in_merge(path, merge_files) for path in paths)
+    )
+
+
 def best_effort_dirty_paths(worktree: Path) -> tuple[str, ...]:
     """Collect dirty paths when staging failed before the cycle's paths were known.
 
@@ -144,28 +235,19 @@ def best_effort_dirty_paths(worktree: Path) -> tuple[str, ...]:
         out = git_output(
             ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
             cwd=worktree,
+            errors="surrogateescape",
         )
     except (subprocess.CalledProcessError, OSError):
         return ()
-    paths: list[str] = []
-    records = [entry for entry in out.split("\0") if entry]
-    index = 0
-    while index < len(records):
-        entry = records[index]
-        status = entry[:2]
-        path = entry[3:]
-        if path:
-            paths.append(path)
-        if status[0] in "RC" or status[1] in "RC":
-            index += 1
-            if index < len(records):
-                paths.append(records[index])
-        index += 1
+    paths = [path for _, entry_paths in _status_z_entries(out) for path in entry_paths]
     return tuple(sorted(set(paths)))
 
 
 def capture_cycle_baseline(
-    worktree: Path, *, tolerated: frozenset[str] = frozenset()
+    worktree: Path,
+    *,
+    tolerated: frozenset[str] = frozenset(),
+    merge_files: frozenset[str] | None = None,
 ) -> CycleBaseline | DirtyStart:
     """Return the cycle's clean-start baseline, or what makes the tree dirty.
 
@@ -178,15 +260,26 @@ def capture_cycle_baseline(
     *tolerated* (#3693) is the operator's exact-path list. A tolerated path that
     is dirty at start is not a finding; it joins ``review_artifacts`` so every
     staging step leaves it unstaged. Markers and unmerged paths still refuse.
+
+    *merge_files* (#3529) adopts one unconcluded default-branch merge: when it
+    is not ``None``, ``MERGE_HEAD`` is not a finding, and unmerged and dirty
+    paths inside it are not findings either (cw's merge brought them in). The
+    other two markers, and every path outside *merge_files*, still refuse. The
+    baseline tree is still ``HEAD``'s tree.
     """
     markers = tuple(m for m in _OPERATION_MARKERS if _marker_is_set(worktree, m))
-    unmerged = _unmerged_paths(worktree)
+    unmerged = unmerged_paths(worktree)
     status = git_output(
         ["status", "--porcelain", "--untracked-files=all"], cwd=worktree
     )
     split = split_tolerated(status, tolerated, check=CHECK_DIRTY_START)
     status_lines = tuple(line for line in split.kept.splitlines() if line)
     dirty = tuple(line for line in status_lines if not _is_review_artifact(line))
+    if merge_files is not None:
+        markers = tuple(m for m in markers if m != _MERGE_MARKER)
+        unmerged = tuple(path for path in unmerged if path not in merge_files)
+        within_merge = _lines_within_merge(worktree, status, merge_files)
+        dirty = tuple(line for line in dirty if line not in within_merge)
     artifacts = frozenset(
         line[_PORCELAIN_PATH_OFFSET:]
         for line in status_lines
