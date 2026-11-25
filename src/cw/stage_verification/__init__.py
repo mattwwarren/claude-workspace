@@ -20,6 +20,11 @@ Submodules:
   every consumer.
 - ``impl_regress_ledger``: the clean-mode ledger verdict reader the regress rule
   falls back to (#3862).
+- ``impl_merge_adopt``: adopting an unconcluded regress merge and the guards
+  that conclude it (#3529).
+- ``impl_resume``: the IMPL re-entry classification and the four dispositions
+  (#3529).
+- ``impl_staleness``: the IMPL staleness check and the regress signal (#3529).
 - ``plan_gates``: PLAN gate set B and the PLAN status vocabulary.
 - ``posted_text``: redaction and capping of text posted to the tracker.
 - ``push``: push-and-verify-head.

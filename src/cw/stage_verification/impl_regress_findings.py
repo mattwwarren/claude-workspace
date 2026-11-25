@@ -5,7 +5,7 @@ REVIEW pass wrote to the worktree's ``.claude/review-verdict.json`` holds the
 MUST_FIX findings the implementation must address. This module owns the one
 stateless rule that decides whether those findings are delivered to the IMPL
 agent. Every consumer calls :func:`regress_review_findings`: the codex prompt
-section, the codex ``existing_branch_work`` exemption, the claude-native
+section, the codex re-entry classification's exemption, the claude-native
 ``queue_metadata.regress_review_findings`` key and the requeue echo.
 
 A claude-native blocking-mode park saves no verdict, so the blocking-findings
