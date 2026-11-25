@@ -22,6 +22,7 @@ from cw.plan_fingerprint import LeadingBlock
 from tests._backend_mcp_helpers import codex_tracker_client
 from tests._shared.plan_approval_builders import (
     APPROVAL_AT,
+    OPERATOR,
     PARK_AT,
     park_body,
     token_body,
@@ -58,11 +59,23 @@ def _snapshot(h: Harness, *, with_token: bool) -> None:
     h.gh.reply(*_VIEW, stdout=issue_envelope_json(comments))
 
 
-def _parked(h: Harness, *, with_token: bool = True) -> Harness:
-    """*h* resumed from a parked large draft, with an operator identity bound."""
+def _parked(
+    h: Harness,
+    *,
+    with_token: bool = True,
+    operator_ids: tuple[str, ...] | None = (OPERATOR,),
+) -> Harness:
+    """*h* resumed from a parked large draft; *operator_ids* ``None`` binds none.
+
+    The captured comments are authored by ``OPERATOR``, so ``operator_ids`` that
+    leave it out make the token comment a stranger's.
+    """
     write_plan_draft(h.worktree, LARGE_PLAN, book=LeadingBlock(applied="none"))
     _snapshot(h, with_token=with_token)
-    h.client = with_operator_ids(codex_tracker_client(h.worktree))
+    client = codex_tracker_client(h.worktree)
+    h.client = (
+        client if operator_ids is None else with_operator_ids(client, operator_ids)
+    )
     return h
 
 
@@ -85,6 +98,26 @@ def test_an_operator_token_after_the_park_completes_the_plan(
     result = h.run()
     assert result.status == "stage_complete"
     assert (h.worktree / PLAN_MD_RELATIVE_PATH).exists()
+    assert not _consumed(result, _ANY_CONSUMED)
+    assert len(h.plan_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "operator_ids",
+    [
+        pytest.param(("someone-else",), id="a_stranger_is_not_in_operator_ids"),
+        pytest.param(None, id="no_operator_ids_configured"),
+    ],
+)
+def test_a_token_without_operator_identity_does_not_approve(
+    harness: Callable[..., Harness], operator_ids: tuple[str, ...] | None
+) -> None:
+    """Identity is what approves: the token alone, from anyone, is not enough."""
+    h = _parked(harness(), operator_ids=operator_ids)
+    add_stations(add_turn(h.runner, LARGE_PLAN, tier="large"))
+    result = h.run()
+    assert result.status == "plan_pending_approval"
+    assert not (h.worktree / PLAN_MD_RELATIVE_PATH).exists()
     assert not _consumed(result, _ANY_CONSUMED)
 
 

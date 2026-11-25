@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -29,7 +29,7 @@ from cw.codex_plan._approval import (
     no_authority_delta,
     persisted_body_sha,
 )
-from cw.codex_plan._result import draft_body, stamp_plan_result
+from cw.codex_plan._result import ResumeDraft, draft_body, stamp_plan_result
 from cw.codex_plan._resume import (
     APPROVED_FINGERPRINT_MATCH,
     OPERATOR_APPROVAL_NO_DELTA,
@@ -58,6 +58,10 @@ from tests._tool_fakes import plan_sentinel
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from cw.auto_dev_result import AutoDevResult
+    from cw.models import TicketTask
+    from cw.ticket_snapshot import SnapshotComment
+
 STRANGER = "stranger"
 _CTX = SnapshotContext(github=True, operator_ids=(OPERATOR,))
 _NO_IDS = SnapshotContext(github=True, operator_ids=())
@@ -67,12 +71,14 @@ _NEW = "2026-11-18T12:00:00Z"
 BODY = "## Files Modified\n- src/x.py\n\n**Scope tier:** large\n"
 
 
-def _observe(*comments: Any, ctx: SnapshotContext = _CTX, body: str = BODY) -> Any:
+def _observe(
+    *comments: SnapshotComment, ctx: SnapshotContext = _CTX, body: str = BODY
+) -> TrackerObservation:
     return observe_tracker(stream_snapshot(comments, body=body), ctx)
 
 
 def _approving(
-    *comments: Any,
+    *comments: SnapshotComment,
     ctx: SnapshotContext = _CTX,
     sources: tuple[str, ...] = (),
     resolutions: str | None = None,
@@ -261,7 +267,7 @@ class TestAlternate:
     def _last_evaluated(self, body: str = BODY) -> str:
         return format_last_evaluated("none", compute_body_sha(body))
 
-    def _task(self, **extra: object) -> Any:
+    def _task(self, **extra: object) -> TicketTask:
         fields: dict[str, object] = {
             "plan_approved_at": _APPROVED_AT,
             "plan_approved_fingerprint": compute_plan_draft_fingerprint(BODY),
@@ -407,11 +413,7 @@ class TestFacts:
         )
         assert facts is NO_APPROVAL
 
-    def test_the_parked_fingerprint_is_the_resume_draft_fingerprint(
-        self, tmp_path: Path
-    ) -> None:
-        from cw.codex_plan._result import ResumeDraft
-
+    def test_the_parked_fingerprint_is_the_resume_draft_fingerprint(self) -> None:
         resume = ResumeDraft(text="", leading="", body=BODY, fingerprint="FP-PARKED")
         facts = approval_facts(
             make_task(),
@@ -426,8 +428,6 @@ class TestFacts:
         assert facts.comment_id == "c9"
 
     def test_a_row_delta_keeps_the_comment_fact(self) -> None:
-        from cw.codex_plan._result import ResumeDraft
-
         resume = ResumeDraft(text="", leading="", body=BODY, fingerprint="FP")
         facts = approval_facts(
             make_task(),
@@ -452,7 +452,7 @@ class TestFacts:
         assert ApprovalFacts().comment_approval(BODY) is None
 
 
-def _large(tmp_path: Path) -> Any:
+def _large(tmp_path: Path) -> AutoDevResult:
     block = extract_block(plan_sentinel(tier="large"))
     assert block is not None
     return stamp_plan_result(json.loads(block), ticket_id="T-1", worktree=tmp_path)

@@ -341,7 +341,7 @@ class TestParkComment:
         assert APPROVAL_LINE in section
         assert "bindings.tickets.operator_ids" in section
         assert "operator-authority alternate" in section
-        assert "no longer says" not in section
+        assert "not available on the codex PLAN lane" not in section
 
     def test_the_park_text_never_carries_the_token_as_its_own_line(
         self, tmp_path: Path
