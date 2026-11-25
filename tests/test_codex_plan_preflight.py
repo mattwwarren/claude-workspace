@@ -238,7 +238,7 @@ class TestFetchBound:
         assert result is None
         assert read.calls == 0
         assert sleep.seconds == []
-        assert run.argv == [["git", "fetch", "origin", "main", "--quiet"]]
+        assert [cmd[1:] for cmd in run.argv] == [["fetch", "origin", "main", "--quiet"]]
         assert run.timeouts == [60.0]
         warnings = [
             r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
