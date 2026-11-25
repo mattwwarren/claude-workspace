@@ -450,6 +450,28 @@ def test_an_unconcluded_merge_is_adopted_resolved_and_concluded(
     assert _should_gate_for_unconcluded_finalize_regress_merge(backstop, {}) is False
 
 
+def test_an_unconcluded_merge_with_a_base_side_rename_is_adopted(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    h = harness()
+    side = tmp_path / "side"
+    push_commit_to_origin(h.origin, "main", side, "old.txt", "old\n")
+    git_in(h.worktree, "fetch", "origin")
+    git_in(h.worktree, "merge", "origin/main")
+    diverge_origin_default(h.worktree, h.origin, BRANCH, side, "clash.py")
+    git_in(side, "mv", "old.txt", "new.txt")
+    git_in(side, "commit", "-m", "rename old.txt")
+    git_in(side, "push", "origin", "main")
+    leave_conflicting_merge(h.worktree)
+    assert "R  old.txt -> new.txt" in git_in(h.worktree, "status", "--porcelain")
+    _seed_marker(h)
+    h.turn(files={"clash.py": "merged\n"})
+    result = h.run()
+    assert result.status == "stage_complete", result.blocker and result.blocker.details
+    assert len(_parents(h)) == 2
+    assert merge_in_progress(h.worktree) is False
+
+
 def test_an_unconcluded_merge_on_a_repair_row_is_adopted(
     harness: Callable[..., Harness], tmp_path: Path
 ) -> None:

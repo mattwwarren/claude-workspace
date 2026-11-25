@@ -342,6 +342,79 @@ class TestAdoptedMergeBaseline:
         assert unmerged_paths(repo) == ("pyproject.toml",)
 
 
+def _unconcluded_rename_merge(
+    repo: Path, *, added: str | None = None
+) -> frozenset[str]:
+    """Leave *repo* mid-merge: base side renames ``old.txt``, ``conf.txt`` conflicts.
+
+    *added* is an extra file the base side adds cleanly. Returns the merge's file
+    names, read with the diff ``adopt_unconcluded_merge`` uses.
+    """
+    _write(repo / "old.txt", "old\n")
+    _write(repo / "conf.txt", "base\n")
+    git_in(repo, "add", "old.txt", "conf.txt")
+    git_in(repo, "commit", "-m", "seed")
+    git_in(repo, "checkout", "-b", "side")
+    git_in(repo, "mv", "old.txt", "new.txt")
+    _write(repo / "conf.txt", "theirs\n")
+    if added is not None:
+        _write(repo / added, "added\n")
+    git_in(repo, "add", "-A")
+    git_in(repo, "commit", "-m", "theirs")
+    git_in(repo, "checkout", "feature")
+    _write(repo / "conf.txt", "mine\n")
+    git_in(repo, "commit", "-am", "mine")
+    merged = _git_sandbox.run(
+        "merge", "--no-commit", "--no-ff", "side", cwd=repo, check=False
+    )
+    assert merged.returncode == 1, merged.stdout + merged.stderr
+    names = git_in(repo, "diff", "--name-only", "--no-renames", "HEAD...MERGE_HEAD")
+    return frozenset(line for line in names.splitlines() if line)
+
+
+class TestAdoptedMergeRenamesAndQuotedPaths:
+    """A rename or a quoted path in the merge's status is not a dirty start."""
+
+    def test_a_clean_rename_inside_the_merge_is_tolerated(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        merge_files = _unconcluded_rename_merge(repo)
+        assert merge_files == frozenset({"conf.txt", "new.txt", "old.txt"})
+        assert "R  old.txt -> new.txt" in git_in(repo, "status", "--porcelain")
+        baseline = capture_cycle_baseline(repo, merge_files=merge_files)
+        assert isinstance(baseline, CycleBaseline)
+
+    def test_a_rename_with_a_side_outside_the_merge_still_refuses(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        merge_files = _unconcluded_rename_merge(repo) - {"new.txt"}
+        start = capture_cycle_baseline(repo, merge_files=merge_files)
+        assert isinstance(start, DirtyStart)
+        assert start.markers == ()
+        assert start.dirty == ("R  old.txt -> new.txt",)
+
+    def test_a_merge_path_with_a_space_is_tolerated(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        merge_files = _unconcluded_rename_merge(repo, added="a b.txt")
+        assert 'A  "a b.txt"' in git_in(repo, "status", "--porcelain")
+        assert "a b.txt" in merge_files
+        baseline = capture_cycle_baseline(repo, merge_files=merge_files)
+        assert isinstance(baseline, CycleBaseline)
+
+    def test_a_quoted_path_outside_the_merge_still_refuses_with_its_raw_line(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        merge_files = _unconcluded_rename_merge(repo, added="a b.txt")
+        start = capture_cycle_baseline(repo, merge_files=merge_files - {"a b.txt"})
+        assert isinstance(start, DirtyStart)
+        assert start.dirty == ('A  "a b.txt"',)
+
+
 class TestCwReviewArtifacts:
     def test_allowlist_matches_the_real_constants(self) -> None:
         assert {

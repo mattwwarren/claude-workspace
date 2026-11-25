@@ -135,6 +135,49 @@ def unstage_review_artifacts(worktree: Path, artifacts: frozenset[str]) -> None:
         git_output(["restore", "--staged", "--", *staged_artifacts], cwd=worktree)
 
 
+def _status_z_entries(out: str) -> list[tuple[str, tuple[str, ...]]]:
+    """Parse ``git status --porcelain=v1 -z`` output into ``(code, paths)`` entries.
+
+    Paths are unquoted. A rename or copy entry carries both its new and old
+    path, so each entry names every path it touches.
+    """
+    entries: list[tuple[str, tuple[str, ...]]] = []
+    records = [entry for entry in out.split("\0") if entry]
+    index = 0
+    while index < len(records):
+        record = records[index]
+        status = record[:_STATUS_CODE_WIDTH]
+        paths = [record[_PORCELAIN_PATH_OFFSET:]]
+        if status[0] in "RC" or status[1] in "RC":
+            index += 1
+            if index < len(records):
+                paths.append(records[index])
+        entries.append((status, tuple(path for path in paths if path)))
+        index += 1
+    return entries
+
+
+def _lines_within_merge(
+    worktree: Path, status: str, merge_files: frozenset[str]
+) -> frozenset[str]:
+    """Return the porcelain lines of *status* whose every path is in *merge_files*.
+
+    The line-based ``--porcelain`` view quotes odd paths and joins a rename as
+    ``old -> new``, so each line is matched to its ``-z`` entry (same order, same
+    count) and judged by the entry's unquoted paths, both sides of a rename.
+    """
+    z_out = git_output(
+        ["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd=worktree
+    )
+    lines = [line for line in status.splitlines() if line]
+    entries = _status_z_entries(z_out)
+    return frozenset(
+        line
+        for line, (_, paths) in zip(lines, entries, strict=True)
+        if all(path in merge_files for path in paths)
+    )
+
+
 def best_effort_dirty_paths(worktree: Path) -> tuple[str, ...]:
     """Collect dirty paths when staging failed before the cycle's paths were known.
 
@@ -148,20 +191,7 @@ def best_effort_dirty_paths(worktree: Path) -> tuple[str, ...]:
         )
     except (subprocess.CalledProcessError, OSError):
         return ()
-    paths: list[str] = []
-    records = [entry for entry in out.split("\0") if entry]
-    index = 0
-    while index < len(records):
-        entry = records[index]
-        status = entry[:2]
-        path = entry[3:]
-        if path:
-            paths.append(path)
-        if status[0] in "RC" or status[1] in "RC":
-            index += 1
-            if index < len(records):
-                paths.append(records[index])
-        index += 1
+    paths = [path for _, entry_paths in _status_z_entries(out) for path in entry_paths]
     return tuple(sorted(set(paths)))
 
 
@@ -200,9 +230,8 @@ def capture_cycle_baseline(
     if merge_files is not None:
         markers = tuple(m for m in markers if m != _MERGE_MARKER)
         unmerged = tuple(path for path in unmerged if path not in merge_files)
-        dirty = tuple(
-            line for line in dirty if line[_PORCELAIN_PATH_OFFSET:] not in merge_files
-        )
+        within_merge = _lines_within_merge(worktree, status, merge_files)
+        dirty = tuple(line for line in dirty if line not in within_merge)
     artifacts = frozenset(
         line[_PORCELAIN_PATH_OFFSET:]
         for line in status_lines
