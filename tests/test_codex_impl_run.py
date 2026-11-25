@@ -1756,6 +1756,7 @@ def test_merge_target_reads_take_the_base_and_trust_roots_keep_the_default(
     push_epic_base(h.worktree)
     on_branch = _spy(monkeypatch, "cw.codex_impl._run", "check_on_branch")
     facts = _spy(monkeypatch, "cw.codex_impl._run", "git_facts")
+    post_facts = _spy(monkeypatch, "cw.codex_impl._post", "git_facts")
     probe = _spy(monkeypatch, "cw.codex_impl._run", "probe_default_branch")
     fence = _spy(monkeypatch, "cw.codex_impl._run", "check_fix_fence")
     sensitive = _spy(monkeypatch, "cw.codex_impl._run", "no_plan_sensitive_block")
@@ -1767,7 +1768,7 @@ def test_merge_target_reads_take_the_base_and_trust_roots_keep_the_default(
     # Merge-target reads: the row's base.
     assert on_branch[0][1]["base_branch"] == ROW_BASE
     assert on_branch[0][1]["default_branch"] == "main"
-    assert [args[1] for args, _kw in facts] == [ROW_BASE, ROW_BASE]
+    assert [args[1] for args, _kw in [*facts, *post_facts]] == [ROW_BASE, ROW_BASE]
     assert probe[0][1]["base_branch"] == ROW_BASE
     assert fence[0][1]["base_branch"] == ROW_BASE
     # Trust roots: the client default.

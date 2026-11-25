@@ -1076,12 +1076,14 @@ _CODEX_FINALIZE_FOLLOW_UPS = frozenset({3542, 3543, 3544})
 _C1_TICKET = 3060
 _CODEX_PLAN_FOLLOW_UPS = frozenset({3912, 3909})
 _C1_RESUME_TICKET = 3464
+#: The IMPL re-entry parity ticket (#3529); no cell may defer to it once it lands.
+_C2_REENTRY_TICKET = 3529
 #: The C2 ticket (#3061, codex IMPL executor); no cell may defer to it once it
 #: lands. Its impl-stage cells are implemented, not-applicable,
 #: or deferred to one of its follow-ups. #3530 (tracker-aware plan recovery) left
 #: the set: #3712 (RFC 0019 T2) implements it, so ``impl.orientation`` is a code ref.
 _C2_TICKET = 3061
-_CODEX_IMPL_FOLLOW_UPS = frozenset({3529, 3531})
+_CODEX_IMPL_FOLLOW_UPS = frozenset({3531})
 # #3055 closed with RFC 0018 S3: its codex review cells moved to #3057 (A2).
 _CODEX_REVIEW_TICKETS = frozenset({3318, 2464, 3057})
 #: The C4 ticket (#3063, usage accounting); no cell may defer to it once it lands.
@@ -1632,6 +1634,63 @@ def test_no_cell_defers_to_the_landed_c2_ticket() -> None:
         for backend, cell in element.cells.items():
             if isinstance(cell, DeferredDisposition):
                 assert cell.ref.number != _C2_TICKET, (element_id, backend)
+
+
+def test_no_cell_defers_to_the_closed_detector_guard_ticket() -> None:
+    """#3529 landed: none of its cells is left deferring to it."""
+    for element_id, element in _manifest().elements.items():
+        for backend, cell in element.cells.items():
+            if isinstance(cell, DeferredDisposition):
+                assert cell.ref.number != _C2_REENTRY_TICKET, (element_id, backend)
+
+
+#: The codex IMPL re-entry cells #3529 flipped, each to its code symbol.
+_C2_RESUME_CODE_CELLS = {
+    "orch.impl-stage-consumption": (
+        "src/cw/stage_verification/impl_staleness.py",
+        "operator_comments_after",
+    ),
+    "impl.pre-stage-detector-guard": (
+        "src/cw/stage_verification/impl_resume.py",
+        "classify_entry",
+    ),
+    "impl.pre-stage-detector-guard-resume-dispositions": (
+        "src/cw/stage_verification/impl_resume.py",
+        "resume_disposition",
+    ),
+    "impl.staleness-regress-check-run-before-applying": (
+        "src/cw/stage_verification/impl_staleness.py",
+        "check_staleness",
+    ),
+    "impl.regress-into-impl-carrying-unconcluded-merge": (
+        "src/cw/stage_verification/impl_merge_adopt.py",
+        "adopt_unconcluded_merge",
+    ),
+    "impl.regress-into-impl-merge-conclusion-dispatch-backstop": (
+        "src/cw/dispatch/impl_gates.py",
+        "_should_gate_for_unconcluded_finalize_regress_merge",
+    ),
+    "impl.branch-freshness": (
+        "src/cw/stage_verification/impl_feedback.py",
+        "probe_default_branch",
+    ),
+    "impl.pre-completion-merge-guard": (
+        "src/cw/stage_verification/impl_merge_adopt.py",
+        "merge_unconcluded_block",
+    ),
+}
+
+
+@pytest.mark.parametrize("element_id", sorted(_C2_RESUME_CODE_CELLS))
+def test_codex_impl_reentry_cells_are_implemented_and_resolve(
+    element_id: str, tmp_path: Path
+) -> None:
+    cell = _real_cell(element_id, CODEX_BACKEND)
+    assert isinstance(cell, ImplementedDisposition)
+    filename, symbol = _C2_RESUME_CODE_CELLS[element_id]
+    assert cell.ref == CodeRef(kind="code", path=filename, symbol=symbol)
+    resolve = make_resolver(_REPO_ROOT, _prompt_for_stage(tmp_path))
+    assert resolve(cell.ref) is None
 
 
 def test_no_cell_defers_to_the_landed_c3_ticket() -> None:

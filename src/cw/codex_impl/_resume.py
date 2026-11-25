@@ -17,6 +17,8 @@ from cw.auto_dev_result import Health
 from cw.codex_impl._result import IMPL_STAGE_COMPLETE
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from cw.local_runner import GitFacts
     from cw.stage_verification.impl_resume import ReentryPlan
 
@@ -54,8 +56,8 @@ def _comment_lines(plan: ReentryPlan) -> list[str]:
     return lines
 
 
-def resume_note(plan: ReentryPlan, facts: GitFacts) -> str | None:
-    """The resume section body, or ``None`` when no turn resumes (a proceed)."""
+def resume_note(plan: ReentryPlan, facts: GitFacts, branch_files: Iterable[str]) -> str:
+    """The resume section body: HEAD, the commits and files already on the branch."""
     entry = plan.entry
     head = entry.head_sha if entry is not None else (facts["commits"] or [""])[0]
     commits = entry.commits if entry is not None else tuple(facts["commits"])
@@ -65,6 +67,9 @@ def resume_note(plan: ReentryPlan, facts: GitFacts) -> str | None:
             "Commits already on the branch (newest first):",
             _commit_lines(commits),
         ]
+    files = sorted(branch_files)
+    if files:
+        lines += ["Files the branch already changes:", *(f"- {f}" for f in files)]
     lines.append(
         "Continue on top of them: do not reset, amend or rewrite them, and do "
         "not repeat work they already hold."
@@ -75,12 +80,14 @@ def resume_note(plan: ReentryPlan, facts: GitFacts) -> str | None:
         lines.append(f"Why the earlier completion no longer stands: {why}.")
     lines.extend(_comment_lines(plan))
     if plan.merge is not None:
-        files = "\n".join(f"- {path}" for path in sorted(plan.merge.outcome.conflicted))
+        conflicted = "\n".join(
+            f"- {path}" for path in sorted(plan.merge.outcome.conflicted)
+        )
         lines += [
             "An unconcluded merge of the default branch was left in the worktree "
             f"(MERGE_HEAD {plan.merge.merge_head[:_SHA_PREFIX_CHARS]}). It "
             "conflicts in:",
-            files or "- (no conflicted paths remain)",
+            conflicted or "- (no conflicted paths remain)",
             "Resolve them (edit the files; do not commit, stage or abort). cw "
             "concludes the merge with its one commit.",
         ]

@@ -150,7 +150,7 @@ class TestCheckStalenessDispositions:
         _stub("")
         with patch(
             "cw.stage_verification.impl_staleness.git_output",
-            side_effect=subprocess.CalledProcessError(128, ["git"]),
+            side_effect=subprocess.CalledProcessError(128, "log"),
         ):
             result = _check(repo, tmp_path)
         assert result.block is not None

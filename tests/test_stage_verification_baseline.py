@@ -27,7 +27,9 @@ from cw.stage_verification.baseline import (
     diff_since,
     stage_cycle,
     staged_cycle_tree,
+    unmerged_paths,
 )
+from tests import _git_sandbox
 from tests._codex_review_helpers import (
     _head_baseline,
     _seed_conflicting_cherry_pick,
@@ -264,6 +266,80 @@ class TestCaptureCycleBaseline:
 
         with pytest.raises(subprocess.CalledProcessError):
             capture_cycle_baseline(not_a_repo)
+
+
+class TestAdoptedMergeBaseline:
+    """``merge_files`` adopts one unconcluded merge and nothing else (#3529)."""
+
+    def _merge(self, repo: Path) -> None:
+        _stage_merge_from_other_branch(repo, {"other.py": "o = 1\n"}, squash=False)
+
+    def test_merge_head_is_tolerated_only_when_merge_files_is_given(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        self._merge(repo)
+        refused = capture_cycle_baseline(repo)
+        assert isinstance(refused, DirtyStart)
+        assert refused.markers == ("MERGE_HEAD",)
+        baseline = capture_cycle_baseline(repo, merge_files=frozenset({"other.py"}))
+        assert isinstance(baseline, CycleBaseline)
+        assert baseline.tree_sha == git_in(repo, "rev-parse", "HEAD^{tree}")
+
+    def test_dirty_paths_outside_merge_files_still_refuse(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        self._merge(repo)
+        _write(repo / "stray.py", "s = 1\n")
+        start = capture_cycle_baseline(repo, merge_files=frozenset({"other.py"}))
+        assert isinstance(start, DirtyStart)
+        assert start.markers == ()
+        assert start.dirty == ("?? stray.py",)
+
+    def test_unmerged_paths_outside_merge_files_still_refuse(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        _seed_conflicting_cherry_pick(repo)
+        start = capture_cycle_baseline(repo, merge_files=frozenset())
+        assert isinstance(start, DirtyStart)
+        assert start.unmerged == ("pyproject.toml",)
+
+    def test_unmerged_paths_inside_merge_files_are_tolerated(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        git_in(repo, "checkout", "-b", "side", "main")
+        _write(repo / "a.py", "a = 'theirs'\n")
+        git_in(repo, "commit", "-am", "theirs")
+        git_in(repo, "checkout", "feature")
+        _write(repo / "a.py", "a = 'mine'\n")
+        git_in(repo, "commit", "-am", "mine")
+        merged = _git_sandbox.run(
+            "merge", "--no-commit", "--no-ff", "side", cwd=repo, check=False
+        )
+        assert merged.returncode == 1
+        assert unmerged_paths(repo) == ("a.py",)
+        baseline = capture_cycle_baseline(repo, merge_files=frozenset({"a.py"}))
+        assert isinstance(baseline, CycleBaseline)
+
+    def test_the_other_operation_markers_still_refuse(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        _seed_conflicting_cherry_pick(repo)
+        start = capture_cycle_baseline(repo, merge_files=frozenset({"pyproject.toml"}))
+        assert isinstance(start, DirtyStart)
+        assert start.markers == ("CHERRY_PICK_HEAD",)
+
+    def test_unmerged_paths_is_public_and_sorted(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        assert unmerged_paths(repo) == ()
+        _seed_conflicting_cherry_pick(repo)
+        assert unmerged_paths(repo) == ("pyproject.toml",)
 
 
 class TestCwReviewArtifacts:

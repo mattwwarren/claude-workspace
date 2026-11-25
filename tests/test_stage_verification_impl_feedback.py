@@ -243,6 +243,7 @@ class TestProbeDefaultBranch:
         assert outcome.block.reason == IMPL_FAILED
         assert outcome.block.details.startswith("merge_conflict_with_default_branch")
         assert "clash.py" in outcome.block.details
+        assert "a non-repair IMPL row does not resolve" in outcome.block.details
         assert outcome.needs_merge is False
 
     def test_conflict_on_repair_row_asks_for_the_merge(
@@ -295,6 +296,7 @@ class TestMergeDefaultOnConflict:
         outcome = merge_default_on_conflict(repo, base_branch="main")
         assert not isinstance(outcome, ImplBlock)
         assert outcome.merge_files == frozenset({"clash.py", "other.py"})
+        assert outcome.conflicted == frozenset({"clash.py"})
         assert (repo / ".git" / "MERGE_HEAD").is_file()
         assert git_in(repo, "ls-files", "-u")
         assert git_in(repo, "cat-file", "-t", outcome.growth_tree) == "tree"

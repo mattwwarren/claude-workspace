@@ -462,6 +462,16 @@ def _allowed_files(
     return allowed
 
 
+def _resume_note(run: _Run, reentry: ReentryPlan | None, facts: GitFacts) -> str | None:
+    """The resume section body for a re-entry, else ``None``."""
+    if reentry is None:
+        return None
+    files = repair_allowed_files(
+        run.worktree, fork_point=facts["fork_point"], approved=()
+    )
+    return resume_note(reentry, facts, files or ())
+
+
 def _assemble(
     run: _Run,
     snapshot: TicketSnapshot | None,
@@ -498,7 +508,7 @@ def _assemble(
         snapshot,
         plan_text,
         allowed,
-        resume_note(reentry, facts) if reentry is not None else None,
+        _resume_note(run, reentry, facts),
         _merge_note(probe.conflicted_files, run.task.base_branch),
     )
     if isinstance(prompt, ImplBlock):

@@ -50,9 +50,12 @@ _EXPECTED_MODULES = frozenset(
         "impl_block",
         "impl_feedback",
         "impl_gates",
+        "impl_merge_adopt",
         "impl_operator_directions",
         "impl_regress_findings",
         "impl_regress_ledger",
+        "impl_resume",
+        "impl_staleness",
         "plan_gates",
         "posted_text",
         "push",
@@ -80,7 +83,15 @@ _OLD_PATHS = (
 #: Codex packages whose surviving submodule sets are pinned.
 _REMAINING_CODEX_MODULES = {
     "cw.codex_finalize": {"__init__", "_argv", "_post", "_prompt", "_run"},
-    "cw.codex_impl": {"__init__", "_argv", "_prompt", "_result", "_run"},
+    "cw.codex_impl": {
+        "__init__",
+        "_argv",
+        "_post",
+        "_prompt",
+        "_result",
+        "_resume",
+        "_run",
+    },
     "cw.codex_plan": {
         "__init__",
         "_approval",
@@ -200,7 +211,7 @@ def _package_modules() -> list[Path]:
 def test_module_set_is_pinned() -> None:
     names = {_short_name(p, _PACKAGE) for p in _package_modules()}
     assert names == _EXPECTED_MODULES
-    assert len(names) == 20
+    assert len(names) == 23
 
 
 @pytest.mark.parametrize("path", _package_modules(), ids=lambda p: p.stem)

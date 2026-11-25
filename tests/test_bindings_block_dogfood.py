@@ -92,6 +92,7 @@ def test_codex_impl_and_finalize_prompts_carry_the_block(tmp_path: Path) -> None
         ticket=None,
         plan_text="PLAN",
         allowed_files=None,
+        resume_note=None,
         merge_note=None,
         bindings_block=block,
     )
