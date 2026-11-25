@@ -87,6 +87,25 @@ class TestCheckStalenessDispositions:
         assert result.block is None
         assert result.friction == (SCRIPT_ABSENT_FRICTION,)
 
+    def test_an_absent_script_with_a_regress_signal_is_stale(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        result = _check(repo, tmp_path, signal="impl")
+        assert result.stale is True
+        assert result.block is None
+        assert result.reasons == ("regressed_to_impl",)
+        assert result.friction == (SCRIPT_ABSENT_FRICTION,)
+
+    def test_exit_2_with_a_regress_signal_is_stale(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        _stub("import sys\nsys.exit(2)\n")
+        result = _check(repo, tmp_path, signal="impl")
+        assert result.stale is True
+        assert result.block is None
+        assert result.reasons == ("regressed_to_impl",)
+        assert result.friction == (CHECK_FAILED_FRICTION,)
+
     def test_a_marker_below_the_minimum_is_the_headless_block(
         self, repo: Path, tmp_path: Path
     ) -> None:

@@ -159,6 +159,17 @@ def _failed(why: str) -> Staleness:
     )
 
 
+def _friction_only(friction: str, signal: str) -> Staleness:
+    """Friction without a script verdict; a regress *signal* still makes it stale.
+
+    cw computes the regress signal itself, so a script that is absent or exits 2
+    cannot erase it: the branch regressed into IMPL resumes instead of advancing.
+    """
+    if signal:
+        return Staleness(stale=True, reasons=(_REASON_REGRESSED,), friction=(friction,))
+    return Staleness(friction=(friction,))
+
+
 def _run_script(
     worktree: Path, script: Path, head_at: str, comments_file: Path, signal: str
 ) -> subprocess.CompletedProcess[str] | str:
@@ -250,7 +261,7 @@ def _execute(
     if isinstance(done, str):
         return _failed(f"it did not run: {done}")
     if done.returncode == _EXIT_USAGE:
-        return Staleness(friction=(CHECK_FAILED_FRICTION,))
+        return _friction_only(CHECK_FAILED_FRICTION, signal)
     verdict = _verdict(done.stdout) if done.returncode == _EXIT_OK else None
     if verdict is None:
         tail = redact_and_cap(done.stderr.strip()[-_STDERR_TAIL_CHARS:])
@@ -268,15 +279,18 @@ def check_staleness(
     """Run the staleness script and apply the comment-provenance filter.
 
     An absent script is friction and not stale (fail open, as the Claude
-    contract). A script whose marker is missing or below the minimum is a
+    contract) unless *signal* is non-empty: cw computed the regress itself, so
+    the verdict is stale (``regressed_to_impl``) with the friction attached. A
+    script whose marker is missing or below the minimum is a
     ``Pre-Stage Detector Guard: HEADLESS BLOCK`` block. Exit 2 is friction and
-    not stale. Any other exit, unparseable output, or a script that did not run
-    is an ``impl_failed`` block. Effective staleness is a regress signal, or a
-    surviving operator-authority comment newer than HEAD.
+    not stale, with the same *signal* exception. Any other exit, unparseable
+    output, or a script that did not run is an ``impl_failed`` block. Effective
+    staleness is a regress signal, or a surviving operator-authority comment
+    newer than HEAD.
     """
     script = resolve_guard_script(worktree, SCRIPT_NAME, MIN_SCRIPT_VERSION)
     if script.path is None:
-        return Staleness(friction=(SCRIPT_ABSENT_FRICTION,))
+        return _friction_only(SCRIPT_ABSENT_FRICTION, signal)
     if not script.marker_ok:
         return Staleness(block=_stale_marker_block(script.path))
     return _execute(

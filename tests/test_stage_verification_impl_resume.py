@@ -330,6 +330,17 @@ class TestPlanReentry:
         assert plan.staleness is not None
         assert plan.staleness.reasons == ("regressed_to_impl",)
 
+    def test_past_s2_regressed_with_no_script_installed_still_resumes(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        _commit(repo, "a.py", trailer=_TRAILER)
+        _seed_marker(repo)
+        plan = _reentry(_plan(repo, tmp_path))
+        assert plan.disposition is Disposition.RESUME
+        assert plan.staleness is not None
+        assert plan.staleness.stale is True
+        assert plan.staleness.reasons == ("regressed_to_impl",)
+
     def test_past_s2_after_head_moved_off_the_durable_regress_head_advances(
         self, repo: Path, tmp_path: Path, staleness_script: Path
     ) -> None:
