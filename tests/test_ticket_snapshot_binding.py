@@ -29,7 +29,7 @@ from tests._shared.ticket_context import make_comment, make_snapshot_from
 from tests._ticket_view_helpers import make_task
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from cw.ticket_snapshot import SnapshotComment, TicketSnapshot
@@ -293,6 +293,45 @@ def test_author_conflict_is_untrusted_all_purposes(purpose: Purpose) -> None:
     )
     rows = bound_comments(snapshot, _mcp("U-1"), purpose)
     assert _ids(rows) == ["clean"]
+
+
+# --- approval comment: identity-bound on both rule sets (#3465) ---
+
+
+@pytest.mark.parametrize("ctx_for", [_github, _mcp], ids=["github", "mcp"])
+def test_approval_comment_binds_only_an_operator_identity(
+    ctx_for: Callable[..., SnapshotContext],
+) -> None:
+    snapshot = _snapshot(
+        make_comment("op", author_id=OPERATOR),
+        make_comment("casefold", author_id=OPERATOR.upper()),
+        make_comment("stranger", author_id="stranger"),
+        make_comment("anon", author_id=None, author=None),
+        make_comment("blank-id", author_id="  "),
+        make_comment("agent", author_id=OPERATOR, agent_authored=True),
+        make_comment("empty", author_id=OPERATOR, body=""),
+        make_comment("blank", author_id=OPERATOR, body="  \n\t "),
+        make_comment("conflict", author_id=OPERATOR, author_conflict=True),
+    )
+    rows = bound_comments(snapshot, ctx_for(OPERATOR), Purpose.APPROVAL_COMMENT)
+    assert _ids(rows) == ["op", "casefold"]
+
+
+@pytest.mark.parametrize("ctx_for", [_github, _mcp], ids=["github", "mcp"])
+def test_approval_comment_binds_nothing_without_operator_ids(
+    ctx_for: Callable[..., SnapshotContext],
+) -> None:
+    snapshot = _snapshot(make_comment("op", author_id=OPERATOR))
+    assert bound_comments(snapshot, ctx_for(), Purpose.APPROVAL_COMMENT) == []
+    assert bound_comments(snapshot, ctx_for("someone"), Purpose.APPROVAL_COMMENT) == []
+
+
+def test_the_github_operator_text_rule_does_not_decide_an_approval() -> None:
+    """GitHub binds a stranger's text for OPERATOR_TEXT, never for an approval."""
+    snapshot = _snapshot(make_comment("stranger", author_id="stranger"))
+    ctx = _github(OPERATOR)
+    assert _ids(bound_comments(snapshot, ctx, Purpose.OPERATOR_TEXT)) == ["stranger"]
+    assert bound_comments(snapshot, ctx, Purpose.APPROVAL_COMMENT) == []
 
 
 # --- B13: legacy dict shape and casefold scope ---

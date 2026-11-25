@@ -13,6 +13,7 @@ from cw.stage_verification.plan_gates import (
     APPROVAL_NEXT_ACTIONS,
     CODEX_PLAN_ARTIFACT_MISSING,
     CODEX_PLAN_GATE_FAILED,
+    CommentApproval,
     check_artifact,
     check_large_tier_approval,
     check_plan_files,
@@ -31,6 +32,11 @@ _FILES = "## Files Modified\n\n- src/cw/x.py\n"
 _SMALL = "## Summary\n\n**Scope tier:** small\n\n" + _FILES
 _LARGE = "## Summary\n\n**Scope tier:** large\n\n" + _FILES
 _FP = "b" * 64
+_OTHER_FP = "c" * 64
+_PARKED_FP = "d" * 64
+_CONSUMED = (
+    f"plan_comment_approval_consumed: comment=c9 parked={_PARKED_FP} current={_FP}"
+)
 
 
 def _result(tmp_path: Path, **overrides: Any) -> AutoDevResult:
@@ -133,6 +139,100 @@ class TestLargeTierApproval:
         (token,) = check.result.friction_highlights
         assert approved in token
         assert _FP in token
+
+    def _approved(self, fingerprint: str) -> Any:
+        return _make_ticket_task(
+            plan_approved_at=datetime.now(UTC), plan_approved_fingerprint=fingerprint
+        )
+
+    @staticmethod
+    def _consumed() -> CommentApproval:
+        """A comment approval for a plan other than the one being gated."""
+        return CommentApproval("c9", parked=_PARKED_FP, current=_FP)
+
+    def test_a_consumed_comment_with_a_matching_row_fingerprint_stays_complete(
+        self, tmp_path: Path
+    ) -> None:
+        """The row approval still covers this plan; the dead comment is noted."""
+        check = check_large_tier_approval(
+            _result(tmp_path, tier="large"),
+            self._approved(_FP),
+            _FP,
+            comment=self._consumed(),
+        )
+        assert check.result.status == "stage_complete"
+        assert check.mismatch is None
+        assert check.result.friction_highlights == [_CONSUMED]
+
+    def test_a_consumed_comment_with_the_alternate_stays_complete(
+        self, tmp_path: Path
+    ) -> None:
+        check = check_large_tier_approval(
+            _result(tmp_path, tier="large"),
+            self._approved(_OTHER_FP),
+            _FP,
+            alternate=True,
+            comment=self._consumed(),
+        )
+        assert check.result.status == "stage_complete"
+        assert check.mismatch is None
+        assert check.result.friction_highlights == [_CONSUMED]
+
+    def test_a_consumed_comment_over_a_mismatched_row_reparks_with_both_notes(
+        self, tmp_path: Path
+    ) -> None:
+        check = check_large_tier_approval(
+            _result(tmp_path, tier="large"),
+            self._approved(_OTHER_FP),
+            _FP,
+            comment=self._consumed(),
+        )
+        assert check.result.status == "plan_pending_approval"
+        assert check.mismatch == (_OTHER_FP, _FP)
+        consumed, mismatch = check.result.friction_highlights
+        assert consumed == _CONSUMED
+        assert mismatch.startswith("plan_approval_fingerprint_mismatch:")
+
+    def test_the_alternate_alone_never_approves_without_row_evidence(
+        self, tmp_path: Path
+    ) -> None:
+        check = check_large_tier_approval(
+            _result(tmp_path, tier="large"), _make_ticket_task(), _FP, alternate=True
+        )
+        assert check.result.status == "plan_pending_approval"
+        assert check.mismatch is None
+
+    def test_a_consumed_comment_without_row_evidence_parks_with_the_note(
+        self, tmp_path: Path
+    ) -> None:
+        check = check_large_tier_approval(
+            _result(tmp_path, tier="large"),
+            _make_ticket_task(),
+            _FP,
+            comment=self._consumed(),
+        )
+        assert check.result.status == "plan_pending_approval"
+        assert check.mismatch is None
+        assert check.result.friction_highlights == [_CONSUMED]
+
+    def test_a_comment_for_this_plan_approves_without_row_evidence(
+        self, tmp_path: Path
+    ) -> None:
+        check = check_large_tier_approval(
+            _result(tmp_path, tier="large"),
+            _make_ticket_task(),
+            _FP,
+            comment=CommentApproval("c9", parked=_FP, current=_FP),
+        )
+        assert check.result.status == "stage_complete"
+        assert check.result.friction_highlights == []
+
+    def test_a_comment_never_changes_a_small_plan(self, tmp_path: Path) -> None:
+        result = _result(tmp_path)
+        check = check_large_tier_approval(
+            result, _make_ticket_task(), _FP, comment=self._consumed()
+        )
+        assert check.result is result
 
     def test_fingerprint_without_timestamp_is_not_evidence(self) -> None:
         task = _make_ticket_task(plan_approved_fingerprint=_FP)
