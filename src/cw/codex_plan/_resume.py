@@ -328,10 +328,20 @@ def _failed_revision(run: _Run, body: str, source: str, why: str) -> _Exit:
     )
 
 
-def _applied(run: _Run, source: str) -> None:
+def _applied(run: _Run, revised: str, source: str, **book: Any) -> _Exit | None:
+    """Record the applied source, then checkpoint the revised draft with it.
+
+    ``succeeded`` is recorded only once the valid revised draft is on disk, in
+    the same write as the ``applied`` source (and any *book* changes such as the
+    round reset), so a later turn exit cannot strand the revision behind a
+    ``started`` lease. A failed write blocks fail-closed.
+    """
     run.book.update(
-        attempted=ResolutionsAttempt(source, ATTEMPT_SUCCEEDED), applied=source
+        attempted=ResolutionsAttempt(source, ATTEMPT_SUCCEEDED),
+        applied=source,
+        **book,
     )
+    return _checkpoint(run, revised)
 
 
 def _non_row_delta(
@@ -344,20 +354,25 @@ def _non_row_delta(
     revised = _revise_for_resolutions(revoked, target, body, state, source)
     if isinstance(revised, _Exit):
         return revised
-    _applied(revoked, source)
+    written = _applied(revoked, revised, source)
+    if written is not None:
+        return written
     return GateOutcome(revoked, revised, fast_path_reason(revoked.task, revised))
 
 
 def finish_row_delta(run: _Run, revised: str, source: str) -> GateOutcome | _Exit:
     """After a row revision: keep an equal approval, else revoke; reset the round."""
     if fast_path_reason(run.task, revised) == APPROVED_FINGERPRINT_MATCH:
-        _applied(run, source)
+        written = _applied(run, revised, source)
+        if written is not None:
+            return written
         return GateOutcome(run, revised, APPROVED_FINGERPRINT_MATCH, row_delta=True)
     revoked = _revoke_approval(run)
     if isinstance(revoked, _Exit):
         return revoked
-    _applied(revoked, source)
-    revoked.book.update(scan_round=0)
+    written = _applied(revoked, revised, source, scan_round=0)
+    if written is not None:
+        return written
     return GateOutcome(
         revoked, revised, fast_path_reason(revoked.task, revised), row_delta=True
     )

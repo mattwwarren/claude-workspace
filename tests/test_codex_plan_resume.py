@@ -19,7 +19,12 @@ import pytest
 from freezegun import freeze_time
 
 from cw.codex_plan._exits import _Exit
-from cw.codex_plan._result import PLAN_MD_RELATIVE_PATH, RESUME_FRICTION, ResumeDraft
+from cw.codex_plan._result import (
+    PLAN_MD_RELATIVE_PATH,
+    RESUME_FRICTION,
+    ResumeDraft,
+    write_plan_draft,
+)
 from cw.codex_plan._resume import (
     APPROVED_FINGERPRINT_MATCH,
     APPROVED_FINGERPRINT_MISMATCH,
@@ -80,6 +85,8 @@ from tests.test_codex_plan_run import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from cw.auto_dev_result import AutoDevResult
 
 pytestmark = pytest.mark.usefixtures("isolated_backend_layers")
 __all__ = ["harness"]
@@ -639,6 +646,100 @@ def test_a_failed_non_row_revision_blocks_after_the_revoke(
     assert result.blocker.reason == "agent_block"
     assert len(_revoked()) == 1
     assert _book(h).attempted == ResolutionsAttempt("comment:B", "failed")
+
+
+_CAPACITY_TURN = CodexRunResult(
+    returncode=1,
+    stdout=(
+        '{"type":"turn.failed","error":{"message":'
+        '"Selected model is at capacity. Please try a different model."}}\n'
+    ),
+    stderr="",
+)
+
+
+def _assert_revision_survives_a_failed_scan(
+    h: Harness, source_prefix: str, result: AutoDevResult
+) -> LeadingBlock:
+    """The scan turn failed after a good revision: the revision is on disk."""
+    assert result.blocker is not None
+    assert result.blocker.reason == CODEX_MODEL_CAPACITY
+    assert result.blocker.retry_eligible is True
+    assert h.draft_path().read_text(encoding="utf-8").endswith(REVISED)
+    book = _book(h)
+    assert book.applied is not None
+    assert book.applied.startswith(source_prefix)
+    assert book.attempted == ResolutionsAttempt(book.applied, "succeeded")
+    assert book.revoked is not None
+    assert len(_revision_calls(h)) == 1
+    assert len(_revoked()) == 1
+    return book
+
+
+def _assert_second_round_is_not_reserved(h: Harness) -> None:
+    again = h.run()
+    assert again.blocker is not None
+    assert again.blocker.reason == CODEX_MODEL_CAPACITY
+    assert "active reservation" not in again.blocker.details
+    assert len(_revision_calls(h)) == 1
+
+
+def test_a_non_row_revision_is_checkpointed_before_a_failing_scan_turn(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness(task_updates=_approve())
+    _seed(h, LeadingBlock(applied="none"))
+    _snap(h, (_marker_comment("B", "2026-11-02T00:00:00Z"),))
+    _revision(h)
+    h.runner.add(stdin_contains(PLAN_TURN), _CAPACITY_TURN)
+    result = h.run()
+    _assert_revision_survives_a_failed_scan(h, "comment:B", result)
+    _assert_second_round_is_not_reserved(h)
+
+
+def test_a_row_revision_is_checkpointed_before_a_failing_scan_turn(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness(task_updates={**_approve(), **_rows("use redis")})
+    _seed(h, LeadingBlock(scan_round=2, last_evaluated=_NONE_FP, applied="none"))
+    _snap(h)
+    _revision(h)
+    h.runner.add(stdin_contains(PLAN_TURN), _CAPACITY_TURN)
+    result = h.run()
+    book = _assert_revision_survives_a_failed_scan(h, "row:1:", result)
+    assert book.scan_round == 0
+    assert book.revoked is not None
+    assert book.revoked.fingerprint == compute_plan_draft_fingerprint(BODY)
+    _assert_second_round_is_not_reserved(h)
+
+
+@pytest.mark.parametrize("kind", ["row", "row-equal", "non-row"])
+def test_a_failed_revision_checkpoint_fails_closed(
+    harness: Callable[..., Harness], kind: str
+) -> None:
+    row = kind != "non-row"
+    h = harness(task_updates={**_approve(), **(_rows("use redis") if row else {})})
+    _seed(h, LeadingBlock(applied="none"))
+    _snap(h, () if row else (_marker_comment("B", "2026-11-02T00:00:00Z"),))
+    _revision(h, BODY if kind == "row-equal" else REVISED)
+    writes: list[str] = []
+
+    def flaky(*args: Any, **kwargs: Any) -> Any:
+        writes.append("write")
+        if len(writes) > 1:  # the first write is the lease reservation
+            message = "ro"
+            raise OSError(message)
+        return write_plan_draft(*args, **kwargs)
+
+    with patch("cw.codex_plan._resume.write_plan_draft", side_effect=flaky):
+        result = h.run()
+    assert result.blocker is not None
+    assert result.blocker.reason == "agent_block"
+    assert "could not be written (OSError)" in result.blocker.details
+    assert h.plan_calls == []
+    attempt = _book(h).attempted
+    assert attempt is not None
+    assert attempt.outcome == "started"
 
 
 @pytest.mark.parametrize("reply", [REVISED, ""], ids=["after-revise", "after-fail"])
