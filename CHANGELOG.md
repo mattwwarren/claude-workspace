@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.111.0] - 2026-11-25
+
 ### Added
 
 - **Codex PLAN approval evidence and origin sync (#3465).** A large codex PLAN can be approved by an operator-identity comment token (bound to the parked draft fingerprint, consumed on any plan change), and by the operator-authority alternate (`operator_approval_no_delta`). The default branch is synced with origin before a PLAN turn, with a bounded fetch that fails open. Comments the provenance rule reads as agent analysis are labelled `[agent analysis: not an operator decision]` in the codex PLAN prompt. The approval rule is recorded in `docs/headless-contract.md`.
