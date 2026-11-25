@@ -11,6 +11,7 @@ assertion follows the result contract in ``.claude/commands/auto-dev.md``'s
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -21,12 +22,15 @@ from click.testing import CliRunner, Result
 from cw.cli import main
 from cw.cli.post_comment import exit_code_for
 from cw.config import events_dir, history_dir
+from cw.dev_queue import save_dev_queue
 from cw.gh import AGENT_COMMENT_MARKER
+from cw.models import DevQueueStore, Stage
 from cw.tracker_post import PostReason, PostStatus
 from tests import _git_sandbox
 from tests._clients_yaml import ClientSpec, write_clients_yaml
 from tests._shared.cli_preflight import _make_agent_repo
-from tests._shared.git_repos import hostile_git_env
+from tests._shared.git_repos import git_in, hostile_git_env
+from tests._shared.stop_hook_context import _seed_running_row, _write_hook_context_file
 from tests._tool_fakes import FakePostCommentGh
 
 if TYPE_CHECKING:
@@ -891,3 +895,125 @@ class TestContractTable:
         reasons = {reason for _s, reason, _c in CONTRACT_TABLE if reason}
         assert statuses == {s.value for s in PostStatus} | {"emitted"}
         assert reasons == {r.value for r in PostReason}
+
+
+class TestParkFindingsRecord:
+    """A REVIEW park's blocking-findings body is saved for a regressed IMPL (#3762)."""
+
+    @pytest.fixture
+    def repo(
+        self,
+        acme_root: Path,
+        fake_gh: FakePostCommentGh,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> Path:
+        """A real git worktree with a cw-context and a RUNNING REVIEW row."""
+        repo = make_git_repo("park-wt")
+        monkeypatch.chdir(repo)
+        _write_hook_context_file(repo, client="acme", ticket_id="42", session_id="s-42")
+        _seed_running_row(repo, stage=Stage.REVIEW)
+        return repo
+
+    @staticmethod
+    def _post(tmp_path: Path, *extra: str, header: str | None = HEADER) -> Result:
+        body = _body(tmp_path, f"finding {SECRET}\n\n{AGENT_COMMENT_MARKER}\n")
+        head = ["--header", header] if header is not None else []
+        return _invoke("42", "--body-file", str(body), *head, *extra)
+
+    @staticmethod
+    def _saved(repo: Path) -> dict[str, object] | None:
+        path = repo / ".cw" / "review-park-findings.json"
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+    def test_posted_review_park_saves_the_redacted_body(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        # --consume deletes the body file, yet the save (from memory) still lands.
+        assert self._post(tmp_path, "--consume").exit_code == EXIT_POSTED
+        assert not (tmp_path / "body.txt").exists()
+        assert self._saved(repo) == {
+            "ticket_id": "42",
+            "reviewed_sha": git_in(repo, "rev-parse", "HEAD"),
+            "text": "finding <redacted>",
+        }
+
+    def test_emitted_review_park_saves_too(self, repo: Path, tmp_path: Path) -> None:
+        result = self._post(tmp_path, "--emit-only", "--out-dir", str(tmp_path / "o"))
+        assert _json(result)["status"] == "emitted"
+        saved = self._saved(repo)
+        assert saved is not None
+        assert SECRET not in str(saved["text"])
+        assert AGENT_COMMENT_MARKER not in str(saved["text"])
+
+    @pytest.mark.parametrize("stage", [Stage.IMPL, Stage.FINALIZE, Stage.PLAN])
+    def test_other_stage_rows_save_nothing_and_log_no_body_or_path(
+        self,
+        repo: Path,
+        tmp_path: Path,
+        stage: Stage,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _seed_running_row(repo, stage=stage)
+        with caplog.at_level(logging.DEBUG, logger="cw.cli.post_comment"):
+            assert self._post(tmp_path).exit_code == EXIT_POSTED
+        assert self._saved(repo) is None
+        assert [r.getMessage() for r in caplog.records] == [
+            "review_park_findings_skipped ticket=42 reason=not_review_stage"
+        ]
+
+    def test_other_header_or_no_header_saves_nothing(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        assert self._post(tmp_path, header="## Other").exit_code == EXIT_POSTED
+        assert self._post(tmp_path, header=None).exit_code == EXIT_POSTED
+        assert self._saved(repo) is None
+
+    def test_refused_and_partial_outcomes_save_nothing(
+        self, repo: Path, fake_gh: FakePostCommentGh, tmp_path: Path
+    ) -> None:
+        empty = _body(tmp_path, "  \n", "empty.txt")
+        refused = _invoke("42", "--body-file", str(empty), "--header", HEADER)
+        assert _json(refused)["status"] == "refused"
+        fake_gh.tamper = True
+        assert _json(self._post(tmp_path))["status"] == "partial"
+        assert self._saved(repo) is None
+
+    def test_no_ids_no_context_or_no_running_row_saves_nothing(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        context = repo / ".claude" / "cw-context.json"
+        original = context.read_text(encoding="utf-8")
+        context.write_text(
+            json.dumps({**json.loads(original), "session_id": ""}), encoding="utf-8"
+        )
+        assert self._post(tmp_path).exit_code == EXIT_POSTED
+        context.unlink()
+        assert self._post(tmp_path, "-c", "acme").exit_code == EXIT_POSTED
+        context.write_text(original, encoding="utf-8")
+        save_dev_queue(DevQueueStore(tasks=[]))
+        assert self._post(tmp_path).exit_code == EXIT_POSTED
+        assert self._saved(repo) is None
+
+    def test_unreadable_head_saves_nothing_and_warns(
+        self,
+        repo: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setattr("cw.cli.post_comment.current_head_sha", lambda _p: None)
+        with caplog.at_level(logging.DEBUG, logger="cw.cli.post_comment"):
+            assert self._post(tmp_path).exit_code == EXIT_POSTED
+        assert self._saved(repo) is None
+        assert [r.getMessage() for r in caplog.records] == [
+            "review_park_findings_skipped ticket=42 reason=no_head"
+        ]
+
+    def test_persistence_failure_leaves_json_and_exit_code_unchanged(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        (repo / ".cw" / "review-park-findings.json").mkdir(parents=True)
+        result = self._post(tmp_path)
+        assert result.exit_code == EXIT_POSTED, result.output
+        assert _json(result)["status"] == "posted"

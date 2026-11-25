@@ -4416,6 +4416,47 @@ class TestWriteHookContextTaskFields:
         # Stage is a StrEnum, so json.dumps renders the plain stage value.
         assert context["queue_metadata"]["regressed_into_stage"] == "impl"
 
+    def test_park_findings_threaded_into_queue_metadata(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """#3762: a REVIEW-regressed row whose park saved its blocking findings
+        carries them in ``queue_metadata.regress_review_findings``."""
+        from cw.models import Stage
+        from cw.review_park_findings import write_park_findings
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        worktree = make_git_repo("wt-3762-park")
+        task = _make_pending_task()
+        task.stage = Stage.IMPL
+        task.stage_high_water = Stage.REVIEW
+        assert write_park_findings(
+            worktree,
+            ticket_id=task.ticket_id,
+            reviewed_sha="d" * 40,
+            text="parked blocking finding",
+        )
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev-impl GEN-3762 --headless",
+            label="auto-dev/GEN-3762",
+            native_daemon=FakeNativeDaemonClient(),
+            ticket_id=task.ticket_id,
+            headless=True,
+            task=task,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["queue_metadata"]["regress_review_findings"] == {
+            "reviewed_sha": "d" * 40,
+            "text": "parked blocking finding",
+        }
+
     def test_pending_operator_comment_threaded_into_queue_metadata(
         self,
         tmp_config_dir: Path,

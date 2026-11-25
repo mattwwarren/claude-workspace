@@ -8,9 +8,14 @@ agent. Every consumer calls :func:`regress_review_findings`: the codex prompt
 section, the codex ``existing_branch_work`` exemption, the claude-native
 ``queue_metadata.regress_review_findings`` key and the requeue echo.
 
-The rule reads only the row's stage facts and the artifact. It never reads
+A claude-native blocking-mode park saves no verdict, so the blocking-findings
+comment it posted is the source there: ``cw post-comment`` saves its body to
+``.cw/review-park-findings.json`` (#3762, :mod:`cw.review_park_findings`), and
+that saved record takes precedence over the verdict readers.
+
+The rule reads only the row's stage facts and the artifacts. It never reads
 ``regressed_into_stage``, ``blocked_reason``, ``pr_url`` or HEAD, so it holds
-on every IMPL retry until the next REVIEW pass rewrites the verdict.
+on every IMPL retry until the next REVIEW pass rewrites or clears them.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from cw.review_findings import (
     has_held_findings,
     held_findings,
 )
+from cw.review_park_findings import read_park_findings
 from cw.stage_verification.impl_regress_ledger import read_held_round_verdict
 from cw.stage_verification.posted_text import redact_and_cap_bytes
 
@@ -38,8 +44,9 @@ if TYPE_CHECKING:
     from cw.review_findings import Finding, ReviewVerdict
 
 #: Why the rule withheld delivery. ``artifact_missing`` covers an absent,
-#: unreadable or invalid verdict; ``not_owned`` covers a foreign verdict and a
-#: ledger round recorded for another head; ``not_blocking`` covers a verdict
+#: unreadable or invalid verdict; ``not_owned`` covers a foreign verdict, a
+#: saved park-findings record for another ticket (#3762) and a ledger round
+#: recorded for another head; ``not_blocking`` covers a verdict
 #: with no deliverable finding: no blocking ``must_fix`` and no held
 #: evidence-gap finding, a clean-mode ledger none of whose listed rounds holds a
 #: held finding, or one whose listed round holds an unsettled decision contest
@@ -141,6 +148,23 @@ def _load_verdict(task: TicketTask, worktree: Path) -> _Loaded:
     return _Loaded(None, _refusal_reason(ledger.refusal), from_ledger=True)
 
 
+def _load_parked(task: TicketTask, worktree: Path) -> RegressOutcome | None:
+    """The saved claude-native park findings (#3762), or ``None`` to fall through.
+
+    A readable, owned record is delivered (re-redacted and capped on the way
+    out); a record stamped for another ticket is ``not_owned`` with no
+    fall-through to the verdict readers. Any other state, including an absent,
+    unreadable or blank record, falls through to the verdict checks.
+    """
+    read = read_park_findings(worktree, task.ticket_id)
+    if read.findings is not None:
+        text = redact_and_cap_bytes(read.findings.text, cap_bytes=_CAP_BYTES)
+        return RegressOutcome(RegressFindings(read.findings.reviewed_sha, text), None)
+    if read.refusal == NOT_OWNED:
+        return RegressOutcome(None, NOT_OWNED)
+    return None
+
+
 def _deliverable(verdict: ReviewVerdict, *, with_must_fix: bool) -> list[Finding]:
     """The findings the rule may deliver from one verdict, in delivery order.
 
@@ -154,6 +178,15 @@ def _deliverable(verdict: ReviewVerdict, *, with_must_fix: bool) -> list[Finding
     return [*must_fix, *(af.finding for af in held_findings(verdict, "evidence_gap"))]
 
 
+def _operator_guard(task: TicketTask) -> WithheldReason | None:
+    """The reason an operator-supplied direction already covers this IMPL run."""
+    if task.review_feedback is not None:
+        return REVIEW_FEEDBACK_PRESENT
+    if task.must_fix_override is not None:
+        return OVERRIDE_PRESENT
+    return None
+
+
 def regress_review_findings(task: TicketTask, worktree: Path) -> RegressOutcome | None:
     """Decide whether the REVIEW verdict's findings reach this IMPL run.
 
@@ -162,10 +195,12 @@ def regress_review_findings(task: TicketTask, worktree: Path) -> RegressOutcome 
     """
     if not _applies(task):
         return None
-    if task.review_feedback is not None:
-        return RegressOutcome(None, REVIEW_FEEDBACK_PRESENT)
-    if task.must_fix_override is not None:
-        return RegressOutcome(None, OVERRIDE_PRESENT)
+    guard = _operator_guard(task)
+    if guard is not None:
+        return RegressOutcome(None, guard)
+    parked = _load_parked(task, worktree)
+    if parked is not None:
+        return parked
     loaded = _load_verdict(task, worktree)
     if loaded.verdict is None:
         return RegressOutcome(None, loaded.reason)

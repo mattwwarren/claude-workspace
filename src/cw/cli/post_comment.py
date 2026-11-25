@@ -19,11 +19,18 @@ failure exits non-zero with no JSON and posts nothing. The command records no
 event: its only outputs are the JSON and stderr reason lines. The call contract
 is single-sourced in ``.claude/commands/auto-dev.md`` ("Tracker post seam
 (#2810)").
+
+One side effect (#3762): a ``posted`` or ``emitted`` ``## Blocking Review
+Findings`` comment sent from a RUNNING REVIEW-stage row also saves its redacted
+body to ``.cw/review-park-findings.json`` (:mod:`cw.review_park_findings`), so a
+later REVIEW regress into IMPL can deliver it. The save is fail-open: no failure
+changes the JSON, the exit code or the events.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -33,13 +40,28 @@ from typing import TYPE_CHECKING
 import click
 
 from cw._hook_context import _read_cw_context
+from cw.branch_ahead import current_head_sha
 from cw.cli._base import handle_errors, main
 from cw.config import get_client
 from cw.dev_queue.lifecycle import _tracker_allows_github_fetch
 from cw.exceptions import CwError
 from cw.gh import FETCH_COMMENTS_TIMEOUT, agent_marked_body, fetch_repo_visibility
-from cw.redact_post_text import git_toplevel, redaction_anchors, resolve_home
-from cw.tracker_post import PartPlan, PostReason, PostResult, PostStatus
+from cw.models import Stage
+from cw.reconcile import find_running_task_for_session
+from cw.redact_post_text import (
+    git_toplevel,
+    redact_post_text,
+    redaction_anchors,
+    resolve_home,
+)
+from cw.review_park_findings import write_park_findings
+from cw.tracker_post import (
+    PartPlan,
+    PostReason,
+    PostResult,
+    PostStatus,
+    strip_trailing_marker,
+)
 from cw.tracker_post import plan_parts as _plan_parts
 from cw.tracker_post import post_parts as _post_parts
 from cw.worktree import _git_dir
@@ -48,6 +70,11 @@ if TYPE_CHECKING:
     from cw.models import ClientConfig
 
 __all__ = ["EMITTED_STATUS", "exit_code_for", "post_comment"]
+
+_log = logging.getLogger(__name__)
+
+#: The header whose posted body a REVIEW park saves for a regressed IMPL (#3762).
+_BLOCKING_FINDINGS_HEADER = "## Blocking Review Findings"
 
 #: The CLI-only status for ``--emit-only``; the library statuses are PostStatus.
 EMITTED_STATUS = "emitted"
@@ -60,6 +87,7 @@ _EXIT_CODES = {
     PostStatus.REFUSED.value: _EXIT_REFUSED,
     PostStatus.PARTIAL.value: _EXIT_PARTIAL,
 }
+_PERSISTED_STATUSES = frozenset({PostStatus.POSTED.value, EMITTED_STATUS})
 _PARTS_SPLIT = "split"
 _PARTS_SINGLE = "single"
 _ISSUE_NUMBER = re.compile(r"#?\d+")
@@ -171,12 +199,21 @@ def _posted_outcome(result: PostResult, visibility: str, redacted: bool) -> _Out
     )
 
 
+def _redaction_inputs(cfg: ClientConfig, opts: _Options) -> tuple[str, list[str]]:
+    """The ``(home, worktrees)`` anchors every redaction of this call uses."""
+    return (
+        resolve_home(os.environ),
+        redaction_anchors(cfg, git_toplevel(), opts.context, opts.worktrees),
+    )
+
+
 def _plan(raw: str, cfg: ClientConfig, opts: _Options) -> PartPlan:
     """Redact *raw* against every anchor, then wrap and split it."""
+    home, worktrees = _redaction_inputs(cfg, opts)
     return _plan_parts(
         raw,
-        home=resolve_home(os.environ),
-        worktrees=redaction_anchors(cfg, git_toplevel(), opts.context, opts.worktrees),
+        home=home,
+        worktrees=worktrees,
         header=opts.header,
         subheading=opts.subheading,
         fence=opts.fence,
@@ -223,6 +260,68 @@ def _post(ticket: str, raw: str, cfg: ClientConfig, opts: _Options) -> _Outcome:
     return _posted_outcome(result, visibility, plan.redacted)
 
 
+def _review_row_ids(context: dict[str, object] | None) -> tuple[str, str] | str:
+    """The cwd context's ``(ticket_id, session_id)``, or the skip reason."""
+    if context is None:
+        return "no_context"
+    ticket_id = context.get("ticket_id")
+    session_id = context.get("session_id")
+    if (
+        not isinstance(ticket_id, str)
+        or not isinstance(session_id, str)
+        or not ticket_id
+        or not session_id
+    ):
+        return "no_ids"
+    return ticket_id, session_id
+
+
+def _persist_park_findings(
+    ticket: str, raw: str, cfg: ClientConfig, opts: _Options, outcome: _Outcome
+) -> None:
+    """Save a REVIEW park's blocking-findings body for a later IMPL regress (#3762).
+
+    Runs only for a ``posted`` or ``emitted`` outcome carrying the exact
+    blocking-findings header, from the RUNNING REVIEW row the cwd context names.
+    Every callee is fail-open (an unreadable context, queue or HEAD is "absent")
+    or returns ``False``, so nothing here can change the result JSON or exit
+    code. Logs carry the ticket only: never the body or a worktree path.
+    """
+    if (
+        outcome.status not in _PERSISTED_STATUSES
+        or opts.header != _BLOCKING_FINDINGS_HEADER
+    ):
+        return
+    ids = _review_row_ids(opts.context)
+    if isinstance(ids, str):
+        _log.debug("review_park_findings_skipped ticket=%s reason=%s", ticket, ids)
+        return
+    ticket_id, session_id = ids
+    task = find_running_task_for_session(ticket_id, session_id)
+    if task is None:
+        _log.debug("review_park_findings_skipped ticket=%s reason=no_row", ticket)
+        return
+    if task.stage != Stage.REVIEW:
+        _log.debug(
+            "review_park_findings_skipped ticket=%s reason=not_review_stage", ticket
+        )
+        return
+    cwd = Path.cwd()
+    head = current_head_sha(cwd)
+    if head is None:
+        _log.warning("review_park_findings_skipped ticket=%s reason=no_head", ticket)
+        return
+    home, worktrees = _redaction_inputs(cfg, opts)
+    write_park_findings(
+        cwd,
+        ticket_id=ticket_id,
+        reviewed_sha=head,
+        text=redact_post_text(
+            strip_trailing_marker(raw), home=home, worktrees=worktrees
+        ),
+    )
+
+
 def _run(
     ticket: str, body_file: Path, cfg: ClientConfig, opts: _Options, *, consume: bool
 ) -> _Outcome:
@@ -239,8 +338,11 @@ def _run(
     if not raw.strip():
         return _Outcome(PostStatus.REFUSED.value, PostReason.EMPTY_BODY)
     if opts.out_dir is not None:
-        return _emit(raw, cfg, opts, opts.out_dir)
-    return _post(ticket, raw, cfg, opts)
+        outcome = _emit(raw, cfg, opts, opts.out_dir)
+    else:
+        outcome = _post(ticket, raw, cfg, opts)
+    _persist_park_findings(ticket, raw, cfg, opts, outcome)
+    return outcome
 
 
 def _emit_result(ticket: str, outcome: _Outcome) -> None:

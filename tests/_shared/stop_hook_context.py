@@ -12,15 +12,19 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from cw.config import load_state, save_state
+from cw.dev_queue import save_dev_queue
 from cw.models import (
     AGENT_SPAWN_STAMP_KEY,
     HOOK_CONTEXT_RELATIVE_PATH,
+    DevQueueStore,
+    QueueItemStatus,
     Session,
     SessionOrigin,
+    Stage,
     TicketTask,
 )
 from tests._shared.lock_helpers import _hold_flock
-from tests._shared.session_seeding import _make_daemon_session
+from tests._shared.session_seeding import _make_daemon_session, _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -167,6 +171,43 @@ def _write_hook_context_file(
     else:
         context[AGENT_SPAWN_STAMP_KEY] = stamp
     context_path.write_text(json.dumps(context, indent=2) + "\n", encoding="utf-8")
+
+
+def _read_context(worktree: Path) -> dict[str, object]:
+    """Return *worktree*'s parsed ``cw-context.json`` (hoisted, #3762)."""
+    raw = json.loads(
+        (worktree / HOOK_CONTEXT_RELATIVE_PATH).read_text(encoding="utf-8")
+    )
+    assert isinstance(raw, dict)
+    return raw
+
+
+def _seed_running_row(
+    worktree: Path,
+    *,
+    stage: Stage = Stage.IMPL,
+    status: QueueItemStatus = QueueItemStatus.RUNNING,
+) -> None:
+    """Seed the dev queue with the row the seeded context file describes.
+
+    The ids are read back out of the written context rather than restated, so
+    this can never drift from ``_write_hook_context_file``'s own literals.
+    Hoisted from ``tests/test_cli_signal_park.py`` (#3762).
+    """
+    context = _read_context(worktree)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                _make_ticket_task(
+                    ticket_id=context["ticket_id"],
+                    client=context["client"],
+                    session_id=context["session_id"],
+                    status=status,
+                    stage=stage,
+                )
+            ]
+        )
+    )
 
 
 def _headless_worktree(tmp_path: Path, name: str = "wt") -> Path:

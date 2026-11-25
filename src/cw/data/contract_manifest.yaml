@@ -766,7 +766,7 @@ elements:
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}}
   impl.regress-review-findings:
     cells:
-      claude-native: {disposition: implemented, note: "queue_metadata.regress_review_findings, derived at spawn (#3694)"}
+      claude-native: {disposition: implemented, note: "queue_metadata.regress_review_findings, derived at spawn (#3694); a park's saved blocking-findings comment is the source on a claude-native blocking-mode park (#3762)"}
       codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/impl_regress_findings.py, symbol: regress_review_findings}, note: "the rendered prompt carries the REVIEW verdict's MUST_FIX findings as untrusted data"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "receives nothing, RFC 0018 D-4: the REVIEW-regress findings are not delivered to opencode IMPL runs"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "receives nothing: the REVIEW-regress findings are not delivered to local IMPL runs"}
