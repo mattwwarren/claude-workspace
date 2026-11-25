@@ -16,6 +16,7 @@ from cw.cli.dev_queue import _requeue_echo
 from cw.exceptions import CwError
 from cw.models import Stage, TicketTask
 from cw.models.review_feedback import ReviewFeedback
+from cw.review_park_findings import write_park_findings
 from tests._review_history_helpers import write_held_ledger
 from tests._shared.review_builders import (
     _make_finding,
@@ -58,6 +59,17 @@ def test_delivered_prints_the_delivered_line(
     assert f"delivered (reviewed_sha {_SHA})" in out.out
     assert "opencode and local IMPL runs receive nothing" in out.out
     assert out.err == ""
+
+
+def test_saved_park_findings_print_the_delivered_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert write_park_findings(
+        tmp_path, ticket_id=_TICKET, reviewed_sha=_SHA, text="parked finding"
+    )
+    _patch_row(monkeypatch, task=_task(), worktree=tmp_path)
+    _requeue_echo._echo_regress_findings(_TICKET, "test")
+    assert f"delivered (reviewed_sha {_SHA})" in capsys.readouterr().out
 
 
 def test_artifact_missing_prints_withheld(

@@ -38,6 +38,7 @@ from cw.codex_review import (
 from cw.local_runner import git_facts
 from cw.models import Stage, TicketTask
 from cw.models.review_feedback import ReviewFeedback
+from cw.review_park_findings import write_park_findings
 from cw.stage_verification import impl_gates as _gates_module
 from cw.stage_verification.baseline import (
     CycleBaseline,
@@ -826,6 +827,15 @@ class TestRegressedReviewRowExemption:
         git_in(repo, "commit", "-m", "prior work")
         write_review_verdict_envelope(
             repo, ticket_id="T-1", reviewed_sha="a" * 40, must_fix=[_make_finding()]
+        )
+        task = _task(stage=Stage.IMPL, stage_high_water=Stage.REVIEW)
+        assert check_existing_branch_work(git_facts(repo, "main"), task, repo) is None
+
+    def test_regressed_row_with_saved_park_findings_is_exempt(self, repo: Path) -> None:
+        _stage(repo)
+        git_in(repo, "commit", "-m", "prior work")
+        assert write_park_findings(
+            repo, ticket_id="T-1", reviewed_sha="a" * 40, text="parked finding"
         )
         task = _task(stage=Stage.IMPL, stage_high_water=Stage.REVIEW)
         assert check_existing_branch_work(git_facts(repo, "main"), task, repo) is None

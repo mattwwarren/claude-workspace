@@ -30,6 +30,7 @@ from cw.contract_manifest._render import _IMPL_CODEX_ADDENDUM, _stage_addendum
 from cw.models import CODEX_BACKEND, Stage, TicketTask
 from cw.models.bindings import Harness
 from cw.models.review_feedback import ReviewFeedback
+from cw.review_park_findings import write_park_findings
 from cw.stage_verification.impl_operator_directions import (
     GATE_PHRASE,
     GOVERNS_PHRASE,
@@ -237,6 +238,19 @@ class TestRegressFindingsSection:
         assert "verify each one against the current" in text
         assert "Fix me" in text
         assert "bound it to the live PR" not in text
+
+    def test_saved_park_findings_render_the_section(self, tmp_path: Path) -> None:
+        """A claude-native park's saved comment reaches the codex prompt (#3762)."""
+        assert write_park_findings(
+            tmp_path,
+            ticket_id=_TICKET,
+            reviewed_sha="b" * 40,
+            text="Parked blocking finding",
+        )
+        text = self._render_regress(tmp_path)
+        assert _begin(REGRESS_FINDINGS_SECTION) in text
+        assert f"reviewed_sha: {'b' * 40}" in text
+        assert "Parked blocking finding" in text
 
     def test_gap_hold_section_is_rendered_with_gap_text(self, tmp_path: Path) -> None:
         """A held evidence-gap finding reaches the prompt with its gap line (#3862)."""
