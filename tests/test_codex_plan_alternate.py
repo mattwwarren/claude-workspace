@@ -28,6 +28,7 @@ from cw.plan_fingerprint import (
     LeadingBlock,
     compute_body_sha,
     compute_plan_draft_fingerprint,
+    format_last_evaluated,
 )
 from tests._shared.ticket_context import issue_envelope_json, observed_issue_envelope
 from tests._tool_fakes import revise_turn_result, stdin_contains
@@ -77,7 +78,7 @@ def _drifted(
     """A draft whose fingerprint differs from the row's approval, body unchanged."""
     book = LeadingBlock(
         applied="none",
-        last_evaluated=f"operator_comment=none|body_sha={_live_body_sha()}",
+        last_evaluated=format_last_evaluated("none", _live_body_sha()),
     )
     write_plan_draft(h.worktree, plan, book=book)
     h.gh.reply(*_VIEW, stdout=issue_envelope_json(comments))

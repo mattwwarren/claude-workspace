@@ -17,14 +17,16 @@ while the plan's fingerprint still equals the one the previous park persisted.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
 from cw.codex_plan._result import draft_body
 from cw.plan_files import _strip_fenced_lines
-from cw.plan_fingerprint import compute_plan_draft_fingerprint
+from cw.plan_fingerprint import (
+    compute_plan_draft_fingerprint,
+    parse_last_evaluated_body_sha,
+)
 from cw.stage_verification.plan_gates import CommentApproval
 
 if TYPE_CHECKING:
@@ -36,10 +38,6 @@ if TYPE_CHECKING:
 
 #: The approval comment token an operator posts on a parked plan (exact line).
 APPROVAL_LINE: Final = "<!-- auto-dev-comment-approval -->"
-
-_LAST_EVALUATED_BODY_SHA = re.compile(
-    r"operator_comment=[^|\n]+\|body_sha=(?P<body_sha>[0-9a-f]{64})"
-)
 
 
 @dataclass(frozen=True)
@@ -113,8 +111,7 @@ def persisted_body_sha(last_evaluated: str | None) -> str | None:
     """The ``body_sha`` component of a persisted ``last_evaluated`` value."""
     if last_evaluated is None:
         return None
-    match = _LAST_EVALUATED_BODY_SHA.fullmatch(last_evaluated)
-    return match.group("body_sha") if match is not None else None
+    return parse_last_evaluated_body_sha(last_evaluated)
 
 
 def alternate_holds(

@@ -29,7 +29,7 @@ from cw.codex_plan._post import PARK_HEADER
 from cw.codex_plan._settle import unlabelled
 from cw.context_queue_metadata import operator_resolutions_source
 from cw.gh import _PLAN_MARKER, PIPELINE_FIXED_HEADERS
-from cw.plan_fingerprint import compute_body_sha
+from cw.plan_fingerprint import compute_body_sha, format_last_evaluated
 from cw.ticket_snapshot import Purpose, bound_comments
 
 if TYPE_CHECKING:
@@ -97,7 +97,7 @@ class TrackerObservation:
         """The ``plan-stage-last-evaluated`` value, ``None`` when unobserved."""
         if not self.observed:
             return None
-        return f"operator_comment={self.operator_comment}|body_sha={self.body_sha}"
+        return format_last_evaluated(self.operator_comment, self.body_sha)
 
     def marker_comment_ids(self) -> list[str]:
         """The ids of the comments carrying the resolutions marker, oldest first."""

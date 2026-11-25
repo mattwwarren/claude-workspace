@@ -37,7 +37,11 @@ from cw.codex_plan._resume import (
 )
 from cw.codex_plan._tracker import TrackerObservation, observe_tracker
 from cw.gh import BLOCKING_FINDINGS_HEADER
-from cw.plan_fingerprint import compute_body_sha, compute_plan_draft_fingerprint
+from cw.plan_fingerprint import (
+    compute_body_sha,
+    compute_plan_draft_fingerprint,
+    format_last_evaluated,
+)
 from cw.stage_verification.plan_gates import CommentApproval, check_large_tier_approval
 from cw.ticket_snapshot import SnapshotContext
 from tests._shared.plan_approval_builders import (
@@ -255,7 +259,7 @@ class TestDoubleDuty:
 
 class TestAlternate:
     def _last_evaluated(self, body: str = BODY) -> str:
-        return f"operator_comment=none|body_sha={compute_body_sha(body)}"
+        return format_last_evaluated("none", compute_body_sha(body))
 
     def _task(self, **extra: object) -> Any:
         fields: dict[str, object] = {
@@ -301,6 +305,14 @@ class TestAlternate:
         assert alternate_holds(self._task(), observation, None) is False
         assert alternate_holds(self._task(), observation, "body_sha=zz") is False
         assert persisted_body_sha(None) is None
+
+    def test_the_producers_fingerprint_round_trips_to_its_body_sha(self) -> None:
+        # The producer (TrackerObservation.fingerprint) and the reader
+        # (persisted_body_sha) share one grammar owner; a format change in
+        # either must not leave the alternate silently never holding.
+        observation = _observe(park_comment())
+        assert observation.fingerprint is not None
+        assert persisted_body_sha(observation.fingerprint) == compute_body_sha(BODY)
 
     def test_a_row_delta_never_takes_it(self) -> None:
         observation = _observe(park_comment())

@@ -24,8 +24,10 @@ from cw.plan_fingerprint import (
     compute_body_sha,
     compute_plan_draft_fingerprint,
     extract_persisted_body_sha,
+    format_last_evaluated,
     is_plan_draft_fingerprint,
     leading_bookkeeping_end,
+    parse_last_evaluated_body_sha,
     parse_leading_block,
     render_leading_block,
     sanitize_persisted_fingerprint,
@@ -343,6 +345,25 @@ class TestExtractPersistedBodySha:
         assert extract_persisted_body_sha(_LAST_EVALUATED + _BODY) is None
         assert extract_persisted_body_sha(_ROUND + "body\n" + _LAST_EVALUATED) is None
         assert extract_persisted_body_sha(_BODY + _ROUND + _LAST_EVALUATED) is None
+
+
+class TestLastEvaluatedGrammar:
+    def test_format_round_trips_through_the_parser(self) -> None:
+        value = format_last_evaluated("c9", "a" * 64)
+        assert value == f"operator_comment=c9|body_sha={'a' * 64}"
+        assert parse_last_evaluated_body_sha(value) == "a" * 64
+
+    def test_a_formatted_value_is_the_bookkeeping_line_grammar(self) -> None:
+        value = format_last_evaluated("none", "b" * 64)
+        line = f"<!-- plan-stage-last-evaluated: {value} -->\n"
+        text = _ROUND + line + _BODY
+        assert extract_persisted_body_sha(text) == "b" * 64
+
+    @pytest.mark.parametrize(
+        "value", ["body_sha=zz", f"operator_comment=c|body_sha={'a' * 63}", ""]
+    )
+    def test_a_malformed_value_parses_to_none(self, value: str) -> None:
+        assert parse_last_evaluated_body_sha(value) is None
 
 
 class TestComputeBodySha:
