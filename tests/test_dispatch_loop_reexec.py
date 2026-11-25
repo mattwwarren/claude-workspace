@@ -135,7 +135,9 @@ def test_forbid_sleep_leaves_global_time_sleep_untouched(
 def test_forbid_sleep_guard_still_bites_on_an_unrequested_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _count_ticks(monkeypatch, real=False)
+    ticks = _count_ticks(monkeypatch, real=False)
+    # Bound the loop: a neutered guard must fail the assertion, not hang.
+    ticks.side_effect = [DispatchTickResult(spawned=0), KeyboardInterrupt()]
     _forbid_sleep(monkeypatch)
     with pytest.raises(AssertionError, match="slept after a re-exec request"):
         run_dispatch_loop(reexec=ReexecControl())
