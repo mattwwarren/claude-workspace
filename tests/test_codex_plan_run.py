@@ -20,6 +20,7 @@ from freezegun import freeze_time
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_driver import run_codex_plan_stage
 from cw.codex_plan._result import PLAN_MD_RELATIVE_PATH
+from cw.codex_plan._revise import REVISION_HEADER
 from cw.codex_plan._stations import PLAN_REVIEWER, PLAN_SOUNDNESS_REVIEWER
 from cw.codex_review import _CODEX_PLAN_BLOCKED_NEXT_ACTIONS
 from cw.codex_runner import CodexRunResult
@@ -61,6 +62,7 @@ from tests._tool_fakes import (
     codex_usage_stdout,
     plan_sentinel,
     plan_turn_result,
+    revise_turn_result,
     station_findings_doc,
     stdin_contains,
 )
@@ -187,6 +189,11 @@ def add_turn(
         plan_turn_result(plan, plan_sentinel(tier=tier, ticket_id=TICKET, **sentinel)),
         times=times,
     )
+
+
+def _failed_revision(runner: ScriptedCodexRunner) -> ScriptedCodexRunner:
+    """A Plan Reviewer revision whose text fails the Working-plan rule (#3464)."""
+    return runner.add(stdin_contains(REVISION_HEADER), revise_turn_result(SMALL_PLAN))
 
 
 def add_stations(
@@ -492,6 +499,7 @@ def test_a_station_block_leaves_an_existing_plan_untouched(
         add_turn(h.runner),
         reviewer=station_findings_doc(PLAN_REVIEWER, severity="MUST_FIX"),
     )
+    _failed_revision(h.runner)
 
     result = h.run()
 
@@ -644,6 +652,7 @@ def test_a_blocking_station_parks_and_keeps_the_draft(
         add_turn(h.runner),
         reviewer=station_findings_doc(PLAN_REVIEWER, severity="MUST_FIX"),
     )
+    _failed_revision(h.runner)
     result = h.run()
     assert result.blocker is not None
     assert result.blocker.reason == "plan_unreviewable"
@@ -653,7 +662,7 @@ def test_a_blocking_station_parks_and_keeps_the_draft(
     events = [(t, p.get("stage"), p.get("error_kind")) for t, p, _ in stage_events()]
     assert events[:2] == [
         ("stage.entered", "s1_plan_generated", None),
-        ("stage.errored", "s1_plan_reviewed", "plan_unreviewable"),
+        ("stage.errored", "s1_plan_reviewed", "plan_revision_failed"),
     ]
 
 
@@ -675,6 +684,7 @@ def test_a_station_block_fingerprint_is_the_on_disk_draft(
         add_turn(h.runner),
         reviewer=station_findings_doc(PLAN_REVIEWER, severity="MUST_FIX"),
     )
+    _failed_revision(h.runner)
 
     result = h.run()
 

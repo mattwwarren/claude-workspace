@@ -11,6 +11,13 @@ leading ``plan-stage-`` line, the required headings present, every
 accumulator section the prior draft carried still carried, and the
 ``## Self-Verified Premises`` entries byte-for-byte. On any failure the
 prior draft is kept.
+
+The review cycle (:func:`revision_cycle`): a binding Plan Reviewer MUST_FIX
+gets exactly one revision, then gate set B, the approval check and the
+stations again. A Plan Soundness MUST_FIX blocks ``plan_unsound`` at once
+(no revision on a headless round). A MUST_FIX that persists posts the
+``## Blocking Review Findings`` comment (``blocking-`` marker); any other
+station block takes no revision and posts nothing.
 """
 
 from __future__ import annotations
@@ -20,15 +27,33 @@ from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import ValidationError
 
-from cw.codex_plan._exits import _Exit
-from cw.codex_plan._result import ReviseTurnDocument, clean_plan_text
-from cw.codex_review import _is_model_capacity_error
+from cw.codex_plan._exits import (
+    _Exit,
+    _gate,
+    _park,
+    _with_friction,
+    _write_draft_best_effort,
+    binding_stations,
+)
+from cw.codex_plan._result import (
+    PARK_STATUSES,
+    STAGE_PLAN_REVIEWED,
+    ReviseTurnDocument,
+    clean_plan_text,
+)
+from cw.codex_plan._stations import PLAN_REVIEWER
+from cw.codex_review import CODEX_MODEL_CAPACITY, _is_model_capacity_error
+from cw.gh import BLOCKING_FINDINGS_HEADER
 from cw.openai_strict_schema import to_openai_strict_schema
+from cw.plan_fingerprint import PLAN_DRAFT_RELATIVE_PATH, compute_plan_draft_fingerprint
+from cw.stage_verification.plan_gates import check_large_tier_approval
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from cw.auto_dev_result import AutoDevResult
     from cw.codex_plan._run import _McpTarget, _Run
+    from cw.codex_plan._stations import StationBlock, StationsOutcome
 
 #: The strict ``-o`` schema the revision turn answers with.
 REVISE_TURN_SCHEMA: Final[dict[str, Any]] = to_openai_strict_schema(
@@ -56,6 +81,9 @@ CONFORMANCE_HEADING: Final = "## Pre-flight Resolution Conformance"
 _SELF_VERIFIED: Final = "## Self-Verified Premises"
 _AMBIGUITIES: Final = "## Ambiguities"
 _BOOKKEEPING_PREFIX: Final = "<!-- plan-stage-"
+#: The ``stage.errored`` kind of an exhausted cycle whose revision ran.
+PLAN_REVISION_FAILED: Final = "plan_revision_failed"
+BLOCKING_FRICTION_PREFIX: Final = "blocking findings posted: "
 
 
 def _headings(text: str) -> list[str]:
@@ -194,12 +222,106 @@ def revise_plan(
     return RevisionOutcome(clean_plan_text(revised))
 
 
+def render_blocking_findings(blocks: Sequence[StationBlock]) -> str:
+    """The #1815 comment: one ``### <Station> — MUST_FIX`` section per station."""
+    sections = [BLOCKING_FINDINGS_HEADER]
+    sections.extend(
+        f"### {block.role} — MUST_FIX\n\n" + "\n".join(block.must_fix)
+        for block in blocks
+    )
+    return "\n\n".join(sections) + "\n"
+
+
+def blocking_findings_exit(
+    run: _Run, plan_text: str, block: StationBlock, *, revision_ran: bool
+) -> _Exit:
+    """A persisting MUST_FIX: blocked with the draft, posting the findings."""
+    fingerprint = _write_draft_best_effort(run, plan_text)
+    exit_ = run.blocked(
+        STAGE_PLAN_REVIEWED,
+        block.reason,
+        block.details,
+        plan_draft_fingerprint=fingerprint,
+        error_kind=PLAN_REVISION_FAILED if revision_ran else None,
+    )
+    result = _with_friction(exit_.result, [f"{BLOCKING_FRICTION_PREFIX}{block.role}"])
+    return _Exit(
+        result,
+        render_blocking_findings([block]),
+        run.worktree / PLAN_DRAFT_RELATIVE_PATH,
+        "blocking",
+    )
+
+
+def _row_resolutions(run: _Run) -> str | None:
+    ordered = sorted(run.task.operator_resolutions, key=lambda r: r.round)
+    return "\n".join(f"- Round {r.round}: {r.text}" for r in ordered) or None
+
+
+def _after_revision(
+    run: _Run, result: AutoDevResult, revised: str
+) -> tuple[str, StationsOutcome] | _Exit:
+    """Checkpoint, gate set B, the approval check, then the stations again."""
+    _write_draft_best_effort(run, revised)
+    failure = _gate(result, revised)
+    if failure is not None:
+        return run.gate_blocked(failure, STAGE_PLAN_REVIEWED)
+    check = check_large_tier_approval(
+        result, run.task, compute_plan_draft_fingerprint(revised)
+    )
+    if check.result.status in PARK_STATUSES:
+        return _park(run, revised, check)
+    stations = binding_stations(run, revised)
+    block = stations.block
+    if block is not None and block.must_fix:
+        return blocking_findings_exit(run, revised, block, revision_ran=True)
+    return revised, stations
+
+
+def revision_cycle(
+    run: _Run,
+    result: AutoDevResult,
+    plan_text: str,
+    stations: StationsOutcome,
+    *,
+    target: _McpTarget,
+) -> tuple[str, StationsOutcome] | _Exit:
+    """Step 1f.4 on a binding station block (see the module docstring)."""
+    block = stations.block
+    if block is None or not block.must_fix:
+        return plan_text, stations
+    if block.role != PLAN_REVIEWER:
+        return blocking_findings_exit(run, plan_text, block, revision_ran=False)
+    outcome = revise_plan(
+        run,
+        target,
+        body=plan_text,
+        findings=block.must_fix,
+        resolutions=_row_resolutions(run),
+    )
+    if outcome.exit is not None:
+        return outcome.exit
+    if outcome.capacity:
+        return run.blocked(
+            STAGE_PLAN_REVIEWED,
+            CODEX_MODEL_CAPACITY,
+            "the plan revision turn hit a model capacity limit",
+            retry_eligible=True,
+            plan_draft_fingerprint=_write_draft_best_effort(run, plan_text),
+        )
+    if outcome.text is None:
+        return blocking_findings_exit(run, plan_text, block, revision_ran=True)
+    return _after_revision(run, result, outcome.text)
+
+
 __all__ = [
     "REQUIRED_HEADINGS",
     "REVISE_TURN_SCHEMA",
     "REVISION_HEADER",
     "RevisionOutcome",
+    "blocking_findings_exit",
     "check_working_plan",
     "render_revision_prompt",
     "revise_plan",
+    "revision_cycle",
 ]

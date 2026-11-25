@@ -32,6 +32,7 @@ model-emitted.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import shutil
@@ -90,6 +91,7 @@ from cw.codex_plan._resume import (
     tracker_state,
     unconverged_details,
 )
+from cw.codex_plan._revise import revision_cycle
 from cw.codex_plan._settle import (
     SettleOutcome,
     unresolved_stubs,
@@ -232,8 +234,13 @@ class _Run:
         *,
         retry_eligible: bool = False,
         plan_draft_fingerprint: str | None = None,
+        error_kind: str | None = None,
     ) -> _Exit:
-        """A cw-built blocked exit; emits its one ``stage.errored``."""
+        """A cw-built blocked exit; emits its one ``stage.errored``.
+
+        The event's ``error_kind`` is *reason* unless *error_kind* overrides
+        it (a revision cycle that ran reports ``plan_revision_failed``).
+        """
         result = plan_blocked(
             ticket_id=self.task.ticket_id,
             worktree=self.worktree,
@@ -242,7 +249,9 @@ class _Run:
             retry_eligible=retry_eligible,
             plan_draft_fingerprint=plan_draft_fingerprint,
         )
-        self.emit(OrchestratorEventType.STAGE_ERRORED, stage, error_kind=reason)
+        self.emit(
+            OrchestratorEventType.STAGE_ERRORED, stage, error_kind=error_kind or reason
+        )
         return _Exit(result)
 
     def gate_blocked(self, failure: GateFailure, stage: str) -> _Exit:
@@ -386,6 +395,7 @@ class _Round:
 
     state: TrackerState
     resume: ResumeDraft | None
+    target: _McpTarget
     settlements: tuple[PlanSettlement, ...] = ()
     row_delta: bool = False
 
@@ -431,7 +441,8 @@ def _route(
         )
     status = check.result.status
     if status not in PARK_STATUSES:
-        return _complete(run, check.result, plan_text)
+        revise = functools.partial(revision_cycle, target=round_.target)
+        return _complete(run, check.result, plan_text, revise=revise)
     if cap_check(run.book, status):
         details = unconverged_details(check.result, round_.state.observation)
         return _consolidated_block(
@@ -552,7 +563,7 @@ def _plan(run: _Run) -> _Exit:
         ctx = replace(ctx, github=True)
     state = tracker_state(_tracker_snapshot(run, target, ctx), ctx, run.task)
     resume = read_resume_draft(run.worktree)
-    round_ = _Round(state=state, resume=resume)
+    round_ = _Round(state=state, resume=resume, target=target)
     if resume is None:
         return _scan(run, target, round_)
     gate = resume_gate(run, target, resume, state)

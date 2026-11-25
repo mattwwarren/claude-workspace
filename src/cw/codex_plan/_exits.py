@@ -32,7 +32,7 @@ from cw.codex_plan._result import (
     write_plan_draft,
     write_plan_md,
 )
-from cw.codex_plan._stations import run_plan_stations, stamp_markers
+from cw.codex_plan._stations import StationsOutcome, run_plan_stations, stamp_markers
 from cw.dev_queue.lifecycle import _plan_body_signoff_ok
 from cw.dev_queue.operator_constraints import record_plan_constraints
 from cw.exceptions import CwError
@@ -47,6 +47,7 @@ from cw.stage_verification.plan_gates import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult
@@ -68,6 +69,15 @@ class _Exit:
     post_text: str | None = None
     artifact_path: Path | None = None
     kind: PlanCommentKind = "plan"
+
+
+if TYPE_CHECKING:
+    #: The revision cycle hook :func:`_complete` takes: the plan text and
+    #: stations outcome to continue with, or an exit of its own.
+    ReviseCycle = Callable[
+        [_Run, AutoDevResult, str, StationsOutcome],
+        tuple[str, StationsOutcome] | _Exit,
+    ]
 
 
 def _gate(result: AutoDevResult, plan_text: str) -> GateFailure | None:
@@ -222,15 +232,9 @@ def _consolidated_block(
     return _Exit(result, comment, run.worktree / PLAN_DRAFT_RELATIVE_PATH, "park")
 
 
-def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
-    """A completing exit: binding stations, the stamped plan, the decisions.
-
-    An existing ``.cw/plan.md`` (the normal state after a regress into PLAN)
-    is replaced only once both stations are clean and both markers verify; it
-    is snapshotted first and the replacement is audited as a friction token
-    (#3498).
-    """
-    stations = run_plan_stations(
+def binding_stations(run: _Run, plan_text: str) -> StationsOutcome:
+    """Run both stations over *plan_text*, binding (the first block stops)."""
+    return run_plan_stations(
         runner=run.runner,
         worktree=run.worktree,
         plan_text=plan_text,
@@ -239,6 +243,30 @@ def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
         session_id=run.sid,
         binding=True,
     )
+
+
+def _complete(
+    run: _Run,
+    result: AutoDevResult,
+    plan_text: str,
+    *,
+    revise: ReviseCycle | None = None,
+) -> _Exit:
+    """A completing exit: binding stations, the stamped plan, the decisions.
+
+    *revise* (#3464) is the revision cycle a station block goes through
+    first (``None``: no cycle); it returns the plan text and stations outcome
+    to continue with, or an exit of its own. An existing ``.cw/plan.md`` (the
+    normal state after a regress into PLAN) is replaced only once both
+    stations are clean and both markers verify; it is snapshotted first and
+    the replacement is audited as a friction token (#3498).
+    """
+    stations = binding_stations(run, plan_text)
+    if stations.block is not None and revise is not None:
+        cycle = revise(run, result, plan_text, stations)
+        if isinstance(cycle, _Exit):
+            return cycle
+        plan_text, stations = cycle
     if stations.block is not None:
         block = stations.block
         return _blocked_with_draft(
