@@ -1069,9 +1069,12 @@ _C3_TICKET = 3062
 _CODEX_FINALIZE_FOLLOW_UPS = frozenset({3542, 3543, 3544})
 #: The C1 ticket (#3060, codex PLAN executor); no cell may defer to it once it
 #: lands. Its plan-stage cells are implemented, not-applicable,
-#: or deferred to one of its two follow-ups.
+#: or deferred to one of its follow-ups: #3465 (the operator-authority delta and
+#: comment-path approval) and #3909 (the operator-answer fold and the
+#: ticket-quote pre-pass). #3464 (resume-round parity) has landed.
 _C1_TICKET = 3060
-_CODEX_PLAN_FOLLOW_UPS = frozenset({3464, 3465})
+_CODEX_PLAN_FOLLOW_UPS = frozenset({3465, 3909})
+_C1_RESUME_TICKET = 3464
 #: The C2 ticket (#3061, codex IMPL executor); no cell may defer to it once it
 #: lands. Its impl-stage cells are implemented, not-applicable,
 #: or deferred to one of its follow-ups. #3530 (tracker-aware plan recovery) left
@@ -1886,6 +1889,90 @@ def test_no_cell_defers_to_the_landed_c1_ticket() -> None:
         for backend, cell in element.cells.items():
             if isinstance(cell, DeferredDisposition):
                 assert cell.ref.number != _C1_TICKET, (element_id, backend)
+
+
+def test_no_cell_defers_to_the_closed_resume_parity_ticket() -> None:
+    """#3464 landed: none of its cells is left deferring to it."""
+    for element_id, element in _manifest().elements.items():
+        for backend, cell in element.cells.items():
+            if isinstance(cell, DeferredDisposition):
+                assert cell.ref.number != _C1_RESUME_TICKET, (element_id, backend)
+
+
+#: The codex cells #3464 flipped, each to its disposition and code symbol.
+_C1_RESUME_CELLS = {
+    "plan.settlement-marker-grammar": (
+        "implemented",
+        "src/cw/codex_plan/_settle.py",
+        "validate_settlements",
+    ),
+    "plan.body-comment-precedence": (
+        "implemented",
+        "src/cw/codex_plan/_tracker.py",
+        "discover_resolutions_source",
+    ),
+    "plan.1-marker-comment": (
+        "implemented",
+        "src/cw/codex_plan/_tracker.py",
+        "discover_resolutions_source",
+    ),
+    "plan.binding-resolutions-delta-fast-path": (
+        "implemented",
+        "src/cw/codex_plan/_resume.py",
+        "resume_gate",
+    ),
+    "plan.row-delivered-delta-ordering": (
+        "implemented",
+        "src/cw/codex_plan/_resume.py",
+        "finish_row_delta",
+    ),
+    "plan.round-cap-read-and-settlement-folding": (
+        "implemented",
+        "src/cw/codex_plan/_resume.py",
+        "cap_check",
+    ),
+    "plan.blocking-findings-comment-rule": (
+        "implemented",
+        "src/cw/codex_plan/_revise.py",
+        "blocking_findings_exit",
+    ),
+    "orch.fast-path-composition-requires-third-condition": (
+        "fails-closed",
+        "src/cw/codex_plan/_resume.py",
+        "fast_path_reason",
+    ),
+}
+
+
+@pytest.mark.parametrize("element_id", sorted(_C1_RESUME_CELLS))
+def test_the_resume_parity_cells_point_at_their_code(element_id: str) -> None:
+    disposition, path, symbol = _C1_RESUME_CELLS[element_id]
+    cell = _manifest().elements[element_id].cells[CODEX_BACKEND]
+    assert not isinstance(cell, str)
+    assert cell.disposition == disposition
+    assert isinstance(cell.ref, CodeRef)
+    assert (cell.ref.path, cell.ref.symbol) == (path, symbol)
+
+
+@pytest.mark.parametrize(
+    "element_id",
+    ["plan.fold-operator-answers-before-review", "plan.ticket-quote-pre-pass"],
+)
+def test_the_fold_and_pre_pass_defer_to_their_debt_ticket(element_id: str) -> None:
+    cell = _manifest().elements[element_id].cells[CODEX_BACKEND]
+    assert isinstance(cell, DeferredDisposition)
+    assert cell.ref.number == 3909
+    assert cell.note is not None
+    assert "#3909" in cell.note
+
+
+@pytest.mark.parametrize(
+    "element_id", ["plan.consolidated-park", "plan.consolidated-park-single-exit-rule"]
+)
+def test_signal_park_is_not_applicable_on_codex_by_decision(element_id: str) -> None:
+    cell = _manifest().elements[element_id].cells[CODEX_BACKEND]
+    assert isinstance(cell, NotApplicableDisposition)
+    assert "run_guarded_stage" in cell.reason
 
 
 #: The codex cells that name the producer that enqueues the comment (RFC 0019 O3).

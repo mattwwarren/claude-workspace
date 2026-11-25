@@ -597,7 +597,7 @@ elements:
   plan.ticket-quote-pre-pass:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3464}, note: "the ticket-quote pre-pass is not wired into cw.codex_plan"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3909}, note: "the Step 1f.2a ticket-quote pre-pass is not wired into cw.codex_plan; #3909 carries it"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the opencode PLAN prompt has no plan-review stations"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.headless-only-checkpoint-revised-draft:
@@ -712,7 +712,7 @@ elements:
   plan.fold-operator-answers-before-review:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3464}, note: "codex PLAN resume-round parity (fold of operator answers into the draft)"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3909}, note: "the Step 1c.0a operator-answer fold is not run on codex; #3909 carries it"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.consolidated-park:

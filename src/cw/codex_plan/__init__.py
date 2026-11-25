@@ -1,15 +1,21 @@
 """The codex PLAN executor (#3060, RFC 0018 C1).
 
-One read-only ``codex exec`` turn writes nothing and returns the plan text and
-a framed sentinel; cw, outside the sandbox, does everything else: gate set B,
-the two plan review stations, the sign-off markers, ``.cw/plan-draft.md`` and
-``.cw/plan.md``, the cw-stamped sentinel, the stage events, the completion
-door and the tracker post.
+One read-only ``codex exec`` turn writes nothing and returns the plan text, a
+framed sentinel and its settlement claims; cw, outside the sandbox, does
+everything else: the resumed-round contract (resolutions delta, fast path,
+round counter and cap, settlement lines, #3464), gate set B, the two plan
+review stations and their revision cycle, the sign-off markers,
+``.cw/plan-draft.md`` and ``.cw/plan.md``, the cw-stamped sentinel, the stage
+events, the completion door and the tracker post.
 
 Modules: :mod:`._argv` (the launch site), :mod:`._prompt` (the command-doc
-source, the prefetch and the prompt), :mod:`._result` (the turn document, the
-stamper and the artifacts), :mod:`._gates` (gate set B), :mod:`._stations`
-(the review stations and markers), :mod:`._post` (the plan and park comment)
+source, the prefetch and the prompt), :mod:`._result` (the turn documents, the
+stamper and the artifacts), :mod:`._tracker` (the tracker fingerprint and the
+resolutions source), :mod:`._settle` (settlement validation and the deferred
+stubs), :mod:`._resume` (the resume gate, the fast path and the round cap),
+:mod:`._revise` (the revision turn and the review revision cycle),
+:mod:`._stations` (the review stations and markers), :mod:`._post` (the plan,
+park and blocking comments), :mod:`._exits` (the park and completion exits)
 and :mod:`._run` (the ordered flow, :func:`run_plan_stage_and_complete`).
 """
 

@@ -4675,13 +4675,14 @@ the extra turn per post proves too costly (the probe records its seconds).
 fixed `--sandbox read-only -c approval_policy=never` policy (no knob; the
 REVIEW `reviewer_sandbox_mode` / `fix_sandbox_mode` settings are never
 read) and no cw timer (ADR-0014). The turn writes nothing. It returns
-`{plan_markdown, sentinel}` in its `-o` document; cw, outside the sandbox,
-does everything else:
+`{plan_markdown, sentinel, settlements}` in its `-o` document; cw, outside the
+sandbox, does everything else:
 
 - **Inputs.** The prompt is A3's plan render plus the codex addendum, then
   the prefetched ticket (GitHub, via `gh`, capped with the oldest comments
-  dropped first) and, on a resume, the persisted `.cw/plan-draft.md` with an
-  `approval: matches|none` line. `queue_metadata` is read by the model from
+  dropped first) and, on a resume, the persisted `.cw/plan-draft.md` led by
+  the park ordinal, the settled item ids and the round counter cw computed.
+  `queue_metadata` is read by the model from
   `.claude/cw-context.json`. On any other tracker the turn reads the ticket
   through the MCP server `tracker_mcp_gate.servers.codex` names, with only
   `get_issue` and `list_comments` enabled; with no usable server, a missing
@@ -4703,34 +4704,68 @@ does everything else:
   (`codex_plan_gate_failed`, the gate named in `details`). A large
   `stage_complete` without a row approval bound to this plan's fingerprint
   parks `plan_pending_approval`. Then cw runs the Plan Reviewer and the Plan
-  Soundness Reviewer as read-only per-role turns: a `MUST_FIX`, a `degraded`
-  or `failed` document, or a rejected finding parks `plan_unreviewable` /
+  Soundness Reviewer as read-only per-role turns: a `degraded` or `failed`
+  document, or a rejected finding, blocks `plan_unreviewable` /
   `plan_unsound` with the findings in `blocker.details`; only a model
-  capacity failure is retry-eligible. cw stamps both sign-off markers into
+  capacity failure is retry-eligible. A Plan Reviewer `MUST_FIX` first gets
+  one revision turn (a second read-only turn with its own `{plan_markdown}`
+  schema, validated by the Working-plan rule), then gate set B, the approval
+  check and the stations again; a Plan Soundness `MUST_FIX` blocks
+  `plan_unsound` at once. A `MUST_FIX` that persists blocks with the draft
+  fingerprint (`stage.errored` `error_kind: plan_revision_failed` when a
+  revision ran). cw stamps both sign-off markers into
   `.cw/plan.md` from clean verdicts only. On a park the stations are advisory
   and their findings ride in the park comment.
-- **Artifacts and resume.** `.cw/plan-draft.md` starts with the explicit
-  `<!-- plan-stage-scan-round: 0 -->` line, and any on-disk leading
-  bookkeeping block is carried verbatim; cw never increments the counter.
-  When the row's `plan_approved_fingerprint` (from `cw dev-queue approve`)
-  equals the resumed draft's fingerprint, cw takes that draft verbatim as
-  the plan and discards the model's text (`plan_resume_model_text_discarded`
-  in `friction_highlights`). `.cw/` is git-excluded, so the artifacts never
+- **Artifacts and resume (#3464).** cw owns the leading bookkeeping block of
+  `.cw/plan-draft.md` and renders it in grammar order on every write (a fresh
+  draft starts at `<!-- plan-stage-scan-round: 0 -->`). A resumed round reads
+  the tracker state from this run's live GitHub snapshot (never the row's
+  stored one) or, on any other tracker, the row's stored snapshot, and
+  computes the resolutions source itself (`row:<N>:<sha>` first, then a
+  marker-bearing body section, then the newest marker comment by snapshot
+  order). A new source is a delta: a comment or body delta revokes the row
+  approval first (`resolutions_source: codex_plan_resume`), then takes a
+  15-minute attempt lease and one revision turn; a row delta revises first,
+  keeps an approval whose fingerprint still matches, and resets the round.
+  Revocation needs positive evidence: an applied comment or body source the
+  snapshot does not show never revokes. When the row's
+  `plan_approved_fingerprint` (from `cw dev-queue approve`) equals the draft's
+  fingerprint and the draft has a `**Scope tier:**` line, the fast path takes
+  the draft with no turn at all (`s1_ambiguity_scan_skipped`,
+  `reason: approved_fingerprint_match`) and cw synthesizes the sentinel. cw
+  counts each EXIT park round (resetting on a tracker or row delta) and at
+  N=2 blocks `ambiguity_scan_unconverged` through the consolidated park; a
+  `PENDING` deferred stub blocks `deferred_stub_unresolved` the same way. cw
+  validates the turn's settlement claims and writes the `plan-stage-settled`
+  lines itself.
+- **Resume limitation.** With no readable snapshot (a failed GitHub fetch, or
+  a non-GitHub tracker with no stored snapshot or no `operator_ids`), the
+  comment and body channels are unobserved and fail closed: no fast path, no
+  fingerprint persisted. The row channel (`cw dev-queue resolve`) works on
+  every tracker. When the persisted applied source is a comment or body
+  section, the round parks `blocked` `agent_block`, retry-eligible, with the
+  approval standing and no scan turn: re-dispatch once the snapshot is
+  readable, or record a row resolution with `cw dev-queue resolve`. On a
+  non-GitHub tracker the stored row snapshot has no freshness check, so a
+  stale one is read as current.
+- **Git exclusion.** `.cw/` is git-excluded, so the artifacts never
   make the worktree dirty for crash recovery. A crash before dispatch
   stamps `stage_base_ref` has no `origin/<branch>` to fall back to on a
   first PLAN, so it parks as a git error rather than requeueing.
 - **Posting.** After the result persists, cw posts the stamped
   `.cw/plan.md` (or, on a park, the consolidated `## Pending Verification
-  Scan` comment) is enqueued to the outbox under the `codex-plan` producer
-  (`plan-` or `park-` marker prefix), best-effort and never retried. A refusal
+  Scan` comment, or the `## Blocking Review Findings` comment for a
+  persisting `MUST_FIX`) is enqueued to the outbox under the `codex-plan`
+  producer (`plan-`, `park-` or `blocking-` marker prefix), best-effort and
+  never retried. Only a `plan-` entry is ever recovered as a plan of record. A refusal
   or an oversize body is a `review.verdict_comment_skipped` event with
   `kind: plan`, never a row hold. Delivery lags by up to one dispatch tick. On a non-GitHub
   tracker `.cw/plan.md` in the reused worktree is the only durable copy; a
   rebuilt worktree loses it (codex IMPL retrieval is C2).
-- **Deferred.** Comment-path approval, the operator-authority delta, the
-  resolutions fast path, settlement folding, the round cap, the revision
-  cycle and the #1815 blocking-findings comment are not on the codex PLAN
-  lane yet (#3464, #3465): only `cw dev-queue approve` approves a large plan.
+- **Deferred.** Comment-path approval and the operator-authority delta
+  (#3465), and the operator-answer fold and the ticket-quote pre-pass
+  (#3909), are not on the codex PLAN lane yet: only `cw dev-queue approve`
+  approves a large plan, and the fast path is fingerprint equality only.
 
 **Codex IMPL (#3061, RFC 0018 C2).** A lane whose IMPL stage resolves to
 `codex` runs `cw codex run --stage impl`: one `codex exec` turn under the
