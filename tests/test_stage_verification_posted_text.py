@@ -14,6 +14,7 @@ from cw.stage_verification.posted_text import (
     WITHHELD,
     describe_added_line,
     redact_and_cap,
+    redact_and_cap_bytes,
     withhold_secret_lines,
 )
 
@@ -45,6 +46,43 @@ class TestRedactAndCap:
     def test_empty_and_short_text_pass_through_unchanged(self) -> None:
         assert redact_and_cap("") == ""
         assert redact_and_cap("short\ntext") == "short\ntext"
+
+
+class TestRedactAndCapBytes:
+    def test_under_cap_text_passes_through(self) -> None:
+        assert redact_and_cap_bytes("short\ntext", cap_bytes=100) == "short\ntext"
+
+    def test_over_cap_multibyte_text_fits_and_ends_with_marker(self) -> None:
+        out = redact_and_cap_bytes("é" * 500, cap_bytes=200)
+
+        assert len(out.encode("utf-8")) <= 200
+        assert out.endswith(TRUNCATION_MARKER)
+        assert out.count(TRUNCATION_MARKER) == 1
+
+    def test_byte_overflow_below_char_cap_is_cut(self) -> None:
+        # 120 two-byte chars: under a 150-char cap, over a 150-byte cap.
+        out = redact_and_cap_bytes("é" * 120, cap_bytes=150)
+
+        assert len(out.encode("utf-8")) <= 150
+        assert out.endswith(TRUNCATION_MARKER)
+
+    def test_redacts_before_capping(self) -> None:
+        out = redact_and_cap_bytes("x" * 50 + _TOKEN, cap_bytes=1000)
+
+        assert "ghp_" not in out
+        assert "<redacted>" in out
+
+    def test_long_line_is_not_cut_at_the_posted_text_default(self) -> None:
+        text = "y" * (ADDED_LINE_MAX_CHARS * 5)
+
+        assert redact_and_cap_bytes(text, cap_bytes=10_000) == text
+
+    def test_cut_never_splits_a_utf8_sequence(self) -> None:
+        for cap in range(40, 60):
+            out = redact_and_cap_bytes("é" * 100, cap_bytes=cap)
+
+            out.encode("utf-8").decode("utf-8")
+            assert len(out.encode("utf-8")) <= cap
 
 
 class TestDescribeAddedLine:

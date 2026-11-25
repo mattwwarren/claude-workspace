@@ -29,7 +29,7 @@ from cw.review_findings import (
     held_findings,
 )
 from cw.stage_verification.impl_regress_ledger import read_held_round_verdict
-from cw.stage_verification.posted_text import TRUNCATION_MARKER, redact_and_cap
+from cw.stage_verification.posted_text import redact_and_cap_bytes
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -59,7 +59,6 @@ NOT_OWNED: Final[WithheldReason] = "not_owned"
 NOT_BLOCKING: Final[WithheldReason] = "not_blocking"
 
 _CAP_BYTES: Final = MAX_REVIEW_REPORT_BYTES
-_MARKER_BYTES: Final = len(TRUNCATION_MARKER.encode("utf-8"))
 
 
 @dataclass(frozen=True)
@@ -106,18 +105,7 @@ def _render(must_fix: list[Finding]) -> str:
         )
         for index, finding in enumerate(must_fix, start=1)
     ]
-    capped = redact_and_cap(
-        "\n\n".join(blocks),
-        max_line_chars=_CAP_BYTES,
-        max_total_chars=_CAP_BYTES,
-    )
-    cut = capped.endswith(TRUNCATION_MARKER)
-    body = capped.removesuffix(TRUNCATION_MARKER) if cut else capped
-    raw = body.encode("utf-8")
-    if not cut and len(raw) <= _CAP_BYTES:
-        return body
-    budget = _CAP_BYTES - _MARKER_BYTES
-    return raw[:budget].decode("utf-8", errors="ignore") + TRUNCATION_MARKER
+    return redact_and_cap_bytes("\n\n".join(blocks), cap_bytes=_CAP_BYTES)
 
 
 def _applies(task: TicketTask) -> bool:

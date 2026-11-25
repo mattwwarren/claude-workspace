@@ -20,6 +20,7 @@ from cw._text import redact
 ADDED_LINE_MAX_CHARS = 120
 POSTED_TEXT_MAX_CHARS = 2000
 TRUNCATION_MARKER = "...[truncated]"
+_MARKER_BYTES = len(TRUNCATION_MARKER.encode("utf-8"))
 WITHHELD = "<source text withheld: looks like a secret assignment>"
 
 # An assignment (`=` or `:`) to an identifier, dotted name or quoted key whose
@@ -58,6 +59,23 @@ def redact_and_cap(
     if len(out) > max_total_chars:
         out, cut = out[:max_total_chars], True
     return f"{out}{TRUNCATION_MARKER}" if cut else out
+
+
+def redact_and_cap_bytes(text: str, *, cap_bytes: int) -> str:
+    """Redact *text*, then cap it to *cap_bytes* of UTF-8, marker included.
+
+    Lines are not cut at the 120-character posted-text default: the only bound
+    is *cap_bytes*. The truncation marker always ends the text when cut, and a
+    cut never splits a UTF-8 sequence.
+    """
+    capped = redact_and_cap(text, max_line_chars=cap_bytes, max_total_chars=cap_bytes)
+    cut = capped.endswith(TRUNCATION_MARKER)
+    body = capped.removesuffix(TRUNCATION_MARKER) if cut else capped
+    raw = body.encode("utf-8")
+    if not cut and len(raw) <= cap_bytes:
+        return body
+    budget = cap_bytes - _MARKER_BYTES
+    return raw[:budget].decode("utf-8", errors="ignore") + TRUNCATION_MARKER
 
 
 def withhold_secret_lines(text: str) -> str:
