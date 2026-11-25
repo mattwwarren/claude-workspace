@@ -74,7 +74,7 @@ elements:
   orch.comment-provenance-rule:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: implemented, ref: {kind: code, path: src/cw/outbox_producer.py, symbol: enqueue_prose}, note: "every part the drain posts carries the agent marker: the producer enqueues with operator_authored=false and the drain appends it through outbox_drain._post_part / post_parts, byte-identical to cw post-comment --emit-only parts"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/outbox_producer.py, symbol: enqueue_prose}, note: "every part the drain posts carries the agent marker: the producer enqueues with operator_authored=false and the drain appends it through outbox_drain._post_part / post_parts, byte-identical to cw post-comment --emit-only parts; the prompt side: the injected ticket text labels every agent-marker, pipeline-header, plan-of-record or self-disclosing comment [agent analysis: not an operator decision] (codex_plan._prompt._comment_text) and the plan addendum item 10 states the rule for comments the turn reads itself"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the opencode prompt posts without the cw-agent-authored marker (S3 does not add it)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   orch.marker-cw-agent-authored:
