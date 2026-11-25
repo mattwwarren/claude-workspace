@@ -7,13 +7,20 @@ on-disk shape. The rule never consults git, so no repository is needed.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+
+import pytest
 
 from cw.models import Stage, TicketTask
 from cw.models.review_feedback import MAX_REVIEW_REPORT_BYTES, ReviewFeedback
 from cw.models.tasks.records import MustFixOverride
 from cw.models.tasks.schema import REGRESSED_OWN_BRANCH_HIGH_WATER
+from cw.review_park_findings import (
+    REVIEW_PARK_FINDINGS_RELATIVE_PATH,
+    write_park_findings,
+)
 from cw.stage_verification.impl_regress_findings import (
     RegressFindings,
     RegressOutcome,
@@ -35,6 +42,7 @@ if TYPE_CHECKING:
 
 _TICKET = "T-3694"
 _SHA = "a" * 40
+_PARK_TEXT = "1. [HIGH] src/a.py\n   summary: parked\n   evidence: line 3"
 
 
 def _task(**updates: Any) -> TicketTask:
@@ -498,9 +506,122 @@ class TestLedgerLane:
         )
 
     def test_blocking_mode_claude_native_still_withheld(self, tmp_path: Path) -> None:
+        """With no saved park-findings record (#3762) there is nothing to deliver."""
         assert regress_review_findings(_task(), tmp_path) == RegressOutcome(
             None, "artifact_missing"
         )
+
+
+def _park(worktree: Path, text: str = _PARK_TEXT, ticket_id: str = _TICKET) -> None:
+    assert write_park_findings(
+        worktree, ticket_id=ticket_id, reviewed_sha=_SHA, text=text
+    )
+
+
+class TestParkFindingsLane:
+    """A claude-native park's saved blocking-findings comment (#3762)."""
+
+    @pytest.mark.parametrize("high_water", [Stage.REVIEW, Stage.FINALIZE])
+    def test_delivers_text_and_reviewed_sha(
+        self, tmp_path: Path, high_water: Stage
+    ) -> None:
+        _park(tmp_path)
+        task = _task(stage_high_water=high_water)
+        findings = _delivered(regress_review_findings(task, tmp_path))
+        assert (findings.reviewed_sha, findings.text) == (_SHA, _PARK_TEXT)
+
+    def test_head_is_not_consulted_and_retry_still_delivers(
+        self, tmp_path: Path
+    ) -> None:
+        _park(tmp_path)
+        first = _delivered(regress_review_findings(_task(), tmp_path))
+        second = _delivered(regress_review_findings(_task(), tmp_path))
+        assert first == second
+
+    def test_beats_a_codex_envelope_and_a_ledger_round(self, tmp_path: Path) -> None:
+        _verdict(tmp_path, must_fix=[_make_finding(summary="from the envelope")])
+        write_held_ledger(tmp_path, [[_gap("L")]], ticket_id=_TICKET)
+        _park(tmp_path)
+        text = _delivered(regress_review_findings(_task(), tmp_path)).text
+        assert text == _PARK_TEXT
+
+    def test_foreign_ticket_is_not_owned_without_falling_through(
+        self, tmp_path: Path
+    ) -> None:
+        _verdict(tmp_path)
+        _park(tmp_path, ticket_id="OTHER-1")
+        assert regress_review_findings(_task(), tmp_path) == RegressOutcome(
+            None, "not_owned"
+        )
+
+    @pytest.mark.parametrize("raw", ["{not json", '{"ticket_id": "T-3694"}'])
+    def test_invalid_artifact_falls_through_to_artifact_missing(
+        self, tmp_path: Path, raw: str
+    ) -> None:
+        (tmp_path / ".cw").mkdir()
+        (tmp_path / REVIEW_PARK_FINDINGS_RELATIVE_PATH).write_text(
+            raw, encoding="utf-8"
+        )
+        assert regress_review_findings(_task(), tmp_path) == RegressOutcome(
+            None, "artifact_missing"
+        )
+
+    def test_blank_artifact_falls_through_to_the_verdict_readers(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / ".cw").mkdir()
+        (tmp_path / REVIEW_PARK_FINDINGS_RELATIVE_PATH).write_text(
+            json.dumps({"ticket_id": _TICKET, "reviewed_sha": _SHA, "text": " "}),
+            encoding="utf-8",
+        )
+        _verdict(tmp_path, must_fix=[_make_finding(summary="from the envelope")])
+        text = _delivered(regress_review_findings(_task(), tmp_path)).text
+        assert "from the envelope" in text
+
+    def test_review_feedback_still_wins(self, tmp_path: Path) -> None:
+        _park(tmp_path)
+        outcome = regress_review_findings(_task(review_feedback=_feedback()), tmp_path)
+        assert outcome == RegressOutcome(None, "review_feedback_present")
+
+    def test_override_still_wins(self, tmp_path: Path) -> None:
+        _park(tmp_path)
+        outcome = regress_review_findings(
+            _task(must_fix_override=_override()), tmp_path
+        )
+        assert outcome == RegressOutcome(None, "override_present")
+
+    def test_oversized_text_is_capped_and_a_secret_redacted_on_delivery(
+        self, tmp_path: Path
+    ) -> None:
+        secret = "ghp_" + "a" * 36
+        (tmp_path / ".cw").mkdir()
+        # Written by hand: the writer itself caps, so this is a record that
+        # predates (or bypasses) it, and delivery must still bound it.
+        (tmp_path / REVIEW_PARK_FINDINGS_RELATIVE_PATH).write_text(
+            json.dumps(
+                {
+                    "ticket_id": _TICKET,
+                    "reviewed_sha": _SHA,
+                    "text": f"{secret}\n" + "x" * (MAX_REVIEW_REPORT_BYTES + 100),
+                }
+            ),
+            encoding="utf-8",
+        )
+        text = _delivered(regress_review_findings(_task(), tmp_path)).text
+        assert secret not in text
+        assert text.endswith(TRUNCATION_MARKER)
+        assert len(text.encode("utf-8")) <= MAX_REVIEW_REPORT_BYTES
+
+    def test_wire_shape_and_friction_line(self, tmp_path: Path) -> None:
+        _park(tmp_path)
+        metadata = with_regress_findings({"attempt": 1}, _task(), tmp_path)
+        assert metadata == {
+            "attempt": 1,
+            "regress_review_findings": {"reviewed_sha": _SHA, "text": _PARK_TEXT},
+        }
+        outcome = regress_review_findings(_task(), tmp_path)
+        assert outcome is not None
+        assert outcome.friction == "regress_review_findings: delivered"
 
 
 class TestReadOwnedVerdictBlockingFlag:
