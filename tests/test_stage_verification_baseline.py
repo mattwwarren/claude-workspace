@@ -20,6 +20,7 @@ from cw.stage_verification.baseline import (
     _CW_REVIEW_ARTIFACTS,
     CycleBaseline,
     DirtyStart,
+    _c_quote,
     best_effort_dirty_paths,
     capture_cycle_baseline,
     cycle_diff,
@@ -413,6 +414,60 @@ class TestAdoptedMergeRenamesAndQuotedPaths:
         start = capture_cycle_baseline(repo, merge_files=merge_files - {"a b.txt"})
         assert isinstance(start, DirtyStart)
         assert start.dirty == ('A  "a b.txt"',)
+
+
+_ACCENTED = "café.txt"
+_ACCENTED_QUOTED = '"caf\\303\\251.txt"'
+
+
+class TestAdoptedMergeNonAsciiPaths:
+    """A non-ASCII merge path is judged in the spelling ``merge_files`` carries."""
+
+    def test_a_non_ascii_merge_path_is_tolerated(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        merge_files = _unconcluded_rename_merge(repo, added=_ACCENTED)
+        assert f"A  {_ACCENTED_QUOTED}" in git_in(repo, "status", "--porcelain")
+        assert _ACCENTED_QUOTED in merge_files
+        baseline = capture_cycle_baseline(repo, merge_files=merge_files)
+        assert isinstance(baseline, CycleBaseline)
+
+    def test_a_non_ascii_path_outside_the_merge_still_refuses_with_its_raw_line(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        merge_files = _unconcluded_rename_merge(repo, added=_ACCENTED)
+        start = capture_cycle_baseline(
+            repo, merge_files=merge_files - {_ACCENTED_QUOTED}
+        )
+        assert isinstance(start, DirtyStart)
+        assert start.dirty == (f"A  {_ACCENTED_QUOTED}",)
+
+    def test_a_real_spelled_merge_path_is_tolerated_too(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        repo = _repo(make_git_repo)
+        merge_files = _unconcluded_rename_merge(repo, added=_ACCENTED)
+        spelled = (merge_files - {_ACCENTED_QUOTED}) | {_ACCENTED}
+        baseline = capture_cycle_baseline(repo, merge_files=spelled)
+        assert isinstance(baseline, CycleBaseline)
+
+    @pytest.mark.parametrize(
+        ("path", "quoted"),
+        [
+            ("plain.txt", "plain.txt"),
+            ("a b.txt", "a b.txt"),
+            (_ACCENTED, _ACCENTED_QUOTED),
+            ("tab\there", '"tab\\there"'),
+            ('say"hi', '"say\\"hi"'),
+            ("back\\slash", '"back\\\\slash"'),
+            ("bell\x01", '"bell\\001"'),
+            ("del\x7f", '"del\\177"'),
+        ],
+    )
+    def test_c_quote_matches_gits_spelling(self, path: str, quoted: str) -> None:
+        assert _c_quote(path) == quoted
 
 
 class TestCwReviewArtifacts:

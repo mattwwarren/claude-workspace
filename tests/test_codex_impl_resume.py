@@ -472,6 +472,23 @@ def test_an_unconcluded_merge_with_a_base_side_rename_is_adopted(
     assert merge_in_progress(h.worktree) is False
 
 
+def test_an_unconcluded_merge_with_a_non_ascii_base_side_path_is_adopted(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    h = harness()
+    side = tmp_path / "side"
+    diverge_origin_default(h.worktree, h.origin, BRANCH, side, "clash.py")
+    push_commit_to_origin(h.origin, "main", side, "café.txt", "accent\n")
+    leave_conflicting_merge(h.worktree)
+    assert 'A  "caf\\303\\251.txt"' in git_in(h.worktree, "status", "--porcelain")
+    _seed_marker(h)
+    h.turn(files={"clash.py": "merged\n"})
+    result = h.run()
+    assert result.status == "stage_complete", result.blocker and result.blocker.details
+    assert len(_parents(h)) == 2
+    assert merge_in_progress(h.worktree) is False
+
+
 def test_an_unconcluded_merge_on_a_repair_row_is_adopted(
     harness: Callable[..., Harness], tmp_path: Path
 ) -> None:

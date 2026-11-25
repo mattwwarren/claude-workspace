@@ -93,6 +93,20 @@ class TestAdoptUnconcludedMerge:
         assert adopted.outcome.conflicted == frozenset({"clash.py"})
         assert len(adopted.outcome.growth_tree) == 40
 
+    def test_a_non_ascii_merge_path_keeps_gits_quoted_spelling(
+        self, repo_origin: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """``merge_files`` is spelled as ``cycle_touched_paths`` spells paths."""
+        repo, origin = repo_origin
+        diverge_origin_default(repo, origin, _BRANCH, tmp_path / "side")
+        push_commit_to_origin(origin, "main", tmp_path / "side", "café.txt")
+        leave_conflicting_merge(repo)
+        adopted = adopt_unconcluded_merge(repo, base_branch="main")
+        assert isinstance(adopted, AdoptedMerge)
+        assert adopted.outcome.merge_files == frozenset(
+            {"clash.py", '"caf\\303\\251.txt"'}
+        )
+
     def test_a_merge_head_off_the_base_is_refused(self, conflicted: Path) -> None:
         fork = git_in(conflicted, "merge-base", "HEAD", "MERGE_HEAD")
         git_in(conflicted, "update-ref", "refs/remotes/origin/main", fork)

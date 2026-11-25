@@ -301,6 +301,18 @@ class TestMergeDefaultOnConflict:
         assert git_in(repo, "ls-files", "-u")
         assert git_in(repo, "cat-file", "-t", outcome.growth_tree) == "tree"
 
+    def test_a_non_ascii_merge_path_keeps_gits_quoted_spelling(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """``merge_files`` is spelled as ``cycle_touched_paths`` spells paths."""
+        commit_tracked_file(repo, "clash.py", "mine\n")
+        _origin_default_moves(repo, tmp_path, "clash.py", "theirs\n")
+        _origin_default_moves(repo, tmp_path, "café.txt", "accent\n")
+        assert probe_default_branch(repo, base_branch="main", repair=True).needs_merge
+        outcome = merge_default_on_conflict(repo, base_branch="main")
+        assert not isinstance(outcome, ImplBlock)
+        assert outcome.merge_files == frozenset({"clash.py", '"caf\\303\\251.txt"'})
+
     def test_an_unmeasurable_merge_is_an_impl_block_and_does_not_merge(
         self, repo: Path
     ) -> None:

@@ -28,6 +28,7 @@ inside the codex executor's review step, outside every lock.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -65,6 +66,22 @@ _PORCELAIN_PATH_OFFSET = 3
 _STATUS_CODE_WIDTH = 2
 # Tracked-modified porcelain codes: worktree-modified, staged, or both.
 _MODIFIED_TRACKED_CODES = frozenset({" M", "M ", "MM"})
+# git's C-style path quoting (``quote_c_style``, ``core.quotePath`` on): a byte
+# with a letter escape gets it, any other control byte, DEL or non-ASCII byte
+# gets a three-digit octal escape.
+_C_QUOTE_LETTER_ESCAPES = {
+    7: "a",
+    8: "b",
+    9: "t",
+    10: "n",
+    11: "v",
+    12: "f",
+    13: "r",
+    34: '"',
+    92: "\\",
+}
+_FIRST_PRINTABLE_BYTE = 0x20
+_DEL_BYTE = 0x7F
 
 
 class CycleBaseline(NamedTuple):
@@ -157,6 +174,32 @@ def _status_z_entries(out: str) -> list[tuple[str, tuple[str, ...]]]:
     return entries
 
 
+def _c_quote(path: str) -> str:
+    """Spell *path* the way git's non-``-z`` output does (C-quoted when odd).
+
+    ``merge_files`` and ``cycle_touched_paths`` both carry this spelling (they
+    read names without ``-z``), while the ``-z`` status read yields the real
+    path, so a merge-side path is matched in either spelling.
+    """
+    pieces: list[str] = []
+    quoted = False
+    for byte in os.fsencode(path):
+        if byte in _C_QUOTE_LETTER_ESCAPES:
+            pieces.append("\\" + _C_QUOTE_LETTER_ESCAPES[byte])
+            quoted = True
+        elif byte < _FIRST_PRINTABLE_BYTE or byte >= _DEL_BYTE:
+            pieces.append(f"\\{byte:03o}")
+            quoted = True
+        else:
+            pieces.append(chr(byte))
+    return '"' + "".join(pieces) + '"' if quoted else path
+
+
+def _in_merge(path: str, merge_files: frozenset[str]) -> bool:
+    """Whether the real *path* is a merge file, in either name spelling."""
+    return path in merge_files or _c_quote(path) in merge_files
+
+
 def _lines_within_merge(
     worktree: Path, status: str, merge_files: frozenset[str]
 ) -> frozenset[str]:
@@ -165,6 +208,8 @@ def _lines_within_merge(
     The line-based ``--porcelain`` view quotes odd paths and joins a rename as
     ``old -> new``, so each line is matched to its ``-z`` entry (same order, same
     count) and judged by the entry's unquoted paths, both sides of a rename.
+    ``merge_files`` is in the C-quoted spelling (see :func:`_c_quote`), so a
+    non-ASCII merge path still matches.
     """
     z_out = git_output(
         ["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd=worktree
@@ -174,7 +219,7 @@ def _lines_within_merge(
     return frozenset(
         line
         for line, (_, paths) in zip(lines, entries, strict=True)
-        if all(path in merge_files for path in paths)
+        if all(_in_merge(path, merge_files) for path in paths)
     )
 
 
