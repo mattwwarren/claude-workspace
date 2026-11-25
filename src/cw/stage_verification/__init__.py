@@ -14,6 +14,8 @@ Submodules:
 - ``finalize_*``: FINALIZE gates, CI evidence, merge gate, PR probes, arm and result.
 - ``growth``: the cumulative growth budget.
 - ``impl_block``, ``impl_feedback``, ``impl_gates``: the IMPL park, feedback and gates.
+- ``impl_operator_directions``: the operator resolutions and constraints an IMPL
+  run receives (#3761), shared by the claude-native key and the codex prompt.
 - ``impl_regress_findings``: the REVIEW-regress findings rule (#3694), shared by
   every consumer.
 - ``impl_regress_ledger``: the clean-mode ledger verdict reader the regress rule

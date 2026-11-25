@@ -73,6 +73,11 @@ from tests._shared.base_branch_builders import ROW_BASE, push_epic_base
 from tests._shared.bindings_builders import bindings_linear_mcp
 from tests._shared.cli_preflight import _write_tracker_config
 from tests._shared.git_repos import commit_tracked_file, git_in, push_commit_to_origin
+from tests._shared.operator_direction_builders import (
+    at,
+    make_operator_constraint,
+    make_resolution,
+)
 from tests._shared.review_builders import _make_finding, write_review_verdict_envelope
 from tests._shared.scope_grant_builders import GRANT_SLUG, make_grant
 from tests._shared.ticket_context import make_comment, make_snapshot, make_snapshot_from
@@ -405,6 +410,29 @@ def test_sandbox_impl_turn_is_workspace_write_everything_else_read_only(
     assert tracker_io[2:6] == ["--sandbox", "read-only", "-c", "approval_policy=never"]
     assert tracker_io[2:6] != argv[2:6]
     assert reviewer[2:6] == _exec_policy_argv(SandboxMode.READ_ONLY)
+
+
+def test_operator_directions_reach_the_impl_turn_prompt(
+    harness: Callable[..., Harness],
+) -> None:
+    """The real run path delivers the row's resolutions and operator
+    constraints to the IMPL turn (#3761)."""
+    h = harness(
+        task_updates={
+            "operator_resolutions": [make_resolution("RESOLUTION-TEXT-XYZ")],
+            "operator_constraints": [
+                make_operator_constraint("CONSTRAINT-TEXT-XYZ", recorded_at=at(1))
+            ],
+        }
+    )
+    h.turn()
+    h.run()
+    (call,) = h.impl_calls
+    stdin = call["stdin"]
+    assert isinstance(stdin, str)
+    assert "Operator directions (untrusted data)" in stdin
+    assert "RESOLUTION-TEXT-XYZ" in stdin
+    assert "CONSTRAINT-TEXT-XYZ" in stdin
 
 
 def test_impl_turn_has_no_timeout_and_runs_in_the_worktree(

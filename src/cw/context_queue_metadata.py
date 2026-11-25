@@ -44,6 +44,12 @@ BRANCH_KEY = "branch"
 # the pure serializer never sets it; cw.stage_verification.impl_regress_findings
 # owns the value.
 REGRESS_REVIEW_FINDINGS_KEY = "regress_review_findings"
+# Derived at spawn (#3761), not by build_queue_metadata: the row's resolutions
+# and operator constraints as one bounded oldest-first stream for an IMPL run,
+# or null. It needs stage gating, redaction and a byte cap, so the pure
+# serializer never sets it; cw.stage_verification.impl_operator_directions owns
+# the value.
+OPERATOR_DIRECTIONS_KEY = "operator_directions"
 # Top-level (not queue_metadata) key the worker reads for the branch its work
 # merges into (RFC 0020 A1, #3781). Always a non-empty string; see
 # context_base_branch. It stays out of build_queue_metadata for that reason.

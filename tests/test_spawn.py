@@ -56,6 +56,12 @@ from tests._clients_yaml import ClientSpec, pipeline_stages_extra, write_clients
 from tests._reconcile_helpers import LockProbeDaemon
 from tests._shared.daemon_fakes import post_launch_attention_payload
 from tests._shared.lock_helpers import _FakeClock
+from tests._shared.operator_direction_builders import (
+    at,
+    make_impl_row,
+    make_operator_constraint,
+    make_resolution,
+)
 from tests._shared.session_seeding import (
     _make_daemon_session,
     _make_ticket_task,
@@ -4732,6 +4738,93 @@ class TestWriteHookContextTaskFields:
             "row:2:" + hashlib.sha256(b'["first","second"]').hexdigest()
         )
 
+    def _spawn_directions_context(
+        self,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        task: TicketTask,
+    ) -> dict[str, Any]:
+        """Spawn for *task* and return the written ``cw-context.json``."""
+        client = _make_client(tmp_path)
+        worktree = make_git_repo("wt-operator-directions")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev-impl GEN-3761 --headless",
+            label="auto-dev/GEN-3761",
+            native_daemon=FakeNativeDaemonClient(),
+            ticket_id="GEN-3761",
+            headless=True,
+            task=task,
+        )
+
+        context: dict[str, Any] = json.loads(
+            (worktree / ".claude" / "cw-context.json").read_text()
+        )
+        return context
+
+    def test_operator_directions_threaded_for_an_impl_row(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """An IMPL row's resolutions and operator constraints reach the worker
+        as one oldest-first ``operator_directions`` stream (#3761)."""
+        task = make_impl_row(
+            resolutions=[make_resolution("RES-TEXT", recorded_at=at(0))],
+            constraints=[make_operator_constraint("CON-TEXT", recorded_at=at(1))],
+            status=QueueItemStatus.PENDING,
+            client="test-client",
+        )
+
+        context = self._spawn_directions_context(tmp_path, make_git_repo, task)
+
+        directions = context["queue_metadata"]["operator_directions"]
+        assert directions["text"].index("RES-TEXT") < directions["text"].index(
+            "CON-TEXT"
+        )
+        assert directions["resolutions"] == 1
+        assert directions["constraints"] == 1
+        assert directions["omitted"] == 0
+        assert [
+            r["text"] for r in context["queue_metadata"][OPERATOR_RESOLUTIONS_KEY]
+        ] == ["RES-TEXT"]
+
+    def test_operator_directions_null_for_a_non_impl_row(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """A PLAN-stage row with the same entries gets the key, set to null."""
+        task = make_impl_row(
+            resolutions=[make_resolution()],
+            constraints=[make_operator_constraint()],
+            stage=Stage.PLAN,
+            status=QueueItemStatus.PENDING,
+            client="test-client",
+        )
+
+        context = self._spawn_directions_context(tmp_path, make_git_repo, task)
+
+        assert "operator_directions" in context["queue_metadata"]
+        assert context["queue_metadata"]["operator_directions"] is None
+
+    def test_operator_directions_null_for_an_impl_row_without_entries(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        task = make_impl_row(status=QueueItemStatus.PENDING, client="test-client")
+
+        context = self._spawn_directions_context(tmp_path, make_git_repo, task)
+
+        assert "operator_directions" in context["queue_metadata"]
+        assert context["queue_metadata"]["operator_directions"] is None
+
     def test_operator_resolutions_empty_threaded_as_empty_list(
         self,
         tmp_config_dir: Path,
@@ -5136,17 +5229,17 @@ class TestCwContextWorkspacePath:
         assert "workspace_path" in context
         assert context["workspace_path"] is None
 
-    def test_schema_version_is_23(
+    def test_schema_version_is_24(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """cw-context.json schema_version is current (23 after the top-level
-        ``base_branch`` addition, #3781)."""
+        """cw-context.json schema_version is current (24 after the derived
+        ``queue_metadata.operator_directions`` key, #3761)."""
         from cw.spawn import CW_CONTEXT_SCHEMA_VERSION, spawn_create_impl
 
-        assert CW_CONTEXT_SCHEMA_VERSION == 23
+        assert CW_CONTEXT_SCHEMA_VERSION == 24
 
         client = _make_client(tmp_path, name="schema-v2-client")
         daemon = FakeNativeDaemonClient()
@@ -5161,7 +5254,7 @@ class TestCwContextWorkspacePath:
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
-        assert context["schema_version"] == 23
+        assert context["schema_version"] == 24
         assert context["bindings_block"].count(BINDINGS_BEGIN) == 1
 
 
