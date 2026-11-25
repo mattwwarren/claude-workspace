@@ -54,7 +54,11 @@ from cw.codex_impl._result import (
     impl_empty_diff_result,
     parse_impl_turn,
 )
-from cw.codex_impl._resume import advance_payload, resume_note
+from cw.codex_impl._resume import (
+    advance_payload,
+    bound_operator_comments,
+    resume_note,
+)
 from cw.codex_lane_config import _resolve_codex_fix_loop_growth_guard_enabled
 from cw.codex_plan._prompt import command_docs_root, ticket_text_from_snapshot
 from cw.codex_review import (
@@ -553,7 +557,7 @@ def _prepare(run: _Run, scratch: Path) -> _Pre | ImplBlock:
         worktree=run.worktree,
         base_branch=run.base_branch,
         facts=facts,
-        comments=snapshot.comments if snapshot is not None else [],
+        comments=bound_operator_comments(snapshot, ctx),
         scratch=scratch,
     )
     if isinstance(reentry, ImplBlock):

@@ -16,7 +16,11 @@ from unittest.mock import patch
 import pytest
 
 from cw.branch_ahead import merge_in_progress
-from cw.codex_impl._resume import advance_payload, resume_note
+from cw.codex_impl._resume import (
+    advance_payload,
+    bound_operator_comments,
+    resume_note,
+)
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.dispatch.impl_gates import _should_gate_for_unconcluded_finalize_regress_merge
 from cw.local_runner import GitFacts
@@ -28,7 +32,9 @@ from cw.stage_verification.impl_gates import run_scope_conformance
 from cw.stage_verification.impl_merge_adopt import AdoptedMerge
 from cw.stage_verification.impl_resume import Disposition, ReentryPlan
 from cw.stage_verification.impl_staleness import Staleness
-from cw.ticket_snapshot import normalize_ticket_id
+from cw.ticket_snapshot import SnapshotContext, normalize_ticket_id
+from cw.tracker_io._prompt import REFRESH_TURN_MARKER
+from tests._backend_mcp_helpers import stage_mcp_config
 from tests._codex_review_helpers import assert_clean_after_refusal, exclude_cw_dir
 from tests._shared.git_repos import (
     commit_tracked_file,
@@ -40,13 +46,17 @@ from tests._shared.git_repos import (
 from tests._shared.scope_grant_builders import install_real_guard_script
 from tests._shared.stop_hook_context import _write_hook_context_file
 from tests._shared.ticket_context import make_comment, make_snapshot_from
+from tests._tool_fakes import stdin_contains
 from tests.test_codex_impl_run import (
     BRANCH,
     TICKET,
     WIDGET,
     Harness,
     _assert_block,
+    _courier_client,
+    _refresh_reply,
     _repin,
+    _tracked_client,
     harness,
 )
 from tests.test_codex_plan_run import stage_events
@@ -54,6 +64,9 @@ from tests.test_codex_plan_run import stage_events
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from cw.auto_dev_result import AutoDevResult
+    from cw.models import ClientConfig
 
 pytestmark = pytest.mark.usefixtures("isolated_backend_layers")
 __all__ = ["harness"]
@@ -98,6 +111,11 @@ def _record_regress_head(sha: str) -> None:
 
 def _staleness_script() -> None:
     install_real_guard_script("check_impl_guard_staleness.py")
+
+
+def _github_client(tmp_path: Path) -> ClientConfig:
+    """A GitHub-issues client: any non-agent commenter binds as operator text."""
+    return _tracked_client(tmp_path, "github-issues")
 
 
 def _resume_section(h: Harness) -> str:
@@ -272,7 +290,7 @@ def test_the_durable_regress_field_equal_to_head_runs_a_turn(
 
 
 def test_a_regress_marker_runs_a_turn_and_delivers_only_operator_comments(
-    harness: Callable[..., Harness],
+    harness: Callable[..., Harness], tmp_path: Path
 ) -> None:
     operator = make_comment(
         "c1", body="please also handle the edge", created_at=_FAR_FUTURE
@@ -284,6 +302,7 @@ def test_a_regress_marker_runs_a_turn_and_delivers_only_operator_comments(
         [operator, agent], ticket_id=normalize_ticket_id(TICKET), client="test"
     )
     h = harness(snapshot=snapshot)
+    h.client = _github_client(tmp_path)
     _staleness_script()
     _commit(h, "done.py", trailer=_TRAILER)
     _seed_marker(h)
@@ -298,13 +317,14 @@ def test_a_regress_marker_runs_a_turn_and_delivers_only_operator_comments(
 
 
 def test_an_operator_comment_after_head_runs_a_turn(
-    harness: Callable[..., Harness],
+    harness: Callable[..., Harness], tmp_path: Path
 ) -> None:
     operator = make_comment("c1", body="one more thing", created_at=_FAR_FUTURE)
     snapshot = make_snapshot_from(
         [operator], ticket_id=normalize_ticket_id(TICKET), client="test"
     )
     h = harness(snapshot=snapshot)
+    h.client = _github_client(tmp_path)
     _staleness_script()
     _commit(h, "done.py", trailer=_TRAILER)
     h.turn()
@@ -315,19 +335,81 @@ def test_an_operator_comment_after_head_runs_a_turn(
 
 
 def test_an_agent_authored_newer_comment_alone_still_advances(
-    harness: Callable[..., Harness],
+    harness: Callable[..., Harness], tmp_path: Path
 ) -> None:
     agent = make_comment("c1", created_at=_FAR_FUTURE, agent_authored=True)
     snapshot = make_snapshot_from(
         [agent], ticket_id=normalize_ticket_id(TICKET), client="test"
     )
     h = harness(snapshot=snapshot)
+    h.client = _github_client(tmp_path)
     _staleness_script()
     _commit(h, "done.py", trailer=_TRAILER)
     result = h.run()
     assert result.status == "stage_complete", result.blocker and result.blocker.details
     assert h.runner.calls == []
-    assert any("agent-authored" in line for line in result.friction_highlights)
+
+
+def _mcp_comment_run(
+    h: Harness,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    author_id: str,
+) -> AutoDevResult:
+    """A past_s2 MCP-bound run whose courier refresh returns one newer comment."""
+    stage_mcp_config(monkeypatch, tmp_path, "codex", "enabled")
+    _staleness_script()
+    _commit(h, "done.py", trailer=_TRAILER)
+    h.runner.add(
+        stdin_contains(REFRESH_TURN_MARKER),
+        _refresh_reply(
+            comments=[
+                {
+                    "id": "c1",
+                    "author_id": author_id,
+                    "body": "a newer comment",
+                    "created_at": _FAR_FUTURE,
+                }
+            ]
+        ),
+    )
+    h.client = _courier_client(tmp_path)
+    return h.run()
+
+
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
+def test_a_newer_comment_from_a_non_operator_on_an_mcp_client_still_advances(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h = harness()
+    result = _mcp_comment_run(h, tmp_path, monkeypatch, author_id="stranger")
+    assert result.status == "stage_complete", result.blocker and result.blocker.details
+    assert h.impl_calls == []
+
+
+@pytest.mark.usefixtures("project_walk_stops_at_state_dir")
+def test_a_newer_comment_from_a_bound_operator_on_an_mcp_client_resumes(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h = harness()
+    h.turn()
+    result = _mcp_comment_run(h, tmp_path, monkeypatch, author_id="operator-1")
+    assert result.status == "stage_complete", result.blocker and result.blocker.details
+    assert "a newer comment" in _resume_section(h)
+
+
+def test_bound_operator_comments_filters_by_binding_and_tolerates_no_snapshot() -> None:
+    mine = make_comment("c1", author_id="operator-1")
+    theirs = make_comment("c2", author_id="stranger")
+    snapshot = make_snapshot_from([mine, theirs])
+    ctx = SnapshotContext(github=False, operator_ids=("operator-1",))
+    assert bound_operator_comments(snapshot, ctx) == [mine]
+    assert bound_operator_comments(None, ctx) == []
 
 
 # --- an unconcluded merge arriving with a regress ----------------------------
