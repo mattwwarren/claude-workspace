@@ -1907,6 +1907,14 @@ review-approval predicate in the same module (`cw review check-approval`),
 whose looser rule (`_merge_parents_on_default`, `_new_non_merge_work`) it does
 not use or change.
 
+A rewritten head is never tolerated by classes (a) to (d): the ancestry check
+runs first, so an attested head that is no longer an ancestor of HEAD reads
+`invalid:not_ancestor`. A `repair_changelog_conflict` rebuild is such a rewrite.
+cw never moves `head_sha` on a carry, so `head_sha` always names a commit a
+review exited clean at. The ledger's `clean_sha_remaps` records the carry, and
+`docs/dispatch-runbook.md` records the decision and its reopen conditions
+(#3893). No change to 13.2 or the model.
+
 ### 13.6 Trust model and consumer rule
 
 `queue_metadata.review_attestation` is read from the worker-writable

@@ -270,6 +270,7 @@ attestation reads `invalid:not_ancestor` and the PR-body Review sign-off is
 stripped for clients with `review.attestation.pr_section` on, which is cosmetic
 and neither parks finalize nor forces a review round. Rejected: accepting the
 re-review, and merging instead of rebuilding (still a delta-confirm round).
+The reasons, the rejected alternatives and when to reopen are in `docs/dispatch-runbook.md` (#3893).
 
 **Freeze gate.** The CHANGELOG freeze gate (`gate_failed`) runs only when
 `.claude/scripts/check_changelog_frozen.py` is present in the client repo (an
