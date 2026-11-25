@@ -153,10 +153,31 @@ class TestUnresolvedConflictFiles:
         (conflicted / "clash.py").write_text("x <<<<<<< y\n", encoding="utf-8")
         assert unresolved_conflict_files(conflicted, {"clash.py"}) == ()
 
-    def test_unreadable_and_absent_paths_are_skipped(self, conflicted: Path) -> None:
-        (conflicted / "bad.bin").write_bytes(b"\xff\xfe\x00")
-        got = unresolved_conflict_files(conflicted, {"bad.bin", "gone.py"})
-        assert got == ()
+    def test_a_non_utf8_conflicted_file_still_holding_markers_is_listed(
+        self, conflicted: Path
+    ) -> None:
+        body = b"caf\xe9\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> origin/main\n"
+        (conflicted / "latin.txt").write_bytes(body)
+        assert unresolved_conflict_files(conflicted, {"latin.txt"}) == ("latin.txt",)
+
+    def test_a_crlf_marker_line_is_listed(self, conflicted: Path) -> None:
+        (conflicted / "clash.py").write_bytes(b"x\r\n<<<<<<< HEAD\r\n")
+        assert unresolved_conflict_files(conflicted, {"clash.py"}) == ("clash.py",)
+
+    def test_a_non_utf8_resolved_file_is_not_listed(self, conflicted: Path) -> None:
+        (conflicted / "latin.txt").write_bytes(b"caf\xe9 merged\n\xff\xfe\x00")
+        assert unresolved_conflict_files(conflicted, {"latin.txt"}) == ()
+
+    def test_an_absent_or_non_file_path_is_skipped(self, conflicted: Path) -> None:
+        (conflicted / "adir").mkdir()
+        assert unresolved_conflict_files(conflicted, {"gone.py", "adir"}) == ()
+
+    def test_a_read_error_on_an_existing_path_counts_as_unresolved(
+        self, conflicted: Path
+    ) -> None:
+        with patch("pathlib.Path.read_bytes", side_effect=PermissionError("denied")):
+            got = unresolved_conflict_files(conflicted, {"clash.py"})
+        assert got == ("clash.py",)
 
 
 class TestUntouchedConflicts:

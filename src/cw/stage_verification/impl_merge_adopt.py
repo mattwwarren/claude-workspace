@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 
 MERGE_IN_PROGRESS_PREFIX: Final = "merge_in_progress: "
 
-_MARKER_LINE: Final = re.compile(r"^(<{7}|>{7})( |$)", re.MULTILINE)
+_MARKER_LINE: Final = re.compile(rb"^(<{7}|>{7})( |\r?$)", re.MULTILINE)
 _NOT_ANCESTOR_RC: Final = 1
 _SHA_PREFIX_CHARS: Final = 12
 _MAX_LISTED: Final = 20
@@ -116,19 +116,26 @@ def adopt_unconcluded_merge(
 def unresolved_conflict_files(
     worktree: Path, conflicted: Iterable[str]
 ) -> tuple[str, ...]:
-    """The conflicted paths whose text still holds ``<<<<<<<`` or ``>>>>>>>`` lines.
+    """The conflicted paths whose bytes still hold ``<<<<<<<`` or ``>>>>>>>`` lines.
 
     Only the conflicted paths are read: a merge-side file that merely contains
-    the literals is not a conflict. An unreadable, absent or binary path is
-    skipped (:func:`untouched_conflicts` covers it).
+    the literals is not a conflict. The scan is over bytes, so a file in a
+    non-UTF-8 encoding is checked too. An absent or non-file path (a
+    modify/delete conflict the turn resolved by deleting) is skipped
+    (:func:`untouched_conflicts` covers it); any other read error on an existing
+    path counts as unresolved, so the guard blocks rather than waving it through.
     """
     found: list[str] = []
     for path in sorted(conflicted):
-        try:
-            text = (worktree / path).read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        target = worktree / path
+        if not target.is_file():
             continue
-        if _MARKER_LINE.search(text):
+        try:
+            data = target.read_bytes()
+        except OSError:
+            found.append(path)
+            continue
+        if _MARKER_LINE.search(data):
             found.append(path)
     return tuple(found)
 
