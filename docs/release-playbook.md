@@ -188,6 +188,24 @@ copying the marker into a human-authored issue cannot make it eligible.
 For backward compatibility, both closers also recognize the exact attribution
 written by the pre-marker guard so existing guard issues are not stranded.
 
+### Pre-cut changelog test set
+
+Before a release cut, run the changelog-machinery tests as a precaution:
+
+```
+uv run --extra mcp pytest tests/ -n auto -m release_cut
+```
+
+The `release_cut` marker selects the files that cover the changelog machinery:
+the freeze check, the sibling-bullet repair, rebuild and sync, the merge-conflict
+classifier, and the release-tag and gate workflows. Membership is pinned by
+`RELEASE_CUT_FILES` in `tests/test_release_cut_set.py`, which also fails when a
+marked file is missing from the registry or the reverse. A new changelog-machinery
+test file carries the marker and joins the registry; the guard enforces it.
+
+The set is a fast precaution, not the gate. `scripts/release.sh` and
+`release-tag.yml` still run the full suite.
+
 ### Keeping `uv.lock` in sync
 
 **Before cutting a release, ensure `uv.lock` is re-locked to the new version**

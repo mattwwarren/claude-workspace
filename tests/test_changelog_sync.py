@@ -35,6 +35,8 @@ from tests._changelog_cut_helpers import (
 )
 from tests._shared.git_repos import git_in, init_bare_origin
 
+pytestmark = pytest.mark.release_cut
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 

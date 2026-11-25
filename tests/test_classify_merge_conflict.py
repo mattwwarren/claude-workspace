@@ -22,7 +22,11 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 from tests._shared.guard_fences import GUARD_MARKER_CURRENT
+
+pytestmark = pytest.mark.release_cut
 
 # ---------------------------------------------------------------------------
 # Script loader

@@ -14,6 +14,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.release_cut
+
 ROOT = Path(__file__).parent.parent
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "changelog-gate.yml"
 SHIP_IT_PATH = ROOT / ".claude" / "commands" / "ship-it.md"

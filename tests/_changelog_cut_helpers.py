@@ -31,6 +31,8 @@ BRANCH = f"dev/{TICKET}"
 
 PREAMBLE = "# Changelog\n\n"
 RELEASED_1_0_0 = "## [1.0.0] - 2026-01-01\n\n### Added\n\n- Initial (#0).\n"
+CL_UNRELEASED_ONLY = "# Changelog\n\n## [Unreleased]\n"
+
 CL_BASE = (
     PREAMBLE
     + "## [Unreleased]\n\n### Added\n\n- Alpha feature (#1).\n\n"

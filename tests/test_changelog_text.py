@@ -28,6 +28,8 @@ import pytest
 from tests._shared import workflow_text
 from tests._shared.workflow_text import _REPO_ROOT, changelog_entry, changelog_text
 
+pytestmark = pytest.mark.release_cut
+
 _TESTS_ROOT = _REPO_ROOT / "tests"
 _READERS = frozenset({"changelog_text", "changelog_entry"})
 _MIN_PINS = 12

@@ -3,8 +3,10 @@
 Real temp git repos. The Step 4.0 approval matrix lives once in
 ``test_review_approval.py`` (#2773); what stays here is the repair-level wiring
 (``evaluate_repair_fence`` hands the row's approval fields and ``new_sha`` to
-the shared predicate) and the clean-mode Step 4.0b check, which loads a ledger
-built with the real convergence engine.
+the shared predicate), the clean-mode Step 4.0b check, which loads a ledger
+built with the real convergence engine, and the clean-sha remap carry (#2921):
+the fence applies a remap in memory only and refuses one whose source is not
+the clean sha.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from cw.reconcile.review_recipes.repair_fence import (
     evaluate_repair_fence,
 )
 from cw.review_approval import APPROVAL_NOT_REQUIRED, APPROVAL_RECORDED, APPROVAL_STALE
+from cw.review_convergence import load_ledger
 from tests._review_approval_helpers import (
     ApprovalRepo,
     advance_main,
@@ -29,13 +32,18 @@ from tests._review_approval_helpers import (
     make_approval_repo,
 )
 from tests._review_convergence_helpers import (
+    REMAP_NEW_SHA,
+    REMAP_OLD_SHA,
     TICKET_ID,
+    clean_sha_remap,
     confirmed_ledger,
     fresh_ledger,
     write_ledger,
 )
 from tests._shared.git_repos import git_in
 from tests.test_reconcile_gate_recipes import _client_with_lanes, _make_task
+
+pytestmark = pytest.mark.release_cut
 
 
 def _snapshot(**fields: object) -> FenceSnapshot:
@@ -333,3 +341,103 @@ def test_no_refusal_keeps_the_detail_unchanged(
 
     assert verdict.passed is False
     assert "remap skipped" not in verdict.detail
+
+
+def _remap_snapshot(ledger_path: Path | None, **fields: object) -> FenceSnapshot:
+    base = FenceSnapshot(
+        ticket_id=TICKET_ID,
+        tier="small",
+        review_approver_kind=None,
+        review_approved_sha=None,
+        clean_mode=True,
+        ledger_path=ledger_path,
+        base_branch="main",
+    )
+    return base._replace(**fields)
+
+
+# --- fence (in memory) -------------------------------------------------------
+
+
+def test_fence_applies_the_remap_in_memory_only(tmp_path: Path) -> None:
+    before = confirmed_ledger(sha=REMAP_OLD_SHA)
+    path = write_ledger(tmp_path, before)
+
+    verdict = evaluate_repair_fence(
+        _remap_snapshot(path),
+        repo=tmp_path,
+        new_sha=REMAP_NEW_SHA,
+        origin_tip=REMAP_NEW_SHA,
+        remap=clean_sha_remap(),
+    )
+
+    assert verdict.passed is True
+    assert verdict.remapped is not None
+    assert verdict.remapped.last_clean_sha == REMAP_NEW_SHA
+    assert verdict.pre_image == before
+    assert load_ledger(path) == before
+
+
+def test_fence_refuses_a_remap_whose_source_is_not_the_clean_sha(
+    tmp_path: Path,
+) -> None:
+    path = write_ledger(tmp_path, confirmed_ledger(sha="tolerated-past"))
+
+    verdict = evaluate_repair_fence(
+        _remap_snapshot(path),
+        repo=tmp_path,
+        new_sha=REMAP_NEW_SHA,
+        origin_tip=REMAP_NEW_SHA,
+        remap=clean_sha_remap(),
+    )
+
+    assert verdict.passed is False
+    assert verdict.tip_reason == "commits_after_clean_round"
+    assert verdict.remapped is None
+    assert "ledger remap refused" in verdict.detail
+
+
+def test_fence_ignores_the_remap_outside_clean_mode(tmp_path: Path) -> None:
+    path = write_ledger(tmp_path, confirmed_ledger(sha=REMAP_OLD_SHA))
+
+    verdict = evaluate_repair_fence(
+        _remap_snapshot(path, clean_mode=False),
+        repo=tmp_path,
+        new_sha=REMAP_NEW_SHA,
+        origin_tip=REMAP_NEW_SHA,
+        remap=clean_sha_remap(),
+    )
+
+    assert verdict.passed is True
+    assert verdict.remapped is None
+
+
+def test_failed_approval_does_not_carry_the_remap(tmp_path: Path) -> None:
+    path = write_ledger(tmp_path, confirmed_ledger(sha=REMAP_OLD_SHA))
+
+    verdict = evaluate_repair_fence(
+        _remap_snapshot(path, tier="large", review_approver_kind=None),
+        repo=tmp_path,
+        new_sha=REMAP_NEW_SHA,
+        origin_tip=REMAP_NEW_SHA,
+        remap=clean_sha_remap(),
+    )
+
+    assert verdict.passed is False
+    assert verdict.remapped is None
+    assert verdict.pre_image is None
+
+
+def test_remap_that_still_fails_the_tip_is_not_carried(tmp_path: Path) -> None:
+    path = write_ledger(tmp_path, confirmed_ledger(sha=REMAP_OLD_SHA))
+
+    verdict = evaluate_repair_fence(
+        _remap_snapshot(path),
+        repo=tmp_path,
+        new_sha="other-head",
+        origin_tip="other-head",
+        remap=clean_sha_remap(),
+    )
+
+    assert verdict.passed is False
+    assert verdict.remapped is None

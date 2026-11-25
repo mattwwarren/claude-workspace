@@ -99,7 +99,10 @@ from tests.test_reconcile_gate_recipes import _client_with_lanes
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
-pytestmark = pytest.mark.usefixtures("repair_events")
+pytestmark = [
+    pytest.mark.usefixtures("repair_events"),
+    pytest.mark.release_cut,
+]
 
 
 # --- detect -----------------------------------------------------------------

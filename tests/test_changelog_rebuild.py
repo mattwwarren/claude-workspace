@@ -39,6 +39,8 @@ from cw.changelog_rebuild import (
 from cw.reconcile.review_recipes.repair_git import _diff_fingerprint
 from cw.repair_disposition import RepairDisposition
 
+pytestmark = pytest.mark.release_cut
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _FIXTURES = Path(__file__).resolve().parent / "fixtures" / "changelog"
 _PRE_1_77_2 = _FIXTURES / "changelog_pre_1_77_2_release.md"

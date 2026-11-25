@@ -58,6 +58,8 @@ from tests._changelog_repair_helpers import (
 from tests._review_convergence_helpers import confirmed_ledger, write_ledger
 from tests._shared.git_repos import git_in, push_commit_to_origin
 
+pytestmark = pytest.mark.release_cut
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _REAL_GATE = _REPO_ROOT / ".claude" / "scripts" / "check_changelog_frozen.py"
 _REAL_ARM_SCRIPT = _REPO_ROOT / ".claude" / "scripts" / "prep_pr_finalize.py"

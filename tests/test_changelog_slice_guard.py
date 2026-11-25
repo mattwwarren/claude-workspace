@@ -29,6 +29,8 @@ import pytest
 
 from tests._shared.workflow_text import _REPO_ROOT
 
+pytestmark = pytest.mark.release_cut
+
 # A release-boundary anchor: an ``[Unreleased]`` heading, a version heading
 # (``## [1.82.0]``), or the bare next-heading boundary ``"\n## ["``.
 _ANCHOR = re.compile(r"## \[(?:Unreleased|\d|$)")
@@ -39,7 +41,6 @@ _ALLOWLIST: dict[str, str] = {
     "tests/test_changelog_sync.py": "slices a synthetic post-cut changelog",
     "tests/test_check_changelog_frozen.py": "the freeze gate's own subject",
     "tests/test_mechanical_repair_real_git.py": "synthetic repair changelog bytes",
-    "tests/test_repair_remap.py": "synthetic repair changelog bytes",
     "tests/test_merge_probe.py": "synthetic changelog bytes for merge probe",
     "tests/test_review_convergence_merge_tolerance.py": "synthetic merge bytes",
     "tests/test_reconcile_changelog_repair.py": "changelog-repair recipe tests",

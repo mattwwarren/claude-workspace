@@ -49,6 +49,8 @@ from tests._changelog_cut_helpers import (
 from tests._shared.git_repos import git_in, list_tags, write_pyproject_override
 from tests._tool_fakes import AbsentToolCli
 
+pytestmark = pytest.mark.release_cut
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = _REPO_ROOT / ".claude" / "scripts" / "check_changelog_frozen.py"
 

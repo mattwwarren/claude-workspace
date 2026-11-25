@@ -24,8 +24,12 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from tests._shared.workflow_text import _load_workflow, _on_block
 from tests._tool_fakes import stub_gh
+
+pytestmark = pytest.mark.release_cut
 
 ROOT = Path(__file__).parent.parent
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "changelog-gate.yml"
