@@ -459,13 +459,13 @@ elements:
   plan.body-comment-precedence:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3464}, note: "codex PLAN resume-round parity (resolutions delta, fast path, settlement folding, round cap)"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_tracker.py, symbol: discover_resolutions_source}, note: "cw reads the snapshot through the trust evaluator; a marker-bearing body section outranks marker comments"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   plan.1-marker-comment:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3464}, note: "codex PLAN resume-round parity (resolutions delta, fast path, settlement folding, round cap)"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_tracker.py, symbol: discover_resolutions_source}, note: "newest is the last marker comment in snapshot order, with the multi-marker friction line"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   plan.file-enumeration-under-explicit-files-modified:

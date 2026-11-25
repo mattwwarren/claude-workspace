@@ -90,6 +90,7 @@ _REMAINING_CODEX_MODULES = {
         "_result",
         "_run",
         "_stations",
+        "_tracker",
     },
 }
 
