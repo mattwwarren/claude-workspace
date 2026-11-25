@@ -243,8 +243,22 @@ reviewed, so it can be older than the worktree's HEAD by design: the worker
 verifies against current HEAD. An unsettled decision contest held in ANY listed
 ledger round withholds a later round's gap finding (`withheld (not_blocking)`)
 until `cw review settle`, matching the codex-lane contest rule. Decision contests
-and operator checklists are not delivered. A claude-native blocking-mode park saves
-no verdict and is withheld (a follow-up ticket persists it). A fix outside the plan's files still needs
+and operator checklists are not delivered. A claude-native park that posts the
+`## Blocking Review Findings` comment (`review_blocked`, `plan_deviation`,
+`review_engine_modified`, `review_confirm_must_fix`) is delivered too (#3762):
+`cw post-comment` saves the redacted comment body, capped at 64 KiB and stamped
+with the ticket and the head at post time, to `.cw/review-park-findings.json`,
+and a REVIEW regress into IMPL delivers that text (it wins over a codex verdict
+or a clean-mode ledger round on the same worktree). Parks that post no such
+comment (`review_operator_actionable`, `review_not_converging`) and re-emitted
+terminal stops save nothing and stay withheld. Every successful
+`cw review workspace init` (a new or resumed round, in either mode) deletes the
+file, so a new REVIEW attempt starts clean and a session that parks rewrites it.
+The rule never checks the file against HEAD, so the worker verifies it as it does
+any delivered finding. Residual: a park followed by a plain `requeue` straight to
+FINALIZE, with no REVIEW attempt in between, keeps the file, so a later
+FINALIZE-to-IMPL regress would deliver that park's text; the override route to
+FINALIZE is guarded by `must_fix_override`. A fix outside the plan's files still needs
 `cw dev-queue approve <T> -c <C> --scope-drift <paths>`. To repair the PR then,
 attach a fresh head-pinned file with `requeue --stage impl
 --review-feedback-file`. That applies to adopted rows too: they have no plan,
@@ -4240,8 +4254,9 @@ then reports `delivered` or `withheld (<reason>)`. The `next:` list keeps the pl
 requeue first and the regress second, because the row carries only `blocked_reason`
 and cannot tell a decision contest, an operator checklist and an evidence gap apart.
 A decision contest or checklist is released by `cw review settle` (or the checklist),
-never by `--regress`. A Claude-native blocking-mode park saves no verdict and is
-withheld, so settle the finding or provide the capability.
+never by `--regress`. A Claude-native blocking-mode park that posts no
+`## Blocking Review Findings` comment saves no verdict and is withheld (see the
+#3762 note above), so settle the finding or provide the capability.
 
 A finding with no diff anchor (`file: N/A`) has no fingerprint key, so the
 verdict comment prints no settle payload for it and `cw review settle` cannot

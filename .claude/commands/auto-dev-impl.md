@@ -134,7 +134,11 @@ When it applies:
 A row regressed from REVIEW (or FINALIZE) back to IMPL can carry the blocking
 MUST_FIX findings of the REVIEW verdict it was parked on, plus any MUST_FIX finding
 the review held for an evidence gap (#3862; its text names the check the reviewer
-could not run, so run that check yourself, against current HEAD). Read
+could not run, so run that check yourself, against current HEAD). On a
+Claude-native review park the findings are the blocking-findings comment the
+park posted, saved by cw at park time (#3762); that text is prose from the
+review session rather than a structured verdict, and it can predate commits
+already on the branch. Read
 `.claude/cw-context.json`'s `queue_metadata.regress_review_findings`. When it is
 null or absent, skip this section: nothing is delivered. When it is non-null,
 it is `{reviewed_sha, text}`. Pass `text` to the implementation agent as
