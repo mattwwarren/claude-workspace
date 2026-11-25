@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from cw.auto_dev_result.parse import extract_block
+from cw.codex_plan._approval import APPROVAL_LINE, has_approval_token
 from cw.codex_plan._post import (
     PARK_HEADER,
     PlanCommentKind,
@@ -323,6 +324,40 @@ class TestParkComment:
         assert "### How to answer" not in text
         assert "fingerprint mismatch" in text
         assert "approved fingerprint: `none`" in text
+
+    def test_approval_section_names_the_token_and_the_operator_ids(
+        self, tmp_path: Path
+    ) -> None:
+        result = _result(tmp_path, tier="large", status="plan_pending_approval")
+        text = render_park_comment(
+            ticket_id=_TICKET,
+            client_name="acme",
+            result=result,
+            draft_body="DRAFT",
+            approved_fingerprint=None,
+            advisory_findings=[],
+        )
+        section = text.split("### Approval requested", 1)[1]
+        assert APPROVAL_LINE in section
+        assert "bindings.tickets.operator_ids" in section
+        assert "operator-authority alternate" in section
+        assert "not available on the codex PLAN lane" not in section
+
+    def test_the_park_text_never_carries_the_token_as_its_own_line(
+        self, tmp_path: Path
+    ) -> None:
+        """A park that quoted the bare token would approve itself on resume."""
+        result = _result(tmp_path, tier="large", status="plan_pending_approval")
+        text = render_park_comment(
+            ticket_id=_TICKET,
+            client_name="acme",
+            result=result,
+            draft_body="DRAFT",
+            approved_fingerprint=None,
+            advisory_findings=[],
+        )
+        assert all(line.strip() != APPROVAL_LINE for line in text.splitlines())
+        assert has_approval_token(text) is False
 
     def test_park_post_names_the_draft(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

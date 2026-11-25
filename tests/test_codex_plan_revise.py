@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from cw.codex_plan._result import PLAN_MD_RELATIVE_PATH
+from cw.codex_plan._result import PLAN_MD_RELATIVE_PATH, write_plan_draft
 from cw.codex_plan._revise import (
     CONFORMANCE_HEADING,
     REVISION_HEADER,
@@ -18,7 +18,14 @@ from cw.codex_plan._revise import (
 from cw.codex_plan._stations import PLAN_REVIEWER, PLAN_SOUNDNESS_REVIEWER
 from cw.codex_review import CODEX_MODEL_CAPACITY
 from cw.models.operator_resolution import OperatorResolution
-from cw.plan_fingerprint import compute_plan_draft_fingerprint
+from cw.plan_fingerprint import (
+    LeadingBlock,
+    compute_body_sha,
+    compute_plan_draft_fingerprint,
+)
+from tests._backend_mcp_helpers import codex_tracker_client
+from tests._shared.plan_approval_builders import VIEW, parked_with_token
+from tests._shared.ticket_context import issue_envelope_json, observed_issue_envelope
 from tests._tool_fakes import (
     revise_turn_result,
     station_findings_doc,
@@ -49,7 +56,11 @@ PLAN = (
     "## Ambiguities\n\nNO_AMBIGUITIES\n"
 )
 REVISED = PLAN.replace("Add the widget.", "Add the revised widget.")
+LARGE = PLAN.replace("small", "large")
+REVISED_LARGE = REVISED.replace("small", "large")
 _MUST_FIX = "MUST_FIX"
+_CONSUMED = "plan_comment_approval_consumed: comment=c9"
+_MISMATCH = "plan_approval_fingerprint_mismatch"
 
 
 def _stations(
@@ -207,6 +218,67 @@ def test_a_revised_large_plan_parks_for_fresh_approval(
     _revision(h, revise_turn_result(REVISED.replace("small", "large")))
     result = h.run()
     assert result.status == "plan_pending_approval"
+    assert not (h.worktree / PLAN_MD_RELATIVE_PATH).exists()
+    assert [f for f in result.friction_highlights if f.startswith(_MISMATCH)]
+    assert not [f for f in result.friction_highlights if f.startswith(_CONSUMED)]
+
+
+def _comment_approved(h: Harness) -> Harness:
+    """*h* resumed from a parked large draft that an operator token approved."""
+    parked_with_token(h, LARGE)
+    add_turn(h.runner, LARGE, tier="large")
+    return h
+
+
+def test_a_revision_that_rewrites_a_comment_approved_plan_parks_again(
+    harness: Callable[..., Harness],
+) -> None:
+    """The approval was for the parked plan; the reviewer's rewrite is a new one."""
+    h = _comment_approved(harness())
+    _stations(h, reviewer=[_must_fix(), _clean()])
+    _revision(h, revise_turn_result(REVISED_LARGE))
+    result = h.run()
+    assert result.status == "plan_pending_approval"
+    assert not (h.worktree / PLAN_MD_RELATIVE_PATH).exists()
+    assert [f for f in result.friction_highlights if f.startswith(_CONSUMED)]
+    assert len(_revision_calls(h)) == 1
+
+
+def test_a_revision_that_leaves_the_draft_fingerprint_keeps_the_comment_approval(
+    harness: Callable[..., Harness],
+) -> None:
+    h = _comment_approved(harness())
+    _stations(h, reviewer=[_must_fix(), _clean()])
+    _revision(h, revise_turn_result(LARGE))
+    result = h.run()
+    assert result.status == "stage_complete"
+    assert (h.worktree / PLAN_MD_RELATIVE_PATH).exists()
+    assert not [f for f in result.friction_highlights if f.startswith(_CONSUMED)]
+    assert len(_revision_calls(h)) == 1
+
+
+def test_a_revised_plan_stays_approved_while_the_alternate_holds(
+    harness: Callable[..., Harness],
+) -> None:
+    """A row approval the alternate still honours covers a reviewer's rewrite."""
+    approved = {
+        "plan_approved_at": datetime(2026, 11, 10, tzinfo=UTC),
+        "plan_approved_fingerprint": compute_plan_draft_fingerprint(LARGE),
+    }
+    h = harness(task_updates=approved)
+    drifted = LARGE.replace("Add the widget.", "Add the drifted widget.")
+    body_sha = compute_body_sha(observed_issue_envelope()["body"])
+    book = LeadingBlock(last_evaluated=f"operator_comment=none|body_sha={body_sha}")
+    write_plan_draft(h.worktree, drifted, book=book)
+    h.gh.reply(*VIEW, stdout=issue_envelope_json())
+    h.client = codex_tracker_client(h.worktree)
+    _stations(h, reviewer=[_must_fix(), _clean()])
+    _revision(h, revise_turn_result(REVISED_LARGE))
+    result = h.run()
+    assert h.plan_calls == []
+    assert result.status == "stage_complete"
+    assert (h.worktree / PLAN_MD_RELATIVE_PATH).exists()
+    assert not [f for f in result.friction_highlights if f.startswith(_MISMATCH)]
 
 
 def test_a_capacity_failure_in_the_revision_is_retryable(

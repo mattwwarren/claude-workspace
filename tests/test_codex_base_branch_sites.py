@@ -88,7 +88,11 @@ def test_codex_plan_has_no_default_branch_read() -> None:
         or (isinstance(node, ast.arg) and node.arg in {"default_branch", "base_branch"})
         or (isinstance(node, ast.keyword) and node.arg == "default_branch")
     ]
-    assert reads == []
+    # The one allowed read: the origin-sync health gate (Step P1) on the primary
+    # checkout, not a merge target (#3465). Exactly one, in _preflight.py.
+    origin_sync = [read for read in reads if read.startswith("_preflight.py:")]
+    assert len(origin_sync) == 1, origin_sync
+    assert [read for read in reads if read not in origin_sync] == []
 
 
 # --- check_on_branch: the row's base is refused beside the client default -----

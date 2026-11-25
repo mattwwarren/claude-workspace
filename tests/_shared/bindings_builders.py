@@ -22,13 +22,17 @@ LINEAR_RENAMED_TOOLS: Final[Mapping[str, str]] = {
 }
 
 
-def bindings_github_cli() -> Bindings:
-    """This repo's shape: tickets on GitHub through ``gh``, code host ``gh``."""
+def bindings_github_cli(*, operator_ids: Sequence[str] = ()) -> Bindings:
+    """This repo's shape: tickets on GitHub through ``gh``, code host ``gh``.
+
+    *operator_ids* sets ``tickets.operator_ids``: on GitHub, the commenter
+    logins whose approval-token comment approves a plan (#3465).
+    """
+    tickets: dict[str, object] = {"system": "github-issues", "cli": "gh"}
+    if operator_ids:
+        tickets["operator_ids"] = list(operator_ids)
     return Bindings.model_validate(
-        {
-            "tickets": {"system": "github-issues", "cli": "gh"},
-            "code_host": {"system": "github", "cli": "gh"},
-        }
+        {"tickets": tickets, "code_host": {"system": "github", "cli": "gh"}}
     )
 
 

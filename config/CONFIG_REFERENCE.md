@@ -245,10 +245,13 @@ optional and takes:
     `system: github-issues`) and `code_host` (with `system: github`) only. Any
     other value, argv templates included, is rejected.
 - `tickets` only: `operator_ids` (the operator's tracker identities, kept as
-  written; empty by default). GitHub ignores them. On a non-GitHub tracker a
-  snapshot comment binds a stage (operator comments, steering, the approved
-  plan) only when its `author_id` equals one of them, compared casefolded, so
-  empty ids bind nothing; the claude-native bindings block lists them.
+  written; empty by default). On GitHub an entry is the commenter's login,
+  compared casefolded, and GitHub reads the list only to authorize a
+  plan-approval comment token (empty means row evidence only). On a
+  non-GitHub tracker a snapshot comment binds a stage (operator comments,
+  steering, the approved plan) only when its `author_id` equals one of them,
+  compared casefolded, so empty ids bind nothing; the claude-native bindings
+  block lists them.
   Snapshot comments are ordered oldest first and "newest" means the last
   qualifying comment in that order. `preflight` (`enabled: false`, `settings_path:
   .claude/settings.json`), the opt-in for the tick-side binding reachability

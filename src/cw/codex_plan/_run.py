@@ -48,6 +48,7 @@ from cw.auto_dev_result.schema._vocab import (
 )
 from cw.backend_mcp_config import McpState, declared_server_names, read_backend_mcp
 from cw.bindings_block import bindings_block_for, effective_tickets_system
+from cw.codex_plan._approval import NO_APPROVAL, ApprovalFacts, approval_facts
 from cw.codex_plan._argv import build_plan_argv, read_tools_for, require_read_only_argv
 from cw.codex_plan._exits import (
     _complete,
@@ -58,6 +59,7 @@ from cw.codex_plan._exits import (
     _with_friction,
 )
 from cw.codex_plan._post import post_plan_comment
+from cw.codex_plan._preflight import origin_sync_block
 from cw.codex_plan._prompt import (
     PLAN_TURN_SCHEMA,
     ResumeFacts,
@@ -398,6 +400,7 @@ class _Round:
     target: _McpTarget
     settlements: tuple[PlanSettlement, ...] = ()
     row_delta: bool = False
+    approval: ApprovalFacts = NO_APPROVAL
 
 
 def _settle_claims(
@@ -441,7 +444,9 @@ def _route(
         )
     status = check.result.status
     if status not in PARK_STATUSES:
-        revise = functools.partial(revision_cycle, target=round_.target)
+        revise = functools.partial(
+            revision_cycle, target=round_.target, approval=round_.approval
+        )
         return _complete(run, check.result, plan_text, revise=revise)
     if cap_check(run.book, status):
         details = unconverged_details(check.result, round_.state.observation)
@@ -463,6 +468,29 @@ def _route(
     return _park(run, plan_text, check)
 
 
+def _approve(
+    run: _Run, result: AutoDevResult, plan_text: str, round_: _Round
+) -> tuple[ApprovalCheck, _Round]:
+    """The approval facts (before the settle moves the anchor) and the gate."""
+    facts = approval_facts(
+        run.task,
+        round_.state.observation,
+        run.book.block.last_evaluated,
+        row_delta=round_.row_delta,
+        settlements=round_.settlements,
+        resolutions_source=round_.state.source.current,
+        resume=round_.resume,
+    )
+    check = check_large_tier_approval(
+        result,
+        run.task,
+        compute_plan_draft_fingerprint(plan_text),
+        alternate=facts.alternate,
+        comment=facts.comment_approval(plan_text),
+    )
+    return check, replace(round_, approval=facts)
+
+
 def _after_turn(
     run: _Run, plan_text_raw: str, result: AutoDevResult, round_: _Round
 ) -> _Exit:
@@ -481,9 +509,7 @@ def _after_turn(
     failure = _gate(result, plan_text)
     if failure is not None:
         return run.gate_blocked(failure, STAGE_PLAN_GENERATED)
-    check = check_large_tier_approval(
-        result, run.task, compute_plan_draft_fingerprint(plan_text)
-    )
+    check, round_ = _approve(run, result, plan_text, round_)
     settled, outcome = _settle_claims(run, check.result, round_)
     settle_fingerprint(run.book, round_.state.observation, row_delta=round_.row_delta)
     return _route(run, plan_text, replace(check, result=settled), outcome, round_)
@@ -552,7 +578,12 @@ def _scan(run: _Run, target: _McpTarget, round_: _Round) -> _Exit:
 
 
 def _plan(run: _Run) -> _Exit:
-    """Steps 1-2 (the tracker state and the resume gate), then the scan."""
+    """Step 0 (origin sync), steps 1-2 (tracker state, resume gate), then the scan."""
+    behind = origin_sync_block(
+        client=run.client, worktree=run.worktree, ticket_id=run.task.ticket_id
+    )
+    if behind is not None:
+        return _Exit(behind)
     target = run.mcp_target()
     if isinstance(target, _Exit):
         return target

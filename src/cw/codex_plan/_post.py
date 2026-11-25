@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final, Literal
 
 from cw.auto_dev_result import SCOPE_TIER_LARGE
+from cw.codex_plan._approval import APPROVAL_LINE
 from cw.codex_stage_post import post_stage_comment
 
 if TYPE_CHECKING:
@@ -95,10 +96,16 @@ def _approval_requested(
         f"{revoked}This plan is classified Large. Run "
         f"`cw dev-queue approve {ticket_id} -c {client_name}`: it stamps "
         "`plan_approved_at` and `plan_approved_fingerprint` on the dev-queue "
-        "row, and the approval is bound to this draft. If the draft changes "
-        "before the next dispatch, the approval no longer matches and the "
-        "plan parks again. Comment-path approval is not available on the "
-        "codex PLAN lane.\n\n"
+        "row. The row approval is bound to this draft: if the draft changes "
+        "before the next dispatch it no longer matches and the plan parks "
+        "again, unless no operator-authority comment is newer than the approval "
+        "and the ticket body is unchanged, in which case the approval still "
+        "stands (the operator-authority alternate). A comment approval counts "
+        "only when its author is in `bindings.tickets.operator_ids` (empty "
+        f"means row evidence only), it carries the token line `{APPROVAL_LINE}` "
+        "as its own line directly after this park, and the draft is unchanged "
+        "since this park; a changed plan consumes it and the plan parks "
+        "again.\n\n"
         f"- current draft fingerprint: `{current or 'none'}`\n"
         f"- approved fingerprint: `{approved or 'none'}`"
     )

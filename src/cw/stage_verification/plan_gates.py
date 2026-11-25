@@ -107,35 +107,70 @@ def has_approval_evidence(task: TicketTask) -> bool:
     return task.plan_approved_at is not None and bool(task.plan_approved_fingerprint)
 
 
+@dataclass(frozen=True)
+class CommentApproval:
+    """A comment-path approval and the plan fingerprints it was compared on (#3465).
+
+    ``parked`` is the fingerprint the previous park persisted; ``current`` is the
+    fingerprint of the plan being gated. The comment approves only when they match.
+    """
+
+    comment_id: str
+    parked: str
+    current: str
+
+
+def _with_friction(result: AutoDevResult, friction: str) -> AutoDevResult:
+    return result.model_copy(
+        update={"friction_highlights": [*result.friction_highlights, friction]}
+    )
+
+
 def check_large_tier_approval(
-    result: AutoDevResult, task: TicketTask, plan_fingerprint: str
+    result: AutoDevResult,
+    task: TicketTask,
+    plan_fingerprint: str,
+    *,
+    alternate: bool = False,
+    comment: CommentApproval | None = None,
 ) -> ApprovalCheck:
     """A large ``stage_complete`` needs approval evidence bound to this plan.
 
-    With no evidence, the result becomes ``plan_pending_approval``. With
-    evidence whose fingerprint differs from *plan_fingerprint*, it re-parks
-    the same way and carries ``(approved, current)`` so the park comment can
-    quote both. Only exact equality is evidence in C1 (#3465 covers the
-    operator-authority delta and the comment path).
+    Order: a comment approval whose parked and current fingerprints match
+    approves; a comment whose fingerprints differ is consumed (friction note,
+    no fast path). Then row evidence is required, and equal fingerprints or the
+    operator-authority *alternate* approve. Otherwise the result re-parks, with
+    a mismatch tuple when row evidence exists. With no keywords the check is
+    the row-only rule it always was.
     """
     if result.status != PLAN_STAGE_COMPLETE or result.scope.tier != SCOPE_TIER_LARGE:
         return ApprovalCheck(result)
+    if comment is not None and comment.parked == comment.current:
+        return ApprovalCheck(result)
+    consumed: str | None = None
+    if comment is not None:
+        consumed = (
+            f"plan_comment_approval_consumed: comment={comment.comment_id} "
+            f"parked={comment.parked} current={comment.current}"
+        )
     parked = result.model_copy(
         update={
             "status": PLAN_PENDING_APPROVAL,
             "next_actions": list(APPROVAL_NEXT_ACTIONS),
         }
     )
+    if consumed is not None:
+        parked = _with_friction(parked, consumed)
     if not has_approval_evidence(task):
         return ApprovalCheck(parked)
     approved = task.plan_approved_fingerprint or ""
-    if approved == plan_fingerprint:
-        return ApprovalCheck(result)
+    if approved == plan_fingerprint or alternate:
+        return ApprovalCheck(
+            result if consumed is None else _with_friction(result, consumed)
+        )
     friction = (
         f"plan_approval_fingerprint_mismatch: approved={approved} "
         f"current={plan_fingerprint}"
     )
-    parked = parked.model_copy(
-        update={"friction_highlights": [*parked.friction_highlights, friction]}
-    )
+    parked = _with_friction(parked, friction)
     return ApprovalCheck(parked, mismatch=(approved, plan_fingerprint))

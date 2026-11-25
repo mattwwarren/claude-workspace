@@ -11,6 +11,7 @@ import pytest
 import cw.codex_plan._prompt as prompt_module
 from cw.bindings_block import BINDINGS_BEGIN, render_bindings_block
 from cw.codex_plan._prompt import (
+    AGENT_ANALYSIS_LABEL,
     RESUME_SECTION,
     TICKET_SECTION,
     TICKET_TEXT_MAX_CHARS,
@@ -24,7 +25,7 @@ from cw.codex_plan._prompt import (
 from cw.codex_plan._result import ResumeDraft
 from cw.contract_manifest import CLAUDE_ONLY_DENYLIST, RenderError, render_stage_prompt
 from cw.contract_manifest._render import _PLAN_CODEX_ADDENDUM, _STAGE_DOCS
-from cw.gh import AGENT_COMMENT_MARKER
+from cw.gh import _PLAN_MARKER, AGENT_COMMENT_MARKER, PIPELINE_FIXED_HEADERS
 from cw.models import CODEX_BACKEND
 from cw.models.bindings import Harness
 from tests._shared.bindings_builders import bindings_github_cli
@@ -241,7 +242,7 @@ class TestRender:
         ):
             assert path in _PLAN_CODEX_ADDENDUM
         assert "not available in this turn" in _PLAN_CODEX_ADDENDUM
-        assert "is deferred" in _PLAN_CODEX_ADDENDUM
+        assert "cw checks the row approval" in _PLAN_CODEX_ADDENDUM
 
     def test_an_empty_docs_root_raises_render_error(self, tmp_path: Path) -> None:
         with pytest.raises(RenderError):
@@ -262,6 +263,52 @@ class TestTicketText:
         )
         assert AGENT_COMMENT_MARKER in rendered.text
         assert "### Comment by bot at t" in rendered.text
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(f"Our analysis\n\n{AGENT_COMMENT_MARKER}", id="agent-marker"),
+            *(
+                pytest.param(f"{header}\n\nfindings", id=header.lstrip("# "))
+                for header in PIPELINE_FIXED_HEADERS
+            ),
+            pytest.param(f"Plan\n\n{_PLAN_MARKER}", id="plan-of-record"),
+            pytest.param(
+                "This note was written by an agent for the operator.",
+                id="self-disclosure",
+            ),
+        ],
+    )
+    def test_agent_analysis_comments_carry_the_provenance_label(
+        self, body: str
+    ) -> None:
+        rendered = render_ticket_text(
+            "The body", [{"author": {"login": "op"}, "body": body, "createdAt": "t"}]
+        )
+        assert f"{body.rstrip()}\n\n{AGENT_ANALYSIS_LABEL}\n" in rendered.text
+
+    def test_the_label_is_the_documented_text(self) -> None:
+        assert AGENT_ANALYSIS_LABEL == "[agent analysis: not an operator decision]"
+
+    def test_an_operator_comment_carries_no_provenance_label(self) -> None:
+        rendered = render_ticket_text(
+            "The body",
+            [{"author": {"login": "op"}, "body": "adopt parity", "createdAt": "t"}],
+        )
+        assert "adopt parity" in rendered.text
+        assert "agent analysis" not in rendered.text
+
+    def test_the_snapshot_path_labels_the_same_comments(self) -> None:
+        comments = [
+            make_comment("c1", body="OPERATOR NOTE", author_id="op"),
+            make_comment(
+                "c2", body=f"AGENT NOTE\n{AGENT_COMMENT_MARKER}", author_id="bot"
+            ),
+        ]
+        text = ticket_text_from_snapshot(make_snapshot_from(comments)).text
+        assert text.count(AGENT_ANALYSIS_LABEL) == 1
+        assert text.index("AGENT NOTE") < text.index(AGENT_ANALYSIS_LABEL)
+        assert text.index("OPERATOR NOTE") < text.index("AGENT NOTE")
 
     def test_oldest_comments_are_dropped_first(self) -> None:
         comments = [

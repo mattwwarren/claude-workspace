@@ -74,7 +74,7 @@ elements:
   orch.comment-provenance-rule:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: implemented, ref: {kind: code, path: src/cw/outbox_producer.py, symbol: enqueue_prose}, note: "every part the drain posts carries the agent marker: the producer enqueues with operator_authored=false and the drain appends it through outbox_drain._post_part / post_parts, byte-identical to cw post-comment --emit-only parts"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/outbox_producer.py, symbol: enqueue_prose}, note: "every part the drain posts carries the agent marker: the producer enqueues with operator_authored=false and the drain appends it through outbox_drain._post_part / post_parts, byte-identical to cw post-comment --emit-only parts; the prompt side: the injected ticket text labels every agent-marker, pipeline-header, plan-of-record or self-disclosing comment [agent analysis: not an operator decision] (codex_plan._prompt._comment_text) and the plan addendum item 10 states the rule for comments the turn reads itself"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the opencode prompt posts without the cw-agent-authored marker (S3 does not add it)"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   orch.marker-cw-agent-authored:
@@ -86,13 +86,13 @@ elements:
   orch.operator-authority-delta:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3465}, note: "not rendered into the codex PLAN prompt in C1"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_approval.py, symbol: no_authority_delta}, note: "a row approval stands only while no operator-authority comment is newer than it; a --post-marker audit comment counts as one"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   orch.fast-path-composition-requires-third-condition:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_plan/_resume.py, symbol: fast_path_reason}, note: "the codex fast path is fingerprint equality only; #3465 alternate must compose with TrackerFingerprint.body_sha equality, which cw already persists"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_approval.py, symbol: alternate_holds}, note: "the operator-authority alternate composes with the persisted body_sha equality; a row delta never takes it"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   orch.impl-stage-consumption:
@@ -362,7 +362,7 @@ elements:
   intake.origin-sync-check:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3465}, note: "Stage-0 origin-sync checks do not run before a codex PLAN turn in C1"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_preflight.py, symbol: read_origin_sync}, note: "origin sync is read before a codex PLAN turn; the fetch is bounded (60s) and fails open"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   intake.materialize-cw-context-json:
@@ -386,7 +386,7 @@ elements:
   intake.origin-sync-divergence-handling:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3465}, note: "Stage-0 origin-sync checks do not run before a codex PLAN turn in C1"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_preflight.py, symbol: origin_sync_block}, note: "ahead or diverged blocks at once; behind-only re-reads 3 times at 30s with no re-fetch"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   intake.fetch-failure-signature-mirror:
@@ -405,7 +405,7 @@ elements:
     covers: [dependency_unmerged]
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3465}, note: "Stage-0 dependency checks do not run before a codex PLAN turn in C1"}
+      codex: {disposition: deferred, ref: {kind: ticket, number: 3912}, note: "Stage-0 dependency checks do not run before a codex PLAN turn (#3912)"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   intake.comments-fetch-failure:
@@ -531,49 +531,49 @@ elements:
   plan.checkpoint-1:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/plan_gates.py, symbol: check_large_tier_approval}, note: "row-path exact fingerprint equality only; a mismatch re-parks quoting both fingerprints"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/plan_gates.py, symbol: check_large_tier_approval}, note: "row delivery keeps exact fingerprint equality; a mismatch re-parks quoting both fingerprints; a comment approval must match the parked fingerprint"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.headless-plan-approval:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/plan_gates.py, symbol: check_large_tier_approval}, note: "row-path exact fingerprint equality only; a mismatch re-parks quoting both fingerprints"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/plan_gates.py, symbol: check_large_tier_approval}, note: "row delivery keeps exact fingerprint equality; a mismatch re-parks quoting both fingerprints; a comment approval must match the parked fingerprint"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "plan_approved_at / plan_approved_fingerprint are not carried by the PLAN prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.operator-authority-delta-alternate:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3465}, note: "only exact fingerprint equality on the row is approval evidence on codex PLAN in C1; the comment path is unavailable"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_approval.py, symbol: alternate_holds}, note: "no newer operator comment, persisted body_sha equal to live; empty operator_ids on GitHub means row evidence only"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.comment-path-approval-token-grammar-closed:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3465}, note: "only exact fingerprint equality on the row is approval evidence on codex PLAN in C1; the comment path is unavailable"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_approval.py, symbol: has_approval_token}, note: "a comment token approves only from an operator identity (author_id in operator_ids, casefolded); GitHub with empty operator_ids never approves by comment; the issue author is not carried by the snapshot and is not used"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   plan.no-double-duty:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3465}, note: "only exact fingerprint equality on the row is approval evidence on codex PLAN in C1; the comment path is unavailable"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_approval.py, symbol: is_double_duty}, note: "a token comment that also settles items or carries resolutions does not approve"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.staleness-guard:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3465}, note: "only exact fingerprint equality on the row is approval evidence on codex PLAN in C1; the comment path is unavailable"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_approval.py, symbol: is_stale}, note: "a later operator comment or pipeline header makes a comment approval stale"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.fingerprint-mismatch-sub-case:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/plan_gates.py, symbol: check_large_tier_approval}, note: "row-path exact fingerprint equality only; a mismatch re-parks quoting both fingerprints"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/plan_gates.py, symbol: check_large_tier_approval}, note: "row delivery keeps exact fingerprint equality; a mismatch re-parks quoting both fingerprints; a comment approval must match the parked fingerprint"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.row-delivered-revisions-never-use-operator-authority-delta:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/plan_gates.py, symbol: check_large_tier_approval}, note: "row-path exact fingerprint equality only; a mismatch re-parks quoting both fingerprints"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_approval.py, symbol: alternate_holds}, note: "row deliveries keep exact fingerprint equality, and a row delta never takes the operator-authority alternate: alternate_holds returns False under row_delta, and finish_row_delta compares the fingerprints itself"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.pre-flight-already-satisfied-check:
@@ -622,7 +622,7 @@ elements:
   plan.independent-of-approval-fingerprint:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/plan_gates.py, symbol: check_large_tier_approval}, note: "row-path exact fingerprint equality only; a mismatch re-parks quoting both fingerprints"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/plan_gates.py, symbol: check_large_tier_approval}, note: "the scope-tier gate (check_scope_tier) and check_large_tier_approval stay independent sensors: a tier flip fires the gate whatever the approval says, and an approval mismatch re-parks whatever the tier gate says"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.first-persist-plan-file:

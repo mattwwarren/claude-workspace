@@ -10,12 +10,19 @@ unchanged; ``author.login`` carries the display ``author``, never ``author_id``.
 Two rule sets, chosen by :attr:`SnapshotContext.github` (``resolve_tracker``
 equals ``github-issues``; an unset tracker is NOT GitHub):
 
-- GitHub: today's rules, byte-compatible. ``operator_ids`` are ignored, and
-  login compares are exact.
+- GitHub: today's rules, byte-compatible. ``operator_ids`` are read only for
+  :attr:`Purpose.APPROVAL_COMMENT` (an entry is the commenter's login,
+  casefolded); every other purpose ignores them, and its login compares are
+  exact.
 - Every other tracker ("MCP"): a comment binds only when its ``author_id`` is
   non-blank, is one of ``operator_ids`` (casefolded at evaluation), and the
   comment is not ``author_conflict``-flagged. Empty ``operator_ids`` binds
   nothing (fail closed).
+
+:attr:`Purpose.APPROVAL_COMMENT` (a plan-approval token, #3465) is identity-bound
+on both rule sets: a comment binds only when its ``author_id`` is non-blank, is in
+``operator_ids`` (casefolded), is not ``author_conflict``-flagged or agent-authored,
+and has a non-blank body, so on GitHub too a drive-by commenter cannot approve.
 
 Snapshot order is oldest first, as the tracker returned it (the stdin
 document is documented oldest-first). On MCP, "newest" means the LAST
@@ -56,6 +63,8 @@ class Purpose(StrEnum):
     VOIDED_AND_SETTLE = "voided_and_settle"
     CONSTRAINTS = "constraints"
     APPROVED_PLAN = "approved_plan"
+    #: A plan-approval comment token (#3465): identity-bound on both rule sets.
+    APPROVAL_COMMENT = "approval_token"
 
 
 @dataclass(frozen=True)
@@ -132,6 +141,19 @@ def _is_operator(comment: SnapshotComment, ctx: SnapshotContext) -> bool:
     return author_id.casefold() in {entry.casefold() for entry in ctx.operator_ids}
 
 
+def _approval_binds(comment: SnapshotComment, ctx: SnapshotContext) -> bool:
+    """An approval token binds only from an operator identity, on either rule set.
+
+    The GitHub rules otherwise let any non-agent commenter bind OPERATOR_TEXT,
+    so an approval must not ride that binding (#3465 R3).
+    """
+    return (
+        _is_operator(comment, ctx)
+        and not comment.agent_authored
+        and bool(comment.body.strip())
+    )
+
+
 def _github_binds(
     comment: SnapshotComment, purpose: Purpose, gh_login: str | None
 ) -> bool:
@@ -175,7 +197,9 @@ def bound_comments(
     """
     if snapshot is None:
         return []
-    if ctx.github:
+    if purpose is Purpose.APPROVAL_COMMENT:
+        kept = [c for c in snapshot.comments if _approval_binds(c, ctx)]
+    elif ctx.github:
         kept = [c for c in snapshot.comments if _github_binds(c, purpose, gh_login)]
     else:
         kept = [c for c in snapshot.comments if _mcp_binds(c, purpose, ctx)]

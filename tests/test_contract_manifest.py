@@ -1069,11 +1069,12 @@ _C3_TICKET = 3062
 _CODEX_FINALIZE_FOLLOW_UPS = frozenset({3542, 3543, 3544})
 #: The C1 ticket (#3060, codex PLAN executor); no cell may defer to it once it
 #: lands. Its plan-stage cells are implemented, not-applicable,
-#: or deferred to one of its follow-ups: #3465 (the operator-authority delta and
-#: comment-path approval) and #3909 (the operator-answer fold and the
-#: ticket-quote pre-pass). #3464 (resume-round parity) has landed.
+#: or deferred to one of its follow-ups: #3912 (the Stage-0 dependency check) and
+#: #3909 (the operator-answer fold and the ticket-quote pre-pass). #3464
+#: (resume-round parity) and #3465 (the operator-authority delta and comment-path
+#: approval) have landed.
 _C1_TICKET = 3060
-_CODEX_PLAN_FOLLOW_UPS = frozenset({3465, 3909})
+_CODEX_PLAN_FOLLOW_UPS = frozenset({3912, 3909})
 _C1_RESUME_TICKET = 3464
 #: The C2 ticket (#3061, codex IMPL executor); no cell may defer to it once it
 #: lands. Its impl-stage cells are implemented, not-applicable,
@@ -1461,10 +1462,6 @@ def _assert_codex_plan_cell(element_id: str, cell: object) -> int | None:
         return None
     if isinstance(cell, NotApplicableDisposition):
         assert cell.reason.strip(), element_id
-        return None
-    if isinstance(cell, FailsClosedDisposition):
-        assert isinstance(cell.ref, CodeRef), element_id
-        assert cell.ref.path.startswith("src/cw/"), element_id
         return None
     assert isinstance(cell, DeferredDisposition), element_id
     assert cell.ref.number in _CODEX_PLAN_FOLLOW_UPS, element_id
@@ -1861,14 +1858,10 @@ def test_no_codex_cell_is_fails_closed() -> None:
     cell is fails-closed. Every former fails-closed codex cell is implemented
     with the cw-run gate that carries it.
 
-    The one exception is not a stage refusal (#3464, Settled Plan Item A3):
-    the codex fast path is fingerprint equality only, so the third-condition
-    composition with #3465's alternate has nothing to compose with and any
-    drift falls through to a full scan.
+    The third-condition composition (#3465's operator-authority alternate)
+    is implemented, so no codex cell is fails-closed.
     """
-    assert elements_with(CODEX_BACKEND, "fails-closed") == (
-        "orch.fast-path-composition-requires-third-condition",
-    )
+    assert elements_with(CODEX_BACKEND, "fails-closed") == ()
 
 
 def test_codex_finalize_cell_counts() -> None:
@@ -1942,9 +1935,9 @@ _C1_RESUME_CELLS = {
         "revision_cycle",
     ),
     "orch.fast-path-composition-requires-third-condition": (
-        "fails-closed",
-        "src/cw/codex_plan/_resume.py",
-        "fast_path_reason",
+        "implemented",
+        "src/cw/codex_plan/_approval.py",
+        "alternate_holds",
     ),
 }
 
@@ -1957,6 +1950,114 @@ def test_the_resume_parity_cells_point_at_their_code(element_id: str) -> None:
     assert cell.disposition == disposition
     assert isinstance(cell.ref, CodeRef)
     assert (cell.ref.path, cell.ref.symbol) == (path, symbol)
+
+
+#: The codex cells #3465 flipped from ``deferred`` to ``implemented``, each to
+#: the code symbol that carries it (the composition cell is in the table above).
+_C1_APPROVAL_CELLS = {
+    "orch.operator-authority-delta": (
+        "implemented",
+        "src/cw/codex_plan/_approval.py",
+        "no_authority_delta",
+    ),
+    "plan.operator-authority-delta-alternate": (
+        "implemented",
+        "src/cw/codex_plan/_approval.py",
+        "alternate_holds",
+    ),
+    "plan.comment-path-approval-token-grammar-closed": (
+        "implemented",
+        "src/cw/codex_plan/_approval.py",
+        "has_approval_token",
+    ),
+    "plan.no-double-duty": (
+        "implemented",
+        "src/cw/codex_plan/_approval.py",
+        "is_double_duty",
+    ),
+    "plan.staleness-guard": (
+        "implemented",
+        "src/cw/codex_plan/_approval.py",
+        "is_stale",
+    ),
+    "intake.origin-sync-check": (
+        "implemented",
+        "src/cw/codex_plan/_preflight.py",
+        "read_origin_sync",
+    ),
+    "intake.origin-sync-divergence-handling": (
+        "implemented",
+        "src/cw/codex_plan/_preflight.py",
+        "origin_sync_block",
+    ),
+}
+
+
+@pytest.mark.parametrize("element_id", sorted(_C1_APPROVAL_CELLS))
+def test_the_approval_and_origin_sync_cells_point_at_their_code(
+    element_id: str,
+) -> None:
+    disposition, path, symbol = _C1_APPROVAL_CELLS[element_id]
+    cell = _manifest().elements[element_id].cells[CODEX_BACKEND]
+    assert not isinstance(cell, str)
+    assert cell.disposition == disposition
+    assert isinstance(cell.ref, CodeRef)
+    assert (cell.ref.path, cell.ref.symbol) == (path, symbol)
+
+
+def test_the_unmerged_dependency_cell_stays_deferred_to_its_debt_ticket() -> None:
+    """Stage-0 dependency checks are not part of #3465: they are #3912."""
+    cell = (
+        _manifest().elements["intake.sentinel-dependency-unmerged"].cells[CODEX_BACKEND]
+    )
+    assert isinstance(cell, DeferredDisposition)
+    assert cell.ref.number == 3912
+    assert cell.note is not None
+    assert "#3912" in cell.note
+
+
+_GATES = "src/cw/stage_verification/plan_gates.py"
+_GATE_SYMBOL = "check_large_tier_approval"
+_STALE_ROW_ONLY_NOTE = "row-path exact fingerprint equality only"
+_PARKED_NOTE = "a comment approval must match the parked fingerprint"
+
+#: The five codex cells that once said "row-path exact fingerprint equality
+#: only" (#3465): each with its ref (path, symbol) and the clause its note now
+#: carries.
+_FIVE_APPROVAL_NOTE_CELLS = {
+    "plan.checkpoint-1": (_GATES, _GATE_SYMBOL, _PARKED_NOTE),
+    "plan.headless-plan-approval": (_GATES, _GATE_SYMBOL, _PARKED_NOTE),
+    "plan.fingerprint-mismatch-sub-case": (_GATES, _GATE_SYMBOL, _PARKED_NOTE),
+    "plan.row-delivered-revisions-never-use-operator-authority-delta": (
+        "src/cw/codex_plan/_approval.py",
+        "alternate_holds",
+        "a row delta never takes the operator-authority alternate",
+    ),
+    "plan.independent-of-approval-fingerprint": (
+        _GATES,
+        _GATE_SYMBOL,
+        "stay independent sensors",
+    ),
+}
+
+
+@pytest.mark.parametrize("element_id", sorted(_FIVE_APPROVAL_NOTE_CELLS))
+def test_the_five_approval_cells_carry_the_reworded_notes(element_id: str) -> None:
+    path, symbol, clause = _FIVE_APPROVAL_NOTE_CELLS[element_id]
+    cell = _manifest().elements[element_id].cells[CODEX_BACKEND]
+    assert isinstance(cell, ImplementedDisposition), element_id
+    assert isinstance(cell.ref, CodeRef)
+    assert (cell.ref.path, cell.ref.symbol) == (path, symbol)
+    assert cell.note is not None
+    assert _STALE_ROW_ONLY_NOTE not in cell.note
+    assert clause in cell.note
+
+
+def test_no_codex_note_still_says_row_path_equality_only() -> None:
+    for element_id, element in _manifest().elements.items():
+        cell = element.cells[CODEX_BACKEND]
+        note = getattr(cell, "note", None)
+        assert note is None or _STALE_ROW_ONLY_NOTE not in note, element_id
 
 
 @pytest.mark.parametrize(

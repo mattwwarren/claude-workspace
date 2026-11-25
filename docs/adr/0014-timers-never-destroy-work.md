@@ -174,7 +174,7 @@ claim invariant 1 already permits it, and it is not a general license.
 The review-engine `completion_check` (codex lane, manifest key) runs a
 repository-declared checker between the role turns and the aggregation turn. It
 is bounded by `completion_check.timeout_seconds` (default 300, at most 900).
-That bound is authorized by operator ruling on #3885. Like the #2910
+That bound is authorized by operator ruling on #3885, and the codex PLAN origin-sync fetch is a second consumer, authorized by operator ruling on #3465. Like the #2910
 Clarification, this section records that authorization; it does not claim the
 ADR text above, read literally against ARCHITECTURE §8 #13, already permits it.
 

@@ -41,9 +41,16 @@ PLAN_DRAFT_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
 # running offset, so a matching HTML comment *inside* the plan body is plan
 # content and stays hash material.
 _ROUND_LINE = re.compile(r"<!-- plan-stage-scan-round: [0-9]+ -->\n?")
+#
+# The ``last_evaluated`` value grammar, ``operator_comment=<id|none>|body_sha=<sha>``,
+# is owned here once: :func:`format_last_evaluated` writes it,
+# :func:`parse_last_evaluated_body_sha` and the line pattern below read it, all
+# through the one ``_LAST_EVALUATED_VALUE`` pattern, so a producer's format
+# change cannot drift from a reader's.
+_LAST_EVALUATED_VALUE = r"operator_comment=[^|\n]+\|body_sha=(?P<body_sha>[0-9a-f]{64})"
+_LAST_EVALUATED_VALUE_RE = re.compile(_LAST_EVALUATED_VALUE)
 _LAST_EVALUATED_LINE = re.compile(
-    r"<!-- plan-stage-last-evaluated: "
-    r"operator_comment=[^|\n]+\|body_sha=(?P<body_sha>[0-9a-f]{64}) -->\n?"
+    r"<!-- plan-stage-last-evaluated: " + _LAST_EVALUATED_VALUE + r" -->\n?"
 )
 # Round-qualified item ids (#2626): bare `A<n>`/`P<n>` is round 1; `R<k>.` is
 # written only for park ordinals k >= 2, so `R1.`, `R0.` and `R02.` are not
@@ -296,6 +303,21 @@ def compute_body_sha(body: str) -> str:
     command's output verbatim instead of hashing the body by hand.
     """
     return hashlib.sha256(body.rstrip().encode("utf-8")).hexdigest()
+
+
+def format_last_evaluated(operator_comment: str, body_sha: str) -> str:
+    """The ``last_evaluated`` value for *operator_comment* and *body_sha*.
+
+    ``operator_comment`` is the latest operator comment id, or ``none``. The one
+    producer of the grammar :func:`parse_last_evaluated_body_sha` reads.
+    """
+    return f"operator_comment={operator_comment}|body_sha={body_sha}"
+
+
+def parse_last_evaluated_body_sha(value: str) -> str | None:
+    """The ``body_sha`` of a ``last_evaluated`` *value*, or None when malformed."""
+    match = _LAST_EVALUATED_VALUE_RE.fullmatch(value)
+    return match.group("body_sha") if match is not None else None
 
 
 def extract_persisted_body_sha(draft_text: str) -> str | None:

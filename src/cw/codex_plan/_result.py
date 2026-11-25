@@ -381,6 +381,18 @@ def on_disk_leading_block(worktree: Path) -> LeadingBlock:
     return parse_leading_block(text)
 
 
+def draft_body(plan_text: str) -> str:
+    """The body a draft persists: cleaned, with exactly one trailing newline.
+
+    The same text :func:`write_plan_draft` writes after the leading block, so a
+    plan's fingerprint computed from this form matches the parked draft's (#3465).
+    """
+    body = clean_plan_text(plan_text)
+    if not body.endswith("\n"):
+        body += "\n"
+    return body
+
+
 def write_plan_draft(worktree: Path, plan_text: str, *, book: LeadingBlock) -> Path:
     """Write ``.cw/plan-draft.md``: *book* rendered in grammar order, then the body.
 
@@ -393,9 +405,7 @@ def write_plan_draft(worktree: Path, plan_text: str, *, book: LeadingBlock) -> P
     (#3490); a bookkeeping-only change takes no snapshot.
     """
     prior = _read_on_disk_draft(worktree)
-    body = clean_plan_text(plan_text)
-    if not body.endswith("\n"):
-        body += "\n"
+    body = draft_body(plan_text)
     text = render_leading_block(book) + body
     path = worktree / PLAN_DRAFT_RELATIVE_PATH
     if prior is not None and prior[leading_bookkeeping_end(prior) :] != body:

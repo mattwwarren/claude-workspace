@@ -24,9 +24,15 @@ from typing import TYPE_CHECKING, Any, Final
 
 import cw
 from cw.codex_plan._result import PlanTurnDocument
+from cw.codex_plan._tracker import is_pipeline_authored
 from cw.contract_manifest import render_stage_prompt
 from cw.contract_manifest._render import _STAGE_DOCS
-from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_body, fetch_issue_comments
+from cw.gh import (
+    FETCH_COMMENTS_TIMEOUT,
+    fetch_issue_body,
+    fetch_issue_comments,
+    is_agent_authored,
+)
 from cw.models import CODEX_BACKEND
 from cw.openai_strict_schema import to_openai_strict_schema
 
@@ -125,13 +131,26 @@ def _section(name: str, body: str) -> str:
     )
 
 
+#: The label cw appends to a comment the provenance rule reads as agent analysis
+#: (#3465): an agent marker, a pipeline fixed header, a plan of record or a
+#: self-disclosure. The body stays verbatim; the label is cw's, not the author's.
+AGENT_ANALYSIS_LABEL: Final = "[agent analysis: not an operator decision]"
+
+
 def _comment_text(comment: dict[str, Any]) -> str:
     author = comment.get("author")
     login = author.get("login") if isinstance(author, dict) else author
     created = comment.get("createdAt") or comment.get("created_at") or "unknown"
     body = comment.get("body")
     text = body if isinstance(body, str) else ""
-    return f"### Comment by {login or 'unknown'} at {created}\n\n{text.rstrip()}\n"
+    label = (
+        f"\n{AGENT_ANALYSIS_LABEL}\n"
+        if is_agent_authored(text) or is_pipeline_authored(text)
+        else ""
+    )
+    return (
+        f"### Comment by {login or 'unknown'} at {created}\n\n{text.rstrip()}\n{label}"
+    )
 
 
 _COMMENTS_HEADING: Final = "## Comments (oldest first)\n\n"
@@ -150,8 +169,11 @@ def render_ticket_text(
     """Render *body* and *comments* (oldest first), capped at *cap* characters.
 
     The cap applies to the whole rendered text, framing and notes included.
-    Comments are kept verbatim, agent-authored ones included (their
-    ``cw-agent-authored`` marker is what the provenance rule reads). Oldest
+    Comments are kept verbatim, agent-authored ones included. A comment the
+    provenance rule reads as agent analysis (an agent marker, a pipeline fixed
+    header, a plan of record or a self-disclosure) is followed by
+    :data:`AGENT_ANALYSIS_LABEL`, so the turn never takes it for an operator
+    decision (#3465). Oldest
     comments are dropped first until the text fits; a body that alone exceeds
     the cap is truncated with a note. A *cap* smaller than the fixed framing
     (about a hundred characters) cannot be honored and yields the framing.

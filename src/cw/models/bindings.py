@@ -213,10 +213,12 @@ class TicketsBinding(RoleBinding):
 
     ``operator_ids`` are the operator's identities on the tracker, kept
     exactly as written (no normalisation, no dedupe). The trust evaluator
-    (``cw.ticket_snapshot._binding``) reads them on non-GitHub trackers only,
-    casefolded at evaluation: a comment binds when its ``author_id`` is one of
-    them. GitHub ignores them. Empty (the default) binds nothing, so an
-    operator opts in. ``preflight`` is always present and off by default.
+    (``cw.ticket_snapshot._binding``) reads them casefolded at evaluation: on a
+    non-GitHub tracker a comment binds when its ``author_id`` is one of them;
+    on GitHub an entry is the commenter's login and the list authorizes only a
+    plan-approval comment token (``Purpose.APPROVAL_COMMENT``, #3465). Empty
+    (the default) binds nothing, so an operator opts in. ``preflight`` is
+    always present and off by default.
     """
 
     system: TicketsSystem | None = None

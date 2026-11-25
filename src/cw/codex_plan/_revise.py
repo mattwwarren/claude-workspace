@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import ValidationError
 
+from cw.codex_plan._approval import NO_APPROVAL, ApprovalFacts
 from cw.codex_plan._exits import (
     _Exit,
     _gate,
@@ -259,15 +260,24 @@ def _row_resolutions(run: _Run) -> str | None:
 
 
 def _after_revision(
-    run: _Run, result: AutoDevResult, revised: str
+    run: _Run, result: AutoDevResult, revised: str, approval: ApprovalFacts
 ) -> tuple[str, StationsOutcome] | _Exit:
-    """Checkpoint, gate set B, the approval check, then the stations again."""
+    """Checkpoint, gate set B, the approval check, then the stations again.
+
+    The approval facts were established on the pre-revision plan; a revised
+    plan that no longer matches the parked fingerprint consumes a comment
+    approval here (#3465 R4).
+    """
     _write_draft_best_effort(run, revised)
     failure = _gate(result, revised)
     if failure is not None:
         return run.gate_blocked(failure, STAGE_PLAN_REVIEWED)
     check = check_large_tier_approval(
-        result, run.task, compute_plan_draft_fingerprint(revised)
+        result,
+        run.task,
+        compute_plan_draft_fingerprint(revised),
+        alternate=approval.alternate,
+        comment=approval.comment_approval(revised),
     )
     if check.result.status in PARK_STATUSES:
         return _park(run, revised, check)
@@ -285,6 +295,7 @@ def revision_cycle(
     stations: StationsOutcome,
     *,
     target: _McpTarget,
+    approval: ApprovalFacts = NO_APPROVAL,
 ) -> tuple[str, StationsOutcome] | _Exit:
     """Step 1f.4 on a binding station block (see the module docstring)."""
     block = stations.block
@@ -311,7 +322,7 @@ def revision_cycle(
         )
     if outcome.text is None:
         return blocking_findings_exit(run, plan_text, block, revision_ran=True)
-    return _after_revision(run, result, outcome.text)
+    return _after_revision(run, result, outcome.text, approval)
 
 
 __all__ = [
