@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.110.0] - 2026-11-25
+
 ### Added
 
 - **A claude-native REVIEW park's blocking findings now reach the regressed IMPL run (#3762).** `cw post-comment` saves the posted `## Blocking Review Findings` body to `.cw/review-park-findings.json`, `regress_review_findings` delivers it to both IMPL surfaces, and every `cw review workspace init` clears it.
