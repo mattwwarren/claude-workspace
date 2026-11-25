@@ -573,7 +573,7 @@ elements:
   plan.row-delivered-revisions-never-use-operator-authority-delta:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/plan_gates.py, symbol: check_large_tier_approval}, note: "row delivery keeps exact fingerprint equality; a mismatch re-parks quoting both fingerprints; a comment approval must match the parked fingerprint"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_approval.py, symbol: alternate_holds}, note: "row deliveries keep exact fingerprint equality, and a row delta never takes the operator-authority alternate: alternate_holds returns False under row_delta, and finish_row_delta compares the fingerprints itself"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.pre-flight-already-satisfied-check:
@@ -622,7 +622,7 @@ elements:
   plan.independent-of-approval-fingerprint:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/plan_gates.py, symbol: check_large_tier_approval}, note: "row delivery keeps exact fingerprint equality; a mismatch re-parks quoting both fingerprints; a comment approval must match the parked fingerprint"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/plan_gates.py, symbol: check_large_tier_approval}, note: "the scope-tier gate (check_scope_tier) and check_large_tier_approval stay independent sensors: a tier flip fires the gate whatever the approval says, and an approval mismatch re-parks whatever the tier gate says"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.first-persist-plan-file:
