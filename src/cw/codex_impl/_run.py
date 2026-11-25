@@ -121,6 +121,7 @@ from cw.stage_verification.impl_gates import (
     dirty_start_block,
     fence_block,
     no_plan_sensitive_block,
+    note_plan_identity,
     repair_allowed_files,
     run_quality_gates,
     run_scope_conformance,
@@ -135,7 +136,11 @@ from cw.stage_verification.impl_resume import Disposition, plan_reentry
 from cw.stage_verification.posted_text import redact_and_cap
 from cw.stage_verification.push import push_and_verify_head
 from cw.ticket_snapshot import context_for_client, snapshot_for_stage
-from cw.ticket_snapshot._plan import PLAN_RECOVERED_FRICTION, recover_plan
+from cw.ticket_snapshot._plan import (
+    PLAN_RECOVERED_FRICTION,
+    plan_identity_unresolved,
+    recover_plan,
+)
 from cw.tolerated_paths import tolerated_paths
 from cw.tracker_io import TrackerIoConfigError, courier_refresher
 
@@ -550,7 +555,9 @@ def _prepare(run: _Run, scratch: Path) -> _Pre | ImplBlock:
     recovered = [f"{PLAN_RECOVERED_FRICTION}: {source}"] if source else []
     guarded = _guards(run)
     if isinstance(guarded, ImplBlock):
-        return guarded
+        return note_plan_identity(
+            guarded, unresolved=plan_identity_unresolved(snapshot, ctx)
+        )
     plan_text, facts = guarded
     reentry = plan_reentry(
         task=run.task,

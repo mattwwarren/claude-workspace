@@ -386,3 +386,43 @@ def test_recovery_warns_with_source_and_ticket_but_never_the_plan_text(
         _recover(worktree, client)
     assert f"ticket_id={ACME_TICKET} source=outbox" in caplog.text
     assert "Step one" not in caplog.text
+
+
+# -- identity_unresolved diagnostic (#3530) ------------------------------------
+
+
+def test_empty_operator_ids_is_identity_unresolved() -> None:
+    from cw.ticket_snapshot._plan import plan_identity_unresolved
+
+    ctx = SnapshotContext()
+    assert plan_identity_unresolved(_snapshot(PLAN_TEXT, author_id="U-2"), ctx)
+    assert plan_identity_unresolved(None, ctx)
+
+
+@pytest.mark.parametrize("author_id", [None, "  "])
+def test_a_marker_comment_without_an_author_id_is_identity_unresolved(
+    author_id: str | None,
+) -> None:
+    from cw.ticket_snapshot._plan import plan_identity_unresolved
+
+    snapshot = make_snapshot_from(
+        [make_comment("c1", body=PLAN_TEXT, author_id=author_id)]
+    )
+    assert plan_identity_unresolved(snapshot, MCP) is True
+
+
+def test_identified_authors_are_not_identity_unresolved() -> None:
+    from cw.ticket_snapshot._plan import plan_identity_unresolved
+
+    assert not plan_identity_unresolved(_snapshot(PLAN_TEXT, author_id="U-2"), MCP)
+    no_marker = make_snapshot_from(
+        [make_comment("c1", body="just a note", author_id=None)]
+    )
+    assert not plan_identity_unresolved(no_marker, MCP)
+    assert not plan_identity_unresolved(None, MCP)
+
+
+def test_github_is_never_identity_unresolved() -> None:
+    from cw.ticket_snapshot._plan import plan_identity_unresolved
+
+    assert not plan_identity_unresolved(None, SnapshotContext(github=True))

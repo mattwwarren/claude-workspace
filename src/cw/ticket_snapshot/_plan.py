@@ -91,6 +91,27 @@ def _reviewed(text: str | None) -> bool:
     return text is not None and _PLAN_MARKER in text
 
 
+def plan_identity_unresolved(
+    snapshot: TicketSnapshot | None, ctx: SnapshotContext
+) -> bool:
+    """True when a non-GitHub plan author cannot be checked (#3530).
+
+    A diagnostic only: it binds nothing. It is True when no operator id is
+    configured, or when a plan-marked comment carries no author id to match.
+    """
+    if ctx.github:
+        return False
+    if not ctx.operator_ids:
+        return True
+    if snapshot is None:
+        return False
+    return any(
+        _PLAN_MARKER in comment.body
+        and (comment.author_id is None or not comment.author_id.strip())
+        for comment in snapshot.comments
+    )
+
+
 def recover_plan(
     task: TicketTask,
     client: ClientConfig,

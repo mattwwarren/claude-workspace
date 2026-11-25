@@ -22,6 +22,7 @@ import json
 import re
 import subprocess
 import sys
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 from cw._git import git_clean_env, git_output, run_git
@@ -108,6 +109,20 @@ def check_plan_present(plan_text: str | None, task: TicketTask) -> ImplBlock | N
         "approved plan (the outbox entry holds redacted text, so a plan whose "
         "text was redacted there is not recovered)",
     )
+
+
+PLAN_IDENTITY_NOTE: Final = (
+    "identity_unresolved: on this tracker a plan comment binds only when its "
+    "author_id is in bindings.tickets.operator_ids; that list is empty or a "
+    "plan-marked comment carries no author_id"
+)
+
+
+def note_plan_identity(block: ImplBlock, *, unresolved: bool) -> ImplBlock:
+    """Append the ``identity_unresolved`` marker to a ``plan_missing`` block."""
+    if not unresolved or block.reason != PLAN_MISSING:
+        return block
+    return replace(block, details=f"{block.details}; {PLAN_IDENTITY_NOTE}")
 
 
 def check_on_branch(

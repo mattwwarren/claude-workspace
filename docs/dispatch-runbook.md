@@ -4763,8 +4763,8 @@ sandbox, does everything else:
   never retried. Only a `plan-` entry is ever recovered as a plan of record. A refusal
   or an oversize body is a `review.verdict_comment_skipped` event with
   `kind: plan`, never a row hold. Delivery lags by up to one dispatch tick. On a non-GitHub
-  tracker `.cw/plan.md` in the reused worktree is the only durable copy; a
-  rebuilt worktree loses it (codex IMPL retrieval is C2).
+  tracker `.cw/plan.md` in the reused worktree is the only durable copy; codex
+  IMPL recovers a missing one from the outbox entry, then the snapshot.
 - **Approval evidence (#3465).** A large codex PLAN is approved by `cw dev-queue approve` (a row approval), by the operator-authority alternate, or by an operator comment token. The alternate holds while no operator comment is newer than the row approval (a `cw dev-queue approve --post-marker` audit comment counts, so it ends the alternate; exact fingerprint equality still works) and the persisted `body_sha` equals the live body's. The token approves only from an identity in `bindings.tickets.operator_ids`, directly after a park, bound to the parked draft: an answer or a revision that changes the plan consumes it. Empty `operator_ids` on GitHub means row evidence only. The `body_sha` anchor rolls each round, so the alternate detects only an edit between consecutive rounds.
 - **Origin sync (#3465).** Before a codex PLAN turn, cw fetches the default branch once (60-second bound, fails open with a WARNING). A local default branch that is ahead of or diverged from origin blocks `local_main_diverged_from_origin` at `stage1_pre_flight`; behind-only is re-read three times at 30-second intervals before it blocks.
 - **Deferred.** The operator-answer fold and the ticket-quote pre-pass (#3909), and the Stage-0 dependency check before a codex PLAN turn (#3912).
@@ -4783,9 +4783,16 @@ pushes. cw does everything else:
   note when one applies, and the plan's "Files You May Change" fence. No
   usable snapshot blocks `plan_missing_context`; a non-GitHub tracker no longer
   blocks `tracker_mcp_unavailable_pre_dispatch` on the pre-turn guard. A
-  missing plan blocks `plan_missing` unless the row is an adopted repair entry
-  (`review_feedback` and `branch` both set); a `recover-red-pr` row has no
-  `branch`, so it needs its `.cw/plan.md`.
+  missing `.cw/plan.md` is recovered first: from the newest `codex-plan` outbox
+  entry, then the snapshot's last bound plan comment (the `plan_recovered:
+  <source>` friction token). `plan_missing` blocks only when recovery also finds
+  nothing, and an adopted repair entry (`review_feedback` and `branch` both set)
+  never blocks here. A `recover-red-pr` row has no `branch`, so it is not a
+  repair entry and attempts recovery like any other row.
+  - GitHub refreshes through `gh`; an MCP tracker refreshes through a courier turn.
+  - A failed refresh never parks. It records `ticket.snapshot_degraded`
+    (`courier_unreachable` for an unbound or disabled server) and runs on the last snapshot.
+  - On a non-GitHub tracker the plan author must be in `bindings.tickets.operator_ids`. When that list is empty, or a plan-marked comment has no author id, `plan_missing` details carry `identity_unresolved:`.
 - **Merge target (RFC 0020 A1, #3781).** The worker's context carries the row's base as top-level `base_branch` (the row's `base_branch`, else the client's `default_branch`), always a non-empty string. claude-native and codex deliver it (codex from RFC 0020 S3b, #3840); opencode and local refuse a row with a non-null base before any agent runs (`base_unsupported_backend`).
 - **Pre-turn guards.** The worktree must be on the row's branch
   (`queue_metadata.branch`, else `<prefix>/<ticket>`). A dirty start parks
@@ -4853,8 +4860,7 @@ pushes. cw does everything else:
   `scope.tier`, `plan_source` and `review` over the model's sentinel, emits
   `s2_impl_started` / `s2_impl_complete`, completes through the door and
   posts nothing to the tracker.
-- **Deferred.** Tracker-aware plan recovery (#3530); the claimed-test and
-  mypy-baseline gates (#3531).
+- **Deferred.** The claimed-test and mypy-baseline gates (#3531).
 
 Two UNVERIFIED items: whether MCP tool calls run under
 `approval_policy=never` (the tracker-IO probe above is the evidence path),
