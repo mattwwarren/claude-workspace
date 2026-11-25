@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
@@ -29,18 +28,13 @@ from cw.codex_review import (
 )
 from cw.codex_review._context import EngineRoster
 from cw.codex_review._engine_round import (
-    EnginePassInputs,
-    EnginePassOutcome,
-    EngineRoundSpec,
     _role_failure,
     engine_unresolvable_blocked,
-    run_engine_pass,
 )
 from cw.codex_review._shard import ReviewInputTooLargeError, plan_prompt_shards
 from cw.codex_review._shard_run import ShardedRun
 from cw.codex_runner import CodexRunResult
 from cw.events import read_events
-from cw.models import Stage
 from cw.review_adjudication import VoidedFinding
 from cw.review_engine.constants import (
     ENGINE_AGGREGATOR_PREAMBLE,
@@ -68,143 +62,45 @@ from tests._codex_review_helpers import (
 from tests._review_engine_helpers import (
     EngineRepo,
     engine_finding,
-    make_aggregation_output,
     make_engine_repo,
     manifest_directory_engine,
 )
+from tests._shared.engine_round_helpers import (
+    ENGINE_ROUND_LOGGER,
+    ENGINE_ROUND_STUB,
+    QUALITY_MARK,
+    ROUND_ID,
+    SECURITY_MARK,
+    SKILL,
+    _aggregation,
+    aggregator_stdins,
+    blocked_details,
+    engine_runner,
+    inputs_for,
+    run_pass,
+    spec_for,
+    task_for,
+)
 from tests._shared.git_repos import commit_tracked_file, git_in
-from tests._shared.session_seeding import _make_ticket_task
-from tests._tool_fakes import CodexReply, ScriptedCodexRunner, stdin_contains
+from tests._tool_fakes import ScriptedCodexRunner
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from cw.models import TicketTask
 
-_STUB = Path(__file__).parent / "fixtures" / "review_engine_stub"
-_SECURITY_SPEC = (_STUB / "agents" / "security.md").read_text(encoding="utf-8")
-_QUALITY_SPEC = (_STUB / "agents" / "quality.md").read_text(encoding="utf-8")
-_ROUND = "round-0"
-_LOGGER = "cw.codex_review._engine_round"
-_SKILL = "repo-review"
-_SECURITY_MARK = "# Security role"
-_QUALITY_MARK = "# Quality role"
-_SKILL_DIR = f".claude/skills/{_SKILL}"
+_SECURITY_SPEC = (ENGINE_ROUND_STUB / "agents" / "security.md").read_text(
+    encoding="utf-8"
+)
+_QUALITY_SPEC = (ENGINE_ROUND_STUB / "agents" / "quality.md").read_text(
+    encoding="utf-8"
+)
+_SKILL_DIR = f".claude/skills/{SKILL}"
 _MUST_FIX = engine_finding(
     "MUST_FIX",
     rule_id="security.injection",
     summary="Unsafe command construction.",
     evidence="x = 1",
 )
-
-
-@pytest.fixture
-def repo(make_git_repo: Callable[..., Path]) -> EngineRepo:
-    return make_engine_repo(make_git_repo, engine_files=_STUB)
-
-
-@pytest.fixture
-def record_event_spy(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
-    """Replace every ``record_event`` binding in an imported ``cw`` module."""
-    spy = MagicMock()
-    for name, module in list(sys.modules.items()):
-        if name.split(".")[0] == "cw" and hasattr(module, "record_event"):
-            monkeypatch.setattr(module, "record_event", spy)
-    return spy
-
-
-def _task(repo: EngineRepo, **overrides: object) -> TicketTask:
-    return _make_ticket_task(
-        ticket_id=repo.ticket,
-        client=repo.client,
-        stage=Stage.REVIEW,
-        scope_hint="small",
-        **overrides,
-    )
-
-
-def _spec(
-    repo: EngineRepo, *, skill: str = _SKILL, default_branch: str = "main"
-) -> EngineRoundSpec:
-    return EngineRoundSpec(
-        context=EngineContext(
-            skill=skill,
-            guarded_paths=(),
-            ticket_id=repo.ticket,
-            client=repo.client,
-            default_branch=default_branch,
-        )
-    )
-
-
-def _inputs(
-    repo: EngineRepo,
-    runner: ScriptedCodexRunner,
-    *,
-    task: TicketTask | None = None,
-    wall_clock_budget_seconds: int | None = None,
-    max_prompt_chars: int | None = None,
-) -> EnginePassInputs:
-    return EnginePassInputs(
-        runner=runner,
-        task=task or _task(repo),
-        worktree=repo.worktree,
-        base_branch="main",
-        config_branch="main",
-        model=None,
-        reasoning_effort=None,
-        wall_clock_budget_seconds=wall_clock_budget_seconds,
-        session_id="s-engine",
-        fix_loop_enabled=True,
-        prior_open_findings=None,
-        claim_tier_enabled=False,
-        disposition_drift_check_enabled=True,
-        settled_suppression=None,
-        max_prompt_chars=max_prompt_chars,
-    )
-
-
-def _aggregation(
-    findings: list[dict[str, object]] | None = None, **overrides: object
-) -> CodexRunResult:
-    """An exit-0 aggregation turn whose ``-o`` file holds a valid output."""
-    content = json.dumps(make_aggregation_output(findings, **overrides))
-    return CodexRunResult(0, "", "", output_file_content=content)
-
-
-def _engine_runner(
-    *,
-    security: CodexReply | None = None,
-    quality: CodexReply | None = None,
-    aggregation: CodexReply | None = None,
-) -> ScriptedCodexRunner:
-    """Role and aggregator rules, keyed on the spec text and the preamble."""
-    return (
-        ScriptedCodexRunner()
-        .add(
-            stdin_contains(ENGINE_AGGREGATOR_PREAMBLE),
-            aggregation or _aggregation(),
-        )
-        .add(stdin_contains(_SECURITY_MARK), security or _ok_result("security"))
-        .add(stdin_contains(_QUALITY_MARK), quality or _ok_result("quality"))
-    )
-
-
-def _pass(
-    repo: EngineRepo,
-    runner: ScriptedCodexRunner,
-    *,
-    cycle: int = 0,
-    round_id: str | None = _ROUND,
-    spec: EngineRoundSpec | None = None,
-    inputs: EnginePassInputs | None = None,
-) -> EnginePassOutcome:
-    return run_engine_pass(
-        spec or _spec(repo),
-        inputs or _inputs(repo, runner),
-        cycle=cycle,
-        round_id=round_id,
-    )
 
 
 def _stdins(runner: ScriptedCodexRunner) -> list[str]:
@@ -215,34 +111,17 @@ def _role_stdins(runner: ScriptedCodexRunner) -> list[str]:
     return [s for s in _stdins(runner) if not s.startswith(ENGINE_AGGREGATOR_PREAMBLE)]
 
 
-def _aggregator_stdins(runner: ScriptedCodexRunner) -> list[str]:
-    return [s for s in _stdins(runner) if s.startswith(ENGINE_AGGREGATOR_PREAMBLE)]
-
-
-def _blocked(
-    outcome: EnginePassOutcome, *, reason: str = "agent_block", retry: bool = True
-) -> str:
-    """Assert *outcome* is a verdict-less block; return its details."""
-    assert outcome.result.status == "blocked"
-    blocker = outcome.result.blocker
-    assert blocker is not None
-    assert blocker.reason == reason
-    assert blocker.retry_eligible is retry
-    assert outcome.verdict is None
-    return blocker.details
-
-
 def _failure_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [
         r.getMessage()
         for r in caplog.records
-        if r.name == _LOGGER and r.levelno == logging.WARNING
+        if r.name == ENGINE_ROUND_LOGGER and r.levelno == logging.WARNING
     ]
 
 
 class TestPass:
     def test_two_roles_then_the_aggregator_give_a_clean_engine_document(
-        self, repo: EngineRepo, monkeypatch: pytest.MonkeyPatch
+        self, engine_repo: EngineRepo, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         captured: dict[str, Any] = {}
 
@@ -253,9 +132,9 @@ class TestPass:
         monkeypatch.setattr(
             "cw.codex_review._engine_round.synthesize_codex_review_result", _spy
         )
-        runner = _engine_runner()
+        runner = engine_runner()
 
-        outcome = _pass(repo, runner)
+        outcome = run_pass(engine_repo, runner)
 
         assert outcome.result.status == "stage_complete"
         assert outcome.result.blocker is None
@@ -270,17 +149,22 @@ class TestPass:
         stdins = _stdins(runner)
         assert len(stdins) == 3
         assert stdins[2].startswith(ENGINE_AGGREGATOR_PREAMBLE)
-        assert _SECURITY_MARK in stdins[0]
-        assert _QUALITY_MARK in stdins[1]
-        summary = repo.worktree / ".cw" / "review-engine" / _ROUND / "summary.json"
-        assert json.loads(summary.read_text(encoding="utf-8"))["head_sha"] == repo.head
+        assert SECURITY_MARK in stdins[0]
+        assert QUALITY_MARK in stdins[1]
+        summary = (
+            engine_repo.worktree / ".cw" / "review-engine" / ROUND_ID / "summary.json"
+        )
+        assert (
+            json.loads(summary.read_text(encoding="utf-8"))["head_sha"]
+            == engine_repo.head
+        )
 
     def test_each_role_spec_follows_the_role_preamble_under_its_heading(
-        self, repo: EngineRepo
+        self, engine_repo: EngineRepo
     ) -> None:
-        runner = _engine_runner()
+        runner = engine_runner()
 
-        _pass(repo, runner)
+        run_pass(engine_repo, runner)
 
         security, quality, aggregator = _stdins(runner)
         assert (
@@ -293,12 +177,14 @@ class TestPass:
         )
         assert aggregator.startswith(ENGINE_AGGREGATOR_PREAMBLE)
         assert "## Aggregation Instructions" in aggregator
-        assert f"Reviewed head: {repo.head}" in aggregator
+        assert f"Reviewed head: {engine_repo.head}" in aggregator
 
-    def test_a_blocking_finding_blocks_with_a_verdict(self, repo: EngineRepo) -> None:
-        runner = _engine_runner(aggregation=_aggregation([_MUST_FIX]))
+    def test_a_blocking_finding_blocks_with_a_verdict(
+        self, engine_repo: EngineRepo
+    ) -> None:
+        runner = engine_runner(aggregation=_aggregation([_MUST_FIX]))
 
-        outcome = _pass(repo, runner)
+        outcome = run_pass(engine_repo, runner)
 
         assert outcome.result.status == "blocked"
         assert outcome.result.blocker is not None
@@ -309,33 +195,39 @@ class TestPass:
         assert outcome.verdict.must_fix[0].source == "engine"
 
     def test_a_default_round_id_is_generated(
-        self, repo: EngineRepo, caplog: pytest.LogCaptureFixture
+        self, engine_repo: EngineRepo, caplog: pytest.LogCaptureFixture
     ) -> None:
-        with caplog.at_level(logging.INFO, logger=_LOGGER):
-            _pass(repo, _engine_runner(), cycle=2, round_id=None)
+        with caplog.at_level(logging.INFO, logger=ENGINE_ROUND_LOGGER):
+            run_pass(engine_repo, engine_runner(), cycle=2, round_id=None)
 
-        (info,) = [r.getMessage() for r in caplog.records if r.name == _LOGGER]
+        (info,) = [
+            r.getMessage() for r in caplog.records if r.name == ENGINE_ROUND_LOGGER
+        ]
         assert "round_id=codex-2-" in info
 
 
 class TestObservability:
     def test_one_info_per_pass_and_no_event(
         self,
-        repo: EngineRepo,
+        engine_repo: EngineRepo,
         caplog: pytest.LogCaptureFixture,
         record_event_spy: MagicMock,
     ) -> None:
-        with caplog.at_level(logging.INFO, logger=_LOGGER):
-            _pass(repo, _engine_runner(aggregation=_aggregation([_MUST_FIX])), cycle=3)
+        with caplog.at_level(logging.INFO, logger=ENGINE_ROUND_LOGGER):
+            run_pass(
+                engine_repo,
+                engine_runner(aggregation=_aggregation([_MUST_FIX])),
+                cycle=3,
+            )
 
         infos = [
             r.getMessage()
             for r in caplog.records
-            if r.name == _LOGGER and r.levelno == logging.INFO
+            if r.name == ENGINE_ROUND_LOGGER and r.levelno == logging.INFO
         ]
         assert infos == [
-            f"codex engine round: ticket={repo.ticket} cycle=3 roles=2 "
-            f"round_id={_ROUND}"
+            f"codex engine round: ticket={engine_repo.ticket} cycle=3 roles=2 "
+            f"round_id={ROUND_ID}"
         ]
         assert _failure_warnings(caplog) == []
         record_event_spy.assert_not_called()
@@ -343,17 +235,17 @@ class TestObservability:
 
     def test_one_warning_per_failure_and_no_event(
         self,
-        repo: EngineRepo,
+        engine_repo: EngineRepo,
         caplog: pytest.LogCaptureFixture,
         record_event_spy: MagicMock,
     ) -> None:
-        runner = _engine_runner(security=CodexRunResult(1, "", "boom"))
+        runner = engine_runner(security=CodexRunResult(1, "", "boom"))
 
-        with caplog.at_level(logging.INFO, logger=_LOGGER):
-            _pass(repo, runner, cycle=1)
+        with caplog.at_level(logging.INFO, logger=ENGINE_ROUND_LOGGER):
+            run_pass(engine_repo, runner, cycle=1)
 
         assert _failure_warnings(caplog) == [
-            f"codex engine round failed: ticket={repo.ticket} cycle=1 "
+            f"codex engine round failed: ticket={engine_repo.ticket} cycle=1 "
             "failure=engine_role_failed"
         ]
         record_event_spy.assert_not_called()
@@ -361,17 +253,17 @@ class TestObservability:
 
     def test_a_park_warns_once_and_records_no_event(
         self,
-        repo: EngineRepo,
+        engine_repo: EngineRepo,
         caplog: pytest.LogCaptureFixture,
         record_event_spy: MagicMock,
     ) -> None:
-        commit_tracked_file(repo.worktree, f"{_SKILL_DIR}/notes.md", "edited\n")
+        commit_tracked_file(engine_repo.worktree, f"{_SKILL_DIR}/notes.md", "edited\n")
 
-        with caplog.at_level(logging.INFO, logger=_LOGGER):
-            _pass(repo, _engine_runner())
+        with caplog.at_level(logging.INFO, logger=ENGINE_ROUND_LOGGER):
+            run_pass(engine_repo, engine_runner())
 
         assert _failure_warnings(caplog) == [
-            f"codex engine round failed: ticket={repo.ticket} cycle=0 "
+            f"codex engine round failed: ticket={engine_repo.ticket} cycle=0 "
             f"failure={REVIEW_ENGINE_MODIFIED_BLOCKER_REASON}"
         ]
         record_event_spy.assert_not_called()
@@ -402,38 +294,40 @@ class TestRoleFailures:
         ids=["timeout", "nonzero", "invalid-json", "failed-document"],
     )
     def test_a_failed_role_skips_the_aggregator_and_blocks_retryably(
-        self, repo: EngineRepo, reply: CodexRunResult, reason: str, retry: bool
+        self, engine_repo: EngineRepo, reply: CodexRunResult, reason: str, retry: bool
     ) -> None:
-        runner = _engine_runner(security=reply)
+        runner = engine_runner(security=reply)
 
-        outcome = _pass(repo, runner)
+        outcome = run_pass(engine_repo, runner)
 
-        details = _blocked(outcome, retry=retry)
+        details = blocked_details(outcome, retry=retry)
         assert details == FRICTION[EngineRoundFailure.ENGINE_ROLE_FAILED].format(
             role="security", reason=reason
         )
-        assert _aggregator_stdins(runner) == []
+        assert aggregator_stdins(runner) == []
         assert outcome.prepared is not None
 
-    def test_an_exhausted_budget_fails_the_first_role(self, repo: EngineRepo) -> None:
-        runner = _engine_runner()
-        inputs = _inputs(repo, runner, wall_clock_budget_seconds=1)
+    def test_an_exhausted_budget_fails_the_first_role(
+        self, engine_repo: EngineRepo
+    ) -> None:
+        runner = engine_runner()
+        inputs = inputs_for(engine_repo, runner, wall_clock_budget_seconds=1)
 
-        outcome = _pass(repo, runner, inputs=inputs)
+        outcome = run_pass(engine_repo, runner, inputs=inputs)
 
-        assert _blocked(outcome) == FRICTION[
+        assert blocked_details(outcome, retry=True) == FRICTION[
             EngineRoundFailure.ENGINE_ROLE_FAILED
         ].format(role="security", reason="budget_exhausted")
         assert _stdins(runner) == []
 
     def test_a_second_role_failure_is_reported_when_the_first_succeeds(
-        self, repo: EngineRepo
+        self, engine_repo: EngineRepo
     ) -> None:
-        runner = _engine_runner(quality=CodexRunResult(-1, "", "", timed_out=True))
+        runner = engine_runner(quality=CodexRunResult(-1, "", "", timed_out=True))
 
-        outcome = _pass(repo, runner)
+        outcome = run_pass(engine_repo, runner)
 
-        assert "quality (codex_timeout)" in _blocked(outcome)
+        assert "quality (codex_timeout)" in blocked_details(outcome, retry=True)
 
     def test_an_unreviewed_shard_is_a_role_failure_of_its_own(self) -> None:
         unreviewed = ShardRecord(
@@ -461,7 +355,7 @@ class TestShardedRoles:
             )
         )
         prepared = _prepare_review_pass(
-            _task(repo),
+            task_for(repo),
             repo.worktree,
             "main",
             config_branch="main",
@@ -476,29 +370,35 @@ class TestShardedRoles:
         return limit, shards
 
     def test_every_role_reviews_every_shard_then_the_aggregator_runs(
-        self, repo: EngineRepo
+        self, engine_repo: EngineRepo
     ) -> None:
-        limit, shards = self._sharded_repo(repo)
-        runner = _engine_runner()
+        limit, shards = self._sharded_repo(engine_repo)
+        runner = engine_runner()
 
-        outcome = _pass(
-            repo, runner, inputs=_inputs(repo, runner, max_prompt_chars=limit)
+        outcome = run_pass(
+            engine_repo,
+            runner,
+            inputs=inputs_for(engine_repo, runner, max_prompt_chars=limit),
         )
 
         assert outcome.result.status == "stage_complete"
         assert len(_role_stdins(runner)) == 2 * shards
-        assert len(_aggregator_stdins(runner)) == 1
+        assert len(aggregator_stdins(runner)) == 1
 
-    def test_a_role_failing_on_a_shard_fails_the_round(self, repo: EngineRepo) -> None:
-        limit, _shards = self._sharded_repo(repo)
-        runner = _engine_runner(security=CodexRunResult(1, "", "boom"))
+    def test_a_role_failing_on_a_shard_fails_the_round(
+        self, engine_repo: EngineRepo
+    ) -> None:
+        limit, _shards = self._sharded_repo(engine_repo)
+        runner = engine_runner(security=CodexRunResult(1, "", "boom"))
 
-        outcome = _pass(
-            repo, runner, inputs=_inputs(repo, runner, max_prompt_chars=limit)
+        outcome = run_pass(
+            engine_repo,
+            runner,
+            inputs=inputs_for(engine_repo, runner, max_prompt_chars=limit),
         )
 
-        assert "security (codex_error)" in _blocked(outcome, retry=False)
-        assert _aggregator_stdins(runner) == []
+        assert "security (codex_error)" in blocked_details(outcome, retry=False)
+        assert aggregator_stdins(runner) == []
 
 
 class TestAggregatorFailures:
@@ -564,14 +464,14 @@ class TestAggregatorFailures:
         ],
     )
     def test_each_failure_blocks_retryably_with_its_friction(
-        self, repo: EngineRepo, reply: CodexRunResult, prefix: str, retry: bool
+        self, engine_repo: EngineRepo, reply: CodexRunResult, prefix: str, retry: bool
     ) -> None:
-        runner = _engine_runner(aggregation=reply)
+        runner = engine_runner(aggregation=reply)
 
-        outcome = _pass(repo, runner)
+        outcome = run_pass(engine_repo, runner)
 
-        assert _blocked(outcome, retry=retry).startswith(prefix)
-        assert len(_aggregator_stdins(runner)) == 1
+        assert blocked_details(outcome, retry=retry).startswith(prefix)
+        assert len(aggregator_stdins(runner)) == 1
         assert outcome.prepared is not None
 
     @pytest.mark.parametrize(
@@ -581,7 +481,7 @@ class TestAggregatorFailures:
     )
     def test_retry_eligibility_reads_the_structured_reason_not_the_text(
         self,
-        repo: EngineRepo,
+        engine_repo: EngineRepo,
         monkeypatch: pytest.MonkeyPatch,
         failure_reason: str | None,
         retry: bool,
@@ -597,12 +497,12 @@ class TestAggregatorFailures:
             lambda **_kwargs: failure,
         )
 
-        outcome = _pass(repo, _engine_runner())
+        outcome = run_pass(engine_repo, engine_runner())
 
-        assert _blocked(outcome, retry=retry) == failure.detail
+        assert blocked_details(outcome, retry=retry) == failure.detail
 
     def test_an_input_too_large_rejection_is_known_and_not_retryable(
-        self, repo: EngineRepo
+        self, engine_repo: EngineRepo
     ) -> None:
         """#3441: the emitted string is unchanged and stays non-transient."""
         stdout = (
@@ -611,48 +511,50 @@ class TestAggregatorFailures:
             / "codex_audit_events"
             / "input_too_large_turn_failed.jsonl"
         ).read_text(encoding="utf-8")
-        runner = _engine_runner(aggregation=CodexRunResult(1, stdout, ""))
+        runner = engine_runner(aggregation=CodexRunResult(1, stdout, ""))
 
-        outcome = _pass(repo, runner)
+        outcome = run_pass(engine_repo, runner)
 
         assert (
-            _blocked(outcome, retry=False)
+            blocked_details(outcome, retry=False)
             == "engine_aggregation_failed: codex_input_too_large"
         )
 
     def test_a_head_that_moved_during_the_round_is_a_head_mismatch(
-        self, repo: EngineRepo
+        self, engine_repo: EngineRepo
     ) -> None:
         def _commit_in_a_role(_argv: list[str], _stdin: str | None) -> CodexRunResult:
-            commit_tracked_file(repo.worktree, "src/moved.py", "y = 2\n")
+            commit_tracked_file(engine_repo.worktree, "src/moved.py", "y = 2\n")
             return _ok_result("security")
 
-        runner = _engine_runner(security=_commit_in_a_role)
+        runner = engine_runner(security=_commit_in_a_role)
 
-        outcome = _pass(repo, runner)
+        outcome = run_pass(engine_repo, runner)
 
-        assert _blocked(outcome, retry=True).startswith(
+        assert blocked_details(outcome, retry=True).startswith(
             "engine_head_mismatch: summary=-"
         )
 
     def test_a_role_that_dirties_the_tree_is_a_worktree_mutation(
-        self, repo: EngineRepo
+        self, engine_repo: EngineRepo
     ) -> None:
         def _edit_in_a_role(_argv: list[str], _stdin: str | None) -> CodexRunResult:
-            (repo.worktree / "src" / "a.py").write_text("x = 99\n", encoding="utf-8")
+            (engine_repo.worktree / "src" / "a.py").write_text(
+                "x = 99\n", encoding="utf-8"
+            )
             return _ok_result("quality")
 
-        runner = _engine_runner(quality=_edit_in_a_role)
+        runner = engine_runner(quality=_edit_in_a_role)
 
-        outcome = _pass(repo, runner)
+        outcome = run_pass(engine_repo, runner)
 
         assert (
-            _blocked(outcome, retry=False)
+            blocked_details(outcome, retry=False)
             == FRICTION[EngineRoundFailure.ENGINE_WORKTREE_MUTATED]
         )
 
     def test_a_summary_write_failure_is_engine_no_summary_and_not_retryable(
-        self, repo: EngineRepo
+        self, engine_repo: EngineRepo
     ) -> None:
         """A directory where the summary file goes: cw cannot write it.
 
@@ -660,20 +562,22 @@ class TestAggregatorFailures:
         failure outside the transient retry policy: a plain requeue would hit
         the same unwritable path.
         """
-        summary_dir = repo.worktree / ".cw" / "review-engine" / _ROUND / "summary.json"
+        summary_dir = (
+            engine_repo.worktree / ".cw" / "review-engine" / ROUND_ID / "summary.json"
+        )
 
         def _block_summary(_argv: list[str], _stdin: str | None) -> CodexRunResult:
             summary_dir.mkdir(parents=True, exist_ok=True)
             return _aggregation()
 
-        runner = _engine_runner(aggregation=_block_summary)
+        runner = engine_runner(aggregation=_block_summary)
 
-        outcome = _pass(repo, runner)
+        outcome = run_pass(engine_repo, runner)
 
-        assert _blocked(outcome, retry=False).startswith("engine_no_summary:")
+        assert blocked_details(outcome, retry=False).startswith("engine_no_summary:")
 
     def test_an_unwritable_aggregation_scratch_is_engine_no_summary(
-        self, repo: EngineRepo, monkeypatch: pytest.MonkeyPatch
+        self, engine_repo: EngineRepo, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """#3436: the scratch OSError reaches the pass as a typed block."""
 
@@ -684,25 +588,25 @@ class TestAggregatorFailures:
         monkeypatch.setattr(
             "cw.codex_review._engine_aggregate._codex_scratch_dir", _unwritable
         )
-        runner = _engine_runner()
+        runner = engine_runner()
 
-        outcome = _pass(repo, runner)
+        outcome = run_pass(engine_repo, runner)
 
-        assert _blocked(outcome, retry=False).startswith("engine_no_summary:")
-        assert _aggregator_stdins(runner) == []
+        assert blocked_details(outcome, retry=False).startswith("engine_no_summary:")
+        assert aggregator_stdins(runner) == []
 
 
 class TestPreflight:
     def test_a_branch_touching_the_engine_parks_before_any_codex_call(
-        self, repo: EngineRepo
+        self, engine_repo: EngineRepo
     ) -> None:
         touched = f"{_SKILL_DIR}/notes.md"
-        commit_tracked_file(repo.worktree, touched, "edited\n")
-        runner = _engine_runner()
+        commit_tracked_file(engine_repo.worktree, touched, "edited\n")
+        runner = engine_runner()
 
-        outcome = _pass(repo, runner)
+        outcome = run_pass(engine_repo, runner)
 
-        details = _blocked(
+        details = blocked_details(
             outcome, reason=REVIEW_ENGINE_MODIFIED_BLOCKER_REASON, retry=False
         )
         assert touched in details
@@ -711,9 +615,9 @@ class TestPreflight:
         assert outcome.prepared is None
 
     def test_an_allowed_head_runs_the_round(
-        self, repo: EngineRepo, monkeypatch: pytest.MonkeyPatch
+        self, engine_repo: EngineRepo, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        commit_tracked_file(repo.worktree, f"{_SKILL_DIR}/notes.md", "edited\n")
+        commit_tracked_file(engine_repo.worktree, f"{_SKILL_DIR}/notes.md", "edited\n")
         seen: list[tuple[str, str, str]] = []
 
         def _allowed(ticket_id: str, client: str, head: str) -> bool:
@@ -723,86 +627,102 @@ class TestPreflight:
         monkeypatch.setattr(
             "cw.review_engine.preflight.review_engine_head_allowed", _allowed
         )
-        runner = _engine_runner()
+        runner = engine_runner()
 
-        outcome = _pass(repo, runner)
+        outcome = run_pass(engine_repo, runner)
 
         assert outcome.result.status == "stage_complete"
         assert seen == [
-            (repo.ticket, repo.client, git_in(repo.worktree, "rev-parse", "HEAD"))
+            (
+                engine_repo.ticket,
+                engine_repo.client,
+                git_in(engine_repo.worktree, "rev-parse", "HEAD"),
+            )
         ]
         assert len(_stdins(runner)) == 3
 
-    def test_the_preflight_runs_on_every_round(self, repo: EngineRepo) -> None:
+    def test_the_preflight_runs_on_every_round(self, engine_repo: EngineRepo) -> None:
         """R19: a fix commit that touches the engine parks the next cycle."""
-        runner = _engine_runner()
-        first = _pass(repo, runner, cycle=0, round_id="round-0")
+        runner = engine_runner()
+        first = run_pass(engine_repo, runner, cycle=0, round_id="round-0")
         assert first.result.status == "stage_complete"
         calls_after_first = len(runner.calls)
-        commit_tracked_file(repo.worktree, f"{_SKILL_DIR}/refs/extra.md", "fix\n")
+        commit_tracked_file(
+            engine_repo.worktree, f"{_SKILL_DIR}/refs/extra.md", "fix\n"
+        )
 
-        second = _pass(repo, runner, cycle=1, round_id="round-1")
+        second = run_pass(engine_repo, runner, cycle=1, round_id="round-1")
 
-        details = _blocked(
+        details = blocked_details(
             second, reason=REVIEW_ENGINE_MODIFIED_BLOCKER_REASON, retry=False
         )
         assert f"{_SKILL_DIR}/refs/extra.md" in details
         assert len(runner.calls) == calls_after_first
 
     def test_an_unresolvable_default_branch_is_retryable_agent_block(
-        self, repo: EngineRepo
+        self, engine_repo: EngineRepo
     ) -> None:
-        runner = _engine_runner()
+        runner = engine_runner()
 
-        outcome = _pass(repo, runner, spec=_spec(repo, default_branch="nonexistent"))
+        outcome = run_pass(
+            engine_repo,
+            runner,
+            spec=spec_for(engine_repo, default_branch="nonexistent"),
+        )
 
-        assert _blocked(outcome) == FRICTION[
+        assert blocked_details(outcome, retry=True) == FRICTION[
             EngineRoundFailure.ENGINE_UNRESOLVABLE
-        ].format(skill=_SKILL, cause="default_branch_unresolved")
+        ].format(skill=SKILL, cause="default_branch_unresolved")
         assert runner.calls == []
 
     def test_the_unresolvable_block_is_the_shared_lane_start_builder(
-        self, repo: EngineRepo
+        self, engine_repo: EngineRepo
     ) -> None:
         """#3438: round time and lane start build the same block."""
-        outcome = _pass(
-            repo, _engine_runner(), spec=_spec(repo, default_branch="nonexistent")
+        outcome = run_pass(
+            engine_repo,
+            engine_runner(),
+            spec=spec_for(engine_repo, default_branch="nonexistent"),
         )
 
         shared = engine_unresolvable_blocked(
-            ticket_id=repo.ticket,
-            worktree=repo.worktree,
-            skill=_SKILL,
+            ticket_id=engine_repo.ticket,
+            worktree=engine_repo.worktree,
+            skill=SKILL,
             cause="default_branch_unresolved",
         )
         assert shared.blocker is not None
-        details = _blocked(outcome, reason=shared.blocker.reason, retry=True)
+        details = blocked_details(outcome, reason=shared.blocker.reason, retry=True)
         assert details == shared.blocker.details
 
     def test_a_skill_that_is_not_on_the_default_branch_is_unresolvable(
-        self, repo: EngineRepo
+        self, engine_repo: EngineRepo
     ) -> None:
-        outcome = _pass(repo, _engine_runner(), spec=_spec(repo, skill="no-such-skill"))
+        outcome = run_pass(
+            engine_repo,
+            engine_runner(),
+            spec=spec_for(engine_repo, skill="no-such-skill"),
+        )
 
-        assert _blocked(outcome) == FRICTION[
+        assert blocked_details(outcome, retry=True) == FRICTION[
             EngineRoundFailure.ENGINE_UNRESOLVABLE
         ].format(skill="no-such-skill", cause="skill_not_found")
 
     def test_a_dirty_tree_before_the_materialize_is_unresolvable(
-        self, repo: EngineRepo
+        self, engine_repo: EngineRepo
     ) -> None:
-        (repo.worktree / "src" / "a.py").write_text("x = 5\n", encoding="utf-8")
-        runner = _engine_runner()
+        (engine_repo.worktree / "src" / "a.py").write_text("x = 5\n", encoding="utf-8")
+        runner = engine_runner()
 
-        outcome = _pass(repo, runner)
+        outcome = run_pass(engine_repo, runner)
 
-        assert _blocked(outcome) == FRICTION[
+        assert blocked_details(outcome, retry=True) == FRICTION[
             EngineRoundFailure.ENGINE_UNRESOLVABLE
-        ].format(skill=_SKILL, cause="materialize_failed")
+        ].format(skill=SKILL, cause="materialize_failed")
         assert runner.calls == []
 
     def test_a_materialize_error_carries_its_cause(
-        self, repo: EngineRepo, monkeypatch: pytest.MonkeyPatch
+        self, engine_repo: EngineRepo, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         def _fail(*_args: object, **_kwargs: object) -> None:
             cause = "skill_unreadable"
@@ -810,11 +730,11 @@ class TestPreflight:
 
         monkeypatch.setattr("cw.codex_review._engine_round.materialize_skill", _fail)
 
-        outcome = _pass(repo, _engine_runner())
+        outcome = run_pass(engine_repo, engine_runner())
 
-        assert _blocked(outcome) == FRICTION[
+        assert blocked_details(outcome, retry=True) == FRICTION[
             EngineRoundFailure.ENGINE_UNRESOLVABLE
-        ].format(skill=_SKILL, cause="skill_unreadable")
+        ].format(skill=SKILL, cause="skill_unreadable")
 
 
 class TestManifestAtRoundTime:
@@ -822,9 +742,9 @@ class TestManifestAtRoundTime:
         self, make_git_repo: Callable[..., Path], tmp_path: Path, manifest: str
     ) -> EngineRepo:
         engine = tmp_path / "engine-files"
-        for source in _STUB.rglob("*"):
+        for source in ENGINE_ROUND_STUB.rglob("*"):
             if source.is_file():
-                target = engine / source.relative_to(_STUB)
+                target = engine / source.relative_to(ENGINE_ROUND_STUB)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(source.read_bytes())
         (engine / "cw-engine.json").write_text(manifest, encoding="utf-8")
@@ -858,11 +778,11 @@ class TestManifestAtRoundTime:
         cause: str,
     ) -> None:
         repo = self._repo_with_manifest(make_git_repo, tmp_path, manifest)
-        runner = _engine_runner()
+        runner = engine_runner()
 
-        outcome = _pass(repo, runner)
+        outcome = run_pass(repo, runner)
 
-        details = _blocked(
+        details = blocked_details(
             outcome,
             reason=REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
             retry=False,
@@ -875,14 +795,14 @@ class TestManifestAtRoundTime:
     def test_a_manifest_directory_is_invalid_not_absent(
         self, make_git_repo: Callable[..., Path], tmp_path: Path
     ) -> None:
-        engine = manifest_directory_engine(tmp_path, _STUB)
+        engine = manifest_directory_engine(tmp_path, ENGINE_ROUND_STUB)
         repo = make_engine_repo(
             make_git_repo, engine_files=engine, name="manifest-directory-repo"
         )
 
-        outcome = _pass(repo, _engine_runner())
+        outcome = run_pass(repo, engine_runner())
 
-        details = _blocked(
+        details = blocked_details(
             outcome,
             reason=REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
             retry=False,
@@ -893,7 +813,7 @@ class TestManifestAtRoundTime:
         )
 
     def test_a_manifest_deleted_after_the_start_check_is_absent(
-        self, repo: EngineRepo, monkeypatch: pytest.MonkeyPatch
+        self, engine_repo: EngineRepo, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """#3445: the round-time absent case shares the start-time text."""
         real = materialize_skill
@@ -910,31 +830,31 @@ class TestManifestAtRoundTime:
         monkeypatch.setattr(
             "cw.codex_review._engine_round.materialize_skill", _drop_manifest
         )
-        runner = _engine_runner()
+        runner = engine_runner()
 
-        outcome = _pass(repo, runner)
+        outcome = run_pass(engine_repo, runner)
 
-        details = _blocked(
+        details = blocked_details(
             outcome,
             reason=REVIEW_ENGINE_UNSUPPORTED_BACKEND_BLOCKER_REASON,
             retry=False,
         )
         assert details == engine_refusal_details(
-            "codex", "no_codex_manifest", f"{_SKILL} has no cw-engine.json"
+            "codex", "no_codex_manifest", f"{SKILL} has no cw-engine.json"
         )
         assert runner.calls == []
 
 
 class TestFullDiffReview:
     def test_a_re_review_reviews_the_whole_diff_not_the_delta(
-        self, repo: EngineRepo
+        self, engine_repo: EngineRepo
     ) -> None:
-        runner = _engine_runner()
-        first = _pass(repo, runner, cycle=0, round_id="round-0")
+        runner = engine_runner()
+        first = run_pass(engine_repo, runner, cycle=0, round_id="round-0")
         assert first.prepared is not None
-        commit_tracked_file(repo.worktree, "src/b.py", "y = 2\n")
+        commit_tracked_file(engine_repo.worktree, "src/b.py", "y = 2\n")
 
-        second = _pass(repo, runner, cycle=1, round_id="round-1")
+        second = run_pass(engine_repo, runner, cycle=1, round_id="round-1")
 
         prepared = second.prepared
         assert prepared is not None
@@ -951,7 +871,7 @@ class TestFullDiffReview:
 class TestNeverRejected:
     def test_operator_settlements_leave_an_engine_finding_standing(
         self,
-        repo: EngineRepo,
+        engine_repo: EngineRepo,
         monkeypatch: pytest.MonkeyPatch,
         record_event_spy: MagicMock,
     ) -> None:
@@ -965,7 +885,7 @@ class TestNeverRejected:
                     "rationale": "settled by the operator",
                     "recorded_at": "2026-08-16T00:00:00Z",
                     "actor": "an-operator",
-                    "reviewed_sha": repo.head[:7],
+                    "reviewed_sha": engine_repo.head[:7],
                     "summary": "Unsafe command construction.",
                 }
             )
@@ -990,12 +910,16 @@ class TestNeverRejected:
         monkeypatch.setattr(
             "cw.codex_review._engine_round.synthesize_codex_review_result", _spy
         )
-        runner = _engine_runner(aggregation=_aggregation([_MUST_FIX]))
+        runner = engine_runner(aggregation=_aggregation([_MUST_FIX]))
 
-        outcome = _pass(
-            repo,
+        outcome = run_pass(
+            engine_repo,
             runner,
-            inputs=_inputs(repo, runner, task=_task(repo, finding_dispositions=ledger)),
+            inputs=inputs_for(
+                engine_repo,
+                runner,
+                task=task_for(engine_repo, finding_dispositions=ledger),
+            ),
         )
 
         assert outcome.prepared is not None
@@ -1015,12 +939,16 @@ class TestNeverRejected:
 
 class TestPromptTooLarge:
     def test_the_pass_lets_the_planner_error_propagate_before_any_role_runs(
-        self, repo: EngineRepo
+        self, engine_repo: EngineRepo
     ) -> None:
-        runner = _engine_runner()
+        runner = engine_runner()
 
         with pytest.raises(ReviewInputTooLargeError) as raised:
-            _pass(repo, runner, inputs=_inputs(repo, runner, max_prompt_chars=10))
+            run_pass(
+                engine_repo,
+                runner,
+                inputs=inputs_for(engine_repo, runner, max_prompt_chars=10),
+            )
 
         assert raised.value.max_chars == 10
         assert _stdins(runner) == []
