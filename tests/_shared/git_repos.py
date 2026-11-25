@@ -360,6 +360,47 @@ def push_commit_to_origin(
     return git_in(work_dir, "rev-parse", "HEAD")
 
 
+def diverge_origin_default(
+    worktree: Path,
+    origin: Path,
+    branch: str,
+    side_dir: Path,
+    filename: str = "clash.py",
+    *,
+    mine: str = "mine\n",
+    theirs: str = "theirs\n",
+    base: str = "main",
+) -> None:
+    """Make *branch* and ``origin/<base>`` each add a conflicting *filename*.
+
+    Commits *filename* (*mine*) on *branch* in *worktree* and pushes it, then
+    pushes a different *filename* (*theirs*) to *origin*'s *base*. A merge of
+    ``origin/<base>`` into *branch* then conflicts in *filename*.
+    """
+    commit_tracked_file(worktree, filename, mine)
+    git_in(worktree, "push", "origin", branch)
+    push_commit_to_origin(origin, base, side_dir, filename, theirs)
+
+
+def leave_conflicting_merge(worktree: Path, base: str = "main") -> None:
+    """Start ``git merge --no-commit --no-ff origin/<base>`` and leave it conflicted.
+
+    A conflicting merge exits 1, so the sandbox runner is called with
+    ``check=False``; the merge must conflict and ``MERGE_HEAD`` must resolve.
+    """
+    git_in(worktree, "fetch", "origin")
+    merged = _git_sandbox.run(
+        "merge",
+        "--no-commit",
+        "--no-ff",
+        f"origin/{base}",
+        cwd=worktree,
+        check=False,
+    )
+    assert merged.returncode == 1, merged.stdout + merged.stderr
+    assert git_in(worktree, "rev-parse", "-q", "--verify", "MERGE_HEAD")
+
+
 def init_bare_origin(repo: Path) -> Path:
     """Create and attach a bare ``origin`` beside *repo*.
 

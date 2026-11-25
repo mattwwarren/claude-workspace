@@ -72,7 +72,12 @@ from tests._codex_review_helpers import (
 from tests._shared.base_branch_builders import ROW_BASE, push_epic_base
 from tests._shared.bindings_builders import bindings_linear_mcp
 from tests._shared.cli_preflight import _write_tracker_config
-from tests._shared.git_repos import commit_tracked_file, git_in, push_commit_to_origin
+from tests._shared.git_repos import (
+    commit_tracked_file,
+    diverge_origin_default,
+    git_in,
+    push_commit_to_origin,
+)
 from tests._shared.operator_direction_builders import (
     at,
     make_operator_constraint,
@@ -804,18 +809,6 @@ def test_a_tolerated_path_does_not_excuse_an_unlisted_dirty_path_at_start(
     assert h.runner.calls == []
 
 
-def test_existing_branch_work_blocks_before_the_turn(
-    harness: Callable[..., Harness],
-) -> None:
-    h = harness()
-    commit_tracked_file(h.worktree, "prior.py")
-    result = h.run()
-    _assert_block(result, "impl_failed")
-    assert result.blocker is not None
-    assert result.blocker.details.startswith("existing_branch_work")
-    assert h.runner.calls == []
-
-
 def test_merge_conflict_with_default_branch_on_fresh_row_blocks(
     harness: Callable[..., Harness],
 ) -> None:
@@ -1251,9 +1244,7 @@ def test_growth_guard_never_applies_to_a_fresh_row(
 
 def _conflicting_repair(h: Harness, tmp_path: Path) -> None:
     """A repair row whose branch and origin/main both add ``clash.py``."""
-    commit_tracked_file(h.worktree, "clash.py", "mine\n")
-    git_in(h.worktree, "push", "origin", BRANCH)
-    push_commit_to_origin(h.origin, "main", tmp_path / "side", "clash.py", "theirs\n")
+    diverge_origin_default(h.worktree, h.origin, BRANCH, tmp_path / "side")
     _repin(h)
 
 
@@ -1676,20 +1667,19 @@ def test_an_impl_turn_without_usage_is_unavailable_with_a_friction_token(
     assert any(f.startswith("usage_unavailable: ") for f in result.friction_highlights)
 
 
-def test_regressed_review_row_without_verdict_blocks_with_withheld_reason(
+def test_regressed_review_row_without_verdict_resumes_and_says_why_withheld(
     harness: Callable[..., Harness],
 ) -> None:
-    """A REVIEW-regressed row with no verdict still blocks, and says why (#3694)."""
+    """A REVIEW-regressed row with no verdict resumes, and records why (#3694)."""
     h = harness(task_updates={"stage_high_water": Stage.REVIEW})
     commit_tracked_file(h.worktree, "prior.py")
+    h.turn()
     result = h.run()
-    _assert_block(result, "impl_failed")
-    assert result.blocker is not None
-    assert result.blocker.details.startswith("existing_branch_work")
-    assert "regress_review_findings: withheld (artifact_missing)." in (
-        result.blocker.details
+    assert result.status == "stage_complete"
+    assert len(h.impl_calls) == 1
+    assert "regress_review_findings: withheld (artifact_missing)" in (
+        result.friction_highlights
     )
-    assert h.runner.calls == []
 
 
 def test_regressed_review_row_with_verdict_is_not_blocked_before_the_turn(

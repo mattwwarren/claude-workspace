@@ -98,7 +98,7 @@ elements:
   orch.impl-stage-consumption:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3529}, note: "deferred IMPL machinery (pre-stage detector guard, resume dispositions, staleness, freshness, merge-conclusion guard); #3529"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/impl_staleness.py, symbol: operator_comments_after}, note: "the provenance filter is the snapshot's cw-computed agent_authored and minimized booleans: only a non-agent, non-minimized comment newer than HEAD counts, and it is delivered verbatim in the resume section"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   orch.gate-destructive-directive:
@@ -821,7 +821,7 @@ elements:
   impl.pre-stage-detector-guard:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3529}, note: "deferred IMPL machinery (pre-stage detector guard, resume dispositions, staleness, freshness, merge-conclusion guard); #3529"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/impl_resume.py, symbol: classify_entry}, note: "cw classifies the entry (fresh, s2_implementing, past_s2) itself; only the S2 split is needed because every state past S2 has the same disposition, so it does not probe PR state; the trailer must be on HEAD itself (narrower than the Claude detector's any-commit rule) because advance runs no cw gate"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.base-branch-resolution:
@@ -833,7 +833,7 @@ elements:
   impl.branch-freshness:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3529}, note: "deferred IMPL machinery (pre-stage detector guard, resume dispositions, staleness, freshness, merge-conclusion guard); #3529"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/impl_feedback.py, symbol: probe_default_branch}, note: "S3b fetches, probes read-only and merges only on conflict; a conflict on a non-repair or resumed row blocks merge_conflict_with_default_branch, matching the contract's BLOCK"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "the IMPL prompt always merges the default branch and records the fork point; the merge-only-on-conflict probe is not carried"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.gate-type-check:
@@ -851,7 +851,7 @@ elements:
   impl.pre-completion-merge-guard:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3529}, note: "deferred IMPL machinery (pre-stage detector guard, resume dispositions, staleness, freshness, merge-conclusion guard); #3529"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/impl_merge_adopt.py, symbol: merge_unconcluded_block}, note: "cw's one commit concludes the merge; the guard is the pre-staging merge_unresolved_block (conflict markers, and conflicted paths still unmerged with unchanged content) plus this post-commit MERGE_HEAD re-check; blocks are impl_failed with a merge_in_progress: details prefix"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.following-completion-artifacts-block-verbatim:
@@ -935,19 +935,19 @@ elements:
   impl.pre-stage-detector-guard-resume-dispositions:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3529}, note: "deferred IMPL machinery (pre-stage detector guard, resume dispositions, staleness, freshness, merge-conclusion guard); #3529"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/impl_resume.py, symbol: resume_disposition}, note: "the four dispositions (proceed, resume, advance) as a pure table; the #2794 finalize-findings carve-out is not mirrored because the codex Ticket section already carries every comment; an adopted merge always resumes, never advances"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.staleness-regress-check-run-before-applying:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3529}, note: "deferred IMPL machinery (pre-stage detector guard, resume dispositions, staleness, freshness, merge-conclusion guard); #3529"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/impl_staleness.py, symbol: check_staleness}, note: "cw runs check_impl_guard_staleness.py itself: an absent script is friction and fail-open, a bad marker is a Pre-Stage Detector Guard HEADLESS BLOCK, exit 2 is friction, any other failure blocks"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   impl.regress-into-impl-carrying-unconcluded-merge:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3529}, note: "deferred IMPL machinery (pre-stage detector guard, resume dispositions, staleness, freshness, merge-conclusion guard); #3529"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/impl_merge_adopt.py, symbol: adopt_unconcluded_merge}, note: "adopted when a regress signal (marker impl, or the durable finalize_regress_branch_head while HEAD still equals it) arrives with MERGE_HEAD on origin/<base>; wins over the classify_entry exemption; cw captures a baseline tolerating only that merge and the turn resolves the conflicts"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.gate-2-scope-conformance-disposition-by:
@@ -977,7 +977,7 @@ elements:
   impl.regress-into-impl-merge-conclusion-dispatch-backstop:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3529}, note: "deferred IMPL machinery (pre-stage detector guard, resume dispositions, staleness, freshness, merge-conclusion guard); #3529"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/dispatch/impl_gates.py, symbol: _should_gate_for_unconcluded_finalize_regress_merge}, note: "lane-agnostic existing code: it keys on task.stage == IMPL, not the lane, so codex IMPL results already pass through it; it also catches a refused adopted-merge turn (HEAD unchanged plus conflict_detected)"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: deferred, ref: {kind: ticket, number: 3260}, note: "an IMPL obligation aider could meet that LocalExecutor does not drive"}
   impl.worktree-isolation-breach-this-codifies:

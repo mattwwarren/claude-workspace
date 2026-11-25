@@ -36,9 +36,8 @@ from cw.codex_review import (
     CODEX_FIX_SCOPE_VIOLATION,
 )
 from cw.local_runner import git_facts
-from cw.models import Stage, TicketTask
+from cw.models import TicketTask
 from cw.models.review_feedback import ReviewFeedback
-from cw.review_park_findings import write_park_findings
 from cw.stage_verification import impl_gates as _gates_module
 from cw.stage_verification.baseline import (
     CycleBaseline,
@@ -50,13 +49,13 @@ from cw.stage_verification.impl_block import IMPL_FAILED, PLAN_MISSING, ImplBloc
 from cw.stage_verification.impl_gates import (
     MIN_SCOPE_SCRIPT_VERSION,
     check_empty_diff,
-    check_existing_branch_work,
     check_on_branch,
     check_plan_present,
     commit_failure_block,
     dirty_start_block,
     fence_block,
     no_plan_sensitive_block,
+    resolve_guard_script,
     run_quality_gates,
     run_scope_conformance,
     staged_totals,
@@ -68,14 +67,7 @@ from tests._codex_review_helpers import (
     install_home_prep_pr_state,
     install_home_scope_script,
 )
-from tests._review_history_helpers import write_held_ledger
 from tests._shared.git_repos import commit_tracked_file, git_in
-from tests._shared.review_builders import (
-    _make_finding,
-    _make_gap_finding,
-    regressed_review_row,
-    write_review_verdict_envelope,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -202,33 +194,6 @@ class TestPlanPresent:
 
 
 class TestPreTurnGuards:
-    def test_existing_branch_work_on_a_fresh_row_blocks(self, repo: Path) -> None:
-        _stage(repo)
-        git_in(repo, "commit", "-m", "prior work")
-        block = check_existing_branch_work(git_facts(repo, "main"), _task(), repo)
-        assert block is not None
-        assert block.reason == IMPL_FAILED
-        assert block.details.startswith("existing_branch_work")
-
-    def test_existing_branch_work_not_checked_on_repair_rows(self, repo: Path) -> None:
-        _stage(repo)
-        git_in(repo, "commit", "-m", "prior work")
-        task = _task(review_feedback=_feedback())
-        assert check_existing_branch_work(git_facts(repo, "main"), task, repo) is None
-
-    def test_fresh_row_with_no_commits_passes(self, repo: Path) -> None:
-        assert (
-            check_existing_branch_work(git_facts(repo, "main"), _task(), repo) is None
-        )
-
-    def test_unresolvable_fork_blocks_a_fresh_row(self, repo: Path) -> None:
-        facts = git_facts(repo, "main")
-        facts["fork_point"] = ""
-        block = check_existing_branch_work(facts, _task(), repo)
-        assert block is not None
-        assert block.reason == IMPL_FAILED
-        assert "fork" in block.details
-
     def test_on_the_expected_branch_passes(self, repo: Path) -> None:
         assert check_on_branch(repo, _BRANCH) is None
 
@@ -819,64 +784,26 @@ class TestHookRewritePinned:
         assert tokens == []
 
 
-class TestRegressedReviewRowExemption:
-    """A REVIEW-regressed row is exempt only while findings are delivered (#3694)."""
+class TestResolveGuardScript:
+    """The guard-script resolution the staleness module shares (#3529)."""
 
-    def test_regressed_row_with_verdict_is_exempt(self, repo: Path) -> None:
-        _stage(repo)
-        git_in(repo, "commit", "-m", "prior work")
-        write_review_verdict_envelope(
-            repo, ticket_id="T-1", reviewed_sha="a" * 40, must_fix=[_make_finding()]
-        )
-        task = _task(stage=Stage.IMPL, stage_high_water=Stage.REVIEW)
-        assert check_existing_branch_work(git_facts(repo, "main"), task, repo) is None
+    def test_an_absent_script_has_no_path(self, repo: Path) -> None:
+        resolved = resolve_guard_script(repo, "check_nothing.py", 2)
+        assert resolved.path is None
+        assert resolved.marker_ok is False
 
-    def test_regressed_row_with_saved_park_findings_is_exempt(self, repo: Path) -> None:
-        _stage(repo)
-        git_in(repo, "commit", "-m", "prior work")
-        assert write_park_findings(
-            repo, ticket_id="T-1", reviewed_sha="a" * 40, text="parked finding"
-        )
-        task = _task(stage=Stage.IMPL, stage_high_water=Stage.REVIEW)
-        assert check_existing_branch_work(git_facts(repo, "main"), task, repo) is None
+    def test_a_script_with_a_stale_marker_is_found_but_not_ok(self, repo: Path) -> None:
+        script = repo / ".claude" / "scripts" / "check_x.py"
+        script.parent.mkdir(parents=True)
+        script.write_text("# cw-script-version: 1\n", encoding="utf-8")
+        resolved = resolve_guard_script(repo, "check_x.py", 2)
+        assert resolved.path == script
+        assert resolved.marker_ok is False
 
-    def test_regressed_row_without_verdict_still_blocks_and_names_reason(
-        self, repo: Path
-    ) -> None:
-        _stage(repo)
-        git_in(repo, "commit", "-m", "prior work")
-        task = _task(stage=Stage.IMPL, stage_high_water=Stage.REVIEW)
-        block = check_existing_branch_work(git_facts(repo, "main"), task, repo)
-        assert block is not None
-        assert block.details.startswith("existing_branch_work")
-        assert "regress_review_findings: withheld (artifact_missing)." in block.details
-
-    def test_pre_pr_gap_hold_row_is_exempt_from_existing_branch_work(
-        self, repo: Path
-    ) -> None:
-        _stage(repo)
-        git_in(repo, "commit", "-m", "prior work")
-        write_review_verdict_envelope(
-            repo,
-            ticket_id="T-1",
-            reviewed_sha="a" * 40,
-            held=[_make_gap_finding(summary="B")],
-        )
-        task = regressed_review_row("T-1", blocked_reason="review_operator_actionable")
-        assert check_existing_branch_work(git_facts(repo, "main"), task, repo) is None
-
-    def test_pre_pr_clean_mode_gap_hold_row_is_exempt(self, repo: Path) -> None:
-        _stage(repo)
-        git_in(repo, "commit", "-m", "prior work")
-        write_held_ledger(
-            repo, [[_make_gap_finding(summary="B")], [], []], ticket_id="T-1"
-        )
-        task = regressed_review_row("T-1", blocked_reason="review_operator_actionable")
-        assert check_existing_branch_work(git_facts(repo, "main"), task, repo) is None
-
-    def test_plain_block_has_no_regress_suffix(self, repo: Path) -> None:
-        _stage(repo)
-        git_in(repo, "commit", "-m", "prior work")
-        block = check_existing_branch_work(git_facts(repo, "main"), _task(), repo)
-        assert block is not None
-        assert "regress_review_findings" not in block.details
+    def test_a_script_at_the_minimum_marker_is_ok(self, repo: Path) -> None:
+        script = repo / ".claude" / "scripts" / "check_x.py"
+        script.parent.mkdir(parents=True)
+        script.write_text("# cw-script-version: 2\n", encoding="utf-8")
+        resolved = resolve_guard_script(repo, "check_x.py", 2)
+        assert resolved.path == script
+        assert resolved.marker_ok is True

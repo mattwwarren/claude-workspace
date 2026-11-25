@@ -38,7 +38,7 @@ from tests._shared.session_seeding import _make_daemon_session, _make_ticket_tas
 from tests._shared.ticket_context import make_comment, make_snapshot_from
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, Sequence
 
     from cw.auto_dev_result import AutoDevResult
     from cw.codex_review import _ReviewPassInputs
@@ -432,8 +432,8 @@ def _install_pre_commit_hook(repo: Path, script: str) -> None:
     hook_path.chmod(0o755)
 
 
-def exclude_cw_dir(repo: Path) -> None:
-    """Git-exclude ``.cw/`` in *repo*, as a real cw worktree does.
+def exclude_cw_dir(repo: Path, patterns: Sequence[str] = (".cw/",)) -> None:
+    """Git-exclude ``.cw/`` (or *patterns*) in *repo*, as a real cw worktree does.
 
     Mirrors ``worktree/_lifecycle.py::_CW_EXCLUDE_PATTERNS``: a worktree made
     by ``make_git_repo`` does not exclude ``.cw/``, so cw's own state would be
@@ -442,7 +442,7 @@ def exclude_cw_dir(repo: Path) -> None:
     exclude = repo / git_in(repo, "rev-parse", "--git-path", "info/exclude")
     exclude.parent.mkdir(parents=True, exist_ok=True)
     with exclude.open("a", encoding="utf-8") as handle:
-        handle.write(".cw/\n")
+        handle.writelines(f"{pattern}\n" for pattern in patterns)
 
 
 def assert_clean_after_refusal(worktree: Path, start_sha: str) -> str:
@@ -1068,9 +1068,9 @@ def fresh_impl_repo(
 ) -> tuple[Path, Path]:
     """A fresh-row IMPL worktree on *branch*, pushed to a bare origin.
 
-    Adds no commit beyond ``main``, so ``check_existing_branch_work`` does not
-    fire (``make_git_repo_with_origin`` commits ``feature.py``, which a fresh
-    row would read as prior work). Returns ``(worktree, origin)``.
+    Adds no commit beyond ``main``, so the row is a fresh entry
+    (``make_git_repo_with_origin`` commits ``feature.py``, which the re-entry
+    classification would read as prior work). Returns ``(worktree, origin)``.
     """
     repo = make_git_repo(name)
     git_in(repo, "checkout", "-b", branch)
