@@ -178,6 +178,22 @@ class TestDecisions:
             "(git push origin main / git pull --ff-only), then re-dispatch"
         )
 
+    def test_the_block_text_names_the_compared_branch(self, tmp_path: Path) -> None:
+        result = _run(
+            tmp_path, _Fetch(), _Reads(_sync(1, 0)), _Sleeps(), branch="trunk"
+        )
+        assert result is not None
+        assert result.blocker is not None
+        assert result.blocker.message == (
+            "Local trunk is not in sync with origin/trunk; pipeline aborted before impl"
+        )
+        assert result.blocker.recovery_hint == (
+            "Orchestrator: push or rebase local trunk "
+            "(git push origin trunk / git pull --ff-only), then re-dispatch"
+        )
+        assert "main" not in result.blocker.message
+        assert "main" not in (result.blocker.recovery_hint or "")
+
     def test_a_non_default_branch_is_the_one_compared(self, tmp_path: Path) -> None:
         seen: list[str] = []
 

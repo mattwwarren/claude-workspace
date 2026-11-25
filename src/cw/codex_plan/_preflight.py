@@ -42,15 +42,26 @@ WAIT_INTERVAL_SECONDS: Final = 30
 DIVERGED_REASON: Final = "local_main_diverged_from_origin"
 _STAGE_REACHED: Final = "stage1_pre_flight"
 _NEXT_ACTIONS: Final = ["sync_local_main"]
-#: The Step P3 sentinel's ``message`` and ``recovery_hint``, verbatim
-#: (``auto-dev-intake-appendix.md``).
-_MESSAGE: Final = (
-    "Local main is not in sync with origin/main; pipeline aborted before impl"
-)
-_RECOVERY_HINT: Final = (
-    "Orchestrator: push or rebase local main "
-    "(git push origin main / git pull --ff-only), then re-dispatch"
-)
+
+
+def _message(branch: str) -> str:
+    """The Step P3 sentinel's ``message`` for *branch*.
+
+    For ``main`` it is the claude-native text verbatim
+    (``auto-dev-intake-appendix.md``); any other default branch is named.
+    """
+    return (
+        f"Local {branch} is not in sync with origin/{branch}; "
+        "pipeline aborted before impl"
+    )
+
+
+def _recovery_hint(branch: str) -> str:
+    """The Step P3 sentinel's ``recovery_hint`` for *branch* (``main`` verbatim)."""
+    return (
+        f"Orchestrator: push or rebase local {branch} "
+        f"(git push origin {branch} / git pull --ff-only), then re-dispatch"
+    )
 
 
 @dataclass(frozen=True)
@@ -133,7 +144,10 @@ def _block(
         result = result.model_copy(
             update={
                 "blocker": blocker.model_copy(
-                    update={"message": _MESSAGE, "recovery_hint": _RECOVERY_HINT}
+                    update={
+                        "message": _message(branch),
+                        "recovery_hint": _recovery_hint(branch),
+                    }
                 )
             }
         )
