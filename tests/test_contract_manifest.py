@@ -1459,6 +1459,10 @@ def _assert_codex_plan_cell(element_id: str, cell: object) -> int | None:
     if isinstance(cell, NotApplicableDisposition):
         assert cell.reason.strip(), element_id
         return None
+    if isinstance(cell, FailsClosedDisposition):
+        assert isinstance(cell.ref, CodeRef), element_id
+        assert cell.ref.path.startswith("src/cw/"), element_id
+        return None
     assert isinstance(cell, DeferredDisposition), element_id
     assert cell.ref.number in _CODEX_PLAN_FOLLOW_UPS, element_id
     return cell.ref.number
@@ -1852,8 +1856,16 @@ def test_codex_prep_pr_and_ship_it_cells_are_not_applicable() -> None:
 def test_no_codex_cell_is_fails_closed() -> None:
     """RFC 0018 D1 (#3064): codex has no stage-level refusal left, so no codex
     cell is fails-closed. Every former fails-closed codex cell is implemented
-    with the cw-run gate that carries it."""
-    assert elements_with(CODEX_BACKEND, "fails-closed") == ()
+    with the cw-run gate that carries it.
+
+    The one exception is not a stage refusal (#3464, Settled Plan Item A3):
+    the codex fast path is fingerprint equality only, so the third-condition
+    composition with #3465's alternate has nothing to compose with and any
+    drift falls through to a full scan.
+    """
+    assert elements_with(CODEX_BACKEND, "fails-closed") == (
+        "orch.fast-path-composition-requires-third-condition",
+    )
 
 
 def test_codex_finalize_cell_counts() -> None:

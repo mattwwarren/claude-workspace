@@ -11,7 +11,6 @@ from pydantic import ValidationError
 from cw.auto_dev_result.parse import extract_block
 from cw.codex_plan._prompt import PLAN_TURN_SCHEMA
 from cw.codex_plan._result import (
-    MODEL_TEXT_DISCARDED_FRICTION,
     PLAN_MD_RELATIVE_PATH,
     PLAN_MD_REPLACED_PREFIX,
     ROUND_ZERO_LINE,
@@ -252,12 +251,9 @@ class TestStamp:
             payload,
             ticket_id="T-9",
             worktree=tmp_path,
-            extra_friction=[MODEL_TEXT_DISCARDED_FRICTION],
+            extra_friction=["cw said"],
         )
-        assert result.friction_highlights == [
-            "model said",
-            MODEL_TEXT_DISCARDED_FRICTION,
-        ]
+        assert result.friction_highlights == ["model said", "cw said"]
 
     def test_model_fingerprint_is_replaced_by_cws_digest(self, tmp_path: Path) -> None:
         draft = _draft(tmp_path, ROUND_ZERO_LINE + _PLAN)

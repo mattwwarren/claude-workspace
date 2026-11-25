@@ -92,7 +92,7 @@ elements:
   orch.fast-path-composition-requires-third-condition:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3464}, note: "codex PLAN has no fast path in C1"}
+      codex: {disposition: fails-closed, ref: {kind: code, path: src/cw/codex_plan/_resume.py, symbol: fast_path_reason}, note: "the codex fast path is fingerprint equality only; #3465 alternate must compose with TrackerFingerprint.body_sha equality, which cw already persists"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   orch.impl-stage-consumption:
@@ -435,7 +435,7 @@ elements:
   plan.resume-check:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_result.py, symbol: read_resume_draft}, note: "cw reads the draft, injects it into the prompt, and takes it verbatim when the row approval matches its fingerprint"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_result.py, symbol: read_resume_draft}, note: "cw reads the draft and injects it into the prompt; an approved draft is taken through the resume gate fast path with no turn"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.tracked-tickets:
@@ -688,25 +688,25 @@ elements:
   plan.resolution-consumed-resolution-evidence-emission-rule:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_result.py, symbol: stamp_plan_result}, note: "the model's evidence is discarded; cw stamps resolution_consumed false and resolution_evidence null"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_result.py, symbol: stamp_plan_result}, note: "the model claim is discarded; cw stamps resolution_consumed and resolution_evidence only from settlements it validated, on an EXIT park"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.binding-resolutions-delta-fast-path:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3464}, note: "codex PLAN resume-round parity (resolutions delta, fast path, settlement folding, round cap)"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_resume.py, symbol: resume_gate}, note: "cw detects the delta on positive evidence only, revises once per source identity, and takes an approved draft through the fast path with no turn"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.row-delivered-delta-ordering:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3464}, note: "codex PLAN resume-round parity (resolutions delta, fast path, settlement folding, round cap)"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_resume.py, symbol: finish_row_delta}, note: "revise first; an equal fingerprint keeps the approval, a different one revokes it and resets the round"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.round-cap-read-and-settlement-folding:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3464}, note: "codex PLAN resume-round parity (resolutions delta, fast path, settlement folding, round cap)"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_resume.py, symbol: cap_check}, note: "cw counts EXIT park rounds, resets on a tracker or row delta, and blocks ambiguity_scan_unconverged at N=2"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.fold-operator-answers-before-review:
@@ -718,13 +718,13 @@ elements:
   plan.consolidated-park:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: not-applicable, reason: "cw renders and posts the park comment (cw.codex_plan._post.render_park_comment); cw signal-park is #3464"}
+      codex: {disposition: not-applicable, reason: "cw renders and posts the park comment (cw.codex_plan._post.render_park_comment); cw signal-park writes no marker on codex: the stage runs inside run_guarded_stage, so every exit carries a sentinel in-process and no Stop hook reads one"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.consolidated-park-single-exit-rule:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: not-applicable, reason: "cw renders and posts the park comment (cw.codex_plan._post.render_park_comment); cw signal-park is #3464"}
+      codex: {disposition: not-applicable, reason: "cw renders and posts the park comment (cw.codex_plan._post.render_park_comment); cw signal-park writes no marker on codex: the stage runs inside run_guarded_stage, so every exit carries a sentinel in-process and no Stop hook reads one"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.gate-interactive-plan-approval:

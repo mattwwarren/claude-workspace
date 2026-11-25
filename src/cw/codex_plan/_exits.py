@@ -14,19 +14,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from cw.codex_plan._post import render_park_comment
+from cw.codex_plan._post import PlanCommentKind, render_park_comment
 from cw.codex_plan._result import (
     DECISIONS_NOT_RECORDED_PREFIX,
     PLAN_BLOCKED,
     PLAN_NO_OP,
     STAGE_PLAN_GENERATED,
     STAGE_PLAN_REVIEWED,
+    STAGE_SCAN_COMPLETE,
     PlanDraftError,
     backup_plan_md,
     clean_plan_text,
     draft_fingerprint_on_disk,
     existing_plan_md_fingerprint,
-    on_disk_leading_block,
     plan_md_replaced_token,
     stamp_plan_result,
     write_plan_draft,
@@ -58,11 +58,16 @@ _log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class _Exit:
-    """What a run ends with: the result, and the comment to post (if any)."""
+    """What a run ends with: the result, and the comment to post (if any).
+
+    *kind* picks the comment's marker prefix (``plan-``, ``park-`` or
+    ``blocking-``); a blocked exit with no comment ignores it.
+    """
 
     result: AutoDevResult
     post_text: str | None = None
     artifact_path: Path | None = None
+    kind: PlanCommentKind = "plan"
 
 
 def _gate(result: AutoDevResult, plan_text: str) -> GateFailure | None:
@@ -98,9 +103,7 @@ def _bound(
 def _write_draft_best_effort(run: _Run, plan_text: str) -> str | None:
     """Write the draft; its on-disk fingerprint, or ``None`` when not written."""
     try:
-        write_plan_draft(
-            run.worktree, plan_text, book=on_disk_leading_block(run.worktree)
-        )
+        write_plan_draft(run.worktree, plan_text, book=run.book.block)
     except PlanDraftError:
         raise
     except OSError:
@@ -168,7 +171,55 @@ def _park(run: _Run, plan_text: str, check: ApprovalCheck) -> _Exit:
         advisory_findings=stations.findings,
         mismatch=check.mismatch is not None,
     )
-    return _Exit(result, comment, run.worktree / PLAN_DRAFT_RELATIVE_PATH)
+    return _Exit(result, comment, run.worktree / PLAN_DRAFT_RELATIVE_PATH, "park")
+
+
+def _consolidated_block(
+    run: _Run,
+    plan_text: str,
+    check: ApprovalCheck,
+    *,
+    reason: str,
+    details: str,
+    note: str,
+) -> _Exit:
+    """A capped or stub-blocked round: blocked, through the consolidated park.
+
+    Writes the draft, runs the advisory stations and posts the park comment
+    (``park-`` marker) with *note*, exactly as a park does, but the result is
+    blocked *reason* (retry-eligible) and its one ``stage.errored`` names
+    ``s1_ambiguity_scan_complete``.
+    """
+    draft_fingerprint = _write_draft_best_effort(run, plan_text)
+    parked = _bound(run, check.result, bind_draft=draft_fingerprint is not None)
+    stations = run_plan_stations(
+        runner=run.runner,
+        worktree=run.worktree,
+        plan_text=plan_text,
+        model=run.model,
+        reasoning_effort=run.reasoning_effort,
+        session_id=run.sid,
+        binding=False,
+    )
+    comment = render_park_comment(
+        ticket_id=run.task.ticket_id,
+        client_name=run.client.name,
+        result=parked,
+        draft_body=clean_plan_text(plan_text),
+        approved_fingerprint=run.task.plan_approved_fingerprint,
+        advisory_findings=stations.findings,
+        mismatch=check.mismatch is not None,
+        note=note,
+    )
+    exit_ = run.blocked(
+        STAGE_SCAN_COMPLETE,
+        reason,
+        details,
+        retry_eligible=True,
+        plan_draft_fingerprint=draft_fingerprint,
+    )
+    result = _with_friction(exit_.result, list(check.result.friction_highlights))
+    return _Exit(result, comment, run.worktree / PLAN_DRAFT_RELATIVE_PATH, "park")
 
 
 def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
@@ -209,9 +260,7 @@ def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
     backup_ok = False
     fingerprint: str | None = None
     try:
-        write_plan_draft(
-            run.worktree, plan_text, book=on_disk_leading_block(run.worktree)
-        )
+        write_plan_draft(run.worktree, plan_text, book=run.book.block)
         fingerprint = draft_fingerprint_on_disk(run.worktree)
         result = _bound(run, result)
         if old_fingerprint is not None:

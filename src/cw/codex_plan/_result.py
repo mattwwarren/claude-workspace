@@ -76,7 +76,6 @@ PLAN_SOUNDNESS_MARKER_VERSION: Final = _PLAN_SOUNDNESS_MARKER_VERSION
 RESUME_FRICTION: Final = (
     "resumed plan from .cw/plan-draft.md — prior blocked/parked attempt"
 )
-MODEL_TEXT_DISCARDED_FRICTION: Final = "plan_resume_model_text_discarded"
 DECISIONS_NOT_RECORDED_PREFIX: Final = "plan_decisions_not_recorded: "
 #: A completing run replaced an existing ``.cw/plan.md`` (#3498):
 #: ``plan_md_replaced: old=<fp|unreadable> new=<fp> backup=<ok|failed>``.
@@ -92,6 +91,8 @@ PLAN_BLOCKED: Final = "blocked"
 #: The stage identifiers the driver's PLAN stage events carry.
 STAGE_PLAN_GENERATED: Final = StageIdentifier.S1_PLAN_GENERATED.value
 STAGE_PLAN_REVIEWED: Final = StageIdentifier.S1_PLAN_REVIEWED.value
+STAGE_SCAN_COMPLETE: Final = StageIdentifier.S1_AMBIGUITY_SCAN_COMPLETE.value
+STAGE_SCAN_SKIPPED: Final = StageIdentifier.S1_AMBIGUITY_SCAN_SKIPPED.value
 PLAN_STATUSES: Final = frozenset(
     {
         PLAN_STAGE_COMPLETE,

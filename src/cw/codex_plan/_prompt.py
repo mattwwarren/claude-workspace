@@ -48,10 +48,34 @@ PLAN_TURN_SCHEMA: Final[dict[str, Any]] = to_openai_strict_schema(
 
 TICKET_SECTION: Final = "Ticket"
 RESUME_SECTION: Final = "Resumed plan draft"
-APPROVAL_MATCHES: Final = "approval: matches"
-APPROVAL_NONE: Final = "approval: none"
 
 _PACKAGED_SUBDIR: Final = ("data", "commands")
+
+
+@dataclass(frozen=True)
+class ResumeFacts:
+    """The cw-computed resume facts the resumed-draft section names (#3464).
+
+    *park_ordinal* is ``k`` (the newest park comment's number, 0 for none),
+    *settled_ids* the item ids already settled and *scan_round* the draft's
+    round counter.
+    """
+
+    park_ordinal: int = 0
+    settled_ids: tuple[str, ...] = ()
+    scan_round: int = 0
+
+    def render(self) -> str:
+        if self.park_ordinal <= 1:
+            ids = "bare A<n>/P<n>"
+        else:
+            ids = f"R{self.park_ordinal}.A<n>/R{self.park_ordinal}.P<n>"
+        settled = ", ".join(self.settled_ids) or "none"
+        return (
+            f"park ordinal: {self.park_ordinal} (settlement item ids: {ids})\n"
+            f"settled items (do not re-raise): {settled}\n"
+            f"scan round: {self.scan_round} (cw owns the counter and the cap)"
+        )
 
 
 @dataclass(frozen=True)
@@ -180,12 +204,14 @@ def render_plan_prompt(
     docs_root: Path,
     ticket: TicketText | None,
     resume: ResumeDraft | None,
-    approval_matches: bool,
     bindings_block: str,
+    facts: ResumeFacts | None = None,
 ) -> str:
     """The PLAN turn's stdin prompt.
 
-    *bindings_block* is the pre-delimited ``Bindings`` block from
+    A resumed draft's section leads with *facts* (the park ordinal, the
+    settled ids and the round counter cw computed). *bindings_block* is the
+    pre-delimited ``Bindings`` block from
     :func:`cw.bindings_block.bindings_block_for`; it goes last, unwrapped.
     Raises :class:`cw.contract_manifest.RenderError` when the contract cannot
     be rendered from *docs_root*. ``session_id`` is ``None``: cw, not the
@@ -202,7 +228,7 @@ def render_plan_prompt(
     if ticket is not None:
         parts.append("\n" + _section(TICKET_SECTION, ticket.text))
     if resume is not None:
-        approval = APPROVAL_MATCHES if approval_matches else APPROVAL_NONE
-        parts.append("\n" + _section(RESUME_SECTION, f"{approval}\n\n{resume.body}"))
+        lead = (facts or ResumeFacts()).render()
+        parts.append("\n" + _section(RESUME_SECTION, f"{lead}\n\n{resume.body}"))
     parts.append("\n" + bindings_block)
     return "".join(parts)

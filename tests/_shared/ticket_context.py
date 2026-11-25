@@ -55,6 +55,26 @@ def observed_issue_envelope() -> dict[str, Any]:
     return envelope
 
 
+def issue_envelope_json(
+    comments: Sequence[tuple[str, str, str]] = (), *, body: str | None = None
+) -> str:
+    """The observed issue envelope as ``gh`` JSON, with *comments* (#3464).
+
+    Each ``(id, body, createdAt)`` keeps a captured comment's shape (author,
+    ``isMinimized`` and the rest); only those three values are replaced, oldest
+    first. *body* replaces the issue body when given.
+    """
+    envelope = observed_issue_envelope()
+    captured = envelope["comments"][0]
+    envelope["comments"] = [
+        {**captured, "id": comment_id, "body": text, "createdAt": created}
+        for comment_id, text, created in comments
+    ]
+    if body is not None:
+        envelope["body"] = body
+    return json.dumps(envelope)
+
+
 def make_snapshot(**overrides: Any) -> TicketSnapshot:
     """A snapshot from the observed envelope (client ``acme``, ticket ``ACM-1``)."""
     envelope = observed_issue_envelope()

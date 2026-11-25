@@ -1,20 +1,21 @@
 """The large-tier two-run codex PLAN flow with a non-echoing model (#3060 R12).
 
 Run 1 parks a large plan for approval and persists the draft with its
-fingerprint; the operator approves that fingerprint on the row; run 2's model
-returns a DIFFERENT text, and cw takes the approved draft verbatim. The
-helpers are the run tests' own (``tests.test_codex_plan_run``).
+fingerprint; the operator approves that fingerprint on the row; run 2 takes
+the approved draft through the fast path with no scan turn at all (#3464), so
+a regenerating model never gets the chance to replace it. The helpers are the
+run tests' own (``tests.test_codex_plan_run``).
 """
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
 
 from cw.codex_plan._result import (
-    MODEL_TEXT_DISCARDED_FRICTION,
     PLAN_MD_RELATIVE_PATH,
     RESUME_FRICTION,
     ROUND_ZERO_LINE,
@@ -24,6 +25,7 @@ from cw.models import Stage
 from cw.plan_fingerprint import PLAN_DRAFT_RELATIVE_PATH, compute_plan_draft_fingerprint
 from cw.reconcile.codex_boot import _worktree_porcelain_clean_except_verdict
 from tests._codex_review_helpers import exclude_cw_dir, seed_codex_stage_run
+from tests._shared.ticket_context import observed_issue_envelope
 from tests._tool_fakes import FakeGhCli, ScriptedCodexRunner
 from tests.test_codex_plan_run import (
     LARGE_PLAN,
@@ -63,7 +65,12 @@ def flow(
     worktree = make_git_repo("wt-flow")
     exclude_cw_dir(worktree)
 
-    def _run(plan: str, *, task_updates: Mapping[str, object] | None = None) -> Harness:
+    def _run(
+        plan: str,
+        *,
+        task_updates: Mapping[str, object] | None = None,
+        snapshot: bool = False,
+    ) -> Harness:
         seed_codex_stage_run(
             worktree=worktree,
             stage=Stage.PLAN,
@@ -72,6 +79,16 @@ def flow(
             task_updates=task_updates,
         )
         gh = script_gh(FakeGhCli().install(monkeypatch))
+        if snapshot:
+            envelope = {**observed_issue_envelope(), "comments": []}
+            gh.reply(
+                "issue",
+                "view",
+                TICKET,
+                "--json",
+                "title,body,url,comments",
+                stdout=json.dumps(envelope),
+            )
         runner = add_stations(add_turn(ScriptedCodexRunner(), plan, tier="large"))
         return Harness(worktree=worktree, runner=runner, gh=gh)
 
@@ -108,19 +125,15 @@ def test_approved_draft_is_taken_verbatim_over_a_regenerated_plan(
     assert _worktree_porcelain_clean_except_verdict(h1.worktree) is True
 
     assert f1 is not None
-    h2 = flow(P2, task_updates=_approve(f1))
+    h2 = flow(P2, task_updates=_approve(f1), snapshot=True)
     run2 = h2.run()
-    (call,) = h2.plan_calls
-    stdin = str(call["stdin"])
-    assert "P1-DISTINCTIVE" in stdin
-    assert "approval: matches" in stdin
+    assert h2.plan_calls == []
     assert run2.status == "stage_complete"
     plan = (h2.worktree / PLAN_MD_RELATIVE_PATH).read_text(encoding="utf-8")
     assert "P1-DISTINCTIVE" in plan
     assert "P2-REGENERATED" not in plan
     assert plan.endswith(P1)
     assert _plan_body_signoff_ok(plan)
-    assert MODEL_TEXT_DISCARDED_FRICTION in run2.friction_highlights
     assert RESUME_FRICTION in run2.friction_highlights
     assert not (h2.worktree / PLAN_DRAFT_RELATIVE_PATH).exists()
     assert run2.plan_draft_fingerprint == f1
@@ -132,7 +145,8 @@ def test_without_approval_the_model_text_reparks(flow: Callable[..., Harness]) -
     h2 = flow(P2)
     run2 = h2.run()
     (call,) = h2.plan_calls
-    assert "approval: none" in str(call["stdin"])
+    assert "approval: none" not in str(call["stdin"])
+    assert "P1-DISTINCTIVE" in str(call["stdin"])
     assert run2.status == "plan_pending_approval"
     assert "P2-REGENERATED" in _draft(h2)
     assert run2.plan_draft_fingerprint == compute_plan_draft_fingerprint(_draft(h2))

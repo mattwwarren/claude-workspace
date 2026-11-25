@@ -88,6 +88,8 @@ _REMAINING_CODEX_MODULES = {
         "_post",
         "_prompt",
         "_result",
+        "_resume",
+        "_revise",
         "_run",
         "_settle",
         "_stations",
