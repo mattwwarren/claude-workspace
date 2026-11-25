@@ -489,7 +489,7 @@ elements:
   plan.leading-bookkeeping-line-grammar-and-order:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_result.py, symbol: write_plan_draft}, note: "cw writes the draft and carries the leading block forward via plan_fingerprint.leading_bookkeeping_end"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_result.py, symbol: write_plan_draft}, note: "cw writes the draft: write_plan_draft parses the leading block (parse_leading_block) and re-renders it (render_leading_block) in grammar order"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.round-counter:
@@ -603,7 +603,7 @@ elements:
   plan.headless-only-checkpoint-revised-draft:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: not-applicable, reason: "codex PLAN runs no Step 1f.4 revision cycle in C1: a blocking station parks, and cw writes the draft once per run"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_revise.py, symbol: revision_cycle}, note: "the Plan Reviewer revision cycle checkpoints each revised draft (_after_revision) before the stations re-run; a blocking station that survives the cycle parks via blocking_findings_exit"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.tier-re-verification-before-stamp:

@@ -1936,6 +1936,11 @@ _C1_RESUME_CELLS = {
         "src/cw/codex_plan/_revise.py",
         "blocking_findings_exit",
     ),
+    "plan.headless-only-checkpoint-revised-draft": (
+        "implemented",
+        "src/cw/codex_plan/_revise.py",
+        "revision_cycle",
+    ),
     "orch.fast-path-composition-requires-third-condition": (
         "fails-closed",
         "src/cw/codex_plan/_resume.py",
