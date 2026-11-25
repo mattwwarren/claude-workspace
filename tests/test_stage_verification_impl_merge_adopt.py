@@ -254,6 +254,10 @@ class TestMergeUnresolvedBlock:
         assert block is not None
         assert block.details.startswith("merge_in_progress: ")
         assert "clash.py is still unmerged and was not changed" in block.details
+        assert "conclude the merge by hand" not in block.details
+        assert "refs/cw/refused-cycles/" in block.details
+        assert "re-run git merge origin/<base> in the worktree" in block.details
+        assert "and requeue" in block.details
 
     def test_a_resolved_conflict_gives_none(self, conflicted: Path) -> None:
         before = conflict_fingerprints(conflicted, {"clash.py"})

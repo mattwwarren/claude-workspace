@@ -180,12 +180,13 @@ def merge_unresolved_block(
         parts.append(f"conflict markers remain in {_listing(markers)}")
     if untouched:
         parts.append(
-            f"{_listing(untouched)} is still unmerged and was not changed by the "
-            "turn (change the file to resolve it, or conclude the merge by hand)"
+            f"{_listing(untouched)} is still unmerged and was not changed by the turn"
         )
     return _block(
         "; ".join(parts) + ". Nothing was committed or pushed, and the merge "
-        "state was dropped with the refused turn."
+        "state was dropped with the refused turn; its edits are pinned under "
+        "refs/cw/refused-cycles/. To proceed, re-run git merge origin/<base> in "
+        "the worktree (or resolve and push by hand) and requeue."
     )
 
 
