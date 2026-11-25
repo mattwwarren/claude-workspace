@@ -21,8 +21,9 @@ Concern -> module:
   ``_make_daemon_session``): ``session_seeding``
 - stop-hook transcripts and hook-context files (``_write_hook_context_file``):
   ``stop_hook_context``
-- codex engine completion check (``make_checker_repo``, ``tamper_roles``,
-  ``checker_tmpdir``, ``engine_repo``): ``engine_round_helpers`` (plugin)
+- codex engine round and completion check (``run_pass``, ``engine_runner``,
+  ``make_checker_repo``, ``tamper_roles``, ``checker_tmpdir``, ``engine_repo``):
+  ``engine_round_helpers`` (plugin)
 - flock holders, fake lock clock, lock-hold records (``fake_lock_clock``,
   ``lock_hold_clock``): ``lock_helpers`` (plugin)
 - review findings, constraints, debt records, diffs (``_make_finding``,
