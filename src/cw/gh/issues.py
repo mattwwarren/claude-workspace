@@ -28,6 +28,19 @@ _PLAN_MARKER = "<!-- plan-spec-reviewed"
 # The consumer-side trust rule lives in .claude/commands/auto-dev.md
 # ("Comment provenance rule"); this constant is the machine-readable half.
 AGENT_COMMENT_MARKER = "<!-- cw-agent-authored -->"
+#: The header of the comment a park posts with blocking review findings: the
+#: REVIEW park saves its body for a regressed IMPL (#3762) and the codex PLAN
+#: revision cycle posts one on exhaustion (#3464).
+BLOCKING_FINDINGS_HEADER = "## Blocking Review Findings"
+#: Pipeline-authored comment headers: a comment opening with one quotes the
+#: resolutions marker but never directs anything (constraint discovery and the
+#: codex PLAN tracker read both drop it).
+PIPELINE_FIXED_HEADERS = (
+    "## Multi-Marker Gate Blocked",
+    "## Pending Verification Scan",
+    BLOCKING_FINDINGS_HEADER,
+    "## Operator-Actionable Review Findings",
+)
 # Fail-closed fallback for a comment that carries no marker but says in its own
 # text that an agent wrote or relayed it (#2617: an orchestrator relayed operator
 # words through the tracker MCP, unmarked). The phrase set is closed and narrow;

@@ -39,6 +39,8 @@ from cw.gh.filing import (
 from cw.gh.issues import (
     _PLAN_MARKER,
     AGENT_COMMENT_MARKER,
+    BLOCKING_FINDINGS_HEADER,
+    PIPELINE_FIXED_HEADERS,
     _comment_has_marker,
     agent_marked_body,
     fetch_approved_plan_comment,
@@ -112,7 +114,9 @@ from cw.gh.runner import (
 
 __all__ = [
     "AGENT_COMMENT_MARKER",
+    "BLOCKING_FINDINGS_HEADER",
     "FETCH_COMMENTS_TIMEOUT",
+    "PIPELINE_FIXED_HEADERS",
     "PR_ADOPT_FIELDS",
     "TIMED_OUT_MERGED_LOOKBACK_DAYS",
     "_BRANCH_PRS_LIMIT",

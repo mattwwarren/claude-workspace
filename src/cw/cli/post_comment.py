@@ -45,7 +45,12 @@ from cw.cli._base import handle_errors, main
 from cw.config import get_client
 from cw.dev_queue.lifecycle import _tracker_allows_github_fetch
 from cw.exceptions import CwError
-from cw.gh import FETCH_COMMENTS_TIMEOUT, agent_marked_body, fetch_repo_visibility
+from cw.gh import (
+    BLOCKING_FINDINGS_HEADER,
+    FETCH_COMMENTS_TIMEOUT,
+    agent_marked_body,
+    fetch_repo_visibility,
+)
 from cw.models import Stage
 from cw.reconcile import find_running_task_for_session
 from cw.redact_post_text import (
@@ -72,9 +77,6 @@ if TYPE_CHECKING:
 __all__ = ["EMITTED_STATUS", "exit_code_for", "post_comment"]
 
 _log = logging.getLogger(__name__)
-
-#: The header whose posted body a REVIEW park saves for a regressed IMPL (#3762).
-_BLOCKING_FINDINGS_HEADER = "## Blocking Review Findings"
 
 #: The CLI-only status for ``--emit-only``; the library statuses are PostStatus.
 EMITTED_STATUS = "emitted"
@@ -289,7 +291,7 @@ def _persist_park_findings(
     """
     if (
         outcome.status not in _PERSISTED_STATUSES
-        or opts.header != _BLOCKING_FINDINGS_HEADER
+        or opts.header != BLOCKING_FINDINGS_HEADER
     ):
         return
     ids = _review_row_ids(opts.context)
