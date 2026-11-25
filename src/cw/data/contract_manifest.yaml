@@ -634,7 +634,7 @@ elements:
   plan.then-record-plan-s-decisions:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: not-applicable, reason: "cw records the plan's decisions in-process (cw.codex_plan._run) after .cw/plan.md verifies"}
+      codex: {disposition: not-applicable, reason: "cw records the plan's decisions in-process (cw.codex_plan._exits) after .cw/plan.md verifies"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   plan.then:

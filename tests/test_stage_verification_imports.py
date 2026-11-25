@@ -84,6 +84,7 @@ _REMAINING_CODEX_MODULES = {
     "cw.codex_plan": {
         "__init__",
         "_argv",
+        "_exits",
         "_post",
         "_prompt",
         "_result",

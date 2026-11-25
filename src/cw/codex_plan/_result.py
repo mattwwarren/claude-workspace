@@ -36,6 +36,7 @@ from cw.dev_queue.lifecycle import (
     _PLAN_SPEC_MARKER,
     _PLAN_SPEC_MARKER_VERSION,
 )
+from cw.models.enums import StageIdentifier
 from cw.plan_fingerprint import (
     PLAN_DRAFT_FINGERPRINT_KEY,
     PLAN_DRAFT_RELATIVE_PATH,
@@ -83,6 +84,10 @@ PLAN_AMBIGUITIES_PENDING: Final = "ambiguities_pending_resolution"
 PLAN_PREMISES_PENDING: Final = "premises_pending_verification"
 PLAN_NO_OP: Final = "no_op"
 PLAN_BLOCKED: Final = "blocked"
+
+#: The stage identifiers the driver's PLAN stage events carry.
+STAGE_PLAN_GENERATED: Final = StageIdentifier.S1_PLAN_GENERATED.value
+STAGE_PLAN_REVIEWED: Final = StageIdentifier.S1_PLAN_REVIEWED.value
 PLAN_STATUSES: Final = frozenset(
     {
         PLAN_STAGE_COMPLETE,
