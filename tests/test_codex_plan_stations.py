@@ -119,6 +119,33 @@ class TestVerdicts:
         assert outcome.block.reason == "plan_unsound"
         assert "MUST_FIX" in outcome.block.details
 
+    def test_a_must_fix_block_carries_its_role_and_lines(self, tmp_path: Path) -> None:
+        runner = _runner(
+            station_findings_doc(
+                PLAN_REVIEWER, severity="MUST_FIX", severities=["SHOULD_FIX"]
+            ),
+            _clean(PLAN_SOUNDNESS_REVIEWER),
+        )
+        block = _stations(runner, tmp_path).block
+        assert block is not None
+        assert block.role == PLAN_REVIEWER
+        (line,) = block.must_fix
+        assert line.startswith(f"- {PLAN_REVIEWER} [MUST_FIX] ")
+        assert line in block.details
+
+    @pytest.mark.parametrize("status", ["degraded", "failed"])
+    def test_a_non_must_fix_block_carries_no_role(
+        self, tmp_path: Path, status: str
+    ) -> None:
+        runner = _runner(
+            station_findings_doc(PLAN_REVIEWER, status=status, detail="x"),
+            _clean(PLAN_SOUNDNESS_REVIEWER),
+        )
+        block = _stations(runner, tmp_path).block
+        assert block is not None
+        assert block.role is None
+        assert block.must_fix == ()
+
     def test_should_fix_only_is_clean(self, tmp_path: Path) -> None:
         runner = _runner(
             station_findings_doc(PLAN_REVIEWER, severity="SHOULD_FIX"),

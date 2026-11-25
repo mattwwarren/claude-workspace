@@ -11,11 +11,10 @@ import pytest
 import cw.codex_plan._prompt as prompt_module
 from cw.bindings_block import BINDINGS_BEGIN, render_bindings_block
 from cw.codex_plan._prompt import (
-    APPROVAL_MATCHES,
-    APPROVAL_NONE,
     RESUME_SECTION,
     TICKET_SECTION,
     TICKET_TEXT_MAX_CHARS,
+    ResumeFacts,
     command_docs_root,
     prefetch_ticket,
     render_plan_prompt,
@@ -43,15 +42,15 @@ def _render(
     *,
     ticket: prompt_module.TicketText | None = None,
     resume: ResumeDraft | None = None,
-    approval: bool = False,
+    facts: ResumeFacts | None = None,
 ) -> str:
     return render_plan_prompt(
         ticket_id=_TICKET,
         docs_root=_COMMANDS_ROOT,
         ticket=ticket,
         resume=resume,
-        approval_matches=approval,
         bindings_block=_BLOCK,
+        facts=facts,
     )
 
 
@@ -206,12 +205,25 @@ class TestRender:
         assert ".claude/cw-context.json" in _PLAN_CODEX_ADDENDUM
         assert "cat the file if jq is absent" in _PLAN_CODEX_ADDENDUM
 
-    def test_resume_section_carries_the_draft_and_approval_line(self) -> None:
-        matched = _render(resume=_resume(), approval=True)
-        assert "DRAFT-LINE-XYZ" in matched
-        assert APPROVAL_MATCHES in matched
-        unmatched = _render(resume=_resume(), approval=False)
-        assert APPROVAL_NONE in unmatched
+    def test_resume_section_carries_the_draft_and_the_resume_facts(self) -> None:
+        text = _render(
+            resume=_resume(),
+            facts=ResumeFacts(
+                park_ordinal=2, settled_ids=("A1", "R2.P1"), scan_round=1
+            ),
+        )
+        section = text.split(f"BEGIN CW-INJECTED: {RESUME_SECTION}")[1]
+        assert "DRAFT-LINE-XYZ" in section
+        assert "park ordinal: 2 (settlement item ids: R2.A<n>/R2.P<n>)" in section
+        assert "settled items (do not re-raise): A1, R2.P1" in section
+        assert "scan round: 1 (cw owns the counter and the cap)" in section
+        assert "approval:" not in section
+
+    def test_resume_facts_default_to_a_first_park(self) -> None:
+        marker = f"BEGIN CW-INJECTED: {RESUME_SECTION}"
+        section = _render(resume=_resume()).split(marker)[1]
+        assert "park ordinal: 0 (settlement item ids: bare A<n>/P<n>)" in section
+        assert "settled items (do not re-raise): none" in section
 
     def test_no_resume_section_without_a_draft(self) -> None:
         assert RESUME_SECTION not in _render().split(_PLAN_CODEX_ADDENDUM)[-1]
@@ -238,7 +250,6 @@ class TestRender:
                 docs_root=tmp_path,
                 ticket=None,
                 resume=None,
-                approval_matches=False,
                 bindings_block=_BLOCK,
             )
 

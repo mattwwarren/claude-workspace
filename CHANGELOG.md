@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **cw now runs the codex PLAN resumed round itself (#3464).** The resolutions delta (row first, then a marker-bearing body section, then the newest marker comment) and its one-shot revision, the approved-fingerprint fast path (an approved draft is taken with no turn; `s1_ambiguity_scan_skipped`, `reason: approved_fingerprint_match`), the round counter and its N=2 cap (`ambiguity_scan_unconverged`), the deferred-stub check (`deferred_stub_unresolved`), the `plan-stage-settled` lines and the Plan Reviewer MUST_FIX revision cycle are deterministic cw code; a persisting MUST_FIX posts a `## Blocking Review Findings` comment under a new `blocking-` outbox marker. Revocation needs positive evidence: an applied comment or body source the snapshot does not show parks `agent_block`, retry-eligible, with the approval standing. The PLAN turn's `-o` document gains a required `settlements` list, and `resolution_consumed` / `resolution_evidence` are cw-stamped from validated settlements. The `plan_resume_model_text_discarded` friction token and the prompt's `approval: matches|none` line are retired. The operator-answer fold and the ticket-quote pre-pass move to #3909; comment-path approval and the operator-authority delta stay #3465.
+
 ## [1.110.0] - 2026-11-25
 
 ### Added

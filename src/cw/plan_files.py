@@ -181,6 +181,30 @@ def _resolve_nested_path(
     return token, dir_ctx  # own "/" or no context: as written
 
 
+def _files_section_lines(plan_text: str) -> list[str]:
+    """The fence-stripped body lines of the plan's files-modified section.
+
+    The heading is matched by prefix (``_FILES_HEADING_PREFIX``); the body ends
+    at the next heading shallower than ``####``. Empty when no heading matches.
+    """
+    lines = _strip_fenced_lines(plan_text.splitlines())
+    try:
+        start = next(
+            i
+            for i, line in enumerate(lines)
+            if line.strip().startswith(_FILES_HEADING_PREFIX)
+        )
+    except StopIteration:
+        return []
+    body: list[str] = []
+    for line in lines[start + 1 :]:
+        stripped = line.strip()
+        if stripped.startswith("#") and not stripped.startswith("####"):
+            break  # next section — the Files Modified body has ended
+        body.append(line)
+    return body
+
+
 def parse_plan_files_modified(plan_text: str) -> list[str]:
     """Extract the file paths listed under the plan's files-modified section.
 
@@ -205,22 +229,10 @@ def parse_plan_files_modified(plan_text: str) -> list[str]:
     pre-#1905 behaviour of letting aider pick files itself, rather than
     hard-blocking a plan that predates the manifest convention.
     """
-    lines = _strip_fenced_lines(plan_text.splitlines())
-    try:
-        start = next(
-            i
-            for i, line in enumerate(lines)
-            if line.strip().startswith(_FILES_HEADING_PREFIX)
-        )
-    except StopIteration:
-        return []
-
     paths: list[str] = []
     dir_ctx: tuple[int, str] | None = None
-    for line in lines[start + 1 :]:
+    for line in _files_section_lines(plan_text):
         stripped = line.strip()
-        if stripped.startswith("#") and not stripped.startswith("####"):
-            break  # next section — the Files Modified body has ended
         candidate: str | None
         if stripped.startswith(("- ", "* ")):
             candidate, dir_ctx = _resolve_nested_path(
@@ -254,6 +266,34 @@ def parse_plan_scope_tier(plan_text: str) -> ScopeTier | None:
                 return SCOPE_TIER_LARGE
             return SCOPE_TIER_SMALL
     return None
+
+
+# A bullet's trailing parenthesised tail, and the first signed ``~N`` in it.
+_PAREN_TAIL = re.compile(r"\(([^()]*)\)\s*$")
+_TILDE_NUMBER = re.compile(r"~\s*(-?[0-9]+)")
+
+
+def parse_plan_lines_estimate(plan_text: str) -> int:
+    """Sum the plan's per-file ``(~N lines)`` estimates (#3464).
+
+    For every bullet of the files-modified section (the same fence-aware
+    section :func:`parse_plan_files_modified` reads), the signed FIRST number
+    after a ``~`` in the bullet's trailing parenthesised tail is added:
+    ``(~140 lines)`` contributes 140, and ``(~-230 lines net, plus ~120
+    added)`` contributes -230 (the trailing "plus" clause is ignored). A bullet
+    with no tail, or with no ``~N`` in it, contributes 0. Table rows are not
+    read. ``0`` when the section is absent.
+    """
+    total = 0
+    for line in _files_section_lines(plan_text):
+        stripped = line.strip()
+        if not stripped.startswith(("- ", "* ")):
+            continue
+        tail = _PAREN_TAIL.search(stripped)
+        number = _TILDE_NUMBER.search(tail.group(1)) if tail is not None else None
+        if number is not None:
+            total += int(number.group(1))
+    return total
 
 
 def resolve_review_scope_tier(

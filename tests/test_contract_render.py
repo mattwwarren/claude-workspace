@@ -322,6 +322,27 @@ def test_plan_impl_and_finalize_each_carry_their_own_codex_addendum() -> None:
     assert "Codex FINALIZE addendum" not in impl
 
 
+def test_plan_addendum_hands_the_resume_machinery_to_cw() -> None:
+    """#3464: items 5, 6 and 9 say what cw runs and what the turn returns."""
+    addendum = _normalized(_stage_addendum("plan"))
+    for needle in (
+        "run the scan on it and return it as plan_markdown",
+        "report each newly answered item in settlements",
+        "cw runs their resume machinery itself",
+        "the approved-fingerprint fast path",
+        "the round counter and its cap",
+        "the review revision cycle",
+        "the operator-authority delta and comment-path approval, which is deferred",
+        "one JSON object with three fields",
+        "settlements (a list, empty when nothing settles)",
+        "R<k>.A<n>",
+        "cw validates each one and drops any it cannot verify",
+    ):
+        assert needle in addendum, needle
+    for retired in ("always re-scan", "approval: matches", "two string fields"):
+        assert retired not in addendum, retired
+
+
 def test_finalize_addendum_overrides_the_remaining_claude_machinery() -> None:
     addendum = _normalized(_stage_addendum("finalize"))
     for needle in (
@@ -471,8 +492,10 @@ def test_every_needed_id_is_rendered_or_deferred(stage: str) -> None:
     for element_id in needed - rendered:
         cell = manifest.elements[element_id].cells[CODEX_BACKEND]
         assert not isinstance(cell, str)
-        assert cell.disposition in {"implemented", "deferred"}, element_id
-        if cell.disposition == "implemented":
+        assert cell.disposition in {"implemented", "deferred", "fails-closed"}, (
+            element_id
+        )
+        if cell.disposition in {"implemented", "fails-closed"}:
             assert isinstance(cell.ref, CodeRef), element_id
 
 

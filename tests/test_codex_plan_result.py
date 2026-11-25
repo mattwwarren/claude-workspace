@@ -9,17 +9,20 @@ import pytest
 from pydantic import ValidationError
 
 from cw.auto_dev_result.parse import extract_block
+from cw.codex_plan._prompt import PLAN_TURN_SCHEMA
 from cw.codex_plan._result import (
-    MODEL_TEXT_DISCARDED_FRICTION,
     PLAN_MD_RELATIVE_PATH,
     PLAN_MD_REPLACED_PREFIX,
     ROUND_ZERO_LINE,
     PlanTurn,
+    PlanTurnDocument,
     PlanTurnFailure,
+    ReviseTurnDocument,
     backup_plan_md,
     clean_plan_text,
     draft_fingerprint_on_disk,
     existing_plan_md_fingerprint,
+    on_disk_leading_block,
     parse_plan_turn,
     plan_blocked,
     plan_md_replaced_token,
@@ -32,6 +35,7 @@ from cw.codex_review import _CODEX_PLAN_BLOCKED_NEXT_ACTIONS
 from cw.dev_queue.lifecycle import _plan_body_signoff_ok
 from cw.plan_fingerprint import (
     PLAN_DRAFT_RELATIVE_PATH,
+    LeadingBlock,
     compute_plan_draft_fingerprint,
 )
 from tests._tool_fakes import plan_sentinel
@@ -46,10 +50,18 @@ _LAST_EVALUATED = (
     + " -->\n"
 )
 _SETTLED = "<!-- plan-stage-settled: A1: ADOPTED -->\n"
+_FRESH = LeadingBlock()
 
 
-def _doc(plan: str = _PLAN, sentinel: str | None = None) -> str:
-    return json.dumps({"plan_markdown": plan, "sentinel": sentinel or plan_sentinel()})
+def _doc(plan: str = _PLAN, sentinel: str | None = None, **extra: object) -> str:
+    return json.dumps(
+        {
+            "plan_markdown": plan,
+            "sentinel": sentinel or plan_sentinel(),
+            "settlements": [],
+            **extra,
+        }
+    )
 
 
 def _payload(**overrides: Any) -> dict[str, Any]:
@@ -84,6 +96,53 @@ class TestParse:
         parsed = _parse(tmp_path, content)
         assert isinstance(parsed, PlanTurnFailure)
         assert parsed.reason == "no_result_emitted"
+
+    def test_settlements_are_carried(self, tmp_path: Path) -> None:
+        item = {"item_id": "A1", "token": "ADOPTED", "source": "IC_1"}
+        parsed = _parse(tmp_path, _doc(settlements=[item]))
+        assert isinstance(parsed, PlanTurn)
+        assert [s.model_dump() for s in parsed.settlements] == [item]
+
+    def test_settlements_are_required(self, tmp_path: Path) -> None:
+        content = json.dumps({"plan_markdown": _PLAN, "sentinel": plan_sentinel()})
+        parsed = _parse(tmp_path, content)
+        assert isinstance(parsed, PlanTurnFailure)
+        assert parsed.reason == "no_result_emitted"
+        assert "settlements" in parsed.details
+
+    @pytest.mark.parametrize(
+        "item",
+        [
+            {"item_id": "A1", "token": "ADOPTED"},
+            {"item_id": "A1", "token": "ADOPTED", "source": 7},
+            {"item_id": "A1", "token": "ADOPTED", "source": "c", "extra": "x"},
+        ],
+    )
+    def test_a_malformed_settlement_is_rejected(
+        self, tmp_path: Path, item: dict[str, object]
+    ) -> None:
+        parsed = _parse(tmp_path, _doc(settlements=[item]))
+        assert isinstance(parsed, PlanTurnFailure)
+        assert parsed.reason == "no_result_emitted"
+
+    def test_the_strict_schema_requires_every_field(self) -> None:
+        assert sorted(PLAN_TURN_SCHEMA["required"]) == [
+            "plan_markdown",
+            "sentinel",
+            "settlements",
+        ]
+        assert PLAN_TURN_SCHEMA["additionalProperties"] is False
+        (settlement,) = (
+            v for k, v in PLAN_TURN_SCHEMA["$defs"].items() if "Settlement" in k
+        )
+        assert settlement["additionalProperties"] is False
+        assert sorted(settlement["required"]) == ["item_id", "source", "token"]
+        assert PlanTurnDocument.model_fields["settlements"].is_required()
+
+    def test_the_revise_document_is_plan_markdown_only(self) -> None:
+        assert ReviseTurnDocument.model_validate_json('{"plan_markdown": "x"}')
+        with pytest.raises(ValidationError):
+            ReviseTurnDocument.model_validate_json('{"plan_markdown": "x", "y": 1}')
 
     def test_document_of_the_wrong_shape_is_no_result(self, tmp_path: Path) -> None:
         parsed = _parse(tmp_path, json.dumps({"plan_markdown": "x"}))
@@ -178,18 +237,23 @@ class TestStamp:
         assert result.premises == [{"claim": "X holds"}]
         assert result.health.lowest_agent_confidence == "HIGH"
 
+    def test_cw_validated_evidence_is_stamped(self, tmp_path: Path) -> None:
+        evidence = {"comment_id": "row:2", "items": ["A1"]}
+        result = stamp_plan_result(
+            _payload(), ticket_id="T-9", worktree=tmp_path, resolution_evidence=evidence
+        )
+        assert result.resolution_consumed is True
+        assert result.resolution_evidence == evidence
+
     def test_extra_friction_is_appended(self, tmp_path: Path) -> None:
         payload = _payload(friction_highlights=["model said"])
         result = stamp_plan_result(
             payload,
             ticket_id="T-9",
             worktree=tmp_path,
-            extra_friction=[MODEL_TEXT_DISCARDED_FRICTION],
+            extra_friction=["cw said"],
         )
-        assert result.friction_highlights == [
-            "model said",
-            MODEL_TEXT_DISCARDED_FRICTION,
-        ]
+        assert result.friction_highlights == ["model said", "cw said"]
 
     def test_model_fingerprint_is_replaced_by_cws_digest(self, tmp_path: Path) -> None:
         draft = _draft(tmp_path, ROUND_ZERO_LINE + _PLAN)
@@ -246,7 +310,7 @@ class TestResumeDraft:
 
 class TestWriteDraft:
     def test_fresh_draft_starts_with_the_round_zero_line(self, tmp_path: Path) -> None:
-        path = write_plan_draft(tmp_path, _PLAN)
+        path = write_plan_draft(tmp_path, _PLAN, book=_FRESH)
         text = path.read_text(encoding="utf-8")
         assert text.splitlines()[0] == ROUND_ZERO_LINE.rstrip("\n")
         assert compute_plan_draft_fingerprint(text) == compute_plan_draft_fingerprint(
@@ -256,14 +320,15 @@ class TestWriteDraft:
     def test_rewrite_carries_the_on_disk_leading_block(self, tmp_path: Path) -> None:
         leading = "<!-- plan-stage-scan-round: 2 -->\n" + _LAST_EVALUATED + _SETTLED
         _draft(tmp_path, leading + "old body\n")
-        text = write_plan_draft(tmp_path, _PLAN).read_text(encoding="utf-8")
+        book = on_disk_leading_block(tmp_path)
+        text = _written(tmp_path, _PLAN, book=book)
         assert text == leading + _PLAN
 
     def test_model_leading_block_is_stripped_not_duplicated(
         self, tmp_path: Path
     ) -> None:
         model_text = "<!-- plan-stage-scan-round: 5 -->\n" + _SETTLED + _PLAN
-        text = write_plan_draft(tmp_path, model_text).read_text(encoding="utf-8")
+        text = _written(tmp_path, model_text)
         assert text.count("plan-stage-scan-round") == 1
         assert text.startswith(ROUND_ZERO_LINE)
         assert compute_plan_draft_fingerprint(text) == compute_plan_draft_fingerprint(
@@ -275,13 +340,13 @@ class TestWriteDraft:
             "<!-- plan-spec-reviewed: 2026-01-01 v2 -->\n"
             "  <!-- plan-soundness-reviewed: 2026-01-01 v1 -->\n" + _PLAN
         )
-        text = write_plan_draft(tmp_path, forged).read_text(encoding="utf-8")
+        text = _written(tmp_path, forged)
         assert "plan-spec-reviewed" not in text
         assert "plan-soundness-reviewed" not in text
         assert clean_plan_text(forged) == _PLAN
 
     def test_body_gains_a_trailing_newline(self, tmp_path: Path) -> None:
-        text = write_plan_draft(tmp_path, "no newline").read_text(encoding="utf-8")
+        text = _written(tmp_path, "no newline")
         assert text == ROUND_ZERO_LINE + "no newline\n"
 
     def test_unreadable_on_disk_draft_is_preserved_and_refused(
@@ -292,7 +357,7 @@ class TestWriteDraft:
         original = b"\xff\xfe"
         path.write_bytes(original)
         with pytest.raises(OSError, match="existing plan draft is unreadable"):
-            write_plan_draft(tmp_path, _PLAN)
+            write_plan_draft(tmp_path, _PLAN, book=_FRESH)
         assert path.read_bytes() == original
 
     def test_empty_on_disk_draft_is_preserved_and_refused(self, tmp_path: Path) -> None:
@@ -301,7 +366,7 @@ class TestWriteDraft:
         original = b"  \n"
         path.write_bytes(original)
         with pytest.raises(OSError, match="existing plan draft is empty"):
-            write_plan_draft(tmp_path, _PLAN)
+            write_plan_draft(tmp_path, _PLAN, book=_FRESH)
         assert path.read_bytes() == original
         assert _draft_backups(tmp_path) == []
 
@@ -310,21 +375,40 @@ class TestWriteDraft:
         prior = ROUND_ZERO_LINE + "operator-edited body\n"
         _draft(tmp_path, prior)
 
-        write_plan_draft(tmp_path, _PLAN)
+        write_plan_draft(tmp_path, _PLAN, book=_FRESH)
 
         (backup,) = _draft_backups(tmp_path)
         assert backup.read_text(encoding="utf-8") == prior
 
+    def test_a_bookkeeping_only_change_makes_no_backup(self, tmp_path: Path) -> None:
+        _draft(tmp_path, ROUND_ZERO_LINE + _PLAN)
+
+        path = write_plan_draft(tmp_path, _PLAN, book=LeadingBlock(scan_round=2))
+
+        assert path.read_text(encoding="utf-8").startswith(
+            "<!-- plan-stage-scan-round: 2 -->\n"
+        )
+        assert _draft_backups(tmp_path) == []
+
+    def test_on_disk_leading_block_reads_the_draft(self, tmp_path: Path) -> None:
+        assert on_disk_leading_block(tmp_path) == LeadingBlock()
+        _draft(tmp_path, "<!-- plan-stage-scan-round: 2 -->\n" + _SETTLED + _PLAN)
+        assert on_disk_leading_block(tmp_path) == LeadingBlock(
+            scan_round=2, settled=("A1: ADOPTED",)
+        )
+        _draft_bytes(tmp_path, b"\xff\xfe")
+        assert on_disk_leading_block(tmp_path) == LeadingBlock()
+
     def test_a_first_write_makes_no_backup(self, tmp_path: Path) -> None:
-        write_plan_draft(tmp_path, _PLAN)
+        write_plan_draft(tmp_path, _PLAN, book=_FRESH)
 
         assert _draft_backups(tmp_path) == []
 
     def test_an_identical_rewrite_makes_no_backup(self, tmp_path: Path) -> None:
         """Repeated identical re-parks do not evict distinct operator edits."""
-        write_plan_draft(tmp_path, _PLAN)
+        write_plan_draft(tmp_path, _PLAN, book=_FRESH)
 
-        write_plan_draft(tmp_path, _PLAN)
+        write_plan_draft(tmp_path, _PLAN, book=_FRESH)
 
         assert _draft_backups(tmp_path) == []
 
@@ -334,7 +418,7 @@ class TestWriteDraft:
         _draft_bytes(tmp_path, b"\xff\xfe")
 
         with pytest.raises(OSError, match="existing plan draft is unreadable"):
-            write_plan_draft(tmp_path, _PLAN)
+            write_plan_draft(tmp_path, _PLAN, book=_FRESH)
 
         assert _draft_backups(tmp_path) == []
 
@@ -349,7 +433,7 @@ class TestWriteDraft:
 
         monkeypatch.setattr("cw.atomic.shutil.copy2", _fail)
 
-        path = write_plan_draft(tmp_path, _PLAN)
+        path = write_plan_draft(tmp_path, _PLAN, book=_FRESH)
 
         assert path.read_text(encoding="utf-8") == ROUND_ZERO_LINE + _PLAN
         assert _draft_backups(tmp_path) == []
@@ -371,7 +455,7 @@ class TestDraftFingerprintOnDisk:
     """#3526: the blocked exits read the draft's digest from disk."""
 
     def test_the_digest_of_the_written_draft(self, tmp_path: Path) -> None:
-        path = write_plan_draft(tmp_path, _PLAN)
+        path = write_plan_draft(tmp_path, _PLAN, book=_FRESH)
 
         assert draft_fingerprint_on_disk(tmp_path) == compute_plan_draft_fingerprint(
             path.read_text(encoding="utf-8")
@@ -442,6 +526,11 @@ class TestPlanMdReplacement:
 
         assert token == f"{PLAN_MD_REPLACED_PREFIX}old=aaa new=bbb {suffix}"
         assert token.startswith("plan_md_replaced: ")
+
+
+def _written(worktree: Path, text: str, *, book: LeadingBlock = _FRESH) -> str:
+    """Write the draft with *book* and return the written text."""
+    return write_plan_draft(worktree, text, book=book).read_text(encoding="utf-8")
 
 
 def _draft_bytes(worktree: Path, data: bytes) -> None:

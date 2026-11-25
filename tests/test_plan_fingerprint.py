@@ -17,13 +17,19 @@ from cw.exceptions import PlanDraftBindingError
 from cw.models.operator_resolution import OperatorResolution
 from cw.plan_fingerprint import (
     PLAN_DRAFT_FINGERPRINT_KEY,
+    ApprovalRevoked,
+    LeadingBlock,
+    ResolutionsAttempt,
     bind_claimed_fingerprint,
     compute_body_sha,
     compute_plan_draft_fingerprint,
     extract_persisted_body_sha,
     is_plan_draft_fingerprint,
     leading_bookkeeping_end,
+    parse_leading_block,
+    render_leading_block,
     sanitize_persisted_fingerprint,
+    settled_line,
 )
 
 if TYPE_CHECKING:
@@ -434,3 +440,125 @@ class TestSanitizePersistedFingerprint:
     def test_absent_key_returns_the_same_object(self) -> None:
         stored: dict[str, object] = {"status": "x"}
         assert sanitize_persisted_fingerprint(stored) is stored
+
+
+# ---------------------------------------------------------------------------
+# LeadingBlock parse / render (#3464)
+# ---------------------------------------------------------------------------
+
+_SHA = "a" * 64
+_SHA2 = "b" * 64
+_LAST_EVAL = f"operator_comment=c9|body_sha={_SHA}"
+
+_BLOCK_SHAPES = {
+    "round_only": LeadingBlock(scan_round=2),
+    "last_evaluated": LeadingBlock(scan_round=1, last_evaluated=_LAST_EVAL),
+    "last_evaluated_none": LeadingBlock(
+        last_evaluated=f"operator_comment=none|body_sha={_SHA}"
+    ),
+    "settled": LeadingBlock(settled=("A1: ADOPTED", "R2.P3: CONFIRMED", "A2: ALT-b")),
+    "attempt_started": LeadingBlock(
+        attempted=ResolutionsAttempt(
+            source="comment:9", outcome="started", lease_until="2026-11-25T10:00:00Z"
+        )
+    ),
+    "attempt_failed": LeadingBlock(
+        attempted=ResolutionsAttempt(source=f"body:{_SHA}", outcome="failed")
+    ),
+    "attempt_succeeded": LeadingBlock(
+        attempted=ResolutionsAttempt(source=f"row:2:{_SHA}", outcome="succeeded")
+    ),
+    "revoked": LeadingBlock(
+        revoked=ApprovalRevoked(at="2026-11-25T10:00:00Z", fingerprint=_SHA2)
+    ),
+    "applied_comment": LeadingBlock(applied="comment:IC_kw1"),
+    "applied_body": LeadingBlock(applied=f"body:{_SHA}"),
+    "applied_row_legacy": LeadingBlock(applied="row:3"),
+    "applied_row": LeadingBlock(applied=f"row:3:{_SHA}"),
+    "applied_none": LeadingBlock(applied="none"),
+    "everything": LeadingBlock(
+        scan_round=1,
+        last_evaluated=_LAST_EVAL,
+        settled=("A1: ADOPTED",),
+        attempted=ResolutionsAttempt(source="row:1", outcome="succeeded"),
+        revoked=ApprovalRevoked(at="t", fingerprint=_SHA2),
+        applied="row:1",
+    ),
+}
+
+
+class TestLeadingBlock:
+    @pytest.mark.parametrize("name", sorted(_BLOCK_SHAPES))
+    def test_round_trip(self, name: str) -> None:
+        block = _BLOCK_SHAPES[name]
+        rendered = render_leading_block(block)
+        text = rendered + "# Plan\n\nbody\n"
+        assert parse_leading_block(text) == block
+        assert leading_bookkeeping_end(text) == len(rendered)
+        assert render_leading_block(parse_leading_block(text)) == rendered
+
+    def test_absent_block_parses_empty_and_renders_round_zero(self) -> None:
+        assert parse_leading_block("# Plan\n") == LeadingBlock()
+        assert render_leading_block(LeadingBlock()) == (
+            "<!-- plan-stage-scan-round: 0 -->\n"
+        )
+
+    def test_order_is_always_the_grammar_order(self) -> None:
+        rendered = render_leading_block(_BLOCK_SHAPES["everything"])
+        opens = [line.split(":")[0] for line in rendered.splitlines()]
+        assert opens == [
+            "<!-- plan-stage-scan-round",
+            "<!-- plan-stage-last-evaluated",
+            "<!-- plan-stage-settled",
+            "<!-- plan-stage-resolutions-attempted",
+            "<!-- plan-stage-approval-revoked",
+            "<!-- plan-stage-resolutions-applied",
+        ]
+
+    def test_bookkeeping_edits_do_not_change_the_fingerprint(self) -> None:
+        body = "# Plan\n\nbody\n"
+        texts = [render_leading_block(b) + body for b in _BLOCK_SHAPES.values()]
+        assert len({compute_plan_draft_fingerprint(t) for t in texts}) == 1
+
+    def test_a_line_outside_the_grammar_is_not_consumed(self) -> None:
+        text = (
+            "<!-- plan-stage-scan-round: 1 -->\n"
+            "<!-- plan-stage-settled: R1.A1: ADOPTED -->\n"
+            "<!-- plan-stage-resolutions-applied: source=none -->\n"
+        )
+        assert parse_leading_block(text) == LeadingBlock(scan_round=1)
+
+    def test_render_refuses_a_value_outside_the_grammar(self) -> None:
+        with pytest.raises(ValueError, match="outside the bookkeeping grammar"):
+            render_leading_block(LeadingBlock(settled=("R1.A1: ADOPTED",)))
+
+
+class TestSettledLine:
+    @pytest.mark.parametrize(
+        ("item_id", "token"),
+        [
+            ("A1", "ADOPTED"),
+            ("P2", "REFUTED"),
+            ("R2.A3", "ALT-c"),
+            ("R10.P1", "DEFERRED"),
+        ],
+    )
+    def test_accepts_grammar_ids(self, item_id: str, token: str) -> None:
+        assert settled_line(item_id, token) == (
+            f"<!-- plan-stage-settled: {item_id}: {token} -->\n"
+        )
+
+    @pytest.mark.parametrize(
+        ("item_id", "token"),
+        [
+            ("R1.A1", "ADOPTED"),
+            ("R0.A1", "ADOPTED"),
+            ("R02.A1", "ADOPTED"),
+            ("A1", "ADOPTED trailing"),
+            ("A1", "CONFIRMED"),
+            ("P1", "ADOPTED"),
+        ],
+    )
+    def test_rejects_non_grammar(self, item_id: str, token: str) -> None:
+        with pytest.raises(ValueError, match="not a plan-stage-settled line"):
+            settled_line(item_id, token)

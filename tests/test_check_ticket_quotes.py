@@ -982,17 +982,17 @@ def test_script_imports_no_cw_and_launches_nothing() -> None:
 
 
 def test_provenance_constants_match_their_real_homes() -> None:
-    from cw.codex_fix_loop.constraints import _FIXED_HEADERS
     from cw.dev_queue.lifecycle import _PLAN_SOUNDNESS_MARKER
     from cw.gh.issues import (
         _PLAN_MARKER,
         _SELF_DISCLOSURE_RE,
         AGENT_COMMENT_MARKER,
+        PIPELINE_FIXED_HEADERS,
     )
 
     assert _mod._AGENT_COMMENT_MARKER == AGENT_COMMENT_MARKER
     assert _mod._SELF_DISCLOSURE_RE.pattern == _SELF_DISCLOSURE_RE.pattern
     assert _mod._SELF_DISCLOSURE_RE.flags == _SELF_DISCLOSURE_RE.flags
-    assert _mod._FIXED_HEADERS == _FIXED_HEADERS
+    assert _mod._FIXED_HEADERS == PIPELINE_FIXED_HEADERS
     assert _mod._PLAN_SPEC_MARKER == _PLAN_MARKER
     assert _mod._PLAN_SOUNDNESS_MARKER == _PLAN_SOUNDNESS_MARKER

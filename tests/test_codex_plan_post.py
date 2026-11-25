@@ -13,6 +13,7 @@ import pytest
 from cw.auto_dev_result.parse import extract_block
 from cw.codex_plan._post import (
     PARK_HEADER,
+    PlanCommentKind,
     post_plan_comment,
     render_park_comment,
 )
@@ -72,7 +73,7 @@ def _post(
     worktree: Path,
     text: str,
     *,
-    park: bool = False,
+    kind: PlanCommentKind = "plan",
     artifact: str = "plan.md",
 ) -> None:
     artifact_path = worktree / ".cw" / artifact
@@ -84,7 +85,7 @@ def _post(
         sid="sess-p",
         text=text,
         artifact_path=artifact_path,
-        park=park,
+        kind=kind,
     )
 
 
@@ -127,7 +128,7 @@ class TestEnqueue:
         worktree = _worktree(tmp_path)
         launches = _no_gh(monkeypatch)
         text = f"{PARK_HEADER}\n\nNo open ambiguities or premises.\n"
-        _post(client, worktree, text, park=True, artifact="plan-draft.md")
+        _post(client, worktree, text, kind="park", artifact="plan-draft.md")
         (produced,) = entries_for(client.name, ticket=_TICKET)
         assert produced.entry.producer == "codex-plan"
         assert produced.entry.marker == content_marker("park", "".join(produced.parts))
@@ -139,12 +140,23 @@ class TestEnqueue:
         client = codex_tracker_client(tmp_path)
         worktree = _worktree(tmp_path)
         _post(client, worktree, _PLAN)
-        _post(client, worktree, _PLAN, park=True)
+        _post(client, worktree, _PLAN, kind="park")
         plan, park = entries_for(client.name, ticket=_TICKET)
         assert plan.entry.marker.startswith("plan-")
         assert park.entry.marker.startswith("park-")
         assert plan.entry.marker.split("-", 1)[1] == park.entry.marker.split("-", 1)[1]
         assert _events() == []
+
+    def test_blocking_enqueues_with_the_blocking_marker(self, tmp_path: Path) -> None:
+        client = codex_tracker_client(tmp_path)
+        worktree = _worktree(tmp_path)
+        text = "## Blocking Review Findings\n\n### Plan Reviewer — MUST_FIX\n\n- x\n"
+        _post(client, worktree, text, kind="blocking", artifact="plan-draft.md")
+        (produced,) = entries_for(client.name, ticket=_TICKET)
+        assert produced.entry.marker == content_marker(
+            "blocking", "".join(produced.parts)
+        )
+        assert not produced.entry.marker.startswith("plan-")
 
     def test_long_plan_splits_with_markers_in_part_one_only(
         self, tmp_path: Path
@@ -240,6 +252,30 @@ class TestParkComment:
         assert "### How to answer" in text
         assert "### Approval requested" not in text
 
+    def test_a_capped_park_carries_its_note_after_the_items(
+        self, tmp_path: Path
+    ) -> None:
+        result = _result(
+            tmp_path,
+            tier="small",
+            status="ambiguities_pending_resolution",
+            ambiguities=[{"question": "Which store?"}],
+            next_actions=["user_resolve_ambiguities"],
+            plan_draft_fingerprint=None,
+        )
+        text = render_park_comment(
+            ticket_id=_TICKET,
+            client_name="acme",
+            result=result,
+            draft_body="DRAFT BODY",
+            approved_fingerprint=None,
+            advisory_findings=[],
+            note="The round cap (2) is reached.",
+        )
+        items = text.index("1. Which store?")
+        note = text.index("### Round blocked\n\nThe round cap (2) is reached.")
+        assert items < note < text.index("### How to answer")
+
     def test_ambiguities_park_comment(self, tmp_path: Path) -> None:
         result = _result(
             tmp_path,
@@ -298,7 +334,7 @@ class TestParkComment:
                 client,
                 worktree,
                 "## Pending Verification Scan\n",
-                park=True,
+                kind="park",
                 artifact="plan-draft.md",
             )
         (event,) = _events()
@@ -315,6 +351,7 @@ class TestParkComment:
                 sid="sess-p",
                 text=_PLAN,
                 artifact_path=worktree / ".cw" / "missing.md",
+                kind="plan",
             )
         (event,) = _events()
         assert event["artifact_path"] is None
@@ -330,6 +367,7 @@ class TestParkComment:
                 sid="sess-p",
                 text=_PLAN,
                 artifact_path=None,
+                kind="plan",
             )
         (event,) = _events()
         assert event["artifact_path"] is None

@@ -98,13 +98,17 @@ class StationBlock:
 
     ``restates_findings`` marks *details* that only restate finding lines the
     station's findings already carry (the MUST_FIX block), so an advisory run
-    does not list them twice (#3527).
+    does not list them twice (#3527). Only a MUST_FIX block carries the
+    station's *role* and its verbatim *must_fix* lines (#3464): the revision
+    cycle and the blocking-findings comment act on nothing else.
     """
 
     reason: str
     details: str
     retry_eligible: bool
     restates_findings: bool = False
+    role: str | None = None
+    must_fix: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -181,7 +185,12 @@ def _classify(
     if blocking:
         details = f"{role} MUST_FIX findings:\n" + "\n".join(blocking)
         block = StationBlock(
-            reason, details, retry_eligible=False, restates_findings=True
+            reason,
+            details,
+            retry_eligible=False,
+            restates_findings=True,
+            role=role,
+            must_fix=tuple(blocking),
         )
         return block, lines
     return None, lines

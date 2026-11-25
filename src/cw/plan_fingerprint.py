@@ -109,6 +109,165 @@ def leading_bookkeeping_end(text: str) -> int:
     return offset
 
 
+_ROUND_OPEN = "<!-- plan-stage-scan-round: "
+_LAST_EVALUATED_OPEN = "<!-- plan-stage-last-evaluated: "
+_SETTLED_OPEN = "<!-- plan-stage-settled: "
+_ATTEMPTED_OPEN = "<!-- plan-stage-resolutions-attempted: "
+_REVOKED_OPEN = "<!-- plan-stage-approval-revoked: "
+_APPLIED_OPEN = "<!-- plan-stage-resolutions-applied: "
+_LINE_CLOSE = " -->"
+ATTEMPT_STARTED = "started"
+ATTEMPT_FAILED = "failed"
+ATTEMPT_SUCCEEDED = "succeeded"
+
+
+@dataclass(frozen=True)
+class ResolutionsAttempt:
+    """The ``plan-stage-resolutions-attempted`` line: a per-source lease."""
+
+    source: str
+    outcome: str
+    lease_until: str | None = None
+
+
+@dataclass(frozen=True)
+class ApprovalRevoked:
+    """The ``plan-stage-approval-revoked`` line: when, and the cleared sha."""
+
+    at: str
+    fingerprint: str
+
+
+@dataclass(frozen=True)
+class LeadingBlock:
+    """The parsed leading bookkeeping block of a ``.cw/plan-draft.md`` (#3464).
+
+    Values are the line contents without the comment frame:
+    ``last_evaluated`` is ``operator_comment=<id|none>|body_sha=<sha>``, each
+    ``settled`` entry is ``<item id>: <token>``, and ``applied`` is the
+    resolutions source (``comment:<id>``, ``body:<sha>``, ``row:<N>[:<sha>]`` or
+    ``none``). An absent block parses as round 0 with nothing else.
+    """
+
+    scan_round: int = 0
+    last_evaluated: str | None = None
+    settled: tuple[str, ...] = ()
+    attempted: ResolutionsAttempt | None = None
+    revoked: ApprovalRevoked | None = None
+    applied: str | None = None
+
+
+def _content(line: str, opener: str) -> str:
+    """*line*'s value between *opener* and the closing `` -->``."""
+    return line[len(opener) :].rstrip("\n").removesuffix(_LINE_CLOSE)
+
+
+def _parse_attempt(value: str) -> ResolutionsAttempt:
+    source_part, _, rest = value.partition("; outcome=")
+    outcome, _, lease = rest.partition("; lease_until=")
+    return ResolutionsAttempt(
+        source=source_part.removeprefix("source="),
+        outcome=outcome,
+        lease_until=lease or None,
+    )
+
+
+def _parse_revoked(value: str) -> ApprovalRevoked:
+    at_part, _, fingerprint = value.partition("; fingerprint=")
+    return ApprovalRevoked(at=at_part.removeprefix("at="), fingerprint=fingerprint)
+
+
+def parse_leading_block(text: str) -> LeadingBlock:
+    """Parse *text*'s leading bookkeeping block into a :class:`LeadingBlock`.
+
+    Walks the same compiled patterns, in the same order, as
+    :func:`leading_bookkeeping_end`, so exactly the lines it would carry are
+    read; a line outside the grammar (or out of order) is plan content and is
+    not consumed. Without the round-counter line the block is absent.
+    """
+    round_match = _ROUND_LINE.match(text)
+    if round_match is None:
+        return LeadingBlock()
+    offset = round_match.end()
+    scan_round = int(_content(round_match.group(0), _ROUND_OPEN))
+    last_evaluated: str | None = None
+    if (match := _LAST_EVALUATED_LINE.match(text, offset)) is not None:
+        last_evaluated = _content(match.group(0), _LAST_EVALUATED_OPEN)
+        offset = match.end()
+    settled: list[str] = []
+    while settled_match := _SETTLED_LINE.match(text, offset):
+        settled.append(_content(settled_match.group(0), _SETTLED_OPEN))
+        offset = settled_match.end()
+    attempted: ResolutionsAttempt | None = None
+    revoked: ApprovalRevoked | None = None
+    applied: str | None = None
+    if (match := _RESOLUTIONS_ATTEMPTED_LINE.match(text, offset)) is not None:
+        attempted = _parse_attempt(_content(match.group(0), _ATTEMPTED_OPEN))
+        offset = match.end()
+    if (match := _APPROVAL_REVOKED_LINE.match(text, offset)) is not None:
+        revoked = _parse_revoked(_content(match.group(0), _REVOKED_OPEN))
+        offset = match.end()
+    if (match := _RESOLUTIONS_APPLIED_LINE.match(text, offset)) is not None:
+        applied = _content(match.group(0), _APPLIED_OPEN).removeprefix("source=")
+    return LeadingBlock(
+        scan_round=scan_round,
+        last_evaluated=last_evaluated,
+        settled=tuple(settled),
+        attempted=attempted,
+        revoked=revoked,
+        applied=applied,
+    )
+
+
+def _attempt_value(attempt: ResolutionsAttempt) -> str:
+    value = f"source={attempt.source}; outcome={attempt.outcome}"
+    if attempt.lease_until is not None:
+        value += f"; lease_until={attempt.lease_until}"
+    return value
+
+
+def render_leading_block(block: LeadingBlock) -> str:
+    """Render *block* in the closed grammar order, one line each.
+
+    The inverse of :func:`parse_leading_block`; an absent block renders the
+    explicit round-0 line. Raises ``ValueError`` when a value would render a
+    line outside the grammar (so a malformed block is never written as plan
+    content that shifts the fingerprint).
+    """
+    lines = [f"{_ROUND_OPEN}{block.scan_round}{_LINE_CLOSE}\n"]
+    if block.last_evaluated is not None:
+        lines.append(f"{_LAST_EVALUATED_OPEN}{block.last_evaluated}{_LINE_CLOSE}\n")
+    lines.extend(f"{_SETTLED_OPEN}{item}{_LINE_CLOSE}\n" for item in block.settled)
+    if block.attempted is not None:
+        value = _attempt_value(block.attempted)
+        lines.append(f"{_ATTEMPTED_OPEN}{value}{_LINE_CLOSE}\n")
+    if block.revoked is not None:
+        revoked = block.revoked
+        value = f"at={revoked.at}; fingerprint={revoked.fingerprint}"
+        lines.append(f"{_REVOKED_OPEN}{value}{_LINE_CLOSE}\n")
+    if block.applied is not None:
+        lines.append(f"{_APPLIED_OPEN}source={block.applied}{_LINE_CLOSE}\n")
+    text = "".join(lines)
+    if leading_bookkeeping_end(text) != len(text):
+        msg = f"leading block renders outside the bookkeeping grammar: {block!r}"
+        raise ValueError(msg)
+    return text
+
+
+def settled_line(item_id: str, token: str) -> str:
+    """The ``plan-stage-settled`` line for *item_id* and *token*.
+
+    Raises ``ValueError`` unless the line fully matches the grammar: a bare
+    ``A<n>``/``P<n>`` id or an ``R<k>.`` qualifier with k >= 2 (``R1.``,
+    ``R0.`` and ``R02.`` are rejected), and a token of the id's letter.
+    """
+    line = f"{_SETTLED_OPEN}{item_id}: {token}{_LINE_CLOSE}\n"
+    if _SETTLED_LINE.fullmatch(line) is None:
+        msg = f"not a plan-stage-settled line: {item_id!r}: {token!r}"
+        raise ValueError(msg)
+    return line
+
+
 def compute_plan_draft_fingerprint(text: str) -> str:
     """Apply the named *Plan-draft fingerprint rule* to draft *text* (#2102).
 

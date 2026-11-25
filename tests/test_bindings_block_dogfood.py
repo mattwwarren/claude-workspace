@@ -73,7 +73,6 @@ def test_codex_plan_prompt_carries_the_context_bytes(tmp_path: Path) -> None:
         docs_root=_COMMANDS_ROOT,
         ticket=None,
         resume=None,
-        approval_matches=False,
         bindings_block=block,
     )
 

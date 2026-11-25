@@ -188,6 +188,14 @@ PLAN_UNSOUND_BLOCKER_REASON: Literal["plan_unsound"] = "plan_unsound"
 # emit it for engine-round, unresolvable-engine and finalize failures. Named so
 # those producers share one spelling (#3438).
 AGENT_BLOCK_BLOCKER_REASON: Literal["agent_block"] = "agent_block"
+# The codex PLAN resume round's two hard exits (#3464): the round cap reached
+# with items still open, and a DEFERRED premise stub left unresolved.
+AMBIGUITY_SCAN_UNCONVERGED_BLOCKER_REASON: Literal["ambiguity_scan_unconverged"] = (
+    "ambiguity_scan_unconverged"
+)
+DEFERRED_STUB_UNRESOLVED_BLOCKER_REASON: Literal["deferred_stub_unresolved"] = (
+    "deferred_stub_unresolved"
+)
 # Blocker reasons at Stage.FINALIZE eligible for automatic regress to IMPL.
 # "agent_block" covers prep-pr gate failures (diff-cover, etc.) that a fresh
 # impl session can fix by adding missing tests. Reasons absent here (e.g.

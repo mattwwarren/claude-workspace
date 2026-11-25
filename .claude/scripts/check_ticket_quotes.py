@@ -104,7 +104,7 @@ TRIGGER_BLOCKQUOTE = "blockquote"
 # Provenance constants. MIRRORED, NOT SHARED: ``.claude/scripts`` must not
 # import ``cw``. tests/test_check_ticket_quotes.py asserts each equals its home:
 #   _AGENT_COMMENT_MARKER, _SELF_DISCLOSURE_RE, _PLAN_SPEC_MARKER  cw.gh.issues
-#   _FIXED_HEADERS                                       cw.codex_fix_loop.constraints
+#   _FIXED_HEADERS                     cw.gh.issues (PIPELINE_FIXED_HEADERS)
 #   _PLAN_SOUNDNESS_MARKER                               cw.dev_queue.lifecycle
 # ---------------------------------------------------------------------------
 

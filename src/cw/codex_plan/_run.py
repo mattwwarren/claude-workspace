@@ -8,12 +8,18 @@ so a stage fault completes the session as ``unexpected_error`` at
 1. Resolve the tracker. A non-GitHub tracker must have a usable codex MCP
    server (the run-time backstop of the pre-dispatch gate), or the run blocks
    ``tracker_mcp_unavailable_pre_dispatch``.
-2. Resolve cw's command-doc tree, prefetch the GitHub ticket, read a resumable
-   draft and render the prompt; any failure blocks ``plan_missing_context``.
-3. Launch one read-only ``codex exec`` turn with no timeout (ADR-0014).
+2. Read the tracker state (this run's live GitHub snapshot, or the row's
+   stored snapshot elsewhere) and a resumable draft. A resumed draft goes
+   through the resume gate (:mod:`cw.codex_plan._resume`): the resolutions
+   delta and its revision, then the approved-fingerprint fast path, which
+   runs no turn at all.
+3. Otherwise resolve cw's command-doc tree, prefetch the GitHub ticket and
+   render the prompt (any failure blocks ``plan_missing_context``), then
+   launch one read-only ``codex exec`` turn with no timeout (ADR-0014).
 4. Parse the ``-o`` document strictly and stamp the sentinel.
-5. Choose the plan text: a resumed draft whose fingerprint the row approved
-   is taken verbatim; otherwise the model's text, cleaned.
+5. The model's text, cleaned, is the plan; cw validates its settlement
+   claims, settles the tracker fingerprint, checks the deferred stubs and
+   runs the round counter and cap.
 6. Gate set B, then the two review stations (binding on a completing exit,
    advisory on a park), then the artifacts and the fingerprint binding.
 7. Record plan decisions, complete through the door, post, and emit
@@ -26,48 +32,71 @@ model-emitted.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import shutil
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
-from cw.auto_dev_result.schema._vocab import PLAN_MISSING_CONTEXT_BLOCKER_REASON
+from cw.auto_dev_result.schema._vocab import (
+    AMBIGUITY_SCAN_UNCONVERGED_BLOCKER_REASON,
+    DEFERRED_STUB_UNRESOLVED_BLOCKER_REASON,
+    PLAN_MISSING_CONTEXT_BLOCKER_REASON,
+)
 from cw.backend_mcp_config import McpState, declared_server_names, read_backend_mcp
 from cw.bindings_block import bindings_block_for, effective_tickets_system
 from cw.codex_plan._argv import build_plan_argv, read_tools_for, require_read_only_argv
-from cw.codex_plan._post import post_plan_comment, render_park_comment
+from cw.codex_plan._exits import (
+    _complete,
+    _consolidated_block,
+    _Exit,
+    _gate,
+    _park,
+    _with_friction,
+)
+from cw.codex_plan._post import post_plan_comment
 from cw.codex_plan._prompt import (
     PLAN_TURN_SCHEMA,
+    ResumeFacts,
     command_docs_root,
     prefetch_ticket,
     render_plan_prompt,
 )
 from cw.codex_plan._result import (
-    DECISIONS_NOT_RECORDED_PREFIX,
-    MODEL_TEXT_DISCARDED_FRICTION,
     PARK_STATUSES,
     PLAN_BLOCKED,
     PLAN_NO_OP,
     RESUME_FRICTION,
-    PlanDraftError,
+    STAGE_PLAN_GENERATED,
+    STAGE_SCAN_SKIPPED,
     PlanTurnFailure,
-    ResumeDraft,
-    backup_plan_md,
     clean_plan_text,
-    draft_fingerprint_on_disk,
-    existing_plan_md_fingerprint,
+    on_disk_leading_block,
     parse_plan_turn,
     plan_blocked,
-    plan_md_replaced_token,
     read_resume_draft,
-    stamp_plan_result,
-    write_plan_draft,
-    write_plan_md,
 )
-from cw.codex_plan._stations import run_plan_stations, stamp_markers
+from cw.codex_plan._resume import (
+    EXIT_STATUSES,
+    GateOutcome,
+    RoundBook,
+    TrackerState,
+    cap_check,
+    resume_gate,
+    settle_fingerprint,
+    synthesize_fast_path_result,
+    tracker_state,
+    unconverged_details,
+)
+from cw.codex_plan._revise import revision_cycle
+from cw.codex_plan._settle import (
+    SettleOutcome,
+    unresolved_stubs,
+    validate_settlements,
+)
 from cw.codex_review import (
     CODEX_ERROR,
     CODEX_MODEL_CAPACITY,
@@ -85,49 +114,48 @@ from cw.codex_stage_completion import (
 from cw.codex_usage import NO_USAGE, UsageAccumulator
 from cw.contract_manifest import RenderError
 from cw.dev_queue import _PRE_DISPATCH_TRACKER_MCP_REASON
-from cw.dev_queue.lifecycle import _plan_body_signoff_ok
-from cw.dev_queue.operator_constraints import record_plan_constraints
 from cw.exceptions import CwError
-from cw.models import CODEX_BACKEND, OrchestratorEventType, Stage
+from cw.models import CODEX_BACKEND, OrchestratorEventType
 from cw.models.bindings import Harness, TicketsBinding
 from cw.models.enums import StageIdentifier
-from cw.plan_decisions import parse_plan_decisions
-from cw.plan_fingerprint import PLAN_DRAFT_RELATIVE_PATH, compute_plan_draft_fingerprint
+from cw.plan_fingerprint import compute_plan_draft_fingerprint
 from cw.stage_verification.plan_gates import (
-    CODEX_PLAN_ARTIFACT_MISSING,
     ApprovalCheck,
     GateFailure,
-    check_artifact,
     check_large_tier_approval,
-    check_plan_files,
-    check_scope_tier,
-    has_approval_evidence,
 )
-from cw.ticket_snapshot import record_snapshot_from_github
+from cw.ticket_snapshot import context_for_client, record_snapshot_from_github
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.tracker_io import TrackerIoConfigError
 from cw.tracker_io._argv import validate_server_name
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import Any
 
     from cw.auto_dev_result import AutoDevResult
+    from cw.codex_plan._result import PlanSettlement, ResumeDraft
     from cw.codex_runner import CodexRunner, CodexRunResult
     from cw.models import ClientConfig, TicketTask
+    from cw.ticket_snapshot import SnapshotContext, TicketSnapshot
 
 _log = logging.getLogger(__name__)
 
 
-def _record_ticket_snapshot(ticket_id: str, client_name: str, cwd: Path) -> None:
-    """Write the GitHub ticket snapshot for this PLAN run; non-fatal (RFC 0019 T1).
+def _record_ticket_snapshot(
+    ticket_id: str, client_name: str, cwd: Path
+) -> TicketSnapshot | None:
+    """Fetch and record this run's GitHub snapshot; ``None`` on failure (non-fatal).
 
-    The PLAN prompt is still built from ``prefetch_ticket``. This is a separate
-    third ``gh`` call, so the stored snapshot can differ from the text the agent
-    saw if the issue changed between calls (named T1 limitation, source skew).
-    Sources for the log are the row (``task.ticket_id``, ``task.client``).
+    The returned snapshot is the one the resume gate reads (#3464): never the
+    row's stored snapshot, which has no freshness check and after a failed
+    fetch would be the previous round's. The PLAN prompt is still built from
+    ``prefetch_ticket``, a separate ``gh`` call, so the two can differ if the
+    issue changed between calls (named T1 limitation, source skew). Sources
+    for the log are the row (``task.ticket_id``, ``task.client``).
     """
     try:
-        record_snapshot_from_github(ticket_id, client_name, cwd)
+        return record_snapshot_from_github(ticket_id, client_name, cwd).snapshot
     except (CwError, OSError):
         _log.warning(
             "codex plan: ticket snapshot not recorded ticket_id=%s client=%s",
@@ -135,14 +163,11 @@ def _record_ticket_snapshot(ticket_id: str, client_name: str, cwd: Path) -> None
             client_name,
             exc_info=True,
         )
+        return None
 
 
-NO_OP: Final = PLAN_NO_OP
-
-#: The stage identifiers the driver's stage events carry.
+#: The intake stage identifier (the ``prev_stage`` of the generated event).
 STAGE_INTAKE: Final = StageIdentifier.S0_INTAKE.value
-STAGE_PLAN_GENERATED: Final = StageIdentifier.S1_PLAN_GENERATED.value
-STAGE_PLAN_REVIEWED: Final = StageIdentifier.S1_PLAN_REVIEWED.value
 
 _SCHEMA_NAME: Final = "plan-schema.json"
 _OUTPUT_NAME: Final = "plan-output.json"
@@ -161,15 +186,6 @@ class _McpTarget:
 
 
 @dataclass(frozen=True)
-class _Exit:
-    """What a run ends with: the result, and the comment to post (if any)."""
-
-    result: AutoDevResult
-    post_text: str | None = None
-    artifact_path: Path | None = None
-
-
-@dataclass(frozen=True)
 class _Run:
     """Everything one PLAN run needs; methods are the flow's steps."""
 
@@ -182,6 +198,7 @@ class _Run:
     model: str | None
     reasoning_effort: str | None
     usage: UsageAccumulator = NO_USAGE
+    book: RoundBook = field(default_factory=RoundBook)
 
     # -- events -------------------------------------------------------------
 
@@ -192,6 +209,7 @@ class _Run:
         *,
         prev_stage: str | None = None,
         error_kind: str | None = None,
+        reason: str | None = None,
     ) -> None:
         """Record one stage event, best-effort: telemetry never changes the result."""
         payload: dict[str, object] = {
@@ -203,6 +221,8 @@ class _Run:
             payload["prev_stage"] = prev_stage
         if error_kind is not None:
             payload["error_kind"] = error_kind
+        if reason is not None:
+            payload["reason"] = reason
         payload["started_at"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         record_event_best_effort(event_type, payload, self.task.ticket_id)
 
@@ -214,8 +234,13 @@ class _Run:
         *,
         retry_eligible: bool = False,
         plan_draft_fingerprint: str | None = None,
+        error_kind: str | None = None,
     ) -> _Exit:
-        """A cw-built blocked exit; emits its one ``stage.errored``."""
+        """A cw-built blocked exit; emits its one ``stage.errored``.
+
+        The event's ``error_kind`` is *reason* unless *error_kind* overrides
+        it (a revision cycle that ran reports ``plan_revision_failed``).
+        """
         result = plan_blocked(
             ticket_id=self.task.ticket_id,
             worktree=self.worktree,
@@ -224,7 +249,9 @@ class _Run:
             retry_eligible=retry_eligible,
             plan_draft_fingerprint=plan_draft_fingerprint,
         )
-        self.emit(OrchestratorEventType.STAGE_ERRORED, stage, error_kind=reason)
+        self.emit(
+            OrchestratorEventType.STAGE_ERRORED, stage, error_kind=error_kind or reason
+        )
         return _Exit(result)
 
     def gate_blocked(self, failure: GateFailure, stage: str) -> _Exit:
@@ -270,7 +297,7 @@ class _Run:
         )
 
     def prompt(
-        self, target: _McpTarget, resume: ResumeDraft | None, approval: bool
+        self, target: _McpTarget, resume: ResumeDraft | None, facts: ResumeFacts
     ) -> str | _Exit:
         """The rendered prompt, or a ``plan_missing_context`` block."""
         docs_root = command_docs_root()
@@ -292,19 +319,16 @@ class _Run:
                     PLAN_MISSING_CONTEXT_BLOCKER_REASON,
                     f"gh could not fetch ticket {self.task.ticket_id} body/comments",
                 )
-            _record_ticket_snapshot(
-                self.task.ticket_id, self.task.client, self.client.workspace_path
-            )
         try:
             return render_plan_prompt(
                 ticket_id=self.task.ticket_id,
                 docs_root=docs_root,
                 ticket=ticket,
                 resume=resume,
-                approval_matches=approval,
                 bindings_block=bindings_block_for(
                     self.client, Harness.CODEX, self.task.ticket_id
                 ),
+                facts=facts,
             )
         except RenderError as exc:
             return self.blocked(
@@ -313,15 +337,25 @@ class _Run:
                 f"render failed: {exc}",
             )
 
-    def turn(self, prompt: str, target: _McpTarget) -> CodexRunResult | _Exit:
-        """Launch the one read-only PLAN turn in a fresh scratch directory."""
+    def turn(
+        self,
+        prompt: str,
+        target: _McpTarget,
+        *,
+        schema: dict[str, Any] = PLAN_TURN_SCHEMA,
+    ) -> CodexRunResult | _Exit:
+        """Launch one read-only turn (the scan, or a revision) in a fresh scratch dir.
+
+        *schema* is the strict ``-o`` schema: the scan's by default, the
+        revision turn's for :func:`cw.codex_plan._revise.revise_plan`.
+        """
         scratch = _codex_scratch_dir(uuid.uuid4().hex)
         try:
-            schema = scratch / _SCHEMA_NAME
-            schema.write_text(json.dumps(PLAN_TURN_SCHEMA), encoding="utf-8")
+            schema_path = scratch / _SCHEMA_NAME
+            schema_path.write_text(json.dumps(schema), encoding="utf-8")
             try:
                 argv = build_plan_argv(
-                    schema_path=schema,
+                    schema_path=schema_path,
                     output_path=scratch / _OUTPUT_NAME,
                     model=self.model,
                     reasoning_effort=self.reasoning_effort,
@@ -355,225 +389,85 @@ class _Run:
         )
 
 
-def _approval_matches(task: TicketTask, resume: ResumeDraft | None) -> bool:
-    return (
-        resume is not None
-        and has_approval_evidence(task)
-        and task.plan_approved_fingerprint == resume.fingerprint
+@dataclass(frozen=True)
+class _Round:
+    """What the round read before its turn: the tracker state and the draft."""
+
+    state: TrackerState
+    resume: ResumeDraft | None
+    target: _McpTarget
+    settlements: tuple[PlanSettlement, ...] = ()
+    row_delta: bool = False
+
+
+def _settle_claims(
+    run: _Run, result: AutoDevResult, round_: _Round
+) -> tuple[AutoDevResult, SettleOutcome]:
+    """Validate the turn's settlement claims; accepted ones join the book."""
+    if round_.resume is None:
+        return result, SettleOutcome()
+    state = round_.state
+    outcome = validate_settlements(
+        round_.settlements,
+        park=state.park,
+        settled=run.book.block.settled,
+        comment_ids=[str(comment["id"]) for comment in state.observation.comments],
+        row_rounds=[resolution.round for resolution in run.task.operator_resolutions],
     )
+    run.book.update(settled=(*run.book.block.settled, *outcome.settled_entries()))
+    return _with_friction(result, outcome.friction(state.park.ordinal)), outcome
 
 
-def _choose_text(
-    model_text: str, resume: ResumeDraft | None, approval: bool
-) -> tuple[str, list[str]]:
-    """The plan text cw uses, and the friction tokens the choice records."""
-    friction = [RESUME_FRICTION] if resume is not None else []
-    cleaned = clean_plan_text(model_text)
-    if resume is None or not approval:
-        return cleaned, friction
-    if cleaned.strip() != resume.body.strip():
-        friction.append(MODEL_TEXT_DISCARDED_FRICTION)
-    return resume.body, friction
-
-
-def _gate(result: AutoDevResult, plan_text: str) -> GateFailure | None:
-    if result.status in {NO_OP, PLAN_BLOCKED}:
-        return None
-    failure = check_artifact(plan_text)
-    if failure is not None:
-        return failure
-    return check_plan_files(plan_text) or check_scope_tier(plan_text, result.scope.tier)
-
-
-def _with_friction(result: AutoDevResult, tokens: list[str]) -> AutoDevResult:
-    if not tokens:
-        return result
-    return result.model_copy(
-        update={"friction_highlights": [*result.friction_highlights, *tokens]}
-    )
-
-
-def _bound(
-    run: _Run, result: AutoDevResult, *, bind_draft: bool = True
-) -> AutoDevResult:
-    """*result* with its fingerprint bound to the on-disk draft."""
-    return stamp_plan_result(
-        result.model_dump(mode="json"),
-        ticket_id=run.task.ticket_id,
-        worktree=run.worktree,
-        bind_draft=bind_draft,
-    )
-
-
-def _write_draft_best_effort(run: _Run, plan_text: str) -> str | None:
-    """Write the draft; its on-disk fingerprint, or ``None`` when not written."""
-    try:
-        write_plan_draft(run.worktree, plan_text)
-    except PlanDraftError:
-        raise
-    except OSError:
-        _log.warning("codex plan draft not written ticket=%s", run.task.ticket_id)
-        return None
-    return draft_fingerprint_on_disk(run.worktree)
-
-
-def _blocked_with_draft(
+def _route(
     run: _Run,
-    reason: str,
-    details: str,
-    *,
-    fingerprint: str | None,
-    retry_eligible: bool = False,
+    plan_text: str,
+    check: ApprovalCheck,
+    outcome: SettleOutcome,
+    round_: _Round,
 ) -> _Exit:
-    """A blocked exit after the stations ran, carrying the draft's fingerprint."""
-    return run.blocked(
-        STAGE_PLAN_REVIEWED,
-        reason,
-        details,
-        retry_eligible=retry_eligible,
-        plan_draft_fingerprint=fingerprint,
-    )
-
-
-def _record_decisions(run: _Run, plan_text: str) -> str | None:
-    """Record the plan's decisions on the row; a friction token on any shortfall."""
-    if run.task.stage != Stage.PLAN:
-        return None
-    decisions = parse_plan_decisions(plan_text)
-    if not decisions:
-        return None
-    try:
-        outcome = record_plan_constraints(
-            run.task.ticket_id, run.client.name, decisions, bounded=True
-        )
-    except (CwError, OSError) as exc:
-        return f"{DECISIONS_NOT_RECORDED_PREFIX}{exc}"
-    if outcome["unrecorded"]:
-        reason = outcome["unrecorded_reason"] or "size cap"
-        return f"{DECISIONS_NOT_RECORDED_PREFIX}{reason}"
-    return None
-
-
-def _park(run: _Run, plan_text: str, check: ApprovalCheck) -> _Exit:
-    """A park exit: write the draft, run advisory stations, render the comment."""
-    draft_fingerprint = _write_draft_best_effort(run, plan_text)
-    result = _bound(run, check.result, bind_draft=draft_fingerprint is not None)
-    stations = run_plan_stations(
-        runner=run.runner,
-        worktree=run.worktree,
-        plan_text=plan_text,
-        model=run.model,
-        reasoning_effort=run.reasoning_effort,
-        session_id=run.sid,
-        binding=False,
-    )
-    comment = render_park_comment(
-        ticket_id=run.task.ticket_id,
-        client_name=run.client.name,
-        result=result,
-        draft_body=clean_plan_text(plan_text),
-        approved_fingerprint=run.task.plan_approved_fingerprint,
-        advisory_findings=stations.findings,
-        mismatch=check.mismatch is not None,
-    )
-    return _Exit(result, comment, run.worktree / PLAN_DRAFT_RELATIVE_PATH)
-
-
-def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
-    """A completing exit: binding stations, the stamped plan, the decisions.
-
-    An existing ``.cw/plan.md`` (the normal state after a regress into PLAN)
-    is replaced only once both stations are clean and both markers verify; it
-    is snapshotted first and the replacement is audited as a friction token
-    (#3498).
-    """
-    stations = run_plan_stations(
-        runner=run.runner,
-        worktree=run.worktree,
-        plan_text=plan_text,
-        model=run.model,
-        reasoning_effort=run.reasoning_effort,
-        session_id=run.sid,
-        binding=True,
-    )
-    if stations.block is not None:
-        block = stations.block
-        return _blocked_with_draft(
+    """The stub check, then the cap, then park or complete."""
+    stubs = unresolved_stubs(plan_text)
+    if stubs:
+        return _consolidated_block(
             run,
-            block.reason,
-            block.details,
-            fingerprint=_write_draft_best_effort(run, plan_text),
-            retry_eligible=block.retry_eligible,
+            plan_text,
+            check,
+            reason=DEFERRED_STUB_UNRESOLVED_BLOCKER_REASON,
+            details="deferred premise stub(s) still unresolved after the scan: "
+            + "; ".join(stubs),
+            note="A deferred premise is still a PENDING stub after this scan, "
+            "so the round blocks instead of parking or completing:\n\n"
+            + "\n".join(stubs),
         )
-    marked = stamp_markers(clean_plan_text(plan_text), today=datetime.now(UTC).date())
-    if not _plan_body_signoff_ok(marked):
-        return _blocked_with_draft(
+    status = check.result.status
+    if status not in PARK_STATUSES:
+        revise = functools.partial(revision_cycle, target=round_.target)
+        return _complete(run, check.result, plan_text, revise=revise)
+    if cap_check(run.book, status):
+        details = unconverged_details(check.result, round_.state.observation)
+        return _consolidated_block(
             run,
-            CODEX_PLAN_ARTIFACT_MISSING,
-            "stamped plan does not carry both sign-off markers",
-            fingerprint=_write_draft_best_effort(run, plan_text),
+            plan_text,
+            check,
+            reason=AMBIGUITY_SCAN_UNCONVERGED_BLOCKER_REASON,
+            details=details,
+            note=f"The round cap is reached: {details}. Answer the items above, "
+            "then re-dispatch.",
         )
-    old_fingerprint = existing_plan_md_fingerprint(run.worktree)
-    backup_ok = False
-    fingerprint: str | None = None
-    try:
-        write_plan_draft(run.worktree, plan_text)
-        fingerprint = draft_fingerprint_on_disk(run.worktree)
-        result = _bound(run, result)
-        if old_fingerprint is not None:
-            backup_ok = backup_plan_md(run.worktree)
-        plan_path = write_plan_md(run.worktree, marked)
-        written = plan_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        return _blocked_with_draft(
-            run,
-            CODEX_PLAN_ARTIFACT_MISSING,
-            f".cw/plan.md: {exc}",
-            fingerprint=fingerprint,
+    evidence = outcome.evidence()
+    if evidence is not None and status in EXIT_STATUSES:
+        stamped = check.result.model_copy(
+            update={"resolution_consumed": True, "resolution_evidence": evidence}
         )
-    if not _plan_body_signoff_ok(written):
-        return _blocked_with_draft(
-            run,
-            CODEX_PLAN_ARTIFACT_MISSING,
-            ".cw/plan.md does not carry both sign-off markers",
-            fingerprint=fingerprint,
-        )
-    run.emit(
-        OrchestratorEventType.STAGE_ENTERED,
-        STAGE_PLAN_REVIEWED,
-        prev_stage=STAGE_PLAN_GENERATED,
-    )
-    try:
-        (run.worktree / PLAN_DRAFT_RELATIVE_PATH).unlink(missing_ok=True)
-    except OSError:
-        _log.warning(
-            "codex plan draft cleanup failed ticket=%s",
-            run.task.ticket_id,
-            exc_info=True,
-        )
-    tokens = _replacement_friction(old_fingerprint, marked, backup_ok=backup_ok)
-    token = _record_decisions(run, written)
-    result = _with_friction(result, [*tokens, *([token] if token else [])])
-    return _Exit(result, marked, plan_path)
-
-
-def _replacement_friction(
-    old_fingerprint: str | None, marked: str, *, backup_ok: bool
-) -> list[str]:
-    """The ``plan_md_replaced`` token when a prior ``.cw/plan.md`` was replaced."""
-    if old_fingerprint is None:
-        return []
-    new_fingerprint = compute_plan_draft_fingerprint(marked)
-    return [
-        plan_md_replaced_token(old_fingerprint, new_fingerprint, backup_ok=backup_ok)
-    ]
+        check = replace(check, result=stamped)
+    return _park(run, plan_text, check)
 
 
 def _after_turn(
-    run: _Run, plan_text_raw: str, result: AutoDevResult, resume: ResumeDraft | None
+    run: _Run, plan_text_raw: str, result: AutoDevResult, round_: _Round
 ) -> _Exit:
-    """Steps 5-7 for a parsed turn."""
-    if result.status == NO_OP:
+    """Steps 5-7 for a parsed turn (or the fast path's synthesized result)."""
+    if result.status == PLAN_NO_OP:
         return _Exit(result)
     if result.status == PLAN_BLOCKED:
         reason = result.blocker.reason if result.blocker is not None else PLAN_BLOCKED
@@ -581,27 +475,60 @@ def _after_turn(
             OrchestratorEventType.STAGE_ERRORED, STAGE_PLAN_GENERATED, error_kind=reason
         )
         return _Exit(result)
-    approval = _approval_matches(run.task, resume)
-    plan_text, friction = _choose_text(plan_text_raw, resume, approval)
-    result = _with_friction(result, friction)
+    plan_text = clean_plan_text(plan_text_raw)
+    friction = [RESUME_FRICTION] if round_.resume is not None else []
+    result = _with_friction(result, [*friction, *round_.state.source.friction])
     failure = _gate(result, plan_text)
     if failure is not None:
         return run.gate_blocked(failure, STAGE_PLAN_GENERATED)
     check = check_large_tier_approval(
         result, run.task, compute_plan_draft_fingerprint(plan_text)
     )
-    if check.result.status in PARK_STATUSES:
-        return _park(run, plan_text, check)
-    return _complete(run, check.result, plan_text)
+    settled, outcome = _settle_claims(run, check.result, round_)
+    settle_fingerprint(run.book, round_.state.observation, row_delta=round_.row_delta)
+    return _route(run, plan_text, replace(check, result=settled), outcome, round_)
 
 
-def _plan(run: _Run) -> _Exit:
-    """Steps 1-4, then :func:`_after_turn`."""
-    target = run.mcp_target()
-    if isinstance(target, _Exit):
-        return target
-    resume = read_resume_draft(run.worktree)
-    prompt = run.prompt(target, resume, _approval_matches(run.task, resume))
+def _tracker_snapshot(
+    run: _Run, target: _McpTarget, ctx: SnapshotContext
+) -> TicketSnapshot | None:
+    """This run's live GitHub snapshot, or the row's stored one elsewhere.
+
+    On GitHub the stored snapshot is never read: a failed live fetch is the
+    unobserved shape, not the previous round's snapshot.
+    """
+    if target.github:
+        return _record_ticket_snapshot(
+            run.task.ticket_id, run.task.client, run.client.workspace_path
+        )
+    return ctx.resolve(run.task, "plan")
+
+
+def _fast_path(run: _Run, gate: GateOutcome, round_: _Round) -> _Exit:
+    """The approved draft, taken with no turn: cw synthesizes the sentinel."""
+    run.emit(
+        OrchestratorEventType.STAGE_ENTERED,
+        STAGE_PLAN_GENERATED,
+        prev_stage=STAGE_INTAKE,
+    )
+    run.emit(
+        OrchestratorEventType.STAGE_ENTERED,
+        STAGE_SCAN_SKIPPED,
+        prev_stage=STAGE_PLAN_GENERATED,
+        reason=gate.reason,
+    )
+    result = synthesize_fast_path_result(run, gate.body)
+    return _after_turn(run, gate.body, result, round_)
+
+
+def _scan(run: _Run, target: _McpTarget, round_: _Round) -> _Exit:
+    """Steps 3-4: render, launch and parse the scan turn."""
+    facts = ResumeFacts(
+        park_ordinal=round_.state.park.ordinal,
+        settled_ids=tuple(e.partition(": ")[0] for e in run.book.block.settled),
+        scan_round=run.book.block.scan_round,
+    )
+    prompt = run.prompt(target, round_.resume, facts)
     if isinstance(prompt, _Exit):
         return prompt
     turn = run.turn(prompt, target)
@@ -620,7 +547,35 @@ def _plan(run: _Run) -> _Exit:
         STAGE_PLAN_GENERATED,
         prev_stage=STAGE_INTAKE,
     )
-    return _after_turn(run, parsed.plan_markdown, parsed.result, resume)
+    round_ = replace(round_, settlements=parsed.settlements)
+    return _after_turn(run, parsed.plan_markdown, parsed.result, round_)
+
+
+def _plan(run: _Run) -> _Exit:
+    """Steps 1-2 (the tracker state and the resume gate), then the scan."""
+    target = run.mcp_target()
+    if isinstance(target, _Exit):
+        return target
+    ctx = context_for_client(run.client, run.worktree, resolve_login=False)
+    if target.github:
+        # The binding-first target read the ticket from GitHub (an unset
+        # tracker included), so its live snapshot binds by the GitHub rules.
+        ctx = replace(ctx, github=True)
+    state = tracker_state(_tracker_snapshot(run, target, ctx), ctx, run.task)
+    resume = read_resume_draft(run.worktree)
+    round_ = _Round(state=state, resume=resume, target=target)
+    if resume is None:
+        return _scan(run, target, round_)
+    gate = resume_gate(run, target, resume, state)
+    if isinstance(gate, _Exit):
+        return gate
+    run = gate.run
+    round_ = replace(round_, row_delta=gate.row_delta)
+    if gate.body != resume.body:
+        round_ = replace(round_, resume=replace(resume, body=gate.body))
+    if gate.fast_path:
+        return _fast_path(run, gate, round_)
+    return _scan(run, target, round_)
 
 
 def _execute(run: _Run) -> None:
@@ -636,7 +591,7 @@ def _execute(run: _Run) -> None:
             sid=run.sid,
             text=exit_.post_text,
             artifact_path=exit_.artifact_path,
-            park=exit_.result.status in PARK_STATUSES,
+            kind=exit_.kind,
         )
     flush_late_usage(run.sid, run.usage)
     record_event_best_effort(
@@ -679,6 +634,7 @@ def run_plan_stage_and_complete(
         model=model,
         reasoning_effort=reasoning_effort,
         usage=usage,
+        book=RoundBook(on_disk_leading_block(worktree)),
     )
     run_guarded_stage(
         client_name=client.name,

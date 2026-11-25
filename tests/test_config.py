@@ -2489,7 +2489,12 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     # subprocess (never dispatch_tick) BEFORE the result is emitted through the
     # door; the read-only codex turn wrote no state, and a LockTimeoutError
     # (a CwError) becomes a plan_decisions_not_recorded friction token.
-    ("cw/codex_plan/_run.py", "_record_decisions"): 1,
+    ("cw/codex_plan/_exits.py", "_record_decisions"): 1,
+    # codex PLAN resume revoke (#3464): runs in the `cw codex run` subprocess,
+    # never reached from dispatch_tick; no irreversible side effect precedes
+    # the lock (only read-only codex turns and worktree draft writes); a
+    # LockTimeoutError (a CwError) becomes a fail-closed agent_block.
+    ("cw/codex_plan/_resume.py", "_revoke_approval"): 1,
     # `cw config concurrency ...` / `cw lane ...`: clients, concurrency_override
     # and (lane rm) dev_queue locks (#2501)
     ("cw/cli/config_cmds.py", "config_concurrency_set"): 1,

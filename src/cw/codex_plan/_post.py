@@ -3,7 +3,8 @@
 A completing exit posts the stamped ``.cw/plan.md`` (both sign-off markers on
 its first lines) as the plan of record; a park exit posts the consolidated
 park comment (:func:`render_park_comment`), never the draft as a plan of
-record. A blocked exit and ``no_op`` post nothing in C1.
+record. A capped or stub-blocked round posts the park comment too (it is the
+consolidated park, #3464); any other blocked exit and ``no_op`` post nothing.
 
 The post itself is the shared best-effort stage post in
 :mod:`cw.codex_stage_post` (#3062), with ``kind: "plan"``: a refusal or an
@@ -13,7 +14,7 @@ unconfirmed post is an event, never a row hold, and ``.cw/plan.md`` (or
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from cw.auto_dev_result import SCOPE_TIER_LARGE
 from cw.codex_stage_post import post_stage_comment
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
 __all__ = [
     "PARK_HEADER",
     "PLAN_COMMENT_KIND",
+    "PlanCommentKind",
     "post_plan_comment",
     "render_park_comment",
 ]
@@ -69,9 +71,8 @@ def _how_to_answer(ticket_id: str, client_name: str) -> str:
         "### How to answer\n\n"
         f"Run `cw dev-queue resolve {ticket_id} -c {client_name}` to answer each "
         "numbered item above on the dev-queue row (no tracker comment needed). "
-        "An operator Pre-flight Resolutions comment is still read by the next "
-        "plan turn for the numbered items, but on the codex PLAN lane it "
-        "carries no resolutions authority."
+        "An operator Pre-flight Resolutions comment or ticket-body section is "
+        "also read as a resolutions source, but the dev-queue row outranks both."
     )
 
 
@@ -112,15 +113,19 @@ def render_park_comment(
     approved_fingerprint: str | None,
     advisory_findings: Sequence[str],
     mismatch: bool = False,
+    note: str | None = None,
 ) -> str:
     """The consolidated park comment for a park exit.
 
-    Sections, in order: the numbered open items, ``### How to answer`` (when
-    an item is open), the advisory station findings (when any), ``###
-    Approval requested`` (Large tier) and the draft. It never prints the
-    pre-flight resolutions marker literal.
+    Sections, in order: the numbered open items, *note* (a capped or
+    stub-blocked round's ``### Round blocked`` explanation, #3464), ``### How
+    to answer`` (when an item is open), the advisory station findings (when
+    any), ``### Approval requested`` (Large tier) and the draft. It never
+    prints the pre-flight resolutions marker literal.
     """
     sections = [PARK_HEADER, _scan_items(result)]
+    if note is not None:
+        sections.append(f"### Round blocked\n\n{note}")
     if result.ambiguities or result.premises:
         sections.append(_how_to_answer(ticket_id, client_name))
     if advisory_findings:
@@ -148,6 +153,17 @@ def render_park_comment(
 PARK_MARKER_PREFIX: Final = "park"
 #: The marker prefix of a completing plan's comment.
 PLAN_MARKER_PREFIX: Final = "plan"
+#: The marker prefix of the ``## Blocking Review Findings`` comment (#3464);
+#: plan-of-record recovery keys on ``plan-``, so it is never read as a plan.
+BLOCKING_MARKER_PREFIX: Final = "blocking"
+
+#: Which of the three codex PLAN comments an exit posts.
+PlanCommentKind = Literal["plan", "park", "blocking"]
+_MARKER_PREFIXES: Final[dict[str, str]] = {
+    "plan": PLAN_MARKER_PREFIX,
+    "park": PARK_MARKER_PREFIX,
+    "blocking": BLOCKING_MARKER_PREFIX,
+}
 #: The producer slug both the plan and park comments enqueue under (T2 reads it).
 PLAN_PRODUCER: Final = "codex-plan"
 
@@ -160,13 +176,14 @@ def post_plan_comment(
     sid: str,
     text: str,
     artifact_path: Path | None,
-    park: bool = False,
+    kind: PlanCommentKind,
 ) -> None:
-    """Enqueue *text* as the plan or park comment, best-effort; never raises.
+    """Enqueue *text* as the plan, park or blocking comment; never raises.
 
     *artifact_path* is the durable copy the events name (``None`` when the
-    file is absent). ``park=True`` selects the ``park-`` marker prefix, so a
-    park comment and a plan of record never share a marker. A thin wrapper over
+    file is absent). *kind* selects the marker prefix (``plan-``, ``park-`` or
+    ``blocking-``), so a park or blocking comment and a plan of record never
+    share a marker. A thin wrapper over
     :func:`cw.codex_stage_post.post_stage_comment` with ``kind="plan"``.
     """
     post_stage_comment(
@@ -178,5 +195,5 @@ def post_plan_comment(
         artifact_path=artifact_path,
         kind=PLAN_COMMENT_KIND,
         producer=PLAN_PRODUCER,
-        marker_prefix=PARK_MARKER_PREFIX if park else PLAN_MARKER_PREFIX,
+        marker_prefix=_MARKER_PREFIXES[kind],
     )

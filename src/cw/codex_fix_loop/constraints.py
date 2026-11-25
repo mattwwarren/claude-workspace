@@ -44,7 +44,7 @@ from cw.codex_review import (
     CODEX_FIX_LOOP_GROWTH_GUARD_KEY,
     _parse_unified_diff,
 )
-from cw.gh import is_agent_authored
+from cw.gh import PIPELINE_FIXED_HEADERS, is_agent_authored
 from cw.models.operator_constraint import (
     OPERATOR_CONSTRAIN_COMMAND,
     render_constraint_entries,
@@ -72,13 +72,6 @@ if TYPE_CHECKING:
     from cw.stage_verification.baseline import CycleBaseline
 
 RESOLUTIONS_MARKER = "<!-- auto-dev-preflight-resolutions -->"
-# Pipeline-authored comments that quote the marker but never direct anything.
-_FIXED_HEADERS = (
-    "## Multi-Marker Gate Blocked",
-    "## Pending Verification Scan",
-    "## Blocking Review Findings",
-    "## Operator-Actionable Review Findings",
-)
 SECTION_HEADING = "## Binding Operator Constraints"
 SECTION_MAX_CHARS = 8000
 _SECTION_TRUNCATED = "\n\n[truncated: read the full operator comment on the ticket]"
@@ -174,7 +167,7 @@ def _is_constraint_comment(
         isinstance(body, str)
         and RESOLUTIONS_MARKER in body
         and not is_agent_authored(body)
-        and not body.lstrip().startswith(_FIXED_HEADERS)
+        and not body.lstrip().startswith(PIPELINE_FIXED_HEADERS)
         and (prefiltered or _author_login(comment) == operator_login)
     )
 

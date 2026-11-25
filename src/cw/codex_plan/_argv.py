@@ -11,8 +11,9 @@ Fixed choices:
 
 * ``--json`` + ``--ephemeral``: the JSONL event stream (model-capacity
   detection reads it) and no resumable session file.
-* ``--output-schema`` / ``-o``: the strict ``{plan_markdown, sentinel}``
-  document, in a uuid scratch directory the driver owns.
+* ``--output-schema`` / ``-o``: the strict
+  ``{plan_markdown, sentinel, settlements}`` document (or the revision turn's
+  ``{plan_markdown}``), in a uuid scratch directory the driver owns.
 * No ``--skip-git-repo-check``: the turn runs in the ticket worktree.
 * MCP: on a non-GitHub tracker the codex server named by
   ``tracker_mcp_gate.servers.codex`` gets the tracker's read tools only
