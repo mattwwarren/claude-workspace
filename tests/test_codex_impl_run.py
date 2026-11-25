@@ -1730,7 +1730,7 @@ def test_regressed_review_row_without_verdict_resumes_and_says_why_withheld(
 def test_regressed_review_row_with_verdict_is_not_blocked_before_the_turn(
     harness: Callable[..., Harness],
 ) -> None:
-    """A delivered REVIEW-regress verdict exempts the row from existing_branch_work."""
+    """A delivered REVIEW-regress verdict exempts the row from re-entry planning."""
     h = harness(task_updates={"stage_high_water": Stage.REVIEW})
     commit_tracked_file(h.worktree, "prior.py")
     write_review_verdict_envelope(
