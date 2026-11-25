@@ -1489,16 +1489,37 @@ def plan_sentinel(*, tier: str = "small", **overrides: object) -> str:
 
 
 def plan_turn_result(
-    plan_markdown: str, sentinel: str, *, returncode: int = 0, stderr: str = ""
+    plan_markdown: str,
+    sentinel: str,
+    *,
+    returncode: int = 0,
+    stderr: str = "",
+    settlements: Sequence[Mapping[str, str]] = (),
 ) -> CodexRunResult:
-    """A PLAN turn's result: the ``{plan_markdown, sentinel}`` ``-o`` document."""
+    """A PLAN turn's result: the ``{plan_markdown, sentinel, settlements}`` doc."""
     return CodexRunResult(
         returncode=returncode,
         stdout="",
         stderr=stderr,
         output_file_content=json.dumps(
-            {"plan_markdown": plan_markdown, "sentinel": sentinel}
+            {
+                "plan_markdown": plan_markdown,
+                "sentinel": sentinel,
+                "settlements": [dict(item) for item in settlements],
+            }
         ),
+    )
+
+
+def revise_turn_result(
+    plan_markdown: str, *, returncode: int = 0, stderr: str = ""
+) -> CodexRunResult:
+    """A PLAN revision turn's result: the ``{plan_markdown}`` ``-o`` document."""
+    return CodexRunResult(
+        returncode=returncode,
+        stdout="",
+        stderr=stderr,
+        output_file_content=json.dumps({"plan_markdown": plan_markdown}),
     )
 
 

@@ -191,11 +191,17 @@ _PLAN_CODEX_ADDENDUM = (
     "write exactly one **Scope tier:** line and a ## Files Modified section "
     "in the plan, and put the same tier in the sentinel; cw only "
     "cross-checks it.\n"
-    "9. Your final message is one JSON object with two string fields, "
-    "plan_markdown (the whole plan) and sentinel (the framed "
-    "<<<AUTO_DEV_RESULT ... AUTO_DEV_RESULT>>> block). Do not write any "
-    "sign-off marker or bookkeeping comment line into plan_markdown; cw owns "
-    "them.\n"
+    "9. Your final message is one JSON object with three fields: "
+    "plan_markdown (the whole plan), sentinel (the framed "
+    "<<<AUTO_DEV_RESULT ... AUTO_DEV_RESULT>>> block) and settlements (a list, "
+    "empty when nothing settles). Each settlement is {item_id, token, source}: "
+    "item_id is an open item of the newest park comment, round-qualified as "
+    "the resume section says (bare A<n>/P<n> at park 1, R<k>.A<n> from park "
+    "2); token is ADOPTED or ALT-<letter> for an A item and CONFIRMED, "
+    "REFUTED or DEFERRED for a P item; source is the operator comment id the "
+    "answer came from, or row:<round> for a row resolution. cw validates each "
+    "one and drops any it cannot verify. Do not write any sign-off marker or "
+    "bookkeeping comment line into plan_markdown; cw owns them.\n"
 )
 
 

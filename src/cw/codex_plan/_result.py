@@ -1,15 +1,16 @@
 """The PLAN turn's output document, the cw-stamped sentinel, and the artifacts.
 
 cw, never the model, emits the PLAN sentinel (#3060 R5): the turn returns a
-strict ``{plan_markdown, sentinel}`` document, the framed sentinel is parsed
-with the strict :class:`~cw.auto_dev_result.AutoDevResult` validation (never
-the lenient ``parse_stdout``), and every field cw owns is stamped over the
-model's. The REVIEW stamper (``stamp_stage_facts``) is not used: it would
-overwrite ``plan_source``, ``commits`` and ``fork_point_sha``.
+strict ``{plan_markdown, sentinel, settlements}`` document, the framed
+sentinel is parsed with the strict :class:`~cw.auto_dev_result.AutoDevResult`
+validation (never the lenient ``parse_stdout``), and every field cw owns is
+stamped over the model's. The REVIEW stamper (``stamp_stage_facts``) is not
+used: it would overwrite ``plan_source``, ``commits`` and ``fork_point_sha``.
 
-cw also owns the two artifacts. ``.cw/plan-draft.md`` keeps its leading
-bookkeeping block on every rewrite (cw writes the explicit round-0 line on a
-fresh draft and never increments it); ``.cw/plan.md`` is written atomically
+cw also owns the two artifacts. ``.cw/plan-draft.md`` is written with the
+leading bookkeeping block the caller passes (rendered in grammar order, so
+the round line, settled lines and resolutions lines are cw's alone);
+``.cw/plan.md`` is written atomically
 once both review stations are clean. :func:`read_resume_draft` is the read
 side of the resume check.
 """
@@ -40,9 +41,12 @@ from cw.models.enums import StageIdentifier
 from cw.plan_fingerprint import (
     PLAN_DRAFT_FINGERPRINT_KEY,
     PLAN_DRAFT_RELATIVE_PATH,
+    LeadingBlock,
     bind_claimed_fingerprint,
     compute_plan_draft_fingerprint,
     leading_bookkeeping_end,
+    parse_leading_block,
+    render_leading_block,
 )
 from cw.stage_verification.plan_gates import (
     PLAN_PENDING_APPROVAL,
@@ -56,8 +60,8 @@ if TYPE_CHECKING:
 #: Where cw writes the reviewed plan, relative to the worktree.
 PLAN_MD_RELATIVE_PATH: Final = PLAN_DRAFT_RELATIVE_PATH.parent / "plan.md"
 
-#: The explicit round-counter default a fresh draft starts with. cw runs no
-#: round-cap engine in C1 (#3464), so it never increments it.
+#: The explicit round-counter line a fresh draft starts with (the render of
+#: an absent :class:`~cw.plan_fingerprint.LeadingBlock`).
 ROUND_ZERO_LINE: Final = "<!-- plan-stage-scan-round: 0 -->\n"
 
 #: The two review sign-off marker prefixes; only cw's stations stamp them.
@@ -108,21 +112,50 @@ _SENTINEL_OPEN: Final = "<<<AUTO_DEV_RESULT"
 _FINGERPRINT_CLAIM: Final = "0" * 64
 
 
+class PlanSettlement(BaseModel):
+    """One operator reply the turn transcribed into a settlement token (#3464).
+
+    A claim, never a fact: cw validates every field against the grammar, the
+    park comment it computed and the operator-authority sources before it
+    writes a ``plan-stage-settled`` line.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    item_id: str
+    token: str
+    source: str
+
+
 class PlanTurnDocument(BaseModel):
-    """The PLAN turn's ``-o`` document: the plan text and the framed sentinel."""
+    """The PLAN turn's ``-o`` document: plan text, framed sentinel, settlements.
+
+    ``settlements`` is required, not defaulted: strict mode would make a
+    defaulted field nullable, and an empty list is the "none settled" answer.
+    """
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     plan_markdown: str
     sentinel: str
+    settlements: list[PlanSettlement]
+
+
+class ReviseTurnDocument(BaseModel):
+    """The revision turn's ``-o`` document: the whole revised plan (#3464)."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    plan_markdown: str
 
 
 @dataclass(frozen=True)
 class PlanTurn:
-    """A parsed turn: the model's plan text and the stamped, validated result."""
+    """A parsed turn: the model's plan text, the stamped result, the claims."""
 
     plan_markdown: str
     result: AutoDevResult
+    settlements: tuple[PlanSettlement, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -179,14 +212,16 @@ def stamp_plan_result(
     worktree: Path,
     extra_friction: Sequence[str] = (),
     bind_draft: bool = False,
+    resolution_evidence: dict[str, Any] | None = None,
 ) -> AutoDevResult:
     """Stamp cw's fields over *payload* and validate it strictly.
 
     cw-stamped: ``schema_version``, ``ticket_id``, ``stage_reached``,
     ``worktree_path``, ``branch``, ``fork_point_sha``, ``commits``, ``pr``,
     ``review``, ``scope.lines_actual`` (null), ``resolution_consumed`` /
-    ``resolution_evidence`` (cw runs no settlement in C1, so never credited)
-    and ``plan_draft_fingerprint``. Model-supplied and kept: ``status``,
+    ``resolution_evidence`` (credited only from *resolution_evidence*, the
+    settlements cw itself validated; the model's claim is discarded) and
+    ``plan_draft_fingerprint``. Model-supplied and kept: ``status``,
     ``plan_source``, the rest of ``scope``, ``ambiguities``, ``premises``,
     ``health``, ``next_actions``, ``blocker`` and ``friction_highlights`` (to
     which *extra_friction* is appended).
@@ -196,6 +231,9 @@ def stamp_plan_result(
     ``pydantic.ValidationError`` on a schema or invariant violation.
     """
     stamped = {**payload, **_cw_fields(ticket_id, worktree)}
+    if resolution_evidence is not None:
+        stamped["resolution_consumed"] = True
+        stamped["resolution_evidence"] = resolution_evidence
     scope = stamped.get("scope")
     if isinstance(scope, dict):
         stamped["scope"] = {**scope, "lines_actual": None}
@@ -242,7 +280,10 @@ def parse_plan_turn(
     try:
         document = PlanTurnDocument.model_validate_json(content)
     except ValidationError as exc:
-        details = f"the -o document is not a {{plan_markdown, sentinel}} object: {exc}"
+        details = (
+            "the -o document is not a {plan_markdown, sentinel, settlements} "
+            f"object: {exc}"
+        )
         return PlanTurnFailure(BLOCKER_REASON_NO_RESULT_EMITTED, details)
     payload = _sentinel_payload(document.sentinel)
     if isinstance(payload, str):
@@ -257,7 +298,11 @@ def parse_plan_turn(
         return PlanTurnFailure(
             BLOCKER_REASON_VALIDATION_FAILED, f"sentinel failed validation: {exc}"
         )
-    return PlanTurn(plan_markdown=document.plan_markdown, result=result)
+    return PlanTurn(
+        plan_markdown=document.plan_markdown,
+        result=result,
+        settlements=tuple(document.settlements),
+    )
 
 
 def read_resume_draft(worktree: Path) -> ResumeDraft | None:
@@ -322,25 +367,37 @@ def _read_on_disk_draft(worktree: Path) -> str | None:
     return text
 
 
-def write_plan_draft(worktree: Path, plan_text: str) -> Path:
-    """Write ``.cw/plan-draft.md``: the carried leading block, then the body.
+def on_disk_leading_block(worktree: Path) -> LeadingBlock:
+    """The on-disk draft's parsed leading block; empty when absent or unreadable.
 
-    The on-disk leading block (any lane's round line, last-evaluated,
-    settled or revocation lines) is carried verbatim; with none, the explicit
-    round-0 line is written. *plan_text* is cleaned first. A prior draft that
-    differs from the new text is snapshotted first (``plan-draft.md.bak-<ns>``,
-    best-effort, newest 5 kept), so a re-park never silently discards an
-    operator's edit (#3490).
+    This is the round's starting bookkeeping state even when ``.cw/plan.md``
+    exists (a regress into PLAN), so a draft rewrite carries every line.
+    """
+    try:
+        text = (worktree / PLAN_DRAFT_RELATIVE_PATH).read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return LeadingBlock()
+    return parse_leading_block(text)
+
+
+def write_plan_draft(worktree: Path, plan_text: str, *, book: LeadingBlock) -> Path:
+    """Write ``.cw/plan-draft.md``: *book* rendered in grammar order, then the body.
+
+    The leading block is cw's (#3464): *book* is the round's bookkeeping
+    state, rendered by :func:`~cw.plan_fingerprint.render_leading_block`, so
+    the round line, settled and resolutions lines are always in grammar order.
+    *plan_text* is cleaned first. A prior draft whose body differs from the
+    new body is snapshotted first (``plan-draft.md.bak-<ns>``, best-effort,
+    newest 5 kept), so a re-park never silently discards an operator's edit
+    (#3490); a bookkeeping-only change takes no snapshot.
     """
     prior = _read_on_disk_draft(worktree)
-    carried = prior[: leading_bookkeeping_end(prior)] if prior is not None else ""
-    leading = carried or ROUND_ZERO_LINE
     body = clean_plan_text(plan_text)
     if not body.endswith("\n"):
         body += "\n"
-    text = leading + body
+    text = render_leading_block(book) + body
     path = worktree / PLAN_DRAFT_RELATIVE_PATH
-    if prior is not None and prior != text:
+    if prior is not None and prior[leading_bookkeeping_end(prior) :] != body:
         rotate_backup(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, text)

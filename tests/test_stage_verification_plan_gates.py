@@ -50,7 +50,9 @@ class TestArtifact:
 
 
 def test_invalid_sentinel_is_validation_failed(tmp_path: Path) -> None:
-    content = json.dumps({"plan_markdown": _SMALL, "sentinel": "garbage"})
+    content = json.dumps(
+        {"plan_markdown": _SMALL, "sentinel": "garbage", "settlements": []}
+    )
     parsed = parse_plan_turn(content, ticket_id="T-1", worktree=tmp_path)
     assert getattr(parsed, "reason", None) == "validation_failed"
 

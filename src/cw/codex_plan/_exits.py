@@ -26,6 +26,7 @@ from cw.codex_plan._result import (
     clean_plan_text,
     draft_fingerprint_on_disk,
     existing_plan_md_fingerprint,
+    on_disk_leading_block,
     plan_md_replaced_token,
     stamp_plan_result,
     write_plan_draft,
@@ -90,13 +91,16 @@ def _bound(
         ticket_id=run.task.ticket_id,
         worktree=run.worktree,
         bind_draft=bind_draft,
+        resolution_evidence=result.resolution_evidence,
     )
 
 
 def _write_draft_best_effort(run: _Run, plan_text: str) -> str | None:
     """Write the draft; its on-disk fingerprint, or ``None`` when not written."""
     try:
-        write_plan_draft(run.worktree, plan_text)
+        write_plan_draft(
+            run.worktree, plan_text, book=on_disk_leading_block(run.worktree)
+        )
     except PlanDraftError:
         raise
     except OSError:
@@ -205,7 +209,9 @@ def _complete(run: _Run, result: AutoDevResult, plan_text: str) -> _Exit:
     backup_ok = False
     fingerprint: str | None = None
     try:
-        write_plan_draft(run.worktree, plan_text)
+        write_plan_draft(
+            run.worktree, plan_text, book=on_disk_leading_block(run.worktree)
+        )
         fingerprint = draft_fingerprint_on_disk(run.worktree)
         result = _bound(run, result)
         if old_fingerprint is not None:
