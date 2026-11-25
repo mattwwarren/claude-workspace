@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from cw.codex_fix_loop.constraints import RESOLUTIONS_MARKER
+from cw.codex_plan._post import PARK_HEADER
+from cw.codex_plan._settle import unlabelled
 from cw.context_queue_metadata import operator_resolutions_source
 from cw.gh import _PLAN_MARKER, PIPELINE_FIXED_HEADERS
 from cw.plan_fingerprint import compute_body_sha
@@ -47,6 +49,25 @@ _HEADING = re.compile(r"^ {0,3}#{1,6}(?:[ \t]|$)")
 
 
 @dataclass(frozen=True)
+class AuthorityComment:
+    """One entry of the ordered authority stream (#3465).
+
+    Unfiltered by the fingerprint's operator rules, so the staleness guard can
+    see a later park header or operator comment that the filtered ``comments``
+    tuple cannot express. ``operator`` is an operator-authority comment,
+    ``approver`` one that may carry a plan-approval token (operator identity),
+    ``header`` a pipeline fixed-header comment and ``park`` a park header.
+    """
+
+    id: str
+    body: str
+    operator: bool
+    approver: bool
+    header: bool
+    park: bool
+
+
+@dataclass(frozen=True)
 class TrackerObservation:
     """What one ticket snapshot shows the resumed round.
 
@@ -59,6 +80,8 @@ class TrackerObservation:
     observed: bool
     comments: tuple[dict[str, object], ...] = ()
     body: str = ""
+    #: The ordered authority stream, oldest first (empty when unobserved).
+    authority_stream: tuple[AuthorityComment, ...] = ()
 
     @property
     def operator_comment(self) -> str:
@@ -102,9 +125,49 @@ def _body(comment: dict[str, object]) -> str:
     return body if isinstance(body, str) else ""
 
 
-def _pipeline_authored(body: str) -> bool:
+def is_pipeline_authored(body: str) -> bool:
     """A fixed-header pipeline comment or a plan of record (not agent-marked)."""
     return body.lstrip().startswith(PIPELINE_FIXED_HEADERS) or _PLAN_MARKER in body
+
+
+def has_pipeline_header(body: str) -> bool:
+    """A pipeline fixed header, with an optional ``(part i of N)`` label stripped."""
+    text, _, _ = unlabelled(body)
+    return text.startswith(PIPELINE_FIXED_HEADERS)
+
+
+def _authority_stream(
+    snapshot: TicketSnapshot, ctx: SnapshotContext
+) -> tuple[AuthorityComment, ...]:
+    """The ordered stream: operator comments and pipeline-header comments."""
+    operator_ids = {
+        str(c["id"]) for c in bound_comments(snapshot, ctx, Purpose.OPERATOR_TEXT)
+    }
+    approver_ids = {
+        str(c["id"]) for c in bound_comments(snapshot, ctx, Purpose.APPROVAL_COMMENT)
+    }
+    stream: list[AuthorityComment] = []
+    for comment in snapshot.comments:
+        header = has_pipeline_header(comment.body)
+        operator = (
+            not header
+            and comment.id in operator_ids
+            and not is_pipeline_authored(comment.body)
+        )
+        if not (header or operator):
+            continue
+        text, index, _ = unlabelled(comment.body)
+        stream.append(
+            AuthorityComment(
+                id=comment.id,
+                body=comment.body,
+                operator=operator,
+                approver=operator and comment.id in approver_ids,
+                header=header,
+                park=index == 1 and text.startswith(PARK_HEADER),
+            )
+        )
+    return tuple(stream)
 
 
 def observe_tracker(
@@ -116,9 +179,14 @@ def observe_tracker(
     comments = tuple(
         comment
         for comment in bound_comments(snapshot, ctx, Purpose.OPERATOR_TEXT)
-        if not _pipeline_authored(_body(comment))
+        if not is_pipeline_authored(_body(comment))
     )
-    return TrackerObservation(observed=True, comments=comments, body=snapshot.body)
+    return TrackerObservation(
+        observed=True,
+        comments=comments,
+        body=snapshot.body,
+        authority_stream=_authority_stream(snapshot, ctx),
+    )
 
 
 def body_resolutions_section(body: str) -> str | None:
@@ -216,11 +284,14 @@ __all__ = [
     "COMMENT_SOURCE_PREFIX",
     "ROW_SOURCE_PREFIX",
     "SOURCE_NONE",
+    "AuthorityComment",
     "ResolutionsSource",
     "TrackerObservation",
     "body_resolutions_section",
     "body_source",
     "discover_resolutions_source",
+    "has_pipeline_header",
+    "is_pipeline_authored",
     "observe_tracker",
     "source_observed",
 ]

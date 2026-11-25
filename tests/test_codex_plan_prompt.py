@@ -241,7 +241,7 @@ class TestRender:
         ):
             assert path in _PLAN_CODEX_ADDENDUM
         assert "not available in this turn" in _PLAN_CODEX_ADDENDUM
-        assert "is deferred" in _PLAN_CODEX_ADDENDUM
+        assert "cw checks the row approval" in _PLAN_CODEX_ADDENDUM
 
     def test_an_empty_docs_root_raises_render_error(self, tmp_path: Path) -> None:
         with pytest.raises(RenderError):

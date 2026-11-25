@@ -56,6 +56,8 @@ class Purpose(StrEnum):
     VOIDED_AND_SETTLE = "voided_and_settle"
     CONSTRAINTS = "constraints"
     APPROVED_PLAN = "approved_plan"
+    #: A plan-approval comment token (#3465): identity-bound on both rule sets.
+    APPROVAL_COMMENT = "approval_token"
 
 
 @dataclass(frozen=True)
@@ -132,6 +134,19 @@ def _is_operator(comment: SnapshotComment, ctx: SnapshotContext) -> bool:
     return author_id.casefold() in {entry.casefold() for entry in ctx.operator_ids}
 
 
+def _approval_binds(comment: SnapshotComment, ctx: SnapshotContext) -> bool:
+    """An approval token binds only from an operator identity, on either rule set.
+
+    The GitHub rules otherwise let any non-agent commenter bind OPERATOR_TEXT,
+    so an approval must not ride that binding (#3465 R3).
+    """
+    return (
+        _is_operator(comment, ctx)
+        and not comment.agent_authored
+        and bool(comment.body.strip())
+    )
+
+
 def _github_binds(
     comment: SnapshotComment, purpose: Purpose, gh_login: str | None
 ) -> bool:
@@ -175,7 +190,9 @@ def bound_comments(
     """
     if snapshot is None:
         return []
-    if ctx.github:
+    if purpose is Purpose.APPROVAL_COMMENT:
+        kept = [c for c in snapshot.comments if _approval_binds(c, ctx)]
+    elif ctx.github:
         kept = [c for c in snapshot.comments if _github_binds(c, purpose, gh_login)]
     else:
         kept = [c for c in snapshot.comments if _mcp_binds(c, purpose, ctx)]

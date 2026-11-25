@@ -13,9 +13,12 @@ show (deleted, unbound, partial or unavailable snapshot) never revokes: the
 round parks for the operator, blocked ``agent_block`` and retry-eligible,
 with the approval standing and the draft untouched.
 
-The codex fast path is fingerprint equality only; the operator-authority
-alternate stays #3465, so there is no third condition to compose with
-(``fails-closed``). cw still persists the ``body_sha`` component.
+The codex fast path takes an approved draft in two ways, both with no turn:
+fingerprint equality with the row approval, or the operator-authority alternate
+(``OPERATOR_APPROVAL_NO_DELTA``, #3465), which holds only while no operator
+comment is newer than the row approval and the persisted ``body_sha`` equals the
+live body's. A row delta never takes the alternate. cw persists the
+``body_sha`` component that the alternate reads.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from cw.auto_dev_result import AutoDevResult, Health
 from cw.auto_dev_result.schema._vocab import AGENT_BLOCK_BLOCKER_REASON
+from cw.codex_plan._approval import alternate_holds
 from cw.codex_plan._exits import _Exit, _with_friction
 from cw.codex_plan._result import (
     PLAN_AMBIGUITIES_PENDING,
@@ -82,6 +86,11 @@ ROUND_CAP: Final = 2
 ATTEMPT_LEASE: Final = timedelta(minutes=15)
 #: The ``reason`` of the fast path's ``s1_ambiguity_scan_skipped`` event.
 APPROVED_FINGERPRINT_MATCH: Final = "approved_fingerprint_match"
+#: The operator-authority alternate: the row approval stands, no newer operator comment.
+OPERATOR_APPROVAL_NO_DELTA: Final = "operator_approval_no_delta"
+FAST_PATH_REASONS: Final = frozenset(
+    {APPROVED_FINGERPRINT_MATCH, OPERATOR_APPROVAL_NO_DELTA}
+)
 NO_APPROVAL_EVIDENCE: Final = "no_approval_evidence"
 APPROVED_FINGERPRINT_MISMATCH: Final = "approved_fingerprint_mismatch"
 NO_SCOPE_TIER: Final = "no_scope_tier"
@@ -135,7 +144,7 @@ class GateOutcome:
 
     @property
     def fast_path(self) -> bool:
-        return self.reason == APPROVED_FINGERPRINT_MATCH
+        return self.reason in FAST_PATH_REASONS
 
 
 def _now() -> str:
@@ -148,15 +157,20 @@ def _is_channel_source(source: str | None) -> bool:
     )
 
 
-def fast_path_reason(task: TicketTask, body: str) -> str:
-    """Why *body* does or does not take the fast path (fingerprint only)."""
+def fast_path_reason(task: TicketTask, body: str, *, alternate: bool = False) -> str:
+    """Why *body* does or does not take the fast path.
+
+    Fingerprint equality, or the operator-authority *alternate* when the caller
+    has established it (a mismatch then takes ``OPERATOR_APPROVAL_NO_DELTA``).
+    """
     if not has_approval_evidence(task):
         return NO_APPROVAL_EVIDENCE
-    if task.plan_approved_fingerprint != compute_plan_draft_fingerprint(body):
+    matched = task.plan_approved_fingerprint == compute_plan_draft_fingerprint(body)
+    if not matched and not alternate:
         return APPROVED_FINGERPRINT_MISMATCH
     if parse_plan_scope_tier(body) is None:
         return NO_SCOPE_TIER
-    return APPROVED_FINGERPRINT_MATCH
+    return APPROVED_FINGERPRINT_MATCH if matched else OPERATOR_APPROVAL_NO_DELTA
 
 
 def synthesize_fast_path_result(run: _Run, body: str) -> AutoDevResult:
@@ -449,7 +463,10 @@ def resume_gate(
         delta = _channel_gate(run, target, body, state, current)
         if delta is not None:
             return delta
-    return GateOutcome(run, body, fast_path_reason(run.task, body))
+    alternate = alternate_holds(
+        run.task, state.observation, run.book.block.last_evaluated
+    )
+    return GateOutcome(run, body, fast_path_reason(run.task, body, alternate=alternate))
 
 
 def settle_fingerprint(
@@ -491,6 +508,8 @@ def unconverged_details(result: AutoDevResult, observation: TrackerObservation) 
 __all__ = [
     "APPROVED_FINGERPRINT_MATCH",
     "EXIT_STATUSES",
+    "FAST_PATH_REASONS",
+    "OPERATOR_APPROVAL_NO_DELTA",
     "ROUND_CAP",
     "GateOutcome",
     "RoundBook",

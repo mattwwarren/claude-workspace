@@ -332,7 +332,8 @@ def test_plan_addendum_hands_the_resume_machinery_to_cw() -> None:
         "the approved-fingerprint fast path",
         "the round counter and its cap",
         "the review revision cycle",
-        "the operator-authority delta and comment-path approval, which is deferred",
+        "cw checks the row approval, "
+        "the operator-authority delta and an operator's approval comment itself",
         "one JSON object with three fields",
         "settlements (a list, empty when nothing settles)",
         "R<k>.A<n>",

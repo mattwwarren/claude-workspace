@@ -72,7 +72,7 @@ class ParkState:
         return None
 
 
-def _unlabelled(body: str) -> tuple[str, int, int]:
+def unlabelled(body: str) -> tuple[str, int, int]:
     """``(text, index, total)``: the body past its part label; unlabelled is 1 of 1."""
     text = body.lstrip()
     match = _PART_LABEL.match(text)
@@ -85,7 +85,7 @@ def _is_park_comment(comment: SnapshotComment) -> bool:
     """A park's first (or only) comment; its continuation parts carry no header."""
     if not comment.agent_authored:
         return False
-    text, index, _ = _unlabelled(comment.body)
+    text, index, _ = unlabelled(comment.body)
     return index == 1 and text.startswith(PARK_HEADER)
 
 
@@ -98,7 +98,7 @@ def _joined_park_body(
     agent-authored comments after the head labelled ``(part i of N)`` for the
     next ``i`` of the same ``N``; labels and provenance markers are dropped.
     """
-    text, _, total = _unlabelled(head.body)
+    text, _, total = unlabelled(head.body)
     if total == 1:
         return head.body
     parts = [strip_trailing_marker(text)]
@@ -106,7 +106,7 @@ def _joined_park_body(
     for comment in later:
         if not comment.agent_authored:
             continue
-        part, index, of = _unlabelled(comment.body)
+        part, index, of = unlabelled(comment.body)
         if of == total and index == len(parts) + 1:
             parts.append(strip_trailing_marker(part))
     return "\n".join(parts)
@@ -271,6 +271,7 @@ __all__ = [
     "ParkState",
     "SettleOutcome",
     "park_state",
+    "unlabelled",
     "unresolved_stubs",
     "validate_settlements",
 ]
