@@ -4702,8 +4702,11 @@ sandbox, does everything else:
   (`codex_plan_artifact_missing`), a `## Files Modified` section and exactly
   one `**Scope tier:**` line matching the sentinel's tier
   (`codex_plan_gate_failed`, the gate named in `details`). A large
-  `stage_complete` without a row approval bound to this plan's fingerprint
-  parks `plan_pending_approval`. Then cw runs the Plan Reviewer and the Plan
+  `stage_complete` without approval evidence bound to this plan parks
+  `plan_pending_approval`: a row approval whose fingerprint equals the plan's,
+  the operator-authority alternate, or an operator's comment token on a plan
+  still equal to the parked draft (see the "Approval evidence (#3465)" bullet
+  below). Then cw runs the Plan Reviewer and the Plan
   Soundness Reviewer as read-only per-role turns: a `degraded` or `failed`
   document, or a rejected finding, blocks `plan_unreviewable` /
   `plan_unsound` with the findings in `blocker.details`; only a model

@@ -10,12 +10,19 @@ unchanged; ``author.login`` carries the display ``author``, never ``author_id``.
 Two rule sets, chosen by :attr:`SnapshotContext.github` (``resolve_tracker``
 equals ``github-issues``; an unset tracker is NOT GitHub):
 
-- GitHub: today's rules, byte-compatible. ``operator_ids`` are ignored, and
-  login compares are exact.
+- GitHub: today's rules, byte-compatible. ``operator_ids`` are read only for
+  :attr:`Purpose.APPROVAL_COMMENT` (an entry is the commenter's login,
+  casefolded); every other purpose ignores them, and its login compares are
+  exact.
 - Every other tracker ("MCP"): a comment binds only when its ``author_id`` is
   non-blank, is one of ``operator_ids`` (casefolded at evaluation), and the
   comment is not ``author_conflict``-flagged. Empty ``operator_ids`` binds
   nothing (fail closed).
+
+:attr:`Purpose.APPROVAL_COMMENT` (a plan-approval token, #3465) is identity-bound
+on both rule sets: a comment binds only when its ``author_id`` is non-blank, is in
+``operator_ids`` (casefolded), is not ``author_conflict``-flagged or agent-authored,
+and has a non-blank body, so on GitHub too a drive-by commenter cannot approve.
 
 Snapshot order is oldest first, as the tracker returned it (the stdin
 document is documented oldest-first). On MCP, "newest" means the LAST
