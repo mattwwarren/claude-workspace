@@ -1,9 +1,10 @@
-"""Shared helpers for the codex engine round's completion check (#3885).
+"""Shared helpers for the codex engine round (#3216) and its completion check (#3885).
 
-Concern: driving ``run_engine_pass`` with a manifest that declares
-``completion_check``, and the evidence/tree probes the completion tests need.
-Fixtures here are plugin-registered (``tests/conftest.py``). The repo fixture
-is ``engine_repo``, not ``repo``, so it cannot shadow a module's own ``repo``.
+Concern: driving ``run_engine_pass`` for the engine round (#3216) and its
+completion check (#3885), plus the evidence/tree probes the completion tests
+need. Fixtures here are plugin-registered (``tests/conftest.py``). The repo
+fixture is ``engine_repo``, not ``repo``, so it cannot shadow a module's own
+``repo``.
 """
 
 from __future__ import annotations
@@ -56,13 +57,16 @@ ROUND_ID = "round-0"
 SKILL = "repo-review"
 SECURITY_MARK = "# Security role"
 QUALITY_MARK = "# Quality role"
-_LOGGER = "cw.codex_review._engine_round"
+ENGINE_ROUND_LOGGER = "cw.codex_review._engine_round"
 
 
-def _aggregation(findings: list[dict[str, object]] | None = None) -> CodexRunResult:
+def _aggregation(
+    findings: list[dict[str, object]] | None = None, **overrides: object
+) -> CodexRunResult:
+    """An exit-0 aggregation turn whose ``-o`` file holds a valid output."""
     from cw.codex_runner import CodexRunResult
 
-    content = json.dumps(make_aggregation_output(findings))
+    content = json.dumps(make_aggregation_output(findings, **overrides))
     return CodexRunResult(0, "", "", output_file_content=content)
 
 
@@ -76,35 +80,44 @@ def task_for(repo: EngineRepo, **overrides: object) -> TicketTask:
     )
 
 
-def spec_for(repo: EngineRepo, *, skill: str = SKILL) -> EngineRoundSpec:
+def spec_for(
+    repo: EngineRepo, *, skill: str = SKILL, default_branch: str = "main"
+) -> EngineRoundSpec:
     return EngineRoundSpec(
         context=EngineContext(
             skill=skill,
             guarded_paths=(),
             ticket_id=repo.ticket,
             client=repo.client,
-            default_branch="main",
+            default_branch=default_branch,
         )
     )
 
 
-def inputs_for(repo: EngineRepo, runner: ScriptedCodexRunner) -> EnginePassInputs:
+def inputs_for(
+    repo: EngineRepo,
+    runner: ScriptedCodexRunner,
+    *,
+    task: TicketTask | None = None,
+    wall_clock_budget_seconds: int | None = None,
+    max_prompt_chars: int | None = None,
+) -> EnginePassInputs:
     return EnginePassInputs(
         runner=runner,
-        task=task_for(repo),
+        task=task or task_for(repo),
         worktree=repo.worktree,
         base_branch="main",
         config_branch="main",
         model=None,
         reasoning_effort=None,
-        wall_clock_budget_seconds=None,
+        wall_clock_budget_seconds=wall_clock_budget_seconds,
         session_id="s-engine",
         fix_loop_enabled=True,
         prior_open_findings=None,
         claim_tier_enabled=False,
         disposition_drift_check_enabled=True,
         settled_suppression=None,
-        max_prompt_chars=None,
+        max_prompt_chars=max_prompt_chars,
     )
 
 
@@ -112,11 +125,15 @@ def engine_runner(
     *,
     security: CodexReply | None = None,
     quality: CodexReply | None = None,
+    aggregation: CodexReply | None = None,
 ) -> ScriptedCodexRunner:
     """Role and aggregator rules keyed on the spec text and the preamble."""
     return (
         ScriptedCodexRunner()
-        .add(stdin_contains(ENGINE_AGGREGATOR_PREAMBLE), _aggregation())
+        .add(
+            stdin_contains(ENGINE_AGGREGATOR_PREAMBLE),
+            aggregation or _aggregation(),
+        )
         .add(stdin_contains(SECURITY_MARK), security or _ok_result("security"))
         .add(stdin_contains(QUALITY_MARK), quality or _ok_result("quality"))
     )
@@ -126,13 +143,16 @@ def run_pass(
     repo: EngineRepo,
     runner: ScriptedCodexRunner,
     *,
+    cycle: int = 0,
+    round_id: str | None = ROUND_ID,
     spec: EngineRoundSpec | None = None,
+    inputs: EnginePassInputs | None = None,
 ) -> EnginePassOutcome:
     return run_engine_pass(
         spec or spec_for(repo),
-        inputs_for(repo, runner),
-        cycle=0,
-        round_id=ROUND_ID,
+        inputs or inputs_for(repo, runner),
+        cycle=cycle,
+        round_id=round_id,
     )
 
 
@@ -164,12 +184,14 @@ def aggregator_stdins(runner: ScriptedCodexRunner) -> list[str]:
     return [s for s in stdins if s.startswith(ENGINE_AGGREGATOR_PREAMBLE)]
 
 
-def blocked_details(outcome: EnginePassOutcome, *, retry: bool) -> str:
-    """Assert a verdict-less ``agent_block`` with *retry*; return its details."""
+def blocked_details(
+    outcome: EnginePassOutcome, *, reason: str = "agent_block", retry: bool
+) -> str:
+    """Assert a verdict-less block with *reason* and *retry*; return its details."""
     assert outcome.result.status == "blocked"
     blocker = outcome.result.blocker
     assert blocker is not None
-    assert blocker.reason == "agent_block"
+    assert blocker.reason == reason
     assert blocker.retry_eligible is retry
     assert outcome.verdict is None
     return blocker.details
