@@ -43,7 +43,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 # Unfinished-operation pseudo-refs whose presence refuses a cycle start.
-_OPERATION_MARKERS = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD")
+_MERGE_MARKER = "MERGE_HEAD"
+_OPERATION_MARKERS = (_MERGE_MARKER, "CHERRY_PICK_HEAD", "REVERT_HEAD")
 # `git rev-parse -q --verify` exit codes: 0 resolves, 1 does not; anything
 # else is a git failure (fail closed: raise, the caller parks codex_error).
 _REF_SET = 0
@@ -106,7 +107,7 @@ def _marker_is_set(worktree: Path, marker: str) -> bool:
     )
 
 
-def _unmerged_paths(worktree: Path) -> tuple[str, ...]:
+def unmerged_paths(worktree: Path) -> tuple[str, ...]:
     """Return the sorted unique paths ``git ls-files -u`` lists."""
     out = git_output(["ls-files", "-u"], cwd=worktree)
     return tuple(sorted({line.split("\t", 1)[1] for line in out.splitlines() if line}))
@@ -165,7 +166,10 @@ def best_effort_dirty_paths(worktree: Path) -> tuple[str, ...]:
 
 
 def capture_cycle_baseline(
-    worktree: Path, *, tolerated: frozenset[str] = frozenset()
+    worktree: Path,
+    *,
+    tolerated: frozenset[str] = frozenset(),
+    merge_files: frozenset[str] | None = None,
 ) -> CycleBaseline | DirtyStart:
     """Return the cycle's clean-start baseline, or what makes the tree dirty.
 
@@ -178,15 +182,27 @@ def capture_cycle_baseline(
     *tolerated* (#3693) is the operator's exact-path list. A tolerated path that
     is dirty at start is not a finding; it joins ``review_artifacts`` so every
     staging step leaves it unstaged. Markers and unmerged paths still refuse.
+
+    *merge_files* (#3529) adopts one unconcluded default-branch merge: when it
+    is not ``None``, ``MERGE_HEAD`` is not a finding, and unmerged and dirty
+    paths inside it are not findings either (cw's merge brought them in). The
+    other two markers, and every path outside *merge_files*, still refuse. The
+    baseline tree is still ``HEAD``'s tree.
     """
     markers = tuple(m for m in _OPERATION_MARKERS if _marker_is_set(worktree, m))
-    unmerged = _unmerged_paths(worktree)
+    unmerged = unmerged_paths(worktree)
     status = git_output(
         ["status", "--porcelain", "--untracked-files=all"], cwd=worktree
     )
     split = split_tolerated(status, tolerated, check=CHECK_DIRTY_START)
     status_lines = tuple(line for line in split.kept.splitlines() if line)
     dirty = tuple(line for line in status_lines if not _is_review_artifact(line))
+    if merge_files is not None:
+        markers = tuple(m for m in markers if m != _MERGE_MARKER)
+        unmerged = tuple(path for path in unmerged if path not in merge_files)
+        dirty = tuple(
+            line for line in dirty if line[_PORCELAIN_PATH_OFFSET:] not in merge_files
+        )
     artifacts = frozenset(
         line[_PORCELAIN_PATH_OFFSET:]
         for line in status_lines

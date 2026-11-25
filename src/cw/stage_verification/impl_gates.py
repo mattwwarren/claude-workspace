@@ -8,11 +8,12 @@ keeps only a breach's ``reason`` (an existing vocabulary reason) and paths and
 words the rest for IMPL, and no ``recovery_hint`` is ever surfaced.
 
 Gate order, as :mod:`cw.codex_impl._run` calls them: the pre-turn guards
-(:func:`check_plan_present`, :func:`check_on_branch`,
-:func:`check_existing_branch_work`), then after the turn gate 1
-(:func:`check_empty_diff`), the fence, gate 2 (:func:`run_scope_conformance`)
-and the repo's quality gates (:func:`run_quality_gates`, which accepts a red
-gate's rewrite of its own touched files after one green re-run, #3686).
+(:func:`check_plan_present`, :func:`check_on_branch`; the existing-branch-work
+classification is :func:`cw.stage_verification.impl_resume.plan_reentry`), then
+after the turn gate 1 (:func:`check_empty_diff`), the fence, gate 2
+(:func:`run_scope_conformance`) and the repo's quality gates
+(:func:`run_quality_gates`, which accepts a red gate's rewrite of its own
+touched files after one green re-run, #3686).
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import json
 import re
 import subprocess
 import sys
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 from cw._git import git_clean_env, git_output, run_git
 from cw.auto_dev_result.schema._vocab import (
@@ -48,7 +49,6 @@ from cw.stage_verification.impl_block import (
     PLAN_MISSING,
     ImplBlock,
 )
-from cw.stage_verification.impl_regress_findings import regress_review_findings
 from cw.stage_verification.posted_text import redact_and_cap
 from cw.worktree import _parse_numstat_totals
 
@@ -58,7 +58,6 @@ if TYPE_CHECKING:
 
     from cw.auto_dev_result.schema._vocab import ScopeTier
     from cw.codex_fix_loop.gates import GatePlan, GateScope
-    from cw.local_runner import GitFacts
     from cw.models import TicketTask
     from cw.stage_verification.baseline import CycleBaseline, DirtyStart
     from cw.stage_verification.fence import FenceBreach
@@ -109,45 +108,6 @@ def check_plan_present(plan_text: str | None, task: TicketTask) -> ImplBlock | N
         "approved plan (the outbox entry holds redacted text, so a plan whose "
         "text was redacted there is not recovered)",
     )
-
-
-def check_existing_branch_work(
-    facts: GitFacts, task: TicketTask, worktree: Path
-) -> ImplBlock | None:
-    """A fresh row whose branch is already ahead of its fork point is not fresh.
-
-    Repair rows (``review_feedback`` set) legitimately start on a branch with
-    commits, so they are never checked. A REVIEW-regressed row whose verdict
-    delivers its findings (#3694: MUST_FIX, and held evidence-gap findings
-    #3862) is exempt for the same reason: its branch carries the work under
-    review. An unresolvable fork point fails
-    closed: cw cannot tell whether the branch carries prior work. When a
-    REVIEW-regressed row is blocked, the block names why its findings were
-    withheld.
-    """
-    if task.review_feedback is not None:
-        return None
-    outcome = regress_review_findings(task, worktree)
-    if outcome is not None and outcome.findings is not None:
-        return None
-    if not facts["fork_point"]:
-        return ImplBlock(
-            IMPL_FAILED,
-            "the fork point against the default branch did not resolve, so cw "
-            "cannot tell whether this branch already carries work",
-        )
-    if facts["commits"]:
-        count = len(facts["commits"])
-        withheld = f" {outcome.friction}." if outcome is not None else ""
-        return ImplBlock(
-            IMPL_FAILED,
-            f"existing_branch_work: the branch already has {count} commit(s) "
-            f"ahead of its fork point {facts['fork_point'][:_SHA_PREFIX_CHARS]}; a "
-            "fresh IMPL row starts from a branch with none. Inspect the branch "
-            "(a failed earlier push leaves a local commit), then push or reset "
-            "it before requeueing." + withheld,
-        )
-    return None
 
 
 def check_on_branch(
@@ -225,6 +185,26 @@ def check_empty_diff(worktree: Path, base: str) -> ImplBlock | None:
 def _scope_script(worktree: Path) -> Path | None:
     """The scope-conformance script: repo-local first, then ``~/.claude/scripts``."""
     return find_guard_script(worktree, SCOPE_SCRIPT_NAME)
+
+
+class GuardScript(NamedTuple):
+    """A resolved guard script: where it is, and whether its marker holds."""
+
+    path: Path | None
+    marker_ok: bool
+
+
+def resolve_guard_script(worktree: Path, name: str, minimum: int) -> GuardScript:
+    """Resolve guard script *name* and apply the ``cw-script-version`` marker rule.
+
+    Lives here, not in the staleness module: ``stage_verification`` modules may
+    not import ``cw.codex_fix_loop`` (the import ratchet), and this module is the
+    one that already does.
+    """
+    script = find_guard_script(worktree, name)
+    if script is None:
+        return GuardScript(None, marker_ok=False)
+    return GuardScript(script, marker_ok=script_marker_ok(script, minimum))
 
 
 def _marker_block(script: Path) -> ImplBlock | None:

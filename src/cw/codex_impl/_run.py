@@ -35,10 +35,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
-from pydantic import ValidationError
-
 from cw._git import git_output
-from cw.auto_dev_result.parse import BLOCKER_REASON_VALIDATION_FAILED
 from cw.auto_dev_result.schema._vocab import PLAN_MISSING_CONTEXT_BLOCKER_REASON
 from cw.backend_mcp_config import declared_server_names
 from cw.bindings_block import bindings_block_for
@@ -47,6 +44,7 @@ from cw.codex_fix_loop.cycle_restore import preserve_and_reset
 from cw.codex_fix_loop.gates import GateScope, plan_cycle_gates
 from cw.codex_fix_loop.hook_failure import as_hook_failure
 from cw.codex_impl._argv import build_impl_argv, require_impl_sandbox_argv
+from cw.codex_impl._post import STAGE_IMPL_STARTED, early_stamp, finish
 from cw.codex_impl._prompt import IMPL_DOCS, IMPL_TURN_SCHEMA, render_impl_prompt
 from cw.codex_impl._result import (
     IMPL_NOT_PUSHED,
@@ -55,8 +53,8 @@ from cw.codex_impl._result import (
     impl_commit_message,
     impl_empty_diff_result,
     parse_impl_turn,
-    stamp_impl_result,
 )
+from cw.codex_impl._resume import advance_payload, resume_note
 from cw.codex_lane_config import _resolve_codex_fix_loop_growth_guard_enabled
 from cw.codex_plan._prompt import command_docs_root, ticket_text_from_snapshot
 from cw.codex_review import (
@@ -73,7 +71,6 @@ from cw.codex_stage_completion import (
     run_guarded_stage,
     with_usage_friction,
 )
-from cw.codex_stage_facts import resolve_plan_source
 from cw.codex_usage import NO_USAGE, UsageAccumulator
 from cw.config import load_effective_config
 from cw.contract_manifest import RenderError
@@ -106,6 +103,7 @@ from cw.stage_verification.impl_block import (
 )
 from cw.stage_verification.impl_feedback import (
     MergeOutcome,
+    ProbeOutcome,
     merge_default_on_conflict,
     probe_default_branch,
     verify_review_feedback,
@@ -113,7 +111,6 @@ from cw.stage_verification.impl_feedback import (
 from cw.stage_verification.impl_gates import (
     approved_extra,
     check_empty_diff,
-    check_existing_branch_work,
     check_on_branch,
     check_plan_present,
     commit_failure_block,
@@ -125,6 +122,12 @@ from cw.stage_verification.impl_gates import (
     run_scope_conformance,
     staged_totals,
 )
+from cw.stage_verification.impl_merge_adopt import (
+    conflict_fingerprints,
+    merge_unconcluded_block,
+    merge_unresolved_block,
+)
+from cw.stage_verification.impl_resume import Disposition, plan_reentry
 from cw.stage_verification.posted_text import redact_and_cap
 from cw.stage_verification.push import push_and_verify_head
 from cw.ticket_snapshot import context_for_client, snapshot_for_stage
@@ -135,18 +138,17 @@ from cw.tracker_io import TrackerIoConfigError, courier_refresher
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.auto_dev_result import AutoDevResult, ScopeTier
+    from cw.auto_dev_result import AutoDevResult
     from cw.codex_fix_loop.gates import GatePlan
     from cw.codex_runner import CodexRunner, CodexRunResult
     from cw.models import ClientConfig, SandboxMode, TicketTask
+    from cw.stage_verification.impl_resume import ReentryPlan
     from cw.ticket_snapshot import TicketSnapshot
 
 _log = logging.getLogger(__name__)
 
 #: The stage identifiers the driver's stage events carry.
 STAGE_PLAN_REVIEWED: Final = StageIdentifier.S1_PLAN_REVIEWED.value
-STAGE_IMPL_STARTED: Final = StageIdentifier.S2_IMPL_STARTED.value
-STAGE_IMPL_COMPLETE: Final = StageIdentifier.S2_IMPL_COMPLETE.value
 
 _SCHEMA_NAME: Final = "impl-schema.json"
 _OUTPUT_NAME: Final = "impl-output.json"
@@ -156,6 +158,10 @@ _PLAN_RELATIVE: Final = ".cw/plan.md"
 _NO_CHANGE_DETAILS: Final = (
     "repair_turn_made_no_change: the repair turn left the tree unchanged, so "
     "there is nothing to commit; the feedback was not addressed"
+)
+_RESUME_NO_CHANGE_DETAILS: Final = (
+    "resume_turn_made_no_change: the resumed turn left the tree unchanged, so "
+    "there is nothing to commit; the existing commits were not advanced"
 )
 
 
@@ -170,6 +176,7 @@ class _Pre:
     allowed: frozenset[str]
     approved: frozenset[str]
     friction: list[str]
+    resume: ReentryPlan | None = None
 
 
 @dataclass(frozen=True)
@@ -183,6 +190,7 @@ class _Flow:
     gate_plan: GatePlan
     scope: GateScope
     tokens: list[str] = field(default_factory=list)
+    conflict_before: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -318,6 +326,7 @@ class _Run:
         snapshot: TicketSnapshot | None,
         plan_text: str | None,
         allowed_files: frozenset[str] | None,
+        resume_note: str | None,
         merge_note: str | None,
     ) -> str | ImplBlock:
         """The rendered prompt, or a ``plan_missing_context`` block.
@@ -346,6 +355,7 @@ class _Run:
                 ticket=ticket,
                 plan_text=plan_text,
                 allowed_files=allowed_files,
+                resume_note=resume_note,
                 merge_note=merge_note,
                 bindings_block=bindings_block_for(
                     self.client, Harness.CODEX, self.task.ticket_id
@@ -430,13 +440,89 @@ def _guards(run: _Run) -> tuple[str | None, GitFacts] | ImplBlock:
         block = verify_review_feedback(run.task, run.worktree)
     if block is not None:
         return block
-    facts = git_facts(run.worktree, run.base_branch)
-    block = check_existing_branch_work(facts, run.task, run.worktree)
-    return block if block is not None else (plan_text, facts)
+    return plan_text, git_facts(run.worktree, run.base_branch)
 
 
-def _prepare(run: _Run) -> _Pre | ImplBlock:
-    """Steps 1: refresh, recovery, the guards, the probe and the rendered prompt."""
+def _allowed_files(
+    run: _Run, plan_text: str | None, facts: GitFacts, approved: list[str]
+) -> frozenset[str] | ImplBlock | None:
+    """The file fence: the plan's manifest, or a no-plan repair's branch files."""
+    if plan_text is not None:
+        return fix_scope_allowlist(plan_text, approved)
+    allowed = repair_allowed_files(
+        run.worktree, fork_point=facts["fork_point"], approved=approved
+    )
+    if allowed is None:
+        return ImplBlock(
+            IMPL_FAILED,
+            "no-plan repair entry has no validated files from the reviewed "
+            "branch or an approved scope-drift allowance; cw will not launch "
+            "an unbounded repair turn",
+        )
+    return allowed
+
+
+def _assemble(
+    run: _Run,
+    snapshot: TicketSnapshot | None,
+    recovered: list[str],
+    guarded: tuple[str | None, GitFacts],
+    reentry: ReentryPlan | None,
+) -> _Pre | ImplBlock:
+    """The probe, the scope fence and the rendered prompt for a turn-bound run."""
+    plan_text, facts = guarded
+    adopted = reentry is not None and reentry.merge is not None
+    probe = (
+        ProbeOutcome()
+        if adopted
+        else probe_default_branch(
+            run.worktree, base_branch=run.base_branch, repair=run.repair
+        )
+    )
+    if probe.block is not None:
+        return probe.block
+    # #3772: the detached driver re-loads the stored row, whose transport the
+    # spawn-success stamp cleared, so re-derive it from the verified ledger here
+    # (before the gate reads it). No-op outside IMPL or with an empty ledger.
+    carry_scope_grants(
+        run.task,
+        run.client,
+        run.worktree,
+        repo=_resolve_repo_slug(run.worktree) if run.task.scope_grants else None,
+    )
+    approved, approval_friction = approved_extra(run.worktree, run.task)
+    allowed = _allowed_files(run, plan_text, facts, approved)
+    if isinstance(allowed, ImplBlock):
+        return allowed
+    prompt = run.prompt(
+        snapshot,
+        plan_text,
+        allowed,
+        resume_note(reentry, facts) if reentry is not None else None,
+        _merge_note(probe.conflicted_files, run.task.base_branch),
+    )
+    if isinstance(prompt, ImplBlock):
+        return prompt
+    friction = [
+        *recovered,
+        *probe.friction,
+        *approval_friction,
+        *(reentry.friction if reentry is not None else ()),
+    ]
+    return _Pre(
+        plan_text,
+        facts,
+        prompt,
+        probe.needs_merge,
+        allowed or frozenset(),
+        frozenset(approved),
+        friction,
+        reentry,
+    )
+
+
+def _prepare(run: _Run, scratch: Path) -> _Pre | ImplBlock:
+    """Step 1: refresh, recovery, the guards, the re-entry plan and the prompt."""
     snapshot = snapshot_for_stage(
         run.task,
         run.client,
@@ -452,69 +538,46 @@ def _prepare(run: _Run) -> _Pre | ImplBlock:
     if isinstance(guarded, ImplBlock):
         return guarded
     plan_text, facts = guarded
-    probe = probe_default_branch(
-        run.worktree, base_branch=run.base_branch, repair=run.repair
+    reentry = plan_reentry(
+        task=run.task,
+        worktree=run.worktree,
+        base_branch=run.base_branch,
+        facts=facts,
+        comments=snapshot.comments if snapshot is not None else [],
+        scratch=scratch,
     )
-    if probe.block is not None:
-        return probe.block
-    # #3772: the detached driver re-loads the stored row, whose transport the
-    # spawn-success stamp cleared, so re-derive it from the verified ledger here
-    # (before the gate reads it). No-op outside IMPL or with an empty ledger.
-    carry_scope_grants(
-        run.task,
-        run.client,
-        run.worktree,
-        repo=_resolve_repo_slug(run.worktree) if run.task.scope_grants else None,
-    )
-    approved, approval_friction = approved_extra(run.worktree, run.task)
-    if plan_text is None:
-        allowed = repair_allowed_files(
-            run.worktree,
-            fork_point=facts["fork_point"],
-            approved=approved,
+    if isinstance(reentry, ImplBlock):
+        return reentry
+    if reentry is not None and reentry.disposition is Disposition.ADVANCE:
+        friction = [*recovered, *reentry.friction]
+        return _Pre(
+            plan_text, facts, "", False, frozenset(), frozenset(), friction, reentry
         )
-        if allowed is None:
-            return ImplBlock(
-                IMPL_FAILED,
-                "no-plan repair entry has no validated files from the reviewed "
-                "branch or an approved scope-drift allowance; cw will not launch "
-                "an unbounded repair turn",
-            )
-    else:
-        allowed = fix_scope_allowlist(plan_text, approved)
-    prompt = run.prompt(
-        snapshot,
-        plan_text,
-        allowed,
-        _merge_note(probe.conflicted_files, run.task.base_branch),
-    )
-    if isinstance(prompt, ImplBlock):
-        return prompt
-    friction = [*recovered, *probe.friction, *approval_friction]
-    return _Pre(
-        plan_text,
-        facts,
-        prompt,
-        probe.needs_merge,
-        allowed or frozenset(),
-        frozenset(approved),
-        friction,
-    )
+    return _assemble(run, snapshot, recovered, guarded, reentry)
+
+
+def _begin_merge(run: _Run, pre: _Pre) -> MergeOutcome | ImplBlock | None:
+    """The adopted merge, else the conflict merge cw starts (repair rows only)."""
+    if pre.resume is not None and pre.resume.merge is not None:
+        return pre.resume.merge.outcome
+    if not pre.needs_merge:
+        return None
+    return merge_default_on_conflict(run.worktree, base_branch=run.base_branch)
 
 
 def _start(run: _Run, pre: _Pre) -> _Flow | ImplBlock:
-    """Step 2: the clean-start baseline, the conflict merge and the pinned gates."""
+    """Step 2: the clean-start baseline, the merge and the pinned gates."""
+    adopted = pre.resume.merge if pre.resume is not None else None
     baseline = capture_cycle_baseline(
-        run.worktree, tolerated=tolerated_paths(run.client)
+        run.worktree,
+        tolerated=tolerated_paths(run.client),
+        merge_files=adopted.outcome.merge_files if adopted is not None else None,
     )
     if isinstance(baseline, DirtyStart):
         return dirty_start_block(baseline)
-    merge = None
-    if pre.needs_merge:
-        started = merge_default_on_conflict(run.worktree, base_branch=run.base_branch)
-        if isinstance(started, ImplBlock):
-            return started
-        merge = started
+    merge = _begin_merge(run, pre)
+    if isinstance(merge, ImplBlock):
+        return merge
     scope = GateScope(
         ticket_id=run.task.ticket_id,
         client=run.client.name,
@@ -528,14 +591,15 @@ def _start(run: _Run, pre: _Pre) -> _Flow | ImplBlock:
         merge=merge,
         gate_plan=plan_cycle_gates(run.worktree, scope),
         scope=scope,
+        conflict_before=(
+            conflict_fingerprints(run.worktree, merge.conflicted)
+            if merge is not None
+            else {}
+        ),
     )
 
 
 # -- post-turn ---------------------------------------------------------------
-
-
-def _tier(run: _Run, pre: _Pre, files: int, lines: int) -> ScopeTier | None:
-    return resolve_review_scope_tier(pre.plan_text, run.task.scope_hint, (files, lines))
 
 
 def _growth_block(run: _Run, flow: _Flow) -> ImplBlock | None:
@@ -564,10 +628,16 @@ def _merge_files(flow: _Flow) -> frozenset[str]:
     return flow.merge.merge_files if flow.merge is not None else frozenset()
 
 
+def _no_change_block(run: _Run) -> ImplBlock:
+    """The turn changed nothing: a repair row's wording, else the resume's."""
+    details = _NO_CHANGE_DETAILS if run.repair else _RESUME_NO_CHANGE_DETAILS
+    return ImplBlock(IMPL_FAILED, details)
+
+
 def _fence_blocks(run: _Run, flow: _Flow, touched: set[str]) -> ImplBlock | None:
     """Gate 1 (empty diff), the file fence and the growth guard."""
-    if run.repair and not touched:
-        return ImplBlock(IMPL_FAILED, _NO_CHANGE_DETAILS)
+    if (run.repair or flow.pre.resume is not None) and not touched:
+        return _no_change_block(run)
     block = check_empty_diff(run.worktree, flow.base)
     if block is not None:
         return block
@@ -615,14 +685,24 @@ def _gate_blocks(
 
     Gate 2 is handed the touched list minus the conflict merge's merge-side
     files: cw's merge brought those in, the model did not edit them (the fence
-    and the growth guard still cover them).
+    and the growth guard still cover them). A resumed run adds the files of the
+    commits already on the branch.
     """
+    scoped = touched - _merge_files(flow)
+    if flow.pre.resume is not None:
+        # The earlier commits are scope-checked too (#3529).
+        scoped |= (
+            repair_allowed_files(
+                run.worktree, fork_point=flow.pre.facts["fork_point"], approved=()
+            )
+            or frozenset()
+        )
     block, friction = run_scope_conformance(
         run.worktree,
         task=run.task,
         plan_text=flow.pre.plan_text,
         plan_path=run.worktree / _PLAN_RELATIVE,
-        touched=touched - _merge_files(flow),
+        touched=scoped,
         scratch=scratch,
     )
     flow.tokens.extend(friction)
@@ -652,7 +732,7 @@ def _commit(run: _Run, flow: _Flow, touched: set[str]) -> ImplBlock | None:
         )
         return fence_block(breach)
     if not measured:
-        return ImplBlock(IMPL_FAILED, _NO_CHANGE_DETAILS)
+        return _no_change_block(run)
     message = impl_commit_message(run.task, repair=run.repair)
     try:
         _git_commit(run.worktree, message)
@@ -684,32 +764,25 @@ def _push(run: _Run) -> ImplBlock | None:
     return None
 
 
-def _stamp_final(run: _Run, flow: _Flow, payload: dict[str, Any]) -> AutoDevResult:
-    """The final stamp with the real post-push git facts, then the complete event."""
-    facts = git_facts(run.worktree, run.base_branch)
-    plan_source, note = resolve_plan_source(run.task, run.worktree)
-    friction = [*flow.pre.friction, *flow.tokens, *([note] if note else [])]
-    result = stamp_impl_result(
-        payload,
-        task=run.task,
-        worktree=run.worktree,
-        facts=facts,
-        scope_tier=_tier(run, flow.pre, facts["files"], facts["lines_actual"]),
-        plan_source=plan_source,
-        extra_friction=friction,
+def _merge_marker_block(run: _Run, flow: _Flow) -> ImplBlock | None:
+    """A conflicted path the turn left unresolved; before anything is staged."""
+    if flow.merge is None or not flow.merge.conflicted:
+        return None
+    return merge_unresolved_block(
+        run.worktree, flow.merge.conflicted, flow.conflict_before
     )
-    run.emit(
-        OrchestratorEventType.STAGE_ENTERED,
-        STAGE_IMPL_COMPLETE,
-        prev_stage=STAGE_IMPL_STARTED,
-    )
-    return result
 
 
 def _after_turn(
     run: _Run, flow: _Flow, payload: dict[str, Any], scratch: Path
 ) -> AutoDevResult:
     """Steps 4-5 for a parsed, schema-valid, completing turn."""
+    # First, before the first staging: cw's `git add -A` (reached through
+    # cycle_touched_paths) marks every unmerged path resolved, and the turn
+    # cannot write the index, so the check is only discriminating until then.
+    unresolved = _merge_marker_block(run, flow)
+    if unresolved is not None:
+        return run.refused(unresolved, flow)
     touched = cycle_touched_paths(run.worktree, flow.baseline)
     block = (
         _fence_blocks(run, flow, touched)
@@ -718,51 +791,14 @@ def _after_turn(
     )
     if block is not None:
         return run.refused(block, flow)
+    # The commit exists, so `blocked` (never `refused`, which would reset it).
+    unconcluded = merge_unconcluded_block(run.worktree)
+    if unconcluded is not None:
+        return run.blocked(unconcluded)
     pushed = _push(run)
     if pushed is not None:
         return run.blocked(pushed)
-    try:
-        return _stamp_final(run, flow, payload)
-    except STAGE_FAULTS as exc:
-        # The commit is already pushed. Convert a post-push stamping failure
-        # into a durable terminal result so the guarded-stage crash handler
-        # cannot incorrectly return the row to PENDING and dispatch it again.
-        try:
-            sha = git_output(["rev-parse", "HEAD"], cwd=run.worktree).strip()
-        except (subprocess.CalledProcessError, OSError):
-            sha = "unknown"
-        detail = redact_and_cap(str(exc))
-        return run.blocked(
-            ImplBlock(
-                IMPL_FAILED,
-                f"the IMPL commit {sha[:12]} was pushed, but cw could not "
-                "complete the post-push result: "
-                f"{detail or 'the completion facts were unavailable'}; "
-                "the pushed commit remains for operator reconciliation",
-            )
-        )
-
-
-def _early_stamp(
-    run: _Run, flow: _Flow, payload: dict[str, Any]
-) -> AutoDevResult | ImplBlock:
-    """Validate the sentinel with pre-turn facts, before any side effect."""
-    facts = flow.pre.facts
-    plan_source, _ = resolve_plan_source(run.task, run.worktree)
-    try:
-        return stamp_impl_result(
-            payload,
-            task=run.task,
-            worktree=run.worktree,
-            facts=facts,
-            scope_tier=_tier(run, flow.pre, facts["files"], facts["lines_actual"]),
-            plan_source=plan_source,
-            extra_friction=[],
-        )
-    except ValidationError as exc:
-        return ImplBlock(
-            BLOCKER_REASON_VALIDATION_FAILED, f"sentinel failed validation: {exc}"
-        )
+    return finish(run, flow.pre, flow.tokens, payload)
 
 
 def _turn_head_block(run: _Run, flow: _Flow) -> ImplBlock | None:
@@ -809,7 +845,7 @@ def _run_turn(run: _Run, flow: _Flow, scratch: Path) -> AutoDevResult:
     if isinstance(parsed, ImplTurnFailure):
         block = ImplBlock(parsed.reason, parsed.details)
         return run.refused(block, flow)
-    early = _early_stamp(run, flow, parsed)
+    early = early_stamp(run, flow.pre, parsed)
     if isinstance(early, ImplBlock):
         return run.refused(early, flow)
     return (
@@ -819,11 +855,30 @@ def _run_turn(run: _Run, flow: _Flow, scratch: Path) -> AutoDevResult:
     )
 
 
+def _advance(run: _Run, pre: _Pre) -> AutoDevResult:
+    """The ``advance`` disposition: no turn, no gates; push HEAD and stamp from git.
+
+    Reached only when HEAD itself carries the ``impl-complete`` trailer, so a
+    gated run already declared the tip complete.
+    """
+    run.emit(
+        OrchestratorEventType.STAGE_ENTERED,
+        STAGE_IMPL_STARTED,
+        prev_stage=STAGE_PLAN_REVIEWED,
+    )
+    pushed = _push(run)
+    if pushed is not None:
+        return run.blocked(pushed)
+    return finish(run, pre, [], advance_payload(pre.facts))
+
+
 def _impl(run: _Run, scratch: Path) -> AutoDevResult:
     """The whole flow: pre-turn, baseline, the turn and everything after it."""
-    pre = _prepare(run)
+    pre = _prepare(run, scratch)
     if isinstance(pre, ImplBlock):
         return run.blocked(pre)
+    if pre.resume is not None and pre.resume.disposition is Disposition.ADVANCE:
+        return _advance(run, pre)
     flow = _start(run, pre)
     if isinstance(flow, ImplBlock):
         return run.blocked(flow)

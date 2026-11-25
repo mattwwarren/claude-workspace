@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Final
 from cw._git import LOCAL_GIT_TIMEOUT_SECONDS, git_output, run_git
 from cw.gh import fetch_pr_view, fetch_repo_name_with_owner, github_pr_url
 from cw.merge_probe import merge_tree, probe_default_merge
+from cw.stage_verification.baseline import unmerged_paths
 from cw.stage_verification.impl_block import IMPL_FAILED, ImplBlock
 from cw.stage_verification.posted_text import redact_and_cap
 
@@ -143,11 +144,12 @@ class MergeOutcome:
     ``merge_files`` are the paths the row's base changed since the merge
     base (cw's merge brought them in, so the turn did not edit them);
     ``growth_tree`` is the conflicted merge-tree oid the growth guard measures
-    the turn against.
+    the turn against. ``conflicted`` are the paths left unmerged in the index.
     """
 
     merge_files: frozenset[str]
     growth_tree: str
+    conflicted: frozenset[str] = frozenset()
 
 
 def fetch_default_branch(worktree: Path, base_branch: str) -> str | None:
@@ -194,7 +196,7 @@ def probe_default_branch(
         block=ImplBlock(
             IMPL_FAILED,
             f"{CONFLICT_PREFIX}: merging origin/{base_branch} into this branch "
-            f"conflicts in {files}; a fresh IMPL row does not resolve default-"
+            f"conflicts in {files}; a non-repair IMPL row does not resolve default-"
             "branch conflicts. Rebase or merge the branch, then requeue.",
         )
     )
@@ -233,4 +235,5 @@ def merge_default_on_conflict(
     return MergeOutcome(
         merge_files=frozenset(line for line in names.splitlines() if line),
         growth_tree=tree.tree,
+        conflicted=frozenset(unmerged_paths(worktree)),
     )
