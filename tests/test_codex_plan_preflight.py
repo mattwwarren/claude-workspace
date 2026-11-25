@@ -7,6 +7,7 @@ and one checks the fetch's bound through the shared tick-fetch gate.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import pytest
@@ -25,7 +26,8 @@ from cw.codex_plan._preflight import (
 )
 from cw.worktree import FetchOutcome, FetchResult, active_tick_fetch
 from tests._doctor_helpers import make_client
-from tests._shared.git_repos import add_bare_origin, commit_tracked_file
+from tests._shared.git_repos import add_bare_origin, commit_tracked_file, git_in
+from tests._worktree_helpers import FakeClock, hanging_run
 from tests.test_codex_plan_run import Harness, harness
 
 if TYPE_CHECKING:
@@ -130,6 +132,15 @@ class TestDecisions:
         assert _run(tmp_path, _Fetch(), read, sleep) is None
         assert sleep.seconds == [WAIT_INTERVAL_SECONDS]
 
+    def test_behind_only_then_an_unreadable_ref_fails_open_after_one_wait(
+        self, tmp_path: Path
+    ) -> None:
+        sleep = _Sleeps()
+        read = _Reads(_sync(0, 2), None)
+        assert _run(tmp_path, _Fetch(), read, sleep) is None
+        assert sleep.seconds == [WAIT_INTERVAL_SECONDS]
+        assert read.calls == 2
+
     def test_behind_only_that_persists_waits_then_blocks(self, tmp_path: Path) -> None:
         sleep = _Sleeps()
         fetch = _Fetch()
@@ -184,20 +195,56 @@ class TestDecisions:
 
 
 class TestFetchBound:
-    def test_the_fetch_runs_under_the_origin_timeout(
+    def test_the_fetch_runs_under_a_sixty_second_gate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        seen: list[float] = []
+        """The literals, not the constant against itself: 60s per call and total."""
+        seen: list[tuple[float, float]] = []
 
         def fake_fetch(client: object) -> FetchResult:
             gate = active_tick_fetch()
             assert gate is not None
-            seen.append(gate.per_call_s)
+            seen.append((gate.per_call_s, gate.budget_s))
             return FetchResult(outcome=FetchOutcome.FETCHED, reason=None)
 
         monkeypatch.setattr(preflight, "fetch_default_branch", fake_fetch)
         fetch_origin(make_client(name="acme", workspace_path=tmp_path))
-        assert seen == [ORIGIN_FETCH_TIMEOUT_SECONDS]
+        assert seen == [(60.0, 60.0)]
+        assert ORIGIN_FETCH_TIMEOUT_SECONDS == 60.0
+
+    def test_a_hanging_fetch_fails_open_and_never_reads(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The real fetch seam times out: no block, a WARNING, one bounded child."""
+        run = hanging_run(FakeClock())
+        monkeypatch.setattr("cw.worktree._git.subprocess.run", run)
+        read = _Reads(_sync(5, 5))
+        sleep = _Sleeps()
+        client = make_client(name="acme", workspace_path=tmp_path).model_copy(
+            update={"default_branch": "main"}
+        )
+        with caplog.at_level(logging.WARNING):
+            result = origin_sync_block(
+                client=client,
+                worktree=tmp_path,
+                ticket_id=TICKET,
+                fetch=fetch_origin,
+                read=read,
+                sleep=sleep,
+            )
+        assert result is None
+        assert read.calls == 0
+        assert sleep.seconds == []
+        assert run.argv == [["git", "fetch", "origin", "main", "--quiet"]]
+        assert run.timeouts == [60.0]
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any("timed out" in m for m in warnings), warnings
+        assert any("origin sync skipped for main" in m for m in warnings), warnings
 
     def test_the_wait_constants_match_the_tick_stale_window(self) -> None:
         assert WAIT_ATTEMPTS * WAIT_INTERVAL_SECONDS == 90
@@ -217,6 +264,38 @@ class TestRealGit:
         ahead = read_origin_sync(repo, branch)
         assert ahead is not None
         assert (ahead.ahead, ahead.behind) == (1, 0)
+
+    def test_read_origin_sync_is_none_without_an_origin(
+        self, make_git_repo: Callable[..., Path], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        repo = make_git_repo("preflight-no-origin")
+        with caplog.at_level(logging.WARNING, logger=preflight.__name__):
+            assert read_origin_sync(repo, "main") is None
+        assert "origin sync not read for main" in caplog.text
+
+    def test_read_origin_sync_is_none_for_a_branch_origin_lacks(
+        self, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
+    ) -> None:
+        repo, _origin = make_git_repo_with_origin("preflight-ghost")
+        assert read_origin_sync(repo, "ghost") is None
+
+    def test_read_origin_sync_counts_a_behind_only_branch_in_order(
+        self, make_git_repo_with_origin: Callable[..., tuple[Path, Path]]
+    ) -> None:
+        """Origin ahead by two: ``ahead`` is the left count, ``behind`` the right."""
+        repo, _origin = make_git_repo_with_origin("preflight-behind")
+        git_in(repo, "checkout", "main")
+        commit_tracked_file(repo, "one.py")
+        commit_tracked_file(repo, "two.py")
+        git_in(repo, "push", "origin", "main")
+        origin_sha = git_in(repo, "rev-parse", "HEAD")
+        git_in(repo, "reset", "--hard", "HEAD~2")
+        local_sha = git_in(repo, "rev-parse", "HEAD")
+        sync = read_origin_sync(repo, "main")
+        assert sync == OriginSync(
+            local_sha=local_sha, origin_sha=origin_sha, ahead=0, behind=2
+        )
+        assert not sync.in_sync
 
 
 class TestRunWiring:
