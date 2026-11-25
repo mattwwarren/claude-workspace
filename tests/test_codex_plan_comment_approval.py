@@ -16,22 +16,10 @@ import pytest
 from cw.codex_plan._result import (
     PLAN_MD_RELATIVE_PATH,
     REVIEW_MARKER_PREFIXES,
-    write_plan_draft,
 )
-from cw.plan_fingerprint import LeadingBlock
-from tests._backend_mcp_helpers import codex_tracker_client
-from tests._shared.plan_approval_builders import (
-    APPROVAL_AT,
-    OPERATOR,
-    PARK_AT,
-    park_body,
-    token_body,
-    with_operator_ids,
-)
-from tests._shared.ticket_context import issue_envelope_json
+from tests._shared.plan_approval_builders import OPERATOR, parked_with_token
 from tests.test_codex_plan_run import (
     LARGE_PLAN,
-    TICKET,
     Harness,
     add_stations,
     add_turn,
@@ -46,17 +34,9 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.usefixtures("isolated_backend_layers")
 __all__ = ["harness"]
 
-_VIEW = ("issue", "view", TICKET, "--json", "title,body,url,comments")
 _CONSUMED = "plan_comment_approval_consumed: comment=c9"
 _ANY_CONSUMED = "plan_comment_approval_consumed"
 REWRITTEN_PLAN = LARGE_PLAN.replace("Add the widget.", "Add the gadget.")
-
-
-def _snapshot(h: Harness, *, with_token: bool) -> None:
-    comments: list[tuple[str, str, str]] = [("p1", park_body(), PARK_AT)]
-    if with_token:
-        comments.append(("c9", token_body(), APPROVAL_AT))
-    h.gh.reply(*_VIEW, stdout=issue_envelope_json(comments))
 
 
 def _parked(
@@ -65,18 +45,9 @@ def _parked(
     with_token: bool = True,
     operator_ids: tuple[str, ...] | None = (OPERATOR,),
 ) -> Harness:
-    """*h* resumed from a parked large draft; *operator_ids* ``None`` binds none.
-
-    The captured comments are authored by ``OPERATOR``, so ``operator_ids`` that
-    leave it out make the token comment a stranger's.
-    """
-    write_plan_draft(h.worktree, LARGE_PLAN, book=LeadingBlock(applied="none"))
-    _snapshot(h, with_token=with_token)
-    client = codex_tracker_client(h.worktree)
-    h.client = (
-        client if operator_ids is None else with_operator_ids(client, operator_ids)
+    return parked_with_token(
+        h, LARGE_PLAN, with_token=with_token, operator_ids=operator_ids
     )
-    return h
 
 
 def _consumed(result: AutoDevResult, prefix: str) -> list[str]:

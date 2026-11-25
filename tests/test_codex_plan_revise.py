@@ -24,13 +24,7 @@ from cw.plan_fingerprint import (
     compute_plan_draft_fingerprint,
 )
 from tests._backend_mcp_helpers import codex_tracker_client
-from tests._shared.plan_approval_builders import (
-    APPROVAL_AT,
-    PARK_AT,
-    park_body,
-    token_body,
-    with_operator_ids,
-)
+from tests._shared.plan_approval_builders import VIEW, parked_with_token
 from tests._shared.ticket_context import issue_envelope_json, observed_issue_envelope
 from tests._tool_fakes import (
     revise_turn_result,
@@ -39,7 +33,6 @@ from tests._tool_fakes import (
 )
 from tests.test_codex_plan_run import (
     PLAN_TURN,
-    TICKET,
     Harness,
     add_turn,
     harness,
@@ -66,7 +59,6 @@ REVISED = PLAN.replace("Add the widget.", "Add the revised widget.")
 LARGE = PLAN.replace("small", "large")
 REVISED_LARGE = REVISED.replace("small", "large")
 _MUST_FIX = "MUST_FIX"
-_VIEW = ("issue", "view", TICKET, "--json", "title,body,url,comments")
 _CONSUMED = "plan_comment_approval_consumed: comment=c9"
 _MISMATCH = "plan_approval_fingerprint_mismatch"
 
@@ -233,10 +225,7 @@ def test_a_revised_large_plan_parks_for_fresh_approval(
 
 def _comment_approved(h: Harness) -> Harness:
     """*h* resumed from a parked large draft that an operator token approved."""
-    write_plan_draft(h.worktree, LARGE, book=LeadingBlock(applied="none"))
-    comments = [("p1", park_body(), PARK_AT), ("c9", token_body(), APPROVAL_AT)]
-    h.gh.reply(*_VIEW, stdout=issue_envelope_json(comments))
-    h.client = with_operator_ids(codex_tracker_client(h.worktree))
+    parked_with_token(h, LARGE)
     add_turn(h.runner, LARGE, tier="large")
     return h
 
@@ -281,7 +270,7 @@ def test_a_revised_plan_stays_approved_while_the_alternate_holds(
     body_sha = compute_body_sha(observed_issue_envelope()["body"])
     book = LeadingBlock(last_evaluated=f"operator_comment=none|body_sha={body_sha}")
     write_plan_draft(h.worktree, drifted, book=book)
-    h.gh.reply(*_VIEW, stdout=issue_envelope_json())
+    h.gh.reply(*VIEW, stdout=issue_envelope_json())
     h.client = codex_tracker_client(h.worktree)
     _stations(h, reviewer=[_must_fix(), _clean()])
     _revision(h, revise_turn_result(REVISED_LARGE))

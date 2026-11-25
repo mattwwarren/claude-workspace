@@ -30,12 +30,12 @@ from cw.plan_fingerprint import (
     compute_plan_draft_fingerprint,
     format_last_evaluated,
 )
+from tests._shared.plan_approval_builders import VIEW
 from tests._shared.ticket_context import issue_envelope_json, observed_issue_envelope
 from tests._tool_fakes import revise_turn_result, stdin_contains
 from tests.test_codex_plan_revise import LARGE
 from tests.test_codex_plan_run import (
     LARGE_PLAN,
-    TICKET,
     Harness,
     add_stations,
     add_turn,
@@ -49,7 +49,6 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.usefixtures("isolated_backend_layers")
 __all__ = ["harness"]
 
-_VIEW = ("issue", "view", TICKET, "--json", "title,body,url,comments")
 _NOW = "2026-11-10 12:00:00"
 _APPROVED_AT = datetime(2026, 11, 10, tzinfo=UTC)
 _BEFORE = "2026-11-09T09:00:00Z"
@@ -81,7 +80,7 @@ def _drifted(
         last_evaluated=format_last_evaluated("none", _live_body_sha()),
     )
     write_plan_draft(h.worktree, plan, book=book)
-    h.gh.reply(*_VIEW, stdout=issue_envelope_json(comments))
+    h.gh.reply(*VIEW, stdout=issue_envelope_json(comments))
 
 
 def _approval() -> dict[str, object]:
@@ -174,7 +173,7 @@ def test_a_changed_ticket_body_ends_the_alternate(
 ) -> None:
     h = harness(task_updates=_approval())
     _drifted(h)
-    h.gh.reply(*_VIEW, stdout=issue_envelope_json(body="The body was edited."))
+    h.gh.reply(*VIEW, stdout=issue_envelope_json(body="The body was edited."))
     add_stations(add_turn(h.runner, LARGE_PLAN, tier="large"))
     _assert_scan_then_mismatch_park(h)
 

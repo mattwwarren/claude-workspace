@@ -36,7 +36,6 @@ from cw.codex_plan._resume import (
     fast_path_reason,
 )
 from cw.codex_plan._tracker import TrackerObservation, observe_tracker
-from cw.gh import BLOCKING_FINDINGS_HEADER
 from cw.plan_fingerprint import (
     compute_body_sha,
     compute_plan_draft_fingerprint,
@@ -46,6 +45,8 @@ from cw.stage_verification.plan_gates import CommentApproval, check_large_tier_a
 from cw.ticket_snapshot import SnapshotContext
 from tests._shared.plan_approval_builders import (
     OPERATOR,
+    PARK_AUTHOR,
+    blocking_comment,
     park_comment,
     stream_snapshot,
     token_body,
@@ -176,13 +177,7 @@ class TestOrdering:
         assert is_stale(stream, "c9") is True
 
     def test_nearest_header_must_be_a_park(self) -> None:
-        blocking = make_comment(
-            "b1",
-            body=f"{BLOCKING_FINDINGS_HEADER}\n\nfix it",
-            author_id="cw-bot",
-            created_at=_OLD,
-            agent_authored=True,
-        )
+        blocking = blocking_comment()
         assert _approving(park_comment(), blocking, token_comment()) is None
 
     def test_a_token_alone_in_the_stream_has_no_park_to_follow(self) -> None:
@@ -194,13 +189,7 @@ class TestOrdering:
         assert _approving(token_comment()) is None
 
     def test_a_non_park_header_ahead_of_the_token_is_not_a_park(self) -> None:
-        blocking = make_comment(
-            "b1",
-            body=f"{BLOCKING_FINDINGS_HEADER}\n\nfix it",
-            author_id="cw-bot",
-            created_at=_OLD,
-            agent_authored=True,
-        )
+        blocking = blocking_comment()
         stream = _observe(blocking, token_comment()).authority_stream
         assert [e.id for e in stream] == ["b1", "c9"]
         assert is_stale(stream, "c9") is False
@@ -223,7 +212,7 @@ class TestOrdering:
         analysis = make_comment(
             "a1",
             body="analysis",
-            author_id="cw-bot",
+            author_id=PARK_AUTHOR,
             created_at=_NEW,
             agent_authored=True,
         )
