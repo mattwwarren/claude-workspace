@@ -89,6 +89,7 @@ _REMAINING_CODEX_MODULES = {
         "_prompt",
         "_result",
         "_run",
+        "_settle",
         "_stations",
         "_tracker",
     },

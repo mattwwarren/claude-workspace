@@ -483,7 +483,7 @@ elements:
   plan.settlement-marker-grammar:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3464}, note: "codex PLAN writes no settlement lines in C1; the model writes no files"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/codex_plan/_settle.py, symbol: validate_settlements}, note: "the turn transcribes settlement tokens; cw validates each against the grammar, the park ordinal and the park comment before writing the line"}
       opencode: {disposition: deferred, ref: {kind: ticket, number: 3059}, note: "not carried by the hand-written prompt"}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   plan.leading-bookkeeping-line-grammar-and-order:

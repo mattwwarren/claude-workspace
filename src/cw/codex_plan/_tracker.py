@@ -200,10 +200,9 @@ def source_observed(source: str, observation: TrackerObservation) -> bool:
 
     A comment source is observed when that comment is still a bound marker
     comment; a body source when the body's resolutions section is still
-    present (whatever its digest). Absence is never evidence of a change.
+    present (whatever its digest). Absence is never evidence of a change; an
+    unobserved round has no marker comments and an empty body.
     """
-    if not observation.observed:
-        return False
     if source.startswith(COMMENT_SOURCE_PREFIX):
         comment_id = source.removeprefix(COMMENT_SOURCE_PREFIX)
         return comment_id in observation.marker_comment_ids()
