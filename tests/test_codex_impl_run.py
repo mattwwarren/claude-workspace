@@ -35,6 +35,7 @@ from cw.config import get_client, load_state, state_dir
 from cw.contract_manifest import RenderError
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.dispatch import apply_staged_decision
+from cw.exceptions import CwError
 from cw.local_runner import UNEXPECTED_ERROR
 from cw.merge_probe import MergeProbe
 from cw.models import (
@@ -1170,6 +1171,50 @@ def test_repair_row_no_plan_adopted_skips_gate2_with_friction_and_plan_source_no
     assert "impl_scope_conformance_skipped_repair_entry" in result.friction_highlights
     (call,) = h.impl_calls
     assert "=== BEGIN CW-INJECTED: Approved plan ===" not in str(call["stdin"])
+
+
+def test_a_no_plan_repair_with_no_validated_files_blocks_before_the_turn(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness(repair=True, plan=None)
+    with patch("cw.codex_impl._run.repair_allowed_files", return_value=None):
+        result = h.run()
+    _assert_block(result, "impl_failed")
+    assert result.blocker is not None
+    assert "no validated files" in result.blocker.details
+    assert h.runner.calls == []
+
+
+def test_a_post_push_stamping_fault_is_a_durable_terminal_block(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    h.turn()
+    with patch("cw.codex_impl._post._stamp_final", side_effect=CwError("stamp")):
+        result = h.run()
+    _assert_block(result, "impl_failed")
+    assert result.blocker is not None
+    assert "was pushed, but cw could not complete the post-push result" in (
+        result.blocker.details
+    )
+    assert h.head()[:12] in result.blocker.details
+    assert h.origin_tip() == h.head()
+
+
+def test_a_post_push_stamping_fault_with_an_unreadable_head_names_unknown(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    h.turn()
+    unreadable = subprocess.CalledProcessError(128, "rev-parse")
+    with (
+        patch("cw.codex_impl._post._stamp_final", side_effect=CwError("stamp")),
+        patch("cw.codex_impl._post.git_output", side_effect=unreadable),
+    ):
+        result = h.run()
+    _assert_block(result, "impl_failed")
+    assert result.blocker is not None
+    assert "IMPL commit unknown was pushed" in result.blocker.details
 
 
 def test_review_feedback_is_injected_as_untrusted_data_between_fences(
