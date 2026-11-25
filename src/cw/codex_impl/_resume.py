@@ -40,17 +40,18 @@ _UNTRUSTED_NOTE: Final = (
 
 def bound_operator_comments(
     snapshot: TicketSnapshot | None, ctx: SnapshotContext
-) -> list[SnapshotComment]:
+) -> list[SnapshotComment] | None:
     """The snapshot comments whose author binds as operator text under *ctx*.
 
     The comments :func:`~cw.ticket_snapshot.bound_comments` keeps for
     ``Purpose.OPERATOR_TEXT``, so a non-operator author on an MCP-bound client
-    never makes a branch stale or reaches the resume note. Empty for a missing
-    snapshot.
+    never makes a branch stale or reaches the resume note. ``None`` for a missing
+    snapshot, which :func:`~cw.stage_verification.impl_resume.plan_reentry`
+    records as friction rather than reading as "no comments".
     """
-    bound = {str(c["id"]) for c in bound_comments(snapshot, ctx, Purpose.OPERATOR_TEXT)}
     if snapshot is None:
-        return []
+        return None
+    bound = {str(c["id"]) for c in bound_comments(snapshot, ctx, Purpose.OPERATOR_TEXT)}
     return [comment for comment in snapshot.comments if comment.id in bound]
 
 

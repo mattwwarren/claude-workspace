@@ -368,6 +368,32 @@ class TestPlanReentry:
         assert plan.disposition is Disposition.ADVANCE
         assert any("agent-authored" in line for line in plan.friction)
 
+    def test_missing_comments_on_a_re_entered_branch_add_the_load_friction(
+        self, repo: Path, tmp_path: Path, staleness_script: Path
+    ) -> None:
+        _commit(repo, "a.py", trailer=_TRAILER)
+        plan = _reentry(_plan(repo, tmp_path, comments=None))
+        assert plan.disposition is Disposition.ADVANCE
+        assert plan.friction.count("impl_guard_comments_load_failed") == 1
+
+    def test_missing_comments_are_not_recorded_twice_when_the_script_flags_them(
+        self, repo: Path, tmp_path: Path, staleness_script: Path
+    ) -> None:
+        _commit(repo, "a.py")
+        staleness_script.write_text(
+            "# cw-script-version: 2\nimport json\n"
+            "print(json.dumps({'reasons': [], 'comments_load_failed': True}))\n",
+            encoding="utf-8",
+        )
+        plan = _reentry(_plan(repo, tmp_path, comments=None))
+        assert plan.disposition is Disposition.RESUME
+        assert plan.friction.count("impl_guard_comments_load_failed") == 1
+
+    def test_a_fresh_row_with_missing_comments_proceeds_without_friction(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        assert _plan(repo, tmp_path, comments=None) is None
+
     def test_a_stale_script_marker_blocks(self, repo: Path, tmp_path: Path) -> None:
         _commit(repo, "a.py")
         script = repo / ".claude" / "scripts" / _STALENESS_SCRIPT

@@ -334,6 +334,18 @@ def test_an_operator_comment_after_head_runs_a_turn(
     assert "impl_guard_stale: stale_comment_after_head" in result.friction_highlights
 
 
+def test_a_past_s2_branch_without_a_snapshot_advances_and_records_the_load_failure(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness(seed_snapshot=False)
+    _staleness_script()
+    _commit(h, "done.py", trailer=_TRAILER)
+    result = h.run()
+    assert result.status == "stage_complete", result.blocker and result.blocker.details
+    assert h.runner.calls == []
+    assert "impl_guard_comments_load_failed" in result.friction_highlights
+
+
 def test_an_agent_authored_newer_comment_alone_still_advances(
     harness: Callable[..., Harness], tmp_path: Path
 ) -> None:
@@ -403,13 +415,13 @@ def test_a_newer_comment_from_a_bound_operator_on_an_mcp_client_resumes(
     assert "a newer comment" in _resume_section(h)
 
 
-def test_bound_operator_comments_filters_by_binding_and_tolerates_no_snapshot() -> None:
+def test_bound_operator_comments_filters_by_binding_or_returns_none() -> None:
     mine = make_comment("c1", author_id="operator-1")
     theirs = make_comment("c2", author_id="stranger")
     snapshot = make_snapshot_from([mine, theirs])
     ctx = SnapshotContext(github=False, operator_ids=("operator-1",))
     assert bound_operator_comments(snapshot, ctx) == [mine]
-    assert bound_operator_comments(None, ctx) == []
+    assert bound_operator_comments(None, ctx) is None
 
 
 # --- an unconcluded merge arriving with a regress ----------------------------

@@ -39,6 +39,7 @@ from cw.stage_verification.impl_merge_adopt import (
 )
 from cw.stage_verification.impl_regress_findings import regress_review_findings
 from cw.stage_verification.impl_staleness import (
+    COMMENTS_LOAD_FAILED_FRICTION,
     REGRESS_IMPL,
     Staleness,
     check_staleness,
@@ -181,11 +182,15 @@ def _friction(
     staleness: Staleness | None,
     merge: AdoptedMerge | None,
     disposition: Disposition,
+    *,
+    comments_missing: bool,
 ) -> tuple[str, ...]:
     """The plan's friction lines, in the order the run reports them."""
     lines: list[str] = list(entry.friction) if entry is not None else []
     if staleness is not None:
         lines.extend(staleness.friction)
+        if comments_missing and COMMENTS_LOAD_FAILED_FRICTION not in lines:
+            lines.append(COMMENTS_LOAD_FAILED_FRICTION)
         if staleness.stale:
             lines.append(f"impl_guard_stale: {', '.join(staleness.reasons)}")
     if merge is not None:
@@ -210,7 +215,7 @@ def plan_reentry(
     worktree: Path,
     base_branch: str,
     facts: GitFacts,
-    comments: Sequence[SnapshotComment],
+    comments: Sequence[SnapshotComment] | None,
     scratch: Path,
 ) -> ReentryPlan | ImplBlock | None:
     """Classify the entry, check staleness and pick the disposition.
@@ -219,6 +224,10 @@ def plan_reentry(
     yields a plan with disposition RESUME, whatever :func:`classify_entry`
     returned (a ``classify_entry`` block still wins, fail-closed). An arriving
     merge with no regress signal is a ``merge_in_progress:`` block.
+
+    ``comments=None`` means the ticket snapshot could not be loaded: the check
+    fails open on no comments (as the Claude contract), and a non-fresh entry
+    records ``impl_guard_comments_load_failed`` so the sentinel shows it.
     """
     merged = _merge_step(worktree, base_branch, task)
     if isinstance(merged, ImplBlock):
@@ -230,7 +239,7 @@ def plan_reentry(
     staleness: Staleness | None = None
     if entry is not None and entry.kind is not EntryKind.FRESH:
         staleness = check_staleness(
-            worktree, comments=comments, signal=signal, scratch=scratch
+            worktree, comments=comments or (), signal=signal, scratch=scratch
         )
         if staleness.block is not None:
             return staleness.block
@@ -246,5 +255,7 @@ def plan_reentry(
         entry,
         staleness,
         merge,
-        _friction(entry, staleness, merge, disposition),
+        _friction(
+            entry, staleness, merge, disposition, comments_missing=comments is None
+        ),
     )
