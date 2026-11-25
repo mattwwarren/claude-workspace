@@ -33,10 +33,11 @@ from cw.models import (
     SessionOrigin,
     Stage,
 )
-from tests._shared.session_seeding import _make_ticket_task
 from tests._shared.stop_hook_context import (
     _hold_context_lock,
     _invoke_hook_command,
+    _read_context,
+    _seed_running_row,
     _write_hook_context_file,
 )
 
@@ -48,45 +49,12 @@ def _context_path(worktree: Path) -> Path:
     return worktree / HOOK_CONTEXT_RELATIVE_PATH
 
 
-def _read_context(worktree: Path) -> dict[str, object]:
-    raw = json.loads(_context_path(worktree).read_text(encoding="utf-8"))
-    assert isinstance(raw, dict)
-    return raw
-
-
 def _seeded_worktree(tmp_path: Path, name: str = "wt") -> Path:
     """A worktree carrying a freshly-written cw-context.json."""
     worktree = tmp_path / name
     worktree.mkdir()
     _write_hook_context_file(worktree)
     return worktree
-
-
-def _seed_running_row(
-    worktree: Path,
-    *,
-    stage: Stage = Stage.IMPL,
-    status: QueueItemStatus = QueueItemStatus.RUNNING,
-) -> None:
-    """Seed the dev queue with the row the seeded context file describes.
-
-    The ids are read back out of the written context rather than restated, so
-    this can never drift from ``_write_hook_context_file``'s own literals.
-    """
-    context = _read_context(worktree)
-    save_dev_queue(
-        DevQueueStore(
-            tasks=[
-                _make_ticket_task(
-                    ticket_id=context["ticket_id"],
-                    client=context["client"],
-                    session_id=context["session_id"],
-                    status=status,
-                    stage=stage,
-                )
-            ]
-        )
-    )
 
 
 def _invoke_signal_park(
