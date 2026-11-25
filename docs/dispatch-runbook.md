@@ -4817,7 +4817,9 @@ pushes. cw does everything else:
   with a `merge_in_progress:` prefix. A merge with no regress signal parks
   `merge_in_progress` too. The dispatch backstop
   (`unconcluded_finalize_regress_merge`) is lane-agnostic and also covers the
-  codex lane.
+  codex lane. A repair row's own default-branch merge also gets the two
+  pre-staging guards (conflict markers, an untouched unmerged path), because
+  its merge outcome now records the conflicted paths.
 - **Gates, in order.** Gate 1 parks `empty_diff_blocked`
   (`empty_diff_no_commits`) on an empty net diff against the fork point; the
   plan fence parks `codex_fix_scope_drift`; on repair rows the growth guard
