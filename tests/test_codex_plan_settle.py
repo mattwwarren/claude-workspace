@@ -20,8 +20,9 @@ from cw.codex_plan._settle import (
     validate_settlements,
 )
 from cw.codex_plan._tracker import observe_tracker
-from cw.gh import AGENT_COMMENT_MARKER
+from cw.gh import AGENT_COMMENT_MARKER, agent_marked_body
 from cw.ticket_snapshot import Purpose, SnapshotContext, bound_comments
+from cw.tracker_post import split_text, wrap_part
 from tests._shared.ticket_context import make_comment, make_snapshot_from
 from tests._tool_fakes import plan_sentinel
 
@@ -156,6 +157,53 @@ class TestParkState:
             [_park("pb", same), _park("pa", same, f"{PARK_HEADER}\n\n1. Only")]
         )
         assert park_state(snapshot).newest_body == _PARK_BODY
+
+    def test_a_split_park_counts_once_with_its_parts_joined(self) -> None:
+        # The park text split by cw's own splitter and wrapped by its own wrapper,
+        # as the outbox posts it, then marked as the drain posts it.
+        text = (
+            f"{PARK_HEADER}\n\n1. Which store?\n   - alternatives: (a) redis (b) disk\n"
+            f"2. X holds\n3. Which queue?\n   - alternatives: (a) sqs (b) amqp\n"
+        )
+        chunks = split_text(text, 60)
+        assert len(chunks) > 1
+        parts = [
+            agent_marked_body(wrap_part(chunk, index=i, total=len(chunks)))
+            for i, chunk in enumerate(chunks, start=1)
+        ]
+        assert parts[0].startswith("(part 1 of ")
+        same = "2026-11-20T00:00:00Z"
+        snapshot = make_snapshot_from(
+            [_park("p1", same, _PARK_BODY)]
+            + [_park(f"q{i}", same, body) for i, body in enumerate(parts, start=1)]
+        )
+        state = park_state(snapshot)
+        assert state.ordinal == 2
+        assert state.newest_body == text.rstrip("\n")
+        assert state.item_block(3) == (
+            "3. Which queue?\n   - alternatives: (a) sqs (b) amqp"
+        )
+
+    def test_a_continuation_part_is_not_a_park(self) -> None:
+        later = _park("p2", "2026-11-21T00:00:00Z", f"(part 2 of 2)\n\n{PARK_HEADER}")
+        snapshot = make_snapshot_from([_park("p1", "2026-11-20T00:00:00Z"), later])
+        assert park_state(snapshot).ordinal == 1
+
+    def test_a_split_park_ignores_a_part_of_another_split(self) -> None:
+        head = _park("a1", "2026-11-20T00:00:00Z", f"(part 1 of 2)\n\n{PARK_HEADER}")
+        other = _park("x2", "2026-11-20T00:00:01Z", "(part 2 of 3)\n\n3. stray")
+        human = make_comment("h", body="(part 2 of 2)\n\n9. human", created_at="z")
+        tail = _park("a2", "2026-11-20T00:00:02Z", "(part 2 of 2)\n\n1. Real item")
+        state = park_state(make_snapshot_from([head, other, human, tail]))
+        assert state.ordinal == 1
+        assert state.newest_body == f"{PARK_HEADER}\n1. Real item"
+
+    def test_the_header_mid_body_is_not_a_park(self) -> None:
+        mention = _park("m1", "2026-11-20T00:00:00Z", f"see\n\n{PARK_HEADER}\n\n1. x")
+        labelled = _park(
+            "m2", "2026-11-20T00:00:01Z", f"(part 2 of 3)\n\n{PARK_HEADER}"
+        )
+        assert park_state(make_snapshot_from([mention, labelled])).ordinal == 0
 
     def test_no_snapshot(self) -> None:
         assert park_state(None) == ParkState(ordinal=0, newest_body=None)

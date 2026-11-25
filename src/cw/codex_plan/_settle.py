@@ -9,9 +9,12 @@ the round cap (fail closed).
 The park ordinal ``k`` and the open item numbers come from cw-posted park
 comments, read from the raw ``snapshot.comments`` (not the trust evaluator,
 which drops agent-authored comments): a park comment is ``agent_authored``
-and carries :data:`~cw.codex_plan._post.PARK_HEADER`. They are numbered in
-snapshot order (the tracker's chronological order, oldest first); the
-comment id breaks a tie only between comments with an equal ``created_at``.
+and carries :data:`~cw.codex_plan._post.PARK_HEADER`. A park over the comment
+cap posts as several comments (``cw.tracker_post.plan_parts``), the first led
+by a ``(part 1 of N)`` label: that first part is the park, counted once, and
+its continuation parts are joined into the newest park's item text. They are
+numbered in snapshot order (the tracker's chronological order, oldest first);
+the comment id breaks a tie only between comments with an equal ``created_at``.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from typing import TYPE_CHECKING, Final
 
 from cw.codex_plan._post import PARK_HEADER
 from cw.plan_fingerprint import settled_line
+from cw.tracker_post import strip_trailing_marker
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
@@ -39,6 +43,8 @@ _DEFERRED_HEADING: Final = "## Deferred Premises"
 _ITEM_ID = re.compile(r"(?:R(?P<round>[0-9]+)\.)?(?P<letter>[AP])(?P<number>[0-9]+)")
 _ALT_TOKEN = re.compile(r"ALT-(?P<letter>[a-z])")
 _NUMBERED_LINE = re.compile(r"^(?P<number>[0-9]+)\. ")
+#: The ``(part i of n)`` label ``cw.tracker_post.wrap_part`` puts first in a split.
+_PART_LABEL = re.compile(r"\(part (?P<index>[0-9]+) of (?P<total>[0-9]+)\)\n\n")
 
 
 @dataclass(frozen=True)
@@ -66,8 +72,44 @@ class ParkState:
         return None
 
 
+def _unlabelled(body: str) -> tuple[str, int, int]:
+    """``(text, index, total)``: the body past its part label; unlabelled is 1 of 1."""
+    text = body.lstrip()
+    match = _PART_LABEL.match(text)
+    if match is None:
+        return text, 1, 1
+    return text[match.end() :], int(match["index"]), int(match["total"])
+
+
 def _is_park_comment(comment: SnapshotComment) -> bool:
-    return comment.agent_authored and comment.body.lstrip().startswith(PARK_HEADER)
+    """A park's first (or only) comment; its continuation parts carry no header."""
+    if not comment.agent_authored:
+        return False
+    text, index, _ = _unlabelled(comment.body)
+    return index == 1 and text.startswith(PARK_HEADER)
+
+
+def _joined_park_body(
+    head: SnapshotComment, comments: Sequence[SnapshotComment]
+) -> str:
+    """The head's body, or the head and its continuation parts joined in order.
+
+    An unlabelled park is returned verbatim. A split park's later parts are the
+    agent-authored comments after the head labelled ``(part i of N)`` for the
+    next ``i`` of the same ``N``; labels and provenance markers are dropped.
+    """
+    text, _, total = _unlabelled(head.body)
+    if total == 1:
+        return head.body
+    parts = [strip_trailing_marker(text)]
+    later = comments[next(i for i, c in enumerate(comments) if c is head) + 1 :]
+    for comment in later:
+        if not comment.agent_authored:
+            continue
+        part, index, of = _unlabelled(comment.body)
+        if of == total and index == len(parts) + 1:
+            parts.append(strip_trailing_marker(part))
+    return "\n".join(parts)
 
 
 def park_state(snapshot: TicketSnapshot | None) -> ParkState:
@@ -82,7 +124,8 @@ def park_state(snapshot: TicketSnapshot | None) -> ParkState:
     ]
     if not ordered:
         return ParkState(ordinal=0, newest_body=None)
-    return ParkState(ordinal=len(ordered), newest_body=ordered[-1].body)
+    newest = _joined_park_body(ordered[-1], snapshot.comments)
+    return ParkState(ordinal=len(ordered), newest_body=newest)
 
 
 @dataclass(frozen=True)
