@@ -15,6 +15,7 @@ from cw.plan_files import (
     _looks_like_path,
     is_large_diff,
     parse_plan_files_modified,
+    parse_plan_lines_estimate,
     parse_plan_scope_tier,
     resolve_review_scope_tier,
 )
@@ -283,3 +284,45 @@ def test_resolve_no_source_returns_none() -> None:
 def test_resolve_none_plan_text_skips_marker_source() -> None:
     """``plan_text=None`` (no ``.cw/plan.md``) falls through to the hint."""
     assert resolve_review_scope_tier(None, "large", None) == "large"
+
+
+# ---------------------------------------------------------------------------
+# parse_plan_lines_estimate (#3464)
+# ---------------------------------------------------------------------------
+
+
+def _files_section(*bullets: str) -> str:
+    return "# Plan\n\n## Files Modified\n\n" + "\n".join(bullets) + "\n\n## Next\n"
+
+
+def test_lines_estimate_reads_one_bullet() -> None:
+    assert parse_plan_lines_estimate(_files_section("- src/a.py (~140 lines)")) == 140
+
+
+def test_lines_estimate_takes_the_first_signed_number_only() -> None:
+    plan = _files_section("- src/a.py (~-230 lines net, plus ~120 added)")
+    assert parse_plan_lines_estimate(plan) == -230
+
+
+def test_lines_estimate_counts_an_unparsable_bullet_as_zero() -> None:
+    plan = _files_section(
+        "- src/a.py (~10 lines)",
+        "- src/b.py",
+        "- src/c.py (some lines)",
+        "* src/d.py (~5 lines)",
+        "prose without a bullet (~99 lines)",
+    )
+    assert parse_plan_lines_estimate(plan) == 15
+
+
+def test_lines_estimate_ignores_fenced_examples_and_other_sections() -> None:
+    plan = (
+        "```\n## Files Modified\n- x.py (~1000 lines)\n```\n"
+        + _files_section("- src/a.py (~3 lines)")
+        + "- src/z.py (~50 lines)\n"
+    )
+    assert parse_plan_lines_estimate(plan) == 3
+
+
+def test_lines_estimate_is_zero_without_a_section() -> None:
+    assert parse_plan_lines_estimate("# Plan\n\n- src/a.py (~10 lines)\n") == 0
