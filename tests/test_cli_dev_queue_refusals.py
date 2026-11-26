@@ -286,7 +286,7 @@ class TestIdempotentRequeue:
             "cw.cli.dev_queue.crud.precheck_requeue", lambda *_a, **_kw: None
         )
         monkeypatch.setattr(
-            "cw.dev_queue.requeue._refuse_if_live_session", lambda *_a, **_kw: None
+            "cw.dev_queue.requeue.core._refuse_if_live_session", lambda *_a, **_kw: None
         )
         patch_roster(monkeypatch, {"abcd1234"})
         before = load_dev_queue().model_dump()

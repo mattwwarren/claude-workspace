@@ -91,7 +91,7 @@ def pinned(
 @pytest.fixture(autouse=True)
 def _fake_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "cw.dev_queue.requeue.get_native_daemon_client", FakeNativeDaemonClient
+        "cw.dev_queue.requeue.core.get_native_daemon_client", FakeNativeDaemonClient
     )
 
 
@@ -924,6 +924,6 @@ class TestOtherCallers:
             if isinstance(node, ast.Call)
             and any(kw.arg in _ADOPT_KEYWORDS for kw in node.keywords)
         }
-        # requeue.py forwards its own parameters under the short names
+        # requeue/core.py forwards its own parameters under the short names
         # ``repin`` / ``recheck``, so the CLI is the only call-site.
         assert offenders == {"cli/dev_queue/crud.py"}

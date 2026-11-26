@@ -2381,7 +2381,8 @@ class TestDispatchTickAutoBypassesApprovedPlan:
             raise AssertionError(msg)
 
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.fetch_approved_plan_comment", _fail_if_called
+            "cw.dev_queue.requeue.plan_guard.fetch_approved_plan_comment",
+            _fail_if_called,
         )
         add_ticket(TicketTask(ticket_id="GEN-FRESH", client="test-client"))
 

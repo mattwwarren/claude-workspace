@@ -187,7 +187,7 @@ class TicketTask(BaseModel):
     # regress (operator `--regress`, or FINALIZE self-heal) lands the task
     # there; cleared by the next real dispatch spawn for this task
     # (dispatch/claim.py), or by an intervening forward requeue bypass
-    # (requeue.py). Distinct from the cumulative regress_attempts above: this
+    # (dev_queue/requeue/). Distinct from the cumulative regress_attempts above: this
     # field answers "was THIS stage entry reached via a backward move," not
     # "how many regresses has this ticket ever had." Reusing regress_attempts
     # for this purpose produces a false positive once any later, unrelated
@@ -624,7 +624,7 @@ class TicketTask(BaseModel):
     # (the sentinel is re-queued PENDING, not rejected). So a set value means
     # "rejected AND the worker was demonstrably done on that landing" -- not
     # merely "rejected." Not a lifetime guarantee: a --from-failed requeue
-    # (dev_queue/requeue.py's requeue_ticket, via the shared
+    # (dev_queue/requeue/core.py's requeue_ticket, via the shared
     # _reset_for_same_stage_requeue in dev_queue/lifecycle.py) doesn't clear
     # this field, so a stale value from an earlier FAILED landing can persist
     # on a task later revived to PENDING/RUNNING -- read it relative to the

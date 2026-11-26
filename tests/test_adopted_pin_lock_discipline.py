@@ -227,7 +227,7 @@ def test_requeue_repin_io_runs_under_dev_queue_lock_never_sessions_lock(
     monkeypatch.setattr("cw.dev_queue.adoption.branch_head_sha_on_origin", _head)
     monkeypatch.setattr("cw.dev_queue.adoption.is_ancestor", _ancestor)
     monkeypatch.setattr(
-        "cw.dev_queue.requeue.get_native_daemon_client", FakeNativeDaemonClient
+        "cw.dev_queue.requeue.core.get_native_daemon_client", FakeNativeDaemonClient
     )
 
     requeue_ticket(_TICKET, _CLIENT, repin_adopted_head=True)

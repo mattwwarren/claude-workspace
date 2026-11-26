@@ -158,7 +158,7 @@ def test_adopted_repin(
         lambda _branch, **_kw: (head, True),
     )
     monkeypatch.setattr(
-        "cw.dev_queue.requeue.get_native_daemon_client", FakeNativeDaemonClient
+        "cw.dev_queue.requeue.core.get_native_daemon_client", FakeNativeDaemonClient
     )
     stage_override = extra.get("stage_override")
     assert stage_override is None or isinstance(stage_override, str)

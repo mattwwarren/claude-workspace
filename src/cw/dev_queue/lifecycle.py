@@ -779,7 +779,7 @@ def _stage_regress(
     # revoked for every target (#2767); a re-review re-stamps it at approve.
     _clear_review_approval(task, path="stage_regress")
     # unproductive=False (GitHub #1750): the shared chokepoint for every
-    # regress (operator `--regress` via requeue.py, routing.py's Rule 5a
+    # regress (operator `--regress` via requeue/, routing.py's Rule 5a
     # FINALIZE self-heal). A deliberate backward move is a pipeline-stage
     # change, not a wasted claim — and regress_attempts already bounds it via
     # its own independent cap, so charging the global ceiling here would

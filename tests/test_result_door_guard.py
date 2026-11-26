@@ -124,9 +124,9 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
             "sweep's or cw spawn close's retry candidacy"
         ),
     },
-    "dev_queue/requeue.py": {
+    "dev_queue/requeue/unblock.py": {
         "session.last_result = None": (
-            "requeue.py:322 — deliberate erasure ahead of a requeue; resets "
+            "unblock.py — deliberate erasure ahead of a requeue; resets "
             "to None rather than publishing a sentinel"
         ),
     },

@@ -300,9 +300,10 @@ class OrchestratorEventType(StrEnum):
     SCOPE_ROUTING_DECISION = "dispatch.scope_routing_decision"
     # GitHub #1730 -- a REVIEW-stage requeue whose resolved executor backend
     # cannot deliver the operator's tracker comments to the reviewer. Namespaced
-    # by its owning module (dev_queue/requeue.py), same convention as
+    # by its owning module (dev_queue/requeue/), same convention as
     # SCOPE_ROUTING_DECISION above. This DEGRADES rather than blocking:
-    # requeue.py:182-183 codifies the asymmetry that impl hard-exits on a
+    # _apply_requeue_stage (dev_queue/requeue/stage_gate.py) codifies the
+    # asymmetry that impl hard-exits on a
     # missing plan while review/finalize degrade, and a hard-fail guard here
     # would invert it (#1730/#1717 comment 6 rejected exactly that). The event
     # is therefore the ONLY signal that the operator's send-back never reached

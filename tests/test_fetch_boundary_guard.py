@@ -56,7 +56,7 @@ _ALLOWLIST: Final[dict[str, str]] = {
     # Sign-off reads (the operator releases a gate against the live plan).
     "cw/reconcile/gate_recipes.py": "sign-off: gate recipe reads the plan of record",
     "cw/dev_queue/lifecycle.py": "sign-off: lifecycle reads the plan of record",
-    "cw/dev_queue/requeue.py": "sign-off: requeue reads the plan of record",
+    "cw/dev_queue/requeue/plan_guard.py": "sign-off: requeue reads the plan of record",
     # With a stated reason.
     "cw/tracker_post.py": "post-comment dedup read-back of the comment just posted",
     "cw/sprint.py": "sprint planning reads issue bodies, outside any stage",
