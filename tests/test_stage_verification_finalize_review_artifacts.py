@@ -513,7 +513,7 @@ class TestWritePrBody:
         rig.with_target(override_section="## Operator override (#2205)\n\nwaived\n")
         write_pr_body(rig.target, current=_BODY, pr_head=_HEAD, section="")
         (edit,) = rig.edits()
-        assert edit.endswith(f"\n\n{OVERRIDE_HEADING}\n\nwaived\n")
+        assert edit.endswith(f"\n\n{OVERRIDE_HEADING}\n\n(#2205)\n\nwaived\n")
 
     def test_an_unchanged_body_makes_no_edit(self, rig: Rig) -> None:
         section = _render_adjudication(_defer())
