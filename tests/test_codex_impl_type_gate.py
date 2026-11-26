@@ -320,7 +320,7 @@ def test_a_git_failure_while_measuring_parks_gate_setup(
     h.turn()
     start = h.head()
     failure = subprocess.CalledProcessError(
-        128, ["git", "merge-base"], stderr="fatal: no merge base"
+        128, "merge-base", stderr="fatal: no merge base"
     )
 
     with patch("cw.codex_impl._type_gate.gate_fork_point", side_effect=failure):
@@ -877,7 +877,7 @@ def test_an_unreadable_baseline_at_record_time_is_friction_not_a_park(
     _seed_main(h, BASELINE_FILE, _baseline_listing(WIDGET))
     _uv(tmp_path, monkeypatch, {GATE4_MYPY: GhReply(1, _mypy_output())})
     h.turn()
-    failure = subprocess.CalledProcessError(128, ["git", "show"])
+    failure = subprocess.CalledProcessError(128, "show")
 
     with patch("cw.codex_impl._type_gate.baselined_paths", side_effect=failure):
         result = h.run()
