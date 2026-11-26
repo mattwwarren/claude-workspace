@@ -122,6 +122,11 @@ def test_declares_tool_and_tool_launch(
         ("uv run --extra dev mypy .", ("--extra", "dev")),
         ("uv run --extra=dev mypy .", ("--extra=dev",)),
         ("uv run --all-extras --all-groups mypy .", ("--all-extras", "--all-groups")),
+        ("uv run --frozen mypy .", ("--frozen",)),
+        ("uv run --locked mypy .", ("--locked",)),
+        ("uv run -q mypy .", ("-q",)),
+        ("uv run --quiet mypy .", ("--quiet",)),
+        ("uv run --no-progress mypy .", ("--no-progress",)),
         (
             "uv run --group lint --with=types-x --python 3.12 mypy .",
             ("--group", "lint", "--with=types-x", "--python", "3.12"),
@@ -156,7 +161,7 @@ def test_tool_launch_carries_the_environment_options(
         "uv run --directory=backend mypy .",
         "uv run --project backend mypy .",
         "uv run --package api mypy .",
-        "uv run --frozen mypy .",
+        "uv run --no-sync mypy .",
         "uv run --all-extras=yes mypy .",
         "uv run --python $PYTHON mypy .",
         # An untracked file is absent from the gate worktree.

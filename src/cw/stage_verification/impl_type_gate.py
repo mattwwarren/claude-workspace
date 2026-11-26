@@ -100,8 +100,21 @@ _EXIT_UNTOUCHED_OK: Final = 1
 
 _SEGMENT_SPLIT: Final = re.compile(r"&&|\|\||[;|\n]")
 _WRAPPERS: Final = frozenset({"make", "pre-commit"})
-# The ``uv run`` options that select the environment; cw repeats these.
-_UV_FLAGS: Final = frozenset({"--all-extras", "--all-groups"})
+# The ``uv run`` options cw repeats on its own command; any other makes the
+# command unreproducible. The flags take no value: they select extras and groups,
+# hold the lockfile as it is, or only change uv's own output. The value options
+# select the environment.
+_UV_FLAGS: Final = frozenset(
+    {
+        "--all-extras",
+        "--all-groups",
+        "--frozen",
+        "--locked",
+        "-q",
+        "--quiet",
+        "--no-progress",
+    }
+)
 _UV_VALUE_OPTIONS: Final = frozenset({"--extra", "--group", "--with", "--python"})
 # Values that can name a path: a relative one may not exist in the gate worktree,
 # which holds only tracked files.

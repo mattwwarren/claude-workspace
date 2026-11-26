@@ -4867,13 +4867,15 @@ pushes. cw does everything else:
   - *Environment.* cw's own ruff, mypy and debt-record commands run at the repo
     root as `uv run` plus the declaring segment's `--extra`, `--all-extras`,
     `--group`, `--all-groups`, `--with` and `--python` options (`--opt value`
-    or `--opt=value`). When cw cannot reproduce the declaring command (an
+    or `--opt=value`) and its `--frozen`, `--locked`, `-q`, `--quiet` and
+    `--no-progress` flags. When cw cannot reproduce the declaring command (an
     earlier `cd`, `pushd`, `export` or assignment, an assignment prefix,
-    `--directory`, `--project`, `--package`, `--env-file`, any other `uv run`
-    option, an option value that needs shell expansion, or a relative-path
-    `--with` or `--python` value, one starting with `.`), it does not run that
-    tool: `impl_gate4_launcher_unsupported: <tool>`. The gate worktree holds
-    only tracked files, so an untracked `.env` or `.venv` is absent there. Of
+    `--directory`, `--project`, `--package`, `--env-file`, `--no-sync`,
+    `--no-dev`, `--offline`, any other `uv run` option, an option value that
+    needs shell expansion, or a relative-path `--with` or `--python` value, one
+    starting with `.`), it does not run that tool:
+    `impl_gate4_launcher_unsupported: <tool>`. The gate worktree holds only
+    tracked files, so an untracked `.env` or `.venv` is absent there. Of
     several declaring segments, one cw can reproduce wins, the first in gate
     order. Baseline commands run verbatim, so only their debt record is skipped
     this way.
