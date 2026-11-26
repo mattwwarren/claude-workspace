@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 __all__ = [
+    "NOTE_LINE_CAP",
     "PROBE_UNAVAILABLE",
     "BoundPr",
     "DetectedPr",
@@ -78,8 +79,9 @@ _MERGE_FIELDS: Final = "mergeable,mergeStateStatus"
 _BLOCKING_MERGE: Final = frozenset({"CONFLICTING", "DIRTY"})
 _MERGEABLE: Final = "MERGEABLE"
 _TAIL: Final = 500
-#: The local-only-merge note is one line; the default per-line cap would cut it.
-_NOTE_LINE_CAP: Final = 600
+#: A park note is one line (this module's local-only-merge note and the semantic
+#: auto-resolve's); the default per-line cap would cut it.
+NOTE_LINE_CAP: Final = 600
 _OVERRIDE_HEADING: Final = "## Operator override"
 _NEXT_REGION: Final = re.compile(r"\n## |<!-- cw-review-signoff:")
 
@@ -271,7 +273,7 @@ def local_only_merge(
         f' worktree; push it with a plain "git push origin'
         f' HEAD:refs/heads/{branch}" and requeue, because a reused PR must'
         " match local HEAD",
-        max_line_chars=_NOTE_LINE_CAP,
+        max_line_chars=NOTE_LINE_CAP,
     )
     return replace(block, details=f"{block.details}; {note}", retry_eligible=False)
 

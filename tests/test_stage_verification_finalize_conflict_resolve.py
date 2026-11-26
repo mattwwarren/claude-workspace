@@ -316,6 +316,45 @@ def test_a_conflict_in_an_ignored_path_is_never_resolved(repo: Repo) -> None:
     _assert_untouched(repo, pre, tip)
 
 
+_LONG_PATHS = (
+    "generated/lockfiles/first_service_with_a_long_name/requirements-frozen.lock",
+    "generated/lockfiles/second_service_with_a_long_name/requirements-frozen.lock",
+)
+
+
+def test_long_conflicted_and_ignored_names_survive_the_park_note(repo: Repo) -> None:
+    for path in _LONG_PATHS:
+        commit_tracked_file(repo.worktree, path, "ours\n")
+    git_in(repo.worktree, "push", "origin", _BRANCH)
+    repo.base_adds("other.py")
+    for path in _LONG_PATHS:
+        (repo.side / path).parent.mkdir(parents=True, exist_ok=True)
+        repo.base_adds(path, "theirs\n")
+    outcome = _resolve(repo, run_gates=_never_gates, ignore=_LONG_PATHS)
+    assert outcome.block is not None
+    both = ", ".join(_LONG_PATHS)
+    assert (
+        f"semantic auto-resolve not attempted: {both} must be regenerated, not "
+        f"hand-resolved; conflicted files: {both}" in outcome.block.details
+    )
+
+
+def test_long_clobbered_names_and_the_explanation_survive(repo: Repo) -> None:
+    _ignore_and_push(repo, "generated/")
+    for path in _LONG_PATHS:
+        (repo.worktree / path).parent.mkdir(parents=True, exist_ok=True)
+        (repo.worktree / path).write_text("mine\n", encoding="utf-8")
+    repo.base_adds("other.py")
+    for path in _LONG_PATHS:
+        (repo.side / path).parent.mkdir(parents=True, exist_ok=True)
+        (repo.side / path).write_text("theirs\n", encoding="utf-8")
+        git_in(repo.side, "add", "-f", path)
+    git_in(repo.side, "commit", "-m", "add lockfiles")
+    git_in(repo.side, "push", "origin", "main")
+    outcome = _resolve(repo, run_gates=_never_gates)
+    _assert_refused(repo, outcome, ", ".join(_LONG_PATHS))
+
+
 @pytest.mark.parametrize(
     ("error", "fragment"),
     [

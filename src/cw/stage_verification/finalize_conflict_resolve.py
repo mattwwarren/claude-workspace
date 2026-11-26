@@ -38,6 +38,7 @@ from cw.merge_probe import merge_tree
 from cw.stage_verification.baseline import unmerged_paths
 from cw.stage_verification.finalize_gates import check_branch, has_tracked_changes
 from cw.stage_verification.finalize_pr import (
+    NOTE_LINE_CAP,
     check_mergeability,
     local_only_merge,
     push_ahead,
@@ -104,6 +105,11 @@ class _Attempt:
     branch: str
     pre_merge: str
     pr_url: str
+
+
+def _capped(text: str) -> str:
+    """*text* for a one-line park note: redacted, then capped at the note width."""
+    return redact_and_cap(text, max_line_chars=NOTE_LINE_CAP)
 
 
 def _noted(block: FinalizeBlock, note: str) -> FinalizeBlock:
@@ -218,7 +224,7 @@ def _fetch_and_check(attempt: _Attempt) -> str | None:
     if clobbers is None:
         return f"the paths origin/{attempt.base_branch} changes could not be listed"
     if clobbers:
-        names = redact_and_cap(_printable(", ".join(clobbers)))
+        names = _capped(_printable(", ".join(clobbers)))
         return (
             f"merging origin/{attempt.base_branch} would write over {names}, "
             "untracked or ignored in the worktree"
@@ -255,9 +261,7 @@ def _abort_park(
     aborted = _abort_note(attempt.worktree)
     block = _noted(attempt.park, note)
     if conflicted:
-        block = _noted(
-            block, f"conflicted files: {redact_and_cap(', '.join(conflicted))}"
-        )
+        block = _noted(block, f"conflicted files: {_capped(', '.join(conflicted))}")
     return replace(block, details=block.details + aborted)
 
 
@@ -356,7 +360,7 @@ def _stage_and_commit(attempt: _Attempt, resolved: _Resolved) -> str | None:
         return _output(added)
     still = unmerged_paths(attempt.worktree)
     if still:
-        return redact_and_cap(f"still unmerged: {', '.join(still)}")
+        return _capped(f"still unmerged: {', '.join(still)}")
     done = _git_hooked(
         attempt.worktree,
         [
@@ -449,7 +453,7 @@ def _gate_park(
     else:
         left = _left_local_note(attempt, why, merge_sha)
         parked = replace(_noted(attempt.park, f"{note}; {left}"), retry_eligible=False)
-    return _noted(parked, f"conflicted files: {redact_and_cap(', '.join(conflicted))}")
+    return _noted(parked, f"conflicted files: {_capped(', '.join(conflicted))}")
 
 
 # -- push and re-check -----------------------------------------------------------
@@ -485,8 +489,7 @@ def _publish(
             )
             if conflicted:
                 recheck = _noted(
-                    recheck,
-                    f"conflicted files: {redact_and_cap(', '.join(conflicted))}",
+                    recheck, f"conflicted files: {_capped(', '.join(conflicted))}"
                 )
         return ResolveOutcome(recheck, friction, merge_sha)
     if classifier_ran and SEMANTIC_UNVERIFIED not in friction:
@@ -509,7 +512,7 @@ def _after_conflict(
     ignored = [p for p in conflicted if p in ignore_paths]
     if ignored:
         note = (
-            f"{_NOT_ATTEMPTED}: {redact_and_cap(', '.join(ignored))} must be "
+            f"{_NOT_ATTEMPTED}: {_capped(', '.join(ignored))} must be "
             "regenerated, not hand-resolved"
         )
         return ResolveOutcome(_abort_park(attempt, note, conflicted))
@@ -566,7 +569,7 @@ def resolve_post_push_conflict(
     if why is None:
         why = _fetch_and_check(attempt)
     if why is not None:
-        return ResolveOutcome(_noted(park, f"{_NOT_ATTEMPTED}: {redact_and_cap(why)}"))
+        return ResolveOutcome(_noted(park, f"{_NOT_ATTEMPTED}: {_capped(why)}"))
     merged = _merge_base(attempt)
     if isinstance(merged, FinalizeBlock):
         return ResolveOutcome(merged)
