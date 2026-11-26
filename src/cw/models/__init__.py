@@ -5,7 +5,7 @@ now a package, one submodule per concern, wired in strict dependency order so
 each submodule only imports from those above it (no cycles):
 
 - ``enums`` — StrEnums and enum-derived frozenset/tuple constants. The DAG
-  root: depends on nothing else in the package.
+  root: depends on nothing else in the package. Itself a package (#3739).
 - ``events`` — ``OrchestratorEvent``, ``PrState``, ``ShippedRedEpisode``, ``WatchedPr``.
 - ``focus`` — ``FocusEntry`` (the ``cw focus`` session pointer, #1644). Also a
   DAG root: imports nothing else in the package.
