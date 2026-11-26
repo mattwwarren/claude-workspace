@@ -1595,13 +1595,13 @@ elements:
   finalize.conflict-resolution-round:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3542}, note: "conflict resolution and adopted-PR paths on codex FINALIZE"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/finalize_delta_confirm.py, symbol: confirm_resolution}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   finalize.accepted-cost:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: not-applicable, reason: "codex FINALIZE runs no conflict-resolution or delta-confirm round (#3542); a stale tip parks"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/finalize_delta_confirm.py, symbol: confirm_resolution}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   finalize.merge-gate-check:
@@ -1643,7 +1643,7 @@ elements:
   finalize.ignored-paths-are-unverified-regenerate:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3542}, note: "conflict resolution and adopted-PR paths on codex FINALIZE"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/finalize_conflict_resolve.py, symbol: resolve_post_push_conflict}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   finalize.delegate-to-prep-pr:
@@ -1673,7 +1673,7 @@ elements:
   finalize.base-branch-state-classifier:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3544}, note: "CI wait and pipeline bookkeeping on codex FINALIZE"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/finalize_gates.py, symbol: reproduces_on_base}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   finalize.finalize-review-findings-comment:
@@ -1727,19 +1727,19 @@ elements:
   finalize.why-this-exists-mergeability:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3542}, note: "conflict resolution and adopted-PR paths on codex FINALIZE"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/finalize_pr.py, symbol: check_mergeability}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   finalize.semantic-auto-resolve-attempt:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3542}, note: "conflict resolution and adopted-PR paths on codex FINALIZE"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/finalize_conflict_resolve.py, symbol: resolve_post_push_conflict}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   finalize.why-this-exists-semantic-resolve:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3542}, note: "conflict resolution and adopted-PR paths on codex FINALIZE"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/finalize_conflict_resolve.py, symbol: resolve_post_push_conflict}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   finalize.reuse-path-quality-gates:
@@ -1769,7 +1769,7 @@ elements:
   finalize.adopted-row-limitation-reuse-path-gates:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3542}, note: "conflict resolution and adopted-PR paths on codex FINALIZE"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/finalize_gates.py, symbol: run_finalize_quality_gates}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}}
       local: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}, note: "local declares IMPL only; a lane routing this stage to local parks stage_unsupported before spawn (#3219)."}
   finalize.post-ship-pipeline-bookkeeping:
@@ -1860,7 +1860,7 @@ elements:
     covers: [merge_conflict_post_push]
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/finalize_pr.py, symbol: probe_default}}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/finalize_conflict_resolve.py, symbol: resolve_post_push_conflict}, note: "post-push parks come from the resolver; the pre-push default-branch probe (src/cw/stage_verification/finalize_pr.py::probe_default) parks the same reason and never merges"}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.finalize-review-findings-comment-trigger-body:
@@ -1960,7 +1960,7 @@ elements:
   finalize.adopted-row-limitation-agent-block-sentinel:
     cells:
       claude-native: {disposition: implemented}
-      codex: {disposition: deferred, ref: {kind: ticket, number: 3542}, note: "conflict resolution and adopted-PR paths on codex FINALIZE"}
+      codex: {disposition: implemented, ref: {kind: code, path: src/cw/stage_verification/finalize_gates.py, symbol: run_finalize_quality_gates}}
       opencode: {disposition: fails-closed, ref: {kind: code, path: src/cw/stage_preflight/decision.py, symbol: first_unmet}}
       local: {disposition: not-applicable, reason: "aider has no agent turn; result synthesized from git"}
   finalize.permission-mode:
