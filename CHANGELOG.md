@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.112.0] - 2026-11-26
+
 ### Fixed
 
 - **Codex IMPL's `plan_missing` names `identity_unresolved` (#3530).** On a non-GitHub tracker with no `operator_ids` configured, or a plan-marked comment with no author id, the block now says the plan author could not be checked. The rest of #3530 shipped with #3712, #3744 and #3760.
