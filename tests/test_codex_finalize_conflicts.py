@@ -62,6 +62,7 @@ _MERGE_FIELDS = "mergeable,mergeStateStatus"
 _READ_BACK = "headRefName,headRefOid,baseRefName,state,autoMergeRequest"
 _BIND = "number,url,headRefName,headRefOid"
 _PR_INFO = {"number": PR_NUMBER, "url": PR_URL, "auto_merge": False, "base": "main"}
+_UNARMED_PR_INFO = {"number": PR_NUMBER, "url": PR_URL, "auto_merge": False}
 
 
 def _script_head(h: Harness, head: str) -> None:
@@ -433,12 +434,35 @@ def test_an_adopted_draft_that_cannot_be_marked_ready_is_never_armed(
     assert result.blocker.details == (
         f"adopted draft PR #{PR_NUMBER} could not be marked ready: HTTP 403: forbidden"
     )
-    assert payload["pr_info"] == {"number": PR_NUMBER, "url": PR_URL}
+    assert payload["pr_info"] == _UNARMED_PR_INFO
     assert [c[0] for c in h.arm.calls()] == [
         "ci-hold",
         "check-automerge-allowed",
         "ready",
     ]
+
+
+def test_a_ready_call_that_does_not_finish_parks_with_auto_merge_false(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness(task_updates={"branch": BRANCH})
+    h.gh.reply("pr", "list", "--head", BRANCH, stdout=_pr_list("OPEN"))
+    unfinished = FinalizeBlock(
+        "operator_unavailable",
+        "prep_pr_finalize.py ready did not finish: boom",
+        retry_eligible=True,
+    )
+    h.monkeypatch.setattr(
+        "cw.codex_finalize._run.mark_adopted_ready",
+        lambda *_a, **_k: (unfinished, []),
+    )
+
+    result, payload = _run_handing(h)
+
+    assert result.blocker is not None
+    assert result.blocker.reason == "operator_unavailable"
+    assert payload["pr_info"] == _UNARMED_PR_INFO
+    assert "arm-automerge" not in [c[0] for c in h.arm.calls()]
 
 
 def test_an_unreadable_mergeability_view_carries_no_conflict_pr_info(

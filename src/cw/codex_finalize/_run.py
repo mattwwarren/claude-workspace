@@ -470,7 +470,8 @@ def _arm_pr(run: _Run, state: _State, bound: BoundPr) -> bool | FinalizeBlock:
             run.worktree, pr_number=bound.number, pr_info=pr_info
         )
         if ready is not None:
-            return ready
+            # The doc's fence: a PR that is not ready is reported unarmed.
+            return replace(ready, pr_info={**pr_info, "auto_merge": False})
         state.friction.extend(friction)
     result = arm(
         run.worktree, pr_number=bound.number, head_sha=state.head, pr_info=pr_info
