@@ -266,10 +266,37 @@ def test_another_tools_baseline_argument_is_not_mypys(command: str) -> None:
         "uv run mypy src/ | uv run mypy-baseline filter",
         "uv run mypy --baseline-file conf/b.json src/",
         "gitleaks detect && uv run mypy --baseline-file conf/b.json src/",
+        'uv run mypy --exclude "build|dist" --baseline-file conf/b.json src/',
+        "uv run mypy --exclude 'build|dist' --baseline-file conf/b.json src/",
+        'uv run mypy --exclude "a;b&&c||d" --baseline-file conf/b.json src/',
+        'uv run mypy --exclude "a\\"|b" --baseline-file conf/b.json src/',
     ],
 )
 def test_a_mypy_segment_is_still_a_baseline_consumer(command: str) -> None:
     assert gate.is_baseline_consumer(command) is True
+    if "--baseline-file" in command:
+        assert "conf/b.json" in gate.baseline_candidates([command])
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'gitleaks -r "a|b" | uv run mypy src/',
+        "gitleaks -r 'a;b' && uv run mypy src/",
+        # An unbalanced quote splits its line at every separator.
+        "echo don't && uv run mypy src/",
+        # A newline always splits, inside quotes too.
+        'echo "a\nuv run mypy src/"',
+        # An escaped quote opens no span.
+        'echo \\"; uv run mypy src/ \\"',
+    ],
+)
+def test_a_separator_outside_a_quoted_span_still_splits(command: str) -> None:
+    with_argument = f"gitleaks --baseline-path x.json; {command}"
+
+    assert gate.declares_tool(command, "mypy") is True
+    assert gate.baseline_candidates([with_argument]) == _DEFAULTS
+    assert gate.is_baseline_consumer(with_argument) is False
 
 
 def test_another_tools_tracked_baseline_is_no_mypy_baseline(repo: Path) -> None:

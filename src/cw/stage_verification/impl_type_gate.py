@@ -98,7 +98,13 @@ _COMMAND_MAX_CHARS: Final = 200
 _DIAGNOSTIC_MAX_CHARS: Final = 300
 _EXIT_UNTOUCHED_OK: Final = 1
 
-_SEGMENT_SPLIT: Final = re.compile(r"&&|\|\||[;|\n]")
+_SEPARATOR: Final = re.compile(r"&&|\|\||[;|]")
+# Scanning one line: an escaped quote or backslash (it opens no span), a quoted
+# span, a separator outside one, or a quote that never closes.
+_SHELL_PART: Final = re.compile(
+    r"""\\["'\\]|"(?:\\.|[^"\\])*"|'[^']*'"""
+    rf"""|(?P<separator>{_SEPARATOR.pattern})|(?P<unbalanced>["'])"""
+)
 _WRAPPERS: Final = frozenset({"make", "pre-commit"})
 # The ``uv run`` options cw repeats on its own command; any other makes the
 # command unreproducible. The flags take no value: they select extras and groups,
@@ -155,8 +161,27 @@ def _tool_pattern(tool: str) -> re.Pattern[str]:
     return re.compile(rf"(?<![\w.-]){re.escape(tool)}(?![\w./-])")
 
 
+def _split_line(line: str) -> list[str]:
+    """*line* split at the separators outside quotes; at all if one never closes."""
+    parts: list[str] = []
+    start = 0
+    for match in _SHELL_PART.finditer(line):
+        if match["unbalanced"]:
+            return _SEPARATOR.split(line)
+        if match["separator"]:
+            parts.append(line[start : match.start()])
+            start = match.end()
+    return [*parts, line[start:]]
+
+
 def _segments(command: str) -> list[str]:
-    return [part.strip() for part in _SEGMENT_SPLIT.split(command) if part.strip()]
+    """The shell segments of *command*; a newline always ends one."""
+    return [
+        part.strip()
+        for line in command.split("\n")
+        for part in _split_line(line)
+        if part.strip()
+    ]
 
 
 def _tokens(segment: str) -> list[str]:
