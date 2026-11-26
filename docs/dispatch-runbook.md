@@ -4903,7 +4903,11 @@ pushes. cw does everything else:
   - *Baselined-debt record.* After the baseline commands pass, cw runs plain
     mypy once more and merges one `SHOULD_FIX` entry per touched file with
     errors into `.cw/deferred-findings.md`, skipping a file that already has
-    one. It never blocks: a malformed artifact is left untouched with
+    one. Only a file with entries in a baseline file at the fork point (an
+    exact repo-relative path in `mypy-baseline.txt` or `.mypy/baseline.json`)
+    is recorded. A touched file with errors and no entry (a new file, or one
+    outside the baseline command's scope) gets no record and does not block:
+    `impl_gate4_baseline_uncovered: <files>`. The record never blocks: a malformed artifact is left untouched with
     `deferred_findings_unparseable`, any other failure is
     `impl_baselined_record_failed`.
   - *`tests.prepare`* is read before the turn from the default branch

@@ -9,6 +9,7 @@ sandboxed git repos; mypy output comes from real captures under
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import subprocess
@@ -44,6 +45,10 @@ _ERRORS_COLUMNS = (_FIXTURES / "mypy_error_output_columns_real.txt").read_text(
     encoding="utf-8"
 )
 _USAGE = (_FIXTURES / "mypy_usage_error_real.txt").read_text(encoding="utf-8")
+_BASELINE_TXT = (_FIXTURES / "mypy_baseline_real.txt").read_text(encoding="utf-8")
+_BASELINE_JSON = (_FIXTURES / "basedmypy_baseline_real.json").read_text(
+    encoding="utf-8"
+)
 _CONFIG = ".claude/project-config.yaml"
 
 
@@ -218,6 +223,38 @@ def test_a_baseline_file_argument_is_a_candidate(repo: Path) -> None:
 
     assert found == MypyBaseline(files=("conf/mypy-base.json",), commands=(command,))
     assert gate.baseline_candidates(["x --baseline-path 'b.txt'"])[-1] == "b.txt"
+
+
+@pytest.mark.parametrize(
+    ("name", "content"),
+    [
+        ("mypy-baseline.txt", _BASELINE_TXT),
+        (".mypy/baseline.json", _BASELINE_JSON),
+    ],
+    ids=["text", "json"],
+)
+def test_baselined_paths_reads_both_formats_at_the_fork(
+    repo: Path, name: str, content: str
+) -> None:
+    commit_tracked_file(repo, name, content)
+    fork = git_in(repo, "rev-parse", "HEAD")
+    (repo / name).write_text("", encoding="utf-8")
+
+    found = gate.baselined_paths(repo, fork, [name])
+
+    assert found == {"pkg/old.py", "top.py"}
+    # Exact repo-relative paths only, never part of a longer one.
+    assert "old.py" not in found
+
+
+def test_baselined_paths_ignores_empty_and_unknown_json(repo: Path) -> None:
+    emptied = json.loads(_BASELINE_JSON)
+    emptied["files"]["top.py"] = []
+    commit_tracked_file(repo, "a.json", json.dumps(emptied))
+    commit_tracked_file(repo, "b.json", "[]\n")
+    fork = git_in(repo, "rev-parse", "HEAD")
+
+    assert gate.baselined_paths(repo, fork, ["a.json", "b.json"]) == {"pkg/old.py"}
 
 
 # -- tests.prepare -------------------------------------------------------------

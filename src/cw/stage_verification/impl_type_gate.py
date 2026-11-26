@@ -17,6 +17,7 @@ ratchet).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -72,6 +73,7 @@ RUFF_NOT_DECLARED_FRICTION: Final = "impl_gate4_ruff_not_declared"
 MYPY_NOT_DECLARED_FRICTION: Final = "impl_gate4_mypy_not_declared"
 BASELINE_FRICTION_PREFIX: Final = "impl_mypy_baseline: "
 UNTOUCHED_ONLY_PREFIX: Final = "impl_gate4_mypy_untouched_only: "
+BASELINE_UNCOVERED_PREFIX: Final = "impl_gate4_baseline_uncovered: "
 DEFERRED_UNPARSEABLE_FRICTION: Final = "deferred_findings_unparseable"
 RECORD_FAILED_FRICTION: Final = "impl_baselined_record_failed"
 
@@ -321,6 +323,31 @@ def detect_mypy_baseline(
         return None
     consumers = tuple(command for command in commands if is_baseline_consumer(command))
     return MypyBaseline(files=files, commands=consumers)
+
+
+def _entry_paths(content: str) -> set[str]:
+    """The paths baseline file *content* holds entries for, in either format.
+
+    ``.mypy/baseline.json`` maps each path under ``files`` to its entries;
+    ``mypy-baseline.txt`` has one ``<path>:0: error: ...`` line per entry.
+    """
+    try:
+        data: object = json.loads(content)
+    except ValueError:
+        return {error.path for error in parse_mypy_errors(content)}
+    files = data.get("files") if isinstance(data, dict) else None
+    if not isinstance(files, dict):
+        return set()
+    return {os.path.normpath(str(path)) for path, entries in files.items() if entries}
+
+
+def baselined_paths(worktree: Path, fork: str, files: Sequence[str]) -> set[str]:
+    """The paths any baseline file in *files* holds an entry for at *fork*."""
+    found: set[str] = set()
+    for path in files:
+        content = git_output(["show", f"{fork}:{path}"], cwd=worktree, errors="replace")
+        found |= _entry_paths(content)
+    return found
 
 
 # -- tests.prepare from the default branch ---------------------------------------
@@ -803,6 +830,7 @@ def record_baselined_errors(
 __all__ = [
     "BASELINE_FRICTION_PREFIX",
     "BASELINE_TOOL",
+    "BASELINE_UNCOVERED_PREFIX",
     "CONSUMER_UNKNOWN_PREFIX",
     "DEFERRED_UNPARSEABLE_FRICTION",
     "GATE4_PREFIX",
@@ -826,6 +854,7 @@ __all__ = [
     "baseline_command_block",
     "baseline_growth",
     "baseline_rule",
+    "baselined_paths",
     "consumer_launch",
     "declares_tool",
     "detect_mypy_baseline",

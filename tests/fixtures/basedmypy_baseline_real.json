@@ -1,0 +1,45 @@
+{
+  "files": {
+    "pkg/old.py": [
+      {
+        "code": "return-value",
+        "column": 11,
+        "message": "Incompatible return value type (got \"int\", expected \"str\")",
+        "offset": 2,
+        "src": "return x",
+        "target": "pkg.old.f"
+      },
+      {
+        "code": "assignment",
+        "column": 17,
+        "message": "Incompatible types in assignment (expression has type \"str\", variable has type \"int\")",
+        "offset": 5,
+        "src": "y: int = \"a\"",
+        "target": "pkg.old.C.m"
+      },
+      {
+        "code": "attr-defined",
+        "column": 8,
+        "message": "\"C\" has no attribute \"nope\"",
+        "offset": 1,
+        "src": "self.nope()",
+        "target": "pkg.old.C.m"
+      }
+    ],
+    "top.py": [
+      {
+        "code": "assignment",
+        "column": 9,
+        "message": "Incompatible types in assignment (expression has type \"str\", variable has type \"int\")",
+        "offset": 1,
+        "src": "q: int = \"s\"",
+        "target": "top"
+      }
+    ]
+  },
+  "format": "1.7",
+  "targets": [
+    "file:pkg/old.py",
+    "file:top.py"
+  ]
+}

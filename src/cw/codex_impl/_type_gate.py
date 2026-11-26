@@ -28,6 +28,7 @@ from cw.stage_verification.baseline import staged_cycle_tree
 from cw.stage_verification.impl_type_gate import (
     BASELINE_FRICTION_PREFIX,
     BASELINE_TOOL,
+    BASELINE_UNCOVERED_PREFIX,
     CONSUMER_UNKNOWN_PREFIX,
     LAUNCHER_UNSUPPORTED_PREFIX,
     MYPY,
@@ -42,6 +43,7 @@ from cw.stage_verification.impl_type_gate import (
     VerdictKind,
     baseline_command_block,
     baseline_growth,
+    baselined_paths,
     consumer_launch,
     declares_tool,
     detect_mypy_baseline,
@@ -118,7 +120,7 @@ class _State:
 
 @dataclass(frozen=True)
 class _Steps:
-    """Which checks run: ruff, plain mypy, and the baseline commands (in order).
+    """Which checks run: ruff, plain mypy, and the baseline's commands.
 
     ``ruff``, ``plain_mypy`` and ``record`` hold the ``uv run`` options of cw's
     own command; ``None`` means that command does not run.
@@ -126,13 +128,15 @@ class _Steps:
 
     ruff: tuple[str, ...] | None = None
     plain_mypy: tuple[str, ...] | None = None
-    baseline: tuple[str, ...] = ()
+    baseline: MypyBaseline | None = None
     record: tuple[str, ...] | None = None
 
     @property
     def any(self) -> bool:
         return (
-            self.ruff is not None or self.plain_mypy is not None or bool(self.baseline)
+            self.ruff is not None
+            or self.plain_mypy is not None
+            or self.baseline is not None
         )
 
 
@@ -225,7 +229,7 @@ def _baseline_steps(
         tokens.append(_skipped(consumer, BASELINE_TOOL, MYPY_NOT_DECLARED_FRICTION))
         return _Steps(ruff=ruff)
     record = _options_for(consumer, MYPY, tokens, MYPY_NOT_DECLARED_FRICTION)
-    return _Steps(ruff=ruff, baseline=baseline.commands, record=record)
+    return _Steps(ruff=ruff, baseline=baseline, record=record)
 
 
 def _steps(declared: _Declared, state: _State, tokens: list[str]) -> _Steps:
@@ -345,8 +349,12 @@ def _run_plain_mypy(ctx: _Ctx, options: Sequence[str]) -> ImplBlock | None:
     return None
 
 
-def _record(ctx: _Ctx, options: Sequence[str]) -> None:
-    """The baselined-debt record: never blocks, friction on any failure."""
+def _record(ctx: _Ctx, baseline: MypyBaseline, options: Sequence[str]) -> None:
+    """The baselined-debt record: never blocks, friction on any failure.
+
+    Only a touched file with entries in a baseline file at the fork point is
+    recorded; the baseline commands never vouched for any other file's errors.
+    """
     files = ctx.state.files
     command = _mypy_command(options, files)
     ran = _run_one(ctx, _RECORD, command, _ceiling(ctx.flow, MYPY))
@@ -354,13 +362,25 @@ def _record(ctx: _Ctx, options: Sequence[str]) -> None:
     if ran.why is not None or (ran.exit_code != 0 and not errors):
         ctx.flow.tokens.append(RECORD_FAILED_FRICTION)
         return
+    erroring = {error.path for error in errors} & set(files)
+    try:
+        listed = baselined_paths(ctx.run.worktree, ctx.state.fork, baseline.files)
+    except (subprocess.CalledProcessError, OSError):
+        ctx.flow.tokens.append(RECORD_FAILED_FRICTION)
+        return
+    uncovered = sorted(erroring - listed)
+    if uncovered:
+        shown = listed_files(uncovered)
+        ctx.flow.tokens.append(f"{BASELINE_UNCOVERED_PREFIX}{shown}")
     path = ctx.run.worktree / DEFERRED_FINDINGS_RELATIVE_PATH
-    ctx.flow.tokens.extend(record_baselined_errors(path, errors, files))
+    ctx.flow.tokens.extend(record_baselined_errors(path, errors, erroring & listed))
 
 
-def _run_baseline(ctx: _Ctx, steps: _Steps) -> ImplBlock | None:
+def _run_baseline(
+    ctx: _Ctx, baseline: MypyBaseline, record: Sequence[str] | None
+) -> ImplBlock | None:
     ceiling = _ceiling(ctx.flow, BASELINE_TOOL)
-    for index, command in enumerate(steps.baseline):
+    for index, command in enumerate(baseline.commands):
         ran = _run_one(ctx, f"{_BASELINE}-{index}", command, ceiling)
         if ran.why is not None:
             return unavailable_block(command, ran.why)
@@ -368,8 +388,8 @@ def _run_baseline(ctx: _Ctx, steps: _Steps) -> ImplBlock | None:
             return baseline_command_block(
                 command, ran.exit_code, ran.output, ctx.state.fork, ctx.state.files
             )
-    if steps.record is not None:
-        _record(ctx, steps.record)
+    if record is not None:
+        _record(ctx, baseline, record)
     return None
 
 
@@ -380,8 +400,8 @@ def _execute(ctx: _Ctx, steps: _Steps) -> ImplBlock | None:
         block = _run_ruff(ctx, steps.ruff)
     if block is None and steps.plain_mypy is not None:
         block = _run_plain_mypy(ctx, steps.plain_mypy)
-    if block is None and steps.baseline:
-        block = _run_baseline(ctx, steps)
+    if block is None and steps.baseline is not None:
+        block = _run_baseline(ctx, steps.baseline, steps.record)
     return block
 
 

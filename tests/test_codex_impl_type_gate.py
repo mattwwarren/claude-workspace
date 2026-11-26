@@ -11,6 +11,7 @@ with its paths substituted. ``CW_GATE_ROOT`` is a ``tmp_path`` directory.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
@@ -24,6 +25,7 @@ from cw.review_adjudication import (
 )
 from cw.stage_verification.impl_type_gate import (
     BASELINE_FRICTION_PREFIX,
+    BASELINE_UNCOVERED_PREFIX,
     CONSUMER_UNKNOWN_PREFIX,
     DEFERRED_UNPARSEABLE_FRICTION,
     GATE4_PREFIX,
@@ -64,6 +66,7 @@ __all__ = ["harness"]
 _FIXTURES = Path(__file__).resolve().parent / "fixtures"
 _CAPTURE = (_FIXTURES / "mypy_error_output_real.txt").read_text(encoding="utf-8")
 _USAGE = (_FIXTURES / "mypy_usage_error_real.txt").read_text(encoding="utf-8")
+_BASELINE_TXT = (_FIXTURES / "mypy_baseline_real.txt").read_text(encoding="utf-8")
 OTHER = "src/cw/other.py"
 PRIOR = "src/cw/prior.py"
 BASELINE_FILE = "mypy-baseline.txt"
@@ -86,6 +89,11 @@ _GATE4_MYPY_ARGV = [
 def _mypy_output(touched: str = WIDGET, other: str = OTHER) -> str:
     """The real capture with *touched* for ``main.py``, *other* for the helper."""
     return _CAPTURE.replace("pkg/helper.py", other).replace("main.py", touched)
+
+
+def _baseline_listing(path: str) -> str:
+    """The real ``mypy-baseline`` capture with *path* for ``pkg/old.py``."""
+    return _BASELINE_TXT.replace("pkg/old.py", path)
 
 
 def _untouched_output() -> str:
@@ -698,7 +706,7 @@ def test_baselined_errors_are_recorded_and_do_not_block(
     gate_root: Path,
 ) -> None:
     h = harness(gates=(BASELINE_GATE,))
-    _seed_main(h, BASELINE_FILE, "old entry\n")
+    _seed_main(h, BASELINE_FILE, _baseline_listing(WIDGET))
     uv = _uv(tmp_path, monkeypatch, {GATE4_MYPY: GhReply(1, _mypy_output())})
     h.turn()
 
@@ -747,7 +755,7 @@ def test_a_malformed_deferred_artifact_is_left_untouched_with_friction(
     gate_root: Path,
 ) -> None:
     h = harness(gates=(BASELINE_GATE,))
-    _seed_main(h, BASELINE_FILE, "old entry\n")
+    _seed_main(h, BASELINE_FILE, _baseline_listing(WIDGET))
     artifact = h.worktree / DEFERRED_FINDINGS_RELATIVE_PATH
     artifact.write_text("hand-edited, not the artifact\n", encoding="utf-8")
     _uv(tmp_path, monkeypatch, {GATE4_MYPY: GhReply(1, _mypy_output())})
@@ -758,6 +766,45 @@ def test_a_malformed_deferred_artifact_is_left_untouched_with_friction(
     assert result.status == "stage_complete", _details(result)
     assert DEFERRED_UNPARSEABLE_FRICTION in result.friction_highlights
     assert artifact.read_text(encoding="utf-8") == "hand-edited, not the artifact\n"
+
+
+def test_a_file_absent_from_the_baseline_is_not_recorded_as_old_debt(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    gate_root: Path,
+) -> None:
+    h = harness(gates=(BASELINE_GATE,))
+    # A longer path that ends in the touched one is not an entry for it.
+    _seed_main(h, BASELINE_FILE, _baseline_listing(f"vendor/{WIDGET}"))
+    _uv(tmp_path, monkeypatch, {GATE4_MYPY: GhReply(1, _mypy_output())})
+    h.turn()
+
+    result = h.run()
+
+    assert result.status == "stage_complete", _details(result)
+    assert f"{BASELINE_UNCOVERED_PREFIX}{WIDGET}" in result.friction_highlights
+    assert not (h.worktree / DEFERRED_FINDINGS_RELATIVE_PATH).exists()
+
+
+def test_an_unreadable_baseline_at_record_time_is_friction_not_a_park(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    gate_root: Path,
+) -> None:
+    h = harness(gates=(BASELINE_GATE,))
+    _seed_main(h, BASELINE_FILE, _baseline_listing(WIDGET))
+    _uv(tmp_path, monkeypatch, {GATE4_MYPY: GhReply(1, _mypy_output())})
+    h.turn()
+    failure = subprocess.CalledProcessError(128, ["git", "show"])
+
+    with patch("cw.codex_impl._type_gate.baselined_paths", side_effect=failure):
+        result = h.run()
+
+    assert result.status == "stage_complete", _details(result)
+    assert RECORD_FAILED_FRICTION in result.friction_highlights
+    assert not (h.worktree / DEFERRED_FINDINGS_RELATIVE_PATH).exists()
 
 
 # -- tests.prepare ------------------------------------------------------------------
