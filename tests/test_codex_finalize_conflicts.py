@@ -389,3 +389,17 @@ def test_an_adopted_draft_that_cannot_be_marked_ready_is_never_armed(
         "check-automerge-allowed",
         "ready",
     ]
+
+
+def test_an_unreadable_mergeability_view_carries_no_conflict_pr_info(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    h.turn()
+    h.gh.reply("pr", "view", PR_URL, "--json", _MERGE_FIELDS, returncode=1)
+
+    result, payload = _run_handing(h)
+
+    assert result.blocker is not None
+    assert result.blocker.reason == "operator_unavailable"
+    assert "pr_info" not in payload
