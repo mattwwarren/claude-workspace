@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
@@ -19,7 +21,7 @@ from unittest.mock import patch
 import pytest
 
 from cw.auto_dev_result import AutoDevResult
-from cw.codex_fix_loop.gates import GateFailure, GatePlan, PlannedGate
+from cw.codex_fix_loop.gates import GateFailure, GateKind, GatePlan, PlannedGate
 from cw.codex_review import CODEX_FIX_DIRTY_START
 from cw.dev_queue.gates import APPROVAL_PARK_FRICTION_PREFIX, STALE_TIP_FRICTION_PREFIX
 from cw.local_runner import git_facts
@@ -693,7 +695,8 @@ class TestQualityGates:
         self, gated: Path, tmp_path: Path, path: str
     ) -> None:
         install_home_prep_pr_state(
-            tmp_path / "state", ("lint", "echo boom-output-xyz; exit 3", 5.0)
+            tmp_path / "state",
+            ("lint", "echo boom-output-xyz; if [ -f src/a.py ]; then exit 3; fi", 5.0),
         )
         block, friction = _gates_run(gated, path)
         assert block is not None
@@ -923,7 +926,9 @@ class TestCreateCiEvidence:
         self, gated: Path, tmp_path: Path
     ) -> None:
         stub = install_home_prep_pr_state(
-            tmp_path / "state", ("lint", "true", 5.0), ("fmt", "exit 3", 5.0)
+            tmp_path / "state",
+            ("lint", "true", 5.0),
+            ("fmt", "if [ -f src/a.py ]; then exit 3; fi", 5.0),
         )
         stub.defer(("lint", ("ci-lint",)))
         run = _gate_run(gated, "create")
@@ -1131,7 +1136,7 @@ class TestRedGateRewriteNote:
     def test_a_red_gate_that_rewrote_nothing_gets_no_note(
         self, gated: Path, tmp_path: Path, path: str
     ) -> None:
-        _red_hook(tmp_path, "echo boom-output-xyz; exit 3")
+        _red_hook(tmp_path, "echo boom-output-xyz; if [ -f src/a.py ]; then exit 3; fi")
         run = _gate_run(gated, path)
         assert run.block is not None
         assert "rewrote" not in run.block.details
@@ -1195,7 +1200,7 @@ class TestRedGateRewriteNote:
         self, gated: Path, tmp_path: Path, path: str
     ) -> None:
         dirty_tracked_file(gated, "tol.py")
-        _red_hook(tmp_path, "exit 1")
+        _red_hook(tmp_path, "[ ! -f src/a.py ]")
         run = _gate_run(gated, path, tolerated=frozenset({"tol.py"}))
         assert run.block is not None
         assert run.block.reason == AGENT_BLOCK
@@ -1276,3 +1281,513 @@ class TestRedGateRewriteNote:
         assert run.block is not None
         assert "...[truncated]" in run.block.details
         assert stem not in run.block.details
+
+
+# --- Step 4.0b delta-confirm round (#3542) ------------------------------------
+
+_DELTA_START = "review converge confirm-job delta"
+_ELIGIBLE_STALE = GhReply(
+    1,
+    json.dumps(
+        {
+            "decision": "rereview_required",
+            "reason": "commits_after_clean_round",
+            "detail": "abc123 landed",
+            "delta_confirm_eligible": True,
+            "resolution_files": ["src/a.py"],
+        }
+    ),
+    "",
+)
+
+
+class TestDeltaConfirmFence:
+    def test_an_eligible_stale_tip_runs_one_round_and_passes_when_clean(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cw = stub_cw_cli(
+            monkeypatch,
+            {
+                "review check-approval": _RECORDED,
+                "review converge config": _CLEAN,
+                "review converge verify-tip": [_ELIGIBLE_STALE, GhReply(0, "{}")],
+                _DELTA_START: [
+                    GhReply(75, "", "CONFIRM_JOB_ID=j1\n"),
+                    GhReply(0, json.dumps({"decision": "clean"})),
+                ],
+            },
+        )
+        outcome = _fence(repo)
+        assert outcome.park is None
+        assert outcome.friction[-1] == f"{TIP_CHECK_PREFIX}accepted"
+        assert cw.calls[-1] == _VERIFY
+        assert not any("finalize" in call for call in cw.calls)
+
+    def test_a_findings_round_parks_with_the_outcome_inside_the_token(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub_cw_cli(
+            monkeypatch,
+            {
+                "review check-approval": _RECORDED,
+                "review converge config": _CLEAN,
+                "review converge verify-tip": _ELIGIBLE_STALE,
+                _DELTA_START: GhReply(0, json.dumps({"decision": "continue"})),
+            },
+        )
+        park = _fence(repo).park
+        assert park is not None
+        assert park["friction_highlights"][-1] == (
+            f"{STALE_TIP_FRICTION_PREFIX} (commits_after_clean_round: abc123 landed;"
+            " delta confirm: findings)"
+        )
+        assert park["next_actions"] == ["requeue_stage_review"]
+
+    def test_a_round_without_detail_keeps_the_outcome_inside_the_parens(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        body = json.loads(_ELIGIBLE_STALE.stdout)
+        del body["detail"]
+        stub_cw_cli(
+            monkeypatch,
+            {
+                "review check-approval": _RECORDED,
+                "review converge config": _CLEAN,
+                "review converge verify-tip": GhReply(1, json.dumps(body)),
+                _DELTA_START: GhReply(3),
+            },
+        )
+        park = _fence(repo).park
+        assert park is not None
+        assert park["friction_highlights"][-1] == (
+            f"{STALE_TIP_FRICTION_PREFIX} (commits_after_clean_round;"
+            " delta confirm: backend_unavailable)"
+        )
+
+    def test_an_ineligible_stale_tip_starts_no_job(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cw = _cw(
+            monkeypatch,
+            check=_RECORDED,
+            config=_CLEAN,
+            verify=_stale("commits_after_clean_round", "abc123 landed"),
+        )
+        assert _fence(repo).park is not None
+        assert not any(" ".join(c).startswith(_DELTA_START) for c in cw.calls)
+
+
+# --- base-branch-state classifier (#2320, #3542) ------------------------------
+
+_MYPY_FIXTURE = Path(__file__).parent / "fixtures" / "mypy_error_output_real.txt"
+_UNCLASSIFIED = "finalize_base_state_unclassified"
+_BRANCH_ONLY_RED = "echo boom-output-xyz; if [ -f src/a.py ]; then exit 3; fi"
+_RED_BOTH = "echo boom-output-xyz; exit 3"
+
+
+def _session_state(repo: Path) -> tuple[str, ...]:
+    return (
+        git_in(repo, "branch", "--show-current"),
+        git_in(repo, "rev-parse", "HEAD"),
+        git_in(repo, "ls-files", "--stage"),
+        git_in(repo, "status", "--porcelain", "--untracked-files=all", "--ignored"),
+    )
+
+
+def _scratch_trees(repo: Path) -> list[str]:
+    listed = git_in(repo, "worktree", "list", "--porcelain")
+    return [line for line in listed.splitlines() if _gates.BASE_WORKTREE_PREFIX in line]
+
+
+def _unclassified_reasons(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage().rsplit("reason=", 1)[1]
+        for r in caplog.records
+        if r.name == _gates.__name__ and _UNCLASSIFIED in r.getMessage()
+    ]
+
+
+def _is_scratch_sh(argv: Any, kwargs: dict[str, Any]) -> bool:
+    cwd = kwargs.get("cwd")
+    return (
+        isinstance(argv, list)
+        and argv[0] == "sh"
+        and cwd is not None
+        and Path(cwd).name.startswith(_gates.BASE_WORKTREE_PREFIX)
+    )
+
+
+@pytest.fixture
+def scratch_launches(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every gate ``sh`` launch whose cwd is a classifier scratch tree."""
+    launches: list[str] = []
+    real_popen = subprocess.Popen
+
+    def _record(argv: Any, *args: Any, **kwargs: Any) -> Any:
+        if _is_scratch_sh(argv, kwargs):
+            launches.append(str(kwargs["cwd"]))
+        return real_popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", _record)
+    return launches
+
+
+def _provision(repo: Path) -> None:
+    """The ignored ``.venv`` marker: the branch run is already provisioned."""
+    venv = repo / ".venv"
+    venv.mkdir()
+    (venv / ".gitignore").write_text("*\n", encoding="utf-8")
+    (venv / "provisioned").write_text("", encoding="utf-8")
+
+
+def _warming_gate(first_run: str, *, extra: str = "") -> str:
+    return (
+        f"{extra}if [ ! -e .venv/provisioned ]; then mkdir -p .venv; "
+        "echo '*' > .venv/.gitignore; : > .venv/provisioned; "
+        f"{first_run}; fi; echo changelog-frozen-bad; exit 1"
+    )
+
+
+_FIXTURE_HEAD = f"head -n 5 {shlex.quote(str(_MYPY_FIXTURE))}"
+
+
+@pytest.mark.parametrize("path", ["reuse", "create"])
+class TestBaseStateClassifier:
+    def test_the_same_failure_on_base_is_external_state_block(
+        self,
+        gated: Path,
+        tmp_path: Path,
+        path: str,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.WARNING)
+        install_home_prep_pr_state(tmp_path / "state", ("lint", _RED_BOTH, 5.0))
+        before = _session_state(gated)
+        block = _gate_run(gated, path).block
+        sha = git_in(gated, "rev-parse", "origin/main")
+        assert block is not None
+        assert block.reason == "external_state_block"
+        assert block.retry_eligible is False
+        assert block.details.startswith(
+            f"the FINALIZE {path}-path quality gate `lint` fails with exit code 3 on"
+            f" this branch and, with the same failure, on a clean origin/main ({sha})"
+        )
+        assert "boom-output-xyz" in block.details
+        assert _unclassified_reasons(caplog) == []
+        assert _session_state(gated) == before
+        assert _scratch_trees(gated) == []
+
+    @pytest.mark.parametrize(
+        ("command", "reason"),
+        [
+            (
+                "if [ -f src/a.py ]; then echo branch-fail; else echo base-fail; fi;"
+                " exit 3",
+                "identity_differs",
+            ),
+            (_BRANCH_ONLY_RED, "base_passed"),
+            (
+                "echo same; if [ -f src/a.py ]; then exit 3; fi; exit 4",
+                "exit_code_differs",
+            ),
+            ("no-such-command-xyz", "exit_code_not_comparable"),
+            ("exit 3", "no_identity"),
+            ("echo made > made.txt; echo boom; exit 3", "tracked_changes"),
+        ],
+    )
+    def test_unclassified_stays_agent_block_with_one_warning(
+        self,
+        gated: Path,
+        tmp_path: Path,
+        path: str,
+        command: str,
+        reason: str,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.WARNING)
+        install_home_prep_pr_state(tmp_path / "state", ("lint", command, 5.0))
+        block = _gate_run(gated, path).block
+        assert block is not None
+        assert block.reason == AGENT_BLOCK
+        assert _unclassified_reasons(caplog) == [reason]
+        assert _scratch_trees(gated) == []
+
+    def test_an_unresolvable_base_is_fetch_failed(
+        self,
+        gated: Path,
+        tmp_path: Path,
+        path: str,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.WARNING)
+        install_home_prep_pr_state(tmp_path / "state", ("lint", _RED_BOTH, 5.0))
+        ci = replace(_ci(path), base="no-such-base")
+        block = run_finalize_quality_gates(gated, scope=_SCOPE, path=path, ci=ci).block
+        assert block is not None
+        assert block.reason == AGENT_BLOCK
+        assert _unclassified_reasons(caplog) == ["fetch_failed"]
+
+    def test_a_virtualenv_inside_the_worktree_is_not_compared(
+        self,
+        gated: Path,
+        tmp_path: Path,
+        path: str,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.WARNING)
+        monkeypatch.setenv("VIRTUAL_ENV", str(gated / ".venv"))
+        install_home_prep_pr_state(tmp_path / "state", ("lint", _RED_BOTH, 5.0))
+        block = _gate_run(gated, path).block
+        assert block is not None
+        assert block.reason == AGENT_BLOCK
+        assert _unclassified_reasons(caplog) == ["environment_in_worktree"]
+
+    def test_a_tolerated_dirty_path_plus_a_red_gate_is_untouched(
+        self,
+        gated: Path,
+        tmp_path: Path,
+        path: str,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.WARNING)
+        dirty_tracked_file(gated, "tol.py")
+        content = (gated / "tol.py").read_text(encoding="utf-8")
+        install_home_prep_pr_state(tmp_path / "state", ("lint", _RED_BOTH, 5.0))
+        block = _gate_run(gated, path, tolerated=frozenset({"tol.py"})).block
+        assert block is not None
+        assert block.reason == AGENT_BLOCK
+        assert (gated / "tol.py").read_text(encoding="utf-8") == content
+        assert _unclassified_reasons(caplog) == ["tracked_changes"]
+
+    def test_a_recognised_gate_runs_once_on_base(
+        self,
+        gated: Path,
+        tmp_path: Path,
+        path: str,
+        scratch_launches: list[str],
+    ) -> None:
+        command = f"cat {shlex.quote(str(_MYPY_FIXTURE))}; exit 1"
+        install_home_prep_pr_state(tmp_path / "state", ("mypy", command, 5.0))
+        block = _gate_run(gated, path).block
+        assert block is not None
+        assert block.reason == "external_state_block"
+        assert len(scratch_launches) == 1
+
+
+class TestBaseStateWarmUp:
+    def test_an_unrecognised_gate_is_warmed_then_compared(
+        self, gated: Path, tmp_path: Path, scratch_launches: list[str]
+    ) -> None:
+        _provision(gated)
+        install_home_prep_pr_state(
+            tmp_path / "state", ("python-2", _warming_gate(_FIXTURE_HEAD), 5.0)
+        )
+        block = _gate_run(gated, "create").block
+        assert block is not None
+        assert block.reason == "external_state_block"
+        assert len(scratch_launches) == 2
+        assert len(set(scratch_launches)) == 1
+        assert _scratch_trees(gated) == []
+
+    def test_the_reset_clears_warm_up_leftovers(
+        self, gated: Path, tmp_path: Path, scratch_launches: list[str]
+    ) -> None:
+        _provision(gated)
+        gate = _warming_gate(
+            f"{_FIXTURE_HEAD}; echo x > leftover.lock",
+            extra="if [ -e leftover.lock ]; then echo leftover-present; fi; ",
+        )
+        install_home_prep_pr_state(tmp_path / "state", ("python-2", gate, 5.0))
+        block = _gate_run(gated, "reuse").block
+        assert block is not None
+        assert block.reason == "external_state_block"
+        assert len(scratch_launches) == 2
+
+    def test_a_warm_up_that_cannot_start_is_unclassified(
+        self,
+        gated: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.WARNING)
+        _provision(gated)
+        install_home_prep_pr_state(
+            tmp_path / "state", ("python-2", "echo changelog-frozen-bad; exit 1", 5.0)
+        )
+        launches: list[str] = []
+        real_popen = subprocess.Popen
+
+        def _boom(argv: Any, *args: Any, **kwargs: Any) -> Any:
+            if _is_scratch_sh(argv, kwargs):
+                launches.append(str(kwargs["cwd"]))
+                if len(launches) == 1:
+                    msg = "sh: cannot start"
+                    raise OSError(msg)
+            return real_popen(argv, *args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "Popen", _boom)
+        block = _gate_run(gated, "create").block
+        assert block is not None
+        assert block.reason == AGENT_BLOCK
+        assert len(launches) == 1
+        assert _unclassified_reasons(caplog) == ["did_not_complete"]
+
+    @pytest.mark.parametrize("first_run", ["exit 127", "kill -9 $$"])
+    def test_a_warm_up_that_does_not_complete_is_unclassified(
+        self,
+        gated: Path,
+        tmp_path: Path,
+        first_run: str,
+        scratch_launches: list[str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.WARNING)
+        _provision(gated)
+        install_home_prep_pr_state(
+            tmp_path / "state", ("python-2", _warming_gate(first_run), 5.0)
+        )
+        block = _gate_run(gated, "create").block
+        assert block is not None
+        assert block.reason == AGENT_BLOCK
+        assert len(scratch_launches) == 1
+        assert _unclassified_reasons(caplog) == ["did_not_complete"]
+
+    def test_a_failed_reset_is_unclassified(
+        self,
+        gated: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.WARNING)
+        _provision(gated)
+        install_home_prep_pr_state(
+            tmp_path / "state", ("python-2", _warming_gate(_FIXTURE_HEAD), 5.0)
+        )
+        monkeypatch.setattr(_gates, "_reset_scratch", lambda *_a: False)
+        block = _gate_run(gated, "create").block
+        assert block is not None
+        assert block.reason == AGENT_BLOCK
+        assert _unclassified_reasons(caplog) == ["reset_failed"]
+
+
+class TestBaseStateScratchFailures:
+    def test_a_failed_scratch_add_is_unclassified(
+        self,
+        gated: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.WARNING)
+        install_home_prep_pr_state(tmp_path / "state", ("lint", _RED_BOTH, 5.0))
+        monkeypatch.setattr(_gates, "_base_sha", lambda *_a: "0" * 40)
+        block = _gate_run(gated, "create").block
+        assert block is not None
+        assert block.reason == AGENT_BLOCK
+        assert _unclassified_reasons(caplog) == ["scratch_tree_failed"]
+
+    def test_an_unreadable_base_sha_is_unclassified(
+        self,
+        gated: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.WARNING)
+        install_home_prep_pr_state(tmp_path / "state", ("lint", _RED_BOTH, 5.0))
+        real = _gates.git_output
+
+        def _fail_rev_parse(args: list[str], **kwargs: Any) -> str:
+            if args[:2] == ["rev-parse", "--verify"]:
+                raise subprocess.CalledProcessError(128, "git")
+            return real(args, **kwargs)
+
+        monkeypatch.setattr(_gates, "git_output", _fail_rev_parse)
+        block = _gate_run(gated, "create").block
+        assert block is not None
+        assert _unclassified_reasons(caplog) == ["scratch_tree_failed"]
+
+    def test_a_base_run_that_raises_did_not_complete(
+        self,
+        gated: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.WARNING)
+        command = f"cat {shlex.quote(str(_MYPY_FIXTURE))}; exit 1"
+        install_home_prep_pr_state(tmp_path / "state", ("mypy", command, 5.0))
+        real = _gates.run_cycle_gates
+
+        def _raise_in_scratch(plan: GatePlan, **kwargs: Any) -> GateFailure | None:
+            if Path(kwargs["worktree"]).name.startswith(_gates.BASE_WORKTREE_PREFIX):
+                raise subprocess.CalledProcessError(1, "git add")
+            return real(plan, **kwargs)
+
+        monkeypatch.setattr(_gates, "run_cycle_gates", _raise_in_scratch)
+        block = _gate_run(gated, "create").block
+        assert block is not None
+        assert block.reason == AGENT_BLOCK
+        assert _unclassified_reasons(caplog) == ["did_not_complete"]
+
+    @pytest.mark.parametrize(
+        ("kind", "code", "incomplete"),
+        [
+            ("red", 1, False),
+            ("red", 126, True),
+            ("red", -9, True),
+            ("red", 137, True),
+            ("unavailable", None, True),
+            ("dirtied", 0, False),
+        ],
+    )
+    def test_incomplete_kinds(
+        self, kind: GateKind, code: int | None, incomplete: bool
+    ) -> None:
+        failure = GateFailure(
+            kind=kind,
+            gate="g",
+            command="c",
+            exit_code=code,
+            seconds=0.0,
+            output="",
+            why=None,
+        )
+        assert _gates._incomplete(failure) is incomplete
+        assert _gates._incomplete(None) is False
+
+    def test_has_tracked_changes_fails_closed(self, tmp_path: Path) -> None:
+        assert _gates.has_tracked_changes(tmp_path / "missing") is True
+
+
+class TestResolvePath:
+    def test_resolve_never_consults_ci_or_classifies(
+        self,
+        gated: Path,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        scratch_launches: list[str],
+    ) -> None:
+        caplog.set_level(logging.WARNING)
+        stub = install_home_prep_pr_state(tmp_path / "state", ("lint", _RED_BOTH, 5.0))
+        stub.defer(("lint", ("ci-lint",)))
+        run = _gate_run(gated, "resolve")
+        assert run.block is not None
+        assert run.block.reason == AGENT_BLOCK
+        assert "Nothing was pushed." in run.block.details
+        assert "created or armed" not in run.block.details
+        assert run.deferred == ()
+        assert run.failed_gate == "lint"
+        assert "boom-output-xyz" in run.failed_output
+        assert "ci-deferral" not in stub.calls()
+        assert scratch_launches == []
+        assert _unclassified_reasons(caplog) == []
+
+    def test_resolve_green_is_passed(self, gated: Path, tmp_path: Path) -> None:
+        install_home_prep_pr_state(tmp_path / "state", ("lint", "true", 5.0))
+        run = _gate_run(gated, "resolve")
+        assert run.block is None
+        assert run.friction == ["resolve_path_gates: passed"]

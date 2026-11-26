@@ -17,12 +17,15 @@ rewrote tracked files (#3769).
 from __future__ import annotations
 
 import json
+import logging
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
-from cw._git import git_clean_env, git_output
+from cw._git import LOCAL_GIT_TIMEOUT_SECONDS, git_clean_env, git_output
 from cw.auto_dev_result.schema._vocab import EXTERNAL_STATE_BLOCKER_REASON
 from cw.codex_fix_loop.gates import (
     GateFailure,
@@ -44,6 +47,15 @@ from cw.stage_verification.finalize_ci_evidence import (
     consult_create,
     consult_reuse,
 )
+from cw.stage_verification.finalize_delta_confirm import (
+    confirm_resolution,
+    delta_eligible,
+)
+from cw.stage_verification.finalize_failure_identity import (
+    failure_identity,
+    identity_matches,
+    is_recognised_gate,
+)
 from cw.stage_verification.finalize_result import (
     AGENT_BLOCK,
     CODEX_MUST_FIX_FINDINGS,
@@ -56,11 +68,11 @@ from cw.stage_verification.finalize_result import (
     FinalizeFacts,
     finalize_approval_park,
 )
+from cw.stage_verification.impl_feedback import fetch_default_branch
+from cw.stage_verification.impl_type_gate import gate_worktree
 from cw.stage_verification.posted_text import redact_and_cap
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from cw.auto_dev_result import ScopeTier
     from cw.local_runner import GitFacts
     from cw.models import TicketTask
@@ -90,6 +102,25 @@ REWRITE_NOTE_MAX_PATHS: Final = 5
 _DIFF_TIMEOUT: Final = 30
 _CYCLE: Final = 0
 _CONTINUE_TOKENS: Final = frozenset({APPROVAL_NOT_REQUIRED, APPROVAL_RECORDED})
+
+#: The semantic auto-resolve's gate path (#3542): no CI consult, no classifier.
+RESOLVE_PATH: Final = "resolve"
+#: The base-branch-state classifier's scratch tree prefix and leftover token.
+BASE_WORKTREE_PREFIX: Final = "cw-gate-wt-finalize-"
+BASE_WORKTREE_LEFTOVER: Final = "finalize_base_worktree_leftover"
+#: ``sh`` could not execute (126) or find (127) the command.
+_SHELL_COULD_NOT_RUN: Final = frozenset({126, 127})
+#: ``sh`` reports a signal-killed child as 128 + the signal number.
+_SIGNAL_EXIT_FLOOR: Final = 128
+
+_log = logging.getLogger(__name__)
+
+
+class _DidNotComplete:
+    """Marker: a base gate run the shell or the runner could not complete."""
+
+
+_DID_NOT_COMPLETE: Final = _DidNotComplete()
 
 _PARK_TEXT: Final = (
     " — the large-tier review approval is not valid for this head, and "
@@ -320,8 +351,14 @@ class FenceOutcome:
     friction: list[str] = field(default_factory=list)
 
 
-def _tip_stale_token(done: subprocess.CompletedProcess[str] | None) -> tuple[str, str]:
-    """``(friction token, reason)`` for a failed ``verify-tip``."""
+def _tip_stale_token(
+    done: subprocess.CompletedProcess[str] | None, delta: str | None = None
+) -> tuple[str, str]:
+    """``(friction token, reason)`` for a failed ``verify-tip``.
+
+    *delta* is the delta-confirm round's park outcome, appended inside the
+    token's parentheses (``stale_tip_reason`` matches the whole entry).
+    """
     try:
         data = json.loads(done.stdout) if done is not None else None
     except (ValueError, RecursionError):
@@ -330,9 +367,10 @@ def _tip_stale_token(done: subprocess.CompletedProcess[str] | None) -> tuple[str
     detail = data.get("detail") if isinstance(data, dict) else None
     if not isinstance(reason, str) or not reason:
         return STALE_TIP_FRICTION_PREFIX, ""
+    suffix = f"; delta confirm: {delta}" if delta is not None else ""
     if isinstance(detail, str) and detail:
-        return f"{STALE_TIP_FRICTION_PREFIX} ({reason}: {detail})", reason
-    return f"{STALE_TIP_FRICTION_PREFIX} ({reason})", reason
+        return f"{STALE_TIP_FRICTION_PREFIX} ({reason}: {detail}{suffix})", reason
+    return f"{STALE_TIP_FRICTION_PREFIX} ({reason}{suffix})", reason
 
 
 def _convergence(worktree: Path) -> str | None:
@@ -351,18 +389,38 @@ def _convergence(worktree: Path) -> str | None:
 
 
 def _tip_check(
-    worktree: Path, facts: FinalizeFacts, tier: ScopeTier, check_line: str
+    worktree: Path,
+    facts: FinalizeFacts,
+    tier: ScopeTier,
+    check_line: str,
+    *,
+    ticket_id: str,
+    client_name: str,
 ) -> FenceOutcome:
-    """Step 4.0b (clean mode only); ``blocking`` skips it."""
+    """Step 4.0b (clean mode only); ``blocking`` skips it.
+
+    A tip refused only for merge-resolution commits since the clean round
+    (``delta_confirm_eligible``) gets one delta-confirm round first (#3542).
+    """
     convergence = _convergence(worktree)
     if convergence is not None and convergence != CLEAN_CONVERGENCE:
         return FenceOutcome()
     done = None
+    delta: str | None = None
     if convergence is not None:
         done = run_cw_cli(worktree, ["review", "converge", "verify-tip"])
         if done is not None and done.returncode == 0:
             return FenceOutcome(friction=[f"{TIP_CHECK_PREFIX}accepted"])
-    token, reason = _tip_stale_token(done)
+        if done is not None and done.returncode == 1 and delta_eligible(done.stdout):
+            delta = confirm_resolution(
+                worktree,
+                ticket_id=ticket_id,
+                client_name=client_name,
+                run_cli=run_cw_cli,
+            )
+            if delta is None:
+                return FenceOutcome(friction=[f"{TIP_CHECK_PREFIX}accepted"])
+    token, reason = _tip_stale_token(done, delta)
     next_action = (
         REQUEUE_STAGE_FINALIZE if reason == TIP_FETCH_FAILED else REQUEUE_STAGE_REVIEW
     )
@@ -387,7 +445,14 @@ def run_approval_fence(
     line = _approval_token(tier, worktree)
     if line in _CONTINUE_TOKENS:
         check_line = f"{APPROVAL_CHECK_PREFIX}{line}"
-        outcome = _tip_check(worktree, facts, tier, check_line)
+        outcome = _tip_check(
+            worktree,
+            facts,
+            tier,
+            check_line,
+            ticket_id=ticket_id,
+            client_name=client_name,
+        )
         if outcome.park is not None:
             return outcome
         return FenceOutcome(friction=[check_line, *outcome.friction])
@@ -423,6 +488,8 @@ class FinalizeGateRun:
     block: FinalizeBlock | None = None
     friction: list[str] = field(default_factory=list)
     deferred: tuple[DeferredGate, ...] = ()
+    failed_gate: str = ""
+    failed_output: str = ""
 
 
 @dataclass(frozen=True)
@@ -444,10 +511,16 @@ def _without(plan: GatePlan, names: frozenset[str]) -> GatePlan:
 def _consult(plan: GatePlan, worktree: Path, path: str, ci: CiContext) -> _CiPlan:
     """Drop the gates CI owns: deferred (create) or green-covered (reuse).
 
-    Nothing to consult for an unavailable plan or one with no gates. A reuse
-    park is returned as the block; no gate runs.
+    Nothing to consult for an unavailable plan, one with no gates, or the
+    ``resolve`` path (the semantic auto-resolve's merge). A reuse park is
+    returned as the block; no gate runs.
     """
-    if plan.script is None or plan.why_unavailable is not None or not plan.gates:
+    if (
+        path == RESOLVE_PATH
+        or plan.script is None
+        or plan.why_unavailable is not None
+        or not plan.gates
+    ):
         return _CiPlan(plan)
     if path == "create":
         try:
@@ -491,9 +564,14 @@ def _failure_block(path: str, failure: GateFailure) -> FinalizeBlock:
         if failure.kind == "red"
         else "passed but changed files (the gate dirtied the worktree)"
     )
+    nothing = (
+        "Nothing was pushed."
+        if path == RESOLVE_PATH
+        else "Nothing was pushed, created or armed."
+    )
     details = (
         f"the branch tip failed the FINALIZE {path}-path quality gate "
-        f"`{failure.gate}`: it {what}. Nothing was pushed, created or armed."
+        f"`{failure.gate}`: it {what}. {nothing}"
     )
     if failure.output:
         details += "\n\nLast lines of gate output:\n" + redact_and_cap(failure.output)
@@ -553,10 +631,14 @@ def run_finalize_quality_gates(
 ) -> FinalizeGateRun:
     """Run the repo's quality gates on the branch tip; never fix, never commit.
 
-    *path* is ``"reuse"`` or ``"create"`` and names the friction literal
-    (``reuse_path_gates: passed|none_detected`` is the doc's). A red gate or a
-    dirtied tree is ``agent_block``; an unavailable detector
-    ``external_state_block``; a dirty start ``codex_fix_dirty_start``.
+    *path* is ``"reuse"``, ``"create"`` or ``"resolve"`` and names the friction
+    literal (``reuse_path_gates: passed|none_detected`` is the doc's). A red
+    gate or a dirtied tree is ``agent_block``; an unavailable detector
+    ``external_state_block``; a dirty start ``codex_fix_dirty_start``. On the
+    create and reuse paths a red gate that fails the same way on a clean
+    ``origin/<base>`` is ``external_state_block`` (:func:`reproduces_on_base`).
+    The ``resolve`` path (the semantic auto-resolve's merge, #3542) has no CI
+    consult, no rewrite note and no base classifier.
 
     Gates the base branch maps to CI (*ci*) do not run here: the create path
     defers them (returned in ``deferred``), the reuse path skips the ones
@@ -595,10 +677,279 @@ def run_finalize_quality_gates(
         return FinalizeGateRun(
             None, [*ci_plan.friction, f"{label}passed"], ci_plan.deferred
         )
-    block = _failure_block(path, failure)
-    if failure.kind == "red":
-        block = _with_rewrite_note(block, worktree, scope, baseline.review_artifacts)
-    return FinalizeGateRun(block, ci_plan.friction)
+    block = _red_block(
+        worktree, failure, path=path, ci_plan=ci_plan, scope=scope, ci=ci
+    )
+    if block is None:
+        block = _failure_block(path, failure)
+        if failure.kind == "red" and path != RESOLVE_PATH:
+            block = _with_rewrite_note(
+                block, worktree, scope, baseline.review_artifacts
+            )
+    return FinalizeGateRun(
+        block,
+        ci_plan.friction,
+        failed_gate=failure.gate,
+        failed_output=redact_and_cap(failure.output) if failure.output else "",
+    )
+
+
+def _red_block(
+    worktree: Path,
+    failure: GateFailure,
+    *,
+    path: str,
+    ci_plan: _CiPlan,
+    scope: GateScope,
+    ci: CiContext,
+) -> FinalizeBlock | None:
+    """The ``external_state_block`` for a red gate base shows too, else ``None``."""
+    if failure.kind != "red" or path == RESOLVE_PATH:
+        return None
+    sha = reproduces_on_base(
+        worktree, failure, plan=ci_plan.plan, scope=scope, base_branch=ci.base
+    )
+    if sha is None:
+        return None
+    return _external_block(path, failure, base_branch=ci.base, sha=sha)
+
+
+# -- base-branch-state classifier (#2320, #3542) -------------------------------
+
+
+def has_tracked_changes(worktree: Path) -> bool:
+    """Whether *worktree* has any tracked modification (staged or not).
+
+    ``git status --porcelain --untracked-files=no``, tolerated paths and review
+    artifacts included. A failed read counts as changes (fail closed).
+    """
+    try:
+        out = git_output(
+            ["status", "--porcelain", "--untracked-files=no"],
+            cwd=worktree,
+            timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return True
+    return bool(out.strip())
+
+
+def _inside(value: str, root: Path) -> bool:
+    try:
+        return Path(value).resolve().is_relative_to(root)
+    except (OSError, ValueError):
+        return False
+
+
+def _environment_in_worktree(worktree: Path) -> bool:
+    """A Python environment the base run could import branch code through."""
+    if os.environ.get("UV_PROJECT_ENVIRONMENT"):
+        return True
+    root = worktree.resolve()
+    venv = os.environ.get("VIRTUAL_ENV")
+    if venv and _inside(venv, root):
+        return True
+    entries = os.environ.get("PATH", "").split(os.pathsep)
+    return any(entry and _inside(entry, root) for entry in entries)
+
+
+def _unclassified(scope: GateScope, gate: str, reason: str) -> None:
+    _log.warning(
+        "finalize_base_state_unclassified ticket=%s session=%s gate=%s reason=%s",
+        scope.ticket_id,
+        scope.session_id,
+        gate,
+        reason,
+    )
+
+
+def _not_comparable(worktree: Path, failure: GateFailure) -> str | None:
+    """Why the branch failure cannot be compared with a clean base, before a fetch."""
+    if failure.exit_code in _SHELL_COULD_NOT_RUN:
+        return "exit_code_not_comparable"
+    if has_tracked_changes(worktree):
+        return "tracked_changes"
+    if _environment_in_worktree(worktree):
+        return "environment_in_worktree"
+    if (
+        failure_identity(failure.gate, failure.full_output, roots=(str(worktree),))
+        is None
+    ):
+        return "no_identity"
+    return None
+
+
+def _incomplete(result: GateFailure | None) -> bool:
+    """A base run the shell or the runner could not complete."""
+    if result is None:
+        return False
+    if result.kind == "unavailable":
+        return True
+    code = result.exit_code
+    return (
+        result.kind == "red"
+        and code is not None
+        and (code in _SHELL_COULD_NOT_RUN or code < 0 or code > _SIGNAL_EXIT_FLOOR)
+    )
+
+
+def _base_run(
+    plan: GatePlan, scratch: Path, scope: GateScope
+) -> GateFailure | None | _DidNotComplete:
+    """Run the one-gate *plan* in the scratch tree; never autofix, never park."""
+    try:
+        result = run_cycle_gates(
+            plan,
+            worktree=scratch,
+            review_artifacts=frozenset(),
+            scope=scope,
+            tokens=[],
+            touched=frozenset(),
+        )
+    except (subprocess.SubprocessError, OSError):
+        return _DID_NOT_COMPLETE
+    return _DID_NOT_COMPLETE if _incomplete(result) else result
+
+
+def _reset_scratch(scratch: Path, sha: str) -> bool:
+    """``git reset --hard <sha>`` in the scratch tree only; False on failure."""
+    try:
+        git_output(
+            ["reset", "--hard", sha], cwd=scratch, timeout=LOCAL_GIT_TIMEOUT_SECONDS
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return False
+    return True
+
+
+def _compared_run(
+    plan: GatePlan, scratch: Path, scope: GateScope, *, warm: bool, sha: str
+) -> GateFailure | None | str:
+    """The base run that is compared, or the ``unclassified`` reason.
+
+    An unrecognised gate (*warm*) runs twice: the warm-up only provisions the
+    tree, a tracked-only reset clears its leftovers, and the second run alone
+    is compared.
+    """
+    if warm:
+        if isinstance(_base_run(plan, scratch, scope), _DidNotComplete):
+            return "did_not_complete"
+        if not _reset_scratch(scratch, sha):
+            return "reset_failed"
+    result = _base_run(plan, scratch, scope)
+    return "did_not_complete" if isinstance(result, _DidNotComplete) else result
+
+
+def _verdict(
+    failure: GateFailure, base: GateFailure | None, *, worktree: Path, scratch: Path
+) -> str | None:
+    """``None`` when *base* shows *failure*, else the ``unclassified`` reason."""
+    if base is None or base.kind != "red":
+        return "base_passed"
+    if base.exit_code != failure.exit_code:
+        return "exit_code_differs"
+    mine = failure_identity(failure.gate, failure.full_output, roots=(str(worktree),))
+    theirs = failure_identity(base.gate, base.full_output, roots=(str(scratch),))
+    if mine is None or theirs is None:
+        return "no_identity"
+    return None if identity_matches(mine, theirs) else "identity_differs"
+
+
+def _classify_in_scratch(
+    worktree: Path, failure: GateFailure, *, plan: GatePlan, scope: GateScope, sha: str
+) -> str | None:
+    """Run the failed gate on a scratch tree at *sha*; ``None`` when reproduced."""
+    one = replace(plan, gates=tuple(g for g in plan.gates if g.name == failure.gate))
+    try:
+        with gate_worktree(
+            worktree,
+            sha,
+            root=str(worktree.parent),
+            ticket=scope.ticket_id,
+            prefix=BASE_WORKTREE_PREFIX,
+            leftover=BASE_WORKTREE_LEFTOVER,
+        ) as scratch:
+            base = _compared_run(
+                one,
+                scratch,
+                scope,
+                warm=not is_recognised_gate(failure.gate),
+                sha=sha,
+            )
+            if isinstance(base, str):
+                return base
+            return _verdict(failure, base, worktree=worktree, scratch=scratch)
+    except (subprocess.SubprocessError, OSError):
+        return "scratch_tree_failed"
+
+
+def _base_sha(worktree: Path, base_branch: str) -> str | None:
+    try:
+        return git_output(
+            ["rev-parse", "--verify", f"origin/{base_branch}^{{commit}}"],
+            cwd=worktree,
+            timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+        ).strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def reproduces_on_base(
+    worktree: Path,
+    failure: GateFailure,
+    *,
+    plan: GatePlan,
+    scope: GateScope,
+    base_branch: str,
+) -> str | None:
+    """The ``origin/<base>`` sha when a red gate fails the same way there.
+
+    The #2320 base-branch-state classifier. It runs only the failed gate, pinned
+    from *plan* and with the branch run's own *scope*, in a detached scratch
+    worktree beside *worktree*: the session worktree is never checked out,
+    reset or staged. A recognised gate (``pytest*``, ``mypy*``, ``ruff*``) runs
+    once there; any other gate runs twice and only the second run is compared.
+    Reproduced means the compared run completed red with the same exit code
+    and every branch failure in it (``finalize_failure_identity``). Anything
+    else is ``None`` (``unclassified``, which stays ``agent_block``) and logs one
+    WARNING ``finalize_base_state_unclassified`` naming the reason. A gate run
+    is never killed (ADR-0014); only the fetch, ``rev-parse`` and reset are
+    bounded.
+    """
+    reason = _not_comparable(worktree, failure)
+    sha: str | None = None
+    if reason is None and fetch_default_branch(worktree, base_branch) is not None:
+        reason = "fetch_failed"
+    if reason is None:
+        sha = _base_sha(worktree, base_branch)
+        if sha is None:
+            reason = "scratch_tree_failed"
+    if reason is None and sha is not None:
+        reason = _classify_in_scratch(
+            worktree, failure, plan=plan, scope=scope, sha=sha
+        )
+    if reason is not None:
+        _unclassified(scope, failure.gate, reason)
+        return None
+    return sha
+
+
+def _external_block(
+    path: str, failure: GateFailure, *, base_branch: str, sha: str
+) -> FinalizeBlock:
+    """The reproduced-on-base park: the cause is outside this branch."""
+    gate = failure.gate
+    details = (
+        f"the FINALIZE {path}-path quality gate `{gate}` fails with exit code "
+        f"{failure.exit_code} on this branch and, with the same failure, on a "
+        f"clean origin/{base_branch} ({sha}); the cause is outside this branch. "
+        f"Nothing was pushed, created or armed. To clear it, `{gate}` must pass "
+        f"on origin/{base_branch}; then merge origin/{base_branch} into the "
+        "branch, push, and requeue finalize."
+    )
+    if failure.output:
+        details += "\n\nLast lines of gate output:\n" + redact_and_cap(failure.output)
+    return FinalizeBlock(EXTERNAL_STATE_BLOCKER_REASON, details, retry_eligible=False)
 
 
 def gate_scope(ticket_id: str, client: str, session_id: str) -> GateScope:
