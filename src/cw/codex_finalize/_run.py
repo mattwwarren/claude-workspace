@@ -21,6 +21,8 @@ returns the claimed row to PENDING. The ordered flow:
    re-file, the UI-evidence gate and the one PR-body write of adjudication,
    override and sign-off, then the debt-ticket link), the fence again
    (immediately before the arm), the seam check, the arm and the verification.
+   A recognised arm refusal is repaired at most once per kind; a pushed repair
+   is re-fenced before the re-arm (#3939).
    A UI-evidence hold skips the arm and reads the PR's armed state instead.
 6. Stage events, the cw-stamped sentinel through the door, the PR-link post
    and ``session.completed``.
