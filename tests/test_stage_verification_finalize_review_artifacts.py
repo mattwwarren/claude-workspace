@@ -550,6 +550,32 @@ class TestWritePrBody:
             )
         assert out.block is not None
 
+    @pytest.mark.parametrize(
+        "reply", [GhReply(1, "", "boom"), None, GhReply(0, "  \n", "")]
+    )
+    def test_a_failed_render_still_writes_the_composed_sections(
+        self, rig: Rig, reply: GhReply | None
+    ) -> None:
+        rig.script_cw(_RENDER, reply)
+        section = _render_adjudication(_defer(summary="fresh"))
+        out = write_pr_body(rig.target, current=_BODY, pr_head=_HEAD, section=section)
+        assert out.block is None
+        assert out.friction == ("friction: review_signoff: skipped_cli_failed",)
+        (edit,) = rig.edits()
+        assert edit == f"{_BODY.rstrip()}\n\n{section.strip()}\n"
+
+    @pytest.mark.parametrize(
+        "reply", [GhReply(1, "", "boom"), None, GhReply(0, "  \n", "")]
+    )
+    def test_a_failed_render_with_no_section_makes_no_edit(
+        self, rig: Rig, reply: GhReply | None
+    ) -> None:
+        rig.script_cw(_RENDER, reply)
+        out = write_pr_body(rig.target, current=_BODY, pr_head=_HEAD, section="")
+        assert out.block is None
+        assert out.friction == ("friction: review_signoff: skipped_cli_failed",)
+        assert rig.edits() == []
+
 
 class TestRenderSignoff:
     def _files(self, rig: Rig, composed: str, current: str) -> tuple[Path, Path]:
