@@ -1167,6 +1167,27 @@ every refusal names the right one for the row (`Run: ...`), and
   it while it still verifies, and only new paths are presented. `show` names the
   owner and the next action in `scope_decision`. A regress into PLAN drops the
   grants; that is the operator's revocation lever (`requeue --stage plan`).
+  For an adopted PR with a committed blocking confirmation, an operator
+  integrating another tool can supply both `--expected-head <reviewed-sha>`
+  and `--expected-park <token>` with the exact paths the current park requests.
+  Read `scope_decision.park_token` from `show --json` before evaluating the
+  evidence; do not fall back to unguarded approval if the token is absent.
+  The guarded command takes the queue and review ledger locks, checks the
+  live PR head and base, then re-reads the park and its committed verdict.
+  A busy ledger returns a refusal immediately. The command holds both locks
+  through the queue save and any audit compensation. The parked session
+  supplies the requested paths and its worktree contains the verdict.
+  A request whose paths were redacted, shortened, or ambiguously delimited
+  does not get a token.
+  Settling the final actionable finding in an in-progress confirmation makes
+  its token unusable and leaves no fresh token to read. The guarded command
+  does not settle a lagging row.
+  A confirmation needs a verdict digest to supply a token. An in-progress
+  confirmation also needs the identities of the fixes dispatched in that round.
+  Obtain fresh review evidence through the normal review workflow.
+  On `{"scope_grant":"not_applied","reason":"..."}` (nonzero exit), re-read
+  and re-evaluate the evidence; do not just substitute a new SHA or token.
+  The token is a snapshot check, not operator authority or GitHub approval.
 - Codex MUST_FIX park (`codex_must_fix_findings`):
   `approve --override-must-fix --reason "<why>"`, then
   `requeue --stage finalize` (§7); if the ticket or lane has a finalize

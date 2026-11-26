@@ -9,10 +9,15 @@ tracker-comment machinery -- lives apart from the plain queue mutations.
 
 from __future__ import annotations
 
+import json
+import re
+from functools import partial
 from typing import TYPE_CHECKING
 
 import click
+import yaml
 
+from cw._git import FULL_COMMIT_ID_RE
 from cw.cli._base import handle_errors
 from cw.cli._worker_guard import refuse_inside_dispatch_worker
 from cw.cli.routed_orphan_close import close_routed_result_sessions_for_ticket
@@ -32,8 +37,13 @@ from cw.dev_queue.approval import (
     REVIEW_LESS_RELEASE_KEY,
 )
 from cw.dev_queue.next_commands import human_gate_settled_notice, is_human_kept_gate
+from cw.dev_queue.scope_drift_guard import (
+    PARK_CHANGED,
+    ScopeGrantExpectation,
+    ScopeGrantNotAppliedError,
+)
 from cw.events import record_event
-from cw.exceptions import ApproveGateError, CwError
+from cw.exceptions import ApproveGateError, ConfigValidationError, CwError
 from cw.models import (
     PLAN_APPROVED_FINGERPRINT_KEY,
     PLAN_PROMOTED_KEY,
@@ -46,6 +56,7 @@ from cw.outbox_producer import (
 )
 from cw.plan_fingerprint import is_plan_draft_fingerprint
 from cw.pr_hydrate import _resolve_repo_slug
+from cw.ticket_view import ViewSources, lock_scope_grant_park
 from cw.worktree import _git_dir
 
 from ._group import dev_queue
@@ -192,17 +203,29 @@ def _grant_repo_slug(client_name: str) -> str | None:
 
     Resolved in the CLI, before the queue lock: ``cw.dev_queue`` cannot import
     ``cw.pr_hydrate`` (import cycle), and the slug is a git read (#3772). ``None``
-    when the client is unknown or the origin is not a GitHub remote; the
-    approval then records an unbound grant that the carry will not reuse.
+    when the client or origin cannot be read. The guarded path requires a
+    repository binding and refuses when the slug is absent.
     """
     try:
         return _resolve_repo_slug(_git_dir(get_client(client_name)))
-    except (CwError, OSError, ValueError):
+    except (CwError, OSError, ValueError, yaml.YAMLError):
         return None
 
 
+def _load_scope_drift_config(guarded: bool) -> OrchestratorConfig:
+    if not guarded:
+        return load_orchestrator_config()
+    try:
+        return load_orchestrator_config(create=False, strict_root=True)
+    except (ConfigValidationError, OSError, ValueError, yaml.YAMLError) as exc:
+        raise ScopeGrantNotAppliedError(PARK_CHANGED) from exc
+
+
 def _approve_scope_drift(
-    ticket_id: str, resolved: str, scope_drift: str, config: OrchestratorConfig
+    ticket_id: str,
+    client: str | None,
+    scope_drift: str,
+    expected: ScopeGrantExpectation | None,
 ) -> None:
     """The ``--scope-drift`` branch of ``dev_queue_approve`` (#2337)."""
     extra_files = [path.strip() for path in scope_drift.split(",") if path.strip()]
@@ -211,13 +234,28 @@ def _approve_scope_drift(
     # routing the dispatch loop would apply); a timeout here leaves the row
     # parked where the loop would have put it, a clean retry. The routed-orphan
     # close (#2517) runs after the transition.
-    result = approve_scope_drift_ticket(
-        ticket_id,
-        resolved,
-        extra_files,
-        bounded=True,
-        repo=_grant_repo_slug(resolved),
-    )
+    try:
+        config = _load_scope_drift_config(guarded=expected is not None)
+        try:
+            resolved = resolve_client(ticket_id, config, client)
+        except CwError as exc:
+            if expected is not None:
+                raise ScopeGrantNotAppliedError(PARK_CHANGED) from exc
+            raise
+        # Settling a guarded request could write before its comparison fails.
+        if expected is None:
+            settle_lagging_row(ticket_id, resolved)
+        result = approve_scope_drift_ticket(
+            ticket_id,
+            resolved,
+            extra_files,
+            bounded=True,
+            repo=_grant_repo_slug(resolved),
+            expected=expected,
+        )
+    except ScopeGrantNotAppliedError as exc:
+        click.echo(json.dumps({"scope_grant": "not_applied", "reason": exc.reason}))
+        raise
     click.echo(
         f"Approved scope drift for {ticket_id} ({resolved}):"
         f" {result['from_stage']} -> {result['to_stage']}. Allowed extra files:"
@@ -234,7 +272,11 @@ def _approve_scope_drift(
             f" `cw dev-queue requeue {ticket_id} -c {resolved} --stage impl"
             " --review-feedback-file <file>`."
         )
-    echo_resulting_row(ticket_id, resolved)
+    if expected is None:
+        echo_resulting_row(ticket_id, resolved)
+    else:
+        # Rendering the successful grant must not bootstrap an absent config.
+        echo_resulting_row(ticket_id, resolved, sources=ViewSources(config=config))
     _close_orphans_after_approve(
         ticket_id, resolved, config, command="approve --scope-drift"
     )
@@ -356,6 +398,32 @@ def _raise_if_settled_into_human_gate(outcome: SettleOutcome) -> None:
         raise ApproveGateError(human_gate_settled_notice(outcome.row))
 
 
+def _scope_grant_expectation(
+    scope_drift: str | None,
+    head: str | None,
+    park: str | None,
+    *,
+    infer_client: bool,
+) -> ScopeGrantExpectation | None:
+    if head is None and park is None:
+        return None
+    if scope_drift is None:
+        msg = "--expected-head and --expected-park require --scope-drift"
+        raise click.UsageError(msg)
+    if head is None or park is None:
+        msg = "--expected-head and --expected-park must be supplied together"
+        raise click.UsageError(msg)
+    if not FULL_COMMIT_ID_RE.fullmatch(head) or not re.fullmatch(r"[0-9a-f]{64}", park):
+        msg = (
+            "--expected-head must be a full lowercase commit ID and"
+            " --expected-park a 64-character lowercase hex token"
+        )
+        raise click.UsageError(msg)
+    return ScopeGrantExpectation(
+        head, park, partial(lock_scope_grant_park, infer_client=infer_client)
+    )
+
+
 @dev_queue.command(name="approve")
 @click.argument("ticket_id")
 @click.option("--client", "-c", default=None, help="Client name.")
@@ -391,6 +459,17 @@ def _raise_if_settled_into_human_gate(outcome: SettleOutcome) -> None:
         " review policy and plan of record. A later repair dispatch re-uses"
         " the grant while it still verifies, and only new paths are"
         " re-presented. Mutually exclusive with --post-marker."
+    ),
+)
+@click.option(
+    "--expected-head",
+    help="With --scope-drift and --expected-park: require this exact reviewed PR head.",
+)
+@click.option(
+    "--expected-park",
+    help=(
+        "With --scope-drift and --expected-head: require scope_decision.park_token"
+        " from dev-queue show --json."
     ),
 )
 @click.option(
@@ -430,6 +509,8 @@ def dev_queue_approve(
     client: str | None,
     post_marker: bool,
     scope_drift: str | None,
+    expected_head: str | None,
+    expected_park: str | None,
     override_must_fix: bool,
     override_reason: str | None,
 ) -> None:
@@ -515,6 +596,9 @@ def dev_queue_approve(
         scope_drift=scope_drift,
         override_must_fix=override_must_fix,
     )
+    expected = _scope_grant_expectation(
+        scope_drift, expected_head, expected_park, infer_client=client is None
+    )
     # #2729: before any of the three write paths below.
     warn_if_dispatch_loop_stale()
     if override_must_fix:
@@ -525,12 +609,12 @@ def dev_queue_approve(
         settle_lagging_row(ticket_id, resolved)
         _approve_must_fix_override(ticket_id, resolved, override_reason)
         return
+    if scope_drift is not None:
+        _approve_scope_drift(ticket_id, client, scope_drift, expected)
+        return
     config = load_orchestrator_config()
     resolved = resolve_client(ticket_id, config, client)
     outcome = settle_lagging_row(ticket_id, resolved)
-    if scope_drift is not None:
-        _approve_scope_drift(ticket_id, resolved, scope_drift, config)
-        return
     _raise_if_settled_into_human_gate(outcome)
     # bounded=True (#2501): operator command. settle_lagging_row (#2692) may
     # first route this row's recorded sentinel under its OWN bounded lock (the

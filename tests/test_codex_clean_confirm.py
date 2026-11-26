@@ -63,6 +63,7 @@ from cw.review_convergence import (
     converged_across_tolerated_merge,
     decided_finding,
     frozen_counts_from_verdict,
+    load_bound_round_verdict,
     load_ledger,
     load_round_verdict,
     one_line,
@@ -1070,7 +1071,10 @@ class TestDirtyConfirmFeedbackContract:
             _head(wt),
         )
         assert last.new_fix > 0
-        persisted = load_round_verdict(wt / LEDGER_RELATIVE_PATH, last.round)
+        persisted = load_bound_round_verdict(
+            wt / LEDGER_RELATIVE_PATH, last.round, last.verdict_sha256
+        )
+        assert persisted is not None
         summaries = {item.finding.summary for item in persisted.accepted}
         assert _MUST_FIX_SUMMARY in summaries
 
@@ -2342,7 +2346,13 @@ class TestPersistedConfirmVerdict:
             codex=_engine_codex(wt),
         )
 
-        (item,) = _decided_round_verdict(wt, 2).accepted
+        last = _ledger(wt).rounds[-1]
+        persisted = load_bound_round_verdict(
+            wt / LEDGER_RELATIVE_PATH, last.round, last.verdict_sha256
+        )
+        assert persisted is not None
+        assert persisted.must_fix == []
+        (item,) = persisted.accepted
         assert item.disposition == "operator_actionable"
         assert item.disposition_detail == CONFIRM_ENGINE_PARK_RATIONALE
 

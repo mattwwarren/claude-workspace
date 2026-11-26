@@ -459,7 +459,12 @@ def _poll_for_lock(
 
 
 def acquire_flock(
-    fd: IO[str], lock_path: Path, *, lock_name: str, bounded: bool
+    fd: IO[str],
+    lock_path: Path,
+    *,
+    lock_name: str,
+    bounded: bool,
+    timeout_s: float | None = None,
 ) -> None:
     """Take ``LOCK_EX`` on the state-lock *fd* named *lock_name*.
 
@@ -467,12 +472,13 @@ def acquire_flock(
     :class:`~cw.exceptions.LockTimeoutError`. ``bounded=True`` polls for
     :func:`sessions_lock_timeout_seconds` and raises the timeout error if
     another process still holds the lock at the deadline. Any ``OSError`` other
-    than contention propagates unchanged.
+    than contention propagates unchanged. An explicit *timeout_s* replaces
+    the configured wait for this acquisition.
     """
     if not bounded:
         fcntl.flock(fd, fcntl.LOCK_EX)
         return
-    timeout = _poll_for_lock(fd, lock_path, lock_name)
+    timeout = _poll_for_lock(fd, lock_path, lock_name, timeout_s)
     if timeout is None:
         return
     raise LockTimeoutError(

@@ -196,6 +196,7 @@ class ScopeDecisionView(BaseModel):
     carried_paths: list[str]
     new_paths: list[str]
     next_action: str
+    park_token: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class TicketView(BaseModel):

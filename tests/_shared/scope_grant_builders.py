@@ -132,4 +132,8 @@ def install_real_scope_script() -> Path:
 
 def drift_details(paths: Sequence[str]) -> str:
     """The ``extra_files:`` list text a ``plan_scope_drift`` park carries."""
-    return "extra_files:\n" + "".join(f"- {path}\n" for path in paths)
+    return (
+        f"the delivered diff touches {len(paths)} file(s) beyond the plan's "
+        "Files Modified allowance (allowed extra: 0). extra_files:\n"
+        + "\n".join(f"- {path}" for path in paths)
+    )

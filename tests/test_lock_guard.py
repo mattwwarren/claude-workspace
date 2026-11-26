@@ -49,6 +49,7 @@ from cw.exceptions import (
 )
 from cw.focus import focus_lock
 from cw.outbox._lock import _outbox_lock
+from cw.review_convergence import ledger_transaction
 from tests._lock_invariants import observing
 from tests._shared.workflow_text import _SRC_ROOT, _iter_src_files
 
@@ -277,7 +278,7 @@ def test_descending_order_raises_under_debug(
     assert str(err) == (
         "lock order violation: acquiring 'sessions' (rank SESSIONS, "
         f"{path}) while holding 'dev_queue' (rank STATE); locks must be "
-        "acquired in non-decreasing rank (sessions, state, leaf). Held, "
+        "acquired in non-decreasing rank (sessions, state, review ledger, leaf). Held, "
         "outermost first: dev_queue. See ADR-0019."
     )
     assert isinstance(err, CwError)
@@ -285,6 +286,16 @@ def test_descending_order_raises_under_debug(
     assert str(err.path) == str(path)
     assert err.rank_name == "SESSIONS"
     assert err.held == ("dev_queue",)
+
+
+@pytest.mark.lock_violations_expected("order")
+def test_review_ledger_cannot_take_the_queue_lock(tmp_path: Path) -> None:
+    with (
+        ledger_transaction(tmp_path / "review.json"),
+        pytest.raises(CwLockOrderError),
+        dev_queue_lock(),
+    ):
+        pytest.fail("queue acquisition must be refused under a review ledger lock")
 
 
 @pytest.mark.lock_violations_expected("order")
@@ -580,6 +591,7 @@ _GUARDED: frozenset[tuple[str, str]] = frozenset(
         ("cw/dev_queue/storage.py", "_plan_lock"),
         ("cw/dispatch_state.py", "dispatch_state_lock"),
         ("cw/focus.py", "_lock"),
+        ("cw/review_convergence/_store.py", "ledger_transaction"),
         ("cw/review_workspace/_lock.py", "_workspace_lock"),
         ("cw/events.py", "_inbox_lock"),
         ("cw/session_inbox.py", "_inbox_lock"),

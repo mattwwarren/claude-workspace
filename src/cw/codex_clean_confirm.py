@@ -85,12 +85,14 @@ from cw.review_convergence import (
     LEDGER_STATUS_CONVERGED,
     LEDGER_STATUS_STOPPED,
     STOP_DECISIONS,
+    bind_confirm_verdict,
     confirm_blocker_fragment,
     decide_confirm_verdict,
     engine_pass_precedes,
     friction_lines,
     from_verdict,
     frozen_counts_from_verdict,
+    ledger_transaction,
     load_ledger,
     one_line,
     outstanding_held,
@@ -598,8 +600,13 @@ def _record_confirm_round(
         now=_now(),
     )
     persisted = decided if engine_pass_precedes(prior) else claude_verdict
-    save_round_verdict(gate.ledger_path, report.round, persisted)
-    save_ledger(gate.ledger_path, ledger)
+    ledger = bind_confirm_verdict(ledger, report.round, persisted)
+    with ledger_transaction(gate.ledger_path) as locked:
+        if load_ledger(locked) != prior:
+            msg = "convergence ledger changed during confirmation; nothing recorded"
+            raise CwError(msg)
+        save_round_verdict(locked, report.round, persisted)
+        save_ledger(locked, ledger)
     gate.pending_findings = []
     gate.ledger = ledger
     claude = CleanConfirmOutcome(

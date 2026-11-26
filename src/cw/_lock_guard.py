@@ -2,7 +2,8 @@
 
 Every guarded lock context manager (``sessions_lock``, the dev-queue and plan
 locks, ``clients_lock``, ``concurrency_override_lock``, ``dispatch_state_lock``,
-the focus lock, and the event/session inbox and history leaf locks) wraps its
+the focus and review ledger locks, and the event/session inbox and history
+leaf locks) wraps its
 body in :func:`lock_guard`. The guard keeps a per-thread stack of held locks
 and checks it before any ``open()`` or ``flock()`` syscall:
 
@@ -55,7 +56,8 @@ class LockRank(enum.IntEnum):
 
     SESSIONS = 0
     STATE = 1
-    LEAF = 2
+    REVIEW_LEDGER = 2
+    LEAF = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,7 +199,8 @@ def _order_message(lock: HeldLock, held: tuple[HeldLock, ...]) -> str | None:
     return (
         f"lock order violation: acquiring {lock.name!r} (rank {lock.rank.name}, "
         f"{lock.path}) while holding {higher.name!r} (rank {higher.rank.name}); "
-        "locks must be acquired in non-decreasing rank (sessions, state, leaf). "
+        "locks must be acquired in non-decreasing rank "
+        "(sessions, state, review ledger, leaf). "
         f"Held, outermost first: {stack}. See ADR-0019."
     )
 

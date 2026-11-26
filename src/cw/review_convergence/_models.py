@@ -395,6 +395,17 @@ class RoundRecord(BaseModel):
     # #3823: evidence-gap holds this round raised. Not counted in new_accepted;
     # dropped while 0, so a held-free round dumps byte-identically.
     new_held: int = Field(default=0, exclude_if=lambda v: v == 0)
+    # Fixes the engine actually dispatched from this confirm round. FixedEntry
+    # retains only the first round, so it cannot distinguish a current fix
+    # decision from a historical one for a resurfacing identity.
+    repair_identities: list[FindingIdentity] = Field(
+        default_factory=list, exclude_if=lambda v: not v
+    )
+    # Optional provenance for newly recorded blocking confirmations. Legacy
+    # rounds remain readable, but cannot authorize a guarded repair.
+    verdict_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$", exclude_if=lambda v: v is None
+    )
 
 
 class FrozenCounts(BaseModel):

@@ -2529,6 +2529,10 @@ _BOUNDED_TRUE_ALLOWLIST: dict[tuple[str, str], int] = {
     # `cw doctor --reap`, stranded routed-result close (#2524)
     ("cw/doctor/routed_result_wedge.py", "reap_routed_result_findings"): 1,
     ("cw/orchestrate.py", "retire_merged_prs"): 1,  # `cw orchestrate retire`
+    # Per-worktree evidence lock, not the sessions lock. The guarded grant
+    # takes it before any durable change; publishers acquire it before
+    # replacing an artifact, leaving the prior committed evidence intact on timeout.
+    ("cw/review_convergence/_store.py", "ledger_transaction"): 1,
     # cw start / cw doctor --reap + dispatch tick pre-pass
     ("cw/reconcile/core.py", "reconcile"): 1,
     ("cw/session.py", "background_session"): 1,  # `cw bg`

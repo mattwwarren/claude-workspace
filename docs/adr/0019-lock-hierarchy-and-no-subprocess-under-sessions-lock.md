@@ -28,7 +28,9 @@ keeps that order and extends it to every other state-file lock.
    - `STATE` (1): the dev-queue lock (`dev_queue_lock` / `_lock`), the plan
      lock (`_plan_lock`), `concurrency_override_lock`, `clients_lock`,
      `dispatch_state_lock`, the focus lock
-   - `LEAF` (2): the event inbox lock (`events._inbox_lock`), a session inbox
+   - `REVIEW_LEDGER` (2): the convergence ledger and its round verdicts
+     (`review_convergence.ledger_transaction`)
+   - `LEAF` (3): the event inbox lock (`events._inbox_lock`), a session inbox
      lock (`session_inbox._inbox_lock`), a client history lock
      (`history._history_lock`), a client outbox lock (`outbox._outbox_lock`)
 
@@ -99,8 +101,10 @@ keeps that order and extends it to every other state-file lock.
 - Never call a function that takes a lock you already hold. Work under the
   held lock instead (for `sessions_lock`: mutate the loaded state and call
   `save_state`, not `mutate_state`).
-- Take `sessions_lock` first, then STATE locks, then at most one leaf, and
-  acquire nothing while a leaf is held.
+- Acquire needed locks in order: `sessions_lock`, STATE locks, the review
+  ledger lock, then at most one leaf. A guarded scope grant holds the queue
+  and ledger locks through its save and any audit compensation. Evidence
+  writers use the same ledger lock and never acquire the queue under it.
 - Do subprocess and network work before taking `sessions_lock` or after it
   releases. A new in-lock site needs a ticket and an allowlist entry, or the
   suite fails.
