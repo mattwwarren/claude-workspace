@@ -554,10 +554,29 @@ def test_a_merge_freeze_refusal_is_synced_refenced_and_re_armed(
     assert h.order[-3:] == ["arm", "run_approval_fence", "arm"]
 
 
+def test_a_reused_pr_repairs_a_merge_freeze_too(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    h.gh.reply("pr", "list", "--head", BRANCH, stdout=_pr_list("OPEN"))
+    h.arm = stub_prep_pr_finalize(Path.home(), arm_refusals=(_FREEZE_REFUSAL,))
+    calls: list[tuple[str, dict[str, Any]]] = []
+    h.monkeypatch.setattr(repair, "sync_changelog", _moving_sync(calls))
+    _pushing_then_reading(h)
+
+    result = h.run()
+
+    assert result.status == "shipped"
+    assert len(_arm_calls(h)) == 2
+    second = _arm_calls(h)[-1]
+    assert second[second.index("--head-sha") + 1] == h.origin_tip()
+    assert RELEASE_CUT_SYNC_FRICTION in result.friction_highlights
+
+
 def test_a_clean_freeze_sync_re_arms_once_without_a_push(
     harness: Callable[..., Harness],
 ) -> None:
-    h = harness().turn()
+    h = harness().turn().trace()
     h.arm = stub_prep_pr_finalize(Path.home(), arm_refusals=(_FREEZE_REFUSAL,))
     head = h.local_head()
     clean = ChangelogSync(SyncState.CLEAN, None, head, None, (), (), "")
@@ -569,6 +588,8 @@ def test_a_clean_freeze_sync_re_arms_once_without_a_push(
     assert RELEASE_CUT_SYNC_FRICTION not in result.friction_highlights
     assert len(_arm_calls(h)) == 2
     assert h.local_head() == head
+    # The create path's two fences only: nothing moved, so no re-fence.
+    assert h.order.count("run_approval_fence") == 2
 
 
 def test_a_failed_freeze_sync_blocks_with_the_hint(
@@ -667,6 +688,29 @@ def test_a_default_base_conflicting_refusal_is_not_synced(
     assert result.blocker.reason == AUTOMERGE_NOT_ARMED
     assert "GitHub reports the PR conflicting" in result.blocker.details
     assert f"{PR_CONFLICTING_PREFIX} changelog-sync" not in result.blocker.details
+
+
+def test_a_run_that_already_merged_for_a_conflict_does_not_union_sync_again(
+    harness: Callable[..., Harness],
+) -> None:
+    # A non-default base: on the default base this would pass without the guard.
+    h = harness(task_updates={"base_branch": ROW_BASE}).turn()
+    push_epic_base(h.worktree)
+    h.arm = stub_prep_pr_finalize(Path.home(), arm_refusals=(_UNION_REFUSAL,))
+    h.monkeypatch.setattr(
+        "cw.codex_finalize._run.check_mergeability_repairing",
+        lambda *_a, **_k: MergeabilityOutcome(None, [], h.head),
+    )
+    calls: list[tuple[str, dict[str, Any]]] = []
+    h.monkeypatch.setattr(repair, "sync_changelog", _moving_sync(calls))
+
+    result = h.run()
+
+    assert result.blocker is not None
+    assert result.blocker.reason == AUTOMERGE_NOT_ARMED
+    assert "repair not attempted" not in result.blocker.details
+    assert len(_arm_calls(h)) == 1
+    assert calls == []
 
 
 def test_each_repair_runs_once_in_one_run(
