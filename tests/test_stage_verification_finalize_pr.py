@@ -30,6 +30,7 @@ from cw.stage_verification.finalize_pr import (
     check_mergeability,
     create_pr_for,
     detect_branch_pr,
+    local_only_merge,
     probe_default,
     push_ahead,
 )
@@ -56,6 +57,7 @@ _NUMBER = 7
 _URL = f"https://github.com/{_REPO}/pull/{_NUMBER}"
 _HEAD = "a" * 40
 _PROBE = "cw.stage_verification.impl_feedback.probe_default_merge"
+_UNVERIFIED = "post_push_mergeability_unverified"
 
 
 @pytest.fixture
@@ -302,6 +304,7 @@ class TestProbeDefault:
         assert "clash.py, z.py" in block.details
         assert "origin/main" in block.details
         assert ("the open PR" in block.details) is pr_exists
+        assert "cw does not resolve a conflict found before the push" in block.details
         assert friction == ()
 
     def test_a_conflict_never_touches_the_tree(self, worktree: Path) -> None:
@@ -533,6 +536,43 @@ class TestCheckMergeability:
         assert check_mergeability(worktree, _URL) == (None, friction)
         assert BEHIND_FRICTION == "behind_default_no_action"
 
+    @pytest.mark.parametrize(
+        ("mergeable", "state", "friction"),
+        [
+            ("MERGEABLE", "CLEAN", []),
+            ("MERGEABLE", "BEHIND", [BEHIND_FRICTION]),
+            ("UNKNOWN", "UNKNOWN", [_UNVERIFIED]),
+            ("UNKNOWN", "BEHIND", [BEHIND_FRICTION, _UNVERIFIED]),
+        ],
+    )
+    def test_the_unverified_token_marks_a_non_mergeable_read(
+        self,
+        gh: FakeGhCli,
+        worktree: Path,
+        mergeable: str,
+        state: str,
+        friction: list[str],
+    ) -> None:
+        gh.reply("pr", "view", _URL, stdout=merge_view(mergeable, state))
+        got = check_mergeability(worktree, _URL, unverified_token=_UNVERIFIED)
+        assert got == (None, friction)
+
+    def test_a_block_never_carries_the_unverified_token(
+        self, gh: FakeGhCli, worktree: Path
+    ) -> None:
+        gh.reply("pr", "view", _URL, stdout=merge_view("CONFLICTING", "DIRTY"))
+        block, friction = check_mergeability(
+            worktree, _URL, unverified_token=_UNVERIFIED
+        )
+        assert block is not None
+        assert block.details == (
+            f"{_URL} is not mergeable after the push (mergeable=CONFLICTING, "
+            "mergeStateStatus=DIRTY)"
+        )
+        assert friction == []
+        gh.reply("pr", "view", returncode=1)
+        assert check_mergeability(worktree, _URL, unverified_token=_UNVERIFIED)[1] == []
+
     def test_an_unreadable_view_is_operator_unavailable(
         self, gh: FakeGhCli, worktree: Path
     ) -> None:
@@ -547,6 +587,24 @@ class TestCheckMergeability:
         gh.reply("pr", "view", _URL, stdout=merge_view("MERGEABLE", "CLEAN"))
         check_mergeability(worktree, _URL)
         assert gh.argvs()[0][:4] == ["gh", "pr", "view", _URL]
+
+
+class TestLocalOnlyMerge:
+    def test_names_the_merge_and_is_not_retryable(self) -> None:
+        pushed = FinalizeBlock(
+            "impl_not_pushed", "git push failed", retry_eligible=True
+        )
+        block = local_only_merge(
+            pushed, merge="semantic auto-resolve merge", branch="dev/T", head_sha="abc"
+        )
+        assert block.retry_eligible is False
+        assert block.reason == "impl_not_pushed"
+        assert block.details == (
+            "git push failed; the semantic auto-resolve merge commit abc exists only"
+            ' in the local worktree; push it with a plain "git push origin'
+            ' HEAD:refs/heads/dev/T" and requeue, because a reused PR must match'
+            " local HEAD"
+        )
 
 
 # --- operator override section ------------------------------------------------

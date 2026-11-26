@@ -1031,7 +1031,7 @@ def test_a_detached_head_blocks_the_same_way(
 def test_a_red_gate_on_the_create_path_pushes_and_creates_nothing(
     harness: Callable[..., Harness],
 ) -> None:
-    h = harness(gates=(("lint", "echo boom; exit 1", 5.0),), unpushed=1)
+    h = harness(gates=(("lint", "echo boom; [ ! -f feature.py ]", 5.0),), unpushed=1)
     tip = h.origin_tip()
     result = h.run()
     _assert_block(result, "agent_block", stage="stage4b_pr_create")
@@ -1047,7 +1047,7 @@ def test_a_red_gate_on_the_create_path_pushes_and_creates_nothing(
 def test_a_red_gate_on_the_reuse_path_never_arms(
     harness: Callable[..., Harness],
 ) -> None:
-    h = harness(gates=(("lint", "exit 1", 5.0),))
+    h = harness(gates=(("lint", "[ ! -f feature.py ]", 5.0),))
     h.gh.reply("pr", "list", "--head", BRANCH, stdout=_pr_list("OPEN"))
     result = h.run()
     _assert_block(result, "agent_block", stage="stage5_post_create")
@@ -1997,7 +1997,12 @@ def test_a_partial_deferral_runs_the_unmapped_gate_before_the_park(
 def test_a_red_unmapped_gate_still_blocks_before_any_pr_exists(
     harness: Callable[..., Harness],
 ) -> None:
-    h = harness(gates=(("lint", "true", 5.0), ("fmt", "exit 3", 5.0)))
+    h = harness(
+        gates=(
+            ("lint", "true", 5.0),
+            ("fmt", "if [ -f feature.py ]; then exit 3; fi", 5.0),
+        )
+    )
     h.gates.defer(("lint", ("ci-lint",)))
     result = h.run()
     _assert_block(
