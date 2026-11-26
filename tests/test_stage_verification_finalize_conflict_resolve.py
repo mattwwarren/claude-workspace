@@ -744,3 +744,100 @@ def test_a_staging_failure_aborts_before_the_commit(
     assert outcome.block is not None
     assert fragment in outcome.block.details
     _assert_untouched(repo, pre, tip)
+
+
+# -- hook-running calls --------------------------------------------------------
+
+
+def test_the_hook_running_calls_have_no_kill_timer(
+    repo: Repo, gh: FakeGhCli, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_real_guard_script(resolve.CLASSIFIER_SCRIPT_NAME)
+    repo.ours_and_theirs(_DOC, "ours\n", "theirs\n")
+    _reads_after_push(monkeypatch, gh, _MERGEABLE)
+    real_run_git = resolve.run_git
+    seen: dict[str, object] = {}
+
+    def _record(argv: list[str], **kwargs: Any) -> Any:
+        seen[argv[0]] = kwargs.get("timeout")
+        return real_run_git(argv, **kwargs)
+
+    monkeypatch.setattr(resolve, "run_git", _record)
+    assert _resolve(repo).block is None
+    assert seen["merge"] is None
+    assert seen["commit"] is None
+    assert seen["add"] is not None
+
+
+def _raise_after(
+    monkeypatch: pytest.MonkeyPatch, matches: Callable[[list[str]], bool]
+) -> None:
+    """Make the matching ``run_git`` call run, then die as a killed child does."""
+    real_run_git = resolve.run_git
+
+    def _die(argv: list[str], **kwargs: Any) -> Any:
+        if not matches(argv):
+            return real_run_git(argv, **kwargs)
+        if argv[0] != "commit":
+            real_run_git(argv, **kwargs)
+        raise subprocess.TimeoutExpired(["git", *argv], 60)
+
+    monkeypatch.setattr(resolve, "run_git", _die)
+
+
+def test_a_commit_that_raises_aborts_and_parks(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_real_guard_script(resolve.CLASSIFIER_SCRIPT_NAME)
+    repo.ours_and_theirs(_DOC, "ours\n", "theirs\n")
+    pre, tip = repo.head(), repo.origin_tip()
+    _raise_after(monkeypatch, lambda argv: argv[0] == "commit")
+    outcome = _resolve(repo, run_gates=_never_gates)
+    assert outcome.block is not None
+    assert outcome.block.reason == MERGE_CONFLICT_POST_PUSH
+    assert "semantic auto-resolve attempted — commit failed: " in outcome.block.details
+    _assert_untouched(repo, pre, tip)
+
+
+def test_a_merge_that_raises_aborts_and_parks(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_real_guard_script(resolve.CLASSIFIER_SCRIPT_NAME)
+    repo.ours_and_theirs(_DOC, "ours\n", "theirs\n")
+    pre, tip = repo.head(), repo.origin_tip()
+    _raise_after(monkeypatch, lambda argv: argv[0] == "merge" and "--abort" not in argv)
+    outcome = _resolve(repo, run_gates=_never_gates)
+    assert outcome.block is not None
+    assert outcome.block.reason == MERGE_CONFLICT_POST_PUSH
+    assert "git merge did not finish: " in outcome.block.details
+    _assert_untouched(repo, pre, tip)
+
+
+@pytest.mark.parametrize(
+    ("command", "fragment"),
+    [
+        ("add", "commit failed: "),
+        ("--abort", "git merge --abort failed ("),
+        ("reset", "NOT reverted ("),
+    ],
+)
+def test_a_git_call_that_raises_is_parked_not_raised(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch, command: str, fragment: str
+) -> None:
+    install_real_guard_script(resolve.CLASSIFIER_SCRIPT_NAME)
+    name = "clash.py" if command == "--abort" else _DOC
+    repo.ours_and_theirs(name, "ours = 1\n", "theirs = 2\n")
+    real_run_git = resolve.run_git
+
+    def _broken(argv: list[str], **kwargs: Any) -> Any:
+        if command in argv[:2]:
+            msg = "git vanished"
+            raise OSError(msg)
+        return real_run_git(argv, **kwargs)
+
+    monkeypatch.setattr(resolve, "run_git", _broken)
+    outcome = _resolve(repo, run_gates=_red)
+    assert outcome.block is not None
+    assert outcome.block.reason == MERGE_CONFLICT_POST_PUSH
+    assert fragment in outcome.block.details
+    assert "git vanished" in outcome.block.details

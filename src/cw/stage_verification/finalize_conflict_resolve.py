@@ -9,6 +9,10 @@ judgement"), the commit, the ``resolve``-path quality gates, the plain push
 and one re-check. Exactly one attempt: never a rebase, a force-push or a
 second merge.
 
+The merge and the commit run repository hooks, so cw puts no kill timer on
+them (ADR-0014); the other git calls are bounded. A git call that raises is
+handled like a failed one.
+
 Every refusal returns the caller's original park with a note saying what was
 tried. A failed gate resets the merge away only when this run made it
 (``HEAD^1`` is the pre-merge sha on the expected branch); otherwise the note
@@ -75,6 +79,7 @@ _CLASSIFIER_TIMEOUT: Final = 120
 _TAIL: Final = 500
 _NOT_ATTEMPTED: Final = "semantic auto-resolve not attempted"
 _ATTEMPTED: Final = "semantic auto-resolve attempted"
+_GIT_ERRORS: Final = (subprocess.SubprocessError, OSError)
 
 
 @dataclass(frozen=True)
@@ -111,6 +116,11 @@ def _git(worktree: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
     return run_git(
         args, cwd=worktree, capture_output=True, timeout=LOCAL_GIT_TIMEOUT_SECONDS
     )
+
+
+def _git_hooked(worktree: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+    """A git call that runs repository hooks: no kill timer (ADR-0014)."""
+    return run_git(args, cwd=worktree, capture_output=True)
 
 
 def _output(done: subprocess.CompletedProcess[str]) -> str:
@@ -191,13 +201,19 @@ def _fetch_and_check(attempt: _Attempt) -> str | None:
 
 def _abort_note(worktree: Path) -> str:
     """``git merge --abort`` when a merge is in progress; a note if it failed."""
-    if _git(worktree, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).returncode != 0:
-        return ""
-    done = _git(worktree, ["merge", "--abort"])
-    if done.returncode == 0:
-        return ""
+    try:
+        probe = _git(worktree, ["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+        if probe.returncode != 0:
+            return ""
+        done = _git(worktree, ["merge", "--abort"])
+    except _GIT_ERRORS as exc:
+        why = _tail(str(exc))
+    else:
+        if done.returncode == 0:
+            return ""
+        why = _output(done)
     return (
-        f"; git merge --abort failed ({_output(done)}): the worktree is mid-merge,"
+        f"; git merge --abort failed ({why}): the worktree is mid-merge,"
         ' run "git merge --abort" by hand'
     )
 
@@ -301,22 +317,15 @@ def _classify(
     return resolved
 
 
-def _commit(
-    attempt: _Attempt, resolved: _Resolved, conflicted: Sequence[str]
-) -> FinalizeBlock | None:
-    """Stage the resolution and commit the merge with the doc's message."""
+def _stage_and_commit(attempt: _Attempt, resolved: _Resolved) -> str | None:
+    """Stage the resolution and commit the merge; ``None`` on success, else why."""
     added = _git(attempt.worktree, ["add", "--", *resolved.files])
-    still = unmerged_paths(attempt.worktree) if added.returncode == 0 else ()
-    if added.returncode != 0 or still:
-        why = (
-            _output(added)
-            if added.returncode != 0
-            else f"still unmerged: {', '.join(still)}"
-        )
-        return _abort_park(
-            attempt, f"{_ATTEMPTED} — commit failed: {redact_and_cap(why)}", conflicted
-        )
-    done = _git(
+    if added.returncode != 0:
+        return _output(added)
+    still = unmerged_paths(attempt.worktree)
+    if still:
+        return redact_and_cap(f"still unmerged: {', '.join(still)}")
+    done = _git_hooked(
         attempt.worktree,
         [
             "commit",
@@ -327,11 +336,20 @@ def _commit(
             AUTO_RESOLVED_TRAILER,
         ],
     )
-    if done.returncode != 0:
-        return _abort_park(
-            attempt, f"{_ATTEMPTED} — commit failed: {_output(done)}", conflicted
-        )
-    return None
+    return None if done.returncode == 0 else _output(done)
+
+
+def _commit(
+    attempt: _Attempt, resolved: _Resolved, conflicted: Sequence[str]
+) -> FinalizeBlock | None:
+    """Commit the merge with the doc's message, or abort it and park."""
+    try:
+        why = _stage_and_commit(attempt, resolved)
+    except _GIT_ERRORS as exc:
+        why = _tail(str(exc))
+    if why is None:
+        return None
+    return _abort_park(attempt, f"{_ATTEMPTED} — commit failed: {why}", conflicted)
 
 
 # -- gates and the revert ------------------------------------------------------
@@ -366,7 +384,10 @@ def _gate_park(
         details = block.details if block is not None else "no reason recorded"
         what = f"the quality gates could not run: {redact_and_cap(details)}"
     merge_sha = _local_head(attempt.worktree)
-    why = _revert(attempt)
+    try:
+        why = _revert(attempt)
+    except _GIT_ERRORS as exc:
+        why = f"the revert did not finish: {_tail(str(exc))}"
     note = f"semantic auto-resolve resolved conflicts ({categories}) but {what}"
     if why is None:
         parked = _noted(attempt.park, f"{note}; reverted")
@@ -462,6 +483,18 @@ def _after_conflict(
     return _publish(attempt, classifier_ran=True, conflicted=conflicted)
 
 
+def _merge_base(
+    attempt: _Attempt,
+) -> subprocess.CompletedProcess[str] | FinalizeBlock:
+    """The one ``git merge`` of the base; the park when it did not finish."""
+    argv = ["merge", "--no-edit", f"origin/{attempt.base_branch}"]
+    try:
+        return _git_hooked(attempt.worktree, argv)
+    except _GIT_ERRORS as exc:
+        note = f"{_ATTEMPTED} — git merge did not finish: {_tail(str(exc))}"
+        return _abort_park(attempt, note, ())
+
+
 def resolve_post_push_conflict(
     worktree: Path,
     *,
@@ -485,7 +518,9 @@ def resolve_post_push_conflict(
         why = _fetch_and_check(attempt)
     if why is not None:
         return ResolveOutcome(_noted(park, f"{_NOT_ATTEMPTED}: {redact_and_cap(why)}"))
-    merged = _git(worktree, ["merge", "--no-edit", f"origin/{base_branch}"])
+    merged = _merge_base(attempt)
+    if isinstance(merged, FinalizeBlock):
+        return ResolveOutcome(merged)
     if merged.returncode == 0:
         return _publish(attempt, classifier_ran=False, conflicted=())
     conflicted = unmerged_paths(worktree)
