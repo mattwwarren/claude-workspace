@@ -25,9 +25,11 @@ Imports no ``cw.codex_*`` module (the stage-verification ratchet).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field, replace
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Final
 
 from cw._git import LOCAL_GIT_TIMEOUT_SECONDS, git_clean_env, git_output, run_git
@@ -150,33 +152,54 @@ def _precondition(worktree: Path, head_sha: str) -> str | None:
     return None
 
 
-def _untracked_clobbers(worktree: Path, base_branch: str) -> list[str] | None:
-    """Paths ``origin/<base>`` adds that already exist untracked (or ignored).
+def _z_paths(worktree: Path, args: list[str]) -> list[str]:
+    """The paths a ``-z`` git read lists, unquoted; non-UTF-8 bytes survive."""
+    out = git_output(args, cwd=worktree, errors="surrogateescape")
+    return [p for p in out.split("\0") if p]
 
-    ``git merge`` silently overwrites an ignored file, and a later revert would
-    delete it. ``None`` when git could not answer (fail closed).
+
+def _clobbered(worktree: Path, path: str, tracked: frozenset[str]) -> str | None:
+    """The untracked entry writing *path* would destroy: itself or a parent."""
+    for parent in reversed(PurePosixPath(path).parents[:-1]):
+        name = str(parent)
+        entry = worktree / name
+        blocks = entry.is_symlink() or not entry.is_dir()
+        if name not in tracked and os.path.lexists(entry) and blocks:
+            return name
+    if path not in tracked and os.path.lexists(worktree / path):
+        return path
+    return None
+
+
+def _untracked_clobbers(worktree: Path, base_branch: str) -> list[str] | None:
+    """Untracked (or ignored) entries a merge of ``origin/<base>`` would write over.
+
+    Covers every path the base side changed since the merge base, not only
+    additions, and every parent of it that is not a directory. ``git merge``
+    silently overwrites an ignored file, and ``merge --abort`` or a later revert
+    would delete it. ``None`` when git could not answer (fail closed).
     """
     try:
-        added = git_output(
+        changed = _z_paths(
+            worktree,
             [
                 "diff",
+                "-z",
                 "--name-only",
                 "--no-renames",
-                "--diff-filter=A",
                 f"HEAD...origin/{base_branch}",
             ],
-            cwd=worktree,
-        ).splitlines()
-        tracked = set(git_output(["ls-files"], cwd=worktree).splitlines())
+        )
+        tracked = frozenset(_z_paths(worktree, ["ls-files", "-z"]))
     except (subprocess.CalledProcessError, OSError):
         return None
-    return [
-        p
-        for p in added
-        if p
-        and p not in tracked
-        and ((worktree / p).exists() or (worktree / p).is_symlink())
-    ]
+    found = (_clobbered(worktree, path, tracked) for path in changed)
+    return list(dict.fromkeys(name for name in found if name is not None))
+
+
+def _printable(text: str) -> str:
+    """*text* with the lone surrogates of non-UTF-8 path bytes escaped."""
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 def _fetch_and_check(attempt: _Attempt) -> str | None:
@@ -186,11 +209,11 @@ def _fetch_and_check(attempt: _Attempt) -> str | None:
         return failed
     clobbers = _untracked_clobbers(attempt.worktree, attempt.base_branch)
     if clobbers is None:
-        return f"the paths origin/{attempt.base_branch} adds could not be listed"
+        return f"the paths origin/{attempt.base_branch} changes could not be listed"
     if clobbers:
-        names = redact_and_cap(", ".join(clobbers))
+        names = redact_and_cap(_printable(", ".join(clobbers)))
         return (
-            f"origin/{attempt.base_branch} adds {names}, which already exist "
+            f"merging origin/{attempt.base_branch} would write over {names}, "
             "untracked or ignored in the worktree"
         )
     return None

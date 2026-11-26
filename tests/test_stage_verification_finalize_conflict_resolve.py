@@ -9,7 +9,9 @@ Real git with a bare origin (``fresh_finalize_repo``), the real
 
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -395,7 +397,7 @@ def test_an_ignored_local_file_base_adds_blocks_the_merge(repo: Repo) -> None:
     pre = repo.head()
     outcome = _resolve(repo, run_gates=_never_gates)
     assert outcome.block is not None
-    assert "origin/main adds local.env, which already exist" in outcome.block.details
+    assert "merging origin/main would write over local.env," in outcome.block.details
     assert (repo.worktree / "local.env").read_text(encoding="utf-8") == "mine\n"
     assert repo.head() == pre
 
@@ -420,8 +422,10 @@ def test_a_hook_rejecting_a_clean_merge_is_aborted(repo: Repo) -> None:
 
 
 def test_an_untracked_path_the_merge_would_overwrite_is_not_aborted(
-    repo: Repo,
+    repo: Repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The file appears after the guard looked, so git itself refuses the merge.
+    monkeypatch.setattr(resolve, "_untracked_clobbers", lambda *_a: [])
     repo.base_adds("unrelated.py")
     (repo.side / "pkg").mkdir()
     repo.base_adds("pkg/mod.py")
@@ -708,7 +712,7 @@ def test_an_unlistable_base_diff_is_not_attempted(
     monkeypatch.setattr(resolve, "git_output", _no_diff)
     outcome = _resolve(repo, run_gates=_never_gates)
     assert outcome.block is not None
-    assert "not attempted: the paths origin/main adds could not be listed" in (
+    assert "not attempted: the paths origin/main changes could not be listed" in (
         outcome.block.details
     )
 
@@ -841,3 +845,74 @@ def test_a_git_call_that_raises_is_parked_not_raised(
     assert outcome.block.reason == MERGE_CONFLICT_POST_PUSH
     assert fragment in outcome.block.details
     assert "git vanished" in outcome.block.details
+
+
+# -- the clobber guard ---------------------------------------------------------
+
+
+def _ignore_and_push(repo: Repo, pattern: str) -> None:
+    commit_tracked_file(repo.worktree, ".gitignore", f"{pattern}\n")
+    git_in(repo.worktree, "push", "origin", _BRANCH)
+
+
+def _assert_refused(repo: Repo, outcome: resolve.ResolveOutcome, name: str) -> None:
+    assert outcome.block is not None
+    assert (
+        f"not attempted: merging origin/main would write over {name}, untracked or "
+        "ignored in the worktree" in outcome.block.details
+    )
+    assert not repo.mid_merge()
+
+
+def test_a_locally_untracked_file_base_modifies_blocks_the_merge(repo: Repo) -> None:
+    commit_tracked_file(repo.worktree, "local.env", "shared\n")
+    git_in(repo.worktree, "push", "origin", f"{_BRANCH}:main")
+    git_in(repo.worktree, "rm", "--cached", "local.env")
+    git_in(repo.worktree, "commit", "-m", "untrack")
+    _ignore_and_push(repo, "local.env")
+    (repo.worktree / "local.env").write_text("mine\n", encoding="utf-8")
+    repo.base_adds("local.env", "theirs\n")
+    pre = repo.head()
+    outcome = _resolve(repo, run_gates=_never_gates)
+    _assert_refused(repo, outcome, "local.env")
+    assert (repo.worktree / "local.env").read_text(encoding="utf-8") == "mine\n"
+    assert repo.head() == pre
+
+
+def test_a_non_ascii_ignored_file_base_adds_blocks_the_merge(repo: Repo) -> None:
+    name = "café.env"
+    _ignore_and_push(repo, "*.env")
+    (repo.worktree / name).write_text("mine\n", encoding="utf-8")
+    repo.base_adds(name, "theirs\n")
+    pre = repo.head()
+    outcome = _resolve(repo, run_gates=_never_gates)
+    _assert_refused(repo, outcome, name)
+    assert (repo.worktree / name).read_text(encoding="utf-8") == "mine\n"
+    assert repo.head() == pre
+
+
+def test_an_ignored_file_where_base_needs_a_directory_blocks_the_merge(
+    repo: Repo,
+) -> None:
+    _ignore_and_push(repo, "foo")
+    (repo.worktree / "foo").write_text("mine\n", encoding="utf-8")
+    repo.base_adds("other.py")
+    (repo.side / "foo").mkdir()
+    repo.base_adds("foo/bar", "theirs\n")
+    pre = repo.head()
+    outcome = _resolve(repo, run_gates=_never_gates)
+    _assert_refused(repo, outcome, "foo")
+    assert (repo.worktree / "foo").read_text(encoding="utf-8") == "mine\n"
+    assert repo.head() == pre
+
+
+@pytest.mark.skipif(sys.platform == "darwin", reason="APFS rejects non-UTF-8")
+def test_a_non_utf8_path_is_listed_and_escaped(repo: Repo) -> None:
+    name = os.fsdecode(b"\xff.env")
+    _ignore_and_push(repo, "*.env")
+    (repo.worktree / name).write_text("mine\n", encoding="utf-8")
+    repo.base_adds(name, "theirs\n")
+    outcome = _resolve(repo, run_gates=_never_gates)
+    _assert_refused(repo, outcome, "\\udcff.env")
+    assert outcome.block is not None
+    outcome.block.details.encode("utf-8")

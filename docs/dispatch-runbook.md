@@ -4998,9 +4998,9 @@ Everything below is cw-run Python; no codex turn gets write access.
   did not move HEAD (there is still at most one merge). Preconditions: local
   HEAD is the PR head; no tracked modification at all (a tolerated tracked
   edit or a tracked-modified review artifact disables it); after the fetch,
-  no path that `origin/<base>` adds exists untracked or ignored in the
-  worktree (`git merge` silently overwrites an ignored file). A failed
-  precondition appends `; semantic auto-resolve not attempted: <why>`. One
+  no path that `origin/<base>` changed since the merge base, and no parent of
+  one that is not a directory, exists untracked or ignored in the worktree
+  (`git merge` silently overwrites an ignored file). A failed precondition appends `; semantic auto-resolve not attempted: <why>`. One
   `git merge --no-edit origin/<base>`: a clean merge is pushed with no gates;
   a merge that fails with no conflicted files is aborted (only when
   `MERGE_HEAD` resolves) and parks; a conflict writes
