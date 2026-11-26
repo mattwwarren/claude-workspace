@@ -13,8 +13,9 @@ so a stage fault completes the session as ``unexpected_error`` at
 3. One write-capable ``codex exec`` turn with no timeout (ADR-0014). The turn
    never stages, commits or pushes.
 4. cw measures the turn, then runs gate 1 (empty diff), the file fence, the
-   growth guard (repair rows), gate 2 (scope conformance) and the quality
-   gates. A refused turn is preserved under a ref and the tree is restored.
+   growth guard (repair rows), gate 2 (scope conformance), the quality gates
+   and gate 4 (ruff and mypy on the touched Python files, #3531). A refused
+   turn is preserved under a ref and the tree is restored.
 5. cw makes the one commit (with the ``Auto-Dev-Stage: impl-complete``
    trailer), pushes it and verifies origin's tip, stamps the sentinel and
    completes through the door.
@@ -59,6 +60,7 @@ from cw.codex_impl._resume import (
     bound_operator_comments,
     resume_note,
 )
+from cw.codex_impl._type_gate import run_type_check_gate
 from cw.codex_lane_config import _resolve_codex_fix_loop_growth_guard_enabled
 from cw.codex_plan._prompt import command_docs_root, ticket_text_from_snapshot
 from cw.codex_review import (
@@ -133,6 +135,7 @@ from cw.stage_verification.impl_merge_adopt import (
     merge_unresolved_block,
 )
 from cw.stage_verification.impl_resume import Disposition, plan_reentry
+from cw.stage_verification.impl_type_gate import PreparePin, pin_prepare
 from cw.stage_verification.posted_text import redact_and_cap
 from cw.stage_verification.push import push_and_verify_head
 from cw.ticket_snapshot import context_for_client, snapshot_for_stage
@@ -190,7 +193,10 @@ class _Pre:
 
 @dataclass(frozen=True)
 class _Flow:
-    """The turn-ready state: baseline, merge, pinned gates and friction."""
+    """The turn-ready state: baseline, merge, pinned gates and friction.
+
+    ``prepare`` is the default branch's ``tests.prepare``, read before the turn.
+    """
 
     pre: _Pre
     baseline: CycleBaseline
@@ -198,6 +204,7 @@ class _Flow:
     merge: MergeOutcome | None
     gate_plan: GatePlan
     scope: GateScope
+    prepare: PreparePin
     tokens: list[str] = field(default_factory=list)
     conflict_before: dict[str, str] = field(default_factory=dict)
 
@@ -612,6 +619,7 @@ def _start(run: _Run, pre: _Pre) -> _Flow | ImplBlock:
         merge=merge,
         gate_plan=plan_cycle_gates(run.worktree, scope),
         scope=scope,
+        prepare=pin_prepare(run.worktree, run.client.default_branch),
         conflict_before=(
             conflict_fingerprints(run.worktree, merge.conflicted)
             if merge is not None
@@ -702,7 +710,7 @@ def _fence_blocks(run: _Run, flow: _Flow, touched: set[str]) -> ImplBlock | None
 def _gate_blocks(
     run: _Run, flow: _Flow, touched: set[str], scratch: Path
 ) -> ImplBlock | None:
-    """Gate 2 (scope conformance), then the repo's quality gates.
+    """Gate 2 (scope conformance), the repo's quality gates, then gate 4.
 
     Gate 2 is handed the touched list minus the conflict merge's merge-side
     files: cw's merge brought those in, the model did not edit them (the fence
@@ -736,7 +744,7 @@ def _gate_blocks(
         scope=flow.scope,
         tokens=flow.tokens,
         touched=touched,
-    )
+    ) or run_type_check_gate(run, flow, touched)
 
 
 def _commit(run: _Run, flow: _Flow, touched: set[str]) -> ImplBlock | None:
