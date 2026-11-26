@@ -174,8 +174,8 @@ _log = logging.getLogger(__name__)
 
 #: Stages whose run commits onto the branch, so a clean HEAD may legitimately sit
 #: on a descendant of the baseline (#3054). Every other stage must still be at
-#: the baseline, which is the REVIEW rule. FINALIZE (C3, #3062) stays out: cw
-#: never commits in FINALIZE, so its orphan is still at the baseline HEAD.
+#: the baseline, which is the REVIEW rule. FINALIZE (C3, #3062) stays out: its
+#: only commits are post-push merge repairs (#3861, #3542); a moved HEAD parks.
 _COMMITTING_STAGES: frozenset[Stage] = frozenset({Stage.IMPL})
 
 # Short reason code stamped as the task's disposition and carried as the

@@ -394,7 +394,8 @@ def _seed_finalize_orphan(
 
 
 def test_finalize_committing_stage_set_is_unchanged() -> None:
-    """cw never commits in FINALIZE (#3062): only IMPL may advance past the base."""
+    """Only IMPL may advance past the base: FINALIZE's only commits are post-push
+    merge repairs (#3861, #3542), so a moved FINALIZE HEAD parks (#3062)."""
     assert frozenset({Stage.IMPL}) == codex_boot._COMMITTING_STAGES
 
 

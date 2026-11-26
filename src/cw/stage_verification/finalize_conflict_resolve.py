@@ -20,7 +20,6 @@ Imports no ``cw.codex_*`` module (the stage-verification ratchet).
 
 from __future__ import annotations
 
-import fnmatch
 import json
 import subprocess
 import sys
@@ -214,10 +213,6 @@ def _abort_park(
             block, f"conflicted files: {redact_and_cap(', '.join(conflicted))}"
         )
     return replace(block, details=block.details + aborted)
-
-
-def _matches_any(path: str, patterns: Sequence[str]) -> bool:
-    return any(path == p or fnmatch.fnmatch(path, p) for p in patterns)
 
 
 def _write_conflicted(worktree: Path, conflicted: Sequence[str]) -> Path:
@@ -442,7 +437,8 @@ def _after_conflict(
     run_gates: Callable[[], FinalizeGateRun],
 ) -> ResolveOutcome:
     """Classify, commit, gate and publish a conflicting merge."""
-    ignored = [p for p in conflicted if _matches_any(p, ignore_paths)]
+    # Exact repo-relative match, no globs (the merge gate's own rule).
+    ignored = [p for p in conflicted if p in ignore_paths]
     if ignored:
         note = (
             f"{_NOT_ATTEMPTED}: {redact_and_cap(', '.join(ignored))} must be "

@@ -290,11 +290,20 @@ def test_a_stale_classifier_marker_is_agent_block(repo: Repo) -> None:
     _assert_untouched(repo, pre, tip)
 
 
+def test_ignore_paths_match_exactly_not_as_globs(repo: Repo) -> None:
+    install_real_guard_script(resolve.CLASSIFIER_SCRIPT_NAME)
+    repo.ours_and_theirs(_DOC, "ours\n", "theirs\n")
+    outcome = _resolve(repo, run_gates=_red, ignore=("*.md",))
+    assert outcome.block is not None
+    assert "must be regenerated" not in outcome.block.details
+    assert "resolved conflicts (doc_append=1)" in outcome.block.details
+
+
 def test_a_conflict_in_an_ignored_path_is_never_resolved(repo: Repo) -> None:
     install_real_guard_script(resolve.CLASSIFIER_SCRIPT_NAME)
     repo.ours_and_theirs("uv.lock", "ours\n", "theirs\n")
     pre, tip = repo.head(), repo.origin_tip()
-    outcome = _resolve(repo, run_gates=_never_gates, ignore=("*.lock",))
+    outcome = _resolve(repo, run_gates=_never_gates, ignore=("other.lock", "uv.lock"))
     assert outcome.block is not None
     assert (
         "semantic auto-resolve not attempted: uv.lock must be regenerated, not "
