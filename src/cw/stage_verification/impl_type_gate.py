@@ -373,10 +373,13 @@ def detect_mypy_baseline(
 ) -> MypyBaseline | None:
     """The baseline at *fork*, or ``None`` when no candidate file is tracked."""
     candidates = baseline_candidates(commands)
+    # No pathspecs: git exits 128 on one outside the repository.
     listed = git_output(
-        ["ls-tree", "-r", "--name-only", fork, "--", *candidates], cwd=worktree
+        ["ls-tree", "-r", "-z", "--name-only", fork],
+        cwd=worktree,
+        errors="surrogateescape",
     )
-    tracked = set(listed.splitlines())
+    tracked = set(listed.split("\0"))
     files = tuple(path for path in candidates if path in tracked)
     if not files:
         return None

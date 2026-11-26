@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -244,6 +245,33 @@ def test_a_baseline_file_argument_is_a_candidate(repo: Path) -> None:
 
 
 _DEFAULTS = ("mypy-baseline.txt", ".mypy/baseline.json")
+_OUTSIDE_COMMANDS = (
+    "uv run mypy --baseline-file /srv/b.json src/",
+    "cd backend && uv run mypy --baseline-file ../b.json .",
+)
+
+
+@pytest.mark.parametrize("command", _OUTSIDE_COMMANDS)
+def test_a_baseline_path_outside_the_repo_is_not_tracked(
+    repo: Path, command: str
+) -> None:
+    fork = git_in(repo, "rev-parse", "HEAD")
+    assert gate.detect_mypy_baseline(repo, fork, [command]) is None
+
+
+@pytest.mark.parametrize("command", _OUTSIDE_COMMANDS)
+def test_a_path_outside_the_repo_keeps_the_tracked_default(
+    repo: Path, command: str
+) -> None:
+    commit_tracked_file(repo, "mypy-baseline.txt", "x\n")
+    # The whole tree is listed: a non-UTF-8 name elsewhere must not raise.
+    git_in(repo, "config", "core.quotePath", "false")
+    commit_tracked_file(repo, os.fsdecode(b"caf\xe9.md"), "x\n")
+    fork = git_in(repo, "rev-parse", "HEAD")
+
+    found = gate.detect_mypy_baseline(repo, fork, [command])
+
+    assert found == MypyBaseline(files=("mypy-baseline.txt",), commands=(command,))
 
 
 @pytest.mark.parametrize(
