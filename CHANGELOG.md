@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.113.0] - 2026-11-26
+
 ### Added
 
 - **Codex FINALIZE runs the review artifacts in Python: debt re-file, adjudication, sign-off, debt-ticket link and the UI-evidence gate (#3543).** A new Step 4d runs on the create and reuse paths after mergeability and before the arm: `cw review debt file` (any failure parks `review_debt_unfiled` before the arm), one PR-body read, one `gh pr edit` that writes the `## Review adjudication` section (copied by cw from `.cw/deferred-findings.md`, no longer model-written), the operator override and the `cw review signoff render` result, then `cw review debt link-pr`. Frontend files with no embedded media in the PR description hold the arm (`ui_evidence_missing` or `ui_evidence_unreadable`, status stays `shipped`, `next_actions` gains `attach_ui_evidence_and_enable_automerge`); cw's own sections are ignored by that check and an already-armed PR is never disarmed. The FINALIZE turn document is now three fields (`pr_title`, `pr_body`, `override_section`). A Linear codex lane with deferrals now parks `review_debt_unfiled` (an accepted per-backend hard-fail): release it with `cw review debt record`, then `cw dev-queue requeue <T> -c <C> --stage finalize`. Fourteen codex FINALIZE manifest cells flip: five implemented, nine not-applicable (no `/prep-pr`, so the review-findings comment cannot trigger).
