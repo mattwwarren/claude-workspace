@@ -68,7 +68,7 @@ These are firm leans, decided to unblock the breakout. Each one can be reversed 
 - **D-6 — The contract has one source: a manifest first, then rendering.** Stable element ids in the command docs, a per-backend disposition manifest and a drift test land first. New codex prompts are rendered from tagged neutral blocks from day one. A shared contract module that generates the docs is rejected as too large.
 - **D-7 — RFC 0017 is respected; its codex deferral is lifted and its opencode deferral stays.** The elements RFC 0017 adds have these manifest dispositions:
   - the engine round (manifest ids `review.engine-round`, `review.engine-branch`, `review.engine-round-adjudication`, `review.fourth-trigger-review-engine-modified-park`, `review.fifth-trigger-review-confirm-must-fix-park` and `review.engine-park-release`): `implemented` for codex. A4 landed in #3216 (commit 60d76687) and the cells cite the codex engine-round modules (`src/cw/codex_review/_engine_round.py`, `src/cw/codex_engine_confirm.py`, `src/cw/review_engine/constants.py`). The engine summary has no manifest element of its own; it is part of the engine round;
-  - review sign-off attestation on codex FINALIZE: still `deferred` (#3543, `finalize.review-sign-off`);
+  - review sign-off attestation on codex FINALIZE: `implemented` (#3543, `finalize.review-sign-off`);
   - opencode: `fails-closed`, per D-4.
 
   #2999 has merged, so `models/tasks/` is already a package. (Amended 2026-11-09.)

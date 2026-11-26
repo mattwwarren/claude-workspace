@@ -2,12 +2,14 @@
 
 ``cw codex run --stage finalize`` runs :func:`run_finalize_stage_and_complete`.
 The hybrid design: one READ_ONLY ``codex exec`` turn returns a strict ``-o``
-document with the judgement text only (PR title, PR body, adjudication and
-operator-override section text); cw does every mechanical or ordering-critical
+document with the judgement text only (PR title, PR body and operator-override
+section text); cw does every mechanical or ordering-critical
 step in Python, outside the sandbox: the MUST_FIX override check, the
 Detector Guard, Step 4.0/4.0b (re-run immediately before the arm), the Step
 4a merge gate, the quality gates, the push, PR create or reuse, the
-mergeability check, the arm via ``prep_pr_finalize.py`` and its verification,
+mergeability check, Step 4d (the review-debt re-file, the adjudication, override
+and sign-off sections of the PR body, the debt-ticket link and the UI-evidence
+gate), the arm via ``prep_pr_finalize.py`` and its verification,
 the PR-link comment, the cw-stamped sentinel and the stage events.
 
 Submodules:
@@ -24,6 +26,8 @@ Submodules:
 - ``cw.stage_verification.finalize_arm`` — the seam check, the arm and the verification.
 - ``cw.stage_verification.finalize_changelog_repair`` — the one-shot CHANGELOG-union
   repair around the mergeability check (#3861).
+- ``cw.stage_verification.finalize_review_artifacts`` and
+  ``cw.stage_verification.finalize_ui_evidence`` — Step 4d (#3543).
 - ``_post`` — the PR-link comment.
 - ``_run`` — the ordered flow.
 """

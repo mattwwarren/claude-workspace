@@ -4960,8 +4960,8 @@ cover the row-delivered and the comment channel and never assert survival.
 **Codex FINALIZE (#3062, RFC 0018 C3).** A lane whose FINALIZE stage resolves
 to `codex` runs `cw codex run --stage finalize`: one `read-only` `codex exec`
 turn (a fixed argv, no knob, no cw timer, ADR-0014) that returns only the
-judgement text (PR title, PR body, the adjudication section and the operator
-override section). The turn never edits, stages, commits, pushes or runs `gh`.
+judgement text (PR title, PR body and the operator override section). The turn
+never edits, stages, commits, pushes or runs `gh`.
 cw does every mechanical or ordering-critical step in Python:
 
 - **Guards, in order.** The MUST_FIX override check, the tier resolution
@@ -4978,16 +4978,76 @@ cw does every mechanical or ordering-critical step in Python:
   (`merge_conflict_post_push`; cw never merges before the push), the push with
   origin verification (`push_auth_failed` or `impl_not_pushed`), `gh pr
   create`, the mergeability check (with one semantic auto-resolve attempt on
-  a conflict), then the arm through `prep_pr_finalize.py` with a read-back
-  (`automerge_not_armed`). The reuse path runs the quality gates, then the
-  same live bind, probe, arm and verification. The reuse path never runs the
-  semantic auto-resolve.
+  a conflict), Step 4d (below), then the arm through `prep_pr_finalize.py` with
+  a read-back (`automerge_not_armed`). The reuse path runs the quality gates,
+  then the same live bind, probe, Step 4d, arm and verification. The reuse
+  path never runs the semantic auto-resolve. The turn document has three
+  fields: cw copies the `## Review adjudication` section from
+  `.cw/deferred-findings.md` itself (so a CI-deferred park keeps it in the
+  created body), and the reuse path runs a turn only when a must-fix override
+  needs its section written.
+- **Step 4d (#3543).** After mergeability and before the second fence, cw runs,
+  in order: the UI-file diff, `cw review debt file` (the re-file gate), one
+  `gh pr view --json body,headRefOid`, the UI-evidence judgement, one
+  `gh pr edit` that writes the adjudication, the operator override and the
+  `cw review signoff render` result, then `cw review debt link-pr`. A
+  re-run over a body that already carries the sections makes no edit
+  (`signoff render` exits 3).
+  - *Debt re-file.* Any non-zero exit blocks `review_debt_unfiled`
+    (`blocker.stage: "stage4_review_debt"`, retry-eligible) before the arm. The
+    result's `pr_info` carries the PR and its armed state as read back; cw never
+    disarms, so a reused PR that an earlier run armed stays armed and reports
+    `auto_merge: true`.
+  - *UI evidence.* UI files are the diff `<fork point>...<head>` matching
+    `ui_paths_regex` (read from the worktree's `.claude/project-config.yaml`;
+    default `^frontends/.*\.(tsx|ts)$`, test files excluded; `^$` turns the gate
+    off). With UI files and no media marker (`<img`, `![..](..)`,
+    `user-attachments`, `.webm`, `.mp4`) the gate holds the arm: the run still
+    ships `shipped` with friction `ui_evidence_missing` and `next_actions`
+    `wait_for_ci` plus `attach_ui_evidence_and_enable_automerge`. An unresolved
+    fork point, a failing diff, or UI files with an unreadable PR body hold the
+    same way with `ui_evidence_unreadable`. The media check ignores cw's own
+    three sections (adjudication, operator override, sign-off block), so finding
+    text such as "add alt text to `<img>`" is never evidence: put screenshots in
+    the description above them or under their own `## ` heading below. Text added
+    under cw's last `## ` section (above any sign-off block) with no heading of
+    its own is not only ignored by the media check but also overwritten by the
+    next adjudication write (by the next override write when that last section
+    is the override).
+  - *Hold on an armed PR.* A hold skips the seam check and the arm and reads the
+    PR's armed state instead. When the PR is already armed (a reuse run) cw does
+    not disarm: the result keeps `pr.auto_merge: true`, adds friction
+    `ui_evidence_missing_on_armed_pr` and `next_actions` `wait_for_ci` plus
+    `attach_ui_evidence`. An unreadable read-back blocks `operator_unavailable`.
+  - *Failed body read.* It blocks only when something depends on it: UI files
+    hold the arm (above); a pending adjudication or override write blocks
+    `operator_unavailable` (retry-eligible, nothing written); when only the
+    sign-off is left cw ships with friction
+    `friction: review_signoff: skipped_pr_head_unreadable`. A failed write
+    blocks when it carried an adjudication or override section, and is friction
+    (`review_signoff_write_failed`) when only the sign-off differed.
+  - *Linear (MCP) lanes.* A codex lane has no agent that can file the payloads
+    `cw review debt file` emits for an MCP tracker, so a run with unfiled
+    deferrals ends `blocked` / `review_debt_unfiled` (status `mcp_pending`) until
+    an operator releases it. This is an accepted per-backend hard-fail, matching
+    claude-native; a `github-issues` lane with `auto_create_issues` off is not
+    affected (`emitted_only` exits 0). **Release:** in the ticket worktree run
+    `cw review debt emit -c <C> --ticket <T> --deferred-findings
+    .cw/deferred-findings.md` and take the payload paths from its JSON `files`
+    list, not a directory listing. For each payload, search the tracker for its
+    `marker`, file a ticket with its `title` and `body` verbatim when none
+    carries it, and write `[{"key": ..., "ticket_id": ..., "url": ...}]`, one
+    entry per key, to a JSON file. Then run `cw review debt record --ids <file>
+    -c <C> --ticket <T> --deferred-findings .cw/deferred-findings.md`, and when
+    it exits 0, `cw dev-queue requeue <T> -c <C> --stage finalize`.
 - **Result.** cw stamps the sentinel (`stage_reached`, `branch`, `commits`,
   `pr`, `review`, `scope.tier`, `plan_source`), takes `pr.auto_merge` from the
   verified PR head, never from the model, emits the stage events and posts the
   PR-link comment (`kind: pr_link`). A failure of either post is friction,
   not a block.
-- **Deferred.** The review-debt re-file (Step 4d, #3543).
+- **Deferred.** The CI wait and the post-ship bookkeeping (#3544). The finalize
+  review-findings comment does not apply: its only trigger is a `/prep-pr`
+  ship-it BLOCK, which codex FINALIZE never runs.
 
 **Codex FINALIZE conflicts, base-state classifier and adopted rows (#3542).**
 Everything below is cw-run Python; no codex turn gets write access.
@@ -6228,7 +6288,17 @@ charged park, not an operator-unavailable one. Re-run
 `cw review debt file -c <client> --ticket <id> --deferred-findings <path>`
 (`<path>` is the worktree's `.cw/deferred-findings.md`; the flag is needed
 outside a cw session; it dedupes, so it is safe to repeat) or requeue the
-ticket. For `mcp_pending`, finish the MCP path above.
+ticket. For `mcp_pending`, finish the MCP path above. On a codex lane with a
+Linear (MCP) tracker this block is an accepted per-backend hard-fail (no codex
+agent files the payloads): `cw review debt emit -c <client> --ticket <id>
+--deferred-findings .cw/deferred-findings.md` from the ticket worktree lists the
+payloads (use its `files` list, not the directory); file one ticket per payload
+(search the tracker for its `marker` first, use its `title` and `body`
+verbatim), write `[{"key": ..., "ticket_id": ..., "url": ...}]` to a file, run
+`cw review debt record --ids <file> -c <client> --ticket <id>
+--deferred-findings .cw/deferred-findings.md`, and when it exits 0 run
+`cw dev-queue requeue <id> -c <client> --stage finalize`. A rerun of
+`cw review debt file` alone stays `mcp_pending` until the ids are recorded.
 Stderr carries one `debt filing failed [<kind>] <key12>: <detail>` line per
 failure and a closing `friction: debt_filing_failed: <n>`. Best-effort audit
 event persistence warnings use their separate `friction: debt_audit_warning:
@@ -6375,9 +6445,8 @@ wording, because a reviewer rewords a finding from round to round and the dedup
 key is the finding's text (one ticket produced 39 issues over six rounds,
 another 24). The engine-confirm path (`file_confirm_deferrals`) still files at
 record time. A codex lane runs PLAN, IMPL, REVIEW and FINALIZE (#3060, #3061, #3062);
-the codex FINALIZE executor does not run item 2a (the debt re-file is deferred
-to #3543), so item 2a is the normal-completion path only on a claude-native
-finalize, not only a retry. The review-debt filer registry (`register_debt_filer`) is gone: nothing
+the codex FINALIZE executor runs item 2a itself (#3543, Step 4d above), so item
+2a is the normal-completion path on both executors, not only a retry. The review-debt filer registry (`register_debt_filer`) is gone: nothing
 files from the codex process.
 
 **Stale-defer filter.** The ledger's `settled` entries carry an additive
