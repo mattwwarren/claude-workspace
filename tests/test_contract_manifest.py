@@ -2593,9 +2593,10 @@ def test_the_recovery_cells_name_the_preconditions(element_id: str) -> None:
         assert needle in cell.reason, needle
 
 
-def test_the_post_ship_cell_names_what_it_does_not_carry() -> None:
+def test_the_post_ship_cell_names_its_gap_and_its_arm_repairs() -> None:
     cell = _real_cell("finalize.post-ship-pipeline-bookkeeping", CODEX_BACKEND)
     assert isinstance(cell, ImplementedDisposition)
     assert cell.note is not None
-    for needle in ("post_pr_link_comment", "#3938", "#3939"):
+    for needle in ("post_pr_link_comment", "#3938", "#3939", "_arm_repairing"):
         assert needle in cell.note, needle
+    assert "two arm-time repairs" not in cell.note

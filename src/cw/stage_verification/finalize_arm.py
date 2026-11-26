@@ -111,11 +111,16 @@ def check_automerge_allowed(
 
 @dataclass(frozen=True)
 class ArmResult:
-    """What the arm did: whether auto-merge is armed, or the block."""
+    """What the arm did: whether auto-merge is armed, or the block.
+
+    ``gh_stderr`` is the script's JSON ``gh_stderr`` field, set only on an
+    exit-1 refusal, so a caller can match the refusal prefix (#3939).
+    """
 
     armed: bool = False
     block: FinalizeBlock | None = None
     friction: list[str] = field(default_factory=list)
+    gh_stderr: str = ""
 
 
 def _refusal(gh_stderr: str, tail: str, pr_info: dict[str, object]) -> FinalizeBlock:
@@ -163,7 +168,8 @@ def arm(
         return ArmResult(armed=False)
     if outcome.returncode == 1:
         return ArmResult(
-            block=_refusal(outcome.gh_stderr, outcome.stderr_tail, pr_info)
+            block=_refusal(outcome.gh_stderr, outcome.stderr_tail, pr_info),
+            gh_stderr=outcome.gh_stderr,
         )
     return ArmResult(
         block=_invocation_block(outcome.returncode, outcome.stderr_tail, pr_info)

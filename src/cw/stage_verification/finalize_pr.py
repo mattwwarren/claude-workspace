@@ -14,8 +14,9 @@ helper lives anywhere else in :mod:`cw.codex_finalize`.
   fetch-and-probe (:func:`cw.stage_verification.impl_feedback.probe_default_branch` with
   ``repair=True``, which never blocks). A conflict blocks
   ``merge_conflict_post_push``; cw never merges before the push. After it,
-  at most one merge is made, by the CHANGELOG-union repair or the create-path
-  semantic auto-resolve (``finalize_conflict_resolve``, #3542).
+  at most one merge is made, by the CHANGELOG-union repair (which the arm-time
+  union repair of #3939 may supply) or the create-path semantic auto-resolve
+  (``finalize_conflict_resolve``, #3542). The #3190 release-cut sync is separate.
 * :func:`check_mergeability` reads the post-push mergeability once; callers
   append their own note to its park. :func:`local_only_merge` makes a failed
   push of a post-push merge truthful.

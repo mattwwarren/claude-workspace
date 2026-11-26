@@ -18,8 +18,18 @@ import pytest
 from cw.changelog_sync import ChangelogSync, SyncState
 from cw.stage_verification import finalize_changelog_repair as repair
 from cw.stage_verification import finalize_conflict_resolve as resolve
-from cw.stage_verification.finalize_changelog_repair import MergeabilityOutcome
+from cw.stage_verification.finalize_arm import (
+    FREEZE_PREFIX,
+    PR_CONFLICTING_PREFIX,
+    _refusal,
+)
+from cw.stage_verification.finalize_changelog_repair import (
+    CHANGELOG_UNION_FRICTION,
+    RELEASE_CUT_SYNC_FRICTION,
+    MergeabilityOutcome,
+)
 from cw.stage_verification.finalize_result import (
+    AUTOMERGE_NOT_ARMED,
     MERGE_CONFLICT_POST_PUSH,
     FinalizeBlock,
 )
@@ -36,20 +46,25 @@ from tests._tool_fakes import (
 )
 from tests.test_codex_finalize_run import (
     _CLEAN,
+    _PARK_MISSING,
     BODY,
     BRANCH,
     FINALIZE_TURN,
+    LARGE_PLAN,
     PR_NUMBER,
     PR_URL,
     Harness,
+    _arm_names,
     _pr_list,
     _run_handing,
     _view,
     harness,
+    stage_events,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from types import ModuleType
 
     from cw.codex_runner import CodexRunResult
 
@@ -137,9 +152,11 @@ def _runs(log: Path) -> int:
     return len(log.read_text(encoding="utf-8").split()) if log.exists() else 0
 
 
-def _publish_rescripts(h: Harness, mergeable: str = "MERGEABLE") -> None:
-    """After the resolver's push, GitHub reports the new head and *mergeable*."""
-    real_push = resolve.push_ahead
+def _publish_rescripts(
+    h: Harness, mergeable: str = "MERGEABLE", *, module: ModuleType = resolve
+) -> None:
+    """After *module*'s push, GitHub reports the new head and *mergeable*."""
+    real_push = module.push_ahead
 
     def _push(worktree: Path, *, branch: str, head_sha: str) -> object:
         block = real_push(worktree, branch=branch, head_sha=head_sha)
@@ -148,7 +165,7 @@ def _publish_rescripts(h: Harness, mergeable: str = "MERGEABLE") -> None:
             _merge_view(h, mergeable, "CLEAN" if mergeable == "MERGEABLE" else "DIRTY")
         return block
 
-    h.monkeypatch.setattr(resolve, "push_ahead", _push)
+    h.monkeypatch.setattr(module, "push_ahead", _push)
 
 
 def _mid_merge(h: Harness) -> bool:
@@ -486,3 +503,252 @@ def test_an_unreadable_mergeability_view_carries_no_conflict_pr_info(
     assert result.blocker is not None
     assert result.blocker.reason == "operator_unavailable"
     assert "pr_info" not in payload
+
+
+_FREEZE_REFUSAL = f"{FREEZE_PREFIX} the release-cut freeze holds this PR"
+_UNION_REFUSAL = f"{PR_CONFLICTING_PREFIX} GitHub reports the PR conflicting"
+
+
+def _moving_sync(calls: list[tuple[str, dict[str, Any]]]) -> Callable[..., Any]:
+    """A changelog sync that really moves HEAD with one commit per call."""
+
+    def _sync(worktree: Path, base: str, **kwargs: Any) -> ChangelogSync:
+        calls.append((base, kwargs))
+        name = f"moved-{len(calls)}.txt"
+        commit_tracked_file(worktree, name)
+        head = git_in(worktree, "rev-parse", "HEAD")
+        return ChangelogSync(SyncState.MOVED, None, head, None, (), (), "")
+
+    return _sync
+
+
+def _arm_calls(h: Harness) -> list[list[str]]:
+    return [argv for argv in h.arm.calls() if argv[0] == "arm-automerge"]
+
+
+def _assert_a_freeze_refusal_is_repaired(h: Harness, arm_names: list[str]) -> None:
+    """Refuse the first arm with a freeze, run, and assert the whole repair."""
+    h.arm = stub_prep_pr_finalize(Path.home(), arm_refusals=(_FREEZE_REFUSAL,))
+    calls: list[tuple[str, dict[str, Any]]] = []
+    h.monkeypatch.setattr(repair, "sync_changelog", _moving_sync(calls))
+    _publish_rescripts(h, module=repair)
+    old_head = h.local_head()
+
+    result = h.run()
+
+    assert result.status == "shipped"
+    assert RELEASE_CUT_SYNC_FRICTION in result.friction_highlights
+    assert [base for base, _ in calls] == ["main"]
+    assert calls[0][1] == {}
+    assert _arm_names(h) == arm_names
+    second = _arm_calls(h)[-1]
+    new_head = second[second.index("--head-sha") + 1]
+    assert new_head != old_head
+    assert new_head == h.origin_tip()
+    assert h.order[-3:] == ["arm", "run_approval_fence", "arm"]
+    assert [e for e in stage_events() if e[0] == "stage.errored"] == []
+
+
+def test_a_merge_freeze_refusal_is_synced_refenced_and_re_armed(
+    harness: Callable[..., Harness],
+) -> None:
+    _assert_a_freeze_refusal_is_repaired(
+        harness().turn().trace(),
+        ["check-automerge-allowed", "arm-automerge", "arm-automerge"],
+    )
+
+
+def test_a_reused_pr_repairs_a_merge_freeze_too(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness().trace()
+    h.gh.reply("pr", "list", "--head", BRANCH, stdout=_pr_list("OPEN"))
+    # The reuse path releases any CI hold first.
+    _assert_a_freeze_refusal_is_repaired(
+        h,
+        ["ci-hold", "check-automerge-allowed", "arm-automerge", "arm-automerge"],
+    )
+
+
+def test_a_clean_freeze_sync_re_arms_once_without_a_push(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness().turn().trace()
+    h.arm = stub_prep_pr_finalize(Path.home(), arm_refusals=(_FREEZE_REFUSAL,))
+    head = h.local_head()
+    clean = ChangelogSync(SyncState.CLEAN, None, head, None, (), (), "")
+    h.monkeypatch.setattr(repair, "sync_changelog", lambda *_a, **_k: clean)
+
+    result = h.run()
+
+    assert result.status == "shipped"
+    assert RELEASE_CUT_SYNC_FRICTION not in result.friction_highlights
+    assert len(_arm_calls(h)) == 2
+    assert h.local_head() == head
+    # The create path's two fences only: nothing moved, so no re-fence.
+    assert h.order.count("run_approval_fence") == 2
+
+
+def test_a_failed_freeze_sync_blocks_with_the_hint(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness().turn()
+    h.arm = stub_prep_pr_finalize(Path.home(), arm_refusals=(_FREEZE_REFUSAL,))
+    refused = ChangelogSync(SyncState.REFUSED, None, None, "dirty", (), (), "dirty")
+    h.monkeypatch.setattr(repair, "sync_changelog", lambda *_a, **_k: refused)
+
+    result, payload = _run_handing(h)
+
+    assert result.blocker is not None
+    assert result.blocker.reason == AUTOMERGE_NOT_ARMED
+    assert payload["pr_info"]["number"] == PR_NUMBER
+    assert payload["pr_info"]["url"] == PR_URL
+    assert result.blocker.details.startswith(
+        f"{FREEZE_PREFIX} changelog-sync refused (dirty): dirty\n"
+    )
+    assert "cw worktree changelog-sync" in result.blocker.details
+    assert len(_arm_calls(h)) == 1
+    assert RELEASE_CUT_SYNC_FRICTION not in result.friction_highlights
+
+
+def test_a_second_freeze_refusal_blocks_after_one_sync(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness().turn()
+    h.arm = stub_prep_pr_finalize(
+        Path.home(), arm_refusals=(_FREEZE_REFUSAL, _FREEZE_REFUSAL)
+    )
+    calls: list[tuple[str, dict[str, Any]]] = []
+    h.monkeypatch.setattr(repair, "sync_changelog", _moving_sync(calls))
+    _publish_rescripts(h, module=repair)
+
+    result = h.run()
+
+    assert result.blocker is not None
+    assert result.blocker.reason == AUTOMERGE_NOT_ARMED
+    assert len(calls) == 1
+    assert len(_arm_calls(h)) == 2
+    assert RELEASE_CUT_SYNC_FRICTION in result.friction_highlights
+
+
+def test_a_conflicting_arm_refusal_is_union_synced_and_re_armed(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness(task_updates={"base_branch": ROW_BASE}).turn()
+    push_epic_base(h.worktree)
+    h.arm = stub_prep_pr_finalize(Path.home(), arm_refusals=(_UNION_REFUSAL,))
+    calls: list[tuple[str, dict[str, Any]]] = []
+    h.monkeypatch.setattr(repair, "sync_changelog", _moving_sync(calls))
+    _publish_rescripts(h, module=repair)
+
+    result = h.run()
+
+    assert result.status == "shipped"
+    assert CHANGELOG_UNION_FRICTION in result.friction_highlights
+    assert calls[0][0] == ROW_BASE
+    assert calls[0][1] == {"union_conflict": True, "default_branch": "main"}
+    assert len(_arm_calls(h)) == 2
+
+
+def test_a_failed_union_sync_blocks_with_the_hint(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness(task_updates={"base_branch": ROW_BASE}).turn()
+    push_epic_base(h.worktree)
+    h.arm = stub_prep_pr_finalize(Path.home(), arm_refusals=(_UNION_REFUSAL,))
+    conflict = ChangelogSync(SyncState.CONFLICT, None, None, None, ("A.md",), (), "")
+    h.monkeypatch.setattr(repair, "sync_changelog", lambda *_a, **_k: conflict)
+
+    result = h.run()
+
+    assert result.blocker is not None
+    assert result.blocker.reason == AUTOMERGE_NOT_ARMED
+    assert result.blocker.details.startswith(
+        f"{PR_CONFLICTING_PREFIX} changelog-sync conflict (-): "
+    )
+    assert len(_arm_calls(h)) == 1
+
+
+def test_a_default_base_conflicting_refusal_is_not_synced(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness().turn()
+    h.arm = stub_prep_pr_finalize(Path.home(), arm_refusals=(_UNION_REFUSAL,))
+
+    def _never(*_a: Any, **_k: Any) -> ChangelogSync:
+        msg = "the default base must not be synced"
+        raise AssertionError(msg)
+
+    h.monkeypatch.setattr(repair, "sync_changelog", _never)
+
+    result = h.run()
+
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == AUTOMERGE_NOT_ARMED
+    assert result.blocker.details == _refusal(_UNION_REFUSAL, "", {}).details
+    # Only the hint names this flag; the stubbed gh_stderr does not.
+    assert "--union-conflict" in result.blocker.details
+    assert f"{PR_CONFLICTING_PREFIX} changelog-sync" not in result.blocker.details
+
+
+def test_a_run_that_already_merged_for_a_conflict_does_not_union_sync_again(
+    harness: Callable[..., Harness],
+) -> None:
+    # A non-default base: on the default base this would pass without the guard.
+    h = harness(task_updates={"base_branch": ROW_BASE}).turn()
+    push_epic_base(h.worktree)
+    h.arm = stub_prep_pr_finalize(Path.home(), arm_refusals=(_UNION_REFUSAL,))
+    h.monkeypatch.setattr(
+        "cw.codex_finalize._run.check_mergeability_repairing",
+        lambda *_a, **_k: MergeabilityOutcome(None, [], h.head),
+    )
+    calls: list[tuple[str, dict[str, Any]]] = []
+    h.monkeypatch.setattr(repair, "sync_changelog", _moving_sync(calls))
+
+    result = h.run()
+
+    assert result.blocker is not None
+    assert result.blocker.reason == AUTOMERGE_NOT_ARMED
+    assert "repair not attempted" not in result.blocker.details
+    assert len(_arm_calls(h)) == 1
+    assert calls == []
+
+
+def test_each_repair_runs_once_in_one_run(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness(task_updates={"base_branch": ROW_BASE}).turn()
+    push_epic_base(h.worktree)
+    h.arm = stub_prep_pr_finalize(
+        Path.home(), arm_refusals=(_FREEZE_REFUSAL, _UNION_REFUSAL)
+    )
+    calls: list[tuple[str, dict[str, Any]]] = []
+    h.monkeypatch.setattr(repair, "sync_changelog", _moving_sync(calls))
+    _publish_rescripts(h, module=repair)
+
+    result = h.run()
+
+    assert result.status == "shipped"
+    assert len(calls) == 2
+    assert len(_arm_calls(h)) == 3
+    assert RELEASE_CUT_SYNC_FRICTION in result.friction_highlights
+    assert CHANGELOG_UNION_FRICTION in result.friction_highlights
+
+
+def test_a_re_fence_park_stops_before_the_re_arm(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness(plan=LARGE_PLAN).turn().trace()
+    recorded = GhReply(0, "REVIEW_APPROVAL_RECORDED\n", "")
+    h.set_cw("review check-approval", [recorded, recorded, _PARK_MISSING])
+    h.arm = stub_prep_pr_finalize(Path.home(), arm_refusals=(_FREEZE_REFUSAL,))
+    calls: list[tuple[str, dict[str, Any]]] = []
+    h.monkeypatch.setattr(repair, "sync_changelog", _moving_sync(calls))
+    _publish_rescripts(h, module=repair)
+
+    result = h.run()
+
+    assert result.status == "review_pending_approval"
+    assert len(_arm_calls(h)) == 1
+    assert h.origin_tip() == h.local_head()

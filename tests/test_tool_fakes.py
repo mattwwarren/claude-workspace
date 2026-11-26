@@ -1245,3 +1245,27 @@ class TestSharedGhFixture:
 
         def test_a_module_level_gh_fixture_wins(self, gh: str) -> None:
             assert gh == "local"
+
+
+def test_stub_prep_pr_finalize_refuses_the_first_arms_then_answers(
+    tmp_path: Path,
+) -> None:
+    from tests._tool_fakes import stub_prep_pr_finalize
+
+    first = "changelog_merge_freeze: held"
+    second = "pr_conflicting: GitHub reports the PR conflicting"
+    stub = stub_prep_pr_finalize(tmp_path, arm_refusals=(first, second))
+    replies = []
+    for _ in range(3):
+        done = subprocess.run(
+            [sys.executable, str(stub.script), "arm-automerge", "7"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        replies.append((done.returncode, done.stdout))
+
+    assert [code for code, _ in replies] == [1, 1, 0]
+    assert json.loads(replies[0][1])["gh_stderr"] == first
+    assert json.loads(replies[1][1])["gh_stderr"] == second
+    assert len(stub.calls()) == 3
