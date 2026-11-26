@@ -43,7 +43,8 @@ _DEFERRED_MD_PROVENANCE = (
     "<!-- written by Stage 3 (auto-dev-review.md), consumed by "
     "Stage 4 Step 4d (auto-dev-finalize.md) -->"
 )
-_DEFERRED_MD_HEADING = "## Review adjudication"
+#: The artifact's one heading, also the PR body's adjudication region heading.
+REVIEW_ADJUDICATION_HEADING = "## Review adjudication"
 _REJECTED_MD_HEADING = "Rejected (intentional / documented tradeoff):"
 _DEFERRED_SENTINEL = "DEFERRED-REVIEW-FINDINGS"
 
@@ -66,7 +67,7 @@ _DEFERRED_MD_STRUCTURAL_LINES = frozenset(
     {
         _DEFERRED_MD_TITLE,
         _DEFERRED_MD_PROVENANCE,
-        _DEFERRED_MD_HEADING,
+        REVIEW_ADJUDICATION_HEADING,
         _REJECTED_MD_HEADING,
     }
 )
@@ -149,7 +150,7 @@ def render_deferred_findings_md(adjudications: list[Adjudication]) -> str:
 
     sections = [
         f"{_DEFERRED_MD_TITLE}\n{_DEFERRED_MD_PROVENANCE}",
-        _DEFERRED_MD_HEADING,
+        REVIEW_ADJUDICATION_HEADING,
     ]
     if rejected:
         rows = "\n".join(_render_rejected_row(a) for a in rejected)

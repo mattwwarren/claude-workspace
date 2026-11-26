@@ -14,10 +14,10 @@ cannot drift apart.
 """
 
 from cw.review_adjudication._deferred_md import (
-    _DEFERRED_MD_HEADING,
     _DEFERRED_MD_PROVENANCE,
     _DEFERRED_MD_TITLE,
     _DEFERRED_SENTINEL,
+    REVIEW_ADJUDICATION_HEADING,
     parse_deferred_findings_md,
 )
 from tests._shared.workflow_text import _cmd, _norm, _section_between
@@ -68,7 +68,7 @@ def test_documented_skeleton_and_entry_parse_as_one_deferral() -> None:
     the fail-closed parser as exactly one `defer` adjudication."""
     text = (
         f"{_DEFERRED_MD_TITLE}\n{_DEFERRED_MD_PROVENANCE}\n\n"
-        f"{_DEFERRED_MD_HEADING}\n\n"
+        f"{REVIEW_ADJUDICATION_HEADING}\n\n"
         f"<!-- {_DEFERRED_SENTINEL}\n"
         "- severity: SHOULD_FIX\n"
         '  summary: "pre-existing baselined mypy errors in src/app.py"\n'

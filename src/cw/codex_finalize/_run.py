@@ -114,10 +114,11 @@ from cw.stage_verification.finalize_gates import (
 )
 from cw.stage_verification.finalize_merge_gate import run_merge_gate
 from cw.stage_verification.finalize_pr import (
+    OVERRIDE_HEADING,
     PR_MERGED,
     BoundPr,
     DetectedPr,
-    apply_override_section,
+    apply_body_section,
     bind_live_pr,
     create_pr_for,
     detect_branch_pr,
@@ -354,7 +355,9 @@ def _pr_body(doc: FinalizeTurnDocument, state: _State) -> str:
     if doc.adjudication_section.strip():
         body += "\n\n" + doc.adjudication_section.strip()
     if state.override_json is not None:
-        body = apply_override_section(body, doc.override_section or state.override_json)
+        body = apply_body_section(
+            body, doc.override_section or state.override_json, heading=OVERRIDE_HEADING
+        )
     return body.rstrip() + "\n"
 
 
@@ -667,7 +670,9 @@ def _edit_override(
         )
     body_file = scratch / _BODY_NAME
     section = doc.override_section or state.override_json or ""
-    body_file.write_text(apply_override_section(body, section), encoding="utf-8")
+    body_file.write_text(
+        apply_body_section(body, section, heading=OVERRIDE_HEADING), encoding="utf-8"
+    )
     done = edit_pr_body(bound.url, body_file=body_file, cwd=run.worktree)
     if done is None or done.returncode != 0:
         return FinalizeBlock(

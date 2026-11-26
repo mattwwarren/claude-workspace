@@ -19,6 +19,11 @@ helper lives anywhere else in :mod:`cw.codex_finalize`.
 * :func:`check_mergeability` reads the post-push mergeability once; callers
   append their own note to its park. :func:`local_only_merge` makes a failed
   push of a post-push merge truthful.
+* :func:`apply_body_section` replaces (or appends) one cw-written ``## `` region
+  of a PR body in place; :func:`strip_cw_regions` removes every such region and
+  the sign-off block from a copy of a body, so the UI-evidence media check never
+  reads cw's own text (#3543). Both match a heading as a whole line and end a
+  region only at a heading line or a sign-off marker line.
 """
 
 from __future__ import annotations
@@ -37,6 +42,8 @@ from cw.gh import (
     github_pr_url,
     parse_pr_url,
 )
+from cw.review_adjudication import REVIEW_ADJUDICATION_HEADING
+from cw.review_signoff import END_MARKER, START_MARKER
 from cw.stage_verification.finalize_gates import check_branch
 from cw.stage_verification.finalize_result import (
     IMPL_NOT_PUSHED,
@@ -51,21 +58,25 @@ from cw.stage_verification.posted_text import redact_and_cap, redacted_tail
 from cw.stage_verification.push import push_and_verify_head
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 __all__ = [
     "NOTE_LINE_CAP",
+    "OVERRIDE_HEADING",
     "PROBE_UNAVAILABLE",
     "BoundPr",
     "DetectedPr",
-    "apply_override_section",
+    "apply_body_section",
     "bind_live_pr",
     "check_mergeability",
     "create_pr_for",
     "detect_branch_pr",
+    "heading_matches",
     "local_only_merge",
     "probe_default",
     "push_ahead",
+    "strip_cw_regions",
 ]
 
 PR_OPEN: Final = "OPEN"
@@ -82,8 +93,10 @@ _TAIL: Final = 500
 #: A park note is one line (this module's local-only-merge note and the semantic
 #: auto-resolve's); the default per-line cap would cut it.
 NOTE_LINE_CAP: Final = 600
-_OVERRIDE_HEADING: Final = "## Operator override"
-_NEXT_REGION: Final = re.compile(r"\n## |<!-- cw-review-signoff:")
+OVERRIDE_HEADING: Final = "## Operator override"
+#: A region ends at the next heading line or at a line that starts a sign-off
+#: marker; a marker quoted mid-line (in finding text) ends nothing.
+_NEXT_REGION: Final = re.compile(r"\n(?:## |[ \t]*<!-- cw-review-signoff:)")
 
 
 @dataclass(frozen=True)
@@ -311,21 +324,98 @@ def check_mergeability(
     return None, friction
 
 
-def apply_override_section(body: str, section: str) -> str:
-    """Replace (or append) the ``## Operator override`` region of *body*.
+def heading_matches(text: str, heading: str) -> Iterator[re.Match[str]]:
+    """Every whole-line occurrence of *heading* in *text*.
 
-    The region runs from its heading to the next ``\\n## ``, a
-    ``<!-- cw-review-signoff:`` marker, or the end of the body.
+    A substring would let an inline mention of a heading in model-written prose
+    start a region, so only a line that is the heading (plus trailing
+    whitespace, a CRLF included) matches.
+    """
+    return re.finditer(rf"^{re.escape(heading)}[ \t\r]*$", text, re.MULTILINE)
+
+
+def _region_end(text: str, after_heading: int) -> int:
+    """Where the region whose heading line ends at *after_heading* ends."""
+    found = _NEXT_REGION.search(text, after_heading)
+    return found.start() if found else len(text)
+
+
+def apply_body_section(body: str, section: str, *, heading: str) -> str:
+    """Replace (or append) the *heading* region of *body* with *section*.
+
+    The region runs from its heading line to the next heading line, a
+    ``<!-- cw-review-signoff:`` marker line, or the end of the body. A *section*
+    without the heading gets it prefixed. A non-blank tail is joined behind a
+    blank line and a region at the end keeps its closing newline, so
+    re-applying the same section is byte-stable.
     """
     block = section.strip()
-    if not block.startswith(_OVERRIDE_HEADING):
-        block = f"{_OVERRIDE_HEADING}\n\n{block}"
-    start = body.find(_OVERRIDE_HEADING)
-    if start < 0:
+    if not block.startswith(heading):
+        block = f"{heading}\n\n{block}"
+    match = next(heading_matches(body, heading), None)
+    if match is None:
         return f"{body.rstrip()}\n\n{block}\n"
-    rest = body[start + len(_OVERRIDE_HEADING) :]
-    found = _NEXT_REGION.search(rest)
-    end = start + len(_OVERRIDE_HEADING) + (found.start() if found else len(rest))
-    tail = body[end:]
-    joined = body[:start] + block
-    return joined + ("\n" + tail if tail and not tail.startswith("\n") else tail)
+    tail = body[_region_end(body, match.end()) :]
+    joined = body[: match.start()] + block
+    return joined + ("\n\n" + tail.lstrip() if tail.strip() else "\n")
+
+
+def _heading_spans(text: str, heading: str) -> list[tuple[int, int]]:
+    return [
+        (m.start(), _region_end(text, m.end())) for m in heading_matches(text, heading)
+    ]
+
+
+def _signoff_spans(text: str) -> list[tuple[int, int]]:
+    """Each sign-off block, with an unterminated start running to the end."""
+    spans: list[tuple[int, int]] = []
+    lines = text.splitlines(keepends=True)
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+    index = 0
+    while index < len(lines):
+        marker = lines[index].strip()
+        if marker == START_MARKER:
+            end = next(
+                (
+                    n
+                    for n in range(index + 1, len(lines))
+                    if lines[n].strip() == END_MARKER
+                ),
+                None,
+            )
+            stop = len(lines) - 1 if end is None else end
+            spans.append((offsets[index], offsets[stop + 1]))
+            index = stop + 1
+            continue
+        if marker == END_MARKER:
+            spans.append((offsets[index], offsets[index + 1]))
+        index += 1
+    return spans
+
+
+def strip_cw_regions(body: str) -> str:
+    """*body* without the regions cw itself writes into a PR body.
+
+    Removes every ``## Review adjudication`` region, every ``## Operator
+    override`` region and every sign-off block (a start marker with no end runs
+    to the end of the body; a lone end marker line is dropped alone). The result
+    feeds the UI-evidence media check only and is never written back to the PR.
+    All spans are collected on one LF-normalised text and deleted together, so
+    removing one region cannot shift another.
+    """
+    text = body.replace("\r\n", "\n")
+    spans = sorted(
+        _heading_spans(text, REVIEW_ADJUDICATION_HEADING)
+        + _heading_spans(text, OVERRIDE_HEADING)
+        + _signoff_spans(text)
+    )
+    kept: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        if start > cursor:
+            kept.append(text[cursor:start])
+        cursor = max(cursor, end)
+    kept.append(text[cursor:])
+    return "".join(kept)

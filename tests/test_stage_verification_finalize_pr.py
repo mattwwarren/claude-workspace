@@ -19,13 +19,15 @@ from unittest.mock import patch
 import pytest
 
 from cw.merge_probe import MergeProbe
+from cw.review_adjudication import REVIEW_ADJUDICATION_HEADING
 from cw.stage_verification import finalize_pr as _pr
 from cw.stage_verification.finalize_pr import (
     BEHIND_FRICTION,
+    OVERRIDE_HEADING,
     PROBE_UNAVAILABLE,
     BoundPr,
     DetectedPr,
-    apply_override_section,
+    apply_body_section,
     bind_live_pr,
     check_mergeability,
     create_pr_for,
@@ -33,6 +35,7 @@ from cw.stage_verification.finalize_pr import (
     local_only_merge,
     probe_default,
     push_ahead,
+    strip_cw_regions,
 )
 from cw.stage_verification.finalize_result import (
     IMPL_NOT_PUSHED,
@@ -629,39 +632,143 @@ class TestLocalOnlyMerge:
 # --- operator override section ------------------------------------------------
 
 
-class TestApplyOverrideSection:
+class TestApplyBodySection:
     SECTION = "## Operator override\n\nMUST_FIX waived by the operator.\n"
+    ADJ = "## Review adjudication\n\nAll clear.\n"
+
+    def _override(self, body: str, section: str | None = None) -> str:
+        return apply_body_section(
+            body, section or self.SECTION, heading=OVERRIDE_HEADING
+        )
+
+    def _adjudication(self, body: str, section: str | None = None) -> str:
+        return apply_body_section(
+            body, section or self.ADJ, heading=REVIEW_ADJUDICATION_HEADING
+        )
 
     def test_appends_when_the_body_has_no_region(self) -> None:
-        out = apply_override_section("Body text\n", self.SECTION)
+        out = self._override("Body text\n")
         assert out == f"Body text\n\n{self.SECTION}"
 
     def test_a_bare_section_gets_the_heading(self) -> None:
-        out = apply_override_section("Body\n", "waived\n")
+        out = self._override("Body\n", "waived\n")
         assert out == "Body\n\n## Operator override\n\nwaived\n"
 
     def test_replaces_the_region_up_to_the_next_heading(self) -> None:
         body = "Intro\n\n## Operator override\n\nold text\n\n## Testing\n\nran\n"
-        out = apply_override_section(body, self.SECTION)
+        out = self._override(body)
         assert "old text" not in out
         assert out.startswith("Intro\n\n## Operator override\n\nMUST_FIX waived")
-        assert out.endswith("\n## Testing\n\nran\n")
+        assert out.endswith("\n\n## Testing\n\nran\n")
         assert out.count("## Operator override") == 1
 
     def test_replaces_the_region_up_to_a_signoff_marker(self) -> None:
         body = "## Operator override\n\nold\n<!-- cw-review-signoff: abc -->\nsigned\n"
-        out = apply_override_section(body, self.SECTION)
+        out = self._override(body)
         assert "old" not in out
         assert "<!-- cw-review-signoff: abc -->\nsigned\n" in out
 
     def test_replaces_a_region_that_runs_to_the_end(self) -> None:
         body = "Intro\n\n## Operator override\n\nold\n"
-        out = apply_override_section(body, self.SECTION)
-        assert out == "Intro\n\n" + self.SECTION.rstrip("\n")
+        out = self._override(body)
+        assert out == "Intro\n\n" + self.SECTION
 
     def test_applying_twice_is_idempotent(self) -> None:
         body = "Intro\n\n## Testing\n\nran\n"
-        once = apply_override_section(body, self.SECTION)
-        twice = apply_override_section(once, self.SECTION)
+        once = self._override(body)
+        twice = self._override(once)
         assert twice.rstrip() == once.rstrip()
         assert twice.count("## Operator override") == 1
+
+    def test_the_adjudication_heading_is_replaced_in_place(self) -> None:
+        body = "Intro\n\n## Review adjudication\n\nold\n\n## Testing\n\nran\n"
+        out = self._adjudication(body)
+        assert out == f"Intro\n\n{self.ADJ.rstrip()}\n\n## Testing\n\nran\n"
+
+    def test_a_reapply_over_a_following_region_is_byte_stable(self) -> None:
+        body = f"Intro\n\n## Testing\n\nran\n\n{self.SECTION}"
+        once = self._adjudication(body)
+        assert self._adjudication(once) == once
+
+    def test_an_inline_mention_of_the_heading_starts_no_region(self) -> None:
+        body = "See ## Review adjudication below, not a heading.\n"
+        out = self._adjudication(body)
+        assert out.startswith(body.rstrip())
+        assert out.endswith(self.ADJ)
+        assert out.count("## Review adjudication") == 2
+
+    def test_a_crlf_heading_line_still_matches(self) -> None:
+        body = "Intro\r\n\r\n## Review adjudication\r\n\r\nold\r\n"
+        out = self._adjudication(body)
+        assert "old" not in out
+        assert out.count("## Review adjudication") == 1
+
+    def test_a_marker_quoted_mid_line_does_not_end_the_region(self) -> None:
+        body = (
+            "## Review adjudication\n\nquotes <!-- cw-review-signoff:end --> inline\n"
+            "and more finding text\n"
+        )
+        out = self._adjudication(body)
+        assert "more finding text" not in out
+        assert self._adjudication(out) == out
+
+
+class TestStripCwRegions:
+    START = "<!-- cw-review-signoff:start -->"
+    END = "<!-- cw-review-signoff:end -->"
+
+    def test_each_cw_region_is_removed_and_the_text_after_it_stays(self) -> None:
+        for region in (
+            "## Review adjudication\n\n<img src=x>\n",
+            "## Operator override\n\n<img src=x>\n",
+        ):
+            out = strip_cw_regions(f"Intro\n\n{region}\n## Testing\n\nran\n")
+            assert "<img" not in out
+            assert out.startswith("Intro\n")
+            assert "## Testing\n\nran\n" in out
+
+    def test_the_signoff_block_is_removed(self) -> None:
+        body = f"Intro\n\n{self.START}\n## Review sign-off\n<img>\n{self.END}\n"
+        out = strip_cw_regions(body)
+        assert "<img" not in out
+        assert out.startswith("Intro")
+
+    def test_every_occurrence_is_removed(self) -> None:
+        body = (
+            "A\n\n## Review adjudication\n\n<img 1>\n\n## Mid\n\nkeep\n\n"
+            "## Review adjudication\n\n<img 2>\n"
+        )
+        out = strip_cw_regions(body)
+        assert "<img" not in out
+        assert "keep" in out
+
+    def test_a_crlf_body_is_handled(self) -> None:
+        body = "A\r\n\r\n## Review adjudication\r\n\r\n<img>\r\n"
+        out = strip_cw_regions(body)
+        assert "<img" not in out
+        assert "\r" not in out
+
+    def test_an_inline_mention_of_a_heading_starts_no_region(self) -> None:
+        body = "see ## Review adjudication and ## Operator override <img>\n"
+        assert strip_cw_regions(body) == body
+
+    def test_a_mid_line_marker_quote_does_not_end_the_region(self) -> None:
+        body = (
+            "## Review adjudication\n\nquote <!-- cw-review-signoff:end --> x\n"
+            "<img later>\n"
+        )
+        assert "<img" not in strip_cw_regions(body)
+
+    def test_a_start_without_an_end_runs_to_the_end_of_the_body(self) -> None:
+        body = f"Intro\n{self.START}\n<img>\nmore\n"
+        assert strip_cw_regions(body) == "Intro\n"
+
+    def test_a_lone_end_marker_removes_only_its_line(self) -> None:
+        body = f"Intro\n{self.END}\n<img>\n"
+        assert strip_cw_regions(body) == "Intro\n<img>\n"
+
+    def test_the_marker_line_ends_an_adjudication_region(self) -> None:
+        body = (
+            f"## Review adjudication\n\nfinding\n{self.START}\nS\n{self.END}\nafter\n"
+        )
+        assert strip_cw_regions(body) == "\nafter\n"
