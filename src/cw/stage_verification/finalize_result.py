@@ -191,6 +191,24 @@ def compose_pr_title(title: str, ticket_id: str) -> str:
     return line[:room].rstrip() + suffix
 
 
+def with_closes_trailer(body: str, ticket_id: str) -> str:
+    """Lead the PR body with ``Closes #<id>`` for a GitHub (numeric) ticket id.
+
+    The line is prepended, not appended: a later ``apply_body_section`` region
+    runs to the next heading, so an appended line could be overwritten. A
+    non-numeric id, or a body that already carries the whole line
+    (case-insensitive, trailing CR or spaces allowed), is returned unchanged.
+    """
+    if not _NUMERIC_TICKET.fullmatch(ticket_id):
+        return body
+    existing = re.compile(
+        rf"^closes #{ticket_id}[ \t]*\r?$", re.IGNORECASE | re.MULTILINE
+    )
+    if existing.search(body):
+        return body
+    return f"Closes #{ticket_id}\n\n{body}"
+
+
 def _scope(facts: FinalizeFacts, tier: ScopeTier | None = None) -> dict[str, Any]:
     git = facts.git
     return {

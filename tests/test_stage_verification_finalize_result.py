@@ -504,3 +504,26 @@ class TestBlockerReasonSweep:
         # Those reasons come from ``_run.py`` through the codex constants.
         for module in _SWEPT_MODULES:
             assert not (_block_reasons(module) & _UNREGISTERED_BY_DESIGN)
+
+
+class TestWithClosesTrailer:
+    """``with_closes_trailer`` leads a created PR body with ``Closes #<n>`` (#3544)."""
+
+    def test_a_numeric_ticket_gets_the_line_first(self) -> None:
+        body = result_module.with_closes_trailer("## Summary\n\nDone.", "42")
+        assert body == "Closes #42\n\n## Summary\n\nDone."
+
+    def test_a_non_numeric_ticket_is_unchanged(self) -> None:
+        body = "## Summary\n\nDone."
+        assert result_module.with_closes_trailer(body, "ENG-1") == body
+
+    def test_an_existing_line_is_not_duplicated(self) -> None:
+        for variant in ("closes #42", "CLOSES #42", "Closes #42\r\n", "Closes #42  \n"):
+            body = f"{variant}\n\n## Summary"
+            assert result_module.with_closes_trailer(body, "42") == body
+
+    def test_a_longer_number_is_not_a_match(self) -> None:
+        body = "Closes #420\n\n## Summary"
+        assert result_module.with_closes_trailer(body, "42") == (
+            "Closes #42\n\nCloses #420\n\n## Summary"
+        )

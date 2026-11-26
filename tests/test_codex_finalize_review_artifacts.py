@@ -138,6 +138,37 @@ def test_a_create_run_copies_the_adjudication_and_writes_one_edit(
     assert _cw_calls(h) == list(_CLIS)
 
 
+def test_the_closes_line_precedes_every_cw_section(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    h.set_cw("review signoff render", _signoff_block)
+    write_deferred_findings(h.worktree, _defer())
+    h.turn(finalize_document(pr_body=BODY))
+    result = h.run()
+    assert result.status == "shipped"
+    (created,) = h.created()
+    assert created.body_file is not None
+    assert created.body_file.startswith(f"Closes #{TICKET}\n\n")
+    assert created.body_file.count(REVIEW_ADJUDICATION_HEADING) == 1
+
+
+def test_the_one_edit_keeps_the_closes_line_first(
+    harness: Callable[..., Harness],
+) -> None:
+    h = harness()
+    h.set_cw("review signoff render", _signoff_block)
+    write_deferred_findings(h.worktree, _defer())
+    h.turn(finalize_document(pr_body=BODY))
+    # The default Step 4d read returns BODY with no Closes line; override it so
+    # the edit path reads back a body already led by the line.
+    _view_body(h, f"Closes #{TICKET}\n\n{BODY}")
+    h.run()
+    (edit,) = _edits(h)
+    assert edit.startswith(f"Closes #{TICKET}\n\n")
+    assert edit.count(f"Closes #{TICKET}") == 1
+
+
 def test_a_ci_deferred_park_keeps_the_adjudication_in_the_created_body(
     harness: Callable[..., Harness], tmp_path: Path
 ) -> None:
