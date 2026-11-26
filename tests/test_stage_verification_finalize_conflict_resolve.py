@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from cw.merge_probe import MergeTreeResult
 from cw.stage_verification import finalize_conflict_resolve as resolve
 from cw.stage_verification.finalize_ci_evidence import CiContext
 from cw.stage_verification.finalize_gates import (
@@ -920,6 +921,46 @@ def test_an_ignored_file_where_base_needs_a_directory_blocks_the_merge(
     _assert_refused(repo, outcome, "foo")
     assert (repo.worktree / "foo").read_text(encoding="utf-8") == "mine\n"
     assert repo.head() == pre
+
+
+def test_an_ignored_file_a_directory_rename_relocates_onto_blocks_the_merge(
+    repo: Repo,
+) -> None:
+    """Base renames ``old/`` to ``new/``; the branch's ``old/c`` would land on
+    an ignored ``new/c``, which no base-side path names."""
+    commit_tracked_file(repo.worktree, "old/a", "a\n")
+    git_in(repo.worktree, "push", "origin", f"{_BRANCH}:main")
+    _ignore_and_push(repo, "new/c")
+    commit_tracked_file(repo.worktree, "old/c", "branch\n")
+    git_in(repo.worktree, "push", "origin", _BRANCH)
+    repo.base_adds("other.py")
+    git_in(repo.side, "mv", "old", "new")
+    git_in(repo.side, "commit", "-m", "rename old to new")
+    git_in(repo.side, "push", "origin", "main")
+    (repo.worktree / "new").mkdir()
+    (repo.worktree / "new" / "c").write_text("mine\n", encoding="utf-8")
+    pre = repo.head()
+    outcome = _resolve(repo, run_gates=_never_gates)
+    _assert_refused(repo, outcome, "new/c")
+    assert (repo.worktree / "new" / "c").read_text(encoding="utf-8") == "mine\n"
+    assert repo.head() == pre
+
+
+def test_an_unpredictable_merge_result_is_not_attempted(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo.base_adds("other.py")
+    monkeypatch.setattr(
+        resolve,
+        "merge_tree",
+        lambda *_a, **_k: MergeTreeResult("unavailable", None, (), "git vanished"),
+    )
+    outcome = _resolve(repo, run_gates=_never_gates)
+    assert outcome.block is not None
+    assert "not attempted: the paths origin/main changes could not be listed" in (
+        outcome.block.details
+    )
+    assert not repo.mid_merge()
 
 
 @pytest.mark.skipif(sys.platform == "darwin", reason="APFS rejects non-UTF-8")

@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Final
 
 from cw._git import LOCAL_GIT_TIMEOUT_SECONDS, git_clean_env, git_output, run_git
 from cw._text import redact
+from cw.merge_probe import merge_tree
 from cw.stage_verification.baseline import unmerged_paths
 from cw.stage_verification.finalize_gates import check_branch, has_tracked_changes
 from cw.stage_verification.finalize_pr import (
@@ -187,29 +188,39 @@ def _clobbered(worktree: Path, path: str, tracked: frozenset[str]) -> str | None
     return None
 
 
+def _merge_writes(worktree: Path, base_branch: str) -> list[str] | None:
+    """Every path a merge of ``origin/<base>`` may write; ``None`` if unknown.
+
+    The base side's changes since the merge base, plus every path that differs
+    between HEAD and the tree ``git merge-tree`` says the merge writes. Only the
+    second names a path a directory rename moves a branch-side file to.
+    """
+    base = f"origin/{base_branch}"
+    diff = ["diff", "-z", "--name-only", "--no-renames"]
+    merged = merge_tree(worktree, "HEAD", base)
+    if merged.tree is None:
+        return None
+    changed = _z_paths(worktree, [*diff, f"HEAD...{base}"])
+    written = _z_paths(worktree, [*diff, "HEAD", merged.tree])
+    return list(dict.fromkeys([*changed, *written]))
+
+
 def _untracked_clobbers(worktree: Path, base_branch: str) -> list[str] | None:
     """Untracked (or ignored) entries a merge of ``origin/<base>`` would write over.
 
-    Covers every path the base side changed since the merge base, not only
-    additions, and every parent of it that is not a directory. ``git merge``
-    silently overwrites an ignored file, and ``merge --abort`` or a later revert
-    would delete it. ``None`` when git could not answer (fail closed).
+    Covers every path :func:`_merge_writes` names, and every parent of it that
+    is not a directory. ``git merge`` silently overwrites an ignored file, and
+    ``merge --abort`` or a later revert would delete it. ``None`` when git could
+    not answer (fail closed).
     """
     try:
-        changed = _z_paths(
-            worktree,
-            [
-                "diff",
-                "-z",
-                "--name-only",
-                "--no-renames",
-                f"HEAD...origin/{base_branch}",
-            ],
-        )
+        writes = _merge_writes(worktree, base_branch)
         tracked = frozenset(_z_paths(worktree, ["ls-files", "-z"]))
     except (subprocess.CalledProcessError, OSError):
         return None
-    found = (_clobbered(worktree, path, tracked) for path in changed)
+    if writes is None:
+        return None
+    found = (_clobbered(worktree, path, tracked) for path in writes)
     return list(dict.fromkeys(name for name in found if name is not None))
 
 
