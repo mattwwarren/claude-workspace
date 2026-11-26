@@ -240,31 +240,94 @@ def test_a_missing_tool_parks_rather_than_skips(
     _assert_no_gate_dirs(gate_root, h)
 
 
+@pytest.mark.parametrize(
+    ("gates", "seed", "label", "start_of_details"),
+    [
+        (
+            (MYPY_GATE,),
+            None,
+            "impl-gate4-mypy",
+            f"`uv run mypy {' '.join(_GATE4_MYPY_ARGV[2:])} {WIDGET}` could not be run",
+        ),
+        (
+            (RUFF_GATE,),
+            None,
+            "impl-gate4-ruff",
+            f"`uv run ruff check --force-exclude {WIDGET}` could not be run",
+        ),
+        (
+            (MYPY_GATE,),
+            (CONFIG, "tests:\n  prepare: make deps\n"),
+            "impl-gate4-prepare",
+            "tests.prepare could not be run",
+        ),
+        (
+            (BASELINE_GATE,),
+            (BASELINE_FILE, "old entry\n"),
+            "impl-gate4-mypy-baseline-0",
+            f"`{BASELINE_CMD}` could not be run",
+        ),
+    ],
+    ids=["mypy", "ruff", "prepare", "baseline"],
+)
 def test_an_unavailable_command_parks(
+    harness: Callable[..., Harness],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    gate_root: Path,
+    gates: tuple[tuple[str, str, float], ...],
+    seed: tuple[str, str] | None,
+    label: str,
+    start_of_details: str,
+) -> None:
+    h = harness(gates=gates)
+    if seed is not None:
+        _seed_main(h, *seed)
+    _uv(tmp_path, monkeypatch)
+    h.turn()
+    start = h.head()
+    labels: list[str] = []
+
+    def _unavailable(plan: Any, **_kwargs: Any) -> GateFailure:
+        labels.append(plan.gates[0].name)
+        return GateFailure(
+            kind="unavailable",
+            gate=plan.gates[0].name,
+            command="x",
+            exit_code=None,
+            seconds=0.0,
+            output="",
+            why="no usable scratch root",
+        )
+
+    with patch("cw.codex_impl._type_gate.run_cycle_gates", _unavailable):
+        details = _assert_gate4_park(h.run(), h, start)
+
+    assert labels == [label]
+    expected = f"{GATE4_PREFIX}{start_of_details}: no usable scratch root"
+    assert details.startswith(expected)
+    _assert_no_gate_dirs(gate_root, h)
+
+
+def test_a_git_failure_while_measuring_parks_gate_setup(
     harness: Callable[..., Harness],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     gate_root: Path,
 ) -> None:
     h = harness(gates=(MYPY_GATE,))
-    _uv(tmp_path, monkeypatch)
+    uv = _uv(tmp_path, monkeypatch)
     h.turn()
     start = h.head()
-    unavailable = GateFailure(
-        kind="unavailable",
-        gate="impl-gate4-mypy",
-        command="x",
-        exit_code=None,
-        seconds=0.0,
-        output="",
-        why="no usable scratch root",
+    failure = subprocess.CalledProcessError(
+        128, ["git", "merge-base"], stderr="fatal: no merge base"
     )
 
-    with patch("cw.codex_impl._type_gate.run_cycle_gates", return_value=unavailable):
+    with patch("cw.codex_impl._type_gate.gate_fork_point", side_effect=failure):
         details = _assert_gate4_park(h.run(), h, start)
 
-    assert "could not be run: no usable scratch root" in details
-    assert "uv run mypy --no-pretty" in details
+    assert details == f"{GATE4_PREFIX}gate setup: fatal: no merge base"
+    assert _gate4_calls(uv.calls) == []
     _assert_no_gate_dirs(gate_root, h)
 
 

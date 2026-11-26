@@ -29,6 +29,7 @@ from cw.stage_verification import impl_type_gate as gate
 from cw.stage_verification.impl_type_gate import (
     DEFERRED_UNPARSEABLE_FRICTION,
     NO_BASELINE_RULE,
+    RECORD_FAILED_FRICTION,
     MypyBaseline,
     MypyError,
     VerdictKind,
@@ -103,6 +104,8 @@ _UNREPRODUCIBLE = gate.UvRun(options=None)
         ("uv run pytest", "mypy", False, None),
         ("uv run mypy --baseline-file .mypy/baseline.json src/", "mypy", True, _UV),
         ("cat .mypy/notes", "mypy", False, None),
+        # Named in the text, but no shell word is the tool.
+        ('uv run mypy""x', "mypy", True, "other"),
         ("poetry run mypy src/", "mypy", True, "other"),
     ],
 )
@@ -128,6 +131,7 @@ def test_declares_tool_and_tool_launch(
         ("uv run mypy --extra not-uv .", ()),
         ("echo ok && uv run mypy .", ()),
         ("FOO=1 true && uv run mypy .", ()),
+        ("(\nuv run mypy .\n)", ()),
     ],
 )
 def test_tool_launch_carries_the_environment_options(
@@ -621,6 +625,34 @@ def test_record_leaves_a_malformed_artifact_untouched(tmp_path: Path) -> None:
 
     assert friction == [DEFERRED_UNPARSEABLE_FRICTION]
     assert path.read_text(encoding="utf-8") == "not the artifact\n"
+
+
+def test_record_with_an_unreadable_artifact_is_record_failed(
+    tmp_path: Path,
+) -> None:
+    path = _artifact(tmp_path)
+    path.mkdir(parents=True)
+    errors = gate.parse_mypy_errors(_ERRORS)
+
+    friction = gate.record_baselined_errors(path, errors, {"main.py"})
+
+    assert friction == [RECORD_FAILED_FRICTION]
+
+
+def test_record_with_a_failing_write_is_record_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _fail(_path: Path, _text: str) -> None:
+        msg = "disk full"
+        raise OSError(msg)
+
+    monkeypatch.setattr(gate, "atomic_write_text", _fail)
+    errors = gate.parse_mypy_errors(_ERRORS)
+
+    friction = gate.record_baselined_errors(_artifact(tmp_path), errors, {"main.py"})
+
+    assert friction == [RECORD_FAILED_FRICTION]
+    assert not _artifact(tmp_path).exists()
 
 
 def test_record_caps_the_error_list(tmp_path: Path) -> None:
