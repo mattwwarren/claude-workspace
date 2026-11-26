@@ -17,6 +17,7 @@ import cw.stage_verification.finalize_gates as gates_module
 import cw.stage_verification.finalize_merge_gate as merge_gate_module
 import cw.stage_verification.finalize_pr as pr_module
 import cw.stage_verification.finalize_result as result_module
+import cw.stage_verification.finalize_review_artifacts as artifacts_module
 from cw.auto_dev_result import AutoDevResult
 from cw.auto_dev_result.parse import (
     BLOCKER_REASON_NO_RESULT_EMITTED,
@@ -33,6 +34,8 @@ from cw.codex_review import (
 from cw.dev_queue.gates import FINALIZE_PARK_STAGE_REACHED
 from cw.stage_verification.finalize_result import (
     AGENT_BLOCK,
+    ATTACH_UI_EVIDENCE,
+    ATTACH_UI_EVIDENCE_AND_ARM,
     AUTOMERGE_NOT_ARMED,
     CODEX_MUST_FIX_FINDINGS,
     IMPL_NOT_PUSHED,
@@ -43,8 +46,11 @@ from cw.stage_verification.finalize_result import (
     PUSH_AUTH_FAILED,
     REQUEUE_STAGE_FINALIZE,
     REQUEUE_STAGE_REVIEW,
+    REVIEW_DEBT_UNFILED,
     SCOPE_TIER_UNRESOLVABLE,
     STAGE4_MUST_FIX_OVERRIDE,
+    STAGE4_REVIEW_DEBT,
+    UI_EVIDENCE_ON_ARMED_PR,
     WAIT_FOR_CI,
     FinalizeBlock,
     FinalizeFacts,
@@ -177,6 +183,31 @@ class TestShipped:
         }
         assert payload["next_actions"] == [WAIT_FOR_CI]
         assert payload["blocker"] is None
+
+    @pytest.mark.parametrize(
+        "extra", [(ATTACH_UI_EVIDENCE_AND_ARM,), (ATTACH_UI_EVIDENCE,)]
+    )
+    def test_extra_actions_follow_wait_for_ci(self, extra: tuple[str, ...]) -> None:
+        payload = finalize_shipped(
+            _facts(),
+            pr_number=7,
+            pr_url=_PR_URL,
+            auto_merge=False,
+            base="main",
+            extra_actions=extra,
+        )
+        assert payload["next_actions"] == [WAIT_FOR_CI, *extra]
+        AutoDevResult.model_validate(payload)
+
+    def test_the_ui_hold_vocabulary_is_pinned(self) -> None:
+        assert ATTACH_UI_EVIDENCE_AND_ARM == "attach_ui_evidence_and_enable_automerge"
+        assert ATTACH_UI_EVIDENCE == "attach_ui_evidence"
+        assert UI_EVIDENCE_ON_ARMED_PR == "ui_evidence_missing_on_armed_pr"
+
+    def test_the_review_debt_block_vocabulary_is_registered(self) -> None:
+        assert REVIEW_DEBT_UNFILED == "review_debt_unfiled"
+        assert REVIEW_DEBT_UNFILED in KNOWN_BLOCKER_REASONS
+        assert STAGE4_REVIEW_DEBT == "stage4_review_debt"
 
     def test_shipped_stamps_cw_measured_facts(self) -> None:
         payload = finalize_shipped(
@@ -410,6 +441,7 @@ _SWEPT_MODULES = (
     pr_module,
     arm_module,
     merge_gate_module,
+    artifacts_module,
 )
 # Reasons that reach a block through a variable, not a literal call argument.
 _DYNAMIC_REASONS = frozenset({PUSH_AUTH_FAILED, IMPL_NOT_PUSHED})

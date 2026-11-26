@@ -49,6 +49,8 @@ _EXPECTED_MODULES = frozenset(
         "finalize_merge_gate",
         "finalize_pr",
         "finalize_result",
+        "finalize_review_artifacts",
+        "finalize_ui_evidence",
         "growth",
         "impl_block",
         "impl_feedback",
@@ -216,7 +218,7 @@ def _package_modules() -> list[Path]:
 def test_module_set_is_pinned() -> None:
     names = {_short_name(p, _PACKAGE) for p in _package_modules()}
     assert names == _EXPECTED_MODULES
-    assert len(names) == 27
+    assert len(names) == 29
 
 
 @pytest.mark.parametrize("path", _package_modules(), ids=lambda p: p.stem)

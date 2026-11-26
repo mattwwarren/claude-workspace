@@ -392,6 +392,10 @@ def test_finalize_addendum_overrides_the_remaining_claude_machinery() -> None:
         "the post-push mergeability check",
         "the conflict-resolution round and the semantic auto-resolve",
         "the adopted draft PR `ready` step",
+        "the UI-evidence gate, the review debt re-file and the debt-ticket PR link",
+        "the Review adjudication and Review sign-off sections of the PR body",
+        "never write that section yourself",
+        "The finalize review-findings comment does not apply here",
         "the sentinel and every stage event",
         "leave them alone",
         "overrides anything above that conflicts with it",
@@ -399,7 +403,7 @@ def test_finalize_addendum_overrides_the_remaining_claude_machinery() -> None:
         ".claude/commands/auto-dev.md",
         "are not available in this turn",
         "is deferred",
-        "pr_title, pr_body, adjudication_section and override_section",
+        "pr_title, pr_body and override_section",
     ):
         assert needle in addendum, needle
     # The PR-title rules finalize.compose-pr-title-in-parent would have rendered.
@@ -409,6 +413,9 @@ def test_finalize_addendum_overrides_the_remaining_claude_machinery() -> None:
     deferred = addendum.split("Their machinery", 1)[1].split("do not improvise", 1)[0]
     assert "conflict-resolution round" not in deferred
     assert "semantic auto-resolve" not in deferred
+    # #3543: the review artifacts are cw's now, so only the CI wait is deferred.
+    assert "review debt re-file" not in deferred
+    assert "review-findings comment" not in deferred
     for token in CLAUDE_ONLY_DENYLIST:
         assert token not in addendum, token
 
@@ -561,23 +568,19 @@ def test_rfc_0017_members_are_skipped_and_pinned() -> None:
         ):
             deferred.add(element_id)
     assert render_module.RFC_0017_TICKET == 3216
-    # #3216 implemented five members on codex and retargeted the two finalize
-    # members to the finalize review-debt follow-up (#3543); all three RFC 0017
-    # deferrals stay out of prompts.
+    # #3543 implemented the two finalize members on codex: only the review-side
+    # review-debt-filing cell stays deferred to #3216 and out of prompts.
     assert deferred == {"review.review-debt-filing"}
-    assert render_module._CODEX_FINALIZE_TICKET == 3543
-    for element_id in ("finalize.review-sign-off", "finalize.gate-review-debt-re-file"):
-        cell = manifest.elements[element_id].cells[CODEX_BACKEND]
-        assert isinstance(cell, DeferredDisposition)
-        assert cell.ref.number == render_module._CODEX_FINALIZE_TICKET
     rendered = {
         block.element_id
         for stage in _STAGES
         for block in stage_blocks(stage, CODEX_BACKEND, docs_root=_COMMANDS_ROOT)
     }
     assert not rendered & deferred
-    assert "finalize.review-sign-off" not in rendered
-    assert "finalize.gate-review-debt-re-file" not in rendered
+    assert "finalize.review-sign-off" in rendered
+    assert "finalize.gate-review-debt-re-file" in rendered
+    # The review-findings comment is not-applicable on codex FINALIZE.
+    assert "finalize.finalize-review-findings-comment" not in rendered
 
 
 def test_intake_ids_are_folded_into_the_plan_needed_set() -> None:
@@ -605,29 +608,7 @@ def test_a_3216_deferral_skips_the_block() -> None:
         b.element_id
         for b in stage_blocks("finalize", CODEX_BACKEND, docs_root=_COMMANDS_ROOT)
     ]
-    assert "finalize.review-sign-off" not in default
-
-
-def test_only_the_rfc_0017_members_skip_on_the_finalize_follow_up_ticket() -> None:
-    """A #3543 deferral skips the block only for the two RFC 0017 members."""
-    ticket = render_module._CODEX_FINALIZE_TICKET
-    cell = {"disposition": "deferred", "ref": {"kind": "ticket", "number": ticket}}
-    manifest = _manifest_variant(
-        **{
-            "finalize.review-sign-off": cell,
-            "finalize.gate-review-debt-re-file": cell,
-            "finalize.link-debt-tickets-to-pr": cell,
-        }
-    )
-    ids = {
-        b.element_id
-        for b in stage_blocks(
-            "finalize", CODEX_BACKEND, docs_root=_COMMANDS_ROOT, manifest=manifest
-        )
-    }
-    assert "finalize.review-sign-off" not in ids
-    assert "finalize.gate-review-debt-re-file" not in ids
-    assert "finalize.link-debt-tickets-to-pr" in ids
+    assert "finalize.review-sign-off" in default
 
 
 def test_not_applicable_cell_drops_the_block() -> None:

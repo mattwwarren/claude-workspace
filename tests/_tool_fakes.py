@@ -1715,7 +1715,7 @@ def argv_has(*tokens: str) -> CodexMatcher:
 
 
 def finalize_document(**overrides: object) -> str:
-    """The FINALIZE turn's strict four-field ``-o`` document, as JSON text.
+    """The FINALIZE turn's strict three-field ``-o`` document, as JSON text.
 
     The defaults are a valid document; *overrides* replace fields (an extra
     key builds the strict-schema violation).
@@ -1723,7 +1723,6 @@ def finalize_document(**overrides: object) -> str:
     document: dict[str, object] = {
         "pr_title": "Add the widget",
         "pr_body": "## Summary\n\nAdds the widget.\n",
-        "adjudication_section": "",
         "override_section": "",
     }
     document.update(overrides)
@@ -1853,16 +1852,22 @@ def stub_prep_pr_finalize(
     return ScriptStub(script, calls)
 
 
+#: One scripted ``FakeCwCli`` reply: a :class:`GhReply`, ``None`` (the CLI could
+#: not finish), or a callable that sees the args and answers either.
+CwReply = GhReply | None | Callable[[list[str]], GhReply | None]
+
+
 class FakeCwCli:
     """In-process ``run_cw_cli`` double: scripted replies keyed by argv prefix.
 
     *replies* maps the space-joined leading args (``"review check-approval"``)
-    to a :class:`GhReply`, ``None`` (the CLI could not finish) or a list of
-    those, consumed in order with the last one repeating. The longest matching
-    prefix wins; an unmatched call raises so a test never runs the real CLI.
+    to a :class:`GhReply`, ``None`` (the CLI could not finish), a callable
+    taking the args and returning either, or a list of those, consumed in order
+    with the last one repeating. The longest matching prefix wins; an unmatched
+    call raises so a test never runs the real CLI.
     """
 
-    def __init__(self, replies: Mapping[str, GhReply | None | list[GhReply | None]]):
+    def __init__(self, replies: Mapping[str, CwReply | list[CwReply]]):
         self._replies = {
             key: list(value) if isinstance(value, list) else [value]
             for key, value in replies.items()
@@ -1882,7 +1887,8 @@ class FakeCwCli:
             msg = f"no scripted cw CLI reply for {line!r}"
             raise AssertionError(msg)
         queue = self._replies[max(keys, key=len)]
-        reply = queue.pop(0) if len(queue) > 1 else queue[0]
+        scripted = queue.pop(0) if len(queue) > 1 else queue[0]
+        reply = scripted(list(args)) if callable(scripted) else scripted
         if reply is None:
             return None
         return subprocess.CompletedProcess(
@@ -1893,15 +1899,38 @@ class FakeCwCli:
         )
 
 
+def _flag_text(args: list[str], flag: str) -> str:
+    return Path(args[args.index(flag) + 1]).read_text(encoding="utf-8")
+
+
+def signoff_render_echo(args: list[str]) -> GhReply:
+    """``cw review signoff render`` for a client that has not opted in.
+
+    Mirrors the real CLI: it reads ``--body-file`` and ``--current-body-file``
+    and answers exit 3 with nothing printed when they match (ignoring CRLF and
+    trailing newlines), else exit 0 with the ``--body-file`` text on stdout.
+    """
+    body = _flag_text(args, "--body-file")
+    current = _flag_text(args, "--current-body-file")
+
+    def _same(text: str) -> str:
+        return text.replace("\r\n", "\n").rstrip("\n")
+
+    if _same(body) == _same(current):
+        return GhReply(3, "", "")
+    return GhReply(0, body, "")
+
+
 _CW_CLI_TARGETS = (
     "cw.stage_verification.finalize_gates.run_cw_cli",
     "cw.stage_verification.finalize_merge_gate.run_cw_cli",
+    "cw.stage_verification.finalize_review_artifacts.run_cw_cli",
 )
 
 
 def stub_cw_cli(
     monkeypatch: pytest.MonkeyPatch,
-    replies: Mapping[str, GhReply | None | list[GhReply | None]],
+    replies: Mapping[str, CwReply | list[CwReply]],
 ) -> FakeCwCli:
     """Replace ``run_cw_cli`` (every importing module) with a :class:`FakeCwCli`."""
     fake = FakeCwCli(replies)

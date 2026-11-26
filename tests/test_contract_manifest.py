@@ -1026,7 +1026,8 @@ _RFC_0017_A4_MEMBERS = (
     "review.fourth-trigger-review-engine-modified-park",
     "review.fifth-trigger-review-confirm-must-fix-park",
 )
-#: The finalize members, retargeted to the finalize review-debt follow-up (#3543).
+#: The finalize members, implemented on codex by the review-artifact parity
+#: ticket (#3543); opencode fails closed on the pre-flight guard.
 _RFC_0017_FINALIZE_MEMBERS = (
     "finalize.gate-review-debt-re-file",
     "finalize.review-sign-off",
@@ -1066,7 +1067,7 @@ _CODEX_STAGE_TICKETS: dict[str, int] = {}
 #: it lands. Its finalize-stage cells are implemented,
 #: not-applicable, or deferred to one of its three follow-ups.
 _C3_TICKET = 3062
-_CODEX_FINALIZE_FOLLOW_UPS = frozenset({3543, 3544})
+_CODEX_FINALIZE_FOLLOW_UPS = frozenset({3544})
 #: The C1 ticket (#3060, codex PLAN executor); no cell may defer to it once it
 #: lands. Its plan-stage cells are implemented, not-applicable,
 #: or deferred to one of its follow-ups: #3912 (the Stage-0 dependency check) and
@@ -1345,12 +1346,13 @@ def test_rfc_0017_member_cells(tmp_path: Path) -> None:
         assert opencode.ref == _PREFLIGHT_REF, element_id
     for element_id in _RFC_0017_FINALIZE_MEMBERS:
         codex = _real_cell(element_id, CODEX_BACKEND)
-        assert isinstance(codex, DeferredDisposition), element_id
-        assert codex.ref == TicketRef(kind="ticket", number=3543)
+        assert isinstance(codex, ImplementedDisposition), element_id
+        assert isinstance(codex.ref, CodeRef), element_id
+        assert resolve(codex.ref) is None, element_id
         opencode = _real_cell(element_id, OPENCODE_BACKEND)
         assert isinstance(opencode, FailsClosedDisposition), element_id
-        assert opencode.guard_pending
-        assert opencode.ref == TicketRef(kind="ticket", number=3543)
+        assert not opencode.guard_pending, element_id
+        assert opencode.ref == _PREFLIGHT_REF, element_id
     debt = _real_cell("review.review-debt-filing", CODEX_BACKEND)
     assert isinstance(debt, DeferredDisposition)
     assert debt.ref == TicketRef(kind="ticket", number=3216)
@@ -1906,11 +1908,31 @@ _C3_CODE_CELLS = {
         "src/cw/stage_verification/finalize_gates.py",
         "run_finalize_quality_gates",
     ),
+    "finalize.append-review-adjudication-to-pr": (
+        "src/cw/stage_verification/finalize_review_artifacts.py",
+        "write_pr_body",
+    ),
+    "finalize.review-sign-off": (
+        "src/cw/stage_verification/finalize_review_artifacts.py",
+        "render_signoff",
+    ),
+    "finalize.gate-review-debt-re-file": (
+        "src/cw/stage_verification/finalize_review_artifacts.py",
+        "run_debt_refile",
+    ),
+    "finalize.link-debt-tickets-to-pr": (
+        "src/cw/stage_verification/finalize_review_artifacts.py",
+        "link_debt_tickets",
+    ),
+    "finalize.gate-ui-evidence": (
+        "src/cw/stage_verification/finalize_ui_evidence.py",
+        "check_ui_evidence",
+    ),
 }
 
 
 def test_codex_finalize_code_cell_table_is_exactly_the_code_cells() -> None:
-    """The 42 implemented codex finalize code cells, no others."""
+    """The 47 implemented codex finalize code cells, no others."""
     code_cells = {
         element_id
         for element_id, element in _manifest().elements.items()
@@ -1921,9 +1943,9 @@ def test_codex_finalize_code_cell_table_is_exactly_the_code_cells() -> None:
         )
     }
     assert code_cells == set(_C3_CODE_CELLS)
-    assert len(_C3_CODE_CELLS) == 42
+    assert len(_C3_CODE_CELLS) == 47
     implemented = set(elements_with(CODEX_BACKEND, "implemented"))
-    assert len(implemented & set(_C3_CODE_CELLS)) == 42
+    assert len(implemented & set(_C3_CODE_CELLS)) == 47
 
 
 @pytest.mark.parametrize("element_id", sorted(_C3_CODE_CELLS))
@@ -1947,7 +1969,7 @@ def test_codex_finalize_follow_up_cells_cover_the_follow_up_tickets() -> None:
         if isinstance(cell, DeferredDisposition):
             by_ticket[cell.ref.number] = by_ticket.get(cell.ref.number, 0) + 1
     assert set(by_ticket) == _CODEX_FINALIZE_FOLLOW_UPS
-    assert sum(by_ticket.values()) == 16
+    assert sum(by_ticket.values()) == 2
 
 
 def test_no_codex_cell_defers_to_3542() -> None:
@@ -1957,6 +1979,17 @@ def test_no_codex_cell_defers_to_3542() -> None:
         for element_id, element in _manifest().elements.items()
         if isinstance(element.cells[CODEX_BACKEND], DeferredDisposition)
         and element.cells[CODEX_BACKEND].ref.number == 3542
+    ]
+    assert deferred == []
+
+
+def test_no_codex_cell_defers_to_3543() -> None:
+    """#3543 closed the codex FINALIZE review-artifact cells."""
+    deferred = [
+        element_id
+        for element_id, element in _manifest().elements.items()
+        if isinstance(element.cells[CODEX_BACKEND], DeferredDisposition)
+        and element.cells[CODEX_BACKEND].ref.number == 3543
     ]
     assert deferred == []
 
@@ -2007,9 +2040,9 @@ def test_codex_finalize_cell_counts() -> None:
             assert not isinstance(cell, str), element_id
             counts[cell.disposition] = counts.get(cell.disposition, 0) + 1
     assert counts == {
-        "implemented": 42,
-        "not-applicable": 33,
-        "deferred": 16,
+        "implemented": 47,
+        "not-applicable": 42,
+        "deferred": 2,
     }
 
 
@@ -2402,8 +2435,6 @@ def test_opencode_finalize_stage_cells_fail_closed_on_the_guard() -> None:
     checked = 0
     for element_id, element in _manifest().elements.items():
         if scope_stage(element_id, OPENCODE_BACKEND) != "finalize":
-            continue
-        if element_id in _RFC_0017_FINALIZE_MEMBERS:
             continue
         cell = element.cells[OPENCODE_BACKEND]
         assert not isinstance(cell, str), element_id

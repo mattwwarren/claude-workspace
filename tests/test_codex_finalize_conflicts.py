@@ -36,6 +36,7 @@ from tests._tool_fakes import (
 )
 from tests.test_codex_finalize_run import (
     _CLEAN,
+    BODY,
     BRANCH,
     FINALIZE_TURN,
     PR_NUMBER,
@@ -69,6 +70,14 @@ def _script_head(h: Harness, head: str) -> None:
     """Re-script every gh read that names the PR head."""
     h.head = head
     h.gh.reply("pr", "view", PR_URL, "--json", _BIND, stdout=_view(headRefOid=head))
+    h.gh.reply(
+        "pr",
+        "view",
+        PR_URL,
+        "--json",
+        "body,headRefOid",
+        stdout=json.dumps({"body": BODY, "headRefOid": head}),
+    )
     h.gh.reply(
         "pr",
         "view",

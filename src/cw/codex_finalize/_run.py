@@ -12,11 +12,15 @@ returns the claimed row to PENDING. The ordered flow:
    ``pr_already_terminal``), with the live-identity bind on a found PR.
 3. Step 4.0 / 4.0b, the fence.
 4. Create path: the merge gate, the quality gates, the default-branch probe,
-   the ahead-push, the one read-only turn, ``gh pr create`` and the bind.
-   Reuse path: the quality gates and, only when overridden, the turn and the
-   ``## Operator override`` body edit.
-5. Mergeability, the fence again (immediately before the arm), the seam
-   check, the arm and the verification.
+   the ahead-push, the one read-only turn, ``gh pr create`` (its body already
+   carries the adjudication copied from the deferred-findings artifact and the
+   override) and the bind. Reuse path: the quality gates and, only when
+   overridden, the turn that writes the override section.
+5. Mergeability, then Step 4d (``run_review_artifacts``: the review-debt
+   re-file, the UI-evidence gate and the one PR-body write of adjudication,
+   override and sign-off, then the debt-ticket link), the fence again
+   (immediately before the arm), the seam check, the arm and the verification.
+   A UI-evidence hold skips the arm and reads the PR's armed state instead.
 6. Stage events, the cw-stamped sentinel through the door, the PR-link post
    and ``session.completed``.
 
@@ -72,7 +76,7 @@ from cw.codex_stage_completion import (
 from cw.codex_stage_facts import resolve_plan_source
 from cw.codex_usage import NO_USAGE, UsageAccumulator
 from cw.contract_manifest import RenderError
-from cw.gh import edit_pr_body, fetch_pr_view
+from cw.gh import fetch_pr_head
 from cw.local_runner import git_facts
 from cw.models import (
     CODEX_BACKEND,
@@ -82,6 +86,10 @@ from cw.models import (
 from cw.models.bindings import Harness
 from cw.models.branch import resolve_base_branch, resolve_feature_branch
 from cw.models.enums import StageIdentifier
+from cw.review_adjudication import (
+    DEFERRED_FINDINGS_RELATIVE_PATH,
+    REVIEW_ADJUDICATION_HEADING,
+)
 from cw.stage_verification.finalize_arm import (
     arm,
     check_automerge_allowed,
@@ -117,6 +125,7 @@ from cw.stage_verification.finalize_pr import (
     PR_MERGED,
     BoundPr,
     DetectedPr,
+    apply_body_section,
     apply_override_section,
     bind_live_pr,
     create_pr_for,
@@ -125,9 +134,12 @@ from cw.stage_verification.finalize_pr import (
     push_ahead,
 )
 from cw.stage_verification.finalize_result import (
+    ATTACH_UI_EVIDENCE,
+    ATTACH_UI_EVIDENCE_AND_ARM,
     MERGE_CONFLICT_POST_PUSH,
     OPERATOR_UNAVAILABLE,
     PRIOR_PIPELINE_PR_OPEN,
+    UI_EVIDENCE_ON_ARMED_PR,
     FinalizeBlock,
     FinalizeFacts,
     FinalizeTurnDocument,
@@ -136,6 +148,11 @@ from cw.stage_verification.finalize_result import (
     finalize_merge_gate_blocked,
     finalize_shipped,
     parse_finalize_turn,
+)
+from cw.stage_verification.finalize_review_artifacts import (
+    PrTarget,
+    adjudication_section,
+    run_review_artifacts,
 )
 from cw.stage_verification.posted_text import redact_and_cap
 from cw.ticket_snapshot import snapshot_for_stage
@@ -161,7 +178,6 @@ _SCHEMA_NAME: Final = "finalize-schema.json"
 _OUTPUT_NAME: Final = "finalize-output.json"
 _BODY_NAME: Final = "pr-body.md"
 _STDERR_TAIL_CHARS: Final = 500
-_GH_TIMEOUT: Final = 30
 #: Appended to a reuse run's ``merge_conflict_post_push`` park (#3542).
 _NO_MERGE_NOTE: Final = (
     "no merge attempted: cw resolves only on a run that created the PR"
@@ -180,6 +196,7 @@ class _State:
     head: str
     branch: str
     override_json: str | None
+    override_section: str | None = None
     friction: list[str] = field(default_factory=list)
     deferred: tuple[DeferredGate, ...] = ()
 
@@ -349,12 +366,19 @@ def _document(
     return parse_finalize_turn(turn.output_file_content)
 
 
-def _pr_body(doc: FinalizeTurnDocument, state: _State) -> str:
+def _pr_body(doc: FinalizeTurnDocument, state: _State, worktree: Path) -> str:
+    """The create-time body: the description, the copied adjudication, the override.
+
+    cw copies the adjudication from the artifact (the model does not write it),
+    so every exit after the create, a CI-deferred park included, keeps it.
+    Step 4d replaces both sections in place on the PR.
+    """
     body = doc.pr_body.rstrip()
-    if doc.adjudication_section.strip():
-        body += "\n\n" + doc.adjudication_section.strip()
-    if state.override_json is not None:
-        body = apply_override_section(body, doc.override_section or state.override_json)
+    section = adjudication_section(worktree / DEFERRED_FINDINGS_RELATIVE_PATH)
+    if section:
+        body = apply_body_section(body, section, heading=REVIEW_ADJUDICATION_HEADING)
+    if state.override_section is not None:
+        body = apply_override_section(body, state.override_section)
     return body.rstrip() + "\n"
 
 
@@ -479,17 +503,65 @@ def _arm_pr(run: _Run, state: _State, bound: BoundPr) -> bool | FinalizeBlock:
     return result.block if result.block is not None else result.armed
 
 
+def _held_arm_state(run: _Run, state: _State, bound: BoundPr) -> bool | FinalizeBlock:
+    """A UI-evidence hold's arm state: read, never changed (never a disarm).
+
+    The hold skips the seam check and the arm, so the claim ``verify_pr_state``
+    checks must be the PR's real state: an already-armed PR (a reuse run whose
+    earlier create armed it) stays armed and is reported as it is.
+    """
+    head = fetch_pr_head(bound.url, cwd=run.worktree)
+    if head is None:
+        return FinalizeBlock(
+            OPERATOR_UNAVAILABLE,
+            f"gh pr view {bound.url} could not read the armed state while the "
+            "UI-evidence gate holds the arm",
+            retry_eligible=True,
+        )
+    if head.auto_merge_armed:
+        state.friction.append(UI_EVIDENCE_ON_ARMED_PR)
+    return head.auto_merge_armed
+
+
+def _review_artifacts(
+    run: _Run, state: _State, bound: BoundPr, scratch: Path
+) -> tuple[FinalizeBlock | None, bool]:
+    """Step 4d: ``(block, hold the arm)``; its friction is recorded."""
+    published = run_review_artifacts(
+        PrTarget(
+            worktree=run.worktree,
+            scratch=scratch,
+            ticket_id=run.task.ticket_id,
+            client_name=run.client.name,
+            pr_number=bound.number,
+            pr_url=bound.url,
+            base=run.base_branch,
+            # No ``or state.head`` fallback: a head-to-head diff is empty and
+            # would let the UI gate fail open (A11). "" is read as unreadable.
+            fork_point=state.facts.git["fork_point"],
+            # Read after _mergeable, which may have moved the head.
+            head_sha=state.head,
+            override_section=state.override_section,
+        )
+    )
+    state.friction.extend(published.friction)
+    return published.block, published.hold_automerge
+
+
 def _arm_and_ship(
-    run: _Run, state: _State, bound: BoundPr, *, created: bool
+    run: _Run, state: _State, bound: BoundPr, scratch: Path, *, created: bool
 ) -> Payload:
-    """Mergeability, the re-fence, the arm and the verification, then ship."""
+    """Mergeability, Step 4d, the re-fence, the arm and the verification, then ship."""
     block = _mergeable(run, state, bound, created=created)
+    if block is not None:
+        return run.blocked(block, state, STAGE5_POST_CREATE)
+    block, hold = _review_artifacts(run, state, bound, scratch)
     if block is not None:
         return run.blocked(block, state, STAGE5_POST_CREATE)
     park = _fence(run, state)
     if park is not None:
         return park
-    armed = _arm_pr(run, state, bound)
+    armed = _held_arm_state(run, state, bound) if hold else _arm_pr(run, state, bound)
     if isinstance(armed, FinalizeBlock):
         return run.blocked(armed, state, STAGE5_POST_CREATE)
     pr_info: dict[str, object] = {"number": bound.number, "url": bound.url}
@@ -503,10 +575,20 @@ def _arm_and_ship(
     if blocked is not None:
         return run.blocked(blocked, state, STAGE5_POST_CREATE)
     state.friction.extend(friction)
-    return _shipped(run, state, bound, auto_merge=armed)
+    extra = (
+        (ATTACH_UI_EVIDENCE if armed else ATTACH_UI_EVIDENCE_AND_ARM,) if hold else ()
+    )
+    return _shipped(run, state, bound, auto_merge=armed, extra_actions=extra)
 
 
-def _shipped(run: _Run, state: _State, bound: BoundPr, *, auto_merge: bool) -> Payload:
+def _shipped(
+    run: _Run,
+    state: _State,
+    bound: BoundPr,
+    *,
+    auto_merge: bool,
+    extra_actions: tuple[str, ...] = (),
+) -> Payload:
     run.emit(
         OrchestratorEventType.STAGE_ENTERED,
         STAGE_CI_WAITING,
@@ -521,6 +603,7 @@ def _shipped(run: _Run, state: _State, bound: BoundPr, *, auto_merge: bool) -> P
         pr_url=bound.url,
         auto_merge=auto_merge,
         base=run.base_branch,
+        extra_actions=extra_actions,
     )
 
 
@@ -625,8 +708,10 @@ def _create(run: _Run, state: _State, scratch: Path) -> Payload:
     doc = _document(run, state, scratch)
     if isinstance(doc, FinalizeBlock):
         return run.blocked(doc, state, STAGE4B_PR_CREATE)
+    if state.override_json is not None:
+        state.override_section = doc.override_section or state.override_json
     body_file = scratch / _BODY_NAME
-    body_file.write_text(_pr_body(doc, state), encoding="utf-8")
+    body_file.write_text(_pr_body(doc, state, run.worktree), encoding="utf-8")
     created = create_pr_for(
         run.worktree,
         base=run.base_branch,
@@ -645,41 +730,23 @@ def _create(run: _Run, state: _State, scratch: Path) -> Payload:
             "deferred", _ci_context(run, state, bound), deferred=state.deferred
         )
         return run.blocked(parked, state, STAGE5_POST_CREATE)
-    return _arm_and_ship(run, state, bound, created=True)
+    return _arm_and_ship(run, state, bound, scratch, created=True)
 
 
-def _edit_override(
-    run: _Run, state: _State, bound: BoundPr, scratch: Path
-) -> FinalizeBlock | None:
-    """Reuse path, overridden only: rewrite the ``## Operator override`` region."""
+def _override_turn(run: _Run, state: _State, scratch: Path) -> FinalizeBlock | None:
+    """Reuse path, overridden only: the turn that writes the override section.
+
+    Step 4d writes it into the PR body with the other cw-written sections.
+    """
     doc = _document(run, state, scratch)
     if isinstance(doc, FinalizeBlock):
         return doc
-    view = fetch_pr_view(
-        bound.url, timeout=_GH_TIMEOUT, fields="body", cwd=run.worktree
-    )
-    body = view.get("body") if view is not None else None
-    if not isinstance(body, str):
-        return FinalizeBlock(
-            OPERATOR_UNAVAILABLE,
-            f"gh pr view {bound.url} could not read the PR body",
-            retry_eligible=True,
-        )
-    body_file = scratch / _BODY_NAME
-    section = doc.override_section or state.override_json or ""
-    body_file.write_text(apply_override_section(body, section), encoding="utf-8")
-    done = edit_pr_body(bound.url, body_file=body_file, cwd=run.worktree)
-    if done is None or done.returncode != 0:
-        return FinalizeBlock(
-            OPERATOR_UNAVAILABLE,
-            f"gh pr edit {bound.url} could not write the operator override section",
-            retry_eligible=True,
-        )
+    state.override_section = doc.override_section or state.override_json
     return None
 
 
 def _reuse(run: _Run, state: _State, bound: BoundPr, scratch: Path) -> Payload:
-    """The OPEN-PR path: gates, probe, override edit, then the arm."""
+    """The OPEN-PR path: gates, probe, override turn, then Step 4d and the arm."""
     block = _gates(run, state, "reuse", pr=bound)
     if block is None:
         block, friction = probe_default(
@@ -689,7 +756,7 @@ def _reuse(run: _Run, state: _State, bound: BoundPr, scratch: Path) -> Payload:
         if block is not None:
             block = _with_conflict_info(run, block, bound)
     if block is None and state.override_json is not None:
-        block = _edit_override(run, state, bound, scratch)
+        block = _override_turn(run, state, scratch)
     if block is None:
         # A hold left by a headless create must not strand this pass's arm.
         block = release_ci_hold(
@@ -697,7 +764,7 @@ def _reuse(run: _Run, state: _State, bound: BoundPr, scratch: Path) -> Payload:
         )
     if block is not None:
         return run.blocked(block, state, STAGE5_POST_CREATE)
-    return _arm_and_ship(run, state, bound, created=False)
+    return _arm_and_ship(run, state, bound, scratch, created=False)
 
 
 def _found(run: _Run, state: _State, found: DetectedPr, scratch: Path) -> Payload:

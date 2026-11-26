@@ -295,8 +295,8 @@ class TestDocsRootAndShipIt:
             _render(_worktree(tmp_path), docs_root=tmp_path / "nowhere")
 
 
-def test_finalize_turn_schema_is_the_strict_four_field_object() -> None:
+def test_finalize_turn_schema_is_the_strict_three_field_object() -> None:
     assert FINALIZE_TURN_SCHEMA["additionalProperties"] is False
-    fields = ["pr_title", "pr_body", "adjudication_section", "override_section"]
+    fields = ["pr_title", "pr_body", "override_section"]
     assert list(FINALIZE_TURN_SCHEMA["properties"]) == fields
     assert FINALIZE_TURN_SCHEMA["required"] == fields
