@@ -118,12 +118,21 @@ def test_pending_with_a_job_id_polls_that_job(
 def test_pending_without_a_job_id_restarts_after_a_pause(
     tmp_path: Path, pauses: list[float]
 ) -> None:
-    pending = GhReply(delta.RUNNING_EXIT, "", "CONFIRM_JOB_ID=\n")
+    pending = GhReply(delta.RUNNING_EXIT, "", "warming up\nCONFIRM_JOB_ID=\n")
     outcome, fake = _run(tmp_path, [pending, _round("continue")])
     assert outcome == "findings"
     starts = [c for c in fake.calls if " ".join(c).startswith(_START)]
     assert len(starts) == 2
     assert "--job-id" not in starts[1]
+    assert pauses == [delta.PENDING_PAUSE_SECONDS]
+
+
+def test_pending_with_no_job_id_line_restarts(
+    tmp_path: Path, pauses: list[float]
+) -> None:
+    pending = GhReply(delta.RUNNING_EXIT, "", "noise only\n")
+    outcome, _fake = _run(tmp_path, [pending, _round("stop_max_cycles")])
+    assert outcome == "stopped"
     assert pauses == [delta.PENDING_PAUSE_SECONDS]
 
 

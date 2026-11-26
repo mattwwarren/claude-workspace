@@ -1762,6 +1762,42 @@ class TestBaseStateScratchFailures:
     def test_has_tracked_changes_fails_closed(self, tmp_path: Path) -> None:
         assert _gates.has_tracked_changes(tmp_path / "missing") is True
 
+    def test_a_reset_that_cannot_run_is_false(self, tmp_path: Path) -> None:
+        assert _gates._reset_scratch(tmp_path / "missing", "0" * 40) is False
+
+    def test_uv_project_environment_is_not_compared(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", "/elsewhere/.venv")
+        assert _gates._environment_in_worktree(tmp_path) is True
+
+    def test_a_path_entry_inside_the_worktree_is_not_compared(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("UV_PROJECT_ENVIRONMENT", raising=False)
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.setenv("PATH", f"/usr/bin:{tmp_path / 'bin'}")
+        assert _gates._environment_in_worktree(tmp_path) is True
+        monkeypatch.setenv("PATH", "/usr/bin")
+        assert _gates._environment_in_worktree(tmp_path) is False
+
+    def test_an_unresolvable_path_value_is_outside(self, tmp_path: Path) -> None:
+        assert _gates._inside("bad\x00path", tmp_path) is False
+
+    def test_a_base_run_with_no_identity_is_unclassified(
+        self, gated: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.WARNING)
+        command = (
+            f"if [ -f src/a.py ]; then cat {shlex.quote(str(_MYPY_FIXTURE))}; fi;"
+            " exit 1"
+        )
+        install_home_prep_pr_state(tmp_path / "state", ("mypy", command, 5.0))
+        block = _gate_run(gated, "create").block
+        assert block is not None
+        assert block.reason == AGENT_BLOCK
+        assert _unclassified_reasons(caplog) == ["no_identity"]
+
 
 class TestResolvePath:
     def test_resolve_never_consults_ci_or_classifies(
