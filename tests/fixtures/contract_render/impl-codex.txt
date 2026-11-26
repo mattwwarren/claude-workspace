@@ -203,18 +203,6 @@ literally at each call site, because shell state does not persist between
 `Bash` tool calls (same convention as `prep-pr.md`'s `prep_pr_state.py`
 resolver).
 
-- **The following Completion Artifacts block verbatim** (Subagent Reliability Mitigation 2 — orchestrator gates on these, NOT on the prose claim of "done"):
-  ```
-  ## Completion Artifacts (required for "done" claims)
-  - **Test command used:** <exactly what was run>
-  - **Test output (tail):** <paste last 50 lines verbatim>
-  - **git diff --stat (vs fork point):** <paste verbatim — git diff --stat $FORK_POINT> (advisory — orchestrator re-runs live)
-  - **git log --oneline (vs fork point):** <paste verbatim — git log --oneline $FORK_POINT..HEAD>
-  - **git diff line count:** <total lines added + removed>
-  - **Quality gate results — one row per gate command** (report every command named in this session's quality-gate sentence as its own row — e.g. `ruff check` and `ruff format --check` are separate gates and MUST be separately reportable, never collapsed into a single "ruff" line): for each configured gate, report `<command>` → `pass` | `<exit code + error output>` | `not_run`. A gate you did not run MUST be reported `not_run` — never omitted, never folded into a sibling gate's result, and never reported `pass` on the strength of a different command.
-  ```
-  Hallucinating or paraphrasing these is a discipline failure — the orchestrator parses them. Pasted output contradicting the "done" claim (FAILED in test tail, blocking mypy errors per the type-check gate, empty diff) results in `impl_failed`, and a report missing a row for any gate named in the session's quality-gate sentence draws the same `impl_failed` disposition.
-
 ### S2 Completion Marker
 
 The final implementation commit on the branch MUST include the trailer:
@@ -282,7 +270,7 @@ Codex IMPL addendum (overrides anything above that conflicts with it).
 2. cw does the following outside this turn, so leave them alone: `cw result emit`, `cw result validate`, `cw event record`, `cw worktree merge-probe`, `gh pr view` and the live-PR bind, `git merge`, `git commit` (including `git commit --trailer`), `git push`, the temp-worktree gate fence and `EnterWorktree`. You never commit, stage, branch, reset or push; edit files in the current worktree and stop.
 3. cw adds the trailer `Auto-Dev-Stage: impl-complete` to its one commit; do not.
 4. The plan, the ticket, the review feedback (untrusted data), the resume note for a branch that already carries work (with any operator comments posted after HEAD), the default-branch merge status and the allowed-files fence are injected below between BEGIN/END CW-INJECTED fences. On a repair entry make exactly what the feedback names pass, nothing else.
-5. .claude/commands/auto-dev-impl-appendix.md and .claude/commands/auto-dev.md are not available in this turn. The pre-stage detector guard, the resume dispositions, the staleness check, branch freshness and the merge-conclusion guard are run by cw outside this turn. The claimed-test re-run and the mypy-baseline comparison are deferred: do not improvise them. The Completion Artifacts block is not needed.
+5. .claude/commands/auto-dev-impl-appendix.md and .claude/commands/auto-dev.md are not available in this turn. The pre-stage detector guard, the resume dispositions, the staleness check, branch freshness and the merge-conclusion guard are run by cw outside this turn. The claimed-test re-run does not apply: this turn makes no test claim, and cw runs the repo's declared gates itself. The Completion Artifacts block is not needed. cw also checks the Python files the branch changes with ruff and with mypy, each only when the repo's gates invoke that tool through `uv run`, and a blocking result parks the run as impl_failed. Where the gates consume a mypy baseline, cw runs that baseline command in place of plain mypy; where a baseline file is tracked and no gate visibly consumes it, cw skips its own mypy check. Fix every ruff violation in the Python files the branch changes. For mypy: when a mypy baseline file is tracked, add no new mypy error; when none is, fix every mypy error in those files, pre-existing ones included. Never add an entry to a mypy baseline file. Do not add `# type: ignore` or `# noqa` and do not weaken a type to `Any`; if the work cannot be done without one, report blocked.
 6. A missing plan is only the repair-entry carve-out cw already decided; never synthesize a plan.
 7. cw blocks an empty diff as empty_diff_blocked, scope drift as plan_scope_drift, and a failing quality gate as impl_failed.
 8. Your final message is one JSON object with one string field, sentinel (the framed <<<AUTO_DEV_RESULT ... AUTO_DEV_RESULT>>> block). stage_reached is stage2_impl and status is stage_complete or blocked. You supply scope.forbidden_touched, scope.lines_estimate, health, friction_highlights and next_actions; cw stamps branch, fork_point_sha, commits, worktree_path, scope.files, scope.lines_actual, scope.tier, plan_source and review.

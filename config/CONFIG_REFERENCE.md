@@ -3203,8 +3203,14 @@ tests:
   reproduce" finding.
 - **Fails closed.** A non-string value, a non-mapping `tests:` block or an
   unreadable file blocks gate 3. A blank or null `prepare` means unset.
-- **Scope.** Only Step 2.5 gate 3 reads it. `/prep-pr`, `detect-gates` and the
-  codex executor do not.
+- **Scope.** Step 2.5 gate 3 and codex IMPL gate 4 read it. `/prep-pr` and
+  `detect-gates` do not.
+- **Codex IMPL (#3531).** Read before the turn from the default branch
+  (`origin/HEAD`, else `origin/<default_branch>`), never from the pushed head
+  or the turn's tree. It runs with `bash -c` in the gate worktree before ruff
+  and mypy, and only when one of them runs. An unreadable value or a failing
+  command parks `impl_failed`. Each gate 4 command has its own `TMPDIR`; there
+  is no timeout.
 
 ## Worktree Context File (`.claude/cw-context.json`)
 

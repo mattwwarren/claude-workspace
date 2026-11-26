@@ -4838,8 +4838,97 @@ pushes. cw does everything else:
   red gate that only rewrote its own touched files is re-run once and accepted
   (`codex_fix_gate_autofixed` friction on success; a rejection parks
   `impl_failed` with the original gate output). Gate 2 is
-  skipped with friction on a repair row with no plan. Gates 3 and 4 (the
-  claimed test command and the mypy baseline) are #3531.
+  skipped with friction on a repair row with no plan. Gate 4 then runs
+  (below). Gate 3 (re-run the claimed test command) does not apply: the turn
+  makes no test claim and emits no Completion Artifacts block, and cw already
+  runs the repo's declared gates itself. Known limit: a repo whose gates
+  declare no test command gets no test run in codex IMPL. Gate 5
+  (`impl_no_incremental_commits`) does not apply either: cw makes exactly one
+  commit by design, refused turns are pinned under `refs/cw/refused-cycles/`,
+  and re-entry handles existing branch work (#3529).
+- **Gate 4: ruff and mypy on the touched Python files (#3531).** It runs after
+  the repo gates and before cw's commit, in a detached `cw-gate-wt-impl-*`
+  worktree under `CW_GATE_ROOT` (else `/var/tmp`) checked out at a dangling
+  snapshot commit of the staged tree (parents `HEAD` and any `MERGE_HEAD`); no
+  ref moves. The checked files are every `.py`/`.pyi` the branch changes since
+  `merge-base origin/<base> <snapshot>`, earlier commits included, deletions
+  aside.
+  - *Applicability* comes from the gate commands pinned before the turn. A
+    command segment declares a tool when it names it and is not a `make` or
+    `pre-commit` run, so wrapper-declared gates (`make lint`, `pre-commit
+    run`) skip gate 4 with `impl_gate4_skipped_no_gate_declared`, unlike
+    claude-native, which re-runs ruff and mypy directly. A tool is checked
+    only when a declaring segment runs it through `uv run`; a tool declared
+    only some other way (bare, `uvx`, `poetry run`) is skipped with
+    `impl_gate4_launcher_unsupported: <tool>`. A tool that is not declared at
+    all is skipped with `impl_gate4_ruff_not_declared` or
+    `impl_gate4_mypy_not_declared`. A turn that touched no Python file runs no
+    tool.
+  - *Environment.* cw's own ruff, mypy and debt-record commands run at the repo
+    root as `uv run` plus the declaring segment's `--extra`, `--all-extras`,
+    `--group`, `--all-groups`, `--with` and `--python` options (`--opt value`
+    or `--opt=value`) and its `--frozen`, `--locked`, `-q`, `--quiet` and
+    `--no-progress` flags. When cw cannot reproduce the declaring command (an
+    earlier `cd`, `pushd`, `export` or assignment, an assignment prefix,
+    `--directory`, `--project`, `--package`, `--env-file`, `--no-sync`,
+    `--no-dev`, `--offline`, any other `uv run` option, an option value that
+    needs shell expansion, or a relative-path `--with` or `--python` value, one
+    starting with `.`), it does not run that tool:
+    `impl_gate4_launcher_unsupported: <tool>`. The gate worktree holds only
+    tracked files, so an untracked `.env` or `.venv` is absent there. Of
+    several declaring segments, one cw can reproduce wins, the first in gate
+    order. Baseline commands run verbatim, so only their debt record is skipped
+    this way.
+  - *Baseline states.* Candidates are `mypy-baseline.txt`,
+    `.mypy/baseline.json` and any `--baseline-file`/`--baseline-path`
+    argument, tracked at the fork point. Those arguments, and the consumer
+    match below, are read only from command segments that name `mypy` or
+    `mypy-baseline`, so another tool's baseline option does not count.
+    **Detected** (a candidate is tracked and a pinned command matches
+    `mypy-baseline filter` or `--baseline-file` in such a segment):
+    cw runs each such command verbatim in place of plain mypy
+    (`impl_mypy_baseline: file=... cmd=...` friction); any non-zero exit parks.
+    **Consumer unknown** (a candidate is tracked, no pinned command consumes
+    it): the mypy check is skipped with
+    `impl_gate4_mypy_skipped_baseline_consumer_unknown: <files>`, so cw never
+    applies a stricter standard than the repo's. **None**: plain `uv run mypy
+    --no-pretty --no-color-output --hide-absolute-path <files>`. In both
+    tracked states the baseline file may not gain lines since the fork point
+    (a growth parks, "a suppression that needs explicit approval"), even when
+    no Python file was touched. To declare a baseline, put the `uv run`
+    pipeline (for example `uv run mypy src/ | uv run mypy-baseline filter`) in
+    the repo's CLAUDE.md `## Quality Gates` block so `detect-gates` reports it.
+  - *Mypy attribution (no baseline).* Exit 0 passes. Any `error:` diagnostic in
+    a touched file parks with those lines, the quoted rule "fix every mypy
+    error in touched files, pre-existing ones included" and the touched file
+    list. Exit 1 whose every diagnostic is in an untouched file passes with
+    `impl_gate4_mypy_untouched_only: <files>` and a WARNING. Exit 2 and above,
+    or a failure with nothing parseable, parks. Limit: an untouched-file error
+    newly exposed by this diff is not attributed to it (claude-native's
+    transitive rule); the repo's own mypy gate still covers its configured
+    scope, and nothing covers it outside that scope. The strict-override
+    check is not mechanized.
+  - *Baselined-debt record.* After the baseline commands pass, cw runs plain
+    mypy once more and merges one `SHOULD_FIX` entry per touched file with
+    errors into `.cw/deferred-findings.md`, skipping a file that already has
+    one. Only a file with entries in a baseline file at the fork point (an
+    exact repo-relative path in `mypy-baseline.txt` or `.mypy/baseline.json`)
+    is recorded. A touched file with errors and no entry (a new file, or one
+    outside the baseline command's scope) gets no record and does not block:
+    `impl_gate4_baseline_uncovered: <files>`. The record never blocks: a
+    malformed artifact is left untouched with `deferred_findings_unparseable`,
+    any other failure is `impl_baselined_record_failed`.
+  - *`tests.prepare`* is read before the turn from the default branch
+    (`origin/HEAD`, else `origin/<default_branch>`), never from the turn's
+    tree, and runs first in the gate worktree (`bash -c`) only when ruff or
+    mypy will run. Unreadable or failing parks.
+  - *Parks* are `impl_failed`, `retry_eligible: false`, with `blocker.details`
+    starting `Step 2.5 gate 4 failed:`; nothing is committed or pushed, the
+    edits are pinned and the tree reset. A gate setup failure (snapshot,
+    merge-base, `worktree add`, an unusable `CW_GATE_ROOT`) is `gate setup:
+    <why>`. Every command runs through the repo gates' runner (scrubbed env,
+    a private `TMPDIR`, `codex_fix.gate_slow` at the gate's ceiling, no
+    timeout). A leftover directory logs `impl_gate4_worktree_leftover`.
 - **One commit.** cw stages the measured paths, re-measures them after the
   gates (a rewrite that empties the diff parks `impl_failed`,
   `repair_turn_made_no_change`), checks the staged set, makes one commit (`feat: implement #<T>`, or `fix: address review feedback
@@ -4860,7 +4949,8 @@ pushes. cw does everything else:
   `scope.tier`, `plan_source` and `review` over the model's sentinel, emits
   `s2_impl_started` / `s2_impl_complete`, completes through the door and
   posts nothing to the tracker.
-- **Deferred.** The claimed-test and mypy-baseline gates (#3531).
+- **Deferred.** Nothing in the IMPL gates; gate 3 and gate 5 are not
+  applicable (above).
 
 Two UNVERIFIED items: whether MCP tool calls run under
 `approval_policy=never` (the tracker-IO probe above is the evidence path),

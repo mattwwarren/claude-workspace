@@ -25,6 +25,8 @@ Submodules:
 - ``impl_resume``: the IMPL re-entry classification and the four dispositions
   (#3529).
 - ``impl_staleness``: the IMPL staleness check and the regress signal (#3529).
+- ``impl_type_gate``: IMPL gate 4's declaration, baseline, ``tests.prepare``,
+  gate-worktree, mypy-attribution and debt-record pieces (#3531).
 - ``plan_gates``: PLAN gate set B and the PLAN status vocabulary.
 - ``posted_text``: redaction and capping of text posted to the tracker.
 - ``push``: push-and-verify-head.

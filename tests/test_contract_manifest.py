@@ -1083,7 +1083,10 @@ _C2_REENTRY_TICKET = 3529
 #: or deferred to one of its follow-ups. #3530 (tracker-aware plan recovery) left
 #: the set: #3712 (RFC 0019 T2) implements it, so ``impl.orientation`` is a code ref.
 _C2_TICKET = 3061
-_CODEX_IMPL_FOLLOW_UPS = frozenset({3531})
+#: #3531 (gates 3-5) landed: no codex IMPL cell defers to a follow-up now.
+_CODEX_IMPL_FOLLOW_UPS: frozenset[int] = frozenset()
+#: The IMPL gates ticket (#3531); no cell may defer to it once it lands.
+_C2_GATES_TICKET = 3531
 # #3055 closed with RFC 0018 S3: its codex review cells moved to #3057 (A2).
 _CODEX_REVIEW_TICKETS = frozenset({3318, 2464, 3057})
 #: The C4 ticket (#3063, usage accounting); no cell may defer to it once it lands.
@@ -1605,6 +1608,15 @@ _C2_CODE_CELLS = {
         "src/cw/stage_verification/impl_gates.py",
         "run_scope_conformance",
     ),
+    "impl.gate-type-check": ("src/cw/codex_impl/_type_gate.py", "run_type_check_gate"),
+    "impl.type-check-gate-mypy-baseline": (
+        "src/cw/stage_verification/impl_type_gate.py",
+        "detect_mypy_baseline",
+    ),
+    "impl.orchestrator-record": (
+        "src/cw/stage_verification/impl_type_gate.py",
+        "record_baselined_errors",
+    ),
 }
 
 
@@ -1621,6 +1633,7 @@ _C2_CW_RUN_GATES = (
     "impl.worktree-isolation-guard",
     "impl.absent-owner-record",
     "impl.implementation-failure-escalation",
+    "impl.following-completion-artifacts-block-verbatim",
 )
 
 
@@ -1634,6 +1647,14 @@ def test_no_cell_defers_to_the_landed_c2_ticket() -> None:
         for backend, cell in element.cells.items():
             if isinstance(cell, DeferredDisposition):
                 assert cell.ref.number != _C2_TICKET, (element_id, backend)
+
+
+def test_no_cell_defers_to_the_landed_gates_ticket() -> None:
+    """#3531 landed: none of its cells is left deferring to it."""
+    for element_id, element in _manifest().elements.items():
+        for backend, cell in element.cells.items():
+            if isinstance(cell, DeferredDisposition):
+                assert cell.ref.number != _C2_GATES_TICKET, (element_id, backend)
 
 
 def test_no_cell_defers_to_the_closed_detector_guard_ticket() -> None:
@@ -1928,6 +1949,7 @@ def test_codex_finalize_cell_counts() -> None:
     for element_id, element in _manifest().elements.items():
         if element_id.split(".")[0] in {"finalize", "prep-pr", "ship-it"}:
             cell = element.cells[CODEX_BACKEND]
+            assert not isinstance(cell, str), element_id
             counts[cell.disposition] = counts.get(cell.disposition, 0) + 1
     assert counts == {
         "implemented": 33,
@@ -2005,7 +2027,7 @@ _C1_RESUME_CELLS = {
 def test_the_resume_parity_cells_point_at_their_code(element_id: str) -> None:
     disposition, path, symbol = _C1_RESUME_CELLS[element_id]
     cell = _manifest().elements[element_id].cells[CODEX_BACKEND]
-    assert not isinstance(cell, str)
+    assert isinstance(cell, (ImplementedDisposition, FailsClosedDisposition))
     assert cell.disposition == disposition
     assert isinstance(cell.ref, CodeRef)
     assert (cell.ref.path, cell.ref.symbol) == (path, symbol)
@@ -2058,7 +2080,7 @@ def test_the_approval_and_origin_sync_cells_point_at_their_code(
 ) -> None:
     disposition, path, symbol = _C1_APPROVAL_CELLS[element_id]
     cell = _manifest().elements[element_id].cells[CODEX_BACKEND]
-    assert not isinstance(cell, str)
+    assert isinstance(cell, (ImplementedDisposition, FailsClosedDisposition))
     assert cell.disposition == disposition
     assert isinstance(cell.ref, CodeRef)
     assert (cell.ref.path, cell.ref.symbol) == (path, symbol)
@@ -2382,13 +2404,14 @@ def test_base_branch_elements_dispositions() -> None:
     elements = _manifest().elements
     for element_id in _BASE_BRANCH_ELEMENTS:
         cells = elements[element_id].cells
-        assert cells["claude-native"].disposition == "implemented", element_id
+        native = cells["claude-native"]
+        assert isinstance(native, ImplementedDisposition), element_id
         codex = cells["codex"]
-        assert codex.disposition == "implemented", element_id
+        assert isinstance(codex, ImplementedDisposition), element_id
         assert isinstance(codex.ref, CodeRef), element_id
         for backend in ("opencode", "local"):
             cell = cells[backend]
-            assert cell.disposition == "fails-closed", (element_id, backend)
+            assert isinstance(cell, FailsClosedDisposition), (element_id, backend)
             assert cell.ref == _PREFLIGHT_REF, (element_id, backend)
             assert not cell.guard_pending, (element_id, backend)
 
