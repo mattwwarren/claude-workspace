@@ -55,11 +55,14 @@ class MergeabilityOutcome:
     ``block`` is ``None`` when the PR is mergeable. ``head`` is the new HEAD
     when the repair pushed a merge (the caller stores it in its run state),
     else ``None``. ``friction`` is every note the check and the repair made.
+    ``refused`` is true when the seam answered ``refused``: nothing may then
+    merge the base by another route.
     """
 
     block: FinalizeBlock | None
     friction: list[str] = field(default_factory=list)
     head: str | None = None
+    refused: bool = False
 
 
 def _with_note(
@@ -162,7 +165,8 @@ def _repair(
             friction,
         )
     note = _changelog_note(synced.state, synced.disposition, synced.detail)
-    return _with_note(block, friction, note)
+    noted = _with_note(block, friction, note)
+    return replace(noted, refused=synced.state == SyncState.REFUSED)
 
 
 def check_mergeability_repairing(

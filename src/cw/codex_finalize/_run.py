@@ -166,6 +166,8 @@ _GH_TIMEOUT: Final = 30
 _NO_MERGE_NOTE: Final = (
     "no merge attempted: cw resolves only on a run that created the PR"
 )
+#: Appended when the CHANGELOG repair refused: no other route merges the base.
+_REFUSED_NOTE: Final = "no merge attempted: the CHANGELOG repair refused to merge"
 
 Payload = dict[str, Any]
 
@@ -428,7 +430,7 @@ def _mergeable(
     """Mergeability, the union repair and, on a create run, the semantic resolve.
 
     At most one merge: the resolver runs only when the union repair did not
-    move HEAD (#3861 amendment), and never on a reuse run.
+    move HEAD and did not refuse (#3861 amendment), and never on a reuse run.
     """
     # stays on client.default_branch: the non-default-base gate asks whether the row's
     # base is the repo default itself (the trust root), not where the row merges.
@@ -441,13 +443,17 @@ def _mergeable(
     )
     state.friction.extend(outcome.friction)
     block = outcome.block
-    if block is not None and block.reason == MERGE_CONFLICT_POST_PUSH:
-        if outcome.head is None and created:
+    conflicted = block is not None and block.reason == MERGE_CONFLICT_POST_PUSH
+    if block is not None and conflicted and outcome.head is None:
+        if not created:
+            block = replace(block, details=f"{block.details}; {_NO_MERGE_NOTE}")
+        elif outcome.refused:
+            note = f"{_REFUSED_NOTE} origin/{run.base_branch}"
+            block = replace(block, details=f"{block.details}; {note}")
+        else:
             outcome = _resolve(run, state, bound, block)
             state.friction.extend(outcome.friction)
             block = outcome.block
-        elif outcome.head is None:
-            block = replace(block, details=f"{block.details}; {_NO_MERGE_NOTE}")
     if outcome.head is not None:
         state.head = outcome.head
     return _with_conflict_info(run, block, bound) if block is not None else None

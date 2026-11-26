@@ -4995,7 +4995,10 @@ Everything below is cw-run Python; no codex turn gets write access.
 - **Semantic auto-resolve (Step 4c.5).** Only on a run that created the PR,
   only when the post-push mergeability check parked
   `merge_conflict_post_push`, and only when the #3861 CHANGELOG-union repair
-  did not move HEAD (there is still at most one merge). Preconditions: local
+  did not move HEAD (there is still at most one merge) and did not answer
+  `refused`. A refused repair parks with its `changelog-sync refused (...)`
+  note and `no merge attempted: the CHANGELOG repair refused to merge
+  origin/<base>`: nothing merges what the seam refused. Preconditions: local
   HEAD is the PR head; no tracked modification at all (a tolerated tracked
   edit or a tracked-modified review artifact disables it); after the fetch,
   no path that `origin/<base>` changed since the merge base, and no parent of

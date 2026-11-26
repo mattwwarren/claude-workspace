@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from cw.changelog_sync import ChangelogSync, SyncState
+from cw.stage_verification import finalize_changelog_repair as repair
 from cw.stage_verification import finalize_conflict_resolve as resolve
 from cw.stage_verification.finalize_changelog_repair import MergeabilityOutcome
 from cw.stage_verification.finalize_result import (
@@ -23,6 +25,7 @@ from cw.stage_verification.finalize_result import (
 )
 from tests._codex_review_helpers import install_home_prep_pr_state, merge_view
 from tests._git_sandbox import run as git_run
+from tests._shared.base_branch_builders import ROW_BASE, push_epic_base
 from tests._shared.git_repos import commit_tracked_file, git_in, push_commit_to_origin
 from tests._shared.scope_grant_builders import install_real_guard_script
 from tests._tool_fakes import (
@@ -255,6 +258,53 @@ def test_a_union_repair_that_moved_head_is_never_resolved_again(
     assert result.blocker.details == still.details
     assert payload["pr_info"] == _PR_INFO
     assert h.local_head() == head
+
+
+def test_a_refused_changelog_repair_is_never_followed_by_a_merge(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    h = harness(task_updates={"base_branch": ROW_BASE})
+    push_epic_base(h.worktree)
+    log = _logging_gates(tmp_path)
+    head, tip = h.local_head(), h.origin_tip()
+    # The base moves while the turn runs, so a bare merge would have work to do.
+    reply = finalize_turn_result(None)
+
+    def _answer(_argv: list[str], _stdin: str | None) -> CodexRunResult:
+        side = tmp_path / "side"
+        push_commit_to_origin(h.origin, ROW_BASE, side, "sibling.py", "x = 1\n")
+        return reply
+
+    h.runner.add(stdin_contains(FINALIZE_TURN), _answer)
+    _merge_view(h, "CONFLICTING", "DIRTY")
+
+    def _refused(*_a: Any, **_k: Any) -> ChangelogSync:
+        return ChangelogSync(
+            SyncState.REFUSED,
+            None,
+            head,
+            "changelog_released_section_touched",
+            (),
+            (),
+            "released section(s) 1.0.0 would change",
+        )
+
+    h.monkeypatch.setattr(repair, "sync_changelog", _refused)
+
+    result, payload = _run_handing(h)
+
+    assert result.blocker is not None
+    assert result.blocker.reason == MERGE_CONFLICT_POST_PUSH
+    assert result.blocker.details.endswith(
+        "changelog-sync refused (changelog_released_section_touched): released "
+        "section(s) 1.0.0 would change; no merge attempted: the CHANGELOG repair "
+        "refused to merge origin/epic/x"
+    )
+    assert payload["pr_info"] == {**_PR_INFO, "base": ROW_BASE}
+    assert h.local_head() == head
+    assert h.origin_tip() == tip
+    assert _runs(log) == 1
+    assert h.arm.calls() == []
 
 
 @pytest.mark.parametrize(
