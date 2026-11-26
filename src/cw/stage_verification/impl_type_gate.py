@@ -516,9 +516,11 @@ def gate_worktree(
     try:
         yield Path(path)
     finally:
-        # Removing the directory and pruning is ``worktree remove --force``.
+        # This path only: the clone is shared, so never ``worktree prune``.
+        run_git(
+            ["worktree", "remove", "--force", path], cwd=worktree, capture_output=True
+        )
         _remove_dir(path, ticket, "impl_gate4_worktree_leftover")
-        run_git(["worktree", "prune"], cwd=worktree, capture_output=True)
 
 
 @contextmanager

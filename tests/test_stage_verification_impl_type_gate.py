@@ -413,6 +413,24 @@ def test_gate_worktree_is_removed_on_normal_exit(repo: Path, tmp_path: Path) -> 
     assert str(path) not in git_in(repo, "worktree", "list")
 
 
+def test_gate_worktree_cleanup_keeps_other_worktrees_registered(
+    repo: Path, tmp_path: Path
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    sibling = tmp_path / "sibling"
+    git_in(repo, "worktree", "add", "--detach", str(sibling), "HEAD")
+    # A sibling session's worktree whose directory is missing right now.
+    sibling.rename(tmp_path / "sibling-moved")
+
+    with gate.gate_worktree(repo, _snap(repo), root=str(root), ticket="T-1") as path:
+        pass
+
+    listed = git_in(repo, "worktree", "list")
+    assert str(sibling) in listed
+    assert str(path) not in listed
+
+
 def test_gate_worktree_is_removed_on_exception(repo: Path, tmp_path: Path) -> None:
     root = tmp_path / "root"
     root.mkdir()
