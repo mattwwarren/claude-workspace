@@ -34,6 +34,7 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Final
 
 from cw._git import LOCAL_GIT_TIMEOUT_SECONDS, git_clean_env, git_output, run_git
+from cw._text import redact
 from cw.stage_verification.baseline import unmerged_paths
 from cw.stage_verification.finalize_gates import check_branch, has_tracked_changes
 from cw.stage_verification.finalize_pr import (
@@ -48,7 +49,11 @@ from cw.stage_verification.finalize_result import (
 )
 from cw.stage_verification.impl_feedback import fetch_default_branch
 from cw.stage_verification.impl_gates import resolve_guard_script
-from cw.stage_verification.posted_text import redact_and_cap
+from cw.stage_verification.posted_text import (
+    WITHHELD,
+    looks_like_secret,
+    redact_and_cap,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -107,7 +112,17 @@ class _Attempt:
 
 
 def _tail(text: str) -> str:
-    return redact_and_cap(text.strip()[-_TAIL:])
+    """The end of subprocess *text*, secrets withheld before anything is cut.
+
+    A cut first could drop the ``password =`` that marks a line and keep its
+    value. The classifier's JSON escapes the quotes of a quoted source line, so
+    each line is also checked unescaped.
+    """
+    safe = "\n".join(
+        WITHHELD if looks_like_secret(line.replace('\\"', '"')) else line
+        for line in text.strip().splitlines()
+    )
+    return redact_and_cap(redact(safe)[-_TAIL:])
 
 
 def _noted(block: FinalizeBlock, note: str) -> FinalizeBlock:

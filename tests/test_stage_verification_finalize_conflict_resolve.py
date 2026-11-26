@@ -931,3 +931,41 @@ def test_a_non_utf8_path_is_listed_and_escaped(repo: Repo) -> None:
     _assert_refused(repo, outcome, "\\udcff.env")
     assert outcome.block is not None
     outcome.block.details.encode("utf-8")
+
+
+# -- secrets in subprocess output ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("ours", "theirs", "secret"),
+    [
+        ("PASSWORD = 'x-ours'\n", "PASSWORD = 'x-theirs'\n", "x-ours"),
+        (
+            'CFG = {"password": "pw-ours"}\n',
+            'CFG = {"password": "pw-theirs"}\n',
+            "pw-ours",
+        ),
+    ],
+)
+def test_a_secret_conflict_head_never_reaches_the_details(
+    repo: Repo, ours: str, theirs: str, secret: str
+) -> None:
+    install_real_guard_script(resolve.CLASSIFIER_SCRIPT_NAME)
+    repo.ours_and_theirs("settings.py", ours, theirs)
+    outcome = _resolve(repo, run_gates=_never_gates)
+    assert outcome.block is not None
+    assert "— refused: " in outcome.block.details
+    assert secret not in outcome.block.details
+    assert secret.replace("ours", "theirs") not in outcome.block.details
+    assert "<source text withheld" in outcome.block.details
+
+
+def test_a_secret_line_cut_by_the_tail_is_still_withheld(repo: Repo) -> None:
+    install_real_guard_script(resolve.CLASSIFIER_SCRIPT_NAME)
+    repo.ours_and_theirs(_DOC, "ours\n", "theirs\n")
+    value = "qz" * 300
+    repo.hook("pre-commit", f"echo \"PASSWORD = '{value}'\" >&2; exit 1")
+    outcome = _resolve(repo, run_gates=_never_gates)
+    assert outcome.block is not None
+    assert "commit failed: " in outcome.block.details
+    assert "qzqz" not in outcome.block.details
