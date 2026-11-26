@@ -565,14 +565,20 @@ def _remove_dir(path: str, ticket: str, what: str) -> None:
 
 @contextmanager
 def gate_worktree(
-    worktree: Path, snap: str, *, root: str, ticket: str
+    worktree: Path,
+    snap: str,
+    *,
+    root: str,
+    ticket: str,
+    prefix: str = GATE_WORKTREE_PREFIX,
+    leftover: str = "impl_gate4_worktree_leftover",
 ) -> Iterator[Path]:
     """A detached temporary worktree at *snap*, removed on every exit.
 
     Hooks are off for the add. A failed add raises ``CalledProcessError``; a
-    directory left behind logs WARNING ``impl_gate4_worktree_leftover``.
+    directory left behind logs WARNING *leftover*. *prefix* names the directory.
     """
-    path = tempfile.mkdtemp(prefix=GATE_WORKTREE_PREFIX, dir=root)
+    path = tempfile.mkdtemp(prefix=prefix, dir=root)
     try:
         run_git(
             [
@@ -598,7 +604,7 @@ def gate_worktree(
         run_git(
             ["worktree", "remove", "--force", path], cwd=worktree, capture_output=True
         )
-        _remove_dir(path, ticket, "impl_gate4_worktree_leftover")
+        _remove_dir(path, ticket, leftover)
 
 
 @contextmanager
@@ -616,12 +622,16 @@ def gate_output_dir(root: str, ticket: str) -> Iterator[Path]:
 
 @dataclass(frozen=True)
 class MypyError:
-    """One mypy ``error:`` diagnostic: normalized path, line, code and the line."""
+    """One mypy ``error:`` diagnostic: normalized path, line, code and the line.
+
+    *message* is the diagnostic text without its trailing ``[code]``.
+    """
 
     path: str
     line: int | None
     code: str | None
     text: str
+    message: str = ""
 
 
 def _normalized(path: str, root: Path | None) -> str:
@@ -644,7 +654,8 @@ def parse_mypy_errors(text: str, root: Path | None = None) -> list[MypyError]:
         match = _DIAGNOSTIC.match(line)
         if match is None:
             continue
-        code = _ERROR_CODE.search(match.group("msg"))
+        msg = match.group("msg")
+        code = _ERROR_CODE.search(msg)
         number = match.group("line")
         errors.append(
             MypyError(
@@ -652,6 +663,7 @@ def parse_mypy_errors(text: str, root: Path | None = None) -> list[MypyError]:
                 line=int(number) if number is not None else None,
                 code=code.group("code") if code is not None else None,
                 text=line,
+                message=(msg[: code.start()] if code is not None else msg).rstrip(),
             )
         )
     return errors

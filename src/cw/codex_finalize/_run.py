@@ -85,9 +85,13 @@ from cw.models.enums import StageIdentifier
 from cw.stage_verification.finalize_arm import (
     arm,
     check_automerge_allowed,
+    mark_adopted_ready,
     verify_pr_state,
 )
-from cw.stage_verification.finalize_changelog_repair import check_mergeability_repairing
+from cw.stage_verification.finalize_changelog_repair import (
+    MergeabilityOutcome,
+    check_mergeability_repairing,
+)
 from cw.stage_verification.finalize_ci_evidence import (
     CiContext,
     DeferredGate,
@@ -95,7 +99,12 @@ from cw.stage_verification.finalize_ci_evidence import (
     ci_pr_info,
     release_ci_hold,
 )
+from cw.stage_verification.finalize_conflict_resolve import (
+    resolve_post_push_conflict,
+)
 from cw.stage_verification.finalize_gates import (
+    RESOLVE_PATH,
+    FinalizeGateRun,
     check_branch,
     gate_scope,
     resolve_tier,
@@ -116,6 +125,7 @@ from cw.stage_verification.finalize_pr import (
     push_ahead,
 )
 from cw.stage_verification.finalize_result import (
+    MERGE_CONFLICT_POST_PUSH,
     OPERATOR_UNAVAILABLE,
     PRIOR_PIPELINE_PR_OPEN,
     FinalizeBlock,
@@ -152,6 +162,12 @@ _OUTPUT_NAME: Final = "finalize-output.json"
 _BODY_NAME: Final = "pr-body.md"
 _STDERR_TAIL_CHARS: Final = 500
 _GH_TIMEOUT: Final = 30
+#: Appended to a reuse run's ``merge_conflict_post_push`` park (#3542).
+_NO_MERGE_NOTE: Final = (
+    "no merge attempted: cw resolves only on a run that created the PR"
+)
+#: Appended when the CHANGELOG repair refused: no other route merges the base.
+_REFUSED_NOTE: Final = "no merge attempted: the CHANGELOG repair refused to merge"
 
 Payload = dict[str, Any]
 
@@ -360,8 +376,62 @@ def _fence(run: _Run, state: _State) -> Payload | None:
     return None
 
 
-def _arm_and_ship(run: _Run, state: _State, bound: BoundPr) -> Payload:
-    """Mergeability, the re-fence, the arm and the verification, then ship."""
+def _conflict_pr_info(run: _Run, bound: BoundPr) -> dict[str, object]:
+    """The ``pr_info`` a ``merge_conflict_post_push`` park carries once a PR exists."""
+    return {
+        "number": bound.number,
+        "url": bound.url,
+        "auto_merge": False,
+        "base": run.base_branch,
+    }
+
+
+def _with_conflict_info(
+    run: _Run, block: FinalizeBlock, bound: BoundPr
+) -> FinalizeBlock:
+    if block.reason != MERGE_CONFLICT_POST_PUSH:
+        return block
+    return replace(block, pr_info=_conflict_pr_info(run, bound))
+
+
+def _resolve_gates(run: _Run, state: _State, bound: BoundPr) -> FinalizeGateRun:
+    """The ``resolve``-path quality gates on the auto-resolve merge."""
+    gated = run_finalize_quality_gates(
+        run.worktree,
+        scope=gate_scope(run.task.ticket_id, run.client.name, run.sid),
+        path=RESOLVE_PATH,
+        ci=_ci_context(run, state, bound),
+        tolerated=tolerated_paths(run.client),
+    )
+    state.friction.extend(gated.friction)
+    return gated
+
+
+def _resolve(
+    run: _Run, state: _State, bound: BoundPr, park: FinalizeBlock
+) -> MergeabilityOutcome:
+    """Step 4c.5's semantic auto-resolve for a create run (#3542)."""
+    resolved = resolve_post_push_conflict(
+        run.worktree,
+        park=park,
+        base_branch=run.base_branch,
+        branch=state.branch,
+        head_sha=state.head,
+        pr_url=bound.url,
+        ignore_paths=_ignore_paths(_context(run.worktree)),
+        run_gates=lambda: _resolve_gates(run, state, bound),
+    )
+    return MergeabilityOutcome(resolved.block, resolved.friction, resolved.head)
+
+
+def _mergeable(
+    run: _Run, state: _State, bound: BoundPr, *, created: bool
+) -> FinalizeBlock | None:
+    """Mergeability, the union repair and, on a create run, the semantic resolve.
+
+    At most one merge: the resolver runs only when the union repair did not
+    move HEAD and did not refuse (#3861 amendment), and never on a reuse run.
+    """
     # stays on client.default_branch: the non-default-base gate asks whether the row's
     # base is the repo default itself (the trust root), not where the row merges.
     outcome = check_mergeability_repairing(
@@ -371,26 +441,58 @@ def _arm_and_ship(run: _Run, state: _State, bound: BoundPr) -> Payload:
         default_branch=run.client.default_branch,
         branch=state.branch,
     )
+    state.friction.extend(outcome.friction)
+    block = outcome.block
+    conflicted = block is not None and block.reason == MERGE_CONFLICT_POST_PUSH
+    if block is not None and conflicted and outcome.head is None:
+        if not created:
+            block = replace(block, details=f"{block.details}; {_NO_MERGE_NOTE}")
+        elif outcome.refused:
+            note = f"{_REFUSED_NOTE} origin/{run.base_branch}"
+            block = replace(block, details=f"{block.details}; {note}")
+        else:
+            outcome = _resolve(run, state, bound, block)
+            state.friction.extend(outcome.friction)
+            block = outcome.block
     if outcome.head is not None:
         state.head = outcome.head
-    state.friction.extend(outcome.friction)
-    if outcome.block is not None:
-        return run.blocked(outcome.block, state, STAGE5_POST_CREATE)
+    return _with_conflict_info(run, block, bound) if block is not None else None
+
+
+def _arm_pr(run: _Run, state: _State, bound: BoundPr) -> bool | FinalizeBlock:
+    """The seam check, the adopted draft ``ready`` step and the arm."""
+    pr_info: dict[str, object] = {"number": bound.number, "url": bound.url}
+    allowed = check_automerge_allowed(run.worktree, pr_info)
+    if isinstance(allowed, FinalizeBlock) or not allowed:
+        return allowed
+    if run.task.branch:
+        ready, friction = mark_adopted_ready(
+            run.worktree, pr_number=bound.number, pr_info=pr_info
+        )
+        if ready is not None:
+            # The doc's fence: a PR that is not ready is reported unarmed.
+            return replace(ready, pr_info={**pr_info, "auto_merge": False})
+        state.friction.extend(friction)
+    result = arm(
+        run.worktree, pr_number=bound.number, head_sha=state.head, pr_info=pr_info
+    )
+    return result.block if result.block is not None else result.armed
+
+
+def _arm_and_ship(
+    run: _Run, state: _State, bound: BoundPr, *, created: bool
+) -> Payload:
+    """Mergeability, the re-fence, the arm and the verification, then ship."""
+    block = _mergeable(run, state, bound, created=created)
+    if block is not None:
+        return run.blocked(block, state, STAGE5_POST_CREATE)
     park = _fence(run, state)
     if park is not None:
         return park
+    armed = _arm_pr(run, state, bound)
+    if isinstance(armed, FinalizeBlock):
+        return run.blocked(armed, state, STAGE5_POST_CREATE)
     pr_info: dict[str, object] = {"number": bound.number, "url": bound.url}
-    allowed = check_automerge_allowed(run.worktree, pr_info)
-    if isinstance(allowed, FinalizeBlock):
-        return run.blocked(allowed, state, STAGE5_POST_CREATE)
-    armed = False
-    if allowed:
-        result = arm(
-            run.worktree, pr_number=bound.number, head_sha=state.head, pr_info=pr_info
-        )
-        if result.block is not None:
-            return run.blocked(result.block, state, STAGE5_POST_CREATE)
-        armed = result.armed
     blocked, friction = verify_pr_state(
         run.worktree,
         pr_url=bound.url,
@@ -472,16 +574,19 @@ def _client_branch_prefix(run: _Run) -> str:
     return resolve_feature_branch(run.task.ticket_id, run.client).rsplit("/", 1)[0]
 
 
+def _ignore_paths(context: dict[str, Any]) -> list[str]:
+    """``merge_gate_ignore_paths`` from the hook context (strings only)."""
+    ignore = context.get("merge_gate_ignore_paths")
+    return [p for p in ignore if isinstance(p, str)] if isinstance(ignore, list) else []
+
+
 def _create_prelude(run: _Run, state: _State) -> Payload | None:
     """Merge gate, quality gates, the default-branch probe and the ahead-push."""
     context = _context(run.worktree)
-    ignore = context.get("merge_gate_ignore_paths")
     gate = run_merge_gate(
         run.worktree,
         enabled=context.get("merge_gate_enabled") is not False,
-        ignore_paths=[p for p in ignore if isinstance(p, str)]
-        if isinstance(ignore, list)
-        else [],
+        ignore_paths=_ignore_paths(context),
         branch=state.branch,
         branch_prefix=_client_branch_prefix(run),
         fork_point=state.facts.git["fork_point"] or state.head,
@@ -540,7 +645,7 @@ def _create(run: _Run, state: _State, scratch: Path) -> Payload:
             "deferred", _ci_context(run, state, bound), deferred=state.deferred
         )
         return run.blocked(parked, state, STAGE5_POST_CREATE)
-    return _arm_and_ship(run, state, bound)
+    return _arm_and_ship(run, state, bound, created=True)
 
 
 def _edit_override(
@@ -581,6 +686,8 @@ def _reuse(run: _Run, state: _State, bound: BoundPr, scratch: Path) -> Payload:
             run.worktree, base_branch=run.base_branch, pr_exists=True
         )
         state.friction.extend(friction)
+        if block is not None:
+            block = _with_conflict_info(run, block, bound)
     if block is None and state.override_json is not None:
         block = _edit_override(run, state, bound, scratch)
     if block is None:
@@ -590,7 +697,7 @@ def _reuse(run: _Run, state: _State, bound: BoundPr, scratch: Path) -> Payload:
         )
     if block is not None:
         return run.blocked(block, state, STAGE5_POST_CREATE)
-    return _arm_and_ship(run, state, bound)
+    return _arm_and_ship(run, state, bound, created=False)
 
 
 def _found(run: _Run, state: _State, found: DetectedPr, scratch: Path) -> Payload:

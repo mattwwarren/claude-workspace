@@ -1,0 +1,2 @@
+Would reformat: pkg/fmt.py
+1 file would be reformatted, 2 files already formatted

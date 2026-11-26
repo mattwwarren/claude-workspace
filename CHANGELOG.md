@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Codex FINALIZE resolves safe post-push conflicts, runs the delta-confirm round, classifies base-branch failures and marks adopted drafts ready (#3542).** All of it is cw-run Python; no codex turn gets write access. On a run that created the PR, a post-push `merge_conflict_post_push` (when the #3861 CHANGELOG-union repair made no merge and did not refuse one) gets one `git merge origin/<base>`, the real `classify_merge_conflict.py`, a commit with the `Auto-Resolved-By` trailer, the quality gates, a plain push and one re-check; a red gate reverts the merge only when this run made it, and otherwise the park names the merge left local and is not retry-eligible. A conflict in a `merge_gate_ignore_paths` path is never resolved. The pre-push probe and the reuse path still never merge; a reuse run's park now says so, and every `merge_conflict_post_push` park after a PR exists carries `pr_info`. Step 4.0b now runs `cw review converge confirm-job delta` on a delta-confirm-eligible stale tip before parking (the outcome is appended to the `review_tip_check: stale` token). A red FINALIZE gate that fails the same way on a clean `origin/<base>` (checked in a detached `cw-gate-wt-finalize-*` scratch worktree) now parks `external_state_block` instead of `agent_block`; any doubt stays `agent_block` and logs `finalize_base_state_unclassified`. An adopted row runs `prep_pr_finalize.py ready` just before the arm. Nine codex FINALIZE manifest cells are now implemented and none defers to #3542.
+
 ## [1.112.0] - 2026-11-26
 
 ### Fixed

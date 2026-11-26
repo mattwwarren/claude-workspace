@@ -113,8 +113,10 @@ class FinalizeBlock:
 
     *stage* is the wire ``stage_reached``; *blocker_stage* overrides
     ``blocker.stage`` (the override refusal's ``stage4_must_fix_override``).
-    *pr_info* is injected into the dumped result for ``automerge_not_armed``
-    (``AutoDevResult`` has no ``pr_info`` field; the dispositions reader does).
+    *pr_info* is injected into the dumped result for any reason that sets it:
+    ``automerge_not_armed``, the adopted ``ready`` ``agent_block`` and a
+    ``merge_conflict_post_push`` park once a PR exists (#3542). ``AutoDevResult``
+    has no ``pr_info`` field; the dispositions reader does.
     """
 
     reason: str

@@ -153,7 +153,8 @@ class TestRepairPassthrough:
 
         assert outcome.block is not None
         assert outcome.block.reason == MERGE_CONFLICT_POST_PUSH
-        assert outcome.block.details.endswith("cw does not resolve conflicts (#3542)")
+        assert outcome.block.details.endswith("mergeStateStatus=DIRTY)")
+        assert "#3542" not in outcome.block.details
         assert outcome.head is None
         assert git_in(clone, "rev-parse", "HEAD") == head_before
 
@@ -251,6 +252,9 @@ class TestRepairPassthrough:
         assert block.details.startswith(f"{pushed_block.details}; ")
         merge_sha = git_in(clone, "rev-parse", "HEAD")
         assert merge_sha in block.details
+        assert f"the CHANGELOG union merge commit {merge_sha} exists only" in (
+            block.details
+        )
         assert "exists only in the local worktree" in block.details
         assert f'"git push origin HEAD:refs/heads/{_BRANCH}"' in block.details
         assert outcome.head is None

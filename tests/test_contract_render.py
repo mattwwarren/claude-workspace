@@ -387,6 +387,11 @@ def test_finalize_addendum_overrides_the_remaining_claude_machinery() -> None:
         "merge gate",
         "quality gates",
         "both the create path and the reuse path",
+        "including the delta-confirm round",
+        "the base-branch-state classifier",
+        "the post-push mergeability check",
+        "the conflict-resolution round and the semantic auto-resolve",
+        "the adopted draft PR `ready` step",
         "the sentinel and every stage event",
         "leave them alone",
         "overrides anything above that conflicts with it",
@@ -400,6 +405,10 @@ def test_finalize_addendum_overrides_the_remaining_claude_machinery() -> None:
     # The PR-title rules finalize.compose-pr-title-in-parent would have rendered.
     for needle in ("<type>(<scope>): <summary>", "72 characters", "GitHub-numeric"):
         assert needle in addendum, needle
+    # #3542: the conflict machinery is cw's now, not deferred.
+    deferred = addendum.split("Their machinery", 1)[1].split("do not improvise", 1)[0]
+    assert "conflict-resolution round" not in deferred
+    assert "semantic auto-resolve" not in deferred
     for token in CLAUDE_ONLY_DENYLIST:
         assert token not in addendum, token
 

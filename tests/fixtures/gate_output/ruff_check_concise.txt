@@ -1,0 +1,5 @@
+pkg/calc.py:1:8: F401 [*] `os` imported but unused
+pkg/calc.py:2:8: F401 [*] `sys` imported but unused
+pkg/calc.py:10:5: F841 Local variable `x` is assigned to but never used
+Found 3 errors.
+[*] 2 fixable with the `--fix` option (1 hidden fix can be enabled with the `--unsafe-fixes` option).

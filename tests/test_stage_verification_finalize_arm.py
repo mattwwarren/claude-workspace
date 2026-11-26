@@ -19,6 +19,7 @@ import pytest
 from cw.reconcile.review_recipes.repair_git import ArmOutcome
 from cw.stage_verification.finalize_arm import (
     _VERIFIED_STATES,
+    DRAFT_FLIPPED_FRICTION,
     FAILING_CHECKS_PREFIX,
     FREEZE_PREFIX,
     PR_CONFLICTING_PREFIX,
@@ -26,6 +27,7 @@ from cw.stage_verification.finalize_arm import (
     _refusal,
     arm,
     check_automerge_allowed,
+    mark_adopted_ready,
     verify_pr_state,
 )
 from cw.stage_verification.finalize_pr import PR_MERGED, PR_OPEN
@@ -431,3 +433,114 @@ class TestPrConflictingHint:
         assert (
             block.details == "arm-automerge failed; gh_stderr: GraphQL: not mergeable"
         )
+
+
+# --- adopted draft PR ready (#3542) ---------------------------------------------
+
+
+def _ready_reply(
+    *, status: str, flipped: bool, gh_exit_code: int | None, gh_stderr: str
+) -> str:
+    """A ``ReadyResult.to_dict()`` reply (``prep_pr_finalize.py``'s own shape)."""
+    return json.dumps(
+        {
+            "pr_number": 7,
+            "status": status,
+            "flipped": flipped,
+            "gh_exit_code": gh_exit_code,
+            "gh_stderr": gh_stderr,
+            "detail": "",
+        }
+    )
+
+
+class TestMarkAdoptedReady:
+    def test_an_already_ready_pr_passes_without_friction(self, repo: Path) -> None:
+        stub = _stub()
+        assert mark_adopted_ready(repo, pr_number=7, pr_info=_PR_INFO) == (None, [])
+        assert stub.calls() == [["ready", "7", "--repo-path", str(repo)]]
+
+    def test_a_flipped_draft_is_friction(self, repo: Path) -> None:
+        _stub(
+            ready_stdout=_ready_reply(
+                status="ready", flipped=True, gh_exit_code=0, gh_stderr=""
+            )
+        )
+        block, friction = mark_adopted_ready(repo, pr_number=7, pr_info=_PR_INFO)
+        assert block is None
+        assert friction == [DRAFT_FLIPPED_FRICTION]
+        assert DRAFT_FLIPPED_FRICTION == "draft_flipped_ready"
+
+    def test_a_failure_quotes_gh_stderr(self, repo: Path) -> None:
+        _stub(
+            ready_exit=1,
+            ready_stdout=_ready_reply(
+                status="failed",
+                flipped=True,
+                gh_exit_code=1,
+                gh_stderr="GraphQL: Resource not accessible by integration",
+            ),
+        )
+        block, friction = mark_adopted_ready(repo, pr_number=7, pr_info=_PR_INFO)
+        assert block is not None
+        assert block.reason == "agent_block"
+        assert block.retry_eligible is True
+        assert block.pr_info == _PR_INFO
+        assert block.details == (
+            "adopted draft PR #7 could not be marked ready: GraphQL: Resource not "
+            "accessible by integration"
+        )
+        assert friction == []
+
+    @pytest.mark.parametrize("stdout", ["not json", ""])
+    def test_an_empty_gh_stderr_or_unreadable_output_quotes_the_raw_output(
+        self, repo: Path, stdout: str
+    ) -> None:
+        reply = (
+            _ready_reply(
+                status="failed", flipped=False, gh_exit_code=None, gh_stderr=""
+            )
+            if stdout == ""
+            else stdout
+        )
+        _stub(ready_exit=1, ready_stdout=reply)
+        block, _ = mark_adopted_ready(repo, pr_number=7, pr_info=_PR_INFO)
+        assert block is not None
+        assert block.details.startswith(
+            "adopted draft PR #7 could not be marked ready: "
+        )
+        assert block.details.removeprefix(
+            "adopted draft PR #7 could not be marked ready: "
+        ).strip()
+
+    @pytest.mark.parametrize("pad", [0, 200])
+    def test_a_secret_straddling_the_cut_never_reaches_the_details(
+        self, repo: Path, pad: int
+    ) -> None:
+        # The assignment's name lies before the last 500 characters, its value
+        # inside them.
+        _stub(ready_exit=1, ready_stdout=f"{'x' * pad} password={'qz' * 300}")
+        block, _ = mark_adopted_ready(repo, pr_number=7, pr_info=_PR_INFO)
+        assert block is not None
+        assert "qzqz" not in block.details
+
+    def test_no_script_is_agent_block(self, repo: Path) -> None:
+        block, _ = mark_adopted_ready(repo, pr_number=7, pr_info=_PR_INFO)
+        assert block is not None
+        assert block.reason == "agent_block"
+        assert "prep_pr_finalize.py" in block.details
+
+    @pytest.mark.parametrize(
+        "error", [OSError("boom"), subprocess.TimeoutExpired("ready", 60)]
+    )
+    def test_a_call_that_does_not_finish_is_retryable_unavailable(
+        self, repo: Path, error: BaseException
+    ) -> None:
+        _stub()
+        with patch(
+            "cw.stage_verification.finalize_arm.subprocess.run", side_effect=error
+        ):
+            block, _ = mark_adopted_ready(repo, pr_number=7, pr_info=_PR_INFO)
+        assert block is not None
+        assert block.reason == "operator_unavailable"
+        assert block.retry_eligible is True

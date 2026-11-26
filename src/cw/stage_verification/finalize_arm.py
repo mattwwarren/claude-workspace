@@ -6,10 +6,15 @@ calls ``gh pr merge`` itself. Verification reads the PR back with
 ``fetch_pr_head`` (state OPEN or MERGED, head oid equal to the local HEAD,
 ``auto_merge_armed`` equal to the claim) and ``fetch_required_failing_checks``
 (``None`` is unverifiable CI and blocks; a non-empty list is friction).
+
+:func:`mark_adopted_ready` runs ``prep_pr_finalize.py ready`` for an adopted
+row (``task.branch`` set) just before the arm: GitHub refuses auto-merge on a
+draft (#3542).
 """
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -25,11 +30,12 @@ from cw.reconcile.review_recipes.repair_git import (
 )
 from cw.stage_verification.finalize_pr import PR_MERGED, PR_OPEN
 from cw.stage_verification.finalize_result import (
+    AGENT_BLOCK,
     AUTOMERGE_NOT_ARMED,
     OPERATOR_UNAVAILABLE,
     FinalizeBlock,
 )
-from cw.stage_verification.posted_text import redact_and_cap
+from cw.stage_verification.posted_text import redact_and_cap, redacted_tail
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -43,6 +49,8 @@ FREEZE_PREFIX: Final = "changelog_merge_freeze:"
 #: The #3861 conflict refusal: GitHub reports the PR conflicting (hedged text).
 PR_CONFLICTING_PREFIX: Final = "pr_conflicting:"
 FAILING_CHECKS_PREFIX: Final = "required_checks_failing_at_emission: "
+#: Friction when ``ready`` flipped an adopted draft PR to ready for review.
+DRAFT_FLIPPED_FRICTION: Final = "draft_flipped_ready"
 
 _CHECK_TIMEOUT: Final = 60
 _VERIFIED_STATES: Final = frozenset({PR_OPEN, PR_MERGED})
@@ -230,3 +238,72 @@ def verify_pr_state(
         names = ", ".join(check.name for check in checks)
         return None, [FAILING_CHECKS_PREFIX + redact_and_cap(names)]
     return None, []
+
+
+def _ready_block(pr_number: int, why: str, pr_info: dict[str, object]) -> FinalizeBlock:
+    return FinalizeBlock(
+        AGENT_BLOCK,
+        f"adopted draft PR #{pr_number} could not be marked ready: {why}",
+        retry_eligible=True,
+        pr_info=pr_info,
+    )
+
+
+def _ready_result(stdout: str) -> dict[str, object] | None:
+    try:
+        data = json.loads(stdout)
+    except (ValueError, RecursionError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def mark_adopted_ready(
+    worktree: Path, *, pr_number: int, pr_info: dict[str, object]
+) -> tuple[FinalizeBlock | None, list[str]]:
+    """``prep_pr_finalize.py ready``: ``(block, friction)`` for an adopted PR.
+
+    Exit 0 passes (``draft_flipped_ready`` when it flipped the PR). Any other
+    exit, or no script, is a retryable ``agent_block`` quoting gh's stderr
+    from the result (the redacted raw output when that is empty or the output
+    is not JSON); a call that does not finish is retryable
+    ``operator_unavailable``.
+    """
+    try:
+        script = _probe_arm_script(worktree)
+    except RepairStopError as exc:
+        return _ready_block(pr_number, redact_and_cap(exc.detail), pr_info), []
+    argv = [
+        sys.executable,
+        str(script),
+        "ready",
+        str(pr_number),
+        "--repo-path",
+        str(worktree),
+    ]
+    try:
+        done = subprocess.run(
+            argv,
+            cwd=worktree,
+            env=git_clean_env(),
+            capture_output=True,
+            text=True,
+            timeout=_CHECK_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return FinalizeBlock(
+            OPERATOR_UNAVAILABLE,
+            f"prep_pr_finalize.py ready did not finish: {redact_and_cap(str(exc))}",
+            retry_eligible=True,
+        ), []
+    data = _ready_result(done.stdout)
+    if done.returncode != 0:
+        gh_stderr = data.get("gh_stderr") if data is not None else None
+        if isinstance(gh_stderr, str) and gh_stderr.strip():
+            why = redacted_tail(gh_stderr)
+        else:
+            raw = f"{done.stdout or ''}\n{done.stderr or ''}"
+            why = redacted_tail(raw) or f"exit {done.returncode}"
+        return _ready_block(pr_number, why, pr_info), []
+    flipped = data is not None and data.get("flipped") is True
+    return None, [DRAFT_FLIPPED_FRICTION] if flipped else []

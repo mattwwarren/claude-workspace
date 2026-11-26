@@ -844,6 +844,22 @@ class TestRunner:
         assert "boom" in failure.output
         assert not log.exists()
 
+    def test_red_gate_keeps_full_output_beyond_the_tail_out_of_repr(
+        self, repo: Path
+    ) -> None:
+        command = "seq 1 60; echo full-first-line-xyz >&2; exit 1"
+        plan = _plan(("lint", command, _CEILING))
+
+        failure = _run(plan, repo)
+
+        assert failure is not None
+        assert failure.kind == "red"
+        lines = failure.full_output.splitlines()
+        assert lines[0] == "1"
+        assert "full-first-line-xyz" in lines
+        assert "\n1\n" not in f"\n{failure.output}\n"
+        assert "full_output" not in repr(failure)
+
     def test_unavailable_plan_starts_nothing(
         self, repo: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

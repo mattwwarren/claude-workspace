@@ -162,9 +162,9 @@ class GateScope:
 class PlannedGate:
     """One detected gate: name, shell command, signal ceiling (seconds), autofix.
 
-    ``autofix`` is the declared command to run when the gate fails red (#3412),
-    or ``None`` when the gate declares none. ``accept_hook_rewrite`` is False
-    when config opts the gate out of the hook-rewrite acceptance (#3689).
+    ``autofix`` is the command for a red gate (#3412), or ``None``.
+    ``accept_hook_rewrite`` is False when config opts the gate out of the
+    hook-rewrite acceptance (#3689). ``env`` goes on top of the gate env (#3542).
     """
 
     name: str
@@ -172,6 +172,7 @@ class PlannedGate:
     ceiling_s: float
     autofix: str | None = None
     accept_hook_rewrite: bool = True
+    env: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -207,6 +208,7 @@ class GateFailure:
     seconds: float
     output: str
     why: str | None
+    full_output: str = field(default="", repr=False, compare=False)
 
 
 class _Watched(NamedTuple):
@@ -446,11 +448,11 @@ def _run_watched(
     signal to the child on any path: if cw's own thread is torn down by an
     exception while waiting, the exception propagates unchanged and the child
     runs to completion against its own descriptor. No ``with Popen``: its exit
-    can wait on, or interrupt, the child. *helper* collects the full output
-    for the caller to parse instead of logging it line by line.
+    can wait on, or interrupt, the child. The full output is always returned;
+    *helper* only stops it being logged line by line.
     """
     start = time.monotonic()
-    out = _Output(scope=scope, gate=gate, log=not helper, chunks=[] if helper else None)
+    out = _Output(scope=scope, gate=gate, log=not helper, chunks=[])
     with tempfile.TemporaryFile("a+b") as spool:
         proc = subprocess.Popen(
             argv,
@@ -632,7 +634,7 @@ def _run_one_gate(
             watched = _run_watched(
                 ["sh", "-c", gate.command],
                 cwd=worktree,
-                env=env,
+                env=env | dict(gate.env),
                 ceiling_s=gate.ceiling_s,
                 gate=gate.name,
                 scope=scope,
@@ -668,6 +670,7 @@ def _run_one_gate(
             seconds=watched.seconds,
             output=output,
             why=None,
+            full_output=watched.text,
         )
     if dirtied:
         return GateFailure(

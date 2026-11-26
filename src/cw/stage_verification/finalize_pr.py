@@ -13,14 +13,19 @@ helper lives anywhere else in :mod:`cw.codex_finalize`.
 * :func:`probe_default` is a thin call into the C2 default-branch
   fetch-and-probe (:func:`cw.stage_verification.impl_feedback.probe_default_branch` with
   ``repair=True``, which never blocks). A conflict blocks
-  ``merge_conflict_post_push`` and is never resolved (#3542).
+  ``merge_conflict_post_push``; cw never merges before the push. After it,
+  at most one merge is made, by the CHANGELOG-union repair or the create-path
+  semantic auto-resolve (``finalize_conflict_resolve``, #3542).
+* :func:`check_mergeability` reads the post-push mergeability once; callers
+  append their own note to its park. :func:`local_only_merge` makes a failed
+  push of a post-push merge truthful.
 """
 
 from __future__ import annotations
 
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final
 
 from cw.auto_dev_result.schema._vocab import EXTERNAL_STATE_BLOCKER_REASON
@@ -42,13 +47,14 @@ from cw.stage_verification.finalize_result import (
     classify_unavailability,
 )
 from cw.stage_verification.impl_feedback import PROBE_UNAVAILABLE, probe_default_branch
-from cw.stage_verification.posted_text import redact_and_cap
+from cw.stage_verification.posted_text import redact_and_cap, redacted_tail
 from cw.stage_verification.push import push_and_verify_head
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 __all__ = [
+    "NOTE_LINE_CAP",
     "PROBE_UNAVAILABLE",
     "BoundPr",
     "DetectedPr",
@@ -57,6 +63,7 @@ __all__ = [
     "check_mergeability",
     "create_pr_for",
     "detect_branch_pr",
+    "local_only_merge",
     "probe_default",
     "push_ahead",
 ]
@@ -70,7 +77,11 @@ _GH_TIMEOUT: Final = 30
 _BIND_FIELDS: Final = "number,url,headRefName,headRefOid"
 _MERGE_FIELDS: Final = "mergeable,mergeStateStatus"
 _BLOCKING_MERGE: Final = frozenset({"CONFLICTING", "DIRTY"})
+_MERGEABLE: Final = "MERGEABLE"
 _TAIL: Final = 500
+#: A park note is one line (this module's local-only-merge note and the semantic
+#: auto-resolve's); the default per-line cap would cut it.
+NOTE_LINE_CAP: Final = 600
 _OVERRIDE_HEADING: Final = "## Operator override"
 _NEXT_REGION: Final = re.compile(r"\n## |<!-- cw-review-signoff:")
 
@@ -191,8 +202,8 @@ def probe_default(
     return FinalizeBlock(
         MERGE_CONFLICT_POST_PUSH,
         f"merging origin/{base_branch} into {where} conflicts in {files}; "
-        "the codex FINALIZE lane does not resolve conflicts (#3542). Merge or "
-        "rebase the branch, push, then requeue finalize.",
+        "cw does not resolve a conflict found before the push or on an open-PR "
+        "reuse run. Merge or rebase the branch, push, then requeue finalize.",
         retry_eligible=pr_exists,
     ), probe.friction
 
@@ -206,7 +217,7 @@ def push_ahead(worktree: Path, *, branch: str, head_sha: str) -> FinalizeBlock |
         push_and_verify_head(worktree, head_sha)
     except (subprocess.CalledProcessError, OSError) as exc:
         stderr = str(getattr(exc, "stderr", "") or exc)
-        tail = redact_and_cap(stderr.strip()[-_TAIL:])
+        tail = redacted_tail(stderr)
         reason = classify_unavailability(stderr)
         if reason is not None:
             return FinalizeBlock(
@@ -246,10 +257,36 @@ def create_pr_for(
     return parsed[1], url
 
 
+def local_only_merge(
+    block: FinalizeBlock, *, merge: str, branch: str, head_sha: str
+) -> FinalizeBlock:
+    """A failed push of a post-push merge, made truthful: the merge is local only.
+
+    *merge* names it (``CHANGELOG union merge``, ``semantic auto-resolve merge``
+    or ``origin/<base> merge``). A requeue reuses the open PR, and that path
+    binds the PR head to local HEAD without pushing, so it can never clear this
+    block: it is not retry-eligible until the operator pushes the merge by
+    hand. No reset: the merge commit stays in the worktree.
+    """
+    note = redact_and_cap(
+        f"the {merge} commit {head_sha} exists only in the local"
+        f' worktree; push it with a plain "git push origin'
+        f' HEAD:refs/heads/{branch}" and requeue, because a reused PR must'
+        " match local HEAD",
+        max_line_chars=NOTE_LINE_CAP,
+    )
+    return replace(block, details=f"{block.details}; {note}", retry_eligible=False)
+
+
 def check_mergeability(
-    worktree: Path, pr_url: str
+    worktree: Path, pr_url: str, *, unverified_token: str | None = None
 ) -> tuple[FinalizeBlock | None, list[str]]:
-    """Post-push mergeability: CONFLICTING/DIRTY block; BEHIND is friction."""
+    """Post-push mergeability: CONFLICTING/DIRTY block; BEHIND is friction.
+
+    *unverified_token* is appended to the friction when the view was read, is
+    not blocking and ``mergeable`` is not ``MERGEABLE`` (the caller says what
+    the unverified read means). A block or an unreadable view never carries it.
+    """
     view = fetch_pr_view(
         pr_url, timeout=_GH_TIMEOUT, fields=_MERGE_FIELDS, cwd=worktree
     )
@@ -265,10 +302,13 @@ def check_mergeability(
         return FinalizeBlock(
             MERGE_CONFLICT_POST_PUSH,
             f"{pr_url} is not mergeable after the push (mergeable={mergeable}, "
-            f"mergeStateStatus={state}); cw does not resolve conflicts (#3542)",
+            f"mergeStateStatus={state})",
             retry_eligible=True,
         ), []
-    return None, [BEHIND_FRICTION] if state == "BEHIND" else []
+    friction = [BEHIND_FRICTION] if state == "BEHIND" else []
+    if unverified_token is not None and mergeable != _MERGEABLE:
+        friction.append(unverified_token)
+    return None, friction
 
 
 def apply_override_section(body: str, section: str) -> str:
