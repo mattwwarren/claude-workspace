@@ -59,7 +59,7 @@ from cw.stage_verification.finalize_ui_evidence import (
     check_ui_evidence,
     find_ui_files,
 )
-from cw.stage_verification.posted_text import redact_and_cap
+from cw.stage_verification.posted_text import redacted_tail
 
 if TYPE_CHECKING:
     import subprocess
@@ -81,7 +81,6 @@ __all__ = [
 _log = logging.getLogger(__name__)
 
 _GH_TIMEOUT: Final = 30
-_TAIL: Final = 500
 _FRICTION_PREFIX: Final = "friction: "
 _REFUSED_FIXTURE_LINE: Final = "friction: debt_filing: refused_fixture_entry"
 _FAILURE_KIND: Final = re.compile(r"debt filing failed \[([a-z_]+)\]")
@@ -229,7 +228,7 @@ def _debt_details(
     data = _debt_json(done)
     status = data.get("status") if data is not None else None
     if data is None:
-        tail = redact_and_cap(done.stderr.strip()[-_TAIL:]).replace("\n", " | ")
+        tail = redacted_tail(done.stderr).replace("\n", " | ")
         return f"cw review debt file exited {done.returncode}: {tail}; {rerun}"
     kinds = sorted(set(_FAILURE_KIND.findall(done.stderr))) or ["none reported"]
     hint = _mcp_hint(target) if status == "mcp_pending" else rerun

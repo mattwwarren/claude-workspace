@@ -321,6 +321,20 @@ class TestDebtRefile:
         assert "\n" not in out.block.details
         assert rig.cw_names() == ["review debt file"]
 
+    def test_a_secret_cut_by_the_tail_boundary_is_not_posted(self, rig: Rig) -> None:
+        value = "hunter2-zebra-9"
+        filler = "\n".join(["z" * 60] * 7 + ["z" * 57])
+        stderr = f"Traceback\npassword = {value}\n{filler}"
+        # A cut-then-redact would start here and keep the unlabelled value.
+        assert stderr[-500:].startswith(value)
+        rig.script_cw(_DEBT_FILE, GhReply(2, "", stderr))
+        block = rig.run().block
+        assert block is not None
+        assert "exited 2: " in block.details
+        assert "z" * 57 in block.details
+        assert value not in block.details
+        assert "\n" not in block.details
+
     def test_stderr_friction_and_failure_kinds_are_carried(self, rig: Rig) -> None:
         stderr = (
             "debt filing failed [rate_limited] gh said no\n"
