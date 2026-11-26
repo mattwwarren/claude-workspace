@@ -10,11 +10,12 @@ on that one park, and only for a non-default base, it makes one plain
 
 :func:`repair_arm_refusal` runs the same sync at the arm: a release-cut merge
 freeze (``changelog_merge_freeze:``) on any base, and a ``pr_conflicting:``
-refusal on a non-default base (#3939). Each kind is repaired at most once per
-run by the caller's spent set.
+refusal on a non-default base (#3939).
 
-It never rebases, force-pushes, or repairs twice. A genuine conflict is left
-as a block that names the files.
+Neither path rebases or force-pushes. The mergeability check repairs once; the
+arm repairs each refusal kind at most once per run, by the caller's spent set.
+The mergeability check leaves a genuine conflict as a block that names the
+files.
 
 Imports only :mod:`cw.changelog_sync` and the ``cw.stage_verification`` modules
 ``finalize_arm``, ``finalize_pr``, ``finalize_result``, ``impl_feedback`` and
@@ -253,7 +254,7 @@ def _finish_arm_repair(
     *,
     branch: str,
 ) -> ArmRepair:
-    """Act on a sync that did not come back clean: block, push, or re-arm."""
+    """Act on a sync result: push a ``moved`` one, else keep the block."""
     if synced.state != SyncState.MOVED:
         note = _changelog_note(synced.state, synced.disposition, synced.detail)
         return ArmRepair(prefix, block=_prefixed(block, f"{prefix} {note}"))
