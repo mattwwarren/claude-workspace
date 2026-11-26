@@ -328,7 +328,7 @@ Epics I and II first, as two independent tracks; Epic III only after both; Epic 
 - **Wave:** 2
 - **Sprint:** 3
 - **Depends on:** O2
-- **Context:** The codex verdict comment, `codex_stage_post`, `approve --post-marker`, `resolve --post` and the gate-recipe audit comments each post inline, and the last posts through `gh` with no tracker guard. `cw review settle` prints a `## Review Finding Dispositions` marker for someone else to post, which on Linear nobody does. This ticket moves all six to enqueue and deletes `cli/dev_queue/_tracker_post.py`, so on Linear these posts are delivered instead of refused or failed. Absorbs the post halves of #2701 (verdict and settle marker on non-GitHub trackers) and #3544 (the codex FINALIZE Linear PR-link post; its CI wait, ticket transition and bookkeeping stay on #3544).
+- **Context:** The codex verdict comment, `codex_stage_post`, `approve --post-marker`, `resolve --post` and the gate-recipe audit comments each post inline, and the last posts through `gh` with no tracker guard. `cw review settle` prints a `## Review Finding Dispositions` marker for someone else to post, which on Linear nobody does. This ticket moves all six to enqueue and deletes `cli/dev_queue/_tracker_post.py`, so on Linear these posts are delivered instead of refused or failed. Absorbs the post halves of #2701 (verdict and settle marker on non-GitHub trackers) and #3544 (the codex FINALIZE Linear PR-link post; its CI wait and bookkeeping stay on #3544, and its ticket transition is #3938).
 - **Scope:** D-B1
 - **Acceptance:**
   - Each of the six producers enqueues and returns without a tracker call, and a test per producer asserts the entry.

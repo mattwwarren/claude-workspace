@@ -5045,9 +5045,38 @@ cw does every mechanical or ordering-critical step in Python:
   verified PR head, never from the model, emits the stage events and posts the
   PR-link comment (`kind: pr_link`). A failure of either post is friction,
   not a block.
-- **Deferred.** The CI wait and the post-ship bookkeeping (#3544). The finalize
-  review-findings comment does not apply: its only trigger is a `/prep-pr`
-  ship-it BLOCK, which codex FINALIZE never runs.
+- **After ship (#3544).** The finalize review-findings comment does not apply:
+  its only trigger is a `/prep-pr` ship-it BLOCK, which codex FINALIZE never
+  runs. Otherwise:
+  - There is no CI wait and no CI-fix turn.
+  - The red-PR sweep pages only an auto-merge-armed PR with a failing required
+    check; recover it with `cw dev-queue recover-red-pr`. A shipped but unarmed
+    PR (UI-evidence hold, `pr.auto_merge: false`) is never paged.
+  - Recovery needs IMPL and REVIEW in the lane pipeline and a claude-native or
+    codex IMPL backend (`red_pr_refusal`). A lane with codex FINALIZE and an
+    opencode or local IMPL backend can be paged but not recovered that way.
+  - Paging is off when `shipped_red_signal_enabled` is false in
+    `orchestrator.yaml`. That switch is global, not per lane.
+  - cw does not register codex FINALIZE PRs with review-monitor, and the codex
+    turn is told not to. That automation can invoke another model provider,
+    push to the PR branch and arm auto-merge, and parity with claude-native is
+    not an opt-in. A per-client or per-lane opt-in is a separate operator
+    decision.
+  - review-monitor's own discovery (`review_monitor_lib/discovery.py::cmd_discover`
+    and `review-monitor.md` Step 0.6) can still enrol these PRs, and its auto-fix
+    can then act on them. This exposure is tracked in #3940.
+  - cw adds `Closes #<n>` at PR creation for a numeric ticket id only. GitHub
+    links and closes the issue only for a PR into the default branch, so a
+    non-default-base row gets the line but no closure, and
+    `pr_is_merged_for_ticket` can still answer "not merged" for it.
+  - cw does not perform a Linear state transition today (#3938).
+  - Two claude-native Step 4d repairs are not done on this lane (#3939): the
+    merge-freeze repair (`cw worktree changelog-sync`, friction
+    `changelog_synced_after_release_cut`) and the arm-time `pr_conflicting:`
+    union sync. The refused arm parks `automerge_not_armed` with a recovery hint.
+  - Two known differences, no code change: `s4_pr_created` is emitted at flow
+    start, before a PR exists, and there is no explicit "store pipeline state"
+    step (the sentinel's `pr` and the merge gate's live PR query stand in for it).
 
 **Codex FINALIZE conflicts, base-state classifier and adopted rows (#3542).**
 Everything below is cw-run Python; no codex turn gets write access.
